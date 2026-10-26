@@ -51,6 +51,9 @@ use fs_sparse::{Coo, Csr};
 
 use crate::linear3::TetAssemblyBudget;
 
+/// Inertial increments using the same constitutive assembly and Newton owner.
+pub mod dynamics;
+
 /// Newton controls for each increment.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct IncrementSettings {
@@ -423,6 +426,7 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
         elements: &[Element],
         states: &[L::State],
         u: &[f64],
+        inertia: Option<&dynamics::Inertia<'_>>,
         cx: &Cx<'_>,
     ) -> Result<Csr, SmallStrainTetError> {
         let mut coo = Coo::new(u.len(), u.len());
@@ -451,6 +455,9 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
                     coo.push(row, 3 * element.nodes[q / 3] + q % 3, element.volume * s);
                 }
             }
+        }
+        if let Some(inertia) = inertia {
+            inertia.add_tangent(&mut coo, cx)?;
         }
         Ok(coo.assemble())
     }
@@ -484,7 +491,7 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
     ) -> Result<Csr, SmallStrainTetError> {
         let elements = self.validate()?;
         self.check(displacement_m, states)?;
-        self.tangent(&elements, states, displacement_m, cx)
+        self.tangent(&elements, states, displacement_m, None, cx)
     }
 
     /// Reference displacement gradients from the same P1 shape gradients as
@@ -541,7 +548,7 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
         &self,
         cx: &Cx<'_>,
     ) -> Result<SmallStrainTetSolution<L::State>, SmallStrainTetError> {
-        self.solve_candidate(None, cx)
+        self.solve_candidate(None, None, cx)
     }
 
     /// Continue the same native Newton solve from accepted displacement and
@@ -559,13 +566,14 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
         element_states: &[L::State],
         cx: &Cx<'_>,
     ) -> Result<SmallStrainTetSolution<L::State>, SmallStrainTetError> {
-        self.solve_candidate(Some((displacement_m, element_states)), cx)
+        self.solve_candidate(Some((displacement_m, element_states)), None, cx)
     }
 
     #[allow(clippy::too_many_lines)] // one shared increment / Newton / backtracking loop
     fn solve_candidate(
         &self,
         initial: Option<(&[f64], &[L::State])>,
+        inertia: Option<&dynamics::Inertia<'_>>,
         cx: &Cx<'_>,
     ) -> Result<SmallStrainTetSolution<L::State>, SmallStrainTetError> {
         checkpoint(cx)?;
@@ -607,9 +615,10 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
             let mut fallbacks = 0usize;
             let mut converged = false;
             let mut f_int = self.internal(&elements, &states, &u, cx)?;
+            if let Some(inertia) = inertia { inertia.add_force(&u, &mut f_int, cx)?; }
             for _ in 0..self.settings.max_newton_iterations {
                 checkpoint(cx)?;
-                let full = self.tangent(&elements, &states, &u, cx)?;
+                let full = self.tangent(&elements, &states, &u, inertia, cx)?;
                 let residual: Vec<f64> = free.iter().map(|&d| f_int[d] - f_ext[d]).collect();
                 let pending: Vec<(usize, f64)> = target
                     .iter()
@@ -617,7 +626,11 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
                     .collect();
                 let pending_any = pending.iter().any(|&(_, dp)| dp != 0.0);
                 let stiffness = (0..dofs).map(|d| full.get(d, d).abs()).fold(0.0, f64::max);
-                let reach = u.iter().map(|v| v.abs()).fold(0.0, f64::max);
+                let reach = if let Some(inertia) = inertia {
+                    inertia.increment_scale(&u, cx)?
+                } else {
+                    u.iter().map(|v| v.abs()).fold(0.0, f64::max)
+                };
                 let scale = norm(&f_int)
                     .max(norm(&f_ext))
                     .max(stiffness * reach)
@@ -657,7 +670,8 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
                     for &(dof, dp) in &pending {
                         trial[dof] = alpha.mul_add(dp, trial[dof]);
                     }
-                    let f_trial = self.internal(&elements, &states, &trial, cx)?;
+                    let mut f_trial = self.internal(&elements, &states, &trial, cx)?;
+                    if let Some(inertia) = inertia { inertia.add_force(&trial, &mut f_trial, cx)?; }
                     let after: Vec<f64> = free.iter().map(|&d| f_trial[d] - f_ext[d]).collect();
                     if pending_any || norm(&after) < before || alpha < 1e-3 {
                         accepted = Some((trial, f_trial));

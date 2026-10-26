@@ -1,6 +1,8 @@
 //! Spatial thermoplastic feedback through the original tetrahedral and heat owners.
 //!
-//! Each physical interval is one quasistatic load increment. The native P1/J2
+//! Each physical interval is one load increment. The default is quasistatic;
+//! [`dynamics`] adds consistent source-density inertia on the SAME Newton and
+//! thermal feedback paths. The native P1/J2
 //! Newton solve uses locally refreshed yield data, retaining the previous
 //! displacement and plastic history. Physical yield dissipation and reversible
 //! thermoelastic exchange enter the original enthalpy graph once per interval.
@@ -17,6 +19,8 @@
 pub mod contact;
 /// Finite electrical storage, native 3D plasticity and one shared thermal solve.
 pub mod electrical;
+/// Inertial motion, plastic heating and reciprocal thermal feedback together.
+pub mod dynamics;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
@@ -311,6 +315,21 @@ impl<'a> ThermoplasticSolid<'a> {
         config: ThermoplasticConfig,
         cx: &Cx<'_>,
     ) -> Result<MechanicalProposal, ThermoplasticError<E>> {
+        self.mechanics_with_motion(enthalpies, prescribed_m, nodal_forces_n,
+            settings, config, None, cx)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn mechanics_with_motion<E>(
+        &self,
+        enthalpies: &[f64],
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        settings: IncrementSettings,
+        config: ThermoplasticConfig,
+        motion: Option<(&[[f64; 3]], f64)>,
+        cx: &Cx<'_>,
+    ) -> Result<MechanicalProposal, ThermoplasticError<E>> {
         let mut materials = Vec::with_capacity(self.cells.len());
         let mut laws = Vec::with_capacity(self.cells.len());
         let mut temperatures_k = Vec::with_capacity(self.cells.len());
@@ -335,9 +354,21 @@ impl<'a> ThermoplasticSolid<'a> {
             settings,
         };
         let old_u = self.solution.displacement_m.as_flattened();
-        let solution = problem
-            .solve_from(old_u, &self.solution.element_states, cx)
-            .map_err(ThermoplasticError::Solid)?;
+        let (solution, motion) = if let Some((velocity, dt_s)) = motion {
+            // The original source caloric density and delivered inventory were
+            // admitted together at binding. Endpoint temperature never creates mass.
+            let densities: Vec<_> = self.cells.iter()
+                .map(|cell| cell.source.density_kg_m3()).collect();
+            let native = problem.advance_backward_euler(old_u, velocity,
+                &self.solution.element_states, &densities, dt_s, cx)
+                .map_err(ThermoplasticError::Solid)?;
+            (native.solution, Some(dynamics::Motion {
+                velocity_mps: native.velocity_mps, energy: native.energy,
+            }))
+        } else {
+            (problem.solve_from(old_u, &self.solution.element_states, cx)
+                .map_err(ThermoplasticError::Solid)?, None)
+        };
         let gradients = problem
             .displacement_gradients(solution.displacement_m.as_flattened(), cx)
             .map_err(ThermoplasticError::Solid)?;
@@ -414,7 +445,9 @@ impl<'a> ThermoplasticSolid<'a> {
         for (&(dof, _), &reaction) in prescribed_m.iter().zip(&solution.increments[0].reactions_n) {
             external_work_j = finite(external_work_j + reaction * (new_u[dof] - old_u[dof]))?;
         }
-        let mechanical_residual_j = finite(internal_work_j - external_work_j)?;
+        let inertia_work_j = motion.as_ref().map_or(0.0,
+            |motion| motion.energy.kinetic_change_j + motion.energy.numerical_loss_j);
+        let mechanical_residual_j = finite(internal_work_j + inertia_work_j - external_work_j)?;
         if mechanical_residual_j.abs() > config.energy_tolerance_j {
             return Err(ThermoplasticError::Invalid(
                 "native force equilibrium misses the independent boundary-work gate",
@@ -434,6 +467,7 @@ impl<'a> ThermoplasticSolid<'a> {
             numerical_loss_j,
             external_work_j,
             mechanical_residual_j,
+            motion,
         })
     }
 
@@ -454,6 +488,24 @@ impl<'a> ThermoplasticSolid<'a> {
         config: ThermoplasticConfig,
         cx: &Cx<'_>,
     ) -> Result<ThermoplasticCandidate<'a, 't, O>, ThermoplasticError<O::Error>> {
+        self.advance_with_motion(thermal, observer, target_s, prescribed_m,
+            nodal_forces_n, settings, thermal_config, config, None, cx).map(|(candidate, _)| candidate)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_with_motion<'t, O: DepositionObserver>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        observer: &O,
+        target_s: f64,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        settings: IncrementSettings,
+        thermal_config: StepConfig,
+        config: ThermoplasticConfig,
+        velocity_mps: Option<&[[f64; 3]]>,
+        cx: &Cx<'_>,
+    ) -> Result<(ThermoplasticCandidate<'a, 't, O>, Option<dynamics::Motion>), ThermoplasticError<O::Error>> {
         poll(cx)?;
         let duration_s = target_s - self.time_s;
         if thermal.time_s() != self.time_s
@@ -499,12 +551,13 @@ impl<'a> ThermoplasticSolid<'a> {
         let mut defects = [f64::INFINITY; 3];
         for iteration in 1..=config.maximum_iterations {
             poll(cx)?;
-            let trial = self.mechanics(
+            let trial = self.mechanics_with_motion(
                 &enthalpies,
                 prescribed_m,
                 nodal_forces_n,
                 settings,
                 config,
+                velocity_mps.map(|velocity| (velocity, duration_s)),
                 cx,
             )?;
             let heat = PlasticHeat {
@@ -523,8 +576,9 @@ impl<'a> ThermoplasticSolid<'a> {
                     cx.checkpoint().map_err(|_| DepositionError::Cancelled)
                 })?;
             let final_h = self.enthalpies(&next_thermal, false, cx)?;
-            let actual =
-                self.mechanics(&final_h, prescribed_m, nodal_forces_n, settings, config, cx)?;
+            let actual = self.mechanics_with_motion(&final_h, prescribed_m,
+                nodal_forces_n, settings, config,
+                velocity_mps.map(|velocity| (velocity, duration_s)), cx)?;
             let applied_heat_j = finite(trial.heat_j.iter().sum())?;
             let caloric_heat_j = finite(actual.heat_j.iter().sum())?;
             let external_heat_j = finite(thermal_audit.external_heat_j - applied_heat_j)?;
@@ -539,6 +593,8 @@ impl<'a> ThermoplasticSolid<'a> {
                     + actual.thermoelastic_storage_change_j
                     + thermal_audit.stored_energy_change_j
                     + actual.numerical_loss_j
+                    + actual.motion.as_ref().map_or(0.0, |motion|
+                        motion.energy.kinetic_change_j + motion.energy.numerical_loss_j)
                     - actual.external_work_j
                     - external_heat_j
                     - thermal_audit.incoming_energy_j,
@@ -592,12 +648,12 @@ impl<'a> ThermoplasticSolid<'a> {
                     heat_defect_j: defects[1],
                 };
                 poll(cx)?;
-                return Ok(ThermoplasticCandidate {
+                return Ok((ThermoplasticCandidate {
                     thermal: next_thermal,
                     solid,
                     observer: heat.inner,
                     report,
-                });
+                }, actual.motion));
             }
             for (h, final_h) in enthalpies.iter_mut().zip(final_h) {
                 *h = finite(
@@ -629,6 +685,7 @@ struct MechanicalProposal {
     numerical_loss_j: f64,
     external_work_j: f64,
     mechanical_residual_j: f64,
+    motion: Option<dynamics::Motion>,
 }
 
 /// Thermal-only audit includes plastic heat and reversible exchange as inputs.
@@ -653,10 +710,14 @@ pub struct ThermoplasticReport {
     pub external_heat_j: f64,
     /// Actual elastic and hardening free-energy change, excluding T s_mechanical.
     pub stored_mechanical_change_j: f64,
+    /// Constitutive backward-Euler loss only; inertial loss is reported by dynamics.
     pub numerical_loss_j: f64,
     pub mechanical_work_j: f64,
+    /// Internal work plus any inertial work, minus actual force/support work.
     pub mechanical_residual_j: f64,
     pub thermal_residual_j: f64,
+    /// Complete caloric/material balance, also including kinetic change and
+    /// inertial numerical loss when supplied by the dynamics owner.
     pub combined_residual_j: f64,
     pub temperature_defect_k: f64,
     pub heat_defect_j: f64,

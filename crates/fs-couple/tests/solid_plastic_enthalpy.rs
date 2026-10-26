@@ -6,6 +6,8 @@ mod contact;
 mod expansion_curve;
 #[path = "solid_plastic_enthalpy/modulus_curve.rs"]
 mod modulus_curve;
+#[path = "solid_plastic_enthalpy/dynamics.rs"]
+mod dynamics;
 
 use std::collections::BTreeMap;
 
@@ -104,13 +106,19 @@ impl Fixture {
         youngs: PropertyClaim,
         hardening: PropertyClaim,
     ) -> Self {
+        Self::with_density_and_constitutive_claims(cp, expansion, youngs, hardening, RHO)
+    }
+    fn with_density_and_constitutive_claims(
+        cp: f64, expansion: Option<PropertyClaim>, youngs: PropertyClaim,
+        hardening: PropertyClaim, density: f64,
+    ) -> Self {
         let has_expansion = expansion.is_some();
         let mut claims = ClaimSet::new();
         for p in [
             youngs,
             scalar(POISSON_RATIO_PROPERTY, Dims([0; 6]), 0.2),
             hardening,
-            scalar(DENSITY_PROPERTY, Density::DIMS, RHO),
+            scalar(DENSITY_PROPERTY, Density::DIMS, density),
             scalar(CP, CP_DIMS, cp),
         ] {
             claims.insert_claim(p).unwrap();
@@ -216,7 +224,7 @@ fn initial<'a>(
     powers: &[f64],
 ) -> DepositionSimulation<'a> {
     let mut events = Vec::new();
-    for (i, _) in fixtures.iter().enumerate() {
+    for (i, fixture) in fixtures.iter().enumerate() {
         events.push(TimedEvent {
             time_s: 0.0,
             event: Event::Birth(DepositedCell {
@@ -224,7 +232,8 @@ fn initial<'a>(
                 material_id: MaterialId(i as u64),
                 segment_id: i as u64,
                 body_id: 7,
-                mass_kg: RHO * V,
+                mass_kg: fixture.caloric.curve().state_at_specific_enthalpy(0.0)
+                    .unwrap().bulk_density_kg_m3() * V,
                 specific_h_j_kg: 0.0,
                 geometry: CellGeometry {
                     start_m: [0.0; 3],
