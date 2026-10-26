@@ -463,6 +463,28 @@ impl Ready {
         }
         Ok(result)
     }
+    /// `write` one sample per callback, with each accepted sample's bow ports in `trace`: the physical sample, port,
+    /// regime, slip velocity [m/s] (the step's slip distance times the rate), traction and normal force [N]. The WAV
+    /// bytes are `write`'s: the solve is causal and the PCM writer encodes each sample alone.
+    fn write_traced<W:Write+Seek>(&mut self,output:W,trace:&mut impl Write,gate:&CancelGate)->Result<(W,WavStreamSummary)> {
+        let mut stream=Pcm16WavStream::new(output,self.spec.rate,self.spec.full_scale,self.spec.block)?;
+        let mut scratch=[0.0];
+        let rate=f64::from(self.spec.rate);
+        writeln!(trace,"sample\tport\tregime\tslip_velocity_m_s\ttraction_n\tnormal_force_n")?;
+        for _ in 0..self.spec.samples {
+            let progress=render_pressure_pcm16(&mut self.performance,&mut stream,gate,&mut scratch,1)?;
+            if !matches!(progress,ScheduledWavProgress::Completed { .. }) {
+                let result=stream.finish()?;
+                return Err(format!("cancelled: only {} samples finalized",result.1.samples).into());
+            }
+            let frame=self.performance.bank().system().last_frame().ok_or("a rendered sample left no accepted bow frame")?;
+            for (port,p) in frame.ports.iter().enumerate() {
+                writeln!(trace,"{}\t{port}\t{:?}\t{:e}\t{:e}\t{:e}",frame.sample,p.regime,p.slip_distance_m*rate,
+                    p.traction_n,p.normal_force_n)?;
+            }
+        }
+        Ok(stream.finish()?)
+    }
 }
 fn read_bounded(path:&Path,cap:usize)->Result<Vec<u8>> {
     let mut bytes=Vec::new();File::open(path)?.take(cap as u64+1).read_to_end(&mut bytes)?;
@@ -488,27 +510,28 @@ fn assemble_shell(args:&[std::ffi::OsString])->Result<()> {
     }
     Ok(())
 }
-/// Take `--observer-store DIR` out of the option pairs; the rest are profile options.
-fn observer_store_option(args:&[std::ffi::OsString])->Result<(Option<&Path>,Vec<std::ffi::OsString>)> {
-    let (mut store,mut rest)=(None,Vec::new());
+/// Take `NAME PATH` (`--observer-store DIR`, `--bow-trace FILE`) out of the option pairs; the rest pass on.
+fn path_option<'a>(args:&'a [std::ffi::OsString],name:&str)->Result<(Option<&'a Path>,Vec<std::ffi::OsString>)> {
+    let (mut path,mut rest)=(None,Vec::new());
     for pair in args.chunks(2) {
-        if pair[0]!="--observer-store" { rest.extend_from_slice(pair); continue; }
-        if store.is_some() { return Err("--observer-store cannot be repeated".into()); }
-        store=Some(Path::new(pair.get(1).ok_or("--observer-store needs a directory")?));
+        if pair[0]!=name { rest.extend_from_slice(pair); continue; }
+        if path.is_some() { return Err(format!("{name} cannot be repeated").into()); }
+        path=Some(Path::new(pair.get(1).ok_or_else(|| format!("{name} needs a path"))?));
     }
-    Ok((store,rest))
+    Ok((path,rest))
 }
 fn main()->Result<()> {
     let raw=std::env::args_os().collect::<Vec<_>>();
     if raw.get(1).is_some_and(|a| a=="assemble-shell") { return assemble_shell(&raw[2..]); }
     let (args, gas_options)=thermochemical::Options::extract_os(&raw)?;
     if args.len()<3 {
-        return Err("usage: material_strings PERFORMANCE NEW_OUTPUT.wav [--body-profile PROFILE] [--stop-profile PROFILE] [--observer-store DIR] [--gas-component SPECIES NASA9 TRANSPORT --gas-water none|ID --gas-phase frozen|liquid-water]".into());
+        return Err("usage: material_strings PERFORMANCE NEW_OUTPUT.wav [--body-profile PROFILE] [--stop-profile PROFILE] [--observer-store DIR] [--bow-trace NEW_FILE] [--gas-component SPECIES NASA9 TRANSPORT --gas-water none|ID --gas-phase frozen|liquid-water]".into());
     }
     if gas_options.record.is_some() {
         return Err("material-string gas records belong in the performance file".into());
     }
-    let (store_dir,options)=observer_store_option(&args[3..])?;
+    let (store_dir,options)=path_option(&args[3..],"--observer-store")?;
+    let (trace_path,options)=path_option(&options,"--bow-trace")?;
     let (body_path,stop_path)=stops::profile_paths(&options)?;
     let mut profile=body_path.map(|p|body::Profile::parse(&read_bounded(p,body::MAX_SHELL_BYTES)?)).transpose()?;
     if let Some(dir)=store_dir {
@@ -652,7 +675,16 @@ fn main()->Result<()> {
     // Complete source, geometry, frequency, schedule and preload admission is
     // finished before creating output. Never overwrite any existing path.
     let output=OpenOptions::new().write(true).create_new(true).open(&args[2])?;
-    let (_,summary)=ready.write(output,&gate).map_err(|e|format!("WAV not completed; keep/discard its partial prefix explicitly: {e}"))?;
+    let written=match trace_path {
+        Some(path)=>{
+            let mut trace=std::io::BufWriter::new(OpenOptions::new().write(true).create_new(true).open(path)?);
+            let written=ready.write_traced(output,&mut trace,&gate);
+            trace.flush()?;
+            written
+        },
+        None=>ready.write(output,&gate),
+    };
+    let (_,summary)=written.map_err(|e|format!("WAV not completed; keep/discard its partial prefix explicitly: {e}"))?;
     eprintln!("samples={}; rate_Hz={}; clips={}; full_scale_Pa={}",summary.samples,summary.sample_rate_hz,
         summary.clipped_samples,summary.full_scale_pa);
     // Steps whose stop missed its tolerance at the actual endpoint and passed it after a headroom re-solve.

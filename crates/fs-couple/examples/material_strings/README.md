@@ -37,6 +37,18 @@ cargo run --release -p fs-couple --example material_strings -- \
   "$demo/pluck-and-bow.material-strings" "$demo/pluck-and-bow.wav"
 ```
 
+`--bow-trace NEW_FILE` also writes the bow's slip history. The file has one
+tab-separated row per accepted sample and bow port, with these columns:
+- the physical sample;
+- the port;
+- its regime (`Sticking`, `Sliding`, `Released` or a layer's);
+- the slip velocity in m/s, which is the step's slip distance times the rate;
+- the traction and the normal force in N.
+
+With the flag, the render runs one sample per callback, and the WAV bytes are
+unchanged. Like the WAV, the file must not exist already, and it is created
+only after admission.
+
 ### Material shear layers in the original contact solve
 
 `shear-layer-bow.material-strings` selects an isothermal elastic-plastic layer

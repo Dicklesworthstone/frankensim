@@ -153,6 +153,9 @@ mod layered;
 #[path = "tests/tension_loss.rs"]
 mod tension_loss;
 
+#[path = "tests/bow_trace.rs"]
+mod bow_trace;
+
 #[path = "tests/polarized.rs"]
 mod polarized;
 
