@@ -278,3 +278,29 @@ fn the_prepared_owner_admits_an_air_bank_beyond_the_dense_ceiling() {
         energy = frame.total_energy_j();
     }
 }
+
+// A mode resting on its link's preload, released 1e-12 of its static deflection off rest, as a body mode rests on the
+// strings' preload: its first increments are a few units in the last place of the deflection, so the two held port
+// forces agree only to the rounding of those differences, not to 1e-9 of the force. Every step is admitted and closes
+// its energy, and the mode stays at its rest.
+#[test]
+fn a_mode_resting_on_a_preload_steps_under_the_air_from_its_first_increments() {
+    let gate = CancelGate::new_clock_free();
+    let (omega, stiffness, extension) = (3000.0_f64, 2e6, 1e-3);
+    let rest = stiffness * extension / (omega * omega + stiffness);
+    let links = vec![ModalColumnConnection { column: vec![1.0], stiffness_n_m: stiffness, damping_n_s_m: 15.0,
+        rest_extension_m: extension }];
+    let models = vec![model(48_000, &[(omega, 0.005)], &[(rest * (1.0 + 1e-12), 0.0)])];
+    let air = fixture(false).air;
+    let mut system = CoupledModalSystem::new_with_columns_prepared(models, links, config(), budget(1), &gate).unwrap()
+        .with_radiation_load(&air, &[0], 1, &gate).unwrap();
+    let mut energy = system.total_energy_j().unwrap();
+    for tick in 0..480 {
+        let frame = system.step(&[0.0]).unwrap().clone();
+        let residual = frame.total_energy_j() + frame.total_dissipation_j() - frame.external_work_j - energy;
+        assert!(residual.abs() <= 1e-11 * energy.max(frame.total_energy_j()), "tick {tick}: residual {residual:e}");
+        energy = frame.total_energy_j();
+    }
+    let q = flatten(&system.models)[0];
+    assert!((q / rest - 1.0).abs() < 1e-11, "{q:e} left the rest {rest:e}");
+}

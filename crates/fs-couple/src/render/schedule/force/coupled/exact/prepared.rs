@@ -420,10 +420,13 @@ impl PreparedNetwork {
         let dq_ports = air.port_increments(&z, &x, &self.weights)?;
         let step = air.advance(radiation, &dq_ports)?;
         // The held force the air's own step implies must be the one the mechanics were held at, and the work each side
-        // received must cancel.
+        // received must cancel. Both forces are formed from increments, end less start, so each port's defect is held
+        // beyond the rounding bound of those differences (see `force_rounding`).
         let exchange = air_force.iter().zip(&dq_ports).try_fold(0.0, |s, (f, dq)| finite(s + f * dq))?;
         let force_scale = air_force.iter().chain(&step.force).fold(0.0_f64, |m, f| m.max(f.abs())).max(f64::MIN_POSITIVE);
-        let force_defect = air_force.iter().zip(&step.force).fold(0.0_f64, |m, (a, b)| m.max((a - b).abs()));
+        let rounding = air.force_rounding(&z, &x, &self.weights, radiation, &dq_ports)?;
+        let force_defect = air_force.iter().zip(&step.force).zip(&rounding)
+            .fold(0.0_f64, |m, ((a, b), r)| m.max((a - b).abs() - r));
         let energy_scale = scale.max(exchange.abs()).max(step.work.abs()).max(step.loss);
         if force_defect > 1e-9 * force_scale || (exchange + step.work).abs() > MATRIX_TOL * energy_scale {
             return Err(invalid("prepared air exchange residual"));
