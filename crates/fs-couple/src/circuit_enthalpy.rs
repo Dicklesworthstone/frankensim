@@ -159,8 +159,10 @@ pub struct CircuitEnthalpyReport<S, D = MaterialCircuitStep> {
     pub deposited_joule_j: f64,
     /// Authored and callback source/boundary heat, EXCLUDING internal Joule heat.
     pub non_electrical_heat_j: f64,
-    /// Driver storage + thermal storage - driver work - other external heat [J].
-    /// A field-motion driver includes body kinetic energy and mechanical work.
+    /// Driver storage + thermal storage + declared numerical dissipation
+    /// - driver work - other external heat [J]. A field-motion driver includes
+    /// body kinetic energy and mechanical work. Numerical dissipation is
+    /// reported by its original driver step and is NEVER deposited as heat.
     pub total_energy_residual_j: f64,
 }
 /// Both endpoints belong to ONE physical interval; neither input is mutated.
@@ -238,6 +240,8 @@ pub(crate) struct DriverAccount<'a> {
     pub resistors: &'a [crate::material_circuit::ResistorHeat],
     pub contacts: &'a [crate::material_circuit::contacts::ContactHeat],
     pub heat_j: f64,
+    /// Original time-discretization loss, separate from constitutive heating.
+    pub numerical_dissipation_j: f64,
     pub stored_change_j: f64,
     pub supplied_j: f64,
 }
@@ -253,7 +257,8 @@ impl ThermalDriver for MaterialCircuitCandidate {
     fn account(&self) -> DriverAccount<'_> {
         let step = self.step();
         DriverAccount { resistors: &step.resistors, contacts: &step.contacts,
-            heat_j: step.heat_j, stored_change_j: step.stored_after_j-step.stored_before_j,
+            heat_j: step.heat_j, numerical_dissipation_j: 0.0,
+            stored_change_j: step.stored_after_j-step.stored_before_j,
             supplied_j: step.native.supplied }
     }
     fn into_parts(self) -> (Self::Model, Self::Step) {
@@ -353,13 +358,28 @@ fn admit_driver_unknowns<E>(
 // below remain shared; this boundary is private and accepts admitted candidates.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn cell_driver_candidate<'m, S, E, D: ThermalDriver>(
-    thermal: &DepositionSimulation<'m>, target_s: f64,
-    controls: CircuitEnthalpySolve, initial_energy_increments_j: &[f64],
-    resolve: impl Fn(&DepositionSimulation<'m>, usize) -> Result<DrivenCoefficients<S, D>, CircuitEnthalpyError<E>>,
-    deposit: impl Fn(&D, f64, &mut dyn FnMut() -> Result<(), DepositionError>)
-        -> Result<BTreeMap<CellId, f64>, CircuitEnthalpyError<E>>,
+    thermal: &DepositionSimulation<'m>,
+    target_s: f64,
+    controls: CircuitEnthalpySolve,
+    initial_energy_increments_j: &[f64],
+    resolve: impl Fn(
+        &DepositionSimulation<'m>,
+        usize,
+    ) -> Result<DrivenCoefficients<S, D>, CircuitEnthalpyError<E>>,
+    deposit: impl Fn(
+        &D,
+        f64,
+        &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, CircuitEnthalpyError<E>>,
     cancelled: impl FnMut() -> bool,
-) -> Result<(DepositionSimulation<'m>, D::Model, CircuitEnthalpyReport<S, D::Step>), CircuitEnthalpyError<E>> {
+) -> Result<
+    (
+        DepositionSimulation<'m>,
+        D::Model,
+        CircuitEnthalpyReport<S, D::Step>,
+    ),
+    CircuitEnthalpyError<E>,
+> {
     let cancel = RefCell::new(cancelled);
     let checkpoint = || if (*cancel.borrow_mut())() { Err(DepositionError::Cancelled) } else { Ok(()) };
     checkpoint()?;
@@ -378,6 +398,9 @@ pub(crate) fn cell_driver_candidate<'m, S, E, D: ThermalDriver>(
         trials.set(trials.get()+coefficients.circuit_trials);
         let circuit = coefficients.circuit;
         let account = circuit.account();
+        if !account.numerical_dissipation_j.is_finite() || account.numerical_dissipation_j < 0.0 {
+            return Err(CircuitEnthalpyError::Invalid("driver numerical dissipation must be finite and nonnegative"));
+        }
         let mut powers = deposit(&circuit, dt, &mut || checkpoint())?;
         let deposited = finite(dt * powers.values().try_fold(0.0, |s, &p| finite(s+p))?)?;
         if (deposited-account.heat_j).abs() > controls.total_energy_tolerance_j {
@@ -413,7 +436,7 @@ pub(crate) fn cell_driver_candidate<'m, S, E, D: ThermalDriver>(
         controls.cell_energy_tolerance_j, controls.thermal_energy_tolerance_j, checkpoint)?;
     let non_electrical_heat_j = finite(audit.external_heat_j - deposited_joule_j)?;
     let account = candidate.account();
-    let total = finite(account.stored_change_j
+    let total = finite(account.stored_change_j + account.numerical_dissipation_j
         + audit.stored_energy_change_j-account.supplied_j-non_electrical_heat_j)?;
     if total.abs() > controls.total_energy_tolerance_j {
         return Err(CircuitEnthalpyError::Invalid("circuit and thermal storage do not close the supplied energy"));
@@ -424,4 +447,3 @@ pub(crate) fn cell_driver_candidate<'m, S, E, D: ThermalDriver>(
             maximum_cell_residual_j, circuit_trials: trials.get(), deposited_joule_j,
             non_electrical_heat_j, total_energy_residual_j: total }))
 }
-

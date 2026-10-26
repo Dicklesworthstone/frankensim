@@ -98,6 +98,7 @@ impl<'c, 'm> ThermalDriver for OhmicWindingCandidate<'c, 'm> {
             resistors: &[],
             contacts: &[],
             heat_j: step.heat_j,
+            numerical_dissipation_j: 0.0,
             stored_change_j: step.stored_after_j - step.stored_before_j,
             supplied_j: step.native.supplied,
         }

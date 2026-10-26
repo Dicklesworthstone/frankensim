@@ -63,6 +63,7 @@ impl ThermalDriver for FieldMotionCandidate {
 fn field_account(step: &FieldMotionStep) -> DriverAccount<'_> {
     DriverAccount { resistors: &step.resistors, contacts: &step.contacts,
         heat_j: step.heat_j,
+        numerical_dissipation_j: 0.0,
         stored_change_j: (step.electrical_energy_j[1]-step.electrical_energy_j[0])
             +(step.kinetic_energy_j[1]-step.kinetic_energy_j[0])
             +(step.elastic_energy_j[1]-step.elastic_energy_j[0]),

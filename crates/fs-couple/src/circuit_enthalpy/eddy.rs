@@ -6,6 +6,9 @@
 //! source work, conduction, boundary heat and total enthalpy share one audit.
 //! Geometry and magnetic permeability remain fixed; no core-loss map is added.
 
+/// Reversible nonlinear induction with physical Joule heating and a separately
+/// audited backward-Euler numerical loss on the same finite thermal timeline.
+pub mod nonlinear;
 /// Reversible permeability/temperature feedback on these same native owners.
 pub mod thermal;
 
@@ -64,6 +67,7 @@ impl<'m> ThermalDriver for PlanarEddyCandidate<'m> {
             resistors: &[],
             contacts: &[],
             heat_j: s.heat_j,
+            numerical_dissipation_j: 0.0,
             stored_change_j: s.stored_after_j - s.stored_before_j - s.parameter_work_j,
             supplied_j: s.supplied_work_j,
         }
@@ -82,14 +86,27 @@ fn induction(e: EddyError) -> Error {
 // The fixed-mu and thermal-mu paths deposit exactly the same native sigma*E²
 // integrals. Neither owner may replace them with averaged-current heating.
 fn deposit_heat(
-    proposal:&PlanarEddyCandidate<'_>, routes:&MagneticRoutes, dt:f64,
-    checkpoint:&mut dyn FnMut()->Result<(),DepositionError>,
-)->Result<BTreeMap<CellId,f64>,Error> {
-    if proposal.step().cells.len()!=routes.conductors.len() {
+    proposal: &PlanarEddyCandidate<'_>,
+    routes: &MagneticRoutes,
+    dt: f64,
+    checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+) -> Result<BTreeMap<CellId, f64>, Error> {
+    deposit_cell_heat(&proposal.step().cells, routes, dt, checkpoint)
+}
+
+// Identical physical sigma E^2 routing for midpoint and nonlinear induction.
+// No magnetic numerical dissipation is present in these admitted cell records.
+fn deposit_cell_heat(
+    losses: &[fs_em::planar::eddy::EddyCellHeat],
+    routes: &MagneticRoutes,
+    dt: f64,
+    checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+) -> Result<BTreeMap<CellId, f64>, Error> {
+    if losses.len() != routes.conductors.len() {
         return Err(invalid("native eddy heat changed triangle correspondence"));
     }
     let mut powers=BTreeMap::new();
-    for loss in &proposal.step().cells {
+    for loss in losses {
         checkpoint()?;
         let cell=routes.conductors.get(&loss.source.triangle)
             .ok_or_else(||invalid("eddy heat lacks an original receiving cell"))?;
@@ -247,4 +264,3 @@ impl MagneticThermalNetwork<'_> {
         })
     }
 }
-
