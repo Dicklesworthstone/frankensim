@@ -12,6 +12,8 @@
 
 /// Implicit ambient radiation with separately owned external and coolant heat.
 pub mod radiation;
+mod storage;
+pub use storage::SolidEnthalpyStorage;
 
 use fs_conduction::{
     ConductionError, ConductionMesh, ConductionProblem, ConductivityModel,
@@ -19,6 +21,7 @@ use fs_conduction::{
 };
 use fs_conduction::transient::enthalpy::{
     EnthalpyBackwardEuler, EnthalpyError, EnthalpyStepConfig, EnthalpyStepSolution,
+    heterogeneous::HeterogeneousEnthalpyBackwardEuler,
 };
 use fs_convection::CorrelationRobinBoundary;
 use fs_exec::Cx;
@@ -36,21 +39,31 @@ use super::recirculation::{
 
 /// Accepted histories on their original storage owners and ONE physical clock.
 /// No mutable slice or independent solid clock is exposed. The spatial storage
-/// owner retains its original chart and invariant nodal masses across steps.
+/// owner retains every original nodal chart and invariant reference mass.
+/// Uniform and heterogeneous states share exactly the same time/energy transaction.
 #[derive(Debug)]
-pub struct StoredCoolingState<'a, 's, 'm, 'c> {
+pub struct StoredMaterialCoolingState<'a, 's, M: SolidEnthalpyStorage + ?Sized> {
     reservoir: LiquidReservoir<'a>,
-    storage: &'s EnthalpyBackwardEuler<'m, 'c>,
+    storage: &'s M,
     solid_specific_enthalpy_j_kg: Vec<f64>,
 }
 
-impl<'a, 's, 'm, 'c> StoredCoolingState<'a, 's, 'm, 'c> {
-    /// Bind a uniformly charted spatial solid to an existing coolant reservoir.
+/// Backward-compatible name for the original uniform solid/coolant state.
+pub type StoredCoolingState<'a, 's, 'm, 'c> =
+    StoredMaterialCoolingState<'a, 's, EnthalpyBackwardEuler<'m, 'c>>;
+
+/// The same accepted history with explicit per-material phase charts/masses.
+/// Material interfaces retain the conduction owner's separate-trace requirement.
+pub type HeterogeneousStoredCoolingState<'a, 's, 'm, 'c> =
+    StoredMaterialCoolingState<'a, 's, HeterogeneousEnthalpyBackwardEuler<'m, 'c>>;
+
+impl<'a, 's, M: SolidEnthalpyStorage + ?Sized> StoredMaterialCoolingState<'a, 's, M> {
+    /// Bind an original uniform or heterogeneous solid to the coolant reservoir.
     /// The two initial histories are explicitly declared at the reservoir time.
     /// Subsequent steps cannot exchange the storage owner or advance just one.
     pub fn try_new(
         cx: &Cx<'_>, reservoir: LiquidReservoir<'a>,
-        storage: &'s EnthalpyBackwardEuler<'m, 'c>, solid_specific_enthalpy_j_kg: Vec<f64>,
+        storage: &'s M, solid_specific_enthalpy_j_kg: Vec<f64>,
     ) -> Result<Self, StoredCoolingError> {
         poll(cx)?;
         if solid_specific_enthalpy_j_kg.len() != storage.reference_nodal_masses_kg().len() {
@@ -58,7 +71,9 @@ impl<'a, 's, 'm, 'c> StoredCoolingState<'a, 's, 'm, 'c> {
         }
         for (vertex, &h) in solid_specific_enthalpy_j_kg.iter().enumerate() {
             if vertex % 256 == 0 { poll(cx)?; }
-            storage.phase_curve().state_at_specific_enthalpy(h)
+            storage.phase_curve_at(vertex)
+                .ok_or(StoredCoolingError::Invalid("solid storage lost a nodal chart"))?
+                .state_at_specific_enthalpy(h)
                 .map_err(|source| EnthalpyError::Phase { vertex, source })?;
         }
         poll(cx)?;
@@ -70,7 +85,7 @@ impl<'a, 's, 'm, 'c> StoredCoolingState<'a, 's, 'm, 'c> {
     /// Accepted mesh-ordered solid specific enthalpy, J/kg.
     pub fn solid_specific_enthalpy_j_kg(&self) -> &[f64] { &self.solid_specific_enthalpy_j_kg }
     /// Original spatial chart/mass owner, never replaced by a thermal trial.
-    pub const fn storage(&self) -> &'s EnthalpyBackwardEuler<'m, 'c> { self.storage }
+    pub const fn storage(&self) -> &'s M { self.storage }
 }
 
 /// Original spatial inputs. Only the boundary partition is rebuilt from the
@@ -167,7 +182,7 @@ impl<'n, 'a, 'card> ParallelLiquidNetwork<'n, 'a, 'card> {
     /// Advance the actual P1 solid enthalpy field AND the recirculating coolant.
     ///
     /// `boundary` only maps current rows to the original mesh. The numerical
-    /// solve is always `EnthalpyBackwardEuler::advance`, using one unchanged
+    /// solve is the original uniform/heterogeneous enthalpy FEM, using unchanged
     /// history and exactly `end_time_s - state.reservoir().time_s()`. All Robin
     /// regions must belong to this coolant network in branch-major order. Other
     /// faces may be adiabatic or prescribed Neumann; Dirichlet remains refused.
@@ -178,8 +193,8 @@ impl<'n, 'a, 'card> ParallelLiquidNetwork<'n, 'a, 'card> {
     /// Failed or cancelled calls change neither history; returned fields are
     /// exactly the accepted endpoint, not a re-solve after publication.
     #[allow(clippy::too_many_arguments)]
-    pub fn advance_stored_solid_with_pump<'p, F>(
-        &self, cx: &Cx<'_>, state: &mut StoredCoolingState<'a, '_, '_, '_>,
+    pub fn advance_stored_solid_with_pump<'p, F, M: SolidEnthalpyStorage + ?Sized>(
+        &self, cx: &Cx<'_>, state: &mut StoredMaterialCoolingState<'a, '_, M>,
         end_time_s: f64, reservoir_external_heat_j: f64, initial_walls_k: &[f64],
         pump: &'p PumpHeadCurve, problem: StoredSolidProblem<'_>,
         controls: StoredCoolingControls, boundary: F,
@@ -196,8 +211,8 @@ impl<'n, 'a, 'card> ParallelLiquidNetwork<'n, 'a, 'card> {
     // All supported physical response owners share this exact interval,
     // coolant coupling, independent energy checks and atomic publication.
     #[allow(clippy::too_many_arguments)]
-    fn advance_stored_using<'p, R, F, S>(
-        &self, cx: &Cx<'_>, state: &mut StoredCoolingState<'a, '_, '_, '_>,
+    fn advance_stored_using<'p, R, F, S, M: SolidEnthalpyStorage + ?Sized>(
+        &self, cx: &Cx<'_>, state: &mut StoredMaterialCoolingState<'a, '_, M>,
         end_time_s: f64, reservoir_external_heat_j: f64, initial_walls_k: &[f64],
         pump: &'p PumpHeadCurve, problem: StoredSolidProblem<'_>,
         controls: StoredCoolingControls, mut boundary: F, mut solve: S,

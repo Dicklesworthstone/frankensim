@@ -3,9 +3,9 @@
 //! Radiation is external heat, never coolant enthalpy. Original convection on
 //! network regions alone feeds the liquid solver; additional Robin regions are
 //! allowed only when explicitly named by a radiation patch. Their original
-//! convection belongs to an external reservoir as well. As in the existing
-//! radiation owner, each patch needs an explicit positive-convection Robin row;
-//! no artificial small coefficient is inserted to imitate pure radiation.
+//! convection belongs to an external reservoir as well. Named zero-flux traces
+//! use the same radiation-only boundary supported by the conduction owner.
+//! Uniform and heterogeneous solid charts share the complete transaction.
 //! The existing area-mean gray-patch model and emissivity snapshot are retained;
 //! this adapter adds no radiation, source-material or time-integration law.
 
@@ -21,7 +21,8 @@ use fs_convection::CorrelationRobinBoundary;
 use fs_exec::Cx;
 
 use super::{ParallelLiquidNetwork, PumpHeadCurve, StoredCoolingControls,
-    StoredCoolingError, StoredCoolingState, StoredCoolingStep, StoredSolidProblem,
+    StoredCoolingError, StoredMaterialCoolingState, StoredCoolingStep, StoredSolidProblem,
+    SolidEnthalpyStorage,
     StoredThermalResponse, poll};
 
 /// All previous gates remain active. Actual inner enthalpy solves have their
@@ -84,8 +85,8 @@ impl<'n, 'a, 'card> ParallelLiquidNetwork<'n, 'a, 'card> {
     /// neither history. No enclosure, participating medium, evolving emissivity
     /// law, fluid residence time or hydraulic-heat deposition is inferred.
     #[allow(clippy::too_many_arguments)]
-    pub fn advance_stored_solid_with_pump_and_radiation<'p, F>(
-        &self, cx: &Cx<'_>, state: &mut StoredCoolingState<'a, '_, '_, '_>,
+    pub fn advance_stored_solid_with_pump_and_radiation<'p, F, M: SolidEnthalpyStorage + ?Sized>(
+        &self, cx: &Cx<'_>, state: &mut StoredMaterialCoolingState<'a, '_, M>,
         end_time_s: f64, reservoir_external_heat_j: f64, initial_walls_k: &[f64],
         pump: &'p PumpHeadCurve, problem: StoredSolidProblem<'_>,
         patches: &[AmbientRadiationPatch], controls: RadiatingStoredCoolingControls,

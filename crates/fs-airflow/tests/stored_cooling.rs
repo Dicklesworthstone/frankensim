@@ -40,6 +40,8 @@ use fs_solver::NewtonKrylovConfig;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 #[path = "../examples/pressure_cooling/source.rs"]
 mod source;
+#[path = "stored_cooling/heterogeneous.rs"]
+mod heterogeneous;
 
 fn point(t: f64) -> QueryPoint {
     QueryPoint::new().with("T", t).unwrap().with("pressure", 100000.0).unwrap()
