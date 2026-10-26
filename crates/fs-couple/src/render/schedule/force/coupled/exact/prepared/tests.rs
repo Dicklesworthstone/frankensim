@@ -218,7 +218,7 @@ fn the_prepared_mode_ceiling_admits_its_van_loan_dimension_and_refuses_one_more_
         max_dense_bytes: usize::MAX,
         max_multiply_terms: u64::MAX,
     };
-    let exponential = wide.admit(MAX_PREPARED_MODAL_MODES, 1, 1).unwrap();
+    let exponential = wide.admit(MAX_PREPARED_MODAL_MODES, 1, 1, 0).unwrap();
     assert_eq!(exponential.max_dimension, 6 * MAX_PREPARED_MODAL_MODES);
     let identity = fs_phs::linear_exact::exponential_with_budget(&[0.0], 1, exponential).unwrap();
     assert_eq!(identity, vec![1.0]);
@@ -227,7 +227,7 @@ fn the_prepared_mode_ceiling_admits_its_van_loan_dimension_and_refuses_one_more_
         ..wide
     };
     assert!(over.validate().is_err());
-    assert!(wide.admit(MAX_PREPARED_MODAL_MODES + 1, 1, 1).is_err());
+    assert!(wide.admit(MAX_PREPARED_MODAL_MODES + 1, 1, 1, 0).is_err());
 }
 
 #[test]

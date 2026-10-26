@@ -67,10 +67,24 @@ pub struct ModalColumnConnection {
     pub rest_extension_m: f64,
 }
 
+/// A connection whose dashpot was written as a constant loss factor, `c = eta k / omega_ref`. On the prepared owner it
+/// acts in the coupled undamped basis, so that every coupled mode carries `eta` times the connection's share of that
+/// mode's strain energy, times the shell's unit spectrum `G` ([`crate::shear_shell::constant_loss`]). The spring is
+/// unchanged. A connection without one is Kelvin-Voigt, bit for bit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ConstantLossConnection {
+    /// The connection's index in construction order.
+    pub connection: usize,
+    /// The angular frequency [rad/s] at which its damping was written.
+    pub reference_omega_rad_s: f64,
+}
+
 struct ConnectionLaw {
     stiffness_n_m: f64,
     damping_n_s_m: f64,
     rest_extension_m: f64,
+    /// The constant-loss anchor [rad/s]; None is Kelvin-Voigt.
+    constant_loss_reference_omega_rad_s: Option<f64>,
 }
 
 /// Capacity for distinct physical spring/dashpot ports, independent of mode count.
@@ -243,7 +257,7 @@ impl CoupledModalSystem {
         config: ModalCouplingConfig,
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
-        Self::new_inner(models, connections, config, None, gate)
+        Self::new_inner(models, connections, config, None, &[], gate)
     }
 
     /// Explicit cold preparation of the complete held-force transition and
@@ -257,7 +271,23 @@ impl CoupledModalSystem {
         budget: PreparedModalBudget,
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
-        Self::new_inner(models, connections, config, Some(budget), gate)
+        Self::new_inner(models, connections, config, Some(budget), &[], gate)
+    }
+
+    /// [`Self::new_prepared`] with the listed connections at a constant loss factor ([`ConstantLossConnection`]). Each
+    /// listed connection needs a positive dashpot; a connection may be listed once.
+    ///
+    /// # Errors
+    /// Those of [`Self::new_prepared`], plus an invalid constant-loss list.
+    pub fn new_prepared_with_constant_loss(
+        models: Vec<ModalAcousticTimeModel>,
+        connections: Vec<ModalConnection>,
+        constant_loss: &[ConstantLossConnection],
+        config: ModalCouplingConfig,
+        budget: PreparedModalBudget,
+        gate: &CancelGate,
+    ) -> Result<Self, ModalCouplingError> {
+        Self::new_inner(models, connections, config, Some(budget), constant_loss, gate)
     }
 
     fn new_inner(
@@ -265,6 +295,7 @@ impl CoupledModalSystem {
         connections: Vec<ModalConnection>,
         config: ModalCouplingConfig,
         prepared: Option<PreparedModalBudget>,
+        constant_loss: &[ConstantLossConnection],
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
         let (offsets, count, _) = connection_layout(&models, connections.len(), config, gate)?;
@@ -287,7 +318,7 @@ impl CoupledModalSystem {
                 damping_n_s_m: link.damping_n_s_m, rest_extension_m: link.rest_extension_m,
             });
         }
-        Self::new_with_columns_inner(models, complete, config, prepared, gate)
+        Self::new_with_columns_inner(models, complete, config, prepared, constant_loss, gate)
     }
 
     /// Prepare simultaneous bilateral reactions on complete signed columns.
@@ -301,7 +332,7 @@ impl CoupledModalSystem {
         config: ModalCouplingConfig,
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
-        Self::new_with_columns_inner(models, connections, config, None, gate)
+        Self::new_with_columns_inner(models, connections, config, None, &[], gate)
     }
 
     /// Complete signed-column version of [`Self::new_prepared`].
@@ -312,7 +343,7 @@ impl CoupledModalSystem {
         budget: PreparedModalBudget,
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
-        Self::new_with_columns_inner(models, connections, config, Some(budget), gate)
+        Self::new_with_columns_inner(models, connections, config, Some(budget), &[], gate)
     }
 
     fn new_with_columns_inner(
@@ -320,6 +351,7 @@ impl CoupledModalSystem {
         connections: Vec<ModalColumnConnection>,
         config: ModalCouplingConfig,
         prepared: Option<PreparedModalBudget>,
+        constant_loss: &[ConstantLossConnection],
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
         let (offsets, count, dt) = connection_layout(&models, connections.len(), config, gate)?;
@@ -338,8 +370,13 @@ impl CoupledModalSystem {
             }
             columns.push(link.column);
             laws.push(ConnectionLaw { stiffness_n_m: link.stiffness_n_m,
-                damping_n_s_m: link.damping_n_s_m, rest_extension_m: link.rest_extension_m });
+                damping_n_s_m: link.damping_n_s_m, rest_extension_m: link.rest_extension_m,
+                constant_loss_reference_omega_rad_s: None });
         }
+        if !constant_loss.is_empty() && prepared.is_none() {
+            return Err(invalid("a constant-loss connection needs the prepared exact owner"));
+        }
+        anchor_constant_loss(&mut laws, constant_loss)?;
         let connections = laws;
         let mut upper_squared = 0.0_f64;
         for model in &models {
@@ -442,6 +479,41 @@ impl CoupledModalSystem {
         self.prepared_budget = Some(budget);
         poll(Some(gate))?;
         Ok(self)
+    }
+
+    /// Bind constant-loss dashpots ([`ConstantLossConnection`]) to this prepared operator before its first sample, and
+    /// prepare it again. Nothing else changes: the same connections, springs, initial states and port ledgers.
+    ///
+    /// # Errors
+    /// A started, unprepared or memory-carrying owner, an already bound anchor, an invalid list, or the preparation's
+    /// own refusals.
+    pub fn with_constant_loss_connections(
+        mut self, constant_loss: &[ConstantLossConnection], gate: &CancelGate,
+    ) -> Result<Self, ModalCouplingError> {
+        poll(Some(gate))?;
+        let Some(budget) = self.prepared_budget else {
+            return Err(invalid("a constant-loss connection needs the prepared exact owner"));
+        };
+        if self.samples_rendered() != 0 || constant_loss.is_empty()
+            || self.connections.iter().any(|link| link.constant_loss_reference_omega_rad_s.is_some()) {
+            return Err(invalid("constant-loss connections require one nonempty cold binding"));
+        }
+        if !self.relaxation_branches.is_empty() || self.radiation.is_some() {
+            return Err(invalid("prepared mechanical propagation cannot discard material or acoustic memory"));
+        }
+        anchor_constant_loss(&mut self.connections, constant_loss)?;
+        self.exact = Some(exact::ExactNetwork::new_prepared(
+            &self.models, &self.columns, &self.connections, self.mode_count(), self.dt, budget, gate,
+        )?);
+        poll(Some(gate))?;
+        Ok(self)
+    }
+
+    /// The connections bound at a constant loss factor, in connection order.
+    #[must_use]
+    pub fn constant_loss_connections(&self) -> Vec<ConstantLossConnection> {
+        self.connections.iter().enumerate().filter_map(|(connection, link)| link.constant_loss_reference_omega_rad_s
+            .map(|reference_omega_rad_s| ConstantLossConnection { connection, reference_omega_rad_s })).collect()
     }
 
     /// Explicit dense preparation choice, retained through owner conversions.
@@ -681,6 +753,21 @@ fn component_energy(models: &[ModalAcousticTimeModel]) -> Result<f64, ModalCoupl
     }
     Ok(sum)
 }
+/// Record each constant-loss anchor on its connection: listed once, on a positive dashpot, at a finite positive angular
+/// frequency.
+fn anchor_constant_loss(laws: &mut [ConnectionLaw], anchors: &[ConstantLossConnection]) -> Result<(), ModalCouplingError> {
+    for anchor in anchors {
+        let link = laws.get_mut(anchor.connection)
+            .ok_or_else(|| invalid("a constant-loss anchor names an unknown connection"))?;
+        if link.constant_loss_reference_omega_rad_s.is_some() || !(link.damping_n_s_m > 0.0)
+            || !anchor.reference_omega_rad_s.is_finite() || anchor.reference_omega_rad_s <= 0.0 {
+            return Err(invalid("a constant-loss anchor is one finite positive angular frequency on a positive dashpot"));
+        }
+        link.constant_loss_reference_omega_rad_s = Some(anchor.reference_omega_rad_s);
+    }
+    Ok(())
+}
+
 fn extension(models: &[ModalAcousticTimeModel], column: &[f64], rest: f64) -> Result<f64, ModalCouplingError> {
     let mut sum = 0.0;
     for (state, &shape) in models.iter().flat_map(|m| m.states()).zip(column) {

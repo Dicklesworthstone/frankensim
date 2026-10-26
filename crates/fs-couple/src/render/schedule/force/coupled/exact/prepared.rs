@@ -11,10 +11,20 @@
 //! ledger, computed when a ledger is first asked for. This is a floating-point
 //! matrix exponential, not a nonlinear/continuum accuracy certificate or a
 //! real-time timing promise.
+//!
+//! A link anchored to a constant loss factor (`ConnectionLaw::constant_loss_reference_omega_rad_s`) wrote its dashpot as
+//! `c = eta k / omega_ref`. Its resistance acts along the damping column `g(K) b` instead of `b`, with
+//! `g(K) = V diag(s_a) V^T` over the coupled undamped modes of the complete stiffness (identity mass) and
+//! `s_a = sqrt(omega_ref G(omega_a) / omega_a)`, G being the shell's five-branch unit spectrum
+//! (`crate::shear_shell::constant_loss`). Coupled mode a then carries the loss factor `eta share_a G(omega_a)`, where
+//! `share_a = k (b.v_a)^2 / omega_a^2` is the link's share of that mode's strain energy: the modal strain-energy rule
+//! of the shell's constant loss, applied to one joint. The congruence keeps the resistance positive semidefinite. The
+//! spring, its storage and its rest force keep `b`; the loss outside the spectrum's fit band is the fit's own shape.
 
 use super::*;
 use fs_phs::linear_exact::{DenseExponentialBudget, UpperBlocks, exponential_with_budget, upper_block_exponential_with_budget};
 use crate::port_adoption::{DeferredTransfers, PortTransfer};
+use crate::shear_shell::constant_loss::ConstantLossSpectrum;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -71,6 +81,8 @@ struct LedgerData {
     springs: Vec<(f64, f64)>,
     /// Damping [N s/m] of every link.
     dampings: Vec<f64>,
+    /// The damping column `g(K) b` of every constant-loss link; None where the dashpot acts along the link's own column.
+    damping_columns: Vec<Option<Vec<f64>>>,
     /// What a link's Gramian is computed from; None without a dissipative link.
     integral: Option<LinkIntegral>,
     gramians: OnceLock<Vec<Option<Vec<f64>>>>,
@@ -125,7 +137,9 @@ impl PreparedModalBudget {
         Ok(())
     }
 
-    fn admit(self, count: usize, losses: usize, links: usize) -> Result<DenseExponentialBudget, ModalCouplingError> {
+    fn admit(self, count: usize, losses: usize, links: usize, anchored: usize)
+        -> Result<DenseExponentialBudget, ModalCouplingError>
+    {
         self.validate()?;
         if count == 0 || count > self.max_modes {
             return Err(invalid("complete prepared modal count exceeds max_modes; no modes were dropped"));
@@ -135,7 +149,11 @@ impl PreparedModalBudget {
         let d = count.checked_mul(3).ok_or_else(|| invalid("prepared state extent"))?;
         let extent = d.checked_mul(d).ok_or_else(|| invalid("prepared matrix extent"))?;
         let matrices = losses.checked_add(128).ok_or_else(|| invalid("prepared workspace count"))?;
+        // A constant-loss link adds one coupled eigensolve of the n x n stiffness (its copy, the eigenvectors and the
+        // solver's own two squares) and one damping column.
+        let eigensolve_entries = if anchored == 0 { 0 } else { 4 * count * count + anchored * count };
         let bytes = extent.checked_mul(matrices)
+            .and_then(|n| n.checked_add(eigensolve_entries))
             .and_then(|n| n.checked_mul(core::mem::size_of::<f64>()))
             .and_then(|n| n.checked_add(links.checked_mul(core::mem::size_of::<Option<Vec<f64>>>())?))
             .ok_or_else(|| invalid("prepared dense byte overflow"))?;
@@ -146,8 +164,14 @@ impl PreparedModalBudget {
         let products = (losses as u64).checked_mul(80 * 8 + 2 * MAX_SCALES as u64 + 2)
             .and_then(|n| n.checked_add(2 * 80 + 2 * MAX_SCALES as u64 + 16))
             .ok_or_else(|| invalid("prepared product work overflow"))?;
+        // Householder tridiagonalization and QL with vectors are about 9 n^3; each damping column is two n^2 products.
+        let eigensolve_terms = if anchored == 0 { Some(0) } else {
+            (count as u64).checked_pow(3).and_then(|n| n.checked_mul(9))
+                .and_then(|n| n.checked_add((anchored as u64).checked_mul((count as u64).checked_pow(2)?)?.checked_mul(2)?))
+        };
         let terms = cube.checked_mul(products)
             .and_then(|n| n.checked_add((links as u64).checked_mul((count as u64).checked_pow(2)?)?.checked_mul(8)?))
+            .and_then(|n| n.checked_add(eigensolve_terms?))
             .ok_or_else(|| invalid("prepared complete work overflow"))?;
         if bytes > self.max_dense_bytes {
             return Err(invalid("prepared exact dense bytes exceed max_dense_bytes"));
@@ -184,8 +208,9 @@ impl PreparedNetwork {
         // One integral for the component loss, one for the summed connection loss, and one per dissipative link that an
         // observed port ledger computes: all are admitted here, before anything is allocated.
         let dissipative = links.iter().filter(|c| c.damping_n_s_m != 0.0).count();
+        let anchored = links.iter().filter(|c| c.constant_loss_reference_omega_rad_s.is_some()).count();
         let losses = usize::from(has_component_loss) + usize::from(dissipative > 0) + dissipative;
-        let exp_budget = budget.admit(count, losses, links.len())?;
+        let exp_budget = budget.admit(count, losses, links.len(), anchored)?;
         let d = 3 * count;
         let mut stiffness = vec![0.0; count * count];
         let mut damping = vec![0.0; count * count];
@@ -198,10 +223,24 @@ impl PreparedNetwork {
         }
         for (column, link) in columns.iter().zip(links) {
             poll(Some(gate))?;
+            // A constant-loss dashpot needs the complete stiffness first; it is added below along its damping column.
+            let viscous = link.constant_loss_reference_omega_rad_s.is_none();
             for i in 0..count {
                 rest_force[i] = finite(rest_force[i] + link.stiffness_n_m * link.rest_extension_m * column[i])?;
                 for j in 0..count {
                     stiffness[i * count + j] = finite(stiffness[i * count + j] + link.stiffness_n_m * column[i] * column[j])?;
+                    if viscous {
+                        damping[i * count + j] = finite(damping[i * count + j] + link.damping_n_s_m * column[i] * column[j])?;
+                    }
+                }
+            }
+        }
+        let damping_columns = constant_loss_columns(&stiffness, columns, links, count, gate)?;
+        for (own, link) in damping_columns.iter().zip(links) {
+            let Some(column) = own else { continue };
+            poll(Some(gate))?;
+            for i in 0..count {
+                for j in 0..count {
                     damping[i * count + j] = finite(damping[i * count + j] + link.damping_n_s_m * column[i] * column[j])?;
                 }
             }
@@ -253,12 +292,12 @@ impl PreparedNetwork {
         // The Gramian is linear in the resistance: ONE integral of the summed dashpots is the total connection loss, however
         // many links there are. Each link's own integral is left to the port ledger.
         let mut connection_resistance: Option<Vec<f64>> = None;
-        for (column, link) in columns.iter().zip(links) {
+        for ((column, link), damping_column) in columns.iter().zip(links).zip(&damping_columns) {
             poll(Some(gate))?;
             if link.damping_n_s_m == 0.0 {
                 continue;
             }
-            let own = link_resistance(column, link.damping_n_s_m, count)?;
+            let own = link_resistance(damping_column.as_deref().unwrap_or(column), link.damping_n_s_m, count)?;
             match connection_resistance.as_mut() {
                 Some(sum) => for (s, v) in sum.iter_mut().zip(&own) { *s = finite(*s + v)?; },
                 None => connection_resistance = Some(own),
@@ -273,7 +312,7 @@ impl PreparedNetwork {
         let ledger = Arc::new(LedgerData {
             count, dt, weights: weights.clone(), columns: columns.to_vec(),
             springs: links.iter().map(|l| (l.stiffness_n_m, l.rest_extension_m)).collect(),
-            dampings: links.iter().map(|l| l.damping_n_s_m).collect(),
+            dampings: links.iter().map(|l| l.damping_n_s_m).collect(), damping_columns,
             integral, gramians: OnceLock::new(), evaluations: AtomicU64::new(0),
         });
         let result = Self { count, dt, weights, stiffness, rest_force, transition, component_loss, connection_total, ledger,
@@ -390,6 +429,11 @@ impl PreparedNetwork {
         self.with_sweep(z, |sweep| Ok((sweep.component, sweep.connection)))
     }
 
+    /// The damping column of a constant-loss link (`g(K) b`), or None where the link's dashpot acts along its own column.
+    pub(super) fn damping_column(&self, link: usize) -> Option<&[f64]> {
+        self.ledger.damping_columns.get(link).and_then(Option::as_deref)
+    }
+
     #[cfg(test)]
     pub(super) fn sweeps(&self) -> u64 { self.sweeps.load(Ordering::Relaxed) }
 
@@ -482,13 +526,13 @@ impl LedgerData {
         let gate = gate.unwrap_or(&idle);
         let d = 3 * self.count;
         let mut computed = Vec::with_capacity(self.dampings.len());
-        for (column, &damping) in self.columns.iter().zip(&self.dampings) {
+        for ((column, &damping), own) in self.columns.iter().zip(&self.dampings).zip(&self.damping_columns) {
             poll(Some(gate))?;
             let Some(integral) = self.integral.as_ref().filter(|_| damping != 0.0) else {
                 computed.push(None);
                 continue;
             };
-            let resistance = link_resistance(column, damping, self.count)?;
+            let resistance = link_resistance(own.as_deref().unwrap_or(column), damping, self.count)?;
             computed.push(Some(gramian(&integral.generator, &resistance, &integral.levels, integral.h, d,
                 integral.budget, gate)?));
         }
@@ -556,6 +600,52 @@ fn state_vector(count: usize, weights: &[f64], expected_dt: f64, x: &[f64], u: &
         z[2 * count + i] = u[i];
     }
     Ok(z)
+}
+
+/// The damping column `g(K) b` of every link anchored to a constant loss factor, None for a Kelvin-Voigt link (see the
+/// module notes). `stiffness` is the complete n x n stiffness with identity mass. Without an anchored link nothing is
+/// solved. K is positive semidefinite: an eigenvalue below zero by more than the solver's roundoff refuses, and one
+/// within it is a free coordinate, where `G(omega) / omega` has its finite limit.
+fn constant_loss_columns(
+    stiffness: &[f64], columns: &[Vec<f64>], links: &[ConnectionLaw], count: usize, gate: &CancelGate,
+) -> Result<Vec<Option<Vec<f64>>>, ModalCouplingError> {
+    if links.iter().all(|link| link.constant_loss_reference_omega_rad_s.is_none()) {
+        return Ok(vec![None; links.len()]);
+    }
+    poll(Some(gate))?;
+    let _admitted = fs_la::eigen::admit_jacobi_eigh(count).map_err(|_| invalid("constant-loss coupled eigensolve size"))?;
+    let (values, vectors) = fs_la::eigen::householder_eigh(stiffness, count);
+    poll(Some(gate))?;
+    let largest = values.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+    let floor = 64.0 * count as f64 * f64::EPSILON * largest;
+    if values.iter().chain(&vectors).any(|v| !v.is_finite()) || values.iter().any(|&v| v < -floor) {
+        return Err(invalid("constant-loss coupled stiffness is not finite positive semidefinite"));
+    }
+    // G(omega) / omega = sum_j g_j / (rate_j (1 + (omega / rate_j)^2)): finite at a free coordinate.
+    let spectrum: Vec<_> = ConstantLossSpectrum::fit().branches().collect();
+    let per_omega: Vec<f64> = values.iter().map(|&value| {
+        let omega = det::sqrt(value.max(0.0));
+        spectrum.iter().map(|&(rate, g)| { let x = omega / rate; g / (rate * (1.0 + x * x)) }).sum::<f64>()
+    }).collect();
+    let mut result = Vec::with_capacity(links.len());
+    for (column, link) in columns.iter().zip(links) {
+        poll(Some(gate))?;
+        let Some(reference) = link.constant_loss_reference_omega_rad_s else {
+            result.push(None);
+            continue;
+        };
+        // d = V diag(s) V^T b: project on the coupled modes, scale each by s_a, and return.
+        let mut scaled = vec![0.0; count];
+        for (a, (value, ratio)) in scaled.iter_mut().zip(&per_omega).enumerate() {
+            let projection = (0..count).fold(0.0, |s, i| s + vectors[i * count + a] * column[i]);
+            *value = finite(det::sqrt(reference * ratio) * projection)?;
+        }
+        let damping_column = (0..count)
+            .map(|i| finite(vectors[i * count..(i + 1) * count].iter().zip(&scaled).fold(0.0, |s, (v, x)| s + v * x)))
+            .collect::<Result<Vec<_>, _>>()?;
+        result.push(Some(damping_column));
+    }
+    Ok(result)
 }
 
 /// One link's own resistance: its dashpot c b b^T in the velocity block of a d x d matrix (d = 3 count).
@@ -726,3 +816,5 @@ fn checked_loss(sum: f64, magnitude: f64) -> Result<f64, ModalCouplingError> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod constant_loss_tests;

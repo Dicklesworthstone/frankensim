@@ -246,7 +246,7 @@ impl ReciprocalStringBank {
         let bridges: Vec<_> = self.source.strings.iter().map(|s| s.connections.as_slice()).collect();
         let mut system = assemble_sources(&self.cards, Some(&self.source.strings), bodies,
             &bridges, &self.source.body_connections, &connections, self.source.fluid_loading.as_ref(),
-            self.source.prepared_linear,
+            self.source.prepared_linear, &self.source.constant_loss_bridges(),
             self.system.port().law.clone(),
             &self.source.options, gate)?;
         if let Some(weights) = self.system.acceleration_pressure_weights() {

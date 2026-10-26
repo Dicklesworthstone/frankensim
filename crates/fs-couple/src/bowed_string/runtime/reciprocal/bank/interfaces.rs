@@ -4,9 +4,10 @@
 
 use super::plate::SharedPlateBridge;
 use super::{
-    MaterialStringBankSource, MaterialStringSource, ReciprocalStringBank, ReciprocalStringError,
-    interior, invalid, poll,
+    MaterialStringBankSource, MaterialStringMember, MaterialStringSource, ReciprocalStringBank,
+    ReciprocalStringError, interior, invalid, poll,
 };
+use crate::render::schedule::force::coupled::ConstantLossConnection;
 use crate::render::schedule::force::coupled::contact::friction::FrictionModalSystem;
 use fs_exec::CancelGate;
 use fs_matdb::MaterialStateId;
@@ -174,6 +175,12 @@ impl MaterialStringBankSource {
             })
     }
 
+    /// Every bound bridge whose interface states a constant-loss anchor, named
+    /// as its connection in the assembled network.
+    pub(super) fn constant_loss_bridges(&self) -> Vec<ConstantLossConnection> {
+        bridge_anchors(&self.strings, &self.material_bridge_interfaces)
+    }
+
     pub(super) fn validate_material_bridge_frequencies(
         &self,
         system: &FrictionModalSystem,
@@ -207,6 +214,12 @@ impl ReciprocalStringBank {
     /// A physical cavity neck whose restoring spring is a body connection gives
     /// a conservative lower bound of zero; appended viscous gas memory does not
     /// masquerade as an independent physical vibration mode.
+    ///
+    /// The one exception to "never edits": an interface that states a
+    /// constant-loss anchor (`ResolvedLinearInterface::constant_loss_reference_omega_rad_s`)
+    /// binds its bridge's dashpot at a constant loss factor, which prepares the
+    /// SAME network again before playback (the prepared owner is required).
+    /// Later fluid, cavity and rotational rebuilds keep the anchor.
     pub fn with_material_bridge_interfaces(
         mut self,
         bindings: Vec<MaterialBridgeInterface>,
@@ -278,10 +291,34 @@ impl ReciprocalStringBank {
             &self.system,
             gate,
         )?;
+        let anchors = bridge_anchors(&self.source.strings, &bindings);
+        if !anchors.is_empty() {
+            self.system = self.system.with_constant_loss_connections(&anchors, gate)
+                .map_err(ReciprocalStringError::Friction)?;
+        }
         poll(gate)?;
         self.source.material_bridge_interfaces = bindings;
         Ok(self)
     }
+}
+
+/// A bridge's connection index: every string's own connections come first in
+/// the assembled network, in string order. Bindings name existing strings.
+fn bridge_anchors(
+    strings: &[MaterialStringMember],
+    bindings: &[MaterialBridgeInterface],
+) -> Vec<ConstantLossConnection> {
+    bindings
+        .iter()
+        .filter_map(|binding| {
+            let reference_omega_rad_s = binding.interface.constant_loss_reference_omega_rad_s()?;
+            let connection = strings[..binding.string]
+                .iter()
+                .map(|member| member.connections.len())
+                .sum();
+            Some(ConstantLossConnection { connection, reference_omega_rad_s })
+        })
+        .collect()
 }
 
 fn outer_material(

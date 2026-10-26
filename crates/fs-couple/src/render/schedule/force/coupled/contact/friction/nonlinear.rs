@@ -342,8 +342,11 @@ impl FrictionModalSystem {
                 damping_n_s_m: law.damping_n_s_m, rest_extension_m: law.rest_extension_m,
             });
         }
+        // Constant-loss anchors stay on their connections; the appended coordinates join the coupled basis they act in.
+        let constant_loss = self.network.constant_loss_connections();
         let network = match self.network.prepared_budget() {
-            Some(budget) => CoupledModalSystem::new_with_columns_prepared(models, columns, self.network.config, budget, gate),
+            Some(budget) => CoupledModalSystem::new_with_columns_inner(models, columns, self.network.config, Some(budget),
+                &constant_loss, gate),
             None => CoupledModalSystem::new_with_columns(models, columns, self.network.config, gate),
         }?;
         let network = if self.network.relaxation_branches.is_empty() { network } else {
