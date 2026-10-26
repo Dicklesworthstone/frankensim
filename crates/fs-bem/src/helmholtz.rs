@@ -1030,10 +1030,7 @@ pub fn solve_radiation_batch(
     formulation: Formulation,
 ) -> Result<Vec<RadiationSolution>, HelmholtzError> {
     let operator = RadiationOperator::prepare(surface, k, medium, velocity_fields, formulation)?;
-    Ok(velocity_fields
-        .iter()
-        .map(|&velocity| operator.solve(velocity))
-        .collect())
+    Ok(operator.solve_all(velocity_fields))
 }
 
 /// One admitted and factorized exterior-radiation operator. Keeping this
@@ -1120,6 +1117,37 @@ impl<'a> RadiationOperator<'a> {
             condition_lower_bound: self.condition_lower_bound,
             dense_cap_utilization: n as f64 / MAX_DENSE_PANELS as f64,
         }
+    }
+
+    /// Every field against the one factorization, in input order, on this
+    /// thread's declared dense workers ([`with_dense_workers`]). Each field
+    /// runs exactly [`Self::solve`], so the worker count never changes a bit.
+    fn solve_all(&self, fields: &[&[C64]]) -> Vec<RadiationSolution> {
+        let workers = DENSE_WORKERS.with(core::cell::Cell::get).min(fields.len());
+        if workers <= 1 {
+            return fields
+                .iter()
+                .map(|&velocity| self.solve(velocity))
+                .collect();
+        }
+        let mut solved: Vec<Option<RadiationSolution>> = fields.iter().map(|_| None).collect();
+        std::thread::scope(|scope| {
+            let mut rest = solved.as_mut_slice();
+            for p in 0..workers {
+                let (start, end) = (p * fields.len() / workers, (p + 1) * fields.len() / workers);
+                let (head, tail) = core::mem::take(&mut rest).split_at_mut(end - start);
+                rest = tail;
+                scope.spawn(move || {
+                    for (slot, &velocity) in head.iter_mut().zip(&fields[start..end]) {
+                        *slot = Some(self.solve(velocity));
+                    }
+                });
+            }
+        });
+        solved
+            .into_iter()
+            .map(|s| s.expect("every scoped worker fills its own fields"))
+            .collect()
     }
 }
 
@@ -3897,6 +3925,65 @@ mod tests {
                     bits(&solved),
                     "{formulation:?} workers {workers}"
                 );
+            }
+            // A batch splits its fields over the workers; each field is still its own one-field solve, in order.
+            let fields: Vec<Vec<C64>> = (0..5)
+                .map(|f| {
+                    let s = f as f64;
+                    velocity
+                        .iter()
+                        .zip(surface.normals())
+                        .map(|(&v, nrm)| v.scale(1.0 + s) + C64::new(s * nrm[0], -0.5 * s * nrm[1]))
+                        .collect()
+                })
+                .collect();
+            let refs: Vec<&[C64]> = fields.iter().map(Vec::as_slice).collect();
+            let one: Vec<_> = refs
+                .iter()
+                .map(|&f| {
+                    solve_radiation(&surface, k, Medium::air(), f, formulation).expect("solve")
+                })
+                .collect();
+            let rule = PanelRule::Triangle { max_pairs: n * n };
+            let ruled = solve_radiation_batch_with_rule(
+                &surface,
+                k,
+                Medium::air(),
+                &refs,
+                formulation,
+                rule,
+            )
+            .expect("ruled batch");
+            for workers in [2, 3, 7, n + 5] {
+                let (batch, ruled_batch) = with_dense_workers(workers, || {
+                    (
+                        solve_radiation_batch(&surface, k, Medium::air(), &refs, formulation)
+                            .expect("batch"),
+                        solve_radiation_batch_with_rule(
+                            &surface,
+                            k,
+                            Medium::air(),
+                            &refs,
+                            formulation,
+                            rule,
+                        )
+                        .expect("ruled batch"),
+                    )
+                });
+                for (expected, actual) in
+                    one.iter().zip(&batch).chain(ruled.iter().zip(&ruled_batch))
+                {
+                    assert_eq!(
+                        bits(&actual.pressure),
+                        bits(&expected.pressure),
+                        "{formulation:?} workers {workers}"
+                    );
+                    assert_eq!(
+                        actual.radiated_power.to_bits(),
+                        expected.radiated_power.to_bits()
+                    );
+                }
+                assert_eq!((batch.len(), ruled_batch.len()), (5, 5));
             }
         }
         // The declaration is scoped and restored, also after a panic.

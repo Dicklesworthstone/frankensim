@@ -553,10 +553,7 @@ pub fn solve_radiation_batch_with_rule(
             Ok((a, b))
         },
     )?;
-    Ok(velocity_fields
-        .iter()
-        .map(|&velocity| operator.solve(velocity))
-        .collect())
+    Ok(operator.solve_all(velocity_fields))
 }
 
 /// One-field form of [`solve_radiation_batch_with_rule`].
