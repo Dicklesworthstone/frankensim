@@ -28,6 +28,8 @@ use fs_thermal::enthalpy::backward_euler::{BackwardEulerStep, StepCoefficients};
 use std::cell::Cell;
 
 mod transport;
+/// Declared chemistry, finite gas heat and the same spatial solid state.
+pub mod reactive;
 use crate::circuit_enthalpy::material::{
     MaterialNetworkError, MaterialNetworkSample, PreparedMaterialNetwork,
 };

@@ -6287,3 +6287,33 @@ resistivity, continuation from the accepted field, physical heat versus
 numerical loss, complete energy balance, and transactional failure. Full native
 integration execution is required in a build environment that can compile the
 pinned constellation; the production-leaf checks alone do not establish it.
+
+## Reacting finite gas and spatial material-solid heating
+
+`SolidEnthalpy::step_with_reacting_isochoric_gas` advances the original declared
+`GasReaction::parcel_candidate` at fixed gas mass, volume and formation-inclusive
+total internal energy, then delegates the existing joint gas/spatial-cell
+backward-Euler owner over the same physical interval. Reaction products and their
+material transport enter the thermal solve. The optional original
+`PreparedMaterialNetwork` keeps internal conductivity and gas-facing material
+layers at the actual endpoint temperatures. The returned native solid state
+feeds the existing deformation, stress, prestress and transient-solid owners.
+
+Original-to-final gas energy plus cell enthalpy minus authored external heat
+must close before either stage publishes. Chemical formation energy is already
+in gas storage and is never added as a separate heat source. The gas temperature
+increment bound covers both the chemical intermediate and final state. Failed
+chemistry, thermal iteration, source admission, events or cancellation preserve
+the original gas and thermal histories.
+
+This is a first-order chemistry-to-thermal operator split for a well-mixed,
+fixed-mass, fixed-volume gas. The isolated chemical stage retains its own entropy
+admission; this is not a whole-system entropy-production claim. Flame propagation,
+gas traction, moving boundaries, melt mechanics and reciprocal thermoelastic
+heat remain outside this path's scope.
+
+`tests/solid_reactive_gas.rs` specifies independent spatial heat and native 3-D
+solid displacement/stress references under data-only kinetic, caloric and product
+transport changes, cooled-species continuation with material k(T), and late
+thermal failure/replay/cancellation. Source parsing and review do not substitute
+for executing these full integration regressions.
