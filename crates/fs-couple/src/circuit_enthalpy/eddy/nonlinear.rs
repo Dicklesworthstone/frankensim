@@ -94,7 +94,7 @@ fn induction(error: NonlinearEddyError) -> Error {
 
 impl MagneticThermalNetwork<'_> {
     #[allow(clippy::too_many_arguments)]
-    fn nonlinear_materials_at(
+    pub(in crate::circuit_enthalpy) fn nonlinear_materials_at(
         &self,
         thermal: &DepositionSimulation<'_>,
         problem: &PlanarNonlinearMagnetostatics,

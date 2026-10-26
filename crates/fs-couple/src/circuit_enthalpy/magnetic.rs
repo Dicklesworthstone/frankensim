@@ -57,6 +57,7 @@ pub enum MagneticThermalError {
     Material(MaterialNetworkError),
     Conductor(ConductorError),
     Winding(OhmicWindingError),
+    NonlinearWinding(fs_em::winding::nonlinear::NonlinearWindingError),
     Induction(EddyError),
     NonlinearInduction(NonlinearEddyError),
     Magnetic(FieldStorageError),
@@ -210,7 +211,9 @@ impl MagneticThermalNetwork<'_> {
         ),
         Error,
     > {
-        self.materials_at_impl(thermal,problem,conductors,sample,routes,cancelled,false)
+        self.materials_at_impl(
+            thermal, problem, conductors, sample, routes, cancelled, false,
+        )
     }
 
     // Used only by the thermal-permeability owner, which independently binds
@@ -223,8 +226,16 @@ impl MagneticThermalNetwork<'_> {
         sample: &MaterialNetworkSample,
         routes: &MagneticRoutes,
         cancelled: &RefCell<impl FnMut() -> bool>,
-    ) -> Result<(Vec<(usize,ResolvedConductorState)>,Vec<MagneticThermalSample>),Error> {
-        self.materials_at_impl(thermal,problem,conductors,sample,routes,cancelled,true)
+    ) -> Result<
+        (
+            Vec<(usize, ResolvedConductorState)>,
+            Vec<MagneticThermalSample>,
+        ),
+        Error,
+    > {
+        self.materials_at_impl(
+            thermal, problem, conductors, sample, routes, cancelled, true,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -306,7 +317,8 @@ impl MagneticThermalNetwork<'_> {
         let mut magnetic = Vec::with_capacity(routes.magnetic.len());
         for (&triangle, &cell) in &routes.magnetic {
             check(cancelled)?;
-            let original = *originals.get(triangle)
+            let original = *originals
+                .get(triangle)
                 .ok_or_else(|| invalid("magnetic material changed triangle correspondence"))?;
             let source = conductors.get(&triangle);
             let snapshot = if let Some(id) = cell {

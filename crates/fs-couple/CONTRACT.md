@@ -6317,3 +6317,39 @@ solid displacement/stress references under data-only kinetic, caloric and produc
 transport changes, cooled-species continuation with material k(T), and late
 thermal failure/replay/cancellation. Source parsing and review do not substitute
 for executing these full integration regressions.
+
+## Circuit-driven nonlinear magnetic fields and finite material heat
+
+`WindingThermalNetwork::step_nonlinear_candidate` closes the original native
+circuit, nonlinear magnetic field and finite enthalpy histories over one
+accepted interval. Source-defined H(B) determines the actual field and winding
+flux linkage; the circuit voltage determines current. The same material cards
+supply winding and core resistivity at each proposed thermal endpoint.
+Every thermal trial restarts both accepted electrical histories and uses the
+existing material-network conduction and caloric residual.
+
+Linear and nonlinear winding consumers share admission of original magnetic
+triangle volumes, explicit heat destinations and native graph-resistor routes.
+Core eddy regions and stranded winding regions must be disjoint. Their physical
+Joule losses and every original graph resistor's loss are deposited exactly
+once. Private winding-port exchanges cancel inside the combined field/circuit
+owner: only external source work enters the global thermal energy account.
+Backward-Euler field and explicit end-inductance numerical dissipation is
+reported separately and never becomes material heat.
+
+The complete H(B) law, fixed geometry, source identity and original caloric
+instances remain pinned. Thermally mapped magnetic cells require wholly solid,
+constant-density caloric charts; temperature-dependent magnetic storage
+refuses until magnetic entropy/parameter work has an owner. Existing thermal
+events, conduction, source domains, work budgets and late cancellation remain
+authoritative. All three accepted histories are unchanged on refusal.
+This is a first-order, reversible isotropic magnetoquasistatic coupling; it
+does not add hysteresis, moving conductors or thermal expansion.
+
+G1/G3/G4 regressions in `nonlinear_winding_enthalpy.rs` compare two accepted
+steps against an independent scalar voltage/current/enthalpy reduction,
+change only source saturation data, verify endpoint resistivity and every
+physical heat contribution, and distinguish external work from private port
+work and numerical loss. They also exercise incomplete routes, trial budgets,
+late cancellation, clock mismatch and deterministic retry. The integration
+tests are added and parsed; full native execution is not yet claimed.

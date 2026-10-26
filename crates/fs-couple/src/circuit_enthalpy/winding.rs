@@ -1,29 +1,37 @@
 //! Spatial winding Joule heat on the original finite enthalpy/Newton owner.
 //!
-//! The magnetic basis and native Kirchhoff history remain with fs-em/fs-phs.
+//! The magnetic field/basis and native Kirchhoff history remain with fs-em/fs-phs.
 //! This adapter reuses the existing MaterialCell and prepared thermal-transport
 //! bindings: caloric storage, conductor resistivity and thermal conductivity
 //! must come from the SAME cards and actual endpoint temperatures. Mapped
 //! magnetic triangles cover whole fixed thermal volumes; no guessed lumped resistor,
 //! fill fraction, copper coefficient or alternate heat integrator is introduced.
 
+/// Circuit-driven nonlinear fields with the same material and heat receivers.
+pub mod nonlinear;
+
+use super::magnetic::{
+    MagneticRoutes, MagneticThermalNetwork, check, invalid, material, same_material,
+};
 use super::{
     CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, DrivenCoefficients,
     DriverAccount, ResistorCell, ThermalDriver, cell_driver_candidate, finite,
-    material::{
-        ConductionLink, MaterialCell, MaterialNetwork, MaterialNetworkSample,
-    },
+    material::{ConductionLink, MaterialCell, MaterialNetwork, MaterialNetworkSample},
 };
 use fs_em::winding::ohmic::{
     OhmicWindingCandidate, OhmicWindingCircuit, OhmicWindingControls, OhmicWindingError,
     OhmicWindingStep, WindingConductor,
 };
-use super::magnetic::{MagneticRoutes, MagneticThermalNetwork, check, invalid, material, same_material};
-use fs_phs::circuit::Branch;
+use fs_phs::circuit::{Branch, CircuitGraph};
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation};
-use std::{cell::RefCell, collections::BTreeMap};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
+};
 
-pub use super::magnetic::{MagneticRegion, MagneticThermalSample, MagneticThermalError as WindingThermalError};
+pub use super::magnetic::{
+    MagneticRegion, MagneticThermalError as WindingThermalError, MagneticThermalSample,
+};
 
 /// Original caloric/conductive samples and every magnetic region's source.
 #[derive(Clone, Debug, PartialEq)]
@@ -35,7 +43,7 @@ pub struct WindingThermalSample {
 /// Data-only material, geometry and complete heat routing for stranded windings.
 /// Thermal cells outside the magnetic geometry keep their original latent and
 /// boundary behavior. Mapped magnetic cells admit fixed solid geometry/density;
-/// thermal expansion, changing permeability/inductance and moving conductors
+/// thermal expansion, changing magnetic constitutive data and moving conductors
 /// require their own coupled work/geometry owner.
 pub struct WindingThermalNetwork<'a> {
     /// Same caloric/material bindings as the existing thermal network, complete
@@ -224,8 +232,12 @@ impl WindingThermalNetwork<'_> {
     }
 
     fn magnetic_layout(&self) -> MagneticThermalNetwork<'_> {
-        MagneticThermalNetwork { cells: self.cells, links: self.links,
-            magnetic_regions: self.magnetic_regions, volume_tolerance_m3: self.volume_tolerance_m3 }
+        MagneticThermalNetwork {
+            cells: self.cells,
+            links: self.links,
+            magnetic_regions: self.magnetic_regions,
+            volume_tolerance_m3: self.volume_tolerance_m3,
+        }
     }
 
     fn admit_routes(
@@ -235,11 +247,37 @@ impl WindingThermalNetwork<'_> {
         cancelled: &RefCell<impl FnMut() -> bool>,
     ) -> Result<Routes, Error> {
         let triangles: Vec<_> = circuit.conductors().iter().map(|s| s.triangle).collect();
-        let magnetic = self.magnetic_layout().routes(
-            thermal, circuit.magnetic().basis().problem(), &triangles, cancelled,
+        self.admit_routes_for_mesh(
+            thermal,
+            circuit.magnetic().basis().problem().mesh(),
+            &triangles,
+            circuit.magnetic().graph(),
+            cancelled,
+        )
+    }
+
+    // Linear and nonlinear circuit fields share the original volumes and heat routes.
+    fn admit_routes_for_mesh(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        mesh: &fs_rep_mesh::TriComplex2,
+        conducting_triangles: &[usize],
+        circuit: &CircuitGraph,
+        cancelled: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<Routes, Error> {
+        let magnetic = self.magnetic_layout().routes_for_mesh(
+            thermal,
+            mesh,
+            conducting_triangles,
+            cancelled,
         )?;
-        if self.graph_resistors.len() != circuit.magnetic().graph().branches.iter()
-            .filter(|(_, _, b)| matches!(b, Branch::Resistor { .. })).count() {
+        if self.graph_resistors.len()
+            != circuit
+                .branches
+                .iter()
+                .filter(|(_, _, b)| matches!(b, Branch::Resistor { .. }))
+                .count()
+        {
             return Err(invalid("every graph resistor needs one heat destination"));
         }
         let mut graph = BTreeMap::new();
@@ -247,13 +285,22 @@ impl WindingThermalNetwork<'_> {
             check(cancelled)?;
             if !thermal.cells().contains_key(&route.cell)
                 || graph.insert(route.branch, route.cell).is_some()
-                || !matches!(circuit.magnetic().graph().branches.get(route.branch),
-                    Some((_, _, Branch::Resistor { .. }))) {
-                return Err(invalid("duplicate, foreign or inactive graph-resistor heat destination"));
+                || !matches!(
+                    circuit.branches.get(route.branch),
+                    Some((_, _, Branch::Resistor { .. }))
+                )
+            {
+                return Err(invalid(
+                    "duplicate, foreign or inactive graph-resistor heat destination",
+                ));
             }
         }
         check(cancelled)?;
-        Ok(Routes { windings: magnetic.conductors.clone(), magnetic, graph })
+        Ok(Routes {
+            windings: magnetic.conductors.clone(),
+            magnetic,
+            graph,
+        })
     }
 
     fn materials_at(
@@ -264,14 +311,30 @@ impl WindingThermalNetwork<'_> {
         routes: &Routes,
         cancelled: &RefCell<impl FnMut() -> bool>,
     ) -> Result<(Vec<WindingConductor>, Vec<MagneticThermalSample>), Error> {
-        let conductors = circuit.conductors().iter().map(|s| (s.triangle, &s.conductor)).collect();
+        let conductors = circuit
+            .conductors()
+            .iter()
+            .map(|s| (s.triangle, &s.conductor))
+            .collect();
         let (sources, samples) = self.magnetic_layout().materials_at(
-            thermal, circuit.magnetic().basis().problem(), &conductors, sample,
-            &routes.magnetic, cancelled,
+            thermal,
+            circuit.magnetic().basis().problem(),
+            &conductors,
+            sample,
+            &routes.magnetic,
+            cancelled,
         )?;
-        Ok((sources.into_iter().map(|(triangle, conductor)| WindingConductor { triangle, conductor }).collect(), samples))
+        Ok((
+            sources
+                .into_iter()
+                .map(|(triangle, conductor)| WindingConductor {
+                    triangle,
+                    conductor,
+                })
+                .collect(),
+            samples,
+        ))
     }
-
 }
 
 // Refresh pins the exact selected claims. Its honest usage receipt therefore
@@ -292,7 +355,20 @@ impl Routes {
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, Error> {
         let step = candidate.step();
-        if step.cells.len() != self.windings.len() || step.graph_resistors.len() != self.graph.len()
+        self.deposit_losses(&step.cells, &[], &step.graph_resistors, dt, checkpoint)
+    }
+
+    // Only physical winding/core/graph losses enter the thermal residual.
+    fn deposit_losses(
+        &self,
+        winding: &[fs_em::winding::ohmic::WindingCellHeat],
+        core: &[fs_em::planar::eddy::EddyCellHeat],
+        graph: &[fs_em::winding::ohmic::WindingGraphResistorHeat],
+        dt: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Error> {
+        if winding.len().checked_add(core.len()) != Some(self.windings.len())
+            || graph.len() != self.graph.len()
         {
             return Err(invalid(
                 "native winding/graph heat receipts changed correspondence",
@@ -311,14 +387,30 @@ impl Routes {
             *sum = finite(*sum + power)?;
             Ok(())
         };
-        for loss in &step.cells {
+        let mut triangles = BTreeSet::new();
+        for (triangle, heat) in winding
+            .iter()
+            .map(|loss| (loss.source.triangle, loss.heat_j))
+            .chain(core.iter().map(|loss| (loss.source.triangle, loss.heat_j)))
+        {
+            if !triangles.insert(triangle) {
+                return Err(invalid(
+                    "winding and core heat must have disjoint original triangles",
+                ));
+            }
             let cell = *self
                 .windings
-                .get(&loss.source.triangle)
+                .get(&triangle)
                 .ok_or_else(|| invalid("native conductor heat has no destination"))?;
-            add(cell, loss.heat_j)?;
+            add(cell, heat)?;
         }
-        for loss in &step.graph_resistors {
+        let mut branches = BTreeSet::new();
+        for loss in graph {
+            if !branches.insert(loss.branch) {
+                return Err(invalid(
+                    "native graph-resistor heat destination is duplicated",
+                ));
+            }
             let cell = *self
                 .graph
                 .get(&loss.branch)
