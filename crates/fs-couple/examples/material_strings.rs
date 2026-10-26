@@ -91,7 +91,7 @@ fn template(w:&input::Wire) -> PrestressedString {
     PrestressedString { length_m:w.length,tension_n:tension,lin_density_kg_m:1.0,axial_stiffness_n:1.0,
         width_m:1.0,n_modes:w.bending_modes,damping_ratio:0.0,rayleigh:None,bending_stiffness_n_m2:0.0,
         kelvin_voigt_bending:None,relaxation_bending:None,polarization_detune:0.0,moving_end:false,
-        tension_loss_factor:None }
+        tension_loss_factor:w.tension_loss.as_ref().map(|row|row.eta_f) }
 }
 // The retained pack includes normalization/uncertainty/rights metadata. Its ID
 // labels source identity, not a new assertion about chemistry or measured quality.
@@ -553,6 +553,17 @@ fn main()->Result<()> {
     for (path,source) in &ready.catalog {
         eprintln!("source={path:?}; pack={:?}; hash={}; artifact={}",source.pack.pack_id(),
             source.pack.content_hash(),source.pack.source_artifact());
+    }
+    let table=input::tension_loss_rows()?;
+    for (string,wire) in ready.spec.strings.iter().enumerate() {
+        let others=|id:Option<&str>| table.iter().filter(|row|Some(row.id.as_str())!=id)
+            .map(|row|format!("{} {}",row.id,row.eta_f)).collect::<Vec<_>>().join(", ");
+        match &wire.tension_loss {
+            Some(row)=>eprintln!("tension_loss_string={string}; row={}; eta_F={}; source={:?}; other_rows=[{}]",
+                row.id,row.eta_f,row.source,others(Some(&row.id))),
+            None=>eprintln!("tension_loss_string={string}; eta_F=stated unknown, entered as 0 (no tension loss: air and the pack's bending law only); rows=[{}]",
+                others(None)),
+        }
     }
     eprintln!("bow_friction={:?}",ready.spec.friction);
     for port in 0..ready.spec.bow_contact_count() {

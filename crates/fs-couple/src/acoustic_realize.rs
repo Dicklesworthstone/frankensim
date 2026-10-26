@@ -1605,6 +1605,7 @@ fn mode_loss_parts(
             what: "relaxation bending cannot be combined with other internal/Rayleigh losses",
         });
     }
+    let tension = tension_loss_zeta(string, omega, wave_number)?;
     let material_bending = string
         .kelvin_voigt_bending
         .map(|law| {
@@ -1668,16 +1669,18 @@ fn mode_loss_parts(
     }
     if let Some(bending) = material_bending {
         return Ok(StringModeLossParts {
-            material: bending,
+            material: bending + tension,
             air: stokes,
             authored: 0.0,
         });
     }
     if string.relaxation_bending.is_some() {
-        // The memory arms supply their own storage and dissipation in pHS.
+        // The memory arms supply their own bending storage and dissipation in
+        // pHS; the tension's loss is not theirs and stays modal.
         return Ok(StringModeLossParts {
+            material: tension,
             air: stokes,
-            ..StringModeLossParts::default()
+            authored: 0.0,
         });
     }
     // A caller-authored modal ratio is an explicit reduced model. Elastic EI
@@ -1687,8 +1690,47 @@ fn mode_loss_parts(
     Ok(StringModeLossParts {
         authored: string.damping_ratio,
         air: stokes,
-        material: 0.0,
+        material: tension,
     })
+}
+
+/// Modal damping ratio of the tension's own loss factor eta_F.
+///
+/// The constant internal-friction term of the string loss model of Valette
+/// and Cuesta, Mécanique de la corde vibrante (1993):
+/// Q_F^-1 = eta_F T k² / (T k² + EI k⁴). A complex tension T (1 + i eta_F)
+/// loses eta_F of the tension's share of the mode's stiffness per radian, so
+/// zeta = eta_F T k² / (2 mu omega²) at the mode's own admitted frequency,
+/// held as a modal viscous rate. It belongs to the string's construction
+/// (core and winding), not to its bending law, and is material heat.
+/// `None` contributes nothing. An authored ratio or Rayleigh pair is already a
+/// complete reduced loss, so it cannot be combined with a physical eta_F.
+fn tension_loss_zeta(
+    string: &PrestressedString,
+    omega: f64,
+    wave_number: f64,
+) -> Result<f64, AcousticRealizeError> {
+    let Some(eta) = string.tension_loss_factor else {
+        return Ok(0.0);
+    };
+    if !eta.is_finite() || eta < 0.0 {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "tension loss factor must be finite and nonnegative",
+        });
+    }
+    if string.rayleigh.is_some() || string.damping_ratio != 0.0 {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "tension loss factor cannot be combined with authored internal/Rayleigh loss",
+        });
+    }
+    let zeta = 0.5 * eta * string.tension_n * wave_number * wave_number
+        / (string.lin_density_kg_m * omega * omega);
+    if !zeta.is_finite() || zeta < 0.0 {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "tension loss damping is unrepresentable",
+        });
+    }
+    Ok(zeta)
 }
 
 fn relaxing_mode_stiffness(string: &PrestressedString, stiffness_n_m2: f64, k: usize) -> f64 {
@@ -6743,6 +6785,129 @@ mod arbitrary_gas_realization_tests {
             change(&mut gas);
             assert!(matches!(realize_assembly_with_gas(&fixture(), &gas),
                 Err(AcousticRealizeError::Ambient(_))), "accepted split physical state: {gas:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tension_loss_tests {
+    use super::*;
+    use fs_scenario::acoustic::{BendingRelaxationBranch, KelvinVoigtBending, PronyBending};
+
+    fn wire(tension_loss_factor: Option<f64>) -> PrestressedString {
+        PrestressedString {
+            length_m: 0.328,
+            tension_n: 70.0,
+            lin_density_kg_m: 4.0e-4,
+            axial_stiffness_n: 0.0,
+            width_m: 2.5e-4,
+            n_modes: 24,
+            damping_ratio: 0.0,
+            rayleigh: None,
+            bending_stiffness_n_m2: 4.0e-4,
+            kelvin_voigt_bending: None,
+            relaxation_bending: None,
+            polarization_detune: 0.0,
+            moving_end: false,
+            tension_loss_factor,
+        }
+    }
+
+    fn mode(string: &PrestressedString, k: usize) -> (f64, f64) {
+        (
+            string_mode_omega(string, k),
+            k as f64 * core::f64::consts::PI / string.length_m,
+        )
+    }
+
+    #[test]
+    fn tension_loss_is_eta_f_on_the_tension_share_of_every_mode_under_each_bending_law() {
+        let gas = gas_state(AmbientGas::sea_level()).unwrap();
+        let eta = 6.0e-4;
+        let kelvin_voigt = KelvinVoigtBending {
+            viscous_stiffness_n_m2_s: 2.0e-8,
+            omega_band_rad_s: (0.0, 1.0e6),
+            material_state_identity: None,
+        };
+        let prony = PronyBending {
+            branches: vec![BendingRelaxationBranch {
+                relaxing_stiffness_n_m2: 1.0e-4,
+                relaxation_time_s: 1.0e-3,
+            }],
+            omega_band_rad_s: (0.0, 1.0e6),
+            material_state_identity: None,
+            source_properties: None,
+        };
+        let laws: [(Option<KelvinVoigtBending>, Option<PronyBending>); 3] = [
+            (None, None),
+            (Some(kelvin_voigt), None),
+            (None, Some(prony)),
+        ];
+        for (kv, relaxation) in laws {
+            let law = |factor| PrestressedString {
+                kelvin_voigt_bending: kv,
+                relaxation_bending: relaxation.clone(),
+                ..wire(factor)
+            };
+            let (plain, zero, lossy) = (law(None), law(Some(0.0)), law(Some(eta)));
+            let mut last = f64::INFINITY;
+            for k in 1..=plain.n_modes {
+                let (omega, wave_number) = mode(&plain, k);
+                let base = mode_loss_parts(&plain, omega, wave_number, &gas).unwrap();
+                // A zero factor is the absent one, bit for bit.
+                let same = mode_loss_parts(&zero, omega, wave_number, &gas).unwrap();
+                assert_eq!(same.total().to_bits(), base.total().to_bits());
+                let parts = mode_loss_parts(&lossy, omega, wave_number, &gas).unwrap();
+                assert_eq!(parts.air.to_bits(), base.air.to_bits());
+                assert_eq!(parts.authored.to_bits(), base.authored.to_bits());
+                let tension = plain.tension_n * wave_number * wave_number;
+                let share =
+                    tension / (tension + plain.bending_stiffness_n_m2 * wave_number.powi(4));
+                // Q_F^-1 = 2 zeta_F, the tension's share of the mode's stiffness times eta_F.
+                let inverse_q = 2.0 * (parts.material - base.material);
+                assert!(
+                    (inverse_q / (eta * share) - 1.0).abs() < 1.0e-9,
+                    "mode {k}: 1/Q_F {inverse_q:e} vs eta_F x share {:e}",
+                    eta * share
+                );
+                // Bending takes a growing share up the series, so the tension's loss dilutes.
+                assert!(
+                    inverse_q < last,
+                    "mode {k}: {inverse_q:e} did not dilute below {last:e}"
+                );
+                last = inverse_q;
+            }
+        }
+    }
+
+    #[test]
+    fn tension_loss_refuses_nonphysical_factors_and_authored_reduced_losses() {
+        let gas = gas_state(AmbientGas::sea_level()).unwrap();
+        let (omega, wave_number) = mode(&wire(None), 3);
+        for bad in [f64::NAN, f64::INFINITY, -1.0e-6] {
+            assert!(
+                mode_zeta(&wire(Some(bad)), omega, wave_number, &gas).is_err(),
+                "accepted eta_F {bad}"
+            );
+        }
+        let authored = PrestressedString {
+            damping_ratio: 1.0e-3,
+            ..wire(Some(1.0e-4))
+        };
+        let rayleigh = PrestressedString {
+            rayleigh: Some(RayleighParams {
+                alpha_per_s: 1.0,
+                beta_s: 0.0,
+            }),
+            ..wire(Some(1.0e-4))
+        };
+        for reduced in [authored, rayleigh] {
+            assert!(mode_zeta(&reduced, omega, wave_number, &gas).is_err());
+            let without = PrestressedString {
+                tension_loss_factor: None,
+                ..reduced
+            };
+            assert!(mode_zeta(&without, omega, wave_number, &gas).is_ok());
         }
     }
 }

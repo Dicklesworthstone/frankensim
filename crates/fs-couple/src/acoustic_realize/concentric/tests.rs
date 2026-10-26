@@ -95,6 +95,12 @@ impl Sources {
     fn runtime<'a>(&'a self, cx: &Cx<'_>)
         -> (ThermalConcentricStringRuntime<'a>, DepositionSimulation<'a>)
     {
+        let (runtime, thermal) = self.runtime_with(cx, template());
+        (runtime.unwrap(), thermal)
+    }
+    fn runtime_with<'a>(&'a self, cx: &Cx<'_>, template: PrestressedString)
+        -> (Result<ThermalConcentricStringRuntime<'a>, ConcentricStringError>, DepositionSimulation<'a>)
+    {
         let mut events = Vec::new();
         let mut materials: Vec<(MaterialId, &'a dyn ThermalLaw)> = Vec::new();
         for (i, (geometry, chart)) in self.reference.layer_integrals().iter().zip(&self.caloric).enumerate() {
@@ -120,11 +126,31 @@ impl Sources {
         let bindings = self.caloric.iter().enumerate().map(|(i, caloric)| ConcentricStringThermalCell {
             cell: CellId(i as u64), caloric,
         }).collect();
-        let runtime = ThermalConcentricStringRuntime::try_new(cx, template(), law, bindings,
+        let runtime = ThermalConcentricStringRuntime::try_new(cx, template, law, bindings,
             &thermal, REFERENCE, 0.02, Some(Pluck { station_frac: 0.4, height_m: 0.0005 }),
-            super::super::gas_state(fs_scenario::AmbientGas::sea_level()).unwrap(), 1.0, RATE).unwrap();
+            super::super::gas_state(fs_scenario::AmbientGas::sea_level()).unwrap(), 1.0, RATE);
         (runtime, thermal)
     }
+}
+
+#[test]
+fn a_tension_loss_factor_refuses_because_no_layer_owns_its_heat() {
+    with_cx(|cx, _| {
+        let sources = Sources::new(4e-5);
+        for eta in [1e-4, f64::NAN] {
+            let lossy = PrestressedString { tension_loss_factor: Some(eta), ..template() };
+            assert!(matches!(sources.runtime_with(cx, lossy).0,
+                Err(ConcentricStringError::Invalid("a layered thermoelastic string has no owner for tension-loss heat"))),
+                "eta_F {eta} was admitted");
+        }
+        // Zero is the absent factor: the same modes and states.
+        let zero = PrestressedString { tension_loss_factor: Some(0.0), ..template() };
+        let (runtime, _) = sources.runtime_with(cx, zero);
+        let runtime = runtime.unwrap();
+        let (base, _) = sources.runtime(cx);
+        assert_eq!(runtime.modes(), base.modes());
+        assert_eq!(runtime.states(), base.states());
+    });
 }
 fn scalar(value: f64, dims: Dims) -> PropertyValue { PropertyValue::Scalar { value, dims } }
 fn point(t: f64) -> QueryPoint { QueryPoint::new().with("T", t).unwrap().with("omega", 1.0).unwrap() }

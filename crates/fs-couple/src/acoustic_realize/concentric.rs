@@ -575,6 +575,12 @@ const MAX_POINT_FORCES: usize = 4096;
 fn bind_string<E>(template: &PrestressedString, source: &ConcentricThermoelasticState)
     -> Result<(ConcentricKelvinVoigtSection, PrestressedString), ConcentricStringError<E>>
 {
+    // Each layer books its own modal heat from its bending viscosity. A tension
+    // loss factor would dissipate energy that no layer owns, so it refuses
+    // until that heat has an owner. Zero is the absent factor.
+    if template.tension_loss_factor.is_some_and(|eta| eta != 0.0) {
+        return Err(invalid("a layered thermoelastic string has no owner for tension-loss heat"));
+    }
     let section = source.section.section().clone()
         .with_kelvin_voigt_bending(KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY)?;
     let force: f64 = source.layers.iter().map(|l| l.young_modulus_pa*l.area_m2*l.elastic_strain).sum();

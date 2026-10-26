@@ -330,6 +330,46 @@ shear histories. Axial relaxation, interlayer slip and measured wound-string
 behavior remain outside their scope. All supplied values
 are synthetic integration data, not measured instrument properties.
 
+### Tension loss
+
+A string's construction (its core, winding and their contacts) loses a fraction
+eta_F of the tension's share of each mode's stiffness. This is Valette and
+Cuesta's eta_F term: Q_F^-1 = eta_F T k² / (T k² + EI k⁴). Each mode carries it
+as viscous damping, zeta_F = eta_F T k² / (2 mu omega²), beside the pack's
+bending law and the gas drag, and it is booked as material heat. It changes no
+mode frequency.
+
+The optional per-string record selects one row of
+[`tension-loss.tsv`](tension-loss.tsv) by its id:
+
+```text
+tension-loss lampis-2024-dominant-cello-g
+```
+
+Place it after the optional `bending-loss` row, or in that row's place.
+
+The table holds cited constructions, not the strings in these examples:
+- Lampis's Dominant cello G, 9.0e-4. It is inverted from that string's mean Q
+  of 1064 on its own data, so it is an upper bound.
+- Mansour, Woodhouse and Scavone's Kaplan cello strings, 1.2e-4 to 2.3e-4.
+- Galluzzo, Woodhouse and Mansour's steel violin E, 5e-5.
+
+Each row's source text says what was measured and what was left out. No violin
+string's eta_F is measured.
+
+The receipt prints:
+- the selected row with its source, and lists the others;
+- with no row selected, `eta_F=stated unknown, entered as 0`, and no tension
+  loss term is formed.
+
+An unknown id refuses before material loading, as does a repeated record.
+
+In the library:
+- an authored modal ratio or Rayleigh pair refuses beside any eta_F, because
+  each is already a complete reduced loss;
+- a layered thermoelastic string refuses a nonzero eta_F, because none of its
+  layers owns that heat.
+
 ### Material shear memory on torsional strings
 
 Torsional modes can select their own source-backed relaxation spectrum for each

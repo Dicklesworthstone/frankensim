@@ -44,6 +44,34 @@ pub struct Wire {
     pub thermal_reference_kelvin: Option<f64>,
     pub bending_modes: usize, pub twist_modes: usize, pub bridge: SharedPlateBridge,
     pub polarizations: Option<TransverseDirections>,
+    /// The `tension-loss` row this string selects. None is no tension loss term.
+    pub tension_loss: Option<TensionLossRow>,
+}
+/// One cited construction's tension loss factor eta_F in `tension-loss.tsv`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TensionLossRow { pub id: String, pub eta_f: f64, pub source: String }
+/// The evidence table that `tension-loss ID` selects from, compiled into the example.
+pub const TENSION_LOSS_TABLE: &str = include_str!("tension-loss.tsv");
+/// Every row of the table in file order. A malformed, duplicate or nonphysical row refuses.
+pub fn tension_loss_rows() -> Result<Vec<TensionLossRow>> {
+    let mut lines = TENSION_LOSS_TABLE.lines().filter(|line| !line.starts_with('#'));
+    if lines.next() != Some("id\teta_F\tsource") {
+        return Err("tension-loss.tsv needs the header id, eta_F, source".into());
+    }
+    let mut rows: Vec<TensionLossRow> = Vec::new();
+    for line in lines {
+        let fields: Vec<&str> = line.split('\t').collect();
+        let &[id, eta_f, source] = fields.as_slice() else {
+            return Err("tension-loss.tsv rows need exactly id, eta_F and source".into());
+        };
+        let eta_f: f64 = eta_f.parse()?;
+        if id.is_empty() || id.contains(char::is_whitespace) || source.is_empty() || !eta_f.is_finite()
+            || eta_f < 0.0 || rows.iter().any(|row| row.id == id) {
+            return Err("tension-loss.tsv rows need a unique id, a finite nonnegative eta_F and a source".into());
+        }
+        rows.push(TensionLossRow { id: id.into(), eta_f, source: source.into() });
+    }
+    Ok(rows)
 }
 /// A source-property selection; the original specimen owns every loss law.
 #[derive(Clone, Debug)]
@@ -229,7 +257,7 @@ impl Spec {
             } else { (row.scalar()?, row.scalar()?) };
             let mut wire = Wire { pack, length, radius, prestress, section: WireSection::Homogeneous,
                 bending_loss: BendingLoss::KelvinVoigt, torsion_memory: None,
-                thermal_reference_kelvin: None,
+                thermal_reference_kelvin: None, tension_loss: None,
                 polarizations: None, bending_modes, twist_modes,
                 bridge: SharedPlateBridge { station_fraction, stiffness_n_m, damping_n_s_m, rest_extension_m: 0.0 } };
             row.end()?;
@@ -262,6 +290,13 @@ impl Spec {
                 };
                 row.end()?;
                 wire.bending_loss.validate()?;
+            }
+            if r.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next()) == Some("tension-loss") {
+                let mut row = r.row("tension-loss")?;
+                let id = row.word()?;
+                row.end()?;
+                wire.tension_loss = Some(tension_loss_rows()?.into_iter().find(|row| row.id == id)
+                    .ok_or("tension-loss names no row of tension-loss.tsv")?);
             }
             if r.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next()) == Some("torsion-memory") {
                 let mut row = r.row("torsion-memory")?;

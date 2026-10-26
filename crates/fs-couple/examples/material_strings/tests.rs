@@ -150,6 +150,9 @@ fn malformed_or_unobserved_controls_and_unbounded_decoder_counts_refuse() {
 #[path = "tests/layered.rs"]
 mod layered;
 
+#[path = "tests/tension_loss.rs"]
+mod tension_loss;
+
 #[path = "tests/polarized.rs"]
 mod polarized;
 
