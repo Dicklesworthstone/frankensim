@@ -9,11 +9,14 @@
 //!
 //! Transport uses fixed reference dry-skeleton volumes and dilute bound moisture.
 //! The solid consumer resolves quasistatic swelling in that reference chart.
-//! Sorption heat, stress-assisted diffusion, free liquid, hysteresis,
-//! transverse transport and a finite external vapor inventory are not modeled.
-//! Its surface conditions are infinite reservoirs. The plate consumer retains
-//! this fixed-geometry assumption and rebuilds actual stiffness AND wet inertia.
+//! Sorption heat, stress-assisted diffusion, free liquid, hysteresis and
+//! transverse transport are not modeled. Ordinary surface conditions are
+//! infinite reservoirs; `atmosphere` instead balances an actual finite vapor
+//! inventory against this same diffusion owner. The plate consumer retains the
+//! fixed geometry and rebuilds actual stiffness AND wet inertia.
 
+/// Finite vapor inventory, source sorption and the original diffusion endpoint.
+pub mod atmosphere;
 pub mod plate;
 /// Directional swelling, compatible shape, stress and native vibration tangent.
 pub mod solid;
@@ -213,7 +216,8 @@ pub struct MoistureSlab {
 pub struct MoistureStepReport {
     /// Start and accepted endpoint time [s].
     pub interval_s: [f64; 2],
-    /// Signed water received from the left and right infinite reservoirs [kg].
+    /// Signed water received through the left and right prescribed surfaces
+    /// [kg]. The finite-atmosphere wrapper debits that same external inventory.
     pub boundary_water_kg: [f64; 2],
     /// Resolved surface dry-basis values; None denotes a sealed face.
     pub surface_moisture: [Option<f64>; 2],

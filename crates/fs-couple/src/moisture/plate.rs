@@ -290,4 +290,27 @@ impl MoisturePlate {
             plate,
         })
     }
+
+    /// Accept finite-atmosphere transport and its native mechanical endpoint
+    /// together. A late elastic-source/assembly refusal discards both proposed
+    /// inventories. The existing fixed-geometry isothermal plate model applies.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_finite_atmosphere(
+        &self,
+        atmosphere: &super::atmosphere::FiniteMoistureAtmosphere,
+        slab: &MoistureSlab,
+        dt_s: f64,
+        faces: &[Option<super::atmosphere::DryBasisSorption>; 2],
+        transport: MoistureStepConfig,
+        controls: super::atmosphere::AtmosphereMoistureSolve,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (super::atmosphere::AtmosphereMoistureCandidate, MoisturePlateState),
+        super::atmosphere::AtmosphereMoistureError,
+    > {
+        let candidate = atmosphere.advance(slab, dt_s, faces, transport, controls, cx)?;
+        let plate = self.resolve(candidate.moisture(), cx)?;
+        poll(cx)?;
+        Ok((candidate, plate))
+    }
 }

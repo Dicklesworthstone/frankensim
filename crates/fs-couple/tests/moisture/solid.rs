@@ -297,6 +297,134 @@ fn shared_one_dof_modal_pencil_changes_with_transported_water_and_material() {
 }
 
 #[test]
+fn finite_vapor_uptake_reaches_compatible_shape_prestress_and_native_modes_atomically() {
+    use super::atmosphere::{atmosphere, controls as atmosphere_controls, sorption};
+    with_cx(|cx| {
+        let gas = atmosphere(0.8, 0.2);
+        let accepted_gas = gas.clone();
+        let initial = slab(card([0.01; 2], 0.3), 0.1, vec![0.1], cx);
+        let fixed = || (0..24).filter(|d| *d != 12).collect();
+        let binding = bind(
+            &initial,
+            SolidStiffnessModel::Isotropic,
+            axes(),
+            fixed(),
+            cx,
+        );
+        let before = binding.resolve(&initial, cx).unwrap();
+        let boundaries = [Some(sorption(0.25)), Some(sorption(0.25))];
+        let (candidate, solid) = binding
+            .advance_finite_atmosphere(
+                &gas,
+                &initial,
+                0.25,
+                &boundaries,
+                config(),
+                atmosphere_controls(),
+                cx,
+            )
+            .unwrap();
+        let water = candidate.step().water_to_solid_kg;
+        assert!(water > 0.0);
+        assert!(
+            candidate.atmosphere().relative_humidity().unwrap() < gas.relative_humidity().unwrap()
+        );
+        near(
+            candidate.atmosphere().gas().mass_kg() + solid.wet_mass_kg(),
+            gas.gas().mass_kg() + before.wet_mass_kg(),
+            2e-13,
+        );
+        near(solid.wet_mass_kg() - before.wet_mass_kg(), water, 1e-13);
+        assert_eq!(solid.time_s(), candidate.moisture().time_s());
+        let increment = candidate.moisture().moisture()[0] - 0.1;
+        for (actual, beta) in solid.expansion_paths()[0]
+            .free_principal_strains()
+            .iter()
+            .zip([0.01, 0.04, 0.02])
+        {
+            near(*actual, beta * increment, 1e-13);
+        }
+        assert!(solid.solution().displacement_m()[4][0] > 0.0);
+        for ((reference, displacement), deformed) in binding
+            .reference_nodes_m()
+            .iter()
+            .zip(solid.solution().displacement_m())
+            .zip(solid.geometry().nodes_m())
+        {
+            for axis in 0..3 {
+                near(deformed[axis], reference[axis] + displacement[axis], 1e-13);
+            }
+        }
+        assert!(solid.stress().elastic_energy_j() > 0.0);
+        let tangent = solid.tangent().unwrap();
+        assert!(
+            tangent
+                .geometric_stiffness()
+                .row(0)
+                .1
+                .iter()
+                .any(|value| value.abs() > 1e-9)
+        );
+        near(
+            tangent.pencil().total_mass_kg,
+            candidate.moisture().wet_mass_kg(),
+            1e-13,
+        );
+        // One native generalized DOF supplies its exact eigenvalue; this uses
+        // the actual signed K_e+K_g and transported wet M, without a new solver.
+        let eigenvalue = |state: &MoistureSolidState| {
+            let pencil = state.tangent().unwrap().pencil();
+            assert_eq!(pencil.free_dofs.as_slice(), &[12]);
+            pencil.stiffness.row(0).1[0] / pencil.mass.row(0).1[0]
+        };
+        assert!(eigenvalue(&solid) > 0.0 && eigenvalue(&solid) < eigenvalue(&before));
+
+        let restricted = slab(card([0.01; 2], 0.105), 0.1, vec![0.1], cx);
+        let restricted_binding = bind(
+            &restricted,
+            SolidStiffnessModel::Isotropic,
+            axes(),
+            fixed(),
+            cx,
+        );
+        let accepted_solid = restricted_binding.resolve(&restricted, cx).unwrap();
+        let transport_only = gas
+            .advance(
+                &restricted,
+                0.25,
+                &boundaries,
+                config(),
+                atmosphere_controls(),
+                cx,
+            )
+            .unwrap();
+        assert!(transport_only.moisture().moisture()[0] > 0.105);
+        assert!(
+            restricted_binding
+                .advance_finite_atmosphere(
+                    &gas,
+                    &restricted,
+                    0.25,
+                    &boundaries,
+                    config(),
+                    atmosphere_controls(),
+                    cx
+                )
+                .is_err()
+        );
+        assert_eq!(gas, accepted_gas);
+        assert_eq!(restricted.moisture(), &[0.1]);
+        assert_eq!(restricted.time_s(), 0.0);
+        let retained = restricted_binding.resolve(&restricted, cx).unwrap();
+        assert_eq!(retained.solution(), accepted_solid.solution());
+        assert_eq!(
+            retained.tangent().unwrap().identity(),
+            accepted_solid.tangent().unwrap().identity()
+        );
+    });
+}
+
+#[test]
 fn cancelled_swell_candidate_never_debits_water_or_publishes_geometry() {
     // Cancellation at a native solid checkpoint retains the same public signal
     // as cancellation before diffusion or at the final publication boundary.

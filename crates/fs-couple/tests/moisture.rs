@@ -20,6 +20,8 @@ use fs_solver::CheckedCgConfig;
 
 #[path = "moisture/solid.rs"]
 mod solid;
+#[path = "moisture/atmosphere.rs"]
+mod atmosphere;
 
 fn qty(kind: QuantityKind) -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))

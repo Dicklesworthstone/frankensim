@@ -6,7 +6,8 @@
 //! owner computes compatible displacement, constraint reactions, stored elastic
 //! energy, deformed geometry and a signed initial-stress vibration pencil.
 //!
-//! This is a slow, isothermal, quasistatic open-reservoir response. Diffusion
+//! This is a slow, isothermal, quasistatic response. Prescribed surface moisture
+//! or the shared finite-atmosphere owner supplies its water boundary. Diffusion
 //! remains on the original reference-volume chart; deformation does not silently
 //! replace its water inventory or transport metric. Chemical reservoir work is
 //! outside this mechanical account. Sorption heat, stress-assisted diffusion,
@@ -431,5 +432,37 @@ impl MoistureSolid {
             transport: report,
             solid,
         })
+    }
+
+    /// Accept finite-atmosphere transport and compatible native solid mechanics
+    /// together. Source-integrated swelling, displacement, stress, geometry and
+    /// the prestressed wet-inertia pencil all resolve at the same endpoint.
+    /// A late source, equilibrium, geometry or cancellation refusal discards
+    /// both proposed water inventories. The original fixed-reference diffusion
+    /// and small-strain isothermal mechanics remain the physical owners; no
+    /// sorption heat, stress-driven diffusion or dynamic state remap is inferred.
+    /// Gas internal-energy change is not total sorption heat, and the changed
+    /// gas pressure is not automatically applied as a mechanical surface traction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_finite_atmosphere(
+        &self,
+        atmosphere: &super::atmosphere::FiniteMoistureAtmosphere,
+        slab: &MoistureSlab,
+        dt_s: f64,
+        faces: &[Option<super::atmosphere::DryBasisSorption>; 2],
+        transport: MoistureStepConfig,
+        controls: super::atmosphere::AtmosphereMoistureSolve,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (
+            super::atmosphere::AtmosphereMoistureCandidate,
+            MoistureSolidState,
+        ),
+        super::atmosphere::AtmosphereMoistureError,
+    > {
+        let candidate = atmosphere.advance(slab, dt_s, faces, transport, controls, cx)?;
+        let solid = self.resolve(candidate.moisture(), cx)?;
+        poll(cx)?;
+        Ok((candidate, solid))
     }
 }

@@ -5387,8 +5387,8 @@ Ordinary modal/force/pressure consumers receive the native pencil; no modal
 frequency multiplier or instrument preset is introduced. Coupled advance
 returns transport and mechanical endpoints together only after both admit.
 
-This rung does not model hygroscopic swelling, humidity prestress, sorption
-heat, finite vapor-reservoir depletion, hysteresis, free liquid, stress-assisted
+This plate rung does not model hygroscopic swelling, humidity prestress, sorption
+heat, hysteresis, free liquid, stress-assisted
 diffusion, changing porosity/geometry, dynamic modal-state remapping, or
 moisture-dependent damping. It makes no complete thermodynamic energy or
 chemical-entropy claim. Its no-swelling/fixed-geometry approximation must be
@@ -5403,6 +5403,68 @@ pack, native modal stiffness/inertia scaling, spatial anisotropic material
 consumption, complete mechanical-source refusal, budgets, quantity-basis
 refusal and cancellation. Native Cargo execution is a separate gate; parsing
 and independent numerical oracles do not establish executed native test results.
+
+### Finite atmospheric water inventory and native material response
+
+`moisture::atmosphere::FiniteMoistureAtmosphere` replaces the infinite surface
+reservoir with the actual water-vapor inventory of the original
+`ClosedGasParcel`. The gas is well mixed at prescribed fixed temperature and
+volume. At least one noncondensing carrier and an explicitly identified water
+species are required; the original Buck liquid-water saturation law retains
+its stated temperature domain. The solid keeps its original isothermal
+dry-basis finite-volume field and conserved dry skeleton.
+
+`DryBasisSorption` pins an equilibrium surface-content property with semantic
+kg-water/kg-dry-solid output. Its two query coordinates are typed absolute
+temperature and relative humidity; duplicate aliases, wrong moisture bases,
+additional conditions and unsupported source states refuse. The surface
+content changes the existing backward-Euler Fick boundary, not the entire
+interior field. Both ends may share the same atmosphere or be sealed.
+
+A bounded scalar solve chooses endpoint RH so endpoint vapor plus endpoint
+bound water equals their initial total. Every trial uses the original slab
+diffusion/source solver with its existing accepted-start diffusivity lag and
+work limits. The accepted vapor mass and unchanged carrier masses determine
+the new mole composition and ideal-gas pressure at the same T and V. The
+original thermochemical gas model then re-resolves caloric, transport and
+acoustic properties from the same retained source catalog. Exact vapor
+depletion removes the inactive species without a trace floor while preserving
+its source catalog for later desorption. An already balanced initial RH,
+including sealed diffusion, retains the complete gas state unchanged.
+
+Publication checks actual reconstructed total water, total gas-plus-solid
+mass and each noncondensing carrier independently. Source, native diffusion,
+bracket, iteration, conservation or cancellation refusal changes neither
+accepted owner. Reports retain both sorption source evaluations, actual gas
+and solid water changes, signed surface transfers and the gas internal-energy
+change. No new mixture-property evaluator, diffusion solver or species store
+is introduced.
+
+`MoisturePlate::advance_finite_atmosphere` rebuilds native DKT stiffness and
+wet inertia from that same moisture endpoint. The corresponding
+`MoistureSolid::advance_finite_atmosphere` resolves the original compatible
+swelling, stress and native prestressed tangent. Each wrapper publishes gas,
+moisture and mechanical endpoints together only after the original mechanical
+source and assembly admissions succeed. A changed source isotherm,
+diffusivity or finite atmospheric volume therefore changes the coupled native
+response without a material-name switch or a frequency multiplier.
+
+This is isothermal water-mass coupling. A prescribed thermostat maintains T;
+bound-water caloric storage and sorption heat are absent, so reported gas
+`delta(m*u)` is not the thermostat's total heat or a closed total-energy
+account. Gas volume stays fixed and its changed pressure is not automatically
+applied as a mechanical surface traction. Condensation, hysteresis, gas
+momentum, geometry-dependent reservoir volume, pressure-dependent sorption
+and thermal moisture coupling remain outside this slice. It advances MR46
+(`frankensim-material-reality-ui2if.7.4`) without closing the broader bead.
+
+Focused synthetic regressions use independent one-cell adsorption/desorption
+and continuation formulas, the native ideal-gas pressure and NASA-9 storage
+limits, conserved carrier and water inventories, actual gas transport/sound
+changes, data-only native plate response, compatible solid deformation and
+prestress, exact sealed/equilibrium retention, and late source or mechanical
+refusal/cancellation. Rust parsing and these authored tests do not establish
+executed native results or empirical sorption accuracy.
 
 ### Simultaneous implicit conservative reaction mechanisms
 
