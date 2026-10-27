@@ -9,6 +9,10 @@ use fs_material::thermochemical_gas::{
 };
 
 fn gas(temperature_k: f64, volume_m3: f64) -> IsochoricGasParcel {
+    gas_with_conductivity(temperature_k, volume_m3, 0.025)
+}
+
+fn gas_with_conductivity(temperature_k: f64, volume_m3: f64, conductivity: f64) -> IsochoricGasParcel {
     use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter};
     use fs_qty::{DynViscosity, MolarMass};
     use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
@@ -52,7 +56,7 @@ fn gas(temperature_k: f64, volume_m3: f64) -> IsochoricGasParcel {
     let mut claims = ClaimSet::new();
     for (name, dims, value) in [
         ("dynamic_viscosity", DynViscosity::DIMS, 1.7e-5),
-        ("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS, 0.025),
+        ("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS, conductivity),
     ] {
         claims.insert_claim(PropertyClaim {
             key: PropertyKey::new(name, dims),
@@ -172,6 +176,156 @@ fn g1_finite_source_gas_matches_two_capacity_solution_and_opposite_heat() {
             assert_eq!(result.report.next_gas.point().axes().get("material-lot"), Some(&7.0));
             assert_eq!(reservoir, saved, "proposal cannot debit the accepted reservoir");
         }
+    });
+}
+
+#[test]
+fn g1_wall_convection_retains_the_original_constant_coefficient_solution() {
+    use fs_couple::finite_gas_thermal::{ConvectionCoefficient, WallConvectionSolve};
+    scope(|cx, _| {
+        let source = sources(1000.0, 1000.0, false, false);
+        let old = Oscillator::try_new(&source.mechanical, &source.caloric,
+            geometry(0.0), 310.0, 0.0, 0.0).unwrap();
+        let reservoir = gas(300.0, 0.01);
+        let body = boundary(&source, 100.0);
+        let environment = FiniteGasThermalEnvironment {
+            gas: &reservoir, body: &body, gas_heat_j: 0.0,
+            gas_solve: GasEnergySolve { energy_tolerance_j_kg: 1e-9, ..gas_solve() },
+            exchange: exchange(1.0),
+            maximum_gas_temperature_increment_k: 1.0,
+        };
+        let input = UniformEnthalpyStepInput {
+            curve: source.caloric.curve(), initial: *old.point().caloric_state(),
+            mass_kg: old.point().mass_kg(), volume_m3: old.point().volume_m3(),
+            surface_area_m2: old.geometry().thermal_surface_m2,
+            internal_heat_j: 0.01, duration_s: 0.5,
+        };
+        let reference = environment.advance(cx, input).unwrap();
+        let result = environment.advance_with_wall_convection(cx, input, WallConvectionSolve {
+            temperature_increment_bracket_k: [-5.0, 5.0],
+            temperature_tolerance_k: 1e-9, maximum_iterations: 128,
+        }, |_, wall_k| Ok::<_, Infallible>(ConvectionCoefficient {
+            coefficient_w_per_m2_k: 100.0, source: wall_k,
+        })).unwrap();
+        close(result.state.temperature_k(), reference.state.temperature_k(), 1e-9);
+        close(result.report.solid_to_gas_heat_j, reference.report.solid_to_gas_heat_j, 1e-10);
+        let sample = &result.report.convection.source;
+        assert!(sample.temperature_residual_k.abs() <= 1e-9);
+        close(sample.endpoint_source, result.state.temperature_k(), 1e-12);
+        assert_eq!(sample.boundary_residual_j, 0.0);
+        assert!(sample.total_wall_trials >= sample.wall_trials);
+    });
+}
+
+#[test]
+fn g3_material_gas_at_film_temperature_drives_reciprocal_natural_convection() {
+    use fs_couple::finite_gas_thermal::{ConvectionCoefficient, WallConvectionSolve};
+    use fs_material::fluid_transport::FluidTransport;
+    scope(|cx, _| {
+        let source = sources(1000.0, 1000.0, false, false);
+        let old = Oscillator::try_new(&source.mechanical, &source.caloric,
+            geometry(0.0), 310.0, 0.0, 0.0).unwrap();
+        let input = UniformEnthalpyStepInput {
+            curve: source.caloric.curve(), initial: *old.point().caloric_state(),
+            mass_kg: old.point().mass_kg(), volume_m3: old.point().volume_m3(),
+            surface_area_m2: old.geometry().thermal_surface_m2,
+            internal_heat_j: 0.01, duration_s: 0.5,
+        };
+        let body = boundary(&source, 0.0); // The explicit law supplies h, not this placeholder.
+        let mut heat = Vec::new();
+        for conductivity in [0.025, 0.05] {
+            let reservoir = gas_with_conductivity(300.0, 0.01, conductivity);
+            let saved = reservoir.clone();
+            let environment = FiniteGasThermalEnvironment {
+                gas: &reservoir, body: &body, gas_heat_j: 0.0,
+                gas_solve: GasEnergySolve { energy_tolerance_j_kg: 1e-9, ..gas_solve() },
+                exchange: exchange(0.5),
+                maximum_gas_temperature_increment_k: 1.0,
+            };
+            let result = environment.advance_with_wall_convection(cx, input, WallConvectionSolve {
+                temperature_increment_bracket_k: [-5.0, 5.0],
+                temperature_tolerance_k: 1e-9, maximum_iterations: 128,
+            }, |gas, wall_k| -> Result<_, String> {
+                let typed = |kind| QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
+                let film_k = 0.5 * wall_k + 0.5 * gas.state().temperature;
+                let point = reservoir.point().clone()
+                    .with_quantity("temperature", typed(QuantityKind::AbsoluteTemperature), film_k)
+                    .map_err(|error| format!("{error:?}"))?
+                    .with_quantity("pressure", typed(QuantityKind::Pressure), gas.state().pressure)
+                    .map_err(|error| format!("{error:?}"))?;
+                let film = reservoir.model().evaluate(&point).map_err(|error| format!("{error:?}"))?;
+                let transport = film.state().transport_state().map_err(|error| format!("{error:?}"))?;
+                let length = 0.1;
+                let ra = transport.rayleigh(9.81, 1.0 / film_k,
+                    (wall_k - gas.state().temperature).abs(), length).map_err(|error| format!("{error:?}"))?;
+                let evaluation = fs_convection::evaluate(fs_convection::CorrelationId::ChurchillChuVerticalPlate,
+                    fs_convection::CorrelationInputs::natural(ra, transport.prandtl()))
+                    .map_err(|error| format!("{error:?}"))?;
+                let coefficient = evaluation.heat_transfer_coefficient(
+                    fs_convection::ThermalConductivity::new(transport.thermal_conductivity_w_m_k()),
+                    fs_qty::Length::new(length)).map_err(|error| format!("{error:?}"))?;
+                Ok(ConvectionCoefficient { coefficient_w_per_m2_k: coefficient.value.value(),
+                    source: (film, evaluation) })
+            }).unwrap();
+            let sample = &result.report.convection.source;
+            let film = &sample.source.0;
+            close(film.state().temperature,
+                0.5 * sample.temperature_k + 0.5 * result.report.next_gas.state().state().temperature, 1e-12);
+            assert_eq!(film.state().thermal_conductivity, conductivity);
+            assert!(sample.temperature_residual_k.abs() <= 1e-9);
+            assert!(sample.boundary_residual_j.abs() <= environment.exchange.source_tolerance_j);
+            assert!(result.report.combined_energy_residual_j.abs() <= environment.exchange.energy_tolerance_j);
+            assert!(result.report.next_gas.state().state().temperature > 300.0);
+            assert!(result.state.temperature_k() < 310.0);
+            assert_eq!(reservoir, saved, "film-property queries must not heat the physical gas");
+            heat.push(result.report.solid_to_gas_heat_j);
+        }
+        assert!(heat[1] > heat[0] * 1.1, "only material conductivity changed");
+    });
+}
+
+#[test]
+fn g4_wall_source_and_feedback_refusals_preserve_accepted_states() {
+    use fs_couple::finite_gas_thermal::{ConvectionCoefficient, ConvectionError,
+        WallConvectionError, WallConvectionSolve};
+    scope(|cx, gate| {
+        let source = sources(1000.0, 1000.0, false, false);
+        let old = Oscillator::try_new(&source.mechanical, &source.caloric,
+            geometry(0.0), 310.0, 0.0, 0.0).unwrap();
+        let reservoir = gas(300.0, 0.01);
+        let saved = reservoir.clone();
+        let body = boundary(&source, 0.0);
+        let input = UniformEnthalpyStepInput {
+            curve: source.caloric.curve(), initial: *old.point().caloric_state(),
+            mass_kg: old.point().mass_kg(), volume_m3: old.point().volume_m3(),
+            surface_area_m2: old.geometry().thermal_surface_m2,
+            internal_heat_j: 0.0, duration_s: 0.5,
+        };
+        let environment = FiniteGasThermalEnvironment {
+            gas: &reservoir, body: &body, gas_heat_j: 0.0,
+            gas_solve: GasEnergySolve { energy_tolerance_j_kg: 1e-9, ..gas_solve() },
+            exchange: exchange(1.0),
+            maximum_gas_temperature_increment_k: 1.0,
+        };
+        let wall = WallConvectionSolve {
+            temperature_increment_bracket_k: [-5.0, 5.0],
+            temperature_tolerance_k: 1e-9, maximum_iterations: 128,
+        };
+        let failed = environment.advance_with_wall_convection::<(), _>(cx, input, wall,
+            |_, _| Err("missing film-property source"));
+        assert!(matches!(failed, Err(ConvectionError::Convection(WallConvectionError::Source("missing film-property source")))));
+        let failed = environment.advance_with_wall_convection(cx, input,
+            WallConvectionSolve { temperature_increment_bracket_k: [0.0, 0.0], ..wall },
+            |_, _| Ok::<_, Infallible>(ConvectionCoefficient { coefficient_w_per_m2_k: 100.0, source: () }));
+        assert!(matches!(failed, Err(ConvectionError::Convection(WallConvectionError::OutsideBracket { .. }))));
+        let failed = environment.advance_with_wall_convection(cx, input, wall,
+            |_, _| {
+                gate.request();
+                Ok::<_, Infallible>(ConvectionCoefficient { coefficient_w_per_m2_k: 100.0, source: () })
+            });
+        assert!(failed.is_err());
+        assert_eq!(reservoir, saved);
+        assert_eq!(*old.point().caloric_state(), input.initial);
     });
 }
 

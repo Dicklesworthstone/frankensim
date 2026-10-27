@@ -7,6 +7,9 @@
 //! Maxwell, plasticity and other callers may repeat this entire proposal during
 //! their own thermal feedback. Neither accepted body nor gas changes here.
 
+mod wall;
+pub use wall::{WallConvectionError, WallConvectionSample, WallConvectionSolve};
+
 use crate::cavity_phs::piston::{
     PistonError,
     thermal::{HeatExchangeSolve, ThermalPistonError, feedback},

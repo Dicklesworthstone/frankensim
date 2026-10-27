@@ -63,6 +63,7 @@ fs-tribo = { path = "../fs-tribo" }
 fs-vfit = { path = "../fs-vfit" }
 
 [dev-dependencies]
+fs-convection = { path = "../fs-convection" }
 fs-modalid = { path = "../fs-modalid" }
 fs-ladder = { path = "../fs-ladder" }
 fs-mbd = { path = "../fs-mbd" }
