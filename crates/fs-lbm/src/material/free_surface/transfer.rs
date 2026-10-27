@@ -7,13 +7,18 @@
 //! error, bounded by the caller, never heat. The returned report describes
 //! ingress only; subsequent evolution belongs to the original VOF solver.
 //!
-//! This rung is an already-liquid, stress-free, uniform-material isothermal
-//! snapshot with capillarity explicitly omitted. It does not melt a solid,
-//! discard plastic history, transport enthalpy, or perform a pressure solve.
+//! The base entry point is an already-liquid, stress-free, uniform-material
+//! isothermal snapshot with capillarity explicitly omitted. The `enthalpy`
+//! extension carries a P1 caloric field into the original thermal VOF owner.
+//! Neither path melts a solid, discards plastic history, or performs a pressure
+//! solve.
 //! The supplied tetrahedra must form a nonoverlapping mesh. Overfilled target
 //! cells refuse, but that check is not a global mesh-intersection certificate.
 
 use std::collections::BTreeMap;
+
+/// Conservative P1 enthalpy ingress into the original moving-liquid owner.
+pub mod enthalpy;
 
 use fs_exec::Cx;
 use fs_la::factor::{cholesky, lu};
@@ -127,6 +132,13 @@ impl From<MaterialLbmError> for TetLiquidTransferError {
 struct CellIntegral {
     volume: f64,
     momentum: [f64; 3],
+    enthalpy_j: f64,
+}
+
+#[derive(Default)]
+struct TransferredEnthalpy {
+    by_cell: BTreeMap<[usize; 3], f64>,
+    source_j: f64,
 }
 
 fn invalid(what: &'static str) -> TetLiquidTransferError {
@@ -200,6 +212,23 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
         limits: TetLiquidTransferLimits,
         cx: &Cx<'_>,
     ) -> Result<(MaterialFreeSurface3<'a>, TetLiquidTransferReport), TetLiquidTransferError> {
+        let (flow, report, _) = self.transfer_tetrahedra(
+            domain, grid_origin_m, source, None, limits, cx,
+        )?;
+        Ok((flow, report))
+    }
+
+    // One geometry/momentum owner for isothermal and enthalpy-bearing ingress.
+    #[allow(clippy::too_many_arguments)]
+    fn transfer_tetrahedra(
+        self,
+        domain: MaterialFreeSurfaceDomain3<'_>,
+        grid_origin_m: [f64; 3],
+        source: TetrahedralLiquidState<'_>,
+        source_h: Option<&[f64]>,
+        limits: TetLiquidTransferLimits,
+        cx: &Cx<'_>,
+    ) -> Result<(MaterialFreeSurface3<'a>, TetLiquidTransferReport, TransferredEnthalpy), TetLiquidTransferError> {
         checkpoint(cx)?;
         self.require_frozen_source()?;
         admit_domain(&domain, &|_, _, _| false)?;
@@ -213,6 +242,7 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
             || source.tetrahedra.len() > limits.max_tetrahedra
             || source.positions_m.len() < 4
             || source.positions_m.len() != source.velocities_m_s.len()
+            || source_h.is_some_and(|h| h.len() != source.positions_m.len())
             || grid_origin_m.iter().any(|x| !x.is_finite())
         {
             return Err(invalid("invalid tetrahedral source or input count limit"));
@@ -230,6 +260,7 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
         }
         let mut cells: BTreeMap<[usize; 3], CellIntegral> = BTreeMap::new();
         let mut original = LiquidTransferMoments::default();
+        let mut thermal = TransferredEnthalpy::default();
         let mut overlap_tests = 0usize;
         for indices in source.tetrahedra {
             checkpoint(cx)?;
@@ -264,7 +295,14 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
                 ));
             }
             integrate_source(&mut original, p, v, whole.volume * rho, grid_origin_m);
-            let gradient = velocity_gradient(p, v)?;
+            let gradient = field_gradient(p, v)?;
+            let h = source_h.map(|values| indices.map(|i| values[i as usize]));
+            let h_gradient = h.map(|values| field_gradient(p, values.map(|value| [value])))
+                .transpose()?;
+            if let Some(values) = h {
+                thermal.source_j += rho * whole.volume
+                    * (values.into_iter().map(|value| 0.25 * value).sum::<f64>());
+            }
             let first: [usize; 3] = core::array::from_fn(|a| {
                 (((lower_tet[a] - grid_origin_m[a]) / dx).floor() as usize).min(domain.cells[a] - 1)
             });
@@ -297,6 +335,10 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
                         }
                         let target = cells.entry(c).or_default();
                         target.volume += overlap.volume;
+                        if let (Some(values), Some(gradient)) = (h, h_gradient) {
+                            target.enthalpy_j += rho
+                                * (values[0] * overlap.volume + dot(gradient[0], overlap.first));
+                        }
                         for a in 0..3 {
                             target.momentum[a] +=
                                 rho * (v[0][a] * overlap.volume + dot(gradient[a], overlap.first));
@@ -328,6 +370,15 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
             // the actual resulting mass discrepancy is audited below as well.
             let fill_fraction = fill.min(1.0);
             let mass = rho * cell_volume * fill_fraction;
+            if source_h.is_some() {
+                let h = integral.enthalpy_j / mass;
+                if !h.is_finite() || !thermal.source_j.is_finite() {
+                    return Err(invalid("transferred specific or extensive enthalpy is not finite"));
+                }
+                // Use the actual admitted native mass, including bounded
+                // geometric roundoff clipping; no thermal energy is discarded.
+                thermal.by_cell.insert(coordinates, h);
+            }
             initial.push(MaterialFreeSurfaceInitialCell3 {
                 coordinates,
                 fill_fraction,
@@ -372,6 +423,7 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
                 overlap_tests,
                 wet_cells: initial.len(),
             },
+            thermal,
         ))
     }
 }
@@ -399,21 +451,21 @@ fn admit_limits(limits: TetLiquidTransferLimits) -> Result<(), TetLiquidTransfer
     Ok(())
 }
 
-fn velocity_gradient(
+fn field_gradient<const N: usize>(
     p: [[f64; 3]; 4],
-    v: [[f64; 3]; 4],
-) -> Result<[[f64; 3]; 3], TetLiquidTransferError> {
+    v: [[f64; N]; 4],
+) -> Result<[[f64; 3]; N], TetLiquidTransferError> {
     let rows: [[f64; 3]; 3] = core::array::from_fn(|i| sub(p[i + 1], p[0]));
     let matrix: [f64; 9] = core::array::from_fn(|i| rows[i / 3][i % 3]);
     let factor =
         lu(&matrix, 3).map_err(|_| invalid("source tetrahedron has singular P1 geometry"))?;
-    let mut gradient = [[0.0; 3]; 3];
-    for a in 0..3 {
+    let mut gradient = [[0.0; 3]; N];
+    for a in 0..N {
         gradient[a] = core::array::from_fn(|i| v[i + 1][a] - v[0][a]);
         factor.solve(&mut gradient[a]);
     }
     if gradient.iter().flatten().any(|v| !v.is_finite()) {
-        return Err(invalid("unrepresentable P1 velocity gradient"));
+        return Err(invalid("unrepresentable P1 field gradient"));
     }
     Ok(gradient)
 }

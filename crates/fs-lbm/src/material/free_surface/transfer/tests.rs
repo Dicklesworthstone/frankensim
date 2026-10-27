@@ -1,4 +1,6 @@
 use super::*;
+
+mod enthalpy;
 use crate::d3q19::freesurface3::ContactModel3;
 use crate::material::free_surface::plan_free_surface_from_material;
 use fs_alloc::{ArenaConfig, ArenaPool};

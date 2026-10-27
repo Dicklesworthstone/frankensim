@@ -2939,3 +2939,37 @@ moving-face freezing and endpoint current-budget rollback; and a conducting
 frozen center with a driven liquid ring. These are synthetic numerical fixtures.
 Reconstructed sources received source/API/physics review; native parsing,
 typechecking and execution were unavailable in this session.
+
+### Spatial enthalpy through tetrahedral liquid handoff (MR28 increment)
+
+`material::free_surface::transfer::enthalpy` carries nodal P1 specific enthalpy
+through the original exact tetrahedron/cell overlap moments used for momentum.
+The existing mass, linear/angular momentum and mechanical projection gates remain
+active. Kinetic and gravitational projection discrepancies remain numerical
+accounts; neither becomes heat. An independent source integral
+`sum(rho*V*sum(h_i)/4)` is checked against the actual native `sum(m*h)` with a
+caller-selected absolute energy bound.
+
+All referenced nodes and intervening caloric knots must remain fully liquid at
+the original density. The original pinned source-line resolver also covers the
+complete temperature interval for density, viscosity, heat capacity and
+conductivity, including each property's own breakpoints. Source holes, unsupported
+line topology, claim switching and interior density changes refuse. Source
+queries and geometric work retain explicit bounds. The same immutable material
+card and original thermal attachment own caloric inversion, source receipts and
+local viscosity; no default temperature is invented for a missing thermal cell.
+
+The result is the existing `MaterialFreeSurfaceEnthalpy3`, ready for its native
+mass transport, heating, conduction and viscosity-dependent motion. Source,
+projection, attachment, budget and cancellation failures return no accepted
+candidate. Four focused regressions cover independently integrated spinning/cut
+geometry, continued native flow, material-only viscosity substitutions and
+hidden caloric/source-density changes with late refusal and deterministic retry.
+These synthetic fixtures received source/API and independent arithmetic review;
+Rust parsing, compilation and test execution were unavailable in this session.
+
+MR28 remains open. This handoff requires already-liquid, stress-free material,
+one constant-density caloric chart and explicitly omitted capillarity. It does
+not discard solid elastic/plastic history, implement melting release, change
+phase volume, supply pressure/capillary work or certify total fluid mechanical
+energy conservation.
