@@ -1,5 +1,6 @@
 //! Optional `window none|wall-cut AXIAL_CELLS [cheeks radial|parallel]
-//! [ramp EDGE_HEIGHT_M ANGLE_DEG]` after the mouth records.
+//! [ramp EDGE_HEIGHT_M ANGLE_DEG]|embouchure AXIAL_CELLS ACROSS_M ALONG_M
+//! OPEN_M` after the mouth records.
 //!
 //! `wall-cut` computes the mouth window's mass from its 3-D geometry
 //! (`fs_bem::wall_window`) and replaces the legacy `0.61 a_eq` inertance with
@@ -19,13 +20,26 @@
 //!   pocket, the bore section starts at the window centre with a flush closed
 //!   end at the window's upstream edge.
 //!
+//! `embouchure` is a flute's: the window is its embouchure hole, not the jet's
+//! flue width by cut-up, and the lip covers part of it.
+//! - the inlet section is the hole's riser, as long as the wall the solve
+//!   cuts; its area must equal ACROSS times ALONG;
+//! - the hole is a straight rectangular prism, ACROSS between parallel walls
+//!   (the jet's direction, around the bore) and ALONG the axis;
+//! - its outer end is covered but for a strip OPEN wide across it, centred
+//!   ([`fs_bem::wall_window::WindowCover`]): the lower lip. A real lip covers
+//!   the side nearer the player. In two dimensions a one-sided cover adds
+//!   twice the centred one's length (by images), and that excess is not
+//!   represented;
+//! - pocket and bore are the cork cavity and the head joint, as above.
+//!
 //! Pocket and bore must be one bore: radii within `POCKET_RADIUS_TOLERANCE`
-//! (1 %) of each other, solved at the bore section's radius. A card gives each
-//! section the radius of the cylinder of equal volume, so a tapering bore
+//! (2.5 %) of each other, solved at the bore section's radius. A card gives
+//! each section the radius of the cylinder of equal volume, so a tapering bore
 //! gives the short pocket and the bore section beside it radii that differ by
-//! the taper between their volume centres, without a step in the instrument.
-//! The network keeps both sections and radii; only the window's near field
-//! sees one bore.
+//! the taper between their volume centres, without a step in the instrument:
+//! 1.9 % for the flute's cork cavity and first head-joint section. The network
+//! keeps both sections and radii; only the window's near field sees one bore.
 //!
 //! A radial prism's mass is the order-4/3 extrapolation of AXIAL_CELLS and
 //! twice that; any other cut is a staircase, extrapolated from AXIAL_CELLS,
@@ -41,28 +55,42 @@
 //! junction to far field is the computed one. The jet's source coefficient and
 //! `mouth_loss_rel` are unchanged. A compact mouth reaction refuses this row.
 //! Not represented: the channel air's compressibility, a windway block or flat
-//! baffle around the window, a tapered pocket, viscous edge loss.
+//! baffle around the window, a tapered pocket, viscous edge loss; for an
+//! embouchure, the hole's taper and undercut, a lip plate other than the
+//! outer cylinder, and the player's face.
 
 use super::{FlueInputError, Rows, bad};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::network::{NetworkNode, TubeNetworkSpec};
 use crate::flue_loop::{FlueError, FlueGeometry};
 use fs_bem::wall_window::{
-    WallWindow, WallWindowLadder, WallWindowOptions, WindowCheeks, WindowOutside, WindowRamp,
-    WindowUpstream, wall_window_ladder,
+    WallWindow, WallWindowLadder, WallWindowOptions, WindowCheeks, WindowCover, WindowOutside,
+    WindowRamp, WindowUpstream, wall_window_ladder,
 };
 use fs_material::gas::GasState;
 
 /// Largest relative difference between pocket and bore radii that the
 /// window solve takes as one bore (see the module notes).
-const POCKET_RADIUS_TOLERANCE: f64 = 0.01;
+const POCKET_RADIUS_TOLERANCE: f64 = 0.025;
 
-/// A `window wall-cut` row: the coarse rung and the cut's shape.
+/// A `window wall-cut` or `window embouchure` row: the coarse rung and the
+/// cut's shape.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct WindowRow {
     axial_cells: usize,
-    cheeks: WindowCheeks,
-    ramp: Option<WindowRamp>,
+    shape: Shape,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Shape {
+    /// The flue's window, flue width by cut-up.
+    WallCut {
+        cheeks: WindowCheeks,
+        ramp: Option<WindowRamp>,
+    },
+    /// A flute's embouchure hole [m]: across by along, its outer end open
+    /// over a centred strip.
+    Embouchure { across: f64, along: f64, open: f64 },
 }
 
 /// The window derived from a card and its solved mass.
@@ -124,14 +152,34 @@ pub(super) fn read(rows: &mut Rows<'_>) -> Result<Option<WindowRow>, FlueInputEr
             };
             Some(WindowRow {
                 axial_cells,
-                cheeks,
-                ramp,
+                shape: Shape::WallCut { cheeks, ramp },
+            })
+        }
+        Some("embouchure") => {
+            let axial_cells: usize = row.number()?;
+            if !(2..=32).contains(&axial_cells) {
+                return Err(bad(row.line, "window embouchure needs 2..=32 axial cells"));
+            }
+            let (across, along, open) = (row.scalar()?, row.scalar()?, row.scalar()?);
+            if !(across > 0.0 && along > 0.0 && open > 0.0 && open < across) {
+                return Err(bad(
+                    row.line,
+                    "window embouchure needs a positive hole and an open strip narrower than the hole",
+                ));
+            }
+            Some(WindowRow {
+                axial_cells,
+                shape: Shape::Embouchure {
+                    across,
+                    along,
+                    open,
+                },
             })
         }
         _ => {
             return Err(bad(
                 row.line,
-                "window requires none or wall-cut AXIAL_CELLS [cheeks radial|parallel] [ramp EDGE_HEIGHT_M ANGLE_DEG]",
+                "window requires none, wall-cut AXIAL_CELLS [cheeks radial|parallel] [ramp EDGE_HEIGHT_M ANGLE_DEG] or embouchure AXIAL_CELLS ACROSS_M ALONG_M OPEN_M",
             ));
         }
     };
@@ -155,10 +203,10 @@ pub(super) fn solve(
         .iter()
         .position(|node| matches!(node, NetworkNode::Inlet))
     else {
-        return refuse("window wall-cut needs the graph's inlet");
+        return refuse("window needs the graph's inlet");
     };
     let Some(riser_index) = graph.sections.iter().position(|s| s.nodes.contains(&inlet)) else {
-        return refuse("window wall-cut needs the inlet's section");
+        return refuse("window needs the inlet's section");
     };
     let riser = graph.sections[riser_index];
     let junction = if riser.nodes[0] == inlet {
@@ -167,13 +215,21 @@ pub(super) fn solve(
         riser.nodes[0]
     };
     let riser_area = core::f64::consts::PI * riser.radius_m * riser.radius_m;
-    if (riser_area / (geometry.flue_width_m * geometry.cut_up_m) - 1.0).abs() > 1e-3 {
-        return refuse(
+    let (window_area, channel) = match shape.shape {
+        Shape::WallCut { .. } => (
+            geometry.flue_width_m * geometry.cut_up_m,
             "window wall-cut: the inlet section must be the window's channel, of area flue width x cut-up",
-        );
+        ),
+        Shape::Embouchure { across, along, .. } => (
+            across * along,
+            "window embouchure: the inlet section must be the hole's riser, of area across x along",
+        ),
+    };
+    if (riser_area / window_area - 1.0).abs() > 1e-3 {
+        return refuse(channel);
     }
     if !matches!(graph.nodes[junction], NetworkNode::Junction) {
-        return refuse("window wall-cut: the channel must end at a plain junction");
+        return refuse("window: the channel must end at a plain junction");
     }
     let closed = |s: &&crate::bernoulli_aperture::network::TubeSection| {
         let far = if s.nodes[0] == junction {
@@ -202,7 +258,7 @@ pub(super) fn solve(
         }
         _ => {
             return refuse(
-                "window wall-cut: the channel's junction must join the bore and at most one closed pocket",
+                "window: the channel's junction must join the bore and at most one closed pocket",
             );
         }
     };
@@ -210,32 +266,49 @@ pub(super) fn solve(
         .is_some_and(|p| !((p.radius_m / bore.radius_m - 1.0).abs() <= POCKET_RADIUS_TOLERANCE))
     {
         return refuse(
-            "window wall-cut: a stepped pocket is not represented; pocket and bore radii must agree within 1 %",
+            "window: a stepped pocket is not represented; pocket and bore radii must agree within 2.5 %",
         );
     }
     let a = bore.radius_m;
-    let arc_width = match shape.cheeks {
-        WindowCheeks::Radial => geometry.flue_width_m,
+    let (width, axial_length, cheeks, ramp, cover) = match shape.shape {
+        Shape::WallCut { cheeks, ramp } => {
+            (geometry.flue_width_m, geometry.cut_up_m, cheeks, ramp, None)
+        }
+        Shape::Embouchure {
+            across,
+            along,
+            open,
+        } => (
+            across,
+            along,
+            WindowCheeks::Parallel,
+            None,
+            Some(WindowCover { open_width: open }),
+        ),
+    };
+    let arc_width = match cheeks {
+        WindowCheeks::Radial => width,
         WindowCheeks::Parallel => {
-            if !(geometry.flue_width_m < 2.0 * a) {
+            if !(width < 2.0 * a) {
                 return refuse(
-                    "window wall-cut: parallel cheeks must stand closer than the bore's diameter",
+                    "window: parallel cheeks must stand closer than the bore's diameter",
                 );
             }
-            2.0 * a * fs_math::det::asin(0.5 * geometry.flue_width_m / a)
+            2.0 * a * fs_math::det::asin(0.5 * width / a)
         }
     };
     let window = WallWindow {
         bore_radius: a,
         wall_thickness: riser.length_m,
         arc_width,
-        axial_length: geometry.cut_up_m,
-        cheeks: shape.cheeks,
-        ramp: shape.ramp,
+        axial_length,
+        cheeks,
+        ramp,
         upstream: WindowUpstream::ClosedEnd {
-            distance: pocket.map_or(0.5 * geometry.cut_up_m, |p| p.length_m),
+            distance: pocket.map_or(0.5 * axial_length, |p| p.length_m),
         },
         outside: WindowOutside::Free,
+        cover,
     };
     let workers = std::thread::available_parallelism().map_or(1, |n| n.get().min(8));
     let options = WallWindowOptions {
@@ -246,11 +319,11 @@ pub(super) fn solve(
     // sample. A channel shorter than that never had a line.
     let channel_line_m = gases[riser_index].sound_speed * (1.0 / f64::from(mechanics_rate_hz));
     if !(channel_line_m.is_finite() && channel_line_m > 0.0 && riser.length_m >= channel_line_m) {
-        return refuse("window wall-cut: the channel must span at least one transit sample");
+        return refuse("window: the channel must span at least one transit sample");
     }
     let ladder = wall_window_ladder(&window, &options).map_err(|error| {
         FlueInputError::Physics(FlueError::Physics(AcousticRealizeError::Nonlinear(
-            format!("window wall-cut: {error}"),
+            format!("window: {error}"),
         )))
     })?;
     graph.sections[riser_index].length_m = channel_line_m;

@@ -11,7 +11,10 @@
 //! port; downstream it continues to a port. Outside, the wall is an infinite
 //! rigid cylinder of radius `a + t` in free space. Alternatively the window's
 //! outer face is a pressure release, which leaves no outer region and is used
-//! to check the inner end correction on its own.
+//! to check the inner end correction on its own. Either face can carry a
+//! rigid cover on the outer surface that leaves open only the strip between
+//! two planes parallel to the window's mid-plane, centred on it: a player's
+//! lip over part of a flute's embouchure hole.
 //!
 //! The air is incompressible and irrotational. The ports carry plane flow at
 //! potential 1, the far exterior sits at 0, and `Q` is the volume flux
@@ -51,7 +54,8 @@
 //!   edge lies on it. Its links scale with their open face area, and a link
 //!   into it ends at its open part's centroid. The bore face is the window's
 //!   cells. The outer face is the last layer's, each cell open over the
-//!   smaller of its own fraction and the cut's at the outer surface. Each
+//!   smaller of its own fraction and the cut's and the cover's at the outer
+//!   surface. Each
 //!   face cell links to its channel cell over its open fraction, and each
 //!   face has its own DCT bases. The exterior's grid ends every open part of
 //!   the outer face on a cell edge, so no flux spreads over a closed part of
@@ -80,9 +84,20 @@
 //! three rungs, not assumed. A caller ladders the cells and extrapolates.
 //! Nothing is fitted.
 //!
+//! A cover's edge is a knife edge, where the velocity is singular like
+//! `d^(-1/2)`; a covered window is a staircase, whose order is observed.
+//! An edge inside a cell splits that cell's column along the edge's radial
+//! line through every layer, so the knife edge lies on a cell boundary at
+//! any open width: the column's cell keeps the open part, as a cut cell, and
+//! the covered part beyond is a cell of its own. Left inside one cell, the
+//! edge's open fraction changes from rung to rung, and so does the cell's
+//! error, so the ladder does not converge.
+//!
 //! Not represented: cheeks that are neither radial nor parallel; an upstream
 //! face that is not straight; a flat baffle, windway or labium outside the
-//! wall; a pocket that is not flat; viscosity; compressibility.
+//! wall; a cover off the window's mid-plane (a lip covers one side of an
+//! embouchure) or off the outer surface; a pocket that is not flat;
+//! viscosity; compressibility.
 
 use core::f64::consts::PI;
 use std::fmt;
@@ -139,6 +154,17 @@ pub struct WindowRamp {
     pub angle: f64,
 }
 
+/// A rigid cover on the outer surface over the window's outer face. It
+/// leaves open only the strip between two planes parallel to the window's
+/// mid-plane, `open_width` apart and centred on it, along the face's whole
+/// length.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowCover {
+    /// Distance between the cover's edges [m], narrower than the opening
+    /// it covers.
+    pub open_width: f64,
+}
+
 /// A window cut through the wall of a cylindrical bore.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WallWindow {
@@ -158,14 +184,16 @@ pub struct WallWindow {
     pub upstream: WindowUpstream,
     /// Outer side.
     pub outside: WindowOutside,
+    /// Cover over the outer face; `None` leaves the face as the cut opens it.
+    pub cover: Option<WindowCover>,
 }
 
 impl WallWindow {
-    /// Radial cheeks and no ramp: the cut whose channel is diagonal in the
-    /// window's DCT basis.
+    /// Radial cheeks, no ramp and no cover: the cut whose channel is diagonal
+    /// in the window's DCT basis.
     #[must_use]
     pub fn is_prism(&self) -> bool {
-        self.cheeks == WindowCheeks::Radial && self.ramp.is_none()
+        self.cheeks == WindowCheeks::Radial && self.ramp.is_none() && self.cover.is_none()
     }
 }
 
@@ -366,9 +394,9 @@ pub struct WallWindowMass {
     /// Resolved window area on the bore surface, `S_w` [m^2].
     pub window_area: f64,
     /// Open area of the window's outer face [m^2]: each cell open over the
-    /// smaller of its fractions at the last wall layer's mid-radius and at
-    /// the outer surface (a release face: at the mid-radius), on the outer
-    /// surface.
+    /// smaller of its fractions at the last wall layer's mid-radius, at the
+    /// outer surface (a release face: at the mid-radius) and under the cover,
+    /// on the outer surface.
     pub outer_area: f64,
     /// The requested arc as resolved by whole `theta` cells [m].
     pub resolved_arc_width: f64,
@@ -538,6 +566,19 @@ pub fn wall_window_mass(
             "a ramp's edge height must lie in [0, t] and its angle in (0, pi/2)",
         ));
     }
+    // The opening's width on the outer surface, across the mid-plane.
+    let opening = match w.cheeks {
+        WindowCheeks::Parallel => 2.0 * a * det::sin(theta_w),
+        WindowCheeks::Radial => 2.0 * (a + t) * det::sin(theta_w.min(0.5 * PI)),
+    };
+    if w
+        .cover
+        .is_some_and(|cover| !(cover.open_width > 0.0 && cover.open_width < opening))
+    {
+        return Err(WallWindowError::Invalid(
+            "a cover's open width must be positive and narrower than the opening it covers",
+        ));
+    }
     if !(o.tolerance > 0.0 && o.tolerance < 1.0) || o.max_iterations == 0 {
         return Err(WallWindowError::Invalid(
             "the conjugate-gradient tolerance must lie in (0, 1) and its iteration budget be positive",
@@ -570,20 +611,25 @@ pub fn wall_window_mass(
     } else {
         staircase_layers(w, &edge_r, nwth, nwx, dth, dxw, o.max_line_cells)?
     };
-    // A staircase's outer face against free space: the last layer's cells,
-    // each open over the smaller of its own fraction and the cut's at the
-    // outer surface, so that the exterior sees the opening the wall has.
+    // A staircase's outer face: the last layer's cells, each open over the
+    // smaller of its own fraction and those at the outer surface, so that
+    // the exterior sees the opening the wall has (parallel cheeks against
+    // free space) and either face sees the cover's strip.
     let outer: Vec<f64> = match layers.last() {
-        Some(top) if free && w.cheeks == WindowCheeks::Parallel => {
-            let half_chord = a * det::sin(0.5 * nwth as f64 * dth);
-            let surface = cheek_fractions(det::asin(half_chord / (a + t)), dth, nwth);
-            top.arc
-                .iter()
-                .zip(&surface)
-                .map(|(&f, &s)| f.min(s))
-                .collect()
+        Some(top) => {
+            let within = |open: Vec<f64>, half_width: f64| -> Vec<f64> {
+                let surface = cheek_fractions(det::asin(half_width / (a + t)), dth, nwth);
+                open.iter().zip(&surface).map(|(&f, &s)| f.min(s)).collect()
+            };
+            let mut open = top.arc.clone();
+            if free && w.cheeks == WindowCheeks::Parallel {
+                open = within(open, a * det::sin(0.5 * nwth as f64 * dth));
+            }
+            if let Some(cover) = w.cover {
+                open = within(open, 0.5 * cover.open_width);
+            }
+            open
         }
-        Some(top) => top.arc.clone(),
         None => Vec::new(),
     };
     if !layers.is_empty() && (outer.is_empty() || layers.iter().any(|cut| cut.arc.is_empty())) {
@@ -591,6 +637,31 @@ pub fn wall_window_mass(
             "the cut closes inside the wall at this resolution",
         ));
     }
+    // A cover's edge off a cell edge splits its column, so that the knife
+    // edge lies on a cell boundary at any open width. The odd arc's
+    // mid-plane cell stays whole: a strip narrower than one cell.
+    let cover_edge = match w.cover {
+        Some(cover) if !layers.is_empty() => {
+            let strip = cheek_fractions(det::asin(0.5 * cover.open_width / (a + t)), dth, nwth);
+            let edge = strip.len() - 1;
+            if strip[edge] < 1.0 && !(nwth % 2 == 1 && edge == 0) {
+                // Parallel cheeks may cut the column too, but outside the
+                // strip: the covered part is what lies between them.
+                if layers
+                    .iter()
+                    .any(|cut| cut.arc.get(edge).is_none_or(|&f| f - strip[edge] < CUT_SNAP))
+                {
+                    return Err(WallWindowError::Invalid(
+                        "a cover's edge lies on a cheek at this resolution",
+                    ));
+                }
+                Some((edge, strip[edge]))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
     // The outer face's (arc, axial) cells, and its open arc cells and length.
     let (outer_open, outer_arc, outer_axial_length) = match layers.last() {
         Some(top) => (
@@ -821,6 +892,7 @@ pub fn wall_window_mass(
             &Staircase {
                 layers: &layers,
                 outer: &outer,
+                cover_edge,
                 edge_r: &edge_r,
                 layer,
                 dth,
@@ -1364,6 +1436,11 @@ struct Staircase<'a> {
     /// the smaller of the last layer's and the cut's at the outer surface, a
     /// release face the last layer's.
     outer: &'a [f64],
+    /// The half arc cell a cover's edge crosses and its open fraction on the
+    /// mid-plane side. That column is split along the edge's radial line
+    /// through every layer: its cell keeps the open part, as a cut cell, and
+    /// the covered part beyond, up to any cheek, is a cell of its own.
+    cover_edge: Option<(usize, f64)>,
     /// Layer edge radii, bore to outer surface.
     edge_r: &'a [f64],
     /// Layer thickness [m].
@@ -1415,11 +1492,31 @@ impl Channel {
         }
         let [bore_face, outer_face] = s.faces;
         let faces = [start[layers], start[layers] + bore_face.size()];
-        let size = if free {
+        // A split column's covered cells follow the faces, one per layer and
+        // axial cell.
+        let mut covered = vec![if free {
             faces[1] + outer_face.size()
         } else {
             faces[1]
-        };
+        }];
+        if s.cover_edge.is_some() {
+            for cut in s.layers {
+                covered.push(covered[covered.len() - 1] + cut.axial.len());
+            }
+        }
+        let size = covered[covered.len() - 1];
+        // Each layer's arc with a split column's cell cut to its open part.
+        let arcs: Vec<Vec<f64>> = s
+            .layers
+            .iter()
+            .map(|cut| {
+                let mut arc = cut.arc.clone();
+                if let Some((edge, open)) = s.cover_edge {
+                    arc[edge] = open;
+                }
+                arc
+            })
+            .collect();
         let m = |i: usize| multiplicity(bore_face.arc_cells, i);
         let mut links = Vec::new();
         for (l, cut) in s.layers.iter().enumerate() {
@@ -1428,21 +1525,24 @@ impl Channel {
             let g_axial = mid * layer * s.dth / s.dxw;
             let g_radial = s.edge_r[l + 1] * s.dth * s.dxw / layer;
             let nx = cut.axial.len();
-            for (i, &fi) in cut.arc.iter().enumerate() {
+            for (i, &fi) in arcs[l].iter().enumerate() {
                 for (j, &fj) in cut.axial.iter().enumerate() {
                     let c = start[l] + i * nx + j;
                     // A link into a cut cell ends at its open part's
                     // centroid. The mid-plane link of an even arc joins a
                     // cell to its own image and carries nothing; the rest
-                    // pair up.
-                    if let Some(&next) = cut.arc.get(i + 1) {
+                    // pair up. A split cell's outward neighbour is its
+                    // covered part.
+                    if let Some(&next) = arcs[l].get(i + 1)
+                        && s.cover_edge.is_none_or(|(edge, _)| edge != i)
+                    {
                         links.push((c, c + nx, 2.0 * fj * g_theta / (0.5 * (1.0 + next))));
                     }
                     if let Some(&next) = cut.axial.get(j + 1) {
                         links.push((c, c + 1, m(i) * fi * g_axial / (0.5 * (1.0 + next))));
                     }
                     if let Some(up) = s.layers.get(l + 1)
-                        && let (Some(&ui), Some(&uj)) = (up.arc.get(i), up.axial.get(j))
+                        && let (Some(&ui), Some(&uj)) = (arcs[l + 1].get(i), up.axial.get(j))
                     {
                         let open = fi.min(ui) * fj.min(uj);
                         let above = start[l + 1] + i * up.axial.len() + j;
@@ -1450,12 +1550,45 @@ impl Channel {
                     }
                 }
             }
+            // The covered part, up to any cheek: its centroid lies half the
+            // column's open fraction from the open part's, and it links
+            // along the axis and through the layers like any cut cell.
+            if let Some((edge, open)) = s.cover_edge {
+                let column = cut.arc[edge];
+                let rest = column - open;
+                for (j, &fj) in cut.axial.iter().enumerate() {
+                    let c = covered[l] + j;
+                    links.push((start[l] + edge * nx + j, c, 2.0 * fj * g_theta / (0.5 * column)));
+                    if let Some(&next) = arcs[l].get(edge + 1) {
+                        let beyond = start[l] + (edge + 1) * nx + j;
+                        links.push((c, beyond, 2.0 * fj * g_theta / (0.5 * (rest + next))));
+                    }
+                    if let Some(&next) = cut.axial.get(j + 1) {
+                        links.push((c, c + 1, m(edge) * rest * g_axial / (0.5 * (1.0 + next))));
+                    }
+                    if let Some(up) = s.layers.get(l + 1)
+                        && let Some(&uj) = up.axial.get(j)
+                    {
+                        let open = rest.min(up.arc[edge] - open) * fj.min(uj);
+                        links.push((c, covered[l + 1] + j, m(edge) * open * g_radial));
+                    }
+                }
+            }
         }
         // Each face cell links to its channel cell over that cell's open
-        // fraction; a release face holds its potential at zero.
+        // fraction, a split one to both parts; a release face holds its
+        // potential at zero.
         let bottom = &s.layers[0];
         let nwx = bore_face.axial_cells;
-        for (i, &fi) in bottom.arc.iter().enumerate().take(bore_face.even) {
+        if let Some((edge, open)) = s.cover_edge
+            && edge < bore_face.even
+        {
+            for (j, &fj) in bottom.axial.iter().enumerate().take(nwx) {
+                let g = m(edge) * (bottom.arc[edge] - open) * fj * s.conductance[0];
+                links.push((covered[0] + j, faces[0] + edge * nwx + j, g));
+            }
+        }
+        for (i, &fi) in arcs[0].iter().enumerate().take(bore_face.even) {
             for (j, &fj) in bottom.axial.iter().enumerate().take(nwx) {
                 let c = i * bottom.axial.len() + j;
                 links.push((c, faces[0] + i * nwx + j, m(i) * fi * fj * s.conductance[0]));

@@ -25,11 +25,14 @@
 # recording. Labium offset +0.29 mm on the pipe side: one player's measured reference jet (Onogi,
 # Yokoyama and Iida, Acta Acustica 5 (2021) 11, Table 1: y/h = 0.24 +- 0.25 at h = 1.2 mm), so the
 # bracket is -0.01 to +0.59 mm; jet angle 0, because the measured 39 degrees are inside that offset.
-# Onset ramp (50 ms), mouth loss (0.02), the jet displacement gain (90) are UNKNOWN or authored: see
-# unknowns.tsv and status.json. The window loss stays authored here (as on the pan pipes, for the same
-# reason) while the recorder and the whistle radiate theirs from the window's solved outer face
-# (`mouth_reaction window-cylinder`): this embouchure's exterior is set by a lip plate, the lip covering
-# part of the hole and the player's face, and none of the three is in its geometry (bead frankensim-5kfrn).
+# Onset ramp (50 ms) and the jet displacement gain (90) are UNKNOWN or authored: see unknowns.tsv and
+# status.json. The embouchure radiates from its solved window, as the recorder and the whistle do, with
+# no authored loss (`window embouchure`, `mouth_reaction window-cylinder`, bead frankensim-5kfrn): the
+# hole is the riser (5 mm deep, the riser's area, Boehm's 10:12 across to along) through the head's
+# outer cylinder at a + 5 mm, the lip plate's proxy, under a centred rigid lip that leaves a strip open,
+# 6 mm at C4 to 3.5 mm at G6 linear in semitones (Coltman 1966 via Fletcher 1975 p.234): D4 5.84, G4
+# 5.44, A5 4.31 mm. Not represented: the lip on one side, the player's face, the lip plate's shape, and
+# the hole's taper and undercut (unknowns.tsv).
 # The jet card is an inline X-Est
 # lip-jet card, not the interim 2-D slot-jet card: theta/b 1.75 places the island's band peak (0.55 omega_c,
 # omega_c = U / 4 theta) at the published Strouhal number of maximum jet amplification, Str_h = 0.025 (de la

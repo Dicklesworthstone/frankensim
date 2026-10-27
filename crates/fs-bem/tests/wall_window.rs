@@ -1,11 +1,12 @@
 //! Wall-window acoustic mass: the ladder, the inner end correction against
 //! Dalmont's law, far-boundary and port invariance, independent
 //! implementations of the prism and of the staircase cuts, the bounds that
-//! radial cuts put on parallel cheeks, worker determinism and the refusals.
+//! radial cuts put on parallel cheeks, a cover against Lamb's slit grating,
+//! worker determinism and the refusals.
 
 use fs_bem::wall_window::{
-    WallWindow, WallWindowError, WallWindowMass, WallWindowOptions, WindowCheeks, WindowOutside,
-    WindowRamp, WindowUpstream, wall_window_ladder, wall_window_mass,
+    WallWindow, WallWindowError, WallWindowMass, WallWindowOptions, WindowCheeks, WindowCover,
+    WindowOutside, WindowRamp, WindowUpstream, wall_window_ladder, wall_window_mass,
 };
 
 /// The Clare D tin whistle's window (Davies 2006 rows of the instrument
@@ -21,6 +22,7 @@ fn clare_d() -> WallWindow {
         ramp: None,
         upstream: WindowUpstream::ClosedEnd { distance: 0.01065 },
         outside: WindowOutside::Free,
+        cover: None,
     }
 }
 
@@ -194,6 +196,7 @@ fn inner_end_correction_matches_dalmont_within_shape_tolerance() {
             ramp: None,
             upstream: WindowUpstream::Port { distance: 0.04 },
             outside: WindowOutside::Release,
+            cover: None,
         };
         let options = WallWindowOptions {
             port_radii: 0.04 / a,
@@ -678,6 +681,13 @@ fn staircase_refusals() {
     ] {
         assert!(invalid(&WallWindow { ramp, ..ok }, &options), "{ramp:?}");
     }
+    // A cover must leave a strip narrower than the 8 mm between the cheeks.
+    for open_width in [0.0, -1e-3, f64::NAN, 0.0081] {
+        let cover = Some(WindowCover { open_width });
+        assert!(invalid(&WallWindow { cover, ..ok }, &options), "{open_width}");
+    }
+    let cover = Some(WindowCover { open_width: 0.0079 });
+    assert!(wall_window_mass(&WallWindow { cover, ..ok }, &options).is_ok());
     assert!(invalid(
         &WallWindow {
             arc_width: core::f64::consts::PI * ok.bore_radius,
@@ -768,6 +778,7 @@ fn bressan_alto() -> WallWindow {
         }),
         upstream: WindowUpstream::ClosedEnd { distance: 0.0023 },
         outside: WindowOutside::Free,
+        cover: None,
     }
 }
 
@@ -837,5 +848,141 @@ fn staircase_ladders_by_rung() {
             }
         }
         assert!(lengths.windows(2).all(|pair| pair[1] < pair[0]), "{name}");
+    }
+}
+
+#[test]
+fn a_cover_on_a_release_face_adds_lambs_slit_grating_length() {
+    // Parallel cheeks D apart through a wall D thick, the outer face a
+    // pressure release under a cover that leaves the centred strip d = D/2
+    // open. In the channel the flow is two-dimensional across the cheeks
+    // (the window's upstream and downstream faces are planes that flow does
+    // not cross), so the cover adds one side of Lamb's slit grating,
+    // (D/pi) ln csc(pi d / 2D), to the channel's length; a 2-D
+    // finite-difference ladder reproduces it to 0.1 %. Its field decays like
+    // exp(-2 pi z / D) and leaves the bore alone. The arc is pi/63 so that
+    // every rung resolves the same cheeks.
+    //
+    // The outer face is the cylinder r = a + t, not a plane: the face falls
+    // by delta(x) = (a + t) - sqrt((a + t)^2 - x^2) toward the cheeks (23 um
+    // there), so the uncovered face lies lower on average than the strip,
+    // and the cover adds about 4 % more than the flat grating. Hadamard's
+    // shape derivative on Lamb's field, where the strip's normal and the
+    // cover's tangential velocity are both |cos(pi x/D)| / sqrt(|sin^2(pi x/D)
+    // - sin^2(pi d/2D)|), gives the excess to first order in delta:
+    // cos^2(pi d/2D)/D PV int delta(x) / (sin^2(pi x/D) - sin^2(pi d/2D)) dx
+    // over the period. The bare kernel's principal value is zero, so
+    // subtracting delta(d/2) leaves a regular integral. A 2-D
+    // finite-element solve of the curved section agrees to 0.1 %.
+    //
+    // The cover's edges fall inside cells on every rung here (open fractions
+    // 0.64, 0.27 and 0.54 of the edge cell from 16 to 64 arc cells), so the
+    // split column carries them. The knife edge converges at first order:
+    // the rungs from 8 to 64 arc cells lie 40, 18, 9.0 and 4.5 % above, and
+    // likewise at d/D 0.4 and 0.25. The 1 % covers this three-rung
+    // extrapolation (0.35 % observed, order 1.07).
+    use core::f64::consts::PI;
+    let a = 0.02;
+    let theta_w = PI / 63.0;
+    let window = WallWindow {
+        bore_radius: a,
+        wall_thickness: 0.002,
+        arc_width: 2.0 * a * theta_w,
+        axial_length: 0.001,
+        cheeks: WindowCheeks::Parallel,
+        ramp: None,
+        upstream: WindowUpstream::Port { distance: 0.04 },
+        outside: WindowOutside::Release,
+        cover: None,
+    };
+    let across = 2.0 * a * theta_w.sin();
+    let open_width = 0.5 * across;
+    let covered = WallWindow {
+        cover: Some(WindowCover { open_width }),
+        ..window
+    };
+    let lamb = across / PI * (1.0 / (PI * open_width / (2.0 * across)).sin()).ln();
+    let edge = 0.5 * open_width;
+    let outer = a + window.wall_thickness;
+    let fall = |x: f64| x * x / (outer + (outer * outer - x * x).sqrt());
+    let kernel = |x: f64| {
+        (fall(x) - fall(edge))
+            / ((PI * x / across).sin().powi(2) - (PI * edge / across).sin().powi(2))
+    };
+    let midpoint = |lo: f64, hi: f64| {
+        let n = 4096;
+        let h = (hi - lo) / f64::from(n);
+        (0..n).map(|i| kernel(lo + (f64::from(i) + 0.5) * h)).sum::<f64>() * h
+    };
+    let curvature = (PI * edge / across).cos().powi(2) / across
+        * 2.0
+        * (midpoint(0.0, edge) + midpoint(edge, 0.5 * across));
+    let reference = lamb + curvature;
+    let added: Vec<f64> = [(8, 16, 16), (16, 32, 32), (32, 64, 64)]
+        .into_iter()
+        .map(|(axial, arc, layers)| {
+            let options = WallWindowOptions {
+                port_radii: 0.04 / a,
+                workers: 4,
+                max_line_cells: 8192,
+                max_unknowns: 20_000,
+                ..rung(axial, arc, layers)
+            };
+            let mass = |w: &WallWindow| solve(w, &options).mass_per_density;
+            (mass(&covered) - mass(&window)) * across * window.axial_length
+        })
+        .collect();
+    let (d1, d2) = (added[1] - added[0], added[2] - added[1]);
+    let order = (d1 / d2).log2();
+    let extrapolated = added[2] + d2 / (d1 / d2 - 1.0);
+    eprintln!(
+        "cover d/D 0.5: added {:?} mm, order {order:.3}, extrapolated {:.5} mm, Lamb {:.5} + curvature {:.5} mm",
+        added.iter().map(|l| l * 1e3).collect::<Vec<_>>(),
+        extrapolated * 1e3,
+        lamb * 1e3,
+        curvature * 1e3
+    );
+    assert!((0.5..=2.0).contains(&order), "observed order {order}");
+    assert!(
+        (extrapolated / reference - 1.0).abs() < 0.01,
+        "cover adds {extrapolated} m, Lamb with the face's curvature {reference} m"
+    );
+}
+
+#[test]
+fn a_cover_opens_only_its_strip_and_narrowing_it_adds_mass() {
+    // The Clare D window with parallel cheeks 8 mm apart under covers that
+    // leave 6 and then 4 mm open: the outer face is the cover's strip on the
+    // outer cylinder, and each narrowing adds mass.
+    let base = clare_d_parallel();
+    let outer_r = base.bore_radius + base.wall_thickness;
+    let options = WallWindowOptions::rung(&base, 8);
+    let mut previous = solve(&base, &options).mass_per_density;
+    for open_width in [0.006, 0.004] {
+        let window = WallWindow {
+            cover: Some(WindowCover { open_width }),
+            ..base
+        };
+        assert!(!window.is_prism());
+        let mass = solve(&window, &options);
+        let half = (0.5 * open_width / outer_r).asin();
+        let strip = 2.0 * outer_r * half * mass.outer_axial_length;
+        assert!(
+            (mass.outer_area / strip - 1.0).abs() < 1e-9,
+            "outer face {} m^2, strip {strip} m^2",
+            mass.outer_area
+        );
+        assert!(
+            mass.outer_cells
+                .iter()
+                .all(|c| c.theta.abs() + 0.5 * c.arc <= half * (1.0 + 1e-12)),
+            "a cell of the outer face lies under the cover"
+        );
+        assert!(
+            mass.mass_per_density > previous,
+            "{open_width} m open: {} after {previous}",
+            mass.mass_per_density
+        );
+        previous = mass.mass_per_density;
     }
 }
