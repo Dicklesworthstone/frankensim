@@ -47,7 +47,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         poll(gate)?;
         let masses = self.flow.lattice.mass_snapshot();
         admit_masses(&masses, self.controls.max_cells)?;
-        let (states, tau, _) = self.resolve_states(&self.h, &masses, gate)?;
+        let resolved = self.resolve_states(&self.flow.lattice, &self.h, &masses, gate)?;
         let mass_unit = self.flow.scaling.mass_unit_kg();
         let rho0 = self.flow.scaling.material().density_kg_m3();
         let dt = self.flow.scaling.timestep_s();
@@ -60,11 +60,11 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             if native_mass == 0.0 {
                 continue;
             }
-            let material = states[&location].clone();
+            let material = resolved.states[&location].clone();
             let lattice_rate = self
                 .flow
                 .lattice
-                .transport_shear_rate(location, tau[&(key, lane)])?;
+                .transport_shear_rate(location, resolved.tau[&(key, lane)])?;
             let rate = lattice_rate / dt;
             let mass = native_mass * mass_unit;
             let volume = mass / rho0;

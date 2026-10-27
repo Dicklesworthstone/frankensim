@@ -37,12 +37,15 @@ pub enum LiquidCapillarity {
     Sourced,
 }
 
-/// Frozen source state for an isothermal, single-phase liquid free surface.
+/// Source state for a single-phase liquid free surface.
 ///
 /// Every used claim and source condition remains in `material()`. This bundle
 /// does not infer a phase diagram, an ambient gas law, wetting, or surface-energy
 /// evolution. A coefficient reported for an unknown surface environment stays
 /// unknown; it is not promoted to an arbitrary liquid/gas pairing.
+/// The ordinary constructor admits frozen coefficients. The explicit rheology
+/// constructor instead requires an evolving temperature/shear owner; consumers
+/// must refuse that bundle when they cannot supply that evolution.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedLiquidSurfaceState {
     material: ResolvedMaterialStatePoint,
@@ -51,6 +54,7 @@ pub struct ResolvedLiquidSurfaceState {
     dynamic_viscosity_pa_s: f64,
     kinematic_viscosity_m2_s: f64,
     surface_tension_n_m: Option<f64>,
+    rheology_axes: Option<(String, String)>,
 }
 
 impl ResolvedLiquidSurfaceState {
@@ -94,8 +98,94 @@ impl ResolvedLiquidSurfaceState {
         };
         Ok(Self {
             material, viscosity_basis, density_kg_m3, dynamic_viscosity_pa_s,
-            kinematic_viscosity_m2_s, surface_tension_n_m,
+            kinematic_viscosity_m2_s, surface_tension_n_m, rheology_axes: None,
         })
+    }
+
+    /// Admit a source for an owner that evolves temperature and physical shear
+    /// rate `sqrt(2 D:D)` together. This does NOT grant frozen isothermal use:
+    /// [`Self::rheology_axes`] remains set and must be consumed by a runtime
+    /// constitutive solve. Capillarity is explicitly neglected on this path.
+    ///
+    /// Only these two response axes may vary. The rate must have the explicit
+    /// dimensional quantity 1/s, not cyclic/angular frequency; the temperature
+    /// must be positive absolute kelvin. Other dynamic applicability refuses.
+    /// Every original property and selected claim remains in the bundle.
+    pub fn try_for_shear_rate_evolution(
+        material: ResolvedMaterialStatePoint,
+        viscosity_basis: LiquidViscosityBasis,
+        temperature_axis: &str,
+        shear_rate_axis: &str,
+    ) -> Result<Self, MaterialStatePointError> {
+        let quantities = material.axis_quantities();
+        let temperature_quantity = quantities.get(temperature_axis).copied();
+        let temperature_ok = temperature_quantity == Some(QuantitySpec::semantic(
+            fs_qty::semantic::SemanticType::new(
+                QuantityKind::AbsoluteTemperature, fs_qty::semantic::ValueForm::Static,
+            ),
+        )) || temperature_axis == "T" && (temperature_quantity.is_none()
+            || temperature_quantity == Some(QuantitySpec::dimensional(fs_qty::Temperature::DIMS)));
+        if temperature_axis == shear_rate_axis
+            || !temperature_ok
+            || !material.query_point().iter().find(|(axis, _)| axis == temperature_axis)
+                .is_some_and(|(_, t)| t.is_finite() && *t > 0.0)
+            || quantities.get(shear_rate_axis)
+                != Some(&QuantitySpec::dimensional(Frequency::DIMS))
+            || !material.query_point().iter().find(|(axis, _)| axis == shear_rate_axis)
+                .is_some_and(|(_, rate)| rate.is_finite() && *rate >= 0.0)
+        {
+            return Err(MaterialStatePointError::InvalidDerived {
+                quantity: "liquid rheology requires named absolute temperature and physical shear-rate axes",
+            });
+        }
+        for property in material.properties() {
+            if property.source_axes().iter().any(|(axis, dims)| {
+                !(axis == temperature_axis && *dims == fs_qty::Temperature::DIMS
+                    || axis == shear_rate_axis && *dims == Frequency::DIMS)
+            }) {
+                return Err(MaterialStatePointError::InvalidRequirement {
+                    property: property.requirement().name().to_owned(),
+                    reason: "liquid rheology evolves only its declared temperature and shear rate",
+                });
+            }
+            require_no_unowned_dynamic_axes(property, Some(shear_rate_axis))?;
+        }
+        let (name, dims) = viscosity_requirement(viscosity_basis);
+        let value = |name: &'static str, dims| -> Result<f64, MaterialStatePointError> {
+            let property = material.property(name)
+                .ok_or(MaterialStatePointError::InvalidDerived { quantity: name })?;
+            if property.requirement().quantity() != QuantitySpec::dimensional(dims)
+                || !property.value_si().is_finite() || property.value_si() <= 0.0
+            {
+                return Err(MaterialStatePointError::InvalidDerived { quantity: name });
+            }
+            Ok(property.value_si())
+        };
+        let density_kg_m3 = value(DENSITY_PROPERTY, Density::DIMS)?;
+        let source_viscosity = value(name, dims)?;
+        let (dynamic_viscosity_pa_s, kinematic_viscosity_m2_s) = match viscosity_basis {
+            LiquidViscosityBasis::Dynamic => (source_viscosity, source_viscosity / density_kg_m3),
+            LiquidViscosityBasis::Kinematic => (
+                dynamic_viscosity_from_kinematic(density_kg_m3, source_viscosity)?, source_viscosity,
+            ),
+        };
+        if !kinematic_viscosity_m2_s.is_finite() || kinematic_viscosity_m2_s <= 0.0 {
+            return Err(MaterialStatePointError::InvalidDerived {
+                quantity: "liquid rheological kinematic viscosity",
+            });
+        }
+        Ok(Self {
+            material, viscosity_basis, density_kg_m3, dynamic_viscosity_pa_s,
+            kinematic_viscosity_m2_s, surface_tension_n_m: None,
+            rheology_axes: Some((temperature_axis.to_owned(), shear_rate_axis.to_owned())),
+        })
+    }
+
+    /// Required evolving coordinates `(temperature, physical shear rate)`.
+    /// `Some` is a prohibition on frozen use, not a grant of static authority.
+    #[must_use]
+    pub fn rheology_axes(&self) -> Option<(&str, &str)> {
+        self.rheology_axes.as_ref().map(|(temperature, rate)| (temperature.as_str(), rate.as_str()))
     }
 
     /// Complete source bundle, including original viscosity and interface context.
@@ -106,7 +196,7 @@ impl ResolvedLiquidSurfaceState {
     #[must_use]
     pub const fn viscosity_basis(&self) -> LiquidViscosityBasis { self.viscosity_basis }
 
-    /// Frozen liquid density [kg/m³].
+    /// Liquid density at this reference source point [kg/m³].
     #[must_use]
     pub const fn density_kg_m3(&self) -> f64 { self.density_kg_m3 }
 
@@ -232,7 +322,16 @@ pub fn require_frozen_coefficient_support(
             reason: "instantaneous coefficient needs a scalar constant or absolute-temperature-only source",
         });
     }
+    require_no_unowned_dynamic_axes(property, None)
+}
+
+fn require_no_unowned_dynamic_axes(
+    property: &ResolvedScalarProperty,
+    shear_rate_axis: Option<&str>,
+) -> Result<(), MaterialStatePointError> {
+    let name = property.requirement().name();
     for (axis, _) in &property.answer().receipt.query_point {
+        if shear_rate_axis == Some(axis.as_str()) { continue; }
         if property.answer().evidence.model.validity.bound(axis).is_none() { continue; }
         let quantity = property.answer().receipt.axis_quantities.get(axis).copied();
         let kind = quantity.and_then(QuantitySpec::semantic_type).map(|ty| ty.kind());

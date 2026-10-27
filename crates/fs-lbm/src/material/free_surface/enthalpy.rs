@@ -40,6 +40,9 @@ use buoyancy::{BoussinesqLiquid, resolve_liquid};
 /// Molecular stress power deposited into the moving liquid's finite enthalpy.
 pub mod viscous;
 
+/// Original T/shear source tables on actual native collision and molecular heat.
+pub mod rheology;
+
 /// Source-conductivity exchange on the existing thermal timeline before flow.
 #[cfg(feature = "enthalpy-coupling")]
 pub mod conduction;
@@ -121,6 +124,11 @@ pub enum FreeSurfaceEnthalpyError {
     Phase(PhaseStateError),
     /// The existing sparse transport solver refused.
     Solve(crate::conjugate::ChtError),
+    /// The shared molecular viscosity/shear solve exhausted its declared budget.
+    RheologyConvergence {
+        iterations: usize,
+        relaxation_defect: f64,
+    },
     /// The existing conservative thermal timeline refused conduction.
     #[cfg(feature = "enthalpy-coupling")]
     Thermal(fs_conduction::enthalpy::DepositionError),
@@ -136,6 +144,13 @@ impl core::fmt::Display for FreeSurfaceEnthalpyError {
             Self::ThermalMaterial(e) => write!(f, "free-surface thermal body: {e}"),
             Self::Phase(e) => write!(f, "free-surface enthalpy chart: {e}"),
             Self::Solve(e) => write!(f, "free-surface enthalpy solve: {e}"),
+            Self::RheologyConvergence {
+                iterations,
+                relaxation_defect,
+            } => write!(
+                f,
+                "free-surface rheology did not converge in {iterations} queries (tau defect {relaxation_defect})",
+            ),
             #[cfg(feature = "enthalpy-coupling")]
             Self::Thermal(e) => write!(f, "free-surface conduction: {e}"),
             Self::Invalid(e) => write!(f, "free-surface enthalpy: {e}"),
@@ -200,6 +215,15 @@ pub struct MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     h: BTreeMap<MassLocation3, f64>,
     states: BTreeMap<MassLocation3, ResolvedLiquidState>,
     buoyancy: Option<BoussinesqLiquid>,
+    rheology: Option<rheology::RheologyBinding>,
+    rheology_samples: BTreeMap<MassLocation3, rheology::FreeSurfaceRheologySample>,
+}
+
+struct ResolvedFlowMaterials {
+    states: BTreeMap<MassLocation3, ResolvedLiquidState>,
+    tau: BTreeMap<(u64, usize), f64>,
+    forces: Option<BTreeMap<(u64, usize), [f64; 3]>>,
+    rheology: BTreeMap<MassLocation3, rheology::FreeSurfaceRheologySample>,
 }
 
 impl<'s> MaterialFreeSurface3<'s> {
@@ -220,9 +244,10 @@ impl<'s> MaterialFreeSurface3<'s> {
         initial_h: impl Fn([usize; 3]) -> f64,
         gate: &CancelGate,
     ) -> Result<MaterialFreeSurfaceEnthalpy3<'s, 'm>, Error> {
-        self.with_enthalpy_model(law, caloric, controls, initial_h, None, gate)
+        self.with_enthalpy_model(law, caloric, controls, initial_h, None, None, gate)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn with_enthalpy_model<'m>(
         self,
         law: &'m LiquidTemperatureLaw<'m>,
@@ -230,6 +255,7 @@ impl<'s> MaterialFreeSurface3<'s> {
         controls: FreeSurfaceEnthalpyControls,
         initial_h: impl Fn([usize; 3]) -> f64,
         buoyancy: Option<crate::material::transport::boussinesq::BoussinesqConfig<3>>,
+        rheology: Option<rheology::RheologyBinding>,
         gate: &CancelGate,
     ) -> Result<MaterialFreeSurfaceEnthalpy3<'s, 'm>, Error> {
         poll(gate)?;
@@ -247,6 +273,11 @@ impl<'s> MaterialFreeSurface3<'s> {
             ));
         }
         let source = self.scaling.material();
+        if source.rheology_axes().is_some() != rheology.is_some() {
+            return Err(Error::Invalid(
+                "evolving liquid source requires its runtime rheology owner",
+            ));
+        }
         if source.capillarity() != LiquidCapillarity::Neglected
             || self.scaling.planar_wetting.is_some()
         {
@@ -313,12 +344,16 @@ impl<'s> MaterialFreeSurface3<'s> {
             h,
             states: BTreeMap::new(),
             buoyancy,
+            rheology,
+            rheology_samples: BTreeMap::new(),
         };
-        let (states, _, forces) = candidate.resolve_states(&candidate.h, &masses, gate)?;
-        if let Some(forces) = forces {
+        let resolved =
+            candidate.resolve_states(&candidate.flow.lattice, &candidate.h, &masses, gate)?;
+        if let Some(forces) = resolved.forces {
             candidate.flow.lattice.rebind_force_field(forces, gate)?;
         }
-        candidate.states = states;
+        candidate.states = resolved.states;
+        candidate.rheology_samples = resolved.rheology;
         Ok(candidate)
     }
 }
@@ -432,19 +467,23 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         let masses = self.flow.lattice.mass_snapshot();
         let mass_unit = self.flow.scaling.mass_unit_kg();
         let before = total(&masses, &self.h, mass_unit)?;
-        let (_, tau, forces) = self.resolve_states(&heated, &masses, gate)?;
+        let resolved = self.resolve_states(&self.flow.lattice, &heated, &masses, gate)?;
         // Native activation/conversion and the companion solve operate on one
         // private candidate. No accepted populations, carry or source state move
         // until every endpoint query and conservation gate has passed.
         let mut lattice = self.flow.lattice.clone();
-        let trace =
-            lattice.step_with_mass_transport(gate, &tau, forces, self.controls.max_mass_routes)?;
+        let trace = lattice.step_with_mass_transport(
+            gate,
+            &resolved.tau,
+            resolved.forces,
+            self.controls.max_mass_routes,
+        )?;
         admit_masses(&trace.after, self.controls.max_cells)?;
         let (mut h, outcome) = transport::advect(&trace, &heated, self.controls, gate)?;
         h.retain(|key, _| trace.after.contains_key(key));
         extend_empty_ghosts(&trace.after, &mut h, &heated)?;
-        let (states, _, endpoint_forces) = self.resolve_states(&h, &trace.after, gate)?;
-        if let Some(forces) = endpoint_forces {
+        let endpoint = self.resolve_states(&lattice, &h, &trace.after, gate)?;
+        if let Some(forces) = endpoint.forces {
             // This changes the Guo population frame without adding an impulse.
             // The accepted force now belongs to the accepted advected h state.
             lattice.rebind_force_field(forces, gate)?;
@@ -485,7 +524,8 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         poll(gate)?;
         self.flow.lattice = lattice;
         self.h = h;
-        self.states = states;
+        self.states = endpoint.states;
+        self.rheology_samples = endpoint.rheology;
         Ok(report)
     }
 
@@ -496,21 +536,17 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
 
     fn resolve_states(
         &self,
+        lattice: &FreeSurface3,
         h: &BTreeMap<MassLocation3, f64>,
         masses: &BTreeMap<MassLocation3, f64>,
         gate: &CancelGate,
-    ) -> Result<
-        (
-            BTreeMap<MassLocation3, ResolvedLiquidState>,
-            BTreeMap<(u64, usize), f64>,
-            Option<BTreeMap<(u64, usize), [f64; 3]>>,
-        ),
-        Error,
-    > {
+    ) -> Result<ResolvedFlowMaterials, Error> {
         let mut states = BTreeMap::new();
         let mut tau = BTreeMap::new();
         let mut forces = self.buoyancy.map(|_| BTreeMap::new());
         let rho = self.flow.scaling.material().density_kg_m3();
+        let rheology_model = self.rheology_model();
+        let mut rheology = BTreeMap::new();
         for (&location, &mass) in masses {
             poll(gate)?;
             if location == MassLocation3::Carry && mass == 0.0 {
@@ -519,23 +555,45 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             let specific = *h
                 .get(&location)
                 .ok_or(Error::Invalid("wet mass has no enthalpy history"))?;
-            let (state, transport) =
-                resolve_liquid(self.law, self.caloric, specific, rho, self.buoyancy)?;
-            let (plan, _) = plan_momentum_scaling(
-                transport.kinematic_viscosity_m2_s(),
-                self.flow.scaling.cell_size_m(),
-                self.flow.scaling.timestep_s(),
-                self.flow.scaling.flow.u_lattice * self.flow.scaling.velocity_scale,
-            )?;
+            let (state, local_tau) = if let Some(model) = &rheology_model {
+                if location == MassLocation3::Carry {
+                    // Carry has caloric storage but no resolved stress or
+                    // collision. Assigning it a constitutive rate would invent
+                    // a physical state; its receiving cell resolves the source.
+                    buoyancy::liquid_temperature(self.caloric, specific, rho)?;
+                    continue;
+                }
+                let sample =
+                    model.sample(specific, self.rheology_stress(lattice, location)?, || {
+                        poll(gate)
+                    })?;
+                rheology.insert(location, sample.sample);
+                (sample.material, sample.sample.collision_tau)
+            } else {
+                let (state, transport) =
+                    resolve_liquid(self.law, self.caloric, specific, rho, self.buoyancy)?;
+                let (plan, _) = plan_momentum_scaling(
+                    transport.kinematic_viscosity_m2_s(),
+                    self.flow.scaling.cell_size_m(),
+                    self.flow.scaling.timestep_s(),
+                    self.flow.scaling.flow.u_lattice * self.flow.scaling.velocity_scale,
+                )?;
+                (state, plan.tau)
+            };
             if let MassLocation3::Cell(key, lane) = location {
-                tau.insert((key, lane), plan.tau);
+                tau.insert((key, lane), local_tau);
                 if let (Some(binding), Some(forces)) = (self.buoyancy, &mut forces) {
                     forces.insert((key, lane), binding.force(&self.flow, &state)?);
                 }
             }
             states.insert(location, state);
         }
-        Ok((states, tau, forces))
+        Ok(ResolvedFlowMaterials {
+            states,
+            tau,
+            forces,
+            rheology,
+        })
     }
 }
 

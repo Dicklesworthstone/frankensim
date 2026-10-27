@@ -1,0 +1,237 @@
+//! Source tables in temperature and physical shear rate drive the actual VOF
+//! collision and molecular heat. The fixed-domain rheology owner supplies the
+//! same local constitutive solve; no second viscosity law or stress estimator
+//! is introduced. This is generalized Newtonian response, without elastic
+//! memory, yield-surface history, phase mobility or capillary energy.
+
+use super::*;
+use crate::material::free_surface::{
+    MaterialFreeSurfaceDomain3, MaterialFreeSurfaceInitialCell3, MaterialFreeSurfaceScaling,
+};
+use crate::material::transport::rheology::{LocalRheologyError, solve_local};
+use fs_exec::Cx;
+use fs_material::liquid::surface::ResolvedLiquidSurfaceState;
+
+pub use crate::material::transport::rheology::RheologySolve;
+
+/// Accepted constitutive query at one actual wet collision cell. The original
+/// material tuple and its source receipts are available through `material_at`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FreeSurfaceRheologySample {
+    /// Source query `sqrt(2 D:D)` [1/s], not a lattice or cyclic frequency.
+    pub shear_rate_per_s: f64,
+    /// `1/2 + 3 (mu/rho0) dt/dx^2` from this SAME source state.
+    pub collision_tau: f64,
+    pub iterations: usize,
+    /// Absolute constitutive fixed-point defect in dimensionless tau.
+    pub relaxation_defect: f64,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct RheologyBinding {
+    rate_axis: String,
+    solve: RheologySolve,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct RheologyStress {
+    /// Force-corrected lattice `gamma_dot * tau`, before the thermal split.
+    numerator: f64,
+    initial_tau: f64,
+}
+
+#[derive(Clone)]
+pub(super) struct RheologyModel<'m> {
+    binding: RheologyBinding,
+    law: &'m LiquidTemperatureLaw<'m>,
+    caloric: &'m EquilibriumEnthalpyPhaseCurve,
+    density: f64,
+    buoyancy: Option<BoussinesqLiquid>,
+    dx: f64,
+    dt: f64,
+    max_speed: f64,
+}
+
+pub(super) struct RheologicalState {
+    pub material: ResolvedLiquidState,
+    pub sample: FreeSurfaceRheologySample,
+}
+
+impl RheologyBinding {
+    fn try_new(
+        source: &ResolvedLiquidSurfaceState,
+        law: &LiquidTemperatureLaw<'_>,
+        solve: RheologySolve,
+    ) -> Result<Self, Error> {
+        solve
+            .validate()
+            .map_err(|_| Error::Invalid("invalid liquid rheology controls"))?;
+        let (temperature_axis, rate_axis) = source.rheology_axes().ok_or(Error::Invalid(
+            "moving-liquid rheology needs an explicitly evolving source bundle",
+        ))?;
+        if temperature_axis != law.temperature_axis() {
+            return Err(Error::Invalid(
+                "rheology and caloric temperature axes must agree",
+            ));
+        }
+        // Thermal conductivity and Cp may belong to a broader law bundle than
+        // the momentum ingress. They cannot introduce an unevolved source axis.
+        ResolvedLiquidSurfaceState::try_for_shear_rate_evolution(
+            law.reference_state().material().clone(),
+            law.viscosity_basis(),
+            temperature_axis,
+            rate_axis,
+        )?;
+        if law
+            .reference_state()
+            .material()
+            .property("specific_heat_capacity")
+            .is_some_and(|property| {
+                property
+                    .source_axes()
+                    .iter()
+                    .any(|(axis, _)| axis == rate_axis)
+            })
+        {
+            return Err(Error::Invalid(
+                "shear-dependent caloric storage needs an additional thermodynamic state owner",
+            ));
+        }
+        Ok(Self {
+            rate_axis: rate_axis.to_owned(),
+            solve,
+        })
+    }
+}
+
+impl RheologyModel<'_> {
+    pub(super) fn sample(
+        &self,
+        h: f64,
+        stress: RheologyStress,
+        check: impl FnMut() -> Result<(), Error>,
+    ) -> Result<RheologicalState, Error> {
+        let temperature = buoyancy::liquid_temperature(self.caloric, h, self.density)?;
+        let root = solve_local(
+            stress.numerator,
+            self.dt,
+            stress.initial_tau,
+            self.binding.solve,
+            check,
+            |rate| {
+                let point = self
+                    .law
+                    .reference_point()
+                    .clone()
+                    .with(self.law.temperature_axis(), temperature)
+                    .and_then(|point| point.with(&self.binding.rate_axis, rate))
+                    .map_err(|_| Error::Invalid("invalid liquid temperature/shear coordinates"))?;
+                let material = self
+                    .law
+                    .reference_state()
+                    .at_query_point(self.law.card(), &point)?;
+                let transport = buoyancy::liquid_transport(&material, self.density, self.buoyancy)?;
+                let (scaling, _) = plan_momentum_scaling(
+                    transport.kinematic_viscosity_m2_s(),
+                    self.dx,
+                    self.dt,
+                    self.max_speed,
+                )?;
+                Ok(((material, scaling.tau), scaling.tau))
+            },
+        )
+        .map_err(|error| match error {
+            LocalRheologyError::Evaluation(error) => error,
+            LocalRheologyError::Invalid(what) => Error::Invalid(what),
+            LocalRheologyError::Convergence {
+                iterations,
+                relaxation_defect,
+            } => Error::RheologyConvergence {
+                iterations,
+                relaxation_defect,
+            },
+        })?;
+        Ok(RheologicalState {
+            material: root.value.0,
+            sample: FreeSurfaceRheologySample {
+                shear_rate_per_s: root.shear_rate_per_s,
+                collision_tau: root.value.1,
+                iterations: root.iterations,
+                relaxation_defect: root.relaxation_defect,
+            },
+        })
+    }
+}
+
+impl<'s> MaterialFreeSurfaceScaling<'s> {
+    /// Initialize moving liquid from one source-backed T/shear constitutive law.
+    ///
+    /// Every occupied/ghost cell immediately solves physical shear against its
+    /// own molecular viscosity. The SAME coefficient drives native collision
+    /// and optional molecular heat. Later thermal substeps refresh all transport
+    /// properties against the held initial stress, then VOF evolves once and
+    /// admits the actual candidate stress before publication. Source-domain,
+    /// convergence and cancellation failures return no initialized candidate.
+    ///
+    /// The ordinary frozen constructors refuse this source. Caloric density is
+    /// fixed, all cells are pure liquid, and capillarity is explicitly neglected.
+    /// The numerical conversion carry transports enthalpy but has no assigned
+    /// strain, viscosity or molecular heat until it returns to a resolved cell.
+    #[allow(clippy::too_many_arguments)]
+    pub fn free_surface3_from_cells_with_rheology<'m>(
+        self,
+        domain: MaterialFreeSurfaceDomain3<'_>,
+        initial: &[MaterialFreeSurfaceInitialCell3],
+        law: &'m LiquidTemperatureLaw<'m>,
+        caloric: &'m EquilibriumEnthalpyPhaseCurve,
+        controls: FreeSurfaceEnthalpyControls,
+        solve: RheologySolve,
+        initial_h: impl Fn([usize; 3]) -> f64,
+        cx: &Cx<'_>,
+        gate: &CancelGate,
+    ) -> Result<MaterialFreeSurfaceEnthalpy3<'s, 'm>, Error> {
+        poll(gate)?;
+        let binding = RheologyBinding::try_new(self.material(), law, solve)?;
+        let flow = self.free_surface3_from_cells_inner(domain, initial, cx)?;
+        let liquid =
+            flow.with_enthalpy_model(law, caloric, controls, initial_h, None, Some(binding), gate)?;
+        cx.checkpoint().map_err(|_| FreeSurfaceError3::Cancelled)?;
+        Ok(liquid)
+    }
+}
+
+impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
+    /// Current rate, physical collision coefficient and local convergence check.
+    #[must_use]
+    pub fn rheology_at(&self, coordinates: [usize; 3]) -> Option<&FreeSurfaceRheologySample> {
+        self.location_at(coordinates)
+            .and_then(|key| self.rheology_samples.get(&key))
+    }
+
+    pub(super) fn rheology_model(&self) -> Option<RheologyModel<'m>> {
+        self.rheology.as_ref().map(|binding| RheologyModel {
+            binding: binding.clone(),
+            law: self.law,
+            caloric: self.caloric,
+            density: self.flow.scaling.material().density_kg_m3(),
+            buoyancy: self.buoyancy,
+            dx: self.flow.scaling.cell_size_m(),
+            dt: self.flow.scaling.timestep_s(),
+            max_speed: self.flow.scaling.flow.u_lattice * self.flow.scaling.velocity_scale,
+        })
+    }
+
+    pub(super) fn rheology_stress(
+        &self,
+        lattice: &FreeSurface3,
+        location: MassLocation3,
+    ) -> Result<RheologyStress, Error> {
+        Ok(RheologyStress {
+            numerator: lattice.transport_shear_rate(location, 1.0)?,
+            initial_tau: self
+                .rheology_samples
+                .get(&location)
+                .map_or(self.flow.scaling.flow.tau, |sample| sample.collision_tau),
+        })
+    }
+}

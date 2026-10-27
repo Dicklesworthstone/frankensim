@@ -201,6 +201,7 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
         cx: &Cx<'_>,
     ) -> Result<(MaterialFreeSurface3<'a>, TetLiquidTransferReport), TetLiquidTransferError> {
         checkpoint(cx)?;
+        self.require_frozen_source()?;
         admit_domain(&domain, &|_, _, _| false)?;
         if self.material().surface_tension_n_m().is_some() || self.planar_wetting().is_some() {
             return Err(invalid(

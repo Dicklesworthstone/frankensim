@@ -117,6 +117,65 @@ fn kinematic_source_uses_same_point_density_without_creating_a_mu_claim() {
 }
 
 #[test]
+fn shear_rate_source_retains_evolution_obligation_and_original_claims() {
+    for basis in [LiquidViscosityBasis::Dynamic, LiquidViscosityBasis::Kinematic] {
+        let original = card(1000.0, 0.1, basis, None);
+        let (viscosity, dims, scale) = match basis {
+            LiquidViscosityBasis::Dynamic => (DYNAMIC_VISCOSITY_PROPERTY, DYNAMIC_VISCOSITY_DIMS, 1.0),
+            LiquidViscosityBasis::Kinematic => (KINEMATIC_VISCOSITY_PROPERTY, KINEMATIC_VISCOSITY_DIMS, 0.001),
+        };
+        let mut claims = ClaimSet::new();
+        for (_, original) in original.claims().claims_ordered() {
+            let mut claim = original.clone();
+            if claim.key.name() == viscosity {
+                claim.value = PropertyValue::Curve {
+                    abscissa: "rate".into(), abscissa_dims: fs_qty::Frequency::DIMS,
+                    knots: vec![(0.0, 0.1 * scale), (100.0, 0.3 * scale)], dims,
+                };
+                claim.interpolation = InterpolationPolicy::LinearInside;
+                claim.validity = claim.validity.with_quantity(
+                    "rate", QuantitySpec::dimensional(fs_qty::Frequency::DIMS), 0.0, 100.0,
+                );
+            }
+            claims.insert_claim(claim).unwrap();
+        }
+        let source = MaterialCard::assemble(original.id().clone(), claims, vec![]).unwrap();
+        let point = point().with_quantity("rate",
+            QuantitySpec::dimensional(fs_qty::Frequency::DIMS), 50.0).unwrap();
+        let requirements: Vec<_> = [(DENSITY_PROPERTY, Density::DIMS), (viscosity, dims)]
+            .into_iter().map(|(name, dims)| ScalarPropertyRequirement::try_new(
+                name, dims, ScalarAdmissibility::StrictlyPositive,
+            ).unwrap()).collect();
+        let bundle = resolve_material_state_point(&source, &point, &requirements,
+            MaterialPropertySelection::SingleClaimOnly).unwrap();
+        assert!(ResolvedLiquidSurfaceState::try_from_material(bundle.clone(), basis,
+            LiquidCapillarity::Neglected).is_err());
+        let evolving = ResolvedLiquidSurfaceState::try_for_shear_rate_evolution(
+            bundle.clone(), basis, "temperature", "rate",
+        ).unwrap();
+        assert_eq!(evolving.rheology_axes(), Some(("temperature", "rate")));
+        assert_eq!(evolving.material(), &bundle);
+        assert_eq!(evolving.capillarity(), LiquidCapillarity::Neglected);
+        assert!((evolving.dynamic_viscosity_pa_s() - 0.2).abs() < 1e-15);
+        assert!((evolving.kinematic_viscosity_m2_s() - 0.0002).abs() < 1e-18);
+        assert!(ResolvedLiquidSurfaceState::try_for_shear_rate_evolution(
+            bundle.clone(), basis, "temperature", "absent",
+        ).is_err());
+        assert!(ResolvedLiquidSurfaceState::try_for_shear_rate_evolution(
+            bundle, basis, "temperature", "temperature",
+        ).is_err());
+    }
+    let source = card(1000.0, 0.1, LiquidViscosityBasis::Dynamic, None);
+    let wrong = point().with_quantity("rate",
+        QuantitySpec::dimensional(fs_qty::Temperature::DIMS), 1.0).unwrap();
+    let bundle = resolve_liquid_surface_state(&source, &wrong, LiquidViscosityBasis::Dynamic,
+        LiquidCapillarity::Neglected, MaterialPropertySelection::SingleClaimOnly).unwrap();
+    assert!(ResolvedLiquidSurfaceState::try_for_shear_rate_evolution(
+        bundle.material().clone(), LiquidViscosityBasis::Dynamic, "temperature", "rate",
+    ).is_err());
+}
+
+#[test]
 fn omitting_capillary_stress_is_explicit_and_does_not_require_sigma() {
     let card = card(1_000.0, 0.1, LiquidViscosityBasis::Dynamic, None);
     let state = resolve_liquid_surface_state(&card, &point(), LiquidViscosityBasis::Dynamic,

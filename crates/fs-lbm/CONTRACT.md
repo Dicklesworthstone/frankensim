@@ -2592,3 +2592,31 @@ these formulas (not Rust execution) gave returned/residual pressure L2 ratios
 it does not meet or establish the plan's -40 dB interface target. Native and
 multidimensional qualification remain necessary before stronger claims.
 
+## Source-resolved rheology in moving liquid (MR23/MR27)
+
+The explicit `free_surface3_from_cells_with_rheology` ingress carries shared
+temperature/shear-rate liquid sources into the actual native VOF collision.
+It reuses the fixed-domain local constitutive solver and force-corrected
+molecular stress. The resulting viscosity supplies collision tau, molecular
+viscous heating and temperature-dependent liquid, finite-wall and gas-film
+thermal transport. Accepted endpoint material/rate observations use the new
+native populations; ordinary frozen constructors refuse evolving-rate bundles.
+`rheology_at` exposes the physical rate, collision coefficient and local
+constitutive residual at an accepted cell.
+
+Thermal substeps hold the initial native stress while resolving temperature and
+rate together. This is the existing first-order split, not exact discrete
+kinetic/thermal conservation. Numerical conversion carry stores enthalpy without
+an invented shear rate, viscosity or heat source. Numerical damping is not
+thermalized. Source-domain, constitutive-convergence, cancellation, thermal and
+native-flow checks precede publication of both liquid and finite-wall states.
+
+The current domain is constant-density pure liquid, stationary walls and
+explicitly omitted capillarity. Shear-dependent caloric storage refuses. No
+viscoelastic/yield history, phase mobility, pressure-work or surface-energy
+claim is added. Five focused runtime tests plus source-admission coverage check
+independent tensor/constitutive roots, body-force correction, data-only
+thinning/thickening, native populations/heat, Newtonian bit parity, thermal
+conductance and rollback. The existing fixed-domain rheology tests also cover
+the shared solver; full native execution remains required.
+

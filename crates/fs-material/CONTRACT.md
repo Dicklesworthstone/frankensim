@@ -2202,3 +2202,16 @@ selection preserves evidence, not measured predictive accuracy. G1/G3 tests in
 derivatives, open/short stiffness, signed/zero coupling, SI-sized synthetic
 coefficients, and whole-block/source-domain refusal. Actual coupled motion,
 charge and native circuit composition belong to `fs-couple::piezoelectric`.
+
+## Explicit liquid source admission for evolving shear rate
+
+`ResolvedLiquidSurfaceState::try_for_shear_rate_evolution` retains the original
+liquid card, viscosity basis and selected claims while explicitly identifying
+the temperature and physical shear-rate axes that its consumer must evolve.
+It introduces no viscosity law, guessed rate or surface-energy model. The
+existing frozen source constructor continues to refuse rate-dependent claims;
+ordinary frozen flow ingress also refuses the evolving marker. Only an owner
+that solves those physical coordinates may use this bundle. The moving-liquid
+enthalpy/rheology owner in `fs-lbm` provides that integration. Focused admission
+tests cover dynamic/kinematic viscosity bases, source retention and refusal of
+unowned axes; caloric response with shear-dependent storage remains unsupported.

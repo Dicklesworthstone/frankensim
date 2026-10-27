@@ -89,6 +89,8 @@ struct Conduction<'a, 'm> {
     caloric: &'a EquilibriumEnthalpyPhaseCurve,
     density: f64,
     buoyancy: Option<BoussinesqLiquid>,
+    rheology: Option<rheology::RheologyModel<'m>>,
+    rheology_stress: BTreeMap<CellId, rheology::RheologyStress>,
     faces: &'a [FreeSurfaceConductionFace],
     endpoints: Vec<[CellId; 2]>,
     liquid_cells: Vec<CellId>,
@@ -118,6 +120,23 @@ struct Samples {
 }
 
 impl Conduction<'_, '_> {
+    fn sample_liquid(
+        &self,
+        id: CellId,
+        h: f64,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<ResolvedLiquidState, Error> {
+        if let Some(model) = &self.rheology {
+            Ok(model
+                .sample(h, self.rheology_stress[&id], || {
+                    check().map_err(Error::from)
+                })?
+                .material)
+        } else {
+            Ok(resolve_liquid(self.law, self.caloric, h, self.density, self.buoyancy)?.0)
+        }
+    }
+
     fn sample(
         &self,
         thermal: &DepositionSimulation<'_>,
@@ -127,13 +146,7 @@ impl Conduction<'_, '_> {
         for &id in &self.liquid_cells {
             check()?;
             let cell = &thermal.cells()[&id];
-            let (state, _) = resolve_liquid(
-                self.law,
-                self.caloric,
-                cell.specific_h_j_kg,
-                self.density,
-                self.buoyancy,
-            )?;
+            let state = self.sample_liquid(id, cell.specific_h_j_kg, check)?;
             states.insert(id, state);
         }
         let mut samples = Vec::with_capacity(self.faces.len());
@@ -591,11 +604,21 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         )?
         .advance_to(0.0, config, || checkpoint(gate))?
         .0;
+        let rheology = self.rheology_model();
+        let mut rheology_stress = BTreeMap::new();
+        if rheology.is_some() {
+            for (&location, &id) in &ids {
+                poll(gate)?;
+                rheology_stress.insert(id, self.rheology_stress(&self.flow.lattice, location)?);
+            }
+        }
         let observer = Conduction {
             law: self.law,
             caloric: self.caloric,
             density: rho,
             buoyancy: self.buoyancy,
+            rheology,
+            rheology_stress,
             faces,
             endpoints,
             liquid_cells,

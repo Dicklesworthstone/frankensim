@@ -70,6 +70,17 @@ pub(super) fn resolve_liquid(
     density: f64,
     buoyancy: Option<BoussinesqLiquid>,
 ) -> Result<(ResolvedLiquidState, FluidTransportState), Error> {
+    let temperature = liquid_temperature(caloric, h, density)?;
+    let state = law.at_temperature(Temperature::new(temperature))?;
+    let transport = liquid_transport(&state, density, buoyancy)?;
+    Ok((state, transport))
+}
+
+pub(super) fn liquid_temperature(
+    caloric: &EquilibriumEnthalpyPhaseCurve,
+    h: f64,
+    density: f64,
+) -> Result<f64, Error> {
     let phase = caloric.state_at_specific_enthalpy(h)?;
     if phase.phase() != SolidLiquidPhase::Liquid
         || phase.bulk_density_kg_m3().to_bits() != density.to_bits()
@@ -78,7 +89,14 @@ pub(super) fn resolve_liquid(
             "free-surface heat needs pure liquid at the original fixed caloric density",
         ));
     }
-    let state = law.at_temperature(Temperature::new(phase.temperature_k()))?;
+    Ok(phase.temperature_k())
+}
+
+pub(super) fn liquid_transport(
+    state: &ResolvedLiquidState,
+    density: f64,
+    buoyancy: Option<BoussinesqLiquid>,
+) -> Result<FluidTransportState, Error> {
     let actual = state.transport_state().map_err(MaterialLbmError::from)?;
     let transport = if let Some(binding) = buoyancy {
         // The original source and its receipts remain in `state`; this is the
@@ -94,7 +112,7 @@ pub(super) fn resolve_liquid(
         }
         actual
     };
-    Ok((state, transport))
+    Ok(transport)
 }
 
 impl<'s> MaterialFreeSurface3<'s> {
@@ -127,6 +145,6 @@ impl<'s> MaterialFreeSurface3<'s> {
         initial_h: impl Fn([usize; 3]) -> f64,
         gate: &CancelGate,
     ) -> Result<MaterialFreeSurfaceEnthalpy3<'s, 'm>, Error> {
-        self.with_enthalpy_model(law, caloric, controls, initial_h, Some(config), gate)
+        self.with_enthalpy_model(law, caloric, controls, initial_h, Some(config), None, gate)
     }
 }

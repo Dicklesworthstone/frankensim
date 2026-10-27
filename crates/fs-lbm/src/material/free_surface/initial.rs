@@ -35,6 +35,16 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
         initial: &[MaterialFreeSurfaceInitialCell3],
         cx: &Cx<'_>,
     ) -> Result<MaterialFreeSurface3<'a>, MaterialLbmError> {
+        self.require_frozen_source()?;
+        self.free_surface3_from_cells_inner(domain, initial, cx)
+    }
+
+    pub(super) fn free_surface3_from_cells_inner(
+        self,
+        domain: MaterialFreeSurfaceDomain3<'_>,
+        initial: &[MaterialFreeSurfaceInitialCell3],
+        cx: &Cx<'_>,
+    ) -> Result<MaterialFreeSurface3<'a>, MaterialLbmError> {
         cx.checkpoint()
             .map_err(|_| crate::d3q19::freesurface3::FreeSurfaceError3::Cancelled)?;
         if self.planar_wetting.is_some() && domain.contact != ContactModel3::Neutral {

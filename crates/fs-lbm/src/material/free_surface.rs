@@ -6,6 +6,8 @@
 //! property is fabricated. Geometry, timestep, gravity and the numerical wall
 //! ghost are explicit scenario data. No thermal, moving-wall, gas-flow, wetting
 //! calibration or conservative surface-energy evolution is introduced here.
+//! The `enthalpy` owner adds thermal evolution; its `rheology` path alone may
+//! consume source bundles that explicitly require evolving physical shear rate.
 
 use fs_exec::CancelGate;
 use fs_material::liquid::surface::{ResolvedLiquidSurfaceState, ResolvedLiquidWettingState};
@@ -24,7 +26,7 @@ pub mod transfer;
 /// Conservative moving-liquid enthalpy and source-temperature viscosity.
 pub mod enthalpy;
 
-/// One frozen source state and its physical-to-lattice conversion.
+/// One reference source state and its physical-to-lattice conversion.
 ///
 /// A necessary numerical admission, not a stability or accuracy certificate.
 /// The caller must maintain its maximum-speed bound and establish adequate
@@ -88,7 +90,9 @@ pub struct MaterialFreeSurface3<'a> {
     scaling: MaterialFreeSurfaceScaling<'a>,
 }
 
-/// Compile an isothermal liquid source bundle into native momentum/capillarity.
+/// Compile a liquid source bundle's reference momentum/capillary scaling.
+/// Frozen constructors refuse a source with required rheology evolution;
+/// the dedicated enthalpy/rheology constructor resolves it at every flow state.
 ///
 /// sigma_lattice = sigma_SI / (rho0 * (dx/dt)^2 * dx).
 /// The native bounded-curvature pressure reconstruction must remain strictly
@@ -137,6 +141,15 @@ pub fn plan_free_surface_from_material(
 }
 
 impl<'a> MaterialFreeSurfaceScaling<'a> {
+    fn require_frozen_source(&self) -> Result<(), MaterialLbmError> {
+        if self.material.rheology_axes().is_some() {
+            return Err(MaterialLbmError::Invalid(
+                "shear-rate material requires the evolving free-surface rheology constructor",
+            ));
+        }
+        Ok(())
+    }
+
     /// Original source state, property receipts and interface environment.
     #[must_use]
     pub const fn material(&self) -> &'a ResolvedLiquidSurfaceState { self.material }
@@ -232,6 +245,7 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
         domain: MaterialFreeSurfaceDomain3<'_>,
         fluid: impl Fn(usize, usize, usize) -> bool,
     ) -> Result<MaterialFreeSurface3<'a>, MaterialLbmError> {
+        self.require_frozen_source()?;
         if self.planar_wetting.is_some() && domain.contact != ContactModel3::Neutral {
             return Err(MaterialLbmError::Invalid(
                 "a sourced planar angle requires Neutral on all other walls",

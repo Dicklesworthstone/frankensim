@@ -51,7 +51,7 @@ pub struct RheologySolve {
     pub relative_relaxation_tolerance: f64,
 }
 impl RheologySolve {
-    fn validate(self) -> Result<(), MaterialTransportError> {
+    pub(crate) fn validate(self) -> Result<(), MaterialTransportError> {
         if self.maximum_iterations == 0
             || !self.relaxation.is_finite()
             || self.relaxation <= 0.0
@@ -69,6 +69,68 @@ impl RheologySolve {
         }
         Ok(())
     }
+}
+
+/// The same constitutive root is used by fixed-domain and free-surface flow.
+pub(crate) struct LocalRheology<F> {
+    pub value: F,
+    pub shear_rate_per_s: f64,
+    pub iterations: usize,
+    pub relaxation_defect: f64,
+}
+
+pub(crate) enum LocalRheologyError<E> {
+    Evaluation(E),
+    Invalid(&'static str),
+    Convergence {
+        iterations: usize,
+        relaxation_defect: f64,
+    },
+}
+
+/// Resolve the force-corrected stress numerator against the material's physical
+/// BGK relaxation. Callers admit controls and units and retain source authority.
+pub(crate) fn solve_local<F, E>(
+    numerator: f64,
+    timestep_s: f64,
+    initial_tau: f64,
+    solve: RheologySolve,
+    mut check: impl FnMut() -> Result<(), E>,
+    mut evaluate: impl FnMut(f64) -> Result<(F, f64), E>,
+) -> Result<LocalRheology<F>, LocalRheologyError<E>> {
+    let mut tau = initial_tau;
+    let mut relaxation_defect = f64::INFINITY;
+    for iterations in 1..=solve.maximum_iterations {
+        check().map_err(LocalRheologyError::Evaluation)?;
+        let rate = (numerator / tau) / timestep_s;
+        if !rate.is_finite() || rate < 0.0 {
+            return Err(LocalRheologyError::Invalid(
+                "physical shear rate is unrepresentable",
+            ));
+        }
+        let (value, next) = evaluate(rate).map_err(LocalRheologyError::Evaluation)?;
+        relaxation_defect = (next - tau).abs();
+        let tolerance = solve.absolute_relaxation_tolerance
+            + solve.relative_relaxation_tolerance * next.max(tau);
+        if !tolerance.is_finite() {
+            return Err(LocalRheologyError::Invalid(
+                "rheology tolerance is unrepresentable",
+            ));
+        }
+        if relaxation_defect <= tolerance {
+            return Ok(LocalRheology {
+                value,
+                shear_rate_per_s: rate,
+                iterations,
+                relaxation_defect,
+            });
+        }
+        tau += solve.relaxation * (next - tau);
+    }
+    Err(LocalRheologyError::Convergence {
+        iterations: solve.maximum_iterations,
+        relaxation_defect,
+    })
 }
 
 /// Original material response and the converged physical coordinates it used.
@@ -195,59 +257,57 @@ fn sample<S: StressSlab<D, Q>, F: FluidTransport, const D: usize, const Q: usize
         range,
         gate,
         &mut |cell, temperature_k, retained| {
-            let mut tau = state.momentum_relaxation()[cell];
-            let mut relaxation_defect = f64::INFINITY;
-            for iterations in 1..=solve.maximum_iterations {
-                poll(gate)?;
-                let rate = (numerator[cell] / tau) / units.timestep_s;
-                if !rate.is_finite() || rate < 0.0 {
-                    return Err(MaterialTransportError::Invalid(
-                        "physical shear rate is unrepresentable",
-                    ));
-                }
-                let point = RheologyPoint {
-                    cell,
-                    temperature_k,
-                    shear_rate_per_s: rate,
-                };
-                let error = |source| MaterialTransportError::State {
-                    cell,
-                    temperature_k,
-                    source,
-                };
-                let source = resolve(point, retained).map_err(|e| error(e.into()))?;
-                let transport = source.transport_state().map_err(|e| error(e.into()))?;
-                let scale = plan_scaling_from_material(
-                    &transport,
-                    units.cell_size_m,
-                    units.timestep_s,
-                    0.0,
-                )
-                .map_err(error)?;
-                let next = scale.flow().tau;
-                relaxation_defect = (next - tau).abs();
-                let tolerance = solve.absolute_relaxation_tolerance
-                    + solve.relative_relaxation_tolerance * next.max(tau);
-                if !tolerance.is_finite() {
-                    return Err(MaterialTransportError::Invalid(
-                        "rheology tolerance is unrepresentable",
-                    ));
-                }
-                if relaxation_defect <= tolerance {
-                    return Ok(RheologyMaterial {
+            let root = solve_local(
+                numerator[cell],
+                units.timestep_s,
+                state.momentum_relaxation()[cell],
+                solve,
+                || poll(gate),
+                |rate| {
+                    let point = RheologyPoint {
+                        cell,
+                        temperature_k,
+                        shear_rate_per_s: rate,
+                    };
+                    let error = |source| MaterialTransportError::State {
+                        cell,
+                        temperature_k,
                         source,
-                        point,
-                        transport,
-                        iterations,
-                        relaxation_defect,
-                    });
-                }
-                tau += solve.relaxation * (next - tau);
-            }
-            Err(MaterialTransportError::RheologyConvergence {
-                cell,
-                iterations: solve.maximum_iterations,
-                relaxation_defect,
+                    };
+                    let source = resolve(point, retained).map_err(|e| error(e.into()))?;
+                    let transport = source.transport_state().map_err(|e| error(e.into()))?;
+                    let scale = plan_scaling_from_material(
+                        &transport,
+                        units.cell_size_m,
+                        units.timestep_s,
+                        0.0,
+                    )
+                    .map_err(error)?;
+                    Ok(((source, transport), scale.flow().tau))
+                },
+            )
+            .map_err(|error| match error {
+                LocalRheologyError::Evaluation(error) => error,
+                LocalRheologyError::Invalid(what) => MaterialTransportError::Invalid(what),
+                LocalRheologyError::Convergence {
+                    iterations,
+                    relaxation_defect,
+                } => MaterialTransportError::RheologyConvergence {
+                    cell,
+                    iterations,
+                    relaxation_defect,
+                },
+            })?;
+            Ok(RheologyMaterial {
+                source: root.value.0,
+                transport: root.value.1,
+                point: RheologyPoint {
+                    cell,
+                    temperature_k,
+                    shear_rate_per_s: root.shear_rate_per_s,
+                },
+                iterations: root.iterations,
+                relaxation_defect: root.relaxation_defect,
             })
         },
     )

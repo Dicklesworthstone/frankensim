@@ -205,8 +205,7 @@ impl Conduction<'_, '_> {
                 return Err(Error::Invalid("environment exceeds exposed liquid area"));
             }
             let h = thermal.cells()[&id].specific_h_j_kg;
-            let (liquid, _) =
-                resolve_liquid(self.law, self.caloric, h, self.density, self.buoyancy)?;
+            let liquid = self.sample_liquid(id, h, check)?;
             let temperature = thermal.temperature_k(id)?;
             let bath = contact.context.axes()["temperature"];
             let film = 0.5 * temperature + 0.5 * bath;

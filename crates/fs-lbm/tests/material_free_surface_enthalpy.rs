@@ -31,6 +31,9 @@ mod buoyancy;
 #[path = "material_free_surface_enthalpy/viscous.rs"]
 mod viscous;
 
+#[path = "material_free_surface_enthalpy/rheology.rs"]
+mod rheology;
+
 fn card(hot_viscosity: f64, hot_density: f64) -> MaterialCard {
     let mut claims = ClaimSet::new();
     for (name, dims, values) in [
