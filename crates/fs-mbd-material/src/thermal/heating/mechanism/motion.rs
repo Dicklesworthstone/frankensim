@@ -7,6 +7,7 @@
 //! work is reported separately and never deposited as caloric heat.
 //! Optional source-backed journal films apply resisting torques in the SAME
 //! mechanical stages and deposit their integrated work on this thermal clock.
+//! Ordered material dry brakes use that same work/heat path for both bodies.
 use super::*;
 use fs_ga::{Se3, Vec3, Wrench};
 use fs_mbd::articulated::{
@@ -21,6 +22,11 @@ use std::cell::RefCell;
 /// Material-driven journal loss and its receiving thermal control volume.
 pub mod viscous;
 use viscous::{BoundBearing, JournalBearing, JournalBearingState};
+
+/// Source-bound dry sliding, generalized resisting effort and two-body heating.
+pub mod dry;
+use dry::{BoundBrake, DryBrakeState, DryJointBrake};
+use fs_tribo::DissipationStep;
 
 /// Component tolerances follow the actual generalized-coordinate ordering.
 #[derive(Clone, Debug, PartialEq)]
@@ -45,6 +51,9 @@ pub struct Controls {
 pub enum Error {
     Heating(HeatingError),
     Material(fs_material::state_point::MaterialStatePointError),
+    ThermalMaterial(fs_material::thermal::source::ThermalMaterialError),
+    Interface(fs_contact::interface_binding::InterfaceBindingError),
+    Tribo(fs_tribo::TriboError),
     Dynamics(ArticulatedError),
     Integration(AdaptiveError),
     Invalid(&'static str),
@@ -69,6 +78,21 @@ impl From<fs_material::state_point::MaterialStatePointError> for Error {
 impl From<DepositionError> for Error {
     fn from(e: DepositionError) -> Self {
         Self::Heating(e.into())
+    }
+}
+impl From<fs_material::thermal::source::ThermalMaterialError> for Error {
+    fn from(e: fs_material::thermal::source::ThermalMaterialError) -> Self {
+        Self::ThermalMaterial(e)
+    }
+}
+impl From<fs_contact::interface_binding::InterfaceBindingError> for Error {
+    fn from(e: fs_contact::interface_binding::InterfaceBindingError) -> Self {
+        Self::Interface(e)
+    }
+}
+impl From<fs_tribo::TriboError> for Error {
+    fn from(e: fs_tribo::TriboError) -> Self {
+        Self::Tribo(e)
     }
 }
 impl From<ArticulatedError> for Error {
@@ -103,6 +127,9 @@ pub struct Audit {
     /// Mechanical loss deposited once in `thermal.external_heat_j` [J].
     /// Subtract this internal transfer when identifying externally supplied heat.
     pub viscous_heat_j: f64,
+    /// Dry sliding loss deposited once into the two ordered finite bodies [J].
+    /// This is included in thermal.external_heat_j, an internal transfer here.
+    pub friction_heat_j: f64,
     pub parameter_work_j: f64,
     pub absolute_parameter_work_j: f64,
     pub numerical_energy_change_j: f64,
@@ -118,7 +145,7 @@ pub struct Audit {
 /// Constant declared joint efforts and uniform gravity act on a stationary
 /// base. Joints, reference placements and thermal transport geometry remain
 /// prescribed. Free thermal expansion changes each link's retained inertia;
-/// deformation velocities, moving joint anchors, contacts, closed kinematic
+/// deformation velocities, moving joint anchors, general contacts, closed kinematic
 /// loops and reciprocal thermoelastic heat require other owners. The original
 /// material mass is retained; this is not a material replacement event.
 #[derive(Clone)]
@@ -157,6 +184,7 @@ impl<'a> HeatedArticulatedMotion<'a> {
             controls,
             work: Work::default(),
             bearings: Vec::new(),
+            brakes: Vec::new(),
             pending: None,
         };
         forward_dynamics(
@@ -212,7 +240,10 @@ impl<'a> HeatedArticulatedMotion<'a> {
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, Error> {
         checkpoint()?;
-        if !self.motion.bearings.is_empty() || bearings.is_empty() || bearings.len() > 64 {
+        if !self.motion.bearings.is_empty()
+            || bearings.is_empty()
+            || bearings.len() + self.motion.brakes.len() > 64
+        {
             return Err(Error::Invalid("attach 1..=64 journal films exactly once"));
         }
         let mut candidate = self.clone();
@@ -232,6 +263,46 @@ impl<'a> HeatedArticulatedMotion<'a> {
     /// Actual endpoint source states, resistance, torque and power in input order.
     pub fn journal_bearings(&self) -> impl ExactSizeIterator<Item = &JournalBearingState> {
         self.motion.bearings.iter().map(|b| &b.state)
+    }
+
+    /// Attach ordered child/parent dry brakes, sharing the native mechanical
+    /// stages and thermal substeps with any journal films. At most 64 total
+    /// dissipative interfaces are admitted. Each brake's two finite cells must
+    /// be actual regions of its child and direct parent; source order matters.
+    /// Normal preload/geometry/heat fractions are explicit prescribed inputs.
+    pub fn with_dry_joint_brakes(
+        &self,
+        brakes: Vec<DryJointBrake<'a>>,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, Error> {
+        checkpoint()?;
+        if !self.motion.brakes.is_empty()
+            || brakes.is_empty()
+            || brakes.len() + self.motion.bearings.len() > 64
+        {
+            return Err(Error::Invalid(
+                "attach dry brakes once within the 64-interface total budget",
+            ));
+        }
+        let mut candidate = self.clone();
+        for brake in brakes {
+            checkpoint()?;
+            candidate.motion.brakes.push(BoundBrake::new(
+                brake,
+                self.configuration().model(),
+                &self.motion.expansion.regions,
+                &self.thermal,
+                &self.motion.velocity,
+                &mut checkpoint,
+            )?);
+        }
+        checkpoint()?;
+        Ok(candidate)
+    }
+
+    /// Accepted source temperatures, friction response and cumulative heat split.
+    pub fn dry_joint_brakes(&self) -> impl ExactSizeIterator<Item = &DryBrakeState> {
+        self.motion.brakes.iter().map(|b| &b.state)
     }
 
     /// Use the existing heat scheduler. Late cancellation, material-domain,
@@ -279,6 +350,7 @@ impl<'a> HeatedArticulatedMotion<'a> {
             mechanical_after: after,
             applied_joint_work_j: w.applied,
             viscous_heat_j: w.viscous,
+            friction_heat_j: w.friction,
             parameter_work_j: w.parameter,
             absolute_parameter_work_j: w.absolute_parameter,
             numerical_energy_change_j: w.numerical,
@@ -286,7 +358,9 @@ impl<'a> HeatedArticulatedMotion<'a> {
             maximum_scaled_momentum_residual: w.momentum_residual,
             rk_attempts: w.attempts,
             combined_residual_j: finite(
-                thermal.residual_j + after.change_from(before)? - w.applied + w.viscous
+                thermal.residual_j + after.change_from(before)? - w.applied
+                    + w.viscous
+                    + w.friction
                     - w.parameter
                     - w.numerical,
             )?,
@@ -321,6 +395,7 @@ impl Controls {
 struct Work {
     applied: f64,
     viscous: f64,
+    friction: f64,
     parameter: f64,
     absolute_parameter: f64,
     numerical: f64,
@@ -340,6 +415,7 @@ struct Motion<'a> {
     controls: Controls,
     work: Work,
     bearings: Vec<BoundBearing<'a>>,
+    brakes: Vec<BoundBrake<'a>>,
     pending: Option<IntegratedMotion>,
 }
 #[derive(Clone)]
@@ -350,6 +426,8 @@ struct IntegratedMotion {
     after_motion: MechanicalEnergy,
     applied: f64,
     viscous: f64,
+    friction: f64,
+    dry_steps: Vec<DissipationStep>,
     heat_w: BTreeMap<CellId, f64>,
     numerical: f64,
     attempts: usize,
@@ -390,6 +468,11 @@ impl Motion<'_> {
                 .iter()
                 .map(|b| b.definition.limits.absolute_loss_tolerance_j),
         );
+        scales.extend(
+            self.brakes
+                .iter()
+                .map(|b| b.definition.limits.absolute_loss_tolerance_j),
+        );
         let mut normalized: Vec<_> = self
             .position
             .iter()
@@ -409,6 +492,12 @@ impl Motion<'_> {
                     let (torque, power, _) = bearing.response(physical[n + bearing.dof])?;
                     effort[bearing.dof] = finite(effort[bearing.dof] + torque)?;
                     out[2 * n + j] = power / scales[2 * n + j];
+                }
+                for (j, brake) in self.brakes.iter().enumerate() {
+                    let (force, power) = brake.response(physical[n + brake.dof])?;
+                    effort[brake.dof] = finite(effort[brake.dof] + force)?;
+                    let index = 2 * n + self.bearings.len() + j;
+                    out[index] = power / scales[index];
                 }
                 let response = forward_dynamics(
                     model,
@@ -483,7 +572,28 @@ impl Motion<'_> {
             let watts = heat_w.entry(bearing.definition.heat_cell).or_insert(0.0);
             *watts = finite(*watts + loss / dt_s)?;
         }
-        let numerical = finite(after_motion.change_from(before)? - applied + viscous)?;
+        let mut friction = 0.0;
+        let mut dry_steps = Vec::with_capacity(self.brakes.len());
+        for (brake, &loss) in self
+            .brakes
+            .iter()
+            .zip(&physical[2 * n + self.bearings.len()..])
+        {
+            brake.response(velocity[brake.dof])?;
+            let step = brake.partition_loss(loss, dt_s)?;
+            friction = finite(friction + step.total_work_j())?;
+            for (cell, heat) in brake
+                .definition
+                .cells
+                .into_iter()
+                .zip([step.surface_a_heat_j(), step.surface_b_heat_j()])
+            {
+                let watts = heat_w.entry(cell).or_insert(0.0);
+                *watts = finite(*watts + heat / dt_s)?;
+            }
+            dry_steps.push(step);
+        }
+        let numerical = finite(after_motion.change_from(before)? - applied + viscous + friction)?;
         checkpoint()?;
         Ok(IntegratedMotion {
             end_s,
@@ -492,6 +602,8 @@ impl Motion<'_> {
             after_motion,
             applied,
             viscous,
+            friction,
+            dry_steps,
             heat_w,
             numerical,
             attempts: report.attempts,
@@ -518,7 +630,7 @@ impl DepositionObserver for Motion<'_> {
         Ok(proposed_s.min(self.controls.maximum_step_s))
     }
     fn requires_step_interval(&self) -> bool {
-        !self.bearings.is_empty()
+        !self.bearings.is_empty() || !self.brakes.is_empty()
     }
     fn step_sources(
         &mut self,
@@ -566,6 +678,8 @@ impl DepositionObserver for Motion<'_> {
             after_motion,
             applied,
             viscous,
+            friction,
+            dry_steps,
             numerical,
             attempts,
             ..
@@ -601,8 +715,12 @@ impl DepositionObserver for Motion<'_> {
             checkpoint()?;
             bearing.refresh(thermal, &next_velocity)?;
         }
+        for (brake, loss) in self.brakes.iter_mut().zip(dry_steps) {
+            brake.accept(loss, thermal, &next_velocity, checkpoint)?;
+        }
         self.work.applied = finite(self.work.applied + applied)?;
         self.work.viscous = finite(self.work.viscous + viscous)?;
+        self.work.friction = finite(self.work.friction + friction)?;
         self.work.parameter = finite(self.work.parameter + parameter)?;
         self.work.absolute_parameter = finite(self.work.absolute_parameter + parameter.abs())?;
         self.work.numerical = finite(self.work.numerical + numerical)?;

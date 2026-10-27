@@ -29,6 +29,8 @@ fs-mbd = { path = "../fs-mbd" }
 fs-qty = { path = "../fs-qty" }
 fs-thermal = { path = "../fs-thermal" }
 fs-time = { path = "../fs-time" }
+fs-contact = { path = "../fs-contact" }
+fs-tribo = { path = "../fs-tribo" }
 
 [dev-dependencies]
 fs-alloc = { path = "../fs-alloc" }

@@ -2040,6 +2040,7 @@ version = "0.0.1"
 dependencies = [
  "fs-alloc",
  "fs-blake3",
+ "fs-contact",
  "fs-evidence",
  "fs-exec",
  "fs-ga",
@@ -2053,6 +2054,7 @@ dependencies = [
  "fs-solid",
  "fs-thermal",
  "fs-time",
+ "fs-tribo",
 ]
 
 [[package]]

@@ -276,3 +276,69 @@ split remains first order. Four G1/G3/G4 tests in
 two-link angular momentum, source-only viscosity feedback and refinement,
 continuation, and late rollback. Native execution remains required for
 numerical qualification.
+
+### Material dry joint brakes and two-body thermal feedback
+
+`articulated_motion::dry::DryJointBrake` joins the existing ordered dry-interface,
+tribology, articulated dynamics and finite-enthalpy owners. `with_dry_joint_brakes`
+attaches prescribed parent-child sliding contacts to `HeatedArticulatedMotion`.
+The existing ABA/RK45 stages apply native `FrictionLaw::regularized_traction_1d`
+and integrate its mechanical power. Those same accepted loss increments pass
+through native `DissipationStep`/`HeatPartition` into the two actual finite thermal
+regions, using the existing shared substeps. No separate motion or heat solver is
+introduced, and journal films and dry brakes can act together.
+
+For a revolute joint, slip is `v = r qdot` and resisting generalized effort is
+`r F`; for a prismatic joint they are `qdot` and `F`. This conjugate mapping
+preserves the full articulated mass coupling and the opposite parent reaction.
+Normal load, nominal contact area, revolute effective radius and heat fractions
+are explicitly prescribed. The preload has no normal displacement/work in the
+admitted coordinate. The source pressure is exactly load divided by nominal area.
+The ordered interface is bound by `fs-contact`; surface A must be a thermal region
+of the named child, B a region of its direct parent, retaining their original
+bulk cards and caloric objects. There is no unnamed third heat destination.
+
+Static/kinetic coefficients come from the existing canonical interface property
+resolver. A scalar must explicitly declare `ConstantWithinValidity`; an exact
+point sample is not promoted to a law over evolving temperature.
+`ThermalInterfacePoint` keeps the two body temperatures distinct and
+only supplies a mean temperature when explicitly declared. Each accepted endpoint
+refreshes the original selected claims. The next mechanical interval therefore
+uses the actual heated interface response, including thermally weakened friction.
+Rate, frequency, field, strain and history-dependent responses/applicability
+refuse because this slice has no owner for those evolving coordinates. Coefficient
+curves and sampled surfaces may use one shared evolving temperature coordinate
+(A, B or declared mean), with additional held pressure/composition coordinates.
+Two evolving source-response temperatures refuse instead of treating point samples
+as proof of support on a diagonal. Native source-line queries check continuous
+support across every crossed knot/cell and the union of both coefficient breakpoints
+checks `mu_k <= mu_s`. Per-step coefficient-change limits require split refinement.
+
+Native regularization is an explicit positive speed and gives zero force at rest;
+this does not claim static sticking, a contact onset/normal-compliance solve, wear,
+texture-direction dependence, flash temperature, or a derived heat partition.
+The two finite regions remain spatially lumped and solid. Thermal contact exchange
+between them can be supplied separately by the existing thermal contact owner.
+Normal force, area and radius do not change with expansion. Existing fixed-topology,
+stationary-base and thermal-parameter-work limits still apply; reciprocal
+thermoelastic work is not invented. The split remains first order and requires
+time refinement independently of RK tolerance.
+
+`Audit::friction_heat_j` is the mechanical loss already included in the thermal
+owner's external heat counter; it is an internal transfer in the combined balance.
+Numerical integration defects and inertia-parameter work remain separate accounts.
+Each brake also retains the native cumulative two-destination `WorkLedger`.
+There are at most 64 journal/brake loss channels in total. Every attachment and
+advance is a candidate; source support, phase, mapping, coefficient, energy,
+integration-budget or cancellation failure preserves motion, both heat stores,
+source receipts and work history together. Source-line work polls the existing
+checkpoint callback at bounded property/knot boundaries.
+
+`tests/heated_articulated_dry_motion.rs` contains independent cube-inertia constant
+deceleration with interface-data swaps and reversed motion, a coupled two-rotor
+momentum/heat balance, prismatic translation, low-speed exponential decay including
+rest, thermal-fade convergence against the analytically reduced coupled ODE,
+aligned restart, wrong-body refusal, source-domain refusal and late cancellation.
+These are synthetic constitutive fixtures, not measured brake validation. This
+delivery has parser/source-review checks only; execution of these new regressions
+is not claimed without a current-source compile/runtime result.
