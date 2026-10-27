@@ -536,6 +536,7 @@ mod tests {
         let controls = inertial::Options {
             maximum_step_s: 0.0003,
             mass_damping_per_s: 20.0,
+            stiffness_damping_s: 0.0,
         };
         // A finite heating pulse excites inertia; the manufactured Young's
         // modulus and expansion both change with the actual spatial field.
@@ -614,12 +615,59 @@ mod tests {
     }
 
     #[test]
+    fn explicit_stiffness_damping_changes_retained_motion_not_the_prescribed_heat() {
+        let card = demo(1.0).unwrap();
+        let gas = options(0.0004);
+        let controls = inertial::Options {
+            maximum_step_s: 0.0003, mass_damping_per_s: 20.0,
+            stiffness_damping_s: 0.0,
+        };
+        let baseline = synthesize_with_options(&card, 5000.0, 0.002, Some(&gas),
+            Some(controls), &CancelGate::new()).unwrap();
+        let damped_controls = inertial::Options { stiffness_damping_s: 1e-5, ..controls };
+        let damped = synthesize_with_options(&card, 5000.0, 0.002, Some(&gas),
+            Some(damped_controls), &CancelGate::new()).unwrap();
+        let a = baseline.inertial_history.as_ref().unwrap();
+        let b = damped.inertial_history.as_ref().unwrap();
+        assert_eq!(a.frames.len(), b.frames.len());
+        assert_eq!(a.frames[0], b.frames[0]);
+        assert_ne!(a.frames.last().unwrap().motion, b.frames.last().unwrap().motion);
+        assert_ne!(a.frames.last().unwrap().work_j[3], b.frames.last().unwrap().work_j[3]);
+        let mesh = mesh();
+        for frame in &b.frames {
+            assert!(frame.work_j[3] >= 0.0);
+            assert!(frame.residual_j.abs() < 2e-9);
+            for &dof in &mesh.fixed {
+                for field in &frame.motion { assert_eq!(field[dof / 3][dof % 3], 0.0); }
+            }
+        }
+        for pair in b.frames.windows(2) {
+            let h = pair[1].time_s - pair[0].time_s;
+            assert!(pair[1].work_j[3] + 1e-12 >= pair[0].work_j[3]);
+            for node in 0..mesh.nodes.len() { for axis in 0..3 {
+                let du = pair[1].motion[0][node][axis] - pair[0].motion[0][node][axis];
+                let vbar = 0.5 * (pair[1].motion[1][node][axis] + pair[0].motion[1][node][axis]);
+                assert!((du - h * vbar).abs() < 1e-12);
+            }}
+        }
+        // This remains one-way heating. Do not manufacture a caloric debit or
+        // alter the independent frozen-state acoustic experiments with the knob.
+        assert_eq!(baseline.gas_history.as_ref().unwrap().rows, damped.gas_history.as_ref().unwrap().rows);
+        assert_eq!(baseline.cold, damped.cold);
+        assert_eq!(baseline.hot, damped.hot);
+        let replay = synthesize_with_options(&card, 5000.0, 0.002, Some(&gas),
+            Some(damped_controls), &CancelGate::new()).unwrap();
+        assert_eq!(b.frames, replay.inertial_history.unwrap().frames);
+    }
+
+    #[test]
     fn inertial_controls_refuse_unadmitted_clocks_and_cancelled_runs() {
         let card = demo(1.0).unwrap();
         let gas = options(0.0004);
         let controls = inertial::Options {
             maximum_step_s: 0.0001,
             mass_damping_per_s: 0.0,
+            stiffness_damping_s: 0.0,
         };
         assert!(
             synthesize_with_options(

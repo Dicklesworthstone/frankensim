@@ -9,6 +9,8 @@ use fs_solid::loads3::transient::{TetTransientRun3, TransientConfig3};
 pub(super) struct Options {
     pub maximum_step_s: f64,
     pub mass_damping_per_s: f64,
+    /// Explicit Rayleigh stiffness coefficient [s], not an acoustic loss factor.
+    pub stiffness_damping_s: f64,
 }
 
 impl Options {
@@ -17,8 +19,10 @@ impl Options {
             || self.maximum_step_s <= 0.0
             || !self.mass_damping_per_s.is_finite()
             || self.mass_damping_per_s < 0.0
+            || !self.stiffness_damping_s.is_finite()
+            || self.stiffness_damping_s < 0.0
         {
-            return Err("inertial history needs a finite positive maximum step and nonnegative mass damping".into());
+            return Err("inertial history needs a finite positive maximum step and finite nonnegative Rayleigh coefficients".into());
         }
         Ok(())
     }
@@ -26,8 +30,18 @@ impl Options {
     pub fn extract(args: &[String]) -> Result<(Vec<String>, Option<Self>)> {
         let mut remaining = Vec::new();
         let mut selected = None;
+        let mut stiffness = None;
         let mut words = args.iter();
         while let Some(word) = words.next() {
+            if word == "--inertial-stiffness-damping" {
+                if stiffness.is_some() {
+                    return Err("--inertial-stiffness-damping may be supplied only once".into());
+                }
+                stiffness = Some(words.next()
+                    .ok_or("--inertial-stiffness-damping needs a coefficient in seconds")?
+                    .parse::<f64>()?);
+                continue;
+            }
             if word != "--inertial-history" {
                 remaining.push(word.clone());
                 continue;
@@ -44,9 +58,16 @@ impl Options {
                     .next()
                     .ok_or("--inertial-history needs MAX_STEP_S MASS_DAMPING_PER_S")?
                     .parse()?,
+                stiffness_damping_s: 0.0,
             };
             options.validate()?;
             selected = Some(options);
+        }
+        if let Some(value) = stiffness {
+            let options = selected.as_mut()
+                .ok_or("--inertial-stiffness-damping requires --inertial-history")?;
+            options.stiffness_damping_s = value;
+            options.validate()?;
         }
         Ok((remaining, selected))
     }
@@ -147,8 +168,8 @@ pub(super) fn evolve(
         absolute_energy_tolerance_j: 1e-10,
         relative_energy_tolerance: 1e-8,
         mass_damping_per_s: options.mass_damping_per_s,
-        // Stiffness refresh admits mass damping; no authored acoustic loss is copied.
-        stiffness_damping_s: 0.0,
+        // Both coefficients are explicit history inputs, never copied from acoustic loss.
+        stiffness_damping_s: options.stiffness_damping_s,
         ..TransientConfig3::default()
     };
     let mut run = loads.begin_transient(
@@ -210,8 +231,9 @@ impl History {
         );
         writeln!(
             out,
-            "# retained native Newmark motion from stress-free rest; maximum_step_s={}; mass_damping_per_s={}; fixed reference mesh/mass and zero supports; prescribed one-way thermal/material work; global cumulative energies are repeated on each node row; acoustic output remains frozen-state experiments",
-            self.options.maximum_step_s, self.options.mass_damping_per_s
+            "# retained native Newmark motion from stress-free rest; maximum_step_s={}; mass_damping_per_s={}; stiffness_damping_s={}; fixed reference mesh/mass and zero supports; prescribed one-way thermal/material work; global cumulative energies are repeated on each node row; acoustic output remains frozen-state experiments",
+            self.options.maximum_step_s, self.options.mass_damping_per_s,
+            self.options.stiffness_damping_s
         )?;
         writeln!(
             out,
@@ -234,5 +256,45 @@ impl History {
         }
         out.flush()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn extract(words: &[&str]) -> Result<(Vec<String>, Option<Options>)> {
+        Options::extract(&words.iter().map(|word| (*word).to_owned()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn rayleigh_input_preserves_legacy_arguments_and_accepts_either_option_order() {
+        let (remaining, legacy) = extract(&["--demo", "1", "--inertial-history", "0.0003", "20"]).unwrap();
+        assert_eq!(remaining, vec!["--demo".to_owned(), "1".to_owned()]);
+        assert_eq!(legacy.unwrap().stiffness_damping_s, 0.0);
+        for words in [
+            vec!["--inertial-history", "0.0003", "20", "--inertial-stiffness-damping", "0.00001"],
+            vec!["--inertial-stiffness-damping", "0.00001", "--inertial-history", "0.0003", "20"],
+        ] {
+            let (remaining, options) = extract(&words).unwrap();
+            assert!(remaining.is_empty());
+            let options = options.unwrap();
+            assert_eq!(options.mass_damping_per_s, 20.0);
+            assert_eq!(options.stiffness_damping_s, 0.00001);
+            options.admit_interval(0.00025).unwrap();
+        }
+    }
+
+    #[test]
+    fn stiffness_damping_requires_explicit_history_and_finite_nonnegative_data() {
+        assert!(extract(&["--inertial-stiffness-damping", "0.001"]).is_err());
+        assert!(extract(&["--inertial-stiffness-damping"]).is_err());
+        for value in ["-1", "NaN", "inf"] {
+            assert!(extract(&["--inertial-history", "0.0003", "20",
+                "--inertial-stiffness-damping", value]).is_err());
+        }
+        assert!(extract(&["--inertial-history", "0.0003", "20",
+            "--inertial-stiffness-damping", "0.001",
+            "--inertial-stiffness-damping", "0.001"]).is_err());
     }
 }

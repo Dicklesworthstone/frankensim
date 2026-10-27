@@ -24,6 +24,8 @@ mod gas;
 mod valve;
 #[path = "solid_enthalpy/rebind.rs"]
 mod rebind;
+#[path = "solid_enthalpy/damping.rs"]
+mod damping;
 
 const NODES: [[f64;3];4] = [[0.,0.,0.],[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]];
 const TETS: [[usize;4];1] = [[0,1,2,3]];
@@ -239,7 +241,7 @@ fn g1_source_softening_and_stiffening_refresh_the_same_inertial_trajectory() {
 }
 
 #[test]
-fn g0_transient_material_loading_requires_bound_thermal_state_and_admitted_damping() {
+fn g0_transient_material_loading_requires_bound_thermal_state_and_supports_material_damping() {
     with_cx(|cx| {
         let fixed: Vec<_> = (0..12).filter(|d| *d != 3).collect();
         let zero = [[0.0;3];4];
@@ -262,11 +264,15 @@ fn g0_transient_material_loading_requires_bound_thermal_state_and_admitted_dampi
         let next_problem = next.problem(&fixed);
         assert!(matches!(next.advance_transient_candidate(&initial_state,&no_thermal,
             &next_problem,&loads,cx),Err(SolidEnthalpyError::Invalid(_))));
-        // A changing stiffness-proportional damping operator needs a separate
-        // passive discretization; the owner refuses it without changing history.
-        assert!(matches!(next.advance_transient_candidate(&initial_state,&run,
-            &next_problem,&loads,cx),Err(SolidEnthalpyError::Transient(
-                fs_solid::loads3::transient::TransientError3::Invalid(_)))));
+        // The same source-resolved thermal state now drives passive Rayleigh
+        // damping while stiffness evolves; the accepted input remains intact.
+        let (damped,report) = next.advance_transient_candidate(&initial_state,&run,
+            &next_problem,&loads,cx).unwrap();
+        assert!(report.native.damping_loss_j >= 0.0);
+        assert!(report.physical_balance_error_j.abs() < 1e-12);
+        assert_eq!(damped.state().time_s,heated.time_s());
+        assert_ne!(initial_state.materials()[0].material_state_identity,
+            next.materials()[0].material_state_identity);
         assert_eq!(run.state().time_s,0.0);
         assert_eq!(run.state().displacement,vec![0.0]);
     });

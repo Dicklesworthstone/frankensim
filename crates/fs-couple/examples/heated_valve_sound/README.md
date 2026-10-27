@@ -181,15 +181,33 @@ For example, a short manufactured heating pulse can use `POWER_W=5000`,
 --inertial-history 0.0003 20
 ```
 
+An optional explicit Rayleigh stiffness coefficient is now supported through
+material softening and stiffening:
+
+```text
+--inertial-history 0.0003 20 --inertial-stiffness-damping 0.00001
+```
+
+The extra coefficient is in seconds, must be finite and nonnegative, and
+requires `--inertial-history`. Either option order is accepted. Omitting it
+retains zero stiffness damping and the original mechanical calculation.
+These are authored mechanical model inputs, not source-calibrated loss spectra
+or a conversion of the acoustic loss factor. Both coefficients appear in the
+motion CSV header.
+
 The original thermal solve first retains each accepted source state. The
-existing sparse Newmark owner then advances one trajectory from stress-free
+existing sparse solid owner then advances one trajectory from stress-free
 rest on those **same physical endpoint times**, using each cell's refreshed
-stiffness and thermal strain. Displacement, velocity and acceleration continue
-through the whole trajectory; they are not reset to successive equilibria.
-The reference mesh, solid mass and homogeneous clamped supports stay fixed.
-Stiffness-proportional damping is zero because the changing-stiffness owner
-admits mass damping only. The acoustic loss factor is not copied into this
-mechanical history.
+stiffness and thermal strain. Displacement and velocity continue through the
+whole trajectory; they are not reset to successive equilibria. The reference
+mesh, solid mass and homogeneous clamped supports stay fixed. For changing
+stiffness and nonzero stiffness damping, the native midpoint effort uses
+`Cbar = eta*M + zeta*(K_old+K_next)/2`, so loss is
+`dt*vbar^T*Cbar*vbar`. Physical endpoint acceleration is recovered from the
+new endpoint operators. Do not assume its endpoint average equals the discrete
+velocity increment in this variable-damping path. Fixed-stiffness and zero
+stiffness-damping paths retain ordinary average-acceleration Newmark behavior.
+No authored acoustic loss is copied into the mechanical history.
 
 The additional `OUTPUT_PREFIX.motion.csv` contains a row for every node at
 every accepted thermal time, including the initial state. Columns report
@@ -279,4 +297,6 @@ material cards against independently written nonlinear cell/gas energy equations
 The inertial regressions exercise a finite heating pulse with changing source
 stiffness, retained Newmark kinematics, identical thermal/mechanical clocks,
 zero supports, explicit work and energy balance, actual inertial displacement,
-deterministic replay, and timestep/control/cancellation refusal.
+deterministic replay, and timestep/control/cancellation refusal. Additional
+regressions define explicit stiffness-damping input admission and check changed
+motion/loss with unchanged prescribed heat and frozen acoustic observations.
