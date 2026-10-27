@@ -29,7 +29,8 @@ use crate::bernoulli_aperture::dg::LoadedApertureDg;
 use crate::bernoulli_aperture::dg::loaded::performance::LoadedDgPerformance;
 use crate::bernoulli_aperture::performance::{ApertureObservation, AperturePerformanceConfig};
 use crate::dg_port::input::DgSourceInput;
-use crate::dg_port::input::wall::{DgMaterialWallInput, DgMaterialWallRecord};
+use crate::dg_port::input::wall::DgMaterialWallRecord;
+use crate::dg_port::input::wall::regions::{DgMaterialWallLayout, DgMaterialWallLayoutInput};
 use fs_blake3::hash_domain;
 use fs_exec::CancelGate;
 use fs_material::gas::GasState;
@@ -46,7 +47,7 @@ pub struct MaterialModalDgValvePerformance {
     materials: Vec<ModalValveMaterialRecord>,
     gases: Vec<GasRecord>,
     ambient: GasState,
-    wall: Option<DgMaterialWallRecord>,
+    wall: DgMaterialWallLayout,
 }
 
 impl MaterialModalDgValvePerformance {
@@ -116,13 +117,16 @@ impl MaterialModalDgValvePerformance {
             line.split_ascii_whitespace().next()) == Some("dg_wall")
         {
             let mut row = rows.row("dg_wall")?;
-            let declaration = DgMaterialWallInput::read(row.line, &mut row.fields)?;
+            let declaration = DgMaterialWallLayoutInput::read(
+                row.line, &mut row.fields, &mut || {
+                    let row = rows.next()?;
+                    Ok::<_, PlateValveInputError>((row.line, row.fields))
+                },
+            )?;
             row.finish()?;
-            if let Some(input) = declaration {
-                let pack = cache.load(input.path(), input.line(), &mut load_material, gate)?;
-                Some(input.resolve(pack, gate)?)
-            } else { None }
-        } else { None };
+            declaration.resolve(gate, &mut |path, line|
+                cache.load(path, line, &mut load_material, gate))?
+        } else { DgMaterialWallLayout::default() };
         let mut row = rows.row("slit_length")?;
         let slit = optional_positive(&mut row)?;
         row.finish()?;
@@ -196,8 +200,7 @@ impl MaterialModalDgValvePerformance {
         }
         let schedule = super::super::decode_schedule(gestures)?;
         checkpoint(gate)?;
-        let load = duct.prepare_with_material_wall(&ambient, dt, gate,
-            wall.as_ref().map(|source| source.wall()))?;
+        let load = duct.prepare_with_material_wall_layout(&ambient, dt, gate, &wall)?;
         let inlet = *load.duct().inlet_gas();
         let impedance = load.impedance_pa_s_m3();
         let mut prepared_plates = Vec::with_capacity(plates.len());
@@ -269,7 +272,9 @@ impl MaterialModalDgValvePerformance {
     /// Ambient, prescribed local and computed exterior material receipts.
     pub fn gas_records(&self) -> &[GasRecord] { &self.gases }
     /// Original material wall source, shared with any plate using the same pack.
-    pub const fn wall_record(&self) -> Option<&DgMaterialWallRecord> { self.wall.as_ref() }
+    pub const fn wall_record(&self) -> Option<&DgMaterialWallRecord> { self.wall.uniform_record() }
+    /// Original physical wall regions, retaining the shared source artifacts.
+    pub const fn wall_layout(&self) -> &DgMaterialWallLayout { &self.wall }
     /// Declared default gas; the actual DG inlet/field is retained by the renderer.
     pub const fn ambient_gas(&self) -> &GasState { &self.ambient }
     /// Move the complete accepted physical and scheduling state without a reset.

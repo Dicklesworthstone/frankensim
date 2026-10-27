@@ -179,3 +179,42 @@ fn the_same_material_source_drives_reed_plates_and_the_original_dg_wall() {
         "only the bore material changed; reed plates keep their original source");
     assert_ne!(reference.0, render(changed).0);
 }
+
+#[test]
+fn physical_wall_regions_share_reed_artifacts_and_retain_local_material_memory() {
+    let declaration = concat!(
+        "dg_wall regions 2\n",
+        "dg_wall_region 0 0.025 isotropic blade.matpack 293.15 100 0.00002 stress-free 50 2000 maxwell 1 1 0.5 boundary_modulus boundary_time\n",
+        "dg_wall_region 0.025 0.05 isotropic blade.matpack 293.15 100 0.00001 stress-free 50 2000 maxwell 1 1 0.5 boundary_modulus boundary_time\n",
+    );
+    let text = input().replace("open 1 2 8", "open 2 2 8")
+        .replace("slit_length", &format!("{declaration}slit_length"));
+    let mut loads = 0;
+    let source = MaterialModalDgValvePerformance::from_bytes_with_sources(
+        text.as_bytes(), 37, &CancelGate::new_clock_free(), None, |path| {
+            assert_eq!(path, "blade.matpack");
+            loads += 1;
+            Ok(pack(900.0, false))
+        },
+    ).unwrap();
+    assert_eq!(loads, 1, "all reed and wall regions retain the one immutable source");
+    let regions = source.wall_layout().regions();
+    assert_eq!(regions.len(), 2);
+    assert!(std::ptr::eq(regions[0].source().pack(), source.material_records()[0].pack()));
+    let duct = source.renderer().system().load().duct();
+    assert!(duct.has_viscothermal_memory());
+    assert!(duct.compliant_wall().is_none());
+    let first = duct.compliant_wall_at_element(0).unwrap();
+    let second = duct.compliant_wall_at_element(1).unwrap();
+    assert!((first.surface_density - 0.018).abs() < 1e-15);
+    assert_eq!(second.surface_density, first.surface_density * 0.5);
+    assert_eq!(second.stiffness_per_area, first.stiffness_per_area * 0.5);
+    let reference = render(source);
+    assert_eq!(reference.0, render(build(&text, 1)).0);
+    let load = reference.1.system().load();
+    let state = load.duct().compliant_wall_state(load.state()).unwrap();
+    assert_eq!(state.relaxation_pressure_pa.len(), 2);
+    assert!(state.relaxation_stored_energy_j > 0.0);
+    let changed = text.replace("0.00001 stress-free", "0.00002 stress-free");
+    assert_ne!(reference.0, render(build(&changed, 37)).0);
+}

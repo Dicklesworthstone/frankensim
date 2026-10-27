@@ -166,13 +166,10 @@ fn flue_wall_provenance(p: &FlueFilePerformance) -> String {
     format!(",\"material_walls\":[{records}],\"wall_strips\":{},\"wall_model_scope\":\"{scope}\"",walls.len())
 }
 
-fn dg_wall_provenance(
-    source: Option<&fs_couple::dg_port::input::wall::DgMaterialWallRecord>,
+fn dg_wall_source_metadata(
+    source: &fs_couple::dg_port::input::wall::DgMaterialWallRecord,
 ) -> String {
     use fs_couple::bernoulli_aperture::wall::material::{AxialConstraint, WallMaterialLoss};
-    let Some(source) = source else {
-        return ",\"solid_wall\":null,\"solid_wall_scope\":\"rigid\"".into();
-    };
     let wall = source.wall();
     let axial = match wall.axial_constraint() {
         AxialConstraint::StressFree => "stress-free",
@@ -188,9 +185,29 @@ fn dg_wall_provenance(
             ("maxwell", format!(",\"maxwell_terms\":[{terms}]"))
         }
     };
-    format!(",\"solid_wall\":{{\"model\":\"isotropic-local-ring-membrane\",\"pack_path\":{},\"pack_hash\":\"{}\",\"resolved_state_hash\":\"{}\",\"thickness_m\":{:e},\"axial_constraint\":\"{axial}\",\"band_hz\":[{:e},{:e}],\"loss\":\"{loss}\",\"propagator\":\"original-exact-dg\"{relaxation}}},\"solid_wall_scope\":\"whole cylindrical main bore; reciprocal frozen-state radial inertia and material response in the original gas propagator; side chimneys rigid; no axial shell waves or exterior wall radiation\"",
+    format!("{{\"model\":\"isotropic-local-ring-membrane\",\"pack_path\":{},\"pack_hash\":\"{}\",\"resolved_state_hash\":\"{}\",\"thickness_m\":{:e},\"axial_constraint\":\"{axial}\",\"band_hz\":[{:e},{:e}],\"loss\":\"{loss}\",\"propagator\":\"original-exact-dg\"{relaxation}}}",
         json_string(source.path()), source.pack().content_hash().to_hex(),
         wall.material().identity().to_hex(), wall.thickness_m(), wall.band_hz()[0], wall.band_hz()[1])
+}
+
+fn dg_wall_provenance(
+    layout: &fs_couple::dg_port::input::wall::regions::DgMaterialWallLayout,
+) -> String {
+    let source = if let Some(source) = layout.uniform_record() {
+        dg_wall_source_metadata(source)
+    } else if layout.regions().is_empty() {
+        return ",\"solid_wall\":null,\"solid_wall_scope\":\"rigid\"".into();
+    } else {
+        let regions = layout.regions().iter().map(|region| {
+            let interval = region.interval_m();
+            format!("{{\"interval_m\":[{:e},{:e}],\"source\":{}}}",
+                interval[0], interval[1], dg_wall_source_metadata(region.source()))
+        }).collect::<Vec<_>>().join(",");
+        let band = layout.band_hz().expect("resolved nonempty regional wall");
+        format!("{{\"model\":\"regional-isotropic-local-ring-membranes\",\"regions\":[{regions}],\"band_hz\":[{:e},{:e}],\"propagator\":\"original-exact-dg\"}}",
+            band[0], band[1])
+    };
+    format!(",\"solid_wall\":{source},\"solid_wall_scope\":\"whole cylindrical main bore; original physical source regions aligned to DG faces; reciprocal frozen-state radial inertia and material response in the original gas propagator; side chimneys rigid; no axial shell waves or exterior wall radiation\"")
 }
 
 fn flue_boundary_provenance(p: &FlueFilePerformance) -> String {
@@ -371,7 +388,7 @@ pub(super) fn material_modal_dg_provenance(
     let outlet = super::duct_metadata::gas_state(load.duct().outlet_gas());
     let gas_sources = super::thermochemical::provenance(p.gas_records());
     let radiation = super::duct_metadata::dg_radiation_provenance(load);
-    let solid_wall = dg_wall_provenance(p.wall_record());
+    let solid_wall = dg_wall_provenance(p.wall_layout());
     let source_json = format!("\"material_modal_dg_valve_input\":{{\"schema\":\"frankensim-material-modal-dg-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"mechanics_rate_hz\":{},\"pressure_point\":\"{pressure_point}\",\"material_sources\":[{materials}],\"structural_propagator\":\"exact-zoh\",\"dg_operator_identity\":\"{}\",\"length_m\":{:e},\"inlet_gas\":{inlet},\"outlet_gas\":{outlet},\"model_scope\":\"original regional material plates, signed modal pressure/force projections and retained material memory coupled to the shared exact DG bore; flat DKT and finite-mode interface; nonlinear time and DG spatial convergence require separate refinement; no measured-instrument qualification\"{observation}{radiation}{gas_sources}{solid_wall}}}",
         i.input_hash.to_hex(), i.blades, i.modes, i.nodes, i.triangles,
         i.mechanics_rate_hz, load.duct().operator_identity().to_hex(),
@@ -673,7 +690,7 @@ fn load_with_all_sources(
             |wall| format!("{{\"model\":\"local-cylinder-positive-quadrature\",\"quadrature_points\":{},\"poles_per_field\":{},\"checked_max_complex_relative_error\":{:e},\"checked_max_real_loss_relative_error\":{:e}}}",
                 wall.resolution.quadrature_points, wall.resolution.poles_per_field,
                 wall.max_complex_error, wall.max_real_loss_error));
-        let solid_wall = dg_wall_provenance(p.wall_record());
+        let solid_wall = dg_wall_provenance(p.wall_layout());
         let source_json = format!("\"flue_dg_input\":{{\"schema\":\"frankensim-flue-dg-performance-v1\",\"blake3\":\"{}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_authority\":\"{}\",\"compiled_controls\":{},\"propagator\":\"original-exact-dg\",\"operator_identity\":\"{}\",\"total_dofs\":{},\"length_m\":{:e},\"inlet_area_m2\":{:e},\"outlet_area_m2\":{:e},\"inlet_gas\":{inlet_gas},\"outlet_gas\":{outlet_gas},\"wall_band_rad_s\":{band},\"wall_owner\":{wall},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"pressure_point\":\"{pressure_point}\",\"model_scope\":\"original estimated jet and causal material-gas DG bore; solid wall image explicitly recorded; taper uses local-cylinder Webster approximation; source, spatial and nonlinear time convergence remain separate; no resolved turbulence or measured flute qualification\"{pressure_observation}{radiation}{field}{gas_sources}{solid_wall}}}",
             i.input_hash.to_hex(), i.jet_card_source, i.jet_card_hash, p.card().authority.label(),
             i.compiled_controls, duct.operator_identity().to_hex(), duct.total_dofs(),

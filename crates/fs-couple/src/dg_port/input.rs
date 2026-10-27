@@ -503,11 +503,33 @@ impl DgSourceInput {
         self, ambient: &GasState, dt: f64, gate: &CancelGate,
         wall: Option<&crate::bernoulli_aperture::wall::material::LocalMaterialWall>,
     ) -> Result<DgPortLoad, DgSourceError> {
+        self.prepare_with_solid_wall(ambient, dt, gate, wall.map(|wall| wall.band_hz()), |owner| {
+            if let Some(wall) = wall {
+                wall.clone().bind_dg_controlled(owner, &mut || gate.is_requested())
+                    .map(|bound| bound.into_duct()).map_err(DgSourceError::Physics)
+            } else { Ok(owner) }
+        })
+    }
+
+    /// Bind a whole-bore source or physically positioned material regions to
+    /// the same native gas/port/radiation path. Regions never follow mesh indices.
+    pub fn prepare_with_material_wall_layout(
+        self, ambient: &GasState, dt: f64, gate: &CancelGate,
+        wall: &wall::regions::DgMaterialWallLayout,
+    ) -> Result<DgPortLoad, DgSourceError> {
+        self.prepare_with_solid_wall(ambient, dt, gate, wall.band_hz(),
+            |owner| wall.bind(owner, gate))
+    }
+
+    fn prepare_with_solid_wall(
+        self, ambient: &GasState, dt: f64, gate: &CancelGate,
+        wall_band_hz: Option<[f64; 2]>,
+        bind_wall: impl FnOnce(DgDuct) -> Result<DgDuct, DgSourceError>,
+    ) -> Result<DgPortLoad, DgSourceError> {
         checkpoint(gate, self.line)?;
-        if wall.is_some_and(|wall| {
-            let band = wall.band_hz();
+        if wall_band_hz.is_some_and(|band|
             band[0] > self.band_hz[0] || band[1] < self.band_hz[1]
-        }) {
+        ) {
             return Err(bad(self.line,
                 "DG solid wall material band must cover the complete propagation band"));
         }
@@ -537,10 +559,7 @@ impl DgSourceInput {
                 .map_err(|error| DgSourceError::Physics(AcousticRealizeError::Duct(error)))?
         };
         checkpoint(gate, self.line)?;
-        let owner = if let Some(wall) = wall {
-            wall.clone().bind_dg_controlled(owner, &mut || gate.is_requested())
-                .map_err(DgSourceError::Physics)?.into_duct()
-        } else { owner };
+        let owner = bind_wall(owner)?;
         checkpoint(gate, self.line)?;
         let branches = self.prepare_chimneys(gate)?;
         let load = if let Some((controls, exterior)) = self.radiation {

@@ -11,6 +11,9 @@ use fs_matdb::{NormalizedMaterialCardPack, QueryPoint};
 use fs_material::state_point::{MaterialPropertySelection, resolve_material_state_point};
 use std::{str::SplitAsciiWhitespace, sync::Arc};
 
+/// Physical axial source partitions for the same uniform/regional DG wall owner.
+pub mod regions;
+
 /// The CLI bounds artifact bytes before decoding; direct callers share the cap.
 pub const MAX_DG_WALL_PACK_BYTES: usize = 8 * 1024 * 1024;
 

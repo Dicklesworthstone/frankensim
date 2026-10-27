@@ -14,7 +14,8 @@
 
 use super::{FlueDgConfig, FlueDgPerformance, FlueMouthRadiation};
 use crate::dg_port::input::{DgSourceError, DgSourceInput};
-use crate::dg_port::input::wall::{DgMaterialWallInput, DgMaterialWallRecord};
+use crate::dg_port::input::wall::DgMaterialWallRecord;
+use crate::dg_port::input::wall::regions::{DgMaterialWallLayout, DgMaterialWallLayoutInput};
 use crate::flue_loop::dg::FlueDgSpec;
 use crate::flue_loop::network::performance::file::{
     FlueInputError, FluePerformanceInfo, MAX_FLUE_PERFORMANCE_BYTES, Rows,
@@ -118,7 +119,7 @@ pub struct FlueDgFilePerformance {
     geometry: FlueGeometry,
     card: JetCard,
     gas_records: Vec<GasRecord>,
-    wall: Option<DgMaterialWallRecord>,
+    wall: DgMaterialWallLayout,
 }
 
 impl FlueDgFilePerformance {
@@ -198,15 +199,21 @@ impl FlueDgFilePerformance {
         row.end()?;
         let wall = if rows.next_is("dg_wall") {
             let mut row = rows.row("dg_wall")?;
-            let declaration = DgMaterialWallInput::read(row.line, &mut row.fields)?;
+            let declaration = DgMaterialWallLayoutInput::read(
+                row.line, &mut row.fields, &mut || {
+                    rows.line += 1;
+                    let text = rows.lines.next()
+                        .ok_or_else(|| bad(rows.line, "missing DG material wall region"))?;
+                    Ok::<_, FlueDgInputError>((rows.line, text.split_ascii_whitespace()))
+                },
+            )?;
             row.end()?;
-            if let Some(input) = declaration {
-                poll(gate)?;
-                let pack = load_material(input.path()).map_err(|source|
-                    FlueInputError::MaterialSource { line: input.line(), source })?;
-                Some(input.resolve(Arc::new(pack), gate)?)
-            } else { None }
-        } else { None };
+            declaration.resolve(gate, &mut |path, line| {
+                let pack = load_material(path).map_err(|source|
+                    FlueInputError::MaterialSource { line, source })?;
+                Ok::<_, FlueDgInputError>(Arc::new(pack))
+            })?
+        } else { DgMaterialWallLayout::default() };
         let mut row = rows.row("flue")?;
         let mut geometry = FlueGeometry {
             flue_width_m: row.scalar()?,
@@ -272,8 +279,8 @@ impl FlueDgFilePerformance {
             return Err(bad(rows.line + 1, "gesture suffix must be canonical without ignored trailing data"));
         }
         poll(gate)?;
-        let load = source.prepare_with_material_wall(&gas,
-            1.0 / f64::from(sample_rate_hz), gate, wall.as_ref().map(|source| source.wall()))?;
+        let load = source.prepare_with_material_wall_layout(&gas,
+            1.0 / f64::from(sample_rate_hz), gate, &wall)?;
         geometry.bore_area_m2 = load.duct().inlet_area_m2();
         let voice = FlueVoice::from_dg(
             Some(&card), displacement_gain, seed_amplitude_rel, geometry,
@@ -324,7 +331,9 @@ impl FlueDgFilePerformance {
     pub const fn geometry(&self) -> FlueGeometry { self.geometry }
     pub const fn card(&self) -> &JetCard { &self.card }
     pub fn gas_records(&self) -> &[GasRecord] { &self.gas_records }
-    pub const fn wall_record(&self) -> Option<&DgMaterialWallRecord> { self.wall.as_ref() }
+    pub const fn wall_record(&self) -> Option<&DgMaterialWallRecord> { self.wall.uniform_record() }
+    /// Original physical material partition, independent of DG refinement.
+    pub const fn wall_layout(&self) -> &DgMaterialWallLayout { &self.wall }
     pub fn into_renderer(self) -> FlueDgPerformance { self.renderer }
 }
 

@@ -6488,8 +6488,21 @@ must cover the propagation band. `dg_wall rigid` and omission retain the
 original operator. Missing source data, unsupported geometry, thin-wall
 violations and complete-state budget overflow refuse before rendering.
 
-Both loaders bind the original `LocalMaterialWall` before preparing the same
-DG exponential. Density, stiffness, viscosity and every positive source
+A complete physical source partition uses `dg_wall regions N`, followed by
+`dg_wall_region X_BEGIN X_END isotropic PACK T OMEGA H AXIAL FMIN FMAX LOSS`
+for each region in inlet-to-outlet order. Coordinates are in metres from the
+original bore inlet. Regions must be contiguous, cover the full bore and
+coincide with actual DG element faces (only floating-point roundoff is
+tolerated). Refinement repeats the same source assignments; cutting a material
+interface refuses instead of averaging the two solids. The common applicability
+band is the intersection of the source bands. Up to 256 regions share an 8 MiB
+unique-artifact budget and the original complete-state limit. Repeated paths
+reuse their immutable artifacts, including paths shared with reed blades.
+The same CLI and pressure/PCM renderer retain every region's geometry, source
+identity and local material memory; no second propagation law is introduced.
+
+Both loaders bind the original `LocalMaterialWall` or its
+`RegionalMaterialWallDg` composition before preparing the same DG exponential. Density, stiffness, viscosity and every positive source
 Maxwell arm affect the actual pressure feedback, radial wall motion and
 retained storage. Prescribed gas fields and independent exterior gas remain
 their original owners. The reed loader shares a single normalized artifact
