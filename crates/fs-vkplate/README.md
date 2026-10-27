@@ -61,6 +61,8 @@ Node count alone does not establish audio-band fidelity.
   space radiate as a weak dipole, which is why a tom's fundamental rings). An optional port
   models a vented front head.
 - **Sound**: the Rayleigh integral of surface acceleration at each microphone, per-node delays.
+  A microphone hears only surfaces facing it. Over a rigid floor (any plane, `floor_z`, `floor_y`)
+  it also hears, by the floor's image, the surfaces facing that image.
   A cymbal is not in a baffle: its microphones apply the unbaffled-disc limit (a dipole,
   `(4/3pi) ka` times the baffled field, for `ka << 1`), joined to the baffled field for `ka >> 1`
   by a first-order high-pass with `tau = 4a/(3 pi c)`.
@@ -671,8 +673,8 @@ band by band.
 
 The presets (and so live, the browser and GPU) still carry the values a 2026-10-14 retuning
 adopted because they graded closer to those recordings (96ccf8f1b): head tensions, strike points,
-the stick's Hunt-Crossley loss, the wires' tension, preload and contact, the kick's felt crown,
-pillow and microphone, the ride's shell and the hi-hat's rim loss, waviness and stick tip. Their
+the stick's Hunt-Crossley loss, the wires' tension, preload and contact, the kick's felt crown
+and pillow, the ride's shell and the hi-hat's rim loss, waviness and stick tip. Their
 notes say so (`kit::FITTED_DRUM_RECEIPT`, `FITTED_CYMBAL_INTERFACE`, the ride's provenance). The
 offline examples' card route keeps none of them (ruling 7486):
 - **Tensions** are a drummer's tuning: both heads keep 88cccbb78's ratio and are scaled so the card
@@ -697,6 +699,14 @@ offline examples' card route keeps none of them (ruling 7486):
   the ride's 1.60 mm bow, 2.20 mm bell and 3.0 s 10 kHz T60; flat hi-hat rims and a 5 mm stick
   tip; the open hat's 8 mm rim opening (`drum_cards::OPEN_HAT_OPENING_M`; the recording's pedal
   position is unknown, and the presets' 2 mm was picked by grade, bb1e5abf3).
+- **The kick's microphone** (presets and card route alike, ruling 8318) is a declared overhead
+  1 m above the shell's top edge, 0.1 m toward the drummer so that the batter passes the facing
+  test, over a floor tangent to the hoops at a declared 0.02 m beyond the shell
+  (`kit::KICK_HOOP_RISE_M`). The drum lies on its side, so the overhead and its floor image are
+  both on the batter's side and the resonant head faces away from both: the overhead hears the
+  batter only. The resonant head's radiation around the shell, and
+  the dipole cancellation of the heads moving together, are not modelled
+  (`kit::OVERHEAD_HEARS_BATTER_ONLY_RECEIPT`).
 - **The hi-hat rims carry no contact loss** (`DECLARED_HIHAT_RIM_LAW`, mu 0; ruling 7865).
   88cccbb78's 3.0 s/m stood in for rim friction, which `BRONZE_RIM_FRICTION` now carries from
   data, and no source gives a separate loss at closure. So rim dissipation is the friction

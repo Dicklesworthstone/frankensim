@@ -1380,6 +1380,22 @@ fn g2_card_drums_keep_no_value_graded_against_a_recording_and_presets_say_theirs
 }
 
 #[test]
+fn g1_the_kick_overhead_hears_the_batter_only_and_says_so() {
+    // Ruling 8318: the kick lies on its side over a floor tangent to its hoops, and its overhead and
+    // the overhead's floor image both lie on the batter's side of the resonant head. The snare and
+    // toms stand on their axes; their floor image is beyond the resonant head, which they hear.
+    let hears_batter_only = |mut s: kit::DrumSpec| {
+        s.grid *= 4.0;
+        kit::drum(&s, &[]).unwrap().notes.iter().any(|n| n == kit::OVERHEAD_HEARS_BATTER_ONLY_RECEIPT)
+    };
+    assert!(hears_batter_only(kit::kick()));
+    assert!(hears_batter_only(kit::card_drum(&kit::kick()).unwrap()));
+    for s in [kit::snare_wires_off(), kit::tom(12.0), kit::tom(14.0)] {
+        assert!(!hears_batter_only(s), "{}", s.name);
+    }
+}
+
+#[test]
 fn g2_card_cymbals_and_hats_take_the_declared_interface_and_presets_say_theirs_was_fitted() {
     let coarse = |c: kit::CymbalSpec| kit::CymbalSpec { grid: c.grid * 3.0, ..c };
     let stick_mu = |p: &kit::Piece| {

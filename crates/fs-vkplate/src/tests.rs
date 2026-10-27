@@ -173,6 +173,16 @@ fn g3_live_internal_clock_matches_offline_and_arbitrary_output_blocks() {
 
 
 #[test]
+fn an_axis_floor_reflects_bit_for_bit_as_the_floor_height_did() {
+    // the snare and toms keep their bytes (ruling 8307): floor_z(h) images [x, y, 2 h - z] exactly
+    for (h, p) in [(-0.65, [0.35, 0.25, 0.9]), (-0.75, [0.35, 0.25, 0.9]), (-0.5, [0.4, -0.2, 1.1]), (-0.55, [0.0, 0.0, 0.3])] {
+        assert_eq!(floor_z(h).image(p).map(f64::to_bits), [p[0], p[1], 2.0 * h - p[2]].map(f64::to_bits));
+    }
+    let p = [0.0, 1.221, 0.1];
+    assert_eq!(floor_y(-0.241).image(p).map(f64::to_bits), [p[0], 2.0 * -0.241 - p[1], p[2]].map(f64::to_bits));
+}
+
+#[test]
 fn g3_microphone_source_height_matches_rigid_translation() {
     for facing in [1.0, -1.0] {
         let mut ins = Instrument::new(48_000.0);
@@ -188,7 +198,7 @@ fn g3_microphone_source_height_matches_rigid_translation() {
             ins.add(b);
         }
         let mut mic = Mic::new([0.4, 0.2, 1.1]);
-        mic.floor = Some(-0.5);
+        mic.floor = Some(floor_z(-0.5));
         ins.mics.push(mic);
         ins.prepare();
         let taps = &ins.mics[0].taps;

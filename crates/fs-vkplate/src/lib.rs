@@ -2005,10 +2005,39 @@ pub struct Mic {
     /// ka >> 1 and to a dipole (4/3pi) ka times it for ka << 1 (rigid disc). A first-order
     /// high-pass with tau = 4a/(3 pi c) joins the two limits. None = baffled.
     pub unbaffled: Option<f64>,
-    /// A rigid floor at this height: surfaces facing away from the microphone still reach it by
-    /// the floor reflection (image source; the snare's underside heard by an overhead).
-    pub floor: Option<f64>,
+    /// A rigid floor: surfaces facing away from the microphone still reach it by the floor
+    /// reflection (image source; the snare's underside heard by an overhead).
+    pub floor: Option<Floor>,
     hp: (f64, f64),
+}
+
+/// A rigid plane: the point `point` on it and its unit `normal`, pointing into the air.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Floor {
+    point: [f64; 3],
+    normal: [f64; 3],
+}
+
+/// The plane z = `height`, normal +z: the floor of a drum standing on its axis (z up).
+pub fn floor_z(height: f64) -> Floor {
+    Floor { point: [0.0, 0.0, height], normal: [0.0, 0.0, 1.0] }
+}
+
+/// The plane y = `height`, normal +y: the floor of a drum lying on its side (the kick, y up).
+pub fn floor_y(height: f64) -> Floor {
+    Floor { point: [0.0, height, 0.0], normal: [0.0, 1.0, 0.0] }
+}
+
+impl Floor {
+    /// The mirror image of `p`, p - 2 (p.n) n + 2 (q.n) n, evaluated in that order so that an
+    /// axis normal reflects exactly as the floor's former height did: 2 h - p along the axis, p
+    /// across it.
+    fn image(&self, p: [f64; 3]) -> [f64; 3] {
+        let n = self.normal;
+        let pn = p[0] * n[0] + p[1] * n[1] + p[2] * n[2];
+        let qn = self.point[0] * n[0] + self.point[1] * n[1] + self.point[2] * n[2];
+        std::array::from_fn(|i| p[i] - 2.0 * pn * n[i] + 2.0 * qn * n[i])
+    }
 }
 
 impl Mic {
@@ -2767,8 +2796,8 @@ impl Instrument {
                 let h2 = b.h * b.h;
                 // the direct path, and the floor's image of the microphone when there is a floor
                 let mut targets = vec![m.pos];
-                if let Some(z) = m.floor {
-                    targets.push([m.pos[0], m.pos[1], 2.0 * z - m.pos[2]]);
+                if let Some(floor) = m.floor {
+                    targets.push(floor.image(m.pos));
                 }
                 for tp in targets {
                     for i in 0..b.n {

@@ -86,17 +86,27 @@ pub struct DrumSpec {
     /// Front-head port radius (kick drums), m.
     pub port: Option<f64>,
     pub mic: [f64; 3],
-    /// Floor height relative to the batter head (None: free field).
-    pub floor: Option<f64>,
+    /// The floor, in the drum's frame (the batter head at the origin; None: free field).
+    pub floor: Option<Floor>,
     /// Where the tensions, strike point, stick and (kick) beater, pillow and microphone come
     /// from. It joins the notes of every drum built from the spec.
     pub provenance: &'static str,
 }
 
 /// The presets' provenance (ruling 7486). Their head tensions, strike points and stick loss, and
-/// the kick's felt crown, pillow and microphone, were adopted in 96ccf8f1b because they graded
-/// closer to the Salamander overheads. `card_drum` replaces them.
-pub const FITTED_DRUM_RECEIPT: &str = "drum: fitted to a recording (96ccf8f1b), not physics: head tensions, strike point and stick Hunt-Crossley loss 0.05 s/m; the kick's felt crown, pillow and microphone";
+/// the kick's felt crown and pillow, were adopted in 96ccf8f1b because they graded closer to the
+/// Salamander overheads. `card_drum` replaces them. The kick's microphone, also adopted there, is
+/// the declared overhead since ruling 8318.
+pub const FITTED_DRUM_RECEIPT: &str = "drum: fitted to a recording (96ccf8f1b), not physics: head tensions, strike point and stick Hunt-Crossley loss 0.05 s/m; the kick's felt crown and pillow";
+
+/// Carried by a drum whose microphone, and its image in the floor, both lie on the batter's side
+/// of the resonant head (the kick's overhead, ruling 8318): the baffled microphone never hears a
+/// surface facing away from it.
+pub const OVERHEAD_HEARS_BATTER_ONLY_RECEIPT: &str = "overhead hears the batter only: the resonant head faces away and the baffled (Rayleigh) microphone has no path around the shell; its radiation, and the together pair's dipole cancellation, are not modelled";
+
+/// How far the kick's hoops stand beyond its shell radius [m], a declared estimate (ruling 8318):
+/// the drum lies on them, so the floor is tangent to their lowest point.
+pub const KICK_HOOP_RISE_M: f64 = 0.02;
 
 /// The presets' stick Hunt-Crossley loss [s/m], adopted by grade in 96ccf8f1b (it was 0.2).
 const FITTED_STICK_LOSS_S_M: f64 = 0.05;
@@ -357,6 +367,11 @@ fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Optio
     let mut mic = Mic::new(s.mic);
     mic.floor = s.floor;
     ins.mics.push(mic);
+    // the resonant head, at z = -depth facing -z, reaches the microphone only from beyond it
+    let beyond_reso = |p: [f64; 3]| p[2] < -s.depth;
+    if !beyond_reso(s.mic) && !s.floor.is_some_and(|f| beyond_reso(f.image(s.mic))) {
+        notes.push(OVERHEAD_HEARS_BATTER_ONLY_RECEIPT.into());
+    }
     let oversample = if !matches!(batter_loss, FilmLoss::FittedT60) {
         pick_oversample(&mut ins, 0.6)?
     } else { s.oversample };
@@ -391,7 +406,7 @@ pub fn snare() -> DrumSpec {
         wires: Some(Wires::estimated()),
         port: None,
         mic: [0.35, 0.25, 0.9], // an overhead about 1 m away, 25 degrees off the drum's axis
-        floor: Some(-0.65),
+        floor: Some(floor_z(-0.65)),
         provenance: FITTED_DRUM_RECEIPT,
     }
 }
@@ -418,8 +433,11 @@ pub fn kick() -> DrumSpec {
         muffle: Some((0.0, -0.16, 0.07, 22.0)),
         wires: None,
         port: None,
-        mic: [0.35, 0.25, 0.9],
-        floor: Some(-0.65),
+        // the drum lies on its side, y up: a declared overhead 1 m above the shell's top edge,
+        // 0.1 m toward the drummer so that the batter (z = 0, facing +z) passes the baffled
+        // microphone's facing test, and the floor under the hoops (ruling 8318)
+        mic: [0.0, 0.221 + 1.0, 0.1],
+        floor: Some(floor_y(-(0.221 + KICK_HOOP_RISE_M))),
         provenance: FITTED_DRUM_RECEIPT,
     }
 }
@@ -454,7 +472,7 @@ pub fn tom(size_in: f64) -> DrumSpec {
         wires: None,
         port: None,
         mic: [0.35, 0.25, 0.9],
-        floor: Some(if size_in <= 12.5 { -0.75 } else { -0.55 }),
+        floor: Some(floor_z(if size_in <= 12.5 { -0.75 } else { -0.55 })),
         provenance: FITTED_DRUM_RECEIPT,
     }
 }
@@ -503,7 +521,7 @@ const CARD_DRUMS: [CardDrum; 4] = [
         name: "kick 18x18",
         tensions: (375.5, 375.5 * 253.0 / 358.0),
         strike_xy: (0.0, 0.02),
-        provenance: "drum (card route, ruling 7486): tensions tuned to the recording's pitch, lowest mode 40.6 Hz (Salamander kick_OH_F_1/_P_3, late tail); strike point (0, 20) mm, a declared playing-position estimate (88cccbb78); beater 0.12 kg with a 3 cm felt face (k 1e8 N/m^2.5, mu 0.3 s/m) and the muffle dashpot 25 N s/m^3 standing in for the pillow are declared estimates (88cccbb78); the microphone is the declared overhead position",
+        provenance: "drum (card route, ruling 7486): tensions tuned to the recording's pitch, lowest mode 40.6 Hz (Salamander kick_OH_F_1/_P_3, late tail); strike point (0, 20) mm, a declared playing-position estimate (88cccbb78); beater 0.12 kg with a 3 cm felt face (k 1e8 N/m^2.5, mu 0.3 s/m) and the muffle dashpot 25 N s/m^3 standing in for the pillow are declared estimates (88cccbb78); the overhead microphone is a declared estimate 1 m above the shell's top edge, (0, 1.221, 0.1) m with y up, its 0.1 m toward the drummer there to clear the batter's facing test, and the floor is tangent to the hoops at a declared 0.02 m beyond the shell radius (ruling 8318); the nominal 18x18 cylinder overestimates the air volume, the shells being very thick and unlathed (Salamander README); unknowns: whether the front head is ported (no source says, and none is modelled; a trial 102 mm port raised the first together line from 46.9 to 54.9 Hz and added a together line at 21-25 Hz, which the linear lumped model does not predict, perhaps by the strike's amplitude, untested; ruling 8334), and the one-of-a-kind rope tuning, without lugs, so the heads' tension need not be uniform around the rim",
     },
     CardDrum {
         name: "rack tom 12x7",
