@@ -48,7 +48,7 @@ pub struct FreeSurfaceWettingSample {
 }
 
 /// A source, geometry, numerical or cancellation refusal; no state is published.
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum FreeSurfaceWettingError {
     Material(MaterialStatePointError),
     Query(MatDbError),
@@ -94,6 +94,14 @@ type Error = FreeSurfaceWettingError;
 /// and surface/history context belongs to the interface card, not a guessed EOS.
 pub struct MaterialFreeSurfaceWetting3<'s, 'm> {
     flow: MaterialFreeSurface3<'s>,
+    binding: WettingBinding<'m>,
+}
+
+// Frozen and thermal flow share one source/geometry/history owner. Thermal
+// callers supply temperatures; the geometric speed and angle arithmetic stays
+// identical to the original isothermal closure.
+#[derive(Clone)]
+pub(super) struct WettingBinding<'m> {
     card: &'m InterfaceSystemCard,
     source: ResolvedInterfaceStatePoint,
     wall: PlanarWall3,
@@ -116,6 +124,24 @@ impl<'s> MaterialFreeSurface3<'s> {
         controls: FreeSurfaceWettingControls,
         gate: &CancelGate,
     ) -> Result<MaterialFreeSurfaceWetting3<'s, 'm>, Error> {
+        let binding = WettingBinding::try_new(
+            &mut self, wall, card, selection, controls, gate,
+        )?;
+        binding.install(&mut self.lattice, gate)?;
+        checkpoint(gate)?;
+        Ok(MaterialFreeSurfaceWetting3 { flow: self, binding })
+    }
+}
+
+impl<'m> WettingBinding<'m> {
+    pub(super) fn try_new(
+        flow: &mut MaterialFreeSurface3<'_>,
+        wall: PlanarWall3,
+        card: &'m InterfaceSystemCard,
+        selection: MaterialPropertySelection,
+        controls: FreeSurfaceWettingControls,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
         checkpoint(gate)?;
         if !controls.pinning_speed_m_s.is_finite()
             || controls.pinning_speed_m_s < 0.0
@@ -126,12 +152,12 @@ impl<'s> MaterialFreeSurface3<'s> {
                 "invalid speed deadband or bounded wall-cell budget",
             ));
         }
-        if self.scaling.planar_wetting.is_some() || !self.lattice.admits_dynamic_planar_wetting() {
+        if flow.scaling.planar_wetting.is_some() || !flow.lattice.admits_dynamic_planar_wetting() {
             return Err(Error::Invalid(
                 "dynamic planar wetting requires otherwise neutral walls",
             ));
         }
-        let liquid = self.scaling.material.material();
+        let liquid = flow.scaling.material.material();
         if &card.surface_b().material != liquid.material()
             || liquid
                 .query_point()
@@ -166,11 +192,10 @@ impl<'s> MaterialFreeSurface3<'s> {
         let source = resolve_interface_state_point(card, &point, &requirements, selection)?;
         require_owned_axes(&source)?;
         bracket(&source)?;
-        let geometry = self
+        let geometry = flow
             .lattice
             .planar_wall_fill(wall, controls.maximum_wall_cells, gate)?;
-        let mut candidate = MaterialFreeSurfaceWetting3 {
-            flow: self,
+        let mut candidate = Self {
             card,
             source,
             wall,
@@ -178,14 +203,8 @@ impl<'s> MaterialFreeSurface3<'s> {
             geometry,
             samples: BTreeMap::new(),
         };
-        let samples = candidate.resolve_samples(&candidate.geometry, None, gate)?;
-        candidate.flow.lattice.set_planar_contact_field(
-            wall,
-            samples
-                .iter()
-                .map(|(&p, s)| (p, s.applied_angle_radians))
-                .collect(),
-            gate,
+        let samples = candidate.resolve_samples(
+            &candidate.geometry, None, &flow.scaling, None, gate,
         )?;
         checkpoint(gate)?;
         candidate.samples = samples;
@@ -203,13 +222,13 @@ impl MaterialFreeSurfaceWetting3<'_, '_> {
     /// Original two-claim binding at stationary initialization.
     #[must_use]
     pub const fn source(&self) -> &ResolvedInterfaceStatePoint {
-        &self.source
+        &self.binding.source
     }
 
     /// Accepted endpoint queries and next-step angles by wall-cell coordinate.
     #[must_use]
     pub const fn samples(&self) -> &BTreeMap<[usize; 3], FreeSurfaceWettingSample> {
-        &self.samples
+        &self.binding.samples
     }
 
     /// Advance native momentum/mass and atomically refresh the contact history.
@@ -219,21 +238,83 @@ impl MaterialFreeSurfaceWetting3<'_, '_> {
         checkpoint(gate)?;
         let mut lattice = self.flow.lattice.clone();
         lattice.step_with_gate(gate)?;
-        let geometry =
-            lattice.planar_wall_fill(self.wall, self.controls.maximum_wall_cells, gate)?;
-        let samples = self.resolve_samples(&geometry, Some(&self.geometry), gate)?;
-        lattice.set_planar_contact_field(
-            self.wall,
-            samples
-                .iter()
-                .map(|(&p, s)| (p, s.applied_angle_radians))
-                .collect(),
-            gate,
-        )?;
+        let binding = self.binding.at_endpoint(&mut lattice, &self.flow.scaling, None, gate)?;
         checkpoint(gate)?;
         self.flow.lattice = lattice;
-        self.geometry = geometry;
-        self.samples = samples;
+        self.binding = binding;
+        Ok(())
+    }
+}
+
+impl WettingBinding<'_> {
+    pub(super) fn source(&self) -> &ResolvedInterfaceStatePoint {
+        &self.source
+    }
+
+    pub(super) fn samples(&self) -> &BTreeMap<[usize; 3], FreeSurfaceWettingSample> {
+        &self.samples
+    }
+
+    pub(super) fn install(
+        &self,
+        lattice: &mut FreeSurface3,
+        gate: &CancelGate,
+    ) -> Result<(), Error> {
+        lattice.set_planar_contact_field(
+            self.wall,
+            self.samples.iter().map(|(&p, s)| (p, s.applied_angle_radians)).collect(),
+            gate,
+        )?;
+        Ok(())
+    }
+
+    pub(super) fn at_endpoint(
+        &self,
+        lattice: &mut FreeSurface3,
+        scaling: &MaterialFreeSurfaceScaling<'_>,
+        temperatures: Option<(&str, &BTreeMap<[usize; 3], f64>)>,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        let geometry = lattice.planar_wall_fill(self.wall, self.controls.maximum_wall_cells, gate)?;
+        let samples = self.resolve_samples(
+            &geometry, Some(&self.geometry), scaling, temperatures, gate,
+        )?;
+        let candidate = Self { geometry, samples, ..self.clone() };
+        candidate.install(lattice, gate)?;
+        Ok(candidate)
+    }
+
+    // Temperature changes before motion hold the last accepted geometric
+    // speed, rather than resetting the hysteresis branch to stationary.
+    pub(super) fn at_temperatures(
+        &self,
+        axis: &str,
+        temperatures: &BTreeMap<[usize; 3], f64>,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        let mut samples = BTreeMap::new();
+        for (&position, current) in &self.geometry {
+            checkpoint(gate)?;
+            let speed = self.samples[&position].signed_speed_m_s;
+            let temperature = temperatures.get(&position).map(|&t| (axis, t));
+            samples.insert(position, self.sample(current, speed, temperature)?);
+        }
+        Ok(Self { samples, ..self.clone() })
+    }
+
+    pub(super) fn admit_temperature(
+        &self,
+        position: [usize; 3],
+        axis: &str,
+        temperature_k: f64,
+    ) -> Result<(), Error> {
+        if let Some(current) = self.geometry.get(&position) {
+            self.sample(
+                current,
+                self.samples[&position].signed_speed_m_s,
+                Some((axis, temperature_k)),
+            )?;
+        }
         Ok(())
     }
 
@@ -241,6 +322,8 @@ impl MaterialFreeSurfaceWetting3<'_, '_> {
         &self,
         geometry: &BTreeMap<[usize; 3], WallFill3>,
         previous: Option<&BTreeMap<[usize; 3], WallFill3>>,
+        scaling: &MaterialFreeSurfaceScaling<'_>,
+        temperatures: Option<(&str, &BTreeMap<[usize; 3], f64>)>,
         gate: &CancelGate,
     ) -> Result<BTreeMap<[usize; 3], FreeSurfaceWettingSample>, Error> {
         let mut result = BTreeMap::new();
@@ -252,34 +335,38 @@ impl MaterialFreeSurfaceWetting3<'_, '_> {
             let speed = contact_speed(
                 current.fill - old_fill,
                 current.tangent_gradient,
-                self.flow.scaling.cell_size_m(),
-                self.flow.scaling.timestep_s(),
+                scaling.cell_size_m(),
+                scaling.timestep_s(),
             )?;
-            let point = self
-                .source
-                .query()
-                .with(DYNAMIC_WETTING_SPEED_AXIS, speed.abs())?;
-            let material = self.source.at_query_point(self.card, &point)?;
-            let (receding, advancing) = bracket(&material)?;
-            let (regime, applied_angle_radians) = select_angle(
-                speed,
-                self.controls.pinning_speed_m_s,
-                current.angle_radians,
-                receding,
-                advancing,
-            );
-            result.insert(
-                position,
-                FreeSurfaceWettingSample {
-                    signed_speed_m_s: speed,
-                    regime,
-                    geometric_angle_radians: current.angle_radians,
-                    applied_angle_radians,
-                    material,
-                },
-            );
+            let temperature = temperatures
+                .and_then(|(axis, field)| field.get(&position).map(|&t| (axis, t)));
+            result.insert(position, self.sample(current, speed, temperature)?);
         }
         Ok(result)
+    }
+
+    fn sample(
+        &self,
+        current: &WallFill3,
+        speed: f64,
+        temperature: Option<(&str, f64)>,
+    ) -> Result<FreeSurfaceWettingSample, Error> {
+        let mut point = self.source.query().with(DYNAMIC_WETTING_SPEED_AXIS, speed.abs())?;
+        if let Some((axis, value)) = temperature {
+            point = point.with(axis, value)?;
+        }
+        let material = self.source.at_query_point(self.card, &point)?;
+        let (receding, advancing) = bracket(&material)?;
+        let (regime, applied_angle_radians) = select_angle(
+            speed, self.controls.pinning_speed_m_s, current.angle_radians, receding, advancing,
+        );
+        Ok(FreeSurfaceWettingSample {
+            signed_speed_m_s: speed,
+            regime,
+            geometric_angle_radians: current.angle_radians,
+            applied_angle_radians,
+            material,
+        })
     }
 }
 

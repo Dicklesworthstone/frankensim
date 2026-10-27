@@ -105,6 +105,8 @@ struct Conduction<'a, 'm> {
     faces: &'a [FreeSurfaceConductionFace],
     endpoints: Vec<[CellId; 2]>,
     liquid_cells: Vec<CellId>,
+    liquid_coordinates: BTreeMap<CellId, [usize; 3]>,
+    wetting: Option<WettingBinding<'m>>,
     bodies: &'a [FreeSurfaceThermalBody<'m>],
     body_ids: Vec<CellId>,
     contacts: &'a [FreeSurfaceBodyContact],
@@ -160,6 +162,12 @@ impl Conduction<'_, '_> {
             check()?;
             let cell = &thermal.cells()[&id];
             let state = self.sample_liquid(id, cell.specific_h_j_kg, check)?;
+            if let Some(wetting) = &self.wetting {
+                wetting.admit_temperature(
+                    self.liquid_coordinates[&id], self.law.temperature_axis(),
+                    super::wetting::temperature(&state, self.law.temperature_axis())?,
+                )?;
+            }
             states.insert(id, state);
         }
         let mut samples = Vec::with_capacity(self.faces.len());
@@ -728,6 +736,10 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             faces,
             endpoints,
             liquid_cells,
+            liquid_coordinates: ids.iter().filter_map(|(&location, &id)| {
+                FreeSurface3::transport_coordinates(location).map(|position| (id, position))
+            }).collect(),
+            wetting: self.wetting.clone(),
             bodies,
             body_ids: body_ids.clone(),
             contacts,

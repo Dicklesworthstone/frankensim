@@ -3010,3 +3010,49 @@ surface energy or total mechanical energy. Variable sigma, Marangoni stress,
 evolving sourced wetting, evaporation and phase-density change remain
 unsupported. Existing single-liquid, constant-density, stationary-wall,
 native pressure-boundary and low-Mach assumptions remain in force.
+
+
+### Thermal free-surface material wetting
+
+`MaterialFreeSurfaceEnthalpy3::with_dynamic_planar_wetting` attaches the
+original ordered interface-card closure to an already admitted pure-liquid
+trajectory. Frozen and thermal flow share one `WettingBinding`, geometric
+contact-speed estimator, hysteresis selection and native contact-angle-field
+installation. Original frozen isothermal arithmetic is retained. Sigma remains
+the separately admitted source-declared constant, not a hidden function of
+contact angle.
+
+Each wet/interface sample uses the original liquid material tuple's actual
+caloric temperature. Zero-mass wet/interface ghosts retain the enthalpy owner's
+existing temperature extension. Genuinely dry wall stencil cells retain the
+explicit initial source context and create no thermal mass. Other substrate
+and environmental coordinates remain fixed; no resolved interface-temperature
+model is inferred.
+
+Before collision, thermal feedback re-evaluates both pinned advancing/receding
+angle claims while holding the last accepted signed contact-line speed. Those
+angles drive the SAME interval's native capillary curvature/pressure update.
+Endpoint admission uses advected temperature and the original backward
+geometric speed, retaining one accepted history. Conductive substeps also check
+interface source support, so leaving and reentering a source interval cannot
+escape admission. Populations, mass, h, angle field, source receipts, contact
+history, finite wall heat and finite gas state publish only after the complete
+native candidate succeeds.
+
+This is a first-order local-cell wetting closure with the original spatial and
+contact-line limits. It supplies no moving substrate, calibrated pinning,
+Marangoni force, capillary heat, or conservative surface/total mechanical
+energy claim. Changing contact angle is not credited as thermal energy.
+
+Four synthetic regression definitions cover original frozen/native parity;
+same-interval temperature -> sourced angle -> population sensitivity and
+neglected-capillary inertness; finite wall/gas/rheology feedback with independent
+wall heat balance; and late thermal/endpoint source failure, rollback, retry
+and cancellation. The independently calculated first two wall-heating endpoints
+are 400.961538461538 K and 401.864956392677 K, placing the 401.2 K source failure
+after one valid internal substep. Final changed files passed Rust syntax parsing,
+source/API review and bounded independent ownership review. Native compilation
+and execution were unavailable (no Rust/Cargo, DSR or RCH); these are authored
+regressions, not passing native or experimental evidence.
+Focused command:
+`cargo test -p fs-lbm --test material_free_surface_enthalpy conduction::capillarity::wetting`.

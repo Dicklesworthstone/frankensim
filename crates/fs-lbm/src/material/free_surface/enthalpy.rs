@@ -9,8 +9,9 @@
 //! This is the single-liquid, constant-density, stationary-wall rung. A sourced
 //! validity-wide constant surface tension retains the native capillary mechanics.
 //! Capillary work and surface-energy accuracy remain the native model's scope;
-//! no surface heat or total-energy closure is invented here. Varying sigma and
-//! sourced wetting refuse. Phase mobility and pressure work are not supplied. Optional `viscous`
+//! no surface heat or total-energy closure is invented here. Varying sigma
+//! refuses. Optional `wetting` evolves the original planar contact law using
+//! local liquid temperature. Phase mobility and pressure work are not supplied. Optional `viscous`
 //! converts the molecular stress power into heat on the same VOF mass routes.
 //! Optional `conduction` reuses the shared thermal timeline on explicit wetted
 //! face geometry. Optional `buoyancy` admits bounded source-density departures
@@ -33,6 +34,7 @@ use fs_material::state_point::MaterialStatePointError;
 use fs_qty::Temperature;
 
 use super::{MaterialFreeSurface3, MaterialLbmError};
+use super::wetting::{FreeSurfaceWettingError, WettingBinding};
 use crate::d3q19::freesurface3::transport::MassLocation3;
 use crate::d3q19::freesurface3::{FreeSurface3, FreeSurfaceError3};
 use crate::material::plan_momentum_scaling;
@@ -48,6 +50,9 @@ pub mod viscous;
 
 /// Original T/shear source tables on actual native collision and molecular heat.
 pub mod rheology;
+
+/// Local temperature and contact-line history on the original planar boundary.
+pub mod wetting;
 
 /// Source-conductivity exchange on the existing thermal timeline before flow.
 #[cfg(feature = "enthalpy-coupling")]
@@ -124,6 +129,8 @@ pub enum FreeSurfaceEnthalpyError {
     Flow(MaterialLbmError),
     /// Original source query refusal, including pinned-claim support.
     Material(MaterialStatePointError),
+    /// The original planar source/geometry/hysteresis owner refused.
+    Wetting(FreeSurfaceWettingError),
     /// Original finite-body material/temperature binding refused.
     ThermalMaterial(fs_material::thermal::source::ThermalMaterialError),
     /// Original caloric chart refusal; no temperature extrapolation occurs.
@@ -150,6 +157,7 @@ impl core::fmt::Display for FreeSurfaceEnthalpyError {
         match self {
             Self::Flow(e) => write!(f, "free-surface enthalpy: {e}"),
             Self::Material(e) => write!(f, "free-surface enthalpy source: {e}"),
+            Self::Wetting(e) => write!(f, "free-surface enthalpy wetting: {e}"),
             Self::ThermalMaterial(e) => write!(f, "free-surface thermal body: {e}"),
             Self::Phase(e) => write!(f, "free-surface enthalpy chart: {e}"),
             Self::Solve(e) => write!(f, "free-surface enthalpy solve: {e}"),
@@ -182,6 +190,11 @@ impl From<FreeSurfaceError3> for FreeSurfaceEnthalpyError {
 impl From<MaterialStatePointError> for FreeSurfaceEnthalpyError {
     fn from(e: MaterialStatePointError) -> Self {
         Self::Material(e)
+    }
+}
+impl From<FreeSurfaceWettingError> for FreeSurfaceEnthalpyError {
+    fn from(e: FreeSurfaceWettingError) -> Self {
+        Self::Wetting(e)
     }
 }
 impl From<fs_material::thermal::source::ThermalMaterialError> for FreeSurfaceEnthalpyError {
@@ -235,6 +248,7 @@ pub struct MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     buoyancy: Option<BoussinesqLiquid>,
     rheology: Option<rheology::RheologyBinding>,
     rheology_samples: BTreeMap<MassLocation3, rheology::FreeSurfaceRheologySample>,
+    wetting: Option<WettingBinding<'m>>,
 }
 
 struct ResolvedFlowMaterials {
@@ -300,7 +314,7 @@ impl<'s> MaterialFreeSurface3<'s> {
         }
         if self.scaling.planar_wetting.is_some() {
             return Err(Error::Invalid(
-                "thermal free surface has no evolving sourced wetting law",
+                "thermal free surface must bind wetting through its evolving interface owner",
             ));
         }
         if source.material().card_identity() != law.reference_state().material().card_identity()
@@ -365,6 +379,7 @@ impl<'s> MaterialFreeSurface3<'s> {
             buoyancy,
             rheology,
             rheology_samples: BTreeMap::new(),
+            wetting: None,
         };
         let resolved =
             candidate.resolve_states(&candidate.flow.lattice, &candidate.h, &masses, gate)?;
@@ -491,6 +506,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         // private candidate. No accepted populations, carry or source state move
         // until every endpoint query and conservation gate has passed.
         let mut lattice = self.flow.lattice.clone();
+        let prepared_wetting = self.prepare_wetting(&mut lattice, &resolved.states, gate)?;
         let trace = lattice.step_with_mass_transport(
             gate,
             &resolved.tau,
@@ -507,6 +523,20 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             // The accepted force now belongs to the accepted advected h state.
             lattice.rebind_force_field(forces, gate)?;
         }
+        let accepted_wetting = match prepared_wetting {
+            Some(binding) => {
+                let temperatures = wetting::temperatures(
+                    &endpoint.states, self.law.temperature_axis(), gate,
+                )?;
+                Some(binding.at_endpoint(
+                    &mut lattice,
+                    &self.flow.scaling,
+                    Some((self.law.temperature_axis(), &temperatures)),
+                    gate,
+                )?)
+            }
+            None => None,
+        };
         let endpoint_masses = lattice.mass_snapshot();
         admit_masses(&endpoint_masses, self.controls.max_cells)?;
         let after = total(&endpoint_masses, &h, mass_unit)?;
@@ -545,6 +575,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         self.h = h;
         self.states = endpoint.states;
         self.rheology_samples = endpoint.rheology;
+        self.wetting = accepted_wetting;
         Ok(report)
     }
 

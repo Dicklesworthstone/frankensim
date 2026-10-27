@@ -16,6 +16,9 @@ use fs_qty::Frequency;
 #[path = "../../nsf3_thermochemical/source.rs"]
 mod gas_source;
 
+#[path = "wetting.rs"]
+mod wetting;
+
 const EXPOSED: [usize; 3] = [3, 3, 3];
 
 fn source_card(sigma: f64, shear: bool, sigma_upper_k: f64) -> MaterialCard {
