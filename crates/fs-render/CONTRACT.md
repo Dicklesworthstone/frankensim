@@ -68,7 +68,10 @@ differentiable lift). Pure Rust throughout.
   an RGB temperature-color curve or a second debit to thermal storage.
   `MaterialThermalBinding::try_gray_diffuse` retains the original
   `fs-conduction::radiation::SurfaceEmissivity` sample and requires its exact
-  card and temperature to match an accepted `ResolvedMaterialStatePoint`.
+  card, complete query point and coordinate quantity meanings to match an
+  accepted `ResolvedMaterialStatePoint`. The physical temperature comes from
+  the radiation owner, including explicitly typed coordinates not named `T`;
+  pressure and phase conditions cannot be dropped when binding appearance.
   Changed thermal endpoints require rebinding. The declaration does not infer
   spectral/directional emissivity from a total measurement or visible n+k,
   and replaces rather than adds to the independent conductor/dielectric law.

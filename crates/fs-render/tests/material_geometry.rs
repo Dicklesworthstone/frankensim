@@ -11,12 +11,13 @@ use fs_ga::Vec3 as MassVec3;
 use fs_geom::{Point3, Vec3};
 use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
-    PropertyValue, Provenance, QueryPoint, SelectionPolicy, UncertaintyModel,
+    PropertyValue, Provenance, QueryPoint, UncertaintyModel,
 };
 use fs_material::state_point::{
     DENSITY_PROPERTY, INVERSE_TEMPERATURE_DIMS, LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
     MaterialPropertySelection, POISSON_RATIO_PROPERTY, YOUNG_MODULUS_PROPERTY,
 };
+use fs_material::thermal::source::ThermalMaterialPoint;
 use fs_mbd_material::deformation::TetrahedralMass;
 use fs_mbd_material::deformation::thermoelastic::{ThermalCell, ThermalSolveConfig};
 use fs_mbd_material::{RegionBinding, ResolvedBody, VolumeMoments, resolve_body};
@@ -286,11 +287,16 @@ fn accepted_hot_state_drives_both_real_silhouette_and_thermal_radiance() {
                     near(actual[axis], original[axis] * (1.0 + alpha * 1500.0));
                 }
             }
-            let emissivity = SurfaceEmissivity::from_card(
+            let point = thermal.sources()[0].stiffness().query();
+            let (emissivity, _) = SurfaceEmissivity::from_condition(
                 "upper",
-                &cards[0],
-                1800.0,
-                SelectionPolicy::SingleClaimOnly,
+                ThermalMaterialPoint {
+                    material: &cards[0],
+                    context: &point,
+                    temperature_axis: "T",
+                    liquid_fraction_axis: None,
+                },
+                MaterialPropertySelection::SingleClaimOnly,
             )
             .unwrap();
             let binding = MaterialThermalBinding::try_gray_diffuse(

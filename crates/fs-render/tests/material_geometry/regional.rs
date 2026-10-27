@@ -19,13 +19,19 @@ fn appearance(
         .zip(body.sources())
         .map(|(region, source)| {
             let index = KEYS.iter().position(|key| *key == region.key()).unwrap();
-            let emissivity = SurfaceEmissivity::from_card(
+            let point = source.stiffness().query();
+            let (emissivity, _) = SurfaceEmissivity::from_condition(
                 region.key(),
-                &cards[index],
-                temperatures[index],
-                SelectionPolicy::SingleClaimOnly,
+                ThermalMaterialPoint {
+                    material: &cards[index],
+                    context: &point,
+                    temperature_axis: "T",
+                    liquid_fraction_axis: None,
+                },
+                MaterialPropertySelection::SingleClaimOnly,
             )
             .unwrap();
+            assert_eq!(emissivity.temperature_k(), temperatures[index]);
             let binding = MaterialThermalBinding::try_gray_diffuse(
                 source.stiffness(),
                 &emissivity,

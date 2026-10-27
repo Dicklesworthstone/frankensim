@@ -4,7 +4,7 @@
 //! point. Surface finish is an independent input, not inferred from chemistry.
 //! Conversion retains the existing visible-band conductor/Cauchy/Beer-Lambert
 //! approximations. The separately declared gray/diffuse thermal binding reuses
-//! a conduction emissivity sample at the same accepted physical temperature.
+//! a conduction emissivity sample at the same complete accepted material state.
 //! Neither binding authenticates measurements or supplies experimental validation.
 
 use fs_blake3::{ContentHash, DomainHasher};
@@ -37,8 +37,11 @@ pub struct MaterialThermalBinding {
 }
 
 impl MaterialThermalBinding {
-    /// Resolve a rendered thermal material from the same card and temperature
-    /// as the supplied accepted mechanical/thermal state bundle.
+    /// Resolve a rendered thermal material from the same card, complete query
+    /// point and quantity conventions as the accepted mechanical/thermal state.
+    /// The radiation owner supplies the physical temperature; its coordinate
+    /// need not be named `T`. Pressure, phase and other source conditions cannot
+    /// be omitted or changed between cooling and observation.
     ///
     /// The selected model emits Planck radiance and reflects `1-epsilon`.
     /// It replaces visible-band conductor/dielectric scattering; combining
@@ -49,12 +52,10 @@ impl MaterialThermalBinding {
         emissivity: &SurfaceEmissivity,
         surface_state_identity: ContentHash,
     ) -> Result<Self, MaterialThermalError> {
-        let temperature = accepted
-            .query_point()
-            .iter()
-            .find_map(|(axis, value)| (axis == "T").then_some(*value));
+        let receipt = emissivity.receipt();
         if accepted.card_identity() != emissivity.card_identity()
-            || temperature != Some(emissivity.temperature_k())
+            || accepted.query_point() != receipt.query_point.as_slice()
+            || accepted.axis_quantities() != &receipt.axis_quantities
         {
             return Err(MaterialThermalError::StateMismatch);
         }
@@ -108,7 +109,7 @@ impl MaterialThermalBinding {
 /// Refusal before thermal appearance can alter a scene.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MaterialThermalError {
-    /// Accepted state and emissivity do not share one card and temperature.
+    /// Accepted state and emissivity differ in card, coordinates or quantities.
     StateMismatch,
     /// The caller did not identify the independently declared surface state.
     MissingSurfaceIdentity,
@@ -120,7 +121,7 @@ impl core::fmt::Display for MaterialThermalError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::StateMismatch => {
-                f.write_str("thermal appearance requires the accepted card and temperature")
+                f.write_str("thermal appearance requires the accepted card, complete query point and quantities")
             }
             Self::MissingSurfaceIdentity => {
                 f.write_str("surface-state identity must not be zero")
@@ -271,6 +272,7 @@ impl MaterialOpticalBinding {
         if mechanical.material() != optical.material()
             || mechanical.card_identity() != optical.card_identity()
             || mechanical.query_point() != optical.query_point()
+            || mechanical.axis_quantities() != optical.axis_quantities()
         {
             return Err(MaterialOpticalError::StateMismatch);
         }
@@ -348,7 +350,7 @@ impl core::fmt::Display for MaterialOpticalError {
         match self {
             Self::StateMismatch => write!(
                 f,
-                "mechanics and optics require the same card and query point"
+                "mechanics and optics require the same card, query point and quantities"
             ),
             Self::MissingSurfaceIdentity => write!(f, "surface-state identity must not be zero"),
             Self::Conductor(error) => error.fmt(f),
