@@ -13,6 +13,7 @@
 //! infer reciprocal thermoelastic heat, plastic flow, phase-support laws, or
 //! deformation-dependent thermal conductances. Those require their own closures.
 //! Partial melt and excessive displacement/strain refuse the whole candidate.
+//! The [`thermoelastic`] path closes reciprocal elastic/finite-heat feedback.
 //! The sibling [`plastic`] path couples actual loaded J2 tetrahedra and spatial
 //! physical-heat feedback under its separately stated energetic assumptions.
 
@@ -20,6 +21,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Loaded J2 tetrahedra exchange physical plastic heat with spatial enthalpy.
 pub mod plastic;
+/// Reciprocal source thermodynamics on the native elastic equilibrium/heat history.
+pub mod thermoelastic;
 /// One finite source gas exchanges heat with distinct spatial solid cells.
 pub mod gas;
 /// Accepted local heat histories drive the existing pressure-valve reduction.
@@ -595,4 +598,3 @@ pub struct SolidEnthalpyCandidate<'m, 't> {
     pub state: SolidEnthalpyState<'m>,
     pub equilibrium: SolidEquilibrium,
 }
-

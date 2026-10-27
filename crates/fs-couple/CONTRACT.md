@@ -8049,3 +8049,50 @@ multi-owner continuation, global energy/species conservation and late final
 pressure/work/cancellation rollback. All six changed Rust files passed syntax
 parsing. Independent diffusion and caloric reference arithmetic was executed.
 Native compilation, Cargo tests and rustfmt remain unexecuted in this environment.
+
+
+### Reciprocal spatial elastic work and finite enthalpy
+
+`solid_enthalpy::thermoelastic::ThermoelasticSolid` retains the original
+`SolidEnthalpy` binding, native compatible equilibrium/stress, actual assembled
+nodal loads and finite thermal state. One declared source interval per reference
+tetrahedron uses the source-backed affine isotropic thermoelastic potential:
+E(T), fixed Poisson ratio and constant instantaneous expansion. The same
+source/card/eigenstrain and delivered reference mass remain pinned. It admits
+a fully solid constant-density interval within the original complete caloric
+chart, preserving later latent/liquid segments. Any latent segment intersecting
+the admitted interval, or any actual phase/source-domain exit, refuses. The
+interval's actual caloric capacity plus the conservative fixed-total-strain
+field capacity must stay positive.
+
+Each bounded heat fixed-point trial starts from accepted thermal and observer
+histories, runs the original thermal substeps/events with additional reversible
+powers, then resolves local sources and solves the original P1 load,
+displacement and stress owner. With unchanged homogeneous supports, local work
+W_e = V_e (sigma_0 + sigma_1) : delta(epsilon) / 2 sums to actual averaged
+endpoint nodal work (f_0 + f_1) dot delta(u) / 2. Q_rev,e = W_e - delta(U_e)
+enters that element's original cell exactly once.
+
+The independent free-energy identity separates expansion work
+-V (sigma_0 + sigma_1) : delta(epsilon_free) / 2 and stiffness work
+V e_0 : delta(C) : e_1 / 2, while T*S remains part of physical U. Numerical
+residuals are never converted to heat. Local source/native stress and energy
+parity, per-element applied/source heat mismatch, mechanical work, thermal
+storage and the combined internal/caloric/external balance all gate publication.
+Original observer source, conductance, transfer, interval and event hooks are
+forwarded; only the final accepted observer clone is returned.
+
+This is quasistatic continuation with declared trapezoidal endpoint mechanical
+work and the original explicit thermal substeps. Changing-load/temperature
+coupling is generally first order. No exact continuous-path work, unconditional
+entropy/stability, inertia, plasticity, moving supports, follower loads, changed
+heat-transfer geometry or phase-flow claim is added. Source, phase, capacity,
+native solve, iteration-budget, observer or cancellation refusal leaves accepted
+history unchanged.
+
+Three synthetic independent regression definitions exercise free/constrained
+finite heating, heterogeneous connected tetrahedra with changing loads and
+material-only substitutions, full phase-chart retention and late refusal/retry.
+All four changed Rust files passed syntax parsing; independent two-element
+reference equations and bounded source/API/physics reviews were completed.
+Native compilation, Cargo tests and rustfmt remain unexecuted in this environment.

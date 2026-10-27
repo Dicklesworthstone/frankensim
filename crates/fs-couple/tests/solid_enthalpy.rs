@@ -27,6 +27,9 @@ mod rebind;
 #[path = "solid_enthalpy/damping.rs"]
 mod damping;
 
+#[path = "solid_enthalpy/thermoelastic.rs"]
+mod thermoelastic;
+
 const NODES: [[f64;3];4] = [[0.,0.,0.],[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]];
 const TETS: [[usize;4];1] = [[0,1,2,3]];
 const FREE: [usize;6] = [0,1,2,4,5,8];
