@@ -115,6 +115,44 @@ fn updated_point(context: &QueryPoint, t: f64, p: f64) -> Result<QueryPoint, Gas
 }
 
 impl ThermochemicalGasModel {
+    /// Conservative upper bound on `dT/du` [kg K/J] for a frozen ideal gas.
+    ///
+    /// The original NASA-9 coefficients bound each active species' cp over the
+    /// supplied single-region temperature bracket. Subtracting its own R/M
+    /// bounds cv; the smallest active species bound also bounds every positive
+    /// mass-weighted mixture. This is a stability bound, not a replacement
+    /// caloric law: actual storage and inversion still use NASA-9 u(T).
+    pub fn maximum_isochoric_temperature_slope(
+        &self, controls: GasEnergySolve,
+    ) -> Result<f64, GasEnergyError> {
+        use fs_thermochem::{ReferenceEquationOfStateV1, StandardStatePhaseV1,
+            UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K};
+        controls.validate()?;
+        let convention = self.thermodynamics().components()[0].convention();
+        if convention.phase() != StandardStatePhaseV1::Gas
+            || convention.eos() != ReferenceEquationOfStateV1::IdealGas
+            || self.thermodynamics().components().iter()
+                .any(|species| species.convention() != convention)
+        {
+            return Err(GasEnergyError::Invalid("isochoric capacity requires one common ideal-gas convention"));
+        }
+        let mut lower: f64 = f64::INFINITY;
+        for species in self.thermodynamics().components() {
+            let gas_constant = (UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K
+                / species.molar_mass().value()).next_up();
+            let cv = (enthalpy::minimum_cp(species, controls)? - gas_constant).next_down();
+            if !positive(cv) {
+                return Err(GasEnergyError::Invalid("source coefficient bound cannot establish positive cv; narrow the gas bracket"));
+            }
+            lower = lower.min(cv);
+        }
+        let slope = (1.0 / lower).next_up();
+        if !positive(slope) {
+            return Err(GasEnergyError::Invalid("isochoric temperature slope is unrepresentable"));
+        }
+        Ok(slope)
+    }
+
     /// Reconstruct a common physical state from conserved density and specific
     /// internal energy. `context` supplies explicitly typed initial T/p and all
     /// other material conditions. T/p are replaced; other axes are preserved.
@@ -228,6 +266,11 @@ pub struct GasHeatStep {
     pub iterations: usize,
 }
 impl IsochoricGasParcel {
+    /// The same frozen-composition source model that owns this parcel's energy,
+    /// pressure and transport. Shared immutably by coupled film evaluations.
+    #[must_use]
+    pub const fn model(&self) -> &ThermochemicalGasModel { &self.model }
+
     /// Initialize from a source-resolved temperature/pressure and explicit
     /// volume. Mass is rho*V from this SAME state, not an independent density.
     pub fn new(model: ThermochemicalGasModel, point: QueryPoint, volume_m3: f64) -> Result<Self, GasEnergyError> {

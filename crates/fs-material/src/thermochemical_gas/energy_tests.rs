@@ -16,6 +16,21 @@ fn specific_u(t: f64, a_fraction: f64, slope: f64) -> f64 {
 }
 
 #[test]
+fn source_isochoric_slope_bounds_actual_cv_without_replacing_nasa_energy() {
+    for fractions in [vec![0.75, 0.25], vec![0.25, 0.75]] {
+        let gas = model(fractions, 0.001);
+        let bound = gas.maximum_isochoric_temperature_slope(controls()).unwrap();
+        for temperature in [200.0, 500.0, 1000.0, 1500.0] {
+            let state = gas.evaluate(&point(temperature, 100000.0)).unwrap();
+            let cv = state.thermodynamics().properties().mass_specific_cv().value();
+            assert!(bound >= 1.0 / cv);
+        }
+        let outside = GasEnergySolve { maximum_temperature_k: 2100.0, ..controls() };
+        assert!(gas.maximum_isochoric_temperature_slope(outside).is_err());
+    }
+}
+
+#[test]
 fn fixed_volume_heat_changes_pressure_and_the_complete_shared_medium() {
     let mut parcel = IsochoricGasParcel::new(model(vec![0.75, 0.25], 0.0), point(300.0, 100000.0), 0.01).unwrap();
     let before = parcel.state().clone();

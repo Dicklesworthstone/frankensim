@@ -7,6 +7,9 @@ use fs_lbm::conjugate::enthalpy::advection::feedback::MaterialFlowError;
 #[path = "occupancy/unsteady.rs"]
 mod unsteady;
 
+#[path = "occupancy/environment.rs"]
+mod environment;
+
 fn geometry<'a>(
     domain: &VoxelDomain,
     curve: &'a EquilibriumEnthalpyPhaseCurve,

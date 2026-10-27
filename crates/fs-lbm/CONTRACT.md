@@ -2707,3 +2707,35 @@ remains in force. Synthetic G1 tests cover speed/dx/dt scaling, direction and
 closed-deadband selection, and all six wall-normal/ghost conventions; G1/G3/G4
 integration tests cover collapsed-bracket native equivalence, rate-law data
 effects on populations, the sigma-zero limit and transactional source exits.
+
+## Finite atmosphere coupled to material phase and native momentum
+
+`conjugate::enthalpy::advection::feedback::environment::advance_finite_gas_with_material_flow`
+composes the original fixed-density material/phase/MAC timeline with a closed,
+fixed-volume `IsochoricGasParcel`. Each accepted thermal substep resolves the
+condensed phase conductivity and the original gas-film conductivity at the
+mean interface temperature and current EOS pressure. A prescribed two-layer
+film transfers equal/opposite joules into condensed total enthalpy and gas
+NASA-9 internal energy. Gas temperature, pressure and transport refresh through
+the same source model. Latent heat, exact solid/mushy occupancy, Darcy mobility,
+liquid viscosity, retained face momentum and optional molecular heating remain
+with the original owners; no second phase or flow solver is added.
+
+The source-derived gas `cv` bound and original condensed caloric slope combine
+with conductive/advective timestep limits. Exposed-area coverage, original gas
+transport claims, explicit film geometry and duplicate ambient-convection
+refusal prevent hidden parallel heat paths. Gas and combined thermal ledgers
+check actual storage against the transferred energy; that internal exchange is
+removed from the union's external heat. Mechanical heating retains its original
+work/kinetic account and actual accepted `step_sources` interval. The returned
+gas, thermal and flow candidates publish together; late source, phase, momentum
+or cancellation failures preserve all inputs.
+
+This is a frozen-composition, stationary-interface, well-mixed gas/film model.
+Gas pressure is observed but does not impose traction or volume work. Reaction,
+evaporation, species transfer, moving solid geometry and nonzero-momentum freeze
+handoff remain outside this path. Four runtime regressions independently check
+NASA internal-energy cooling and latent melting, gas-data-only changes that open
+native flow faces, late pressure-domain/cancellation rollback and small-reservoir
+capacity limits. Coefficients are synthetic. MR25/MR29 remain open for their
+broader moving solid/liquid integration.

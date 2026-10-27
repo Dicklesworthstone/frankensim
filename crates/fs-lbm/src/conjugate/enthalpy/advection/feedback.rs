@@ -32,6 +32,9 @@ use crate::material::transport::boussinesq::{BoussinesqConfig, BoussinesqMateria
 /// Current and irreversible heat from these exact live-flow material samples.
 pub mod electrical;
 
+/// Finite source-backed gas storage exchanging heat with the same phase/flow cells.
+pub mod environment;
+
 mod viscous;
 use viscous::ViscousHeating;
 pub use viscous::ViscousHeatingAudit;

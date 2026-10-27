@@ -138,7 +138,7 @@ impl Interval {
     }
 }
 
-fn minimum_cp(
+pub(super) fn minimum_cp(
     species: &Nasa9StandardStateModelV1, controls: GasEnergySolve,
 ) -> Result<f64, GasEnergyError> {
     let lo = controls.minimum_temperature_k;

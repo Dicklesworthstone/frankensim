@@ -2230,3 +2230,14 @@ and its `fs-couple` temperature-feedback driver. This is a decoupled physical
 plane with symmetric static Ohmic response; Hall/AC effects, inferred normal
 transport and changing principal directions require additional physical laws.
 Program anchor: MR43 (`frankensim-material-reality-ui2if.7.1`), remains open.
+
+## Finite ideal-gas internal-energy capacity for coupled exchange
+
+`ThermochemicalGasModel::maximum_isochoric_temperature_slope` bounds `dT/du`
+over an explicit single-region temperature bracket using the original NASA-9
+coefficient interval bound and each species' `cv = cp - R/M`. The bound is a
+timestep aid; the existing source model still owns actual `u(T)` and inversion.
+`IsochoricGasParcel::model` exposes that same immutable composition/source model
+for coupled film queries. No constant heat capacity, enthalpy substitution or
+second gas caloric law is introduced. A focused test compares the bound with
+actual mixture heat capacities and refuses a bracket outside source support.
