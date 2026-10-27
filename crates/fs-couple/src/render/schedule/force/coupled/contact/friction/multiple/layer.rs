@@ -206,8 +206,9 @@ impl MultiFrictionModalSystem {
     ///
     /// A layer needs positive compression throughout every accepted sample.
     /// Opening refuses without erasing storage; layer fracture/detachment is
-    /// not implemented. Dynamic relocation and the separate nonlinear geometric
-    /// potential iteration are refused rather than omitting interface history.
+    /// not implemented. Dynamic relocation refuses. Bound nonlinear mechanical
+    /// storage uses the existing joint discrete-gradient iteration, retaining
+    /// this layer's accepted history and reversible energy in every trial.
     pub fn with_material_shear_layers(
         mut self,
         bindings: Vec<(usize, ResolvedShearLayer)>,
@@ -219,9 +220,8 @@ impl MultiFrictionModalSystem {
         }
         if self.samples_rendered() != 0
             || self.shear_layers.iter().any(Option::is_some)
-            || self.core.has_nonlinear_potentials()
         {
-            return Err(invalid("material shear layers require one complete binding before playback without unsupported geometric storage").into());
+            return Err(invalid("material shear layers require one complete binding before playback").into());
         }
         for (port, source) in bindings {
             poll(Some(gate))?;

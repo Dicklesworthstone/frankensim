@@ -66,8 +66,8 @@ impl Inputs {
     }
     pub fn preflight(&self, spec: &input::Spec) -> Result<()> {
         self.validate_tracks(&spec.schedule)?;
-        if spec.geometric_stretching.is_some() || spec.longitudinal_waves.is_some() {
-            return Err("material shear layers require the shared linear mechanical owner; nonlinear geometric storage is not yet composed with layer storage".into());
+        if spec.contact_thermal && (spec.geometric_stretching.is_some() || spec.longitudinal_waves.is_some()) {
+            return Err("contact-thermal material layers are not yet composed with nonlinear geometric storage".into());
         }
         Ok(())
     }

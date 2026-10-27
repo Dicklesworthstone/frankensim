@@ -119,6 +119,18 @@ contact solve, optional fiber compliance, body/cavity motion and pressure
 observer carry that response into PCM. Changing the pack or layer geometry
 does not require changing Rust.
 
+Isothermal material shear layers compose with either `geometric-stretching` or
+`longitudinal-waves`. For example, insert
+`geometric-stretching 0.2 64 100000 1e-11 1e-10` before `cavity` in
+`shear-layer-bow.material-strings`; alternatively select
+`longitudinal-waves 0.2 0.01 64 100000 1e-11 1e-10 2 1 2`.
+The original strain energy, layer elastic/plastic history and any series-drive
+spring/dashpot remain in one staged contact solve and complete energy balance.
+Changing only layer source data changes the shared pressure output. These two
+strain selections remain mutually exclusive. Contact-thermal continuation with
+nonlinear mechanical storage still refuses before material I/O; fixed layer
+geometry and retained compression remain required.
+
 The `state` row supplies the initial temperature and material query. Without
 an explicit contact-thermal profile it stays frozen. Every
 selected property needs explicit temperature support and applicability from

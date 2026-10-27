@@ -21,8 +21,9 @@ impl MultiBowStringBank {
     ///
     /// This is a fixed-layer, retained-compression rung. Bind once before
     /// playback; dry-interface cards cannot also control those ports. Opening,
-    /// migrating layer history and nonlinear geometric-storage composition
-    /// refuse explicitly. Temperature is the declared frozen source state;
+    /// and migrating layer history refuse explicitly. Nonlinear string strain
+    /// and any compliant-drive springs participate in the same staged solve
+    /// with the layer's own reversible storage. Temperature is the declared frozen source state;
     /// conduction, flash heating, wear and measured rosin behavior are not
     /// supplied by this adapter.
     pub fn with_bow_shear_layers(

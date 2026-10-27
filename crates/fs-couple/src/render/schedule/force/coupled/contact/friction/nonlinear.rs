@@ -141,7 +141,16 @@ pub(super) struct NonlinearTrialWork {
     pub absolute_drive_work_j: f64,
     pub network_dissipation_j: f64,
     pub friction_dissipation_j: f64,
+    pub internal_storage: Option<NonlinearInternalStorage>,
     pub contacts: Option<NonlinearContactWork>,
+}
+/// Original contact mechanisms may store energy outside the modal coordinates.
+/// Their dissipation and supplied work already belong to the trial's friction
+/// accounts; only accepted/staged storage must be added to the joint DG balance.
+#[derive(Clone, Copy)]
+pub(super) struct NonlinearInternalStorage {
+    pub before_energy_j: f64,
+    pub after_energy_j: f64,
 }
 /// Already evaluated by the original normal-contact owner at this same trial.
 /// For x=N^T q-s, -R N^T delta_q = -delta_U-loss-R delta_s. Thus normal
@@ -181,6 +190,7 @@ impl NonlinearTrial for SingleTrial<'_> {
             absolute_drive_work_j: frame.drive_work_j.abs(),
             network_dissipation_j: frame.network_dissipation_j,
             friction_dissipation_j: frame.friction_dissipation_j,
+            internal_storage: None,
             contacts: None,
         })
     }
@@ -488,19 +498,27 @@ impl NonlinearFrictionState {
             last_ratio = finite(residual / tolerance)?;
             let after = finite(frame.network_energy_j + after_potential)?;
             let external_work = dot(external, &inner.network.free_delta)?;
+            // Layer and series-drive springs stay outside the modal energy
+            // report. Their original accepted and staged storage still enter
+            // this complete balance, without duplicating plastic/dashpot loss.
+            let (stored_before, stored_after) = match frame.internal_storage {
+                Some(storage) => (finite(before + storage.before_energy_j)?,
+                    finite(after + storage.after_energy_j)?),
+                None => (before, after),
+            };
             // Keep obstacle storage separate in the public frame, but include
             // BOTH accepted endpoints and its own loss/work in this transaction.
             let (total_before, total_after) = match frame.contacts {
-                Some(contact) => (finite(before + contact.before_energy_j)?,
-                    finite(after + contact.after_energy_j)?),
-                None => (before, after),
+                Some(contact) => (finite(stored_before + contact.before_energy_j)?,
+                    finite(stored_after + contact.after_energy_j)?),
+                None => (stored_before, stored_after),
             };
             let balance = if let Some(contact) = frame.contacts {
                 finite(total_after - total_before + frame.network_dissipation_j
                     + frame.friction_dissipation_j + contact.dissipation_j
                     - external_work - frame.drive_work_j - contact.work_j)?
             } else { finite(
-                after - before + frame.network_dissipation_j + frame.friction_dissipation_j
+                total_after - total_before + frame.network_dissipation_j + frame.friction_dissipation_j
                     - external_work
                     - frame.drive_work_j,
             )? };

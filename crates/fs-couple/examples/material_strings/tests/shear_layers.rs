@@ -167,6 +167,51 @@ fn layer_history_and_pcm_are_identical_across_callback_boundaries() {
         assert_eq!(summary.samples, 1024);
     });
 }
+
+#[test]
+fn layer_material_swaps_reach_nonlinear_string_pressure_without_resetting_interface_history() {
+    scoped(|cx, gate| {
+        for record in ["geometric-stretching 0.2 64 100000 1e-11 1e-10",
+            "longitudinal-waves 0.2 0.01 64 100000 1e-11 1e-10 2 1 2"] {
+            let text = include_str!("../shear-layer-bow.material-strings")
+                .replace("48000 4096 0.01 128", "48000 256 0.01 128")
+                .replace("cavity neck", &format!("{record}\ncavity neck"));
+            let spec = || input::Spec::parse(text.as_bytes()).unwrap();
+            let mut direct = ready(cx, gate, spec(), 4.0);
+            let mut replay = ready(cx, gate, spec(), 4.0);
+            let mut changed = ready(cx, gate, spec(), 12.0);
+            assert_eq!(direct.spec.bytes, changed.spec.bytes);
+            assert_eq!(direct.performance.bank().system().components().iter().map(|m| m.modes()).collect::<Vec<_>>(),
+                changed.performance.bank().system().components().iter().map(|m| m.modes()).collect::<Vec<_>>());
+            let expected = pressure(&mut direct, 1);
+            assert_eq!(expected, pressure(&mut replay, 37));
+            let replacement = pressure(&mut changed, 128);
+            assert!(expected.iter().any(|p| p.abs() > 1e-12));
+            assert!(expected.iter().zip(replacement).any(|(a, b)| (a - b).abs() > 1e-12));
+            for port in 0..3 {
+                assert_eq!(direct.performance.bank().system().material_shear_state(port),
+                    replay.performance.bank().system().material_shear_state(port));
+            }
+            let frame = direct.performance.bank().system().last_frame().unwrap();
+            assert!(frame.nonlinear.is_some());
+            assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+            assert!(frame.ports.iter().all(|port| port.shear_layer.is_some()));
+            assert!(frame.shear_layer_energy_j > 0.0);
+            let mut output = ready(cx, gate, spec(), 4.0);
+            let (wav, report) = output.write(Cursor::new(Vec::new()), gate).unwrap();
+            assert_eq!(wav.into_inner(), fs_couple::pcm_wav::encode_pcm16_wav(&expected, 48_000, 0.01).unwrap().0);
+            assert_eq!(report.samples, 256);
+
+            // The thermal endpoint owner remains a separate admitted rung.
+            let mut unsupported = spec(); unsupported.contact_thermal = true;
+            let mut reads = 0;
+            assert!(unsupported.compile(cx, gate, |name| {
+                reads += 1; Ok(pack(name, 7800.0, 200_000.0, None))
+            }).err().unwrap().to_string().contains("contact-thermal"));
+            assert_eq!(reads, 0);
+        }
+    });
+}
 #[test]
 fn incomplete_layer_declarations_sources_bands_and_opening_do_not_fall_back_to_dry_friction() {
     let text = include_str!("../shear-layer-bow.material-strings");

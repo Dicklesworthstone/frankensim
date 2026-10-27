@@ -201,6 +201,81 @@ fn material_layer_and_series_hair_share_one_compliance_and_energy_transaction() 
     });
 }
 
+#[test]
+fn material_layer_series_drive_and_string_strain_share_storage_and_transactional_history() {
+    use fs_couple::render::schedule::force::coupled::contact::friction::nonlinear::NonlinearModalConfig;
+    with_cx(|cx, gate| {
+        let build = |tight: bool| {
+            let bank = base(cx, gate, 7800.0).with_geometric_stretching(0.2,
+                NonlinearModalConfig { max_iterations: if tight { 1 } else { 64 },
+                    maximum_generalized_force: 1e5,
+                    force_absolute_tolerance: if tight { 1e-30 } else { 1e-11 },
+                    force_relative_tolerance: if tight { 1e-30 } else { 1e-10 } }, gate)
+                .unwrap().with_additional_bows(vec![extra()], joint_limits(), gate).unwrap();
+            let (_, system) = reacting_surface(bank, gate)
+                // Zero yield in this manufactured film guarantees that the
+                // small driving speed exercises plastic loss as well as storage.
+                .with_bow_shear_layers(vec![(0, layer(8e6, 0.0, 10.0, 1e6))], gate)
+                .unwrap().into_parts();
+            system.with_series_compliant_drives(vec![(0, 2000.0, 0.4)], gate).unwrap()
+        };
+        let mut system = build(false);
+        let mut replay = build(false);
+        let zero = vec![0.0; system.mode_count()];
+        let (mut work, mut losses, mut strain, mut plastic, mut hair_loss) = (0.0, 0.0, 0.0_f64, 0.0, 0.0);
+        for sample in 0..192 {
+            if sample == 96 {
+                let frame = system.last_frame().unwrap().clone();
+                let history = system.material_shear_state(0).unwrap().clone();
+                let before = system.components().iter().map(|m| m.states().to_vec()).collect::<Vec<_>>();
+                let energy = system.total_energy_j().unwrap();
+                assert!(system.step(&zero, &[drive(0.0, 0.0); 2]).is_err());
+                assert_eq!(system.last_frame(), Some(&frame));
+                assert_eq!(system.material_shear_state(0), Some(&history));
+                assert_eq!(system.components().iter().map(|m| m.states().to_vec()).collect::<Vec<_>>(), before);
+                assert_eq!(system.total_energy_j().unwrap(), energy);
+                assert_eq!(system.samples_rendered(), frame.sample);
+            }
+            let drives = [drive(if sample < 128 { 0.001 } else { -0.001 }, 0.1), drive(0.0, 0.0)];
+            let f = system.step(&zero, &drives).unwrap().clone();
+            assert_eq!(&f, replay.step(&zero, &drives).unwrap());
+            let nonlinear = f.nonlinear.unwrap();
+            assert!(nonlinear.reaction_residual <= nonlinear.reaction_tolerance);
+            assert!(f.energy_residual_j.abs() <= f.energy_tolerance_j);
+            let layer = f.ports[0].shear_layer.unwrap();
+            assert!((layer.stored_change_j + layer.dissipated_j
+                - f.ports[0].traction_n * f.ports[0].slip_distance_m).abs() <= f.energy_tolerance_j);
+            work += f.external_work_j + f.drive_work_j;
+            losses += f.network_dissipation_j + f.friction_dissipation_j;
+            strain = strain.max(nonlinear.nonlinear_energy_j);
+            plastic += layer.dissipated_j;
+            hair_loss += f.ports[0].series_drive_dissipation_j;
+            assert!((system.total_energy_j().unwrap() + losses - work).abs() < 2e-10);
+        }
+        let frame = system.last_frame().unwrap();
+        assert!(strain > 0.0 && plastic > 0.0 && hair_loss > 0.0);
+        assert!(system.total_energy_j().unwrap() > frame.network_energy_j + frame.shear_layer_energy_j);
+
+        // Exhaust the OUTER constitutive solve after it staged actual film and
+        // hair histories. None of those candidates may become accepted state.
+        let mut refused = build(true);
+        let mut initial = refused.components()[0].states().to_vec();
+        initial[0].displacement_m_sqrt_kg = 1e-7;
+        refused.restore_component_states(0, &initial).unwrap();
+        let states = refused.components().iter().map(|m| m.states().to_vec()).collect::<Vec<_>>();
+        let history = refused.material_shear_state(0).unwrap().clone();
+        let energy = refused.total_energy_j().unwrap();
+        for _ in 0..2 {
+            assert!(refused.step(&zero, &[drive(0.001, 0.1), drive(0.0, 0.0)]).is_err());
+            assert_eq!(refused.components().iter().map(|m| m.states().to_vec()).collect::<Vec<_>>(), states);
+            assert_eq!(refused.material_shear_state(0), Some(&history));
+            assert_eq!(refused.total_energy_j().unwrap(), energy);
+            assert_eq!(refused.samples_rendered(), 0);
+            assert!(refused.last_frame().is_none());
+        }
+    });
+}
+
 fn retained_schedule() -> GestureSchedule {
     GestureSchedule::try_new(
         700,

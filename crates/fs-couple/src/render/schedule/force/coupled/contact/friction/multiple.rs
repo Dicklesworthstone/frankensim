@@ -409,10 +409,6 @@ impl MultiFrictionModalSystem {
             self.frame.sweeps = 1; self.accepted = true;
             return Ok(&self.frame);
         }
-        if self.core.has_nonlinear_potentials() && (self.series_drives.iter().any(Option::is_some)
-            || self.shear_layers.iter().any(Option::is_some)) {
-            return Err(invalid("series compliant drives and shear layers are not jointly staged with bound nonlinear storage").into());
-        }
         if self.core.has_nonlinear_potentials() && self.obstacles.as_ref().is_some_and(obstacles::ObstacleSet::has_residual) {
             return Err(invalid("bound nonlinear storage is not staged with the obstacles' residual compliance").into());
         }
