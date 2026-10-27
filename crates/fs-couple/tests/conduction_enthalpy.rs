@@ -6,7 +6,7 @@ mod common;
 use common::{config, initial, material, material_with_electrical_basis, near, point};
 use fs_couple::circuit_enthalpy::{
     CircuitEnthalpyError, CircuitEnthalpySolve,
-    conduction::{ConductionRegion, ConductionThermalNetwork},
+    conduction::{ConductionDrive, ConductionRegion, ConductionThermalNetwork},
     material::{ConductionLink, MaterialCell},
 };
 use fs_em::conduction::{ConductionControls, PlanarConduction};
@@ -518,4 +518,300 @@ fn source_geometry_route_budget_and_late_cancellation_refuse_without_advancing()
     assert_eq!(thermal.cells(), &saved);
     assert_eq!(thermal.time_s(), 0.0);
     assert_eq!(original.conductors(), &sources);
+}
+
+#[test]
+fn current_drive_rebuilds_material_voltage_and_positive_thermal_feedback() {
+    let mut results = Vec::new();
+    for rho in [1.0, 2.0] {
+        let (a, ca) = material(rho, 2.0, 0.005);
+        let (b, cb) = material(rho, 2.0, 0.005);
+        let cards = [a, b];
+        let curves = [ca, cb];
+        let mut thermal = initial(&curves, 999.0, None);
+        let mut field = problem(
+            &cards,
+            [ElectricalPropertyBasis::Resistivity; 2],
+            300.0,
+            1.0,
+        );
+        let context = point(300.0);
+        let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
+        let bindings = cells(&cards, &curves, &context, &key);
+        let layout = network(&bindings);
+        let current = 3.0;
+        let dt = 0.2;
+        let mut theta = 0.0;
+        for step in 1..=3 {
+            let next = layout
+                .step_driven_candidate(
+                    &thermal,
+                    step as f64 * dt,
+                    &field,
+                    ConductionDrive::Current {
+                        positive: &[2, 5],
+                        negative: &[0, 3],
+                        current_a: current,
+                    },
+                    limits(),
+                    field_controls(),
+                    config(),
+                    &[0.0; 2],
+                    || false,
+                )
+                .unwrap();
+            // Independent BE solution: C*(theta1-theta0) =
+            // dt*I^2*rho0*(1+alpha*theta1), with C=2 J/K per slab.
+            theta = (2.0 * theta + dt * current * current * rho)
+                / (2.0 - dt * current * current * rho * 0.005);
+            let t = next.thermal().temperature_k(CellId(30)).unwrap();
+            near(t, 300.0 + theta);
+            near(next.thermal().temperature_k(CellId(10)).unwrap(), t);
+            let final_rho = rho * (1.0 + 0.005 * theta);
+            let voltage = 2.0 * current * final_rho;
+            let report = next.report();
+            let electrical = &report.electrical;
+            near(electrical.voltage_v[2] - electrical.voltage_v[0], voltage);
+            near(
+                electrical.nodal_boundary_current_a[2].unwrap()
+                    + electrical.nodal_boundary_current_a[5].unwrap(),
+                current,
+            );
+            near(electrical.supplied_work_j, dt * voltage * current);
+            near(electrical.heat_j, dt * current * current * 2.0 * final_rho);
+            near(report.deposited_joule_j, electrical.heat_j);
+            near(
+                next.thermal().energy_j() - thermal.energy_j(),
+                electrical.supplied_work_j,
+            );
+            assert!(
+                voltage > 2.0 * current * rho,
+                "heating must change the required source voltage"
+            );
+            for i in 0..4 {
+                near(electrical.current_density_a_m2[i][0], -current);
+                near(
+                    electrical.cell_power_w[i],
+                    0.5 * current * current * final_rho,
+                );
+                near(
+                    next.problem().conductors()[i].resistivity_ohm_m(),
+                    final_rho,
+                );
+                assert_eq!(
+                    next.problem().conductors()[i]
+                        .source_property()
+                        .answer()
+                        .receipt
+                        .selected,
+                    field.conductors()[i]
+                        .source_property()
+                        .answer()
+                        .receipt
+                        .selected
+                );
+            }
+            near(report.total_energy_residual_j, 0.0);
+            let (t, p, _) = next.into_parts();
+            thermal = t;
+            field = p;
+        }
+        results.push(theta);
+    }
+    assert!(
+        results[1] > results[0],
+        "fixed current must heat the higher-resistivity material more"
+    );
+}
+
+#[test]
+fn current_reversal_zero_and_matching_voltage_share_native_heat_equations() {
+    let (a, ca) = material(1.0, 1.0, 0.002);
+    let (b, cb) = material(3.0, 2.0, 0.001);
+    let cards = [a, b];
+    let curves = [ca, cb];
+    let thermal = initial(&curves, 999.0, None);
+    let field = problem(
+        &cards,
+        [ElectricalPropertyBasis::Resistivity; 2],
+        300.0,
+        1.0,
+    );
+    let context = point(300.0);
+    let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
+    let bindings = cells(&cards, &curves, &context, &key);
+    let layout = network(&bindings);
+    let run = |current| {
+        layout
+            .step_driven_candidate(
+                &thermal,
+                0.2,
+                &field,
+                ConductionDrive::Current {
+                    positive: &[2, 5],
+                    negative: &[0, 3],
+                    current_a: current,
+                },
+                limits(),
+                field_controls(),
+                config(),
+                &[0.0; 2],
+                || false,
+            )
+            .unwrap()
+    };
+    let forward = run(2.0);
+    let reverse = run(-2.0);
+    let zero = run(0.0);
+    let voltage = forward.report().electrical.voltage_v[2];
+    // Same BE endpoint equations when the voltage source is set to the
+    // current-source solution's endpoint voltage; no continuous-time identity.
+    let matched = layout
+        .step_candidate(
+            &thermal,
+            0.2,
+            &field,
+            &ends(voltage, 0.0),
+            limits(),
+            field_controls(),
+            config(),
+            &[0.0; 2],
+            || false,
+        )
+        .unwrap();
+    for id in [CellId(30), CellId(10)] {
+        near(
+            forward.thermal().temperature_k(id).unwrap(),
+            reverse.thermal().temperature_k(id).unwrap(),
+        );
+        near(
+            forward.thermal().temperature_k(id).unwrap(),
+            matched.thermal().temperature_k(id).unwrap(),
+        );
+        near(zero.thermal().temperature_k(id).unwrap(), 300.0);
+    }
+    near(
+        forward.report().electrical.heat_j,
+        reverse.report().electrical.heat_j,
+    );
+    near(
+        forward.report().electrical.supplied_work_j,
+        reverse.report().electrical.supplied_work_j,
+    );
+    near(zero.report().deposited_joule_j, 0.0);
+    for triangle in 0..4 {
+        near(
+            forward.report().electrical.current_density_a_m2[triangle][0],
+            -reverse.report().electrical.current_density_a_m2[triangle][0],
+        );
+        near(zero.report().electrical.cell_power_w[triangle], 0.0);
+    }
+}
+
+#[test]
+fn invalid_current_electrodes_and_late_cancellation_return_no_partial_state() {
+    let (a, ca) = material(1.0, 1.0, 0.002);
+    let (b, cb) = material(3.0, 2.0, 0.001);
+    let cards = [a, b];
+    let curves = [ca, cb];
+    let thermal = initial(&curves, 1.0, None);
+    let field = problem(
+        &cards,
+        [ElectricalPropertyBasis::Resistivity; 2],
+        300.0,
+        1.0,
+    );
+    let context = point(300.0);
+    let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
+    let bindings = cells(&cards, &curves, &context, &key);
+    let layout = network(&bindings);
+    for current in [f64::NAN, f64::INFINITY, f64::MAX] {
+        assert!(
+            layout
+                .step_driven_candidate(
+                    &thermal,
+                    0.2,
+                    &field,
+                    ConductionDrive::Current {
+                        positive: &[2, 5],
+                        negative: &[0, 3],
+                        current_a: current
+                    },
+                    limits(),
+                    field_controls(),
+                    config(),
+                    &[0.0; 2],
+                    || false
+                )
+                .is_err()
+        );
+    }
+    // Even an unpowered electrode must retain physically admitted trace geometry.
+    for (positive, negative) in [(&[2][..], &[0, 3][..]), (&[2, 5][..], &[2, 5][..])] {
+        assert!(
+            layout
+                .step_driven_candidate(
+                    &thermal,
+                    0.2,
+                    &field,
+                    ConductionDrive::Current {
+                        positive,
+                        negative,
+                        current_a: 0.0
+                    },
+                    limits(),
+                    field_controls(),
+                    config(),
+                    &[0.0; 2],
+                    || false
+                )
+                .is_err()
+        );
+    }
+    let mut polls = 0;
+    layout
+        .step_driven_candidate(
+            &thermal,
+            0.2,
+            &field,
+            ConductionDrive::Current {
+                positive: &[2, 5],
+                negative: &[0, 3],
+                current_a: 2.0,
+            },
+            limits(),
+            field_controls(),
+            config(),
+            &[0.0; 2],
+            || {
+                polls += 1;
+                false
+            },
+        )
+        .unwrap();
+    let mut seen = 0;
+    assert!(matches!(
+        layout.step_driven_candidate(
+            &thermal,
+            0.2,
+            &field,
+            ConductionDrive::Current {
+                positive: &[2, 5],
+                negative: &[0, 3],
+                current_a: 2.0
+            },
+            limits(),
+            field_controls(),
+            config(),
+            &[0.0; 2],
+            || {
+                seen += 1;
+                seen == polls
+            }
+        ),
+        Err(CircuitEnthalpyError::Cancelled)
+    ));
+    assert_eq!(thermal.time_s(), 0.0);
+    near(thermal.temperature_k(CellId(30)).unwrap(), 300.0);
+    near(field.conductors()[0].resistivity_ohm_m(), 1.0);
 }

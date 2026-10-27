@@ -13,7 +13,7 @@ use super::{
         ConductionLink, MaterialCell, MaterialNetwork, MaterialNetworkError, MaterialNetworkSample,
     },
 };
-use fs_em::conduction::{ConductionControls, ConductionError, PlanarConduction};
+use fs_em::conduction::{ConductionControls, ConductionError, ConductionField, PlanarConduction};
 use fs_feec::weighted::WeightedAssemblyLimits;
 use fs_material::{
     conductor::{ConductorError, ResolvedConductorState},
@@ -22,6 +22,83 @@ use fs_material::{
 use fs_solver::SolveReport;
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation};
 use std::{cell::RefCell, collections::BTreeMap};
+
+/// Held ideal electrical boundary for one electrothermal interval.
+#[derive(Clone, Copy, Debug)]
+pub enum ConductionDrive<'a> {
+    /// Original prescribed exterior potentials [V]; other edges are insulated.
+    Voltage(&'a [(usize, f64)]),
+    /// Total current [A] entering the positive electrode and leaving the
+    /// negative electrode. Each electrode is a disjoint union of complete
+    /// exterior edges. Their potentials are solved from the current material
+    /// field; the negative electrode is the zero-potential reference.
+    Current {
+        positive: &'a [usize],
+        negative: &'a [usize],
+        current_a: f64,
+    },
+}
+
+impl ConductionDrive<'_> {
+    fn solve<'p>(
+        self,
+        problem: &'p PlanarConduction,
+        controls: ConductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ConductionField<'p>, Error> {
+        match self {
+            Self::Voltage(boundary) => problem
+                .solve(boundary, controls, cancelled)
+                .map_err(field_error),
+            Self::Current {
+                positive,
+                negative,
+                current_a,
+            } => {
+                if !current_a.is_finite() {
+                    return Err(invalid("prescribed total electrode current must be finite"));
+                }
+                // The native two-terminal field extraction includes the exact
+                // geometry and all regional sigma(T). Its unit solution also
+                // admits both electrode traces, including at zero current.
+                let resistance = problem
+                    .resistance(positive, negative, controls, cancelled)
+                    .map_err(field_error)?;
+                let voltage = finite(current_a * resistance.resistance_ohm())?;
+                if current_a != 0.0 && voltage == 0.0 {
+                    return Err(invalid(
+                        "prescribed current lost its representable electrode voltage",
+                    ));
+                }
+                let field = resistance
+                    .field_at_voltage(
+                        voltage,
+                        controls.current_tolerance_a,
+                        controls.power_tolerance_w,
+                        cancelled,
+                    )
+                    .map_err(field_error)?;
+                // Check the actual recovered current independently of I*R.
+                let mut actual = 0.0;
+                for &vertex in positive {
+                    if cancelled() {
+                        return Err(CircuitEnthalpyError::Cancelled);
+                    }
+                    let current = field.nodal_boundary_current_a()[vertex].ok_or_else(|| {
+                        invalid("current electrode lost its native terminal reaction")
+                    })?;
+                    actual = finite(actual + current)?;
+                }
+                if finite(actual - current_a)?.abs() > controls.current_tolerance_a {
+                    return Err(invalid(
+                        "recovered electrode current does not match its prescribed total",
+                    ));
+                }
+                Ok(field)
+            }
+        }
+    }
+}
 
 /// One explicit receiving thermal cell for an original electrical triangle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,9 +229,40 @@ impl<'t> ConductionEnthalpyCandidate<'t> {
 }
 
 impl ConductionThermalNetwork<'_> {
+    /// Original prescribed-voltage entry point, sharing the same complete
+    /// thermal/material solve with current-controlled electrodes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_candidate<'t>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        problem: &PlanarConduction,
+        boundary_voltage_v: &[(usize, f64)],
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ConductionEnthalpyCandidate<'t>, Error> {
+        self.step_driven_candidate(
+            thermal,
+            target_s,
+            problem,
+            ConductionDrive::Voltage(boundary_voltage_v),
+            assembly,
+            field_controls,
+            controls,
+            initial_energy_increments_j,
+            cancelled,
+        )
+    }
+
     /// Solve actual spatial current redistribution, local heating and thermal
-    /// transport at ONE common endpoint. Electrode voltages are held for the
-    /// interval. The existing enthalpy owner supplies the nonlinear residual,
+    /// transport at ONE common endpoint. Either the electrode voltages or the
+    /// total two-terminal current is held for the interval. Current drive uses
+    /// the native material/geometry resistance extraction at EVERY trial; its
+    /// voltage and local heat therefore evolve with the same accepted material.
+    /// The existing enthalpy owner supplies the nonlinear residual,
     /// event rules, finite-difference/Newton budgets and final energy acceptance.
     /// `maximum_circuit_trials` bounds these field solves, including the final
     /// fresh solve; `controls.circuit` is unused because there is no circuit DAE.
@@ -168,12 +276,12 @@ impl ConductionThermalNetwork<'_> {
     /// thermal/electrical time discretization, not unconditional stability or
     /// measured-material validation. Refine mesh, time and solve tolerances.
     #[allow(clippy::too_many_arguments)]
-    pub fn step_candidate<'t>(
+    pub fn step_driven_candidate<'t>(
         &self,
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
         problem: &PlanarConduction,
-        boundary_voltage_v: &[(usize, f64)],
+        drive: ConductionDrive<'_>,
         assembly: WeightedAssemblyLimits,
         field_controls: ConductionControls,
         controls: CircuitEnthalpySolve,
@@ -239,11 +347,7 @@ impl ConductionThermalNetwork<'_> {
                         (*cancel.borrow_mut())()
                     })
                     .map_err(field_error)?;
-                let field = next
-                    .solve(boundary_voltage_v, field_controls, &mut || {
-                        (*cancel.borrow_mut())()
-                    })
-                    .map_err(field_error)?;
+                let field = drive.solve(&next, field_controls, &mut || (*cancel.borrow_mut())())?;
                 let heat_j = finite(dt * field.power_w())?;
                 let supplied_work_j =
                     finite(dt * finite(field.power_w() - field.power_balance_residual_w())?)?;

@@ -6683,3 +6683,25 @@ work. G1/G3/G4 synthetic tests in `tests/conduction_enthalpy.rs` exercise layere
 current/heat, an independent thermal reference, nonlinear source-only feedback,
 continuation, material substitution, gauge/current reversal and atomic refusal.
 They verify the declared numerical model, not empirical material qualification.
+
+
+### Spatial Ohmic current-drive feedback (MR43)
+
+`circuit_enthalpy::conduction::ConductionThermalNetwork::step_driven_candidate`
+accepts a held `ConductionDrive::Voltage` or a held total two-terminal
+`ConductionDrive::Current`. The existing `step_candidate` voltage API delegates
+to the same complete thermal/material residual. Current-drive electrodes are
+disjoint complete exterior traces; the negative electrode is the potential
+reference. Each trial re-extracts the native spatial resistance from the
+actual source-pinned conductivity field, solves its electrode voltage, and
+checks the recovered total current independently. This drives local E.J heating,
+finite caloric storage and material refresh without a separate heat/current
+integrator or a guessed uniform wire. Both current directions and zero current
+retain source, geometry and trace admission. Electrical storage, induction and
+source compliance limits remain outside this ideal DC boundary model.
+
+G1/G3/G4 regressions in `tests/conduction_enthalpy.rs` cover the independent
+current-heated slab equation, data-only resistivity changes, continued operator
+updates, reversal/zero-current limits, matching voltage-driven BE endpoints,
+invalid electrodes/current and late transactional cancellation. Source review
+and parsing are not substitutes for executing these coupled tests.
