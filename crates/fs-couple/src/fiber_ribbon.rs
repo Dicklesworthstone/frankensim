@@ -11,9 +11,12 @@
 //! The physical reason for retaining hair stretch and finite width in bowing
 //! is documented by Pitteroff & Woodhouse, Acta Acustica 84 (1998), 744--757,
 //! https://www.repository.cam.ac.uk/handle/1810/244810 (review, section 1.1).
-//! This is the straight-fiber, rigid-end, small-motion limit. It omits stick
-//! camber/flexure, fiber-to-fiber contact, large deflection, air drag and thermal
-//! rosin. Fixed-state Kelvin--Voigt coefficients require explicit source data;
+//! The base rung is the straight-fiber, rigid-end, small-motion limit. Explicit
+//! `with_axial_transverse_strain` adds the existing moderate-slope extensional
+//! law to the SAME contact solver, so normal deflection changes fiber tension
+//! and axial waves. Both rungs omit stick camber/flexure, fiber-to-fiber contact,
+//! large rotations, air drag and thermal rosin. Fixed-state Kelvin--Voigt
+//! coefficients require explicit source data;
 //! missing loss is never replaced with an invented Q. Refine BOTH the span
 //! modes and ribbon cells; the sample-rate owner refuses unresolved modes.
 
@@ -25,6 +28,9 @@ use fs_exec::CancelGate;
 use fs_material::section::{ConcentricKelvinVoigtSection, axial::ConcentricAxialViscosity};
 use fs_material::state_point::MaterialStatePointError;
 use fs_math::{c64::C64, det};
+
+/// Conservative coupling of fiber extension and normal deflection.
+pub mod strain;
 
 /// Dimensions and fixed pre-tension of the original physical fiber bundle.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -65,6 +71,7 @@ pub enum FiberRibbonError {
     Invalid(&'static str),
     Material(MaterialStatePointError),
     Modal(ModalAcousticTimeError),
+    Strain(fs_nlmodal::NlModalError),
     Cancelled,
 }
 impl core::fmt::Display for FiberRibbonError {
@@ -73,6 +80,7 @@ impl core::fmt::Display for FiberRibbonError {
             Self::Invalid(what) => write!(f, "fiber ribbon: {what}"),
             Self::Material(error) => write!(f, "fiber ribbon material: {error:?}"),
             Self::Modal(error) => write!(f, "fiber ribbon modes: {error}"),
+            Self::Strain(error) => write!(f, "fiber ribbon strain: {error}"),
             Self::Cancelled => write!(f, "fiber ribbon preparation cancelled"),
         }
     }
@@ -88,6 +96,7 @@ pub struct TensionedFiberRibbon {
     bending: ConcentricKelvinVoigtSection,
     cell: ModalAcousticTimeModel,
     cell_line_density_kg_m: f64,
+    strain: Option<strain::FiberStrain>,
 }
 
 impl TensionedFiberRibbon {
@@ -204,6 +213,7 @@ impl TensionedFiberRibbon {
             bending,
             cell,
             cell_line_density_kg_m,
+            strain: None,
         })
     }
 

@@ -1,5 +1,6 @@
 //! Data-only fiber geometry and material selection for the existing renderer.
 use super::*;
+pub use fs_couple::fiber_ribbon::strain::FiberStrainLimits;
 use fs_couple::fiber_ribbon::{FiberRibbonGeometry, FiberRibbonResolution, TensionedFiberRibbon};
 use fs_material::section::{
     ConcentricElasticSection, ConcentricMaterialLayer, axial::YOUNG_VISCOSITY_PROPERTY,
@@ -15,6 +16,7 @@ pub struct Input {
     pub station_fraction: f64,
     pub axial_modes: usize,
     pub transverse_modes: usize,
+    pub strain: Option<(FiberStrainLimits, NonlinearModalConfig)>,
 }
 impl Input {
     pub fn mode_count(&self, spec: &input::Spec) -> Result<usize> {
@@ -30,6 +32,34 @@ impl Input {
                 "bow_fibers requires positive span modes/fiber count and interior fiber station"
                     .into(),
             );
+        }
+        if let Some((limits, config)) = self.strain {
+            limits.validate()?;
+            config.validate()?;
+            if self.axial_modes > fs_nlmodal::longitudinal::MAX_LONGITUDINAL_MODES
+                || self.transverse_modes > fs_nlmodal::longitudinal::MAX_TRANSVERSE_MODES
+            {
+                return Err(
+                    "fiber strain requires an explicitly supported axial/normal resolution".into(),
+                );
+            }
+            let string_config = spec
+                .geometric_stretching
+                .as_ref()
+                .map(|(_, config)| config)
+                .or_else(|| spec.longitudinal_waves.as_ref().map(|(_, config)| config));
+            if string_config.is_some_and(|existing| *existing != config) {
+                return Err(
+                    "fiber and string strain must use the same joint solve configuration".into(),
+                );
+            }
+            if spec
+                .forces
+                .as_ref()
+                .is_some_and(|program| program.initialization == ForceInitialization::StaticPreload)
+            {
+                return Err("fiber strain requires retained initial state; nonlinear static preload is not implemented".into());
+            }
         }
         // The current geometry freezes the contact along a uniformly translating
         // fiber. Do not silently model an accelerating/reversing bow as one.
@@ -85,7 +115,7 @@ impl Input {
         let (width_m, cells) = spec
             .bow_ribbon
             .ok_or("bow_fibers requires a physical ribbon")?;
-        Ok(TensionedFiberRibbon::try_new(
+        let ribbon = TensionedFiberRibbon::try_new(
             FiberRibbonGeometry {
                 length_m: self.length_m,
                 width_m,
@@ -104,6 +134,10 @@ impl Input {
             spec.rate,
             modal_budget(),
             gate,
-        )?)
+        )?;
+        match self.strain {
+            Some((limits, config)) => Ok(ribbon.with_axial_transverse_strain(limits, config)?),
+            None => Ok(ribbon),
+        }
     }
 }

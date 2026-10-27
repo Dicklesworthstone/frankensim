@@ -248,6 +248,39 @@ string stretching energy with its existing fiber contact profile. The
 longitudinal selection instead retains the declared axial wave coordinates;
 the two string strain images remain mutually exclusive.
 
+To also couple the fibers' own normal deflection to axial strain and tension,
+add this optional record immediately after `bow_fibers`:
+
+```text
+bow_fiber_strain MAX_SLOPE MAX_STRAIN MAX_ITERS MAX_FORCE ABS_TOL REL_TOL
+```
+
+The first two values declare the motion envelope (slope at most 0.3 and strain
+at most 0.1); the remaining four declare the joint numerical solve. They must
+match any `geometric-stretching` or `longitudinal-waves` solve configuration.
+These are admission and numerical limits, not fitted material measurements.
+The source pack still supplies all stiffness, mass and loss coefficients.
+Normal deflection now changes the same retained fibers' axial waves and tension
+through `u_x + y_x²/2`. The unchanged contact solve propagates their reactions
+to string motion, body pressure and WAV output. No second fiber oscillator is
+introduced. Omission keeps the explicitly linear fiber rung.
+
+`fiber-strain-contact.material-strings` enables both fiber and string strain
+with the existing manufactured materials, geometry and normal-contact profile:
+
+```bash
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/fiber-strain-contact.material-strings" "$demo/fiber-strain-contact.wav" \
+  --stop-profile "$demo/fiber-contact.stops"
+```
+
+This remains a physical integration fixture, not a measured violin or horsehair
+model. Retained axial harmonics must be refined alongside normal modes; omitted
+axial harmonics equilibrate statically. Excess slope/strain, local loss of
+tension, unsupported resolution, incompatible solve settings, nonlinear static
+preload and a failed joint solve refuse. Viscosity remains the original
+small-strain operator; finite-slope viscous coupling is not supplied.
+
 Changing support speed still refuses because its frame-acceleration forces are
 not supplied by the frozen-station model. It does not model a flexible bow stick,
 contact migration, inter-hair rubbing or thermal rosin. Axial and normal mode

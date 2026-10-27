@@ -429,3 +429,74 @@ fn fiber_normal_reactions_and_string_stretching_share_one_work_balance() {
         assert_eq!(output, pressure(&mut build(), 37));
     });
 }
+
+#[test]
+fn explicit_fiber_strain_source_reaches_contact_pressure_and_the_same_wav() {
+    scoped(|cx, gate| {
+        let text = include_str!("../fiber-strain-contact.material-strings")
+            .replace("48000 4096", "48000 129");
+        let build = || input::Spec::parse(text.as_bytes()).unwrap().compile_with_profiles(
+            cx, gate, None,
+            Some(crate::stops::Profile::parse(include_str!("../fiber-contact.stops").as_bytes()).unwrap()),
+            |name| Ok(if name == "fiber.fsmatpk" { fiber_pack(1300.0, false) }
+                else { pack(name, 7800.0, 200_000.0, None) }),
+        ).unwrap();
+        let mut run = build();
+        let source = run.performance.bank().source();
+        assert!(source.bank().geometric_stretching().is_some());
+        assert!(source.bank().material_cavity().is_some());
+        let fibers = source.fiber_ribbon().unwrap();
+        let first = fibers.component_start();
+        let law = fibers.model().strain().unwrap();
+        let declared = run.spec.bow_fibers.as_ref().unwrap().strain.unwrap();
+        assert_eq!(law.limits(), declared.0);
+        assert_eq!(law.config(), declared.1);
+        let mut output = Vec::new();
+        for _ in 0..129 {
+            let mut sample = [0.0];
+            run.performance.block(&mut sample).unwrap();
+            output.push(sample[0]);
+            let frame = run.performance.bank().system().last_frame().unwrap();
+            assert!(frame.nonlinear.is_some());
+            assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        }
+        let bank = run.performance.bank();
+        let q: Vec<_> = bank.system().components()[first].states().iter()
+            .map(|state| state.displacement_m_sqrt_kg).collect();
+        let observed = bank.source().fiber_ribbon().unwrap().model().strain().unwrap()
+            .observe(&q).unwrap();
+        assert!(observed.mean_dynamic_strain > 0.0 && observed.strain_energy_j > 0.0);
+        assert!(output.iter().any(|p| p.abs() > 1e-12));
+        let (wav, summary) = build().write(Cursor::new(Vec::<u8>::new()), gate).unwrap();
+        let (expected, clips) = fs_couple::pcm_wav::encode_pcm16_wav(&output, 48000, 0.01).unwrap();
+        assert_eq!(wav.into_inner(), expected);
+        assert_eq!(summary.samples, 129);
+        assert_eq!(summary.clipped_samples, clips as u64);
+    });
+}
+
+#[test]
+fn fiber_strain_domain_resolution_and_joint_config_refuse_before_material_io() {
+    let text = include_str!("../fiber-strain-contact.material-strings");
+    for (from, to) in [
+        ("bow_fiber_strain 0.2 0.03", "bow_fiber_strain 0.4 0.03"),
+        ("bow_fiber_strain 0.2 0.03", "bow_fiber_strain 0.2 0.2"),
+        ("bow_fiber_strain 0.2 0.03 64", "bow_fiber_strain 0.2 0.03 0"),
+        ("bow_fiber_strain 0.2 0.03 64", "bow_fiber_strain 0.2 0.03 32"),
+        ("40 0.4 2 2", "40 0.4 33 2"),
+        ("bow_fibers fiber.fsmatpk 0.00004 0.6 180 40 0.4 2 2\n", ""),
+    ] {
+        assert!(input::Spec::parse(text.replace(from, to).as_bytes()).is_err());
+    }
+    scoped(|cx, gate| {
+        let mut spec = input::Spec::parse(text.as_bytes()).unwrap();
+        spec.bow_fibers.as_mut().unwrap().strain.as_mut().unwrap().1.max_iterations = 63;
+        let mut reads = 0;
+        let result = spec.compile(cx, gate, |_| {
+            reads += 1;
+            Ok(fiber_pack(1300.0, false))
+        });
+        assert!(result.is_err());
+        assert_eq!(reads, 0);
+    });
+}

@@ -398,3 +398,292 @@ fn scoped_normal(make: impl Fn(&Cx<'_>, &CancelGate, f64) -> MultiBowStringBank)
         }));
     });
 }
+
+fn strain_config()
+-> fs_couple::render::schedule::force::coupled::contact::friction::nonlinear::NonlinearModalConfig {
+    fs_couple::render::schedule::force::coupled::contact::friction::nonlinear::NonlinearModalConfig {
+        max_iterations: 128,
+        maximum_generalized_force: 1e6,
+        force_absolute_tolerance: 1e-10,
+        force_relative_tolerance: 1e-9,
+    }
+}
+
+fn strain_limits() -> fs_couple::fiber_ribbon::strain::FiberStrainLimits {
+    fs_couple::fiber_ribbon::strain::FiberStrainLimits {
+        maximum_slope: 0.3,
+        maximum_strain: 0.1,
+    }
+}
+
+#[test]
+fn fiber_strain_matches_independent_continuum_energy_and_gradient() {
+    // G1: all nonzero geometric harmonics below are retained, so numerical
+    // integration of EA/2 * (u_x + y_x²/2)² is an independent continuum oracle.
+    use fs_phs::Storage;
+    let gate = CancelGate::new_clock_free();
+    let ribbon = fibers(3, 4, 1300.0, 3e9, 0.0, 40.0, 192000, &gate)
+        .with_axial_transverse_strain(strain_limits(), strain_config())
+        .unwrap();
+    let strain = ribbon.strain().unwrap();
+    let q = [5e-9, -2e-9, 0.0, 0.0, 1e-6, -2e-6, 0.0, 0.0];
+    let l = ribbon.geometry().length_m;
+    let scale = (2.0 / (ribbon.cell_line_density_kg_m() * l)).sqrt();
+    let ea = ribbon.axial_material().elastic().axial_stiffness_n()
+        * ribbon.geometry().fiber_count as f64
+        / ribbon.resolution().cells as f64;
+    let mut integral = 0.0;
+    for i in 0..2048 {
+        let x = (i as f64 + 0.5) / 2048.0;
+        let mut axial = 0.0;
+        let mut normal = 0.0;
+        for n in 1..=4 {
+            let derivative = scale * n as f64 * std::f64::consts::PI / l
+                * (n as f64 * std::f64::consts::PI * x).cos();
+            axial += derivative * q[n - 1];
+            normal += derivative * q[4 + n - 1];
+        }
+        integral += 0.5 * ea * (axial + 0.5 * normal * normal).powi(2) * l / 2048.0;
+    }
+    assert!((strain.hamiltonian(&q) / integral - 1.0).abs() < 2e-13);
+    let mut gradient = [0.0; 8];
+    strain.gradient(&q, &mut gradient);
+    for i in 0..8 {
+        let mut a = q;
+        let mut b = q;
+        let h = 2e-11;
+        a[i] -= h;
+        b[i] += h;
+        let numerical = (strain.hamiltonian(&b) - strain.hamiltonian(&a)) / (2.0 * h);
+        assert!(
+            (gradient[i] - numerical).abs() < 1e-7 * gradient[i].abs() + 1e-12,
+            "coordinate {i}: {} != {numerical}",
+            gradient[i]
+        );
+    }
+}
+
+#[test]
+fn axial_enrichment_converges_to_uncondensed_continuum_strain_energy() {
+    use fs_phs::Storage;
+    let gate = CancelGate::new_clock_free();
+    let source = fibers(3, 4, 1300.0, 3e9, 0.0, 40.0, 192000, &gate);
+    let l = source.geometry().length_m;
+    let amplitudes = [2e-4, -1e-4, 5e-5, 2.5e-5];
+    let ea = source.axial_material().elastic().axial_stiffness_n() * 60.0;
+    let mut integral = 0.0;
+    for i in 0..2048 {
+        let x = (i as f64 + 0.5) / 2048.0;
+        let slope: f64 = amplitudes
+            .iter()
+            .enumerate()
+            .map(|(n, amplitude)| {
+                let k = (n + 1) as f64 * std::f64::consts::PI;
+                amplitude * k / l * (k * x).cos()
+            })
+            .sum();
+        integral += 0.125 * ea * slope.powi(4) * l / 2048.0;
+    }
+    let mut previous_error = f64::INFINITY;
+    for axial_modes in [2, 4, 8] {
+        let ribbon = TensionedFiberRibbon::try_new(
+            source.geometry(),
+            FiberRibbonResolution {
+                cells: 3,
+                axial_modes,
+                transverse_modes: 4,
+            },
+            source.axial_material().clone(),
+            source.bending_material().clone(),
+            192000,
+            ModalAcousticTimeBudget::audible_reference(),
+            &gate,
+        )
+        .unwrap()
+        .with_axial_transverse_strain(strain_limits(), strain_config())
+        .unwrap();
+        let normalization = (0.5 * ribbon.cell_line_density_kg_m() * l).sqrt();
+        let mut q = vec![0.0; axial_modes + amplitudes.len()];
+        for (slot, amplitude) in q[axial_modes..].iter_mut().zip(amplitudes) {
+            *slot = normalization * amplitude;
+        }
+        let error = (ribbon.strain().unwrap().hamiltonian(&q) / integral - 1.0).abs();
+        assert!(error < previous_error, "{axial_modes} axial modes: {error}");
+        previous_error = error;
+    }
+    assert!(previous_error < 2e-13);
+}
+
+#[test]
+fn fiber_strain_width_refinement_preserves_physical_energy_and_tension() {
+    use fs_phs::Storage;
+    let gate = CancelGate::new_clock_free();
+    let mut previous: Option<(f64, f64, f64)> = None;
+    for cells in [1, 3, 9] {
+        let ribbon = fibers(cells, 2, 1300.0, 3e9, 0.0, 40.0, 48000, &gate)
+            .with_axial_transverse_strain(strain_limits(), strain_config())
+            .unwrap();
+        // Identical physical displacements for each quadrature strip.
+        let mass_scale =
+            (0.5 * ribbon.cell_line_density_kg_m() * ribbon.geometry().length_m).sqrt();
+        let q = [mass_scale * 1e-8, 0.0, mass_scale * 2e-4, 0.0];
+        let strain = ribbon.strain().unwrap();
+        let observation = strain.observe(&q).unwrap();
+        let current = (
+            cells as f64 * strain.hamiltonian(&q),
+            cells as f64 * observation.minimum_tension_n,
+            cells as f64 * observation.maximum_tension_n,
+        );
+        if let Some(old) = previous {
+            assert!((current.0 / old.0 - 1.0).abs() < 2e-14);
+            assert!((current.1 / old.1 - 1.0).abs() < 2e-14);
+            assert!((current.2 / old.2 - 1.0).abs() < 2e-14);
+        }
+        previous = Some(current);
+    }
+}
+
+#[test]
+fn normal_fiber_motion_drives_axial_waves_in_the_original_contact_bank() {
+    // G3: the original linear rung cannot transfer normal motion into axial
+    // waves. The conservative strain rung must, while retaining the string's
+    // own nonlinear energy, all body/cavity states and the same work audit.
+    with_cx(|cx, gate| {
+        let make = |coupled| {
+            let ribbon = fibers(3, 2, 1300.0, 3e9, 50.0, 40.0, 48000, gate);
+            let ribbon = if coupled {
+                ribbon
+                    .with_axial_transverse_strain(strain_limits(), strain_config())
+                    .unwrap()
+            } else {
+                ribbon
+            };
+            base(cx, gate, 7800.0)
+                .with_geometric_stretching(0.2, strain_config(), gate)
+                .unwrap()
+                .with_tensioned_fiber_ribbon(ribbon, 0.4, ribbon_limits(), gate)
+                .unwrap()
+        };
+        let mut linear = make(false);
+        let mut coupled = make(true);
+        assert!(coupled.source().bank().geometric_stretching().is_some());
+        assert!(coupled.source().bank().material_cavity().is_some());
+        let source = coupled.source().fiber_ribbon().unwrap();
+        let first = source.component_start();
+        let normal = source
+            .model()
+            .displacement_map(0.5, FiberDirection::Normal)
+            .unwrap();
+        let mut external = vec![0.0; coupled.system().mode_count()];
+        let start: usize = coupled.system().components()[..first]
+            .iter()
+            .map(|c| c.modes().len())
+            .sum();
+        for cell in 0..3 {
+            for (mode, shape) in normal.iter().enumerate() {
+                external[start + 4 * cell + mode] = 0.02 * shape;
+            }
+        }
+        let drives = vec![drive(0.0, 0.0); 3];
+        for sample in 0..128 {
+            if sample == 64 {
+                external.fill(0.0);
+            }
+            for bank in [&mut linear, &mut coupled] {
+                let frame = bank.step(&external, &drives).unwrap();
+                assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+            }
+        }
+        assert!(linear.system().components()[first..].iter().all(|c| {
+            c.states()[..2]
+                .iter()
+                .all(|s| s.velocity_m_sqrt_kg_per_s == 0.0)
+        }));
+        let axial_energy: f64 = coupled.system().components()[first..]
+            .iter()
+            .map(|c| {
+                c.states()[..2]
+                    .iter()
+                    .map(|s| 0.5 * s.velocity_m_sqrt_kg_per_s.powi(2))
+                    .sum::<f64>()
+            })
+            .sum();
+        assert!(
+            axial_energy > 1e-18,
+            "normal motion did not reach the original axial wave state"
+        );
+        let q: Vec<_> = coupled.system().components()[first]
+            .states()
+            .iter()
+            .map(|s| s.displacement_m_sqrt_kg)
+            .collect();
+        let observation = coupled
+            .source()
+            .fiber_ribbon()
+            .unwrap()
+            .model()
+            .strain()
+            .unwrap()
+            .observe(&q)
+            .unwrap();
+        assert!(observation.mean_dynamic_strain > 0.0);
+        // The same changed hair state must reach actual traction and the
+        // existing string/body pressure observer when contact is engaged.
+        let drives = vec![drive(0.01, 0.01); 3];
+        let mut pressure_difference = 0.0;
+        let mut traction_difference = 0.0;
+        for _ in 0..64 {
+            let a = linear.step(&external, &drives).unwrap().clone();
+            let b = coupled.step(&external, &drives).unwrap().clone();
+            pressure_difference += (a.observer_pressure_pa - b.observer_pressure_pa).abs();
+            traction_difference += (a.ports[0].traction_n - b.ports[0].traction_n).abs();
+            assert!(b.energy_residual_j.abs() <= b.energy_tolerance_j);
+        }
+        assert!(pressure_difference > 1e-18 && traction_difference > 1e-18);
+        let before = states(&coupled);
+        let accepted = coupled.system().last_frame().unwrap().clone();
+        external[start] = f64::NAN;
+        assert!(coupled.step(&external, &drives).is_err());
+        assert_eq!(states(&coupled), before);
+        assert_eq!(coupled.system().last_frame(), Some(&accepted));
+    });
+}
+
+#[test]
+fn fiber_strain_refuses_invalid_motion_and_mismatched_joint_solve() {
+    let gate = CancelGate::new_clock_free();
+    let ribbon = fibers(3, 2, 1300.0, 3e9, 0.0, 40.0, 48000, &gate)
+        .with_axial_transverse_strain(strain_limits(), strain_config())
+        .unwrap();
+    let law = ribbon.strain().unwrap();
+    assert!(law.observe(&[0.0; 3]).is_err());
+    assert!(law.observe(&[f64::NAN, 0.0, 0.0, 0.0]).is_err());
+    assert!(law.observe(&[0.0, 0.0, 1.0, 0.0]).is_err());
+    let normalization = (0.5 * ribbon.cell_line_density_kg_m() * ribbon.geometry().length_m).sqrt();
+    let ea = ribbon.axial_material().elastic().axial_stiffness_n() * 60.0;
+    let q =
+        2.0 * (40.0 / 3.0) / ea * ribbon.geometry().length_m / std::f64::consts::PI * normalization;
+    assert!(
+        law.observe(&[q, 0.0, 0.0, 0.0]).is_err(),
+        "a fiber with local compressive tension must refuse"
+    );
+    assert!(
+        ribbon
+            .with_axial_transverse_strain(strain_limits(), strain_config())
+            .is_err()
+    );
+    with_cx(|cx, gate| {
+        let mut different = strain_config();
+        different.max_iterations -= 1;
+        let ribbon = fibers(3, 2, 1300.0, 3e9, 0.0, 40.0, 48000, gate)
+            .with_axial_transverse_strain(strain_limits(), different)
+            .unwrap();
+        assert!(
+            base(cx, gate, 7800.0)
+                .with_geometric_stretching(0.2, strain_config(), gate)
+                .unwrap()
+                .with_tensioned_fiber_ribbon(ribbon, 0.4, ribbon_limits(), gate)
+                .is_err()
+        );
+    });
+}

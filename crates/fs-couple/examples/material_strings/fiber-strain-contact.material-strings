@@ -1,0 +1,23 @@
+frankensim-material-strings-v3
+audio 48000 4096 0.01 128
+state 293.15 1000
+gas mixture 293.15 101325 mole 2 N2 0.8 O2 0.2
+body body.fsmatpk 0.4 0.3 0.001 2 1
+strings 1
+string wire.fsmatpk 0.5 0.0003 tension 20 4 3 0.8 3000 0.1
+section homogeneous
+polarizations two 1 0 0.6 0.8
+geometric-stretching 0.2 64 100000 1e-11 1e-10
+cavity neck 0.003 0.01 0.02 100 1
+friction coulomb 0.8 0.4
+bow_ribbon 0.01 3
+bow_fibers fiber.fsmatpk 0.00004 0.6 180 40 0.4 2 2
+bow_fiber_strain 0.2 0.03 64 100000 1e-11 1e-10
+forces retain 0 0
+schedule
+frankensim-gesture-schedule-v1
+control_rate_hz	1000
+tracks	1
+track	bow	bow	0
+initial	bow	1e-2	0e0	2e-1
+events	0

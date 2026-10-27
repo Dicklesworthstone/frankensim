@@ -147,6 +147,9 @@ impl ReciprocalStringBank {
     /// cavity, radiation, material memory and nonlinear strain storage remain
     /// attached. Appended fiber modes leave the original string and retained
     /// longitudinal coordinates in place and join their constitutive solve.
+    /// An explicitly bound fiber strain law couples its normal deflection and
+    /// axial extension through that same owner. It retains all existing string
+    /// nonlinear storage and requires the same numerical solve configuration.
     ///
     /// Bind cold. Contact station is fixed along the
     /// fibers: this is a local frozen-station bowing model in a uniformly
@@ -178,6 +181,10 @@ impl ReciprocalStringBank {
         let string_count = self.cards.len();
         self.system = self.system.with_internal_components(ribbon.cell_models(), gate)
             .map_err(ReciprocalStringError::Friction)?;
+        if let Some((bindings, config)) = ribbon.strain_bindings(component_start) {
+            self.system = self.system.with_mapped_nonlinear_potentials(bindings, config, gate)
+                .map_err(ReciprocalStringError::Friction)?;
+        }
         let mut bank = self.with_uniform_bow_ribbon(ribbon.geometry().width_m, cells, joint, gate)?;
         let attachments = (0..cells).map(|port| FrictionSurfaceAttachment { port,
             surface: ModalAttachment { component: component_start + port, shapes: axial.clone() },

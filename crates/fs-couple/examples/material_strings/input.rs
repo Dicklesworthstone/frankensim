@@ -766,12 +766,28 @@ impl Spec {
         let bow_fibers = if r.lines.clone().next()
             .and_then(|line| line.split_ascii_whitespace().next()) == Some("bow_fibers") {
             let mut row = r.row("bow_fibers")?;
-            let input = fibers::Input { pack: row.path()?, radius_m: row.positive()?,
+            let mut input = fibers::Input { pack: row.path()?, radius_m: row.positive()?,
                 length_m: row.positive()?, fiber_count: row.count(1 << 24)?,
                 tension_n: row.positive()?, station_fraction: row.scalar()?,
                 axial_modes: row.count(MAX_MODES)?, transverse_modes: row.count(MAX_MODES)?,
+                strain: None,
             };
             row.end()?;
+            if r.lines.clone().next()
+                .and_then(|line| line.split_ascii_whitespace().next()) == Some("bow_fiber_strain") {
+                let mut row = r.row("bow_fiber_strain")?;
+                let limits = fibers::FiberStrainLimits {
+                    maximum_slope: row.positive()?, maximum_strain: row.positive()?,
+                };
+                let config = NonlinearModalConfig {
+                    max_iterations: row.count(128)?, maximum_generalized_force: row.positive()?,
+                    force_absolute_tolerance: row.positive()?, force_relative_tolerance: row.positive()?,
+                };
+                row.end()?;
+                limits.validate()?;
+                config.validate()?;
+                input.strain = Some((limits, config));
+            }
             Some(input)
         } else { None };
         let mut row = r.row("forces")?;

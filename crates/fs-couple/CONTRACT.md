@@ -30,6 +30,25 @@ without conversion or duplicate types. That lower boundary depends only on
 
 ## Public types and semantics
 
+### Coupled extension and normal deflection of material fibers
+
+`TensionedFiberRibbon::with_axial_transverse_strain` uses the original
+`fs_nlmodal::longitudinal::LongitudinalString` storage, with each quadrature
+strip's original mass, EA and tensile preload. Normal deflection changes
+`u_x + y_x²/2`, generating axial waves and changing local tension and contact
+reaction. All original fiber coordinates and linear material losses remain in
+the shared exact-linear/contact/discrete-gradient owner. Its existing axial
+quadratic storage is subtracted once from the nonlinear correction. Disjoint
+cold material potentials compose under one identical solve configuration;
+overlapping coordinates or incompatible budgets refuse. Existing string, body,
+cavity and pressure states are retained. Continuous-span slope/strain bounds
+and positive local tension gate every trial. This fixed-end moderate-slope
+rung retains selected axial inertia; omitted axial harmonics equilibrate
+statically. Axial/normal modes and time require refinement. It adds no stick
+camber, moving contact, nonlinear viscous cross terms or real-instrument claim.
+Focused G1/G3 checks compare independent continuum strain energy and gradient,
+quadrature-width invariance, normal-to-axial energy transfer, and rollback.
+
 ### Material gas loading in the file-driven plate renderer
 
 The optional `radiation-load none|baffled-piston` record after `observer` in a

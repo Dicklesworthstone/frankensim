@@ -686,6 +686,10 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     if let Some(fibers)=ready.performance.bank().source().fiber_ribbon() {
         eprintln!("bow_fibers={:?}; resolution={:?}; mass_kg={}; station={}; frozen-station rigid-end model, not thermal rosin",
             fibers.model().geometry(),fibers.model().resolution(),fibers.model().mass_kg(),fibers.station_fraction());
+        if let Some(strain)=fibers.model().strain() {
+            eprintln!("bow_fiber_strain={:?}; joint_solve={:?}; moderate-slope fixed-end material strain",
+                strain.limits(),strain.config());
+        }
     }
     if let Some(profile)=&ready.body_profile { eprintln!("body_profile={profile:?}"); }
     if let Some(report)=&ready.body_radiation { eprintln!("computed_body_radiation={report}"); }

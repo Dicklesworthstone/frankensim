@@ -215,7 +215,7 @@ pub(super) struct NonlinearFrictionState {
     last: Option<NonlinearFrictionFrame>,
 }
 impl FrictionModalSystem {
-    /// Bind additional storage once, before playback. Existing nonzero initial
+    /// Bind disjoint additional storage before playback. Existing nonzero initial
     /// motion is preserved. Rendering, gestures, interfaces and observation use
     /// this same owner; refused trials publish no accepted state or diagnostic.
     pub fn with_nonlinear_potentials(
@@ -249,8 +249,11 @@ impl FrictionModalSystem {
     /// Bind a complete positive strain energy across existing components.
     /// Referenced linear oscillators remain in the exact propagator. Only the
     /// constitutive correction enters the joint friction/contact iteration.
-    /// Duplicate coordinates, overlapping bindings, invalid replacement indices
-    /// or nonlinear energy outside the complete network budget refuse.
+    /// Disjoint cold constituents may join an existing binding under the SAME
+    /// solve configuration. Every original storage law remains active in one
+    /// combined constitutive iteration. Duplicate coordinates, overlapping
+    /// bindings, changed numerical budgets, invalid replacement indices or
+    /// nonlinear energy outside the complete network budget refuse.
     pub fn with_mapped_nonlinear_potentials(
         mut self,
         bindings: Vec<MappedModalPotentialBinding>,
@@ -260,14 +263,17 @@ impl FrictionModalSystem {
         poll(Some(gate))?;
         config.validate()?;
         if self.samples_rendered() != 0
-            || self.nonlinear.is_some()
+            || self.nonlinear.as_ref().is_some_and(|state| state.config != config)
             || bindings.is_empty()
             || bindings.len() > self.mode_count()
         {
             return Err(invalid("nonlinear storage requires cold nonempty binding and finite force/iteration budgets").into());
         }
         let mut occupied = vec![false; self.mode_count()];
-        let mut potentials = Vec::with_capacity(bindings.len());
+        let mut potentials = self.nonlinear.take().map_or_else(Vec::new, |state| state.potentials);
+        for potential in &potentials {
+            for &coordinate in &potential.coordinates { occupied[coordinate] = true; }
+        }
         for binding in bindings {
             poll(Some(gate))?;
             let count = binding.potential.coordinate_count();
