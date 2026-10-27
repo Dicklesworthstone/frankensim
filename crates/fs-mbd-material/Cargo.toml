@@ -11,12 +11,15 @@ description = "Source-bound material and geometry compilation to the existing ri
 layer = "L3"
 
 [features]
+# Joint material interface damping and finite-body thermal feedback.
+dissipative-coupling = ["dep:fs-solver"]
 # Keep electrical spatial solvers out of ordinary material-to-dynamics users.
 electrothermal-coupling = ["dep:fs-exec", "dep:fs-lbm"]
 # Constrained 3-D thermal shape uses the existing solid FEM implementation.
 thermoelastic-coupling = ["dep:fs-exec", "dep:fs-solid", "dep:fs-blake3"]
 
 [dependencies]
+fs-solver = { path = "../fs-solver", optional = true }
 fs-blake3 = { path = "../fs-blake3", optional = true }
 fs-solid = { path = "../fs-solid", optional = true }
 fs-exec = { path = "../fs-exec", optional = true }

@@ -342,3 +342,60 @@ aligned restart, wrong-body refusal, source-domain refusal and late cancellation
 These are synthetic constitutive fixtures, not measured brake validation. This
 delivery has parser/source-review checks only; execution of these new regressions
 is not claimed without a current-source compile/runtime result.
+
+## Material interface damping and finite-body thermal feedback
+
+With `dissipative-coupling`, `thermal::heating::motion::damping::DampedRigidPair`
+retains two original `HeatedRigidBody` trajectories and their finite enthalpy
+networks. An ordered `ResolvedLinearInterface` supplies a pure axial viscous
+connector: explicitly sourced zero stiffness, positive damping over its fixed
+declared area, and no constant-loss anchor. Attachments name original material
+regions and reference body points. Existing source expansion moves those points;
+their actual world separation determines the central impulse direction.
+The caller establishes that points belong to the named regions and that the
+lumped interface law represents the physical connection.
+
+`MaterialDamper::temperature_side` explicitly selects the receiving cell whose
+temperature supplies the interface law. Other original coordinates, surface
+roles, property roles and selected claims are retained. `first_heat_fraction`
+routes physical heat to side 0; side 1 receives the exact remainder. Neither an
+average temperature nor an effusivity partition is invented. The connector has
+no separate heat store. Original links and reservoirs remain with each body's
+thermal network; no additional inter-body thermal-conduction link is supplied.
+
+Each step solves both public `fs-thermal::BackwardEulerStep` residuals using the
+existing Newton-Krylov and fallible finite-difference owners. Unknowns are cell
+energy increments in each body's original sorted order. Every trial starts from
+the same accepted bodies and refreshes c at the proposed interface temperature.
+A fresh final evaluation must pass local, global, and mechanical/thermal energy
+gates before either history is returned. Unsupported sources, pending events,
+nonlinear budgets, physical step limits and cancellation publish no endpoint.
+The returned pair retains the accepted source for subsequent continuation.
+
+For starting axial relative velocity v and summed native inverse effective mass g,
+the midpoint impulse on the second body is J=-c*dt*v/(1+c*dt*g/2). The native
+equal-and-opposite point-impulse owner updates both momenta. Independently
+calculated heat D=c*dt*(v/(1+c*dt*g/2))^2 must agree with both its kinetic-energy
+change and midpoint impulse work before it enters thermal storage once.
+Central impulses conserve linear and total angular momentum in exact arithmetic.
+The admitted c*dt*g ceiling is at most 2, refusing scalar slip reversal from an
+excessively coarse damping step. The original frequency domain must include
+zero and the resolved relaxation rate; this does not establish broadband
+physical validity or remove time-refinement obligations.
+
+After the impulse, the original integrator advances actual positions and
+orientations. Existing expansion/full-inertia transfer then updates configuration
+while preserving world momenta. This is a first-order split. Its audit separates
+physical dissipation, independently evaluated reservoir/authored heat, expansion
+parameter work and native numerical drift. Only physical damping loss is
+deposited as heat. Expansion parameter work remains the existing explicit
+unresolved thermoelastic-work boundary: this closes dissipative feedback, not a
+general thermoelastic free-energy, entropy or coupled-passivity model.
+Spring storage, dry friction, normal contact, connector mass and deformation
+kinetics require their own owners.
+
+The focused regression target is `heating_damping` with
+`--features dissipative-coupling`. Manufactured sources exercise midpoint
+impulse/heat, material-temperature feedback, continuing trajectories and joint
+refusal. These tests specify implementation checks, not measured validation;
+native execution must be reported separately from source review.

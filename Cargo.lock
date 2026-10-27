@@ -2052,6 +2052,7 @@ dependencies = [
  "fs-modal",
  "fs-qty",
  "fs-solid",
+ "fs-solver",
  "fs-thermal",
  "fs-time",
  "fs-tribo",

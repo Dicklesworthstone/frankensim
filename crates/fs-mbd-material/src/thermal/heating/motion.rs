@@ -6,6 +6,10 @@
 //! source expansion and principal-frame lowering as static configuration.
 //! Parameter work is reported and bounded separately from caloric heat and
 //! integration error. Reciprocal thermoelastic heat is not inferred.
+/// Source-bound viscous interfaces with reciprocal finite-body heat feedback.
+#[cfg(feature = "dissipative-coupling")]
+pub mod damping;
+
 use super::*;
 use crate::principal::transfer::ConfigurationTransferControls;
 use crate::principal::{PrincipalFrame, PrincipalFrameError};
