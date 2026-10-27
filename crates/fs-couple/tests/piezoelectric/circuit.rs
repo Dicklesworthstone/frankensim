@@ -3,6 +3,9 @@ use super::{near, rod};
 #[path = "../circuit_enthalpy/common.rs"]
 mod thermal_source;
 
+#[path = "circuit/thermal.rs"]
+mod ceramic_thermal;
+
 use fs_couple::circuit_enthalpy::{CircuitEnthalpyError, CircuitEnthalpySolve};
 use fs_couple::circuit_enthalpy::material::{CellResistor, ConductionLink, MaterialCell, MaterialNetwork};
 use fs_couple::circuit_enthalpy::piezoelectric::{self as heated, PiezoelectricEnthalpyInput};

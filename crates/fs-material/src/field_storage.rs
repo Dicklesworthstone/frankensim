@@ -196,7 +196,7 @@ pub fn admit_magnetic_temperature_refresh(
 
 // One source/context continuity rule for linear and nonlinear field owners.
 // Constitutive admission and parameter work remain each caller's responsibility.
-pub(super) fn admit_source_temperature_refresh(
+pub(crate) fn admit_source_temperature_refresh(
     prepared: &ResolvedMaterialStatePoint,
     refreshed: &ResolvedMaterialStatePoint,
 ) -> Result<(), FieldStorageError> {

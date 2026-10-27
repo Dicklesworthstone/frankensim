@@ -7983,3 +7983,35 @@ memory, and late transactional refusals. All eight changed Rust files passed
 syntax parsing. Independent manufactured-profile arithmetic was evaluated;
 it is not a native acoustic trajectory execution. Native Rust compilation/tests
 were not run because Rust/Cargo and DSR/RCH were unavailable.
+
+
+### Ceramic material temperature in the original piezoelectric/enthalpy solve
+
+`circuit_enthalpy::piezoelectric::thermal` advances the existing
+`PiezoelectricCircuit` and original finite enthalpy/Newton timeline atomically.
+Each nonlinear trial refreshes the original rod at trial endpoint T, retaining
+accepted charge, flux, extension, momentum, geometry and source identity, then
+solves the original Kirchhoff/piezo descriptor. Native rebind exposes
+P=Psi(T1,x0)-Psi(T0,x0); Q_rev=-P-[T1*S1-T0*S0] enters the same whole-rod
+caloric cell separately from native resistor Joule heat. The final account
+closes ceramic U, rod kinetic energy, other circuit storage and caloric enthalpy
+against electrical work, force-displacement work and external heat.
+
+The coupled owner requires a fully solid constant-density chart covering the
+whole source interval, matching entire rod volume/mass, and positive
+caloric-plus-field capacity over explicit strain/D bounds. Original small-signal
+and ideal-source compatibility gates remain authoritative. Ordinary fixed-ceramic
+stepping has P=0 and retains the existing native trajectory. Unsupported
+source/density/phase, capacity/coordinate bounds, native failure, budget or
+cancellation return no joint endpoint. This endpoint-T coefficient split is
+generally first order; energy closure is not an unconditional entropy/stability
+or time-error certificate. Thermal strain, depoling, pyroelectric offsets and
+irreversible ceramic losses require their own admitted laws.
+
+Four focused regression definitions cover independent full-block potentials and
+derivatives, signed poling reversal/zero coupling, continued material-load motion
+and physical energy, an isolated fixed-charge caloric limit, fixed-source native
+equality, and late source/budget/cancellation refusal with deterministic retry.
+All nine changed Rust files passed syntax parsing; independent scalar equations
+were evaluated. Native Rust compilation/tests and rustfmt were not run because
+the required Rust/Cargo and DSR/RCH environment was unavailable.

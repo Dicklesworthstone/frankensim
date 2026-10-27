@@ -5,12 +5,15 @@
 //! is lowered from the rod's original material. Its quadratic charge energy is
 //! REPLACED by the original charge/strain energy, not added to it. All other
 //! circuit stamps, fluxes, charges and source ports retain their native owner.
-//! The rod source context stays fixed. Resistor heating may evolve separately;
-//! ceramic heating, dielectric loss, depoling and nonlinear strain are not added.
+//! Ordinary stepping holds the rod source context fixed. The explicit thermal
+//! entry rebinds that same rod with frozen conserved coordinates and records
+//! parameter work for its caloric owner. Dielectric loss, depoling and nonlinear
+//! strain are not added.
 
 use super::{MaterialCircuit, MaterialCircuitError, MaterialCircuitSolve,
     MaterialResistor, ResistorHeat, account_step, bind, extended, poll, positive};
 use crate::piezoelectric::{PiezoelectricCouplingError, PiezoelectricRod};
+use fs_material::piezoelectric::thermal::ThermalLongitudinalPiezoelectric;
 use fs_phs::{DescriptorPortHamiltonian, QuadraticStorage, StepRecord, Storage, step_descriptor};
 use fs_phs::circuit::{Branch, CircuitDae, CircuitError, CircuitGraph};
 
@@ -41,6 +44,9 @@ pub struct PiezoelectricCircuitStep {
     pub other_electrical_energy_j: [f64; 2],
     pub electrical_supply_j: f64,
     pub mechanical_supply_j: f64,
+    /// Frozen-coordinate ceramic Helmholtz change; internal reversible transfer
+    /// for a thermal owner, not electrical supply or irreversible heat.
+    pub parameter_work_j: f64,
     pub resistors: Vec<ResistorHeat>,
     pub heat_j: f64,
     pub energy_residual_j: f64,
@@ -126,6 +132,56 @@ impl PiezoelectricCircuit {
         Ok(self.rod.energy(&[self.extension_m, self.momentum_kg_m_s, self.charge_c()])?)
     }
 
+    /// Refresh the SAME ceramic from its pinned affine thermal law while
+    /// retaining original extension, momentum, charge, flux and circuit topology.
+    /// Then run the original descriptor interval at the proposed endpoint T.
+    /// No switching impulse is inferred: incompatible ideal-source constraints
+    /// at the frozen-coordinate rebind still refuse through native admission.
+    /// The caloric caller must pay -P-delta(TS) and close physical internal energy.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_thermal_material_candidate(
+        &self, law: &ThermalLongitudinalPiezoelectric, temperature_k: f64,
+        sources: Vec<MaterialResistor>, electrical_ports: &[f64], force_n: f64,
+        duration_s: f64, controls: MaterialCircuitSolve,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PiezoelectricCircuitCandidate, MaterialCircuitError> {
+        poll(&mut cancelled)?;
+        law.at_material(self.rod.material()).map_err(PiezoelectricCouplingError::from)?;
+        let at = law.at_temperature(temperature_k).map_err(PiezoelectricCouplingError::from)?;
+        let rod = PiezoelectricRod::new(at.material().clone(), self.rod.length_m(),
+            self.rod.area_m2(), self.rod.limits())?;
+        if rod.modal_mass_kg().to_bits() != self.rod.modal_mass_kg().to_bits() {
+            return Err(invalid("thermal piezoelectric update cannot change reference inertia"));
+        }
+        let volume = self.rod.length_m()*self.rod.area_m2();
+        let before = volume*self.rod.response(self.extension_m,self.charge_c())?.stored_energy_j_m3;
+        let frozen = volume*rod.response(self.extension_m,self.charge_c())?.stored_energy_j_m3;
+        let parameter_work_j = frozen-before;
+        if !before.is_finite() || !frozen.is_finite() || !parameter_work_j.is_finite() {
+            return Err(invalid("piezoelectric thermal parameter work is unrepresentable"));
+        }
+        let mut rebound = self.clone();
+        rebound.circuit.graph.branches[self.branch].2 = Branch::Capacitor {
+            farads: rod.axially_clamped_capacitance_f(),
+        };
+        rebound.rod = rod;
+        let mut candidate = rebound.step_candidate(sources,electrical_ports,force_n,
+            duration_s,controls,&mut cancelled)?;
+        candidate.step.piezoelectric_energy_j[0] = self.piezoelectric_energy_j()?;
+        candidate.step.stored_before_j = candidate.step.piezoelectric_energy_j[0]
+            + candidate.step.other_electrical_energy_j[0];
+        candidate.step.parameter_work_j = parameter_work_j;
+        candidate.step.energy_residual_j = candidate.step.stored_after_j-candidate.step.stored_before_j
+            + candidate.step.heat_j-candidate.step.electrical_supply_j-candidate.step.mechanical_supply_j
+            - parameter_work_j;
+        if !candidate.step.energy_residual_j.is_finite()
+            || candidate.step.energy_residual_j.abs() > controls.energy_tolerance_j {
+            return Err(MaterialCircuitError::Balance("piezoelectric original storage and thermal parameter work do not close"));
+        }
+        poll(&mut cancelled)?;
+        Ok(candidate)
+    }
+
     /// Solve the material circuit and rod together for one held-load interval.
     ///
     /// Resistors are refreshed from their sources for this trial. Every trial
@@ -191,7 +247,7 @@ impl PiezoelectricCircuit {
         poll(&mut cancelled)?;
         Ok(PiezoelectricCircuitCandidate { model, step: PiezoelectricCircuitStep {
             native: record, stored_before_j, stored_after_j, piezoelectric_energy_j,
-            other_electrical_energy_j, electrical_supply_j, mechanical_supply_j,
+            other_electrical_energy_j, electrical_supply_j, mechanical_supply_j, parameter_work_j: 0.0,
             resistors: heat, heat_j, energy_residual_j,
         } })
     }

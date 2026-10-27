@@ -2501,3 +2501,30 @@ are in the fs-couple dielectric thermal test child. Final source syntax parsing,
 bounded source review and independent scalar arithmetic passed; native Rust
 tests were unavailable, so no executed native or empirical qualification is
 asserted.
+
+
+### Source-bound thermal longitudinal piezoelectric potential
+
+`ThermalLongitudinalPiezoelectric` pins the complete original longitudinal
+material bundle, card, source claims, axis quantities and fixed nonthermal
+coordinates. The owned absolute-temperature interval admits affine s_E(T),
+signed d(T), epsilon_T(T), constant reference density, and positive definiteness
+of the full coupled block A=[[s_E,d],[d,epsilon_T]] throughout. In natural
+coordinates x=[strain,D], y=A^-1*x, the same native response supplies
+Psi=V*x^T*y/2, S=V*y^T*A'*y/2, U=Psi+T*S, and
+C_x=-T*V*(A'*y)^T*A^-1*(A'*y).
+
+Signed/zero coupling is valid; signed-zero reference checks use the admitted
+source-path scale without replacing actual source values. A normalized
+full-block eigenvalue/derivative bound supplies a conservative minimum field
+heat capacity over the caller's strain/D envelope. This is an admitted model
+bound, not a numerical certificate. Common affine-source and capacity routines
+are shared with the existing field-storage thermodynamics; positive-coefficient
+source admission retains its original behavior. No separate constitutive engine,
+pyroelectric offset, expansion, depoling, hysteresis, phase transition or
+dissipative ceramic law is inferred.
+
+Focused synthetic regressions in fs-couple compare the complete analytic
+potentials, thermal derivatives, signed/zero coupling and actual coupled
+circuit/motion/caloric evolution. Source syntax and independent scalar references
+were checked; native compilation/tests were not run in the editing environment.

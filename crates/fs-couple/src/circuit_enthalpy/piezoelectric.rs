@@ -3,13 +3,17 @@
 //! Original rod storage and Kirchhoff motion supply the actual resistor heat.
 //! The original enthalpy residual resolves resistance at its proposed thermal
 //! endpoint, so load heating feeds back into current and mechanical response.
-//! Ceramic material coefficients remain fixed; this does not evolve the rod's
-//! temperature, field entropy, depoling, dielectric loss or thermal strain.
+//! The base entry holds ceramic coefficients fixed. The `thermal` entry adds
+//! the same ceramic's source-derived temperature response and field entropy.
+//! Neither entry infers depoling, dielectric loss or thermal strain.
 
 use super::*;
 use crate::material_circuit::piezoelectric::{
     PiezoelectricCircuit, PiezoelectricCircuitCandidate, PiezoelectricCircuitStep,
 };
+
+/// Ceramic coefficient/entropy feedback on this original circuit and heat owner.
+pub mod thermal;
 
 /// Accepted physical history, held drives and original resistor heat routes.
 #[derive(Clone, Copy)]
@@ -49,7 +53,7 @@ impl ThermalDriver for PiezoelectricCircuitCandidate {
             resistors: &step.resistors, contacts: &[], heat_j: step.heat_j,
             numerical_dissipation_j: 0.0,
             stored_change_j: step.stored_after_j-step.stored_before_j,
-            supplied_j: step.electrical_supply_j+step.mechanical_supply_j,
+            supplied_j: step.electrical_supply_j+step.mechanical_supply_j+step.parameter_work_j,
         }
     }
     fn into_parts(self) -> (Self::Model, Self::Step) { PiezoelectricCircuitCandidate::into_parts(self) }

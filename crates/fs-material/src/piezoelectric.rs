@@ -25,6 +25,9 @@ use crate::state_point::{
     resolve_material_state_point,
 };
 
+/// Reversible caloric response of the original coupled compliance block.
+pub mod thermal;
+
 /// Axial `s33^E` [1/Pa], with other stresses zero and electric field fixed.
 pub const COMPLIANCE_33_E_PROPERTY: &str = "piezoelectric_compliance_33_at_constant_field";
 /// Signed `d33` [m/V = C/N] in the same oriented material axis as the other roles.

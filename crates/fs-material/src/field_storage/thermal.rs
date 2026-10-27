@@ -143,6 +143,23 @@ fn affine_path(
     temperature_axis: &str,
     temperature_range_k: [f64; 2],
 ) -> Result<(f64, f64, f64), FieldStorageError> {
+    let (reference, slope, endpoints) = affine_source_path(
+        card, material, property_name, temperature_axis, temperature_range_k, true,
+    )?;
+    Ok((reference, slope, endpoints[0].min(endpoints[1])))
+}
+
+/// Exact affine source-path admission shared by scalar storage and coupled
+/// active-material blocks. Signed cross coefficients need finite support;
+/// diagonal storage coefficients additionally require positivity.
+pub(crate) fn affine_source_path(
+    card: &MaterialCard,
+    material: &ResolvedMaterialStatePoint,
+    property_name: &str,
+    temperature_axis: &str,
+    temperature_range_k: [f64; 2],
+    strictly_positive: bool,
+) -> Result<(f64, f64, [f64; 2]), FieldStorageError> {
     let invalid = FieldStorageError::Invalid;
     let [low, high] = temperature_range_k;
     if !low.is_finite() || !high.is_finite() || low <= 0.0 || low >= high {
@@ -174,13 +191,27 @@ fn affine_path(
         &point(low)?, &point(high)?, property.answer().receipt.selected)?;
     if knots.first().map(|v| v.0) != Some(low)
         || knots.last().map(|v| v.0) != Some(high)
-        || knots.iter().any(|(_, value)| !value.is_finite() || *value <= 0.0)
+        || knots.iter().any(|(_, value)| !value.is_finite() || strictly_positive && *value <= 0.0)
     {
-        return Err(invalid("positive field source must continuously cover the complete thermal range"));
+        return Err(invalid("admissible field source must continuously cover the complete thermal range"));
     }
-    let slope = affine_temperature_slope(&knots, reference_k, property.value_si()).map_err(invalid)?;
-    let minimum = knots.first().unwrap().1.min(knots.last().unwrap().1);
-    Ok((reference_k, slope, minimum))
+    // Positive storage retains its original relative admission. Signed cross
+    // coefficients can cancel exactly at the reference temperature; admit their
+    // reference against the source-path scale rather than divide by that zero.
+    let (slope_reference_k, slope_reference_value) = if strictly_positive {
+        (reference_k, property.value_si())
+    } else { knots[0] };
+    let slope = affine_temperature_slope(&knots, slope_reference_k, slope_reference_value).map_err(invalid)?;
+    if !strictly_positive {
+        let expected = finite(slope.mul_add(reference_k-knots[0].0,knots[0].1),
+            "signed affine source reference is unrepresentable")?;
+        let scale = knots.iter().fold(property.value_si().abs().max(expected.abs()),
+            |scale,(_,value)| scale.max(value.abs()));
+        if (expected-property.value_si()).abs()>128.0*f64::EPSILON*scale {
+            return Err(invalid("signed coefficient reference differs from its admitted affine path"));
+        }
+    }
+    Ok((reference_k, slope, [knots.first().unwrap().1, knots.last().unwrap().1]))
 }
 
 fn thermal_state(
@@ -205,7 +236,7 @@ fn thermal_state(
     Ok(FieldThermalState { free_energy_j, entropy_j_k, internal_energy_j, heat_capacity_j_k })
 }
 
-fn capacity_bound(
+pub(crate) fn capacity_bound(
     worst_energy_j: f64,
     maximum_temperature_k: f64,
     maximum_ratio: f64,
