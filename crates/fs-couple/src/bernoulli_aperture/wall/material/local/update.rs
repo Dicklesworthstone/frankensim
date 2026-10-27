@@ -163,6 +163,12 @@ fn prepare(
     })
 }
 
+enum GasRefresh {
+    Lossless,
+    UniformDiffusion(f64),
+    SpatialDiffusion(f64),
+}
+
 /// Prepare the same live gas transfer and certified clock for either wall
 /// source layout. Native wall coordinates and all immutable source assignments
 /// remain with their existing owner; the new field retains its gas catalog.
@@ -171,7 +177,7 @@ fn prepare_gas(
     state: &DgState,
     propagator: &DgPropagator,
     field: &AxialGasField,
-    viscothermal_error: Option<f64>,
+    refresh: GasRefresh,
     maximum_absolute_parameter_work_j: f64,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(DgDuct, DgState, DgPropagator, DgGasMaterialUpdate), AcousticRealizeError> {
@@ -181,22 +187,31 @@ fn prepare_gas(
     let mut next_state = state.clone();
     propagator.sync_nodal(&mut next_state).map_err(duct_error)?;
     let mut next_duct = duct.clone();
-    let report = if let Some(error) = viscothermal_error {
-        next_duct.rebind_uniform_viscothermal_gas_field(
+    let report = match refresh {
+        GasRefresh::UniformDiffusion(error) => next_duct.rebind_uniform_viscothermal_gas_field(
             &mut next_state,
             field,
             error,
             maximum_absolute_parameter_work_j,
             cancelled,
-        )
-    } else {
-        next_duct.rebind_uniform_gas_field(
+        ).map_err(duct_error),
+        GasRefresh::SpatialDiffusion(error) => next_duct.rebind_spatial_viscothermal_gas_field(
+            &mut next_state,
+            field,
+            error,
+            maximum_absolute_parameter_work_j,
+            cancelled,
+        ).map_err(|error| match error {
+            fs_duct::profile::gas_field::GasFieldDuctError::Duct(error) => duct_error(error),
+            error => AcousticRealizeError::Nonlinear(error.to_string()),
+        }),
+        GasRefresh::Lossless => next_duct.rebind_uniform_gas_field(
             &mut next_state,
             field,
             maximum_absolute_parameter_work_j,
             cancelled,
-        )
-    }.map_err(duct_error)?;
+        ).map_err(duct_error),
+    }?;
     if cancelled() {
         return Err(AcousticRealizeError::Cancelled);
     }
@@ -237,7 +252,7 @@ impl MaterialWallDg {
             state,
             propagator,
             field,
-            None,
+            GasRefresh::Lossless,
             maximum_absolute_parameter_work_j,
             cancelled,
         )?;
@@ -272,9 +287,38 @@ impl MaterialWallDg {
             state,
             propagator,
             field,
-            Some(maximum_relative_error),
+            GasRefresh::UniformDiffusion(maximum_relative_error),
             maximum_absolute_parameter_work_j,
             cancelled,
+        )?;
+        let _old_duct = core::mem::replace(&mut self.duct, duct);
+        let _old_state = core::mem::replace(state, next);
+        let _old_propagator = core::mem::replace(propagator, stepping);
+        Ok(report)
+    }
+
+    /// Refresh the actual spatial source field on its retained native DG basis.
+    ///
+    /// Preserve weak compression/momentum and every physical quadrature-arm
+    /// history; retain wall source receipts, motion and Maxwell memory. New
+    /// source data drive both pointwise diffusion and reciprocal wall loading.
+    /// The retained geometry, mesh, quadrature, pole support and angular band
+    /// must remain admitted. Actual changed storage is external parameter work,
+    /// not a heat/species solve or mean-pressure traction. The complete field,
+    /// state and original-clock certified propagator publish atomically.
+    pub fn rebind_spatial_viscothermal_gas_field_controlled(
+        &mut self,
+        field: &AxialGasField,
+        state: &mut DgState,
+        propagator: &mut DgPropagator,
+        maximum_relative_error: f64,
+        maximum_absolute_parameter_work_j: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<DgGasMaterialUpdate, AcousticRealizeError> {
+        let (duct, next, stepping, report) = prepare_gas(
+            &self.duct, state, propagator, field,
+            GasRefresh::SpatialDiffusion(maximum_relative_error),
+            maximum_absolute_parameter_work_j, cancelled,
         )?;
         let _old_duct = core::mem::replace(&mut self.duct, duct);
         let _old_state = core::mem::replace(state, next);
@@ -354,7 +398,7 @@ impl RegionalMaterialWallDg {
             state,
             propagator,
             field,
-            None,
+            GasRefresh::Lossless,
             maximum_absolute_parameter_work_j,
             cancelled,
         )?;
@@ -381,9 +425,32 @@ impl RegionalMaterialWallDg {
             state,
             propagator,
             field,
-            Some(maximum_relative_error),
+            GasRefresh::UniformDiffusion(maximum_relative_error),
             maximum_absolute_parameter_work_j,
             cancelled,
+        )?;
+        let _old_duct = core::mem::replace(&mut self.duct, duct);
+        let _old_state = core::mem::replace(state, next);
+        let _old_propagator = core::mem::replace(propagator, stepping);
+        Ok(report)
+    }
+
+    /// Spatial-field counterpart retaining every original region's wall source
+    /// and history. Uses the uniform wall wrapper's atomic native transfer and
+    /// explicit band/work admissions without averaging gas or wall materials.
+    pub fn rebind_spatial_viscothermal_gas_field_controlled(
+        &mut self,
+        field: &AxialGasField,
+        state: &mut DgState,
+        propagator: &mut DgPropagator,
+        maximum_relative_error: f64,
+        maximum_absolute_parameter_work_j: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<DgGasMaterialUpdate, AcousticRealizeError> {
+        let (duct, next, stepping, report) = prepare_gas(
+            &self.duct, state, propagator, field,
+            GasRefresh::SpatialDiffusion(maximum_relative_error),
+            maximum_absolute_parameter_work_j, cancelled,
         )?;
         let _old_duct = core::mem::replace(&mut self.duct, duct);
         let _old_state = core::mem::replace(state, next);

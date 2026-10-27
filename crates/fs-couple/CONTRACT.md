@@ -7715,3 +7715,26 @@ and kinetics use endpoint evaluation with midpoint mechanical kinematics,
 generally first order. Arbitrary spatial flow/flames, shared crank mechanics,
 material-network wiring of this coupled policy and a complete wall-entropy
 model remain outside this increment. Broad gas/thermal beads remain open.
+
+
+### Regional atmosphere updates on continuing material walls
+
+Both `MaterialWallDg` and `RegionalMaterialWallDg` expose
+`rebind_spatial_viscothermal_gas_field_controlled`. The shared preparation path
+uses the original spatial gas-memory transfer, retains all wall material
+assignments and physical histories, rebuilds the original propagator at its
+existing timestep and tolerance, then publishes field, state and propagator
+together. Complete gas catalogs, actual local composition/temperature/pressure
+and new port coefficients survive; the inlet does not stand in for the field.
+The native weak-coordinate/arm conservation and external parameter-work scope
+are specified in the fs-duct contract. No background thermal/species transport
+or mean-pressure wall-prestress update is inferred.
+
+A focused source regression definition changes the outlet atmosphere while
+holding the inlet fixed, continues native pressure and regional wall motion,
+checks the same clock and retained source catalogs, and exercises both wall
+source layouts plus late cancellation and stale-propagator refusal. Syntax
+parsing and source/API review passed; native Rust execution was unavailable in
+this environment, so this is not a passing native or experimental result.
+Focused native command:
+`cargo test -p fs-couple --test material_duct_wall spatial::gas_regional_live`.

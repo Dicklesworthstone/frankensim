@@ -22,6 +22,8 @@ mod maxwell_live;
 mod gas_live;
 #[path = "spatial/gas_viscothermal.rs"]
 mod gas_viscothermal;
+#[path = "spatial/gas_regional_live.rs"]
+mod gas_regional_live;
 
 fn composition(fraction: f64) -> Composition {
     Composition::new(

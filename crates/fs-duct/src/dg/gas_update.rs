@@ -27,14 +27,14 @@ pub struct DgGasMaterialUpdate {
 fn invalid(what: &'static str) -> DuctError {
     DuctError::BadParameter { what }
 }
-fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), DuctError> {
+pub(super) fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), DuctError> {
     if cancelled() {
         Err(DuctError::Cancelled { completed_steps: 0 })
     } else {
         Ok(())
     }
 }
-fn scaled(value: f64, factor: f64) -> Result<f64, DuctError> {
+pub(super) fn scaled(value: f64, factor: f64) -> Result<f64, DuctError> {
     let next = value * factor;
     if !next.is_finite() || (value != 0.0 && next == 0.0) {
         return Err(invalid(
@@ -43,7 +43,7 @@ fn scaled(value: f64, factor: f64) -> Result<f64, DuctError> {
     }
     Ok(next)
 }
-fn energy(values: &[f64]) -> f64 {
+pub(super) fn energy(values: &[f64]) -> f64 {
     0.5 * values.iter().map(|x| x * x).sum::<f64>()
 }
 

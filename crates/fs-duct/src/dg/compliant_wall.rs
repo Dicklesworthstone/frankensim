@@ -30,7 +30,8 @@ pub(super) struct CompliantWall {
     displacement_scale: f64,
     velocity_scale: f64,
     // Nonuniform gas cannot supply wall inertia through its pressure mass.
-    // These geometric maps recover physical velocity from wall energy coordinates.
+    // Retained maps and explicit wall scales recover physical velocity from
+    // wall energy coordinates without following future gas-mass changes.
     physical_velocity_maps: Option<Vec<Vec<f64>>>,
     relaxation: Vec<WallRelaxationBranch>,
 }
@@ -91,6 +92,19 @@ fn coordinate_error(error: CoordinateError) -> DuctError {
 }
 
 impl CompliantWall {
+    /// Retain the physical interpretation of unchanged structural coordinates
+    /// when the GAS mass ceases to be proportional to its old uniform value.
+    /// Existing geometric maps already have this property. The uniform route
+    /// used the old pressure inverse root with explicit wall scales; retain
+    /// that exact map and those scales, never the replacement pressure map.
+    pub(super) fn retain_physical_observation_maps(&mut self, elements: &[DgElement]) {
+        if self.physical_velocity_maps.is_none() {
+            self.physical_velocity_maps = Some(
+                elements.iter().map(|element| element.mp_inv_sqrt.clone()).collect(),
+            );
+        }
+    }
+
     /// The retained wall coordinates use the geometric Gram root and do not
     /// change with uniform gas. Its physical observation uses Mp^(-1/2), so
     /// compensate that map's sqrt(B_new/B_old) change exactly once here.

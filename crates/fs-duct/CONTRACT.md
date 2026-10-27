@@ -1301,3 +1301,49 @@ Bounded independent source/API/physical-account review found no concrete
 defect. The reconstructed final Rust sources/tests received whitespace and
 source checks but could not be parsed, compiled or numerically executed
 after the executor became unavailable.
+
+
+### Live regional viscothermal gas-state transfer
+
+`DgDuct::rebind_spatial_viscothermal_gas_field` updates the existing spatial
+viscothermal owner at the original element boundaries, basis, Gauss points,
+radii and native Jacobi-arm support. The complete replacement `AxialGasField`
+feeds the original gas-mass, local Bessel, matched-boundary and pressure-port
+assemblies. Every new quadrature state retains the original band/error admission.
+The uniform exact-mass transfer API keeps its separate existing rules.
+
+The main conserved quantities are the weak coordinates `Mp*p` and `Mq*q`.
+For `x=M^(1/2)u`, the transfer is
+`x_new=M_new^(-1/2) M_old^(1/2) x_old`; the roots need not commute.
+This does not claim exact pointwise conservation under unresolved spatial
+variation. Each fixed physical diffusion section separately preserves its
+viscous momentum or thermal compression volume. Gas-independent Jacobi weights
+cancel from the old/new scalar arm storage-root ratio. Main and ALL diffusion
+storage changes enter one signed external parameter-work account, without
+subtracting unchanged large structural storage or advancing the physical clock.
+
+Original structural displacement, velocity and regional Maxwell coordinates
+remain unchanged. Reciprocal pressure/wall coupling is transformed with the
+same pressure map and its opposite transpose; physical wall observation retains
+its original geometric map. Rebuilding the gas must not reinterpret those
+unchanged wall coordinates with the new gas mass root. The state keeps its
+initial energy and prior work/loss history, and receives the new operator
+identity and current physical pressure/flow.
+
+Changed element subdivision, quadrature/pole/thermal support, invalid source
+states, unresolved band, stale state, excessive/unrepresentable parameter work
+and cancellation refuse before publication. The source owner prescribing the
+background update owes the recorded work. This is not a mean-flow,
+thermochemical heat/species evolution, pressure-prestress, remeshing or history
+projection model.
+
+Two focused native regression definitions independently integrate weak
+compression/momentum and main energy at 32 Gauss points; check every physical
+arm's stored quantity and energy, noncommuting roots, current-pressure wall
+force, dissipation and continuing motion; and exercise uniform/spatial
+observation retention and late refusal rollback. Changed source and test files
+passed Rust syntax parsing and source/API review in the implementation
+environment. Native compilation and execution were unavailable (no Rust/Cargo,
+DSR or RCH); these definitions are not executed or experimental evidence.
+Focused native command:
+`cargo test -p fs-duct --lib dg::viscothermal::spatial::update::tests`.

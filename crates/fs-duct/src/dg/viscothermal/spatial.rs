@@ -14,6 +14,8 @@
 use super::*;
 use fs_phs::{MAX_ZK_DIFFUSIVE_POLES, ZkDiffusive, ZkDiffusiveTerm};
 
+mod update;
+
 /// Independent wall diffusion and spatial-integration resolution axes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DgWallResolution {
@@ -46,6 +48,12 @@ pub struct DgWallAdmission {
 #[derive(Debug, Clone)]
 struct WallChannel {
     field_start: usize,
+    /// Original physical quadrature point and radius identify a fixed section.
+    point_m: f64,
+    radius_m: f64,
+    /// sqrt(w*m) for viscous inertia; sqrt(w*m*(gamma-1)) for thermal
+    /// compliance. The retained dimensionless Jacobi weight is gas-independent.
+    storage_root: f64,
     /// sqrt(w*m) M^(-1/2) phi; m is C0 or L0, not a damping fit.
     projection: Vec<f64>,
     drag_per_s: f64,
@@ -74,7 +82,9 @@ impl DgDuct {
     /// For uniform gas/radius, with_viscothermal remains the exact-mass shortcut;
     /// this explicit spatial route uses quadrature even in that limit.
     ///
-    /// The gas field is frozen; walls are rigid and isothermal. The local
+    /// Between prescribed material updates the gas field is frozen; walls are
+    /// rigid and isothermal. rebind_spatial_viscothermal_gas_field continues
+    /// these native histories at a new admitted background state. The local
     /// cylindrical ZK law does not provide mean flow, finite wall temperature,
     /// spherical-cone corrections, molecular relaxation or a 3-D solution.
     /// All memories start at zero when an acoustic initial state is projected.
@@ -198,6 +208,11 @@ impl DgDuct {
                             invalid("DG wall quadrature mass is not positive and finite").into(),
                         );
                     }
+                    let storage_root = det::sqrt(mass)
+                        * if is_pressure { det::sqrt(gas.gamma - 1.0) } else { 1.0 };
+                    if !storage_root.is_finite() || storage_root <= 0.0 {
+                        return Err(invalid("DG wall physical arm storage is unrepresentable").into());
+                    }
                     let inverse = if is_pressure {
                         &element.mp_inv_sqrt
                     } else {
@@ -216,6 +231,9 @@ impl DgDuct {
                     }
                     channels.push(WallChannel {
                         field_start: e * local + if is_pressure { 0 } else { self.field_dofs },
+                        point_m: x,
+                        radius_m: radius,
+                        storage_root,
                         projection,
                         drag_per_s: drag,
                         terms: terms.to_vec(),
