@@ -96,6 +96,45 @@ made. The focused `material_free_surface_enthalpy` tests exercise actual
 interface conversion, material-only viscosity changes, heat conservation and
 atomic physical/source-domain refusals.
 
+### Finite solid heat exchange with moving liquid
+
+With `enthalpy-coupling`, `step_with_body_conduction` adds source-bound
+`FreeSurfaceThermalBody` cells to the existing moving-liquid thermal timeline.
+Each body keeps finite mass and specific enthalpy from its original immutable
+caloric chart. Its scalar conductivity is resolved at the same current
+temperature, with the initial source claim pinned throughout its lifetime.
+Changing material data changes the actual contact heat, subsequent liquid
+viscosity/buoyancy and native VOF populations.
+
+Explicit `FreeSurfaceBodyContact` patches must join a positive liquid cell to
+a face-adjacent permanent solid tile or outer domain wall. Inactive gas tiles
+cannot become thermal solids. Contact area, liquid/solid centroid distances
+and stationary solid geometry are caller-supplied physical data; each native
+wall face occurs once. The original thermal owner checks total surface
+coverage and applies the two material half-cell resistances in series to both
+the heat exchange and CFL bound. Undeclared surfaces remain insulated. Contact
+resistance is explicitly neglected, not inferred from the material names.
+
+Solid and liquid storage share the SAME substeps. Their exchange is internal
+in the combined thermal audit; `flow.body_heat_j` records the signed transfer
+into the liquid, separately from external and molecular heat. The corresponding
+body report exposes both finite stores and the combined balance defect. The
+viscous-heating entry point composes the original molecular source with this
+same timeline. After thermal advancement, the original native mass routes
+transport liquid enthalpy. All material, thermal, native flow, conservation,
+budget and cancellation checks precede publishing either participant.
+
+This remains a first-order thermal/flow split with fixed solid geometry and
+constant caloric density, pure liquid, stationary native walls and neglected
+capillarity. Solid cells refuse melting because this adapter supplies no
+mechanical phase handoff. It is a finite-volume/uniform-cell model, not a new
+mechanical solver, inferred wall geometry, interface-resistance model or
+experimental validation. Focused tests in
+`tests/material_free_surface_enthalpy/conduction/body.rs` compare independent
+two-material heat/storage calculations, data-only substitutions and exact
+insulation reduction; they also exercise source/cancellation and late native
+flow refusals of the complete solid/liquid transaction.
+
 ## Public types and semantics
 
 - D2Q9 constants: `Q` (9), `CS2` (`1/3`), `MACH_LIMIT` (`0.3`).

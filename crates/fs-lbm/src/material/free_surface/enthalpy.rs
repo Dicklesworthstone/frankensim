@@ -93,7 +93,10 @@ pub struct FreeSurfaceEnthalpyReport {
     /// Constitutive molecular stress work converted into heat [J]. Zero for
     /// steps that do not explicitly select the viscous-heating entry point.
     pub viscous_heat_j: f64,
-    /// `H_after - H_before - external_heat - viscous_heat` [J]. No balancing
+    /// Signed heat received from explicitly coupled finite solid cells [J].
+    /// This is internal exchange when the accounting boundary includes them.
+    pub body_heat_j: f64,
+    /// `H_after - H_before - external_heat - viscous_heat - body_heat` [J]. No balancing
     /// heat or numerical kinetic-energy residual is added.
     pub balance_defect_j: f64,
     /// True residual returned by the existing sparse solver.
@@ -111,6 +114,8 @@ pub enum FreeSurfaceEnthalpyError {
     Flow(MaterialLbmError),
     /// Original source query refusal, including pinned-claim support.
     Material(MaterialStatePointError),
+    /// Original finite-body material/temperature binding refused.
+    ThermalMaterial(fs_material::thermal::source::ThermalMaterialError),
     /// Original caloric chart refusal; no temperature extrapolation occurs.
     Phase(PhaseStateError),
     /// The existing sparse transport solver refused.
@@ -127,6 +132,7 @@ impl core::fmt::Display for FreeSurfaceEnthalpyError {
         match self {
             Self::Flow(e) => write!(f, "free-surface enthalpy: {e}"),
             Self::Material(e) => write!(f, "free-surface enthalpy source: {e}"),
+            Self::ThermalMaterial(e) => write!(f, "free-surface thermal body: {e}"),
             Self::Phase(e) => write!(f, "free-surface enthalpy chart: {e}"),
             Self::Solve(e) => write!(f, "free-surface enthalpy solve: {e}"),
             #[cfg(feature = "enthalpy-coupling")]
@@ -149,6 +155,11 @@ impl From<FreeSurfaceError3> for FreeSurfaceEnthalpyError {
 impl From<MaterialStatePointError> for FreeSurfaceEnthalpyError {
     fn from(e: MaterialStatePointError) -> Self {
         Self::Material(e)
+    }
+}
+impl From<fs_material::thermal::source::ThermalMaterialError> for FreeSurfaceEnthalpyError {
+    fn from(e: fs_material::thermal::source::ThermalMaterialError) -> Self {
+        Self::ThermalMaterial(e)
     }
 }
 impl From<PhaseStateError> for FreeSurfaceEnthalpyError {
@@ -359,7 +370,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         gate: &CancelGate,
     ) -> Result<FreeSurfaceEnthalpyReport, Error> {
         let (heated, external, absolute_heat) = self.prepare_heat(heat, gate)?;
-        self.advance_prepared_enthalpy(heated, external, 0.0, absolute_heat, gate)
+        self.advance_prepared_enthalpy(heated, external, 0.0, 0.0, absolute_heat, gate)
     }
 
     fn prepare_heat(
@@ -397,7 +408,11 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         if !external.is_finite() {
             return Err(Error::Invalid("total supplied heat overflows"));
         }
-        Ok((heated, external, heat.iter().map(|q| q.energy_j.abs()).sum()))
+        Ok((
+            heated,
+            external,
+            heat.iter().map(|q| q.energy_j.abs()).sum(),
+        ))
     }
 
     // Both external heating and source-conductivity exchange feed the exact
@@ -408,6 +423,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         heated: BTreeMap<MassLocation3, f64>,
         external: f64,
         viscous: f64,
+        body_heat: f64,
         absolute_heat: f64,
         gate: &CancelGate,
     ) -> Result<FreeSurfaceEnthalpyReport, Error> {
@@ -435,7 +451,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         let endpoint_masses = lattice.mass_snapshot();
         admit_masses(&endpoint_masses, self.controls.max_cells)?;
         let after = total(&endpoint_masses, &h, mass_unit)?;
-        let defect = after - before - external - viscous;
+        let defect = after - before - external - viscous - body_heat;
         let scale = absolute_total(&masses, &self.h, mass_unit)?
             + absolute_total(&endpoint_masses, &h, mass_unit)?
             + absolute_heat;
@@ -459,6 +475,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             enthalpy_after_j: after,
             external_heat_j: external,
             viscous_heat_j: viscous,
+            body_heat_j: body_heat,
             balance_defect_j: defect,
             relative_transport_residual: outcome.relative_residual,
             transport_iterations: outcome.iterations,

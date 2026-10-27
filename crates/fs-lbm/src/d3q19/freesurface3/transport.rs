@@ -99,6 +99,18 @@ mod viscous_tests {
 }
 
 impl FreeSurface3 {
+    /// Permanent mechanical wall, not an inactive tile that can later be gas.
+    /// Thermal contacts must not turn an absent liquid neighbor into a solid.
+    pub(crate) fn transport_wall_at(&self, coordinates: [i64; 3]) -> bool {
+        let (nx, ny, nz) = self.grid.tile_dims();
+        let extents = [nx * TILE, ny * TILE, nz * TILE];
+        if coordinates.iter().zip(extents).any(|(&p, n)| p < 0 || p >= n as i64) {
+            return true;
+        }
+        let [x, y, z] = coordinates.map(|p| (p as usize / TILE) as u32);
+        self.solid.contains(&morton3(x, y, z))
+    }
+
     /// Accepted molecular strain rate in lattice inverse-time units. Carry
     /// has no resolved velocity/stress and must never be thermalized as a cell.
     pub(crate) fn transport_shear_rate(

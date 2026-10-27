@@ -40,7 +40,10 @@ pub struct FreeSurfaceViscousConductionReport {
 }
 
 impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
-    fn viscous_sources(&self, gate: &CancelGate) -> Result<Vec<FreeSurfaceViscousCell>, Error> {
+    pub(super) fn viscous_sources(
+        &self,
+        gate: &CancelGate,
+    ) -> Result<Vec<FreeSurfaceViscousCell>, Error> {
         poll(gate)?;
         let masses = self.flow.lattice.mass_snapshot();
         admit_masses(&masses, self.controls.max_cells)?;
@@ -138,6 +141,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             heated,
             external,
             viscous,
+            0.0,
             absolute_heat + viscous,
             gate,
         )?;

@@ -14,6 +14,14 @@ use fs_conduction::enthalpy::{
     ThermalLaw, ThermalLink, TimedEvent, series_conductance_w_k,
 };
 
+/// Finite source-bound solid cells exchanging heat with native stationary walls.
+pub mod body;
+pub use body::{
+    FreeSurfaceBodyContact, FreeSurfaceBodyContactSample, FreeSurfaceBodyExchange,
+    FreeSurfaceThermalBody,
+};
+use fs_material::state_point::ResolvedMaterialStatePoint;
+
 /// Actual wet geometry of one face at the beginning of this flow step.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FreeSurfaceConductionFace {
@@ -56,6 +64,8 @@ pub struct FreeSurfaceConductionReport {
     pub last_applied: Vec<FreeSurfaceConductionSample>,
     /// Source-supported thermal endpoint BEFORE the subsequent VOF advection.
     pub thermal_endpoint: Vec<FreeSurfaceConductionSample>,
+    /// Present only when finite solid cells participate in this timeline.
+    pub bodies: Option<FreeSurfaceBodyExchange>,
 }
 
 fn checkpoint(gate: &CancelGate) -> Result<(), DepositionError> {
@@ -74,9 +84,23 @@ struct Conduction<'a, 'm> {
     buoyancy: Option<BoussinesqLiquid>,
     faces: &'a [FreeSurfaceConductionFace],
     endpoints: Vec<[CellId; 2]>,
+    liquid_cells: Vec<CellId>,
+    bodies: &'a [FreeSurfaceThermalBody<'m>],
+    body_ids: Vec<CellId>,
+    contacts: &'a [FreeSurfaceBodyContact],
+    contact_endpoints: Vec<(CellId, usize)>,
     powers: BTreeMap<CellId, f64>,
     last: Vec<FreeSurfaceConductionSample>,
     endpoint: Vec<FreeSurfaceConductionSample>,
+    body_last: Vec<FreeSurfaceBodyContactSample>,
+    body_endpoint: Vec<FreeSurfaceBodyContactSample>,
+    body_states_endpoint: Vec<ResolvedMaterialStatePoint>,
+}
+
+struct Samples {
+    liquid: Vec<FreeSurfaceConductionSample>,
+    contacts: Vec<FreeSurfaceBodyContactSample>,
+    bodies: Vec<ResolvedMaterialStatePoint>,
 }
 
 impl Conduction<'_, '_> {
@@ -84,10 +108,11 @@ impl Conduction<'_, '_> {
         &self,
         thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<Vec<FreeSurfaceConductionSample>, Error> {
+    ) -> Result<Samples, Error> {
         let mut states = BTreeMap::new();
-        for (&id, cell) in thermal.cells() {
+        for &id in &self.liquid_cells {
             check()?;
+            let cell = &thermal.cells()[&id];
             let (state, _) = resolve_liquid(
                 self.law,
                 self.caloric,
@@ -112,7 +137,38 @@ impl Conduction<'_, '_> {
                 conductance_w_k,
             });
         }
-        Ok(samples)
+        let mut bodies = Vec::with_capacity(self.bodies.len());
+        for (body, &id) in self.bodies.iter().zip(&self.body_ids) {
+            check()?;
+            bodies.push(body.resolve(thermal.cells()[&id].specific_h_j_kg)?);
+        }
+        let mut contacts = Vec::with_capacity(self.contacts.len());
+        for (&contact, &(liquid_id, body_index)) in
+            self.contacts.iter().zip(&self.contact_endpoints)
+        {
+            check()?;
+            let liquid = states[&liquid_id].clone();
+            let body = bodies[body_index].clone();
+            let conductance_w_k = series_conductance_w_k(
+                contact.area_m2,
+                contact.distances_m,
+                [
+                    liquid.thermal_conductivity_w_m_k(),
+                    self.bodies[body_index].conductivity(&body),
+                ],
+            )?;
+            contacts.push(FreeSurfaceBodyContactSample {
+                contact,
+                liquid,
+                body,
+                conductance_w_k,
+            });
+        }
+        Ok(Samples {
+            liquid: samples,
+            contacts,
+            bodies,
+        })
     }
 }
 
@@ -137,13 +193,19 @@ impl DepositionObserver for Conduction<'_, '_> {
         thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<u64, f64>, Error> {
-        self.last = self.sample(thermal, check)?;
-        Ok(self
+        let samples = self.sample(thermal, check)?;
+        self.last = samples.liquid;
+        self.body_last = samples.contacts;
+        let mut values: BTreeMap<_, _> = self
             .last
             .iter()
             .enumerate()
             .map(|(i, s)| (i as u64, s.conductance_w_k))
-            .collect())
+            .collect();
+        for (i, sample) in self.body_last.iter().enumerate() {
+            values.insert((self.faces.len() + i) as u64, sample.conductance_w_k);
+        }
+        Ok(values)
     }
 
     fn step(
@@ -155,7 +217,10 @@ impl DepositionObserver for Conduction<'_, '_> {
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), Error> {
         // Admit all accepted thermal substeps, including isolated heated cells.
-        self.endpoint = self.sample(thermal, check)?;
+        let samples = self.sample(thermal, check)?;
+        self.endpoint = samples.liquid;
+        self.body_endpoint = samples.contacts;
+        self.body_states_endpoint = samples.bodies;
         Ok(())
     }
 }
@@ -199,9 +264,24 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         viscous: &[viscous::FreeSurfaceViscousCell],
         gate: &CancelGate,
     ) -> Result<FreeSurfaceConductionReport, Error> {
+        self.advance_with_thermal_bodies(faces, heat, controls, viscous, &mut [], &[], gate)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_with_thermal_bodies(
+        &mut self,
+        faces: &[FreeSurfaceConductionFace],
+        heat: &[FreeSurfaceCellHeat],
+        controls: FreeSurfaceConductionControls,
+        viscous: &[viscous::FreeSurfaceViscousCell],
+        bodies: &mut [FreeSurfaceThermalBody<'_>],
+        contacts: &[FreeSurfaceBodyContact],
+        gate: &CancelGate,
+    ) -> Result<FreeSurfaceConductionReport, Error> {
         poll(gate)?;
         if controls.maximum_faces > self.controls.max_mass_routes
-            || faces.len() > controls.maximum_faces
+            || faces.len().saturating_add(contacts.len()) > controls.maximum_faces
+            || bodies.len() > self.controls.max_cells
             || heat.len() > self.controls.max_cells
             || controls.maximum_substeps == 0
             || controls.maximum_substeps > 1_000_000
@@ -278,6 +358,35 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 "liquid conduction needs positive located cell mass",
             ));
         }
+        if ids.len().saturating_add(bodies.len()) > self.controls.max_cells {
+            return Err(Error::Invalid(
+                "combined solid/liquid thermal cell budget exhausted",
+            ));
+        }
+        let liquid_cells: Vec<_> = ids.values().copied().collect();
+        let mut materials = vec![(MaterialId(0), self.caloric as &dyn ThermalLaw)];
+        let mut body_by_id = BTreeMap::new();
+        let mut body_ids = Vec::with_capacity(bodies.len());
+        let mut body_before = 0.0;
+        for (i, body) in bodies.iter().enumerate() {
+            poll(gate)?;
+            if body_by_id.insert(body.id(), i).is_some() {
+                return Err(Error::Invalid("finite thermal body ids must be unique"));
+            }
+            body.resolve(body.specific_enthalpy_j_kg())?;
+            let id = CellId((liquid_cells.len() + i) as u64);
+            let material = MaterialId((i + 1) as u64);
+            body_ids.push(id);
+            materials.push((material, body.caloric() as &dyn ThermalLaw));
+            body_before += body.enthalpy_j();
+            events.push(TimedEvent {
+                time_s: 0.0,
+                event: Event::Birth(body.cell(id, material)),
+            });
+        }
+        if !body_before.is_finite() {
+            return Err(Error::Invalid("finite solid enthalpy sum overflows"));
+        }
         let cell_id = |p| -> Result<CellId, Error> {
             let location = self
                 .location_at(p)
@@ -317,6 +426,45 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                     a,
                     b,
                     area_m2: face.area_m2,
+                    conductance_w_k: 0.0,
+                }),
+            });
+        }
+        let mut wall_faces = BTreeSet::new();
+        let mut contact_endpoints = Vec::with_capacity(contacts.len());
+        for (index, &contact) in contacts.iter().enumerate() {
+            poll(gate)?;
+            let a = cell_id(contact.liquid)?;
+            let body = *body_by_id
+                .get(&contact.body_id)
+                .ok_or(Error::Invalid("liquid contact names an absent finite body"))?;
+            let separation = (0..3).fold(0u64, |sum, axis| {
+                sum.saturating_add((contact.liquid[axis] as i64).abs_diff(contact.wall[axis]))
+            });
+            if separation != 1
+                || !self.flow.lattice.transport_wall_at(contact.wall)
+                || !wall_faces.insert((a, contact.wall))
+                || !contact.area_m2.is_finite()
+                || contact.area_m2 < 0.0
+                || contact.area_m2 > area
+                || contact
+                    .distances_m
+                    .iter()
+                    .any(|d| !d.is_finite() || *d <= 0.0)
+                || contact.distances_m[0] > dx
+            {
+                return Err(Error::Invalid(
+                    "solid contact needs one unique adjacent permanent wetted wall face",
+                ));
+            }
+            contact_endpoints.push((a, body));
+            events.push(TimedEvent {
+                time_s: 0.0,
+                event: Event::Contact(ThermalLink {
+                    id: (faces.len() + index) as u64,
+                    a,
+                    b: body_ids[body],
+                    area_m2: contact.area_m2,
                     conductance_w_k: 0.0,
                 }),
             });
@@ -365,7 +513,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         };
         let thermal = DepositionSimulation::new(
             events,
-            &[(MaterialId(0), self.caloric as &dyn ThermalLaw)],
+            &materials,
             DepositionBudget {
                 max_cells: self.controls.max_cells,
                 max_links: controls.maximum_faces,
@@ -382,9 +530,17 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             buoyancy: self.buoyancy,
             faces,
             endpoints,
+            liquid_cells,
+            bodies,
+            body_ids: body_ids.clone(),
+            contacts,
+            contact_endpoints,
             powers,
             last: Vec::new(),
             endpoint: Vec::new(),
+            body_last: Vec::new(),
+            body_endpoint: Vec::new(),
+            body_states_endpoint: Vec::new(),
         };
         let (thermal, observer, audit) =
             thermal.advance_observed(&observer, duration, config, || checkpoint(gate))?;
@@ -398,18 +554,63 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         } else {
             let defect = audit.external_heat_j - external_heat - viscous_heat;
             if !defect.is_finite() || defect.abs() > controls.energy_tolerance_j {
-                return Err(Error::Invalid("authored and molecular liquid heat do not close"));
+                return Err(Error::Invalid(
+                    "authored and molecular liquid heat do not close",
+                ));
             }
             external_heat
         };
+        let mut body_after = 0.0;
+        let mut body_change = 0.0;
+        let mut body_enthalpies = Vec::with_capacity(bodies.len());
+        for (body, &id) in bodies.iter().zip(&body_ids) {
+            poll(gate)?;
+            let h = thermal.cells()[&id].specific_h_j_kg;
+            body_after += body.mass_kg() * h;
+            body_change += body.mass_kg() * (h - body.specific_enthalpy_j_kg());
+            body_enthalpies.push(h);
+        }
+        if !body_after.is_finite() || !body_change.is_finite() {
+            return Err(Error::Invalid("finite solid endpoint enthalpy overflows"));
+        }
+        let body_heat = if bodies.is_empty() { 0.0 } else { -body_change };
+        let body_sources = observer.body_states_endpoint;
+        if body_sources.len() != bodies.len() {
+            return Err(Error::Invalid(
+                "finite solid endpoint source state is incomplete",
+            ));
+        }
+        let body_last = observer.body_last;
+        let body_endpoint = observer.body_endpoint;
+        let last_applied = observer.last;
+        let thermal_endpoint = observer.endpoint;
         let flow = self.advance_prepared_enthalpy(
-            heated, external, viscous_heat, absolute_heat, gate,
+            heated,
+            external,
+            viscous_heat,
+            body_heat,
+            absolute_heat + body_heat.abs(),
+            gate,
         )?;
+        // Flow has passed every endpoint/advection gate; accepting the already
+        // admitted solid candidate is now infallible. No partial thermal commit.
+        for ((body, h), material) in bodies.iter_mut().zip(body_enthalpies).zip(body_sources) {
+            body.accept(h, material);
+        }
+        let body_report = (!bodies.is_empty()).then_some(FreeSurfaceBodyExchange {
+            enthalpy_before_j: body_before,
+            enthalpy_after_j: body_after,
+            heat_to_liquid_j: body_heat,
+            combined_balance_defect_j: flow.balance_defect_j,
+            last_applied: body_last,
+            thermal_endpoint: body_endpoint,
+        });
         Ok(FreeSurfaceConductionReport {
             thermal: audit,
             flow,
-            last_applied: observer.last,
-            thermal_endpoint: observer.endpoint,
+            last_applied,
+            thermal_endpoint,
+            bodies: body_report,
         })
     }
 }
