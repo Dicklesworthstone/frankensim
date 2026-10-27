@@ -3722,7 +3722,7 @@ mod material_plate_tests {
         let domain = ValidityDomain::unconstrained()
             .with("T", 293.15, 293.15)
             .with("omega", 1.0, 10_000.0);
-        let mut properties = orthotropic_properties(450.0, 1.0);
+        let mut properties = orthotropic_properties(450.0, 1.0).to_vec();
         properties.extend(
             PLANE_STRESS_VISCOSITY_PROPERTIES
                 .into_iter()

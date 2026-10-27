@@ -134,7 +134,7 @@ fn g1_finite_source_gas_matches_two_capacity_solution_and_opposite_heat() {
                 maximum_gas_temperature_increment_k: 100.0,
             };
             let input = UniformEnthalpyStepInput {
-                curve: source.caloric.curve(), initial: old.point().caloric_state(),
+                curve: source.caloric.curve(), initial: *old.point().caloric_state(),
                 mass_kg: old.point().mass_kg(), volume_m3: old.point().volume_m3(),
                 surface_area_m2: old.geometry().thermal_surface_m2,
                 internal_heat_j: 4e-4, duration_s: 0.01,
@@ -387,7 +387,7 @@ fn g3_insulation_preserves_original_motion_and_radiation_stays_external() {
         };
         let with_radiation = FiniteGasThermalEnvironment { body: &radiating, ..environment };
         let result = with_radiation.advance(cx, UniformEnthalpyStepInput {
-            curve: source.caloric.curve(), initial: state.point().caloric_state(),
+            curve: source.caloric.curve(), initial: *state.point().caloric_state(),
             mass_kg: state.point().mass_kg(), volume_m3: state.point().volume_m3(),
             surface_area_m2: state.geometry().thermal_surface_m2,
             internal_heat_j: 0.0, duration_s: 0.001,

@@ -163,7 +163,7 @@ mod scalar_tests {
         let values = scalars::<4>(&["1e-300", "1e300", "-2.5", "-0.0"]).unwrap();
         assert_eq!(values, [1e-300_f64, 1e300_f64, -2.5, -0.0]);
         assert!(values[3].is_sign_negative());
-        assert_eq!(scalars::<0>(&[]).unwrap(), []);
+        assert_eq!(scalars::<0>(&[]).unwrap(), [0.0_f64; 0]);
     }
 
     #[test]

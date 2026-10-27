@@ -25,7 +25,7 @@ use super::{
 };
 use fs_duct::{
     Duct, DuctError, DuctResponse, HoleState, LossModel, MouthLoad, OpenHoleFlow, Segment,
-    Termination, WallModel,
+    Termination, WallModel, input_impedance_with_wall_options,
 };
 use fs_material::gas::GasState;
 use fs_phs::WallPin;

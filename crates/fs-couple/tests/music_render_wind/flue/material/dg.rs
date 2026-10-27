@@ -262,4 +262,5 @@ fn rigid_is_exactly_the_original_path_and_invalid_sources_never_default_to_it() 
     );
 }
 
+#[path = "dg/regions.rs"]
 mod regions;

@@ -366,7 +366,7 @@ impl<'a> BoundBrake<'a> {
                 )
                 .map_err(|source| MaterialStatePointError::Support {
                     property: claim.key.name().to_owned(),
-                    source,
+                    source: Box::new(source),
                 })?;
             coordinates.extend(line.knots.into_iter().map(|(coordinate, _)| coordinate));
         }

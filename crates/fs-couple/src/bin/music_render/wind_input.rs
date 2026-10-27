@@ -1,4 +1,5 @@
 //! File-driven wind sources through the shared pressure and WAV owners.
+#[path = "wind_input/attachments.rs"]
 mod attachments;
 use std::io::{Read, Write};
 use std::path::Path;

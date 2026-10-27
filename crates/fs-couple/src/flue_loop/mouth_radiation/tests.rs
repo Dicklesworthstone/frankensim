@@ -222,7 +222,7 @@ fn same_sample_jet_feedback_sees_the_retained_radiation_pressure() {
         history_pressure_pa: 0.02,
     };
     let (step, trial, loss) = v
-        .solve_jet_mouth(boundary, delayed, 1e-4, coefficients)
+        .solve_jet_mouth(boundary, delayed, 1e-4, coefficients, None)
         .unwrap();
     let (_, memory) = v
         .mouth_radiation
