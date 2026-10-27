@@ -135,6 +135,37 @@ two-material heat/storage calculations, data-only substitutions and exact
 insulation reduction; they also exercise source/cancellation and late native
 flow refusals of the complete solid/liquid transaction.
 
+### Environmental gas heat reaches the moving liquid
+
+With `enthalpy-coupling`, `step_with_gas_environment` composes explicitly
+exposed `FreeSurfaceGasContact` patches with the same liquid conduction,
+finite-wall contacts, optional molecular heating and native VOF advance.
+Each patch names a positive-mass liquid cell, an adjacent gas cell, physical
+area, liquid-centroid distance and gas-film thickness. Duplicate faces,
+permanent walls, wet gas neighbors and excessive coverage refuse. Geometry
+must be supplied from the currently accepted interface at every call.
+
+The existing series-conductance owner combines the original liquid k(T) with
+the supplied `ThermochemicalGasModel` conductivity at the mean liquid/bath
+temperature. Its species fractions, NASA9 laws, pressure and transport cards
+remain source-owned data. Every thermal substep and endpoint reevaluates the
+same sources, with the initial film transport claims retained. The thermal
+step bound includes the SUM of gas and internal contact conductances at each
+affected cell. Gas heat changes the actual liquid enthalpy, viscosity and
+native populations; changing the gas data requires no solver-code change.
+
+The gas bath is an explicit external reservoir. Its signed heat appears in
+the environmental report and is already counted once in `external_heat_j`.
+Finite-wall heat stays internal and molecular heating keeps its separate
+account. A late source, thermal, flow, budget or cancellation error publishes
+neither liquid nor wall state. This is a continuum, quasi-steady Fourier-film
+closure and the existing first-order thermal/flow split; it does not derive
+the film thickness, resolve gas convection, evolve finite gas storage, or
+supply evaporation, radiation, rarefied-gas transfer or gas pressure forces.
+Focused tests in `tests/material_free_surface_enthalpy/conduction/environment.rs`
+compare independent layer/storage calculations, data-driven native population
+changes, combined heat accounting, stiff exchange and transactional refusal.
+
 ## Public types and semantics
 
 - D2Q9 constants: `Q` (9), `CS2` (`1/3`), `MACH_LIMIT` (`0.3`).

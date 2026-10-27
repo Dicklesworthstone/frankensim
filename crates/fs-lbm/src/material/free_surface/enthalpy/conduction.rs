@@ -20,6 +20,11 @@ pub use body::{
     FreeSurfaceBodyContact, FreeSurfaceBodyContactSample, FreeSurfaceBodyExchange,
     FreeSurfaceThermalBody,
 };
+/// Source-resolved gas-film exchange on explicitly exposed liquid faces.
+pub mod environment;
+pub use environment::{
+    FreeSurfaceGasContact, FreeSurfaceGasExchange, FreeSurfaceGasFace, FreeSurfaceGasSample,
+};
 use fs_material::state_point::ResolvedMaterialStatePoint;
 
 /// Actual wet geometry of one face at the beginning of this flow step.
@@ -66,6 +71,8 @@ pub struct FreeSurfaceConductionReport {
     pub thermal_endpoint: Vec<FreeSurfaceConductionSample>,
     /// Present only when finite solid cells participate in this timeline.
     pub bodies: Option<FreeSurfaceBodyExchange>,
+    /// Prescribed environmental gas heat, included once in external heat.
+    pub environment: Option<FreeSurfaceGasExchange>,
 }
 
 fn checkpoint(gate: &CancelGate) -> Result<(), DepositionError> {
@@ -95,6 +102,13 @@ struct Conduction<'a, 'm> {
     body_last: Vec<FreeSurfaceBodyContactSample>,
     body_endpoint: Vec<FreeSurfaceBodyContactSample>,
     body_states_endpoint: Vec<ResolvedMaterialStatePoint>,
+    environment: &'a [FreeSurfaceGasContact<'a>],
+    environment_endpoints: Vec<CellId>,
+    environment_last: Vec<FreeSurfaceGasSample>,
+    environment_endpoint: Vec<FreeSurfaceGasSample>,
+    environment_reference: Vec<FreeSurfaceGasSample>,
+    environment_heat_j: f64,
+    environment_absolute_heat_j: f64,
 }
 
 struct Samples {
@@ -181,11 +195,28 @@ impl DepositionObserver for Conduction<'_, '_> {
 
     fn sources(
         &mut self,
-        _: &DepositionSimulation<'_>,
+        thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, Error> {
         check()?;
-        Ok(self.powers.clone())
+        let mut powers = self.powers.clone();
+        self.environment_last = self.sample_environment(thermal, check)?;
+        if self.environment_reference.is_empty() {
+            self.environment_reference = self.environment_last.clone();
+        }
+        for (&id, sample) in self
+            .environment_endpoints
+            .iter()
+            .zip(&self.environment_last)
+        {
+            check()?;
+            if sample.heat_into_liquid_w == 0.0 {
+                continue;
+            }
+            let watts = powers.entry(id).or_insert(0.0);
+            *watts = environment::finite(*watts + sample.heat_into_liquid_w)?;
+        }
+        Ok(powers)
     }
 
     fn conductances(
@@ -208,10 +239,19 @@ impl DepositionObserver for Conduction<'_, '_> {
         Ok(values)
     }
 
+    fn limit_timestep_s(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        proposed_s: f64,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<f64, Error> {
+        self.environment_timestep(thermal, proposed_s, check)
+    }
+
     fn step(
         &mut self,
         _: f64,
-        _: f64,
+        duration_s: f64,
         _: &BTreeMap<CellId, f64>,
         thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
@@ -221,6 +261,14 @@ impl DepositionObserver for Conduction<'_, '_> {
         self.endpoint = samples.liquid;
         self.body_endpoint = samples.contacts;
         self.body_states_endpoint = samples.bodies;
+        self.environment_endpoint = self.sample_environment(thermal, check)?;
+        for sample in &self.environment_last {
+            check()?;
+            let heat = environment::finite(duration_s * sample.heat_into_liquid_w)?;
+            self.environment_heat_j = environment::finite(self.environment_heat_j + heat)?;
+            self.environment_absolute_heat_j =
+                environment::finite(self.environment_absolute_heat_j + heat.abs())?;
+        }
         Ok(())
     }
 }
@@ -278,9 +326,28 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         contacts: &[FreeSurfaceBodyContact],
         gate: &CancelGate,
     ) -> Result<FreeSurfaceConductionReport, Error> {
+        self.advance_with_environment(faces, heat, controls, viscous, bodies, contacts, &[], gate)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_with_environment(
+        &mut self,
+        faces: &[FreeSurfaceConductionFace],
+        heat: &[FreeSurfaceCellHeat],
+        controls: FreeSurfaceConductionControls,
+        viscous: &[viscous::FreeSurfaceViscousCell],
+        bodies: &mut [FreeSurfaceThermalBody<'_>],
+        contacts: &[FreeSurfaceBodyContact],
+        environment: &[FreeSurfaceGasContact<'_>],
+        gate: &CancelGate,
+    ) -> Result<FreeSurfaceConductionReport, Error> {
         poll(gate)?;
         if controls.maximum_faces > self.controls.max_mass_routes
-            || faces.len().saturating_add(contacts.len()) > controls.maximum_faces
+            || faces
+                .len()
+                .saturating_add(contacts.len())
+                .saturating_add(environment.len())
+                > controls.maximum_faces
             || bodies.len() > self.controls.max_cells
             || heat.len() > self.controls.max_cells
             || controls.maximum_substeps == 0
@@ -469,6 +536,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 }),
             });
         }
+        let environment_endpoints = self.admit_environment(environment, &cell_id, dx, gate)?;
         let mut powers = BTreeMap::new();
         let mut absolute_heat = 0.0;
         let mut external_heat = 0.0;
@@ -541,6 +609,13 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             body_last: Vec::new(),
             body_endpoint: Vec::new(),
             body_states_endpoint: Vec::new(),
+            environment,
+            environment_endpoints,
+            environment_last: Vec::new(),
+            environment_endpoint: Vec::new(),
+            environment_reference: Vec::new(),
+            environment_heat_j: 0.0,
+            environment_absolute_heat_j: 0.0,
         };
         let (thermal, observer, audit) =
             thermal.advance_observed(&observer, duration, config, || checkpoint(gate))?;
@@ -549,16 +624,17 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             poll(gate)?;
             heated.insert(location, thermal.cells()[&id].specific_h_j_kg);
         }
-        let external = if viscous.is_empty() {
+        let external = if viscous.is_empty() && environment.is_empty() {
             audit.external_heat_j
         } else {
-            let defect = audit.external_heat_j - external_heat - viscous_heat;
+            let defect =
+                audit.external_heat_j - external_heat - viscous_heat - observer.environment_heat_j;
             if !defect.is_finite() || defect.abs() > controls.energy_tolerance_j {
                 return Err(Error::Invalid(
-                    "authored and molecular liquid heat do not close",
+                    "authored, molecular and environmental liquid heat do not close",
                 ));
             }
-            external_heat
+            external_heat + observer.environment_heat_j
         };
         let mut body_after = 0.0;
         let mut body_change = 0.0;
@@ -584,12 +660,17 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         let body_endpoint = observer.body_endpoint;
         let last_applied = observer.last;
         let thermal_endpoint = observer.endpoint;
+        let environment_report = (!environment.is_empty()).then_some(FreeSurfaceGasExchange {
+            heat_to_liquid_j: observer.environment_heat_j,
+            last_applied: observer.environment_last,
+            thermal_endpoint: observer.environment_endpoint,
+        });
         let flow = self.advance_prepared_enthalpy(
             heated,
             external,
             viscous_heat,
             body_heat,
-            absolute_heat + body_heat.abs(),
+            absolute_heat + body_heat.abs() + observer.environment_absolute_heat_j,
             gate,
         )?;
         // Flow has passed every endpoint/advection gate; accepting the already
@@ -611,6 +692,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             last_applied,
             thermal_endpoint,
             bodies: body_report,
+            environment: environment_report,
         })
     }
 }

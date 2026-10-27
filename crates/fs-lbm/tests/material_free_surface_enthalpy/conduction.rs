@@ -9,6 +9,9 @@ use fs_lbm::material::free_surface::enthalpy::conduction::{
 #[path = "conduction/body.rs"]
 mod body;
 
+#[path = "conduction/environment.rs"]
+mod environment;
+
 const PAIR: [[usize; 3]; 2] = [[3, 3, 3], [4, 3, 3]];
 
 fn conducting_card(scale: f64) -> MaterialCard {

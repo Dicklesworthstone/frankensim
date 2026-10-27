@@ -88,7 +88,8 @@ pub struct FreeSurfaceEnthalpyReport {
     pub enthalpy_before_j: f64,
     /// Extensive liquid enthalpy after the step [J], including carry.
     pub enthalpy_after_j: f64,
-    /// Exactly the sum of the caller's admitted cell heat [J].
+    /// Admitted external cell heat plus any explicitly coupled environmental
+    /// reservoir supply [J]. Internal wall and molecular heat stay separate.
     pub external_heat_j: f64,
     /// Constitutive molecular stress work converted into heat [J]. Zero for
     /// steps that do not explicitly select the viscous-heating entry point.

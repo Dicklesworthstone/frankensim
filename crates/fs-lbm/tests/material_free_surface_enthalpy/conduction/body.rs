@@ -9,7 +9,7 @@ use fs_material::thermal::source::ThermalMaterialPoint;
 
 const WALL_LIQUID: [usize; 3] = [0, 3, 3];
 
-fn wall_card(scale: f64, upper_k: f64) -> MaterialCard {
+pub(super) fn wall_card(scale: f64, upper_k: f64) -> MaterialCard {
     let mut claims = ClaimSet::new();
     claims
         .insert_claim(PropertyClaim {
@@ -50,7 +50,7 @@ fn wall_card(scale: f64, upper_k: f64) -> MaterialCard {
     .unwrap()
 }
 
-fn wall_chart(card: &MaterialCard) -> EquilibriumEnthalpyPhaseCurve {
+pub(super) fn wall_chart(card: &MaterialCard) -> EquilibriumEnthalpyPhaseCurve {
     EquilibriumEnthalpyPhaseCurve::try_single_phase(
         card.content_hash(),
         SolidLiquidPhase::Solid,
@@ -72,7 +72,7 @@ fn wall_chart(card: &MaterialCard) -> EquilibriumEnthalpyPhaseCurve {
     .unwrap()
 }
 
-fn wall<'a>(
+pub(super) fn wall<'a>(
     card: &'a MaterialCard,
     chart: &'a EquilibriumEnthalpyPhaseCurve,
     context: &'a QueryPoint,
@@ -106,7 +106,7 @@ fn wall<'a>(
     .unwrap()
 }
 
-fn contact() -> FreeSurfaceBodyContact {
+pub(super) fn contact() -> FreeSurfaceBodyContact {
     FreeSurfaceBodyContact {
         body_id: 42,
         liquid: WALL_LIQUID,
