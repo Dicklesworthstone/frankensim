@@ -6,6 +6,8 @@
 //! the existing Newton-Krylov owner solves it using the exact discrete tangent.
 
 pub mod reactive;
+/// Shared-snapshot species flow feeding the original elastic-cavity owners.
+pub mod exchange;
 
 use std::cell::{Cell, RefCell};
 

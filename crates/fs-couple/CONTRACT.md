@@ -7907,3 +7907,43 @@ recorded above. Focused command:
 `cargo test -p fs-couple --test material_exchange_network state_tests::coupled`.
 The fixed-topology, independent-wall, closed homogeneous-gas and first-order
 limits of the prepared coupled solver are unchanged.
+
+
+### Finite plumbing and the native elastic-cavity state (MR05/MR06/MR07)
+
+`GasValveMotion::{network_candidate,reactive_thermal_network_candidate,reactive_thermal_network_layers_candidate}`
+compose the original shared-snapshot nozzle/species/enthalpy owner with the
+original mesh/material-derived elastic motion. `ModalGasNetwork` assigns one
+chamber identity and any bounded finite-reservoir plumbing; every inlet and
+outlet samples the same accepted inventories. All transported enthalpy enters
+storage once, including formation reference and flow work. A single endpoint
+inversion policy is required for the chamber's flow and mechanical stages.
+
+The reactive thermal path transfers once, then restarts every original coupled
+heat/chemistry/pressure/motion probe from that same transferred chamber. Heat,
+reaction rates, EOS and structural pressure work use the original simultaneous
+endpoint solver. Thermal source selection remains the original complete gas/body
+law. Anchored volume, modal basis/equilibrium, structural history, observers and
+accepted clock are retained. The candidate returns the chamber, every finite
+reservoir, optional finite body and all original stage reports together.
+
+A fresh extensive balance encloses all final gas inventories, body enthalpy,
+modal storage, original modal loss, actual exterior-pressure work and external
+heat. Stream enthalpy cancels internally; chemical formation energy is never
+added as heat. Source, aggregate donor withdrawal, pressure crossing, local
+nonlinear, final mass/energy and cancellation failures publish no endpoint.
+
+This is a first-order transport-then-coupled-motion composition over one native
+sample, not an implicit flow network. The thermal body's geometry is fixed and
+separate from the source-fixed elastic wall. No jet momentum, flame/shock,
+thermal basis update, phase handoff, exact continuum accuracy or whole-network
+entropy theorem is claimed. The existing thermal entropy report covers only
+the post-flow evolution window. Refine the complete sample at flow events.
+
+Six focused G1/G3/G4 regression definitions compare intake/exhaust against
+independent ideal-nozzle, mixture caloric, isomer-rate, finite heat and six-tet
+modal equations; they cover material/composition changes, reporting-ID
+invariance, closed-flow equality, anchored continuation, late refusal and
+cancellation/retry. Independent scalar references and Rust syntax parsing were
+run in the editing session. Native Rust compilation/tests were not run because
+Rust/Cargo and DSR/RCH were unavailable.

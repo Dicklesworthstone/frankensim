@@ -1,5 +1,6 @@
 //! Finite source gas loads the real elastic modes and shares their volume work.
 mod reactive;
+mod exchange;
 
 use super::*;
 use fs_couple::cavity_phs::modal::{GasValveMotion, ModalGasError, ModalGasSolve};
