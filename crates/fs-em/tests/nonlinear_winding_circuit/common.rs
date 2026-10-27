@@ -32,34 +32,34 @@ pub fn source(saturating: bool, sigma: f64) -> MaterialCard {
 }
 
 pub fn problem(card: &MaterialCard, depth: f64) -> PlanarNonlinearMagnetostatics {
-    material::problem(
-        card,
-        TriComplex2::from_indexed_triangles(
-            "two-square-stranded-magnetic-section",
-            vec![
-                [0.0, 0.0],
-                [1.0, 0.0],
-                [2.0, 0.0],
-                [0.0, 1.0],
-                [1.0, 1.0],
-                [2.0, 1.0],
-                [0.5, 0.5],
-                [1.5, 0.5],
-            ],
-            vec![
-                [0, 1, 6],
-                [1, 4, 6],
-                [4, 3, 6],
-                [3, 0, 6],
-                [1, 2, 7],
-                [2, 5, 7],
-                [5, 4, 7],
-                [4, 1, 7],
-            ],
-            Metric2::planar(depth).unwrap(),
-        )
-        .unwrap(),
+    material::problem(card, mesh(depth))
+}
+pub fn mesh(depth: f64) -> TriComplex2 {
+    TriComplex2::from_indexed_triangles(
+        "two-square-stranded-magnetic-section",
+        vec![
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 1.0],
+            [2.0, 1.0],
+            [0.5, 0.5],
+            [1.5, 0.5],
+        ],
+        vec![
+            [0, 1, 6],
+            [1, 4, 6],
+            [4, 3, 6],
+            [3, 0, 6],
+            [1, 2, 7],
+            [2, 5, 7],
+            [5, 4, 7],
+            [4, 1, 7],
+        ],
+        Metric2::planar(depth).unwrap(),
     )
+    .unwrap()
 }
 pub fn boundary() -> Vec<(usize, f64)> {
     (0..6).map(|v| (v, 0.0)).collect()

@@ -8,9 +8,11 @@
 //! Energy is NOT H*B/2 or midpoint-H work. For the source-integrated convex
 //! energy psi, D = H_next.(B_next-B_old) - (psi_next-psi_old) is the nonnegative
 //! backward-Euler numerical dissipation. Delta psi + Joule heat + D = source
-//! work. D is reported separately and must NEVER be deposited as material heat.
-//! This is first-order fixed-geometry, fixed-law, isotropic reversible MQS;
-//! no hysteresis, remanence, moving geometry or magnetic parameter work.
+//! work for a fixed law. A source-pinned linear mu(T) refresh adds explicit
+//! parameter work P=psi_next(B_old)-psi_old(B_old), so delta psi + heat + D
+//! equals source work + P. D is never material heat; a thermal owner must close
+//! P and the field entropy. Nonlinear H(B) laws remain fixed. This is first-order
+//! fixed-geometry isotropic reversible MQS, without hysteresis or remanence.
 
 use super::{
     Conduction, EddyCellHeat, EddyConductor, EddyControls, EddyError, EddyHeat, EddySection,
@@ -25,11 +27,16 @@ use crate::planar::{
         PositiveQuadratic,
     },
 };
+use fs_feec::weighted::WeightedAssemblyLimits;
 use fs_material::{
-    field_storage::{admit_fixed_magnetic_refresh, linear_magnetic_permeability},
+    field_storage::{
+        admit_fixed_magnetic_refresh, admit_magnetic_temperature_refresh,
+        linear_magnetic_permeability,
+    },
     state_point::ResolvedMaterialStatePoint,
 };
 use fs_rep_mesh::TriComplex2;
+use std::{ops::Deref, sync::Arc};
 
 /// Physical accounting allowances and the shared bounded nonlinear solve.
 #[derive(Clone, Copy, Debug)]
@@ -126,10 +133,56 @@ impl PositiveQuadratic for BackwardConduction<'_> {
     }
 }
 
-/// Immutable accepted A/current/time history, retaining the original source law.
+#[derive(Clone)]
+enum MagneticOwner<'m> {
+    Borrowed(&'m PlanarNonlinearMagnetostatics),
+    Owned(Arc<PlanarNonlinearMagnetostatics>),
+}
+impl Deref for MagneticOwner<'_> {
+    type Target = PlanarNonlinearMagnetostatics;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Borrowed(problem) => problem,
+            Self::Owned(problem) => problem,
+        }
+    }
+}
+
+/// Preserve every original source and law kind. Nonlinear magnetic entropy
+/// requires additional constitutive data, so only linear regions may change.
+pub(crate) fn admit_material_refresh(
+    before: &[IsotropicMagneticMaterial],
+    after: &[IsotropicMagneticMaterial],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), NonlinearEddyError> {
+    if before.len() != after.len() {
+        return Err(
+            EddyError::Invalid("complete original magnetic correspondence required").into(),
+        );
+    }
+    for (before, after) in before.iter().zip(after) {
+        poll(cancelled)?;
+        match (before, after) {
+            (IsotropicMagneticMaterial::Linear(a), IsotropicMagneticMaterial::Linear(b)) => {
+                admit_magnetic_temperature_refresh(a, b).map_err(EddyError::from)?;
+            }
+            (
+                IsotropicMagneticMaterial::Reversible(a),
+                IsotropicMagneticMaterial::Reversible(b),
+            ) if a == b => {}
+            _ => return Err(EddyError::Invalid(
+                "temperature refresh preserves linear sources and complete fixed nonlinear laws",
+            )
+            .into()),
+        }
+    }
+    Ok(())
+}
+
+/// Immutable accepted A/current/time history, retaining the original sources.
 #[derive(Clone)]
 pub struct PlanarNonlinearEddy<'m> {
-    problem: &'m PlanarNonlinearMagnetostatics,
+    problem: MagneticOwner<'m>,
     conductors: Vec<EddyConductor>,
     insulators: Vec<usize>,
     boundary: Vec<(usize, f64)>,
@@ -150,6 +203,9 @@ pub struct NonlinearEddyMagneticCell {
     pub free_energy_j: [f64; 2],
     /// Convex Bregman loss of backward Euler; not physical heat.
     pub numerical_dissipation_j: f64,
+    /// Signed psi_next(B_old)-psi_old(B_old) at fixed original flux density.
+    /// Neither Joule heat nor external impressed-current work.
+    pub parameter_work_j: f64,
 }
 #[derive(Clone, Debug)]
 pub struct NonlinearEddyStep {
@@ -163,7 +219,9 @@ pub struct NonlinearEddyStep {
     pub supplied_work_j: f64,
     /// Nonnegative first-order time-discretization loss; never material heat.
     pub numerical_dissipation_j: f64,
-    /// Delta stored + heat + numerical dissipation - supplied work.
+    /// Sum of source-resolved material work; a thermal/external owner must close it.
+    pub parameter_work_j: f64,
+    /// Delta stored + heat + numerical dissipation - supplied work - parameter work.
     pub energy_residual_j: f64,
     pub region_currents_a: Vec<(u32, f64)>,
     /// Recomputed full nonlinear induction residual, including C_sigma/dt.
@@ -277,7 +335,7 @@ impl<'m> PlanarNonlinearEddy<'m> {
         )?;
         poll(cancelled)?;
         Ok(Self {
-            problem,
+            problem: MagneticOwner::Borrowed(problem),
             conductors,
             insulators: insulating_triangles.to_vec(),
             boundary: boundary.to_vec(),
@@ -290,8 +348,8 @@ impl<'m> PlanarNonlinearEddy<'m> {
             report: initial.report().clone(),
         })
     }
-    pub fn problem(&self) -> &'m PlanarNonlinearMagnetostatics {
-        self.problem
+    pub fn problem(&self) -> &PlanarNonlinearMagnetostatics {
+        &self.problem
     }
     pub fn conductors(&self) -> &[EddyConductor] {
         &self.conductors
@@ -316,7 +374,7 @@ impl<'m> PlanarNonlinearEddy<'m> {
     pub fn field(
         &self,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<PlanarNonlinearField<'m>, NonlinearEddyError> {
+    ) -> Result<PlanarNonlinearField<'_>, NonlinearEddyError> {
         Ok(self
             .problem
             .recover(self.potential_wb_m.clone(), self.report.clone(), cancelled)?)
@@ -335,6 +393,58 @@ impl<'m> PlanarNonlinearEddy<'m> {
         limits: NonlinearEddyControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PlanarNonlinearEddyCandidate<'m>, NonlinearEddyError> {
+        self.step_with_owner(
+            target_s,
+            self.problem.clone(),
+            conductors,
+            impressed_jz_a_m2,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Reassemble the original geometry with source-pinned linear mu(T), while
+    /// retaining accepted A and the original field-energy reference. The full
+    /// nonlinear H(B) entries stay unchanged. Endpoints include signed material
+    /// work; this operation does not identify that work with physical heating.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_materials_candidate(
+        &self,
+        target_s: f64,
+        materials: Vec<IsotropicMagneticMaterial>,
+        conductors: Vec<EddyConductor>,
+        impressed_jz_a_m2: &[f64],
+        assembly: WeightedAssemblyLimits,
+        limits: NonlinearEddyControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PlanarNonlinearEddyCandidate<'m>, NonlinearEddyError> {
+        poll(cancelled)?;
+        admit_material_refresh(self.problem.materials(), &materials, cancelled)?;
+        let problem = PlanarNonlinearMagnetostatics::new(
+            self.problem.mesh().clone(),
+            materials,
+            assembly,
+            cancelled,
+        )?;
+        self.step_with_owner(
+            target_s,
+            MagneticOwner::Owned(Arc::new(problem)),
+            conductors,
+            impressed_jz_a_m2,
+            limits,
+            cancelled,
+        )
+    }
+
+    fn step_with_owner(
+        &self,
+        target_s: f64,
+        next_problem: MagneticOwner<'m>,
+        conductors: Vec<EddyConductor>,
+        impressed_jz_a_m2: &[f64],
+        limits: NonlinearEddyControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PlanarNonlinearEddyCandidate<'m>, NonlinearEddyError> {
         poll(cancelled)?;
         admit_controls(limits)?;
         let dt = target_s - self.time_s;
@@ -343,10 +453,14 @@ impl<'m> PlanarNonlinearEddy<'m> {
                 EddyError::Invalid("positive representable induction interval required").into(),
             );
         }
-        let (conductors, conduction) =
-            bind(self.problem, conductors, Some(&self.conductors), cancelled)?;
+        let (conductors, conduction) = bind(
+            &*next_problem,
+            conductors,
+            Some(&self.conductors),
+            cancelled,
+        )?;
         let loads = load(
-            self.problem,
+            &*next_problem,
             impressed_jz_a_m2,
             &self.components,
             limits.current_balance_tolerance_a,
@@ -357,7 +471,7 @@ impl<'m> PlanarNonlinearEddy<'m> {
             conduction: &conduction,
             dt,
         };
-        let field = self.problem.solve_loaded(
+        let field = next_problem.solve_loaded(
             &loads,
             &self.boundary,
             &self.potential_wb_m,
@@ -366,9 +480,9 @@ impl<'m> PlanarNonlinearEddy<'m> {
             cancelled,
         )?;
         let potential = field.potential_wb_m();
-        let magnetic = self.problem.magnetic_load(potential, cancelled)?;
+        let magnetic = next_problem.magnetic_load(potential, cancelled)?;
         admit_algebraic(
-            self.problem,
+            &*next_problem,
             &magnetic,
             &loads,
             &self.algebraic,
@@ -389,14 +503,17 @@ impl<'m> PlanarNonlinearEddy<'m> {
             &conductors,
             &increments,
             dt,
-            self.problem.thickness_m(),
+            next_problem.thickness_m(),
             limits.current_balance_tolerance_a,
             cancelled,
         )?;
         let old_field = self.field(cancelled)?;
-        let mut magnetic_cells = Vec::with_capacity(self.problem.materials().len());
+        let refreshed_old =
+            next_problem.recover(self.potential_wb_m.clone(), self.report.clone(), cancelled)?;
+        let mut magnetic_cells = Vec::with_capacity(next_problem.materials().len());
         let mut numerical_dissipation_j = 0.0;
-        for (triangle, material) in self.problem.materials().iter().enumerate() {
+        let mut parameter_work_j = 0.0;
+        for (triangle, material) in next_problem.materials().iter().enumerate() {
             poll(cancelled)?;
             let b0 = old_field.magnetic_flux_density_t()[triangle];
             let b1 = field.magnetic_flux_density_t()[triangle];
@@ -423,6 +540,10 @@ impl<'m> PlanarNonlinearEddy<'m> {
                 .into());
             }
             numerical_dissipation_j = finite(numerical_dissipation_j + numerical)?;
+            let parameter = finite(
+                refreshed_old.cell_energy_j()[triangle] - old_field.cell_energy_j()[triangle],
+            )?;
+            parameter_work_j = finite(parameter_work_j + parameter)?;
             magnetic_cells.push(NonlinearEddyMagneticCell {
                 triangle,
                 volume_m3,
@@ -432,11 +553,14 @@ impl<'m> PlanarNonlinearEddy<'m> {
                     field.cell_energy_j()[triangle],
                 ],
                 numerical_dissipation_j: numerical,
+                parameter_work_j: parameter,
             });
         }
         let supplied_work_j = finite(loads.iter().zip(&increments).map(|(f, d)| f * d).sum())?;
         let energy_residual_j = finite(
-            field.energy_j() - self.energy_j + heat_j + numerical_dissipation_j - supplied_work_j,
+            field.energy_j() - self.energy_j + heat_j + numerical_dissipation_j
+                - supplied_work_j
+                - parameter_work_j,
         )?;
         if energy_residual_j.abs() > limits.energy_tolerance_j {
             return Err(EddyError::Balance("nonlinear magnetic storage, physical heat, numerical loss and source work do not close").into());
@@ -449,22 +573,26 @@ impl<'m> PlanarNonlinearEddy<'m> {
             heat_j,
             supplied_work_j,
             numerical_dissipation_j,
+            parameter_work_j,
             energy_residual_j,
             region_currents_a,
             report: field.report().clone(),
         };
+        let potential_wb_m = potential.to_vec();
+        let energy_j = field.energy_j();
+        let report = field.report().clone();
         let state = Self {
-            problem: self.problem,
+            problem: next_problem,
             conductors,
             insulators: self.insulators.clone(),
             boundary: self.boundary.clone(),
             components: self.components.clone(),
             algebraic: self.algebraic.clone(),
             impressed_jz_a_m2: impressed_jz_a_m2.to_vec(),
-            potential_wb_m: potential.to_vec(),
-            energy_j: field.energy_j(),
+            potential_wb_m,
+            energy_j,
             time_s: target_s,
-            report: field.report().clone(),
+            report,
         };
         poll(cancelled)?;
         Ok(PlanarNonlinearEddyCandidate { state, step })

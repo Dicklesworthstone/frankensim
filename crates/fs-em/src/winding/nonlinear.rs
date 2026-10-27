@@ -11,9 +11,10 @@
 //! Native graph work -dt*I*V cancels terminal work into the field/winding. Core
 //! eddy heat, stranded Joule heat, graph heat and backward-Euler numerical loss
 //! remain separate. Strand cells cannot also own resolved eddy conductivity.
-//! This is a fixed-geometry, fixed-H(B), reversible isotropic MQS lane. Only
-//! supported same-source conductivity temperature refresh is allowed. No core
-//! hysteresis, moving conductor, magnetic temperature work or fitted L is used.
+//! This is a fixed-geometry reversible isotropic MQS lane. A pinned linear mu(T)
+//! refresh carries explicit magnetic parameter work; a thermal owner must close
+//! it with the field entropy. Nonlinear H(B) stays fixed. No core hysteresis,
+//! moving conductor or fitted inductance is used.
 //! The allocating native DAE must admit the held private-current trials; ideal
 //! current-only constraint topologies can refuse this bounded partitioned lane.
 
@@ -31,11 +32,12 @@ use crate::planar::{
         EddyConductor,
         nonlinear::{
             NonlinearEddyControls, NonlinearEddyError, NonlinearEddyStep, PlanarNonlinearEddy,
-            PlanarNonlinearEddyCandidate,
+            PlanarNonlinearEddyCandidate, admit_material_refresh,
         },
     },
     nonlinear::IsotropicMagneticMaterial,
 };
+use fs_feec::weighted::WeightedAssemblyLimits;
 use fs_material::field_storage::admit_fixed_magnetic_refresh;
 use fs_phs::{
     StepRecord,
@@ -199,6 +201,9 @@ pub struct NonlinearWindingStep {
     pub supplied_work_j: f64,
     /// Magnetic and declared end-inductance BE loss, never physical heating.
     pub numerical_dissipation_j: f64,
+    /// Signed source-resolved magnetic work, separate from external source
+    /// ports and Joule heat. A caloric/material owner must close this account.
+    pub parameter_work_j: f64,
     pub energy_residual_j: f64,
     pub field_trials: usize,
     pub report: NewtonReport,
@@ -289,6 +294,7 @@ fn linkages(
 
 fn bind(
     field: &PlanarNonlinearEddy<'_>,
+    materials: Option<&[IsotropicMagneticMaterial]>,
     profiles: &[Vec<f64>],
     sources: Vec<WindingConductor>,
     previous: Option<&[WindingConductor]>,
@@ -311,7 +317,7 @@ fn bind(
         previous,
         |source| {
             let material = source.conductor.material();
-            match &field.problem().materials()[source.triangle] {
+            match &materials.unwrap_or_else(|| field.problem().materials())[source.triangle] {
                 IsotropicMagneticMaterial::Linear(original) => {
                     admit_fixed_magnetic_refresh(original, material)?
                 }
@@ -471,8 +477,14 @@ impl<'m> NonlinearWindingCircuit<'m> {
                 "complete finite remaining inductor fluxes and capacitor charges required",
             ));
         }
-        let (conductors, conductor_windings, resistance_ohm) =
-            bind(&field, &windings.profiles_per_m2, sources, None, cancelled)?;
+        let (conductors, conductor_windings, resistance_ohm) = bind(
+            &field,
+            None,
+            &windings.profiles_per_m2,
+            sources,
+            None,
+            cancelled,
+        )?;
         let flux_linkages_wb = linkages(&field, &windings, &initial.currents_a, cancelled)?;
         let layout = Rc::new(Layout {
             graph,
@@ -570,6 +582,58 @@ impl<'m> NonlinearWindingCircuit<'m> {
         controls: NonlinearWindingControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<NonlinearWindingCandidate<'m>> {
+        self.step_with_materials(
+            target_s,
+            None,
+            core_conductors,
+            winding_conductors,
+            external_inputs,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Continue the original field/circuit history with source-pinned linear
+    /// magnetic temperature refresh. Complete fixed nonlinear H(B) entries are
+    /// retained. The native field's signed parameter work is reported separately
+    /// from external source work and physical heat. Rejected trials publish no
+    /// field, current, linkage or circuit state. Assembly is explicitly bounded
+    /// for every field trial; all trials restart from this accepted history.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_materials_candidate(
+        &self,
+        target_s: f64,
+        materials: Vec<IsotropicMagneticMaterial>,
+        core_conductors: Vec<EddyConductor>,
+        winding_conductors: Vec<WindingConductor>,
+        external_inputs: &[f64],
+        assembly: WeightedAssemblyLimits,
+        controls: NonlinearWindingControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<NonlinearWindingCandidate<'m>> {
+        admit_material_refresh(self.field.problem().materials(), &materials, cancelled)?;
+        self.step_with_materials(
+            target_s,
+            Some((materials, assembly)),
+            core_conductors,
+            winding_conductors,
+            external_inputs,
+            controls,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_with_materials(
+        &self,
+        target_s: f64,
+        materials: Option<(Vec<IsotropicMagneticMaterial>, WeightedAssemblyLimits)>,
+        core_conductors: Vec<EddyConductor>,
+        winding_conductors: Vec<WindingConductor>,
+        external_inputs: &[f64],
+        controls: NonlinearWindingControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<NonlinearWindingCandidate<'m>> {
         use NonlinearWindingError::{Balance, Invalid};
         poll(cancelled)?;
         controls.newton.validate()?;
@@ -590,6 +654,9 @@ impl<'m> NonlinearWindingCircuit<'m> {
         ports(&self.layout, external_inputs, &self.currents_a)?;
         let (conductors, conductor_windings, resistance_ohm) = bind(
             &self.field,
+            materials
+                .as_ref()
+                .map(|(materials, _)| materials.as_slice()),
             self.profiles_per_m2(),
             winding_conductors,
             Some(&self.conductors),
@@ -610,13 +677,25 @@ impl<'m> NonlinearWindingCircuit<'m> {
             poll(&mut check)?;
             let (native, _) = self.layout.dae.step_audited(&x0, &input, dt)?;
             poll(&mut check)?;
-            let field = self.field.step_to_candidate(
-                target_s,
-                core_conductors.clone(),
-                &j,
-                controls.field,
-                &mut check,
-            )?;
+            let field = if let Some((materials, assembly)) = &materials {
+                self.field.step_with_materials_candidate(
+                    target_s,
+                    materials.clone(),
+                    core_conductors.clone(),
+                    &j,
+                    *assembly,
+                    controls.field,
+                    &mut check,
+                )?
+            } else {
+                self.field.step_to_candidate(
+                    target_s,
+                    core_conductors.clone(),
+                    &j,
+                    controls.field,
+                    &mut check,
+                )?
+            };
             let linkage = linkages(field.state(), &self.layout.windings, currents, &mut check)?;
             let voltage = native.y[self.layout.external_ports..].to_vec();
             let residual = currents
@@ -757,8 +836,11 @@ impl<'m> NonlinearWindingCircuit<'m> {
         let stored_after_j = finite(circuit_after + field_step.stored_after_j + end_after)?;
         let heat_j = finite(winding_heat + graph_heat + field_step.heat_j)?;
         let numerical_dissipation_j = finite(field_step.numerical_dissipation_j + end_numerical)?;
+        let parameter_work_j = field_step.parameter_work_j;
         let energy_residual_j = finite(
-            stored_after_j - stored_before_j + heat_j + numerical_dissipation_j - external_work,
+            stored_after_j - stored_before_j + heat_j + numerical_dissipation_j
+                - external_work
+                - parameter_work_j,
         )?;
         let defects = [
             trial.native.supplied - (external_work - terminal_work),
@@ -804,6 +886,7 @@ impl<'m> NonlinearWindingCircuit<'m> {
             heat_j,
             supplied_work_j: external_work,
             numerical_dissipation_j,
+            parameter_work_j,
             energy_residual_j,
             field_trials: trials.get(),
             report: result.report,

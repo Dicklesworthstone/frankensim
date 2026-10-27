@@ -479,9 +479,9 @@ and heat. A conductivity refresh pins the complete original card, requirements,
 coordinate schema, source selection and electrical basis. Nonlinear conductors
 also retain the H(B) claim. A temperature change is admitted only when the full
 original H(B) range is still supported and its constitutive law is unchanged;
-temperature-dependent magnetization requires a different parameter-work owner.
+the explicit linear-temperature refresh described below owns changes in mu(T).
 
-The source-integrated endpoint energies satisfy
+For a fixed law, the source-integrated endpoint energies satisfy
 `delta psi + Joule heat + numerical dissipation = endpoint impressed work`.
 The separately reported numerical term is the nonnegative magnetic Bregman
 loss `V*(H_next dot (B_next-B_old) - (psi_next-psi_old))`. It uses the original
@@ -493,9 +493,8 @@ residual remain visible. Failure of source support, nonlinear budget, current
 balance, energy accounting or cancellation returns no candidate replacement.
 
 This is a first-order stationary, isotropic, reversible magnetoquasistatic
-section with fixed magnetic law and fixed geometry. It does not add hysteresis,
-remanence evolution, conductor motion, terminal-circuit feedback or magnetic
-thermal parameter work. A recovered transient field uses the existing explicit
+section with fixed geometry. It does not add hysteresis, remanence evolution or
+conductor motion. A recovered transient field uses the existing explicit
 position/frame transfer without re-solving static equilibrium. Synthetic
 `nonlinear_eddy` tests cover independent P1 decay, material-data substitution,
 Joule/numerical separation, time refinement, conductivity refresh, balanced
@@ -523,7 +522,8 @@ unrepresented end geometry, resistance and mutual coupling are not invented.
 Disjoint stranded triangles use the same source/resistance and spatial Joule
 owners as linear windings. They cannot also own resolved eddy conductivity.
 Complete material/card/claim/basis continuity is retained across conductivity
-temperature refresh, and the original full H(B) law remains frozen.
+temperature refresh. The original full nonlinear H(B) law remains frozen;
+linear mu(T) may refresh through the explicit material-work path below.
 
 The private port work `-dt*I*V` cancels the field/winding terminal work.
 `NonlinearWindingStep.supplied_work_j` contains only original external source
@@ -539,9 +539,33 @@ histories on source, budget, native constraint, nonlinear or cancellation refusa
 This first-order coupling admits at most 16 windings within the existing
 32-node/64-branch/32-port/128-state allocating circuit bounds. The native graph
 must admit its held private-current trials; ideal current-only constraint
-topologies can refuse this partitioned lane. Geometry, magnetic law and native
-graph coefficients stay fixed during each native trial. No hysteresis, magnetic thermal parameter work,
+topologies can refuse this partitioned lane. Geometry, proposed magnetic law and
+native graph coefficients stay fixed during each native trial. No hysteresis,
 moving-conductor or experimental material-qualification claim is introduced.
+
+### Source-pinned magnetic temperature refresh on continuing circuits
+
+`PlanarNonlinearEddy::step_with_materials_candidate` and
+`NonlinearWindingCircuit::step_with_materials_candidate` reassemble the same
+original mesh at proposed source-pinned linear mu(T) states. Original material
+cards, complete claims, coordinate schema, fixed context and constitutive kinds
+remain pinned. Nonlinear H(B) entries must remain exactly unchanged. A refreshed
+candidate owns its assembled problem and retains original field, circuit and
+linkage histories through clone and continuation.
+
+Each magnetic cell reports signed `parameter_work_j` equal to
+`P=psi_next(B_old)-psi_old(B_old)`. The backward-Euler Bregman loss uses the
+endpoint law for both field values. Native energy closure is consequently
+`delta psi + Joule heat + numerical loss = external work + P`, including native
+circuit and declared end storage for windings. Source work and parameter work
+remain distinct. A caloric owner must separately resolve field entropy and
+reversible heat; neither P nor numerical loss is automatically material heating.
+Original fixed-law stepping uses the same implementation with zero P.
+
+`nonlinear_winding_circuit::thermal` supplies independent RL and conducting-P1
+checks for data-only mu(T), signed local/global work, physical/numerical heat
+separation, owned restart, source correspondence and late cancellation. Native
+execution must be reported separately from parser and source review.
 
 `NonlinearWindingCircuit::with_graph_resistors` binds every ordinary graph
 resistor to a complete `GraphResistorMaterial`. It reassembles only the original

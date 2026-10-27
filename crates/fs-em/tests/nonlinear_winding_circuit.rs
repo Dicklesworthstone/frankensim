@@ -1,6 +1,8 @@
 //! Actual native circuits must respond to spatial H(B) and conductor data.
 #[path = "nonlinear_winding_circuit/common.rs"]
 mod common;
+#[path = "nonlinear_winding_circuit/thermal.rs"]
+mod thermal;
 
 use common::{b_from_current, conductors, controls, density_energy, h, linkage, near};
 use fs_em::{
