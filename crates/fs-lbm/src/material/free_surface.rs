@@ -6,8 +6,9 @@
 //! property is fabricated. Geometry, timestep, gravity and the numerical wall
 //! ghost are explicit scenario data. No thermal, moving-wall, gas-flow, wetting
 //! calibration or conservative surface-energy evolution is introduced here.
-//! The `enthalpy` owner adds thermal evolution; its `rheology` path alone may
-//! consume source bundles that explicitly require evolving physical shear rate.
+//! The `enthalpy` owner adds thermal evolution. The `rheology` owner resolves
+//! physical shear rate at fixed temperature, retaining sourced capillarity;
+//! `enthalpy::rheology` instead evolves temperature and shear together.
 
 use fs_exec::CancelGate;
 use fs_material::liquid::surface::{ResolvedLiquidSurfaceState, ResolvedLiquidWettingState};
@@ -27,6 +28,8 @@ pub mod transfer;
 pub mod enthalpy;
 /// Source-pinned hysteresis on the actual planar VOF contact line.
 pub mod wetting;
+/// Source viscosity at the actual shear rate, without inventing thermal data.
+pub mod rheology;
 
 /// One reference source state and its physical-to-lattice conversion.
 ///
@@ -122,7 +125,31 @@ pub fn plan_free_surface_from_material(
         ((material.density_kg_m3() * cell_size_m) * cell_size_m) * cell_size_m,
         "free-surface cell mass unit is unrepresentable",
     )?;
-    let surface_tension_lattice = match material.surface_tension_n_m() {
+    let surface_tension_lattice = capillary_scaling(
+        material.surface_tension_n_m(),
+        pressure_unit_pa,
+        cell_size_m,
+    )?;
+    Ok(MaterialFreeSurfaceScaling {
+        material,
+        flow,
+        cell_size_m,
+        timestep_s,
+        velocity_scale,
+        pressure_unit_pa,
+        mass_unit_kg,
+        surface_tension_lattice,
+        planar_wetting: None,
+    })
+}
+
+// Frozen and evolving-viscosity consumers use the same native capillary domain.
+fn capillary_scaling(
+    surface_tension_n_m: Option<f64>,
+    pressure_unit_pa: f64,
+    cell_size_m: f64,
+) -> Result<f64, MaterialLbmError> {
+    let surface_tension_lattice = match surface_tension_n_m {
         None => 0.0,
         Some(sigma) => positive(
             (sigma / pressure_unit_pa) / cell_size_m,
@@ -135,11 +162,7 @@ pub fn plan_free_surface_from_material(
             "surface tension and scaling can produce nonpositive native capillary boundary density",
         ));
     }
-    Ok(MaterialFreeSurfaceScaling {
-        material, flow, cell_size_m, timestep_s, velocity_scale,
-        pressure_unit_pa, mass_unit_kg, surface_tension_lattice,
-        planar_wetting: None,
-    })
+    Ok(surface_tension_lattice)
 }
 
 impl<'a> MaterialFreeSurfaceScaling<'a> {

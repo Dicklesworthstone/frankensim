@@ -2862,3 +2862,40 @@ braking, actual temperature feedback, one material epoch across repeated
 current trials, and late support-solve/nonconvergence rollback. This closes the
 bounded MR43 moving-current/fluid/thermal connection; general phase transition,
 induction and moving solid/fluid mechanical coupling remain broader work.
+
+## Isothermal source rheology with native capillarity
+
+`material::free_surface::rheology::IsothermalRheologyLaw` binds one immutable
+material card and complete resolved bundle to fixed temperature, pressure,
+composition and source environment. Only the explicitly named physical shear
+rate `sqrt(2 D:D)` changes. The dynamic/kinematic viscosity basis and sourced
+versus neglected capillarity are explicit. No caloric data is requested. The
+shared material admission permits temperature/rate source response and refuses
+unowned dynamic axes; density and surface tension must be shear-independent.
+All runtime queries retain the original selected claims and full context.
+
+`MaterialFreeSurfaceRheology3` uses the existing physical-unit and cell-state
+ingress, molecular force-corrected stress and shared bounded `solve_local` owner.
+Each wet collision lane, including zero-mass interface ghosts, closes rate
+against `tau = 1/2 + 3 nu dt/dx^2`. Those exact material coefficients drive the
+existing native collision, streaming, VOF mass exchange and conversion. The
+native capillary reconstruction retains the sourced uniform sigma; frozen and
+evolving-viscosity paths share the same dimensional and positive-boundary-density
+admission. No clipping, material-name dispatch or duplicate viscosity fit occurs.
+
+The accepted per-cell source states drive one explicit step on a private native
+candidate. Its new stress and speed fields must pass source, convergence and
+scenario bounds before populations, fill, carry, conversion counters and source
+receipts are published together. Cancellation is polled between constitutive
+queries and before publication. The unregioned mass carry has no invented shear
+rate or material collision cell. Original native mass accounting is unchanged.
+
+This is isothermal generalized-Newtonian response on stationary walls, with the
+explicit numerical contact ghost inherited from the domain. It does not add
+thermal storage, viscous heat, viscoelastic or yield history, moving walls,
+variable-sigma traction, phase change or conservative surface-energy evolution.
+Source and numerical admission are not stability or experimental-accuracy
+certificates. Focused tests in `tests/material_free_surface_rheology.rs` exercise
+an independent force-corrected tensor and analytical constitutive root, native
+Newtonian bit parity, source-only viscosity/capillary motion changes with mass
+conservation and deterministic replay, and endpoint source/convergence rollback.

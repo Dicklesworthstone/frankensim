@@ -210,4 +210,15 @@ impl FreeSurface3 {
         trace.after = self.mass_snapshot();
         Ok(trace)
     }
+
+    /// The enclosing constitutive owner admits and publishes a private candidate.
+    /// Reuse native collision, mass exchange and conversion without recording
+    /// unused enthalpy routes for an isothermal trajectory.
+    pub(crate) fn step_with_material_relaxation(
+        &mut self,
+        gate: &CancelGate,
+        tau: &BTreeMap<(u64, usize), f64>,
+    ) -> Result<(), FreeSurfaceError3> {
+        self.step_inner(gate, None, Some(tau))
+    }
 }
