@@ -6595,3 +6595,58 @@ fringing, material hysteresis, heating, or measured material validation.
 Amplitude limits are caller-admitted model restrictions, not sourced strength
 or breakdown measurements. It is a bounded MR59 implementation, not closure
 of that bead's full tensor/electrostatic/structural qualification.
+
+## Regional material walls in native duct propagation
+
+`bernoulli_aperture::wall::material::RegionalMaterialWallDg` retains one original
+`LocalMaterialWall` per DG element, including its material state, thickness,
+restraint and explicit loss law. It compiles independent surface mass, stiffness
+and Kelvin--Voigt resistance into `fs-duct`'s existing reciprocal gas/wall
+operator and intersects the original source bands. Different wall materials
+therefore change both pressure propagation and wall motion in the same native
+time solve, including spatial gas composition and pre-existing gas memories.
+
+Exactly uniform assignments retain the original full Maxwell-spectrum route;
+heterogeneous Maxwell spectra refuse rather than lose a material's memory.
+Material boundaries align with element boundaries. The existing thin cylindrical
+local-membrane model supplies no axial shell waves, stress transfer across
+material joints, or live transfer of an already vibrating wall into new material
+coordinates. Focused G1/G3 tests reconstruct local force/energy relations and
+change only one wall assignment through the actual pressure/motion evolution.
+
+## Spatial Ohmic current and finite material-temperature feedback
+
+`circuit_enthalpy::conduction::ConductionThermalNetwork::step_candidate`
+connects `fs-em::conduction::PlanarConduction` to the existing material-bound
+enthalpy/Newton owner. Each electrical triangle has one explicit heat receiver;
+mapped triangles must cover that receiver's entire physical volume. The same
+card, caloric law instance, source selections and fixed external coordinates
+remain bound. All electrically mapped caloric charts are solid and have constant
+density compatible with the retained mass and geometry. Nonlinear heat capacity
+and temperature-dependent resistivity/conductivity remain supported.
+
+Every thermal trial re-queries each original electrical source at its proposed
+temperature, rebuilds the native FEEC conductivity operator and solves the held
+electrode voltages. Actual spatial current redistribution and volume-integrated
+`E.J` determine local heat; no uniform-resistor reduction supplies it. Original
+thermal links resolve their conductivity from the same endpoint material state.
+The shared backward-Euler residual accounts for these local losses, thermal
+conduction and authored boundaries together. Independently recovered terminal
+work must close against the deposited heat and combined stored-energy change.
+
+The candidate returns both accepted thermal history and the rebuilt endpoint
+electrical problem, together with the exact field observations and original
+linear/nonlinear reports. Initial electrical/thermal state mismatch, unsupported
+sources, incomplete correspondence, unaccepted balance, budgets and cancellation
+return no candidate. All nonlinear trials leave original inputs unchanged.
+`maximum_circuit_trials` bounds field evaluations on this shared driver;
+`ConductionControls` governs the field solve, and the unused circuit-DAE controls
+do not govern it. Events obey the original enthalpy interval rules.
+
+This is fixed-geometry isotropic quasistatic DC with held electrode voltages and
+first-order thermal time integration. It does not add induction, dielectric
+storage, thermoelectric terms, contact resistance, phase change or moving-mesh
+work. G1/G3/G4 synthetic tests in `tests/conduction_enthalpy.rs` exercise layered
+current/heat, an independent thermal reference, nonlinear source-only feedback,
+continuation, material substitution, gauge/current reversal and atomic refusal.
+They verify the declared numerical model, not empirical material qualification.

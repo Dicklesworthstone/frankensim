@@ -9,6 +9,8 @@
 
 /// Material field/current response coupled to the same finite enthalpy solve.
 pub mod conductivity;
+/// Spatial DC current and local Joule heating on the same finite thermal solve.
+pub mod conduction;
 /// Data-only caloric/card, resistor and conductive-link bindings.
 pub mod material;
 /// Two-sided deposition of source-backed electrical contact heat.
