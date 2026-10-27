@@ -8,7 +8,7 @@ pub mod double_acting;
 pub mod network;
 /// Simultaneous signed heat contacts sharing one gas energy midpoint.
 pub mod ports;
-mod heat;
+pub(crate) mod heat;
 
 use super::{ConductanceSample, GasPiston, HeatExchangeSolve, PistonInput,
     PistonSolve, PistonStep, ResolvedThermochemicalGasState, ThermalPistonError,

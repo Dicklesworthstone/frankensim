@@ -1,4 +1,6 @@
 //! Synthetic source cards exercise chemistry, material heat and momentum together.
+mod coupled;
+
 use super::*;
 use crate::cavity_phs::piston::reactive::thermal::ReactiveThermalPistonError;
 use crate::cavity_phs::piston::thermal::layers::MaterialConductionLayers;

@@ -7671,3 +7671,47 @@ coupled implicit mechanism and shared gas inversion policy; chemistry-only
 subcycling refuses. It adds no flame, shock, valve flow, shared crank, wall
 material heating or guaranteed nonlinear uniqueness. The gas-control-volume
 and gas-chemistry ladder beads remain open.
+
+
+### Simultaneous reactive gas, finite material walls and signed heat contacts
+
+`GasPiston::coupled_reactive_thermal_candidate` and its material-layer entry
+close reciprocal wall heat against the same endpoint chemistry/pressure/work
+solve. Each proposed Q starts from the original gas inventory and body
+enthalpy: gas receives `Q_external + Q`, body receives `Q_body - Q`. The
+actual endpoint gas composition/T/p and body enthalpy/phase determine the
+original conductance law, and the shared scalar residual closes
+`Q = dt G (T_body,end - T_gas,end)`. The material-layer entry reuses the
+same-card enthalpy/conductivity condition owner and the reacted gas's original
+mixture transport. The exposed patch cannot exceed the body's surface area.
+`MaterialGasPiston` retains the original source-derived translating inertia.
+
+`coupled_reactive_thermal_ports_candidate` uses that same heat-root owner for
+multiple contacts. It retains individual signed heats and concrete source
+records in stable contact-ID order, including opposing nonzero transfers at
+zero net gas heat. Every contact sees one actual reacted gas endpoint.
+Finite counterpart callers must debit those returned transfers exactly once
+and publish their histories with the gas. The existing split assembly entry
+points keep their declared split semantics; these are explicit coupled entries.
+
+Independent gas/kinetic/body energy, applied/evaluated boundary heat, source
+identity and nested pressure/chemical work counts accompany joint candidates.
+Chemical formation and body latent energy remain in their original storage;
+neither numerical residual nor a duplicate reaction/phase heat source is added.
+The same endpoint kinetic policy, source envelopes, whole-interval clock and
+cancellation boundary apply throughout all discarded and accepted trials.
+
+Three new focused tests specify two continuing source-conductivity substitutions
+with independent caloric/endpoint-rate/transport/acoustic equations, actual
+source retention, cancellation and foreign-card refusal, and opposing signed
+thermal contacts. Scoped Rust parsing/formatting, whitespace and source/API
+review passed. Native compilation and execution remain blocked by the missing
+pinned siblings/runners and full filesystem; independent scalar reference
+calculations do not replace those tests or experimental validation.
+
+The uniform finite body retains fixed geometry and negligible pV-work scope;
+its phase chart does not move a melt boundary or alter piston inertia. Heat
+and kinetics use endpoint evaluation with midpoint mechanical kinematics,
+generally first order. Arbitrary spatial flow/flames, shared crank mechanics,
+material-network wiring of this coupled policy and a complete wall-entropy
+model remain outside this increment. Broad gas/thermal beads remain open.

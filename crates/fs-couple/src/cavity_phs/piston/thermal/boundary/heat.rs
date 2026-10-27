@@ -83,7 +83,7 @@ pub(super) fn solve<S, E>(
     Ok(candidate)
 }
 
-pub(super) fn conductive_heat<E>(dt: f64, g: f64, boundary_k: f64, gas_k: f64)
+pub(crate) fn conductive_heat<E>(dt: f64, g: f64, boundary_k: f64, gas_k: f64)
     -> Result<f64, ThermalPistonError<E>>
 {
     let delta = boundary_k - gas_k;

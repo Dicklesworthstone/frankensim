@@ -7,6 +7,8 @@
 
 /// Bounded refinement of chemistry, wall heat and piston motion together.
 pub mod subcycling;
+/// Same-endpoint chemistry, motion and reciprocal finite-wall heat exchange.
+pub mod coupled;
 
 use super::{
     GasPiston, GasReaction, GasReactionError, GasReactionSolve, GasReactionStep, PistonInput,

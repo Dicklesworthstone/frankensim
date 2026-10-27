@@ -120,6 +120,46 @@ impl MaterialGasPiston {
         Ok(candidate)
     }
 
+    /// Evolve material-wall heat, chemistry and pressure motion at one endpoint
+    /// while retaining this translating specimen's original sourced inertia.
+    #[allow(clippy::too_many_arguments)]
+    pub fn coupled_reactive_thermal_candidate<S, E>(
+        &self, reaction: &super::reactive::GasReaction, input: PistonInput,
+        thermal_body: UniformEnthalpyStepInput<'_>, chemistry: super::reactive::GasReactionSolve,
+        controls: super::reactive::coupled::CoupledReactivePistonSolve,
+        exchange: HeatExchangeSolve,
+        resolve: impl FnMut(&ResolvedThermochemicalGasState, EquilibriumPhaseState)
+            -> Result<ConductanceSample<S>, E>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<super::reactive::thermal::coupled::CoupledReactiveThermalCandidate<S, Self>,
+        super::reactive::thermal::coupled::CoupledReactiveThermalError<E>>
+    {
+        let candidate = self.piston.coupled_reactive_thermal_candidate(reaction, input, thermal_body,
+            chemistry, controls, exchange, resolve, &mut cancelled)?
+            .map_piston(|piston| Self { body: self.body.clone(), piston });
+        if cancelled() { return Err(super::reactive::thermal::coupled::CoupledReactiveThermalError::Cancelled); }
+        Ok(candidate)
+    }
+
+    /// Same-card endpoint conductivity/enthalpy and the original gas transport
+    /// drive heat and reaction feedback without separately supplied piston mass.
+    #[allow(clippy::too_many_arguments)]
+    pub fn coupled_reactive_thermal_layers_candidate(
+        &self, reaction: &super::reactive::GasReaction, input: PistonInput,
+        thermal_body: UniformEnthalpyStepInput<'_>, chemistry: super::reactive::GasReactionSolve,
+        controls: super::reactive::coupled::CoupledReactivePistonSolve,
+        exchange: HeatExchangeSolve, layers: MaterialConductionLayers<'_>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<super::reactive::thermal::coupled::CoupledReactiveThermalCandidate<ResolvedMaterialStatePoint, Self>,
+        super::reactive::thermal::coupled::CoupledReactiveThermalError<LayerConductionError>>
+    {
+        let candidate = self.piston.coupled_reactive_thermal_layers_candidate(reaction, input,
+            thermal_body, chemistry, controls, exchange, layers, &mut cancelled)?
+            .map_piston(|piston| Self { body: self.body.clone(), piston });
+        if cancelled() { return Err(super::reactive::thermal::coupled::CoupledReactiveThermalError::Cancelled); }
+        Ok(candidate)
+    }
+
     /// Preserve source-resolved rigid inertia while reaction products exchange
     /// heat with a finite material body and drive the original pressure solve.
     /// The thermal store may be separate from this translating rigid specimen.
