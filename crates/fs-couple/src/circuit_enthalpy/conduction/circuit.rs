@@ -263,6 +263,9 @@ impl ConductionThermalNetwork<'_> {
     /// caloric cards must match the accepted state before any trial. Field and
     /// descriptor current/work, local heat, and combined storage are admitted
     /// independently. No accepted state changes on any refusal or cancellation.
+    /// Confined equal-density phase charts use the same explicit liquid-fraction
+    /// coordinate and latent-enthalpy admission as the directly driven field;
+    /// conductivity changes on an isothermal plateau still restamp the circuit.
     /// This does not add displacement current, induction inside the conductor,
     /// contact resistance, thermoelectric transport or a moving/phase-changing
     /// geometry model to the quasistatic spatial field.

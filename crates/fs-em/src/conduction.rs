@@ -144,12 +144,9 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
         let mut geometry_frame = None;
         for conductor in &conductors {
             poll(cancelled)?;
-            if conductor
-                .source_properties()
-                .any(|p| !p.is_static_at_fixed_external_conditions())
-            {
+            if !conductor.has_admitted_static_sources() {
                 return Err(ConductionError::Invalid(
-                    "spatial DC conduction requires static Ohmic coefficients at fixed external conditions",
+                    "spatial DC conduction requires static Ohmic coefficients at fixed external or explicitly owned phase conditions",
                 ));
             }
             if let Some(frame) = conductor.frame() {

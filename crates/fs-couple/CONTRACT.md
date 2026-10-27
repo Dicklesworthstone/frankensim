@@ -6715,12 +6715,14 @@ connects `fs-em::conduction::PlanarConduction` to the existing material-bound
 enthalpy/Newton owner. Each electrical triangle has one explicit heat receiver;
 mapped triangles must cover that receiver's entire physical volume. The same
 card, caloric law instance, source selections and fixed external coordinates
-remain bound. All electrically mapped caloric charts are solid and have constant
-density compatible with the retained mass and geometry. Nonlinear heat capacity
-and temperature-dependent resistivity/conductivity remain supported.
+remain bound. All electrically mapped caloric charts have constant density
+compatible with the retained mass and geometry. Confined non-solid charts use
+the explicit phase-coordinate admission below. Nonlinear caloric storage and
+temperature/phase-dependent resistivity/conductivity remain supported.
 
 Every thermal trial re-queries each original electrical source at its proposed
-temperature, rebuilds the native FEEC conductivity operator and solves the held
+temperature and declared liquid mass fraction, rebuilds the native FEEC
+conductivity operator and solves the held
 electrode voltages. Actual spatial current redistribution and volume-integrated
 `E.J` determine local heat; no uniform-resistor reduction supplies it. Original
 thermal links resolve their conductivity from the same endpoint material state.
@@ -6737,9 +6739,10 @@ return no candidate. All nonlinear trials leave original inputs unchanged.
 `ConductionControls` governs the field solve, and the unused circuit-DAE controls
 do not govern it. Events obey the original enthalpy interval rules.
 
-This is fixed-geometry isotropic quasistatic DC with held electrode voltages and
+This is fixed-geometry quasistatic DC with admitted scalar/tensor coefficients,
+held electrode voltages and
 first-order thermal time integration. It does not add induction, dielectric
-storage, thermoelectric terms, contact resistance, phase change or moving-mesh
+storage, thermoelectric terms, contact resistance, density-changing phase or moving-mesh
 work. G1/G3/G4 synthetic tests in `tests/conduction_enthalpy.rs` exercise layered
 current/heat, an independent thermal reference, nonlinear source-only feedback,
 continuation, material substitution, gauge/current reversal and atomic refusal.
@@ -6941,8 +6944,9 @@ Voltage, equipotential total-current and distributed current-density drives
 all retain their existing boundary and source-work accounting. Continuation
 publishes the accepted thermal history and endpoint tensor operator together.
 Source-domain, solve-budget and cancellation failures retain the old pair.
-The existing fully solid, constant-density, fixed-geometry DC limits remain;
-principal axes do not rotate with temperature. Independent tests derive the
+The fixed-density, fixed-geometry DC limits remain; an explicitly owned liquid
+mass fraction also admits the confined phase-changing path below. Principal
+axes do not rotate with temperature. Independent tests derive the
 nonlinear heating equation for a rotated resistivity law, continue its accepted
 state, verify transverse current, and exercise source and late-cancellation
 rollback. Coefficients are synthetic, not a material-accuracy claim. Program
@@ -6958,6 +6962,33 @@ and heat routing remain shared. A rotated anisotropic RC fixture checks three
 continuing discharge/heating steps against independently solved nonlinear
 midpoint circuit and finite-capacity heat equations, including original pins,
 transverse coordinate components and combined energy closure.
+
+### Confined phase-changing spatial conductors and circuits
+
+The same spatial/circuit/enthalpy owner admits solid, mushy and fully liquid
+caloric states when every chart knot's density matches the represented fixed
+volume within its existing volume tolerance. Non-solid charts require an
+explicit liquid MASS fraction coordinate. The electrical material retains that
+declared coordinate, and the thermal binding must drive the exact same axis
+from its actual enthalpy state on every nonlinear trial and accepted endpoint.
+This remains active on an isothermal latent plateau, where temperature alone
+cannot describe changing transport.
+
+Both scalar and oriented principal electrical laws use the existing source
+resolver, original claims, electrical basis and fixed tensor frame. The supplied
+material law determines phase-dependent conductivity/resistivity; no effective
+mixture rule, phase-interface impedance or extra latent-heat source is invented.
+Current redistribution, terminal resistance, capacitor/inductor evolution and
+local Joule heat remain in their original native owners and one energy balance.
+Moving geometry, shrinkage, fluid motion and density-changing phase charts
+remain outside this stationary confined model.
+
+Three synthetic regressions in `conduction_phase_enthalpy` independently check
+current/voltage-driven latent evolution, continuation into liquid sensible heat,
+capacitor storage and phase-dependent discharge, and source/axis/density/late
+cancellation refusal. Focused parsing/formatting and source review passed;
+native Cargo execution remains unverified. MR43 remains open for broader EM
+and moving-material coupling.
 
 ## Source-backed updates of an already vibrating duct wall
 

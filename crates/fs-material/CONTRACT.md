@@ -2220,6 +2220,16 @@ unowned axes; caloric response with shear-dependent storage remains unsupported.
 
 `conductor::planar` resolves two independent principal conductivity or
 resistivity properties and an explicit fixed material-to-geometry frame.
+
+Scalar and planar tensor snapshots may explicitly retain one solver-owned
+liquid-mass-fraction coordinate using `with_liquid_mass_fraction_axis` and
+`try_from_phase_material`. It must exist as a dimensional scalar in `[0,1]`.
+The existing static source policy applies to every other coordinate. Refresh
+preserves the declared axis, source basis and tensor frame; it does not evolve
+phase or infer a solid/liquid mixture law. Coupled consumers must bind that
+axis to their actual caloric liquid mass fraction. Unowned response dependence
+remains refused.
+
 Resistivity is inverted in its principal basis after source evaluation; the
 existing tensor rotation computes `sigma = Q diag(sigma1,sigma2) Q^T`.
 The complete material snapshot, source basis, frame identities and orientation

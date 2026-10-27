@@ -89,6 +89,7 @@ pub struct ResolvedConductorState {
     material: ResolvedMaterialStatePoint,
     source_basis: ElectricalPropertyBasis,
     resistivity_ohm_m: f64,
+    liquid_mass_fraction_axis: Option<String>,
 }
 
 impl ResolvedConductorState {
@@ -162,7 +163,50 @@ impl ResolvedConductorState {
                 reciprocal
             }
         };
-        Ok(Self { material, source_basis, resistivity_ohm_m })
+        Ok(Self {
+            material,
+            source_basis,
+            resistivity_ohm_m,
+            liquid_mass_fraction_axis: None,
+        })
+    }
+
+    /// Declare one phase coordinate supplied by a physical enthalpy owner.
+    /// The already-resolved coordinate must be a dimensional scalar in [0,1].
+    /// This admits a stationary source snapshot; it neither evolves phase nor
+    /// invents a solid/liquid mixing rule. Every other source axis must retain
+    /// its existing fixed-external meaning. Coupled owners must bind this exact
+    /// axis to their actual liquid MASS fraction on every refresh.
+    ///
+    /// # Errors
+    /// Missing, mistyped or out-of-range phase coordinates, a changed declared
+    /// axis, or another source-dependent coordinate without a static owner.
+    pub fn with_liquid_mass_fraction_axis(
+        mut self,
+        axis: impl Into<String>,
+    ) -> Result<Self, ConductorError> {
+        let axis = axis.into();
+        validate_liquid_mass_fraction_axis(&self.material, &axis)?;
+        if self
+            .liquid_mass_fraction_axis
+            .as_ref()
+            .is_some_and(|old| old != &axis)
+            || !self.source_property().has_only_owned_and_fixed_external_conditions(
+                &axis,
+                QuantitySpec::dimensional(Dims([0; 6])),
+            )
+        {
+            return Err(ConductorError::InvalidInput {
+                quantity: "phase conductor requires one retained phase axis and otherwise static source conditions",
+            });
+        }
+        self.liquid_mass_fraction_axis = Some(axis);
+        Ok(self)
+    }
+
+    /// Explicit stationary liquid-mass-fraction coordinate, when selected.
+    pub fn liquid_mass_fraction_axis(&self) -> Option<&str> {
+        self.liquid_mass_fraction_axis.as_deref()
     }
 
     /// Exact source-resolved material bundle, including its usage receipt.
@@ -212,6 +256,25 @@ impl ResolvedConductorState {
             resistance_ohm,
         })
     }
+}
+
+fn validate_liquid_mass_fraction_axis(
+    material: &ResolvedMaterialStatePoint,
+    axis: &str,
+) -> Result<(), ConductorError> {
+    let point = material.query();
+    if axis.is_empty()
+        || point.axis_quantities().get(axis) != Some(&QuantitySpec::dimensional(Dims([0; 6])))
+        || !point
+            .axes()
+            .get(axis)
+            .is_some_and(|fraction| fraction.is_finite() && (0.0..=1.0).contains(fraction))
+    {
+        return Err(ConductorError::InvalidInput {
+            quantity: "liquid mass fraction needs one existing dimensional scalar coordinate in [0,1]",
+        });
+    }
+    Ok(())
 }
 
 /// Resolve bulk resistivity without inventing a unit wire or solver geometry.

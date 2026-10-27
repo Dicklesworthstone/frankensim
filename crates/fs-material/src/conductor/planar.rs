@@ -101,6 +101,8 @@ pub trait PlanarConductorMaterial: sealed::Sealed + Clone {
     fn material(&self) -> &ResolvedMaterialStatePoint;
     fn source_basis(&self) -> ElectricalPropertyBasis;
     fn frame(&self) -> Option<PlanarElectricalFrame>;
+    /// One explicitly owned liquid-mass-fraction coordinate; never inferred.
+    fn liquid_mass_fraction_axis(&self) -> Option<&str>;
     fn source_property_names(&self) -> &'static [&'static str];
     fn conductivity(&self) -> PlanarConductivity;
     /// Rebuild the SAME law/basis/orientation around an atomically refreshed
@@ -112,6 +114,19 @@ pub trait PlanarConductorMaterial: sealed::Sealed + Clone {
                 .property(name)
                 .expect("canonical conductor retains every admitted electrical property")
         })
+    }
+    /// Static snapshot admission, including the explicitly owned phase axis.
+    /// All other response and applicability coordinates retain the original
+    /// fixed-external policy; strain, frequency and field axes are not frozen.
+    fn has_admitted_static_sources(&self) -> bool {
+        self.source_properties()
+            .all(|p| match self.liquid_mass_fraction_axis() {
+                Some(axis) => p.has_only_owned_and_fixed_external_conditions(
+                    axis,
+                    QuantitySpec::dimensional(Dims([0; 6])),
+                ),
+                None => p.is_static_at_fixed_external_conditions(),
+            })
     }
 }
 
@@ -126,6 +141,9 @@ impl PlanarConductorMaterial for ResolvedConductorState {
     fn frame(&self) -> Option<PlanarElectricalFrame> {
         None
     }
+    fn liquid_mass_fraction_axis(&self) -> Option<&str> {
+        self.liquid_mass_fraction_axis()
+    }
     fn source_property_names(&self) -> &'static [&'static str] {
         match self.source_basis() {
             ElectricalPropertyBasis::Resistivity => &[ELECTRICAL_RESISTIVITY_PROPERTY],
@@ -136,7 +154,11 @@ impl PlanarConductorMaterial for ResolvedConductorState {
         PlanarConductivity::Scalar(self.resistivity_ohm_m().recip())
     }
     fn with_material(&self, material: ResolvedMaterialStatePoint) -> Result<Self, ConductorError> {
-        Self::try_from_material_with_basis(material, self.source_basis())
+        let next = Self::try_from_material_with_basis(material, self.source_basis())?;
+        match self.liquid_mass_fraction_axis() {
+            Some(axis) => next.with_liquid_mass_fraction_axis(axis),
+            None => Ok(next),
+        }
     }
 }
 
@@ -147,6 +169,7 @@ pub struct ResolvedOrthotropicConductor2 {
     material: ResolvedMaterialStatePoint,
     basis: ElectricalPropertyBasis,
     frame: PlanarElectricalFrame,
+    liquid_mass_fraction_axis: Option<String>,
     principal_conductivity_s_m: [f64; 2],
     conductivity_s_m: [[f64; 2]; 2],
     identity: ContentHash,
@@ -161,6 +184,39 @@ impl ResolvedOrthotropicConductor2 {
         basis: ElectricalPropertyBasis,
         frame: PlanarElectricalFrame,
     ) -> Result<Self, ConductorError> {
+        Self::from_material_with_phase_axis(material, basis, frame, None)
+    }
+
+    /// Adopt the same tensor law with an explicitly supplied stationary phase
+    /// coordinate. Its owner must refresh the actual liquid MASS fraction;
+    /// no mixing rule, phase geometry change or tensor-frame rotation is inferred.
+    ///
+    /// # Errors
+    /// Invalid phase coordinates or principal source coefficients, unowned
+    /// response axes, or an unrepresentable positive rotated conductivity.
+    pub fn try_from_phase_material(
+        material: ResolvedMaterialStatePoint,
+        basis: ElectricalPropertyBasis,
+        frame: PlanarElectricalFrame,
+        liquid_mass_fraction_axis: impl Into<String>,
+    ) -> Result<Self, ConductorError> {
+        Self::from_material_with_phase_axis(
+            material,
+            basis,
+            frame,
+            Some(liquid_mass_fraction_axis.into()),
+        )
+    }
+
+    fn from_material_with_phase_axis(
+        material: ResolvedMaterialStatePoint,
+        basis: ElectricalPropertyBasis,
+        frame: PlanarElectricalFrame,
+        liquid_mass_fraction_axis: Option<String>,
+    ) -> Result<Self, ConductorError> {
+        if let Some(axis) = &liquid_mass_fraction_axis {
+            validate_liquid_mass_fraction_axis(&material, axis)?;
+        }
         let names = principal_names(basis);
         let mut principal = [0.0; 2];
         for (axis, name) in names.iter().enumerate() {
@@ -168,7 +224,13 @@ impl ResolvedOrthotropicConductor2 {
                 .property(name)
                 .ok_or(ConductorError::InvalidInput { quantity: name })?;
             if p.requirement().quantity() != QuantitySpec::dimensional(basis.dimensions())
-                || !p.is_static_at_fixed_external_conditions()
+                || !match &liquid_mass_fraction_axis {
+                    Some(axis) => p.has_only_owned_and_fixed_external_conditions(
+                        axis,
+                        QuantitySpec::dimensional(Dims([0; 6])),
+                    ),
+                    None => p.is_static_at_fixed_external_conditions(),
+                }
                 || !p.value_si().is_finite()
                 || p.value_si() <= 0.0
             {
@@ -215,10 +277,16 @@ impl ResolvedOrthotropicConductor2 {
             ElectricalPropertyBasis::Resistivity => 0,
             ElectricalPropertyBasis::Conductivity => 1,
         }]);
+        if let Some(axis) = &liquid_mass_fraction_axis {
+            hash.update(b"liquid-mass-fraction-axis");
+            hash.update(&(axis.len() as u64).to_le_bytes());
+            hash.update(axis.as_bytes());
+        }
         Ok(Self {
             material,
             basis,
             frame,
+            liquid_mass_fraction_axis,
             principal_conductivity_s_m: principal,
             conductivity_s_m: matrix,
             identity: hash.finalize(),
@@ -232,6 +300,9 @@ impl ResolvedOrthotropicConductor2 {
     }
     pub const fn frame(&self) -> PlanarElectricalFrame {
         self.frame
+    }
+    pub fn liquid_mass_fraction_axis(&self) -> Option<&str> {
+        self.liquid_mass_fraction_axis.as_deref()
     }
     pub const fn principal_conductivity_s_m(&self) -> &[f64; 2] {
         &self.principal_conductivity_s_m
@@ -255,6 +326,9 @@ impl PlanarConductorMaterial for ResolvedOrthotropicConductor2 {
     fn frame(&self) -> Option<PlanarElectricalFrame> {
         Some(self.frame)
     }
+    fn liquid_mass_fraction_axis(&self) -> Option<&str> {
+        self.liquid_mass_fraction_axis()
+    }
     fn source_property_names(&self) -> &'static [&'static str] {
         principal_names(self.basis)
     }
@@ -262,7 +336,12 @@ impl PlanarConductorMaterial for ResolvedOrthotropicConductor2 {
         PlanarConductivity::Tensor(self.conductivity_s_m)
     }
     fn with_material(&self, material: ResolvedMaterialStatePoint) -> Result<Self, ConductorError> {
-        Self::try_from_material(material, self.basis, self.frame)
+        Self::from_material_with_phase_axis(
+            material,
+            self.basis,
+            self.frame,
+            self.liquid_mass_fraction_axis.clone(),
+        )
     }
 }
 
@@ -301,6 +380,12 @@ impl PlanarConductorMaterial for ResolvedPlanarConductor {
         match self {
             Self::Isotropic(_) => None,
             Self::Orthotropic(s) => Some(s.frame()),
+        }
+    }
+    fn liquid_mass_fraction_axis(&self) -> Option<&str> {
+        match self {
+            Self::Isotropic(s) => s.liquid_mass_fraction_axis(),
+            Self::Orthotropic(s) => s.liquid_mass_fraction_axis(),
         }
     }
     fn source_property_names(&self) -> &'static [&'static str] {

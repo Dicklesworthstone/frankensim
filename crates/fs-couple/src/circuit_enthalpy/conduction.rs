@@ -1,7 +1,7 @@
-//! Spatial Ohmic conduction and local material-temperature feedback.
+//! Spatial Ohmic conduction and local material-temperature/phase feedback.
 //!
-//! The original FEEC field owner solves div(sigma(T) grad(V))=0 at each proposed
-//! thermal endpoint. Its actual per-triangle E.J integrals feed the existing
+//! The original FEEC field owner solves div(sigma(T,f_liquid) grad(V))=0 at each
+//! proposed thermal endpoint. Its per-triangle E.J integrals feed the existing
 //! backward-Euler enthalpy residual. No uniform-resistor approximation, second
 //! heat integrator, or independent material-name lookup is introduced.
 
@@ -290,10 +290,14 @@ impl ConductionThermalNetwork<'_> {
     /// fresh solve; `controls.circuit` is unused because there is no circuit DAE.
     ///
     /// Source choices, cards, coordinate quantities and fixed external values
-    /// remain pinned. Only each binding's temperature changes. All electrically
-    /// mapped charts must remain wholly solid with constant density on this
-    /// fixed-geometry rung. Caloric curves may be nonlinear; geometry motion,
-    /// phase changes, thermoelectric transfer, induction, contacts and dielectric
+    /// remain pinned. Each binding's temperature and explicitly declared liquid
+    /// mass fraction evolve together. Stationary, confined solid/mushy/liquid
+    /// charts are admitted only when their density matches the fixed electrical
+    /// volume throughout the complete chart; a non-solid chart requires the
+    /// liquid-fraction coordinate even on an isothermal latent-heat plateau.
+    /// The supplied electrical law owns the effective phase response: no mixing
+    /// rule or phase-interface impedance is inferred. Geometry motion, phase
+    /// density changes, thermoelectric transfer, induction, contacts and dielectric
     /// storage require their corresponding coupled owners. This is first-order
     /// thermal/electrical time discretization, not unconditional stability or
     /// measured-material validation. Refine mesh, time and solve tolerances.
@@ -486,13 +490,17 @@ impl ConductionThermalNetwork<'_> {
                 .ok_or_else(|| invalid("electrical receiver lacks a caloric binding"))?;
             for knot in binding.curve.knots() {
                 check(cancel)?;
-                if knot.liquid_mass_fraction != 0.0
-                    || (finite(cell.mass_kg / knot.bulk_density_kg_m3)? - cell.geometry.volume_m3)
-                        .abs()
-                        > self.volume_tolerance_m3
+                if knot.liquid_mass_fraction != 0.0 && binding.point.liquid_fraction_axis.is_none() {
+                    return Err(invalid(
+                        "non-solid electrical charts require an explicit liquid mass fraction coordinate",
+                    ));
+                }
+                if (finite(cell.mass_kg / knot.bulk_density_kg_m3)? - cell.geometry.volume_m3)
+                    .abs()
+                    > self.volume_tolerance_m3
                 {
                     return Err(invalid(
-                        "fixed electrical geometry requires a solid chart with matching constant density",
+                        "fixed electrical geometry requires matching constant density through every phase",
                     ));
                 }
             }
@@ -518,12 +526,19 @@ impl ConductionThermalNetwork<'_> {
             let binding = bindings
                 .get(&cell)
                 .ok_or_else(|| invalid("electrical receiver lacks a material binding"))?;
+            if original.liquid_mass_fraction_axis().is_some()
+                && original.liquid_mass_fraction_axis() != binding.point.liquid_fraction_axis
+            {
+                return Err(invalid(
+                    "electrical phase coordinate must be driven by the same caloric liquid mass fraction",
+                ));
+            }
             let phase = *phases
                 .get(&cell)
                 .ok_or_else(|| invalid("electrical receiver lacks endpoint phase"))?;
-            if !phase.is_fully_solid() {
+            if !phase.is_fully_solid() && binding.point.liquid_fraction_axis.is_none() {
                 return Err(invalid(
-                    "fixed electrical geometry cannot follow a phase change",
+                    "non-solid electrical states require an explicit liquid mass fraction coordinate",
                 ));
             }
             let point = binding

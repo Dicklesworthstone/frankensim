@@ -627,3 +627,12 @@ one problem. Fixed geometry, symmetric DC and static external-condition limits
 remain; no Hall response or out-of-plane closure is inferred. Four focused
 tests cover independent rotated fields, current traces, heterogeneous resistance,
 isotropic degeneration, missing principal sources and inconsistent frames.
+
+The same static field owner also admits an explicitly retained liquid-mass-
+fraction coordinate from the shared conductor material type. Its physical
+owner must supply that actual coordinate; no arbitrary source axis becomes
+fixed merely by appearing in a query. All other source conditions retain the
+existing static admission. The field remains a stationary snapshot; latent
+enthalpy evolution, fixed-volume phase admission and circuit feedback belong
+to the existing `fs-couple` thermal owner. No phase geometry, phase-interface
+resistance or automatic electrical mixture law is inferred here.
