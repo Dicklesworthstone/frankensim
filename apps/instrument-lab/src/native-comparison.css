@@ -1,0 +1,14 @@
+.nc-panel { margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid var(--line, #444); }
+.nc-panel h4 { margin: 0 0 .5rem; }
+.nc-panel .btn-row { flex-wrap: wrap; gap: .5rem; }
+.nc-panel input[type="text"] { min-width: 12rem; flex: 1; padding: .5rem; }
+.nc-captures { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; margin: 1rem 0; }
+.nc-source { max-height: 18rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .75rem; }
+.nc-control { display: flex; align-items: center; flex-wrap: wrap; gap: .75rem; margin: .75rem 0; }
+.nc-control input[type="range"] { flex: 1; min-width: 8rem; }
+.nc-panel [aria-pressed="true"] { outline: 2px solid currentColor; outline-offset: 1px; }
+.nc-metrics { line-height: 1.6; }
+@media (max-width: 600px) { .nc-captures { grid-template-columns: 1fr; } }
+.nc-panel input[type="text"] { background: var(--ink-1); color: var(--ivory); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); }
+.nc-captures > div { min-width: 0; overflow-wrap: anywhere; }
+.nc-metrics.nw-refused { color: var(--ember, #b34426); }

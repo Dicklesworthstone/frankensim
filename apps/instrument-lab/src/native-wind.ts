@@ -7,10 +7,11 @@ import materialReedDgSource from "../../../crates/fs-couple/examples/material_mo
 import stringExampleSource from "../../../crates/fs-couple/examples/material_strings/pluck-and-bow.material-strings?raw";
 import layeredStringSource from "../../../crates/fs-couple/examples/material_strings/relaxing-layered-strings.material-strings?raw";
 import shearStringSource from "../../../crates/fs-couple/examples/material_strings/shear-layer-bow.material-strings?raw";
-import { nativeWindStatus, renderNativeWindBundle, type NativeWindStatus, type NativeWindAttachment, type NativeWindGasSources, type NativeStringProfiles } from "./native-wind-client.mjs";
+import { nativeWindStatus, renderNativePerformance, type NativeWindStatus, type NativeWindAttachment, type NativeWindGasSources, type NativeStringProfiles } from "./native-wind-client.mjs";
 import { el } from "./util";
 import { createNativeGasControls } from "./native-wind-gases";
 import { createNativeStringProfiles } from "./native-string-profiles";
+import { createNativeComparisonPanel } from "./native-comparison";
 
 const EXAMPLES = [
   {
@@ -125,6 +126,9 @@ export function createNativeWindPanel(): HTMLElement {
     attachmentInfo, attachmentList);
   type Attached = NativeWindAttachment & { sha256: string };
   let attachments: Attached[] = [];
+  let replacing: Attached | null = null;
+  const replacementFile = el("input", {type:"file", "aria-label":"Replace an attached source without changing its path"});
+  replacementFile.hidden = true;
   const attachmentIdentity = (): string => JSON.stringify(attachments.map(file => [file.path, file.sha256]));
   const gas = createNativeGasControls(() => edited());
   const profiles = createNativeStringProfiles(() => edited());
@@ -138,6 +142,8 @@ export function createNativeWindPanel(): HTMLElement {
   const playback = el("div", { class: "nw-playback" }, audio, download, renderedFrom, renderedFiles);
   playback.hidden = true;
   cancel.hidden = true;
+  const comparison = createNativeComparisonPanel(() => audio.pause());
+  audio.addEventListener("play", () => comparison.stop());
 
   let status: NativeWindStatus | null = null;
   let checking: AbortController | null = null;
@@ -252,6 +258,7 @@ export function createNativeWindPanel(): HTMLElement {
     const controller = new AbortController();
     rendering = controller;
     audio.pause();
+    comparison.stop();
     showResult("Rendering your performance from its material, gas and geometry data…");
     controls();
     let timedOut = false;
@@ -261,10 +268,21 @@ export function createNativeWindPanel(): HTMLElement {
     }, connected.timeoutMs + 5000);
     void (async () => {
       try {
-        const wave = await renderNativeWindBundle(submitted, submittedFiles, connected, {renderer:submittedRenderer,
+        const native = await renderNativePerformance(submitted, submittedFiles, connected, {renderer:submittedRenderer,
           decimate:submittedDecimate, gasSources:submittedGas, stringProfiles:submittedProfiles}, controller.signal);
         if (rendering !== controller || controller.signal.aborted) return;
-        const nextUrl = URL.createObjectURL(wave);
+        let details = submittedFiles.length
+          ? "Rendered source files: " + submittedFiles.map(file => `${file.path} · ${file.bytes.byteLength.toLocaleString()} bytes · SHA-256 ${file.sha256}`).join("\n")
+          : "This render used no attached source files.";
+        if (submittedGas) details += "\nGas associations: " + submittedGas.components
+          .map(component => `${component.speciesPath} / ${component.nasa9Path} / ${component.transportPath}`).join("; ")
+          + ` · phase ${submittedGas.phase} · water ${submittedGas.waterSpecies ?? "none"}`;
+        if (submittedProfiles) details += "\nString profiles: " + Object.entries(submittedProfiles)
+          .map(([role, path]) => `${role}: ${path}`).join("; ");
+        await comparison.setCurrent(native, sourceName,
+          `Performer: ${submittedRenderer} · native decimation: ${submittedDecimate}\n${details}\n\nOriginal performance:\n${submitted}`, controller.signal);
+        if (rendering !== controller || controller.signal.aborted) return;
+        const nextUrl = URL.createObjectURL(native.wave);
         clearPreview();
         previewUrl = nextUrl;
         renderedSource = submitted;
@@ -273,20 +291,13 @@ export function createNativeWindPanel(): HTMLElement {
         renderedGasIdentity = submittedGasIdentity;
         renderedProfileIdentity = submittedProfileIdentity;
         renderedRenderer = submittedRenderer;
-        renderedFiles.textContent = submittedFiles.length
-          ? "Rendered source files: " + submittedFiles.map(file => `${file.path} · ${file.bytes.byteLength.toLocaleString()} bytes · SHA-256 ${file.sha256}`).join("\n")
-          : "This render used no attached source files.";
-        if (submittedGas) renderedFiles.textContent += "\nGas associations: " + submittedGas.components
-          .map(component => `${component.speciesPath} / ${component.nasa9Path} / ${component.transportPath}`).join("; ")
-          + ` · phase ${submittedGas.phase} · water ${submittedGas.waterSpecies ?? "none"}`;
-        if (submittedProfiles) renderedFiles.textContent += "\nString profiles: " + Object.entries(submittedProfiles)
-          .map(([role, path]) => `${role}: ${path}`).join("; ");
+        renderedFiles.textContent = details;
         audio.src = nextUrl;
         download.href = nextUrl;
         download.download = `${sourceName.replace(/\.[^.]*$/, "") || "physical"}-render.wav`;
         playback.hidden = false;
         edited();
-        showResult("Render complete. Press play to listen, or download the WAV.");
+        showResult("Render complete. Listen above or keep this result as reference A to compare a material or atmosphere change below.");
       } catch (error) {
         if (rendering !== controller) return;
         showResult(controller.signal.aborted
@@ -349,6 +360,11 @@ export function createNativeWindPanel(): HTMLElement {
         attached.path = path.value; gas.setAttachments(attachments.map(file => file.path));
         profiles.setAttachments(attachments.map(file => file.path)); edited();
       });
+      const replace = el("button", {type:"button", class:"btn"}, "Replace…");
+      replace.addEventListener("click", () => {
+        if (rendering || loadingFile) return;
+        replacing = attached; replacementFile.click();
+      });
       const remove = el("button", { type: "button", class: "btn" }, "Remove");
       remove.addEventListener("click", () => {
         attachments = attachments.filter(file => file !== attached);
@@ -356,7 +372,7 @@ export function createNativeWindPanel(): HTMLElement {
       });
       attachmentList.append(el("div", { class: "nw-attachment" }, path,
         el("span", { class: "small muted", title: `SHA-256 ${attached.sha256}` },
-          `${attached.bytes.byteLength.toLocaleString()} bytes · ${attached.sha256.slice(0, 12)}…`), remove));
+          `${attached.bytes.byteLength.toLocaleString()} bytes · ${attached.sha256.slice(0, 12)}…`), replace, remove));
     }
     controls();
   };
@@ -390,6 +406,31 @@ export function createNativeWindPanel(): HTMLElement {
       showResult("Source files could not be read. Your previous attachments are unchanged.", true);
     }).finally(() => { loadingFile = false; controls(); });
   });
+  replacementFile.addEventListener("change", () => {
+    const selected = replacementFile.files?.[0], target = replacing;
+    replacementFile.value = ""; replacing = null;
+    if (!selected || !target || !attachments.includes(target) || rendering || loadingFile) return;
+    const maximumFile = Math.min(8 * 1024 * 1024, status?.maximumAttachmentFileBytes ?? 8 * 1024 * 1024);
+    const maximumTotal = Math.min(32 * 1024 * 1024, status?.maximumAttachmentBytes ?? 32 * 1024 * 1024);
+    const otherBytes = attachments.reduce((sum, file) => sum + (file === target ? 0 : file.bytes.byteLength), 0);
+    if (!selected.size || selected.size > maximumFile || otherBytes + selected.size > maximumTotal) {
+      showResult("Replacement exceeds the source-file limit. The original material remains attached.", true);
+      return;
+    }
+    loadingFile = true; controls();
+    void selected.arrayBuffer().then(async buffer => {
+      const digest = await crypto.subtle.digest("SHA-256", buffer);
+      const sha256 = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+      const index = attachments.indexOf(target);
+      if (index === -1) return;
+      // Swap bytes, never the declared path. Existing gas/profile associations
+      // and performance references survive; earlier render snapshots stay intact.
+      attachments[index] = {path:target.path, bytes:new Uint8Array(buffer), sha256};
+      drawAttachments(); edited();
+      showResult(`Replaced ${target.path}. Render again to hear the new source; reference A is unchanged.`);
+    }).catch(() => showResult("The replacement could not be read. The original material remains attached.", true))
+      .finally(() => { loadingFile = false; controls(); });
+  });
   file.addEventListener("change", () => {
     const selected = file.files?.[0];
     file.value = "";
@@ -420,6 +461,7 @@ export function createNativeWindPanel(): HTMLElement {
     checking?.abort();
     rendering?.abort();
     clearPreview();
+    comparison.dispose();
   });
   window.addEventListener("pageshow", (event) => {
     if (event.persisted) void checkConnection();
@@ -444,8 +486,8 @@ export function createNativeWindPanel(): HTMLElement {
     el("div", { class: "nw-source-head" }, el("label", { for: "native-wind-source" }, "Performance source"),
       sourceInfo),
     source, attachmentPanel, profiles.element, gas.element, decimation,
-    el("div", { class: "btn-row nw-actions" }, render, cancel, open, attach, reset, check, file, attachmentFile),
-    result, playback);
+    el("div", { class: "btn-row nw-actions" }, render, cancel, open, attach, reset, check, file, attachmentFile, replacementFile),
+    result, playback, comparison.element);
   drawAttachments();
   edited();
   void checkConnection();
