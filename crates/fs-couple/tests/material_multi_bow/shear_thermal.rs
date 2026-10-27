@@ -875,3 +875,6 @@ fn drive_heat_route_and_late_source_refusals_preserve_stretch_heat_and_pressure_
         assert_eq!(heat.cells(), reference_heat.cells());
     });
 }
+
+#[path = "shear_thermal/performance.rs"]
+mod performance;

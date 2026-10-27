@@ -227,3 +227,6 @@ fn incomplete_layer_declarations_sources_bands_and_opening_do_not_fall_back_to_d
         assert_eq!(calls, 0);
     });
 }
+
+#[path = "shear_layers/contact_thermal.rs"]
+mod contact_thermal;

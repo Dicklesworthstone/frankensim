@@ -66,7 +66,7 @@ class MaterialPreparation(unittest.TestCase):
         # This executable is an I/O witness, not a mock physical model. It checks
         # the actual staged files received by the subprocess and records them.
         executable = root / "material_strings"
-        executable.write_text("#!/usr/bin/env python3\nimport json, sys\nfrom pathlib import Path\np=Path(sys.argv[1])\nprint(json.dumps({'performance':p.read_text(),'wire':(p.parent/'wire.fsmatpk').read_text(),'args':sys.argv[3:]}))\nPath(sys.argv[2]).write_bytes(b'render witness')\n")
+        executable.write_text("#!/usr/bin/env python3\nimport json, sys\nfrom pathlib import Path\np=Path(sys.argv[1])\nt=Path(sys.argv[sys.argv.index('--contact-thermal')+1])\nprint(json.dumps({'performance':p.read_text(),'wire':(p.parent/'wire.fsmatpk').read_text(),'args':sys.argv[3:],'thermal':t.read_bytes().hex()}))\nPath(sys.argv[2]).write_bytes(b'render witness')\n")
         executable.chmod(0o755)
         original = (EXAMPLES / "pluck.material-strings").read_text()
         source = root / "source.material-strings"
@@ -76,12 +76,18 @@ class MaterialPreparation(unittest.TestCase):
         other = root / "other.fsmatpk"
         other.write_bytes(b"different-density-and-stiffness")
         gas = "mixture 293.15 50662.5 mole 3 N2 0.7 O2 0.2 He 0.1"
+        thermal = root / "source.contact-thermal"
+        thermal.write_bytes(b"frankensim-contact-thermal-v1\r\nboundary adiabatic\r\n")
         args = ["--renderer", str(executable), "--performance", str(source), "--out", str(root / "run"),
-                "--gas-record", gas, "--pack", f"wire.fsmatpk={other}", "--full-scale-pa", "5"]
+                "--gas-record", gas, "--pack", f"wire.fsmatpk={other}", "--full-scale-pa", "5",
+                "--contact-thermal", str(thermal)]
         self.assertEqual(R.main(args), 0)
         witness = json.loads((root / "run/render.log").read_text())
         self.assertIn("gas " + gas, witness["performance"])
         self.assertEqual(witness["wire"], "different-density-and-stiffness")
+        self.assertEqual(witness["thermal"], thermal.read_bytes().hex())
+        self.assertEqual((root / "run/contact-thermal.profile").read_bytes(), thermal.read_bytes())
+        self.assertEqual(witness["args"], ["--contact-thermal", str(root / "run/contact-thermal.profile")])
         self.assertEqual(R.row(witness["performance"].splitlines(), "string"), R.row(original.splitlines(), "string"))
         self.assertEqual(source.read_text(), original)
         with self.assertRaises(FileExistsError):

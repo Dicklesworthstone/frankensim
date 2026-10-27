@@ -84,7 +84,7 @@ impl Inputs {
     ) -> Result<MultiBowStringBank> {
         poll(gate)?;
         self.preflight(spec)?;
-        let requirements = [
+        let mut requirements = vec![
             Requirement::try_new(
                 SHEAR_LAYER_MODULUS_PROPERTY,
                 Pressure::DIMS,
@@ -101,6 +101,9 @@ impl Inputs {
                 Admit::StrictlyPositive,
             )?,
         ];
+        if spec.contact_thermal {
+            requirements.push(Requirement::try_new("density", Density::DIMS, Admit::StrictlyPositive)?);
+        }
         let mut bindings = Vec::with_capacity(spec.bow_contact_count());
         for (port, track) in spec.schedule.tracks().iter().enumerate() {
             poll(gate)?;

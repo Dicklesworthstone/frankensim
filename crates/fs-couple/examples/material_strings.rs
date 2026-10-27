@@ -12,6 +12,8 @@ mod stops;
 mod bow_interfaces;
 #[path = "material_strings/shear_layers.rs"]
 mod shear_layers;
+#[path = "material_strings/contact_thermal.rs"]
+mod contact_thermal;
 #[path = "material_strings/bridge_interfaces.rs"]
 mod bridge_interfaces;
 #[path = "material_strings/translational_bridges.rs"]
@@ -530,13 +532,16 @@ fn main()->Result<()> {
     if raw.get(1).is_some_and(|a| a=="assemble-shell") { return assemble_shell(&raw[2..]); }
     let (args, gas_options)=thermochemical::Options::extract_os(&raw)?;
     if args.len()<3 {
-        return Err("usage: material_strings PERFORMANCE NEW_OUTPUT.wav [--body-profile PROFILE] [--stop-profile PROFILE] [--observer-store DIR] [--bow-trace NEW_FILE] [--gas-component SPECIES NASA9 TRANSPORT --gas-water none|ID --gas-phase frozen|liquid-water]".into());
+        return Err("usage: material_strings PERFORMANCE NEW_OUTPUT.wav [--body-profile PROFILE] [--stop-profile PROFILE] [--observer-store DIR] [--bow-trace NEW_FILE] [--contact-thermal PROFILE] [--gas-component SPECIES NASA9 TRANSPORT --gas-water none|ID --gas-phase frozen|liquid-water]".into());
     }
     if gas_options.record.is_some() {
         return Err("material-string gas records belong in the performance file".into());
     }
     let (store_dir,options)=path_option(&args[3..],"--observer-store")?;
     let (trace_path,options)=path_option(&options,"--bow-trace")?;
+    let (thermal_path,options)=path_option(&options,"--contact-thermal")?;
+    let thermal_profile=thermal_path.map(|p|contact_thermal::Profile::parse(
+        &read_bounded(p,contact_thermal::MAX_BYTES)?)).transpose()?;
     let (body_path,stop_path)=stops::profile_paths(&options)?;
     let mut profile=body_path.map(|p|body::Profile::parse(&read_bounded(p,body::MAX_SHELL_BYTES)?)).transpose()?;
     if let Some(dir)=store_dir {
@@ -549,6 +554,7 @@ fn main()->Result<()> {
     let gas_registry=gas_sources.registry(&gas_bindings);
     let mut spec=input::Spec::parse_with_gas_sources(
         &read_bounded(path,input::MAX_INPUT_BYTES)?,gas_registry.as_ref())?;
+    spec.contact_thermal=thermal_profile.is_some();
     let gate=CancelGate::new_clock_free();let pool=fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     let mut remaining=input::MAX_TOTAL_PACK_BYTES;
     if let Some(stops) = &stop_profile { stops.validate_performance(&spec,&gate)?; }
@@ -578,6 +584,8 @@ fn main()->Result<()> {
             Ok(NormalizedPack::from_bytes(&bytes)?)
         })
     })?;
+    let contact_heat=thermal_profile.as_ref().map(|profile|profile.prepare(&ready,&gate)).transpose()?;
+    if let Some(heat)=&contact_heat { heat.describe(); }
     for (path,source) in &ready.catalog {
         eprintln!("source={path:?}; pack={:?}; hash={}; artifact={}",source.pack.pack_id(),
             source.pack.content_hash(),source.pack.source_artifact());
@@ -596,7 +604,7 @@ fn main()->Result<()> {
     eprintln!("bow_friction={:?}",ready.spec.friction);
     for port in 0..ready.spec.bow_contact_count() {
         if let Some(layer)=ready.performance.bank().bow_shear_layer(port) {
-            eprintln!("bow_shear_layer_port={port}; source={}; area_m2={}; thickness_m={}; frozen_T_K={}; stiffness_N_m={}; yield_N={}; plastic_resistance_N_s_m={}; max_elastic_shear={}",
+            eprintln!("bow_shear_layer_port={port}; source={}; area_m2={}; thickness_m={}; initial_T_K={}; stiffness_N_m={}; yield_N={}; plastic_resistance_N_s_m={}; max_elastic_shear={}",
                 layer.resolved().identity(),layer.area_m2(),layer.thickness_m(),layer.temperature_kelvin(),
                 layer.stiffness_n_m(),layer.yield_force_n(),layer.plastic_resistance_n_s_m(),layer.maximum_elastic_shear_strain());
         }
@@ -699,11 +707,17 @@ fn main()->Result<()> {
     let written=match trace_path {
         Some(path)=>{
             let mut trace=std::io::BufWriter::new(OpenOptions::new().write(true).create_new(true).open(path)?);
-            let written=ready.write_traced(output,&mut trace,&gate);
+            let written=match &contact_heat {
+                Some(heat)=>heat.write(&mut ready,output,Some(&mut trace),&gate),
+                None=>ready.write_traced(output,&mut trace,&gate),
+            };
             trace.flush()?;
             written
         },
-        None=>ready.write(output,&gate),
+        None=>match &contact_heat {
+            Some(heat)=>heat.write(&mut ready,output,None,&gate),
+            None=>ready.write(output,&gate),
+        },
     };
     let (_,summary)=written.map_err(|e|format!("WAV not completed; keep/discard its partial prefix explicitly: {e}"))?;
     eprintln!("samples={}; rate_Hz={}; clips={}; full_scale_Pa={}",summary.samples,summary.sample_rate_hz,

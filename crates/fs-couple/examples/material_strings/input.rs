@@ -196,6 +196,8 @@ pub struct Spec {
     /// One-way receiver through the body profile's closed acoustic skin; nothing is fed back.
     pub one_way_observer: Option<OneWayShellObserverOptions>,
     pub cavity: Option<MaterialBodyCavity>, pub friction: bow_interfaces::Inputs,
+    /// The explicit contact-thermal profile requires original film density.
+    pub contact_thermal: bool,
     pub bow_ribbon: Option<(f64, usize)>, pub forces: Option<StringForceProgram>,
     pub bow_fibers: Option<fibers::Input>,
     pub schedule: GestureSchedule,
@@ -864,7 +866,7 @@ impl Spec {
             gas, gas_record, body, strings, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
             rotational_bridges, translational_bridges, cylinder_gas_loading, prepared_linear, residual_flexibility, geometric_stretching,
             longitudinal_waves, longitudinal_loss, bending_memory, body_radiation, shell_bem_angular_refinement,
-            shell_observer, shell_receiver_quadrature, one_way_observer, cavity, friction, bow_ribbon, bow_fibers,
+            shell_observer, shell_receiver_quadrature, one_way_observer, cavity, friction, contact_thermal: false, bow_ribbon, bow_fibers,
             forces, schedule };
         spec.validate_shell_observer()?;
         if let Some(layers) = spec.friction.shear_layers() { layers.preflight(&spec)?; }

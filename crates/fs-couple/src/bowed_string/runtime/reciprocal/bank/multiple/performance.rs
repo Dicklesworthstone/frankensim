@@ -231,6 +231,19 @@ impl PressureRenderer for MultiBowPerformance {
         Ok(())
     }
     fn block(&mut self, output: &mut [f64]) -> Result<(), RenderError> {
+        self.block_with_step(output, |bank, forces, drives| {
+            bank.system.step(forces, drives)
+                .map(|frame| frame.observer_pressure_pa).map_err(RenderError::Friction)
+        })
+    }
+}
+
+impl MultiBowPerformance {
+    // One schedule, force, motion and observer loop for ordinary and thermally
+    // coupled rendering. A specialized step must commit the SAME bank once.
+    fn block_with_step(&mut self, output: &mut [f64],
+        mut step: impl FnMut(&mut MultiBowStringBank, &[f64], &[FrictionDrive])
+            -> Result<f64, RenderError>) -> Result<(), RenderError> {
         let count = u64::try_from(output.len()).map_err(|_| render_invalid("multi-bow output size exceeds its clock"))?;
         self.validate_sample_count(count)?;
         if output.is_empty() { return Err(RenderError::EmptyBlock); }
@@ -262,13 +275,13 @@ impl PressureRenderer for MultiBowPerformance {
             let result = if let Some(stations) = &self.stop_station_motion {
                 self.bank.step_with_stop_stations(forces, &self.candidate, &stations.candidate,
                     self.stop_motion.as_ref().map(|motion| motion.candidate.as_slice()))
+                    .map(|frame| frame.observer_pressure_pa)
             } else if let Some(motion) = &self.stop_motion {
                 self.bank.system.step_with_obstacle_offsets(forces, &self.candidate, &motion.candidate)
-                    .map_err(RenderError::Friction)
-            } else { self.bank.system.step(forces, &self.candidate).map_err(RenderError::Friction) };
+                    .map(|frame| frame.observer_pressure_pa).map_err(RenderError::Friction)
+            } else { step(&mut self.bank, forces, &self.candidate) };
             match result {
-                Ok(frame) => {
-                    let compact_pressure = frame.observer_pressure_pa;
+                Ok(compact_pressure) => {
                     *slot = if let Some(observer) = self.shell_observer.as_mut() {
                         match observer.pressure(&self.bank.system) {
                             Ok(pressure) => pressure,
@@ -300,3 +313,7 @@ pub mod stations;
 
 /// Source-bound finite-distance closed-shell pressure on the same accepted clock.
 pub mod observation;
+
+
+/// Source-bound contact heat on the original scheduled pressure/PCM route.
+pub mod thermal;

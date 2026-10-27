@@ -85,7 +85,8 @@ contact solve, optional fiber compliance, body/cavity motion and pressure
 observer carry that response into PCM. Changing the pack or layer geometry
 does not require changing Rust.
 
-The `state` row supplies the frozen temperature and material query. Every
+The `state` row supplies the initial temperature and material query. Without
+an explicit contact-thermal profile it stays frozen. Every
 selected property needs explicit temperature support and applicability from
 static storage through the sample clock's Nyquist frequency. Constants and
 temperature-only curves are supported. Pressure-, rate-, strain- or
@@ -98,8 +99,12 @@ geometry/tangent frame, and an elastic shear limit in `(0, 0.1]`. Prescribed
 bow loads must stay positive; contact-loaded bows instead author zero extra
 load and use the simultaneously solved normal reaction. Opening refuses
 atomically, preserving stored layer energy and accepted history. Layer
-opening/recontact, wear, thermal evolution, migration and nonlinear string
-geometric storage are not yet composed. Prepared-linear propagation is
+opening/recontact, wear, migration and nonlinear string geometric storage
+are not yet composed. Explicit finite contact heating is available through
+`--contact-thermal PROFILE`; see [CONTACT_THERMAL.md](CONTACT_THERMAL.md).
+That route uses the same source cards, canonical schedule and pressure/PCM
+owner, with source heat capacity, density and conductivity, retained strain,
+and material temperature feedback. No thermal constants are inferred. Prepared-linear propagation is
 supported within its existing independent restrictions.
 
 The supplied layer is **manufactured integration data**. Its constants are

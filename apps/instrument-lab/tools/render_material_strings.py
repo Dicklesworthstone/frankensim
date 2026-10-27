@@ -134,6 +134,7 @@ def main(argv=None) -> int:
     parser.add_argument("--pack-root", type=Path)
     parser.add_argument("--pack", action="append", default=[], metavar="REFERENCED_PATH=SOURCE_PACK")
     parser.add_argument("--body-profile", type=Path)
+    parser.add_argument("--contact-thermal", type=Path, help="original finite contact-heat profile; thermal properties come from the same assembly packs")
     parser.add_argument("--shell-table", type=Path)
     parser.add_argument("--assembly-options", type=Path)
     parser.add_argument("--gas-record", help="exact shared gas record after 'gas', e.g. 'mixture 293.15 101325 mole 2 N2 0.8 O2 0.2'")
@@ -181,6 +182,7 @@ def main(argv=None) -> int:
         audio[3] = repr(args.full_scale_pa)
         lines[i] = " ".join(audio)
     text = "\n".join(lines) + "\nschedule\n" + schedule
+    thermal_profile = args.contact_thermal.read_bytes() if args.contact_thermal else None
     output = args.out.expanduser().resolve()
     output.mkdir(parents=True, exist_ok=False)
     profile = args.body_profile.read_text() if args.body_profile else ""
@@ -193,6 +195,10 @@ def main(argv=None) -> int:
         text = assembly_geometry(text, result.stdout)
     elif profile:
         (output / "body.profile").write_text(profile)
+    if thermal_profile is not None:
+        (output / "contact-thermal.profile").write_bytes(thermal_profile)
+    # Thermal cells refer to the SAME assembly packs. Do not introduce an
+    # independent thermal pack loader or bypass the native card-identity check.
     stage_packs([text, profile], args.pack_root or args.performance.parent, args.pack, output)
     source = output / "performance.material-strings"
     source.write_text(text)
@@ -200,6 +206,8 @@ def main(argv=None) -> int:
     command = [renderer, str(source), str(wav)]
     if profile:
         command += ["--body-profile", str(output / "body.profile")]
+    if thermal_profile is not None:
+        command += ["--contact-thermal", str(output / "contact-thermal.profile")]
     for paths in args.gas_component:
         command += ["--gas-component", *(str(Path(p).expanduser().resolve()) for p in paths)]
     for key in ("water", "phase"):
