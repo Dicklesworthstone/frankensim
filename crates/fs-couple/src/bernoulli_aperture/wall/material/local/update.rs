@@ -163,7 +163,7 @@ fn prepare(
     })
 }
 
-enum GasRefresh {
+pub(super) enum GasRefresh {
     Lossless,
     UniformDiffusion(f64),
     SpatialDiffusion(f64),
@@ -172,7 +172,7 @@ enum GasRefresh {
 /// Prepare the same live gas transfer and certified clock for either wall
 /// source layout. Native wall coordinates and all immutable source assignments
 /// remain with their existing owner; the new field retains its gas catalog.
-fn prepare_gas(
+pub(super) fn prepare_gas(
     duct: &DgDuct,
     state: &DgState,
     propagator: &DgPropagator,

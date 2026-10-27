@@ -15,6 +15,7 @@ use fs_vfit::relaxation::RelaxationImpedanceSpec;
 
 mod update;
 mod orthotropic;
+pub(super) mod finite_gas;
 
 /// Immutable material, thickness, restraint and complete local loss law.
 ///

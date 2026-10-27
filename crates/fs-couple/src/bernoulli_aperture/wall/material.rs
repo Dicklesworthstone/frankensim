@@ -20,6 +20,10 @@ pub use relaxation::WallRelaxation;
 pub(crate) mod source;
 mod local;
 pub use local::{LocalMaterialWall, MaterialWallDg, RegionalMaterialWallDg};
+pub use local::finite_gas::{
+    FiniteGasDgBackground, FiniteGasDgError, FiniteGasDgLoss, FiniteGasDgSolve,
+    FiniteGasDgStep,
+};
 
 use fs_vfit::relaxation::RelaxationImpedanceSpec;
 use super::{WallPatch, invalid};

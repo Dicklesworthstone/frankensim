@@ -166,6 +166,13 @@ impl AxialGasField {
         &self.model
     }
 
+    /// Original frozen-gas or liquid-water admission policy. Runtime consumers
+    /// must retain this policy when rebuilding a field from a new gas state.
+    #[must_use]
+    pub const fn phase(&self) -> ThermochemicalPhase {
+        self.phase
+    }
+
     /// Length of the supplied field [m].
     #[must_use]
     pub fn length_m(&self) -> f64 {

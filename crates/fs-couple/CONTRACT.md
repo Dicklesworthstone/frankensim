@@ -7947,3 +7947,39 @@ invariance, closed-flow equality, anchored continuation, late refusal and
 cancellation/retry. Independent scalar references and Rust syntax parsing were
 run in the editing session. Native Rust compilation/tests were not run because
 Rust/Cargo and DSR/RCH were unavailable.
+
+
+### Finite thermochemical background and continuing material-wall acoustics
+
+`MaterialWallDg` and `RegionalMaterialWallDg` expose
+`step_with_finite_gas_controlled` and the closed-inventory
+`step_with_finite_gas_heat_controlled` convenience. The original native
+propagator advances one sample in the initial medium. A repeatable original-owner
+background proposal receives that original finite parcel, the same dt and trial
+work out of gas; it returns a complete endpoint with separately identified heat
+and transported enthalpy plus original reports/companion candidates. Existing
+scalar feedback closes gas work against the actual native wave/diffusion
+parameter-work increment. The heat convenience reuses the original source gas's
+caloric/EOS/model-and-work update; no new thermal or flow solver is introduced.
+
+Measured extensive gas storage, native storage, original port work and
+unpartitioned loss independently close before the source wrapper, gas, state and
+same-clock propagator publish together. Complete initial source-state equality,
+actual circular volume, source/phase policy, fixed geometry, temperature/work/
+error budgets and cancellation are admitted. Final nodal and native port
+observations and ledger use the accepted gas, while held-port integrals retain
+their actual substep. Kelvin/Maxwell wall histories and supported uniform
+diffusion histories survive, and parameter work appears once across later ledgers.
+
+Native dissipation remains exported energy: there is no inferred gas/wall
+thermal partition. Scope is uniform well-mixed, fixed-volume, first-order
+partitioned acoustics; no mean-flow momentum, pressure prestress, new material
+kinetics, wall heating or spatial background update. External callbacks must
+return immutable companion proposals and publish those only after acceptance.
+
+Three integration regression definitions cover independent variable-Cp
+heating/storage, original nozzle species transfer with continuing wall/diffusion
+memory, and late transactional refusals. All eight changed Rust files passed
+syntax parsing. Independent manufactured-profile arithmetic was evaluated;
+it is not a native acoustic trajectory execution. Native Rust compilation/tests
+were not run because Rust/Cargo and DSR/RCH were unavailable.

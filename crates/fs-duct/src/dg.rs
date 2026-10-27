@@ -1182,6 +1182,25 @@ impl DgDuct {
         self.gas_field.as_ref()
     }
 
+    /// Instantaneous conjugate pressures of every actual declared port [Pa].
+    /// This uses the current native pressure loading columns and physical state,
+    /// including after a material update; it neither advances time nor infers a
+    /// new integrated port work. A foreign state or nonfinite observation refuses.
+    pub fn port_pressures(&self, state: &DgState) -> Result<Vec<(PortId, f64)>, DuctError> {
+        if state.operator_identity != self.operator_identity()
+            || state.tilde.len() != self.total_dofs()
+        {
+            return Err(DuctError::BadParameter { what: "DG port observation requires the current operator state" });
+        }
+        self.ports.iter().map(|(id, column)| {
+            let pressure: f64 = column.iter().zip(&state.tilde).map(|(b, x)| b * x).sum();
+            if !pressure.is_finite() {
+                return Err(DuctError::BadParameter { what: "DG port pressure is unrepresentable" });
+            }
+            Ok((*id, pressure))
+        }).collect()
+    }
+
     /// Inlet boundary condition at $x = 0$.
     #[must_use]
     pub const fn inlet(&self) -> DgBoundary {
