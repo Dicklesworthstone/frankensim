@@ -57,6 +57,23 @@ impl BowedStringCard {
         lower_backbone(cx, &string, gas, sample_rate_hz, 0.0)
     }
 
+    // A multilayer Prony source takes the same elastic/gas backbone as a
+    // homogeneous source. Only the bank may use it: that owner immediately
+    // installs every original layer arm in its exact material-memory state.
+    pub(crate) fn concentric_relaxation_backbone_with_gas(
+        cx: &Cx<'_>, template: PrestressedString,
+        section: &fs_material::section::relaxation::ConcentricPronySection,
+        prestress: StringPrestress, gas: &GasState, sample_rate_hz: u32,
+    ) -> Result<Self, AcousticRealizeError> {
+        poll(cx)?;
+        let string = crate::material_assembly::concentric::with_concentric_prony_section(
+            template, section, prestress)?;
+        let mut elastic = string.clone();
+        elastic.relaxation_bending = None;
+        validate_incremental_string(&elastic)?;
+        lower_backbone(cx, &string, gas, sample_rate_hz, 0.0)
+    }
+
     // Private to a bank constructor which immediately binds the original
     // source's material histories. Memoryless cards retain their refusal.
     pub(crate) fn material_relaxation_backbone_with_gas(

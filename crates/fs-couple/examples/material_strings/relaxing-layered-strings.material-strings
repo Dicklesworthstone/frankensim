@@ -1,0 +1,31 @@
+frankensim-material-strings-v3
+audio 48000 4096 0.01 128
+state 293.15 1000
+gas mixture 293.15 101325 mole 2 N2 0.8 O2 0.2
+body body.fsmatpk 0.4 0.3 0.001 2 1
+strings 2
+string relaxing-wire.fsmatpk 0.5 0.0003 tension 20 4 2 0.8 3000 0.1
+section bonded 0.0002 1
+layer relaxing-wire.fsmatpk 0.0003
+polarizations two 0.6 0.8 1 0
+bending-loss prony 1 relaxing_bending_modulus bending_relaxation_time
+string relaxing-wire.fsmatpk 0.5 0.0003 tension 22 4 2 0.74 3000 0.1
+section bonded 0.0002 1
+layer relaxing-wire.fsmatpk 0.0003
+polarizations two 0.6 0.8 1 0
+bending-loss prony 1 relaxing_bending_modulus bending_relaxation_time
+cavity physical-neck 0.003 0.01 0.02 flanged unflanged 1
+friction stribeck 0.8 0.4 0.1 0
+forces preload 1 1
+port 0 0.2 surface 0.002
+force 0 0 0
+schedule
+frankensim-gesture-schedule-v1
+control_rate_hz	700
+tracks	1
+track	bow	bow	0
+initial	bow	0e0	0e0	2e-1
+events	3
+event	1e-2	5e-3	bow	1e-2	1e-2	2e-1
+event	2e-2	1e-2	bow	-1e-2	5e-3	2e-1
+event	4e-2	0e0	bow	0e0	0e0	2e-1

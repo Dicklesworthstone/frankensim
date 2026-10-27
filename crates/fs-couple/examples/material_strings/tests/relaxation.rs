@@ -8,7 +8,7 @@ use fs_scenario::acoustic::BendingRelaxationProperties;
 const LOSS: &str = "bending-loss prony 1 relaxing_bending_modulus bending_relaxation_time";
 
 fn source_pack(name: &str, delta: f64, time: f64, band: f64, omit: Option<&str>) -> NormalizedPack {
-    let exclusive = name == "wire.fsmatpk" || name == "relaxing-wire.fsmatpk";
+    let exclusive = matches!(name, "wire.fsmatpk" | "relaxing-wire.fsmatpk" | "layered-sleeve.fsmatpk");
     let base = pack(name,7800.0,200_000.0,exclusive.then_some(ETA));
     let mut claims = base.claims().clone();
     for (key,dims,value) in [(EQUILIBRIUM,Pressure::DIMS,200e9),
@@ -242,10 +242,6 @@ fn selected_sources_unsupported_models_and_duplicate_laws_refuse_before_they_can
         unsupported.prepared_linear=Some(PreparedModalBudget {
             max_modes:64,max_dense_bytes:16_777_216,max_multiply_terms:16_777_216,
         });
-        let mut layered=selected();
-        layered.strings[0].section=input::WireSection::Bonded {
-            core_radius_m:0.0002,sleeves:vec![input::WireLayer {pack:"sleeve.fsmatpk".into(),outer_radius_m:0.0003}],
-        };
         let plain=spec();
         let mut twice=selected();
         twice.bending_memory=Some(bending_memory::Input::new(4,vec![
@@ -261,7 +257,7 @@ fn selected_sources_unsupported_models_and_duplicate_laws_refuse_before_they_can
                 vec![("relaxing_bending_modulus".into(),"bending_relaxation_time".into())],
                 &too_many.strings).unwrap(),
         ],&too_many.strings).unwrap());
-        for rejected in [unsupported,layered,twice,too_many] {
+        for rejected in [unsupported,twice,too_many] {
             let mut calls=0;
             assert!(rejected.compile(cx,gate,|name| {
                 calls+=1; Ok(source_pack(name,80e9,0.001,200_000.0,None))
@@ -270,3 +266,6 @@ fn selected_sources_unsupported_models_and_duplicate_laws_refuse_before_they_can
         }
     });
 }
+
+#[path = "relaxation/layered.rs"]
+mod layered;

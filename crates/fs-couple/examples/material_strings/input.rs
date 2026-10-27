@@ -924,15 +924,21 @@ impl Spec {
         for wire in &self.strings {
             wire.bending_loss.validate()?;
             if let BendingLoss::Prony { properties } = &wire.bending_loss {
-                if matches!(wire.section, WireSection::Bonded { .. }) {
-                    return Err("exclusive string Prony bending requires a homogeneous specimen or close-wound core; bonded strings use layer memory".into());
-                }
+                let layers = match &wire.section {
+                    WireSection::Bonded { sleeves, .. } => sleeves.len() + 1,
+                    WireSection::Homogeneous | WireSection::CloseWound { .. } => 1,
+                };
                 if self.prepared_linear.is_some() {
                     return Err("string material memory requires the exact owner; prepared-linear has no internal-strain states".into());
                 }
+                let arms = layers.checked_mul(properties.len())
+                    .ok_or("complete layer relaxation-arm count overflow")?;
+                if arms > fs_material::section::relaxation::MAX_SECTION_RELAXATION_BRANCHES {
+                    return Err("bonded string exceeds the original section relaxation-arm ceiling".into());
+                }
                 let planes = if wire.polarizations.is_some() { 2 } else { 1 };
                 states = wire.bending_modes.checked_mul(planes)
-                    .and_then(|n| n.checked_mul(properties.len()))
+                    .and_then(|n| n.checked_mul(arms))
                     .and_then(|n| states.checked_add(n))
                     .ok_or("complete string memory-state count overflow")?;
                 if states > 256 {

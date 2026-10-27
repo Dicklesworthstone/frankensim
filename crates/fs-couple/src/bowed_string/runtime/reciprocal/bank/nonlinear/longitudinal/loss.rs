@@ -28,6 +28,7 @@ impl LongitudinalMaterialLoss {
                     outer_radius_m: s.radius_m(), material: s.material().clone(),
                 }]).map_err(|e| ImpactError::Owner(e.to_string()))?,
             MaterialStringSource::Concentric { section, .. } => section.elastic().clone(),
+            MaterialStringSource::ConcentricProny { section, .. } => section.elastic().clone(),
             MaterialStringSource::Wound(_) => return Err(invalid("winding axial loss needs its own resolved constitutive model")),
         };
         section.with_axial_viscosity(viscosity_property)

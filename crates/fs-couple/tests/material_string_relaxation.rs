@@ -459,3 +459,6 @@ fn zero_shear_arms_preserve_pressure_and_unsupported_history_consumers_refuse() 
             .into_nonlinear(cx,gas(),48_000,0.2,initial,gate).is_err());
     });
 }
+
+#[path = "material_string_relaxation/exclusive.rs"]
+mod exclusive;

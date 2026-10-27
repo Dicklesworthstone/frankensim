@@ -55,6 +55,7 @@ impl MaterialStringSource {
             Self::Homogeneous(s) => s.string().axial_stiffness_n,
             Self::Wound(s) => s.string().axial_stiffness_n,
             Self::Concentric { section, .. } => section.elastic().axial_stiffness_n(),
+            Self::ConcentricProny { section, .. } => section.elastic().axial_stiffness_n(),
         };
         if !value.is_finite() || value <= 0.0 {
             return Err(invalid("material string stretching requires its positive source-derived EA"));

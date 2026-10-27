@@ -278,7 +278,7 @@ impl MaterialStringSource {
         let count = match bending {
             Self::Homogeneous(s) => s.string().n_modes,
             Self::Wound(s) => s.string().n_modes,
-            Self::Concentric { template, .. } => template.n_modes,
+            Self::Concentric { template, .. } | Self::ConcentricProny { template, .. } => template.n_modes,
             Self::WithPolarizations(_) | Self::WithTorsion(_) => {
                 return Err(MaterialStatePointError::InvalidDerived {
                     quantity: "two transverse planes require one original unpolarized source",
@@ -307,7 +307,7 @@ impl MaterialStringSource {
         match self {
             Self::WithPolarizations(p) => p.source.torsion_source(),
             Self::WithTorsion(t) => Some(t),
-            Self::Homogeneous(_) | Self::Wound(_) | Self::Concentric { .. } => None,
+            Self::Homogeneous(_) | Self::Wound(_) | Self::Concentric { .. } | Self::ConcentricProny { .. } => None,
         }
     }
 

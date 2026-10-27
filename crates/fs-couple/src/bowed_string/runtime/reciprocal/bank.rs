@@ -57,6 +57,16 @@ pub enum MaterialStringSource {
         /// Independent support prescription; no hidden pitch normalization.
         prestress: StringPrestress,
     },
+    /// Perfectly bonded annuli with exclusive per-layer bending memory.
+    /// Every source arm survives in the shared exact mechanical owner.
+    ConcentricProny {
+        /// Span and modal resolution, without inherited internal damping.
+        template: PrestressedString,
+        /// Original layer states, geometry, selectors and independent spectra.
+        section: fs_material::section::relaxation::ConcentricPronySection,
+        /// Applied force or fixed extension, with no implicit pitch tuning.
+        prestress: StringPrestress,
+    },
 }
 impl MaterialStringSource {
     // Reconstruct the same transverse source when another medium supplies
@@ -72,6 +82,10 @@ impl MaterialStringSource {
                 crate::material_assembly::concentric::with_concentric_kelvin_voigt_section(
                     template.clone(), section, *prestress,
                 ).map_err(ReciprocalStringError::Material),
+            Self::ConcentricProny { template, section, prestress } =>
+                crate::material_assembly::concentric::with_concentric_prony_section(
+                    template.clone(), section, *prestress,
+                ).map_err(ReciprocalStringError::Material),
         }
     }
     fn modes(&self) -> usize {
@@ -79,7 +93,7 @@ impl MaterialStringSource {
             Self::WithTorsion(t) => t.total_modes(),
             Self::Homogeneous(s) => s.string().n_modes,
             Self::Wound(s) => s.string().n_modes,
-            Self::Concentric { template, .. } => template.n_modes }
+            Self::Concentric { template, .. } | Self::ConcentricProny { template, .. } => template.n_modes }
     }
     fn lower(&self, cx: &Cx<'_>, gas: &GasState, rate: u32)
         -> Result<BowedStringCard, ReciprocalStringError>
@@ -94,6 +108,8 @@ impl MaterialStringSource {
             Self::Wound(s) => BowedStringCard::from_wound_material_specimen(cx, s, gas, rate),
             Self::Concentric { template, section, prestress } =>
                 BowedStringCard::from_concentric_material_section(cx, template.clone(), section, *prestress, gas, rate),
+            Self::ConcentricProny { .. } =>
+                return Err(invalid("this scalar string-card consumer cannot retain layered bending history")),
         }.map_err(ReciprocalStringError::Material)
     }
 }

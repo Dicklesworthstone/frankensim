@@ -133,6 +133,8 @@ fn geometry_and_band(source: &MaterialStringSource)
         }
         MaterialStringSource::Concentric { section, .. } =>
             Ok((section.elastic().outer_radius_m(), section.omega_band_rad_s())),
+        MaterialStringSource::ConcentricProny { section, .. } =>
+            Ok((section.elastic().outer_radius_m(), section.omega_band_rad_s())),
     }
 }
 

@@ -12,6 +12,7 @@ pub use thermal::{CompiledThermoelasticConcentricAssembly,
     compile_concentric_thermal_material_assembly, with_concentric_thermal_extension};
 
 use fs_material::section::{ConcentricElasticSection, ConcentricKelvinVoigtSection};
+use fs_material::section::relaxation::ConcentricPronySection;
 use fs_scenario::{AcousticAssembly, PrestressedString};
 use crate::acoustic_realize::{AcousticRealizeError, RealizedAssembly};
 use crate::string_specimen::StringPrestress;
@@ -91,6 +92,44 @@ pub(super) fn with_section_coefficients(
     input.bending_stiffness_n_m2 = bending;
     input.width_m = positive(2.0 * outer_radius, "section radiating width must be finite and positive")?;
     Ok(input)
+}
+
+/// Bind the original per-layer bending spectra and the same section/support law.
+///
+/// Every arm keeps its own integrated stiffness and relaxation time. No
+/// Kelvin-Voigt coefficient, equivalent material, or averaged time is inferred.
+/// Consumers must retain the material histories or refuse this description.
+/// Original layer identities and selectors remain in `section`.
+///
+/// # Errors
+/// The original elastic section/support admission rejects inherited internal
+/// loss, unsupported geometry or nonphysical support prescriptions.
+pub fn with_concentric_prony_section(
+    input: PrestressedString,
+    section: &ConcentricPronySection,
+    prestress: StringPrestress,
+) -> Result<PrestressedString, AcousticRealizeError> {
+    let mut string = with_concentric_section(input, section.elastic(), prestress)?;
+    string.relaxation_bending = Some(concentric_prony_bending(section));
+    Ok(string)
+}
+
+/// Shared mechanical lowering of an already admitted source spectrum.
+pub(crate) fn concentric_prony_bending(
+    section: &ConcentricPronySection,
+) -> fs_scenario::acoustic::PronyBending {
+    fs_scenario::acoustic::PronyBending {
+        branches: section.branches().iter().map(|arm|
+            fs_scenario::acoustic::BendingRelaxationBranch {
+                relaxing_stiffness_n_m2: arm.relaxing_stiffness_n_m2,
+                relaxation_time_s: arm.relaxation_time_s,
+            }).collect(),
+        omega_band_rad_s: section.omega_band_rad_s(),
+        // There is no single equivalent material: the owning section retains
+        // every layer's actual source state, spatial assignment and selectors.
+        material_state_identity: None,
+        source_properties: None,
+    }
 }
 
 /// An ordinary material-compiled assembly with its layered section retained.

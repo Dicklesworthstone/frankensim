@@ -22,6 +22,21 @@ impl MaterialStringSource {
             Self::Homogeneous(s) => s.string().relaxation_bending,
             Self::Wound(s) => s.string().relaxation_bending,
             Self::Concentric { .. } => None,
+            Self::ConcentricProny { section, .. } =>
+                Some(crate::material_assembly::concentric::concentric_prony_bending(section)),
+        }
+    }
+
+    // The homogeneous adapter admits eight arms; a source-bound section
+    // already admits at most 128 across its physical layers. The complete
+    // bank's 256-state and setup budgets still bound the projected histories.
+    fn bending_relaxation_arm_limit(&self) -> usize {
+        match self {
+            Self::WithPolarizations(p) => p.source().bending_relaxation_arm_limit(),
+            Self::WithTorsion(t) => t.bending().bending_relaxation_arm_limit(),
+            Self::ConcentricProny { .. } =>
+                fs_material::section::relaxation::MAX_SECTION_RELAXATION_BRANCHES,
+            _ => 8,
         }
     }
 
@@ -37,6 +52,10 @@ impl MaterialStringSource {
                     .map_err(ReciprocalStringError::Material),
             Self::Wound(s) if s.string().relaxation_bending.is_some() =>
                 BowedStringCard::wound_relaxation_backbone_with_gas(cx, s, gas, rate)
+                    .map_err(ReciprocalStringError::Material),
+            Self::ConcentricProny { template, section, prestress } =>
+                BowedStringCard::concentric_relaxation_backbone_with_gas(
+                    cx, template.clone(), section, *prestress, gas, rate)
                     .map_err(ReciprocalStringError::Material),
             _ => self.lower(cx, gas, rate),
         }
@@ -82,7 +101,7 @@ impl MaterialStringBankSource {
         for (member, card) in self.strings.iter().zip(cards) {
             poll(gate)?;
             if let Some(law) = member.source.bending_relaxation() {
-                if law.branches.len() > 8 {
+                if law.branches.len() > member.source.bending_relaxation_arm_limit() {
                     return Err(invalid("string memory exceeds the bounded source-arm count"));
                 }
                 let positive = law.branches.iter().filter(|b| b.relaxing_stiffness_n_m2 > 0.0).count();

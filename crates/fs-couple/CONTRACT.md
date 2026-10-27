@@ -3980,8 +3980,8 @@ and execution remain required; no measured violin/cello/bass fidelity is claimed
 ### Original string-material spectra in the shared instrument owner
 
 An original homogeneous `ResolvedStringSpecimen` selected with
-`with_prony_bending_loss` now retains that exclusive constitutive law when
-lowered into `ReciprocalStringBank`. A private elastic-backbone lowering path
+`with_prony_bending_loss`, or a bonded `MaterialStringSource::ConcentricProny`,
+retains its exclusive constitutive law when lowered into `ReciprocalStringBank`. A private elastic-backbone lowering path
 checks the original material identity, property selection and loss exclusivity;
 public memoryless card and impact consumers still refuse the same law. Each
 positive source arm contributes one internal strain per retained transverse
@@ -4003,8 +4003,14 @@ support through the complete instantaneous coupled frequency bound.
 The ordinary performer accepts `bending-loss prony COUNT MODULUS TIME ...`
 after each string's versioned section/polarization rows. It requires original
 equilibrium Young modulus and source excess-modulus/time pairs, without
-requiring unselected bending viscosity. The existing `bending-memory` block
-remains the additional per-layer path for homogeneous or bonded sections.
+requiring unselected bending viscosity. Each bonded layer resolves those roles on its own original material state.
+The common `ConcentricPronySection` supplies every `DeltaE * I_layer` and
+independent relaxation time, with no inferred bending viscosity or averaged
+time constant. Its geometry and source receipts also feed torsion, both
+transverse planes, support laws, cylinder gas loading and longitudinal dynamics.
+The section's 128-arm bound and the complete owner's 256-history/setup ceilings
+remain enforced. The existing `bending-memory` block remains the additional
+per-layer path for homogeneous or bonded sections with selected Kelvin viscosity.
 Automatic, explicit and regional body history allowances share one checked
 setup budget before material I/O. Static preload initializes relaxed history;
 material reactions reach the common body, neighboring strings and PCM writer.

@@ -179,6 +179,7 @@ fn section(source: &MaterialStringSource) -> Result<ConcentricElasticSection, Re
             vec![ConcentricMaterialLayer { outer_radius_m: s.radius_m(), material: s.material().clone() }])
             .map_err(owner),
         MaterialStringSource::Concentric { section, .. } => Ok(section.elastic().clone()),
+        MaterialStringSource::ConcentricProny { section, .. } => Ok(section.elastic().clone()),
         MaterialStringSource::Wound(s) => Ok(s.section().core().elastic().clone()),
     }
 }

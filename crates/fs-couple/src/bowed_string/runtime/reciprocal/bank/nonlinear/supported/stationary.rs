@@ -22,6 +22,7 @@ pub(super) fn split_loss(source: &NonlinearMaterialString, remainder_hz: f64,
         MaterialStringSource::Homogeneous(s) => 0.5*s.string().width_m,
         MaterialStringSource::Wound(s) => s.section().outer_radius_m(),
         MaterialStringSource::Concentric { section, .. } => section.elastic().outer_radius_m(),
+        MaterialStringSource::ConcentricProny { section, .. } => section.elastic().outer_radius_m(),
         MaterialStringSource::WithTorsion(_) => return Err(invalid("nested torsion is not a physical gas-drag source")),
         MaterialStringSource::WithPolarizations(_) => return Err(invalid("nested polarizations are not a physical gas-drag source")),
     };

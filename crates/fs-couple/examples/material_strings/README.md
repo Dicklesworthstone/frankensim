@@ -313,6 +313,25 @@ The selected path does not require `kelvin_voigt_bending_viscosity`;
 `relaxing-wire.tsv` deliberately has none. Torsion retains its independently
 selected shear modulus and shear viscosity.
 
+Bonded concentric sections use this same exclusive selection. Each physical
+layer resolves the declared property roles on its own material pack: it supplies
+its own equilibrium modulus, excess moduli and time constants. The original
+section integrates each `DeltaE * I_layer`; each time survives in the exact
+solver. Neither a common time constant nor a scalar viscosity is fitted.
+Two transverse planes use the same physical section with separate strain
+histories; torsion remains an independent sourced channel. All layers together
+admit at most 128 source arms, and all declared string/body histories share the
+existing 256-state limit and setup budget.
+
+`relaxing-layered-strings.material-strings` uses that same synthetic pack in
+the core and sleeve of two bonded strings, with two transverse planes per
+string. It can be rendered with the command above after changing the input and
+output filenames. Assigning a different pack to a `layer` row changes only
+that layer's density, stiffness and relaxation spectrum. The finished radius,
+gas loading, support prescription and shared bridge/body/cavity mechanics stay
+on their original construction path. This fixture is a bonded-section example;
+it does not assert that a sliding helical winding is a bonded annulus.
+
 The existing `bending-memory` / `string-memory` block before `cavity` remains
 available for additional per-layer memory alongside explicitly selected
 Kelvin–Voigt loss, including perfectly bonded sections and close-wound cores. See
@@ -337,9 +356,8 @@ in the performance changes the constitutive history loading the common body.
 Its pressure is what the existing PCM writer receives. Static preload
 initializes relaxed histories, and neighboring-string motion uses the same
 reciprocal mechanics. The exclusive per-string selection supports homogeneous
-strings and close-wound cores on the exact solver; bonded sections use the
-existing additional-memory interface and `prepared-linear` refuses constitutive
-histories. Core relaxation in a wound string keeps the original helix mass,
+strings, bonded sections and close-wound cores on the exact solver;
+`prepared-linear` refuses constitutive histories. Core relaxation in a wound string keeps the original helix mass,
 finished gas-loading radius and wrapping material identity. All participating
 source bands must cover the complete instantaneous coupled frequency bound. These models
 supply bending relaxation; the torsional selection below supplies independent

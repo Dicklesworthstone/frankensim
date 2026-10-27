@@ -136,8 +136,23 @@ impl input::Wire {
                 // complete expansion cards remain in Ready.spec / Ready.catalog.
                 // All later mechanical rebuilds use this same resultant, E/rho,
                 // layer geometry and material loss. No live heat evolution is implied.
-                MaterialStringSource::Concentric { template: template(self),
-                    section: elastic.with_kelvin_voigt_bending(ETA)?, prestress }
+                match &self.bending_loss {
+                    input::BendingLoss::KelvinVoigt =>
+                        MaterialStringSource::Concentric { template: template(self),
+                            section: elastic.with_kelvin_voigt_bending(ETA)?, prestress },
+                    input::BendingLoss::Prony { properties } => {
+                        // The same declared property roles are resolved in EACH
+                        // original layer. Values and time constants remain local;
+                        // no viscosity claim is requested or synthesized.
+                        let bindings = vec![fs_material::section::relaxation::LayerBendingRelaxationProperties {
+                            equilibrium_modulus: fs_couple::string_specimen::EQUILIBRIUM_YOUNG_MODULUS_PROPERTY.into(),
+                            branches: properties.iter().map(|p|
+                                (p.modulus.clone(), p.relaxation_time.clone())).collect(),
+                        }; elastic.layers().len()];
+                        MaterialStringSource::ConcentricProny { template: template(self),
+                            section: elastic.with_prony_bending(&bindings)?, prestress }
+                    }
+                }
             }
         };
         // Torsion resolves from these SAME original layer states, not a second

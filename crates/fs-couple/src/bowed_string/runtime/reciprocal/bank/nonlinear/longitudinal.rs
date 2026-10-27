@@ -285,6 +285,12 @@ impl MaterialStringSource {
                 }
                 Ok(section.elastic().line_density_kg_m())
             }
+            Self::ConcentricProny { section, .. } => {
+                for layer in section.elastic().layers() {
+                    elastic_source(&layer.material, band)?;
+                }
+                Ok(section.elastic().line_density_kg_m())
+            }
         }
     }
 }
