@@ -202,13 +202,6 @@ fn layer_material_swaps_reach_nonlinear_string_pressure_without_resetting_interf
             assert_eq!(wav.into_inner(), fs_couple::pcm_wav::encode_pcm16_wav(&expected, 48_000, 0.01).unwrap().0);
             assert_eq!(report.samples, 256);
 
-            // The thermal endpoint owner remains a separate admitted rung.
-            let mut unsupported = spec(); unsupported.contact_thermal = true;
-            let mut reads = 0;
-            assert!(unsupported.compile(cx, gate, |name| {
-                reads += 1; Ok(pack(name, 7800.0, 200_000.0, None))
-            }).err().unwrap().to_string().contains("contact-thermal"));
-            assert_eq!(reads, 0);
         }
     });
 }

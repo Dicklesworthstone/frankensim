@@ -65,11 +65,7 @@ impl Inputs {
         Ok(())
     }
     pub fn preflight(&self, spec: &input::Spec) -> Result<()> {
-        self.validate_tracks(&spec.schedule)?;
-        if spec.contact_thermal && (spec.geometric_stretching.is_some() || spec.longitudinal_waves.is_some()) {
-            return Err("contact-thermal material layers are not yet composed with nonlinear geometric storage".into());
-        }
-        Ok(())
+        self.validate_tracks(&spec.schedule)
     }
     /// Reuse the original bulk-pack catalog and shared byte budget. Resolve all
     /// declarations before attaching them in one complete immutable binding.

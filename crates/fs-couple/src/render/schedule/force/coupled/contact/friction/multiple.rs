@@ -409,16 +409,23 @@ impl MultiFrictionModalSystem {
             self.frame.sweeps = 1; self.accepted = true;
             return Ok(&self.frame);
         }
-        if self.core.has_nonlinear_potentials() && self.obstacles.as_ref().is_some_and(obstacles::ObstacleSet::has_residual) {
-            return Err(invalid("bound nonlinear storage is not staged with the obstacles' residual compliance").into());
-        }
-        let accepted = if self.core.has_nonlinear_potentials() {
-            self.stage_with_nonlinear(external, drives, obstacle_offsets, gate)?
-        } else {
-            self.stage_multiple(external, drives, obstacle_offsets, gate)?
-        };
+        let accepted = self.stage_constitutive(external, drives, obstacle_offsets, gate)?;
         poll(gate)?;
         Ok(self.publish_step(accepted))
+    }
+
+    // Both ordinary playback and thermal coefficient trials stage the same
+    // complete constitutive owner. Neither caller may bypass its exclusions or
+    // replace nonlinear string storage with a linear-only mechanical trial.
+    fn stage_constitutive(&mut self, external: &[f64], drives: &[FrictionDrive],
+        obstacle_offsets: Option<&[f64]>, gate: Option<&CancelGate>)
+        -> Result<MultiFrictionFrame, ModalFrictionError> {
+        if self.core.has_nonlinear_potentials() {
+            if self.obstacles.as_ref().is_some_and(obstacles::ObstacleSet::has_residual) {
+                return Err(invalid("bound nonlinear storage is not staged with the obstacles' residual compliance").into());
+            }
+            self.stage_with_nonlinear(external, drives, obstacle_offsets, gate)
+        } else { self.stage_multiple(external, drives, obstacle_offsets, gate) }
     }
 
     // Shared by the ordinary step and the closed layer/enthalpy transaction.

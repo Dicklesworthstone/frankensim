@@ -333,9 +333,11 @@ impl MultiFrictionModalSystem {
     ///
     /// Actual solved normal reactions, series hair storage/loss, material
     /// memory, body/cavity reaction and the pressure observer use the original
-    /// simultaneous solve. The exposed ordinary dry/isothermal step is unchanged.
-    /// Dynamic footprint motion and separate nonlinear geometric storage are
-    /// outside this fixed-layer adapter. A refusal leaves accepted mechanics,
+    /// simultaneous solve. Bound nonlinear mechanical storage uses its original
+    /// discrete-gradient iteration at each thermal endpoint; its material and
+    /// strain law stay frozen while the declared film/receiving cells evolve.
+    /// Dynamic footprint motion remains outside this fixed-layer adapter.
+    /// A refusal leaves accepted mechanics,
     /// all source/history/heat, last pressure and both clocks unchanged.
     #[allow(clippy::too_many_arguments)]
     pub fn step_with_layer_thermal_network<'t, S, E>(
@@ -412,10 +414,9 @@ impl MultiFrictionModalSystem {
             ]
             .iter()
             .any(|v| !v.is_finite() || *v < 0.0)
-            || self.core.has_nonlinear_potentials()
         {
             return Err(LayerThermalError::Invalid(
-                "incompatible layer clocks, thermal unknowns, work controls or nonlinear storage",
+                "incompatible layer clocks, thermal unknowns or work controls",
             ));
         }
         let original_layers = self.shear_layers.clone();
@@ -493,7 +494,7 @@ impl MultiFrictionModalSystem {
                     }
                     let mut system = mechanics.borrow_mut();
                     let original = std::mem::replace(&mut system.shear_layers, layers);
-                    let staged = system.stage_multiple(external, drives, None, Some(gate));
+                    let staged = system.stage_constitutive(external, drives, None, Some(gate));
                     let candidate_layers = std::mem::replace(&mut system.shear_layers, original);
                     // Accepted source/strain was restored even if mechanics refused.
                     let frame = staged?;

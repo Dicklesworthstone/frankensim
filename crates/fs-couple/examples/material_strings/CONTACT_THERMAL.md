@@ -105,7 +105,14 @@ compression, solid material, the original sample clock, canonical bow/force
 controls, and any selected body/cavity pressure observer. It cannot compose
 moving stop/footprint trajectories, thermal expansion or melt/recontact
 history; those require corresponding transport/work terms in the physical
-owner. Unsupported nonlinear mechanical storage also refuses in that owner.
+owner. Geometric stretching and retained longitudinal waves use their original
+nonlinear mechanical/contact solve at every proposed thermal endpoint. Each
+trial starts from accepted string, film and drive histories, and film plastic
+heat, reversible affine-modulus exchange and explicitly routed drive loss enter
+the same finite enthalpy network. String/body constitutive coefficients stay at
+their declared source state; this contact-only model does not infer bulk string
+heating or thermal expansion. Solid caloric state, affine film `G(T)` and the
+existing residual-compliance exclusion remain required.
 
 The render log records material/caloric identities, actual cell masses and
 initial temperatures, then final temperatures and stored enthalpies.

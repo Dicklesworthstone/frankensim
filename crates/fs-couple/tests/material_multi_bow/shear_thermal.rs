@@ -43,6 +43,15 @@ fn coating_law(
     modulus_knots: Option<Vec<(f64, f64)>>,
     elastic_yield_pa: Option<f64>,
 ) -> (MaterialCard, ResolvedHeatCapacityCurve) {
+    coating_law_with_capacity(variable_loss, modulus_knots, elastic_yield_pa, CP)
+}
+
+fn coating_law_with_capacity(
+    variable_loss: bool,
+    modulus_knots: Option<Vec<(f64, f64)>>,
+    elastic_yield_pa: Option<f64>,
+    heat_capacity: f64,
+) -> (MaterialCard, ResolvedHeatCapacityCurve) {
     let mut claims = ClaimSet::new();
     for (name, dims, cold, hot, varies) in [
         ("density", Density::DIMS, DENSITY, DENSITY, false),
@@ -70,8 +79,8 @@ fn coating_law(
         (
             "specific_heat_capacity",
             SPECIFIC_HEAT_CAPACITY_DIMS,
-            CP,
-            CP,
+            heat_capacity,
+            heat_capacity,
             false,
         ),
         (
@@ -137,7 +146,7 @@ fn coating_law(
             selection: SelectionPolicy::SingleClaimOnly,
         },
         SolidLiquidPhase::Solid,
-        -20.0 * CP,
+        -20.0 * heat_capacity,
         1e-8,
     )
     .unwrap();
@@ -172,6 +181,15 @@ fn instrument(cx: &Cx<'_>, gate: &CancelGate, card: &MaterialCard) -> MultiBowSt
     reacting_surface(joint(cx, gate, 7800.0), gate)
         .with_bow_shear_layers(vec![(0, layer(card))], gate)
         .unwrap()
+}
+
+fn nonlinear_instrument(cx: &Cx<'_>, gate: &CancelGate, card: &MaterialCard) -> MultiBowStringBank {
+    use fs_couple::render::schedule::force::coupled::contact::friction::nonlinear::NonlinearModalConfig;
+    let bank = base(cx, gate, 7800.0).with_geometric_stretching(0.2,
+        NonlinearModalConfig { max_iterations: 64, maximum_generalized_force: 1e5,
+            force_absolute_tolerance: 1e-11, force_relative_tolerance: 1e-10 }, gate)
+        .unwrap().with_additional_bows(vec![extra()], joint_limits(), gate).unwrap();
+    reacting_surface(bank, gate).with_bow_shear_layers(vec![(0, layer(card))], gate).unwrap()
 }
 
 fn thermal<'a>(
@@ -376,11 +394,68 @@ fn layer_heat_requeries_same_material_and_changes_actual_instrument_pressure() {
 }
 
 #[test]
+fn nonlinear_string_and_film_internal_energy_close_while_heat_capacity_changes_pressure() {
+    with_cx(|cx, gate| {
+        let (card, caloric) = coating_law_with_capacity(true,
+            Some(vec![(280.0, 8.4e6), (340.0, 7.2e6)]), None, 10.0);
+        let (slow_card, slow_caloric) = coating_law_with_capacity(true,
+            Some(vec![(280.0, 8.4e6), (340.0, 7.2e6)]), None, CP);
+        let mut bank = nonlinear_instrument(cx, gate, &card);
+        let mut slow = nonlinear_instrument(cx, gate, &slow_card);
+        let (mut heat, mut slow_heat) =
+            (thermal(caloric.curve(), false), thermal(slow_caloric.curve(), false));
+        let bound = binding(&card, caloric.curve());
+        let slow_bound = binding(&slow_card, slow_caloric.curve());
+        let original = bank.bow_shear_layer(0).unwrap().clone();
+        let forces = vec![0.0; bank.system().mode_count()];
+        let drives = [drive(0.001, 0.1), drive(0.0, 0.0)];
+        let (mut work, mut external_loss, mut difference, mut strain) = (0.0, 0.0, 0.0, 0.0_f64);
+        for _ in 0..256 {
+            let f = bank.step_with_layer_thermal_network(&mut heat, &bound,
+                controls(1), &[0.0], &forces, &drives, gate, other).unwrap();
+            let reference = slow.step_with_layer_thermal_network(&mut slow_heat, &slow_bound,
+                controls(1), &[0.0], &forces, &drives, gate, other).unwrap();
+            let nonlinear = f.mechanics.nonlinear.unwrap();
+            assert!(nonlinear.reaction_residual <= nonlinear.reaction_tolerance);
+            assert!(f.mechanics.energy_residual_j.abs() <= f.mechanics.energy_tolerance_j);
+            assert!(f.total_energy_residual_j.abs() <= controls(1).total_energy_tolerance_j);
+            assert!((f.routed_reversible_heat_j + f.coefficient_free_energy_change_j
+                + f.mechanical_entropy_energy_change_j).abs() < 1e-15);
+            work += f.mechanics.external_work_j + f.mechanics.drive_work_j;
+            external_loss += f.mechanics.network_dissipation_j
+                + f.mechanics.friction_dissipation_j - f.routed_plastic_heat_j;
+            difference += (f.mechanics.observer_pressure_pa - reference.mechanics.observer_pressure_pa).abs();
+            strain = strain.max(nonlinear.nonlinear_energy_j);
+
+            // Independent internal-energy expression for affine G(T), plus
+            // the original complete string/body/cavity/nonlinear storage.
+            let e = bank.system().material_shear_state(0).unwrap().elastic_slip_m();
+            let film_internal = 0.5 * AREA / THICKNESS * 14e6 * (e[0]*e[0] + e[1]*e[1]);
+            let structural = bank.system().total_energy_j().unwrap() - f.mechanics.shear_layer_energy_j;
+            assert!((structural + film_internal + total_heat(&heat) + external_loss - work).abs() < 2e-9);
+        }
+        assert!(strain > 0.0 && difference > 1e-14);
+        assert!(heat.temperature_k(FILM).unwrap() > slow_heat.temperature_k(FILM).unwrap());
+        assert!(slow_heat.temperature_k(FILM).unwrap() > 300.0);
+        assert!(bank.bow_shear_layer(0).unwrap().stiffness_n_m() < original.stiffness_n_m());
+        for (current, initial) in bank.bow_shear_layer(0).unwrap().resolved().properties().iter()
+            .zip(original.resolved().properties()) {
+            assert_eq!(current.answer().receipt.selected, initial.answer().receipt.selected);
+        }
+        assert_eq!(bank.system().samples_rendered(), 256);
+        assert_eq!(heat.time_s(), 256.0 / 48_000.0);
+    });
+}
+
+#[test]
 fn original_network_conducts_film_heat_without_repeating_mechanical_history() {
+  for nonlinear in [false, true] {
     with_cx(|cx, gate| {
         let (card, caloric) = coating(false, false);
-        let mut heated = instrument(cx, gate, &card);
-        let mut ordinary = instrument(cx, gate, &card);
+        let make = || if nonlinear { nonlinear_instrument(cx, gate, &card) }
+            else { instrument(cx, gate, &card) };
+        let mut heated = make();
+        let mut ordinary = make();
         let mut heat = thermal(caloric.curve(), true);
         let bound = binding(&card, caloric.curve());
         let forces = vec![0.0; heated.system().mode_count()];
@@ -400,6 +475,7 @@ fn original_network_conducts_film_heat_without_repeating_mechanical_history() {
                 )
                 .unwrap();
             let reference = ordinary.step(&forces, &drives).unwrap();
+            assert_eq!(f.mechanics.nonlinear.is_some(), nonlinear);
             // Extra endpoint/Jacobian trials do not age mechanical/strain state.
             assert_eq!(
                 f.mechanics.observer_pressure_pa,
@@ -445,13 +521,16 @@ fn original_network_conducts_film_heat_without_repeating_mechanical_history() {
             ordinary.system().samples_rendered()
         );
     });
+  }
 }
 
 #[test]
 fn thermal_and_contact_failures_preserve_all_accepted_instrument_and_heat_state() {
+  for nonlinear in [false, true] {
     with_cx(|cx, gate| {
         let (card, caloric) = coating(true, true);
-        let mut bank = instrument(cx, gate, &card);
+        let mut bank = if nonlinear { nonlinear_instrument(cx, gate, &card) }
+            else { instrument(cx, gate, &card) };
         let mut heat = thermal(caloric.curve(), false);
         let bound = binding(&card, caloric.curve());
         let forces = vec![0.0; bank.system().mode_count()];
@@ -473,6 +552,7 @@ fn thermal_and_contact_failures_preserve_all_accepted_instrument_and_heat_state(
         let old_source = bank.bow_shear_layer(0).unwrap().clone();
         let old_history = bank.system().material_shear_state(0).unwrap().clone();
         let old_frame = bank.system().last_frame().unwrap().clone();
+        assert_eq!(old_frame.nonlinear.is_some(), nonlinear);
         let old_cells = heat.cells().clone();
         let old_time = heat.time_s();
         let assert_unchanged = |bank: &MultiBowStringBank, heat: &DepositionSimulation<'_>| {
@@ -565,6 +645,7 @@ fn thermal_and_contact_failures_preserve_all_accepted_instrument_and_heat_state(
         );
         assert_unchanged(&bank, &heat);
     });
+  }
 }
 
 #[test]
