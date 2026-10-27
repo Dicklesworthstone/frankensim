@@ -6,7 +6,8 @@
 //! coefficients are required, so relative permittivity/permeability cannot be
 //! mistaken for their dimensioned counterparts.
 //!
-//! The model is isotropic, linear, nondispersive and lossless. Fringing, leakage,
+//! The uniform reductions below are isotropic, linear, nondispersive and lossless.
+//! The planar module additionally admits explicitly oriented dielectric sources. Fringing, leakage,
 //! saturation, hysteresis, dielectric loss and geometry evolution require other
 //! laws. Source curves and surfaces may be resolved at fixed temperature,
 //! pressure, composition, moisture and concentration, with typed external roles.
@@ -20,6 +21,8 @@ pub mod permanent;
 pub mod nonlinear;
 /// Source-bound reversible thermal field energy and entropy at fixed geometry.
 pub mod thermal;
+/// Source-backed scalar or oriented planar dielectric response.
+pub mod planar;
 
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::{Dims, QuantitySpec};
@@ -115,9 +118,16 @@ pub fn linear_electric_permittivity(
 pub fn constant_electric_permittivity(
     material: &ResolvedMaterialStatePoint,
 ) -> Result<f64, FieldStorageError> {
-    let value = linear_electric_permittivity(material)?;
-    let source = material.property(ELECTRIC_PERMITTIVITY_PROPERTY)
-        .expect("linear admission retains its source");
+    constant_coefficient(material, ELECTRIC_PERMITTIVITY_PROPERTY, ELECTRIC_PERMITTIVITY_DIMS)
+}
+
+fn constant_coefficient(
+    material: &ResolvedMaterialStatePoint,
+    name: &'static str,
+    dims: Dims,
+) -> Result<f64, FieldStorageError> {
+    let value = coefficient(material, name, dims)?;
+    let source = material.property(name).expect("linear admission retains its source");
     if !source.source_axes().is_empty()
         || source.answer().receipt.decision != fs_matdb::EvaluationDecision::ConstantWithinValidity
     {

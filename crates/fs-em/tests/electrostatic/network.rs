@@ -226,7 +226,7 @@ fn regional_dielectric_swap_changes_actual_multi_capacitor_circuit_dynamics() {
         assert!(reduced.energy_residual_j().abs() < 1e-15);
         for (cell, &value) in epsilon.iter().enumerate() {
             near(
-                matrix.unit_fields()[0].problem().permittivity_f_m()[cell],
+                matrix.unit_fields()[0].problem().permittivity_f_m().unwrap()[cell],
                 value,
             );
             assert_eq!(

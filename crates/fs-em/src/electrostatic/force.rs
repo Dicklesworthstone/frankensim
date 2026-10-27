@@ -3,7 +3,7 @@
 use fs_ga::Wrench;
 use fs_rep_mesh::Metric2;
 
-use super::{ElectricField, ElectrostaticError, poll};
+use super::{ElectricField, ElectrostaticError, PlanarDielectricLaw, poll};
 use crate::{
     force::{
         MaxwellForceLimits,
@@ -63,6 +63,13 @@ impl ElectricField<'_> {
             moment_origin_m,
             limits,
             |inner, outer, vertices| {
+                if !matches!(self.problem().permittivity_laws()[inner], PlanarDielectricLaw::Isotropic)
+                    || !matches!(self.problem().permittivity_laws()[outer], PlanarDielectricLaw::Isotropic)
+                {
+                    return Err(ContourError::Invalid(
+                        "electric force requires an explicitly isotropic exterior dielectric law",
+                    ));
+                }
                 let source = *exterior.get_or_insert(&materials[inner]);
                 if materials[inner] != *source || materials[outer] != *source {
                     return Err(ContourError::Invalid(

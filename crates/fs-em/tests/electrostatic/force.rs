@@ -464,3 +464,46 @@ fn charge_material_budget_and_cancellation_refusals_leave_the_field_intact() {
         ))
     ));
 }
+
+
+#[test]
+fn anisotropic_interior_uses_scalar_collar_but_anisotropic_collar_refuses() {
+    use fs_material::field_storage::planar::PlanarDielectricLaw;
+    let (reference, enclosed, body) = specimen(8, EPSILON, false, DEPTH);
+    let count = reference.mesh().faces().len();
+    let mut materials = reference.materials().to_vec();
+    let mut laws = vec![PlanarDielectricLaw::Isotropic; count];
+    for cell in body {
+        materials[cell] = super::anisotropic::material([2.0 * EPSILON, 4.0 * EPSILON]);
+        laws[cell] = super::anisotropic::law(0.31);
+    }
+    let problem = PlanarElectrostatics::new_with_laws(
+        reference.mesh().clone(), materials, laws, limits(), &mut || false,
+    ).unwrap();
+    let potential = |[x, y]: [f64; 2]| -10.0 * (x + 0.2 * y);
+    let field = problem.solve(
+        &vec![0.0; count], &boundary(&problem, potential), controls(), &mut || false,
+    ).unwrap();
+    let wrench = field.maxwell_wrench(
+        &enclosed, &frame(), [0.0; 3], force_limits(), &mut || false,
+    ).unwrap();
+    assert!(wrench.to_array().iter().all(|value| value.is_finite()));
+
+    // Numerical equality of principal values is insufficient to assign a
+    // mechanical stress convention to a declared orthotropic exterior law.
+    let exterior = PlanarElectrostatics::new_with_laws(
+        reference.mesh().clone(),
+        vec![super::anisotropic::material([EPSILON; 2]); count],
+        vec![super::anisotropic::law(0.31); count],
+        limits(), &mut || false,
+    ).unwrap();
+    let field = exterior.solve(
+        &vec![0.0; count], &boundary(&exterior, potential), controls(), &mut || false,
+    ).unwrap();
+    assert!(matches!(
+        field.maxwell_wrench(&enclosed, &frame(), [0.0; 3], force_limits(), &mut || false),
+        Err(ElectrostaticError::Invalid(
+            "electric force requires an explicitly isotropic exterior dielectric law"
+        ))
+    ));
+}

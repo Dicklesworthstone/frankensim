@@ -7492,10 +7492,10 @@ zero-exchange parity, continued anchored motion/species/energy, and
 budget/domain/caloric/cancellation rollback. The scalar oracle eliminates
 the species and exact held-force wall response algebraically; it does not
 reuse the runtime nonlinear solver. Coefficients are synthetic.
-Runtime Rust parsing completed before the executor became unavailable;
-the newly added tests have received source/API review and independent
-reference arithmetic only. Native compilation and numerical execution
-remain pending.
+An earlier runtime draft passed the pinned Rust syntax parser before the
+executor became unavailable. The final sources and new tests received
+source/API review and independent reference arithmetic only. Native
+compilation and numerical execution remain pending.
 
 This path is first order: chemistry and gas pressure use backward Euler,
 while the structural held-force response retains its native ZOH integration.
@@ -7541,3 +7541,28 @@ a temperature change. Isotropic reference preparation is supported;
 anisotropic finite thermal mapping, coupled evolving thermomechanics,
 inelasticity and nearly-incompressible stabilization remain open. MR58 and
 MR21 remain open.
+
+
+### Directional dielectric storage through the original phase/heat trajectory
+
+The spatial conduction/enthalpy coupling now accepts the explicit dielectric
+laws retained by `PlanarLeakyDielectric`. Its existing complete-bundle
+refresh evaluates actual temperature/liquid fraction and conductivity while
+preserving both principal permittivity claims, their independent material
+frame and the original geometry frame. The original local midpoint `E.J`
+is deposited once into the original enthalpy owner; field storage remains
+`E.epsilon.E/2`. No extra electric state, material epoch or heat credit is
+introduced.
+
+The focused anisotropic dielectric child tests specify two continuing
+charge/phase/heat steps against independent scalar energy/charge elimination,
+scalar and tensor conductivity, independent dielectric-axis substitution,
+source identity and phase-coordinate retention, wrong-frame/missing-source/
+varying-permittivity refusal and late cancellation. The synthetic fixture
+is not experimental calibration. Source/API review and independent scalar
+reference arithmetic completed; reconstructed Rust tests remain unexecuted
+and unparsed in the unavailable executor.
+
+Permittivity and its frame remain source-declared constant through these
+trajectories. Variable-permittivity work and reversible thermal entropy,
+dielectric dispersion and structural motion remain outside this increment.

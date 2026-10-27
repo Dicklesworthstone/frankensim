@@ -33,7 +33,7 @@ pub struct CapacitanceMatrixControls {
 pub struct CapacitanceResponse {
     /// Free electrode charges in the original terminal ordering [C].
     pub terminal_charge_c: Vec<f64>,
-    /// Integral epsilon*|sum(V_i E_i)|²/2 on the original cells [J].
+    /// Integral E.epsilon.E/2 of the superposed field on original cells [J].
     pub energy_j: f64,
 }
 
@@ -356,8 +356,9 @@ impl<'m> PlanarCapacitanceMatrix<'m> {
                 .mesh
                 .face_measure(cell)
                 .ok_or_else(|| invalid("missing original dielectric volume"))?;
-            let epsilon = self.problem.permittivity_f_m[cell];
-            let energy = finite(0.5 * volume * epsilon * e[0].mul_add(e[0], e[1] * e[1]))?;
+            let d = self.problem.permittivity[cell].displacement_c_m2(e);
+            let d = [finite(d[0])?, finite(d[1])?];
+            let energy = finite(0.5 * volume * e[0].mul_add(d[0], e[1] * d[1]))?;
             if energy < 0.0 || e != [0.0; 2] && energy == 0.0 {
                 return Err(invalid("superposed electric energy is not representable"));
             }

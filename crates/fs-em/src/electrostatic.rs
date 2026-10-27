@@ -22,7 +22,10 @@ use fs_feec::{
     weighted2::{CellWeight2, weighted_mass_matrix_2d},
 };
 use fs_material::{
-    field_storage::{ELECTRIC_PERMITTIVITY_DIMS, FieldStorageError, linear_electric_permittivity},
+    field_storage::{
+        ELECTRIC_PERMITTIVITY_DIMS, FieldStorageError,
+        planar::{PlanarDielectricLaw, PlanarPermittivity},
+    },
     state_point::ResolvedMaterialStatePoint,
 };
 use fs_phs::circuit::Branch;
@@ -107,7 +110,9 @@ fn geometry(error: MagneticError) -> ElectrostaticError {
 pub struct PlanarElectrostatics {
     mesh: TriComplex2,
     materials: Vec<ResolvedMaterialStatePoint>,
-    permittivity_f_m: Vec<f64>,
+    permittivity_laws: Vec<PlanarDielectricLaw>,
+    permittivity: Vec<PlanarPermittivity>,
+    scalar_permittivity_f_m: Option<Vec<f64>>,
     stiffness: Csr,
 }
 
@@ -118,11 +123,35 @@ struct ElectricCellResponse {
     energy_j: f64,
 }
 impl PlanarElectrostatics {
-    /// Assemble d0^T M(epsilon) d0 from the SAME absolute SI permittivity law
-    /// admitted by ResolvedCapacitor. Material changes create a new problem.
+    /// Assemble d0^T M(epsilon) d0 from the SAME scalar absolute SI
+    /// permittivity law admitted by ResolvedCapacitor.
     pub fn new(
         mesh: TriComplex2,
         materials: Vec<ResolvedMaterialStatePoint>,
+        limits: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ElectrostaticError> {
+        Self::assemble(mesh, materials, None, limits, cancelled)
+    }
+
+    /// Assemble the SAME native dielectric operator with explicit scalar or
+    /// oriented source laws per cell. Every oriented law names one common mesh
+    /// frame; its material axes need not coincide with any conductivity axes.
+    /// Materials retain every source requirement and state coordinate.
+    pub fn new_with_laws(
+        mesh: TriComplex2,
+        materials: Vec<ResolvedMaterialStatePoint>,
+        laws: Vec<PlanarDielectricLaw>,
+        limits: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ElectrostaticError> {
+        Self::assemble(mesh, materials, Some(laws), limits, cancelled)
+    }
+
+    fn assemble(
+        mesh: TriComplex2,
+        materials: Vec<ResolvedMaterialStatePoint>,
+        laws: Option<Vec<PlanarDielectricLaw>>,
         limits: WeightedAssemblyLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, ElectrostaticError> {
@@ -133,6 +162,7 @@ impl PlanarElectrostatics {
             ));
         }
         if materials.len() != mesh.faces().len()
+            || laws.as_ref().is_some_and(|values| values.len() != materials.len())
             || mesh.vertices().len() > limits.max_dofs
             || mesh.edges().len() > limits.max_dofs
             || mesh.faces().len() > limits.max_cells
@@ -146,15 +176,34 @@ impl PlanarElectrostatics {
                 "one material per triangle and bounded assembly extents required",
             ));
         }
-        let mut permittivity_f_m = Vec::with_capacity(materials.len());
+        let permittivity_laws = laws
+            .unwrap_or_else(|| vec![PlanarDielectricLaw::Isotropic; materials.len()]);
+        let mut permittivity = Vec::with_capacity(materials.len());
         let mut weights = Vec::with_capacity(materials.len());
-        for material in &materials {
+        let mut geometry_frame = None;
+        for (material, law) in materials.iter().zip(&permittivity_laws) {
             poll(cancelled)?;
-            let epsilon =
-                linear_electric_permittivity(material).map_err(ElectrostaticError::Material)?;
-            permittivity_f_m.push(epsilon);
-            weights.push(CellWeight2::Scalar(epsilon));
+            if let Some(frame) = law.frame() {
+                if geometry_frame.is_some_and(|id| id != frame.geometry_frame()) {
+                    return Err(ElectrostaticError::Invalid(
+                        "all oriented dielectric laws must name one mesh-coordinate frame",
+                    ));
+                }
+                geometry_frame = Some(frame.geometry_frame());
+            }
+            let epsilon = law.resolve(material).map_err(ElectrostaticError::Material)?;
+            // Tensor SPD admission stays with the original outward-interval
+            // weighted FEEC owner; the solver never substitutes an average.
+            weights.push(match epsilon {
+                PlanarPermittivity::Scalar(value) => CellWeight2::Scalar(value),
+                PlanarPermittivity::Tensor(matrix) => CellWeight2::Tensor(matrix),
+            });
+            permittivity.push(epsilon);
         }
+        let scalar_permittivity_f_m = permittivity.iter().map(|value| match value {
+            PlanarPermittivity::Scalar(value) => Some(*value),
+            PlanarPermittivity::Tensor(_) => None,
+        }).collect();
         let mass = weighted_mass_matrix_2d(
             &mesh,
             1,
@@ -180,7 +229,9 @@ impl PlanarElectrostatics {
         Ok(Self {
             mesh,
             materials,
-            permittivity_f_m,
+            permittivity_laws,
+            permittivity,
+            scalar_permittivity_f_m,
             stiffness,
         })
     }
@@ -190,8 +241,18 @@ impl PlanarElectrostatics {
     pub fn materials(&self) -> &[ResolvedMaterialStatePoint] {
         &self.materials
     }
-    pub fn permittivity_f_m(&self) -> &[f64] {
-        &self.permittivity_f_m
+    /// Exact original source-law choices, including material/mesh frames.
+    pub fn permittivity_laws(&self) -> &[PlanarDielectricLaw] {
+        &self.permittivity_laws
+    }
+    /// Actual scalar/tensor coefficients in original mesh coordinates [F/m].
+    pub fn permittivity_coefficients(&self) -> &[PlanarPermittivity] {
+        &self.permittivity
+    }
+    /// Scalar view only when EVERY cell declares an isotropic law. A mixed or
+    /// tensor field has no scalar surrogate; use the complete coefficient view.
+    pub fn permittivity_f_m(&self) -> Option<&[f64]> {
+        self.scalar_permittivity_f_m.as_deref()
     }
 
     /// Solve prescribed free charge density [C/m3] and exterior voltage [V].
@@ -285,10 +346,8 @@ impl PlanarElectrostatics {
                     e[axis] = finite((-delta).mul_add(gradients[local][axis], e[axis]))?;
                 }
             }
-            let d = [
-                finite(self.permittivity_f_m[cell] * e[0])?,
-                finite(self.permittivity_f_m[cell] * e[1])?,
-            ];
+            let displacement = self.permittivity[cell].displacement_c_m2(e);
+            let d = [finite(displacement[0])?, finite(displacement[1])?];
             let volume = self
                 .mesh
                 .face_measure(cell)

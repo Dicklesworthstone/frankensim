@@ -19,7 +19,7 @@ use crate::scalar_potential::{self, PotentialError};
 use fs_feec::weighted::WeightedAssemblyLimits;
 use fs_material::{
     conductor::{ResolvedConductorState, planar::PlanarConductorMaterial},
-    field_storage::constant_electric_permittivity,
+    field_storage::planar::PlanarDielectricLaw,
 };
 use fs_solver::{CheckedCgConfig, SolveReport};
 use fs_sparse::Csr;
@@ -104,7 +104,9 @@ fn admit_controls(controls: DielectricRelaxationControls) -> Result<(), Error> {
 
 /// Accepted electric potential/charge, fixed dielectric storage and actual
 /// scalar or oriented conductivity. Each conductor retains the COMPLETE common
-/// source bundle, including its absolute electric_permittivity property.
+/// source bundle, including every selected absolute permittivity coefficient.
+/// Dielectric material axes are selected explicitly and held independently of
+/// the conductor axes; both resolve into the same named mesh-coordinate frame.
 #[derive(Clone)]
 pub struct PlanarLeakyDielectric<C = ResolvedConductorState> {
     dielectric: Arc<PlanarElectrostatics>,
@@ -156,19 +158,34 @@ impl<C> DielectricRelaxationCandidate<C> {
 
 fn dielectric<C: PlanarConductorMaterial>(
     conduction: &PlanarConduction<C>,
+    laws: Vec<PlanarDielectricLaw>,
     limits: WeightedAssemblyLimits,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<PlanarElectrostatics, Error> {
-    let mut materials = Vec::with_capacity(conduction.conductors().len());
-    for conductor in conduction.conductors() {
+    if laws.len() != conduction.conductors().len() || laws.len() > limits.max_cells {
+        return Err(Error::Invalid("one bounded dielectric source law per original conductor cell required"));
+    }
+    let mut geometry_frame = conduction.conductors().iter()
+        .find_map(|material| material.frame().map(|frame| frame.geometry_frame()));
+    let mut materials = Vec::with_capacity(laws.len());
+    for (conductor, law) in conduction.conductors().iter().zip(&laws) {
         poll(cancelled)?;
+        if let Some(frame) = law.frame() {
+            if geometry_frame.is_some_and(|id| id != frame.geometry_frame()) {
+                return Err(Error::Invalid(
+                    "dielectric and conductivity frames must refer to the same mesh coordinates",
+                ));
+            }
+            geometry_frame = Some(frame.geometry_frame());
+        }
         let source = conductor.material();
-        constant_electric_permittivity(source).map_err(ElectrostaticError::Material)?;
+        law.resolve_constant(source).map_err(ElectrostaticError::Material)?;
         materials.push(source.clone());
     }
-    Ok(PlanarElectrostatics::new(
+    Ok(PlanarElectrostatics::new_with_laws(
         conduction.mesh().clone(),
         materials,
+        laws,
         limits,
         cancelled,
     )?)
@@ -293,6 +310,33 @@ impl<C: PlanarConductorMaterial> PlanarLeakyDielectric<C> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, Error> {
         poll(cancelled)?;
+        if conduction.conductors().len() > limits.max_cells {
+            return Err(Error::Invalid("dielectric cell count exceeds assembly budget"));
+        }
+        let laws = vec![PlanarDielectricLaw::Isotropic; conduction.conductors().len()];
+        Self::new_with_dielectric_laws(
+            conduction, laws, voltage_v, voltage_vertices, time_s, limits, controls, cancelled,
+        )
+    }
+
+    /// Initialize the SAME charge owner with explicit source dielectric laws.
+    /// Each coefficient is selected from its conductor's complete material
+    /// bundle; no second material state or conductivity-derived axes are used.
+    /// Scalar and oriented cells may coexist. Both principal permittivities,
+    /// their selected claims and their independent frames remain fixed through
+    /// subsequent conductivity/temperature/phase refreshes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_dielectric_laws(
+        conduction: PlanarConduction<C>,
+        laws: Vec<PlanarDielectricLaw>,
+        voltage_v: Vec<f64>,
+        voltage_vertices: &[usize],
+        time_s: f64,
+        limits: WeightedAssemblyLimits,
+        controls: DielectricRelaxationControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        poll(cancelled)?;
         admit_controls(controls)?;
         if !time_s.is_finite()
             || time_s < 0.0
@@ -311,7 +355,7 @@ impl<C: PlanarConductorMaterial> PlanarLeakyDielectric<C> {
             .map(|&v| (v, voltage_v[v]))
             .collect();
         scalar_potential::prescribed_boundary(conduction.mesh(), &boundary, cancelled)?;
-        let dielectric = dielectric(&conduction, limits, cancelled)?;
+        let dielectric = dielectric(&conduction, laws, limits, cancelled)?;
         let cells = dielectric.cell_response(&voltage_v, cancelled)?;
         let nodal_charge_c = apply(&dielectric.stiffness, &voltage_v, cancelled)?;
         check_storage(&voltage_v, &nodal_charge_c, cells.energy_j, controls)?;
@@ -382,12 +426,14 @@ impl<C: PlanarConductorMaterial> PlanarLeakyDielectric<C> {
             limits,
             cancelled,
         )?;
-        let dielectric = dielectric(&conduction, limits, cancelled)?;
-        if dielectric
-            .permittivity_f_m
-            .iter()
-            .zip(&self.dielectric.permittivity_f_m)
-            .any(|(a, b)| a.to_bits() != b.to_bits())
+        let dielectric = dielectric(
+            &conduction, self.dielectric.permittivity_laws().to_vec(), limits, cancelled,
+        )?;
+        if dielectric.permittivity_coefficients().iter()
+            .zip(self.dielectric.permittivity_coefficients())
+            .any(|(a, b)| a.matrix_f_m().into_iter().flatten()
+                .zip(b.matrix_f_m().into_iter().flatten())
+                .any(|(left, right)| left.to_bits() != right.to_bits()))
         {
             return Err(Error::Invalid(
                 "dielectric permittivity changed without its parameter-work owner",

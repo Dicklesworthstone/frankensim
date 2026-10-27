@@ -4,6 +4,8 @@ mod common;
 mod force;
 #[path = "electrostatic/network.rs"]
 mod network;
+#[path = "electrostatic/anisotropic.rs"]
+mod anisotropic;
 use common::{config, layered, limits};
 use fs_em::electrostatic::{ElectrostaticControls, ElectrostaticError, PlanarElectrostatics};
 use fs_evidence::ValidityDomain;

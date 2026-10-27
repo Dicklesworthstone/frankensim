@@ -1,5 +1,7 @@
 //! Native spatial relaxation and its enthalpy feedback share the existing fixture.
 use super::*;
+#[path = "dielectric/anisotropic.rs"]
+mod anisotropic;
 use fs_em::electrostatic::relaxation::{DielectricRelaxationControls, PlanarLeakyDielectric};
 use fs_material::{
     conductor::ResolvedConductorState,

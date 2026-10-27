@@ -671,3 +671,38 @@ epsilon/sigma decay, heterogeneous interface charge and voltage-ramp work.
 Source/parser review completed for this change. These regression cases have not
 been executed in the current environment because pinned sibling dependencies
 and configured remote runners are unavailable.
+
+
+### Directional dielectric storage in native fields and charge relaxation
+
+`PlanarElectrostatics::new_with_laws` assembles scalar or explicitly oriented
+per-cell source permittivities through the original weighted FEEC Hodge
+operator. Field recovery uses `D = epsilon E` and storage uses the physical
+integral of `E.D/2`, including cross terms. The native multi-electrode
+Gram/reaction/circuit extraction and superposed response retain that same
+tensor storage. Existing pair-capacitor reduction still refuses nonpassive
+pair coefficients. No scalar average or conductivity-derived frame is used.
+Scalar construction remains available. The scalar accessor
+`permittivity_f_m()` now returns `Option<&[f64]>`, with `None` for any
+tensor/mixed field; the complete coefficient and source-law views are explicit.
+
+`PlanarLeakyDielectric::new_with_dielectric_laws` retains these laws through
+the original continuing charge owner and complete conductivity/temperature/
+phase material refresh. Dielectric and conductor material axes may differ;
+their geometry frames must identify the same physical mesh. Every selected
+principal permittivity must declare validity-wide constancy, and every
+rotated matrix entry must remain unchanged during a trajectory. The original
+charge, current, storage, source-work and rollback gates remain active.
+
+Maxwell force contours retain their explicitly isotropic exterior convention.
+An anisotropic interior may be enclosed by a supported scalar collar.
+Declared tensor exterior laws refuse even when their numerical eigenvalues
+coincide. This does not supply universal anisotropic mechanical stress,
+normal-direction closure, dispersion, induction or moving geometry.
+
+The focused tests specify oblique displacement/storage, specimen/frame
+rotation, native capacitance extraction and independent RC decay, and
+anisotropic interiors with scalar force collars. Reconstructed runtime
+sources match the previously parsed source lengths; final reconstructed
+sources/tests received source/API review but could not be parsed, compiled
+or executed after the executor became unavailable.

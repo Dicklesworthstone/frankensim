@@ -2411,3 +2411,23 @@ retain the underlying elastic-domain owner. Spatial consumers can preserve the
 complete material binding instead of stripping it to bare coefficients.
 The public `state_point::is_fixed_external_coordinate` classifies one coordinate;
 it does not replace typed-query, source-axis, validity or path admission.
+
+
+### Explicit planar dielectric source laws
+
+`field_storage::planar` admits explicit scalar or fixed-principal-axis
+in-plane permittivity. Orthotropic sources provide independently selected
+`electric_permittivity_1` and `electric_permittivity_2` in absolute F/m,
+with the existing named `PlanarElectricalFrame`. The shared storage source
+gate retains units, selected claims and applicability; the original tensor
+rotation supplies `epsilon = Q diag(epsilon1,epsilon2) Q^T`. No conductivity
+orientation or omitted normal response is inferred. The physical plane must
+be decoupled from the omitted normal direction.
+
+Snapshot resolution and trajectory admission remain distinct. Retained
+charge owners require every principal coefficient to be explicitly constant
+throughout source validity. Equal samples do not prove constancy. Changing
+dielectric coefficients or axes during a trajectory still requires an
+independently accounted parameter-work/thermal-entropy model; this increment
+does not supply one. All source coefficients remain in the original complete
+material bundle.
