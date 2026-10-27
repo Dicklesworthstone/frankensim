@@ -5,8 +5,10 @@
 //! a stationary, pressure-matched acoustic interface, not an advective mixing
 //! layer, thermal equilibration or live replacement of an acoustic state.
 
-use super::{DuctError, DuctResponse, GasState, LossModel, OpenHoleFlow, Region,
-    RegionalDuct, Termination, WallModel, invalid};
+use super::{
+    DuctError, DuctResponse, GasState, LossModel, OpenHoleFlow, Region, RegionalDuct, Termination,
+    WallModel, invalid,
+};
 
 impl RegionalDuct {
     /// Bind the homogeneous exterior independently of the internal terminal gas.
@@ -46,8 +48,16 @@ impl RegionalDuct {
     pub(super) fn terminal_response(&self, terminal: &Region, omega: f64,
         loss: LossModel, termination: Termination, wall: WallModel<'_>)
         -> Result<DuctResponse, DuctError> {
-        fs_duct::exterior::input_impedance(&terminal.duct, &terminal.gas,
-            self.exterior_gas(), omega, loss, termination, wall)
+        fs_duct::exterior::input_impedance_options(
+            &terminal.duct,
+            &terminal.gas,
+            self.exterior_gas(),
+            omega,
+            loss,
+            termination,
+            wall,
+            self.compose_options(),
+        )
     }
 
     pub(super) fn terminal_response_with_holes(
@@ -58,8 +68,16 @@ impl RegionalDuct {
         termination: Termination,
         wall: WallModel<'_>,
     ) -> Result<(DuctResponse, Vec<OpenHoleFlow>), DuctError> {
-        fs_duct::exterior::input_impedance_and_holes(&terminal.duct, &terminal.gas,
-            self.exterior_gas(), omega, loss, termination, wall)
+        fs_duct::exterior::input_impedance_and_holes_options(
+            &terminal.duct,
+            &terminal.gas,
+            self.exterior_gas(),
+            omega,
+            loss,
+            termination,
+            wall,
+            self.compose_options(),
+        )
     }
 }
 

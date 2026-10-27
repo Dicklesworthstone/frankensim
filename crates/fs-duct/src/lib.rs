@@ -1082,6 +1082,27 @@ pub(crate) fn collect_open_hole_sites(duct: &Duct) -> (Vec<OpenHoleSite>, f64, f
     (sites, x_ac, last_r)
 }
 
+/// Default static reed closing pressure $P_M = K_a y_m = 3464\text{ Pa}$
+/// (`Chatziioannou & van Walstijn 2009`, *Proc. DAFx-09*, Table 1:
+/// $K_a = 8.66\text{ MPa/m}$, $y_m = 0.40\text{ mm}$) used when a passive
+/// duct is evaluated without an explicit reed card.
+pub const DEFAULT_REED_CLOSING_PRESSURE_PA: f64 = 3464.0;
+
+/// Sinusoidal-equivalent peak mouthpiece acoustic pressure
+/// $p_{\text{ac,peak}}(P_M) = (\sqrt{2}/3)\, P_M$ at the lossless Raman
+/// oscillation threshold $\gamma_{\text{th}} = p_m / P_M = 1/3$, where the
+/// square-wave mouthpiece oscillation has amplitude $p_{\text{rms}} = P_M / 3$
+/// (`Dalmont, Gilbert & Ollivier 2003`, *JASA* 114(4):2253–2262, Sec. II.B
+/// Eq. 12; `Chaigne & Kergomard 2016`, *Acoustics of Musical Instruments*,
+/// Sec. 9.4.2).
+#[must_use]
+pub fn raman_threshold_peak_pressure_pa(closing_pressure_pa: f64) -> f64 {
+    if !closing_pressure_pa.is_finite() || closing_pressure_pa <= 0.0 {
+        return 0.0;
+    }
+    (det::sqrt(2.0) / 3.0) * closing_pressure_pa
+}
+
 /// Describing-function orifice separation resistance for an open side hole
 /// (Dalmont, Nederveen, Dubos, Ollivier, Meserette & te Sligte 2002,
 /// Acta Acustica united with Acustica 88:567-575, Sec. 4.1, Eq. 18-19, p. 572),
@@ -1100,6 +1121,7 @@ pub(crate) fn open_hole_vortex_resistance(
     hole_index: usize,
     total_acoustic_len_m: f64,
     outlet_radius_m: f64,
+    closing_pressure_pa: f64,
 ) -> f64 {
     open_hole_vortex_spec(
         state,
@@ -1111,6 +1133,7 @@ pub(crate) fn open_hole_vortex_resistance(
         hole_index,
         total_acoustic_len_m,
         outlet_radius_m,
+        closing_pressure_pa,
     )
     .0
 }
@@ -1126,9 +1149,21 @@ pub(crate) fn open_hole_vortex_spec(
     hole_index: usize,
     total_acoustic_len_m: f64,
     outlet_radius_m: f64,
+    closing_pressure_pa: f64,
 ) -> (f64, f64, f64) {
-    open_hole_vortex_spec_in_exterior(state, state, loss, hole_radius, bore_radius,
-        chimney_height, sites, hole_index, total_acoustic_len_m, outlet_radius_m)
+    open_hole_vortex_spec_in_exterior(
+        state,
+        state,
+        loss,
+        hole_radius,
+        bore_radius,
+        chimney_height,
+        sites,
+        hole_index,
+        total_acoustic_len_m,
+        outlet_radius_m,
+        closing_pressure_pa,
+    )
 }
 
 // The existing low-ka reference estimate expresses outlet end masses as
@@ -1146,11 +1181,18 @@ pub(crate) fn open_hole_vortex_spec_in_exterior(
     hole_index: usize,
     total_acoustic_len_m: f64,
     outlet_radius_m: f64,
+    closing_pressure_pa: f64,
 ) -> (f64, f64, f64) {
     if loss != LossModel::Bessel || hole_index >= sites.len() {
         return (0.0, 0.0, 0.0);
     }
-    const P_AC_PEAK_PA: f64 = 1633.0;
+    let p_ac_peak_pa = raman_threshold_peak_pressure_pa(closing_pressure_pa);
+    if p_ac_peak_pa <= 0.0 {
+        return (0.0, 0.0, 0.0);
+    }
+    // Kirchhoff/Helmholtz free-streamline vena contracta pi / (pi + 2) = 0.611
+    // (Dalmont, Nederveen, Dubos, Ollivier, Meserette & te Sligte 2002,
+    // Acta Acust. united Ac. 88:567-575, Sec. 4.1 p. 572).
     const C_VC: f64 = 0.61;
     let rho = state.density;
     let c = state.sound_speed;
@@ -1185,8 +1227,6 @@ pub(crate) fn open_hole_vortex_spec_in_exterior(
     if d_eff <= 0.0 || !d_eff.is_finite() {
         return (0.0, 0.0, 0.0);
     }
-    let is_register_vent =
-        hole_index == 0 && hole_radius * hole_radius < 0.05 * bore_radius * bore_radius;
     let omega0 = core::f64::consts::PI * c / (3.0 * d_eff);
     let z_down_abs = det::sqrt(3.0) * zc_bore;
     let t_h = chimney_height
@@ -1196,6 +1236,12 @@ pub(crate) fn open_hole_vortex_spec_in_exterior(
     if l_h <= 0.0 || !l_h.is_finite() {
         return (0.0, 0.0, 0.0);
     }
+    // Physical register-vent classifier: a register hole's bore-equivalent shunt
+    // length l_h = t_h (a/b)^2 exceeds the upstream bore length xi_ac from the
+    // reed to the hole (so it acts as an inductive register leak rather than
+    // terminating the fundamental at xi_ac like a tone hole where l_h < xi_ac;
+    // Benade 1976 Sec. 21.6, Chaigne & Kergomard 2016 Sec. 12.2.4).
+    let is_register_vent = hole_index == 0 && l_h > xi_ac;
     let omega_reactance = if is_register_vent && 3.0 * d_eff < l_h {
         omega0
     } else {
@@ -1206,7 +1252,7 @@ pub(crate) fn open_hole_vortex_spec_in_exterior(
     if denom <= 0.0 || !denom.is_finite() {
         return (0.0, 0.0, 0.0);
     }
-    let u_h = P_AC_PEAK_PA * z_down_abs / denom;
+    let u_h = p_ac_peak_pa * z_down_abs / denom;
     let v_ac = u_h / area_h;
     let v_crit = omega0 * hole_radius;
     let v_eff = (v_ac - v_crit).max(0.0);
@@ -1626,6 +1672,27 @@ pub fn input_impedance_with_wall(
     compose::evaluate_with_wall(duct, state, omega, loss, LoadSpec::Analytic(termination), wall)
 }
 
+/// [`input_impedance_with_wall`] with explicit [`compose::ComposeOptions`].
+pub fn input_impedance_with_wall_options(
+    duct: &Duct,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    termination: Termination,
+    wall: WallModel<'_>,
+    options: compose::ComposeOptions,
+) -> Result<DuctResponse, DuctError> {
+    compose::evaluate_with_wall_options(
+        duct,
+        state,
+        omega,
+        loss,
+        LoadSpec::Analytic(termination),
+        wall,
+        options,
+    )
+}
+
 /// [`input_impedance_with_wall`] plus outward volume-velocity transfers at every
 /// open or vented tone hole's flanged mouth, solved from the same chain.
 pub fn input_impedance_with_wall_and_holes(
@@ -1643,6 +1710,27 @@ pub fn input_impedance_with_wall_and_holes(
         loss,
         LoadSpec::Analytic(termination),
         wall,
+    )
+}
+
+/// [`input_impedance_with_wall_and_holes`] with explicit [`compose::ComposeOptions`].
+pub fn input_impedance_with_wall_and_holes_options(
+    duct: &Duct,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    termination: Termination,
+    wall: WallModel<'_>,
+    options: compose::ComposeOptions,
+) -> Result<(DuctResponse, Vec<OpenHoleFlow>), DuctError> {
+    compose::evaluate_with_wall_and_holes_options(
+        duct,
+        state,
+        omega,
+        loss,
+        LoadSpec::Analytic(termination),
+        wall,
+        options,
     )
 }
 
@@ -1695,6 +1783,32 @@ pub fn input_impedance_load_with_wall(
     compose::evaluate_with_wall(duct, state, omega, loss, LoadSpec::Fixed(z_load), wall)
 }
 
+/// [`input_impedance_load_with_wall`] with explicit [`compose::ComposeOptions`].
+pub fn input_impedance_load_with_wall_options(
+    duct: &Duct,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    z_load: C64,
+    wall: WallModel<'_>,
+    options: compose::ComposeOptions,
+) -> Result<DuctResponse, DuctError> {
+    if !z_load.re.is_finite() || !z_load.im.is_finite() {
+        return Err(DuctError::BadParameter {
+            what: "tabulated load must be finite",
+        });
+    }
+    compose::evaluate_with_wall_options(
+        duct,
+        state,
+        omega,
+        loss,
+        LoadSpec::Fixed(z_load),
+        wall,
+        options,
+    )
+}
+
 /// [`input_impedance_load_with_wall`] plus outward volume-velocity transfers at
 /// every open or vented tone hole's flanged mouth, solved from the same chain.
 pub fn input_impedance_load_with_wall_and_holes(
@@ -1713,6 +1827,32 @@ pub fn input_impedance_load_with_wall_and_holes(
     compose::evaluate_with_wall_and_holes(duct, state, omega, loss, LoadSpec::Fixed(z_load), wall)
 }
 
+/// [`input_impedance_load_with_wall_and_holes`] with explicit [`compose::ComposeOptions`].
+pub fn input_impedance_load_with_wall_and_holes_options(
+    duct: &Duct,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    z_load: C64,
+    wall: WallModel<'_>,
+    options: compose::ComposeOptions,
+) -> Result<(DuctResponse, Vec<OpenHoleFlow>), DuctError> {
+    if !z_load.re.is_finite() || !z_load.im.is_finite() {
+        return Err(DuctError::BadParameter {
+            what: "tabulated load must be finite",
+        });
+    }
+    compose::evaluate_with_wall_and_holes_options(
+        duct,
+        state,
+        omega,
+        loss,
+        LoadSpec::Fixed(z_load),
+        wall,
+        options,
+    )
+}
+
 #[allow(clippy::too_many_lines)] // one coherent physics stage
 #[allow(clippy::needless_pass_by_value)] // small spec taken by value keeps the public call sites clean
 fn input_impedance_core(
@@ -1727,8 +1867,24 @@ fn input_impedance_core(
 }
 
 // Exact historical operation graph inside the explicit compatibility envelope.
+#[allow(clippy::too_many_arguments)]
 fn input_impedance_legacy(
     duct:&Duct,state:&GasState,omega:f64,loss:LossModel,load:LoadSpec,wall:Option<&WallPin>,
+) -> Result<DuctResponse,DuctError> {
+    input_impedance_legacy_with_closing_pressure(
+        duct,
+        state,
+        omega,
+        loss,
+        load,
+        wall,
+        DEFAULT_REED_CLOSING_PRESSURE_PA,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn input_impedance_legacy_with_closing_pressure(
+    duct:&Duct,state:&GasState,omega:f64,loss:LossModel,load:LoadSpec,wall:Option<&WallPin>,closing_pressure_pa:f64,
 ) -> Result<DuctResponse,DuctError> {
     if duct.segments.is_empty() {
         return Err(DuctError::EmptyDuct);
@@ -1793,6 +1949,7 @@ fn input_impedance_legacy(
                     hole_i,
                     total_acoustic_len_m,
                     outlet_radius_m,
+                    closing_pressure_pa,
                 );
                 hole_i += 1;
             }
@@ -3958,6 +4115,7 @@ mod tone_hole_tests {
             0,
             0.66,
             0.03,
+            DEFAULT_REED_CLOSING_PRESSURE_PA,
         );
         let rv_fng = open_hole_vortex_resistance(
             &state,
@@ -3969,6 +4127,7 @@ mod tone_hole_tests {
             1,
             0.66,
             0.03,
+            DEFAULT_REED_CLOSING_PRESSURE_PA,
         );
         let rv_lossless = open_hole_vortex_resistance(
             &state,
@@ -3980,6 +4139,7 @@ mod tone_hole_tests {
             0,
             0.66,
             0.03,
+            DEFAULT_REED_CLOSING_PRESSURE_PA,
         );
         assert!(
             (10.0e6..20.0e6).contains(&rv_reg),
@@ -4653,6 +4813,8 @@ mod register_vortex_tests {
         };
         let (sites, total_len, outlet_r) = collect_open_hole_sites(&duct);
         assert_eq!(sites.len(), 2);
+        let p_peak_card = raman_threshold_peak_pressure_pa(DEFAULT_REED_CLOSING_PRESSURE_PA);
+        assert!((p_peak_card - 1632.94526002).abs() < 1.0e-5);
         let (reg_rv, reg_uthresh, reg_kquad) = open_hole_vortex_spec(
             &state,
             LossModel::Bessel,
@@ -4663,6 +4825,31 @@ mod register_vortex_tests {
             0,
             total_len,
             outlet_r,
+            DEFAULT_REED_CLOSING_PRESSURE_PA,
+        );
+        let (reg_rv_low, reg_uthresh_low, _) = open_hole_vortex_spec(
+            &state,
+            LossModel::Bessel,
+            0.00135,
+            0.00745,
+            0.0127,
+            &sites,
+            0,
+            total_len,
+            outlet_r,
+            2400.0,
+        );
+        let (reg_rv_high, reg_uthresh_high, _) = open_hole_vortex_spec(
+            &state,
+            LossModel::Bessel,
+            0.00135,
+            0.00745,
+            0.0127,
+            &sites,
+            0,
+            total_len,
+            outlet_r,
+            4800.0,
         );
         let (tone_rv, tone_uthresh, tone_kquad) = open_hole_vortex_spec(
             &state,
@@ -4674,10 +4861,13 @@ mod register_vortex_tests {
             1,
             total_len,
             outlet_r,
+            DEFAULT_REED_CLOSING_PRESSURE_PA,
         );
         assert!(reg_rv > 1.0e6);
         assert!(reg_kquad > 1.0e10);
         assert!(reg_uthresh > reg_rv / reg_kquad);
+        assert!(reg_rv_low < reg_rv && reg_rv < reg_rv_high);
+        assert!(reg_uthresh_low < reg_uthresh && reg_uthresh < reg_uthresh_high);
         assert!(tone_rv > 0.0);
         assert_eq!(tone_uthresh, 0.0);
         assert_eq!(tone_kquad, 0.0);

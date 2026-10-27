@@ -37,6 +37,12 @@ pub struct ComposeOptions {
     pub maximum_blocks: usize,
     /// Preserve the old operation graph only inside its declared envelope.
     pub preserve_well_conditioned_bits: bool,
+    /// Static reed closing pressure $P_M = K_a y_m$ [Pa] setting the
+    /// Raman/Dalmont threshold acoustic pressure amplitude
+    /// $p_{\text{ac,peak}} = (\sqrt{2}/3)\, P_M$ for the open-hole vortex
+    /// describing function (`Dalmont, Gilbert & Ollivier 2003` Eq. 12;
+    /// `Chaigne & Kergomard 2016` Sec. 9.4.2).
+    pub closing_pressure_pa: f64,
 }
 impl Default for ComposeOptions {
     fn default() -> Self {
@@ -45,6 +51,7 @@ impl Default for ComposeOptions {
             maximum_condition: DEFAULT_MAX_CONDITION,
             maximum_blocks: MAX_COMPOSITION_BLOCKS,
             preserve_well_conditioned_bits: true,
+            closing_pressure_pa: crate::DEFAULT_REED_CLOSING_PRESSURE_PA,
         }
     }
 }
@@ -84,9 +91,11 @@ impl ComposeOptions {
             || self.maximum_condition < 1.0
             || self.maximum_blocks == 0
             || self.maximum_blocks > MAX_COMPOSITION_BLOCKS
+            || !self.closing_pressure_pa.is_finite()
+            || self.closing_pressure_pa <= 0.0
         {
             return Err(bad(
-                "composition needs finite condition >=1 and declared block cap",
+                "composition needs finite condition >=1, positive closing pressure and declared block cap",
             ));
         }
         Ok(())
@@ -476,7 +485,27 @@ pub fn input_reflection_with_wall(
     duct: &Duct, state: &GasState, omega: f64, loss: LossModel,
     termination: Termination, wall: WallModel<'_>,
 ) -> Result<InputReflection, DuctError> {
-    let options = ComposeOptions::default();
+    input_reflection_with_wall_options(
+        duct,
+        state,
+        omega,
+        loss,
+        termination,
+        wall,
+        ComposeOptions::default(),
+    )
+}
+
+/// [`input_reflection_with_wall`] with explicit [`ComposeOptions`].
+pub fn input_reflection_with_wall_options(
+    duct: &Duct,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    termination: Termination,
+    wall: WallModel<'_>,
+    options: ComposeOptions,
+) -> Result<InputReflection, DuctError> {
     let chain = duct_chain_with_wall(duct, state, omega, loss, wall, options, true, || false)?;
     let radius = duct
         .segments
@@ -1013,6 +1042,7 @@ pub(crate) fn duct_chain_in_exterior(
                                 hole_index,
                                 total_acoustic_len_m,
                                 outlet_radius_m,
+                                options.closing_pressure_pa,
                             );
                         r_vortex = vortex_r;
                         open_holes.push(prepare_open_hole(
@@ -1272,13 +1302,37 @@ pub(crate) fn evaluate_with_wall(
     evaluate_in_exterior(duct, state, state, omega, loss, load, wall)
 }
 
+pub(crate) fn evaluate_with_wall_options(
+    duct: &Duct,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    load: LoadSpec,
+    wall: WallModel<'_>,
+    options: ComposeOptions,
+) -> Result<DuctResponse, DuctError> {
+    evaluate_in_exterior_options(duct, state, state, omega, loss, load, wall, options)
+}
+
 // The legacy ABCD path has no separate radiation gas. Reusing it after the
 // new chain was built would silently discard every changed side-hole load.
-fn exterior_options(duct: &Duct, state: &GasState, exterior: &GasState) -> ComposeOptions {
-    ComposeOptions { preserve_well_conditioned_bits: state == exterior
-        || !duct.segments.iter().any(|segment| matches!(segment,
-            Segment::ToneHole { state, .. } if crate::hole_sigma(*state) > 0.0)),
-        ..ComposeOptions::default() }
+fn exterior_options(
+    duct: &Duct,
+    state: &GasState,
+    exterior: &GasState,
+    options: ComposeOptions,
+) -> ComposeOptions {
+    ComposeOptions {
+        preserve_well_conditioned_bits: options.preserve_well_conditioned_bits
+            && (state == exterior
+                || !duct.segments.iter().any(|segment| {
+                    matches!(
+                        segment,
+                        Segment::ToneHole { state, .. } if crate::hole_sigma(*state) > 0.0
+                    )
+                })),
+        ..options
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1286,9 +1340,41 @@ pub(crate) fn evaluate_in_exterior(
     duct: &Duct, state: &GasState, exterior: &GasState, omega: f64, loss: LossModel,
     load: LoadSpec, wall: WallModel<'_>,
 ) -> Result<DuctResponse, DuctError> {
-    let options = exterior_options(duct, state, exterior);
-    let (chain, _) = duct_chain_in_exterior(duct, state, exterior, omega, loss,
-        wall, options, true, || false)?;
+    evaluate_in_exterior_options(
+        duct,
+        state,
+        exterior,
+        omega,
+        loss,
+        load,
+        wall,
+        ComposeOptions::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_in_exterior_options(
+    duct: &Duct,
+    state: &GasState,
+    exterior: &GasState,
+    omega: f64,
+    loss: LossModel,
+    load: LoadSpec,
+    wall: WallModel<'_>,
+    options: ComposeOptions,
+) -> Result<DuctResponse, DuctError> {
+    let options = exterior_options(duct, state, exterior, options);
+    let (chain, _) = duct_chain_in_exterior(
+        duct,
+        state,
+        exterior,
+        omega,
+        loss,
+        wall,
+        options,
+        true,
+        || false,
+    )?;
     evaluate_prepared_chain(duct, state, omega, loss, load, wall, options, &chain)
 }
 
@@ -1303,12 +1389,47 @@ pub(crate) fn evaluate_with_wall_and_holes(
     evaluate_in_exterior_and_holes(duct, state, state, omega, loss, load, wall)
 }
 
+pub(crate) fn evaluate_with_wall_and_holes_options(
+    duct: &Duct,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    load: LoadSpec,
+    wall: WallModel<'_>,
+    options: ComposeOptions,
+) -> Result<(DuctResponse, Vec<OpenHoleFlow>), DuctError> {
+    evaluate_in_exterior_and_holes_options(duct, state, state, omega, loss, load, wall, options)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_in_exterior_and_holes(
     duct: &Duct, state: &GasState, exterior: &GasState, omega: f64, loss: LossModel,
     load: LoadSpec, wall: WallModel<'_>,
 ) -> Result<(DuctResponse, Vec<OpenHoleFlow>), DuctError> {
-    let options = exterior_options(duct, state, exterior);
+    evaluate_in_exterior_and_holes_options(
+        duct,
+        state,
+        exterior,
+        omega,
+        loss,
+        load,
+        wall,
+        ComposeOptions::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_in_exterior_and_holes_options(
+    duct: &Duct,
+    state: &GasState,
+    exterior: &GasState,
+    omega: f64,
+    loss: LossModel,
+    load: LoadSpec,
+    wall: WallModel<'_>,
+    options: ComposeOptions,
+) -> Result<(DuctResponse, Vec<OpenHoleFlow>), DuctError> {
+    let options = exterior_options(duct, state, exterior, options);
     let (chain, open_holes) =
         duct_chain_in_exterior(duct, state, exterior, omega, loss, wall, options, true, || false)?;
     let radius = duct
@@ -1353,7 +1474,15 @@ fn evaluate_prepared_chain(
             .transfer_condition_estimate
             .is_some_and(|v| v <= LEGACY_MAX_TRANSFER_CONDITION)
     {
-        if let Ok(mut old) = crate::input_impedance_legacy(duct, state, omega, loss, load, pin) {
+        if let Ok(mut old) = crate::input_impedance_legacy_with_closing_pressure(
+            duct,
+            state,
+            omega,
+            loss,
+            load,
+            pin,
+            options.closing_pressure_pa,
+        ) {
             if [old.impedance, old.u_mouth_over_u_in, old.p_mouth_over_u_in]
                 .iter()
                 .all(|&v| finite(v))

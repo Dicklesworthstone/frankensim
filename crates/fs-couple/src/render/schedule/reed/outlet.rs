@@ -109,6 +109,7 @@ impl ObservationInput {
     pub(super) fn build_regional(self, duct: &Duct, regional: RegionalDuct, reed: BeatingReed,
         termination: Termination, rate: u32, samples: usize, delay_speed_m_s: f64)
         -> Result<(ReedBoreVoice, Option<TerminalObservation>), ReedPerformanceError> {
+        let regional = regional.with_closing_pressure_pa(reed.closing_pressure_pa);
         if let Self::Legacy(distance) = self {
             let voice = ReedBoreVoice::with_line(duct, regional.inlet_gas(), reed,
                 PlateBank::default(), distance, rate, |_| {

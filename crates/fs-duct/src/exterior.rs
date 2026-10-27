@@ -82,9 +82,34 @@ pub fn input_impedance(
     termination: Termination,
     wall: WallModel<'_>,
 ) -> Result<DuctResponse, DuctError> {
+    input_impedance_options(
+        duct,
+        interior,
+        exterior,
+        omega,
+        loss,
+        termination,
+        wall,
+        compose::ComposeOptions::default(),
+    )
+}
+
+/// [`input_impedance`] with explicit [`compose::ComposeOptions`].
+#[allow(clippy::too_many_arguments)]
+pub fn input_impedance_options(
+    duct: &Duct,
+    interior: &GasState,
+    exterior: &GasState,
+    omega: f64,
+    loss: LossModel,
+    termination: Termination,
+    wall: WallModel<'_>,
+    options: compose::ComposeOptions,
+) -> Result<DuctResponse, DuctError> {
     let (load, ka) = load(duct, interior, exterior, omega, termination)?;
-    let mut response =
-        compose::evaluate_in_exterior(duct, interior, exterior, omega, loss, load, wall)?;
+    let mut response = compose::evaluate_in_exterior_options(
+        duct, interior, exterior, omega, loss, load, wall, options,
+    )?;
     if let Some(ka) = ka {
         response.mouth_ka = ka;
     }
@@ -102,9 +127,34 @@ pub fn input_impedance_and_holes(
     termination: Termination,
     wall: WallModel<'_>,
 ) -> Result<(DuctResponse, Vec<OpenHoleFlow>), DuctError> {
+    input_impedance_and_holes_options(
+        duct,
+        interior,
+        exterior,
+        omega,
+        loss,
+        termination,
+        wall,
+        compose::ComposeOptions::default(),
+    )
+}
+
+/// [`input_impedance_and_holes`] with explicit [`compose::ComposeOptions`].
+#[allow(clippy::too_many_arguments)]
+pub fn input_impedance_and_holes_options(
+    duct: &Duct,
+    interior: &GasState,
+    exterior: &GasState,
+    omega: f64,
+    loss: LossModel,
+    termination: Termination,
+    wall: WallModel<'_>,
+    options: compose::ComposeOptions,
+) -> Result<(DuctResponse, Vec<OpenHoleFlow>), DuctError> {
     let (load, ka) = load(duct, interior, exterior, omega, termination)?;
-    let (mut response, holes) =
-        compose::evaluate_in_exterior_and_holes(duct, interior, exterior, omega, loss, load, wall)?;
+    let (mut response, holes) = compose::evaluate_in_exterior_and_holes_options(
+        duct, interior, exterior, omega, loss, load, wall, options,
+    )?;
     if let Some(ka) = ka {
         response.mouth_ka = ka;
     }
@@ -123,8 +173,31 @@ pub fn input_reflection(
     termination: Termination,
     wall: WallModel<'_>,
 ) -> Result<compose::InputReflection, DuctError> {
+    input_reflection_options(
+        duct,
+        interior,
+        exterior,
+        omega,
+        loss,
+        termination,
+        wall,
+        compose::ComposeOptions::default(),
+    )
+}
+
+/// [`input_reflection`] with explicit [`compose::ComposeOptions`].
+#[allow(clippy::too_many_arguments)]
+pub fn input_reflection_options(
+    duct: &Duct,
+    interior: &GasState,
+    exterior: &GasState,
+    omega: f64,
+    loss: LossModel,
+    termination: Termination,
+    wall: WallModel<'_>,
+    options: compose::ComposeOptions,
+) -> Result<compose::InputReflection, DuctError> {
     admit(interior, exterior)?;
-    let options = compose::ComposeOptions::default();
     let (chain, _) = compose::duct_chain_in_exterior(
         duct,
         interior,
@@ -158,13 +231,37 @@ pub fn input_impedance_load(
     z_load: C64,
     wall: WallModel<'_>,
 ) -> Result<DuctResponse, DuctError> {
+    input_impedance_load_options(
+        duct,
+        interior,
+        exterior,
+        omega,
+        loss,
+        z_load,
+        wall,
+        compose::ComposeOptions::default(),
+    )
+}
+
+/// [`input_impedance_load`] with explicit [`compose::ComposeOptions`].
+#[allow(clippy::too_many_arguments)]
+pub fn input_impedance_load_options(
+    duct: &Duct,
+    interior: &GasState,
+    exterior: &GasState,
+    omega: f64,
+    loss: LossModel,
+    z_load: C64,
+    wall: WallModel<'_>,
+    options: compose::ComposeOptions,
+) -> Result<DuctResponse, DuctError> {
     admit(interior, exterior)?;
     if !z_load.re.is_finite() || !z_load.im.is_finite() {
         return Err(DuctError::BadParameter {
             what: "tabulated load must be finite",
         });
     }
-    compose::evaluate_in_exterior(
+    compose::evaluate_in_exterior_options(
         duct,
         interior,
         exterior,
@@ -172,6 +269,7 @@ pub fn input_impedance_load(
         loss,
         LoadSpec::Fixed(z_load),
         wall,
+        options,
     )
 }
 
@@ -186,13 +284,37 @@ pub fn input_impedance_load_and_holes(
     z_load: C64,
     wall: WallModel<'_>,
 ) -> Result<(DuctResponse, Vec<OpenHoleFlow>), DuctError> {
+    input_impedance_load_and_holes_options(
+        duct,
+        interior,
+        exterior,
+        omega,
+        loss,
+        z_load,
+        wall,
+        compose::ComposeOptions::default(),
+    )
+}
+
+/// [`input_impedance_load_and_holes`] with explicit [`compose::ComposeOptions`].
+#[allow(clippy::too_many_arguments)]
+pub fn input_impedance_load_and_holes_options(
+    duct: &Duct,
+    interior: &GasState,
+    exterior: &GasState,
+    omega: f64,
+    loss: LossModel,
+    z_load: C64,
+    wall: WallModel<'_>,
+    options: compose::ComposeOptions,
+) -> Result<(DuctResponse, Vec<OpenHoleFlow>), DuctError> {
     admit(interior, exterior)?;
     if !z_load.re.is_finite() || !z_load.im.is_finite() {
         return Err(DuctError::BadParameter {
             what: "tabulated load must be finite",
         });
     }
-    compose::evaluate_in_exterior_and_holes(
+    compose::evaluate_in_exterior_and_holes_options(
         duct,
         interior,
         exterior,
@@ -200,6 +322,7 @@ pub fn input_impedance_load_and_holes(
         loss,
         LoadSpec::Fixed(z_load),
         wall,
+        options,
     )
 }
 

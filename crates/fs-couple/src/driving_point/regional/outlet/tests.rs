@@ -159,6 +159,20 @@ fn register_hole_shunt_line_activates_only_on_small_register_vent_and_scatters_q
         )
         .unwrap();
     let mut shunt = shunt.expect("1.35 mm register hole should build a WDF orifice shunt line");
+    let (_, _, shunt_high_pm) = register_duct
+        .clone()
+        .with_closing_pressure_pa(4800.0)
+        .baffled_outlet_and_open_holes_and_shunt_delayed_at(
+            48000,
+            1024,
+            location(),
+            WallModel::Rigid,
+            air.sound_speed,
+        )
+        .unwrap();
+    let shunt_high_pm = shunt_high_pm.expect("higher P_M register hole should build a WDF shunt");
+    assert!(shunt_high_pm.r2_pa_s_m3 > shunt.r2_pa_s_m3);
+    assert!(shunt_high_pm.u_crit_m3_s > shunt.u_crit_m3_s);
     let mut shunt_double = shunt.clone();
     assert_eq!(shunt.step(0.0).unwrap(), 0.0);
 

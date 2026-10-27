@@ -387,7 +387,8 @@ impl ReedBoreVoice {
     ) -> Result<Self, AcousticRealizeError> {
         let termination = termination.into();
         let regional = crate::driving_point::regional::RegionalDuct::new(physics, gases)
-            .map_err(|e| crate::acoustic_realize::map_drive(crate::driving_point::DrivingPointError::Duct(e)))?;
+            .map_err(|e| crate::acoustic_realize::map_drive(crate::driving_point::DrivingPointError::Duct(e)))?
+            .with_closing_pressure_pa(reed.closing_pressure_pa);
         Self::with_line(physics, regional.inlet_gas(), reed, plates, listener_m, sample_rate_hz, |_| {
             regional.characteristic_line_realized(termination, sample_rate_hz, line_samples, wall, None)
                 .map_err(crate::acoustic_realize::map_drive)
@@ -425,7 +426,8 @@ impl ReedBoreVoice {
             .map_err(|error| match error {
                 GasFieldDuctError::Material(error) => AcousticRealizeError::Ambient(error.to_string()),
                 GasFieldDuctError::Duct(error) => AcousticRealizeError::Duct(error),
-            })?;
+            })?
+            .with_closing_pressure_pa(reed.closing_pressure_pa);
         Self::with_line(physics, regional.inlet_gas(), reed, plates, listener_m, sample_rate_hz, |_| {
             regional.characteristic_line_realized(termination, sample_rate_hz, line_samples, wall, None)
                 .map_err(crate::acoustic_realize::map_drive)
@@ -461,7 +463,8 @@ impl ReedBoreVoice {
             .map_err(|error| match error {
                 GasFieldDuctError::Material(error) => AcousticRealizeError::Ambient(error.to_string()),
                 GasFieldDuctError::Duct(error) => AcousticRealizeError::Duct(error),
-            })?;
+            })?
+            .with_closing_pressure_pa(reed.closing_pressure_pa);
         Self::with_line(physics, regional.inlet_gas(), reed, plates, listener_m,
             sample_rate_hz, |_| {
                 regional.characteristic_line_realized(

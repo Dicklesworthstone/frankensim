@@ -528,6 +528,7 @@ impl GasFieldDuct {
                         open_hole_index,
                         total_acoustic_len_m,
                         outlet_radius_m,
+                        crate::DEFAULT_REED_CLOSING_PRESSURE_PA,
                     );
                     r_vortex = vortex.0;
                     if observe_holes {
