@@ -25,6 +25,8 @@ pub use initial::MaterialFreeSurfaceInitialCell3;
 pub mod transfer;
 /// Conservative moving-liquid enthalpy and source-temperature viscosity.
 pub mod enthalpy;
+/// Source-pinned hysteresis on the actual planar VOF contact line.
+pub mod wetting;
 
 /// One reference source state and its physical-to-lattice conversion.
 ///

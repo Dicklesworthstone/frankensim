@@ -26,6 +26,9 @@ use fs_material::state_point::{DENSITY_PROPERTY, MaterialPropertySelection};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Density, Dims, QuantitySpec};
 
+#[path = "material_free_surface3/wetting.rs"]
+mod dynamic_wetting;
+
 fn point(temperature: f64) -> QueryPoint {
     QueryPoint::new()
         .with_quantity(
@@ -37,7 +40,11 @@ fn point(temperature: f64) -> QueryPoint {
             temperature,
         )
         .unwrap()
-        .with("pressure", 100_000.0)
+        .with_quantity(
+            "pressure",
+            QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static)),
+            100_000.0,
+        )
         .unwrap()
 }
 
@@ -55,7 +62,15 @@ fn claim(name: &str, value: f64, dims: Dims) -> PropertyClaim {
                 290.0,
                 310.0,
             )
-            .with("pressure", 90_000.0, 110_000.0),
+            .with_quantity(
+                "pressure",
+                QuantitySpec::semantic(SemanticType::new(
+                    QuantityKind::Pressure,
+                    ValueForm::Static,
+                )),
+                90_000.0,
+                110_000.0,
+            ),
         uncertainty: UncertaintyModel::Unstated,
         interpolation: InterpolationPolicy::ConstantWithinValidity,
         observations: vec![],
@@ -68,6 +83,15 @@ fn claim(name: &str, value: f64, dims: Dims) -> PropertyClaim {
 }
 
 fn liquid(revision: u32, temperature: f64, sigma: Option<f64>) -> ResolvedLiquidSurfaceState {
+    liquid_at_pressure(revision, temperature, sigma, 100_000.0)
+}
+
+fn liquid_at_pressure(
+    revision: u32,
+    temperature: f64,
+    sigma: Option<f64>,
+    pressure: f64,
+) -> ResolvedLiquidSurfaceState {
     let mut claims = ClaimSet::new();
     for (name, value, dims) in [
         (DENSITY_PROPERTY, 1000.0, Density::DIMS),
@@ -96,7 +120,7 @@ fn liquid(revision: u32, temperature: f64, sigma: Option<f64>) -> ResolvedLiquid
     }
     resolve_liquid_surface_state(
         &card,
-        &point(temperature),
+        &point(temperature).with("pressure", pressure).unwrap(),
         LiquidViscosityBasis::Dynamic,
         if sigma.is_some() {
             LiquidCapillarity::Sourced

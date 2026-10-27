@@ -499,6 +499,70 @@ impl ResolvedScalarProperty {
         self.has_only_fixed_external_conditions(None, false)
     }
 
+    /// Admit one explicitly evolved coordinate and otherwise fixed external context.
+    ///
+    /// The owned coordinate must be present with the EXACT declared quantity and
+    /// a finite value. Every other response axis and applicability bound uses the
+    /// same canonical fixed-external policy as
+    /// [`Self::is_static_at_fixed_external_conditions`]: static temperature,
+    /// pressure, composition, moisture or concentration, with only the existing
+    /// legacy `T` exception. Response dimensions must match their descriptors.
+    /// A scalar still needs validity-wide constant support.
+    ///
+    /// This classifies source support, not a physical evolution law. The caller
+    /// must actually evolve the named coordinate, hold all other conditions
+    /// fixed, and retain the original source/selection during runtime queries.
+    /// It does not broaden `is_static_at_fixed_external_conditions` or admit
+    /// unowned frequency, strain, stress, field or rate dependence.
+    #[must_use]
+    pub fn has_only_owned_and_fixed_external_conditions(
+        &self,
+        owned_axis: &str,
+        owned_quantity: QuantitySpec,
+    ) -> bool {
+        if self.source_axes.is_empty()
+            && self.answer.receipt.decision != fs_matdb::EvaluationDecision::ConstantWithinValidity
+        {
+            return false;
+        }
+        let receipt = &self.answer.receipt;
+        let value = |axis: &str| {
+            receipt
+                .query_point
+                .iter()
+                .find(|(name, _)| name == axis)
+                .map(|(_, value)| *value)
+        };
+        if receipt.axis_quantities.get(owned_axis) != Some(&owned_quantity)
+            || !value(owned_axis).is_some_and(f64::is_finite)
+        {
+            return false;
+        }
+        let supported = |axis: &str, dims: Option<Dims>| {
+            if axis == owned_axis {
+                return dims.is_none_or(|d| d == owned_quantity.dims());
+            }
+            let quantity = receipt.axis_quantities.get(axis).copied();
+            is_fixed_external_coordinate(axis, quantity, value(axis))
+                && dims.is_none_or(|d| {
+                    quantity.map_or(axis == "T" && d == fs_qty::Temperature::DIMS, |q| {
+                        q.dims() == d
+                    })
+                })
+        };
+        self.source_axes
+            .iter()
+            .all(|(axis, dims)| supported(axis, Some(*dims)))
+            && self
+                .answer
+                .evidence
+                .model
+                .validity
+                .bounds()
+                .keys()
+                .all(|axis| supported(axis, None))
+    }
+
     /// Whether this source supplies a constant coefficient when temperature is
     /// held at the resolved state. Accepts validity-wide scalar constants or
     /// positive absolute-temperature curves. A semantic AbsoluteTemperature/Static
@@ -3588,6 +3652,182 @@ mod tests {
             assert_eq!(property.value_si(), 2.5e9);
             assert_eq!(property.is_constant_at_fixed_temperature(), expected);
             assert_eq!(property.answer().receipt.selected, id);
+        }
+    }
+
+    #[test]
+    fn g0_owned_rate_preserves_the_shared_fixed_external_policy() {
+        let speed = QuantitySpec::dimensional(Dims([1, 0, -1, 0, 0, 0]));
+        let static_quantity =
+            |kind| QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
+        for (external, low, high, admitted) in [
+            (
+                static_quantity(QuantityKind::Pressure),
+                90_000.0,
+                110_000.0,
+                true,
+            ),
+            (
+                static_quantity(QuantityKind::Composition(
+                    fs_qty::semantic::CompositionBasis::MoleFraction,
+                )),
+                0.0,
+                1.0,
+                true,
+            ),
+            (
+                QuantitySpec::dimensional(Pressure::DIMS),
+                90_000.0,
+                110_000.0,
+                false,
+            ),
+            (
+                static_quantity(QuantityKind::Stress),
+                90_000.0,
+                110_000.0,
+                false,
+            ),
+        ] {
+            for extra_rate in [false, true] {
+                let mut source = claim("synthetic-angle", Dims::NONE, vec![], 400.0);
+                source.value = PropertyValue::Surface2D {
+                    axes: ["line_speed".into(), "environment".into()],
+                    axis_dims: [speed.dims(), external.dims()],
+                    samples: vec![
+                        ([0.0, low], 1.0),
+                        ([1.0, low], 1.2),
+                        ([0.0, high], 1.1),
+                        ([1.0, high], 1.3),
+                    ],
+                    triangles: vec![[0, 1, 2], [1, 3, 2]],
+                    dims: Dims::NONE,
+                };
+                source.validity = source
+                    .validity
+                    .with_quantity("line_speed", speed, 0.0, 1.0)
+                    .with_quantity("environment", external, low, high);
+                let mut point = QueryPoint::new()
+                    .with("T", 300.0)
+                    .unwrap()
+                    .with_quantity("line_speed", speed, 0.25)
+                    .unwrap()
+                    .with_quantity("environment", external, f64::midpoint(low, high))
+                    .unwrap();
+                if extra_rate {
+                    let rate = QuantitySpec::dimensional(fs_qty::Frequency::DIMS);
+                    source.validity = source
+                        .validity
+                        .with_quantity("another_rate", rate, 0.0, 1.0);
+                    point = point.with_quantity("another_rate", rate, 0.25).unwrap();
+                }
+                let mut claims = ClaimSet::new();
+                claims.insert_claim(source).unwrap();
+                let card = MaterialCard::assemble(
+                    MaterialStateId {
+                        chemistry: "synthetic contact source".into(),
+                        phase: "liquid".into(),
+                        process: "numerical fixture".into(),
+                        revision: 0,
+                    },
+                    claims,
+                    vec![],
+                )
+                .unwrap();
+                let requirement = ScalarPropertyRequirement::try_new(
+                    "synthetic-angle",
+                    Dims::NONE,
+                    ScalarAdmissibility::StrictlyPositive,
+                )
+                .unwrap();
+                let state = resolve_material_state_point(
+                    &card,
+                    &point,
+                    &[requirement],
+                    MaterialPropertySelection::SingleClaimOnly,
+                )
+                .unwrap();
+                let property = state.property("synthetic-angle").unwrap();
+                let original = property.answer().clone();
+                assert_eq!(
+                    property.has_only_owned_and_fixed_external_conditions("line_speed", speed),
+                    admitted && !extra_rate,
+                    "{external:?}, extra rate {extra_rate}",
+                );
+                assert!(!property.is_static_at_fixed_external_conditions());
+                assert!(!property.has_only_owned_and_fixed_external_conditions(
+                    "line_speed",
+                    QuantitySpec::dimensional(fs_qty::Frequency::DIMS),
+                ));
+                assert!(
+                    !property.has_only_owned_and_fixed_external_conditions("missing_speed", speed)
+                );
+                assert_eq!(
+                    property.answer(),
+                    &original,
+                    "admission cannot rewrite source evidence"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn g0_owned_coordinate_keeps_the_scalar_constant_support_gate() {
+        let speed = QuantitySpec::dimensional(Dims([1, 0, -1, 0, 0, 0]));
+        for interpolation in [
+            InterpolationPolicy::ConstantWithinValidity,
+            InterpolationPolicy::TabulatedOnly,
+        ] {
+            let mut source = claim("synthetic-angle", Dims::NONE, vec![], 400.0);
+            source.value = PropertyValue::Scalar {
+                value: 1.2,
+                dims: Dims::NONE,
+            };
+            source.interpolation = interpolation;
+            // Exact-only scalar evidence resolves only at point validity. Both
+            // claims resolve, but only the declared constant supports freezing.
+            source.validity = source.validity.with("T", 300.0, 300.0).with_quantity(
+                "line_speed",
+                speed,
+                0.0,
+                0.0,
+            );
+            let mut claims = ClaimSet::new();
+            claims.insert_claim(source).unwrap();
+            let card = MaterialCard::assemble(
+                MaterialStateId {
+                    chemistry: "synthetic scalar support".into(),
+                    phase: "liquid".into(),
+                    process: "numerical fixture".into(),
+                    revision: 0,
+                },
+                claims,
+                vec![],
+            )
+            .unwrap();
+            let point = QueryPoint::new()
+                .with("T", 300.0)
+                .unwrap()
+                .with_quantity("line_speed", speed, 0.0)
+                .unwrap();
+            let requirement = ScalarPropertyRequirement::try_new(
+                "synthetic-angle",
+                Dims::NONE,
+                ScalarAdmissibility::StrictlyPositive,
+            )
+            .unwrap();
+            let state = resolve_material_state_point(
+                &card,
+                &point,
+                &[requirement],
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .unwrap();
+            let property = state.property("synthetic-angle").unwrap();
+            assert_eq!(
+                property.has_only_owned_and_fixed_external_conditions("line_speed", speed),
+                interpolation == InterpolationPolicy::ConstantWithinValidity,
+            );
+            assert!(!property.is_static_at_fixed_external_conditions());
         }
     }
 

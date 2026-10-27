@@ -203,6 +203,7 @@ impl FreeSurface3 {
             sigma,
             contact,
             planar_contact: None,
+            planar_contact_field: None,
             carry: 0.0,
             conversions: ConversionStats3::default(),
             worst_step_violation: 0.0,

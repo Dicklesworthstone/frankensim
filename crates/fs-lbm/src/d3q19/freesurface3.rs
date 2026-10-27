@@ -46,6 +46,7 @@ mod initial;
 pub use initial::FreeSurfaceInitialCell3;
 mod forcing;
 pub(crate) mod transport;
+pub(crate) mod wetting;
 use transport::{MassLocation3, MassTransport3};
 
 /// D3Q19 lattice speed of sound squared.
@@ -256,6 +257,7 @@ pub struct FreeSurface3 {
     sigma: f64,
     contact: ContactModel3,
     planar_contact: Option<PlanarContactAngle3>,
+    planar_contact_field: Option<wetting::PlanarContactField3>,
     /// Conversion-conservation carry (mass awaiting redistribution).
     carry: f64,
     conversions: ConversionStats3,
@@ -458,6 +460,7 @@ impl FreeSurface3 {
             sigma,
             contact,
             planar_contact: None,
+            planar_contact_field: None,
             carry: 0.0,
             conversions: ConversionStats3::default(),
             worst_step_violation: 0.0,
@@ -651,6 +654,7 @@ impl FreeSurface3 {
             angle_radians,
             cotangent,
         });
+        self.planar_contact_field = None;
         self.contact = ContactModel3::Neutral;
         Ok(())
     }
@@ -762,7 +766,7 @@ impl FreeSurface3 {
     // This supplies the normal in the existing sigma*curvature pressure
     // reconstruction; tracked liquid mass is never edited here.
     fn planar_angle_ghost(&self, position: [i64; 3]) -> Option<f64> {
-        let contact = self.planar_contact?;
+        let contact = self.planar_contact_at(position)?;
         if contact.cotangent == 0.0 {
             return None;
         }

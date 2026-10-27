@@ -2654,3 +2654,56 @@ thinning/thickening, native populations/heat, Newtonian bit parity, thermal
 conductance and rollback. The existing fixed-domain rheology tests also cover
 the shared solver; full native execution remains required.
 
+
+
+### Dynamic wetting data reaches the native planar capillary boundary
+
+`material::free_surface::wetting::MaterialFreeSurfaceWetting3` binds both
+original advancing/receding angle claims of an ordered substrate/liquid
+`InterfaceSystemCard` to one planar domain wall. The liquid phase/process/revision
+must match the actual source. Every fixed liquid query coordinate and quantity
+descriptor is retained, with only the explicit SI `contact_line_speed` axis
+added. Both original claims must support stationary initialization. Subsequent
+queries pin those SAME selections, including when another claim could answer
+outside their support. Temperature and other dynamic source dependencies are
+not silently evolved; the liquid and environment remain the admitted frozen
+isothermal context. Source medium, preparation and history remain on the card.
+The shared `ResolvedScalarProperty::has_only_owned_and_fixed_external_conditions`
+admission exempts exactly the typed speed owned by this runtime. Every other
+response and applicability axis uses the existing canonical fixed-external
+policy, including typed pressure/composition; their complete values stay fixed
+through the trajectory. Thus a pressure-dependent angle law changes native
+capillary motion when the prescribed pressure data changes between scenarios.
+The existing static-only admission and scalar constant-support rules are intact.
+
+The existing native smoothed VOF field supplies the actual wall-adjacent fill
+and in-wall gradient. For outward liquid normal `-grad(phi)/|grad(phi)|`, the
+signed geometric speed is `(phi_new - phi_old) * dx / (dt * |grad_t(phi_new)|)`;
+the gradient is per LATTICE CELL, not per metre. Positive speed advances liquid.
+It is a first-cell spatial estimate and a backward time difference, not a
+subcell contact-line reconstruction or the fluid velocity at a no-slip wall.
+Newly activated wall history was gas. Nonzero fill motion with a zero tangential
+gradient, nonfinite/unrepresentable speed, missing source support or an exceeded
+wall-cell budget refuses. Initial history is explicitly stationary.
+
+Above/below the caller's nonnegative speed deadband, the original advancing or
+receding endpoint supplies the angle. Inside the closed deadband, the measured
+geometric angle is projected into the sourced hysteresis interval. The resulting
+PER-CELL field enters the same geometric wall ghost, curvature, Laplace-pressure
+reconstruction and actual native momentum/mass step. Endpoint angles drive the
+next step, an explicit one-step-lagged closure. A collapsed bracket reproduces
+the original homogeneous equilibrium boundary; omitted capillarity leaves the
+angle data inert in momentum. Other walls and internal solid tiles are neutral.
+Existing static wetting and the legacy Wetting ghost cannot be combined with
+this binding. The scalar query-only `query_dynamic_wetting2` remains unchanged.
+
+Native populations, fill, carry, conversion counters, contact history, original
+source receipts and the next-step angle field publish together only after the
+complete native candidate and all endpoint/source/cancellation gates succeed.
+No thermal or surface-energy closure, exact kinematic pinning, calibrated
+dynamic-contact-line accuracy, arbitrary substrate geometry, moving wall or
+thermocapillary force is claimed. The thermal free-surface capillarity refusal
+remains in force. Synthetic G1 tests cover speed/dx/dt scaling, direction and
+closed-deadband selection, and all six wall-normal/ghost conventions; G1/G3/G4
+integration tests cover collapsed-bracket native equivalence, rate-law data
+effects on populations, the sigma-zero limit and transactional source exits.
