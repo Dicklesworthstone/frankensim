@@ -6728,3 +6728,19 @@ This first-order, well-mixed fixed-volume split requires timestep refinement.
 It adds no resolved jet or wind force, conductive solid/gas exchange, chamber
 radiation loading or propagation through a varying medium. The compact pressure
 observer remains diagnostic; no experimental material qualification is implied.
+
+### Distributed current injection on the common electrothermal drive
+
+`ConductionDrive::CurrentDensity` adds native prescribed-current-density edges
+and voltage return traces to the same `step_driven_candidate` residual used by
+voltage and total-electrode-current drives. Each material-temperature trial
+rebuilds the source-bound spatial operator and solves its original mixed
+boundary problem. Source work includes the solved voltage at current traces;
+the actual per-cell E.J heats the existing finite enthalpy cells exactly once.
+The accepted report retains the native nodal applied currents and total boundary
+currents beside the material operator and thermal history. Current edges need
+not be equipotential; their prescribed density differs physically from the
+existing equipotential two-terminal total-current drive. The same solid,
+constant-density, fixed-geometry, first-order DC limits and atomic failure rules
+apply. Focused tests add independent heterogeneous current-heating equations,
+temperature feedback, continuation, material substitution and late rollback.

@@ -13,7 +13,9 @@ use super::{
         ConductionLink, MaterialCell, MaterialNetwork, MaterialNetworkError, MaterialNetworkSample,
     },
 };
-use fs_em::conduction::{ConductionControls, ConductionError, ConductionField, PlanarConduction};
+use fs_em::conduction::{
+    ConductionControls, ConductionCurrentTrace, ConductionError, ConductionField, PlanarConduction,
+};
 use fs_feec::weighted::WeightedAssemblyLimits;
 use fs_material::{
     conductor::{ConductorError, ResolvedConductorState},
@@ -37,6 +39,14 @@ pub enum ConductionDrive<'a> {
         negative: &'a [usize],
         current_a: f64,
     },
+    /// Distributed prescribed inward current density on exterior edges, with
+    /// voltage traces supplying the reference and any return current. These
+    /// current traces need not be equipotential. Native edge integration and
+    /// the spatial field determine the source work and local heat together.
+    CurrentDensity {
+        voltage: &'a [(usize, f64)],
+        currents: &'a [ConductionCurrentTrace],
+    },
 }
 
 impl ConductionDrive<'_> {
@@ -49,6 +59,9 @@ impl ConductionDrive<'_> {
         match self {
             Self::Voltage(boundary) => problem
                 .solve(boundary, controls, cancelled)
+                .map_err(field_error),
+            Self::CurrentDensity { voltage, currents } => problem
+                .solve_with_current_traces(voltage, currents, controls, cancelled)
                 .map_err(field_error),
             Self::Current {
                 positive,
@@ -170,6 +183,10 @@ pub struct ConductionThermalStep {
     pub cell_power_w: Vec<f64>,
     /// Positive INTO the conductor at each prescribed boundary vertex.
     pub nodal_boundary_current_a: Vec<Option<f64>>,
+    /// Authored current-density trace loads integrated by the native field
+    /// owner [A]. At a voltage/current corner these are included in the combined
+    /// boundary current above, never an additional external energy supply.
+    pub nodal_applied_current_a: Vec<Option<f64>>,
     pub boundary_current_a: f64,
     pub maximum_free_current_residual_a: f64,
     pub power_balance_residual_w: f64,
@@ -259,7 +276,8 @@ impl ConductionThermalNetwork<'_> {
 
     /// Solve actual spatial current redistribution, local heating and thermal
     /// transport at ONE common endpoint. Either the electrode voltages or the
-    /// total two-terminal current is held for the interval. Current drive uses
+    /// total two-terminal current or distributed current density is held for
+    /// the interval. Total-current drive uses
     /// the native material/geometry resistance extraction at EVERY trial; its
     /// voltage and local heat therefore evolve with the same accepted material.
     /// The existing enthalpy owner supplies the nonlinear residual,
@@ -366,6 +384,7 @@ impl ConductionThermalNetwork<'_> {
                     current_density_a_m2: field.current_density_a_m2().to_vec(),
                     cell_power_w: field.cell_power_w().to_vec(),
                     nodal_boundary_current_a: field.nodal_boundary_current_a().to_vec(),
+                    nodal_applied_current_a: field.nodal_applied_current_a().to_vec(),
                     boundary_current_a: field.boundary_current_a(),
                     maximum_free_current_residual_a: field.maximum_free_current_residual_a(),
                     power_balance_residual_w: field.power_balance_residual_w(),

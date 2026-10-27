@@ -9,7 +9,7 @@ use fs_couple::circuit_enthalpy::{
     conduction::{ConductionDrive, ConductionRegion, ConductionThermalNetwork},
     material::{ConductionLink, MaterialCell},
 };
-use fs_em::conduction::{ConductionControls, PlanarConduction};
+use fs_em::conduction::{ConductionControls, ConductionCurrentTrace, PlanarConduction};
 use fs_feec::weighted::WeightedAssemblyLimits;
 use fs_matdb::{MaterialCard, PropertyKey, QueryPoint};
 use fs_material::{
@@ -136,6 +136,215 @@ fn ends(voltage: f64, offset: f64) -> [(usize, f64); 4] {
         (2, voltage + offset),
         (5, voltage + offset),
     ]
+}
+
+#[test]
+fn current_driven_material_feedback_uses_solved_voltage_and_local_joule_heat() {
+    let alpha = 0.002;
+    let mut heating = Vec::new();
+    for resistance in [1.0, 2.0] {
+        let (a, ca) = material(resistance, 1.0, alpha);
+        let (b, cb) = material(3.0, 2.0, 0.0);
+        let cards = [a, b];
+        let curves = [ca, cb];
+        let thermal = initial(&curves, 999.0, None);
+        let original = problem(
+            &cards,
+            [ElectricalPropertyBasis::Resistivity; 2],
+            300.0,
+            1.0,
+        );
+        let context = point(300.0);
+        let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
+        let bindings = cells(&cards, &curves, &context, &key);
+        let currents = [ConductionCurrentTrace {
+            vertices: [2, 5],
+            inward_current_density_a_m2: 2.0,
+        }];
+        let next = network(&bindings)
+            .step_driven_candidate(
+                &thermal,
+                0.5,
+                &original,
+                ConductionDrive::CurrentDensity {
+                    voltage: &[(0, 0.0), (3, 0.0)],
+                    currents: &currents,
+                },
+                limits(),
+                field_controls(),
+                config(),
+                &[0.0; 2],
+                || false,
+            )
+            .unwrap();
+        // Independent BE balance at fixed I=2 A and G=1 W/K:
+        // (1.5-2*rho0*alpha)*dT1-.5*dT2=2*rho0,
+        // -.5*dT1+2.5*dT2=6. The voltage is an output of rho(T), not a
+        // separately supplied resistor law or frozen initial field.
+        let a11 = 1.5 - 2.0 * resistance * alpha;
+        let det = a11 * 2.5 - 0.25;
+        let d1 = (5.0 * resistance + 3.0) / det;
+        let d2 = (6.0 * a11 + resistance) / det;
+        near(
+            next.thermal().temperature_k(CellId(30)).unwrap(),
+            300.0 + d1,
+        );
+        near(
+            next.thermal().temperature_k(CellId(10)).unwrap(),
+            300.0 + d2,
+        );
+        let rho = resistance * (1.0 + alpha * d1);
+        let field = &next.report().electrical;
+        near(field.voltage_v[2], 2.0 * (rho + 3.0));
+        near(field.voltage_v[5], field.voltage_v[2]);
+        near(field.nodal_applied_current_a[2].unwrap(), 1.0);
+        near(field.nodal_applied_current_a[5].unwrap(), 1.0);
+        for i in 0..4 {
+            near(field.current_density_a_m2[i][0], -2.0);
+            near(field.cell_power_w[i], 2.0 * if i < 2 { rho } else { 3.0 });
+        }
+        near(field.heat_j, 2.0 * (rho + 3.0));
+        near(field.supplied_work_j, field.heat_j);
+        near(next.report().deposited_joule_j, field.heat_j);
+        near(
+            next.thermal().energy_j() - thermal.energy_j(),
+            d1 + 2.0 * d2,
+        );
+        assert!(next.report().total_energy_residual_j.abs() < config().total_energy_tolerance_j);
+        let continuing = network(&bindings)
+            .step_driven_candidate(
+                next.thermal(),
+                1.0,
+                next.problem(),
+                ConductionDrive::CurrentDensity {
+                    voltage: &[(0, 0.0), (3, 0.0)],
+                    currents: &currents,
+                },
+                limits(),
+                field_controls(),
+                config(),
+                &[0.0; 2],
+                || false,
+            )
+            .unwrap();
+        assert!(continuing.report().electrical.voltage_v[2] > field.voltage_v[2]);
+        assert!(continuing.thermal().temperature_k(CellId(30)).unwrap() > 300.0 + d1);
+        heating.push(field.heat_j);
+    }
+    // At fixed current a more resistive source dissipates MORE power. This is
+    // the opposite feedback to prescribing the same voltage across the body.
+    assert!(heating[1] > heating[0]);
+}
+
+#[test]
+fn current_driven_trial_failure_preserves_both_material_and_thermal_states() {
+    let (a, ca) = material(1.0, 1.0, 0.002);
+    let (b, cb) = material(3.0, 2.0, 0.0);
+    let cards = [a, b];
+    let curves = [ca, cb];
+    let thermal = initial(&curves, 0.0, None);
+    let original = problem(
+        &cards,
+        [ElectricalPropertyBasis::Resistivity; 2],
+        300.0,
+        1.0,
+    );
+    let context = point(300.0);
+    let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
+    let bindings = cells(&cards, &curves, &context, &key);
+    let layout = network(&bindings);
+    let saved = thermal.cells().clone();
+    let sources = original.conductors().to_vec();
+    let currents = [ConductionCurrentTrace {
+        vertices: [2, 5],
+        inward_current_density_a_m2: 2.0,
+    }];
+    let mut polls = 0;
+    let accepted = layout
+        .step_driven_candidate(
+            &thermal,
+            0.1,
+            &original,
+            ConductionDrive::CurrentDensity {
+                voltage: &[(0, 0.0), (3, 0.0)],
+                currents: &currents,
+            },
+            limits(),
+            field_controls(),
+            config(),
+            &[0.0; 2],
+            || {
+                polls += 1;
+                false
+            },
+        )
+        .unwrap();
+    let mut calls = 0;
+    assert!(matches!(
+        layout.step_driven_candidate(
+            &thermal,
+            0.1,
+            &original,
+            ConductionDrive::CurrentDensity {
+                voltage: &[(0, 0.0), (3, 0.0)],
+                currents: &currents,
+            },
+            limits(),
+            field_controls(),
+            config(),
+            &[0.0; 2],
+            || {
+                calls += 1;
+                calls == polls
+            },
+        ),
+        Err(CircuitEnthalpyError::Cancelled)
+    ));
+    let overconstrained = [ConductionCurrentTrace {
+        vertices: [0, 3],
+        ..currents[0]
+    }];
+    assert!(
+        layout
+            .step_driven_candidate(
+                &thermal,
+                0.1,
+                &original,
+                ConductionDrive::CurrentDensity {
+                    voltage: &[(0, 0.0), (3, 0.0)],
+                    currents: &overconstrained,
+                },
+                limits(),
+                field_controls(),
+                config(),
+                &[0.0; 2],
+                || false,
+            )
+            .is_err()
+    );
+    assert_eq!(thermal.cells(), &saved);
+    assert_eq!(original.conductors(), &sources);
+    let retry = layout
+        .step_driven_candidate(
+            &thermal,
+            0.1,
+            &original,
+            ConductionDrive::CurrentDensity {
+                voltage: &[(0, 0.0), (3, 0.0)],
+                currents: &currents,
+            },
+            limits(),
+            field_controls(),
+            config(),
+            &[0.0; 2],
+            || false,
+        )
+        .unwrap();
+    assert_eq!(retry.thermal().cells(), accepted.thermal().cells());
+    assert_eq!(
+        retry.report().electrical.voltage_v,
+        accepted.report().electrical.voltage_v
+    );
 }
 
 #[test]

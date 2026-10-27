@@ -591,3 +591,24 @@ voltage changes through the native winding circuit and body acceleration,
 retained decaying-eddy force versus an incorrect static reset, source/contour
 refusals and late cancellation. Full native integration execution remains
 required; source parsing and metadata compilation are not physical validation.
+
+## Distributed material-conductor current boundaries
+
+`PlanarConduction::solve_with_current_traces` accepts signed uniform inward
+current density on actual exterior edges beside prescribed voltage traces.
+The original planar metric supplies extruded edge area; exact P1 integration
+supplies half the edge current to each endpoint of the existing FEEC solve.
+Current traces are not assumed equipotential. Duplicate/interior edges,
+nonfinite loads and simultaneous voltage/current traces on the same edge refuse;
+every connected component retains a real voltage trace and return-current path.
+
+Free-node current residuals subtract the authored load. Terminal power uses
+the prescribed current at current-only vertices and the actual combined weak
+reaction at voltage vertices. `nodal_applied_current_a` separately preserves
+the applied trace contribution at mixed corners, allowing the voltage-source
+reaction to be recovered without double counting. The original cell E.J and
+terminal work must agree before acceptance. Zero-load voltage and native
+two-terminal reductions retain their existing owner. G1/G3/G4 regressions check
+layered material fields, extrusion, reversal, gauge, mixed corners, input order
+and transactional cancellation. This is fixed-geometry isotropic DC conduction,
+not an ideal equipotential current electrode, contact law or electrical storage.

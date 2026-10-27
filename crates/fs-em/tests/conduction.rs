@@ -3,7 +3,9 @@
 mod common;
 
 use common::{config, ends, layered, limits, near};
-use fs_em::conduction::{ConductionControls, ConductionError, PlanarConduction};
+use fs_em::conduction::{
+    ConductionControls, ConductionCurrentTrace, ConductionError, PlanarConduction,
+};
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
@@ -107,6 +109,204 @@ fn slab(
         &mut || false,
     )
     .unwrap()
+}
+
+#[test]
+fn prescribed_current_uses_actual_edge_area_and_material_field() {
+    let low = conductor(2.0, ElectricalPropertyBasis::Resistivity);
+    let high = conductor(4.0, ElectricalPropertyBasis::Conductivity);
+    for (depth, offset, density) in [(0.2, 0.0, 3.0), (0.6, 8.0, -3.0)] {
+        let problem = slab(high.clone(), low.clone(), depth);
+        let current = [ConductionCurrentTrace {
+            vertices: [5, 2],
+            inward_current_density_a_m2: density,
+        }];
+        let field = problem
+            .solve_with_current_traces(
+                &[(0, offset), (3, offset)],
+                &current,
+                controls(),
+                &mut || false,
+            )
+            .unwrap();
+        // Independently integrated series slab: J is prescribed, while each
+        // material determines its own voltage drop and irreversible J²/sigma.
+        let drop = density * (0.5 / 4.0 + 0.5 / 2.0);
+        near(field.voltage_v()[1], offset + density * 0.5 / 4.0);
+        near(field.voltage_v()[2], offset + drop);
+        near(field.voltage_v()[5], offset + drop);
+        for i in 0..4 {
+            let sigma = if i < 2 { 4.0 } else { 2.0 };
+            near(field.electric_field_v_m()[i][0], -density / sigma);
+            near(field.current_density_a_m2()[i][0], -density);
+            near(field.current_density_a_m2()[i][1], 0.0);
+            near(
+                field.cell_power_w()[i],
+                0.25 * depth * density.powi(2) / sigma,
+            );
+        }
+        near(field.power_w(), depth * density * drop);
+        for v in [2, 5] {
+            near(
+                field.nodal_applied_current_a()[v].unwrap(),
+                0.5 * depth * density,
+            );
+            near(
+                field.nodal_boundary_current_a()[v].unwrap(),
+                0.5 * depth * density,
+            );
+        }
+        near(
+            field.nodal_boundary_current_a()[0].unwrap()
+                + field.nodal_boundary_current_a()[3].unwrap(),
+            -depth * density,
+        );
+        near(field.boundary_current_a(), 0.0);
+        near(field.maximum_free_current_residual_a(), 0.0);
+        near(field.power_balance_residual_w(), 0.0);
+        let by_voltage = problem
+            .solve(
+                &[
+                    (0, offset),
+                    (3, offset),
+                    (2, offset + drop),
+                    (5, offset + drop),
+                ],
+                controls(),
+                &mut || false,
+            )
+            .unwrap();
+        for (a, b) in field.cell_power_w().iter().zip(by_voltage.cell_power_w()) {
+            near(*a, *b);
+        }
+    }
+}
+
+#[test]
+fn distributed_currents_and_voltage_corners_have_one_source_work_account() {
+    let material = conductor(2.0, ElectricalPropertyBasis::Conductivity);
+    let problem = slab(material.clone(), material, 0.2);
+    // The two top edges meet at node 4. Node 3 also lies on the voltage trace;
+    // its prescribed-current contribution must not become a second source.
+    let currents = [
+        ConductionCurrentTrace {
+            vertices: [3, 4],
+            inward_current_density_a_m2: 2.0,
+        },
+        ConductionCurrentTrace {
+            vertices: [4, 5],
+            inward_current_density_a_m2: 4.0,
+        },
+    ];
+    let baseline = problem
+        .solve_with_current_traces(&[(0, 0.0), (3, 0.0)], &currents, controls(), &mut || false)
+        .unwrap();
+    let reversed = [
+        ConductionCurrentTrace {
+            vertices: [5, 4],
+            ..currents[1]
+        },
+        ConductionCurrentTrace {
+            vertices: [4, 3],
+            ..currents[0]
+        },
+    ];
+    let repeat = problem
+        .solve_with_current_traces(&[(0, 0.0), (3, 0.0)], &reversed, controls(), &mut || false)
+        .unwrap();
+    assert_eq!(baseline.voltage_v(), repeat.voltage_v());
+    assert_eq!(baseline.cell_power_w(), repeat.cell_power_w());
+    near(baseline.nodal_applied_current_a()[3].unwrap(), 0.1);
+    near(baseline.nodal_applied_current_a()[4].unwrap(), 0.3);
+    near(baseline.nodal_applied_current_a()[5].unwrap(), 0.2);
+    let mut source_work = 0.0;
+    for v in 0..6 {
+        let applied = baseline.nodal_applied_current_a()[v].unwrap_or(0.0);
+        source_work += baseline.voltage_v()[v] * applied;
+        if [0, 3].contains(&v) {
+            let voltage_source = baseline.nodal_boundary_current_a()[v].unwrap() - applied;
+            source_work += baseline.voltage_v()[v] * voltage_source;
+        }
+    }
+    near(source_work, baseline.power_w());
+    near(baseline.boundary_current_a(), 0.0);
+    let shifted = problem
+        .solve_with_current_traces(&[(0, 7.0), (3, 7.0)], &currents, controls(), &mut || false)
+        .unwrap();
+    near(shifted.power_w(), baseline.power_w());
+    for (a, b) in shifted.voltage_v().iter().zip(baseline.voltage_v()) {
+        near(*a - 7.0, *b);
+    }
+}
+
+#[test]
+fn current_traces_refuse_interior_duplicate_overconstrained_and_cancelled_loads() {
+    let material = conductor(2.0, ElectricalPropertyBasis::Conductivity);
+    let problem = slab(material.clone(), material, 0.2);
+    let current = ConductionCurrentTrace {
+        vertices: [2, 5],
+        inward_current_density_a_m2: 3.0,
+    };
+    for bad in [
+        vec![ConductionCurrentTrace {
+            vertices: [1, 4],
+            ..current
+        }],
+        vec![ConductionCurrentTrace {
+            vertices: [0, 3],
+            ..current
+        }],
+        vec![ConductionCurrentTrace {
+            vertices: [2, usize::MAX],
+            ..current
+        }],
+        vec![ConductionCurrentTrace {
+            inward_current_density_a_m2: f64::NAN,
+            ..current
+        }],
+        vec![
+            current,
+            ConductionCurrentTrace {
+                vertices: [5, 2],
+                ..current
+            },
+        ],
+    ] {
+        assert!(matches!(
+            problem
+                .solve_with_current_traces(&[(0, 0.0), (3, 0.0)], &bad, controls(), &mut || false,),
+            Err(ConductionError::Invalid(_))
+        ));
+    }
+    assert!(
+        problem
+            .solve_with_current_traces(&[], &[current], controls(), &mut || false,)
+            .is_err()
+    );
+    let mut polls = 0;
+    let accepted = problem
+        .solve_with_current_traces(&[(0, 0.0), (3, 0.0)], &[current], controls(), &mut || {
+            polls += 1;
+            false
+        })
+        .unwrap();
+    let mut calls = 0;
+    assert!(matches!(
+        problem.solve_with_current_traces(
+            &[(0, 0.0), (3, 0.0)],
+            &[current],
+            controls(),
+            &mut || {
+                calls += 1;
+                calls == polls
+            },
+        ),
+        Err(ConductionError::Cancelled)
+    ));
+    let again = problem
+        .solve_with_current_traces(&[(0, 0.0), (3, 0.0)], &[current], controls(), &mut || false)
+        .unwrap();
+    assert_eq!(accepted.voltage_v(), again.voltage_v());
 }
 
 #[test]
