@@ -14,11 +14,12 @@ use fs_qty::{Density, Dims, DynViscosity, Pressure};
 use fs_vfit::relaxation::RelaxationImpedanceSpec;
 
 mod update;
+mod orthotropic;
 
 /// Immutable material, thickness, restraint and complete local loss law.
 ///
-/// This is the existing isotropic, frozen-state, small-displacement membrane
-/// limit. It does not include axial shell waves, pressure prestress, thermal
+/// The frozen-state, small-displacement membrane may be isotropic or have
+/// orthotropic principal axes aligned with the hoop and axial directions. It does not include axial shell waves, pressure prestress, thermal
 /// evolution, or nonlocal wall radiation. Every queried radius must satisfy
 /// the original thickness/radius <= 0.05 admission.
 #[derive(Clone, Debug, PartialEq)]
@@ -32,6 +33,8 @@ pub struct LocalMaterialWall {
     young: f64,
     viscosity: f64,
     axial_factor: f64,
+    orthotropic_axes: Option<[usize; 2]>,
+    proportional_viscosity_time_property: Option<String>,
 }
 
 /// The same source-bound wall and its native time-domain acoustic owner.
@@ -238,6 +241,8 @@ impl LocalMaterialWall {
             young,
             viscosity,
             axial_factor,
+            orthotropic_axes: None,
+            proportional_viscosity_time_property: None,
         })
     }
 
