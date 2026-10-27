@@ -49,6 +49,38 @@ With the flag, the render runs one sample per callback, and the WAV bytes are
 unchanged. Like the WAV, the file must not exist already, and it is created
 only after admission.
 
+### Move the bow position along the string
+
+`migrating-bow.material-strings` moves a finite-width bow across the original
+vibrating string/body/cavity system and holds the last position. Run it with
+the same wire/body packs and command used above for `pluck-and-bow`.
+Insert this optional block after any `bow_ribbon` / `bow_fibers` declarations
+and before `forces`:
+
+```text
+bow_station_motion 2 0.00003 1048576 3
+bow_station_knot 480 0.2
+bow_station_knot 2400 0.28
+bow_station_knot 3600 0.23
+```
+
+The first row declares maximum travel speed along the string [m/s], maximum
+travel per mechanical sample [m], geometry-update work limit, and knot count.
+Each knot gives an elapsed mechanical sample and one position fraction per
+original bow track. With a ribbon, the single position is its centre; the
+existing ribbon geometry places every cell and checks the full footprint.
+Positions interpolate linearly from the initial schedule position and hold
+after the final knot. Bow speed and load remain in the canonical gesture
+schedule; the position path does not retune or restart the string.
+
+The same force/velocity contact maps carry transverse and torsional motion,
+body response, material memory and microphone pressure. Independent moving
+finger stops may share the physical clock. Contact-loaded bow normal patches
+and retained shear/thermal films currently refuse because their moving
+material histories are not transported. This is a midpoint geometry
+discretization: refine time, retained modes and ribbon cells before making
+accuracy claims. It does not establish measured instrument realism.
+
 ### Native application source packets and output clock
 
 The same performer can run from an explicit set of attached source files:

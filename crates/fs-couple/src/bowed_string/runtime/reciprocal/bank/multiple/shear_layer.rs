@@ -31,6 +31,9 @@ impl MultiBowStringBank {
         bindings: Vec<(usize, ResolvedShearLayer)>,
         gate: &CancelGate,
     ) -> Result<Self, ReciprocalStringError> {
+        if !bindings.is_empty() && self.bow_station_motion_limits().is_some() {
+            return Err(super::invalid("moving bow stations cannot bind fixed material shear history"));
+        }
         self.system = self
             .system
             .with_material_shear_layers(bindings, gate)
@@ -61,6 +64,9 @@ impl MultiBowStringBank {
         gate: &CancelGate,
         resolve: impl Fn(&DepositionSimulation<'t>) -> Result<StepCoefficients<S>, E>,
     ) -> Result<LayerThermalFrame<S>, LayerThermalError<E>> {
+        if self.bow_station_motion_limits().is_some() {
+            return Err(LayerThermalError::Invalid("contact heat requires transported bow geometry and material history"));
+        }
         self.system.step_with_layer_thermal_network(thermal, bindings, controls,
             energy_guess_j, external, drives, gate, resolve)
     }
@@ -86,6 +92,9 @@ impl MultiBowStringBank {
         gate: &CancelGate,
         resolve: impl Fn(&DepositionSimulation<'t>) -> Result<StepCoefficients<S>, E>,
     ) -> Result<LayerThermalFrame<S>, LayerThermalError<E>> {
+        if self.bow_station_motion_limits().is_some() {
+            return Err(LayerThermalError::Invalid("contact heat requires transported bow geometry and material history"));
+        }
         self.system.step_with_contact_thermal_network(thermal, bindings, series_heat,
             controls, energy_guess_j, external, drives, gate, resolve)
     }

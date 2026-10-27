@@ -52,6 +52,9 @@ impl MultiBowStringBank {
     {
         if gate.is_requested() { return Err(RenderError::Coupled(ModalCouplingError::Cancelled)); }
         if bindings.is_empty() { return Ok(self); }
+        if self.bow_station_motion_limits().is_some() {
+            return Err(error("contact-loaded bows need jointly transported normal patches before bow migration"));
+        }
         if !self.source.bow_contact_loads.is_empty() || self.system.samples_rendered() != 0
             || bindings.len() > self.source.bows.len() {
             return Err(error("bow contact loads require one complete binding before playback"));

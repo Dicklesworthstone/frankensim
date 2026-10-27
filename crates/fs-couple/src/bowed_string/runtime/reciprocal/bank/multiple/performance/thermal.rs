@@ -65,6 +65,7 @@ impl MultiBowPerformance {
         let system = &self.bank.system;
         if self.stop_motion.is_some()
             || self.stop_station_motion.is_some()
+            || self.bank.bow_station_motion_limits().is_some()
             || thermal.time_s() != system.samples_rendered() as f64 * system.sample_period_s()
             || thermal.cells().is_empty()
             || thermal.cells().len() > controls.maximum_cells

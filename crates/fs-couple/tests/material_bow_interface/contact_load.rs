@@ -40,6 +40,18 @@ fn raw(cx:&Cx<'_>,gate:&CancelGate,rho:f64,interface:DryFrictionBinding,normal:M
 fn loaded(cx:&Cx<'_>,gate:&CancelGate,rho:f64,interface:DryFrictionBinding)->MultiBowStringBank {
     raw(cx,gate,rho,interface,contact()).with_bow_contact_loads(vec![BowContactLoad {bow:0,stop:0}],gate).unwrap()
 }
+
+#[test]
+fn moving_bow_stations_refuse_untransported_normal_patches_in_either_binding_order() {
+    use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::stations::BowStationMotionLimits;
+    let limits=BowStationMotionLimits {maximum_speed_m_s:1.0,maximum_step_m:0.001,max_update_terms:1_048_576};
+    with_cx(|cx,gate| {
+        assert!(loaded(cx,gate,7800.0,binding(0.4,1e6)).with_bow_station_motion(limits,gate).is_err());
+        let moving=raw(cx,gate,7800.0,binding(0.4,1e6),contact()).with_bow_station_motion(limits,gate).unwrap();
+        assert!(moving.with_bow_contact_loads(vec![BowContactLoad {bow:0,stop:0}],gate).is_err());
+    });
+}
+
 fn drive()->FrictionDrive { FrictionDrive {speed_m_s:0.3,normal_force_n:0.0} }
 fn motion()->StopMotionProgram {
     StopMotionProgram {knots:vec![StopMotionKnot {sample:64,offsets_m:vec![-3e-6]},

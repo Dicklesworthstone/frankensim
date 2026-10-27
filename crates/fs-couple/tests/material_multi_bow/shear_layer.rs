@@ -66,6 +66,27 @@ fn coated(cx: &Cx<'_>, gate: &CancelGate, g: f64, viscosity: f64) -> MultiBowStr
 }
 
 #[test]
+fn moving_bow_stations_refuse_material_layer_history_in_either_binding_order() {
+    use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::stations::BowStationMotionLimits;
+    let limits = BowStationMotionLimits {
+        maximum_speed_m_s: 1.0,
+        maximum_step_m: 0.001,
+        max_update_terms: 1_048_576,
+    };
+    with_cx(|cx, gate| {
+        assert!(coated(cx, gate, 8e6, 10.0)
+            .with_bow_station_motion(limits, gate)
+            .is_err());
+        let moving = reacting_surface(joint(cx, gate, 7800.0), gate)
+            .with_bow_station_motion(limits, gate)
+            .unwrap();
+        assert!(moving
+            .with_bow_shear_layers(vec![(0, layer(8e6, 2000.0, 10.0, 1e6))], gate)
+            .is_err());
+    });
+}
+
+#[test]
 fn layer_material_swap_changes_shared_instrument_pressure_and_keeps_physical_energy() {
     with_cx(|cx, gate| {
         let mut a = coated(cx, gate, 8e6, 10.0);

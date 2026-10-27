@@ -7,6 +7,63 @@ use fs_material::section::{
     ConcentricElasticSection, ConcentricMaterialLayer, axial::YOUNG_VISCOSITY_PROPERTY,
 };
 
+#[test]
+fn migrating_string_contact_keeps_fiber_material_stations_and_reciprocal_history() {
+    use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::{
+        ribbon::UniformBowRibbon, stations::BowStationMotionLimits,
+    };
+    use fs_couple::render::schedule::force::coupled::{
+        ModalAttachment,
+        contact::friction::multiple::surfaces::geometry::{FrictionGeometry, FrictionGeometryConfig},
+    };
+    with_cx(|cx, gate| {
+        let make = || base(cx, gate, 7800.0)
+            .with_tensioned_fiber_ribbon(fibers(3, 2, 1300.0, 3e9, 50.0, 40.0, 48000, gate),
+                0.4, ribbon_limits(), gate).unwrap();
+        let mut actual = make().with_bow_station_motion(BowStationMotionLimits {
+            maximum_speed_m_s: 1.0, maximum_step_m: 0.001, max_update_terms: 1_048_576,
+        }, gate).unwrap();
+        let (_, mut reference) = make().into_parts();
+        let card = actual.cards()[0].clone();
+        let norm = (card.linear_density_kg_m*card.length_m*0.5).sqrt();
+        let receivers: Vec<_> = (0..3).map(|i| actual.system().port(i).unwrap().right.clone()).collect();
+        let initial = actual.source().ribbon().unwrap().clone();
+        let first_fiber = actual.source().fiber_ribbon().unwrap().component_start();
+        let mut start = initial.stations().to_vec();
+        let zero = vec![0.0;actual.system().mode_count()];
+        let mut drives = vec![drive(0.0,0.0);3];
+        initial.project_drive(drive(0.02,0.03), &mut drives).unwrap();
+        for sample in 0..64 {
+            let end = UniformBowRibbon::try_new(StringBowLocation {
+                string: 0, station_fraction: 0.2+0.00001*(sample+1) as f64,
+            }, card.length_m, initial.width_m(), 3).unwrap();
+            let maps: Vec<_> = start.iter().zip(end.stations()).enumerate().map(|(i,(&a,&b))| {
+                let station=a+0.5*(b-a);
+                FrictionGeometry {
+                    left: ModalAttachment { component: 0, shapes: (1..=card.mode_count)
+                        .map(|n| (n as f64*core::f64::consts::PI*station).sin()/norm).collect() },
+                    right: receivers[i].clone(),
+                }
+            }).collect();
+            let frame=actual.step_with_bow_stations(&zero,&drives,end.stations(),None).unwrap().clone();
+            let expected=reference.step_with_friction_geometry(&zero,&drives,&maps,None,None,
+                FrictionGeometryConfig {max_update_terms:1_048_576},gate).unwrap().clone();
+            assert_eq!(frame,expected);
+            for (i,receiver) in receivers.iter().enumerate() {
+                assert_eq!(&actual.system().port(i).unwrap().right,receiver);
+            }
+            start.copy_from_slice(end.stations());
+        }
+        let source=actual.source().fiber_ribbon().unwrap();
+        assert_eq!(source.station_fraction(),0.4);
+        assert_eq!(source.model().geometry().length_m,0.6);
+        assert_eq!(actual.source().ribbon(),Some(&initial));
+        assert!(actual.system().components()[first_fiber..].iter().flat_map(|m|m.states())
+            .any(|s|s.velocity_m_sqrt_kg_per_s!=0.0));
+        assert_eq!(states(&actual),reference.components().iter().flat_map(|m|m.states().iter().copied()).collect::<Vec<_>>());
+    });
+}
+
 fn fiber_material(rho: f64, young: f64, eta: f64) -> ResolvedMaterialStatePoint {
     let mut claims = ClaimSet::new();
     let mut requirements = Vec::new();

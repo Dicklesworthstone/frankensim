@@ -26,7 +26,7 @@ impl StopStationMotionLimits {
 }
 
 pub(in super::super) struct StationState {
-    accepted: Vec<f64>,
+    pub(in super::super) accepted: Vec<f64>,
     limits: StopStationMotionLimits,
 }
 
@@ -41,7 +41,7 @@ impl MultiBowStringBank {
     /// prescribed moving compliant stop, not a solved finger or a pitch edit.
     ///
     /// Stops supplying bow normal loads must stay at their bow stations until
-    /// tangential contact migration is represented. Other independent stops can
+    /// the complete normal/tangential patch is transported. Other independent stops can
     /// migrate in the same bank. Endpoint motion may refuse on the existing
     /// contact, energy, pressure, nonlinear-domain or compliance limits.
     pub fn with_stop_station_motion(mut self, limits: StopStationMotionLimits,
@@ -88,6 +88,21 @@ impl MultiBowStringBank {
     pub fn step_with_stop_stations_under_gate(&mut self, external: &[f64], drives: &[FrictionDrive],
         stations: &[f64], offsets_m: Option<&[f64]>, gate: &CancelGate) -> Result<&MultiFrictionFrame, RenderError>
     {
+        let endpoints = self.prepare_stop_station_geometry(stations, gate)?;
+        if self.bow_stations.is_some() {
+            self.step_with_bow_geometry(external, drives, None, Some(&endpoints), offsets_m, gate)
+        } else {
+            self.system.step_with_obstacle_geometry_under_gate(external, drives, &endpoints, offsets_m, gate)
+        }.map_err(RenderError::Friction)?;
+        // No fallible operation follows publication; accepted source locations
+        // and the generic owner's accepted maps always describe the same sample.
+        self.stop_stations.as_mut().expect("admitted stop station state").accepted.copy_from_slice(stations);
+        Ok(self.system.last_frame().expect("complete stop step was accepted"))
+    }
+
+    pub(in super::super) fn prepare_stop_station_geometry(&self, stations: &[f64],
+        gate: &CancelGate) -> Result<Vec<ObstacleGeometry>, RenderError>
+    {
         if gate.is_requested() { return Err(RenderError::Coupled(ModalCouplingError::Cancelled)); }
         let state = self.stop_stations.as_ref().ok_or_else(|| error("stop station motion has not been admitted"))?;
         if stations.len() != self.source.stops.len() {
@@ -107,12 +122,6 @@ impl MultiBowStringBank {
                 return Err(error("a contact-loaded bow normal cannot migrate without its tangential contact"));
             }
         }
-        let endpoints = self.stop_geometry(&self.source.stops, Some(stations), state.limits.max_update_terms, gate)?;
-        let frame = self.system.step_with_obstacle_geometry_under_gate(external, drives, &endpoints, offsets_m, gate)
-            .map_err(RenderError::Friction)?;
-        // No fallible operation follows publication; accepted source locations
-        // and the generic owner's accepted maps always describe the same sample.
-        self.stop_stations.as_mut().expect("admitted stop station state").accepted.copy_from_slice(stations);
-        Ok(frame)
+        self.stop_geometry(&self.source.stops, Some(stations), state.limits.max_update_terms, gate)
     }
 }

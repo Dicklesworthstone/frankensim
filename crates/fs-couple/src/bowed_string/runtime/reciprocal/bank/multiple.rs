@@ -9,7 +9,8 @@
 //! instead resolve each load from contact mechanics. Optional receiving-body
 //! attachments also return tangential traction and resolve surface motion;
 //! a shared bow-hair structure is not inferred by this adapter.
-//! Bow stations are fixed; independently admitted compliant stops can migrate.
+//! Explicit station paths can translate prescribed-load bow contacts along the
+//! original strings; independently admitted compliant stops can also migrate.
 //! The underlying bounded nonlinear solve may
 //! refuse a step; global uniqueness and measured instrument timbre are not claimed.
 
@@ -63,6 +64,7 @@ pub struct MultiBowStringBank {
     cards: Vec<BowedStringCard>,
     system: MultiFrictionModalSystem,
     stop_stations: Option<stops::stations::StationState>,
+    bow_stations: Option<stations::BowStationState>,
 }
 impl ReciprocalStringBank {
     /// Add material-derived contacts without reducing or resetting any component.
@@ -116,7 +118,7 @@ impl ReciprocalStringBank {
         Ok(MultiBowStringBank { source: MultiBowStringBankSource {
             bank: self.source, bows, joint, stops: Vec::new(), bow_contact_loads: Vec::new(),
             ribbon: None, fiber_ribbon: None, body_surfaces: Vec::new(),
-        }, cards: self.cards, system, stop_stations: None })
+        }, cards: self.cards, system, stop_stations: None, bow_stations: None })
     }
 }
 impl MultiBowStringBank {
@@ -138,10 +140,18 @@ impl MultiBowStringBank {
     /// For contact-loaded bows, zero means no additional prescribed load
     /// and separation of the bound normal contact supplies the actual release.
     pub fn step(&mut self, external: &[f64], drives: &[FrictionDrive])
-        -> Result<&MultiFrictionFrame, ModalFrictionError> { self.system.step(external, drives) }
+        -> Result<&MultiFrictionFrame, ModalFrictionError> {
+        if self.bow_stations.is_some() {
+            self.step_with_bow_geometry(external, drives, None, None, None, &CancelGate::new_clock_free())
+        } else { self.system.step(external, drives) }
+    }
     /// Same atomic physical sample with the original owner's cancellation polls.
     pub fn step_under_gate(&mut self, external: &[f64], drives: &[FrictionDrive], gate: &CancelGate)
-        -> Result<&MultiFrictionFrame, ModalFrictionError> { self.system.step_under_gate(external, drives, gate) }
+        -> Result<&MultiFrictionFrame, ModalFrictionError> {
+        if self.bow_stations.is_some() {
+            self.step_with_bow_geometry(external, drives, None, None, None, gate)
+        } else { self.system.step_under_gate(external, drives, gate) }
+    }
     /// Transfer the original sources together with the complete accepted state.
     #[must_use]
     pub fn into_parts(self) -> (MultiBowStringBankSource, MultiFrictionModalSystem) { (self.source, self.system) }
@@ -152,6 +162,9 @@ pub mod performance;
 
 /// Material-derived unilateral stops in the same bow/string/body mechanics.
 pub mod stops;
+
+/// Source-derived bow contact migration on the unchanged material bases.
+pub mod stations;
 
 
 /// Source/interface applicability retained through the existing bow performers.

@@ -4155,7 +4155,7 @@ Acceleration pressure uses endpoint maps and endpoint geometric force.
 Accepted stations, offsets, mechanics, reports and clock publish atomically;
 constant station paths retain fixed-position arithmetic. Receiver footprints
 and normals remain fixed. A stop supplying a fixed bow's normal load cannot
-migrate until tangential migration/slip is represented. Nonpositive
+migrate until its complete normal/tangential patch is transported. Nonpositive
 endpoint/mean-map compliance, trajectory limits and existing material, force,
 penetration, energy and pressure limits refuse. The native v1 stop profile
 carries bounded station trajectories on the original performance clock, with
@@ -4164,6 +4164,37 @@ independent work identity, endpoint pressure, refusal/retry/hold, complete
 source-state retention and file/direct PCM identity; native execution remains
 required. This is not a solved finger, evolving contact patch, rigid stopping
 constraint or measured instrument qualification.
+
+Prescribed bow-position migration uses the original `MultiBowStringBank` and
+`MultiBowPerformance` transaction. The source string's surface map is evaluated
+at each step's midpoint station, including its actual material/gas-loaded mass,
+declared transverse directions and retained surface torque. This held map is a
+power-conjugate velocity/force transformer: slip is `u*dt - B^T*delta_q`, with no
+invented `Bdot*q` sliding term, geometric storage or frequency assignment. Every
+traction shares the original simultaneous friction, normal-contact and optional
+nonlinear solve. The original modes, material/fluid histories, body/cavity
+reaction and pressure observer remain live. Independent stop station/normal
+translation paths retain their own attachment and actuator work in that SAME
+accepted sample. Geometry, physical state, reports and source endpoint cursors
+publish together; a refused trial permits an unchanged replay. A later held
+sample settles the tangent map onto the accepted endpoint, rather than leaving
+the preceding interval's midpoint in place.
+
+Finite ribbons translate all original quadrature cells together at their source
+width; the complete footprint must stay inside the original supported string
+span. Explicit speed, per-sample distance and complete response-rebuild budgets
+bound admission. Receiver footprints and contact material stations along any
+resolved fibers stay fixed, preserving their free length and mechanical state.
+Contact-loaded normals and retained shear/thermal layers refuse in either
+binding order until their complete patches and history can be transported.
+Native material-string files expose bounded station knots before the original
+gesture schedule, and use the same renderer and callback-independent clock.
+Regression coverage includes independent midpoint sine maps and work/slip,
+fixed-position parity, material/fiber/gas state retention, combined independent
+stop work, refusal/replay, finite-width geometry and temporal refinement. This
+bounded prescribed longitudinal migration does not resolve motion along bow
+hair, changing supports, contact area, transported film, or measured instrument
+accuracy; spatial and temporal refinement remain separate qualifications.
 
 `ReedPerformance::from_bytes_with_gas_field` accepts the same source-retaining `AxialGasField` for authored geometry and gestures. Its exact inlet state drives reed density and impedance; the resolved midpoint cells supply one existing regional TMM for both feedback and terminal pressure. The exact outlet field state supplies the default exterior, and an explicit exterior record replaces that single binding for both flanged loading and baffled observation. The field remains frozen during rendering. Common pressure, full length, geometry/refinement and conflicting per-segment source declarations refuse through the existing owners. Standalone and ensemble sidecars can inspect the original primitive stations and source-pack identities.
 

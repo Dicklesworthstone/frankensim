@@ -211,6 +211,11 @@ impl input::Spec {
             return Err("material-string gas coefficients must retain their original source record".into());
         }
         self.validate_shell_observer()?;
+        let bow_station_program = self.bow_station_program(gate)?;
+        if bow_station_program.is_some()
+            && stop_profile.as_ref().is_some_and(|stops| !stops.bow_contacts().is_empty()) {
+            return Err("bow migration requires jointly moving normal contact patches; contact-loaded bows are not supported".into());
+        }
         if let Some(layers)=self.friction.shear_layers() { layers.preflight(&self)?; }
         if let Some(body)=&profile { body.preflight(&self)?; }
         if self.one_way_observer.is_some() && profile.is_none() {
@@ -449,6 +454,9 @@ impl input::Spec {
         };
         if let Some(forces)=&self.forces { performance=performance.with_string_forces(forces.clone(),gate)?; }
         if let Some(stops)=&stop_profile { performance=stops.bind_motion(performance,gate)?; }
+        if let Some(program)=bow_station_program {
+            performance=performance.with_bow_station_motion(program,gate)?;
+        }
         if let Some(observer)=&self.shell_observer {
             performance=performance.with_material_shell_observer_with_quadrature(
                 observer.clone(),self.shell_receiver_quadrature,gate)?;

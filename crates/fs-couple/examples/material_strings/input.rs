@@ -11,6 +11,9 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::o
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::observation::one_way::{
     OneWayRule, OneWayShellObserverOptions};
 
+#[path = "bow_motion.rs"]
+pub mod bow_motion;
+
 pub const MAX_INPUT_BYTES: usize = 1_048_576;
 pub const MAX_PACK_BYTES: usize = 8 * 1_048_576;
 pub const MAX_TOTAL_PACK_BYTES: usize = 64 * 1_048_576;
@@ -200,6 +203,8 @@ pub struct Spec {
     pub contact_thermal: bool,
     pub bow_ribbon: Option<(f64, usize)>, pub forces: Option<StringForceProgram>,
     pub bow_fibers: Option<fibers::Input>,
+    /// Prescribed position along the string, separate from tangential speed/load.
+    pub bow_station_motion: Option<bow_motion::Input>,
     pub schedule: GestureSchedule,
 }
 impl Spec {
@@ -790,6 +795,7 @@ impl Spec {
             }
             Some(input)
         } else { None };
+        let bow_station_motion = bow_motion::Input::parse(&mut r)?;
         let mut row = r.row("forces")?;
         let initialization = match row.word()? {
             "retain" => ForceInitialization::RetainState,
@@ -873,7 +879,7 @@ impl Spec {
             for event in &track.events {
                 if event.time_s > last_time { return Err("bow command starts after the last observed control tick".into()); }
                 if !matches!(event.value, GestureValue::Bow { station: s, .. } if s.to_bits() == station.to_bits()) {
-                    return Err("bow stations remain fixed; events may change speed and load, not geometry".into());
+                    return Err("gesture events change bow speed/load; use bow_station_motion for position along the string".into());
                 }
             }
         }
@@ -883,7 +889,8 @@ impl Spec {
             rotational_bridges, translational_bridges, cylinder_gas_loading, prepared_linear, residual_flexibility, geometric_stretching,
             longitudinal_waves, longitudinal_loss, bending_memory, body_radiation, shell_bem_angular_refinement,
             shell_observer, shell_receiver_quadrature, one_way_observer, cavity, friction, contact_thermal: false, bow_ribbon, bow_fibers,
-            forces, schedule };
+            bow_station_motion, forces, schedule };
+        spec.bow_station_program(&CancelGate::new_clock_free())?;
         spec.validate_shell_observer()?;
         if let Some(layers) = spec.friction.shear_layers() { layers.preflight(&spec)?; }
         spec.network_dimensions(false)?;

@@ -390,6 +390,7 @@ impl ReciprocalStringBank {
             cards,
             system,
             stop_stations,
+            bow_stations,
         } = bank;
         let system = system
             .with_series_compliant_drives(drives, gate)
@@ -399,6 +400,7 @@ impl ReciprocalStringBank {
             cards,
             system,
             stop_stations,
+            bow_stations,
         })
     }
 }

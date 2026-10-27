@@ -137,13 +137,17 @@ impl MultiBowStringBank {
     pub fn step_with_stop_offsets(&mut self, external: &[f64], drives: &[FrictionDrive], offsets: &[f64])
         -> Result<&MultiFrictionFrame, ModalFrictionError>
     {
-        self.system.step_with_obstacle_offsets(external, drives, offsets)
+        if self.bow_stations.is_some() {
+            self.step_with_bow_geometry(external, drives, None, None, Some(offsets), &CancelGate::new_clock_free())
+        } else { self.system.step_with_obstacle_offsets(external, drives, offsets) }
     }
     /// Same physical transaction with cancellation polling.
     pub fn step_with_stop_offsets_under_gate(&mut self, external: &[f64], drives: &[FrictionDrive],
         offsets: &[f64], gate: &CancelGate) -> Result<&MultiFrictionFrame, ModalFrictionError>
     {
-        self.system.step_with_obstacle_offsets_under_gate(external, drives, offsets, gate)
+        if self.bow_stations.is_some() {
+            self.step_with_bow_geometry(external, drives, None, None, Some(offsets), gate)
+        } else { self.system.step_with_obstacle_offsets_under_gate(external, drives, offsets, gate) }
     }
 }
 
