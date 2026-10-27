@@ -16,10 +16,11 @@ impl RegionalDuct {
         wall: WallModel<'_>,
     ) -> Result<C64, DuctError> {
         let zc = self.inlet_impedance();
+        let exterior = self.exterior_gas();
         if let Some(field) = &self.continuous {
             let chain =
                 field.chain_with_wall_exterior_controlled(omega, LossModel::Bessel,
-                    self.exterior_gas.as_ref(), wall, &mut || false)?;
+                    Some(exterior), wall, &mut || false)?;
             return compose_chain_reflection(&chain.blocks, Some(load), ComposeOptions::default())?
                 .referenced_to(zc);
         }
@@ -27,13 +28,13 @@ impl RegionalDuct {
         let terminal = runs.next().expect("admitted nonempty duct");
         let mut response =
             fs_duct::exterior::input_impedance_load(&terminal.duct, &terminal.gas,
-                self.exterior_gas.as_ref().unwrap_or(&terminal.gas),
+                exterior,
                 omega, LossModel::Bessel, load, wall)?;
         for region in runs {
             response = fs_duct::exterior::input_impedance_load(
                 &region.duct,
                 &region.gas,
-                self.exterior_gas.as_ref().unwrap_or(&region.gas),
+                exterior,
                 omega,
                 LossModel::Bessel,
                 response.impedance,

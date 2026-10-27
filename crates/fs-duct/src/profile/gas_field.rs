@@ -8,10 +8,10 @@
 
 use super::{MAX_RICCATI_STEPS, RiccatiSteps, bad, local_generator, magnus_step, positive};
 use crate::compose::{
-    ComposeOptions, CompositionMode, InputReflection, PreparedChain, TwoPort, compose_chain,
-    compose_chain_reflection, duct_chain_with_wall,
+    ComposeOptions, CompositionMode, InputReflection, PreparedChain, PreparedOpenHole, TwoPort,
+    compose_chain, compose_chain_reflection, open_hole_flows, prepare_open_hole,
 };
-use crate::{Duct, DuctError, DuctResponse, LossModel, Segment, Termination};
+use crate::{Duct, DuctError, DuctResponse, LossModel, OpenHoleFlow, Segment, Termination};
 use fs_material::MaterialError;
 use fs_material::gas::GasState;
 use fs_material::gas_field::AxialGasField;
@@ -71,6 +71,21 @@ struct ToneHoleStep {
     segment: usize,
     gas: GasState,
     extra_series_m: f64,
+    bore_one_way_time_s: f64,
+}
+
+/// Physical open chimney and its travel time through the original material
+/// field. These are observation coordinates, not an extra propagation model.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GasFieldOpening {
+    /// Axial coordinate from the inlet [m].
+    pub axial_position_m: f64,
+    /// Radiating radius including the declared open area fraction [m].
+    pub effective_radius_m: f64,
+    /// Integral of 1/c to this junction on the original propagation quadrature.
+    pub bore_one_way_time_s: f64,
+    /// Bore travel plus physical/inner-matching chimney length at its local c.
+    pub one_way_time_s: f64,
 }
 
 /// Acoustic binding of existing geometry to the one shared material field.
@@ -223,6 +238,7 @@ impl GasFieldDuct {
                     segment: segment_index,
                     gas: *field.state_at(offset)?.state(),
                     extra_series_m,
+                    bore_one_way_time_s: travel,
                 });
                 continue;
             }
@@ -343,6 +359,37 @@ impl GasFieldDuct {
     pub const fn one_way_time_s(&self) -> f64 {
         self.one_way_time_s
     }
+
+    /// Open and vented mouths in authored order, with no closed-hole sources.
+    /// Travel times use the same admitted primitive field and quadrature as the
+    /// feedback operator; they never use an averaged or exterior sound speed.
+    pub fn open_hole_sites(&self) -> Vec<GasFieldOpening> {
+        let mut sites = Vec::new();
+        let mut axial_position_m = 0.0;
+        let mut steps = self.holes.iter();
+        for segment in &self.duct.segments {
+            if let Segment::ToneHole { hole_radius, chimney_height, bore_radius, state } = *segment {
+                let (gas, time) = if self.field.uniform_state().is_some() {
+                    (&self.inlet, axial_position_m / self.inlet.sound_speed)
+                } else {
+                    let step = steps.next().expect("each admitted junction retains its local gas");
+                    (&step.gas, step.bore_one_way_time_s)
+                };
+                let sigma = crate::hole_sigma(state);
+                if sigma > 0.0 {
+                    let inner = fs_phs::side_hole_inner_length(hole_radius, bore_radius);
+                    sites.push(GasFieldOpening {
+                        axial_position_m,
+                        effective_radius_m: hole_radius * sigma.sqrt(),
+                        bore_one_way_time_s: time,
+                        one_way_time_s: time + (chimney_height + inner) / gas.sound_speed,
+                    });
+                }
+            }
+            axial_position_m += segment.axial_length();
+        }
+        sites
+    }
     /// Actual field integration blocks, including zero-length tone-hole
     /// junctions; zero for the original uniform path.
     pub fn steps_used(&self) -> usize {
@@ -403,25 +450,26 @@ impl GasFieldDuct {
         wall: WallModel<'_>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedChain, DuctError> {
+        self.chain_with_holes_controlled(omega, loss, exterior, wall, false, cancelled)
+            .map(|(chain, _)| chain)
+    }
+
+    fn chain_with_holes_controlled(
+        &self,
+        omega: f64,
+        loss: LossModel,
+        exterior: Option<&GasState>,
+        wall: WallModel<'_>,
+        observe_holes: bool,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(PreparedChain, Vec<PreparedOpenHole>), DuctError> {
         if let Some(exterior) = exterior {
             crate::exterior::admit(&self.inlet, exterior)?;
         }
         if self.field.uniform_state().is_some() {
-            if let Some(exterior) = exterior {
-                return crate::compose::duct_chain_in_exterior(&self.duct, &self.inlet,
-                    exterior, omega, loss, wall, ComposeOptions::default(), true, cancelled)
-                    .map(|(chain, _)| chain);
-            }
-            return duct_chain_with_wall(
-                &self.duct,
-                &self.inlet,
-                omega,
-                loss,
-                wall,
-                ComposeOptions::default(),
-                true,
-                cancelled,
-            );
+            return crate::compose::duct_chain_in_exterior(&self.duct, &self.inlet,
+                exterior.unwrap_or(&self.inlet), omega, loss, wall,
+                ComposeOptions::default(), true, cancelled);
         }
         if !positive(omega) {
             return Err(bad("gas-field frequency must be positive and finite"));
@@ -434,6 +482,7 @@ impl GasFieldDuct {
         }
         let root3 = det::sqrt(3.0);
         let mut blocks = Vec::with_capacity(self.steps_used());
+        let mut observed_holes = Vec::new();
         let mut min_shear = f64::INFINITY;
         let (open_sites, total_acoustic_len_m, outlet_radius_m) =
             crate::collect_open_hole_sites(&self.duct);
@@ -468,7 +517,7 @@ impl GasFieldDuct {
                 }
                 let mut r_vortex = 0.0;
                 if crate::hole_sigma(state) > 0.0 {
-                    r_vortex = crate::open_hole_vortex_spec_in_exterior(
+                    let vortex = crate::open_hole_vortex_spec_in_exterior(
                         &hole.gas,
                         exterior.unwrap_or(&hole.gas),
                         loss,
@@ -479,7 +528,15 @@ impl GasFieldDuct {
                         open_hole_index,
                         total_acoustic_len_m,
                         outlet_radius_m,
-                    ).0;
+                    );
+                    r_vortex = vortex.0;
+                    if observe_holes {
+                        observed_holes.push(prepare_open_hole(
+                            &hole.gas, exterior.unwrap_or(&hole.gas), omega, loss, wall,
+                            &self.duct.segments[hole.segment], open_sites[open_hole_index],
+                            blocks.len(), hole.extra_series_m, vortex, true,
+                        )?);
+                    }
                     open_hole_index += 1;
                 }
                 let matrix = crate::tone_hole_t_junction_with_wall_vortex(
@@ -513,11 +570,11 @@ impl GasFieldDuct {
             min_shear = min_shear.min(shear_a).min(shear_b);
             axial_index += 1;
         }
-        Ok(PreparedChain {
+        Ok((PreparedChain {
             blocks,
             reference_impedance: reference,
             min_shear_number: min_shear,
-        })
+        }, observed_holes))
     }
 
     fn exterior<'a>(&'a self, gas: Option<&'a GasState>) -> Result<&'a GasState, DuctError> {
@@ -562,6 +619,25 @@ impl GasFieldDuct {
         &self, omega: f64, loss: LossModel, termination: Termination,
         exterior: Option<&GasState>, wall: WallModel<'_>,
     ) -> Result<DuctResponse, DuctError> {
+        self.response_with_holes(omega, loss, termination, exterior, wall, false)
+            .map(|(response, _)| response)
+    }
+
+    /// The same feedback response plus physical open/vented chimney flows.
+    /// Each flow is reconstructed from its actual place in the Magnus cascade,
+    /// retaining local material, wall, mutual correction and exterior loading.
+    /// Closed holes remain acoustic loads and never become radiating sources.
+    pub fn response_with_wall_and_holes(
+        &self, omega: f64, loss: LossModel, termination: Termination,
+        exterior: Option<&GasState>, wall: WallModel<'_>,
+    ) -> Result<(DuctResponse, Vec<OpenHoleFlow>), DuctError> {
+        self.response_with_holes(omega, loss, termination, exterior, wall, true)
+    }
+
+    fn response_with_holes(
+        &self, omega: f64, loss: LossModel, termination: Termination,
+        exterior: Option<&GasState>, wall: WallModel<'_>, observe_holes: bool,
+    ) -> Result<(DuctResponse, Vec<OpenHoleFlow>), DuctError> {
         let radiation = self.exterior(exterior)?;
         let radius = self
             .duct
@@ -570,14 +646,21 @@ impl GasFieldDuct {
             .expect("admitted duct")
             .outlet_radius();
         if self.field.uniform_state().is_some() {
+            if observe_holes {
+                return crate::exterior::input_impedance_and_holes(&self.duct, &self.inlet,
+                    radiation, omega, loss, termination, wall);
+            }
             return crate::exterior::input_impedance(&self.duct, &self.inlet, radiation,
-                omega, loss, termination, wall);
+                omega, loss, termination, wall).map(|response| (response, Vec::new()));
         }
-        let chain = self.chain_with_wall_exterior_controlled(omega, loss, exterior, wall, &mut || false)?;
+        let (chain, holes) = self.chain_with_holes_controlled(
+            omega, loss, exterior, wall, observe_holes, &mut || false,
+        )?;
         let (load, mouth_ka) = crate::exterior::termination_impedance(
             termination, &self.outlet, radiation, radius, omega)?;
         let solved = compose_chain(&chain.blocks, load, ComposeOptions::default())?;
-        Ok(DuctResponse {
+        let flows = open_hole_flows(&chain, &holes, load, ComposeOptions::default())?;
+        Ok((DuctResponse {
             omega,
             impedance: solved.z_in,
             min_shear_number: chain.min_shear_number,
@@ -590,7 +673,7 @@ impl GasFieldDuct {
             },
             condition_estimate: solved.condition_estimate,
             composition: CompositionMode::ImpedanceRecursion,
-        })
+        }, flows))
     }
 
     /// Direct input reflection for characteristic-line construction. The

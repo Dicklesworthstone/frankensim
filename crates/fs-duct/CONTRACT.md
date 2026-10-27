@@ -43,8 +43,15 @@ mean flow, species diffusion, condensation or varying-medium mutual-hole law.
 G1 tests compare independent finite-line ABCD assembly and chimney/outlet flow
 continuity; G0/G3 cover identical-gas bits, closed-hole isolation, pressure
 scaling, invalid media, and a warm field feeding a complete hole cluster.
-The continuous-field side-hole observer remains outside the current
-`fs-couple` observation adapter; its load and feedback paths use this boundary.
+`GasFieldDuct::response_with_wall_and_holes` retains open/vented chimney flows
+from their actual locations in that same stable cascade. Uniform and varying
+fields share one chimney/series-branch preparation and flow-reconstruction
+owner. `open_hole_sites` exposes their physical geometry and the original
+quadrature travel times, including local chimney travel. This feeds the
+`fs-couple` bell-and-hole observer without dropping sources when a continuous
+field is selected. A separate warm-prefix/uniform-cluster cascade checks both
+chimney entrance and mouth transfers; closed holes never radiate. Existing
+frozen-field, mutual-hole and infinite-baffle observation limits still apply.
 
 ## Public types and semantics
 

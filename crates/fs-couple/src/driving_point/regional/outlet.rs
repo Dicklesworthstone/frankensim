@@ -408,8 +408,13 @@ impl RegionalDuct {
     }
 
     fn open_hole_sites(&self) -> Vec<OpenHoleSite> {
-        if self.continuous.is_some() {
-            return Vec::new();
+        if let Some(field) = &self.continuous {
+            return field.open_hole_sites().into_iter().map(|site| OpenHoleSite {
+                axial_position_m: site.axial_position_m,
+                effective_radius_m: site.effective_radius_m,
+                bore_one_way_time_s: site.bore_one_way_time_s,
+                one_way_time_s: site.one_way_time_s,
+            }).collect();
         }
         let mut sites = Vec::new();
         let mut axial_x = 0.0_f64;

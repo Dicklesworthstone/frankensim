@@ -12,8 +12,10 @@ impl RegionalDuct {
     /// Bind the homogeneous exterior independently of the internal terminal gas.
     ///
     /// This cold construction changes no geometry or stored acoustic state.
-    /// Omitting it retains the historical terminal-gas exterior exactly. An
-    /// explicitly supplied identical gas also takes the original uniform path.
+    /// Omitting it uses the actual outlet gas at every exposed mouth and
+    /// observer, including upstream holes and continuous fields. In particular,
+    /// it never assigns a different exterior to each hole's local bore gas.
+    /// An explicitly supplied identical gas also takes the original uniform path.
     /// The exterior has the common static pressure but may differ in temperature
     /// or composition. Closed/ideal-open end conditions do not acquire radiation.
     ///

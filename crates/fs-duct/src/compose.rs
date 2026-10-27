@@ -802,6 +802,61 @@ pub(crate) struct PreparedOpenHole {
     pub vortex_critical_flow_m3_s: f64,
     pub vortex_quadratic_coeff_pa_s2_m6: f64,
 }
+
+/// The same physical chimney/series branch for uniform and continuous-gas
+/// chains. The caller supplies the already admitted mutual and vortex terms;
+/// the observer must use the identical branch as the acoustic feedback.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_open_hole(
+    state: &GasState,
+    exterior: &GasState,
+    omega: f64,
+    loss: LossModel,
+    wall: WallModel<'_>,
+    geometry: &Segment,
+    site: crate::OpenHoleSite,
+    block_index: usize,
+    extra_series_m: f64,
+    vortex: (f64, f64, f64),
+    compact_corrections: bool,
+) -> Result<PreparedOpenHole, DuctError> {
+    let Segment::ToneHole { hole_radius, chimney_height, bore_radius, state: hs } = *geometry else {
+        return Err(bad("open-hole observation requires a tone-hole segment"));
+    };
+    let sigma = crate::hole_sigma(hs);
+    if sigma <= 0.0 {
+        return Err(bad("open-hole observation requires a positive opening"));
+    }
+    let (mut open, chimney_length_m) = crate::chimney_open_response_with_wall(
+        state, exterior, hole_radius, chimney_height, bore_radius, omega, loss,
+        compact_corrections, wall,
+    )?;
+    open.impedance = open.impedance + C64::from_re(vortex.0);
+    let series_length = if compact_corrections {
+        fs_phs::side_hole_series_length(hole_radius, bore_radius) * sigma + extra_series_m
+    } else {
+        0.0
+    };
+    let half = if series_length == 0.0 {
+        C64::ZERO
+    } else {
+        let area = core::f64::consts::PI * bore_radius * bore_radius;
+        C64::new(0.0, -omega * state.density * series_length / area).scale(0.5)
+    };
+    Ok(PreparedOpenHole {
+        block_index,
+        axial_position_m: site.axial_position_m,
+        effective_radius_m: site.effective_radius_m,
+        chimney_length_m,
+        sigma,
+        half_series_impedance: half,
+        open_chimney_impedance: open.impedance,
+        chimney_u_mouth_over_u_in: open.u_mouth_over_u_in,
+        vortex_resistance_pa_s_m3: vortex.0,
+        vortex_critical_flow_m3_s: vortex.1,
+        vortex_quadratic_coeff_pa_s2_m6: vortex.2,
+    })
+}
 fn push_block(blocks: &mut Vec<TwoPort>, limit: usize, block: TwoPort) -> Result<(), DuctError> {
     if blocks.len() >= limit {
         return Err(bad("composition block work cap exceeded"));
@@ -946,18 +1001,6 @@ pub(crate) fn duct_chain_in_exterior(
                                 (site_j.axial_position_m - xi).abs(),
                             );
                         }
-                        let (mut open_resp, chimney_length_m) =
-                            crate::chimney_open_response_with_wall(
-                                state,
-                                exterior,
-                                hole_radius,
-                                chimney_height,
-                                bore_radius,
-                                omega,
-                                loss,
-                                true,
-                                wall,
-                            )?;
                         let (vortex_r, vortex_u_crit, vortex_k_quad) =
                             crate::open_hole_vortex_spec_in_exterior(
                                 state,
@@ -972,29 +1015,10 @@ pub(crate) fn duct_chain_in_exterior(
                                 outlet_radius_m,
                             );
                         r_vortex = vortex_r;
-                        open_resp.impedance = open_resp.impedance + C64::from_re(r_vortex);
-                        let ts =
-                            fs_phs::side_hole_series_length(hole_radius, bore_radius) * sigma
-                                + extra;
-                        let half = if ts == 0.0 {
-                            C64::ZERO
-                        } else {
-                            let area = core::f64::consts::PI * bore_radius * bore_radius;
-                            C64::new(0.0, -omega * state.density * ts / area).scale(0.5)
-                        };
-                        open_holes.push(PreparedOpenHole {
-                            block_index,
-                            axial_position_m: xi,
-                            effective_radius_m: bi,
-                            chimney_length_m,
-                            sigma,
-                            half_series_impedance: half,
-                            open_chimney_impedance: open_resp.impedance,
-                            chimney_u_mouth_over_u_in: open_resp.u_mouth_over_u_in,
-                            vortex_resistance_pa_s_m3: vortex_r,
-                            vortex_critical_flow_m3_s: vortex_u_crit,
-                            vortex_quadratic_coeff_pa_s2_m6: vortex_k_quad,
-                        });
+                        open_holes.push(prepare_open_hole(
+                            state, exterior, omega, loss, wall, s, site, block_index,
+                            extra, (vortex_r, vortex_u_crit, vortex_k_quad), true,
+                        )?);
                         hole_index += 1;
                     }
                     crate::tone_hole_t_junction_with_wall_vortex(
@@ -1133,7 +1157,7 @@ pub(crate) fn duct_chain_in_exterior(
     ))
 }
 
-fn open_hole_flows(
+pub(crate) fn open_hole_flows(
     chain: &PreparedChain,
     open_holes: &[PreparedOpenHole],
     z_load: Option<C64>,

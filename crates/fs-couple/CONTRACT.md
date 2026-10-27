@@ -1478,6 +1478,15 @@ gradient. Multiple open/vented holes retain every mutual correction and
 require a constant primitive field throughout their connecting span;
 unsupported varying inter-hole media still refuse. This also reaches the
 existing scheduled reed renderer without a separate propagation path.
+Open/vented chimney flows now cross this continuous-field binding into the
+same bell-and-hole microphone realization. Axial delays use the original
+gas-field quadrature and each chimney's local sound speed. Feedback, chimney
+mouth loads and exterior microphones use one homogeneous exterior: the explicit
+binding, or the actual outlet gas when omitted. The same choice applies to
+regional interfaces, arbitrary terminal loads and characteristic-line shortcuts. Selecting a continuous field cannot
+silently turn an open hole into a non-radiating source. Closed holes remain
+loads only. This retains the existing sampled-transfer and infinite-baffle
+approximations, rather than adding a new radiation or transport law.
 A focused impulse regression covers the combined wall/field changes to
 both incoming feedback and causal external microphone pressure.
 
@@ -1688,7 +1697,11 @@ clarinet is one filling of those objects.
   density, bending, installed tension, material viscosity and torsional inertia
   remain distinct. The active transverse card replaces sampled gas resistance
   with intrinsic material loss plus the explicitly collapsed slow tail, so
-  fluid damping is not counted twice.
+  fluid damping is not counted twice. The same intrinsic-loss owner supplies
+  Kelvin–Voigt bending and the construction's independent tensile loss factor
+  in the loaded mass basis; selecting causal fluid loading must not erase
+  either. Prony bending keeps its internal strains alongside that tensile
+  loss, without inventing a second bending-viscosity law.
 
   All material-string performance versions accept the optional
   `cylinder-gas-loading X_MIN X_MAX INTERVALS` row before an optional
@@ -6465,6 +6478,26 @@ late-cancellation refusals preserve all accepted histories. These are discrete
 coupling checks, not measured resistor or magnetic-device validation.
 
 ## Source gas fields and source walls in the native DG operator
+
+The authored material-modal DG valve and DG flue loaders accept the same
+optional `dg_wall` record after the complete `dg_tube`/`dg_bore` block:
+`dg_wall isotropic PACK T OMEGA H AXIAL FMIN FMAX LOSS`. `AXIAL` is
+`stress-free` or `strain-fixed`; `LOSS` uses the existing elastic,
+Kelvin-Voigt or source-property Maxwell grammar. The declared material band
+must cover the propagation band. `dg_wall rigid` and omission retain the
+original operator. Missing source data, unsupported geometry, thin-wall
+violations and complete-state budget overflow refuse before rendering.
+
+Both loaders bind the original `LocalMaterialWall` before preparing the same
+DG exponential. Density, stiffness, viscosity and every positive source
+Maxwell arm affect the actual pressure feedback, radial wall motion and
+retained storage. Prescribed gas fields and independent exterior gas remain
+their original owners. The reed loader shares a single normalized artifact
+cache between its blades and wall; CLI metadata retains the solid source and
+model scope. This remains a frozen, isotropic thin cylindrical main-bore wall;
+side chimneys stay rigid, and axial shell waves and exterior wall radiation
+are absent. Source-swap, gas-field, callback, original CLI/PCM and refusal
+regressions are added; full native verification remains required.
 
 `LocalMaterialWall::bind_dg` composes its original elastic, Kelvin or
 source-Maxwell material with a prescribed nonuniform `AxialGasField` on

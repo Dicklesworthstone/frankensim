@@ -615,6 +615,16 @@ fn uniform_fingered_field_preserves_original_bits() {
             assert_eq!(actual.impedance, expected.impedance);
             assert_eq!(actual.u_mouth_over_u_in, expected.u_mouth_over_u_in);
             assert_eq!(actual.p_mouth_over_u_in, expected.p_mouth_over_u_in);
+            let (observed, holes) = bound.response_with_wall_and_holes(
+                TAU * frequency, loss, Termination::FlangedOpen, None, WallModel::Rigid,
+            ).unwrap();
+            let (original, original_holes) = crate::input_impedance_with_wall_and_holes(
+                &geometry, bound.inlet_gas(), TAU * frequency, loss,
+                Termination::FlangedOpen, WallModel::Rigid,
+            ).unwrap();
+            assert_eq!(observed.impedance, original.impedance);
+            assert_eq!(holes, original_holes);
+            assert_eq!(holes.len(), bound.open_hole_sites().len());
         }
     }
 }
@@ -671,7 +681,7 @@ fn warmed_entry_preserves_the_complete_hole_cluster_in_an_independent_exterior()
         for wall in [None, Some(&wall)] {
           for exterior in [None, Some(outside.state())] {
             let omega = TAU * 430.0;
-            let tail_response = crate::exterior::input_impedance(
+            let (tail_response, tail_holes) = crate::exterior::input_impedance_and_holes(
                 &tail,
                 tail_gas.state(),
                 exterior.unwrap_or(tail_gas.state()),
@@ -710,9 +720,47 @@ fn warmed_entry_preserves_the_complete_hole_cluster_in_an_independent_exterior()
                 exterior, wall).unwrap().referenced_to(bound.inlet_impedance()).unwrap();
             let zref = C64::from_re(bound.inlet_impedance());
             assert!(relative(reflected, (actual.impedance-zref)/(actual.impedance+zref))<2e-11);
+            let (observed, holes) = bound.response_with_wall_and_holes(
+                omega, loss, Termination::FlangedOpen, exterior, WallModel::from_pin(wall),
+            ).unwrap();
+            assert_eq!(observed.impedance, actual.impedance);
+            assert_eq!(observed.u_mouth_over_u_in, actual.u_mouth_over_u_in);
+            assert_eq!(holes.len(), 2, "a field cannot silence its open chimneys");
+            for (hole, tail_hole) in holes.iter().zip(&tail_holes) {
+                assert!((hole.axial_position_m - length - tail_hole.axial_position_m).abs() < 1e-15);
+                assert!(relative(hole.u_hole_over_u_in,
+                    expected.u_out_over_u_in * tail_hole.u_hole_over_u_in) < 2e-11);
+                assert!(relative(hole.u_chimney_in_over_u_in,
+                    expected.u_out_over_u_in * tail_hole.u_chimney_in_over_u_in) < 2e-11);
+            }
           }
         }
     }
+}
+
+#[test]
+fn hole_travel_uses_the_actual_temperature_field_and_local_chimney_gas() {
+    let source = field([300.0, 390.0], [0.8, 0.8], 101325.0);
+    let geometry = fingered_bore([crate::HoleState::Closed, crate::HoleState::Vent(0.4)]);
+    let bound = GasFieldDuct::new(&geometry, &source, RiccatiSteps(32)).unwrap();
+    let sites = bound.open_hole_sites();
+    assert_eq!(sites.len(), 1);
+    let site = sites[0];
+    let x = 2.0 * LENGTH / 3.0;
+    let local = source.state_at(x).unwrap();
+    // This fixture has constant cp/composition, hence c is proportional to
+    // sqrt(T). Integrating 1/c over a linear temperature field is analytic.
+    let travel = 2.0 * x / (bound.inlet_gas().sound_speed + local.state().sound_speed);
+    assert!((site.bore_one_way_time_s - travel).abs() < 1e-13);
+    let chimney = 0.005 + fs_phs::side_hole_inner_length(0.002, RADIUS);
+    assert!((site.one_way_time_s - travel - chimney / local.state().sound_speed).abs() < 1e-13);
+    assert_eq!(site.effective_radius_m, 0.002 * 0.4_f64.sqrt());
+    let (_, holes) = bound.response_with_wall_and_holes(
+        TAU * 430.0, LossModel::Bessel, Termination::FlangedOpen, None, WallModel::Rigid,
+    ).unwrap();
+    assert_eq!(holes.len(), 1);
+    assert_eq!(holes[0].axial_position_m, site.axial_position_m);
+    assert!(holes[0].u_hole_over_u_in.abs() > 1e-5);
 }
 
 #[test]

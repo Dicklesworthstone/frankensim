@@ -23,6 +23,122 @@ const LENGTH: f64 = 0.57;
 const RADIUS: f64 = 0.0073;
 const TAU: f64 = core::f64::consts::TAU;
 
+#[test]
+fn continuous_gas_fields_keep_open_holes_in_physical_microphone_output() {
+    use crate::pcm_wav::baffled::CircularOutletReceiver;
+    use fs_duct::{HoleState, RiccatiSteps, WallModel};
+
+    let radius = 0.0015;
+    let geometry = Duct { segments: vec![
+        Segment::Cylinder { radius, length: LENGTH / 2.0 },
+        Segment::ToneHole { hole_radius: 0.0005, chimney_height: 0.003,
+            bore_radius: radius, state: HoleState::Open },
+        Segment::Cylinder { radius, length: LENGTH / 2.0 },
+    ] };
+    let source = field(360.0);
+    let outside = *source.state_at(0.0).unwrap().state();
+    let duct = RegionalDuct::from_continuous_gas_field(&geometry, &source, RiccatiSteps(16))
+        .unwrap().with_exterior_gas(outside).unwrap();
+    let field_owner = duct.continuous_gas_field().unwrap();
+    let (response, holes) = duct.response_with_wall_and_holes(
+        TAU * 430.0, LossModel::Bessel, Termination::FlangedOpen, WallModel::Rigid,
+    ).unwrap();
+    let (direct, direct_holes) = field_owner.response_with_wall_and_holes(
+        TAU * 430.0, LossModel::Bessel, Termination::FlangedOpen, Some(&outside), WallModel::Rigid,
+    ).unwrap();
+    assert_eq!(response.impedance, direct.impedance);
+    assert_eq!(holes, direct_holes);
+    assert_eq!(holes.len(), 1);
+
+    let receiver = CircularOutletReceiver { position_m: [0.0, 0.0, 1.0],
+        radial_rings: 2, angular_points: 8, maximum_frequency_hz: 700.0 };
+    let (mut bell, mut microphones, _) = duct.baffled_outlet_and_open_holes_and_shunt_delayed_at(
+        8000, 256, receiver, WallModel::Rigid, outside.sound_speed,
+    ).unwrap();
+    assert_eq!(microphones.len(), 1, "changing to a continuous field must not drop a source");
+    let info = microphones[0].info();
+    assert_eq!(info.gas, outside);
+    assert_eq!(info.radius_m, 0.0005);
+    assert_eq!(info.receiver.position_m[0], LENGTH / 2.0);
+    assert_eq!(info.axial_delay_samples,
+        (field_owner.open_hole_sites()[0].one_way_time_s * 8000.0).floor() as usize);
+    let mut hole_energy = 0.0;
+    let mut difference = 0.0;
+    for n in 0..1024 {
+        let input = if n == 0 { 1.0 } else { 0.0 };
+        let bell_pressure = bell.step(input).unwrap();
+        let hole_pressure = microphones[0].step(input).unwrap();
+        assert!(bell_pressure.is_finite() && hole_pressure.is_finite());
+        hole_energy += hole_pressure * hole_pressure;
+        difference += ((bell_pressure + hole_pressure) - bell_pressure).powi(2);
+    }
+    assert!(hole_energy > 0.0 && difference > 0.0);
+}
+
+#[test]
+fn default_continuous_exterior_is_shared_by_feedback_holes_baked_load_and_microphones() {
+    use crate::pcm_wav::baffled::CircularOutletReceiver;
+    use fs_duct::{HoleState, RiccatiSteps, WallModel};
+    use fs_duct::compose::{ComposeOptions, compose_chain_reflection};
+    use fs_math::c64::C64;
+
+    let radius = 0.0015;
+    let geometry = Duct { segments: vec![
+        Segment::Cylinder { radius, length: LENGTH / 2.0 },
+        Segment::ToneHole { hole_radius: 0.0005, chimney_height: 0.003,
+            bore_radius: radius, state: HoleState::Open },
+        Segment::Cylinder { radius, length: LENGTH / 2.0 },
+    ] };
+    let source = field(360.0);
+    let regional = RegionalDuct::from_continuous_gas_field(&geometry, &source, RiccatiSteps(16))
+        .unwrap();
+    let exterior = *source.state_at(LENGTH).unwrap().state();
+    assert_ne!(source.state_at(LENGTH / 2.0).unwrap().state(), &exterior);
+    let explicit = regional.clone().with_exterior_gas(exterior).unwrap();
+    let owner = regional.continuous_gas_field().unwrap();
+    let omega = TAU * 430.0;
+    for termination in [Termination::Closed, Termination::FlangedOpen] {
+        let actual = regional.response_with_wall_and_holes(
+            omega, LossModel::Bessel, termination, WallModel::Rigid).unwrap();
+        let expected = owner.response_with_wall_and_holes(
+            omega, LossModel::Bessel, termination, Some(&exterior), WallModel::Rigid).unwrap();
+        assert_eq!(actual.0.impedance, expected.0.impedance);
+        assert_eq!(actual.1, expected.1);
+        assert_eq!(regional.response(omega, LossModel::Bessel, termination, None)
+            .unwrap().impedance, expected.0.impedance);
+        assert_eq!(regional.reflection_with_wall(omega, LossModel::Bessel,
+            termination, WallModel::Rigid).unwrap(), owner.reflection_with_wall(
+            omega, LossModel::Bessel, termination, Some(&exterior), WallModel::Rigid)
+            .unwrap().referenced_to(regional.inlet_impedance()).unwrap());
+        // The lower-level owner deliberately retains its local-gas convention.
+        let local = owner.response_with_wall_and_holes(
+            omega, LossModel::Bessel, termination, None, WallModel::Rigid).unwrap();
+        assert_ne!(local.1[0].u_hole_over_u_in, actual.1[0].u_hole_over_u_in);
+    }
+    let load = C64::from_re(300000.0);
+    let chain = owner.chain_with_wall_exterior_controlled(omega, LossModel::Bessel,
+        Some(&exterior), WallModel::Rigid, &mut || false).unwrap();
+    let expected = compose_chain_reflection(&chain.blocks, Some(load), ComposeOptions::default())
+        .unwrap().referenced_to(regional.inlet_impedance()).unwrap();
+    assert_eq!(regional.loaded_reflection(omega, load, WallModel::Rigid).unwrap(), expected);
+
+    let receiver = CircularOutletReceiver { position_m: [0.0, 0.0, 1.0],
+        radial_rings: 2, angular_points: 8, maximum_frequency_hz: 700.0 };
+    let microphones = |duct: &RegionalDuct| duct.baffled_outlet_and_open_holes_delayed_at(
+        8000, 256, receiver, WallModel::Rigid, exterior.sound_speed).unwrap();
+    let (mut default_bell, mut default_holes) = microphones(&regional);
+    let (mut explicit_bell, mut explicit_holes) = microphones(&explicit);
+    assert_eq!(default_holes.len(), 1);
+    assert_eq!(default_holes[0].info().gas, exterior);
+    for sample in 0..1024 {
+        let input = if sample == 0 { 1.0 } else { 0.0 };
+        assert_eq!(default_bell.step(input).unwrap().to_bits(),
+            explicit_bell.step(input).unwrap().to_bits());
+        assert_eq!(default_holes[0].step(input).unwrap().to_bits(),
+            explicit_holes[0].step(input).unwrap().to_bits());
+    }
+}
+
 fn typed(kind: QuantityKind) -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))
 }
@@ -470,7 +586,7 @@ fn continuous_field_routes_local_tone_holes_into_the_characteristic_line() {
             TAU * 430.0,
             LossModel::Bessel,
             Termination::UnflangedOpen,
-            None,
+            Some(regional.exterior_gas()),
         )
         .unwrap();
     assert_eq!(response.impedance, direct.impedance);

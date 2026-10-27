@@ -138,14 +138,19 @@ fn g3_exterior_reaches_upstream_holes_with_a_closed_terminal_and_a_baked_load() 
         Segment::ToneHole { hole_radius: 0.0004, chimney_height: 0.003,
             bore_radius: 0.001, state: HoleState::Vent(0.4) },
         duct().segments[1].clone()] };
-    let original = RegionalDuct::new(&geometry, &[a, a, b]).unwrap();
-    let external = original.clone().with_exterior_gas(b).unwrap();
+    let default = RegionalDuct::new(&geometry, &[a, a, b]).unwrap();
+    let original = default.clone().with_exterior_gas(a).unwrap();
+    let external = default.clone().with_exterior_gas(b).unwrap();
     let omega = core::f64::consts::TAU * 731.0;
     for termination in [Termination::Closed, Termination::FlangedOpen] {
         let first = original.response_with_wall_and_holes(omega, LossModel::Bessel,
             termination, WallModel::Rigid).unwrap();
         let second = external.response_with_wall_and_holes(omega, LossModel::Bessel,
             termination, WallModel::Rigid).unwrap();
+        let default_response = default.response_with_wall_and_holes(omega, LossModel::Bessel,
+            termination, WallModel::Rigid).unwrap();
+        assert_eq!(bits(default_response.0), bits(second.0));
+        assert_eq!(default_response.1, second.1);
         assert_eq!(first.1.len(), 1); assert_eq!(second.1.len(), 1);
         assert_ne!(first.0.impedance, second.0.impedance);
         assert_ne!(first.1[0].u_hole_over_u_in, second.1[0].u_hole_over_u_in);
@@ -158,4 +163,32 @@ fn g3_exterior_reaches_upstream_holes_with_a_closed_terminal_and_a_baked_load() 
     let loaded = |region: &RegionalDuct| region.loaded_reflection(
         omega, z_load, WallModel::Rigid).unwrap();
     assert_ne!(loaded(&original), loaded(&external));
+    assert_eq!(loaded(&default), loaded(&external));
+}
+
+#[test]
+fn independent_exterior_reaches_uniform_holes_with_closed_or_ideal_open_terminal() {
+    let a = air(100000.0); let b = enriched();
+    let geometry = Duct { segments: vec![duct().segments[0].clone(),
+        Segment::ToneHole { hole_radius: 0.0004, chimney_height: 0.003,
+            bore_radius: 0.001, state: HoleState::Open },
+        duct().segments[1].clone()] };
+    let original = RegionalDuct::new(&geometry, &[a, a, a]).unwrap();
+    let external = original.clone().with_exterior_gas(b).unwrap();
+    for termination in [Termination::Closed, Termination::IdealOpen] {
+        let omega = core::f64::consts::TAU * 731.0;
+        assert_ne!(original.response(omega, LossModel::Bessel, termination, None).unwrap().impedance,
+            external.response(omega, LossModel::Bessel, termination, None).unwrap().impedance);
+        let mut first = original.characteristic_line(termination, 8000, 2048, None, Some(512)).unwrap();
+        let mut second = external.characteristic_line(termination, 8000, 2048, None, Some(512)).unwrap();
+        let mut difference = 0.0;
+        for sample in 0..2048 {
+            let input = if sample == 0 { 1.0 } else { 0.0 };
+            let a = first.push(input).unwrap();
+            let b = second.push(input).unwrap();
+            assert!(a.is_finite() && b.is_finite());
+            difference += (a - b).powi(2);
+        }
+        assert!(difference > 0.0, "terminal condition must not bypass side-hole loading");
+    }
 }

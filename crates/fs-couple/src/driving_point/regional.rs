@@ -64,8 +64,9 @@ impl RegionalDuct {
     ///
     /// States must be coherent and at exactly the same static pressure. Species
     /// and temperature may vary. A tone-hole record uses its assigned gas for
-    /// both its compact bore junction and chimney; no exterior medium jump is
-    /// inferred. Geometry/radiation/loss validity remains checked by `fs-duct`
+    /// both its compact bore junction and chimney. Every exposed mouth uses
+    /// one homogeneous exterior, defaulting to the actual outlet gas; an
+    /// explicit binding replaces only that exterior. Geometry/radiation/loss validity remains checked by `fs-duct`
     /// at each requested frequency. Construction does not advance sound state.
     ///
     /// # Errors
@@ -172,15 +173,16 @@ impl RegionalDuct {
         if !omega.is_finite() || omega <= 0.0 {
             return Err(invalid("frequency must be positive and finite"));
         }
+        let exterior = self.exterior_gas();
         if let Some(field) = &self.continuous {
-            return field.response_with_wall(omega, loss, termination, self.exterior_gas.as_ref(), wall);
+            return field.response_with_wall(omega, loss, termination, Some(exterior), wall);
         }
         let mut runs = self.regions.iter().rev();
         let terminal = runs.next().expect("nonempty binding");
         let mut response = self.terminal_response(terminal, omega, loss, termination, wall)?;
         for region in runs {
             let upstream = fs_duct::exterior::input_impedance_load(&region.duct, &region.gas,
-                self.exterior_gas.as_ref().unwrap_or(&region.gas), omega,
+                exterior, omega,
                 loss, response.impedance, wall)?;
             // A downstream one-port receives the upstream run's output flow.
             // Keep the REAL mouth's ka and load; this interface is not another
@@ -206,17 +208,11 @@ impl RegionalDuct {
         if !omega.is_finite() || omega <= 0.0 {
             return Err(invalid("frequency must be positive and finite"));
         }
+        let exterior = self.exterior_gas();
         if let Some(field) = &self.continuous {
-            return Ok((
-                field.response_with_wall(
-                    omega,
-                    loss,
-                    termination,
-                    self.exterior_gas.as_ref(),
-                    wall,
-                )?,
-                Vec::new(),
-            ));
+            return field.response_with_wall_and_holes(
+                omega, loss, termination, Some(exterior), wall,
+            );
         }
         let mut offsets = Vec::with_capacity(self.regions.len());
         let mut axial_x = 0.0;
@@ -240,7 +236,7 @@ impl RegionalDuct {
             let (upstream, mut upstream_holes) = fs_duct::exterior::input_impedance_load_and_holes(
                 &region.duct,
                 &region.gas,
-                self.exterior_gas.as_ref().unwrap_or(&region.gas),
+                exterior,
                 omega,
                 loss,
                 response.impedance,
@@ -271,14 +267,15 @@ impl RegionalDuct {
     pub fn reflection_with_wall(&self, omega: f64, loss: LossModel,
         termination: Termination, wall: WallModel<'_>) -> Result<fs_math::c64::C64, DuctError> {
         let zc = self.inlet_impedance();
+        let exterior = self.exterior_gas();
         if let Some(field) = &self.continuous {
             return field.reflection_with_wall(omega, loss, termination,
-                self.exterior_gas.as_ref(), wall)?.referenced_to(zc);
+                Some(exterior), wall)?.referenced_to(zc);
         }
         if self.regions.len() == 1 {
             let region = &self.regions[0];
             return fs_duct::exterior::input_reflection(&region.duct, &region.gas,
-                self.exterior_gas(), omega, loss, termination, wall)?.referenced_to(zc);
+                exterior, omega, loss, termination, wall)?.referenced_to(zc);
         }
         self.response_with_wall(omega, loss, termination, wall)
             .map(|response| impedance_reflectance(&response, zc))
@@ -328,9 +325,15 @@ impl RegionalDuct {
             MouthLoad::Matched => return Err(super::baked::matched_refusal()),
         };
         // Delegate constant pins verbatim, including travel-time arithmetic.
+        // A closed/ideal-open terminal does not remove radiation at side holes.
         if let WallModel::Rigid | WallModel::Pin(_) = wall
             && self.continuous.is_none() && self.regions.len() == 1 && (self.exterior_gas() == self.outlet_gas()
-            || matches!(termination, Termination::Closed | Termination::IdealOpen)) {
+            || (matches!(termination, Termination::Closed | Termination::IdealOpen)
+                && !self.regions[0].duct.segments.iter().any(|segment| {
+                    matches!(segment, Segment::ToneHole { state, .. }
+                        if matches!(state, HoleState::Open)
+                            || matches!(state, HoleState::Vent(fraction) if *fraction > 0.0))
+                }))) {
             let pin = match wall { WallModel::Pin(pin) => Some(pin), _ => None };
             let r = &self.regions[0];
             let length = super::duct_axial_length(&r.duct);
