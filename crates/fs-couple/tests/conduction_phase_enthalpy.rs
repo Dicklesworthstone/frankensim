@@ -2,6 +2,8 @@
 //! All numbers below are synthetic constitutive data, not empirical metals.
 #[path = "circuit_enthalpy/common.rs"]
 mod common;
+#[path = "conduction_phase_enthalpy/dielectric.rs"]
+mod dielectric;
 
 use common::{config, near};
 use fs_blake3::ContentHash;

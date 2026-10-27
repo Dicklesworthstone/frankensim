@@ -636,3 +636,38 @@ existing static admission. The field remains a stationary snapshot; latent
 enthalpy evolution, fixed-volume phase admission and circuit feedback belong
 to the existing `fs-couple` thermal owner. No phase geometry, phase-interface
 resistance or automatic electrical mixture law is inferred here.
+
+## Native spatial leaky-dielectric charge and energy history
+
+`electrostatic::relaxation::PlanarLeakyDielectric<C>` retains physical P1
+potentials, weak nodal charges, cell dielectric storage and time on the original
+planar mesh. It uses the existing dielectric and scalar/oriented Ohmic Hodge
+operators and checked potential solve. The midpoint interval satisfies
+`(K_epsilon + dt K_sigma/2) V1 = (K_epsilon - dt K_sigma/2) V0`
+at free vertices. No lumped fitted capacitance or duplicate cell constitutive
+law replaces the native operators.
+
+Original complete exterior voltage traces remain fixed in topology and may
+ramp in value. Other boundaries isolate total conduction plus displacement
+current. Electrode reactions include both terms and pair with midpoint voltage
+for source work. Shared native cell recovery computes physical local E.J heat,
+E.D/2 storage and displacement current. The candidate checks free-node current,
+net electrode current, weak-charge/cell-storage agreement and
+`delta U_field + Q_Joule - W_electrodes` before publication.
+
+The dielectric source must declare validity-wide constant absolute scalar
+permittivity. Conductivity may refresh at the actual state, retaining original
+material identity, full source claims, basis, frame, phase axis and coordinate
+meanings. The original accepted charge is the starting point of every trial;
+failure or cancellation publishes no state. Variable permittivity, dispersion,
+magnetic induction, breakdown, carrier chemistry and moving interfaces are not
+represented.
+
+Held-coefficient midpoint accuracy is second order, but charge sign is not
+preserved for arbitrary intervals; the physical relaxation time and spatial
+field still require independent resolution. Native regression cases live in
+the fs-couple `conduction_phase_enthalpy::dielectric` lane and compare analytic
+epsilon/sigma decay, heterogeneous interface charge and voltage-ramp work.
+Source/parser review completed for this change. These regression cases have not
+been executed in the current environment because pinned sibling dependencies
+and configured remote runners are unavailable.

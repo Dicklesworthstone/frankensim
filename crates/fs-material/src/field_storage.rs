@@ -107,6 +107,27 @@ pub fn linear_electric_permittivity(
     )
 }
 
+/// Absolute permittivity explicitly constant across its whole source domain.
+/// Retained charge owners without dielectric parameter work/thermal entropy
+/// must use this admission rather than infer constancy from two snapshots.
+/// Source applicability still follows the original nondispersive static law;
+/// runtime refreshes must retain the claim and remain inside its validity.
+pub fn constant_electric_permittivity(
+    material: &ResolvedMaterialStatePoint,
+) -> Result<f64, FieldStorageError> {
+    let value = linear_electric_permittivity(material)?;
+    let source = material.property(ELECTRIC_PERMITTIVITY_PROPERTY)
+        .expect("linear admission retains its source");
+    if !source.source_axes().is_empty()
+        || source.answer().receipt.decision != fs_matdb::EvaluationDecision::ConstantWithinValidity
+    {
+        return Err(FieldStorageError::Invalid(
+            "live dielectric storage without parameter work requires validity-wide constant permittivity",
+        ));
+    }
+    Ok(value)
+}
+
 /// Absolute scalar permeability for a linear isotropic lossless field owner.
 /// Shares the exact source/model admission used by the circuit inductance:
 /// temperature and typed pressure/composition/moisture/concentration may be

@@ -7222,3 +7222,38 @@ source-data gas changes followed by wall rebinding, and atomic refusal.
 This advances MR08/MR33/MR34 while their wider spatial/history requirements
 remain open. Native execution and measured acoustic validation remain
 separate gates.
+
+## Continuing spatial dielectric charge through thermal phase change
+
+`ConductionThermalNetwork::step_dielectric_candidate` connects the native
+`PlanarLeakyDielectric` history to the original cell enthalpy residual. Every
+thermal trial resolves the same complete material source bundle at actual
+temperature and liquid mass fraction, refreshes scalar or oriented conductivity,
+and advances from the same accepted electric charge and potentials. Local
+midpoint E.J power is routed once through the existing original-triangle to
+receiving-cell correspondence. Electric storage change remains a separate
+physical ledger term; it is not deposited as additional heat.
+
+The jointly accepted candidate owns the continued native field, finite thermal
+state and original combined energy report. Source work includes displacement
+current during electrode-voltage ramps. Thermal conduction, prescribed heat,
+Joule deposition and dielectric storage close in the same acceptance path.
+Confined equal-density phase change follows the existing enthalpy admission;
+changed geometry or phase density is refused. Permittivity must be explicitly
+constant over its source validity domain and unchanged along the trajectory,
+so variable dielectric parameter work is not silently discarded.
+
+Thermal rates and conductivity use the endpoint; overall coupled temporal
+accuracy is first order in general even though the held-coefficient electrical
+interval uses midpoint. The original material identities, frames, source
+receipts, clocks and trace topology must agree. Cancellation, missing sources,
+changed storage or late thermal refusal leave all accepted owners unchanged.
+Dispersion, induction, breakdown, charge-carrier chemistry and moving interfaces
+remain outside this coupling.
+
+Four regression cases in `tests/conduction_phase_enthalpy/dielectric.rs`
+cover independent epsilon/sigma relaxation and local heat, heterogeneous
+interface charge and driven electrode work, latent melting with phase-dependent
+conductivity, and source/storage/cancellation rollback. Scalar and rotated
+tensor conductivity both use the native path. These cases are authored and
+source/parser checked, but were not executed in this environment.

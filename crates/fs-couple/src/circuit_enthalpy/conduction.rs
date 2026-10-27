@@ -7,6 +7,8 @@
 
 /// Spatial conductor terminals coupled to native circuit storage and finite heat.
 pub mod circuit;
+/// Retained dielectric charge and local conduction heat on this same material network.
+pub mod dielectric;
 
 use super::{
     CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, DrivenCoefficients,
@@ -140,6 +142,7 @@ pub enum ConductionThermalError {
     Material(MaterialNetworkError),
     Conductor(ConductorError),
     Field(ConductionError),
+    Dielectric(fs_em::electrostatic::relaxation::DielectricRelaxationError),
     Invalid(&'static str),
 }
 impl core::fmt::Display for ConductionThermalError {

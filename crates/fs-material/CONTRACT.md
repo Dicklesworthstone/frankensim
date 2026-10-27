@@ -2339,3 +2339,20 @@ The spatial consumer tests actual loaded-solid creep, finite-store heating and
 endpoint temperature feedback in `fs-couple`. This advances MR22
 (`frankensim-material-reality-ui2if.3.4`); its broader material/history scope
 remains open.
+
+## Constant dielectric storage admission for native charge relaxation
+
+`field_storage::constant_electric_permittivity` admits the existing absolute
+`electric_permittivity` requirement only when its selected source declares a
+constant law over its admitted validity domain. A coincidentally unchanged
+sample from a temperature or phase curve does not establish this constitutive
+contract. Units, positivity, complete source receipt and original query
+semantics remain owned by the common material resolver.
+
+The native leaky-dielectric trajectory uses this admission to change
+conductivity at the actual thermal state without silently introducing
+permittivity parameter work or reversible thermal entropy. It retains the
+complete common source bundle; changing material identity, source claims,
+coordinate meanings, tensor frame or phase-axis binding on an existing
+trajectory is refused. Variable dielectric storage needs its own work/entropy
+law and is outside this entry point.

@@ -10,6 +10,8 @@
 //! field-dependent conduction require their own models. A changed temperature
 //! or material must be resolved and prepared again, not substituted into an
 //! already accepted field. No electrical storage or thermal evolution is added.
+//! The separate [`crate::electrostatic::relaxation`] owner composes these same
+//! cell currents/losses with retained dielectric charge and displacement current.
 
 use fs_feec::{
     assembly::{incidence_to_csr, stiffness},
@@ -106,6 +108,14 @@ pub struct PlanarConduction<C = ResolvedConductorState> {
     conductivity: Vec<PlanarConductivity>,
     conductivity_s_m: Vec<f64>,
     stiffness: Csr,
+}
+
+// One original Ohmic cell law for steady balance and retained charge dynamics.
+pub(crate) struct ConductionCellResponse {
+    pub electric_field_v_m: Vec<[f64; 2]>,
+    pub current_density_a_m2: Vec<[f64; 2]>,
+    pub cell_power_w: Vec<f64>,
+    pub power_w: f64,
 }
 impl<C: PlanarConductorMaterial> PlanarConduction<C> {
     /// Assemble the same native weighted FEEC operator used by other scalar
@@ -216,6 +226,10 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
     /// Actual scalar/tensor conductivity in the original mesh coordinates.
     pub fn conductivity_coefficients(&self) -> &[PlanarConductivity] {
         &self.conductivity
+    }
+
+    pub(crate) fn stiffness_operator(&self) -> &Csr {
+        &self.stiffness
     }
 
     /// Solve at prescribed exterior voltage traces. Remaining exterior edges
@@ -354,18 +368,14 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
         Ok(loads)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn recover_field(
+    pub(crate) fn cell_response(
         &self,
-        voltage: Vec<f64>,
-        prescribed: &[Option<f64>],
-        applied: Vec<Option<f64>>,
-        current_tolerance_a: f64,
-        power_tolerance_w: f64,
-        report: Option<SolveReport>,
+        voltage: &[f64],
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<ConductionField<'_, C>, ConductionError> {
-        let n = self.mesh.vertices().len();
+    ) -> Result<ConductionCellResponse, ConductionError> {
+        if voltage.len() != self.mesh.vertices().len() || voltage.iter().any(|v| !v.is_finite()) {
+            return Err(ConductionError::Invalid("complete finite native potentials required"));
+        }
         let mut electric_field_v_m = Vec::with_capacity(self.conductors.len());
         let mut current_density_a_m2 = Vec::with_capacity(self.conductors.len());
         let mut cell_power_w = Vec::with_capacity(self.conductors.len());
@@ -399,6 +409,26 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
             current_density_a_m2.push(j);
             cell_power_w.push(power);
         }
+        Ok(ConductionCellResponse {
+            electric_field_v_m, current_density_a_m2, cell_power_w, power_w,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn recover_field(
+        &self,
+        voltage: Vec<f64>,
+        prescribed: &[Option<f64>],
+        applied: Vec<Option<f64>>,
+        current_tolerance_a: f64,
+        power_tolerance_w: f64,
+        report: Option<SolveReport>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ConductionField<'_, C>, ConductionError> {
+        let n = self.mesh.vertices().len();
+        let ConductionCellResponse {
+            electric_field_v_m, current_density_a_m2, cell_power_w, power_w,
+        } = self.cell_response(&voltage, cancelled)?;
         let mut nodal_boundary_current_a = vec![None; n];
         let mut boundary_current_a = 0.0;
         let mut maximum_free_current_residual_a: f64 = 0.0;

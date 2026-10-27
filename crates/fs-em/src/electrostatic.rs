@@ -6,12 +6,15 @@
 //! edges have zero normal electric displacement. Fields are not averaged across
 //! dielectric interfaces. Charge reactions and the stored integral E.D/2 are
 //! checked before publication. These are discrete residual checks, not spatial
-//! error bounds. No conduction, dielectric loss, dispersion, breakdown, moving
-//! geometry, or live temperature/parameter-work claim is made.
+//! error bounds. This static solve adds no conduction, dielectric dispersion,
+//! breakdown or geometry evolution. [`relaxation`] composes its native storage
+//! with Ohmic transport on a retained charge history at constant permittivity.
 
 mod force;
 /// Multiple source-resolved electrodes and passive native circuit reduction.
 pub mod network;
+/// Retained dielectric charge, native Ohmic current and physical relaxation heat.
+pub mod relaxation;
 
 use fs_feec::{
     assembly::{incidence_to_csr, stiffness},
@@ -106,6 +109,13 @@ pub struct PlanarElectrostatics {
     materials: Vec<ResolvedMaterialStatePoint>,
     permittivity_f_m: Vec<f64>,
     stiffness: Csr,
+}
+
+struct ElectricCellResponse {
+    electric_field_v_m: Vec<[f64; 2]>,
+    displacement_c_m2: Vec<[f64; 2]>,
+    cell_energy_j: Vec<f64>,
+    energy_j: f64,
 }
 impl PlanarElectrostatics {
     /// Assemble d0^T M(epsilon) d0 from the SAME absolute SI permittivity law
@@ -249,23 +259,16 @@ impl PlanarElectrostatics {
         )
     }
 
-    // Native solves and admitted electrode-basis superpositions use this same
-    // gradient, source-reaction and physical-energy recovery. No second field
-    // representation or looser force-only residual is introduced.
-    #[allow(clippy::too_many_arguments)]
-    fn recover_field(
+    // Share actual E, D and storage with the retained charge owner without
+    // imposing a separate prescribed-volume-charge equilibrium on that history.
+    fn cell_response(
         &self,
-        voltage: Vec<f64>,
-        free_charge_density_c_m3: &[f64],
-        rhs: &[f64],
-        prescribed: &[Option<f64>],
-        volume_charge_c: f64,
-        charge_tolerance_c: f64,
-        energy_tolerance_j: f64,
-        report: Option<SolveReport>,
+        voltage: &[f64],
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<ElectricField<'_>, ElectrostaticError> {
-        let n = self.mesh.vertices().len();
+    ) -> Result<ElectricCellResponse, ElectrostaticError> {
+        if voltage.len() != self.mesh.vertices().len() || voltage.iter().any(|v| !v.is_finite()) {
+            return Err(ElectrostaticError::Invalid("complete finite native potentials required"));
+        }
         let mut electric_field_v_m = Vec::with_capacity(self.materials.len());
         let mut displacement_c_m2 = Vec::with_capacity(self.materials.len());
         let mut cell_energy_j = Vec::with_capacity(self.materials.len());
@@ -303,6 +306,30 @@ impl PlanarElectrostatics {
             displacement_c_m2.push(d);
             cell_energy_j.push(energy);
         }
+        Ok(ElectricCellResponse {
+            electric_field_v_m, displacement_c_m2, cell_energy_j, energy_j,
+        })
+    }
+
+    // Native solves and admitted electrode-basis superpositions use this same
+    // gradient, source-reaction and physical-energy recovery.
+    #[allow(clippy::too_many_arguments)]
+    fn recover_field(
+        &self,
+        voltage: Vec<f64>,
+        free_charge_density_c_m3: &[f64],
+        rhs: &[f64],
+        prescribed: &[Option<f64>],
+        volume_charge_c: f64,
+        charge_tolerance_c: f64,
+        energy_tolerance_j: f64,
+        report: Option<SolveReport>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ElectricField<'_>, ElectrostaticError> {
+        let n = self.mesh.vertices().len();
+        let ElectricCellResponse {
+            electric_field_v_m, displacement_c_m2, cell_energy_j, energy_j,
+        } = self.cell_response(&voltage, cancelled)?;
         let mut nodal_boundary_charge_c = vec![None; n];
         let mut boundary_charge_c = 0.0;
         let mut maximum_free_charge_residual_c: f64 = 0.0;
