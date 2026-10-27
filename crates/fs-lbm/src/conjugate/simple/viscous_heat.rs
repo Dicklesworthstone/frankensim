@@ -26,6 +26,14 @@ mod unsteady;
 #[cfg(feature = "enthalpy-coupling")]
 pub use unsteady::{UnsteadyHeatingAudit, UnsteadyMechanicalStep};
 
+struct MolecularPower {
+    heat: Vec<f64>,
+    quadrature_w: f64,
+    wall_power_w: [f64; 6],
+    wall_tangential_force_n: [[f64; 3]; 6],
+    molecular_heat_w: f64,
+}
+
 /// The checked value itself: the shared `finite` gate returns only the verdict.
 fn finite_value(field: &'static str, value: f64) -> Result<f64, ChtError> {
     finite(field, value)?;
@@ -426,13 +434,7 @@ impl Solver<'_> {
     // The stress/drag quadratures are shared by steady and inertial Stokes.
     // Only the caller owns the storage/time balance; no steady power equality
     // is imposed on an accelerating field.
-    fn sample_viscous_power(
-        &self,
-        field: &FlowField,
-        pressure_pa: &[f64],
-        controls: ViscousHeatControls,
-        gate: &CancelGate,
-    ) -> Result<ViscousPower, ChtError> {
+    fn sample_molecular_power(&self, gate: &CancelGate) -> Result<MolecularPower, ChtError> {
         let domain = self.domain;
         let mut heat = vec![0.0; domain.cell_count()];
         let mut quadrature_w = 0.0;
@@ -580,6 +582,52 @@ impl Solver<'_> {
             }
         }
         let molecular_heat_w = finite_value("viscous_heat.molecular", heat.iter().sum())?;
+        Ok(MolecularPower {
+            heat, quadrature_w, wall_power_w, wall_tangential_force_n, molecular_heat_w,
+        })
+    }
+
+    /// Root-mean-square sqrt(2 D:D) on the ORIGINAL symmetric-stress
+    /// quadrature, including native half-cell walls and graded-cell edges.
+    /// The observation must use a unit molecular coefficient, so its strain
+    /// measure contains no viscosity, Darcy loss, pressure, forcing or LES.
+    #[cfg(feature = "enthalpy-coupling")]
+    pub(in crate::conjugate) fn molecular_shear_rates(
+        &self,
+        gate: &CancelGate,
+    ) -> Result<Vec<f64>, ChtError> {
+        if !self.eddy_viscosity.is_empty()
+            || self.molecular_viscosity.len() != self.domain.cell_count()
+            || self.molecular_viscosity.iter().any(|mu| *mu != 1.0)
+        {
+            return Err(invalid_power("kinematic strain observation requires the unit molecular operator"));
+        }
+        let power = self.sample_molecular_power(gate)?;
+        power.heat.into_iter().enumerate().map(|(cell, integral)| {
+            poll(gate)?;
+            let square = finite_value("rheology.strain_square", integral / self.domain.volume(cell))?;
+            if square < 0.0 {
+                return Err(invalid_power("negative molecular strain invariant"));
+            }
+            finite_value("rheology.shear_rate", fs_math::det::sqrt(square))
+        }).collect()
+    }
+
+    fn sample_viscous_power(
+        &self,
+        field: &FlowField,
+        pressure_pa: &[f64],
+        controls: ViscousHeatControls,
+        gate: &CancelGate,
+    ) -> Result<ViscousPower, ChtError> {
+        let domain = self.domain;
+        let MolecularPower {
+            mut heat, mut quadrature_w, wall_power_w, wall_tangential_force_n, molecular_heat_w,
+        } = self.sample_molecular_power(gate)?;
+        let add = |value: &mut f64, amount: f64| -> Result<(), ChtError> {
+            *value = finite_value("viscous_heat.power", *value + amount)?;
+            Ok(())
+        };
         let (cell_darcy_heat_w, darcy_heat_w) = if self.porous.is_empty() {
             (None, 0.0)
         } else {

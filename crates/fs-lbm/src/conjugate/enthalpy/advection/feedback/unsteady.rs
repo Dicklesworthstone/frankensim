@@ -206,7 +206,7 @@ where
             .and_then(|owner| owner.record.as_ref())
     }
 
-    fn reference_fluid(&self) -> Result<FluidProperties, MaterialFlowError<O::Error>> {
+    pub(super) fn reference_fluid(&self) -> Result<FluidProperties, MaterialFlowError<O::Error>> {
         let reference = self.reference.ok_or(invalid(
             "retained momentum requires the admitted mobile reference; no solid transport is fabricated",
         ))?;

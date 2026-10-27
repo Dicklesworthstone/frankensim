@@ -281,6 +281,15 @@ impl DepositionObserver for CoolingAfterStartup {
 
 #[test]
 fn freezing_a_moving_face_refuses_without_losing_kinetic_heat_or_native_history() {
+    freezing_a_moving_face_refuses(false);
+}
+
+#[test]
+fn newly_solid_rheology_uses_zero_rate_before_native_freezing_handoff() {
+    freezing_a_moving_face_refuses(true);
+}
+
+fn freezing_a_moving_face_refuses(rheology: bool) {
     let card = source(100.0);
     let curve = chart(&card);
     let law = MushyPhaseLaw::try_new_with_immobile_solid(&curve, 1.0, 1.0, 1.0).unwrap();
@@ -289,6 +298,19 @@ fn freezing_a_moving_face_refuses_without_losing_kinetic_heat_or_native_history(
     let gate = CancelGate::new();
     let config = closed();
     let old = geometry(&domain, &curve, [150.0; 9]);
+    // Liquid rate may be nonzero, but the original phase source must never be
+    // asked for a flowing solid. The physical momentum handoff must still
+    // refuse moving faces after this source admission succeeds.
+    let rate_source = |_: usize, cell: &DepositedCell, _: f64, rate: f64| {
+        if law.classify_at_specific_enthalpy(cell.specific_h_j_kg)?.mobile().is_none()
+            && rate != 0.0
+        {
+            return Err(fs_material::MaterialError::State {
+                what: "exact-solid source received a liquid strain rate".into(),
+            });
+        }
+        resolve(&card, &law, cell.specific_h_j_kg)
+    };
     let observer = MaterialFlowFeedback::try_new_phase(
         &old,
         &domain,
@@ -303,6 +325,11 @@ fn freezing_a_moving_face_refuses_without_losing_kinetic_heat_or_native_history(
     .unwrap()
     .with_unsteady_body_force_heating(corner_force(), controls())
     .unwrap();
+    let observer = if rheology {
+        observer.with_native_rheology(&old, &rate_source).unwrap()
+    } else {
+        observer
+    };
     let (moving, history, _) = old
         .advance_observed(&observer, 0.01, step(0.01), || Ok(()))
         .unwrap();
@@ -313,6 +340,9 @@ fn freezing_a_moving_face_refuses_without_losing_kinetic_heat_or_native_history(
     let mechanical = coast.unsteady_mechanical_step().unwrap().clone();
     let ledger = coast.unsteady_heating_audit();
     assert!(mechanical.final_kinetic_energy_j > 0.0);
+    if rheology {
+        assert!(coast.endpoint_shear_rate_per_s().unwrap()[0] > 0.0);
+    }
     let failed = moving.advance_observed(&coast, 0.05, step(0.04), || Ok(()));
     assert!(matches!(failed,
         Err(MaterialFlowError::Momentum(ChtError::InvalidInput { field: "simple.momentum_state", reason }))

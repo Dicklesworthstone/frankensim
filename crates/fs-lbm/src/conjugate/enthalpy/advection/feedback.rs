@@ -35,6 +35,10 @@ pub mod electrical;
 /// Finite source-backed gas storage exchanging heat with the same phase/flow cells.
 pub mod environment;
 
+/// Material response to the accepted native symmetric-strain invariant.
+pub mod rheology;
+use rheology::RheologyBinding;
+
 mod viscous;
 use viscous::ViscousHeating;
 pub use viscous::ViscousHeatingAudit;
@@ -102,6 +106,10 @@ pub struct FlowMaterialSample<F, T = FluidTransportState> {
 pub struct MaterialFlowEpoch<F, T = FluidTransportState> {
     pub time_s: f64,
     pub samples: Vec<FlowMaterialSample<F, T>>,
+    /// Cell-volume RMS sqrt(2 D:D) [1/s] of the accepted starting MAC state.
+    /// Present only with explicit native rheology; these rates queried the
+    /// SAME material coefficients used by momentum, conductivity and heat.
+    pub shear_rate_per_s: Option<Vec<f64>>,
     pub flow: FvFlow,
     /// Applied `(rho(T)-rho0)*g` [N/m³] in native voxel order, zero on solids.
     /// None on the original fixed-density path; never an additional heat input.
@@ -176,6 +184,7 @@ pub struct MaterialFlowFeedback<'a, F, R, O, T = FluidTransportState> {
     phase_conduction: Option<PhaseConduction<'a>>,
     viscous_heating: Option<ViscousHeating>,
     unsteady: Option<MaterialMomentum>,
+    rheology: Option<RheologyBinding<'a, F>>,
     bound_time_s: f64,
     fluid_conduction: BTreeMap<(CellId, CellId), FluidConductionFace>,
     advected: Option<Advected<O>>,
@@ -244,6 +253,7 @@ where
             phase_conduction: None,
             viscous_heating: None,
             unsteady: None,
+            rheology: None,
             bound_time_s: thermal.time_s(),
             fluid_conduction: BTreeMap::new(),
             advected: Some(advected),
@@ -739,16 +749,7 @@ where
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
         self.check_map(thermal, check)?;
         self.check_unsteady_start(thermal, check)?;
-        let samples = sample(
-            thermal,
-            self.domain,
-            self.input,
-            self.gate,
-            &mut self.resolve,
-            self.exact_phase.then_some(self.mushy).flatten(),
-            self.snapshot,
-            check,
-        )?;
+        let samples = self.sample_materials(thermal, check)?;
         admit_density(&samples, self.density_kg_m3)?;
         self.check_phase_conduction(&samples, check)?;
         let active_domain = self.momentum_domain(&samples, check)?;
@@ -916,6 +917,7 @@ where
         self.applied = Some(MaterialFlowEpoch {
             time_s: thermal.time_s(),
             samples,
+            shear_rate_per_s: self.rheology.as_ref().map(|source| source.rates.clone()),
             flow,
             buoyancy_force_n_m3,
             external_force_n_m3: self.external_force_n_m3.clone(),
@@ -1021,16 +1023,7 @@ where
     ) -> Result<(), Self::Error> {
         self.check_map(thermal, &mut || Ok(()))?;
         self.check_unsteady_start(thermal, &mut || Ok(()))?;
-        self.endpoint = sample(
-            thermal,
-            self.domain,
-            self.input,
-            self.gate,
-            &mut self.resolve,
-            self.exact_phase.then_some(self.mushy).flatten(),
-            self.snapshot,
-            &mut || Ok(()),
-        )?;
+        self.endpoint = self.sample_materials(thermal, &mut || Ok(()))?;
         admit_density(&self.endpoint, self.density_kg_m3)?;
         self.mushy_drag(&self.endpoint, &mut || Ok(()))?;
         let domain = self.momentum_domain(&self.endpoint, &mut || Ok(()))?;
@@ -1052,16 +1045,7 @@ where
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), Self::Error> {
         self.check_map(thermal, check)?;
-        self.endpoint = sample(
-            thermal,
-            self.domain,
-            self.input,
-            self.gate,
-            &mut self.resolve,
-            self.exact_phase.then_some(self.mushy).flatten(),
-            self.snapshot,
-            check,
-        )?;
+        self.endpoint = self.sample_materials(thermal, check)?;
         admit_density(&self.endpoint, self.density_kg_m3)?;
         self.mushy_drag(&self.endpoint, check)?;
         let domain = self.momentum_domain(&self.endpoint, check)?;
@@ -1084,6 +1068,15 @@ where
                 // freezing must remove only zero-energy momentum entries.
                 owner.accept_phase_domain(domain.as_ref().unwrap_or(self.domain), self.gate)?;
             }
+        }
+        if self.rheology.is_some() {
+            // The initial sampling above admits thermal/phase changes before
+            // native momentum. Now re-admit the ACTUAL endpoint velocity and T;
+            // these coefficients drive only the next accepted interval.
+            self.endpoint = self.sample_materials(thermal, check)?;
+            admit_density(&self.endpoint, self.density_kg_m3)?;
+            self.mushy_drag(&self.endpoint, check)?;
+            self.check_phase_conduction(&self.endpoint, check)?;
         }
         if let Some(owner) = &mut self.viscous_heating {
             let applied = self

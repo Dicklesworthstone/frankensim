@@ -52,6 +52,32 @@ fn controls(dt: f64, config: &SimpleConfig) -> UnsteadyConfig {
 }
 
 impl MaterialMomentum {
+    /// Observe the accepted native faces with the same symmetric-strain and
+    /// half-cell wall quadrature used by physical molecular heating. A unit
+    /// coefficient removes material weighting; no momentum solve or time step
+    /// occurs and no diagnostic energy is deposited into heat.
+    pub fn shear_rates(
+        &self,
+        domain: &VoxelDomain,
+        fluid: Option<&FluidProperties>,
+        config: &SimpleConfig,
+        gate: &CancelGate,
+    ) -> Result<Vec<f64>, ChtError> {
+        poll(gate)?;
+        let Some(state) = &self.state else {
+            return Ok(vec![0.0; domain.cell_count()]);
+        };
+        let mut unit = *fluid.ok_or_else(|| {
+            invalid("native shear observation lacks its actual mobile reference")
+        })?;
+        unit.kinematic_viscosity_m2_s = 1.0 / unit.density_kg_m3;
+        let mut solver = material_solver(
+            domain, &unit, &vec![1.0; domain.cell_count()], None, None, config, gate,
+        )?;
+        solver.restore_momentum(state)?;
+        solver.molecular_shear_rates(gate)
+    }
+
     pub fn at_rest(
         domain: &VoxelDomain,
         fluid: &FluidProperties,

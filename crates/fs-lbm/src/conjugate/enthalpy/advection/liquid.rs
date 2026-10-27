@@ -42,6 +42,9 @@ use fs_material::fluid_transport::FluidTransport;
 use super::{FlowEnthalpyInput, MaterialFlowAdvection, same_positive};
 use crate::material::conjugate::MaterialChtFlow;
 
+/// Pinned temperature/shear-rate liquid sources on retained native momentum.
+pub mod rheology;
+
 /// Native fixed-cell assignment with one explicitly sourced liquid/caloric law.
 #[derive(Clone, Copy)]
 pub struct LiquidFlowEnthalpyInput<'a> {
@@ -523,6 +526,15 @@ fn admit_law_mode(
     frozen_viscosity: bool,
     fixed_density: bool,
 ) -> Result<(), LiquidEnthalpyError> {
+    admit_law_with_rheology(input, frozen_viscosity, fixed_density, None)
+}
+
+fn admit_law_with_rheology(
+    input: LiquidFlowEnthalpyInput<'_>,
+    frozen_viscosity: bool,
+    fixed_density: bool,
+    shear_rate_axis: Option<&str>,
+) -> Result<(), LiquidEnthalpyError> {
     let law = input.liquid;
     let reference = law.reference_state();
     let curve = input.caloric.curve();
@@ -531,14 +543,24 @@ fn admit_law_mode(
             "liquid and caloric material cards differ",
         ));
     }
-    // Reuse instantaneous Newtonian admission, including rate/frequency domains.
-    ResolvedLiquidSurfaceState::try_from_material(
-        reference.material().clone(),
-        law.viscosity_basis(),
-        LiquidCapillarity::Neglected,
-    )?;
+    if let Some(axis) = shear_rate_axis {
+        // Reuse the shared explicit T/shear source admission used by VOF;
+        // this marker cannot authorize any frozen-viscosity entry point.
+        ResolvedLiquidSurfaceState::try_for_shear_rate_evolution(
+            reference.material().clone(),
+            law.viscosity_basis(),
+            law.temperature_axis(),
+            axis,
+        )?;
+    } else {
+        ResolvedLiquidSurfaceState::try_from_material(
+            reference.material().clone(),
+            law.viscosity_basis(),
+            LiquidCapillarity::Neglected,
+        )?;
+    }
     // The momentum admission above checks rho/mu, not the retained thermal
-    // roles. Cp and k must also be instantaneous temperature-only coefficients.
+    // roles. Their response axes also need explicit runtime owners.
     for name in [
         SPECIFIC_HEAT_CAPACITY_PROPERTY,
         THERMAL_CONDUCTIVITY_PROPERTY,
@@ -549,7 +571,11 @@ fn admit_law_mode(
             .ok_or(LiquidEnthalpyError::Invalid(
                 "missing liquid thermal source property",
             ))?;
-        require_frozen_coefficient_support(property)?;
+        // Conductivity may share the explicitly evolved rate. Caloric storage
+        // cannot: the original h(T) chart contains no shear-state energy.
+        if shear_rate_axis.is_none() || name == SPECIFIC_HEAT_CAPACITY_PROPERTY {
+            require_frozen_coefficient_support(property)?;
+        }
     }
     let viscosity = match law.viscosity_basis() {
         LiquidViscosityBasis::Dynamic => DYNAMIC_VISCOSITY_PROPERTY,

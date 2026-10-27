@@ -2534,7 +2534,7 @@ The discrete account is `W_wall + W_body + W_pressure = Q_molecular + Q_Darcy + 
 
 Source-derived Boussinesq forcing also composes with this retained-momentum heat mode. The same applied material epoch supplies density departures, viscosity and conductivity; its buoyancy field adds to any prescribed actuator field in the native momentum equation. The original staggered body-work quadrature evaluates both total force and the buoyancy component on the same endpoint faces. `UnsteadyMechanicalStep::supplied_buoyancy_power_w` and `cell_buoyancy_power_w` retain that signed component; `UnsteadyHeatingAudit::supplied_buoyancy_work_j` accumulates it over accepted intervals. Buoyancy is a SUBSET of total body work, never an additional supply or heat source. Actuator work is total body work minus that subset. Physical molecular/Darcy losses alone enter enthalpy, while numerical loss remains separate.
 
-Admission is closed fixed geometry, laminar Newtonian source transport, constant reference mass/density and the original fixed-pressure caloric chart. Material buoyancy retains its explicit small density/Cp-departure bounds and source/endpoint checks. Its signed work represents exchange with the declared Boussinesq forcing model; no resolved gravitational-potential reservoir is introduced. A stationary Darcy frame must share the bulk enthalpy at local thermal equilibrium. Exact phase occupancy uses the same zero-speed face admission above; an all-solid interval has zero mechanical work, physical heat, kinetic change and numerical loss. Locking a moving face, openings, fans, configured extra resistance, moving skeletons and compressible pressure work refuse or remain outside this mode. Prescribed actuator work does not debit an unspecified finite electrical/mechanical reservoir. Duration-dependent histories refuse instantaneous `power_balance_observed` queries.
+Admission is closed fixed geometry, laminar source transport, constant reference mass/density and the original fixed-pressure caloric chart. The default source path is Newtonian; the explicit retained-flow rheology binding below owns shear dependence. Material buoyancy retains its explicit small density/Cp-departure bounds and source/endpoint checks. Its signed work represents exchange with the declared Boussinesq forcing model; no resolved gravitational-potential reservoir is introduced. A stationary Darcy frame must share the bulk enthalpy at local thermal equilibrium. Exact phase occupancy uses the same zero-speed face admission above; an all-solid interval has zero mechanical work, physical heat, kinetic change and numerical loss. Locking a moving face, openings, fans, configured extra resistance, moving skeletons and compressible pressure work refuse or remain outside this mode. Prescribed actuator work does not debit an unspecified finite electrical/mechanical reservoir. Duration-dependent histories refuse instantaneous `power_balance_observed` queries.
 
 All state, source snapshots, prepared momentum, heat and accounts remain inside the original thermal deep-clone transaction. A pending interval can be prepared and accepted only once; solver, caloric, endpoint, history, cancellation or budget refusal publishes none of it. Focused G1/G3/G4 regressions cover the independently reduced 2x2 MAC startup/work identity, negative actuator work, drive-off kinetic decay without numerical heating, material feedback, CFL clipping, latent Darcy heating and late rollback. Exact-phase cases additionally cover cold-solid startup, quiescent freeze/remelt, the independent eight-face moving-ring kinetic/work account while its central solid melts, data-only viscosity changes, and atomic refusal to lock a moving face.
 
@@ -2553,6 +2553,49 @@ substance data or a spatially converged benchmark. The example retains the
 closed single-phase Boussinesq/Stokes restrictions and introduces no additional
 solver, state clock or gravitational-potential reservoir. Its actual entry tests
 cover material source identity, bounded support and data-only coupled response.
+
+### Source rheology on the retained momentum and enthalpy timeline
+
+`LiquidFlowRheology` binds the original pinned liquid, density and caloric
+sources to actual temperature and physical shear rate. It creates the existing
+`MaterialFlowFeedback` with retained native MAC momentum; it adds no fluid or
+thermal stepper. The general `with_native_rheology` attachment also composes
+with the existing phase-aware source callback and its original admission rules.
+
+The cell-volume RMS `sqrt(2 D:D)` is observed from the exact retained face
+velocities using the original symmetric-stress quadrature, including graded
+shear edges and no-slip half-cell walls. A unit molecular coefficient removes
+viscosity weighting from this kinematic observation. Darcy drag, LES losses,
+cell speed, collision parameters and numerical time loss are not strain rate.
+The original scalar Newtonian sampling path remains unchanged.
+
+Each accepted-start enthalpy/temperature/rate resolves one immutable source
+epoch. The identical evaluated viscosity drives native full-stress momentum
+and optional physical molecular heat. Its conductivity drives the existing
+fluid conduction and finite-atmosphere exchange; caloric storage retains its
+original owner. `MaterialFlowEpoch::shear_rate_per_s` records the rates that
+actually supplied those applied coefficients. Actual endpoint temperature and
+native rate are re-admitted before publication, and
+`endpoint_shear_rate_per_s` exposes that endpoint separately.
+
+The pure-liquid convenience requires fixed density, original material and
+Cp/rho pins, and rate-independent h(T). The general phase attachment queries
+an exact solid at zero constitutive rate according to its current caloric
+state, without modifying live face velocity or bypassing the original
+zero-speed freezing handoff. All source samples, thermal and native momentum
+histories, physical heat and wrapped finite-gas state remain inside the same
+clone-and-publish transaction. Late source or phase refusal and cancellation
+publish none of the candidate.
+
+Coefficients are explicitly lagged from the accepted start: this first-order
+generalized-Newtonian split requires time/space refinement and does not add an
+implicit nonlinear rheology solve, yield or viscoelastic memory, moving phase
+geometry, or a mass/density handoff. Six focused regressions cover an
+independent two-interval circulation/work/heat reference, graded-grid strain,
+exact constant-Newtonian parity, endpoint-source/cancellation rollback,
+rate-dependent conductivity with finite gas exchange, and phase-first solid
+admission before the native kinetic handoff. Their addition is not a claim of
+executed numerical or experimental validation.
 
 
 

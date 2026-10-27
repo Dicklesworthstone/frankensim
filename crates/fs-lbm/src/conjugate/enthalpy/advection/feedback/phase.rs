@@ -211,6 +211,7 @@ where
             phase_conduction: None,
             viscous_heating: None,
             unsteady: None,
+            rheology: None,
             bound_time_s: thermal.time_s(),
             fluid_conduction: BTreeMap::new(),
             advected: Some(Advected::new(inner, Vec::new(), input.max_connections)?),
