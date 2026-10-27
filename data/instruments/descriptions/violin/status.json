@@ -3,27 +3,31 @@
  "family": "violin",
  "title": "Violin",
  "reference_instrument": "Violin (University of Iowa MIS)",
- "summary": "A labelled diagnostic baseline, not a violin: open-string arco cards for the G, D, A and E strings, written from published string properties, a Schelleng-range bow and a published rosin friction curve, each number with a source row. They run through the one-string point-bow reader with a one-way one-oscillator body, which is reduced physics. The oscillator is one oscillator whose frequency, effective mass and damping come from a published measured violin (McLennan, UNSW) and whose radiating area is unknown.",
+ "summary": "Four material strings on the il Cannone body: Dominant string sections from Pickering's measurements, each with two polarisations, its twist and its afterlength, coupled through the bridge to a shell assembly of the Guarneri il Cannone's measured geometry with spruce and maple data and its enclosed air, bowed open by a point bow. Each open string is tuned to equal temperament from the instrument's own pulse response. The body's modes stop at 5 kHz on an unconverged mesh, the radiated pressure is a compact approximation, the strings' transverse internal loss is unknown and entered as zero, and the bow keeps an authored Stribeck law, so this is a sourced assembly, not a converged violin.",
  "physics_present": [
-  "fs-couple bowed_string: pinned Euler-Bernoulli string modes from vibrating length, tension and mass per length; tension is set from the table so the open-string pitch is a result of the card",
-  "fs-couple stribeck_friction on the shared fs-tribo law with event stiction: static cap, then a Gaussian drop to the kinetic coefficient",
-  "a one-way compact radiating body at a 1 m observer; modal damping from the fundamental's measured Q where one was retrieved",
-  "a point bow driven by a canonical gesture schedule (on the string at rest, constant acceleration to the bow speed, constant force, lift); the bow force is chosen from the card's own bow-force sweep, in the middle of its longest run of Helmholtz motion, with no recording involved",
-  "bow-force sweeps of every card with a rigid bridge (bowed_card_sweep): one flyback per period with slip fraction near the bow-to-bridge ratio over a band of forces, interleaved with doubled-slip and raucous forces, so the playable map is multistable; receipts are in data/instruments/grades"
+  "fs-couple material_strings: four strings from compiled Dominant section packs (Pickering 1985), over the full span including afterlength, with the pack's bending and twisting stiffness, two transverse polarisations, twist modes carrying Pickering's measured torsional loss, and air drag and loading from the declared gas",
+  "residual flexibility (c6854036b): each string's bridge and fixed stops see the exact static compliance of the string's bending modes left out of its retained set",
+  "the il Cannone shell assembly (Guarneri 1743, ESRF geometry; 64 parts on the 6 mm mesh, h6) with Norway spruce (Viala 2020) for the top, bass bar and soundpost and sycamore maple (Sonderegger 2013) for the back, ribs and bridge; body modes from 15 Hz to 5 kHz, the top of the spruce pack's validity band",
+  "each string drives its own point on the bridge along the bowing direction; the other three strings stay coupled in the reciprocal assembly while one is bowed",
+  "the enclosed air as a uniform-pressure cavity with a flanged circular neck standing for the f-holes, as the shell assembler prints them, coupled to the shell's signed volume",
+  "a point bow at one tenth of the speaking length from the bridge, with the bow speed, force and articulation of the open-string cards and the solver's Stribeck friction",
+  "open strings tuned to equal temperament (A4 = 440 Hz) by a tension factor per string read from the assembled instrument's own pulse response, never from a recording",
+  "dry air (N2 0.8, O2 0.2) at 293.15 K and 101325 Pa as one gas state for string loading, cavity and pressure output"
  ],
  "physics_missing": [
-  "the whole body (a reduced stand-in is rendered): bridge, arched top and back with graduated thickness, ribs, bass bar, soundpost, f-holes, enclosed air and radiation back-loading; the physical route is the material_strings shell body with published plate geometry and wood data, finite-width bow ribbon",
-  "string torsion and the second polarisation, and a ribbon bow with hair compliance",
-  "bending stiffness and mode-dependent loss of the real wound strings; the card carries zero stiffness and one damping ratio for every mode",
-  "a hyperbolic or thermal rosin law: the solver's Stribeck law is Gaussian and its regularisation speed is tied to the same file field",
-  "stopped notes and finger damping; only open strings are described",
-  "mode-count, friction-substep and time-step convergence ladders",
-  "player noise: the render is far too clean (harmonic-to-noise ratio and spectral flux of the violin and viola notes are far from the real recordings), because there is no hair ribbon, no rosin thermal third body and no bow speed or force fluctuation",
-  "hysteresis and onset classes: the sweeps start from rest at constant speed and force, so the up and down force ramps, the acceleration and force onset map and the pre-Helmholtz transient length are not measured",
-  "measured playable limits: the model's Helmholtz band has not been compared with the published measured limits on a card whose string matches the measured one; torsion, which lowers the upper limit, is absent"
+  "convergence: the 6 mm mesh rung and the 5 kHz body-mode window are not converged; the committed render.sh uses the 8 mm rung with a 2 kHz window, the phrases the 6 mm one, and no wood source reaches above 5-6 kHz",
+  "an exterior radiation solve: pressure is the compact baffled, zero-retardation body and neck observer, with no directivity or f-hole geometry",
+  "the strings' transverse internal loss: Pickering measured none, so the bending loss and the tension loss (eta_F) are stated unknowns, both entered as zero, and a string loses transverse energy only to air drag and its supports; measured wound violin and cello strings lose much more at high frequency, and the bowed slip regime depends on it (pexfp.299)",
+  "the string-to-bridge joint: an authored spring and dashpot per string (200000 N/m, 0.1 N s/m), not the contact mechanics of the bridge notch",
+  "a measured rosin law: the bow's Stribeck coefficients (0.8 static, 0.4 kinetic, 0.1 m/s) are authored, not measured; no thermal third body, no hair ribbon, no bow noise",
+  "a sound stick rule at the bow: the step-averaged sticking now rendered carries an undamped alternation of the friction force from sample to sample that can fire slips early; its replacement is in progress (pexfp.299)",
+  "the bow port's residual flexibility: the stops carry it, the bow contact does not yet (pexfp.299); only open strings are graded",
+  "a single co-characterised instrument: il Cannone's geometry is combined with independently sourced wood and string data, and the strings' speaking length is the generic rung's, not il Cannone's own",
+  "player variation: constant bow speed and force, so the onset and the sustained part are cleaner than a player's"
  ],
  "blocked": null,
  "beads": [
-  "pexfp.298"
+  "pexfp.298",
+  "pexfp.299"
  ]
 }
