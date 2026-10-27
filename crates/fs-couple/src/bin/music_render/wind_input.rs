@@ -187,13 +187,26 @@ fn dg_wall_source_metadata(
 ) -> String {
     use fs_couple::bernoulli_aperture::wall::material::{AxialConstraint, WallMaterialLoss};
     let wall = source.wall();
+    let (model, directions) = match wall.orthotropic_axes() {
+        None => ("isotropic-local-ring-membrane", String::new()),
+        Some([hoop, axial]) => {
+            let viscosity = wall.proportional_viscosity_time_property().map_or_else(String::new, |name| {
+                let time = wall.material().property(name).expect("admitted original viscosity time").value_si();
+                format!(",\"proportional_viscosity\":{{\"time_property\":{},\"time_s\":{time:e},\"law\":\"C_viscous=tau*C_elastic\"}}", json_string(name))
+            });
+            ("orthotropic-principal-local-ring-membrane", format!(
+                ",\"material_axes\":{{\"hoop\":{},\"axial\":{},\"basis\":\"one-based principal axes following local cylindrical directions\"}}{viscosity}", hoop + 1, axial + 1))
+        }
+    };
     let axial = match wall.axial_constraint() {
         AxialConstraint::StressFree => "stress-free",
         AxialConstraint::StrainFixed => "strain-fixed",
     };
     let (loss, relaxation) = match wall.loss() {
         WallMaterialLoss::Elastic => ("elastic", String::new()),
-        WallMaterialLoss::KelvinVoigt => ("kelvin-voigt", String::new()),
+        WallMaterialLoss::KelvinVoigt => (
+            if wall.proportional_viscosity_time_property().is_some() { "proportional-kelvin-voigt" }
+                else { "kelvin-voigt" }, String::new()),
         WallMaterialLoss::Maxwell(spectrum) => {
             let terms = spectrum.material().terms.iter().map(|(modulus, time)| format!(
                 "{{\"modulus_pa\":{modulus:e},\"relaxation_time_s\":{time:e}}}"))
@@ -201,7 +214,7 @@ fn dg_wall_source_metadata(
             ("maxwell", format!(",\"maxwell_terms\":[{terms}]"))
         }
     };
-    format!("{{\"model\":\"isotropic-local-ring-membrane\",\"pack_path\":{},\"pack_hash\":\"{}\",\"resolved_state_hash\":\"{}\",\"thickness_m\":{:e},\"axial_constraint\":\"{axial}\",\"band_hz\":[{:e},{:e}],\"loss\":\"{loss}\",\"propagator\":\"original-exact-dg\"{relaxation}}}",
+    format!("{{\"model\":\"{model}\",\"pack_path\":{},\"pack_hash\":\"{}\",\"resolved_state_hash\":\"{}\",\"thickness_m\":{:e},\"axial_constraint\":\"{axial}\",\"band_hz\":[{:e},{:e}],\"loss\":\"{loss}\",\"propagator\":\"original-exact-dg\"{relaxation}{directions}}}",
         json_string(source.path()), source.pack().content_hash().to_hex(),
         wall.material().identity().to_hex(), wall.thickness_m(), wall.band_hz()[0], wall.band_hz()[1])
 }
@@ -220,7 +233,10 @@ fn dg_wall_provenance(
                 interval[0], interval[1], dg_wall_source_metadata(region.source()))
         }).collect::<Vec<_>>().join(",");
         let band = layout.band_hz().expect("resolved nonempty regional wall");
-        format!("{{\"model\":\"regional-isotropic-local-ring-membranes\",\"regions\":[{regions}],\"band_hz\":[{:e},{:e}],\"propagator\":\"original-exact-dg\"}}",
+        let model = if layout.regions().iter().any(|region| region.source().wall().orthotropic_axes().is_some()) {
+            "regional-local-ring-membranes"
+        } else { "regional-isotropic-local-ring-membranes" };
+        format!("{{\"model\":\"{model}\",\"regions\":[{regions}],\"band_hz\":[{:e},{:e}],\"propagator\":\"original-exact-dg\"}}",
             band[0], band[1])
     };
     format!(",\"solid_wall\":{source},\"solid_wall_scope\":\"whole cylindrical main bore; original physical source regions aligned to DG faces; reciprocal frozen-state radial inertia and material response in the original gas propagator; side chimneys rigid; no axial shell waves or exterior wall radiation\"")
@@ -304,7 +320,7 @@ fn modal_boundary_provenance(
     let records = p.boundary_records().iter().map(|(side, record)| {
         let aperture = renderer.source().system().boundary_apertures(*side)
             .expect("source-bound material keys").aperture(record.node())
-            .expect("original side/node address");
+            .expect("original boundary address");
         let drive = renderer.held_boundary_drives(*side).iter()
             .find(|drive| drive.node == record.node()).expect("complete explicit initial key drives");
         let name = match side { ValveSide::Upstream => "upstream", ValveSide::Downstream => "downstream" };
