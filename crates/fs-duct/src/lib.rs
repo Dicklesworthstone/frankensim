@@ -79,6 +79,8 @@ pub use profile::{ConeSlices, RadiusProfile, RiccatiSteps};
 /// Source-owned local wall response shared by constant and varying gas paths.
 pub mod wall;
 pub use wall::{WallLaw, WallModel};
+/// Independently declared exterior gas at the bell and side-hole radiation ports.
+pub mod exterior;
 /// Generic frequency-domain duct graphs, loops and labelled N-port impedances.
 pub mod network;
 /// Exact thin-wall unflanged radiation load below the axisymmetric cutoff.
@@ -868,6 +870,7 @@ fn tone_hole_shunt_with_wall(
 ) -> Result<C64, DuctError> {
     tone_hole_shunt_with_wall_vortex(
         state,
+        state,
         hole_radius,
         chimney_height,
         hole_state,
@@ -882,6 +885,7 @@ fn tone_hole_shunt_with_wall(
 #[allow(clippy::too_many_arguments)]
 fn tone_hole_shunt_with_wall_vortex(
     state: &GasState,
+    exterior: &GasState,
     hole_radius: f64,
     chimney_height: f64,
     hole_state: HoleState,
@@ -895,6 +899,7 @@ fn tone_hole_shunt_with_wall_vortex(
     if sigma > 0.0 && sigma < 1.0 {
         let z_o = tone_hole_shunt_with_wall_vortex(
             state,
+            exterior,
             hole_radius,
             chimney_height,
             HoleState::Open,
@@ -906,6 +911,7 @@ fn tone_hole_shunt_with_wall_vortex(
         )?;
         let z_c = tone_hole_shunt_with_wall_vortex(
             state,
+            exterior,
             hole_radius,
             chimney_height,
             HoleState::Closed,
@@ -920,6 +926,7 @@ fn tone_hole_shunt_with_wall_vortex(
     if sigma <= 0.0 {
         return chimney_line_impedance_with_wall(
             state,
+            exterior,
             hole_radius,
             chimney_height,
             omega,
@@ -931,6 +938,7 @@ fn tone_hole_shunt_with_wall_vortex(
     let inner = side_hole_inner_length(hole_radius, bore_radius);
     let z_open = chimney_line_impedance_with_wall(
         state,
+        exterior,
         hole_radius,
         chimney_height + inner,
         omega,
@@ -946,6 +954,7 @@ fn tone_hole_shunt_with_wall_vortex(
 /// a narrow/wide model jump.
 fn chimney_line_impedance_with_wall(
     state: &GasState,
+    exterior: &GasState,
     radius: f64,
     length: f64,
     omega: f64,
@@ -965,12 +974,13 @@ fn chimney_line_impedance_with_wall(
     let duct = Duct {
         segments: vec![Segment::Cylinder { radius, length }],
     };
-    Ok(input_impedance_with_wall(&duct, state, omega, chimney_loss, termination, wall)?.impedance)
+    Ok(exterior::input_impedance(&duct, state, exterior, omega, chimney_loss, termination, wall)?.impedance)
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn chimney_open_response_with_wall(
     state: &GasState,
+    exterior: &GasState,
     hole_radius: f64,
     chimney_height: f64,
     bore_radius: f64,
@@ -1001,9 +1011,10 @@ pub(crate) fn chimney_open_response_with_wall(
         }],
     };
     Ok((
-        input_impedance_with_wall(
+        exterior::input_impedance(
             &duct,
             state,
+            exterior,
             omega,
             chimney_loss,
             Termination::FlangedOpen,
@@ -1115,6 +1126,26 @@ pub(crate) fn open_hole_vortex_spec(
     total_acoustic_len_m: f64,
     outlet_radius_m: f64,
 ) -> (f64, f64, f64) {
+    open_hole_vortex_spec_in_exterior(state, state, loss, hole_radius, bore_radius,
+        chimney_height, sites, hole_index, total_acoustic_len_m, outlet_radius_m)
+}
+
+// The existing low-ka reference estimate expresses outlet end masses as
+// equivalent lengths of bore gas. A different exterior changes only those
+// masses by rho_ext/rho_bore; the internal jet and junction keep their gas.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn open_hole_vortex_spec_in_exterior(
+    state: &GasState,
+    exterior: &GasState,
+    loss: LossModel,
+    hole_radius: f64,
+    bore_radius: f64,
+    chimney_height: f64,
+    sites: &[OpenHoleSite],
+    hole_index: usize,
+    total_acoustic_len_m: f64,
+    outlet_radius_m: f64,
+) -> (f64, f64, f64) {
     if loss != LossModel::Bessel || hole_index >= sites.len() {
         return (0.0, 0.0, 0.0);
     }
@@ -1122,6 +1153,7 @@ pub(crate) fn open_hole_vortex_spec(
     const C_VC: f64 = 0.61;
     let rho = state.density;
     let c = state.sound_speed;
+    let exterior_mass_ratio = exterior.density / rho;
     let area_h = core::f64::consts::PI * hole_radius * hole_radius;
     let area_b = core::f64::consts::PI * bore_radius * bore_radius;
     let zc_bore = rho * c / area_b;
@@ -1135,7 +1167,7 @@ pub(crate) fn open_hole_vortex_spec(
             let a_j = site_j.bore_radius_m;
             let t_j = site_j.chimney_height_m
                 + side_hole_inner_length(b_j, a_j)
-                + 0.8216 * b_j;
+                + (0.8216 * b_j) * exterior_mass_ratio;
             let l_eq_j = (site_j.acoustic_position_m - x_next_ac).max(0.0)
                 + t_j * (bore_radius * bore_radius) / (b_j * b_j);
             if l_eq_j > 0.0 {
@@ -1146,7 +1178,7 @@ pub(crate) fn open_hole_vortex_spec(
         (d, l_par)
     } else {
         let d = (total_acoustic_len_m - xi_ac).max(0.0);
-        (d, 0.8216 * outlet_radius_m)
+        (d, (0.8216 * outlet_radius_m) * exterior_mass_ratio)
     };
     let d_eff = d_next + l_load;
     if d_eff <= 0.0 || !d_eff.is_finite() {
@@ -1158,7 +1190,7 @@ pub(crate) fn open_hole_vortex_spec(
     let z_down_abs = det::sqrt(3.0) * zc_bore;
     let t_h = chimney_height
         + side_hole_inner_length(hole_radius, bore_radius)
-        + 0.8216 * hole_radius;
+        + (0.8216 * hole_radius) * exterior_mass_ratio;
     let l_h = t_h * (bore_radius * bore_radius) / (hole_radius * hole_radius);
     if l_h <= 0.0 || !l_h.is_finite() {
         return (0.0, 0.0, 0.0);
@@ -1233,6 +1265,7 @@ fn tone_hole_t_junction_with_wall(
 ) -> Result<[C64; 4], DuctError> {
     tone_hole_t_junction_with_wall_vortex(
         state,
+        state,
         hole_radius,
         chimney_height,
         hole_state,
@@ -1248,6 +1281,7 @@ fn tone_hole_t_junction_with_wall(
 #[allow(clippy::too_many_arguments)]
 fn tone_hole_t_junction_with_wall_vortex(
     state: &GasState,
+    exterior: &GasState,
     hole_radius: f64,
     chimney_height: f64,
     hole_state: HoleState,
@@ -1260,6 +1294,7 @@ fn tone_hole_t_junction_with_wall_vortex(
 ) -> Result<[C64; 4], DuctError> {
     let zh = tone_hole_shunt_with_wall_vortex(
         state,
+        exterior,
         hole_radius,
         chimney_height,
         hole_state,
@@ -1761,6 +1796,7 @@ fn input_impedance_legacy(
                 hole_i += 1;
             }
             tone_hole_t_junction_with_wall_vortex(
+                state,
                 state,
                 hole_radius,
                 chimney_height,

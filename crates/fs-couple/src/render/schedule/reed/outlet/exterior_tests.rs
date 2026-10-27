@@ -59,9 +59,31 @@ fn identical_exterior_is_exact_and_unsupported_interfaces_refuse_with_source_lin
         SOURCE.replace(RECEIVER, &format!("{RECEIVER}\nexterior 300 100000 0\nexterior 300 100000 0")),
         SOURCE.replace(RECEIVER, &format!("{RECEIVER}\nexterior mixture NaN 100000 mole 1 N2 1")),
     ] { assert!(ReedPerformance::from_bytes(text.as_bytes(), 37).is_err()); }
+}
+
+#[test]
+fn g3_two_medium_open_chimney_reaches_the_scheduled_reed_and_microphone() {
     let holes = SOURCE.replace("segments 2\ncylinder 0.0015 0.2",
         "segments 4\ncylinder 0.0015 0.1\nhole 0.0005 0.002 0.0015 1\ncylinder 0.0015 0.1")
-        .replace(RECEIVER, &format!("{RECEIVER}\nexterior 303.15 100000 0.4"));
-    let error = ReedPerformance::from_bytes(holes.as_bytes(), 37).err().unwrap();
-    assert!(error.to_string().contains("two-medium chimney"), "{error}");
+        .replace("reed 0.0004 0.013 6000 0 0 0.35",
+            "reed 0.0004 0.013 6000 0.00001 100 0.35");
+    let changed = holes.replace(RECEIVER,
+        &format!("{RECEIVER}\nexterior 303.15 100000 0.4\nobserver_law none"));
+    let baseline = holes.replace(RECEIVER, &format!("{RECEIVER}\nobserver_law none"));
+    let mut a = ReedPerformance::from_bytes(baseline.as_bytes(), 37).unwrap();
+    let mut b = ReedPerformance::from_bytes(changed.as_bytes(), 37).unwrap();
+    assert_eq!(a.segment_gases(), b.segment_gases());
+    assert_eq!(voice(&a).rho, voice(&b).rho);
+    assert_eq!(voice(&a).zc, voice(&b).zc);
+    let mut motion_changed = false;
+    let mut sound_changed = false;
+    for _ in 0..701 {
+        let (mut pa, mut pb) = ([0.0], [0.0]);
+        a.pressure_block(&mut pa).unwrap(); b.pressure_block(&mut pb).unwrap();
+        assert!(pa[0].is_finite() && pb[0].is_finite());
+        motion_changed |= voice(&a).reed_y.to_bits() != voice(&b).reed_y.to_bits();
+        sound_changed |= pa[0].to_bits() != pb[0].to_bits();
+    }
+    assert!(motion_changed && sound_changed);
+    assert_eq!(raw(&changed, 37), raw(&changed, 113));
 }

@@ -9,7 +9,7 @@ use fs_duct::{
 use fs_math::c64::C64;
 
 impl RegionalDuct {
-    fn loaded_reflection(
+    pub(super) fn loaded_reflection(
         &self,
         omega: f64,
         load: C64,
@@ -18,19 +18,24 @@ impl RegionalDuct {
         let zc = self.inlet_impedance();
         if let Some(field) = &self.continuous {
             let chain =
-                field.chain_with_wall_controlled(omega, LossModel::Bessel, wall, &mut || false)?;
+                field.chain_with_wall_exterior_controlled(omega, LossModel::Bessel,
+                    self.exterior_gas.as_ref(), wall, &mut || false)?;
             return compose_chain_reflection(&chain.blocks, Some(load), ComposeOptions::default())?
                 .referenced_to(zc);
         }
         let mut runs = self.regions.iter().rev();
         let terminal = runs.next().expect("admitted nonempty duct");
         let mut response =
-            super::super::baked::response(&terminal.duct, &terminal.gas, omega, load, wall)?;
+            fs_duct::exterior::input_impedance_load(&terminal.duct, &terminal.gas,
+                self.exterior_gas.as_ref().unwrap_or(&terminal.gas),
+                omega, LossModel::Bessel, load, wall)?;
         for region in runs {
-            response = super::super::baked::response(
+            response = fs_duct::exterior::input_impedance_load(
                 &region.duct,
                 &region.gas,
+                self.exterior_gas.as_ref().unwrap_or(&region.gas),
                 omega,
+                LossModel::Bessel,
                 response.impedance,
                 wall,
             )?;

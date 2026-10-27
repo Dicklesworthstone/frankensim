@@ -1,5 +1,5 @@
 use super::*;
-use fs_duct::{Duct, input_impedance_load};
+use fs_duct::{Duct, HoleState, Segment, input_impedance_load};
 use fs_material::gas::GasSpec;
 use fs_material::gas_species::{GasSpecies, resolve_gas_mixture};
 use fs_qty::semantic::{Composition, CompositionBasis};
@@ -114,7 +114,7 @@ fn independent_exterior_changes_receiver_travel_and_pressure_but_not_axial_trave
 }
 
 #[test]
-fn incoherent_pressure_mismatched_and_two_medium_open_chimneys_refuse() {
+fn incoherent_and_pressure_mismatched_media_refuse() {
     let a = air(100000.0); let b = enriched();
     let baseline = RegionalDuct::new(&duct(), &[a, b]).unwrap();
     assert!(baseline.clone().with_exterior_gas(air(50000.0)).is_err());
@@ -127,6 +127,35 @@ fn incoherent_pressure_mismatched_and_two_medium_open_chimneys_refuse() {
                 bore_radius: 0.001, state }, duct().segments[1].clone()] };
         let region = RegionalDuct::new(&geometry, &[a, a, b]).unwrap();
         assert!(region.clone().with_exterior_gas(a).is_ok());
-        assert_eq!(region.with_exterior_gas(b).is_ok(), matches!(state, HoleState::Closed));
+        assert!(region.with_exterior_gas(b).is_ok());
     }
+}
+
+#[test]
+fn g3_exterior_reaches_upstream_holes_with_a_closed_terminal_and_a_baked_load() {
+    let a = air(100000.0); let b = enriched();
+    let geometry = Duct { segments: vec![duct().segments[0].clone(),
+        Segment::ToneHole { hole_radius: 0.0004, chimney_height: 0.003,
+            bore_radius: 0.001, state: HoleState::Vent(0.4) },
+        duct().segments[1].clone()] };
+    let original = RegionalDuct::new(&geometry, &[a, a, b]).unwrap();
+    let external = original.clone().with_exterior_gas(b).unwrap();
+    let omega = core::f64::consts::TAU * 731.0;
+    for termination in [Termination::Closed, Termination::FlangedOpen] {
+        let first = original.response_with_wall_and_holes(omega, LossModel::Bessel,
+            termination, WallModel::Rigid).unwrap();
+        let second = external.response_with_wall_and_holes(omega, LossModel::Bessel,
+            termination, WallModel::Rigid).unwrap();
+        assert_eq!(first.1.len(), 1); assert_eq!(second.1.len(), 1);
+        assert_ne!(first.0.impedance, second.0.impedance);
+        assert_ne!(first.1[0].u_hole_over_u_in, second.1[0].u_hole_over_u_in);
+        assert_eq!(bits(second.0), bits(external.response(omega, LossModel::Bessel,
+            termination, None).unwrap()));
+        assert_eq!(original.one_way_time_s(), external.one_way_time_s());
+    }
+    // A baked terminal load does not replace the explicit side-hole medium.
+    let z_load = fs_math::c64::C64::from_re(300000.0);
+    let loaded = |region: &RegionalDuct| region.loaded_reflection(
+        omega, z_load, WallModel::Rigid).unwrap();
+    assert_ne!(loaded(&original), loaded(&external));
 }

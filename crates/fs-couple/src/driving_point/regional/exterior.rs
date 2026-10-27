@@ -1,16 +1,12 @@
 //! A prescribed exterior gas at the existing terminal pressure/volume-flow port.
 //!
 //! The bore keeps its original material, travel time and viscothermal laws.
-//! Only the radiating load and exterior observer consume this medium. This is
+//! Every radiating mouth and exterior observer consume this medium. This is
 //! a stationary, pressure-matched acoustic interface, not an advective mixing
 //! layer, thermal equilibration or live replacement of an acoustic state.
 
-use super::{
-    DuctError, DuctResponse, GasState, HoleState, LossModel, OpenHoleFlow, Region, RegionalDuct,
-    Segment, Termination, WallModel, input_impedance_load_with_wall,
-    input_impedance_load_with_wall_and_holes, input_impedance_with_wall,
-    input_impedance_with_wall_and_holes, invalid,
-};
+use super::{DuctError, DuctResponse, GasState, LossModel, OpenHoleFlow, Region,
+    RegionalDuct, Termination, WallModel, invalid};
 
 impl RegionalDuct {
     /// Bind the homogeneous exterior independently of the internal terminal gas.
@@ -21,34 +17,17 @@ impl RegionalDuct {
     /// The exterior has the common static pressure but may differ in temperature
     /// or composition. Closed/ideal-open end conditions do not acquire radiation.
     ///
-    /// Open/vented side holes still use the existing combined chimney/radiation
-    /// law. Their gas must match the explicit exterior; a two-medium chimney is
-    /// not implemented and is refused instead of using the wrong radiation.
-    /// Closed holes may contain a different gas. Existing mutual-hole restrictions
-    /// remain active and no second outlet load or end correction is added.
+    /// Open/vented holes propagate through their original bore-gas chimney,
+    /// terminated by this exterior's radiation impedance. Pressure and volume
+    /// flow meet at the original mouth, with no second end correction. Closed
+    /// chimney compliance is unchanged. Existing mutual-hole restrictions remain.
     ///
     /// # Errors
-    /// Incoherent gas, unequal static pressure, or an exposed side hole whose
-    /// local medium does not match this exterior.
+    /// Incoherent gas or unequal static pressure.
     pub fn with_exterior_gas(mut self, gas: GasState) -> Result<Self, DuctError> {
         gas.validate_coherence().map_err(|_| invalid("exterior gas is not a coherent material state"))?;
         if gas.pressure != self.inlet_gas().pressure {
             return Err(invalid("exterior and duct need a common static pressure; mean flow is not modeled"));
-        }
-        for region in &self.regions {
-            if region.gas == gas { continue; }
-            for segment in &region.duct.segments {
-                if let Segment::ToneHole { state, .. } = segment {
-                    let exposed = match state {
-                        HoleState::Closed => false,
-                        HoleState::Open => true,
-                        HoleState::Vent(sigma) => *sigma > 0.0,
-                    };
-                    if exposed {
-                        return Err(invalid("an exposed tone hole with a different exterior gas needs an unavailable two-medium chimney law"));
-                    }
-                }
-            }
         }
         self.exterior_gas = Some(gas);
         Ok(self)
@@ -65,21 +44,8 @@ impl RegionalDuct {
     pub(super) fn terminal_response(&self, terminal: &Region, omega: f64,
         loss: LossModel, termination: Termination, wall: WallModel<'_>)
         -> Result<DuctResponse, DuctError> {
-        let exterior = self.exterior_gas();
-        if *exterior == terminal.gas
-            || matches!(termination, Termination::Closed | Termination::IdealOpen) {
-            return input_impedance_with_wall(&terminal.duct, &terminal.gas,
-                omega, loss, termination, wall);
-        }
-        let radius = terminal.duct.segments.last().expect("admitted axial outlet").outlet_radius();
-        // Keep radiation with its owner, including its frequency-domain sign,
-        // low-ka refusal and flanged-piston continuation. Internal propagation
-        // receives that load through the same port as a measured/baked load.
-        let load = fs_duct::compact_radiation_impedance(termination, exterior, radius, omega)?;
-        let mut response = input_impedance_load_with_wall(&terminal.duct, &terminal.gas,
-            omega, loss, load, wall)?;
-        response.mouth_ka = omega / exterior.sound_speed * radius;
-        Ok(response)
+        fs_duct::exterior::input_impedance(&terminal.duct, &terminal.gas,
+            self.exterior_gas(), omega, loss, termination, wall)
     }
 
     pub(super) fn terminal_response_with_holes(
@@ -90,36 +56,8 @@ impl RegionalDuct {
         termination: Termination,
         wall: WallModel<'_>,
     ) -> Result<(DuctResponse, Vec<OpenHoleFlow>), DuctError> {
-        let exterior = self.exterior_gas();
-        if *exterior == terminal.gas
-            || matches!(termination, Termination::Closed | Termination::IdealOpen)
-        {
-            return input_impedance_with_wall_and_holes(
-                &terminal.duct,
-                &terminal.gas,
-                omega,
-                loss,
-                termination,
-                wall,
-            );
-        }
-        let radius = terminal
-            .duct
-            .segments
-            .last()
-            .expect("admitted axial outlet")
-            .outlet_radius();
-        let load = fs_duct::compact_radiation_impedance(termination, exterior, radius, omega)?;
-        let (mut response, holes) = input_impedance_load_with_wall_and_holes(
-            &terminal.duct,
-            &terminal.gas,
-            omega,
-            loss,
-            load,
-            wall,
-        )?;
-        response.mouth_ka = omega / exterior.sound_speed * radius;
-        Ok((response, holes))
+        fs_duct::exterior::input_impedance_and_holes(&terminal.duct, &terminal.gas,
+            self.exterior_gas(), omega, loss, termination, wall)
     }
 }
 

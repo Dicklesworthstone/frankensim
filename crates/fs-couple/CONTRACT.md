@@ -1364,6 +1364,21 @@ or in-band certificate for nonlinear harmonics is supplied.
 
 ### `driving_point::regional::field`
 
+`RegionalDuct::with_exterior_gas` now binds side-hole radiation as well as the
+terminal load and observer. Every regional run retains its own chimney gas
+and receives the same explicit exterior through `fs_duct::exterior`; pressure
+and volume flow join the two media without a second end correction. Open and
+vented holes may therefore contain a different mixture from the atmosphere.
+This also reaches the continuous-field response/reflection, baked terminal
+loads and scheduled reed renderer. A closed main outlet does not disable
+radiation through open side holes. An omitted exterior retains the original
+local-gas convention and identical media retain their original bits. Static
+pressure mismatch and unavailable varying-medium mutual-hole laws still
+refuse. Focused G1/G3 tests cover physical side-hole transfers, upstream gas
+regions, continuous fields and changes to both reed motion and microphone
+pressure. This is frozen pressure-matched acoustics, not a mixing/mean-flow
+model or experimental validation of a complete instrument.
+
 `RegionalDuct::from_gas_field` discretizes the shared `fs_material::gas_field::AxialGasField`
 at explicitly refinable midpoint cells (at most 64 total), retaining the
 existing cylinder/cone TMM and pressure/volume-flow interconnection. It adds no

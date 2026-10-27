@@ -25,9 +25,7 @@ use super::{
 };
 use fs_duct::{
     Duct, DuctError, DuctResponse, HoleState, LossModel, MouthLoad, OpenHoleFlow, Segment,
-    Termination, WallModel, input_impedance_load_with_wall,
-    input_impedance_load_with_wall_and_holes, input_impedance_with_wall,
-    input_impedance_with_wall_and_holes,
+    Termination, WallModel,
 };
 use fs_material::gas::GasState;
 use fs_phs::WallPin;
@@ -175,13 +173,14 @@ impl RegionalDuct {
             return Err(invalid("frequency must be positive and finite"));
         }
         if let Some(field) = &self.continuous {
-            return field.response_with_wall(omega, loss, termination, Some(self.exterior_gas()), wall);
+            return field.response_with_wall(omega, loss, termination, self.exterior_gas.as_ref(), wall);
         }
         let mut runs = self.regions.iter().rev();
         let terminal = runs.next().expect("nonempty binding");
         let mut response = self.terminal_response(terminal, omega, loss, termination, wall)?;
         for region in runs {
-            let upstream = input_impedance_load_with_wall(&region.duct, &region.gas, omega,
+            let upstream = fs_duct::exterior::input_impedance_load(&region.duct, &region.gas,
+                self.exterior_gas.as_ref().unwrap_or(&region.gas), omega,
                 loss, response.impedance, wall)?;
             // A downstream one-port receives the upstream run's output flow.
             // Keep the REAL mouth's ka and load; this interface is not another
@@ -213,7 +212,7 @@ impl RegionalDuct {
                     omega,
                     loss,
                     termination,
-                    Some(self.exterior_gas()),
+                    self.exterior_gas.as_ref(),
                     wall,
                 )?,
                 Vec::new(),
@@ -238,9 +237,10 @@ impl RegionalDuct {
             hole.axial_position_m += offsets[terminal_idx];
         }
         for (region_idx, region) in runs {
-            let (upstream, mut upstream_holes) = input_impedance_load_with_wall_and_holes(
+            let (upstream, mut upstream_holes) = fs_duct::exterior::input_impedance_load_and_holes(
                 &region.duct,
                 &region.gas,
+                self.exterior_gas.as_ref().unwrap_or(&region.gas),
                 omega,
                 loss,
                 response.impedance,
@@ -273,13 +273,12 @@ impl RegionalDuct {
         let zc = self.inlet_impedance();
         if let Some(field) = &self.continuous {
             return field.reflection_with_wall(omega, loss, termination,
-                Some(self.exterior_gas()), wall)?.referenced_to(zc);
+                self.exterior_gas.as_ref(), wall)?.referenced_to(zc);
         }
-        if self.regions.len() == 1 && (self.exterior_gas() == self.outlet_gas()
-            || matches!(termination, Termination::Closed | Termination::IdealOpen)) {
+        if self.regions.len() == 1 {
             let region = &self.regions[0];
-            return fs_duct::compose::input_reflection_with_wall(&region.duct, &region.gas,
-                omega, loss, termination, wall)?.referenced_to(zc);
+            return fs_duct::exterior::input_reflection(&region.duct, &region.gas,
+                self.exterior_gas(), omega, loss, termination, wall)?.referenced_to(zc);
         }
         self.response_with_wall(omega, loss, termination, wall)
             .map(|response| impedance_reflectance(&response, zc))

@@ -10,6 +10,29 @@ doctrine: instrument bores, mufflers, HVAC runs and waveguides are the
 same object, and every medium property derives from
 `fs_material::gas::GasState` — no hardcoded air.
 
+### Independent exterior gas
+
+`exterior::{input_impedance,input_impedance_and_holes,input_reflection,input_impedance_load,
+input_impedance_load_and_holes}` use a separately admitted `GasState` for the
+terminal radiation and every open/vented side-hole mouth. The finite chimney
+keeps its local interior gas, viscothermal transport and material wall; its
+pressure/volume-flow port receives the exterior radiation impedance directly.
+Closed chimney compliance and internal junction/mutual corrections remain
+internal. The existing low-ka vortex reference estimate converts exterior end
+masses to interior equivalent lengths with `rho_exterior/rho_interior`.
+Identical media retain the original arithmetic. Different hole media cannot
+fall back to the old single-medium ABCD path.
+
+`GasFieldDuct::chain_with_wall_exterior_controlled` carries the same explicit
+exterior through continuously varying fields, including local chimneys.
+Response and reflection use it together. An omitted exterior preserves the
+historical local-gas hole convention; every explicit gas must be coherent and
+at the common static pressure. These are frozen acoustic interfaces, with no
+mean flow, species diffusion, condensation or varying-medium mutual-hole law.
+G1 tests compare independent finite-line ABCD assembly and chimney/outlet flow
+continuity; G0/G3 cover identical-gas bits, closed-hole isolation, pressure
+scaling, invalid media, and a warm field feeding a complete hole cluster.
+
 ## Public types and semantics
 
 ### Smooth plane-wave profiles (IRP M2.1-W3a)

@@ -620,7 +620,7 @@ fn uniform_fingered_field_preserves_original_bits() {
 }
 
 #[test]
-fn warmed_entry_preserves_the_complete_homogeneous_hole_cluster() {
+fn warmed_entry_preserves_the_complete_hole_cluster_in_an_independent_exterior() {
     let length = LENGTH / 3.0;
     let source = AxialGasField::new(
         vec![0.0, length, LENGTH],
@@ -666,16 +666,19 @@ fn warmed_entry_preserves_the_complete_homogeneous_hole_cluster() {
     // Independent cascade: solve the entire existing uniform hole cluster as
     // one physical load, then apply only the warm prefix. This retains both
     // mutual corrections and the original lossy chimney/wall laws.
+    let outside = source.state_at(0.0).unwrap();
     for loss in [LossModel::Lossless, LossModel::Bessel] {
         for wall in [None, Some(&wall)] {
+          for exterior in [None, Some(outside.state())] {
             let omega = TAU * 430.0;
-            let tail_response = crate::input_impedance_wall(
+            let tail_response = crate::exterior::input_impedance(
                 &tail,
                 tail_gas.state(),
+                exterior.unwrap_or(tail_gas.state()),
                 omega,
                 loss,
                 Termination::FlangedOpen,
-                wall,
+                WallModel::from_pin(wall),
             )
             .unwrap();
             let prefix_chain = prefix
@@ -688,7 +691,7 @@ fn warmed_entry_preserves_the_complete_homogeneous_hole_cluster() {
             )
             .unwrap();
             let actual = bound
-                .response_wall(omega, loss, Termination::FlangedOpen, None, wall)
+                .response_wall(omega, loss, Termination::FlangedOpen, exterior, wall)
                 .unwrap();
             assert!(relative(actual.impedance, expected.z_in) < 2e-11);
             assert!(
@@ -703,6 +706,11 @@ fn warmed_entry_preserves_the_complete_homogeneous_hole_cluster() {
                     expected.u_out_over_u_in * tail_response.p_mouth_over_u_in
                 ) < 2e-11
             );
+            let reflected = bound.reflection_wall(omega, loss, Termination::FlangedOpen,
+                exterior, wall).unwrap().referenced_to(bound.inlet_impedance()).unwrap();
+            let zref = C64::from_re(bound.inlet_impedance());
+            assert!(relative(reflected, (actual.impedance-zref)/(actual.impedance+zref))<2e-11);
+          }
         }
     }
 }

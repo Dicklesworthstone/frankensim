@@ -389,7 +389,29 @@ impl GasFieldDuct {
         wall: WallModel<'_>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedChain, DuctError> {
+        self.chain_with_wall_exterior_controlled(omega, loss, None, wall, cancelled)
+    }
+
+    /// The same field and chimney propagation with an independently declared
+    /// exterior radiation gas at every exposed hole. `None` preserves the
+    /// original local-gas radiation convention; no gas is averaged or replaced.
+    pub fn chain_with_wall_exterior_controlled(
+        &self,
+        omega: f64,
+        loss: LossModel,
+        exterior: Option<&GasState>,
+        wall: WallModel<'_>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedChain, DuctError> {
+        if let Some(exterior) = exterior {
+            crate::exterior::admit(&self.inlet, exterior)?;
+        }
         if self.field.uniform_state().is_some() {
+            if let Some(exterior) = exterior {
+                return crate::compose::duct_chain_in_exterior(&self.duct, &self.inlet,
+                    exterior, omega, loss, wall, ComposeOptions::default(), true, cancelled)
+                    .map(|(chain, _)| chain);
+            }
             return duct_chain_with_wall(
                 &self.duct,
                 &self.inlet,
@@ -446,8 +468,9 @@ impl GasFieldDuct {
                 }
                 let mut r_vortex = 0.0;
                 if crate::hole_sigma(state) > 0.0 {
-                    r_vortex = crate::open_hole_vortex_resistance(
+                    r_vortex = crate::open_hole_vortex_spec_in_exterior(
                         &hole.gas,
+                        exterior.unwrap_or(&hole.gas),
                         loss,
                         hole_radius,
                         bore_radius,
@@ -456,11 +479,12 @@ impl GasFieldDuct {
                         open_hole_index,
                         total_acoustic_len_m,
                         outlet_radius_m,
-                    );
+                    ).0;
                     open_hole_index += 1;
                 }
                 let matrix = crate::tone_hole_t_junction_with_wall_vortex(
                     &hole.gas,
+                    exterior.unwrap_or(&hole.gas),
                     hole_radius,
                     chimney_height,
                     state,
@@ -538,7 +562,7 @@ impl GasFieldDuct {
         &self, omega: f64, loss: LossModel, termination: Termination,
         exterior: Option<&GasState>, wall: WallModel<'_>,
     ) -> Result<DuctResponse, DuctError> {
-        let exterior = self.exterior(exterior)?;
+        let radiation = self.exterior(exterior)?;
         let radius = self
             .duct
             .segments
@@ -546,19 +570,11 @@ impl GasFieldDuct {
             .expect("admitted duct")
             .outlet_radius();
         if self.field.uniform_state().is_some() {
-            if *exterior == self.inlet
-                || matches!(termination, Termination::Closed | Termination::IdealOpen)
-            {
-                return crate::input_impedance_with_wall(&self.duct, &self.inlet, omega, loss, termination, wall);
-            }
-            let load = crate::compact_radiation_impedance(termination, exterior, radius, omega)?;
-            let mut response =
-                crate::input_impedance_load_with_wall(&self.duct, &self.inlet, omega, loss, load, wall)?;
-            response.mouth_ka = omega / exterior.sound_speed * radius;
-            return Ok(response);
+            return crate::exterior::input_impedance(&self.duct, &self.inlet, radiation,
+                omega, loss, termination, wall);
         }
-        let chain = self.chain_with_wall_controlled(omega, loss, wall, &mut || false)?;
-        let (load, mouth_ka) = crate::termination_impedance(termination, exterior, radius, omega)?;
+        let chain = self.chain_with_wall_exterior_controlled(omega, loss, exterior, wall, &mut || false)?;
+        let (load, mouth_ka) = crate::termination_impedance(termination, radiation, radius, omega)?;
         let solved = compose_chain(&chain.blocks, load, ComposeOptions::default())?;
         Ok(DuctResponse {
             omega,
@@ -606,15 +622,15 @@ impl GasFieldDuct {
         &self, omega: f64, loss: LossModel, termination: Termination,
         exterior: Option<&GasState>, wall: WallModel<'_>,
     ) -> Result<InputReflection, DuctError> {
-        let exterior = self.exterior(exterior)?;
-        let chain = self.chain_with_wall_controlled(omega, loss, wall, &mut || false)?;
+        let radiation = self.exterior(exterior)?;
+        let chain = self.chain_with_wall_exterior_controlled(omega, loss, exterior, wall, &mut || false)?;
         let radius = self
             .duct
             .segments
             .last()
             .expect("admitted duct")
             .outlet_radius();
-        let (load, _) = crate::termination_impedance(termination, exterior, radius, omega)?;
+        let (load, _) = crate::termination_impedance(termination, radiation, radius, omega)?;
         compose_chain_reflection(&chain.blocks, load, ComposeOptions::default())
     }
 }
