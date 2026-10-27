@@ -38,6 +38,12 @@ pub use super::magnetic::{
 pub struct WindingThermalSample {
     pub network: MaterialNetworkSample,
     pub magnetic: Vec<MagneticThermalSample>,
+    /// Source-derived field entropy and internal energy when magnetic thermal
+    /// feedback is active. Ordinary fixed-magnetic steps leave this absent.
+    pub magnetic_caloric: Option<super::magnetic::caloric::MagneticCaloricExchange>,
+    /// Independent physical energy closure, retained with the accepted source
+    /// report when a caloric magnetic step is decomposed for continuation.
+    pub magnetic_balance: Option<nonlinear::thermal::MagneticCaloricBalance>,
 }
 
 /// Data-only material, geometry and complete heat routing for stranded windings.
@@ -216,6 +222,8 @@ impl WindingThermalNetwork<'_> {
                     source: WindingThermalSample {
                         network: coefficients.source,
                         magnetic,
+                        magnetic_caloric: None,
+                        magnetic_balance: None,
                     },
                     circuit_trials: 1,
                 })

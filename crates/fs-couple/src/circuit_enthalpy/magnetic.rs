@@ -4,6 +4,9 @@
 //! identities, fixed solid volumes, complete material snapshots and permeability
 //! admission. This module does not own another field or thermal integrator.
 
+/// Shared field entropy, heat-capacity admission and reversible heat transfer.
+pub mod caloric;
+
 use super::{
     CircuitEnthalpyError, finite,
     material::{ConductionLink, MaterialCell, MaterialNetworkError, MaterialNetworkSample},

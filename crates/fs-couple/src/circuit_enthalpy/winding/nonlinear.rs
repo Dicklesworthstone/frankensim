@@ -6,12 +6,19 @@
 //! Physical winding/core/graph Joule heat is deposited once. Numerical field
 //! dissipation and private circuit-port work are never mistaken for heat.
 
+/// Reversible magnetic temperature feedback on this same circuit/field solve.
+pub mod thermal;
+
 use super::{
     CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, DrivenCoefficients,
     DriverAccount, Error, ThermalDriver, WindingThermalError, WindingThermalNetwork,
     WindingThermalSample, cell_driver_candidate, check, invalid, material, same_material,
 };
+use crate::circuit_enthalpy::magnetic::caloric::{
+    MagneticEnergyCell, MagneticThermalLaw, PreparedMagneticCaloric,
+};
 use crate::circuit_enthalpy::material::{CellResistor, MaterialNetwork};
+use fs_em::planar::nonlinear::IsotropicMagneticMaterial;
 use fs_em::{
     planar::eddy::EddyConductor,
     winding::{
@@ -22,10 +29,12 @@ use fs_em::{
         ohmic::WindingConductor,
     },
 };
+use fs_feec::weighted::WeightedAssemblyLimits;
 use fs_material::conductor::ElectricalPropertyBasis;
 use fs_phs::circuit::Branch;
 use fs_thermal::enthalpy::DepositionSimulation;
 use std::{cell::RefCell, collections::BTreeMap};
+use thermal::MagneticCaloricBalance;
 
 /// The circuit, field and finite thermal histories accepted over one interval.
 pub struct NonlinearWindingEnthalpyCandidate<'t, 'm> {
@@ -42,6 +51,12 @@ impl<'t, 'm> NonlinearWindingEnthalpyCandidate<'t, 'm> {
     }
     pub fn report(&self) -> &CircuitEnthalpyReport<WindingThermalSample, NonlinearWindingStep> {
         &self.report
+    }
+    /// Independent physical internal-energy balance for a magnetic thermal
+    /// step. The ordinary report also retains the native free-energy/parameter
+    /// work account; only this balance treats reversible field heat internally.
+    pub fn caloric_balance(&self) -> Option<&MagneticCaloricBalance> {
+        self.report.source.magnetic_balance.as_ref()
     }
     /// Commit all histories together; reported physical heat is already deposited.
     pub fn into_parts(
@@ -68,7 +83,9 @@ impl<'m> ThermalDriver for NonlinearWindingCandidate<'m> {
             stored_change_j: step.stored_after_j - step.stored_before_j,
             // Native work also contains private winding-port exchanges. Those
             // cancel against the field/winding work in this combined owner.
-            supplied_j: step.supplied_work_j,
+            // Magnetic parameter work is explicit at this intermediate
+            // free-energy boundary; the caloric owner closes its destination.
+            supplied_j: step.supplied_work_j + step.parameter_work_j,
         }
     }
     fn into_parts(self) -> (Self::Model, Self::Step) {
@@ -121,6 +138,7 @@ impl WindingThermalNetwork<'_> {
             circuit,
             external_inputs,
             None,
+            None,
             controls,
             winding_controls,
             initial_energy_increments_j,
@@ -159,6 +177,7 @@ impl WindingThermalNetwork<'_> {
             circuit,
             external_inputs,
             Some((resistors, electrical_bases)),
+            None,
             controls,
             winding_controls,
             initial_energy_increments_j,
@@ -174,6 +193,7 @@ impl WindingThermalNetwork<'_> {
         circuit: &NonlinearWindingCircuit<'m>,
         external_inputs: &[f64],
         graph_material: Option<(&[CellResistor], &[(usize, ElectricalPropertyBasis)])>,
+        magnetic_thermal: Option<(&[MagneticThermalLaw], WeightedAssemblyLimits)>,
         controls: CircuitEnthalpySolve,
         winding_controls: NonlinearWindingControls,
         initial_energy_increments_j: &[f64],
@@ -255,6 +275,49 @@ impl WindingThermalNetwork<'_> {
             ));
         }
         let layout = self.magnetic_layout();
+        let caloric = if let Some((bindings, _)) = magnetic_thermal {
+            if circuit
+                .field()
+                .problem()
+                .materials()
+                .iter()
+                .any(|m| !matches!(m, IsotropicMagneticMaterial::Linear(_)))
+            {
+                return Err(invalid(
+                    "magnetic caloric winding feedback currently requires sourced linear permeability in every region",
+                ));
+            }
+            let field = circuit
+                .field()
+                .field(&mut || (*cancel.borrow_mut())())
+                .map_err(|e| match e {
+                    fs_em::planar::eddy::nonlinear::NonlinearEddyError::Cancelled => {
+                        CircuitEnthalpyError::Cancelled
+                    }
+                    other => {
+                        CircuitEnthalpyError::Source(WindingThermalError::NonlinearInduction(other))
+                    }
+                })?;
+            let originals: Vec<_> = circuit
+                .field()
+                .problem()
+                .materials()
+                .iter()
+                .map(IsotropicMagneticMaterial::material)
+                .collect();
+            Some(PreparedMagneticCaloric::new(
+                &layout,
+                thermal,
+                circuit.field().problem().mesh(),
+                &originals,
+                field.magnetic_flux_density_t(),
+                bindings,
+                &routes.magnetic,
+                &cancel,
+            )?)
+        } else {
+            None
+        };
         let accepted = prepared
             .resolve(thermal, || (*cancel.borrow_mut())())
             .map_err(material)?;
@@ -288,14 +351,34 @@ impl WindingThermalNetwork<'_> {
                 }
             }
         }
-        let (initial, _) = layout.nonlinear_materials_at(
-            thermal,
-            circuit.field().problem(),
-            &conductors,
-            &accepted.source,
-            &routes.magnetic,
-            &cancel,
-        )?;
+        let resolve_materials =
+            |state: &DepositionSimulation<'_>,
+             sample: &crate::circuit_enthalpy::material::MaterialNetworkSample| {
+                if caloric.is_some() {
+                    thermal::materials_at(
+                        &layout,
+                        state,
+                        circuit.field().problem(),
+                        &conductors,
+                        sample,
+                        &routes.magnetic,
+                        &cancel,
+                    )
+                } else {
+                    layout.nonlinear_materials_at(
+                        state,
+                        circuit.field().problem(),
+                        &conductors,
+                        sample,
+                        &routes.magnetic,
+                        &cancel,
+                    )
+                }
+            };
+        let (initial, initial_magnetic) = resolve_materials(thermal, &accepted.source)?;
+        if let Some(caloric) = &caloric {
+            caloric.validate_sources(thermal, &initial_magnetic, &cancel)?;
+        }
         if initial.len() != conductors.len()
             || initial.iter().any(|(triangle, source)| {
                 conductors.get(triangle).is_none_or(|original| {
@@ -310,24 +393,20 @@ impl WindingThermalNetwork<'_> {
                 "accepted nonlinear winding/core sources must match the actual thermal endpoint",
             ));
         }
-        let (thermal, circuit, report) = cell_driver_candidate(
+        let (thermal, circuit, mut report) = cell_driver_candidate(
             thermal,
             target_s,
             controls,
             initial_energy_increments_j,
             |state, _remaining| {
                 check(&cancel)?;
-                let coefficients = prepared
+                let mut coefficients = prepared
                     .resolve(state, || (*cancel.borrow_mut())())
                     .map_err(material)?;
-                let (sources, magnetic) = layout.nonlinear_materials_at(
-                    state,
-                    circuit.field().problem(),
-                    &conductors,
-                    &coefficients.source,
-                    &routes.magnetic,
-                    &cancel,
-                )?;
+                let (sources, magnetic) = resolve_materials(state, &coefficients.source)?;
+                if let Some(caloric) = &caloric {
+                    caloric.validate_sources(state, &magnetic, &cancel)?;
+                }
                 let mut core = Vec::new();
                 let mut winding = Vec::new();
                 for (triangle, conductor) in sources {
@@ -362,16 +441,53 @@ impl WindingThermalNetwork<'_> {
                 } else {
                     circuit.clone()
                 };
-                let proposal = driven
-                    .step_to_candidate(
-                        target_s,
-                        core,
-                        winding,
-                        external_inputs,
-                        winding_controls,
-                        &mut || (*cancel.borrow_mut())(),
-                    )
-                    .map_err(electrical)?;
+                let proposal = if let Some((_, assembly)) = magnetic_thermal {
+                    driven
+                        .step_with_materials_candidate(
+                            target_s,
+                            magnetic
+                                .iter()
+                                .map(|s| IsotropicMagneticMaterial::Linear(s.material.clone()))
+                                .collect(),
+                            core,
+                            winding,
+                            external_inputs,
+                            assembly,
+                            winding_controls,
+                            &mut || (*cancel.borrow_mut())(),
+                        )
+                        .map_err(electrical)?
+                } else {
+                    driven
+                        .step_to_candidate(
+                            target_s,
+                            core,
+                            winding,
+                            external_inputs,
+                            winding_controls,
+                            &mut || (*cancel.borrow_mut())(),
+                        )
+                        .map_err(electrical)?
+                };
+                let magnetic_caloric = if let Some(caloric) = &caloric {
+                    Some(caloric.deposit(
+                        state,
+                        proposal.step().field.magnetic_cells.iter().map(|cell| {
+                            MagneticEnergyCell {
+                                triangle: cell.triangle,
+                                flux_density_t: cell.flux_density_t,
+                                free_energy_j: cell.free_energy_j,
+                                parameter_work_j: cell.parameter_work_j,
+                            }
+                        }),
+                        &mut coefficients.sources_w,
+                        target_s - thermal.time_s(),
+                        controls.total_energy_tolerance_j,
+                        &cancel,
+                    )?)
+                } else {
+                    None
+                };
                 Ok(DrivenCoefficients {
                     circuit: proposal,
                     sources_w: coefficients.sources_w,
@@ -379,6 +495,8 @@ impl WindingThermalNetwork<'_> {
                     source: WindingThermalSample {
                         network: coefficients.source,
                         magnetic,
+                        magnetic_caloric,
+                        magnetic_balance: None,
                     },
                     circuit_trials: 1,
                 })
@@ -395,6 +513,8 @@ impl WindingThermalNetwork<'_> {
             },
             || (*cancel.borrow_mut())(),
         )?;
+        report.source.magnetic_balance =
+            thermal::balance(&report, controls.total_energy_tolerance_j)?;
         check(&cancel)?;
         Ok(NonlinearWindingEnthalpyCandidate {
             thermal,

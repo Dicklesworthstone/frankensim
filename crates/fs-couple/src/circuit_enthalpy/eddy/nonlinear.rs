@@ -78,7 +78,7 @@ impl<'m> ThermalDriver for PlanarNonlinearEddyCandidate<'m> {
             heat_j: step.heat_j,
             numerical_dissipation_j: step.numerical_dissipation_j,
             stored_change_j: step.stored_after_j - step.stored_before_j,
-            supplied_j: step.supplied_work_j,
+            supplied_j: step.supplied_work_j + step.parameter_work_j,
         }
     }
     fn into_parts(self) -> (Self::Model, Self::Step) {

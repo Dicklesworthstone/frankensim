@@ -4,6 +4,8 @@
 mod field;
 #[path = "nonlinear_winding_enthalpy/graph_material.rs"]
 mod graph_material;
+#[path = "nonlinear_winding_enthalpy/thermal.rs"]
+mod magnetic_thermal;
 
 use fs_couple::{
     circuit_enthalpy::{

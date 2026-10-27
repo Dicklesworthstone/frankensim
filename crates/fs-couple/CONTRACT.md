@@ -6563,8 +6563,9 @@ reported separately and never becomes material heat.
 
 The complete H(B) law, fixed geometry, source identity and original caloric
 instances remain pinned. Thermally mapped magnetic cells require wholly solid,
-constant-density caloric charts; temperature-dependent magnetic storage
-refuses until magnetic entropy/parameter work has an owner. Existing thermal
+constant-density caloric charts. These entry points retain fixed magnetic
+storage; the thermal-magnetic entry below supplies its entropy/work owner.
+Existing thermal
 events, conduction, source domains, work budgets and late cancellation remain
 authoritative. All three accepted histories are unchanged on refusal.
 This is a first-order, reversible isotropic magnetoquasistatic coupling; it
@@ -6609,6 +6610,48 @@ loss separation. Changing only the resistor's source curve changes both actual
 current and body temperatures. Source-domain, missing-binding, work-budget and
 late-cancellation refusals preserve all accepted histories. These are discrete
 coupling checks, not measured resistor or magnetic-device validation.
+
+### Voltage-driven magnetic temperature and finite caloric feedback
+
+`WindingThermalNetwork::step_nonlinear_thermal_candidate` closes sourced mu(T),
+winding/core resistivity, optional material graph resistors and finite caloric
+storage on that same native field/circuit/enthalpy residual. It retains actual
+nodal field, terminal current, linkage, remaining circuit charge/flux and clock;
+every trial starts from the accepted histories. The native field owner rebuilds
+the original mesh at the proposed material state and retains its new operator
+for continuation. Complete source cards, claim selections, fixed coordinates,
+material volumes, thermal receivers and original topology remain bound.
+
+The shared `magnetic::caloric::PreparedMagneticCaloric` implementation now serves
+both this winding consumer and the original induction thermal consumer. It uses
+the existing `ThermalMagneticMaterial` for field Helmholtz energy psi, entropy S
+and internal energy U=psi+T*S. Each native cell's signed parameter work P supplies
+reversible heat Q_rev=-P-delta(T*S) to its original caloric receiver. Physical
+Joule loss is routed once through existing winding/core/graph destinations;
+backward-Euler numerical loss is never deposited as heat.
+
+The ordinary report retains native free-energy/parameter-work closure. The
+additional `caloric_balance()` independently checks field internal energy,
+native circuit storage, declared winding end storage and caloric energy against
+external electrical work, external heat and numerical loss. Both source samples
+and the accepted physical balance survive `into_parts` in the returned report.
+No constitutive work is silently assigned to an external thermal reservoir.
+
+This path requires linear isotropic permeability with an admitted positive
+affine mu(T) over each declared interval, fully solid fixed-density magnetic
+volumes and positive combined caloric/field heat capacity throughout the declared
+temperature and flux-density envelope. Fixed external magnetic regions require
+temperature-independent permeability. H(B,T), hysteresis, remanence evolution,
+moving geometry and thermal expansion require their own thermodynamic owners.
+Source, capacity, field-envelope, solver and cancellation refusal publish none
+of the proposed histories. This is first-order time integration, not an
+unconditional passivity or experimental material-validation claim.
+
+`nonlinear_winding_enthalpy::magnetic_thermal` adds independent voltage/current
+and physical-energy references for data-only permeability changes, nonzero end
+inductance, continuing intervals, constant-law equivalence, replay and atomic
+refusal. Parser/source checks and independent reference-equation evaluations
+are reported separately from native execution of these regressions.
 
 ## Source gas fields and source walls in the native DG operator
 
