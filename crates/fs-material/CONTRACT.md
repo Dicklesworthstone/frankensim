@@ -2215,3 +2215,18 @@ that solves those physical coordinates may use this bundle. The moving-liquid
 enthalpy/rheology owner in `fs-lbm` provides that integration. Focused admission
 tests cover dynamic/kinematic viscosity bases, source retention and refusal of
 unowned axes; caloric response with shear-dependent storage remains unsupported.
+
+## Source-backed planar orthotropic electrical response
+
+`conductor::planar` resolves two independent principal conductivity or
+resistivity properties and an explicit fixed material-to-geometry frame.
+Resistivity is inverted in its principal basis after source evaluation; the
+existing tensor rotation computes `sigma = Q diag(sigma1,sigma2) Q^T`.
+The complete material snapshot, source basis, frame identities and orientation
+remain bound to the result. Missing directions never become scalar defaults.
+The sealed common response also admits the existing scalar owner and a mixed
+scalar/orthotropic region enum. Both feed the same native `fs-em` field solve
+and its `fs-couple` temperature-feedback driver. This is a decoupled physical
+plane with symmetric static Ohmic response; Hall/AC effects, inferred normal
+transport and changing principal directions require additional physical laws.
+Program anchor: MR43 (`frankensim-material-reality-ui2if.7.1`), remains open.

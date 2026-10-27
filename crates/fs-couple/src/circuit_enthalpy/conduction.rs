@@ -21,6 +21,7 @@ use fs_em::conduction::{
 };
 use fs_feec::weighted::WeightedAssemblyLimits;
 use fs_material::{
+    conductor::planar::PlanarConductorMaterial,
     conductor::{ConductorError, ResolvedConductorState},
     thermal::source::ThermalMaterialError,
 };
@@ -53,12 +54,12 @@ pub enum ConductionDrive<'a> {
 }
 
 impl ConductionDrive<'_> {
-    fn solve<'p>(
+    fn solve<'p, C: PlanarConductorMaterial>(
         self,
-        problem: &'p PlanarConduction,
+        problem: &'p PlanarConduction<C>,
         controls: ConductionControls,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<ConductionField<'p>, Error> {
+    ) -> Result<ConductionField<'p, C>, Error> {
         match self {
             Self::Voltage(boundary) => problem
                 .solve(boundary, controls, cancelled)
@@ -198,12 +199,12 @@ pub struct ConductionThermalStep {
     pub linear: Option<SolveReport>,
 }
 
-struct FieldCandidate {
-    problem: PlanarConduction,
+struct FieldCandidate<C> {
+    problem: PlanarConduction<C>,
     step: ConductionThermalStep,
 }
-impl ThermalDriver for FieldCandidate {
-    type Model = PlanarConduction;
+impl<C: PlanarConductorMaterial> ThermalDriver for FieldCandidate<C> {
+    type Model = PlanarConduction<C>;
     type Step = ConductionThermalStep;
     fn account(&self) -> DriverAccount<'_> {
         DriverAccount {
@@ -222,16 +223,16 @@ impl ThermalDriver for FieldCandidate {
 
 /// Jointly accepted heat history and its endpoint spatial material operator.
 /// Consume them together to continue; all original inputs remain unchanged.
-pub struct ConductionEnthalpyCandidate<'t> {
+pub struct ConductionEnthalpyCandidate<'t, C = ResolvedConductorState> {
     thermal: DepositionSimulation<'t>,
-    problem: PlanarConduction,
+    problem: PlanarConduction<C>,
     report: CircuitEnthalpyReport<MaterialNetworkSample, ConductionThermalStep>,
 }
-impl<'t> ConductionEnthalpyCandidate<'t> {
+impl<'t, C: PlanarConductorMaterial> ConductionEnthalpyCandidate<'t, C> {
     pub fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
-    pub fn problem(&self) -> &PlanarConduction {
+    pub fn problem(&self) -> &PlanarConduction<C> {
         &self.problem
     }
     pub fn report(&self) -> &CircuitEnthalpyReport<MaterialNetworkSample, ConductionThermalStep> {
@@ -241,7 +242,7 @@ impl<'t> ConductionEnthalpyCandidate<'t> {
         self,
     ) -> (
         DepositionSimulation<'t>,
-        PlanarConduction,
+        PlanarConduction<C>,
         CircuitEnthalpyReport<MaterialNetworkSample, ConductionThermalStep>,
     ) {
         (self.thermal, self.problem, self.report)
@@ -252,18 +253,18 @@ impl ConductionThermalNetwork<'_> {
     /// Original prescribed-voltage entry point, sharing the same complete
     /// thermal/material solve with current-controlled electrodes.
     #[allow(clippy::too_many_arguments)]
-    pub fn step_candidate<'t>(
+    pub fn step_candidate<'t, C: PlanarConductorMaterial>(
         &self,
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
-        problem: &PlanarConduction,
+        problem: &PlanarConduction<C>,
         boundary_voltage_v: &[(usize, f64)],
         assembly: WeightedAssemblyLimits,
         field_controls: ConductionControls,
         controls: CircuitEnthalpySolve,
         initial_energy_increments_j: &[f64],
         cancelled: impl FnMut() -> bool,
-    ) -> Result<ConductionEnthalpyCandidate<'t>, Error> {
+    ) -> Result<ConductionEnthalpyCandidate<'t, C>, Error> {
         self.step_driven_candidate(
             thermal,
             target_s,
@@ -296,19 +297,21 @@ impl ConductionThermalNetwork<'_> {
     /// storage require their corresponding coupled owners. This is first-order
     /// thermal/electrical time discretization, not unconditional stability or
     /// measured-material validation. Refine mesh, time and solve tolerances.
+    /// Scalar, oriented orthotropic and mixed cells share this same residual;
+    /// every principal electrical source and its fixed orientation is retained.
     #[allow(clippy::too_many_arguments)]
-    pub fn step_driven_candidate<'t>(
+    pub fn step_driven_candidate<'t, C: PlanarConductorMaterial>(
         &self,
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
-        problem: &PlanarConduction,
+        problem: &PlanarConduction<C>,
         drive: ConductionDrive<'_>,
         assembly: WeightedAssemblyLimits,
         field_controls: ConductionControls,
         controls: CircuitEnthalpySolve,
         initial_energy_increments_j: &[f64],
         cancelled: impl FnMut() -> bool,
-    ) -> Result<ConductionEnthalpyCandidate<'t>, Error> {
+    ) -> Result<ConductionEnthalpyCandidate<'t, C>, Error> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
         super::admit_driver_unknowns(thermal, controls, initial_energy_increments_j)?;
@@ -346,7 +349,9 @@ impl ConductionThermalNetwork<'_> {
             .map_err(material)?;
         let initial = self.materials_at(problem, &accepted.source, &routes, &cancel)?;
         if initial.iter().zip(problem.conductors()).any(|(a, b)| {
-            a.source_basis() != b.source_basis() || !same_material(a.material(), b.material())
+            a.source_basis() != b.source_basis()
+                || a.frame() != b.frame()
+                || !same_material(a.material(), b.material())
         }) {
             return Err(invalid(
                 "accepted conductor sources must match the actual thermal state",
@@ -432,10 +437,10 @@ impl ConductionThermalNetwork<'_> {
         })
     }
 
-    fn admit_routes(
+    fn admit_routes<C: PlanarConductorMaterial>(
         &self,
         thermal: &DepositionSimulation<'_>,
-        problem: &PlanarConduction,
+        problem: &PlanarConduction<C>,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<Vec<CellId>, Error> {
         if !self.volume_tolerance_m3.is_finite()
@@ -498,13 +503,13 @@ impl ConductionThermalNetwork<'_> {
             .collect()
     }
 
-    fn materials_at(
+    fn materials_at<C: PlanarConductorMaterial>(
         &self,
-        problem: &PlanarConduction,
+        problem: &PlanarConduction<C>,
         sample: &MaterialNetworkSample,
         routes: &[CellId],
         cancel: &RefCell<impl FnMut() -> bool>,
-    ) -> Result<Vec<ResolvedConductorState>, Error> {
+    ) -> Result<Vec<C>, Error> {
         let bindings: BTreeMap<_, _> = self.cells.iter().map(|c| (c.cell, c)).collect();
         let phases: BTreeMap<_, _> = sample.cells.iter().map(|c| (c.cell, c.phase)).collect();
         let mut sources = Vec::with_capacity(routes.len());
@@ -533,15 +538,15 @@ impl ConductionThermalNetwork<'_> {
                         ThermalMaterialError::Material(e),
                     ))
                 })?;
-            let conductor = ResolvedConductorState::try_from_material_with_basis(
-                snapshot,
-                original.source_basis(),
-            )
-            .map_err(|e| CircuitEnthalpyError::Source(ConductionThermalError::Conductor(e)))?;
-            binding
-                .point
-                .admit_static(conductor.source_property())
-                .map_err(|e| material(MaterialNetworkError::Material(e)))?;
+            let conductor = original
+                .with_material(snapshot)
+                .map_err(|e| CircuitEnthalpyError::Source(ConductionThermalError::Conductor(e)))?;
+            for property in conductor.source_properties() {
+                binding
+                    .point
+                    .admit_static(property)
+                    .map_err(|e| material(MaterialNetworkError::Material(e)))?;
+            }
             sources.push(conductor);
         }
         Ok(sources)

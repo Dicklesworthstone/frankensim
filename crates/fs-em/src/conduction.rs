@@ -5,7 +5,7 @@
 //! current and irreversible heating. The dielectric field shares only scalar
 //! algebra and electrode geometry; its charge/storage law is not reused here.
 //!
-//! This is a stationary, isotropic DC model with fixed geometry and material
+//! This is a stationary symmetric Ohmic model with fixed geometry and material
 //! state. Induction, displacement current, contacts, Hall response and nonlinear
 //! field-dependent conduction require their own models. A changed temperature
 //! or material must be resolved and prepared again, not substituted into an
@@ -16,6 +16,7 @@ use fs_feec::{
     weighted::{WeightedAssemblyLimits, WeightedError},
     weighted2::{CellWeight2, weighted_mass_matrix_2d},
 };
+use fs_material::conductor::planar::{PlanarConductivity, PlanarConductorMaterial};
 use fs_material::conductor::{ELECTRICAL_CONDUCTIVITY_DIMS, ResolvedConductorState};
 use fs_phs::circuit::Branch;
 use fs_rep_mesh::{Metric2, TriComplex2};
@@ -95,22 +96,25 @@ fn positive(value: f64) -> bool {
     value.is_finite() && value > 0.0
 }
 
-/// Immutable original mesh, source-bound scalar conductors and conductivity
+/// Immutable original mesh, source-bound conductors and conductivity
 /// Hodge. One complete material snapshot is retained per original triangle.
-pub struct PlanarConduction {
+/// The default scalar type preserves existing callers; oriented/mixed source
+/// states use this SAME field operator, boundary solve, current and heat owner.
+pub struct PlanarConduction<C = ResolvedConductorState> {
     mesh: TriComplex2,
-    conductors: Vec<ResolvedConductorState>,
+    conductors: Vec<C>,
+    conductivity: Vec<PlanarConductivity>,
     conductivity_s_m: Vec<f64>,
     stiffness: Csr,
 }
-impl PlanarConduction {
+impl<C: PlanarConductorMaterial> PlanarConduction<C> {
     /// Assemble the same native weighted FEEC operator used by other scalar
     /// fields, with the conductivity's actual SI dimensions. The canonical
     /// conductor owner selects resistivity or conductivity explicitly; material
     /// names and an assumed unit wire play no role in the spatial law.
     pub fn new(
         mesh: TriComplex2,
-        conductors: Vec<ResolvedConductorState>,
+        conductors: Vec<C>,
         limits: WeightedAssemblyLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, ConductionError> {
@@ -135,25 +139,44 @@ impl PlanarConduction {
             ));
         }
         let mut conductivity_s_m = Vec::with_capacity(conductors.len());
+        let mut conductivity = Vec::with_capacity(conductors.len());
         let mut weights = Vec::with_capacity(conductors.len());
+        let mut geometry_frame = None;
         for conductor in &conductors {
             poll(cancelled)?;
-            if !conductor
-                .source_property()
-                .is_static_at_fixed_external_conditions()
+            if conductor
+                .source_properties()
+                .any(|p| !p.is_static_at_fixed_external_conditions())
             {
                 return Err(ConductionError::Invalid(
-                    "spatial DC conduction requires a static Ohmic scalar at fixed external conditions",
+                    "spatial DC conduction requires static Ohmic coefficients at fixed external conditions",
                 ));
             }
-            let sigma = conductor.resistivity_ohm_m().recip();
-            if !positive(sigma) {
-                return Err(ConductionError::Invalid(
-                    "source conductivity must be positive and representable",
-                ));
+            if let Some(frame) = conductor.frame() {
+                if geometry_frame.is_some_and(|id| id != frame.geometry_frame()) {
+                    return Err(ConductionError::Invalid(
+                        "all oriented conductors must use one mesh-coordinate frame",
+                    ));
+                }
+                geometry_frame = Some(frame.geometry_frame());
             }
-            conductivity_s_m.push(sigma);
-            weights.push(CellWeight2::Scalar(sigma));
+            let sigma = conductor.conductivity();
+            let weight = match sigma {
+                PlanarConductivity::Scalar(value) => {
+                    if !positive(value) {
+                        return Err(ConductionError::Invalid(
+                            "source conductivity must be positive and representable",
+                        ));
+                    }
+                    conductivity_s_m.push(value);
+                    CellWeight2::Scalar(value)
+                }
+                // Existing outward-interval SPD admission belongs to the
+                // original weighted FEEC owner, not a second electrical gate.
+                PlanarConductivity::Tensor(matrix) => CellWeight2::Tensor(matrix),
+            };
+            conductivity.push(sigma);
+            weights.push(weight);
         }
         let mass = weighted_mass_matrix_2d(
             &mesh,
@@ -180,6 +203,7 @@ impl PlanarConduction {
         Ok(Self {
             mesh,
             conductors,
+            conductivity,
             conductivity_s_m,
             stiffness,
         })
@@ -189,11 +213,12 @@ impl PlanarConduction {
         &self.mesh
     }
     /// Complete original card, query, requirements and electrical source basis.
-    pub fn conductors(&self) -> &[ResolvedConductorState] {
+    pub fn conductors(&self) -> &[C] {
         &self.conductors
     }
-    pub fn conductivity_s_m(&self) -> &[f64] {
-        &self.conductivity_s_m
+    /// Actual scalar/tensor conductivity in the original mesh coordinates.
+    pub fn conductivity_coefficients(&self) -> &[PlanarConductivity] {
+        &self.conductivity
     }
 
     /// Solve at prescribed exterior voltage traces. Remaining exterior edges
@@ -204,7 +229,7 @@ impl PlanarConduction {
         boundary_voltage_v: &[(usize, f64)],
         controls: ConductionControls,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<ConductionField<'_>, ConductionError> {
+    ) -> Result<ConductionField<'_, C>, ConductionError> {
         self.solve_with_current_traces(boundary_voltage_v, &[], controls, cancelled)
     }
 
@@ -226,7 +251,7 @@ impl PlanarConduction {
         current_traces: &[ConductionCurrentTrace],
         controls: ConductionControls,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<ConductionField<'_>, ConductionError> {
+    ) -> Result<ConductionField<'_, C>, ConductionError> {
         poll(cancelled)?;
         if boundary_voltage_v.len() > self.mesh.vertices().len()
             || !positive(controls.linear.tolerance)
@@ -342,7 +367,7 @@ impl PlanarConduction {
         power_tolerance_w: f64,
         report: Option<SolveReport>,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<ConductionField<'_>, ConductionError> {
+    ) -> Result<ConductionField<'_, C>, ConductionError> {
         let n = self.mesh.vertices().len();
         let mut electric_field_v_m = Vec::with_capacity(self.conductors.len());
         let mut current_density_a_m2 = Vec::with_capacity(self.conductors.len());
@@ -359,10 +384,8 @@ impl PlanarConduction {
                     e[axis] = finite((-delta).mul_add(gradients[local][axis], e[axis]))?;
                 }
             }
-            let j = [
-                finite(self.conductivity_s_m[cell] * e[0])?,
-                finite(self.conductivity_s_m[cell] * e[1])?,
-            ];
+            let current = self.conductivity[cell].current_density_a_m2(e);
+            let j = [finite(current[0])?, finite(current[1])?];
             let volume = self
                 .mesh
                 .face_measure(cell)
@@ -452,7 +475,7 @@ impl PlanarConduction {
         negative_terminal: &[usize],
         controls: ConductionControls,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<PlanarResistance<'_>, ConductionError> {
+    ) -> Result<PlanarResistance<'_, C>, ConductionError> {
         let excitation_v = 1.0;
         let boundary = scalar_potential::terminal_boundary(
             &self.mesh,
@@ -495,9 +518,17 @@ impl PlanarConduction {
     }
 }
 
+impl PlanarConduction<ResolvedConductorState> {
+    /// Original scalar conductivity view; anisotropic fields expose the full
+    /// matrix through `conductivity_coefficients`, never a scalar surrogate.
+    pub fn conductivity_s_m(&self) -> &[f64] {
+        &self.conductivity_s_m
+    }
+}
+
 /// Accepted voltage/current/heat tied to its original source and geometry.
-pub struct ConductionField<'a> {
-    problem: &'a PlanarConduction,
+pub struct ConductionField<'a, C = ResolvedConductorState> {
+    problem: &'a PlanarConduction<C>,
     voltage_v: Vec<f64>,
     electric_field_v_m: Vec<[f64; 2]>,
     current_density_a_m2: Vec<[f64; 2]>,
@@ -510,8 +541,8 @@ pub struct ConductionField<'a> {
     power_balance_residual_w: f64,
     report: Option<SolveReport>,
 }
-impl ConductionField<'_> {
-    pub fn problem(&self) -> &PlanarConduction {
+impl<C: PlanarConductorMaterial> ConductionField<'_, C> {
+    pub fn problem(&self) -> &PlanarConduction<C> {
         self.problem
     }
     pub fn voltage_v(&self) -> &[f64] {
@@ -562,12 +593,12 @@ impl ConductionField<'_> {
 
 /// Retained unit-voltage solution and its independently power/current-checked
 /// resistance for the existing Kirchhoff/pHS circuit owner.
-pub struct PlanarResistance<'a> {
-    field: ConductionField<'a>,
+pub struct PlanarResistance<'a, C = ResolvedConductorState> {
+    field: ConductionField<'a, C>,
     resistance_ohm: f64,
 }
-impl<'a> PlanarResistance<'a> {
-    pub fn unit_voltage_field(&self) -> &ConductionField<'a> {
+impl<'a, C: PlanarConductorMaterial> PlanarResistance<'a, C> {
+    pub fn unit_voltage_field(&self) -> &ConductionField<'a, C> {
         &self.field
     }
     pub fn resistance_ohm(&self) -> f64 {
@@ -595,7 +626,7 @@ impl<'a> PlanarResistance<'a> {
         current_tolerance_a: f64,
         power_tolerance_w: f64,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<ConductionField<'a>, ConductionError> {
+    ) -> Result<ConductionField<'a, C>, ConductionError> {
         poll(cancelled)?;
         if !voltage_v.is_finite() || !positive(current_tolerance_a) || !positive(power_tolerance_w)
         {

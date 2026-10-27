@@ -6848,3 +6848,32 @@ flames, shock/ignition prediction or validated engine fidelity. Formula
 conventions follow the [Cantera reaction-rate reference](https://www.cantera.org/stable/reference/kinetics/reaction-rates.html)
 and [falloff reference](https://www.cantera.org/stable/reference/kinetics/rate-constants.html).
 Program anchor `frankensim-ext-gas-chemistry-ladder-paqh` remains open.
+
+## Directional electrical transport on the shared enthalpy timeline
+
+`ConductionThermalNetwork` and its jointly accepted candidate now use the same
+generic native field owner for scalar, oriented orthotropic and mixed regions.
+Each nonlinear thermal trial refreshes every original principal electrical
+claim at its actual temperature, retains the original basis and material/mesh
+frame, solves current, and deposits the original per-cell `E.J` exactly once.
+Voltage, equipotential total-current and distributed current-density drives
+all retain their existing boundary and source-work accounting. Continuation
+publishes the accepted thermal history and endpoint tensor operator together.
+Source-domain, solve-budget and cancellation failures retain the old pair.
+The existing fully solid, constant-density, fixed-geometry DC limits remain;
+principal axes do not rotate with temperature. Independent tests derive the
+nonlinear heating equation for a rotated resistivity law, continue its accepted
+state, verify transverse current, and exercise source and late-cancellation
+rollback. Coefficients are synthetic, not a material-accuracy claim. Program
+anchor: MR43 (`frankensim-material-reality-ui2if.7.1`), remains open.
+
+Oriented planar conductor materials also pass through this native circuit
+connection. Each thermal trial refreshes both principal source properties at
+its endpoint temperature, retains the fixed material frame, and uses the same
+field resistance to stamp the circuit branch. The original circuit midpoint
+supplies the spatial voltage; actual per-triangle Joule losses enter the common
+enthalpy residual. Scalar defaults, topology, fixed C/L, source work, storage
+and heat routing remain shared. A rotated anisotropic RC fixture checks three
+continuing discharge/heating steps against independently solved nonlinear
+midpoint circuit and finite-capacity heat equations, including original pins,
+transverse coordinate components and combined energy closure.

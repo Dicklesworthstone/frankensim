@@ -612,3 +612,18 @@ two-terminal reductions retain their existing owner. G1/G3/G4 regressions check
 layered material fields, extrusion, reversal, gauge, mixed corners, input order
 and transactional cancellation. This is fixed-geometry isotropic DC conduction,
 not an ideal equipotential current electrode, contact law or electrical storage.
+
+## Oriented material conductivity in the native spatial solve
+
+`PlanarConduction<C>`, its field and its resistance reduction accept the shared
+source-bearing `PlanarConductorMaterial`. The default remains the original
+scalar conductor. Oriented principal data and mixed scalar/tensor cells use the
+same FEEC assembly, voltage/current boundaries, solve and power acceptance.
+The existing weighted owner admits tensor positivity; current is `J=sigma E`
+and the original per-cell integral of `E.J` must match terminal work. Tensor
+fields expose their full matrix instead of an effective scalar surrogate.
+Source-fixed frames must name the same geometry coordinate frame throughout
+one problem. Fixed geometry, symmetric DC and static external-condition limits
+remain; no Hall response or out-of-plane closure is inferred. Four focused
+tests cover independent rotated fields, current traces, heterogeneous resistance,
+isotropic degeneration, missing principal sources and inconsistent frames.

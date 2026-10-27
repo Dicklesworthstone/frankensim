@@ -6,6 +6,8 @@
 //! spatial E/J solution. Local E.J heat and every other graph-resistor loss enter
 //! the existing enthalpy residual once. The common candidate publishes all three
 //! states together. No uniform-wire substitute or additional integrator is used.
+//! Scalar and oriented tensor materials use that same field extraction; both
+//! principal source properties and the fixed frame survive every thermal trial.
 
 use super::*;
 use crate::circuit_enthalpy::ResistorCell;
@@ -29,8 +31,8 @@ pub struct ConductionCircuitTerminal {
 /// Only native fluxes and charges carry electrical storage. The field remains
 /// quasistatic at the circuit's common midpoint; C/L and other graph resistors
 /// are explicitly authored fixed parameters on this bounded rung.
-pub struct ConductionCircuit {
-    problem: PlanarConduction,
+pub struct ConductionCircuit<C = ResolvedConductorState> {
+    problem: PlanarConduction<C>,
     graph: CircuitGraph,
     terminal: ConductionCircuitTerminal,
     fluxes_wb: Vec<f64>,
@@ -95,7 +97,7 @@ fn stamp(
     Ok(next)
 }
 
-impl ConductionCircuit {
+impl<C: PlanarConductorMaterial> ConductionCircuit<C> {
     /// Bind the native spatial resistance and initialize conserved branch-order
     /// fluxes/charges using the original descriptor. The named resistor slot's
     /// numeric value is replaced by the field extraction; it is not a fallback.
@@ -103,7 +105,7 @@ impl ConductionCircuit {
     /// receiving thermal cells when advancing the coupled state.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        problem: PlanarConduction,
+        problem: PlanarConduction<C>,
         graph: CircuitGraph,
         terminal: ConductionCircuitTerminal,
         time_s: f64,
@@ -152,7 +154,7 @@ impl ConductionCircuit {
         })
     }
 
-    pub fn problem(&self) -> &PlanarConduction {
+    pub fn problem(&self) -> &PlanarConduction<C> {
         &self.problem
     }
     pub fn graph(&self) -> &CircuitGraph {
@@ -198,12 +200,12 @@ pub struct ConductionCircuitStep {
     pub energy_residual_j: f64,
 }
 
-struct CircuitFieldCandidate {
-    circuit: ConductionCircuit,
+struct CircuitFieldCandidate<C> {
+    circuit: ConductionCircuit<C>,
     step: ConductionCircuitStep,
 }
-impl ThermalDriver for CircuitFieldCandidate {
-    type Model = ConductionCircuit;
+impl<C: PlanarConductorMaterial> ThermalDriver for CircuitFieldCandidate<C> {
+    type Model = ConductionCircuit<C>;
     type Step = ConductionCircuitStep;
     fn account(&self) -> DriverAccount<'_> {
         DriverAccount {
@@ -221,16 +223,16 @@ impl ThermalDriver for CircuitFieldCandidate {
 }
 
 /// Joint proposal for finite heat, conserved circuit storage and spatial sources.
-pub struct ConductionCircuitEnthalpyCandidate<'t> {
+pub struct ConductionCircuitEnthalpyCandidate<'t, C = ResolvedConductorState> {
     thermal: DepositionSimulation<'t>,
-    circuit: ConductionCircuit,
+    circuit: ConductionCircuit<C>,
     report: CircuitEnthalpyReport<MaterialNetworkSample, ConductionCircuitStep>,
 }
-impl<'t> ConductionCircuitEnthalpyCandidate<'t> {
+impl<'t, C: PlanarConductorMaterial> ConductionCircuitEnthalpyCandidate<'t, C> {
     pub fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
-    pub fn circuit(&self) -> &ConductionCircuit {
+    pub fn circuit(&self) -> &ConductionCircuit<C> {
         &self.circuit
     }
     pub fn report(&self) -> &CircuitEnthalpyReport<MaterialNetworkSample, ConductionCircuitStep> {
@@ -240,7 +242,7 @@ impl<'t> ConductionCircuitEnthalpyCandidate<'t> {
         self,
     ) -> (
         DepositionSimulation<'t>,
-        ConductionCircuit,
+        ConductionCircuit<C>,
         CircuitEnthalpyReport<MaterialNetworkSample, ConductionCircuitStep>,
     ) {
         (self.thermal, self.circuit, self.report)
@@ -265,11 +267,11 @@ impl ConductionThermalNetwork<'_> {
     /// contact resistance, thermoelectric transport or a moving/phase-changing
     /// geometry model to the quasistatic spatial field.
     #[allow(clippy::too_many_arguments)]
-    pub fn step_circuit_candidate<'t>(
+    pub fn step_circuit_candidate<'t, C: PlanarConductorMaterial>(
         &self,
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
-        circuit: &ConductionCircuit,
+        circuit: &ConductionCircuit<C>,
         ports: &[f64],
         graph_resistors: &[ResistorCell],
         assembly: WeightedAssemblyLimits,
@@ -277,7 +279,7 @@ impl ConductionThermalNetwork<'_> {
         controls: CircuitEnthalpySolve,
         initial_energy_increments_j: &[f64],
         cancelled: impl FnMut() -> bool,
-    ) -> Result<ConductionCircuitEnthalpyCandidate<'t>, Error> {
+    ) -> Result<ConductionCircuitEnthalpyCandidate<'t, C>, Error> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
         super::super::admit_driver_unknowns(thermal, controls, initial_energy_increments_j)?;
@@ -350,7 +352,9 @@ impl ConductionThermalNetwork<'_> {
             .map_err(material)?;
         let initial = self.materials_at(problem, &accepted.source, &routes, &cancel)?;
         if initial.iter().zip(problem.conductors()).any(|(a, b)| {
-            a.source_basis() != b.source_basis() || !same_material(a.material(), b.material())
+            a.source_basis() != b.source_basis()
+                || a.frame() != b.frame()
+                || !same_material(a.material(), b.material())
         }) {
             return Err(invalid(
                 "accepted spatial circuit sources must match the actual thermal state",
@@ -422,16 +426,16 @@ impl ConductionThermalNetwork<'_> {
     }
 }
 
-impl ConductionCircuit {
+impl<C: PlanarConductorMaterial> ConductionCircuit<C> {
     fn trial(
         &self,
-        problem: PlanarConduction,
+        problem: PlanarConduction<C>,
         target_s: f64,
         ports: &[f64],
         field_controls: ConductionControls,
         controls: MaterialCircuitSolve,
         cancel: &RefCell<impl FnMut() -> bool>,
-    ) -> Result<CircuitFieldCandidate, Error> {
+    ) -> Result<CircuitFieldCandidate<C>, Error> {
         check(cancel)?;
         let dt = finite(target_s - self.time_s)?;
         let resistance = problem

@@ -5,6 +5,9 @@
 //! that same state with explicit length and cross-section. Neither path chooses
 //! a metal, adds contact resistance, or infers a temperature-evolution law.
 
+/// Shared planar scalar/anisotropic conductivity with fixed material frames.
+pub mod planar;
+
 use core::fmt;
 
 use fs_matdb::{MaterialCard, QueryPoint};
