@@ -1076,12 +1076,14 @@ def single_map_image(kind, M, f, nf, out, f_lo, f_hi, span_db=80.0):
     return dict(real=None, ours=name, diff=None, f_lo_hz=f_lo, f_hi_hz=f_hi, span_db=span_db)
 
 
-def write_listening(root, family, slot, y, info, meta, reason, dyn="mf", band_hz=None):
+def write_listening(root, family, slot, y, info, meta, reason, dyn="mf", band_hz=None, full_scale_pa=None):
     """A render with no recording to compare it with (an instrument with no licensed reference): audio, its two maps,
     and the reason there is no reference, in the contract P8 accepts (real null, no_reference.reason, alignment null,
     partials null, metrics []). No gap, no ruler, no claim."""
     if not reason or not str(reason).strip():
         raise ValueError("IRPDECOMP_LISTEN_REASON: a listening-only pair states why there is no reference")
+    if full_scale_pa is not None and (not math.isfinite(full_scale_pa) or full_scale_pa <= 0):
+        raise ValueError("IRPDECOMP_LISTEN_SCALE: full_scale_pa must be finite positive pascals")
     final = Path(root) / family / slot
 
     def build(stage):
@@ -1094,16 +1096,26 @@ def write_listening(root, family, slot, y, info, meta, reason, dyn="mf", band_hz
                     scalogram=single_map_image("scalogram", C, cf, nf, stage, 60.0, top))
         dur = nf * HOP / SR
         yo = y[: int(round(dur * SR))]
-        g = 0.7 / max(float(np.abs(yo).max()), 1e-12)
+        # A material/atmosphere experiment must retain its pressure ratios.
+        # The declared native Pa-to-PCM scale is a calibration, never a gain to
+        # fit this particular note. The default historical listening view is unchanged.
+        g = 1.0 if full_scale_pa is not None else 0.7 / max(float(np.abs(yo).max()), 1e-12)
         write_wav(stage / "ours.wav", yo * g)
+        level = (f"The render's level is retained at {full_scale_pa:g} Pa per full scale, without peak normalization. "
+                 "Use the same full-scale pressure when comparing material or atmosphere variants."
+                 if full_scale_pa is not None else
+                 f"The peak is set to 0.70 of full scale ({20 * math.log10(g):+.1f} dB); there is no recording to match it to.")
         pj = dict(schema="frankensim.instrument-pair.v1", family=family, note=slot, dynamic=dyn, duration_s=round(dur, 4), real=None,
                   no_reference=dict(reason=str(reason).strip()),
                   ours=dict(wav=str(meta["wav"]), git_sha=meta["git_sha"], observer=meta["observer"], sample_rate=meta["sample_rate"], recipe=meta["recipe"]),
                   audio=dict(real=None, ours="ours.wav",
                              level_match=((f"The clip is low-passed at {band_hz:.0f} Hz (the render is valid only below it). " if band_hz else "")
-                                          + f"The peak is set to 0.70 of full scale ({20 * math.log10(g):+.1f} dB); there is no recording to match it to.")),
+                                          + level)),
                   alignment=None, figures=figs, partials=None, metrics=[],
                   decompose=dict(version=DECOMPOSE_VERSION, grader=GRADER_VERSION, mode="listening-only", onset_s=info["onset_s"]))
+        if full_scale_pa is not None:
+            pj["ours"]["full_scale_pa"] = full_scale_pa
+            pj["audio"]["gain_db"] = 0.0
         (stage / "pair.json").write_text(json.dumps(clean(pj), indent=1, allow_nan=False))
         return pj
 
@@ -1121,7 +1133,7 @@ def run_listening(c, root):
         raw = lowpass(raw, c["band_hz"])
     y, info = _labelled("render", align, raw, f0, render_floor(highpass(raw, f0), f0))
     meta = dict(wav=c["wav"], git_sha=c["git_sha"], observer=c["observer"], recipe=c["recipe"], sample_rate=wav_sample_rate(c["wav"]), note=c["note"])
-    return write_listening(root, c["family"], c.get("slot") or c["note"], y, info, meta, c.get("reason"), c.get("dyn", "mf"), c.get("band_hz"))
+    return write_listening(root, c["family"], c.get("slot") or c["note"], y, info, meta, c.get("reason"), c.get("dyn", "mf"), c.get("band_hz"), c.get("full_scale_pa"))
 
 
 DEFAULTS = dict(lib="/data/tmp/wa-inst/p2-grade/grade/library-v6-light.json", wav_dir="/data/tmp/wa-inst/refs-wav48",
@@ -1365,7 +1377,7 @@ def _batch_job(args):
 
 def cmd_listen(a):
     c = dict(family=a.family, note=a.note, slot=a.slot, dyn=a.dyn, wav=a.render, git_sha=a.git_sha, observer=a.observer, recipe=a.recipe,
-             reason=a.reason, band_hz=a.band_hz)
+             reason=a.reason, band_hz=a.band_hz, full_scale_pa=a.full_scale_pa)
     try:
         pj = run_listening({k: v for k, v in c.items() if v is not None}, a.out)
     except REFUSALS as e:
@@ -1500,6 +1512,7 @@ def main():
     p.add_argument("--recipe", required=True)
     p.add_argument("--reason", required=True, help="one sentence: why there is no recording to compare with")
     p.add_argument("--band-hz", type=float)
+    p.add_argument("--full-scale-pa", type=float, help="retain the native render's amplitude at this declared Pa-to-PCM scale instead of peak-normalizing it")
     p.add_argument("--out", default=DEFAULTS["out"])
     p.set_defaults(fn=cmd_listen)
     p = sub.add_parser("batch")

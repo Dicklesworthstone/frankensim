@@ -287,6 +287,8 @@ def validate_listening(pj: dict, base: Path) -> list[str]:
         for key in ("wav", "git_sha", "observer", "recipe"):
             if not isinstance(ours.get(key), str) or not ours[key]:
                 problems.append(f"ours.{key} is required")
+        if "full_scale_pa" in ours and (not finite(ours["full_scale_pa"]) or ours["full_scale_pa"] <= 0):
+            problems.append("ours.full_scale_pa must be finite positive pascals")
     audio = pj.get("audio")
     if not isinstance(audio, dict):
         problems.append("audio is missing")
@@ -298,6 +300,8 @@ def validate_listening(pj: dict, base: Path) -> list[str]:
             problems.append(f"audio.ours names no file ({v!r})")
         if not isinstance(audio.get("level_match"), str) or not audio["level_match"]:
             problems.append("audio.level_match must say how loudness was set")
+        if isinstance(ours, dict) and "full_scale_pa" in ours and audio.get("gain_db") != 0.0:
+            problems.append("a calibrated listening render must retain zero playback gain")
     figs = pj.get("figures")
     if not isinstance(figs, dict):
         problems.append("figures is missing")

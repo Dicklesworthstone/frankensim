@@ -493,6 +493,29 @@ class ListeningOnlyTests(unittest.TestCase):
         self.assertEqual(pj["ours"]["git_sha"], "abc")
         self.assertEqual(sorted(p.name for p in d.iterdir()), sorted(["pair.json", "ours.wav", "spectrogram-ours.webp", "scalogram-ours.webp"]))
 
+    def test_calibrated_listening_retains_the_material_pressure_ratio(self):
+        from instrgrade import load
+        root = Path(tempfile.mkdtemp())
+        signal = tone(f0=523.25, dur=1.2, lead=0.05)
+        meta = dict(wav="native.wav", git_sha="fixture", observer="receiver 1 m", recipe="material_strings", sample_rate=SR, note="C5")
+        for label, gain in (("reference", 1.0), ("changed", 0.25)):
+            pj = dc.write_listening(root, "violin", label, signal * gain, {"onset_s": 0.05}, meta,
+                                    "Manufactured material comparison; no reference recording.", full_scale_pa=2.0)
+            self.assertEqual(pj["ours"]["full_scale_pa"], 2.0)
+            self.assertEqual(pj["audio"]["gain_db"], 0.0)
+            self.assertIn("without peak normalization", pj["audio"]["level_match"])
+        a = load(root / "violin" / "reference" / "ours.wav")
+        b = load(root / "violin" / "changed" / "ours.wav")
+        np.testing.assert_allclose(b, 0.25 * a, rtol=1e-7, atol=1e-9)
+        self.assertAlmostEqual(float(np.sqrt(np.mean(b * b) / np.mean(a * a))), 0.25, places=7)
+
+    def test_invalid_listening_pressure_scales_refuse_before_staging(self):
+        root = Path(tempfile.mkdtemp())
+        for scale in (0.0, -1.0, float("nan"), float("inf")):
+            with self.subTest(scale=scale), self.assertRaisesRegex(ValueError, "LISTEN_SCALE"):
+                dc.write_listening(root, "violin", "G3", np.zeros(100), {}, {}, "No paired recording", full_scale_pa=scale)
+        self.assertEqual(list(root.iterdir()), [])
+
     def test_a_second_render_moves_the_first_aside_and_a_missing_reason_is_a_refusal_record(self):
         import json
         root = Path(tempfile.mkdtemp())
