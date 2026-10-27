@@ -11,9 +11,18 @@
 //! interface. Expansion parameter work remains separate; dissipative feedback
 //! does not supply the missing thermoelastic free-energy model.
 
+pub use super::loads::MaterialAttachment as DamperAttachment;
+use super::loads::{attachment_arm, attachment_region};
 use super::*;
 use fs_matdb::InterfaceSystemCard;
-use fs_material::state_point::{MaterialStatePointError, ResolvedLinearInterface};
+use fs_material::phase::EquilibriumPhaseState;
+use fs_material::state_point::{
+    MaterialPropertySelection, MaterialStatePointError, ResolvedLinearInterface,
+};
+use fs_material::thermal::interface::{
+    AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY, ThermalInterfacePoint,
+};
+use fs_material::thermal::source::ThermalMaterialError;
 use fs_mbd::{ActionReactionImpulseReceipt, apply_equal_and_opposite_impulse_at_body_points};
 use fs_solver::finite_difference::{FallibleFiniteDifference, FiniteDifferenceError};
 use fs_solver::{
@@ -21,15 +30,6 @@ use fs_solver::{
 };
 use fs_thermal::enthalpy::backward_euler::{BackwardEulerStep, StepCoefficients};
 use std::cell::{Cell, RefCell};
-
-/// A material attachment and heat receiver in one body's original coordinates.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct DamperAttachment {
-    /// The same region supplies the surface identity and receiving mass.
-    pub cell: CellId,
-    /// Reference body coordinates [m]; source expansion moves the attachment.
-    pub reference_point_m: fs_ga::Vec3,
-}
 
 /// Explicit source, geometry, temperature convention and heat routing.
 #[derive(Clone, Debug)]
@@ -67,6 +67,8 @@ pub struct DampingSolve {
 pub enum DampingError {
     Motion(HeatedMotionError),
     Material(MaterialStatePointError),
+    /// Ordered thermal source, physical context or bulk-state identity refusal.
+    Interface(ThermalMaterialError),
     Thermal(DepositionError),
     Newton(NewtonError),
     NotConverged(NewtonReport),
@@ -100,6 +102,11 @@ impl From<MaterialStatePointError> for DampingError {
         Self::Material(e)
     }
 }
+impl From<ThermalMaterialError> for DampingError {
+    fn from(e: ThermalMaterialError) -> Self {
+        Self::Interface(e)
+    }
+}
 impl From<DepositionError> for DampingError {
     fn from(e: DepositionError) -> Self {
         Self::Thermal(e)
@@ -118,6 +125,11 @@ pub struct DampingAudit {
     pub source: ResolvedLinearInterface,
     pub thermal: [EnergyAudit; 2],
     pub heat_by_body_j: [f64; 2],
+    /// Signed internal conductive heat from side 0 into side 1 [J]. This
+    /// transfer is separate from both generated damping heat and external heat.
+    pub contact_heat_to_second_j: f64,
+    /// Endpoint A/R'' [W/K], or None for the explicit insulated approximation.
+    pub contact_conductance_w_k: Option<f64>,
     /// c*dt*v_mid^2, independently checked against native impulse work.
     pub dissipated_heat_j: f64,
     pub impulse_energy_residual_j: f64,
@@ -135,13 +147,14 @@ pub struct DampingAudit {
 /// Two accepted thermal/mechanical histories and one source-bound viscous link.
 ///
 /// Each original thermal network retains its material regions, conduction and
-/// reservoirs. This exchanges mechanical work and dissipative heat; it adds no
-/// direct heat-conduction link between the networks. Clone retains all accepted
-/// enthalpy, configuration, motion, source and clock state.
+/// reservoirs. An optional source-bound contact exchanges heat between those
+/// same networks. Clone retains all accepted enthalpy, configuration, motion,
+/// source, contact-coordinate binding and clock state.
 #[derive(Clone)]
 pub struct DampedRigidPair<'a> {
     bodies: [HeatedRigidBody<'a>; 2],
     damper: MaterialDamper<'a>,
+    thermal_contact: Option<ThermalInterfacePoint<'a>>,
 }
 
 impl<'a> DampedRigidPair<'a> {
@@ -167,7 +180,11 @@ impl<'a> DampedRigidPair<'a> {
             .source
             .require_surface_materials(a.card.id(), b.card.id())?;
         damper.source = refresh(&damper, &bodies[damper.temperature_side].thermal)?;
-        Ok(Self { bodies, damper })
+        Ok(Self {
+            bodies,
+            damper,
+            thermal_contact: None,
+        })
     }
 
     pub const fn bodies(&self) -> &[HeatedRigidBody<'a>; 2] {
@@ -178,8 +195,101 @@ impl<'a> DampedRigidPair<'a> {
         &self.damper
     }
 
-    pub fn into_parts(self) -> ([HeatedRigidBody<'a>; 2], MaterialDamper<'a>) {
-        (self.bodies, self.damper)
+    /// Bind negligible-storage conduction through the SAME original interface.
+    ///
+    /// The complete damper source must already contain the area-specific
+    /// resistance claim. It is admitted by the shared thermal-interface owner
+    /// with its exact existing claim pin, never selected a second time. The
+    /// original mechanical area supplies A/R''. Both regions are lumped thermal
+    /// nodes at their own temperatures; no bulk half-cell resistance is inferred.
+    /// The source's existing `T` axis must explicitly be one of those side
+    /// temperatures, as selected by `MaterialDamper::temperature_side`.
+    ///
+    /// Pressure, gap, surface state and every other external coordinate remain
+    /// fixed. The caller supplies an interface law valid for this continuing
+    /// connection; no collision/contact active set or changing contact area is
+    /// inferred from the moving attachment points.
+    pub fn with_thermal_contact(
+        mut self,
+        point: ThermalInterfacePoint<'a>,
+    ) -> Result<Self, DampingError> {
+        if point.interface.content_hash() != self.damper.card.content_hash()
+            || point.temperature_axes[self.damper.temperature_side] != "T"
+        {
+            return Err(DampingError::Invalid(
+                "heat and damping require the same original interface and explicit side T convention",
+            ));
+        }
+        for (i, material) in point.materials.into_iter().enumerate() {
+            let region = attachment_region(&self.bodies[i], self.damper.attachments[i])?;
+            if material.content_hash() != region.card.content_hash() {
+                return Err(DampingError::Invalid(
+                    "thermal interface must retain both actual receiving material cards",
+                ));
+            }
+        }
+        let states = self.contact_states(&self.bodies[0].thermal, &self.bodies[1].thermal)?;
+        let query = point.at(states)?;
+        let original = self.damper.source.resolved().query();
+        let dynamic: Vec<_> = point
+            .temperature_axes
+            .into_iter()
+            .chain(point.liquid_fraction_axes.into_iter().flatten())
+            .chain(point.mean_temperature_axis)
+            .collect();
+        if original.axes().iter().any(|(axis, value)| {
+            !dynamic.contains(&axis.as_str()) && query.axes().get(axis) != Some(value)
+        }) {
+            return Err(DampingError::Invalid(
+                "thermal contact cannot change the interface's fixed source context",
+            ));
+        }
+        let source = require_viscous(
+            self.damper
+                .source
+                .at_query_point(self.damper.card, &query)?,
+        )?;
+        let resistance = source
+            .resolved()
+            .property(AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY)
+            .ok_or(DampingError::Invalid(
+                "the original interface bundle needs a unique thermal resistance",
+            ))?;
+        let thermal = point.resolve_resistance(
+            states,
+            MaterialPropertySelection::PinnedByProperty(vec![(
+                AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY.into(),
+                resistance.answer().receipt.selected,
+            )]),
+        )?;
+        let admitted = &thermal.properties()[0];
+        if resistance.requirement().quantity() != admitted.requirement().quantity()
+            || resistance.value_si().to_bits() != admitted.value_si().to_bits()
+        {
+            return Err(DampingError::Invalid(
+                "thermal resistance must use the original complete interface bundle",
+            ));
+        }
+        self.damper.source = source;
+        self.thermal_contact = Some(point);
+        contact_conductance(&self.damper.source)?;
+        Ok(self)
+    }
+
+    /// Original ordered two-temperature contact binding, if conduction is active.
+    pub const fn thermal_contact(&self) -> Option<ThermalInterfacePoint<'a>> {
+        self.thermal_contact
+    }
+
+    /// Decompose without losing the optional physical interface binding.
+    pub fn into_parts(
+        self,
+    ) -> (
+        [HeatedRigidBody<'a>; 2],
+        MaterialDamper<'a>,
+        Option<ThermalInterfacePoint<'a>>,
+    ) {
+        (self.bodies, self.damper, self.thermal_contact)
     }
 
     /// Solve one bounded interval; continue from the returned pair.
@@ -259,29 +369,22 @@ impl<'a> DampedRigidPair<'a> {
                                 return Err(DampingError::Budget("interface proposals"));
                             }
                             trials.set(trials.get() + 1);
-                            let source = refresh(
-                                &self.damper,
-                                if self.damper.temperature_side == 0 {
-                                    a
-                                } else {
-                                    b
-                                },
-                            )?;
+                            let (source, contact) = self.resolve_interface(a, b, dt)?;
                             let impulse = self.impulse(&source, dt, controls)?;
                             let qa = number(impulse.heat_j * self.damper.first_heat_fraction)?;
                             let qb = number(impulse.heat_j - qa)?;
                             Ok::<_, DampingError>(StepCoefficients {
                                 sources_w: BTreeMap::from([(
                                     self.damper.attachments[1].cell,
-                                    number(qb / dt)?,
+                                    number(number(qb + contact.heat_to_second_j)? / dt)?,
                                 )]),
                                 conductances_w_k: BTreeMap::new(),
-                                payload: (source, impulse, [qa, qb]),
+                                payload: (source, impulse, [qa, qb], contact),
                             })
                         },
                         checkpoint,
                     )?;
-                    let qa = b.payload().2[0];
+                    let qa = number(b.payload().2[0] - b.payload().3.heat_to_second_j)?;
                     Ok::<_, DampingError>(StepCoefficients {
                         sources_w: BTreeMap::from([(
                             self.damper.attachments[0].cell,
@@ -334,13 +437,14 @@ impl<'a> DampedRigidPair<'a> {
             controls.thermal_energy_tolerance_j,
             checkpoint,
         )?;
-        let (tb, (source, impulse, heat), ab) = trial.accept(
+        let (tb, (source, impulse, heat, contact), ab) = trial.accept(
             controls.cell_energy_tolerance_j,
             controls.thermal_energy_tolerance_j,
             checkpoint,
         )?;
         // Ask the original rate owner for authored/reservoir supply without
-        // internal damping. Do not derive supply from a closed combined total.
+        // internal damping or contact transfer. Do not derive supply from a
+        // closed combined total.
         let mut external = 0.0;
         for thermal in [&ta, &tb] {
             external = number(
@@ -409,6 +513,8 @@ impl<'a> DampedRigidPair<'a> {
                 source,
                 thermal: [aa, ab],
                 heat_by_body_j: heat,
+                contact_heat_to_second_j: contact.heat_to_second_j,
+                contact_conductance_w_k: contact.conductance_w_k,
                 dissipated_heat_j: impulse.heat_j,
                 impulse_energy_residual_j: impulse.residual_j,
                 external_heat_j: external,
@@ -420,6 +526,75 @@ impl<'a> DampedRigidPair<'a> {
                 trials: trials.get(),
             },
         ))
+    }
+
+    fn contact_states(
+        &self,
+        first: &DepositionSimulation<'_>,
+        second: &DepositionSimulation<'_>,
+    ) -> Result<[EquilibriumPhaseState; 2], DampingError> {
+        let state = |i: usize, thermal: &DepositionSimulation<'_>| {
+            let attachment = self.damper.attachments[i];
+            let region = attachment_region(&self.bodies[i], attachment)?;
+            let cell = thermal
+                .cells()
+                .get(&attachment.cell)
+                .ok_or(DampingError::Invalid("thermal contact cell is absent"))?;
+            region
+                .caloric
+                .curve()
+                .state_at_specific_enthalpy(cell.specific_h_j_kg)
+                .map_err(|e| DampingError::Motion(HeatingError::Caloric(e).into()))
+        };
+        Ok([state(0, first)?, state(1, second)?])
+    }
+
+    fn resolve_interface(
+        &self,
+        first: &DepositionSimulation<'_>,
+        second: &DepositionSimulation<'_>,
+        dt: f64,
+    ) -> Result<(ResolvedLinearInterface, ContactExchange), DampingError> {
+        if let Some(point) = self.thermal_contact {
+            let states = self.contact_states(first, second)?;
+            let query = point.at(states)?;
+            let source = require_viscous(
+                self.damper
+                    .source
+                    .at_query_point(self.damper.card, &query)?,
+            )?;
+            let exchange = Self::contact_exchange(&source, states, dt)?;
+            Ok((source, exchange))
+        } else {
+            Ok((
+                refresh(
+                    &self.damper,
+                    if self.damper.temperature_side == 0 {
+                        first
+                    } else {
+                        second
+                    },
+                )?,
+                ContactExchange {
+                    conductance_w_k: None,
+                    heat_to_second_j: 0.0,
+                },
+            ))
+        }
+    }
+
+    fn contact_exchange(
+        source: &ResolvedLinearInterface,
+        states: [EquilibriumPhaseState; 2],
+        dt: f64,
+    ) -> Result<ContactExchange, DampingError> {
+        let conductance = contact_conductance(source)?;
+        let difference = number(states[0].temperature_k() - states[1].temperature_k())?;
+        let heat = number(dt * number(conductance * difference)?)?;
+        Ok(ContactExchange {
+            conductance_w_k: Some(conductance),
+            heat_to_second_j: heat,
+        })
     }
 
     fn impulse(
@@ -503,46 +678,24 @@ struct Dissipation {
     residual_j: f64,
 }
 
-fn attachment_region<'b, 'a>(
-    body: &'b HeatedRigidBody<'a>,
-    attachment: DamperAttachment,
-) -> Result<&'b ThermalRegion<'a>, DampingError> {
-    if ![
-        attachment.reference_point_m.x,
-        attachment.reference_point_m.y,
-        attachment.reference_point_m.z,
-    ]
-    .into_iter()
-    .all(f64::is_finite)
-    {
-        return Err(DampingError::Invalid("nonfinite material attachment"));
-    }
-    body.motion
-        .expansion
-        .regions
-        .iter()
-        .find(|r| r.cell_id == attachment.cell)
-        .ok_or(DampingError::Invalid(
-            "attachment must name an original material/thermal region",
-        ))
+struct ContactExchange {
+    conductance_w_k: Option<f64>,
+    heat_to_second_j: f64,
 }
 
-fn attachment_arm(
-    body: &HeatedRigidBody<'_>,
-    attachment: DamperAttachment,
-) -> Result<fs_mbd::Vec3, DampingError> {
-    let binding = attachment_region(body, attachment)?;
-    let index = body
-        .reference()
-        .regions()
-        .iter()
-        .position(|r| r.key() == binding.key)
-        .ok_or(DampingError::Invalid("missing original attachment region"))?;
-    let region = &body.configuration().regions()[index];
-    let point = region.fixed_point_m()
-        + (attachment.reference_point_m - region.fixed_point_m())
-            .scale(1.0 + region.expansion().free_linear_strain());
-    Ok(body.principal_frame().arm_for_body_point(point)?)
+fn contact_conductance(source: &ResolvedLinearInterface) -> Result<f64, DampingError> {
+    let resistance = source
+        .resolved()
+        .property(AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY)
+        .ok_or(DampingError::Invalid("missing original thermal resistance"))?
+        .value_si();
+    let conductance = number(source.area_m2() / resistance)?;
+    if resistance <= 0.0 || conductance <= 0.0 {
+        return Err(DampingError::Invalid(
+            "positive representable contact resistance and conductance required",
+        ));
+    }
+    Ok(conductance)
 }
 
 fn refresh(
@@ -561,7 +714,12 @@ fn refresh(
             thermal.temperature_k(damper.attachments[damper.temperature_side].cell)?,
         )
         .map_err(|_| DampingError::Invalid("invalid interface temperature coordinate"))?;
-    let source = damper.source.at_query_point(damper.card, &point)?;
+    require_viscous(damper.source.at_query_point(damper.card, &point)?)
+}
+
+fn require_viscous(
+    source: ResolvedLinearInterface,
+) -> Result<ResolvedLinearInterface, DampingError> {
     if source.stiffness_n_m() != 0.0
         || source.damping_n_s_m() <= 0.0
         || source.constant_loss_reference_omega_rad_s().is_some()

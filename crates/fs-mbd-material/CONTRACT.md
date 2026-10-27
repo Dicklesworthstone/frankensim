@@ -361,12 +361,13 @@ roles, property roles and selected claims are retained. `first_heat_fraction`
 routes physical heat to side 0; side 1 receives the exact remainder. Neither an
 average temperature nor an effusivity partition is invented. The connector has
 no separate heat store. Original links and reservoirs remain with each body's
-thermal network; no additional inter-body thermal-conduction link is supplied.
+thermal network. `new` defaults to insulation between the bodies;
+`with_thermal_contact` adds the ordered source-bound exchange described below.
 
 Each step solves both public `fs-thermal::BackwardEulerStep` residuals using the
 existing Newton-Krylov and fallible finite-difference owners. Unknowns are cell
 energy increments in each body's original sorted order. Every trial starts from
-the same accepted bodies and refreshes c at the proposed interface temperature.
+the same accepted bodies and refreshes the source at the proposed temperatures.
 A fresh final evaluation must pass local, global, and mechanical/thermal energy
 gates before either history is returned. Unsupported sources, pending events,
 nonlinear budgets, physical step limits and cancellation publish no endpoint.
@@ -387,8 +388,8 @@ After the impulse, the original integrator advances actual positions and
 orientations. Existing expansion/full-inertia transfer then updates configuration
 while preserving world momenta. This is a first-order split. Its audit separates
 physical dissipation, independently evaluated reservoir/authored heat, expansion
-parameter work and native numerical drift. Only physical damping loss is
-deposited as heat. Expansion parameter work remains the existing explicit
+parameter work and native numerical drift. Mechanical heat generation is exactly
+the physical damping loss. Expansion parameter work remains the existing explicit
 unresolved thermoelastic-work boundary: this closes dissipative feedback, not a
 general thermoelastic free-energy, entropy or coupled-passivity model.
 Spring storage, dry friction, normal contact, connector mass and deformation
@@ -399,6 +400,35 @@ The focused regression target is `heating_damping` with
 impulse/heat, material-temperature feedback, continuing trajectories and joint
 refusal. These tests specify implementation checks, not measured validation;
 native execution must be reported separately from source review.
+
+### Ordered thermal exchange through the same damping interface
+
+`DampedRigidPair::with_thermal_contact` binds the shared `ThermalInterfacePoint`
+to the existing complete interface bundle, which must already contain the
+canonical area-specific thermal-contact resistance alongside stiffness and
+damping. Admission retains the same interface card, ordered actual receiving
+bulk cards, original claim pins, coordinate schema and fixed external
+conditions. The declared side selected by `temperature_side` supplies the
+mechanical layer-temperature coordinate `T`; both side temperatures, optional
+phase fractions and any explicitly declared mean follow their actual caloric
+states. No mean temperature is inferred.
+
+The original mechanical interface area A and sourced resistance R'' [m² K/W]
+supply G=A/R'' [W/K]. At every joint backward-Euler trial the complete original
+bundle refreshes together, and Q=dt G (T_A-T_B) enters the first network as -Q
+and the second as +Q. Each network retains its original cells, conduction,
+reservoirs and authored sources. Generated dashpot heat keeps its explicit
+partition. `contact_heat_to_second_j` and `contact_conductance_w_k` expose
+internal transfer separately from dissipation, external heat, expansion
+parameter work and numerical drift.
+
+This is a fixed-area, negligible-storage connection between lumped thermal
+nodes. It infers no bulk half-cell resistance, evolving gap, contact active set
+or pressure law. Source refusal, cancellation or failed energy closure returns
+neither proposed body. Cloning and the third `into_parts` component preserve
+the contact binding. The `heating_damping` regressions cover unequal starting
+temperatures in both side orders, data-only nonlinear resistance swaps that
+alter both thermal histories and motion, lossless restart and atomic refusal.
 
 ## External impulses on continuing heated material bodies
 

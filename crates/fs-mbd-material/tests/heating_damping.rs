@@ -7,13 +7,17 @@ use fs_evidence::ValidityDomain;
 use fs_ga::{Se3, So3, Twist, Vec3};
 use fs_matdb::{
     ClaimSet, InterfaceSystemCard, InterpolationPolicy, MaterialCard, PropertyClaim, PropertyKey,
-    PropertyValue, Provenance, SurfaceSpec, SystemContext, UncertaintyModel,
+    PropertyValue, Provenance, QueryPoint, SurfaceSpec, SystemContext, UncertaintyModel,
 };
 use fs_material::phase::{ResolvedHeatCapacityCurve, SolidLiquidPhase};
 use fs_material::state_point::{
     MaterialPropertySelection, ResolvedLinearInterface, ScalarAdmissibility,
     ScalarPropertyRequirement, interface_stiffness_per_area_dims,
     interface_viscosity_per_area_dims, resolve_interface_state_point,
+};
+use fs_material::thermal::interface::{
+    AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS, AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
+    ThermalInterfacePoint,
 };
 use fs_mbd::{Gravity, RigidBodyIntegrator};
 use fs_mbd_material::ResolvedBody;
@@ -180,7 +184,7 @@ fn central_impulse_matches_independent_momentum_heat_and_free_flight() {
     let chart = caloric(&solid, 1e5, SolidLiquidPhase::Solid);
     let reference = reference(&solid, 1);
     let interface = interface(&solid, 0., 500., 0.);
-    let (bodies, mut damper) =
+    let (bodies, mut damper, _) =
         pair(&reference, &solid, &chart, &interface, 0., 0., [2., 3.]).into_parts();
     damper.first_heat_fraction = 0.25;
     let old = DampedRigidPair::new(bodies, damper).unwrap();
@@ -380,7 +384,7 @@ fn late_cancellation_and_material_or_solver_refusals_leave_both_histories_intact
     ));
     close(narrow_pair.bodies()[0].thermal().time_s(), 0.);
     let spring = self::interface(&solid, 0., 500., 1.);
-    let (bodies, mut damper) = old.into_parts();
+    let (bodies, mut damper, _) = old.into_parts();
     damper.card = &spring;
     let requirements = [
         ScalarPropertyRequirement::try_new(
@@ -413,4 +417,355 @@ fn late_cancellation_and_material_or_solver_refusals_leave_both_histories_intact
         DampedRigidPair::new(bodies, damper),
         Err(DampingError::Invalid(_))
     ));
+}
+
+fn conducting_interface(
+    solid: &MaterialCard,
+    slope: f64,
+    resistance: f64,
+    thermal_slope: f64,
+    upper: f64,
+    side: usize,
+) -> InterfaceSystemCard {
+    let original = interface(solid, slope, 500., 0.);
+    let mut claims = original.claims().clone();
+    let second_axis = if side == 0 { "T_b" } else { "T" };
+    claims
+        .insert_claim(PropertyClaim {
+            key: PropertyKey::new(
+                AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
+                AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
+            ),
+            value: PropertyValue::Curve {
+                abscissa: second_axis.into(),
+                abscissa_dims: Temperature::DIMS,
+                knots: vec![
+                    (300., resistance),
+                    (upper, resistance * (1. + thermal_slope * (upper - 300.))),
+                ],
+                dims: AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
+            },
+            validity: ValidityDomain::unconstrained()
+                .with(second_axis, 300., upper)
+                .with("pressure", 1e5, 2e5),
+            interpolation: InterpolationPolicy::LinearInside,
+            uncertainty: UncertaintyModel::Unstated,
+            observations: vec![],
+            provenance: Provenance {
+                source: "synthetic ordered thermal contact".into(),
+                license: "CC0-1.0".into(),
+                artifact: None,
+            },
+        })
+        .unwrap();
+    InterfaceSystemCard::assemble(
+        original.surface_a().clone(),
+        original.surface_b().clone(),
+        SystemContext {
+            medium: original.medium().into(),
+            third_body: None,
+            environment: original.environment().into(),
+            history: original.history().into(),
+        },
+        claims,
+        vec![],
+    )
+    .unwrap()
+}
+
+fn contact_context(side: usize) -> QueryPoint {
+    point(300., 1e5)
+        .with("omega", 0.)
+        .unwrap()
+        .with(if side == 0 { "T_b" } else { "T_a" }, 300.)
+        .unwrap()
+}
+
+fn contact_point<'a>(
+    solid: &'a MaterialCard,
+    interface: &'a InterfaceSystemCard,
+    context: &'a QueryPoint,
+    side: usize,
+) -> ThermalInterfacePoint<'a> {
+    ThermalInterfacePoint {
+        interface,
+        materials: [solid; 2],
+        context,
+        temperature_axes: if side == 0 {
+            ["T", "T_b"]
+        } else {
+            ["T_a", "T"]
+        },
+        liquid_fraction_axes: [None; 2],
+        mean_temperature_axis: None,
+    }
+}
+
+fn conducting_pair<'a>(
+    reference: &'a ResolvedBody,
+    chart: &'a ResolvedHeatCapacityCurve,
+    point: ThermalInterfacePoint<'a>,
+    side: usize,
+    speed: f64,
+    watts: [f64; 2],
+    warmup_s: f64,
+) -> DampedRigidPair<'a> {
+    let requirements = [
+        (
+            "k",
+            interface_stiffness_per_area_dims(),
+            ScalarAdmissibility::NonNegative,
+        ),
+        (
+            "c",
+            interface_viscosity_per_area_dims(),
+            ScalarAdmissibility::StrictlyPositive,
+        ),
+        (
+            AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
+            AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
+            ScalarAdmissibility::StrictlyPositive,
+        ),
+    ]
+    .map(|(name, dims, domain)| ScalarPropertyRequirement::try_new(name, dims, domain).unwrap());
+    let source = resolve_interface_state_point(
+        point.interface,
+        point.context,
+        &requirements,
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    let bodies = [0, 1].map(|i| {
+        let sign = if i == 0 { 1. } else { -1. };
+        let body = HeatedRigidBody::new(
+            heated(reference, point.materials[i], chart, watts[i], vec![]),
+            Se3::from_parts(So3::identity(), Vec3::new(-sign, 0., 0.)).unwrap(),
+            Twist::new(Vec3::default(), Vec3::new(sign * speed, 0., 0.)),
+            RigidBodyIntegrator::new(Gravity::ZERO),
+            HeatedMotionControls {
+                maximum_step_s: 0.125,
+                relative_tensor_tolerance: 1e-12,
+                transfer: ConfigurationTransferControls {
+                    relative_momentum_tolerance: 1e-12,
+                    maximum_parameter_work_j: 1.,
+                },
+                maximum_numerical_energy_change_j: 1e-7,
+            },
+            || Ok(()),
+        )
+        .unwrap();
+        if warmup_s == 0. {
+            body
+        } else {
+            body.advance_to(warmup_s, config(), || Ok(())).unwrap().0
+        }
+    });
+    DampedRigidPair::new(
+        bodies,
+        MaterialDamper {
+            card: point.interface,
+            source: ResolvedLinearInterface::new(source, "k", "c", 1.).unwrap(),
+            attachments: [DamperAttachment {
+                cell: CellId(0),
+                reference_point_m: Vec3::default(),
+            }; 2],
+            temperature_side: side,
+            first_heat_fraction: 0.5,
+        },
+    )
+    .unwrap()
+    .with_thermal_contact(point)
+    .unwrap()
+}
+
+#[test]
+fn conducting_interface_matches_two_capacity_balance_with_distinct_initial_temperatures() {
+    let solid = card(10., 0., 500.);
+    let chart = caloric(&solid, 1e5, SolidLiquidPhase::Solid);
+    let reference = reference(&solid, 1);
+    for side in [0, 1] {
+        let interface = conducting_interface(&solid, 0., 2., 0., 500., side);
+        let context = contact_context(side); // Reference temperatures differ from actual warm state.
+        let binding = contact_point(&solid, &interface, &context, side);
+        let old = conducting_pair(&reference, &chart, binding, side, 0., [100., 0.], 0.05);
+        close(
+            old.bodies()[0].thermal().temperature_k(CellId(0)).unwrap(),
+            300.25,
+        );
+        close(
+            old.bodies()[1].thermal().temperature_k(CellId(0)).unwrap(),
+            300.,
+        );
+        let (next, audit) = old.step_to(0.15, solve(), &[9.9, 0.1], || false).unwrap();
+        // C_a=C_b=20 J/K, G=A/R''=0.5 W/K. Backward Euler on both
+        // capacities gives this closed form with independent external forcing.
+        let heat = 0.1 * 0.5 * (0.25 + 0.1 * 100. / 20.) / (1. + 0.1 * 0.5 * (2. / 20.));
+        close(audit.contact_heat_to_second_j, heat);
+        close(audit.contact_conductance_w_k.unwrap(), 0.5);
+        close(audit.dissipated_heat_j, 0.);
+        close(audit.external_heat_j, 10.);
+        close(
+            next.bodies()[0].thermal().energy_j() - old.bodies()[0].thermal().energy_j(),
+            10. - heat,
+        );
+        close(
+            next.bodies()[1].thermal().energy_j() - old.bodies()[1].thermal().energy_j(),
+            heat,
+        );
+        close(audit.combined_residual_j, 0.);
+        // Decomposition keeps the same physical contact binding for restart.
+        for (i, axis) in binding.temperature_axes.into_iter().enumerate() {
+            close(
+                audit.source.resolved().state_coordinate(axis).unwrap(),
+                next.bodies()[i].thermal().temperature_k(CellId(0)).unwrap(),
+            );
+        }
+        let saved = next.clone();
+        let (bodies, damper, contact) = next.into_parts();
+        let restarted = DampedRigidPair::new(bodies, damper)
+            .unwrap()
+            .with_thermal_contact(contact.unwrap())
+            .unwrap();
+        let a = saved
+            .step_to(0.25, solve(), &[9.9, 0.1], || false)
+            .unwrap()
+            .0;
+        let b = restarted
+            .step_to(0.25, solve(), &[9.9, 0.1], || false)
+            .unwrap()
+            .0;
+        unchanged(&a, &b);
+    }
+}
+
+#[test]
+fn resistance_data_changes_both_thermal_states_and_temperature_dependent_motion() {
+    let solid = card(1., 0., 500.);
+    let chart = caloric(&solid, 1e5, SolidLiquidPhase::Solid);
+    let reference = reference(&solid, 1);
+    let mut speeds = Vec::new();
+    for resistance in [0.05, 0.5] {
+        let interface = conducting_interface(&solid, 1., resistance, 0.2, 500., 0);
+        let context = contact_context(0);
+        let binding = contact_point(&solid, &interface, &context, 0);
+        let old = conducting_pair(&reference, &chart, binding, 0, 1., [50., 0.], 0.);
+        // Independent reduction of the two capacity equations. For a proposed
+        // damping heat D, energy fixes theta_a+theta_b. The contact equation is
+        // quadratic because R''=R0*(1+0.2*theta_b); use its analytical root.
+        let second_rise = |d: f64| {
+            let sum = (5. + d) / 2.;
+            let a = 2. * resistance * 0.2;
+            let b = 2. * resistance - 0.5 * d * resistance * 0.2 + 0.2;
+            let c = -0.5 * d * resistance - 0.1 * sum;
+            -2. * c / (b + (b * b - 4. * a * c).sqrt())
+        };
+        let (mut lo, mut hi): (f64, f64) = (0., 2.);
+        for _ in 0..80 {
+            let d = 0.5 * (lo + hi);
+            let damping = 1. + (5. + d) / 2. - second_rise(d);
+            let predicted = 0.1 * damping * (2. / (1. + 0.05 * damping)).powi(2);
+            if d < predicted {
+                lo = d;
+            } else {
+                hi = d;
+            }
+        }
+        let d = 0.5 * (lo + hi);
+        let tb = second_rise(d);
+        let ta = (5. + d) / 2. - tb;
+        let c = 1. + ta;
+        let (next, audit) = old.step_to(0.1, solve(), &[3., 2.], || false).unwrap();
+        close(audit.dissipated_heat_j, d);
+        close(audit.source.damping_n_s_m(), c);
+        close(audit.contact_heat_to_second_j, 2. * tb - 0.5 * d);
+        close(
+            audit.contact_conductance_w_k.unwrap(),
+            1. / (resistance * (1. + 0.2 * tb)),
+        );
+        close(
+            next.bodies()[0].thermal().temperature_k(CellId(0)).unwrap(),
+            300. + ta,
+        );
+        close(
+            next.bodies()[1].thermal().temperature_k(CellId(0)).unwrap(),
+            300. + tb,
+        );
+        let speed = (1. - 0.05 * c) / (1. + 0.05 * c);
+        close(
+            next.bodies()[0].state().linear_momentum_world().x,
+            2. * speed,
+        );
+        close(audit.external_heat_j, 5.);
+        close(audit.combined_residual_j, 0.);
+        for (before, after) in old
+            .damper()
+            .source
+            .resolved()
+            .properties()
+            .iter()
+            .zip(audit.source.resolved().properties())
+        {
+            assert_eq!(
+                before.answer().receipt.selected,
+                after.answer().receipt.selected
+            );
+        }
+        speeds.push(speed);
+    }
+    assert!(speeds[0] > speeds[1]); // Stronger conduction cools the driving-side damper law.
+}
+
+#[test]
+fn conducting_damper_refusals_preserve_both_bodies_and_the_complete_source() {
+    let solid = card(1., 0., 500.);
+    let chart = caloric(&solid, 1e5, SolidLiquidPhase::Solid);
+    let reference = reference(&solid, 1);
+    let interface = conducting_interface(&solid, 1., 0.05, 0.2, 500., 0);
+    let context = contact_context(0);
+    let binding = contact_point(&solid, &interface, &context, 0);
+    let old = conducting_pair(&reference, &chart, binding, 0, 1., [50., 0.], 0.);
+    let saved = old.clone();
+    let mut checkpoints = 0;
+    old.step_to(0.1, solve(), &[3., 2.], || {
+        checkpoints += 1;
+        false
+    })
+    .unwrap();
+    let mut calls = 0;
+    assert!(matches!(
+        old.step_to(0.1, solve(), &[3., 2.], || {
+            calls += 1;
+            calls == checkpoints
+        }),
+        Err(DampingError::Thermal(DepositionError::Cancelled))
+    ));
+    unchanged(&old, &saved);
+    assert_eq!(
+        old.thermal_contact().unwrap().context,
+        saved.thermal_contact().unwrap().context
+    );
+    let foreign = card(2., 0., 500.); // Same named material ID, different actual card.
+    let mut wrong = binding;
+    wrong.materials[1] = &foreign;
+    assert!(old.clone().with_thermal_contact(wrong).is_err());
+    let changed_context = context.clone().with("pressure", 1.5e5).unwrap();
+    wrong = binding;
+    wrong.context = &changed_context;
+    assert!(old.clone().with_thermal_contact(wrong).is_err());
+    let narrow = conducting_interface(&solid, 1., 0.05, 0.2, 300.01, 0);
+    let limited = conducting_pair(
+        &reference,
+        &chart,
+        contact_point(&solid, &narrow, &context, 0),
+        0,
+        1.,
+        [50., 0.],
+        0.,
+    );
+    let prior = limited.clone();
+    assert!(matches!(
+        limited.step_to(0.1, solve(), &[3., 2.], || false),
+        Err(DampingError::Material(_))
+    ));
+    unchanged(&limited, &prior);
 }
