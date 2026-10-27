@@ -2782,3 +2782,48 @@ NASA internal-energy cooling and latent melting, gas-data-only changes that open
 native flow faces, late pressure-domain/cancellation rollback and small-reservoir
 capacity limits. Coefficients are synthetic. MR25/MR29 remain open for their
 broader moving solid/liquid integration.
+
+## Material MHD drives native momentum and enthalpy reciprocally
+
+`conjugate::enthalpy::advection::feedback::mhd::advance_mhd_enthalpy_with_material_flow`
+joins the existing moving-conductor current operator to retained native MAC
+unsteady Stokes momentum and the original conservative enthalpy timeline.
+Resistivity, viscosity, conductivity, buoyancy and admitted mobile mushy drag
+read the same material objects at each actual starting h/T. A bounded implicit
+iteration solves current with `u × B`, applies the native reciprocal Lorentz
+force, and advances momentum from the same accepted history over the actual
+thermal interval. Its endpoint cell velocity uses the same half-cell force
+interpolation as the electrical work identity. Independent velocity and work
+gates refuse incomplete coupling; every real current/momentum trial is budgeted.
+An inner duration-dependent observer publishes one interval, not one per trial.
+
+Only conductor-frame `I²R` and native molecular/Darcy dissipation enter thermal
+storage. Signed Lorentz work transfers energy between current and momentum;
+magnetic braking can heat material while electrode power is zero. Native
+kinetic storage, backward-Euler numerical loss and bounded pressure-constraint
+work retain separate accounts. Electrical sampled work, force work on actual
+endpoint velocity, the native face-force lift and mapped heat are independently
+checked. Absolute accumulated transfer defects cannot cancel between intervals.
+The combined thermal/kinetic/work gate includes original thermal input, external
+body and buoyancy work, wall work and electrode supply without double-counting
+physical loss. The final current support solve uses actual endpoint h/T and
+velocity and supplies no extra heat.
+
+This entry requires a complete shared fixed-volume mobile map and the original
+unsteady physical-heating admission. The imposed magnetic source is stationary;
+the caller owns solenoidal-field validity and low-induction applicability. There
+is no induced-field energy store, Hall response, moving boundary or force
+handoff into a conducting frozen solid. Exact solid locking is explicitly
+refused; existing mobile mushy drag remains available. Electrode-connected and
+fully isolated current topologies are explicit choices. Fixed original contact
+resistance and heat partition are preserved. Changing drive or B between
+accepted advances retains native momentum. Material, budget, convergence,
+endpoint and cancellation failures preserve both original states.
+
+Synthetic regressions reduce a driven 3x2 MAC box independently to its current,
+Lorentz-force, viscous-loss and face-mass equations. They cover resistivity-data
+substitution, B reversal, external-force composition, zero-voltage magnetic
+braking, actual temperature feedback, one material epoch across repeated
+current trials, and late support-solve/nonconvergence rollback. This closes the
+bounded MR43 moving-current/fluid/thermal connection; general phase transition,
+induction and moving solid/fluid mechanical coupling remain broader work.

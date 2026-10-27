@@ -32,6 +32,9 @@ use crate::material::transport::boussinesq::{BoussinesqConfig, BoussinesqMateria
 /// Current and irreversible heat from these exact live-flow material samples.
 pub mod electrical;
 
+/// Reciprocal motional current, Lorentz momentum and physical heat on one timeline.
+pub mod mhd;
+
 /// Finite source-backed gas storage exchanging heat with the same phase/flow cells.
 pub mod environment;
 
@@ -120,6 +123,8 @@ pub struct MaterialFlowEpoch<F, T = FluidTransportState> {
     /// buoyancy. Its signed work is in viscous_power for quasisteady heating;
     /// in unsteady_mechanical_step it is total body work minus the buoyancy
     /// subset. Work is never added as heat again.
+    /// The MHD adapter adds its native Lorentz force to this applied RHS only;
+    /// its report separates electrical transfer from original actuator work.
     pub external_force_n_m3: Option<Vec<[f64; 3]>>,
     /// Applied isotropic `mu/K(phi(h))` [Pa s/m2], in native voxel order.
     /// None without an explicitly attached stationary mushy closure.

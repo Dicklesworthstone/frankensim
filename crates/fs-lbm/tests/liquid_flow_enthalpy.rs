@@ -41,6 +41,9 @@ mod mushy;
 #[path = "liquid_flow_enthalpy/viscous.rs"]
 mod viscous;
 
+#[path = "liquid_flow_enthalpy/mhd.rs"]
+mod mhd;
+
 fn absolute() -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature, ValueForm::Static,
