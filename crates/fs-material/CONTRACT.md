@@ -2376,3 +2376,27 @@ accepted composition, temperature and pressure. Nonfinite or unrepresentable
 energy increments, source/domain failures, failed inversion and cancellation
 publish no parcel. This primitive supplies a material state transition, not
 reaction kinetics, species transport or open-system mass/chemical work.
+
+## Composition, volume and mechanical work at one caloric endpoint
+
+`ClosedGasParcel::replace_model_with_heat_work_volume` reconstructs the new
+source-backed material model at unchanged mass, specified final volume and
+`U_end = U_start + Q - W`. Positive W is work delivered by the gas. The original
+density/internal-energy inversion resolves temperature, pressure, transport and
+acoustics together, without an intermediate composition, heat-only or volume-only
+state. The existing fixed-volume heat and conserved-energy methods delegate with
+zero work and retain their meaning.
+
+`GasCompositionStep` records both volumes, supplied heat, delivered work,
+actual storage change and `delta U + W - Q`. The mechanical consumer must
+independently close the supplied work against its actual pressure/volume
+trajectory; this material primitive supplies no work quadrature or entropy
+production law. Formation references remain inside species internal energies.
+Nonfinite/lost exchanges, unsupported endpoints, failed energy inversion and
+cancellation preserve the original parcel.
+
+G1/G4 regression cases in the original composition module independently check
+an ideal-gas isothermal expansion with equal supplied heat and delivered work,
+and failed/cancelled moving-volume reconstruction. Parser checks completed;
+native Rust execution was unavailable because DSR/RCH are absent and the shared
+filesystem is full.
