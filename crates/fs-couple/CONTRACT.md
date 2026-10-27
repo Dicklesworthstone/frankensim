@@ -7787,3 +7787,46 @@ arithmetic passed. Native compilation/tests were unavailable (no Rust/Cargo,
 DSR or RCH); no native or experimental success is asserted.
 Focused command:
 `cargo test -p fs-couple --test solid_enthalpy valve::gas_motion::reactive::coupled::thermal`.
+
+
+### Spatial electrocaloric feedback through the original charge/enthalpy solve
+
+`ConductionThermalNetwork::step_dielectric_thermal_candidate` resolves endpoint
+conductivity and affine scalar/orthotropic epsilon(T) inside the existing
+enthalpy residual and retained `PlanarLeakyDielectric`. It reuses the original
+Joule heat router. Each original triangle additionally deposits
+`Qrev=-P-delta(TS)`, where P is its native coefficient work and S is the
+source derivative at fixed D. Reversible heat and Ohmic heat remain separate;
+no numerical residual is reclassified as physical heating.
+
+The final enclosing account is
+`delta_U_field+delta_H_caloric-W_electrode-Q_external`.
+Original complete source identities, claims, nonthermal axes, fixed material
+frames, whole-volume thermal receivers and accepted clocks remain pinned.
+Capacity bounds are summed over ALL triangles assigned to each caloric cell;
+caloric plus field capacity must stay positive throughout the common source
+interval and explicit |D| envelope. Actual accepted and proposed displacement
+magnitudes both satisfy that envelope. The full field/thermal candidate
+publishes together after source, charge, energy, capacity and cancellation gates.
+
+This increment admits fixed geometry and axes, fully solid constant-density
+mapped caloric charts and positive affine nondispersive linear epsilon.
+The separate constant-epsilon trajectory retains its existing phase support.
+Nonlinear polarization, phase-dependent field entropy, dispersion,
+electrostriction, moving interfaces, unconditional entropy/passivity and
+temporal-accuracy claims remain outside this model.
+
+Three focused regression definitions cover independent oriented fixed-D
+thermodynamic derivatives; both slope signs and the zero-slope limit over
+continued spatial charge/heat and driven-electrode trajectories; and the
+weak-leakage conserved-charge limit plus source, capacity, phase, budget,
+late-cancellation and retry refusals. Independent scalar elimination checks
+covered nine slope/orientation/drive combinations over two continued steps.
+The weak-leakage reference endpoint is 300.50484323440674 K, versus
+300.50484323440355 K in the exactly conserved-charge limit, with approximately
+7.95e-12 J of physical leakage heat. These are independent reference
+calculations, not executed native outputs. Final changed files passed Rust
+syntax parsing and bounded independent source/accounting review; native
+compilation/tests were unavailable (no Rust/Cargo, DSR or RCH).
+Focused command:
+`cargo test -p fs-couple --test conduction_phase_enthalpy dielectric::thermal`.

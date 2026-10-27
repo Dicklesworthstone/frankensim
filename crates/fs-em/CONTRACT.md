@@ -730,3 +730,27 @@ anisotropic interiors with scalar force collars. Reconstructed runtime
 sources match the previously parsed source lengths; final reconstructed
 sources/tests received source/API review but could not be parsed, compiled
 or executed after the executor became unavailable.
+
+
+### Retained charge under source-backed epsilon(T)
+
+`PlanarLeakyDielectric::new_with_thermal_dielectric_laws` retains the original
+material derivative laws in the SAME native spatial charge owner. Its step uses
+`(Kepsilon1+dt Ksigma/2)V1=q0-dt Ksigma V0/2`: q0 is the original accepted
+charge, never reconstructed with replacement epsilon. Original conductivity
+recovery supplies midpoint E.J; the original dielectric recovery supplies both
+endpoint D and Helmholtz storage. Displacement current uses actual D1-D0.
+
+Each original triangle reports the exact two-endpoint coefficient work
+`P=-V E0.(epsilon1-epsilon0).E1/2`, closing
+`delta_psi+Q_Joule-W_electrode-P=0`. This signed transfer is separate from
+Ohmic loss. A thermal owner must also close field entropy/internal energy;
+merely applying epsilon(T) and relabeling the storage residual as heat is not
+admitted. The ordinary constant-epsilon construction and phase-refresh gates
+remain intact. Fixed mesh, voltage traces, independent conductivity/dielectric
+frames, original source bundle and selected claims retain their native checks.
+
+Focused coupled regressions cover scalar and oriented source laws, both slope
+signs and zero slope, continued charge/heat, electrode work and the isolated-charge
+limit. Changed native source passed Rust syntax and bounded independent
+accounting/source review; native compilation/test execution was unavailable.

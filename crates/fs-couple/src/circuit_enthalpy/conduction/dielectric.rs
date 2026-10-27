@@ -13,6 +13,9 @@ use fs_em::electrostatic::relaxation::{
     DielectricRelaxationStep, PlanarLeakyDielectric,
 };
 
+/// Source-backed reversible dielectric thermal work on the same charge owner.
+pub mod thermal;
+
 /// One jointly accepted charge/potential history, material state and enthalpy.
 pub struct DielectricEnthalpyCandidate<'t, C = ResolvedConductorState> {
     thermal: DepositionSimulation<'t>,
@@ -53,7 +56,7 @@ impl<C: PlanarConductorMaterial> ThermalDriver for DielectricRelaxationCandidate
             heat_j: step.heat_j,
             numerical_dissipation_j: 0.0,
             stored_change_j: step.stored_after_j - step.stored_before_j,
-            supplied_j: step.supplied_work_j,
+            supplied_j: step.supplied_work_j + step.parameter_work_j,
         }
     }
     fn into_parts(self) -> (Self::Model, Self::Step) {
@@ -66,6 +69,27 @@ fn dielectric(error: DielectricRelaxationError) -> Error {
         DielectricRelaxationError::Cancelled => CircuitEnthalpyError::Cancelled,
         other => CircuitEnthalpyError::Source(ConductionThermalError::Dielectric(other)),
     }
+}
+
+fn deposit_heat<C>(
+    proposal: &DielectricRelaxationCandidate<C>,
+    routes: &[CellId],
+    checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+) -> Result<BTreeMap<CellId, f64>, Error> {
+    let mut powers = BTreeMap::new();
+    if proposal.step().cell_power_w.len() != routes.len() {
+        return Err(invalid("native dielectric heat lost its original cell correspondence"));
+    }
+    for (&power, &cell) in proposal.step().cell_power_w.iter().zip(routes) {
+        checkpoint()?;
+        let previous = *powers.get(&cell).unwrap_or(&0.0);
+        let combined = finite(previous + power)?;
+        if power != 0.0 && combined == previous {
+            return Err(invalid("local dielectric conduction heat disappeared in its receiving cell"));
+        }
+        powers.insert(cell, combined);
+    }
+    Ok(powers)
 }
 
 impl ConductionThermalNetwork<'_> {
@@ -101,6 +125,9 @@ impl ConductionThermalNetwork<'_> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
         super::super::admit_driver_unknowns(thermal, controls, initial_energy_increments_j)?;
+        if field.thermal_dielectric_laws().is_some() {
+            return Err(invalid("temperature-dependent dielectric storage requires step_dielectric_thermal_candidate"));
+        }
         if field.time_s().to_bits() != thermal.time_s().to_bits()
             || self.cells.len() != thermal.cells().len()
         {
@@ -161,24 +188,7 @@ impl ConductionThermalNetwork<'_> {
                 })
             },
             |proposal: &DielectricRelaxationCandidate<C>, _dt, checkpoint| {
-                let mut powers = BTreeMap::new();
-                if proposal.step().cell_power_w.len() != routes.len() {
-                    return Err(invalid(
-                        "native dielectric heat lost its original cell correspondence",
-                    ));
-                }
-                for (&power, &cell) in proposal.step().cell_power_w.iter().zip(&routes) {
-                    checkpoint()?;
-                    let previous = *powers.get(&cell).unwrap_or(&0.0);
-                    let combined = finite(previous + power)?;
-                    if power != 0.0 && combined == previous {
-                        return Err(invalid(
-                            "local dielectric conduction heat disappeared in its receiving cell",
-                        ));
-                    }
-                    powers.insert(cell, combined);
-                }
-                Ok(powers)
+                deposit_heat(proposal, &routes, checkpoint)
             },
             || (*cancel.borrow_mut())(),
         )?;

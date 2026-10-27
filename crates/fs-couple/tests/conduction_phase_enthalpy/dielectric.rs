@@ -2,6 +2,8 @@
 use super::*;
 #[path = "dielectric/anisotropic.rs"]
 mod anisotropic;
+#[path = "dielectric/thermal.rs"]
+mod thermal;
 use fs_em::electrostatic::relaxation::{DielectricRelaxationControls, PlanarLeakyDielectric};
 use fs_material::{
     conductor::ResolvedConductorState,

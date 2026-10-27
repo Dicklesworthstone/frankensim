@@ -2472,3 +2472,32 @@ integrals, subinterval additivity, reversal/domain refusal and a nearly
 isothermal sensible limit. Source syntax parsing and independent scalar
 arithmetic passed; native Rust tests were unavailable in the implementation
 environment. This is not a continuous transport or entropy-production proof.
+
+
+### Source-backed planar dielectric thermodynamics
+
+`ThermalPlanarDielectricMaterial` pins one original complete material bundle,
+selected claims, nonthermal context and explicit scalar or fixed orthotropic
+dielectric axes. Positive globally affine principal epsilon(T) must be supported
+throughout the declared absolute-temperature interval, including interior source
+knots. It reuses the original affine-path, Helmholtz derivative and capacity
+helpers, and re-evaluates the full source bundle at each accepted temperature.
+
+At fixed displacement D and volume, the law supplies
+`psi=V D.epsilon(T)^-1.D/2`,
+`S=-partial_T psi=V E.epsilon_T.E/2`,
+`U=psi+TS` and the nonpositive fixed-D field heat capacity. The field contribution
+is relative to the original zero-field caloric chart, not another heat store.
+A conservative capacity bound applies over the explicit T and |D| envelope.
+A thermal consumer must add ALL field contributions assigned to each caloric
+receiver and keep their combined heat capacity positive.
+
+Source continuity compares original card, exact claims, full query semantics
+and actual values; a requery's stronger pinned selection receipt is not confused
+with a change in physical material. Axes and composition/pressure context stay
+fixed. No dispersion, nonlinear polarization, phase-dependent entropy or
+electrostriction is inferred. The focused source-derivative and coupled tests
+are in the fs-couple dielectric thermal test child. Final source syntax parsing,
+bounded source review and independent scalar arithmetic passed; native Rust
+tests were unavailable, so no executed native or empirical qualification is
+asserted.

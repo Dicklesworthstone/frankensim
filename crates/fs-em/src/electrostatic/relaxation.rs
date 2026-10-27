@@ -1,14 +1,15 @@
 //! Electroquasistatic charge relaxation on the original dielectric/Ohmic mesh.
 //!
-//! `K_epsilon (V1-V0)/dt + K_sigma (V1+V0)/2 = I_external` uses the existing
+//! `(K_epsilon1 V1-K_epsilon0 V0)/dt + K_sigma (V1+V0)/2 = I_external` uses the existing
 //! material FEEC operators and checked scalar-potential solve. Local midpoint
 //! E.J comes from the original Ohmic recovery; endpoint E.D/2 comes from the
 //! original dielectric recovery. No fitted RC element or duplicate cell law is
 //! introduced. Native nodal charges include volume and boundary weak charges.
 //!
-//! The dielectric must be a source-declared constant over its validity domain.
-//! Conductivity may refresh with the same pinned material state; epsilon may
-//! not change without a reversible storage/entropy owner. Geometry and voltage
+//! Ordinary construction requires source-declared constant permittivity. An
+//! explicitly bound thermal derivative law also admits temperature-dependent
+//! storage, with local signed parameter work exposed for its caloric owner.
+//! Conductivity and epsilon retain the same complete material bundle. Geometry and voltage
 //! trace topology remain fixed. Unprescribed faces carry zero TOTAL current,
 //! including displacement current. This is a quasistatic leaky dielectric, not
 //! dielectric dispersion, magnetic induction, breakdown or carrier transport.
@@ -19,7 +20,8 @@ use crate::scalar_potential::{self, PotentialError};
 use fs_feec::weighted::WeightedAssemblyLimits;
 use fs_material::{
     conductor::{ResolvedConductorState, planar::PlanarConductorMaterial},
-    field_storage::planar::PlanarDielectricLaw,
+    field_storage::{planar::PlanarDielectricLaw,
+        thermal::electric::ThermalPlanarDielectricMaterial},
 };
 use fs_solver::{CheckedCgConfig, SolveReport};
 use fs_sparse::Csr;
@@ -110,6 +112,7 @@ fn admit_controls(controls: DielectricRelaxationControls) -> Result<(), Error> {
 #[derive(Clone)]
 pub struct PlanarLeakyDielectric<C = ResolvedConductorState> {
     dielectric: Arc<PlanarElectrostatics>,
+    thermal_laws: Option<Arc<[ThermalPlanarDielectricMaterial]>>,
     conduction: Arc<PlanarConduction<C>>,
     voltage_v: Vec<f64>,
     nodal_charge_c: Vec<f64>,
@@ -117,6 +120,17 @@ pub struct PlanarLeakyDielectric<C = ResolvedConductorState> {
     stored_energy_j: f64,
     voltage_vertices: Vec<usize>,
     time_s: f64,
+}
+
+/// Local Helmholtz storage and explicit coefficient work on one original cell.
+/// P=-volume*E0.(epsilon1-epsilon0).E1/2 is the exact two-endpoint work required
+/// by this native charge equation. It is reversible transfer, never Joule heat.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DielectricEnergyCell {
+    pub triangle: usize,
+    pub displacement_c_m2: [[f64; 2]; 2],
+    pub free_energy_j: [f64; 2],
+    pub parameter_work_j: f64,
 }
 
 /// One physical midpoint interval. Current densities are resolved locally in
@@ -136,6 +150,8 @@ pub struct DielectricRelaxationStep {
     pub stored_after_j: f64,
     pub heat_j: f64,
     pub supplied_work_j: f64,
+    pub parameter_work_j: f64,
+    pub electric_cells: Vec<DielectricEnergyCell>,
     pub energy_residual_j: f64,
     pub linear: Option<SolveReport>,
 }
@@ -159,16 +175,18 @@ impl<C> DielectricRelaxationCandidate<C> {
 fn dielectric<C: PlanarConductorMaterial>(
     conduction: &PlanarConduction<C>,
     laws: Vec<PlanarDielectricLaw>,
+    thermal_laws: Option<&[ThermalPlanarDielectricMaterial]>,
     limits: WeightedAssemblyLimits,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<PlanarElectrostatics, Error> {
-    if laws.len() != conduction.conductors().len() || laws.len() > limits.max_cells {
+    if laws.len() != conduction.conductors().len() || laws.len() > limits.max_cells
+        || thermal_laws.is_some_and(|thermal| thermal.len() != laws.len()) {
         return Err(Error::Invalid("one bounded dielectric source law per original conductor cell required"));
     }
     let mut geometry_frame = conduction.conductors().iter()
         .find_map(|material| material.frame().map(|frame| frame.geometry_frame()));
     let mut materials = Vec::with_capacity(laws.len());
-    for (conductor, law) in conduction.conductors().iter().zip(&laws) {
+    for (triangle, (conductor, law)) in conduction.conductors().iter().zip(&laws).enumerate() {
         poll(cancelled)?;
         if let Some(frame) = law.frame() {
             if geometry_frame.is_some_and(|id| id != frame.geometry_frame()) {
@@ -179,7 +197,14 @@ fn dielectric<C: PlanarConductorMaterial>(
             geometry_frame = Some(frame.geometry_frame());
         }
         let source = conductor.material();
-        law.resolve_constant(source).map_err(ElectrostaticError::Material)?;
+        if let Some(thermal) = thermal_laws {
+            if thermal[triangle].law() != *law {
+                return Err(Error::Invalid("dielectric derivative law changed original material axes"));
+            }
+            thermal[triangle].at_material(source).map_err(ElectrostaticError::Material)?;
+        } else {
+            law.resolve_constant(source).map_err(ElectrostaticError::Material)?;
+        }
         materials.push(source.clone());
     }
     Ok(PlanarElectrostatics::new_with_laws(
@@ -336,6 +361,47 @@ impl<C: PlanarConductorMaterial> PlanarLeakyDielectric<C> {
         controls: DielectricRelaxationControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, Error> {
+        Self::new_with_storage(conduction, laws, None, voltage_v, voltage_vertices,
+            time_s, limits, controls, cancelled)
+    }
+
+    /// Initialize the same charge owner with source-backed epsilon(T) and its
+    /// exact thermal derivatives. Every triangle retains its original bundle
+    /// and fixed axes. Subsequent native steps expose parameter work; a thermal
+    /// consumer must additionally close field entropy and caloric internal
+    /// energy, including positive combined capacity over its field envelope.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_thermal_dielectric_laws(
+        conduction: PlanarConduction<C>,
+        thermal_laws: Vec<ThermalPlanarDielectricMaterial>,
+        voltage_v: Vec<f64>,
+        voltage_vertices: &[usize],
+        time_s: f64,
+        limits: WeightedAssemblyLimits,
+        controls: DielectricRelaxationControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        poll(cancelled)?;
+        if thermal_laws.len() > limits.max_cells {
+            return Err(Error::Invalid("dielectric thermal laws exceed assembly budget"));
+        }
+        let laws = thermal_laws.iter().map(ThermalPlanarDielectricMaterial::law).collect();
+        Self::new_with_storage(conduction, laws, Some(Arc::from(thermal_laws)), voltage_v,
+            voltage_vertices, time_s, limits, controls, cancelled)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_storage(
+        conduction: PlanarConduction<C>,
+        laws: Vec<PlanarDielectricLaw>,
+        thermal_laws: Option<Arc<[ThermalPlanarDielectricMaterial]>>,
+        voltage_v: Vec<f64>,
+        voltage_vertices: &[usize],
+        time_s: f64,
+        limits: WeightedAssemblyLimits,
+        controls: DielectricRelaxationControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
         poll(cancelled)?;
         admit_controls(controls)?;
         if !time_s.is_finite()
@@ -355,7 +421,7 @@ impl<C: PlanarConductorMaterial> PlanarLeakyDielectric<C> {
             .map(|&v| (v, voltage_v[v]))
             .collect();
         scalar_potential::prescribed_boundary(conduction.mesh(), &boundary, cancelled)?;
-        let dielectric = dielectric(&conduction, laws, limits, cancelled)?;
+        let dielectric = dielectric(&conduction, laws, thermal_laws.as_deref(), limits, cancelled)?;
         let cells = dielectric.cell_response(&voltage_v, cancelled)?;
         let nodal_charge_c = apply(&dielectric.stiffness, &voltage_v, cancelled)?;
         check_storage(&voltage_v, &nodal_charge_c, cells.energy_j, controls)?;
@@ -364,6 +430,7 @@ impl<C: PlanarConductorMaterial> PlanarLeakyDielectric<C> {
         poll(cancelled)?;
         Ok(Self {
             dielectric: Arc::new(dielectric),
+            thermal_laws,
             conduction: Arc::new(conduction),
             voltage_v,
             nodal_charge_c,
@@ -378,6 +445,15 @@ impl<C: PlanarConductorMaterial> PlanarLeakyDielectric<C> {
     }
     pub fn dielectric(&self) -> &PlanarElectrostatics {
         &self.dielectric
+    }
+    pub fn thermal_dielectric_laws(&self) -> Option<&[ThermalPlanarDielectricMaterial]> {
+        self.thermal_laws.as_deref()
+    }
+    /// Actual local D from the original native field recovery, in mesh axes.
+    pub fn displacement_c_m2(
+        &self, cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<[f64; 2]>, Error> {
+        Ok(self.dielectric.cell_response(&self.voltage_v, cancelled)?.displacement_c_m2)
     }
     pub fn voltage_v(&self) -> &[f64] {
         &self.voltage_v
@@ -427,9 +503,10 @@ impl<C: PlanarConductorMaterial> PlanarLeakyDielectric<C> {
             cancelled,
         )?;
         let dielectric = dielectric(
-            &conduction, self.dielectric.permittivity_laws().to_vec(), limits, cancelled,
+            &conduction, self.dielectric.permittivity_laws().to_vec(),
+            self.thermal_laws.as_deref(), limits, cancelled,
         )?;
-        if dielectric.permittivity_coefficients().iter()
+        if self.thermal_laws.is_none() && dielectric.permittivity_coefficients().iter()
             .zip(self.dielectric.permittivity_coefficients())
             .any(|(a, b)| a.matrix_f_m().into_iter().flatten()
                 .zip(b.matrix_f_m().into_iter().flatten())
@@ -480,8 +557,33 @@ impl<C: PlanarConductorMaterial> PlanarLeakyDielectric<C> {
             .map(|(a, b)| finite(0.5 * a + 0.5 * b))
             .collect::<Result<Vec<_>, _>>()?;
         let losses = conduction.cell_response(&midpoint_voltage_v, cancelled)?;
-        let previous = dielectric.cell_response(&self.voltage_v, cancelled)?;
+        let previous = self.dielectric.cell_response(&self.voltage_v, cancelled)?;
         let endpoint = dielectric.cell_response(&voltage_v, cancelled)?;
+        let mut electric_cells = Vec::with_capacity(previous.cell_energy_j.len());
+        let mut parameter_work_j = 0.0;
+        for triangle in 0..previous.cell_energy_j.len() {
+            poll(cancelled)?;
+            let before = self.dielectric.permittivity_coefficients()[triangle].matrix_f_m();
+            let after = dielectric.permittivity_coefficients()[triangle].matrix_f_m();
+            let e0 = previous.electric_field_v_m[triangle];
+            let e1 = endpoint.electric_field_v_m[triangle];
+            let mut delta_d = [0.0; 2];
+            for i in 0..2 {
+                for j in 0..2 {
+                    delta_d[i] = finite(finite(after[i][j] - before[i][j])?.mul_add(e1[j], delta_d[i]))?;
+                }
+            }
+            let volume = conduction.mesh().face_measure(triangle)
+                .ok_or(Error::Invalid("dielectric cell lacks its original volume"))?;
+            let work = finite(-0.5 * volume * finite(e0[0].mul_add(delta_d[0], e0[1] * delta_d[1]))?)?;
+            parameter_work_j = finite(parameter_work_j + work)?;
+            electric_cells.push(DielectricEnergyCell {
+                triangle,
+                displacement_c_m2: [previous.displacement_c_m2[triangle], endpoint.displacement_c_m2[triangle]],
+                free_energy_j: [previous.cell_energy_j[triangle], endpoint.cell_energy_j[triangle]],
+                parameter_work_j: work,
+            });
+        }
         let nodal_charge_c = apply(&dielectric.stiffness, &voltage_v, cancelled)?;
         check_storage(&voltage_v, &nodal_charge_c, endpoint.energy_j, controls)?;
         let current = apply(
@@ -515,7 +617,7 @@ impl<C: PlanarConductorMaterial> PlanarLeakyDielectric<C> {
         let heat_j = finite(dt * losses.power_w)?;
         let supplied_work_j = finite(dt * source_power)?;
         let energy_residual_j =
-            finite(endpoint.energy_j - self.stored_energy_j + heat_j - supplied_work_j)?;
+            finite(endpoint.energy_j - self.stored_energy_j + heat_j - supplied_work_j - parameter_work_j)?;
         if (losses.power_w != 0.0 && heat_j == 0.0)
             || (source_power != 0.0 && supplied_work_j == 0.0)
             || maximum_free_current_residual_a > controls.current_tolerance_a
@@ -540,6 +642,8 @@ impl<C: PlanarConductorMaterial> PlanarLeakyDielectric<C> {
             stored_after_j: endpoint.energy_j,
             heat_j,
             supplied_work_j,
+            parameter_work_j,
+            electric_cells,
             energy_residual_j,
             linear,
         };
@@ -547,6 +651,7 @@ impl<C: PlanarConductorMaterial> PlanarLeakyDielectric<C> {
         Ok(DielectricRelaxationCandidate {
             field: Self {
                 dielectric: Arc::new(dielectric),
+                thermal_laws: self.thermal_laws.clone(),
                 conduction: Arc::new(conduction),
                 voltage_v,
                 nodal_charge_c,

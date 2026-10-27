@@ -33,6 +33,8 @@ use crate::state_point::{
 /// Spatial material field thermodynamics, using the same affine source admission
 /// and potential derivatives as lumped C(T)/L(T).
 pub mod magnetic;
+/// Spatial scalar or oriented dielectric thermodynamics at fixed displacement.
+pub mod electric;
 
 /// A native material storage element. Geometry and source receipts are retained;
 /// this is not another circuit state, graph branch or material evaluator.
