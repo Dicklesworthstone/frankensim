@@ -4,6 +4,7 @@ mod thermal;
 mod network;
 mod implicit;
 mod arrhenius;
+mod collider;
 
 use super::*;
 use crate::cavity_phs::piston::material::MaterialGasPiston;

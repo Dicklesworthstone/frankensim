@@ -143,7 +143,7 @@ behavior.
   progress rate, per-direction range statuses, and the complete nested
   thermodynamic receipt. The type records a caller's law declaration; it does
   not infer or certify elementary-reaction kinetics.
-  Operation-tree version 2 admits exact absence: an absent participant gives
+  Operation-tree version 3 admits exact absence: an absent participant gives
   its direction a `ZeroActivity` status, exact zero product/rate and a retained
   negative-infinite log. This is distinct from underflow of a positive product,
   which still supplies no direct rate. Products need no artificial trace seed.
@@ -312,7 +312,7 @@ it does not itself select kinetic orders.
 
 After the caller explicitly selects stoichiometric coefficients as kinetic
 orders and supplies all nonnegative dimensionless activities `a_i = p_i / p0`,
-operation-tree version 2 preserves the positive-state operation order:
+operation-tree version 3 preserves the positive-state operation order:
 
 ```text
 ell_i       = deterministic_ln(a_i)
@@ -699,3 +699,29 @@ Those capabilities require separate typed laws, contracts, tests, budgets, and
 proof-bearing beads. These initial evaluators must not be used as evidence that
 the broader `fs-thermochem` roadmap is complete.
 
+
+
+
+## Explicit common kinetic multiplier
+
+Mass-action operation-tree version 3 adds
+`DeclaredStoichiometricMassActionV1::evaluate_with_kinetic_multiplier`.
+The caller supplies one finite nonnegative dimensionless factor that applies
+to both directional rates after the original thermodynamic evaluation.
+The original `evaluate` path is the unit-factor case and preserves its
+arithmetic; each receipt now retains the exact multiplier bits.
+
+A physical zero factor produces `ZeroKineticMultiplier` and zero progress
+without replacing real activities, activity products, term receipts or the
+thermodynamic reverse closure. A direction already stopped by `ZeroActivity`
+retains that more specific status. A positive-factor product that underflows
+or overflows has no direct rate and retains an explicit range status. Original
+log-only base rates remain unavailable; this extension does not rescale them
+back into range. Invalid coefficients or source domains still refuse even
+when the multiplier is zero.
+
+The thermochemistry owner does not infer collider concentrations, efficiencies
+or falloff models. The material gas coupling supplies those laws using its
+existing gas inventory and source resolver. Focused native regressions check
+unit-factor identity, common forward/reverse scaling, real zero with retained
+activities, range loss and invalid-factor/source refusal.

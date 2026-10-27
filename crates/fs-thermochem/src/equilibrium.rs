@@ -25,8 +25,10 @@ pub const REACTION_EQUILIBRIUM_EVALUATOR_VERSION_V1: u32 = 1;
 /// Version of the reverse-progress-rate consistency operation tree.
 pub const REVERSE_RATE_CLOSURE_EVALUATOR_VERSION_V1: u32 = 1;
 /// Version of the declared stoichiometric mass-action operation tree.
-/// Version 2 admits exact absence separately from exponential underflow.
-pub const STOICHIOMETRIC_MASS_ACTION_EVALUATOR_VERSION_V1: u32 = 2;
+/// Version 3 retains an explicit nonnegative common kinetic multiplier.
+/// Exact activity absence and a physical zero multiplier remain distinct
+/// from exponential/product underflow.
+pub const STOICHIOMETRIC_MASS_ACTION_EVALUATOR_VERSION_V1: u32 = 3;
 /// Maximum species rows retained or scanned by one reaction model.
 pub const MAX_REACTION_SPECIES_V1: usize = 128;
 /// Maximum reaction columns whose matrix identity may be bound by one model.
@@ -1460,12 +1462,20 @@ pub enum MassActionDirectionalRateStatusV1 {
     /// Direct activity product exists, but multiplication by the scale
     /// underflowed.
     ProgressRateUnderflow,
+    /// An explicitly zero common kinetic multiplier stops this direction.
+    /// Actual activities and their products remain unchanged.
+    ZeroKineticMultiplier,
 }
 
 /// Construction or evaluation refusal for declared stoichiometric
 /// mass-action progress.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StoichiometricMassActionErrorV1 {
+    /// A common forward/reverse kinetic multiplier was negative or non-finite.
+    InvalidKineticMultiplier {
+        /// Exact rejected IEEE-754 bits.
+        bits: u64,
+    },
     /// One activity was negative or non-finite.
     InvalidActivity {
         /// Affected species.
@@ -1530,6 +1540,10 @@ pub enum StoichiometricMassActionErrorV1 {
 impl fmt::Display for StoichiometricMassActionErrorV1 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidKineticMultiplier { bits } => write!(
+                formatter,
+                "mass-action kinetic multiplier must be nonnegative and finite (bits {bits:#018x})"
+            ),
             Self::InvalidActivity { species, bits } => write!(
                 formatter,
                 "ideal-gas activity for {species} must be nonnegative and finite (bits {bits:#018x})"
@@ -1934,6 +1948,7 @@ impl DeclaredStoichiometricMassActionV1 {
             fs_math_version: fs_math::VERSION,
             fs_qty_version: fs_qty::VERSION,
             kinetic_order_convention: self.kinetic_order_convention,
+            kinetic_multiplier_bits: 1.0_f64.to_bits(),
             reverse_rate_receipt: reverse_rate.receipt().clone(),
             term_receipts,
             log_forward_activity_product_bits: log_forward_activity_product.to_bits(),
@@ -1965,6 +1980,92 @@ impl DeclaredStoichiometricMassActionV1 {
             reverse_status,
             receipt,
         })
+    }
+
+    /// Apply one explicit nonnegative factor to BOTH kinetic directions.
+    ///
+    /// The original activities, thermodynamic affinity and reverse equilibrium
+    /// closure remain unchanged. Examples include a normalized third-body
+    /// concentration or a declared falloff factor. This owner does not infer
+    /// that physical law or supply collider data.
+    ///
+    /// Unit multiplier preserves the original arithmetic. An exactly zero
+    /// factor produces exact zero rates without inventing absent reactants.
+    /// Positive-factor underflow/overflow remains a missing direct rate with
+    /// its explicit range status, never a physical zero. Existing unscaled
+    /// direct-rate range limitations remain; this method does not rescue a
+    /// log-only base rate by rescaling it.
+    pub fn evaluate_with_kinetic_multiplier(
+        &self,
+        temperature: Temperature,
+        activities: Vec<IdealGasSpeciesActivityV1>,
+        multiplier: Dimensionless,
+    ) -> Result<DeclaredStoichiometricMassActionEvaluationV1, StoichiometricMassActionErrorV1> {
+        let factor = multiplier.value();
+        if !factor.is_finite() || factor < 0.0 {
+            return Err(StoichiometricMassActionErrorV1::InvalidKineticMultiplier {
+                bits: factor.to_bits(),
+            });
+        }
+        let mut evaluated = self.evaluate(temperature, activities)?;
+        if factor == 1.0 {
+            return Ok(evaluated);
+        }
+        let (forward_status, forward) = multiply_mass_action_direction(
+            evaluated.forward_status, evaluated.forward_progress_rate, factor,
+        );
+        let (reverse_status, reverse) = multiply_mass_action_direction(
+            evaluated.reverse_status, evaluated.reverse_progress_rate, factor,
+        );
+        let net = match (forward, reverse) {
+            (Some(forward), Some(reverse)) => {
+                let value = forward.value() - reverse.value();
+                if !value.is_finite() {
+                    return Err(StoichiometricMassActionErrorV1::UnrepresentableArithmeticValue {
+                        species: None, direction: None,
+                        value: MassActionArithmeticValueV1::NetProgressRate, bits: value.to_bits(),
+                    });
+                }
+                Some(NetReactionProgressRateV1::new(value))
+            }
+            _ => None,
+        };
+        evaluated.forward_status = forward_status;
+        evaluated.reverse_status = reverse_status;
+        evaluated.forward_progress_rate = forward;
+        evaluated.reverse_progress_rate = reverse;
+        evaluated.net_progress_rate = net;
+        evaluated.receipt.kinetic_multiplier_bits = factor.to_bits();
+        evaluated.receipt.forward_status = forward_status;
+        evaluated.receipt.reverse_status = reverse_status;
+        evaluated.receipt.forward_progress_rate_bits = forward.map(|rate| rate.value().to_bits());
+        evaluated.receipt.reverse_progress_rate_bits = reverse.map(|rate| rate.value().to_bits());
+        evaluated.receipt.net_progress_rate_bits = net.map(|rate| rate.value().to_bits());
+        Ok(evaluated)
+    }
+}
+
+fn multiply_mass_action_direction(
+    status: MassActionDirectionalRateStatusV1,
+    rate: Option<DirectionalReactionProgressRateV1>,
+    multiplier: f64,
+) -> (MassActionDirectionalRateStatusV1, Option<DirectionalReactionProgressRateV1>) {
+    if status == MassActionDirectionalRateStatusV1::ZeroActivity {
+        return (status, rate);
+    }
+    if multiplier == 0.0 {
+        return (MassActionDirectionalRateStatusV1::ZeroKineticMultiplier,
+            Some(DirectionalReactionProgressRateV1::new(0.0)));
+    }
+    let Some(rate) = rate else { return (status, None); };
+    let value = rate.value() * multiplier;
+    if value.is_infinite() {
+        (MassActionDirectionalRateStatusV1::ProgressRateOverflow, None)
+    } else if value == 0.0 {
+        (MassActionDirectionalRateStatusV1::ProgressRateUnderflow, None)
+    } else {
+        (MassActionDirectionalRateStatusV1::FinitePositive,
+            Some(DirectionalReactionProgressRateV1::new(value)))
     }
 }
 
@@ -2109,6 +2210,7 @@ pub struct DeclaredStoichiometricMassActionReceiptV1 {
     fs_math_version: &'static str,
     fs_qty_version: &'static str,
     kinetic_order_convention: MassActionKineticOrderConventionV1,
+    kinetic_multiplier_bits: u64,
     reverse_rate_receipt: ThermodynamicReverseRateReceiptV1,
     term_receipts: Vec<StoichiometricMassActionTermReceiptV1>,
     log_forward_activity_product_bits: u64,
@@ -2123,6 +2225,11 @@ pub struct DeclaredStoichiometricMassActionReceiptV1 {
 }
 
 impl DeclaredStoichiometricMassActionReceiptV1 {
+    /// Exact declared common forward/reverse kinetic multiplier bits.
+    #[must_use]
+    pub const fn kinetic_multiplier_bits(&self) -> u64 {
+        self.kinetic_multiplier_bits
+    }
     /// Mass-action operation-tree version.
     #[must_use]
     pub const fn evaluator_version(&self) -> u32 {
@@ -2231,6 +2338,11 @@ pub struct DeclaredStoichiometricMassActionEvaluationV1 {
 }
 
 impl DeclaredStoichiometricMassActionEvaluationV1 {
+    /// Explicit dimensionless common kinetic multiplier; one on the original path.
+    #[must_use]
+    pub const fn kinetic_multiplier(&self) -> Dimensionless {
+        Dimensionless::new(f64::from_bits(self.receipt.kinetic_multiplier_bits))
+    }
     /// Nested equilibrium and reverse-scale evaluation.
     #[must_use]
     pub const fn reverse_rate(&self) -> &ThermodynamicReverseRateEvaluationV1 {
@@ -3300,6 +3412,71 @@ mod tests {
         );
         assert!(reverse_scale_unavailable.reverse_progress_rate().is_none());
         assert!(reverse_scale_unavailable.net_progress_rate().is_none());
+    }
+
+    #[test]
+    fn g0_common_kinetic_multiplier_keeps_actual_activities_and_equilibrium() {
+        let law = isomer_mass_action(1, 7.0);
+        let activities = vec![activity("A", 2.0), activity("B", 0.5)];
+        let base = law.evaluate(Temperature::new(500.0), activities.clone()).unwrap();
+        assert_eq!(base, law.evaluate_with_kinetic_multiplier(
+            Temperature::new(500.0), activities.clone(), Dimensionless::new(1.0),
+        ).unwrap());
+        let scaled = law.evaluate_with_kinetic_multiplier(
+            Temperature::new(500.0), activities.clone(), Dimensionless::new(2.5),
+        ).unwrap();
+        assert_eq!(scaled.reverse_rate(), base.reverse_rate());
+        assert_eq!(scaled.receipt().terms(), base.receipt().terms());
+        assert_eq!(scaled.forward_activity_product(), base.forward_activity_product());
+        assert_eq!(scaled.reverse_activity_product(), base.reverse_activity_product());
+        assert_eq!(scaled.kinetic_multiplier().value(), 2.5);
+        assert_eq!(scaled.forward_progress_rate().unwrap().value(),
+            2.5 * base.forward_progress_rate().unwrap().value());
+        assert_eq!(scaled.reverse_progress_rate().unwrap().value(),
+            2.5 * base.reverse_progress_rate().unwrap().value());
+        assert_eq!(scaled.net_progress_rate().unwrap().value(),
+            scaled.forward_progress_rate().unwrap().value() - scaled.reverse_progress_rate().unwrap().value());
+
+        let stopped = law.evaluate_with_kinetic_multiplier(
+            Temperature::new(500.0), activities, Dimensionless::new(0.0),
+        ).unwrap();
+        assert_eq!(stopped.forward_status(), MassActionDirectionalRateStatusV1::ZeroKineticMultiplier);
+        assert_eq!(stopped.reverse_status(), MassActionDirectionalRateStatusV1::ZeroKineticMultiplier);
+        assert_eq!(stopped.forward_activity_product(), base.forward_activity_product());
+        assert_eq!(stopped.reverse_activity_product(), base.reverse_activity_product());
+        assert_eq!(stopped.receipt().terms(), base.receipt().terms());
+        assert_eq!(stopped.reverse_rate(), base.reverse_rate());
+        assert_eq!(stopped.forward_progress_rate().unwrap().value(), 0.0);
+        assert_eq!(stopped.reverse_progress_rate().unwrap().value(), 0.0);
+        assert_eq!(stopped.net_progress_rate().unwrap().value(), 0.0);
+        assert_eq!(stopped.receipt().kinetic_multiplier_bits(), 0.0_f64.to_bits());
+    }
+
+    #[test]
+    fn g3_positive_multiplier_range_loss_is_never_physical_extinction() {
+        let law = isomer_mass_action(1, 1e-300);
+        let activities = vec![activity("A", 1.0), activity("B", 1.0)];
+        let underflow = law.evaluate_with_kinetic_multiplier(
+            Temperature::new(500.0), activities.clone(), Dimensionless::new(1e-100),
+        ).unwrap();
+        assert_eq!(underflow.forward_status(), MassActionDirectionalRateStatusV1::ProgressRateUnderflow);
+        assert_eq!(underflow.reverse_status(), MassActionDirectionalRateStatusV1::ProgressRateUnderflow);
+        assert!(underflow.forward_progress_rate().is_none());
+        assert!(underflow.net_progress_rate().is_none());
+        assert_eq!(underflow.kinetic_multiplier().value(), 1e-100);
+        for factor in [-1.0, f64::INFINITY, f64::NAN] {
+            assert!(matches!(law.evaluate_with_kinetic_multiplier(
+                Temperature::new(500.0), activities.clone(), Dimensionless::new(factor),
+            ), Err(StoichiometricMassActionErrorV1::InvalidKineticMultiplier { .. })));
+        }
+        assert!(law.evaluate_with_kinetic_multiplier(
+            Temperature::new(1e6), activities.clone(), Dimensionless::new(0.0),
+        ).is_err(), "zero multiplier must not hide invalid thermochemical sources");
+        let overflow = isomer_mass_action(1, 2.0).evaluate_with_kinetic_multiplier(
+            Temperature::new(500.0), activities, Dimensionless::new(f64::MAX),
+        ).unwrap();
+        assert_eq!(overflow.forward_status(), MassActionDirectionalRateStatusV1::ProgressRateOverflow);
+        assert!(overflow.net_progress_rate().is_none());
     }
 }
 

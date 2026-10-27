@@ -57,28 +57,38 @@ pub(super) fn pin_coefficients(
     selection: &MaterialPropertySelection,
     basis: ArrheniusRateBasis,
 ) -> Result<MaterialPropertySelection, GasReactionError> {
+    pin_requirements(material, selection, &requirements(basis)?)
+}
+
+// One pinning policy for all kinetic source properties. Collider laws may
+// extend the required set, but cannot select fresh claims during evolution.
+pub(super) fn pin_requirements(
+    material: &MaterialCard,
+    selection: &MaterialPropertySelection,
+    required: &[ScalarPropertyRequirement],
+) -> Result<MaterialPropertySelection, GasReactionError> {
     match selection {
         // Full keys, coverage, source membership and point validity remain the
         // original shared resolver's responsibility on every evaluation.
         MaterialPropertySelection::PinnedByProperty(_) => Ok(selection.clone()),
         MaterialPropertySelection::PreferObservationBacked => Err(invalid(
-            "Arrhenius coefficients require explicit claim pins after observation selection",
+            "kinetic source properties require explicit claim pins after observation selection",
         )),
         MaterialPropertySelection::SingleClaimOnly => {
-            let mut pins = Vec::with_capacity(5);
-            for requirement in requirements(basis)? {
+            let mut pins = Vec::with_capacity(required.len());
+            for requirement in required {
                 let mut claims = material
                     .claims()
                     .claims_ordered()
                     .filter(|(_, claim)| claim.key.name() == requirement.name());
                 let Some((id, _)) = claims.next() else {
                     return Err(invalid(
-                        "Arrhenius material is missing a required coefficient claim",
+                        "kinetic material is missing a required property claim",
                     ));
                 };
                 if claims.next().is_some() {
                     return Err(invalid(
-                        "Arrhenius coefficient has multiple claims; explicitly pin one before evolution",
+                        "kinetic property has multiple claims; explicitly pin one before evolution",
                     ));
                 }
                 pins.push((requirement.name().to_owned(), id));

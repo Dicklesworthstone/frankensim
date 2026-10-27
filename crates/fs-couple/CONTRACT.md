@@ -6768,7 +6768,7 @@ temperature feedback, continuation, material substitution and late rollback.
 
 The new binding pins coefficient claim identities before evolution. `SingleClaimOnly` requires globally unique claims for every required coefficient and becomes an explicit pin set; ambiguous/observation-preferred selection requires caller-supplied pins. Source validity crossing cannot silently choose another claim, including within implicit endpoint iterations. The legacy directly resolved scalar-rate path is unchanged. Existing explicit, scalar/coupled implicit, subcycled, piston, species-flow and electrical/thermal consumers use the same channel evaluator. Formation energy is never credited again as heat; source/range/cancellation refusal publishes no proposed physical state. Positive rates that underflow/overflow refuse rather than become zero or infinity.
 
-Focused tests in `cavity_phs::piston::reactive::tests::arrhenius` cover independent dimensional rate scaling, first-/second-order concentration conversion and reverse equilibrium, normalization invariance, actual material-piston motion and energy, implicit endpoint temperature feedback, and bad-unit/range/source/cancellation rollback including disjoint source domains. Coefficients are synthetic. This slice does not supply a validated fuel mechanism, third-body/falloff/surface chemistry, flame/shock model, or measured engine/ignition prediction. Program anchor: `frankensim-ext-gas-chemistry-ladder-paqh`, remains open.
+Focused tests in `cavity_phs::piston::reactive::tests::arrhenius` cover independent dimensional rate scaling, first-/second-order concentration conversion and reverse equilibrium, normalization invariance, actual material-piston motion and energy, implicit endpoint temperature feedback, and bad-unit/range/source/cancellation rollback including disjoint source domains. Coefficients are synthetic. The Arrhenius coefficient binding alone does not supply collider/falloff or surface chemistry; the optional material collider extension below supplies the bounded third-body/Lindemann law. Neither slice supplies a validated fuel mechanism, flame/shock model, or measured engine/ignition prediction. Program anchor: `frankensim-ext-gas-chemistry-ladder-paqh`, remains open.
 
 ### Spatial conductor, transient circuit storage, and finite heat
 
@@ -6808,3 +6808,43 @@ authored and source-reviewed; Rust parsing/format checks passed. They were not
 executed in the implementation environment because the workspace disk was full
 and DSR/RCH were unavailable. No runtime conformance or empirical calibration
 claim follows from their presence.
+
+
+
+## Material collider density and Lindemann falloff
+
+`MaterialRateScale::with_colliders` binds a declared third-body or Lindemann law
+to an existing reaction channel. Every species in the original source catalog,
+including inert gas, has an explicit reaction-card efficiency property; multiple
+species may intentionally share one property. Claim identities for the base
+kinetic law and all added coefficients are pinned before evolution. Each
+chemical stage resolves the complete coefficient set at the actual parcel
+condition point and forms `q = sum(epsilon_i n_i)/(V c0)` from the live gas
+inventory. Neither a substitute pressure nor a second species store is accepted.
+
+Third-body kinetics apply `q` to both directional rates. Lindemann uses the base
+activity scale as `k_inf`, the explicitly normalized material property
+`reaction_low_pressure_rate_scale` as `k0`, and the common factor
+`Pr/(1+Pr)`, with `Pr = k0 q/k_inf`. Both scales use mol/(m3 s) because the
+pressure activities and `q` are dimensionless; imported concentration-based
+low-pressure constants require the explicit activity and `c0` conversion.
+The existing `fs-thermochem` evaluator retains real species activities, reverse
+equilibrium and the common multiplier. Exactly zero effective colliders give
+zero rates; a positive rate lost to numerical range refuses coupled publication.
+
+The shared channel evaluator carries this law into existing explicit,
+implicit, mechanism, subcycled, piston, flow and electrical/thermal reaction
+paths. Formation energy, mass, element conservation and accepted-state entropy
+remain owned by the original conservative gas update. No extra combustion heat
+is injected. Focused synthetic regressions cover inert-pressure changes at fixed
+reactant partial pressure, independent low/high-pressure limits and reverse
+balance, absent colliders, data-only efficiency changes through conservative
+piston motion and acoustic state, implicit endpoint temperature/composition,
+source-domain refusal and cancellation.
+
+This is bounded ideal-gas third-body/Lindemann chemistry. It does not provide
+Troe/SRI broadening, chemically activated reactions, empirical fuel mechanisms,
+flames, shock/ignition prediction or validated engine fidelity. Formula
+conventions follow the [Cantera reaction-rate reference](https://www.cantera.org/stable/reference/kinetics/reaction-rates.html)
+and [falloff reference](https://www.cantera.org/stable/reference/kinetics/rate-constants.html).
+Program anchor `frankensim-ext-gas-chemistry-ladder-paqh` remains open.

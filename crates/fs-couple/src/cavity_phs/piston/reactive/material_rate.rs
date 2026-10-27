@@ -8,6 +8,8 @@
 
 /// Explicit modified Arrhenius source data and concentration/activity conversion.
 pub mod arrhenius;
+/// Declared third-body and Lindemann collision laws using the live mixture.
+pub mod collider;
 
 use super::{ClosedGasParcel, GasReaction, GasReactionError, Temperature, invalid, poll, positive};
 use fs_matdb::MaterialCard;
@@ -15,7 +17,7 @@ use fs_material::state_point::{
     MaterialPropertySelection, MaterialStatePointError, ResolvedMaterialStatePoint,
     ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point,
 };
-use fs_qty::{Dims, Pressure};
+use fs_qty::{Dimensionless, Dims, Pressure};
 use fs_thermochem::equilibrium::{
     DeclaredStoichiometricMassActionEvaluationV1, DeclaredStoichiometricMassActionV1,
     IdealGasSpeciesActivityV1, ReactionProgressRateQuantityV1, ReactionProgressRateScaleV1,
@@ -38,6 +40,7 @@ pub struct MaterialRateScale {
     selection: MaterialPropertySelection,
     reference_pressure: Pressure,
     arrhenius_basis: Option<arrhenius::ArrheniusRateBasis>,
+    collider: Option<collider::MaterialColliderLaw>,
 }
 impl MaterialRateScale {
     /// Bind source data expressed for dimensionless p_i/p0 activities. A
@@ -59,6 +62,7 @@ impl MaterialRateScale {
             selection,
             reference_pressure,
             arrhenius_basis: None,
+            collider: None,
         })
     }
     /// Bind a modified Arrhenius law authored in the explicitly selected basis.
@@ -102,6 +106,58 @@ impl MaterialRateScale {
     pub const fn arrhenius_basis(&self) -> Option<arrhenius::ArrheniusRateBasis> {
         self.arrhenius_basis
     }
+
+    /// Attach a declared bath-collision law to this reaction-rate source.
+    ///
+    /// The same material card supplies the additional concentration, efficiency
+    /// and (for Lindemann falloff) low-pressure scale properties. The selection
+    /// selects ONLY those additional properties; all existing base-rate claim
+    /// pins are preserved. Previously unpinned scalar sources become globally
+    /// unique explicit pins before this evolving collision path is admitted.
+    /// Efficiencies may share one property, but no property may serve two
+    /// dimensionally/physically distinct roles.
+    pub fn with_colliders(
+        mut self,
+        law: collider::MaterialColliderLaw,
+        selection: MaterialPropertySelection,
+    ) -> Result<Self, GasReactionError> {
+        if self.collider.is_some() {
+            return Err(invalid("a kinetic source already has a collider law"));
+        }
+        let base = self.base_requirements()?;
+        let extra = law.requirements()?;
+        if base.len() + extra.len() > fs_material::state_point::MAX_MATERIAL_STATE_PROPERTIES
+            || base.iter().any(|a| extra.iter().any(|b| a.name() == b.name()))
+        {
+            return Err(invalid("collider and base-rate properties must be distinct and bounded"));
+        }
+        let MaterialPropertySelection::PinnedByProperty(mut pins) =
+            arrhenius::pin_requirements(&self.material, &self.selection, &base)?
+        else { return Err(invalid("base kinetic source was not pinned")); };
+        let MaterialPropertySelection::PinnedByProperty(extra_pins) =
+            arrhenius::pin_requirements(&self.material, &selection, &extra)?
+        else { return Err(invalid("collider source was not pinned")); };
+        pins.extend(extra_pins);
+        self.selection = MaterialPropertySelection::PinnedByProperty(pins);
+        self.collider = Some(law);
+        Ok(self)
+    }
+
+    /// Original immutable mixture/collider declaration, when selected.
+    #[must_use]
+    pub const fn collider(&self) -> Option<&collider::MaterialColliderLaw> {
+        self.collider.as_ref()
+    }
+
+    fn base_requirements(&self) -> Result<Vec<ScalarPropertyRequirement>, GasReactionError> {
+        match self.arrhenius_basis {
+            Some(basis) => arrhenius::requirements(basis),
+            None => Ok(vec![ScalarPropertyRequirement::try_new(
+                ACTIVITY_RATE_SCALE_PROPERTY, ACTIVITY_RATE_SCALE_DIMS,
+                ScalarAdmissibility::StrictlyPositive,
+            )?]),
+        }
+    }
 }
 impl From<MaterialStatePointError> for GasReactionError {
     fn from(error: MaterialStatePointError) -> Self {
@@ -140,6 +196,9 @@ impl GasReaction {
                 "material kinetic scale and reaction use different activity reference pressures",
             ));
         }
+        if let Some(collider) = &source.collider {
+            collider.validate_catalog(&self.catalog)?;
+        }
         self.rate_material = Some(source);
         Ok(self)
     }
@@ -169,14 +228,10 @@ pub(super) fn evaluate_rate_for(
         return Ok((kinetics.evaluate(temperature, activities)?, None));
     };
     poll(cancelled)?;
-    let required = match source.arrhenius_basis {
-        Some(basis) => arrhenius::requirements(basis)?,
-        None => vec![ScalarPropertyRequirement::try_new(
-            ACTIVITY_RATE_SCALE_PROPERTY,
-            ACTIVITY_RATE_SCALE_DIMS,
-            ScalarAdmissibility::StrictlyPositive,
-        )?],
-    };
+    let mut required = source.base_requirements()?;
+    if let Some(collider) = &source.collider {
+        required.extend(collider.requirements()?);
+    }
     let resolved = resolve_material_state_point(
         &source.material,
         gas.point(),
@@ -196,6 +251,10 @@ pub(super) fn evaluate_rate_for(
             .ok_or_else(|| invalid("resolved material omitted the required kinetic scale"))?
             .value_si(),
     };
+    let multiplier = match &source.collider {
+        Some(collider) => collider.multiplier(&resolved, gas, scale, cancelled)?,
+        None => 1.0,
+    };
     let scale = ReactionProgressRateScaleV1::new(ReactionProgressRateQuantityV1::new(scale))
         .map_err(|_| {
             invalid("resolved material scale is outside the original kinetic quantity domain")
@@ -210,7 +269,9 @@ pub(super) fn evaluate_rate_for(
         kinetics.kinetic_order_convention(),
     );
     poll(cancelled)?;
-    let evaluated = kinetics.evaluate(temperature, activities)?;
+    let evaluated = kinetics.evaluate_with_kinetic_multiplier(
+        temperature, activities, Dimensionless::new(multiplier),
+    )?;
     poll(cancelled)?;
     Ok((evaluated, Some(resolved)))
 }
