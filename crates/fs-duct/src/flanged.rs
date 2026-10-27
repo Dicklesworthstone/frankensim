@@ -20,6 +20,10 @@
 //! `p_n = −ζ_n v_n`, `ζ_n/(ρc) = K/√(K² − α_n²)` (`−iK/√(α_n² − K²)` below
 //! cutoff). The plane-mode load is the Schur complement
 //! `Z_eff = Z_00 − Z_0E (Z_EE + diag ζ)^{-1} Z_E0`.
+//! Across a stationary gas interface, pressure and normal velocity are
+//! continuous. The radiation matrix uses the exterior `ρ_e, c_e`, while
+//! the eliminated duct modes retain the interior `ρ_i, c_i`:
+//! `ζ_n/(ρ_e c_e) = (ρ_i c_i)/(ρ_e c_e) K_i/√(K_i² − α_n²)`.
 //!
 //! `Z_00` is the closed-form piston ([`fs_phs::baffled_piston_impedance`]),
 //! so one mode IS that piston. The mode ladder moves the low-`ka` end
@@ -304,7 +308,32 @@ pub fn flanged_pipe_impedance(
     omega: f64,
     modes: usize,
 ) -> Result<C64, DuctError> {
+    flanged_pipe_impedance_with_exterior(state, state, radius, omega, modes)
+}
+
+/// Flanged aperture between a local duct gas and a homogeneous exterior.
+/// The exterior owns radiation; the duct gas owns the eliminated higher
+/// modes. Both coherent states must have the same static pressure. This is
+/// linear acoustics at a stationary interface, without mixing or mean flow.
+/// Identical states reproduce [`flanged_pipe_impedance`] bit for bit.
+///
+/// # Errors
+/// Invalid states, unequal static pressure, invalid geometry/frequency/mode
+/// count, either gas's `ka` above [`FLANGED_MAX_KA`], or a singular/non-passive load.
+pub fn flanged_pipe_impedance_with_exterior(
+    state: &GasState,
+    exterior: &GasState,
+    radius: f64,
+    omega: f64,
+    modes: usize,
+) -> Result<C64, DuctError> {
     crate::validate_gas(state)?;
+    crate::validate_gas(exterior)?;
+    if state.pressure != exterior.pressure {
+        return Err(DuctError::BadParameter {
+            what: "flanged radiation interface requires equal static pressure",
+        });
+    }
     if !(radius > 0.0 && radius.is_finite() && omega > 0.0 && omega.is_finite()) {
         return Err(DuctError::BadParameter {
             what: "flanged radiation needs positive finite radius and frequency",
@@ -315,21 +344,27 @@ pub fn flanged_pipe_impedance(
             what: "flanged radiation mode count outside 1..=FLANGED_MAX_MODES",
         });
     }
-    let ka = omega / state.sound_speed * radius;
+    let ka = omega / exterior.sound_speed * radius;
     if !(ka <= FLANGED_MAX_KA) {
         return Err(DuctError::RadiationKaTooLarge { ka });
+    }
+    let internal_ka = omega / state.sound_speed * radius;
+    if !(internal_ka <= FLANGED_MAX_KA) {
+        return Err(DuctError::RadiationKaTooLarge { ka: internal_ka });
     }
     let key = (
         radius.to_bits(),
         omega.to_bits(),
         state.density.to_bits(),
         state.sound_speed.to_bits(),
+        exterior.density.to_bits(),
+        exterior.sound_speed.to_bits(),
         modes,
     );
     if let Some(&hit) = memo().get(&key) {
         return Ok(hit);
     }
-    let load = flanged_load_uncached(state, radius, omega, ka, modes)?;
+    let load = flanged_load_uncached(state, exterior, radius, omega, ka, modes)?;
     let mut cache = memo();
     if cache.len() >= MEMO_CAP {
         cache.clear();
@@ -341,7 +376,7 @@ pub fn flanged_pipe_impedance(
 /// Exact-input memo. The load is a pure function of these bits, so a hit
 /// returns the same bits a recomputation would. Banks and corpus sweeps
 /// revisit one hole radius on one frequency grid across fingerings.
-type MemoKey = (u64, u64, u64, u64, usize);
+type MemoKey = (u64, u64, u64, u64, u64, u64, usize);
 const MEMO_CAP: usize = 1 << 20;
 static MEMO: LazyLock<std::sync::Mutex<std::collections::HashMap<MemoKey, C64>>> =
     LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -352,14 +387,15 @@ fn memo() -> std::sync::MutexGuard<'static, std::collections::HashMap<MemoKey, C
 
 fn flanged_load_uncached(
     state: &GasState,
+    exterior: &GasState,
     radius: f64,
     omega: f64,
     ka: f64,
     modes: usize,
 ) -> Result<C64, DuctError> {
-    let z0 = state.density * state.sound_speed / (core::f64::consts::PI * radius * radius);
+    let z0 = exterior.density * exterior.sound_speed / (core::f64::consts::PI * radius * radius);
     let (r00, x00) =
-        fs_phs::baffled_piston_impedance(state.density, state.sound_speed, radius, omega)
+        fs_phs::baffled_piston_impedance(exterior.density, exterior.sound_speed, radius, omega)
             .map_err(|_| DuctError::BadParameter {
                 what: "flanged radiation piston term",
             })?;
@@ -369,11 +405,14 @@ fn flanged_load_uncached(
     } else {
         let rules = RULES.as_ref().map_err(Clone::clone)?;
         let z = radiation_matrix(ka, modes)?;
+        let internal_ka = omega / state.sound_speed * radius;
+        let impedance_ratio = state.density * state.sound_speed
+            / (exterior.density * exterior.sound_speed);
         // Modes exactly at cutoff carry ζ = ∞ and drop out (the continuous limit).
         let keep: Vec<usize> = (1..modes)
             .filter(|&n| {
                 let alpha = rules.roots[n - 1].0;
-                (ka - alpha) * (ka + alpha) != 0.0
+                (internal_ka - alpha) * (internal_ka + alpha) != 0.0
             })
             .collect();
         let e = keep.len();
@@ -384,12 +423,12 @@ fn flanged_load_uncached(
                 a[row * e + col] = z[packed(m, n, modes)];
             }
             let alpha = rules.roots[m - 1].0;
-            let gap = (ka - alpha) * (ka + alpha);
+            let gap = (internal_ka - alpha) * (internal_ka + alpha);
             let zeta = if gap > 0.0 {
-                C64::from_re(ka / det::sqrt(gap))
+                C64::from_re(internal_ka / det::sqrt(gap))
             } else {
-                C64::new(0.0, -ka / det::sqrt(-gap))
-            };
+                C64::new(0.0, -internal_ka / det::sqrt(-gap))
+            }.scale(impedance_ratio);
             a[row * e + row] = a[row * e + row] + zeta;
             b[row] = z[packed(0, m, modes)];
         }

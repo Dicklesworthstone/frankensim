@@ -117,12 +117,57 @@ its unobserved continuation is not fabricated.
 
 ## Observation and scope
 
-This is the current `ReedBoreVoice` **bore-pressure plus compact-jet proxy** with
-an empty plate bank. It is not a calibrated exterior microphone, a bell/hole
-radiation field, a complete instrument material reconstruction, or a moving
-fingering mechanism. The existing constructor's 5 Pa traveling-wave seed is
+`listener_m` selects the current `ReedBoreVoice` **bore-pressure plus compact-jet
+proxy** with an empty plate bank. The physical bell/side-hole observation below
+is a separate supported selection. Neither observation supplies a complete
+instrument material reconstruction or a moving fingering mechanism.
+The existing constructor's 5 Pa traveling-wave seed is
 retained, not silently replaced with a new initialization law. Passive bore
 filtering and structural/contact dynamics stay in their original owners.
+
+### Independent room gas with open tone holes
+
+Replace the `listener_m` record with the following records to use the existing
+baffled microphone and an independently authored room atmosphere:
+
+```
+baffled_outlet 0 0 0.5 4 16 1000
+exterior mixture 303.15 100000 mole 3 N2 0.7 O2 0.2 CO2 0.1
+observer_law stokes-kirchhoff
+termination flanged
+```
+
+The receiver coordinates are metres; the last three numbers select radial
+rings, angular points and the observation band in Hz. The `exterior` record
+uses the same gas-material resolver as the bore and must have the bore's
+static pressure. Start from `reed-baffled-mixture.performance`, whose common
+pressure is 100000 Pa, and edit only the exterior data to compare atmospheres.
+`reed-two-medium-tone-hole.performance` supplies a complete example with a
+partly open chimney, two internal gas regions and a third exterior state:
+
+```bash
+cargo run -p fs-couple --bin music_render -- wind \
+  crates/fs-couple/examples/reed-two-medium-tone-hole.performance two-medium.wav
+```
+
+Open and partially vented `hole` records now support this independent exterior.
+Each chimney keeps its own bore-region gas for propagation, internal junction
+corrections, wall coupling and viscothermal loss. At its opening the shared
+flanged radiation owner matches pressure and volume flow to the room gas,
+including the internal higher-mode impedance. The same resulting hole load
+changes reed feedback and the radiating volume flow heard by the microphone.
+Closed holes remain sealed. Bell and hole propagation to the receiver use the
+same declared room gas. No instrument-specific retuning or code change is
+required for a material substitution.
+
+This is linear acoustic matching across prescribed stationary gases, not a
+simulation of breath mixing or airflow. Existing restrictions on mutual
+coupling across different internal hole media remain. The piecewise regional
+renderer supplies bell and hole pressure; the continuous gas-field observer
+currently supplies bell pressure only. The existing flanged-aperture and
+one-dimensional bore approximations remain, without a measured-instrument
+accuracy claim. Native regressions check open and vented holes through reed
+motion, physical microphone pressure, block-independent WAVs and sidecars.
 
 Superposition with another source requires a physically compatible observation
 and common time origin supplied by the caller; matching scalar units and sample

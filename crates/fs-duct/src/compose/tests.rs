@@ -190,6 +190,84 @@ fn dd_response(m: [Dc; 4], load: Option<C64>) -> (C64, C64, C64) {
         (p / d).rounded(),
     )
 }
+
+#[test]
+fn two_medium_open_and_vented_holes_match_independent_junction_flow() {
+    let local = gas();
+    let exterior = GasState::try_new(
+        &fs_material::gas_species::GasSpecies::CarbonDioxide.spec(), 303.15, local.pressure,
+    ).unwrap();
+    let (a, b, h) = (0.004, 0.0015, 0.006);
+    let (left_length, right_length) = (0.21, 0.31);
+    for sigma in [1.0, 0.25] {
+        let duct = Duct { segments: vec![
+            Segment::Cylinder { radius: a, length: left_length },
+            Segment::ToneHole { hole_radius: b, chimney_height: h, bore_radius: a,
+                state: HoleState::Vent(sigma) },
+            Segment::Cylinder { radius: a, length: right_length },
+        ] };
+        for frequency in [173.0, 731.0, 2031.0] {
+            let omega = TAU * frequency;
+            let bore = crate::segment_wave(&local, a, omega, LossModel::Lossless).unwrap();
+            let chimney = crate::segment_wave(&local, b, omega, LossModel::Lossless).unwrap();
+            let load = crate::flanged_pipe_impedance_with_exterior(
+                &local, &exterior, a, omega, crate::FLANGED_MODES,
+            ).unwrap();
+            let hole_load = crate::flanged_pipe_impedance_with_exterior(
+                &local, &exterior, b, omega, crate::FLANGED_MODES,
+            ).unwrap();
+            let (z_open, chimney_flow, _) = dd_response(dd_cylinder(
+                chimney, h + crate::side_hole_inner_length(b, a),
+            ), Some(hole_load));
+            let (z_closed, _, _) = dd_response(dd_cylinder(chimney, h), None);
+            let admittance = z_open.recip().scale(sigma) + z_closed.recip().scale(1.0 - sigma);
+            let half_series = Dc::from(C64::new(0.0,
+                -omega * local.density * crate::side_hole_series_length(b, a) * sigma
+                    / (2.0 * PI * a * a)));
+            let series = [Dc::ONE, half_series, Dc::ZERO, Dc::ONE];
+            let left = dd_mul(dd_cylinder(bore, left_length), series);
+            let right = dd_mul(series, dd_cylinder(bore, right_length));
+            let shunt = [Dc::ONE, Dc::ZERO, Dc::from(admittance), Dc::ONE];
+            let (z_in, mouth_flow, mouth_pressure) =
+                dd_response(dd_mul(dd_mul(left, shunt), right), Some(load));
+            let middle_pressure = (right[0] * Dc::from(load) + right[1]) * Dc::from(mouth_flow);
+            let entering_hole = middle_pressure.rounded() * z_open.recip().scale(sigma);
+            let outward_hole = entering_hole * chimney_flow;
+
+            let (response, holes) = crate::exterior::input_impedance_and_holes(
+                &duct, &local, &exterior, omega, LossModel::Lossless,
+                Termination::FlangedOpen, WallModel::Rigid,
+            ).unwrap();
+            assert_eq!(holes.len(), 1);
+            for (actual, expected) in [
+                (response.impedance, z_in),
+                (response.u_mouth_over_u_in, mouth_flow),
+                (response.p_mouth_over_u_in, mouth_pressure),
+                (holes[0].u_chimney_in_over_u_in, entering_hole),
+                (holes[0].u_hole_over_u_in, outward_hole),
+            ] {
+                assert!(relative(actual, expected) < 3.0e-11,
+                    "sigma={sigma} frequency={frequency}: {actual:?} vs {expected:?}");
+            }
+            let reflection = crate::exterior::input_reflection(&duct, &local, &exterior,
+                omega, LossModel::Lossless, Termination::FlangedOpen, WallModel::Rigid).unwrap();
+            let zc = C64::from_re(reflection.reference_impedance);
+            assert!(relative(reflection.reflection, (z_in - zc) / (z_in + zc)) < 3.0e-11);
+            assert!(reflection.reflection.abs() <= 1.0 + 1.0e-12);
+
+            let (legacy, legacy_holes) = crate::input_impedance_with_wall_and_holes(
+                &duct, &local, omega, LossModel::Bessel, Termination::FlangedOpen, WallModel::Rigid,
+            ).unwrap();
+            let (same, same_holes) = crate::exterior::input_impedance_and_holes(
+                &duct, &local, &local, omega, LossModel::Bessel,
+                Termination::FlangedOpen, WallModel::Rigid,
+            ).unwrap();
+            assert_eq!(same.impedance, legacy.impedance);
+            assert_eq!(same.u_mouth_over_u_in, legacy.u_mouth_over_u_in);
+            assert_eq!(same_holes, legacy_holes);
+        }
+    }
+}
 // Measure today's actual primitive+ABCD operation graph, rather than rounding
 // the independent oracle and calling that a measured legacy defect.
 fn legacy_matrix(

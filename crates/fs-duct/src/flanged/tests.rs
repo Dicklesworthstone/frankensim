@@ -221,7 +221,7 @@ fn flanged_load_bitwise_repeat() {
     let calls = 50_u32;
     let mut b = C64::ZERO;
     for _ in 0..calls {
-        b = flanged_load_uncached(&gas, RADIUS, omega, ka, FLANGED_MODES).expect("fresh");
+        b = flanged_load_uncached(&gas, &gas, RADIUS, omega, ka, FLANGED_MODES).expect("fresh");
     }
     let per_call_us = start.elapsed().as_secs_f64() * 1.0e6 / f64::from(calls);
     assert_eq!((a.re.to_bits(), a.im.to_bits()), (b.re.to_bits(), b.im.to_bits()));
@@ -231,6 +231,63 @@ fn flanged_load_bitwise_repeat() {
          \"modes\":{FLANGED_MODES},\"per_call_us\":{per_call_us:.1},\"verdict\":\"pass\"}}",
         a.re, a.im
     );
+}
+
+#[test]
+fn two_medium_flange_matches_pressure_velocity_continuity() {
+    let internal = air();
+    let external = GasState::try_new(
+        &fs_material::gas_species::GasSpecies::Helium.spec(), 293.15, internal.pressure,
+    ).unwrap();
+    let alpha = RULES.as_ref().unwrap().roots[0].0;
+    let area = PI * RADIUS * RADIUS;
+    for internal_ka in [0.01, 0.7, alpha * 0.999, alpha * 1.001, 7.0] {
+        let omega = omega_of(&internal, internal_ka);
+        let external_ka = omega / external.sound_speed * RADIUS;
+        let (r, x) = fs_phs::baffled_piston_impedance(
+            external.density, external.sound_speed, RADIUS, omega,
+        ).unwrap();
+        let piston = C64::new(r, x);
+        assert_eq!(flanged_pipe_impedance_with_exterior(
+            &internal, &external, RADIUS, omega, 1,
+        ).unwrap(), piston);
+
+        // Solve the two pressure/velocity equations directly in dimensional
+        // modal coordinates. Only the interior axial wavenumber changes at
+        // duct-mode cutoff; the exterior radiation matrix remains smooth.
+        let z = radiation_matrix(external_ka, 2).unwrap();
+        let exterior_rho_c = external.density * external.sound_speed;
+        let q_squared = (omega / internal.sound_speed).powi(2) - (alpha / RADIUS).powi(2);
+        let internal_mode = if q_squared > 0.0 {
+            C64::from_re(internal.density * omega / det::sqrt(q_squared))
+        } else {
+            C64::new(0.0, -internal.density * omega / det::sqrt(-q_squared))
+        };
+        let z01 = z[1].scale(exterior_rho_c);
+        let z11 = z[2].scale(exterior_rho_c);
+        let expected = piston - (z01 * z01 / (z11 + internal_mode)).scale(1.0 / area);
+        let actual = flanged_pipe_impedance_with_exterior(
+            &internal, &external, RADIUS, omega, 2,
+        ).unwrap();
+        assert!((actual - expected).abs() < 2.0e-12 * expected.abs());
+        assert_ne!(actual, flanged_pipe_impedance(&external, RADIUS, omega, 2).unwrap(),
+            "the interior higher modes cannot be replaced by exterior gas");
+
+        let same = flanged_pipe_impedance_with_exterior(
+            &internal, &internal, RADIUS, omega, FLANGED_MODES,
+        ).unwrap();
+        assert_eq!(same, flanged_pipe_impedance(&internal, RADIUS, omega, FLANGED_MODES).unwrap());
+        let production = flanged_pipe_impedance_with_exterior(
+            &internal, &external, RADIUS, omega, FLANGED_MODES,
+        ).unwrap();
+        assert!(production.re >= 0.0);
+        let zc = C64::from_re(internal.density * internal.sound_speed / area);
+        assert!(((production - zc) / (production + zc)).abs() <= 1.0 + 1.0e-12);
+    }
+    let wrong_pressure = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 50000.0).unwrap();
+    assert!(flanged_pipe_impedance_with_exterior(
+        &internal, &wrong_pressure, RADIUS, 1000.0, FLANGED_MODES,
+    ).is_err());
 }
 
 /// Measurement behind the cap (bead `frankensim-irp-v5-instrument-realism-pexfp.324`). The cap is a
@@ -256,8 +313,8 @@ fn flanged_design_is_measured_across_and_beyond_the_cap() {
         let closed = C64::new(r / z0, x / z0);
         let quad = radiation_matrix(ka, 1).expect("matrix")[0];
         let piston_rel = (quad - closed).abs() / closed.abs();
-        let l16 = flanged_load_uncached(&gas, RADIUS, omega, ka, FLANGED_MODES);
-        let l24 = flanged_load_uncached(&gas, RADIUS, omega, ka, FLANGED_MAX_MODES);
+        let l16 = flanged_load_uncached(&gas, &gas, RADIUS, omega, ka, FLANGED_MODES);
+        let l24 = flanged_load_uncached(&gas, &gas, RADIUS, omega, ka, FLANGED_MAX_MODES);
         let line = match (&l16, &l24) {
             (Ok(a), Ok(b)) => {
                 let ladder = (*a - *b).abs() / b.abs();

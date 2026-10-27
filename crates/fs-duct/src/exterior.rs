@@ -23,6 +23,25 @@ pub(crate) fn admit(interior: &GasState, exterior: &GasState) -> Result<(), Duct
     Ok(())
 }
 
+/// Radiation into the exterior with the local duct's higher-mode impedances
+/// retained in the flanged Schur complement. Other termination models retain
+/// their existing scope; closed/ideal ports acquire no radiating load.
+pub(crate) fn termination_impedance(
+    termination: Termination,
+    interior: &GasState,
+    exterior: &GasState,
+    radius: f64,
+    omega: f64,
+) -> Result<(Option<C64>, f64), DuctError> {
+    admit(interior, exterior)?;
+    if interior != exterior && termination == Termination::FlangedOpen {
+        return Ok((Some(crate::flanged_pipe_impedance_with_exterior(
+            interior, exterior, radius, omega, crate::FLANGED_MODES,
+        )?), omega / exterior.sound_speed * radius));
+    }
+    crate::termination_impedance(termination, exterior, radius, omega)
+}
+
 fn load(
     duct: &Duct,
     interior: &GasState,
@@ -39,9 +58,9 @@ fn load(
         .last()
         .ok_or(DuctError::EmptyDuct)?
         .outlet_radius();
-    let impedance = crate::compact_radiation_impedance(termination, exterior, radius, omega)?;
+    let (impedance, _) = termination_impedance(termination, interior, exterior, radius, omega)?;
     Ok((
-        LoadSpec::Fixed(impedance),
+        LoadSpec::Fixed(impedance.expect("radiating termination")),
         Some(omega * radius / exterior.sound_speed),
     ))
 }
@@ -122,7 +141,7 @@ pub fn input_reflection(
         .last()
         .ok_or(DuctError::EmptyDuct)?
         .outlet_radius();
-    let (load, _) = crate::termination_impedance(termination, exterior, radius, omega)?;
+    let (load, _) = termination_impedance(termination, interior, exterior, radius, omega)?;
     compose::compose_chain_reflection(&chain.blocks, load, options)
 }
 

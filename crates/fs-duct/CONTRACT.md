@@ -23,6 +23,17 @@ masses to interior equivalent lengths with `rho_exterior/rho_interior`.
 Identical media retain the original arithmetic. Different hole media cannot
 fall back to the old single-medium ABCD path.
 
+The flanged aperture's radiation matrix and piston term use exterior density
+and sound speed. Its eliminated duct modes retain the local density, sound
+speed and axial wavenumber. `flanged_pipe_impedance_with_exterior` therefore
+uses `(rho_i c_i)/(rho_e c_e) K_i/sqrt(K_i^2-alpha_n^2)` for the modal diagonal
+in exterior-normalized coordinates. Both media retain the existing `ka` cap;
+identical states reproduce the original flanged load. A dimensional two-mode
+continuity oracle straddles the internal cutoff, while a double-double
+T-junction cascade checks flanged terminal loading, input reflection and open/
+vented chimney-mouth volume flow. The existing unflanged approximations retain
+their prior scope.
+
 `GasFieldDuct::chain_with_wall_exterior_controlled` carries the same explicit
 exterior through continuously varying fields, including local chimneys.
 Response and reflection use it together. An omitted exterior preserves the
@@ -32,6 +43,8 @@ mean flow, species diffusion, condensation or varying-medium mutual-hole law.
 G1 tests compare independent finite-line ABCD assembly and chimney/outlet flow
 continuity; G0/G3 cover identical-gas bits, closed-hole isolation, pressure
 scaling, invalid media, and a warm field feeding a complete hole cluster.
+The continuous-field side-hole observer remains outside the current
+`fs-couple` observation adapter; its load and feedback paths use this boundary.
 
 ## Public types and semantics
 

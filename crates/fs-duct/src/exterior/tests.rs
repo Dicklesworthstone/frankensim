@@ -135,9 +135,9 @@ fn g1_exterior_chimney_matches_independent_finite_line_and_flow_continuity() {
             )
             .unwrap();
             let (a, b, h) = (0.002, 0.0006, 0.003);
-            let radiation =
-                crate::compact_radiation_impedance(Termination::FlangedOpen, &outside, b, omega)
-                    .unwrap();
+            let radiation = crate::flanged_pipe_impedance_with_exterior(
+                &inside, &outside, b, omega, crate::FLANGED_MODES,
+            ).unwrap();
             let chimney = cylinder(&inside, b, h + fs_phs::side_hole_inner_length(b, a), omega);
             let open =
                 (chimney[0] * radiation + chimney[1]) / (chimney[2] * radiation + chimney[3]);

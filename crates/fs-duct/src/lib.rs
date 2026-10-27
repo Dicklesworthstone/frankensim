@@ -88,7 +88,8 @@ pub mod levine_schwinger;
 pub use levine_schwinger::{LsQuadrature, LsSolution, LS_MAX_KA, levine_schwinger_impedance};
 /// Multimodal flanged circular-pipe radiation load, continuous in `ka`.
 pub mod flanged;
-pub use flanged::{FLANGED_MAX_KA, FLANGED_MAX_MODES, FLANGED_MODES, flanged_pipe_impedance};
+pub use flanged::{FLANGED_MAX_KA, FLANGED_MAX_MODES, FLANGED_MODES, flanged_pipe_impedance,
+    flanged_pipe_impedance_with_exterior};
 /// Lossless variable-area plane-wave DG in the time domain (M2.2-W3a).
 pub mod dg;
 #[cfg(test)]

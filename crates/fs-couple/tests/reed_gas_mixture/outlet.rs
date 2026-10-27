@@ -141,3 +141,32 @@ fn separate_exterior_material_reaches_actual_cli_pcm_and_invalid_records_create_
         assert!(!output.with_extension("provenance.json").exists());
     }
 }
+
+#[test]
+fn data_only_two_medium_tone_holes_reach_cli_pcm_at_both_block_sizes() {
+    let dir = directory();
+    let fixture = include_str!("../../examples/reed-two-medium-tone-hole.performance");
+    for sigma in [1.0, 0.3] {
+        let exterior = fixture.replace("hole 0.0005 0.002 0.0015 0.3",
+            &format!("hole 0.0005 0.002 0.0015 {sigma}"));
+        let text = exterior.replace("exterior mixture 303.15 100000 mole 2 N2 0.8 O2 0.2\n", "");
+        let source = ReedPerformance::from_bytes(exterior.as_bytes(), 37).unwrap();
+        assert_eq!(source.segment_gases().len(), 4);
+        assert_ne!(source.outlet_receiver().unwrap().gas, source.segment_gases()[1]);
+        let pcm = pressure(&exterior);
+        assert!(pcm.iter().all(|x| x.is_finite()));
+        assert_ne!(pcm, pressure(&text), "only the exterior material record changed");
+        let (expected, _) = encode_pcm16_wav(&pcm, 48000, 2.0).unwrap();
+        assert!(expected[44..].iter().any(|byte| *byte != 0));
+        let input = dir.join(format!("two-medium-{sigma}.performance"));
+        std::fs::write(&input, exterior).unwrap();
+        for block in [37, 113] {
+            let output = dir.join(format!("two-medium-{sigma}-{block}.wav"));
+            success(wind(&input, &output, block, false));
+            assert_eq!(std::fs::read(&output).unwrap(), expected);
+            let metadata = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
+            assert!(metadata.contains("\"pressure_point\":\"baffled-outlet\""));
+            assert!(metadata.contains("bound exterior gas"));
+        }
+    }
+}

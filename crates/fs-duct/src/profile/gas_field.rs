@@ -574,7 +574,8 @@ impl GasFieldDuct {
                 omega, loss, termination, wall);
         }
         let chain = self.chain_with_wall_exterior_controlled(omega, loss, exterior, wall, &mut || false)?;
-        let (load, mouth_ka) = crate::termination_impedance(termination, radiation, radius, omega)?;
+        let (load, mouth_ka) = crate::exterior::termination_impedance(
+            termination, &self.outlet, radiation, radius, omega)?;
         let solved = compose_chain(&chain.blocks, load, ComposeOptions::default())?;
         Ok(DuctResponse {
             omega,
@@ -630,7 +631,8 @@ impl GasFieldDuct {
             .last()
             .expect("admitted duct")
             .outlet_radius();
-        let (load, _) = crate::termination_impedance(termination, radiation, radius, omega)?;
+        let (load, _) = crate::exterior::termination_impedance(
+            termination, &self.outlet, radiation, radius, omega)?;
         compose_chain_reflection(&chain.blocks, load, ComposeOptions::default())
     }
 }
