@@ -31,8 +31,9 @@ pub(super) struct Options {
 
 impl Options {
     /// Remove only explicitly named gas options, preserving legacy arguments.
-    /// Each component is SPECIES.pack NASA9.pack TRANSPORT-CLAIMS.pack; the
-    /// declaration itself assigns those transport claims to that species.
+    /// Each component is SPECIES.pack NASA9.pack TRANSPORT.pack. Transport may
+    /// be the original material-card pack or a legacy pure-transport claim pack;
+    /// the declaration explicitly associates it with this species in both cases.
     pub fn extract(args: &[String]) -> Result<(Vec<String>, Self), String> {
         let words = args.iter().map(OsString::from).collect::<Vec<_>>();
         let (remaining, options) = Self::extract_os(&words)?;
@@ -53,7 +54,7 @@ impl Options {
                     }
                     let mut path = || {
                         words.next().filter(|s| !s.to_string_lossy().starts_with("--"))
-                        .map(PathBuf::from).ok_or_else(|| "--gas-component needs species, NASA-9 and pure-transport claim pack paths".to_string())
+                        .map(PathBuf::from).ok_or_else(|| "--gas-component needs species, NASA-9 and pure-transport pack paths".to_string())
                     };
                     result.components.push([path()?, path()?, path()?]);
                 }
@@ -117,12 +118,27 @@ impl Options {
     }
 
     pub fn load(&self) -> Result<LoadedSources, String> {
+        self.load_with(|path| bounded_read(path, MAX_PACK_BYTES))
+    }
+
+    /// Decode the same native sources through an explicitly supplied byte reader.
+    /// Restricted callers can use an immutable attachment map without permitting
+    /// fallback filesystem access. Every successful read still obeys the native
+    /// per-file and total-byte limits; the callback cannot weaken those bounds.
+    pub fn load_with(
+        &self,
+        mut read_source: impl FnMut(&Path) -> Result<Vec<u8>, String>,
+    ) -> Result<LoadedSources, String> {
         let mut loaded = Vec::with_capacity(self.components.len());
-        let mut total_bytes = 0;
+        let mut total_bytes = 0usize;
         for paths in &self.components {
             let mut read = |path: &Path| -> Result<Vec<u8>, String> {
-                let bytes = bounded_read(path, MAX_PACK_BYTES)?;
-                total_bytes += bytes.len();
+                let bytes = read_source(path)?;
+                if bytes.is_empty() || bytes.len() > MAX_PACK_BYTES {
+                    return Err(format!("gas source {} must contain 1 byte..16 MiB", path.display()));
+                }
+                total_bytes = total_bytes.checked_add(bytes.len())
+                    .ok_or_else(|| "gas source byte count overflow".to_string())?;
                 if total_bytes > MAX_TOTAL_BYTES {
                     return Err("gas source packs exceed the aggregate 64 MiB budget".into());
                 }
@@ -132,25 +148,9 @@ impl Options {
                 .map_err(|e| format!("species pack: {e}"))?;
             let nasa9 = NormalizedModelPack::from_bytes(&read(&paths[1])?)
                 .map_err(|e| format!("NASA-9 pack: {e}"))?;
-            let claims = NormalizedPack::from_bytes(&read(&paths[2])?)
-                .map_err(|e| format!("pure transport claim pack: {e}"))?;
-            // This wrapper records the CLI's explicit association, not an
-            // inferred chemical property or a newly certified specimen.
-            let transport = NormalizedMaterialCardPack::new(
-                MaterialStateId {
-                    chemistry: species.association().species().as_str().into(),
-                    phase: species.association().standard_state_phase().into(),
-                    process: "caller-declared gas-component source association".into(),
-                    revision: 0,
-                },
-                claims,
-            )
-            .map_err(|e| format!("transport association: {e}"))?;
-            loaded.push(Component {
-                species,
-                nasa9,
-                transport,
-            });
+            let transport_bytes = read(&paths[2])?;
+            let transport = decode_transport(&transport_bytes, &species)?;
+            loaded.push(Component { species, nasa9, transport });
         }
         Ok(LoadedSources {
             components: loaded,
@@ -158,6 +158,32 @@ impl Options {
             phase: self.phase,
         })
     }
+}
+
+fn decode_transport(
+    bytes: &[u8],
+    species: &NormalizedSpeciesPack,
+) -> Result<NormalizedMaterialCardPack, String> {
+    // Select only by the canonical wire header, never filename or chemistry.
+    // An invalid card must not be retried as legacy data or replaced by a preset.
+    if bytes.starts_with(b"FSMCDPK\0") {
+        return NormalizedMaterialCardPack::from_bytes(bytes)
+            .map_err(|e| format!("pure transport material-card pack: {e}"));
+    }
+    let claims = NormalizedPack::from_bytes(bytes)
+        .map_err(|e| format!("pure transport claim pack: {e}"))?;
+    // Preserve the historical CLI association and its identity for raw claim
+    // packs. Canonical material cards above retain their own exact identity,
+    // process, model association and provenance, matching the live gas owner.
+    NormalizedMaterialCardPack::new(
+        MaterialStateId {
+            chemistry: species.association().species().as_str().into(),
+            phase: species.association().standard_state_phase().into(),
+            process: "caller-declared gas-component source association".into(),
+            revision: 0,
+        },
+        claims,
+    ).map_err(|e| format!("transport association: {e}"))
 }
 
 struct Component {
