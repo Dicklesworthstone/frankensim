@@ -20,8 +20,8 @@ pub struct MembraneTerm {
 
 #[derive(Clone)]
 struct GradientEntry {
-    row: usize,
-    other: usize,
+    row: u32,
+    other: u32,
     weight: f64,
 }
 
@@ -35,18 +35,29 @@ struct OrderedGradient {
 }
 
 impl OrderedGradient {
-    fn new(terms: &[Vec<MembraneTerm>], nodes: usize) -> Self {
+    fn new(terms: &[Vec<MembraneTerm>], nodes: usize) -> Result<Self, String> {
+        // Addresses are storage, not reduced physics. Reject an unrepresentable
+        // graph before allocation; never truncate an address or omit a term.
+        if u32::try_from(nodes).is_err() || u32::try_from(terms.len()).is_err() {
+            return Err("annular gradient exceeds 32-bit addressing".into());
+        }
         let mut rows: Vec<Vec<GradientEntry>> = (0..nodes).map(|_| Vec::new()).collect();
         for (row, terms) in terms.iter().enumerate() {
+            let row = u32::try_from(row).map_err(|_| "annular gradient row overflow")?;
             for t in terms {
+                if t.a >= nodes || t.b >= nodes {
+                    return Err("annular gradient node outside body".into());
+                }
+                let a = u32::try_from(t.a).map_err(|_| "annular gradient node overflow")?;
+                let b = u32::try_from(t.b).map_err(|_| "annular gradient node overflow")?;
                 rows[t.a].push(GradientEntry {
                     row,
-                    other: t.b,
+                    other: b,
                     weight: t.weight,
                 });
                 rows[t.b].push(GradientEntry {
                     row,
-                    other: t.a,
+                    other: a,
                     weight: t.weight,
                 });
             }
@@ -58,7 +69,7 @@ impl OrderedGradient {
             entries.extend(row);
             ptr.push(entries.len());
         }
-        Self { ptr, entries }
+        Ok(Self { ptr, entries })
     }
 
     fn add(&self, w: &[f64], z: &[f64], f: &[f64], h2: f64, g: &mut [f64]) {
@@ -66,9 +77,9 @@ impl OrderedGradient {
             let mut value = g[node];
             for t in &self.entries[range[0]..range[1]] {
                 // Preserve the original terms.iter().zip(f) short-force behavior.
-                if let Some(&fc) = f.get(t.row) {
+                if let Some(&fc) = f.get(t.row as usize) {
                     let scale = h2 * fc * t.weight;
-                    value += scale * (w[t.other] + z[t.other]);
+                    value += scale * (w[t.other as usize] + z[t.other as usize]);
                 }
             }
             g[node] = value;
@@ -280,7 +291,7 @@ impl AnnularMembrane {
             })
             .collect();
         let strains = vec![0.0; strain_pairs.len()];
-        let gradient_rows = OrderedGradient::new(&terms, grid.len());
+        let gradient_rows = OrderedGradient::new(&terms, grid.len())?;
         Ok((
             Self {
                 terms,
@@ -503,7 +514,7 @@ mod tests {
             b: 0,
             weight: 1.0,
         }]];
-        let rows = OrderedGradient::new(&terms, 2);
+        let rows = OrderedGradient::new(&terms, 2).unwrap();
         let initial = [9007199254740992.0_f64, -0.0];
         let mut old = initial;
         let mut new = initial;
@@ -528,7 +539,7 @@ mod tests {
                 }]
             })
             .collect();
-        let rows = OrderedGradient::new(&terms, 2);
+        let rows = OrderedGradient::new(&terms, 2).unwrap();
         let f = [9007199254740992.0, -9007199254740992.0, 1.0];
         let mut old = [0.0; 2];
         let mut new = old;
@@ -546,6 +557,21 @@ mod tests {
             &mut reordered,
         );
         assert_ne!(new.map(f64::to_bits), reordered.map(f64::to_bits));
+    }
+
+    #[test]
+    fn compact_gradient_refuses_addresses_outside_the_body() {
+        let terms = vec![vec![MembraneTerm {
+            a: 0,
+            b: 2,
+            weight: 1.0,
+        }]];
+        assert!(OrderedGradient::new(&terms, 2).is_err());
+        assert!(OrderedGradient::new(&terms, 0).is_err());
+        if usize::BITS > 32 {
+            let too_many = (u32::MAX as usize).checked_add(1).unwrap();
+            assert!(OrderedGradient::new(&[], too_many).is_err());
+        }
     }
 
     #[test]
