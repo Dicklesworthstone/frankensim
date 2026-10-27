@@ -352,7 +352,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
     ///
     /// This is a first-order thermal/flow split with explicit, CFL-subcycled
     /// thermal conduction. It retains the original constant-density, single-
-    /// liquid and neglected-capillarity limits. It does not add surface energy,
+    /// liquid and source-constant capillarity limits. It does not add surface energy,
     /// viscous heating, phase conversion or pressure work. All histories remain
     /// unchanged on thermal, source, VOF, transport, budget or cancellation error.
     pub fn step_with_conduction(

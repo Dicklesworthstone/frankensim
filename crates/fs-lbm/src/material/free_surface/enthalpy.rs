@@ -6,8 +6,11 @@
 //! the native face and conversion/carry routes. The existing sparse Krylov
 //! owner solves that transport; no velocity-derived second mass flux exists.
 //!
-//! This is the single-liquid, constant-density, stationary-wall rung. Capillary
-//! energy, phase mobility and pressure work are not supplied. Optional `viscous`
+//! This is the single-liquid, constant-density, stationary-wall rung. A sourced
+//! validity-wide constant surface tension retains the native capillary mechanics.
+//! Capillary work and surface-energy accuracy remain the native model's scope;
+//! no surface heat or total-energy closure is invented here. Varying sigma and
+//! sourced wetting refuse. Phase mobility and pressure work are not supplied. Optional `viscous`
 //! converts the molecular stress power into heat on the same VOF mass routes.
 //! Optional `conduction` reuses the shared thermal timeline on explicit wetted
 //! face geometry. Optional `buoyancy` admits bounded source-density departures
@@ -20,7 +23,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use fs_exec::CancelGate;
 use fs_material::liquid::ResolvedLiquidState;
-use fs_material::liquid::surface::LiquidCapillarity;
+use fs_material::liquid::surface::{
+    LiquidCapillarity, ResolvedLiquidSurfaceState, SURFACE_TENSION_DIMS,
+    SURFACE_TENSION_PROPERTY,
+};
 use fs_material::liquid_temperature::LiquidTemperatureLaw;
 use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, PhaseStateError, SolidLiquidPhase};
 use fs_material::state_point::MaterialStatePointError;
@@ -244,8 +250,10 @@ impl<'s> MaterialFreeSurface3<'s> {
     /// initial wet lane, including any zero-mass interface ghost.
     ///
     /// The caloric chart and liquid law must name the same original material
-    /// card as the surface source. The source must explicitly neglect capillarity
-    /// and use the same viscosity basis and complete initial query context.
+    /// card as the surface source and retain its viscosity basis and complete
+    /// initial query context. Capillarity must be explicitly neglected or use a
+    /// source-declared constant sigma retained in the SAME full thermal bundle.
+    /// Equal values sampled from a varying source do not establish constancy.
     /// Existing nonzero conversion carry requires a prior thermal history and
     /// cannot be initialized by assigning it an arbitrary temperature here.
     pub fn with_enthalpy<'m>(
@@ -290,11 +298,9 @@ impl<'s> MaterialFreeSurface3<'s> {
                 "evolving liquid source requires its runtime rheology owner",
             ));
         }
-        if source.capillarity() != LiquidCapillarity::Neglected
-            || self.scaling.planar_wetting.is_some()
-        {
+        if self.scaling.planar_wetting.is_some() {
             return Err(Error::Invalid(
-                "thermal free surface needs explicitly neglected capillarity and no wetting law",
+                "thermal free surface has no evolving sourced wetting law",
             ));
         }
         if source.material().card_identity() != law.reference_state().material().card_identity()
@@ -308,6 +314,7 @@ impl<'s> MaterialFreeSurface3<'s> {
                 "surface, caloric and temperature laws must retain one material and query context",
             ));
         }
+        admit_capillary_source(source, law)?;
         let viscosity = match source.viscosity_basis() {
             fs_material::liquid_temperature::LiquidViscosityBasis::Dynamic => "dynamic_viscosity",
             fs_material::liquid_temperature::LiquidViscosityBasis::Kinematic => {
@@ -607,6 +614,47 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             rheology,
         })
     }
+}
+
+// The original immutable bundle refreshes this same selected claim at every
+// thermal/rheological stage. Native scaling already owns the admitted sigma;
+// there is no second capillary state or independently queried source epoch.
+fn admit_capillary_source(
+    source: &ResolvedLiquidSurfaceState,
+    law: &LiquidTemperatureLaw<'_>,
+) -> Result<(), Error> {
+    if source.capillarity() == LiquidCapillarity::Neglected {
+        return Ok(());
+    }
+    let original = source.material().property(SURFACE_TENSION_PROPERTY)
+        .ok_or(Error::Invalid("missing original capillary source"))?;
+    let retained = law.reference_state().material().property(SURFACE_TENSION_PROPERTY)
+        .ok_or(Error::Invalid("thermal law must retain the original capillary source"))?;
+    for property in [original, retained] {
+        if !property.source_axes().is_empty()
+            || property.answer().receipt.decision
+                != fs_matdb::EvaluationDecision::ConstantWithinValidity
+            || property.requirement().quantity()
+                != fs_qty::QuantitySpec::dimensional(SURFACE_TENSION_DIMS)
+            || !property.value_si().is_finite()
+            || property.value_si() <= 0.0
+        {
+            return Err(Error::Invalid(
+                "thermal capillarity requires source-declared constant sigma within validity",
+            ));
+        }
+    }
+    if original.requirement() != retained.requirement()
+        || original.answer().receipt.selected != retained.answer().receipt.selected
+        || original.value_si().to_bits() != retained.value_si().to_bits()
+        || source.surface_tension_n_m().map(f64::to_bits)
+            != Some(retained.value_si().to_bits())
+    {
+        return Err(Error::Invalid(
+            "thermal law must retain the surface's exact sigma requirement and source claim",
+        ));
+    }
+    Ok(())
 }
 
 fn poll(gate: &CancelGate) -> Result<(), Error> {

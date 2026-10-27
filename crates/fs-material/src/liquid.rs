@@ -47,6 +47,39 @@ pub struct ResolvedLiquidState {
 }
 
 impl ResolvedLiquidState {
+    /// Adopt an already resolved complete bundle without selecting new claims.
+    ///
+    /// All original properties, query meanings and receipts are retained. The
+    /// four liquid requirements must match this consumer exactly; additional
+    /// coupled properties are refreshed with them at every later query.
+    ///
+    /// # Errors
+    /// Refuses missing or incompatible requirements and invalid derived transport.
+    pub fn try_from_material(
+        material: ResolvedMaterialStatePoint,
+        viscosity_basis: crate::liquid_temperature::LiquidViscosityBasis,
+    ) -> Result<Self, MaterialStatePointError> {
+        let (name, dims, kinematic) = match viscosity_basis {
+            crate::liquid_temperature::LiquidViscosityBasis::Dynamic => {
+                (DYNAMIC_VISCOSITY_PROPERTY, DYNAMIC_VISCOSITY_DIMS, false)
+            }
+            crate::liquid_temperature::LiquidViscosityBasis::Kinematic => {
+                (KINEMATIC_VISCOSITY_PROPERTY, KINEMATIC_VISCOSITY_DIMS, true)
+            }
+        };
+        for required in liquid_requirements(name, dims)? {
+            if material.property(required.name())
+                .is_none_or(|property| property.requirement() != &required)
+            {
+                return Err(MaterialStatePointError::InvalidRequirement {
+                    property: required.name().to_owned(),
+                    reason: "retained liquid bundle must contain each exact transport requirement",
+                });
+            }
+        }
+        liquid_from_resolved_material(material, kinematic)
+    }
+
     /// Refresh every transport property at a new complete physical query while
     /// retaining the original material card, source claims and viscosity basis.
     /// Temperature, pressure, shear rate and composition coordinates may evolve
@@ -177,7 +210,16 @@ fn resolve_liquid_state_with_viscosity(
     viscosity_dims: Dims,
     viscosity_is_kinematic: bool,
 ) -> Result<ResolvedLiquidState, MaterialStatePointError> {
-    let requirements = [
+    let requirements = liquid_requirements(viscosity_property, viscosity_dims)?;
+    let material = resolve_material_state_point(card, point, &requirements, selection)?;
+    liquid_from_resolved_material(material, viscosity_is_kinematic)
+}
+
+fn liquid_requirements(
+    viscosity_property: &str,
+    viscosity_dims: Dims,
+) -> Result<[ScalarPropertyRequirement; 4], MaterialStatePointError> {
+    Ok([
         ScalarPropertyRequirement::try_new(
             DENSITY_PROPERTY,
             Density::DIMS,
@@ -201,12 +243,10 @@ fn resolve_liquid_state_with_viscosity(
             viscosity_dims,
             ScalarAdmissibility::StrictlyPositive,
         )?,
-    ];
-    let material = resolve_material_state_point(card, point, &requirements, selection)?;
-    liquid_from_resolved_material(material, viscosity_is_kinematic)
+    ])
 }
 
-// Only initial liquid resolution and exact-source refresh enter here, so all
+// Only checked liquid admission and exact-source refresh enter here, so all
 // four required complete keys have already passed the same consumer checks.
 fn liquid_from_resolved_material(
     material: ResolvedMaterialStatePoint,

@@ -12,7 +12,9 @@ use fs_qty::{QuantitySpec, Temperature};
 use crate::liquid::{
     ResolvedLiquidState, resolve_liquid_state, resolve_liquid_state_from_kinematic,
 };
-use crate::state_point::{MaterialPropertySelection, MaterialStatePointError};
+use crate::state_point::{
+    MaterialPropertySelection, MaterialStatePointError, ResolvedMaterialStatePoint,
+};
 
 /// Which viscosity quantity the source actually reports. No implicit fallback.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,21 +69,38 @@ impl<'a> LiquidTemperatureLaw<'a> {
         card: &'a MaterialCard, point: &QueryPoint, temperature_axis: &str,
         viscosity_basis: LiquidViscosityBasis, selection: MaterialPropertySelection,
     ) -> Result<Self, MaterialStatePointError> {
-        let absolute = QuantitySpec::semantic(SemanticType::new(
-            QuantityKind::AbsoluteTemperature, ValueForm::Static,
-        ));
-        let descriptor_ok = match point.axis_quantities().get(temperature_axis) {
-            Some(q) => *q == absolute || *q == QuantitySpec::dimensional(Temperature::DIMS),
-            None => temperature_axis == "T",
-        };
-        if !descriptor_ok || !point.axes().get(temperature_axis)
-            .is_some_and(|t| t.is_finite() && *t > 0.0)
-        {
-            return Err(invalid("liquid temperature law needs an explicit positive absolute-temperature coordinate"));
-        }
+        validate_temperature(point, temperature_axis)?;
         let reference_state = viscosity_basis.resolve(card, point, selection)?;
         Ok(Self {
             card, reference_point: point.clone(), reference_state,
+            temperature_axis: temperature_axis.to_owned(), viscosity_basis,
+        })
+    }
+
+    /// Bind an existing complete source bundle to its original immutable card.
+    ///
+    /// This preserves optional coupled claims along with rho, Cp, conductivity
+    /// and the explicitly selected viscosity basis. Every later temperature
+    /// refresh pins the complete original bundle; no second material epoch is
+    /// introduced for additional coefficients such as surface tension.
+    ///
+    /// # Errors
+    /// Refuses a different card, invalid temperature coordinate or incompatible
+    /// liquid requirements in the supplied bundle.
+    pub fn try_from_material(
+        card: &'a MaterialCard,
+        material: ResolvedMaterialStatePoint,
+        temperature_axis: &str,
+        viscosity_basis: LiquidViscosityBasis,
+    ) -> Result<Self, MaterialStatePointError> {
+        if material.card_identity() != card.content_hash() {
+            return Err(invalid("liquid temperature law requires the original material card"));
+        }
+        let reference_point = material.query();
+        validate_temperature(&reference_point, temperature_axis)?;
+        let reference_state = ResolvedLiquidState::try_from_material(material, viscosity_basis)?;
+        Ok(Self {
+            card, reference_point, reference_state,
             temperature_axis: temperature_axis.to_owned(), viscosity_basis,
         })
     }
@@ -118,6 +137,25 @@ impl<'a> LiquidTemperatureLaw<'a> {
     /// Original source viscosity convention.
     #[must_use]
     pub const fn viscosity_basis(&self) -> LiquidViscosityBasis { self.viscosity_basis }
+}
+
+fn validate_temperature(
+    point: &QueryPoint,
+    temperature_axis: &str,
+) -> Result<(), MaterialStatePointError> {
+    let absolute = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature, ValueForm::Static,
+    ));
+    let descriptor_ok = match point.axis_quantities().get(temperature_axis) {
+        Some(q) => *q == absolute || *q == QuantitySpec::dimensional(Temperature::DIMS),
+        None => temperature_axis == "T",
+    };
+    if !descriptor_ok || !point.axes().get(temperature_axis)
+        .is_some_and(|t| t.is_finite() && *t > 0.0)
+    {
+        return Err(invalid("liquid temperature law needs an explicit positive absolute-temperature coordinate"));
+    }
+    Ok(())
 }
 
 fn invalid(quantity: &'static str) -> MaterialStatePointError {

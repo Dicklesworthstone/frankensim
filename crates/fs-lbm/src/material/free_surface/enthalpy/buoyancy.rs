@@ -134,8 +134,8 @@ impl<'s> MaterialFreeSurface3<'s> {
     ///
     /// This is a first-order held-force thermal/flow split, not a moving-volume
     /// approximation. It adds no phase conversion, pressure work, gravitational
-    /// energy balance or physical viscous heating. Original walls, neglected
-    /// capillarity, native pressure-boundary accuracy and low-Mach limits remain.
+    /// energy balance or physical viscous heating. Original stationary walls,
+    /// constant sourced capillarity, native pressure-boundary accuracy and low-Mach limits remain.
     pub fn with_boussinesq_enthalpy<'m>(
         self,
         law: &'m LiquidTemperatureLaw<'m>,

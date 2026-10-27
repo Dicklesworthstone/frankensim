@@ -2973,3 +2973,40 @@ one constant-density caloric chart and explicitly omitted capillarity. It does
 not discard solid elastic/plastic history, implement melting release, change
 phase volume, supply pressure/capillary work or certify total fluid mechanical
 energy conservation.
+
+
+### Constant sourced capillarity in the original heated free surface
+
+`MaterialFreeSurfaceEnthalpy3` now retains sourced capillarity when sigma
+is declared `ConstantWithinValidity`, has no response axes and is bound
+into the same complete liquid bundle as density, heat capacity, conductivity
+and the selected viscosity basis. Original card, query meanings,
+requirements, selected claims and coefficient identity are preserved through
+every thermal/rheology stage and native endpoint. A varying curve with equal
+sampled values does not establish a constant law; a missing active sigma in
+the old four-property thermal bundle refuses.
+
+The original native capillary scaling and pressure reconstruction continue
+unchanged. Temperature/shear-dependent transport, finite gas storage and
+finite wall heat use the same retained source trajectory. Leaving the
+selected sigma claim's validity domain refuses the complete candidate even
+if a fresh query could select a different fallback claim. Liquid populations,
+enthalpy, finite wall stores and finite gas state publish together.
+
+Four focused regressions in
+`tests/material_free_surface_enthalpy/conduction/capillarity.rs` specify
+bitwise native capillary parity at uniform enthalpy, sigma-data substitution
+in actual populations, independent four-substep NASA gas/nonlinear-wall heat
+references, real temperature/shear feedback into continuing momentum,
+complete-bundle admission and late source-domain rollback/retry/cancellation.
+The independent reference places the late validity crossing after one
+admitted internal thermal substep. These are synthetic numerical fixtures,
+not material calibration or experimental validation. Source/API review and
+independent scalar arithmetic completed; the reconstructed Rust sources and
+tests could not be parsed, compiled or executed in the unavailable executor.
+
+The enthalpy ledger does not invent capillary heat or claim conservative
+surface energy or total mechanical energy. Variable sigma, Marangoni stress,
+evolving sourced wetting, evaporation and phase-density change remain
+unsupported. Existing single-liquid, constant-density, stationary-wall,
+native pressure-boundary and low-Mach assumptions remain in force.

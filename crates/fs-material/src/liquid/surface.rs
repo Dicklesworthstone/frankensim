@@ -117,6 +117,29 @@ impl ResolvedLiquidSurfaceState {
         temperature_axis: &str,
         shear_rate_axis: &str,
     ) -> Result<Self, MaterialStatePointError> {
+        Self::try_for_shear_rate_evolution_with_capillarity(
+            material, viscosity_basis, LiquidCapillarity::Neglected,
+            temperature_axis, shear_rate_axis,
+        )
+    }
+
+    /// Admit T/shear evolution while retaining the scenario's capillary choice.
+    ///
+    /// All active coefficients come from the same complete source bundle.
+    /// The receiving runtime must own every admitted response and explicitly
+    /// refuse any capillary dependence it cannot evolve. This does not grant
+    /// frozen use or supply surface-energy, Marangoni or wetting dynamics.
+    ///
+    /// # Errors
+    /// Refuses the same unsupported axes and invalid momentum coefficients as
+    /// the noncapillary entry point, and missing or invalid active surface data.
+    pub fn try_for_shear_rate_evolution_with_capillarity(
+        material: ResolvedMaterialStatePoint,
+        viscosity_basis: LiquidViscosityBasis,
+        capillarity: LiquidCapillarity,
+        temperature_axis: &str,
+        shear_rate_axis: &str,
+    ) -> Result<Self, MaterialStatePointError> {
         let quantities = material.axis_quantities();
         let temperature_quantity = quantities.get(temperature_axis).copied();
         let temperature_ok = temperature_quantity == Some(QuantitySpec::semantic(
@@ -174,9 +197,15 @@ impl ResolvedLiquidSurfaceState {
                 quantity: "liquid rheological kinematic viscosity",
             });
         }
+        let surface_tension_n_m = match capillarity {
+            LiquidCapillarity::Neglected => None,
+            LiquidCapillarity::Sourced => Some(value(
+                SURFACE_TENSION_PROPERTY, SURFACE_TENSION_DIMS,
+            )?),
+        };
         Ok(Self {
             material, viscosity_basis, density_kg_m3, dynamic_viscosity_pa_s,
-            kinematic_viscosity_m2_s, surface_tension_n_m: None,
+            kinematic_viscosity_m2_s, surface_tension_n_m,
             rheology_axes: Some((temperature_axis.to_owned(), shear_rate_axis.to_owned())),
         })
     }

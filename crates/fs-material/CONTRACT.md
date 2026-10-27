@@ -2431,3 +2431,23 @@ dielectric coefficients or axes during a trajectory still requires an
 independently accounted parameter-work/thermal-entropy model; this increment
 does not supply one. All source coefficients remain in the original complete
 material bundle.
+
+
+### Complete liquid bundles through temperature and shear evolution
+
+`ResolvedLiquidState::try_from_material` adopts an already resolved material
+bundle after checking the original four transport requirements and explicit
+dynamic/kinematic viscosity basis. Additional coupled properties remain
+attached. `LiquidTemperatureLaw::try_from_material` also checks the original
+immutable card and temperature coordinate. Its existing exact-source refresh
+therefore retains all selected claims, query meanings and receipts through
+later temperatures, including an active surface-tension claim.
+
+`ResolvedLiquidSurfaceState::try_for_shear_rate_evolution_with_capillarity`
+keeps the scenario's explicit capillary choice in that same complete bundle
+while preserving the original temperature/shear ownership. The old entry
+continues to declare neglected capillarity. Admission of an evolving bundle
+does not authorize freezing an unsupported coefficient; the receiving
+runtime must own or refuse each active response. The thermal free-surface
+consumer currently requires source-declared validity-wide constant sigma.
+No surface-energy, Marangoni or wetting dynamics are inferred by adoption.

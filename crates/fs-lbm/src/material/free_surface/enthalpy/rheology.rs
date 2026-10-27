@@ -2,7 +2,9 @@
 //! collision and molecular heat. The fixed-domain rheology owner supplies the
 //! same local constitutive solve; no second viscosity law or stress estimator
 //! is introduced. This is generalized Newtonian response, without elastic
-//! memory, yield-surface history, phase mobility or capillary energy.
+//! memory, yield-surface history, phase mobility or capillary energy. A sourced
+//! constant sigma can accompany the same complete thermal/rheology bundle; the
+//! original native capillary operator retains its own mechanical accuracy.
 
 use super::*;
 use crate::material::free_surface::{
@@ -76,9 +78,10 @@ impl RheologyBinding {
         }
         // Thermal conductivity and Cp may belong to a broader law bundle than
         // the momentum ingress. They cannot introduce an unevolved source axis.
-        ResolvedLiquidSurfaceState::try_for_shear_rate_evolution(
+        ResolvedLiquidSurfaceState::try_for_shear_rate_evolution_with_capillarity(
             law.reference_state().material().clone(),
             law.viscosity_basis(),
+            source.capillarity(),
             temperature_axis,
             rate_axis,
         )?;
@@ -174,7 +177,8 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
     /// convergence and cancellation failures return no initialized candidate.
     ///
     /// The ordinary frozen constructors refuse this source. Caloric density is
-    /// fixed, all cells are pure liquid, and capillarity is explicitly neglected.
+    /// fixed and all cells are pure liquid. Capillarity is neglected or uses
+    /// source-declared constant sigma in the same complete thermal bundle.
     /// The numerical conversion carry transports enthalpy but has no assigned
     /// strain, viscosity or molecular heat until it returns to a resolved cell.
     #[allow(clippy::too_many_arguments)]
