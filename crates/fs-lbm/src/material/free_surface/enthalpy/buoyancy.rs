@@ -145,6 +145,6 @@ impl<'s> MaterialFreeSurface3<'s> {
         initial_h: impl Fn([usize; 3]) -> f64,
         gate: &CancelGate,
     ) -> Result<MaterialFreeSurfaceEnthalpy3<'s, 'm>, Error> {
-        self.with_enthalpy_model(law, caloric, controls, initial_h, Some(config), None, gate)
+        self.with_enthalpy_model(law, caloric, controls, initial_h, Some(config), None, None, gate)
     }
 }

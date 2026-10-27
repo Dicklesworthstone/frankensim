@@ -9,8 +9,9 @@
 //! This is the single-liquid, constant-density, stationary-wall rung. A sourced
 //! validity-wide constant surface tension retains the native capillary mechanics.
 //! Capillary work and surface-energy accuracy remain the native model's scope;
-//! no surface heat or total-energy closure is invented here. Varying sigma
-//! refuses. Optional `wetting` evolves the original planar contact law using
+//! no surface heat or total-energy closure is invented here. Optional
+//! `thermocapillary` admits source-varying sigma on a checked planar tank surface.
+//! Optional `wetting` evolves the original planar contact law using
 //! local liquid temperature. Phase mobility and pressure work are not supplied. Optional `viscous`
 //! converts the molecular stress power into heat on the same VOF mass routes.
 //! Optional `conduction` reuses the shared thermal timeline on explicit wetted
@@ -53,6 +54,9 @@ pub mod rheology;
 
 /// Local temperature and contact-line history on the original planar boundary.
 pub mod wetting;
+
+/// Source-driven tangential stress on an explicitly bounded planar free surface.
+pub mod thermocapillary;
 
 /// Source-conductivity exchange on the existing thermal timeline before flow.
 #[cfg(feature = "enthalpy-coupling")]
@@ -258,6 +262,7 @@ pub struct MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     rheology: Option<rheology::RheologyBinding>,
     rheology_samples: BTreeMap<MassLocation3, rheology::FreeSurfaceRheologySample>,
     wetting: Option<WettingBinding<'m>>,
+    thermocapillary: Option<thermocapillary::PlanarThermocapillarity>,
     #[cfg(feature = "enthalpy-coupling")]
     electrical: Option<conduction::electrical::ElectricalCore>,
 }
@@ -266,6 +271,7 @@ struct ResolvedFlowMaterials {
     states: BTreeMap<MassLocation3, ResolvedLiquidState>,
     tau: BTreeMap<(u64, usize), f64>,
     forces: Option<BTreeMap<(u64, usize), [f64; 3]>>,
+    surface_tensions: Option<BTreeMap<(u64, usize), f64>>,
     rheology: BTreeMap<MassLocation3, rheology::FreeSurfaceRheologySample>,
 }
 
@@ -289,7 +295,7 @@ impl<'s> MaterialFreeSurface3<'s> {
         initial_h: impl Fn([usize; 3]) -> f64,
         gate: &CancelGate,
     ) -> Result<MaterialFreeSurfaceEnthalpy3<'s, 'm>, Error> {
-        self.with_enthalpy_model(law, caloric, controls, initial_h, None, None, gate)
+        self.with_enthalpy_model(law, caloric, controls, initial_h, None, None, None, gate)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -301,6 +307,7 @@ impl<'s> MaterialFreeSurface3<'s> {
         initial_h: impl Fn([usize; 3]) -> f64,
         buoyancy: Option<crate::material::transport::boussinesq::BoussinesqConfig<3>>,
         rheology: Option<rheology::RheologyBinding>,
+        thermocapillary: Option<thermocapillary::PlanarThermocapillarity>,
         gate: &CancelGate,
     ) -> Result<MaterialFreeSurfaceEnthalpy3<'s, 'm>, Error> {
         poll(gate)?;
@@ -339,7 +346,7 @@ impl<'s> MaterialFreeSurface3<'s> {
                 "surface, caloric and temperature laws must retain one material and query context",
             ));
         }
-        admit_capillary_source(source, law)?;
+        admit_capillary_source(source, law, thermocapillary.is_some())?;
         let viscosity = match source.viscosity_basis() {
             fs_material::liquid_temperature::LiquidViscosityBasis::Dynamic => "dynamic_viscosity",
             fs_material::liquid_temperature::LiquidViscosityBasis::Kinematic => {
@@ -391,11 +398,15 @@ impl<'s> MaterialFreeSurface3<'s> {
             rheology,
             rheology_samples: BTreeMap::new(),
             wetting: None,
+            thermocapillary,
             #[cfg(feature = "enthalpy-coupling")]
             electrical: None,
         };
         let resolved =
             candidate.resolve_states(&candidate.flow.lattice, &candidate.h, &masses, gate)?;
+        if let Some(surface_tensions) = resolved.surface_tensions {
+            candidate.flow.lattice.rebind_surface_tensions(surface_tensions, gate)?;
+        }
         if let Some(forces) = resolved.forces {
             candidate.flow.lattice.rebind_force_field(forces, gate)?;
         }
@@ -548,6 +559,9 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         // private candidate. No accepted populations, carry or source state move
         // until every endpoint query and conservation gate has passed.
         let mut lattice = self.flow.lattice.clone();
+        if let Some(surface_tensions) = resolved.surface_tensions {
+            lattice.rebind_surface_tensions(surface_tensions, gate)?;
+        }
         let prepared_wetting = self.prepare_wetting(&mut lattice, &resolved.states, gate)?;
         let trace = lattice.step_with_mass_transport(
             gate,
@@ -560,6 +574,9 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         h.retain(|key, _| trace.after.contains_key(key));
         extend_empty_ghosts(&trace.after, &mut h, &heated)?;
         let endpoint = self.resolve_states(&lattice, &h, &trace.after, gate)?;
+        if let Some(surface_tensions) = endpoint.surface_tensions {
+            lattice.rebind_surface_tensions(surface_tensions, gate)?;
+        }
         #[cfg(feature = "enthalpy-coupling")]
         if let Some(core) = &self.electrical {
             core.admit(&lattice, &endpoint.states, gate)?;
@@ -697,10 +714,12 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             }
             states.insert(location, state);
         }
+        let surface_tensions = self.resolve_thermocapillarity(lattice, &states, &mut forces, gate)?;
         Ok(ResolvedFlowMaterials {
             states,
             tau,
             forces,
+            surface_tensions,
             rheology,
         })
     }
@@ -712,8 +731,12 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
 fn admit_capillary_source(
     source: &ResolvedLiquidSurfaceState,
     law: &LiquidTemperatureLaw<'_>,
+    evolving: bool,
 ) -> Result<(), Error> {
     if source.capillarity() == LiquidCapillarity::Neglected {
+        if evolving {
+            return Err(Error::Invalid("thermocapillarity requires an explicitly sourced surface tension"));
+        }
         return Ok(());
     }
     let original = source.material().property(SURFACE_TENSION_PROPERTY)
@@ -721,16 +744,18 @@ fn admit_capillary_source(
     let retained = law.reference_state().material().property(SURFACE_TENSION_PROPERTY)
         .ok_or(Error::Invalid("thermal law must retain the original capillary source"))?;
     for property in [original, retained] {
-        if !property.source_axes().is_empty()
-            || property.answer().receipt.decision
-                != fs_matdb::EvaluationDecision::ConstantWithinValidity
-            || property.requirement().quantity()
+        let constant = property.source_axes().is_empty()
+            && property.answer().receipt.decision == fs_matdb::EvaluationDecision::ConstantWithinValidity;
+        let thermal = evolving && !property.source_axes().is_empty()
+            && property.source_axes().iter().all(|(axis, dims)|
+                axis == law.temperature_axis() && *dims == fs_qty::Temperature::DIMS);
+        if !(constant || thermal) || property.requirement().quantity()
                 != fs_qty::QuantitySpec::dimensional(SURFACE_TENSION_DIMS)
             || !property.value_si().is_finite()
             || property.value_si() <= 0.0
         {
             return Err(Error::Invalid(
-                "thermal capillarity requires source-declared constant sigma within validity",
+                "thermal sigma requires a source-declared constant or explicit planar temperature evolution",
             ));
         }
     }

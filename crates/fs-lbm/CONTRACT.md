@@ -3006,10 +3006,12 @@ independent scalar arithmetic completed; the reconstructed Rust sources and
 tests could not be parsed, compiled or executed in the unavailable executor.
 
 The enthalpy ledger does not invent capillary heat or claim conservative
-surface energy or total mechanical energy. Variable sigma, Marangoni stress,
-evolving sourced wetting, evaporation and phase-density change remain
-unsupported. Existing single-liquid, constant-density, stationary-wall,
-native pressure-boundary and low-Mach assumptions remain in force.
+surface energy or total mechanical energy. This ordinary thermal binding
+continues to require constant sigma; the explicit planar thermocapillary
+entry point below admits a bounded temperature-varying law. Evaporation and
+phase-density change remain unsupported. Existing single-liquid,
+constant-density, stationary-wall, native pressure-boundary and low-Mach
+assumptions remain in force.
 
 
 ### Thermal free-surface material wetting
@@ -3143,3 +3145,51 @@ zero-B parity with original gravity, accepted-state continuation and late
 split-gate rollback. The seven changed Rust files passed Tree-sitter syntax
 parsing, and independent scalar current/force/energy references were executed.
 Native compilation, Cargo tests and rustfmt remain unexecuted in this environment.
+
+### Source-driven planar thermocapillary flow (MR26/MR27 increment)
+
+`MaterialFreeSurfaceScaling::free_surface3_from_cells_with_thermocapillarity`
+binds the original liquid, caloric chart, optional buoyancy/rheology and one
+explicit `PlanarThermocapillarity` envelope. The full original material bundle
+retains a positive surface-tension claim in N/m; only a source-declared constant
+or the existing law's absolute-temperature response axis is admitted. Every
+thermal evaluation pins the same claim, and the actual accepted local caloric
+temperature drives both the native Laplace-pressure coefficient and tangential
+surface stress. No duplicate source epoch or material-name rule is introduced.
+
+The geometry reduction is a Cartesian tank/slab with a single nearly planar
+surface in every column, neutral stationary walls and no internal walls,
+overhangs, disconnected liquid, multiple partial layers or unlocated carry.
+The declared surface-cell layer cannot change during the admitted trajectory.
+Actual raw VOF fill reconstructs each column height. A caller-declared departure
+smaller than half a cell and a positive surface-fill floor gate both endpoints.
+Centered tangential sigma differences (one-sided at actual tank walls) implement
+the declared flat-interface stress. Each projected patch has area dx² and its
+surface cell has occupied volume fill*dx³; their ratio supplies the physical
+force density without a diffuse-interface normalization. Normal gradients do
+not become tangential forces. Normal capillary pressure remains solely in the
+existing smoothed-fill reconstruction with that cell's original sigma.
+
+The extra traction composes with the original Guo gravity, source buoyancy and
+any integrated Lorentz load. Source-frame changes retain physical velocity and
+force-corrected stress without a second impulse. Original thermal substeps,
+mass routes, enthalpy transport, finite wall/gas histories and endpoint source
+admission remain transactional. A vanishing gradient restores the original
+force frame. Constant-source ordinary curved trajectories keep their original
+arithmetic; this opt-in does not relax their source restrictions.
+
+Scope is a first-order held-force split with cell-centered source temperature
+and a caller-admitted flat-interface approximation. It is not arbitrary curved
+thermocapillarity, a resolved interface-temperature law, surfactant transport,
+contact-line calibration, capillary heat, surface entropy or a conservative
+surface/total-mechanical-energy model. Refine time and interface resolution;
+no experiment-backed accuracy or unconditional stability is claimed.
+
+Focused G1/G3/G4 regressions cover all normal-axis/sign choices, independent
+traction magnitude and occupied-volume weighting, normal-gradient exclusion,
+original Laplace-pressure arithmetic, constant-source parity, source-only
+native flow direction, heat/mass/replay and transactional refusal/retry.
+Test targets are the native `d3q19::freesurface3::thermocapillary` unit module
+and `material_free_surface_enthalpy`'s
+`conduction::capillarity::thermocapillary` module with `enthalpy-coupling` enabled.
+The broad MR26/MR27 deliveries remain open.

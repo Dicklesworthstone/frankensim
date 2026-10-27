@@ -40,6 +40,9 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         gate: &CancelGate,
     ) -> Result<Self, Error> {
         poll(gate)?;
+        if self.thermocapillary.is_some() {
+            return Err(Error::Invalid("flat-interface thermocapillarity cannot impose a separate contact-angle geometry"));
+        }
         if self.wetting.is_some() {
             return Err(Error::Invalid("thermal liquid already owns a planar wetting history"));
         }

@@ -201,6 +201,7 @@ impl FreeSurface3 {
             tiles,
             solid,
             sigma,
+            local_sigma: None,
             contact,
             planar_contact: None,
             planar_contact_field: None,

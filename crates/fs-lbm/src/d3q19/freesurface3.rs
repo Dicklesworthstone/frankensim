@@ -45,6 +45,7 @@ use super::{CollisionError3, E3, OPP3, Q3, TILE, equilibrium3};
 mod initial;
 pub use initial::FreeSurfaceInitialCell3;
 mod forcing;
+pub(crate) mod thermocapillary;
 pub(crate) mod transport;
 pub(crate) mod wetting;
 use transport::{MassLocation3, MassTransport3};
@@ -255,6 +256,9 @@ pub struct FreeSurface3 {
     solid: std::collections::BTreeSet<u64>,
     /// Surface tension coefficient (0 = off), 2-D port.
     sigma: f64,
+    /// Source-evolved coefficients on the current wet cells. The original
+    /// scalar path remains unchanged when all coefficients equal `sigma`.
+    local_sigma: Option<BTreeMap<(u64, usize), f64>>,
     contact: ContactModel3,
     planar_contact: Option<PlanarContactAngle3>,
     planar_contact_field: Option<wetting::PlanarContactField3>,
@@ -458,6 +462,7 @@ impl FreeSurface3 {
             tiles,
             solid,
             sigma,
+            local_sigma: None,
             contact,
             planar_contact: None,
             planar_contact_field: None,
@@ -846,11 +851,12 @@ impl FreeSurface3 {
     /// Reference density for gas reconstruction: `1 + σκ/cs²` (2-D port;
     /// σ = 0 short-circuits to exactly 1).
     fn reference_density(&self, key: u64, lane: usize) -> f64 {
-        if self.sigma == 0.0 {
+        let sigma = self.local_sigma.as_ref().map_or(self.sigma, |field| field[&(key, lane)]);
+        if sigma == 0.0 {
             return 1.0;
         }
         let kappa = self.curvature(key, lane);
-        self.sigma.mul_add(kappa / CS2_3, 1.0)
+        sigma.mul_add(kappa / CS2_3, 1.0)
     }
 
     /// Curvature of the smoothed fill at the cell: `div(n̂)` with
@@ -901,6 +907,9 @@ impl FreeSurface3 {
         local_tau: Option<&BTreeMap<(u64, usize), f64>>,
     ) -> Result<(), FreeSurfaceError3> {
         check_cancel(gate)?;
+        if let Some(field) = &self.local_sigma {
+            self.admit_surface_tensions(field, gate)?;
+        }
         let ledger_before = self.ledger_mass();
         self.refresh_fill(gate)?;
         let (model, _) = self.grid.collision();

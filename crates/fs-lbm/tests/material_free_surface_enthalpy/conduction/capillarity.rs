@@ -22,6 +22,9 @@ mod wetting;
 #[path = "electrical.rs"]
 mod electrical;
 
+#[path = "thermocapillary.rs"]
+mod thermocapillary;
+
 const EXPOSED: [usize; 3] = [3, 3, 3];
 
 fn source_card(sigma: f64, shear: bool, sigma_upper_k: f64) -> MaterialCard {

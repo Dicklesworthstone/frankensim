@@ -60,7 +60,7 @@ pub(super) struct RheologicalState {
 }
 
 impl RheologyBinding {
-    fn try_new(
+    pub(super) fn try_new(
         source: &ResolvedLiquidSurfaceState,
         law: &LiquidTemperatureLaw<'_>,
         solve: RheologySolve,
@@ -198,7 +198,7 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
         let binding = RheologyBinding::try_new(self.material(), law, solve)?;
         let flow = self.free_surface3_from_cells_inner(domain, initial, cx)?;
         let liquid =
-            flow.with_enthalpy_model(law, caloric, controls, initial_h, None, Some(binding), gate)?;
+            flow.with_enthalpy_model(law, caloric, controls, initial_h, None, Some(binding), None, gate)?;
         cx.checkpoint().map_err(|_| FreeSurfaceError3::Cancelled)?;
         Ok(liquid)
     }
