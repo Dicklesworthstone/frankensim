@@ -170,3 +170,236 @@ fn independent_temperature_binding_retains_strict_source_phase_density_and_conte
         assert!(resolve_contact_at_temperatures(contact,&cards,&point(),[&bad,&r[1]],305.0).is_err());
     }
 }
+
+#[test]
+fn source_dependent_contact_heat_reaches_both_native_reservoirs_with_closed_feedback() {
+    use fs_conduction::interface::lumped_pair::MaterialContactLaw;
+    use fs_conduction::interface::temperature::ContactIterationConfig;
+    use fs_material::thermal::interface::ThermalInterfacePoint;
+
+    let a = material(0.02);
+    let b = material(0.04);
+    let mechanical_interface = pair_interface(&a, &b);
+    let cards = pair_cards(&a, &b, &mechanical_interface);
+    let ca = caloric(&a, 0.02);
+    let cb = caloric(&b, 0.04);
+    let kelvin = QuantitySpec::dimensional(Temperature::DIMS);
+    let dims = AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS;
+    let mut claims = ClaimSet::new();
+    claims
+        .insert_claim(PropertyClaim {
+            key: PropertyKey::new(AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY, dims),
+            value: PropertyValue::Curve {
+                abscissa: "meanT".into(),
+                abscissa_dims: Temperature::DIMS,
+                knots: vec![(300.0, 1e-4), (320.0, 3e-4)],
+                dims,
+            },
+            validity: ValidityDomain::unconstrained()
+                .with_quantity("aT", kelvin, 300.0, 320.0)
+                .with_quantity("bT", kelvin, 300.0, 320.0)
+                .with_quantity("meanT", kelvin, 300.0, 320.0),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::LinearInside,
+            observations: vec![],
+            provenance: Provenance {
+                source: "synthetic temperature-dependent contact resistance, not measured material"
+                    .into(),
+                license: "CC0-1.0".into(),
+                artifact: None,
+            },
+        })
+        .unwrap();
+    let thermal_interface = InterfaceSystemCard::assemble(
+        SurfaceSpec {
+            material: a.id().clone(),
+            texture_frame: "surface-a".into(),
+        },
+        SurfaceSpec {
+            material: b.id().clone(),
+            texture_frame: "surface-b".into(),
+        },
+        SystemContext {
+            medium: "dry".into(),
+            third_body: None,
+            environment: "test".into(),
+            history: "initial".into(),
+        },
+        claims,
+        vec![],
+    )
+    .unwrap();
+    let conditions = QueryPoint::new()
+        .with_quantity("aT", kelvin, 310.0)
+        .unwrap()
+        .with_quantity("bT", kelvin, 300.0)
+        .unwrap()
+        .with_quantity("meanT", kelvin, 305.0)
+        .unwrap();
+    let binding = ThermalInterfacePoint {
+        interface: &thermal_interface,
+        materials: [&a, &b],
+        context: &conditions,
+        temperature_axes: ["aT", "bT"],
+        liquid_fraction_axes: [None, None],
+        mean_temperature_axis: Some("meanT"),
+    };
+    let transport = LumpedThermalTransport::try_declared(100.0, 0.0).unwrap();
+    let iteration = ContactIterationConfig {
+        max_iterations: 64,
+        relaxation: 0.7,
+        residual_tolerance_j: 1e-13,
+    };
+
+    context(|gate, cx| {
+        let mut system = pair(&cards, [&ca, &cb], [0.2, 0.0]);
+        let law = MaterialContactLaw::new(
+            binding,
+            [
+                system.reservoirs()[0].state(),
+                system.reservoirs()[1].state(),
+            ],
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let reference = law
+            .reference()
+            .property(AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY)
+            .unwrap();
+        let selected = reference.answer().receipt.selected;
+        let initial_resistance = reference.value_si();
+        near(initial_resistance, 1.5e-4, 1e-18);
+        let initial_energy = system.mechanics().stored_energy_j();
+        let mut transferred = 0.0;
+        let mut active = 0;
+        let mut changed_source_value = false;
+
+        for _ in 0..1800 {
+            let frame = system
+                .step_with_material_feedback(
+                    &[0.0; 2],
+                    gate,
+                    |contact, reservoirs| refresh(contact, reservoirs, &cards),
+                    |trial| {
+                        let reservoirs = trial.reservoirs();
+                        let area = trial.contact_patch_area_m2("touch")?;
+                        let transfers = law
+                            .advance(
+                                cx,
+                                [reservoirs[0].thermal, reservoirs[1].thermal],
+                                [&transport, &transport],
+                                area,
+                                1e-14,
+                                iteration,
+                            )
+                            .map_err(|error| ImpactError::Owner(error.to_string()))?;
+                        Ok(CoupledThermalStep {
+                            transfers: Vec::from(transfers),
+                            boundary_heat_j: 0.0,
+                        })
+                    },
+                )
+                .unwrap();
+
+            let transfers = &frame.thermal.transfers;
+            let report = &transfers[0].report;
+            assert_eq!(frame.thermal.boundary_heat_j, 0.0);
+            assert_eq!(transfers[0].external_heat_j, -transfers[1].external_heat_j);
+            assert!(frame.thermal.impact.combined_energy_residual_j.abs() < 1e-9);
+            assert!(report.physical_contact_residual_j.abs() <= iteration.residual_tolerance_j);
+            assert!(report.endpoint_maximum_biot.is_finite());
+            assert!(report.endpoint_maximum_biot <= 0.1);
+            assert!(report.iterations <= iteration.max_iterations);
+
+            let temperatures = [
+                system.reservoirs()[0].state().temperature_k(),
+                system.reservoirs()[1].state().temperature_k(),
+            ];
+            assert_eq!(
+                report.endpoint.state_coordinate("aT"),
+                Some(temperatures[0])
+            );
+            assert_eq!(
+                report.endpoint.state_coordinate("bT"),
+                Some(temperatures[1])
+            );
+            let mean = 0.5 * temperatures[0] + 0.5 * temperatures[1];
+            assert_eq!(report.endpoint.state_coordinate("meanT"), Some(mean));
+            let endpoint = report
+                .endpoint
+                .property(AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY)
+                .unwrap();
+            assert_eq!(endpoint.answer().receipt.selected, selected);
+            near(
+                endpoint.value_si(),
+                1e-4 * (1.0 + 0.1 * (mean - 300.0)),
+                1e-16,
+            );
+            changed_source_value |= (endpoint.value_si() - initial_resistance).abs() > 1e-12;
+            if report.applied.area_m2 > 0.0 {
+                active += 1;
+                transferred += transfers[1].external_heat_j;
+            } else {
+                assert_eq!(transfers[0].external_heat_j, 0.0);
+            }
+        }
+
+        assert!(active > 0 && transferred > 1e-7);
+        assert!(changed_source_value);
+        assert!(system.reservoirs()[0].state().temperature_k() < 310.0);
+        assert!(system.reservoirs()[1].state().temperature_k() > 300.0);
+        near(
+            system.mechanics().stored_energy_j()
+                + system
+                    .reservoirs()
+                    .iter()
+                    .map(|r| r.storage_change_j())
+                    .sum::<f64>(),
+            initial_energy,
+            1e-9,
+        );
+        near(
+            system
+                .reservoirs()
+                .iter()
+                .map(|r| r.boundary_heat_j())
+                .sum(),
+            0.0,
+            1e-15,
+        );
+
+        // Refusal after a real mechanical trial must leave both accepted histories intact.
+        let motion = system.mechanics().state().to_vec();
+        let samples = system.mechanics().samples();
+        let sources = system.mechanics().material_contacts().to_vec();
+        let stores = system.reservoirs().to_vec();
+        let mut thermal_called = false;
+        let refused = system.step_with_coupled_transport(&[0.0; 2], gate, |trial| {
+            thermal_called = true;
+            let reservoirs = trial.reservoirs();
+            let area = trial.contact_patch_area_m2("touch")?;
+            let transfers = law
+                .advance(
+                    cx,
+                    [reservoirs[0].thermal, reservoirs[1].thermal],
+                    [&transport, &transport],
+                    area,
+                    1e-14,
+                    ContactIterationConfig {
+                        max_iterations: 0,
+                        ..iteration
+                    },
+                )
+                .map_err(|error| ImpactError::Owner(error.to_string()))?;
+            Ok(CoupledThermalStep {
+                transfers: Vec::from(transfers),
+                boundary_heat_j: 0.0,
+            })
+        });
+        assert!(thermal_called && refused.is_err());
+        assert_eq!(system.mechanics().state(), motion);
+        assert_eq!(system.mechanics().samples(), samples);
+        assert_eq!(system.mechanics().material_contacts(), sources);
+        assert_eq!(system.reservoirs(), stores);
+    });
+}
