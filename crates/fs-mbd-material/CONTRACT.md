@@ -166,3 +166,42 @@ There is no second source resolver, rotation formula or scalar expansion path.
 The reference density passed to that shared lowering is the same retained
 density as before; existing prescribed-temperature arithmetic and identities
 are unchanged.
+
+## Continuing free-body motion under finite material heating
+
+`PrincipalFrame` is the shared full-inertia lowering used by the original
+`PrincipalBody` and by changed configurations. `transfer_state_from` retains
+world centre-of-mass position, linear and spin angular momentum, and authored
+body orientation when the centroid and principal axes change. The geometry
+origin translates to retain the physical mass centre. Equal, bit-identical
+mass is required; the composing owner must additionally establish unchanged
+matter and a common body frame. The returned signed kinetic parameter work is
+explicit and bounded. It is neither heat nor damping, and principal-axis
+relabeling is not a new physical orientation.
+
+`thermal::heating::motion::HeatedRigidBody` establishes that lineage from one
+`HeatedBody`, retaining its original source/material inventory and thermal
+timeline. Every actual thermal substep advances the existing free-body
+integrator using the current inertia, resolves the next source expansion and
+transfers the continuing momentum to that configuration. A mechanical step
+limit tightens the same thermal scheduler; events and cooling retain one clock.
+`advance_with` composes the existing generated-heat/transport observers without
+another heat solve. Source failures, cancellations and work-budget failures
+discard the entire proposed thermal and mechanical history.
+
+The audit separates caloric heat, signed configuration work and fixed-inertia
+numerical energy change. Limits apply to sums of absolute work/error during an
+advance, so heating followed by cooling cannot hide an exceeded allowance.
+This is one-way thermal forcing of free flight under uniform gravity. Internal
+deformation velocities, thermal stresses, support/contact work and reciprocal
+thermoelastic heat are omitted; configuration work is not silently debited from
+the thermal cells. The retained thermal fixed points are in the moving body
+frame, not world-space clamps. Uniform-region and small-geometry-change
+assumptions remain. The split is first order in changing inertia and requires
+time refinement independently of energy closure.
+
+G1/G3 tests in `principal` and `heating_motion` cover full-tensor/centroid changes,
+world angular momentum including its orbital contribution, source heat-capacity
+changes to actual spin, nonuniform expansion, heating/cooling, restart equality,
+and atomic source/work/cancellation refusal. Synthetic material fixtures test
+the implemented mechanics; they are not empirical material qualification.
