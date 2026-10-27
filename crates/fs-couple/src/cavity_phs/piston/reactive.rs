@@ -9,6 +9,8 @@
 //! energy is therefore not added again as a heat input. The new composition,
 //! EOS, caloric, transport and acoustic state then drives the original piston
 //! pressure/work solve. One physical interval is used by both stages.
+//! The [`heat`] and [`boundary`] entries instead expose actual heated or
+//! moving-volume endpoints to enclosing simultaneous thermal/mechanical solves.
 //!
 //! This is a first-order reaction-then-motion split for homogeneous,
 //! caller-declared stoichiometric mass-action laws. Each rate scale is declared
@@ -39,6 +41,8 @@ pub mod subcycling;
 pub mod implicit;
 /// Endpoint chemistry with explicitly balanced heat on the original gas owner.
 pub mod heat;
+/// Same-endpoint chemistry with explicit heat, volume and mechanical work.
+pub mod boundary;
 
 use super::{GasPiston, PistonError, PistonInput, PistonSolve, PistonStep};
 use fs_material::MaterialError;
@@ -204,9 +208,9 @@ pub struct GasReactionStep {
     pub maximum_species_residual_mol: f64,
     /// Actual total mass discrepancy (the original parcel preserves mass exactly) [kg].
     pub mass_residual_kg: f64,
-    /// Actual internal-energy change at fixed geometry [J]. The ordinary
-    /// adiabatic entry bounds it about zero; the explicit heated entry balances
-    /// it against that entry's separately reported heat supply.
+    /// Actual internal-energy change [J]. The ordinary adiabatic entry bounds
+    /// it about zero; heated and moving-boundary entries balance it against
+    /// their separately reported heat supply and delivered mechanical work.
     pub stored_energy_change_j: f64,
     /// Measured gas entropy change [J/K]. For a heated endpoint this includes
     /// heat transport; its separate report subtracts the endpoint heat entropy.
@@ -394,6 +398,21 @@ impl GasReaction {
         &self, gas: &ClosedGasParcel, changes: &[f64], expected: &[f64], heat_j: f64,
         controls: GasReactionSolve, cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(ClosedGasParcel, usize), GasReactionError> {
+        self.reconstruct_inventory_at_boundary(
+            gas, changes, expected,
+            boundary::GasReactionBoundary {
+                final_volume_m3: gas.volume_m3(), heat_j, work_by_gas_j: 0.0,
+            },
+            controls, cancelled,
+        )
+    }
+
+    fn reconstruct_inventory_at_boundary(
+        &self, gas: &ClosedGasParcel, changes: &[f64], expected: &[f64],
+        boundary: boundary::GasReactionBoundary,
+        controls: GasReactionSolve, cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(ClosedGasParcel, usize), GasReactionError> {
+        boundary.validate()?;
         let mut next = gas.clone();
         let mut iterations = 0;
         if changes.iter().any(|change| *change != 0.0) {
@@ -429,9 +448,18 @@ impl GasReaction {
                     invalid("reaction composition does not satisfy the original quantity owner")
                 })?;
             let model = self.catalog.with_composition(composition)?;
-            iterations = next.replace_model_with_heat(model, heat_j, controls.gas, cancelled)?.iterations;
-        } else if heat_j != 0.0 {
-            iterations = next.add_heat(heat_j, controls.gas, cancelled)?.iterations;
+            iterations = next.replace_model_with_heat_work_volume(
+                model, boundary.final_volume_m3, boundary.heat_j, boundary.work_by_gas_j,
+                controls.gas, cancelled,
+            )?.iterations;
+        } else if boundary.final_volume_m3 != gas.volume_m3() || boundary.work_by_gas_j != 0.0 {
+            let model = next.model().clone();
+            iterations = next.replace_model_with_heat_work_volume(
+                model, boundary.final_volume_m3, boundary.heat_j, boundary.work_by_gas_j,
+                controls.gas, cancelled,
+            )?.iterations;
+        } else if boundary.heat_j != 0.0 {
+            iterations = next.add_heat(boundary.heat_j, controls.gas, cancelled)?.iterations;
         }
         Ok((next, iterations))
     }
@@ -449,6 +477,27 @@ impl GasReaction {
         progress: mechanism::Progress, heat_j: f64, controls: GasReactionSolve,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<GasReactionCandidate, GasReactionError> {
+        self.admit_progress_at_boundary(
+            gas, initial, next, progress,
+            boundary::GasReactionBoundary {
+                final_volume_m3: gas.volume_m3(), heat_j, work_by_gas_j: 0.0,
+            },
+            true, controls, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn admit_progress_at_boundary(
+        &self, gas: &ClosedGasParcel, initial: &[f64], next: ClosedGasParcel,
+        progress: mechanism::Progress, boundary: boundary::GasReactionBoundary,
+        admit_entropy: bool, controls: GasReactionSolve,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<GasReactionCandidate, GasReactionError> {
+        if next.volume_m3().to_bits() != boundary.final_volume_m3.to_bits()
+            || next.mass_kg().to_bits() != gas.mass_kg().to_bits()
+        {
+            return Err(invalid("reaction endpoint lost its original mass or prescribed volume"));
+        }
         let mechanism::Progress { primary, additional, changes, expected, consumed } = progress;
         let components = self.catalog.thermodynamics().components();
         let actual = self.inventory(&next)?;
@@ -471,11 +520,11 @@ impl GasReaction {
                 - gas.state().specific_internal_energy_j_kg());
         let entropy = gas.mass_kg()
             * (next.state().specific_entropy_j_kg_k()? - gas.state().specific_entropy_j_kg_k()?);
-        let energy_residual = energy - heat_j;
+        let energy_residual = (energy + boundary.work_by_gas_j) - boundary.heat_j;
         // Backward Euler uses the actual endpoint temperature for heat entropy
         // transport. This residual includes its nonnegative time-discretization
         // entropy; it is not a measurement of chemical entropy production alone.
-        let heat_entropy = heat_j / next.state().state().temperature;
+        let heat_entropy = boundary.heat_j / next.state().state().temperature;
         let entropy_residual = entropy - heat_entropy;
         if maximum_residual > controls.species_tolerance_mol
             || !energy.is_finite()
@@ -486,10 +535,10 @@ impl GasReaction {
             || !entropy_residual.is_finite()
         {
             return Err(invalid(
-                "reaction species, total internal energy/heat or entropy did not close; refine the interval",
+                "reaction species, internal energy/heat/work or entropy did not close; refine the interval",
             ));
         }
-        if entropy_residual < -controls.entropy_tolerance_j_k {
+        if admit_entropy && entropy_residual < -controls.entropy_tolerance_j_k {
             return Err(GasReactionError::EntropyDecrease {
                 change_j_k: entropy_residual, tolerance_j_k: controls.entropy_tolerance_j_k,
             });

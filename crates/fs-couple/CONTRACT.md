@@ -7447,3 +7447,63 @@ dielectric loss, depoling, nonlinear/anisotropic 3-D fields and electrical
 contacts are not evolved. The rod context and reference mass stay fixed;
 explicit resistor/thermal-network states evolve. Coupled thermal accuracy is
 generally first order; work closure is not a time-accuracy certificate.
+
+
+### Joint implicit chemistry and native elastic gas-boundary motion
+
+`cavity_phs::modal::reactive::coupled` adds
+`GasValveMotion::{coupled_reactive_step_candidate, step_coupled_reactive}`.
+It closes the original implicit mechanism, material gas energy inversion and
+mesh-derived elastic wall response at one accepted endpoint. Each pressure
+trial starts from the original accepted gas and modal states. The native
+held-pressure response supplies the anchored final volume and actual wall
+sweep; the gas receives the matching debit `W = p_trial * (V1 - V0)`.
+The original species equations use that same `V1`, composition and
+`U1 = U0 + Q - W`. Formation energy remains inside the original caloric
+storage and is never supplied again as reaction heat.
+
+The original Newton--Krylov owner solves the endpoint EOS pressure residual.
+The adapter has explicit pressure/volume intervals, a bounded pressure
+difference stencil, outer probe count and native solver budget. Every inner
+mechanism retains its source, species, consumed-fraction, caloric and work
+limits. Native gas-loaded clock admission still applies; it is a
+frozen-composition restriction, not an error estimate for the whole reacting
+system. Final admission independently checks pressure, anchored volume,
+reciprocal native input work, EOS/work mismatch and the complete first law:
+gas and modal storage changes plus native structural loss and exterior
+pressure work equal external heat. Structural damping remains an outgoing
+loss; it is not silently deposited in the gas.
+
+`piston::reactive::boundary` exposes the same closed-parcel implicit mechanism
+with explicit final volume, heat and work. It reuses the original composition
+reconstruction and material energy inversion, including the zero-exchange
+path. Heat entropy transport is `Q/T_end`; mechanical work is excluded from
+that transport. Arbitrary enclosing mechanical trial probes defer only the
+entropy inequality, which the native modal owner must enforce after pressure
+and work close and before publication. The public standalone boundary
+candidate always enforces it. All other source and conservation gates apply
+to every trial. Refusal or cancellation leaves both original owners and their
+histories available for deterministic retry.
+
+The focused child `tests/solid_enthalpy/valve/gas_motion/reactive/coupled.rs`
+specifies independent equal-mass isomer and one-DOF six-tet-cube references,
+source-rate and stiffness substitutions, explicit volume/heat/work and native
+zero-exchange parity, continued anchored motion/species/energy, and
+budget/domain/caloric/cancellation rollback. The scalar oracle eliminates
+the species and exact held-force wall response algebraically; it does not
+reuse the runtime nonlinear solver. Coefficients are synthetic.
+Runtime Rust parsing completed before the executor became unavailable;
+the newly added tests have received source/API review and independent
+reference arithmetic only. Native compilation and numerical execution
+remain pending.
+
+This path is first order: chemistry and gas pressure use backward Euler,
+while the structural held-force response retains its native ZOH integration.
+The original reaction-then-motion split remains available. The joint path
+requires one original implicit mechanism and a shared gas inversion policy;
+chemistry-only subcycling is refused so refinement covers the complete
+coupled sample. It does not add flame/shock propagation, thermal wall
+exchange, evolving structural material/basis, moving mesh reconstruction,
+or composition-dependent radiation transfers. No nonlinear uniqueness or
+unconditional convergence claim is made. The broader material-reality and
+gas-chemistry beads remain open.

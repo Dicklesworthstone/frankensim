@@ -1,6 +1,8 @@
 //! G1/G3/G4: source chemistry drives the original mesh mode, with an independent
 //! constant-cv pressure/work oracle and transactional refusal controls.
 //! All coefficients are synthetic; these are not empirical combustion checks.
+mod coupled;
+
 use super::*;
 use fs_couple::cavity_phs::modal::reactive::ReactiveModalGasError;
 use fs_couple::cavity_phs::piston::reactive::{

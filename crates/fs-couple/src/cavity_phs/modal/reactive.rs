@@ -11,6 +11,11 @@
 //! not claim a simultaneous implicit reacting-fluid/structure solve, flame
 //! propagation, chemical acoustic relaxation or structural heat transfer. The
 //! structural material/geometry epoch and observation transfers remain fixed.
+//!
+//! The separate [`coupled`] entry solves endpoint chemistry and pressure/work
+//! together while retaining this same native wall and volume chart.
+
+pub mod coupled;
 
 use super::{GasValveMotion, ModalGasError, ModalGasSolve, ModalGasStep};
 use crate::cavity_phs::piston::reactive::{

@@ -1,7 +1,8 @@
 //! Simultaneous conservative backward Euler for a declared reaction mechanism.
 //!
-//! Solve every extent equation xi_r - dt V rate_r(n0 + S xi, U0, V) = 0
-//! with fs-solver's Newton--Krylov/globalization owner. A trial reconstructs
+//! Solve every extent equation xi_r - dt V1 rate_r(n0 + S xi, U1, V1) = 0
+//! with fs-solver's Newton--Krylov/globalization owner. The original entry has
+//! U1=U0 and V1=V0; heat/work entries use U1=U0+Q-W. A trial reconstructs
 //! ONE original gas state; all channels then query its actual T, pressure and
 //! composition. Formation energy remains in the original total-U chart.
 //!
@@ -174,7 +175,7 @@ struct Problem<'a, C> {
     scales: Vec<f64>,
     bounds: Vec<[f64; 2]>,
     duration_s: f64,
-    heat_j: f64,
+    boundary: boundary::GasReactionBoundary,
     controls: GasReactionSolve,
     policy: &'a ImplicitMechanismSolve,
     cancelled: RefCell<&'a mut C>,
@@ -291,11 +292,11 @@ impl<C: FnMut() -> bool> Problem<'_, C> {
         self.evaluations.set(spent + 1);
         let extents = self.extents(x)?;
         let inventory = self.inventory(&extents)?;
-        let (gas, energy_iterations) = self.law.reconstruct_inventory_with_heat(
+        let (gas, energy_iterations) = self.law.reconstruct_inventory_at_boundary(
             self.gas,
             &inventory.changes,
             &inventory.amounts,
-            self.heat_j,
+            self.boundary,
             self.controls,
             &mut || self.stop(),
         )?;
@@ -616,7 +617,28 @@ pub(in crate::cavity_phs::piston::reactive) fn candidate_with_heat(
     policy: &ImplicitMechanismSolve,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<GasReactionCandidate, GasReactionError> {
+    candidate_at_boundary(
+        law, gas, duration_s,
+        boundary::GasReactionBoundary {
+            final_volume_m3: gas.volume_m3(), heat_j, work_by_gas_j: 0.0,
+        },
+        true, controls, policy, cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::cavity_phs::piston::reactive) fn candidate_at_boundary(
+    law: &GasReaction,
+    gas: &ClosedGasParcel,
+    duration_s: f64,
+    boundary: boundary::GasReactionBoundary,
+    admit_entropy: bool,
+    controls: GasReactionSolve,
+    policy: &ImplicitMechanismSolve,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<GasReactionCandidate, GasReactionError> {
     poll(cancelled)?;
+    boundary.validate()?;
     policy.validate(law)?;
     let initial = law.inventory(gas)?;
     let components = law.catalog.thermodynamics().components();
@@ -685,7 +707,7 @@ pub(in crate::cavity_phs::piston::reactive) fn candidate_with_heat(
         scales,
         bounds,
         duration_s,
-        heat_j,
+        boundary,
         controls,
         policy,
         cancelled: RefCell::new(cancelled),
@@ -767,12 +789,13 @@ pub(in crate::cavity_phs::piston::reactive) fn candidate_with_heat(
             residual_mol: accepted.residual_mol[j],
         })
         .collect();
-    let mut result = law.admit_progress_with_heat(
+    let mut result = law.admit_progress_at_boundary(
         gas,
         &problem.initial,
         accepted.gas,
         accepted.progress,
-        heat_j,
+        boundary,
+        admit_entropy,
         controls,
         &mut || problem.stop(),
     )?;
