@@ -2541,3 +2541,37 @@ ordering only and does not extend the original transport-stage entropy account
 to subsequent heat/work. The multi-chamber DG integration exercises a late
 heated-reservoir reversal and complete rollback. Source/API review and syntax
 parsing completed; native execution remains unverified in this environment.
+
+
+### Source-backed reversible isotropic thermoelastic storage
+
+`elastic::thermal::AffineIsotropicThermoelastic` retains the original material
+card, selected elastic and expansion claims, full query semantics and declared
+positive temperature interval. It admits positive affine Young's modulus,
+constant Poisson ratio in (-1, 1/2), and constant instantaneous linear expansion.
+Dimensionally equal semantic coefficient kinds are not interchangeable with
+the native dimension-only elastic schema. External coordinates and selected
+claims stay pinned through every refresh.
+
+The original `IsotropicElastic` supplies stress. Explicit conversions between
+its tensor-shear Voigt convention and the solid owner's Mandel convention
+preserve work. At fixed total strain, the adapter evaluates elastic Helmholtz
+energy Psi, entropy -dPsi/dT, internal energy Psi+T*S and fixed-total-strain
+capacity -T*d2Psi/dT2. Total and elastic strain components must stay inside the
+declared small-strain envelope. The stress-free reference is the retained
+expansion source, not an inferred density or material-name temperature.
+
+The full-interval conservative lower capacity bound is intended to be added
+to the actual caloric inventory by a coupled physical consumer. This adapter
+does not create heat storage, infer current density, evolve temperature, solve
+mechanical equilibrium, supply plasticity or claim finite-deformation validity.
+A consumer must separately retain its reference mass, admit the actual caloric
+chart and check positive combined capacity.
+
+Two focused regression definitions cover independent isotropic invariants,
+pure shear work, fixed-total-strain thermal derivatives, signed modulus slopes
+and expansion, exact relaxed/constant-source limits, capacity bounds and
+source/schema/domain refusals. All three changed Rust files passed syntax
+parsing. Independent finite-difference reference calculations and bounded
+physics/API reviews completed. Native compilation, Cargo tests and rustfmt
+remain unexecuted in this environment.

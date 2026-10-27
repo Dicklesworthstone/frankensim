@@ -6,6 +6,9 @@
 use crate::{MaterialAdmissibility, MaterialError, SmallStrainLaw, Tangent6, Voigt};
 use fs_evidence::{Ambition, ModelCard, ValidityDomain};
 
+/// Source-derived reversible thermal response of the original isotropic law.
+pub mod thermal;
+
 /// Isotropic linear elasticity (E, ν).
 #[derive(Debug, Clone, PartialEq)]
 pub struct IsotropicElastic {
