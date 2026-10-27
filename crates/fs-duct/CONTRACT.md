@@ -1225,3 +1225,39 @@ focused native/source regressions add analytic Maxwell continuation, physical
 storage quadrature, source-temperature response and nonzero-history rollback.
 Rust parsing and source review passed; these new native regressions have not
 been executed in the implementation environment.
+
+## Live uniform gas changes on a continuing DG trajectory
+
+`DgDuct::rebind_uniform_gas` and its source-field counterpart retain acoustic
+compression `p/B` and axial momentum `rho*q/A` through a prescribed,
+zero-duration uniform material intervention at fixed geometry. The original
+energy coordinates scale by `sqrt(B_new/B_old)` and
+`sqrt(rho_old/rho_new)`. Native geometric mass maps, the wave operator,
+matched boundaries and pressure/volume-flow ports receive the same gas
+coefficients; physical pressure and flow change consistently.
+
+Wall displacement, velocity, elastic/Kelvin response, regional Maxwell
+histories, clock, initial energy and prior dissipation remain intact. The
+actual acoustic storage change enters signed parameter work once. Physical
+wall observation maps are updated consistently with the gas normalization.
+This work belongs to the owner changing the background material; it is not
+heat, loss or an inferred mass/species injection.
+
+Source-backed updates retain the complete original replacement field catalog,
+queries, receipts and phase policy, including catalog species whose local
+fraction is zero. The complete field must cover the original length and be
+spatially uniform. Unsupported nonuniform gas and native viscothermal gas
+closures refuse; their histories are neither averaged nor reset. Regional
+Maxwell wall histories remain supported.
+
+All owner/state, work-budget, arithmetic and cancellation checks precede
+publication. A new native propagator is required; the old operator identity
+cannot continue the changed state. This interface supplies no background
+thermal/species dynamics, mean flow, static pressure traction or nonuniform
+temporal-interface model.
+
+Three native regressions cover an independent one-element wave continuation,
+signed work and subsequent ledger closure, regional wall memory and physical
+acceleration, port/matched-boundary equivalence to fresh assembly, and atomic
+refusals. Source-wall integration tests live in fs-couple. Parsing and source
+review do not establish executed native or empirical validation.

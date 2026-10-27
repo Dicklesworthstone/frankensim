@@ -1,7 +1,11 @@
 //! Source-backed wall changes on a continuing native DG trajectory.
 
 use super::*;
-use fs_duct::dg::{DgDuct, DgPropagator, DgState, DgWallMaterialUpdate, DgWallRelaxationTransfer};
+use fs_duct::dg::{
+    DgDuct, DgGasMaterialUpdate, DgPropagator, DgState, DgWallMaterialUpdate,
+    DgWallRelaxationTransfer,
+};
+use fs_material::gas_field::AxialGasField;
 
 fn duct_error(error: fs_duct::DuctError) -> AcousticRealizeError {
     match error {
@@ -159,7 +163,80 @@ fn prepare(
     })
 }
 
+/// Prepare the same live gas transfer and certified clock for either wall
+/// source layout. Native wall coordinates and all immutable source assignments
+/// remain with their existing owner; the new field retains its gas catalog.
+fn prepare_gas(
+    duct: &DgDuct,
+    state: &DgState,
+    propagator: &DgPropagator,
+    field: &AxialGasField,
+    maximum_absolute_parameter_work_j: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(DgDuct, DgState, DgPropagator, DgGasMaterialUpdate), AcousticRealizeError> {
+    if cancelled() {
+        return Err(AcousticRealizeError::Cancelled);
+    }
+    let mut next_state = state.clone();
+    propagator.sync_nodal(&mut next_state).map_err(duct_error)?;
+    let mut next_duct = duct.clone();
+    let report = next_duct
+        .rebind_uniform_gas_field(
+            &mut next_state,
+            field,
+            maximum_absolute_parameter_work_j,
+            cancelled,
+        )
+        .map_err(duct_error)?;
+    if cancelled() {
+        return Err(AcousticRealizeError::Cancelled);
+    }
+    let next_propagator = next_duct
+        .propagator(propagator.dt(), propagator.tolerance())
+        .map_err(duct_error)?;
+    if cancelled() {
+        return Err(AcousticRealizeError::Cancelled);
+    }
+    Ok((next_duct, next_state, next_propagator, report))
+}
+
 impl MaterialWallDg {
+    /// Refresh the continuing uniform gas from its complete shared source field.
+    ///
+    /// Native gas compression and momentum are preserved; pressure, volume flow,
+    /// boundary/side-port efforts and reciprocal wall loading follow the new
+    /// source T/pressure/composition. Wall source, displacement, velocity and
+    /// every Maxwell history survive. The exact physical storage change enters
+    /// the separate parameter-work ledger once, without advancing the clock.
+    /// The owner changing the background must settle this signed work; the
+    /// intervention does not solve heat, mass transport or mean-pressure traction.
+    ///
+    /// Field, native operator, state and certified propagator publish together.
+    /// The original timestep/tolerance and wall applicability band are retained.
+    /// Nonuniform gas and viscothermal GAS memory refuse, never average/reset;
+    /// regional Maxwell wall memory remains supported by the native transfer.
+    pub fn rebind_gas_field_controlled(
+        &mut self,
+        field: &AxialGasField,
+        state: &mut DgState,
+        propagator: &mut DgPropagator,
+        maximum_absolute_parameter_work_j: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<DgGasMaterialUpdate, AcousticRealizeError> {
+        let (duct, next, stepping, report) = prepare_gas(
+            &self.duct,
+            state,
+            propagator,
+            field,
+            maximum_absolute_parameter_work_j,
+            cancelled,
+        )?;
+        let _old_duct = core::mem::replace(&mut self.duct, duct);
+        let _old_state = core::mem::replace(state, next);
+        let _old_propagator = core::mem::replace(propagator, stepping);
+        Ok(report)
+    }
+
     /// Replace a live uniform wall from original material sources.
     ///
     /// Supply a newly resolved material state (for example at a new supported
@@ -215,6 +292,32 @@ impl MaterialWallDg {
 }
 
 impl RegionalMaterialWallDg {
+    /// Source-retaining uniform gas refresh for independently sourced walls.
+    /// Uses `MaterialWallDg::rebind_gas_field_controlled`'s physical transfer and
+    /// atomic publication, retaining every original element's material receipt,
+    /// wall motion and hereditary history without a regional average.
+    pub fn rebind_gas_field_controlled(
+        &mut self,
+        field: &AxialGasField,
+        state: &mut DgState,
+        propagator: &mut DgPropagator,
+        maximum_absolute_parameter_work_j: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<DgGasMaterialUpdate, AcousticRealizeError> {
+        let (duct, next, stepping, report) = prepare_gas(
+            &self.duct,
+            state,
+            propagator,
+            field,
+            maximum_absolute_parameter_work_j,
+            cancelled,
+        )?;
+        let _old_duct = core::mem::replace(&mut self.duct, duct);
+        let _old_state = core::mem::replace(state, next);
+        let _old_propagator = core::mem::replace(propagator, stepping);
+        Ok(report)
+    }
+
     /// Replace each original element's live material without averaging sources.
     ///
     /// This is the regional counterpart of `MaterialWallDg::rebind_controlled`:

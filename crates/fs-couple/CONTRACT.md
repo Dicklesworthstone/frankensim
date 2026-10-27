@@ -7191,3 +7191,34 @@ reference, single-solid, small-strain/rotation model with linear overstress;
 it does not claim finite-strain creep, phase change, damage, general rate
 exponents or measured material accuracy. MR22
 (`frankensim-material-reality-ui2if.3.4`) remains open for broader coverage.
+
+## Live gas propagation through source-bound compliant ducts
+
+`MaterialWallDg::rebind_gas_field_controlled` and its regional counterpart
+compose the original native uniform gas intervention with the retained
+`AxialGasField`. Actual compression and gas momentum survive; pressure,
+volume flow, native propagation, matched boundaries, pressure ports and
+reciprocal wall loading use the same new medium. Material data determines the
+change, without a pitch multiplier or replacement oscillator.
+
+Uniform/regional wall motion and local Maxwell histories retain their
+physical values. The original signed parameter-work ledger records the
+actual acoustic storage change once. The adapter prepares the new source
+field, state, operator and same-timestep/tolerance native propagator before
+publishing any of them. Subsequent existing wall-material updates remain
+bound to the refreshed gas.
+
+The operation is a prescribed temporal material intervention at fixed
+geometry. The enclosing gas/thermal owner must separately account for
+background heat, species transfer and the stated parameter work. It adds
+neither mean flow nor static wall pressure traction. Nonuniform gas and
+native viscothermal gas closures refuse until their state transfer is
+represented. Source erasure, foreign owners, excessive work or late
+cancellation preserve the prior accepted trajectory and propagator.
+
+Five native/integration regressions cover independent wave continuation,
+regional Maxwell motion, port and cold-assembly equivalence, actual
+source-data gas changes followed by wall rebinding, and atomic refusal.
+This advances MR08/MR33/MR34 while their wider spatial/history requirements
+remain open. Native execution and measured acoustic validation remain
+separate gates.

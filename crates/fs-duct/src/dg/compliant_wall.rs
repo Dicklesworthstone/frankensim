@@ -91,6 +91,34 @@ fn coordinate_error(error: CoordinateError) -> DuctError {
 }
 
 impl CompliantWall {
+    /// The retained wall coordinates use the geometric Gram root and do not
+    /// change with uniform gas. Its physical observation uses Mp^(-1/2), so
+    /// compensate that map's sqrt(B_new/B_old) change exactly once here.
+    pub(super) fn rescale_uniform_gas_observation(
+        &mut self,
+        pressure_scale: f64,
+    ) -> Result<(), DuctError> {
+        if self.physical_velocity_maps.is_some() {
+            return Err(invalid(
+                "uniform gas update cannot replace spatial wall coordinate maps",
+            ));
+        }
+        for value in core::iter::once(&mut self.displacement_scale)
+            .chain(core::iter::once(&mut self.velocity_scale))
+            .chain(
+                self.relaxation
+                    .iter_mut()
+                    .map(|branch| &mut branch.pressure_scale),
+            )
+        {
+            *value /= pressure_scale;
+            if !value.is_finite() || *value <= 0.0 {
+                return Err(invalid("updated gas lost a physical wall observation scale"));
+            }
+        }
+        Ok(())
+    }
+
     fn pin_at(&self, element: usize) -> WallPin {
         self.regional_pins
             .as_ref()

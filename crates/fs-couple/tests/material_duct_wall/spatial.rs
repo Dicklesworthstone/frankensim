@@ -18,6 +18,8 @@ mod gas_support;
 mod live;
 #[path = "spatial/maxwell_live.rs"]
 mod maxwell_live;
+#[path = "spatial/gas_live.rs"]
+mod gas_live;
 
 fn composition(fraction: f64) -> Composition {
     Composition::new(
