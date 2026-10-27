@@ -54,7 +54,24 @@ PY
 
 The pan-flute, steel-string guitar and Salamander entries are archives. Each
 lists the exact selected member names, output paths, SHA-256 and byte length.
-Extract only those named members and check their hashes. The 27 Salamander members
+Use `--members` to stream these archives and retain only their selected audio:
+
+```sh
+bash data/instruments/fetch-references.sh --members \
+  --manifest data/instruments/references-supplemental.json \
+  --instrument 'Pan pipes' --instrument 'Steel-string guitar' --instrument 'Drum kit'
+```
+
+This retains 33,517,346 bytes of original recordings instead of 431,599,967
+bytes of source archives. Both the complete archive and each selected member
+must match their pins before any new audio file is published. Failed downloads
+leave `.part` files for inspection; existing recordings and partial files are
+never overwritten. A repeat run verifies the extracted recordings without
+downloading the archive again. `--pin --members` reports the archive and member
+digests without retaining downloads. Other files selected with `--members`
+follow the ordinary acquisition path.
+
+The 27 Salamander members
 supply every reference used by `apps/instrument-lab/tools/kitgrade.py`: a primary
 hit, a repeat at the same dynamic and a second dynamic for each of nine kit
 states. Point its `SALAMANDER_OH_DIR` argument at the extracted
@@ -112,6 +129,15 @@ AIFFs also passed complete decoding: 24-bit, 44.1 kHz stereo. This adds 21
 checksum-pinned recordings to the selection. These 30 files were verified in
 memory because the current filesystem was full; the manifest records how to
 retrieve them and does not assert that an audio cache is present.
+
+On 2026-10-27, all 39 sources in the selected Iowa baseline and supplement were
+downloaded again, including all three complete archive streams. Their 66
+selected audio files (262,548,365 bytes) matched their SHA-256 and byte-length
+pins and passed full FFmpeg decoding. This covers the 22 family cards and the
+additional piano, organ, steel-string guitar and percussion comparisons above.
+These checks streamed the actual recordings through memory; they do not claim
+a persistent audio cache or improved simulation fidelity. The new `--members`
+path was also exercised against the real pan-pipe and steel-string archives.
 
 ## Recording limits and attribution
 

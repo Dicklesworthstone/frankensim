@@ -7,6 +7,8 @@
 #   --id ID             select a recording (repeatable); combined selectors intersect.
 #   --list              print selected manifest entries without downloading or requiring a destination.
 #   --manifest PATH     use another reference manifest with the same file fields.
+#   --members           acquire only checksum-pinned audio members of tar archives, streaming the
+#                       complete archive for verification without retaining the source container.
 # Never overwrites and never deletes. Audio is never committed: FRANKENSIM_REFERENCE_DIR must be an
 # existing directory, and a directory on the Mac Data volume (/System/Volumes/Data) is refused.
 # One JSONL line per file on stdout: utc, event, id, url, sha256_expected, sha256_observed, bytes,
@@ -29,6 +31,7 @@ import json
 import os
 import socket
 import sys
+import tarfile
 import time
 import urllib.request
 
@@ -41,6 +44,7 @@ parser.add_argument("--instrument", action="append", default=[], help="exact ins
 parser.add_argument("--id", action="append", default=[], help="exact recording ID, repeatable")
 parser.add_argument("--list", action="store_true", help="list selected manifest entries without downloading")
 parser.add_argument("--manifest", default=manifest, help="reference manifest JSON")
+parser.add_argument("--members", action="store_true", help="stream tar archives and retain only their pinned audio members; other files are unchanged")
 args = parser.parse_args(sys.argv[4:])
 mode = "--pin" if args.pin else "--verify"
 USER_AGENT = "frankensim-agent (+https://github.com/Dicklesworthstone/frankensim)"
@@ -77,6 +81,100 @@ def download(url, part):
     return h.hexdigest(), size
 
 
+def storage_path(relative):
+    parts = relative.split("/")
+    if os.path.isabs(relative) or any(p in ("", ".", "..") for p in parts):
+        raise ValueError(f"storage path escapes the destination: {relative!r}")
+    path = os.path.join(dest, *parts)
+    if os.path.commonpath((os.path.realpath(dest), os.path.realpath(path))) != os.path.realpath(dest):
+        raise ValueError(f"storage path escapes through a symlink: {relative!r}")
+    return path
+
+
+class HashedReader:
+    """Hash compressed source bytes, including padding after tar's end marker."""
+    def __init__(self, source):
+        self.source, self.digest, self.size = source, hashlib.sha256(), 0
+
+    def read(self, count=-1):
+        data = self.source.read(count)
+        self.digest.update(data)
+        self.size += len(data)
+        return data
+
+
+def fetch_members(entry, start):
+    members = entry.get("members", [])
+    if not members:
+        raise ValueError("archive has no checksum-pinned members")
+    targets, paths = {}, set()
+    for member in members:
+        name = member["archive_member"]
+        path = storage_path(member["path"])
+        if name in targets or path in paths:
+            raise ValueError("duplicate archive member or destination")
+        paths.add(path)
+        targets[name] = dict(member, id=entry["id"] + ":" + name, url=entry["url"])
+    pending = {}
+    for name, member in targets.items():
+        path = storage_path(member["path"])
+        if os.path.exists(path):
+            observed, size = digest_file(path)
+            if mode != "--pin" and (observed != member["sha256"] or size != member["bytes"]):
+                raise ValueError(f"existing member does not match its pin: {member['path']}")
+            emit("pinned" if mode == "--pin" else "verified", member, observed, size, start)
+        else:
+            pending[name] = member
+    if not pending:
+        return
+
+    archive_path = storage_path(entry["path"])
+    request = urllib.request.Request(entry["url"], headers={"User-Agent": USER_AGENT})
+    source = open(archive_path, "rb") if os.path.exists(archive_path) else urllib.request.urlopen(request, timeout=120)
+    staged, seen = [], set()
+    with source:
+        reader = HashedReader(source)
+        with tarfile.open(fileobj=reader, mode="r|*") as archive:
+            for item in archive:
+                if item.name not in pending:
+                    continue
+                member = pending[item.name]
+                if item.name in seen or not item.isfile():
+                    raise ValueError(f"duplicate or non-regular archive member: {item.name}")
+                seen.add(item.name)
+                if mode != "--pin" and item.size != member["bytes"]:
+                    raise ValueError(f"archive member length does not match its pin: {item.name}")
+                path = storage_path(member["path"])
+                part = path + ".part"
+                if mode != "--pin":
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                digest, size = hashlib.sha256(), 0
+                # Exclusive creation preserves incomplete earlier acquisitions for inspection.
+                with archive.extractfile(item) as audio, open(os.devnull if mode == "--pin" else part, "wb" if mode == "--pin" else "xb") as out:
+                    for block in iter(lambda: audio.read(1 << 20), b""):
+                        digest.update(block)
+                        size += len(block)
+                        out.write(block)
+                observed = digest.hexdigest()
+                if mode != "--pin" and (observed != member["sha256"] or size != member["bytes"]):
+                    raise ValueError(f"archive member does not match its pin; bytes kept at {part}")
+                staged.append((member, path, part, observed, size))
+        while reader.read(1 << 20):
+            pass
+    if seen != set(pending):
+        raise ValueError("archive is missing members: " + ", ".join(sorted(set(pending) - seen)))
+    observed = reader.digest.hexdigest()
+    if mode != "--pin" and (observed != entry["sha256"] or reader.size != entry["bytes"]):
+        raise ValueError("source archive does not match its pin; unverified members remain at .part")
+    emit("pinned" if mode == "--pin" else "archive-verified", entry, observed, reader.size, start)
+    # Nothing is published until BOTH the complete source and every selected member verify.
+    for member, path, part, observed, size in staged:
+        if mode != "--pin":
+            os.link(part, path)
+            os.unlink(part)  # only the temporary name; verified bytes remain at path
+        emit("pinned" if mode == "--pin" else "fetched", member, observed, size, start)
+
+
 with open(args.manifest) as source:
     files = json.load(source)["files"]
 instruments = {f.get("instrument", "").casefold() for f in files}
@@ -102,6 +200,14 @@ if mount == "/System/Volumes/Data":
     sys.exit(f"REFUSED: {dest} is on the Mac Data volume ({mount}); reference audio lives off-volume")
 for entry in files:
     start = time.monotonic()
+    if args.members and entry.get("kind") == "archive":
+        try:
+            fetch_members(entry, start)
+        except (OSError, ValueError, tarfile.TarError) as error:
+            print(f"REFUSED archive {entry['id']}: {error}", file=sys.stderr)
+            emit("refused", entry, None, None, start)
+            refused += 1
+        continue
     parts = entry["path"].split("/")
     if os.path.isabs(entry["path"]) or any(p in ("", ".", "..") for p in parts):
         print(f"REFUSED {entry['id']}: storage path escapes the destination: {entry['path']!r}", file=sys.stderr)

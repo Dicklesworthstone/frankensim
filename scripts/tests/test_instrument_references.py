@@ -7,11 +7,13 @@ Every test prints one IRPDATA line for scripts/e2e/instrument_data.sh. Artifact 
 import functools
 import hashlib
 import http.server
+import io
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
+import tarfile
 import tempfile
 import threading
 import time
@@ -71,6 +73,20 @@ def entry(payload, url="http://127.0.0.1:9/unreachable"):
             "sha256": hashlib.sha256(payload).hexdigest(), "bytes": len(payload)}
 
 
+def archive_entry(directory, compression=""):
+    source = Path(directory) / "source.tar"
+    selected = b"original audio bytes"
+    with tarfile.open(source, "w" + compression) as archive:
+        for name, payload in (("samples/selected.wav", selected), ("other.wav", b"unselected")):
+            item = tarfile.TarInfo(name)
+            item.size = len(payload)
+            archive.addfile(item, io.BytesIO(payload))
+    result = dict(entry(source.read_bytes(), source.as_uri()), kind="archive", path="container.tar")
+    result["members"] = [{"archive_member": "samples/selected.wav", "path": "selected/note.wav",
+                          "sha256": hashlib.sha256(selected).hexdigest(), "bytes": len(selected)}]
+    return result, selected
+
+
 class Quiet(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -81,6 +97,65 @@ def tree(directory):
 
 
 class ReferenceTests(unittest.TestCase):
+    def test_archive_members_stream_tar_xz_and_bzip_without_retaining_container(self):
+        for compression in ("", ":xz", ":bz2"):
+            with self.subTest(compression=compression), tempfile.TemporaryDirectory() as directory:
+                archive, payload = archive_entry(directory, compression)
+                result, events = fetch(directory, [archive], selectors=("--members",))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual([e["event"] for e in events], ["archive-verified", "fetched"])
+                self.assertEqual(tree(Path(directory) / "refs"), [("selected/note.wav", payload)])
+                # Pinned extracted audio is usable without another archive download.
+                archive["url"] = "http://127.0.0.1:9/unreachable"
+                result, events = fetch(directory, [archive], selectors=("--members",))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual([e["event"] for e in events], ["verified"])
+
+    def test_archive_must_verify_before_any_member_is_published(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive, payload = archive_entry(directory)
+            archive["sha256"] = "0" * 64
+            result, events = fetch(directory, [archive], selectors=("--members",))
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual([e["event"] for e in events], ["refused"])
+            self.assertIn("source archive does not match", result.stderr)
+            self.assertEqual(tree(Path(directory) / "refs"), [("selected/note.wav.part", payload)])
+
+    def test_archive_member_pin_and_missing_member_are_checked(self):
+        for defect in ("sha256", "archive_member"):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as directory:
+                archive, _ = archive_entry(directory)
+                archive["members"][0][defect] = "0" * 64 if defect == "sha256" else "missing.wav"
+                result, events = fetch(directory, [archive], selectors=("--members",))
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual([e["event"] for e in events], ["refused"])
+                self.assertFalse((Path(directory) / "refs/selected/note.wav").exists())
+
+    def test_archive_member_destinations_must_not_escape_or_alias(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive, _ = archive_entry(directory)
+            archive["members"][0]["path"] = "../escape.wav"
+            result, events = fetch(directory, [archive], selectors=("--members",))
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("storage path escapes", result.stderr)
+            self.assertEqual(tree(Path(directory) / "refs"), [])
+            member = dict(archive["members"][0], path="note.wav")
+            archive["members"] = [member, dict(member, archive_member="other.wav")]
+            result, events = fetch(directory, [archive], selectors=("--members",))
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("duplicate", result.stderr)
+            self.assertEqual(tree(Path(directory) / "refs"), [])
+
+    def test_archive_member_pin_mode_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive, _ = archive_entry(directory, ":bz2")
+            result, events = fetch(directory, [archive], mode="--pin", selectors=("--members",))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual([e["event"] for e in events], ["pinned", "pinned"])
+            self.assertEqual(events[0]["sha256_observed"], archive["sha256"])
+            self.assertEqual(events[1]["sha256_observed"], archive["members"][0]["sha256"])
+            self.assertEqual(tree(Path(directory) / "refs"), [])
+
     def test_list_selection_needs_no_audio_destination(self):
         env = dict(os.environ, FRANKENSIM_REFERENCE_DIR="/nonexistent-reference-directory")
         result = subprocess.run(["bash", str(FETCH), "--list", "--instrument", "violin"],
