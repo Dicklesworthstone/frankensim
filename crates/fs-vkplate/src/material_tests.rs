@@ -1415,9 +1415,11 @@ fn g2_card_cymbals_and_hats_take_the_declared_interface_and_presets_say_theirs_w
     // the shells' rest shapes vary the gap a little either way; the waviness adds up to 0.15 mm
     assert!(spread(&fitted_gaps) > spread(&card_gaps) + 1.0e-4, "{} {}", spread(&fitted_gaps), spread(&card_gaps));
     for c in card.instrument.contacts.iter().filter(|c| !c.b.iter().any(|&(b, _, _)| card.instrument.bodies[b].name == "stick")) {
+        // ruling 7865: the card rims carry no contact loss; the friction below is their dissipation
         let Law::Power { mu, .. } = c.law;
-        assert_eq!(mu, 3.0);
+        assert_eq!(mu, 0.0);
     }
+    assert!(kit::DECLARED_CYMBAL_INTERFACE.hat_receipt.contains("no rim contact loss (ruling 7865)"));
     // Rim friction (ruling 7520 G1): the presets' graded RIM_FRICTION, the card route's measured
     // tin bronze on itself; both receipts say which.
     let rubs = |p: &kit::Piece| p.instrument.frictions.iter().map(|f| f.mu).collect::<Vec<_>>();

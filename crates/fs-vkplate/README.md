@@ -663,11 +663,13 @@ offline examples' card route keeps none of them (ruling 7486):
   tension 2.0 N, preload 0.25 N/m and contact loss 2.0 s/m; the kick's 0.12 kg
   beater with a 3 cm felt face (k 1e8 N/m^2.5, alpha 2.5, mu 0.3 s/m) and muffle dashpot 25 N s/m^3
   (no pillow is modelled);
-  the ride's 1.60 mm bow, 2.20 mm bell and 3.0 s 10 kHz T60; flat hi-hat rims with loss 3.0 s/m
-  and a 5 mm stick tip; the open hat's 8 mm rim opening (`drum_cards::OPEN_HAT_OPENING_M`; the
-  recording's pedal position is unknown, and the presets' 2 mm was picked by grade, bb1e5abf3).
-  88cccbb78 set that rim loss to stand in for rim friction, which is now its own term
-  (`BRONZE_RIM_FRICTION` on this route), so the two overlap.
+  the ride's 1.60 mm bow, 2.20 mm bell and 3.0 s 10 kHz T60; flat hi-hat rims and a 5 mm stick
+  tip; the open hat's 8 mm rim opening (`drum_cards::OPEN_HAT_OPENING_M`; the recording's pedal
+  position is unknown, and the presets' 2 mm was picked by grade, bb1e5abf3).
+- **The hi-hat rims carry no contact loss** (`DECLARED_HIHAT_RIM_LAW`, mu 0; ruling 7865).
+  88cccbb78's 3.0 s/m stood in for rim friction, which `BRONZE_RIM_FRICTION` now carries from
+  data, and no source gives a separate loss at closure. So rim dissipation is the friction
+  alone. The presets keep their fitted `HIHAT_RIM_LAW` (0.08 s/m).
 
 88cccbb78's own loss points came from the recordings' band decay times. The card drums no longer
 use head T60s; the cymbals' and hi-hat's T60 pairs still do.

@@ -598,7 +598,7 @@ pub const DECLARED_CYMBAL_INTERFACE: CymbalInterface = CymbalInterface {
     hat_rim_waviness_m: 0.0,
     hat_rim_friction: BRONZE_RIM_FRICTION,
     cymbal_receipt: "cymbal stick (ruling 7486): Hunt-Crossley loss 0.2 s/m, a declared estimate (88cccbb78)",
-    hat_receipt: "hi-hat (ruling 7486): flat rims, rim loss 3.0 s/m, a 5 mm stick tip and stick loss 0.2 s/m, declared estimates (88cccbb78); 88cccbb78 set the rim loss to stand in for rim friction, which is now its own term, so the two overlap; rim friction 0.6 (Buckley, Cu-10Sn self-mated; ruling 7520): dry in air, a polished hemispherical pin at 2.5 N and 0.05 m/s (NASA TN D-6912, 1972, fig. 2), not B20 rims; primary values span 0.2-0.6 across contact geometry (Morin 1834: 0.20, a loaded bronze sled on bronze)",
+    hat_receipt: "hi-hat (ruling 7486): flat rims, a 5 mm stick tip and stick loss 0.2 s/m, declared estimates (88cccbb78); no rim contact loss (ruling 7865): 88cccbb78's 3.0 s/m stood in for rim friction and no source gives a separate loss at closure, so rim dissipation is the friction alone; rim friction 0.6 (Buckley, Cu-10Sn self-mated; ruling 7520): dry in air, a polished hemispherical pin at 2.5 N and 0.05 m/s (NASA TN D-6912, 1972, fig. 2), not B20 rims; primary values span 0.2-0.6 across contact geometry (Morin 1834: 0.20, a loaded bronze sled on bronze)",
 };
 
 /// Dry kinetic friction of tin bronze on itself, for the card route's hi-hat rims (ruling 7520
@@ -609,8 +609,11 @@ pub const DECLARED_CYMBAL_INTERFACE: CymbalInterface = CymbalInterface {
 /// a bronze bed at about 1.2 m/s; neither is a lathed B20 rim at a hi-hat's load and slip.
 pub const BRONZE_RIM_FRICTION: f64 = 0.6;
 
-/// 88cccbb78's declared hi-hat rim law, reference cell as HIHAT_RIM_LAW.
-pub const DECLARED_HIHAT_RIM_LAW: Law = Law::Power { k: 2.0e9, alpha: 1.5, mu: 3.0 };
+/// 88cccbb78's declared hi-hat rim stiffness (reference cell as HIHAT_RIM_LAW), with no
+/// Hunt-Crossley loss (ruling 7865). 88cccbb78's 3.0 s/m stood in for rim friction, which
+/// BRONZE_RIM_FRICTION now carries from data, so keeping it would count that loss twice. No
+/// source gives a separate loss at closure, so the rims dissipate through the friction alone.
+pub const DECLARED_HIHAT_RIM_LAW: Law = Law::Power { k: 2.0e9, alpha: 1.5, mu: 0.0 };
 
 /// Grid points (spacing h) with r in [r0, r1]. A grid too coarse to put four of them in the
 /// annulus (a real-time grid) widens r1 to the first ring that does; the caller then spreads the
