@@ -261,7 +261,11 @@ impl<'a> DampedRigidPair<'a> {
                             trials.set(trials.get() + 1);
                             let source = refresh(
                                 &self.damper,
-                                if self.damper.temperature_side == 0 { a } else { b },
+                                if self.damper.temperature_side == 0 {
+                                    a
+                                } else {
+                                    b
+                                },
                             )?;
                             let impulse = self.impulse(&source, dt, controls)?;
                             let qa = number(impulse.heat_j * self.damper.first_heat_fraction)?;
@@ -485,7 +489,11 @@ impl<'a> DampedRigidPair<'a> {
                 "native impulse loss and physical dashpot heating disagree",
             ));
         }
-        Ok(Dissipation { receipt, heat_j, residual_j })
+        Ok(Dissipation {
+            receipt,
+            heat_j,
+            residual_j,
+        })
     }
 }
 
