@@ -276,7 +276,7 @@ __device__ Pred predict_scalars(const P& p, int s, int b) {
     v = fmax(v, 0.0);
     double root = sqrt(2.0 * v);
     if (vk) {
-      double target = rprev > 0.0 ? 0.5 * (root + rprev) : root;
+      double target = 0.5 * (root + rprev); // zero is a valid previous potential
       if (psi > target) psi = target;
       else psi = fmin(sqrt(psi * psi + 2.0 * budget), target);
       r.rprev1 = root;
@@ -804,18 +804,17 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
       const int i = __ldg(&p.item_start[item]) + tid;
       double v[4] = {0.0, 0.0, 0.0, 0.0};
       const bool sav = p.savf[(ll)s * p.NB + b] > 0.0;
+      const bool vk = __ldg(&p.bvk[b]) != 0;
       const bool viscous = __ldg(&p.bviscous[b]) != 0;
-      if ((sav || viscous) && tid < __ldg(&p.item_len[item])) {
+      if ((sav || vk || viscous) && tid < __ldg(&p.item_len[item])) {
         const ll o = (ll)s * NT + i;
         const double dv = Wn[o] - Wp[o];
-        if (sav) {
-          if (__ldg(&p.bvk[b])) {
-            v[0] = __ldg(&p.ms0[i]) * dv * dv;
-            const double correction = mass_flux_correction(p, i, (ll)s * NT, W, Wp);
-            v[1] = (__ldg(&p.mass[i]) * (LW[o] - LWP[o]) + correction) * dv;
-          }
-          v[2] = p.G[o] * dv;
+        if (vk) {
+          v[0] = __ldg(&p.ms0[i]) * dv * dv;
+          const double correction = mass_flux_correction(p, i, (ll)s * NT, W, Wp);
+          v[1] = (__ldg(&p.mass[i]) * (LW[o] - LWP[o]) + correction) * dv;
         }
+        if (sav) v[2] = p.G[o] * dv;
         if (viscous) {
           const ll base = (ll)s * NT;
           // Same quarter-cell tensor-root rows as the native solver: squares of
@@ -830,7 +829,7 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
           }
         }
       }
-      if (sav || viscous) {
+      if (sav || vk || viscous) {
         block_sum<4>(v, sh);
         if (tid == 0) for (int kk = 0; kk < 4; kk++) p.p7[((ll)s * NI + item) * 4 + kk] = v[kk];
       }
@@ -856,20 +855,21 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
         const int s = sb / (int)p.NB, b = sb % (int)p.NB;
         const ll ob = (ll)s * p.NB + b;
         const bool sav = p.savf[ob] > 0.0;
+        const bool vk = __ldg(&p.bvk[b]) != 0;
         const bool viscous = __ldg(&p.bviscous[b]) != 0;
         double d[4] = {0.0, 0.0, 0.0, 0.0};
-        if (sav || viscous) wsums<4>(d, p.p7, 4, 0, __ldg(&p.bitem0[b]), __ldg(&p.bitem1[b]), s, NI);
+        if (sav || vk || viscous) wsums<4>(d, p.p7, 4, 0, __ldg(&p.bitem0[b]), __ldg(&p.bitem1[b]), s, NI);
         if (lane == 0) {
           const double bending_loss = d[3] / (4.0 * k);
           if (viscous) p.viscous_dissipated[ob] = p.viscous_dissipated[ob] + bending_loss;
           double psi = p.psi1[ob];
-          if (sav) {
-            if (__ldg(&p.bvk[b])) {
-              const double ih2 = 1.0 / (__ldg(&p.bh[b]) * __ldg(&p.bh[b]));
-              p.budgetA[ob] = d[0] / (2.0 * k) + fmax(__ldg(&p.bs1[b]) * ih2 / k * d[1], 0.0) + bending_loss;
-            }
-            psi = psi + 0.5 * d[2];
+          // Refresh shell credit even when the nonlinear gradient vanishes.
+          if (vk) {
+            const double ih2 = 1.0 / (__ldg(&p.bh[b]) * __ldg(&p.bh[b]));
+            const double loss = d[0] / (2.0 * k) + __ldg(&p.bs1[b]) * ih2 / k * d[1] + bending_loss;
+            p.budgetA[ob] = loss < 0.0 ? 0.0 : loss; // signed net loss; preserve NaN
           }
+          if (sav) psi = psi + 0.5 * d[2];
           p.psiA[ob] = psi;
           p.rprevA[ob] = p.rprev1[ob];
         }

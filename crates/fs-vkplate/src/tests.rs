@@ -513,6 +513,118 @@ fn exporting_an_instrument_changes_nothing_and_exports_a_spd_airy_inverse() {
     }
 }
 
+#[test]
+fn g3_shell_reanchoring_is_continuous_at_zero_previous_potential() {
+    let mut spec = kit::splash();
+    spec.grid = 0.025;
+    let shell = kit::cymbal(&spec, &[]).unwrap().instrument.bodies.remove(0);
+    let mut targets = vec![];
+    for fraction in [0.0, 1e-6] {
+        let mut b = shell.clone();
+        let q: Vec<_> = (0..b.n).map(|i| 1e-5 * (0.31 * i as f64).sin()).collect();
+        // A prescribed checkpoint, independent of Body::sync's initial-state
+        // policy: previous potential is exactly zero or approaches it.
+        for i in 0..b.n { b.w[i] = fraction * q[i]; }
+        b.r_prev = (2.0 * b.nonlinear_gradient()).sqrt();
+        b.wp.clone_from(&b.w);
+        b.w.clone_from(&q);
+        b.sync();
+        assert_eq!(b.r_prev == 0.0, fraction == 0.0);
+        b.budget = b.nonlinear_gradient();
+        b.linear_forces();
+        b.predict(1.0 / 48_000.0);
+        targets.push(b.psi);
+    }
+    assert!((targets[0] / targets[1] - 1.0).abs() < 1e-4,
+        "zero previous potential caused a discontinuous correction: {targets:?}");
+}
+
+#[test]
+fn g0_shell_loss_credit_uses_signed_total_viscous_work() {
+    let mut spec = kit::splash();
+    spec.grid = 0.025;
+    let shell = kit::cymbal(&spec, &[]).unwrap().instrument.bodies.remove(0);
+    let q: Vec<_> = (0..shell.n).map(|i| 1e-5 * (0.31 * i as f64).sin()).collect();
+    let mass_norm: f64 = shell.mass.iter().zip(&q).map(|(m, q)| m * q * q).sum();
+    // Independent free-edge flux: count each edge once, rather than calling
+    // the production CSR damping or credit calculation in the oracle.
+    let mut edge_norm = 0.0;
+    for (&(i, j), &a) in &shell.grid_index {
+        for (di, dj) in [(1, 0), (0, 1)] {
+            if let Some(&b) = shell.grid_index.get(&(i + di, j + dj)) {
+                edge_norm += 0.5 * (shell.mass[a] + shell.mass[b]) * (q[a] - q[b]).powi(2);
+            }
+        }
+    }
+    assert!(mass_norm > 0.0 && edge_norm > 0.0);
+    let (dt, s1) = (1e-5, 0.02);
+    for fraction in [0.5, 2.0] {
+        for direction in [-1.0, 1.0] {
+            let mut b = shell.clone();
+            let s0 = 2.0 * fraction * s1 * edge_norm / (b.h * b.h * mass_norm);
+            b.s0.fill(s0);
+            b.s1 = s1;
+            b.w.clone_from(&q);
+            b.wp.fill(0.0);
+            b.sync();
+            b.linear_forces();
+            b.predict(dt);
+            assert!(b.sav);
+            // Manufactured contact work reverses centered motion relative to
+            // the backward velocity; test either sign of total viscous work.
+            for i in 0..b.n { b.wn[i] = direction * q[i]; }
+            let work0 = s0 * mass_norm / (2.0 * dt);
+            let work1 = direction * s1 * edge_norm / (dt * b.h * b.h);
+            let expected = (work0 + work1).max(0.0);
+            b.finish(dt);
+            assert!((b.budget - expected).abs() < 1e-11 * (work0 + work1.abs()),
+                "s0 {work0} J, s1 {work1} J: credited {} J instead of net {expected} J", b.budget);
+        }
+    }
+    let mut invalid = shell;
+    invalid.wn[0] = f64::NAN;
+    invalid.finish(dt);
+    assert!(invalid.budget.is_nan(), "invalid viscous work became zero credit");
+}
+
+#[test]
+fn g0_shell_loss_credit_refreshes_when_the_nonlinear_gradient_vanishes() {
+    let mut spec = kit::splash();
+    spec.grid = 0.025;
+    let mut b = kit::cymbal(&spec, &[]).unwrap().instrument.bodies.remove(0);
+    let dt = 1.0 / 48_000.0;
+    b.s0.fill(10.0);
+    b.s1 = 0.0;
+    for i in 0..b.n {
+        b.w[i] = 1e-5 * (0.31 * i as f64).sin();
+        b.wp[i] = 2.0 * b.w[i];
+    }
+    b.sync();
+    b.linear_forces();
+    b.predict(dt);
+    assert!(b.sav);
+    // A contact correction reaches zero deformation after real viscous work.
+    b.wn.fill(0.0);
+    b.finish(dt);
+    assert!(b.budget > 0.0);
+    b.rotate();
+    b.linear_forces();
+    b.predict(dt);
+    assert!(!b.sav, "undeformed shell must have zero nonlinear gradient");
+    for speed in [0.0, 1e-4] {
+        let mut step = b.clone();
+        let mut expected = 0.0;
+        for i in 0..step.n {
+            let velocity = speed * (0.47 * i as f64).cos();
+            step.wn[i] = step.wp[i] + 2.0 * dt * velocity;
+            expected += 2.0 * dt * step.mass[i] * step.s0[i] * velocity * velocity;
+        }
+        step.finish(dt);
+        assert!((step.budget - expected).abs() <= 1e-12 * expected.max(1e-30),
+            "inactive SAV reused old credit: {} J, current work {expected} J", step.budget);
+    }
+}
+
 /// The auxiliary variable must keep tracking sqrt(2V): a shallow shell carries its curvature
 /// stiffness in V, so psi / sqrt(2V) scales that stiffness. Without the relaxation this ratio
 /// reached 1.48 and then 0.52 within 2 s on this live-grid ride (and the 8-16 kHz bands grew back).

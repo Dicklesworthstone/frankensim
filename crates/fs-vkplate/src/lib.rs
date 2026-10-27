@@ -1263,7 +1263,9 @@ impl Body {
                 // stiffness (which a shallow shell carries entirely in V) by that factor. Pull it back
                 // to sqrt(2V) at the half step without adding energy the losses did not remove:
                 // lowering psi only removes energy; raising it spends at most the last step's loss.
-                let target = if self.r_prev > 0.0 { 0.5 * (root + self.r_prev) } else { root };
+                // Zero is a physical previous potential, not an uninitialized
+                // sentinel: keep the same half-step average through zero.
+                let target = 0.5 * (root + self.r_prev);
                 if self.psi > target {
                     self.psi = target;
                 } else {
@@ -1413,8 +1415,10 @@ impl Body {
             self.radiated_j += radiated;
             bending_loss += radiated;
         }
-        if self.sav && self.vk.is_some() {
+        if self.vk.is_some() {
             // energy the loss terms removed over this step (the budget for raising psi next step):
+            // Refresh at zero nonlinear gradient too: otherwise a zero-work
+            // step retains credit already allocated by the previous step.
             // s0: sum m s0 (wn - wp)^2 / (2k); s1 uses the same symmetric
             // mass-weighted edge flux as predict, paired with centered velocity.
             let ih2 = 1.0 / (self.h * self.h);
@@ -1426,7 +1430,10 @@ impl Body {
                 let correction = self.lap.mass_flux_correction(i, &self.w, &self.wp, &self.mass);
                 d1 += (self.mass[i] * (self.lw[i] - self.lwp[i]) + correction) * dv;
             }
-            self.budget = d0 / (2.0 * k) + (self.s1 * ih2 / k * d1).max(0.0) + bending_loss;
+            // Backward s1 velocity can do negative work against centered
+            // motion. Clip the signed total, not its separate contributions.
+            let loss = d0 / (2.0 * k) + self.s1 * ih2 / k * d1 + bending_loss;
+            self.budget = if loss < 0.0 { 0.0 } else { loss }; // preserve NaN
         }
         if self.sav {
             let d: f64 = self.g.iter().zip(&self.wn).zip(&self.wp).map(|((g, a), b)| g * (a - b)).sum();
