@@ -7407,3 +7407,43 @@ contact, follower pressure and a mixed/stabilized nearly-incompressible
 formulation remain outside this path. No continuous-time inversion or
 self-intersection guarantee, mesh-convergence certificate, or new adjoint
 claim is made.
+
+
+### Material piezoelectric circuit and finite load heating (MR59 increment)
+
+`material_circuit::piezoelectric::PiezoelectricCircuit` places the original
+longitudinal piezoelectric rod inside the native Kirchhoff descriptor. The
+selected capacitor branch defines the electrode order. Its clamped capacitance
+comes from the rod material; its charge-only energy stamp is removed before
+inserting the original charge/strain energy and consistent inertia. Other
+capacitors, inductors, source ports, transformers and resistor bindings retain
+their native operators. Initial and endpoint algebraic admission use the true
+coupled voltage and never project charge, flux, extension or momentum to repair
+an incompatible ideal clamp.
+
+One candidate solves rod motion and circuit current together. Existing
+material-circuit accounting evaluates resistor heat at the actual algebraic
+midpoint. Electrical port work and held force times extension change close
+against combined storage and heat. Piezoelectric field, strain and kinetic
+storage are counted exactly once.
+
+`circuit_enthalpy::piezoelectric::step_candidate` uses the existing thermal-driver
+boundary and original backward-Euler/Newton enthalpy solve. Load resistance and
+conduction are resolved at the proposed endpoint temperatures. Each trial
+restarts from the accepted electrical/mechanical prefix; each resistor has one
+finite thermal receiver. Any source, domain, budget, work or cancellation
+refusal returns no joint endpoint.
+
+Five authored numerical fixtures cover independently eliminated loaded-rod
+equations, source density/coupling/resistance and polarity substitutions,
+additional C/L storage and Kirchhoff exchange, open/short limits, finite-load
+thermal feedback, and late refusal/retry. Independent arithmetic is not native
+Rust validation: parsing, compilation and tests remain unrun because the
+executor is unavailable. These fixtures are not measured material calibration.
+
+MR59 remains open. The existing uniform, small-signal longitudinal rod and
+bounded dense circuit domains apply. Ceramic temperature, thermal strain,
+dielectric loss, depoling, nonlinear/anisotropic 3-D fields and electrical
+contacts are not evolved. The rod context and reference mass stay fixed;
+explicit resistor/thermal-network states evolve. Coupled thermal accuracy is
+generally first order; work closure is not a time-accuracy certificate.

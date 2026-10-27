@@ -179,7 +179,7 @@ impl PiezoelectricRod {
         self.limits
     }
 
-    fn response(&self, extension: f64, charge: f64) -> Result<PiezoelectricResponse> {
+    pub(crate) fn response(&self, extension: f64, charge: f64) -> Result<PiezoelectricResponse> {
         let strain = extension / self.length_m;
         let response = self.material.response(strain, charge / self.area_m2)?;
         if strain.abs() > self.limits.max_abs_strain
@@ -191,7 +191,7 @@ impl PiezoelectricRod {
         }
         Ok(response)
     }
-    fn energy(&self, x: &[f64]) -> Result<f64> {
+    pub(crate) fn energy(&self, x: &[f64]) -> Result<f64> {
         let response = self.response(x[0], x[2])?;
         let kinetic = 0.5 * x[1] * (x[1] / self.modal_mass_kg);
         let material_energy = self.volume_m3 * response.stored_energy_j_m3;

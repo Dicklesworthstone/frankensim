@@ -16,6 +16,8 @@ pub mod motion;
 pub mod conductivity;
 /// Source-bound electrical contacts in series with original bulk branches.
 pub mod contacts;
+/// Source-derived piezoelectric motion on the same Kirchhoff storage solver.
+pub mod piezoelectric;
 use contacts::{SeriesElectricalContact, ContactHeat};
 
 use fs_material::conductor::{ConductorError, OhmicDrive, ResolvedConductor};
@@ -61,6 +63,8 @@ pub enum MaterialCircuitError {
     Storage(fs_material::field_storage::FieldStorageError),
     /// Original source-bound mechanical section or layer-strain refusal.
     Material(fs_material::state_point::MaterialStatePointError),
+    /// Original piezoelectric material, geometry or operating-domain refusal.
+    Piezoelectric(crate::piezoelectric::PiezoelectricCouplingError),
     /// Independent branch heat or total electrical balance did not close.
     Balance(&'static str),
     /// The material response did not agree with the solved branch fields.

@@ -11,6 +11,9 @@ use fs_material::state_point::MaterialPropertySelection;
 use fs_phs::{PortHamiltonian, QuadraticStorage, interconnect, step};
 use fs_qty::Density;
 
+#[path = "piezoelectric/circuit.rs"]
+mod circuit_tests;
+
 fn rod(d: f64, density: f64) -> PiezoelectricRod {
     let mut claims = ClaimSet::new();
     for (name, dims, value) in [

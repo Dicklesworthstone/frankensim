@@ -27,6 +27,8 @@ pub mod field_storage;
 pub mod magnetic;
 /// Retained spatial induction and Joule heat on the original enthalpy timeline.
 pub mod eddy;
+/// Piezoelectric motion, electrical load and finite resistor heating.
+pub mod piezoelectric;
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
