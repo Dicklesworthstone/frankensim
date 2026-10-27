@@ -76,6 +76,7 @@ impl DgDuct {
             pins,
             None,
             &[],
+            None,
             maximum_absolute_parameter_work_j,
             cancelled,
         )
@@ -117,6 +118,50 @@ impl DgDuct {
             pins,
             Some(spectra),
             correspondence,
+            None,
+            maximum_absolute_parameter_work_j,
+            cancelled,
+        )
+    }
+
+    /// Transfer constitutively generated memory in its ORIGINAL physical basis.
+    ///
+    /// For each entry in `correspondence`, `[a,b]` in `extension_maps` declares
+    /// `y_new = a*y_old + b*w`, where y=z/K is the arm's elastic extension and
+    /// w is the unchanged radial displacement. Both coefficients are dimensionless;
+    /// a must be finite and nonzero. This invertible change of internal coordinate
+    /// lets a material owner retain, for example, an eliminated axial strain when
+    /// its Schur-complement coefficients change. It is NOT a fitted state reset.
+    ///
+    /// The caller must derive the map from its constitutive law and establish
+    /// source lineage. Every positive history is still covered exactly once on
+    /// its original element. No new or discarded coordinate, interpolation,
+    /// nonlinear remapping or changed geometry/gas is admitted. [1,0] is exactly
+    /// the original extension-preserving route, including floating-point order.
+    ///
+    /// Use the ORIGINAL displacement coordinate (not the rescaled candidate)
+    /// and the common geometric Gram root for both stores. The full resulting
+    /// memory-energy difference joins the same signed parameter-work budget.
+    /// Cancellation, overflow or an excessive work request leaves both accepted
+    /// owners unchanged. The caller must rebuild the propagator atomically with
+    /// this change; this function does not advance physical time.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rebind_compliant_wall_relaxation_regions_with_extension_maps(
+        &mut self,
+        state: &mut DgState,
+        pins: &[WallPin],
+        spectra: &[Option<&fs_material::visco::GeneralizedMaxwell>],
+        correspondence: &[DgWallRelaxationTransfer],
+        extension_maps: &[[f64; 2]],
+        maximum_absolute_parameter_work_j: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<DgWallMaterialUpdate, DuctError> {
+        self.rebind_wall_data(
+            state,
+            pins,
+            Some(spectra),
+            correspondence,
+            Some(extension_maps),
             maximum_absolute_parameter_work_j,
             cancelled,
         )
@@ -129,10 +174,17 @@ impl DgDuct {
         pins: &[WallPin],
         spectra: Option<&[Option<&fs_material::visco::GeneralizedMaxwell>]>,
         correspondence: &[DgWallRelaxationTransfer],
+        extension_maps: Option<&[[f64; 2]]>,
         maximum_absolute_parameter_work_j: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<DgWallMaterialUpdate, DuctError> {
         check_cancelled(cancelled)?;
+        if extension_maps.is_some_and(|maps| maps.len() != correspondence.len()
+            || maps.iter().any(|map| !map[0].is_finite() || map[0] == 0.0
+                || !map[1].is_finite()))
+        {
+            return Err(invalid("wall memory requires one finite invertible physical extension map per correspondence"));
+        }
         if !maximum_absolute_parameter_work_j.is_finite()
             || maximum_absolute_parameter_work_j < 0.0
             || pins.len() != self.mesh.elements
@@ -241,6 +293,7 @@ impl DgDuct {
                 &mut next,
                 self.mesh,
                 correspondence,
+                extension_maps,
                 cancelled,
             )?;
         }
@@ -287,6 +340,7 @@ fn transfer_relaxation(
     after: &mut DgState,
     mesh: DgMesh,
     correspondence: &[DgWallRelaxationTransfer],
+    extension_maps: Option<&[[f64; 2]]>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<f64, DuctError> {
     let local = mesh.order + 1;
@@ -306,7 +360,7 @@ fn transfer_relaxation(
         })
     };
     let mut work = 0.0;
-    for entry in correspondence {
+    for (entry_index, entry) in correspondence.iter().enumerate() {
         check_cancelled(cancelled)?;
         if entry.element >= mesh.elements {
             return Err(invalid(
@@ -326,6 +380,18 @@ fn transfer_relaxation(
                 "Maxwell extension transfer scale is unrepresentable",
             ));
         }
+        let [extension, displacement] = extension_maps.map_or([1.0, 0.0], |maps| maps[entry_index]);
+        let memory_scale = if extension == 1.0 { scale } else { scale * extension };
+        let displacement_scale = if displacement == 0.0 { 0.0 } else {
+            (det::sqrt(b.stiffness_per_area)
+                / det::sqrt(old.pin_at(entry.element).stiffness_per_area)) * displacement
+        };
+        if !memory_scale.is_finite() || memory_scale == 0.0
+            || !displacement_scale.is_finite()
+            || (displacement != 0.0 && displacement_scale == 0.0)
+        {
+            return Err(invalid("constitutive wall memory map is unrepresentable"));
+        }
         let old_start = a.start + entry.element * local - a.field_start;
         let new_start = b.start + entry.element * local - b.field_start;
         for i in 0..local {
@@ -338,8 +404,19 @@ fn transfer_relaxation(
             old_seen[old_index - memory_start] = true;
             new_seen[new_index - memory_start] = true;
             let old_value = before.tilde[old_index];
-            let new_value = old_value * scale;
-            if !new_value.is_finite() || (old_value != 0.0 && new_value == 0.0) {
+            let memory_value = old_value * memory_scale;
+            let displacement_value = before.tilde[old.start + entry.element * local + i];
+            let mixed = displacement_value * displacement_scale;
+            if !memory_value.is_finite() || (old_value != 0.0 && memory_value == 0.0)
+                || !mixed.is_finite()
+                || (displacement_value != 0.0 && displacement_scale != 0.0 && mixed == 0.0)
+            {
+                return Err(invalid("constitutive wall memory map lost a nonzero term"));
+            }
+            // An exact cancellation here is physical, unlike losing either
+            // nonzero summand to underflow. Preserve legacy arithmetic at b=0.
+            let new_value = if displacement_scale == 0.0 { memory_value } else { memory_value + mixed };
+            if !new_value.is_finite() {
                 return Err(invalid(
                     "Maxwell elastic extension was lost during state transfer",
                 ));
