@@ -25,6 +25,12 @@ pub use local::finite_gas::{
     FiniteGasDgStep,
 };
 
+pub use local::finite_gas::transport::{
+    FiniteGasDgBinding, FiniteGasDgNode, FiniteGasDgTransportInput,
+    FiniteGasDgTransportSolve, FiniteGasDgTransportStep, FiniteGasDgTransportError,
+    advance_finite_gas_dg_transport,
+};
+
 use fs_vfit::relaxation::RelaxationImpedanceSpec;
 use super::{WallPatch, invalid};
 use super::super::network::{NetworkNode, TubeNetworkSpec};

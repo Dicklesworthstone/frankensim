@@ -72,6 +72,33 @@ pub struct GasTransportStep {
     pub entropy_change_j_k: f64,
 }
 
+impl GasTransportStep {
+    /// Reapply the ORIGINAL active-nozzle ordering gate after an enclosing
+    /// thermal/mechanical proposal changes the transported gas endpoints.
+    ///
+    /// This does not sample another flow or spend inventory again. The supplied
+    /// map must retain every original parcel identity; the actual positive
+    /// transfers and directions in this report remain authoritative. It checks
+    /// pressure ordering only: heat/work can change entropy, and the transport
+    /// entropy report is not a certificate for that subsequent process.
+    pub fn admit_endpoint_nozzle_pressures(
+        &self, parcels: &BTreeMap<u64, ClosedGasParcel>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(), GasTransportError> {
+        check(&mut cancelled)?;
+        if !parcels.keys().copied().eq(self.exchange.parcels.iter().map(|row| row.id))
+            || self.nozzles.iter().any(|row| !parcels.contains_key(&row.donor)
+                || !parcels.contains_key(&row.receiver))
+        {
+            return Err(GasTransportError::Invalid(
+                "final nozzle admission needs the complete original parcel identity map",
+            ));
+        }
+        pressure::admit_pressures(parcels, &self.nozzles, &mut cancelled)?;
+        check(&mut cancelled)
+    }
+}
+
 /// All proposed material states and their common balances, or no endpoint.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GasTransportCandidate {
@@ -157,3 +184,4 @@ pub fn step_candidate(
 
 #[cfg(test)]
 mod tests;
+

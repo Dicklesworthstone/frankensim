@@ -5,6 +5,9 @@
 //! from the finite background into the actual wave/diffusion storage. No gas
 //! kinetics, mass-flow law, thermal solver or acoustic propagator is duplicated.
 
+/// Shared original-snapshot transport into multiple native acoustic owners.
+pub mod transport;
+
 use super::{MaterialWallDg, RegionalMaterialWallDg};
 use super::update::{GasRefresh, prepare_gas};
 use crate::acoustic_realize::AcousticRealizeError;

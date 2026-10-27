@@ -2528,3 +2528,16 @@ Focused synthetic regressions in fs-couple compare the complete analytic
 potentials, thermal derivatives, signed/zero coupling and actual coupled
 circuit/motion/caloric evolution. Source syntax and independent scalar references
 were checked; native compilation/tests were not run in the editing environment.
+
+
+### Final nozzle admission after enclosing heat or mechanical work
+
+`GasTransportStep::admit_endpoint_nozzle_pressures` reapplies the existing
+active-nozzle pressure-order check to a complete endpoint parcel map after an
+enclosing physical owner supplies heat or mechanical work. Original parcel IDs
+and actual positive transfers remain authoritative; the adapter samples no new
+flow, spends no inventory and changes no accepted parcel. It checks pressure
+ordering only and does not extend the original transport-stage entropy account
+to subsequent heat/work. The multi-chamber DG integration exercises a late
+heated-reservoir reversal and complete rollback. Source/API review and syntax
+parsing completed; native execution remains unverified in this environment.

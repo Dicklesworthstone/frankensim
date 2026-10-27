@@ -8015,3 +8015,37 @@ equality, and late source/budget/cancellation refusal with deterministic retry.
 All nine changed Rust files passed syntax parsing; independent scalar equations
 were evaluated. Native Rust compilation/tests and rustfmt were not run because
 the required Rust/Cargo and DSR/RCH environment was unavailable.
+
+
+### Shared finite gas transport and continuing acoustic chambers
+
+`advance_finite_gas_dg_transport` composes the original combined nozzle and
+Maxwell-Stefan transport with multiple existing source-backed uniform or
+regional-wall DG owners and finite reservoirs. All rates, gross species
+withdrawals and partial enthalpies use one immutable original gas snapshot over
+the common native sample duration. Transport reconstructs each inventory once;
+repeated local gas/acoustic work feedback reads that transported proposal
+without resampling or withdrawing again. Each duct's complete original source
+state and clock must match its native parcel. Unbound reservoirs use the
+original caloric heat owner.
+
+`GasTransportStep::admit_endpoint_nozzle_pressures` delegates the original
+active-flow ordering gate against the complete final heat/work-adjusted map.
+Actual global gas and wave/wall storage, native loss, external heat, port work
+and mass close before both maps publish. Transported enthalpy and gas-to-wave
+work are internal and never counted again. Per-duct source fields, ports,
+diffusion memories and physical Maxwell histories continue.
+
+These are distinct well-mixed fixed-volume chambers: no continuous spatial
+pressure-equilibrated field, acoustic scattering through restrictions, jet
+momentum/noise, static pressure prestress, wall thermal evolution or guessed
+gas/wall loss partition. Transport entropy applies to its original stage;
+later heat/work does not inherit an entropy certificate. Original source,
+near-isothermal diffusion and gross-withdrawal gates remain; the composed
+evolution is first order and requires physical timestep refinement.
+
+Three focused regressions cover independent binary flux and source substitution,
+multi-owner continuation, global energy/species conservation and late final
+pressure/work/cancellation rollback. All six changed Rust files passed syntax
+parsing. Independent diffusion and caloric reference arithmetic was executed.
+Native compilation, Cargo tests and rustfmt remain unexecuted in this environment.
