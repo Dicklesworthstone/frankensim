@@ -27,11 +27,15 @@ use fs_material::gas_field::input::PrimitiveGasColumns;
 use fs_material::gas_species::input::{GasInputError, GasRecord, ThermochemicalSources, read_gas_record};
 use std::str::SplitAsciiWhitespace;
 
+/// Shared source-backed solid wall declaration for every authored DG wind path.
+pub mod wall;
+
 /// Keep source-line errors distinct from the original material and solver error.
 #[derive(Debug)]
 pub enum DgSourceError {
     Input { line: usize, what: &'static str },
     Gas { line: usize, source: fs_material::MaterialError },
+    Material { line: usize, source: fs_material::state_point::MaterialStatePointError },
     Physics(AcousticRealizeError),
     Radiation { line: usize, source: MimoRadiationInputError },
 }
@@ -40,6 +44,7 @@ impl core::fmt::Display for DgSourceError {
         match self {
             Self::Input { line, what } => write!(f, "DG source line {line}: {what}"),
             Self::Gas { line, source } => write!(f, "DG material line {line}: {source}"),
+            Self::Material { line, source } => write!(f, "DG solid material line {line}: {source}"),
             Self::Physics(source) => write!(f, "DG source physics: {source}"),
             Self::Radiation { line, source } => write!(f, "DG radiation line {line}: {source}"),
         }
@@ -486,7 +491,26 @@ impl DgSourceInput {
     pub fn prepare(
         self, ambient: &GasState, dt: f64, gate: &CancelGate,
     ) -> Result<DgPortLoad, DgSourceError> {
+        self.prepare_with_material_wall(ambient, dt, gate, None)
+    }
+
+    /// Prepare the same DG gas, ports and radiation with an optional original
+    /// source-backed wall. All wall inertia, elasticity and positive Maxwell
+    /// arms enter the ONE native DG exponential, alongside gas wall memory.
+    /// The full bore must satisfy the original uniform-cylinder/thin-wall
+    /// admission. Side chimneys retain their explicitly rigid wall model.
+    pub fn prepare_with_material_wall(
+        self, ambient: &GasState, dt: f64, gate: &CancelGate,
+        wall: Option<&crate::bernoulli_aperture::wall::material::LocalMaterialWall>,
+    ) -> Result<DgPortLoad, DgSourceError> {
         checkpoint(gate, self.line)?;
+        if wall.is_some_and(|wall| {
+            let band = wall.band_hz();
+            band[0] > self.band_hz[0] || band[1] < self.band_hz[1]
+        }) {
+            return Err(bad(self.line,
+                "DG solid wall material band must cover the complete propagation band"));
+        }
         self.check_state_budget(ambient)?;
         let owner = if let Some(field) = &self.field {
             DgDuct::new_with_gas_field(
@@ -512,6 +536,11 @@ impl DgSourceInput {
             owner.with_viscothermal(self.poles, self.band_hz, self.maximum_relative_error)
                 .map_err(|error| DgSourceError::Physics(AcousticRealizeError::Duct(error)))?
         };
+        checkpoint(gate, self.line)?;
+        let owner = if let Some(wall) = wall {
+            wall.clone().bind_dg_controlled(owner, &mut || gate.is_requested())
+                .map_err(DgSourceError::Physics)?.into_duct()
+        } else { owner };
         checkpoint(gate, self.line)?;
         let branches = self.prepare_chimneys(gate)?;
         let load = if let Some((controls, exterior)) = self.radiation {

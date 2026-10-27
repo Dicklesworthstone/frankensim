@@ -50,6 +50,12 @@ impl MaterialWallDg {
     pub const fn duct(&self) -> &fs_duct::dg::DgDuct {
         &self.duct
     }
+    /// Move the original coupled operator into its acoustic host without
+    /// rebuilding or copying its material and gas-memory coordinates.
+    #[must_use]
+    pub fn into_duct(self) -> fs_duct::dg::DgDuct {
+        self.duct
+    }
 }
 
 /// Independently sourced wall materials on the ORIGINAL DG elements.

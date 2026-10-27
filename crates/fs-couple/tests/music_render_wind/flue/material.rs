@@ -15,6 +15,8 @@ mod boundaries;
 mod mimo;
 #[path = "material/wall_memory.rs"]
 mod wall_memory;
+#[path = "material/dg.rs"]
+mod dg;
 
 fn pack(density: f64, young: f64, omit: Option<&str>, upper_omega: f64)
     -> NormalizedMaterialCardPack

@@ -147,3 +147,35 @@ fn invalid_clock_structure_and_unbound_observation_refuse_without_substitution()
     ).err().unwrap();
     assert!(matches!(error, PlateValveInputError::Material { .. }));
 }
+
+#[test]
+fn the_same_material_source_drives_reed_plates_and_the_original_dg_wall() {
+    let declaration = "dg_wall isotropic blade.matpack 293.15 100 0.00002 stress-free 50 2000 maxwell 1 1 0.5 boundary_modulus boundary_time\n";
+    let text = input().replace("slit_length", &format!("{declaration}slit_length"));
+    let mut loads = 0;
+    let source = MaterialModalDgValvePerformance::from_bytes_with_sources(
+        text.as_bytes(), 37, &CancelGate::new_clock_free(), None, |path| {
+            assert_eq!(path, "blade.matpack"); loads += 1; Ok(pack(900.0, false))
+        },
+    ).unwrap();
+    assert_eq!(loads, 1, "reed and wall must share the original immutable artifact");
+    assert_eq!(source.wall_record().unwrap().pack(), source.material_records()[0].pack());
+    let duct = source.renderer().system().load().duct();
+    let wall = duct.compliant_wall().unwrap();
+    assert!((wall.surface_density - 0.018).abs() < 1e-15);
+    assert!((wall.stiffness_per_area - 8e10).abs() < 1e-4);
+    assert!(duct.has_viscothermal_memory());
+    assert_eq!(duct.total_dofs(), 63, "gas, diffusion, radial motion and one physical Maxwell arm");
+    let reference = render(source);
+    assert_eq!(reference.0, render(build(&text, 1)).0);
+    let load = reference.1.system().load();
+    let motion = load.duct().compliant_wall_state(load.state()).unwrap();
+    assert!(motion.stored_energy_j > 0.0);
+    assert!(motion.relaxation_stored_energy_j > 0.0);
+    assert_eq!(motion.relaxation_pressure_pa.len(), 1);
+    let changed = text.replacen("isotropic blade.matpack", "isotropic altered.matpack", 1);
+    let changed = build(&changed, 37);
+    assert_eq!(changed.material_records()[0].pack(), &pack(900.0, false),
+        "only the bore material changed; reed plates keep their original source");
+    assert_ne!(reference.0, render(changed).0);
+}

@@ -14,6 +14,7 @@
 
 use super::{FlueDgConfig, FlueDgPerformance, FlueMouthRadiation};
 use crate::dg_port::input::{DgSourceError, DgSourceInput};
+use crate::dg_port::input::wall::{DgMaterialWallInput, DgMaterialWallRecord};
 use crate::flue_loop::dg::FlueDgSpec;
 use crate::flue_loop::network::performance::file::{
     FlueInputError, FluePerformanceInfo, MAX_FLUE_PERFORMANCE_BYTES, Rows,
@@ -24,7 +25,9 @@ use fs_aeroac::jetcard::{JetCard, mint_tonal_interim_card};
 use fs_blake3::hash_domain;
 use fs_exec::CancelGate;
 use fs_material::gas_species::input::{GasRecord, ThermochemicalSources};
+use fs_matdb::NormalizedMaterialCardPack;
 use fs_scenario::gesture::GestureSchedule;
+use std::sync::Arc;
 
 pub const FLUE_DG_PERFORMANCE_SCHEMA: &str = "frankensim-flue-dg-performance-v1";
 
@@ -115,6 +118,7 @@ pub struct FlueDgFilePerformance {
     geometry: FlueGeometry,
     card: JetCard,
     gas_records: Vec<GasRecord>,
+    wall: Option<DgMaterialWallRecord>,
 }
 
 impl FlueDgFilePerformance {
@@ -133,6 +137,20 @@ impl FlueDgFilePerformance {
         max_block: usize,
         gate: &CancelGate,
         sources: Option<&ThermochemicalSources<'_>>,
+    ) -> Result<Self, FlueDgInputError> {
+        Self::from_bytes_with_sources(bytes, max_block, gate, sources,
+            |_| Err("DG solid wall requires a normalized material source loader".into()))
+    }
+
+    /// Optional `dg_wall` after the complete DG bore block resolves a solid
+    /// source through the same local wall law used by moving-valve sources.
+    /// The original gas diffusion, source equations and observer are retained.
+    pub fn from_bytes_with_sources(
+        bytes: &[u8],
+        max_block: usize,
+        gate: &CancelGate,
+        sources: Option<&ThermochemicalSources<'_>>,
+        mut load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
     ) -> Result<Self, FlueDgInputError> {
         poll(gate)?;
         if bytes.len() > MAX_FLUE_PERFORMANCE_BYTES || !(1..=65_536).contains(&max_block) {
@@ -178,6 +196,17 @@ impl FlueDgFilePerformance {
             &gas, sources, &mut gas_records, gate,
         )?;
         row.end()?;
+        let wall = if rows.next_is("dg_wall") {
+            let mut row = rows.row("dg_wall")?;
+            let declaration = DgMaterialWallInput::read(row.line, &mut row.fields)?;
+            row.end()?;
+            if let Some(input) = declaration {
+                poll(gate)?;
+                let pack = load_material(input.path()).map_err(|source|
+                    FlueInputError::MaterialSource { line: input.line(), source })?;
+                Some(input.resolve(Arc::new(pack), gate)?)
+            } else { None }
+        } else { None };
         let mut row = rows.row("flue")?;
         let mut geometry = FlueGeometry {
             flue_width_m: row.scalar()?,
@@ -243,7 +272,8 @@ impl FlueDgFilePerformance {
             return Err(bad(rows.line + 1, "gesture suffix must be canonical without ignored trailing data"));
         }
         poll(gate)?;
-        let load = source.prepare(&gas, 1.0 / f64::from(sample_rate_hz), gate)?;
+        let load = source.prepare_with_material_wall(&gas,
+            1.0 / f64::from(sample_rate_hz), gate, wall.as_ref().map(|source| source.wall()))?;
         geometry.bore_area_m2 = load.duct().inlet_area_m2();
         let voice = FlueVoice::from_dg(
             Some(&card), displacement_gain, seed_amplitude_rel, geometry,
@@ -286,7 +316,7 @@ impl FlueDgFilePerformance {
             jet_card_hash: card.content_hash(), jet_card_source,
             compiled_controls: renderer.compiled_controls(),
         };
-        Ok(Self { info, renderer, geometry, card, gas_records })
+        Ok(Self { info, renderer, geometry, card, gas_records, wall })
     }
 
     pub const fn info(&self) -> FluePerformanceInfo { self.info }
@@ -294,6 +324,7 @@ impl FlueDgFilePerformance {
     pub const fn geometry(&self) -> FlueGeometry { self.geometry }
     pub const fn card(&self) -> &JetCard { &self.card }
     pub fn gas_records(&self) -> &[GasRecord] { &self.gas_records }
+    pub const fn wall_record(&self) -> Option<&DgMaterialWallRecord> { self.wall.as_ref() }
     pub fn into_renderer(self) -> FlueDgPerformance { self.renderer }
 }
 
