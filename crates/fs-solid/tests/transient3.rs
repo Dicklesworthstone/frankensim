@@ -5,6 +5,9 @@ use fs_solid::linear3::*;
 use fs_solid::loads3::{TetLoadGeometry3, VolumeLoad3};
 use fs_solid::loads3::transient::{TransientConfig3, TransientError3};
 
+#[path = "transient3/thermal_damping.rs"]
+mod thermal_damping;
+
 const NODES: [[f64; 3]; 4] = [[0.0,0.0,0.0], [1.0,0.0,0.0], [0.0,1.0,0.0], [0.0,0.0,1.0]];
 const TETS: [[usize; 4]; 1] = [[0,1,2,3]];
 const ZERO: [[f64; 3]; 4] = [[0.0; 3]; 4];
@@ -310,9 +313,12 @@ fn g4_thermal_refresh_refuses_changed_mass_and_late_strain_without_mutating_hist
             softened.material_state_identity,frame,0.1).unwrap();
         let damped = load.begin_transient(&original,None,0.0,&ZERO,&ZERO,
             TransientConfig3 { stiffness_damping_s:0.01, ..config() },cx).unwrap();
-        assert!(matches!(damped.advance_thermal_candidate(&softened_problem,
-            TetThermalStrainField::Uniform(&softened_strain),&load,0.01,frame,0.1,cx),
-            Err(TransientError3::Invalid(_))));
+        let (damped_next, damped_report) = damped.advance_thermal_candidate(&softened_problem,
+            TetThermalStrainField::Uniform(&softened_strain),&load,0.01,frame,0.1,cx).unwrap();
+        assert!(damped_report.native.damping_loss_j >= 0.0);
+        assert!(damped_report.physical_balance_error_j.abs() < 1e-12);
+        assert_eq!(damped_next.state().time_s,0.01);
+        assert_eq!(damped.state(),&saved);
         // The native inertial candidate is computed, then physical stress
         // recovery refuses an over-limit elastic strain. Accepted history stays.
         assert!(run.advance_thermal_candidate(&original,TetThermalStrainField::Uniform(&strain),

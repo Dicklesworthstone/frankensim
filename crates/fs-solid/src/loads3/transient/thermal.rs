@@ -55,9 +55,12 @@ impl<'g, 'm> TetTransientRun3<'g, 'm, '_, '_> {
     /// identities are retained by the returned run and native stress recovery.
     /// Reference density stays bit-identical. A changed Mandel tensor rebuilds
     /// the native endpoint stiffness; an unchanged tensor reuses its operator.
-    /// Changing stiffness requires zero stiffness-proportional Rayleigh damping:
-    /// endpoint damping with changing K is not unconditionally dissipative.
-    /// Mass damping remains supported. Mass changes and moving supports refuse.
+    /// Changed stiffness uses Cbar = eta*M + zeta*(K_old+K_next)/2 at the
+    /// midpoint velocity, keeping Rayleigh loss nonnegative for the admitted K.
+    /// Endpoint acceleration is recovered with the actual endpoint operators;
+    /// both solves share the original iteration limit. Mass changes and moving
+    /// supports refuse. This remains the explicitly supplied Rayleigh model,
+    /// not a newly inferred broadband or temperature-dependent loss law.
     ///
     /// Eigenstrain follows the endpoint trapezoidal/Newmark convention, as do
     /// external forces. Resolve jumps and short heating pulses explicitly and
@@ -93,9 +96,6 @@ impl<'g, 'm> TetTransientRun3<'g, 'm, '_, '_> {
             stiffness_changed |= before.stiffness_mandel_pa().iter().flatten()
                 .zip(after.stiffness_mandel_pa().iter().flatten())
                 .any(|(a,b)| a.to_bits() != b.to_bits());
-        }
-        if stiffness_changed && self.config.stiffness_damping_s != 0.0 {
-            return Err(TransientError3::Invalid("changing stiffness requires zero stiffness-proportional damping"));
         }
         // Existing assembly checks full source identity, counts, constraints,
         // geometry/quality and bounds before any source is retained.

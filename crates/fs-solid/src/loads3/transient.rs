@@ -32,6 +32,7 @@ pub mod adjoint;
 pub mod motion;
 /// Source-refreshed thermal strain with physical elastic energy and input work.
 pub mod thermal;
+mod thermal_damping;
 
 /// Explicit resource, solve, motion and energy allowances, all in coherent SI.
 #[derive(Debug, Clone, Copy)]
@@ -149,15 +150,24 @@ impl Precond for Diagonal {
 }
 fn solve(op: &Operator<'_, '_>, rhs: &[f64], config: TransientConfig3)
     -> Result<(Vec<f64>, usize, f64), TransientError3> {
-    check(op.cx)?;
+    solve_with_diagonal(op, rhs, config, op.cx,
+        |i| op.cm * op.m.get(i, i) + op.ck * op.k.get(i, i))
+}
+
+// The same PCG, preconditioner and fresh residual gate also admit a combination
+// of the two endpoint stiffness operators. No parallel numerical solver exists.
+fn solve_with_diagonal(op: &impl LinearOp, rhs: &[f64], config: TransientConfig3,
+    cx: &Cx<'_>, diagonal_entry: impl Fn(usize) -> f64)
+    -> Result<(Vec<f64>, usize, f64), TransientError3> {
+    check(cx)?;
     let rhs_norm = number(length(rhs))?;
     let allowance = number(config.absolute_force_tolerance_n
         + config.solve.relative_residual_tolerance * rhs_norm)?;
     if rhs_norm == 0.0 { return Ok((vec![0.0; rhs.len()], 0, 0.0)); }
     let mut inverse = Vec::with_capacity(rhs.len());
     for i in 0..rhs.len() {
-        if i % 256 == 0 { check(op.cx)?; }
-        let d = number(op.cm * op.m.get(i, i) + op.ck * op.k.get(i, i))?;
+        if i % 256 == 0 { check(cx)?; }
+        let d = number(diagonal_entry(i))?;
         if d <= 0.0 { return Err(TransientError3::Invalid("effective mass diagonal is not positive")); }
         inverse.push(number(d.recip())?);
     }
@@ -167,15 +177,15 @@ fn solve(op: &Operator<'_, '_>, rhs: &[f64], config: TransientConfig3)
     // drift at the boundary. Absolute allowance still handles physical zero.
     let target = (0.1 * allowance / rhs_norm).min(0.1);
     while state.iters < config.solve.maximum_iterations && state.rel_residual() > target {
-        check(op.cx)?;
+        check(cx)?;
         let before = state.iters;
         let remaining = config.solve.maximum_iterations - before;
         let _ = state.run(op, &diagonal, target, remaining.min(32));
         if state.iters == before { break; }
     }
-    check(op.cx)?;
+    check(cx)?;
     let mut applied = vec![0.0; rhs.len()]; op.apply(&state.x, &mut applied);
-    check(op.cx)?;
+    check(cx)?;
     let residual = rhs.iter().zip(&applied).fold(0.0_f64, |n, (f, a)| n.hypot(f-a));
     if !residual.is_finite() || residual > allowance || state.x.iter().any(|v| !v.is_finite()) {
         return Err(TransientError3::Solve { iterations: state.iters, residual_n: residual, allowance_n: allowance });
@@ -421,9 +431,8 @@ impl TetTransientRun3<'_, '_, '_, '_> {
             return Err(TransientError3::Invalid("thermal endpoint requires matching fields and stationary zero supports"));
         }
         if stiffness_before.is_some_and(|matrix| matrix.nrows() != self.free_dofs().len())
-            || (stiffness_before.is_some()
-                && (next_supports.is_some() || self.config.stiffness_damping_s != 0.0)) {
-            return Err(TransientError3::Invalid("changing stiffness requires fixed mass, stationary zero supports and zero stiffness-proportional damping"));
+            || (stiffness_before.is_some() && next_supports.is_some()) {
+            return Err(TransientError3::Invalid("changing stiffness requires fixed mass and stationary zero supports"));
         }
         if self.state.step >= self.config.maximum_steps { return Err(TransientError3::Budget); }
         let next_time = self.state.time_s + h_s;
@@ -434,24 +443,36 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         if b == 0.0 { return Err(TransientError3::Invalid("squared time step underflows")); }
         let force = self.reduce_force(load_next, cx)?;
         let n = force.len();
-        let mut qp = Vec::with_capacity(n); let mut vp = Vec::with_capacity(n);
-        for i in 0..n {
-            if i % 256 == 0 { check(cx)?; }
-            qp.push(number(self.state.displacement[i] + h_s*self.state.velocity[i] + b*self.state.acceleration[i])?);
-            vp.push(number(self.state.velocity[i] + 0.5*h_s*self.state.acceleration[i])?);
-        }
         let eta = self.config.mass_damping_per_s; let zeta = self.config.stiffness_damping_s;
-        let ku = self.apply(0.0, 1.0, &qp, cx)?; let cv = self.apply(eta, zeta, &vp, cx)?;
         let thermal_force = thermal_next.unwrap_or(&self.thermal);
-        let mut rhs: Vec<_> = (0..n).map(|i| force[i]+thermal_force[i]-ku[i]-cv[i]).collect();
-        if let Some(supports) = &next_supports { self.subtract_support_force(supports, &mut rhs, cx)?; }
-        let op = self.operator(number(1.0+0.5*h_s*eta)?, number(b+0.5*h_s*zeta)?, cx);
-        let (a, iterations, force_residual_n) = solve(&op, &rhs, self.config)?;
-        let mut q = Vec::with_capacity(n); let mut v = Vec::with_capacity(n);
+        let changing_damping = stiffness_before.filter(|_| zeta != 0.0);
+        let (q, v, a, iterations, force_residual_n) = if let Some(previous) = changing_damping {
+            let endpoint = self.damped_material_endpoint(previous, &force, thermal_force, h_s, b, cx)?;
+            (endpoint.displacement, endpoint.velocity, endpoint.acceleration,
+                endpoint.iterations, endpoint.force_residual_n)
+        } else {
+            // Preserve the original arithmetic for all previously admitted runs.
+            let mut qp = Vec::with_capacity(n); let mut vp = Vec::with_capacity(n);
+            for i in 0..n {
+                if i % 256 == 0 { check(cx)?; }
+                qp.push(number(self.state.displacement[i] + h_s*self.state.velocity[i] + b*self.state.acceleration[i])?);
+                vp.push(number(self.state.velocity[i] + 0.5*h_s*self.state.acceleration[i])?);
+            }
+            let ku = self.apply(0.0, 1.0, &qp, cx)?; let cv = self.apply(eta, zeta, &vp, cx)?;
+            let mut rhs: Vec<_> = (0..n).map(|i| force[i]+thermal_force[i]-ku[i]-cv[i]).collect();
+            if let Some(supports) = &next_supports { self.subtract_support_force(supports, &mut rhs, cx)?; }
+            let op = self.operator(number(1.0+0.5*h_s*eta)?, number(b+0.5*h_s*zeta)?, cx);
+            let (a, iterations, force_residual_n) = solve(&op, &rhs, self.config)?;
+            let mut q = Vec::with_capacity(n); let mut v = Vec::with_capacity(n);
+            for i in 0..n {
+                if i % 256 == 0 { check(cx)?; }
+                q.push(number(qp[i]+b*a[i])?); v.push(number(vp[i]+0.5*h_s*a[i])?);
+            }
+            (q, v, a, iterations, force_residual_n)
+        };
         let mut dq = Vec::with_capacity(n); let mut average_v = Vec::with_capacity(n);
         for i in 0..n {
             if i % 256 == 0 { check(cx)?; }
-            q.push(number(qp[i]+b*a[i])?); v.push(number(vp[i]+0.5*h_s*a[i])?);
             dq.push(number(q[i]-self.state.displacement[i])?);
             average_v.push(0.5*v[i]+0.5*self.state.velocity[i]);
         }
@@ -474,8 +495,12 @@ impl TetTransientRun3<'_, '_, '_, '_> {
                 let average: Vec<_> = self.thermal.iter().zip(next).map(|(a,b)| 0.5*a+0.5*b).collect();
                 number(inner(&average, &dq))?
             } else { number(inner(&self.thermal, &dq))? };
-            (kinetic, strain, number(inner(&average_force, &dq))?, 0.0, thermal_work,
-                number(h_s*inner(&average_v, &self.apply(eta,zeta,&average_v,cx)?))?)
+            let damping_loss = if let Some(previous) = changing_damping {
+                self.material_damping_loss(previous, &average_v, h_s, cx)?
+            } else {
+                number(h_s*inner(&average_v, &self.apply(eta,zeta,&average_v,cx)?))?
+            };
+            (kinetic, strain, number(inner(&average_force, &dq))?, 0.0, thermal_work, damping_loss)
         };
         let stiffness_parameter_work_j = if let Some(previous) = stiffness_before {
             let mut old_action = vec![0.0; n];
