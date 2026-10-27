@@ -6971,10 +6971,28 @@ Source receipts, state, reciprocal operator and a newly certified propagator
 publish together at the same physical clock after applicability-band, work,
 state-identity and cancellation checks. No vibration restart or amplitude
 normalization occurs. Failed source or propagator preparation retains the old
-complete state. Live Maxwell-history replacement, changing gas/mesh, thermal
-expansion and mass transfer remain outside this operation; cold regional
-hereditary construction is unchanged. Focused tests continue an independent
+complete state. Changing gas/mesh, thermal expansion and mass transfer remain
+outside this operation; cold regional hereditary construction is unchanged.
+Focused tests continue an independent
 sealed-wall oscillator, preserve regional diffusion history, change supported
 source temperature, and exercise source/work/history/cancellation refusals.
 Program anchors: MR08/MR34 (`frankensim-material-reality-ui2if.1.8`, `.5.4`),
 remain open for broader changing-geometry and reduced-history behavior.
+
+The same live operation now retains sourced Maxwell internal variables. Every
+arm keeps its elastic extension `z_j/K_j`, hence its viscous offset relative to
+the retained wall displacement. Its modulus/time property pair and exact
+selected claim IDs establish identity, with the same immutable material card,
+base claims, wall thickness, axial restraint and positive-arm support. Reordered
+declarations and uniform/regional storage layouts are handled by complete
+per-element correspondence. Unlabelled authored spectra, changed sources,
+activated/extinguished arms and incomplete maps refuse atomically.
+
+Changed Maxwell spring storage joins the existing parameter-work ledger once;
+a relaxation-time-only update has zero instantaneous work and changes future
+loss in the native DG propagator. Five focused regressions cover an independent
+analytic gas/wall/Maxwell trajectory, physical storage quadrature, source-driven
+temperature updates and rollback with nonzero history. Parsing/formatting and
+bounded source review passed; native test execution remains unverified. This
+does not solve heat, infer branch lineage across different materials, or turn
+instantaneous parameter work into dissipated heat.

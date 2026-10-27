@@ -1187,8 +1187,8 @@ zero outside their support. Native source, pressure, force, storage and port
 regressions cover differing spectra and mixed hereditary/Kelvin regions.
 The local membrane model still omits axial shell waves and stress transfer at
 material joints. These attachment APIs initialize cold mechanics; no internal
-history is silently discarded. Live elastic/Kelvin--Voigt transfer uses the
-separate continuing-state operation below.
+history is silently discarded. Live elastic/Kelvin--Voigt and explicitly mapped
+Maxwell transfers use the separate continuing-state operations below.
 
 ## Live material updates on the native gas/wall state
 
@@ -1203,9 +1203,25 @@ or a mass-transfer process. A finite explicit work budget bounds each update.
 
 Original state/operator identity, passive coefficients and cancellation are
 checked before publication; old propagators refuse after an operator change.
-Uniform and regional Maxwell histories refuse a live replacement because no
-source-identified branch transfer is provided. The existing cold regional
-Maxwell API remains supported. Native tests check analytical post-change wall
+The elastic/Kelvin--Voigt API refuses retained Maxwell histories; callers use
+`rebind_compliant_wall_relaxation_regions` with a complete per-element
+`DgWallRelaxationTransfer` mapping for hereditary updates. The source owner must
+establish each arm's physical identity. The native transfer preserves every
+elastic extension `z_j/K_j` and hence viscous offset `w-z_j/K_j`, including when
+uniform and regional storage order differ. It requires one-to-one coverage of
+every original and replacement positive history on its original element.
+Missing/duplicate histories, activated/extinguished arms and unsupported maps
+refuse. No projection or reset substitutes for correspondence.
+
+Each normalized memory coordinate scales by `sqrt(K_new/K_old)`. Its actual
+spring-storage change joins the existing parameter-work account exactly once.
+A relaxation-time-only change owes zero instantaneous work and changes future
+native dissipation. The same regional assembler and propagator continue the
+trajectory. Native tests check analytical post-change wall
 motion/pressure, physical quadrature of parameter work, retained gas-memory
 coordinates, one-time energy accounting and transactional refusal. This does not
-remap gas, mesh, expanding geometry or hereditary branch histories.
+remap gas, mesh or expanding geometry, or infer physical arm identity. Five
+focused native/source regressions add analytic Maxwell continuation, physical
+storage quadrature, source-temperature response and nonzero-history rollback.
+Rust parsing and source review passed; these new native regressions have not
+been executed in the implementation environment.

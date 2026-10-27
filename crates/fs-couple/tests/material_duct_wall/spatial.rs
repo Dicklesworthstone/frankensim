@@ -16,6 +16,8 @@ use fs_thermochem::{Composition, CompositionBasis};
 mod gas_support;
 #[path = "spatial/live.rs"]
 mod live;
+#[path = "spatial/maxwell_live.rs"]
+mod maxwell_live;
 
 fn composition(fraction: f64) -> Composition {
     Composition::new(

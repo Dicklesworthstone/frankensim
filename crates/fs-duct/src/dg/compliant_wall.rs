@@ -18,7 +18,7 @@ mod coordinates;
 mod relaxation;
 use coordinates::{CoordinateError, WallCoordinates};
 mod update;
-pub use update::DgWallMaterialUpdate;
+pub use update::{DgWallMaterialUpdate, DgWallRelaxationTransfer};
 
 #[derive(Debug, Clone)]
 pub(super) struct CompliantWall {
@@ -42,6 +42,9 @@ struct WallRelaxationBranch {
     // on these nodes. Uniform branches retain the original complete-field map.
     field_start: usize,
     dofs: usize,
+    // Index in the original local source spectrum, including omitted zero arms.
+    source_arm: usize,
+    stiffness_per_area: f64,
     rate_per_s: f64,
     pressure_scale: f64,
 }

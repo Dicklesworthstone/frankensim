@@ -83,7 +83,7 @@ use fs_math::det;
 mod viscothermal;
 pub use viscothermal::{DgWallAdmission, DgWallResolution};
 mod compliant_wall;
-pub use compliant_wall::{DgCompliantWallState, DgWallMaterialUpdate};
+pub use compliant_wall::{DgCompliantWallState, DgWallMaterialUpdate, DgWallRelaxationTransfer};
 mod port_response;
 pub use port_response::{DgMultiportResponse, DgPortResponse};
 mod side_ports;

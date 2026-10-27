@@ -276,7 +276,8 @@ impl LocalMaterialWall {
     /// wall; its inertia and spring mass use the geometric Gram matrix, never
     /// an averaged gas. Uniform-cylinder and thin-wall restrictions apply. This is
     /// cold compilation. `MaterialWallDg::rebind_controlled` updates an already
-    /// vibrating elastic/Kelvin--Voigt wall and its certified propagator together.
+    /// vibrating wall and its certified propagator together; Maxwell histories
+    /// require complete original source-arm correspondence on fixed geometry.
     /// The retained band is the SAME model applicability statement as the
     /// graph-wall owner, not a filter or broadband input certificate. The
     /// caller must resolve and qualify its excited frequency range separately.

@@ -143,7 +143,7 @@ impl DgDuct {
         let mut total = original;
         for source in sources {
             let factor = source.pin.stiffness_per_area / source.material.e_inf;
-            for &(modulus, tau) in &source.material.terms {
+            for (source_arm, &(modulus, tau)) in source.material.terms.iter().enumerate() {
                 check_cancelled(cancelled)?;
                 if modulus == 0.0 {
                     continue;
@@ -170,6 +170,8 @@ impl DgDuct {
                     start,
                     field_start: source.field_start,
                     dofs: source.dofs,
+                    source_arm,
+                    stiffness_per_area: stiffness,
                     rate_per_s,
                     pressure_scale,
                 });

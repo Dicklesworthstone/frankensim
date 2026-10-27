@@ -7,6 +7,7 @@ use crate::acoustic_realize::AcousticRealizeError;
 use fs_blake3::ContentHash;
 use fs_material::visco::GeneralizedMaxwell;
 use fs_material::state_point::ResolvedMaterialStatePoint;
+use fs_matdb::ClaimId;
 use fs_qty::{Dims, Pressure};
 use fs_vfit::relaxation::{ComplianceRelaxationTerm, RelaxationImpedanceSpec, MAX_RELAXATION_BRANCHES};
 use fs_vfit::waveguide::network::{NetworkNode, WaveguideNetwork};
@@ -18,14 +19,26 @@ pub struct WallRelaxation {
     material: GeneralizedMaxwell,
     provenance: String,
     source_identity: Option<ContentHash>,
+    source_arms: Option<Vec<SourceArm>>,
     band_hz: [f64; 2],
     max_dt_over_tau: f64,
     max_angular_step: f64,
+}
+
+/// The identity of an internal variable comes from its original property pair
+/// and selected claims, never from the current coefficient values or ordering.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SourceArm {
+    modulus_property: String,
+    time_property: String,
+    modulus_claim: ClaimId,
+    time_claim: ClaimId,
 }
 impl PartialEq for WallRelaxation {
     fn eq(&self, other: &Self) -> bool {
         self.material.e_inf == other.material.e_inf && self.material.terms == other.material.terms
             && self.provenance == other.provenance && self.source_identity == other.source_identity
+            && self.source_arms == other.source_arms
             && self.band_hz == other.band_hz
             && self.max_dt_over_tau == other.max_dt_over_tau && self.max_angular_step == other.max_angular_step
     }
@@ -50,12 +63,20 @@ impl WallRelaxation {
         }
         let equilibrium = super::property(material, "young_modulus", Pressure::DIMS, band_hz)?;
         let mut terms = Vec::with_capacity(properties.len());
+        let mut source_arms = Vec::with_capacity(properties.len());
         for (index, (modulus, time)) in properties.iter().enumerate() {
             if properties[..index].iter().any(|(e, tau)| e == modulus && tau == time) {
                 return Err(invalid("material wall must not duplicate a sourced relaxation branch"));
             }
             terms.push((super::property(material, modulus, Pressure::DIMS, band_hz)?,
                 super::property(material, time, Dims([0, 0, 1, 0, 0, 0]), band_hz)?));
+            let selected = |name: &str| material.property(name)
+                .map(|property| property.answer().receipt.selected)
+                .ok_or_else(|| invalid("wall relaxation requires its original selected source claims"));
+            source_arms.push(SourceArm {
+                modulus_property: modulus.clone(), time_property: time.clone(),
+                modulus_claim: selected(modulus)?, time_claim: selected(time)?,
+            });
         }
         let law = GeneralizedMaxwell::new(equilibrium, terms)
             .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?;
@@ -63,6 +84,7 @@ impl WallRelaxation {
             format!("material-state:{}; branches:{properties:?}", material.identity()),
             band_hz, max_dt_over_tau, max_angular_step)?;
         spectrum.source_identity = Some(material.identity());
+        spectrum.source_arms = Some(source_arms);
         Ok(spectrum)
     }
 
@@ -93,7 +115,8 @@ impl WallRelaxation {
         }
         let material = GeneralizedMaxwell::new(material.e_inf, material.terms)
             .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
-        Ok(Self { material, provenance, source_identity: None, band_hz, max_dt_over_tau, max_angular_step })
+        Ok(Self { material, provenance, source_identity: None, source_arms: None,
+            band_hz, max_dt_over_tau, max_angular_step })
     }
     /// Exact original material law; zero arms remain in the source record.
     #[must_use]
@@ -107,6 +130,31 @@ impl WallRelaxation {
     /// Original material applicability [Hz].
     #[must_use]
     pub const fn band_hz(&self) -> [f64; 2] { self.band_hz }
+
+    /// Exact source lineage on the same material card is checked by the wall
+    /// owner. Here every declared arm must survive, even a zero arm; only the
+    /// positive histories produce native storage-transfer entries.
+    pub(super) fn history_correspondence(&self, replacement: &Self)
+        -> Result<Vec<(usize, usize)>, AcousticRealizeError>
+    {
+        let (Some(old), Some(new)) = (&self.source_arms, &replacement.source_arms) else {
+            return Err(invalid("live Maxwell history requires source-resolved arm identities"));
+        };
+        if old.len() != new.len() {
+            return Err(invalid("live Maxwell update cannot create or discard source arms"));
+        }
+        let mut result = Vec::with_capacity(old.len());
+        for (previous, identity) in old.iter().enumerate() {
+            let next = new.iter().position(|candidate| candidate == identity)
+                .ok_or_else(|| invalid("live Maxwell history must retain each original property pair and selected claims"))?;
+            let positive = self.material.terms[previous].0 > 0.0;
+            if positive != (replacement.material.terms[next].0 > 0.0) {
+                return Err(invalid("live Maxwell update cannot activate or extinguish an arm"));
+            }
+            if positive { result.push((previous, next)); }
+        }
+        Ok(result)
+    }
 
     pub(super) fn validate_source(&self, material: &ResolvedMaterialStatePoint)
         -> Result<(), AcousticRealizeError> {
