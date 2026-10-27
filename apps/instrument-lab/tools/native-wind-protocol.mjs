@@ -1,11 +1,13 @@
 // Transport limits only. The selected native performer owns the source grammar and physics.
+import {inspectNativeWave, NATIVE_WAVE_LIMIT} from '../src/native-wave.mjs';
+
 export const MAX_SOURCE_BYTES = 1024 * 1024;
 export const MAX_ATTACHMENTS = 32;
 export const MAX_ATTACHMENT_FILE_BYTES = 8 * 1024 * 1024;
 export const MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
 // Base64 source and attachments, plus a bounded path/JSON envelope.
 export const MAX_REQUEST_BYTES = 4 * Math.ceil((MAX_SOURCE_BYTES + MAX_ATTACHMENT_BYTES) / 3) + 65536;
-export const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+export const MAX_OUTPUT_BYTES = NATIVE_WAVE_LIMIT;
 export const MAX_LOG_BYTES = 256 * 1024;
 export const DEFAULT_TIMEOUT_MS = 60000;
 // The configured native CLI owns the grammar and all material/artifact decoding.
@@ -123,28 +125,8 @@ export function validateInput(bytes, bundled = false) {
 }
 
 export function validateWave(bytes, limit = MAX_OUTPUT_BYTES) {
-  const bad = () => { throw new NativeWindError(502, 'Native renderer did not produce a complete PCM16 WAV.'); };
   if (bytes.length > limit) throw new NativeWindError(502, 'Native WAV exceeds the output limit.');
-  if (bytes.length < 44 || bytes.toString('ascii', 0, 4) !== 'RIFF'
-      || bytes.toString('ascii', 8, 12) !== 'WAVE' || bytes.readUInt32LE(4) + 8 !== bytes.length) bad();
-  let pos = 12, format = false, data = false, alignment = 0, dataLength = 0;
-  while (pos + 8 <= bytes.length) {
-    const name = bytes.toString('ascii', pos, pos + 4), size = bytes.readUInt32LE(pos + 4);
-    const end = pos + 8 + size;
-    if (end > bytes.length) bad();
-    if (name === 'fmt ') {
-      if (format || size < 16 || bytes.readUInt16LE(pos + 8) !== 1
-          || bytes.readUInt16LE(pos + 10) !== 1 || bytes.readUInt32LE(pos + 12) !== 48000
-          || bytes.readUInt16LE(pos + 22) !== 16) bad();
-      alignment = bytes.readUInt16LE(pos + 20);
-      if (alignment !== 2 || bytes.readUInt32LE(pos + 16) !== 96000) bad();
-      format = true;
-    } else if (name === 'data') {
-      if (data || !size) bad();
-      data = true; dataLength = size;
-    }
-    pos = end + (size & 1);
-  }
-  if (pos !== bytes.length || !format || !data || dataLength % alignment) bad();
+  try { inspectNativeWave(bytes, limit); }
+  catch (error) { throw new NativeWindError(502, error.message); }
   return bytes;
 }

@@ -1,4 +1,5 @@
 /** Transport contract of tools/serve-native-wind.mjs; no instrument or material defaults. */
+import type {NativePressureReceipt} from './native-wave.mjs';
 export interface NativeWindStatus {
   available: boolean;
   renderers?: { wind: boolean; strings: boolean };
@@ -12,6 +13,7 @@ export interface NativeWindStatus {
   maximumAttachmentBytes?: number;
   maximumRequestBytes?: number;
   supportsGasSources?: boolean;
+  supportsPressureReceipts?: boolean;
 }
 export type NativeWindRequest = typeof globalThis.fetch;
 export function nativeWindStatus(signal?: AbortSignal, request?: NativeWindRequest): Promise<NativeWindStatus>;
@@ -36,3 +38,5 @@ export interface NativeWindOptions {
   stringProfiles?: NativeStringProfiles;
 }
 export function renderNativeWindBundle(source: string, attachments: readonly NativeWindAttachment[], status: NativeWindStatus, options?: NativeWindOptions, signal?: AbortSignal, request?: NativeWindRequest): Promise<Blob>;
+export interface NativePerformanceResult { wave: Blob; receipt: NativePressureReceipt | null; }
+export function renderNativePerformance(source: string, attachments: readonly NativeWindAttachment[], status: NativeWindStatus, options?: NativeWindOptions, signal?: AbortSignal, request?: NativeWindRequest): Promise<NativePerformanceResult>;

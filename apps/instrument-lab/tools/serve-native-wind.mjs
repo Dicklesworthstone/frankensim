@@ -11,6 +11,9 @@ import {DEFAULT_TIMEOUT_MS, MAX_LOG_BYTES, MAX_OUTPUT_BYTES, MAX_SOURCE_BYTES,
   MAX_ATTACHMENTS, MAX_ATTACHMENT_FILE_BYTES, MAX_ATTACHMENT_BYTES, MAX_REQUEST_BYTES,
   NativeWindError, SUPPORTED_SCHEMAS, STRING_SCHEMAS, validateInput, validateWave} from './native-wind-protocol.mjs';
 
+import {nativePressureReceipt} from './native-pressure-receipt.mjs';
+import {PRESSURE_RECEIPT_HEADER} from '../src/native-wave.mjs';
+
 const here = dirname(fileURLToPath(import.meta.url));
 const types = {'.html':'text/html; charset=utf-8', '.js':'text/javascript; charset=utf-8',
   '.mjs':'text/javascript; charset=utf-8', '.css':'text/css; charset=utf-8', '.json':'application/json',
@@ -90,7 +93,7 @@ function runNative(engine, input, output, dir, signal, outputLimit, experiment) 
     const child = spawn(engine, [...(experiment.renderer === 'strings' ? [] : ['wind']), input, output,
       '--self-contained', ...(decimate ? ['--decimate'] : []), ...sourceArgs, ...gasArgs, ...profileArgs], {cwd:dir, shell:false,
       windowsHide:true, detached:process.platform !== 'win32', stdio:['ignore', 'pipe', 'pipe']});
-    let reason, size = 0, forceKill, finished = false; const chunks = [];
+    let reason, size = 0, forceKill, finished = false; const chunks = [], stdout = [], stderr = [];
     const kill = name => { if (!child.pid) return;
       try { if (process.platform === 'win32') child.kill(name); else process.kill(-child.pid, name); }
       catch (error) { if (error.code !== 'ESRCH') child.kill(name); } };
@@ -98,10 +101,11 @@ function runNative(engine, input, output, dir, signal, outputLimit, experiment) 
       forceKill = setTimeout(() => kill('SIGKILL'), 1000); forceKill.unref(); };
     const abort = () => stop(signal.reason);
     signal.addEventListener('abort', abort, {once:true});
-    const read = bytes => { size += bytes.length;
+    const read = (bytes, stream) => { size += bytes.length;
       if (size > MAX_LOG_BYTES) stop(new NativeWindError(502, 'Native diagnostics exceeded 256 KiB.'));
-      else chunks.push(bytes); };
-    child.stdout.on('data', read); child.stderr.on('data', read);
+      else { chunks.push(bytes); stream.push(bytes); } };
+    child.stdout.on('data', bytes => read(bytes, stdout));
+    child.stderr.on('data', bytes => read(bytes, stderr));
     // Bound an in-progress WAV as well as the completed result; never read an oversized file.
     let checking = false;
     const check = setInterval(async () => {
@@ -120,7 +124,7 @@ function runNative(engine, input, output, dir, signal, outputLimit, experiment) 
       if (reason) reject(reason);
       else if (code !== 0) reject(new NativeWindError(400,
         `Native renderer refused the source (exit ${code}). ${Buffer.concat(chunks).toString('utf8').slice(-3000)}`));
-      else accept();
+      else accept({stdout:Buffer.concat(stdout).toString('utf8'), stderr:Buffer.concat(stderr).toString('utf8')});
     });
     if (signal.aborted) abort();
   });
@@ -171,7 +175,7 @@ export function createNativeWindServer({engine = process.env.FSIM_MUSIC_RENDER |
           maximumSourceBytes:MAX_SOURCE_BYTES, maximumOutputBytes, timeoutMs,
           supportedSchemas:[...(wind ? SUPPORTED_SCHEMAS : []), ...(strings ? STRING_SCHEMAS : [])],
           maximumAttachments:MAX_ATTACHMENTS, maximumAttachmentFileBytes:MAX_ATTACHMENT_FILE_BYTES,
-          maximumAttachmentBytes:MAX_ATTACHMENT_BYTES, maximumRequestBytes:MAX_REQUEST_BYTES, supportsGasSources:true});
+          maximumAttachmentBytes:MAX_ATTACHMENT_BYTES, maximumRequestBytes:MAX_REQUEST_BYTES, supportsGasSources:true, supportsPressureReceipts:true});
       }
       if (pathname !== '/api/native-wind/render' || req.method !== 'POST') {
         if (['GET', 'HEAD'].includes(req.method) && !pathname.startsWith('/api/') && await serveAsset(req, res, dist, pathname)) return;
@@ -208,10 +212,15 @@ export function createNativeWindServer({engine = process.env.FSIM_MUSIC_RENDER |
           await mkdir(dirname(destination), {recursive:true, mode:0o700});
           await writeFile(destination, attachment.bytes, {mode:0o600, flag:'wx'});
         }
-        await runNative(selectedEngine, input, output, dir, controller.signal, maximumOutputBytes, experiment);
+        const diagnostics = await runNative(selectedEngine, input, output, dir, controller.signal, maximumOutputBytes, experiment);
         const wave = await readWave(output, maximumOutputBytes);
         if (controller.signal.aborted) throw controller.signal.reason;
-        res.writeHead(200, {'Content-Type':'audio/wav', 'Content-Length':wave.length}); res.end(wave);
+        let receipt;
+        try { receipt = await nativePressureReceipt(experiment.renderer ?? 'wind', output, diagnostics, wave); }
+        catch (error) { throw new NativeWindError(502, error.message); }
+        if (controller.signal.aborted) throw controller.signal.reason;
+        res.writeHead(200, {'Content-Type':'audio/wav', 'Content-Length':wave.length,
+          ...(receipt ? {[PRESSURE_RECEIPT_HEADER]:JSON.stringify(receipt)} : {})}); res.end(wave);
       } finally {
         clearTimeout(timer); res.off('close', disconnected);
         try { if (dir) await rm(dir, {recursive:true, force:true}); } // Only this request's newly created private directory.

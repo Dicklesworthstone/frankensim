@@ -1,4 +1,6 @@
 // Transport only. Source parsing, material laws and synthesis belong to the selected native performer.
+import {PRESSURE_RECEIPT_HEADER, verifyPressureReceipt} from './native-wave.mjs';
+
 const STATUS_URL = "/api/native-wind/status";
 const RENDER_URL = "/api/native-wind/render";
 
@@ -68,11 +70,16 @@ async function boundedWave(response, maximumBytes) {
 }
 
 export async function renderNativeWind(source, status, signal, request = globalThis.fetch) {
-  return sendNativeWind(source, [], status, {}, signal, request);
+  return (await sendNativeWind(source, [], status, {}, signal, request)).wave;
 }
 
 /** Exact attached source files; the native loader remains the material authority. */
 export async function renderNativeWindBundle(source, attachments, status, options = {}, signal, request = globalThis.fetch) {
+  return (await sendNativeWind(source, attachments, status, options, signal, request)).wave;
+}
+
+/** Original WAV plus verified native pressure calibration, when the executable emits it. */
+export async function renderNativePerformance(source, attachments, status, options = {}, signal, request = globalThis.fetch) {
   return sendNativeWind(source, attachments, status, options, signal, request);
 }
 
@@ -149,7 +156,18 @@ async function sendNativeWind(source, attachments, status, options, signal, requ
     await response.body?.cancel();
     throw new Error("The native renderer returned an unexpected response instead of audio.");
   }
-  return boundedWave(response, status.maximumOutputBytes);
+  const wave = await boundedWave(response, status.maximumOutputBytes);
+  const header = response.headers.get(PRESSURE_RECEIPT_HEADER);
+  let receipt = null;
+  if (header !== null) {
+    let value;
+    try {
+      if (header.length > 2048) throw new Error('oversized receipt');
+      value = JSON.parse(header);
+    } catch { throw new Error('The native renderer returned invalid pressure calibration.'); }
+    receipt = await verifyPressureReceipt(value, new Uint8Array(await wave.arrayBuffer()), renderer);
+  }
+  return {wave, receipt};
 }
 
 // Keep encoding bounded without spreading a large binary array on the call stack.
