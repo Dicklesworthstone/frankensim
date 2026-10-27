@@ -54,7 +54,7 @@ impl DgDuct {
     /// Unsupported geometry/gas variation, repeated attachment, unresolved pole
     /// band, or total acoustic-plus-memory DOFs above the existing dense cap.
     pub fn with_viscothermal(
-        mut self,
+        self,
         poles: usize,
         band_hz: [f64; 2],
         maximum_relative_error: f64,
@@ -97,6 +97,20 @@ impl DgDuct {
         .map_err(|_| DuctError::BadParameter {
             what: "DG viscothermal Bessel pole data or declared band is unresolved",
         })?;
+        self.with_uniform_viscothermal_model(model)
+    }
+
+    // Stamp the SAME native uniform Bessel realization. Live material refresh
+    // uses this owner with the original angular band, radius and pole count.
+    pub(super) fn with_uniform_viscothermal_model(
+        mut self,
+        model: fs_phs::ZkDiffusive,
+    ) -> Result<Self, DuctError> {
+        if self.viscothermal.is_some() || self.compliant_wall.is_some() {
+            return Err(DuctError::BadParameter {
+                what: "uniform viscothermal stamping requires the bare acoustic owner",
+            });
+        }
         let m = self.field_dofs;
         let original = self.total_dofs();
         let branches = model.series_terms().len() + model.shunt_terms().len();

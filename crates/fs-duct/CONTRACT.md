@@ -1261,3 +1261,43 @@ signed work and subsequent ledger closure, regional wall memory and physical
 acceleration, port/matched-boundary equivalence to fresh assembly, and atomic
 refusals. Source-wall integration tests live in fs-couple. Parsing and source
 review do not establish executed native or empirical validation.
+
+
+### Live uniform gas changes with native viscothermal history
+
+`DgDuct::rebind_uniform_viscothermal_gas` and
+`rebind_uniform_viscothermal_gas_field` extend live material intervention to
+the original uniform circular `ZkDiffusive` owner. Fixed radius, mesh, exact
+angular band, pole count and dimensionless Jacobi sections identify the
+physical arms. This is not arbitrary state-space matching. The replacement
+gas independently passes the original band's complex-response and real-loss
+admission under the supplied error budget. Spatial/nonuniform memories,
+changed support and creation or removal of thermal arms remain refused.
+
+Each viscous arm preserves momentum and each thermal arm preserves compression
+volume. Their physical inertance/compliance are respectively
+`(rho/A)*(gain/rate)` and `(A/B)*(gain/rate)`. Main acoustic compression
+and momentum retain their original invariants. The same native stamping
+owner rebuilds mass matrices, reciprocal wave/diffusion operators, matched
+impedances and physical port maps. Structural coordinates, regional wall
+data and Maxwell histories remain attached; only the reciprocal pressure
+couplings and corresponding observations rescale.
+
+The actual changed wave plus diffusion-memory storage enters cumulative
+parameter work once. Viscosity/conductivity-only changes with unchanged
+density, bulk modulus and gamma produce zero instantaneous work while
+changing subsequent losses. The transfer never labels coefficient work as
+heat or infers mass injection, mean-pressure traction or a thermochemical
+background balance. Its external owner owes those exchanges. Native callers
+must rebuild the propagator after an accepted operator change; stale operators
+refuse. All numerical/source/band/work/cancellation failures retain the
+original duct and state.
+
+Three focused native regressions specify independent closed-form viscous
+continuation, every arm's momentum/compression invariant, independent
+instantaneous dissipation, cold-operator/port equivalence, regional wall
+history retention, transport-only changes and atomic late refusals.
+Bounded independent source/API/physical-account review found no concrete
+defect. The reconstructed final Rust sources/tests received whitespace and
+source checks but could not be parsed, compiled or numerically executed
+after the executor became unavailable.

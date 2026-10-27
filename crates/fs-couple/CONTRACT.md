@@ -7566,3 +7566,29 @@ and unparsed in the unavailable executor.
 Permittivity and its frame remain source-declared constant through these
 trajectories. Variable-permittivity work and reversible thermal entropy,
 dielectric dispersion and structural motion remain outside this increment.
+
+
+### Source-retaining live viscothermal atmosphere updates
+
+`MaterialWallDg` and `RegionalMaterialWallDg` expose
+`rebind_viscothermal_gas_field_controlled`. The existing prepare/publish
+boundary now supports the native uniform circular diffusion transfer with an
+explicit new-gas admission budget. It retains the complete source catalog,
+query and composition, every wall material receipt and local Maxwell
+history, and the original physical clock and propagator tolerance. Updated
+gas field, native state and newly certified propagator publish together.
+The prior lossless entry keeps its original admission contract.
+
+The source integration regression changes temperature, pressure and
+composition with nonzero acoustic and wall histories. It specifies preserved
+physical memory and receipts, changed continuing pressure trajectories,
+complete parameter-work accounting, and source/band/foreign-operator/late
+cancellation rollback. Its narrow-duct wall fixture explicitly satisfies
+the original thin-wall limit. These are synthetic numerical references;
+the reconstructed final test has not been parsed or executed.
+
+This path is a prescribed uniform background material intervention. Actual
+wave and diffusion storage changes are external parameter work, not an
+unmodeled heat credit. It adds no spatial gas mixing, mass/species injection,
+mean-pressure traction or thermochemical reservoir solve. Geometry, radius,
+native diffusion sections and thermal-arm support stay fixed.

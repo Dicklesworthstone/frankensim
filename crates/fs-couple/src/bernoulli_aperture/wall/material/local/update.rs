@@ -171,6 +171,7 @@ fn prepare_gas(
     state: &DgState,
     propagator: &DgPropagator,
     field: &AxialGasField,
+    viscothermal_error: Option<f64>,
     maximum_absolute_parameter_work_j: f64,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(DgDuct, DgState, DgPropagator, DgGasMaterialUpdate), AcousticRealizeError> {
@@ -180,14 +181,22 @@ fn prepare_gas(
     let mut next_state = state.clone();
     propagator.sync_nodal(&mut next_state).map_err(duct_error)?;
     let mut next_duct = duct.clone();
-    let report = next_duct
-        .rebind_uniform_gas_field(
+    let report = if let Some(error) = viscothermal_error {
+        next_duct.rebind_uniform_viscothermal_gas_field(
+            &mut next_state,
+            field,
+            error,
+            maximum_absolute_parameter_work_j,
+            cancelled,
+        )
+    } else {
+        next_duct.rebind_uniform_gas_field(
             &mut next_state,
             field,
             maximum_absolute_parameter_work_j,
             cancelled,
         )
-        .map_err(duct_error)?;
+    }.map_err(duct_error)?;
     if cancelled() {
         return Err(AcousticRealizeError::Cancelled);
     }
@@ -228,6 +237,42 @@ impl MaterialWallDg {
             state,
             propagator,
             field,
+            None,
+            maximum_absolute_parameter_work_j,
+            cancelled,
+        )?;
+        let _old_duct = core::mem::replace(&mut self.duct, duct);
+        let _old_state = core::mem::replace(state, next);
+        let _old_propagator = core::mem::replace(propagator, stepping);
+        Ok(report)
+    }
+
+    /// Refresh uniform source gas while retaining native circular diffusion.
+    ///
+    /// The original Bessel sections preserve every viscous arm's momentum and
+    /// every thermal arm's compression volume. Wave and memory storage changes
+    /// enter parameter work once; Maxwell wall sources and histories survive.
+    /// The new gas must resolve the retained band's complex response and real
+    /// loss under maximum_relative_error, without changing radius/pole support.
+    /// The complete source field, native state and SAME-clock certified
+    /// propagator publish together after all admission and cancellation checks.
+    /// This is a prescribed material intervention, not a heat/species solver;
+    /// its external owner owes the signed work and any background gas balance.
+    pub fn rebind_viscothermal_gas_field_controlled(
+        &mut self,
+        field: &AxialGasField,
+        state: &mut DgState,
+        propagator: &mut DgPropagator,
+        maximum_relative_error: f64,
+        maximum_absolute_parameter_work_j: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<DgGasMaterialUpdate, AcousticRealizeError> {
+        let (duct, next, stepping, report) = prepare_gas(
+            &self.duct,
+            state,
+            propagator,
+            field,
+            Some(maximum_relative_error),
             maximum_absolute_parameter_work_j,
             cancelled,
         )?;
@@ -309,6 +354,34 @@ impl RegionalMaterialWallDg {
             state,
             propagator,
             field,
+            None,
+            maximum_absolute_parameter_work_j,
+            cancelled,
+        )?;
+        let _old_duct = core::mem::replace(&mut self.duct, duct);
+        let _old_state = core::mem::replace(state, next);
+        let _old_propagator = core::mem::replace(propagator, stepping);
+        Ok(report)
+    }
+
+    /// Regional-wall counterpart of the uniform source wrapper's live
+    /// viscothermal gas refresh. Every original wall receipt, local Maxwell
+    /// history and applicability band is retained without regional averaging.
+    pub fn rebind_viscothermal_gas_field_controlled(
+        &mut self,
+        field: &AxialGasField,
+        state: &mut DgState,
+        propagator: &mut DgPropagator,
+        maximum_relative_error: f64,
+        maximum_absolute_parameter_work_j: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<DgGasMaterialUpdate, AcousticRealizeError> {
+        let (duct, next, stepping, report) = prepare_gas(
+            &self.duct,
+            state,
+            propagator,
+            field,
+            Some(maximum_relative_error),
             maximum_absolute_parameter_work_j,
             cancelled,
         )?;

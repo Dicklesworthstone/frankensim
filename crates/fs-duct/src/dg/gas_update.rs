@@ -6,6 +6,8 @@
 //! compressive/kinetic storage change is parameter work, never heat or damping.
 use super::*;
 
+mod viscothermal;
+
 /// Measured storage change from one accepted uniform gas intervention.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DgGasMaterialUpdate {
@@ -13,9 +15,9 @@ pub struct DgGasMaterialUpdate {
     pub energy_before_j: f64,
     /// Complete acoustic and unchanged wall storage afterwards [J].
     pub energy_after_j: f64,
-    /// Original compressive and fluid kinetic energy alone [J].
+    /// Original acoustic storage, including any admitted diffusion memory [J].
     pub acoustic_energy_before_j: f64,
-    /// Updated compressive and fluid kinetic energy alone [J].
+    /// Updated acoustic storage, including any admitted diffusion memory [J].
     pub acoustic_energy_after_j: f64,
     /// Signed external work INTO the represented acoustic system [J].
     /// The owner changing the background gas owes this transfer separately.
