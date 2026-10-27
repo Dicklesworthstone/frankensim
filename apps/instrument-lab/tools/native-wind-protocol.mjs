@@ -3,7 +3,8 @@ export const MAX_SOURCE_BYTES = 1024 * 1024;
 export const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 export const MAX_LOG_BYTES = 256 * 1024;
 export const DEFAULT_TIMEOUT_MS = 60000;
-// These native families need no filesystem-backed material/artifact callbacks.
+// Supported editor families. The native --self-contained loader policy, rather
+// than the schema name, refuses any external material/artifact callbacks.
 export const SUPPORTED_SCHEMAS = ['frankensim-reed-performance-v1', 'frankensim-flue-dg-performance-v1'];
 
 export class NativeWindError extends Error {

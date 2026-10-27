@@ -116,11 +116,47 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Keep complete Cargo logs with bounded console diagnostics
+        run: |
+          mkdir -p "$RUNNER_TEMP/instrument-material-logs"
+          cat > "$RUNNER_TEMP/instrument-material-cargo.bash" <<'BASH'
+          cargo() {
+            local log code
+            log="$(mktemp "$RUNNER_TEMP/instrument-material-logs/cargo-${GITHUB_ACTION:-local}-XXXXXXXX.log")"
+            {
+              printf 'cargo'
+              printf ' %q' "$@"
+              printf '\n'
+            } | tee "$log"
+            if command cargo "$@" >>"$log" 2>&1; then code=0; else code=$?; fi
+            printf 'Exit %s; full output: %s\n' "$code" "${log##*/}"
+            if (( code == 0 )); then
+              grep -E '^(test result:|[[:space:]]*(Finished|Running) )' "$log" || true
+            else
+              grep -n -m 10 -B 2 -A 12 -E '^error(\[|:)' "$log" || true
+              tail -n 120 "$log" || true
+            fi
+            return "$code"
+          }
+          unset BASH_ENV
+          BASH
+          printf 'BASH_ENV=%s\n' "$RUNNER_TEMP/instrument-material-cargo.bash" >> "$GITHUB_ENV"
       - name: Materialize the existing pinned dependencies
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
       - name: Material multimode reeds and retained pressure feedback
         if: ${{ !cancelled() }}
         run: cargo test -p fs-couple --test modal_aperture -- --test-threads=1
+      - name: Interior and exterior gas at flanged modal openings
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test -p fs-duct --lib flanged:: -- --test-threads=1
+      - name: Native source-file policy and unchanged physical audio
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-couple --test music_render_wind self_contained -- --test-threads=1
+      - name: Current Nolle source feedback and transactional flute state
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test -p fs-couple --lib flue_loop::convection_tests:: -- --test-threads=1
       - name: Matched exterior reaction and instrument pressure
         if: ${{ !cancelled() }}
         run: |
@@ -251,3 +287,11 @@ jobs:
       - name: Reciprocal material strings bodies cavities and scheduled sound
         if: ${{ !cancelled() }}
         run: cargo test -p fs-couple --test reciprocal_cavity -- --test-threads=1
+      - name: Upload complete native Cargo output
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: instrument-material-logs-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/instrument-material-logs/*.log
+          if-no-files-found: ignore
+          retention-days: 7

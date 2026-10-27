@@ -111,6 +111,11 @@ impl Options {
         Ok((remaining, result))
     }
 
+    /// Whether these explicit options would resolve source data outside the input.
+    pub fn uses_external_files(&self) -> bool {
+        self.record.is_some() || !self.components.is_empty()
+    }
+
     pub fn load(&self) -> Result<LoadedSources, String> {
         let mut loaded = Vec::with_capacity(self.components.len());
         let mut total_bytes = 0;

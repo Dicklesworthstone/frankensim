@@ -88,8 +88,11 @@ string performances remain native CLI inputs: this first route carries no
 external material packs or radiation artifacts.
 
 The companion passes the exact UTF-8 bytes to one configured executable as
-`music_render wind INPUT.performance OUT.wav`, with a private working directory
-and fixed arguments. It does not parse physical parameters, retune notes, change
+`music_render wind INPUT.performance OUT.wav --self-contained`, with a private
+working directory and fixed arguments. The native loader enforces the absence
+of external source files, including optional `dg_wall` declarations; an older
+executable that lacks this option must be rebuilt. The companion does not parse
+physical parameters, retune notes, change
 PCM gain, synthesize fallback audio or run a shell. Playback becomes available
 only after successful native execution and a complete 48 kHz mono PCM16 WAV.
 Source or solver refusals remain visible; cancellation terminates the native

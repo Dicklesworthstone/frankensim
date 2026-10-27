@@ -78,7 +78,7 @@ async function serveAsset(req, res, dist, pathname) {
 function runNative(engine, input, output, dir, signal, outputLimit) {
   return new Promise((accept, reject) => {
     if (signal.aborted) return reject(signal.reason);
-    const child = spawn(engine, ['wind', input, output], {cwd:dir, shell:false,
+    const child = spawn(engine, ['wind', input, output, '--self-contained'], {cwd:dir, shell:false,
       windowsHide:true, detached:process.platform !== 'win32', stdio:['ignore', 'pipe', 'pipe']});
     let reason, size = 0, forceKill, finished = false; const chunks = [];
     const kill = name => { if (!child.pid) return;

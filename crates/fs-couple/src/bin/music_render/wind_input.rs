@@ -33,15 +33,20 @@ fn opening_loss_provenance<'a>(
     format!(",\"opening_losses\":[{records}],\"opening_loss_scope\":\"same-sample symmetric quasi-steady separation in series with original local radiation; no vortex memory, directional pressure recovery or measured instrument coefficient\"")
 }
 
-fn options(args: &[String]) -> Result<(&str, &str, usize, bool, ObservationPolicy, Option<&str>), String> {
+fn options(args: &[String]) -> Result<(&str, &str, usize, bool, ObservationPolicy, Option<&str>, bool), String> {
     let mut paths = Vec::new();
     let mut flows = None;
     let mut block = None;
     let mut decimate = false;
+    let mut self_contained = false;
     let mut policy = ObservationPolicy::Diagnostic;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "--self-contained" => {
+                if self_contained { return Err("--self-contained may only be supplied once".into()); }
+                self_contained = true;
+            }
             "--acceptance" => {
                 if policy == ObservationPolicy::Acceptance { return Err("--acceptance may only be supplied once".into()); }
                 policy = ObservationPolicy::Acceptance;
@@ -68,9 +73,9 @@ fn options(args: &[String]) -> Result<(&str, &str, usize, bool, ObservationPolic
         }
     }
     let [input, output] = paths.as_slice() else {
-        return Err("usage: music_render wind INPUT.performance OUT.wav [--block N] [--decimate] [--acceptance] [--aperture-flows FLOWS]".into());
+        return Err("usage: music_render wind INPUT.performance OUT.wav [--block N] [--decimate] [--acceptance] [--aperture-flows FLOWS] [--self-contained]".into());
     };
-    Ok((*input, *output, block.unwrap_or(512), decimate, policy, flows))
+    Ok((*input, *output, block.unwrap_or(512), decimate, policy, flows, self_contained))
 }
 
 // A physical propagation delay is source geometry, not an output/filter latency
@@ -895,7 +900,7 @@ pub(super) fn run_with_gas_sources(
     args: &[String],
     sources: Option<&ThermochemicalSources<'_>>,
 ) -> Result<(), String> {
-    let (input, output, block, decimate, policy, flows) = options(args)?;
+    let (input, output, block, decimate, policy, flows, self_contained) = options(args)?;
     let output = Path::new(output);
     let sidecar = output.with_extension("provenance.json");
     if output == sidecar.as_path() || output.exists() || sidecar.exists() {
@@ -915,6 +920,11 @@ pub(super) fn run_with_gas_sources(
         .map_err(|e| format!("wind input read failed: {e}"))?;
     let parent = Path::new(input).parent().unwrap_or(Path::new("."));
     let loaded = load_with_all_sources(&bytes, block, policy, sources, |name| {
+        // Admission belongs at the shared source callback: any current or future
+        // physical record that requests a pack must refuse before filesystem I/O.
+        if self_contained {
+            return Err(format!("--self-contained refuses external material-card pack {name:?}"));
+        }
         let file = std::fs::File::open(parent.join(name))
             .map_err(|e| format!("material-card pack {name:?} open failed: {e}"))?;
         let mut pack_bytes = Vec::new();
@@ -926,6 +936,9 @@ pub(super) fn run_with_gas_sources(
         NormalizedMaterialCardPack::from_bytes(&pack_bytes)
             .map_err(|e| format!("material-card pack {name:?}: {e}"))
     }, |name| {
+        if self_contained {
+            return Err(format!("--self-contained refuses external radiation artifact {name:?}"));
+        }
         let file = std::fs::File::open(parent.join(name))
             .map_err(|e| format!("MIMO radiation artifact {name:?} open failed: {e}"))?;
         let mut bytes = Vec::new();

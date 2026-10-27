@@ -47,7 +47,7 @@ writeFileSync(args[2], wav);
 }
 const native = {skip:process.platform === 'win32'};
 
-test('transport retains exact UTF-8 and admits only self-contained native source families', () => {
+test('transport retains exact UTF-8 and admits supported native source families', () => {
   const bytes = source(); assert.equal(validateSource(bytes), bytes);
   const flute = Buffer.from('frankensim-flue-dg-performance-v1\nopaque'); assert.equal(validateSource(flute), flute);
   for (const bad of [Buffer.alloc(0), Buffer.from([0xff]), Buffer.from('frankensim-material-modal-valve-v1\nsection /etc/passwd'), Buffer.alloc(MAX_SOURCE_BYTES + 1)])
@@ -132,8 +132,9 @@ test('exact native arguments and bytes, private cwd, real returned WAV and clean
     assert.equal(response.status, 200); assert.match(response.headers.get('content-type'), /^audio\/wav/);
     const wave = Buffer.from(await response.arrayBuffer()); assert.equal(wave.toString('ascii', 0, 4), 'RIFF'); assert.equal(wave.length, 48);
     const receipt = JSON.parse(await readFile(app.receipt, 'utf8'));
-    assert.equal(receipt.bytes, bytes.toString('base64')); assert.equal(receipt.args.length, 3); assert.equal(receipt.args[0], 'wind');
+    assert.equal(receipt.bytes, bytes.toString('base64')); assert.equal(receipt.args.length, 4); assert.equal(receipt.args[0], 'wind');
     assert.equal(receipt.args[1], join(receipt.cwd, 'input.performance')); assert.equal(receipt.args[2], join(receipt.cwd, 'output.wav'));
+    assert.equal(receipt.args[3], '--self-contained');
     assert.ok(isAbsolute(receipt.cwd)); assert.ok(receipt.cwd.startsWith(app.tempRoot + '/'));
     assert.equal(receipt.directoryMode, 0o700); assert.equal(receipt.sourceMode, 0o600);
     await until(async () => !(await app.status()).busy); assert.deepEqual(await readdir(app.tempRoot), []);

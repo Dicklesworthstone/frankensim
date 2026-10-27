@@ -1072,7 +1072,17 @@ impl FlueVoice {
                         ..c
                     },
                 )?;
-                Ok((cut_flow - trial.flow_m3_s, step, trial, power))
+                let residual = cut_flow - trial.flow_m3_s;
+                // Accept the root's cut flow and the source used by this mouth
+                // solve as one state. The constitutive cut is the residual
+                // oracle; substituting it after convergence would change the
+                // source without re-solving the mouth and break its work identity.
+                let accepted = JetTrial {
+                    flow_m3_s: cut_flow,
+                    source_pa: source,
+                    ..trial
+                };
+                Ok((residual, step, accepted, power))
             };
             let (mut lo, mut hi): (f64, f64) = (0.0, c.q_max);
             if let Some(loss) = &self.mouth_contraction {
@@ -1697,7 +1707,25 @@ mod convection_tests {
                 let q_max = speed * geometry.flue_height_m * geometry.flue_width_m;
                 for _ in 0..17 {
                     let previous = v.nolle_jet().unwrap().receptivity_displacement_m();
+                    let response = v
+                        .nolle_jet()
+                        .unwrap()
+                        .prepare_step(speed, geometry.flue_width_m, 0.0)
+                        .unwrap();
                     v.step_block(&mut [0.0]).unwrap();
+                    let candidate = response
+                        .candidate(v.mouth_flow_m3_s(), v.flow_prev - 0.5 * q_max)
+                        .unwrap();
+                    let constitutive_cut = 0.5
+                        * q_max
+                        * (1.0
+                            + ((candidate.eta_m - geometry.effective_offset_m())
+                                / (0.5 * geometry.flue_height_m))
+                                .tanh());
+                    assert!(
+                        (v.flow_prev - constitutive_cut).abs() <= 32.0 * f64::EPSILON * q_max,
+                        "accepted cut-flow residual at {rate} Hz, {pressure} Pa"
+                    );
                     // Exact solution of xi' + leak xi = (alpha_p Q - alpha_j
                     // dQj)/(H W), using the flows actually accepted by the
                     // acoustic solve. A previous-sample coupling fails this.

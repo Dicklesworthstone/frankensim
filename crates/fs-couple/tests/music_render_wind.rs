@@ -131,6 +131,92 @@ fn invalid_wind_sources_clocks_and_overrides_refuse_before_creating_output_files
     }
 }
 
+#[test]
+fn self_contained_reed_and_dg_flue_keep_the_same_physical_pcm_and_provenance() {
+    let dir = directory();
+    for (index, (source, decimate)) in [
+        (REED, false),
+        (include_str!("../examples/flue-dg.performance"), true),
+    ].iter().enumerate() {
+        let input = dir.join(format!("inline-{index}.performance"));
+        std::fs::write(&input, source).unwrap();
+        let ordinary = dir.join(format!("ordinary-{index}.wav"));
+        success(run(&input, &ordinary, 37, *decimate));
+        let restricted = dir.join(format!("self-contained-{index}.wav"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_music_render"));
+        command.arg("wind").arg(&input).arg(&restricted)
+            .args(["--block", "37", "--self-contained"]);
+        if *decimate { command.arg("--decimate"); }
+        success(command.output().unwrap());
+        assert_eq!(std::fs::read(&restricted).unwrap(), std::fs::read(&ordinary).unwrap());
+        assert_eq!(std::fs::read(restricted.with_extension("provenance.json")).unwrap(),
+            std::fs::read(ordinary.with_extension("provenance.json")).unwrap());
+    }
+}
+
+#[test]
+fn self_contained_dg_wall_refuses_before_opening_missing_or_existing_source_packs() {
+    let dir = directory();
+    let input = dir.join("external-wall.performance");
+    let source = include_str!("../examples/flue-dg.performance").replace("\nflue ",
+        "\ndg_wall isotropic wall.pack 293.15 1000 0.001 stress-free 50 2000 elastic\nflue ");
+    std::fs::write(&input, source).unwrap();
+    for present in [false, true] {
+        if present {
+            std::fs::write(dir.join("wall.pack"), b"not a material-card pack").unwrap();
+        }
+        let output = dir.join(format!("restricted-{present}.wav"));
+        let result = Command::new(env!("CARGO_BIN_EXE_music_render"))
+            .arg("wind").arg(&input).arg(&output)
+            .args(["--decimate", "--self-contained"]).output().unwrap();
+        assert!(!result.status.success());
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(stderr.contains("--self-contained refuses external material-card pack \"wall.pack\""),
+            "{stderr}");
+        assert!(!stderr.contains("open failed"), "{stderr}");
+        assert!(!output.exists());
+        assert!(!output.with_extension("provenance.json").exists());
+
+        // The ordinary CLI still resolves the same declared artifact. A missing
+        // file reports open failure; an existing malformed file reaches decoding.
+        let ordinary = dir.join(format!("ordinary-wall-{present}.wav"));
+        let result = run(&input, &ordinary, 37, true);
+        assert!(!result.status.success());
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(stderr.contains("material-card pack \"wall.pack\""), "{stderr}");
+        assert!(!stderr.contains("--self-contained"), "{stderr}");
+        assert_eq!(stderr.contains("open failed"), !present, "{stderr}");
+        assert!(!ordinary.exists());
+        assert!(!ordinary.with_extension("provenance.json").exists());
+    }
+}
+
+#[test]
+fn self_contained_duplicate_and_external_gas_options_refuse_before_source_file_access() {
+    let dir = directory();
+    let input = dir.join("inline.performance");
+    std::fs::write(&input, REED).unwrap();
+    for (index, (flags, expected)) in [
+        (vec!["--self-contained", "--self-contained"],
+            "--self-contained may only be supplied once"),
+        (vec!["--self-contained", "--gas-record", "missing.gas"],
+            "--self-contained refuses external gas source files"),
+        (vec!["--self-contained", "--gas-component", "missing-species.pack",
+            "missing-nasa.pack", "missing-transport.pack", "--gas-water", "none",
+            "--gas-phase", "frozen"],
+            "--self-contained refuses external gas source files"),
+    ].iter().enumerate() {
+        let output = dir.join(format!("refused-self-contained-{index}.wav"));
+        let result = Command::new(env!("CARGO_BIN_EXE_music_render"))
+            .arg("wind").arg(&input).arg(&output).args(flags).output().unwrap();
+        assert!(!result.status.success());
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(stderr.contains(*expected), "{stderr}");
+        assert!(!output.exists());
+        assert!(!output.with_extension("provenance.json").exists());
+    }
+}
+
 #[path = "music_render_wind/valve.rs"]
 mod valve;
 
