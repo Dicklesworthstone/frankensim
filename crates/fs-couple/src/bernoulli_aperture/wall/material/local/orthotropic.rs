@@ -13,6 +13,8 @@ use fs_material::state_point::{
     ScalarAdmissibility, ScalarPropertyRequirement,
 };
 
+mod normal_viscosity;
+
 const TIME_DIMS: Dims = Dims([0, 0, 1, 0, 0, 0]);
 
 fn axes_names(axes: [usize; 2]) -> Result<(&'static str, &'static str, &'static str), AcousticRealizeError> {
