@@ -5,8 +5,8 @@
 //! worker determinism and the refusals.
 
 use fs_bem::wall_window::{
-    WallWindow, WallWindowError, WallWindowMass, WallWindowOptions, WindowCheeks, WindowCover,
-    WindowOutside, WindowRamp, WindowUpstream, wall_window_ladder, wall_window_mass,
+    CoverSide, WallWindow, WallWindowError, WallWindowMass, WallWindowOptions, WindowCheeks,
+    WindowCover, WindowOutside, WindowRamp, WindowUpstream, wall_window_ladder, wall_window_mass,
 };
 
 /// The Clare D tin whistle's window (Davies 2006 rows of the instrument
@@ -683,11 +683,33 @@ fn staircase_refusals() {
     }
     // A cover must leave a strip narrower than the 8 mm between the cheeks.
     for open_width in [0.0, -1e-3, f64::NAN, 0.0081] {
-        let cover = Some(WindowCover { open_width });
-        assert!(invalid(&WallWindow { cover, ..ok }, &options), "{open_width}");
+        for side in [CoverSide::Centred, CoverSide::OneSided { face: None }] {
+            let cover = Some(WindowCover { open_width, side });
+            assert!(invalid(&WallWindow { cover, ..ok }, &options), "{open_width}");
+        }
     }
-    let cover = Some(WindowCover { open_width: 0.0079 });
+    let cover = Some(WindowCover {
+        open_width: 0.0079,
+        side: CoverSide::Centred,
+    });
     assert!(wall_window_mass(&WallWindow { cover, ..ok }, &options).is_ok());
+    // A face stands in free space, at a setback of at least zero and within
+    // half a turn of the mid-plane.
+    let face = |setback: f64, outside: WindowOutside| WallWindow {
+        cover: Some(WindowCover {
+            open_width: 0.004,
+            side: CoverSide::OneSided {
+                face: Some(setback),
+            },
+        }),
+        outside,
+        ..ok
+    };
+    for setback in [-1e-4, f64::NAN, f64::INFINITY, 0.03] {
+        assert!(invalid(&face(setback, WindowOutside::Free), &options), "{setback}");
+    }
+    assert!(invalid(&face(0.001, WindowOutside::Release), &options));
+    assert!(wall_window_mass(&face(0.001, WindowOutside::Free), &options).is_ok());
     assert!(invalid(
         &WallWindow {
             arc_width: core::f64::consts::PI * ok.bore_radius,
@@ -898,7 +920,10 @@ fn a_cover_on_a_release_face_adds_lambs_slit_grating_length() {
     let across = 2.0 * a * theta_w.sin();
     let open_width = 0.5 * across;
     let covered = WallWindow {
-        cover: Some(WindowCover { open_width }),
+        cover: Some(WindowCover {
+            open_width,
+            side: CoverSide::Centred,
+        }),
         ..window
     };
     let lamb = across / PI * (1.0 / (PI * open_width / (2.0 * across)).sin()).ln();
@@ -960,7 +985,10 @@ fn a_cover_opens_only_its_strip_and_narrowing_it_adds_mass() {
     let mut previous = solve(&base, &options).mass_per_density;
     for open_width in [0.006, 0.004] {
         let window = WallWindow {
-            cover: Some(WindowCover { open_width }),
+            cover: Some(WindowCover {
+                open_width,
+                side: CoverSide::Centred,
+            }),
             ..base
         };
         assert!(!window.is_prism());
@@ -985,4 +1013,146 @@ fn a_cover_opens_only_its_strip_and_narrowing_it_adds_mass() {
         );
         previous = mass.mass_per_density;
     }
+}
+
+#[test]
+fn a_whole_solve_matches_the_folded_one() {
+    // A symmetric staircase solved over its whole arc, every mode and every
+    // cell, carries the same mass as the folded solve: radial and parallel
+    // cheeks, a ramp, a centred cover whose edge splits a column, and a
+    // release face, on even and odd arcs.
+    let parallel = clare_d_parallel();
+    let centred = |open_width: f64| {
+        Some(WindowCover {
+            open_width,
+            side: CoverSide::Centred,
+        })
+    };
+    let windows = [
+        WallWindow {
+            ramp: wedge(0.0005),
+            ..clare_d()
+        },
+        parallel,
+        WallWindow {
+            ramp: wedge(0.0005),
+            ..parallel
+        },
+        WallWindow {
+            cover: centred(0.005),
+            ..parallel
+        },
+        WallWindow {
+            cover: centred(0.005),
+            outside: WindowOutside::Release,
+            ..parallel
+        },
+    ];
+    for window in &windows {
+        for arc in [12, 13] {
+            let folded = solve(window, &rung(8, arc, 8));
+            let whole = solve(
+                window,
+                &WallWindowOptions {
+                    whole: true,
+                    ..rung(8, arc, 8)
+                },
+            );
+            assert!(
+                (whole.mass_per_density / folded.mass_per_density - 1.0).abs() < 1e-8,
+                "{arc} arc cells: whole {} folded {}",
+                whole.mass_per_density,
+                folded.mass_per_density
+            );
+            assert!((whole.outer_area / folded.outer_area - 1.0).abs() < 1e-12);
+            let open: f64 = whole.outer_cells.iter().map(|c| c.arc * c.length).sum();
+            let outer_r = window.bore_radius + window.wall_thickness;
+            assert!((open * outer_r / whole.outer_area - 1.0).abs() < 1e-12);
+            let flux: f64 = whole.outer_cells.iter().map(|c| c.flux).sum();
+            assert!((flux / whole.outer_flux - 1.0).abs() < 1e-9);
+        }
+    }
+}
+
+#[test]
+fn a_face_behind_a_one_sided_lip_adds_mass_as_it_closes_in() {
+    // The Clare D window between parallel cheeks 8 mm apart under a strip
+    // that covers it from one side up to the mid-plane, leaving 4 mm open
+    // against the far cheek. The outer face is that strip. A face rising
+    // from the outer surface behind the cover's edge closes the exterior on
+    // that side: far round the back it leaves the mass as it was, and each
+    // step toward the edge adds mass.
+    let base = clare_d_parallel();
+    let outer_r = base.bore_radius + base.wall_thickness;
+    let lip = |face: Option<f64>| WallWindow {
+        cover: Some(WindowCover {
+            open_width: 0.004,
+            side: CoverSide::OneSided { face },
+        }),
+        ..base
+    };
+    let options = WallWindowOptions {
+        workers: 4,
+        ..WallWindowOptions::rung(&base, 8)
+    };
+    let bare = solve(&lip(None), &options);
+    // The cheeks stand where the whole theta cells resolve them.
+    let rim = base.bore_radius * (0.5 * bare.resolved_arc_width / base.bore_radius).sin();
+    let far = (rim / outer_r).asin();
+    let edge = ((rim - 0.004) / outer_r).asin();
+    let strip = outer_r * (far - edge) * bare.outer_axial_length;
+    assert!(
+        (bare.outer_area / strip - 1.0).abs() < 1e-9,
+        "outer face {} m^2, strip {strip} m^2",
+        bare.outer_area
+    );
+    assert!(
+        bare.outer_cells.iter().all(|c| c.theta - 0.5 * c.arc >= edge - 1e-12
+            && c.theta + 0.5 * c.arc <= far + 1e-12),
+        "a cell of the outer face lies under the cover"
+    );
+    let behind = solve(&lip(Some((core::f64::consts::PI - 0.1 + edge) * outer_r)), &options);
+    assert!(
+        (behind.mass_per_density / bare.mass_per_density - 1.0).abs() < 0.01,
+        "a face at the back: {} against {}",
+        behind.mass_per_density,
+        bare.mass_per_density
+    );
+    let mut previous = behind.mass_per_density;
+    for setback in [0.002, 0.001, 0.0] {
+        let mass = solve(&lip(Some(setback)), &options);
+        assert!(
+            mass.mass_per_density > previous,
+            "a face {setback} m behind the edge: {} after {previous}",
+            mass.mass_per_density
+        );
+        assert!((mass.outer_flux / mass.flux - 1.0).abs() < 1e-9);
+        previous = mass.mass_per_density;
+    }
+}
+
+#[test]
+fn a_one_sided_ladder_with_a_face_reports_its_order() {
+    let window = WallWindow {
+        cover: Some(WindowCover {
+            open_width: 0.004,
+            side: CoverSide::OneSided { face: Some(0.001) },
+        }),
+        ..clare_d_parallel()
+    };
+    let options = WallWindowOptions {
+        workers: 4,
+        ..WallWindowOptions::rung(&window, 8)
+    };
+    let ladder = wall_window_ladder(&window, &options).expect("one-sided ladder");
+    eprintln!(
+        "one-sided with a face: rungs {:?} mm, observed order {:.3}",
+        ladder
+            .rungs
+            .iter()
+            .map(|r| r.bore_length * 1e3)
+            .collect::<Vec<_>>(),
+        ladder.order,
+    );
+    assert!((0.5..=2.0).contains(&ladder.order), "observed order {}", ladder.order);
 }

@@ -52,9 +52,15 @@
 //! cells' static mass, so the static mass from junction to far field stays
 //! the computed one.
 //!
-//! Not represented: a lip plate, baffle or face near the window; the
-//! window's mutual radiation with the foot or the open holes; flow through
-//! the opening (the radiation is linear); a finite head length.
+//! A face beside the window ([`fs_bem::wall_window::CoverSide`]) enters
+//! through the computed mass only: it closes the static exterior the solve
+//! sees, while the resistance and the cells' static mass stay the bare
+//! cylinder's, so the series inertance carries the face's static mass.
+//!
+//! Not represented: the face's effect on the resistance, and a lip plate or
+//! baffle near the window; the window's mutual radiation with the foot or
+//! the open holes; flow through the opening (the radiation is linear); a
+//! finite head length.
 
 use super::{FlueError, FlueVoice};
 use core::f64::consts::{FRAC_PI_4, PI, TAU};
@@ -100,7 +106,7 @@ pub enum WindowFlux {
     /// The wall window's own solved outer-face cells.
     WallWindow,
     /// One uniform piston over the outer face's angle and the window's
-    /// cut-up, centred on the window: a bracket.
+    /// cut-up, centred on the opening: a bracket.
     CutUpPiston,
 }
 
@@ -116,16 +122,31 @@ impl WindowFlux {
 }
 
 /// The uniform piston over the angle the outer `cells` span and the
-/// window's `cut_up_m`, centred on the window, carrying unit flux.
+/// window's `cut_up_m`, centred on that span (on the window when the cells
+/// are symmetric), carrying unit flux.
 #[must_use]
 pub fn cut_up_piston(cells: &[OuterFaceCell], cut_up_m: f64) -> OuterFaceCell {
     let reach = cells
         .iter()
         .map(|cell| cell.theta.abs() + 0.5 * cell.arc)
         .fold(0.0, f64::max);
+    // A one-sided opening's span does not straddle the mid-plane.
+    let lo = cells
+        .iter()
+        .map(|cell| cell.theta - 0.5 * cell.arc)
+        .fold(f64::INFINITY, f64::min);
+    let hi = cells
+        .iter()
+        .map(|cell| cell.theta + 0.5 * cell.arc)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let (theta, arc) = if lo.is_finite() && (lo + hi).abs() > 1e-12 * reach {
+        (0.5 * (lo + hi), hi - lo)
+    } else {
+        (0.0, 2.0 * reach)
+    };
     OuterFaceCell {
-        theta: 0.0,
-        arc: 2.0 * reach,
+        theta,
+        arc,
         axial: 0.0,
         length: cut_up_m,
         flux: 1.0,

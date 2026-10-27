@@ -29,10 +29,13 @@
 # status.json. The embouchure radiates from its solved window, as the recorder and the whistle do, with
 # no authored loss (`window embouchure`, `mouth_reaction window-cylinder`, bead frankensim-5kfrn): the
 # hole is the riser (5 mm deep, the riser's area, Boehm's 10:12 across to along) through the head's
-# outer cylinder at a + 5 mm, the lip plate's proxy, under a centred rigid lip that leaves a strip open,
-# 6 mm at C4 to 3.5 mm at G6 linear in semitones (Coltman 1966 via Fletcher 1975 p.234): D4 5.84, G4
-# 5.44, A5 4.31 mm. Not represented: the lip on one side, the player's face, the lip plate's shape, and
-# the hole's taper and undercut (unknowns.tsv).
+# outer cylinder at a + 5 mm, the lip plate's proxy, under a rigid lip on the player's side that leaves a
+# strip open against the hole's far edge, 6 mm at C4 to 3.5 mm at G6 linear in semitones (Coltman 1966
+# via Fletcher 1975 p.234): D4 5.84, G4 5.44, A5 4.31 mm (`lip one-sided`). The player's face is a rigid
+# half-plane through the bore's axis standing 1.8 mm behind the lip's edge (`face 0.0018`: the jet's
+# dead interval over the lip, Fletcher 1975 p.235, inside his 1 to 2 mm of p.234), solved in the window's
+# exterior. Not represented: the face's angle, shape and extent, the lip's thickness, the lip plate's
+# shape, and the hole's taper and undercut (unknowns.tsv).
 # The jet card is an inline X-Est
 # lip-jet card, not the interim 2-D slot-jet card: theta/b 1.75 places the island's band peak (0.55 omega_c,
 # omega_c = U / 4 theta) at the published Strouhal number of maximum jet amplification, Str_h = 0.025 (de la

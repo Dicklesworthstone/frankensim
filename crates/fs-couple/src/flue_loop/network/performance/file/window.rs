@@ -1,6 +1,6 @@
 //! Optional `window none|wall-cut AXIAL_CELLS [cheeks radial|parallel]
 //! [ramp EDGE_HEIGHT_M ANGLE_DEG]|embouchure AXIAL_CELLS ACROSS_M ALONG_M
-//! OPEN_M` after the mouth records.
+//! OPEN_M [lip centred|one-sided [face SETBACK_M]]` after the mouth records.
 //!
 //! `wall-cut` computes the mouth window's mass from its 3-D geometry
 //! (`fs_bem::wall_window`) and replaces the legacy `0.61 a_eq` inertance with
@@ -26,11 +26,14 @@
 //!   cuts; its area must equal ACROSS times ALONG;
 //! - the hole is a straight rectangular prism, ACROSS between parallel walls
 //!   (the jet's direction, around the bore) and ALONG the axis;
-//! - its outer end is covered but for a strip OPEN wide across it, centred
-//!   ([`fs_bem::wall_window::WindowCover`]): the lower lip. A real lip covers
-//!   the side nearer the player. In two dimensions a one-sided cover adds
-//!   twice the centred one's length (by images), and that excess is not
-//!   represented;
+//! - its outer end is covered but for a strip OPEN wide across it
+//!   ([`fs_bem::wall_window::WindowCover`]): the lower lip. `lip centred`, the
+//!   default, centres the strip. `lip one-sided` puts it against the hole's
+//!   far edge, the lip covering the rest from the player's side, as a real
+//!   lip does. `face SETBACK_M` after it stands the player's face in the free
+//!   space outside: a rigid half-plane through the bore's axis, rising from
+//!   the outer surface SETBACK behind the lip's edge (as arc on that
+//!   surface) along the whole bore;
 //! - pocket and bore are the cork cavity and the head joint, as above.
 //!
 //! Pocket and bore must be one bore: radii within `POCKET_RADIUS_TOLERANCE`
@@ -57,15 +60,17 @@
 //! Not represented: the channel air's compressibility, a windway block or flat
 //! baffle around the window, a tapered pocket, viscous edge loss; for an
 //! embouchure, the hole's taper and undercut, a lip plate other than the
-//! outer cylinder, and the player's face.
+//! outer cylinder, the lip's thickness and shape, and a face other than a
+//! half-plane through the axis (inclined, curved, of finite extent, or with
+//! the lips' opening in it).
 
 use super::{FlueInputError, Rows, bad};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::network::{NetworkNode, TubeNetworkSpec};
 use crate::flue_loop::{FlueError, FlueGeometry};
 use fs_bem::wall_window::{
-    WallWindow, WallWindowLadder, WallWindowOptions, WindowCheeks, WindowCover, WindowOutside,
-    WindowRamp, WindowUpstream, wall_window_ladder,
+    CoverSide, WallWindow, WallWindowLadder, WallWindowOptions, WindowCheeks, WindowCover,
+    WindowOutside, WindowRamp, WindowUpstream, wall_window_ladder,
 };
 use fs_material::gas::GasState;
 
@@ -89,8 +94,13 @@ enum Shape {
         ramp: Option<WindowRamp>,
     },
     /// A flute's embouchure hole [m]: across by along, its outer end open
-    /// over a centred strip.
-    Embouchure { across: f64, along: f64, open: f64 },
+    /// over a strip on the lip's `side`.
+    Embouchure {
+        across: f64,
+        along: f64,
+        open: f64,
+        side: CoverSide,
+    },
 }
 
 /// The window derived from a card and its solved mass.
@@ -167,19 +177,45 @@ pub(super) fn read(rows: &mut Rows<'_>) -> Result<Option<WindowRow>, FlueInputEr
                     "window embouchure needs a positive hole and an open strip narrower than the hole",
                 ));
             }
+            let side = if row.fields.clone().next() == Some("lip") {
+                row.fields.next();
+                match row.fields.next() {
+                    Some("centred") => CoverSide::Centred,
+                    Some("one-sided") => {
+                        let face = if row.fields.clone().next() == Some("face") {
+                            row.fields.next();
+                            let setback = row.scalar()?;
+                            if !(setback >= 0.0) {
+                                return Err(bad(
+                                    row.line,
+                                    "window face needs a setback of at least 0 m",
+                                ));
+                            }
+                            Some(setback)
+                        } else {
+                            None
+                        };
+                        CoverSide::OneSided { face }
+                    }
+                    _ => return Err(bad(row.line, "window lip requires centred or one-sided")),
+                }
+            } else {
+                CoverSide::Centred
+            };
             Some(WindowRow {
                 axial_cells,
                 shape: Shape::Embouchure {
                     across,
                     along,
                     open,
+                    side,
                 },
             })
         }
         _ => {
             return Err(bad(
                 row.line,
-                "window requires none, wall-cut AXIAL_CELLS [cheeks radial|parallel] [ramp EDGE_HEIGHT_M ANGLE_DEG] or embouchure AXIAL_CELLS ACROSS_M ALONG_M OPEN_M",
+                "window requires none, wall-cut AXIAL_CELLS [cheeks radial|parallel] [ramp EDGE_HEIGHT_M ANGLE_DEG] or embouchure AXIAL_CELLS ACROSS_M ALONG_M OPEN_M [lip centred|one-sided [face SETBACK_M]]",
             ));
         }
     };
@@ -278,12 +314,16 @@ pub(super) fn solve(
             across,
             along,
             open,
+            side,
         } => (
             across,
             along,
             WindowCheeks::Parallel,
             None,
-            Some(WindowCover { open_width: open }),
+            Some(WindowCover {
+                open_width: open,
+                side,
+            }),
         ),
     };
     let arc_width = match cheeks {

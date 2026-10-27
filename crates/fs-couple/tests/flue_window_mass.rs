@@ -3,11 +3,12 @@
 //! legacy `0.61 a_eq` inertance, parallel cheeks and a labium ramp from the
 //! row, the pocket radius tolerance, the refusals, and the window's radiation
 //! from the head's outer cylinder in place of the authored loss; and
-//! `window embouchure` on the G4 flute card: the hole under the lip.
+//! `window embouchure` on the G4 flute card: the hole under the lip, centred
+//! or from the player's side, with the player's face behind it.
 
 use fs_bem::wall_window::{
-    WallWindow, WallWindowOptions, WindowCheeks, WindowCover, WindowRamp, WindowUpstream,
-    wall_window_ladder,
+    CoverSide, WallWindow, WallWindowOptions, WindowCheeks, WindowCover, WindowRamp,
+    WindowUpstream, wall_window_ladder,
 };
 use fs_couple::flue_loop::network::performance::file::{FlueFilePerformance, FlueInputError};
 use fs_couple::pcm_wav::observation::PressureRenderer;
@@ -361,6 +362,7 @@ fn flute() -> (String, [f64; 3], String) {
     let fields: Vec<f64> = rows[0]
         .split_whitespace()
         .skip(3)
+        .take(3)
         .map(|f| f.parse().unwrap())
         .collect();
     assert_eq!(fields.len(), 3);
@@ -391,7 +393,7 @@ fn the_flute_window_is_its_embouchure_hole_under_the_lip() {
     );
     assert!((2.0 * a * (0.5 * w.arc_width / a).sin() / across - 1.0).abs() < 1e-12);
     assert_eq!((w.cheeks, w.ramp), (WindowCheeks::Parallel, None));
-    assert_eq!(w.cover, Some(WindowCover { open_width: open }));
+    assert_eq!(w.cover.map(|cover| cover.open_width), Some(open));
     assert_eq!(w.upstream, WindowUpstream::ClosedEnd { distance: 0.017 });
     let riser_area = core::f64::consts::PI * 0.0061025 * 0.0061025;
     assert!((across * along / riser_area - 1.0).abs() <= 1e-3);
@@ -446,4 +448,74 @@ fn malformed_embouchure_rows_refuse() {
         "window embouchure 4 {} {along} {open}",
         1.01 * across
     )));
+    let hole = format!("window embouchure 4 {across} {along} {open}");
+    for lip in [
+        " lip",
+        " lip sideways",
+        " lip one-sided face",
+        " lip one-sided face -0.001",
+        " lip centred face 0.001",
+        " lip one-sided face 0.001 0.002",
+    ] {
+        assert!(refused(&format!("{hole}{lip}")), "{lip}");
+    }
+}
+
+#[test]
+fn a_one_sided_lip_and_the_players_face_come_from_the_row() {
+    // The lip covers the hole from the player's side, leaving its strip
+    // against the far wall, and the face stands 1 mm behind the lip's edge.
+    let (text, [across, along, open], row) = flute();
+    let hole = format!("window embouchure 8 {across} {along} {open}");
+    let solve = |lip: &str| {
+        let file = parse(&text.replace(&row, &format!("{hole}{lip}"))).unwrap();
+        let record = file.window().expect("window record").clone();
+        let voice = file.renderer().voice();
+        let load = voice.window_radiation_load().expect("window radiation");
+        assert!(load.band_error() <= 0.05, "{lip}: band error {}", load.band_error());
+        (record, voice.mouth_inertance_pa_s2_m3())
+    };
+    let (centred, _) = solve("");
+    let (lip, lip_inertance) = solve(" lip one-sided");
+    let (face, face_inertance) = solve(" lip one-sided face 0.001");
+    assert_eq!(
+        centred.window.cover,
+        Some(WindowCover {
+            open_width: open,
+            side: CoverSide::Centred,
+        })
+    );
+    assert_eq!(
+        lip.window.cover,
+        Some(WindowCover {
+            open_width: open,
+            side: CoverSide::OneSided { face: None },
+        })
+    );
+    assert_eq!(
+        face.window.cover.map(|cover| cover.side),
+        Some(CoverSide::OneSided { face: Some(0.001) })
+    );
+    // The open strip runs OPEN wide from the far wall on the outer surface,
+    // off the hole's centre.
+    let cells = &lip.ladder.rungs[lip.ladder.rungs.len() - 1].outer_cells;
+    let outer = 0.0087744 + 0.005;
+    let far = cells.iter().map(|c| c.theta + 0.5 * c.arc).fold(f64::MIN, f64::max);
+    let near = cells.iter().map(|c| c.theta - 0.5 * c.arc).fold(f64::MAX, f64::min);
+    let edge = ((outer * far.sin() - open) / outer).asin();
+    assert!((near - edge).abs() < 1e-9, "strip from {near} rad, edge at {edge} rad");
+    let centroid = cells.iter().map(|c| c.theta * c.flux).sum::<f64>()
+        / cells.iter().map(|c| c.flux).sum::<f64>();
+    assert!(centroid > 0.0, "centroid {centroid}");
+    // The face adds mass, and the voice's inertance carries it.
+    assert!(face.ladder.mass_per_density > lip.ladder.mass_per_density);
+    assert!(face_inertance > lip_inertance);
+    let bore_area = core::f64::consts::PI * 0.0087744 * 0.0087744;
+    eprintln!(
+        "flute G4 at 8 axial cells, {:.4} mm open: centred {:.4} mm, one-sided {:.4} mm, face 1 mm behind {:.4} mm of bore",
+        open * 1e3,
+        centred.ladder.mass_per_density * bore_area * 1e3,
+        lip.ladder.mass_per_density * bore_area * 1e3,
+        face.ladder.mass_per_density * bore_area * 1e3
+    );
 }

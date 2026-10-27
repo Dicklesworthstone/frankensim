@@ -794,10 +794,14 @@ fn load_with_all_sources(
                 let fine = &l.rungs[l.rungs.len() - 1];
                 let cheeks = match w.cheeks { fs_bem::wall_window::WindowCheeks::Radial => "radial", fs_bem::wall_window::WindowCheeks::Parallel => "parallel" };
                 let ramp = w.ramp.map_or_else(|| "null".to_string(), |r| format!("{{\"edge_height_m\":{:e},\"angle_rad\":{:e}}}", r.edge_height, r.angle));
+                let cover = w.cover.map_or_else(|| "null".to_string(), |c| match c.side {
+                    fs_bem::wall_window::CoverSide::Centred => format!("{{\"open_width_m\":{:e},\"side\":\"centred\",\"face_setback_m\":null}}", c.open_width),
+                    fs_bem::wall_window::CoverSide::OneSided { face } => format!("{{\"open_width_m\":{:e},\"side\":\"one-sided\",\"face_setback_m\":{}}}", c.open_width, face.map_or_else(|| "null".to_string(), |s| format!("{s:e}"))),
+                });
                 let rungs = l.rungs.iter().map(|r| format!("{:e}", r.bore_length)).collect::<Vec<_>>().join(",");
                 let iterations = l.rungs.iter().map(|r| r.iterations.to_string()).collect::<Vec<_>>().join(",");
                 let order_source = if w.is_prism() { "re-entrant edges" } else { "observed over three rungs" };
-                format!(",\"window\":{{\"model\":\"wall-cut-potential-flow-v2\",\"legacy_load_replaced\":\"0.61 a_eq mouth inertance\",\"bore_radius_m\":{:e},\"wall_thickness_m\":{:e},\"arc_width_m\":{:e},\"resolved_arc_width_m\":{:e},\"axial_length_m\":{:e},\"cheeks\":\"{cheeks}\",\"ramp\":{ramp},\"resolved_outer_axial_length_m\":{:e},\"pocket_end_m\":{:e},\"cells\":[{},{},{}],\"rung_bore_lengths_m\":[{rungs}],\"rung_iterations\":[{iterations}],\"extrapolation_order\":{:e},\"order_source\":\"{order_source}\",\"bore_length_m\":{:e},\"network_channel_line_m\":{:e},\"riser_mass_per_density_per_m\":{:e},\"mouth_inertance_pa_s2_m3\":{:e},\"jet_source_coefficient\":\"unchanged\",\"mouth_loss_rel\":\"{window_loss}\"}}",
+                format!(",\"window\":{{\"model\":\"wall-cut-potential-flow-v2\",\"legacy_load_replaced\":\"0.61 a_eq mouth inertance\",\"bore_radius_m\":{:e},\"wall_thickness_m\":{:e},\"arc_width_m\":{:e},\"resolved_arc_width_m\":{:e},\"axial_length_m\":{:e},\"cheeks\":\"{cheeks}\",\"ramp\":{ramp},\"cover\":{cover},\"resolved_outer_axial_length_m\":{:e},\"pocket_end_m\":{:e},\"cells\":[{},{},{}],\"rung_bore_lengths_m\":[{rungs}],\"rung_iterations\":[{iterations}],\"extrapolation_order\":{:e},\"order_source\":\"{order_source}\",\"bore_length_m\":{:e},\"network_channel_line_m\":{:e},\"riser_mass_per_density_per_m\":{:e},\"mouth_inertance_pa_s2_m3\":{:e},\"jet_source_coefficient\":\"unchanged\",\"mouth_loss_rel\":\"{window_loss}\"}}",
                     w.bore_radius, w.wall_thickness, w.arc_width, fine.resolved_arc_width, w.axial_length,
                     fine.outer_axial_length, pocket, record.cells[0], record.cells[1], record.cells[2], l.order,
                     l.mass_per_density * bore_area, record.channel_line_m, record.riser_mass_per_density,

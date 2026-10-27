@@ -13,8 +13,12 @@
 //! outer face is a pressure release, which leaves no outer region and is used
 //! to check the inner end correction on its own. Either face can carry a
 //! rigid cover on the outer surface that leaves open only the strip between
-//! two planes parallel to the window's mid-plane, centred on it: a player's
-//! lip over part of a flute's embouchure hole.
+//! two planes parallel to the window's mid-plane, centred on it or against
+//! the opening's edge on one side: a player's lip over part of a flute's
+//! embouchure hole, which covers it from the player's side. Behind a
+//! one-sided cover's edge a face can stand in free space: a rigid half-plane
+//! through the bore's axis, rising from the outer surface into the far field
+//! along the whole bore, as a player's face stands over the lip.
 //!
 //! The air is incompressible and irrotational. The ports carry plane flow at
 //! potential 1, the far exterior sits at 0, and `Q` is the volume flux
@@ -69,6 +73,15 @@
 //!   the `theta >= 0` half and solved with the face potentials by
 //!   Jacobi-preconditioned conjugate gradients to a declared relative
 //!   residual.
+//! - A staircase that is not symmetric about its mid-plane (a one-sided
+//!   cover) is solved whole, with no folding: every arc cell, every DCT
+//!   mode, the bore's `sin` modes beside its `cos` ones, and an exterior
+//!   `theta` grid around the whole circle. Its columns are the window's arc
+//!   cells, the one the cover's edge crosses split there through every
+//!   layer, and each layer opens each column over an interval. A face cuts
+//!   the exterior grid's ring of links where it stands, which leaves the
+//!   modes of one full turn with rigid ends. A symmetric staircase can be
+//!   solved whole as well, which checks the folding.
 //! - The exterior's far boundary is a monopole Robin condition about the
 //!   origin. In the cases checked, its error falls about eightfold for each
 //!   doubling of the far radius.
@@ -95,9 +108,11 @@
 //!
 //! Not represented: cheeks that are neither radial nor parallel; an upstream
 //! face that is not straight; a flat baffle, windway or labium outside the
-//! wall; a cover off the window's mid-plane (a lip covers one side of an
-//! embouchure) or off the outer surface; a pocket that is not flat;
-//! viscosity; compressibility.
+//! wall; a cover off the outer surface, or with a thickness (a lip's front
+//! surface is the face's job); a face that is not a half-plane through the
+//! axis (inclined to the radius, curved, or of finite extent), or that has
+//! the lips' opening in it; a pocket that is not flat; viscosity;
+//! compressibility.
 
 use core::f64::consts::PI;
 use std::fmt;
@@ -156,13 +171,30 @@ pub struct WindowRamp {
 
 /// A rigid cover on the outer surface over the window's outer face. It
 /// leaves open only the strip between two planes parallel to the window's
-/// mid-plane, `open_width` apart and centred on it, along the face's whole
-/// length.
+/// mid-plane, `open_width` apart, along the face's whole length.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WindowCover {
-    /// Distance between the cover's edges [m], narrower than the opening
-    /// it covers.
+    /// Width of the open strip [m], narrower than the opening it covers.
     pub open_width: f64,
+    /// Where the strip lies.
+    pub side: CoverSide,
+}
+
+/// Where a cover's open strip lies across the opening.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CoverSide {
+    /// Centred on the window's mid-plane, the cover over both sides.
+    Centred,
+    /// Against the opening's edge at `theta > 0` on the outer surface, the
+    /// cover over the rest from the `theta < 0` side, as a player's lower
+    /// lip covers an embouchure hole from the player's side.
+    OneSided {
+        /// A face's setback behind the cover's edge [m], as arc on the outer
+        /// surface: a rigid half-plane through the bore's axis there, rising
+        /// from the outer surface into the far field along the whole bore.
+        /// It needs free space outside; `None` leaves free space alone.
+        face: Option<f64>,
+    },
 }
 
 /// A window cut through the wall of a cylindrical bore.
@@ -226,6 +258,10 @@ pub struct WallWindowOptions {
     pub tolerance: f64,
     /// A staircase needing more conjugate-gradient iterations is refused.
     pub max_iterations: usize,
+    /// Solve a staircase over the window's whole arc even when it is
+    /// symmetric about its mid-plane, which checks the folded solve. A
+    /// staircase that is not symmetric is always solved whole; a prism never.
+    pub whole: bool,
 }
 
 impl Default for WallWindowOptions {
@@ -242,6 +278,7 @@ impl Default for WallWindowOptions {
             workers: 1,
             tolerance: 1e-12,
             max_iterations: 100_000,
+            whole: false,
         }
     }
 }
@@ -420,7 +457,8 @@ pub struct WallWindowMass {
     /// Exterior grid cells, (radial, axial); zero with a release face.
     pub exterior_cells: (usize, usize),
     /// Unknowns of the final solve: a prism's coupled face system, a
-    /// staircase's folded channel cells and face potentials.
+    /// staircase's channel cells (folded unless solved whole) and face
+    /// potentials.
     pub unknowns: usize,
     /// Relative residual of the final solve, recomputed after it.
     pub residual: f64,
@@ -579,6 +617,27 @@ pub fn wall_window_mass(
             "a cover's open width must be positive and narrower than the opening it covers",
         ));
     }
+    let face = match w.cover.map(|cover| cover.side) {
+        Some(CoverSide::OneSided { face: Some(setback) }) => {
+            if !free {
+                return Err(WallWindowError::Invalid(
+                    "a face stands in free space; a release face has none",
+                ));
+            }
+            if !(setback.is_finite() && setback >= 0.0) {
+                return Err(WallWindowError::Invalid(
+                    "a face's setback must be finite and at least zero",
+                ));
+            }
+            Some(setback)
+        }
+        _ => None,
+    };
+    // A one-sided cover breaks the mirror symmetry the folded solve needs.
+    let one_sided = w
+        .cover
+        .is_some_and(|cover| matches!(cover.side, CoverSide::OneSided { .. }));
+    let whole = !w.is_prism() && (o.whole || one_sided);
     if !(o.tolerance > 0.0 && o.tolerance < 1.0) || o.max_iterations == 0 {
         return Err(WallWindowError::Invalid(
             "the conjugate-gradient tolerance must lie in (0, 1) and its iteration budget be positive",
@@ -611,12 +670,65 @@ pub fn wall_window_mass(
     } else {
         staircase_layers(w, &edge_r, nwth, nwx, dth, dxw, o.max_line_cells)?
     };
+    // A whole staircase's columns, cuts and outer face. Its outer surface is
+    // open within the parallel cheeks there (against free space) and the
+    // cover's strip, whose edges become column boundaries.
+    let grid = match layers.last() {
+        Some(top) if whole => {
+            if layers.iter().any(|cut| cut.arc.is_empty()) {
+                return Err(WallWindowError::Invalid(
+                    "the cut closes inside the wall at this resolution",
+                ));
+            }
+            let cheek = if free && w.cheeks == WindowCheeks::Parallel {
+                det::asin(a * det::sin(0.5 * nwth as f64 * dth) / (a + t))
+            } else {
+                f64::INFINITY
+            };
+            let far = cut_reach(&top.arc, nwth, dth).min(cheek);
+            let (splits, surface, face_angle) = match w.cover {
+                None => (Vec::new(), (-far, far), None),
+                Some(WindowCover {
+                    open_width,
+                    side: CoverSide::Centred,
+                }) => {
+                    let edge = det::asin(0.5 * open_width / (a + t));
+                    (vec![-edge, edge], (-edge.min(far), edge.min(far)), None)
+                }
+                Some(WindowCover { open_width, .. }) => {
+                    // The strip runs from the opening's edge as resolved.
+                    let rim = (a + t) * det::sin(far);
+                    if !(open_width < 2.0 * rim) {
+                        return Err(WallWindowError::Invalid(
+                            "a one-sided cover's strip must be narrower than the opening as resolved",
+                        ));
+                    }
+                    let edge = det::asin((rim - open_width) / (a + t));
+                    let face_angle = face.map(|setback| edge - setback / (a + t));
+                    if face_angle.is_some_and(|angle| !(angle > -PI)) {
+                        return Err(WallWindowError::Invalid(
+                            "a face must stand within half a turn of the window's mid-plane",
+                        ));
+                    }
+                    (vec![edge], (edge, far), face_angle)
+                }
+            };
+            let grid = WholeGrid::new(&layers, nwth, dth, &splits, surface, face_angle);
+            if grid.outer.is_empty() {
+                return Err(WallWindowError::Invalid(
+                    "the cut closes inside the wall at this resolution",
+                ));
+            }
+            Some(grid)
+        }
+        _ => None,
+    };
     // A staircase's outer face: the last layer's cells, each open over the
     // smaller of its own fraction and those at the outer surface, so that
     // the exterior sees the opening the wall has (parallel cheeks against
     // free space) and either face sees the cover's strip.
     let outer: Vec<f64> = match layers.last() {
-        Some(top) => {
+        Some(top) if !whole => {
             let within = |open: Vec<f64>, half_width: f64| -> Vec<f64> {
                 let surface = cheek_fractions(det::asin(half_width / (a + t)), dth, nwth);
                 open.iter().zip(&surface).map(|(&f, &s)| f.min(s)).collect()
@@ -630,9 +742,12 @@ pub fn wall_window_mass(
             }
             open
         }
-        None => Vec::new(),
+        _ => Vec::new(),
     };
-    if !layers.is_empty() && (outer.is_empty() || layers.iter().any(|cut| cut.arc.is_empty())) {
+    if !layers.is_empty()
+        && !whole
+        && (outer.is_empty() || layers.iter().any(|cut| cut.arc.is_empty()))
+    {
         return Err(WallWindowError::Invalid(
             "the cut closes inside the wall at this resolution",
         ));
@@ -641,7 +756,7 @@ pub fn wall_window_mass(
     // edge lies on a cell boundary at any open width. The odd arc's
     // mid-plane cell stays whole: a strip narrower than one cell.
     let cover_edge = match w.cover {
-        Some(cover) if !layers.is_empty() => {
+        Some(cover) if !layers.is_empty() && !whole => {
             let strip = cheek_fractions(det::asin(0.5 * cover.open_width / (a + t)), dth, nwth);
             let edge = strip.len() - 1;
             if strip[edge] < 1.0 && !(nwth % 2 == 1 && edge == 0) {
@@ -663,22 +778,30 @@ pub fn wall_window_mass(
         _ => None,
     };
     // The outer face's (arc, axial) cells, and its open arc cells and length.
-    let (outer_open, outer_arc, outer_axial_length) = match layers.last() {
-        Some(top) => (
+    let (outer_open, outer_arc, outer_axial_length) = match (layers.last(), &grid) {
+        (Some(top), Some(grid)) => (
+            (grid.outer.len(), top.axial.len()),
+            grid.outer
+                .iter()
+                .map(|&(_, lo, hi)| (hi - lo) / dth)
+                .sum::<f64>(),
+            dxw * top.axial.iter().sum::<f64>(),
+        ),
+        (Some(top), None) => (
             (2 * outer.len() - nwth % 2, top.axial.len()),
             (0..outer.len())
                 .map(|i| multiplicity(nwth, i) * outer[i])
                 .sum::<f64>(),
             dxw * top.axial.iter().sum::<f64>(),
         ),
-        None => ((nwth, nwx), nwth as f64, dxw * nwx as f64),
+        (None, _) => ((nwth, nwx), nwth as f64, dxw * nwx as f64),
     };
     if free && !(reach > outer_axial_length - half) {
         return Err(WallWindowError::Invalid(
             "the exterior must reach beyond the ramp",
         ));
     }
-    let faces = [(nwth, nwx), outer_open].map(|(arc, axial)| FaceBasis::new(arc, axial));
+    let faces = [(nwth, nwx), outer_open].map(|(arc, axial)| FaceBasis::new(arc, axial, whole));
     if w.is_prism() {
         let face = faces[0].size();
         let unknowns = if free { 2 * face } else { face };
@@ -773,22 +896,29 @@ pub fn wall_window_mass(
     };
     let terms = in_parallel(n_theta / 2 + 1, o.workers, |m| context.terms(m))?;
 
-    // Face maps in each face's even DCT basis: potential per unit flux out
-    // of the region through each mode, plus the face cells' half-cell drop.
+    // Face maps in each face's DCT basis (its even modes when folded):
+    // potential per unit flux out of the region through each mode, plus the
+    // face cells' half-cell drop. A whole face takes each bore mode's `sin`
+    // beside its `cos`; the alternating mode's one nonzero part has the
+    // weight of one.
     let face_map = |basis: &FaceBasis,
-                    pick: fn(&ModeTerms) -> (&[f64], &[f64]),
+                    pick: fn(&ModeTerms) -> (&[f64], &[f64], &[f64]),
                     half_cell: f64,
                     radius: f64| {
-        let (even, nx) = (basis.even, basis.axial_cells);
+        let (modes, nx) = (basis.modes, basis.axial_cells);
         let face = basis.size();
         let mut map = vec![0.0; face * face];
         for (m, term) in terms.iter().enumerate() {
             let weight = if m == 0 || 2 * m == n_theta { 1.0 } else { 2.0 };
             let g = weight / (n_theta as f64 * dth);
-            let (arc, y) = pick(term);
-            for pe in 0..even {
-                for pf in 0..even {
-                    let coefficient = g * arc[pe] * arc[pf];
+            let (arc, sin, y) = pick(term);
+            for pe in 0..modes {
+                for pf in 0..modes {
+                    let coefficient = if sin.is_empty() {
+                        g * arc[pe] * arc[pf]
+                    } else {
+                        g * (arc[pe] * arc[pf] + sin[pe] * sin[pf])
+                    };
                     for q in 0..nx {
                         let row = &mut map[(pe * nx + q) * face + pf * nx..][..nx];
                         for (entry, &yv) in row.iter_mut().zip(&y[q * nx..(q + 1) * nx]) {
@@ -807,24 +937,40 @@ pub fn wall_window_mass(
     let bore_map = face_map(&faces[0], bore_terms, bore.half_cell, a);
     let exterior_map = match (&exterior, layers.last()) {
         (Some(region), None) => Some(face_map(&faces[1], exterior_terms, region.half_cell, a + t)),
-        (Some(region), Some(top)) => Some(cut_exterior_map(
-            region,
-            &OuterFace {
-                basis: &faces[1],
-                arc: &outer,
-                axial: &top.axial,
-                radius: a + t,
-            },
-            n_theta,
-            dth,
-            dxw,
-            o.workers,
-        )?),
+        (Some(region), Some(top)) => Some(match &grid {
+            Some(grid) => whole_exterior_map(
+                region,
+                grid,
+                &OuterFace {
+                    basis: &faces[1],
+                    arc: &grid.fractions,
+                    axial: &top.axial,
+                    radius: a + t,
+                },
+                n_theta,
+                dth,
+                dxw,
+                o.workers,
+            )?,
+            None => cut_exterior_map(
+                region,
+                &OuterFace {
+                    basis: &faces[1],
+                    arc: &outer,
+                    axial: &top.axial,
+                    radius: a + t,
+                },
+                n_theta,
+                dth,
+                dxw,
+                o.workers,
+            )?,
+        }),
         (None, _) => None,
     };
 
     let solved = if w.is_prism() {
-        let (even, face) = (faces[0].even, faces[0].size());
+        let (even, face) = (faces[0].modes, faces[0].size());
         // Channel: per even DCT mode, flux into the bottom face and out of the
         // top face per unit bottom and top potential, scaled to cell fluxes.
         let mut into_bottom = vec![0.0; face];
@@ -882,30 +1028,61 @@ pub fn wall_window_mass(
         Solved {
             flux: rhs[0] * (into_bottom[0] * phi[0] + cross[0] * top(0)),
             outer_flux: rhs[0] * outer_modes[0],
-            outer_cells: faces[0].half_cells(&outer_modes),
+            outer_cells: faces[0].cells(&outer_modes),
             unknowns: size,
             residual: det::sqrt(misfit) / rhs[0],
             iterations: 0,
         }
     } else {
+        let conductance = [a, a + t].map(|r| r * dth * dxw / (0.5 * layer));
+        let resistance = [
+            bore.half_cell / (a * dth * dxw),
+            exterior
+                .as_ref()
+                .map_or(0.0, |e| e.half_cell / ((a + t) * dth * dxw)),
+        ];
+        let free = exterior_map.is_some();
+        let top = &layers[layers.len() - 1];
+        let (channel, outer_open) = match &grid {
+            Some(grid) => (
+                Channel::whole(
+                    &WholeStaircase {
+                        layers: &layers,
+                        grid,
+                        edge_r: &edge_r,
+                        layer,
+                        dth,
+                        dxw,
+                        faces: &faces,
+                        conductance,
+                    },
+                    free,
+                ),
+                (grid.fractions.as_slice(), top.axial.as_slice()),
+            ),
+            None => (
+                Channel::new(
+                    &Staircase {
+                        layers: &layers,
+                        outer: &outer,
+                        cover_edge,
+                        edge_r: &edge_r,
+                        layer,
+                        dth,
+                        dxw,
+                        faces: &faces,
+                        conductance,
+                    },
+                    free,
+                ),
+                (outer.as_slice(), top.axial.as_slice()),
+            ),
+        };
         staircase_channel(
-            &Staircase {
-                layers: &layers,
-                outer: &outer,
-                cover_edge,
-                edge_r: &edge_r,
-                layer,
-                dth,
-                dxw,
-                faces: &faces,
-                conductance: [a, a + t].map(|r| r * dth * dxw / (0.5 * layer)),
-                resistance: [
-                    bore.half_cell / (a * dth * dxw),
-                    exterior
-                        .as_ref()
-                        .map_or(0.0, |e| e.half_cell / ((a + t) * dth * dxw)),
-                ],
-            },
+            &channel,
+            &faces,
+            resistance,
+            outer_open,
             &bore_map,
             exterior_map.as_deref(),
             o,
@@ -922,13 +1099,27 @@ pub fn wall_window_mass(
     } = solved;
     // Each half cell's open part, from its open fractions: an arc cell is
     // open from its edge nearer the mid-plane (the odd arc's mid-plane cell
-    // about its centre), an axial cell from its upstream edge.
+    // about its centre), an axial cell from its upstream edge. A whole
+    // face's cells are open over their own intervals.
     let (outer_arc_cells, outer_axial) = match layers.last() {
         Some(top) => (outer.clone(), top.axial.clone()),
         None => (vec![1.0; nwth.div_ceil(2)], vec![1.0; nwx]),
     };
     let odd = nwth % 2 == 1;
     let mut outer_cells = Vec::with_capacity(2 * half_fluxes.len());
+    if let Some(grid) = &grid {
+        for (k, &(_, lo, hi)) in grid.outer.iter().enumerate() {
+            for (j, &fj) in outer_axial.iter().enumerate() {
+                outer_cells.push(OuterFaceCell {
+                    theta: 0.5 * (lo + hi),
+                    arc: hi - lo,
+                    axial: -half + (j as f64 + 0.5 * fj) * dxw,
+                    length: fj * dxw,
+                    flux: half_fluxes[k * outer_axial.len() + j],
+                });
+            }
+        }
+    }
     for (i, &fi) in outer_arc_cells.iter().enumerate() {
         let theta = if odd && i == 0 {
             0.0
@@ -990,51 +1181,83 @@ pub fn wall_window_mass(
 struct Solved {
     flux: f64,
     outer_flux: f64,
-    /// Flux out of each of the outer face's half cells, outward from the
-    /// mid-plane by axial cells.
+    /// Flux out of each of the outer face's cells ([`FaceBasis::cells`]) by
+    /// axial cells.
     outer_cells: Vec<f64>,
     unknowns: usize,
     residual: f64,
     iterations: usize,
 }
 
-/// One face's cells and orthonormal DCT-II bases.
+/// One face's cells and orthonormal DCT-II bases. A folded face keeps the
+/// `theta`-even arc modes and stands for its half cells outward from the
+/// mid-plane; a whole face keeps every mode and every cell.
 struct FaceBasis {
     arc_cells: usize,
     axial_cells: usize,
-    /// The `theta`-even modes: `ceil(arc_cells / 2)`.
-    even: usize,
+    /// The arc modes kept: `ceil(arc_cells / 2)` folded, `arc_cells` whole.
+    modes: usize,
+    whole: bool,
     arc_dct: Vec<f64>,
     axial_dct: Vec<f64>,
 }
 
 impl FaceBasis {
-    fn new(arc_cells: usize, axial_cells: usize) -> Self {
+    fn new(arc_cells: usize, axial_cells: usize, whole: bool) -> Self {
         Self {
             arc_cells,
             axial_cells,
-            even: arc_cells.div_ceil(2),
+            modes: if whole {
+                arc_cells
+            } else {
+                arc_cells.div_ceil(2)
+            },
+            whole,
             arc_dct: dct_rows(arc_cells),
             axial_dct: dct_rows(axial_cells),
         }
     }
 
-    /// Unknowns of the face in its even basis.
+    /// Unknowns of the face in its basis.
     fn size(&self) -> usize {
-        self.even * self.axial_cells
+        self.modes * self.axial_cells
     }
 
-    /// The cell values, on the half cells outward from the mid-plane by
-    /// axial cells, of the face vector whose even coefficients are `modes`.
-    fn half_cells(&self, modes: &[f64]) -> Vec<f64> {
-        let (n, nx) = (self.arc_cells, self.axial_cells);
-        let half = n.div_ceil(2);
-        let mut cells = vec![0.0; half * nx];
-        for pe in 0..self.even {
+    /// The arc DCT row of kept mode `p`: row `2 p` folded, `p` whole.
+    fn arc_row(&self, p: usize) -> &[f64] {
+        let (n, row) = (self.arc_cells, if self.whole { p } else { 2 * p });
+        &self.arc_dct[row * n..(row + 1) * n]
+    }
+
+    /// The arc cells the face's cell values stand on: folded, the half cells
+    /// outward from the mid-plane; whole, every cell.
+    fn cell_range(&self) -> Range<usize> {
+        let n = self.arc_cells;
+        if self.whole { 0..n } else { n / 2..n }
+    }
+
+    /// Mirror images a cell value stands for.
+    fn weight(&self, cell: usize) -> f64 {
+        if self.whole {
+            1.0
+        } else {
+            multiplicity(self.arc_cells, cell)
+        }
+    }
+
+    /// The cell values, by axial cells, of the face vector whose
+    /// coefficients are `modes`.
+    fn cells(&self, modes: &[f64]) -> Vec<f64> {
+        let nx = self.axial_cells;
+        let range = self.cell_range();
+        let count = range.len();
+        let mut cells = vec![0.0; count * nx];
+        for pe in 0..self.modes {
+            let row = &self.arc_row(pe)[range.clone()];
             for q in 0..nx {
                 let axial = &self.axial_dct[q * nx..(q + 1) * nx];
-                for i in 0..half {
-                    let z = modes[pe * nx + q] * self.arc_dct[2 * pe * n + n / 2 + i];
+                for (i, &r) in row.iter().enumerate() {
+                    let z = modes[pe * nx + q] * r;
                     for (c, &p) in cells[i * nx..(i + 1) * nx].iter_mut().zip(axial) {
                         *c += z * p;
                     }
@@ -1044,22 +1267,30 @@ impl FaceBasis {
         cells
     }
 
-    /// The even arc DCT coefficients of `cos(m theta)` sampled at the arc
-    /// cells' centres, with `n` cells around the bore.
-    fn arc_coefficients(&self, m: usize, n: f64) -> Vec<f64> {
+    /// The arc DCT coefficients, on the kept modes, of `cos(m theta)` and,
+    /// for a whole face, `sin(m theta)`, sampled at the arc cells' centres,
+    /// with `n` cells around the bore.
+    fn arc_coefficients(&self, m: usize, n: f64) -> (Vec<f64>, Vec<f64>) {
         let nwth = self.arc_cells;
-        let cos_m: Vec<f64> = (0..nwth)
-            .map(|k| {
-                let centre = k as f64 - 0.5 * (nwth - 1) as f64;
-                det::cos(2.0 * PI * m as f64 * centre / n)
-            })
-            .collect();
-        (0..self.even)
-            .map(|pe| {
-                let row = &self.arc_dct[2 * pe * nwth..(2 * pe + 1) * nwth];
-                row.iter().zip(&cos_m).map(|(p, c)| p * c).sum::<f64>()
-            })
-            .collect()
+        let angle = |k: usize| {
+            let centre = k as f64 - 0.5 * (nwth - 1) as f64;
+            2.0 * PI * m as f64 * centre / n
+        };
+        let project = |samples: &[f64]| -> Vec<f64> {
+            (0..self.modes)
+                .map(|pe| {
+                    let row = self.arc_row(pe);
+                    row.iter().zip(samples).map(|(p, c)| p * c).sum::<f64>()
+                })
+                .collect()
+        };
+        let cos_m: Vec<f64> = (0..nwth).map(|k| det::cos(angle(k))).collect();
+        let sin_m = if self.whole {
+            project(&(0..nwth).map(|k| det::sin(angle(k))).collect::<Vec<_>>())
+        } else {
+            Vec::new()
+        };
+        (project(&cos_m), sin_m)
     }
 }
 
@@ -1075,8 +1306,10 @@ struct Modes<'a> {
 
 impl Modes<'_> {
     /// Mode `m`: the discrete `theta` Laplacian's eigenvalue `mu`, each
-    /// face's arc coefficients of `cos(m theta)`, and each region's face
-    /// response projected onto its face's axial DCT basis.
+    /// face's arc coefficients of `cos(m theta)` (and the bore face's of
+    /// `sin(m theta)` when whole), and each region's face response projected
+    /// onto its face's axial DCT basis. The outer face's coefficients serve a
+    /// prism's exterior only.
     fn terms(&self, m: usize) -> Result<ModeTerms> {
         let n = self.n_theta as f64;
         let mu = (2.0 - 2.0 * det::cos(2.0 * PI * m as f64 / n)) / (self.dth * self.dth);
@@ -1088,35 +1321,42 @@ impl Modes<'_> {
                 .map_err(|source| WallWindowError::Factor { stage, source })
         };
         let bore = response(self.bore, bore_face, "bore mode elimination")?;
-        let exterior = match self.exterior {
-            Some(region) => response(region, outer_face, "exterior mode elimination")?,
-            None => Vec::new(),
+        let (exterior, outer_arc) = match self.exterior {
+            Some(region) => (
+                response(region, outer_face, "exterior mode elimination")?,
+                outer_face.arc_coefficients(m, n).0,
+            ),
+            None => (Vec::new(), Vec::new()),
         };
+        let (bore_arc, bore_sin) = bore_face.arc_coefficients(m, n);
         Ok(ModeTerms {
-            bore_arc: bore_face.arc_coefficients(m, n),
-            outer_arc: outer_face.arc_coefficients(m, n),
+            bore_arc,
+            bore_sin,
+            outer_arc,
             bore,
             exterior,
         })
     }
 }
 
-/// One `theta` mode's contribution: each face's even arc DCT coefficients of
-/// `cos(m theta)`, and each region's face response in its face's axial DCT
-/// basis (axial cells squared, row-major).
+/// One `theta` mode's contribution: each face's arc DCT coefficients of
+/// `cos(m theta)` (the bore face's of `sin(m theta)` too when whole, else
+/// none), and each region's face response in its face's axial DCT basis
+/// (axial cells squared, row-major).
 struct ModeTerms {
     bore_arc: Vec<f64>,
+    bore_sin: Vec<f64>,
     outer_arc: Vec<f64>,
     bore: Vec<f64>,
     exterior: Vec<f64>,
 }
 
-fn bore_terms(term: &ModeTerms) -> (&[f64], &[f64]) {
-    (&term.bore_arc, &term.bore)
+fn bore_terms(term: &ModeTerms) -> (&[f64], &[f64], &[f64]) {
+    (&term.bore_arc, &term.bore_sin, &term.bore)
 }
 
-fn exterior_terms(term: &ModeTerms) -> (&[f64], &[f64]) {
-    (&term.outer_arc, &term.exterior)
+fn exterior_terms(term: &ModeTerms) -> (&[f64], &[f64], &[f64]) {
+    (&term.outer_arc, &[], &term.exterior)
 }
 
 /// `f` over `0..count` in order, on up to `workers` threads.
@@ -1179,41 +1419,23 @@ fn cut_exterior_map(
     dxw: f64,
     workers: usize,
 ) -> Result<Vec<f64>> {
-    let OuterFace {
-        basis,
-        arc,
-        axial,
-        radius,
-    } = *face;
-    let (even, nx, narc) = (basis.even, basis.axial_cells, basis.arc_cells);
+    let OuterFace { basis, arc, .. } = *face;
+    let narc = basis.arc_cells;
     let edge = arc.len() - 1;
     let (widths, centres) = folded_cells(n_theta, dth, narc % 2 == 1, edge, arc[edge]);
+    let links: Vec<(usize, usize, f64)> = (0..widths.len() - 1)
+        .map(|i| (i, i + 1, 1.0 / (centres[i + 1] - centres[i])))
+        .collect();
+    let (values, vectors, scale) = theta_modes(&widths, &links)?;
     let n = widths.len();
-    if fs_la::eigen::admit_jacobi_eigh(n).is_err() {
-        return Err(WallWindowError::Invalid(
-            "the exterior's theta cells exceed the dense eigensolver's workspace",
-        ));
-    }
-    // M^(-1/2) K M^(-1/2), whose eigenvectors are M^(1/2) v.
-    let scale: Vec<f64> = widths.iter().map(|&w| 1.0 / det::sqrt(w)).collect();
-    let mut matrix = vec![0.0; n * n];
-    for i in 0..n - 1 {
-        let g = 1.0 / (centres[i + 1] - centres[i]);
-        matrix[i * n + i] += g * scale[i] * scale[i];
-        matrix[(i + 1) * n + i + 1] += g * scale[i + 1] * scale[i + 1];
-        let c = -g * scale[i] * scale[i + 1];
-        matrix[i * n + i + 1] = c;
-        matrix[(i + 1) * n + i] = c;
-    }
-    let (values, vectors) = fs_la::eigen::householder_eigh(&matrix, n);
     // Each face arc cell's folded cell, outward from the mid-plane.
     let folded: Vec<usize> = (0..narc).map(|k| (2 * k).abs_diff(narc - 1) / 2).collect();
     let coefficients: Vec<Vec<f64>> = (0..n)
         .map(|mode| {
-            (0..even)
+            (0..basis.modes)
                 .map(|pe| {
-                    let row = &basis.arc_dct[2 * pe * narc..(2 * pe + 1) * narc];
-                    let v: f64 = row
+                    let v: f64 = basis
+                        .arc_row(pe)
                         .iter()
                         .zip(&folded)
                         .map(|(p, &i)| p * scale[i] * vectors[i * n + mode])
@@ -1223,7 +1445,155 @@ fn cut_exterior_map(
                 .collect()
         })
         .collect();
-    let responses = in_parallel(n, workers, |mode| {
+    let arc_widths: Vec<f64> = folded.iter().map(|&i| arc[i] * dth).collect();
+    modal_exterior_map(region, face, &values, &coefficients, &arc_widths, dxw, workers)
+}
+
+/// The exterior's face map under a whole staircase's outer face, in the
+/// face's whole basis. The exterior's `theta` grid runs around the whole
+/// circle from the window's edge at `theta < 0`: the bore's cells, split
+/// wherever an outer face cell's open interval ends, so that each face cell
+/// is one exterior cell, and where a face stands. Its modes solve
+/// `K v = mu M v` as the folded grid's do, over a ring of links that a face
+/// cuts: the rigid half-plane joins nothing across it. With `v^T M v = 1`
+/// over the whole circle, `v` is the mode as it stands.
+///
+/// # Errors
+/// [`WallWindowError::Invalid`] when the grid exceeds the dense
+/// eigensolver's workspace; [`WallWindowError::Unphysical`] when a face cell
+/// is not one exterior cell; [`WallWindowError::Factor`] when a mode's
+/// elimination fails.
+fn whole_exterior_map(
+    region: &Region,
+    grid: &WholeGrid,
+    face: &OuterFace<'_>,
+    n_theta: usize,
+    dth: f64,
+    dxw: f64,
+    workers: usize,
+) -> Result<Vec<f64>> {
+    let OuterFace { basis, arc, .. } = *face;
+    let start = grid.edges[0];
+    let tolerance = CUT_SNAP * dth;
+    let mut edges: Vec<f64> = (0..=n_theta).map(|k| start + k as f64 * dth).collect();
+    let turn = edges[n_theta] - start;
+    let face_angle = grid.face.map(|f| if f < start { f + turn } else { f });
+    let breaks = grid
+        .outer
+        .iter()
+        .flat_map(|&(_, lo, hi)| [lo, hi])
+        .chain(face_angle);
+    for x in breaks {
+        let at = edges.partition_point(|&e| e < x);
+        let near = |i: usize| edges.get(i).is_some_and(|&e| (e - x).abs() <= tolerance);
+        if !(near(at) || (at > 0 && near(at - 1))) {
+            edges.insert(at, x);
+        }
+    }
+    let nearest = |x: f64| {
+        let at = edges.partition_point(|&e| e < x);
+        [at.saturating_sub(1), at.min(edges.len() - 1)]
+            .into_iter()
+            .min_by(|&p, &q| (edges[p] - x).abs().total_cmp(&(edges[q] - x).abs()))
+            .unwrap_or(at)
+    };
+    let widths: Vec<f64> = edges.windows(2).map(|p| p[1] - p[0]).collect();
+    let centres: Vec<f64> = edges.windows(2).map(|p| 0.5 * (p[0] + p[1])).collect();
+    let n = widths.len();
+    // The ring of links, less the one across the face.
+    let cut = face_angle.map(|f| nearest(f) % n);
+    let links: Vec<(usize, usize, f64)> = (0..n)
+        .filter(|&i| cut != Some((i + 1) % n))
+        .map(|i| {
+            let spacing = if i + 1 < n {
+                centres[i + 1] - centres[i]
+            } else {
+                centres[0] + turn - centres[n - 1]
+            };
+            (i, (i + 1) % n, 1.0 / spacing)
+        })
+        .collect();
+    let (values, vectors, scale) = theta_modes(&widths, &links)?;
+    let mut cells = Vec::with_capacity(grid.outer.len());
+    for &(_, lo, hi) in &grid.outer {
+        let i = nearest(lo);
+        if !(i < n && (edges[i] - lo).abs() <= tolerance && (edges[i + 1] - hi).abs() <= tolerance) {
+            return Err(WallWindowError::Unphysical(
+                "an outer face cell is not one exterior cell",
+            ));
+        }
+        cells.push(i);
+    }
+    let coefficients: Vec<Vec<f64>> = (0..n)
+        .map(|mode| {
+            (0..basis.modes)
+                .map(|p| {
+                    basis
+                        .arc_row(p)
+                        .iter()
+                        .zip(&cells)
+                        .map(|(r, &i)| r * scale[i] * vectors[i * n + mode])
+                        .sum::<f64>()
+                })
+                .collect()
+        })
+        .collect();
+    let arc_widths: Vec<f64> = arc.iter().map(|&f| f * dth).collect();
+    modal_exterior_map(region, face, &values, &coefficients, &arc_widths, dxw, workers)
+}
+
+/// A `theta` grid's modes: the eigenvalues and eigenvectors (row-major,
+/// one column per mode) of `M^(-1/2) K M^(-1/2)`, `M` the cell `widths` and
+/// `K` the `links` `(cell, cell, g)`, and `M^(-1/2)`'s diagonal, which turns
+/// an eigenvector into its mode `v` with `v^T M v = 1`.
+///
+/// # Errors
+/// [`WallWindowError::Invalid`] when the grid exceeds the dense
+/// eigensolver's workspace.
+fn theta_modes(widths: &[f64], links: &[(usize, usize, f64)]) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+    let n = widths.len();
+    if fs_la::eigen::admit_jacobi_eigh(n).is_err() {
+        return Err(WallWindowError::Invalid(
+            "the exterior's theta cells exceed the dense eigensolver's workspace",
+        ));
+    }
+    let scale: Vec<f64> = widths.iter().map(|&w| 1.0 / det::sqrt(w)).collect();
+    let mut matrix = vec![0.0; n * n];
+    for &(i, j, g) in links {
+        matrix[i * n + i] += g * scale[i] * scale[i];
+        matrix[j * n + j] += g * scale[j] * scale[j];
+        let c = -g * scale[i] * scale[j];
+        matrix[i * n + j] = c;
+        matrix[j * n + i] = c;
+    }
+    let (values, vectors) = fs_la::eigen::householder_eigh(&matrix, n);
+    Ok((values, vectors, scale))
+}
+
+/// The exterior's face map in the face's basis from its `theta` modes:
+/// each mode's eigenvalue `values` and `coefficients` on the face's kept arc
+/// modes, plus each face cell's half-cell drop over its open part, the
+/// cells' `arc_widths` [rad] by the face's axial fractions.
+///
+/// # Errors
+/// [`WallWindowError::Factor`] when a mode's elimination fails.
+fn modal_exterior_map(
+    region: &Region,
+    face: &OuterFace<'_>,
+    values: &[f64],
+    coefficients: &[Vec<f64>],
+    arc_widths: &[f64],
+    dxw: f64,
+    workers: usize,
+) -> Result<Vec<f64>> {
+    let OuterFace {
+        basis,
+        axial,
+        radius,
+        ..
+    } = *face;
+    let (even, nx) = (basis.modes, basis.axial_cells);
+    let responses = in_parallel(values.len(), workers, |mode| {
         region
             .face_response(values[mode].max(0.0))
             .map(|y| congruence(&basis.axial_dct, &y, nx))
@@ -1248,9 +1618,9 @@ fn cut_exterior_map(
         }
     }
     // The half-cell drops, over each cell's open width.
-    let arc_widths: Vec<f64> = folded.iter().map(|&i| arc[i] * dth).collect();
     let axial_widths: Vec<f64> = axial.iter().map(|&f| f * dxw).collect();
-    let arc_drop = inverse_widths(&basis.arc_dct, 2, even, &arc_widths);
+    let stride = if basis.whole { 1 } else { 2 };
+    let arc_drop = inverse_widths(&basis.arc_dct, stride, even, arc_widths);
     let axial_drop = inverse_widths(&basis.axial_dct, 1, nx, &axial_widths);
     let drop = region.half_cell / radius;
     for pe in 0..even {
@@ -1428,6 +1798,109 @@ fn cheek_fractions(phi: f64, dth: f64, arc_cells: usize) -> Vec<f64> {
         .collect()
 }
 
+/// How far either side of the mid-plane a layer's cut reaches [rad], from
+/// the open fractions of its half arc cells.
+fn cut_reach(arc: &[f64], arc_cells: usize, dth: f64) -> f64 {
+    let odd = arc_cells % 2 == 1;
+    let last = arc.len() - 1;
+    if odd && last == 0 {
+        0.5 * arc[0] * dth
+    } else {
+        (if odd { last as f64 - 0.5 } else { last as f64 } + arc[last]) * dth
+    }
+}
+
+/// A staircase over the window's whole arc. Its columns are the window's
+/// arc cells, each one a cover's edge crosses split there, so that the edge
+/// lies on a column boundary. Each wall layer opens each column over an
+/// interval, and the outer face's cells are the top layer's columns over the
+/// interval open at the outer surface.
+struct WholeGrid {
+    /// Column edges [rad], from the window's edge at `theta < 0`.
+    edges: Vec<f64>,
+    /// The window arc cell, which is the bore face cell, of each column.
+    cell: Vec<usize>,
+    /// Each layer's open interval in each column `(lo, hi)` [rad]; a column
+    /// the layer's cut misses has `hi <= lo`.
+    open: Vec<Vec<(f64, f64)>>,
+    /// The outer face's cells from `theta < 0`: the top layer's column and
+    /// its interval open at the outer surface [rad].
+    outer: Vec<(usize, f64, f64)>,
+    /// Each outer face cell's open interval in `theta` cells.
+    fractions: Vec<f64>,
+    /// The angle a face stands at [rad], if any.
+    face: Option<f64>,
+}
+
+impl WholeGrid {
+    /// `layers`' cuts unfolded onto the window's `arc_cells` cells of `dth`,
+    /// split at `splits`, with the outer surface open over `surface` [rad].
+    /// An end within [`CUT_SNAP`] of a column edge lies on it.
+    fn new(
+        layers: &[Cut],
+        arc_cells: usize,
+        dth: f64,
+        splits: &[f64],
+        surface: (f64, f64),
+        face: Option<f64>,
+    ) -> Self {
+        let start = -0.5 * arc_cells as f64 * dth;
+        let mut edges: Vec<f64> = (0..=arc_cells).map(|k| start + k as f64 * dth).collect();
+        let mut cell: Vec<usize> = (0..arc_cells).collect();
+        let tolerance = CUT_SNAP * dth;
+        for &split in splits {
+            let at = edges.partition_point(|&e| e < split);
+            if at > 0
+                && at < edges.len()
+                && split - edges[at - 1] > tolerance
+                && edges[at] - split > tolerance
+            {
+                edges.insert(at, split);
+                cell.insert(at, cell[at - 1]);
+            }
+        }
+        let snap_edge = |x: f64| {
+            edges
+                .iter()
+                .copied()
+                .find(|&e| (e - x).abs() <= tolerance)
+                .unwrap_or(x)
+        };
+        let columns = edges.len() - 1;
+        let open: Vec<Vec<(f64, f64)>> = layers
+            .iter()
+            .map(|cut| {
+                let reach = cut_reach(&cut.arc, arc_cells, dth);
+                (0..columns)
+                    .map(|c| {
+                        (
+                            snap_edge(edges[c].max(-reach)),
+                            snap_edge(edges[c + 1].min(reach)),
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+        let (lo_s, hi_s) = (snap_edge(surface.0), snap_edge(surface.1));
+        let mut outer = Vec::new();
+        for (c, &(lo, hi)) in open[open.len() - 1].iter().enumerate() {
+            let (lo, hi) = (lo.max(lo_s), hi.min(hi_s));
+            if hi - lo > tolerance {
+                outer.push((c, lo, hi));
+            }
+        }
+        let fractions = outer.iter().map(|&(_, lo, hi)| (hi - lo) / dth).collect();
+        Self {
+            edges,
+            cell,
+            open,
+            outer,
+            fractions,
+            face,
+        }
+    }
+}
+
 /// A staircase channel's geometry and grid.
 struct Staircase<'a> {
     /// The cut of each layer, bore to outer surface.
@@ -1453,15 +1926,32 @@ struct Staircase<'a> {
     /// Conductance from an open face cell to its channel cell's centre, bore
     /// and outer face [m].
     conductance: [f64; 2],
-    /// The half-cell resistance each face map carries on its diagonal, bore
-    /// and exterior [1/m].
-    resistance: [f64; 2],
 }
 
-/// The folded unknowns: each layer's half arc cells by its axial cells, then
-/// the bore face's potentials and, with a free exterior, the outer face's. A
-/// half cell stands for itself and its mirror image, except the mid-plane
-/// cell of an odd arc.
+/// A whole staircase channel's geometry and grid.
+struct WholeStaircase<'a> {
+    /// The cut of each layer, bore to outer surface: the axial fractions.
+    layers: &'a [Cut],
+    /// Columns, their open intervals and the outer face.
+    grid: &'a WholeGrid,
+    /// Layer edge radii, bore to outer surface.
+    edge_r: &'a [f64],
+    /// Layer thickness [m].
+    layer: f64,
+    dth: f64,
+    dxw: f64,
+    /// The bore face (the window's cells) and the outer face.
+    faces: &'a [FaceBasis; 2],
+    /// Conductance from a whole open face cell to its channel cell's centre,
+    /// bore and outer face [m].
+    conductance: [f64; 2],
+}
+
+/// The channel's unknowns: each layer's cells by its axial cells, then the
+/// bore face's potentials and, with a free exterior, the outer face's.
+/// Folded, the cells are the half arc cells, and a half cell stands for
+/// itself and its mirror image, except the mid-plane cell of an odd arc;
+/// whole, they are each layer's open columns.
 struct Channel {
     /// First potential of the bore face and of the outer face.
     faces: [usize; 2],
@@ -1581,14 +2071,14 @@ impl Channel {
         let bottom = &s.layers[0];
         let nwx = bore_face.axial_cells;
         if let Some((edge, open)) = s.cover_edge
-            && edge < bore_face.even
+            && edge < bore_face.modes
         {
             for (j, &fj) in bottom.axial.iter().enumerate().take(nwx) {
                 let g = m(edge) * (bottom.arc[edge] - open) * fj * s.conductance[0];
                 links.push((covered[0] + j, faces[0] + edge * nwx + j, g));
             }
         }
-        for (i, &fi) in arcs[0].iter().enumerate().take(bore_face.even) {
+        for (i, &fi) in arcs[0].iter().enumerate().take(bore_face.modes) {
             for (j, &fj) in bottom.axial.iter().enumerate().take(nwx) {
                 let c = i * bottom.axial.len() + j;
                 links.push((c, faces[0] + i * nwx + j, m(i) * fi * fj * s.conductance[0]));
@@ -1607,6 +2097,108 @@ impl Channel {
                 }
             }
         }
+        Self::from_links(faces, links, ground, size)
+    }
+
+    /// A whole staircase's channel. Each layer's open columns are its cells,
+    /// open over their intervals, and neighbouring cells link across the
+    /// edge they share if both reach it. A link into a cell ends at its open
+    /// interval's centre.
+    fn whole(s: &WholeStaircase<'_>, free: bool) -> Self {
+        let grid = s.grid;
+        let [bore_face, outer_face] = s.faces;
+        // Each layer's open columns and their first unknowns.
+        let mut index: Vec<Vec<Option<usize>>> = Vec::with_capacity(s.layers.len());
+        let mut next = 0;
+        for (cut, open) in s.layers.iter().zip(&grid.open) {
+            let nx = cut.axial.len();
+            index.push(
+                open.iter()
+                    .map(|&(lo, hi)| {
+                        (hi > lo).then(|| {
+                            next += nx;
+                            next - nx
+                        })
+                    })
+                    .collect(),
+            );
+        }
+        let faces = [next, next + bore_face.size()];
+        let size = if free {
+            faces[1] + outer_face.size()
+        } else {
+            faces[1]
+        };
+        let mut links = Vec::new();
+        for (l, cut) in s.layers.iter().enumerate() {
+            let mid = 0.5 * (s.edge_r[l] + s.edge_r[l + 1]);
+            let nx = cut.axial.len();
+            let open = &grid.open[l];
+            for (c, &(lo, hi)) in open.iter().enumerate() {
+                let Some(first) = index[l][c] else { continue };
+                let (width, centre) = (hi - lo, 0.5 * (lo + hi));
+                for (j, &fj) in cut.axial.iter().enumerate() {
+                    let cell = first + j;
+                    if let (Some(&(lo_n, hi_n)), Some(Some(beyond))) =
+                        (open.get(c + 1), index[l].get(c + 1))
+                        && hi >= grid.edges[c + 1]
+                        && lo_n <= grid.edges[c + 1]
+                    {
+                        let spacing = 0.5 * (lo_n + hi_n) - centre;
+                        links.push((cell, beyond + j, s.layer * fj * s.dxw / (mid * spacing)));
+                    }
+                    if let Some(&after) = cut.axial.get(j + 1) {
+                        let g = mid * s.layer * width / (s.dxw * 0.5 * (1.0 + after));
+                        links.push((cell, cell + 1, g));
+                    }
+                    if let (Some(up), Some(Some(above))) =
+                        (s.layers.get(l + 1), index.get(l + 1).map(|row| row[c]))
+                        && let Some(&uj) = up.axial.get(j)
+                    {
+                        let (lo_u, hi_u) = grid.open[l + 1][c];
+                        let overlap = hi.min(hi_u) - lo.max(lo_u);
+                        if overlap > 0.0 {
+                            let g = s.edge_r[l + 1] * overlap * fj.min(uj) * s.dxw / s.layer;
+                            links.push((cell, above + j, g));
+                        }
+                    }
+                }
+            }
+        }
+        // Each bore face cell links to every column over it, each over its
+        // open interval; a release face holds its potential at zero.
+        let bottom = &s.layers[0];
+        let (nwx, dth) = (bore_face.axial_cells, s.dth);
+        for (c, &(lo, hi)) in grid.open[0].iter().enumerate() {
+            let Some(first) = index[0][c] else { continue };
+            for (j, &fj) in bottom.axial.iter().enumerate().take(nwx) {
+                let g = (hi - lo) / dth * fj * s.conductance[0];
+                links.push((first + j, faces[0] + grid.cell[c] * nwx + j, g));
+            }
+        }
+        let top = s.layers.len() - 1;
+        let nx = s.layers[top].axial.len();
+        let mut ground = Vec::new();
+        for (k, &(c, lo, hi)) in grid.outer.iter().enumerate() {
+            let Some(first) = index[top][c] else { continue };
+            for (j, &fj) in s.layers[top].axial.iter().enumerate() {
+                let g = (hi - lo) / dth * fj * s.conductance[1];
+                if free {
+                    links.push((first + j, faces[1] + k * nx + j, g));
+                } else {
+                    ground.push((first + j, g));
+                }
+            }
+        }
+        Self::from_links(faces, links, ground, size)
+    }
+
+    fn from_links(
+        faces: [usize; 2],
+        links: Vec<(usize, usize, f64)>,
+        ground: Vec<(usize, f64)>,
+        size: usize,
+    ) -> Self {
         let mut diagonal = vec![0.0; size];
         for &(p, q, g) in &links {
             diagonal[p] += g;
@@ -1635,25 +2227,27 @@ impl Channel {
     }
 }
 
-/// One face's potentials among the unknowns and their even DCT transform.
+/// One face's potentials among the unknowns and their DCT transform.
 struct FaceLink<'a> {
     basis: &'a FaceBasis,
     /// First unknown of the face.
     start: usize,
-    /// Half arc cells.
+    /// The face's cells ([`FaceBasis::cell_range`]).
     half: usize,
-    /// `m_i P[2 pe][k_i]`, `even x half`: the even arc rows on the half
-    /// cells, times the cells' multiplicities.
+    /// `m_i P[p][k_i]`, `modes x half`: the kept arc rows on the face's
+    /// cells, times the mirror images each stands for.
     arc: Vec<f64>,
 }
 
 impl<'a> FaceLink<'a> {
     fn new(basis: &'a FaceBasis, start: usize) -> Self {
-        let (n, half) = (basis.arc_cells, basis.arc_cells.div_ceil(2));
-        let mut arc = vec![0.0; basis.even * half];
-        for pe in 0..basis.even {
-            for i in 0..half {
-                arc[pe * half + i] = multiplicity(n, i) * basis.arc_dct[2 * pe * n + n / 2 + i];
+        let range = basis.cell_range();
+        let half = range.len();
+        let mut arc = vec![0.0; basis.modes * half];
+        for pe in 0..basis.modes {
+            let row = &basis.arc_row(pe)[range.clone()];
+            for (i, &r) in row.iter().enumerate() {
+                arc[pe * half + i] = basis.weight(i) * r;
             }
         }
         Self {
@@ -1664,9 +2258,9 @@ impl<'a> FaceLink<'a> {
         }
     }
 
-    /// The face cells' potentials in the face's even basis.
+    /// The face cells' potentials in the face's basis.
     fn to_modes(&self, u: &[f64]) -> Vec<f64> {
-        let (even, nx) = (self.basis.even, self.basis.axial_cells);
+        let (even, nx) = (self.basis.modes, self.basis.axial_cells);
         let cells = &u[self.start..self.start + self.half * nx];
         let mut arc = vec![0.0; even * nx];
         for pe in 0..even {
@@ -1693,10 +2287,10 @@ impl<'a> FaceLink<'a> {
         modes
     }
 
-    /// Add the folded cell values of `modes` (the transpose of
-    /// [`Self::to_modes`]) to the face cells of `y`.
+    /// Add the cell values of `modes` (the transpose of [`Self::to_modes`])
+    /// to the face cells of `y`.
     fn add_from_modes(&self, modes: &[f64], y: &mut [f64]) {
-        let (even, nx) = (self.basis.even, self.basis.axial_cells);
+        let (even, nx) = (self.basis.modes, self.basis.axial_cells);
         let mut arc = vec![0.0; even * nx];
         for pe in 0..even {
             let row = &mut arc[pe * nx..(pe + 1) * nx];
@@ -1777,32 +2371,35 @@ impl FaceLoad {
     }
 }
 
-/// Solve a staircase channel with its face potentials by Jacobi-
-/// preconditioned conjugate gradients over the folded unknowns.
+/// Solve a staircase `channel` with its face potentials by Jacobi-
+/// preconditioned conjugate gradients over its unknowns: the faces' bases,
+/// each face map's half-cell `resistance` [1/m], and the open fractions of
+/// the outer face's arc and axial cells.
 fn staircase_channel(
-    s: &Staircase<'_>,
+    channel: &Channel,
+    faces: &[FaceBasis; 2],
+    resistance: [f64; 2],
+    outer_open: (&[f64], &[f64]),
     bore_map: &[f64],
     exterior_map: Option<&[f64]>,
     options: &WallWindowOptions,
 ) -> Result<Solved> {
-    let channel = Channel::new(s, exterior_map.is_some());
     let n = channel.diagonal.len();
-    let [bore_face, outer_face] = s.faces;
+    let [bore_face, outer_face] = faces;
     // Each face with its half-cell resistance and, if its cells are cut, the
-    // open fractions of its half arc and axial cells.
+    // open fractions of its arc and axial cells.
     let mut faces = vec![(
         FaceLink::new(bore_face, channel.faces[0]),
         FaceLoad::new(bore_map, bore_face.size(), "bore face map")?,
-        s.resistance[0],
+        resistance[0],
         None,
     )];
     if let Some(map) = exterior_map {
-        let top = &s.layers[s.layers.len() - 1];
         faces.push((
             FaceLink::new(outer_face, channel.faces[1]),
             FaceLoad::new(map, outer_face.size(), "exterior face map")?,
-            s.resistance[1],
-            Some((s.outer, top.axial.as_slice())),
+            resistance[1],
+            Some(outer_open),
         ));
     }
     let apply = |u: &[f64], y: &mut [f64]| {
@@ -1822,13 +2419,13 @@ fn staircase_channel(
     let (bore, bore_load, ..) = &faces[0];
     bore.add_from_modes(&bore_load.apply(&uniform), &mut rhs);
     // A face map is at least its cells' half-cell drops, each over the cell's
-    // open part, so its inverse's diagonal on a half cell is at most the
-    // cell's multiplicity over its own drop.
+    // open part, so its inverse's diagonal on a cell is at most the mirror
+    // images it stands for over its own drop.
     let mut jacobi = channel.diagonal.clone();
     for (link, _, resistance, open) in &faces {
         let nx = link.basis.axial_cells;
         for i in 0..link.half {
-            let g = multiplicity(link.basis.arc_cells, i) / resistance;
+            let g = link.basis.weight(i) / resistance;
             for (j, v) in jacobi[link.start + i * nx..link.start + (i + 1) * nx]
                 .iter_mut()
                 .enumerate()
@@ -1884,15 +2481,17 @@ fn staircase_channel(
             let modes = load.apply(&top.to_modes(&u));
             (
                 det::sqrt(outer_cells as f64) * modes[0],
-                outer_face.half_cells(&modes),
+                outer_face.cells(&modes),
             )
         }
         None => {
-            // A ground link carries its half cell and its mirror image.
+            // A folded ground link carries its half cell and its mirror image.
             let nx = outer_face.axial_cells;
-            let cells = channel.ground.iter().enumerate().map(|(k, &(c, g))| {
-                g * u[c] / multiplicity(outer_face.arc_cells, k / nx)
-            });
+            let cells = channel
+                .ground
+                .iter()
+                .enumerate()
+                .map(|(k, &(c, g))| g * u[c] / outer_face.weight(k / nx));
             (
                 channel.ground.iter().map(|&(c, g)| g * u[c]).sum(),
                 cells.collect(),

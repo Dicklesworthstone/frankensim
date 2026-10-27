@@ -128,7 +128,7 @@ outlet 38 -0.0446073 0
 mouth_aperture rectangle 0.010 0.012
 mouth_radiation -0.6384936 0 4 4
 mouth_reaction window-cylinder
-window embouchure 16 0.0098740 0.0118488 0.0043065
+window embouchure 16 0.0098740 0.0118488 0.0043065 lip one-sided face 0.0018
 controls 4096 100000
 gesture
 frankensim-gesture-schedule-v1
