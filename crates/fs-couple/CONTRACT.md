@@ -6769,3 +6769,42 @@ temperature feedback, continuation, material substitution and late rollback.
 The new binding pins coefficient claim identities before evolution. `SingleClaimOnly` requires globally unique claims for every required coefficient and becomes an explicit pin set; ambiguous/observation-preferred selection requires caller-supplied pins. Source validity crossing cannot silently choose another claim, including within implicit endpoint iterations. The legacy directly resolved scalar-rate path is unchanged. Existing explicit, scalar/coupled implicit, subcycled, piston, species-flow and electrical/thermal consumers use the same channel evaluator. Formation energy is never credited again as heat; source/range/cancellation refusal publishes no proposed physical state. Positive rates that underflow/overflow refuse rather than become zero or infinity.
 
 Focused tests in `cavity_phs::piston::reactive::tests::arrhenius` cover independent dimensional rate scaling, first-/second-order concentration conversion and reverse equilibrium, normalization invariance, actual material-piston motion and energy, implicit endpoint temperature feedback, and bad-unit/range/source/cancellation rollback including disjoint source domains. Coefficients are synthetic. This slice does not supply a validated fuel mechanism, third-body/falloff/surface chemistry, flame/shock model, or measured engine/ignition prediction. Program anchor: `frankensim-ext-gas-chemistry-ladder-paqh`, remains open.
+
+### Spatial conductor, transient circuit storage, and finite heat
+
+`circuit_enthalpy::conduction::circuit` connects a source-resolved planar
+conductor to an original resistor slot in the bounded native Kirchhoff graph.
+The complete positive/negative electrodes follow the branch orientation. The
+native spatial operator supplies the resistance; the original circuit descriptor
+advances capacitor charge and inductor flux. At each proposed thermal endpoint,
+the existing material resolver refreshes conductivity from the same retained
+sources, the descriptor restarts from the accepted electrical storage, and its
+actual midpoint voltage drives the native spatial E/J field.
+
+Every triangle retains its full-volume thermal receiver. Every other graph
+resistor must name exactly one active receiving cell. The existing enthalpy
+candidate owns the common nonlinear residual and publication. Field terminal
+work is internal to this boundary; only the native circuit ports supply external
+electrical work. Independent checks compare field/circuit current, local and
+graph Joule heat, native dissipation, electrical storage, and the combined
+thermal/electrical balance. Missing, duplicate, foreign, or double-counted heat
+routes refuse. Initial source snapshots and electrical/thermal clocks must agree.
+Cancellation or any late refusal leaves all accepted fields, charges, fluxes,
+source selections, and thermal stores unchanged.
+
+This rung represents one heterogeneous two-electrode body in a bounded graph.
+It holds geometry, solid density, circuit topology, C/L values, other graph
+resistances, and source-port inputs fixed over the interval. Electrical midpoint
+stepping with endpoint material coefficients and backward-Euler heat is generally
+first-order as a coupled method; energy admission is not a discretization-error
+bound. It does not add conductor induction/displacement current, moving geometry,
+phase transitions, contact resistance, or thermoelectric transport.
+
+The added `tests/conduction_enthalpy/circuit.rs` regressions use independent RC
+and RL decay formulae, layered local heating, a nonlinear scalar temperature/
+resistance balance, an external source with another heat-producing resistor,
+source/charge continuation, and refusal/retry checks (G1/G3/G4). These tests were
+authored and source-reviewed; Rust parsing/format checks passed. They were not
+executed in the implementation environment because the workspace disk was full
+and DSR/RCH were unavailable. No runtime conformance or empirical calibration
+claim follows from their presence.

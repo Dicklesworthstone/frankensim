@@ -164,9 +164,9 @@ fn positive(x: f64) -> bool { x.is_finite() && x > 0.0 }
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), MaterialCircuitError> {
     if cancelled() { Err(MaterialCircuitError::Cancelled) } else { Ok(()) }
 }
-fn bind(graph: &CircuitGraph, mut sources: Vec<MaterialResistor>, contacts: &[SeriesElectricalContact])
-    -> Result<(CircuitGraph, Vec<MaterialResistor>, CircuitDae), MaterialCircuitError>
-{
+/// Shared bounded graph/storage admission for lumped and spatial conductors.
+/// Returns resistor count; the native circuit owner still admits all topology.
+pub(crate) fn admit_graph(graph: &CircuitGraph) -> Result<usize, MaterialCircuitError> {
     use MaterialCircuitError::Invalid;
     if graph.node_count > MAX_MATERIAL_CIRCUIT_NODES
         || graph.branches.len() > MAX_MATERIAL_CIRCUIT_BRANCHES
@@ -198,6 +198,14 @@ fn bind(graph: &CircuitGraph, mut sources: Vec<MaterialResistor>, contacts: &[Se
     if n_l + 2*n_c + graph.node_count.saturating_sub(1) + n_v + graph.transformers.len() > MAX_STATES {
         return Err(Invalid("circuit exceeds bounded descriptor state capacity"));
     }
+    Ok(n_r)
+}
+
+fn bind(graph: &CircuitGraph, mut sources: Vec<MaterialResistor>, contacts: &[SeriesElectricalContact])
+    -> Result<(CircuitGraph, Vec<MaterialResistor>, CircuitDae), MaterialCircuitError>
+{
+    use MaterialCircuitError::Invalid;
+    let n_r = admit_graph(graph)?;
     if sources.len() != n_r { return Err(Invalid("every resistor requires exactly one material binding")); }
     sources.sort_by_key(|s| s.branch);
     let mut lowered = graph.clone();
@@ -213,7 +221,7 @@ fn bind(graph: &CircuitGraph, mut sources: Vec<MaterialResistor>, contacts: &[Se
     let dae = assemble_circuit(&lowered)?;
     Ok((lowered, sources, dae))
 }
-fn extended(dae: &CircuitDae, fluxes: &[f64], charges: &[f64], inputs: &[f64])
+pub(crate) fn extended(dae: &CircuitDae, fluxes: &[f64], charges: &[f64], inputs: &[f64])
     -> Result<Vec<f64>, MaterialCircuitError>
 {
     if fluxes.len() != dae.flux_index.len() || charges.len() != dae.charge_index.len()

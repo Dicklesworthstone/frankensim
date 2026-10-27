@@ -5,6 +5,9 @@
 //! backward-Euler enthalpy residual. No uniform-resistor approximation, second
 //! heat integrator, or independent material-name lookup is introduced.
 
+/// Spatial conductor terminals coupled to native circuit storage and finite heat.
+pub mod circuit;
+
 use super::{
     CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, DrivenCoefficients,
     DriverAccount, ThermalDriver, cell_driver_candidate, finite,

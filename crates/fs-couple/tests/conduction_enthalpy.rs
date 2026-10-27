@@ -1024,3 +1024,6 @@ fn invalid_current_electrodes_and_late_cancellation_return_no_partial_state() {
     near(thermal.temperature_k(CellId(30)).unwrap(), 300.0);
     near(field.conductors()[0].resistivity_ohm_m(), 1.0);
 }
+
+#[path = "conduction_enthalpy/circuit.rs"]
+mod circuit;
