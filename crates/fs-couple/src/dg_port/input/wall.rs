@@ -23,6 +23,12 @@ enum WallConstitutiveInput {
         axes: [usize; 2],
         proportional_viscosity_time_property: Option<String>,
     },
+    OrthotropicNormal {
+        axes: [usize; 2],
+        properties: [String; 3],
+        max_dt_over_tau: f64,
+        max_angular_step: f64,
+    },
 }
 
 /// One frozen, uniform solid around the original cylindrical main bore.
@@ -43,6 +49,7 @@ pub struct DgMaterialWallRecord {
     path: String,
     pack: Arc<NormalizedMaterialCardPack>,
     wall: LocalMaterialWall,
+    normal_viscosity_properties: Option<[String; 3]>,
 }
 
 impl DgMaterialWallRecord {
@@ -58,6 +65,11 @@ impl DgMaterialWallRecord {
     pub const fn wall(&self) -> &LocalMaterialWall {
         &self.wall
     }
+    /// Original [D_hh,D_ha,D_aa] source names for independent normal viscosity.
+    /// None retains the older isotropic, elastic or proportional input route.
+    pub fn normal_viscosity_properties(&self) -> Option<[&str; 3]> {
+        self.normal_viscosity_properties.as_ref().map(|names| names.each_ref().map(String::as_str))
+    }
 }
 
 impl DgMaterialWallInput {
@@ -70,7 +82,12 @@ impl DgMaterialWallInput {
     /// kelvin-voigt or maxwell COUNT MAX_DT_OVER_TAU MAX_ANGULAR_STEP E TAU ... .
     /// Orthotropic LOSS is elastic or proportional-kelvin-voigt TIME_PROPERTY;
     /// the source time declares C_viscous=tau*C_elastic, never a fitted loss.
-    /// General directional relaxation and off-axis normal/shear coupling refuse.
+    /// Independent normal viscosity uses
+    /// `normal-kelvin-voigt MAX_DT_OVER_TAU MAX_ANGULAR_STEP HH HA AA`.
+    /// The three named Pa s properties form the supplied symmetric 2-D normal
+    /// tensor, not a 3-D tensor to condense. Free axial stress retains the exact
+    /// resulting Maxwell memory and residual Kelvin resistance. Off-axis
+    /// normal/shear coupling and general anisotropic spectra still refuse.
     pub fn read(
         line: usize,
         fields: &mut SplitAsciiWhitespace<'_>,
@@ -111,14 +128,32 @@ impl DgMaterialWallInput {
             if axes[0] == axes[1] {
                 return Err(bad(line, "orthotropic wall hoop and axial directions must differ"));
             }
-            let proportional_viscosity_time_property = match row.word()? {
-                "elastic" => None,
-                "proportional-kelvin-voigt" => Some(row.word()?.to_owned()),
-                _ => return Err(bad(line, "orthotropic wall loss requires elastic or proportional-kelvin-voigt TIME_PROPERTY")),
-            };
-            LocalMaterialWall::orthotropic_requirements(axes, proportional_viscosity_time_property.as_deref())
-                .map_err(DgSourceError::Physics)?;
-            WallConstitutiveInput::Orthotropic { axes, proportional_viscosity_time_property }
+            match row.word()? {
+                "normal-kelvin-voigt" => {
+                    let max_dt_over_tau = row.positive()?;
+                    let max_angular_step = row.positive()?;
+                    if max_dt_over_tau > 2.0 || max_angular_step > 1.0 {
+                        return Err(bad(line, "normal wall viscosity limits require dt/tau <= 2 and angular step <= 1"));
+                    }
+                    let properties = [row.word()?.to_owned(), row.word()?.to_owned(), row.word()?.to_owned()];
+                    LocalMaterialWall::orthotropic_normal_viscosity_requirements(
+                        axes, properties.each_ref().map(String::as_str),
+                    ).map_err(DgSourceError::Physics)?;
+                    WallConstitutiveInput::OrthotropicNormal {
+                        axes, properties, max_dt_over_tau, max_angular_step,
+                    }
+                }
+                loss => {
+                    let proportional_viscosity_time_property = match loss {
+                        "elastic" => None,
+                        "proportional-kelvin-voigt" => Some(row.word()?.to_owned()),
+                        _ => return Err(bad(line, "orthotropic wall loss requires elastic, proportional-kelvin-voigt or normal-kelvin-voigt with explicit source properties")),
+                    };
+                    LocalMaterialWall::orthotropic_requirements(axes, proportional_viscosity_time_property.as_deref())
+                        .map_err(DgSourceError::Physics)?;
+                    WallConstitutiveInput::Orthotropic { axes, proportional_viscosity_time_property }
+                }
+            }
         } else {
             WallConstitutiveInput::Isotropic(
                 WallMaterialLossSource::read(row.fields).map_err(|what| bad(line, what))?,
@@ -156,12 +191,20 @@ impl DgMaterialWallInput {
             .with("T", self.temperature_k)
             .and_then(|point| point.with("omega", self.angular_frequency_rad_s))
             .map_err(|_| bad(self.line, "invalid DG wall material query"))?;
+        let normal_viscosity_properties = match &self.constitutive {
+            WallConstitutiveInput::OrthotropicNormal { properties, .. } => Some(properties.clone()),
+            _ => None,
+        };
         let requirements = match &self.constitutive {
             WallConstitutiveInput::Isotropic(loss) => loss.requirements()
                 .map_err(|source| DgSourceError::Material { line: self.line, source })?,
             WallConstitutiveInput::Orthotropic { axes, proportional_viscosity_time_property } =>
                 LocalMaterialWall::orthotropic_requirements(*axes, proportional_viscosity_time_property.as_deref())
                     .map_err(DgSourceError::Physics)?,
+            WallConstitutiveInput::OrthotropicNormal { axes, properties, .. } =>
+                LocalMaterialWall::orthotropic_normal_viscosity_requirements(
+                    *axes, properties.each_ref().map(String::as_str),
+                ).map_err(DgSourceError::Physics)?,
         };
         let material = resolve_material_state_point(pack.card(), &point, &requirements,
             MaterialPropertySelection::SingleClaimOnly)
@@ -174,8 +217,15 @@ impl DgMaterialWallInput {
             WallConstitutiveInput::Orthotropic { axes, proportional_viscosity_time_property } =>
                 LocalMaterialWall::new_orthotropic(material, self.thickness_m, self.axial,
                     axes, proportional_viscosity_time_property.as_deref(), self.band_hz),
+            WallConstitutiveInput::OrthotropicNormal {
+                axes, properties, max_dt_over_tau, max_angular_step,
+            } => LocalMaterialWall::new_orthotropic_normal_kelvin_voigt(
+                material, self.thickness_m, self.axial, axes,
+                properties.each_ref().map(String::as_str), self.band_hz,
+                max_dt_over_tau, max_angular_step,
+            ),
         }.map_err(DgSourceError::Physics)?;
         checkpoint(gate, self.line)?;
-        Ok(DgMaterialWallRecord { path: self.path, pack, wall })
+        Ok(DgMaterialWallRecord { path: self.path, pack, wall, normal_viscosity_properties })
     }
 }

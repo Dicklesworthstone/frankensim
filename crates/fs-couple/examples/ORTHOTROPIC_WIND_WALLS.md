@@ -20,13 +20,14 @@ incremental axial strain). `HOOP_AXIS` and `AXIAL_AXIS` are distinct one-based
 principal material directions in `1..=3`. These directions follow the **local
 cylindrical texture**, not one fixed Cartesian grain frame.
 
-`LOSS` is either `elastic` or `proportional-kelvin-voigt TIME_PROPERTY`. The latter
+`LOSS` may be `elastic`, `proportional-kelvin-voigt TIME_PROPERTY`, or the
+independent normal-viscosity declaration below. The proportional form
 explicitly declares the normal-plane law `C_viscous = tau * C_elastic`, with a
 nonnegative source property `tau` in seconds. A material name never supplies
-this property or substitutes an empirical decay coefficient. Nonproportional
-anisotropic viscosity and Maxwell spectra are not supported by this declaration;
-they refuse rather than acquire a scalar approximation. The original isotropic
-elastic, Kelvin--Voigt and Maxwell declarations remain unchanged.
+this property or substitutes an empirical decay coefficient. General anisotropic
+Maxwell spectra and full 3-D viscous condensation are not supported by this
+declaration; they refuse rather than acquire a scalar approximation. The original
+isotropic elastic, Kelvin--Voigt and Maxwell declarations remain unchanged.
 
 For the small synthetic tube in `flue-dg.performance`, an illustrative declaration
 is:
@@ -71,6 +72,53 @@ energy and loss. Its gas field and viscothermal histories remain separate and
 unchanged. A direction or source substitution changes the actual operator and
 pressure output, without retuning or changing the PCM scale.
 
+## Independent normal-plane viscosity
+
+For a material with a supplied two-dimensional normal-plane law
+`sigma = C * strain + D * strain_rate`, select:
+
+```text
+dg_wall orthotropic wall.fsmcdpk 293.15 1000 0.00002 stress-free 50 2000 1 2 normal-kelvin-voigt 1 0.8 wall_eta_hh wall_eta_ha wall_eta_aa
+```
+
+The three properties are **stiffness-viscosity matrix entries** `D_hh`, `D_ha`
+and `D_aa`, in Pa s, in the ordered local hoop/axial frame. They are not
+uniaxial Young viscosities. The cross entry can be negative. The whole symmetric
+2-by-2 D matrix must be positive semidefinite; exact zero and rank-deficient
+laws are admitted, but negative coefficients are never clipped. Reversing the
+source axes requires assigning the viscosity properties to that new frame too.
+
+The two numerical limits before the names retain the shared wall source
+contract: `0 < MAX_DT_OVER_TAU <= 2` and `0 < MAX_ANGULAR_STEP <= 1`. The exact DG
+exponential does not apply a midpoint step to the generated relaxation. Its
+complete-state cap, accuracy admission and nonlinear source clock still apply.
+
+Fixed axial strain uses `C_hh + s*D_hh`. Free axial stress requires the **whole
+constitutive Schur complement**, not separate condensation of C and D:
+
+```text
+M(s) = C_hh + s*D_hh - (C_ha + s*D_ha)^2 / (C_aa + s*D_aa)
+     = E_h + eta*s + delta_E*s*tau / (1 + s*tau)
+eta = D_hh - D_ha^2 / D_aa
+tau = D_aa / C_aa
+delta_E = C_aa * (C_ha/C_aa - D_ha/D_aa)^2
+```
+
+The native Maxwell state carries this induced axial memory, while the base wall
+retains residual Kelvin resistance. Both contribute to the same DG pressure,
+energy and dissipation. A zero `D_aa` requires zero `D_ha` and has no axial memory;
+proportional coupling has zero induced strength. No spectrum is fitted. Existing
+gas viscothermal states remain independent. The source record retains the
+original three names (`normal_viscosity_properties()`), pack and property
+receipts. The existing sidecar records the realized Maxwell arm when present;
+its `loss: maxwell` label identifies that representation, not a new source pack.
+
+This declaration supplies an already two-dimensional normal constitutive law.
+It does **not** take an arbitrary 3-D viscous tensor and independently eliminate
+radial stress. Generated memory cannot use the live source-pair rebind API:
+there is no direct original modulus/time property pair to identify that history.
+It is cold-bound at the authored state, like the other native wind inputs.
+
 ## Regional sources and Instrument Lab
 
 Each `dg_wall_region X_BEGIN X_END` row accepts the same `orthotropic ...`
@@ -112,16 +160,20 @@ This addition does not by itself qualify a wooden clarinet, oboe or flute as a
 measured instrument. Complete specimen data, applicable geometry, spatial/time
 refinement and recording comparisons remain separate requirements.
 
-Focused regressions are in `tests/orthotropic_duct_wall.rs` and
-`tests/orthotropic_wind_input.rs`: reciprocal compliance, the isotropic limit,
+Focused regressions are in `tests/orthotropic_duct_wall.rs`,
+`tests/normal_viscous_duct_wall.rs` and `tests/orthotropic_wind_input.rs`: reciprocal compliance, the isotropic limit,
 loss, source refusals, gas/solid pressure and energy, both native source families,
-regional orientations, exact PCM and attached-source parity. Run them with the
-repository's pinned build environment:
+regional orientations, exact PCM and attached-source parity. The independent
+normal-viscosity cases additionally compare the full two-strain dynamics,
+stored energy and dissipation with the native condensed history, then exercise
+both wind loaders and regional memory support. Run them with the repository's
+pinned build environment:
 
 ```sh
-cargo test -p fs-couple --test orthotropic_duct_wall --test orthotropic_wind_input
+cargo test -p fs-couple --test orthotropic_duct_wall --test normal_viscous_duct_wall --test orthotropic_wind_input
 ```
 
 At initial publication these Rust tests have not been executed in the editing
 environment, which lacks a Rust toolchain. Independent numerical matrix-inversion
-checks validate the reduction algebra, not compilation or instrument realism.
+and full two-strain time-domain checks validate the reduction algebra, not
+compilation, native renderer execution or instrument realism.

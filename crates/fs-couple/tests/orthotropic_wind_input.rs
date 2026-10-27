@@ -223,3 +223,6 @@ fn native_cli_and_attached_source_preserve_physical_pcm_and_directional_metadata
     }
     assert_eq!(receipts[0], receipts[1]);
 }
+
+#[path = "orthotropic_wind_input/normal.rs"]
+mod normal;
