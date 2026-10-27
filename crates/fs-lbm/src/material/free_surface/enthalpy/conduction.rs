@@ -742,7 +742,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         .0;
         let electrical = self.electrical.as_ref().map(|core| {
             core.admit(&self.flow.lattice, &self.states, gate)?;
-            electrical::ElectricalTimeline::new(core, &cell_id)
+            electrical::ElectricalTimeline::new(core, &cell_id, &self.flow)
         }).transpose()?;
         let rheology = self.rheology_model();
         let mut rheology_stress = BTreeMap::new();
@@ -792,6 +792,8 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             thermal.advance_observed(&observer, duration, config, || checkpoint(gate))?;
         let electrical_report = observer.electrical.as_ref()
             .map(|current| current.report(controls.energy_tolerance_j)).transpose()?;
+        let electrical_forces = observer.electrical.as_ref()
+            .map(|current| current.average_forces(&self.flow.scaling)).transpose()?.flatten();
         let joule_heat = electrical_report.as_ref().map_or(0.0, |current| current.joule_heat_j);
         let mut finite_gas_report = observer.finite_atmosphere.as_ref()
             .map(|gas| gas.balance(observer.environment_heat_j, &audit, controls.energy_tolerance_j))
@@ -849,6 +851,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             viscous_heat,
             body_heat,
             absolute_heat + body_heat.abs() + observer.environment_absolute_heat_j + joule_heat,
+            electrical_forces.as_ref(),
             gate,
         )?;
         if let Some(report) = &mut finite_gas_report {

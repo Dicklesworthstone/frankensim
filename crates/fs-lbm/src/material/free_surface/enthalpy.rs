@@ -120,6 +120,10 @@ pub struct FreeSurfaceEnthalpyReport {
     pub transport_iterations: usize,
     /// Count of native nonzero mass routes, including conversion redistribution.
     pub mass_routes: usize,
+    /// Actual native motion on an imposed-B core, separately observed from
+    /// the electrical solver's sampled Lorentz work. No kinetic defect is heat.
+    #[cfg(feature = "enthalpy-coupling")]
+    pub magnetic_motion: Option<conduction::electrical::FreeSurfaceMagneticMotion>,
 }
 
 /// Typed source, native-flow, numerical or physical-domain refusal.
@@ -449,7 +453,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         gate: &CancelGate,
     ) -> Result<FreeSurfaceEnthalpyReport, Error> {
         let (heated, external, absolute_heat) = self.prepare_heat(heat, gate)?;
-        self.advance_prepared_enthalpy(heated, external, 0.0, 0.0, absolute_heat, gate)
+        self.advance_prepared_enthalpy(heated, external, 0.0, 0.0, absolute_heat, None, gate)
     }
 
     fn prepare_heat(
@@ -503,6 +507,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
     // Both external heating and source-conductivity exchange feed the exact
     // same native collision/advection/acceptance owner. No thermal stage can
     // publish before this complete mass and energy candidate succeeds.
+    #[allow(clippy::too_many_arguments)]
     fn advance_prepared_enthalpy(
         &mut self,
         heated: BTreeMap<MassLocation3, f64>,
@@ -510,13 +515,35 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         viscous: f64,
         body_heat: f64,
         absolute_heat: f64,
+        additional_forces: Option<&BTreeMap<MassLocation3, [f64; 3]>>,
         gate: &CancelGate,
     ) -> Result<FreeSurfaceEnthalpyReport, Error> {
         poll(gate)?;
         let masses = self.flow.lattice.mass_snapshot();
         let mass_unit = self.flow.scaling.mass_unit_kg();
         let before = total(&masses, &self.h, mass_unit)?;
-        let resolved = self.resolve_states(&self.flow.lattice, &heated, &masses, gate)?;
+        let mut resolved = self.resolve_states(&self.flow.lattice, &heated, &masses, gate)?;
+        if let Some(additional) = additional_forces {
+            let reference = self.flow.lattice.reference_force();
+            let forces = resolved.forces.get_or_insert_with(|| masses.keys().filter_map(|location| {
+                if let MassLocation3::Cell(key, lane) = *location { Some(((key, lane), reference)) }
+                else { None }
+            }).collect());
+            for (&location, extra) in additional {
+                poll(gate)?;
+                let MassLocation3::Cell(key, lane) = location else {
+                    return Err(Error::Invalid("unlocated carry cannot receive a body force"));
+                };
+                let force = forces.get_mut(&(key, lane))
+                    .ok_or(Error::Invalid("additional body force requires an accepted wet cell"))?;
+                for axis in 0..3 {
+                    force[axis] += extra[axis];
+                    if !force[axis].is_finite() {
+                        return Err(Error::Invalid("combined native body force is not finite"));
+                    }
+                }
+            }
+        }
         // Native activation/conversion and the companion solve operate on one
         // private candidate. No accepted populations, carry or source state move
         // until every endpoint query and conservation gate has passed.
@@ -537,11 +564,22 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         if let Some(core) = &self.electrical {
             core.admit(&lattice, &endpoint.states, gate)?;
         }
-        if let Some(forces) = endpoint.forces {
+        let endpoint_forces = endpoint.forces.or_else(|| additional_forces.map(|_| {
+            let reference = lattice.reference_force();
+            trace.after.keys().filter_map(|location| {
+                if let MassLocation3::Cell(key, lane) = *location { Some(((key, lane), reference)) }
+                else { None }
+            }).collect()
+        }));
+        if let Some(forces) = endpoint_forces {
             // This changes the Guo population frame without adding an impulse.
             // The accepted force now belongs to the accepted advected h state.
             lattice.rebind_force_field(forces, gate)?;
         }
+        #[cfg(feature = "enthalpy-coupling")]
+        let magnetic_motion = self.electrical.as_ref().map(|core|
+            core.admit_motion(&self.flow.lattice, &lattice, &self.flow.scaling, gate)
+        ).transpose()?.flatten();
         let accepted_wetting = match prepared_wetting {
             Some(binding) => {
                 let temperatures = wetting::temperatures(
@@ -588,6 +626,8 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             relative_transport_residual: outcome.relative_residual,
             transport_iterations: outcome.iterations,
             mass_routes: trace.routes.len(),
+            #[cfg(feature = "enthalpy-coupling")]
+            magnetic_motion,
         };
         poll(gate)?;
         self.flow.lattice = lattice;

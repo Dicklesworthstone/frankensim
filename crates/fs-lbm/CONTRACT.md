@@ -3102,3 +3102,44 @@ liquid/wall/gas storage, late source/budget refusal and partial geometry/drive
 admission. All five changed Rust files passed syntax parsing, and independent
 scalar recurrences were evaluated. Native compilation/tests were not run:
 Rust/Cargo and DSR/RCH were unavailable in the editing environment.
+
+
+### Imposed-field motional current and Lorentz forcing of moving liquid
+
+`MaterialFreeSurfaceEnthalpy3::with_imposed_magnetic_field` extends the retained
+fully occupied electrical core with a prescribed stationary Cartesian B field.
+It calls the original moving-conductor face operator: the same half-cell
+interpolation produces u cross B voltage and its transpose Lorentz force.
+Accepted native `sample_at` velocity already includes the Guo half-force
+correction; no second correction is added. Temperature/shear-dependent
+conductivity or resistivity remains in the original complete pinned liquid bundle.
+
+Every actual thermal interval deposits native conductor-frame I^2 R once.
+Electrical power and accumulated energy independently satisfy electrode supply
+= Joule heat + signed sampled Lorentz work to the declared W/J tolerances.
+Endpoint current diagnostics deposit neither heat nor impulse. Integrated native
+cell forces become one interval-average load through the original rho0/dx/dt
+scaling and Guo collision; original gravity and source buoyancy remain.
+Endpoint reframing restores the original nonmagnetic force field while preserving
+physical velocity and force-corrected stress, so continuation does not inherit a
+stale magnetic half-force.
+
+The explicit current/thermal/flow split holds accepted velocity during thermal
+current solves. `sampled_lorentz_work_j` is that sampled electrical/mechanical
+exchange, not an exact LBM kinetic balance. `flow.magnetic_motion` separately
+observes actual core control-volume kinetic change and the largest endpoint
+velocity change, including advection, pressure, viscosity and other forces.
+A caller-declared velocity-change threshold refuses excessive lag before the
+liquid/wall/gas transaction commits; it is an error-control observation, not a
+rigorous error bound or balancing heat. Neither kinetic change nor a work
+discrepancy is thermalized.
+
+Scope remains low induction, imposed static B, scalar Ohmic transport, fully
+occupied fixed current geometry and declared current boundaries. No partial-cell
+current closure, magnetic field storage, induction, Hall force, magnetization,
+Maxwell traction or global kinetic-energy closure is claimed. Four focused
+regressions cover motional braking, force reversal, conductivity substitution,
+zero-B parity with original gravity, accepted-state continuation and late
+split-gate rollback. The seven changed Rust files passed Tree-sitter syntax
+parsing, and independent scalar current/force/energy references were executed.
+Native compilation, Cargo tests and rustfmt remain unexecuted in this environment.

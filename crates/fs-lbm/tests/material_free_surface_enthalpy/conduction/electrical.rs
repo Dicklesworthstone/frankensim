@@ -7,6 +7,9 @@ use fs_material::conductor::ElectricalPropertyBasis;
 
 const CORE: [usize; 3] = [1, 3, 3];
 
+#[path = "electrical/magnetic.rs"]
+mod magnetic;
+
 fn electrical_card(
     basis: ElectricalPropertyBasis,
     scale: f64,
@@ -92,6 +95,17 @@ fn with_unbound<R>(
     shear: bool,
     run: impl FnOnce(MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> R,
 ) -> R {
+    with_initial_flow(card, basis, shear, None, [0.0; 3], run)
+}
+
+fn with_initial_flow<R>(
+    card: &MaterialCard,
+    basis: ElectricalPropertyBasis,
+    shear: bool,
+    velocity: Option<[f64; 3]>,
+    gravity: [f64; 3],
+    run: impl FnOnce(MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> R,
+) -> R {
     let material = electrical_bundle(card, basis, shear, 400.0);
     let source = if shear {
         ResolvedLiquidSurfaceState::try_for_shear_rate_evolution_with_capillarity(
@@ -111,18 +125,23 @@ fn with_unbound<R>(
     if !shear {
         for cell in &mut initial { cell.velocity_m_s = [0.0; 3]; }
     }
+    if let Some(velocity) = velocity {
+        for cell in &mut initial { cell.velocity_m_s = velocity; }
+    }
+    let mut native_domain = domain();
+    native_domain.gravity_m_s2 = gravity;
     with_cx(&gate, |cx| {
         let scaling = plan_free_surface_from_material(&source, 0.001, 0.001, 0.1).unwrap();
         let mut liquid = if shear {
             scaling.free_surface3_from_cells_with_rheology(
-                domain(), &initial, &law, &chart, FreeSurfaceEnthalpyControls::default(),
+                native_domain, &initial, &law, &chart, FreeSurfaceEnthalpyControls::default(),
                 RheologySolve {
                     maximum_iterations: 128, relaxation: 0.5,
                     absolute_relaxation_tolerance: 1e-13, relative_relaxation_tolerance: 1e-13,
                 }, |_| 200000.0, cx, &gate,
             )
         } else {
-            scaling.free_surface3_from_cells(domain(), &initial, cx).unwrap()
+            scaling.free_surface3_from_cells(native_domain, &initial, cx).unwrap()
                 .with_enthalpy(&law, &chart, FreeSurfaceEnthalpyControls::default(),
                     |_| 200000.0, &gate)
         }.unwrap();

@@ -143,6 +143,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             viscous,
             0.0,
             absolute_heat + viscous,
+            None,
             gate,
         )?;
         Ok(FreeSurfaceViscousReport { flow, applied })
