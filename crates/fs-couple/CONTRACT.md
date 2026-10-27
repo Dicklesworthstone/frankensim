@@ -706,7 +706,9 @@ The file-driven path also accepts `frankensim-flue-performance-v1`:
 `music_render wind crates/fs-couple/examples/flue.performance OUT.wav --block 512`.
 The fixed-order SI records explicitly supply mechanical/output clocks, the output
 sample window and pascal scale/ceiling, bore and exterior gas, cylinder dimensions
-and prescribed terminal reflection, mouth dimensions, jet card/gain/onset seed,
+and prescribed terminal reflection, mouth dimensions, jet card/gain/onset seed, an
+optional opt-in jet response in place of the gain chain (`jet_response forced-bickley
+SPACING WINDOW` or `jet_transfer nolle-price-2015 CHANNEL CHAMFER_DEPTH_M`, exclusive),
 jet limits, wave memory, fractional phase band/budget, optional viscothermal cells
 and band, receiver position/resolution/band, and control compilation limits. The
 suffix is the existing canonical, typed blowing-pressure gesture schedule.
@@ -2580,7 +2582,49 @@ None.
   its corrected feedback phase; they require a fresh sweep. The card's
   Reynolds band (144-264) does not cover playing pressures (Re ~1500),
   so `claim_check` refuses every claim from this fixture: that boundary
-  is inherited by the flue-gates bead, not papered over.
+  is inherited by the flue-gates bead, not papered over. This chain is
+  the DEFAULT, and its gain is AUTHORED: the cards' gain 90 is about
+  7-18x the forced jet's response at each note's speaking mode (mail
+  7491). It stands until the forced jet passes fg_003, fg_004, fj_001 and
+  gas_direction_amount (ruling 7518, mail 7859, bead pexfp.135.1).
+
+  OPT-IN FORCED JET (`FlueVoice::with_forced_jet`, card row `jet_response
+  forced-bickley SPACING WINDOW`; rulings 7376/7518): the forced Bickley
+  jet's complete causal response replaces the band chain and the authored
+  gain. The labium displacement is `eta_n = sum_k g_k v_(n-k)` of the exit
+  transverse velocity (mouth velocity plus onset seed). `g_k` are the hat
+  weights of one step response integrated by `fs_aeroac::forced_jet` at
+  the station `cut-up / b` and the Reynolds number of the held pressure
+  (the gesture's highest blowing pressure, including a declared source's
+  pressure path). The exit is the Poiseuille slit (`b = 0.4 h`, `U0 =
+  1.5 U`) behind a slit windway attached first; otherwise it is a uniform
+  lip jet (`b = 0.75 h`, `U0 = U`). The time axis follows the actual speed
+  on every sample, `g_0` enters the same-sample mouth solve, and the
+  response is held after its window. Register physics is graded on the
+  production row 0.1 b and 90 b/U0 (`PRODUCTION_SPEC`). Numerical fixtures
+  declare `COARSE_SPEC` 0.25/40, which renders the whistle D5 card within
+  0.3 cents and 0.3 dB of the production row. A process memo retains 32
+  integrated responses keyed by their exact inputs; the integration is
+  deterministic, so reuse is bit-identical.
+  REFUSALS: current-sample feedback beyond the solve's uniqueness bound
+  asks for refinement (a jet that crosses the cut-up and grows within one
+  sample; at 48 kHz over flue 0.1-1 mm, cut-up 0.06-0.8 mm and
+  100-4000 Pa, only the 5.3 b and 10.7 b stations at 4 kPa reach it); a
+  cut-up shorter than one grid cell of the response refuses at attach; a
+  retained history at the slowest admitted jet beyond the declared budget
+  refuses; so do a non-positive reference pressure, the unsteady windway
+  (its jet starts from rest, where this frozen-time response needs
+  unbounded history), a windway attached after it, and the Nolle/Price
+  transfer beside it.
+  NOT CLAIMED: the base jet's own spreading over the cut-up, the labium's
+  hydrodynamic back-reaction, the Reynolds number of attack and release
+  (frozen at the held pressure), and memory beyond the window.
+  Of the four gates of the switch, its fg_004 twin
+  (`fg_004_forced_jet_*`) passes unchanged, but it LANDS HIGH on the three
+  register gates. Their ignored forced-jet twins
+  (`fj_001_forced_jet_*`, `fg_003_forced_jet_*`,
+  `gas_direction_amount_forced_jet.rs`) carry the measured registers. The
+  default switches only when all four pass with their assertions unchanged.
 
   Quasi-steady convection reads mouth velocity at the actual retarded time
   `t_n - tau`: the newest committed history entry is `t_(n-1)`, not `t_n`.

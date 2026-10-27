@@ -123,6 +123,24 @@ scope law, pinned as data and by test).
   (St 0.03662 vs Brown 0.03554, +3.0% inside the ±6% bin; ramp
   hysteresis and 0.0366/0.0458 multi-stability recorded) with the
   exact staging-rig FNV fingerprint as provenance.
+- `forced_jet::{ForcedJetResolution, ForcedJet, JetStepResponse,
+  bickley_step_response, FRONT_MARGIN}` — beads pexfp.135/.138/.321,
+  ruling 7376: the causal response of a planar Bickley jet to a uniform
+  transverse acoustic velocity at a baffled flue exit, integrated in
+  time from the linearised vorticity equation (Thom wall at the exit:
+  the jet leaves undisplaced and parallel; the exact discrete harmonic
+  exterior beyond the lateral band; a downstream wall kept
+  `FRONT_MARGIN` beyond the disturbance front). Units: `b`, `U0`,
+  `b / U0`, `Re = U0 b / nu`. `bickley_step_response` records the
+  centreline displacement at one station for a unit velocity step from
+  rest over the declared window and holds it afterwards; `transfer(w)`
+  is that held response's exact Fourier transform and `hat_weights`
+  the audio-rate convolution weights in seconds for a mouth velocity
+  linear between samples (`g_0` multiplies the current sample, the
+  weights end one sample after the window and sum to the held gain).
+  Refuses non-power-of-two or short boxes (`length < window + 8`), an
+  explicit viscous number `4 dt / (Re dx^2)` above 2, stations outside
+  the box, and non-finite results.
 
 ## Invariants
 
@@ -292,6 +310,37 @@ chemical evolution, acoustic radiation, turbulence-convergence or SPL claim.
    leaked, review-caught); the Rayleigh solver's result is
    documented GUESS-DEPENDENT (any eigenvalue of the symmetry class
    zeroes the mismatch); determinism bitwise.
+14. FORCED JET (`tests/forced_jet.rs`, executed on trj lane q): at
+   station 11 b and Re 600, the step kernel's transfer equals
+   independent harmonic forcing from rest within 0.1 % at w 0.5. At
+   w 1-2, holding the response after window 90 cuts a slowly decaying
+   tail. That costs 2.5-3.9 % (1.2 % at w 3; the test holds w 2 to
+   4 %). At w 2, window 150 halves it, while the harmonic side moves
+   1e-3, and spacing and time step leave it at 3.2-3.8 %;
+   the kernel converges at second order on the ladder dx 0.2/0.1/0.05
+   (window 90 b/U0; change 0.1 -> 0.05 is 0.07-0.11 % at w 0.03-0.16,
+   0.7-1.9 % at w 0.5-1, held gain 14.8625 -> 14.8663 b/U0) and is bit
+   identical at 1 and 5 workers; doubling the box (102.4 -> 204.8 b)
+   or narrowing the band (8 -> 6 b) moves it at most 3.3e-3 / 1.9e-3
+   at w >= 0.06. Inviscid, the downstream wave carries the published
+   sinuous spatial mode at w 0.8 (Sabatini & Bailly 2015,
+   1.449709 - 0.134109i): wavenumber within 0.1 %, growth rate
+   converging from below with the critical-layer resolution (4.4 % low
+   at dx 0.1 with window 125; a dx 0.05 prototype is 1.2 % low). The
+   hat weights for a recorder-like jet (22.5 m/s, 0.4 mm, 44.1 kHz)
+   are 73 causal taps whose current-sample weight is the early
+   `s ~ t` response (0.5 % from half a period) and whose sum is the
+   held gain to 1e-9. SnowySummit's causality admission: the transfer
+   sampled on [0, 10] b/U0 and inverted puts less energy and L1 before
+   time zero than any of the probe's pure-delay controls (5, 10, 15,
+   20 b) on the same grid: energy 1.1e-5 against 4.2e-4 and L1 2.1e-3
+   against 0.15 untapered, 3.0e-9 against 2.6e-6 and 6.8e-5 against
+   0.015 under the 0.25 Gaussian taper (prototype kernels hold the same
+   level over windows 30-150 b/U0). Windows stay at
+   or below ~150 b/U0: beyond ~200 the downstream packet's growth
+   brings FFT round-off into the global Poisson solve and every
+   station blows up at once; from 90 to 200 the transfer moves at most
+   3 % and 4 degrees at w >= 0.04.
 
 ## Error model
 
@@ -302,12 +351,18 @@ eigenvalues.
 ## Determinism class
 
 Deterministic: fs_math::det transcendentals + Dd arithmetic only, no
-platform libm, no RNG.
+platform libm, no RNG. `forced_jet` splits its rows across
+`std::thread::scope` workers; every row of both transforms is computed
+whole by one worker, so the result is bit-identical for every worker
+count (tested at 1 and 5).
 
 ## Cancellation behavior
 
 Synchronous, milliseconds-class. No `Cx` integration (workspace
-`frankensim-ccmn`).
+`frankensim-ccmn`). Exception: `bickley_step_response` is
+seconds-to-minutes class (window 90 b/U0 at dx 0.1: 100-175 s on a
+loaded 8-worker trj; dx 0.2: 52 s) and is not interruptible; callers
+poll their gate before and after it.
 
 ## Unsafe boundary
 
@@ -357,6 +412,11 @@ is the bounce-back parity artifact (executed at rate 1.60: bin 4095 of
 non-overlapping pair averaging annihilates the period-2 line exactly,
 keeps a tone's bin index and Strouhal (record duration unchanged; the
 pipeline Strouhal is halved), refuses odd/short records.
+
+`tests/forced_jet.rs` (5, minutes-class): the published spatial mode
+downstream; step kernel against harmonic forcing; the dx 0.2/0.1/0.05
+ladder and worker-count bits; box and band invariance; hat weights and
+the causality admission against a pure delay (invariant 14).
 
 `tests/aeroac.rs` (11): Wronskian identity; derivative cross-checks;
 fsci-special oracle; small-argument limits; Hankel far-field
@@ -408,3 +468,14 @@ determinism.
 - The Rayleigh oracle is INVISCID (no critical-layer viscous
   correction); exactly-neutral real-c modes are ill-posed for
   shooting and are validated by approach from the unstable side.
+- Forced jet: the base flow is parallel (its own viscous spreading
+  over the window is neglected; the disturbance is viscous); 2-D (no
+  span ends); linear (saturation belongs to the consumer); the exit is
+  a baffle wall (no channel profile development, no chamfer); the
+  labium does not react back on the jet, which runs on freely past
+  the station; the response is held after the window, so content
+  below w ~ 2 pi / window is the held limit, not computed, and the
+  slowly decaying tail the hold cuts costs 2.5-3.9 % at w 1-2 at
+  window 90 (invariant 14); the
+  spatial growth rate is low by the critical-layer resolution (4.4 %
+  at dx 0.1, invariant 14).

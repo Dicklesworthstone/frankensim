@@ -30,9 +30,11 @@ use crate::bernoulli_aperture::radiation::environment::multiport::input::{
 use crate::bernoulli_aperture::radiation::environment::multiport::source::{
     ComputedBaffledInput, ComputedBaffledRecord, MimoSourceInput, MimoSourceRecord,
 };
+use crate::flue_loop::forced_jet::ForcedJetSpec;
 use crate::flue_loop::nolle_jet::{ChannelClass, NolleSpec};
 use crate::flue_loop::window_radiation::{WindowFlux, WindowRadiationLoad, cut_up_piston};
-use crate::flue_loop::{FlueError, FlueGeometry, FlueVoice, network::FlueNetworkSpec};
+use crate::flue_loop::{FlueError, FlueGeometry, FlueVoice};
+use crate::flue_loop::network::{FlueNetworkSpec, FlueSourcePaths};
 use crate::pcm_wav::baffled::CircularOutletReceiver;
 use crate::pcm_wav::baffled::openings::duct::{
     DuctOpening, DuctRadiationSpec, DuctReconstruction,
@@ -44,7 +46,7 @@ use fs_exec::CancelGate;
 use fs_matdb::NormalizedMaterialCardPack;
 use fs_material::gas::GasState;
 use fs_material::gas_species::input::{GasInputError, GasRecord, ThermochemicalSources, read_gas_record};
-use fs_scenario::gesture::GestureSchedule;
+use fs_scenario::gesture::{GestureSchedule, GestureTarget, GestureValue};
 use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 
 mod duct;
@@ -109,6 +111,35 @@ impl core::fmt::Display for FlueInputError {
 }
 impl std::error::Error for FlueInputError {}
 fn bad(line: usize, what: &'static str) -> FlueInputError { FlueInputError::Input { line, what } }
+
+/// Optional `jet_response forced-bickley SPACING WINDOW`; `None` keeps the island's own chain.
+pub(crate) fn read_jet_response(rows: &mut Rows<'_>) -> Result<Option<ForcedJetSpec>, FlueInputError> {
+    if !rows.next_is("jet_response") { return Ok(None); }
+    let mut row = rows.row("jet_response")?;
+    if row.fields.next() != Some("forced-bickley") {
+        return Err(bad(rows.line, "jet_response requires forced-bickley SPACING WINDOW"));
+    }
+    let spec = ForcedJetSpec { spacing: row.scalar()?, window: row.scalar()? };
+    row.end()?;
+    Ok(Some(spec))
+}
+
+/// The held note's pressure: the highest the gesture's blowing tracks reach, the legacy target or
+/// the declared source's pressure path. It sets the Reynolds number of the forced jet's integration.
+pub(crate) fn held_blowing_pressure(schedule: &GestureSchedule, source: Option<&FlueSourcePaths>)
+    -> f64
+{
+    schedule.tracks().iter()
+        .filter(|track| match &track.target {
+            GestureTarget::BlowingPressure => true,
+            GestureTarget::Parameter(path) => source.is_some_and(|paths| *path == paths.pressure),
+            _ => false,
+        })
+        .flat_map(|track| core::iter::once(&track.initial)
+            .chain(track.events.iter().map(|event| &event.value)))
+        .filter_map(|value| match value { GestureValue::PressurePa(p) => Some(*p), _ => None })
+        .fold(0.0f64, f64::max)
+}
 fn poll(gate: &CancelGate) -> Result<(), FlueInputError> {
     if gate.is_requested() { Err(bad(0, "flue source construction cancelled")) } else { Ok(()) }
 }
@@ -165,6 +196,15 @@ impl FlueFilePerformance {
     /// `jet` row replaces the island's receptivity chain by the published Nolle/Price jet transfer
     /// (`flue_loop::nolle_jet`), with the measured phase velocity of the channel class. Omission keeps
     /// the island's own chain and every default result bit-identical.
+    /// Optional `jet_response forced-bickley SPACING WINDOW` in the same place instead replaces that
+    /// chain by the forced Bickley jet's causal response (`flue_loop::forced_jet`). It is integrated
+    /// at grid SPACING [b] over WINDOW [b/U0] at the Reynolds number of the gesture's highest
+    /// blowing pressure; register physics is graded on 0.1 90. The two rows exclude each other.
+    /// The `jet` row's DISPLACEMENT_GAIN is the default chain's authored gain. The cards' 90 is
+    /// about 7-18x the forced jet's response at each note's speaking mode (mail 7491). It stands
+    /// until the forced jet passes fg_003, fg_004, fj_001 and gas_direction_amount (ruling 7518,
+    /// mail 7859), and is
+    /// unused while either jet row is present.
     /// Gains, seed, dimensions, limits, clocks and the pressure phrase are data.
     /// The gesture suffix may also contain one typed `jet-angle` track in radians:
     /// it changes the existing geometric jet split at fixed cut-up and mouth area.
@@ -473,6 +513,11 @@ impl FlueFilePerformance {
             Some(NolleSpec::price_2015(channel, chamfer_depth_m)
                 .map_err(|what| FlueInputError::Physics(FlueError::Invalid { what }))?)
         } else { None };
+        // Optional, by name: the forced Bickley jet's causal response replaces the same chain.
+        let jet_response = read_jet_response(&mut rows)?;
+        if jet_transfer.is_some() && jet_response.is_some() {
+            return Err(bad(rows.line, "jet_transfer and jet_response exclude each other"));
+        }
         let mut row = rows.row("jet_limits")?;
         let minimum_jet_speed_m_s = row.scalar()?;
         let maximum_jet_mach = row.scalar()?;
@@ -606,6 +651,18 @@ impl FlueFilePerformance {
         };
         let voice = match jet_transfer {
             Some(spec) => voice.with_nolle_jet(spec).map_err(FlueInputError::Physics)?,
+            None => voice,
+        };
+        let voice = match jet_response {
+            Some(spec) => {
+                // The integration is one bounded attach-time task between two gate polls.
+                poll(gate)?;
+                let voice = voice.with_forced_jet(spec,
+                    held_blowing_pressure(&schedule, control_source.as_ref()))
+                    .map_err(FlueInputError::Physics)?;
+                poll(gate)?;
+                voice
+            }
             None => voice,
         };
         let voice = match &window {

@@ -6,6 +6,7 @@
 //! logged evidence; the assertions are the falsifiers.
 
 use fs_aeroac::jetcard::{JetCard, mint_tonal_interim_card};
+use fs_couple::flue_loop::forced_jet::PRODUCTION_SPEC;
 use fs_couple::flue_loop::{FlueControl, FlueError, FlueGeometry, FlueRank, FlueVoice};
 use fs_duct::{Duct, Fingering, FingeringTable, HoleState, Segment, Termination};
 use fs_material::gas::{GasSpec, GasState};
@@ -353,6 +354,146 @@ fn fg_003_overblowing_ladder_walks_fundamental_to_octave() {
     );
 }
 
+/// The gate's voice with the opt-in forced jet on the production row (`PRODUCTION_SPEC`),
+/// integrated at the pressure it is held at.
+fn forced_voice(
+    card: &JetCard,
+    geom: FlueGeometry,
+    seed_rel: f64,
+    seed: u64,
+    index: u32,
+    held_pa: f64,
+) -> Result<FlueVoice, FlueError> {
+    FlueVoice::new(
+        Some(card),
+        GAIN,
+        seed_rel,
+        geom,
+        &open_pipe(0.30, BORE_R),
+        &air20(),
+        Termination::UnflangedOpen,
+        RATE,
+        seed,
+        index,
+    )?
+    .with_forced_jet(PRODUCTION_SPEC, held_pa)
+}
+
+/// fg_003 once more under the opt-in forced jet (ruling 7518), with the same assertions. Each row
+/// is a voice built cold at its own held pressure, since the response is integrated at the
+/// Reynolds number of the held pressure and claims no sweep between rows. It fails today and
+/// stays ignored until it passes unchanged; the default switches only then.
+#[test]
+#[ignore = "frankensim-irp-v5-instrument-realism-pexfp.135.1: forced jet lands high: the onset row, 75 Pa, locks 2.00 f1; 110-360 Pa 0.97-1.00, 540-1200 Pa 1.95-1.99, 1800-2700 Pa 2.97-2.99"]
+fn fg_003_forced_jet_overblowing_ladder_walks_fundamental_to_octave() {
+    let card = lip_card();
+    let gas = air20();
+    let f1 = pipe_mode_hz(&gas, 0.30, BORE_R, 1.0);
+    let f2 = pipe_mode_hz(&gas, 0.30, BORE_R, 2.0);
+    let pressures = [
+        10.0, 15.0, 22.0, 33.0, 50.0, 75.0, 110.0, 160.0, 240.0, 360.0, 540.0, 810.0, 1200.0,
+        1800.0, 2700.0,
+    ];
+    let mach_top = (2.0 * pressures[pressures.len() - 1] / gas.density).sqrt() / gas.sound_speed;
+    assert!(
+        mach_top < 0.2,
+        "the sweep stays incompressible: Mach {mach_top}"
+    );
+    let mut map = Vec::new();
+    println!(
+        "FORCED-JET REGIME MAP (blow_pa, U, Re, inside_card, transit_ms, lock_hz, lock/f1, p_rms, eta_rms/b, duty):"
+    );
+    // Each row integrates the production response at its own Reynolds number (minutes each), so
+    // the rows run concurrently; the map is printed in pressure order.
+    let rows: Vec<_> = std::thread::scope(|s| {
+        let rows: Vec<_> = pressures
+            .iter()
+            .map(|&p| {
+                s.spawn(move || {
+                    let geom = geometry(LIP_CUT_UP, 0.0, 0.0);
+                    let mut v = forced_voice(&lip_card(), geom, SEED_REL, 3, 0, p).expect("voice");
+                    let (lock, rms) = settle(&mut v, p, 60);
+                    (p, lock, rms, *v.diagnostics().last().expect("diag"))
+                })
+            })
+            .collect();
+        rows.into_iter()
+            .map(|row| row.join().expect("row"))
+            .collect()
+    });
+    for (p, lock, rms, d) in rows {
+        println!(
+            "{p:.0}\t{:.2}\t{:.0}\t{}\t{:.3}\t{lock:.1}\t{:.3}\t{rms:.3e}\t{:.3}\t{:.3}",
+            d.jet_speed_m_s,
+            d.reynolds,
+            d.inside_card_validity,
+            d.transit_s * 1e3,
+            lock / f1,
+            d.eta_rms_over_b,
+            d.duty_pipe_side
+        );
+        map.push((p, lock, rms));
+    }
+    println!("reference open-open modes f1={f1:.1} f2={f2:.1} (log only)");
+    let oscillating: Vec<&(f64, f64, f64)> = map.iter().filter(|(_, _, rms)| *rms > 1.0).collect();
+    assert!(
+        oscillating.len() >= 3,
+        "the loop must self-sustain at several pressures: {map:?}"
+    );
+    let low = oscillating.first().expect("first");
+    let high = oscillating.last().expect("last");
+    let ratio_low = low.1 / f1;
+    let ratio_high = high.1 / f1;
+    assert!(
+        (0.8..1.25).contains(&ratio_low),
+        "lowest oscillating pressure locks near the fundamental: {ratio_low}"
+    );
+    // The ladder: some higher pressure locks the octave, and the top of
+    // the sweep sits at or above it (a strong jet overblows further).
+    let octave = oscillating
+        .iter()
+        .find(|(p, lock, _)| *p > low.0 && (1.7..2.4).contains(&(lock / f1)))
+        .expect("a higher pressure locks near the octave");
+    println!(
+        "{{\"fixture\":\"fg-003-forced\",\"fundamental_pa\":{},\"octave_pa\":{},\"top_pa\":{},\"top_ratio\":{ratio_high}}}",
+        low.0, octave.0, high.0
+    );
+    assert!(
+        ratio_high >= 1.7,
+        "the top of the sweep stays at or above the octave: {ratio_high}"
+    );
+
+    // SELF-SUSTAINED, not seed-filtered: a limit cycle's amplitude does
+    // not depend on the onset seed level, while a resonant pipe merely
+    // filtering the seed scales with it. Re-run the lowest oscillating
+    // pressure with the seed ten times smaller; the RMS must agree
+    // within 20 percent and the lock must not move.
+    let mut quiet = forced_voice(
+        &card,
+        geometry(LIP_CUT_UP, 0.0, 0.0),
+        SEED_REL / 10.0,
+        3,
+        0,
+        low.0,
+    )
+    .expect("voice");
+    let (lock_quiet, rms_quiet) = settle(&mut quiet, low.0, 60);
+    println!(
+        "{{\"fixture\":\"fg-003-forced\",\"seed_check_pa\":{},\"rms_seeded\":{},\"rms_quiet_seed\":{rms_quiet},\"lock_seeded\":{},\"lock_quiet_seed\":{lock_quiet}}}",
+        low.0, low.2, low.1
+    );
+    assert!(
+        (rms_quiet / low.2 - 1.0).abs() < 0.2,
+        "a limit cycle does not scale with the seed: {} vs {rms_quiet}",
+        low.2
+    );
+    assert!(
+        (lock_quiet / low.1 - 1.0).abs() < 0.05,
+        "the lock does not depend on the seed: {} vs {lock_quiet}",
+        low.1
+    );
+}
+
 /// VOICING: a larger cut-up lengthens the jet transit, so onset needs
 /// more pressure; a labium offset towards the pipe side shifts the duty
 /// of the cut jet. Both logged and asserted in direction only.
@@ -439,6 +580,117 @@ fn fg_004_voicing_gestures_move_onset_and_duty_in_the_expected_direction() {
     let inward = duty(0.0003);
     println!(
         "{{\"fixture\":\"fg-004\",\"duty_centered\":{centered},\"duty_labium_inward\":{inward}}}"
+    );
+    assert!(
+        inward < centered,
+        "moving the labium into the jet cuts less of it onto the pipe side"
+    );
+}
+
+/// fg_004 once more under the opt-in forced jet (ruling 7518; mail 7859 makes it the fourth gate of
+/// the switch), with the same assertions, seeds and voice indices. The onset sweep is one voice held
+/// at the sweep's top pressure, as a card's `jet_response` row holds the gesture's highest blowing
+/// pressure; the lock and duty voices are held at the pressure they run at. The six voices are
+/// independent, so they run concurrently.
+#[test]
+fn fg_004_forced_jet_voicing_gestures_move_onset_and_duty_in_the_expected_direction() {
+    const LAW_BLOW_PA: f64 = 240.0;
+    const ONSET_SWEEP_PA: [f64; 11] = [
+        20.0, 35.0, 50.0, 70.0, 100.0, 140.0, 200.0, 280.0, 400.0, 560.0, 800.0,
+    ];
+    let gas = air20();
+    let f1 = pipe_mode_hz(&gas, 0.30, BORE_R, 1.0);
+    let u_law = (2.0 * LAW_BLOW_PA / gas.density).sqrt();
+    let (cut_short, cut_long) = window_cut_ups(f1, u_law);
+    assert!(
+        cut_long - cut_short >= 2e-3 - 1e-12,
+        "the window holds two distinct cut-ups: {cut_short} {cut_long}"
+    );
+    for w in [cut_short, cut_long] {
+        let st_w = f1 * w / u_law;
+        assert!(
+            (FIRST_REGISTER_WINDOW.0..=FIRST_REGISTER_WINDOW.1).contains(&st_w),
+            "cut-up {w} m sits inside the first-register window: Str_W {st_w}"
+        );
+    }
+    let onset = |cut_up: f64| -> Option<f64> {
+        let top = ONSET_SWEEP_PA[ONSET_SWEEP_PA.len() - 1];
+        let mut v = forced_voice(&lip_card(), geometry(cut_up, 0.0, 0.0), SEED_REL, 4, 0, top)
+            .expect("voice");
+        for &p in &ONSET_SWEEP_PA {
+            let (_, rms) = settle(&mut v, p, 40);
+            if rms > 1.0 {
+                return Some(p);
+            }
+        }
+        None
+    };
+    let lock_at = |cut_up: f64, blow_pa: f64| -> (f64, f64) {
+        let mut v = forced_voice(
+            &lip_card(),
+            geometry(cut_up, 0.0, 0.0),
+            SEED_REL,
+            4,
+            2,
+            blow_pa,
+        )
+        .expect("voice");
+        settle(&mut v, blow_pa, 60)
+    };
+    let duty = |offset: f64| -> f64 {
+        let mut v = forced_voice(
+            &lip_card(),
+            geometry(LIP_CUT_UP, offset, 0.0),
+            SEED_REL,
+            4,
+            1,
+            110.0,
+        )
+        .expect("voice");
+        let _ = settle(&mut v, 110.0, 40);
+        v.diagnostics().last().expect("diag").duty_pipe_side
+    };
+    let (short, long, (lock_short, rms_short), (lock_long, rms_long), centered, inward) =
+        std::thread::scope(|s| {
+            let short = s.spawn(move || onset(cut_short));
+            let long = s.spawn(move || onset(cut_long));
+            let at_short = s.spawn(move || lock_at(cut_short, LAW_BLOW_PA));
+            let at_long = s.spawn(move || lock_at(cut_long, LAW_BLOW_PA));
+            let centered = s.spawn(move || duty(0.0));
+            let inward = s.spawn(move || duty(0.0003));
+            (
+                short.join().expect("onset short"),
+                long.join().expect("onset long"),
+                at_short.join().expect("lock short"),
+                at_long.join().expect("lock long"),
+                centered.join().expect("duty centered"),
+                inward.join().expect("duty inward"),
+            )
+        });
+    println!(
+        "{{\"fixture\":\"fg-004-forced\",\"cut_up_short_m\":{cut_short},\"cut_up_long_m\":{cut_long},\"onset_pa_short\":{short:?},\"onset_pa_long\":{long:?}}}"
+    );
+    println!(
+        "{{\"fixture\":\"fg-004-forced\",\"blow_pa\":{LAW_BLOW_PA},\"lock_hz_short\":{lock_short},\"lock_hz_long\":{lock_long},\"lock_over_f1_short\":{},\"lock_over_f1_long\":{},\"rms_short\":{rms_short},\"rms_long\":{rms_long}}}",
+        lock_short / f1,
+        lock_long / f1
+    );
+    println!(
+        "{{\"fixture\":\"fg-004-forced\",\"duty_centered\":{centered},\"duty_labium_inward\":{inward}}}"
+    );
+    assert!(
+        short.is_some() && long.is_some(),
+        "both cut-ups must reach onset in the sweep"
+    );
+    for (cut_up, rms) in [(cut_short, rms_short), (cut_long, rms_long)] {
+        assert!(
+            rms > 1.0,
+            "cut-up {cut_up} must oscillate at {LAW_BLOW_PA} Pa"
+        );
+    }
+    assert!(
+        lock_long <= lock_short * 1.05,
+        "a longer cut-up (longer transit) locks the same or a lower mode: {lock_short} vs {lock_long}"
     );
     assert!(
         inward < centered,

@@ -27,6 +27,12 @@
 //!   Bickley jet `U = sech^2(y)` — the analytic reference the fs-lbm
 //!   jet runs are validated against. Its own pins are SELF-VERIFIED
 //!   exact eigenmodes (machine-zero ODE residuals re-proven per run).
+//! - [`forced_jet`]: the causal forced response of a planar Bickley jet
+//!   to the acoustic transverse velocity at a flue exit (beads
+//!   pexfp.135/.138/.321): the linearised viscous vorticity dynamics
+//!   integrated in time from a Kutta exit, giving one step response and
+//!   its audio-rate hat weights from mouth velocity to labium
+//!   displacement.
 //! - [`regime`]: recorded 2D CentralMoment tonal-lock landscape (bead
 //!   l011o), the inverse-cascade refusal to catalog those spectra as
 //!   broadband flute noise, a spectral-flatness measurement, and a
@@ -45,6 +51,7 @@
 pub mod bessel;
 pub mod bickley;
 pub mod curle2d;
+pub mod forced_jet;
 pub mod jetcard;
 pub mod jetlab;
 pub mod material;

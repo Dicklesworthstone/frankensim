@@ -366,12 +366,23 @@ the shared `dg_tube` or `dg_bore` declaration and its geometry/gas-field rows,
 `flue WIDTH HEIGHT CUT_UP OFFSET ANGLE MOUTH_LOSS_REL`,
 `windway none|slit LENGTH|unsteady LENGTH TRANSVERSE_CELLS CONVECTION_CELLS`,
 `jet_card tonal-interim|json CANONICAL_CARD`,
-`jet DISPLACEMENT_GAIN SEED_AMPLITUDE VOICE_SEED VOICE_INDEX`,
+`jet DISPLACEMENT_GAIN SEED_AMPLITUDE VOICE_SEED VOICE_INDEX`, an optional
+`jet_response forced-bickley SPACING WINDOW`,
 `jet_limits MIN_SPEED MAX_MACH MAX_HISTORY`, `controls MAX_CONTROLS MAX_WORK`,
 and `observation inlet-pressure` or `observation baffled X Y Z RINGS ANGLES FMAX_HZ`,
 followed by the existing canonical `gesture` suffix. Pressure and optional jet-angle tracks retain their existing
 physical units and interpolation. The actual DG inlet supplies mouth bore area,
 density, viscosity and sound speed; there is no second authored inlet medium.
+
+`DISPLACEMENT_GAIN` is the default jet chain's AUTHORED gain. The cards' 90 is
+about 7-18x the forced jet's response at each note's speaking mode (mail 7491).
+It stands until the forced jet passes fg_003, fg_004, fj_001 and gas_direction_amount
+(ruling 7518, mail 7859, bead pexfp.135.1). The optional `jet_response forced-bickley SPACING
+WINDOW` row, in this file and in the network files after the `jet` row, selects the
+forced Bickley jet's causal response by name in place of that chain. It is
+integrated at grid SPACING [b] over WINDOW [b/U0] at the Reynolds number of the
+gesture's highest blowing pressure, and register physics is graded on 0.1 90. The
+gain is then unused. In network files it excludes `jet_transfer nolle-price-2015`.
 
 The bore declaration is shared with plate valves; see
 [PLATE_VALVE_PERFORMANCES.md](PLATE_VALVE_PERFORMANCES.md) for its numerical

@@ -11,6 +11,8 @@
 //! replacement, the original compact self reaction, or one complete shared
 //! rectangular-mouth/circular-terminal reaction. The latter includes all
 //! reciprocal cross terms and requires source quadrature over mechanical Nyquist.
+//! The `jet` row may be followed by `jet_response forced-bickley SPACING WINDOW`, which selects
+//! the forced Bickley jet (`flue_loop::forced_jet`) in place of the authored-gain chain by name.
 
 use super::{FlueDgConfig, FlueDgPerformance, FlueMouthRadiation};
 use crate::dg_port::input::{DgSourceError, DgSourceInput};
@@ -19,6 +21,7 @@ use crate::dg_port::input::wall::regions::{DgMaterialWallLayout, DgMaterialWallL
 use crate::flue_loop::dg::FlueDgSpec;
 use crate::flue_loop::network::performance::file::{
     FlueInputError, FluePerformanceInfo, MAX_FLUE_PERFORMANCE_BYTES, Rows,
+    held_blowing_pressure, read_jet_response,
 };
 use crate::flue_loop::{FlueGeometry, FlueVoice};
 use crate::pcm_wav::baffled::CircularOutletReceiver;
@@ -249,6 +252,7 @@ impl FlueDgFilePerformance {
         let voice_seed = row.number()?;
         let voice_index = row.number()?;
         row.end()?;
+        let jet_response = read_jet_response(&mut rows)?;
         let mut row = rows.row("jet_limits")?;
         let minimum_jet_speed_m_s = row.scalar()?;
         let maximum_jet_mach = row.scalar()?;
@@ -294,6 +298,17 @@ impl FlueDgFilePerformance {
             Some((length, Some((transverse, convection)))) => voice
                 .with_unsteady_windway(length, transverse, convection)
                 .map_err(FlueInputError::Physics)?,
+        };
+        let voice = match jet_response {
+            Some(spec) => {
+                // The forced jet's integration is one bounded attach-time task between two polls.
+                poll(gate)?;
+                let voice = voice.with_forced_jet(spec, held_blowing_pressure(&schedule, None))
+                    .map_err(FlueInputError::Physics)?;
+                poll(gate)?;
+                voice
+            }
+            None => voice,
         };
         let config = FlueDgConfig {
             sample_rate_hz, samples, max_block, max_controls, max_compile_work,

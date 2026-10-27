@@ -50,7 +50,18 @@
 //!   frequency): the loop cannot lock above or far below the band, and
 //!   the band rises with the jet speed;
 //!   the quasi-steady history is interpolated at the actual retarded time,
-//!   with sub-sample transit coupled to the current mouth solve;
+//!   with sub-sample transit coupled to the current mouth solve. This chain
+//!   is the default. Its gain is authored: the cards' 90 is about 7-18x the
+//!   forced jet's response at each note's speaking mode (mail 7491). It
+//!   stands until the forced jet passes fg_003, fg_004, fj_001 and
+//!   gas_direction_amount (ruling 7518, mail 7859, bead pexfp.135.1);
+//! - opt-in by name, the forced Bickley jet's complete causal response
+//!   ([`forced_jet`], ruling 7376) replaces that chain:
+//!   `eta_n = sum_k g_k v_(n-k)` of the exit transverse velocity, with its
+//!   delay, growth and high-Strouhal fall-off from the linearised jet and
+//!   `g_0` in the same-sample mouth solve. The published Nolle/Price
+//!   transfer ([`nolle_jet`]) is the other opt-in; the two exclude each
+//!   other;
 //! - the jet is cut by the labium: the volume flow entering the pipe is
 //!   `Q_j = Q_max * (1 + tanh((eta - y0) / b)) / 2`, the card's
 //!   smoothed top-hat profile integrated, `b` its half-width scaled to
@@ -106,6 +117,9 @@ pub mod windway;
 
 /// Opt-in published jet transfer of Nolle/Price (2015) in place of the island's band chain.
 pub mod nolle_jet;
+
+/// Opt-in forced Bickley jet's causal response in place of the island's band chain.
+pub mod forced_jet;
 
 /// Philox kernel id of the flue onset seed stream (logical identity;
 /// never a scheduling artifact).
@@ -317,7 +331,11 @@ pub struct JetIsland {
     /// Card: amplitude claims require a seeded run.
     pub seeded_amplitude_claims_only: bool,
     /// AUTHORED: spatial amplification of the jet deflection over the
-    /// cut-up (the card carries no receptivity gain measurement).
+    /// cut-up (the card carries no receptivity gain measurement). The cards'
+    /// gain 90 is about 7-18x the forced jet's response at each note's
+    /// speaking mode (mail 7491). It stands until the forced jet passes fg_003,
+    /// fg_004, fj_001 and gas_direction_amount (ruling 7518, mail 7859). Unused while a jet
+    /// response ([`forced_jet`] or [`nolle_jet`]) is attached.
     pub displacement_gain: f64,
     /// AUTHORED: onset seed amplitude relative to the jet speed.
     pub seed_amplitude_rel: f64,
@@ -581,6 +599,12 @@ pub struct FlueVoice {
     // Opt-in published jet transfer; its source memory commits with the mouth
     // solve, and both feedback flows belong to the same mechanical interval.
     nolle: Option<nolle_jet::NolleJet>,
+    // Opt-in forced-jet kernel (see `forced_jet`): the labium displacement from the retained exit
+    // velocities. None = the island's own chain.
+    forced: Option<forced_jet::ForcedJetKernel>,
+    // Slowest positive bulk jet and most retained jet-response input samples this voice admits.
+    minimum_jet_speed_m_s: f64,
+    max_jet_history_samples: usize,
     // Mouth loop coefficients.
     inertance: f64,
     resistance: f64,
@@ -698,6 +722,9 @@ impl FlueVoice {
             momentum_thickness_m,
             displacement_state: 0.0,
             nolle: None,
+            forced: None,
+            minimum_jet_speed_m_s: minimum_jet_speed,
+            max_jet_history_samples: max_history,
             inertance,
             resistance,
             source_coeff: rho * geometry.end_correction_m() / s_m,
@@ -817,6 +844,9 @@ impl FlueVoice {
             || self.unsteady_windway.is_some() {
             return Err(FlueError::Invalid { what: "viscous windway requires one cold attachment" });
         }
+        if self.forced.is_some() {
+            return Err(FlueError::Invalid { what: "viscous windway must be attached before the forced jet, whose exit it sets" });
+        }
         self.viscous_windway = Some(crate::bernoulli_aperture::viscous::ViscousSlit::from_gas(
             &self.gas, length_m).map_err(FlueError::Physics)?);
         self.jet_speed_m_s = self.validated_jet_speed(self.blow_pa)?;
@@ -893,6 +923,9 @@ impl FlueVoice {
             || self.unsteady_windway.is_some() {
             return Err(FlueError::Invalid { what: "unsteady windway requires one cold source-channel attachment" });
         }
+        if self.forced.is_some() {
+            return Err(FlueError::Invalid { what: "the forced jet refuses the unsteady windway" });
+        }
         self.unsteady_windway = Some(windway::UnsteadyWindway::new(&self.gas, &self.geometry,
             length_m, transverse_cells, convection_cells, self.dt, self.island.convection_ratio)?);
         self.validated_jet_speed(self.blow_pa)?;
@@ -918,6 +951,9 @@ impl FlueVoice {
                 what: "nolle jet requires one cold attachment and no unsteady windway",
             });
         }
+        if self.forced.is_some() {
+            return Err(FlueError::Invalid { what: "nolle jet and forced jet exclude each other" });
+        }
         let centre_over_bulk = if self.viscous_windway.is_some() {
             nolle_jet::POISEUILLE_CENTRE_OVER_BULK
         } else {
@@ -938,6 +974,53 @@ impl FlueVoice {
     #[must_use]
     pub const fn nolle_jet(&self) -> Option<&nolle_jet::NolleJet> {
         self.nolle.as_ref()
+    }
+
+    /// Replace the island's receptivity chain (band IIR, high-pass, leak and the authored
+    /// displacement gain) by the forced Bickley jet's causal response ([`forced_jet`]) before any
+    /// accepted sample. The labium displacement becomes `sum_k g_k v_(n-k)` of the exit transverse
+    /// velocity (mouth velocity plus onset seed). The tanh cut, source, mouth loop, windway and
+    /// wind line are unchanged. A slit windway, attached first, gives the Poiseuille exit; no
+    /// windway gives a uniform lip jet. `reference_pressure_pa` (the held blowing pressure) sets
+    /// the Reynolds number of the integration. The slowest admitted jet and the history budget
+    /// bound the retained exit velocities. The unsteady windway is refused: its jet starts from
+    /// rest and decays toward zero speed after a release, where this frozen-time response would
+    /// need unbounded history.
+    ///
+    /// # Errors
+    /// Late or repeated attachment, a poisoned voice, an attached Nolle/Price transfer or
+    /// unsteady windway, a non-positive reference pressure, a history longer than the budget at
+    /// the slowest admitted jet, or the integrator's own refusal.
+    pub fn with_forced_jet(mut self, spec: forced_jet::ForcedJetSpec, reference_pressure_pa: f64)
+        -> Result<Self, FlueError>
+    {
+        if self.poisoned || self.samples != 0 || self.nolle.is_some() || self.forced.is_some()
+            || self.unsteady_windway.is_some() {
+            return Err(FlueError::Invalid {
+                what: "forced jet requires one cold attachment and no other jet transfer or unsteady windway",
+            });
+        }
+        if !(reference_pressure_pa > 0.0 && reference_pressure_pa.is_finite()) {
+            return Err(FlueError::Invalid { what: "forced jet reference pressure must be positive" });
+        }
+        let reference_bulk = self.validated_jet_speed(reference_pressure_pa)?;
+        let kernel = forced_jet::ForcedJetKernel::new(spec, self.viscous_windway.is_some(),
+            self.geometry.flue_height_m, self.geometry.cut_up_m, self.nu, reference_bulk,
+            self.minimum_jet_speed_m_s, self.max_jet_history_samples, self.dt)
+            .map_err(|what| FlueError::Invalid { what })?;
+        self.island.provenance.push_str(&format!(
+            "; jet response: forced Bickley jet (b {:.4e} m, U0/U {}, station {:.3} b, Re {:.1} at {} Pa, spacing {} b, window {} b/U0, held {:.4e} s at that pressure) in place of the band chain and displacement gain",
+            kernel.half_width_m(), kernel.centre_over_bulk(), kernel.step_response().station(),
+            kernel.reynolds(), reference_pressure_pa, spec.spacing, spec.window,
+            kernel.held_gain_s(reference_bulk)));
+        self.forced = Some(kernel);
+        Ok(self)
+    }
+
+    /// The attached forced-jet kernel, if any.
+    #[must_use]
+    pub const fn forced_jet(&self) -> Option<&forced_jet::ForcedJetKernel> {
+        self.forced.as_ref()
     }
 
     /// Actual source field, material state, energy and both supplied resolutions.
@@ -993,9 +1076,11 @@ impl FlueVoice {
         let hp_out = c.hp_alpha*(self.band_hp[1]+hp_in-self.band_hp[0]);
         let displacement_m = self.displacement_state
             + self.dt*(hp_out+seed-c.leak_rate*self.displacement_state);
-        let eta_m = match c.eta_override {
-            Some(eta) => eta,
-            None => self.island.displacement_gain*displacement_m,
+        let eta_m = match (c.eta_override, &self.forced) {
+            (Some(eta), _) => eta,
+            // The forced jet's prepared known part plus g_0 times this trial's exit velocity.
+            (None, Some(kernel)) => kernel.current().0 + kernel.current().1*velocity,
+            (None, None) => self.island.displacement_gain*displacement_m,
         };
         let flow_m3_s = if c.q_max > 0.0 {
             0.5*c.q_max*(1.0+((eta_m-c.offset_m)/c.half_width_m).tanh())
@@ -1170,8 +1255,11 @@ impl FlueVoice {
         let direct = boundary.direct_reflection;
         let denominator = (l/dt+r)*(1.0-direct)+zc*(1.0+direct);
         let compliance = (1.0-direct)/denominator;
-        let eta_slope = self.island.displacement_gain*dt*c.hp_alpha*c.band_alpha*c.band_alpha
-            *delayed.current_weight/area;
+        let eta_slope = match &self.forced {
+            Some(kernel) => kernel.current().1*delayed.current_weight/area,
+            None => self.island.displacement_gain*dt*c.hp_alpha*c.band_alpha*c.band_alpha
+                *delayed.current_weight/area,
+        };
         let feedback = compliance*(self.source_coeff/dt)*(0.5*c.q_max)*eta_slope/c.half_width_m;
         if direct.abs() > 1.0 || !compliance.is_finite() || compliance <= 0.0
             || !feedback.is_finite() || !(0.0..1.0).contains(&feedback) {
@@ -1361,6 +1449,10 @@ impl FlueVoice {
             let delayed = if self.nolle.is_some() {
                 // The published transfer owns the jet response; the island chain idles at zero.
                 RetardedVelocity { past_m_s: 0.0, current_weight: 0.0 }
+            } else if self.forced.is_some() {
+                // The forced jet's own history is the delay: the trial velocity is this sample's
+                // exit velocity, the seed (added below) plus the unknown mouth velocity.
+                RetardedVelocity { past_m_s: 0.0, current_weight: 1.0 }
             } else {
                 match &windway_trial {
                     Some(windway) => windway.mouth_response(),
@@ -1379,6 +1471,15 @@ impl FlueVoice {
                 jet.prepare_step(jet.centre_over_bulk()*u, self.geometry.flue_width_m, seed)
                     .map_err(|what| FlueError::Invalid { what })).transpose()?;
             let chain_seed = if nolle_step.is_some() { 0.0 } else { seed };
+            // The forced jet takes the seed as exit velocity, like the mouth's, and prepares this
+            // sample's known displacement from its retained velocities.
+            let (delayed, chain_seed) = match &mut self.forced {
+                Some(kernel) => {
+                    kernel.prepare(u).map_err(|what| FlueError::Invalid { what })?;
+                    (RetardedVelocity { past_m_s: chain_seed, ..delayed }, 0.0)
+                }
+                None => (delayed, chain_seed),
+            };
             let coefficients = JetStepCoefficients { q_max, half_width_m: b,
                 offset_m: y0, band_alpha, hp_alpha, leak_rate, eta_override: None };
             let boundary = self.line.mouth_boundary()?;
@@ -1455,6 +1556,10 @@ impl FlueVoice {
             // Mouth transverse velocity into the history ring.
             self.history[self.head] = q / s_m;
             self.head = (self.head + 1) % self.history.len();
+            // The accepted exit velocity into the forced jet's retained history.
+            if let Some(kernel) = &mut self.forced {
+                kernel.push(delayed.past_m_s + q / s_m);
+            }
             // The observable is the wave launched into the pipe: the mouth
             // plane is the pipe's pressure node, so the total pressure
             // there says little about the standing wave the pipe carries.
@@ -1933,6 +2038,172 @@ mod convection_tests {
         assert_eq!(v.mouth_flow_m3_s(), 0.0);
         assert_eq!(v.band_state, [0.0;2]);
         assert_eq!(v.displacement_state, 0.0);
+        assert!(v.claim_check().is_err());
+    }
+}
+
+#[cfg(test)]
+mod forced_jet_tests {
+    use super::*;
+    use crate::bernoulli_aperture::{contraction::ContractionSpec,
+        network::{NetworkNode, TubeNetworkSpec, TubeSection}};
+    use fs_exec::CancelGate;
+    use fs_material::gas::GasSpec;
+
+    // Plumbing of the opt-in forced jet on the coarse row (forced_jet::COARSE_SPEC, 0.25 b and
+    // 40 b/U0: same physics, coarse grid); these are not qualified flute/recorder specimens.
+    const PLUMBING: forced_jet::ForcedJetSpec = forced_jet::COARSE_SPEC;
+    // A resolved cut-up, and one a 4 kPa jet crosses within one 48 kHz sample. On a 0.1 mm flue
+    // that cut-up is 5.3 b, so the jet grows within the sample and its current feedback exceeds
+    // one; shorter stations stay below one (measured over flue 0.1-1 mm, cut-up 0.06-0.8 mm,
+    // 100-4000 Pa: only 5.3 b and 10.7 b at 4 kPa refuse).
+    const CUT_UP_M: f64 = 0.004;
+    const SUBSAMPLE_CUT_UP_M: f64 = 4e-4;
+    const SUBSAMPLE_FLUE_M: f64 = 1e-4;
+    const SUBSAMPLE_PA: f64 = 4000.0;
+
+    fn geometry(cut_up_m: f64) -> FlueGeometry {
+        FlueGeometry { flue_width_m: 0.010, flue_height_m: 0.001, cut_up_m,
+            labium_offset_m: 0.0, jet_angle_rad: 0.0,
+            bore_area_m2: core::f64::consts::PI*0.006*0.006, mouth_loss_rel: 0.02 }
+    }
+    fn gas(pressure: f64) -> GasState {
+        GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, pressure).unwrap()
+    }
+    // The chain's authored gain is passed and unused once the forced jet attaches.
+    fn bare_voice(gas: GasState, geometry: FlueGeometry, rate: u32, history: usize) -> FlueVoice {
+        let source = network::FlueNetworkSpec {
+            graph: TubeNetworkSpec {
+                nodes: vec![NetworkNode::Inlet, NetworkNode::Termination { reflection: -0.7 }],
+                sections: vec![TubeSection { nodes: [0,1], length_m: 0.3, radius_m: 0.006,
+                    max_length_error_m: 0.005 }],
+                sound_speed_m_s: gas.sound_speed, max_wave_memory_bytes: 1_000_000,
+            },
+            gases: vec![gas], viscothermal: vec![], minimum_jet_speed_m_s: 1.0,
+            maximum_jet_mach: 0.3, max_jet_history_samples: history,
+        };
+        FlueVoice::from_network(Some(&fs_aeroac::jetcard::mint_tonal_interim_card().unwrap()),
+            90.0, 1e-6, geometry, source, rate, 3, 0, &CancelGate::new_clock_free()).unwrap()
+    }
+    fn voice(gas: GasState, geometry: FlueGeometry) -> FlueVoice {
+        bare_voice(gas, geometry, 48_000, 4096).with_forced_jet(PLUMBING, 100.0).unwrap()
+    }
+    fn contraction() -> ContractionSpec {
+        ContractionSpec { area_ratio: 0.8, maximum_contracted_mach: 0.3,
+            provenance: "authored numerical forced-jet fixture".into() }
+    }
+    fn assert_work(v: &FlueVoice) {
+        for d in v.diagnostics() {
+            let scale = d.source_work_j.abs()+d.pipe_work_j.abs()+d.stored_delta_j.abs()
+                +d.radiation_loss_j+d.numerical_dissipation_j+d.separation_loss_j;
+            assert!(d.ledger_defect_j.abs() <= 2e-12*scale+1e-30, "{d:?}");
+            assert!(d.separation_loss_j >= 0.0);
+        }
+    }
+
+    #[test]
+    fn g0_forced_jet_attaches_once_after_the_windway_and_refuses_sub_grid_stations() {
+        let v = voice(gas(101_325.0), geometry(CUT_UP_M));
+        assert!(v.forced_jet().is_some());
+        assert!(v.with_viscous_windway(0.015).is_err());
+        let v = voice(gas(101_325.0), geometry(CUT_UP_M));
+        assert!(v.with_unsteady_windway(0.015, 8, 8).is_err());
+        let v = voice(gas(101_325.0), geometry(CUT_UP_M));
+        assert!(v.with_forced_jet(PLUMBING, 100.0).is_err());
+        let v = bare_voice(gas(101_325.0), geometry(CUT_UP_M), 48_000, 4096)
+            .with_unsteady_windway(0.015, 8, 8).unwrap();
+        assert!(v.with_forced_jet(PLUMBING, 100.0).is_err());
+        // A 60 um cut-up on a 1 mm flue is 0.08 b, inside the first 0.25 b grid cell.
+        let v = bare_voice(gas(101_325.0), geometry(6e-5), 48_000, 4096);
+        assert!(v.with_forced_jet(PLUMBING, 100.0).is_err());
+    }
+
+    #[test]
+    fn g3_forced_jet_preserves_work_and_block_partition_across_gas_states() {
+        for pressure in [50_000.0,100_000.0,200_000.0] {
+            for separated in [false,true] {
+                let build = || {
+                    let v = voice(gas(pressure), geometry(CUT_UP_M));
+                    if separated { v.with_mouth_contraction(contraction()).unwrap() } else { v }
+                };
+                let (mut one, mut many) = (build(), build());
+                for v in [&mut one, &mut many] {
+                    v.apply(FlueControl::SetBlowingPressure(100.0)).unwrap();
+                }
+                let (mut a, mut b) = ([0.0;257], [0.0;257]);
+                one.step_block(&mut a).unwrap();
+                for chunk in b.chunks_mut(31) { many.step_block(chunk).unwrap(); }
+                assert_eq!(a,b);
+                assert!(a.iter().any(|p| *p != 0.0));
+                assert_eq!(one.network().unwrap().last_frame(), many.network().unwrap().last_frame());
+                assert_eq!(one.mouth_flow_m3_s(), many.mouth_flow_m3_s());
+                assert_work(&one); assert_work(&many);
+            }
+        }
+    }
+
+    #[test]
+    fn g3_forced_jet_takes_the_actual_viscous_windway_speed() {
+        let ordinary = gas(101_325.0);
+        let mut spec = GasSpec::dry_air_ussa1976();
+        spec.sutherland_beta *= 4.0; // Synthetic viscosity-only substitution.
+        let viscous = GasState::try_new(&spec, 293.15, ordinary.pressure).unwrap();
+        assert_eq!(ordinary.density, viscous.density);
+        assert_eq!(ordinary.sound_speed, viscous.sound_speed);
+        let build = |gas| bare_voice(gas, geometry(CUT_UP_M), 48_000, 4096)
+            .with_viscous_windway(0.015).unwrap().with_forced_jet(PLUMBING, 100.0).unwrap();
+        let (mut a, mut b) = (build(ordinary), build(viscous));
+        for v in [&mut a, &mut b] { v.apply(FlueControl::SetBlowingPressure(100.0)).unwrap(); }
+        assert!(b.jet_speed_m_s() < a.jet_speed_m_s());
+        assert!(b.forced_jet().unwrap().reynolds() < a.forced_jet().unwrap().reynolds());
+        let (mut first, mut second) = ([0.0;257], [0.0;257]);
+        a.step_block(&mut first).unwrap(); b.step_block(&mut second).unwrap();
+        assert_ne!(first,second);
+        assert_work(&a); assert_work(&b);
+    }
+
+    #[test]
+    fn g0_forced_jet_contraction_cap_rounding_cannot_refuse_an_interior_jet_root() {
+        // Mouth area 0.25 mm x 0.2 mm, the same bits as 1 mm x 50 um; the station 0.2/0.75 is
+        // inside the forced jet's grid. At 400 Pa the full jet flux is 1.6 times the contraction's
+        // Mach cap, so the cap bounds the root search.
+        let mut geometry = geometry(0.0002);
+        geometry.flue_width_m = 0.00025;
+        geometry.mouth_loss_rel = 0.0;
+        // The jet crosses this cut-up in about a sample at 48 kHz, where the forced jet's
+        // current feedback is underresolved; 960 kHz resolves it.
+        let mut v = bare_voice(gas(101_325.0), geometry, 960_000, 65_536)
+            .with_forced_jet(PLUMBING, 400.0).unwrap()
+            .with_mouth_contraction(contraction()).unwrap();
+        let loss = v.mouth_contraction().unwrap();
+        let raw_bound = loss.effective_area_m2()
+            *(loss.gas().sound_speed*loss.spec().maximum_contracted_mach);
+        // Arithmetic witness: the nominal endpoint rounds above Mach 0.3.
+        assert!(loss.at_flow(raw_bound).is_err());
+        v.apply(FlueControl::SetBlowingPressure(400.0)).unwrap();
+        assert!(v.jet_speed_m_s()*geometry.flue_height_m*geometry.flue_width_m > raw_bound);
+        v.step_block(&mut [0.0;257]).unwrap();
+        assert!(v.mouth_flow_m3_s().abs() < raw_bound);
+        v.mouth_contraction().unwrap().at_flow(v.mouth_flow_m3_s()).unwrap();
+        assert!(v.diagnostics()[0].separation_loss_j > 0.0);
+        assert_work(&v);
+    }
+
+    #[test]
+    fn g0_forced_jet_underresolved_current_feedback_refuses_before_any_wave_commit() {
+        // A jet that crosses the cut-up and grows within one sample feeds the current mouth
+        // flow back by more than one: the solve has no unique root, so it asks for a finer clock.
+        let mut geometry = geometry(SUBSAMPLE_CUT_UP_M);
+        geometry.flue_height_m = SUBSAMPLE_FLUE_M;
+        let mut v = bare_voice(gas(101_325.0), geometry, 48_000, 4096)
+            .with_forced_jet(PLUMBING, SUBSAMPLE_PA).unwrap();
+        v.apply(FlueControl::SetBlowingPressure(SUBSAMPLE_PA)).unwrap();
+        assert!(v.transit_s() < v.dt);
+        assert!(matches!(v.step_block(&mut [0.0]),
+            Err(FlueError::Invalid { what }) if what.contains("refine")));
+        assert_eq!(v.samples_rendered(), 0);
+        assert!(v.network().unwrap().last_frame().is_none());
+        assert_eq!(v.mouth_flow_m3_s(), 0.0);
         assert!(v.claim_check().is_err());
     }
 }

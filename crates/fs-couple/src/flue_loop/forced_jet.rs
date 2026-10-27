@@ -1,0 +1,279 @@
+//! The forced Bickley jet's causal response ([`fs_aeroac::forced_jet`]) as the island's labium
+//! displacement (rulings 7376 and 7518; beads pexfp.135/.138/.321). The displacement at the
+//! labium is `eta_n = sum_k g_k v_(n-k)` [m], where `v` is the exit transverse velocity: the mouth
+//! velocity `q / S_m` plus the onset seed. `g_k` [s] are the hat weights of one integrated step
+//! response, and `g_0` multiplies the current mouth velocity, which is still unknown inside the
+//! same-sample solve. It is opt-in by name and replaces the island's band chain and authored
+//! displacement gain. The tanh cut, mouth loss and window are separate. It is not the default:
+//! of the four gates of the switch it passes fg_004 but lands high on the three register gates
+//! (fj_001, fg_003, gas_direction_amount; bead pexfp.135.1), and the default switches only once
+//! all four pass unchanged.
+//!
+//! The exit profile is the Bickley jet with the exit's momentum flux and centre speed:
+//! - A slit windway's Poiseuille exit gives `b = 0.4 h` and `U0 = 1.5 U`.
+//! - No windway (a lip jet of uniform speed) gives `b = 0.75 h` and `U0 = U`.
+//!
+//! The station is `cut-up / b`. The step response is integrated once, at the Reynolds number
+//! `U0 b / nu` of the reference (held) pressure. Its time axis follows the actual jet speed on
+//! every sample.
+//!
+//! Not claimed:
+//! - The base jet's own spreading over the cut-up.
+//! - The labium's hydrodynamic back-reaction.
+//! - The Reynolds number of attack and release.
+//! - Memory beyond the window, where the response is held.
+
+use std::sync::{Mutex, PoisonError};
+
+use fs_aeroac::AeroacError;
+use fs_aeroac::forced_jet::{
+    FRONT_MARGIN, ForcedJetResolution, JetStepResponse, bickley_step_response,
+};
+
+/// Bickley half-width over flue height of a Poiseuille slit exit (its momentum flux at 1.5 x
+/// the bulk speed).
+pub const POISEUILLE_HALF_WIDTH_OVER_HEIGHT: f64 = 0.4;
+/// Centre over bulk speed of a Poiseuille slit exit.
+pub const POISEUILLE_CENTRE_OVER_BULK: f64 = 1.5;
+/// Bickley half-width over flue height of a uniform exit (its momentum flux at the bulk speed).
+pub const UNIFORM_HALF_WIDTH_OVER_HEIGHT: f64 = 0.75;
+/// Half-height of the resolved vortical band [b]; the exact exterior closes it.
+pub const BAND_HALF_HEIGHT: f64 = 8.0;
+/// Centreline Courant number of the integration.
+pub const COURANT: f64 = 0.8;
+/// Most worker threads for the integration (the result does not depend on the count).
+pub const MAX_WORKERS: usize = 8;
+/// The production row, `jet_response forced-bickley 0.1 90`, on which register physics is graded.
+pub const PRODUCTION_SPEC: ForcedJetSpec = ForcedJetSpec { spacing: 0.1, window: 90.0 };
+/// The coarse row numerical fixtures declare: the same physics on a coarse grid and a shorter
+/// window. On the whistle D5 card it renders within 0.3 cents and 0.3 dB of [`PRODUCTION_SPEC`].
+pub const COARSE_SPEC: ForcedJetSpec = ForcedJetSpec { spacing: 0.25, window: 40.0 };
+/// Most integrated responses one process retains for reuse.
+pub const RETAINED_RESPONSES: usize = 32;
+
+// Integrated responses by their exact inputs. The integration is deterministic and its bits do
+// not depend on the worker count, so a voice built again from the same flue, gas and row reuses
+// the identical response instead of integrating it again.
+static RESPONSES: Mutex<Vec<([u64; 5], JetStepResponse)>> = Mutex::new(Vec::new());
+
+fn integrated(station: f64, resolution: &ForcedJetResolution)
+    -> Result<JetStepResponse, AeroacError>
+{
+    let key = [station.to_bits(), resolution.spacing.to_bits(), resolution.window.to_bits(),
+        resolution.reynolds.to_bits(), resolution.streamwise_cells as u64];
+    let retained = || RESPONSES.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((_, step)) = retained().iter().find(|(k, _)| *k == key) {
+        return Ok(step.clone());
+    }
+    let step = bickley_step_response(station, resolution)?;
+    let mut cache = retained();
+    if !cache.iter().any(|(k, _)| *k == key) {
+        if cache.len() == RETAINED_RESPONSES {
+            cache.remove(0);
+        }
+        cache.push((key, step.clone()));
+    }
+    Ok(step)
+}
+
+/// Card row `jet_response forced-bickley SPACING WINDOW`: the grid spacing [b] and the recorded
+/// window [b/U0] of the step response.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ForcedJetSpec {
+    /// Grid spacing [b].
+    pub spacing: f64,
+    /// Recorded window [b/U0].
+    pub window: f64,
+}
+
+/// The integrated response, its jet scales and the retained exit velocities.
+#[derive(Debug, Clone)]
+pub struct ForcedJetKernel {
+    spec: ForcedJetSpec,
+    step: JetStepResponse,
+    half_width_m: f64,
+    centre_over_bulk: f64,
+    reynolds: f64,
+    dt: f64,
+    ring: Vec<f64>,
+    head: usize,
+    weights: Vec<f64>,
+    weights_bulk_bits: u64,
+    current: (f64, f64),
+}
+
+fn refusal(error: AeroacError) -> &'static str {
+    match error {
+        AeroacError::NonFinite { what } | AeroacError::InvalidParameter { what } => what,
+        AeroacError::NotConverged { .. } => "forced jet integration did not converge",
+    }
+}
+
+impl ForcedJetKernel {
+    /// Integrate the step response for this flue. `slit` selects the Poiseuille exit;
+    /// `reference_bulk_m_s` is the bulk speed at the held pressure, which sets the Reynolds
+    /// number; `minimum_bulk_m_s` sizes the retained input history, which may not exceed
+    /// `max_taps` samples.
+    ///
+    /// # Errors
+    /// Non-positive or non-finite inputs, a resolution the integrator refuses, or more retained
+    /// samples at the slowest jet than `max_taps`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        spec: ForcedJetSpec,
+        slit: bool,
+        flue_height_m: f64,
+        cut_up_m: f64,
+        kinematic_viscosity_m2_s: f64,
+        reference_bulk_m_s: f64,
+        minimum_bulk_m_s: f64,
+        max_taps: usize,
+        sample_period_s: f64,
+    ) -> Result<Self, &'static str> {
+        let (width_ratio, centre_over_bulk) = if slit {
+            (
+                POISEUILLE_HALF_WIDTH_OVER_HEIGHT,
+                POISEUILLE_CENTRE_OVER_BULK,
+            )
+        } else {
+            (UNIFORM_HALF_WIDTH_OVER_HEIGHT, 1.0)
+        };
+        let half_width_m = width_ratio * flue_height_m;
+        let inputs = [
+            spec.spacing,
+            spec.window,
+            half_width_m,
+            cut_up_m,
+            kinematic_viscosity_m2_s,
+            reference_bulk_m_s,
+            minimum_bulk_m_s,
+            sample_period_s,
+        ];
+        if !inputs.iter().all(|v| v.is_finite() && *v > 0.0) {
+            return Err("forced jet needs positive finite geometry, gas, speeds and window");
+        }
+        let station = cut_up_m / half_width_m;
+        let reynolds =
+            centre_over_bulk * reference_bulk_m_s * half_width_m / kinematic_viscosity_m2_s;
+        let reach = (spec.window + FRONT_MARGIN).max(station + FRONT_MARGIN);
+        let cells = ((reach / spec.spacing).ceil() as usize)
+            .max(32)
+            .next_power_of_two();
+        let workers = std::thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get)
+            .min(MAX_WORKERS);
+        let resolution = ForcedJetResolution {
+            spacing: spec.spacing,
+            streamwise_cells: cells,
+            half_height: BAND_HALF_HEIGHT,
+            window: spec.window,
+            courant: COURANT,
+            reynolds,
+            workers,
+        };
+        let step = integrated(station, &resolution).map_err(refusal)?;
+        let slowest = step
+            .hat_weights(
+                centre_over_bulk * minimum_bulk_m_s,
+                half_width_m,
+                sample_period_s,
+            )
+            .map_err(refusal)?
+            .len();
+        if slowest > max_taps {
+            return Err("forced jet history at the slowest admitted jet exceeds the declared jet history budget");
+        }
+        Ok(Self {
+            spec,
+            step,
+            half_width_m,
+            centre_over_bulk,
+            reynolds,
+            dt: sample_period_s,
+            ring: vec![0.0; slowest],
+            head: 0,
+            weights: Vec::new(),
+            weights_bulk_bits: 0,
+            current: (0.0, 0.0),
+        })
+    }
+
+    /// The card row this response was integrated from.
+    #[must_use]
+    pub const fn spec(&self) -> ForcedJetSpec {
+        self.spec
+    }
+
+    /// The integrated step response.
+    #[must_use]
+    pub const fn step_response(&self) -> &JetStepResponse {
+        &self.step
+    }
+
+    /// Bickley half-width of the exit [m].
+    #[must_use]
+    pub const fn half_width_m(&self) -> f64 {
+        self.half_width_m
+    }
+
+    /// Centre over bulk speed of the exit.
+    #[must_use]
+    pub const fn centre_over_bulk(&self) -> f64 {
+        self.centre_over_bulk
+    }
+
+    /// `U0 b / nu` the response was integrated at.
+    #[must_use]
+    pub const fn reynolds(&self) -> f64 {
+        self.reynolds
+    }
+
+    /// Held displacement per exit velocity [s] at bulk speed `bulk_m_s`: `b s(window) / U0`.
+    #[must_use]
+    pub fn held_gain_s(&self, bulk_m_s: f64) -> f64 {
+        self.half_width_m / (self.centre_over_bulk * bulk_m_s) * self.step.held_gain()
+    }
+
+    /// Prepare this sample at bulk speed `bulk_m_s`: the displacement's known part [m] from the
+    /// retained exit velocities and the current-velocity weight `g_0` [s], kept for
+    /// [`Self::current`]. A still jet displaces nothing.
+    ///
+    /// # Errors
+    /// A jet slower than the retained history admits.
+    pub fn prepare(&mut self, bulk_m_s: f64) -> Result<(f64, f64), &'static str> {
+        if bulk_m_s == 0.0 {
+            self.current = (0.0, 0.0);
+            return Ok(self.current);
+        }
+        if bulk_m_s.to_bits() != self.weights_bulk_bits || self.weights.is_empty() {
+            self.weights = self
+                .step
+                .hat_weights(self.centre_over_bulk * bulk_m_s, self.half_width_m, self.dt)
+                .map_err(refusal)?;
+            self.weights_bulk_bits = bulk_m_s.to_bits();
+        }
+        let n = self.ring.len();
+        if self.weights.len() > n {
+            return Err("jet is slower than its retained forced-jet history");
+        }
+        let mut known = 0.0;
+        for (k, g) in self.weights.iter().enumerate().skip(1) {
+            known += g * self.ring[(self.head + n - k) % n];
+        }
+        self.current = (known, self.weights[0]);
+        Ok(self.current)
+    }
+
+    /// The prepared sample's known displacement [m] and current-velocity weight [s]:
+    /// `eta = known + g_0 v` for this sample's exit velocity `v`.
+    #[must_use]
+    pub const fn current(&self) -> (f64, f64) {
+        self.current
+    }
+
+    /// Retain this sample's accepted exit velocity [m/s].
+    pub fn push(&mut self, velocity_m_s: f64) {
+        self.ring[self.head] = velocity_m_s;
+        self.head = (self.head + 1) % self.ring.len();
+    }
+}
