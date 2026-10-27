@@ -144,9 +144,11 @@ impl ReciprocalStringBank {
     /// stretch the fibers and feed back into each string contact in the SAME
     /// joint solve; their material losses enter the existing energy account.
     /// No post-filter or independently stepped bow is used. The original body,
-    /// cavity, radiation and material memory remain attached.
+    /// cavity, radiation, material memory and nonlinear strain storage remain
+    /// attached. Appended fiber modes leave the original string and retained
+    /// longitudinal coordinates in place and join their constitutive solve.
     ///
-    /// Bind cold, before nonlinear storage. Contact station is fixed along the
+    /// Bind cold. Contact station is fixed along the
     /// fibers: this is a local frozen-station bowing model in a uniformly
     /// translating support frame, not a complete stroke/moving-frog model.
     /// `FrictionDrive::speed_m_s` is that frame's prescribed constant speed.

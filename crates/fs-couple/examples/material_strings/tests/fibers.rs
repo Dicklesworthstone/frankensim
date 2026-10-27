@@ -302,3 +302,130 @@ fn incompatible_fiber_contact_geometry_and_motion_refuse_before_material_io() {
         }
     });
 }
+
+fn nonlinear_fiber_text(axial: bool) -> String {
+    let source = if axial {
+        include_str!("../longitudinal-cylinder-bow.material-strings")
+    } else {
+        include_str!("../nonlinear-cylinder-bow.material-strings")
+    };
+    source.replace("48000 4096", "48000 129")
+        .replace("prepared-linear 64 67108864 200000000000\n", "")
+        .replace("cylinder-gas-loading 0.001 30 4", "cylinder-gas-loading 0.001 30 2")
+        .replace("polarizations two 0.6 0.8 1 0\n",
+            "polarizations two 0.6 0.8 1 0\nbending-loss prony 1 fiber_test_delta fiber_test_time\n")
+        .replace("friction coulomb 0.8 0.4\n",
+            "friction coulomb 0.8 0.4\nbow_ribbon 0.01 3\nbow_fibers fiber.fsmatpk 0.00004 0.6 180 40 0.4 2 2\n")
+}
+
+fn nonlinear_pack(name: &str, fiber_density: f64) -> NormalizedPack {
+    if name == "fiber.fsmatpk" { return fiber_pack(fiber_density, false); }
+    let layered = matches!(name, "wire.fsmatpk" | "sleeve.fsmatpk");
+    let original = pack(name, 7800.0, 200_000.0, layered.then_some(ETA));
+    if !layered { return original; }
+    let mut claims = original.claims().clone();
+    for (key, dims, value) in [
+        ("equilibrium_young_modulus", Pressure::DIMS, 200e9),
+        ("fiber_test_delta", Pressure::DIMS, 20e9),
+        ("fiber_test_time", Dims([0, 0, 1, 0, 0, 0]), 0.001),
+    ] {
+        claims.insert_claim(PropertyClaim {
+            key: PropertyKey::new(key, dims), value: PropertyValue::Scalar { value, dims },
+            validity: ValidityDomain::unconstrained().with("T", 280.0, 320.0)
+                .with("omega", 0.0, 200_000.0),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::ConstantWithinValidity, observations: vec![],
+            provenance: Provenance { source: "manufactured nonlinear fiber composition".into(),
+                license: "CC0-1.0".into(), artifact: None },
+        }).unwrap();
+    }
+    NormalizedPack::new(original.pack_id(), "nonlinear-fiber-fixture", original.source_artifact(),
+        original.redistribution_terms(), claims, vec![], vec![]).unwrap()
+}
+
+#[test]
+fn fibers_share_nonlinear_strain_layer_histories_gas_and_original_pcm() {
+    scoped(|cx, gate| {
+        for axial in [false, true] {
+            let text = nonlinear_fiber_text(axial);
+            let build = |rho| input::Spec::parse(text.as_bytes()).unwrap()
+                .compile(cx, gate, |name| Ok(nonlinear_pack(name, rho))).unwrap();
+            let mut direct = build(1300.0);
+            let bank = direct.performance.bank();
+            let first_fiber = bank.source().fiber_ribbon().unwrap().component_start();
+            let source = bank.source().bank();
+            assert!(source.cylinder_gas_loading().is_some());
+            assert!(source.material_cavity().is_some());
+            assert_eq!(source.geometric_stretching().is_some(), !axial);
+            assert_eq!(source.longitudinal_waves().is_some(), axial);
+            assert_eq!(bank.system().material_memory().len(), 4);
+            let axial_component = source.longitudinal_waves().map(|waves|
+                waves.strings()[0].axial_component());
+            if let Some(index) = axial_component { assert!(index < first_fiber); }
+            let mut dense = build(5200.0);
+            for (a, b) in bank.system().components()[..first_fiber].iter()
+                .zip(&dense.performance.bank().system().components()[..first_fiber]) {
+                assert_eq!(a.modes(), b.modes(), "fiber substitution changed the original string/body basis");
+            }
+            let expected = pressure(&mut direct, 1);
+            assert!(expected.iter().any(|p| p.abs() > 1e-15));
+            assert_eq!(expected, pressure(&mut build(1300.0), 37));
+            assert!(expected.iter().zip(pressure(&mut dense, 128))
+                .any(|(a, b)| (a-b).abs() > 1e-15));
+            let system = direct.performance.bank().system();
+            let frame = system.last_frame().unwrap();
+            assert!(frame.nonlinear.is_some(), "appending fibers discarded the strain law");
+            assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+            assert!(system.material_memory().iter().any(|z| *z != 0.0));
+            assert!(system.components()[first_fiber..].iter().any(|fiber|
+                fiber.states()[..2].iter().any(|q| q.displacement_m_sqrt_kg != 0.0)));
+            if let Some(index) = axial_component {
+                assert!(system.components()[index].states().iter()
+                    .any(|q| q.displacement_m_sqrt_kg != 0.0));
+            } else {
+                assert!(frame.nonlinear.unwrap().nonlinear_energy_j > 0.0);
+            }
+            let (wav, summary) = build(1300.0).write(Cursor::new(Vec::<u8>::new()), gate).unwrap();
+            let encoded = fs_couple::pcm_wav::encode_pcm16_wav(&expected, 48_000, 0.01).unwrap();
+            assert_eq!(wav.into_inner(), encoded.0);
+            assert_eq!(summary.samples, 129);
+        }
+    });
+}
+
+#[test]
+fn fiber_normal_reactions_and_string_stretching_share_one_work_balance() {
+    scoped(|cx, gate| {
+        let text = include_str!("../fiber-contact.material-strings")
+            .replace("48000 4096", "48000 129")
+            .replace("cavity neck", "geometric-stretching 0.2 64 100000 1e-11 1e-10\ncavity neck");
+        let build = || input::Spec::parse(text.as_bytes()).unwrap().compile_with_profiles(
+            cx, gate, None,
+            Some(crate::stops::Profile::parse(include_str!("../fiber-contact.stops").as_bytes()).unwrap()),
+            |name| Ok(if name == "fiber.fsmatpk" { fiber_pack(1300.0, false) }
+                else { pack(name, 7800.0, 200_000.0, None) }),
+        ).unwrap();
+        let mut direct = build();
+        let initial = direct.performance.bank().system().total_energy_j().unwrap();
+        assert!(initial > 0.0, "the original elastic interference must remain stored");
+        let (mut work, mut loss, mut stretch) = (0.0, 0.0, 0.0_f64);
+        let mut output = Vec::new();
+        for _ in 0..129 {
+            let mut sample = [0.0]; direct.performance.block(&mut sample).unwrap();
+            output.push(sample[0]);
+            let system = direct.performance.bank().system();
+            let frame = system.last_frame().unwrap();
+            for (port, contact) in frame.ports.iter().zip(system.last_obstacle_frames().unwrap()) {
+                assert_eq!(port.normal_force_n, contact.normal_force_n);
+                if contact.normal_force_n == 0.0 { assert_eq!(port.traction_n, 0.0); }
+            }
+            work += frame.external_work_j + frame.drive_work_j + frame.obstacle_work_j;
+            loss += frame.network_dissipation_j + frame.friction_dissipation_j + frame.obstacle_dissipation_j;
+            stretch = stretch.max(frame.nonlinear.unwrap().nonlinear_energy_j);
+            assert!((system.total_energy_j().unwrap() + loss - work - initial).abs() < 1e-10);
+            assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        }
+        assert!(stretch > 0.0 && output.iter().any(|p| p.abs() > 1e-12));
+        assert_eq!(output, pressure(&mut build(), 37));
+    });
+}

@@ -349,6 +349,7 @@ impl FiniteMoistureAtmosphere {
         let point = self
             .gas
             .point()
+            .clone()
             .with("pressure", pressure)
             .map_err(|_| invalid("invalid accepted pressure coordinate"))?;
         let gas = ClosedGasParcel::new(model, point, self.gas.volume_m3())?;

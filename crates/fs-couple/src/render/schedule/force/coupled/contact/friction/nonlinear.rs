@@ -314,15 +314,17 @@ impl FrictionModalSystem {
     }
 
     /// Cold extension of the original full operator. Existing signed columns,
-    /// initial states, material interfaces and pressure weights are preserved.
-    /// Call before installing nonlinear storage; the new components then join
-    /// that same constitutive solve. No already-playing history can be reset.
+    /// initial states, material interfaces, nonlinear storage and pressure
+    /// weights are preserved. Appending components leaves every original
+    /// constitutive coordinate index unchanged; new coordinates participate in
+    /// that same nonlinear solve through the complete mechanical network.
+    /// No already-playing history can be reset.
     pub(crate) fn with_internal_components(
         self, additional: Vec<ModalAcousticTimeModel>, gate: &CancelGate,
     ) -> Result<Self, ModalFrictionError> {
         poll(Some(gate))?;
-        if self.samples_rendered() != 0 || self.nonlinear.is_some() || additional.is_empty() {
-            return Err(invalid("internal coordinates require cold nonempty preparation before nonlinear binding").into());
+        if self.samples_rendered() != 0 || additional.is_empty() {
+            return Err(invalid("internal coordinates require cold nonempty preparation").into());
         }
         let count = additional.iter().try_fold(self.mode_count(), |count, model| {
             count.checked_add(model.modes().len()).ok_or_else(|| invalid("internal modal dimension overflow"))
@@ -367,6 +369,12 @@ impl FrictionModalSystem {
         if let Some(interface) = self.interface {
             next = next.with_interface(interface)?;
         }
+        // Bound potentials retain their exact original coordinate prefix and
+        // any replaced linear stiffness. A larger network must not turn their
+        // storage into a diagnostic-only source, or silently lose it entirely.
+        next.nonlinear = self.nonlinear;
+        limit("complete initial material/nonlinear energy", next.total_energy_j()?,
+            next.network.config.maximum_total_energy_j)?;
         poll(Some(gate))?;
         Ok(next)
     }

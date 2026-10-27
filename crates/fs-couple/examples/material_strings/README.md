@@ -184,10 +184,21 @@ on fiber receivers refuse: moving the endpoints would also require their
 frame-acceleration forces, which this frozen model does not supply. Ordinary
 fixed/bridge stop motion remains available. The original `fiber-ribbon`
 fixture retains prescribed uniform normal load.
-It refuses speed changes and nonlinear-string options until those combinations
-have the corresponding moving-support/assembly implementation. It does not
-model flexible bow stick, contact migration, inter-hair rubbing or thermal
-rosin. Axial and normal mode counts, ribbon cells and physical sample rate are
+The same fiber continuum now composes with `geometric-stretching` or
+`longitudinal-waves`. Its modes append after the original string/body/fluid
+coordinates without replacing their nonlinear strain storage, layered material
+histories or pressure observer. Equal and opposite fiber/string tractions and
+any resolved normal reactions participate in that same constitutive solve.
+For example, add `geometric-stretching 0.2 64 100000 1e-11 1e-10` before the
+`cavity` row in `fiber-contact.material-strings` to retain the source-derived
+string stretching energy with its existing fiber contact profile. The
+longitudinal selection instead retains the declared axial wave coordinates;
+the two string strain images remain mutually exclusive.
+
+Changing support speed still refuses because its frame-acceleration forces are
+not supplied by the frozen-station model. It does not model a flexible bow stick,
+contact migration, inter-hair rubbing or thermal rosin. Axial and normal mode
+counts, ribbon cells and physical sample rate are
 independent refinement axes. A selected mode outside source validity or the
 clock's Nyquist guard is refused, never discarded.
 

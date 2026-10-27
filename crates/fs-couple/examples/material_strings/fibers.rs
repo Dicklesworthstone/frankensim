@@ -31,9 +31,6 @@ impl Input {
                     .into(),
             );
         }
-        if spec.geometric_stretching.is_some() || spec.longitudinal_waves.is_some() {
-            return Err("fiber components currently bind before nonlinear string storage; this input combination needs a reordered compiler".into());
-        }
         // The current geometry freezes the contact along a uniformly translating
         // fiber. Do not silently model an accelerating/reversing bow as one.
         for track in spec.schedule.tracks() {
