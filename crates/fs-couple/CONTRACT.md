@@ -7635,3 +7635,39 @@ wave and diffusion storage changes are external parameter work, not an
 unmodeled heat credit. It adds no spatial gas mixing, mass/species injection,
 mean-pressure traction or thermochemical reservoir solve. Geometry, radius,
 native diffusion sections and thermal-arm support stay fixed.
+
+
+### Same-endpoint reacting gas and material-bound inertial wall
+
+`GasPiston::coupled_reactive_candidate` closes the existing implicit mechanism
+at the actual moving gas endpoint: each pressure trial supplies the original
+wall kinematics and `W = p (V1 - V0)`, then the original reaction owner solves
+`xi_r = dt V1 rate_r(T1, p1, n1)` with `U1 = U0 + Q - W`. The shared bounded
+scalar solver closes applied pressure against that same endpoint EOS. Native
+wall kinematics and impulse accounting are shared with the nonreacting piston.
+Fixed supports retain their original volume and balance pressure with a
+zero-work support impulse. `MaterialGasPiston` keeps the original resolved
+rigid-body inertia and source receipts through the same candidate.
+
+Gas composition, temperature, transport, acoustics, volume, momentum and port
+history publish together. Complete formation energy is already in gas U;
+no reaction-enthalpy credit or numerical residual is added as heat. Independent
+EOS-pressure, pressure-work, impulse, mechanical/total energy and signed
+`Delta S - Q/T1` admission precede return. The latter includes the temporal
+method's entropy and is not an isolated chemical-production claim. Every
+pressure and chemical probe has explicit work/source-domain bounds.
+
+Three focused synthetic tests specify independent endpoint caloric/EOS/rate
+relations, fixed support, zero-rate nonzero-heat evolution, two continuing
+exothermic compression intervals, source/bracket refusals and final-checkpoint
+cancellation. Scoped Rust parsing/formatting, whitespace and source/API review
+passed; native compilation and test execution remain unavailable because the
+pinned constellation siblings and remote runners are absent and disk is full.
+Independent reduced-equation arithmetic is not Rust execution or experiment.
+
+This is homogeneous closed-gas kinetics with endpoint pressure/chemistry and
+midpoint wall kinematics, generally first order. It requires the original
+coupled implicit mechanism and shared gas inversion policy; chemistry-only
+subcycling refuses. It adds no flame, shock, valve flow, shared crank, wall
+material heating or guaranteed nonlinear uniqueness. The gas-control-volume
+and gas-chemistry ladder beads remain open.

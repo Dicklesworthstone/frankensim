@@ -6,6 +6,7 @@ mod implicit;
 mod arrhenius;
 mod collider;
 mod third_body;
+mod coupled;
 
 use super::*;
 use crate::cavity_phs::piston::material::MaterialGasPiston;

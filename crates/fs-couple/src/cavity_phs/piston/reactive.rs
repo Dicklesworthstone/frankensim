@@ -43,6 +43,8 @@ pub mod implicit;
 pub mod heat;
 /// Same-endpoint chemistry with explicit heat, volume and mechanical work.
 pub mod boundary;
+/// Endpoint chemistry and native piston pressure work solved on one interval.
+pub mod coupled;
 
 use super::{GasPiston, PistonError, PistonInput, PistonSolve, PistonStep};
 use fs_material::MaterialError;

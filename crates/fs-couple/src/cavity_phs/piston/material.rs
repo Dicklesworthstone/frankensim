@@ -104,6 +104,22 @@ impl MaterialGasPiston {
         Ok(candidate)
     }
 
+    /// Resolve chemical rates at the same endpoint as gas pressure and wall
+    /// work, retaining the original material-derived inertia and source records.
+    pub fn coupled_reactive_candidate(
+        &self, reaction: &super::reactive::GasReaction, input: PistonInput,
+        chemistry: super::reactive::GasReactionSolve,
+        controls: super::reactive::coupled::CoupledReactivePistonSolve,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<super::reactive::coupled::CoupledReactivePistonCandidate<Self>,
+        super::reactive::coupled::CoupledReactivePistonError>
+    {
+        let candidate = self.piston.coupled_reactive_candidate(reaction, input, chemistry, controls,
+            &mut cancelled)?.map_piston(|piston| Self { body: self.body.clone(), piston });
+        if cancelled() { return Err(super::reactive::coupled::CoupledReactivePistonError::Cancelled); }
+        Ok(candidate)
+    }
+
     /// Preserve source-resolved rigid inertia while reaction products exchange
     /// heat with a finite material body and drive the original pressure solve.
     /// The thermal store may be separate from this translating rigid specimen.
