@@ -22,7 +22,8 @@ pub enum InitialPlateMemory {
     Unrelaxed,
 }
 
-/// Cold projection and complete constitutive-state budgets; no rank truncation.
+/// Cold projection and complete constitutive-state budgets. Null strain
+/// directions carry no memory; every resolved positive channel is retained.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlateRelaxationLimits {
     pub max_modes: usize,
@@ -183,9 +184,11 @@ impl ModalPlateRelaxation {
     #[must_use] pub const fn limits(&self) -> PlateRelaxationLimits { self.limits }
 }
 
-/// Shared positive factor of a complete regional bending form. Exact-zero
-/// strain rows carry no energy; singular nonzero subspaces refuse. Both reed
-/// and instrument-body consumers use these SAME factors, including cross terms.
+/// Shared positive factor of a complete regional bending form. Localized
+/// regions can have nonzero rows while leaving combinations of retained modes
+/// unstrained. Those null directions carry no memory. Both reed and body
+/// consumers retain the SAME complete form, including its cross terms, within
+/// the existing dimensionless reconstruction tolerance; no stiffness is added.
 pub(crate) fn factor(form: &[f64], n: usize, gate: &CancelGate)
     -> Result<Vec<Vec<f64>>, AcousticRealizeError>
 {
@@ -202,14 +205,23 @@ pub(crate) fn factor(form: &[f64], n: usize, gate: &CancelGate)
     }
     let normalized: Vec<_> = (0..size*size).map(|i|
         form[n*active[i/size]+active[i%size]]/scales[i/size]/scales[i%size]).collect();
-    let root = fs_la::factor::cholesky(&normalized,size)
-        .map_err(|_| invalid("regional bending memory cannot discard singular nonzero strain channels"))?;
-    let mut rows = Vec::with_capacity(size);
-    for channel in 0..size {
+    let factors = match fs_la::factor::cholesky(&normalized,size) {
+        // Preserve successful positive-definite projections and their channel
+        // order exactly. A material patch need not be positive definite on the
+        // complete instrument's modes, however: use the SAME pivoted PSD owner
+        // as localized interface loss if the unpivoted factor refuses.
+        Ok(root) => (0..size).map(|channel|
+            (0..size).map(|i| root.l(i,channel)).collect::<Vec<_>>()).collect(),
+        Err(_) => super::ModalPlateViscosity::from_psd_modal_matrix(
+            normalized, size, 1.0, gate,
+        )?.columns,
+    };
+    let mut rows = Vec::with_capacity(factors.len());
+    for factor in factors {
         poll(gate)?;
         let mut row = vec![0.0;n];
-        for (i,&mode) in active.iter().enumerate() { row[mode] = scales[i]*root.l(i,channel); }
-        if row.iter().any(|v| !v.is_finite()) || row[active[channel]] == 0.0 {
+        for (i,&mode) in active.iter().enumerate() { row[mode] = scales[i]*factor[i]; }
+        if row.iter().any(|v| !v.is_finite()) || row.iter().all(|v| *v == 0.0) {
             return Err(invalid("regional material strain factor is unrepresentable"));
         }
         rows.push(row);
@@ -223,4 +235,41 @@ pub(crate) fn factor(form: &[f64], n: usize, gate: &CancelGate)
         }
     }}
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn g0_localized_strain_retains_its_nullspace_and_complete_scaled_work() {
+        let gate = CancelGate::new_clock_free();
+        // One physical strain channel on three coordinates, including a
+        // completely unstrained coordinate and disparate coordinate scales.
+        let form = [4e12, -6e6, 0.0, -6e6, 9.0, 0.0, 0.0, 0.0, 0.0];
+        let rows = factor(&form, 3, &gate).unwrap();
+        assert_eq!(rows.len(), 1);
+        for q in [[3e-6_f64, 2.0, 7.0], [1e-6, -1.0, 0.0]] {
+            let expected = 0.5 * (2e6 * q[0] - 3.0 * q[1]).powi(2);
+            let actual: f64 = rows.iter().map(|row| {
+                0.5 * row.iter().zip(q).map(|(c, x)| c * x).sum::<f64>().powi(2)
+            }).sum();
+            assert!((actual - expected).abs() <= 1e-12 * expected.max(1.0));
+        }
+        assert!(rows.iter().all(|row| row[2] == 0.0));
+        assert!(factor(&[1.0, 2.0, 2.0, 1.0], 2, &gate).is_err());
+        assert!(factor(&[0.0, 1.0, 1.0, 0.0], 2, &gate).is_err());
+    }
+
+    #[test]
+    fn g0_positive_definite_regional_channels_keep_original_arithmetic() {
+        let gate = CancelGate::new_clock_free();
+        let form = [4.0, 1.0, 1.0, 9.0];
+        let scale = [det::sqrt(4.0), det::sqrt(9.0)];
+        let normalized: Vec<_> = (0..4).map(|i| form[i] / scale[i / 2] / scale[i % 2]).collect();
+        let original = fs_la::factor::cholesky(&normalized, 2).unwrap();
+        let expected: Vec<Vec<_>> = (0..2).map(|j|
+            (0..2).map(|i| scale[i] * original.l(i, j)).collect()).collect();
+        assert_eq!(factor(&form, 2, &gate).unwrap(), expected);
+    }
 }

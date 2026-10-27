@@ -285,6 +285,49 @@ fn one_region_material_swap_changes_returning_acoustics_and_block_invariant_pres
 }
 
 #[test]
+fn localized_material_patch_reaches_modal_memory_and_the_actual_microphone() {
+    // A patch adjacent to the clamped edge has only one unconstrained DKT
+    // vertex (three physical coordinates). Its bending form is consequently
+    // rank deficient on SIX retained modes. Such a local material is not an
+    // invalid whole instrument, and its modal cross terms must remain active.
+    let text = regional_source()
+        .replace("blade 3 0.2 3000 0.04", "blade 6 0.2 12000 0.2")
+        .replace("initial 3\nstate 0 0\nstate 0 0\nstate 0 0",
+            "initial 6\nstate 0 0\nstate 0 0\nstate 0 0\nstate 0 0\nstate 0 0\nstate 0 0");
+    let text = text.lines().map(|line| {
+        if let Some(row) = line.strip_prefix("triangle ") {
+            let fields: Vec<_> = row.split_whitespace().collect();
+            let region = usize::from(fields[..3] != ["0", "8", "7"]);
+            format!("triangle {} {} {} {region}", fields[0], fields[1], fields[2])
+        } else { line.to_owned() }
+    }).collect::<Vec<_>>().join("\n") + "\n";
+    let reference = load_regional(&text, 37, 1e8, 0.001);
+    let changed = load_regional(&text, 37, 6e8, 0.0002);
+    let a = valve(&changed);
+    assert_eq!(a.modal_states().len(), 12);
+    let plate = &a.material_plates()[0];
+    assert_eq!(plate.source().regions()[0].input.region.triangle_indices, vec![1]);
+    let memory = a.material_relaxation().unwrap();
+    assert!(memory.is_regional());
+    assert_eq!(memory.material_spectra()[0][0].terms, vec![(6e8, 0.0002)]);
+    let patch_channels: Vec<_> = (0..memory.memory_sqrt_j()[0].len())
+        .filter(|&i| memory.regional_relaxation_time_s(i) == Some(0.0002)).collect();
+    assert!((1..=3).contains(&patch_channels.len()),
+        "one free physical vertex must not acquire six independent strain channels");
+    assert!(patch_channels.iter().any(|&i|
+        memory.regional_coupling_row(i).unwrap()[..6].iter().filter(|v| **v != 0.0).count() > 1));
+    let (original_pressure, _) = render(reference);
+    let (pressure, rendered) = render(changed);
+    assert!(pressure.iter().all(|p| p.is_finite()));
+    assert!(pressure.iter().any(|p| p.abs() > 1e-15));
+    assert!(pressure.iter().zip(original_pressure).any(|(a, b)| (a - b).abs() > 1e-15));
+    let (partitioned, _) = render(load_regional(&text, 1, 6e8, 0.0002));
+    assert_eq!(pressure, partitioned);
+    let LoadedAperture::Modal(a) = rendered.source().system().valve() else { panic!("modal source") };
+    assert!(a.material_relaxation().unwrap().memory_sqrt_j().iter().flatten().any(|z| *z != 0.0));
+}
+
+#[test]
 fn regional_selection_refuses_missing_sources_unresolved_clocks_and_complete_history_overflow() {
     let text = regional_source();
     for invalid in [

@@ -3852,8 +3852,14 @@ MODULUS TIME ...` reaches the existing wind file, CLI, metadata and PCM.
 
 The complete exact loss block must satisfy `2*(3*modes+channels) <= 256` before
 allocation. Original projection budgets, instantaneous frequency/source bands,
-angular caps and `dt/tau <= 2` apply. Exact-zero strain rows carry no memory;
-singular nonzero regional forms refuse without regularization or rank removal.
+angular caps and `dt/tau <= 2` apply. Exact-zero strain rows carry no memory.
+Localized regions can also have nonzero modal rows with a null strain subspace:
+these use the same pivoted positive-semidefinite factor as localized interface
+viscosity. Both reed and body memory retain the original cross terms within the
+existing `1e-10` dimensionless reconstruction allowance, without added stiffness
+or artificial damping in null directions. Successful positive-definite factors
+retain their original arithmetic and channel order. Indefinite or unresolved
+forms still refuse; every resolved channel counts against the original budget.
 The old proportional selector retains its original diagonal propagation.
 This is regional proportional-to-local-tensor bending memory, not arbitrary
 three-dimensional Prony plane-stress condensation, nonlinear wet-cane physics
