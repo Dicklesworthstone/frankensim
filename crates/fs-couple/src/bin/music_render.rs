@@ -38,6 +38,9 @@
 //! See `examples/REED_PERFORMANCES.md`; the legacy `reed` fixture is unchanged.
 //! `--self-contained` refuses external material/radiation artifacts and gas
 //! source packs before opening them; inline physical source data is unchanged.
+//! With repeated `--attached-source RELATIVE_PATH`, only those explicitly supplied
+//! files are snapshotted below the performance directory and available to material
+//! and radiation callbacks. Unlisted paths and external gas options remain refused.
 //!
 //! `music_render lip INPUT.performance OUT.wav [--block N]` renders a lip-valve performance
 //! (`fs_couple::brass_loop::performance`): a measured lip, a held bore of cylinders, cones and

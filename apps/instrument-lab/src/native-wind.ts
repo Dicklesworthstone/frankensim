@@ -2,7 +2,7 @@ import "./native-wind.css";
 // Canonical native fixtures, bundled verbatim by Vite; no copied physics defaults.
 import reedExampleSource from "../../../crates/fs-couple/examples/reed-two-medium-tone-hole.performance?raw";
 import flueExampleSource from "../../../crates/fs-couple/examples/flue-nolle.performance?raw";
-import { nativeWindStatus, renderNativeWind, type NativeWindStatus } from "./native-wind-client.mjs";
+import { nativeWindStatus, renderNativeWindBundle, type NativeWindStatus, type NativeWindAttachment } from "./native-wind-client.mjs";
 import { el } from "./util";
 
 const EXAMPLES = [
@@ -38,6 +38,10 @@ export function createNativeWindPanel(): HTMLElement {
     spellcheck: "false", autocapitalize: "off", autocomplete: "off", wrap: "off",
     "aria-describedby": "native-wind-source-help" });
   source.value = selectedExample.source;
+  // A textarea normalizes CRLF. Keep the loaded UTF-8 text until the user edits it.
+  let loadedSource = selectedExample.source;
+  let loadedEditorValue = source.value;
+  const currentSource = (): string => source.value === loadedEditorValue ? loadedSource : source.value;
   const sourceInfo = el("span", { class: "small muted" });
   const connection = el("span", { class: "nw-connection", role: "status", "aria-live": "polite" }, "Checking local renderer…");
   const result = el("p", { class: "nw-result small", role: "status", "aria-live": "polite", "aria-atomic": "true" });
@@ -46,13 +50,28 @@ export function createNativeWindPanel(): HTMLElement {
   const check = el("button", { type: "button", class: "btn" }, "Check renderer");
   const open = el("button", { type: "button", class: "btn" }, "Open performance…");
   const reset = el("button", { type: "button", class: "btn" }, "Reset example");
+  const attach = el("button", { type: "button", class: "btn" }, "Attach source files…");
+  const attachmentFile = el("input", { type: "file", multiple: "",
+    "aria-label": "Attach material packs or other referenced native source files" });
+  attachmentFile.hidden = true;
+  const decimate = el("input", { type: "checkbox", id: "native-wind-decimate" });
+  const decimation = el("label", { for: "native-wind-decimate", class: "small nw-decimation" }, decimate,
+    " Use native decimation for a performance above 48 kHz (mechanics keep their original clock)");
+  const attachmentList = el("div", { class: "nw-attachments" });
+  const attachmentInfo = el("p", { class: "small muted" });
+  const attachmentPanel = el("section", { "aria-label": "Attached source files" },
+    attachmentInfo, attachmentList);
+  type Attached = NativeWindAttachment & { sha256: string };
+  let attachments: Attached[] = [];
+  const attachmentIdentity = (): string => JSON.stringify(attachments.map(file => [file.path, file.sha256]));
   const file = el("input", { type: "file", accept: ".performance,.txt,text/plain",
     "aria-label": "Open a native wind performance" });
   file.hidden = true;
   const audio = el("audio", { controls: "", preload: "metadata", "aria-label": "Your native wind render" });
   const download = el("a", { class: "btn", download: "wind-render.wav" }, "Download WAV");
   const renderedFrom = el("p", { class: "small muted" });
-  const playback = el("div", { class: "nw-playback" }, audio, download, renderedFrom);
+  const renderedFiles = el("p", { class: "small muted nw-file-identities" });
+  const playback = el("div", { class: "nw-playback" }, audio, download, renderedFrom, renderedFiles);
   playback.hidden = true;
   cancel.hidden = true;
 
@@ -62,6 +81,8 @@ export function createNativeWindPanel(): HTMLElement {
   let loadingFile = false;
   let previewUrl: string | null = null;
   let renderedSource: string | null = null;
+  let renderedAttachmentIdentity: string | null = null;
+  let renderedDecimate = false;
   let sourceName = selectedExample.name;
 
   const controls = (): void => {
@@ -72,16 +93,20 @@ export function createNativeWindPanel(): HTMLElement {
     open.disabled = active || loadingFile;
     reset.disabled = active || loadingFile;
     starter.disabled = active || loadingFile;
+    attach.disabled = active || loadingFile;
+    decimate.disabled = active || loadingFile;
+    attachmentList.querySelectorAll<HTMLInputElement | HTMLButtonElement>("input,button")
+      .forEach(control => { control.disabled = active || loadingFile; });
     source.readOnly = active || loadingFile;
     source.setAttribute("aria-busy", String(active));
     render.textContent = active ? "Rendering…" : "Render WAV";
   };
   const edited = (): void => {
-    sourceInfo.textContent = `${sourceName} · ${new TextEncoder().encode(source.value).byteLength.toLocaleString()} bytes`;
+    sourceInfo.textContent = `${sourceName} · ${new TextEncoder().encode(currentSource()).byteLength.toLocaleString()} bytes`;
     if (renderedSource !== null) {
-      renderedFrom.textContent = source.value === renderedSource
-        ? "This WAV was rendered from the source currently shown."
-        : "This WAV is from your previous source. Render again to hear your edits.";
+      renderedFrom.textContent = currentSource() === renderedSource && attachmentIdentity() === renderedAttachmentIdentity && decimate.checked === renderedDecimate
+        ? "This WAV was rendered from the performance and source files currently shown."
+        : "This WAV is from your previous performance or source files. Render again to hear your edits.";
     }
     controls();
   };
@@ -92,6 +117,8 @@ export function createNativeWindPanel(): HTMLElement {
     download.removeAttribute("href");
     playback.hidden = true;
     renderedSource = null;
+    renderedAttachmentIdentity = null;
+    renderedFiles.textContent = "";
     if (previewUrl !== null) URL.revokeObjectURL(previewUrl);
     previewUrl = null;
   };
@@ -137,7 +164,10 @@ export function createNativeWindPanel(): HTMLElement {
   render.addEventListener("click", () => {
     if (!status?.available || status.busy || rendering || checking || loadingFile) return;
     const connected = status;
-    const submitted = source.value;
+    const submitted = currentSource();
+    const submittedFiles = attachments.map(file => ({ ...file }));
+    const submittedAttachmentIdentity = attachmentIdentity();
+    const submittedDecimate = decimate.checked;
     const controller = new AbortController();
     rendering = controller;
     audio.pause();
@@ -150,12 +180,17 @@ export function createNativeWindPanel(): HTMLElement {
     }, connected.timeoutMs + 5000);
     void (async () => {
       try {
-        const wave = await renderNativeWind(submitted, connected, controller.signal);
+        const wave = await renderNativeWindBundle(submitted, submittedFiles, connected, {decimate:submittedDecimate}, controller.signal);
         if (rendering !== controller || controller.signal.aborted) return;
         const nextUrl = URL.createObjectURL(wave);
         clearPreview();
         previewUrl = nextUrl;
         renderedSource = submitted;
+        renderedAttachmentIdentity = submittedAttachmentIdentity;
+        renderedDecimate = submittedDecimate;
+        renderedFiles.textContent = submittedFiles.length
+          ? "Rendered source files: " + submittedFiles.map(file => `${file.path} · ${file.bytes.byteLength.toLocaleString()} bytes · SHA-256 ${file.sha256}`).join("\n")
+          : "This render used no attached source files.";
         audio.src = nextUrl;
         download.href = nextUrl;
         download.download = `${sourceName.replace(/\.[^.]*$/, "") || "wind"}-render.wav`;
@@ -185,12 +220,17 @@ export function createNativeWindPanel(): HTMLElement {
   open.addEventListener("click", () => file.click());
   const loadExample = (): void => {
     source.value = selectedExample.source;
+    loadedSource = selectedExample.source;
+    loadedEditorValue = source.value;
     sourceName = selectedExample.name;
     introduction.textContent = selectedExample.intro;
     sourceHelp.textContent = selectedExample.help;
     canonical.href = exampleUrl(selectedExample.name);
-    showResult("Example loaded. Edit the source or render it.");
+    attachments = [];
+    decimate.checked = false;
+    drawAttachments();
     edited();
+    showResult("Example loaded. Edit the source or render it.");
   };
   reset.addEventListener("click", loadExample);
   starter.addEventListener("change", () => {
@@ -199,6 +239,56 @@ export function createNativeWindPanel(): HTMLElement {
     if (!selected) return;
     selectedExample = selected;
     loadExample();
+  });
+  const drawAttachments = (): void => {
+    attachmentInfo.textContent = attachments.length
+      ? `${attachments.length} source files · ${attachments.reduce((sum, file) => sum + file.bytes.byteLength, 0).toLocaleString()} bytes. Paths must match the performance exactly.`
+      : "Attach the original material packs or artifacts referenced by your performance. Keep their source paths; edit a path below when the description uses a subdirectory.";
+    attachmentList.replaceChildren();
+    for (const attached of attachments) {
+      const path = el("input", { type: "text", value: attached.path, spellcheck: "false",
+        "aria-label": `Source path for ${attached.path}` });
+      path.addEventListener("input", () => { attached.path = path.value; edited(); });
+      const remove = el("button", { type: "button", class: "btn" }, "Remove");
+      remove.addEventListener("click", () => {
+        attachments = attachments.filter(file => file !== attached);
+        drawAttachments(); edited();
+      });
+      attachmentList.append(el("div", { class: "nw-attachment" }, path,
+        el("span", { class: "small muted", title: `SHA-256 ${attached.sha256}` },
+          `${attached.bytes.byteLength.toLocaleString()} bytes · ${attached.sha256.slice(0, 12)}…`), remove));
+    }
+    controls();
+  };
+  decimate.addEventListener("change", edited);
+  attach.addEventListener("click", () => attachmentFile.click());
+  attachmentFile.addEventListener("change", () => {
+    const selected = Array.from(attachmentFile.files ?? []);
+    attachmentFile.value = "";
+    if (!selected.length || rendering || loadingFile) return;
+    const maxFiles = Math.min(32, status?.maximumAttachments ?? 32);
+    const maxFileBytes = Math.min(8 * 1024 * 1024, status?.maximumAttachmentFileBytes ?? 8 * 1024 * 1024);
+    const maxBytes = Math.min(32 * 1024 * 1024, status?.maximumAttachmentBytes ?? 32 * 1024 * 1024);
+    const total = attachments.reduce((sum, file) => sum + file.bytes.byteLength, 0)
+      + selected.reduce((sum, file) => sum + file.size, 0);
+    if (attachments.length + selected.length > maxFiles || total > maxBytes
+        || selected.some(file => !file.size || file.size > maxFileBytes)) {
+      showResult(`Choose at most ${maxFiles} nonempty files, ${maxFileBytes.toLocaleString()} bytes per file and ${maxBytes.toLocaleString()} bytes combined.`, true);
+      return;
+    }
+    loadingFile = true; controls();
+    void Promise.all(selected.map(async file => {
+      const buffer = await file.arrayBuffer();
+      const digest = await crypto.subtle.digest("SHA-256", buffer);
+      const sha256 = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+      return {path:file.name, bytes:new Uint8Array(buffer), sha256};
+    })).then(added => {
+      attachments.push(...added);
+      drawAttachments(); edited();
+      showResult("Source files attached. Check that each path matches the performance, then render.");
+    }).catch(() => {
+      showResult("Source files could not be read. Your previous attachments are unchanged.", true);
+    }).finally(() => { loadingFile = false; controls(); });
   });
   file.addEventListener("change", () => {
     const selected = file.files?.[0];
@@ -212,8 +302,10 @@ export function createNativeWindPanel(): HTMLElement {
     loadingFile = true;
     controls();
     void selected.arrayBuffer().then((bytes) => {
-      const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
       source.value = text;
+      loadedSource = text;
+      loadedEditorValue = source.value;
       sourceName = selected.name;
       showResult("Performance loaded. Edit the source or render it.");
       edited();
@@ -243,15 +335,16 @@ export function createNativeWindPanel(): HTMLElement {
     el("details", { class: "nw-help small" },
       el("summary", {}, "About the source and local renderer"),
       sourceHelp,
-      el("p", {}, "The local renderer accepts self-contained frankensim-reed-performance-v1, frankensim-flue-performance-v1 and frankensim-flue-dg-performance-v1 descriptions. File-backed material and valve packs, and DG sources requiring --decimate, need the command-line workflow."),
+      el("p", {}, "Reed, flue and material-valve descriptions use the original native loader. Attach the exact material packs and artifacts named by the source, including subdirectory paths. Changing a pack changes its physical properties; missing data and unsupported states remain native refusals. Keep the same declared pressure scale when comparing renders."),
       el("p", {}, "Rendering uses the local music_render executable. The hosted review page can show and edit the source; audio is available when you open it through the local renderer server."),
       el("p", {}, canonical,
         " · ", el("a", { href: "https://github.com/Dicklesworthstone/frankensim/tree/main/apps/instrument-lab#native-wind-renderer", target: "_blank", rel: "noopener" }, "Local renderer setup"))),
     el("div", { class: "nw-source-head" }, el("label", { for: "native-wind-source" }, "Performance source"),
       sourceInfo),
-    source,
-    el("div", { class: "btn-row nw-actions" }, render, cancel, open, reset, check, file),
+    source, attachmentPanel, decimation,
+    el("div", { class: "btn-row nw-actions" }, render, cancel, open, attach, reset, check, file, attachmentFile),
     result, playback);
+  drawAttachments();
   edited();
   void checkConnection();
   return panel;

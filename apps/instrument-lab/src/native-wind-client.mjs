@@ -68,6 +68,18 @@ async function boundedWave(response, maximumBytes) {
 }
 
 export async function renderNativeWind(source, status, signal, request = globalThis.fetch) {
+  return sendNativeWind(source, [], status, {}, signal, request);
+}
+
+/** Exact attached source files; the native loader remains the material authority. */
+export async function renderNativeWindBundle(source, attachments, status, options = {}, signal, request = globalThis.fetch) {
+  return sendNativeWind(source, attachments, status, options, signal, request);
+}
+
+async function sendNativeWind(source, attachments, status, options, signal, request) {
+  if (options.decimate !== undefined && typeof options.decimate !== 'boolean') {
+    throw new Error("Choose whether to use native decimation explicitly.");
+  }
   if (!status.available) throw new Error("The native renderer is unavailable on this host.");
   if (typeof status.token !== "string" || status.token.length === 0) {
     throw new Error("Check the native renderer connection before rendering.");
@@ -79,11 +91,34 @@ export async function renderNativeWind(source, status, signal, request = globalT
   if (bytes.byteLength > status.maximumSourceBytes) {
     throw new Error("The performance description exceeds the renderer's source limit.");
   }
+  let body = bytes, contentType = "text/plain;charset=utf-8";
+  if (attachments.length || options.decimate) {
+    if (![status.maximumAttachments, status.maximumAttachmentFileBytes,
+      status.maximumAttachmentBytes, status.maximumRequestBytes].every(positiveInteger)) {
+      throw new Error("This local renderer does not support attached source files. Update the local server.");
+    }
+    if (attachments.length > status.maximumAttachments) throw new Error("Too many source attachments.");
+    let total = 0;
+    const files = attachments.map(file => {
+      if (typeof file.path !== "string" || !(file.bytes instanceof Uint8Array) || !file.bytes.byteLength
+        || file.bytes.byteLength > status.maximumAttachmentFileBytes) {
+        throw new Error("Each attachment needs its source path and nonempty bytes within the per-file limit.");
+      }
+      total += file.bytes.byteLength;
+      if (total > status.maximumAttachmentBytes) throw new Error("Source attachments exceed the combined byte limit.");
+      return {path:file.path, bytes:base64(file.bytes)};
+    });
+    body = JSON.stringify({format:"frankensim-native-wind-input-v1", source:base64(bytes), attachments:files, decimate:options.decimate ?? false});
+    contentType = "application/json;charset=utf-8";
+    if (new TextEncoder().encode(body).byteLength > status.maximumRequestBytes) {
+      throw new Error("The complete experiment exceeds the renderer's request limit.");
+    }
+  }
   const response = await request(RENDER_URL, {
     method: "POST", signal, cache: "no-store", credentials: "same-origin",
-    headers: { "Content-Type": "text/plain;charset=utf-8", Accept: "audio/wav, application/json",
+    headers: { "Content-Type": contentType, Accept: "audio/wav, application/json",
       "X-Native-Wind-Token": status.token },
-    body: bytes,
+    body,
   });
   if (!response.ok) throw new Error(await refusal(response));
   if (response.headers.get("content-type")?.split(";")[0]?.trim() !== "audio/wav") {
@@ -91,4 +126,13 @@ export async function renderNativeWind(source, status, signal, request = globalT
     throw new Error("The native renderer returned an unexpected response instead of audio.");
   }
   return boundedWave(response, status.maximumOutputBytes);
+}
+
+// Keep encoding bounded without spreading a large binary array on the call stack.
+function base64(bytes) {
+  let binary = "";
+  for (let start = 0; start < bytes.length; start += 32768) {
+    binary += String.fromCharCode(...bytes.subarray(start, start + 32768));
+  }
+  return btoa(binary);
 }

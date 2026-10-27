@@ -61,8 +61,8 @@ changed gets a new URL, so no visitor pairs new code with an hour-old `strandbar
 
 ## Native wind renderer
 
-The instrument-family section can also edit and render a self-contained wind
-performance with the existing **native `music_render wind` solver**. Build the
+The instrument-family section can edit and render wind performances with their
+original material packs using the existing **native `music_render wind` solver**. Build the
 local executable and the app, then serve that app through the optional loopback
 companion. From the repository root:
 
@@ -86,27 +86,56 @@ measured clarinet or oboe. The starter selector also opens the canonical
 `flue-nolle.performance`, whose `jet_transfer` record chooses the same native
 Nolle/Price source. Its mechanical and output clocks remain part of the native
 description. Both starters are numerical examples, not measured instruments.
-The text-only route admits self-contained `frankensim-flue-performance-v1` and
-`frankensim-flue-dg-performance-v1` sources. Pack-backed flue/valve and material
-string performances remain native CLI inputs: this first route carries no
-external material packs or radiation artifacts.
-DG inputs whose mechanical clock requires the explicit native `--decimate`
-option also use the CLI. The Nolle starter already declares separate mechanical
-and output clocks, which its native observer handles directly.
+
+The same panel accepts the original reed, flue, plate-valve and material-modal
+valve source formats, including `frankensim-material-modal-dg-valve-v1`.
+Use **Attach source files…** to supply the original binary material packs or
+artifacts referenced by the performance. Each displayed path must match the
+source exactly; edit it to retain a nested path such as `materials/reed.fsmcdpk`.
+A different wall or reed pack therefore reaches the native material resolver
+without translating its properties into browser parameters. The shared
+`dg_wall` declarations use this route too.
+
+The panel retains selected bytes and shows their SHA-256 identities. Each WAV
+records the submitted file identities in its playback details; changing a
+source path, file or performance marks the existing WAV as an older result.
+Keep the declared pressure-to-PCM scale fixed when comparing material variants.
+For a DG performance whose source clock is above 48 kHz, select **Use native decimation**.
+This passes the native `--decimate` option: mechanical integration retains the declared
+clock and the existing native downsampler produces the 48 kHz WAV. The adapter never
+rewrites the source clock or chooses a lower-resolution physics model.
+The Nolle starter already declares separate mechanical and output clocks,
+which its native observer handles directly.
+Playback never peak-normalizes or retunes the native result. Original model
+limits and missing-source refusals still apply; attaching a pack does not
+qualify an instrument as measured or realistic.
+
+Material-string performances and thermochemical CLI options such as
+`--gas-component` remain separate native workflows. This panel supplies the
+exact files referenced by wind descriptions; it does not infer gas-component
+associations, source coefficients or physical defaults.
 
 The companion passes the exact UTF-8 bytes to one configured executable as
-`music_render wind INPUT.performance OUT.wav --self-contained`, with a private
-working directory and fixed arguments. The native loader enforces the absence
-of external source files, including optional `dg_wall` declarations; an older
-executable that lacks this option must be rebuilt. The companion does not parse
-physical parameters, retune notes, change
+`music_render wind INPUT.performance OUT.wav --self-contained`, with a private working directory
+and fixed arguments (plus `--decimate` only when explicitly selected). Attached files are written byte-for-byte beneath that
+private directory at their declared relative paths. Each is explicitly allowed
+with `--attached-source RELATIVE_PATH`; the native loader snapshots only these
+files before parsing, and both material and radiation callbacks read only that
+byte map. Unlisted paths stay refused, including when a referenced file exists
+elsewhere on the host. Rebuild `music_render` for these options; older binaries
+refuse rather than weaken the file policy.
+
+The companion does not parse physical parameters, retune notes, change
 PCM gain, synthesize fallback audio or run a shell. Playback becomes available
 only after successful native execution and a complete 48 kHz mono PCM16 WAV.
 Source or solver refusals remain visible; cancellation terminates the native
 child and removes that job's temporary files.
 
-The local adapter admits one render at a time, at most 1 MiB of source, 16 MiB of
-WAV, 256 KiB of process diagnostics and 60 seconds per request. These are local
+The local adapter admits one render at a time, at most 1 MiB of source, 32 attached
+files (8 MiB each, 32 MiB combined), 16 MiB of WAV, 256 KiB of process diagnostics
+and 60 seconds per request. A versioned JSON/base64 envelope carries attachments;
+its complete encoded size is bounded before decoding, and the original text
+request remains supported. These are local
 execution budgets, not physical acceptance criteria. Host/Origin checks and a
 per-session request token restrict execution to the same local app. Only files
 inside the selected built app are served; there is no command or filesystem API.

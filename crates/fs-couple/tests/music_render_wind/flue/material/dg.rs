@@ -151,7 +151,15 @@ fn sourced_dg_wall_reaches_the_actual_cli_microphone_and_pcm_owner() {
     let output = dir.join("flue-dg-wall.wav");
     success(run(&path, &output, 37, true));
     assert_eq!(std::fs::read(&output).unwrap(), expected);
+    let restricted = dir.join("flue-dg-wall-attached.wav");
+    success(std::process::Command::new(env!("CARGO_BIN_EXE_music_render"))
+        .arg("wind").arg(&path).arg(&restricted)
+        .args(["--block", "37", "--decimate", "--self-contained",
+            "--attached-source", "wall.fsmcdpk"]).output().unwrap());
+    assert_eq!(std::fs::read(&restricted).unwrap(), expected,
+        "explicit source snapshots must retain the original physical PCM");
     let metadata = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
+    assert_eq!(std::fs::read_to_string(restricted.with_extension("provenance.json")).unwrap(), metadata);
     for token in [
         "\"solid_wall\":{",
         "\"loss\":\"kelvin-voigt\"",

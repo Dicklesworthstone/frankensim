@@ -235,3 +235,37 @@ mod dg;
 
 #[path = "music_render_wind/flue_dg.rs"]
 mod flue_dg;
+
+
+#[test]
+fn attached_materials_are_explicit_and_cannot_enable_ambient_source_callbacks() {
+    let dir = directory();
+    let input = dir.join("attached-wall.performance");
+    let source = include_str!("../examples/flue-dg.performance").replace("\nflue ",
+        "\ndg_wall isotropic wall.pack 293.15 1000 0.001 stress-free 50 2000 elastic\nflue ");
+    std::fs::write(&input, source).unwrap();
+    std::fs::write(dir.join("wall.pack"), b"original malformed pack, for loader admission only").unwrap();
+    std::fs::write(dir.join("other.pack"), b"unrelated source").unwrap();
+    for (index, flags, expected) in [
+        (0, vec!["--attached-source", "wall.pack"], "--attached-source requires --self-contained"),
+        (1, vec!["--self-contained", "--attached-source", "other.pack"],
+            "--self-contained refuses external material-card pack"),
+        (2, vec!["--self-contained", "--attached-source", "wall.pack"], "material-card pack"),
+        (3, vec!["--self-contained", "--attached-source", "../wall.pack"], "relative path"),
+        (4, vec!["--self-contained", "--attached-source", "wall.pack",
+            "--attached-source", "wall.pack"], "duplicate --attached-source"),
+    ] {
+        let output = dir.join(format!("attached-refusal-{index}.wav"));
+        let result = Command::new(env!("CARGO_BIN_EXE_music_render"))
+            .arg("wind").arg(&input).arg(&output).arg("--decimate").args(flags).output().unwrap();
+        assert!(!result.status.success());
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(stderr.contains(expected), "{stderr}");
+        if index == 2 {
+            assert!(!stderr.contains("--self-contained refuses"), "{stderr}");
+            assert!(!stderr.contains("open failed"), "{stderr}");
+        }
+        assert!(!output.exists());
+        assert!(!output.with_extension("provenance.json").exists());
+    }
+}

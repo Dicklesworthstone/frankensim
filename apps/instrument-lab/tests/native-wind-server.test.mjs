@@ -7,9 +7,13 @@ import {tmpdir} from 'node:os';
 import {join, isAbsolute} from 'node:path';
 import http from 'node:http';
 import {createNativeWindServer} from '../tools/serve-native-wind.mjs';
-import {MAX_SOURCE_BYTES, validateSource} from '../tools/native-wind-protocol.mjs';
+import {MAX_SOURCE_BYTES, MAX_ATTACHMENTS, MAX_ATTACHMENT_FILE_BYTES, validateInput, validateSource} from '../tools/native-wind-protocol.mjs';
 
 const source = (mode = 'ok') => Buffer.from(`frankensim-reed-performance-v1\r\n${mode}\r\n# UTF-8: 音; $() '--help'\r\n`);
+const bundle = (bytes = source(), files = []) => Buffer.from(JSON.stringify({
+  format:'frankensim-native-wind-input-v1', source:bytes.toString('base64'),
+  attachments:files.map(([path, bytes]) => ({path, bytes:bytes.toString('base64')})),
+}));
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(fn) { for (let i = 0; i < 400; i++) { if (await fn()) return; await pause(10); } throw new Error('Timed out waiting for test condition.'); }
 async function setup(options = {}) {
@@ -20,9 +24,12 @@ async function setup(options = {}) {
 // Synthetic process fixture: never presented as native physics.
 import {readFileSync, writeFileSync, statSync} from 'node:fs';
 const args = process.argv.slice(2), input = readFileSync(args[1]);
-writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({args, cwd:process.cwd(), bytes:input.toString('base64'), pid:process.pid,
+const text = input.toString(), requested = /^# read-files (.+)$/m.exec(text);
+const files = requested ? JSON.parse(requested[1]).map(path => ({
+ path, bytes:readFileSync(path).toString('base64'), mode:statSync(path).mode & 0o777,
+})) : [];
+writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({args, cwd:process.cwd(), bytes:input.toString('base64'), files, pid:process.pid,
  directoryMode:statSync(process.cwd()).mode & 0o777, sourceMode:statSync(args[1]).mode & 0o777}));
-const text = input.toString();
 if (text.includes('test-refuse')) { console.error('synthetic parser refusal'); process.exit(2); }
 if (text.includes('test-log')) { process.stderr.write(Buffer.alloc(300000, 120)); await new Promise(() => setInterval(() => {}, 1000)); }
 if (text.includes('test-hang')) { process.on('SIGTERM', () => {}); await new Promise(() => setInterval(() => {}, 1000)); }
@@ -42,16 +49,17 @@ writeFileSync(args[2], wav);
   const initial = await status();
   const run = (bytes = source(), extra = {}) => fetch(url + '/api/native-wind/render', {method:'POST',
     headers:{'Content-Type':'text/plain;charset=utf-8', 'X-Native-Wind-Token':initial.token}, body:bytes, ...extra});
-  return {...app, url, dir, receipt, tempRoot, status, initial, run,
+  const runBundle = bytes => run(bytes, {headers:{'Content-Type':'application/json', 'X-Native-Wind-Token':initial.token}});
+  return {...app, url, dir, receipt, tempRoot, status, initial, run, runBundle,
     async cleanup() { await app.shutdown(); await rm(dir, {recursive:true, force:true}); }};
 }
 const native = {skip:process.platform === 'win32'};
 
-test('transport retains exact UTF-8 and admits supported native source families', () => {
+test('transport retains exact UTF-8 and admits the original native wind source families', () => {
   const bytes = source(); assert.equal(validateSource(bytes), bytes);
   const flute = Buffer.from('frankensim-flue-dg-performance-v1\nopaque'); assert.equal(validateSource(flute), flute);
   const nolle = Buffer.from('frankensim-flue-performance-v1\nopaque'); assert.equal(validateSource(nolle), nolle);
-  for (const bad of [Buffer.alloc(0), Buffer.from([0xff]), Buffer.from('frankensim-material-modal-valve-v1\nsection /etc/passwd'), Buffer.alloc(MAX_SOURCE_BYTES + 1)])
+  for (const bad of [Buffer.alloc(0), Buffer.from([0xff]), Buffer.from('frankensim-material-strings-v1\nunsupported'), Buffer.alloc(MAX_SOURCE_BYTES + 1)])
     assert.throws(() => validateSource(bad));
   assert.throws(() => createNativeWindServer({engine:'relative-executable'}), /absolute/);
 });
@@ -70,7 +78,7 @@ test('loopback status/static service, token, origin and confined assets', native
       {headers:{Host:'attacker.example'}}, res => {res.resume(); resolve(res.statusCode);}));
     assert.equal(forbiddenHost, 403);
     assert.equal((await app.run(source(), {headers:{'Content-Type':'text/plain'}})).status, 403);
-    assert.equal((await app.run(source(), {headers:{'Content-Type':'application/json', 'X-Native-Wind-Token':app.initial.token}})).status, 415);
+    assert.equal((await app.run(source(), {headers:{'Content-Type':'application/octet-stream', 'X-Native-Wind-Token':app.initial.token}})).status, 415);
     assert.equal((await fetch(app.url + '/api/execute')).status, 404);
   } finally { await app.cleanup(); }
 });
@@ -192,4 +200,96 @@ test('timeout, browser abort and shutdown kill the child and remove its private 
       assert.throws(() => process.kill(record.pid, 0)); assert.deepEqual(await readdir(app.tempRoot), []);
     } finally { await app.cleanup(); }
   }
+});
+
+test('material valve source and nested binary packs reach the native process without translation', native, async () => {
+  const app = await setup();
+  try {
+    const paths = ['materials/reed.fsmcdpk', 'materials/wall.fsmcdpk'];
+    const bytes = Buffer.from('frankensim-material-modal-dg-valve-v1\n# read-files ' + JSON.stringify(paths) + '\n# µ source\n');
+    const first = Buffer.from([0, 255, 128, 13, 10, 39, 36, 40, 41]);
+    const second = Buffer.from('independent source material bytes');
+    assert.equal(app.initial.maximumAttachments, MAX_ATTACHMENTS);
+    assert.equal(app.initial.maximumAttachmentFileBytes, MAX_ATTACHMENT_FILE_BYTES);
+    const response = await app.runBundle(bundle(bytes, [[paths[0], first], [paths[1], second]]));
+    assert.equal(response.status, 200);
+    assert.equal((await response.arrayBuffer()).byteLength, 48);
+    const record = JSON.parse(await readFile(app.receipt, 'utf8'));
+    assert.equal(record.bytes, bytes.toString('base64'));
+    assert.deepEqual(record.files, [
+      {path:paths[0], bytes:first.toString('base64'), mode:0o600},
+      {path:paths[1], bytes:second.toString('base64'), mode:0o600},
+    ]);
+    assert.equal(record.args[0], 'wind');
+    assert.deepEqual(record.args.slice(3), ['--self-contained', '--attached-source', paths[0], '--attached-source', paths[1]]);
+    await until(async () => !(await app.status()).busy);
+    assert.deepEqual(await readdir(app.tempRoot), []);
+    // A material swap is only a source-byte change; no CLI flags or PCM gain change.
+    const replacement = Buffer.from([91, 4, 3, 2, 1, 0]);
+    assert.equal((await app.runBundle(bundle(bytes, [[paths[0], replacement], [paths[1], second]]))).status, 200);
+    const swapped = JSON.parse(await readFile(app.receipt, 'utf8'));
+    assert.equal(swapped.files[0].bytes, replacement.toString('base64'));
+    assert.equal(swapped.bytes, record.bytes); assert.equal(swapped.args.length, 8);
+  } finally { await app.cleanup(); }
+});
+
+test('attachment envelopes refuse traversal, collisions, malformed bytes and excess files before execution', native, async () => {
+  const app = await setup();
+  try {
+    const one = Buffer.from([1,2,3]);
+    for (const path of ['../outside', '/absolute', 'a/../b', 'a//b', 'a\\b', 'a:b',
+      '.hidden', 'a/.hidden', 'a b', '-flag', 'input.performance', 'output.wav', 'output.provenance.json', 'input.performance/child']) {
+      const response = await app.runBundle(bundle(source(), [[path, one]]));
+      assert.equal(response.status, 400, path);
+    }
+    for (const paths of [['same', 'same'], ['parent', 'parent/child'], ['parent/child', 'parent']]) {
+      assert.equal((await app.runBundle(bundle(source(), paths.map(path => [path, one])))).status, 400);
+    }
+    const malformed = JSON.parse(bundle().toString());
+    for (const bytes of ['AA=A', 'AB==', 'abc', '!!!!', '']) {
+      malformed.attachments = [{path:'wall.fsmcdpk', bytes}];
+      assert.equal((await app.runBundle(Buffer.from(JSON.stringify(malformed)))).status, 400);
+    }
+    assert.equal((await app.runBundle(bundle(source(), Array.from({length:MAX_ATTACHMENTS+1}, (_, i) => [String(i), one])))).status, 400);
+    await assert.rejects(readFile(app.receipt), {code:'ENOENT'});
+    assert.deepEqual(await readdir(app.tempRoot), []);
+  } finally { await app.cleanup(); }
+});
+
+test('native missing-file refusal is visible and failed source jobs keep no attachments', native, async () => {
+  const app = await setup();
+  try {
+    const bytes = Buffer.from('frankensim-material-modal-dg-valve-v1\n# read-files ["missing.fsmcdpk"]\n');
+    const response = await app.runBundle(bundle(bytes, [['different.fsmcdpk', Buffer.from([1])]]));
+    assert.equal(response.status, 400); assert.match((await response.json()).error, /Native renderer refused/);
+    assert.deepEqual(await readdir(app.tempRoot), []);
+  } finally { await app.cleanup(); }
+});
+
+test('source and per-file byte budgets apply to the decoded attachment envelope', () => {
+  const packet = bundle(source(), [['wall.fsmcdpk', Buffer.alloc(MAX_ATTACHMENT_FILE_BYTES + 1, 7)]]);
+  assert.throws(() => validateInput(packet, true), /byte limit|base64/);
+  assert.throws(() => validateInput(bundle(Buffer.alloc(MAX_SOURCE_BYTES + 1, 97)), true), /byte limit|base64/);
+  assert.throws(() => validateInput(Buffer.from([0xff]), true), /UTF-8 JSON/);
+});
+
+test('native decimation is explicit while original source clocks and bytes stay unchanged', native, async () => {
+  const app = await setup();
+  try {
+    const bytes = Buffer.from('frankensim-flue-dg-performance-v1\nconfig 96000 96 37 0.2 1e-5\n');
+    const packet = JSON.parse(bundle(bytes).toString());
+    packet.decimate = true;
+    const response = await app.runBundle(Buffer.from(JSON.stringify(packet)));
+    assert.equal(response.status, 200);
+    assert.equal((await response.arrayBuffer()).byteLength, 48);
+    const record = JSON.parse(await readFile(app.receipt, 'utf8'));
+    assert.equal(record.bytes, bytes.toString('base64'));
+    assert.deepEqual(record.args.slice(3), ['--self-contained', '--decimate']);
+    for (const value of [1, 'true', null]) {
+      packet.decimate = value;
+      assert.throws(() => validateInput(Buffer.from(JSON.stringify(packet)), true), /decimation/);
+    }
+    delete packet.decimate; packet.gain = 2;
+    assert.throws(() => validateInput(Buffer.from(JSON.stringify(packet)), true), /unsupported fields/);
+  } finally { await app.cleanup(); }
 });

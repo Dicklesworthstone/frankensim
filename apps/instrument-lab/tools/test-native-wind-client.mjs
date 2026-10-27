@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { nativeWindStatus, renderNativeWind } from "../src/native-wind-client.mjs";
+import { nativeWindStatus, renderNativeWind, renderNativeWindBundle } from "../src/native-wind-client.mjs";
 
 const status = { available: true, busy: false, token: "test-session",
   maximumSourceBytes: 1_048_576, maximumOutputBytes: 16_777_216, timeoutMs: 60_000 };
@@ -117,4 +117,49 @@ test("cancellation reaches the in-flight native request", async () => {
   });
   controller.abort();
   await assert.rejects(pending, { name: "AbortError" });
+});
+
+test("binary source bundles retain exact material bytes, paths, performance and WAV amplitude", async () => {
+  const extended = {...status, maximumAttachments:32, maximumAttachmentFileBytes:8*1024*1024,
+    maximumAttachmentBytes:32*1024*1024, maximumRequestBytes:48*1024*1024};
+  const source = "frankensim-material-modal-dg-valve-v1\n# µ native data\n";
+  const bytes = Uint8Array.from({length:130001}, (_, i) => i % 256);
+  const expected = wave(); expected[44] = 0x9a; expected[45] = 0x37;
+  const result = await renderNativeWindBundle(source, [{path:"packs/reed.fsmcdpk", bytes}], extended, {}, undefined, async (url, options) => {
+    assert.equal(url, "/api/native-wind/render");
+    assert.equal(options.headers["Content-Type"], "application/json;charset=utf-8");
+    assert.equal(options.headers["X-Native-Wind-Token"], status.token);
+    const packet = JSON.parse(options.body);
+    assert.equal(packet.format, "frankensim-native-wind-input-v1");
+    assert.deepEqual(Buffer.from(packet.source, "base64"), Buffer.from(source));
+    assert.equal(packet.attachments[0].path, "packs/reed.fsmcdpk");
+    assert.deepEqual(Buffer.from(packet.attachments[0].bytes, "base64"), Buffer.from(bytes));
+    return audio(expected);
+  });
+  assert.deepEqual(new Uint8Array(await result.arrayBuffer()), expected);
+});
+
+test("attachment limits and older servers refuse without discarding a selected material", async () => {
+  const attachment = {path:"wall.fsmcdpk", bytes:new Uint8Array([1, 2, 3])};
+  const never = async () => assert.fail("invalid attachment request must not be sent");
+  await assert.rejects(renderNativeWindBundle("source", [attachment], status, {}, undefined, never), /does not support/);
+  const extended = {...status, maximumAttachments:1, maximumAttachmentFileBytes:4, maximumAttachmentBytes:4,
+    maximumRequestBytes:1024};
+  await assert.rejects(renderNativeWindBundle("source", [attachment, attachment], extended, {}, undefined, never), /Too many/);
+  await assert.rejects(renderNativeWindBundle("source", [{...attachment, bytes:new Uint8Array(5)}], extended, {}, undefined, never), /per-file limit/);
+  await assert.rejects(renderNativeWindBundle("source", [attachment], {...extended, maximumAttachmentBytes:2}, {}, undefined, never), /combined byte limit/);
+  await assert.rejects(renderNativeWindBundle("source", [attachment], {...extended, maximumRequestBytes:8}, {}, undefined, never), /request limit/);
+});
+
+test("higher mechanical clocks request the original native decimator without modifying source or WAV", async () => {
+  const connected = {...status, maximumAttachments:32, maximumAttachmentFileBytes:8388608,
+    maximumAttachmentBytes:33554432, maximumRequestBytes:48000000};
+  const source = "frankensim-flue-dg-performance-v1\noriginal high-clock source";
+  await renderNativeWindBundle(source, [], connected, {decimate:true}, undefined, async (_url, options) => {
+    const packet = JSON.parse(options.body);
+    assert.equal(packet.decimate, true);
+    assert.deepEqual(packet.attachments, []);
+    assert.equal(Buffer.from(packet.source, "base64").toString(), source);
+    return audio();
+  });
 });

@@ -1,4 +1,5 @@
 //! File-driven wind sources through the shared pressure and WAV owners.
+mod attachments;
 use std::io::{Read, Write};
 use std::path::Path;
 use fs_blake3::ContentHash;
@@ -33,12 +34,13 @@ fn opening_loss_provenance<'a>(
     format!(",\"opening_losses\":[{records}],\"opening_loss_scope\":\"same-sample symmetric quasi-steady separation in series with original local radiation; no vortex memory, directional pressure recovery or measured instrument coefficient\"")
 }
 
-fn options(args: &[String]) -> Result<(&str, &str, usize, bool, ObservationPolicy, Option<&str>, bool), String> {
+fn options(args: &[String]) -> Result<(&str, &str, usize, bool, ObservationPolicy, Option<&str>, bool, Vec<&str>), String> {
     let mut paths = Vec::new();
     let mut flows = None;
     let mut block = None;
     let mut decimate = false;
     let mut self_contained = false;
+    let mut attached_sources = Vec::new();
     let mut policy = ObservationPolicy::Diagnostic;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -46,6 +48,14 @@ fn options(args: &[String]) -> Result<(&str, &str, usize, bool, ObservationPolic
             "--self-contained" => {
                 if self_contained { return Err("--self-contained may only be supplied once".into()); }
                 self_contained = true;
+            }
+            "--attached-source" => {
+                let path = iter.next().map(String::as_str).filter(|value| !value.starts_with('-'))
+                    .ok_or_else(|| "--attached-source needs a relative source path".to_string())?;
+                if attached_sources.len() == attachments::MAX_FILES {
+                    return Err("--attached-source allows at most 32 files".into());
+                }
+                attached_sources.push(path);
             }
             "--acceptance" => {
                 if policy == ObservationPolicy::Acceptance { return Err("--acceptance may only be supplied once".into()); }
@@ -72,10 +82,13 @@ fn options(args: &[String]) -> Result<(&str, &str, usize, bool, ObservationPolic
             value => paths.push(value),
         }
     }
+    if !attached_sources.is_empty() && !self_contained {
+        return Err("--attached-source requires --self-contained".into());
+    }
     let [input, output] = paths.as_slice() else {
-        return Err("usage: music_render wind INPUT.performance OUT.wav [--block N] [--decimate] [--acceptance] [--aperture-flows FLOWS] [--self-contained]".into());
+        return Err("usage: music_render wind INPUT.performance OUT.wav [--block N] [--decimate] [--acceptance] [--aperture-flows FLOWS] [--self-contained [--attached-source RELATIVE_PATH]...]".into());
     };
-    Ok((*input, *output, block.unwrap_or(512), decimate, policy, flows, self_contained))
+    Ok((*input, *output, block.unwrap_or(512), decimate, policy, flows, self_contained, attached_sources))
 }
 
 // A physical propagation delay is source geometry, not an output/filter latency
@@ -917,7 +930,7 @@ pub(super) fn run_with_gas_sources(
     args: &[String],
     sources: Option<&ThermochemicalSources<'_>>,
 ) -> Result<(), String> {
-    let (input, output, block, decimate, policy, flows, self_contained) = options(args)?;
+    let (input, output, block, decimate, policy, flows, self_contained, attached_names) = options(args)?;
     let output = Path::new(output);
     let sidecar = output.with_extension("provenance.json");
     if output == sidecar.as_path() || output.exists() || sidecar.exists() {
@@ -936,11 +949,15 @@ pub(super) fn run_with_gas_sources(
     file.take((MAX_PLATE_VALVE_PERFORMANCE_BYTES + 1) as u64).read_to_end(&mut bytes)
         .map_err(|e| format!("wind input read failed: {e}"))?;
     let parent = Path::new(input).parent().unwrap_or(Path::new("."));
+    let attached_sources = attachments::AttachedSources::load(parent, &attached_names)?;
     let loaded = load_with_all_sources(&bytes, block, policy, sources, |name| {
-        // Admission belongs at the shared source callback: any current or future
-        // physical record that requests a pack must refuse before filesystem I/O.
+        // Restricted callbacks can only read eagerly admitted input snapshots.
+        // A missing name never falls through to ambient filesystem access.
         if self_contained {
-            return Err(format!("--self-contained refuses external material-card pack {name:?}"));
+            let pack_bytes = attached_sources.get(name).ok_or_else(||
+                format!("--self-contained refuses external material-card pack {name:?}"))?;
+            return NormalizedMaterialCardPack::from_bytes(pack_bytes)
+                .map_err(|e| format!("material-card pack {name:?}: {e}"));
         }
         let file = std::fs::File::open(parent.join(name))
             .map_err(|e| format!("material-card pack {name:?} open failed: {e}"))?;
@@ -954,7 +971,8 @@ pub(super) fn run_with_gas_sources(
             .map_err(|e| format!("material-card pack {name:?}: {e}"))
     }, |name| {
         if self_contained {
-            return Err(format!("--self-contained refuses external radiation artifact {name:?}"));
+            return attached_sources.get(name).map(<[u8]>::to_vec).ok_or_else(||
+                format!("--self-contained refuses external radiation artifact {name:?}"));
         }
         let file = std::fs::File::open(parent.join(name))
             .map_err(|e| format!("MIMO radiation artifact {name:?} open failed: {e}"))?;

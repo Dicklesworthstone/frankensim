@@ -1,6 +1,6 @@
 // Optional loopback companion: serve a built Instrument Lab and the existing native wind CLI.
 import http from 'node:http';
-import {access, lstat, mkdtemp, open, realpath, rm, stat, writeFile} from 'node:fs/promises';
+import {access, lstat, mkdir, mkdtemp, open, realpath, rm, stat, writeFile} from 'node:fs/promises';
 import {constants, createReadStream} from 'node:fs';
 import {spawn} from 'node:child_process';
 import {randomBytes} from 'node:crypto';
@@ -8,7 +8,8 @@ import {tmpdir} from 'node:os';
 import {dirname, extname, isAbsolute, join, relative, resolve, sep} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {DEFAULT_TIMEOUT_MS, MAX_LOG_BYTES, MAX_OUTPUT_BYTES, MAX_SOURCE_BYTES,
-  NativeWindError, SUPPORTED_SCHEMAS, validateSource, validateWave} from './native-wind-protocol.mjs';
+  MAX_ATTACHMENTS, MAX_ATTACHMENT_FILE_BYTES, MAX_ATTACHMENT_BYTES, MAX_REQUEST_BYTES,
+  NativeWindError, SUPPORTED_SCHEMAS, validateInput, validateWave} from './native-wind-protocol.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const types = {'.html':'text/html; charset=utf-8', '.js':'text/javascript; charset=utf-8',
@@ -24,7 +25,8 @@ async function available(engine) {
   if (!engine) return false;
   try { await access(engine, constants.X_OK); return (await stat(engine)).isFile(); } catch { return false; }
 }
-function sourceBody(req, signal) {
+function sourceBody(req, signal, bundled) {
+  const limit = bundled ? MAX_REQUEST_BYTES : MAX_SOURCE_BYTES;
   return new Promise((accept, reject) => {
     let size = 0; const chunks = [];
     const cleanup = () => { req.off('data', data); req.off('end', end); req.off('error', fail);
@@ -32,9 +34,9 @@ function sourceBody(req, signal) {
     const fail = error => { cleanup(); req.resume(); reject(error); };
     const aborted = () => fail(signal.reason || new NativeWindError(400, 'Performance upload disconnected.'));
     const data = chunk => { size += chunk.length;
-      if (size > MAX_SOURCE_BYTES) fail(new NativeWindError(413, 'Performance exceeds the 1 MiB input limit.'));
+      if (size > limit) fail(new NativeWindError(413, 'Experiment exceeds the complete request limit.'));
       else chunks.push(chunk); };
-    const end = () => { cleanup(); try { accept(validateSource(Buffer.concat(chunks))); } catch (error) { reject(error); } };
+    const end = () => { cleanup(); try { accept(validateInput(Buffer.concat(chunks), bundled)); } catch (error) { reject(error); } };
     req.on('data', data); req.once('end', end); req.once('error', fail); req.once('aborted', aborted);
     signal.addEventListener('abort', aborted, {once:true});
     if (signal.aborted || req.aborted) aborted();
@@ -75,10 +77,11 @@ async function serveAsset(req, res, dist, pathname) {
     res.once('close', () => stream.destroy()); stream.pipe(res); }
   return true;
 }
-function runNative(engine, input, output, dir, signal, outputLimit) {
+function runNative(engine, input, output, dir, signal, outputLimit, attachments, decimate) {
   return new Promise((accept, reject) => {
     if (signal.aborted) return reject(signal.reason);
-    const child = spawn(engine, ['wind', input, output, '--self-contained'], {cwd:dir, shell:false,
+    const sourceArgs = attachments.flatMap(file => ['--attached-source', file.path]);
+    const child = spawn(engine, ['wind', input, output, '--self-contained', ...(decimate ? ['--decimate'] : []), ...sourceArgs], {cwd:dir, shell:false,
       windowsHide:true, detached:process.platform !== 'win32', stdio:['ignore', 'pipe', 'pipe']});
     let reason, size = 0, forceKill, finished = false; const chunks = [];
     const kill = name => { if (!child.pid) return;
@@ -155,17 +158,21 @@ export function createNativeWindServer({engine = process.env.FSIM_MUSIC_RENDER |
     try {
       if (req.method === 'GET' && pathname === '/api/native-wind/status') return send(200,
         {available:!closing && await available(engine), busy:active !== null, token,
-          maximumSourceBytes:MAX_SOURCE_BYTES, maximumOutputBytes, timeoutMs, supportedSchemas:SUPPORTED_SCHEMAS});
+          maximumSourceBytes:MAX_SOURCE_BYTES, maximumOutputBytes, timeoutMs, supportedSchemas:SUPPORTED_SCHEMAS,
+          maximumAttachments:MAX_ATTACHMENTS, maximumAttachmentFileBytes:MAX_ATTACHMENT_FILE_BYTES,
+          maximumAttachmentBytes:MAX_ATTACHMENT_BYTES, maximumRequestBytes:MAX_REQUEST_BYTES});
       if (pathname !== '/api/native-wind/render' || req.method !== 'POST') {
         if (['GET', 'HEAD'].includes(req.method) && !pathname.startsWith('/api/') && await serveAsset(req, res, dist, pathname)) return;
         return send(404, {error:'Not found. Build Instrument Lab and pass its dist directory to this server.'});
       }
       if (closing) return send(503, {error:'Local renderer is shutting down.'});
       if (req.headers['x-native-wind-token'] !== token) return send(403, {error:'Missing local session token. Refresh renderer availability.'});
-      if (!/^text\/plain(?:\s*;\s*charset\s*=\s*utf-8)?\s*$/i.test(req.headers['content-type'] || '')
-          || (req.headers['content-encoding'] && req.headers['content-encoding'] !== 'identity'))
-        return send(415, {error:'Send the exact UTF-8 performance as text/plain.'});
-      if (Number(req.headers['content-length'] || 0) > MAX_SOURCE_BYTES) return send(413, {error:'Performance exceeds the 1 MiB input limit.'});
+      const media = /^(text\/plain|application\/json)(?:\s*;\s*charset\s*=\s*utf-8)?\s*$/i.exec(req.headers['content-type'] || '');
+      if (!media || (req.headers['content-encoding'] && req.headers['content-encoding'] !== 'identity'))
+        return send(415, {error:'Send UTF-8 performance text or an attachment experiment as JSON.'});
+      const bundled = media[1].toLowerCase() === 'application/json';
+      if (Number(req.headers['content-length'] || 0) > (bundled ? MAX_REQUEST_BYTES : MAX_SOURCE_BYTES))
+        return send(413, {error:'Experiment exceeds the complete request limit.'});
       if (active) return send(409, {error:'Another native wind render is running. Cancel it or wait.'});
       const controller = new AbortController(); let complete;
       const job = {controller, finished:new Promise(resolve => { complete = resolve; })}; active = job;
@@ -175,12 +182,18 @@ export function createNativeWindServer({engine = process.env.FSIM_MUSIC_RENDER |
       let dir;
       try {
         if (!await available(engine)) throw new NativeWindError(503, 'Native wind executable is unavailable. Build music_render and configure its absolute path.');
-        const bytes = await sourceBody(req, controller.signal);
+        const experiment = await sourceBody(req, controller.signal, bundled);
         if (controller.signal.aborted) throw controller.signal.reason;
         dir = await mkdtemp(join(tempRoot, 'frankensim-native-wind-'));
         const input = join(dir, 'input.performance'), output = join(dir, 'output.wav');
-        await writeFile(input, bytes, {mode:0o600, flag:'wx'});
-        await runNative(engine, input, output, dir, controller.signal, maximumOutputBytes);
+        await writeFile(input, experiment.source, {mode:0o600, flag:'wx'});
+        for (const attachment of experiment.attachments) {
+          if (controller.signal.aborted) throw controller.signal.reason;
+          const destination = join(dir, attachment.path);
+          await mkdir(dirname(destination), {recursive:true, mode:0o700});
+          await writeFile(destination, attachment.bytes, {mode:0o600, flag:'wx'});
+        }
+        await runNative(engine, input, output, dir, controller.signal, maximumOutputBytes, experiment.attachments, experiment.decimate);
         const wave = await readWave(output, maximumOutputBytes);
         if (controller.signal.aborted) throw controller.signal.reason;
         res.writeHead(200, {'Content-Type':'audio/wav', 'Content-Length':wave.length}); res.end(wave);

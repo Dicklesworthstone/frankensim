@@ -28,3 +28,9 @@
   .nw-source { font-size: 11px; padding: 10px; }
   .nw-source-head { align-items: start; }
 }
+
+.nw-attachments { display: grid; gap: 8px; margin: 10px 0; }
+.nw-attachment { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.nw-attachment input { flex: 1 1 240px; min-width: 0; padding: 7px 9px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--ink-1); color: var(--ivory); font: 12px var(--font-mono); }
+.nw-attachment input:focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; }
+.nw-file-identities { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 10px; }
