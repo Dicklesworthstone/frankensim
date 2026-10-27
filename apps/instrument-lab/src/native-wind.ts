@@ -1,20 +1,43 @@
 import "./native-wind.css";
-// One canonical native fixture, bundled verbatim by Vite; no copied physics defaults.
-import exampleSource from "../../../crates/fs-couple/examples/reed-two-medium-tone-hole.performance?raw";
+// Canonical native fixtures, bundled verbatim by Vite; no copied physics defaults.
+import reedExampleSource from "../../../crates/fs-couple/examples/reed-two-medium-tone-hole.performance?raw";
+import flueExampleSource from "../../../crates/fs-couple/examples/flue-nolle.performance?raw";
 import { nativeWindStatus, renderNativeWind, type NativeWindStatus } from "./native-wind-client.mjs";
 import { el } from "./util";
 
-const EXAMPLE_NAME = "reed-two-medium-tone-hole.performance";
-const EXAMPLE_URL = "https://github.com/Dicklesworthstone/frankensim/blob/main/crates/fs-couple/examples/reed-two-medium-tone-hole.performance";
+const EXAMPLES = [
+  {
+    name: "reed-two-medium-tone-hole.performance",
+    label: "Reed — two-medium tone hole",
+    source: reedExampleSource,
+    intro: "Starter: two-medium tone hole — a short boundary diagnostic with a reed and three tube sections in different gas regions. Change the gas mixtures, temperature, geometry or gestures in the description.",
+    help: "ambient sets the inlet and chimney gas; a segment’s gas entry overrides its local medium; exterior sets the surrounding gas. The interior and exterior must share a static pressure because this boundary model omits mean flow. This short numerical fixture is not a measured clarinet or oboe.",
+  },
+  {
+    name: "flue-nolle.performance",
+    label: "Flute — Nolle/Price jet",
+    source: flueExampleSource,
+    intro: "Starter: flute jet — a short blowing-pressure phrase through a cylindrical tube, using the native Nolle/Price jet transfer. Change the gas, tube, mouth geometry or pressure gesture in the description.",
+    help: "gas owns the internal medium; exterior sets the surrounding gas. jet_transfer selects the short-channel Nolle/Price source. The native description owns the mechanical and output clocks, and the jet and acoustic mouth are solved together. This synthetic example is not a measured flute.",
+  },
+];
+const exampleUrl = (name: string): string =>
+  `https://github.com/Dicklesworthstone/frankensim/blob/main/crates/fs-couple/examples/${name}`;
 const LOCAL_FILE_LIMIT = 1_048_576; // Bound file reading even on a static host without a renderer.
 const message = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
 /** A source editor and native render client. Synthesis stays in the Rust renderer. */
 export function createNativeWindPanel(): HTMLElement {
+  let selectedExample = EXAMPLES[0]!;
+  const starter = el("select", { id: "native-wind-starter", class: "btn" },
+    ...EXAMPLES.map((example) => el("option", { value: example.name }, example.label)));
+  const introduction = el("p", { class: "nw-intro" }, selectedExample.intro);
+  const sourceHelp = el("p", { id: "native-wind-source-help" }, selectedExample.help);
+  const canonical = el("a", { href: exampleUrl(selectedExample.name), target: "_blank", rel: "noopener" }, "Canonical example");
   const source = el("textarea", { id: "native-wind-source", class: "nw-source", rows: "15",
     spellcheck: "false", autocapitalize: "off", autocomplete: "off", wrap: "off",
     "aria-describedby": "native-wind-source-help" });
-  source.value = exampleSource;
+  source.value = selectedExample.source;
   const sourceInfo = el("span", { class: "small muted" });
   const connection = el("span", { class: "nw-connection", role: "status", "aria-live": "polite" }, "Checking local renderer…");
   const result = el("p", { class: "nw-result small", role: "status", "aria-live": "polite", "aria-atomic": "true" });
@@ -39,7 +62,7 @@ export function createNativeWindPanel(): HTMLElement {
   let loadingFile = false;
   let previewUrl: string | null = null;
   let renderedSource: string | null = null;
-  let sourceName = EXAMPLE_NAME;
+  let sourceName = selectedExample.name;
 
   const controls = (): void => {
     const active = rendering !== null;
@@ -48,6 +71,7 @@ export function createNativeWindPanel(): HTMLElement {
     check.disabled = active || checking !== null;
     open.disabled = active || loadingFile;
     reset.disabled = active || loadingFile;
+    starter.disabled = active || loadingFile;
     source.readOnly = active || loadingFile;
     source.setAttribute("aria-busy", String(active));
     render.textContent = active ? "Rendering…" : "Render WAV";
@@ -159,10 +183,22 @@ export function createNativeWindPanel(): HTMLElement {
   check.addEventListener("click", () => void checkConnection());
   source.addEventListener("input", edited);
   open.addEventListener("click", () => file.click());
-  reset.addEventListener("click", () => {
-    source.value = exampleSource;
-    sourceName = EXAMPLE_NAME;
+  const loadExample = (): void => {
+    source.value = selectedExample.source;
+    sourceName = selectedExample.name;
+    introduction.textContent = selectedExample.intro;
+    sourceHelp.textContent = selectedExample.help;
+    canonical.href = exampleUrl(selectedExample.name);
+    showResult("Example loaded. Edit the source or render it.");
     edited();
+  };
+  reset.addEventListener("click", loadExample);
+  starter.addEventListener("change", () => {
+    if (rendering || loadingFile) return;
+    const selected = EXAMPLES.find((example) => example.name === starter.value);
+    if (!selected) return;
+    selectedExample = selected;
+    loadExample();
   });
   file.addEventListener("change", () => {
     const selected = file.files?.[0];
@@ -202,13 +238,14 @@ export function createNativeWindPanel(): HTMLElement {
       el("div", {}, el("h3", { id: "native-wind-title" }, "Render a wind performance"),
         el("p", { class: "small muted" }, "Edit the source, run the native physics, and listen to your result.")),
       connection),
-    el("p", { class: "nw-intro" }, "Starter: two-medium tone hole — a short boundary diagnostic with a reed and three tube sections in different gas regions. Change the gas mixtures, temperature, geometry or gestures in the description, or open a self-contained reed or flue performance."),
+    el("div", { class: "nw-source-head" }, el("label", { for: "native-wind-starter" }, "Starter performance"), starter),
+    introduction,
     el("details", { class: "nw-help small" },
       el("summary", {}, "About the source and local renderer"),
-      el("p", { id: "native-wind-source-help" }, "ambient sets the inlet and chimney gas; a segment’s gas entry overrides its local medium; exterior sets the surrounding gas. The interior and exterior must share a static pressure because this boundary model omits mean flow. This short numerical fixture is not a measured clarinet or oboe."),
-      el("p", {}, "The local renderer accepts self-contained frankensim-reed-performance-v1 and frankensim-flue-dg-performance-v1 descriptions. File-backed material and valve packs need the command-line workflow."),
+      sourceHelp,
+      el("p", {}, "The local renderer accepts self-contained frankensim-reed-performance-v1, frankensim-flue-performance-v1 and frankensim-flue-dg-performance-v1 descriptions. File-backed material and valve packs, and DG sources requiring --decimate, need the command-line workflow."),
       el("p", {}, "Rendering uses the local music_render executable. The hosted review page can show and edit the source; audio is available when you open it through the local renderer server."),
-      el("p", {}, el("a", { href: EXAMPLE_URL, target: "_blank", rel: "noopener" }, "Canonical example"),
+      el("p", {}, canonical,
         " · ", el("a", { href: "https://github.com/Dicklesworthstone/frankensim/tree/main/apps/instrument-lab#native-wind-renderer", target: "_blank", rel: "noopener" }, "Local renderer setup"))),
     el("div", { class: "nw-source-head" }, el("label", { for: "native-wind-source" }, "Performance source"),
       sourceInfo),

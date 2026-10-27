@@ -132,11 +132,12 @@ fn invalid_wind_sources_clocks_and_overrides_refuse_before_creating_output_files
 }
 
 #[test]
-fn self_contained_reed_and_dg_flue_keep_the_same_physical_pcm_and_provenance() {
+fn self_contained_reed_and_flues_keep_the_same_physical_pcm_and_provenance() {
     let dir = directory();
     for (index, (source, decimate)) in [
         (REED, false),
         (include_str!("../examples/flue-dg.performance"), true),
+        (include_str!("../examples/flue-nolle.performance"), false),
     ].iter().enumerate() {
         let input = dir.join(format!("inline-{index}.performance"));
         std::fs::write(&input, source).unwrap();

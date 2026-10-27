@@ -50,6 +50,7 @@ const native = {skip:process.platform === 'win32'};
 test('transport retains exact UTF-8 and admits supported native source families', () => {
   const bytes = source(); assert.equal(validateSource(bytes), bytes);
   const flute = Buffer.from('frankensim-flue-dg-performance-v1\nopaque'); assert.equal(validateSource(flute), flute);
+  const nolle = Buffer.from('frankensim-flue-performance-v1\nopaque'); assert.equal(validateSource(nolle), nolle);
   for (const bad of [Buffer.alloc(0), Buffer.from([0xff]), Buffer.from('frankensim-material-modal-valve-v1\nsection /etc/passwd'), Buffer.alloc(MAX_SOURCE_BYTES + 1)])
     assert.throws(() => validateSource(bad));
   assert.throws(() => createNativeWindServer({engine:'relative-executable'}), /absolute/);

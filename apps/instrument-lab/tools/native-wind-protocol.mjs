@@ -5,7 +5,7 @@ export const MAX_LOG_BYTES = 256 * 1024;
 export const DEFAULT_TIMEOUT_MS = 60000;
 // Supported editor families. The native --self-contained loader policy, rather
 // than the schema name, refuses any external material/artifact callbacks.
-export const SUPPORTED_SCHEMAS = ['frankensim-reed-performance-v1', 'frankensim-flue-dg-performance-v1'];
+export const SUPPORTED_SCHEMAS = ['frankensim-reed-performance-v1', 'frankensim-flue-performance-v1', 'frankensim-flue-dg-performance-v1'];
 
 export class NativeWindError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -18,7 +18,7 @@ export function validateSource(bytes) {
   try { text = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes); }
   catch { throw new NativeWindError(400, 'Performance must contain valid UTF-8 bytes.'); }
   if (!SUPPORTED_SCHEMAS.includes(text.split(/\r?\n/, 1)[0]))
-    throw new NativeWindError(400, 'This text-only renderer accepts self-contained reed and flue-DG performances. Pack-backed sources require the native CLI.');
+    throw new NativeWindError(400, 'This text-only renderer accepts self-contained reed, flue and flue-DG performances. Pack-backed sources require the native CLI.');
   // Do not trim, normalize newlines, parse records, or re-encode the admitted bytes.
   return bytes;
 }

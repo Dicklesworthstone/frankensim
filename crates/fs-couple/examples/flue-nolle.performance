@@ -1,0 +1,27 @@
+frankensim-flue-performance-v1
+clock 96000 48000
+output 24000 5 1000000
+gas 293.15 101325 0
+exterior same
+tube 0.3 0.006 1e-10 -0.9
+flue 0.010 0.001 0.004 0 0 0.02
+windway none
+jet_card tonal-interim
+jet 90 1e-6 3 0
+jet_transfer nolle-price-2015 short-channel 0
+jet_limits 1 0.3 8192
+wave_memory_bytes 1048576
+fractional 1000 0.01
+viscothermal 8 300 500
+receiver 0 0 0.5 4 16 1000
+controls 4096 100000
+gesture
+frankensim-gesture-schedule-v1
+control_rate_hz	1000
+tracks	1
+track	blow	blowing-pressure
+initial	pressure-pa	0e0
+events	3
+event	0e0	5e-3	pressure-pa	3e2
+event	1.5e-1	2e-2	pressure-pa	4e2
+event	3.5e-1	1e-2	pressure-pa	0e0

@@ -82,10 +82,17 @@ native rendering service.
 The editor starts from the repository's `reed-two-medium-tone-hole.performance`:
 its internal mixture, exterior mixture, tone hole and axial gas change reach the
 original source parser and physics. It is synthetic integration data, not a
-measured clarinet or oboe. The text-only route also admits self-contained
+measured clarinet or oboe. The starter selector also opens the canonical
+`flue-nolle.performance`, whose `jet_transfer` record chooses the same native
+Nolle/Price source. Its mechanical and output clocks remain part of the native
+description. Both starters are numerical examples, not measured instruments.
+The text-only route admits self-contained `frankensim-flue-performance-v1` and
 `frankensim-flue-dg-performance-v1` sources. Pack-backed flue/valve and material
 string performances remain native CLI inputs: this first route carries no
 external material packs or radiation artifacts.
+DG inputs whose mechanical clock requires the explicit native `--decimate`
+option also use the CLI. The Nolle starter already declares separate mechanical
+and output clocks, which its native observer handles directly.
 
 The companion passes the exact UTF-8 bytes to one configured executable as
 `music_render wind INPUT.performance OUT.wav --self-contained`, with a private
