@@ -1074,7 +1074,7 @@ impl FlueVoice {
                 )?;
                 Ok((cut_flow - trial.flow_m3_s, step, trial, power))
             };
-            let (mut lo, mut hi) = (0.0, c.q_max);
+            let (mut lo, mut hi): (f64, f64) = (0.0, c.q_max);
             if let Some(loss) = &self.mouth_contraction {
                 if direct < 1.0 {
                     // Do not ask the constitutive owner to evaluate a trial

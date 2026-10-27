@@ -16,6 +16,8 @@ const types = {'.html':'text/html; charset=utf-8', '.js':'text/javascript; chars
   '.wasm':'application/wasm', '.svg':'image/svg+xml', '.png':'image/png', '.webp':'image/webp',
   '.jpg':'image/jpeg', '.jpeg':'image/jpeg', '.ico':'image/x-icon', '.wav':'audio/wav',
   '.flac':'audio/flac', '.m4a':'audio/mp4', '.mp4':'video/mp4', '.woff':'font/woff', '.woff2':'font/woff2',
+  '.mid':'audio/midi', '.midi':'audio/midi', '.csv':'text/csv; charset=utf-8',
+  '.tsv':'text/tab-separated-values; charset=utf-8', '.txt':'text/plain; charset=utf-8',
   '.performance':'text/plain; charset=utf-8'};
 const inside = (root, file) => { const r = relative(root, file); return r !== '..' && !r.startsWith('..' + sep) && !isAbsolute(r); };
 async function available(engine) {
@@ -43,14 +45,33 @@ async function serveAsset(req, res, dist, pathname) {
   try { decoded = decodeURIComponent(pathname); } catch { throw new NativeWindError(400, 'Invalid asset path.'); }
   if (decoded.includes('\0') || decoded.split('/').some(p => p.startsWith('.'))) return false;
   const file = resolve(dist, '.' + (decoded === '/' ? '/index.html' : decoded));
-  if (!inside(dist, file) || !types[extname(file)]) return false;
-  let actual;
+  if (!inside(dist, file)) return false;
+  let actual, info;
   try { const root = await realpath(dist); actual = await realpath(file);
-    if (!inside(root, actual) || !(await stat(actual)).isFile()) return false;
+    if (!inside(root, actual)) return false;
+    info = await stat(actual); if (!info.isFile()) return false;
   } catch { return false; }
-  res.writeHead(200, {'Content-Type':types[extname(file)]});
-  if (req.method === 'HEAD') res.end();
-  else { const stream = createReadStream(actual); stream.on('error', () => res.destroy());
+  const headers = {'Content-Type':types[extname(file).toLowerCase()] || 'application/octet-stream',
+    'Content-Length':info.size, 'Accept-Ranges':'bytes'};
+  let start = 0, end = info.size - 1, status = 200;
+  // Range applies to GET only. Unsupported/malformed or multipart ranges are
+  // ignored; without representation validators, If-Range also receives the full file.
+  const range = req.method === 'GET' && !req.headers['if-range']
+    ? /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '') : null;
+  if (range && (range[1] || range[2])) {
+    if (range[1]) {
+      start = Number(range[1]); end = range[2] ? Math.min(Number(range[2]), end) : end;
+    } else start = Math.max(0, info.size - Number(range[2]));
+    if (start >= info.size || start > end) {
+      res.writeHead(416, {...headers, 'Content-Range':`bytes */${info.size}`, 'Content-Length':0});
+      res.end(); return true;
+    }
+    status = 206; headers['Content-Range'] = `bytes ${start}-${end}/${info.size}`;
+    headers['Content-Length'] = end - start + 1;
+  }
+  res.writeHead(status, headers);
+  if (req.method === 'HEAD' || info.size === 0) res.end();
+  else { const stream = createReadStream(actual, {start, end}); stream.on('error', () => res.destroy());
     res.once('close', () => stream.destroy()); stream.pipe(res); }
   return true;
 }

@@ -74,6 +74,57 @@ test('loopback status/static service, token, origin and confined assets', native
   } finally { await app.cleanup(); }
 });
 
+test('built MIDI and opaque binary assets retain their bytes without opening paths outside dist', native, async () => {
+  const app = await setup({engine:'/nonexistent/music_render'});
+  try {
+    const bytes = Buffer.from([77, 84, 104, 100, 0, 255, 128, 1]);
+    for (const [name, type] of [['phrase.mid', 'audio/midi'], ['phrase.midi', 'audio/midi'], ['body.fsb', 'application/octet-stream']]) {
+      await writeFile(join(app.dir, 'dist', name), bytes);
+      const response = await fetch(app.url + '/' + name);
+      assert.equal(response.status, 200); assert.equal(response.headers.get('content-type'), type);
+      assert.equal(response.headers.get('content-length'), String(bytes.length)); assert.equal(response.headers.get('accept-ranges'), 'bytes');
+      assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes);
+    }
+    const head = await fetch(app.url + '/phrase.mid', {method:'HEAD', headers:{Range:'bytes=1-2'}});
+    assert.equal(head.status, 200); assert.equal(head.headers.get('content-type'), 'audio/midi');
+    assert.equal(head.headers.get('content-length'), String(bytes.length)); assert.equal((await head.arrayBuffer()).byteLength, 0);
+    await writeFile(join(app.dir, 'private.fsb'), bytes);
+    await symlink(join(app.dir, 'private.fsb'), join(app.dir, 'dist', 'leak.fsb'));
+    await writeFile(join(app.dir, 'dist', '.hidden.fsb'), bytes);
+    for (const path of ['/leak.fsb', '/.hidden.fsb', '/%2e%2e%2fprivate.fsb'])
+      assert.equal((await fetch(app.url + path)).status, 404);
+  } finally { await app.cleanup(); }
+});
+
+test('static audio serves single byte ranges, suffixes, full fallbacks and unsatisfiable 416 responses', native, async () => {
+  const app = await setup({engine:'/nonexistent/music_render'});
+  try {
+    const bytes = Buffer.from('0123456789abcdef');
+    await writeFile(join(app.dir, 'dist', 'clip.wav'), bytes);
+    for (const [range, start, end] of [['bytes=2-5', 2, 5], ['bytes=10-', 10, 15],
+      ['bytes=-3', 13, 15], ['bytes=14-99', 14, 15], ['bytes=-99', 0, 15]]) {
+      const response = await fetch(app.url + '/clip.wav', {headers:{Range:range}});
+      assert.equal(response.status, 206); assert.equal(response.headers.get('content-type'), 'audio/wav');
+      assert.equal(response.headers.get('content-range'), `bytes ${start}-${end}/${bytes.length}`);
+      assert.equal(response.headers.get('content-length'), String(end - start + 1));
+      assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes.subarray(start, end + 1));
+    }
+    for (const range of ['bytes=16-', 'bytes=-0', 'bytes=9-2']) {
+      const response = await fetch(app.url + '/clip.wav', {headers:{Range:range}});
+      assert.equal(response.status, 416); assert.equal(response.headers.get('content-range'), 'bytes */16');
+      assert.equal(response.headers.get('content-length'), '0'); assert.equal((await response.arrayBuffer()).byteLength, 0);
+    }
+    for (const headers of [{Range:'bytes=0-1,4-5'}, {Range:'items=1-3'}, {Range:'bytes=0-1', 'If-Range':'"unknown"'}]) {
+      const response = await fetch(app.url + '/clip.wav', {headers}); assert.equal(response.status, 200);
+      assert.equal(response.headers.get('content-length'), '16'); assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes);
+    }
+    await writeFile(join(app.dir, 'dist', 'empty.bin'), Buffer.alloc(0));
+    const empty = await fetch(app.url + '/empty.bin'); assert.equal(empty.status, 200); assert.equal(empty.headers.get('content-length'), '0');
+    const range = await fetch(app.url + '/empty.bin', {headers:{Range:'bytes=0-'}});
+    assert.equal(range.status, 416); assert.equal(range.headers.get('content-range'), 'bytes */0');
+  } finally { await app.cleanup(); }
+});
+
 test('exact native arguments and bytes, private cwd, real returned WAV and cleanup', native, async () => {
   const app = await setup();
   try {
