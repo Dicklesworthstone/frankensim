@@ -498,7 +498,8 @@ impl<'m> ThermoplasticSolid<'m> {
                         nodal_forces_n,
                         settings,
                         mechanical_config,
-                        velocity_mps.map(|velocity| (velocity, dt)),
+                        dt,
+                        velocity_mps,
                         cx,
                     )?;
                     let mut coefficients = resolve(endpoint).map_err(ContactError::Source)?;

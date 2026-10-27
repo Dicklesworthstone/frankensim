@@ -7072,3 +7072,39 @@ modes of a native coil/capacitor interconnection. They also check incompatible
 clamps, amplitude/domain refusal and late-cancellation retry. This advances
 MR60 (`frankensim-material-reality-ui2if.7.8`); the broader thermal/history,
 spatial field and acoustic-observation requirements remain open.
+
+## Time-dependent plastic flow on the common solid/enthalpy owner
+
+`ThermoplasticSolid::with_linear_overstress` selects the canonical positive
+viscosity from each element's original mechanical/caloric material before
+loading. Selection is in existing connectivity order; `None` retains the
+rate-independent law. No second mesh, history, constitutive solver, caloric
+inventory or integration timeline is introduced.
+
+The existing shared mechanical candidate passes its actual physical dt to the
+native J2 stress, tangent, history and work account. This same endpoint is used
+by quasistatic loading, consistent inertia, solved-pressure thermal contacts
+and electrical/contact heating, including their inertial wrappers. Each thermal
+or Newton trial restarts from the accepted displacement and plastic history;
+thermal substeps do not advance the constitutive clock. Persistent positive
+overstress is admitted on continuation. A held load now causes finite-time
+creep rather than an immediate rate-independent return.
+
+Yield plus viscous dissipation enters the original finite caloric cells exactly
+once. Viscosity, yield and the other selected coefficients are refreshed from
+the same complete source at actual endpoint temperature, so material data and
+the generated heat alter subsequent deformation. Hardening storage, reversible
+heat, constitutive numerical loss, kinetic storage and inertial numerical loss
+keep their existing distinct accounts. The common source/heat/work gates still
+publish all candidates together or leave accepted state and clock untouched.
+
+Synthetic `tests/solid_plastic_enthalpy/overstress.rs` independently solves the
+uniaxial Perzyna and finite-capacity heat equations over successive actual
+loaded-tetrahedron steps in tension and compression. It checks temperature-
+dependent viscosity substitution, material/time scaling, thermal-substep
+independence, shared inertial response and losses, missing/unsupported sources,
+duration-free refusal and failed-proposal retry. This is the existing fixed-
+reference, single-solid, small-strain/rotation model with linear overstress;
+it does not claim finite-strain creep, phase change, damage, general rate
+exponents or measured material accuracy. MR22
+(`frankensim-material-reality-ui2if.3.4`) remains open for broader coverage.

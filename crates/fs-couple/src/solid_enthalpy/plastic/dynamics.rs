@@ -6,14 +6,16 @@
 //! consistent backward-Euler inertia. Every thermal proposal restarts from
 //! the same accepted displacement, velocity, plastic history and enthalpy.
 //!
-//! Actual yield dissipation and reversible thermoelastic heat reach the SAME
+//! Actual yield/overstress dissipation and reversible thermoelastic heat reach the SAME
 //! thermal timeline once. Constitutive and kinetic numerical losses remain
 //! separate from heat. The combined gate includes caloric storage, elastic
 //! and hardening free energy, the mechanical entropy contribution, kinetic
 //! energy, actual nodal/support work and both numerical losses.
 //!
 //! This inherits the original source/phase/small-strain admission. The model
-//! is rate-independent plasticity with resolved inertia, not a strain-rate law.
+//! uses rate-independent J2 by default; explicit material viscosity selects the
+//! same source-bound linear-overstress law as the quasistatic thermal owner.
+//! Both constitutive kinetics and inertia use the actual physical interval.
 //! Loads and support displacements are endpoint values; resolve pulses and
 //! refine physical intervals to assess first-order time accuracy. The thermal
 //! owner's own substeps do not add mechanical timesteps. Geometry, transport

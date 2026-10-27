@@ -214,6 +214,34 @@ impl<'a> ThermoplasticSolid<'a> {
         &self.materials
     }
 
+    /// Select source-defined linear overstress in connectivity order before
+    /// loading. `None` explicitly retains rate independence for that element.
+    /// Each selected viscosity is pinned on the SAME mechanical/caloric card.
+    /// All existing static, inertial, contact and electrical candidates use the
+    /// actual common physical interval in the original return map and heat audit.
+    pub fn with_linear_overstress(mut self,
+        selections: &[Option<fs_material::state_point::MaterialPropertySelection>],
+        cx: &Cx<'_>) -> Result<Self, ThermoplasticError> {
+        poll(cx)?;
+        if selections.len() != self.cells.len() || !self.solution.increments.is_empty()
+            || self.solution.element_states.iter().any(|s| s.alpha != 0.0 || s.plastic_strain != [0.0; 6])
+        {
+            return Err(ThermoplasticError::Invalid(
+                "select one optional overstress source per element before mechanical evolution"));
+        }
+        for (i, (cell, selection)) in self.cells.iter_mut().zip(selections).enumerate() {
+            poll(cx)?;
+            if let Some(selection) = selection {
+                cell.source = cell.source.clone().with_linear_overstress(selection.clone())
+                    .map_err(ThermoplasticError::Material)?;
+                self.materials[i] = cell.source.resolve_enthalpy(cell.accepted.specific_h_j_kg)
+                    .map_err(ThermoplasticError::Material)?.1;
+            }
+        }
+        poll(cx)?;
+        Ok(self)
+    }
+
     /// Lower these exact structural source bindings to the existing material
     /// conduction network. Entries remain in tetrahedron order; linked cells
     /// require an explicit conductivity selection. Selected transport sources
@@ -314,7 +342,8 @@ impl<'a> ThermoplasticSolid<'a> {
         nodal_forces_n: &[(usize, f64)],
         settings: IncrementSettings,
         config: ThermoplasticConfig,
-        motion: Option<(&[[f64; 3]], f64)>,
+        duration_s: f64,
+        motion: Option<&[[f64; 3]]>,
         cx: &Cx<'_>,
     ) -> Result<MechanicalProposal, ThermoplasticError<E>> {
         let mut materials = Vec::with_capacity(self.cells.len());
@@ -324,7 +353,7 @@ impl<'a> ThermoplasticSolid<'a> {
             poll(cx)?;
             let (state, law) = bound
                 .source
-                .resolve_expanded_enthalpy(h)
+                .resolve_expanded_enthalpy_for_step(h, duration_s)
                 .map_err(ThermoplasticError::Material)?;
             temperatures_k.push(state.temperature_k());
             materials.push(law.resolved().clone());
@@ -341,13 +370,13 @@ impl<'a> ThermoplasticSolid<'a> {
             settings,
         };
         let old_u = self.solution.displacement_m.as_flattened();
-        let (solution, motion) = if let Some((velocity, dt_s)) = motion {
+        let (solution, motion) = if let Some(velocity) = motion {
             // The original source caloric density and delivered inventory were
             // admitted together at binding. Endpoint temperature never creates mass.
             let densities: Vec<_> = self.cells.iter()
                 .map(|cell| cell.source.density_kg_m3()).collect();
             let native = problem.advance_backward_euler(old_u, velocity,
-                &self.solution.element_states, &densities, dt_s, cx)
+                &self.solution.element_states, &densities, duration_s, cx)
                 .map_err(ThermoplasticError::Solid)?;
             (native.solution, Some(dynamics::Motion {
                 velocity_mps: native.velocity_mps, energy: native.energy,
@@ -381,7 +410,7 @@ impl<'a> ThermoplasticSolid<'a> {
             }
             let increment = bound
                 .source
-                .advance_with_energy(
+                .advance_with_energy_for_step(
                     bound.accepted.specific_h_j_kg,
                     enthalpies[i],
                     &self.solution.element_strain[i],
@@ -393,6 +422,7 @@ impl<'a> ThermoplasticSolid<'a> {
                             / bound.volume_m3,
                         yield_pa: config.yield_tolerance_pa,
                     },
+                    duration_s,
                 )
                 .map_err(ThermoplasticError::Material)?;
             heat_j.push(finite(bound.volume_m3 * increment.caloric_heat_j_m3())?);
@@ -526,9 +556,9 @@ impl<'a> ThermoplasticSolid<'a> {
                 .source
                 .mechanical_strain(old_temperature, &self.solution.element_strain[i])
                 .map_err(ThermoplasticError::Material)?;
-            material
-                .law()
+            self.cells[i].source
                 .validate_committed_history(
+                    material,
                     &old_strain,
                     &self.solution.element_states[i],
                     config.yield_tolerance_pa,
@@ -544,7 +574,8 @@ impl<'a> ThermoplasticSolid<'a> {
                 nodal_forces_n,
                 settings,
                 config,
-                velocity_mps.map(|velocity| (velocity, duration_s)),
+                duration_s,
+                velocity_mps,
                 cx,
             )?;
             let heat = PlasticHeat {
@@ -564,8 +595,8 @@ impl<'a> ThermoplasticSolid<'a> {
                 })?;
             let final_h = self.enthalpies(&next_thermal, false, cx)?;
             let actual = self.mechanics_with_motion(&final_h, prescribed_m,
-                nodal_forces_n, settings, config,
-                velocity_mps.map(|velocity| (velocity, duration_s)), cx)?;
+                nodal_forces_n, settings, config, duration_s,
+                velocity_mps, cx)?;
             let applied_heat_j = finite(trial.heat_j.iter().sum())?;
             let caloric_heat_j = finite(actual.heat_j.iter().sum())?;
             let external_heat_j = finite(thermal_audit.external_heat_j - applied_heat_j)?;

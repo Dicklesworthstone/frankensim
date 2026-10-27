@@ -11,6 +11,8 @@
 //! Fixed moduli/constant alpha retain -T_0 alpha delta(tr(sigma)) exactly.
 //! This endpoint rule closes the discrete first law; time refinement is required.
 //! Numerical loss remains separate and is never deposited as physical heat.
+//! Selected linear overstress uses eta(T_1)/dt in the original return map and
+//! physical dissipation. Eta stores no free energy and adds no entropy term.
 
 use super::*;
 use crate::tensor::{contract, trace};
@@ -23,6 +25,7 @@ use fs_evidence::ModelCard;
 pub struct ThermalJ2 {
     source: ResolvedJ2Plasticity,
     expansion_strain: f64,
+    rate: Option<super::super::rate::LinearOverstressJ2>,
 }
 impl ThermalJ2 {
     /// Complete original property bundle at this law's temperature.
@@ -40,20 +43,31 @@ impl SmallStrainLaw for ThermalJ2 {
         self.source.initial_state()
     }
     fn stress(&self, strain: &Voigt, state: &J2State) -> Voigt {
-        self.source.stress(&self.mechanical_strain(strain), state)
+        let strain = self.mechanical_strain(strain);
+        match &self.rate {
+            Some(rate) => rate.stress(&strain, state),
+            None => self.source.stress(&strain, state),
+        }
     }
     fn tangent(&self, strain: &Voigt, state: &J2State) -> Tangent6 {
-        self.source.tangent(&self.mechanical_strain(strain), state)
+        let strain = self.mechanical_strain(strain);
+        match &self.rate {
+            Some(rate) => rate.tangent(&strain, state),
+            None => self.source.tangent(&strain, state),
+        }
     }
     fn update_state(&self, strain: &Voigt, state: &J2State) -> J2State {
-        self.source
-            .update_state(&self.mechanical_strain(strain), state)
+        let strain = self.mechanical_strain(strain);
+        match &self.rate {
+            Some(rate) => rate.update_state(&strain, state),
+            None => self.source.update_state(&strain, state),
+        }
     }
     fn admissibility(&self) -> MaterialAdmissibility {
-        self.source.admissibility()
+        self.rate.as_ref().map_or_else(|| self.source.admissibility(), SmallStrainLaw::admissibility)
     }
     fn card(&self) -> ModelCard {
-        self.source.card()
+        self.rate.as_ref().map_or_else(|| self.source.card(), SmallStrainLaw::card)
     }
 }
 
@@ -130,11 +144,28 @@ impl ThermoplasticSource<'_> {
 
     /// Resolve the actual caloric state into the same native spatial law,
     /// including its material-derived stress-free strain.
+    /// Rate-dependent sources require `resolve_expanded_enthalpy_for_step`.
     pub fn resolve_expanded_enthalpy(
         &self,
         specific_enthalpy_j_kg: f64,
     ) -> Result<(EquilibriumPhaseState, ThermalJ2), FeedbackError> {
+        self.resolve_expanded_for_interval(specific_enthalpy_j_kg, None)
+    }
+
+    /// Resolve source coefficients and the return map for this physical interval.
+    /// Thermal substeps and nonlinear iterations do not create extra plastic time.
+    pub fn resolve_expanded_enthalpy_for_step(&self, specific_enthalpy_j_kg: f64, duration_s: f64)
+        -> Result<(EquilibriumPhaseState, ThermalJ2), FeedbackError> {
+        if !positive(duration_s) {
+            return Err(FeedbackError::Invalid("positive physical constitutive interval required"));
+        }
+        self.resolve_expanded_for_interval(specific_enthalpy_j_kg, Some(duration_s))
+    }
+
+    fn resolve_expanded_for_interval(&self, specific_enthalpy_j_kg: f64, duration_s: Option<f64>)
+        -> Result<(EquilibriumPhaseState, ThermalJ2), FeedbackError> {
         let (state, source) = self.resolve_enthalpy(specific_enthalpy_j_kg)?;
+        let rate = self.overstress_law(&source, duration_s)?;
         let expansion_strain =
             self.expansion_strain_between(self.reference_temperature_k, state.temperature_k())?;
         Ok((
@@ -142,12 +173,14 @@ impl ThermoplasticSource<'_> {
             ThermalJ2 {
                 source,
                 expansion_strain,
+                rate,
             },
         ))
     }
 
     /// Audit a total-strain increment against the original source and caloric
     /// states. Accepted history remains unchanged. No thermal solver is added.
+    /// Rate-dependent sources require `advance_with_energy_for_step`.
     pub fn advance_with_energy(
         &self,
         old_h_j_kg: f64,
@@ -157,6 +190,29 @@ impl ThermoplasticSource<'_> {
         strain: &Voigt,
         tolerances: EnergyTolerances,
     ) -> Result<ThermoplasticIncrement, FeedbackError> {
+        self.advance_for_interval(old_h_j_kg, new_h_j_kg, old_strain, old_state,
+            strain, tolerances, None)
+    }
+
+    /// Audit yield/viscous dissipation and reciprocal heat at the same physical dt
+    /// used by the native spatial constitutive response.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_energy_for_step(&self, old_h_j_kg: f64, new_h_j_kg: f64,
+        old_strain: &Voigt, old_state: &J2State, strain: &Voigt,
+        tolerances: EnergyTolerances, duration_s: f64)
+        -> Result<ThermoplasticIncrement, FeedbackError> {
+        if !positive(duration_s) {
+            return Err(FeedbackError::Invalid("positive physical constitutive interval required"));
+        }
+        self.advance_for_interval(old_h_j_kg, new_h_j_kg, old_strain, old_state,
+            strain, tolerances, Some(duration_s))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_for_interval(&self, old_h_j_kg: f64, new_h_j_kg: f64,
+        old_strain: &Voigt, old_state: &J2State, strain: &Voigt,
+        tolerances: EnergyTolerances, duration_s: Option<f64>)
+        -> Result<ThermoplasticIncrement, FeedbackError> {
         let old = self
             .caloric
             .curve()
@@ -175,10 +231,12 @@ impl ThermoplasticSource<'_> {
                 old_state,
                 strain,
                 tolerances,
+                duration_s,
             )?
             .1)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn increment_at_temperature<E>(
         &self,
         old_temperature_k: f64,
@@ -187,14 +245,15 @@ impl ThermoplasticSource<'_> {
         old_state: &J2State,
         strain: &Voigt,
         tolerances: EnergyTolerances,
+        duration_s: Option<f64>,
     ) -> Result<(ResolvedJ2Plasticity, ThermoplasticIncrement), FeedbackError<E>> {
         let source = self.resolve_temperature(temperature_k)?;
         let old_mechanical = self.mechanical_strain_at(old_temperature_k, old_strain)?;
         let mechanical_strain = self.mechanical_strain_at(temperature_k, strain)?;
-        let mechanical = source
-            .law()
-            .advance_with_energy(&old_mechanical, old_state, &mechanical_strain, tolerances)
-            .map_err(FeedbackError::Mechanical)?;
+        let mechanical = match self.overstress_law(&source, duration_s)? {
+            Some(rate) => rate.advance_with_energy(&old_mechanical, old_state, &mechanical_strain, tolerances),
+            None => source.law().advance_with_energy(&old_mechanical, old_state, &mechanical_strain, tolerances),
+        }.map_err(FeedbackError::Mechanical)?;
         let old_elastic = core::array::from_fn(|i| old_mechanical[i] - old_state.plastic_strain[i]);
         let variable_moduli = self.youngs_temperature_slope_pa_k != 0.0
             || self.hardening_temperature_slope_pa_k != 0.0;
@@ -299,6 +358,19 @@ impl ThermoplasticSource<'_> {
                 thermoelastic_storage_change_j_m3,
             },
         ))
+    }
+
+    fn overstress_law<E>(&self, source: &ResolvedJ2Plasticity, duration_s: Option<f64>)
+        -> Result<Option<super::super::rate::LinearOverstressJ2>, FeedbackError<E>> {
+        use super::super::rate::{LinearOverstressJ2, OVERSTRESS_VISCOSITY_PROPERTY};
+        if !self.linear_overstress { return Ok(None); }
+        let duration_s = duration_s.ok_or(FeedbackError::Invalid(
+            "source-defined overstress requires the physical step duration"))?;
+        let viscosity = source.material().property(OVERSTRESS_VISCOSITY_PROPERTY)
+            .ok_or(FeedbackError::Invalid("resolved source omitted overstress viscosity"))?.value_si();
+        let law = LinearOverstressJ2::new(source.law().clone(), viscosity, duration_s)
+            .map_err(|e| FeedbackError::Source(e.into()))?;
+        Ok(Some(law))
     }
 
     fn expansion_strain_between<E>(&self, from_k: f64, to_k: f64) -> Result<f64, FeedbackError<E>> {

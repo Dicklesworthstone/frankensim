@@ -477,8 +477,8 @@ impl<'m> ThermoplasticSolid<'m> {
                 let h = self.enthalpies::<Infallible>(endpoint, false, cx)
                     .map_err(ElectricalSolidSourceError::Mechanical)?;
                 let mechanical = self.mechanics_with_motion::<Infallible>(&h, prescribed_m,
-                    nodal_forces_n, settings, mechanics,
-                    velocity_mps.map(|velocity| (velocity, dt)), cx)
+                    nodal_forces_n, settings, mechanics, dt,
+                    velocity_mps, cx)
                     .map_err(ElectricalSolidSourceError::Mechanical)?;
                 let mut support_samples = Vec::with_capacity(support_contacts.len());
                 for (binding, &(element, normal)) in support_contacts.iter().zip(&support_routes) {

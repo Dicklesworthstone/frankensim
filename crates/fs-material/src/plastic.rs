@@ -9,6 +9,8 @@ pub mod source;
 pub mod energy;
 /// Fixed-energy native thermoplastic heat feedback through shared transport.
 pub mod thermal;
+/// Linear overstress with the same radial return, history and consistent tangent.
+pub mod rate;
 
 use crate::elastic::IsotropicElastic;
 use crate::tensor::{contract, deviator, trace};
@@ -72,7 +74,7 @@ impl J2Plasticity {
         })
     }
 
-    fn radial_return(&self, strain: &Voigt, state: &J2State) -> Update {
+    fn radial_return(&self, strain: &Voigt, state: &J2State, overstress_modulus: f64) -> Update {
         let (lambda, mu) = self.elastic.lame();
         let mut elastic_strain = [0.0f64; 6];
         for ((e, s), p) in elastic_strain
@@ -101,7 +103,7 @@ impl J2Plasticity {
             };
         }
         let (_, mu) = self.elastic.lame();
-        let dgamma = f / (3.0 * mu + self.hardening);
+        let dgamma = f / (3.0 * mu + self.hardening + overstress_modulus);
         let mut n_hat = s_trial;
         for c in &mut n_hat {
             *c /= norm_s;
@@ -138,54 +140,15 @@ impl SmallStrainLaw for J2Plasticity {
     }
 
     fn stress(&self, strain: &Voigt, state: &J2State) -> Voigt {
-        self.radial_return(strain, state).stress
+        self.radial_return(strain, state, 0.0).stress
     }
 
     fn tangent(&self, strain: &Voigt, state: &J2State) -> Tangent6 {
-        let up = self.radial_return(strain, state);
-        if !up.plastic {
-            return self.elastic.stiffness();
-        }
-        let (lambda, mu) = self.elastic.lame();
-        let kappa = lambda + 2.0 * mu / 3.0;
-        // Simo–Hughes algorithmic moduli:
-        //   C = κ I⊗I + 2μθ I_dev − 2μ θ̄ n̂⊗n̂
-        let theta = 1.0 - 3.0 * mu * up.dgamma / up.q_trial;
-        let theta_bar = 3.0 * mu / (3.0 * mu + self.hardening) - (1.0 - theta);
-        let mut c = [[0.0f64; 6]; 6];
-        // n̂ : dε picks up the shear-doubling of the tensor contraction.
-        let weight = |j: usize| if j < 3 { 1.0 } else { 2.0 };
-        for (i, row) in c.iter_mut().enumerate() {
-            for (j, slot) in row.iter_mut().enumerate() {
-                let vol = if i < 3 && j < 3 { kappa } else { 0.0 };
-                let dev = if i < 3 && j < 3 {
-                    if i == j { 1.0 - 1.0 / 3.0 } else { -1.0 / 3.0 }
-                } else if i == j {
-                    1.0
-                } else {
-                    0.0
-                };
-                *slot = vol + 2.0 * mu * theta * dev
-                    - 2.0 * mu * theta_bar * up.n_hat[i] * up.n_hat[j] * weight(j);
-            }
-        }
-        c
+        self.tangent_with_overstress(strain, state, 0.0)
     }
 
     fn update_state(&self, strain: &Voigt, state: &J2State) -> J2State {
-        let up = self.radial_return(strain, state);
-        if !up.plastic {
-            return state.clone();
-        }
-        let k = up.dgamma * det::sqrt(1.5);
-        let mut plastic_strain = state.plastic_strain;
-        for (p, n) in plastic_strain.iter_mut().zip(&up.n_hat) {
-            *p += k * n;
-        }
-        J2State {
-            plastic_strain,
-            alpha: state.alpha + up.dgamma,
-        }
+        self.update_state_with_overstress(strain, state, 0.0)
     }
 
     fn admissibility(&self) -> MaterialAdmissibility {
@@ -193,8 +156,6 @@ impl SmallStrainLaw for J2Plasticity {
             has_stored_energy: true, // elastic part
             dissipation_nonnegative: true,
             polyconvex: None,
-            // Associative flow + isotropic hardening ⇒ symmetric
-            // algorithmic moduli.
             tangent_symmetric: true,
             failure_envelope: "von Mises yield surface q = sigma_y + H*alpha",
         }
@@ -223,4 +184,54 @@ impl SmallStrainLaw for J2Plasticity {
             0.05,
         )
     }
+}
+
+impl J2Plasticity {
+    fn tangent_with_overstress(&self, strain: &Voigt, state: &J2State, overstress_modulus: f64) -> Tangent6 {
+        let up = self.radial_return(strain, state, overstress_modulus);
+        if !up.plastic {
+            return self.elastic.stiffness();
+        }
+        let (lambda, mu) = self.elastic.lame();
+        let kappa = lambda + 2.0 * mu / 3.0;
+        // Simo–Hughes algorithmic moduli:
+        //   C = κ I⊗I + 2μθ I_dev − 2μ θ̄ n̂⊗n̂
+        let theta = 1.0 - 3.0 * mu * up.dgamma / up.q_trial;
+        let theta_bar = 3.0 * mu / (3.0 * mu + self.hardening + overstress_modulus) - (1.0 - theta);
+        let mut c = [[0.0f64; 6]; 6];
+        // n̂ : dε picks up the shear-doubling of the tensor contraction.
+        let weight = |j: usize| if j < 3 { 1.0 } else { 2.0 };
+        for (i, row) in c.iter_mut().enumerate() {
+            for (j, slot) in row.iter_mut().enumerate() {
+                let vol = if i < 3 && j < 3 { kappa } else { 0.0 };
+                let dev = if i < 3 && j < 3 {
+                    if i == j { 1.0 - 1.0 / 3.0 } else { -1.0 / 3.0 }
+                } else if i == j {
+                    1.0
+                } else {
+                    0.0
+                };
+                *slot = vol + 2.0 * mu * theta * dev
+                    - 2.0 * mu * theta_bar * up.n_hat[i] * up.n_hat[j] * weight(j);
+            }
+        }
+        c
+    }
+
+    fn update_state_with_overstress(&self, strain: &Voigt, state: &J2State, overstress_modulus: f64) -> J2State {
+        let up = self.radial_return(strain, state, overstress_modulus);
+        if !up.plastic {
+            return state.clone();
+        }
+        let k = up.dgamma * det::sqrt(1.5);
+        let mut plastic_strain = state.plastic_strain;
+        for (p, n) in plastic_strain.iter_mut().zip(&up.n_hat) {
+            *p += k * n;
+        }
+        J2State {
+            plastic_strain,
+            alpha: state.alpha + up.dgamma,
+        }
+    }
+
 }

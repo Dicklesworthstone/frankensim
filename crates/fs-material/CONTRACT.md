@@ -2289,3 +2289,53 @@ Synthetic material tests compare an independent symmetric-block inverse and
 energy, work-conjugate derivatives, signed/bias/temperature data changes,
 coupled instability and source-domain refusal. Motion and native circuit
 composition belong to `fs-couple::magnetostrictive`.
+
+## Source-defined linear J2 overstress and physical creep heat
+
+`plastic::rate::LinearOverstressJ2` extends the original radial-return owner
+with the explicitly declared associative Perzyna n=1 law
+`alpha_dot = max(q - sigma_y - H alpha, 0)/eta`. The native tensor convention,
+history, trial stress and consistent algorithmic tangent remain shared. For an
+actual physical interval dt, backward Euler gives
+`delta_alpha = max(f_trial,0)/(3 mu + H + eta/dt)`. Positive endpoint overstress
+is a legitimate committed state; the consistency gate checks
+`q - sigma_y - H alpha - eta delta_alpha/dt`. Every new interval starts from
+the accepted internal variables. Native viscosity and duration must be finite,
+positive and representable together with the return denominator.
+
+The energetic-hardening interpretation remains explicit:
+`psi=e:C:e/2 + H alpha^2/2`. Physical dissipation is
+`sigma_y delta_alpha + eta delta_alpha^2/dt`; the viscosity is not added to
+hardening storage. The original backward-Euler numerical loss is separate and
+never deposited as heat. Fixed-strain stress relaxation can therefore warm the
+finite thermal store while reducing actual elastic storage. The original
+rate-independent law and arithmetic remain the default when no viscosity is
+selected.
+
+`ThermoplasticSource::with_linear_overstress` selects
+`plastic_overstress_viscosity` [Pa s] from the same original mechanical/caloric
+material card and complete fixed external context. This role is distinct from
+fluid shear viscosity. The original claim is pinned; its continuous source line
+must stay finite and positive across the complete caloric interval. Piecewise
+temperature dependence is admitted; unowned mechanical, rate, history and
+frequency source coordinates refuse. Every thermal trial and the accepted
+endpoint refresh this claim together with the other material coefficients.
+Viscosity affects kinetics and dissipation, contributes no stored free energy,
+and creates no additional mechanical entropy term. Existing affine E/H and
+integrated expansion accounts remain intact.
+
+`CaloricPoint` and the spatial thermal owner supply actual physical dt.
+`resolve_expanded_enthalpy_for_step` and `advance_with_energy_for_step` expose
+the same interval-aware source law; their duration-free counterparts refuse a
+source that explicitly selected overstress. Coupling proposals and thermal
+substeps cannot accumulate extra plastic time. This is small-strain linear
+overstress with energetic isotropic hardening, not a nonlinear rate exponent,
+finite-strain creep, damage, phase transformation or empirical validation.
+
+Synthetic `tests/plastic_rate.rs` compares independent radial-return/storage/
+heat expressions, a fixed-strain analytic stress-relaxation solution with
+first-order refinement, all discrete tangent entries and eta/dt scaling.
+The spatial consumer tests actual loaded-solid creep, finite-store heating and
+endpoint temperature feedback in `fs-couple`. This advances MR22
+(`frankensim-material-reality-ui2if.3.4`); its broader material/history scope
+remains open.

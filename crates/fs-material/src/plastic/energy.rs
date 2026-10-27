@@ -2,7 +2,8 @@
 //!
 //! This is the explicitly ENERGETIC linear-hardening interpretation:
 //! psi = 1/2 e:C:e + 1/2 H alpha^2. The yield offset dissipates
-//! sigma_y delta_alpha; hardening energy is stored. An empirical hardening
+//! sigma_y delta_alpha; selected linear overstress adds eta delta_alpha^2/dt
+//! to physical dissipation. Hardening energy is stored. An empirical hardening
 //! curve alone does not establish this heat partition for a real specimen.
 //!
 //! Endpoint stress work closes as delta_psi + physical_dissipation +
@@ -22,7 +23,8 @@ use fs_math::det;
 pub struct EnergyTolerances {
     /// Maximum absolute work-account residual [J/m3].
     pub energy_j_m3: f64,
-    /// Maximum absolute endpoint yield residual [Pa].
+    /// Maximum absolute endpoint flow residual [Pa]. For linear overstress this
+    /// is `q - sigma_y - H alpha - eta delta_alpha/dt`, not zero overstress.
     pub yield_pa: f64,
 }
 
@@ -49,7 +51,7 @@ pub struct IncrementEnergy {
     pub final_state: StoredEnergy,
     /// Endpoint stress contracted with the total strain increment.
     pub mechanical_work_j_m3: f64,
-    /// sigma_y delta_alpha; the only heat source of this energetic model.
+    /// Yield-offset and, when selected, linear-overstress dissipation.
     pub physical_dissipation_j_m3: f64,
     /// 1/2 delta_e:C:delta_e + 1/2 H (delta_alpha)^2.
     pub numerical_dissipation_j_m3: f64,
@@ -112,6 +114,17 @@ impl fmt::Display for EnergyError {
 impl std::error::Error for EnergyError {}
 
 impl J2Plasticity {
+    /// Admit finite small-strain history without imposing instantaneous yield.
+    /// A viscous plastic solid may retain positive overstress between steps.
+    pub fn validate_overstress_history(&self, strain: &Voigt, state: &J2State)
+        -> Result<(), EnergyError> {
+        self.validate_energy_law()?;
+        let elastic = self.admit_energy_history(strain, state)?;
+        if self.elastic.stress(&elastic, &()).iter().any(|x| !x.is_finite()) {
+            return Err(EnergyError::Invalid("committed overstress is unrepresentable"));
+        }
+        Ok(())
+    }
     /// Admit a committed history at THIS law's temperature and yield offset.
     /// Initial histories need this check; a thermal trial may lower the yield
     /// offset and intentionally make the previously committed state overstress.
@@ -143,6 +156,13 @@ impl J2Plasticity {
         &self, old_strain: &Voigt, old_state: &J2State, strain: &Voigt,
         tolerances: EnergyTolerances,
     ) -> Result<EnergyIncrement, EnergyError> {
+        self.advance_with_overstress_energy(old_strain, old_state, strain, tolerances, 0.0)
+    }
+
+    pub(super) fn advance_with_overstress_energy(
+        &self, old_strain: &Voigt, old_state: &J2State, strain: &Voigt,
+        tolerances: EnergyTolerances, overstress_modulus: f64,
+    ) -> Result<EnergyIncrement, EnergyError> {
         self.validate_energy_law()?;
         if !positive(tolerances.energy_j_m3) || !positive(tolerances.yield_pa) {
             return Err(EnergyError::Invalid("energy and yield allowances must be finite and positive"));
@@ -150,8 +170,8 @@ impl J2Plasticity {
         let old_e = self.admit_energy_history(old_strain, old_state)?;
         self.admit_energy_strain(strain)?;
         // The constitutive owner alone performs the predictor and radial return.
-        let stress_pa = self.stress(strain, old_state);
-        let state = self.update_state(strain, old_state);
+        let stress_pa = self.radial_return(strain, old_state, overstress_modulus).stress;
+        let state = self.update_state_with_overstress(strain, old_state, overstress_modulus);
         let new_e = self.admit_energy_history(strain, &state)?;
         if stress_pa.iter().any(|v| !v.is_finite()) {
             return Err(EnergyError::Invalid("native stress is not representable"));
@@ -161,7 +181,8 @@ impl J2Plasticity {
             || delta_alpha == 0.0 && state.plastic_strain != old_state.plastic_strain {
             return Err(EnergyError::Invalid("plastic history increment is not representable or monotone"));
         }
-        let yield_residual = finite(self.yield_function(&stress_pa, state.alpha))?;
+        let yield_residual = finite(self.yield_function(&stress_pa, state.alpha)
+            - product(overstress_modulus, delta_alpha)?)?;
         if yield_residual > tolerances.yield_pa
             || delta_alpha > 0.0 && yield_residual.abs() > tolerances.yield_pa {
             return Err(EnergyError::YieldResidual {
@@ -170,7 +191,11 @@ impl J2Plasticity {
         }
         // Also admit the committed elastic stress, not just the corrected
         // predictor: storing an inconsistent internal state must refuse.
-        self.validate_committed_history(strain, &state, tolerances.yield_pa)?;
+        if overstress_modulus == 0.0 {
+            self.validate_committed_history(strain, &state, tolerances.yield_pa)?;
+        } else {
+            self.validate_overstress_history(strain, &state)?;
+        }
         let initial = self.energy_of(&old_e, old_state.alpha)?;
         let final_state = self.energy_of(&new_e, state.alpha)?;
         let delta_e = subtract(&new_e, &old_e);
@@ -179,7 +204,8 @@ impl J2Plasticity {
         let mut energy = IncrementEnergy {
             initial, final_state,
             mechanical_work_j_m3: finite(contract(&stress_pa, &delta_strain))?,
-            physical_dissipation_j_m3: product(self.yield_stress, delta_alpha)?,
+            physical_dissipation_j_m3: finite(product(self.yield_stress, delta_alpha)?
+                + product(overstress_modulus, product(delta_alpha, delta_alpha)?)?)?,
             numerical_dissipation_j_m3: finite(numerical.total_j_m3())?,
             residual_j_m3: 0.0,
         };

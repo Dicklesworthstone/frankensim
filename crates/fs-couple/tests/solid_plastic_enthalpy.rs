@@ -8,6 +8,8 @@ mod expansion_curve;
 mod modulus_curve;
 #[path = "solid_plastic_enthalpy/dynamics.rs"]
 mod dynamics;
+#[path = "solid_plastic_enthalpy/overstress.rs"]
+mod overstress;
 
 use std::collections::BTreeMap;
 

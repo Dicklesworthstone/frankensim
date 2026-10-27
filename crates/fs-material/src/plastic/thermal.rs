@@ -8,10 +8,14 @@
 //! is the caloric internal-energy chart. Coefficient work and temperature derivatives
 //! of elastic/hardening free energy enter the same reversible heat/storage account.
 //! Kinked moduli require strain/history-dependent entropy jumps and are refused.
+//! Optional linear J2 overstress uses positive sourced eta(T) and the actual
+//! physical interval in the same radial return, tangent and work account.
+//! Without that explicit source selection the original rate-independent law
+//! is unchanged. A duration-free response refuses when overstress is selected.
 //! Phase/volume work, general nonlinear coefficient laws and finite deformation
 //! remain outside this reduction.
 //!
-//! Physical yield dissipation and signed reversible thermoelastic exchange are
+//! Physical yield/overstress dissipation and signed reversible thermoelastic exchange are
 //! passed separately to the existing thermal owner.
 //! Hardening storage and backward-Euler numerical loss are never heated. Every
 //! trial retains the same old strain, plastic history, enthalpy and clock. A
@@ -137,6 +141,8 @@ impl<E: std::error::Error + 'static> std::error::Error for FeedbackError<E> {}
 /// energetic hardening, with fixed Poisson ratio and density. Yield stress, Cp and
 /// optional expansion may be piecewise linear. Modulus derivatives and integrated
 /// expansion contribute both reversible heat and their internal-energy storage.
+/// An explicitly selected viscosity is refreshed from the same complete bundle
+/// at each trial and accepted temperature; it changes kinetics, not stored energy.
 #[derive(Clone, Debug)]
 pub struct ThermoplasticSource<'a> {
     card: &'a MaterialCard,
@@ -156,6 +162,7 @@ pub struct ThermoplasticSource<'a> {
     hardening_temperature_slope_pa_k: f64,
     maximum_youngs_modulus_pa: f64,
     reference_temperature_k: f64,
+    linear_overstress: bool,
 }
 
 /// One initially uniform specimen with immutable accepted native history.
@@ -417,7 +424,7 @@ impl<'a> ThermoplasticSource<'a> {
             let hardening = name == query.hardening_basis.property_name();
             let fixed = name == POISSON_RATIO_PROPERTY || name == density_name;
             // Mechanics, caloric data and linked transport use the same
-            // rate-independent source admission.
+            // admission of instantaneous coefficients at fixed external context.
             admit_rate_independent_property(property, &query.temperature_axis)?;
             let support = query
                 .card
@@ -529,6 +536,7 @@ impl<'a> ThermoplasticSource<'a> {
             hardening_temperature_slope_pa_k,
             maximum_youngs_modulus_pa,
             reference_temperature_k: state.temperature_k(),
+            linear_overstress: false,
         };
         // Affine extrema occur at the span ends; the native owner checks the
         // elastic tensor, hardening conversion and return-map denominator there.
@@ -536,6 +544,62 @@ impl<'a> ThermoplasticSource<'a> {
         result.resolve_temperature(knots[knots.len() - 1].temperature_k)?;
         result.admit_thermoelastic_capacity()?;
         Ok(result)
+    }
+
+    /// Select linear J2 overstress viscosity from this same immutable material.
+    /// Its original claim is pinned and must continuously support the caloric
+    /// interval with positive finite values. Temperature may change viscosity;
+    /// additional rate/stress/history source axes are not silently frozen.
+    /// The actual physical duration is supplied by each later step.
+    pub fn with_linear_overstress(mut self, selection: MaterialPropertySelection)
+        -> Result<Self, FeedbackError> {
+        use super::rate::{OVERSTRESS_VISCOSITY_DIMS, OVERSTRESS_VISCOSITY_PROPERTY};
+        if self.linear_overstress {
+            return Err(FeedbackError::Invalid("linear overstress is already selected"));
+        }
+        let requirement = ScalarPropertyRequirement::try_new(OVERSTRESS_VISCOSITY_PROPERTY,
+            OVERSTRESS_VISCOSITY_DIMS, ScalarAdmissibility::StrictlyPositive)
+            .map_err(|e| FeedbackError::Source(e.into()))?;
+        let resolved = resolve_material_state_point(self.card, &self.context,
+            std::slice::from_ref(&requirement), selection)
+            .map_err(|e| FeedbackError::Source(e.into()))?;
+        let property = &resolved.properties()[0];
+        admit_rate_independent_property(property, &self.temperature_axis)?;
+        let selected = property.answer().receipt.selected;
+        let claim = self.card.claims().claim(selected)
+            .ok_or(FeedbackError::Invalid("overstress claim left its original card"))?;
+        let knots = self.caloric.curve().knots();
+        let lower = point_at(&self.context, &self.temperature_axis, knots[0].temperature_k)?;
+        let upper = point_at(&self.context, &self.temperature_axis, knots[knots.len()-1].temperature_k)?;
+        let support = self.card.claims().query_line_typed(&claim.key, &self.temperature_axis,
+            &lower, &upper, ClaimSelection::Pinned(selected))
+            .map_err(|e| FeedbackError::Support { property: OVERSTRESS_VISCOSITY_PROPERTY.into(), reason: e.to_string() })?;
+        if support.knots.iter().any(|(_, sample)| !positive(sample.evidence.value.value)) {
+            return Err(FeedbackError::Invalid("overstress viscosity must be positive throughout its source interval"));
+        }
+        let MaterialPropertySelection::PinnedByProperty(pins) = &mut self.selection else {
+            return Err(FeedbackError::Invalid("thermoplastic coefficients lost original claim pins"));
+        };
+        pins.push((OVERSTRESS_VISCOSITY_PROPERTY.into(), selected));
+        self.requirements.push(requirement);
+        self.linear_overstress = true;
+        self.source = self.resolve_temperature(self.reference_temperature_k)?;
+        Ok(self)
+    }
+
+    /// Whether physical step duration is required for this constitutive model.
+    pub const fn has_linear_overstress(&self) -> bool { self.linear_overstress }
+
+    /// Admit accepted strain/history using the selected kinetic interpretation.
+    /// Viscous material may carry real positive overstress into the next step.
+    pub fn validate_committed_history(&self, source: &ResolvedJ2Plasticity,
+        mechanical_strain: &Voigt, history: &J2State, tolerance_pa: f64)
+        -> Result<(), EnergyError> {
+        if self.linear_overstress {
+            source.law().validate_overstress_history(mechanical_strain, history)
+        } else {
+            source.law().validate_committed_history(mechanical_strain, history, tolerance_pa)
+        }
     }
 
     /// Source bundle at the admitted reference temperature.
@@ -681,6 +745,18 @@ impl<'a> CaloricPoint<'a> {
         })
     }
 
+    /// Attach source-defined overstress before any loading or time advance.
+    /// The same candidate/transport owner supplies physical dt and finite heat.
+    pub fn with_linear_overstress(mut self, selection: MaterialPropertySelection)
+        -> Result<Self, FeedbackError> {
+        if self.time_s != 0.0 || self.strain != [0.0; 6] || self.history.alpha != 0.0 {
+            return Err(FeedbackError::Invalid("select the overstress law before advancing the specimen"));
+        }
+        self.binding = self.binding.with_linear_overstress(selection)?;
+        self.source = self.binding.resolve_temperature(self.state.temperature_k())?;
+        Ok(self)
+    }
+
     /// Original complete source snapshot at the accepted temperature.
     #[must_use]
     pub const fn resolved(&self) -> &ResolvedJ2Plasticity {
@@ -765,9 +841,9 @@ impl<'a> CaloricPoint<'a> {
                 "invalid feedback controls or physical interval",
             ));
         }
-        self.source
-            .law()
+        self.binding
             .validate_committed_history(
+                &self.source,
                 &self
                     .binding
                     .mechanical_strain_at(self.state.temperature_k(), &self.strain)?,
@@ -783,7 +859,7 @@ impl<'a> CaloricPoint<'a> {
         let mut defects = [f64::INFINITY; 4];
         for iteration in 1..=config.max_iterations {
             poll(&mut cancelled)?;
-            let (_, trial) = self.propose_at(temperature, &strain, tolerances)?;
+            let (_, trial) = self.propose_at(temperature, &strain, tolerances, duration_s)?;
             let applied_heat_j = product(self.volume_m3, trial.caloric_heat_j_m3())?;
             let proposal = transport(UniformEnthalpyStepInput {
                 curve: self.binding.caloric.curve(),
@@ -824,7 +900,7 @@ impl<'a> CaloricPoint<'a> {
                 ));
             }
             let final_temperature = proposal.state.temperature_k();
-            let (source, increment) = self.propose_at(final_temperature, &strain, tolerances)?;
+            let (source, increment) = self.propose_at(final_temperature, &strain, tolerances, duration_s)?;
             let reversible_heat_j = product(self.volume_m3, increment.reversible_heat_j_m3)?;
             let thermoelastic_storage_change_j =
                 product(self.volume_m3, increment.thermoelastic_storage_change_j_m3)?;
@@ -901,6 +977,7 @@ impl<'a> CaloricPoint<'a> {
         temperature_k: f64,
         strain: &Voigt,
         tolerances: EnergyTolerances,
+        duration_s: f64,
     ) -> Result<(ResolvedJ2Plasticity, ThermoplasticIncrement), FeedbackError<E>> {
         self.binding.increment_at_temperature(
             self.state.temperature_k(),
@@ -909,6 +986,7 @@ impl<'a> CaloricPoint<'a> {
             &self.history,
             strain,
             tolerances,
+            Some(duration_s),
         )
     }
 }
@@ -928,7 +1006,7 @@ fn admit_rate_independent_property<E>(
         .is_some()
     {
         return Err(FeedbackError::Invalid(
-            "frequency-bounded data cannot define rate-independent thermoplastic coefficients",
+            "frequency-bounded data cannot define instantaneous thermoplastic coefficients",
         ));
     }
     Ok(())
