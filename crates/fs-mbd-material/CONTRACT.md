@@ -249,3 +249,30 @@ coaxial two-joint cases independently specify the full coupled inertia law,
 heat-capacity-only swaps, applied work, cooling/restart and transactional
 source/cancellation/work-budget refusal. Full workspace qualification remains
 a separate gate.
+
+## Material-driven journal loss in continuing articulated motion (MR20)
+
+`HeatedArticulatedMotion::with_journal_bearings` binds explicit revolute links,
+receiving thermal cells, concentric geometry and source-pinned
+`LiquidTemperatureLaw` instances. Native ABA/RK stages integrate the relative
+resisting torque and its conjugate nonnegative power using the same coefficient.
+Each accepted interval's integrated loss enters its receiving enthalpy cell
+once. Endpoint viscosity/density refresh from the actual wall temperature and
+original claims; the next interval uses that material state. All retained
+liquid properties require continuous temperature-path source support.
+
+`Audit.viscous_heat_j` is internal mechanical-to-thermal transfer already present
+in the thermal owner's supplied heat. The combined audit cancels it, retaining
+applied joint work, inertia-remap parameter work and numerical energy defect
+as separate accounts. Native stages enforce a creeping-flow bound; endpoints
+enforce the declared viscosity-change limit. Every source, budget, mechanical,
+thermal or cancellation refusal leaves the accepted coupled history intact.
+
+The film is massless, isothermal and quasisteady with prescribed concentric
+geometry. No pressure-supported load, eccentricity, cavitation, turbulence,
+end effects, film thermal storage or spin-up is claimed. The thermal/mechanical
+split remains first order. Four G1/G3/G4 tests in
+`tests/heated_articulated_viscous_motion.rs` cover analytic spin-down/local heat,
+two-link angular momentum, source-only viscosity feedback and refinement,
+continuation, and late rollback. Native execution remains required for
+numerical qualification.

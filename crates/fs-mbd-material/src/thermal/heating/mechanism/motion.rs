@@ -5,6 +5,8 @@
 //! then receive the same conjugate joint momenta at unchanged joint positions.
 //! This is a first-order split with a stationary prescribed base. Parameter
 //! work is reported separately and never deposited as caloric heat.
+//! Optional source-backed journal films apply resisting torques in the SAME
+//! mechanical stages and deposit their integrated work on this thermal clock.
 use super::*;
 use fs_ga::{Se3, Vec3, Wrench};
 use fs_mbd::articulated::{
@@ -15,6 +17,10 @@ use fs_time::{
     AdaptiveError, AdaptiveState, AdaptiveStatus, PiController, rk45_adaptive_controlled,
 };
 use std::cell::RefCell;
+
+/// Material-driven journal loss and its receiving thermal control volume.
+pub mod viscous;
+use viscous::{BoundBearing, JournalBearing, JournalBearingState};
 
 /// Component tolerances follow the actual generalized-coordinate ordering.
 #[derive(Clone, Debug, PartialEq)]
@@ -38,6 +44,7 @@ pub struct Controls {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Error {
     Heating(HeatingError),
+    Material(fs_material::state_point::MaterialStatePointError),
     Dynamics(ArticulatedError),
     Integration(AdaptiveError),
     Invalid(&'static str),
@@ -52,6 +59,11 @@ impl std::error::Error for Error {}
 impl From<HeatingError> for Error {
     fn from(e: HeatingError) -> Self {
         Self::Heating(e)
+    }
+}
+impl From<fs_material::state_point::MaterialStatePointError> for Error {
+    fn from(e: fs_material::state_point::MaterialStatePointError) -> Self {
+        Self::Material(e)
     }
 }
 impl From<DepositionError> for Error {
@@ -88,6 +100,9 @@ pub struct Audit {
     pub mechanical_before: MechanicalEnergy,
     pub mechanical_after: MechanicalEnergy,
     pub applied_joint_work_j: f64,
+    /// Mechanical loss deposited once in `thermal.external_heat_j` [J].
+    /// Subtract this internal transfer when identifying externally supplied heat.
+    pub viscous_heat_j: f64,
     pub parameter_work_j: f64,
     pub absolute_parameter_work_j: f64,
     pub numerical_energy_change_j: f64,
@@ -141,6 +156,8 @@ impl<'a> HeatedArticulatedMotion<'a> {
             gravity: gravity_world,
             controls,
             work: Work::default(),
+            bearings: Vec::new(),
+            pending: None,
         };
         forward_dynamics(
             motion.expansion.configuration.model(),
@@ -182,6 +199,39 @@ impl<'a> HeatedArticulatedMotion<'a> {
     }
     pub fn mechanical_energy(&self) -> Result<MechanicalEnergy, Error> {
         self.motion.energy()
+    }
+
+    /// Attach up to 64 massless, isothermal journal films to this mechanism.
+    /// Each explicitly named receiving cell supplies the lubricant temperature
+    /// and receives all of that film's dissipated work. Film storage, pressure
+    /// support and changes to the prescribed bearing geometry are not inferred.
+    /// Existing accepted state is unchanged on every refusal or cancellation.
+    pub fn with_journal_bearings(
+        &self,
+        bearings: Vec<JournalBearing<'a>>,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, Error> {
+        checkpoint()?;
+        if !self.motion.bearings.is_empty() || bearings.is_empty() || bearings.len() > 64 {
+            return Err(Error::Invalid("attach 1..=64 journal films exactly once"));
+        }
+        let mut candidate = self.clone();
+        for bearing in bearings {
+            checkpoint()?;
+            candidate.motion.bearings.push(BoundBearing::new(
+                bearing,
+                self.configuration().model(),
+                &self.thermal,
+                &self.motion.velocity,
+            )?);
+        }
+        checkpoint()?;
+        Ok(candidate)
+    }
+
+    /// Actual endpoint source states, resistance, torque and power in input order.
+    pub fn journal_bearings(&self) -> impl ExactSizeIterator<Item = &JournalBearingState> {
+        self.motion.bearings.iter().map(|b| &b.state)
     }
 
     /// Use the existing heat scheduler. Late cancellation, material-domain,
@@ -228,6 +278,7 @@ impl<'a> HeatedArticulatedMotion<'a> {
             mechanical_before: before,
             mechanical_after: after,
             applied_joint_work_j: w.applied,
+            viscous_heat_j: w.viscous,
             parameter_work_j: w.parameter,
             absolute_parameter_work_j: w.absolute_parameter,
             numerical_energy_change_j: w.numerical,
@@ -235,8 +286,7 @@ impl<'a> HeatedArticulatedMotion<'a> {
             maximum_scaled_momentum_residual: w.momentum_residual,
             rk_attempts: w.attempts,
             combined_residual_j: finite(
-                thermal.residual_j + after.change_from(before)?
-                    - w.applied
+                thermal.residual_j + after.change_from(before)? - w.applied + w.viscous
                     - w.parameter
                     - w.numerical,
             )?,
@@ -270,6 +320,7 @@ impl Controls {
 #[derive(Clone, Copy, Default)]
 struct Work {
     applied: f64,
+    viscous: f64,
     parameter: f64,
     absolute_parameter: f64,
     numerical: f64,
@@ -288,6 +339,20 @@ struct Motion<'a> {
     gravity: Vec3,
     controls: Controls,
     work: Work,
+    bearings: Vec<BoundBearing<'a>>,
+    pending: Option<IntegratedMotion>,
+}
+#[derive(Clone)]
+struct IntegratedMotion {
+    end_s: f64,
+    position: Vec<f64>,
+    velocity: Vec<f64>,
+    after_motion: MechanicalEnergy,
+    applied: f64,
+    viscous: f64,
+    heat_w: BTreeMap<CellId, f64>,
+    numerical: f64,
+    attempts: usize,
 }
 impl Motion<'_> {
     fn energy(&self) -> Result<MechanicalEnergy, Error> {
@@ -299,85 +364,77 @@ impl Motion<'_> {
             self.gravity,
         )
     }
-}
-impl DepositionObserver for Motion<'_> {
-    type Error = Error;
-    fn begin(&mut self) -> Result<(), Error> {
-        self.work = Work::default();
-        Ok(())
-    }
-    fn event(&mut self, event: &Event, thermal: &DepositionSimulation<'_>) -> Result<(), Error> {
-        Ok(self.expansion.event(event, thermal)?)
-    }
-    fn limit_timestep_s(
-        &mut self,
-        _: &DepositionSimulation<'_>,
-        proposed_s: f64,
-        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<f64, Error> {
-        checkpoint()?;
-        Ok(proposed_s.min(self.controls.maximum_step_s))
-    }
-    fn step(
-        &mut self,
+    fn integrate(
+        &self,
         start_s: f64,
         dt_s: f64,
-        old: &BTreeMap<CellId, f64>,
-        thermal: &DepositionSimulation<'_>,
+        end_s: f64,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<(), Error> {
+    ) -> Result<IntegratedMotion, Error> {
         checkpoint()?;
-        if start_s != self.time_s || !positive(dt_s) || thermal.time_s() <= start_s {
+        if start_s != self.time_s || !positive(dt_s) || end_s <= start_s {
             return Err(Error::Invalid("joint and thermal clocks disagree"));
         }
         let model = self.expansion.configuration.model();
         let before = self.energy()?;
         let n = self.position.len();
-        let scales: Vec<_> = self
+        let mut scales: Vec<_> = self
             .controls
             .absolute_position_tolerance
             .iter()
             .chain(&self.controls.absolute_velocity_tolerance)
             .copied()
             .collect();
-        let normalized: Vec<_> = self
+        scales.extend(
+            self.bearings
+                .iter()
+                .map(|b| b.definition.limits.absolute_loss_tolerance_j),
+        );
+        let mut normalized: Vec<_> = self
             .position
             .iter()
             .chain(&self.velocity)
             .zip(&scales)
             .map(|(&u, &scale)| u / scale)
             .collect();
+        normalized.resize(scales.len(), 0.0);
         let mut state = AdaptiveState::new(start_s, &normalized, dt_s);
         let external = vec![Wrench::default(); model.link_count()];
         let source_error = RefCell::new(None);
         let rhs = |_: f64, u: &[f64], out: &mut [f64]| {
-            let physical: Vec<_> = u.iter().zip(&scales).map(|(&x, &s)| x * s).collect();
-            match forward_dynamics(
-                model,
-                self.base,
-                &physical[..n],
-                &physical[n..],
-                &self.effort,
-                self.gravity,
-                &external,
-            ) {
-                Ok(response) => {
-                    for i in 0..n {
-                        out[i] = physical[n + i] / scales[i];
-                        out[n + i] = response.generalized_acceleration[i] / scales[n + i];
-                    }
+            let result = (|| -> Result<(), Error> {
+                let physical: Vec<_> = u.iter().zip(&scales).map(|(&x, &s)| x * s).collect();
+                let mut effort = self.effort.clone();
+                for (j, bearing) in self.bearings.iter().enumerate() {
+                    let (torque, power, _) = bearing.response(physical[n + bearing.dof])?;
+                    effort[bearing.dof] = finite(effort[bearing.dof] + torque)?;
+                    out[2 * n + j] = power / scales[2 * n + j];
                 }
-                Err(error) => {
-                    *source_error.borrow_mut() = Some(error);
-                    out.fill(f64::NAN);
+                let response = forward_dynamics(
+                    model,
+                    self.base,
+                    &physical[..n],
+                    &physical[n..2 * n],
+                    &effort,
+                    self.gravity,
+                    &external,
+                )?;
+                for i in 0..n {
+                    out[i] = physical[n + i] / scales[i];
+                    out[n + i] = response.generalized_acceleration[i] / scales[n + i];
                 }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                *source_error.borrow_mut() = Some(error);
+                out.fill(f64::NAN);
             }
         };
         let mut checkpoint_error = None;
         let result = rk45_adaptive_controlled(
             &mut state,
             &rhs,
-            thermal.time_s(),
+            end_s,
             self.controls.relative_state_tolerance,
             1.0,
             &PiController::default(),
@@ -394,7 +451,7 @@ impl DepositionObserver for Motion<'_> {
             return Err(error.into());
         }
         if let Some(error) = source_error.into_inner() {
-            return Err(error.into());
+            return Err(error);
         }
         let report = result?;
         if report.status != AdaptiveStatus::ReachedEnd {
@@ -402,7 +459,7 @@ impl DepositionObserver for Motion<'_> {
         }
         let physical: Vec<_> = state.u.iter().zip(&scales).map(|(&x, &s)| x * s).collect();
         let position = physical[..n].to_vec();
-        let velocity = physical[n..].to_vec();
+        let velocity = physical[n..2 * n].to_vec();
         let after_motion = energy(model, self.base, &position, &velocity, self.gravity)?;
         let applied = finite(
             self.effort
@@ -412,7 +469,109 @@ impl DepositionObserver for Motion<'_> {
                 .map(|((&force, &q), &old_q)| force * (q - old_q))
                 .sum(),
         )?;
-        let numerical = finite(after_motion.change_from(before)? - applied)?;
+        let mut viscous = 0.0;
+        let mut heat_w = BTreeMap::new();
+        for (bearing, &loss) in self.bearings.iter().zip(&physical[2 * n..]) {
+            if !nonnegative(loss) {
+                return Err(Error::Budget(
+                    "journal integrated loss must be nonnegative; refine RK tolerances",
+                ));
+            }
+            // Validate the fixed-coefficient endpoint, including the last RK stage.
+            bearing.response(velocity[bearing.dof])?;
+            viscous = finite(viscous + loss)?;
+            let watts = heat_w.entry(bearing.definition.heat_cell).or_insert(0.0);
+            *watts = finite(*watts + loss / dt_s)?;
+        }
+        let numerical = finite(after_motion.change_from(before)? - applied + viscous)?;
+        checkpoint()?;
+        Ok(IntegratedMotion {
+            end_s,
+            position,
+            velocity,
+            after_motion,
+            applied,
+            viscous,
+            heat_w,
+            numerical,
+            attempts: report.attempts,
+        })
+    }
+}
+impl DepositionObserver for Motion<'_> {
+    type Error = Error;
+    fn begin(&mut self) -> Result<(), Error> {
+        self.work = Work::default();
+        self.pending = None;
+        Ok(())
+    }
+    fn event(&mut self, event: &Event, thermal: &DepositionSimulation<'_>) -> Result<(), Error> {
+        Ok(self.expansion.event(event, thermal)?)
+    }
+    fn limit_timestep_s(
+        &mut self,
+        _: &DepositionSimulation<'_>,
+        proposed_s: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<f64, Error> {
+        checkpoint()?;
+        Ok(proposed_s.min(self.controls.maximum_step_s))
+    }
+    fn requires_step_interval(&self) -> bool {
+        !self.bearings.is_empty()
+    }
+    fn step_sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        start_s: f64,
+        dt_s: f64,
+        end_s: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Error> {
+        checkpoint()?;
+        if thermal.time_s() != start_s || self.pending.is_some() {
+            return Err(Error::Invalid("unmatched mechanical interval"));
+        }
+        // These are the exact accepted start-state material snapshots. They
+        // cannot be replaced independently of this thermal/motion history.
+        let candidate = self.integrate(start_s, dt_s, end_s, checkpoint)?;
+        let heat = candidate.heat_w.clone();
+        self.pending = Some(candidate);
+        Ok(heat)
+    }
+    fn step(
+        &mut self,
+        start_s: f64,
+        dt_s: f64,
+        old: &BTreeMap<CellId, f64>,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Error> {
+        checkpoint()?;
+        if start_s != self.time_s || !positive(dt_s) || thermal.time_s() <= start_s {
+            return Err(Error::Invalid("joint and thermal clocks disagree"));
+        }
+        let candidate = self
+            .pending
+            .take()
+            .ok_or(Error::Invalid("missing mechanical interval"))?;
+        if candidate.end_s != thermal.time_s() {
+            return Err(Error::Invalid(
+                "mechanical candidate endpoint differs from thermal endpoint",
+            ));
+        }
+        let IntegratedMotion {
+            position,
+            velocity,
+            after_motion,
+            applied,
+            viscous,
+            numerical,
+            attempts,
+            ..
+        } = candidate;
+        let model = self.expansion.configuration.model();
+        let n = self.position.len();
         let momentum = stationary_base_joint_momentum(model, &position, &velocity)?;
         let old_model = model.clone();
         self.expansion
@@ -438,7 +597,12 @@ impl DepositionObserver for Motion<'_> {
         }
         let after = energy(model, self.base, &position, &next_velocity, self.gravity)?;
         let parameter = after.change_from(after_motion)?;
+        for bearing in &mut self.bearings {
+            checkpoint()?;
+            bearing.refresh(thermal, &next_velocity)?;
+        }
         self.work.applied = finite(self.work.applied + applied)?;
+        self.work.viscous = finite(self.work.viscous + viscous)?;
         self.work.parameter = finite(self.work.parameter + parameter)?;
         self.work.absolute_parameter = finite(self.work.absolute_parameter + parameter.abs())?;
         self.work.numerical = finite(self.work.numerical + numerical)?;
@@ -447,7 +611,7 @@ impl DepositionObserver for Motion<'_> {
         self.work.attempts = self
             .work
             .attempts
-            .checked_add(report.attempts)
+            .checked_add(attempts)
             .ok_or(Error::Budget("mechanical attempt count overflow"))?;
         if self.work.absolute_parameter > self.controls.maximum_parameter_work_j {
             return Err(Error::Budget("absolute thermal-configuration work"));
