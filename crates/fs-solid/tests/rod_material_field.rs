@@ -11,6 +11,9 @@ use fs_qty::{Density, Pressure};
 use fs_solid::rod::{Rod, RodSection, TipLoad};
 use fs_solid::rod::material_field::{SpatialMaterialRod, SpatialRodError};
 
+#[path = "rod_material_field/reference.rs"]
+mod reference;
+
 fn section(scale: f64) -> ConcentricShearSection {
     let mut claims = ClaimSet::new();
     let mut requirements = Vec::new();

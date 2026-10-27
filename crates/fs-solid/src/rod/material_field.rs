@@ -6,6 +6,8 @@
 //! length; cross-section/material jumps are one-dimensional idealizations, not
 //! resolved joint/interface stresses. The original clamped-root, dense FD/Newton
 //! statics and body-frame tip-moment convention remain in force.
+//! An explicitly supplied stress-free centerline and material frames retain
+//! intrinsic camber/twist through the SAME energy, loads and thermal refresh.
 
 use fs_exec::CancelGate;
 use fs_ga::So3;
@@ -19,6 +21,8 @@ pub mod thermal;
 pub mod supports;
 /// Reference mass, gravity and root-clamp reaction in the same equilibrium.
 pub mod gravity;
+/// Stress-free curved centerlines and material frames, independent of material.
+pub mod reference;
 
 use super::{MAX_MATERIAL_ROD_SEGMENTS, Rod, RodSection, TipLoad};
 use crate::SolidError;
@@ -71,6 +75,7 @@ pub struct SpatialMaterialRod {
     free_dofs: Vec<usize>,
     reference_mass: Arc<gravity::RodReferenceMass>,
     gravity: Option<gravity::GravityLoad>,
+    reference_geometry: Option<Arc<reference::RodReferenceGeometry>>,
 }
 
 impl SpatialMaterialRod {
@@ -119,7 +124,8 @@ impl SpatialMaterialRod {
         let rod = Rod::straight(length_m, sections.len(), stiffness[0]);
         let free_dofs = (0..rod.ndof()).collect();
         Ok(Self { rod, sections, stiffness, reference_length_m: length_m, thermal: None,
-            supports: Vec::new(), free_dofs, reference_mass, gravity: None })
+            supports: Vec::new(), free_dofs, reference_mass, gravity: None,
+            reference_geometry: None })
     }
 
     /// Original material assignments and all layer receipts, in spatial order.
@@ -131,16 +137,17 @@ impl SpatialMaterialRod {
     /// Accepted body-to-world nodal frames from the existing SO(3) owner.
     #[must_use]
     pub fn frames(&self) -> &[So3] { &self.rod.frames }
-    /// Authored straight reference length [m], not the current arc length.
+    /// Authored material reference length [m], not the current arc length.
     #[must_use]
     pub const fn reference_length_m(&self) -> f64 { self.reference_length_m }
 
-    /// Existing Cosserat axial/shear strains and curvature/twist [1/m].
+    /// Elastic Cosserat strain/curvature relative to the stress-free geometry.
+    /// Thermal eigenstrain is separate and is applied by the section owner.
     pub fn segment_strains(&self, segment: usize) -> Result<([f64; 3], [f64; 3]), SpatialRodError> {
         if segment >= self.sections.len() {
             return Err(SpatialRodError::Invalid("segment index is outside the material field"));
         }
-        Ok(self.rod.strains(segment)?)
+        self.strains_for(&self.rod, segment)
     }
 
     /// Local force [N] and moment [N m] resultants at the accepted configuration.
@@ -169,13 +176,29 @@ impl SpatialMaterialRod {
     // translation probes geometrically while retaining exact uniform/spatial
     // parity for the original unheated elastic path.
     fn probe_translation_scale_m(&self) -> f64 {
-        if self.thermal.is_some() { self.rod.l0 } else { 1.0 }
+        if self.thermal.is_some() || self.reference_geometry.is_some() { self.rod.l0 } else { 1.0 }
+    }
+
+    fn strains_for(&self, rod: &Rod, segment: usize)
+        -> Result<([f64; 3], [f64; 3]), SpatialRodError> {
+        let (mut g, mut k) = rod.strains(segment)?;
+        if let Some(reference) = &self.reference_geometry {
+            let (g0, k0) = reference.strains[segment];
+            for c in 0..3 {
+                g[c] -= g0[c];
+                k[c] -= k0[c];
+            }
+        }
+        if !g.iter().chain(&k).all(|v| v.is_finite()) {
+            return Err(SpatialRodError::Invalid("relative material rod strain is unrepresentable"));
+        }
+        Ok((g, k))
     }
 
     fn energy_for(&self, rod: &Rod) -> Result<f64, SpatialRodError> {
         let mut energy = 0.0;
         for (segment, section) in self.stiffness.iter().enumerate() {
-            let (g, k) = rod.strains(segment)?;
+            let (g, k) = self.strains_for(rod, segment)?;
             energy += match &self.thermal {
                 Some(field) => {
                     // Replace, never add to, the old axial stored energy.

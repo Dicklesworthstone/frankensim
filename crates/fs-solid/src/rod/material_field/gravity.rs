@@ -128,7 +128,7 @@ impl SpatialMaterialRod {
     pub fn gravity_nodal_forces_n(&self) -> Option<&[[f64; 3]]> {
         self.gravity.as_ref().map(|load| load.force_n.as_slice())
     }
-    /// Gravity potential change [J] relative to the straight reference pose.
+    /// Gravity potential change [J] relative to the actual unloaded reference pose.
     /// Kept separate from `energy_j()`, which remains stored elastic energy.
     pub fn gravity_potential_j(&self) -> Result<f64, SpatialRodError> {
         self.gravity_potential_for(&self.rod)
@@ -137,7 +137,8 @@ impl SpatialMaterialRod {
         let Some(load) = &self.gravity else { return Ok(0.0); };
         let mut potential = 0.0;
         for (node, (position, force)) in rod.positions.iter().zip(&load.force_n).enumerate() {
-            let reference = [node as f64 * rod.l0, 0.0, 0.0];
+            let reference = self.reference_geometry.as_ref().map_or(
+                [node as f64 * rod.l0, 0.0, 0.0], |geometry| geometry.positions_m()[node]);
             for c in 0..3 { potential -= force[c] * (position[c] - reference[c]); }
         }
         if !potential.is_finite() {

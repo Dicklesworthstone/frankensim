@@ -1,7 +1,7 @@
 //! Prescribed spatial thermal states coupled to the existing rod equilibrium.
 //!
 //! Every segment can have different current temperature, material and layer
-//! expansion. The reference length describes the initially straight compatible
+//! expansion. The reference length describes the initially unloaded compatible
 //! configuration at each retained expansion path's reference state. Current
 //! moduli, density and integrated expansion must come from exactly the same
 //! layer bundles. No endpoint-alpha approximation or whole-body scaling is used.

@@ -1187,6 +1187,28 @@ constant-strain tetrahedra lock under confined plastic incompressibility
 (confined limit loads are over-predicted; no B-bar/mixed formulation); dead
 loads; no limit-load continuation; no mesh-convergence claim.
 
+### Intrinsically curved material rods
+
+`SpatialMaterialRod::try_from_reference` binds `RodReferenceGeometry` to the
+existing per-segment material sections. Both present and unloaded strain measures
+use the same midpoint directors/SO(3) logarithm; elastic energy and resultants use
+their difference. A cambered or twisted unloaded part therefore carries no
+invented bending/torsional preload. The original Newton, support reactions,
+reference-mass gravity and local thermal-section owners remain authoritative.
+`RodMaterialSource::with_reference_geometry` preserves this datum, source pins,
+and mass through temperature refresh; gravity uses the actual reference nodes.
+
+Inputs declare an unloaded shape with equal material-coordinate intervals and
+resolved neighboring rotations below pi. A loaded scan cannot supply unloaded
+geometry without an independently justified reconstruction. Refine nodes,
+frames and section assignments together. This remains bounded static slender-rod
+mechanics with circular concentric sections and finite-difference tangents;
+it does not supply dynamic stick/ribbon coupling, scan accuracy, contact,
+self-intersection certification, or experimentally validated instrument audio.
+G0/G1/G3 tests in `rod_material_field/reference.rs` cover intrinsic zero stress,
+a three-rung circular-arc end-moment limit, material changes, gravity datum and
+objectivity; `rod_material_source.rs` covers source/temperature continuity.
+
 ## Invariants
 
 1. Patch tests exact: linear displacement fields are reproduced to

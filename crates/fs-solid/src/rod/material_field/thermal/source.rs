@@ -18,6 +18,7 @@ use fs_qty::{Density, Pressure};
 
 use super::{SpatialMaterialRod, SpatialRodError, checkpoint};
 use crate::rod::MAX_MATERIAL_ROD_SEGMENTS;
+use crate::rod::material_field::reference::RodReferenceGeometry;
 
 /// One spatial layer, its immutable card and complete stress-free state.
 #[derive(Clone, Debug)]
@@ -140,7 +141,7 @@ impl<'a> RodMaterialSource<'a> {
     /// observation. The first unsupported layer refuses the whole candidate.
     ///
     /// Supports and loads are applied to the returned rod through existing APIs.
-    /// Its initial pose is straight; no branch tracking or dynamic remap is implied.
+    /// Its initial pose is the retained reference; no branch tracking or dynamic remap is implied.
     pub fn resolve_at(
         &self, temperatures_k: &[f64], gate: &CancelGate,
     ) -> Result<SpatialMaterialRod, SpatialRodError> {
@@ -172,10 +173,33 @@ impl<'a> RodMaterialSource<'a> {
         }
         // Retain the original per-segment inventory and its density receipts.
         // Current rho(T) must not redefine weight on frozen reference geometry.
-        let rod = SpatialMaterialRod::try_straight_with_mass(
+        let mut rod = SpatialMaterialRod::try_straight_with_mass(
             self.reference.reference_length_m(), mechanical, Some(self.reference.reference_mass.clone()),
         )?;
+        rod.reference_geometry = self.reference.reference_geometry.clone();
+        rod.rod.positions.clone_from(&self.reference.rod.positions);
+        rod.rod.frames.clone_from(&self.reference.rod.frames);
         rod.with_thermal_sections(thermal, self.linear_strain_limit, gate)
+    }
+
+    /// Bind an unloaded curved shape to this already admitted source description.
+    /// Material-coordinate length and section count must match. Source pins,
+    /// reference mass and temperature paths are unchanged; heating cannot erase
+    /// intrinsic curvature or mistake it for mechanical strain.
+    /// This makes a new static description, not a live rest-shape update.
+    pub fn with_reference_geometry(
+        &self, geometry: RodReferenceGeometry, gate: &CancelGate,
+    ) -> Result<Self, SpatialRodError> {
+        checkpoint(gate)?;
+        if geometry.length_m().to_bits() != self.reference.reference_length_m().to_bits() {
+            return Err(SpatialRodError::Invalid("source and reference geometry must have the same material-coordinate length"));
+        }
+        let mut candidate = self.clone();
+        candidate.reference = SpatialMaterialRod::try_from_reference(
+            geometry, self.reference.sections.clone())?;
+        candidate.reference.reference_mass = self.reference.reference_mass.clone();
+        checkpoint(gate)?;
+        Ok(candidate)
     }
 
     /// Original reference material bundles and undeformed geometry.

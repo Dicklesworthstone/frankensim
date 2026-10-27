@@ -139,3 +139,33 @@ fn incomplete_states_invalid_geometry_and_cancellation_publish_no_candidate() {
     assert!(RodMaterialSource::try_new(0.2, vec![segment(&card, 0.01)], "young_modulus", 0.03, &CancelGate::new()).is_err());
     assert_eq!(source.reference_temperatures_k(), &[300.0]);
 }
+
+#[test]
+fn curved_reference_survives_material_temperature_refresh_without_mass_or_stress_reset() {
+    use fs_ga::{So3, So3Tangent, Vec3};
+    use fs_math::det;
+    use fs_solid::rod::material_field::reference::RodReferenceGeometry;
+    let card = card(1.0, false);
+    let original = source(&card);
+    let gate = CancelGate::new();
+    let angle = 0.2;
+    let nodes = vec![[0.0; 3], [det::sin(angle), 1.0-det::cos(angle), 0.0]];
+    let frames = vec![So3::identity(), So3::exp(So3Tangent::new(Vec3::new(0.0, 0.0, angle))).unwrap()];
+    let source = original.with_reference_geometry(
+        RodReferenceGeometry::try_new(0.2, nodes.clone(), frames.clone()).unwrap(), &gate).unwrap();
+    assert_eq!(source.reference_rod().energy_j().unwrap(), 0.0);
+    for temperature in [300.0, 400.0, 300.0] {
+        let rod = source.resolve_at(&[temperature], &gate).unwrap()
+            .with_gravity([0.0, -9.81, 0.0], &gate).unwrap();
+        assert_eq!(rod.positions_m(), nodes);
+        assert_eq!(rod.frames(), frames);
+        assert_eq!(rod.segment_strains(0).unwrap(), ([0.0; 3], [0.0; 3]));
+        assert_eq!(rod.reference_mass().total_mass_kg(), original.reference_mass_kg());
+        assert_eq!(rod.gravity_potential_j().unwrap(), 0.0);
+        let expansion = rod.thermal_sections().unwrap()[0].zero_resultant_axial_strain();
+        near(rod.segment_resultants(0).unwrap().0[0],
+            -rod.sections()[0].elastic().axial_stiffness_n() * expansion, 1e-12);
+        assert_eq!(rod.segment_resultants(0).unwrap().1, [0.0; 3]);
+    }
+    assert_eq!(original.reference_rod().positions_m()[1], [0.2, 0.0, 0.0]);
+}
