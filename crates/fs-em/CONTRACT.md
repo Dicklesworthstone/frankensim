@@ -369,6 +369,62 @@ RC dynamics, and refuse a positive-mutual coarse discretization without altering
 its field matrix. Full native integration execution is still required in an
 environment able to compile the pinned dependency graph.
 
+## Spatial material DC current and native resistor heat
+
+`conduction::PlanarConduction` binds each original planar triangle to the
+canonical `ResolvedConductorState`, preserving its complete source bundle and
+explicit independent resistivity/conductivity basis. The weighted Whitney Hodge
+and incidence assemble `d0^T M(sigma) d0` in actual conductivity dimensions.
+Dielectric and conductor fields share scalar Dirichlet elimination, checked CG,
+and complete-electrode trace admission through one internal owner. They retain
+their distinct physical laws: conductor reactions are current [A], and
+`integral E.J dV` is irreversible power [W], with no dielectric `1/2` factor.
+
+The stationary equation is `-div(sigma grad(V))=0`. Prescribed voltage traces
+cover complete exterior edges and anchor each connected component; remaining
+edges are insulated. Recovery keeps original cell `E=-grad(V)` and `J=sigma E`
+without averaging across interfaces. Weak reactions are current entering the
+conductor at prescribed nodes. Net terminal current, free-node current residual,
+and the difference between integrated Joule and terminal power must satisfy
+independent absolute physical allowances. These discrete balance gates do not
+certify spatial approximation error.
+
+`resistance` solves the actual heterogeneous geometry at one volt and checks
+its integrated power against the independently summed terminal current before
+returning a native `Branch::Resistor`. Its retained source/geometry field is the
+same dissipative component as that branch. `PlanarResistance::field_at_voltage`
+recovers current and per-original-triangle `cell_power_w` at the native circuit's
+actual stage voltage without re-solving. For a midpoint circuit step, the
+midpoint branch voltage and `dt*cell_power_w` partition that same native resistor
+heat; the spatial report is not an additional loss. Complete material snapshots
+and actual extruded volumes remain accessible for an explicit receiving thermal
+cell map. This electrical owner neither advances thermal state nor invents a
+heat partition between unrelated bodies.
+
+Temperature, composition and fixed pressure act through original resolved
+source queries. New supported material snapshots require a newly prepared
+operator. Both independent electrical source bases use the common scalar
+conductor law; no material-name branch or inferred unit-length wire enters.
+Frequency-, field-, strain- or rate-bounded sources refuse the stationary scalar
+model. The mesh and state remain fixed during each solve. Insulating regions
+must be represented by the conductor domain's actual boundary, not artificial
+small positive conductivities. Floating unknown-potential electrodes, interface
+resistance, anisotropy, nonlinear conduction, displacement current, induction,
+Hall effects and geometry/thermal evolution are outside this admission.
+
+Existing mesh/assembly and Krylov budgets bound work; cancellation is polled
+during material admission, assembly, elimination, field/heat recovery and branch
+reconstruction. Refusal never modifies an accepted source or field. G1/G3/G4
+regressions in `tests/conduction.rs` compare independent series and parallel
+material geometries, source-basis and temperature changes, thickness, voltage
+reversal and gauge shifts. Actual repeated native RC steps must lose precisely
+the recovered spatial Joule heat. Unsupported source models, trace/assembly/
+iteration limits and late cancellation refuse. Synthetic fixtures are not
+experimental material validation. The continuum current and dissipation laws
+follow MIT *Electromagnetic Fields and Energy*, sections
+[7.2](https://web.mit.edu/6.013_book/www/chapter7/7.2.html) and
+[11.3](https://web.mit.edu/6.013_book/www/chapter11/11.3.html).
+
 ## Electric field, circuit and native mechanical load
 
 `PlanarCapacitanceMatrix::field_at_voltages` reconstructs an actual

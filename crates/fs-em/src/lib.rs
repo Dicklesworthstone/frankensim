@@ -43,9 +43,13 @@
 //! torque. Native circuit electrode potentials can reconstruct its original
 //! spatial field and mechanical load without another field solve.
 
+/// Spatial source-bound DC current, Joule heat and geometry-derived resistance.
+pub mod conduction;
 /// Spatial source-bound dielectric fields and geometry-derived capacitance.
 pub mod electrostatic;
 pub mod force;
 pub mod planar;
 pub mod transfer;
 pub mod winding;
+
+mod scalar_potential;

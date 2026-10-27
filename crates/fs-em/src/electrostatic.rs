@@ -24,10 +24,11 @@ use fs_material::{
 };
 use fs_phs::circuit::Branch;
 use fs_rep_mesh::{Metric2, TriComplex2};
-use fs_solver::{CheckedCgConfig, CheckedCgError, CsrOp, SolveReport, checked_cg};
-use fs_sparse::{Csr, precond::IdentityPrecond};
+use fs_solver::{CheckedCgConfig, SolveReport};
+use fs_sparse::Csr;
 
-use crate::planar::{MagneticError, PlanarMagnetostatics, gradients};
+use crate::planar::{MagneticError, gradients};
+use crate::scalar_potential::{self, PotentialError};
 
 /// Independent algebraic, charge and energy acceptance budgets.
 #[derive(Clone, Copy, Debug)]
@@ -59,6 +60,16 @@ impl core::fmt::Display for ElectrostaticError {
     }
 }
 impl std::error::Error for ElectrostaticError {}
+
+impl From<PotentialError> for ElectrostaticError {
+    fn from(error: PotentialError) -> Self {
+        match error {
+            PotentialError::Invalid(reason) => Self::Invalid(reason),
+            PotentialError::Cancelled => Self::Cancelled,
+            PotentialError::Nonconvergence(report) => Self::Nonconvergence(report),
+        }
+    }
+}
 
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), ElectrostaticError> {
     if cancelled() {
@@ -198,8 +209,7 @@ impl PlanarElectrostatics {
             ));
         }
         let prescribed =
-            PlanarMagnetostatics::admit_mesh_boundary(&self.mesh, boundary_voltage_v, cancelled)
-                .map_err(geometry)?;
+            scalar_potential::prescribed_boundary(&self.mesh, boundary_voltage_v, cancelled)?;
         let n = self.mesh.vertices().len();
         let mut rhs = vec![0.0; n];
         let mut volume_charge_c = 0.0;
@@ -219,54 +229,13 @@ impl PlanarElectrostatics {
                 rhs[vertex as usize] = finite(rhs[vertex as usize] + charge / 3.0)?;
             }
         }
-        let free: Vec<_> = (0..n).filter(|&v| prescribed[v].is_none()).collect();
-        let mut index = vec![usize::MAX; n];
-        for (i, &v) in free.iter().enumerate() {
-            index[v] = i;
-        }
-        let mut row_ptr = vec![0];
-        let mut columns = Vec::new();
-        let mut values = Vec::new();
-        let mut reduced_rhs = Vec::with_capacity(free.len());
-        for &v in &free {
-            poll(cancelled)?;
-            let mut load = rhs[v];
-            let (cols, vals) = self.stiffness.row(v);
-            for (&w, &value) in cols.iter().zip(vals) {
-                if let Some(voltage) = prescribed[w] {
-                    load = finite((-value).mul_add(voltage, load))?;
-                } else {
-                    columns.push(index[w]);
-                    values.push(value);
-                }
-            }
-            row_ptr.push(columns.len());
-            reduced_rhs.push(load);
-        }
-        let matrix = Csr::from_parts(free.len(), free.len(), row_ptr, columns, values);
-        let mut voltage: Vec<_> = prescribed.iter().map(|v| v.unwrap_or(0.0)).collect();
-        let report = if free.is_empty() {
-            None
-        } else {
-            let result = checked_cg(
-                &CsrOp::symmetric(matrix),
-                &IdentityPrecond,
-                &reduced_rhs,
-                controls.linear,
-                |_| poll(cancelled),
-            )
-            .map_err(|error| match error {
-                CheckedCgError::InvalidInput(reason) => ElectrostaticError::Invalid(reason),
-                CheckedCgError::Interrupted(error) => error,
-            })?;
-            if !result.report.converged_euclidean() {
-                return Err(ElectrostaticError::Nonconvergence(result.report));
-            }
-            for (&v, &value) in free.iter().zip(&result.x) {
-                voltage[v] = value;
-            }
-            Some(result.report)
-        };
+        let (voltage, report) = scalar_potential::solve(
+            &self.stiffness,
+            &rhs,
+            &prescribed,
+            controls.linear,
+            cancelled,
+        )?;
         self.recover_field(
             voltage,
             free_charge_density_c_m3,
@@ -445,57 +414,8 @@ impl PlanarElectrostatics {
         voltages_v: &[f64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<(usize, f64)>, ElectrostaticError> {
-        let n = self.mesh.vertices().len();
-        if terminals.len() < 2
-            || terminals.len() > n
-            || voltages_v.len() != terminals.len()
-            || voltages_v.iter().any(|v| !v.is_finite())
-        {
-            return Err(ElectrostaticError::Invalid(
-                "complete finite electrode voltages and at least two terminals required",
-            ));
-        }
-        let trace = self
-            .mesh
-            .boundary_trace()
-            .map_err(|_| ElectrostaticError::Invalid("invalid electrode boundary trace"))?;
-        let mut boundary = Vec::new();
-        let mut assigned = vec![false; n];
-        for (&terminal, &value) in terminals.iter().zip(voltages_v) {
-            if terminal.is_empty() || terminal.len() > n {
-                return Err(ElectrostaticError::Invalid(
-                    "nonempty bounded terminal traces required",
-                ));
-            }
-            let mut selected = vec![false; n];
-            for &vertex in terminal {
-                poll(cancelled)?;
-                if vertex >= n || assigned[vertex] {
-                    return Err(ElectrostaticError::Invalid(
-                        "invalid, overlapping or repeated terminal vertex",
-                    ));
-                }
-                assigned[vertex] = true;
-                selected[vertex] = true;
-                boundary.push((vertex, value));
-            }
-            let mut supported = vec![false; n];
-            for edge in &trace.edges {
-                poll(cancelled)?;
-                let [a, b] = edge.oriented_vertices.map(|v| v as usize);
-                if selected[a] && selected[b] {
-                    supported[a] = true;
-                    supported[b] = true;
-                }
-            }
-            if terminal.iter().any(|&v| !supported[v]) {
-                return Err(ElectrostaticError::Invalid(
-                    "each terminal must cover exterior edges, not isolated points",
-                ));
-            }
-        }
-        poll(cancelled)?;
-        Ok(boundary)
+        scalar_potential::terminal_boundary(&self.mesh, terminals, voltages_v, cancelled)
+            .map_err(Into::into)
     }
 }
 
