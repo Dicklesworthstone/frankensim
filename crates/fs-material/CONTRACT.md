@@ -2173,3 +2173,32 @@ magnetic heat, parameter work, hysteresis or irreversible demagnetization.
 G1/G3 regressions in `fs-em/tests/nonlinear_magnetic.rs` exercise analytical
 energy/tangents, material-only solved saturation, mixed-material oblique fields,
 the linear limit, source-domain refusals and cancellation.
+
+## Reversible longitudinal piezoelectric material
+
+`piezoelectric::LongitudinalPiezoelectric` resolves density, directional
+`piezoelectric_compliance_33_at_constant_field` [1/Pa], signed
+`piezoelectric_strain_charge_33` [m/V = C/N], and absolute
+`piezoelectric_permittivity_33_at_constant_stress` [F/m] from one original
+material state. The common local direction is material axis 3, transverse
+stress is free, and the electric field is longitudinal. Scalar/curve/surface
+queries retain their complete selected claims and fixed external conditions;
+dynamic field, stress, strain or frequency support cannot be frozen.
+
+The strain-charge convention is `strain=s_E stress+d E`,
+`D=d stress+epsilon_T E`. Coupled stability requires both `s_E>0` and
+`epsilon_axial=epsilon_T-d*d/s_E>0`; positive individual diagonal coefficients
+alone do not suffice. The single energy is
+`w(strain,D)=strain^2/(2s_E)+(D-(d/s_E)strain)^2/(2epsilon_axial)`.
+Its derivatives supply both stress and electric field. The reduced
+`epsilon_axial` fixes axial strain with transverse stress still free; it is
+not asserted to be the fully clamped three-dimensional permittivity.
+
+This is a reversible, fixed-state, small-signal one-dimensional law. It does
+not infer off-axis tensors, arbitrary tensor rotation, saturation, depoling,
+hysteresis, leakage, dielectric heating or thermal coefficient work. Source
+selection preserves evidence, not measured predictive accuracy. G1/G3 tests in
+`tests/piezoelectric.rs` independently check strain-charge equations, energy
+derivatives, open/short stiffness, signed/zero coupling, SI-sized synthetic
+coefficients, and whole-block/source-domain refusal. Actual coupled motion,
+charge and native circuit composition belong to `fs-couple::piezoelectric`.

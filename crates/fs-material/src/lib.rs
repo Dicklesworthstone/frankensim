@@ -46,6 +46,8 @@ pub mod hyper;
 pub mod identifiability;
 pub mod iso9613;
 pub mod phase;
+/// Source-bound reciprocal longitudinal piezoelectric stress, field and storage.
+pub mod piezoelectric;
 /// Source-bound anisotropic reduced viscosity and work-conjugate plane transforms.
 pub mod plane_stress_viscosity;
 pub mod plastic;

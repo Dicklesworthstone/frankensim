@@ -77,6 +77,8 @@ pub mod modal_acoustic_time {
 pub mod pcm_wav;
 pub mod piano_vertical;
 pub mod pickup;
+/// Source-bound reciprocal longitudinal piezoelectric sensors and actuators.
+pub mod piezoelectric;
 /// Full source-derived viscous tensors on the shared DKT and modal runtime.
 pub mod plate_viscosity;
 /// Accepted-step port schemas and physical accounting adapters.

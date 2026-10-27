@@ -6495,3 +6495,40 @@ thermoelastic heating, reactive/nozzle flow, finite-deformation geometry or
 automatic exterior radiation-transfer refresh. Changing the structural source
 requires its native state transfer and explicit geometry/parameter work before
 binding a new volume chart.
+
+## Material-driven longitudinal piezoelectric sensor/actuator
+
+`piezoelectric` composes the original `fs-material::piezoelectric` source law
+with a rod's reference area/length and the shared `fs-phs` stepping and port
+owners. The fixed-root axial shape `u(z)=x*z/L` gives consistent mass
+`rho*A*L/3`. Combined energy is `A*L*w(x/L,Q/A)+p^2/(2m)`; its derivatives
+provide force, voltage and velocity. Geometry and material data therefore
+change inertia, open/short stiffness, capacitance, direct sensing and converse
+actuation together, without independent sensor/actuator gains.
+
+`PiezoelectricBody::step_candidate` advances extension, momentum and free
+charge in one native descriptor solve. A held current includes open-circuit
+zero current. A held ideal voltage uses an algebraic source-current coordinate
+and includes a short circuit at zero voltage. Initial charge must already be
+compatible with a voltage clamp: native zero-time admission may not project
+any conserved coordinate. Switching impulses need a separate circuit model.
+Accepted endpoints satisfy the declared small-signal strain/field envelope,
+explicit voltage tolerance and independently reconstructed mechanical/electric
+work balance. Cancellation, source/domain refusal or failed work balance
+publishes no partial state. Cancellation is polled around the bounded 3/4-state
+native solve; no interruption inside its factorization is promised.
+
+`PiezoelectricRod::port_hamiltonian` exposes the same energy as an ordinary
+two-port component: inputs [force,current], outputs [velocity,voltage], state
+[extension,momentum,charge]. Existing native interconnections can compose it
+with physical electrical/mechanical storage. G1/G3/G4 synthetic regressions in
+`tests/piezoelectric.rs` exercise solved data-only material substitutions,
+direct/converse responses, distinct open/short mechanical trajectories, actual
+R-L circuit exchange, work conservation, and atomic refusal/cancellation.
+
+This single-element longitudinal model is fixed-state and reversible. It adds
+no empirical coefficients, resolved axial waves, transverse mechanics,
+fringing, material hysteresis, heating, or measured material validation.
+Amplitude limits are caller-admitted model restrictions, not sourced strength
+or breakdown measurements. It is a bounded MR59 implementation, not closure
+of that bead's full tensor/electrostatic/structural qualification.
