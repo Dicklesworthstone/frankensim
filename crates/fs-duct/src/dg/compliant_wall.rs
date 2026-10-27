@@ -20,6 +20,9 @@ use coordinates::{CoordinateError, WallCoordinates};
 #[derive(Debug, Clone)]
 pub(super) struct CompliantWall {
     pin: WallPin,
+    // One exact coefficient set per original element, never an averaged wall.
+    // The original pin remains the reference for the retained coordinate maps.
+    regional_pins: Option<Vec<WallPin>>,
     start: usize,
     displacement_scale: f64,
     velocity_scale: f64,
@@ -75,6 +78,12 @@ fn coordinate_error(error: CoordinateError) -> DuctError {
 }
 
 impl CompliantWall {
+    fn pin_at(&self, element: usize) -> WallPin {
+        self.regional_pins
+            .as_ref()
+            .map_or(self.pin, |pins| pins[element])
+    }
+
     fn physical_map<'a>(&'a self, element: &'a DgElement, index: usize) -> &'a [f64] {
         self.physical_velocity_maps
             .as_ref()
@@ -257,6 +266,7 @@ impl DgDuct {
         }
         self.compliant_wall = Some(CompliantWall {
             pin,
+            regional_pins: None,
             start: original,
             displacement_scale,
             velocity_scale,
@@ -276,6 +286,120 @@ impl DgDuct {
         );
         check_cancelled(cancelled)?;
         Ok(self)
+    }
+
+    /// Attach an independent elastic/Kelvin--Voigt wall on each original DG
+    /// element. Coefficients follow element order; a material boundary must
+    /// coincide with an element boundary. The full cylindrical wall is covered.
+    ///
+    /// Local surface mass, stiffness and resistance remain separate data.
+    /// Each gas/wall coupling uses that element's mass and its ORIGINAL gas
+    /// Gram matrix; no effective density, modulus, gas or loss is substituted.
+    /// Displacement and velocity are still advanced by the same reciprocal
+    /// native operator, including any pre-existing gas memory and side ports.
+    ///
+    /// The local membrane approximation omits axial wall stress transfer,
+    /// waves across material joints, geometry motion and static prestress.
+    /// Refine the acoustic mesh with the material boundaries held fixed.
+    /// This is cold preparation; it does not transfer a vibrating wall state.
+    /// Hereditary walls use the separate uniform-spectrum constructor; this
+    /// function does not infer or discard a material's memory branches.
+    ///
+    /// # Errors
+    /// Missing/extra element coefficients, invalid local laws, unsupported
+    /// geometry, duplicate binding, state-budget or representability failure.
+    pub fn with_compliant_wall_regions(self, pins: &[WallPin]) -> Result<Self, DuctError> {
+        self.with_compliant_wall_regions_controlled(pins, &mut || false)
+    }
+
+    /// Cancellable preparation of independently assigned element walls.
+    /// Failure returns no partially modified operator or accepted state.
+    pub fn with_compliant_wall_regions_controlled(
+        self,
+        pins: &[WallPin],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, DuctError> {
+        check_cancelled(cancelled)?;
+        if pins.len() != self.elements.len() || pins.is_empty() {
+            return Err(invalid(
+                "DG regional wall needs one law per original element",
+            ));
+        }
+        for pin in pins {
+            check_cancelled(cancelled)?;
+            fs_phs::wall_specific_impedance(pin, 1.0)
+                .map_err(|_| invalid("DG regional wall needs passive finite local coefficients"))?;
+        }
+        let reference = pins[0];
+        let mut duct = self.with_compliant_wall_controlled(reference, cancelled)?;
+        if pins.iter().all(|pin| *pin == reference) {
+            // Uniform data takes the original operation order and identity.
+            return Ok(duct);
+        }
+        let wall = duct.compliant_wall.as_ref().expect("wall attached above");
+        let start = wall.start;
+        let local = duct.mesh.order + 1;
+        let m = duct.field_dofs;
+        let n = duct.total_dofs();
+        for (element, pin) in pins.iter().enumerate() {
+            check_cancelled(cancelled)?;
+            let mass_scale = det::sqrt(reference.surface_density / pin.surface_density);
+            let stiffness_scale = det::sqrt(reference.stiffness_per_area / pin.stiffness_per_area);
+            let omega = det::sqrt(pin.stiffness_per_area / pin.surface_density);
+            let decay = pin.resistance / pin.surface_density;
+            if [
+                mass_scale,
+                stiffness_scale,
+                omega,
+                wall.velocity_scale * mass_scale,
+                wall.displacement_scale * stiffness_scale,
+            ]
+            .iter()
+            .any(|v| !v.is_finite() || *v <= 0.0)
+                || !decay.is_finite()
+                || (pin.resistance > 0.0 && decay == 0.0)
+            {
+                return Err(invalid(
+                    "DG regional wall coefficient or coordinate is unrepresentable",
+                ));
+            }
+            let base = element * local;
+            for i in 0..local {
+                check_cancelled(cancelled)?;
+                let pressure = base + i;
+                let displacement = start + base + i;
+                let velocity = start + m + base + i;
+                duct.l_tilde[displacement * n + velocity] = omega;
+                duct.l_tilde[velocity * n + displacement] = -omega;
+                duct.l_tilde[velocity * n + velocity] = -decay;
+                for j in 0..local {
+                    let other_velocity = start + m + base + j;
+                    let old = duct.l_tilde[pressure * n + other_velocity];
+                    let coupling = old * mass_scale;
+                    if !coupling.is_finite() || (old != 0.0 && coupling == 0.0) {
+                        return Err(invalid(
+                            "DG regional wall reciprocal coupling is unrepresentable",
+                        ));
+                    }
+                    duct.l_tilde[pressure * n + other_velocity] = coupling;
+                    duct.l_tilde[other_velocity * n + pressure] = -coupling;
+                }
+            }
+        }
+        duct.compliant_wall
+            .as_mut()
+            .expect("wall attached above")
+            .regional_pins = Some(pins.to_vec());
+        duct.operator_identity = hash_operator(
+            duct.mesh,
+            duct.inlet,
+            duct.outlet,
+            &duct.elements,
+            &duct.l_tilde,
+            &duct.ports,
+        );
+        check_cancelled(cancelled)?;
+        Ok(duct)
     }
 
     /// Attach the existing generalized-Maxwell material spectrum to the same
@@ -422,11 +546,26 @@ impl DgDuct {
         Ok(duct)
     }
 
-    /// The original equilibrium/inertial/Kelvin coefficients, if attached.
+    /// The original homogeneous equilibrium/inertial/Kelvin coefficients.
+    /// Returns `None` for no wall or a genuinely heterogeneous wall; use
+    /// [`Self::compliant_wall_at_element`] to inspect regional assignments.
     /// Maxwell branch storage and pressure are returned by compliant_wall_state.
     #[must_use]
     pub fn compliant_wall(&self) -> Option<WallPin> {
-        self.compliant_wall.as_ref().map(|wall| wall.pin)
+        self.compliant_wall
+            .as_ref()
+            .filter(|wall| wall.regional_pins.is_none())
+            .map(|wall| wall.pin)
+    }
+
+    /// Actual coefficients at one ORIGINAL element, including homogeneous
+    /// walls. Out-of-range indices and a missing wall return `None`.
+    #[must_use]
+    pub fn compliant_wall_at_element(&self, element: usize) -> Option<WallPin> {
+        self.compliant_wall
+            .as_ref()
+            .filter(|_| element < self.elements.len())
+            .map(|wall| wall.pin_at(element))
     }
 
     /// Read actual wall motion and storage from the native acoustic state.
@@ -455,6 +594,16 @@ impl DgDuct {
         for (e, element) in self.elements.iter().enumerate() {
             let base = e * local;
             let map = wall.physical_map(element, e);
+            let (displacement_scale, velocity_scale) = if wall.regional_pins.is_some() {
+                let pin = wall.pin_at(e);
+                (
+                    wall.displacement_scale
+                        * det::sqrt(wall.pin.stiffness_per_area / pin.stiffness_per_area),
+                    wall.velocity_scale * det::sqrt(wall.pin.surface_density / pin.surface_density),
+                )
+            } else {
+                (wall.displacement_scale, wall.velocity_scale)
+            };
             for i in 0..local {
                 for j in 0..local {
                     displacement_m[base + i] +=
@@ -462,8 +611,8 @@ impl DgDuct {
                     velocity_m_s[base + i] +=
                         map[i * local + j] * state.tilde[wall.start + m + base + j];
                 }
-                displacement_m[base + i] *= wall.displacement_scale;
-                velocity_m_s[base + i] *= wall.velocity_scale;
+                displacement_m[base + i] *= displacement_scale;
+                velocity_m_s[base + i] *= velocity_scale;
             }
         }
         let mut relaxation_pressure_pa = Vec::with_capacity(wall.relaxation.len());
@@ -517,11 +666,26 @@ impl DgDuct {
 
     pub(super) fn compliant_wall_loss(&self, state: &DgState) -> f64 {
         self.compliant_wall.as_ref().map_or(0.0, |wall| {
-            let mut loss = wall.pin.resistance / wall.pin.surface_density
-                * state.tilde[wall.start + self.field_dofs..wall.start + 2 * self.field_dofs]
-                    .iter()
-                    .map(|value| value * value)
-                    .sum::<f64>();
+            let mut loss = if let Some(pins) = &wall.regional_pins {
+                let local = self.mesh.order + 1;
+                pins.iter()
+                    .enumerate()
+                    .map(|(e, pin)| {
+                        let base = wall.start + self.field_dofs + e * local;
+                        pin.resistance / pin.surface_density
+                            * state.tilde[base..base + local]
+                                .iter()
+                                .map(|value| value * value)
+                                .sum::<f64>()
+                    })
+                    .sum()
+            } else {
+                wall.pin.resistance / wall.pin.surface_density
+                    * state.tilde[wall.start + self.field_dofs..wall.start + 2 * self.field_dofs]
+                        .iter()
+                        .map(|value| value * value)
+                        .sum::<f64>()
+            };
             for branch in &wall.relaxation {
                 loss += branch.rate_per_s
                     * state.tilde[branch.start..branch.start + self.field_dofs]

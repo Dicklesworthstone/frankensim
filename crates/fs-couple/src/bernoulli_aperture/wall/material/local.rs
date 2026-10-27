@@ -52,6 +52,121 @@ impl MaterialWallDg {
     }
 }
 
+/// Independently sourced wall materials on the ORIGINAL DG elements.
+/// The exact material receipts, temperatures, thicknesses and restraints remain
+/// attached to the one gas/wall time operator; no effective material is minted.
+#[derive(Clone, Debug)]
+pub struct RegionalMaterialWallDg {
+    walls: Vec<LocalMaterialWall>,
+    band_hz: [f64; 2],
+    duct: fs_duct::dg::DgDuct,
+}
+impl RegionalMaterialWallDg {
+    /// Bind one source law per original element, in element order. Distinct
+    /// material states may describe different substances or temperatures.
+    /// Material interfaces must coincide with element boundaries; refinement
+    /// repeats each region's source over its sub-elements explicitly.
+    ///
+    /// Elastic/Kelvin--Voigt regions preserve each local mass, stiffness and
+    /// viscosity in the native reciprocal DG operator. An exactly homogeneous
+    /// source list takes the existing path, including its complete Maxwell
+    /// spectrum. Heterogeneous hereditary spectra currently refuse rather than
+    /// dropping internal history or inventing a common spectrum.
+    ///
+    /// The returned applicability band is the intersection of all source bands,
+    /// not a filter or error certificate. Original cylindrical/thin-membrane,
+    /// frozen-state and cold-binding restrictions apply.
+    pub fn new(
+        walls: Vec<LocalMaterialWall>,
+        duct: fs_duct::dg::DgDuct,
+    ) -> Result<Self, AcousticRealizeError> {
+        Self::new_controlled(walls, duct, &mut || false)
+    }
+
+    /// Cancellable source binding; failures publish no partially coupled duct.
+    pub fn new_controlled(
+        walls: Vec<LocalMaterialWall>,
+        duct: fs_duct::dg::DgDuct,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, AcousticRealizeError> {
+        if cancelled() {
+            return Err(AcousticRealizeError::Cancelled);
+        }
+        if walls.is_empty() || walls.len() != duct.mesh().elements {
+            return Err(invalid(
+                "regional DG wall needs one original material per element",
+            ));
+        }
+        let mut band_hz = walls[0].band_hz;
+        for wall in &walls {
+            if cancelled() {
+                return Err(AcousticRealizeError::Cancelled);
+            }
+            band_hz[0] = band_hz[0].max(wall.band_hz[0]);
+            band_hz[1] = band_hz[1].min(wall.band_hz[1]);
+        }
+        if band_hz[0] >= band_hz[1] {
+            return Err(invalid(
+                "regional wall sources have no common positive frequency interval",
+            ));
+        }
+        if walls.iter().all(|wall| *wall == walls[0]) {
+            let bound = walls[0].clone().bind_dg_controlled(duct, cancelled)?;
+            return Ok(Self {
+                walls,
+                band_hz,
+                duct: bound.duct,
+            });
+        }
+        let radius = duct.uniform_circular_radius_m().ok_or_else(|| {
+            invalid("regional DG material wall requires an explicit uniform circular geometry")
+        })?;
+        let nodes = duct.node_positions();
+        let local = duct.mesh().order + 1;
+        let mut pins = Vec::with_capacity(walls.len());
+        for (element, wall) in walls.iter().enumerate() {
+            if cancelled() {
+                return Err(AcousticRealizeError::Cancelled);
+            }
+            if matches!(&wall.loss, WallMaterialLoss::Maxwell(_)) {
+                return Err(invalid(
+                    "regional hereditary wall spectra require a dedicated history-preserving operator",
+                ));
+            }
+            let base = element * local;
+            let length = nodes[base + local - 1] - nodes[base];
+            pins.push(wall.base_patch(radius, length)?.wall);
+        }
+        let duct = duct
+            .with_compliant_wall_regions_controlled(&pins, cancelled)
+            .map_err(|e| match e {
+                fs_duct::DuctError::Cancelled { .. } => AcousticRealizeError::Cancelled,
+                error => AcousticRealizeError::Nonlinear(error.to_string()),
+            })?;
+        Ok(Self {
+            walls,
+            band_hz,
+            duct,
+        })
+    }
+
+    /// Original material/geometry laws, in original element order.
+    #[must_use]
+    pub fn walls(&self) -> &[LocalMaterialWall] {
+        &self.walls
+    }
+    /// Common applicability interval of all original source laws [Hz].
+    #[must_use]
+    pub const fn band_hz(&self) -> [f64; 2] {
+        self.band_hz
+    }
+    /// The native gas/wall operator, including retained gas fields and memory.
+    #[must_use]
+    pub const fn duct(&self) -> &fs_duct::dg::DgDuct {
+        &self.duct
+    }
+}
+
 impl LocalMaterialWall {
     /// Resolve the same original claims used by graph-based material walls.
     ///

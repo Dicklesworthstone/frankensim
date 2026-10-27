@@ -17,7 +17,7 @@ pub mod relaxation;
 pub use relaxation::WallRelaxation;
 pub(crate) mod source;
 mod local;
-pub use local::{LocalMaterialWall, MaterialWallDg};
+pub use local::{LocalMaterialWall, MaterialWallDg, RegionalMaterialWallDg};
 
 use fs_vfit::relaxation::RelaxationImpedanceSpec;
 use super::{WallPatch, invalid};

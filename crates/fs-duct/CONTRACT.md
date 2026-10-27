@@ -1154,3 +1154,20 @@ gas memory and port work, original uniform identity and caps, actual composition
 and solid-source changes in propagated pressure/wall motion, and source refusals.
 Those full crate tests await native execution; leaf evidence does not certify
 the complete material-query/DG exponential integration.
+
+`with_compliant_wall_regions` extends the same operator to one independent
+elastic/Kelvin--Voigt `WallPin` per original element. Material boundaries align
+with element boundaries; each region retains its own surface mass, stiffness
+and resistance. The existing gas/wall coupling is rescaled by the local wall
+mass, with opposite transpose entries retained exactly. Physical displacement,
+velocity and loss use those same local coefficients. Gas mass matrices,
+viscothermal memories, boundary/side ports and the time integrator are retained.
+Identical regional coefficients take the original homogeneous path bitwise.
+`compliant_wall_at_element` reports actual assignments; `compliant_wall` returns
+no homogeneous pin for a heterogeneous wall. Preparation is cancellable and old
+states refuse by operator identity. G1 tests reconstruct each local physical
+equation and independently integrate energy/loss for uniform and spatial gas;
+G3 tests exercise original pressure-port evolution and data-only region swaps.
+The local membrane model still omits axial shell waves and stress transfer at
+material joints. Heterogeneous Maxwell spectra and live wall-state transfer
+are not supplied by this extension; no internal history is silently discarded.
