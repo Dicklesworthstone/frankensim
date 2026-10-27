@@ -120,6 +120,7 @@ fn sourced_relaxation_rejects_a_foreign_wall_even_when_equilibrium_modulus_match
         sound_speed_m_s: gas.sound_speed, max_wave_memory_bytes: 1_000_000,
     };
     let assignment = MaterialWallAssignment { node: 1, material: foreign.clone(),
+        model: Default::default(),
         thickness_m: THICKNESS, axial: AxialConstraint::StressFree,
         loss: WallMaterialLoss::Maxwell(spectrum.clone()) };
     assert!(bind_material_walls(graph, vec![assignment], BAND, 1,
@@ -145,6 +146,7 @@ fn continuous_material_wall_matches_original_graph_hereditary_impedance() {
         sound_speed_m_s: gas.sound_speed, max_wave_memory_bytes: 1_000_000,
     };
     let source = MaterialWallAssignment { node: 1, material: law.material().clone(),
+        model: Default::default(),
         thickness_m: law.thickness_m(), axial: law.axial_constraint(), loss: law.loss().clone() };
     let (_, walls) = bind_material_walls(graph, vec![source.clone()], BAND, 1,
         &CancelGate::new_clock_free()).unwrap();

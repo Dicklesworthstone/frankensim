@@ -17,6 +17,8 @@ mod mimo;
 mod wall_memory;
 #[path = "material/dg.rs"]
 mod dg;
+#[path = "material/orthotropic.rs"]
+mod orthotropic;
 
 fn pack(density: f64, young: f64, omit: Option<&str>, upper_omega: f64)
     -> NormalizedMaterialCardPack

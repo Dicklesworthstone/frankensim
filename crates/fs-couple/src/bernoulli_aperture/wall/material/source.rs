@@ -2,7 +2,8 @@
 //! This binds original material data to the existing wall law; it never fits a
 //! spectrum to sound or adds a second damping/evolution path.
 
-use super::{WallMaterialLoss, WallRelaxation, YOUNG_VISCOSITY_PROPERTY};
+use super::{AxialConstraint, LocalMaterialWall, WallMaterialLoss, WallMaterialModel,
+    WallRelaxation, YOUNG_VISCOSITY_PROPERTY};
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_material::state_point::{
     MaterialStatePointError, ResolvedMaterialStatePoint, ScalarAdmissibility as Admit,
@@ -11,6 +12,100 @@ use fs_material::state_point::{
 use fs_qty::{Density, Dims, DynViscosity, Pressure};
 use fs_vfit::relaxation::MAX_RELAXATION_BRANCHES;
 use std::str::SplitAsciiWhitespace;
+
+/// One source selection shared by DG, graph reed and graph jet ingress.
+pub(crate) enum WallConstitutiveSource {
+    Isotropic(WallMaterialLossSource),
+    Orthotropic { axes: [usize; 2], proportional_viscosity_time_property: Option<String> },
+    OrthotropicNormal { axes: [usize; 2], properties: [String; 3],
+        max_dt_over_tau: f64, max_angular_step: f64 },
+}
+
+impl WallConstitutiveSource {
+    pub(crate) fn read(orthotropic: bool, fields: &mut SplitAsciiWhitespace<'_>)
+        -> Result<Self, &'static str>
+    {
+        if !orthotropic { return WallMaterialLossSource::read(fields).map(Self::Isotropic); }
+        let mut axes = [0; 2];
+        for axis in &mut axes {
+            *axis = fields.next().and_then(|s| s.parse::<usize>().ok())
+                .filter(|n| (1..=3).contains(n))
+                .ok_or("orthotropic wall axes must be distinct integers in 1..=3")? - 1;
+        }
+        if axes[0] == axes[1] { return Err("orthotropic wall hoop and axial directions must differ"); }
+        let proportional_viscosity_time_property = match fields.next() {
+            Some("normal-kelvin-voigt") => {
+                let max_dt_over_tau = fields.next().and_then(|s| s.parse::<f64>().ok())
+                    .filter(|n| n.is_finite() && *n > 0.0 && *n <= 2.0)
+                    .ok_or("normal wall viscosity requires finite 0 < dt/tau <= 2")?;
+                let max_angular_step = fields.next().and_then(|s| s.parse::<f64>().ok())
+                    .filter(|n| n.is_finite() && *n > 0.0 && *n <= 1.0)
+                    .ok_or("normal wall viscosity requires finite 0 < angular step <= 1")?;
+                let mut name = || fields.next()
+                    .filter(|name| !name.is_empty() && name.len() <= MAX_MATERIAL_PROPERTY_NAME_BYTES)
+                    .map(str::to_owned).ok_or("normal wall viscosity needs three exact source properties");
+                let properties = [name()?, name()?, name()?];
+                LocalMaterialWall::orthotropic_normal_viscosity_requirements(
+                    axes, properties.each_ref().map(String::as_str))
+                    .map_err(|_| "normal wall viscosity properties conflict with the elastic quantities")?;
+                return Ok(Self::OrthotropicNormal { axes, properties, max_dt_over_tau, max_angular_step });
+            }
+            Some("elastic") => None,
+            Some("proportional-kelvin-voigt") => Some(fields.next()
+                .filter(|name| !name.is_empty() && name.len() <= MAX_MATERIAL_PROPERTY_NAME_BYTES)
+                .ok_or("orthotropic wall needs an exact proportional-viscosity time property")?.to_owned()),
+            _ => return Err("orthotropic wall loss requires elastic, proportional-kelvin-voigt or normal-kelvin-voigt with explicit source properties"),
+        };
+        LocalMaterialWall::orthotropic_requirements(axes, proportional_viscosity_time_property.as_deref())
+            .map_err(|_| "orthotropic wall has an invalid proportional-viscosity source property")?;
+        Ok(Self::Orthotropic { axes, proportional_viscosity_time_property })
+    }
+
+    pub(crate) fn requirements(&self) -> Result<Vec<Requirement>, AcousticRealizeError> {
+        match self {
+            Self::Isotropic(loss) => loss.requirements()
+                .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string())),
+            Self::Orthotropic { axes, proportional_viscosity_time_property } =>
+                LocalMaterialWall::orthotropic_requirements(*axes, proportional_viscosity_time_property.as_deref()),
+            Self::OrthotropicNormal { axes, properties, .. } =>
+                LocalMaterialWall::orthotropic_normal_viscosity_requirements(*axes,
+                    properties.each_ref().map(String::as_str)),
+        }
+    }
+
+    pub(crate) fn selection(&self, material: &ResolvedMaterialStatePoint, thickness_m: f64,
+        axial: AxialConstraint, band_hz: [f64; 2])
+        -> Result<(WallMaterialModel, WallMaterialLoss), AcousticRealizeError>
+    {
+        match self {
+            Self::Isotropic(loss) => Ok((WallMaterialModel::Isotropic, loss.resolve(material, band_hz)?)),
+            Self::Orthotropic { axes, proportional_viscosity_time_property } => Ok((
+                WallMaterialModel::Orthotropic { axes: *axes,
+                    proportional_viscosity_time_property: proportional_viscosity_time_property.clone() },
+                if proportional_viscosity_time_property.is_some() { WallMaterialLoss::KelvinVoigt }
+                else { WallMaterialLoss::Elastic },
+            )),
+            Self::OrthotropicNormal { axes, properties, max_dt_over_tau, max_angular_step } => {
+                let wall = LocalMaterialWall::new_orthotropic_normal_kelvin_voigt(material.clone(),
+                    thickness_m, axial, *axes, properties.each_ref().map(String::as_str),
+                    band_hz, *max_dt_over_tau, *max_angular_step)?;
+                Ok((WallMaterialModel::OrthotropicNormal { axes:*axes, properties:properties.clone(),
+                    max_dt_over_tau:*max_dt_over_tau, max_angular_step:*max_angular_step }, wall.loss().clone()))
+            }
+        }
+    }
+
+    pub(crate) fn resolve(&self, material: ResolvedMaterialStatePoint, thickness_m: f64,
+        axial: AxialConstraint, band_hz: [f64; 2]) -> Result<LocalMaterialWall, AcousticRealizeError>
+    {
+        let (model, loss) = self.selection(&material, thickness_m, axial, band_hz)?;
+        model.resolve(material, thickness_m, axial, loss, band_hz)
+    }
+
+    pub(crate) fn normal_viscosity_properties(&self) -> Option<[String; 3]> {
+        match self { Self::OrthotropicNormal { properties, .. } => Some(properties.clone()), _ => None }
+    }
+}
 
 pub(crate) enum WallMaterialLossSource {
     Elastic,

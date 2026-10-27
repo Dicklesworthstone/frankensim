@@ -4,7 +4,7 @@
 //! No acoustic coefficient is inferred from a name and no fitted loss is introduced.
 
 use super::{DgSourceError, Row, bad, checkpoint};
-use crate::bernoulli_aperture::wall::material::source::WallMaterialLossSource;
+use crate::bernoulli_aperture::wall::material::source::WallConstitutiveSource;
 use crate::bernoulli_aperture::wall::material::{AxialConstraint, LocalMaterialWall};
 use fs_exec::CancelGate;
 use fs_matdb::{NormalizedMaterialCardPack, QueryPoint};
@@ -17,20 +17,6 @@ pub mod regions;
 /// The CLI bounds artifact bytes before decoding; direct callers share the cap.
 pub const MAX_DG_WALL_PACK_BYTES: usize = 8 * 1024 * 1024;
 
-enum WallConstitutiveInput {
-    Isotropic(WallMaterialLossSource),
-    Orthotropic {
-        axes: [usize; 2],
-        proportional_viscosity_time_property: Option<String>,
-    },
-    OrthotropicNormal {
-        axes: [usize; 2],
-        properties: [String; 3],
-        max_dt_over_tau: f64,
-        max_angular_step: f64,
-    },
-}
-
 /// One frozen, uniform solid around the original cylindrical main bore.
 pub struct DgMaterialWallInput {
     line: usize,
@@ -40,7 +26,7 @@ pub struct DgMaterialWallInput {
     thickness_m: f64,
     axial: AxialConstraint,
     band_hz: [f64; 2],
-    constitutive: WallConstitutiveInput,
+    constitutive: WallConstitutiveSource,
 }
 
 /// Original source and resolved constitutive law, independent of DG resolution.
@@ -119,46 +105,8 @@ impl DgMaterialWallInput {
             _ => return Err(bad(line, "DG wall axial restraint must be stress-free or strain-fixed")),
         };
         let band_hz = [row.positive()?, row.positive()?];
-        let constitutive = if orthotropic {
-            let mut axes = [0; 2];
-            for axis in &mut axes {
-                *axis = row.word()?.parse::<usize>().ok().filter(|n| (1..=3).contains(n))
-                    .ok_or_else(|| bad(line, "orthotropic wall axes must be distinct integers in 1..=3"))? - 1;
-            }
-            if axes[0] == axes[1] {
-                return Err(bad(line, "orthotropic wall hoop and axial directions must differ"));
-            }
-            match row.word()? {
-                "normal-kelvin-voigt" => {
-                    let max_dt_over_tau = row.positive()?;
-                    let max_angular_step = row.positive()?;
-                    if max_dt_over_tau > 2.0 || max_angular_step > 1.0 {
-                        return Err(bad(line, "normal wall viscosity limits require dt/tau <= 2 and angular step <= 1"));
-                    }
-                    let properties = [row.word()?.to_owned(), row.word()?.to_owned(), row.word()?.to_owned()];
-                    LocalMaterialWall::orthotropic_normal_viscosity_requirements(
-                        axes, properties.each_ref().map(String::as_str),
-                    ).map_err(DgSourceError::Physics)?;
-                    WallConstitutiveInput::OrthotropicNormal {
-                        axes, properties, max_dt_over_tau, max_angular_step,
-                    }
-                }
-                loss => {
-                    let proportional_viscosity_time_property = match loss {
-                        "elastic" => None,
-                        "proportional-kelvin-voigt" => Some(row.word()?.to_owned()),
-                        _ => return Err(bad(line, "orthotropic wall loss requires elastic, proportional-kelvin-voigt or normal-kelvin-voigt with explicit source properties")),
-                    };
-                    LocalMaterialWall::orthotropic_requirements(axes, proportional_viscosity_time_property.as_deref())
-                        .map_err(DgSourceError::Physics)?;
-                    WallConstitutiveInput::Orthotropic { axes, proportional_viscosity_time_property }
-                }
-            }
-        } else {
-            WallConstitutiveInput::Isotropic(
-                WallMaterialLossSource::read(row.fields).map_err(|what| bad(line, what))?,
-            )
-        };
+        let constitutive = WallConstitutiveSource::read(orthotropic, row.fields)
+            .map_err(|what| bad(line, what))?;
         row.finish()?;
         if angular_frequency_rad_s < 0.0 || band_hz[0] >= band_hz[1] {
             return Err(bad(line, "DG wall needs nonnegative source frequency and an ordered positive band"));
@@ -191,40 +139,13 @@ impl DgMaterialWallInput {
             .with("T", self.temperature_k)
             .and_then(|point| point.with("omega", self.angular_frequency_rad_s))
             .map_err(|_| bad(self.line, "invalid DG wall material query"))?;
-        let normal_viscosity_properties = match &self.constitutive {
-            WallConstitutiveInput::OrthotropicNormal { properties, .. } => Some(properties.clone()),
-            _ => None,
-        };
-        let requirements = match &self.constitutive {
-            WallConstitutiveInput::Isotropic(loss) => loss.requirements()
-                .map_err(|source| DgSourceError::Material { line: self.line, source })?,
-            WallConstitutiveInput::Orthotropic { axes, proportional_viscosity_time_property } =>
-                LocalMaterialWall::orthotropic_requirements(*axes, proportional_viscosity_time_property.as_deref())
-                    .map_err(DgSourceError::Physics)?,
-            WallConstitutiveInput::OrthotropicNormal { axes, properties, .. } =>
-                LocalMaterialWall::orthotropic_normal_viscosity_requirements(
-                    *axes, properties.each_ref().map(String::as_str),
-                ).map_err(DgSourceError::Physics)?,
-        };
+        let normal_viscosity_properties = self.constitutive.normal_viscosity_properties();
+        let requirements = self.constitutive.requirements().map_err(DgSourceError::Physics)?;
         let material = resolve_material_state_point(pack.card(), &point, &requirements,
             MaterialPropertySelection::SingleClaimOnly)
             .map_err(|source| DgSourceError::Material { line: self.line, source })?;
-        let wall = match self.constitutive {
-            WallConstitutiveInput::Isotropic(loss) => {
-                let loss = loss.resolve(&material, self.band_hz).map_err(DgSourceError::Physics)?;
-                LocalMaterialWall::new(material, self.thickness_m, self.axial, loss, self.band_hz)
-            }
-            WallConstitutiveInput::Orthotropic { axes, proportional_viscosity_time_property } =>
-                LocalMaterialWall::new_orthotropic(material, self.thickness_m, self.axial,
-                    axes, proportional_viscosity_time_property.as_deref(), self.band_hz),
-            WallConstitutiveInput::OrthotropicNormal {
-                axes, properties, max_dt_over_tau, max_angular_step,
-            } => LocalMaterialWall::new_orthotropic_normal_kelvin_voigt(
-                material, self.thickness_m, self.axial, axes,
-                properties.each_ref().map(String::as_str), self.band_hz,
-                max_dt_over_tau, max_angular_step,
-            ),
-        }.map_err(DgSourceError::Physics)?;
+        let wall = self.constitutive.resolve(material, self.thickness_m, self.axial, self.band_hz)
+            .map_err(DgSourceError::Physics)?;
         checkpoint(gate, self.line)?;
         Ok(DgMaterialWallRecord { path: self.path, pack, wall, normal_viscosity_properties })
     }

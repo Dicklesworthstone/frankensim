@@ -104,6 +104,7 @@ fn properties(rho: f64, young: f64, eta: f64) -> [(&'static str, Dims, f64); 4] 
 }
 fn assignment(rho: f64, young: f64, eta: f64) -> MaterialWallAssignment {
     MaterialWallAssignment {
+        model: Default::default(),
         node: 1,
         material: state(&properties(rho, young, eta), None, None),
         thickness_m: 0.0002,
@@ -111,6 +112,107 @@ fn assignment(rho: f64, young: f64, eta: f64) -> MaterialWallAssignment {
         loss: WallMaterialLoss::KelvinVoigt,
     }
 }
+
+#[test]
+fn graph_orthotropic_walls_use_the_original_local_constitutive_reduction() {
+    use fs_couple::bernoulli_aperture::wall::material::{LocalMaterialWall, WallMaterialModel};
+    let properties = [("density", Density::DIMS, 1000.0),
+        ("young_modulus_1", Pressure::DIMS, 1e6),
+        ("young_modulus_2", Pressure::DIMS, 4e6),
+        ("poisson_ratio_12", Dims::NONE, 0.1),
+        ("wall_viscosity_time", Dims([0,0,1,0,0,0]), 2e-6)];
+    let material = state(&properties, None, None);
+    for axes in [[0,1], [1,0]] {
+        for axial in [AxialConstraint::StressFree, AxialConstraint::StrainFixed] {
+            let model = WallMaterialModel::Orthotropic { axes,
+                proportional_viscosity_time_property: Some("wall_viscosity_time".into()) };
+            let source = MaterialWallAssignment { node:1, material:material.clone(), model,
+                thickness_m:0.0002, axial, loss:WallMaterialLoss::KelvinVoigt };
+            let actual = bound(source.clone());
+            let local = LocalMaterialWall::new_orthotropic(material.clone(), source.thickness_m,
+                axial, axes, Some("wall_viscosity_time"), BAND).unwrap();
+            assert_eq!(actual.patch(), local.base_patch(actual.radius_m(), actual.length_m()).unwrap());
+            assert_eq!(actual.source(), &source);
+            // Independent plane-stress compliance: nu_21=nu_12 E_2/E_1.
+            // The determinant is unchanged by exchanging hoop and axial axes.
+            let e_hoop = if axes[0] == 0 { 1e6 } else { 4e6 };
+            let constrained = if axial == AxialConstraint::StrainFixed { 1.0/(1.0-0.1*0.4) } else { 1.0 };
+            let stiffness = e_hoop * constrained * source.thickness_m / 0.006f64.powi(2);
+            close(actual.patch().wall.stiffness_per_area, stiffness);
+            close(actual.patch().wall.resistance, stiffness * 2e-6);
+            close(actual.patch().wall.surface_density, 0.2);
+        }
+    }
+    let mut source = MaterialWallAssignment { node:1, material,
+        model:WallMaterialModel::Orthotropic { axes:[0,1], proportional_viscosity_time_property:None },
+        thickness_m:0.0002, axial:AxialConstraint::StressFree, loss:WallMaterialLoss::KelvinVoigt };
+    assert!(bind_material_walls(graph(), vec![source.clone()], BAND, 1, &CancelGate::new_clock_free()).is_err(),
+        "a directional wall may not silently discard an incompatible loss selection");
+    source.loss = WallMaterialLoss::Elastic;
+    assert_eq!(bound(source).patch().wall.resistance, 0.0);
+}
+
+#[test]
+fn graph_normal_viscosity_retains_axial_memory_and_residual_kelvin_dissipation() {
+    use fs_couple::bernoulli_aperture::wall::material::{LocalMaterialWall, WallMaterialModel};
+    let mut patches = Vec::new();
+    let mut memories = Vec::new();
+    for cross in [-60.0, 60.0] {
+        let material = state(&[("density", Density::DIMS, 1000.0),
+            ("young_modulus_1", Pressure::DIMS, 1e6),
+            ("young_modulus_2", Pressure::DIMS, 4e6),
+            ("poisson_ratio_12", Dims::NONE, 0.1),
+            ("eta_hh", DynViscosity::DIMS, 400.0),
+            ("eta_ha", DynViscosity::DIMS, cross),
+            ("eta_aa", DynViscosity::DIMS, 90.0)], None, None);
+        let names = ["eta_hh", "eta_ha", "eta_aa"];
+        let model = WallMaterialModel::OrthotropicNormal { axes:[0,1],
+            properties:names.map(str::to_owned), max_dt_over_tau:1.0, max_angular_step:0.8 };
+        for axial in [AxialConstraint::StressFree, AxialConstraint::StrainFixed] {
+            let local = LocalMaterialWall::new_orthotropic_normal_kelvin_voigt(
+                material.clone(), 0.0002, axial, [0,1], names, BAND, 1.0, 0.8).unwrap();
+            let source = MaterialWallAssignment { node:1, material:material.clone(),
+                model:model.clone(), thickness_m:0.0002, axial, loss:local.loss().clone() };
+            let actual = bound(source.clone());
+            let patch = actual.patch();
+            let factor = source.thickness_m / actual.radius_m().powi(2);
+            assert_eq!(patch, local.base_patch(actual.radius_m(), actual.length_m()).unwrap());
+            if axial == AxialConstraint::StressFree {
+                // Eliminate the full C+sD law. The sign of cross viscosity
+                // leaves its Schur remainder unchanged but changes memory.
+                let c_aa = 4e6 / 0.96;
+                let delta_e = c_aa * (0.1 - cross / 90.0).powi(2);
+                let tau = 90.0 / c_aa;
+                close(patch.wall.stiffness_per_area, 1e6 * factor);
+                close(patch.wall.resistance, (400.0 - cross * cross / 90.0) * factor);
+                let WallMaterialLoss::Maxwell(spectrum) = &source.loss else { panic!("lost axial memory") };
+                assert_eq!(spectrum.material().terms.len(), 1);
+                close(spectrum.material().terms[0].0, delta_e);
+                close(spectrum.material().terms[0].1, tau);
+                let load = actual.load();
+                let [term] = load.compliance_terms() else { panic!("lost original graph memory load") };
+                close(term.resistance_pa_s_m3, delta_e * factor * tau / patch.area_m2);
+                close(term.rate_per_s, 1.0 / tau);
+                actual.validate_time_step(1.0 / RATE as f64).unwrap();
+                assert!(actual.validate_time_step(0.001).is_err());
+                let mut discarded = source.clone();
+                discarded.loss = WallMaterialLoss::KelvinVoigt;
+                assert!(bind_material_walls(graph(), vec![discarded], BAND, 1,
+                    &CancelGate::new_clock_free()).is_err());
+                patches.push(patch);
+                memories.push(spectrum.material().terms.clone());
+            } else {
+                assert_eq!(source.loss, WallMaterialLoss::KelvinVoigt);
+                assert!(actual.load().compliance_terms().is_empty());
+                close(patch.wall.stiffness_per_area, (1e6 / 0.96) * factor);
+                close(patch.wall.resistance, 400.0 * factor);
+            }
+        }
+    }
+    assert_eq!(patches[0], patches[1]);
+    assert_ne!(memories[0], memories[1]);
+}
+
 fn gas() -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap()
 }

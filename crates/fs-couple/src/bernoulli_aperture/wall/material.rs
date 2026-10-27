@@ -6,10 +6,12 @@
 //! Kelvin--Voigt Young viscosity uses the SAME constant Poisson reduction.
 //! No frequency-independent loss factor is relabeled as viscosity.
 //!
-//! This is not a carved shell, a wooden orthotropic bore, moving geometry or
-//! exterior wall radiation. Axial/bending coupling between rings, end-cap
+//! Principal-aligned orthotropic walls use the same local membrane owner as
+//! DG ducts, retaining the original directional moduli and material axes.
+//! This is not a carved shell, off-axis grain, moving geometry or exterior
+//! wall radiation. Axial/bending coupling between rings, end-cap
 //! traction, static-pressure prestress and thermal evolution are absent. It is
-//! a frozen-state, small-displacement, isotropic thin-wall image, not a claim
+//! a frozen-state, small-displacement thin-wall image, not a claim
 //! that every change of bore metal must produce an audible timbre difference.
 
 /// Hereditary material spectra through the shared passive acoustic load.
@@ -45,11 +47,74 @@ pub enum AxialConstraint {
 pub enum WallMaterialLoss {
     /// Lossless membrane. Other network loss channels are unchanged.
     Elastic,
-    /// Requires the source's `kelvin_voigt_young_viscosity` claim.
+    /// Viscous response from the explicit constitutive selection. Isotropic
+    /// walls require `kelvin_voigt_young_viscosity`; directional walls retain
+    /// their declared proportional time or normal-plane tensor properties.
     KelvinVoigt,
     /// Existing generalized-Maxwell law; retains its original spectrum and conditions.
-    /// No separate Kelvin--Voigt damping is added to this constitutive model.
+    /// Isotropic source spectra add no Kelvin damping. Exact normal-plane
+    /// elimination may retain its source-derived residual Kelvin resistance.
     Maxwell(WallRelaxation),
+}
+
+/// Explicit constitutive image of a local cylindrical membrane.
+/// Material names never choose this reduction or its principal directions.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum WallMaterialModel {
+    /// Original isotropic Young/Poisson reduction and loss source.
+    #[default]
+    Isotropic,
+    /// Material principal axes follow the local [hoop, axial] directions.
+    /// A time property declares C_viscous=tau*C_elastic on this plane.
+    /// Off-axis grain and general directional relaxation are not approximated.
+    Orthotropic {
+        /// Distinct zero-based principal material directions in 0..3.
+        axes: [usize; 2],
+        /// None selects elastic response; Some requires KelvinVoigt loss.
+        proportional_viscosity_time_property: Option<String>,
+    },
+    /// Independent symmetric normal-plane Kelvin--Voigt viscosity. Eliminating
+    /// free axial stress retains its exact Maxwell memory and Kelvin remainder.
+    OrthotropicNormal {
+        /// Distinct zero-based local [hoop, axial] principal directions.
+        axes: [usize; 2],
+        /// Original [D_hh,D_ha,D_aa] source properties, each in Pa s.
+        properties: [String; 3],
+        /// Explicit midpoint-network relaxation resolution, in (0,2].
+        max_dt_over_tau: f64,
+        /// Explicit midpoint-network angular-step limit, in (0,1].
+        max_angular_step: f64,
+    },
+}
+
+impl WallMaterialModel {
+    fn resolve(&self, material: ResolvedMaterialStatePoint, thickness_m: f64,
+        axial: AxialConstraint, loss: WallMaterialLoss, band_hz: [f64; 2])
+        -> Result<LocalMaterialWall, AcousticRealizeError>
+    {
+        match self {
+            Self::Isotropic => LocalMaterialWall::new(material, thickness_m, axial, loss, band_hz),
+            Self::Orthotropic { axes, proportional_viscosity_time_property } => {
+                let expected = if proportional_viscosity_time_property.is_some() {
+                    WallMaterialLoss::KelvinVoigt
+                } else { WallMaterialLoss::Elastic };
+                if loss != expected {
+                    return Err(invalid("orthotropic wall loss must match its explicit proportional viscosity source"));
+                }
+                LocalMaterialWall::new_orthotropic(material, thickness_m, axial, *axes,
+                    proportional_viscosity_time_property.as_deref(), band_hz)
+            }
+            Self::OrthotropicNormal { axes, properties, max_dt_over_tau, max_angular_step } => {
+                let wall = LocalMaterialWall::new_orthotropic_normal_kelvin_voigt(material,
+                    thickness_m, axial, *axes, properties.each_ref().map(String::as_str),
+                    band_hz, *max_dt_over_tau, *max_angular_step)?;
+                if &loss != wall.loss() {
+                    return Err(invalid("normal wall viscosity must retain the exact source-derived relaxation spectrum"));
+                }
+                Ok(wall)
+            }
+        }
+    }
 }
 
 /// One source assignment to a physical, degree-two cylindrical junction.
@@ -57,8 +122,10 @@ pub enum WallMaterialLoss {
 pub struct MaterialWallAssignment {
     /// Original graph node; original section/node indices are never renumbered.
     pub node: usize,
-    /// Exact material state with dimensioned density, E and Poisson ratio.
+    /// Exact material state with the selected model's dimensioned properties.
     pub material: ResolvedMaterialStatePoint,
+    /// Explicit isotropic or principal-aligned membrane reduction.
+    pub model: WallMaterialModel,
     /// Uniform radial wall thickness [m] at this already resolved state.
     pub thickness_m: f64,
     /// Explicit structural boundary assumption of the local ring image.
@@ -132,7 +199,7 @@ fn property(material: &ResolvedMaterialStatePoint, name: &str, dims: Dims,
 fn reduce(source: MaterialWallAssignment, radius: f64, length: f64, band: [f64; 2])
     -> Result<BoundMaterialWall, AcousticRealizeError>
 {
-    let law = LocalMaterialWall::new(source.material.clone(), source.thickness_m,
+    let law = source.model.resolve(source.material.clone(), source.thickness_m,
         source.axial, source.loss.clone(), band)?;
     let patch = law.base_patch(radius, length)?;
     let load = law.load(patch)?;

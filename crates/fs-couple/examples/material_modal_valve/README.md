@@ -280,7 +280,7 @@ physical strip covers half of each adjacent section; unselected strips remain
 rigid. Walls never replace terminal radiation, cavities, preexisting wall loads
 or branching junctions. There are at most 64 selected wall nodes on either side.
 
-Every wall resolves density, Young modulus and Poisson ratio from its declared
+Every isotropic wall resolves density, Young modulus and Poisson ratio from its declared
 pack at the explicit solid temperature and angular frequency. `kelvin-voigt`
 also requires the dimensioned `kelvin_voigt_young_viscosity` property; `elastic`
 explicitly chooses zero internal loss. Source claims must be constant at that
@@ -288,13 +288,44 @@ solid temperature and valid across the whole wall band. That band must cover
 the declared propagation and microphone bands. Unsupported material data,
 thickness/radius above 0.05, missing coefficients or invalid graph sites refuse.
 
+The same original graph sites also accept a principal-aligned orthotropic wall:
+
+```text
+wall upstream|downstream NODE orthotropic PACK SOLID_T_K SOURCE_OMEGA_RAD_S THICKNESS_M AXIAL HOOP_AXIS AXIAL_AXIS LOSS
+```
+
+`AXIAL` retains `stress-free` or `strain-fixed`. The distinct principal axes are
+one-based integers in 1..=3, ordered hoop then axial, and follow the local
+cylindrical directions. `LOSS` is `elastic`,
+`proportional-kelvin-voigt TIME_PROPERTY`, or
+`normal-kelvin-voigt MAX_DT_OVER_TAU MAX_ANGULAR_STEP HH HA AA`.
+The original nonnegative proportional time claim
+declares `C_viscous = tau C_elastic` on this membrane plane. Density, the two
+directional Young moduli and their major Poisson ratio are resolved directly.
+The same constitutive owner serves graph jets and DG ducts, including reciprocal
+Poisson reduction under fixed axial strain. No equivalent isotropic card or
+material-name rule is introduced.
+
+The independent normal-viscosity selection names the three Pa·s entries of a
+symmetric positive-semidefinite viscosity matrix in the local hoop/axial plane;
+`HA` may be negative. Fixed axial strain keeps the original hoop entry. Free
+axial stress eliminates the complete `C + sD` law and retains the resulting
+Maxwell arm and residual Kelvin resistance in the original duct load. Changing
+only a source cross-viscosity value can therefore change reed feedback and
+external pressure even when the base wall mass, stiffness and resistance stay
+the same. Its explicit resolution limits satisfy `0 < MAX_DT_OVER_TAU <= 2` and
+`0 < MAX_ANGULAR_STEP <= 1` and are checked against the actual graph clock when
+memory is present. Native provenance preserves the source tensor names and
+values, material axes, reduced memory and residual resistance. Full 3-D
+viscoelastic condensation and unsupported directional spectra still refuse.
+
 The wall shares the plate source cache and total material-byte budget, while
 keeping its independent state query. The original regional gas stays in each
 duct section; neither solid temperature nor its material name selects a new
 gas. The same material-wall owner participates in pressure/flow work and storage
 with compact or MIMO terminal radiation, and with or without a supply channel.
-It is a fixed-state local isotropic membrane approximation: no full shell,
-orthotropic tissue, axial wall coupling or exterior shell radiation is implied.
+It is a fixed-state local membrane approximation: no full shell, off-axis grain,
+axial wall coupling or exterior shell radiation is implied.
 
 `propagation integer` selects the original integer delay image.
 The separate `propagator` row is optional and appears immediately after `audio`.

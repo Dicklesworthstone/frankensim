@@ -4,7 +4,7 @@ use super::plate::{MaterialCache, relative_path};
 use crate::bernoulli_aperture::wall::material::{
     AxialConstraint, MaterialWallAssignment, MaterialWallInput,
 };
-use crate::bernoulli_aperture::wall::material::source::WallMaterialLossSource;
+use crate::bernoulli_aperture::wall::material::source::WallConstitutiveSource;
 use fs_exec::CancelGate;
 use fs_matdb::{NormalizedMaterialCardPack, QueryPoint};
 use fs_material::state_point::{MaterialPropertySelection, resolve_material_state_point};
@@ -66,9 +66,11 @@ pub(super) fn read(rows: &mut Reader<'_>, maximum_frequency_hz: f64,
         if assignments[index].len() >= 64 || assignments[index].iter().any(|a| a.node == node) {
             return Err(bad(row.line, "each side admits at most 64 distinct original wall nodes"));
         }
-        if row.word()? != "isotropic" {
-            return Err(bad(row.line, "wall requires an explicit isotropic membrane material"));
-        }
+        let orthotropic = match row.word()? {
+            "isotropic" => false,
+            "orthotropic" => true,
+            _ => return Err(bad(row.line, "wall requires an explicit isotropic or principal-aligned orthotropic membrane")),
+        };
         let path = row.word()?.to_string();
         relative_path(&path, row.line)?;
         let temperature = row.scalar()?;
@@ -79,7 +81,7 @@ pub(super) fn read(rows: &mut Reader<'_>, maximum_frequency_hz: f64,
             "strain-fixed" => AxialConstraint::StrainFixed,
             _ => return Err(bad(row.line, "wall axial restraint must be stress-free or strain-fixed")),
         };
-        let loss = WallMaterialLossSource::read(&mut row.fields)
+        let constitutive = WallConstitutiveSource::read(orthotropic, &mut row.fields)
             .map_err(|what| bad(row.line, what))?;
         let line = row.line;
         row.finish()?;
@@ -90,13 +92,13 @@ pub(super) fn read(rows: &mut Reader<'_>, maximum_frequency_hz: f64,
         let point = QueryPoint::new().with("T", temperature)
             .and_then(|p| p.with("omega", omega))
             .map_err(|e| PlateValveInputError::MaterialSource { line, source: e.to_string() })?;
-        let material = (|| {
-            let required = loss.requirements()?;
-            resolve_material_state_point(pack.card(), &point, &required,
-                MaterialPropertySelection::SingleClaimOnly)
-        })().map_err(|source| PlateValveInputError::Material { line, source })?;
-        let loss = loss.resolve(&material, band_hz).map_err(PlateValveInputError::Physics)?;
-        assignments[index].push(MaterialWallAssignment { node, material, thickness_m, axial, loss });
+        let required = constitutive.requirements().map_err(PlateValveInputError::Physics)?;
+        let material = resolve_material_state_point(pack.card(), &point, &required,
+            MaterialPropertySelection::SingleClaimOnly)
+            .map_err(|source| PlateValveInputError::Material { line, source })?;
+        let (model, loss) = constitutive.selection(&material, thickness_m, axial, band_hz)
+            .map_err(PlateValveInputError::Physics)?;
+        assignments[index].push(MaterialWallAssignment { node, material, model, thickness_m, axial, loss });
         records.push(ModalValveWallRecord { side, node, path, pack });
     }
     Ok((assignments.map(|assignments| (!assignments.is_empty()).then(|| MaterialWallInput {

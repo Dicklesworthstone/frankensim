@@ -66,6 +66,126 @@ fn loaded(text: &str, wall: &NormalizedMaterialCardPack, block: usize)
         |_| Ok(OPERATOR.as_bytes().to_vec()))
 }
 
+fn directional_wall_pack() -> NormalizedMaterialCardPack {
+    let base = wall_pack(1e6, None, 100000.0);
+    let mut claims = base.card().claims().clone();
+    let template = claims.claims_for("young_modulus")[0].1.clone();
+    for (name, dims, value) in [("young_modulus_1", Pressure::DIMS, 1e6),
+        ("young_modulus_2", Pressure::DIMS, 4e6), ("poisson_ratio_12", Dims::NONE, 0.1),
+        ("wall_viscosity_time", Dims([0,0,1,0,0,0]), 2e-6)] {
+        let mut claim = template.clone();
+        claim.key = PropertyKey::new(name, dims);
+        claim.value = PropertyValue::Scalar { value, dims };
+        claims.insert_claim(claim).unwrap();
+    }
+    let normalized = NormalizedPack::new("synthetic-directional-wall", "integration-v1",
+        base.source_artifact(), "CC0-1.0", claims, vec![], vec![]).unwrap();
+    NormalizedMaterialCardPack::new(base.card().id().clone(), normalized).unwrap()
+}
+
+fn normal_viscous_wall_pack(cross: f64) -> NormalizedMaterialCardPack {
+    let base = directional_wall_pack();
+    let mut claims = base.card().claims().clone();
+    let template = claims.claims_for("young_modulus_1")[0].1.clone();
+    for (name, value) in [("wall_eta_hh", 400.0), ("wall_eta_ha", cross), ("wall_eta_aa", 90.0)] {
+        let mut claim = template.clone();
+        claim.key = PropertyKey::new(name, DynViscosity::DIMS);
+        claim.value = PropertyValue::Scalar { value, dims:DynViscosity::DIMS };
+        claims.insert_claim(claim).unwrap();
+    }
+    let normalized = NormalizedPack::new("synthetic-normal-viscous-wall", "integration-v1",
+        base.source_artifact(), "CC0-1.0", claims, vec![], vec![]).unwrap();
+    NormalizedMaterialCardPack::new(base.card().id().clone(), normalized).unwrap()
+}
+
+#[test]
+fn g3_normal_viscosity_keeps_axial_memory_in_both_original_reed_ducts() {
+    use crate::bernoulli_aperture::wall::material::{WallMaterialLoss, WallMaterialModel};
+    let text = input_walls().replace("isotropic wall.matpack", "orthotropic wall.matpack")
+        .replace("strain-fixed", "stress-free")
+        .replace("kelvin-voigt", "1 2 normal-kelvin-voigt 1 0.8 wall_eta_hh wall_eta_ha wall_eta_aa");
+    let mut pressures = Vec::new();
+    let mut patches = Vec::new();
+    let mut reeds = Vec::new();
+    for cross in [-60.0, 60.0] {
+        let material = normal_viscous_wall_pack(cross);
+        let p = loaded(&text, &material, 37).unwrap();
+        reeds.push(valve(&p).material_plates()[0].source().specimen_identity());
+        let system = p.renderer().source().system();
+        let mut original_patches = Vec::new();
+        for side in [ValveSide::Upstream, ValveSide::Downstream] {
+            let wall = &system.material_walls(side)[0];
+            assert!(matches!(wall.source().model, WallMaterialModel::OrthotropicNormal { axes:[0,1], .. }));
+            let WallMaterialLoss::Maxwell(spectrum) = &wall.source().loss else { panic!("lost axial memory") };
+            assert_eq!(spectrum.material().terms.len(), 1);
+            assert_eq!(wall.load().compliance_terms().len(), 1);
+            assert!(wall.patch().wall.resistance > 0.0);
+            original_patches.push(wall.patch());
+        }
+        patches.push(original_patches);
+        let mut renderer = p.into_renderer();
+        let mut pressure = Vec::new();
+        let mut maximum_memory = [0.0_f64; 2];
+        while renderer.remaining_samples() != 0 {
+            let mut sample = [0.0]; renderer.block(&mut sample).unwrap();
+            pressure.push(sample[0]);
+            let system = renderer.source().system();
+            let frame = renderer.source().last_frame().unwrap();
+            let scale = frame.stored_energy_j + frame.storage_change_j.abs()
+                + frame.source_work_j.abs() + frame.aperture.mechanical_work_j.abs();
+            assert!(frame.balance_residual_j().abs() <= 1e-16 + 1e-7 * scale);
+            for (i, side, node) in [(0, ValveSide::Upstream, 2), (1, ValveSide::Downstream, 1)] {
+                let energy = system.wall_relaxation_energy_j(side, node).unwrap();
+                assert!(energy.is_finite() && energy >= 0.0);
+                maximum_memory[i] = maximum_memory[i].max(energy);
+            }
+        }
+        assert!(maximum_memory.iter().all(|energy| *energy > 0.0));
+        assert!(pressure.iter().all(|pressure| pressure.is_finite()));
+        assert_eq!(pressure, render(loaded(&text, &material, 37).unwrap()).0);
+        pressures.push(pressure);
+    }
+    assert_eq!(reeds[0], reeds[1]);
+    assert_eq!(patches[0], patches[1]);
+    assert!(pressures[0].iter().zip(&pressures[1]).any(|(a,b)| (a-b).abs() > 1e-15),
+        "a data-only change of axial memory must reach the actual exterior receiver");
+}
+
+#[test]
+fn g3_directional_duct_walls_share_the_original_reed_and_external_pressure_owner() {
+    use crate::bernoulli_aperture::wall::material::WallMaterialModel;
+    let text = input_walls().replace("isotropic wall.matpack", "orthotropic wall.matpack")
+        .replace("stress-free kelvin-voigt", "stress-free 1 2 proportional-kelvin-voigt wall_viscosity_time")
+        .replace("strain-fixed kelvin-voigt", "strain-fixed 1 2 proportional-kelvin-voigt wall_viscosity_time");
+    let material = directional_wall_pack();
+    let p = loaded(&text, &material, 37).unwrap();
+    let reed = valve(&p).material_plates()[0].source().specimen_identity();
+    for side in [ValveSide::Upstream, ValveSide::Downstream] {
+        let wall = &p.renderer().source().system().material_walls(side)[0];
+        assert_eq!(wall.source().model, WallMaterialModel::Orthotropic { axes:[0,1],
+            proportional_viscosity_time_property:Some("wall_viscosity_time".into()) });
+        assert!(wall.source().material.property("young_modulus").is_none());
+        assert_eq!(wall.source().material.card_identity(), material.card().content_hash());
+        assert_eq!(wall.patch().wall.surface_density, 0.2);
+    }
+    let reference = render(p).0;
+    assert!(reference.iter().any(|pressure| pressure.abs()>1e-15));
+    assert_eq!(reference, render(loaded(&text, &material, 1).unwrap()).0);
+    let rotated = text.replace("strain-fixed 1 2", "strain-fixed 2 1");
+    let p = loaded(&rotated, &material, 37).unwrap();
+    assert_eq!(valve(&p).material_plates()[0].source().specimen_identity(), reed);
+    let wall = &p.renderer().source().system().material_walls(ValveSide::Downstream)[0];
+    let expected = 4e6/0.96 * 0.0002 / 0.007f64.powi(2);
+    assert!((wall.patch().wall.stiffness_per_area/expected-1.0).abs()<1e-14);
+    assert!(reference.iter().zip(render(p).0).any(|(a,b)| (a-b).abs()>1e-15));
+    // Even a complete isotropic bundle cannot replace the missing directional claims.
+    assert!(loaded(&text, &wall_pack(1e6, None, 100000.0), 37).is_err());
+    for invalid in [text.replace("1 2 proportional", "1 1 proportional"),
+        text.replace("proportional-kelvin-voigt wall_viscosity_time", "kelvin-voigt")] {
+        assert!(loaded(&invalid, &material, 37).is_err());
+    }
+}
+
 #[test]
 fn g0_material_walls_share_original_sources_geometry_gases_and_both_radiation_paths() {
     let material = wall_pack(1e6, None, 100000.0);

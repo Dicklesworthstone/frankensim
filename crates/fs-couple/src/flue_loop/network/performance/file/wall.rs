@@ -5,7 +5,7 @@ use fs_exec::CancelGate;
 use crate::bernoulli_aperture::wall::material::{
     AxialConstraint, MaterialWallAssignment, MaterialWallInput,
 };
-use crate::bernoulli_aperture::wall::material::source::WallMaterialLossSource;
+use crate::bernoulli_aperture::wall::material::source::WallConstitutiveSource;
 use crate::material_assembly::MaterialSource;
 use fs_matdb::{NormalizedMaterialCardPack, QueryPoint};
 use fs_material::state_point::{
@@ -43,7 +43,7 @@ struct ParsedWall {
     angular_frequency_rad_s: f64,
     thickness_m: f64,
     axial: AxialConstraint,
-    loss: WallMaterialLossSource,
+    constitutive: WallConstitutiveSource,
 }
 pub(super) struct ParsedWalls {
     line: usize,
@@ -70,9 +70,11 @@ impl ParsedWalls {
             if assignments.iter().any(|a| a.node == node) {
                 return Err(bad(row.line, "wall must name a distinct original graph node"));
             }
-            if row.fields.next() != Some("isotropic") {
-                return Err(bad(row.line, "wall requires NODE isotropic PACK T OMEGA H AXIAL LOSS"));
-            }
+            let orthotropic = match row.fields.next() {
+                Some("isotropic") => false,
+                Some("orthotropic") => true,
+                _ => return Err(bad(row.line, "wall requires NODE isotropic|orthotropic PACK T OMEGA H AXIAL [HOOP_AXIS AXIAL_AXIS] LOSS")),
+            };
             let path = row.fields.next().ok_or_else(|| bad(row.line, "wall needs a material-card pack path"))?;
             // Relative on every supported host. Only the caller opens the file.
             super::material::relative_path(path, row.line)?;
@@ -84,7 +86,7 @@ impl ParsedWalls {
                 Some("strain-fixed") => AxialConstraint::StrainFixed,
                 _ => return Err(bad(row.line, "wall axial constraint must be stress-free or strain-fixed")),
             };
-            let loss = WallMaterialLossSource::read(&mut row.fields)
+            let constitutive = WallConstitutiveSource::read(orthotropic, &mut row.fields)
                 .map_err(|what| bad(row.line, what))?;
             let source_line = row.line;
             row.end()?;
@@ -92,7 +94,7 @@ impl ParsedWalls {
                 return Err(bad(source_line, "wall needs a positive material temperature/thickness and nonnegative angular frequency"));
             }
             assignments.push(ParsedWall { node, line: source_line, path: path.into(),
-                temperature_k, angular_frequency_rad_s, thickness_m, axial, loss });
+                temperature_k, angular_frequency_rad_s, thickness_m, axial, constitutive });
         }
         Ok(Some(Self { line, band_hz, assignments }))
     }
@@ -115,14 +117,14 @@ impl ParsedWalls {
                 .map_err(|source| FlueInputError::MaterialSource { line: wall.line, source: source.to_string() })?;
             let source = MaterialSource { card: pack.card(), point: &point,
                 selection: MaterialPropertySelection::SingleClaimOnly };
-            let material = (|| {
-                let required = wall.loss.requirements()?;
-                resolve_material_state_point(source.card, source.point, &required, source.selection)
-            })().map_err(|source| FlueInputError::Material { line: wall.line, source })?;
-            let loss = wall.loss.resolve(&material, self.band_hz)
+            let required = wall.constitutive.requirements()
+                .map_err(|source| FlueInputError::Physics(super::FlueError::Physics(source)))?;
+            let material = resolve_material_state_point(source.card, source.point, &required, source.selection)
+                .map_err(|source| FlueInputError::Material { line: wall.line, source })?;
+            let (model, loss) = wall.constitutive.selection(&material, wall.thickness_m, wall.axial, self.band_hz)
                 .map_err(|source| FlueInputError::Physics(super::FlueError::Physics(source)))?;
             assignments.push(MaterialWallAssignment { node: wall.node, material,
-                thickness_m: wall.thickness_m, axial: wall.axial, loss });
+                model, thickness_m: wall.thickness_m, axial: wall.axial, loss });
             records.push(FlueWallRecord { node: wall.node, path: wall.path, pack });
         }
         let max_walls = assignments.len();

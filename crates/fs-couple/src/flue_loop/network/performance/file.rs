@@ -3,7 +3,7 @@
 //! The versioned source selects existing owners, including fractional travel,
 //! optional gas-derived wide-tube loss, material wall motion, terminal reaction,
 //! and the multirate Rayleigh receiver. Every physical selection is source data.
-//! Local isotropic walls, compact baffled loads and supplied mutual-radiation
+//! Local material walls, compact baffled loads and supplied mutual-radiation
 //! operators retain their original limits; this is not a measured Boehm flute,
 //! full shell model, resolved turbulent jet or broadband unbaffled qualification.
 //!
@@ -249,6 +249,15 @@ impl FlueFilePerformance {
     /// pairs in Pa and seconds, with `young_modulus` as the equilibrium modulus.
     /// Each coefficient must cover the wall band; the actual mechanics clock
     /// must resolve the declared time and instantaneous-frequency limits.
+    /// Alternatively `wall NODE orthotropic PACK T_K OMEGA_RAD_S THICKNESS_M
+    /// AXIAL HOOP_AXIS AXIAL_AXIS LOSS` uses distinct one-based principal axes
+    /// following the local cylindrical directions. Its LOSS is `elastic`,
+    /// `proportional-kelvin-voigt TIME_PROPERTY`, or `normal-kelvin-voigt
+    /// MAX_DT_OVER_TAU MAX_ANGULAR_STEP HH HA AA`. The last three properties
+    /// supply the symmetric 2-D normal viscosity in Pa s. Free axial stress
+    /// retains its exact Maxwell memory and residual Kelvin resistance; fixed
+    /// axial strain selects the original hoop entry. These are the same
+    /// source-backed reductions used by DG walls. No isotropic replacement is made.
     /// The same source selector and passive wall evolution serve reed ducts.
     /// Each source binds an existing empty degree-two cylindrical
     /// junction; geometry and gas assignments stay unchanged. The original wall

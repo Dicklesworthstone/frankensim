@@ -138,13 +138,14 @@ fn radiation_provenance(radiation: Option<BaffledRadiationLoad>) -> String {
 }
 
 fn flue_wall_provenance(p: &FlueFilePerformance) -> String {
-    use fs_couple::bernoulli_aperture::wall::material::{AxialConstraint, WallMaterialLoss};
+    use fs_couple::bernoulli_aperture::wall::material::AxialConstraint;
     let walls = p.renderer().voice().network().expect("file admits graph").material_walls();
     let records = p.wall_records().iter().map(|record| {
         let wall = walls.iter().find(|wall| wall.source().node == record.node())
             .expect("retained material source has its original physical wall");
         let assignment = wall.source();
         let material = &assignment.material;
+        let (model, directions) = graph_wall_constitutive_metadata(assignment);
         let state = material.material();
         let coordinate = |name: &str| material.query_point().iter()
             .find(|(axis, _)| axis == name).expect("file supplies T and omega").1;
@@ -152,23 +153,9 @@ fn flue_wall_provenance(p: &FlueFilePerformance) -> String {
             AxialConstraint::StressFree => "stress-free",
             AxialConstraint::StrainFixed => "strain-fixed",
         };
-        let loss = match &assignment.loss {
-            WallMaterialLoss::Elastic => "elastic",
-            WallMaterialLoss::KelvinVoigt => "kelvin-voigt",
-            WallMaterialLoss::Maxwell(_) => "maxwell",
-        };
-        let relaxation = match &assignment.loss {
-            WallMaterialLoss::Maxwell(spectrum) => {
-                let material = spectrum.material();
-                let terms = material.terms.iter().map(|(modulus, time)| format!(
-                    "{{\"modulus_pa\":{modulus:e},\"relaxation_time_s\":{time:e}}}"))
-                    .collect::<Vec<_>>().join(",");
-                format!(",\"equilibrium_modulus_pa\":{:e},\"maxwell_terms\":[{terms}]", material.e_inf)
-            }
-            _ => String::new(),
-        };
+        let (loss, relaxation) = graph_wall_loss_metadata(assignment);
         let patch = wall.patch();
-        format!("{{\"node\":{},\"model\":\"isotropic-local-ring-membrane\",\"pack_path\":{},\"pack_hash\":\"{}\",\"card_hash\":\"{}\",\"resolved_state_hash\":\"{}\",\"source_artifact\":\"{}\",\"material_chemistry\":{},\"material_phase\":{},\"material_process\":{},\"material_revision\":{},\"temperature_k\":{:e},\"angular_frequency_rad_s\":{:e},\"band_hz\":[{:e},{:e}],\"radius_m\":{:e},\"covered_length_m\":{:e},\"area_m2\":{:e},\"thickness_m\":{:e},\"axial_constraint\":\"{axial}\",\"loss\":\"{loss}\",\"surface_density_kg_m2\":{:e},\"stiffness_pa_m\":{:e},\"resistance_pa_s_m\":{:e}{relaxation}}}",
+        format!("{{\"node\":{},\"model\":\"{model}\",\"pack_path\":{},\"pack_hash\":\"{}\",\"card_hash\":\"{}\",\"resolved_state_hash\":\"{}\",\"source_artifact\":\"{}\",\"material_chemistry\":{},\"material_phase\":{},\"material_process\":{},\"material_revision\":{},\"temperature_k\":{:e},\"angular_frequency_rad_s\":{:e},\"band_hz\":[{:e},{:e}],\"radius_m\":{:e},\"covered_length_m\":{:e},\"area_m2\":{:e},\"thickness_m\":{:e},\"axial_constraint\":\"{axial}\",\"loss\":\"{loss}\",\"surface_density_kg_m2\":{:e},\"stiffness_pa_m\":{:e},\"resistance_pa_s_m\":{:e}{relaxation}{directions}}}",
             record.node(),json_string(record.path()),record.pack().content_hash().to_hex(),
             material.card_identity().to_hex(),material.identity().to_hex(),record.pack().source_artifact().to_hex(),
             json_string(&state.chemistry),json_string(&state.phase),json_string(&state.process),state.revision,
@@ -182,22 +169,72 @@ fn flue_wall_provenance(p: &FlueFilePerformance) -> String {
     format!(",\"material_walls\":[{records}],\"wall_strips\":{},\"wall_model_scope\":\"{scope}\"",walls.len())
 }
 
+fn wall_constitutive_metadata(
+    material: &fs_material::state_point::ResolvedMaterialStatePoint,
+    axes: Option<[usize; 2]>, time_property: Option<&str>,
+    normal_properties: Option<[&str; 3]>,
+) -> (&'static str, String) {
+    match axes {
+        None => ("isotropic-local-ring-membrane", String::new()),
+        Some([hoop, axial]) => {
+            let mut viscosity = time_property.map_or_else(String::new, |name| {
+                let time = material.property(name).expect("admitted original viscosity time").value_si();
+                format!(",\"proportional_viscosity\":{{\"time_property\":{},\"time_s\":{time:e},\"law\":\"C_viscous=tau*C_elastic\"}}", json_string(name))
+            });
+            if let Some(names) = normal_properties {
+                let entries = ["hh", "ha", "aa"].into_iter().zip(names).map(|(axis, name)| {
+                    let value = material.property(name).expect("admitted original normal viscosity").value_si();
+                    format!("\"{axis}\":{{\"property\":{},\"value_pa_s\":{value:e}}}", json_string(name))
+                }).collect::<Vec<_>>().join(",");
+                viscosity.push_str(&format!(",\"normal_viscosity\":{{{entries},\"law\":\"symmetric normal-plane Kelvin-Voigt; exact constrained C+sD reduction\"}}"));
+            }
+            ("orthotropic-principal-local-ring-membrane", format!(
+                ",\"material_axes\":{{\"hoop\":{},\"axial\":{},\"basis\":\"one-based principal axes following local cylindrical directions\"}}{viscosity}", hoop + 1, axial + 1))
+        }
+    }
+}
+
+fn graph_wall_constitutive_metadata(
+    source: &fs_couple::bernoulli_aperture::wall::material::MaterialWallAssignment,
+) -> (&'static str, String) {
+    use fs_couple::bernoulli_aperture::wall::material::WallMaterialModel;
+    match &source.model {
+        WallMaterialModel::Isotropic => wall_constitutive_metadata(&source.material, None, None, None),
+        WallMaterialModel::Orthotropic { axes, proportional_viscosity_time_property } =>
+            wall_constitutive_metadata(&source.material, Some(*axes), proportional_viscosity_time_property.as_deref(), None),
+        WallMaterialModel::OrthotropicNormal { axes, properties, .. } =>
+            wall_constitutive_metadata(&source.material, Some(*axes), None, Some(properties.each_ref().map(String::as_str))),
+    }
+}
+
+fn graph_wall_loss_metadata(
+    source: &fs_couple::bernoulli_aperture::wall::material::MaterialWallAssignment,
+) -> (&'static str, String) {
+    use fs_couple::bernoulli_aperture::wall::material::{WallMaterialLoss, WallMaterialModel};
+    match &source.loss {
+        WallMaterialLoss::Elastic => ("elastic", String::new()),
+        WallMaterialLoss::KelvinVoigt => (match &source.model {
+            WallMaterialModel::Isotropic => "kelvin-voigt",
+            WallMaterialModel::Orthotropic { .. } => "proportional-kelvin-voigt",
+            WallMaterialModel::OrthotropicNormal { .. } => "normal-kelvin-voigt",
+        }, String::new()),
+        WallMaterialLoss::Maxwell(spectrum) => {
+            let material = spectrum.material();
+            let terms = material.terms.iter().map(|(modulus, time)| format!(
+                "{{\"modulus_pa\":{modulus:e},\"relaxation_time_s\":{time:e}}}"))
+                .collect::<Vec<_>>().join(",");
+            ("maxwell", format!(",\"equilibrium_modulus_pa\":{:e},\"maxwell_terms\":[{terms}]", material.e_inf))
+        }
+    }
+}
+
 fn dg_wall_source_metadata(
     source: &fs_couple::dg_port::input::wall::DgMaterialWallRecord,
 ) -> String {
     use fs_couple::bernoulli_aperture::wall::material::{AxialConstraint, WallMaterialLoss};
     let wall = source.wall();
-    let (model, directions) = match wall.orthotropic_axes() {
-        None => ("isotropic-local-ring-membrane", String::new()),
-        Some([hoop, axial]) => {
-            let viscosity = wall.proportional_viscosity_time_property().map_or_else(String::new, |name| {
-                let time = wall.material().property(name).expect("admitted original viscosity time").value_si();
-                format!(",\"proportional_viscosity\":{{\"time_property\":{},\"time_s\":{time:e},\"law\":\"C_viscous=tau*C_elastic\"}}", json_string(name))
-            });
-            ("orthotropic-principal-local-ring-membrane", format!(
-                ",\"material_axes\":{{\"hoop\":{},\"axial\":{},\"basis\":\"one-based principal axes following local cylindrical directions\"}}{viscosity}", hoop + 1, axial + 1))
-        }
-    };
+    let (model, directions) = wall_constitutive_metadata(wall.material(),
+        wall.orthotropic_axes(), wall.proportional_viscosity_time_property(), source.normal_viscosity_properties());
     let axial = match wall.axial_constraint() {
         AxialConstraint::StressFree => "stress-free",
         AxialConstraint::StrainFixed => "strain-fixed",
@@ -206,6 +243,7 @@ fn dg_wall_source_metadata(
         WallMaterialLoss::Elastic => ("elastic", String::new()),
         WallMaterialLoss::KelvinVoigt => (
             if wall.proportional_viscosity_time_property().is_some() { "proportional-kelvin-voigt" }
+                else if source.normal_viscosity_properties().is_some() { "normal-kelvin-voigt" }
                 else { "kelvin-voigt" }, String::new()),
         WallMaterialLoss::Maxwell(spectrum) => {
             let terms = spectrum.material().terms.iter().map(|(modulus, time)| format!(
@@ -457,12 +495,21 @@ pub(super) fn material_modal_provenance(
         let wall = system.material_walls(record.side()).iter()
             .find(|wall| wall.source().node == record.node()).expect("source-bound duct wall");
         let material = &wall.source().material;
-        format!("{{\"side\":\"{side}\",\"node\":{},\"path\":{},\"pack_hash\":\"{}\",\"card_hash\":\"{}\",\"state_hash\":\"{}\",\"thickness_m\":{:e},\"radius_m\":{:e},\"length_m\":{:e},\"band_hz\":[{:e},{:e}]}}",
+        let (model, directions) = graph_wall_constitutive_metadata(wall.source());
+        let (loss, relaxation) = graph_wall_loss_metadata(wall.source());
+        let patch = wall.patch();
+        format!("{{\"side\":\"{side}\",\"node\":{},\"model\":\"{model}\",\"path\":{},\"pack_hash\":\"{}\",\"card_hash\":\"{}\",\"state_hash\":\"{}\",\"thickness_m\":{:e},\"radius_m\":{:e},\"length_m\":{:e},\"band_hz\":[{:e},{:e}],\"loss\":\"{loss}\",\"surface_density_kg_m2\":{:e},\"stiffness_pa_m\":{:e},\"resistance_pa_s_m\":{:e}{relaxation}{directions}}}",
             record.node(), json_string(record.path()), record.pack().content_hash().to_hex(),
             material.card_identity().to_hex(), material.identity().to_hex(),
-            wall.source().thickness_m, wall.radius_m(), wall.length_m(), wall.band_hz()[0], wall.band_hz()[1])
+            wall.source().thickness_m, wall.radius_m(), wall.length_m(), wall.band_hz()[0], wall.band_hz()[1],
+            patch.wall.surface_density, patch.wall.stiffness_per_area, patch.wall.resistance)
     }).collect::<Vec<_>>().join(",");
-    let wall_json = format!(",\"material_duct_walls\":[{walls}],\"duct_wall_scope\":\"fixed-state local isotropic membrane; original regional duct gas; no full shell or exterior wall radiation\"");
+    let directional_walls = [fs_couple::bernoulli_aperture::two_sided::ValveSide::Upstream,
+        fs_couple::bernoulli_aperture::two_sided::ValveSide::Downstream].into_iter().any(|side|
+            system.material_walls(side).iter().any(|wall|
+                !matches!(&wall.source().model, fs_couple::bernoulli_aperture::wall::material::WallMaterialModel::Isotropic)));
+    let wall_model = if directional_walls { "isotropic or principal-aligned orthotropic" } else { "isotropic" };
+    let wall_json = format!(",\"material_duct_walls\":[{walls}],\"duct_wall_scope\":\"fixed-state local {wall_model} membrane; original regional duct gas; no full shell or exterior wall radiation\"");
     let supply = system.supply_channel().map_or_else(|| "null".into(), |channel| {
         let spec = channel.spec();
         format!("{{\"length_m\":{:e},\"width_m\":{:e},\"height_m\":{:e},\"transverse_cells\":{},\"density_kg_m3\":{:e},\"viscosity_pa_s\":{:e}}}",

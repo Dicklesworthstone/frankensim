@@ -61,6 +61,50 @@ The example includes a warmer N₂/O₂/CO₂ inlet, an ambient main tube and a
 separate branch temperature. These are prescribed frozen states. They do not
 claim to solve breath advection, thermal exchange, gas mixing or condensation.
 
+## Material walls in the original graph
+
+After the complete duct records, an optional wall block assigns source material
+to an unused degree-two junction between equal-radius sections:
+
+```text
+walls COUNT MIN_HZ MAX_HZ
+wall NODE isotropic PACK T_K OMEGA_RAD_S THICKNESS_M AXIAL LOSS
+wall NODE orthotropic PACK T_K OMEGA_RAD_S THICKNESS_M AXIAL HOOP_AXIS AXIAL_AXIS LOSS
+```
+
+Supply exactly `COUNT` wall rows. `AXIAL` is `stress-free` or `strain-fixed`.
+Isotropic loss accepts `elastic`, `kelvin-voigt`, or the existing sourced Maxwell
+spectrum. Orthotropic loss accepts `elastic`,
+`proportional-kelvin-voigt TIME_PROPERTY`, or
+`normal-kelvin-voigt MAX_DT_OVER_TAU MAX_ANGULAR_STEP HH HA AA`.
+The proportional property is a nonnegative time in seconds declaring
+`C_viscous = tau C_elastic` in the selected membrane plane.
+Its distinct principal axes are numbered 1 through 3 and follow the **local
+hoop and axial directions**. They do not describe a fixed Cartesian grain angle.
+The original directional moduli, major Poisson ratio, density and time claim
+retain their source identities; no equivalent isotropic material is fabricated.
+
+For independent normal viscosity, `HH`, `HA`, and `AA` are the exact names of
+Pa·s properties in the local hoop/axial plane. Their symmetric matrix must be
+positive semidefinite; the cross term may be negative. Fixed axial strain selects
+the hoop response. Free axial stress eliminates the complete `C + sD` law,
+retaining its resulting Maxwell memory together with residual Kelvin resistance
+in the original pressure/flow load. Separately condensing elasticity and viscosity
+would lose that physical memory. The declared `MAX_DT_OVER_TAU` is in `(0, 2]`
+and `MAX_ANGULAR_STEP` in `(0, 1]`; the graph's actual mechanics clock must satisfy
+both limits when memory is present. Native provenance retains the tensor source
+names and values, material axes, reduced memory, and residual wall resistance.
+
+This is the same local constitutive reduction as the DG and material-reed paths.
+It changes the existing pressure/volume-flow load, wall storage and physical
+loss while retaining the jet, regional gas, propagation and microphone owners.
+Each wall covers half of each adjacent physical section; unselected strips stay
+rigid. Source claims must cover the wall band, which covers the declared acoustic
+band. The existing thin-wall and topology limits remain: off-axis grain, full
+three-dimensional viscoelastic condensation, general directional relaxation,
+axial shell waves and exterior shell radiation are not
+supplied by this local membrane image. Omission or `walls none` retains rigid walls.
+
 ## Distributed loss and exterior openings
 
 Before `mouth_radiation`, optional `mouth_aperture rectangle WIDTH_M LENGTH_M`
