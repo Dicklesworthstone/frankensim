@@ -2356,3 +2356,23 @@ complete common source bundle; changing material identity, source claims,
 coordinate meanings, tensor frame or phase-axis binding on an existing
 trajectory is refused. Variable dielectric storage needs its own work/entropy
 law and is outside this entry point.
+
+## Composition replacement at a shared heat and chemical energy endpoint
+
+`ClosedGasParcel::replace_model_with_heat` extends the original conservative
+composition boundary with one signed heat increment. At unchanged mass and
+volume it reconstructs the new source-backed thermochemical model directly at
+`U_end = U_start + Q` through the existing density/internal-energy inversion.
+It does not require an intermediate adiabatic composition state or an
+intermediate heat-only state to lie inside the material support. The original
+conserved-energy replacement delegates with zero heat and keeps its existing
+meaning.
+
+`GasCompositionStep` now reports supplied heat, actual stored-energy change and
+their residual. Formation energies remain part of the original species internal
+energies; callers must not add their release again as an independent heat term.
+All endpoint EOS, caloric, transport and acoustic properties come from the same
+accepted composition, temperature and pressure. Nonfinite or unrepresentable
+energy increments, source/domain failures, failed inversion and cancellation
+publish no parcel. This primitive supplies a material state transition, not
+reaction kinetics, species transport or open-system mass/chemical work.

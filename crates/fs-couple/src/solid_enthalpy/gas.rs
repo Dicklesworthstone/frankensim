@@ -71,6 +71,7 @@ pub enum SolidGasError {
     Solid(SolidEnthalpyError),
     Thermal(DepositionError),
     Gas(GasEnergyError),
+    Reaction(crate::cavity_phs::piston::reactive::GasReactionError),
     Source(ThermalMaterialError),
     Transport(MaterialNetworkError),
     Newton(NewtonError),
@@ -107,6 +108,14 @@ impl From<GasEnergyError> for SolidGasError {
         match error {
             GasEnergyError::Cancelled => Self::Cancelled,
             other => Self::Gas(other),
+        }
+    }
+}
+impl From<crate::cavity_phs::piston::reactive::GasReactionError> for SolidGasError {
+    fn from(error: crate::cavity_phs::piston::reactive::GasReactionError) -> Self {
+        match error {
+            crate::cavity_phs::piston::reactive::GasReactionError::Cancelled => Self::Cancelled,
+            other => Self::Reaction(other),
         }
     }
 }
@@ -345,6 +354,34 @@ impl<'m> SolidEnthalpy<'m> {
         initial_energy_increments_j: &[f64],
         cx: &Cx<'_>,
     ) -> Result<SolidGasCandidate<'m, 't>, SolidGasError> {
+        self.step_gas_with_endpoint(
+            thermal, gas, target_s, external_gas_heat_j, contacts, transport,
+            controls, initial_energy_increments_j, cx,
+            |heat| {
+                let mut next = gas.clone();
+                let report = next.add_heat(heat, controls.gas, || cx.checkpoint().is_err())?;
+                Ok((next, report, ()))
+            },
+        ).map(|(candidate, ())| candidate)
+    }
+
+    // One original spatial heat residual and publication boundary. The gas
+    // owner may resolve composition together with its total-energy increment;
+    // its source/kinetic payload travels with the EXACT accepted thermal trial.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn step_gas_with_endpoint<'t, P>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        gas: &IsochoricGasParcel,
+        target_s: f64,
+        external_gas_heat_j: f64,
+        contacts: &[SolidGasContact],
+        transport: Option<&PreparedMaterialNetwork<'_, '_>>,
+        controls: SolidGasSolve,
+        initial_energy_increments_j: &[f64],
+        cx: &Cx<'_>,
+        resolve_gas_endpoint: impl Fn(f64) -> Result<(IsochoricGasParcel, GasHeatStep, P), SolidGasError>,
+    ) -> Result<(SolidGasCandidate<'m, 't>, P), SolidGasError> {
         let checkpoint = || cx.checkpoint().map_err(|_| DepositionError::Cancelled);
         checkpoint()?;
         controls.newton.validate()?;
@@ -455,8 +492,7 @@ impl<'m> SolidEnthalpy<'m> {
                 return Err(SolidGasError::TrialBudget);
             }
             trials.set(trials.get() + 1);
-            let mut next_gas = gas.clone();
-            let gas_step = next_gas.add_heat(x[n], controls.gas, || cx.checkpoint().is_err())?;
+            let (next_gas, gas_step, gas_payload) = resolve_gas_endpoint(x[n])?;
             step.evaluate(
                 &x[..n],
                 |endpoint| {
@@ -540,6 +576,7 @@ impl<'m> SolidEnthalpy<'m> {
                             external,
                             gas_residual,
                             transport_sample,
+                            gas_payload,
                         ),
                     })
                 },
@@ -581,7 +618,7 @@ impl<'m> SolidEnthalpy<'m> {
         let maximum_cell_residual_j = trial.maximum_cell_residual_j();
         let (
             thermal,
-            (gas, gas_step, state, contacts, net, external, gas_energy_residual_j, transport),
+            (gas, gas_step, state, contacts, net, external, gas_energy_residual_j, transport, gas_payload),
             audit,
         ) = trial.accept(
             controls.cell_energy_tolerance_j,
@@ -604,7 +641,7 @@ impl<'m> SolidEnthalpy<'m> {
             ));
         }
         checkpoint()?;
-        Ok(SolidGasCandidate {
+        Ok((SolidGasCandidate {
             thermal,
             gas,
             state,
@@ -622,6 +659,6 @@ impl<'m> SolidEnthalpy<'m> {
                 nonlinear: result.report,
                 trials: trials.get(),
             },
-        })
+        }, gas_payload))
     }
 }

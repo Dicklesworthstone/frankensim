@@ -25,6 +25,9 @@ use fs_thermal::enthalpy::*;
 mod fixture;
 use fixture::*;
 
+#[path = "solid_reactive_gas/coupled.rs"]
+mod coupled;
+
 #[test]
 fn kinetic_caloric_and_transport_data_drive_spatial_heat_deformation_and_stress() {
     with_cx(|cx, _| {

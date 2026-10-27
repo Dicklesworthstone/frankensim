@@ -1,10 +1,11 @@
-//! Atomic gas-material replacement at conserved extensive storage.
+//! Atomic gas-material replacement with one extensive energy target.
 //!
 //! This is the composition-change boundary for a uniform parcel. A caller may
 //! supply a new thermochemical model with different mole fractions or a different
-//! admitted species set. Mass, volume and total internal energy are held fixed;
-//! temperature and pressure are reconstructed by the NEW model, then all transport
-//! and acoustic properties are resolved from that same accepted state.
+//! admitted species set. Mass and volume remain fixed. The original replacement
+//! conserves internal energy; its heat-aware variant reconstructs directly at
+//! U_start + Q. Temperature and pressure come from the NEW model at that target,
+//! then all transport and acoustic properties resolve from the same state.
 //!
 //! This operation is deliberately not a mixing-rate, diffusion, valve, reaction,
 //! or chemical-equilibrium model. The caller owns the physical process that chose
@@ -28,8 +29,13 @@ pub struct GasCompositionStep {
     pub mass_kg: f64,
     /// Conserved parcel volume [m3].
     pub volume_m3: f64,
-    /// Actual total internal-energy change [J]; bounded about zero.
+    /// Signed heat supplied while changing composition [J]; zero for the
+    /// original conserved-energy replacement.
+    pub supplied_heat_j: f64,
+    /// Actual total internal-energy change [J].
     pub stored_energy_change_j: f64,
+    /// Actual stored change minus supplied heat [J].
+    pub energy_residual_j: f64,
     /// Interior temperature-inversion iterations.
     pub iterations: usize,
 }
@@ -52,6 +58,26 @@ impl ClosedGasParcel {
         &mut self,
         model: ThermochemicalGasModel,
         controls: GasEnergySolve,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<GasCompositionStep, GasEnergyError> {
+        self.replace_model_with_heat(model, 0.0, controls, cancelled)
+    }
+
+    /// Replace the material model and admit a signed heat exchange in ONE
+    /// original density/energy reconstruction. Mass and volume stay fixed.
+    ///
+    /// This avoids a fictitious intermediate at the new composition but old
+    /// energy (or old composition but new energy). A coupled reaction/heat
+    /// owner can therefore query its actual nonadiabatic endpoint, including
+    /// formation references, without requiring an unsupported split state.
+    /// The caller owns stoichiometry, kinetics and the equal/opposite thermal
+    /// debit; this primitive supplies no additional chemical heat source.
+    /// Refusal or cancellation preserves the complete accepted parcel.
+    pub fn replace_model_with_heat(
+        &mut self,
+        model: ThermochemicalGasModel,
+        heat_j: f64,
+        controls: GasEnergySolve,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<GasCompositionStep, GasEnergyError> {
         poll(&mut cancelled)?;
@@ -62,8 +88,12 @@ impl ClosedGasParcel {
         }
         let initial = self.parcel.state.clone();
         let specific_u = initial.specific_internal_energy_j_kg();
-        if !specific_u.is_finite() {
-            return Err(GasEnergyError::Invalid("finite initial specific internal energy required"));
+        let specific_heat = heat_j / mass;
+        let target_u = specific_u + specific_heat;
+        if !specific_u.is_finite() || !heat_j.is_finite() || !target_u.is_finite()
+            || (heat_j != 0.0 && (specific_heat == 0.0 || target_u == specific_u))
+        {
+            return Err(GasEnergyError::Invalid("finite represented initial energy and heat increment required"));
         }
         let density = mass / volume;
         if !positive(density) {
@@ -72,16 +102,19 @@ impl ClosedGasParcel {
         let solution = model.reconstruct_density_energy(
             &self.parcel.point,
             density,
-            specific_u,
+            target_u,
             controls,
             &mut cancelled,
         )?;
         let final_state = solution.state().clone();
         let stored = mass * (final_state.specific_internal_energy_j_kg() - specific_u);
+        let residual = stored - heat_j;
         let tolerance_j = mass * controls.energy_tolerance_j_kg;
-        if !stored.is_finite() || !positive(tolerance_j) || stored.abs() > tolerance_j {
+        if !stored.is_finite() || !residual.is_finite() || !positive(tolerance_j)
+            || residual.abs() > tolerance_j
+        {
             return Err(GasEnergyError::Invalid(
-                "replacement model does not conserve represented parcel internal energy",
+                "replacement model does not close represented parcel energy and heat",
             ));
         }
         let point = updated_point(
@@ -99,7 +132,9 @@ impl ClosedGasParcel {
             final_state,
             mass_kg: mass,
             volume_m3: volume,
+            supplied_heat_j: heat_j,
             stored_energy_change_j: stored,
+            energy_residual_j: residual,
             iterations,
         })
     }

@@ -95,6 +95,9 @@ pub struct ImplicitMechanismReport {
     pub equations: Vec<ImplicitChannelResidual>,
     pub maximum_residual_mol: f64,
     pub evaluations: usize,
+    /// Original caloric inversion work at the accepted endpoint; trial work is
+    /// separately bounded by evaluations and each GasEnergySolve policy.
+    pub endpoint_energy_iterations: usize,
     /// None only when the original zero-extent state already closes all equations.
     pub nonlinear: Option<NewtonReport>,
 }
@@ -142,6 +145,7 @@ struct Inventory {
 }
 struct Evaluation {
     gas: ClosedGasParcel,
+    energy_iterations: usize,
     progress: mechanism::Progress,
     residual_mol: Vec<f64>,
 }
@@ -170,6 +174,7 @@ struct Problem<'a, C> {
     scales: Vec<f64>,
     bounds: Vec<[f64; 2]>,
     duration_s: f64,
+    heat_j: f64,
     controls: GasReactionSolve,
     policy: &'a ImplicitMechanismSolve,
     cancelled: RefCell<&'a mut C>,
@@ -286,10 +291,11 @@ impl<C: FnMut() -> bool> Problem<'_, C> {
         self.evaluations.set(spent + 1);
         let extents = self.extents(x)?;
         let inventory = self.inventory(&extents)?;
-        let gas = self.law.reconstruct_inventory(
+        let (gas, energy_iterations) = self.law.reconstruct_inventory_with_heat(
             self.gas,
             &inventory.changes,
             &inventory.amounts,
+            self.heat_j,
             self.controls,
             &mut || self.stop(),
         )?;
@@ -330,6 +336,7 @@ impl<C: FnMut() -> bool> Problem<'_, C> {
         let mut reports = reports.into_iter();
         Ok(Evaluation {
             gas,
+            energy_iterations,
             progress: mechanism::Progress {
                 primary: reports.next().expect("admitted nonempty mechanism"),
                 additional: reports.collect(),
@@ -597,6 +604,18 @@ pub(in crate::cavity_phs::piston::reactive) fn candidate(
     policy: &ImplicitMechanismSolve,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<GasReactionCandidate, GasReactionError> {
+    candidate_with_heat(law, gas, duration_s, 0.0, controls, policy, cancelled)
+}
+
+pub(in crate::cavity_phs::piston::reactive) fn candidate_with_heat(
+    law: &GasReaction,
+    gas: &ClosedGasParcel,
+    duration_s: f64,
+    heat_j: f64,
+    controls: GasReactionSolve,
+    policy: &ImplicitMechanismSolve,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<GasReactionCandidate, GasReactionError> {
     poll(cancelled)?;
     policy.validate(law)?;
     let initial = law.inventory(gas)?;
@@ -666,6 +685,7 @@ pub(in crate::cavity_phs::piston::reactive) fn candidate(
         scales,
         bounds,
         duration_s,
+        heat_j,
         controls,
         policy,
         cancelled: RefCell::new(cancelled),
@@ -733,6 +753,7 @@ pub(in crate::cavity_phs::piston::reactive) fn candidate(
         ));
     }
     let maximum_residual_mol = accepted.maximum_residual();
+    let endpoint_energy_iterations = accepted.energy_iterations;
     let equations = law
         .channels()
         .enumerate()
@@ -746,11 +767,12 @@ pub(in crate::cavity_phs::piston::reactive) fn candidate(
             residual_mol: accepted.residual_mol[j],
         })
         .collect();
-    let mut result = law.admit_progress(
+    let mut result = law.admit_progress_with_heat(
         gas,
         &problem.initial,
         accepted.gas,
         accepted.progress,
+        heat_j,
         controls,
         &mut || problem.stop(),
     )?;
@@ -759,6 +781,7 @@ pub(in crate::cavity_phs::piston::reactive) fn candidate(
         equations,
         maximum_residual_mol,
         evaluations: problem.evaluations.get(),
+        endpoint_energy_iterations,
         nonlinear,
     });
     problem.poll()?;

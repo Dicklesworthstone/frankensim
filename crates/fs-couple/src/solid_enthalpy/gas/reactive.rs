@@ -7,6 +7,9 @@
 //! solver. Continuing the accepted gas makes later rates see its actual cooled
 //! temperature, composition and pressure. Time refinement remains necessary.
 
+/// Shared implicit endpoint chemistry and spatial gas/solid heat exchange.
+pub mod coupled;
+
 use super::{
     Cx, DepositionSimulation, IsochoricGasParcel, PreparedMaterialNetwork, SolidEnthalpy,
     SolidEnthalpyState, SolidGasContact, SolidGasError, SolidGasReport, SolidGasSolve,

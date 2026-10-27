@@ -37,6 +37,8 @@ pub mod mechanism;
 pub mod subcycling;
 /// Backward-Euler extent with the same conservative gas and source-rate owners.
 pub mod implicit;
+/// Endpoint chemistry with explicitly balanced heat on the original gas owner.
+pub mod heat;
 
 use super::{GasPiston, PistonError, PistonInput, PistonSolve, PistonStep};
 use fs_material::MaterialError;
@@ -79,6 +81,22 @@ pub struct GasReactionSolve {
     pub species_tolerance_mol: f64,
     /// Maximum tolerated roundoff decrease in closed reaction entropy [J/K].
     pub entropy_tolerance_j_k: f64,
+}
+impl GasReactionSolve {
+    fn validate(self, duration_s: f64) -> Result<(), GasReactionError> {
+        self.gas.validate()?;
+        if !positive(duration_s)
+            || !positive(self.species_tolerance_mol)
+            || !positive(self.entropy_tolerance_j_k)
+            || !positive(self.maximum_consumed_fraction)
+            || self.maximum_consumed_fraction >= 1.0
+        {
+            return Err(invalid(
+                "positive reaction time/tolerances and a consumed-fraction limit in (0,1) required",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// No refusal mutates accepted gas, material inertia, geometry or momentum.
@@ -186,9 +204,12 @@ pub struct GasReactionStep {
     pub maximum_species_residual_mol: f64,
     /// Actual total mass discrepancy (the original parcel preserves mass exactly) [kg].
     pub mass_residual_kg: f64,
-    /// Actual internal-energy discrepancy at fixed geometry, bounded about zero [J].
+    /// Actual internal-energy change at fixed geometry [J]. The ordinary
+    /// adiabatic entry bounds it about zero; the explicit heated entry balances
+    /// it against that entry's separately reported heat supply.
     pub stored_energy_change_j: f64,
-    /// Measured entropy change of this isolated chemical stage [J/K].
+    /// Measured gas entropy change [J/K]. For a heated endpoint this includes
+    /// heat transport; its separate report subtracts the endpoint heat entropy.
     pub entropy_change_j_k: f64,
     /// Actual accepted substeps and estimate; None on the original one-step path.
     pub subcycling: Option<subcycling::ReactionSubcyclingReport>,
@@ -344,17 +365,7 @@ impl GasReaction {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<GasReactionCandidate, GasReactionError> {
         poll(&mut cancelled)?;
-        controls.gas.validate()?;
-        if !positive(duration_s)
-            || !positive(controls.species_tolerance_mol)
-            || !positive(controls.entropy_tolerance_j_k)
-            || !positive(controls.maximum_consumed_fraction)
-            || controls.maximum_consumed_fraction >= 1.0
-        {
-            return Err(invalid(
-                "positive reaction time/tolerances and a consumed-fraction limit in (0,1) required",
-            ));
-        }
+        controls.validate(duration_s)?;
         if let Some(policy) = self.implicit {
             return implicit::candidate(self, gas, duration_s, controls, policy, &mut cancelled);
         }
@@ -375,7 +386,16 @@ impl GasReaction {
         &self, gas: &ClosedGasParcel, changes: &[f64], expected: &[f64],
         controls: GasReactionSolve, cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ClosedGasParcel, GasReactionError> {
+        self.reconstruct_inventory_with_heat(gas, changes, expected, 0.0, controls, cancelled)
+            .map(|(gas, _)| gas)
+    }
+
+    fn reconstruct_inventory_with_heat(
+        &self, gas: &ClosedGasParcel, changes: &[f64], expected: &[f64], heat_j: f64,
+        controls: GasReactionSolve, cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(ClosedGasParcel, usize), GasReactionError> {
         let mut next = gas.clone();
+        let mut iterations = 0;
         if changes.iter().any(|change| *change != 0.0) {
             let total: f64 = expected.iter().sum();
             if !positive(total) {
@@ -409,14 +429,24 @@ impl GasReaction {
                     invalid("reaction composition does not satisfy the original quantity owner")
                 })?;
             let model = self.catalog.with_composition(composition)?;
-            next.replace_model_conserving_mass_energy(model, controls.gas, cancelled)?;
+            iterations = next.replace_model_with_heat(model, heat_j, controls.gas, cancelled)?.iterations;
+        } else if heat_j != 0.0 {
+            iterations = next.add_heat(heat_j, controls.gas, cancelled)?.iterations;
         }
-        Ok(next)
+        Ok((next, iterations))
     }
 
     fn admit_progress(
         &self, gas: &ClosedGasParcel, initial: &[f64], next: ClosedGasParcel,
         progress: mechanism::Progress, controls: GasReactionSolve,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<GasReactionCandidate, GasReactionError> {
+        self.admit_progress_with_heat(gas, initial, next, progress, 0.0, controls, cancelled)
+    }
+
+    fn admit_progress_with_heat(
+        &self, gas: &ClosedGasParcel, initial: &[f64], next: ClosedGasParcel,
+        progress: mechanism::Progress, heat_j: f64, controls: GasReactionSolve,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<GasReactionCandidate, GasReactionError> {
         let mechanism::Progress { primary, additional, changes, expected, consumed } = progress;
@@ -441,18 +471,27 @@ impl GasReaction {
                 - gas.state().specific_internal_energy_j_kg());
         let entropy = gas.mass_kg()
             * (next.state().specific_entropy_j_kg_k()? - gas.state().specific_entropy_j_kg_k()?);
+        let energy_residual = energy - heat_j;
+        // Backward Euler uses the actual endpoint temperature for heat entropy
+        // transport. This residual includes its nonnegative time-discretization
+        // entropy; it is not a measurement of chemical entropy production alone.
+        let heat_entropy = heat_j / next.state().state().temperature;
+        let entropy_residual = entropy - heat_entropy;
         if maximum_residual > controls.species_tolerance_mol
             || !energy.is_finite()
-            || energy.abs() > gas.mass_kg() * controls.gas.energy_tolerance_j_kg
+            || !energy_residual.is_finite()
+            || energy_residual.abs() > gas.mass_kg() * controls.gas.energy_tolerance_j_kg
             || !entropy.is_finite()
+            || !heat_entropy.is_finite()
+            || !entropy_residual.is_finite()
         {
             return Err(invalid(
-                "closed reaction species, total internal energy or entropy did not close; refine the interval",
+                "reaction species, total internal energy/heat or entropy did not close; refine the interval",
             ));
         }
-        if entropy < -controls.entropy_tolerance_j_k {
+        if entropy_residual < -controls.entropy_tolerance_j_k {
             return Err(GasReactionError::EntropyDecrease {
-                change_j_k: entropy, tolerance_j_k: controls.entropy_tolerance_j_k,
+                change_j_k: entropy_residual, tolerance_j_k: controls.entropy_tolerance_j_k,
             });
         }
         poll(cancelled)?;

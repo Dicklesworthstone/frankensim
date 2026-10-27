@@ -7257,3 +7257,60 @@ interface charge and driven electrode work, latent melting with phase-dependent
 conductivity, and source/storage/cancellation rollback. Scalar and rotated
 tensor conductivity both use the native path. These cases are authored and
 source/parser checked, but were not executed in this environment.
+
+## Joint endpoint chemistry, finite gas heat and spatial solid enthalpy
+
+`GasReaction::heated_implicit_candidate` solves the original implicit mechanism
+at the actual heated or cooled endpoint `U_end = U_start + Q`, with unchanged
+closed-parcel mass and volume. Every existing channel rate, material source,
+activity, collider and Troe evaluation therefore sees that same endpoint
+temperature, pressure and composition. The original stoichiometry, consumption,
+source-support, caloric inversion and work limits remain authoritative. Chemical
+formation energies remain inside gas storage; no additional reaction-heat source
+is introduced. Zero supplied heat preserves the existing adiabatic path.
+
+`SolidEnthalpy::step_with_coupled_reacting_isochoric_gas` uses that capability
+inside the original spatial cell/gas thermal residual. The unknowns remain cell
+energy increments and total gas energy increment. For each outer thermal trial,
+the original inner mechanism solves its extents at that proposed gas energy;
+the resulting gas state determines the original film transport and thermal
+residual. Wall cooling consequently changes the reaction extent within the
+same accepted interval. This is nonlinear elimination of the existing chemical
+equations, with no intermediate adiabatic-reaction-then-cooling state.
+
+The common gas endpoint callback carries the identical accepted parcel, native
+heat receipt and chemical report through the original final thermal acceptance.
+Ordinary nonreacting calls use the same path with their existing heat-only
+callback. Finite wall heat cancels between participants once, authored external
+heat remains supply, nonlinear spatial k(T) uses the original prepared material
+network, and actual solid endpoints re-admit original expansion/elasticity
+sources before mechanical recovery. A single gas inversion policy must be
+shared by chemistry and heat. No candidate changes accepted gas, thermal or
+mechanical state on numerical, source, budget or late cancellation refusal.
+
+The heat-aware reaction report distinguishes signed endpoint heat-entropy
+transport `Q/T_end` from `delta S - Q/T_end`. Cooling may lower gas entropy;
+the latter residual is admitted nonnegative within the original tolerance.
+It includes backward-Euler numerical entropy and is neither isolated chemical
+entropy production nor the entropy of an unspecified external reservoir.
+
+This path requires `with_implicit_mechanism`, including for one channel;
+chemistry-only subcycling is refused because the complete coupled interval must
+be refined together. Inner and outer residuals have their original independent
+caps. Nested work can be expensive, and no uniqueness or unconditional
+convergence claim is made. Temporal accuracy remains first order. The gas is
+homogeneous and fixed-volume, solid thermal geometry is fixed, and mechanical
+recovery retains the original sequential thermoelastic interpretation. Flame
+fronts, shocks, pressure traction, reciprocal thermoelastic heat and moving
+interfaces remain outside this entry point.
+
+Four regression cases in `tests/solid_reactive_gas/coupled.rs` cover an
+independently derived heated/cooled isomer endpoint and zero-heat parity, an
+independent joint reaction/wall-heat reference with native displacement and
+stress, continued species/source history with nonlinear spatial conduction,
+and source/control/budget/cancellation rollback with deterministic retry.
+Changing only wall-conductivity data changes same-interval reaction extent.
+The cases and runtime were parser/source reviewed, including independent
+numerical checks of the analytic references, but native tests were not executed
+because the pinned sibling dependencies and configured remote runners are
+unavailable in this environment.
