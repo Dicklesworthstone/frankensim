@@ -125,6 +125,7 @@ pub struct MaterialStringBankSource {
     options: StringBankOptions,
     body_connections: Vec<ModalConnection>,
     material_bridge_interfaces: Vec<interfaces::MaterialBridgeInterface>,
+    translational_body_connections: Vec<polarization::StringBodyTranslationConnection>,
     rotational_body_connections: Vec<torsion::StringBodyRotationConnection>,
     fluid_loading: Option<fluid::StringBankFluidLoading>,
     geometric_stretching: Option<nonlinear::bank::StringBankStretching>,
@@ -163,6 +164,11 @@ impl MaterialStringBankSource {
     /// Original receiver-to-receiver links before string-prefix remapping.
     #[must_use]
     pub fn body_connections(&self) -> &[ModalConnection] { &self.body_connections }
+    /// Independently directed centreline/body laws in the original supplied-body basis.
+    #[must_use]
+    pub fn translational_body_connections(&self) -> &[polarization::StringBodyTranslationConnection] {
+        &self.translational_body_connections
+    }
     /// Original torque/rotation laws and angular body maps, in supplied order.
     /// Their string maps use the same source-bound polar inertia as bow torsion.
     #[must_use]
@@ -284,11 +290,11 @@ impl ReciprocalStringBank {
         }
         let connections: Vec<&[InteriorStringConnection]> = strings.iter()
             .map(|member| member.connections.as_slice()).collect();
-        let system = assemble_sources(&cards, Some(&strings), bodies, &connections, &body_connections, &[], None, prepared, &[], false, law, &options, gate)?;
+        let system = assemble_sources(&cards, Some(&strings), bodies, &connections, &body_connections, &[], &[], None, prepared, &[], false, law, &options, gate)?;
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
         poll(gate)?;
-        let source = MaterialStringBankSource { strings, gas, options, body_connections, material_bridge_interfaces: Vec::new(), rotational_body_connections: Vec::new(), fluid_loading: None, geometric_stretching: None, longitudinal_waves: None, prepared_linear: prepared, material_plate: None, material_chart: None, material_chart_basis: None, material_chart_viscosity: None, material_chart_relaxation: None, string_bending_relaxation: None, material_chart_bridges: None, material_shell: None, material_shell_image: None, material_shell_assembly: None, material_shell_assembly_image: None, material_cavity: None, body_radiation: None, spatial_cavity: None, residual_flexibility: false };
+        let source = MaterialStringBankSource { strings, gas, options, body_connections, material_bridge_interfaces: Vec::new(), translational_body_connections: Vec::new(), rotational_body_connections: Vec::new(), fluid_loading: None, geometric_stretching: None, longitudinal_waves: None, prepared_linear: prepared, material_plate: None, material_chart: None, material_chart_basis: None, material_chart_viscosity: None, material_chart_relaxation: None, string_bending_relaxation: None, material_chart_bridges: None, material_shell: None, material_shell_image: None, material_shell_assembly: None, material_shell_assembly_image: None, material_cavity: None, body_radiation: None, spatial_cavity: None, residual_flexibility: false };
         let system = source.restore_material_memory(system, &cards, None, gate)?;
         Ok(Self { source, cards, system })
     }
@@ -345,7 +351,8 @@ impl ReciprocalStringBank {
         let bodies = self.system.components()[self.cards.len()..body_end].to_vec();
         let bridges: Vec<_> = self.source.strings.iter().map(|s| s.connections.as_slice()).collect();
         let mut system = assemble_sources(&self.cards, Some(&self.source.strings), bodies,
-            &bridges, &self.source.body_connections, &self.source.rotational_body_connections,
+            &bridges, &self.source.body_connections, &self.source.translational_body_connections,
+            &self.source.rotational_body_connections,
             self.source.fluid_loading.as_ref(), self.source.prepared_linear,
             &self.source.constant_loss_bridges(), true, self.system.port().law.clone(),
             &self.source.options, gate)?;
@@ -503,7 +510,7 @@ pub(super) fn assemble(
     connections: &[&[InteriorStringConnection]], body_connections: &[ModalConnection],
     law: FrictionLaw, options: &StringBankOptions, gate: &CancelGate,
 ) -> Result<FrictionModalSystem, ReciprocalStringError> {
-    assemble_sources(cards, None, bodies, connections, body_connections, &[], None, None, &[], false, law, options, gate)
+    assemble_sources(cards, None, bodies, connections, body_connections, &[], &[], None, None, &[], false, law, options, gate)
 }
 
 // Keep the original one-string API in the same assembler. Its absent source
@@ -515,6 +522,7 @@ fn assemble_sources(
     cards: &[BowedStringCard], sources: Option<&[MaterialStringMember]>,
     bodies: Vec<ModalAcousticTimeModel>, connections: &[&[InteriorStringConnection]],
     body_connections: &[ModalConnection],
+    translational_body_connections: &[polarization::StringBodyTranslationConnection],
     rotational_body_connections: &[torsion::StringBodyRotationConnection],
     fluid_loading: Option<&fluid::StringBankFluidLoading>, prepared: Option<PreparedModalBudget>,
     constant_loss: &[ConstantLossConnection], residual: bool, law: FrictionLaw,
@@ -526,7 +534,8 @@ fn assemble_sources(
         || options.bow.string >= cards.len() || !interior(options.bow.station_fraction) {
         return Err(invalid("reciprocal assembly requires aligned strings, bodies and an interior bow"));
     }
-    if residual && (sources.is_none() || !rotational_body_connections.is_empty() || !constant_loss.is_empty()
+    if residual && (sources.is_none() || !translational_body_connections.is_empty()
+        || !rotational_body_connections.is_empty() || !constant_loss.is_empty()
         || connections.iter().any(|c| c.len() != 1)) {
         // Only a single spring/dashpot bridge per string condenses here.
         return Err(invalid("residual flexibility condenses one plain bridge connection per material string"));
@@ -581,6 +590,11 @@ fn assemble_sources(
         }
         components.push(ModalAcousticTimeModel::try_new(options.sample_rate_hz, modes, options.string_budget)
             .map_err(|source| ReciprocalStringError::Network(ModalCouplingError::Component { component: index, source }))?);
+    }
+    for connection in translational_body_connections {
+        poll(gate)?;
+        let members = sources.ok_or_else(|| invalid("a directed bridge requires original material string sources"))?;
+        links.push(connection.lower(cards, members, &bodies)?);
     }
     for connection in rotational_body_connections {
         poll(gate)?;

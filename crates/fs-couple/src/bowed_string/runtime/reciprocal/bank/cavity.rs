@@ -280,7 +280,8 @@ impl ReciprocalStringBank {
         if let Some(loading) = &mut fluid { loading.body_components += added_components; }
         let bridge_rows: Vec<_> = self.source.strings.iter().map(|s| s.connections.as_slice()).collect();
         let mut system = assemble_sources(&self.cards, Some(&self.source.strings),
-            image.components, &bridge_rows, &links, &self.source.rotational_body_connections,
+            image.components, &bridge_rows, &links, &self.source.translational_body_connections,
+            &self.source.rotational_body_connections,
             fluid.as_ref(), self.source.prepared_linear, &self.source.constant_loss_bridges(),
             self.source.residual_flexibility, self.system.port().law.clone(), &self.source.options, gate).map_err(ShellCavityError::Bank)?;
         if let Some(original) = self.system.acceleration_pressure_weights() {

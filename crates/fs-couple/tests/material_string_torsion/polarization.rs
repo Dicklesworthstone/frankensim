@@ -5,7 +5,9 @@ use super::*;
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::force::{
     StringForceCoupling, StringForcePort,
 };
-use fs_couple::bowed_string::runtime::reciprocal::bank::polarization::TransverseDirections;
+use fs_couple::bowed_string::runtime::reciprocal::bank::polarization::{
+    StringBodyTranslationConnection, TransverseDirection, TransverseDirections,
+};
 
 fn directions(bow: [f64; 2], bridge: [f64; 2]) -> TransverseDirections {
     TransverseDirections::try_new(bow, bridge).unwrap()
@@ -32,6 +34,149 @@ fn near(a: f64, b: f64, floor: f64) {
         (a - b).abs() <= 2e-9 * a.abs().max(b.abs()) + floor,
         "{a:e} != {b:e}"
     );
+}
+
+// Two physical receiver displacement coordinates in one two-mode body basis.
+// The mode shapes are an explicit synthetic fixture, not a measured violin.
+fn two_axis_bank(cx: &Cx<'_>, gate: &CancelGate, rho: f64, axes: TransverseDirections)
+    -> ReciprocalStringBank
+{
+    let input = MaterialStringSource::Homogeneous(with_uniform_circular_material_state(
+        template(), 0.0003, &material(rho, 80e9, 1000.0, 200_000.0),
+    ).unwrap().with_kelvin_voigt_bending_loss().unwrap())
+        .with_torsion("G", "eta_s", 3).unwrap()
+        .with_transverse_polarizations(axes).unwrap();
+    let receiver = ModalAcousticTimeModel::try_new(48_000,
+        [450.0, 700.0].into_iter().map(|angular_frequency_rad_s| ModalAcousticMode {
+            angular_frequency_rad_s, damping_ratio: 0.01,
+            pressure_per_modal_velocity: fs_math::c64::C64::new(1.0, 0.0),
+        }).collect(), ModalAcousticTimeBudget::audible_reference()).unwrap();
+    ReciprocalStringBank::new(cx, vec![MaterialStringMember { source: input,
+        connections: vec![InteriorStringConnection { station_fraction: 0.8,
+            body: ModalAttachment { component: 0, shapes: vec![1.0, 0.25] },
+            stiffness_n_m: 3000.0, damping_n_s_m: 0.1, rest_extension_m: 0.0 }],
+    }], gas(), vec![receiver], law(), options(), gate).unwrap()
+}
+
+fn second_axis(direction: TransverseDirection) -> StringBodyTranslationConnection {
+    StringBodyTranslationConnection { string: 0, station_fraction: 0.8, direction,
+        body: ModalAttachment { component: 0, shapes: vec![0.35, 0.8] },
+        stiffness_n_m: 1200.0, damping_n_s_m: 0.04, rest_extension_m: 0.0 }
+}
+
+#[test]
+fn g3_second_bridge_axis_radiates_reciprocally_and_a_material_swap_changes_the_sound() {
+    with_cx(|cx, gate| {
+        let axes = directions([1.0, 0.0], [1.0, 0.0]);
+        let mut dark = two_axis_bank(cx, gate, 7800.0, axes);
+        let mut coupled = two_axis_bank(cx, gate, 7800.0, axes)
+            .with_translational_body_connections(vec![second_axis(TransverseDirection::Y)], gate).unwrap();
+        let mut heavier = two_axis_bank(cx, gate, 15600.0, axes)
+            .with_translational_body_connections(vec![second_axis(TransverseDirection::Y)], gate).unwrap();
+        assert_eq!(coupled.source().translational_body_connections(), heavier.source().translational_body_connections());
+        assert_eq!(coupled.cards()[0].tension_n, heavier.cards()[0].tension_n);
+        assert_eq!(coupled.cards()[0].bending_stiffness_n_m2, heavier.cards()[0].bending_stiffness_n_m2);
+        near(heavier.cards()[0].fundamental_hz()/coupled.cards()[0].fundamental_hz(),
+            1.0/2.0_f64.sqrt(), 1e-14);
+        let released = FrictionDrive { speed_m_s: 0.0, normal_force_n: 0.0 };
+        let (mut peak, mut change) = (0.0_f64, 0.0_f64);
+        let (mut work, mut loss) = (0.0, 0.0);
+        for n in 0..384 {
+            // The same physical transverse point force, entirely in plane Y.
+            let force = |bank: &ReciprocalStringBank| {
+                let mut force = vec![0.0; bank.system().mode_count()];
+                if n < 32 {
+                    let card = &bank.cards()[0];
+                    let normalization = (0.5*card.length_m*card.linear_density_kg_m).sqrt();
+                    for k in 0..4 {
+                        force[4+k] = 0.01*((k+1) as f64*core::f64::consts::PI*0.3).sin()/normalization;
+                    }
+                }
+                force
+            };
+            let fd = *dark.step(&force(&dark), released).unwrap();
+            let a = *coupled.step(&force(&coupled), released).unwrap();
+            let b = *heavier.step(&force(&heavier), released).unwrap();
+            assert_eq!(fd.observer_pressure_pa, 0.0, "the absent bridge axis must stay disconnected");
+            peak = peak.max(a.observer_pressure_pa.abs());
+            change = change.max((a.observer_pressure_pa-b.observer_pressure_pa).abs());
+            work += a.external_work_j;
+            loss += a.network_dissipation_j;
+            for frame in [a, b] {
+                assert_eq!(frame.drive_work_j, 0.0);
+                assert_eq!(frame.friction_dissipation_j, 0.0);
+                assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+            }
+            assert!(coupled.system().components()[0].states()[8..].iter().all(|s|
+                s.displacement_m_sqrt_kg == 0.0 && s.velocity_m_sqrt_kg_per_s == 0.0),
+                "centreline bridge force must not invent torque");
+        }
+        assert!(peak > 1e-8 && change > 1e-8, "new axis or material did not reach physical sound");
+        assert!(coupled.system().components()[0].states()[..4].iter()
+            .any(|s| s.velocity_m_sqrt_kg_per_s.abs() > 1e-8), "body did not return force into plane X");
+        assert!((coupled.system().total_energy_j().unwrap()+loss-work).abs() < 2e-10);
+    });
+}
+
+#[test]
+fn g1_independent_bridge_axes_are_invariant_under_a_common_transverse_basis_rotation() {
+    with_cx(|cx, gate| {
+        let mut a = two_axis_bank(cx, gate, 7800.0, directions([1.0, 0.0], [1.0, 0.0]))
+            .with_translational_body_connections(vec![second_axis(TransverseDirection::Y)], gate).unwrap();
+        let mut b = two_axis_bank(cx, gate, 7800.0, directions([0.6, 0.8], [0.6, 0.8]))
+            .with_translational_body_connections(vec![second_axis(
+                TransverseDirection::try_new([-0.8, 0.6]).unwrap())], gate).unwrap();
+        let zero = vec![0.0; a.system().mode_count()];
+        for _ in 0..192 {
+            let fa = *a.step(&zero, drive()).unwrap();
+            let fb = *b.step(&zero, drive()).unwrap();
+            near(fa.observer_pressure_pa, fb.observer_pressure_pa, 1e-12);
+            near(fa.drive_work_j, fb.drive_work_j, 1e-17);
+            near(fa.network_dissipation_j, fb.network_dissipation_j, 1e-17);
+            let qa = a.system().components()[0].states();
+            let qb = b.system().components()[0].states();
+            for k in 0..4 {
+                let (x,y) = (qa[k].displacement_m_sqrt_kg, qa[4+k].displacement_m_sqrt_kg);
+                near(qb[k].displacement_m_sqrt_kg, 0.6*x-0.8*y, 1e-14);
+                near(qb[4+k].displacement_m_sqrt_kg, 0.8*x+0.6*y, 1e-14);
+            }
+        }
+    });
+}
+
+#[test]
+fn g0_directed_bridge_refuses_missing_planes_invalid_laws_and_live_rebinding() {
+    with_cx(|cx, gate| {
+        let make = || two_axis_bank(cx, gate, 7800.0, directions([1.0, 0.0], [1.0, 0.0]));
+        let good = second_axis(TransverseDirection::Y);
+        let mut one_plane_link = good.clone();
+        one_plane_link.body.shapes = vec![1.0];
+        let missing_plane = raw(cx, gate, source(80e9,1000.0), options()).unwrap()
+            .with_translational_body_connections(vec![one_plane_link], gate).err().unwrap();
+        assert!(missing_plane.to_string().contains("second-plane"), "{missing_plane}");
+        for case in 0..7 {
+            let mut bad = good.clone();
+            match case {
+                0 => bad.string = 1,
+                1 => bad.station_fraction = 1.0,
+                2 => bad.body.component = 1,
+                3 => bad.body.shapes = vec![1.0],
+                4 => bad.stiffness_n_m = -1.0,
+                5 => bad.damping_n_s_m = f64::NAN,
+                _ => bad.rest_extension_m = f64::INFINITY,
+            }
+            assert!(make().with_translational_body_connections(vec![bad], gate).is_err(), "case {case}");
+        }
+        assert!(make().with_translational_body_connections(vec![good.clone()], gate).unwrap()
+            .with_translational_body_connections(vec![good.clone()], gate).is_err());
+        assert!(make().with_residual_flexibility(gate).unwrap()
+            .with_translational_body_connections(vec![good.clone()], gate).is_err());
+        assert!(make().with_translational_body_connections(vec![good.clone()], gate).unwrap()
+            .with_residual_flexibility(gate).is_err());
+        let mut moving = make();
+        moving.step(&vec![0.0; moving.system().mode_count()], drive()).unwrap();
+        assert!(moving.with_translational_body_connections(vec![good], gate).is_err());
+    });
 }
 
 #[test]

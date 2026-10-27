@@ -1,7 +1,9 @@
 //! G1/G3/G5: gas inertia and memory change the SAME physical source and receiver.
 use super::*;
 use fs_couple::air_path::cylinder::CylinderFlowResolution;
-use fs_couple::bowed_string::runtime::reciprocal::bank::polarization::TransverseDirections;
+use fs_couple::bowed_string::runtime::reciprocal::bank::polarization::{
+    StringBodyTranslationConnection, TransverseDirection, TransverseDirections,
+};
 
 fn resolution() -> CylinderFlowResolution {
     CylinderFlowResolution { minimum_wavenumber_radius: 1e-3,
@@ -108,19 +110,27 @@ fn viscous_memory_receives_energy_and_changes_actual_body_pressure_at_equal_dens
 }
 
 #[test]
-fn rotational_attachment_order_preserves_complete_gas_memory_and_accepted_history() {
+fn directed_and_rotational_attachment_order_preserves_complete_gas_memory_and_accepted_history() {
     with_cx(|cx, gate| {
         let plain = base(cx, gate, gas());
         let link = rotation(&plain);
-        let mut a = plain.with_rotational_body_connections(vec![link.clone()], gate).unwrap()
+        let translation = StringBodyTranslationConnection {
+            string: 0, station_fraction: 0.8, direction: TransverseDirection::Y,
+            body: plain.source().strings()[0].connections[0].body.clone(),
+            stiffness_n_m: 500.0, damping_n_s_m: 0.02, rest_extension_m: 0.0,
+        };
+        let mut a = plain.with_translational_body_connections(vec![translation.clone()], gate).unwrap()
+            .with_rotational_body_connections(vec![link.clone()], gate).unwrap()
             .with_cylinder_gas_loading(resolution(), gate).unwrap();
         let mut b = base(cx, gate, gas()).with_cylinder_gas_loading(resolution(), gate).unwrap()
-            .with_rotational_body_connections(vec![link], gate).unwrap();
+            .with_rotational_body_connections(vec![link], gate).unwrap()
+            .with_translational_body_connections(vec![translation], gate).unwrap();
         assert!(b.source().cylinder_gas_loading().is_some());
         assert_eq!(a.system().mode_count(), b.system().mode_count());
         assert_eq!(a.system().acceleration_pressure_weights(), b.system().acceleration_pressure_weights());
         assert_eq!(a.source().body_connections(), b.source().body_connections());
         assert_eq!(a.source().rotational_body_connections(), b.source().rotational_body_connections());
+        assert_eq!(a.source().translational_body_connections(), b.source().translational_body_connections());
         let zero = vec![0.0; a.system().mode_count()];
         for _ in 0..64 {
             assert_eq!(a.step(&zero, drive()).unwrap(), b.step(&zero, drive()).unwrap());

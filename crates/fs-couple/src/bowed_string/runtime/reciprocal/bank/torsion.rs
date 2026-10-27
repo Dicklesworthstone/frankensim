@@ -240,12 +240,15 @@ impl ReciprocalStringBank {
             self.system.components().len(), |fluid| self.cards.len() + fluid.body_components,
         );
         let bodies = self.system.components()[self.cards.len()..body_end].to_vec();
-        let link_count = self.source.body_connections.len().checked_add(connections.len())
+        let link_count = self.source.body_connections.len()
+            .checked_add(self.source.translational_body_connections.len())
+            .and_then(|count| count.checked_add(connections.len()))
             .ok_or_else(|| invalid("rotational bridge connection count overflow"))?;
         preflight(&self.source.strings, &bodies, &self.source.options, link_count)?;
         let bridges: Vec<_> = self.source.strings.iter().map(|s| s.connections.as_slice()).collect();
         let mut system = assemble_sources(&self.cards, Some(&self.source.strings), bodies,
-            &bridges, &self.source.body_connections, &connections, self.source.fluid_loading.as_ref(),
+            &bridges, &self.source.body_connections, &self.source.translational_body_connections,
+            &connections, self.source.fluid_loading.as_ref(),
             self.source.prepared_linear, &self.source.constant_loss_bridges(),
             self.source.residual_flexibility, self.system.port().law.clone(),
             &self.source.options, gate)?;

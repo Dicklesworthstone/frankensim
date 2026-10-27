@@ -183,7 +183,8 @@ impl ReciprocalStringBank {
         let total_modes = self.system.mode_count().checked_add(added_modes)
             .ok_or_else(|| invalid("complete fluid/string/body dimension overflow"))?;
         let old_links = self.source.strings.iter().try_fold(
-            self.source.body_connections.len() + self.source.rotational_body_connections.len(),
+            self.source.body_connections.len() + self.source.translational_body_connections.len()
+                + self.source.rotational_body_connections.len(),
             |n, s| n.checked_add(s.connections.len()),
         ).ok_or_else(|| invalid("fluid/string/body connection count overflow"))?;
         if total_modes > self.source.options.network.max_modes
@@ -228,7 +229,8 @@ impl ReciprocalStringBank {
         let bridges: Vec<_> = self.source.strings.iter().map(|s| s.connections.as_slice()).collect();
         let mut system = assemble_sources(
             &cards, Some(&self.source.strings), bodies, &bridges,
-            &self.source.body_connections, &self.source.rotational_body_connections,
+            &self.source.body_connections, &self.source.translational_body_connections,
+            &self.source.rotational_body_connections,
             Some(&fluid), self.source.prepared_linear, &self.source.constant_loss_bridges(),
             self.source.residual_flexibility, self.system.port().law.clone(), &self.source.options, gate,
         )?;

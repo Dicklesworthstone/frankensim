@@ -17,6 +17,67 @@ fn ready(cx: &Cx<'_>, gate: &CancelGate, loss: f64, shear: f64) -> Ready {
 }
 
 #[test]
+fn independent_bridge_axis_projects_the_original_shell_and_reaches_pressure() {
+    scoped(|cx, gate| {
+        let text = include_str!("../../cylinder-flow.material-strings")
+            .replace("48000 4096 0.01 128", "48000 96 0.01 128")
+            .replace("cylinder-gas-loading 0.001 30 12",
+                "translational-bridges 1\ntranslational-bridge 0 0.8 0 1 0 11 1 0 0 1500 0.02 0\ncylinder-gas-loading 0.001 30 4");
+        let build = |body_shear| input::Spec::parse(text.as_bytes()).unwrap()
+            .compile_with_body(cx, gate, Some(shell_profile()), |name|
+                Ok(if name == "body.fsmatpk" { pack_with_shear(name, 1.0, body_shear, None) }
+                    else { pack(name, 1.0, None) })).unwrap();
+        let mut directed = build(1.0);
+        let source = directed.performance.bank().source().bank();
+        let joints = source.translational_body_connections();
+        assert_eq!(joints.len(), 1);
+        assert_eq!(joints[0].direction.components(), [0.0, 1.0]);
+        let image = source.material_shell_image().unwrap();
+        let expected: Vec<_> = image.physical_modes().iter().map(|mode| mode[6*11]).collect();
+        assert_eq!(joints[0].body.shapes, expected);
+        assert!(expected.iter().any(|value| *value != 0.0));
+        assert!(source.cylinder_gas_loading().is_some());
+        assert!(source.material_cavity().is_some());
+        let actual = pressure(&mut directed, 7);
+        let mut same = build(1.0);
+        assert_eq!(actual, pressure(&mut same, 31));
+        let mut original = ready(cx, gate, 1.0, 1.0);
+        assert_ne!(actual, pressure(&mut original, 7));
+        let mut swapped = build(0.1);
+        assert_ne!(joints_for(&same), joints_for(&swapped));
+        assert_ne!(actual, pressure(&mut swapped, 13));
+        let frame = directed.performance.bank().system().last_frame().unwrap();
+        assert_eq!(frame.external_work_j, 0.0);
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+    });
+}
+
+fn joints_for(ready: &Ready) -> Vec<f64> {
+    ready.performance.bank().source().bank().translational_body_connections()[0].body.shapes.clone()
+}
+
+#[test]
+fn independent_bridge_axes_require_real_shell_geometry_and_physical_directions() {
+    let base = include_str!("../../directional-pluck.material-strings");
+    let valid = "translational-bridges 1\ntranslational-bridge 0 0.8 0 1 0 11 1 0 0 1500 0.02 0\n";
+    let text = base.replace("cavity neck", &format!("{valid}cavity neck"));
+    for (old, new) in [
+        ("0 0.8 0 1", "0 0.8 0 2"),
+        ("0 11 1 0 0", "0 11 2 0 0"),
+        ("1500 0.02 0", "0 0 0"),
+        ("0 0.8 0 1", "0 1 0 1"),
+        ("1500 0.02 0", "-1 0.02 0"),
+    ] {
+        assert!(input::Spec::parse(text.replace(old, new).as_bytes()).is_err(), "accepted {new}");
+    }
+    scoped(|cx, gate| {
+        let result = input::Spec::parse(text.as_bytes()).unwrap().compile(cx, gate,
+            |name| Ok(pack(name, 1.0, None)));
+        assert!(result.is_err(), "a plate profile cannot supply an unmodeled lateral shell displacement");
+    });
+}
+
+#[test]
 fn curved_material_body_keeps_layers_planes_torsion_cavity_and_gas_in_actual_pressure() {
     scoped(|cx, gate| {
         let mut a = ready(cx, gate, 1.0, 1.0);

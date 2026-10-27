@@ -14,6 +14,8 @@ mod bow_interfaces;
 mod shear_layers;
 #[path = "material_strings/bridge_interfaces.rs"]
 mod bridge_interfaces;
+#[path = "material_strings/translational_bridges.rs"]
+mod translational_bridges;
 #[path = "material_strings/bending_memory.rs"]
 mod bending_memory;
 #[path = "material_strings/torsion_memory.rs"]
@@ -353,6 +355,7 @@ impl input::Spec {
             }
             bank.with_rotational_body_connections(joints, gate)?
         };
+        let bank = translational_bridges::bind(bank, &self.translational_bridges, gate)?;
         let bank = if profile.as_ref().is_some_and(body::Profile::has_thermal_cavity) {
             bank // Gas inertia precedes the material/thermal memory prefix.
         } else if let Some(resolution) = self.cylinder_gas_loading {
@@ -657,6 +660,9 @@ fn main()->Result<()> {
         profile.bytes.len(),ready.performance.bank().source().stops().len()); }
     for (joint, baseline) in ready.spec.rotational_bridges.iter().zip(&ready.rotational_bridge_baselines_m) {
         eprintln!("rotational_bridge={joint:?}; body_footprint_separation_m={baseline}");
+    }
+    for joint in &ready.spec.translational_bridges {
+        eprintln!("translational_bridge={joint:?}; body_map=original_shell_global_displacement");
     }
     if let Some(budget)=ready.performance.bank().source().bank().prepared_linear_budget() {
         eprintln!("prepared_linear={budget:?}");

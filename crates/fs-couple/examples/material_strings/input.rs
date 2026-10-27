@@ -114,6 +114,15 @@ pub enum WireSection {
 pub struct WireLayer { pub pack: String, pub outer_radius_m: f64 }
 const MAX_LAYERS: usize = 16;
 const MAX_ROTATIONAL_BRIDGES: usize = 16;
+const MAX_TRANSLATIONAL_BRIDGES: usize = 16;
+/// An additional physical displacement axis at a node of the retained shell.
+/// String directions use its transverse frame; body directions use global XYZ.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TranslationalBridge {
+    pub string: usize, pub station_fraction: f64, pub direction: TransverseDirection,
+    pub shell_component: usize, pub node: usize, pub body_direction: [f64; 3],
+    pub stiffness_n_m: f64, pub damping_n_s_m: f64, pub rest_extension_m: f64,
+}
 /// A scalar rotational joint referencing actual body-profile point footprints.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RotationalBridge {
@@ -170,6 +179,7 @@ pub struct Spec {
     pub gas_record: GasRecord,
     pub bridge_interfaces: bridge_interfaces::Inputs,
     pub rotational_bridges: Vec<RotationalBridge>,
+    pub translational_bridges: Vec<TranslationalBridge>,
     pub cylinder_gas_loading: Option<CylinderFlowResolution>,
     pub prepared_linear: Option<PreparedModalBudget>,
     /// `residual-flexibility exact-static-green`: the omitted bending modes' static compliance in series with
@@ -366,6 +376,32 @@ impl Spec {
                     return Err("rotational bridge needs sourced twist, an interior station, distinct body footprints and a nonzero passive law".into());
                 }
                 rotational_bridges.push(joint);
+            }
+        }
+        let mut translational_bridges = Vec::new();
+        if r.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next()) == Some("translational-bridges") {
+            let mut row = r.row("translational-bridges")?;
+            let joints = row.count(MAX_TRANSLATIONAL_BRIDGES)?; row.end()?;
+            for _ in 0..joints {
+                let mut row = r.row("translational-bridge")?;
+                let joint = TranslationalBridge {
+                    string: row.count(count - 1)?, station_fraction: row.scalar()?,
+                    direction: TransverseDirection::try_new([row.scalar()?, row.scalar()?])?,
+                    shell_component: row.count(63)?, node: row.count(3071)?,
+                    body_direction: [row.scalar()?, row.scalar()?, row.scalar()?],
+                    stiffness_n_m: row.scalar()?, damping_n_s_m: row.scalar()?,
+                    rest_extension_m: row.scalar()?,
+                };
+                row.end()?;
+                let norm2 = joint.body_direction.iter().map(|x| x*x).sum::<f64>();
+                if !(0.0 < joint.station_fraction && joint.station_fraction < 1.0)
+                    || !norm2.is_finite() || (norm2 - 1.0).abs() > 1e-12
+                    || (strings[joint.string].polarizations.is_none() && joint.direction.components()[1] != 0.0)
+                    || joint.stiffness_n_m < 0.0 || joint.damping_n_s_m < 0.0
+                    || (joint.stiffness_n_m == 0.0 && joint.damping_n_s_m == 0.0) {
+                    return Err("translational bridge needs an interior station, retained transverse direction, unit global body axis and a nonzero passive law".into());
+                }
+                translational_bridges.push(joint);
             }
         }
         let cylinder_gas_loading = if r.lines.clone().next()
@@ -826,7 +862,7 @@ impl Spec {
         friction.validate_tracks(&schedule)?;
         let spec = Self { bytes: bytes.to_vec(), rate, samples, full_scale, block, temperature, omega,
             gas, gas_record, body, strings, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
-            rotational_bridges, cylinder_gas_loading, prepared_linear, residual_flexibility, geometric_stretching,
+            rotational_bridges, translational_bridges, cylinder_gas_loading, prepared_linear, residual_flexibility, geometric_stretching,
             longitudinal_waves, longitudinal_loss, bending_memory, body_radiation, shell_bem_angular_refinement,
             shell_observer, shell_receiver_quadrature, one_way_observer, cavity, friction, bow_ribbon, bow_fibers,
             forces, schedule };
@@ -956,6 +992,7 @@ impl Spec {
         let cavity_links = self.cavity.as_ref().map_or(0, |c|
             1 + usize::from(c.cavity.neck_resistance_n_s_m() != 0.0));
         let mut links = self.strings.len().checked_add(self.rotational_bridges.len())
+            .and_then(|n| n.checked_add(self.translational_bridges.len()))
             .and_then(|n| n.checked_add(cavity_links))
             .and_then(|n| n.checked_add(if tensor_body { self.body.modes } else { 0 }))
             .and_then(|n| n.checked_add(additional_body_connections))

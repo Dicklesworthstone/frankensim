@@ -912,6 +912,69 @@ This does not establish nonlinear bridge contact, moving endpoints, local
 plate-slope convergence, large-angle torsion, exterior radiation loading, or
 measured violin/cello/bass fidelity.
 
+### Material string bank independently directed translational bridges
+
+`bowed_string::runtime::reciprocal::bank::polarization::StringBodyTranslationConnection`
+and `ReciprocalStringBank::with_translational_body_connections` add independent
+centreline translation laws to the existing material string bank. Each law
+retains an original string index, interior station, signed unit
+`TransverseDirection`, original-body `ModalAttachment`, nonnegative stiffness
+and viscous resistance, and signed rest extension. The body map must measure
+displacement along the SAME physical signed direction as the string map.
+Body indices address the supplied bodies before strings are prefixed.
+
+The relative coordinate is `direction dot y_string - x_body - rest`.
+The original material source supplies the string projection with its actual
+gas-loaded transverse mass. Its transpose supplies reciprocal force in the
+same `CoupledModalSystem`; spring storage and dashpot loss enter the existing
+work ledger. Original scalar bridges remain active, so distinct directions
+and body maps can load both transverse planes without duplicating the
+material string or prescribing modal detuning. Centreline translation has
+zero direct torsional projection. Neither a complete rigid bridge nor its
+contact law is inferred.
+
+The retained source exposes `translational_body_connections()`. Cold gas,
+cavity and rotational-bridge rebuilds retain those declarations and lower
+their string maps against the current sourced realization. Original body
+maps, material memory, gas state, exterior radiation, pressure observation
+and dry bow interfaces stay with their existing owners. Binding accepts
+one complete nonempty set before motion or playback and before nonlinear
+storage; an empty set is a no-op. A one-plane source refuses any nonzero
+second direction component. Scalar omitted-mode residual bridge flexibility
+refuses this composition. Invalid stations, body indices, nonfinite or zero
+body maps, nonpassive laws and owner budget violations refuse without
+publishing a replacement system.
+
+The `material_strings` frontend accepts an optional
+`translational-bridges COUNT` block after thermal-support and rotational-bridge
+records, before cylinder gas loading and `cavity`:
+
+`translational-bridge STRING STATION SX SY SHELL_COMPONENT NODE GX GY GZ K C REST`
+
+It requires an original material shell or assembled-shell body. The adapter
+dots a global unit direction with the selected physical node's XYZ
+translation in every retained `physical_modes` vector, preserving the original
+mass normalization and eigenvector signs. Assembly components share ONE
+assembled modal basis; their physical component index selects geometry,
+while the modal attachment uses body zero. Recompiling after a body-material
+substitution regenerates this projection from the new material solve.
+
+String-local and body-global directions declare an orientation mapping.
+The input has no string-to-world frame, so consistency between those
+directions, including across connections, remains the geometry author's
+responsibility. Unit-vector admission does not verify that mapping. The
+frontend admits at most 16 additional rows and requires a retained second
+plane whenever `SY` is nonzero.
+
+Core regressions cover transverse-basis covariance, reciprocal second-plane
+pressure, material substitution, zero direct torque, energy closure, cold
+admission and gas/rotational attachment order. Frontend regressions project
+the actual shell node, retain gas/cavity bindings, compare callback sizes
+and change the body material. `directional-bridge.material-strings` is a
+synthetic integration fixture, not measured instrument or bridge
+qualification. Full three-dimensional unilateral bridge contact, moving
+geometry and measured violin/cello/bass fidelity remain separate requirements.
+
 ### `string_specimen`
 
 `acoustic_realize::LinearMaterialStringRuntime` incrementally advances an explicitly
@@ -1630,7 +1693,7 @@ clarinet is one filling of those objects.
   All material-string performance versions accept the optional
   `cylinder-gas-loading X_MIN X_MAX INTERVALS` row before an optional
   `prepared-linear` row and then `cavity`, after any section, polarization and
-  rotational-bridge records. The same
+  rotational/translational-bridge records. The same
   original geometry/gas supplies the operator; no extra material coefficients
   are authored. This binding precedes additional bows, stop profiles, static
   preload and the physical pressure/PCM schedule. File construction counts all

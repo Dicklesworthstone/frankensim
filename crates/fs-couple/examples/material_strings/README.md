@@ -735,7 +735,7 @@ accepted mechanical state.
 ## Rotational bridges from physical footprints
 
 All three input versions accept an optional block after ALL string/section/polarization records
-and optional `thermal-supports`, before `cavity`:
+and optional `thermal-supports`, before any `translational-bridges` and `cavity` records:
 
 ```text
 rotational-bridges COUNT
@@ -772,6 +772,85 @@ fixtures use a surface pluck/release and two strings on one material body. Build
 them with the directional body pack as shown in
 [BODY_PROFILES.md](BODY_PROFILES.md#reciprocal-rotational-bridges). They remain
 synthetic integration data, not a measured bridge or instrument.
+
+## Independent translational bridges from physical shell nodes
+
+All three input versions accept an optional block after all string/section/
+polarization records, optional `thermal-supports` and optional
+`rotational-bridges`, before `cylinder-gas-loading`, `prepared-linear` and
+`cavity`:
+
+```text
+translational-bridges COUNT
+translational-bridge STRING STATION SX SY SHELL_COMPONENT NODE GX GY GZ K_N_PER_M C_NS_PER_M REST_M
+```
+
+Each row adds a centreline spring/dashpot between one interior string station
+and one physical node of a **v3 shell or v4 assembled-shell `--body-profile`**.
+`STRING`, `SHELL_COMPONENT` and `NODE` are zero-based indices; a standalone
+shell has only component zero. `STATION` is a fraction strictly between zero
+and one of the full supported string, including afterlength. `[SX, SY]` is a
+signed unit direction in that string's transverse frame; `[GX, GY, GZ]` is a
+signed unit direction in the body's global frame. A single-plane string
+requires `SY = 0`. Stiffness and viscous resistance must be finite,
+nonnegative and not both zero; the stress-free extension is signed metres.
+
+The body displacement row comes from the selected node's original global XYZ
+translations in every retained shell `physical_modes` vector, preserving mass
+normalization and mode signs. Assembled components share the same assembled
+eigenbasis: `SHELL_COMPONENT` selects physical geometry, while the modal
+attachment addresses the combined body at index zero. Input never substitutes
+authored modal coefficients, a normal-force footprint or a separately solved
+lateral basis for these translations.
+
+The two directions declare the same physical signed axis in different frames.
+The file currently supplies no string-to-world frame, so the geometry author
+must ensure that these declarations are consistent, including across rows.
+The parser checks unit directions and available coordinates; it cannot
+independently verify their relative orientation. Joint stiffness and damping
+remain explicit mechanical data, rather than properties inferred from the
+bulk string or body material.
+
+The relative coordinate is
+`[SX, SY] dot y_string - [GX, GY, GZ] dot u_body - REST_M`.
+Spring energy, dashpot loss and equal-and-opposite reactions enter the
+existing shared solve. The original bridges remain active. Distinct
+directions can therefore load both transverse planes through different
+body displacements; these centreline ports apply no direct twist torque.
+Material loss, torsion, gas, cavity and pressure observation remain in the
+same system.
+
+Changing a body material pack rebuilds the shell basis and nodal projections.
+Changing string material or surrounding gas rebuilds the string projection
+with its actual mass and material operator. Cold gas, cavity and rotational
+reconstruction retains the declarations, original body basis, material memory
+and observers.
+
+The native API accepts one complete nonempty binding before playback or
+string motion and before nonlinear storage is attached. Scalar
+`residual-flexibility exact-static-green` refuses additional directed bridges.
+Missing nodes/components, absent second-plane coordinates, zero projected
+body motion, invalid laws and complete-network budget violations also refuse.
+Flat-plate profiles do not provide the required shell nodal translations.
+Omitting the block or selecting zero rows preserves the existing path;
+at most 16 additional translational bridges are accepted.
+
+`directional-bridge.material-strings` adds a second-plane string connection
+to the global X displacement of node 11 in `arched.body`, alongside the
+original bridge, layered string, torsion, cavity and causal gas loading.
+Using the wire, sleeve and directional body packs prepared by the arched-body
+recipe in [BODY_PROFILES.md](BODY_PROFILES.md):
+
+```bash
+cp crates/fs-couple/examples/material_strings/directional-bridge.material-strings "$demo/"
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/directional-bridge.material-strings" "$demo/directional-bridge.wav" \
+  --body-profile crates/fs-couple/examples/material_strings/arched.body
+```
+
+This is synthetic integration data. It demonstrates an additional physical
+reaction path and material-dependent pressure response; it does not establish
+measured bridge properties or violin/cello/bass fidelity.
 
 ## V2: independent material layers and support constraints
 
@@ -869,7 +948,7 @@ data, not a calibrated instrument-temperature prediction.
 ## Causal gas loading of the moving strings
 
 All three input versions accept one optional numerical-resolution record after
-the complete string/section/polarization records, optional thermal supports and any rotational-bridge block,
+the complete string/section/polarization records, optional thermal supports and any rotational or translational bridge blocks,
 before an optional `prepared-linear` row and then `cavity`:
 
 ```text
@@ -935,7 +1014,7 @@ coupling directions determine which motions reach contacts and the shared body.
 
 The executable counts **all** requested material, body, neck and fluid
 coordinates against its 128-mode bound. It computes a connection allowance for
-every string bridge, angular joint, memory dashpot, body tensor column and cavity
+every string bridge, additional directed translation, angular joint, memory dashpot, body tensor column and cavity
 compression/neck-loss channel. The original setup estimate
 `N * (L + 1)^2` remains bounded by 16,777,216 work units and the shared connection
 ceiling is 4096. A zero body-viscosity tensor may consume fewer columns than the
@@ -1043,7 +1122,7 @@ pitch changes.
   bound the Nyquist guard checks.
 - Refused: a released static preload with stops (use `forces retain`), receiver
   stops, moving or migrating stops, bound nonlinear storage, material bridge
-  interfaces, rotational and constant-loss bridges, and a string with other than
+  interfaces, additional directed translational bridges, rotational and constant-loss bridges, and a string with other than
   one bridge connection.
 - The bow port carries no residual yet. That is the next step.
 
@@ -1567,8 +1646,8 @@ fixed-extension supports and fixed rotational ends. Its shared body is the legac
 simply supported isotropic flat plate or an explicit material plate, shell or
 assembly described in [BODY_PROFILES.md](BODY_PROFILES.md), with an optional
 uniform-pressure cavity/circular neck. Bridges are interior transverse
-connections on the full span **including afterlength**, plus explicitly selected
-scalar rotational spring/dashpot joints. A full 3D unilateral bridge-contact
+connections on the full span **including afterlength**, with optional independent
+translational directions from shell nodes and scalar rotational spring/dashpot joints. A full 3D unilateral bridge-contact
 law, coupled f-hole/interior/exterior geometry, distributed cavity modes,
 resolved winding contact/slip and solved finger disengagement remain outside
 this composition. The computed planar and closed-shell exterior reactions and
@@ -1579,7 +1658,7 @@ instrument-fidelity evidence.
 
 Input caps: 1 MiB performance; 8 MiB per distinct material pack and 64 MiB total
 raw packs; 8 strings, at most 16 layers per string, 16 bow contacts, 16 rotational
-bridges, 64 force ports, 128 complete-network modes including fluid memory,
+and 16 additional translational bridges, 64 force ports, 128 complete-network modes including fluid memory,
 16 plate modes; 16,384 events per input family; 262,144 compiled controls per
 family; 16,777,216 source/projection work units per compiler; at most 384 kHz,
 600 seconds or 28,800,000 samples. Existing numerical owners retain their stricter

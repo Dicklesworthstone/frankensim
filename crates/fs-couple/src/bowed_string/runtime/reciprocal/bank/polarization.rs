@@ -17,7 +17,9 @@
 //! the same joint solve. The explicit `MaterialStringSource::into_nonlinear`
 //! path retains both planes in one Kirchhoff--Carrier elongation/tension channel;
 //! the linear bank continues to use its original quadratic storage. A six-DOF
-//! termination and a resolved bow-normal contact law remain outside this image.
+//! termination remains outside this image. Independently directed translation
+//! connections can load both planes through distinct body displacement maps;
+//! the bridge need not be a rank-one termination.
 //! Optional twist carries no fictitious direct acoustic output.
 
 use super::*;
@@ -56,6 +58,131 @@ impl TransverseDirection {
     /// Original dimensionless components in the declared transverse frame.
     #[must_use]
     pub const fn components(self) -> [f64; 2] { self.0 }
+}
+
+/// A centreline spring/dashpot along an independently declared transverse axis.
+///
+/// Its relative displacement is `direction dot y_string - x_body - rest`.
+/// The same projection applies the equal and opposite force in the coupled
+/// solve. Several such laws express a bridge with different compliances in its
+/// two transverse directions, without duplicating a string or changing its
+/// material. Torque is independent and receives exactly zero from this port.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StringBodyTranslationConnection {
+    /// Original material-string index.
+    pub string: usize,
+    /// Interior station on the full supported string, including afterlength.
+    pub station_fraction: f64,
+    /// Signed unit direction in this string's declared transverse frame.
+    pub direction: TransverseDirection,
+    /// Displacement along that SAME physical axis in the original body basis.
+    /// Component indices address the supplied bodies, before strings are added.
+    /// A material producer must derive this map from its actual geometry/basis;
+    /// matching its length alone does not establish provenance or orientation.
+    pub body: ModalAttachment,
+    /// Nonnegative stiffness [N/m], independently sourced from the joint.
+    pub stiffness_n_m: f64,
+    /// Nonnegative viscous resistance [N s/m], independently sourced from the joint.
+    pub damping_n_s_m: f64,
+    /// Signed stress-free relative displacement [m].
+    pub rest_extension_m: f64,
+}
+
+impl StringBodyTranslationConnection {
+    pub(super) fn lower(
+        &self, cards: &[BowedStringCard], members: &[MaterialStringMember],
+        bodies: &[ModalAcousticTimeModel],
+    ) -> Result<ModalConnection, ReciprocalStringError> {
+        let member = members.get(self.string)
+            .ok_or_else(|| invalid("directed bridge names an unknown material string"))?;
+        let card = cards.get(self.string)
+            .ok_or_else(|| invalid("directed bridge has no aligned string realization"))?;
+        let body = bodies.get(self.body.component)
+            .ok_or_else(|| invalid("directed bridge names an unknown original body"))?;
+        if !interior(self.station_fraction)
+            || self.body.shapes.len() != body.modes().len()
+            || self.body.shapes.iter().any(|x| !x.is_finite())
+            || self.body.shapes.iter().all(|x| *x == 0.0)
+            || !self.stiffness_n_m.is_finite() || self.stiffness_n_m < 0.0
+            || !self.damping_n_s_m.is_finite() || self.damping_n_s_m < 0.0
+            || (self.stiffness_n_m == 0.0 && self.damping_n_s_m == 0.0)
+            || !self.rest_extension_m.is_finite() {
+            return Err(invalid("directed bridge requires an interior station, a nonzero finite body map and a passive law"));
+        }
+        let shapes = member.source.transverse_shape_along(card, self.station_fraction, self.direction)?;
+        Ok(ModalConnection {
+            left: ModalAttachment { component: self.string, shapes },
+            right: ModalAttachment { component: cards.len() + self.body.component,
+                shapes: self.body.shapes.clone() },
+            stiffness_n_m: self.stiffness_n_m, damping_n_s_m: self.damping_n_s_m,
+            rest_extension_m: self.rest_extension_m,
+        })
+    }
+}
+
+impl ReciprocalStringBank {
+    /// Add reciprocal string/body translations with an independent axis per law.
+    ///
+    /// The existing bridge connections remain. These extra ports can carry the
+    /// missing second-plane reaction, or a spatially separated support. Their
+    /// string rows use the original material and actual gas-loaded transverse
+    /// mass; the supplied body rows stay in that body's retained basis. Thus
+    /// normal and lateral bridge motion, sympathetic strings and any torsion
+    /// share one force solve and one work ledger. No modal frequency is retuned.
+    /// Original source identities, memory, gas, radiation, observer and dry bow
+    /// interface survive; subsequent gas/cavity/rotational bindings retain all
+    /// directions and recompute their projections from the same sources.
+    ///
+    /// Bind one complete set before string motion or playback and before adding
+    /// nonlinear storage. An empty set is a no-op. Omitted-mode residual bridge
+    /// flexibility currently admits one axis only and refuses this composition.
+    /// A one-plane string refuses any direction with a nonzero second component.
+    /// This does not infer a bridge's anisotropic law, rigid frame, geometry or
+    /// unilateral contact from the bulk string material.
+    pub fn with_translational_body_connections(
+        mut self, connections: Vec<StringBodyTranslationConnection>, gate: &CancelGate,
+    ) -> Result<Self, ReciprocalStringError> {
+        poll(gate)?;
+        if connections.is_empty() { return Ok(self); }
+        if self.system.has_nonlinear_potentials() || self.source.residual_flexibility {
+            return Err(invalid("directed bridges bind before nonlinear storage and without scalar residual flexibility"));
+        }
+        if self.system.samples_rendered() != 0 || !self.source.translational_body_connections.is_empty()
+            || self.system.components()[..self.cards.len()].iter().flat_map(|c| c.states())
+                .any(|s| s.displacement_m_sqrt_kg != 0.0 || s.velocity_m_sqrt_kg_per_s != 0.0) {
+            return Err(invalid("directed bridges require one complete binding before string motion or playback"));
+        }
+        let body_end = self.source.fluid_loading.as_ref().map_or(
+            self.system.components().len(), |fluid| self.cards.len() + fluid.body_components,
+        );
+        let bodies = self.system.components()[self.cards.len()..body_end].to_vec();
+        let link_count = self.source.body_connections.len()
+            .checked_add(self.source.rotational_body_connections.len())
+            .and_then(|count| count.checked_add(connections.len()))
+            .ok_or_else(|| invalid("directed bridge connection count overflow"))?;
+        preflight(&self.source.strings, &bodies, &self.source.options, link_count)?;
+        let bridges: Vec<_> = self.source.strings.iter().map(|s| s.connections.as_slice()).collect();
+        let mut system = assemble_sources(&self.cards, Some(&self.source.strings), bodies,
+            &bridges, &self.source.body_connections, &connections,
+            &self.source.rotational_body_connections, self.source.fluid_loading.as_ref(),
+            self.source.prepared_linear, &self.source.constant_loss_bridges(),
+            false, self.system.port().law.clone(), &self.source.options, gate)?;
+        if let Some(weights) = self.system.acceleration_pressure_weights() {
+            system = system.with_acceleration_pressure(weights.to_vec())
+                .map_err(ReciprocalStringError::Friction)?;
+        }
+        if let Some(binding) = self.system.interface() {
+            system = system.with_interface(binding.clone()).map_err(ReciprocalStringError::Friction)?;
+        }
+        system = self.source.restore_material_memory(system, &self.cards,
+            Some(self.system.material_memory().to_vec()), gate)?;
+        self.source.validate_body_memory_frequencies(&system, gate)?;
+        self.source.validate_material_bridge_frequencies(&system, gate)?;
+        poll(gate)?;
+        self.system = system;
+        self.source.translational_body_connections = connections;
+        Ok(self)
+    }
 }
 
 /// Physical directions expressed in one common orthonormal transverse frame.
