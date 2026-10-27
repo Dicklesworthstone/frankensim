@@ -9,7 +9,7 @@ use fs_thermochem::*;
 use fs_thermochem::equilibrium::*;
 use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
 
-fn reaction(rate:f64) -> GasReaction {
+pub(super) fn reaction(rate:f64) -> GasReaction {
     let (a,ta)=gas_fixture::component("A",0.028,0.0);
     let (b,tb)=gas_fixture::component("B",0.028,-50000.0);
     let species=vec![a.species().clone(),b.species().clone()];
@@ -25,14 +25,14 @@ fn reaction(rate:f64) -> GasReaction {
         Composition::new(CompositionBasis::MoleFraction,vec![0.5,0.5]).unwrap()).unwrap(),vec![ta,tb],None).unwrap();
     GasReaction::new(catalog,law).unwrap()
 }
-fn piston(law:&GasReaction) -> GasPiston {
+pub(super) fn piston(law:&GasReaction) -> GasPiston {
     let model=law.catalog().with_composition(Composition::new(CompositionBasis::MoleFraction,vec![1.0,0.0]).unwrap()).unwrap();
     let q=|k|QuantitySpec::semantic(SemanticType::new(k,ValueForm::Static));
     let point=QueryPoint::new().with_quantity("temperature",q(QuantityKind::AbsoluteTemperature),400.0).unwrap()
         .with_quantity("pressure",q(QuantityKind::Pressure),100000.0).unwrap();
     GasPiston::new(ClosedGasParcel::new(model,point,0.001).unwrap(),1.0,0.01,0.0).unwrap()
 }
-fn chemical() -> GasReactionSolve {
+pub(super) fn chemical() -> GasReactionSolve {
     GasReactionSolve {gas:gas_fixture::chamber(1,&gas_fixture::pistons()[0],0.00005).piston_solve.gas,
         maximum_consumed_fraction:0.2,species_tolerance_mol:1e-12,entropy_tolerance_j_k:1e-10}
 }

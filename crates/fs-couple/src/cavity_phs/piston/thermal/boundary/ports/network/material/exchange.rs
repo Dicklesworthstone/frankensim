@@ -3,9 +3,11 @@
 //! nonlinear solver, thermal history, or material-name-based default.
 /// Pluggable gas heat laws on this same complete physical assembly.
 pub mod gas_law;
+/// Same-endpoint reacting chambers on this original electrical/thermal assembly.
+pub mod reactive;
 
 use super::MaterialContact;
-use super::super::{Chamber, NetworkCandidate, NetworkError, NetworkSolve};
+use super::super::{Chamber, DrivenNetworkError, NetworkCandidate, NetworkError, NetworkSolve};
 use crate::cavity_phs::piston::thermal::boundary::network::material::resolve_contact;
 use crate::circuit_enthalpy::{CircuitEnthalpyError, CircuitEnthalpyInput, CircuitThermalCoefficients};
 use crate::circuit_enthalpy::contacts::{ContactThermalCoefficients, ContactThermalSample};
@@ -238,32 +240,41 @@ impl PreparedMaterialExchangeNetwork<'_, '_> {
     ) -> Result<NetworkCandidate<'m, ContactThermalSample<MaterialExchangeSample>, ResolvedMaterialStatePoint>,
         CircuitEnthalpyError<NetworkError<MaterialExchangeError, MaterialNetworkError>>>
     {
-        if gas_patches.len() > controls.maximum_contacts {
-            return Err(CircuitEnthalpyError::Invalid("material gas contact capacity exceeded"));
-        }
-        let mut surfaces = Vec::with_capacity(gas_patches.len());
-        let mut mapped = std::collections::BTreeMap::new();
-        for patch in gas_patches {
-            checkpoint(cx).map_err(coupled_error)?;
-            let geometry = patch.geometry;
-            if ![geometry.gas_distance_m, geometry.cell_distance_m].iter()
-                .all(|length| length.is_finite() && *length > 0.0)
-                || mapped.insert(patch.contact.id, patch).is_some() {
-                return Err(CircuitEnthalpyError::Invalid("unique gas contacts and positive finite layer distances required"));
-            }
-            surfaces.push(gas_law::GasSurface { contact: patch.contact, area_m2: geometry.area_m2 });
-        }
+        let (surfaces, mapped) = conductive_surfaces(cx, gas_patches, controls)?;
         self.step_with_gas_law_candidate(cx, thermal, target_s, circuit, ports,
             chambers, &surfaces, controls, guess_j, |contact, state, source, gas| {
-                self.resolve_conductive_gas_contact(*mapped[&contact.id], state, source, gas)
+                self.resolve_conductive_gas_contact(mapped[&contact.id], state, source, gas)
             })
     }
 }
-fn coupled_error<E>(e: MaterialExchangeError)
-    -> CircuitEnthalpyError<NetworkError<MaterialExchangeError, E>>
+// Material geometry admission is shared by both native chamber time policies.
+#[allow(clippy::type_complexity)]
+fn conductive_surfaces<B>(cx: &Cx<'_>, patches: &[MaterialContact], controls: NetworkSolve)
+    -> Result<(Vec<gas_law::GasSurface>, std::collections::BTreeMap<u64, MaterialContact>),
+        CircuitEnthalpyError<DrivenNetworkError<MaterialExchangeError, B>>>
+{
+    if patches.len() > controls.maximum_contacts {
+        return Err(CircuitEnthalpyError::Invalid("material gas contact capacity exceeded"));
+    }
+    let mut surfaces = Vec::with_capacity(patches.len());
+    let mut mapped = std::collections::BTreeMap::new();
+    for &patch in patches {
+        checkpoint(cx).map_err(coupled_error)?;
+        let geometry = patch.geometry;
+        if ![geometry.gas_distance_m, geometry.cell_distance_m].iter()
+            .all(|length| length.is_finite() && *length > 0.0)
+            || mapped.insert(patch.contact.id, patch).is_some() {
+            return Err(CircuitEnthalpyError::Invalid("unique gas contacts and positive finite layer distances required"));
+        }
+        surfaces.push(gas_law::GasSurface { contact: patch.contact, area_m2: geometry.area_m2 });
+    }
+    Ok((surfaces, mapped))
+}
+fn coupled_error<B>(e: MaterialExchangeError)
+    -> CircuitEnthalpyError<DrivenNetworkError<MaterialExchangeError, B>>
 {
     match e {
         MaterialExchangeError::Cancelled => CircuitEnthalpyError::Cancelled,
-        other => CircuitEnthalpyError::Source(NetworkError::Material(other)),
+        other => CircuitEnthalpyError::Source(DrivenNetworkError::Material(other)),
     }
 }

@@ -7830,3 +7830,50 @@ syntax parsing and bounded independent source/accounting review; native
 compilation/tests were unavailable (no Rust/Cargo, DSR or RCH).
 Focused command:
 `cargo test -p fs-couple --test conduction_phase_enthalpy dielectric::thermal`.
+
+
+### Same-endpoint reactive chambers on the shared material exchange network
+
+The shared circuit/enthalpy network now accepts native midpoint and coupled
+reactive boundary drivers through one internal boundary interface. Electrical
+route admission, receiving-cell heat aggregation, circuit advancement, the
+outer thermal residual and final all-owner energy check remain single owners.
+Existing public midpoint candidate/error names specialize the same generic
+carriers and retain their original behavior and source records.
+
+`network::reactive::step_with_contacts_candidate` binds optional original
+reaction mechanisms to stable chamber IDs. Listed chambers close reaction
+progress, pressure work, wall momentum and all thermal contacts against the
+same proposed endpoint; unlisted chambers retain their native midpoint law.
+Every trial restarts the original accepted gas inventory. The result retains
+an explicit native-or-reactive boundary and its actual detailed receipt;
+endpoint chemistry is never represented as a fabricated midpoint step.
+
+`PreparedMaterialExchangeNetwork::coupled_reactive_step_candidate` and its
+custom gas-law counterpart connect that policy to the original material bulk,
+electrical contacts, thermal contacts, finite enthalpy cells and closed
+radiation enclosure. Conductivity/resistivity, source/phase snapshots, heat
+routes, surface-area admission and radiation closure use their existing owners.
+Each signed gas contact is debited at its physical receiving cell, even when
+other contacts cancel its net gas heat. Formation and latent energy remain in
+original storage; reaction energy and electrical heat are not credited twice.
+No accepted circuit, thermal, gas or moving-wall history changes on refusal.
+
+Six focused regression definitions cover mixed reacting/ordinary chambers,
+independent per-cell and all-owner energy equations, endpoint kinetic rates,
+two continuing material-data substitutions, exact source retention, custom
+heat laws, no-reaction equivalence, mapping/area refusals and late cancellation.
+Scoped Rust syntax/formatting, whitespace and bounded source/API review passed.
+Native compilation and test execution remain unavailable because pinned
+constellation siblings and remote runners are absent and the filesystem is
+full. These definitions and source checks are not executed native validation.
+Focused command: `cargo test -p fs-couple --test material_exchange_network coupled_`.
+
+This is a first-order homogeneous closed-gas model with independent translating
+walls and fixed circuit topology/C/L and thermal geometry. The original coupled
+implicit mechanism and explicit source/work limits remain required. Whole-
+assembly interval refinement, rather than chemistry-only substeps, governs
+coupled time resolution. It adds no spatial flame, valve mass flow, shared
+crank or unconditional convergence guarantee. The broad physics ladder beads
+remain open; this increment closes the previously separate material-network
+connection for the coupled chemistry/heat/pressure policy.

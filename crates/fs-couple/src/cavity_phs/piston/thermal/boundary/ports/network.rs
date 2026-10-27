@@ -4,6 +4,8 @@
 
 /// Data-only material contacts with aggregate surface-area admission.
 pub mod material;
+/// Optional same-endpoint reactions on the original shared thermal network.
+pub mod reactive;
 
 use super::*;
 use crate::circuit_enthalpy::{self, CircuitEnthalpyCandidate, CircuitEnthalpyError,
@@ -54,11 +56,11 @@ pub struct NetworkSolve {
 }
 /// Original source errors retain their domain and chamber identity.
 #[derive(Debug)]
-pub enum NetworkError<E, F> {
+pub enum DrivenNetworkError<E, B> {
     /// Circuit/thermal material callback refusal.
     Material(E),
     /// Original gas/momentum/contact refusal, with its physical chamber.
-    Boundary { chamber: u64, error: ThermalPistonError<F> },
+    Boundary { chamber: u64, error: B },
     /// Thermal owner refused a contact temperature.
     Thermal(DepositionError),
     /// Global boundary work limit exhausted.
@@ -66,27 +68,34 @@ pub enum NetworkError<E, F> {
     /// Contact heat overflowed, vanished or failed its receiving-cell balance.
     Transfer,
 }
-impl<E: core::fmt::Debug, F: core::fmt::Debug> core::fmt::Display for NetworkError<E,F> {
+impl<E: core::fmt::Debug, B: core::fmt::Debug> core::fmt::Display for DrivenNetworkError<E,B> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { write!(f,"multi-chamber coupling: {self:?}") }
 }
-impl<E: std::error::Error+'static, F: std::error::Error+'static> std::error::Error for NetworkError<E,F> {}
+impl<E: std::error::Error+'static, B: std::error::Error+'static> std::error::Error for DrivenNetworkError<E,B> {}
+
+/// Original native midpoint boundary errors; existing callers retain their types.
+pub type NetworkError<E,F> = DrivenNetworkError<E,ThermalPistonError<F>>;
 
 /// Original chamber endpoint and per-contact sources, in stable ID order.
-pub struct ChamberBoundary<I> {
+pub struct DrivenChamberBoundary<B> {
     /// Original physical chamber identity.
     pub id: u64,
-    /// Exact shared-midpoint gas proposal. Each source also retains its cell map.
-    pub boundary: ThermalPortsCandidate<(Contact,I)>,
+    /// The exact native boundary proposal, retaining its own integration law.
+    pub boundary: B,
 }
+/// Original shared-midpoint gas and exact source/receiving-cell records.
+pub type ChamberBoundary<I> = DrivenChamberBoundary<ThermalPortsCandidate<(Contact,I)>>;
 /// One matching material evaluation and all gas candidates for the same interval.
-pub struct NetworkSources<S,I> {
+pub struct DrivenNetworkSources<S,B> {
     /// Original material-network source payload.
     pub material: S,
     /// All gas candidates in stable chamber-ID order.
-    pub chambers: Vec<ChamberBoundary<I>>,
+    pub chambers: Vec<DrivenChamberBoundary<B>>,
     /// Actual signed heat debit handed to the thermal source map [J].
     pub transferred_heat_j: f64,
 }
+/// Original midpoint result payload, now one specialization of the shared owner.
+pub type NetworkSources<S,I> = DrivenNetworkSources<S,ThermalPortsCandidate<(Contact,I)>>;
 /// Combined physical balance and work, not a time-accuracy certificate.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NetworkStep {
@@ -100,21 +109,24 @@ pub struct NetworkStep {
     pub boundary_solves: usize,
     /// Every nested scalar heat proposal across all chamber solves.
     pub exchange_trials: usize,
-    /// Every nested gas-material proposal across all chamber solves.
+    /// Every nested gas-material or reacting-pressure proposal across all
+    /// chamber solves. Reactive receipts separately retain chemical work.
     pub material_trials: usize,
 }
 /// No accepted circuit, thermal cell or gas is changed by constructing this.
-pub struct NetworkCandidate<'m,S,I> {
-    network: CircuitEnthalpyCandidate<'m,NetworkSources<S,I>>,
+pub struct DrivenNetworkCandidate<'m,S,B> {
+    network: CircuitEnthalpyCandidate<'m,DrivenNetworkSources<S,B>>,
     step: NetworkStep,
 }
-impl<'m,S,I> NetworkCandidate<'m,S,I> {
+/// Original midpoint API; no endpoint or receipt conversion is performed.
+pub type NetworkCandidate<'m,S,I> = DrivenNetworkCandidate<'m,S,ThermalPortsCandidate<(Contact,I)>>;
+impl<'m,S,B> DrivenNetworkCandidate<'m,S,B> {
     /// Proposed thermal history, with original masses, laws and event cursor.
     pub fn thermal(&self) -> &DepositionSimulation<'m> { self.network.thermal() }
     /// Proposed conserved electrical charge/flux history.
     pub fn circuit(&self) -> &MaterialCircuit { self.network.circuit() }
     /// Proposed gases and all original contact evaluations in chamber-ID order.
-    pub fn chambers(&self) -> &[ChamberBoundary<I>] { &self.network.report().source.chambers }
+    pub fn chambers(&self) -> &[DrivenChamberBoundary<B>] { &self.network.report().source.chambers }
     /// Original material-network evaluation at the accepted thermal endpoint.
     pub fn material(&self) -> &S { &self.network.report().source.material }
     /// Actual independent all-owner energy check and bounded-work counts.
@@ -125,10 +137,63 @@ impl<'m,S,I> NetworkCandidate<'m,S,I> {
     /// `boundary.into_parts()` rather than advancing or depositing heat again.
     #[allow(clippy::type_complexity)]
     pub fn into_parts(self) -> (DepositionSimulation<'m>, MaterialCircuit,
-        CircuitEnthalpyReport<NetworkSources<S,I>>, NetworkStep) {
+        CircuitEnthalpyReport<DrivenNetworkSources<S,B>>, NetworkStep) {
         let (thermal,circuit,report) = self.network.into_parts();
         (thermal,circuit,report,self.step)
     }
+}
+
+// Only the boundary-specific proposal and its measured account vary. The
+// receiving-cell heat map, electrical/thermal residual and final balance below
+// remain the single network owner. This is not a second public solver interface.
+struct BoundaryAccount {
+    gas_energy_change_j: f64,
+    kinetic_energy_change_j: f64,
+    exterior_pressure_work_j: f64,
+    external_force_work_j: f64,
+    support_work_j: f64,
+    exchange_trials: usize,
+    material_trials: usize,
+}
+
+trait BoundaryDriver<I,F> {
+    type Boundary;
+    type Error;
+    fn advance(
+        &self, chamber: &Chamber<'_>, ports: &[ThermalPort], maximum_ports: usize,
+        resolve: &mut dyn FnMut(ThermalPort,&ResolvedThermochemicalGasState)
+            -> Result<ConductanceSample<(Contact,I)>,F>,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<Self::Boundary,Self::Error>;
+    fn source(boundary: &Self::Boundary) -> &[ThermalPortSample<(Contact,I)>];
+    fn account(boundary: &Self::Boundary) -> BoundaryAccount;
+    fn is_cancelled(error: &Self::Error) -> bool;
+}
+
+struct NativeBoundary;
+impl<I,F> BoundaryDriver<I,F> for NativeBoundary {
+    type Boundary = ThermalPortsCandidate<(Contact,I)>;
+    type Error = ThermalPistonError<F>;
+    fn advance(
+        &self, chamber: &Chamber<'_>, ports: &[ThermalPort], maximum_ports: usize,
+        resolve: &mut dyn FnMut(ThermalPort,&ResolvedThermochemicalGasState)
+            -> Result<ConductanceSample<(Contact,I)>,F>,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<Self::Boundary,Self::Error> {
+        chamber.piston.thermal_ports_candidate(chamber.input,chamber.piston_solve,
+            chamber.exchange,ports,maximum_ports,resolve,cancelled)
+    }
+    fn source(boundary: &Self::Boundary) -> &[ThermalPortSample<(Contact,I)>] { boundary.source() }
+    fn account(boundary: &Self::Boundary) -> BoundaryAccount {
+        let step=boundary.step();
+        let p=&step.piston;
+        BoundaryAccount { gas_energy_change_j:p.gas.stored_energy_change_j,
+            kinetic_energy_change_j:p.kinetic_energy_change_j,
+            exterior_pressure_work_j:p.exterior_pressure_work_j,
+            external_force_work_j:p.external_force_work_j,support_work_j:p.support_work_j,
+            exchange_trials:step.exchange_trials,material_trials:step.material_trials }
+    }
+    fn is_cancelled(error: &Self::Error) -> bool { matches!(error,ThermalPistonError::Cancelled) }
 }
 
 /// Solve all chambers, contacts, resistor bodies and finite electrical storage
@@ -153,6 +218,7 @@ pub fn step_candidate<'m,S,I,E,F>(
     cancelled: impl FnMut() -> bool,
 ) -> Result<NetworkCandidate<'m,S,I>,CircuitEnthalpyError<NetworkError<E,F>>> {
     step_bound(thermal,target_s,electrical,&[],chambers,contacts,controls,guess_j,
+        &NativeBoundary,
         |state| resolve(state).map(|bulk| ContactThermalCoefficients {bulk,contacts:Vec::new()}),
         resolve_port,cancelled)
 }
@@ -181,12 +247,28 @@ pub fn step_with_contacts_candidate<'m,S,I,E,F>(
         -> Result<ConductanceSample<I>,F>,
     cancelled: impl FnMut() -> bool,
 ) -> Result<NetworkCandidate<'m,ContactThermalSample<S>,I>,CircuitEnthalpyError<NetworkError<E,F>>> {
+    step_with_driver(thermal,target_s,electrical,heat_routes,chambers,contacts,controls,
+        guess_j,&NativeBoundary,resolve,resolve_port,cancelled)
+}
+
+// Electrical contact-route admission remains shared with every boundary driver.
+#[allow(clippy::too_many_arguments,clippy::type_complexity)]
+fn step_with_driver<'m,S,I,E,F,D: BoundaryDriver<I,F>>(
+    thermal: &DepositionSimulation<'m>, target_s: f64, electrical: CircuitEnthalpyInput<'_>,
+    heat_routes: &[ContactHeatCells], chambers: &[Chamber<'_>], contacts: &[Contact],
+    controls: NetworkSolve, guess_j: &[f64], driver: &D,
+    resolve: impl Fn(&DepositionSimulation<'m>) -> Result<ContactThermalCoefficients<S>,E>,
+    resolve_port: impl Fn(Contact,&DepositionSimulation<'m>,&S,&ResolvedThermochemicalGasState)
+        -> Result<ConductanceSample<I>,F>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<DrivenNetworkCandidate<'m,ContactThermalSample<S>,D::Boundary>,
+    CircuitEnthalpyError<DrivenNetworkError<E,D::Error>>> {
     let cancel=RefCell::new(cancelled);
     let check=||if (*cancel.borrow_mut())() {Err(DepositionError::Cancelled)} else {Ok(())};
     check()?;
     let routes=electrical_contacts::admit_routes(thermal,electrical.circuit,heat_routes,check)?
         .into_values().collect::<Vec<_>>();
-    step_bound(thermal,target_s,electrical,&routes,chambers,contacts,controls,guess_j,|state| {
+    step_bound(thermal,target_s,electrical,&routes,chambers,contacts,controls,guess_j,driver,|state| {
         let resolved=resolve(state)?;
         let bulk=resolved.bulk;
         Ok(ContactThermalCoefficients {contacts:resolved.contacts,
@@ -199,15 +281,15 @@ pub fn step_with_contacts_candidate<'m,S,I,E,F>(
 
 // One chamber/source residual and one final all-owner balance for both routes.
 #[allow(clippy::too_many_arguments,clippy::type_complexity)]
-fn step_bound<'m,S,I,E,F>(
+fn step_bound<'m,S,I,E,F,D: BoundaryDriver<I,F>>(
     thermal: &DepositionSimulation<'m>, target_s: f64, electrical: CircuitEnthalpyInput<'_>,
     heat_routes: &[ContactHeatCells], chambers: &[Chamber<'_>], contacts: &[Contact],
-    controls: NetworkSolve, guess_j: &[f64],
+    controls: NetworkSolve, guess_j: &[f64], driver: &D,
     resolve: impl Fn(&DepositionSimulation<'m>) -> Result<ContactThermalCoefficients<S>,E>,
     resolve_port: impl Fn(Contact,&DepositionSimulation<'m>,&S,&ResolvedThermochemicalGasState)
         -> Result<ConductanceSample<I>,F>,
     cancelled: impl FnMut() -> bool,
-) -> Result<NetworkCandidate<'m,S,I>,CircuitEnthalpyError<NetworkError<E,F>>> {
+) -> Result<DrivenNetworkCandidate<'m,S,D::Boundary>,CircuitEnthalpyError<DrivenNetworkError<E,D::Error>>> {
     let cancel = RefCell::new(cancelled);
     let check = || if (*cancel.borrow_mut())() { Err(DepositionError::Cancelled) } else { Ok(()) };
     check()?;
@@ -238,64 +320,64 @@ fn step_bound<'m,S,I,E,F>(
     let calls=Cell::new(0usize); let heat_trials=Cell::new(0usize); let material_trials=Cell::new(0usize);
     let candidate = circuit_enthalpy::driven_with_contacts_candidate(
         thermal,target_s,electrical,heat_routes,controls.network,guess_j,|state,_remaining| {
-        let (bulk,contacts) = (|| -> Result<_,NetworkError<E,F>> {
-        let resolved=resolve(state).map_err(NetworkError::Material)?;
+        let (bulk,contacts) = (|| -> Result<_,DrivenNetworkError<E,D::Error>> {
+        let resolved=resolve(state).map_err(DrivenNetworkError::Material)?;
         let mut coefficients=resolved.bulk;
         let mut boundaries=Vec::with_capacity(ordered.len());
         let mut cell_heat=BTreeMap::<CellId,f64>::new();
         let mut evaluated_heat=0.0;
         for (&id,chamber) in &ordered {
-            check().map_err(NetworkError::Thermal)?;
-            if calls.get()>=controls.maximum_boundary_solves { return Err(NetworkError::Budget); }
+            check().map_err(DrivenNetworkError::Thermal)?;
+            if calls.get()>=controls.maximum_boundary_solves { return Err(DrivenNetworkError::Budget); }
             let ports: Vec<_> = groups[&id].iter().map(|contact| state.temperature_k(contact.cell)
                 .map(|temperature_k| ThermalPort {id:contact.id,temperature_k}))
-                .collect::<Result<_,_>>().map_err(NetworkError::Thermal)?;
+                .collect::<Result<_,_>>().map_err(DrivenNetworkError::Thermal)?;
             calls.set(calls.get()+1);
-            let boundary=chamber.piston.thermal_ports_candidate(chamber.input,chamber.piston_solve,
-                chamber.exchange,&ports,controls.maximum_contacts,|port,gas| {
+            let boundary=driver.advance(chamber,&ports,controls.maximum_contacts,&mut |port,gas| {
                     let contact=mapped[&port.id];
                     resolve_port(contact,state,&coefficients.source,gas).map(|sample| ConductanceSample {
                         conductance_w_k:sample.conductance_w_k,source:(contact,sample.source) })
-                },||(*cancel.borrow_mut())())
-                .map_err(|error|NetworkError::Boundary {chamber:id,error})?;
-            heat_trials.set(heat_trials.get().checked_add(boundary.step().exchange_trials).ok_or(NetworkError::Budget)?);
-            material_trials.set(material_trials.get().checked_add(boundary.step().material_trials).ok_or(NetworkError::Budget)?);
-            for sample in boundary.source() {
+                },&mut ||(*cancel.borrow_mut())())
+                .map_err(|error|DrivenNetworkError::Boundary {chamber:id,error})?;
+            let account=D::account(&boundary);
+            heat_trials.set(heat_trials.get().checked_add(account.exchange_trials).ok_or(DrivenNetworkError::Budget)?);
+            material_trials.set(material_trials.get().checked_add(account.material_trials).ok_or(DrivenNetworkError::Budget)?);
+            for sample in D::source(&boundary) {
                 let sum=cell_heat.entry(sample.source.0.cell).or_insert(0.0);
                 *sum+=sample.heat_j; evaluated_heat+=sample.heat_j;
-                if !sum.is_finite() || !evaluated_heat.is_finite() { return Err(NetworkError::Transfer); }
+                if !sum.is_finite() || !evaluated_heat.is_finite() { return Err(DrivenNetworkError::Transfer); }
             }
-            boundaries.push(ChamberBoundary {id,boundary});
+            boundaries.push(DrivenChamberBoundary {id,boundary});
         }
         // Aggregate by the true receiving cell, not by gas or electrical branch.
         // Keep individual signed contacts above even when a cell's net is zero.
         let mut deposited=0.0;
         for (cell,q) in cell_heat {
-            check().map_err(NetworkError::Thermal)?;
+            check().map_err(DrivenNetworkError::Thermal)?;
             let watts=q/dt;
             let source=coefficients.sources_w.entry(cell).or_insert(0.0);
             let previous=*source; let next=previous-watts;
             if !watts.is_finite() || !next.is_finite() || (q!=0.0 && (watts==0.0 || next==previous)) {
-                return Err(NetworkError::Transfer);
+                return Err(DrivenNetworkError::Transfer);
             }
             *source=next; deposited+=dt*watts;
         }
         if !deposited.is_finite() || (deposited-evaluated_heat).abs()>controls.total_energy_tolerance_j {
-            return Err(NetworkError::Transfer);
+            return Err(DrivenNetworkError::Transfer);
         }
         Ok((CircuitThermalCoefficients {resistors:coefficients.resistors,sources_w:coefficients.sources_w,
-            conductances_w_k:coefficients.conductances_w_k,source:NetworkSources {
+            conductances_w_k:coefficients.conductances_w_k,source:DrivenNetworkSources {
                 material:coefficients.source,chambers:boundaries,transferred_heat_j:deposited}},resolved.contacts))
         })().map_err(CircuitEnthalpyError::Source)?;
-        let circuit=electrical_contacts::advance_circuit::<NetworkError<E,F>>(electrical.circuit,bulk.resistors,contacts,
+        let circuit=electrical_contacts::advance_circuit::<DrivenNetworkError<E,D::Error>>(electrical.circuit,bulk.resistors,contacts,
             electrical.ports,dt,controls.network.circuit,||(*cancel.borrow_mut())())?;
         Ok(circuit_enthalpy::DrivenCoefficients {circuit,sources_w:bulk.sources_w,
             conductances_w_k:bulk.conductances_w_k,source:bulk.source,circuit_trials:1})
     },||(*cancel.borrow_mut())());
     let candidate=match candidate {
-        Err(CircuitEnthalpyError::Source(NetworkError::Boundary {error:ThermalPistonError::Cancelled,..})) =>
+        Err(CircuitEnthalpyError::Source(DrivenNetworkError::Boundary {error,..})) if D::is_cancelled(&error) =>
             return Err(CircuitEnthalpyError::Cancelled),
-        Err(CircuitEnthalpyError::Source(NetworkError::Thermal(DepositionError::Cancelled))) =>
+        Err(CircuitEnthalpyError::Source(DrivenNetworkError::Thermal(DepositionError::Cancelled))) =>
             return Err(CircuitEnthalpyError::Cancelled),
         other=>other?,
     };
@@ -304,9 +386,9 @@ fn step_bound<'m,S,I,E,F>(
     let mut total=(report.electrical.stored_after_j-report.electrical.stored_before_j)
         +report.thermal.stored_energy_change_j-report.electrical.native.supplied-external;
     for chamber in &report.source.chambers {
-        let p=&chamber.boundary.step().piston;
-        total+=p.gas.stored_energy_change_j+p.kinetic_energy_change_j+p.exterior_pressure_work_j
-            -p.external_force_work_j-ordered[&chamber.id].input.heat_j;
+        let p=D::account(&chamber.boundary);
+        total+=p.gas_energy_change_j+p.kinetic_energy_change_j+p.exterior_pressure_work_j
+            -p.external_force_work_j-p.support_work_j-ordered[&chamber.id].input.heat_j;
     }
     if !external.is_finite() || !total.is_finite() || total.abs()>controls.total_energy_tolerance_j {
         return Err(CircuitEnthalpyError::Invalid("all chambers, thermal bodies and circuit fail combined energy balance"));
@@ -315,7 +397,7 @@ fn step_bound<'m,S,I,E,F>(
     let step=NetworkStep {external_network_heat_j:external,transferred_heat_j:report.source.transferred_heat_j,
         total_energy_residual_j:total,boundary_solves:calls.get(),exchange_trials:heat_trials.get(),
         material_trials:material_trials.get()};
-    Ok(NetworkCandidate {network:candidate,step})
+    Ok(DrivenNetworkCandidate {network:candidate,step})
 }
 
 #[cfg(test)]

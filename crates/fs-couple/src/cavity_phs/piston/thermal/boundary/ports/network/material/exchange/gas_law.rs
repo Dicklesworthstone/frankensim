@@ -3,7 +3,7 @@
 //! source selection, heat destinations, reaction schedule or energy accounting.
 use super::*;
 use crate::cavity_phs::piston::thermal::ConductanceSample;
-use crate::cavity_phs::piston::thermal::boundary::ports::network::Contact;
+use crate::cavity_phs::piston::thermal::boundary::ports::network::{Contact, NetworkStep};
 use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
 use fs_thermal::enthalpy::CellId;
 use std::collections::{BTreeMap, BTreeSet};
@@ -45,46 +45,16 @@ impl PreparedMaterialExchangeNetwork<'_, '_> {
             &ResolvedThermochemicalGasState) -> Result<ConductanceSample<I>, E>,
     ) -> Result<NetworkCandidate<'m, ContactThermalSample<MaterialExchangeSample>, I>,
         CircuitEnthalpyError<NetworkError<MaterialExchangeError, E>>> {
-        checkpoint(cx).map_err(coupled_error)?;
-        if surfaces.len() > controls.maximum_contacts || chambers.len() > controls.maximum_chambers {
-            return Err(CircuitEnthalpyError::Invalid("gas surface/chamber capacity exceeded"));
-        }
-        let ids = chambers.iter().map(|c| c.id).collect::<BTreeSet<_>>();
-        let mut mapped = BTreeMap::new();
-        for surface in surfaces {
-            checkpoint(cx).map_err(coupled_error)?;
-            if !surface.area_m2.is_finite() || surface.area_m2 < 0.0
-                || !ids.contains(&surface.contact.chamber)
-                || mapped.insert(surface.contact.id, surface).is_some() {
-                return Err(CircuitEnthalpyError::Invalid("unique gas surfaces, existing chambers and finite nonnegative areas required"));
-            }
-        }
-        let mut areas = BTreeMap::<CellId, f64>::new();
-        // Stable physical contact-ID ordering, even for area accumulation.
-        for surface in mapped.values() {
-            let total = areas.entry(surface.contact.cell).or_default();
-            *total += surface.area_m2;
-            if !total.is_finite() {
-                return Err(CircuitEnthalpyError::Invalid("aggregate gas patch area is unrepresentable"));
-            }
-        }
-        for (&cell, &area) in &areas {
-            checkpoint(cx).map_err(coupled_error)?;
-            admit_area(thermal, cell, area).map_err(coupled_error)?;
-        }
+        let admitted = GasSurfaceSet::admit(cx, thermal, chambers, surfaces, controls)?;
         let binding = self.binding.electrical;
         let routes = binding.heat_destinations(thermal).map_err(|e| coupled_error(e.into()))?;
         let destinations = binding.bulk.resistors.iter().map(|r| r.destination).collect::<Vec<_>>();
-        let contacts = mapped.values().map(|s| s.contact).collect::<Vec<_>>();
         let result = super::super::super::step_with_contacts_candidate(thermal, target_s,
             CircuitEnthalpyInput { circuit, ports, destinations: &destinations }, &routes,
-            chambers, &contacts, controls, guess_j,
+            chambers, &admitted.contacts, controls, guess_j,
             |state| {
                 // Recheck the original owner's exposure at every actual trial.
-                for (&cell, &area) in &areas {
-                    checkpoint(cx)?;
-                    admit_area(state, cell, area)?;
-                }
+                admitted.check_trial(cx, state)?;
                 self.resolve(cx, state)
             },
             |contact, state, source, gas| resolve(contact, state, source, gas),
@@ -93,26 +63,12 @@ impl PreparedMaterialExchangeNetwork<'_, '_> {
             Err(CircuitEnthalpyError::Source(NetworkError::Material(e))) => return Err(coupled_error(e)),
             other => other?,
         };
-        // An admitted zero-area law cannot inject a hidden heat path. This is
-        // checked before publication without replacing the callback's payload.
-        for chamber in candidate.chambers() {
-            for sample in chamber.boundary.source() {
-                if mapped[&sample.port.id].area_m2 == 0.0 && sample.conductance_w_k != 0.0 {
-                    return Err(CircuitEnthalpyError::Invalid("zero-area gas surface returned nonzero conductance"));
-                }
-            }
-        }
+        admitted.check_samples(candidate.chambers().iter()
+            .flat_map(|chamber| chamber.boundary.source())
+            .map(|sample| (sample.port.id, sample.conductance_w_k)))?;
         let radiation_j = candidate.material().material.radiation.as_ref()
             .map_or(0.0, |r| (target_s - thermal.time_s()) * r.net_heat_w());
-        let external = candidate.step().external_network_heat_j - radiation_j;
-        let residual = candidate.step().total_energy_residual_j + radiation_j;
-        if !radiation_j.is_finite() || !external.is_finite() || !residual.is_finite()
-            || residual.abs() > controls.total_energy_tolerance_j {
-            return Err(coupled_error(MaterialExchangeError::Invalid("closed radiation cannot supply combined physical energy")));
-        }
-        checkpoint(cx).map_err(coupled_error)?;
-        candidate.step.external_network_heat_j = external;
-        candidate.step.total_energy_residual_j = residual;
+        close_radiation(cx, &mut candidate.step, radiation_j, controls)?;
         Ok(candidate)
     }
 
@@ -127,6 +83,82 @@ impl PreparedMaterialExchangeNetwork<'_, '_> {
         resolve_contact(self.binding.electrical.bulk, patch.contact.cell, thermal,
             &source.bulk, gas, patch.geometry)
     }
+}
+
+// One surface admission and radiation correction for midpoint and reacting
+// endpoint drivers. This owns no gas, thermal or electrical state.
+pub(super) struct GasSurfaceSet {
+    mapped: BTreeMap<u64, GasSurface>,
+    areas: BTreeMap<CellId, f64>,
+    pub(super) contacts: Vec<Contact>,
+}
+impl GasSurfaceSet {
+    pub(super) fn admit<B>(
+        cx: &Cx<'_>, thermal: &DepositionSimulation<'_>, chambers: &[Chamber<'_>],
+        surfaces: &[GasSurface], controls: NetworkSolve,
+    ) -> Result<Self, CircuitEnthalpyError<DrivenNetworkError<MaterialExchangeError, B>>> {
+        checkpoint(cx).map_err(coupled_error)?;
+        if surfaces.len() > controls.maximum_contacts || chambers.len() > controls.maximum_chambers {
+            return Err(CircuitEnthalpyError::Invalid("gas surface/chamber capacity exceeded"));
+        }
+        let ids = chambers.iter().map(|chamber| chamber.id).collect::<BTreeSet<_>>();
+        let mut mapped = BTreeMap::new();
+        for &surface in surfaces {
+            checkpoint(cx).map_err(coupled_error)?;
+            if !surface.area_m2.is_finite() || surface.area_m2 < 0.0
+                || !ids.contains(&surface.contact.chamber)
+                || mapped.insert(surface.contact.id, surface).is_some() {
+                return Err(CircuitEnthalpyError::Invalid("unique gas surfaces, existing chambers and finite nonnegative areas required"));
+            }
+        }
+        let mut areas = BTreeMap::<CellId, f64>::new();
+        for surface in mapped.values() {
+            let total = areas.entry(surface.contact.cell).or_default();
+            *total += surface.area_m2;
+            if !total.is_finite() {
+                return Err(CircuitEnthalpyError::Invalid("aggregate gas patch area is unrepresentable"));
+            }
+        }
+        let contacts = mapped.values().map(|surface| surface.contact).collect();
+        let admitted = Self { mapped, areas, contacts };
+        admitted.check_trial(cx, thermal).map_err(coupled_error)?;
+        Ok(admitted)
+    }
+
+    pub(super) fn check_trial(&self, cx: &Cx<'_>, thermal: &DepositionSimulation<'_>)
+        -> Result<(), MaterialExchangeError> {
+        for (&cell, &area) in &self.areas {
+            checkpoint(cx)?;
+            admit_area(thermal, cell, area)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn check_samples<B>(&self, samples: impl Iterator<Item = (u64, f64)>)
+        -> Result<(), CircuitEnthalpyError<DrivenNetworkError<MaterialExchangeError, B>>> {
+        for (id, conductance) in samples {
+            let surface = self.mapped.get(&id).ok_or(CircuitEnthalpyError::Invalid("gas result names an absent surface"))?;
+            if surface.area_m2 == 0.0 && conductance != 0.0 {
+                return Err(CircuitEnthalpyError::Invalid("zero-area gas surface returned nonzero conductance"));
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(super) fn close_radiation<B>(
+    cx: &Cx<'_>, step: &mut NetworkStep, radiation_j: f64, controls: NetworkSolve,
+) -> Result<(), CircuitEnthalpyError<DrivenNetworkError<MaterialExchangeError, B>>> {
+    let external = step.external_network_heat_j-radiation_j;
+    let residual = step.total_energy_residual_j+radiation_j;
+    if !radiation_j.is_finite() || !external.is_finite() || !residual.is_finite()
+        || residual.abs() > controls.total_energy_tolerance_j {
+        return Err(coupled_error(MaterialExchangeError::Invalid("closed radiation cannot supply combined physical energy")));
+    }
+    checkpoint(cx).map_err(coupled_error)?;
+    step.external_network_heat_j = external;
+    step.total_energy_residual_j = residual;
+    Ok(())
 }
 
 fn admit_area(thermal: &DepositionSimulation<'_>, id: CellId, area: f64)

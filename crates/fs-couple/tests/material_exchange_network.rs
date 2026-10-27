@@ -226,3 +226,9 @@ fn mismatched_surface_conditions_duplicates_area_and_cancellation_publish_nothin
 
 #[path = "material_exchange/reactive.rs"]
 mod reactive_tests;
+
+#[path = "material_exchange/coupled_material.rs"]
+mod coupled_material;
+
+#[path = "material_exchange/coupled_core.rs"]
+mod coupled_core;
