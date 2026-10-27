@@ -59,6 +59,59 @@ The page's data, audio, images, replays and MIDI rolls keep their paths and a on
 hands the page each file's content hash and `util.asset()` asks for `path?v=<hash>`: a file a deploy
 changed gets a new URL, so no visitor pairs new code with an hour-old `strandbar.json` or recording.
 
+## Native wind renderer
+
+The instrument-family section can also edit and render a self-contained wind
+performance with the existing **native `music_render wind` solver**. Build the
+local executable and the app, then serve that app through the optional loopback
+companion. From the repository root:
+
+```sh
+cargo build --release -p fs-couple --bin music_render
+npm --prefix apps/instrument-lab ci
+npm --prefix apps/instrument-lab run build
+node apps/instrument-lab/tools/serve-native-wind.mjs --engine "$(pwd)/target/release/music_render"
+```
+
+Open `http://127.0.0.1:8787`. `FSIM_MUSIC_RENDER` can supply the same absolute
+executable path; `--dist` selects an existing app build and `--port` changes the
+loopback port. Starting without an executable leaves the viewer available and
+reports the renderer as unavailable. Static hosted builds do not acquire a
+native rendering service.
+
+The editor starts from the repository's `reed-two-medium-tone-hole.performance`:
+its internal mixture, exterior mixture, tone hole and axial gas change reach the
+original source parser and physics. It is synthetic integration data, not a
+measured clarinet or oboe. The text-only route also admits self-contained
+`frankensim-flue-dg-performance-v1` sources. Pack-backed flue/valve and material
+string performances remain native CLI inputs: this first route carries no
+external material packs or radiation artifacts.
+
+The companion passes the exact UTF-8 bytes to one configured executable as
+`music_render wind INPUT.performance OUT.wav`, with a private working directory
+and fixed arguments. It does not parse physical parameters, retune notes, change
+PCM gain, synthesize fallback audio or run a shell. Playback becomes available
+only after successful native execution and a complete 48 kHz mono PCM16 WAV.
+Source or solver refusals remain visible; cancellation terminates the native
+child and removes that job's temporary files.
+
+The local adapter admits one render at a time, at most 1 MiB of source, 16 MiB of
+WAV, 256 KiB of process diagnostics and 60 seconds per request. These are local
+execution budgets, not physical acceptance criteria. Host/Origin checks and a
+per-session request token restrict execution to the same local app. Only files
+inside the selected built app are served; there is no command or filesystem API.
+
+```sh
+node --test apps/instrument-lab/tests/native-wind-server.test.mjs
+node --test apps/instrument-lab/tools/test-native-wind-client.mjs
+```
+
+The server suite uses an explicitly synthetic subprocess to check byte/argument
+preservation, real HTTP responses, refusal handling, cancellation and limits.
+It verifies the adapter rather than native Rust physics or instrument realism.
+Its executable-fixture checks require a temporary directory that permits local
+execution. No rendered audio or built app assets are committed by this workflow.
+
 ## Grading against real recordings
 
 The "Real vs ours" section compares renders with University of Iowa Musical Instrument Samples

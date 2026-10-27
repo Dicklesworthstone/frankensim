@@ -1,0 +1,30 @@
+/* Native wind source editing uses the same Instrument Lab palette as the family cards. */
+.nw-panel { margin-bottom: 24px; }
+.nw-panel [hidden] { display: none !important; }
+.nw-panel .panel-head { gap: 12px; flex-wrap: wrap; }
+.nw-panel .panel-head h3 { font: 600 23px/1.25 var(--font-display); color: var(--ivory); }
+.nw-connection { font: 500 11px/1.4 var(--font-mono); color: var(--air); }
+.nw-intro { max-width: 78ch; margin: 12px 0; color: var(--ivory-2); }
+.nw-help { margin: 12px 0 18px; color: var(--ivory-3); }
+.nw-help summary { cursor: pointer; color: var(--ivory-2); }
+.nw-help p { max-width: 90ch; margin: 8px 0; }
+.nw-source-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 16px; margin-bottom: 7px; }
+.nw-source-head label { font: 600 12px/1.4 var(--font-mono); color: var(--ivory-2); }
+.nw-source-head span { overflow-wrap: anywhere; }
+.nw-source {
+  display: block; width: 100%; min-height: 220px; max-height: 75vh; resize: vertical; tab-size: 4;
+  padding: 13px 15px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
+  background: var(--ink-1); color: var(--ivory); font: 400 12px/1.65 var(--font-mono);
+}
+.nw-source:focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; }
+.nw-source[readonly] { opacity: 0.75; }
+.nw-actions { margin-top: 12px; flex-wrap: wrap; }
+.nw-result { min-height: 1.5em; margin-top: 12px; color: var(--ivory-2); white-space: pre-wrap; overflow-wrap: anywhere; }
+.nw-result.nw-refused { color: #f0b9a3; border-left: 2px solid var(--ember); padding-left: 12px; }
+.nw-playback { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding-top: 14px; margin-top: 14px; border-top: 1px solid var(--line); }
+.nw-playback audio { flex: 1 1 280px; min-width: 0; max-width: 640px; }
+.nw-playback p { flex-basis: 100%; }
+@media (max-width: 640px) {
+  .nw-source { font-size: 11px; padding: 10px; }
+  .nw-source-head { align-items: start; }
+}
