@@ -333,6 +333,42 @@ impl RegionalDuct {
         )
     }
 
+    /// Build the time-domain WDF 2-port nonlinear orifice shunt line at the
+    /// first open tone hole (if any) on the `fft_samples` grid without building
+    /// baffled spatial Rayleigh receivers (used by the legacy observer path so
+    /// in-loop reed/bore state stays bitwise identical to the baffled path).
+    pub fn register_hole_shunt_line(
+        &self,
+        sample_rate_hz: u32,
+        fft_samples: usize,
+        wall: WallModel<'_>,
+    ) -> Result<Option<RegisterHoleShuntLine>, OutletError> {
+        let sites = self.open_hole_sites();
+        if sites.is_empty() {
+            return Ok(None);
+        }
+        let hole_times: Vec<f64> = sites.iter().map(|s| s.one_way_time_s).collect();
+        let first_bore_time_s = sites[0].bore_one_way_time_s;
+        let (_, _, shunt_line) = acceleration_kernels_with_holes(
+            sample_rate_hz,
+            fft_samples,
+            self.one_way_time_s(),
+            &hole_times,
+            first_bore_time_s,
+            self.inlet_impedance(),
+            1.0,
+            |omega| {
+                self.response_with_wall_and_holes(
+                    omega,
+                    LossModel::Bessel,
+                    Termination::FlangedOpen,
+                    wall,
+                )
+            },
+        )?;
+        Ok(shunt_line)
+    }
+
     /// [`Self::baffled_outlet_and_open_holes_and_shunt_delayed_at`] with the
     /// numerical WDF port reference resistance scaled by `port_resistance_scale`
     /// (`R_2 = port_resistance_scale * Z_{0,port}`).
