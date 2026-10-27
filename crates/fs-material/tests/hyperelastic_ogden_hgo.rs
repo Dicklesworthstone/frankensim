@@ -854,6 +854,92 @@ fn g0_bulk_and_stretch_parameter_domains_refuse() {
     ));
 }
 
+/// G0/G3: a declared material domain is enforced by the original NH/MR
+/// consumers as well as the spectral laws, independently of rigid rotations.
+#[test]
+fn g0_neo_hookean_and_mooney_rivlin_stretch_domains() {
+    let q = rotation([0.0, 0.0, 1.0], 0.73);
+    for model in [
+        HyperelasticModel::NeoHookean {
+            mu: 2.0,
+            lambda: 5.0,
+        },
+        HyperelasticModel::MooneyRivlin {
+            c10: 0.8,
+            c01: 0.2,
+            kappa: 7.0,
+        },
+    ] {
+        let law = Hyperelastic::new(model, 3.0).unwrap();
+        for stretch in [3.0, 1.0 / 3.0] {
+            let at = diag([stretch, 1.0, 1.0]);
+            let outside = diag([
+                if stretch > 1.0 {
+                    stretch * (1.0 + 1e-12)
+                } else {
+                    stretch / (1.0 + 1e-12)
+                },
+                1.0,
+                1.0,
+            ]);
+            for f in [at, flat(matmul3(&q, &matrix(&at)))] {
+                assert!(law.piola(&f).is_ok(), "inclusive limit: {f:?}");
+                assert!(law.tangent(&f).is_ok(), "inclusive limit: {f:?}");
+            }
+            for f in [outside, flat(matmul3(&q, &matrix(&outside)))] {
+                assert!(matches!(law.piola(&f), Err(MaterialError::State { .. })));
+                assert!(matches!(law.tangent(&f), Err(MaterialError::State { .. })));
+            }
+        }
+        // Positive determinant alone is insufficient: an isochoric stretch
+        // can leave BOTH the tensile and compressive material domains.
+        let isochoric = diag([50.0, 1.0 / 50.0, 1.0]);
+        assert!(matches!(
+            law.piola(&isochoric),
+            Err(MaterialError::State { .. })
+        ));
+        assert!(matches!(
+            law.tangent(&isochoric),
+            Err(MaterialError::State { .. })
+        ));
+    }
+}
+
+#[test]
+fn g0_neo_hookean_and_mooney_rivlin_invalid_stretch_limits_refuse() {
+    for model in [
+        HyperelasticModel::NeoHookean {
+            mu: 2.0,
+            lambda: 5.0,
+        },
+        HyperelasticModel::MooneyRivlin {
+            c10: 0.8,
+            c01: 0.2,
+            kappa: 7.0,
+        },
+    ] {
+        let identity_only = Hyperelastic::new(model.clone(), 1.0).unwrap();
+        assert!(identity_only.piola(&I).is_ok());
+        assert!(identity_only.tangent(&I).is_ok());
+        for limit in [-1.0, 0.0, 0.999999, f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                Hyperelastic::new(model.clone(), limit),
+                Err(MaterialError::Parameters { .. })
+            ));
+            let mut changed = identity_only.clone();
+            changed.stretch_limit = limit;
+            assert!(matches!(
+                changed.piola(&I),
+                Err(MaterialError::Parameters { .. })
+            ));
+            assert!(matches!(
+                changed.tangent(&I),
+                Err(MaterialError::Parameters { .. })
+            ));
+        }
+    }
+}
+
 #[test]
 fn g0_log_bulk_split_and_parameter_derived_admissibility() {
     for volumetric in [

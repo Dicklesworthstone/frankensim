@@ -549,10 +549,12 @@ homogenization, the P2 milestone.
   two-sided Hessian there is not claimed. A single aligned family supplies
   `2 k1 (lambda²-1) exp(k2 (lambda²-1)²) lambda²` incompressible Cauchy
   stress; two identical families supply twice this value.
-  New variants enforce all principal stretches in `[1/limit,limit]` with
-  eight-EPSILON eigensolver boundary roundoff; limit*(1+1e-12) refuses.
-  Legacy NH/MR retain their existing card-only stretch limit (an explicit
-  remaining admission gap). Both new variants offer quadratic or log-squared
+  All four variants enforce all principal stretches in `[1/limit,limit]` in
+  stress and tangent evaluation, with eight-EPSILON eigensolver boundary
+  roundoff; limit*(1+1e-12) refuses. The limit must be finite and at least one,
+  including after mutation of the public field. Generic-scalar energy
+  evaluation retains its documented admissible-F precondition. The Ogden and
+  HGO variants offer quadratic or log-squared
   bulk energies and separate distortional/bulk accessors. Full-invariant
   HGO's fibre accessor intentionally retains volume dependence.
 - `hyper::cards` instantiates strict, dimensioned `ConstitutiveModelCard`s

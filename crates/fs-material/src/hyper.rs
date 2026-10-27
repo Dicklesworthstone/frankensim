@@ -4,7 +4,7 @@
 //! is the exact Hessian (nested duals) — derivative consistency is by
 //! construction, then independently FD-gated in conformance. Ogden uses
 //! coalescence-safe spectral derivatives; HGO uses tension-only structural
-//! strains. The new laws enforce their declared principal-stretch domains.
+//! strains. Every law enforces its declared principal-stretch domain.
 
 use crate::{MaterialAdmissibility, MaterialError};
 use fs_ad::{Dual, Dual64, Real};
@@ -160,8 +160,14 @@ impl Hyperelastic {
     /// Construct with parameter checks.
     ///
     /// # Errors
-    /// [`MaterialError::Parameters`] on non-positive moduli.
+    /// [`MaterialError::Parameters`] on inadmissible moduli or a
+    /// principal-stretch limit that is nonfinite or smaller than one.
     pub fn new(model: HyperelasticModel, stretch_limit: f64) -> Result<Self, MaterialError> {
+        if !stretch_limit.is_finite() || stretch_limit < 1.0 {
+            return Err(MaterialError::Parameters {
+                what: "principal-stretch limit must be finite and at least one".into(),
+            });
+        }
         let ok = match &model {
             HyperelasticModel::NeoHookean { mu, lambda } => *mu > 0.0 && *lambda >= 0.0,
             HyperelasticModel::MooneyRivlin { c10, c01, kappa } => {
@@ -184,8 +190,6 @@ impl Hyperelastic {
                         .is_finite()
                     && volumetric.kappa().is_finite()
                     && volumetric.kappa() > 0.0
-                    && stretch_limit.is_finite()
-                    && stretch_limit >= 1.0
             }
             HyperelasticModel::HolzapfelGasserOgden {
                 c10,
@@ -196,22 +200,14 @@ impl Hyperelastic {
                 volumetric,
                 ..
             } => {
-                [
-                    *c10,
-                    *k1,
-                    *k2,
-                    *dispersion,
-                    volumetric.kappa(),
-                    stretch_limit,
-                ]
-                .iter()
-                .all(|v| v.is_finite())
+                [*c10, *k1, *k2, *dispersion, volumetric.kappa()]
+                    .iter()
+                    .all(|v| v.is_finite())
                     && *c10 > 0.0
                     && *k1 >= 0.0
                     && *k2 > 0.0
                     && (0.0..=1.0 / 3.0).contains(dispersion)
                     && volumetric.kappa() > 0.0
-                    && stretch_limit >= 1.0
                     && fibres.len() <= MAX_FIBRE_FAMILIES
                     && fibres.iter().all(|a| {
                         a.iter().all(|v| v.is_finite())
@@ -346,26 +342,27 @@ impl Hyperelastic {
     }
 
     fn check_state(&self, f: &[f64; 9]) -> Result<(), MaterialError> {
-        check_admissible(f)?;
-        if matches!(
-            &self.model,
-            HyperelasticModel::Ogden { .. } | HyperelasticModel::HolzapfelGasserOgden { .. }
-        ) {
-            let stretches = self.principal_stretches(f)?;
-            // Eight ULPs accommodate eigensolver/rotation roundoff at the
-            // inclusive boundary; 1e-12 beyond the limit still refuses.
-            let roundoff = 8.0 * f64::EPSILON;
-            if stretches[0] < (1.0 - roundoff) / self.stretch_limit
-                || stretches[2] > self.stretch_limit * (1.0 + roundoff)
-            {
-                return Err(MaterialError::State {
-                    what: format!(
-                        "principal stretches {stretches:?} outside [{}, {}]",
-                        1.0 / self.stretch_limit,
-                        self.stretch_limit
-                    ),
-                });
-            }
+        // These fields are public, so a caller may have changed the limit
+        // since construction. An invalid domain must not disable admission.
+        if !self.stretch_limit.is_finite() || self.stretch_limit < 1.0 {
+            return Err(MaterialError::Parameters {
+                what: "principal-stretch limit must be finite and at least one".into(),
+            });
+        }
+        let stretches = self.principal_stretches(f)?;
+        // Eight ULPs accommodate eigensolver/rotation roundoff at the
+        // inclusive boundary; 1e-12 beyond the limit still refuses.
+        let roundoff = 8.0 * f64::EPSILON;
+        if stretches[0] < (1.0 - roundoff) / self.stretch_limit
+            || stretches[2] > self.stretch_limit * (1.0 + roundoff)
+        {
+            return Err(MaterialError::State {
+                what: format!(
+                    "principal stretches {stretches:?} outside [{}, {}]",
+                    1.0 / self.stretch_limit,
+                    self.stretch_limit
+                ),
+            });
         }
         Ok(())
     }
@@ -373,7 +370,9 @@ impl Hyperelastic {
     /// First Piola–Kirchhoff stress `P = ∂W/∂F` (row-major 9-vector).
     ///
     /// # Errors
-    /// [`MaterialError::State`] when det F ≤ 0.
+    /// [`MaterialError::State`] when det F ≤ 0, F is nonfinite, or a
+    /// principal stretch exceeds the declared domain. An invalid public
+    /// `stretch_limit` returns [`MaterialError::Parameters`].
     pub fn piola(&self, f: &[f64; 9]) -> Result<[f64; 9], MaterialError> {
         self.check_state(f)?;
         let (_, grad) = fs_ad::gradient::<9>(*f, |x| self.energy(&x));
@@ -390,7 +389,9 @@ impl Hyperelastic {
     /// exact via nested duals — one inner-gradient sweep per column.
     ///
     /// # Errors
-    /// [`MaterialError::State`] when det F ≤ 0.
+    /// [`MaterialError::State`] when det F ≤ 0, F is nonfinite, or a
+    /// principal stretch exceeds the declared domain. An invalid public
+    /// `stretch_limit` returns [`MaterialError::Parameters`].
     pub fn tangent(&self, f: &[f64; 9]) -> Result<[[f64; 9]; 9], MaterialError> {
         self.check_state(f)?;
         let mut a = [[0.0f64; 9]; 9];
