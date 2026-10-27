@@ -205,3 +205,47 @@ world angular momentum including its orbital contribution, source heat-capacity
 changes to actual spin, nonuniform expansion, heating/cooling, restart equality,
 and atomic source/work/cancellation refusal. Synthetic material fixtures test
 the implemented mechanics; they are not empirical material qualification.
+
+## Continuing articulated motion under material heating
+
+`thermal::heating::articulated_motion::HeatedArticulatedMotion` binds the
+existing `HeatedArticulated` inventory, source heat timeline and accepted joint
+positions/velocities. Each actual heat substep advances `fs-mbd` ABA dynamics
+through the existing checked `fs-time` RK45 owner, with stationary base,
+constant declared joint efforts and uniform gravity. Position and rate error
+scales are independent per coordinate, including mixed prismatic/revolute trees.
+
+At a thermal configuration change, the native RNEA/ABA mass actions preserve
+`p = M(q) qdot` at unchanged joint positions. This transfers the coupled
+generalized momentum, not each link's angular velocity in isolation. The native
+joint-position and velocity limits apply to the resulting state. Momentum is
+not checked as actuator force; actual applied efforts retain their own limits.
+No dense mass matrix or independent dynamics/time solver is introduced.
+
+Thermal mass and original source ownership remain unchanged. Mechanical kinetic
+and gravitational storage, exact held-effort work, signed thermal-configuration
+work and fixed-configuration integration error are separate accounts. Total
+absolute parameter work and numerical defects have caller-specified bounds;
+opposite heating/cooling signs cannot conceal excessive unresolved work.
+Parameter work is external to this one-way caloric model, never a second heat
+credit. Joint momentum residuals use componentwise dimensional tolerances.
+
+The original heat scheduler owns both clocks, generated sources and contact
+events. `advance_with` composes ordinary thermal observers; source, material,
+joint-limit, work-budget and late cancellation refusals discard the complete
+proposed trajectory. Native recursions are bounded by the source mechanism's
+global region/link cap; cancellation is checked at every RK stage and thermal
+substep. Clone retains the full restart state.
+
+Scope is the existing free-expansion rigid-link approximation with prescribed
+joint placements and transport geometry. The thermal/mechanical split is first
+order and requires step refinement. No moving-base or closed-loop mechanism,
+contact/impact, shape-change kinetic energy, reciprocal thermoelastic heat or
+experimental qualification is claimed.
+
+Focused G1/G3 tests: `cargo test -p fs-mbd --test articulated_mass` and
+`cargo test -p fs-mbd-material --test heated_articulated_motion`. Synthetic
+coaxial two-joint cases independently specify the full coupled inertia law,
+heat-capacity-only swaps, applied work, cooling/restart and transactional
+source/cancellation/work-budget refusal. Full workspace qualification remains
+a separate gate.

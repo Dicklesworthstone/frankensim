@@ -28,6 +28,7 @@ fs-material = { path = "../fs-material" }
 fs-mbd = { path = "../fs-mbd" }
 fs-qty = { path = "../fs-qty" }
 fs-thermal = { path = "../fs-thermal" }
+fs-time = { path = "../fs-time" }
 
 [dev-dependencies]
 fs-alloc = { path = "../fs-alloc" }

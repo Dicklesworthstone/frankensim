@@ -3,6 +3,9 @@ use super::*;
 use crate::articulated::ResolvedArticulated;
 use crate::thermal::ExpandedArticulated;
 
+/// Continuing joint motion with source-resolved inertia on the thermal clock.
+pub mod motion;
+
 #[cfg(feature = "electrothermal-coupling")]
 mod electrical;
 

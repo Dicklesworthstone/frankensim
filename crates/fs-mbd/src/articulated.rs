@@ -1171,6 +1171,56 @@ pub fn forward_dynamics(
     })
 }
 
+/// Conjugate joint momentum `p = M(q) qdot` for a stationary prescribed base.
+///
+/// The existing RNEA recursion applies the generalized mass operator with zero
+/// bias velocity, gravity and external load. No dense matrix is formed. Actual
+/// position/rate limits are admitted before evaluation; momentum is not an
+/// actuator force and is never compared with an effort limit. A moving base
+/// requires its additional affine momentum contribution and is outside this API.
+pub fn stationary_base_joint_momentum(
+    model: &ArticulatedModel,
+    joint_position: &[f64],
+    joint_velocity: &[f64],
+) -> Result<Vec<f64>, ArticulatedError> {
+    model.validate_configuration(joint_position)?;
+    model.validate_velocity(joint_velocity)?;
+    let zero = vec![0.0; model.dof_count()];
+    let external = vec![Wrench::default(); model.link_count()];
+    Ok(inverse_dynamics(
+        model, BaseState::stationary(Se3::identity()), joint_position, &zero,
+        joint_velocity, Vec3::default(), &external,
+    )?.generalized_force)
+}
+
+/// Recover `qdot = M(q)^-1 p` through the existing linear-storage ABA recursion.
+///
+/// This is the stationary-base inverse mass action, not an applied-force solve.
+/// Momentum has units N s for a prismatic coordinate and N m s for a revolute
+/// coordinate. Joint position and resulting velocity limits still apply. The
+/// recursion's physical-inertia/singularity and finite-output checks remain in
+/// force; no joint limit is edited and no fictitious impulse is applied.
+pub fn stationary_base_joint_velocity(
+    model: &ArticulatedModel,
+    joint_position: &[f64],
+    joint_momentum: &[f64],
+) -> Result<Vec<f64>, ArticulatedError> {
+    model.validate_configuration(joint_position)?;
+    model.validate_generalized("joint_momentum", joint_momentum)?;
+    let zero = vec![0.0; model.dof_count()];
+    let external = vec![Wrench::default(); model.link_count()];
+    let pass = articulated_body_pass(
+        model, Twist::zero(), joint_position, &zero, joint_momentum, &external,
+        None, false, PRESCRIBED_ABA_FIELDS,
+    )?;
+    let (velocity, _) = propagate_aba_accelerations(
+        model, &pass, Twist::zero(), "joint_velocity_from_momentum",
+        "body_velocity_from_momentum",
+    )?;
+    model.validate_velocity(&velocity)?;
+    Ok(velocity)
+}
+
 /// Featherstone articulated-body forward dynamics with a physical free base.
 ///
 /// The six base coordinates are unactuated and solved together with the scalar

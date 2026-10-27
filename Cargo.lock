@@ -2052,6 +2052,7 @@ dependencies = [
  "fs-qty",
  "fs-solid",
  "fs-thermal",
+ "fs-time",
 ]
 
 [[package]]

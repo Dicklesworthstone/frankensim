@@ -471,3 +471,20 @@ fault injection, or G5 cross-ISA evidence.
   friction coefficient, contact modulus, grasp force, speed, stability margin,
   or force-closure guarantee. Its normalized display pose belongs to the
   browser presentation layer and is not returned by `fs-mbd`.
+
+## Stationary-base generalized mass actions
+
+`articulated::stationary_base_joint_momentum` evaluates `M(q) qdot` through the
+existing zero-bias RNEA recursion. `stationary_base_joint_velocity` applies the
+inverse mass through the existing ABA recursion, retaining linear storage and
+physical-inertia checks. Neither builds a dense generalized matrix. Momentum
+has units N s or N m s for prismatic or revolute coordinates; it is not an
+actuator force and does not use force limits. Actual input/output positions and
+rates retain their native joint-limit checks.
+
+These functions assume a stationary prescribed base; a moving base adds an
+affine momentum term and requires a separate boundary. Their immediate consumer
+is source-heated articulated dynamics in fs-mbd-material, where thermal inertia
+updates preserve joint momentum and account parameter work explicitly.
+`cargo test -p fs-mbd --test articulated_mass` uses an independently known
+two-joint inertia matrix and checks the momentum/force-limit distinction.
