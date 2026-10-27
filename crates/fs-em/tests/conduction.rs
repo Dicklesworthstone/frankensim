@@ -17,6 +17,7 @@ use fs_material::{
 };
 use fs_phs::circuit::{Branch, CircuitGraph, assemble_circuit};
 use fs_qty::Temperature;
+use fs_rep_mesh::{Metric2, TriComplex2};
 
 fn source(
     value: PropertyValue,
@@ -225,6 +226,56 @@ fn parallel_paths_thickness_voltage_reversal_and_gauge_preserve_power() {
         power.push(forward.power_w());
     }
     near(power[1], 3.0 * power[0]);
+}
+
+#[test]
+fn common_voltage_shift_preserves_a_free_interior_node_current_and_heat() {
+    let mesh = TriComplex2::from_indexed_triangles(
+        "conductor-free-interior-gauge",
+        vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.25, 0.5]],
+        vec![[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4]],
+        Metric2::planar(0.2).unwrap(),
+    )
+    .unwrap();
+    let problem = PlanarConduction::new(
+        mesh,
+        vec![conductor(2.0, ElectricalPropertyBasis::Conductivity); 4],
+        limits(),
+        &mut || false,
+    )
+    .unwrap();
+    let boundary = [(0, 0.0), (1, 4.0), (2, 4.0), (3, 0.0)];
+    let original = problem.solve(&boundary, controls(), &mut || false).unwrap();
+    let reference = 2.0_f64.powi(40);
+    let shifted = problem
+        .solve(
+            &boundary.map(|(node, voltage)| (node, reference + voltage)),
+            controls(),
+            &mut || false,
+        )
+        .unwrap();
+    // Independent affine solution V=4*x: the unconstrained INTERIOR node is
+    // at one volt, E=(-4,0), J=(-8,0), and sigma*|E|²*volume gives each heat.
+    // Integer voltage differences remain exactly representable at this gauge;
+    // the offset must not set the tolerance for the free-node solve.
+    near(original.voltage_v()[4], 1.0);
+    near(shifted.voltage_v()[4] - reference, 1.0);
+    assert!(original.report().unwrap().converged_euclidean());
+    assert!(shifted.report().unwrap().converged_euclidean());
+    assert!(shifted.nodal_boundary_current_a()[4].is_none());
+    for (cell, area) in [0.25, 0.375, 0.25, 0.125].into_iter().enumerate() {
+        for field in [&original, &shifted] {
+            near(field.electric_field_v_m()[cell][0], -4.0);
+            near(field.electric_field_v_m()[cell][1], 0.0);
+            near(field.current_density_a_m2()[cell][0], -8.0);
+            near(field.current_density_a_m2()[cell][1], 0.0);
+            near(field.cell_power_w()[cell], 6.4 * area);
+        }
+    }
+    near(original.power_w(), 6.4);
+    near(shifted.power_w(), original.power_w());
+    near(shifted.maximum_free_current_residual_a(), 0.0);
+    near(shifted.power_balance_residual_w(), 0.0);
 }
 
 #[test]

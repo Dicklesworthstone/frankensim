@@ -82,8 +82,7 @@ mod viscous_tests {
         // Pure xy shear has Pi_xy = -rho*tau*gamma/3. The D3Q19 fourth
         // moment sum(w*ex^2*ey^2)=1/9 supplies this independent field.
         for q in 0..Q3 {
-            physical[q] -= 3.0 * rho * tau * rate * W3[q]
-                * f64::from(E3[q].0) * f64::from(E3[q].1);
+            physical[q] -= 3.0 * rho * tau * rate * W3[q] * f64::from(E3[q].0) * f64::from(E3[q].1);
         }
         let expected = force_corrected_shear_rate3(&physical, rho, velocity, [0.0; 3], tau);
         assert!((expected - rate).abs() < 1e-14);
@@ -104,7 +103,11 @@ impl FreeSurface3 {
     pub(crate) fn transport_wall_at(&self, coordinates: [i64; 3]) -> bool {
         let (nx, ny, nz) = self.grid.tile_dims();
         let extents = [nx * TILE, ny * TILE, nz * TILE];
-        if coordinates.iter().zip(extents).any(|(&p, n)| p < 0 || p >= n as i64) {
+        if coordinates
+            .iter()
+            .zip(extents)
+            .any(|(&p, n)| p < 0 || p >= n as i64)
+        {
             return true;
         }
         let [x, y, z] = coordinates.map(|p| (p as usize / TILE) as u32);
@@ -134,10 +137,16 @@ impl FreeSurface3 {
         let force = self.force_at_lane(key, lane);
         let u = core::array::from_fn(|d| raw[d] + 0.5 * force[d] / rho);
         let rate = crate::d3q19::force_corrected_shear_rate3(
-            &self.grid.populations(slot, lane), rho, u, force, tau,
+            &self.grid.populations(slot, lane),
+            rho,
+            u,
+            force,
+            tau,
         );
         if !rate.is_finite() || rate < 0.0 {
-            return Err(FreeSurfaceError3::Transport("unrepresentable liquid strain rate"));
+            return Err(FreeSurfaceError3::Transport(
+                "unrepresentable liquid strain rate",
+            ));
         }
         Ok(rate)
     }

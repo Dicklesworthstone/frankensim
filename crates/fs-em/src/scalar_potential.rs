@@ -80,13 +80,19 @@ pub(crate) fn solve(
     let mut columns = Vec::new();
     let mut values = Vec::new();
     let mut reduced_rhs = Vec::with_capacity(free.len());
+    // Constant potentials lie in the full Hodge operator's nullspace. Solve
+    // for differences before multiplying by that operator: a large common
+    // voltage must not dominate either elimination or the CG residual scale.
+    // The original absolute prescribed outputs remain bit-for-bit unchanged.
+    let reference = prescribed.iter().flatten().copied().next().unwrap_or(0.0);
     for &v in &free {
         poll(cancelled)?;
         let mut load = rhs[v];
         let (cols, vals) = stiffness.row(v);
         for (&w, &value) in cols.iter().zip(vals) {
             if let Some(voltage) = prescribed[w] {
-                load = finite((-value).mul_add(voltage, load))?;
+                let difference = finite(voltage - reference)?;
+                load = finite((-value).mul_add(difference, load))?;
             } else {
                 columns.push(index[w]);
                 values.push(value);
@@ -115,7 +121,7 @@ pub(crate) fn solve(
             return Err(PotentialError::Nonconvergence(result.report));
         }
         for (&v, &value) in free.iter().zip(&result.x) {
-            voltage[v] = value;
+            voltage[v] = finite(reference + value)?;
         }
         Some(result.report)
     };
