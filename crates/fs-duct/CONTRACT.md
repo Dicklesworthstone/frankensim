@@ -1186,5 +1186,26 @@ identity. Regional pressure rows follow element then arm order and are exactly
 zero outside their support. Native source, pressure, force, storage and port
 regressions cover differing spectra and mixed hereditary/Kelvin regions.
 The local membrane model still omits axial shell waves and stress transfer at
-material joints. Live wall-state transfer is not supplied; binding is cold and
-no internal history is silently discarded.
+material joints. These attachment APIs initialize cold mechanics; no internal
+history is silently discarded. Live elastic/Kelvin--Voigt transfer uses the
+separate continuing-state operation below.
+
+## Live material updates on the native gas/wall state
+
+`DgDuct::rebind_compliant_wall_regions` changes fixed-geometry wall coefficients
+on an accepted trajectory. It preserves gas wave and viscothermal coordinates
+exactly, radial displacement, and conjugate wall momentum. The original native
+reciprocal operator is rebuilt with each element's new coefficients. The actual
+spring/kinetic storage change enters `cumulative_parameter_work_j` once, apart
+from port work, initial energy and inferred dissipation. The parameter-changing
+physical owner must settle that signed work; this operation does not infer heat
+or a mass-transfer process. A finite explicit work budget bounds each update.
+
+Original state/operator identity, passive coefficients and cancellation are
+checked before publication; old propagators refuse after an operator change.
+Uniform and regional Maxwell histories refuse a live replacement because no
+source-identified branch transfer is provided. The existing cold regional
+Maxwell API remains supported. Native tests check analytical post-change wall
+motion/pressure, physical quadrature of parameter work, retained gas-memory
+coordinates, one-time energy accounting and transactional refusal. This does not
+remap gas, mesh, expanding geometry or hereditary branch histories.

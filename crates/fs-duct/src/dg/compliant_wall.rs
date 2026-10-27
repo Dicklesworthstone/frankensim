@@ -17,6 +17,8 @@ use fs_phs::WallPin;
 mod coordinates;
 mod relaxation;
 use coordinates::{CoordinateError, WallCoordinates};
+mod update;
+pub use update::DgWallMaterialUpdate;
 
 #[derive(Debug, Clone)]
 pub(super) struct CompliantWall {
@@ -309,7 +311,8 @@ impl DgDuct {
     /// The local membrane approximation omits axial wall stress transfer,
     /// waves across material joints, geometry motion and static prestress.
     /// Refine the acoustic mesh with the material boundaries held fixed.
-    /// This is cold preparation; it does not transfer a vibrating wall state.
+    /// This is cold preparation; use `rebind_compliant_wall_regions` to transfer
+    /// a vibrating wall with a separate signed parameter-work account.
     /// Use with_compliant_wall_relaxation_regions for explicit local spectra;
     /// this elastic/Kelvin constructor does not infer hereditary branches.
     ///

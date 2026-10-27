@@ -14,6 +14,8 @@ use fs_thermochem::{Composition, CompositionBasis};
 // their receipts and explicit synthetic-data scope, without copying a fit.
 #[path = "../../src/render/schedule/reed/field_input/tests/support.rs"]
 mod gas_support;
+#[path = "spatial/live.rs"]
+mod live;
 
 fn composition(fraction: f64) -> Composition {
     Composition::new(

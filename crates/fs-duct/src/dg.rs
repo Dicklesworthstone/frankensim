@@ -83,7 +83,7 @@ use fs_math::det;
 mod viscothermal;
 pub use viscothermal::{DgWallAdmission, DgWallResolution};
 mod compliant_wall;
-pub use compliant_wall::DgCompliantWallState;
+pub use compliant_wall::{DgCompliantWallState, DgWallMaterialUpdate};
 mod port_response;
 pub use port_response::{DgMultiportResponse, DgPortResponse};
 mod side_ports;
@@ -173,12 +173,16 @@ pub struct EnergyLedgerRow {
     pub port_work_step_j: f64,
     /// Cumulative work [J] injected by ports since initialization.
     pub cumulative_port_work_j: f64,
+    /// Cumulative signed work [J] supplied by accepted material-parameter
+    /// changes. This is separate from port work and irreversible heat.
+    pub cumulative_parameter_work_j: f64,
     /// Cumulative energy [J] absorbed by `Matched` boundaries and any wall memory,
     /// inferred from the stored-energy deficit (zero for the fully lossless image).
     pub cumulative_dissipated_j: f64,
-    /// Signed energy balance residual $E(t_n) - E(0) - W_{\text{port}} + D_{\text{matched}}$ [J].
+    /// Signed residual $E(t_n) - E(0) - W_{\text{port}} - W_{\text{parameter}} + D$ [J].
     pub energy_balance_residual_j: f64,
-    /// Relative drift $|E(t_n) - E(0) - W_{\text{port}} + D_{\text{matched}}| / \max(E(0) + |W_{\text{port}}|, 10^{-300})$.
+    /// Absolute residual divided by initial energy plus the magnitudes of
+    /// accumulated port and parameter work (with a 1e-300 J floor).
     pub relative_energy_drift: f64,
     /// True for the lossless image with lossless boundaries. False when boundary
     /// absorption or wall dissipation is inferred from the deficit.
@@ -1332,6 +1336,7 @@ impl DgDuct {
             step_count: 0,
             initial_energy_j: e0,
             cumulative_port_work_j: 0.0,
+            cumulative_parameter_work_j: 0.0,
             cumulative_dissipated_j: 0.0,
             nodal_dirty: false,
         }
@@ -1359,6 +1364,7 @@ impl DgDuct {
             step_count: 0,
             initial_energy_j: 0.0,
             cumulative_port_work_j: 0.0,
+            cumulative_parameter_work_j: 0.0,
             cumulative_dissipated_j: 0.0,
             nodal_dirty: false,
         }
@@ -1879,6 +1885,7 @@ pub struct DgState {
     step_count: u64,
     initial_energy_j: f64,
     cumulative_port_work_j: f64,
+    cumulative_parameter_work_j: f64,
     cumulative_dissipated_j: f64,
     nodal_dirty: bool,
 }
@@ -1908,6 +1915,13 @@ impl DgState {
     #[must_use]
     pub const fn initial_energy_j(&self) -> f64 {
         self.initial_energy_j
+    }
+
+    /// Signed external parameter work accepted without advancing the clock [J].
+    /// Material updates do not reset the initial energy or reclassify work as heat.
+    #[must_use]
+    pub const fn cumulative_parameter_work_j(&self) -> f64 {
+        self.cumulative_parameter_work_j
     }
 
     /// Original accumulated boundary/wall loss [J]. For the dense kernel this
@@ -2159,8 +2173,12 @@ impl DgPropagator {
         state.step_count += 1;
         state.cumulative_port_work_j += step_work;
         let energy_now = state.stored_energy_j();
-        let residual = energy_now - state.initial_energy_j - state.cumulative_port_work_j;
-        let scale = (state.initial_energy_j + state.cumulative_port_work_j.abs()).max(1e-300);
+        let residual = energy_now - state.initial_energy_j - state.cumulative_port_work_j
+            - state.cumulative_parameter_work_j;
+        let scale = (state.initial_energy_j
+            + state.cumulative_port_work_j.abs()
+            + state.cumulative_parameter_work_j.abs())
+        .max(1e-300);
         Ok(DgStepOutput {
             port_outputs,
             ledger: EnergyLedgerRow {
@@ -2168,6 +2186,7 @@ impl DgPropagator {
                 stored_energy_j: energy_now,
                 port_work_step_j: step_work,
                 cumulative_port_work_j: state.cumulative_port_work_j,
+                cumulative_parameter_work_j: state.cumulative_parameter_work_j,
                 cumulative_dissipated_j: 0.0,
                 energy_balance_residual_j: residual,
                 relative_energy_drift: residual.abs() / scale,
@@ -2233,8 +2252,12 @@ impl DgPropagator {
         // negative value would expose a non-passive step.
         state.cumulative_dissipated_j += e_prev + step_work - e_now;
         let residual = e_now - state.initial_energy_j - state.cumulative_port_work_j
+            - state.cumulative_parameter_work_j
             + state.cumulative_dissipated_j;
-        let scale = (state.initial_energy_j + state.cumulative_port_work_j.abs()).max(1e-300);
+        let scale = (state.initial_energy_j
+            + state.cumulative_port_work_j.abs()
+            + state.cumulative_parameter_work_j.abs())
+        .max(1e-300);
         Ok(DgStepOutput {
             port_outputs,
             ledger: EnergyLedgerRow {
@@ -2242,6 +2265,7 @@ impl DgPropagator {
                 stored_energy_j: e_now,
                 port_work_step_j: step_work,
                 cumulative_port_work_j: state.cumulative_port_work_j,
+                cumulative_parameter_work_j: state.cumulative_parameter_work_j,
                 cumulative_dissipated_j: state.cumulative_dissipated_j,
                 energy_balance_residual_j: residual,
                 relative_energy_drift: residual.abs() / scale,

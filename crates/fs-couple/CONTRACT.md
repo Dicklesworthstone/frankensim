@@ -6659,9 +6659,9 @@ Elastic, Kelvin--Voigt and hereditary regions may coexist; no common spectrum
 replaces their sources. Gas memory, ports and wall histories advance in one
 native operator, and physical pressure observations are zero outside each arm's
 support. Material boundaries align with element boundaries. The existing thin cylindrical
-local-membrane model supplies no axial shell waves, stress transfer across
-material joints, or live transfer of an already vibrating wall into new material
-coordinates. Focused G1/G3 tests reconstruct local force/energy relations and
+local-membrane model supplies no axial shell waves or stress transfer across
+material joints. Cold attachment and the live elastic/Kelvin--Voigt transfer
+described below are distinct operations. Focused G1/G3 tests reconstruct local force/energy relations and
 change only one wall assignment through the actual pressure/motion evolution.
 
 ## Spatial Ohmic current and finite material-temperature feedback
@@ -6877,3 +6877,23 @@ and heat routing remain shared. A rotated anisotropic RC fixture checks three
 continuing discharge/heating steps against independently solved nonlinear
 midpoint circuit and finite-capacity heat equations, including original pins,
 transverse coordinate components and combined energy closure.
+
+## Source-backed updates of an already vibrating duct wall
+
+Uniform and regional material-wall owners now expose `rebind_controlled` on
+the continuing native DG state. New source-resolved density, stiffness and
+viscosity, including supported temperature changes, retain radial displacement,
+surface momentum, gas waves and every viscothermal memory coordinate. The native
+transfer reports actual changed wall storage as signed parameter work once;
+the external thermal/material owner owes that work and cannot also call it heat.
+Source receipts, state, reciprocal operator and a newly certified propagator
+publish together at the same physical clock after applicability-band, work,
+state-identity and cancellation checks. No vibration restart or amplitude
+normalization occurs. Failed source or propagator preparation retains the old
+complete state. Live Maxwell-history replacement, changing gas/mesh, thermal
+expansion and mass transfer remain outside this operation; cold regional
+hereditary construction is unchanged. Focused tests continue an independent
+sealed-wall oscillator, preserve regional diffusion history, change supported
+source temperature, and exercise source/work/history/cancellation refusals.
+Program anchors: MR08/MR34 (`frankensim-material-reality-ui2if.1.8`, `.5.4`),
+remain open for broader changing-geometry and reduced-history behavior.

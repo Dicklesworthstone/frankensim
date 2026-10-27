@@ -13,6 +13,8 @@ use fs_phs::{WallPin, wall_specific_impedance};
 use fs_qty::{Density, Dims, DynViscosity, Pressure};
 use fs_vfit::relaxation::RelaxationImpedanceSpec;
 
+mod update;
+
 /// Immutable material, thickness, restraint and complete local loss law.
 ///
 /// This is the existing isotropic, frozen-state, small-displacement membrane
@@ -273,7 +275,8 @@ impl LocalMaterialWall {
     /// propagator. The original pointwise gas-field masses also couple to this
     /// wall; its inertia and spring mass use the geometric Gram matrix, never
     /// an averaged gas. Uniform-cylinder and thin-wall restrictions apply. This is
-    /// cold compilation, not transfer of an already vibrating wall.
+    /// cold compilation. `MaterialWallDg::rebind_controlled` updates an already
+    /// vibrating elastic/Kelvin--Voigt wall and its certified propagator together.
     /// The retained band is the SAME model applicability statement as the
     /// graph-wall owner, not a filter or broadband input certificate. The
     /// caller must resolve and qualify its excited frequency range separately.
