@@ -1,5 +1,7 @@
 //! Independent finite-stretch motion, work, material substitution and objectivity.
 //! These are authored numerical fixtures, not measured material validation.
+#[path = "finite_solid/thermal.rs"]
+mod thermal;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_couple::finite_solid::*;
 use fs_evidence::ValidityDomain;

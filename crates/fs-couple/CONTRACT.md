@@ -7360,7 +7360,7 @@ exterior-radiation refresh. The wider gas-chemistry ladder remains open.
 
 ### Source-bound finite-strain dynamics (MR58 bounded increment)
 
-`finite_solid::FiniteSolidMaterial` binds an explicit model index and reference
+`finite_solid::FiniteSolidMaterial::resolve` binds an explicit model index and reference
 density from the same immutable `MaterialCard` at the exact
 `ResolvedHyperelastic` context, retaining the original model, typed source
 query, material identity and density receipt. The existing fixed-external
@@ -7401,8 +7401,8 @@ and API review; native parsing, compilation and test execution remain pending
 because the available executor could not start.
 
 MR58 remains open. This increment is compressible, isothermal,
-rate-independent hyperelasticity on conforming P1 tetrahedra. Thermal
-reference deformation, finite-strain inelastic evolution, moving supports,
+rate-independent hyperelasticity on conforming P1 tetrahedra. Evolving thermal
+reference state, finite-strain inelastic evolution, moving supports,
 contact, follower pressure and a mixed/stabilized nearly-incompressible
 formulation remain outside this path. No continuous-time inversion or
 self-intersection guarantee, mesh-convergence certificate, or new adjoint
@@ -7507,3 +7507,37 @@ exchange, evolving structural material/basis, moving mesh reconstruction,
 or composition-dependent radiation transfers. No nonlinear uniqueness or
 unconditional convergence claim is made. The broader material-reality and
 gas-chemistry beads remain open.
+
+
+### Source-declared finite thermal reference (MR58/MR21 increment)
+
+`finite_solid::thermal::MeanThermalReference` uses the existing mean engineering
+expansion resolver with explicit reference and endpoint temperature roles.
+The coefficient must carry that source convention; instantaneous small-strain
+coefficients are not silently reinterpreted. Both contexts retain all remaining
+coordinates and quantity descriptors. The selected law's actual source axes
+and validity axes must be supported fixed external conditions, including when
+a curve declares a dependence absent from its applicability bounds.
+
+`FiniteSolidMaterial::resolve_mean_thermal` binds the thermal reference,
+reference density and current-temperature constitutive model to one immutable
+material card. With source length ratio `s=L(T)/L(T_ref)`, `Fe=F/s` and the
+response per original reference volume is `W0=s^3 W(Fe)`, `P0=s^2 Pe`,
+`A0=s Ae`. The original material checks the elastic gradient; `hyper3` also
+checks the actual total Jacobian. Density and mass stay at the original
+reference temperature. Uniform and per-element references use the same native
+force, energy, tangent and dynamic operators.
+
+Five new fixtures cover independent energy/stress/tangent formulas, free
+expansion under rigid rotation, source-driven finite motion, heterogeneous
+held temperatures, original mass, and source/domain/Jacobian refusals.
+Source/API review and independent arithmetic were performed; native Rust
+parsing, compilation and execution remain unavailable. These fixtures do not
+supply experimental calibration.
+
+This is thermal preparation followed by mechanics at held temperature per
+element. It does not evolve a heat/entropy equation or account for work during
+a temperature change. Isotropic reference preparation is supported;
+anisotropic finite thermal mapping, coupled evolving thermomechanics,
+inelasticity and nearly-incompressible stabilization remain open. MR58 and
+MR21 remain open.

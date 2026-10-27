@@ -23,8 +23,30 @@ const PA: Dims = Dims([-1, 1, -2, 0, 0, 0]);
 /// A spatial solver may borrow a native law or a source-bound law without
 /// extracting bare parameters or introducing another constitutive update.
 pub trait HyperelasticMaterial {
-    /// The same law must supply energy, Piola stress and consistent tangent.
+    /// The underlying law owns constitutive evaluation and its elastic domain.
     fn hyperelastic(&self) -> &Hyperelastic;
+
+    /// Stored energy per original reference volume.
+    ///
+    /// A reference-deformation adapter must transform this together with stress
+    /// and tangent. Spatial consumers must retain this material seam rather
+    /// than extracting a bare law and losing its reference configuration.
+    fn energy_density(&self, deformation: &[f64; 9]) -> f64 {
+        self.hyperelastic().energy(deformation)
+    }
+
+    /// First Piola stress conjugate to the caller's deformation gradient.
+    fn first_piola(&self, deformation: &[f64; 9]) -> Result<[f64; 9], MaterialError> {
+        self.hyperelastic().piola(deformation)
+    }
+
+    /// Exact derivative of first Piola stress in the same reference frame.
+    fn consistent_tangent(
+        &self,
+        deformation: &[f64; 9],
+    ) -> Result<[[f64; 9]; 9], MaterialError> {
+        self.hyperelastic().tangent(deformation)
+    }
 }
 
 impl HyperelasticMaterial for Hyperelastic {

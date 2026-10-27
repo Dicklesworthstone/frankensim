@@ -2400,3 +2400,14 @@ an ideal-gas isothermal expansion with equal supplied heat and delivered work,
 and failed/cancelled moving-volume reconstruction. Parser checks completed;
 native Rust execution was unavailable because DSR/RCH are absent and the shared
 filesystem is full.
+
+
+### Reference-aware hyperelastic material interface
+
+`hyper::cards::HyperelasticMaterial` exposes `energy_density`, `first_piola`
+and `consistent_tangent` with defaults delegating to the original native law.
+A reference-deformation adapter must transform all three consistently and
+retain the underlying elastic-domain owner. Spatial consumers can preserve the
+complete material binding instead of stripping it to bare coefficients.
+The public `state_point::is_fixed_external_coordinate` classifies one coordinate;
+it does not replace typed-query, source-axis, validity or path admission.

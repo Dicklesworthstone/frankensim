@@ -1666,3 +1666,13 @@ the native Piola force and tangent. Reference mass delegates to
 unrepresentable element/assembled mass refuses. Consumers must retain that
 mass during deformation instead of multiplying updated volume by a fixed
 reference density. These accessors introduce no constitutive or time solver.
+
+
+### Reference-aware finite-deformation response
+
+`hyper3` evaluates energy, Piola force and tangent through the original
+`HyperelasticMaterial` interface, preserving source reference-deformation
+adapters. Bare laws retain the default native response. The actual total
+deformation must have a finite positive Jacobian independently of the
+material's elastic-gradient admission. Reference geometry and the consistent
+reference mass remain fixed; a thermal adapter does not alter the mass mesh.

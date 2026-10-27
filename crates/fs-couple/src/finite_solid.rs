@@ -1,7 +1,8 @@
 //! Source-bound finite-deformation solid motion on the native solid/time owners.
 //!
 //! The same immutable material card supplies a finite-strain constitutive model
-//! and reference density at one exact typed external context. The reference
+//! and original reference density. Ordinary bindings share one typed context;
+//! thermal preparation retains explicit reference and current contexts. The
 //! mass stays fixed as the body deforms. Native hyper3 supplies Piola forces,
 //! consistent tangents and stored energy; native generalized-alpha at rho_inf=1
 //! supplies implicit-midpoint motion. No constitutive law or integrator is
@@ -10,9 +11,14 @@
 //! This bounded path has fixed supports, held referential nodal/body loads,
 //! compressible isothermal hyperelasticity and conforming P1 tetrahedra.
 //! Nonlinear midpoint has a signed energy defect: it is reported and gated,
-//! never converted into physical heat. No thermal eigen-deformation, plasticity,
-//! contact, moving supports, follower pressure, mixed incompressible formulation,
-//! or continuous-in-time nonintersection claim is made.
+//! never converted into physical heat. The optional mean-expansion source path
+//! prepares an isotropic thermal reference at a held temperature per element.
+//! No evolving heat equation, plasticity, contact, moving supports, follower
+//! pressure, mixed incompressible formulation or continuous-in-time
+//! nonintersection claim is made.
+
+/// Source-declared engineering thermal reference preparation.
+pub mod thermal;
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -43,6 +49,7 @@ pub struct FiniteSolidMaterial {
     law: ResolvedHyperelastic,
     density: ResolvedMaterialStatePoint,
     model_index: usize,
+    thermal: Option<thermal::MeanThermalReference>,
 }
 
 impl FiniteSolidMaterial {
@@ -72,7 +79,7 @@ impl FiniteSolidMaterial {
                 "reference density requires validity-wide support at fixed external conditions; evolving mechanical axes are not owned".into(),
             ));
         }
-        Ok(Self { law, density, model_index })
+        Ok(Self { law, density, model_index, thermal: None })
     }
 
     /// Original admitted constitutive model and exact external context.
@@ -90,6 +97,44 @@ impl FiniteSolidMaterial {
 
 impl HyperelasticMaterial for FiniteSolidMaterial {
     fn hyperelastic(&self) -> &Hyperelastic { self.law.law() }
+
+    fn energy_density(&self, deformation: &[f64; 9]) -> f64 {
+        match &self.thermal {
+            None => self.law.law().energy(deformation),
+            Some(thermal) => thermal.volume_ratio()
+                * self.law.law().energy(&thermal.elastic_deformation(deformation)),
+        }
+    }
+
+    fn first_piola(
+        &self,
+        deformation: &[f64; 9],
+    ) -> Result<[f64; 9], fs_material::MaterialError> {
+        match &self.thermal {
+            None => self.law.law().piola(deformation),
+            Some(thermal) => {
+                let p = self.law.law().piola(&thermal.elastic_deformation(deformation))?
+                    .map(|value| thermal.area_ratio() * value);
+                thermal.check_response(p.iter())?;
+                Ok(p)
+            }
+        }
+    }
+
+    fn consistent_tangent(
+        &self,
+        deformation: &[f64; 9],
+    ) -> Result<[[f64; 9]; 9], fs_material::MaterialError> {
+        match &self.thermal {
+            None => self.law.law().tangent(deformation),
+            Some(thermal) => {
+                let a = self.law.law().tangent(&thermal.elastic_deformation(deformation))?
+                    .map(|row| row.map(|value| thermal.stretch() * value));
+                thermal.check_response(a.iter().flatten())?;
+                Ok(a)
+            }
+        }
+    }
 }
 
 /// Budget for the existing native consistent-initial-acceleration solve.

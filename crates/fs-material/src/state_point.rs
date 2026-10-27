@@ -343,7 +343,9 @@ pub struct ResolvedScalarProperty {
 /// Shared source-domain policy for mechanical laws held at fixed external
 /// conditions. Evolving strain, stress, rates and field coordinates need their
 /// own physical owner; matching dimensions alone never freezes those roles.
-pub(crate) fn is_fixed_external_coordinate(
+/// This classifies one coordinate only; the source owner must still admit
+/// complete typed queries, validity domains and any required path support.
+pub fn is_fixed_external_coordinate(
     axis: &str,
     quantity: Option<QuantitySpec>,
     value: Option<f64>,

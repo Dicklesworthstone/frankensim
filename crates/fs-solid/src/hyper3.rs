@@ -125,10 +125,10 @@ impl<L: HyperelasticMaterial> HyperelasticLawField<'_, L> {
         Ok(())
     }
 
-    fn at(&self, element: usize) -> &Hyperelastic {
+    fn at(&self, element: usize) -> &L {
         match self {
-            Self::Uniform(law) => law.hyperelastic(),
-            Self::PerElement(laws) => laws[element].hyperelastic(),
+            Self::Uniform(law) => law,
+            Self::PerElement(laws) => &laws[element],
         }
     }
 }
@@ -411,6 +411,19 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
         Ok(elements)
     }
 
+    // Geometry admission belongs to this owner even when a material adapter
+    // evaluates an elastic gradient relative to another stress-free state.
+    fn deformation_jacobian(f: &[f64; 9]) -> Result<f64, String> {
+        let j = f[0] * (f[4] * f[8] - f[5] * f[7])
+            - f[1] * (f[3] * f[8] - f[5] * f[6])
+            + f[2] * (f[3] * f[7] - f[4] * f[6]);
+        if f.iter().any(|value| !value.is_finite()) || !j.is_finite() || j <= 0.0 {
+            Err(format!("total deformation has nonpositive or nonfinite det F = {j}"))
+        } else {
+            Ok(j)
+        }
+    }
+
     fn deformation_gradient(element: &Element, u: &[f64]) -> [f64; 9] {
         let mut f = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
         for (a, &node) in element.nodes.iter().enumerate() {
@@ -440,15 +453,17 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
                 checkpoint(cx)?;
             }
             let f = Self::deformation_gradient(element, u);
-            let j = f[0] * (f[4] * f[8] - f[5] * f[7]) - f[1] * (f[3] * f[8] - f[5] * f[6])
-                + f[2] * (f[3] * f[7] - f[4] * f[6]);
+            let j = match Self::deformation_jacobian(&f) {
+                Ok(j) => j,
+                Err(what) => return Ok(Err((index, what))),
+            };
             min_det_f = min_det_f.min(j);
             let material = self.material.at(index);
-            let p = match material.piola(&f) {
+            let p = match material.first_piola(&f) {
                 Ok(p) => p,
                 Err(error) => return Ok(Err((index, error.to_string()))),
             };
-            let w = material.energy(&f);
+            let w = material.energy_density(&f);
             if !w.is_finite() {
                 return Ok(Err((
                     index,
@@ -486,7 +501,10 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
                 checkpoint(cx)?;
             }
             let f = Self::deformation_gradient(element, u);
-            let a4 = match self.material.at(index).tangent(&f) {
+            if let Err(what) = Self::deformation_jacobian(&f) {
+                return Ok(Err((index, what)));
+            }
+            let a4 = match self.material.at(index).consistent_tangent(&f) {
                 Ok(a4) => a4,
                 Err(error) => return Ok(Err((index, error.to_string()))),
             };
