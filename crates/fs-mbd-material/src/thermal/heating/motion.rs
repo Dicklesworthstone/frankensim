@@ -9,6 +9,8 @@
 /// Source-bound viscous interfaces with reciprocal finite-body heat feedback.
 #[cfg(feature = "dissipative-coupling")]
 pub mod damping;
+/// Material-coordinate external impulse events on the same accepted trajectory.
+pub mod loads;
 
 use super::*;
 use crate::principal::transfer::ConfigurationTransferControls;

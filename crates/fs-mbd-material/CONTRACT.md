@@ -399,3 +399,36 @@ The focused regression target is `heating_damping` with
 impulse/heat, material-temperature feedback, continuing trajectories and joint
 refusal. These tests specify implementation checks, not measured validation;
 native execution must be reported separately from source review.
+
+## External impulses on continuing heated material bodies
+
+`thermal::heating::motion::loads::MaterialAttachment` identifies an original
+material region and a point in reference body coordinates. The current source
+expansion maps that point about the region's original fixed point; the existing
+principal-frame owner supplies its actual centre-of-mass-relative arm.
+`HeatedRigidBody::material_point_kinematics` exposes that same world point,
+velocity and angular velocity for an external load or contact owner.
+
+`apply_material_impulses` applies an explicitly bounded, ordered batch of native
+point-impulse events to a private candidate. Each impulse uses the existing
+`fs-mbd::RigidBodyState::apply_impulse_at_body_point` owner and the current
+source-derived mass and full inertia. Signed external work is independently
+evaluated as impulse dot midpoint point velocity and compared with native work
+and the actual kinetic-storage change, at both event and batch level. Extraction
+of mechanical work remains signed; it is not relabeled as generated heat.
+
+Accepted events retain the original thermal cells, sources, event cursor,
+configuration, pose and physical clock. The returned body continues through the
+same thermal/mechanical advance, so subsequent heating updates its inertia
+without discarding the applied momentum. Failed attachment admission, native
+dynamics, work bounds or cancellation publish no partial batch. The audit keeps
+the ordered native receipts and separate external-work/storage accounts.
+
+This is an instantaneous mechanical-input boundary. The caller supplies the
+physical impulse law, the other body's reaction and any separately resolved
+impact/friction heat. It does not infer a contact active set, a force-holding
+duration or a continuous-force time integrator. Material coordinates do not prove
+geometric contact or membership inside a region; the geometry owner supplies
+that physical correspondence. Focused tests in `heating_loads` exercise analytic
+off-centre work/momentum, continued heating, source-only density and expansion
+changes, and atomic refusal. Native execution is reported separately.
