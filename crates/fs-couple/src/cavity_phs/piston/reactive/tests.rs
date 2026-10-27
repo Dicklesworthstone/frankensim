@@ -3,6 +3,7 @@
 mod thermal;
 mod network;
 mod implicit;
+mod arrhenius;
 
 use super::*;
 use crate::cavity_phs::piston::material::MaterialGasPiston;
