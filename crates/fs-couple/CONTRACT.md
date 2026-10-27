@@ -6723,8 +6723,8 @@ Nyquist guard and existing midpoint resolved-band limit apply to a conservative
 bound that includes the gas rank-one stiffness, at the old, midpoint and final
 gas states.
 
-This is a closed, spatially uniform, frozen-composition gas and a fixed
-structural material/geometry epoch. Its pressure/volume feedback requires
+The base `step` uses a closed, spatially uniform, frozen-composition gas and a
+fixed structural material/geometry epoch. Its pressure/volume feedback requires
 time refinement; exact structural ZOH does not make the full nonlinear
 interconnection exact. There is no new wall heat transfer, reciprocal
 thermoelastic heating, reactive/nozzle flow, finite-deformation geometry or
@@ -7314,3 +7314,39 @@ The cases and runtime were parser/source reviewed, including independent
 numerical checks of the analytic references, but native tests were not executed
 because the pinned sibling dependencies and configured remote runners are
 unavailable in this environment.
+
+## Source-defined reactions drive the elastic gas boundary
+
+`GasValveMotion::reactive_step_candidate` and `step_reactive` connect the original
+`GasReaction` to the existing mesh/material-derived modal pressure boundary.
+One native modal sample supplies the chemical duration. Source-backed explicit,
+implicit, multichannel and subcycled kinetics remain owned by `GasReaction`.
+
+The accepted owner is cloned with its original reference volume, reference modal
+coordinates, equilibrium, material identity, modal state and observation transfers.
+A fixed-volume chemical proposal conserves total gas internal energy, including
+formation references. Every subsequent gas/motion trial starts from that same
+reacted gas and accepted mechanical history; chemical substeps never advance the
+structural clock. Native gas-loaded time-resolution gates are retained. A complete
+candidate publishes once, or both histories remain unchanged.
+
+The split is first-order chemistry then joint pressure/work/motion. Compression
+and external heat affect the next chemical sample. The enclosing account starts
+before chemistry: gas internal-energy change plus modal storage change, physical
+modal loss and exterior pressure work equals supplied external heat within the
+declared tolerance. Formation energy and modal loss are not added as gas heating.
+Original chemical and post-reaction mechanical reports remain separate.
+
+G1/G3/G4 regressions in `tests/solid_enthalpy/valve/gas_motion/reactive.rs` use the
+existing six-tet cube's independent one-DOF mass/stiffness integrals and a
+constant-cv energy-midpoint quadratic with the changed formation offset. They
+cover source-rate/modulus substitution, forward/reverse excitation, inert
+equality with the native step, continued anchored volume, physical damping
+balance and rejected chemical/late-mechanical proposals with deterministic retry.
+Coefficients are synthetic. Native regression execution is still required; only
+source/API review and independent arithmetic were available in this session.
+
+This remains a spatially uniform closed gas and fixed structural
+material/geometry epoch. It adds no flame/shock propagation, chemical acoustic
+relaxation, wall thermal transfer, nozzle flow, moving geometry/basis or automatic
+exterior-radiation refresh. The wider gas-chemistry ladder remains open.

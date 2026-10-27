@@ -5,6 +5,8 @@
 //! through its exact ZOH map. A scalar volume residual joins their endpoints;
 //! the existing Newton-Krylov owner solves it using the exact discrete tangent.
 
+pub mod reactive;
+
 use std::cell::{Cell, RefCell};
 
 use fs_exec::Cx;
