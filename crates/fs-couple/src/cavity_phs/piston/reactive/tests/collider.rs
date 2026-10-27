@@ -1,5 +1,7 @@
 //! Synthetic reaction/collider data exercise native conservative gas and motion.
 //! No empirical ignition, fuel-mechanism or engine-fidelity claim is made.
+mod troe;
+
 use super::*;
 use crate::cavity_phs::piston::reactive::implicit::ImplicitReactionSolve;
 use crate::cavity_phs::piston::reactive::material_rate::collider::*;

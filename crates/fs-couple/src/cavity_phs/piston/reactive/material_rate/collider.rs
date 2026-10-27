@@ -12,8 +12,12 @@
 //! Pr/(1+Pr), where Pr = (k0/k_inf) q. Both scales have units mol/(m3 s) because
 //! species activities and q are dimensionless. An imported concentration-based
 //! low-pressure coefficient must include the explicit c0 and activity-basis
-//! conversion. This is Lindemann (broadening factor one), not Troe/SRI falloff,
-//! chemically activated kinetics or validated combustion-mechanism data.
+//! conversion. Explicit Troe3/Troe4 regimes multiply this same Lindemann factor
+//! by the canonical Troe broadening function, using the actual gas temperature.
+//! Three parameters omit the T2 term; four parameters require its source claim.
+//! This bounded rung admits alpha in [0,1], positive characteristic temperatures
+//! and 0 < Fcent <= 1. It does not clamp coefficients or supply SRI, chemically
+//! activated kinetics or validated combustion-mechanism data.
 //!
 //! Reference conventions:
 //! <https://www.cantera.org/stable/reference/kinetics/reaction-rates.html>
@@ -29,18 +33,25 @@ use super::{
     ACTIVITY_RATE_SCALE_DIMS, ClosedGasParcel, GasReactionError, ResolvedMaterialStatePoint,
     ScalarAdmissibility, ScalarPropertyRequirement, invalid, poll, positive,
 };
-use crate::cavity_phs::piston::reactive::mechanism::Sum;
 use fs_material::thermochemical_gas::ThermochemicalGasModel;
-use fs_qty::Dims;
+use fs_qty::{Dims, Temperature};
 use fs_thermochem::SpeciesId;
 use fs_thermochem::equilibrium::MAX_REACTION_SPECIES_V1;
 use std::collections::BTreeSet;
 
 /// Explicit positive normalization c0 in mol/m3.
 pub const REFERENCE_CONCENTRATION_PROPERTY: &str = "reaction_collider_reference_concentration";
-/// Normalized low-pressure activity scale k0 in mol/(m3 s), used by Lindemann.
+/// Normalized low-pressure activity scale k0 in mol/(m3 s), used by falloff laws.
 /// This can be a source scalar, curve or surface at the actual state point.
 pub const LOW_PRESSURE_SCALE_PROPERTY: &str = "reaction_low_pressure_rate_scale";
+/// Dimensionless Troe weight alpha in [0,1].
+pub const TROE_ALPHA_PROPERTY: &str = "reaction_troe_alpha";
+/// Troe T3 (T***) in kelvin, in (1-alpha)*exp(-T/T3).
+pub const TROE_T3_PROPERTY: &str = "reaction_troe_temperature_3";
+/// Troe T1 (T*) in kelvin, in alpha*exp(-T/T1).
+pub const TROE_T1_PROPERTY: &str = "reaction_troe_temperature_1";
+/// Troe T2 (T**) in kelvin, in exp(-T2/T); required only for Troe4.
+pub const TROE_T2_PROPERTY: &str = "reaction_troe_temperature_2";
 
 /// A source property for ONE species' reaction-specific collision efficiency.
 /// Multiple explicitly named species may share one property.
@@ -57,6 +68,10 @@ pub enum ColliderRegime {
     ThirdBody,
     /// Interpolate low/high-pressure limits with the Lindemann Pr/(1+Pr) law.
     Lindemann,
+    /// Troe broadening with explicitly sourced alpha, T3 and T1; no T2 term.
+    Troe3,
+    /// Troe broadening with explicitly sourced alpha, T3, T1 and T2.
+    Troe4,
 }
 
 /// Immutable species/property bindings for a single reaction channel.
@@ -131,17 +146,39 @@ impl MaterialColliderLaw {
             MOLAR_CONCENTRATION_DIMS,
             ScalarAdmissibility::StrictlyPositive,
         )?];
-        if self.regime == ColliderRegime::Lindemann {
+        if self.regime != ColliderRegime::ThirdBody {
             required.push(ScalarPropertyRequirement::try_new(
                 LOW_PRESSURE_SCALE_PROPERTY,
                 ACTIVITY_RATE_SCALE_DIMS,
                 ScalarAdmissibility::StrictlyPositive,
             )?);
         }
+        if matches!(self.regime, ColliderRegime::Troe3 | ColliderRegime::Troe4) {
+            required.push(ScalarPropertyRequirement::try_new(
+                TROE_ALPHA_PROPERTY,
+                Dims([0; 6]),
+                ScalarAdmissibility::NonNegative,
+            )?);
+            for name in [TROE_T3_PROPERTY, TROE_T1_PROPERTY] {
+                required.push(ScalarPropertyRequirement::try_new(
+                    name,
+                    Temperature::DIMS,
+                    ScalarAdmissibility::StrictlyPositive,
+                )?);
+            }
+            if self.regime == ColliderRegime::Troe4 {
+                required.push(ScalarPropertyRequirement::try_new(
+                    TROE_T2_PROPERTY,
+                    Temperature::DIMS,
+                    ScalarAdmissibility::StrictlyPositive,
+                )?);
+            }
+        }
         let mut names = BTreeSet::new();
         for binding in &self.efficiencies {
             if binding.property == REFERENCE_CONCENTRATION_PROPERTY
                 || binding.property == LOW_PRESSURE_SCALE_PROPERTY
+                || required.iter().any(|r| r.name() == binding.property)
             {
                 return Err(invalid(
                     "an efficiency property cannot also be a collider scale",
@@ -173,56 +210,21 @@ impl MaterialColliderLaw {
                 .map(|p| p.value_si())
                 .ok_or_else(|| invalid("resolved source omitted a required collider coefficient"))
         };
-        let c0 = property(REFERENCE_CONCENTRATION_PROPERTY)?;
-        let model = gas.model().thermodynamics();
-        let mut weighted = Sum::default();
-        for (species, fraction) in model
-            .components()
-            .iter()
-            .zip(model.mole_composition().fractions())
-        {
-            poll(cancelled)?;
-            let index = self
-                .efficiencies
-                .binary_search_by(|b| b.species.cmp(species.species()))
-                .map_err(|_| invalid("live gas has no declared collider efficiency"))?;
-            let efficiency = property(&self.efficiencies[index].property)?;
-            let contribution = efficiency * fraction;
-            if !contribution.is_finite()
-                || (efficiency > 0.0 && *fraction > 0.0 && contribution == 0.0)
-            {
-                return Err(invalid("positive collider contribution is unrepresentable"));
-            }
-            weighted.add(contribution)?;
-        }
-        // A real absence of effective colliders is distinct from numerical
-        // underflow; the native kinetic owner preserves actual activities.
-        if weighted.value == 0.0 {
-            poll(cancelled)?;
+        // Selected source validity and the physical Troe coefficient domain
+        // still apply when the complete effective collider population is zero.
+        let log_center = self.troe_log_center(resolved, gas.state().state().temperature)?;
+        let Some(log_q) = super::third_body::normalized_concentration_log(
+            &self.efficiencies,
+            resolved,
+            gas,
+            cancelled,
+        )?
+        else {
             return Ok(0.0);
-        }
-        let molar_mass = gas
-            .state()
-            .thermodynamics()
-            .properties()
-            .molar_mass()
-            .value();
-        let concentration = (gas.mass_kg() / molar_mass) / gas.volume_m3();
-        if !positive(concentration) || !positive(weighted.value) || !positive(c0) {
-            return Err(invalid(
-                "positive represented collider concentration required",
-            ));
-        }
-        let log_q = fs_math::det::ln(weighted.value) + fs_math::det::ln(concentration)
-            - fs_math::det::ln(c0);
-        if !log_q.is_finite() {
-            return Err(invalid(
-                "collider concentration ratio logarithm is unrepresentable",
-            ));
-        }
+        };
         let factor = match self.regime {
             ColliderRegime::ThirdBody => fs_math::det::exp(log_q),
-            ColliderRegime::Lindemann => {
+            ColliderRegime::Lindemann | ColliderRegime::Troe3 | ColliderRegime::Troe4 => {
                 let low = property(LOW_PRESSURE_SCALE_PROPERTY)?;
                 if !positive(base_scale) || !positive(low) {
                     return Err(invalid(
@@ -231,15 +233,19 @@ impl MaterialColliderLaw {
                 }
                 let log_reduced = fs_math::det::ln(low) - fs_math::det::ln(base_scale) + log_q;
                 if !log_reduced.is_finite() {
-                    return Err(invalid("Lindemann reduced pressure is unrepresentable"));
+                    return Err(invalid("falloff reduced pressure is unrepresentable"));
                 }
-                // Avoid overflow in Pr or 1+Pr at a perfectly finite high-
-                // pressure limit. A lost positive low-pressure rate still refuses.
-                if log_reduced >= 0.0 {
-                    1.0 / (1.0 + fs_math::det::exp(-log_reduced))
+                if let Some(log_center) = log_center {
+                    troe_multiplier(log_reduced, log_center)?
                 } else {
-                    let reduced = fs_math::det::exp(log_reduced);
-                    reduced / (1.0 + reduced)
+                    // Avoid overflow in Pr or 1+Pr at a perfectly finite high-
+                    // pressure limit. A lost positive low-pressure rate still refuses.
+                    if log_reduced >= 0.0 {
+                        1.0 / (1.0 + fs_math::det::exp(-log_reduced))
+                    } else {
+                        let reduced = fs_math::det::exp(log_reduced);
+                        reduced / (1.0 + reduced)
+                    }
                 }
             }
         };
@@ -251,4 +257,102 @@ impl MaterialColliderLaw {
         poll(cancelled)?;
         Ok(factor)
     }
+
+    fn troe_log_center(
+        &self,
+        resolved: &ResolvedMaterialStatePoint,
+        temperature: f64,
+    ) -> Result<Option<f64>, GasReactionError> {
+        if !matches!(self.regime, ColliderRegime::Troe3 | ColliderRegime::Troe4) {
+            return Ok(None);
+        }
+        let property = |name| {
+            resolved
+                .property(name)
+                .map(|p| p.value_si())
+                .ok_or_else(|| invalid("resolved source omitted a required Troe coefficient"))
+        };
+        let alpha = property(TROE_ALPHA_PROPERTY)?;
+        if !alpha.is_finite() || !(0.0..=1.0).contains(&alpha) || !positive(temperature) {
+            return Err(invalid(
+                "Troe requires alpha in [0,1] and positive gas temperature",
+            ));
+        }
+        let mut terms = [f64::NEG_INFINITY; 3];
+        for (i, (weight, name)) in [(1.0 - alpha, TROE_T3_PROPERTY), (alpha, TROE_T1_PROPERTY)]
+            .into_iter()
+            .enumerate()
+        {
+            let characteristic = property(name)?;
+            if !positive(characteristic) {
+                return Err(invalid("Troe characteristic temperatures must be positive"));
+            }
+            if weight == 0.0 {
+                continue;
+            }
+            let ratio = temperature / characteristic;
+            if !positive(ratio) {
+                return Err(invalid("Troe temperature ratio underflows or overflows"));
+            }
+            terms[i] = fs_math::det::ln(weight) - ratio;
+        }
+        if self.regime == ColliderRegime::Troe4 {
+            let characteristic = property(TROE_T2_PROPERTY)?;
+            let ratio = characteristic / temperature;
+            if !positive(characteristic) || !positive(ratio) {
+                return Err(invalid("Troe T2 temperature ratio underflows or overflows"));
+            }
+            terms[2] = -ratio;
+        }
+        // Keep even an exponentially small positive center in logarithmic
+        // form. A final representable rate must not depend on exp(-T/Ti)
+        // fitting separately in a direct floating-point value.
+        let maximum = terms.into_iter().fold(f64::NEG_INFINITY, f64::max);
+        if !maximum.is_finite() {
+            return Err(invalid("Troe center has no representable logarithm"));
+        }
+        let sum: f64 = terms
+            .into_iter()
+            .filter(|v| v.is_finite())
+            .map(|v| fs_math::det::exp(v - maximum))
+            .sum();
+        let log_center = maximum + fs_math::det::ln(sum);
+        if !log_center.is_finite() || log_center > 0.0 {
+            return Err(invalid("Troe broadening requires 0 < Fcent <= 1"));
+        }
+        Ok(Some(log_center))
+    }
+}
+
+/// Canonical Troe formula, evaluated without constructing Pr, Fcent or x/y.
+fn troe_multiplier(log_reduced: f64, log_center: f64) -> Result<f64, GasReactionError> {
+    let center10 = log_center / core::f64::consts::LN_10;
+    let c = -0.4 - 0.67 * center10;
+    let n = 0.75 - 1.27 * center10;
+    let x = log_reduced / core::f64::consts::LN_10 + c;
+    let y = n - 0.14 * x;
+    if ![c, n, x, y].iter().all(|v| v.is_finite()) || (x == 0.0 && y == 0.0) {
+        return Err(invalid("Troe broadening coordinates are unrepresentable"));
+    }
+    // 1/(1+(x/y)^2) = y^2/(x^2+y^2), including the continuous y=0
+    // value zero. Scaling by the larger coordinate avoids either square
+    // overflowing and never divides by the vanishing denominator in f1.
+    let weight = if x.abs() <= y.abs() {
+        let ratio = x / y;
+        1.0 / (1.0 + ratio * ratio)
+    } else {
+        let ratio = y / x;
+        let square = ratio * ratio;
+        square / (1.0 + square)
+    };
+    let log_lindemann = if log_reduced >= 0.0 {
+        -fs_math::det::ln(1.0 + fs_math::det::exp(-log_reduced))
+    } else {
+        log_reduced - fs_math::det::ln(1.0 + fs_math::det::exp(log_reduced))
+    };
+    let log_factor = log_lindemann + log_center * weight;
+    if !log_factor.is_finite() {
+        return Err(invalid("Troe multiplier logarithm is unrepresentable"));
+    }
+    Ok(fs_math::det::exp(log_factor))
 }

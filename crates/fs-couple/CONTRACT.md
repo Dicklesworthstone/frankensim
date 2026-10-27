@@ -6768,7 +6768,7 @@ temperature feedback, continuation, material substitution and late rollback.
 
 The new binding pins coefficient claim identities before evolution. `SingleClaimOnly` requires globally unique claims for every required coefficient and becomes an explicit pin set; ambiguous/observation-preferred selection requires caller-supplied pins. Source validity crossing cannot silently choose another claim, including within implicit endpoint iterations. The legacy directly resolved scalar-rate path is unchanged. Existing explicit, scalar/coupled implicit, subcycled, piston, species-flow and electrical/thermal consumers use the same channel evaluator. Formation energy is never credited again as heat; source/range/cancellation refusal publishes no proposed physical state. Positive rates that underflow/overflow refuse rather than become zero or infinity.
 
-Focused tests in `cavity_phs::piston::reactive::tests::arrhenius` cover independent dimensional rate scaling, first-/second-order concentration conversion and reverse equilibrium, normalization invariance, actual material-piston motion and energy, implicit endpoint temperature feedback, and bad-unit/range/source/cancellation rollback including disjoint source domains. Coefficients are synthetic. The Arrhenius coefficient binding alone does not supply collider/falloff or surface chemistry; the optional material collider extension below supplies the bounded third-body/Lindemann law. Neither slice supplies a validated fuel mechanism, flame/shock model, or measured engine/ignition prediction. Program anchor: `frankensim-ext-gas-chemistry-ladder-paqh`, remains open.
+Focused tests in `cavity_phs::piston::reactive::tests::arrhenius` cover independent dimensional rate scaling, first-/second-order concentration conversion and reverse equilibrium, normalization invariance, actual material-piston motion and energy, implicit endpoint temperature feedback, and bad-unit/range/source/cancellation rollback including disjoint source domains. Coefficients are synthetic. The Arrhenius coefficient binding alone does not supply collider/falloff or surface chemistry; the optional material collider extension below supplies bounded third-body, Lindemann and Troe laws. Neither slice supplies a validated fuel mechanism, flame/shock model, or measured engine/ignition prediction. Program anchor: `frankensim-ext-gas-chemistry-ladder-paqh`, remains open.
 
 ### Spatial conductor, transient circuit storage, and finite heat
 
@@ -6811,9 +6811,9 @@ claim follows from their presence.
 
 
 
-## Material collider density and Lindemann falloff
+## Material collider density and pressure-dependent falloff
 
-`MaterialRateScale::with_colliders` binds a declared third-body or Lindemann law
+`MaterialRateScale::with_colliders` binds a declared third-body, Lindemann or Troe law
 to an existing reaction channel. Every species in the original source catalog,
 including inert gas, has an explicit reaction-card efficiency property; multiple
 species may intentionally share one property. Claim identities for the base
@@ -6842,12 +6842,49 @@ balance, absent colliders, data-only efficiency changes through conservative
 piston motion and acoustic state, implicit endpoint temperature/composition,
 source-domain refusal and cancellation.
 
-This is bounded ideal-gas third-body/Lindemann chemistry. It does not provide
-Troe/SRI broadening, chemically activated reactions, empirical fuel mechanisms,
+This is bounded ideal-gas third-body/Lindemann/Troe chemistry. It does not provide
+SRI broadening, chemically activated reactions, empirical fuel mechanisms,
 flames, shock/ignition prediction or validated engine fidelity. Formula
 conventions follow the [Cantera reaction-rate reference](https://www.cantera.org/stable/reference/kinetics/reaction-rates.html)
 and [falloff reference](https://www.cantera.org/stable/reference/kinetics/rate-constants.html).
 Program anchor `frankensim-ext-gas-chemistry-ladder-paqh` remains open.
+
+### Source-backed Troe broadening on the same reaction channel
+
+`ColliderRegime::Troe3` and `Troe4` extend the existing collider owner with the
+common factor `Pr/(1+Pr) * F(T, Pr)`. Both pin and resolve the dimensionless
+`reaction_troe_alpha` and kelvin-valued `reaction_troe_temperature_3` and
+`reaction_troe_temperature_1`. `Troe4` additionally requires
+`reaction_troe_temperature_2`; `Troe3` deliberately omits that last term.
+There are no hidden coefficient defaults or species-name special cases.
+
+The center is `(1-alpha) exp(-T/T3) + alpha exp(-T/T1)`, with `exp(-T2/T)`
+added only for `Troe4`. This bounded model requires `alpha` in `[0,1]`, positive
+characteristic temperatures and `0 < Fcent <= 1` at the actual gas temperature.
+Source coefficients retain their existing units, validity domains and pinned
+claim identities during implicit iterations. Invalid selected coefficients
+still refuse when effective colliders are exactly absent.
+
+The implementation evaluates the center by log-sum-exp and combines the
+Lindemann and Troe factors in logarithmic form. For the canonical coordinates
+`x = log10(Pr) - 0.4 - 0.67 log10(Fcent)` and
+`y = 0.75 - 1.27 log10(Fcent) - 0.14 x`, the broadening exponent uses
+`y^2/(x^2+y^2)` with scaled ratios. This admits the continuous `y=0` value
+without dividing by zero or overflowing either square. Positive final factors
+lost to numerical range refuse; physical collider absence remains exact zero.
+The specified finite Troe algebra, including its pressure tails, is preserved
+without replacing the broadening factor by an assumed exact limiting value.
+
+Focused synthetic regressions compare independent Troe equations across
+pressure regimes, exercise source-only changes through implicit piston motion
+and conservative energy, and cover coefficient/source/cancellation refusal.
+Supplemental shared-law regressions cover concentration normalization, exact
+absence before extreme normalization, native range statuses and precedence of
+`ZeroActivity`. These tests are authored and source-reviewed; native Cargo
+execution remains unverified in the resource-exhausted implementation workspace.
+The original channel evaluator supplies all reaction consumers, thermodynamic
+reverse closure and conservation; this extension creates no second rate or
+combustion-heat owner.
 
 ## Directional electrical transport on the shared enthalpy timeline
 

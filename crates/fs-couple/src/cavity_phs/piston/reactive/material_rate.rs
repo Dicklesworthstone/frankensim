@@ -8,8 +8,10 @@
 
 /// Explicit modified Arrhenius source data and concentration/activity conversion.
 pub mod arrhenius;
-/// Declared third-body and Lindemann collision laws using the live mixture.
+/// Declared third-body, Lindemann and Troe laws using the live mixture.
 pub mod collider;
+// Shared concentration arithmetic for all declared collider and falloff laws.
+mod third_body;
 
 use super::{ClosedGasParcel, GasReaction, GasReactionError, Temperature, invalid, poll, positive};
 use fs_matdb::MaterialCard;

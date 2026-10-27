@@ -5,6 +5,7 @@ mod network;
 mod implicit;
 mod arrhenius;
 mod collider;
+mod third_body;
 
 use super::*;
 use crate::cavity_phs::piston::material::MaterialGasPiston;

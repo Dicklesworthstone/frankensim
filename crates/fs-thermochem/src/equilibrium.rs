@@ -2414,6 +2414,7 @@ impl DeclaredStoichiometricMassActionEvaluationV1 {
 
 #[cfg(test)]
 mod tests {
+    mod rate_multiplier;
     use super::*;
     use fs_evidence::ValidityDomain;
     use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter, Provenance};
