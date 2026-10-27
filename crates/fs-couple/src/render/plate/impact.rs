@@ -262,7 +262,9 @@ impl ImpactSystem {
         config:ImpactConfig)->Result<Self,ImpactError> {
         let modes=bodies.iter().try_fold(0usize,|n,b|n.checked_add(b.potential.count()))
             .ok_or_else(||invalid("mode count overflow"))?;
-        if modes==0 || modes>MAX_IMPACT_MODES || contacts.len()>32 || pads.len()>16 || volumes.len()>16 || volumes.len()>8
+        // A distributed cavity supplies one spring per retained pressure mode, up to its own basis limit.
+        if modes==0 || modes>MAX_IMPACT_MODES || contacts.len()>32 || pads.len()>16
+            || volumes.len()>cavity::MAX_CAVITY_PRESSURE_MODES
             || config.max_steps==0 || config.max_steps>(1u64<<53)
             || ![config.dt_s,config.maximum_energy_j,config.energy_absolute_tolerance_j,
                 config.energy_relative_tolerance,config.maximum_generalized_force].iter().all(|v|v.is_finite() && *v>0.0)
@@ -314,10 +316,21 @@ impl ImpactSystem {
             || !(v.bulk_modulus_pa/v.volume_m3).is_finite() || v.areas.len()!=modes || v.areas.iter().any(|a|!a.is_finite()) {
             return Err(invalid("volume spring requires positive finite fluid/volume and reciprocal modal areas"));}}
         // PSD dyads from every volume spring add to the original solid pencil.
+        // Their sum B^T B (rows sqrt(K/V) a) shares its nonzero spectrum with the Gram
+        // matrix B B^T. Gershgorin on that Gram matrix keeps the bound near the largest
+        // spring when springs act on nearly orthogonal coordinates, as a distributed
+        // cavity's pressure modes do; the trace bound grows with their count. Both are
+        // upper bounds, so the clock admits by the smaller.
+        let mut trace_bound=stiffness_bound;
         for volume in &volumes {
-            stiffness_bound+=(volume.bulk_modulus_pa/volume.volume_m3)
+            trace_bound+=(volume.bulk_modulus_pa/volume.volume_m3)
                 *volume.areas.iter().map(|a|a*a).sum::<f64>();
         }
+        let roots:Vec<f64>=volumes.iter().map(|v|(v.bulk_modulus_pa/v.volume_m3).sqrt()).collect();
+        let gram_bound=stiffness_bound+volumes.iter().zip(&roots).map(|(u,ru)|volumes.iter().zip(&roots)
+            .map(|(v,rv)|(ru*rv*u.areas.iter().zip(&v.areas).map(|(a,b)|a*b).sum::<f64>()).abs()).sum::<f64>())
+            .fold(0.0_f64,f64::max);
+        stiffness_bound=trace_bound.min(gram_bound);
         let mut retained=Vec::with_capacity(pads.len());let mut histories=Vec::with_capacity(pads.len());
         for spec in pads {
             spec.validate(modes)?;let start=x.len()-2*modes;x.resize(x.len()+spec.creep.len(),0.0);
@@ -493,5 +506,64 @@ mod integrator_band_tests {
         });
         assert!(make(cap/3.0).is_ok());
         assert!(matches!(make(cap/3.0+1e-12),Err(ImpactError::TimeResolution(_))));
+    }
+
+    fn config(dt_s:f64)->ImpactConfig {
+        ImpactConfig {dt_s,max_steps:1,maximum_energy_j:1e6,energy_absolute_tolerance_j:1e-12,
+            energy_relative_tolerance:1e-10,maximum_generalized_force:1e6}
+    }
+
+    #[test]
+    fn orthogonal_cavity_springs_admit_the_clock_of_their_own_top_frequency() {
+        // Twelve springs, one per coordinate, as a cavity's pressure modes: every coordinate
+        // rings at sqrt(1 + 3) = 2 rad/s. The trace bound would demand sqrt(1 + 12*3).
+        let cap=fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP;
+        let make=|dt| ImpactSystem::new(vec![ImpactBody {
+            potential:BodyPotential::Linear(vec![1.0;12]),
+            initial:vec![ModalAcousticState::default();12],damping_per_s:vec![0.0;12],
+        }],vec![],vec![],(0..12).map(|j|VolumeSpring {bulk_modulus_pa:3.0,volume_m3:1.0,
+            areas:(0..12).map(|i|if i==j {1.0} else {0.0}).collect()}).collect(),config(dt));
+        assert!(make(cap/2.0).is_ok());
+        assert!(matches!(make(cap/2.0+1e-12),Err(ImpactError::TimeResolution(_))));
+    }
+
+    #[test]
+    fn more_than_eight_volume_springs_store_exact_energy_gradient_and_tangent() {
+        use fs_phs::Storage;
+        let (modes,springs)=(12,20);
+        let omega:Vec<f64>=(0..modes).map(|i|1.0+0.5*i as f64).collect();
+        let volumes:Vec<_>=(0..springs).map(|j|VolumeSpring {bulk_modulus_pa:2.0+j as f64,volume_m3:1.0+0.25*j as f64,
+            areas:(0..modes).map(|i|((3*i+5*j)%7) as f64-3.0).collect()}).collect();
+        let initial:Vec<_>=(0..modes).map(|i|ModalAcousticState {
+            displacement_m_sqrt_kg:((2*i)%5) as f64*1e-3-2e-3,velocity_m_sqrt_kg_per_s:((3*i)%4) as f64*1e-2}).collect();
+        let system=ImpactSystem::new(vec![ImpactBody {potential:BodyPotential::Linear(omega.clone()),
+            initial:initial.clone(),damping_per_s:vec![0.0;modes]}],vec![],vec![],volumes.clone(),config(1e-4))
+            .unwrap_or_else(|e|panic!("{e}"));
+        let q:Vec<f64>=initial.iter().map(|s|s.displacement_m_sqrt_kg).collect();
+        let stiffness:Vec<f64>=volumes.iter().map(|v|v.bulk_modulus_pa/v.volume_m3).collect();
+        let strain:Vec<f64>=volumes.iter().map(|v|v.areas.iter().zip(&q).map(|(a,q)|a*q).sum()).collect();
+        let energy=initial.iter().zip(&omega).map(|(s,w)|0.5*(s.velocity_m_sqrt_kg_per_s.powi(2)
+            +(w*s.displacement_m_sqrt_kg).powi(2))).sum::<f64>()
+            +stiffness.iter().zip(&strain).map(|(k,s)|0.5*k*s*s).sum::<f64>();
+        assert!((system.stored_energy_j()-energy).abs()<=1e-12*energy);
+        let mut gradient=vec![0.0;2*modes];
+        system.mechanical.gradient(system.state(),&mut gradient);
+        for i in 0..modes {
+            let force=omega[i]*omega[i]*q[i]+volumes.iter().zip(&stiffness).zip(&strain)
+                .map(|((v,k),s)|k*s*v.areas[i]).sum::<f64>();
+            assert!((gradient[2*i]-force).abs()<=1e-12*force.abs().max(1e-9),"mode {i}: {} against {force}",gradient[2*i]);
+            assert_eq!(gradient[2*i+1].to_bits(),initial[i].velocity_m_sqrt_kg_per_s.to_bits());
+        }
+        // The energy is quadratic, so the tangent's action equals the gradient's change exactly.
+        let direction:Vec<f64>=(0..2*modes).map(|k|((7*k)%9) as f64*1e-3-4e-3).collect();
+        let mut action=vec![0.0;2*modes];
+        assert!(system.hessian_vector(system.state(),&direction,&mut action));
+        let shifted:Vec<f64>=system.state().iter().zip(&direction).map(|(x,d)|x+d).collect();
+        let mut moved=vec![0.0;2*modes];
+        system.mechanical.gradient(&shifted,&mut moved);
+        let scale=action.iter().fold(0.0_f64,|m,v|m.max(v.abs()));
+        for k in 0..2*modes {
+            assert!((moved[k]-gradient[k]-action[k]).abs()<=1e-10*scale,"coordinate {k}");
+        }
     }
 }
