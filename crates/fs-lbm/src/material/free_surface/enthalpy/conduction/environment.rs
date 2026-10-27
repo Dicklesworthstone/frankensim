@@ -6,6 +6,8 @@
 //! evaluate liquid conductivity at the cell temperature and gas conductivity
 //! at the mean cell/bath temperature. The original thermal timeline integrates
 //! that heat before native VOF/enthalpy transport and viscosity refresh.
+//! The optional finite atmosphere supplies evolving gas T and EOS pressure
+//! from its original internal-energy owner while retaining the same film law.
 
 use super::*;
 use fs_matdb::QueryPoint;
@@ -45,14 +47,16 @@ pub struct FreeSurfaceGasSample {
     /// Full species, EOS and transport snapshot at the declared film temperature.
     pub gas: ResolvedThermochemicalGasState,
     pub conductance_w_k: f64,
-    /// Positive into the liquid, negative into the external bath [W].
+    /// Positive into the liquid, negative into the gas bath [W]. A finite
+    /// atmosphere stores the exact opposite heat on the same interval.
     pub heat_into_liquid_w: f64,
 }
 
 #[derive(Clone, Debug)]
 pub struct FreeSurfaceGasExchange {
     /// Signed bath supply [J], already included in the thermal and flow reports'
-    /// external heat. Never add this a second time to a system balance.
+    /// external heat. With `finite_gas`, its opposite is stored in the gas and
+    /// this transfer is internal to their union. Never add it twice.
     pub heat_to_liquid_j: f64,
     pub last_applied: Vec<FreeSurfaceGasSample>,
     /// Supported endpoint before the subsequent native advection/momentum step.
@@ -69,7 +73,10 @@ pub(super) fn finite(value: f64) -> Result<f64, Error> {
     }
 }
 
-fn same_sources(a: &ResolvedThermochemicalGasState, b: &ResolvedThermochemicalGasState) -> bool {
+pub(super) fn same_sources(
+    a: &ResolvedThermochemicalGasState,
+    b: &ResolvedThermochemicalGasState,
+) -> bool {
     a.components().len() == b.components().len()
         && a.components().iter().zip(b.components()).all(|(a, b)| {
             a.card_identity() == b.card_identity()
@@ -207,16 +214,17 @@ impl Conduction<'_, '_> {
             let h = thermal.cells()[&id].specific_h_j_kg;
             let liquid = self.sample_liquid(id, h, check)?;
             let temperature = thermal.temperature_k(id)?;
-            let bath = contact.context.axes()["temperature"];
+            let (model, context) = self.finite_atmosphere.as_ref().map_or(
+                (contact.model, contact.context),
+                |gas| (gas.parcel.model(), gas.parcel.point()),
+            );
+            let bath = context.axes()["temperature"];
             let film = 0.5 * temperature + 0.5 * bath;
-            let point = contact
-                .context
+            let point = context
                 .clone()
                 .with("temperature", film)
                 .map_err(|_| Error::Invalid("invalid environmental film temperature"))?;
-            let gas = contact
-                .model
-                .evaluate(&point)
+            let gas = model.evaluate(&point)
                 .map_err(MaterialLbmError::from)?;
             if self
                 .environment_reference
@@ -290,6 +298,19 @@ impl Conduction<'_, '_> {
             if decay > 0.0 {
                 // A half-capacity numerical margin preserves a convex thermal
                 // update for frozen coefficients. It is not a material law.
+                dt = dt.min(0.5 / decay);
+            }
+        }
+        if let Some(gas) = &self.finite_atmosphere {
+            let mut conductance = 0.0;
+            for sample in &self.environment_last {
+                check()?;
+                conductance = finite(conductance + sample.conductance_w_k)?;
+            }
+            let decay = finite(gas.temperature_slope * conductance / gas.parcel.mass_kg())?;
+            if decay > 0.0 {
+                // This is an additional finite-capacity row of the SAME heat
+                // operator. Liquid rows already include film + contact loss.
                 dt = dt.min(0.5 / decay);
             }
         }

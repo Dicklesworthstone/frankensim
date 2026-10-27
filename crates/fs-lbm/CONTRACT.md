@@ -200,6 +200,41 @@ Focused tests in `tests/material_free_surface_enthalpy/conduction/environment.rs
 compare independent layer/storage calculations, data-driven native population
 changes, combined heat accounting, stiff exchange and transactional refusal.
 
+### Finite atmosphere on the native free-surface thermal timeline
+
+`step_with_finite_gas_environment` gives the same moving-liquid thermal owner
+an actual `IsochoricGasParcel`. Each accepted thermal substep transfers equal
+and opposite film heat between the liquid and the original NASA-9 gas internal
+energy. Fixed gas mass, composition, volume and formation reference are retained;
+its new temperature and EOS pressure re-evaluate the same source-backed films.
+Bulk and film transport claims are checked again at the actual endpoint.
+
+The shared explicit step bound includes the sum of all exposed conductances
+against the finite gas capacity, together with the original liquid, internal
+conduction and finite-wall contact rows. A small atmosphere therefore cannot
+silently act as an infinite heat reservoir. Source-dependent liquid viscosity
+and rheology, ordered wall interfaces, optional molecular heat and native VOF
+mass/enthalpy transport continue through their original owners. All proposed
+gas, finite-wall and liquid states publish only after the native flow and
+advection gates succeed.
+
+`FreeSurfaceConductionReport::finite_gas` records actual gas internal-energy
+change, reciprocal heat defect and the combined liquid/wall/gas thermal
+account. Environmental heat appears once as a supply to the liquid subsystem
+and cancels against gas storage in their union. Authored heat and the existing
+physical molecular-heating account remain distinct; no full VOF kinetic-energy
+or pressure-work closure is inferred.
+
+This retains the existing pure-liquid, neglected-capillarity and first-order
+thermal/flow approximation. The caller supplies currently exposed geometry at
+each interval; the film is held during the thermal stage. Gas volume is an
+explicit fixed-volume approximation, with no gas momentum, pressure traction,
+evaporation, reaction, radiation or phase-density handoff. Five focused
+synthetic regressions cover independent nonlinear NASA energy/pressure limits,
+data-driven native population changes, finite wall/interface/molecular heat,
+summed small-gas-capacity timestep admission, and late source/cancellation
+rollback. Their addition does not establish executed native validation.
+
 ## Public types and semantics
 
 - D2Q9 constants: `Q` (9), `CS2` (`1/3`), `MACH_LIMIT` (`0.3`).

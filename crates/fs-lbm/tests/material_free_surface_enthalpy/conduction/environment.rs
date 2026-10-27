@@ -11,6 +11,9 @@ use fs_material::thermochemical_gas::ThermochemicalGasModel;
 #[path = "../../nsf3_thermochemical/source.rs"]
 mod gas_source;
 
+#[path = "atmosphere.rs"]
+mod atmosphere;
+
 const EXPOSED: [usize; 3] = [3, 3, 3];
 
 fn gas_contact<'a>(

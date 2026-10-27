@@ -132,6 +132,9 @@ pub enum FreeSurfaceEnthalpyError {
     /// The existing conservative thermal timeline refused conduction.
     #[cfg(feature = "enthalpy-coupling")]
     Thermal(fs_conduction::enthalpy::DepositionError),
+    /// The original finite-atmosphere internal-energy owner refused.
+    #[cfg(feature = "enthalpy-coupling")]
+    Gas(fs_material::thermochemical_gas::energy::GasEnergyError),
     /// Missing physical closure, invalid input or exhausted explicit budget.
     Invalid(&'static str),
 }
@@ -153,6 +156,8 @@ impl core::fmt::Display for FreeSurfaceEnthalpyError {
             ),
             #[cfg(feature = "enthalpy-coupling")]
             Self::Thermal(e) => write!(f, "free-surface conduction: {e}"),
+            #[cfg(feature = "enthalpy-coupling")]
+            Self::Gas(e) => write!(f, "free-surface finite atmosphere: {e}"),
             Self::Invalid(e) => write!(f, "free-surface enthalpy: {e}"),
         }
     }
@@ -196,6 +201,13 @@ impl From<fs_conduction::enthalpy::DepositionError> for FreeSurfaceEnthalpyError
         } else {
             Self::Thermal(e)
         }
+    }
+}
+
+#[cfg(feature = "enthalpy-coupling")]
+impl From<fs_material::thermochemical_gas::energy::GasEnergyError> for FreeSurfaceEnthalpyError {
+    fn from(error: fs_material::thermochemical_gas::energy::GasEnergyError) -> Self {
+        Self::Gas(error)
     }
 }
 

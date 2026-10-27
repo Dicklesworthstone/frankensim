@@ -95,6 +95,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             contacts,
             interfaces,
             environment,
+            None,
             gate,
         )
     }
@@ -123,6 +124,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             contacts,
             interfaces,
             environment,
+            None,
             gate,
         )?;
         Ok(viscous::FreeSurfaceViscousConductionReport {

@@ -25,6 +25,9 @@ pub mod environment;
 pub use environment::{
     FreeSurfaceGasContact, FreeSurfaceGasExchange, FreeSurfaceGasFace, FreeSurfaceGasSample,
 };
+/// Finite atmospheric storage on the same thermal and native VOF interval.
+pub mod atmosphere;
+pub use atmosphere::FreeSurfaceFiniteGasExchange;
 use fs_material::state_point::ResolvedMaterialStatePoint;
 
 /// Source-bound resistance at an ordered liquid/solid thermal contact.
@@ -75,8 +78,12 @@ pub struct FreeSurfaceConductionReport {
     pub thermal_endpoint: Vec<FreeSurfaceConductionSample>,
     /// Present only when finite solid cells participate in this timeline.
     pub bodies: Option<FreeSurfaceBodyExchange>,
-    /// Prescribed environmental gas heat, included once in external heat.
+    /// Environmental heat entering the liquid subsystem's external heat once.
+    /// `finite_gas` supplies the opposite gas storage when that bath is finite.
     pub environment: Option<FreeSurfaceGasExchange>,
+    /// Additional finite gas storage account when the environment has an owner.
+    /// Gas/liquid exchange is internal to this combined thermal system.
+    pub finite_gas: Option<FreeSurfaceFiniteGasExchange>,
 }
 
 fn checkpoint(gate: &CancelGate) -> Result<(), DepositionError> {
@@ -116,6 +123,7 @@ struct Conduction<'a, 'm> {
     environment_reference: Vec<FreeSurfaceGasSample>,
     environment_heat_j: f64,
     environment_absolute_heat_j: f64,
+    finite_atmosphere: Option<atmosphere::FiniteAtmosphere>,
 }
 
 struct Samples {
@@ -306,14 +314,22 @@ impl DepositionObserver for Conduction<'_, '_> {
         self.endpoint = samples.liquid;
         self.body_endpoint = samples.contacts;
         self.body_states_endpoint = samples.bodies;
-        self.environment_endpoint = self.sample_environment(thermal, check)?;
+        let mut gas_heat = 0.0;
         for sample in &self.environment_last {
             check()?;
             let heat = environment::finite(duration_s * sample.heat_into_liquid_w)?;
+            if self.finite_atmosphere.is_some() {
+                gas_heat = environment::finite(gas_heat + heat)?;
+            }
             self.environment_heat_j = environment::finite(self.environment_heat_j + heat)?;
             self.environment_absolute_heat_j =
                 environment::finite(self.environment_absolute_heat_j + heat.abs())?;
         }
+        if let Some(gas) = &mut self.finite_atmosphere {
+            gas.accept_heat(-gas_heat, check)?;
+        }
+        // Both film endpoints use the actually accepted gas T and EOS pressure.
+        self.environment_endpoint = self.sample_environment(thermal, check)?;
         Ok(())
     }
 }
@@ -381,6 +397,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             contacts,
             interfaces,
             &[],
+            None,
             gate,
         )
     }
@@ -406,6 +423,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             contacts,
             &[],
             environment,
+            None,
             gate,
         )
     }
@@ -421,6 +439,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         contacts: &[FreeSurfaceBodyContact],
         interfaces: &[FreeSurfaceBodyInterface<'_>],
         environment: &[FreeSurfaceGasContact<'_>],
+        finite_atmosphere: Option<&mut atmosphere::FiniteAtmosphere>,
         gate: &CancelGate,
     ) -> Result<FreeSurfaceConductionReport, Error> {
         poll(gate)?;
@@ -727,9 +746,13 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             environment_reference: Vec::new(),
             environment_heat_j: 0.0,
             environment_absolute_heat_j: 0.0,
+            finite_atmosphere: finite_atmosphere.as_deref().cloned(),
         };
-        let (thermal, observer, audit) =
+        let (thermal, mut observer, audit) =
             thermal.advance_observed(&observer, duration, config, || checkpoint(gate))?;
+        let mut finite_gas_report = observer.finite_atmosphere.as_ref()
+            .map(|gas| gas.balance(observer.environment_heat_j, &audit, controls.energy_tolerance_j))
+            .transpose()?;
         let mut heated = self.h.clone();
         for (location, id) in ids {
             poll(gate)?;
@@ -784,10 +807,21 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             absolute_heat + body_heat.abs() + observer.environment_absolute_heat_j,
             gate,
         )?;
+        if let Some(report) = &mut finite_gas_report {
+            // Native advection already checked its own extensive-enthalpy
+            // defect. This is the combined actual liquid/wall/gas account;
+            // internal gas and wall transfers cancel, molecular heat stays
+            // in its original separate account.
+            report.combined_thermal_balance_defect_j =
+                flow.balance_defect_j + report.gas_balance_defect_j;
+        }
         // Flow has passed every endpoint/advection gate; accepting the already
         // admitted solid candidate is now infallible. No partial thermal commit.
         for ((body, h), material) in bodies.iter_mut().zip(body_enthalpies).zip(body_sources) {
             body.accept(h, material);
+        }
+        if let (Some(target), Some(accepted)) = (finite_atmosphere, observer.finite_atmosphere.take()) {
+            *target = accepted;
         }
         let body_report = (!bodies.is_empty()).then_some(FreeSurfaceBodyExchange {
             enthalpy_before_j: body_before,
@@ -804,6 +838,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             thermal_endpoint,
             bodies: body_report,
             environment: environment_report,
+            finite_gas: finite_gas_report,
         })
     }
 }
