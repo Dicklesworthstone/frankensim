@@ -557,7 +557,20 @@ impl Prepared {
         &self,
         ready: &mut Ready,
         output: W,
-        mut trace: Option<&mut dyn Write>,
+        trace: Option<&mut dyn Write>,
+        gate: &CancelGate,
+    ) -> Result<(W, WavStreamSummary)> {
+        self.write_observed(ready, output, trace, false, gate)
+    }
+
+    /// Thermal and mechanical state advance together at the source clock.
+    /// Only their accepted pressure is decimated; traces retain every source step.
+    pub fn write_observed<W: Write + Seek>(
+        &self,
+        ready: &mut Ready,
+        output: W,
+        trace: Option<&mut dyn Write>,
+        decimate: bool,
         gate: &CancelGate,
     ) -> Result<(W, WavStreamSummary)> {
         let network = self.network(gate)?;
@@ -589,55 +602,13 @@ impl Prepared {
             gate,
             |endpoint| self.resolve(endpoint),
         )?;
-        let mut stream = Pcm16WavStream::new(
-            output,
-            ready.spec.rate,
-            ready.spec.full_scale,
-            ready.spec.block,
-        )?;
-        let mut scratch = vec![0.0; if trace.is_some() { 1 } else { ready.spec.block }];
-        if let Some(trace) = trace.as_mut() {
-            writeln!(
-                trace,
-                "sample\tport\tregime\tslip_velocity_m_s\ttraction_n\tnormal_force_n"
-            )?;
-        }
-        let mut remaining = ready.spec.samples;
-        while remaining > 0 {
-            let count = remaining.min(scratch.len() as u64);
-            let progress = render_pressure_pcm16(
-                &mut performance,
-                &mut stream,
-                gate,
-                &mut scratch[..count as usize],
-                count,
-            )?;
-            if !matches!(progress, ScheduledWavProgress::Completed { .. }) {
-                let (_, summary) = stream.finish()?;
-                return Err(format!(
-                    "cancelled: only {} thermal samples finalized",
-                    summary.samples
-                )
-                .into());
-            }
-            if let Some(trace) = trace.as_mut() {
-                let frame = performance
-                    .last_frame()
-                    .ok_or("rendered thermal sample has no accepted frame")?;
-                for (port, p) in frame.mechanics.ports.iter().enumerate() {
-                    writeln!(
-                        trace,
-                        "{}\t{port}\t{:?}\t{:e}\t{:e}\t{:e}",
-                        frame.mechanics.sample,
-                        p.regime,
-                        p.slip_distance_m * f64::from(ready.spec.rate),
-                        p.traction_n,
-                        p.normal_force_n
-                    )?;
-                }
-            }
-            remaining -= count;
-        }
+        let result = match trace {
+            Some(trace) => write_traced_pressure(
+                &mut performance, output, trace, &ready.spec, decimate, gate,
+                |performance| performance.last_frame().map(|frame| &frame.mechanics),
+            ),
+            None => write_pressure(&mut performance, output, &ready.spec, decimate, gate),
+        }?;
         for cell in performance.thermal().cells().values() {
             eprintln!(
                 "contact_thermal_final_cell={}; T_K={}; stored_H_J={}",
@@ -646,6 +617,6 @@ impl Prepared {
                 cell.mass_kg * cell.specific_h_j_kg
             );
         }
-        Ok(stream.finish()?)
+        Ok(result)
     }
 }

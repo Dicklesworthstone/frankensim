@@ -85,6 +85,9 @@ fn g3_decimated_attached_strings_preserve_output_clock_and_callback_identity() {
         std::fs::write(dir.join("input.performance"), source).unwrap();
         let mut command = args(&dir, output, Some(&names));
         command.push("--decimate".into());
+        if block == 37 {
+            command.extend(["--bow-trace".into(), dir.join("mechanics.tsv").into_os_string()]);
+        }
         run(&command).unwrap();
     }
     let wav = std::fs::read(dir.join("prime.wav")).unwrap();
@@ -93,6 +96,9 @@ fn g3_decimated_attached_strings_preserve_output_clock_and_callback_identity() {
     assert_eq!(u32::from_le_bytes(wav[40..44].try_into().unwrap()), 256 * 2);
     assert_eq!(wav.len(), 44 + 256 * 2);
     assert!(wav[44..].iter().any(|byte| *byte != 0));
+    let trace = std::fs::read_to_string(dir.join("mechanics.tsv")).unwrap();
+    assert_eq!(trace.lines().count(), 513, "trace keeps all 512 mechanical samples");
+    assert!(trace.lines().last().unwrap().starts_with("512\t"));
 
     // An incomplete observation interval must not silently shorten the gesture
     // horizon or publish an output with an unrendered mechanical tail.
@@ -100,8 +106,10 @@ fn g3_decimated_attached_strings_preserve_output_clock_and_callback_identity() {
         original.replace("48000 256 0.001 37", "96000 513 0.001 37")).unwrap();
     let mut command = args(&dir, "partial.wav", Some(&names));
     command.push("--decimate".into());
+    command.extend(["--bow-trace".into(), dir.join("partial.tsv").into_os_string()]);
     assert!(run(&command).unwrap_err().to_string().contains("complete output intervals"));
     assert!(!dir.join("partial.wav").exists());
+    assert!(!dir.join("partial.tsv").exists());
 }
 
 #[test]

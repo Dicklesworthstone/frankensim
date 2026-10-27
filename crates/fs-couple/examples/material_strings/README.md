@@ -79,9 +79,12 @@ complete output intervals. The observer retains its causal filter delay and
 does not append or discard mechanical samples; its observation policy is printed
 with the render diagnostics.
 
-`--decimate` currently requires the ordinary pressure writer. It refuses
-`--bow-trace` and `--contact-thermal`, whose specialized writers retain their
-declared output clock. At the native 48 kHz clock, those options remain available.
+`--decimate` composes with `--contact-thermal` and `--bow-trace`. Contact heat
+continues through the original coupled mechanical/enthalpy owner at every
+mechanical step. The trace observes each accepted mechanical sample before
+pressure decimation, so its indices and row count retain the mechanical clock.
+Only the microphone pressure is resampled. Trace I/O failure refuses the output
+without pretending that already accepted mechanical steps were rolled back.
 
 ### Material shear layers in the original contact solve
 

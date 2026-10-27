@@ -116,6 +116,22 @@ Playback never peak-normalizes or retunes the native result. Original model
 limits and missing-source refusals still apply; attaching a pack does not
 qualify an instrument as measured or realistic.
 
+### Material reeds and compliant walls
+
+The **Material reeds** starters open the original paired-blade descriptions.
+`paired-walls.performance` uses `blade.matpack` and `wall.matpack`; each blade's
+mesh, thickness regions and source material drive motion and swept flow while
+the material walls return pressure to the same upstream/downstream solve.
+Its 768 kHz mechanics already have a declared 48 kHz pressure observer, so the
+starter leaves additional decimation off.
+
+`paired-dg-chimney.performance` uses `blade.matpack` with the existing spatial
+duct, side chimney and separately declared bore/chimney/exterior gases. That
+source runs at 96 kHz, so selecting it visibly enables native decimation while
+preserving the source bytes. The [material-modal source instructions](../../crates/fs-couple/examples/material_modal_valve/README.md)
+give the pack-building commands and physical declarations. These are
+manufactured integration specimens, not measured clarinet or oboe models.
+
 ### Material-string performances
 
 Select **Strings — materials, bow/contact and shared body** in **Physical performer**,
@@ -126,6 +142,14 @@ original packs named in the selected source. The
 [native string instructions](../../crates/fs-couple/examples/material_strings/README.md)
 show how to build those packs from the supplied manifests. Both starters are
 synthetic integration fixtures, not measured violin, cello or bass models.
+
+The **Material shear layer** starter uses the original
+`shear-layer-bow.material-strings`. Attach `wire.fsmatpk`, `body.fsmatpk` and
+`manufactured-shear-layer.fsmatpk`. The same native instructions explain how
+geometric stretching or longitudinal waves retain the layer's elastic/plastic
+history and compliant-drive storage in the coupled solve. A contact-thermal
+profile additionally requires genuine caloric and transport claims for its
+declared material; this isothermal example does not supply those missing data.
 
 The optional **String specimen profiles** selectors associate exact attached paths with
 the native body, stop and contact-thermal profiles. The companion forwards them
@@ -138,9 +162,10 @@ controls below, with their atmosphere record kept in the performance.
 Explicit string decimation runs the existing pressure observer through the shared
 native downsampler and writes 48 kHz PCM, retaining the original mechanical clock,
 gesture times, pressure scale and filter delay. The source duration must contain
-a whole number of output frames. `--decimate` currently refuses contact-thermal
-profiles and `--bow-trace`; those native workflows retain their original output
-clock. Bow traces and observer-store caches are not exposed by the web adapter.
+a whole number of output frames. Contact-thermal profiles keep the complete
+mechanical-rate feedback while this observer produces 48 kHz PCM. The native
+CLI can also retain a full-mechanical-rate `--bow-trace` before decimation.
+Bow traces and observer-store caches are not exposed by the web adapter.
 
 ### Source-backed gas mixtures
 

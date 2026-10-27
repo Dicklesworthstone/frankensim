@@ -5,8 +5,8 @@ use crate::contact_thermal::Profile;
 use fs_material::state_point::{SPECIFIC_HEAT_CAPACITY_DIMS, THERMAL_CONDUCTIVITY_DIMS};
 use fs_qty::Temperature;
 
-fn thermal_pack(cp: f64, omit: Option<&str>) -> NormalizedPack {
-    let source = layer_pack(4.0, 200_000.0, Some(PLASTIC_SHEAR_VISCOSITY_PROPERTY));
+fn thermal_pack(cp: f64, omit: Option<&str>, band: f64) -> NormalizedPack {
+    let source = layer_pack(4.0, band, Some(PLASTIC_SHEAR_VISCOSITY_PROPERTY));
     let mut claims = source.claims().clone();
     let artifact = fs_blake3::ContentHash([19; 32]);
     let provenance = Provenance {
@@ -48,7 +48,7 @@ fn thermal_pack(cp: f64, omit: Option<&str>) -> NormalizedPack {
                 },
                 validity: ValidityDomain::unconstrained()
                     .with("T", 280.0, 320.0)
-                    .with("omega", 0.0, 200_000.0),
+                    .with("omega", 0.0, band),
                 uncertainty: UncertaintyModel::Unstated,
                 interpolation: if variable {
                     InterpolationPolicy::LinearInside
@@ -97,11 +97,60 @@ links 0
 fn compiled(cx: &Cx<'_>, gate: &CancelGate, cp: f64, omit: Option<&str>) -> Result<Ready> {
     thermal_spec().compile(cx, gate, |name| {
         Ok(if name == "manufactured-shear-layer.fsmatpk" {
-            thermal_pack(cp, omit)
+            thermal_pack(cp, omit, 200_000.0)
         } else {
             pack(name, 7800.0, 200_000.0, None)
         })
     })
+}
+
+#[test]
+fn high_rate_thermal_contact_keeps_heat_feedback_and_mechanical_trace_under_decimation() {
+    scoped(|cx, gate| {
+        let profile = Profile::parse(PROFILE.as_bytes()).unwrap();
+        let build = |cp, block| {
+            let source = String::from_utf8(thermal_spec().bytes).unwrap()
+                .replace("48000 512 0.01 128", &format!("96000 1024 0.01 {block}"));
+            let mut spec = input::Spec::parse(source.as_bytes()).unwrap();
+            spec.contact_thermal = true;
+            spec.compile(cx, gate, |name| Ok(if name == "manufactured-shear-layer.fsmatpk" {
+                thermal_pack(cp, None, 400_000.0)
+            } else { pack(name, 7800.0, 400_000.0, None) })).unwrap()
+        };
+        let mut raw = build(10.0, 128);
+        let mut observed = build(10.0, 37);
+        let mut cooler = build(1000.0, 128);
+        let native = profile.prepare(&raw, gate).unwrap();
+        let decimated = profile.prepare(&observed, gate).unwrap();
+        let changed = profile.prepare(&cooler, gate).unwrap();
+        native.write(&mut raw, Cursor::new(Vec::new()), None, gate).unwrap();
+        let mut trace = Vec::new();
+        let (wav, summary) = decimated.write_observed(&mut observed, Cursor::new(Vec::new()),
+            Some(&mut trace), true, gate).unwrap();
+        changed.write_observed(&mut cooler, Cursor::new(Vec::new()),
+            None, true, gate).unwrap();
+        assert_eq!(summary.sample_rate_hz, 48_000);
+        assert_eq!(summary.samples, 512);
+        assert_eq!(observed.performance.samples_rendered(), 1024);
+        let text = String::from_utf8(trace).unwrap();
+        assert_eq!(text.lines().count(), 1025);
+        for (sample, row) in text.lines().skip(1).enumerate() {
+            assert_eq!(row.split('\t').next().unwrap().parse::<u64>().unwrap(), sample as u64 + 1);
+        }
+        assert_eq!(raw.performance.bank().system().last_frame(), observed.performance.bank().system().last_frame());
+        assert_eq!(raw.performance.bank().system().material_shear_state(0),
+            observed.performance.bank().system().material_shear_state(0));
+        let native_layer = raw.performance.bank().bow_shear_layer(0).unwrap();
+        let warm = observed.performance.bank().bow_shear_layer(0).unwrap();
+        let cool = cooler.performance.bank().bow_shear_layer(0).unwrap();
+        assert_eq!(native_layer.temperature_kelvin().to_bits(), warm.temperature_kelvin().to_bits());
+        assert!(warm.temperature_kelvin() > cool.temperature_kelvin());
+        assert!(cool.temperature_kelvin() > 293.15);
+        assert!(warm.plastic_resistance_n_s_m() < cool.plastic_resistance_n_s_m());
+        assert_ne!(observed.performance.bank().system().last_frame().unwrap().observer_pressure_pa,
+            cooler.performance.bank().system().last_frame().unwrap().observer_pressure_pa);
+        assert_eq!(wav.into_inner().len(), 44 + 512 * 2);
+    });
 }
 
 #[test]

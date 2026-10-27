@@ -120,6 +120,13 @@ initial temperatures, then final temperatures and stored enthalpies.
 ordinary renderer. Tracing changes callback size only; it does not run a
 second simulation. Existing WAV headroom and clipping reporting still apply.
 
+`--decimate` can be combined with this profile and `--bow-trace`. Heat feedback
+and trace rows retain every original mechanical step while the shared pressure
+observer emits 48 kHz PCM. The declared mechanical horizon must contain complete
+output intervals; admission occurs before either output file is created. The
+observer keeps its causal filter delay and never restarts thermal history at
+the audio clock.
+
 The existing `shear-layer-bow.material-strings` pack is an **isothermal
 manufactured integration fixture** and does not supply the additional thermal
 source data. The native tests supply explicitly manufactured thermal claims

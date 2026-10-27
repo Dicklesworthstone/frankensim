@@ -2,8 +2,11 @@ import "./native-wind.css";
 // Canonical native fixtures, bundled verbatim by Vite; no copied physics defaults.
 import reedExampleSource from "../../../crates/fs-couple/examples/reed-two-medium-tone-hole.performance?raw";
 import flueExampleSource from "../../../crates/fs-couple/examples/flue-nolle.performance?raw";
+import materialReedSource from "../../../crates/fs-couple/examples/material_modal_valve/paired-walls.performance?raw";
+import materialReedDgSource from "../../../crates/fs-couple/examples/material_modal_valve/paired-dg-chimney.performance?raw";
 import stringExampleSource from "../../../crates/fs-couple/examples/material_strings/pluck-and-bow.material-strings?raw";
 import layeredStringSource from "../../../crates/fs-couple/examples/material_strings/relaxing-layered-strings.material-strings?raw";
+import shearStringSource from "../../../crates/fs-couple/examples/material_strings/shear-layer-bow.material-strings?raw";
 import { nativeWindStatus, renderNativeWindBundle, type NativeWindStatus, type NativeWindAttachment, type NativeWindGasSources, type NativeStringProfiles } from "./native-wind-client.mjs";
 import { el } from "./util";
 import { createNativeGasControls } from "./native-wind-gases";
@@ -15,6 +18,7 @@ const EXAMPLES = [
     label: "Reed — two-medium tone hole",
     renderer: "wind",
     source: reedExampleSource,
+    decimate: false,
     intro: "Starter: two-medium tone hole — a short boundary diagnostic with a reed and three tube sections in different gas regions. Change the gas mixtures, temperature, geometry or gestures in the description.",
     help: "ambient sets the inlet and chimney gas; a segment’s gas entry overrides its local medium; exterior sets the surrounding gas. The interior and exterior must share a static pressure because this boundary model omits mean flow. This short numerical fixture is not a measured clarinet or oboe.",
   },
@@ -23,14 +27,34 @@ const EXAMPLES = [
     label: "Flute — Nolle/Price jet",
     renderer: "wind",
     source: flueExampleSource,
+    decimate: false,
     intro: "Starter: flute jet — a short blowing-pressure phrase through a cylindrical tube, using the native Nolle/Price jet transfer. Change the gas, tube, mouth geometry or pressure gesture in the description.",
     help: "gas owns the internal medium; exterior sets the surrounding gas. jet_transfer selects the short-channel Nolle/Price source. The native description owns the mechanical and output clocks, and the jet and acoustic mouth are solved together. This synthetic example is not a measured flute.",
+  },
+  {
+    name: "material_modal_valve/paired-walls.performance",
+    label: "Material reeds — paired blades and compliant duct walls",
+    renderer: "wind",
+    source: materialReedSource,
+    decimate: false,
+    intro: "Starter: two material-derived reed blades coupled to an upstream tract, downstream bore and material walls. Attach blade.matpack and wall.matpack from the canonical material-modal example. Change each blade region or wall source independently.",
+    help: "The original meshes, thickness regions, material stiffness and loss determine blade motion, aperture flow and external microphone pressure. This source already observes its 768 kHz mechanics at 48 kHz; leave additional decimation off. Its manufactured materials are not measured cane or a qualified clarinet/oboe specimen.",
+  },
+  {
+    name: "material_modal_valve/paired-dg-chimney.performance",
+    label: "Material reeds — resolved duct, chimney and regional gases",
+    renderer: "wind",
+    source: materialReedDgSource,
+    decimate: true,
+    intro: "Starter: the same material-derived paired blades drive a spatially resolved duct with a side chimney. Attach blade.matpack. The bore, chimney and exterior have separately declared gas sources and feed the original radiating boundary.",
+    help: "This canonical source runs at 96 kHz. Native decimation is selected below to observe its unchanged mechanical trajectory at 48 kHz. Material, gas, geometry and numerical resolution remain authored source data; the browser adds no acoustic coefficients.",
   },
   {
     name: "material_strings/pluck-and-bow.material-strings",
     label: "Strings — pluck and bow with a shared body",
     renderer: "strings",
     source: stringExampleSource,
+    decimate: false,
     intro: "Starter: one material-derived string, body and cavity, with a physical preload and bow gesture. Attach wire.fsmatpk and body.fsmatpk using the source-pack instructions linked below, or open your own complete material-string performance.",
     help: "The string performer derives modes and losses from original material data and geometry. It retains sympathetic strings, reciprocal body/contact forces and the declared gas. Optional profiles add body geometry, fingers/frets and contact heat. This is a numerical integration fixture, not a measured violin, cello or bass.",
   },
@@ -39,8 +63,18 @@ const EXAMPLES = [
     label: "Strings — bonded layers with original relaxation spectra",
     renderer: "strings",
     source: layeredStringSource,
+    decimate: false,
     intro: "Starter: layered strings with independent source relaxation spectra. Attach each original material pack named in the performance. Change layer materials and geometry in the data; the shared constitutive solver retains each layer's history.",
     help: "This perfectly bonded concentric-section model retains original per-layer moduli and relaxation times. It does not add sliding helical windings. Keep the stated end-load or displacement comparison and pressure scale when comparing material substitutions.",
+  },
+  {
+    name: "material_strings/shear-layer-bow.material-strings",
+    label: "Strings — material shear layer and distributed bow contact",
+    renderer: "strings",
+    source: shearStringSource,
+    decimate: false,
+    intro: "Starter: a material shear layer drives distributed bow contact on the original string/body/cavity system. Attach wire.fsmatpk, body.fsmatpk and manufactured-shear-layer.fsmatpk from the canonical material-string example.",
+    help: "Layer shear modulus, yield stress and plastic viscosity control retained elastic/plastic history and the actual pressure output. The native instructions describe geometric stretching, longitudinal waves and optional contact heat. Heat feedback requires the same materials to supply caloric and transport data; this isothermal fixture does not invent them.",
   },
 ];
 const exampleUrl = (name: string): string =>
@@ -284,7 +318,7 @@ export function createNativeWindPanel(): HTMLElement {
     sourceHelp.textContent = selectedExample.help;
     canonical.href = exampleUrl(selectedExample.name);
     attachments = [];
-    decimate.checked = false;
+    decimate.checked = selectedExample.decimate;
     gas.reset();
     profiles.reset();
     drawAttachments();
@@ -403,7 +437,7 @@ export function createNativeWindPanel(): HTMLElement {
       el("summary", {}, "About the source and local renderer"),
       sourceHelp,
       el("p", {}, "Wind and material-string descriptions use their original native loaders. Attach the exact material packs and artifacts named by the source, including subdirectory paths. Changing a pack changes its physical properties; missing data and unsupported states remain native refusals. Keep the same declared pressure scale when comparing renders."),
-      el("p", {}, "Rendering uses the local music_render or material_strings executable. The hosted review page can show and edit the source; audio is available when you open it through the local renderer server. String decimation currently excludes contact-thermal profiles and bow traces; those workflows retain their original output clock."),
+      el("p", {}, "Rendering uses the local music_render or material_strings executable. The hosted review page can show and edit the source; audio is available when you open it through the local renderer server. String contact-thermal profiles retain their original mechanical clock when pressure is decimated to 48 kHz."),
       el("p", {}, canonical,
         " · ", el("a", {href: "https://github.com/Dicklesworthstone/frankensim/tree/main/crates/fs-couple/examples/material_strings", target: "_blank", rel: "noopener"}, "String source-pack instructions"),
         " · ", el("a", { href: "https://github.com/Dicklesworthstone/frankensim/tree/main/apps/instrument-lab#native-wind-and-string-renderer", target: "_blank", rel: "noopener" }, "Local renderer setup"))),

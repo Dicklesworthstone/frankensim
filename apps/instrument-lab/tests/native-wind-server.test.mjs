@@ -63,12 +63,12 @@ test('material strings reuse the exact source packet, gas associations and expli
     assert.deepEqual(app.initial.renderers, {wind:false, strings:true});
     assert.equal(app.initial.available, true);
     assert.ok(app.initial.supportedSchemas.includes('frankensim-material-strings-v3'));
-    const names = ['wire.pack', 'body.pack', 'shape.body', 'finger.stops', 'gas/s', 'gas/n', 'gas/t'];
+    const names = ['wire.pack', 'body.pack', 'shape.body', 'finger.stops', 'contact.thermal', 'gas/s', 'gas/n', 'gas/t'];
     const bytes = Buffer.from('frankensim-material-strings-v3\r\n# read-files ' + JSON.stringify(names) + '\r\n# original 音\r\n');
     const files = names.map((name, i) => [name, Buffer.from([0, 255, i, 13, 10])]);
     const packet = JSON.parse(bundle(bytes, files));
     packet.renderer = 'strings'; packet.decimate = true;
-    packet.stringProfiles = {bodyPath:'shape.body', stopPath:'finger.stops'};
+    packet.stringProfiles = {bodyPath:'shape.body', stopPath:'finger.stops', contactThermalPath:'contact.thermal'};
     packet.gasSources = {components:[{speciesPath:'gas/s', nasa9Path:'gas/n', transportPath:'gas/t'}], waterSpecies:null, phase:'frozen'};
     const response = await app.runBundle(JSON.stringify(packet));
     assert.equal(response.status, 200); assert.equal((await response.arrayBuffer()).byteLength, 48);
@@ -77,7 +77,7 @@ test('material strings reuse the exact source packet, gas associations and expli
     assert.deepEqual(receipt.args, [join(receipt.cwd, 'input.performance'), join(receipt.cwd, 'output.wav'),
       '--self-contained', '--decimate', ...names.flatMap(name => ['--attached-source', name]),
       '--gas-water', 'none', '--gas-phase', 'frozen', '--gas-component', 'gas/s', 'gas/n', 'gas/t',
-      '--body-profile', 'shape.body', '--stop-profile', 'finger.stops']);
+      '--body-profile', 'shape.body', '--stop-profile', 'finger.stops', '--contact-thermal', 'contact.thermal']);
     assert.deepEqual(receipt.files.map(file => [file.path, file.bytes]), files.map(([path, bytes]) => [path, bytes.toString('base64')]));
     await until(async () => !(await app.status()).busy);
     assert.equal((await app.run()).status, 503, 'a configured string performer must not substitute for a missing wind performer');
