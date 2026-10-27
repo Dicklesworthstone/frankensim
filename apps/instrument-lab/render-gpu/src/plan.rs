@@ -692,6 +692,11 @@ impl Plan {
         let mut ct_nodes = vec![];
         let mut body_contacts: Vec<Vec<i32>> = vec![vec![]; p.nb];
         for (j, c) in img.contacts.iter().enumerate() {
+            // the kernel solves the power law only: a crushing contact (the crash's shaft strike)
+            // would render as elastic, so it renders on the CPU
+            if c.crush.is_some() {
+                return Err(format!("contact {j} crushes (fs_vkplate::Crush), which the GPU kernel does not solve; render it on the CPU"));
+            }
             p.ct_a0.push(i32s(p.ct_node.len()));
             let mut comp = 0.0;
             for &(b, i, w) in &c.a {

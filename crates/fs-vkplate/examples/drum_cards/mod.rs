@@ -4,11 +4,14 @@
 //! that are coils of sourced steel (ruling 7373), and in place of every value
 //! adopted because it graded closer to a recording (96ccf8f1b), the
 //! recording's pitch for the tensions and 88cccbb78's declared estimates for
-//! the rest (ruling 7486).
+//! the rest (ruling 7486). The crash struck with the shaft takes its stick,
+//! and the wood's crush across the grain, from the same hickory card (ruling
+//! 7476).
 
 use fs_matdb::QueryPoint;
 use fs_vkplate::kit::{self, CymbalSpec, DrumSpec, Piece};
-use fs_vkplate::materials::{KitMaterials, temperature_frequency_point};
+use fs_vkplate::materials::{KitMaterials, temperature_frequency_point, temperature_point};
+use fs_vkplate::shaft::{SHOULDER_STATION_M, ShaftStrike};
 
 /// The PET head-film card and the hickory stick card, both compiled from
 /// data/matdb/seed-v1 (see the crate README).
@@ -159,6 +162,33 @@ pub fn hihat(gap: f64, pedal_n: f64, hits: &[(f64, f64)], preset: bool) -> Resul
             &kit::DECLARED_CYMBAL_INTERFACE,
         )
     }
+}
+
+/// A preset-bronze cymbal struck once at its edge, at `speed` m/s, by the
+/// hickory card's shaft at the declared shoulder station, the wood crushing
+/// across its grain. The edge is taken fully rounded (half its thickness).
+/// There is no default speed: a shaft strike is rendered as a ladder of speeds
+/// (ruling 7373).
+#[allow(dead_code)] // perform.rs shares this module and strikes no cymbal
+pub fn shaft_cymbal(spec: &kit::CymbalSpec, speed: Option<f64>) -> Result<Piece, String> {
+    let speed = speed.ok_or(
+        "crash-shaft has no default speed: give SPEED_M_S, the shaft's speed at the edge (render a ladder of speeds, ruling 7373)",
+    )?;
+    let gas = fs_vkplate::standard_gas();
+    let shaft = ShaftStrike::from_card(
+        HICKORY,
+        &temperature_point("T", gas.temperature)?,
+        SHOULDER_STATION_M,
+        0.5 * kit::edge_thickness(spec),
+        (kit::BRONZE.0, kit::BRONZE.1),
+    )?;
+    kit::cymbal_struck_by(
+        spec,
+        &[(0.005, speed, 1.0)],
+        gas,
+        (shaft.mass_kg, shaft.law, Some(shaft.crush)),
+        &shaft.notes,
+    )
 }
 
 /// The open hat's rim opening on the card route: 88cccbb78's declared 8 mm (ruling 7520 G2).

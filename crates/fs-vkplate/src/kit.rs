@@ -798,39 +798,68 @@ pub fn cymbal(c: &CymbalSpec, hits: &[(f64, f64, f64, f64)]) -> Result<Piece, St
 
 /// The same plate and contact mechanics with material-resolved propagation.
 pub fn cymbal_with_gas(c: &CymbalSpec, hits: &[(f64, f64, f64, f64)], gas: GasState) -> Result<Piece, String> {
-    build_cymbal(c, hits, gas, None, &FITTED_CYMBAL_INTERFACE)
+    build_cymbal(c, hits, gas, None, &FITTED_CYMBAL_INTERFACE, None)
 }
 
 /// The same with the stick's loss from `iface` (the card route passes DECLARED_CYMBAL_INTERFACE).
 pub fn cymbal_with_interface(c: &CymbalSpec, hits: &[(f64, f64, f64, f64)], iface: &CymbalInterface) -> Result<Piece, String> {
-    build_cymbal(c, hits, standard_gas(), None, iface)
+    build_cymbal(c, hits, standard_gas(), None, iface, None)
 }
 
 /// Source-bound shell stiffness/mass and spherical-striker mass/contact.
 /// With materials supplied, hit tuple radii remain strike positions; the
 /// material binding's tip radius declares the common physical impactor.
 pub fn cymbal_with_materials(c: &CymbalSpec, hits: &[(f64, f64, f64, f64)], gas: GasState, materials: &KitMaterials) -> Result<Piece, String> {
-    build_cymbal(c, hits, gas, Some(materials), &FITTED_CYMBAL_INTERFACE)
+    build_cymbal(c, hits, gas, Some(materials), &FITTED_CYMBAL_INTERFACE, None)
 }
 
-fn build_cymbal(c: &CymbalSpec, hits: &[(f64, f64, f64, f64)], gas: GasState, materials: Option<&KitMaterials>, iface: &CymbalInterface) -> Result<Piece, String> {
+/// A declared striker: its moving mass [kg], its contact law and, if it crushes, its crush.
+pub type Striker = (f64, Law, Option<Crush>);
+
+/// A cymbal of preset bronze struck by a declared striker, the same for every hit (time s, speed
+/// m/s, radius fraction). `notes`, the striker's receipts, join the piece's in place of a stick
+/// receipt. The shaft strike (`shaft::ShaftStrike`) enters here.
+pub fn cymbal_struck_by(c: &CymbalSpec, hits: &[(f64, f64, f64)], gas: GasState, striker: Striker, notes: &[String]) -> Result<Piece, String> {
+    // the hit tuple's tip radius is read only by the presets' own stick
+    let hits: Vec<_> = hits.iter().map(|&(t, v, rf)| (t, v, rf, f64::NAN)).collect();
+    let mut piece = build_cymbal(c, &hits, gas, None, &DECLARED_CYMBAL_INTERFACE, Some(striker))?;
+    piece.notes.extend(notes.iter().cloned());
+    Ok(piece)
+}
+
+/// A cymbal's thickness at its free edge [m].
+pub fn edge_thickness(c: &CymbalSpec) -> f64 {
+    bow_thickness(c, c.radius)
+}
+
+fn build_cymbal(c: &CymbalSpec, hits: &[(f64, f64, f64, f64)], gas: GasState, materials: Option<&KitMaterials>, iface: &CymbalInterface, striker: Option<Striker>) -> Result<Piece, String> {
     let mut ins = instrument(OUT_RATE, gas, materials)?;
     let elastic = materials.map_or(BRONZE, |m| elastic_values(m.primary()));
     let mut body = cymbal_body(c.name, c, elastic, materials.and_then(KitMaterials::primary_bending_loss))?;
     body.origin = [0.0, 0.0, 0.0];
     let n = body.n;
     let ci = ins.add(body);
-    let st = ins.add(Body::point("stick", materials.map_or(STICK_TIP_KG, KitMaterials::striker_mass_kg)));
+    let mass = striker.map_or_else(|| materials.map_or(STICK_TIP_KG, KitMaterials::striker_mass_kg), |(m, _, _)| m);
+    if !(mass.is_finite() && mass > 0.0) {
+        return Err(format!("cymbal striker mass must be positive, got {mass} kg"));
+    }
+    let st = ins.add(Body::point("stick", mass));
     let mut notes = vec![format!("{}: {n} nodes at {:.1} mm", c.name, c.grid * 1e3)];
     notes.extend(c.provenance.map(String::from));
-    if materials.is_none() {
+    if materials.is_none() && striker.is_none() {
         notes.push(iface.cymbal_receipt.into());
     }
     for (k, &(t, v, rf, tip)) in hits.iter().enumerate() {
         let fp = ins.bodies[ci].footprint(rf * c.radius, 0.0, 0.0);
         // the stick comes down onto the upper surface: plate on side a
-        let law = materials.map_or_else(|| hertz_pair(tip, PRESET_HICKORY, (elastic.0, elastic.1), iface.stick_loss_s_m), KitMaterials::impact_law);
+        let law = striker.map_or_else(
+            || materials.map_or_else(|| hertz_pair(tip, PRESET_HICKORY, (elastic.0, elastic.1), iface.stick_loss_s_m), KitMaterials::impact_law),
+            |(_, l, _)| l,
+        );
         let mut con = Contact::new(fp.into_iter().map(|(n_, w)| (ci, n_, w)).collect(), vec![(st, 0, 1.0)], 0.0, law);
+        if let Some((_, _, Some(crush))) = striker {
+            con = con.crushing(crush)?;
+        }
         con.active = false;
         ins.contacts.push(con);
         ins.strikes.push(Strike { time: t, striker: st, contact: ins.contacts.len() - 1, speed: v, clear: 2e-4, done: false });

@@ -1516,3 +1516,109 @@ fn g1_the_film_card_curve_gives_each_head_mode_the_loss_tangent_at_its_own_frequ
     let kick = kit::kick_with_materials(&kick, &[], standard_gas(), &film).unwrap();
     assert!(kick.notes.iter().any(|n| n.starts_with(kit::KICK_PILLOW_RECEIPT) && n.contains("muffle dashpot (22 N s/m^3 over a 70 mm radius")));
 }
+
+#[test]
+fn g1_the_crash_shaft_is_the_hickory_card_across_its_grain_on_bronze() {
+    use crate::hertz::EllipticHertz;
+    use crate::shaft::{
+        SHAFT_CONTACT_LOSS_S_M, SHAFT_UNMODELLED_NOTE, SHOULDER_STATION_M,
+        ShaftStrike, Z5A_GRIP_M, Z5A_PROFILE, across_grain_compliances, effective_volume_m3,
+        profile_radius_m,
+    };
+    let point = crate::materials::temperature_point("T", 293.15).unwrap();
+    let bronze = (kit::BRONZE.0, kit::BRONZE.1);
+    let shaft =
+        ShaftStrike::from_card(HICKORY, &point, SHOULDER_STATION_M, 0.475e-3, bronze).unwrap();
+    // The card's density on the Z5A estimate's own pivot inertia, heavier than the tip.
+    near(
+        shaft.mass_kg,
+        806.4 * effective_volume_m3(&Z5A_PROFILE, Z5A_GRIP_M, SHOULDER_STATION_M).unwrap(),
+    );
+    assert!(shaft.mass_kg > 806.4 / 800.0 * kit::STICK_TIP_KG);
+    // The two across-grain compliances from the closed-form stiffnesses of the card's
+    // transversely isotropic solid, independent of the compliance inversion.
+    let e_l = 16_390e6;
+    let (e_p, g, nu_lp, nu_p) = (0.05693 * e_l, 0.06657 * e_l, 0.4668, 0.518);
+    let d = 1.0 - nu_p - 2.0 * nu_lp * nu_lp * e_p / e_l;
+    let c11 = e_p * (1.0 - nu_lp * nu_lp * e_p / e_l) / ((1.0 + nu_p) * d);
+    let c12 = e_p * (nu_p + nu_lp * nu_lp * e_p / e_l) / ((1.0 + nu_p) * d);
+    let (c13, c33) = (e_p * nu_lp / d, e_l * (1.0 - nu_p) / d);
+    let plane = c11 / (PI * (c11 * c11 - c12 * c12));
+    let grain = (c33 / (c11 * c33 - c13 * c13) * (1.0 / g + 2.0 / (c13 + (c11 * c33).sqrt())))
+        .sqrt()
+        / (2.0 * PI);
+    let (p, gr) = across_grain_compliances(e_l, e_p, g, nu_lp, nu_p).unwrap();
+    near(p, plane);
+    near(gr, grain);
+    // Softer across the grain, in both planes, than along it (the tip's axial modulus).
+    let along = axial_indentation_modulus(e_l, e_p, g, nu_lp, nu_p).unwrap();
+    assert!(plane > grain && 1.0 / (PI * grain) < along);
+    // The law is that contact's K: the edge and the shaft summed with the bronze.
+    let target = (1.0 - bronze.1 * bronze.1) / (PI * bronze.0);
+    let radius = profile_radius_m(&Z5A_PROFILE, SHOULDER_STATION_M).unwrap();
+    let contact =
+        EllipticHertz::solve(plane + target, grain + target, 0.5 / radius, 0.5 / 0.475e-3).unwrap();
+    let Law::Power { k, alpha, mu } = shaft.law;
+    // the card route's declared stick loss, not the presets' fitted one (ruling 7486)
+    assert_eq!((alpha, mu, SHAFT_CONTACT_LOSS_S_M), (1.5, 0.2, kit::DECLARED_STICK_LOSS_S_M));
+    assert!(
+        (k / contact.k() - 1.0).abs() < 1e-9,
+        "{k} vs {}",
+        contact.k()
+    );
+    // The crush: GTR-282 Table 5-3a's shagbark side hardness, 8,400 N to embed the 11.28 mm ball to
+    // half its diameter, over the ball's projected area, on that contact's Hertz area; fresh wood.
+    near(shaft.crush.pressure, 8400.0 / (PI * 5.64e-3 * 5.64e-3));
+    assert!((shaft.crush.pressure * 1e-6 - 84.06).abs() < 0.01);
+    near(shaft.crush.area, contact.area_per_approach());
+    assert_eq!(shaft.crush.deepest, 0.0);
+    // the card's compression perpendicular to the grain (12,100 kPa) is stated, not used
+    assert!(shaft.notes.iter().any(|n| n.starts_with("stick crush across the grain") && n.contains("84.1 MPa") && n.contains("12.1 MPa")));
+    // long round the shaft, short along it; far softer than the presets' 5 mm tip
+    assert!(shaft.contact.aspect() < 1.0);
+    let Law::Power { k: tip, .. } = kit::hertz_stick(0.005, bronze.0, bronze.1);
+    assert!(k < 0.1 * tip, "{k} vs {tip}");
+    // the ellipse scales as F^(1/3): eight times the force, twice the mean pressure
+    near(
+        shaft.contact.mean_pressure_pa(800.0),
+        2.0 * shaft.contact.mean_pressure_pa(100.0),
+    );
+    assert!(shaft.notes[0].starts_with("stick: the shaft across the edge at 0.330 m"));
+    assert!(shaft.notes.iter().any(|n| n == SHAFT_UNMODELLED_NOTE));
+    // A card without the transverse constants refuses: there is no isotropic fallback.
+    let plain = pack("isotropic stick", 800.0, 12e9, Some(0.3)).to_bytes();
+    let refused = ShaftStrike::from_card(&plain, &point, SHOULDER_STATION_M, 0.475e-3, bronze)
+        .err()
+        .unwrap();
+    assert!(refused.starts_with("shaft stick card:"), "{refused}");
+    // The cymbal is struck by that mass with that law and crush, and says what is not modelled
+    // in place of a stick receipt.
+    let mut spec = kit::crash();
+    spec.grid *= 4.0;
+    let mut piece = kit::cymbal_struck_by(
+        &spec,
+        &[(0.002, 2.0, 1.0)],
+        standard_gas(),
+        (shaft.mass_kg, shaft.law, Some(shaft.crush)),
+        &shaft.notes,
+    )
+    .unwrap();
+    let bodies = &piece.instrument.bodies;
+    let stick = bodies.iter().position(|b| b.name == "stick").unwrap();
+    assert_eq!(bodies[stick].mass[0], shaft.mass_kg);
+    let strike = |piece: &kit::Piece| {
+        piece.instrument.contacts.iter().find(|c| c.b.iter().any(|&(b, _, _)| b == stick)).unwrap().clone()
+    };
+    let Law::Power { k: struck, .. } = strike(&piece).law;
+    assert_eq!(struck, k);
+    assert_eq!(strike(&piece).crush, Some(shaft.crush));
+    assert!(piece.notes.iter().any(|n| n == SHAFT_UNMODELLED_NOTE));
+    assert!(!piece.notes.iter().any(|n| n == kit::DECLARED_CYMBAL_INTERFACE.cymbal_receipt));
+    // Through the solver: at 2 m/s the edge crushes the shaft and leaves a permanent set.
+    kit::render(&mut piece, 0.006, |_| {});
+    let hit = strike(&piece);
+    let crush = hit.crush.unwrap();
+    assert!(hit.peak_force > 0.0);
+    assert!(crush.deepest > 2.0 * crush.onset(k), "crushed to {:e} m, onset {:e} m", crush.deepest, crush.onset(k));
+    assert!(crush.set(k) > 0.0);
+}

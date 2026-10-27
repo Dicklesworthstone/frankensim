@@ -185,10 +185,41 @@ uses Wood Handbook Table 5-3a for shagbark hickory at 12 % moisture content:
   Table 5-2, so this is the mean μLR of its 16 hardwoods;
 - E_T/E_L 0.05693, G_LT/E_L 0.06657, ν_LT 0.4668 and a transverse-plane
   Poisson ratio 0.518, the hardwood means of Tables 5-1 and 5-2, also
-  composition proxies.
+  composition proxies;
+- side hardness 8,400 N (the load to embed an 11.28 mm ball to half its
+  diameter) and compression perpendicular to the grain 12.1 MPa (the stress at
+  the proportional limit), from the same Table 5-3a row.
 
 It is admitted from 288.15 to 298.15 K, by Table 5-15. The other true
 hickories' values are kept as the stated spread.
+
+### The crash struck with the shaft
+
+`crash-shaft` (examples/kit) strikes the crash's edge with the card stick's
+shaft, at right angles (`shaft`). The stick is the Z5A shape estimate, turned
+about its grip; the edge lands at its 0.33 m station. The stick's angle and
+that landing point are declared, not sourced. The shaft crossing the edge is
+an elliptic Hertz contact of crossed cylinders, with the wood indented across
+its grain (Barber's anisotropic half-space with the Delafargue-Ulm cos 2φ).
+
+Elastic, that contact's mean pressure would reach 119-245 MPa at 1-8 m/s. That is
+above the card's side hardness read as a mean pressure, 84.1 MPa (8,400 N over
+π (5.64 mm)²), so the wood crushes. The contact is a `Crush` (lib.rs):
+- Hertz until the mean pressure reaches 84.1 MPa;
+- deeper, that mean pressure on the Hertz area, which Thornton (1997) keeps
+  proportional to the approach;
+- unloading and reloading along Hertz from a permanent set.
+
+Its potential only falls as the wood crushes, so the discrete-gradient solve
+stays passive. The Hertz area is half the edge's truncation of the shaft, the
+area the hardness test divides by at depth, so this is the lower of the two
+readings of the same datum. The card's compression perpendicular to the grain,
+a seventh of that pressure, is stated and not used. It is where a
+plate-loaded block begins to crush.
+
+The shaft's Hunt-Crossley loss is the card route's declared 0.2 s/m. Each hit
+crushes fresh wood. Not modelled: friction along the edge and the stick's
+bending. The GPU renderer refuses a crushing contact.
 
 A striker card that carries all four elastic ratios (`TIP_ANISOTROPY`) has a
 tip transversely isotropic about the grain. Its Hertz modulus is then the
@@ -693,7 +724,8 @@ cargo run --release --example livebench -- 5                   # real-time facto
 cargo test --release
 ```
 Live pieces: `kick snare snare-off tom-12 tom-14 hihat hihat-closed hihat-open crash ride`.
-The offline `kit` and `perform` examples use the fixed hi-hat names; `kit` also renders `splash`.
+The offline `kit` and `perform` examples use the fixed hi-hat names; `kit` also renders `splash`
+and `crash-shaft`, which has no default speed (give SPEED_M_S).
 
 Their drums (`kick snare snare-off tom-12 tom-14`) are built from the sourced cards by default
 (`examples/drum_cards/mod.rs`):

@@ -56,6 +56,10 @@ pub mod coil;
 /// Elliptical Hertz contact of two elastic bodies.
 pub mod hertz;
 
+/// A cymbal struck with the stick's shaft across its edge: the shaft's effective mass and its
+/// elastic contact across the grain from the stick card.
+pub mod shaft;
+
 /// Default environmental datum; all coefficients come from the shared gas law.
 /// Custom atmospheres enter through `Instrument::with_gas`.
 pub fn standard_gas() -> GasState {
@@ -1848,6 +1852,73 @@ pub enum Law {
     Power { k: f64, alpha: f64, mu: f64 },
 }
 
+/// A contact whose softer body crushes: the stick's wood across its grain under a cymbal's edge
+/// (`shaft`). The contact's `Law::Power` (alpha 1.5) is its elastic Hertz law F = K d^(3/2), whose
+/// contact area is `area` d. Loading is Hertz until the mean pressure F/A reaches `pressure`, at the
+/// onset d_y = (pressure area / K)^2. Deeper, the mean pressure stays there and the area keeps
+/// Hertz's proportion to the approach, F = pressure area d (Thornton 1997, J. Appl. Mech. 64, 383,
+/// whose limit is the peak pressure; here it is the mean pressure, which a hardness test reports).
+/// Below the deepest approach d_m the contact unloads and reloads along Hertz from a permanent set,
+/// with the curvature that keeps the loaded area at the peak force (Thornton's construction):
+/// F = K (d_m/d_y)^(1/4) (d - s)^(3/2) with s = d_m - sqrt(d_m d_y). At every approach a deeper
+/// memory gives no more force, so the contact's potential only falls as the wood crushes and the
+/// discrete-gradient solve stays passive. Only the Hunt-Crossley loss of the law is added to it.
+/// The solve's secant spans two steps, d^(n-1) to d^(n+1), so it reads the memory through d^(n-1):
+/// a loading step then lies wholly on the crushing line, and the crush is exact to second order
+/// (a memory through d^n would put the step's lower half on an unloading curve, a first-order
+/// error). Each launch crushes fresh wood.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Crush {
+    /// Contact area per unit approach [m].
+    pub area: f64,
+    /// Mean contact pressure at which the softer body crushes [Pa].
+    pub pressure: f64,
+    /// The deepest approach so far [m], through the previous step: the contact's memory.
+    pub deepest: f64,
+}
+
+impl Crush {
+    pub fn new(area: f64, pressure: f64) -> Result<Crush, String> {
+        if !(area.is_finite() && area > 0.0 && pressure.is_finite() && pressure > 0.0) {
+            return Err(format!("crush needs a positive area per approach and crush pressure, got {area} m and {pressure} Pa"));
+        }
+        Ok(Crush { area, pressure, deepest: 0.0 })
+    }
+
+    /// The approach at which a Hertz contact of stiffness `k` [N/m^1.5] begins to crush [m].
+    #[must_use]
+    pub fn onset(&self, k: f64) -> f64 {
+        let root = self.area * self.pressure / k;
+        root * root
+    }
+
+    /// At the current memory: the unloading curve's stiffness [N/m^1.5], its permanent set [m] and
+    /// the approach where it meets the crushing line [m].
+    fn branch(&self, k: f64) -> (f64, f64, f64) {
+        let onset = self.onset(k);
+        let reach = self.deepest.max(onset);
+        (k * (reach / onset).sqrt().sqrt(), reach - (reach * onset).sqrt(), reach)
+    }
+
+    /// The permanent set the contact keeps once unloaded [m].
+    #[must_use]
+    pub fn set(&self, k: f64) -> f64 {
+        self.branch(k).1
+    }
+
+    /// The force at approach `d` at the current memory, without Hunt-Crossley loss [N].
+    #[must_use]
+    pub fn force(&self, k: f64, d: f64) -> f64 {
+        let (stiff, set, reach) = self.branch(k);
+        if d > reach {
+            self.pressure * self.area * d
+        } else {
+            let x = (d - set).max(0.0);
+            stiff * x * x.sqrt()
+        }
+    }
+}
+
 /// One-sided contact: d = sum_side sign * weight * w - gap; d > 0 is interpenetration.
 #[derive(Clone)]
 pub struct Contact {
@@ -1867,11 +1938,23 @@ pub struct Contact {
     /// elsewhere: it is as exact there, but it would change every other piece's output (by rounding
     /// for most; the open hi-hat's rim chatter decorrelates), and that has not been graded.
     pub fixed_point_exit: bool,
+    /// The crushing of the softer body, with its memory; None for an elastic contact.
+    pub crush: Option<Crush>,
 }
 
 impl Contact {
     pub fn new(a: Vec<(usize, usize, f64)>, b: Vec<(usize, usize, f64)>, gap: f64, law: Law) -> Contact {
-        Contact { a, b, gap, law, d_now: 0.0, active: true, peak_force: 0.0, force: 0.0, fixed_point_exit: false }
+        Contact { a, b, gap, law, d_now: 0.0, active: true, peak_force: 0.0, force: 0.0, fixed_point_exit: false, crush: None }
+    }
+
+    /// The same contact crushing as `crush` describes; its law must be Hertz (alpha 1.5).
+    pub fn crushing(mut self, crush: Crush) -> Result<Contact, String> {
+        let Law::Power { k, alpha, .. } = self.law;
+        if alpha != 1.5 || !(k.is_finite() && k > 0.0) {
+            return Err(format!("a crushing contact needs a Hertz law (alpha 1.5, K > 0), got alpha {alpha}, K {k}"));
+        }
+        self.crush = Some(crush);
+        Ok(self)
     }
 }
 
@@ -1994,6 +2077,38 @@ fn contact_phi(d: f64, previous: f64, kk: f64, alpha: f64, mu: f64, k: f64) -> (
     else { (value, kk*(derivative*damp+elastic*damping_rate)) }
 }
 
+/// The secant of a crushing contact's potential between `previous` and `d` at its current memory,
+/// and its derivative in `d` (`power_secant` for `Crush`). The potential is convex, so the secant
+/// increases with `d`.
+fn crush_secant(d: f64, previous: f64, kk: f64, crush: &Crush) -> (f64, f64) {
+    let (stiff, set, reach) = crush.branch(kk);
+    let slope = crush.pressure * crush.area;
+    if d <= reach && previous <= reach {
+        let (value, derivative) = power_secant(d - set, previous - set, 1.5);
+        return (stiff * value, stiff * derivative);
+    }
+    if d >= reach && previous >= reach {
+        return (0.5 * slope * (d + previous), 0.5 * slope);
+    }
+    // one end on each branch: the unloading curve up to `reach`, the crushing line beyond it
+    let (lo, hi) = if d < previous { (d, previous) } else { (previous, d) };
+    let below = stiff * power_secant(reach - set, lo - set, 1.5).0 * (reach - lo);
+    let above = 0.5 * slope * (hi + reach) * (hi - reach);
+    let value = (below + above) / (hi - lo);
+    (value, (crush.force(kk, d) - value) / (d - previous))
+}
+
+/// `contact_phi` for a crushing contact.
+#[inline(always)]
+fn crush_phi(d: f64, previous: f64, kk: f64, crush: &Crush, mu: f64, k: f64) -> (f64, f64) {
+    let (elastic, derivative) = crush_secant(d, previous, kk, crush);
+    let damping_rate = mu/(2.0*k);
+    let damp = 1.0+damping_rate*(d-previous);
+    let value = elastic*damp;
+    if value <= 0.0 { (0.0, 0.0) }
+    else { (value, derivative*damp+elastic*damping_rate) }
+}
+
 /// Centered discrete-gradient contact, phi = delta U / delta d times the
 /// Hunt--Crossley factor at (d_next-d_previous)/(2k), clipped at zero force.
 /// Thus zero-loss free masses conserve staggered kinetic plus contact energy.
@@ -2010,7 +2125,19 @@ fn contact_phi(d: f64, previous: f64, kk: f64, alpha: f64, mu: f64, k: f64) -> (
 /// root and halves back down to it (30-47 iterations instead of about 3).
 fn contact_force(d_pred: f64, comp: f64, force: f64, previous: f64, law: Law, fixed_exit: bool, k: f64) -> f64 {
     let Law::Power { k: kk, alpha, mu } = law;
-    let phi = |d| contact_phi(d, previous, kk, alpha, mu, k);
+    solve_force(d_pred, comp, force, previous, fixed_exit, |d| contact_phi(d, previous, kk, alpha, mu, k))
+}
+
+/// `contact_force` for a crushing contact, at its current memory.
+#[allow(clippy::too_many_arguments)]
+fn crush_force(d_pred: f64, comp: f64, force: f64, previous: f64, law: Law, crush: &Crush, fixed_exit: bool, k: f64) -> f64 {
+    let Law::Power { k: kk, mu, .. } = law;
+    solve_force(d_pred, comp, force, previous, fixed_exit, |d| crush_phi(d, previous, kk, crush, mu, k))
+}
+
+/// The root of f = phi(d_pred - comp f) for `contact_force` and `crush_force`.
+#[inline(always)]
+fn solve_force(d_pred: f64, comp: f64, force: f64, previous: f64, fixed_exit: bool, phi: impl Fn(f64) -> (f64, f64)) -> f64 {
     // no penetration, or a NaN one (a state already blown up): no force, and no 60 Newton steps on NaN
     if d_pred.is_nan() || previous.is_nan() || (d_pred <= 0.0 && previous <= 0.0) {
         return 0.0;
@@ -2198,8 +2325,8 @@ fn apply_force(bodies: &mut [Body], c: &mut Contact, f: f64, d_pred: f64, comp: 
 }
 
 /// Every active contact in list order, each solved implicitly with the others' updates applied.
-/// Runs of contacts on disjoint nodes with the sqrt law (snare wires, hi-hat rims, sticks) are
-/// queued and solved interleaved; any other contact, or one that shares a node with the queue,
+/// Runs of contacts on disjoint nodes with the sqrt law and no crush (snare wires, hi-hat rims,
+/// sticks) are queued and solved interleaved; any other contact, or one that shares a node with the queue,
 /// first flushes the queue. The result is bit-identical to solving one contact at a time.
 fn solve_contacts(bodies: &mut [Body], contacts: &mut [Contact], q: &mut ContactQueue, k: f64) {
     if q.mark.len() != bodies.len() {
@@ -2217,7 +2344,7 @@ fn solve_contacts(bodies: &mut [Body], contacts: &mut [Contact], q: &mut Contact
             continue;
         }
         let Law::Power { k: kk, alpha, mu } = contacts[jc].law;
-        let queued = alpha == 1.5;
+        let queued = alpha == 1.5 && contacts[jc].crush.is_none();
         let c = &contacts[jc];
         if !queued || c.a.iter().chain(&c.b).any(|&(b, i, _)| q.mark[b][i] == q.batch) {
             q.flush(bodies, contacts, k);
@@ -2240,7 +2367,14 @@ fn solve_contacts(bodies: &mut [Body], contacts: &mut [Contact], q: &mut Contact
         // friction solve may have invalidated. The secant spans two steps.
         if !queued || d_pred.is_nan() || previous.is_nan() || (d_pred <= 0.0 && previous <= 0.0) {
             // solved now: the queue is empty, or this contact moves nothing
-            let f = contact_force(d_pred, comp, c.force, previous, c.law, c.fixed_point_exit, k);
+            let f = match &mut c.crush {
+                Some(crush) => {
+                    // the memory through the secant's lower end, d^(n-1) (see `Crush`)
+                    crush.deepest = crush.deepest.max(previous);
+                    crush_force(d_pred, comp, c.force, previous, c.law, crush, c.fixed_point_exit, k)
+                }
+                None => contact_force(d_pred, comp, c.force, previous, c.law, c.fixed_point_exit, k),
+            };
             apply_force(bodies, c, f, d_pred, comp, k);
             continue;
         }
@@ -2764,6 +2898,9 @@ impl Instrument {
             st.wn[0] = z0 - s.speed * k;
             c.active = true;
             c.d_now = surf - z0 - c.gap;
+            if let Some(crush) = &mut c.crush {
+                crush.deepest = 0.0;
+            }
         }
         // contacts, solved implicitly one at a time (see `solve_contacts`)
         solve_contacts(&mut self.bodies, &mut self.contacts, &mut self.cq, k);
@@ -3112,6 +3249,103 @@ fn exact_contact_root_is_not_bisected_away() {
             1.25, 1.0, 1.0, 0.25,
             Law::Power { k: 8.0, alpha: 1.5, mu: 0.0 }, fixed_exit, 0.1,
         ), 1.0);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn g0_crush_is_hertz_to_its_pressure_then_holds_it_and_unloads_from_a_set() {
+    // The scale of the shaft on a crash edge: K, the Hertz area per approach, hickory's 84 MPa.
+    let (kk, area, pressure) = (9.0e7, 4.4e-3, 84.0e6);
+    let close = |a: f64, b: f64| assert!((a - b).abs() <= 1e-12 * b.abs(), "{a} vs {b}");
+    let mut c = Crush::new(area, pressure).unwrap();
+    let onset = c.onset(kk);
+    // Hertz until its mean pressure is the crush pressure, then that mean pressure on the Hertz area
+    close(kk * onset.powf(1.5) / (area * onset), pressure);
+    for x in [0.25, 0.5, 1.0] {
+        close(c.force(kk, x * onset), kk * (x * onset).powf(1.5));
+    }
+    for x in [1.5, 4.0, 9.0] {
+        close(c.force(kk, x * onset) / (area * x * onset), pressure);
+    }
+    assert_eq!(c.set(kk), 0.0);
+    // crushed to 4 d_y: set 4 - sqrt(4) = 2 d_y, unloading stiffness K 4^(1/4), continuous at the turn
+    c.deepest = 4.0 * onset;
+    close(c.set(kk), 2.0 * onset);
+    close(c.force(kk, 4.0 * onset), pressure * area * 4.0 * onset);
+    close(c.force(kk, 3.0 * onset), kk * 2f64.sqrt() * onset.powf(1.5));
+    assert_eq!(c.force(kk, 2.0 * onset), 0.0);
+    assert_eq!(c.force(kk, -onset), 0.0);
+    // at every approach a deeper memory gives no more force: the potential only falls as it crushes
+    let curve = |m: f64| -> Vec<f64> {
+        let at = Crush { deepest: m * onset, ..c };
+        (1..=48).map(|i| at.force(kk, 0.25 * i as f64 * onset)).collect()
+    };
+    let mut last = curve(0.0);
+    for m in [1.0, 1.05, 1.5, 2.0, 4.0, 11.0] {
+        let now = curve(m);
+        for (i, (a, b)) in now.iter().zip(&last).enumerate() {
+            assert!(*a <= *b * (1.0 + 1e-12), "memory {m} d_y gives more force at {} d_y", 0.25 * (i + 1) as f64);
+        }
+        last = now;
+    }
+    assert!(Crush::new(0.0, pressure).is_err() && Crush::new(area, f64::NAN).is_err());
+    let felt = Contact::new(vec![], vec![], 0.0, Law::Power { k: kk, alpha: 2.5, mu: 0.0 });
+    assert!(felt.crushing(c).is_err());
+}
+
+#[cfg(test)]
+#[test]
+fn g1_a_mass_dropped_on_a_crushing_contact_rebounds_as_thornton_and_never_gains_energy() {
+    // A mass on a rigid crushing contact, stepped as solve_contacts steps it: the memory through
+    // the secant's lower end, then the discrete-gradient solve. Without Hunt-Crossley loss the
+    // staggered energy (at the memory of the step) never rises; an elastic drop returns its speed,
+    // and a crushing one crushes and rebounds as the continuous law does: loading takes
+    // 2/5 K d_y^(5/2) + p A' (d_m^2 - d_y^2) / 2, unloading returns 2/5 p A' d_m sqrt(d_m d_y).
+    // What is left is the turn, between samples: about a k^2 / d_m, 3e-4 at the crash's own 288 kHz.
+    // A memory through d^n instead was 1.1e-4 too deep at 1 m/s and 20 MHz (scaled by the step,
+    // about 7e-3 at 288 kHz).
+    let (kk, area, pressure, mass) = (9.0e7, 4.4e-3, 84.0e6, 0.013);
+    let law = Law::Power { k: kk, alpha: 1.5, mu: 0.0 };
+    let slope = area * pressure;
+    let potential = |c: &Crush, d: f64| {
+        let (stiff, set, reach) = c.branch(kk);
+        let x = (d.min(reach) - set).max(0.0);
+        let line = if d > reach { 0.5 * slope * (d * d - reach * reach) } else { 0.0 };
+        0.4 * stiff * x * x * x.sqrt() + line
+    };
+    let cases = [(2.0e7, 1e-6), (2.88e5, 2e-3)].into_iter().flat_map(|rt| [0.05, 1.0, 4.0].map(move |v| (rt, v)));
+    for ((rate, tol), speed) in cases {
+        let k = 1.0 / rate;
+        let mut c = Crush::new(area, pressure).unwrap();
+        let onset = c.onset(kk);
+        let energy = |c: &Crush, a: f64, b: f64| 0.5 * mass * ((b - a) * rate).powi(2) + 0.5 * (potential(c, a) + potential(c, b));
+        let (mut d0, mut d1, mut f) = (-1e-6 - speed * k, -1e-6, 0.0);
+        let start = energy(&c, d0, d1);
+        let (mut h, mut rise) = (start, 0.0_f64);
+        while !(d1 < -1e-6 && d1 < d0) {
+            let d_pred = 2.0 * d1 - d0;
+            c.deepest = c.deepest.max(d0);
+            let before = energy(&c, d0, d1);
+            f = crush_force(d_pred, k * k / mass, f, d0, law, &c, false, k);
+            let d2 = d_pred - k * k / mass * f;
+            let next = energy(&c, d1, d2);
+            rise = rise.max(before - h).max(next - before);
+            (h, d0, d1) = (next, d1, d2);
+        }
+        assert!(rise <= 1e-12 * start, "{speed} m/s: energy rose by {rise:e} J");
+        let restitution = (d0 - d1) * rate / speed;
+        if speed < 0.08 {
+            assert!(c.deepest < onset && c.set(kk) == 0.0);
+            assert!((restitution - 1.0).abs() < 1e-9, "{speed} m/s: elastic restitution {restitution}");
+            continue;
+        }
+        let deepest = (onset * onset + (mass * speed * speed - 0.8 * kk * onset.powf(2.5)) / slope).sqrt();
+        let expected = (0.4 * slope * deepest * (deepest * onset).sqrt() / (0.5 * mass * speed * speed)).sqrt();
+        assert!(c.deepest > 10.0 * onset);
+        assert!((c.deepest / deepest - 1.0).abs() < tol, "{rate} Hz, {speed} m/s: crushed to {} vs {deepest}", c.deepest);
+        assert!((c.set(kk) / (deepest - (deepest * onset).sqrt()) - 1.0).abs() < tol);
+        assert!((restitution / expected - 1.0).abs() < tol, "{rate} Hz, {speed} m/s: restitution {restitution} vs {expected}");
     }
 }
 

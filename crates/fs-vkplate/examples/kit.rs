@@ -1,11 +1,14 @@
 //! Render one drum-kit piece to a 48 kHz float WAV.
 //!
 //! usage: kit PIECE OUT.wav [SPEED_M_S] [SECONDS] [--preset-heads]
-//! PIECE: kick | snare | snare-off | tom-12 | tom-14 | hihat-closed | hihat-open | splash | crash | ride
+//! PIECE: kick | snare | snare-off | tom-12 | tom-14 | hihat-closed | hihat-open | splash | crash | crash-shaft | ride
 //!
 //! The drums' heads and stick come from sourced material cards, and no piece keeps a value fitted
 //! to a recording (see `drum_cards`); `--preset-heads` renders the recording-fitted presets
-//! instead, and says so.
+//! instead, and says so. `crash-shaft` is the crash struck at its edge with the hickory card's
+//! shaft, the wood crushing across its grain; it has no default speed (render a ladder of
+//! SPEED_M_S).
+use fs_vkplate::Law;
 use fs_vkplate::kit::{self, Piece};
 use std::time::Instant;
 
@@ -39,6 +42,7 @@ fn main() {
         "hihat-open" => (drum_cards::open_hihat(&[(0.005, v(2.5))], preset_heads), 2.5),
         "splash" => (cymbal(kit::splash(), (0.005, v(2.0), 0.78, 0.005)), 2.6),
         "crash" => (cymbal(kit::crash(), (0.005, v(6.0), 0.95, 0.008)), 5.0),
+        "crash-shaft" => (drum_cards::shaft_cymbal(&cy(kit::crash()), speed), 5.0),
         "ride" => (cymbal(drum_cards::ride(preset_heads), (0.005, v(2.5), 0.6, 0.004)), 4.0),
         other => {
             eprintln!("unknown piece {other}");
@@ -70,6 +74,15 @@ fn main() {
     for c in &p.instrument.contacts {
         if c.peak_force > 0.0 && c.b.iter().any(|&(b, _, _)| striker(b)) {
             eprintln!("strike peak force {:.1} N", c.peak_force);
+            if let Some(crush) = &c.crush {
+                let Law::Power { k, .. } = c.law;
+                eprintln!(
+                    "  crushed to {:.1} um (crushing begins at {:.2} um), permanent set {:.1} um",
+                    crush.deepest * 1e6,
+                    crush.onset(k) * 1e6,
+                    crush.set(k) * 1e6
+                );
+            }
         }
     }
     eprintln!("{dur} s rendered in {wall:.1} s ({:.1}x real time); peak {peak:.3} Pa", wall / dur);
