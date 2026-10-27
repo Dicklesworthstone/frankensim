@@ -129,3 +129,6 @@ fn chamber_free_state_keeps_the_same_finite_electrical_thermal_evolution() {
 
 #[path = "flow.rs"]
 mod flow;
+
+#[path = "state/coupled.rs"]
+mod coupled;

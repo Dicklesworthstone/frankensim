@@ -7877,3 +7877,33 @@ coupled time resolution. It adds no spatial flame, valve mass flow, shared
 crank or unconditional convergence guarantee. The broad physics ladder beads
 remain open; this increment closes the previously separate material-network
 connection for the coupled chemistry/heat/pressure policy.
+
+
+### Continuing simultaneous reactions in the persistent material assembly
+
+`MaterialExchangeState::coupled_reactive_candidate` and
+`advance_coupled_reactive`, with corresponding custom gas-law entries, move
+all endpoints from the prepared coupled network into the original live state.
+Gas species and complete source catalogs, volume/momentum, port histories,
+finite-cell enthalpy/event cursor and electrical charge/flux advance together.
+The same clock/drive admission is shared with existing staged and flow routes.
+There is no additional reaction stage, thermal deposition or constitutive law.
+
+`CoupledMaterialExchangeAdvance` retains the original circuit/thermal report,
+material/contact samples and each actual `CoupledChamberStep` variant. Chemical
+progress remains inside the original reacting boundary account rather than
+being copied into a second state or an incompatible midpoint report. Empty
+reaction bindings preserve ordinary chamber integration. A final cancellation
+checkpoint precedes the single live-state replacement; all prior work remains
+a candidate, including source validation and collection of every chamber.
+
+Two focused regression definitions cover two continued intervals, direct vs
+preview vs live-state equality, exact source/report and port-history retention,
+dismantle/resume, ordinary-path reduction, outer-work refusal and late source
+cancellation followed by deterministic retry in a fresh execution scope.
+Scoped Rust syntax/formatting, whitespace and bounded source/API review passed.
+Native compilation and tests remain unavailable for the environment reasons
+recorded above. Focused command:
+`cargo test -p fs-couple --test material_exchange_network state_tests::coupled`.
+The fixed-topology, independent-wall, closed homogeneous-gas and first-order
+limits of the prepared coupled solver are unchanged.

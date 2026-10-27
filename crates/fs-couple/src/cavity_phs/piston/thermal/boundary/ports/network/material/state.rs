@@ -4,6 +4,8 @@
 pub mod flow;
 /// Bounded temporal refinement of the complete sealed material assembly.
 pub mod subcycling;
+/// Continuing same-endpoint chemical, pressure, circuit and finite-wall feedback.
+pub mod coupled;
 
 use super::exchange::{MaterialExchangeSample, PreparedMaterialExchangeNetwork, gas_law::GasSurface};
 use super::reactive::{ChamberReaction, ChamberReactionStep, ReactiveExchangeError};
@@ -75,6 +77,22 @@ pub struct MaterialExchangeState<'m> {
     circuit: MaterialCircuit,
     chambers: BTreeMap<u64, GasPiston>,
 }
+
+// A single clock/identity admission for native, staged-flow and simultaneous
+// reacting advances. Physics errors remain with each actual boundary owner.
+enum StateAdmissionError {
+    Invalid(&'static str),
+    Cancelled,
+}
+impl StateAdmissionError {
+    fn staged<E>(self) -> ReactiveExchangeError<E> {
+        match self {
+            Self::Invalid(message) => ReactiveExchangeError::Invalid(message),
+            Self::Cancelled => ReactiveExchangeError::Cancelled,
+        }
+    }
+}
+
 impl<'m> MaterialExchangeState<'m> {
     /// Take ownership of already-admitted initial physical states. The map makes
     /// chamber identities unique; source/area bindings are admitted by preparation
@@ -90,6 +108,35 @@ impl<'m> MaterialExchangeState<'m> {
     /// Explicitly dismantle the co-owned state, without advancing any subsystem.
     pub fn into_parts(self) -> (DepositionSimulation<'m>, MaterialCircuit, BTreeMap<u64, GasPiston>) {
         (self.thermal, self.circuit, self.chambers)
+    }
+
+    fn driven_chambers<'a>(
+        &self, chamber_states: &'a BTreeMap<u64, GasPiston>, cx: &Cx<'_>,
+        target_s: f64, drives: &[ChamberDrive], controls: NetworkSolve,
+    ) -> Result<Vec<Chamber<'a>>, StateAdmissionError> {
+        use StateAdmissionError as Error;
+        cx.checkpoint().map_err(|_| Error::Cancelled)?;
+        let dt = target_s - self.time_s();
+        if !dt.is_finite() || dt <= 0.0 || self.chambers.len() > controls.maximum_chambers
+            || drives.len() != self.chambers.len()
+            || !chamber_states.keys().eq(self.chambers.keys()) {
+            return Err(Error::Invalid("one forward assembly clock and one drive per live chamber required"));
+        }
+        let mut ordered = BTreeMap::new();
+        for drive in drives {
+            cx.checkpoint().map_err(|_| Error::Cancelled)?;
+            if !self.chambers.contains_key(&drive.chamber)
+                || ordered.insert(drive.chamber, drive).is_some() {
+                return Err(Error::Invalid("duplicate drive or unknown live chamber"));
+            }
+        }
+        Ok(ordered.iter().map(|(&id, drive)| Chamber {
+            id, piston: &chamber_states[&id],
+            input: PistonInput { duration_s: dt, heat_j: drive.heat_j,
+                exterior_pressure_pa: drive.exterior_pressure_pa,
+                external_force_n: drive.external_force_n },
+            piston_solve: drive.piston_solve, exchange: drive.exchange,
+        }).collect())
     }
 
     /// Preview one interval with a caller-selected gas heat law while retaining
@@ -159,28 +206,8 @@ impl<'m> MaterialExchangeState<'m> {
             &ResolvedThermochemicalGasState) -> Result<ConductanceSample<I>, E>,
     ) -> Result<(Self, MaterialExchangeAdvance<I>), ReactiveExchangeError<E>> {
         use ReactiveExchangeError as Error;
-        cx.checkpoint().map_err(|_| Error::Cancelled)?;
-        let dt = target_s - self.time_s();
-        if !dt.is_finite() || dt <= 0.0 || self.chambers.len() > controls.maximum_chambers
-            || drives.len() != self.chambers.len()
-            || !chamber_states.keys().eq(self.chambers.keys()) {
-            return Err(Error::Invalid("one forward assembly clock and one drive per live chamber required"));
-        }
-        let mut ordered = BTreeMap::new();
-        for drive in drives {
-            cx.checkpoint().map_err(|_| Error::Cancelled)?;
-            if !self.chambers.contains_key(&drive.chamber)
-                || ordered.insert(drive.chamber, drive).is_some() {
-                return Err(Error::Invalid("duplicate drive or unknown live chamber"));
-            }
-        }
-        let chambers = ordered.iter().map(|(&id, drive)| Chamber {
-            id, piston: &chamber_states[&id],
-            input: PistonInput { duration_s: dt, heat_j: drive.heat_j,
-                exterior_pressure_pa: drive.exterior_pressure_pa,
-                external_force_n: drive.external_force_n },
-            piston_solve: drive.piston_solve, exchange: drive.exchange,
-        }).collect::<Vec<_>>();
+        let chambers = self.driven_chambers(chamber_states, cx, target_s, drives, controls)
+            .map_err(StateAdmissionError::staged)?;
         let proposal = prepared.reactive_with_gas_law_candidate(cx, &self.thermal,
             target_s, &self.circuit, ports, &chambers, reactions, surfaces,
             controls, guess_j, resolve)?;
@@ -225,26 +252,8 @@ impl<'m> MaterialExchangeState<'m> {
         gas_patches: &[MaterialContact], controls: NetworkSolve, guess_j: &[f64],
     ) -> Result<(Self, MaterialExchangeAdvance), ReactiveExchangeError> {
         use ReactiveExchangeError as Error;
-        cx.checkpoint().map_err(|_| Error::Cancelled)?;
-        let dt = target_s - self.time_s();
-        if !dt.is_finite() || dt <= 0.0 || self.chambers.len() > controls.maximum_chambers
-            || drives.len() != self.chambers.len() || !chamber_states.keys().eq(self.chambers.keys()) {
-            return Err(Error::Invalid("one forward assembly clock and one drive per live chamber required"));
-        }
-        let mut ordered = BTreeMap::new();
-        for drive in drives {
-            cx.checkpoint().map_err(|_| Error::Cancelled)?;
-            if !self.chambers.contains_key(&drive.chamber)
-                || ordered.insert(drive.chamber, drive).is_some() {
-                return Err(Error::Invalid("duplicate drive or unknown live chamber"));
-            }
-        }
-        let chambers = ordered.iter().map(|(&id, drive)| Chamber {
-            id, piston: &chamber_states[&id],
-            input: PistonInput { duration_s: dt, heat_j: drive.heat_j,
-                exterior_pressure_pa: drive.exterior_pressure_pa, external_force_n: drive.external_force_n },
-            piston_solve: drive.piston_solve, exchange: drive.exchange,
-        }).collect::<Vec<_>>();
+        let chambers = self.driven_chambers(chamber_states, cx, target_s, drives, controls)
+            .map_err(StateAdmissionError::staged)?;
         let proposal = prepared.reactive_step_candidate(cx, &self.thermal, target_s,
             &self.circuit, ports, &chambers, reactions, gas_patches, controls, guess_j)?;
         let (thermal, circuit, report, step) = proposal.into_parts();
