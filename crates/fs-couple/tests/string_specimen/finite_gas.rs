@@ -7,6 +7,10 @@ use fs_material::thermochemical_gas::energy::{GasEnergySolve, IsochoricGasParcel
 use fs_material::thermochemical_gas::{SpeciesTransportMaterial, ThermochemicalGasModel};
 
 fn parcel(molar_mass: f64, pressure: f64) -> IsochoricGasParcel {
+    parcel_named("synthetic-string-gas", molar_mass, pressure)
+}
+
+fn parcel_named(name: &str, molar_mass: f64, pressure: f64) -> IsochoricGasParcel {
     use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter};
     use fs_qty::{MolarMass, Temperature};
     use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
@@ -48,7 +52,7 @@ fn parcel(molar_mass: f64, pressure: f64) -> IsochoricGasParcel {
         sources: vec![],
         provenance: provenance.clone(),
     };
-    let species = SpeciesId::new("synthetic-string-gas").unwrap();
+    let species = SpeciesId::new(name).unwrap();
     let thermo = Nasa9StandardStateModelV1::new(
         species.clone(),
         MolarMass::new(molar_mass),
@@ -99,7 +103,7 @@ fn parcel(molar_mass: f64, pressure: f64) -> IsochoricGasParcel {
         species,
         material: MaterialCard::assemble(
             MaterialStateId {
-                chemistry: "synthetic-string-gas".into(),
+                chemistry: name.into(),
                 phase: "gas".into(),
                 process: "synthetic".into(),
                 revision: 0,
@@ -448,7 +452,9 @@ fn g4_finite_gas_late_refusal_epoch_and_cancellation_preserve_both_owners() {
     });
 }
 
-#[path = "finite_gas/exchange.rs"]
-mod exchange;
 #[path = "finite_gas/electrical.rs"]
 mod electrical;
+#[path = "finite_gas/exchange.rs"]
+mod exchange;
+#[path = "finite_gas/flow.rs"]
+mod flow;

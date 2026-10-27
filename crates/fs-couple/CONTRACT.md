@@ -6705,3 +6705,26 @@ current-heated slab equation, data-only resistivity changes, continued operator
 updates, reversal/zero-current limits, matching voltage-driven BE endpoints,
 invalid electrodes/current and late transactional cancellation. Source review
 and parsing are not substitutes for executing these coupled tests.
+
+## Continuing vibration in an exchanging material atmosphere (MR34)
+
+`ThermalMaterialStringRuntime::step_with_isochoric_gas_nozzle` advances one
+existing mechanical/solid/gas thermal sample, then uses the native source-backed
+pressure-driven nozzle to exchange species and upstream enthalpy with a second
+finite gas volume. The final conserved mixture supplies both aerodynamic drag
+and compact pressure observation. Modal displacement/momentum and the previous
+accepted observer acceleration survive; one epoch and one audio sample advance.
+
+The three owners publish atomically after an independently measured combined
+mechanical, solid and two-volume internal-energy balance. Transported enthalpy
+is internal to the pair; flow work and thermalized jet energy are not added as
+separate heating. Source conflicts, excessive withdrawal, pressure reversal,
+final temperature bounds and cancellation leave every accepted state intact.
+The G1/G3/G4 regressions in `tests/string_specimen/finite_gas/flow.rs` cover native
+transfer endpoints, independent energy/pressure expressions, data-only species
+substitution, retained motion/history, reverse flow and transactional failure.
+
+This first-order, well-mixed fixed-volume split requires timestep refinement.
+It adds no resolved jet or wind force, conductive solid/gas exchange, chamber
+radiation loading or propagation through a varying medium. The compact pressure
+observer remains diagnostic; no experimental material qualification is implied.

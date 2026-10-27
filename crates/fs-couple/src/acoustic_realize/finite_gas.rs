@@ -8,11 +8,15 @@
 //! This is a first-order partitioned, well-mixed fixed-volume model. The
 //! `exchange` module adds reciprocal source-resolved thermal transfer. Neither
 //! path introduces a chamber boundary, radiation loading or gas pressure work.
+//! The `flow` module composes the original conservative species/enthalpy nozzle
+//! owner with that continuing acoustic state when gas enters or leaves.
 
-/// Reciprocal source-resolved conduction on the same finite-gas/string step.
-pub mod exchange;
 /// Ideal electrical source work on the same finite-gas/string transaction.
 pub mod electrical;
+/// Reciprocal source-resolved conduction on the same finite-gas/string step.
+pub mod exchange;
+/// Source-resolved pressure-driven species exchange on the continuing string.
+pub mod flow;
 
 use super::{
     AcousticRealizeError, ThermalMaterialStringFrame, ThermalMaterialStringRuntime,
@@ -225,7 +229,6 @@ impl ThermalMaterialStringRuntime {
             mut string,
             gas_step,
         } = proposal;
-        let expected_epoch = self.mechanical.epoch();
         let initial_internal_energy = gas.state().specific_internal_energy_j_kg();
         let initial_mechanical_energy = modal_energy(self);
         let drag_heat_j = string.vibration.dissipation.air_loss_j;
@@ -237,36 +240,13 @@ impl ThermalMaterialStringRuntime {
             ));
         }
 
-        // Rebuild at this sample's publication epoch; no extra physical instant.
-        // The rebind retains q and p and owes zero elastic parameter work.
-        candidate.mechanical.epoch = expected_epoch;
-        candidate
-            .mechanical
-            .rebind_gas(cx, next_gas.state().state())
-            .map_err(ThermalStringError::Acoustic)?;
-        candidate.mechanical.member.observer.previous_acceleration = self
-            .mechanical
-            .member
-            .observer
-            .previous_acceleration
-            .clone();
-        let initial = candidate
-            .mechanical
-            .member
-            .observer
-            .previous_acceleration
-            .is_none()
-            .then(|| linear_accelerations(&self.mechanical.member.model, forces));
-        string.vibration.acoustic.observer_pressure_pa = candidate
-            .mechanical
-            .member
-            .observer
-            .observe(
-                linear_accelerations(&candidate.mechanical.member.model, forces),
-                initial,
-                candidate.mechanical.member.model.sample_period_s(),
-            )
-            .map_err(ThermalStringError::Acoustic)?;
+        self.refresh_finite_gas_medium(
+            cx,
+            forces,
+            &mut candidate,
+            &mut string,
+            next_gas.state().state(),
+        )?;
 
         let final_internal_energy = next_gas.state().specific_internal_energy_j_kg();
         let gas_storage = gas.mass_kg() * (final_internal_energy - initial_internal_energy);
@@ -317,5 +297,49 @@ impl ThermalMaterialStringRuntime {
             energy_balance_residual_j: residual,
             energy_tolerance_j: tolerance,
         })
+    }
+
+    // The surrounding transaction may heat AND exchange species before it has
+    // its final medium. Always reconstruct from the original sample history,
+    // never from an intermediate observer evaluation in the same sample.
+    fn refresh_finite_gas_medium(
+        &self,
+        cx: &fs_exec::Cx<'_>,
+        forces: &[f64],
+        candidate: &mut Self,
+        string: &mut ThermalMaterialStringFrame,
+        gas: &fs_material::gas::GasState,
+    ) -> Result<(), FiniteGasStringError> {
+        // Rebuild at this sample's publication epoch; no extra physical instant.
+        // The rebind retains q and p and owes zero elastic parameter work.
+        candidate.mechanical.epoch = self.mechanical.epoch();
+        candidate
+            .mechanical
+            .rebind_gas(cx, gas)
+            .map_err(ThermalStringError::Acoustic)?;
+        candidate.mechanical.member.observer.previous_acceleration = self
+            .mechanical
+            .member
+            .observer
+            .previous_acceleration
+            .clone();
+        let initial = candidate
+            .mechanical
+            .member
+            .observer
+            .previous_acceleration
+            .is_none()
+            .then(|| linear_accelerations(&self.mechanical.member.model, forces));
+        string.vibration.acoustic.observer_pressure_pa = candidate
+            .mechanical
+            .member
+            .observer
+            .observe(
+                linear_accelerations(&candidate.mechanical.member.model, forces),
+                initial,
+                candidate.mechanical.member.model.sample_period_s(),
+            )
+            .map_err(ThermalStringError::Acoustic)?;
+        Ok(())
     }
 }
