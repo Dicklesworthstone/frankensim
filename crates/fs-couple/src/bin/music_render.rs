@@ -36,11 +36,12 @@
 //! `music_render wind INPUT.performance OUT.wav [--block N] [--decimate] [--self-contained]`
 //! renders authored reed primitives, segmented ducts and pressure phrases.
 //! See `examples/REED_PERFORMANCES.md`; the legacy `reed` fixture is unchanged.
-//! `--self-contained` refuses external material/radiation artifacts and gas
-//! source packs before opening them; inline physical source data is unchanged.
+//! `--self-contained` refuses unlisted material, radiation and gas source files.
 //! With repeated `--attached-source RELATIVE_PATH`, only those explicitly supplied
-//! files are snapshotted below the performance directory and available to material
-//! and radiation callbacks. Unlisted paths and external gas options remain refused.
+//! files are snapshotted below the performance directory. Gas-component options,
+//! material and radiation callbacks consume this same immutable byte map.
+//! Inline physical data and the shared gas laws are unchanged; gas declarations
+//! remain in the performance, not in an external `--gas-record` file.
 //!
 //! `music_render lip INPUT.performance OUT.wav [--block N]` renders a lip-valve performance
 //! (`fs_couple::brass_loop::performance`): a measured lip, a held bore of cylinders, cones and
@@ -351,20 +352,13 @@ fn string_context(block: usize) -> RenderContext {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (args, gas_options) = thermochemical::Options::extract(&args).unwrap_or_else(|e| fail(&e));
-    if args.first().is_some_and(|arg| arg == "wind")
-        && args.iter().any(|arg| arg == "--self-contained")
-        && gas_options.uses_external_files()
-    {
-        fail("--self-contained refuses external gas source files");
+    if args.first().is_some_and(|arg| arg == "wind") {
+        wind_input::run_with_gas_options(&args[1..], &gas_options).unwrap_or_else(|e| fail(&e));
+        return;
     }
     let gas_sources = gas_options.load().unwrap_or_else(|e| fail(&e));
     let gas_bindings = gas_sources.bindings();
     let gas_registry = gas_sources.registry(&gas_bindings);
-    if args.first().is_some_and(|arg| arg == "wind") {
-        if gas_options.record.is_some() { fail("wind gas records belong in the performance file"); }
-        wind_input::run_with_gas_sources(&args[1..], gas_registry.as_ref()).unwrap_or_else(|e| fail(&e));
-        return;
-    }
     if args.first().is_some_and(|arg| arg == "ensemble") {
         if gas_options.record.is_some() { fail("ensemble gas records belong in the source performance files"); }
         ensemble_input::run_with_gas_sources(&args[1..], gas_registry.as_ref()).unwrap_or_else(|e| fail(&e));

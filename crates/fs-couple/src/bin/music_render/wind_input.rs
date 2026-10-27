@@ -1,6 +1,8 @@
 //! File-driven wind sources through the shared pressure and WAV owners.
 #[path = "wind_input/attachments.rs"]
 mod attachments;
+#[path = "wind_input/gas_sources.rs"]
+mod gas_sources;
 use std::io::{Read, Write};
 use std::path::Path;
 use fs_blake3::ContentHash;
@@ -936,9 +938,26 @@ fn load_with_all_sources(
 pub(super) fn run(args: &[String]) -> Result<(), String> {
     run_with_gas_sources(args, None)
 }
+
+/// Native file options use the same snapshots for gas, solids and radiation.
+pub(super) fn run_with_gas_options(
+    args: &[String],
+    gas_options: &super::thermochemical::Options,
+) -> Result<(), String> {
+    gas_sources::run_with_gas_options(args, gas_options)
+}
+
 pub(super) fn run_with_gas_sources(
     args: &[String],
     sources: Option<&ThermochemicalSources<'_>>,
+) -> Result<(), String> {
+    run_with_prepared_sources(args, sources, None)
+}
+
+fn run_with_prepared_sources(
+    args: &[String],
+    sources: Option<&ThermochemicalSources<'_>>,
+    prepared: Option<attachments::AttachedSources>,
 ) -> Result<(), String> {
     let (input, output, block, decimate, policy, flows, self_contained, attached_names) = options(args)?;
     let output = Path::new(output);
@@ -959,7 +978,10 @@ pub(super) fn run_with_gas_sources(
     file.take((MAX_PLATE_VALVE_PERFORMANCE_BYTES + 1) as u64).read_to_end(&mut bytes)
         .map_err(|e| format!("wind input read failed: {e}"))?;
     let parent = Path::new(input).parent().unwrap_or(Path::new("."));
-    let attached_sources = attachments::AttachedSources::load(parent, &attached_names)?;
+    let attached_sources = match prepared {
+        Some(snapshot) => snapshot,
+        None => attachments::AttachedSources::load(parent, &attached_names)?,
+    };
     let loaded = load_with_all_sources(&bytes, block, policy, sources, |name| {
         // Restricted callbacks can only read eagerly admitted input snapshots.
         // A missing name never falls through to ambient filesystem access.
