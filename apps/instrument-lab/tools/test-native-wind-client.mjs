@@ -163,3 +163,37 @@ test("higher mechanical clocks request the original native decimator without mod
     return audio();
   });
 });
+
+test("gas source associations accompany exact source and pack bytes without browser coefficients", async () => {
+  const connected = {...status, supportsGasSources:true, maximumAttachments:32, maximumAttachmentFileBytes:8388608,
+    maximumAttachmentBytes:33554432, maximumRequestBytes:48000000};
+  const gasSources = {components:[
+    {speciesPath:"gas/custom.species", nasa9Path:"gas/custom.nasa9", transportPath:"gas/custom.transport"},
+    {speciesPath:"gas/second.species", nasa9Path:"gas/second.nasa9", transportPath:"gas/second.transport"},
+  ], waterSpecies:null, phase:"frozen"};
+  const attachments = gasSources.components.flatMap(component => Object.values(component))
+    .map((path, index) => ({path, bytes:new Uint8Array([0, 255, index, 13, 10])}));
+  const source = "frankensim-flue-performance-v1\r\n# authored thermochemical record remains verbatim\r\n";
+  await renderNativeWindBundle(source, attachments, connected, {gasSources}, undefined, async (_url, options) => {
+    const packet = JSON.parse(options.body);
+    assert.deepEqual(packet.gasSources, gasSources);
+    assert.equal(Buffer.from(packet.source, "base64").toString(), source);
+    for (let index = 0; index < attachments.length; index++) {
+      assert.equal(packet.attachments[index].path, attachments[index].path);
+      assert.deepEqual(Buffer.from(packet.attachments[index].bytes, "base64"), Buffer.from(attachments[index].bytes));
+    }
+    return audio();
+  });
+});
+
+test("selected gas sources cannot silently disappear on an older server or malformed option", async () => {
+  const connected = {...status, maximumAttachments:32, maximumAttachmentFileBytes:8388608,
+    maximumAttachmentBytes:33554432, maximumRequestBytes:48000000};
+  const gasSources = {components:[{speciesPath:"s", nasa9Path:"n", transportPath:"t"}], waterSpecies:null, phase:"frozen"};
+  const never = async () => assert.fail("unsupported gas source request must not be sent");
+  await assert.rejects(renderNativeWindBundle("source", [], connected, {gasSources}, undefined, never), /does not support attached gas sources/);
+  for (const gasSources of [null, {}, {components:[]}]) {
+    await assert.rejects(renderNativeWindBundle("source", [], {...connected, supportsGasSources:true},
+      {gasSources}, undefined, never), /Gas sources need explicit/);
+  }
+});

@@ -77,11 +77,14 @@ async function serveAsset(req, res, dist, pathname) {
     res.once('close', () => stream.destroy()); stream.pipe(res); }
   return true;
 }
-function runNative(engine, input, output, dir, signal, outputLimit, attachments, decimate) {
+function runNative(engine, input, output, dir, signal, outputLimit, attachments, decimate, gasSources) {
   return new Promise((accept, reject) => {
     if (signal.aborted) return reject(signal.reason);
     const sourceArgs = attachments.flatMap(file => ['--attached-source', file.path]);
-    const child = spawn(engine, ['wind', input, output, '--self-contained', ...(decimate ? ['--decimate'] : []), ...sourceArgs], {cwd:dir, shell:false,
+    const gasArgs = gasSources ? ['--gas-water', gasSources.waterSpecies ?? 'none',
+      '--gas-phase', gasSources.phase, ...gasSources.components.flatMap(component =>
+        ['--gas-component', component.speciesPath, component.nasa9Path, component.transportPath])] : [];
+    const child = spawn(engine, ['wind', input, output, '--self-contained', ...(decimate ? ['--decimate'] : []), ...sourceArgs, ...gasArgs], {cwd:dir, shell:false,
       windowsHide:true, detached:process.platform !== 'win32', stdio:['ignore', 'pipe', 'pipe']});
     let reason, size = 0, forceKill, finished = false; const chunks = [];
     const kill = name => { if (!child.pid) return;
@@ -160,7 +163,7 @@ export function createNativeWindServer({engine = process.env.FSIM_MUSIC_RENDER |
         {available:!closing && await available(engine), busy:active !== null, token,
           maximumSourceBytes:MAX_SOURCE_BYTES, maximumOutputBytes, timeoutMs, supportedSchemas:SUPPORTED_SCHEMAS,
           maximumAttachments:MAX_ATTACHMENTS, maximumAttachmentFileBytes:MAX_ATTACHMENT_FILE_BYTES,
-          maximumAttachmentBytes:MAX_ATTACHMENT_BYTES, maximumRequestBytes:MAX_REQUEST_BYTES});
+          maximumAttachmentBytes:MAX_ATTACHMENT_BYTES, maximumRequestBytes:MAX_REQUEST_BYTES, supportsGasSources:true});
       if (pathname !== '/api/native-wind/render' || req.method !== 'POST') {
         if (['GET', 'HEAD'].includes(req.method) && !pathname.startsWith('/api/') && await serveAsset(req, res, dist, pathname)) return;
         return send(404, {error:'Not found. Build Instrument Lab and pass its dist directory to this server.'});
@@ -193,7 +196,7 @@ export function createNativeWindServer({engine = process.env.FSIM_MUSIC_RENDER |
           await mkdir(dirname(destination), {recursive:true, mode:0o700});
           await writeFile(destination, attachment.bytes, {mode:0o600, flag:'wx'});
         }
-        await runNative(engine, input, output, dir, controller.signal, maximumOutputBytes, experiment.attachments, experiment.decimate);
+        await runNative(engine, input, output, dir, controller.signal, maximumOutputBytes, experiment.attachments, experiment.decimate, experiment.gasSources);
         const wave = await readWave(output, maximumOutputBytes);
         if (controller.signal.aborted) throw controller.signal.reason;
         res.writeHead(200, {'Content-Type':'audio/wav', 'Content-Length':wave.length}); res.end(wave);

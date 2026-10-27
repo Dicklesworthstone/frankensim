@@ -293,3 +293,46 @@ test('native decimation is explicit while original source clocks and bytes stay 
     assert.throws(() => validateInput(Buffer.from(JSON.stringify(packet)), true), /unsupported fields/);
   } finally { await app.cleanup(); }
 });
+
+test('gas declarations bind only explicitly attached original pack bytes and fixed native arguments', native, async () => {
+  const app = await setup();
+  try {
+    assert.equal(app.initial.supportsGasSources, true);
+    const paths = ['gas/custom.species', 'gas/custom.nasa9', 'gas/custom.transport'];
+    const bytes = Buffer.from('frankensim-flue-performance-v1\n# read-files ' + JSON.stringify(paths) + '\n');
+    const originals = paths.map((path, index) => [path, Buffer.from([0, 255, index, 13, 10])]);
+    const packet = JSON.parse(bundle(bytes, originals).toString());
+    packet.gasSources = {components:[{speciesPath:paths[0], nasa9Path:paths[1], transportPath:paths[2]}],
+      waterSpecies:null, phase:'frozen'};
+    const response = await app.runBundle(Buffer.from(JSON.stringify(packet)));
+    assert.equal(response.status, 200); assert.equal((await response.arrayBuffer()).byteLength, 48);
+    const record = JSON.parse(await readFile(app.receipt, 'utf8'));
+    assert.equal(record.bytes, bytes.toString('base64'));
+    assert.deepEqual(record.files, originals.map(([path, bytes]) => ({path, bytes:bytes.toString('base64'), mode:0o600})));
+    assert.deepEqual(record.args.slice(3), ['--self-contained',
+      ...paths.flatMap(path => ['--attached-source', path]),
+      '--gas-water', 'none', '--gas-phase', 'frozen', '--gas-component', ...paths]);
+    await until(async () => !(await app.status()).busy);
+    assert.deepEqual(await readdir(app.tempRoot), []);
+  } finally { await app.cleanup(); }
+});
+
+test('gas associations refuse missing source paths and absent phase or water policy before execution', () => {
+  const paths = ['gas/s', 'gas/n', 'gas/t'];
+  const base = JSON.parse(bundle(source(), paths.map(path => [path, Buffer.from([1])])).toString());
+  const component = {speciesPath:paths[0], nasa9Path:paths[1], transportPath:paths[2]};
+  const valid = {components:[component], waterSpecies:null, phase:'frozen'};
+  const packet = gasSources => Buffer.from(JSON.stringify({...base, gasSources}));
+  assert.deepEqual(validateInput(packet(valid), true).gasSources, valid);
+  assert.equal(validateInput(packet({...valid, phase:'liquid-water', waterSpecies:'authored-water'}), true).gasSources.waterSpecies, 'authored-water');
+  for (const bad of [null, [], {}, {...valid, phase:undefined}, {...valid, waterSpecies:undefined},
+    {...valid, waterSpecies:''}, {...valid, waterSpecies:'none'}, {...valid, waterSpecies:'two words'},
+    {...valid, phase:'liquid-water'}, {...valid, phase:'automatic'}, {...valid, components:[]},
+    {...valid, components:Array.from({length:129}, () => component)}, {...valid, arbitraryFlag:'--gain'},
+    {...valid, components:[{...component, speciesPath:'../outside'}]},
+    {...valid, components:[{...component, nasa9Path:'unlisted.nasa9'}]},
+    {...valid, components:[{...component, transportPath:undefined}]},
+    {...valid, components:[{...component, modelCoefficients:[1, 2, 3]}]}]) {
+    assert.throws(() => validateInput(packet(bad), true), /[Gg]as|[Ee]very gas|[Cc]hoose an explicit|liquid-water/);
+  }
+});

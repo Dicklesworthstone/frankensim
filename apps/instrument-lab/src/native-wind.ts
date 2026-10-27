@@ -2,8 +2,9 @@ import "./native-wind.css";
 // Canonical native fixtures, bundled verbatim by Vite; no copied physics defaults.
 import reedExampleSource from "../../../crates/fs-couple/examples/reed-two-medium-tone-hole.performance?raw";
 import flueExampleSource from "../../../crates/fs-couple/examples/flue-nolle.performance?raw";
-import { nativeWindStatus, renderNativeWindBundle, type NativeWindStatus, type NativeWindAttachment } from "./native-wind-client.mjs";
+import { nativeWindStatus, renderNativeWindBundle, type NativeWindStatus, type NativeWindAttachment, type NativeWindGasSources } from "./native-wind-client.mjs";
 import { el } from "./util";
+import { createNativeGasControls } from "./native-wind-gases";
 
 const EXAMPLES = [
   {
@@ -64,6 +65,7 @@ export function createNativeWindPanel(): HTMLElement {
   type Attached = NativeWindAttachment & { sha256: string };
   let attachments: Attached[] = [];
   const attachmentIdentity = (): string => JSON.stringify(attachments.map(file => [file.path, file.sha256]));
+  const gas = createNativeGasControls(() => edited());
   const file = el("input", { type: "file", accept: ".performance,.txt,text/plain",
     "aria-label": "Open a native wind performance" });
   file.hidden = true;
@@ -83,6 +85,7 @@ export function createNativeWindPanel(): HTMLElement {
   let renderedSource: string | null = null;
   let renderedAttachmentIdentity: string | null = null;
   let renderedDecimate = false;
+  let renderedGasIdentity: string | null = null;
   let sourceName = selectedExample.name;
 
   const controls = (): void => {
@@ -95,6 +98,7 @@ export function createNativeWindPanel(): HTMLElement {
     starter.disabled = active || loadingFile;
     attach.disabled = active || loadingFile;
     decimate.disabled = active || loadingFile;
+    gas.setDisabled(active || loadingFile);
     attachmentList.querySelectorAll<HTMLInputElement | HTMLButtonElement>("input,button")
       .forEach(control => { control.disabled = active || loadingFile; });
     source.readOnly = active || loadingFile;
@@ -104,7 +108,7 @@ export function createNativeWindPanel(): HTMLElement {
   const edited = (): void => {
     sourceInfo.textContent = `${sourceName} · ${new TextEncoder().encode(currentSource()).byteLength.toLocaleString()} bytes`;
     if (renderedSource !== null) {
-      renderedFrom.textContent = currentSource() === renderedSource && attachmentIdentity() === renderedAttachmentIdentity && decimate.checked === renderedDecimate
+      renderedFrom.textContent = currentSource() === renderedSource && attachmentIdentity() === renderedAttachmentIdentity && decimate.checked === renderedDecimate && gas.identity() === renderedGasIdentity
         ? "This WAV was rendered from the performance and source files currently shown."
         : "This WAV is from your previous performance or source files. Render again to hear your edits.";
     }
@@ -118,6 +122,7 @@ export function createNativeWindPanel(): HTMLElement {
     playback.hidden = true;
     renderedSource = null;
     renderedAttachmentIdentity = null;
+    renderedGasIdentity = null;
     renderedFiles.textContent = "";
     if (previewUrl !== null) URL.revokeObjectURL(previewUrl);
     previewUrl = null;
@@ -168,6 +173,10 @@ export function createNativeWindPanel(): HTMLElement {
     const submittedFiles = attachments.map(file => ({ ...file }));
     const submittedAttachmentIdentity = attachmentIdentity();
     const submittedDecimate = decimate.checked;
+    let submittedGas: NativeWindGasSources | undefined;
+    try { submittedGas = gas.read(); }
+    catch (error) { showResult(message(error), true); return; }
+    const submittedGasIdentity = gas.identity();
     const controller = new AbortController();
     rendering = controller;
     audio.pause();
@@ -180,7 +189,7 @@ export function createNativeWindPanel(): HTMLElement {
     }, connected.timeoutMs + 5000);
     void (async () => {
       try {
-        const wave = await renderNativeWindBundle(submitted, submittedFiles, connected, {decimate:submittedDecimate}, controller.signal);
+        const wave = await renderNativeWindBundle(submitted, submittedFiles, connected, {decimate:submittedDecimate, gasSources:submittedGas}, controller.signal);
         if (rendering !== controller || controller.signal.aborted) return;
         const nextUrl = URL.createObjectURL(wave);
         clearPreview();
@@ -188,9 +197,13 @@ export function createNativeWindPanel(): HTMLElement {
         renderedSource = submitted;
         renderedAttachmentIdentity = submittedAttachmentIdentity;
         renderedDecimate = submittedDecimate;
+        renderedGasIdentity = submittedGasIdentity;
         renderedFiles.textContent = submittedFiles.length
           ? "Rendered source files: " + submittedFiles.map(file => `${file.path} · ${file.bytes.byteLength.toLocaleString()} bytes · SHA-256 ${file.sha256}`).join("\n")
           : "This render used no attached source files.";
+        if (submittedGas) renderedFiles.textContent += "\nGas associations: " + submittedGas.components
+          .map(component => `${component.speciesPath} / ${component.nasa9Path} / ${component.transportPath}`).join("; ")
+          + ` · phase ${submittedGas.phase} · water ${submittedGas.waterSpecies ?? "none"}`;
         audio.src = nextUrl;
         download.href = nextUrl;
         download.download = `${sourceName.replace(/\.[^.]*$/, "") || "wind"}-render.wav`;
@@ -228,6 +241,7 @@ export function createNativeWindPanel(): HTMLElement {
     canonical.href = exampleUrl(selectedExample.name);
     attachments = [];
     decimate.checked = false;
+    gas.reset();
     drawAttachments();
     edited();
     showResult("Example loaded. Edit the source or render it.");
@@ -245,10 +259,13 @@ export function createNativeWindPanel(): HTMLElement {
       ? `${attachments.length} source files · ${attachments.reduce((sum, file) => sum + file.bytes.byteLength, 0).toLocaleString()} bytes. Paths must match the performance exactly.`
       : "Attach the original material packs or artifacts referenced by your performance. Keep their source paths; edit a path below when the description uses a subdirectory.";
     attachmentList.replaceChildren();
+    gas.setAttachments(attachments.map(file => file.path));
     for (const attached of attachments) {
       const path = el("input", { type: "text", value: attached.path, spellcheck: "false",
         "aria-label": `Source path for ${attached.path}` });
-      path.addEventListener("input", () => { attached.path = path.value; edited(); });
+      path.addEventListener("input", () => {
+        attached.path = path.value; gas.setAttachments(attachments.map(file => file.path)); edited();
+      });
       const remove = el("button", { type: "button", class: "btn" }, "Remove");
       remove.addEventListener("click", () => {
         attachments = attachments.filter(file => file !== attached);
@@ -341,7 +358,7 @@ export function createNativeWindPanel(): HTMLElement {
         " · ", el("a", { href: "https://github.com/Dicklesworthstone/frankensim/tree/main/apps/instrument-lab#native-wind-renderer", target: "_blank", rel: "noopener" }, "Local renderer setup"))),
     el("div", { class: "nw-source-head" }, el("label", { for: "native-wind-source" }, "Performance source"),
       sourceInfo),
-    source, attachmentPanel, decimation,
+    source, attachmentPanel, gas.element, decimation,
     el("div", { class: "btn-row nw-actions" }, render, cancel, open, attach, reset, check, file, attachmentFile),
     result, playback);
   drawAttachments();

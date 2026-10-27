@@ -80,6 +80,15 @@ async function sendNativeWind(source, attachments, status, options, signal, requ
   if (options.decimate !== undefined && typeof options.decimate !== 'boolean') {
     throw new Error("Choose whether to use native decimation explicitly.");
   }
+  if (options.gasSources !== undefined) {
+    if (!options.gasSources || typeof options.gasSources !== "object"
+        || !Array.isArray(options.gasSources.components) || !options.gasSources.components.length) {
+      throw new Error("Gas sources need explicit species, NASA-9 and transport-claim associations.");
+    }
+    if (status.supportsGasSources !== true) {
+      throw new Error("This local renderer does not support attached gas sources. Update the local server.");
+    }
+  }
   if (!status.available) throw new Error("The native renderer is unavailable on this host.");
   if (typeof status.token !== "string" || status.token.length === 0) {
     throw new Error("Check the native renderer connection before rendering.");
@@ -92,7 +101,7 @@ async function sendNativeWind(source, attachments, status, options, signal, requ
     throw new Error("The performance description exceeds the renderer's source limit.");
   }
   let body = bytes, contentType = "text/plain;charset=utf-8";
-  if (attachments.length || options.decimate) {
+  if (attachments.length || options.decimate || options.gasSources !== undefined) {
     if (![status.maximumAttachments, status.maximumAttachmentFileBytes,
       status.maximumAttachmentBytes, status.maximumRequestBytes].every(positiveInteger)) {
       throw new Error("This local renderer does not support attached source files. Update the local server.");
@@ -108,7 +117,8 @@ async function sendNativeWind(source, attachments, status, options, signal, requ
       if (total > status.maximumAttachmentBytes) throw new Error("Source attachments exceed the combined byte limit.");
       return {path:file.path, bytes:base64(file.bytes)};
     });
-    body = JSON.stringify({format:"frankensim-native-wind-input-v1", source:base64(bytes), attachments:files, decimate:options.decimate ?? false});
+    body = JSON.stringify({format:"frankensim-native-wind-input-v1", source:base64(bytes), attachments:files, decimate:options.decimate ?? false,
+      ...(options.gasSources !== undefined ? {gasSources:options.gasSources} : {})});
     contentType = "application/json;charset=utf-8";
     if (new TextEncoder().encode(body).byteLength > status.maximumRequestBytes) {
       throw new Error("The complete experiment exceeds the renderer's request limit.");

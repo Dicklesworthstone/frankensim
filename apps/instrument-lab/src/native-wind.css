@@ -34,3 +34,12 @@
 .nw-attachment input { flex: 1 1 240px; min-width: 0; padding: 7px 9px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--ink-1); color: var(--ivory); font: 12px var(--font-mono); }
 .nw-attachment input:focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; }
 .nw-file-identities { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 10px; }
+
+.nw-gas-controls { margin: 14px 0; }
+.nw-gas-fields { margin: 10px 0; border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 12px; }
+.nw-gas-fields legend { color: var(--ivory-2); font-size: 13px; }
+.nw-gas-component { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) auto; gap: 10px; align-items: end; margin: 12px 0; }
+.nw-gas-component label, .nw-gas-policy label { display: flex; flex-direction: column; gap: 5px; min-width: 0; font-size: 12px; }
+.nw-gas-policy { display: flex; flex-wrap: wrap; gap: 12px; margin: 12px 0; }
+.nw-gas-controls select, .nw-gas-controls input[type="text"] { width: 100%; background: var(--ink-1); color: var(--ivory); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); padding: 8px; font: 12px var(--font-mono); }
+@media (max-width: 800px) { .nw-gas-component { grid-template-columns: 1fr; align-items: start; } }

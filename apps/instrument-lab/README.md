@@ -110,10 +110,35 @@ Playback never peak-normalizes or retunes the native result. Original model
 limits and missing-source refusals still apply; attaching a pack does not
 qualify an instrument as measured or realistic.
 
-Material-string performances and thermochemical CLI options such as
-`--gas-component` remain separate native workflows. This panel supplies the
-exact files referenced by wind descriptions; it does not infer gas-component
-associations, source coefficients or physical defaults.
+### Source-backed gas mixtures
+
+Enable **Use attached thermochemical gas sources** to use the same species
+registry as the native `--gas-component` workflow. Attach each original species
+pack, NASA-9 model pack, and **pure transport claims pack**, then select their
+three paths for each component. The third file is the native CLI's
+`NormalizedPack` of transport claims, not a wrapped
+`NormalizedMaterialCardPack`. Choose the phase policy and enter the canonical
+water species ID, or explicitly enter `none` when water is absent.
+
+Temperature, pressure, composition and canonical species IDs stay in the
+performance's existing `thermochemical` records. The browser does not decode
+material coefficients, assign gas identities from filenames, or rewrite those
+records. The same attached species may be used by the inlet, regional and
+exterior gas declarations; native source identity, thermodynamic, transport and
+domain checks remain authoritative. The liquid-water option retains the
+existing saturation admission check; it does not add condensation dynamics.
+
+The companion forwards only the declared component triples as
+`--gas-component SPECIES NASA9 TRANSPORT-CLAIMS`, plus explicit `--gas-water`
+and `--gas-phase` options. Every path must also name an attached file. The native
+gas loader reads those components from the same frozen attachment byte map as
+wall and reed materials. Unlisted files cannot fall through to the host
+filesystem. Changing an association or policy marks the existing WAV as stale,
+just as replacing the source pack bytes does.
+
+Material-string performances remain a separate native workflow. Wind gas
+records stay inline in the performance; the panel does not pass a separate
+`--gas-record` override.
 
 The companion passes the exact UTF-8 bytes to one configured executable as
 `music_render wind INPUT.performance OUT.wav --self-contained`, with a private working directory

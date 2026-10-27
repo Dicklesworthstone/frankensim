@@ -40,6 +40,33 @@ function decodedBase64(value, limit) {
   return bytes;
 }
 
+// These declarations associate existing attached files; native code owns all
+// species identities, coefficient decoding, mixture resolution and domain checks.
+function validateGasSources(value, attachedNames) {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+      || Object.keys(value).some(key => !['components', 'waterSpecies', 'phase'].includes(key))
+      || !Array.isArray(value.components) || !value.components.length || value.components.length > 128)
+    throw new NativeWindError(400, 'Gas sources require 1..128 explicit species/model/transport associations.');
+  if (!['frozen', 'liquid-water'].includes(value.phase))
+    throw new NativeWindError(400, 'Choose an explicit frozen or liquid-water gas phase policy.');
+  if (value.waterSpecies !== null && (typeof value.waterSpecies !== 'string'
+      || !value.waterSpecies || value.waterSpecies === 'none' || Buffer.byteLength(value.waterSpecies, 'utf8') > 512
+      || /[\u0000-\u0020\u007f]/.test(value.waterSpecies)))
+    throw new NativeWindError(400, 'Gas water identity must be a canonical species ID or null for none.');
+  if (value.phase === 'liquid-water' && value.waterSpecies === null)
+    throw new NativeWindError(400, 'The liquid-water policy requires an explicit water species ID.');
+  const fields = ['speciesPath', 'nasa9Path', 'transportPath'];
+  const components = value.components.map(component => {
+    if (!component || typeof component !== 'object' || Array.isArray(component)
+        || Object.keys(component).some(key => !fields.includes(key))
+        || fields.some(key => typeof component[key] !== 'string' || !attachedNames.has(component[key])))
+      throw new NativeWindError(400, 'Every gas component needs three exact paths to attached source files.');
+    return {speciesPath:component.speciesPath, nasa9Path:component.nasa9Path, transportPath:component.transportPath};
+  });
+  return {components, waterSpecies:value.waterSpecies, phase:value.phase};
+}
+
 /** Transport envelope only: no physics records or material constants are interpreted. */
 export function validateInput(bytes, bundled = false) {
   if (!bundled) return {source:validateSource(bytes), attachments:[], decimate:false};
@@ -50,7 +77,7 @@ export function validateInput(bytes, bundled = false) {
   if (packet?.format !== 'frankensim-native-wind-input-v1' || !Array.isArray(packet.attachments)
       || packet.attachments.length > MAX_ATTACHMENTS)
     throw new NativeWindError(400, 'Experiment requires its version and at most 32 source attachments.');
-  if (Object.keys(packet).some(key => !['format', 'source', 'attachments', 'decimate'].includes(key))
+  if (Object.keys(packet).some(key => !['format', 'source', 'attachments', 'decimate', 'gasSources'].includes(key))
       || (packet.decimate !== undefined && typeof packet.decimate !== 'boolean'))
     throw new NativeWindError(400, 'Experiment contains unsupported fields or an invalid native decimation option.');
   const source = validateSource(decodedBase64(packet.source, MAX_SOURCE_BYTES));
@@ -73,7 +100,8 @@ export function validateInput(bytes, bundled = false) {
     if (total > MAX_ATTACHMENT_BYTES) throw new NativeWindError(413, 'Attachments exceed the 32 MiB combined limit.');
     return {path, bytes:content};
   });
-  return {source, attachments, decimate:packet.decimate ?? false};
+  const gasSources = validateGasSources(packet.gasSources, new Set(attachments.map(file => file.path)));
+  return {source, attachments, decimate:packet.decimate ?? false, ...(gasSources ? {gasSources} : {})};
 }
 
 export function validateWave(bytes, limit = MAX_OUTPUT_BYTES) {
