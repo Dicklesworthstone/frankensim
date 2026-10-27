@@ -50,6 +50,11 @@ pub struct MhdCurrentState {
     /// None denotes insulation or an ideal electrode with no bulk getter.
     pub resistivity_ohm_m: Vec<Option<f64>>,
     pub velocity_m_s: Vec<[f64; 3]>,
+    /// Anchor-on-material force [N] per original voxel, equal and opposite to
+    /// the Lorentz load in an exact frozen cell. The force on the anchor is
+    /// its negative. Mobile cells have zero reaction. This direct magnetic
+    /// reaction excludes fluid/solid traction and wall reactions.
+    pub frozen_lorentz_reaction_n: Vec<[f64; 3]>,
     pub solution: MovingConductorSolution,
 }
 
@@ -67,6 +72,13 @@ pub struct MhdEnthalpyReport {
     pub lorentz_work_j: f64,
     /// Work computed by the reciprocal current owner on its sampled velocity.
     pub sampled_lorentz_work_j: f64,
+    /// Accepted anchor-on-material Lorentz reaction impulse [N s], integrated
+    /// per original voxel over actual thermal intervals, before endpoint phase
+    /// changes. The impulse delivered to the external anchor is its negative.
+    pub frozen_lorentz_reaction_impulse_n_s: Vec<[f64; 3]>,
+    /// Exactly zero: every supported cell and native constrained face must
+    /// have zero velocity. A moving support is outside this explicit model.
+    pub frozen_support_work_j: f64,
     pub electrical_defect_j: f64,
     pub heat_transfer_defect_j: f64,
     /// Actual native-endpoint Lorentz work minus electrically sampled work.
@@ -162,6 +174,7 @@ struct Work {
     mapped_j: f64,
     lorentz_j: f64,
     sampled_lorentz_j: f64,
+    frozen_lorentz_reaction_impulse_n_s: Vec<[f64; 3]>,
     other_body_j: f64,
     body_defect_j: f64,
     absolute_transfer_defect_j: f64,
@@ -188,7 +201,7 @@ fn invalid(reason: &'static str) -> JouleEnthalpyError {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn evaluate<F, T>(
+fn evaluate<F, T: FlowTransportSnapshot>(
     input: JouleEnthalpyInput<'_>,
     motion: MhdEnthalpyInput<'_>,
     gate: &CancelGate,
@@ -202,7 +215,7 @@ fn evaluate<F, T>(
     if *solves >= input.max_current_solves {
         return Err(JouleEnthalpyError::CurrentBudget);
     }
-    if samples.len() != input.cell_ids.len() {
+    if samples.len() != input.cell_ids.len() || velocity.len() != samples.len() {
         return Err(invalid("MHD requires every original flow material sample"));
     }
     let mut temperature_k = Vec::with_capacity(samples.len());
@@ -256,12 +269,33 @@ fn evaluate<F, T>(
             gate,
         )?,
     };
+    // Electrical cells retain their original material identity through phase
+    // changes. Frozen conductors still carry current and dissipate I²R; their
+    // Lorentz load is carried by the explicitly stationary external anchor.
+    let mut frozen_lorentz_reaction_n = vec![[0.0; 3]; samples.len()];
+    for (c, sample) in samples.iter().enumerate() {
+        checkpoint(gate)?;
+        if matches!(
+            sample.transport.phase_mobility(),
+            Some(PhaseMobility::ImmobileSolid { .. })
+        ) {
+            if velocity[c].iter().any(|&value| value != 0.0) {
+                return Err(invalid("anchored MHD requires exactly stationary frozen material"));
+            }
+            for axis in 0..3 {
+                frozen_lorentz_reaction_n[c][axis] = finite(
+                    -solution.lorentz_force_density_n_m3[c][axis] * input.domain.volume(c),
+                )?;
+            }
+        }
+    }
     Ok(MhdCurrentState {
         time_s: thermal.time_s(),
         temperature_k,
         specific_enthalpy_j_kg,
         resistivity_ohm_m,
         velocity_m_s: velocity.to_vec(),
+        frozen_lorentz_reaction_n,
         solution,
     })
 }
@@ -305,7 +339,10 @@ where
         self.momentum_trials = 0;
         self.pending = None;
         self.last = None;
-        self.work = Work::default();
+        self.work = Work {
+            frozen_lorentz_reaction_impulse_n_s: vec![[0.0; 3]; self.input.cell_ids.len()],
+            ..Work::default()
+        };
         Ok(())
     }
 
@@ -355,12 +392,17 @@ where
             .ok_or(invalid("missing native MHD momentum"))?
             .velocity_m_s
             .clone();
+        // An all-solid interval has an exact zero-dimensional momentum system.
+        // It still solves current and deposits heat, but consumes no native
+        // momentum trial, exactly as the original phase owner specifies.
+        let native_solve = epoch.samples.iter()
+            .any(|sample| sample.transport.mobile_transport().is_some());
         let mut velocity_defect = f64::INFINITY;
         let mut work_defect = f64::INFINITY;
         for _ in 0..self.motion.max_coupling_iterations {
             check()?;
             checkpoint(self.flow.gate)?;
-            if self.momentum_trials >= self.flow.max_solves {
+            if native_solve && self.momentum_trials >= self.flow.max_solves {
                 return Err(DepositionError::Budget("live material MHD momentum trials").into());
             }
             let current = evaluate(
@@ -377,6 +419,27 @@ where
             // history. Rejected Picard iterates cannot age either owner.
             let mut candidate = self.flow.clone();
             let mut force = current.solution.lorentz_force_density_n_m3.clone();
+            for (c, sample) in epoch.samples.iter().enumerate() {
+                check()?;
+                if matches!(
+                    sample.transport.phase_mobility(),
+                    Some(PhaseMobility::ImmobileSolid { .. })
+                ) {
+                    // Keep this load in the explicit support receipt, not in
+                    // the fluid RHS. The native solid-face constraints remain
+                    // untouched. Other solid loading still needs its own owner.
+                    if epoch.external_force_n_m3.as_ref()
+                        .is_some_and(|forces| forces[c].iter().any(|&f| f != 0.0))
+                        || epoch.buoyancy_force_n_m3.as_ref()
+                            .is_some_and(|forces| forces[c].iter().any(|&f| f != 0.0))
+                    {
+                        return Err(invalid(
+                            "anchored MHD support accounts only for frozen Lorentz loads",
+                        ).into());
+                    }
+                    force[c] = [0.0; 3];
+                }
+            }
             if let Some(external) = &epoch.external_force_n_m3 {
                 for (total, old) in force.iter_mut().zip(external) {
                     check()?;
@@ -390,13 +453,25 @@ where
                 .as_mut()
                 .expect("checked source epoch")
                 .external_force_n_m3 = Some(force);
-            self.momentum_trials += 1;
+            self.momentum_trials += usize::from(native_solve);
             candidate.solves = self.momentum_trials;
             let mut sources = candidate.step_sources(thermal, start_s, dt_s, end_s, check)?;
             let next_velocity = &candidate
                 .unsteady_flow()
                 .expect("admitted momentum")
                 .velocity_m_s;
+            for (sample, actual) in epoch.samples.iter().zip(next_velocity) {
+                check()?;
+                if matches!(
+                    sample.transport.phase_mobility(),
+                    Some(PhaseMobility::ImmobileSolid { .. })
+                ) && actual.iter().any(|&v| v != 0.0)
+                {
+                    return Err(invalid(
+                        "native momentum moved an externally anchored frozen cell",
+                    ).into());
+                }
+            }
             velocity_defect = 0.0_f64;
             for (actual, sampled) in next_velocity.iter().zip(&velocity) {
                 check()?;
@@ -548,6 +623,14 @@ where
         w.mapped_j = finite(w.mapped_j + pending.mapped_w * dt_s)?;
         w.lorentz_j = finite(w.lorentz_j + pending.lorentz_w * dt_s)?;
         w.sampled_lorentz_j = finite(w.sampled_lorentz_j + state.mechanical_power_w * dt_s)?;
+        for (impulse, force) in w.frozen_lorentz_reaction_impulse_n_s.iter_mut()
+            .zip(&pending.state.frozen_lorentz_reaction_n)
+        {
+            check()?;
+            for axis in 0..3 {
+                impulse[axis] = finite(impulse[axis] + force[axis] * dt_s)?;
+            }
+        }
         w.other_body_j = finite(w.other_body_j + pending.other_body_w * dt_s)?;
         w.body_defect_j = finite(w.body_defect_j + pending.body_defect_w * dt_s)?;
         w.absolute_transfer_defect_j = finite(
@@ -615,7 +698,9 @@ where
 /// Native Reynolds and mechanical-work admission remain in force. The original
 /// external body force and Boussinesq source remain composable and keep distinct
 /// work accounts. This entry refuses exact solid phase locking: reaction on a
-/// conducting frozen skeleton needs its own mechanical owner. Mobile mushy
+/// conducting frozen skeleton needs an explicit support owner. Select
+/// advance_mhd_enthalpy_with_anchored_phase for stationary external anchors.
+/// Mobile mushy
 /// resistance still uses the original h-dependent material closure.
 ///
 /// The full electrical/thermal/flow map must be identical. Resume with returned
@@ -650,6 +735,85 @@ where
     R: Clone + FnMut(usize, &DepositedCell, f64) -> Result<F, MaterialError>,
     O: DepositionObserver,
 {
+    advance_mhd_enthalpy_impl(
+        thermal, target_s, config, input, motion, flow, false, resistivity,
+    )
+}
+
+/// Continue conducting solid, mushy and liquid material with stationary anchors.
+///
+/// This explicit boundary model supports the Lorentz load of every exact solid
+/// cell with an equal and opposite external force. The force on the material and
+/// its accepted impulse remain visible per original voxel; the external anchor
+/// receives their negatives. The anchor's velocity and work are exactly zero.
+/// This accounts only for direct magnetic loads, not native wall/fluid traction.
+///
+/// Construct the flow with MaterialFlowFeedback::try_new_phase and attach native
+/// unsteady viscous heating. Every original cell remains in the same electrical,
+/// material and total-enthalpy map: frozen cells can conduct and heat without
+/// liquid-only viscosity or heat capacity. Melting releases the original native
+/// faces at zero speed; mobile cells receive the unchanged reciprocal Lorentz
+/// force lift and physical molecular/Darcy heat. All-solid intervals solve
+/// current without inventing a momentum solve. Phase and transport are sampled
+/// at the actual interval start, so timestep refinement remains necessary.
+///
+/// The original native phase owner still refuses freezing a moving face. This
+/// API supplies no capture impulse/heat, moving support, deforming solid,
+/// unequal-density phase change or free-surface transition. Nonmagnetic loading
+/// on constrained cells still refuses. All low-induction, fixed-field, work,
+/// convergence and transactional requirements of
+/// advance_mhd_enthalpy_with_material_flow also apply.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn advance_mhd_enthalpy_with_anchored_phase<'t, 'f, F, R, O>(
+    thermal: &DepositionSimulation<'t>,
+    target_s: f64,
+    config: StepConfig,
+    input: JouleEnthalpyInput<'_>,
+    motion: MhdEnthalpyInput<'_>,
+    flow: &MaterialFlowFeedback<'f, F, R, O, PhaseFlowTransport>,
+    resistivity: impl Fn(&FlowMaterialSample<F, PhaseFlowTransport>) -> Result<Option<f64>, ChtError>,
+) -> Result<
+    (
+        DepositionSimulation<'t>,
+        MaterialFlowFeedback<'f, F, R, O, PhaseFlowTransport>,
+        MhdEnthalpyReport,
+    ),
+    MaterialFlowMhdError<O::Error>,
+>
+where
+    F: Clone,
+    R: Clone + FnMut(usize, &DepositedCell, f64) -> Result<F, MaterialError>,
+    O: DepositionObserver,
+{
+    advance_mhd_enthalpy_impl(
+        thermal, target_s, config, input, motion, flow, true, resistivity,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn advance_mhd_enthalpy_impl<'t, 'f, F, R, O, T>(
+    thermal: &DepositionSimulation<'t>,
+    target_s: f64,
+    config: StepConfig,
+    input: JouleEnthalpyInput<'_>,
+    motion: MhdEnthalpyInput<'_>,
+    flow: &MaterialFlowFeedback<'f, F, R, O, T>,
+    anchored_skeleton: bool,
+    resistivity: impl Fn(&FlowMaterialSample<F, T>) -> Result<Option<f64>, ChtError>,
+) -> Result<
+    (
+        DepositionSimulation<'t>,
+        MaterialFlowFeedback<'f, F, R, O, T>,
+        MhdEnthalpyReport,
+    ),
+    MaterialFlowMhdError<O::Error>,
+>
+where
+    F: Clone,
+    T: FlowTransportSnapshot,
+    R: Clone + FnMut(usize, &DepositedCell, f64) -> Result<F, MaterialError>,
+    O: DepositionObserver,
+{
     let gate = flow.gate;
     checkpoint(gate)?;
     admit_electrical_map(thermal, input, gate)?;
@@ -662,14 +826,14 @@ where
             .iter()
             .zip(flow.input.cell_ids)
             .any(|(&e, &f)| f != Some(e))
-        || flow.exact_phase
+        || flow.exact_phase != anchored_skeleton
         || !flow
             .unsteady
             .as_ref()
             .is_some_and(MaterialMomentum::has_heating)
     {
         return Err(invalid(
-            "MHD needs the same complete mobile domain/map and native unsteady physical heating",
+            "MHD needs the same complete material domain/map, explicit phase support and native unsteady physical heating",
         )
         .into());
     }
@@ -709,7 +873,10 @@ where
         momentum_trials: 0,
         pending: None,
         last: None,
-        work: Work::default(),
+        work: Work {
+            frozen_lorentz_reaction_impulse_n_s: vec![[0.0; 3]; input.cell_ids.len()],
+            ..Work::default()
+        },
     };
     let (next, mut accepted, thermal_audit) =
         thermal.advance_observed(&source, target_s, config, || checkpoint(gate))?;
@@ -757,6 +924,8 @@ where
         deposited_joule_j: work.mapped_j,
         lorentz_work_j: work.lorentz_j,
         sampled_lorentz_work_j: work.sampled_lorentz_j,
+        frozen_lorentz_reaction_impulse_n_s: work.frozen_lorentz_reaction_impulse_n_s.clone(),
+        frozen_support_work_j: 0.0,
         electrical_defect_j: finite(work.electrode_j - work.joule_j - work.sampled_lorentz_j)?,
         heat_transfer_defect_j: finite(work.joule_j - work.mapped_j)?,
         mechanical_transfer_defect_j: finite(work.lorentz_j - work.sampled_lorentz_j)?,

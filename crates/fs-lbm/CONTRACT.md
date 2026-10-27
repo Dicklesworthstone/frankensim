@@ -2899,3 +2899,43 @@ certificates. Focused tests in `tests/material_free_surface_rheology.rs` exercis
 an independent force-corrected tensor and analytical constitutive root, native
 Newtonian bit parity, source-only viscosity/capillary motion changes with mass
 conservation and deterministic replay, and endpoint source/convergence rollback.
+
+### Anchored conducting phase changes retain reciprocal MHD
+
+`conjugate::enthalpy::advection::feedback::mhd::advance_mhd_enthalpy_with_anchored_phase`
+explicitly selects an external stationary anchor for exact frozen cells. The
+existing mobile MHD entry still refuses implicit exact-solid support. Both
+entries share the same native current, MAC momentum and conservative enthalpy
+algorithm. Original cell IDs, source snapshots, conductor contacts and thermal
+mass remain unchanged through solid, mushy and liquid epochs. Frozen conductors
+carry source-resolved current and receive I²R without querying liquid-only
+viscosity or Cp.
+
+The native current owner's Lorentz density remains available for every voxel.
+In a frozen voxel its negative times original volume is reported as
+`frozen_lorentz_reaction_n`, the anchor-on-material force in N; the anchor receives
+the opposite force. Only this supported magnetic load is excluded from the
+mobile momentum RHS. Accepted intervals integrate that force over actual
+durations into `frozen_lorentz_reaction_impulse_n_s`; endpoint melting does not
+erase the preceding support impulse. This covers direct Lorentz support, not
+native fluid/solid or outer-wall traction. Other frozen body/buoyancy loads
+refuse. Supported material must have exactly zero velocity, so
+`frozen_support_work_j` is exactly zero. Original reciprocal force/work and
+combined energy gates remain active on actual accepted mobile velocity. No
+support work or numerical loss is deposited as heat.
+
+All-solid intervals solve current and advance heat on the original timeline
+without consuming a momentum solve or fabricating liquid transport. The existing
+phase owner releases melted native faces at zero speed and retains all other
+momentum. Freezing moving faces still refuses: this supplies no capture impulse,
+kinetic-to-thermal handoff, deforming/moving support, shrinkage, phase-density jump
+or free-surface transition. Static imposed-field, low-induction, closed unsteady
+Stokes, fixed-contact, equal phase-density and time-refinement assumptions apply.
+
+Four focused regressions in `liquid_flow_enthalpy/mushy/continuity/anchored_mhd.rs`
+cover independently predicted frozen Ohmic heat and signed support under material
+resistivity/field changes; melting into viscosity-dependent native MHD flow;
+moving-face freezing and endpoint current-budget rollback; and a conducting
+frozen center with a driven liquid ring. These are synthetic numerical fixtures.
+Reconstructed sources received source/API/physics review; native parsing,
+typechecking and execution were unavailable in this session.

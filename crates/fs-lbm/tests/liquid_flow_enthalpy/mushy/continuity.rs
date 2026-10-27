@@ -17,6 +17,9 @@ use fs_material::thermal::source::ThermalMaterialPoint;
 #[path = "continuity/electrothermal_momentum.rs"]
 mod electrothermal_momentum;
 
+#[path = "continuity/anchored_mhd.rs"]
+mod anchored_mhd;
+
 pub(super) fn source(mu: f64) -> MaterialCard {
     let mut claims = ClaimSet::new();
     for (name, dims, value) in [
