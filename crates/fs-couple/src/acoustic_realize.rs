@@ -1596,6 +1596,44 @@ fn mode_loss_parts(
     wave_number: f64,
     gas: &GasState,
 ) -> Result<StringModeLossParts, AcousticRealizeError> {
+    let mut loss = intrinsic_mode_loss_parts(string, omega, wave_number)?;
+    // A supplied Rayleigh pair is already a complete reduced loss model.
+    if string.rayleigh.is_some() {
+        return Ok(loss);
+    }
+    // The compact string path interprets width as circular diameter for air
+    // drag. R [N s/m²] / (2 mu_linear omega) is dimensionless. Material
+    // bindings derive this diameter and mu_linear from the same cross-section.
+    let resistance = crate::air_path::oscillating_cylinder_air_resistance_per_length(
+        0.5 * string.width_m,
+        omega,
+        gas,
+    )?;
+    loss.air = 0.5 * resistance / string.lin_density_kg_m / omega;
+    if !loss.air.is_finite() {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "cylinder air damping ratio is unrepresentable",
+        });
+    }
+    Ok(loss)
+}
+
+/// The string's own loss, excluding its surrounding fluid. A causal fluid
+/// realization must replace only the air term, keeping tension and material
+/// bending losses in the actual (possibly fluid-loaded) modal mass basis.
+pub(crate) fn intrinsic_string_mode_zeta(
+    string: &PrestressedString,
+    omega: f64,
+    wave_number: f64,
+) -> Result<f64, AcousticRealizeError> {
+    Ok(intrinsic_mode_loss_parts(string, omega, wave_number)?.total())
+}
+
+fn intrinsic_mode_loss_parts(
+    string: &PrestressedString,
+    omega: f64,
+    wave_number: f64,
+) -> Result<StringModeLossParts, AcousticRealizeError> {
     if string.relaxation_bending.is_some()
         && (string.kelvin_voigt_bending.is_some()
             || string.rayleigh.is_some()
@@ -1623,8 +1661,9 @@ fn mode_loss_parts(
             }
             // Galerkin projection of (eta I y_xxt)_xx gives c_k = eta I k^4.
             // With mu q_tt + c_k q_t + (T k² + EI k⁴) q = 0,
-            // zeta_k = c_k/(2 mu omega_k). Tension energy is lossless: using
-            // eta*omega/(2E) here would omit the bending-energy dilution.
+            // zeta_k = c_k/(2 mu omega_k). This bending law does not dissipate
+            // tension energy: eta*omega/(2E) would omit the bending dilution.
+            // Any independently declared tension loss is added separately.
             // Sakthivel et al. (2023), https://arxiv.org/abs/2301.07931.
             let zeta = 0.5 * law.viscous_stiffness_n_m2_s
                 * wave_number.powi(4)
@@ -1653,25 +1692,10 @@ fn mode_loss_parts(
             ..StringModeLossParts::default()
         });
     }
-    // The compact string path interprets width as circular diameter for air
-    // drag. R [N s/m²] / (2 mu_linear omega) is dimensionless. Material
-    // bindings derive this diameter and mu_linear from the same cross-section.
-    let resistance = crate::air_path::oscillating_cylinder_air_resistance_per_length(
-        0.5 * string.width_m,
-        omega,
-        gas,
-    )?;
-    let stokes = 0.5 * resistance / string.lin_density_kg_m / omega;
-    if !stokes.is_finite() {
-        return Err(AcousticRealizeError::InvalidDescription {
-            what: "cylinder air damping ratio is unrepresentable",
-        });
-    }
     if let Some(bending) = material_bending {
         return Ok(StringModeLossParts {
             material: bending + tension,
-            air: stokes,
-            authored: 0.0,
+            ..StringModeLossParts::default()
         });
     }
     if string.relaxation_bending.is_some() {
@@ -1679,8 +1703,7 @@ fn mode_loss_parts(
         // pHS; the tension's loss is not theirs and stays modal.
         return Ok(StringModeLossParts {
             material: tension,
-            air: stokes,
-            authored: 0.0,
+            ..StringModeLossParts::default()
         });
     }
     // A caller-authored modal ratio is an explicit reduced model. Elastic EI
@@ -1689,8 +1712,8 @@ fn mode_loss_parts(
     // the Kelvin-Voigt or causal memory path above.
     Ok(StringModeLossParts {
         authored: string.damping_ratio,
-        air: stokes,
         material: tension,
+        ..StringModeLossParts::default()
     })
 }
 

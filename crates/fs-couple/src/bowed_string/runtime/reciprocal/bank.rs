@@ -59,6 +59,21 @@ pub enum MaterialStringSource {
     },
 }
 impl MaterialStringSource {
+    // Reconstruct the same transverse source when another medium supplies
+    // inertia. Keep every intrinsic constitutive law instead of recovering it
+    // by subtracting a sampled air loss from a rounded modal damping ratio.
+    fn resolved_transverse_string(&self) -> Result<PrestressedString, ReciprocalStringError> {
+        match self {
+            Self::WithPolarizations(p) => p.source().resolved_transverse_string(),
+            Self::WithTorsion(t) => t.bending().resolved_transverse_string(),
+            Self::Homogeneous(s) => Ok(s.string()),
+            Self::Wound(s) => Ok(s.string()),
+            Self::Concentric { template, section, prestress } =>
+                crate::material_assembly::concentric::with_concentric_kelvin_voigt_section(
+                    template.clone(), section, *prestress,
+                ).map_err(ReciprocalStringError::Material),
+        }
+    }
     fn modes(&self) -> usize {
         match self { Self::WithPolarizations(p) => p.total_modes(),
             Self::WithTorsion(t) => t.total_modes(),

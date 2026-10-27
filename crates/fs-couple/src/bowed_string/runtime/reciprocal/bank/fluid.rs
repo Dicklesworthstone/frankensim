@@ -141,9 +141,10 @@ impl ReciprocalStringBank {
     ///
     /// Source solid density is untouched. The returned cards carry the actual
     /// transverse inertia (solid plus instantaneous fluid added mass); their
-    /// damping contains ONLY material Kelvin-Voigt loss and the collapsed slow
-    /// fluid tail. Every remaining viscous contribution is a coupled fluid mass,
-    /// so it cannot be double-counted as old per-mode gas resistance.
+    /// damping keeps material Kelvin-Voigt loss, the construction's independent
+    /// tension loss and the collapsed slow fluid tail. Every remaining fluid
+    /// contribution is a coupled mass, so it cannot be double-counted as old
+    /// per-mode gas resistance.
     /// Original Prony specimens retain their actual internal strains and use
     /// the loaded transverse mass in their bending-memory projection. Bind an
     /// explicit layered-string spectrum only after selecting gas loading.
@@ -205,14 +206,19 @@ impl ReciprocalStringBank {
                 || card.linear_density_kg_m <= solid.linear_density_kg_m {
                 return Err(invalid("added gas inertia is not representable beside the actual solid line mass"));
             }
+            let mut source_string = member.source.resolved_transverse_string()?;
+            source_string.lin_density_kg_m = card.linear_density_kg_m;
             for k in 0..card.mode_count {
                 let wave_number = (k + 1) as f64 * core::f64::consts::PI / card.length_m;
                 let omega = card.mode_omega_rad_s(k + 1);
                 // Re-derive intrinsic loss from its source; subtracting two close
                 // sampled damping values could silently discard real viscosity.
-                let resistance = card.viscous_bending_n_m2_s * wave_number.powi(4)
-                    + flow.low_tail_resistance_per_length_n_s_m2();
-                let zeta = 0.5 * resistance / card.linear_density_kg_m / omega;
+                let material = crate::acoustic_realize::intrinsic_string_mode_zeta(
+                    &source_string, omega, wave_number,
+                ).map_err(ReciprocalStringError::Material)?;
+                let fluid_tail = 0.5 * flow.low_tail_resistance_per_length_n_s_m2()
+                    / card.linear_density_kg_m / omega;
+                let zeta = material + fluid_tail;
                 if !omega.is_finite() || omega <= 0.0 || omega < lo || omega > hi
                     || !zeta.is_finite() || zeta <= 0.0 {
                     return Err(invalid("fluid-loaded string mode exceeds its original material band or representability"));

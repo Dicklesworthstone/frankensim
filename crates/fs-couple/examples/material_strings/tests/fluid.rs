@@ -107,6 +107,51 @@ fn pressure_composition_and_core_material_are_independent_data_changes_in_the_sa
 }
 
 #[test]
+fn causal_gas_loading_keeps_construction_loss_for_homogeneous_bonded_and_wound_strings() {
+    scoped(|cx, gate| {
+        let row = input::tension_loss_rows().unwrap().into_iter()
+            .find(|row| row.id == "lampis-2024-dominant-cello-g").unwrap();
+        let bonded = text();
+        let homogeneous = bonded.replace(
+            "section bonded 0.0002 1\nlayer sleeve.fsmatpk 0.0003", "section homogeneous");
+        let wound = bonded.replace(
+            "section bonded 0.0002 1\nlayer sleeve.fsmatpk 0.0003",
+            "section close-wound 0.0002 wrap.fsmatpk 0.00005 0.000101")
+            .replace("tension 20 1 1", "tension 20 1 0");
+        for input in [homogeneous, bonded, wound] {
+            let lossy = input.replace(FLOW, &format!("tension-loss {}\n{FLOW}", row.id));
+            let mut a = compile(cx, gate, input::Spec::parse(input.as_bytes()).unwrap(), 7800.0);
+            let mut b = compile(cx, gate, input::Spec::parse(lossy.as_bytes()).unwrap(), 7800.0);
+            let (plain, loss) = (&a.performance.bank().cards()[0], &b.performance.bank().cards()[0]);
+            assert_eq!(plain.linear_density_kg_m, loss.linear_density_kg_m);
+            assert_eq!(plain.bending_stiffness_n_m2, loss.bending_stiffness_n_m2);
+            assert_eq!(plain.viscous_bending_n_m2_s, loss.viscous_bending_n_m2_s);
+            for k in 1..=loss.mode_count {
+                let wave = k as f64 * core::f64::consts::PI / loss.length_m;
+                let omega = loss.mode_omega_rad_s(k);
+                assert_eq!(omega, plain.mode_omega_rad_s(k));
+                // eta_F multiplies the tensile stiffness, not the air's inertia
+                // or its memory. Both polarizations retain that same loss.
+                let expected = 0.5 * row.eta_f * loss.tension_n * wave * wave
+                    / (loss.linear_density_kg_m * omega * omega);
+                assert!(((loss.zetas[k-1] - plain.zetas[k-1]) / expected - 1.0).abs() < 1e-10);
+                let modes = b.performance.bank().system().components()[0].modes();
+                assert_eq!(modes[k-1].damping_ratio, loss.zetas[k-1]);
+                assert_eq!(modes[k-1+loss.mode_count].damping_ratio, loss.zetas[k-1]);
+            }
+            let p = pressure(&mut a, 128);
+            let q = pressure(&mut b, 37);
+            assert!(p.iter().zip(&q).any(|(p, q)| (p-q).abs() > 1e-15),
+                "tension loss disappeared before the actual body-pressure output");
+            for ready in [&a, &b] {
+                let frame = ready.performance.bank().system().last_frame().unwrap();
+                assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+            }
+        }
+    });
+}
+
+#[test]
 fn fluid_count_is_a_live_axis_and_complete_dimensions_preserve_explicit_work_limits() {
     scoped(|cx, gate| {
         let input = small();

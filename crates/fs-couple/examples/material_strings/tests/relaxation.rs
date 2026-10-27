@@ -91,6 +91,46 @@ fn source_spectrum_changes_shared_pressure_and_pcm_with_original_mode_geometry()
 }
 
 #[test]
+fn hereditary_bending_and_causal_fluid_keep_the_independent_tension_loss() {
+    scoped(|cx, gate| {
+        let mut s = selected();
+        s.samples = 128;
+        s.strings[0].bending_modes = 2;
+        s.cylinder_gas_loading = Some(CylinderFlowResolution {
+            minimum_wavenumber_radius: 1e-3, maximum_wavenumber_radius: 30.0, intervals: 2,
+        });
+        let mut a = ready(cx, gate, s.clone(), 80e9);
+        let row = input::tension_loss_rows().unwrap().into_iter()
+            .find(|row| row.id == "lampis-2024-dominant-cello-g").unwrap();
+        s.strings[0].tension_loss = Some(row.clone());
+        let mut b = ready(cx, gate, s, 80e9);
+        let branches_a = a.performance.bank().system().material_relaxation_branches();
+        let branches_b = b.performance.bank().system().material_relaxation_branches();
+        assert_eq!(branches_a.len(), branches_b.len());
+        for (a, b) in branches_a.iter().zip(branches_b) {
+            assert_eq!(a.projection, b.projection);
+            assert_eq!(a.stiffness, b.stiffness);
+            assert_eq!(a.relaxation_time_s, b.relaxation_time_s);
+        }
+        assert_eq!(a.performance.bank().system().material_memory(),
+            b.performance.bank().system().material_memory());
+        let (plain, loss) = (&a.performance.bank().cards()[0], &b.performance.bank().cards()[0]);
+        assert_eq!(loss.viscous_bending_n_m2_s, 0.0, "Prony storage acquired a second bending loss");
+        for k in 1..=loss.mode_count {
+            let wave = k as f64 * core::f64::consts::PI / loss.length_m;
+            let omega = loss.mode_omega_rad_s(k);
+            let expected = 0.5 * row.eta_f * loss.tension_n * wave * wave
+                / (loss.linear_density_kg_m * omega * omega);
+            assert!(((loss.zetas[k-1] - plain.zetas[k-1]) / expected - 1.0).abs() < 1e-10);
+        }
+        assert!(pressure(&mut a, 128).iter().zip(pressure(&mut b, 37))
+            .any(|(p, q)| (p-q).abs() > 1e-15));
+        let frame = b.performance.bank().system().last_frame().unwrap();
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+    });
+}
+
+#[test]
 fn string_and_body_memories_share_gas_torsion_axial_and_multibow_performer() {
     scoped(|cx,gate| {
         let mut s = selected();
