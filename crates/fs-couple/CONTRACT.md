@@ -7350,3 +7350,54 @@ This remains a spatially uniform closed gas and fixed structural
 material/geometry epoch. It adds no flame/shock propagation, chemical acoustic
 relaxation, wall thermal transfer, nozzle flow, moving geometry/basis or automatic
 exterior-radiation refresh. The wider gas-chemistry ladder remains open.
+
+
+### Source-bound finite-strain dynamics (MR58 bounded increment)
+
+`finite_solid::FiniteSolidMaterial` binds an explicit model index and reference
+density from the same immutable `MaterialCard` at the exact
+`ResolvedHyperelastic` context, retaining the original model, typed source
+query, material identity and density receipt. The existing fixed-external
+source admission rejects unsupported stress, strain, rate and history axes;
+a numerically matching query alone cannot freeze them. Held temperature,
+pressure and composition describe reference preparation/environment
+conditions. This path does not refresh them during a trajectory.
+
+`FiniteSolidBody` uses `hyper3`'s total-Lagrangian P1 internal force, exact
+consistent tangent and strain energy, `linear3`'s consistent reference-mass
+kernel, `fs-time`'s bounded `second_order_acceleration` initialization and its
+`OperatorGeneralizedAlpha` at `rho_inf=1`. Uniform and per-element source fields
+use the same operators. Reference mass is immutable during finite motion;
+material density is never multiplied by deformed volume. Every free DOF
+requires positive finite mass, including refusal of unused free nodes.
+Prescribed displacements are stationary and attained initially.
+
+Candidate intervals use held referential nodal/body loads and return actual
+kinetic and strain storage, force-displacement source work, midpoint support
+reactions and the signed energy integration defect. Nonlinear midpoint is not
+exactly energy conserving: that signed defect must pass the requested
+absolute gate and is never relabeled as heat. The gate is not a trajectory
+accuracy certificate. No accepted q/v/a/history changes until the caller
+publishes the returned candidate; domain, solver, workspace, cancellation and
+late energy refusals leave the original body intact. Immutable matrices are
+shared between candidates; the accepted-step budget bounds retained history.
+Native geometry and solver errors retain their original owners; material
+binding preserves the original source refusal text.
+
+The focused `finite_solid` integration tests specify an independent scalar
+finite-stretch oscillator and its physical work/storage, density and
+stiffness substitutions, rigid rotation with translating acceleration,
+heterogeneous reference masses, source-axis refusal, inversion/stretch
+limits, massless free-node refusal and late energy/cancellation rollback.
+They are numerical fixtures, not experimental validation or measured
+material calibration. The reconstructed Rust sources have received source
+and API review; native parsing, compilation and test execution remain pending
+because the available executor could not start.
+
+MR58 remains open. This increment is compressible, isothermal,
+rate-independent hyperelasticity on conforming P1 tetrahedra. Thermal
+reference deformation, finite-strain inelastic evolution, moving supports,
+contact, follower pressure and a mixed/stabilized nearly-incompressible
+formulation remain outside this path. No continuous-time inversion or
+self-intersection guarantee, mesh-convergence certificate, or new adjoint
+claim is made.

@@ -1654,3 +1654,15 @@ reaction and reciprocal thermoelastic heat are not inferred. Three focused
 one-tetrahedron tests use independent consistent mass, stiffness, thermal
 equilibrium and oscillator references to check motion/work, source-update
 continuity, changed pressure response and refused/cancelled candidates.
+
+
+### Native finite-strain storage and reference-mass access
+
+The `hyper3` owner exposes full referential dead loads, actual stored energy and
+a consistent reference mass for dynamic consumers. Energy uses the same
+deformation gradient, determinant/stretch admission and constitutive owner as
+the native Piola force and tangent. Reference mass delegates to
+`linear3::p1_tet_consistent_mass`, with one positive finite density per element;
+unrepresentable element/assembled mass refuses. Consumers must retain that
+mass during deformation instead of multiplying updated volume by a fixed
+reference density. These accessors introduce no constitutive or time solver.

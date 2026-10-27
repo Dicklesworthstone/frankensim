@@ -58,6 +58,7 @@ fs-solver = { path = "../fs-solver" }
 fs-sparse = { path = "../fs-sparse" }
 fs-thermal = { path = "../fs-thermal" }
 fs-thermochem = { path = "../fs-thermochem" }
+fs-time = { path = "../fs-time" }
 fs-tribo = { path = "../fs-tribo" }
 fs-vfit = { path = "../fs-vfit" }
 

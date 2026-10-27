@@ -1340,6 +1340,7 @@ dependencies = [
  "fs-substrate",
  "fs-thermal",
  "fs-thermochem",
+ "fs-time",
  "fs-tribo",
  "fs-vfit",
 ]

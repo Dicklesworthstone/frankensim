@@ -565,6 +565,120 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
         }
     }
 
+    /// Assemble the full consistent mass in the undeformed reference mesh.
+    ///
+    /// Each entry is a reference density, kg/m^3, in tetrahedron order. This
+    /// delegates to the same P1 mass kernel as small-strain elasticity. Retain
+    /// this matrix throughout a material motion: using deformed volume with
+    /// fixed reference density would create or destroy mass.
+    ///
+    /// # Errors
+    /// Invalid mesh, density, budget, unrepresentable mass, or cancellation.
+    pub fn reference_mass_matrix(
+        &self,
+        reference_density_kg_m3: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<Csr, HyperTetError> {
+        checkpoint(cx)?;
+        let elements = self.validate()?;
+        if reference_density_kg_m3.len() != elements.len()
+            || reference_density_kg_m3
+                .iter()
+                .any(|rho| !rho.is_finite() || *rho <= 0.0)
+        {
+            return Err(HyperTetError::InvalidInput {
+                what: "one finite positive reference density is required per tetrahedron".into(),
+            });
+        }
+        let dofs = 3 * self.nodes_m.len();
+        let mut coo = Coo::new(dofs, dofs);
+        for (index, (element, density)) in
+            elements.iter().zip(reference_density_kg_m3).enumerate()
+        {
+            if index % 4096 == 0 {
+                checkpoint(cx)?;
+            }
+            let scale = density * element.volume / 20.0;
+            if !scale.is_finite() || scale <= 0.0 {
+                return Err(HyperTetError::InvalidInput {
+                    what: format!("element {index}: reference mass is not representable"),
+                });
+            }
+            let local = crate::linear3::p1_tet_consistent_mass(element.volume, *density);
+            for (a, &node_a) in element.nodes.iter().enumerate() {
+                for (b, &node_b) in element.nodes.iter().enumerate() {
+                    for component in 0..3 {
+                        coo.push(
+                            3 * node_a + component,
+                            3 * node_b + component,
+                            local[3 * a + component][3 * b + component],
+                        );
+                    }
+                }
+            }
+        }
+        let mass = coo.assemble();
+        for row in 0..dofs {
+            if row % 4096 == 0 {
+                checkpoint(cx)?;
+            }
+            if mass.row(row).1.iter().any(|value| !value.is_finite()) {
+                return Err(HyperTetError::InvalidInput {
+                    what: "assembled reference mass is not finite".into(),
+                });
+            }
+        }
+        checkpoint(cx)?;
+        Ok(mass)
+    }
+
+    /// Full dead-load vector at unit load, N, on the reference mesh.
+    ///
+    /// # Errors
+    /// Invalid mesh, load, budget, accumulation overflow, or cancellation.
+    pub fn external_force_n(&self, cx: &Cx<'_>) -> Result<Vec<f64>, HyperTetError> {
+        checkpoint(cx)?;
+        let elements = self.validate()?;
+        let force = self.external(&elements, 1.0);
+        checkpoint(cx)?;
+        if force.iter().any(|value| !value.is_finite()) {
+            return Err(HyperTetError::InvalidInput {
+                what: "assembled dead force is not finite".into(),
+            });
+        }
+        Ok(force)
+    }
+
+    /// Actual stored strain energy, J, evaluated by the same material law and
+    /// deformation gradient as the native force and tangent.
+    ///
+    /// The material's determinant and principal-stretch domain is admitted
+    /// before energy is returned. This is storage, not dissipated heat.
+    ///
+    /// # Errors
+    /// Invalid input/budget, material-domain refusal, overflow, or cancellation.
+    pub fn stored_energy_j(
+        &self,
+        displacement_m: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<f64, HyperTetError> {
+        checkpoint(cx)?;
+        let elements = self.validate()?;
+        self.check_len(displacement_m)?;
+        let evaluated = self
+            .evaluate(&elements, displacement_m, cx)?
+            .map_err(|(element, what)| HyperTetError::MaterialRefused { element, what })?;
+        if !evaluated.energy.is_finite()
+            || evaluated.internal.iter().any(|value| !value.is_finite())
+        {
+            return Err(HyperTetError::InvalidInput {
+                what: "stored energy or internal force is not finite".into(),
+            });
+        }
+        checkpoint(cx)?;
+        Ok(evaluated.energy)
+    }
+
     fn check_len(&self, u: &[f64]) -> Result<(), HyperTetError> {
         if u.len() == 3 * self.nodes_m.len() && u.iter().all(|v| v.is_finite()) {
             Ok(())
