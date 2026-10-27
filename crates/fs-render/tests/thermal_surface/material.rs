@@ -87,6 +87,9 @@ fn condition(axis: &str, temperature: f64) -> QueryPoint {
         .unwrap()
         .with_quantity("pressure", quantity(QuantityKind::Pressure), 100_000.0)
         .unwrap()
+        // Retained specimen context, not an axis of these optical source laws.
+        .with_quantity("load_context", quantity(QuantityKind::Pressure), 100_000.0)
+        .unwrap()
         .with_quantity(
             "liquid_fraction",
             QuantitySpec::dimensional(Dims::NONE),
@@ -151,9 +154,24 @@ fn condition_card(axis: &str) -> MaterialCard {
                     PropertyValue::Scalar { value, dims }
                 },
                 validity: ValidityDomain::unconstrained()
-                    .with(axis, 1200.0, 1800.0)
-                    .with("pressure", 100_000.0, 200_000.0)
-                    .with("liquid_fraction", 0.0, 1.0),
+                    .with_quantity(
+                        axis,
+                        quantity(QuantityKind::AbsoluteTemperature),
+                        1200.0,
+                        1800.0,
+                    )
+                    .with_quantity(
+                        "pressure",
+                        quantity(QuantityKind::Pressure),
+                        100_000.0,
+                        200_000.0,
+                    )
+                    .with_quantity(
+                        "liquid_fraction",
+                        QuantitySpec::dimensional(Dims::NONE),
+                        0.0,
+                        1.0,
+                    ),
                 uncertainty: UncertaintyModel::Unstated,
                 interpolation: if varying {
                     InterpolationPolicy::LinearInside
@@ -250,7 +268,7 @@ fn g0_same_temperature_cannot_hide_changed_pressure_phase_or_quantity_meaning() 
         point.clone().with("liquid_fraction", 0.75).unwrap(),
         point
             .clone()
-            .with_quantity("pressure", quantity(QuantityKind::Stress), 100_000.0)
+            .with_quantity("load_context", quantity(QuantityKind::Stress), 100_000.0)
             .unwrap(),
     ] {
         let accepted = state_at(&card, &other);
@@ -281,7 +299,7 @@ fn g0_optical_binding_retains_quantity_meaning_at_identical_numeric_coordinates(
     .unwrap();
     let other = point
         .clone()
-        .with_quantity("pressure", quantity(QuantityKind::Stress), 100_000.0)
+        .with_quantity("load_context", quantity(QuantityKind::Stress), 100_000.0)
         .unwrap();
     let accepted = state_at(&card, &other);
     assert_eq!(accepted.query_point(), optical.resolved().query_point());

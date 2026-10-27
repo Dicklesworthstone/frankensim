@@ -1785,3 +1785,29 @@ This fixed-geometry, zero-interface-storage reduction supplies no evolving
 contact pressure or composition transport. The composed current/heat regressions
 in `fs-couple/tests/electrical_contacts/conditions.rs` include actual two-body
 heat exchange and a source-support-hole refusal with unchanged coefficients.
+
+### Material-dependent exchange between finite thermal reservoirs
+
+`interface::lumped_pair::MaterialContactLaw` composes the existing ordered
+`ThermalInterfacePoint` with `advance_contact_pair` and its finite-body enthalpy
+solver. It selects the interface claim once, then refreshes that exact source at
+both actual side temperatures and declared liquid mass fractions. An optional
+mean temperature is an explicit source coordinate; other supplied conditions,
+including pressure and composition, remain fixed.
+
+Every trial starts from the original states and supplied heats. Relaxation
+changes only the trial enthalpies. Acceptance requires the endpoint source,
+the physical contact heat-law residual, both reservoir energy balances and the
+endpoint Biot bound to pass. One signed transfer leaves A and enters B; zero
+area opens the link while retaining each body's internal heating. Returned
+proposals include the applied inner solve and the refreshed endpoint receipt.
+Cancellation, exhausted iterations or unsupported source conditions return no
+partially accepted pair.
+
+This is a fixed-geometry, two-reservoir, zero-interface-storage reduction.
+Source checks cover the visited query points, not continuous paths through
+sparse multiaxis support. Arbitrary nonlinear laws have no uniqueness or
+convergence guarantee. The reduced Biot check does not qualify local spreading,
+flash temperatures, evolving pressure/composition or ambient/radiative exchange.
+The coupled impact regression uses the actual mechanical contact area and
+publishes both reservoir proposals through the existing coupled thermal owner.

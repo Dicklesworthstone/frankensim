@@ -108,3 +108,181 @@ fn invalid(what:&str)->ConductionError {
     ConductionError::Interface {interface:"lumped-contact-pair".into(),what:what.into(),
         fix:"supply both original finite thermal states and one admitted source-backed contact area".into()}
 }
+
+use super::temperature::ContactIterationConfig;
+use crate::lumped::LUMPED_BIOT_CEILING;
+use fs_material::phase::EquilibriumPhaseState;
+use fs_material::state_point::{MaterialPropertySelection, ResolvedInterfaceStatePoint};
+use fs_material::thermal::interface::ThermalInterfacePoint;
+
+/// One ordered material contact law with its original selected source pinned.
+///
+/// The declared side temperatures and liquid mass fractions follow the actual
+/// caloric states. Other supplied source coordinates remain fixed. The binding
+/// owns no thermal history and never switches claims at a support boundary.
+#[derive(Clone, Debug)]
+pub struct MaterialContactLaw<'a> {
+    binding: ThermalInterfacePoint<'a>,
+    reference: ResolvedInterfaceStatePoint,
+}
+
+impl<'a> MaterialContactLaw<'a> {
+    /// Select and admit the static interface law at two original material states.
+    /// Bulk identities, ordered surfaces and coordinate conventions are checked
+    /// by the shared thermal-interface owner.
+    pub fn new(
+        binding: ThermalInterfacePoint<'a>,
+        states: [EquilibriumPhaseState; 2],
+        selection: MaterialPropertySelection,
+    ) -> Result<Self, ConductionError> {
+        let reference = binding
+            .resolve_resistance(states, selection)
+            .map_err(|error| invalid(&error.to_string()))?;
+        Ok(Self { binding, reference })
+    }
+
+    /// Original source selection and complete reference conditions.
+    #[must_use]
+    pub fn reference(&self) -> &ResolvedInterfaceStatePoint {
+        &self.reference
+    }
+
+    /// Propose both reservoirs using resistance at their actual endpoint states.
+    ///
+    /// Each bounded Picard trial delegates to the original conservative
+    /// finite-body solver with the original states and supplied heats. Only
+    /// trial enthalpies are relaxed; resistance values and accepted histories
+    /// are never blended. Acceptance checks the physical heat-law residual
+    /// against a fresh endpoint source answer and rechecks the reduced Biot
+    /// bound there. Both proposals must be published together by their owner.
+    ///
+    /// Zero area leaves the contact open while preserving internal heating and
+    /// source admission. A failed query, cancellation or exhausted iteration
+    /// budget returns no pair. Source checks cover the visited points, not
+    /// continuous paths through sparse multiaxis support. This fixed-geometry
+    /// reduction supplies no uniqueness guarantee, local spreading/flash
+    /// temperature model, evolving pressure or ambient/radiative exchange.
+    pub fn advance(
+        &self,
+        cx: &Cx<'_>,
+        inputs: [UniformEnthalpyStepInput<'_>; 2],
+        transports: [&LumpedThermalTransport; 2],
+        area_m2: f64,
+        energy_tolerance_j: f64,
+        iteration: ContactIterationConfig,
+    ) -> Result<[UniformEnthalpyStep<MaterialContactPairReport>; 2], ConductionError> {
+        poll(cx)?;
+        if iteration.max_iterations == 0
+            || !positive(iteration.relaxation)
+            || iteration.relaxation > 1.0
+            || !positive(iteration.residual_tolerance_j)
+        {
+            return Err(invalid(
+                "material contact needs a positive iteration budget, relaxation in (0,1] and a finite positive physical residual allowance",
+            ));
+        }
+        let selected = self.reference.properties()[0].answer().receipt.selected;
+        let mut trial = [inputs[0].initial, inputs[1].initial];
+        for index in 0..iteration.max_iterations {
+            poll(cx)?;
+            let point = self
+                .binding
+                .at(trial)
+                .map_err(|error| invalid(&error.to_string()))?;
+            // Retain the complete coordinate schema and exact selected source.
+            self.reference
+                .at_query_point(self.binding.interface, &point)
+                .map_err(|error| invalid(&error.to_string()))?;
+            let interface = InterfaceResistance::from_card_pinned(
+                "material contact",
+                self.binding.interface,
+                &point,
+                selected,
+            )?;
+            let pair = advance_contact_pair(
+                cx,
+                inputs,
+                transports,
+                &interface,
+                area_m2,
+                energy_tolerance_j,
+            )?;
+            let states = [pair[0].state, pair[1].state];
+            let endpoint_point = self
+                .binding
+                .at(states)
+                .map_err(|error| invalid(&error.to_string()))?;
+            let endpoint = self
+                .reference
+                .at_query_point(self.binding.interface, &endpoint_point)
+                .map_err(|error| invalid(&error.to_string()))?;
+            let endpoint_resistance = endpoint.properties()[0].value_si();
+            let heat_a_to_b_j = pair[1].external_heat_j;
+            let (physical_contact_residual_j, endpoint_maximum_biot) =
+                if let Some(contact) = &pair[0].report.contact {
+                    let resistance_k_per_w = endpoint_resistance / area_m2;
+                    if !positive(resistance_k_per_w) {
+                        return Err(invalid("endpoint contact resistance is not representable"));
+                    }
+                    let residual = heat_a_to_b_j
+                        - inputs[0].duration_s
+                            * ((states[0].temperature_k() - states[1].temperature_k())
+                                / resistance_k_per_w);
+                    // The inner solver uses each body's whole-chart minimum
+                    // conductivity. Its conservative bound scales with 1/R''.
+                    let biot =
+                        contact.maximum_biot * (interface.value_m2_k_per_w() / endpoint_resistance);
+                    if !residual.is_finite() || !biot.is_finite() || biot > LUMPED_BIOT_CEILING {
+                        return Err(invalid(
+                            "endpoint heat law or lumped contact Biot bound is inadmissible",
+                        ));
+                    }
+                    (residual, biot)
+                } else {
+                    (heat_a_to_b_j, 0.0)
+                };
+            if physical_contact_residual_j.abs() <= iteration.residual_tolerance_j {
+                poll(cx)?;
+                let report = MaterialContactPairReport {
+                    applied: pair[0].report.clone(),
+                    endpoint,
+                    physical_contact_residual_j,
+                    endpoint_maximum_biot,
+                    iterations: index + 1,
+                };
+                return Ok(pair.map(|proposal| UniformEnthalpyStep {
+                    state: proposal.state,
+                    external_heat_j: proposal.external_heat_j,
+                    energy_residual_tolerance_j: proposal.energy_residual_tolerance_j,
+                    report: report.clone(),
+                }));
+            }
+            for side in 0..2 {
+                let enthalpy = (1.0 - iteration.relaxation) * trial[side].specific_enthalpy_j_kg()
+                    + iteration.relaxation * states[side].specific_enthalpy_j_kg();
+                trial[side] = inputs[side]
+                    .curve
+                    .state_at_specific_enthalpy(enthalpy)
+                    .map_err(|error| invalid(&error.to_string()))?;
+            }
+        }
+        Err(invalid(
+            "material contact exhausted its bounded iterations before closing the physical heat law",
+        ))
+    }
+}
+
+/// Applied conservative inner solve and the actual endpoint material answer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaterialContactPairReport {
+    /// Original source-bearing fixed-resistance inner solve, without alteration.
+    pub applied: ContactPairReport,
+    /// The same selected interface claim at both actual endpoint states.
+    pub endpoint: ResolvedInterfaceStatePoint,
+    /// Q - dt (T_A - T_B) / (R''_endpoint / area), in joules.
+    pub physical_contact_residual_j: f64,
+    /// Conservative contact Biot bound using the endpoint resistance.
+    pub endpoint_maximum_biot: f64,
+    /// Number of inner finite-body solves used by the accepted proposal.
+    pub iterations: usize,
+}
