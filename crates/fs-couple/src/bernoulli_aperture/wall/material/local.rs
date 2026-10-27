@@ -73,11 +73,10 @@ impl RegionalMaterialWallDg {
     /// Material interfaces must coincide with element boundaries; refinement
     /// repeats each region's source over its sub-elements explicitly.
     ///
-    /// Elastic/Kelvin--Voigt regions preserve each local mass, stiffness and
-    /// viscosity in the native reciprocal DG operator. An exactly homogeneous
-    /// source list takes the existing path, including its complete Maxwell
-    /// spectrum. Heterogeneous hereditary spectra currently refuse rather than
-    /// dropping internal history or inventing a common spectrum.
+    /// Each region preserves its mass, equilibrium stiffness, viscosity and
+    /// every positive Maxwell arm in the native reciprocal DG operator.
+    /// Spectra may differ in branch count and relaxation times; no common fit
+    /// replaces them. Exactly homogeneous sources retain the original uniform path.
     ///
     /// The returned applicability band is the intersection of all source bands,
     /// not a filter or error certificate. Original cylindrical/thin-membrane,
@@ -134,17 +133,16 @@ impl RegionalMaterialWallDg {
             if cancelled() {
                 return Err(AcousticRealizeError::Cancelled);
             }
-            if matches!(&wall.loss, WallMaterialLoss::Maxwell(_)) {
-                return Err(invalid(
-                    "regional hereditary wall spectra require a dedicated history-preserving operator",
-                ));
-            }
             let base = element * local;
             let length = nodes[base + local - 1] - nodes[base];
             pins.push(wall.base_patch(radius, length)?.wall);
         }
+        let spectra: Vec<_> = walls.iter().map(|wall| match &wall.loss {
+            WallMaterialLoss::Maxwell(source) => Some(source.material()),
+            _ => None,
+        }).collect();
         let duct = duct
-            .with_compliant_wall_regions_controlled(&pins, cancelled)
+            .with_compliant_wall_relaxation_regions_controlled(&pins, &spectra, cancelled)
             .map_err(|e| match e {
                 fs_duct::DuctError::Cancelled { .. } => AcousticRealizeError::Cancelled,
                 error => AcousticRealizeError::Nonlinear(error.to_string()),
@@ -170,6 +168,12 @@ impl RegionalMaterialWallDg {
     #[must_use]
     pub const fn duct(&self) -> &fs_duct::dg::DgDuct {
         &self.duct
+    }
+    /// Move the coupled operator into the acoustic host without rebuilding its
+    /// regional material, gas-memory or hereditary wall coordinates.
+    #[must_use]
+    pub fn into_duct(self) -> fs_duct::dg::DgDuct {
+        self.duct
     }
 }
 

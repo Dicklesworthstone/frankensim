@@ -1170,11 +1170,21 @@ mass, with opposite transpose entries retained exactly. Physical displacement,
 velocity and loss use those same local coefficients. Gas mass matrices,
 viscothermal memories, boundary/side ports and the time integrator are retained.
 Identical regional coefficients take the original homogeneous path bitwise.
-`compliant_wall_at_element` reports actual assignments; `compliant_wall` returns
-no homogeneous pin for a heterogeneous wall. Preparation is cancellable and old
-states refuse by operator identity. G1 tests reconstruct each local physical
+`compliant_wall_at_element` reports actual base assignments; `compliant_wall`
+returns no homogeneous pin for differing base coefficients. Equal base pins do
+not imply equal hereditary spectra. Preparation is cancellable and old states
+refuse by operator identity. G1 tests reconstruct each local physical
 equation and independently integrate energy/loss for uniform and spatial gas;
 G3 tests exercise original pressure-port evolution and data-only region swaps.
+`with_compliant_wall_relaxation_regions` retains each element's independently
+declared generalized-Maxwell spectrum beside its original base pin. Every
+positive arm allocates only that element's nodal state, with its own stiffness
+and relaxation rate. The same reciprocal gas/wall operator supplies its force,
+storage and loss; no common spectrum or additional constitutive stepper appears.
+Homogeneous assignments retain the original full-field ordering and operator
+identity. Regional pressure rows follow element then arm order and are exactly
+zero outside their support. Native source, pressure, force, storage and port
+regressions cover differing spectra and mixed hereditary/Kelvin regions.
 The local membrane model still omits axial shell waves and stress transfer at
-material joints. Heterogeneous Maxwell spectra and live wall-state transfer
-are not supplied by this extension; no internal history is silently discarded.
+material joints. Live wall-state transfer is not supplied; binding is cold and
+no internal history is silently discarded.

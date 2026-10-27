@@ -6639,9 +6639,13 @@ operator and intersects the original source bands. Different wall materials
 therefore change both pressure propagation and wall motion in the same native
 time solve, including spatial gas composition and pre-existing gas memories.
 
-Exactly uniform assignments retain the original full Maxwell-spectrum route;
-heterogeneous Maxwell spectra refuse rather than lose a material's memory.
-Material boundaries align with element boundaries. The existing thin cylindrical
+Exactly uniform assignments retain the original full Maxwell-spectrum route.
+Heterogeneous assignments carry every original positive Maxwell arm on its own
+element's nodes, alongside the original local mass and equilibrium stiffness.
+Elastic, Kelvin--Voigt and hereditary regions may coexist; no common spectrum
+replaces their sources. Gas memory, ports and wall histories advance in one
+native operator, and physical pressure observations are zero outside each arm's
+support. Material boundaries align with element boundaries. The existing thin cylindrical
 local-membrane model supplies no axial shell waves, stress transfer across
 material joints, or live transfer of an already vibrating wall into new material
 coordinates. Focused G1/G3 tests reconstruct local force/energy relations and

@@ -3,6 +3,7 @@ use fs_material::gas::{GasSpec, GasState};
 
 mod spatial;
 mod regional;
+mod regional_relaxation;
 
 const RADIUS: f64 = 0.01;
 const LENGTH: f64 = 0.3;

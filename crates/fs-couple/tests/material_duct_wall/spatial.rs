@@ -50,9 +50,12 @@ fn gas_field(
     )
 }
 fn source_wall(density: f64, modulus: f64) -> LocalMaterialWall {
+    source_wall_with_arm(density, modulus, 0.8, 0.0005)
+}
+fn source_wall_with_arm(density: f64, modulus: f64, arm_fraction: f64, tau: f64) -> LocalMaterialWall {
     let mut values = properties(density, modulus, 2.0).to_vec();
-    values.push(("wall_arm_modulus", Pressure::DIMS, 0.8 * modulus));
-    values.push(("wall_arm_time", Dims([0, 0, 1, 0, 0, 0]), 0.0005));
+    values.push(("wall_arm_modulus", Pressure::DIMS, arm_fraction * modulus));
+    values.push(("wall_arm_time", Dims([0, 0, 1, 0, 0, 0]), tau));
     let source = state(&values, None, None);
     let law = WallRelaxation::from_state_point(
         &source,
@@ -264,7 +267,7 @@ fn one_regional_material_swap_changes_the_same_gas_and_wall_trajectory() {
 }
 
 #[test]
-fn regional_source_admission_keeps_uniform_memory_and_refuses_lost_history() {
+fn regional_source_admission_keeps_uniform_and_mixed_material_history() {
     let field = gas_field(0.2, 300.0).unwrap();
     let original = duct(&field);
     let memory = source_wall(1000.0, 1e6);
@@ -276,7 +279,15 @@ fn regional_source_admission_keeps_uniform_memory_and_refuses_lost_history() {
     );
     assert_eq!(regional.walls(), &[memory.clone(), memory.clone()]);
     let elastic = kelvin_wall(1800.0, 4e6, 5.0, 0.00015);
-    assert!(RegionalMaterialWallDg::new(vec![memory, elastic.clone()], original.clone()).is_err());
+    let mixed = RegionalMaterialWallDg::new(vec![memory, elastic.clone()], original.clone()).unwrap();
+    let dg = mixed.duct();
+    let mut current = dg.project_initial_state(|_| 1.0, |_| 0.0);
+    dg.propagator(2e-6, 1e-13).unwrap().step(&mut current, &[]).unwrap();
+    let observed = dg.compliant_wall_state(&current).unwrap();
+    let local = dg.mesh().order + 1;
+    assert_eq!(observed.relaxation_pressure_pa.len(), 1);
+    assert!(observed.relaxation_pressure_pa[0][..local].iter().any(|p| *p != 0.0));
+    assert!(observed.relaxation_pressure_pa[0][local..].iter().all(|p| *p == 0.0));
     assert!(RegionalMaterialWallDg::new(vec![elastic.clone()], original.clone()).is_err());
     let other = kelvin_wall(1000.0, 1e6, 2.0, 0.0002);
     for stop in [1, 10, 20] {
@@ -294,4 +305,49 @@ fn regional_source_admission_keeps_uniform_memory_and_refuses_lost_history() {
         ));
         assert!(original.compliant_wall_at_element(0).is_none());
     }
+}
+
+/// Source-only relaxation-time changes traverse the original material binding,
+/// spatial gas, native propagation and pressure observation without a new fit.
+#[test]
+fn regional_source_spectra_reach_pressure_with_every_local_history_retained() {
+    let field = gas_field(0.2, 350.0).unwrap();
+    let left = source_wall(1000.0, 1e6);
+    let mut histories = Vec::new();
+    for tau in [0.0002, 0.002] {
+        let right = source_wall_with_arm(1800.0, 4e6, 0.35, tau);
+        let source_ids = [left.material().identity(), right.material().identity()];
+        let bound = RegionalMaterialWallDg::new(
+            vec![left.clone(), right], duct(&field),
+        ).unwrap();
+        assert_eq!(bound.walls()[0].material().identity(), source_ids[0]);
+        assert_eq!(bound.walls()[1].material().identity(), source_ids[1]);
+        assert_eq!(bound.band_hz(), BAND);
+        let dg = bound.into_duct();
+        assert_eq!(dg.gas_field(), Some(&field));
+        let local = dg.mesh().order + 1;
+        let propagator = dg.propagator(2e-6, 1e-13).unwrap();
+        let mut current = dg.project_initial_state(|_| 1.0, |_| 0.0);
+        let initial = current.stored_energy_j();
+        let mut previous = initial;
+        let mut history = Vec::new();
+        for _ in 0..100 {
+            propagator.step(&mut current, &[]).unwrap();
+            propagator.sync_nodal(&mut current).unwrap();
+            let wall = dg.compliant_wall_state(&current).unwrap();
+            assert_eq!(wall.relaxation_pressure_pa.len(), 2);
+            assert!(wall.relaxation_pressure_pa[0][local..].iter().all(|p| *p == 0.0));
+            assert!(wall.relaxation_pressure_pa[1][..local].iter().all(|p| *p == 0.0));
+            assert!(wall.relaxation_stored_energy_j > 0.0);
+            close(wall.stored_energy_j, current.wall_stored_energy_j());
+            assert!(current.stored_energy_j() <= previous + 2e-12 * initial);
+            previous = current.stored_energy_j();
+            history.push(current.pressure()[0]);
+        }
+        assert!(current.stored_energy_j() < initial);
+        histories.push(history);
+    }
+    let signal: f64 = histories[0].iter().map(|p| p * p).sum();
+    let difference: f64 = histories[0].iter().zip(&histories[1]).map(|(a,b)| (a-b).powi(2)).sum();
+    assert!(difference > 1e-10 * signal);
 }

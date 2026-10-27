@@ -1,6 +1,6 @@
 use super::*;
 
-fn base(spatial: bool) -> DgDuct {
+pub(super) fn base(spatial: bool) -> DgDuct {
     if !spatial {
         return duct(DgBoundary::Closed);
     }
