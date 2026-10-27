@@ -101,3 +101,74 @@ viscosity/caloric substitutions, regional Maxwell memory with conduction and
 all observer hooks, late temperature/phase/budget rollback, exact caloric/clock
 binding, and Tet10 quadrature-to-element heat routing. These are synthetic
 numerical fixtures, not measured-material validation.
+
+## Same-card runnable consumer
+
+`material_solid_self_heating` uses this public adapter with the original
+material resolver and heat-capacity-curve constructor. Its insulated reference
+specimen is the unit tetrahedron with vertices `(0,0,0)`, `(1,0,0)`, `(0,1,0)`,
+`(0,0,1)` metres. Only the last node's z component is free. Its initial axial
+coordinate is 0.001 m and velocity 0.1 m/s; all subsequent loads are zero.
+Those are explicit fixture geometry, supports and initial conditions, not a
+claim of a calibrated object. It writes physical motion, temperature, mechanical
+storage, caloric-storage change, cumulative physical heat and energy residual
+on one clock. It does not synthesize a sound from temperature or a loss preset.
+
+```bash
+cargo run -p fs-couple --example material_solid_self_heating -- \
+  --demo 1 1 8 0.03125 /tmp/self-heating-baseline.csv
+cargo run -p fs-couple --example material_solid_self_heating -- \
+  --demo 3 1 8 0.03125 /tmp/self-heating-viscosity.csv
+cargo run -p fs-couple --example material_solid_self_heating -- \
+  --demo 1 2 8 0.03125 /tmp/self-heating-capacity.csv
+```
+
+After `--demo`, arguments are viscosity-time scale, heat-capacity scale, number
+of steps, step duration in seconds, and a **new** CSV path. The manufactured
+card contains density 2 kg/m3, Young's modulus 120 Pa, Poisson ratio zero,
+proportional Kelvin time `0.01 * scale` seconds, and specific heat `1 * scale`
+J/(kg K). These deliberately simple values are synthetic, not a real substance.
+The example creates the entire card first; its consumer has no demo-only
+coefficient path. The second command changes decay and heating. The third
+keeps motion and dissipated joules identical while halving temperature rise.
+
+For an existing canonical normalized material-card pack:
+
+```bash
+cargo run -p fs-couple --example material_solid_self_heating -- \
+  --pack /path/to/material.matpack YOUR_KELVIN_TIME_PROPERTY \
+  8 0.03125 /tmp/self-heating-source.csv
+```
+
+The selected model is explicitly **isotropic proportional Kelvin-Voigt**:
+`C_viscous = time * C_elastic`, with no Maxwell branches in this example.
+The time-property name is supplied, not guessed. Its value must be in seconds
+and nonnegative; zero explicitly disables loss, while missing loss data refuses.
+Density, Young's modulus, Poisson ratio and that time are resolved together at
+300 K. The full native isotropic stiffness tensor and consistent mass are used;
+there is no hand-built oscillator in the implementation. Reference mass comes
+from the same source-density tetrahedral assembly that drives inertia and is
+then used by the finite caloric cell.
+
+The **same card** must supply `specific_heat_capacity` and `density` across the
+fully-solid 300–350 K caloric interval. The existing caloric constructor owns
+integration and chart admission. The mechanical source claims are pinned and
+requeried at every actual thermal substep and event; changed values or unsupported
+conditions refuse rather than quietly freezing temperature-dependent data.
+Imported card identity and initial/final mechanical source identities appear
+in the CSV header. No material-name selection or missing-data fallback occurs.
+
+This remains a fixed-geometry, zero-thermal-expansion approximation, appropriate
+only where the chosen frozen mechanical model is justified. The mathematical
+Kelvin law is declared over 0..100000 rad/s by this bounded example; this is not
+measured bandwidth validation. The existing propagation/source-domain limits
+can reject an imported specimen or time step. Inputs are limited to 1..=4096
+steps and packs of at most 16 MiB. The complete trajectory must succeed before
+the output file is created; existing paths are never overwritten. File-writing
+failures are not an atomic filesystem transaction.
+
+`cargo test -p fs-couple --example material_solid_self_heating` defines three
+additional regressions against independent scalar mass/stiffness/decay and
+caloric equations, material-only substitutions, deterministic repeats, missing
+or changed sources, explicit input limits and cancellation. Native compilation
+and execution remain necessary to validate the authored Rust implementation.
