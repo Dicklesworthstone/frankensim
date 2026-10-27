@@ -39,8 +39,10 @@
 //! carrier and has mass before the jet leaves the flue; that acausal part (about 1e-4 of the energy) is
 //! lumped at the first causal tap and the tail beyond the retained span at the last tap, which keeps the
 //! low-frequency gain. The realisation error against the closed form is measured at construction and
-//! reported; construction refuses above 15 %. The integral is forward Euler with a leak of
-//! `0.01 U0 / W~` (below Price's first band edge, St 0.054). Gauntlet tier: G0/G2 (closed-form edges,
+//! reported; construction refuses above 15 %. The leaky integral is advanced exactly for held
+//! input, with leak `0.01 U0 / W~` (below Price's first band edge, St 0.054). A read-only
+//! affine next-step response supports simultaneous jet/mouth coupling without advancing history.
+//! Gauntlet tier: G0/G1/G2 (held-input integration, closed-form edges,
 //! time-domain lock-in against the closed form). NO CLAIM: linear small-signal law only (the labium cut
 //! supplies the saturation), Bickley-profile growth without spreading or Reynolds dependence.
 
@@ -294,6 +296,47 @@ pub struct NolleJet {
     head: usize,
 }
 
+/// Read-only next-step condensation of the retained jet history. The two flows
+/// are held over the mechanical interval and are unknowns of the host's solve.
+/// In particular, the jet's direct hydrodynamic feedback is not yesterday's flow.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct NolleStep {
+    xi_history_m: f64,
+    xi_mouth_s_m2: f64,
+    xi_jet_s_m2: f64,
+    eta_history_m: f64,
+    pub(crate) eta_mouth_s_m2: f64,
+    pub(crate) eta_jet_s_m2: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct NolleCandidate {
+    xi_m: f64,
+    pub(crate) eta_m: f64,
+}
+
+impl NolleStep {
+    pub(crate) fn candidate(
+        self,
+        mouth_flow_m3_s: f64,
+        jet_flow_m3_s: f64,
+    ) -> Result<NolleCandidate, &'static str> {
+        let xi_m = self.xi_history_m
+            + self.xi_mouth_s_m2 * mouth_flow_m3_s
+            + self.xi_jet_s_m2 * jet_flow_m3_s;
+        let eta_m = self.eta_history_m
+            + self.eta_mouth_s_m2 * mouth_flow_m3_s
+            + self.eta_jet_s_m2 * jet_flow_m3_s;
+        if ![mouth_flow_m3_s, jet_flow_m3_s, xi_m, eta_m]
+            .iter()
+            .all(|v| v.is_finite())
+        {
+            return Err("nolle jet trial left the finite domain");
+        }
+        Ok(NolleCandidate { xi_m, eta_m })
+    }
+}
+
 impl NolleJet {
     /// Build the transfer for one flue geometry.
     ///
@@ -431,6 +474,13 @@ impl NolleJet {
         self.spec
     }
 
+    /// Accepted leaky integral of the transverse disturbance [m]. This is
+    /// physical source memory, not the labium displacement after convection.
+    #[must_use]
+    pub fn receptivity_displacement_m(&self) -> f64 {
+        self.xi
+    }
+
     fn push(&mut self, value: f64) {
         let len = self.ring.len();
         self.ring[self.head] = value;
@@ -447,6 +497,16 @@ impl NolleJet {
         (1.0 - fraction) * sample(k) + fraction * sample(k + 1)
     }
 
+    // The ring still ends at n-1. Separate the unknown xi_n from the actual
+    // retarded interpolation; a sub-sample transit must not acquire a full delay.
+    fn pending_at(&self, delay_samples: f64) -> (f64, f64) {
+        if delay_samples < 1.0 {
+            (1.0 - delay_samples, delay_samples * self.at(0.0))
+        } else {
+            (0.0, self.at(delay_samples - 1.0))
+        }
+    }
+
     fn kernel_at(&self, t_hat: f64) -> f64 {
         let position = t_hat.abs() / KERNEL_STEP_HAT;
         let i = position.floor() as usize;
@@ -457,27 +517,16 @@ impl NolleJet {
         (1.0 - fraction) * self.kernel[i] + fraction * self.kernel[i + 1]
     }
 
-    /// Advance one sample and return the labium displacement `eta` [m] (positive towards the pipe).
-    ///
-    /// `flow_prev_m3_s` is the mouth flow into the pipe at the previous sample and
-    /// `jet_flow_prev_m3_s` the previous fluctuating jet flow `dQ_j`; both enter the disturbance
-    /// integral with one sample of lag (forward Euler). `seed_velocity_m_s` is the onset seed as a
-    /// transverse velocity. At rest (`centre_speed_m_s == 0`) there is no jet and no response.
-    ///
-    /// # Errors
-    /// A non-finite input or a jet slower than the sized history allows.
-    pub fn step(
-        &mut self,
+    /// Condense one held-input step without changing source memory. Every
+    /// delayed tap is affine in the same interval's endpoint displacement.
+    pub(crate) fn prepare_step(
+        &self,
         centre_speed_m_s: f64,
-        flow_prev_m3_s: f64,
-        jet_flow_prev_m3_s: f64,
         flue_width_m: f64,
         seed_velocity_m_s: f64,
-    ) -> Result<f64, &'static str> {
+    ) -> Result<NolleStep, &'static str> {
         if !(centre_speed_m_s.is_finite()
             && centre_speed_m_s >= 0.0
-            && flow_prev_m3_s.is_finite()
-            && jet_flow_prev_m3_s.is_finite()
             && flue_width_m.is_finite()
             && flue_width_m > 0.0
             && seed_velocity_m_s.is_finite())
@@ -485,52 +534,119 @@ impl NolleJet {
             return Err("nolle jet step needs finite inputs and a positive flue width");
         }
         if centre_speed_m_s == 0.0 {
-            self.xi = 0.0;
-            self.push(0.0);
-            return Ok(0.0);
+            return Ok(NolleStep {
+                xi_history_m: 0.0,
+                xi_mouth_s_m2: 0.0,
+                xi_jet_s_m2: 0.0,
+                eta_history_m: 0.0,
+                eta_mouth_s_m2: 0.0,
+                eta_jet_s_m2: 0.0,
+            });
         }
         let dt = self.dt;
         let w = self.w_tilde_m;
         let dt_hat = centre_speed_m_s * dt / w;
         let leak = self.spec.leak_rel * centre_speed_m_s / w;
-        let disturbance = (self.spec.alpha_p * flow_prev_m3_s
-            - self.spec.alpha_j * jet_flow_prev_m3_s)
-            / (flue_width_m * w)
-            + seed_velocity_m_s;
-        self.xi = self.xi * (1.0 - leak * dt) + dt * disturbance;
-        let xi = self.xi;
-        self.push(xi);
+        // xi' + leak*xi = disturbance. exp_m1 retains the source integral when
+        // leak*dt is small; this removes Euler's decay error and stability limit.
+        let decay = (-leak * dt).exp();
+        let input_time = -(-leak * dt).exp_m1() / leak;
+        let xi_history_m = decay * self.xi + input_time * seed_velocity_m_s;
+        let xi_mouth_s_m2 = input_time * self.spec.alpha_p / (flue_width_m * w);
+        let xi_jet_s_m2 = -input_time * self.spec.alpha_j / (flue_width_m * w);
         let carrier_delay = self.tau_hat / dt_hat;
         let spacing_hat = dt_hat.max(TAP_SPACING_HAT);
         let early_hat = self.early_index as f64 * KERNEL_STEP_HAT;
         let late_hat = self.late_index as f64 * KERNEL_STEP_HAT;
         let latest = carrier_delay + late_hat / dt_hat;
-        if !(latest + 2.0 <= self.ring.len() as f64) {
+        if !dt_hat.is_finite()
+            || dt_hat <= 0.0
+            || !latest.is_finite()
+            || !(latest + 2.0 <= self.ring.len() as f64)
+        {
             return Err("jet transit exceeds the retained history");
         }
-        let carrier = self.at(carrier_delay);
-        let mut smooth = self.kernel[0] * spacing_hat * carrier;
+        let (carrier_direct, carrier_history) = self.pending_at(carrier_delay);
+        let mut direct = (1.0 + self.kernel[0] * spacing_hat) * carrier_direct;
+        let mut history = (1.0 + self.kernel[0] * spacing_hat) * carrier_history;
+        let mut accumulate = |weight: f64, delay: f64| {
+            let (current, past) = self.pending_at(delay);
+            direct += weight * current;
+            history += weight * past;
+        };
         let late_taps = (late_hat / spacing_hat).floor() as usize;
         for k in 1..=late_taps {
             let offset_hat = k as f64 * spacing_hat;
-            smooth += self.kernel_at(offset_hat)
-                * spacing_hat
-                * self.at(carrier_delay + offset_hat / dt_hat);
+            accumulate(
+                self.kernel_at(offset_hat) * spacing_hat,
+                carrier_delay + offset_hat / dt_hat,
+            );
         }
         let early_taps = (early_hat / spacing_hat).floor() as usize;
         for k in 1..=early_taps {
             let offset_hat = k as f64 * spacing_hat;
-            smooth += self.kernel_at(offset_hat)
-                * spacing_hat
-                * self.at((carrier_delay - offset_hat / dt_hat).max(0.0));
+            accumulate(
+                self.kernel_at(offset_hat) * spacing_hat,
+                (carrier_delay - offset_hat / dt_hat).max(0.0),
+            );
         }
-        smooth += self.early_lump * self.at((carrier_delay - early_hat / dt_hat).max(0.0));
-        smooth += self.late_lump * self.at(carrier_delay + late_hat / dt_hat);
-        let eta = self.spec.jet_gain * self.centre_over_bulk * (xi - carrier - smooth);
-        if !eta.is_finite() {
+        accumulate(
+            self.early_lump,
+            (carrier_delay - early_hat / dt_hat).max(0.0),
+        );
+        accumulate(self.late_lump, carrier_delay + late_hat / dt_hat);
+        let gain = self.spec.jet_gain * self.centre_over_bulk;
+        let response = NolleStep {
+            xi_history_m,
+            xi_mouth_s_m2,
+            xi_jet_s_m2,
+            eta_history_m: gain * ((1.0 - direct) * xi_history_m - history),
+            eta_mouth_s_m2: gain * (1.0 - direct) * xi_mouth_s_m2,
+            eta_jet_s_m2: gain * (1.0 - direct) * xi_jet_s_m2,
+        };
+        if ![
+            decay,
+            input_time,
+            xi_history_m,
+            xi_mouth_s_m2,
+            xi_jet_s_m2,
+            response.eta_history_m,
+            response.eta_mouth_s_m2,
+            response.eta_jet_s_m2,
+        ]
+        .iter()
+        .all(|v| v.is_finite())
+            || input_time <= 0.0
+        {
             return Err("nolle jet left the finite domain");
         }
-        Ok(eta)
+        Ok(response)
+    }
+
+    // Called only after the complete physical host has accepted this step.
+    pub(crate) fn commit(&mut self, candidate: NolleCandidate) {
+        self.xi = candidate.xi_m;
+        self.push(candidate.xi_m);
+    }
+
+    /// Advance one sample with explicitly held mouth and fluctuating jet flows,
+    /// returning labium displacement `eta` [m], positive towards the pipe.
+    /// A coupled host instead uses the affine preview to solve these flows at
+    /// the same time level. No source memory is changed on a refused step.
+    /// At zero centre speed there is no jet and no response.
+    pub fn step(
+        &mut self,
+        centre_speed_m_s: f64,
+        mouth_flow_m3_s: f64,
+        jet_flow_m3_s: f64,
+        flue_width_m: f64,
+        seed_velocity_m_s: f64,
+    ) -> Result<f64, &'static str> {
+        let candidate = self
+            .prepare_step(centre_speed_m_s, flue_width_m, seed_velocity_m_s)?
+            .candidate(mouth_flow_m3_s, jet_flow_m3_s)?;
+        self.commit(candidate);
+        Ok(candidate.eta_m)
     }
 }
 
@@ -699,5 +815,83 @@ mod tests {
         assert!(jet.step(f64::NAN, 0.0, 0.0, 8.0e-3, 0.0).is_err());
         assert!(jet.step(10.0, 0.0, 0.0, 0.0, 0.0).is_err());
         assert!(NolleSpec::price_2015(ChannelClass::Long, -1.0).is_err());
+    }
+
+    #[test]
+    fn g1_held_receptivity_is_exact_on_three_source_clocks() {
+        // Independent forced first-order ODE solution, including both physical
+        // feedback flows and the seed. No gain, material or pole is retuned.
+        let (speed, width, mouth, direct_jet, seed) = (15.0, 0.01, 2e-6, -3e-7, 1e-5);
+        let duration = 0.001;
+        for rate in [48_000, 96_000, 192_000] {
+            let spec = NolleSpec::price_2015(ChannelClass::Long, 0.0007).unwrap();
+            let mut jet =
+                NolleJet::new(spec, 1.5, 0.00109, 0.00483, 1.0 / f64::from(rate), 1.0).unwrap();
+            jet.xi = 2e-7;
+            let leak = spec.leak_rel * speed / jet.w_tilde_m;
+            let equilibrium = ((spec.alpha_p * mouth - spec.alpha_j * direct_jet)
+                / (width * jet.w_tilde_m)
+                + seed)
+                / leak;
+            let expected = equilibrium + (jet.xi - equilibrium) * (-leak * duration).exp();
+            for _ in 0..rate / 1000 {
+                jet.step(speed, mouth, direct_jet, width, seed).unwrap();
+            }
+            assert!(
+                (jet.receptivity_displacement_m() - expected).abs()
+                    < 512.0 * f64::EPSILON * expected.abs(),
+                "rate {rate}"
+            );
+        }
+    }
+
+    #[test]
+    fn g1_pending_retarded_trace_preserves_affine_time_and_current_sample() {
+        let mut jet = NolleJet::new(
+            NolleSpec::price_2015(ChannelClass::Short, 0.0).unwrap(),
+            1.0,
+            0.001,
+            0.004,
+            1.0 / 48_000.0,
+            1.0,
+        )
+        .unwrap();
+        for head in [0, 3, jet.ring.len() - 1] {
+            jet.head = head;
+            for back in 0..jet.ring.len() {
+                let slot = (head + jet.ring.len() - 1 - back) % jet.ring.len();
+                jet.ring[slot] = 2.0 - 0.7 * (back + 1) as f64;
+            }
+            for delay in [0.0, 0.25, 0.75, 1.0, 1.25, 3.7] {
+                let (current, history) = jet.pending_at(delay);
+                assert!((current * 2.0 + history - (2.0 - 0.7 * delay)).abs() < 2e-15);
+            }
+        }
+    }
+
+    #[test]
+    fn g0_refused_steps_and_affine_trials_preserve_the_complete_source_history() {
+        let mut jet = NolleJet::new(
+            NolleSpec::price_2015(ChannelClass::Long, 0.0).unwrap(),
+            1.0,
+            0.001,
+            0.004,
+            1.0 / 48_000.0,
+            2.0,
+        )
+        .unwrap();
+        for _ in 0..7 {
+            jet.step(20.0, 1e-6, 2e-7, 0.01, 0.0).unwrap();
+        }
+        let saved = jet.clone();
+        let step = jet.prepare_step(20.0, 0.01, 0.0).unwrap();
+        for q in [-1e-5, 0.0, 1e-5] {
+            step.candidate(q, -q).unwrap();
+        }
+        assert!(jet.step(0.01, 1e-6, 0.0, 0.01, 0.0).is_err());
+        assert!(jet.step(20.0, f64::NAN, 0.0, 0.01, 0.0).is_err());
+        assert_eq!(jet.xi, saved.xi);
+        assert_eq!(jet.head, saved.head);
+        assert_eq!(jet.ring, saved.ring);
     }
 }
