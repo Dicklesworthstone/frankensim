@@ -27,6 +27,10 @@ mod fibers;
 // Native entry points share one bounded source loader and phase policy.
 #[path = "../src/bin/music_render/thermochemical.rs"]
 mod thermochemical;
+#[path = "../src/bin/music_render/wind_input/attachments.rs"]
+mod attachments;
+#[path = "material_strings/native_input.rs"]
+mod native_input;
 #[path = "../src/bin/music_render/json.rs"]
 mod json;
 use json::json_string;
@@ -45,7 +49,7 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::f
 use fs_couple::bowed_string::runtime::reciprocal::plate::MaterialBodyCavity;
 use fs_couple::cavity_modal::{HelmholtzModalCavity,CavityNeckLoss};
 use fs_couple::modal_acoustic_time::ModalAcousticTimeBudget;
-use fs_couple::pcm_wav::observation::PressureRenderer;
+use fs_couple::pcm_wav::observation::{DecimatedRenderer,PressureRenderer};
 use fs_couple::pcm_wav::stream::{Pcm16WavStream,WavStreamSummary,render_pressure_pcm16,ScheduledWavProgress};
 use fs_couple::render::schedule::force::{ForceInitialization,ForceRenderConfig,ModalForceEvent};
 use fs_couple::render::schedule::force::coupled::{ModalCouplingConfig,MAX_MODAL_CONNECTIONS,PreparedModalBudget};
@@ -529,27 +533,40 @@ fn path_option<'a>(args:&'a [std::ffi::OsString],name:&str)->Result<(Option<&'a 
 }
 fn main()->Result<()> {
     let raw=std::env::args_os().collect::<Vec<_>>();
+    run(&raw)
+}
+fn run(raw:&[std::ffi::OsString])->Result<()> {
     if raw.get(1).is_some_and(|a| a=="assemble-shell") { return assemble_shell(&raw[2..]); }
-    let (args, gas_options)=thermochemical::Options::extract_os(&raw)?;
+    let (args, gas_options)=thermochemical::Options::extract_os(raw)?;
+    let (args, source_options)=native_input::SourceOptions::extract(&args)?;
     if args.len()<3 {
-        return Err("usage: material_strings PERFORMANCE NEW_OUTPUT.wav [--body-profile PROFILE] [--stop-profile PROFILE] [--observer-store DIR] [--bow-trace NEW_FILE] [--contact-thermal PROFILE] [--gas-component SPECIES NASA9 TRANSPORT --gas-water none|ID --gas-phase frozen|liquid-water]".into());
+        return Err("usage: material_strings PERFORMANCE NEW_OUTPUT.wav [--body-profile PROFILE] [--stop-profile PROFILE] [--observer-store DIR] [--bow-trace NEW_FILE] [--contact-thermal PROFILE] [--decimate] [--self-contained --attached-source RELATIVE_PATH ...] [--gas-component SPECIES NASA9 TRANSPORT --gas-water none|ID --gas-phase frozen|liquid-water]".into());
     }
     if gas_options.record.is_some() {
         return Err("material-string gas records belong in the performance file".into());
     }
+    let path=Path::new(&args[1]);let parent=path.parent().unwrap_or(Path::new("."));
+    let sources=source_options.load(parent)?;
     let (store_dir,options)=path_option(&args[3..],"--observer-store")?;
+    if sources.is_restricted() && store_dir.is_some() {
+        return Err("--self-contained refuses --observer-store; observer setup must be computed from attached physical sources".into());
+    }
     let (trace_path,options)=path_option(&options,"--bow-trace")?;
     let (thermal_path,options)=path_option(&options,"--contact-thermal")?;
+    if source_options.decimate && (trace_path.is_some() || thermal_path.is_some()) {
+        return Err("--decimate currently requires the ordinary pressure renderer; --bow-trace and --contact-thermal retain their declared output clock".into());
+    }
     let thermal_profile=thermal_path.map(|p|contact_thermal::Profile::parse(
-        &read_bounded(p,contact_thermal::MAX_BYTES)?)).transpose()?;
+        &sources.read_option(p,contact_thermal::MAX_BYTES)?)).transpose()?;
     let (body_path,stop_path)=stops::profile_paths(&options)?;
-    let mut profile=body_path.map(|p|body::Profile::parse(&read_bounded(p,body::MAX_SHELL_BYTES)?)).transpose()?;
+    let mut profile=body_path.map(|p|body::Profile::parse(&sources.read_option(p,body::MAX_SHELL_BYTES)?)).transpose()?;
     if let Some(dir)=store_dir {
         profile.as_mut().ok_or("--observer-store requires --body-profile")?.keep_observer_setups(dir)?;
     }
-    let stop_profile=stop_path.map(|p|stops::Profile::parse(&read_bounded(p,stops::MAX_BYTES)?)).transpose()?;
-    let path=Path::new(&args[1]);let parent=path.parent().unwrap_or(Path::new("."));
-    let gas_sources=gas_options.load()?;
+    let stop_profile=stop_path.map(|p|stops::Profile::parse(&sources.read_option(p,stops::MAX_BYTES)?)).transpose()?;
+    let gas_sources=if sources.is_restricted() {
+        gas_options.load_with(|p|sources.read_option(p,input::MAX_PACK_BYTES).map_err(|e|e.to_string()))?
+    } else { gas_options.load()? };
     let gas_bindings=gas_sources.bindings();
     let gas_registry=gas_sources.registry(&gas_bindings);
     let mut spec=input::Spec::parse_with_gas_sources(
@@ -560,18 +577,18 @@ fn main()->Result<()> {
     if let Some(stops) = &stop_profile { stops.validate_performance(&spec,&gate)?; }
     if let Some(body) = &mut profile {
         body.load_interfaces(&spec,&gate,|name| {
-            let bytes=read_bounded(&parent.join(name),input::MAX_PACK_BYTES.min(remaining))?;
+            let bytes=sources.read_relative(name,input::MAX_PACK_BYTES.min(remaining))?;
             remaining=remaining.checked_sub(bytes.len()).ok_or("combined source pack byte budget exceeded")?;
             Ok(NormalizedInterfacePack::from_bytes(&bytes)?)
         })?;
     }
     spec.friction.load(&gate,|name| {
-        let bytes=read_bounded(&parent.join(name),input::MAX_PACK_BYTES.min(remaining))?;
+        let bytes=sources.read_relative(name,input::MAX_PACK_BYTES.min(remaining))?;
         remaining=remaining.checked_sub(bytes.len()).ok_or("combined source pack byte budget exceeded")?;
         Ok(NormalizedInterfacePack::from_bytes(&bytes)?)
     })?;
     spec.bridge_interfaces.load(spec.temperature, spec.omega, &gate, |name| {
-        let bytes=read_bounded(&parent.join(name),input::MAX_PACK_BYTES.min(remaining))?;
+        let bytes=sources.read_relative(name,input::MAX_PACK_BYTES.min(remaining))?;
         remaining=remaining.checked_sub(bytes.len()).ok_or("combined source pack byte budget exceeded")?;
         Ok(NormalizedInterfacePack::from_bytes(&bytes)?)
     })?;
@@ -579,7 +596,7 @@ fn main()->Result<()> {
         let cx=Cx::new(&gate,arena,fs_exec::StreamKey {seed:0,kernel_id:0,tile:0,iteration:0},
             fs_exec::Budget::INFINITE,fs_exec::ExecMode::Deterministic);
         spec.compile_with_profiles(&cx,&gate,profile,stop_profile,|name| {
-            let bytes=read_bounded(&parent.join(name),input::MAX_PACK_BYTES.min(remaining))?;
+            let bytes=sources.read_relative(name,input::MAX_PACK_BYTES.min(remaining))?;
             remaining=remaining.checked_sub(bytes.len()).ok_or("material pack byte budget exceeded")?;
             Ok(NormalizedPack::from_bytes(&bytes)?)
         })
@@ -703,8 +720,24 @@ fn main()->Result<()> {
     if !gas_source_json.is_empty() { eprintln!("gas_source={{\"scope\":\"frozen material-string atmosphere\"{gas_source_json}}}"); }
     // Complete source, geometry, frequency, schedule and preload admission is
     // finished before creating output. Never overwrite any existing path.
-    let output=OpenOptions::new().write(true).create_new(true).open(&args[2])?;
-    let written=match trace_path {
+    let written=if source_options.decimate {
+        if ready.spec.rate<=48_000 { return Err("--decimate requires mechanics above 48000 Hz".into()); }
+        let mut renderer=DecimatedRenderer::new(&mut ready.performance,ready.spec.rate,48_000,ready.spec.block)?;
+        let info=renderer.info();
+        let samples=renderer.output_samples_for(ready.spec.samples)?;
+        eprintln!("pressure_observation={info:?}; mechanical state and gesture clock unchanged");
+        let output=OpenOptions::new().write(true).create_new(true).open(&args[2])?;
+        let mut stream=Pcm16WavStream::new(output,48_000,ready.spec.full_scale,ready.spec.block)?;
+        let mut scratch=vec![0.0;ready.spec.block];
+        let progress=render_pressure_pcm16(&mut renderer,&mut stream,&gate,&mut scratch,samples)?;
+        let result=stream.finish()?;
+        if !matches!(progress,ScheduledWavProgress::Completed { .. }) {
+            return Err(format!("cancelled: only {} output samples finalized",result.1.samples).into());
+        }
+        Ok(result)
+    } else {
+      let output=OpenOptions::new().write(true).create_new(true).open(&args[2])?;
+      match trace_path {
         Some(path)=>{
             let mut trace=std::io::BufWriter::new(OpenOptions::new().write(true).create_new(true).open(path)?);
             let written=match &contact_heat {
@@ -718,6 +751,7 @@ fn main()->Result<()> {
             Some(heat)=>heat.write(&mut ready,output,None,&gate),
             None=>ready.write(output,&gate),
         },
+      }
     };
     let (_,summary)=written.map_err(|e|format!("WAV not completed; keep/discard its partial prefix explicitly: {e}"))?;
     eprintln!("samples={}; rate_Hz={}; clips={}; full_scale_Pa={}",summary.samples,summary.sample_rate_hz,

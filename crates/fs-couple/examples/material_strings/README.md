@@ -49,6 +49,40 @@ With the flag, the render runs one sample per callback, and the WAV bytes are
 unchanged. Like the WAV, the file must not exist already, and it is created
 only after admission.
 
+### Native application source packets and output clock
+
+The same performer can run from an explicit set of attached source files:
+
+```bash
+material_strings performance.material-strings output.wav \
+  --self-contained \
+  --attached-source materials/wire.fsmatpk \
+  --attached-source materials/body.fsmatpk
+```
+
+Names inside the performance and optional body, stop, contact-thermal, interface,
+and gas sources must resolve to those exact attachment paths. Add each referenced
+file with another `--attached-source`. Restricted execution snapshots the
+admitted files before decoding them; an unlisted reference refuses rather than
+reading another file. It also refuses `--observer-store`, so computed observer
+setups come from the attached physical sources.
+
+Without `--self-contained`, existing CLI path resolution is unchanged: material
+references are relative to the performance file, while profile and explicit gas
+source options use paths supplied by the caller.
+
+For mechanics above 48 kHz, `--decimate` writes 48 kHz PCM using the existing shared
+pressure observer. The mechanical state, material histories, gestures, and
+simulation time step remain at the declared input rate. The rate must be a
+supported integer multiple of 48 kHz, and the mechanical horizon must contain
+complete output intervals. The observer retains its causal filter delay and
+does not append or discard mechanical samples; its observation policy is printed
+with the render diagnostics.
+
+`--decimate` currently requires the ordinary pressure writer. It refuses
+`--bow-trace` and `--contact-thermal`, whose specialized writers retain their
+declared output clock. At the native 48 kHz clock, those options remain available.
+
 ### Material shear layers in the original contact solve
 
 `shear-layer-bow.material-strings` selects an isothermal elastic-plastic layer

@@ -50,6 +50,22 @@ impl<T: PressureRenderer + ?Sized> PressureRenderer for Box<T> {
     }
 }
 
+// Borrow the original physical state when an observation is temporary. This
+// changes ownership only: its clocks, admission and callbacks remain the source's.
+impl<T: PressureRenderer + ?Sized> PressureRenderer for &mut T {
+    fn samples_rendered(&self) -> u64 { (**self).samples_rendered() }
+    fn max_block_len(&self) -> usize { (**self).max_block_len() }
+    fn validate_sample_rate(&self, rate: u32) -> Result<(), RenderError> {
+        (**self).validate_sample_rate(rate)
+    }
+    fn validate_sample_count(&self, samples: u64) -> Result<(), RenderError> {
+        (**self).validate_sample_count(samples)
+    }
+    fn block(&mut self, output: &mut [f64]) -> Result<(), RenderError> {
+        (**self).block(output)
+    }
+}
+
 impl PressureRenderer for ScheduledRenderer {
     fn samples_rendered(&self) -> u64 { ScheduledRenderer::samples_rendered(self) }
     fn max_block_len(&self) -> usize { self.context().max_block_len() }

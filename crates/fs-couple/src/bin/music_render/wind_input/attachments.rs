@@ -1,4 +1,4 @@
-//! Explicit input snapshots for the local wind adapter.
+//! Explicit input snapshots shared by the local native instrument adapters.
 //! Source callbacks never fall through to the host filesystem in restricted mode.
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, Metadata};
