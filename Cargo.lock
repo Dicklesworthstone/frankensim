@@ -1655,6 +1655,7 @@ name = "fs-flux"
 version = "0.0.1"
 dependencies = [
  "fs-la",
+ "fs-material",
  "fs-solid",
  "fs-solver",
  "fs-sparse",

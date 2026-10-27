@@ -67,6 +67,16 @@ adjoints.
   for IMEX transients (implicit Stokes, lagged convection),
   `solve_adjoint` for the transposed system. Dense LU under n ≤ 1500
   (fixture path), GMRES restarts above.
+- `MaterialFluxSystem` (`material`) binds that same FEEC operator to the shared
+  `fs-material::fluid_transport::FluidTransport` owner. Gas, mixture and liquid
+  evaluations supply one frozen `FluidTransportState`; `nu=mu/rho`, force
+  density [N/m³] divided by rho, physical mean-zero pressure [Pa] and kinetic
+  energy per unit out-of-plane depth [J/m] are derived together. Numerical
+  controls cannot independently override viscosity. Stokes assembly/solve,
+  Picard iteration and IMEX BDF1 all use the existing operator; original source
+  receipts remain available through `material()`. Invalid inputs, nonfinite
+  outputs and failed convergence return `MaterialFluxError` without publishing
+  a physical solution. The primitive singular-mesh panic contract still applies.
 
 ## Invariants
 
@@ -172,6 +182,12 @@ Stokes MMS orders + exact divergence; flux-003 pressure-robustness
 identity; flux-004 cavity Picard + Ghia coarse band; flux-005
 Taylor–Green BDF1; flux-006 adjoint gradient + annihilation.
 
+`tests/material_flow.rs` (G1/G3): hydrostatic pressure from physical force
+density at different material densities, inverse-dynamic-viscosity Stokes flow
+under material swaps, density-weighted kinetic energy, shared-gas pressure
+changes in a manufactured accelerating BDF1 flow, the Picard creeping-flow
+limit, and invalid/stale material state, boundary/load and timestep refusal.
+
 `tests/ale_gcl.rs`: flux-007 fixed mesh, rigid translation, affine
 expansion/shear, two-cell interior cancellation, replay, translation
 covariance, continuous-trajectory minima, and fail-closed endpoint,
@@ -186,6 +202,15 @@ work; aero-009 hostile thin-gap/target-fit refusal; aero-014 forged wrench,
 power, and receipt-identity refusal.
 
 ## No-claim boundaries
+
+`MaterialFluxSystem` is a homogeneous, single-state, Newtonian incompressible
+material binding. It does not implement spatially varying density/viscosity,
+compressible gas dynamics, thermal evolution, or phase change. Gas thermodynamic
+pressure selects material properties; the flow pressure is a mean-zero gauge
+and must not be used as an EOS absolute pressure. Both BDF1 time levels use the
+same density; a density change during evolution needs an explicit conservative
+state transfer. The binding neither adds material source authority to raw
+transport tuples nor turns numerical convergence into physical validation.
 
 The `lc` quarter-wave result is not an absolute-voltage, current, energy,
 coupling, quality-factor, loss, load, air-breakdown, corona, or streamer-length

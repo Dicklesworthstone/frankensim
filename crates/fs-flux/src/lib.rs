@@ -18,17 +18,21 @@ pub mod bdm;
 /// Reduced circular-capillary flow screening with an explicit Newtonian,
 /// fully-developed applicability boundary.
 pub mod capillary;
-/// Reciprocal quasistatic Reynolds pressure for deforming thin-gap interfaces.
-#[path = "gas_film/resistive.rs"]
-pub mod resistive_film;
 #[cfg(feature = "continuum")]
 pub mod gas_film;
 #[cfg(feature = "quarter-wave")]
 pub mod lc;
+/// Material-bound FEEC flow with coherent SI loads, pressure and kinetic energy.
+#[cfg(feature = "continuum")]
+#[path = "ns/material.rs"]
+pub mod material;
 #[cfg(feature = "continuum")]
 pub mod ns;
 #[cfg(feature = "continuum")]
 pub mod reduced_aero;
+/// Reciprocal quasistatic Reynolds pressure for deforming thin-gap interfaces.
+#[path = "gas_film/resistive.rs"]
+pub mod resistive_film;
 #[cfg(feature = "continuum")]
 pub mod trimesh;
 
@@ -43,6 +47,10 @@ pub use gas_film::{
     GasFilmInputAuthority, GasFilmReceipt, GasFilmStep, GasFilmUncertainty, IsothermalIdealGas,
     MovingWallInput, RoughnessPolicy, SlipPolicy, isothermal_compressible_reynolds_model_id,
     solve_isothermal_gas_film_1d,
+};
+#[cfg(feature = "continuum")]
+pub use material::{
+    MaterialFluxError, MaterialFluxNumerics, MaterialFluxSolution, MaterialFluxSystem,
 };
 #[cfg(feature = "continuum")]
 pub use ns::{FluxParams, FluxSolution, FluxSystem};

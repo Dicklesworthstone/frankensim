@@ -12,12 +12,13 @@ layer = "L3"
 
 [features]
 default = ["continuum", "quarter-wave"]
-continuum = ["dep:fs-la", "dep:fs-solid", "dep:fs-solver", "dep:fs-sparse"]
+continuum = ["dep:fs-la", "dep:fs-material", "dep:fs-solid", "dep:fs-solver", "dep:fs-sparse"]
 quarter-wave = []
 
 [dependencies]
 fs-tribo = { path = "../fs-tribo" }
 fs-la = { path = "../fs-la", optional = true }
+fs-material = { path = "../fs-material", optional = true }
 fs-solid = { path = "../fs-solid", optional = true }
 fs-solver = { path = "../fs-solver", optional = true }
 fs-sparse = { path = "../fs-sparse", optional = true }
@@ -40,6 +41,11 @@ required-features = ["continuum"]
 [[test]]
 name = "reduced_aero"
 path = "tests/reduced_aero.rs"
+required-features = ["continuum"]
+
+[[test]]
+name = "material_flow"
+path = "tests/material_flow.rs"
 required-features = ["continuum"]
 
 [lints]
