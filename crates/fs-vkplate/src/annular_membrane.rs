@@ -19,8 +19,67 @@ pub struct MembraneTerm {
 }
 
 #[derive(Clone)]
+struct GradientEntry {
+    row: usize,
+    other: usize,
+    weight: f64,
+}
+
+/// Transpose only the fixed contribution addresses. Each output node retains
+/// the original row/term order and the a-then-b order when a == b. Rest shape,
+/// displacement, Airy force, and scale are read afresh for every evaluation.
+#[derive(Clone)]
+struct OrderedGradient {
+    ptr: Vec<usize>,
+    entries: Vec<GradientEntry>,
+}
+
+impl OrderedGradient {
+    fn new(terms: &[Vec<MembraneTerm>], nodes: usize) -> Self {
+        let mut rows: Vec<Vec<GradientEntry>> = (0..nodes).map(|_| Vec::new()).collect();
+        for (row, terms) in terms.iter().enumerate() {
+            for t in terms {
+                rows[t.a].push(GradientEntry {
+                    row,
+                    other: t.b,
+                    weight: t.weight,
+                });
+                rows[t.b].push(GradientEntry {
+                    row,
+                    other: t.a,
+                    weight: t.weight,
+                });
+            }
+        }
+        let mut ptr = Vec::with_capacity(nodes + 1);
+        let mut entries = Vec::with_capacity(rows.iter().map(Vec::len).sum());
+        ptr.push(0);
+        for row in rows {
+            entries.extend(row);
+            ptr.push(entries.len());
+        }
+        Self { ptr, entries }
+    }
+
+    fn add(&self, w: &[f64], z: &[f64], f: &[f64], h2: f64, g: &mut [f64]) {
+        for (node, range) in self.ptr.windows(2).enumerate() {
+            let mut value = g[node];
+            for t in &self.entries[range[0]..range[1]] {
+                // Preserve the original terms.iter().zip(f) short-force behavior.
+                if let Some(&fc) = f.get(t.row) {
+                    let scale = h2 * fc * t.weight;
+                    value += scale * (w[t.other] + z[t.other]);
+                }
+            }
+            g[node] = value;
+        }
+    }
+}
+
+#[derive(Clone)]
 pub(super) struct AnnularMembrane {
     pub terms: Vec<Vec<MembraneTerm>>,
+    gradient_rows: OrderedGradient,
     // The same geometric-strain product contributes to several Airy rows.
     // Keep their original term order, but evaluate each product once per step.
     strain_pairs: Vec<(usize, usize)>,
@@ -221,9 +280,11 @@ impl AnnularMembrane {
             })
             .collect();
         let strains = vec![0.0; strain_pairs.len()];
+        let gradient_rows = OrderedGradient::new(&terms, grid.len());
         Ok((
             Self {
                 terms,
+                gradient_rows,
                 strain_pairs,
                 strains,
                 load_terms,
@@ -306,13 +367,7 @@ impl AnnularMembrane {
     }
 
     pub(super) fn gradient(&self, w: &[f64], z: &[f64], f: &[f64], h2: f64, g: &mut [f64]) {
-        for (row, &fc) in self.terms.iter().zip(f) {
-            for t in row {
-                let scale = h2 * fc * t.weight;
-                g[t.a] += scale * (w[t.b] + z[t.b]);
-                g[t.b] += scale * (w[t.a] + z[t.a]);
-            }
-        }
+        self.gradient_rows.add(w, z, f, h2, g);
     }
 
     /// Exact derivative J of the weak strain load q/(E t) at w=0.
@@ -361,6 +416,137 @@ impl AnnularMembrane {
 #[cfg(test)]
 mod tests {
     use super::super::{Body, Edge, Nonlinear, PlateSpec};
+    use super::{MembraneTerm, OrderedGradient};
+
+    // Frozen original scatter, independent of the candidate's transposed rows.
+    fn scatter(
+        terms: &[Vec<MembraneTerm>],
+        w: &[f64],
+        z: &[f64],
+        f: &[f64],
+        h2: f64,
+        g: &mut [f64],
+    ) {
+        for (row, &fc) in terms.iter().zip(f) {
+            for t in row {
+                let scale = h2 * fc * t.weight;
+                g[t.a] += scale * (w[t.b] + z[t.b]);
+                g[t.b] += scale * (w[t.a] + z[t.a]);
+            }
+        }
+    }
+
+    #[test]
+    fn ordered_gradient_matches_real_annuli_with_live_field_changes() {
+        for h in [0.08, 0.04, 0.02] {
+            for hole in [0.1, 0.25] {
+                for curved in [false, true] {
+                    let body = plate(h, hole, curved);
+                    let vk = body.vk.as_ref().unwrap();
+                    let a = vk.annulus.as_ref().unwrap();
+                    assert!(a.terms.iter().flatten().any(|t| t.a == t.b));
+                    for (phase, rest_scale, gain) in [
+                        (0.0, 1.0, 1.0),
+                        (0.7, -2.0, -0.125),
+                        (1.9, 0.0, 1e-100),
+                        (0.0, 1.0, 1.0),
+                    ] {
+                        let w: Vec<_> = body
+                            .xy
+                            .iter()
+                            .map(|[x, y]| {
+                                0.007 * (19.0 * x + phase).sin() * (13.0 * y - phase).cos()
+                            })
+                            .collect();
+                        let z: Vec<_> = body
+                            .xy
+                            .iter()
+                            .zip(&vk.z0)
+                            .map(|([x, y], z)| rest_scale * z + phase * 0.003 * (x - y))
+                            .collect();
+                        let f: Vec<_> = (0..a.terms.len())
+                            .map(|i| gain * ((i % 19) as f64 - 9.0) / 7.0)
+                            .collect();
+                        let initial: Vec<_> = (0..body.n)
+                            .map(|i| match i % 4 {
+                                0 => -0.0,
+                                1 => 0.0,
+                                2 => 1e-6 * (i + 1) as f64,
+                                _ => -1e3 / (i + 1) as f64,
+                            })
+                            .collect();
+                        // The short-force control also preserves the original zip.
+                        for count in [0, f.len() / 2, f.len()] {
+                            let mut old = initial.clone();
+                            let mut new = initial.clone();
+                            scatter(&a.terms, &w, &z, &f[..count], h * h, &mut old);
+                            a.gradient(&w, &z, &f[..count], h * h, &mut new);
+                            assert!(old.iter().all(|v| v.is_finite()));
+                            for (node, (old, new)) in old.iter().zip(&new).enumerate() {
+                                assert_eq!(
+                                    old.to_bits(),
+                                    new.to_bits(),
+                                    "h={h} hole={hole} curved={curved} phase={phase} count={count} node={node}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ordered_gradient_keeps_diagonal_updates_and_initial_accumulator() {
+        let terms = vec![vec![MembraneTerm {
+            a: 0,
+            b: 0,
+            weight: 1.0,
+        }]];
+        let rows = OrderedGradient::new(&terms, 2);
+        let initial = [9007199254740992.0_f64, -0.0];
+        let mut old = initial;
+        let mut new = initial;
+        scatter(&terms, &[1.0], &[0.0], &[1.0], 1.0, &mut old);
+        rows.add(&[1.0], &[0.0], &[1.0], 1.0, &mut new);
+        assert_eq!(new.map(f64::to_bits), old.map(f64::to_bits));
+        assert_eq!(new[0].to_bits(), initial[0].to_bits());
+        assert_eq!(new[1].to_bits(), (-0.0_f64).to_bits());
+        // Combining the diagonal's two updates, or summing before adding g,
+        // changes rounding. This is a discriminating control, not a tolerance.
+        assert_ne!((initial[0] + 2.0).to_bits(), old[0].to_bits());
+    }
+
+    #[test]
+    fn ordered_gradient_keeps_original_row_order_under_cancellation() {
+        let terms: Vec<_> = (0..3)
+            .map(|_| {
+                vec![MembraneTerm {
+                    a: 0,
+                    b: 1,
+                    weight: 1.0,
+                }]
+            })
+            .collect();
+        let rows = OrderedGradient::new(&terms, 2);
+        let f = [9007199254740992.0, -9007199254740992.0, 1.0];
+        let mut old = [0.0; 2];
+        let mut new = old;
+        scatter(&terms, &[1.0; 2], &[0.0; 2], &f, 1.0, &mut old);
+        rows.add(&[1.0; 2], &[0.0; 2], &f, 1.0, &mut new);
+        assert_eq!(new.map(f64::to_bits), old.map(f64::to_bits));
+        assert_eq!(new, [1.0; 2]);
+        let mut reordered = [0.0; 2];
+        scatter(
+            &terms,
+            &[1.0; 2],
+            &[0.0; 2],
+            &[f[0], f[2], f[1]],
+            1.0,
+            &mut reordered,
+        );
+        assert_ne!(new.map(f64::to_bits), reordered.map(f64::to_bits));
+    }
 
     #[test]
     fn rest_tangent_matches_energy_derivative_and_is_reciprocal() {
