@@ -578,10 +578,9 @@ pub struct FlueVoice {
     // integral's 1/omega cancels the drive derivative's omega and the
     // pipe's resonance alone selects the mode).
     displacement_state: f64,
-    // Opt-in published jet transfer (see `nolle_jet`) and the previous fluctuating jet flow it
-    // feeds back through alpha_j. None = the island's own chain.
+    // Opt-in published jet transfer; its source memory commits with the mouth
+    // solve, and both feedback flows belong to the same mechanical interval.
     nolle: Option<nolle_jet::NolleJet>,
-    nolle_jet_flow_prev: f64,
     // Mouth loop coefficients.
     inertance: f64,
     resistance: f64,
@@ -699,7 +698,6 @@ impl FlueVoice {
             momentum_thickness_m,
             displacement_state: 0.0,
             nolle: None,
-            nolle_jet_flow_prev: 0.0,
             inertance,
             resistance,
             source_coeff: rho * geometry.end_correction_m() / s_m,
@@ -1011,9 +1009,14 @@ impl FlueVoice {
             eta_m, flow_m3_s, source_pa })
     }
 
-    fn solve_jet_mouth(&self, boundary: WindBoundary, delayed: RetardedVelocity,
-        seed: f64, c: JetStepCoefficients) -> Result<(MouthStep, JetTrial, f64), FlueError>
-    {
+    fn solve_jet_mouth(
+        &self,
+        boundary: WindBoundary,
+        delayed: RetardedVelocity,
+        seed: f64,
+        c: JetStepCoefficients,
+        nolle: Option<nolle_jet::NolleStep>,
+    ) -> Result<(MouthStep, JetTrial, f64), FlueError> {
         let (radiation_direct, radiation_history) = self.mouth_radiation.as_ref()
             .map_or((0.0, 0.0), mouth_radiation::MouthRadiation::affine_pressure);
         // At most one of the two is attached; an absent one adds exact zeros.
@@ -1028,6 +1031,118 @@ impl FlueVoice {
             Some(loss) => mouth_loss::solve(boundary, source-radiation_history, self.q_prev, l, r, zc, dt, loss),
             None => Ok((solve_mouth_port(boundary, source-radiation_history, self.q_prev, l, r, zc, dt)?, 0.0)),
         };
+        if let Some(response) = nolle {
+            // Condense the exact held-input receptivity and all retained
+            // convection history, then solve the cut jet and acoustic mouth
+            // together. The feedback uses CURRENT Q and dQj, not a delayed
+            // copy that changes the loop phase when the source clock changes.
+            let resting_cut = 0.5 * c.q_max * (1.0 + (-c.offset_m / c.half_width_m).tanh());
+            let direct = boundary.direct_reflection;
+            let denominator = (l / dt + r) * (1.0 - direct) + zc * (1.0 + direct);
+            let flow_slope = (1.0 - direct) / denominator * self.source_coeff / dt;
+            // A passive contraction can only reduce dQ/dQj. Consequently the
+            // largest possible d(eta)/dQj is one of these two endpoints.
+            // Negative direct jet feedback is retained rather than discarded
+            // in a magnitude bound. tanh' <= 1 then proves a unique cut-flow root.
+            let eta_slope = response
+                .eta_jet_s_m2
+                .max(response.eta_jet_s_m2 + response.eta_mouth_s_m2 * flow_slope);
+            let feedback = (0.5 * c.q_max / c.half_width_m) * eta_slope.max(0.0);
+            if direct.abs() > 1.0
+                || !flow_slope.is_finite()
+                || flow_slope < 0.0
+                || !feedback.is_finite()
+                || feedback >= 1.0
+            {
+                return Err(FlueError::Invalid {
+                    what: "current Nolle jet feedback is underresolved; refine the source time step",
+                });
+            }
+            let evaluate = |cut_flow: f64| -> Result<(f64, MouthStep, JetTrial, f64), FlueError> {
+                let source = self.source_coeff * (cut_flow - self.flow_prev) / dt;
+                let (step, power) = mouth(source)?;
+                let candidate = response
+                    .candidate(step.flow_m3_s, cut_flow - resting_cut)
+                    .map_err(|what| FlueError::Invalid { what })?;
+                let trial = self.jet_trial(
+                    0.0,
+                    0.0,
+                    JetStepCoefficients {
+                        eta_override: Some(candidate.eta_m),
+                        ..c
+                    },
+                )?;
+                Ok((cut_flow - trial.flow_m3_s, step, trial, power))
+            };
+            let (mut lo, mut hi) = (0.0, c.q_max);
+            if let Some(loss) = &self.mouth_contraction {
+                if direct < 1.0 {
+                    // Do not ask the constitutive owner to evaluate a trial
+                    // beyond its Mach domain just to bracket a valid solution.
+                    // Invert the same passive mouth relation at its flow bounds.
+                    let mut bound = loss.effective_area_m2()
+                        * (loss.gas().sound_speed * loss.spec().maximum_contracted_mach);
+                    for _ in 0..32 {
+                        bound = bound.next_down();
+                    }
+                    let cut_at = |q: f64| -> Result<f64, FlueError> {
+                        let drop = loss
+                            .at_flow(q)
+                            .map_err(FlueError::Physics)?
+                            .pressure_drop_pa;
+                        let pressure = (2.0 * boundary.history_pressure_pa
+                            + zc * (1.0 + direct) * q)
+                            / (1.0 - direct);
+                        let source = l / dt * (q - self.q_prev)
+                            + r * q
+                            + pressure
+                            + drop
+                            + radiation_history;
+                        let cut = self.flow_prev + dt * source / self.source_coeff;
+                        if !cut.is_finite() {
+                            return Err(FlueError::Invalid {
+                                what: "Nolle mouth flow domain is not representable",
+                            });
+                        }
+                        Ok(cut)
+                    };
+                    lo = lo.max(cut_at(-bound)?);
+                    hi = hi.min(cut_at(bound)?);
+                    if lo > hi {
+                        return Err(FlueError::Invalid {
+                            what: "Nolle jet-mouth root lies outside the admitted flow domain",
+                        });
+                    }
+                }
+            }
+            let tolerance = 32.0 * f64::EPSILON * c.q_max;
+            let ends = [evaluate(lo)?, evaluate(hi)?];
+            for (residual, step, trial, power) in ends {
+                if residual.abs() <= tolerance {
+                    return Ok((step, trial, power));
+                }
+            }
+            if ends[0].0 > 0.0 || ends[1].0 < 0.0 {
+                return Err(FlueError::Invalid {
+                    what: "Nolle jet-mouth root lies outside the admitted flow domain",
+                });
+            }
+            for _ in 0..96 {
+                let flow = 0.5 * lo + 0.5 * hi;
+                let (residual, step, trial, power) = evaluate(flow)?;
+                if residual.abs() <= tolerance {
+                    return Ok((step, trial, power));
+                }
+                if residual < 0.0 {
+                    lo = flow;
+                } else {
+                    hi = flow;
+                }
+            }
+            return Err(FlueError::Invalid {
+                what: "same-sample Nolle jet-mouth flow is unresolved",
+            });
+        }
         // Traces with no current-sample coefficient are explicit. A closed
         // wave boundary instead fixes q independently of the current jet.
         if delayed.current_weight == 0.0 || c.q_max == 0.0 || boundary.direct_reflection == 1.0 {
@@ -1150,7 +1265,8 @@ impl FlueVoice {
     }
 
     fn advance_block(
-        &mut self, out: &mut [f64],
+        &mut self,
+        out: &mut [f64],
         mut observe: impl FnMut(&FlueResonator) -> Result<(), FlueError>,
     ) -> Result<(), FlueError> {
         let dt = self.dt;
@@ -1246,27 +1362,22 @@ impl FlueVoice {
             } else {
                 0.0
             };
-            // Disjoint field borrows: the transfer is advanced with last sample's mouth flow and jet
-            // flow (forward Euler), the seed entering as transverse velocity like the island's.
-            let (chain_seed, eta_override) = match &mut self.nolle {
-                Some(jet) => {
-                    let eta = jet
-                        .step(jet.centre_over_bulk() * u, self.q_prev, self.nolle_jet_flow_prev,
-                            self.geometry.flue_width_m, seed)
-                        .map_err(|what| FlueError::Invalid { what })?;
-                    (0.0, Some(eta))
-                }
-                None => (seed, None),
-            };
+            // Prepare the published transfer without advancing its source
+            // memory. Both unknown feedback flows enter the current mouth
+            // solve; history is published only with the accepted wave step.
+            let nolle_step = self.nolle.as_ref().map(|jet|
+                jet.prepare_step(jet.centre_over_bulk()*u, self.geometry.flue_width_m, seed)
+                    .map_err(|what| FlueError::Invalid { what })).transpose()?;
+            let chain_seed = if nolle_step.is_some() { 0.0 } else { seed };
             let coefficients = JetStepCoefficients { q_max, half_width_m: b,
-                offset_m: y0, band_alpha, hp_alpha, leak_rate, eta_override };
+                offset_m: y0, band_alpha, hp_alpha, leak_rate, eta_override: None };
             let boundary = self.line.mouth_boundary()?;
-            let (mouth, trial, separation_power) = self.solve_jet_mouth(boundary, delayed, chain_seed, coefficients)?;
+            let (mouth, trial, separation_power) =
+                self.solve_jet_mouth(boundary, delayed, chain_seed, coefficients, nolle_step)?;
             let (eta, flow, p_source) = (trial.eta_m, trial.flow_m3_s, trial.source_pa);
-            if self.nolle.is_some() {
-                // Fluctuating part of the cut jet flow about the undeflected cut (Price's q_j).
-                self.nolle_jet_flow_prev = flow - 0.5 * q_max * (1.0 + (-y0 / b).tanh());
-            }
+            let nolle_candidate = nolle_step.map(|step|
+                step.candidate(mouth.flow_m3_s, flow-0.5*q_max*(1.0+(-y0/b).tanh()))
+                    .map_err(|what| FlueError::Invalid { what })).transpose()?;
             eta_sq += eta * eta;
             if eta > y0 {
                 pipe_side += 1;
@@ -1296,6 +1407,9 @@ impl FlueVoice {
             if let Some(windway) = windway_candidate {
                 self.unsteady_windway = Some(windway);
                 self.jet_speed_m_s = u;
+            }
+            if let Some(candidate) = nolle_candidate {
+                self.nolle.as_mut().expect("prepared source").commit(candidate);
             }
             self.band_state = trial.band_state;
             self.band_hp = trial.band_hp;
@@ -1558,6 +1672,94 @@ mod convection_tests {
             assert!(d.ledger_defect_j.abs() <= 2e-12*scale+1e-30, "{d:?}");
             assert!(d.separation_loss_j >= 0.0);
         }
+    }
+
+    #[test]
+    fn g1_nolle_receptivity_uses_the_current_solved_flows_on_three_clocks() {
+        use nolle_jet::{ChannelClass, NolleSpec};
+        let geometry = FlueGeometry {
+            cut_up_m: 0.004,
+            ..geometry()
+        };
+        for rate in [48_000, 96_000, 192_000] {
+            for pressure in [50_000.0, 200_000.0] {
+                let spec = NolleSpec::price_2015(ChannelClass::Short, 0.0007).unwrap();
+                let mut v = voice_at(gas(pressure), geometry, 1.0, rate)
+                    .with_mouth_contraction(contraction())
+                    .unwrap()
+                    .with_nolle_jet(spec)
+                    .unwrap();
+                v.island.seed_amplitude_rel = 0.0;
+                v.apply(FlueControl::SetBlowingPressure(100.0)).unwrap();
+                let speed = v.jet_speed_m_s();
+                let travel = geometry.cut_up_m + spec.chamfer_depth_m;
+                let leak = spec.leak_rel * speed / travel;
+                let q_max = speed * geometry.flue_height_m * geometry.flue_width_m;
+                for _ in 0..17 {
+                    let previous = v.nolle_jet().unwrap().receptivity_displacement_m();
+                    v.step_block(&mut [0.0]).unwrap();
+                    // Exact solution of xi' + leak xi = (alpha_p Q - alpha_j
+                    // dQj)/(H W), using the flows actually accepted by the
+                    // acoustic solve. A previous-sample coupling fails this.
+                    let source = (spec.alpha_p * v.mouth_flow_m3_s()
+                        - spec.alpha_j * (v.flow_prev - 0.5 * q_max))
+                        / (geometry.flue_width_m * travel);
+                    let expected = previous * (-leak * v.dt).exp()
+                        + source * (-(-leak * v.dt).exp_m1()) / leak;
+                    let actual = v.nolle_jet().unwrap().receptivity_displacement_m();
+                    assert!(
+                        (actual - expected).abs()
+                            < 256.0 * f64::EPSILON * actual.abs().max(expected.abs()).max(1e-30),
+                        "{rate} Hz, {pressure} Pa"
+                    );
+                }
+                assert_work(&v);
+            }
+        }
+    }
+
+    #[test]
+    fn g3_nolle_source_partition_is_exact_and_a_failed_mouth_does_not_publish_it() {
+        use nolle_jet::{ChannelClass, NolleSpec};
+        let build = |maximum_contracted_mach| {
+            let mut loss = contraction();
+            loss.maximum_contracted_mach = maximum_contracted_mach;
+            let mut v = voice(
+                gas(101_325.0),
+                FlueGeometry {
+                    cut_up_m: 0.004,
+                    ..geometry()
+                },
+                1.0,
+            )
+            .with_mouth_contraction(loss)
+            .unwrap()
+            .with_nolle_jet(NolleSpec::price_2015(ChannelClass::Short, 0.0).unwrap())
+            .unwrap();
+            v.apply(FlueControl::SetBlowingPressure(100.0)).unwrap();
+            v
+        };
+        let (mut one, mut many) = (build(0.3), build(0.3));
+        let (mut a, mut b) = ([0.0; 257], [0.0; 257]);
+        one.step_block(&mut a).unwrap();
+        for block in b.chunks_mut(31) {
+            many.step_block(block).unwrap();
+        }
+        assert_eq!(a, b);
+        assert_eq!(
+            one.nolle_jet().unwrap().receptivity_displacement_m(),
+            many.nolle_jet().unwrap().receptivity_displacement_m()
+        );
+        assert_work(&one);
+        assert_work(&many);
+        let mut refused = build(1e-10);
+        let before = refused.nolle_jet().unwrap().receptivity_displacement_m();
+        assert!(refused.step_block(&mut [0.0]).is_err());
+        assert_eq!(
+            refused.nolle_jet().unwrap().receptivity_displacement_m(),
+            before
+        );
+        assert_eq!(refused.samples, 0);
     }
 
     #[test]
