@@ -25,7 +25,7 @@ use super::{
 };
 use fs_duct::{
     Duct, DuctError, DuctResponse, HoleState, LossModel, MouthLoad, OpenHoleFlow, Segment,
-    Termination, WallModel, input_impedance_with_wall_options,
+    Termination, WallModel,
 };
 use fs_material::gas::GasState;
 use fs_phs::WallPin;
@@ -55,7 +55,6 @@ pub struct RegionalDuct {
     exterior_gas: Option<GasState>,
     inlet_gas_override: Option<GasState>,
     continuous: Option<fs_duct::profile::gas_field::GasFieldDuct>,
-    closing_pressure_pa: f64,
 }
 
 fn invalid(what: &'static str) -> DuctError { DuctError::BadParameter { what } }
@@ -129,31 +128,7 @@ impl RegionalDuct {
             return Err(invalid("regional travel time must be positive and finite"));
         }
         Ok(Self { regions, gases: gases.to_vec(), one_way_time_s, exterior_gas: None,
-            inlet_gas_override: None, continuous: None,
-            closing_pressure_pa: fs_duct::DEFAULT_REED_CLOSING_PRESSURE_PA })
-    }
-
-    /// Bind the static reed closing pressure $P_M = K_a y_m$ [Pa] used for the
-    /// Raman/Dalmont threshold acoustic pressure amplitude
-    /// $p_{\text{ac,peak}} = (\sqrt{2}/3)\, P_M$ in the open-hole vortex
-    /// describing function (`Dalmont, Gilbert & Ollivier 2003` Eq. 12).
-    #[must_use]
-    pub const fn with_closing_pressure_pa(mut self, closing_pressure_pa: f64) -> Self {
-        self.closing_pressure_pa = closing_pressure_pa;
-        self
-    }
-
-    /// Static reed closing pressure $P_M$ [Pa] bound to this regional duct.
-    #[must_use]
-    pub const fn closing_pressure_pa(&self) -> f64 {
-        self.closing_pressure_pa
-    }
-
-    pub(super) fn compose_options(&self) -> fs_duct::compose::ComposeOptions {
-        fs_duct::compose::ComposeOptions {
-            closing_pressure_pa: self.closing_pressure_pa,
-            ..fs_duct::compose::ComposeOptions::default()
-        }
+            inlet_gas_override: None, continuous: None })
     }
 
     /// Resolved media in authored segment order, including hole records.
@@ -202,12 +177,11 @@ impl RegionalDuct {
         if let Some(field) = &self.continuous {
             return field.response_with_wall(omega, loss, termination, Some(exterior), wall);
         }
-        let options = self.compose_options();
         let mut runs = self.regions.iter().rev();
         let terminal = runs.next().expect("nonempty binding");
         let mut response = self.terminal_response(terminal, omega, loss, termination, wall)?;
         for region in runs {
-            let upstream = fs_duct::exterior::input_impedance_load_options(
+            let upstream = fs_duct::exterior::input_impedance_load(
                 &region.duct,
                 &region.gas,
                 exterior,
@@ -215,7 +189,6 @@ impl RegionalDuct {
                 loss,
                 response.impedance,
                 wall,
-                options,
             )?;
             // A downstream one-port receives the upstream run's output flow.
             // Keep the REAL mouth's ka and load; this interface is not another
@@ -247,7 +220,6 @@ impl RegionalDuct {
                 omega, loss, termination, Some(exterior), wall,
             );
         }
-        let options = self.compose_options();
         let mut offsets = Vec::with_capacity(self.regions.len());
         let mut axial_x = 0.0;
         for region in &self.regions {
@@ -268,7 +240,7 @@ impl RegionalDuct {
         }
         for (region_idx, region) in runs {
             let (upstream, mut upstream_holes) =
-                fs_duct::exterior::input_impedance_load_and_holes_options(
+                fs_duct::exterior::input_impedance_load_and_holes(
                     &region.duct,
                     &region.gas,
                     exterior,
@@ -276,7 +248,6 @@ impl RegionalDuct {
                     loss,
                     response.impedance,
                     wall,
-                    options,
                 )?;
             for hole in &mut holes {
                 hole.u_hole_over_u_in = hole.u_hole_over_u_in * upstream.u_mouth_over_u_in;
@@ -310,7 +281,7 @@ impl RegionalDuct {
         }
         if self.regions.len() == 1 {
             let region = &self.regions[0];
-            return fs_duct::exterior::input_reflection_options(
+            return fs_duct::exterior::input_reflection(
                 &region.duct,
                 &region.gas,
                 exterior,
@@ -318,7 +289,6 @@ impl RegionalDuct {
                 loss,
                 termination,
                 wall,
-                self.compose_options(),
             )?
             .referenced_to(zc);
         }
@@ -399,19 +369,7 @@ impl RegionalDuct {
                 n_fft_override,
                 pole_states,
                 |omega| {
-                    let loss = LossModel::Bessel;
-                    if self.closing_pressure_pa == fs_duct::DEFAULT_REED_CLOSING_PRESSURE_PA {
-                        duct_reflectance(&r.duct, &r.gas, omega, loss, termination, pin, zc)
-                    } else {
-                        let options = self.compose_options();
-                        match input_impedance_with_wall_options(&r.duct, &r.gas, omega, loss, termination, wall, options) {
-                            Ok(response) => Ok(impedance_reflectance(&response, zc)),
-                            Err(DuctError::Singular) => {
-                                fs_duct::compose::input_reflection_with_wall_options(&r.duct, &r.gas, omega, loss, termination, wall, options)?.referenced_to(zc)
-                            }
-                            Err(e) => Err(e),
-                        }
-                    }
+                    duct_reflectance(&r.duct, &r.gas, omega, LossModel::Bessel, termination, pin, zc)
                 },
             );
         }

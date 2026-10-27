@@ -131,7 +131,7 @@ fn a_second_stage_overflow_poison_cannot_resume_with_inconsistent_histories() {
 }
 
 #[test]
-fn register_hole_shunt_line_activates_only_on_small_register_vent_and_scatters_quadratically() {
+fn open_hole_shunt_line_is_port_scale_invariant_passive_at_small_amplitude_and_uniform_across_holes() {
     let air = gas(false);
     let register_duct = RegionalDuct::new(
         &Duct {
@@ -149,47 +149,117 @@ fn register_hole_shunt_line_activates_only_on_small_register_vent_and_scatters_q
         &[air, air, air],
     )
     .unwrap();
-    let (_, _, shunt) = register_duct
-        .baffled_outlet_and_open_holes_and_shunt_delayed_at(
+    let (_, _, shunt_1) = register_duct
+        .baffled_outlet_and_open_holes_and_shunt_delayed_at_with_port_scale(
             48000,
             1024,
             location(),
             WallModel::Rigid,
             air.sound_speed,
+            1.0,
         )
         .unwrap();
-    let mut shunt = shunt.expect("1.35 mm register hole should build a WDF orifice shunt line");
-    let (_, _, shunt_high_pm) = register_duct
-        .clone()
-        .with_closing_pressure_pa(4800.0)
-        .baffled_outlet_and_open_holes_and_shunt_delayed_at(
+    let (_, _, shunt_half) = register_duct
+        .baffled_outlet_and_open_holes_and_shunt_delayed_at_with_port_scale(
             48000,
             1024,
             location(),
             WallModel::Rigid,
             air.sound_speed,
+            0.5,
         )
         .unwrap();
-    let shunt_high_pm = shunt_high_pm.expect("higher P_M register hole should build a WDF shunt");
-    assert!(shunt_high_pm.r2_pa_s_m3 > shunt.r2_pa_s_m3);
-    assert!(shunt_high_pm.u_crit_m3_s > shunt.u_crit_m3_s);
-    let mut shunt_double = shunt.clone();
-    assert_eq!(shunt.step(0.0).unwrap(), 0.0);
+    let (_, _, shunt_double_r2) = register_duct
+        .baffled_outlet_and_open_holes_and_shunt_delayed_at_with_port_scale(
+            48000,
+            1024,
+            location(),
+            WallModel::Rigid,
+            air.sound_speed,
+            2.0,
+        )
+        .unwrap();
+    let mut shunt_1 = shunt_1.expect("open hole should build a WDF orifice shunt line");
+    let mut shunt_half = shunt_half.expect("0.5x R2 open hole should build a WDF shunt line");
+    let mut shunt_double_r2 =
+        shunt_double_r2.expect("2.0x R2 open hole should build a WDF shunt line");
+    assert_eq!(shunt_1.u_crit_m3_s, 0.0);
+    assert!((shunt_half.r2_pa_s_m3 - 0.5 * shunt_1.r2_pa_s_m3).abs() < 1.0e-6);
+    assert!((shunt_double_r2.r2_pa_s_m3 - 2.0 * shunt_1.r2_pa_s_m3).abs() < 1.0e-6);
 
+    // Gate 2: R2 port-resistance scaling (0.5x, 1.0x, 2.0x) must leave the solved
+    // orifice flow U_h(t) and reflected reed wave delta p^-(t) invariant to < 1e-9.
+    let mut shunt_double_drive = shunt_1.clone();
+    let mut shunt_soft = shunt_1.clone();
+    let mut shunt_no_vortex = shunt_1.without_vortex_loss();
+
+    let mut max_dp_1: f64 = 0.0;
+    let mut max_dp_diff_half: f64 = 0.0;
+    let mut max_dp_diff_double: f64 = 0.0;
+    let mut max_u_1: f64 = 0.0;
+    let mut max_u_diff_half: f64 = 0.0;
+    let mut max_u_diff_double: f64 = 0.0;
     let mut energy_single = 0.0;
     let mut energy_double = 0.0;
-    for n in 0..512 {
-        let p_in = 4500.0 * (2.0 * std::f64::consts::PI * 900.0 * n as f64 / 48000.0).sin();
-        let u1 = shunt.step(p_in).unwrap();
-        let u2 = shunt_double.step(2.0 * p_in).unwrap();
-        assert!(u1.is_finite() && u2.is_finite());
-        let r1 = shunt.s12_history();
-        let r2 = shunt_double.s12_history();
-        energy_single += r1 * r1;
-        energy_double += r2 * r2;
-    }
-    assert!(energy_double > 0.0 && energy_double > 4.0 * energy_single, "energy_single={energy_single}, energy_double={energy_double}");
+    let mut max_soft_u: f64 = 0.0;
+    let mut max_soft_diff: f64 = 0.0;
 
+    for n in 0..512 {
+        let phase = 2.0 * std::f64::consts::PI * 900.0 * n as f64 / 48000.0;
+        let p_in = 1500.0 * phase.sin();
+        let u1 = shunt_1.step(p_in).unwrap();
+        let u_half = shunt_half.step(p_in).unwrap();
+        let u_dbl_r2 = shunt_double_r2.step(p_in).unwrap();
+        let u_dbl_drive = shunt_double_drive.step(2.0 * p_in).unwrap();
+        assert!(u1.is_finite() && u_half.is_finite() && u_dbl_r2.is_finite() && u_dbl_drive.is_finite());
+
+        let dp1 = shunt_1.s12_history();
+        let dp_half = shunt_half.s12_history();
+        let dp_dbl_r2 = shunt_double_r2.s12_history();
+        let dp_dbl_drive = shunt_double_drive.s12_history();
+
+        max_dp_1 = max_dp_1.max(dp1.abs());
+        max_dp_diff_half = max_dp_diff_half.max((dp_half - dp1).abs());
+        max_dp_diff_double = max_dp_diff_double.max((dp_dbl_r2 - dp1).abs());
+        max_u_1 = max_u_1.max(u1.abs());
+        max_u_diff_half = max_u_diff_half.max((u_half - u1).abs());
+        max_u_diff_double = max_u_diff_double.max((u_dbl_r2 - u1).abs());
+
+        energy_single += dp1 * dp1;
+        energy_double += dp_dbl_drive * dp_dbl_drive;
+
+        // Gate 3: small-amplitude limit matches the vortex-free model to rounding.
+        let p_soft = 1.0e-3 * phase.sin();
+        let u_soft = shunt_soft.step(p_soft).unwrap();
+        let u_lin = shunt_no_vortex.step(p_soft).unwrap();
+        assert_eq!(shunt_no_vortex.s12_history(), 0.0);
+        max_soft_u = max_soft_u.max(u_lin.abs());
+        max_soft_diff = max_soft_diff.max((u_soft - u_lin).abs());
+    }
+
+    assert!(
+        max_dp_diff_half / max_dp_1 < 1.0e-9 && max_dp_diff_double / max_dp_1 < 1.0e-9,
+        "R2 port scaling changed reflected reed wave: rel_half={}, rel_double={}",
+        max_dp_diff_half / max_dp_1,
+        max_dp_diff_double / max_dp_1
+    );
+    assert!(
+        max_u_diff_half / max_u_1 < 1.0e-9 && max_u_diff_double / max_u_1 < 1.0e-9,
+        "R2 port scaling changed orifice flow: rel_half={}, rel_double={}",
+        max_u_diff_half / max_u_1,
+        max_u_diff_double / max_u_1
+    );
+    assert!(
+        max_soft_diff / max_soft_u < 1.0e-9,
+        "small-amplitude orifice flow diverged from vortex-free model: rel={}",
+        max_soft_diff / max_soft_u
+    );
+    assert!(
+        energy_double > 4.0 * energy_single,
+        "quadratic orifice loss should grow superlinearly with amplitude: single={energy_single}, double={energy_double}"
+    );
+
+    // Gate 4: one law for every open hole with K proportional to b^{-4}.
     let tonehole_duct = RegionalDuct::new(
         &Duct {
             segments: vec![
@@ -206,7 +276,7 @@ fn register_hole_shunt_line_activates_only_on_small_register_vent_and_scatters_q
         &[air, air, air],
     )
     .unwrap();
-    let (_, _, no_shunt) = tonehole_duct
+    let (_, _, tonehole_shunt) = tonehole_duct
         .baffled_outlet_and_open_holes_and_shunt_delayed_at(
             48000,
             1024,
@@ -215,5 +285,12 @@ fn register_hole_shunt_line_activates_only_on_small_register_vent_and_scatters_q
             air.sound_speed,
         )
         .unwrap();
-    assert!(no_shunt.is_none(), "2.35 mm normal tone hole must not activate the register-hole shunt");
+    let tonehole_shunt =
+        tonehole_shunt.expect("2.35 mm open tone hole must obey the same orifice law");
+    let expected_k_ratio = (0.00235_f64 / 0.00135_f64).powi(4);
+    let actual_k_ratio = shunt_1.k_quad_pa_s2_m6 / tonehole_shunt.k_quad_pa_s2_m6;
+    assert!(
+        (actual_k_ratio - expected_k_ratio).abs() / expected_k_ratio < 1.0e-12,
+        "actual_k_ratio={actual_k_ratio}, expected_k_ratio={expected_k_ratio}"
+    );
 }

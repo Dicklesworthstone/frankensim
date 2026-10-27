@@ -48,7 +48,7 @@ impl RegionalDuct {
     pub(super) fn terminal_response(&self, terminal: &Region, omega: f64,
         loss: LossModel, termination: Termination, wall: WallModel<'_>)
         -> Result<DuctResponse, DuctError> {
-        fs_duct::exterior::input_impedance_options(
+        fs_duct::exterior::input_impedance(
             &terminal.duct,
             &terminal.gas,
             self.exterior_gas(),
@@ -56,7 +56,6 @@ impl RegionalDuct {
             loss,
             termination,
             wall,
-            self.compose_options(),
         )
     }
 
@@ -68,7 +67,7 @@ impl RegionalDuct {
         termination: Termination,
         wall: WallModel<'_>,
     ) -> Result<(DuctResponse, Vec<OpenHoleFlow>), DuctError> {
-        fs_duct::exterior::input_impedance_and_holes_options(
+        fs_duct::exterior::input_impedance_and_holes(
             &terminal.duct,
             &terminal.gas,
             self.exterior_gas(),
@@ -76,7 +75,6 @@ impl RegionalDuct {
             loss,
             termination,
             wall,
-            self.compose_options(),
         )
     }
 }

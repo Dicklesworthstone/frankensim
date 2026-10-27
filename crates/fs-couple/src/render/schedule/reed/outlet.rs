@@ -109,13 +109,22 @@ impl ObservationInput {
     pub(super) fn build_regional(self, duct: &Duct, regional: RegionalDuct, reed: BeatingReed,
         termination: Termination, rate: u32, samples: usize, delay_speed_m_s: f64)
         -> Result<(ReedBoreVoice, Option<TerminalObservation>), ReedPerformanceError> {
-        let regional = regional.with_closing_pressure_pa(reed.closing_pressure_pa);
         if let Self::Legacy(distance) = self {
-            let voice = ReedBoreVoice::with_line(duct, regional.inlet_gas(), reed,
+            let mut voice = ReedBoreVoice::with_line(duct, regional.inlet_gas(), reed,
                 PlateBank::default(), distance, rate, |_| {
                     regional.characteristic_line_realized(termination, rate, samples, None, None)
                         .map_err(map_drive)
                 }).map_err(ReedPerformanceError::Model)?;
+            let grid = voice.line.history().len();
+            if let Some(mut shunt) = regional
+                .register_hole_shunt_line(rate, grid, fs_duct::WallModel::from_pin(None))
+                .map_err(ReedPerformanceError::Outlet)?
+            {
+                shunt
+                    .prime(voice.p_plus_prev)
+                    .map_err(|error| ReedPerformanceError::Outlet(OutletError::Transfer(error)))?;
+                voice.set_register_shunt(shunt);
+            }
             return Ok((voice, None));
         }
         let Self::Baffled { receiver, exterior } = self else { unreachable!("legacy returned above") };

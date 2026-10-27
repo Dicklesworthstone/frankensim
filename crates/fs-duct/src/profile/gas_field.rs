@@ -484,8 +484,7 @@ impl GasFieldDuct {
         let mut blocks = Vec::with_capacity(self.steps_used());
         let mut observed_holes = Vec::new();
         let mut min_shear = f64::INFINITY;
-        let (open_sites, total_acoustic_len_m, outlet_radius_m) =
-            crate::collect_open_hole_sites(&self.duct);
+        let open_sites = crate::collect_open_hole_sites(&self.duct);
         let mut axial_index = 0;
         let mut hole_index = 0;
         let mut open_hole_index = 0;
@@ -515,32 +514,17 @@ impl GasFieldDuct {
                             * (hole.gas.density * omega / hole.gas.dynamic_viscosity).sqrt(),
                     );
                 }
-                let mut r_vortex = 0.0;
                 if crate::hole_sigma(state) > 0.0 {
-                    let vortex = crate::open_hole_vortex_spec_in_exterior(
-                        &hole.gas,
-                        exterior.unwrap_or(&hole.gas),
-                        loss,
-                        hole_radius,
-                        bore_radius,
-                        chimney_height,
-                        &open_sites,
-                        open_hole_index,
-                        total_acoustic_len_m,
-                        outlet_radius_m,
-                        crate::DEFAULT_REED_CLOSING_PRESSURE_PA,
-                    );
-                    r_vortex = vortex.0;
                     if observe_holes {
                         observed_holes.push(prepare_open_hole(
                             &hole.gas, exterior.unwrap_or(&hole.gas), omega, loss, wall,
                             &self.duct.segments[hole.segment], open_sites[open_hole_index],
-                            blocks.len(), hole.extra_series_m, vortex, true,
+                            blocks.len(), hole.extra_series_m, true,
                         )?);
                     }
                     open_hole_index += 1;
                 }
-                let matrix = crate::tone_hole_t_junction_with_wall_vortex(
+                let matrix = crate::tone_hole_t_junction_in_exterior_with_wall(
                     &hole.gas,
                     exterior.unwrap_or(&hole.gas),
                     hole_radius,
@@ -550,7 +534,6 @@ impl GasFieldDuct {
                     loss,
                     bore_radius,
                     hole.extra_series_m,
-                    r_vortex,
                     wall,
                 )?;
                 blocks.push(TwoPort::from_abcd(matrix, reference)?);

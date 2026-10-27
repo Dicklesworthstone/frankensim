@@ -37,12 +37,6 @@ pub struct ComposeOptions {
     pub maximum_blocks: usize,
     /// Preserve the old operation graph only inside its declared envelope.
     pub preserve_well_conditioned_bits: bool,
-    /// Static reed closing pressure $P_M = K_a y_m$ [Pa] setting the
-    /// Raman/Dalmont threshold acoustic pressure amplitude
-    /// $p_{\text{ac,peak}} = (\sqrt{2}/3)\, P_M$ for the open-hole vortex
-    /// describing function (`Dalmont, Gilbert & Ollivier 2003` Eq. 12;
-    /// `Chaigne & Kergomard 2016` Sec. 9.4.2).
-    pub closing_pressure_pa: f64,
 }
 impl Default for ComposeOptions {
     fn default() -> Self {
@@ -51,7 +45,6 @@ impl Default for ComposeOptions {
             maximum_condition: DEFAULT_MAX_CONDITION,
             maximum_blocks: MAX_COMPOSITION_BLOCKS,
             preserve_well_conditioned_bits: true,
-            closing_pressure_pa: crate::DEFAULT_REED_CLOSING_PRESSURE_PA,
         }
     }
 }
@@ -91,11 +84,9 @@ impl ComposeOptions {
             || self.maximum_condition < 1.0
             || self.maximum_blocks == 0
             || self.maximum_blocks > MAX_COMPOSITION_BLOCKS
-            || !self.closing_pressure_pa.is_finite()
-            || self.closing_pressure_pa <= 0.0
         {
             return Err(bad(
-                "composition needs finite condition >=1, positive closing pressure and declared block cap",
+                "composition needs finite condition >=1 and declared block cap",
             ));
         }
         Ok(())
@@ -485,27 +476,7 @@ pub fn input_reflection_with_wall(
     duct: &Duct, state: &GasState, omega: f64, loss: LossModel,
     termination: Termination, wall: WallModel<'_>,
 ) -> Result<InputReflection, DuctError> {
-    input_reflection_with_wall_options(
-        duct,
-        state,
-        omega,
-        loss,
-        termination,
-        wall,
-        ComposeOptions::default(),
-    )
-}
-
-/// [`input_reflection_with_wall`] with explicit [`ComposeOptions`].
-pub fn input_reflection_with_wall_options(
-    duct: &Duct,
-    state: &GasState,
-    omega: f64,
-    loss: LossModel,
-    termination: Termination,
-    wall: WallModel<'_>,
-    options: ComposeOptions,
-) -> Result<InputReflection, DuctError> {
+    let options = ComposeOptions::default();
     let chain = duct_chain_with_wall(duct, state, omega, loss, wall, options, true, || false)?;
     let radius = duct
         .segments
@@ -827,13 +798,12 @@ pub(crate) struct PreparedOpenHole {
     pub half_series_impedance: C64,
     pub open_chimney_impedance: C64,
     pub chimney_u_mouth_over_u_in: C64,
-    pub vortex_resistance_pa_s_m3: f64,
-    pub vortex_critical_flow_m3_s: f64,
-    pub vortex_quadratic_coeff_pa_s2_m6: f64,
+    pub shunt_port_reference_pa_s_m3: f64,
+    pub orifice_quadratic_coeff_pa_s2_m6: f64,
 }
 
 /// The same physical chimney/series branch for uniform and continuous-gas
-/// chains. The caller supplies the already admitted mutual and vortex terms;
+/// chains. The caller supplies the already admitted mutual terms;
 /// the observer must use the identical branch as the acoustic feedback.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_open_hole(
@@ -846,7 +816,6 @@ pub(crate) fn prepare_open_hole(
     site: crate::OpenHoleSite,
     block_index: usize,
     extra_series_m: f64,
-    vortex: (f64, f64, f64),
     compact_corrections: bool,
 ) -> Result<PreparedOpenHole, DuctError> {
     let Segment::ToneHole { hole_radius, chimney_height, bore_radius, state: hs } = *geometry else {
@@ -856,11 +825,10 @@ pub(crate) fn prepare_open_hole(
     if sigma <= 0.0 {
         return Err(bad("open-hole observation requires a positive opening"));
     }
-    let (mut open, chimney_length_m) = crate::chimney_open_response_with_wall(
+    let (open, chimney_length_m) = crate::chimney_open_response_with_wall(
         state, exterior, hole_radius, chimney_height, bore_radius, omega, loss,
         compact_corrections, wall,
     )?;
-    open.impedance = open.impedance + C64::from_re(vortex.0);
     let series_length = if compact_corrections {
         fs_phs::side_hole_series_length(hole_radius, bore_radius) * sigma + extra_series_m
     } else {
@@ -872,6 +840,10 @@ pub(crate) fn prepare_open_hole(
         let area = core::f64::consts::PI * bore_radius * bore_radius;
         C64::new(0.0, -omega * state.density * series_length / area).scale(0.5)
     };
+    let area_h = core::f64::consts::PI * site.effective_radius_m * site.effective_radius_m;
+    let area_b = core::f64::consts::PI * bore_radius * bore_radius;
+    let z0_port = state.density * state.sound_speed * (1.0 / area_h + 0.5 * sigma / area_b);
+    let k_quad = crate::open_hole_orifice_quadratic_coeff(state, loss, site.effective_radius_m);
     Ok(PreparedOpenHole {
         block_index,
         axial_position_m: site.axial_position_m,
@@ -881,9 +853,8 @@ pub(crate) fn prepare_open_hole(
         half_series_impedance: half,
         open_chimney_impedance: open.impedance,
         chimney_u_mouth_over_u_in: open.u_mouth_over_u_in,
-        vortex_resistance_pa_s_m3: vortex.0,
-        vortex_critical_flow_m3_s: vortex.1,
-        vortex_quadratic_coeff_pa_s2_m6: vortex.2,
+        shunt_port_reference_pa_s_m3: z0_port,
+        orifice_quadratic_coeff_pa_s2_m6: k_quad,
     })
 }
 fn push_block(blocks: &mut Vec<TwoPort>, limit: usize, block: TwoPort) -> Result<(), DuctError> {
@@ -972,7 +943,7 @@ pub(crate) fn duct_chain_in_exterior(
     let mut blocks = Vec::new();
     let mut open_holes = Vec::new();
     let mut min_shear = f64::INFINITY;
-    let (sites, total_acoustic_len_m, outlet_radius_m) = crate::collect_open_hole_sites(duct);
+    let sites = crate::collect_open_hole_sites(duct);
     let mut hole_index = 0;
     for (index, s) in duct.segments.iter().enumerate() {
         poll(&mut cancelled, index)?;
@@ -1014,7 +985,6 @@ pub(crate) fn duct_chain_in_exterior(
                 let block_index = blocks.len();
                 let m = if compact_corrections {
                     let mut extra = 0.0;
-                    let mut r_vortex = 0.0;
                     if sigma > 0.0 {
                         let site = sites[hole_index];
                         let (xi, bi, ai) = (
@@ -1030,28 +1000,13 @@ pub(crate) fn duct_chain_in_exterior(
                                 (site_j.axial_position_m - xi).abs(),
                             );
                         }
-                        let (vortex_r, vortex_u_crit, vortex_k_quad) =
-                            crate::open_hole_vortex_spec_in_exterior(
-                                state,
-                                exterior,
-                                loss,
-                                hole_radius,
-                                bore_radius,
-                                chimney_height,
-                                &sites,
-                                hole_index,
-                                total_acoustic_len_m,
-                                outlet_radius_m,
-                                options.closing_pressure_pa,
-                            );
-                        r_vortex = vortex_r;
                         open_holes.push(prepare_open_hole(
                             state, exterior, omega, loss, wall, s, site, block_index,
-                            extra, (vortex_r, vortex_u_crit, vortex_k_quad), true,
+                            extra, true,
                         )?);
                         hole_index += 1;
                     }
-                    crate::tone_hole_t_junction_with_wall_vortex(
+                    crate::tone_hole_t_junction_in_exterior_with_wall(
                         state,
                         exterior,
                         hole_radius,
@@ -1061,37 +1016,15 @@ pub(crate) fn duct_chain_in_exterior(
                         loss,
                         bore_radius,
                         extra,
-                        r_vortex,
                         wall,
                     )?
                 } else {
                     if sigma > 0.0 {
                         let site = sites[hole_index];
-                        let (xi, bi) = (site.axial_position_m, site.effective_radius_m);
-                        let (open_resp, chimney_length_m) = crate::chimney_open_response_with_wall(
-                            state,
-                            exterior,
-                            hole_radius,
-                            chimney_height,
-                            bore_radius,
-                            omega,
-                            loss,
-                            false,
-                            wall,
-                        )?;
-                        open_holes.push(PreparedOpenHole {
-                            block_index,
-                            axial_position_m: xi,
-                            effective_radius_m: bi,
-                            chimney_length_m,
-                            sigma,
-                            half_series_impedance: C64::ZERO,
-                            open_chimney_impedance: open_resp.impedance,
-                            chimney_u_mouth_over_u_in: open_resp.u_mouth_over_u_in,
-                            vortex_resistance_pa_s_m3: 0.0,
-                            vortex_critical_flow_m3_s: 0.0,
-                            vortex_quadratic_coeff_pa_s2_m6: 0.0,
-                        });
+                        open_holes.push(prepare_open_hole(
+                            state, exterior, omega, loss, wall, s, site, block_index,
+                            0.0, false,
+                        )?);
                         hole_index += 1;
                     }
                     let loss = if loss == LossModel::WideTube {
@@ -1252,32 +1185,25 @@ pub(crate) fn open_hole_flows(
         if !finite(u_hole_over_u_in) || !finite(u_chimney_in_over_u_in) {
             return Err(DuctError::Singular);
         }
-        let shunt_port_reflection = if hole.vortex_resistance_pa_s_m3 > 0.0 {
-            let z_left = (C64::ONE + r_left).scale(reference) / (C64::ONE - r_left)
-                + hole.half_series_impedance;
-            let z_right = (C64::ONE + r_right).scale(reference) / (C64::ONE - r_right)
-                + hole.half_series_impedance;
-            let z_bore_mid = ((z_left * z_right) / (z_left + z_right)).scale(hole.sigma);
-            let r2 = C64::from_re(hole.vortex_resistance_pa_s_m3);
-            let z_port2_minus_r2 = (hole.open_chimney_impedance - r2.scale(2.0)) + z_bore_mid;
-            let z_port2_plus_r2 = hole.open_chimney_impedance + z_bore_mid;
-            let s22 = z_port2_minus_r2 / z_port2_plus_r2;
-            if !finite(s22) {
-                return Err(DuctError::Singular);
-            }
-            s22
-        } else {
-            C64::ZERO
-        };
+        let z_left = (C64::ONE + r_left).scale(reference) / (C64::ONE - r_left)
+            + hole.half_series_impedance;
+        let z_right = (C64::ONE + r_right).scale(reference) / (C64::ONE - r_right)
+            + hole.half_series_impedance;
+        let z_bore_mid = ((z_left * z_right) / (z_left + z_right)).scale(hole.sigma);
+        let z_net = hole.open_chimney_impedance + z_bore_mid;
+        let z0_port = C64::from_re(hole.shunt_port_reference_pa_s_m3);
+        let shunt_port_reflection = (z_net - z0_port) / (z_net + z0_port);
+        if !finite(shunt_port_reflection) {
+            return Err(DuctError::Singular);
+        }
         flows.push(OpenHoleFlow {
             axial_position_m: hole.axial_position_m,
             effective_radius_m: hole.effective_radius_m,
             chimney_length_m: hole.chimney_length_m,
             u_hole_over_u_in,
             u_chimney_in_over_u_in,
-            vortex_resistance_pa_s_m3: hole.vortex_resistance_pa_s_m3,
-            vortex_critical_flow_m3_s: hole.vortex_critical_flow_m3_s,
-            vortex_quadratic_coeff_pa_s2_m6: hole.vortex_quadratic_coeff_pa_s2_m6,
+            shunt_port_reference_pa_s_m3: hole.shunt_port_reference_pa_s_m3,
+            orifice_quadratic_coeff_pa_s2_m6: hole.orifice_quadratic_coeff_pa_s2_m6,
             shunt_port_reflection,
         });
     }
@@ -1302,37 +1228,18 @@ pub(crate) fn evaluate_with_wall(
     evaluate_in_exterior(duct, state, state, omega, loss, load, wall)
 }
 
-pub(crate) fn evaluate_with_wall_options(
-    duct: &Duct,
-    state: &GasState,
-    omega: f64,
-    loss: LossModel,
-    load: LoadSpec,
-    wall: WallModel<'_>,
-    options: ComposeOptions,
-) -> Result<DuctResponse, DuctError> {
-    evaluate_in_exterior_options(duct, state, state, omega, loss, load, wall, options)
-}
-
 // The legacy ABCD path has no separate radiation gas. Reusing it after the
 // new chain was built would silently discard every changed side-hole load.
-fn exterior_options(
-    duct: &Duct,
-    state: &GasState,
-    exterior: &GasState,
-    options: ComposeOptions,
-) -> ComposeOptions {
-    ComposeOptions {
-        preserve_well_conditioned_bits: options.preserve_well_conditioned_bits
-            && (state == exterior
-                || !duct.segments.iter().any(|segment| {
-                    matches!(
-                        segment,
-                        Segment::ToneHole { state, .. } if crate::hole_sigma(*state) > 0.0
-                    )
-                })),
-        ..options
-    }
+fn exterior_options(duct: &Duct, state: &GasState, exterior: &GasState) -> ComposeOptions {
+    let mut options = ComposeOptions::default();
+    options.preserve_well_conditioned_bits = state == exterior
+        || !duct.segments.iter().any(|segment| {
+            matches!(
+                segment,
+                Segment::ToneHole { state, .. } if crate::hole_sigma(*state) > 0.0
+            )
+        });
+    options
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1340,30 +1247,7 @@ pub(crate) fn evaluate_in_exterior(
     duct: &Duct, state: &GasState, exterior: &GasState, omega: f64, loss: LossModel,
     load: LoadSpec, wall: WallModel<'_>,
 ) -> Result<DuctResponse, DuctError> {
-    evaluate_in_exterior_options(
-        duct,
-        state,
-        exterior,
-        omega,
-        loss,
-        load,
-        wall,
-        ComposeOptions::default(),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn evaluate_in_exterior_options(
-    duct: &Duct,
-    state: &GasState,
-    exterior: &GasState,
-    omega: f64,
-    loss: LossModel,
-    load: LoadSpec,
-    wall: WallModel<'_>,
-    options: ComposeOptions,
-) -> Result<DuctResponse, DuctError> {
-    let options = exterior_options(duct, state, exterior, options);
+    let options = exterior_options(duct, state, exterior);
     let (chain, _) = duct_chain_in_exterior(
         duct,
         state,
@@ -1389,47 +1273,12 @@ pub(crate) fn evaluate_with_wall_and_holes(
     evaluate_in_exterior_and_holes(duct, state, state, omega, loss, load, wall)
 }
 
-pub(crate) fn evaluate_with_wall_and_holes_options(
-    duct: &Duct,
-    state: &GasState,
-    omega: f64,
-    loss: LossModel,
-    load: LoadSpec,
-    wall: WallModel<'_>,
-    options: ComposeOptions,
-) -> Result<(DuctResponse, Vec<OpenHoleFlow>), DuctError> {
-    evaluate_in_exterior_and_holes_options(duct, state, state, omega, loss, load, wall, options)
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_in_exterior_and_holes(
     duct: &Duct, state: &GasState, exterior: &GasState, omega: f64, loss: LossModel,
     load: LoadSpec, wall: WallModel<'_>,
 ) -> Result<(DuctResponse, Vec<OpenHoleFlow>), DuctError> {
-    evaluate_in_exterior_and_holes_options(
-        duct,
-        state,
-        exterior,
-        omega,
-        loss,
-        load,
-        wall,
-        ComposeOptions::default(),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn evaluate_in_exterior_and_holes_options(
-    duct: &Duct,
-    state: &GasState,
-    exterior: &GasState,
-    omega: f64,
-    loss: LossModel,
-    load: LoadSpec,
-    wall: WallModel<'_>,
-    options: ComposeOptions,
-) -> Result<(DuctResponse, Vec<OpenHoleFlow>), DuctError> {
-    let options = exterior_options(duct, state, exterior, options);
+    let options = exterior_options(duct, state, exterior);
     let (chain, open_holes) =
         duct_chain_in_exterior(duct, state, exterior, omega, loss, wall, options, true, || false)?;
     let radius = duct
@@ -1474,15 +1323,7 @@ fn evaluate_prepared_chain(
             .transfer_condition_estimate
             .is_some_and(|v| v <= LEGACY_MAX_TRANSFER_CONDITION)
     {
-        if let Ok(mut old) = crate::input_impedance_legacy_with_closing_pressure(
-            duct,
-            state,
-            omega,
-            loss,
-            load,
-            pin,
-            options.closing_pressure_pa,
-        ) {
+        if let Ok(mut old) = crate::input_impedance_legacy(duct, state, omega, loss, load, pin) {
             if [old.impedance, old.u_mouth_over_u_in, old.p_mouth_over_u_in]
                 .iter()
                 .all(|&v| finite(v))
