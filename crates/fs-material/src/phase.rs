@@ -17,6 +17,9 @@ pub mod conductivity;
 /// Phase-first thermal/electrical sources and optional mobile fluid transport.
 pub mod transport;
 
+// Relative equilibrium entropy uses this same admitted h -> T chart.
+mod entropy;
+
 use core::fmt;
 
 use fs_blake3::{ContentHash, DomainHasher};

@@ -1,5 +1,7 @@
 //! Joint endpoint chemistry, native elastic work and conservative continuation.
 //! Equal-mass synthetic isomers give an independent scalar elimination oracle.
+mod thermal;
+
 use super::*;
 use fs_couple::cavity_phs::modal::reactive::coupled::CoupledReactiveModalGasSolve;
 use fs_couple::cavity_phs::piston::reactive::{

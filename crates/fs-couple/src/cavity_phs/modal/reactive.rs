@@ -16,6 +16,8 @@
 //! together while retaining this same native wall and volume chart.
 
 pub mod coupled;
+/// Finite material heat exchange in that same chemical/mechanical endpoint.
+pub mod thermal;
 
 use super::{GasValveMotion, ModalGasError, ModalGasSolve, ModalGasStep};
 use crate::cavity_phs::piston::reactive::{

@@ -7738,3 +7738,52 @@ parsing and source/API review passed; native Rust execution was unavailable in
 this environment, so this is not a passing native or experimental result.
 Focused native command:
 `cargo test -p fs-couple --test material_duct_wall spatial::gas_regional_live`.
+
+
+### Joint finite material heat, reaction and native elastic motion
+
+`GasValveMotion::coupled_reactive_thermal_candidate` closes the original
+implicit reaction/pressure/native-modal endpoint with a finite enthalpy body.
+The existing bounded scalar feedback owner finds one signed transfer Q into
+the gas. Every trial restarts ALL owners from their accepted histories:
+`U_gas,1=U_gas,0+Q_gas+Q-W` and
+`H_body,1=H_body,0+Q_body-Q`. Rates, gas pressure/work, source transport and
+interface conductance use those same proposed endpoints. No reaction-first
+heat lag, separate piston, constant-Cp surrogate or additional formation-heat
+credit is introduced.
+
+The existing source-bound series-conduction adapter also has a direct entry
+point, `coupled_reactive_thermal_layers_candidate`. Body conductivity and
+caloric state must retain the same material card and actual query point.
+The original reacted gas supplies its own conductivity. The returned candidate
+contains the original motion/gas owner, `UniformEnthalpyStep` and full account;
+they publish together. Cancellation or source, bracket, pressure/chemistry,
+clock, work or caloric refusal leaves every accepted history unchanged.
+
+Independent measured balances enclose gas storage, body enthalpy, modal
+storage, original structural damping and exterior pressure work. Q cancels;
+damping leaves this enclosure and is not deposited again. Body entropy uses
+the original chart's exact piecewise `integral(dh/T)`, including latent heat.
+The native gas entropy gate remains active; final body, interface
+`Q(1/T_gas,1-1/T_body,1)`, and enclosing endpoint entropy inequalities are
+checked separately. These discrete inequalities include backward-Euler
+integration entropy and are not a continuous entropy-production certificate.
+
+This is a first-order endpoint reaction/conduction and native held-pressure
+structural method, with explicit nested work/residual limits. The thermal body
+uses a justified uniform-temperature, fixed-geometry, negligible-pV-work
+enthalpy model and is a separate participant from the source-fixed elastic wall.
+It does not silently update that wall's basis, expansion, strength or phase.
+No flame, shock, phase-density motion, mechanical/fluid handoff, unconditional
+convergence or continuum combustion accuracy is claimed.
+
+Four synthetic native regression definitions cover independent scalar
+elimination of heat, chemistry and six-tet elastic motion under conductivity
+and caloric DATA changes; continuing latent-body/native-mode trajectories and
+whole-system accounting; late source/clock/budget failures and deterministic
+retry; and cancellation after actual chemical/mechanical/source evaluation.
+Rust syntax parsing, bounded independent source/API review and reference
+arithmetic passed. Native compilation/tests were unavailable (no Rust/Cargo,
+DSR or RCH); no native or experimental success is asserted.
+Focused command:
+`cargo test -p fs-couple --test solid_enthalpy valve::gas_motion::reactive::coupled::thermal`.

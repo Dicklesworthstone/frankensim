@@ -2451,3 +2451,24 @@ does not authorize freezing an unsupported coefficient; the receiving
 runtime must own or refuse each active response. The thermal free-surface
 consumer currently requires source-declared validity-wide constant sigma.
 No surface-energy, Marangoni or wetting dynamics are inferred by adoption.
+
+
+### Relative entropy on the admitted enthalpy/phase chart
+
+`EquilibriumEnthalpyPhaseCurve::specific_entropy_change_j_kg_k(h0,h1)`
+integrates `dh/T(h)` on the SAME bounded piecewise-linear caloric chart.
+Sensible intervals use their logarithmic integral, evaluated with log1p near
+isothermal limits; latent plateaus contribute `delta_h/T_transition`.
+Fixed-order compensated accumulation, original endpoint/source-domain
+admission and explicit representability checks apply. Reversing endpoints
+reverses the sign. No apparent plateau heat capacity, additional latent energy,
+absolute entropy reference, chemical mixing or variable-pressure work is
+invented. Its thermodynamic scope is the chart's fixed pressure/composition
+convention. Coupled owners retain responsibility for boundary entropy and any
+additional state/work coordinates.
+
+Two focused regression definitions cover independent sensible-plus-latent
+integrals, subinterval additivity, reversal/domain refusal and a nearly
+isothermal sensible limit. Source syntax parsing and independent scalar
+arithmetic passed; native Rust tests were unavailable in the implementation
+environment. This is not a continuous transport or entropy-production proof.
