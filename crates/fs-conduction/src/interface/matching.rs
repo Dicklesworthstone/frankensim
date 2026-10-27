@@ -28,12 +28,9 @@ use crate::mesh::ConductionMesh;
 
 mod sensitivity;
 
-/// Canonical `fs-matdb` property consumed by the contact operator.
-pub const AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY: &str =
-    "area-specific-thermal-contact-resistance";
-
-/// SI dimensions of `R''`, m² K/W.
-pub const AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS: fs_qty::Dims = fs_qty::Dims([0, -1, 3, 1, 0, 0]);
+pub use fs_material::thermal::interface::{
+    AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS, AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
+};
 
 /// One evidence-bearing area-specific interface resistance.
 #[derive(Debug, Clone, PartialEq)]

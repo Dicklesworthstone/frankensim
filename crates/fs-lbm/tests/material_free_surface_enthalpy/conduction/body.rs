@@ -3,7 +3,12 @@
 use super::*;
 use fs_conduction::enthalpy::CellGeometry;
 use fs_lbm::material::free_surface::enthalpy::conduction::{
-    FreeSurfaceBodyContact, FreeSurfaceThermalBody,
+    FreeSurfaceBodyContact, FreeSurfaceBodyInterface, FreeSurfaceThermalBody,
+};
+use fs_matdb::{InterfaceSystemCard, SurfaceSpec, SystemContext};
+use fs_material::thermal::interface::{
+    AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS as RESISTANCE_DIMS,
+    AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY as RESISTANCE, ThermalInterfacePoint,
 };
 use fs_material::thermal::source::ThermalMaterialPoint;
 
@@ -114,6 +119,314 @@ pub(super) fn contact() -> FreeSurfaceBodyContact {
         area_m2: 1e-6,
         distances_m: [0.0005; 2],
     }
+}
+
+pub(super) fn interface_card(
+    liquid: &MaterialCard,
+    solid: &MaterialCard,
+    scale: f64,
+    liquid_upper_k: f64,
+    fallback: bool,
+) -> InterfaceSystemCard {
+    let mut claims = ClaimSet::new();
+    let claim = PropertyClaim {
+        key: PropertyKey::new(RESISTANCE, RESISTANCE_DIMS),
+        value: PropertyValue::Curve {
+            abscissa: "meanT".into(),
+            abscissa_dims: Temperature::DIMS,
+            knots: vec![(300.0, scale), (500.0, 2.0 * scale)],
+            dims: RESISTANCE_DIMS,
+        },
+        validity: ValidityDomain::unconstrained()
+            .with_quantity(
+                "liquidT",
+                QuantitySpec::dimensional(Temperature::DIMS),
+                300.0,
+                liquid_upper_k,
+            )
+            .with_quantity(
+                "solidT",
+                QuantitySpec::dimensional(Temperature::DIMS),
+                300.0,
+                500.0,
+            ),
+        uncertainty: UncertaintyModel::Unstated,
+        interpolation: InterpolationPolicy::LinearInside,
+        observations: vec![],
+        provenance: Provenance {
+            source: "synthetic ordered thermal interface".into(),
+            license: "test-only".into(),
+            artifact: None,
+        },
+    };
+    claims.insert_claim(claim.clone()).unwrap();
+    if fallback {
+        let mut other = claim;
+        other.validity = ValidityDomain::unconstrained()
+            .with_quantity(
+                "liquidT",
+                QuantitySpec::dimensional(Temperature::DIMS),
+                400.000001,
+                500.0,
+            )
+            .with_quantity(
+                "solidT",
+                QuantitySpec::dimensional(Temperature::DIMS),
+                300.0,
+                500.0,
+            );
+        claims.insert_claim(other).unwrap();
+    }
+    InterfaceSystemCard::assemble(
+        SurfaceSpec {
+            material: liquid.id().clone(),
+            texture_frame: "liquid".into(),
+        },
+        SurfaceSpec {
+            material: solid.id().clone(),
+            texture_frame: "wall".into(),
+        },
+        SystemContext {
+            medium: "declared contact".into(),
+            third_body: None,
+            environment: "synthetic".into(),
+            history: "fixed surface".into(),
+        },
+        claims,
+        vec![],
+    )
+    .unwrap()
+}
+
+pub(super) fn interface_point() -> QueryPoint {
+    QueryPoint::new()
+        .with_quantity(
+            "liquidT",
+            QuantitySpec::dimensional(Temperature::DIMS),
+            400.0,
+        )
+        .unwrap()
+        .with_quantity(
+            "solidT",
+            QuantitySpec::dimensional(Temperature::DIMS),
+            450.0,
+        )
+        .unwrap()
+        .with_quantity("meanT", QuantitySpec::dimensional(Temperature::DIMS), 425.0)
+        .unwrap()
+}
+
+pub(super) fn interface<'a>(
+    liquid: &'a MaterialCard,
+    solid: &'a MaterialCard,
+    source: &'a InterfaceSystemCard,
+    context: &'a QueryPoint,
+) -> FreeSurfaceBodyInterface<'a> {
+    FreeSurfaceBodyInterface::try_new(
+        0,
+        ThermalInterfacePoint {
+            interface: source,
+            materials: [liquid, solid],
+            context,
+            temperature_axes: ["liquidT", "solidT"],
+            liquid_fraction_axes: [None; 2],
+            mean_temperature_axis: Some("meanT"),
+        },
+        [
+            caloric(liquid)
+                .state_at_specific_enthalpy(200000.0)
+                .unwrap(),
+            wall_chart(solid)
+                .state_at_specific_enthalpy(75000.0)
+                .unwrap(),
+        ],
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap()
+}
+
+#[test]
+fn g1_interface_and_two_bulk_layers_share_the_actual_thermal_substeps() {
+    let liquid = conducting_card(1.0);
+    let solid = wall_card(0.5, 500.0);
+    let chart = wall_chart(&solid);
+    let context = point(450.0);
+    let source = interface_card(&liquid, &solid, 1e-5, 500.0, false);
+    let source_point = interface_point();
+    let binding = interface(&liquid, &solid, &source, &source_point);
+    with_liquid(&liquid, false, |thermal, gate| {
+        let mut bodies = [wall(&solid, &chart, &context, 450.0)];
+        let before = thermal.total_enthalpy_j().unwrap() + bodies[0].enthalpy_j();
+        let report = thermal
+            .step_with_body_interfaces(
+                &[],
+                &[],
+                controls(),
+                &mut bodies,
+                &[contact()],
+                &[binding],
+                &[],
+                gate,
+            )
+            .unwrap();
+        let (mut tl, mut ts) = (400.0, 450.0);
+        let mut applied_g = 0.0;
+        for _ in 0..4 {
+            let resistance = 1e-5 * (1.0 + (0.5 * (tl + ts) - 300.0) / 200.0);
+            applied_g = 1e-6 / (0.0005 / (tl - 200.0) + 0.0005 / (0.5 * (ts - 200.0)) + resistance);
+            let q = 0.00025 * applied_g * (ts - tl);
+            tl += q / 0.002;
+            ts -= q / 0.001;
+        }
+        assert_eq!(report.thermal.substeps, 4);
+        assert_eq!(report.flow.external_heat_j, 0.0);
+        let body_report = report.bodies.unwrap();
+        near(
+            body_report.last_applied[0].conductance_w_k,
+            applied_g,
+            2e-13,
+        );
+        near(
+            temperature(thermal.material_at(WALL_LIQUID).unwrap()),
+            tl,
+            2e-13,
+        );
+        near(
+            bodies[0].specific_enthalpy_j_kg(),
+            (ts - 300.0) * 500.0,
+            2e-13,
+        );
+        let endpoint = body_report.thermal_endpoint[0].interface.as_ref().unwrap();
+        assert_eq!(endpoint.card_identity(), source.content_hash());
+        near(endpoint.state_coordinate("liquidT").unwrap(), tl, 2e-13);
+        near(endpoint.state_coordinate("solidT").unwrap(), ts, 2e-13);
+        near(
+            endpoint.state_coordinate("meanT").unwrap(),
+            0.5 * (tl + ts),
+            2e-13,
+        );
+        near(
+            thermal.total_enthalpy_j().unwrap() + bodies[0].enthalpy_j(),
+            before,
+            2e-12,
+        );
+        assert!(body_report.combined_balance_defect_j.abs() < 1e-9);
+    });
+}
+
+#[test]
+fn g3_interface_data_changes_liquid_material_state_and_native_motion() {
+    let run = |resistance| {
+        let liquid = conducting_card(1.0);
+        let solid = wall_card(1.0, 500.0);
+        let chart = wall_chart(&solid);
+        let context = point(450.0);
+        let source = interface_card(&liquid, &solid, resistance, 500.0, false);
+        let source_point = interface_point();
+        let binding = interface(&liquid, &solid, &source, &source_point);
+        with_liquid(&liquid, true, |thermal, gate| {
+            let mut bodies = [wall(&solid, &chart, &context, 450.0)];
+            let before = thermal.total_enthalpy_j().unwrap() + bodies[0].enthalpy_j();
+            for _ in 0..3 {
+                thermal
+                    .step_with_body_interfaces(
+                        &[],
+                        &[],
+                        controls(),
+                        &mut bodies,
+                        &[contact()],
+                        std::slice::from_ref(&binding),
+                        &[],
+                        gate,
+                    )
+                    .unwrap();
+            }
+            near(
+                thermal.total_enthalpy_j().unwrap() + bodies[0].enthalpy_j(),
+                before,
+                2e-11,
+            );
+            (
+                thermal.flow().lattice().grid().state_bits(),
+                temperature(thermal.material_at(WALL_LIQUID).unwrap()),
+                thermal
+                    .material_at(WALL_LIQUID)
+                    .unwrap()
+                    .dynamic_viscosity_pa_s(),
+                bodies[0].specific_enthalpy_j_kg(),
+            )
+        })
+    };
+    let conductive = run(1e-6);
+    let resistive = run(1e-3);
+    assert_ne!(
+        conductive.0, resistive.0,
+        "interface data must reach native populations"
+    );
+    assert!(conductive.1 > resistive.1);
+    assert!(conductive.2 < resistive.2);
+    assert!(conductive.3 < resistive.3);
+}
+
+#[test]
+fn g4_interface_support_exit_does_not_switch_claims_or_publish_either_body() {
+    let liquid = conducting_card(1.0);
+    let solid = wall_card(1.0, 500.0);
+    let chart = wall_chart(&solid);
+    let context = point(450.0);
+    // A replacement exists at warmer liquid temperatures. The source selected
+    // at 400 K is pinned, so the actual first heat increment must still refuse.
+    let source = interface_card(&liquid, &solid, 1e-5, 400.0, true);
+    let source_point = interface_point();
+    let binding = interface(&liquid, &solid, &source, &source_point);
+    with_liquid(&liquid, true, |thermal, gate| {
+        let mut bodies = [wall(&solid, &chart, &context, 450.0)];
+        let bits = thermal.flow().lattice().grid().state_bits();
+        let energy = thermal.total_enthalpy_j().unwrap();
+        let body_h = bodies[0].specific_enthalpy_j_kg();
+        let body_source = bodies[0].material().clone();
+        for interfaces in [
+            vec![binding.clone(), binding.clone()],
+            vec![binding.clone()],
+        ] {
+            assert!(
+                thermal
+                    .step_with_body_interfaces(
+                        &[],
+                        &[],
+                        controls(),
+                        &mut bodies,
+                        &[contact()],
+                        &interfaces,
+                        &[],
+                        gate
+                    )
+                    .is_err()
+            );
+            assert_eq!(thermal.flow().lattice().grid().state_bits(), bits);
+            assert_eq!(thermal.total_enthalpy_j().unwrap(), energy);
+            assert_eq!(bodies[0].specific_enthalpy_j_kg(), body_h);
+            assert_eq!(bodies[0].material(), &body_source);
+        }
+        let cancelled = CancelGate::new_clock_free();
+        cancelled.request();
+        assert!(
+            thermal
+                .step_with_body_interfaces(
+                    &[],
+                    &[],
+                    controls(),
+                    &mut bodies,
+                    &[contact()],
+                    &[binding],
+                    &[],
+                    &cancelled
+                )
+                .is_err()
+        );
+        assert_eq!(thermal.flow().lattice().grid().state_bits(), bits);
+        assert_eq!(bodies[0].specific_enthalpy_j_kg(), body_h);
+    });
 }
 
 #[test]
@@ -327,6 +640,9 @@ fn g4_native_flow_refusal_discards_completed_solid_liquid_exchange() {
     let solid = wall_card(1.0, 500.0);
     let solid_chart = wall_chart(&solid);
     let context = point(450.0);
+    let interface_source = interface_card(&liquid, &solid, 1e-5, 500.0, false);
+    let interface_context = interface_point();
+    let binding = interface(&liquid, &solid, &interface_source, &interface_context);
     let gate = CancelGate::new_clock_free();
     with_cx(&gate, |cx| {
         let flow = plan_free_surface_from_material(&source, 0.001, 0.001, 0.1)
@@ -351,7 +667,7 @@ fn g4_native_flow_refusal_discards_completed_solid_liquid_exchange() {
         let body_h = bodies[0].specific_enthalpy_j_kg();
         let body_source = bodies[0].material().clone();
         assert!(matches!(
-            thermal.step_with_body_conduction(
+            thermal.step_with_body_interfaces(
                 &[],
                 &[],
                 FreeSurfaceConductionControls {
@@ -360,6 +676,8 @@ fn g4_native_flow_refusal_discards_completed_solid_liquid_exchange() {
                 },
                 &mut bodies,
                 &[contact()],
+                &[binding],
+                &[],
                 &gate,
             ),
             Err(FreeSurfaceEnthalpyError::Flow(_))
@@ -377,6 +695,9 @@ fn g1_body_exchange_external_heat_and_viscous_heat_are_distinct_accounts() {
     let solid = wall_card(1.0, 500.0);
     let chart = wall_chart(&solid);
     let context = point(450.0);
+    let interface_source = interface_card(&liquid, &solid, 1e-5, 500.0, false);
+    let interface_context = interface_point();
+    let binding = interface(&liquid, &solid, &interface_source, &interface_context);
     with_liquid(&liquid, true, |thermal, gate| {
         let mut bodies = [wall(&solid, &chart, &context, 450.0)];
         let before = thermal.total_enthalpy_j().unwrap() + bodies[0].enthalpy_j();
@@ -384,7 +705,7 @@ fn g1_body_exchange_external_heat_and_viscous_heat_are_distinct_accounts() {
         let mut molecular = 0.0;
         for _ in 0..3 {
             let report = thermal
-                .step_with_body_conduction_and_viscous_heating(
+                .step_with_body_interfaces_and_viscous_heating(
                     &[],
                     &[FreeSurfaceCellHeat {
                         coordinates: [6, 6, 6],
@@ -393,6 +714,8 @@ fn g1_body_exchange_external_heat_and_viscous_heat_are_distinct_accounts() {
                     controls(),
                     &mut bodies,
                     &[contact()],
+                    std::slice::from_ref(&binding),
+                    &[],
                     gate,
                 )
                 .unwrap();

@@ -61,7 +61,10 @@ pub struct FreeSurfaceBodyContactSample {
     pub liquid: ResolvedLiquidState,
     /// Original pinned solid conductivity source at its current h.
     pub body: ResolvedMaterialStatePoint,
-    /// Total series conductance of the declared solid/liquid layers [W/K].
+    /// Original ordered interface at the SAME two caloric states. None is the
+    /// explicitly selected zero-contact-resistance approximation.
+    pub interface: Option<fs_material::state_point::ResolvedInterfaceStatePoint>,
+    /// Total series conductance of the bulk layers and any interface [W/K].
     pub conductance_w_k: f64,
 }
 
@@ -270,7 +273,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         contacts: &[FreeSurfaceBodyContact],
         gate: &CancelGate,
     ) -> Result<FreeSurfaceConductionReport, Error> {
-        self.advance_with_thermal_bodies(faces, heat, controls, &[], bodies, contacts, gate)
+        self.advance_with_thermal_bodies(faces, heat, controls, &[], bodies, contacts, &[], gate)
     }
 
     /// The same finite-body exchange with the original molecular heating owner.
@@ -285,8 +288,16 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         gate: &CancelGate,
     ) -> Result<viscous::FreeSurfaceViscousConductionReport, Error> {
         let applied = self.viscous_sources(gate)?;
-        let conduction = self
-            .advance_with_thermal_bodies(faces, heat, controls, &applied, bodies, contacts, gate)?;
+        let conduction = self.advance_with_thermal_bodies(
+            faces,
+            heat,
+            controls,
+            &applied,
+            bodies,
+            contacts,
+            &[],
+            gate,
+        )?;
         Ok(viscous::FreeSurfaceViscousConductionReport {
             conduction,
             applied,

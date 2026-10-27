@@ -113,7 +113,8 @@ and stationary solid geometry are caller-supplied physical data; each native
 wall face occurs once. The original thermal owner checks total surface
 coverage and applies the two material half-cell resistances in series to both
 the heat exchange and CFL bound. Undeclared surfaces remain insulated. Contact
-resistance is explicitly neglected, not inferred from the material names.
+resistance is explicitly neglected by this entry point; the source-bound
+interface entry below supplies it without replacing either bulk layer.
 
 Solid and liquid storage share the SAME substeps. Their exchange is internal
 in the combined thermal audit; `flow.body_heat_j` records the signed transfer
@@ -134,6 +135,39 @@ experimental validation. Focused tests in
 two-material heat/storage calculations, data-only substitutions and exact
 insulation reduction; they also exercise source/cancellation and late native
 flow refusals of the complete solid/liquid transaction.
+
+### Ordered interface materials between finite walls and moving liquid
+
+`step_with_body_interfaces` and its viscous-heating counterpart add the original
+ordered `InterfaceSystemCard` through `FreeSurfaceBodyInterface`. The common
+`ThermalInterfacePoint::resolve_resistance` selects one positive area-specific
+resistance [m2 K/W] at the actual initial liquid/solid caloric states. Each
+thermal substep and endpoint refreshes that same selected source with each
+side's own temperature (and declared phase coordinates), retaining the complete
+surface/medium/history context. Source support cannot silently switch claims.
+Pressure and other external conditions stay explicitly prescribed.
+
+The shared `fs-thermal::enthalpy::series_contact_conductance_w_k` composes
+`A / (d_liquid/k_liquid + R'' + d_solid/k_solid)`. This SAME conductance supplies
+both thermal exchange and the existing explicit stability limit. The original
+finite stores, native mass-route enthalpy transport, viscosity and optional
+material buoyancy therefore respond to interface-data substitutions. Pair heat
+remains internal; molecular heat and external supply retain separate accounts.
+The interface entry points also accept the existing environmental gas patches,
+so wall contact, gas exchange and molecular heating share one source timeline
+and combined thermal step bound. Gas heat remains external; wall exchange is
+internal. Applied/endpoint samples keep the original interface receipt alongside
+both bulk material states. A zero-area/insulated patch still queries its interface;
+omitting an interface binding explicitly retains the historical zero-resistance
+approximation. Duplicate or absent contact indices refuse before advancement.
+
+All thermal, source, endpoint, native-flow and cancellation gates precede joint
+publication. Fixed geometry, negligible contact storage, pure liquid and
+neglected capillarity remain the physical scope. This does not infer contact
+pressure, wetting area, gas heat exchange or a melting-solid handoff. Focused
+G1/G3/G4 tests in the existing finite-body suite compare independent three-layer
+heat calculations, actual interface-data changes in VOF populations, pinned
+source-domain exits and rollback; synthetic fixtures are not experimental data.
 
 ### Environmental gas heat reaches the moving liquid
 

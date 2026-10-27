@@ -135,7 +135,6 @@ pub struct ThermalLink {
     pub conductance_w_k: f64,
 }
 
-
 /// Bulk conductance [W/K] of two homogeneous isotropic layers in series.
 ///
 /// Distances are positive layer thicknesses [m], conductivity is [W/(m K)],
@@ -148,9 +147,26 @@ pub fn series_conductance_w_k(
     distances_m: [f64; 2],
     conductivity_w_m_k: [f64; 2],
 ) -> Result<f64, DepositionError> {
+    series_contact_conductance_w_k(area_m2, distances_m, conductivity_w_m_k, 0.0)
+}
+
+/// Conductance of the same two bulk layers plus one interface in series.
+///
+/// `area_resistance_m2_k_w` is the source-resolved area-specific contact
+/// resistance [m² K/W]. Zero explicitly omits that interface resistance and
+/// retains the original two-layer arithmetic. The caller owns the ordered
+/// materials, source support and physical contact geometry. Invalid resistance
+/// refuses even for an explicitly insulated face.
+pub fn series_contact_conductance_w_k(
+    area_m2: f64,
+    distances_m: [f64; 2],
+    conductivity_w_m_k: [f64; 2],
+    area_resistance_m2_k_w: f64,
+) -> Result<f64, DepositionError> {
     if !nonnegative(area_m2)
         || !distances_m.into_iter().all(positive)
         || !conductivity_w_m_k.into_iter().all(nonnegative)
+        || !nonnegative(area_resistance_m2_k_w)
     {
         return Err(DepositionError::InvalidInput(
             "series conduction needs finite area/conductivity and positive distances",
@@ -161,7 +177,12 @@ pub fn series_conductance_w_k(
     }
     let ra = finite(distances_m[0] / conductivity_w_m_k[0])?;
     let rb = finite(distances_m[1] / conductivity_w_m_k[1])?;
-    let total = finite(ra + rb)?;
+    let bulk = finite(ra + rb)?;
+    let total = if area_resistance_m2_k_w == 0.0 {
+        bulk
+    } else {
+        finite(bulk + area_resistance_m2_k_w)?
+    };
     let conductance = finite(area_m2 / total)?;
     if ra <= 0.0 || rb <= 0.0 || total <= 0.0 || conductance <= 0.0 {
         return Err(DepositionError::InvalidInput(
@@ -608,6 +629,27 @@ mod tests {
         assert!(series_conductance_w_k(0.0, [f64::NAN, 1.0], [0.0, 1.0]).is_err());
         assert!(series_conductance_w_k(1.0, [1.0; 2], [-1.0, 1.0]).is_err());
         assert!(series_conductance_w_k(1.0, [f64::MIN_POSITIVE; 2], [f64::MAX; 2],).is_err());
+    }
+
+    #[test]
+    fn contact_resistance_composes_once_with_bulk_and_checks_insulated_inputs() {
+        let bulk = series_conductance_w_k(6.0, [0.25, 0.5], [12.0, 10.0]).unwrap();
+        let zero = series_contact_conductance_w_k(6.0, [0.25, 0.5], [12.0, 10.0], 0.0).unwrap();
+        assert_eq!(bulk.to_bits(), zero.to_bits());
+        let contact = series_contact_conductance_w_k(6.0, [0.25, 0.5], [12.0, 10.0], 0.1).unwrap();
+        close(
+            1.0 / contact,
+            0.25 / (6.0 * 12.0) + 0.5 / (6.0 * 10.0) + 0.1 / 6.0,
+            1e-14,
+        );
+        assert!(contact < bulk);
+        assert_eq!(
+            series_contact_conductance_w_k(0.0, [1.0; 2], [1.0; 2], 0.1),
+            Ok(0.0)
+        );
+        for invalid in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(series_contact_conductance_w_k(0.0, [1.0; 2], [1.0; 2], invalid).is_err());
+        }
     }
 
     struct Sensible;

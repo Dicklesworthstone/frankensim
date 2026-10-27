@@ -198,6 +198,9 @@ fn g1_environment_wall_molecular_and_authored_heat_share_one_account() {
     let solid = body::wall_card(0.5, 500.0);
     let chart = body::wall_chart(&solid);
     let context = point(450.0);
+    let contact_source = body::interface_card(&liquid, &solid, 1e-5, 500.0, false);
+    let contact_point = body::interface_point();
+    let binding = body::interface(&liquid, &solid, &contact_source, &contact_point);
     with_exposed_liquid(&liquid, true, |thermal, gate| {
         let mut bodies = [body::wall(&solid, &chart, &context, 450.0)];
         let before = thermal.total_enthalpy_j().unwrap() + bodies[0].enthalpy_j();
@@ -206,20 +209,28 @@ fn g1_environment_wall_molecular_and_authored_heat_share_one_account() {
             energy_j: 0.001,
         };
         let report = thermal
-            .step_with_gas_environment(
+            .step_with_body_interfaces_and_viscous_heating(
                 &[],
                 &[heat],
                 controls(),
                 &mut bodies,
                 &[body::contact()],
+                std::slice::from_ref(&binding),
                 &[gas_contact(&gas, &gas_point)],
-                true,
                 gate,
             )
             .unwrap()
             .conduction;
         let environment = report.environment.unwrap();
         let wall = report.bodies.unwrap();
+        assert_eq!(
+            wall.last_applied[0]
+                .interface
+                .as_ref()
+                .unwrap()
+                .card_identity(),
+            contact_source.content_hash(),
+        );
         assert!(environment.heat_to_liquid_j < 0.0);
         assert!(wall.heat_to_liquid_j > 0.0);
         assert!(report.flow.viscous_heat_j > 0.0);

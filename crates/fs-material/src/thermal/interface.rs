@@ -6,6 +6,13 @@ use fs_matdb::{InterfaceSystemCard, MaterialCard, QueryPoint};
 use fs_qty::{Dims, QuantitySpec, Temperature};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 
+/// Canonical ordered-interface resistance property, shared by spatial and
+/// finite-cell thermal consumers [m² K/W].
+pub const AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY: &str =
+    "area-specific-thermal-contact-resistance";
+/// SI dimensions of area-specific thermal resistance [m² K/W].
+pub const AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS: Dims = Dims([0, -1, 3, 1, 0, 0]);
+
 /// Original ordered surfaces, interface source and explicit evolving coordinates.
 #[derive(Clone, Copy, Debug)]
 pub struct ThermalInterfacePoint<'a> {
@@ -27,6 +34,55 @@ pub struct ThermalInterfacePoint<'a> {
 }
 
 impl ThermalInterfacePoint<'_> {
+    /// Resolve a static resistance from the original ordered interface at the
+    /// actual two caloric states. Temperature and phase remain distinct on the
+    /// two sides; fixed pressure/medium/history conditions are never inferred.
+    /// The returned bundle can refresh the same selected claim with
+    /// `at_query_point`, without selecting a replacement at a support boundary.
+    pub fn resolve_resistance(
+        &self,
+        states: [EquilibriumPhaseState; 2],
+        selection: crate::state_point::MaterialPropertySelection,
+    ) -> Result<crate::state_point::ResolvedInterfaceStatePoint, ThermalMaterialError> {
+        use crate::state_point::{
+            ScalarAdmissibility, ScalarPropertyRequirement, resolve_interface_state_point,
+        };
+        let point = self.at(states)?;
+        let requirement = ScalarPropertyRequirement::try_new(
+            AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
+            AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
+            ScalarAdmissibility::StrictlyPositive,
+        )
+        .map_err(ThermalMaterialError::Material)?;
+        let resolved =
+            resolve_interface_state_point(self.interface, &point, &[requirement], selection)
+                .map_err(ThermalMaterialError::Material)?;
+        let property = &resolved.properties()[0];
+        if !property
+            .source_axes()
+            .iter()
+            .all(|(axis, dims)| self.is_response_axis(axis, *dims))
+            || property
+                .angular_frequency_band_rad_s()
+                .map_err(ThermalMaterialError::Material)?
+                .is_some_and(|(low, _)| low > 0.0)
+            || point.axes().iter().any(|(axis, value)| {
+                (axis == "omega"
+                    || point
+                        .axis_quantities()
+                        .get(axis)
+                        .and_then(|q| q.semantic_type())
+                        .is_some_and(|s| matches!(s.kind(), QuantityKind::Frequency(_))))
+                    && *value != 0.0
+            })
+        {
+            return Err(ThermalMaterialError::Invalid(
+                "contact resistance needs static response in owned thermal/phase or typed fixed external coordinates",
+            ));
+        }
+        Ok(resolved)
+    }
+
     /// Rebind only the declared axes, using the SAME bulk-state coordinate owner.
     /// Both phase identities and ordered surface identities are checked before
     /// any property is queried. Aliased axes refuse instead of losing a side.

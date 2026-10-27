@@ -11,7 +11,7 @@ use super::*;
 use fs_conduction::enthalpy::{
     Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionError,
     DepositionObserver, DepositionSimulation, EnergyAudit, Event, MaterialId, StepConfig,
-    ThermalLaw, ThermalLink, TimedEvent, series_conductance_w_k,
+    ThermalLaw, ThermalLink, TimedEvent, series_conductance_w_k, series_contact_conductance_w_k,
 };
 
 /// Finite source-bound solid cells exchanging heat with native stationary walls.
@@ -26,6 +26,10 @@ pub use environment::{
     FreeSurfaceGasContact, FreeSurfaceGasExchange, FreeSurfaceGasFace, FreeSurfaceGasSample,
 };
 use fs_material::state_point::ResolvedMaterialStatePoint;
+
+/// Source-bound resistance at an ordered liquid/solid thermal contact.
+pub mod interface;
+pub use interface::FreeSurfaceBodyInterface;
 
 /// Actual wet geometry of one face at the beginning of this flow step.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -97,6 +101,7 @@ struct Conduction<'a, 'm> {
     bodies: &'a [FreeSurfaceThermalBody<'m>],
     body_ids: Vec<CellId>,
     contacts: &'a [FreeSurfaceBodyContact],
+    interfaces: BTreeMap<usize, &'a FreeSurfaceBodyInterface<'a>>,
     contact_endpoints: Vec<(CellId, usize)>,
     powers: BTreeMap<CellId, f64>,
     last: Vec<FreeSurfaceConductionSample>,
@@ -170,24 +175,51 @@ impl Conduction<'_, '_> {
             bodies.push(body.resolve(thermal.cells()[&id].specific_h_j_kg)?);
         }
         let mut contacts = Vec::with_capacity(self.contacts.len());
-        for (&contact, &(liquid_id, body_index)) in
-            self.contacts.iter().zip(&self.contact_endpoints)
+        for (index, (&contact, &(liquid_id, body_index))) in self
+            .contacts
+            .iter()
+            .zip(&self.contact_endpoints)
+            .enumerate()
         {
             check()?;
             let liquid = states[&liquid_id].clone();
             let body = bodies[body_index].clone();
-            let conductance_w_k = series_conductance_w_k(
+            let interface = self
+                .interfaces
+                .get(&index)
+                .map(|binding| {
+                    binding.at([
+                        self.caloric.state_at_specific_enthalpy(
+                            thermal.cells()[&liquid_id].specific_h_j_kg,
+                        )?,
+                        self.bodies[body_index]
+                            .caloric()
+                            .state_at_specific_enthalpy(
+                                thermal.cells()[&self.body_ids[body_index]].specific_h_j_kg,
+                            )?,
+                    ])
+                })
+                .transpose()?;
+            let resistance = interface.as_ref().map_or(0.0, |source| {
+                source
+                    .property(interface::AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY)
+                    .expect("required interface resistance")
+                    .value_si()
+            });
+            let conductance_w_k = series_contact_conductance_w_k(
                 contact.area_m2,
                 contact.distances_m,
                 [
                     liquid.thermal_conductivity_w_m_k(),
                     self.bodies[body_index].conductivity(&body),
                 ],
+                resistance,
             )?;
             contacts.push(FreeSurfaceBodyContactSample {
                 contact,
                 liquid,
                 body,
+                interface,
                 conductance_w_k,
             });
         }
@@ -325,7 +357,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         viscous: &[viscous::FreeSurfaceViscousCell],
         gate: &CancelGate,
     ) -> Result<FreeSurfaceConductionReport, Error> {
-        self.advance_with_thermal_bodies(faces, heat, controls, viscous, &mut [], &[], gate)
+        self.advance_with_thermal_bodies(faces, heat, controls, viscous, &mut [], &[], &[], gate)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -337,9 +369,20 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         viscous: &[viscous::FreeSurfaceViscousCell],
         bodies: &mut [FreeSurfaceThermalBody<'_>],
         contacts: &[FreeSurfaceBodyContact],
+        interfaces: &[FreeSurfaceBodyInterface<'_>],
         gate: &CancelGate,
     ) -> Result<FreeSurfaceConductionReport, Error> {
-        self.advance_with_environment(faces, heat, controls, viscous, bodies, contacts, &[], gate)
+        self.advance_with_interfaces_and_environment(
+            faces,
+            heat,
+            controls,
+            viscous,
+            bodies,
+            contacts,
+            interfaces,
+            &[],
+            gate,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -351,6 +394,32 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         viscous: &[viscous::FreeSurfaceViscousCell],
         bodies: &mut [FreeSurfaceThermalBody<'_>],
         contacts: &[FreeSurfaceBodyContact],
+        environment: &[FreeSurfaceGasContact<'_>],
+        gate: &CancelGate,
+    ) -> Result<FreeSurfaceConductionReport, Error> {
+        self.advance_with_interfaces_and_environment(
+            faces,
+            heat,
+            controls,
+            viscous,
+            bodies,
+            contacts,
+            &[],
+            environment,
+            gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_with_interfaces_and_environment(
+        &mut self,
+        faces: &[FreeSurfaceConductionFace],
+        heat: &[FreeSurfaceCellHeat],
+        controls: FreeSurfaceConductionControls,
+        viscous: &[viscous::FreeSurfaceViscousCell],
+        bodies: &mut [FreeSurfaceThermalBody<'_>],
+        contacts: &[FreeSurfaceBodyContact],
+        interfaces: &[FreeSurfaceBodyInterface<'_>],
         environment: &[FreeSurfaceGasContact<'_>],
         gate: &CancelGate,
     ) -> Result<FreeSurfaceConductionReport, Error> {
@@ -373,6 +442,24 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             return Err(Error::Invalid(
                 "invalid liquid-conduction work or time/energy bounds",
             ));
+        }
+        let mut interface_contacts = BTreeMap::new();
+        if interfaces.len() > contacts.len() {
+            return Err(Error::Invalid(
+                "more interface laws than liquid/solid contacts",
+            ));
+        }
+        for binding in interfaces {
+            poll(gate)?;
+            if binding.contact_index() >= contacts.len()
+                || interface_contacts
+                    .insert(binding.contact_index(), binding)
+                    .is_some()
+            {
+                return Err(Error::Invalid(
+                    "each interface law needs one unique existing contact",
+                ));
+            }
         }
         let dx = self.flow.scaling.cell_size_m();
         let area = dx * dx;
@@ -625,6 +712,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             bodies,
             body_ids: body_ids.clone(),
             contacts,
+            interfaces: interface_contacts,
             contact_endpoints,
             powers,
             last: Vec::new(),
