@@ -83,7 +83,7 @@ async function sendNativeWind(source, attachments, status, options, signal, requ
   if (options.gasSources !== undefined) {
     if (!options.gasSources || typeof options.gasSources !== "object"
         || !Array.isArray(options.gasSources.components) || !options.gasSources.components.length) {
-      throw new Error("Gas sources need explicit species, NASA-9 and transport-claim associations.");
+      throw new Error("Gas sources need explicit species, NASA-9 and transport-pack associations.");
     }
     if (status.supportsGasSources !== true) {
       throw new Error("This local renderer does not support attached gas sources. Update the local server.");

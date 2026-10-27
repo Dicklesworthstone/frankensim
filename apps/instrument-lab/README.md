@@ -114,10 +114,10 @@ qualify an instrument as measured or realistic.
 
 Enable **Use attached thermochemical gas sources** to use the same species
 registry as the native `--gas-component` workflow. Attach each original species
-pack, NASA-9 model pack, and **pure transport claims pack**, then select their
-three paths for each component. The third file is the native CLI's
-`NormalizedPack` of transport claims, not a wrapped
-`NormalizedMaterialCardPack`. Choose the phase policy and enter the canonical
+pack, NASA-9 model pack, and **pure transport material-card pack**, then select
+their three paths for each component. The native loader preserves the full
+`NormalizedMaterialCardPack` identity and provenance; legacy `NormalizedPack`
+transport claims also remain supported. Choose the phase policy and enter the canonical
 water species ID, or explicitly enter `none` when water is absent.
 
 Temperature, pressure, composition and canonical species IDs stay in the
@@ -129,7 +129,7 @@ domain checks remain authoritative. The liquid-water option retains the
 existing saturation admission check; it does not add condensation dynamics.
 
 The companion forwards only the declared component triples as
-`--gas-component SPECIES NASA9 TRANSPORT-CLAIMS`, plus explicit `--gas-water`
+`--gas-component SPECIES NASA9 TRANSPORT`, plus explicit `--gas-water`
 and `--gas-phase` options. Every path must also name an attached file. The native
 gas loader reads those components from the same frozen attachment byte map as
 wall and reed materials. Unlisted files cannot fall through to the host

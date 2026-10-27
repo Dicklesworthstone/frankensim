@@ -138,6 +138,12 @@ scope law, pinned as data and by test).
   the audio-rate convolution weights in seconds for a mouth velocity
   linear between samples (`g_0` multiplies the current sample, the
   weights end one sample after the window and sum to the held gain).
+  `interval_hat_weights` integrates this SAME interpolant's derivative
+  against both physical-time endpoint hats on a supplied convective interval.
+  It returns newer/older weights in seconds, leaves the held tail inactive,
+  and refuses invalid ages, advances or durations. At uniform spacing,
+  adjacent interval weights recompose the existing hat weights. The consumer
+  owns the accepted clock history; this method adds no variable-Re flow law.
   Refuses non-power-of-two or short boxes (`length < window + 8`), an
   explicit viscous number `4 dt / (Re dx^2)` above 2, stations outside
   the box, and non-finite results.
@@ -413,10 +419,11 @@ non-overlapping pair averaging annihilates the period-2 line exactly,
 keeps a tone's bin index and Strouhal (record duration unchanged; the
 pipeline Strouhal is halved), refuses odd/short records.
 
-`tests/forced_jet.rs` (5, minutes-class): the published spatial mode
+`tests/forced_jet.rs` (6, full suite minutes-class): the published spatial mode
 downstream; step kernel against harmonic forcing; the dx 0.2/0.1/0.05
 ladder and worker-count bits; box and band invariance; hat weights and
-the causality admission against a pure delay (invariant 14).
+the causality admission against a pure delay (invariant 14); local interval
+weights against uniform hats at three clocks, tail support and invalid clocks.
 
 `tests/aeroac.rs` (11): Wronskian identity; derivative cross-checks;
 fsci-special oracle; small-argument limits; Hankel far-field

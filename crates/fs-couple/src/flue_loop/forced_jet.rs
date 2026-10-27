@@ -1,6 +1,6 @@
 //! The forced Bickley jet's causal response ([`fs_aeroac::forced_jet`]) as the island's labium
-//! displacement (rulings 7376 and 7518; beads pexfp.135/.138/.321). The displacement at the
-//! labium is `eta_n = sum_k g_k v_(n-k)` [m], where `v` is the exit transverse velocity: the mouth
+//! displacement (rulings 7376 and 7518; beads pexfp.135/.138/.321). At constant speed the
+//! labium displacement is `eta_n = sum_k g_k v_(n-k)` [m], where `v` is the exit transverse velocity: the mouth
 //! velocity `q / S_m` plus the onset seed. `g_k` [s] are the hat weights of one integrated step
 //! response, and `g_0` multiplies the current mouth velocity, which is still unknown inside the
 //! same-sample solve. It is opt-in by name and replaces the island's band chain and authored
@@ -14,8 +14,15 @@
 //! - No windway (a lip jet of uniform speed) gives `b = 0.75 h` and `U0 = U`.
 //!
 //! The station is `cut-up / b`. The step response is integrated once, at the Reynolds number
-//! `U0 b / nu` of the reference (held) pressure. Its time axis follows the actual jet speed on
-//! every sample.
+//! `U0 b / nu` of the reference (held) pressure. At variable speed its clock is
+//! `tau(t) = integral U0(t) / b dt`: each accepted interval retains its own advance.
+//! A new speed never retroactively rescales old input intervals. This is the explicit
+//! frozen-response extension `dz/dt = (U0(t)/b) A z + B v`, with the SAME fixed-Re
+//! operator A and physical transverse velocity v, not a new variable-Re flow solve.
+//! Velocity is linear within each mechanical interval and speed is held on that interval.
+//! At zero speed the jet output/forcing is disabled and this response's clock freezes;
+//! molecular decay of a stopped jet is outside this fixed-Re image. A trajectory with
+//! constant positive speed from rest retains the original cached hat arithmetic exactly.
 //!
 //! Not claimed:
 //! - The base jet's own spreading over the cut-up.
@@ -86,7 +93,15 @@ pub struct ForcedJetSpec {
     pub window: f64,
 }
 
-/// The integrated response, its jet scales and the retained exit velocities.
+/// One accepted physical-time velocity interval and its convective-clock advance.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct JetInterval {
+    start_velocity_m_s: f64,
+    end_velocity_m_s: f64,
+    advance: f64,
+}
+
+/// The integrated response, its jet scales and the retained exit-velocity intervals.
 #[derive(Debug, Clone)]
 pub struct ForcedJetKernel {
     spec: ForcedJetSpec,
@@ -95,8 +110,16 @@ pub struct ForcedJetKernel {
     centre_over_bulk: f64,
     reynolds: f64,
     dt: f64,
-    ring: Vec<f64>,
+    minimum_bulk_m_s: f64,
+    ring: Vec<JetInterval>,
     head: usize,
+    used: usize,
+    last_velocity_m_s: f64,
+    uniform_bulk_bits: Option<u64>,
+    uniform_intervals: usize,
+    nonuniform_history: bool,
+    prepared_bulk_bits: u64,
+    prepared_advance: f64,
     weights: Vec<f64>,
     weights_bulk_bits: u64,
     current: (f64, f64),
@@ -190,8 +213,16 @@ impl ForcedJetKernel {
             centre_over_bulk,
             reynolds,
             dt: sample_period_s,
-            ring: vec![0.0; slowest],
+            minimum_bulk_m_s,
+            ring: vec![JetInterval::default(); slowest],
             head: 0,
+            used: 0,
+            last_velocity_m_s: 0.0,
+            uniform_bulk_bits: None,
+            uniform_intervals: 0,
+            nonuniform_history: false,
+            prepared_bulk_bits: 0,
+            prepared_advance: 0.0,
             weights: Vec::new(),
             weights_bulk_bits: 0,
             current: (0.0, 0.0),
@@ -234,34 +265,74 @@ impl ForcedJetKernel {
         self.half_width_m / (self.centre_over_bulk * bulk_m_s) * self.step.held_gain()
     }
 
-    /// Prepare this sample at bulk speed `bulk_m_s`: the displacement's known part [m] from the
-    /// retained exit velocities and the current-velocity weight `g_0` [s], kept for
-    /// [`Self::current`]. A still jet displaces nothing.
+    /// Prepare the known displacement [m] and current-velocity coefficient [s].
+    /// Accepted intervals keep their individual convective ages when speed changes.
+    /// Repeated trials do not advance the clock or publish any velocity.
+    ///
+    /// A still jet emits no displacement and does not advance this fixed-Re clock.
     ///
     /// # Errors
-    /// A jet slower than the retained history admits.
+    /// Nonfinite/negative speed, a positive speed below the declared minimum,
+    /// or nonfinite response. A refusal leaves the accepted history unchanged.
     pub fn prepare(&mut self, bulk_m_s: f64) -> Result<(f64, f64), &'static str> {
+        if !bulk_m_s.is_finite() || bulk_m_s < 0.0 {
+            return Err("forced jet speed must be finite and nonnegative");
+        }
         if bulk_m_s == 0.0 {
+            self.prepared_bulk_bits = 0;
+            self.prepared_advance = 0.0;
             self.current = (0.0, 0.0);
             return Ok(self.current);
         }
-        if bulk_m_s.to_bits() != self.weights_bulk_bits || self.weights.is_empty() {
-            self.weights = self
-                .step
-                .hat_weights(self.centre_over_bulk * bulk_m_s, self.half_width_m, self.dt)
-                .map_err(refusal)?;
-            self.weights_bulk_bits = bulk_m_s.to_bits();
-        }
-        let n = self.ring.len();
-        if self.weights.len() > n {
+        if bulk_m_s < self.minimum_bulk_m_s {
             return Err("jet is slower than its retained forced-jet history");
         }
-        let mut known = 0.0;
-        for (k, g) in self.weights.iter().enumerate().skip(1) {
-            known += g * self.ring[(self.head + n - k) % n];
+        let bits = bulk_m_s.to_bits();
+        let advance = self.centre_over_bulk * bulk_m_s * self.dt / self.half_width_m;
+        if !advance.is_finite() || advance <= 0.0 {
+            return Err("forced jet convective advance must be finite and positive");
         }
-        self.current = (known, self.weights[0]);
-        Ok(self.current)
+        let n = self.ring.len();
+        let current = if !self.nonuniform_history
+            && self.uniform_bulk_bits.is_none_or(|old| old == bits)
+        {
+            // Keep the original summation and interpolation for a uniformly moving jet.
+            if bits != self.weights_bulk_bits || self.weights.is_empty() {
+                self.weights = self.step
+                    .hat_weights(self.centre_over_bulk * bulk_m_s, self.half_width_m, self.dt)
+                    .map_err(refusal)?;
+                self.weights_bulk_bits = bits;
+            }
+            if self.weights.len() > n {
+                return Err("jet is slower than its retained forced-jet history");
+            }
+            let mut known = 0.0;
+            for (k, g) in self.weights.iter().enumerate().skip(1) {
+                known += g * self.ring[(self.head + n - k) % n].end_velocity_m_s;
+            }
+            (known, self.weights[0])
+        } else {
+            let (current_weight, previous_weight) = self.step
+                .interval_hat_weights(0.0, advance, self.dt).map_err(refusal)?;
+            let mut known = previous_weight * self.last_velocity_m_s;
+            let mut age = advance;
+            for k in 0..self.used {
+                if age >= self.step.window() { break; }
+                let interval = self.ring[(self.head + n - 1 - k) % n];
+                let (newer, older) = self.step
+                    .interval_hat_weights(age, interval.advance, self.dt).map_err(refusal)?;
+                known += newer * interval.end_velocity_m_s + older * interval.start_velocity_m_s;
+                age += interval.advance;
+            }
+            (known, current_weight)
+        };
+        if !current.0.is_finite() || !current.1.is_finite() {
+            return Err("forced jet response left the finite displacement domain");
+        }
+        self.prepared_bulk_bits = bits;
+        self.prepared_advance = advance;
+        self.current = current;
+        Ok(current)
     }
 
     /// The prepared sample's known displacement [m] and current-velocity weight [s]:
@@ -271,9 +342,37 @@ impl ForcedJetKernel {
         self.current
     }
 
-    /// Retain this sample's accepted exit velocity [m/s].
+    /// Commit the prepared interval and its accepted exit velocity [m/s].
+    /// The coupled voice validates velocity before this publication. At rest,
+    /// no velocity is injected; old intervals retain their convective ages.
     pub fn push(&mut self, velocity_m_s: f64) {
-        self.ring[self.head] = velocity_m_s;
+        if self.prepared_advance == 0.0 {
+            self.nonuniform_history |= self.used != 0;
+            self.uniform_intervals = 0;
+            self.last_velocity_m_s = 0.0;
+            return;
+        }
+        let same_speed = self.uniform_bulk_bits == Some(self.prepared_bulk_bits);
+        self.nonuniform_history |= self.uniform_bulk_bits.is_some() && !same_speed;
+        self.uniform_intervals = if same_speed {
+            (self.uniform_intervals + 1).min(self.ring.len())
+        } else { 1 };
+        self.uniform_bulk_bits = Some(self.prepared_bulk_bits);
+        // Once the complete bounded history is uniform again, the original
+        // cached convolution is valid without reinterpreting any old interval.
+        if self.uniform_intervals == self.ring.len() {
+            self.nonuniform_history = false;
+        }
+        self.ring[self.head] = JetInterval {
+            start_velocity_m_s: self.last_velocity_m_s,
+            end_velocity_m_s: velocity_m_s,
+            advance: self.prepared_advance,
+        };
         self.head = (self.head + 1) % self.ring.len();
+        self.used = (self.used + 1).min(self.ring.len());
+        self.last_velocity_m_s = velocity_m_s;
     }
 }
+
+#[cfg(test)]
+mod tests;

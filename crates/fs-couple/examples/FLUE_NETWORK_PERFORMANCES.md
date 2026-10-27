@@ -384,6 +384,22 @@ integrated at grid SPACING [b] over WINDOW [b/U0] at the Reynolds number of the
 gesture's highest blowing pressure, and register physics is graded on 0.1 90. The
 gain is then unused. In network files it excludes `jet_transfer nolle-price-2015`.
 
+During a pressure gesture the response uses the accumulated convective clock
+`tau = integral U0(t)/b dt`. Each accepted physical-time velocity interval keeps
+its own speed and age; changing the pressure no longer retimes the entire past
+using the newest speed. The current velocity remains an affine unknown in the
+same mouth solve. Speed is held and transverse velocity is linear within each
+mechanical interval. A constant positive-speed trajectory retains the original
+hat-weight arithmetic. Zero speed disables forcing/output and freezes this
+response clock without consuming history capacity.
+
+This is an explicit **fixed-Reynolds response approximation**,
+`dz/dt = (U0(t)/b) A z + B v`, using the already integrated operator. It does not
+resolve changing Reynolds number, molecular decay at rest, jet spreading or the
+labium's hydrodynamic reaction. The minimum positive speed, finite response
+window and existing history budget remain binding; no register or acceptance
+gate is relaxed.
+
 The bore declaration is shared with plate valves; see
 [PLATE_VALVE_PERFORMANCES.md](PLATE_VALVE_PERFORMANCES.md) for its numerical
 limits and geometry/gas-field syntax. Static gas/material substitutions rebuild

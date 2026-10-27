@@ -726,6 +726,63 @@ impl JetStepResponse {
         Ok(C64::new(0.0, omega) * sum + C64::new(c, -s).scale(self.held_gain()))
     }
 
+    /// Physical-time endpoint weights [s] of one accepted convective interval.
+    ///
+    /// `younger_age` and `advance` are in the response clock [b/U0]; the interval
+    /// runs from age younger_age+advance to younger_age over physical_duration_s.
+    /// For endpoint velocities (old, new) in m/s, its contribution is
+    /// `older_weight * old + newer_weight * new` metres. This returns
+    /// (newer_weight, older_weight), including the current unknown endpoint.
+    ///
+    /// This is exact for this owner's piecewise-linear step response and a
+    /// physical velocity linear over the interval. It integrates the derivative
+    /// h against both linear hats locally; no large accumulated integrals are
+    /// subtracted. The held response tail has zero derivative and contributes
+    /// no additional impulse. Each interval retains its OWN physical clock scale.
+    ///
+    /// # Errors
+    /// Nonfinite/negative age, nonpositive advance/duration, or nonfinite weights.
+    pub fn interval_hat_weights(
+        &self,
+        younger_age: f64,
+        advance: f64,
+        physical_duration_s: f64,
+    ) -> Result<(f64, f64), AeroacError> {
+        if !younger_age.is_finite() || younger_age < 0.0
+            || !advance.is_finite() || advance <= 0.0
+            || !physical_duration_s.is_finite() || physical_duration_s <= 0.0
+        {
+            return Err(AeroacError::InvalidParameter {
+                what: "forced jet interval needs a finite nonnegative age and positive advance/duration",
+            });
+        }
+        if younger_age >= self.window() { return Ok((0.0, 0.0)); }
+        let spacing = self.time_step;
+        let end = (younger_age + advance).min(self.window());
+        let mut age = younger_age;
+        let mut knot = (age / spacing).floor() as usize;
+        let (mut newer, mut older) = (0.0, 0.0);
+        while age < end && knot + 1 < self.values.len() {
+            let next = (((knot + 1) as f64) * spacing).min(end);
+            if next > age {
+                let impulse = (self.values[knot + 1] - self.values[knot])
+                    * ((next - age) / spacing);
+                let fraction = 0.5
+                    * ((age - younger_age) / advance + (next - younger_age) / advance);
+                newer += impulse * (1.0 - fraction);
+                older += impulse * fraction;
+                age = next;
+            }
+            knot += 1;
+        }
+        let seconds_per_clock = physical_duration_s / advance;
+        let weights = (seconds_per_clock * newer, seconds_per_clock * older);
+        if !weights.0.is_finite() || !weights.1.is_finite() {
+            return Err(AeroacError::NonFinite { what: "forced jet interval weights" });
+        }
+        Ok(weights)
+    }
+
     /// Audio-rate hat weights `g_k` [s], `k = 0..`, for a jet of centre speed
     /// `centre_speed_m_s` and Bickley half-width `half_width_m` sampled every
     /// `sample_period_s`: `eta_n = sum_k g_k v_(n-k)` in metres for mouth

@@ -2598,9 +2598,24 @@ None.
   (the gesture's highest blowing pressure, including a declared source's
   pressure path). The exit is the Poiseuille slit (`b = 0.4 h`, `U0 =
   1.5 U`) behind a slit windway attached first; otherwise it is a uniform
-  lip jet (`b = 0.75 h`, `U0 = U`). The time axis follows the actual speed
-  on every sample, `g_0` enters the same-sample mouth solve, and the
-  response is held after its window. Register physics is graded on the
+  lip jet (`b = 0.75 h`, `U0 = U`). At variable speed, accepted velocity
+  intervals retain their own advances of `tau = integral U0/b dt`; a new
+  speed never retroactively retimes the history. The explicit fixed-Re
+  extension is `dz/dt = (U0(t)/b) A z + B v`, with held interval speed and
+  linear physical-time velocity. Local derivative-knot integration avoids
+  cancellation of accumulated response integrals. The current velocity's
+  affine coefficient still enters the same-sample mouth solve; the response
+  is held after its window. Constant positive speed from rest retains the
+  old cached hat-weight arithmetic. Zero speed disables input/output and
+  freezes this approximate clock, with no claim of molecular decay at rest.
+  Trial preparation never commits the clock or velocity; accepted publication
+  alone appends an interval. The declared minimum positive speed bounds
+  the same number of retained samples (three scalars per interval).
+  G0/G1/G3 source tests in `flue_loop::forced_jet::tests` cover original
+  uniform arithmetic at three clocks, independent response-integral
+  correspondence after speed changes/ring wrap, the instantaneous-retiming
+  falsifier, and transactional rest/refusal behavior.
+  Register physics is graded on the
   production row 0.1 b and 90 b/U0 (`PRODUCTION_SPEC`). Numerical fixtures
   declare `COARSE_SPEC` 0.25/40, which renders the whistle D5 card within
   0.3 cents and 0.3 dB of the production row. A process memo retains 32

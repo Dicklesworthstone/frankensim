@@ -23,17 +23,17 @@ export function createNativeGasControls(changed: () => void): GasControls {
     placeholder: "Species ID, or none", "aria-label": "Water species ID or none" });
   const fields = el("fieldset", { class: "nw-gas-fields" },
     el("legend", {}, "Thermochemical gas sources"),
-    el("p", { class: "small muted" }, "Attach each species pack, its NASA-9 model pack, and its pure transport claims pack. Select their exact paths below. The performance keeps the species IDs, mixture fractions, temperature and pressure in its thermochemical gas records."),
+    el("p", { class: "small muted" }, "Attach each species pack, its NASA-9 model pack, and its pure transport material-card pack. Select their exact paths below. The performance keeps the species IDs, mixture fractions, temperature and pressure in its thermochemical gas records."),
     list, add,
     el("div", { class: "nw-gas-policy" },
       el("label", {}, "Phase policy", phase),
       el("label", {}, "Water identity", water)),
-    el("p", { class: "small muted" }, "Use the original native transport claims pack, not a wrapped material-card pack. Missing coefficients, incompatible source IDs and states outside the source domains are refused by the native model."));
+    el("p", { class: "small muted" }, "The native loader preserves original transport material-card identities and also accepts legacy transport claims packs. Missing coefficients, incompatible source IDs and states outside the source domains are refused by the native model."));
   const element = el("section", { class: "nw-gas-controls", "aria-label": "Gas material sources" },
     el("label", { for: "native-wind-gas-sources", class: "small nw-decimation" }, enabled,
       " Use attached thermochemical gas sources"), fields);
   const keys = ["speciesPath", "nasa9Path", "transportPath"] as const;
-  const labels = ["Species pack", "NASA-9 model pack", "Pure transport claims pack"] as const;
+  const labels = ["Species pack", "NASA-9 model pack", "Pure transport pack"] as const;
   type Row = { element: HTMLElement; inputs: Record<typeof keys[number], HTMLSelectElement> };
   let rows: Row[] = [];
   let paths: readonly string[] = [];

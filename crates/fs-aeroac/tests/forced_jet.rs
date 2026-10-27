@@ -363,3 +363,30 @@ fn hat_weights_are_causal_and_close_on_the_held_gain() {
         );
     }
 }
+
+#[test]
+fn interval_weights_recompose_uniform_hats_and_refuse_invalid_clocks() {
+    // Small numerical response; no measured jet or register claim.
+    let response = bickley_step_response(3.0, &resolution(0.5, 32, 8.0, 8.0, 600.0)).unwrap();
+    for rate in [48_000, 96_000, 192_000] {
+        let dt = 1.0 / f64::from(rate);
+        let advance = 12.0 * dt / 0.00075;
+        let hats = response.hat_weights(12.0, 0.00075, dt).unwrap();
+        for (k, expected) in hats.iter().enumerate() {
+            let newer = response.interval_hat_weights(k as f64 * advance, advance, dt).unwrap().0;
+            let older = if k == 0 { 0.0 } else {
+                response.interval_hat_weights((k - 1) as f64 * advance, advance, dt).unwrap().1
+            };
+            assert!((newer + older - expected).abs() <= 1e-10 * expected.abs().max(1e-6),
+                "intervals do not recompose hat {k} at {rate} Hz");
+        }
+    }
+    assert_eq!(response.interval_hat_weights(response.window(), 1.0, 1e-5).unwrap(), (0.0, 0.0));
+    for (age, advance, duration) in [
+        (-1.0, 1.0, 1e-5), (f64::NAN, 1.0, 1e-5),
+        (0.0, 0.0, 1e-5), (0.0, f64::INFINITY, 1e-5),
+        (0.0, 1.0, 0.0), (0.0, 1.0, f64::NAN),
+    ] {
+        assert!(response.interval_hat_weights(age, advance, duration).is_err());
+    }
+}
