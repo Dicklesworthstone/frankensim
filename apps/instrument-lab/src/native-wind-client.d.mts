@@ -1,6 +1,7 @@
 /** Transport contract of tools/serve-native-wind.mjs; no instrument or material defaults. */
 export interface NativeWindStatus {
   available: boolean;
+  renderers?: { wind: boolean; strings: boolean };
   busy: boolean;
   token?: string;
   maximumSourceBytes: number;
@@ -27,5 +28,11 @@ export interface NativeWindGasSources {
   waterSpecies: string | null;
   phase: "frozen" | "liquid-water";
 }
-export interface NativeWindOptions { decimate?: boolean; gasSources?: NativeWindGasSources; }
+export interface NativeStringProfiles { bodyPath?: string; stopPath?: string; contactThermalPath?: string; }
+export interface NativeWindOptions {
+  renderer?: "wind" | "strings";
+  decimate?: boolean;
+  gasSources?: NativeWindGasSources;
+  stringProfiles?: NativeStringProfiles;
+}
 export function renderNativeWindBundle(source: string, attachments: readonly NativeWindAttachment[], status: NativeWindStatus, options?: NativeWindOptions, signal?: AbortSignal, request?: NativeWindRequest): Promise<Blob>;

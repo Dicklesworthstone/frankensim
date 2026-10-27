@@ -1,4 +1,4 @@
-// Transport only. All source parsing, material laws and synthesis belong to music_render.
+// Transport only. Source parsing, material laws and synthesis belong to the selected native performer.
 const STATUS_URL = "/api/native-wind/status";
 const RENDER_URL = "/api/native-wind/render";
 
@@ -77,6 +77,18 @@ export async function renderNativeWindBundle(source, attachments, status, option
 }
 
 async function sendNativeWind(source, attachments, status, options, signal, request) {
+  const renderer = options.renderer === undefined ? 'wind' : options.renderer;
+  if (!['wind', 'strings'].includes(renderer)) throw new Error("Choose the wind or material-string renderer.");
+  if (renderer === 'strings' && status.renderers?.strings !== true) {
+    throw new Error("The material-string renderer is unavailable. Configure material_strings on the local server.");
+  }
+  if (renderer === 'wind' && status.renderers?.wind === false) {
+    throw new Error("The wind renderer is unavailable. Configure music_render on the local server.");
+  }
+  if (options.stringProfiles !== undefined && (renderer !== 'strings' || !options.stringProfiles
+      || typeof options.stringProfiles !== 'object' || Array.isArray(options.stringProfiles))) {
+    throw new Error("Choose explicit attached profiles for the material-string renderer.");
+  }
   if (options.decimate !== undefined && typeof options.decimate !== 'boolean') {
     throw new Error("Choose whether to use native decimation explicitly.");
   }
@@ -101,7 +113,7 @@ async function sendNativeWind(source, attachments, status, options, signal, requ
     throw new Error("The performance description exceeds the renderer's source limit.");
   }
   let body = bytes, contentType = "text/plain;charset=utf-8";
-  if (attachments.length || options.decimate || options.gasSources !== undefined) {
+  if (attachments.length || options.decimate || options.gasSources !== undefined || renderer === 'strings' || options.stringProfiles !== undefined) {
     if (![status.maximumAttachments, status.maximumAttachmentFileBytes,
       status.maximumAttachmentBytes, status.maximumRequestBytes].every(positiveInteger)) {
       throw new Error("This local renderer does not support attached source files. Update the local server.");
@@ -118,7 +130,9 @@ async function sendNativeWind(source, attachments, status, options, signal, requ
       return {path:file.path, bytes:base64(file.bytes)};
     });
     body = JSON.stringify({format:"frankensim-native-wind-input-v1", source:base64(bytes), attachments:files, decimate:options.decimate ?? false,
-      ...(options.gasSources !== undefined ? {gasSources:options.gasSources} : {})});
+      ...(options.gasSources !== undefined ? {gasSources:options.gasSources} : {}),
+      ...(renderer === 'strings' ? {renderer} : {}),
+      ...(options.stringProfiles !== undefined ? {stringProfiles:options.stringProfiles} : {})});
     contentType = "application/json;charset=utf-8";
     if (new TextEncoder().encode(body).byteLength > status.maximumRequestBytes) {
       throw new Error("The complete experiment exceeds the renderer's request limit.");

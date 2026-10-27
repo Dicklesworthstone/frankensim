@@ -17,32 +17,34 @@ const bundle = (bytes = source(), files = []) => Buffer.from(JSON.stringify({
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(fn) { for (let i = 0; i < 400; i++) { if (await fn()) return; await pause(10); } throw new Error('Timed out waiting for test condition.'); }
 async function setup(options = {}) {
+  const {withStrings = false, ...serverOptions} = options;
   const dir = await mkdtemp(join(tmpdir(), 'native-wind-test-')), dist = join(dir, 'dist'), tempRoot = join(dir, 'jobs');
   await mkdir(dist); await mkdir(tempRoot); await writeFile(join(dist, 'index.html'), '<title>Synthetic adapter test</title>');
   const receipt = join(dir, 'receipt.json'), engine = join(dir, 'fixture.mjs');
   const fixture = `#!${process.execPath}
 // Synthetic process fixture: never presented as native physics.
 import {readFileSync, writeFileSync, statSync} from 'node:fs';
-const args = process.argv.slice(2), input = readFileSync(args[1]);
+const args = process.argv.slice(2), offset = args[0] === 'wind' ? 1 : 0;
+const inputPath = args[offset], outputPath = args[offset + 1], input = readFileSync(inputPath);
 const text = input.toString(), requested = /^# read-files (.+)$/m.exec(text);
 const files = requested ? JSON.parse(requested[1]).map(path => ({
  path, bytes:readFileSync(path).toString('base64'), mode:statSync(path).mode & 0o777,
 })) : [];
 writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({args, cwd:process.cwd(), bytes:input.toString('base64'), files, pid:process.pid,
- directoryMode:statSync(process.cwd()).mode & 0o777, sourceMode:statSync(args[1]).mode & 0o777}));
+ directoryMode:statSync(process.cwd()).mode & 0o777, sourceMode:statSync(inputPath).mode & 0o777}));
 if (text.includes('test-refuse')) { console.error('synthetic parser refusal'); process.exit(2); }
 if (text.includes('test-log')) { process.stderr.write(Buffer.alloc(300000, 120)); await new Promise(() => setInterval(() => {}, 1000)); }
 if (text.includes('test-hang')) { process.on('SIGTERM', () => {}); await new Promise(() => setInterval(() => {}, 1000)); }
-if (text.includes('test-invalid')) { writeFileSync(args[2], 'not a wave'); process.exit(0); }
-if (text.includes('test-large')) { writeFileSync(args[2], Buffer.alloc(4097)); process.exit(0); }
+if (text.includes('test-invalid')) { writeFileSync(outputPath, 'not a wave'); process.exit(0); }
+if (text.includes('test-large')) { writeFileSync(outputPath, Buffer.alloc(4097)); process.exit(0); }
 if (text.includes('test-delay')) await new Promise(resolve => setTimeout(resolve, 200));
 const wav = Buffer.alloc(48); wav.write('RIFF'); wav.writeUInt32LE(40, 4); wav.write('WAVEfmt ', 8);
 wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(48000, 24);
 wav.writeUInt32LE(96000, 28); wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34); wav.write('data', 36); wav.writeUInt32LE(4, 40);
-writeFileSync(args[2], wav);
+writeFileSync(outputPath, wav);
 `;
   await writeFile(engine, fixture, {mode:0o700});
-  const app = createNativeWindServer({engine, dist, tempRoot, ...options});
+  const app = createNativeWindServer({engine, stringsEngine:withStrings ? engine : null, dist, tempRoot, ...serverOptions});
   await new Promise((accept, reject) => {app.server.once('error', reject); app.server.listen(0, '127.0.0.1', accept);});
   const url = `http://127.0.0.1:${app.server.address().port}`;
   const status = () => fetch(url + '/api/native-wind/status').then(r => r.json());
@@ -54,6 +56,58 @@ writeFileSync(args[2], wav);
     async cleanup() { await app.shutdown(); await rm(dir, {recursive:true, force:true}); }};
 }
 const native = {skip:process.platform === 'win32'};
+
+test('material strings reuse the exact source packet, gas associations and explicit profile paths', native, async () => {
+  const app = await setup({withStrings:true, engine:null});
+  try {
+    assert.deepEqual(app.initial.renderers, {wind:false, strings:true});
+    assert.equal(app.initial.available, true);
+    assert.ok(app.initial.supportedSchemas.includes('frankensim-material-strings-v3'));
+    const names = ['wire.pack', 'body.pack', 'shape.body', 'finger.stops', 'gas/s', 'gas/n', 'gas/t'];
+    const bytes = Buffer.from('frankensim-material-strings-v3\r\n# read-files ' + JSON.stringify(names) + '\r\n# original 音\r\n');
+    const files = names.map((name, i) => [name, Buffer.from([0, 255, i, 13, 10])]);
+    const packet = JSON.parse(bundle(bytes, files));
+    packet.renderer = 'strings'; packet.decimate = true;
+    packet.stringProfiles = {bodyPath:'shape.body', stopPath:'finger.stops'};
+    packet.gasSources = {components:[{speciesPath:'gas/s', nasa9Path:'gas/n', transportPath:'gas/t'}], waterSpecies:null, phase:'frozen'};
+    const response = await app.runBundle(JSON.stringify(packet));
+    assert.equal(response.status, 200); assert.equal((await response.arrayBuffer()).byteLength, 48);
+    const receipt = JSON.parse(await readFile(app.receipt, 'utf8'));
+    assert.equal(receipt.bytes, bytes.toString('base64'));
+    assert.deepEqual(receipt.args, [join(receipt.cwd, 'input.performance'), join(receipt.cwd, 'output.wav'),
+      '--self-contained', '--decimate', ...names.flatMap(name => ['--attached-source', name]),
+      '--gas-water', 'none', '--gas-phase', 'frozen', '--gas-component', 'gas/s', 'gas/n', 'gas/t',
+      '--body-profile', 'shape.body', '--stop-profile', 'finger.stops']);
+    assert.deepEqual(receipt.files.map(file => [file.path, file.bytes]), files.map(([path, bytes]) => [path, bytes.toString('base64')]));
+    await until(async () => !(await app.status()).busy);
+    assert.equal((await app.run()).status, 503, 'a configured string performer must not substitute for a missing wind performer');
+  } finally { await app.cleanup(); }
+});
+
+test('renderer and profile declarations refuse mismatched schemas, unlisted paths and arbitrary flags', () => {
+  const bytes = Buffer.from('frankensim-material-strings-v1\nopaque');
+  for (const renderer of ['strings', 'wind', 'shell', null]) {
+    const packet = {...JSON.parse(bundle(bytes, [['body.profile', Buffer.from('original')]])), renderer};
+    if (renderer === 'strings') {
+      assert.equal(validateInput(Buffer.from(JSON.stringify(packet)), true).renderer, 'strings');
+      for (const stringProfiles of [{bodyPath:'missing'}, {stopPath:'../body.profile'}, {observerStore:'body.profile'}, {bodyPath:null}])
+        assert.throws(() => validateInput(Buffer.from(JSON.stringify({...packet, stringProfiles})), true), /String profiles/);
+    } else assert.throws(() => validateInput(Buffer.from(JSON.stringify(packet)), true));
+  }
+  const wind = {...JSON.parse(bundle(source(), [['body.profile', Buffer.from('original')]])), stringProfiles:{bodyPath:'body.profile'}};
+  assert.throws(() => validateInput(Buffer.from(JSON.stringify(wind)), true), /String profiles/);
+});
+
+test('string source packets cannot fall back to the wind executable', native, async () => {
+  const app = await setup();
+  try {
+    const packet = {...JSON.parse(bundle(Buffer.from('frankensim-material-strings-v3\nopaque'))), renderer:'strings'};
+    const response = await app.runBundle(JSON.stringify(packet));
+    assert.equal(response.status, 503);
+    assert.match((await response.json()).error, /material-string executable/);
+    await assert.rejects(readFile(app.receipt), {code:'ENOENT'});
+  } finally { await app.cleanup(); }
+});
 
 test('transport retains exact UTF-8 and admits the original native wind source families', () => {
   const bytes = source(); assert.equal(validateSource(bytes), bytes);

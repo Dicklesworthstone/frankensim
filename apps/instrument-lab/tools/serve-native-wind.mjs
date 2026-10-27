@@ -1,4 +1,4 @@
-// Optional loopback companion: serve a built Instrument Lab and the existing native wind CLI.
+// Optional loopback companion for the existing wind and material-string native performers.
 import http from 'node:http';
 import {access, lstat, mkdir, mkdtemp, open, realpath, rm, stat, writeFile} from 'node:fs/promises';
 import {constants, createReadStream} from 'node:fs';
@@ -9,7 +9,7 @@ import {dirname, extname, isAbsolute, join, relative, resolve, sep} from 'node:p
 import {fileURLToPath} from 'node:url';
 import {DEFAULT_TIMEOUT_MS, MAX_LOG_BYTES, MAX_OUTPUT_BYTES, MAX_SOURCE_BYTES,
   MAX_ATTACHMENTS, MAX_ATTACHMENT_FILE_BYTES, MAX_ATTACHMENT_BYTES, MAX_REQUEST_BYTES,
-  NativeWindError, SUPPORTED_SCHEMAS, validateInput, validateWave} from './native-wind-protocol.mjs';
+  NativeWindError, SUPPORTED_SCHEMAS, STRING_SCHEMAS, validateInput, validateWave} from './native-wind-protocol.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const types = {'.html':'text/html; charset=utf-8', '.js':'text/javascript; charset=utf-8',
@@ -77,14 +77,18 @@ async function serveAsset(req, res, dist, pathname) {
     res.once('close', () => stream.destroy()); stream.pipe(res); }
   return true;
 }
-function runNative(engine, input, output, dir, signal, outputLimit, attachments, decimate, gasSources) {
+function runNative(engine, input, output, dir, signal, outputLimit, experiment) {
   return new Promise((accept, reject) => {
     if (signal.aborted) return reject(signal.reason);
+    const {attachments, decimate, gasSources, stringProfiles} = experiment;
     const sourceArgs = attachments.flatMap(file => ['--attached-source', file.path]);
     const gasArgs = gasSources ? ['--gas-water', gasSources.waterSpecies ?? 'none',
       '--gas-phase', gasSources.phase, ...gasSources.components.flatMap(component =>
         ['--gas-component', component.speciesPath, component.nasa9Path, component.transportPath])] : [];
-    const child = spawn(engine, ['wind', input, output, '--self-contained', ...(decimate ? ['--decimate'] : []), ...sourceArgs, ...gasArgs], {cwd:dir, shell:false,
+    const profileArgs = [['bodyPath', '--body-profile'], ['stopPath', '--stop-profile'], ['contactThermalPath', '--contact-thermal']]
+      .flatMap(([key, flag]) => stringProfiles?.[key] ? [flag, stringProfiles[key]] : []);
+    const child = spawn(engine, [...(experiment.renderer === 'strings' ? [] : ['wind']), input, output,
+      '--self-contained', ...(decimate ? ['--decimate'] : []), ...sourceArgs, ...gasArgs, ...profileArgs], {cwd:dir, shell:false,
       windowsHide:true, detached:process.platform !== 'win32', stdio:['ignore', 'pipe', 'pipe']});
     let reason, size = 0, forceKill, finished = false; const chunks = [];
     const kill = name => { if (!child.pid) return;
@@ -107,7 +111,7 @@ function runNative(engine, input, output, dir, signal, outputLimit, attachments,
       } catch (error) { if (error.code !== 'ENOENT') stop(new NativeWindError(502, 'Could not inspect native output.')); }
       finally { checking = false; }
     }, 100); check.unref();
-    child.once('error', () => stop(new NativeWindError(503, 'Native wind executable could not be started.')));
+    child.once('error', () => stop(new NativeWindError(503, 'Selected native executable could not be started.')));
     // The configured native renderer needs no surviving helper processes.
     child.once('exit', () => kill('SIGKILL'));
     child.once('close', code => {
@@ -135,9 +139,10 @@ async function readWave(output, limit) {
 }
 
 export function createNativeWindServer({engine = process.env.FSIM_MUSIC_RENDER || null,
+  stringsEngine = process.env.FSIM_MATERIAL_STRINGS || null,
   dist = resolve(here, '../dist'), timeoutMs = DEFAULT_TIMEOUT_MS,
   maximumOutputBytes = MAX_OUTPUT_BYTES, tempRoot = tmpdir()} = {}) {
-  if (engine && !isAbsolute(engine)) throw new Error('Native wind executable must be an absolute path.');
+  if ([engine, stringsEngine].some(path => path && !isAbsolute(path))) throw new Error('Native executables must be absolute paths.');
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600000
       || !Number.isInteger(maximumOutputBytes) || maximumOutputBytes < 44 || maximumOutputBytes > MAX_OUTPUT_BYTES)
     throw new Error('Invalid local rendering budget.');
@@ -159,11 +164,15 @@ export function createNativeWindServer({engine = process.env.FSIM_MUSIC_RENDER |
     try { pathname = new URL(req.url, `http://${host}`).pathname; }
     catch { return send(400, {error:'Invalid request path.'}); }
     try {
-      if (req.method === 'GET' && pathname === '/api/native-wind/status') return send(200,
-        {available:!closing && await available(engine), busy:active !== null, token,
-          maximumSourceBytes:MAX_SOURCE_BYTES, maximumOutputBytes, timeoutMs, supportedSchemas:SUPPORTED_SCHEMAS,
+      if (req.method === 'GET' && pathname === '/api/native-wind/status') {
+        const [wind, strings] = await Promise.all([available(engine), available(stringsEngine)]);
+        return send(200,
+        {available:!closing && (wind || strings), renderers:{wind:!closing && wind, strings:!closing && strings}, busy:active !== null, token,
+          maximumSourceBytes:MAX_SOURCE_BYTES, maximumOutputBytes, timeoutMs,
+          supportedSchemas:[...(wind ? SUPPORTED_SCHEMAS : []), ...(strings ? STRING_SCHEMAS : [])],
           maximumAttachments:MAX_ATTACHMENTS, maximumAttachmentFileBytes:MAX_ATTACHMENT_FILE_BYTES,
           maximumAttachmentBytes:MAX_ATTACHMENT_BYTES, maximumRequestBytes:MAX_REQUEST_BYTES, supportsGasSources:true});
+      }
       if (pathname !== '/api/native-wind/render' || req.method !== 'POST') {
         if (['GET', 'HEAD'].includes(req.method) && !pathname.startsWith('/api/') && await serveAsset(req, res, dist, pathname)) return;
         return send(404, {error:'Not found. Build Instrument Lab and pass its dist directory to this server.'});
@@ -176,16 +185,19 @@ export function createNativeWindServer({engine = process.env.FSIM_MUSIC_RENDER |
       const bundled = media[1].toLowerCase() === 'application/json';
       if (Number(req.headers['content-length'] || 0) > (bundled ? MAX_REQUEST_BYTES : MAX_SOURCE_BYTES))
         return send(413, {error:'Experiment exceeds the complete request limit.'});
-      if (active) return send(409, {error:'Another native wind render is running. Cancel it or wait.'});
+      if (active) return send(409, {error:'Another native render is running. Cancel it or wait.'});
       const controller = new AbortController(); let complete;
       const job = {controller, finished:new Promise(resolve => { complete = resolve; })}; active = job;
       const disconnected = () => { if (!res.writableEnded) controller.abort(new NativeWindError(499, 'Browser disconnected; render cancelled.')); };
       res.once('close', disconnected);
-      const timer = setTimeout(() => controller.abort(new NativeWindError(504, 'Native wind render exceeded its execution budget.')), timeoutMs);
+      const timer = setTimeout(() => controller.abort(new NativeWindError(504, 'Native render exceeded its execution budget.')), timeoutMs);
       let dir;
       try {
-        if (!await available(engine)) throw new NativeWindError(503, 'Native wind executable is unavailable. Build music_render and configure its absolute path.');
         const experiment = await sourceBody(req, controller.signal, bundled);
+        const selectedEngine = experiment.renderer === 'strings' ? stringsEngine : engine;
+        if (!await available(selectedEngine)) throw new NativeWindError(503, experiment.renderer === 'strings'
+          ? 'Native material-string executable is unavailable. Build material_strings and configure its absolute path.'
+          : 'Native wind executable is unavailable. Build music_render and configure its absolute path.');
         if (controller.signal.aborted) throw controller.signal.reason;
         dir = await mkdtemp(join(tempRoot, 'frankensim-native-wind-'));
         const input = join(dir, 'input.performance'), output = join(dir, 'output.wav');
@@ -196,7 +208,7 @@ export function createNativeWindServer({engine = process.env.FSIM_MUSIC_RENDER |
           await mkdir(dirname(destination), {recursive:true, mode:0o700});
           await writeFile(destination, attachment.bytes, {mode:0o600, flag:'wx'});
         }
-        await runNative(engine, input, output, dir, controller.signal, maximumOutputBytes, experiment.attachments, experiment.decimate, experiment.gasSources);
+        await runNative(selectedEngine, input, output, dir, controller.signal, maximumOutputBytes, experiment);
         const wave = await readWave(output, maximumOutputBytes);
         if (controller.signal.aborted) throw controller.signal.reason;
         res.writeHead(200, {'Content-Type':'audio/wav', 'Content-Length':wave.length}); res.end(wave);
@@ -205,7 +217,7 @@ export function createNativeWindServer({engine = process.env.FSIM_MUSIC_RENDER |
         try { if (dir) await rm(dir, {recursive:true, force:true}); } // Only this request's newly created private directory.
         finally { if (active === job) active = null; complete(); }
       }
-    } catch (error) { send(error.status || 500, {error:error instanceof NativeWindError ? error.message : 'Local wind rendering failed.'}); }
+    } catch (error) { send(error.status || 500, {error:error instanceof NativeWindError ? error.message : 'Local rendering failed.'}); }
   });
   server.headersTimeout = 10000; server.requestTimeout = 15000;
   return {server, async shutdown() {
@@ -218,19 +230,21 @@ export function createNativeWindServer({engine = process.env.FSIM_MUSIC_RENDER |
 
 async function cli() {
   let engine = process.env.FSIM_MUSIC_RENDER || null, dist = resolve(here, '../dist'), port = 8787;
+  let stringsEngine = process.env.FSIM_MATERIAL_STRINGS || null;
   const args = process.argv.slice(2);
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--help') {
-      console.log('node tools/serve-native-wind.mjs [--engine /absolute/path/music_render] [--dist DIST] [--port 8787]\nFSIM_MUSIC_RENDER also selects the local executable. Build the app first with npm run build.'); return;
+      console.log('node tools/serve-native-wind.mjs [--engine /absolute/path/music_render] [--strings-engine /absolute/path/material_strings] [--dist DIST] [--port 8787]\nFSIM_MUSIC_RENDER and FSIM_MATERIAL_STRINGS select the local executables. Build the app first with npm run build.'); return;
     }
-    if (!['--engine', '--dist', '--port'].includes(args[i]) || !args[i + 1]) throw new Error('Unknown or incomplete local-server option.');
+    if (!['--engine', '--strings-engine', '--dist', '--port'].includes(args[i]) || !args[i + 1]) throw new Error('Unknown or incomplete local-server option.');
     const option = args[i], value = args[++i];
-    if (option === '--engine') engine = value; else if (option === '--dist') dist = resolve(value); else port = Number(value);
+    if (option === '--engine') engine = value; else if (option === '--strings-engine') stringsEngine = value;
+    else if (option === '--dist') dist = resolve(value); else port = Number(value);
   }
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('Port must be 1024–65535.');
-  const app = createNativeWindServer({engine, dist});
+  const app = createNativeWindServer({engine, stringsEngine, dist});
   app.server.on('error', error => { console.error(error.message); process.exitCode = 1; });
-  app.server.listen(port, '127.0.0.1', () => console.log(`Instrument Lab + native wind: http://127.0.0.1:${port}\nLocal only; Ctrl+C stops rendering and the server.`));
+  app.server.listen(port, '127.0.0.1', () => console.log(`Instrument Lab + native physics: http://127.0.0.1:${port}\nLocal only; Ctrl+C stops rendering and the server.`));
   process.once('SIGINT', () => void app.shutdown()); process.once('SIGTERM', () => void app.shutdown());
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

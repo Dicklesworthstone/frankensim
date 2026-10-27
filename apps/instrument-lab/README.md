@@ -59,25 +59,29 @@ The page's data, audio, images, replays and MIDI rolls keep their paths and a on
 hands the page each file's content hash and `util.asset()` asks for `path?v=<hash>`: a file a deploy
 changed gets a new URL, so no visitor pairs new code with an hour-old `strandbar.json` or recording.
 
-## Native wind renderer
+## Native wind and string renderer
 
-The instrument-family section can edit and render wind performances with their
-original material packs using the existing **native `music_render wind` solver**. Build the
-local executable and the app, then serve that app through the optional loopback
+The instrument-family section can edit and render wind and string performances
+with their original material packs using the existing **native `music_render wind`
+and `material_strings` solvers**. Build the local executables and the app, then serve that app through the optional loopback
 companion. From the repository root:
 
 ```sh
-cargo build --release -p fs-couple --bin music_render
+cargo build --release -p fs-couple --bin music_render --bin material_strings
 npm --prefix apps/instrument-lab ci
 npm --prefix apps/instrument-lab run build
-node apps/instrument-lab/tools/serve-native-wind.mjs --engine "$(pwd)/target/release/music_render"
+node apps/instrument-lab/tools/serve-native-wind.mjs \
+  --engine "$(pwd)/target/release/music_render" \
+  --strings-engine "$(pwd)/target/release/material_strings"
 ```
 
-Open `http://127.0.0.1:8787`. `FSIM_MUSIC_RENDER` can supply the same absolute
-executable path; `--dist` selects an existing app build and `--port` changes the
-loopback port. Starting without an executable leaves the viewer available and
-reports the renderer as unavailable. Static hosted builds do not acquire a
-native rendering service.
+Open `http://127.0.0.1:8787`. `FSIM_MUSIC_RENDER` and `FSIM_MATERIAL_STRINGS` can
+supply the respective absolute executable paths; use the actual Cargo output
+paths if your target directory differs. `--dist` selects an existing app build
+and `--port` changes the loopback port. Either performer can be configured on its
+own. The panel reports availability for the selected performer and refuses if
+that executable is absent. Starting without executables leaves the viewer
+available. Static hosted builds do not acquire a native rendering service.
 
 The editor starts from the repository's `reed-two-medium-tone-hole.performance`:
 its internal mixture, exterior mixture, tone hole and axial gas change reach the
@@ -88,7 +92,8 @@ Nolle/Price source. Its mechanical and output clocks remain part of the native
 description. Both starters are numerical examples, not measured instruments.
 
 The same panel accepts the original reed, flue, plate-valve and material-modal
-valve source formats, including `frankensim-material-modal-dg-valve-v1`.
+valve source formats, including `frankensim-material-modal-dg-valve-v1`, and
+`frankensim-material-strings-v1`, `-v2` and `-v3` with the string performer selected.
 Use **Attach source files…** to supply the original binary material packs or
 artifacts referenced by the performance. Each displayed path must match the
 source exactly; edit it to retain a nested path such as `materials/reed.fsmcdpk`.
@@ -98,9 +103,10 @@ without translating its properties into browser parameters. The shared
 
 The panel retains selected bytes and shows their SHA-256 identities. Each WAV
 records the submitted file identities in its playback details; changing a
-source path, file or performance marks the existing WAV as an older result.
+source path, file, performer, profile or performance marks the existing WAV as an older result.
 Keep the declared pressure-to-PCM scale fixed when comparing material variants.
-For a DG performance whose source clock is above 48 kHz, select **Use native decimation**.
+For a DG wind or material-string performance whose source clock is above 48 kHz,
+select **Use native decimation**.
 This passes the native `--decimate` option: mechanical integration retains the declared
 clock and the existing native downsampler produces the 48 kHz WAV. The adapter never
 rewrites the source clock or chooses a lower-resolution physics model.
@@ -109,6 +115,32 @@ which its native observer handles directly.
 Playback never peak-normalizes or retunes the native result. Original model
 limits and missing-source refusals still apply; attaching a pack does not
 qualify an instrument as measured or realistic.
+
+### Material-string performances
+
+Select **Strings — materials, bow/contact and shared body** in **Physical performer**,
+or choose either canonical string starter. `pluck-and-bow.material-strings` connects
+pluck and bow gestures to shared strings and a body; `relaxing-layered-strings.material-strings`
+retains each bonded layer's original material relaxation spectrum. Attach the
+original packs named in the selected source. The
+[native string instructions](../../crates/fs-couple/examples/material_strings/README.md)
+show how to build those packs from the supplied manifests. Both starters are
+synthetic integration fixtures, not measured violin, cello or bass models.
+
+The optional **String specimen profiles** selectors associate exact attached paths with
+the native body, stop and contact-thermal profiles. The companion forwards them
+as `--body-profile`, `--stop-profile` and `--contact-thermal`. Attach every material
+or geometry artifact referenced by a profile too; the same frozen byte map serves
+the profile, material, contact, body and radiation loaders. These selectors add no
+browser coefficients or alternate synthesis model. Strings use the same gas-source
+controls below, with their atmosphere record kept in the performance.
+
+Explicit string decimation runs the existing pressure observer through the shared
+native downsampler and writes 48 kHz PCM, retaining the original mechanical clock,
+gesture times, pressure scale and filter delay. The source duration must contain
+a whole number of output frames. `--decimate` currently refuses contact-thermal
+profiles and `--bow-trace`; those native workflows retain their original output
+clock. Bow traces and observer-store caches are not exposed by the web adapter.
 
 ### Source-backed gas mixtures
 
@@ -132,22 +164,23 @@ The companion forwards only the declared component triples as
 `--gas-component SPECIES NASA9 TRANSPORT`, plus explicit `--gas-water`
 and `--gas-phase` options. Every path must also name an attached file. The native
 gas loader reads those components from the same frozen attachment byte map as
-wall and reed materials. Unlisted files cannot fall through to the host
+wall, reed, string and body materials. Unlisted files cannot fall through to the host
 filesystem. Changing an association or policy marks the existing WAV as stale,
 just as replacing the source pack bytes does.
 
-Material-string performances remain a separate native workflow. Wind gas
-records stay inline in the performance; the panel does not pass a separate
+Gas records stay inline in the performance; the panel does not pass a separate
 `--gas-record` override.
 
-The companion passes the exact UTF-8 bytes to one configured executable as
-`music_render wind INPUT.performance OUT.wav --self-contained`, with a private working directory
-and fixed arguments (plus `--decimate` only when explicitly selected). Attached files are written byte-for-byte beneath that
+The companion passes the exact UTF-8 bytes to the selected executable as
+`music_render wind INPUT.performance OUT.wav --self-contained` or
+`material_strings INPUT.performance OUT.wav --self-contained`, with a private working directory
+and fixed arguments (plus explicitly selected decimation, gas associations and string profiles).
+Attached files are written byte-for-byte beneath that
 private directory at their declared relative paths. Each is explicitly allowed
 with `--attached-source RELATIVE_PATH`; the native loader snapshots only these
 files before parsing, and both material and radiation callbacks read only that
 byte map. Unlisted paths stay refused, including when a referenced file exists
-elsewhere on the host. Rebuild `music_render` for these options; older binaries
+elsewhere on the host. Rebuild the selected executable for these options; older binaries
 refuse rather than weaken the file policy.
 
 The companion does not parse physical parameters, retune notes, change

@@ -2,14 +2,18 @@ import "./native-wind.css";
 // Canonical native fixtures, bundled verbatim by Vite; no copied physics defaults.
 import reedExampleSource from "../../../crates/fs-couple/examples/reed-two-medium-tone-hole.performance?raw";
 import flueExampleSource from "../../../crates/fs-couple/examples/flue-nolle.performance?raw";
-import { nativeWindStatus, renderNativeWindBundle, type NativeWindStatus, type NativeWindAttachment, type NativeWindGasSources } from "./native-wind-client.mjs";
+import stringExampleSource from "../../../crates/fs-couple/examples/material_strings/pluck-and-bow.material-strings?raw";
+import layeredStringSource from "../../../crates/fs-couple/examples/material_strings/relaxing-layered-strings.material-strings?raw";
+import { nativeWindStatus, renderNativeWindBundle, type NativeWindStatus, type NativeWindAttachment, type NativeWindGasSources, type NativeStringProfiles } from "./native-wind-client.mjs";
 import { el } from "./util";
 import { createNativeGasControls } from "./native-wind-gases";
+import { createNativeStringProfiles } from "./native-string-profiles";
 
 const EXAMPLES = [
   {
     name: "reed-two-medium-tone-hole.performance",
     label: "Reed — two-medium tone hole",
+    renderer: "wind",
     source: reedExampleSource,
     intro: "Starter: two-medium tone hole — a short boundary diagnostic with a reed and three tube sections in different gas regions. Change the gas mixtures, temperature, geometry or gestures in the description.",
     help: "ambient sets the inlet and chimney gas; a segment’s gas entry overrides its local medium; exterior sets the surrounding gas. The interior and exterior must share a static pressure because this boundary model omits mean flow. This short numerical fixture is not a measured clarinet or oboe.",
@@ -17,9 +21,26 @@ const EXAMPLES = [
   {
     name: "flue-nolle.performance",
     label: "Flute — Nolle/Price jet",
+    renderer: "wind",
     source: flueExampleSource,
     intro: "Starter: flute jet — a short blowing-pressure phrase through a cylindrical tube, using the native Nolle/Price jet transfer. Change the gas, tube, mouth geometry or pressure gesture in the description.",
     help: "gas owns the internal medium; exterior sets the surrounding gas. jet_transfer selects the short-channel Nolle/Price source. The native description owns the mechanical and output clocks, and the jet and acoustic mouth are solved together. This synthetic example is not a measured flute.",
+  },
+  {
+    name: "material_strings/pluck-and-bow.material-strings",
+    label: "Strings — pluck and bow with a shared body",
+    renderer: "strings",
+    source: stringExampleSource,
+    intro: "Starter: one material-derived string, body and cavity, with a physical preload and bow gesture. Attach wire.fsmatpk and body.fsmatpk using the source-pack instructions linked below, or open your own complete material-string performance.",
+    help: "The string performer derives modes and losses from original material data and geometry. It retains sympathetic strings, reciprocal body/contact forces and the declared gas. Optional profiles add body geometry, fingers/frets and contact heat. This is a numerical integration fixture, not a measured violin, cello or bass.",
+  },
+  {
+    name: "material_strings/relaxing-layered-strings.material-strings",
+    label: "Strings — bonded layers with original relaxation spectra",
+    renderer: "strings",
+    source: layeredStringSource,
+    intro: "Starter: layered strings with independent source relaxation spectra. Attach each original material pack named in the performance. Change layer materials and geometry in the data; the shared constitutive solver retains each layer's history.",
+    help: "This perfectly bonded concentric-section model retains original per-layer moduli and relaxation times. It does not add sliding helical windings. Keep the stated end-load or displacement comparison and pressure scale when comparing material substitutions.",
   },
 ];
 const exampleUrl = (name: string): string =>
@@ -30,6 +51,12 @@ const message = (error: unknown): string => error instanceof Error ? error.messa
 /** A source editor and native render client. Synthesis stays in the Rust renderer. */
 export function createNativeWindPanel(): HTMLElement {
   let selectedExample = EXAMPLES[0]!;
+  const renderer = el("select", {id: "native-performance-renderer", class: "btn"},
+    el("option", {value: "wind"}, "Wind — reeds, jets and material valves"),
+    el("option", {value: "strings"}, "Strings — materials, bow/contact and shared body"));
+  const selectedRenderer = (): "wind" | "strings" => renderer.value === "strings" ? "strings" : "wind";
+  const rendererAvailable = (next: NativeWindStatus | null): boolean => Boolean(next?.available
+    && (selectedRenderer() === "strings" ? next.renderers?.strings === true : next.renderers?.wind !== false));
   const starter = el("select", { id: "native-wind-starter", class: "btn" },
     ...EXAMPLES.map((example) => el("option", { value: example.name }, example.label)));
   const introduction = el("p", { class: "nw-intro" }, selectedExample.intro);
@@ -66,10 +93,11 @@ export function createNativeWindPanel(): HTMLElement {
   let attachments: Attached[] = [];
   const attachmentIdentity = (): string => JSON.stringify(attachments.map(file => [file.path, file.sha256]));
   const gas = createNativeGasControls(() => edited());
-  const file = el("input", { type: "file", accept: ".performance,.txt,text/plain",
-    "aria-label": "Open a native wind performance" });
+  const profiles = createNativeStringProfiles(() => edited());
+  const file = el("input", { type: "file", accept: ".performance,.material-strings,.txt,text/plain",
+    "aria-label": "Open a native physical performance" });
   file.hidden = true;
-  const audio = el("audio", { controls: "", preload: "metadata", "aria-label": "Your native wind render" });
+  const audio = el("audio", { controls: "", preload: "metadata", "aria-label": "Your native physical render" });
   const download = el("a", { class: "btn", download: "wind-render.wav" }, "Download WAV");
   const renderedFrom = el("p", { class: "small muted" });
   const renderedFiles = el("p", { class: "small muted nw-file-identities" });
@@ -86,19 +114,24 @@ export function createNativeWindPanel(): HTMLElement {
   let renderedAttachmentIdentity: string | null = null;
   let renderedDecimate = false;
   let renderedGasIdentity: string | null = null;
+  let renderedProfileIdentity: string | null = null;
+  let renderedRenderer: string | null = null;
   let sourceName = selectedExample.name;
 
   const controls = (): void => {
     const active = rendering !== null;
-    render.disabled = active || loadingFile || checking !== null || !status?.available || status.busy || !source.value.trim();
+    render.disabled = active || loadingFile || checking !== null || !rendererAvailable(status) || Boolean(status?.busy) || !source.value.trim();
     cancel.hidden = !active;
     check.disabled = active || checking !== null;
     open.disabled = active || loadingFile;
     reset.disabled = active || loadingFile;
     starter.disabled = active || loadingFile;
+    renderer.disabled = active || loadingFile;
     attach.disabled = active || loadingFile;
     decimate.disabled = active || loadingFile;
     gas.setDisabled(active || loadingFile);
+    profiles.element.hidden = selectedRenderer() !== "strings";
+    profiles.setDisabled(active || loadingFile || selectedRenderer() !== "strings");
     attachmentList.querySelectorAll<HTMLInputElement | HTMLButtonElement>("input,button")
       .forEach(control => { control.disabled = active || loadingFile; });
     source.readOnly = active || loadingFile;
@@ -108,7 +141,7 @@ export function createNativeWindPanel(): HTMLElement {
   const edited = (): void => {
     sourceInfo.textContent = `${sourceName} · ${new TextEncoder().encode(currentSource()).byteLength.toLocaleString()} bytes`;
     if (renderedSource !== null) {
-      renderedFrom.textContent = currentSource() === renderedSource && attachmentIdentity() === renderedAttachmentIdentity && decimate.checked === renderedDecimate && gas.identity() === renderedGasIdentity
+      renderedFrom.textContent = currentSource() === renderedSource && attachmentIdentity() === renderedAttachmentIdentity && decimate.checked === renderedDecimate && gas.identity() === renderedGasIdentity && selectedRenderer() === renderedRenderer && profiles.identity() === renderedProfileIdentity
         ? "This WAV was rendered from the performance and source files currently shown."
         : "This WAV is from your previous performance or source files. Render again to hear your edits.";
     }
@@ -123,6 +156,8 @@ export function createNativeWindPanel(): HTMLElement {
     renderedSource = null;
     renderedAttachmentIdentity = null;
     renderedGasIdentity = null;
+    renderedProfileIdentity = null;
+    renderedRenderer = null;
     renderedFiles.textContent = "";
     if (previewUrl !== null) URL.revokeObjectURL(previewUrl);
     previewUrl = null;
@@ -144,10 +179,10 @@ export function createNativeWindPanel(): HTMLElement {
       const next = await nativeWindStatus(controller.signal);
       if (checking !== controller) return;
       status = next;
-      connection.textContent = !next.available ? "Native renderer unavailable"
+      connection.textContent = !rendererAvailable(next) ? "Selected native renderer unavailable"
         : next.busy ? "Local renderer is busy" : "Local renderer ready";
-      if (!next.available) {
-        showResult("Open the local Instrument Lab server to render and listen. You can edit the source here.");
+      if (!rendererAvailable(next)) {
+        showResult("Configure the selected native executable in the local Instrument Lab server to render and listen. You can edit the source here.");
       } else if (next.busy) {
         showResult("Another render is running. Check the renderer again when it finishes.");
       } else {
@@ -167,16 +202,19 @@ export function createNativeWindPanel(): HTMLElement {
   };
 
   render.addEventListener("click", () => {
-    if (!status?.available || status.busy || rendering || checking || loadingFile) return;
+    if (!status || !rendererAvailable(status) || status.busy || rendering || checking || loadingFile) return;
     const connected = status;
     const submitted = currentSource();
     const submittedFiles = attachments.map(file => ({ ...file }));
     const submittedAttachmentIdentity = attachmentIdentity();
     const submittedDecimate = decimate.checked;
+    const submittedRenderer = selectedRenderer();
     let submittedGas: NativeWindGasSources | undefined;
-    try { submittedGas = gas.read(); }
+    let submittedProfiles: NativeStringProfiles | undefined;
+    try { submittedGas = gas.read(); submittedProfiles = submittedRenderer === "strings" ? profiles.read() : undefined; }
     catch (error) { showResult(message(error), true); return; }
     const submittedGasIdentity = gas.identity();
+    const submittedProfileIdentity = profiles.identity();
     const controller = new AbortController();
     rendering = controller;
     audio.pause();
@@ -189,7 +227,8 @@ export function createNativeWindPanel(): HTMLElement {
     }, connected.timeoutMs + 5000);
     void (async () => {
       try {
-        const wave = await renderNativeWindBundle(submitted, submittedFiles, connected, {decimate:submittedDecimate, gasSources:submittedGas}, controller.signal);
+        const wave = await renderNativeWindBundle(submitted, submittedFiles, connected, {renderer:submittedRenderer,
+          decimate:submittedDecimate, gasSources:submittedGas, stringProfiles:submittedProfiles}, controller.signal);
         if (rendering !== controller || controller.signal.aborted) return;
         const nextUrl = URL.createObjectURL(wave);
         clearPreview();
@@ -198,15 +237,19 @@ export function createNativeWindPanel(): HTMLElement {
         renderedAttachmentIdentity = submittedAttachmentIdentity;
         renderedDecimate = submittedDecimate;
         renderedGasIdentity = submittedGasIdentity;
+        renderedProfileIdentity = submittedProfileIdentity;
+        renderedRenderer = submittedRenderer;
         renderedFiles.textContent = submittedFiles.length
           ? "Rendered source files: " + submittedFiles.map(file => `${file.path} · ${file.bytes.byteLength.toLocaleString()} bytes · SHA-256 ${file.sha256}`).join("\n")
           : "This render used no attached source files.";
         if (submittedGas) renderedFiles.textContent += "\nGas associations: " + submittedGas.components
           .map(component => `${component.speciesPath} / ${component.nasa9Path} / ${component.transportPath}`).join("; ")
           + ` · phase ${submittedGas.phase} · water ${submittedGas.waterSpecies ?? "none"}`;
+        if (submittedProfiles) renderedFiles.textContent += "\nString profiles: " + Object.entries(submittedProfiles)
+          .map(([role, path]) => `${role}: ${path}`).join("; ");
         audio.src = nextUrl;
         download.href = nextUrl;
-        download.download = `${sourceName.replace(/\.[^.]*$/, "") || "wind"}-render.wav`;
+        download.download = `${sourceName.replace(/\.[^.]*$/, "") || "physical"}-render.wav`;
         playback.hidden = false;
         edited();
         showResult("Render complete. Press play to listen, or download the WAV.");
@@ -235,36 +278,42 @@ export function createNativeWindPanel(): HTMLElement {
     source.value = selectedExample.source;
     loadedSource = selectedExample.source;
     loadedEditorValue = source.value;
-    sourceName = selectedExample.name;
+    sourceName = selectedExample.name.split("/").pop()!;
+    renderer.value = selectedExample.renderer;
     introduction.textContent = selectedExample.intro;
     sourceHelp.textContent = selectedExample.help;
     canonical.href = exampleUrl(selectedExample.name);
     attachments = [];
     decimate.checked = false;
     gas.reset();
+    profiles.reset();
     drawAttachments();
     edited();
     showResult("Example loaded. Edit the source or render it.");
   };
-  reset.addEventListener("click", loadExample);
+  reset.addEventListener("click", () => { loadExample(); void checkConnection(); });
   starter.addEventListener("change", () => {
     if (rendering || loadingFile) return;
     const selected = EXAMPLES.find((example) => example.name === starter.value);
     if (!selected) return;
     selectedExample = selected;
     loadExample();
+    void checkConnection();
   });
+  renderer.addEventListener("change", () => { edited(); void checkConnection(); });
   const drawAttachments = (): void => {
     attachmentInfo.textContent = attachments.length
       ? `${attachments.length} source files · ${attachments.reduce((sum, file) => sum + file.bytes.byteLength, 0).toLocaleString()} bytes. Paths must match the performance exactly.`
       : "Attach the original material packs or artifacts referenced by your performance. Keep their source paths; edit a path below when the description uses a subdirectory.";
     attachmentList.replaceChildren();
     gas.setAttachments(attachments.map(file => file.path));
+    profiles.setAttachments(attachments.map(file => file.path));
     for (const attached of attachments) {
       const path = el("input", { type: "text", value: attached.path, spellcheck: "false",
         "aria-label": `Source path for ${attached.path}` });
       path.addEventListener("input", () => {
-        attached.path = path.value; gas.setAttachments(attachments.map(file => file.path)); edited();
+        attached.path = path.value; gas.setAttachments(attachments.map(file => file.path));
+        profiles.setAttachments(attachments.map(file => file.path)); edited();
       });
       const remove = el("button", { type: "button", class: "btn" }, "Remove");
       remove.addEventListener("click", () => {
@@ -344,21 +393,23 @@ export function createNativeWindPanel(): HTMLElement {
 
   const panel = el("section", { class: "panel nw-panel", "aria-labelledby": "native-wind-title" },
     el("div", { class: "panel-head" },
-      el("div", {}, el("h3", { id: "native-wind-title" }, "Render a wind performance"),
+      el("div", {}, el("h3", { id: "native-wind-title" }, "Render a material-driven performance"),
         el("p", { class: "small muted" }, "Edit the source, run the native physics, and listen to your result.")),
       connection),
+    el("div", {class: "nw-source-head"}, el("label", {for: "native-performance-renderer"}, "Physical performer"), renderer),
     el("div", { class: "nw-source-head" }, el("label", { for: "native-wind-starter" }, "Starter performance"), starter),
     introduction,
     el("details", { class: "nw-help small" },
       el("summary", {}, "About the source and local renderer"),
       sourceHelp,
-      el("p", {}, "Reed, flue and material-valve descriptions use the original native loader. Attach the exact material packs and artifacts named by the source, including subdirectory paths. Changing a pack changes its physical properties; missing data and unsupported states remain native refusals. Keep the same declared pressure scale when comparing renders."),
-      el("p", {}, "Rendering uses the local music_render executable. The hosted review page can show and edit the source; audio is available when you open it through the local renderer server."),
+      el("p", {}, "Wind and material-string descriptions use their original native loaders. Attach the exact material packs and artifacts named by the source, including subdirectory paths. Changing a pack changes its physical properties; missing data and unsupported states remain native refusals. Keep the same declared pressure scale when comparing renders."),
+      el("p", {}, "Rendering uses the local music_render or material_strings executable. The hosted review page can show and edit the source; audio is available when you open it through the local renderer server. String decimation currently excludes contact-thermal profiles and bow traces; those workflows retain their original output clock."),
       el("p", {}, canonical,
-        " · ", el("a", { href: "https://github.com/Dicklesworthstone/frankensim/tree/main/apps/instrument-lab#native-wind-renderer", target: "_blank", rel: "noopener" }, "Local renderer setup"))),
+        " · ", el("a", {href: "https://github.com/Dicklesworthstone/frankensim/tree/main/crates/fs-couple/examples/material_strings", target: "_blank", rel: "noopener"}, "String source-pack instructions"),
+        " · ", el("a", { href: "https://github.com/Dicklesworthstone/frankensim/tree/main/apps/instrument-lab#native-wind-and-string-renderer", target: "_blank", rel: "noopener" }, "Local renderer setup"))),
     el("div", { class: "nw-source-head" }, el("label", { for: "native-wind-source" }, "Performance source"),
       sourceInfo),
-    source, attachmentPanel, gas.element, decimation,
+    source, attachmentPanel, profiles.element, gas.element, decimation,
     el("div", { class: "btn-row nw-actions" }, render, cancel, open, attach, reset, check, file, attachmentFile),
     result, playback);
   drawAttachments();

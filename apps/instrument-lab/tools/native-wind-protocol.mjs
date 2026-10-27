@@ -1,4 +1,4 @@
-// Transport limits only. music_render owns the complete source grammar and physics.
+// Transport limits only. The selected native performer owns the source grammar and physics.
 export const MAX_SOURCE_BYTES = 1024 * 1024;
 export const MAX_ATTACHMENTS = 32;
 export const MAX_ATTACHMENT_FILE_BYTES = 8 * 1024 * 1024;
@@ -13,19 +13,24 @@ export const DEFAULT_TIMEOUT_MS = 60000;
 export const SUPPORTED_SCHEMAS = ['frankensim-reed-performance-v1', 'frankensim-flue-dg-performance-v1',
   'frankensim-material-modal-dg-valve-v1', 'frankensim-material-modal-valve-v1',
   'frankensim-plate-valve-performance-v1', 'frankensim-flue-performance-v1'];
+export const STRING_SCHEMAS = ['frankensim-material-strings-v1', 'frankensim-material-strings-v2',
+  'frankensim-material-strings-v3'];
 
 export class NativeWindError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 
-export function validateSource(bytes) {
-  if (!bytes.length) throw new NativeWindError(400, 'Choose or enter a wind performance file.');
+export function validateSource(bytes, renderer = 'wind') {
+  if (!['wind', 'strings'].includes(renderer)) throw new NativeWindError(400, 'Choose the wind or material-string renderer.');
+  if (!bytes.length) throw new NativeWindError(400, 'Choose or enter a performance file.');
   if (bytes.length > MAX_SOURCE_BYTES) throw new NativeWindError(413, 'Performance exceeds the 1 MiB input limit.');
   let text;
   try { text = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes); }
   catch { throw new NativeWindError(400, 'Performance must contain valid UTF-8 bytes.'); }
-  if (!SUPPORTED_SCHEMAS.includes(text.split(/\r?\n/, 1)[0]))
-    throw new NativeWindError(400, 'Choose a native reed, flue or material-valve performance supported by music_render wind.');
+  if (!(renderer === 'strings' ? STRING_SCHEMAS : SUPPORTED_SCHEMAS).includes(text.split(/\r?\n/, 1)[0]))
+    throw new NativeWindError(400, renderer === 'strings'
+      ? 'Choose an original material-string performance supported by material_strings.'
+      : 'Choose a native reed, flue or material-valve performance supported by music_render wind.');
   // Do not trim, normalize newlines, parse records, or re-encode the admitted bytes.
   return bytes;
 }
@@ -67,6 +72,16 @@ function validateGasSources(value, attachedNames) {
   return {components, waterSpecies:value.waterSpecies, phase:value.phase};
 }
 
+function validateStringProfiles(value, renderer, attachedNames) {
+  if (value === undefined) return undefined;
+  const keys = ['bodyPath', 'stopPath', 'contactThermalPath'];
+  if (renderer !== 'strings' || !value || typeof value !== 'object' || Array.isArray(value)
+      || Object.keys(value).some(key => !keys.includes(key))
+      || Object.values(value).some(path => typeof path !== 'string' || !attachedNames.has(path)))
+    throw new NativeWindError(400, 'String profiles must name attached body, stop or contact-thermal source files.');
+  return Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]]));
+}
+
 /** Transport envelope only: no physics records or material constants are interpreted. */
 export function validateInput(bytes, bundled = false) {
   if (!bundled) return {source:validateSource(bytes), attachments:[], decimate:false};
@@ -77,10 +92,11 @@ export function validateInput(bytes, bundled = false) {
   if (packet?.format !== 'frankensim-native-wind-input-v1' || !Array.isArray(packet.attachments)
       || packet.attachments.length > MAX_ATTACHMENTS)
     throw new NativeWindError(400, 'Experiment requires its version and at most 32 source attachments.');
-  if (Object.keys(packet).some(key => !['format', 'source', 'attachments', 'decimate', 'gasSources'].includes(key))
+  if (Object.keys(packet).some(key => !['format', 'source', 'attachments', 'decimate', 'gasSources', 'renderer', 'stringProfiles'].includes(key))
       || (packet.decimate !== undefined && typeof packet.decimate !== 'boolean'))
     throw new NativeWindError(400, 'Experiment contains unsupported fields or an invalid native decimation option.');
-  const source = validateSource(decodedBase64(packet.source, MAX_SOURCE_BYTES));
+  const renderer = packet.renderer === undefined ? 'wind' : packet.renderer;
+  const source = validateSource(decodedBase64(packet.source, MAX_SOURCE_BYTES), renderer);
   const names = new Set(['input.performance', 'output.wav', 'output.provenance.json']);
   let total = 0;
   const attachments = packet.attachments.map(file => {
@@ -101,7 +117,9 @@ export function validateInput(bytes, bundled = false) {
     return {path, bytes:content};
   });
   const gasSources = validateGasSources(packet.gasSources, new Set(attachments.map(file => file.path)));
-  return {source, attachments, decimate:packet.decimate ?? false, ...(gasSources ? {gasSources} : {})};
+  const stringProfiles = validateStringProfiles(packet.stringProfiles, renderer, new Set(attachments.map(file => file.path)));
+  return {source, attachments, decimate:packet.decimate ?? false, ...(renderer === 'strings' ? {renderer} : {}),
+    ...(gasSources ? {gasSources} : {}), ...(stringProfiles ? {stringProfiles} : {})};
 }
 
 export function validateWave(bytes, limit = MAX_OUTPUT_BYTES) {

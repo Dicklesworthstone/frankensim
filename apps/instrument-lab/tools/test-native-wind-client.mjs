@@ -197,3 +197,68 @@ test("selected gas sources cannot silently disappear on an older server or malfo
       {gasSources}, undefined, never), /Gas sources need explicit/);
   }
 });
+
+test("material strings preserve their performer, source, profiles, gas associations and native PCM", async () => {
+  const connected = {...status, renderers:{wind:false, strings:true}, supportsGasSources:true,
+    maximumAttachments:32, maximumAttachmentFileBytes:8388608,
+    maximumAttachmentBytes:33554432, maximumRequestBytes:48000000};
+  const source = "frankensim-material-strings-v3\r\n# µ original string material data\r\n";
+  const stringProfiles = {bodyPath:"profiles/body.profile", stopPath:"profiles/fingers.profile",
+    contactThermalPath:"profiles/contact-heat.profile"};
+  const gasSources = {components:[{speciesPath:"gas/custom.species", nasa9Path:"gas/custom.nasa9",
+    transportPath:"gas/custom.transport"}], waterSpecies:null, phase:"frozen"};
+  const attachments = [...Object.values(stringProfiles), ...Object.values(gasSources.components[0]), "materials/wire.fsmcdpk"]
+    .map((path, index) => ({path, bytes:new Uint8Array([0, 255, index, 13, 10])}));
+  const expected = wave(); expected[44] = 0x21; expected[45] = 0xa7;
+  const result = await renderNativeWindBundle(source, attachments, connected,
+    {renderer:"strings", stringProfiles, gasSources}, undefined, async (url, options) => {
+      assert.equal(url, "/api/native-wind/render");
+      assert.equal(options.headers["X-Native-Wind-Token"], status.token);
+      assert.equal(options.headers["Content-Type"], "application/json;charset=utf-8");
+      const packet = JSON.parse(options.body);
+      assert.equal(packet.renderer, "strings");
+      assert.equal(packet.decimate, false);
+      assert.deepEqual(packet.stringProfiles, stringProfiles);
+      assert.deepEqual(packet.gasSources, gasSources);
+      assert.deepEqual(Buffer.from(packet.source, "base64"), Buffer.from(source));
+      assert.deepEqual(packet.attachments.map(file => ({path:file.path, bytes:Buffer.from(file.bytes, "base64")})),
+        attachments.map(file => ({path:file.path, bytes:Buffer.from(file.bytes)})));
+      return audio(expected);
+    });
+  assert.deepEqual(new Uint8Array(await result.arrayBuffer()), expected);
+  // Even a source with no external files needs an explicit performer; plain text selects wind.
+  await renderNativeWindBundle(source, [], connected, {renderer:"strings", decimate:true}, undefined,
+    async (_url, options) => {
+      assert.equal(options.headers["Content-Type"], "application/json;charset=utf-8");
+      const packet = JSON.parse(options.body);
+      assert.equal(packet.renderer, "strings");
+      assert.equal(packet.decimate, true);
+      assert.deepEqual(packet.attachments, []);
+      assert.equal(Buffer.from(packet.source, "base64").toString(), source);
+      return audio();
+    });
+});
+
+test("a selected performer or string profile cannot fall back to another native engine", async () => {
+  const connected = {...status, renderers:{wind:true, strings:true}, maximumAttachments:32,
+    maximumAttachmentFileBytes:8388608, maximumAttachmentBytes:33554432, maximumRequestBytes:48000000};
+  const never = async () => assert.fail("unsupported performer must be refused before sending");
+  for (const renderers of [undefined, {wind:true, strings:false}]) {
+    await assert.rejects(renderNativeWindBundle("source", [], {...connected, renderers},
+      {renderer:"strings"}, undefined, never), /material-string renderer is unavailable/);
+  }
+  await assert.rejects(renderNativeWind("source", {...connected, renderers:{wind:false, strings:true}},
+    undefined, never), /wind renderer is unavailable/);
+  for (const renderer of [null, "piano"]) {
+    await assert.rejects(renderNativeWindBundle("source", [], connected, {renderer}, undefined, never),
+      /Choose the wind or material-string renderer/);
+  }
+  await assert.rejects(renderNativeWindBundle("source", [], connected,
+    {stringProfiles:{bodyPath:"body.profile"}}, undefined, never), /material-string renderer/);
+  for (const stringProfiles of [null, [], "body.profile"]) {
+    await assert.rejects(renderNativeWindBundle("source", [], connected,
+      {renderer:"strings", stringProfiles}, undefined, never), /explicit attached profiles/);
+  }
+  await assert.rejects(renderNativeWindBundle("source", [], connected,
+    {renderer:"strings", decimate:1}, undefined, never), /decimation explicitly/);
+});
