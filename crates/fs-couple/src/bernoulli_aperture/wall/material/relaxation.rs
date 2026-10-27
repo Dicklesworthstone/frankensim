@@ -12,6 +12,8 @@ use fs_qty::{Dims, Pressure};
 use fs_vfit::relaxation::{ComplianceRelaxationTerm, RelaxationImpedanceSpec, MAX_RELAXATION_BRANCHES};
 use fs_vfit::waveguide::network::{NetworkNode, WaveguideNetwork};
 
+mod normal;
+
 /// Immutable source spectrum at the original wall's fixed material state.
 /// This retains a supplied material law, not a fit from the desired sound.
 #[derive(Clone, Debug)]
@@ -20,6 +22,7 @@ pub struct WallRelaxation {
     provenance: String,
     source_identity: Option<ContentHash>,
     source_arms: Option<Vec<SourceArm>>,
+    normal_history: Option<normal::NormalPlaneHistory>,
     band_hz: [f64; 2],
     max_dt_over_tau: f64,
     max_angular_step: f64,
@@ -39,6 +42,7 @@ impl PartialEq for WallRelaxation {
         self.material.e_inf == other.material.e_inf && self.material.terms == other.material.terms
             && self.provenance == other.provenance && self.source_identity == other.source_identity
             && self.source_arms == other.source_arms
+            && self.normal_history == other.normal_history
             && self.band_hz == other.band_hz
             && self.max_dt_over_tau == other.max_dt_over_tau && self.max_angular_step == other.max_angular_step
     }
@@ -116,7 +120,7 @@ impl WallRelaxation {
         let material = GeneralizedMaxwell::new(material.e_inf, material.terms)
             .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
         Ok(Self { material, provenance, source_identity: None, source_arms: None,
-            band_hz, max_dt_over_tau, max_angular_step })
+            normal_history: None, band_hz, max_dt_over_tau, max_angular_step })
     }
     /// Exact original material law; zero arms remain in the source record.
     #[must_use]

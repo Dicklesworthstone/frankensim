@@ -115,9 +115,69 @@ its `loss: maxwell` label identifies that representation, not a new source pack.
 
 This declaration supplies an already two-dimensional normal constitutive law.
 It does **not** take an arbitrary 3-D viscous tensor and independently eliminate
-radial stress. Generated memory cannot use the live source-pair rebind API:
-there is no direct original modulus/time property pair to identify that history.
-It is cold-bound at the authored state, like the other native wind inputs.
+radial stress. The native wind file grammar still binds one authored state.
+The library's live material-wall wrappers also support the source-identified
+axial-strain transfer below; no fictitious modulus/time property pair is minted.
+
+## Continuing a directional wall through material-state changes
+
+`MaterialWallDg::rebind_controlled` and
+`RegionalMaterialWallDg::rebind_controlled` accept a newly resolved normal-plane
+law from the **same immutable material card and selected claims**. Density,
+directional elasticity and the three viscosity properties can vary with a
+supported source coordinate such as temperature. The original frame, property
+roles, thickness, axial restraint, gas and geometry remain fixed. Each endpoint
+must retain the induced positive relaxation mode; creating, extinguishing or
+replacing its history with an unrelated Maxwell source refuses.
+
+The transfer preserves physical radial displacement, conjugate surface momentum
+and the eliminated **axial strain**, not the old generated extension coordinate.
+Writing `c = C_ha/C_aa`, `d = c-D_ha/D_aa`, radial displacement `w` and generated
+arm extension `y = z/K_arm`:
+
+```text
+y = radius * (axial_strain + c * hoop_strain) / d
+hoop_strain = w / radius
+y_new = (d_old/d_new)*y_old + ((c_new-c_old)/d_new)*w
+```
+
+Holding `y` unchanged would silently change axial strain when `c` or `d` moves.
+The shared native DG transfer applies the derived invertible map with its
+original geometric Gram matrix, including local regional support. Signed maps
+are permitted; an exact cancellation is not mistaken for lost state. Source
+identity, finite values, history coverage, work budget and cancellation remain
+explicit admission checks. Ordinary source-pair Maxwell arms retain their
+original extension-preserving transfer and operation order.
+
+The full changed elastic/kinetic storage is recorded once as **parameter work**.
+A viscosity-only change at fixed elastic tensor and density changes subsequent
+pressure and loss but not instantaneous physical storage. The external driver
+owes the signed work: this operation is not heat evolution, an entropy balance,
+thermal expansion, mass transport, or elapsed physical time. Both source
+wrappers rebuild the existing propagator at its original timestep and tolerance
+and publish source, state and propagator together only after acceptance.
+
+Resolve the replacement state through the original material resolver and the
+same `orthotropic_normal_viscosity_requirements`, construct it with
+`new_orthotropic_normal_kelvin_voigt`, then pass that wall to the wrapper's
+existing `rebind_controlled` method. Library callers do not supply the internal
+map themselves. This does not add scheduled temperature controls to the native
+performance grammar or Instrument Lab; their current material changes still
+start separate renders.
+
+Focused regressions cover full uncondensed two-strain/gas dynamics after a
+source-temperature change, viscosity-only storage invariance even when the
+internal coordinate reverses sign, regional support, source/frame/role refusals,
+and cancellation before and after propagator preparation:
+
+```sh
+cargo test -p fs-duct --test dg_wall_extension_transfer
+cargo test -p fs-couple --test normal_viscous_wall_updates
+```
+
+At initial publication these seven native regressions are authored but
+unexecuted. Independent matrix-exponential and fine-step uncondensed references
+exercise the transfer equations, not native compilation or recorded sound.
 
 ## Regional sources and Instrument Lab
 
@@ -149,11 +209,12 @@ byte-identical. Mixed/directional regional layouts are identified as
 
 ## Scope and verification
 
-This remains a frozen-state, axisymmetric **thin cylindrical membrane** with
+The underlying model remains an axisymmetric **thin cylindrical membrane** with
 `H/radius <= 0.05`. It omits axial wave inertia, bending between rings, thick-wall
 radial stresses, off-axis shear coupling, end-cap traction, changing geometry,
 and exterior wall radiation. Source-frame alignment must describe the specimen:
 a straight Cartesian grain direction cannot silently become cylindrical texture.
+Source coefficients stay fixed between explicit material interventions.
 The normal-plane check does not validate an unspecified full 3-D elastic tensor.
 
 This addition does not by itself qualify a wooden clarinet, oboe or flute as a

@@ -84,8 +84,9 @@ impl LocalMaterialWall {
     /// All original material queries, axes, density and thickness are retained.
     /// The generated spectrum records the source state and named coefficients;
     /// it is an algebraic constitutive reduction, not another material card.
-    /// Its memory has no direct source modulus/time pair, so the existing live
-    /// Maxwell rebind API refuses rather than misidentifying that history.
+    /// Its memory retains the original tensor claims and axial-strain identity.
+    /// The live wall wrapper preserves that physical strain as coefficients
+    /// change, rather than falsely treating the generated arm as a source pair.
     ///
     /// The explicit temporal limits have the same domain as WallRelaxation::new;
     /// exact-DG propagation does not impose those midpoint-network limits.
@@ -163,6 +164,8 @@ impl LocalMaterialWall {
         let spectrum = super::super::super::WallRelaxation::new(law, format!(
             "exact normal-plane Kelvin-Voigt elimination; material-state:{}; axes:{axes:?}; viscosity-properties:{viscosity_properties:?}",
             wall.material.identity()), band_hz, max_dt_over_tau, max_angular_step)?;
+        let spectrum = spectrum.with_normal_plane_history(&wall.material, axes,
+            viscosity_properties, elastic_ratio, mismatch)?;
         wall.loss = WallMaterialLoss::Maxwell(spectrum);
         Ok(wall)
     }

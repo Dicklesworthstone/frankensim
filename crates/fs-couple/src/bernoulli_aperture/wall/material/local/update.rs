@@ -52,6 +52,7 @@ fn prepare(
     let mut band_hz = walls[0].band_hz;
     let mut pins = Vec::with_capacity(walls.len());
     let mut correspondence = Vec::new();
+    let mut extension_maps = Vec::new();
     let mut has_relaxation = false;
     for (element, wall) in walls.iter().enumerate() {
         if cancelled() {
@@ -69,30 +70,36 @@ fn prepare(
                         "live Maxwell history requires the original material card, thickness and restraint",
                     ));
                 }
-                for name in [
-                    DENSITY_PROPERTY,
-                    YOUNG_MODULUS_PROPERTY,
-                    POISSON_RATIO_PROPERTY,
-                ] {
-                    let selected = |source: &LocalMaterialWall| {
-                        source
-                            .material
-                            .property(name)
-                            .map(|property| property.answer().receipt.selected)
-                    };
-                    if selected(previous) != selected(wall) {
-                        return Err(invalid(
-                            "live Maxwell history must retain the original base material claims",
-                        ));
+                if let Some(map) = old.normal_history_extension_map(new)? {
+                    correspondence.push(DgWallRelaxationTransfer {
+                        element, previous_arm: 0, replacement_arm: 0,
+                    });
+                    extension_maps.push(map);
+                } else {
+                    for name in [
+                        DENSITY_PROPERTY,
+                        YOUNG_MODULUS_PROPERTY,
+                        POISSON_RATIO_PROPERTY,
+                    ] {
+                        let selected = |source: &LocalMaterialWall| {
+                            source
+                                .material
+                                .property(name)
+                                .map(|property| property.answer().receipt.selected)
+                        };
+                        if selected(previous) != selected(wall) {
+                            return Err(invalid(
+                                "live Maxwell history must retain the original base material claims",
+                            ));
+                        }
+                    }
+                    for (previous_arm, replacement_arm) in old.history_correspondence(new)? {
+                        correspondence.push(DgWallRelaxationTransfer {
+                            element, previous_arm, replacement_arm,
+                        });
+                        extension_maps.push([1.0, 0.0]);
                     }
                 }
-                correspondence.extend(old.history_correspondence(new)?.into_iter().map(
-                    |(previous_arm, replacement_arm)| DgWallRelaxationTransfer {
-                        element,
-                        previous_arm,
-                        replacement_arm,
-                    },
-                ));
             }
             (WallMaterialLoss::Maxwell(_), _) | (_, WallMaterialLoss::Maxwell(_)) => {
                 return Err(invalid(
@@ -126,11 +133,12 @@ fn prepare(
                 _ => None,
             })
             .collect();
-        next_duct.rebind_compliant_wall_relaxation_regions(
+        next_duct.rebind_compliant_wall_relaxation_regions_with_extension_maps(
             &mut next_state,
             &pins,
             &spectra,
             &correspondence,
+            &extension_maps,
             maximum_absolute_parameter_work_j,
             cancelled,
         )
@@ -338,12 +346,18 @@ impl MaterialWallDg {
     /// Source receipts, duct, accepted state and certified propagator publish
     /// together after every check. The propagator keeps its timestep/tolerance;
     /// no sample is consumed. A replacement must cover the existing declared
-    /// frequency band. A Maxwell wall also preserves every arm's elastic
+    /// frequency band. A source-pair Maxwell wall preserves every arm's elastic
     /// extension and viscous offset, identified by its original property pair
     /// and selected claims on the SAME immutable card. Reordering source arms
     /// is supported; changing thickness/restraint, unlabelled authored spectra,
     /// new/dropped arms and zero/positive transitions refuse. A relaxation-time
     /// change alters future loss without instantaneous parameter work.
+    /// Exactly condensed normal Kelvin--Voigt memory instead retains its
+    /// original physical axial strain. Its card, frame, viscosity property
+    /// roles and selected claims must match; both endpoints must retain the
+    /// induced positive mode. The generated extension coordinate is transformed
+    /// with the changing constitutive coefficients, not held or reset. The
+    /// complete elastic/kinetic storage change is still parameter work.
     /// This intervention does not solve heat, expansion, changing gas,
     /// or mass transfer. Cancellation is checked around the existing bounded
     /// dense propagator preparation, which supplies no internal cancel callback.
