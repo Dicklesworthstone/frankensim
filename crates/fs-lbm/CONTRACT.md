@@ -3056,3 +3056,49 @@ and execution were unavailable (no Rust/Cargo, DSR or RCH); these are authored
 regressions, not passing native or experimental evidence.
 Focused command:
 `cargo test -p fs-lbm --test material_free_surface_enthalpy conduction::capillarity::wetting`.
+
+
+### Source-bound DC current on the free-surface thermal trajectory
+
+`MaterialFreeSurfaceEnthalpy3::with_electrical_core` retains a bounded rectangular
+native current domain, ideal electrode drive and explicit contact laws. Every
+selected cell must remain a fully occupied native `Fluid` cell; partial VOF
+current geometry refuses before publication. Core exterior faces impose declared
+zero normal current. They neither infer surrounding material insulation nor
+create mechanical walls. Electrical regions and contact indices are local to
+the declared core.
+
+The same complete liquid T/shear bundle supplies `ResolvedConductorState`;
+exactly one scalar conductivity or resistivity source is required, and changing
+that source basis is a data change. All original requirements, query meanings
+and pinned source receipts remain. The original voxel current solver supplies
+half-cell/contact I^2 R to the existing thermal observer at each actual accepted
+interval. Diagnostic endpoint solves consume budget but deposit no heat. The
+report independently integrates electrode power and deposited Joule power,
+admits both instantaneous W and integrated J defects, and retains applied and
+thermal-endpoint current/source epochs.
+
+Every existing conduction, finite-wall, bath, finite-atmosphere, rheology and
+wetting path automatically uses the bound current. Instantaneous-heat/pure-flow
+paths refuse an attached drive rather than omitting it. The original thermal
+timeline updates conductivity, viscosity, film and contact sources; its endpoint
+h feeds the original collision and VOF enthalpy transport. Current/source/budget/
+cancellation failure or candidate core dewetting leaves liquid, walls and
+atmosphere unchanged.
+
+Scope: zero imposed magnetic field, quasi-static isotropic Ohmic transport,
+fixed complete current-cell geometry, explicit thermal-current feedback and the
+existing first-order thermal/flow split. No cut-cell conductivity interpolation,
+motional EMF/Lorentz work, electrochemistry, phase-density closure, surface-work
+heating or total kinetic-energy claim. Refine time for nonlinear electrical
+feedback. Native Joule heat is external heat to this thermal system; it is
+counted once and compared separately with measured electrode supply.
+`combined_thermal_balance_defect_j` in the finite-gas report includes electrical
+Joule heat among external inputs.
+
+Five focused regression definitions cover independent R(T)/current/heat,
+conductivity/resistivity equivalence and actual population response, coupled
+liquid/wall/gas storage, late source/budget refusal and partial geometry/drive
+admission. All five changed Rust files passed syntax parsing, and independent
+scalar recurrences were evaluated. Native compilation/tests were not run:
+Rust/Cargo and DSR/RCH were unavailable in the editing environment.

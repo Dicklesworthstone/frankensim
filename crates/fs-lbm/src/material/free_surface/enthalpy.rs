@@ -102,8 +102,8 @@ pub struct FreeSurfaceEnthalpyReport {
     pub enthalpy_before_j: f64,
     /// Extensive liquid enthalpy after the step [J], including carry.
     pub enthalpy_after_j: f64,
-    /// Admitted external cell heat plus any explicitly coupled environmental
-    /// reservoir supply [J]. Internal wall and molecular heat stay separate.
+    /// Admitted external cell heat, native Joule heat and any explicitly coupled
+    /// environmental reservoir supply [J]. Internal wall and molecular heat stay separate.
     pub external_heat_j: f64,
     /// Constitutive molecular stress work converted into heat [J]. Zero for
     /// steps that do not explicitly select the viscous-heating entry point.
@@ -148,6 +148,9 @@ pub enum FreeSurfaceEnthalpyError {
     /// The original finite-atmosphere internal-energy owner refused.
     #[cfg(feature = "enthalpy-coupling")]
     Gas(fs_material::thermochemical_gas::energy::GasEnergyError),
+    /// The original scalar electrical source could not adopt the liquid bundle.
+    #[cfg(feature = "enthalpy-coupling")]
+    Conductor(fs_material::conductor::ConductorError),
     /// Missing physical closure, invalid input or exhausted explicit budget.
     Invalid(&'static str),
 }
@@ -172,6 +175,8 @@ impl core::fmt::Display for FreeSurfaceEnthalpyError {
             Self::Thermal(e) => write!(f, "free-surface conduction: {e}"),
             #[cfg(feature = "enthalpy-coupling")]
             Self::Gas(e) => write!(f, "free-surface finite atmosphere: {e}"),
+            #[cfg(feature = "enthalpy-coupling")]
+            Self::Conductor(e) => write!(f, "free-surface electrical source: {e}"),
             Self::Invalid(e) => write!(f, "free-surface enthalpy: {e}"),
         }
     }
@@ -249,6 +254,8 @@ pub struct MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     rheology: Option<rheology::RheologyBinding>,
     rheology_samples: BTreeMap<MassLocation3, rheology::FreeSurfaceRheologySample>,
     wetting: Option<WettingBinding<'m>>,
+    #[cfg(feature = "enthalpy-coupling")]
+    electrical: Option<conduction::electrical::ElectricalCore>,
 }
 
 struct ResolvedFlowMaterials {
@@ -380,6 +387,8 @@ impl<'s> MaterialFreeSurface3<'s> {
             rheology,
             rheology_samples: BTreeMap::new(),
             wetting: None,
+            #[cfg(feature = "enthalpy-coupling")]
+            electrical: None,
         };
         let resolved =
             candidate.resolve_states(&candidate.flow.lattice, &candidate.h, &masses, gate)?;
@@ -449,6 +458,12 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         gate: &CancelGate,
     ) -> Result<(BTreeMap<MassLocation3, f64>, f64, f64), Error> {
         poll(gate)?;
+        #[cfg(feature = "enthalpy-coupling")]
+        if self.electrical.is_some() {
+            return Err(Error::Invalid(
+                "an electrical core requires a conduction timeline; its drive cannot be skipped",
+            ));
+        }
         if heat.len() > self.controls.max_cells {
             return Err(Error::Invalid("cell-heat budget exhausted"));
         }
@@ -518,6 +533,10 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         h.retain(|key, _| trace.after.contains_key(key));
         extend_empty_ghosts(&trace.after, &mut h, &heated)?;
         let endpoint = self.resolve_states(&lattice, &h, &trace.after, gate)?;
+        #[cfg(feature = "enthalpy-coupling")]
+        if let Some(core) = &self.electrical {
+            core.admit(&lattice, &endpoint.states, gate)?;
+        }
         if let Some(forces) = endpoint.forces {
             // This changes the Guo population frame without adding an impulse.
             // The accepted force now belongs to the accepted advected h state.

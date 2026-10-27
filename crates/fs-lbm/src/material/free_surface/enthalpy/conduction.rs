@@ -28,6 +28,11 @@ pub use environment::{
 /// Finite atmospheric storage on the same thermal and native VOF interval.
 pub mod atmosphere;
 pub use atmosphere::FreeSurfaceFiniteGasExchange;
+/// Native source-driven current and Joule heat in a declared fully wet core.
+pub mod electrical;
+pub use electrical::{
+    FreeSurfaceElectricalExchange, FreeSurfaceElectricalInput, FreeSurfaceElectricalState,
+};
 use fs_material::state_point::ResolvedMaterialStatePoint;
 
 /// Source-bound resistance at an ordered liquid/solid thermal contact.
@@ -84,6 +89,8 @@ pub struct FreeSurfaceConductionReport {
     /// Additional finite gas storage account when the environment has an owner.
     /// Gas/liquid exchange is internal to this combined thermal system.
     pub finite_gas: Option<FreeSurfaceFiniteGasExchange>,
+    /// Actual native electrode supply and Joule heat, counted once in external heat.
+    pub electrical: Option<FreeSurfaceElectricalExchange>,
 }
 
 fn checkpoint(gate: &CancelGate) -> Result<(), DepositionError> {
@@ -96,6 +103,7 @@ fn checkpoint(gate: &CancelGate) -> Result<(), DepositionError> {
 
 #[derive(Clone)]
 struct Conduction<'a, 'm> {
+    gate: &'a CancelGate,
     law: &'a LiquidTemperatureLaw<'m>,
     caloric: &'a EquilibriumEnthalpyPhaseCurve,
     density: f64,
@@ -126,6 +134,7 @@ struct Conduction<'a, 'm> {
     environment_heat_j: f64,
     environment_absolute_heat_j: f64,
     finite_atmosphere: Option<atmosphere::FiniteAtmosphere>,
+    electrical: Option<electrical::ElectricalTimeline>,
 }
 
 struct Samples {
@@ -261,6 +270,15 @@ impl DepositionObserver for Conduction<'_, '_> {
     ) -> Result<BTreeMap<CellId, f64>, Error> {
         check()?;
         let mut powers = self.powers.clone();
+        if let Some(current) = self.sample_current(thermal, check)? {
+            let electrical = self.electrical.as_mut().expect("bound electrical core");
+            for (&id, &watts) in electrical.cells.iter().zip(&current.solution.joule_w) {
+                check()?;
+                let power = powers.entry(id).or_insert(0.0);
+                *power = electrical::finite(*power + watts)?;
+            }
+            electrical.last = Some(current);
+        }
         self.environment_last = self.sample_environment(thermal, check)?;
         if self.environment_reference.is_empty() {
             self.environment_reference = self.environment_last.clone();
@@ -311,7 +329,7 @@ impl DepositionObserver for Conduction<'_, '_> {
 
     fn step(
         &mut self,
-        _: f64,
+        start_s: f64,
         duration_s: f64,
         _: &BTreeMap<CellId, f64>,
         thermal: &DepositionSimulation<'_>,
@@ -322,6 +340,10 @@ impl DepositionObserver for Conduction<'_, '_> {
         self.endpoint = samples.liquid;
         self.body_endpoint = samples.contacts;
         self.body_states_endpoint = samples.bodies;
+        if let Some(endpoint) = self.sample_current(thermal, check)? {
+            self.electrical.as_mut().expect("bound electrical core")
+                .accept(start_s, duration_s, endpoint)?;
+        }
         let mut gas_heat = 0.0;
         for sample in &self.environment_last {
             check()?;
@@ -718,6 +740,10 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         )?
         .advance_to(0.0, config, || checkpoint(gate))?
         .0;
+        let electrical = self.electrical.as_ref().map(|core| {
+            core.admit(&self.flow.lattice, &self.states, gate)?;
+            electrical::ElectricalTimeline::new(core, &cell_id)
+        }).transpose()?;
         let rheology = self.rheology_model();
         let mut rheology_stress = BTreeMap::new();
         if rheology.is_some() {
@@ -727,6 +753,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             }
         }
         let observer = Conduction {
+            gate,
             law: self.law,
             caloric: self.caloric,
             density: rho,
@@ -759,9 +786,13 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             environment_heat_j: 0.0,
             environment_absolute_heat_j: 0.0,
             finite_atmosphere: finite_atmosphere.as_deref().cloned(),
+            electrical,
         };
         let (thermal, mut observer, audit) =
             thermal.advance_observed(&observer, duration, config, || checkpoint(gate))?;
+        let electrical_report = observer.electrical.as_ref()
+            .map(|current| current.report(controls.energy_tolerance_j)).transpose()?;
+        let joule_heat = electrical_report.as_ref().map_or(0.0, |current| current.joule_heat_j);
         let mut finite_gas_report = observer.finite_atmosphere.as_ref()
             .map(|gas| gas.balance(observer.environment_heat_j, &audit, controls.energy_tolerance_j))
             .transpose()?;
@@ -770,17 +801,18 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             poll(gate)?;
             heated.insert(location, thermal.cells()[&id].specific_h_j_kg);
         }
-        let external = if viscous.is_empty() && environment.is_empty() {
+        let external = if viscous.is_empty() && environment.is_empty() && electrical_report.is_none() {
             audit.external_heat_j
         } else {
             let defect =
-                audit.external_heat_j - external_heat - viscous_heat - observer.environment_heat_j;
+                audit.external_heat_j - external_heat - viscous_heat - observer.environment_heat_j
+                    - joule_heat;
             if !defect.is_finite() || defect.abs() > controls.energy_tolerance_j {
                 return Err(Error::Invalid(
-                    "authored, molecular and environmental liquid heat do not close",
+                    "authored, molecular, electrical and environmental liquid heat do not close",
                 ));
             }
-            external_heat + observer.environment_heat_j
+            external_heat + observer.environment_heat_j + joule_heat
         };
         let mut body_after = 0.0;
         let mut body_change = 0.0;
@@ -816,7 +848,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             external,
             viscous_heat,
             body_heat,
-            absolute_heat + body_heat.abs() + observer.environment_absolute_heat_j,
+            absolute_heat + body_heat.abs() + observer.environment_absolute_heat_j + joule_heat,
             gate,
         )?;
         if let Some(report) = &mut finite_gas_report {
@@ -851,6 +883,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             bodies: body_report,
             environment: environment_report,
             finite_gas: finite_gas_report,
+            electrical: electrical_report,
         })
     }
 }
