@@ -79,6 +79,8 @@ pub mod piano_vertical;
 pub mod pickup;
 /// Source-bound reciprocal longitudinal piezoelectric sensors and actuators.
 pub mod piezoelectric;
+/// Material-driven biased magnetostrictive coil/core motion on the shared stepper.
+pub mod magnetostrictive;
 /// Full source-derived viscous tensors on the shared DKT and modal runtime.
 pub mod plate_viscosity;
 /// Accepted-step port schemas and physical accounting adapters.

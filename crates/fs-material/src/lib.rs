@@ -48,6 +48,8 @@ pub mod iso9613;
 pub mod phase;
 /// Source-bound reciprocal longitudinal piezoelectric stress, field and storage.
 pub mod piezoelectric;
+/// Source-bound reciprocal incremental magnetostriction about a declared bias.
+pub mod magnetostrictive;
 /// Source-bound anisotropic reduced viscosity and work-conjugate plane transforms.
 pub mod plane_stress_viscosity;
 pub mod plastic;

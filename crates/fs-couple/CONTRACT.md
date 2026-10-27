@@ -7027,3 +7027,48 @@ temperature updates and rollback with nonzero history. Parsing/formatting and
 bounded source review passed; native test execution remains unverified. This
 does not solve heat, infer branch lineage across different materials, or turn
 instantaneous parameter work into dissipated heat.
+
+## Material-driven biased magnetostrictive coil/core
+
+`magnetostrictive` composes the original source-bound incremental magnetic
+material with the existing `fs-phs` descriptor and port interconnections. One
+fixed-root rod uses axial displacement `u(z)=x*z/L`, reference volume `A*L`,
+and consistent mass `rho*A*L/3`. Its ideal N-turn coil uniformly links the core:
+`lambda=N*A*Delta B`, `Delta i=L*Delta H/N`. The native state is
+`[x, momentum, Delta lambda]`. Differentiating the same integrated material
+energy supplies axial force and current; no independently fitted sensing or
+actuating gains, material-name dispatch, or additional time integrator exists.
+
+The complete material, typed nonzero DC bias and reference geometry remain
+fixed. The reference shape is already equilibrated at that bias. Native ports
+are force/velocity and incremental voltage/current, and the reported account is
+reversible perturbation energy plus kinetic energy. It excludes the DC-bias
+source's preparation/absolute energy. This incremental passivity/accounting
+boundary must not be relabeled a closed energy account for an entire biased
+device. A coupled caller may connect the native component to electrical and
+mechanical loads while retaining that same perturbation convention.
+
+The coil reduction gives `L_c=N^2*A*mu_axial/L`, `theta=N*A*(d/s_H)/L`,
+`lambda=L_c*i+theta*x`, and `F=k_H*x-theta*i`. A held current gives
+`k_H=A/(L*s_H)`; a held flux gives `k_B=A*mu_T/[L*(s_H*mu_T-d^2)]`.
+Zero incremental voltage conserves flux and is not the zero-current boundary.
+Ideal current clamps require compatible accepted flux; no switching impulse
+or conserved-state projection is introduced. Candidate source, amplitude,
+native solve, work, or late cancellation refusal leaves the body unchanged.
+
+The caller's strain/H increment envelope is checked through the material
+storage and at acceptance; its H limit must be below the absolute bias.
+The ideal fixed magnetic path equals the rod length. Distributed waves,
+off-axis deformation, magnetic fringing/demagnetizing fields, Maxwell forces
+from changing magnetic geometry, coil resistance, eddy/hysteresis losses,
+thermal evolution and acoustic radiation are not supplied by this component.
+It computes axial vibration and sensing; it does not synthesize a hum signal
+or claim microphone pressure or empirical transducer accuracy.
+
+Synthetic `tests/magnetostrictive.rs` regressions independently predict the
+fixed-current/fixed-flux midpoint oscillators, source-sign/density/turn-count
+effects, current- and voltage-driven motion/work, and both coupled normal
+modes of a native coil/capacitor interconnection. They also check incompatible
+clamps, amplitude/domain refusal and late-cancellation retry. This advances
+MR60 (`frankensim-material-reality-ui2if.7.8`); the broader thermal/history,
+spatial field and acoustic-observation requirements remain open.

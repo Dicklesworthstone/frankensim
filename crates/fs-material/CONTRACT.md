@@ -2251,3 +2251,41 @@ timestep aid; the existing source model still owns actual `u(T)` and inversion.
 for coupled film queries. No constant heat capacity, enthalpy substitution or
 second gas caloric law is introduced. A focused test compares the bound with
 actual mixture heat capacities and refuses a bracket outside source support.
+
+## Biased incremental longitudinal magnetostriction
+
+`magnetostrictive::LongitudinalMagnetostrictive` resolves density, incremental
+axial compliance at fixed H, the signed reciprocal piezomagnetic d33, and
+incremental absolute permeability at fixed axial stress from one original
+material bundle. The coefficient property names explicitly distinguish these
+incremental, direction-3, stress/field conventions from an ordinary magnetic
+permeability or a global magnetostriction curve. No grade name selects data.
+
+The original query must contain an explicitly typed, finite nonzero H-bias
+coordinate in A/m. This owner holds that bias and every other external condition
+fixed. The shared owned-coordinate/fixed-external admission retains typed
+temperature, pressure and composition and refuses unowned dynamic fields,
+stress, frequency and rate dependence. Bias- or temperature-dependent source
+curves select a tangent at initialization; they are not silently refreshed
+along the trajectory. A scalar requires `ConstantWithinValidity`.
+
+The reversible perturbation equations are `epsilon=s_H*sigma+d*H` and
+`B=d*sigma+mu_T*H`. All four variables are increments about the already biased,
+stress-free prepared reference. `s_H>0` and `mu_axial=mu_T-d*d/s_H>0` admit the
+whole coupled block. With independent epsilon and B, one energy
+`w=epsilon^2/(2*s_H)+(B-(d/s_H)*epsilon)^2/(2*mu_axial)` gives both stress and H.
+This is incremental storage, not the absolute energy of the DC-biased device;
+bias preparation and its source work remain outside the model. The constitutive
+convention follows Deng and Dapino, *Magnetic flux biasing of magnetostrictive
+sensors*, Smart Materials and Structures 26 (2017) 055027, Eq. (1),
+<https://doi.org/10.1088/1361-665X/aa688b>. No measured constants are imported.
+
+This is a local small-signal, longitudinal, reversible tangent with free
+transverse stress. It supplies neither a full tensor, a stress-preload law,
+magnetization/domain history, hysteresis, saturation, heating nor parameter work.
+The dynamic consumer must declare a strain/field increment envelope; avoiding
+zero-bias crossing does not prove that a measured law is linear in that envelope.
+Synthetic material tests compare an independent symmetric-block inverse and
+energy, work-conjugate derivatives, signed/bias/temperature data changes,
+coupled instability and source-domain refusal. Motion and native circuit
+composition belong to `fs-couple::magnetostrictive`.
