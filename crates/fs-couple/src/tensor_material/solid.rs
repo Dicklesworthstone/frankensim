@@ -3,6 +3,9 @@
 //! all come from one retained source basis. No strain reconstruction, damping
 //! fit, second eigensolve or alternate time integrator is introduced.
 
+/// Physical element loss deposited on the original finite thermal timeline.
+pub mod thermal;
+
 use super::*;
 use fs_solid::linear3::visco::{ProjectedViscoSolid, ViscoElementError};
 
