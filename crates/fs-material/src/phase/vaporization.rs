@@ -13,6 +13,9 @@
 //! the internal energy of a rigid, sealed volume. Heat-exchange geometry remains
 //! the transport owner's explicit reference geometry.
 
+/// Steady adiabatic pressure-drop flashing on the same original water source.
+pub mod flash;
+
 use fs_qty::Pressure;
 use fs_thermochem::water::{SaturatedWaterState, WaterSaturationError, WaterSaturationSolve};
 
@@ -32,6 +35,12 @@ pub struct WaterVaporizationState {
 }
 
 impl WaterVaporizationState {
+    /// Retained original pressure chart for subsequent heating or condensation.
+    /// Reusing it avoids another source evaluation or pressure inversion.
+    pub const fn law(self) -> IsobaricWaterVaporization {
+        self.law
+    }
+
     /// Absolute equilibrium temperature [K].
     pub fn temperature_k(self) -> f64 {
         self.law.saturation.temperature().value()
@@ -99,9 +108,10 @@ pub struct WaterVaporizationHeatStep {
     pub mass_kg: f64,
     /// Requested heat into the specimen [J]. Cooling is negative.
     pub supplied_heat_j: f64,
-    /// Original [liquid, vapor] phase inventories [kg].
+    /// Original [liquid, vapor] phase inventories [kg], separately rounded.
     pub initial_phase_masses_kg: [f64; 2],
-    /// Proposed [liquid, vapor] phase inventories [kg].
+    /// Proposed [liquid, vapor] phase inventories [kg], separately rounded.
+    /// Their displayed sum can differ from the invariant total mass by roundoff.
     pub phase_masses_kg: [f64; 2],
     /// Original and proposed total volumes [m3], separately rounded.
     pub volumes_m3: [f64; 2],
@@ -179,6 +189,8 @@ impl IsobaricWaterVaporization {
     }
 
     /// Use the original bounded saturation-pressure inversion; no second root solver.
+    /// The chart retains the evaluated source pressure within the caller's Pa
+    /// residual budget. It does not replace that pressure with the requested value.
     pub fn at_pressure(
         pressure: Pressure,
         controls: WaterSaturationSolve,

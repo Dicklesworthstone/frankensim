@@ -4042,3 +4042,22 @@ between a steam condenser and a lower-pressure boiler, positive heat-transfer
 entropy production, complete phase depletion/reentry and atomic refusal.
 `cargo run -p fs-material --example water_boiling` runs a heating/cooling cycle
 with phase inventory, volume, expansion work and independent energy checks.
+
+### Adiabatic pressure-drop flashing
+
+`WaterVaporizationState::flash_to_pressure` resolves the equilibrium endpoint
+of a steady adiabatic throttle with no shaft work and negligible kinetic and
+potential energy changes. Specific enthalpy is retained bitwise. The original
+IAPWS source at the lower pressure determines actual liquid/vapor inventory,
+volume, internal energy and entropy. Independent source Delta u + Delta(pv)
+and signed entropy-generation checks use explicit caller budgets; p_out Delta v
+is not substituted for the inlet/outlet flow-work difference.
+
+The report retains the actual pressure drop, original pressure-inversion
+residual, flow-work change and signed entropy generation. Pressure increases,
+critical collapse and enthalpies requiring subcooling or superheating refuse;
+no off-saturation source or valve flow-rate model is inferred. The returned
+state's `law()` reuses its exact retained chart for further heating or cooling.
+Tests include vapor creation from saturated 450 K liquid throttled to
+101325 Pa, a heating/flash/condensation chain, conservation and source-domain,
+accuracy and cancellation refusals.
