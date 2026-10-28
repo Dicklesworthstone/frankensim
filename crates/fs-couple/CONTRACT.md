@@ -9135,3 +9135,12 @@ Six original-source physical tests pass: native linear RLC reduction, independen
 major-loop pinning area/remanence, analytic active-set RL refinement, reversal/
 source/budget/cancellation refusal, distinct finite copper/core heating with R(T)
 feedback and global closure, and thermal-domain rollback.
+
+
+### Reciprocal finite-caloric normal contact
+
+`tribothermal::normal::CaloricNormalContact` advances one prescribed linear indentation segment and the original finite thermal network together. The native sphere or elliptic Hertz/Hunt-Crossley owner supplies force, patch geometry, pressure, free energy and applicability. Normal load and patch evolve with indentation. The segment mean force, rather than endpoint force multiplied by travel, is conjugate to actual normal displacement. Hunt-Crossley work is integrated over that segment and deposited once through the declared heat partition.
+
+The constitutive model supplies the reduced modulus and its two-temperature gradient/Hessian at fixed geometry. Surface entropy is `s_i=-dpsi/dT_i`; contact internal energy is `U=psi+sum(T_i*s_i)`. A symmetric coordinate-path split accounts for nonlinear coefficient changes; reversible exchange is `-C_i-delta(T_i*s_i)`. The original caloric capacities plus the full contact thermal Hessian must admit a positive-definite two-temperature stability matrix. Every trial starts from accepted normal and caloric state. Original caloric objects, cell masses, source domains and native contact applicability remain bound. Independent native-potential, thermal-cell and whole-system energy gates precede atomic publication; failure/cancellation leaves both owners unchanged.
+
+Geometry/curvature and declared damping remain fixed over the segment. This first-order composition prescribes normal motion; it does not implement flight/impact event localization, thermal expansion, phase change, moving curvature, simultaneous tangential/body motion or complete Euler thermal closure. Seven focused native G1/G3 tests cover analytic reciprocal cooling, loaded heating, integrated damping on compression/release, circular degeneration and tiny increments, first-order refinement, capacity refusal and transactional failure/replay. Sources are authored references, not measured calibration.

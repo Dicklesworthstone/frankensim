@@ -612,3 +612,6 @@ fn final_cancellation_source_domain_and_trial_budget_leave_both_histories_unchan
 
 #[path = "tribothermal/partial_slip.rs"]
 mod partial_slip;
+
+#[path = "tribothermal/normal.rs"]
+mod normal;

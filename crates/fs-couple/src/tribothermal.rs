@@ -470,3 +470,6 @@ impl<'a> MaterialSlidingContact<'a> {
 
 /// Finite caloric and entropy feedback for loaded native partial-slip history.
 pub mod partial_slip;
+
+/// Reciprocal finite-caloric normal contact with evolving indentation and patch.
+pub mod normal;
