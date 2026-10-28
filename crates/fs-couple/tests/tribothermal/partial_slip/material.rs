@@ -372,3 +372,6 @@ fn original_source_domain_failure_rolls_back_loaded_and_thermal_histories() {
 
 #[path = "resolved_material.rs"]
 mod resolved;
+
+#[path = "rolling.rs"]
+mod rolling;

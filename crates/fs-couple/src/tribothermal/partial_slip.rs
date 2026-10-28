@@ -903,3 +903,6 @@ fn difference_error<E>(e: FiniteDifferenceError<CaloricContactError<E>>) -> Calo
         FiniteDifferenceError::Invalid(s) => CaloricContactError::Invalid(s),
     }
 }
+
+/// Original rolling loss and retained microslip in one finite thermal solve.
+pub mod rolling;
