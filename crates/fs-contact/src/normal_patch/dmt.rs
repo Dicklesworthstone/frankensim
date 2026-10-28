@@ -17,6 +17,9 @@
 
 #[path = "dmt/energy.rs"]
 mod energy;
+/// Stable loading-machine branches and finite-range snap events.
+#[path = "dmt/fixture.rs"]
+pub mod fixture;
 
 use core::f64::consts::PI;
 

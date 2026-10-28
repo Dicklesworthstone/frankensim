@@ -505,6 +505,35 @@ cover original equations, derivative/energy consistency, corners, work cycles,
 contact/noncontact friction, scaling and applicability; `adhesive_shear` adds
 the original-source DMT-to-shear integration case.
 
+`normal_patch::dmt::fixture::DmtSpringFixture` connects that same source-bound
+finite-range law to a massless loading spring of stiffness K. With
+S=2*pi*R*W/z0, stability requires K+F'(delta)>0. For K>S the attractive-gap
+branch is stable and approach/retraction is reversible. For K<S that branch
+is unstable: immutable history localizes snap-in at stage D=-z0 and snap-off
+at D=-2*pi*R*W/K. The contact's geometrical regime remains separate from the
+sign of the total force; an attractive gap never supplies solid shear area.
+K=S is neutral with nonunique gap equilibria and refuses explicitly.
+
+The original normal sources, authority and indentation envelope remain in
+force. A bounded allocation-free scalar solve supplies contacting equilibria;
+gap/separated equilibria and stability thresholds are analytic. Responses retain
+spring storage, total potential, force-balance residual and the condensed stage
+tangent. Geometric corners have no smooth tangent. Branch jumps report the
+finite tip motion and release of contact-plus-spring potential at fixed stage.
+The external transient/thermal owner decides where that release goes. Smooth
+stage work uses the original exact-piece DMT work and a factored spring-energy
+difference; only accepting a successor token commits a release. Total work
+closes storage change plus jump release. Machine inertia, tip dynamics,
+viscoelasticity and experimental validation are not introduced.
+
+G1/G3 `tests/adhesive_dmt_fixture.rs` checks the original dimensional equilibrium,
+the energy curvature of stable and unstable tail solutions, both event
+thresholds, independent integrated cycle work, reversible stiff-machine cycles,
+potential gradients/tangents, dimensional similarity and source/history refusals.
+The fixture is a direct energy derivation for the existing DMT-M/Dugdale model;
+the machine-stiffness motivation is Deng and Kesari (2019),
+<https://doi.org/10.1016/j.jmps.2019.07.009>.
+
 ## Simultaneous normal impact admission
 
 `multicontact::solve_normal_impacts` consumes one full contact-space inverse
