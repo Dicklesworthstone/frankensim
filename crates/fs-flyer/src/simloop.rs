@@ -9,7 +9,7 @@
 //!   Airborne: perception (E4.6c-i) → control law (fixed hold /
 //!           historical pilot / human input) → canard mechanism →
 //!           full nonlinear force build-up with the pitch-rate term →
-//!           FRD longitudinal kinematics + rotor torque balance + OU
+//!           inertial longitudinal momentum + rotor torque balance + OU
 //!           gust coupling + reduced lateral build-up → ground contact.
 //!
 //! Every tick chains into a running blake3 digest (bit-identical
@@ -43,6 +43,7 @@ use fs_atmo::ou::{OuMode, STATIONARY_ANCHOR_TICK, StationaryOuPath};
 use fs_blake3::hash_domain;
 use fs_math::det;
 
+mod motion;
 mod spatial_wind;
 pub use spatial_wind::SpatialWindSpec;
 use spatial_wind::SpatialWindState;
@@ -921,29 +922,32 @@ impl SimLoop {
                 if self.spatial_wind.is_some() {
                     self.advance_spatial_motion(&b, alpha_clamped, dt);
                 } else {
-                    // FRD longitudinal kinematics.
-                    let du = b.force_n[0] / m - self.q * self.w;
-                    let dw = b.force_n[2] / m + self.q * self.u;
-                    let dq = b.moment_y_nm / IYY_KG_M2;
-                    let inc_u = dt * du;
-                    self.u += inc_u;
-                    let inc_w = dt * dw;
-                    self.w += inc_w;
-                    let inc_q = dt * dq;
-                    self.q += inc_q;
-                    let inc_th = dt * self.q;
-                    self.theta += inc_th;
+                    // Store body airspeed as before, but advance inertial
+                    // ground momentum. Steady headwind is a velocity offset;
+                    // the legacy scalar gust still enters only the load alpha.
+                    let wind = [-self.spec.headwind_mps, 0.0];
+                    let next = motion::held_load_step(
+                        motion::LongitudinalMotion {
+                            position_m: [self.x_m, self.h_m],
+                            ground_mps: motion::ground_velocity([self.u, self.w], self.theta, wind),
+                            theta_rad: self.theta,
+                            q_rad_s: self.q,
+                        },
+                        motion::nongravity_acceleration(
+                            [b.force_n[0], b.force_n[2]],
+                            alpha_clamped,
+                            m,
+                        ),
+                        b.moment_y_nm / IYY_KG_M2,
+                        motion::GRAVITY_MPS2,
+                        dt,
+                    );
+                    [self.x_m, self.h_m] = next.position_m;
+                    self.theta = next.theta_rad;
+                    self.q = next.q_rad_s;
+                    [self.u, self.w] = motion::body_air_velocity(next.ground_mps, self.theta, wind);
                     let inc_om = dt * b.torque_imbalance_nm / 1.6;
                     self.omega += inc_om;
-                    let climb = self.u * det::sin(self.theta) - self.w * det::cos(self.theta);
-                    let inc_h = dt * climb;
-                    self.h_m += inc_h;
-                    let ground_speed = (self.u * det::cos(self.theta)
-                        + self.w * det::sin(self.theta)
-                        - self.spec.headwind_mps)
-                        .max(0.0);
-                    let inc_x = dt * ground_speed;
-                    self.x_m += inc_x;
                 }
                 // Project the achieved antisymmetric strip twists back
                 // onto the registered warp basis. Common trim washout

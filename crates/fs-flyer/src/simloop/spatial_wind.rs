@@ -2,7 +2,7 @@
 //! inertial state; air-relative velocity is sampled, never time-differentiated.
 //! This avoids treating an OU innovation as an impulsive aircraft acceleration.
 
-use super::{SimLoop, map_atmo};
+use super::{SimLoop, map_atmo, motion};
 use crate::Refusal;
 use fs_atmo::evolving::{EvolvingTurbulenceCheckpoint, EvolvingTurbulenceField};
 use fs_atmo::ou::OuCheckpoint;
@@ -312,11 +312,8 @@ impl SimLoop {
     pub(super) fn sync_spatial_air_velocity(&mut self) -> Result<f64, Refusal> {
         let wind = self.spatial_wind.as_ref().expect("spatial path");
         let sample = wind.sample([self.x_m, 0.0, self.h_m])?;
-        let vx = wind.ground_mps[0] - sample.u[0];
-        let vh = wind.ground_mps[1] - sample.u[2];
-        let (s, c) = (det::sin(self.theta), det::cos(self.theta));
-        self.u = c * vx + s * vh;
-        self.w = s * vx - c * vh;
+        [self.u, self.w] =
+            motion::body_air_velocity(wind.ground_mps, self.theta, [sample.u[0], sample.u[2]]);
         Ok(sample.u[2])
     }
 
@@ -429,19 +426,15 @@ impl SimLoop {
         dt: f64,
     ) {
         let mass = self.design.gross_mass_kg;
-        let weight = mass * 9.80665;
-        // force_buildup owns the level-flight gravity convention theta=alpha.
-        // Remove that contribution, rotate actual aerodynamic forces with the
-        // actual attitude, then apply world gravity once. A gust changes alpha,
-        // not the direction of gravity.
-        let fx = loads.force_n[0] + weight * det::sin(alpha);
-        let fz = loads.force_n[2] - weight * det::cos(alpha);
-        let (s, c) = (det::sin(self.theta), det::cos(self.theta));
-        let forward = c * fx + s * fz;
-        let upward = s * fx - c * fz;
         let wind = self.spatial_wind.as_mut().expect("spatial path");
         match self.phase {
             super::Phase::OnRail => {
+                let weight = mass * motion::GRAVITY_MPS2;
+                let fx = loads.force_n[0] + weight * det::sin(alpha);
+                let fz = loads.force_n[2] - weight * det::cos(alpha);
+                let (s, c) = (det::sin(self.theta), det::cos(self.theta));
+                let forward = c * fx + s * fz;
+                let upward = s * fx - c * fz;
                 let normal = (weight - upward).max(0.0);
                 let tow = match self.spec.catapult {
                     Some(tow) if self.x_m < tow.pull_length_m => tow.pull_force_n,
@@ -458,12 +451,26 @@ impl SimLoop {
                 }
             }
             super::Phase::Airborne => {
-                wind.ground_mps[0] += dt * forward / mass;
-                wind.ground_mps[1] += dt * (upward / mass - 9.80665);
-                self.x_m += dt * wind.ground_mps[0];
-                self.h_m += dt * wind.ground_mps[1];
-                self.q += dt * loads.moment_y_nm / super::IYY_KG_M2;
-                self.theta += dt * self.q;
+                let next = motion::held_load_step(
+                    motion::LongitudinalMotion {
+                        position_m: [self.x_m, self.h_m],
+                        ground_mps: wind.ground_mps,
+                        theta_rad: self.theta,
+                        q_rad_s: self.q,
+                    },
+                    motion::nongravity_acceleration(
+                        [loads.force_n[0], loads.force_n[2]],
+                        alpha,
+                        mass,
+                    ),
+                    loads.moment_y_nm / super::IYY_KG_M2,
+                    motion::GRAVITY_MPS2,
+                    dt,
+                );
+                wind.ground_mps = next.ground_mps;
+                [self.x_m, self.h_m] = next.position_m;
+                self.theta = next.theta_rad;
+                self.q = next.q_rad_s;
             }
             super::Phase::Ended(_) => unreachable!("live integration only"),
         }

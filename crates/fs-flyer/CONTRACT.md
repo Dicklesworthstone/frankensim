@@ -76,6 +76,30 @@ with `mech-step-non-finite` and `mech-step-unresolved`, respectively.
 
 ## Spatial wind in the flight lifecycle
 
+Both ordinary and spatial-wind airborne paths use one shared longitudinal
+held-load momentum step. Non-gravity body loads rotate at the midpoint attitude
+under the accepted constant pitch moment; the resulting world impulse advances
+ground velocity, and mean ground velocity advances the centre of mass. Constant
+pitch acceleration and ballistic gravity integrate exactly, while a rotating
+held body force has second-order kinematics. Loads still come from one tick-start
+aerodynamic solve, so this is not a fully coupled second-order flight method.
+
+The ordinary path retains body airspeed as stored state, converting through the
+steady headwind offset before and after the inertial step. Force-free attitude
+changes therefore preserve world momentum and kinetic energy to roundoff instead
+of creating energy through explicit rotating-frame transport. Airborne ground
+motion may be backward. Both paths remove the force assembly's level-flight
+gravity convention and apply vertical world gravity once, independent of angle
+of attack, pitch attitude or a gust. Focused analytic regressions live in
+`simloop/motion.rs`; the launch-rail constraints retain their existing treatment.
+
+Pilot member 3 retains its registered gains. Its earlier crash-class calibration
+predates this momentum/gravity correction and is no longer a validation claim for
+the current plant. The corrected seed-1903 reference runs through its 20 s cap
+with 14.57 s airborne, seven undulations and 53.10 m of travel; the lifecycle
+battery checks that bounded trajectory and exact replay without retuning gains
+to reproduce the earlier flawed-physics ending.
+
 `SimLoop::init_with_spatial_wind(scenario, SpatialWindSpec)` opts into the
 wall-compatible evolving `fs-atmo` field. The specification declares the mean
 log law, spatial strength and length, advection speed, and every modal OU
@@ -99,8 +123,8 @@ prelaunch dynamics.
 Spatial runs save V3 checkpoints containing the entire wind specification,
 both actual OU quadratures, ground velocity, and run identity. The existing
 `restore_checkpoint` resumes this state exactly and checks the relative-air
-velocity against the restored ground/wind state. Legacy initialization and V2
-checkpoint bytes retain their existing behavior. Focused tests live in
+velocity against the restored ground/wind state. Legacy initialization and the V2
+checkpoint layout retain their existing encoding. Focused tests live in
 `simloop/spatial_wind/tests.rs`: actual load/propeller response, zero-amplitude
 gust exclusion, observer independence, rail/airborne replay, and gravity-frame
 consistency. Run with `cargo test -p fs-flyer --lib simloop::spatial_wind`.
@@ -148,7 +172,7 @@ or a validation of historical turbulent flight.
 `replayenv::{record_replay_with_spatial_wind,
 record_replay_with_distributed_spatial_wind}` retain the exact V3/V4 tick-zero
 checkpoint in the existing envelope layout. Legacy `record_replay` keeps its
-checkpoint sequence and serialized bytes. `scrub_to_tick(0)` reads the actual
+checkpoint cadence and serialized layout. `scrub_to_tick(0)` reads the actual
 initial state without advancing either physics or the wind; positive ticks
 resume the nearest strictly earlier checkpoint and reproduce that step's output.
 Both tick-zero digest and run intent must match. Spatial replay requires its

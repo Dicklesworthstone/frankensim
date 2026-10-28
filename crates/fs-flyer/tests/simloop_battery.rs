@@ -327,13 +327,13 @@ fn rail_phase_produces_receipted_transition() {
 }
 
 #[test]
-fn member3_flies_the_dec17_class_undulating_flight() {
-    // E5.3b-i (bead guzez.6.5.1): the nonlinear-calibrated member 3
-    // must fly the Dec-17 flight-1 CLASS on the full nonlinear plant:
-    // a long undulating flight ending in GROUND CONTACT (the
-    // historical ending) — not an envelope exit, not a tick timeout.
-    // Per-item oracles on the flight-class metrics; run twice
-    // bit-identically (the registration is deterministic evidence).
+fn member3_flies_the_reference_window_with_corrected_momentum() {
+    // Member 3's gains remain unchanged. Its earlier crash-class oracle
+    // was calibrated with explicit body transport and level-flight gravity.
+    // Correcting both lets this seed fly through the reference window:
+    // 14.57 s airborne, seven undulations and 53.10 m. This is a bounded
+    // plant regression, not validation of the historical crash ending;
+    // that earlier calibration claim is withdrawn for the corrected plant.
     let run = || {
         let mut sim = SimLoop::init(dec17_scenario(1903, PilotMode::Historical(3))).unwrap();
         let mut liftoff = None;
@@ -369,23 +369,22 @@ fn member3_flies_the_dec17_class_undulating_flight() {
         (liftoff.unwrap(), undulation_flips / 2, end.unwrap(), digest)
     };
     let (liftoff, undulations, (terminal, end_tick, x_end), digest) = run();
-    // Measured class (16-seed sweep receipt in pilot.rs): the flight
-    // ends in ground contact or an envelope exit DURING the final
-    // plunge of a full-length flight — never a tick timeout, never a
-    // failure to leave the rail at this seed.
-    assert!(
-        matches!(
-            terminal,
-            TerminalEvent::GroundContact | TerminalEvent::EnvelopeExceeded
-        ),
-        "the crash-class ending: {terminal:?}"
+    assert_eq!(
+        terminal,
+        TerminalEvent::MaxTicks,
+        "the corrected plant must sustain this reference window"
+    );
+    assert_eq!(
+        end_tick,
+        dec17_scenario(1903, PilotMode::Historical(3)).max_ticks,
+        "the reference window must run to its configured cap"
     );
     let airborne_s = (end_tick - liftoff) as f64 / 120.0;
-    assert!(airborne_s >= 8.0, "flight-1 class duration: {airborne_s} s");
+    assert!(airborne_s >= 8.0, "controlled flight duration: {airborne_s} s");
     assert!(undulations >= 3, "undulating flight: {undulations}");
     assert!(
         (25.0..90.0).contains(&x_end),
-        "ground distance in the historical tens-of-meters class: {x_end} m"
+        "ground distance in the reference-window band: {x_end} m"
     );
     // Deterministic registration evidence.
     let (_, _, _, digest2) = run();
@@ -393,7 +392,7 @@ fn member3_flies_the_dec17_class_undulating_flight() {
     jlog(
         "member3-flight",
         &format!(
-            "\"airborne_s\":{airborne_s},\"undulations\":{undulations},\"x_end_m\":{x_end},\"digest\":\"{}\"",
+            "\"airborne_s\":{airborne_s},\"undulations\":{undulations},\"x_end_m\":{x_end},\"terminal\":\"{terminal:?}\",\"end_tick\":{end_tick},\"digest\":\"{}\"",
             &digest[..16]
         ),
     );
@@ -553,8 +552,11 @@ fn golden_digest() {
     // payload; the v1 prefix and longitudinal trajectory are unchanged.
     // Golden bump 2026-10-28: converged passive hinge friction changes
     // the settled initial state and the ensuing deterministic trajectory.
+    // Golden bump 2026-10-28: airborne translation now advances world
+    // momentum with actual vertical gravity and midpoint held-load motion;
+    // explicit body-frame transport no longer creates kinetic energy.
     assert_eq!(
-        digest, "01846743bc55e9e2a8c1bfd4962111f75c3b4bf80009a297a1cab8e46748556c",
+        digest, "fa01e33e9079c9a1372a2fd7c582c3c86103e69eeadf70d7c736d8b6806491bf",
         "lifecycle golden moved — determinism regression or an \
          intentional physics change requiring the golden-bump protocol"
     );
