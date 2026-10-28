@@ -1,0 +1,72 @@
+frankensim.matdb-source.v1
+observation	stock-shapes	TECATRON SX natural unfilled PPS semiconductor stock shapes	Ensinger 2023-09-19 AB; ISO 527-2 tension, ISO 178 flexure, ISO 604 compression, ISO 22007-4:2008 thermal	Producer comparison values for the separately identified SX unfilled PPS grade. The sheet explicitly uses a test dimension outside its usual 40-60 mm reference-rod range; actual stock dimension is unstated. Tensile type 1b; flexural span 64 mm; compression modulus on 10x10x50 mm over 0.5-1%; stress points on 10 mm cubes. Temperature, moisture, pressure, orientation and uncertainty are unstated. SI density and heat capacity are conversions. Speeds denote crosshead travel. No substitution for ordinary TECATRON, CMP or reinforced grades, interpolation of compression points, isotropic law, service-temperature property law or semiconductor qualification is inferred.
+scalar	density	stock-shapes	density	1360	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade_tecatron_sx_natural	1	1	1
+validity	density	source_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+validity	density	source_pressure_known	0	0	1
+validity	density	source_orientation_known	0	0	1
+scalar	thermal-conductivity	stock-shapes	thermal_conductivity	0.25	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	source_grade_tecatron_sx_natural	1	1	1
+validity	thermal-conductivity	source_temperature_known	0	0	1
+validity	thermal-conductivity	source_moisture_condition_known	0	0	1
+validity	thermal-conductivity	source_pressure_known	0	0	1
+validity	thermal-conductivity	source_orientation_known	0	0	1
+scalar	specific-heat-capacity	stock-shapes	specific_heat_capacity	1000	J/kg/K	constant
+uncertainty	specific-heat-capacity	unstated	-	-	-	-
+validity	specific-heat-capacity	source_grade_tecatron_sx_natural	1	1	1
+validity	specific-heat-capacity	source_temperature_known	0	0	1
+validity	specific-heat-capacity	source_moisture_condition_known	0	0	1
+validity	specific-heat-capacity	source_pressure_known	0	0	1
+validity	specific-heat-capacity	source_orientation_known	0	0	1
+scalar	tensile-modulus	stock-shapes	tensile_modulus	4000	MPa	constant
+uncertainty	tensile-modulus	unstated	-	-	-	-
+validity	tensile-modulus	source_grade_tecatron_sx_natural	1	1	1
+validity	tensile-modulus	source_temperature_known	0	0	1
+validity	tensile-modulus	source_moisture_condition_known	0	0	1
+validity	tensile-modulus	source_pressure_known	0	0	1
+validity	tensile-modulus	source_orientation_known	0	0	1
+validity	tensile-modulus	test_speed	0.000016666666666666667	0.000016666666666666667	m/s
+scalar	tensile-strength	stock-shapes	tensile_strength	102	MPa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	source_grade_tecatron_sx_natural	1	1	1
+validity	tensile-strength	source_temperature_known	0	0	1
+validity	tensile-strength	source_moisture_condition_known	0	0	1
+validity	tensile-strength	source_pressure_known	0	0	1
+validity	tensile-strength	source_orientation_known	0	0	1
+validity	tensile-strength	test_speed	0.00008333333333333333	0.00008333333333333333	m/s
+scalar	flexural-strength	stock-shapes	flexural_strength	151	MPa	constant
+uncertainty	flexural-strength	unstated	-	-	-	-
+validity	flexural-strength	source_grade_tecatron_sx_natural	1	1	1
+validity	flexural-strength	source_temperature_known	0	0	1
+validity	flexural-strength	source_moisture_condition_known	0	0	1
+validity	flexural-strength	source_pressure_known	0	0	1
+validity	flexural-strength	source_orientation_known	0	0	1
+validity	flexural-strength	test_speed	0.000033333333333333335	0.000033333333333333335	m/s
+scalar	flexural-modulus	stock-shapes	flexural_modulus	4000	MPa	constant
+uncertainty	flexural-modulus	unstated	-	-	-	-
+validity	flexural-modulus	source_grade_tecatron_sx_natural	1	1	1
+validity	flexural-modulus	source_temperature_known	0	0	1
+validity	flexural-modulus	source_moisture_condition_known	0	0	1
+validity	flexural-modulus	source_pressure_known	0	0	1
+validity	flexural-modulus	source_orientation_known	0	0	1
+validity	flexural-modulus	test_speed	0.000033333333333333335	0.000033333333333333335	m/s
+scalar	compression-modulus	stock-shapes	compression_modulus	3300	MPa	constant
+uncertainty	compression-modulus	unstated	-	-	-	-
+validity	compression-modulus	source_grade_tecatron_sx_natural	1	1	1
+validity	compression-modulus	source_temperature_known	0	0	1
+validity	compression-modulus	source_moisture_condition_known	0	0	1
+validity	compression-modulus	source_pressure_known	0	0	1
+validity	compression-modulus	source_orientation_known	0	0	1
+validity	compression-modulus	test_speed	0.00008333333333333333	0.00008333333333333333	m/s
+curve	compression-points	stock-shapes	compressive_stress	compressive_strain	1	MPa	0.01:20,0.02:38	tabulated
+uncertainty	compression-points	unstated	-	-	-	-
+validity	compression-points	source_grade_tecatron_sx_natural	1	1	1
+validity	compression-points	source_temperature_known	0	0	1
+validity	compression-points	source_moisture_condition_known	0	0	1
+validity	compression-points	source_pressure_known	0	0	1
+validity	compression-points	source_orientation_known	0	0	1
+validity	compression-points	test_speed	0.00008333333333333333	0.00008333333333333333	m/s
+validity	compression-points	compressive_strain	0.01	0.02	1

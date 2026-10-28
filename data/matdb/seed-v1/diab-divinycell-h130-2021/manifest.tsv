@@ -1,0 +1,28 @@
+frankensim.matdb-manifest.v3
+pack_id	diab-divinycell-h130-2021
+redistribution	permitted	Selected attributed numerical facts and original notes only; neither the producer document nor its table layout is redistributed
+citation	Diab Group, Divinycell H, revision 20 SI April 2021, pp. 1-2, H130 column; manufacturer-authored datasheet archived at https://www.shop.swiss-composite.ch/shop/resources/downloads/H80_2420_PF20/t-diab_divinycell_h-e.pdf , accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	diab-divinycell-h130-2021	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	compression_strength	compression-strength	dimensional
+property	compression_strength_minimum	compression-strength-minimum	dimensional
+property	compression_modulus	compression-modulus	dimensional
+property	compression_modulus_minimum	compression-modulus-minimum	dimensional
+property	tensile_strength	tensile-strength	dimensional
+property	tensile_strength_minimum	tensile-strength-minimum	dimensional
+property	tensile_modulus	tensile-modulus	dimensional
+property	tensile_modulus_minimum	tensile-modulus-minimum	dimensional
+property	shear_strength	shear-strength	dimensional
+property	shear_strength_minimum	shear-strength-minimum	dimensional
+property	shear_modulus	shear-modulus	dimensional
+property	shear_modulus_minimum	shear-modulus-minimum	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	source_grade_divinycell_h130_2021	source-grade-divinycell-h130-2021	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	source_test_rate_known	source-test-rate-known	dimensional
+axis	normal_to_sheet	normal-to-sheet	dimensional
+axis	source_orientation_known	source-orientation-known	dimensional
+axis	source_is_nominal_value	source-is-nominal-value	dimensional

@@ -1,0 +1,50 @@
+frankensim.matdb-source.v1
+observation	stock-shapes	TECAPAI CM XP403 green unreinforced compression-moulded PAI stock shapes	Ensinger 2025-07-14 AC; ISO 527-2 tension, ISO 178 flexure, ISO 604 compression	Producer comparison values for unreinforced compression-moulded, machined PAI made from Torlon powder. Tensile type 1b; flexural span 64 mm; compression stress points on 10 mm cubes. Temperature, moisture, pressure, orientation and uncertainty are unstated. Density is converted to SI; tensile strength is explicitly at break, not yield. Tensile/flexural speeds denote crosshead travel; compression speed is not printed. No heat capacity or conductivity is supplied because this sheet does not state them. No isotropic constitutive law, compression interpolation, creep, wear law or service-temperature property extension is inferred.
+scalar	density	stock-shapes	density	1410	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade_tecapai_cm_xp403_green	1	1	1
+validity	density	source_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+validity	density	source_pressure_known	0	0	1
+validity	density	source_orientation_known	0	0	1
+scalar	tensile-modulus	stock-shapes	tensile_modulus	3600	MPa	constant
+uncertainty	tensile-modulus	unstated	-	-	-	-
+validity	tensile-modulus	source_grade_tecapai_cm_xp403_green	1	1	1
+validity	tensile-modulus	source_temperature_known	0	0	1
+validity	tensile-modulus	source_moisture_condition_known	0	0	1
+validity	tensile-modulus	source_pressure_known	0	0	1
+validity	tensile-modulus	source_orientation_known	0	0	1
+validity	tensile-modulus	test_speed	0.000016666666666666667	0.000016666666666666667	m/s
+scalar	tensile-strength-at-break	stock-shapes	tensile_strength_at_break	122	MPa	constant
+uncertainty	tensile-strength-at-break	unstated	-	-	-	-
+validity	tensile-strength-at-break	source_grade_tecapai_cm_xp403_green	1	1	1
+validity	tensile-strength-at-break	source_temperature_known	0	0	1
+validity	tensile-strength-at-break	source_moisture_condition_known	0	0	1
+validity	tensile-strength-at-break	source_pressure_known	0	0	1
+validity	tensile-strength-at-break	source_orientation_known	0	0	1
+validity	tensile-strength-at-break	test_speed	0.00008333333333333333	0.00008333333333333333	m/s
+scalar	flexural-strength	stock-shapes	flexural_strength	173	MPa	constant
+uncertainty	flexural-strength	unstated	-	-	-	-
+validity	flexural-strength	source_grade_tecapai_cm_xp403_green	1	1	1
+validity	flexural-strength	source_temperature_known	0	0	1
+validity	flexural-strength	source_moisture_condition_known	0	0	1
+validity	flexural-strength	source_pressure_known	0	0	1
+validity	flexural-strength	source_orientation_known	0	0	1
+validity	flexural-strength	test_speed	0.000033333333333333335	0.000033333333333333335	m/s
+scalar	flexural-modulus	stock-shapes	flexural_modulus	3600	MPa	constant
+uncertainty	flexural-modulus	unstated	-	-	-	-
+validity	flexural-modulus	source_grade_tecapai_cm_xp403_green	1	1	1
+validity	flexural-modulus	source_temperature_known	0	0	1
+validity	flexural-modulus	source_moisture_condition_known	0	0	1
+validity	flexural-modulus	source_pressure_known	0	0	1
+validity	flexural-modulus	source_orientation_known	0	0	1
+validity	flexural-modulus	test_speed	0.000033333333333333335	0.000033333333333333335	m/s
+curve	compression-points	stock-shapes	compressive_stress	compressive_strain	1	MPa	0.01:12,0.02:32,0.05:90	tabulated
+uncertainty	compression-points	unstated	-	-	-	-
+validity	compression-points	source_grade_tecapai_cm_xp403_green	1	1	1
+validity	compression-points	source_temperature_known	0	0	1
+validity	compression-points	source_moisture_condition_known	0	0	1
+validity	compression-points	source_pressure_known	0	0	1
+validity	compression-points	source_orientation_known	0	0	1
+validity	compression-points	compressive_strain	0.01	0.05	1
+validity	compression-points	source_test_rate_known	0	0	1

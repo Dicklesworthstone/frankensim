@@ -1,0 +1,19 @@
+frankensim.matdb-manifest.v3
+pack_id	ensinger-tecapeek-gf30-natural
+redistribution	permitted	Selected attributed numerical facts and original notes only; neither the producer document nor its table layout is redistributed
+citation	Ensinger GmbH, TECAPEEK GF30 natural stock shapes, 2023-07-19 version AF, p. 1; https://www.ensinger-online.com/modules/public/sheet/createsheet.php?FILENAME=TECAPEEK_GF30_natural_0.PDF&FL=0&SID=673&ZOOM=1.2 ; product identity https://www.ensingerplastics.com/en/shapes/peek-tecapeek-gf30-natural , accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	ensinger-tecapeek-gf30-natural	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	tensile_modulus	tensile-modulus	dimensional
+property	tensile_strength	tensile-strength	dimensional
+property	compressive_stress	compressive-stress	dimensional
+axis	source_grade_tecapeek_gf30_natural	source-grade-tecapeek-gf30-natural	dimensional
+axis	source_temperature_known	source-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	source_orientation_known	source-orientation-known	dimensional
+axis	test_speed	test-speed	dimensional
+axis	compressive_strain	compressive-strain	dimensional
