@@ -90,7 +90,11 @@ Focused G1 tests cover those regimes and a one-second, 440-cycle high-Q decay;
 cached full/half steps and direct steps share the same coefficient evaluator.
 `held_force_for_port_velocity` solves the exact-ZOH scalar endpoint constraint
 using free modal motion plus unit-port-force mobility, with conjugate force
-and velocity projections. It refuses invalid/nonpositive mobility and
+and velocity projections.
+The force mobility is evaluated from a zero state, rather than subtracting
+unit-forced and free motions about the accepted state. This keeps a finite
+physical force response from disappearing beneath a large background velocity;
+solving the constraint still does not advance or mutate the state. It refuses invalid/nonpositive mobility and
 nonfinite inputs/results without changing state. The ordinary step still
 admits state and energy budgets. The bowed runtime's set-valued contact uses
 the same free-motion plus unit-force endpoint response, cached per bow station

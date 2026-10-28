@@ -306,7 +306,11 @@ impl ExactZohKernel {
         }
     }
 
-    fn for_duration(&self, modes: &[ModalAcousticMode], duration_s: f64) -> Option<&[ExactZohCoefficients]> {
+    fn for_duration(
+        &self,
+        modes: &[ModalAcousticMode],
+        duration_s: f64,
+    ) -> Option<&[ExactZohCoefficients]> {
         let duration_bits = duration_s.to_bits();
         if duration_bits == self.full_duration_bits {
             Some(&self.full)
@@ -392,19 +396,25 @@ impl ModalAcousticTimeModel {
         velocity_m_s: f64,
         budget: ModalAcousticTimeBudget,
     ) -> Result<Self, ModalAcousticTimeError> {
-        if !mass_kg.is_finite() || mass_kg <= 0.0
-            || !displacement_m.is_finite() || !velocity_m_s.is_finite()
+        if !mass_kg.is_finite()
+            || mass_kg <= 0.0
+            || !displacement_m.is_finite()
+            || !velocity_m_s.is_finite()
         {
             return Err(ModalAcousticTimeError::InvalidInput {
                 what: "free mass requires positive finite kilograms and finite physical motion",
             });
         }
         let root_mass = det::sqrt(mass_kg);
-        let mut model = Self::try_new_with_free_coordinates(sample_rate_hz, vec![ModalAcousticMode {
-            angular_frequency_rad_s: 0.0,
-            damping_ratio: 0.0,
-            pressure_per_modal_velocity: C64::ZERO,
-        }], budget)?;
+        let mut model = Self::try_new_with_free_coordinates(
+            sample_rate_hz,
+            vec![ModalAcousticMode {
+                angular_frequency_rad_s: 0.0,
+                damping_ratio: 0.0,
+                pressure_per_modal_velocity: C64::ZERO,
+            }],
+            budget,
+        )?;
         model.restore_states(&[ModalAcousticState {
             displacement_m_sqrt_kg: root_mass * displacement_m,
             velocity_m_sqrt_kg_per_s: root_mass * velocity_m_s,
@@ -608,11 +618,7 @@ impl ModalAcousticTimeModel {
             },
             0.0,
         );
-        let s_f = self.advance_exact_zoh_step(
-            mode_index,
-            ModalAcousticState::default(),
-            1.0,
-        );
+        let s_f = self.advance_exact_zoh_step(mode_index, ModalAcousticState::default(), 1.0);
         (
             qq,
             s_v.displacement_m_sqrt_kg,
@@ -632,7 +638,9 @@ impl ModalAcousticTimeModel {
     /// Original immutable physical/observer budgets, also enforced by coupled
     /// owners that restore a complete externally propagated candidate state.
     #[must_use]
-    pub const fn budget(&self) -> ModalAcousticTimeBudget { self.budget }
+    pub const fn budget(&self) -> ModalAcousticTimeBudget {
+        self.budget
+    }
 
     /// Initialize every mode at the static equilibrium of one held force.
     ///
@@ -1068,9 +1076,7 @@ impl ModalAcousticTimeModel {
                 found: port_shapes.len(),
             });
         }
-        if !target_port_velocity_m_s.is_finite()
-            || port_shapes.iter().any(|phi| !phi.is_finite())
-        {
+        if !target_port_velocity_m_s.is_finite() || port_shapes.iter().any(|phi| !phi.is_finite()) {
             return Err(ModalAcousticTimeError::InvalidInput {
                 what: "held-force port shapes and target velocity must be finite",
             });
@@ -1083,15 +1089,21 @@ impl ModalAcousticTimeModel {
             let (free, unit) = match transition_coefficients {
                 Some(coefficients) => (
                     advance_exact_zoh_cached(*mode, *state, 0.0, coefficients[mode_index]),
-                    advance_exact_zoh_cached(*mode, *state, 1.0, coefficients[mode_index]),
+                    advance_exact_zoh_cached(
+                        *mode,
+                        ModalAcousticState::default(),
+                        1.0,
+                        coefficients[mode_index],
+                    ),
                 ),
                 None => (
                     advance_exact_zoh(*mode, *state, 0.0, duration_s),
-                    advance_exact_zoh(*mode, *state, 1.0, duration_s),
+                    advance_exact_zoh(*mode, ModalAcousticState::default(), 1.0, duration_s),
                 ),
             };
-            let mode_mobility =
-                unit.velocity_m_sqrt_kg_per_s - free.velocity_m_sqrt_kg_per_s;
+            // Mobility is the force response from rest, independent of the
+            // accepted state. Subtracting two large free velocities can erase it.
+            let mode_mobility = unit.velocity_m_sqrt_kg_per_s;
             free_port_velocity_m_s += phi * free.velocity_m_sqrt_kg_per_s;
             port_mobility_m_s_per_n += phi * phi * mode_mobility;
         }
@@ -1245,10 +1257,14 @@ fn exact_zoh_coefficients(mode: ModalAcousticMode, dt: f64) -> ExactZohCoefficie
         // subtraction at both ends of that range.
         position_retention = if position_decrement.abs() < 0.5 {
             1.0 - position_decrement
-        } else { next_position };
+        } else {
+            next_position
+        };
         velocity_retention = if velocity_decrement.abs() < 0.5 {
             1.0 - velocity_decrement
-        } else { next_velocity };
+        } else {
+            next_velocity
+        };
     }
     ExactZohCoefficients::Damped {
         position_retention,
@@ -1379,6 +1395,127 @@ mod tests {
     }
 
     #[test]
+    fn g1_damped_held_force_matches_high_precision_exponential_across_scales() {
+        // Independent 90-decimal-digit exponential of the augmented matrix
+        // [[0,1,0],[-omega²,-2*zeta*omega,F],[0,0,0]], acting on [q,v,1].
+        // Inputs were lifted from their exact f64 values before exponentiation.
+        // Cover soft modes, tiny physical loss, both sides of critical damping,
+        // and a viscous mode whose slow pole used to cancel to zero.
+        let cases = [
+            (
+                1.0e-6,
+                0.05,
+                100.0,
+                1.0 / 48_000.0,
+                0.0,
+                0.0,
+                2.170_138_888_887_381_5e-8,
+                0.002_083_333_333_331_163,
+            ),
+            (
+                1000.0,
+                1.0e-12,
+                24_200.0,
+                1.0 / 48_000.0,
+                0.0002,
+                -0.3,
+                0.000_198_958_597_058_404_05,
+                0.200_028_933_615_378_96,
+            ),
+            (
+                1000.0,
+                0.999_999_995,
+                3.0,
+                0.002,
+                0.0002,
+                -0.3,
+                1.781_981_824_719_25e-6,
+                -0.012_721_516_531_311_369,
+            ),
+            (
+                1000.0,
+                1.000_000_005,
+                3.0,
+                0.002,
+                0.0002,
+                -0.3,
+                1.781_983_077_021_73e-6,
+                -0.012_721_516_717_171_822,
+            ),
+            (
+                100.0,
+                1.0e12,
+                2.0e14,
+                0.1,
+                0.0,
+                0.0,
+                0.099_999_999_999_745,
+                0.999_999_999_995,
+            ),
+        ];
+        for (omega, zeta, force, dt, q, v, expected_q, expected_v) in cases {
+            let mode = ModalAcousticMode {
+                angular_frequency_rad_s: omega,
+                damping_ratio: zeta,
+                pressure_per_modal_velocity: C64::ZERO,
+            };
+            let initial = ModalAcousticState {
+                displacement_m_sqrt_kg: q,
+                velocity_m_sqrt_kg_per_s: v,
+            };
+            let actual = advance_exact_zoh(mode, initial, force, dt);
+            assert!(
+                (actual.displacement_m_sqrt_kg - expected_q).abs() <= 2.0e-13 * expected_q.abs(),
+                "omega={omega}, zeta={zeta}: q={} expected={expected_q}",
+                actual.displacement_m_sqrt_kg
+            );
+            assert!(
+                (actual.velocity_m_sqrt_kg_per_s - expected_v).abs() <= 2.0e-13 * expected_v.abs(),
+                "omega={omega}, zeta={zeta}: v={} expected={expected_v}",
+                actual.velocity_m_sqrt_kg_per_s
+            );
+            let mut model = ModalAcousticTimeModel::try_new(48_000, vec![mode], budget()).unwrap();
+            model.restore_states(&[initial]).unwrap();
+            let frame = model.step_duration(&[force], dt).unwrap();
+            assert_state_bits_eq(model.states()[0], actual);
+            assert!(frame.viscous_dissipation_j >= -frame.dissipation_roundoff_tolerance_j);
+        }
+    }
+
+    #[test]
+    fn g1_port_mobility_does_not_subtract_large_free_velocities() {
+        let mode = ModalAcousticMode {
+            angular_frequency_rad_s: 1000.0,
+            damping_ratio: 0.05,
+            pressure_per_modal_velocity: C64::ZERO,
+        };
+        let mut limits = budget();
+        limits.maximum_abs_velocity_m_sqrt_kg_per_s = 1.0e15;
+        limits.maximum_total_energy_j = 1.0e30;
+        let mut model = ModalAcousticTimeModel::try_new(48_000, vec![mode], limits).unwrap();
+        let state = ModalAcousticState {
+            displacement_m_sqrt_kg: 0.0,
+            velocity_m_sqrt_kg_per_s: 1.0e14,
+        };
+        model.restore_states(&[state]).unwrap();
+        let dt = model.sample_period_s();
+        let free = advance_exact_zoh(mode, state, 0.0, dt).velocity_m_sqrt_kg_per_s;
+        let response = advance_exact_zoh(mode, ModalAcousticState::default(), 1.0, dt)
+            .velocity_m_sqrt_kg_per_s;
+        let target = free + 1.0e12 * response;
+        let force = model
+            .held_force_for_port_velocity(&[1.0], target, dt)
+            .unwrap();
+        let actual = advance_exact_zoh(mode, state, force, dt).velocity_m_sqrt_kg_per_s;
+        assert!((actual - target).abs() <= 2.0 * f64::EPSILON * target.abs());
+        assert_eq!(
+            model.states(),
+            &[state],
+            "solving the port must not advance its state"
+        );
+    }
+
+    #[test]
     fn g1_forced_undamped_steps_preserve_work_without_equilibrium_cancellation() {
         let state = ModalAcousticState {
             displacement_m_sqrt_kg: 0.0002,
@@ -1475,8 +1612,11 @@ mod tests {
             let drag_dt = 2.0 * damping_ratio * mode.angular_frequency_rad_s * dt;
             let expected_q = 0.5 * force * dt * dt * (1.0 - drag_dt / 3.0);
             let expected_v = force * dt * (1.0 - 0.5 * drag_dt);
-            assert!((next.displacement_m_sqrt_kg / expected_q - 1.0).abs() < 2.0e-14,
-                "zeta={damping_ratio} q={} expected={expected_q}", next.displacement_m_sqrt_kg);
+            assert!(
+                (next.displacement_m_sqrt_kg / expected_q - 1.0).abs() < 2.0e-14,
+                "zeta={damping_ratio} q={} expected={expected_q}",
+                next.displacement_m_sqrt_kg
+            );
             assert!((next.velocity_m_sqrt_kg_per_s / expected_v - 1.0).abs() < 2.0e-14);
         }
     }
@@ -1502,7 +1642,9 @@ mod tests {
                 (angle.cos(), angle.sin() / angle)
             } else if zeta > 1.0 {
                 (angle.cosh(), angle.sinh() / angle)
-            } else { (1.0, 1.0) };
+            } else {
+                (1.0, 1.0)
+            };
             let expected_q = (-delta).exp() * (cosine + delta * sinc);
             let expected_v = -omega * omega * dt * (-delta).exp() * sinc;
             let next = advance_exact_zoh(mode, initial, 0.0, dt);
@@ -1556,7 +1698,9 @@ mod tests {
         };
         let next = advance_exact_zoh(mode, initial, 0.0, 40.0);
         assert!((next.displacement_m_sqrt_kg / (41.0 * (-40.0_f64).exp()) - 1.0).abs() < 2.0e-12);
-        assert!((next.velocity_m_sqrt_kg_per_s / (-40.0 * (-40.0_f64).exp()) - 1.0).abs() < 2.0e-12);
+        assert!(
+            (next.velocity_m_sqrt_kg_per_s / (-40.0 * (-40.0_f64).exp()) - 1.0).abs() < 2.0e-12
+        );
     }
 
     #[test]
@@ -1661,7 +1805,12 @@ mod tests {
         };
         model.restore_states(&[state]).unwrap();
         let dt = 0.37 / 48_000.0;
-        assert!(model.transition_kernel.for_duration(&model.modes, dt).is_none());
+        assert!(
+            model
+                .transition_kernel
+                .for_duration(&model.modes, dt)
+                .is_none()
+        );
         let expected = advance_exact_zoh(mode, state, -1.75, dt);
         model.step_duration(&[-1.75], dt).unwrap();
         assert_state_bits_eq(model.states()[0], expected);
@@ -1847,7 +1996,9 @@ mod tests {
         let ladder = |count: usize| -> Vec<ModalAcousticMode> {
             (0..count)
                 .map(|k| ModalAcousticMode {
-                    angular_frequency_rad_s: 2.0 * core::f64::consts::PI * (100.0 + 10.0 * k as f64),
+                    angular_frequency_rad_s: 2.0
+                        * core::f64::consts::PI
+                        * (100.0 + 10.0 * k as f64),
                     damping_ratio: 0.01,
                     pressure_per_modal_velocity: C64::from_re(1.0),
                 })
@@ -1857,7 +2008,9 @@ mod tests {
         let admitted = ModalAcousticTimeModel::try_new(192_000, ladder(4_096), budget())
             .expect("exactly the cap is admitted");
         assert_eq!(admitted.modes().len(), 4_096);
-        let refused = ModalAcousticTimeError::InvalidInput { what: "mode count must be in 1..=4096" };
+        let refused = ModalAcousticTimeError::InvalidInput {
+            what: "mode count must be in 1..=4096",
+        };
         assert_eq!(
             ModalAcousticTimeModel::try_new(192_000, ladder(4_097), budget()).err(),
             Some(refused.clone())
@@ -2076,9 +2229,10 @@ mod tests {
                     .held_force_for_port_velocity(&shapes, target_port_velocity_m_s, duration_s)
                     .unwrap();
                 let mut probe = model.clone();
-                let generalized_forces: Vec<f64> =
-                    shapes.iter().map(|phi| phi * force).collect();
-                probe.step_duration(&generalized_forces, duration_s).unwrap();
+                let generalized_forces: Vec<f64> = shapes.iter().map(|phi| phi * force).collect();
+                probe
+                    .step_duration(&generalized_forces, duration_s)
+                    .unwrap();
                 let achieved_port_velocity_m_s: f64 = probe
                     .states()
                     .iter()
@@ -2148,7 +2302,9 @@ mod tests {
                     * m.damping_ratio
                     * m.angular_frequency_rad_s
                     * s.velocity_m_sqrt_kg_per_s
-                    + m.angular_frequency_rad_s * m.angular_frequency_rad_s * s.displacement_m_sqrt_kg)
+                    + m.angular_frequency_rad_s
+                        * m.angular_frequency_rad_s
+                        * s.displacement_m_sqrt_kg)
             })
             .sum::<f64>()
             / w_point;
@@ -2230,8 +2386,7 @@ mod tests {
         };
         let negative_mobility_model =
             ModalAcousticTimeModel::try_new(48_000, vec![undamped], budget()).unwrap();
-        let three_quarter_period_s =
-            1.5 * core::f64::consts::PI / undamped.angular_frequency_rad_s;
+        let three_quarter_period_s = 1.5 * core::f64::consts::PI / undamped.angular_frequency_rad_s;
         assert!(matches!(
             negative_mobility_model.held_force_for_port_velocity(
                 &[1.0],
@@ -2243,7 +2398,11 @@ mod tests {
             })
         ));
 
-        assert_eq!(model.states(), before, "every refusal must leave state untouched");
+        assert_eq!(
+            model.states(),
+            before,
+            "every refusal must leave state untouched"
+        );
     }
 
     #[test]
@@ -2261,8 +2420,7 @@ mod tests {
             },
         ];
         let mut model =
-            ModalAcousticTimeModel::try_new_with_free_coordinates(48_000, modes, budget())
-                .unwrap();
+            ModalAcousticTimeModel::try_new_with_free_coordinates(48_000, modes, budget()).unwrap();
         let initial = [
             ModalAcousticState {
                 displacement_m_sqrt_kg: 0.002,
