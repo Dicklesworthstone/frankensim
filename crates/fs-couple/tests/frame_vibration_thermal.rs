@@ -57,6 +57,7 @@ struct Spec {
     cp: f64,
     mechanical_upper: f64,
     curved_eta: bool,
+    curved_elastic: bool,
 }
 fn specimens() -> [Spec; 2] {
     [
@@ -66,6 +67,7 @@ fn specimens() -> [Spec; 2] {
             cp: 0.5,
             mechanical_upper: 600.0,
             curved_eta: false,
+            curved_elastic: false,
         },
         Spec {
             axial: 8.0,
@@ -73,6 +75,7 @@ fn specimens() -> [Spec; 2] {
             cp: 1.0,
             mechanical_upper: 600.0,
             curved_eta: false,
+            curved_elastic: false,
         },
     ]
 }
@@ -123,7 +126,8 @@ fn material(index: usize, spec: Spec) -> (MaterialCard, ResolvedHeatCapacityCurv
         if viscosity {
             validity = validity.with("omega", 0.0, 4096.0);
         }
-        let curved = viscosity && spec.curved_eta;
+        let curved =
+            (viscosity && spec.curved_eta) || (name == "young_modulus" && spec.curved_elastic);
         claims
             .insert_claim(PropertyClaim {
                 key: PropertyKey::new(name, dims),
@@ -410,13 +414,154 @@ fn near(actual: f64, expected: f64, tolerance: f64) {
     );
 }
 fn oscillator(mass: f64, stiffness: f64, damping: f64, time: f64) -> (f64, f64, f64) {
+    oscillator_from(mass, stiffness, damping, time, 0.01, 0.03)
+}
+fn oscillator_from(
+    mass: f64,
+    stiffness: f64,
+    damping: f64,
+    time: f64,
+    q0: f64,
+    v0: f64,
+) -> (f64, f64, f64) {
     let a = damping / (2.0 * mass);
     let w = (stiffness / mass - a * a).sqrt();
     let (s, c) = (w * time).sin_cos();
-    let b = (0.03 + a * 0.01) / w;
-    let q = (-a * time).exp() * (0.01 * c + b * s);
-    let v = (-a * time).exp() * (-0.01 * w * s + b * w * c) - a * q;
+    let b = (v0 + a * q0) / w;
+    let q = (-a * time).exp() * (q0 * c + b * s);
+    let v = (-a * time).exp() * (-q0 * w * s + b * w * c) - a * q;
     (q, v, 0.5 * mass * v * v + 0.5 * stiffness * q * q)
+}
+
+#[test]
+fn source_eta_temperature_feedback_rebuilds_original_motion_and_layer_heat() {
+    let mut endpoints = Vec::new();
+    for prepared_backend in [false, true] {
+        for curved in [false, true] {
+            let specs = specimens().map(|mut spec| {
+                spec.cp *= 0.001;
+                spec.curved_eta = curved;
+                spec
+            });
+            fixture(
+                specs,
+                false,
+                false,
+                0.0,
+                |component, mut thermal, network| {
+                    let gate = CancelGate::new_clock_free();
+                    let mut owner = component
+                        .into_thermal_system(
+                            &thermal,
+                            network,
+                            &DESTINATIONS,
+                            config(),
+                            prepared_backend.then(prepared),
+                            &gate,
+                        )
+                        .unwrap();
+                    let area = areas();
+                    let mass = RHO * area.iter().sum::<f64>() * LENGTH / 3.0;
+                    let stiffness = YOUNG * area.iter().sum::<f64>() / LENGTH;
+                    let dt = 1.0 / f64::from(RATE);
+                    let capacity: [f64; 2] =
+                        std::array::from_fn(|i| RHO * area[i] * LENGTH * specs[i].cp);
+                    let mut temperatures = [300.0; 2];
+                    let (mut q, mut v) = (0.01, 0.03);
+                    let mut energy = 0.5 * mass * v * v + 0.5 * stiffness * q * q;
+                    let total = owner.mechanical().total_energy_j().unwrap() + thermal.energy_j();
+                    for sample in 1..=64 {
+                        // Independent continuous solution for this frozen-coefficient
+                        // interval; the manufactured source has eta/eta300=.005T-.5.
+                        let eta: [f64; 2] = std::array::from_fn(|i| {
+                            specs[i].axial
+                                * if curved {
+                                    0.005 * temperatures[i] - 0.5
+                                } else {
+                                    1.0
+                                }
+                        });
+                        let resistance: [f64; 2] =
+                            std::array::from_fn(|i| eta[i] * area[i] / LENGTH);
+                        let damping: f64 = resistance.iter().sum();
+                        let next = oscillator_from(mass, stiffness, damping, dt, q, v);
+                        let heat = energy - next.2;
+                        let layer_heat: [f64; 2] =
+                            std::array::from_fn(|i| heat * resistance[i] / damping);
+                        let report = owner
+                            .step(&mut thermal, &[0.0], solve(), &[0.0; 2], &gate)
+                            .unwrap();
+                        for i in 0..2 {
+                            let prior = report.interval_viscosity[0].1.elastic().layers()[i]
+                                .material
+                                .property("axial_eta")
+                                .unwrap();
+                            near(prior.value_si(), eta[i], 2e-7);
+                            near(report.layer_heat[i].total_j(), layer_heat[i], 2e-11);
+                            temperatures[i] += layer_heat[i] / capacity[i];
+                            near(
+                                thermal.temperature_k(CELLS[i]).unwrap(),
+                                temperatures[i],
+                                3e-6,
+                            );
+                            let actual = owner.viscous_sections()[0].1.elastic().layers()[i]
+                                .material
+                                .property("axial_eta")
+                                .unwrap();
+                            near(
+                                actual.value_si(),
+                                specs[i].axial
+                                    * if curved {
+                                        0.005 * temperatures[i] - 0.5
+                                    } else {
+                                        1.0
+                                    },
+                                2e-7,
+                            );
+                            assert_eq!(
+                                prior.answer().receipt.selected,
+                                actual.answer().receipt.selected
+                            );
+                        }
+                        let refreshed: f64 = (0..2)
+                            .map(|i| {
+                                specs[i].axial * area[i] / LENGTH
+                                    * if curved {
+                                        0.005 * temperatures[i] - 0.5
+                                    } else {
+                                        1.0
+                                    }
+                            })
+                            .sum();
+                        near(
+                            owner.mechanical().connection_damping_n_s_m(0).unwrap(),
+                            refreshed,
+                            1e-8,
+                        );
+                        let shape = owner.basis().modes()[0].displacement[3];
+                        let state = owner.mechanical().components()[0].states()[0];
+                        near(shape * state.displacement_m_sqrt_kg, next.0, 2e-9);
+                        near(shape * state.velocity_m_sqrt_kg_per_s, next.1, 2e-8);
+                        assert_eq!(owner.mechanical().samples_rendered(), sample);
+                        near(
+                            owner.mechanical().total_energy_j().unwrap() + thermal.energy_j(),
+                            total,
+                            2e-10,
+                        );
+                        (q, v, energy) = next;
+                    }
+                    let state = owner.mechanical().components()[0].states()[0];
+                    endpoints.push((
+                        owner.basis().modes()[0].displacement[3] * state.displacement_m_sqrt_kg,
+                        CELLS.map(|cell| thermal.temperature_k(cell).unwrap()),
+                    ));
+                },
+            );
+        }
+    }
+    assert!((endpoints[0].0 - endpoints[1].0).abs() > 1e-5);
+    near(endpoints[0].0, endpoints[2].0, 2e-10);
+    near(endpoints[1].0, endpoints[3].0, 2e-10);
 }
 
 #[test]
@@ -666,7 +811,10 @@ fn data_only_heat_capacity_swap_and_sourced_conduction_share_the_original_trajec
 #[test]
 fn refused_heat_preserves_nonzero_continuation_and_deterministic_retry() {
     fixture(
-        specimens(),
+        specimens().map(|spec| Spec {
+            curved_eta: true,
+            ..spec
+        }),
         false,
         false,
         0.02,
@@ -716,6 +864,9 @@ fn refused_heat_preserves_nonzero_continuation_and_deterministic_retry() {
             }
             let saved = actual.mechanical().last_frame().unwrap().clone();
             let states = actual.mechanical().components()[0].states().to_vec();
+            let resistances: Vec<_> = (0..3)
+                .map(|i| actual.mechanical().connection_damping_n_s_m(i))
+                .collect();
             let cells = thermal.cells().clone();
             let time = thermal.time_s();
             let mut exhausted = solve();
@@ -732,6 +883,12 @@ fn refused_heat_preserves_nonzero_continuation_and_deterministic_retry() {
             );
             assert_eq!(thermal.cells(), &cells);
             assert_eq!(thermal.time_s(), time);
+            assert_eq!(
+                resistances,
+                (0..3)
+                    .map(|i| actual.mechanical().connection_damping_n_s_m(i))
+                    .collect::<Vec<_>>()
+            );
             let cancel = CancelGate::new_clock_free();
             cancel.request();
             assert!(matches!(
@@ -748,6 +905,12 @@ fn refused_heat_preserves_nonzero_continuation_and_deterministic_retry() {
             assert_eq!(retried.layer_heat, comparison.layer_heat);
             assert_eq!(retried.entropy, comparison.entropy);
             assert_eq!(thermal.cells(), expected_thermal.cells());
+            for i in 0..3 {
+                assert_eq!(
+                    actual.mechanical().connection_damping_n_s_m(i),
+                    expected.mechanical().connection_damping_n_s_m(i)
+                );
+            }
         },
     );
     let mut narrow = specimens();
@@ -779,7 +942,7 @@ fn refused_heat_preserves_nonzero_continuation_and_deterministic_retry() {
         },
     );
     let mut curved = specimens();
-    curved[0].curved_eta = true;
+    curved[0].curved_elastic = true;
     fixture(curved, false, false, 0.0, |component, thermal, network| {
         assert!(
             component

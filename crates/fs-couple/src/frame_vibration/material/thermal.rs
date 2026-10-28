@@ -7,11 +7,13 @@
 //! The existing enthalpy/Newton owner advances conduction and reservoirs, and
 //! both histories publish only after independent work, heat and storage gates.
 //!
-//! Geometry and mechanical coefficients remain fixed. Density, E and BOTH
-//! viscosities must be source-declared scalar constants, with their original
-//! claims admitted again at every proposed layer temperature. This represents
-//! finite self-heating inside that fully-solid domain, not thermal expansion,
-//! evolving stiffness, temperature-dependent loss, melting or a new propagator.
+//! Geometry, density and E remain fixed; both original viscosity laws may vary
+//! with temperature. Each interval uses its accepted starting resistances. Its
+//! actual work heats the finite cells, then their accepted endpoint sources
+//! rebuild the SAME mechanical propagator for the next interval. This is a
+//! first-order thermal/coefficient split; refine the shared clock for accuracy.
+//! A dashpot stores no energy, so changing eta adds no parameter-work impulse.
+//! Elastic thermal feedback, expansion and melting require their own owners.
 
 use super::{FrameVibrationBasis, FrameVibrationComponent, FrameVibrationError};
 use crate::circuit_enthalpy::{
@@ -25,13 +27,14 @@ use crate::circuit_enthalpy::{
 use crate::material_circuit::MaterialCircuitSolve;
 use crate::render::schedule::force::coupled::{
     CoupledModalFrame, CoupledModalSystem, ModalCouplingConfig, ModalCouplingError,
-    PreparedModalBudget,
+    PreparedModalBudget, damping::ConnectionDamping,
 };
 use fs_exec::CancelGate;
 use fs_matdb::EvaluationDecision;
 use fs_material::section::ConcentricElasticSection;
 use fs_material::section_temperature::ConcentricSectionTemperatureLaw;
 use fs_material::state_point::{DENSITY_PROPERTY, MaterialStatePointError, YOUNG_MODULUS_PROPERTY};
+use fs_solid::frame2d::FrameViscousSection;
 use fs_solver::{NewtonKrylovConfig, NewtonReport};
 use fs_thermal::enthalpy::{
     CellId, DepositedCell, DepositionError, DepositionSimulation, EnergyAudit,
@@ -142,15 +145,27 @@ fn same_positive(actual: f64, expected: f64) -> bool {
         && expected > 0.0
         && (actual - expected).abs() <= 1e-10 * expected
 }
+fn share(part: f64, whole: f64) -> Result<f64> {
+    if whole == 0.0 {
+        return Ok(0.0);
+    }
+    let fraction = finite(part / whole)?;
+    if part > 0.0 && fraction == 0.0 {
+        return Err(invalid("layer heat fraction underflow"));
+    }
+    Ok(fraction)
+}
 
 struct Receiver {
     binding: FrameLayerCell,
     original: DepositedCell,
+    temperature_axis: String,
     axial_share: f64,
     bending_share: f64,
 }
 struct Region<'a> {
     element: usize,
+    length_m: f64,
     law: ConcentricSectionTemperatureLaw<'a>,
     receivers: Vec<Receiver>,
 }
@@ -162,6 +177,7 @@ pub struct FrameThermalSystem<'n, 'a> {
     mechanical: CoupledModalSystem,
     prepared: PreparedMaterialNetwork<'n, 'a>,
     regions: Vec<Region<'a>>,
+    viscosity: Vec<(usize, FrameViscousSection)>,
     origin_s: f64,
 }
 
@@ -223,6 +239,10 @@ pub struct FrameThermalReport {
     pub source: MaterialNetworkSample,
     /// Every original section re-evaluated at its actual layer temperatures.
     pub sections: Vec<(usize, ConcentricElasticSection)>,
+    /// Source viscosity used during this interval, before its heat was received.
+    pub interval_viscosity: Vec<(usize, FrameViscousSection)>,
+    /// Accepted endpoint viscosity, installed for the NEXT mechanical interval.
+    pub next_viscosity: Vec<(usize, FrameViscousSection)>,
     pub nonlinear: NewtonReport,
     pub maximum_cell_residual_j: f64,
     pub material_trials: usize,
@@ -326,12 +346,7 @@ impl FrameVibrationComponent {
                         "frame layer must retain its whole fixed-solid mass, volume and original physical source context",
                     ));
                 }
-                for key in [
-                    DENSITY_PROPERTY,
-                    YOUNG_MODULUS_PROPERTY,
-                    section.axial().viscosity_property(),
-                    section.bending().viscosity_property(),
-                ] {
+                for key in [DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY] {
                     let coefficient = solid
                         .material
                         .property(key)
@@ -341,20 +356,10 @@ impl FrameVibrationComponent {
                             != EvaluationDecision::ConstantWithinValidity
                     {
                         return Err(invalid(
-                            "frame self-heating requires source-declared temperature-independent mechanical coefficients",
+                            "frame self-heating requires source-declared temperature-independent density and elasticity",
                         ));
                     }
                 }
-                let share = |part: f64, whole: f64| -> Result<f64> {
-                    if whole == 0.0 {
-                        return Ok(0.0);
-                    }
-                    let fraction = finite(part / whole)?;
-                    if part > 0.0 && fraction == 0.0 {
-                        return Err(invalid("layer heat fraction underflow"));
-                    }
-                    Ok(fraction)
-                };
                 receivers.push(Receiver {
                     binding: FrameLayerCell {
                         element: *element,
@@ -362,6 +367,7 @@ impl FrameVibrationComponent {
                         cell,
                     },
                     original: original.clone(),
+                    temperature_axis: caloric.point.temperature_axis.to_owned(),
                     axial_share: share(
                         section.axial().layer_viscous_rigidity_n_s()[layer],
                         section.axial().viscous_rigidity_n_s(),
@@ -379,10 +385,12 @@ impl FrameVibrationComponent {
                     .map_err(material)?;
             regions.push(Region {
                 element: *element,
+                length_m: length,
                 law,
                 receivers,
             });
         }
+        let viscosity = operator.sections().to_vec();
         let (basis, mechanical) =
             self.into_system(config, prepared, gate)
                 .map_err(|e| match e {
@@ -395,23 +403,32 @@ impl FrameVibrationComponent {
             mechanical,
             prepared: binding,
             regions,
+            viscosity,
             origin_s: thermal.time_s(),
         })
     }
 }
 
 impl FrameThermalSystem<'_, '_> {
+    /// Fixed mass/elastic reference and physical maps. Its source damping
+    /// records describe construction; `viscous_sections()` is the live state.
     pub const fn basis(&self) -> &FrameVibrationBasis {
         &self.basis
     }
     pub const fn mechanical(&self) -> &CoupledModalSystem {
         &self.mechanical
     }
+    /// Current source-bound resistances at each accepted layer temperature.
+    pub fn viscous_sections(&self) -> &[(usize, FrameViscousSection)] {
+        &self.viscosity
+    }
 
     /// Advance one original held-force modal sample and the same finite thermal
     /// interval. Heat uses independently integrated port work, never a stored-
     /// energy defect. The native implicit thermal residual evaluates sourced
-    /// conduction at the endpoint; refine the clock for thermal time accuracy.
+    /// conduction at the endpoint. Viscosity is frozen over this interval, then
+    /// refreshed at its accepted temperature without changing stored mechanical
+    /// energy or histories. Refine the clock for this first-order feedback split.
     ///
     /// Start/inside-interval thermal events retain the original residual's
     /// refusal rules. On failure, BOTH accepted histories, modal sample/ledger,
@@ -439,9 +456,29 @@ impl FrameThermalSystem<'_, '_> {
         }
         let before = self.mechanical.total_energy_j()?;
         let regions = &self.regions;
+        let viscosity = &self.viscosity;
+        for (region, (_, section)) in regions.iter().zip(viscosity) {
+            for (receiver, layer) in region.receivers.iter().zip(section.elastic().layers()) {
+                let temperature = thermal.temperature_k(receiver.binding.cell)?;
+                let source = layer
+                    .material
+                    .query_point()
+                    .iter()
+                    .find(|(axis, _)| axis == &receiver.temperature_axis)
+                    .map(|(_, temperature)| *temperature)
+                    .ok_or_else(|| {
+                        invalid("frame viscosity lost its original temperature coordinate")
+                    })?;
+                if temperature.to_bits() != source.to_bits() {
+                    return Err(invalid(
+                        "frame viscosity and finite cells must retain their jointly accepted thermal state",
+                    ));
+                }
+            }
+        }
         let prepared = &self.prepared;
-        let (next_thermal, report) = self.mechanical.step_with_admission(
-            external_modal_forces, gate, |_mechanical, frame, transfers| {
+        let (next_thermal, report, damping, next_shares, next_viscosity) = self.mechanical.step_with_admission(
+            external_modal_forces, gate, |mechanical, frame, transfers| {
                 check(gate)?;
                 if transfers.len() != 3 * regions.len() { return Err(invalid("frame heat port layout changed")); }
                 let mut layer_heat = Vec::new();
@@ -479,7 +516,7 @@ impl FrameThermalSystem<'_, '_> {
                         check(gate)?;
                         let source = prepared.resolve(state, || gate.is_requested()).map_err(network)?;
                         let mut sections = Vec::with_capacity(regions.len());
-                        for region in regions {
+                        for (region, (_, previous)) in regions.iter().zip(viscosity) {
                             check(gate)?;
                             let mut temperatures = Vec::with_capacity(region.receivers.len());
                             for receiver in &region.receivers {
@@ -494,6 +531,13 @@ impl FrameThermalSystem<'_, '_> {
                                 temperatures.push(state.temperature_k(cell.id)?);
                             }
                             let section = region.law.at_temperatures_k(&temperatures).map_err(material)?;
+                            let section = FrameViscousSection::try_new(section,
+                                previous.axial().viscosity_property(), previous.bending().viscosity_property())
+                                .map_err(|error| CircuitEnthalpyError::Source(FrameThermalSourceError::Frame(error.into())))?;
+                            let band = section.omega_band_rad_s();
+                            if band.0 != 0.0 || band.1 < core::f64::consts::PI / dt {
+                                return Err(invalid("refreshed frame viscosity must support DC through the actual Nyquist band"));
+                            }
                             sections.push((region.element, section));
                         }
                         Ok(DrivenCoefficients {
@@ -506,21 +550,57 @@ impl FrameThermalSystem<'_, '_> {
                     true, || gate.is_requested(),
                 )?;
                 let entropy = entropy.ok_or_else(|| invalid("frame heat requires its original entropy account"))?;
+                let mut updates = Vec::with_capacity(3 * regions.len());
+                let mut next_shares = Vec::new();
+                for (index, (region, (_, section))) in regions.iter().zip(&audit.source.1).enumerate() {
+                    check(gate)?;
+                    let axial = finite(section.axial().viscous_rigidity_n_s() / region.length_m)?;
+                    let bending = finite(section.bending().viscous_stiffness_n_m2_s()
+                        / region.length_m / region.length_m / region.length_m)?;
+                    if (section.axial().viscous_rigidity_n_s() > 0.0 && axial == 0.0)
+                        || (section.bending().viscous_stiffness_n_m2_s() > 0.0 && bending == 0.0) {
+                        return Err(invalid("refreshed frame viscosity is unrepresentable on the original geometry"));
+                    }
+                    for (k, damping_n_s_m) in [axial, finite(3.0 * bending)?, bending].into_iter().enumerate() {
+                        updates.push(ConnectionDamping { connection: 3 * index + k, damping_n_s_m });
+                    }
+                    for layer in 0..region.receivers.len() {
+                        next_shares.push((
+                            share(section.axial().layer_viscous_rigidity_n_s()[layer], section.axial().viscous_rigidity_n_s())?,
+                            share(section.bending().layer_viscous_stiffness_n_m2_s()[layer], section.bending().viscous_stiffness_n_m2_s())?,
+                        ));
+                    }
+                }
+                let damping = mechanical.prepare_staged_connection_damping(&updates, gate)?;
+                let sections = audit.source.1.iter().map(|(element, section)| (*element, section.elastic().clone())).collect();
                 let report = FrameThermalReport {
                     mechanical: audit.electrical, thermal: audit.thermal, layer_heat,
                     deposited_material_heat_j: audit.deposited_joule_j,
                     external_thermal_heat_j: audit.non_electrical_heat_j,
                     external_mechanical_loss_j: outside,
                     combined_energy_residual_j: audit.total_energy_residual_j,
-                    entropy: entropy.into(), source: audit.source.0, sections: audit.source.1,
+                    entropy: entropy.into(), source: audit.source.0, sections,
+                    interval_viscosity: viscosity.to_vec(), next_viscosity: audit.source.1,
                     nonlinear: audit.nonlinear, maximum_cell_residual_j: audit.maximum_cell_residual_j,
                     material_trials: audit.circuit_trials,
                 };
-                Ok((candidate, report))
+                let next_viscosity = report.next_viscosity.clone();
+                Ok((candidate, report, damping, next_shares, next_viscosity))
             },
         )?;
         // The native stage/admit/publish boundary made the final cancellation
         // check. These infallible moves publish the matching finite-cell state.
+        self.mechanical.install_connection_damping(damping);
+        for (receiver, (axial, bending)) in self
+            .regions
+            .iter_mut()
+            .flat_map(|region| &mut region.receivers)
+            .zip(next_shares)
+        {
+            receiver.axial_share = axial;
+            receiver.bending_share = bending;
+        }
+        self.viscosity = next_viscosity;
         *thermal = next_thermal;
         Ok(report)
     }

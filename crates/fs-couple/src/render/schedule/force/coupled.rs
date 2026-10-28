@@ -22,6 +22,7 @@ mod relaxation;
 pub(crate) mod dg;
 pub mod harmonic;
 pub mod radiation;
+pub mod damping;
 pub use exact::prepared::{MAX_PREPARED_MODAL_MODES, PreparedModalBudget};
 
 /// One attachment in a component's unchanged mass-normalized modal basis.

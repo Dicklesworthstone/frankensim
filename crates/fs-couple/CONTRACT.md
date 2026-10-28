@@ -10011,3 +10011,92 @@ Native tests pass without relaxing the original time-resolution bound. Branch
 coefficients and applicability must come from the caller's source reduction;
 this API does not automatically derive a hereditary material tensor or add
 finite-wavelength acoustic back-reaction.
+
+## Spatial electrothermal field storage and finite frame heat feedback
+
+### One spatial electrical/thermal state
+
+`ConductionThermalNetwork::step_field_circuit_candidate` composes the original
+spatial conduction circuit with the same field-storage thermodynamics already
+used by the lumped circuit. The original charge/flux coordinates, source
+conductivity, surrounding material resistance, capacitance/inductance and finite
+caloric cells are evaluated inside one thermal residual. Geometry, caloric
+ownership, source claims and state-dependent heat-capacity admission remain
+mandatory. The existing fixed-state field API and default report types remain
+valid.
+
+The common field law retains free energy `psi=z²/(2K(T))`, entropy
+`S=-partial_T psi`, and physical internal energy `U=psi+T*S`. Its reversible
+transfer `-delta_psi_parameter-delta(T*S)` is internal heat, distinct from the
+native local Joule integrals and external thermal sources. The enclosing
+balance uses physical field internal energy plus caloric storage. Source/geometry,
+heat-capacity, budget or cancellation refusal leaves both original histories
+unchanged. The spatial RC/RL regressions use independent scalar electrical and
+caloric equations, including positive, negative and zero coefficient slopes,
+thermal resistance feedback, source refusal and continuation.
+
+### Original frame losses heat their own material
+
+`FrameVibrationComponent::into_thermal_system` binds each original member layer
+to exactly one whole finite material cell through `FrameLayerCell`. The material
+card, source context and caloric object remain original; receiving volume is
+`A_i*L` and mass is `rho_i*A_i*L`. Every participating cell must stay in its
+fully solid, constant-density caloric domain. Original scalar density and
+Young's modulus must explicitly declare constant-within-validity behavior.
+This rung retains the reference geometry, mass and elastic basis.
+
+`FrameThermalSystem::step` stages the original ordinary or prepared modal step,
+then deposits its independently integrated axial and both curvature-port work
+integrals. Axial heat partitions by the original `eta_i*A_i`; bending heat
+partitions by `eta_i*I_i`. Neither an energy defect nor an authored heat fraction
+defines physical dissipation. The same `PreparedMaterialNetwork` and finite
+enthalpy/Newton residual advance source conductivity, conduction, reservoirs and
+caloric storage. Authored additional modal losses remain an explicit external
+sink. Reports expose material heat, source evaluations, combined energy balance,
+actual caloric entropy, conductive production, material `D_i/T_i`, and separate
+temporal/algebraic entropy defects.
+
+The complete original section bundles are refreshed with
+`ConcentricSectionTemperatureLaw`. Original axial and bending viscosity
+properties may vary with temperature. Each interval uses its accepted starting
+viscosities and layer heat shares; its resulting finite-cell temperatures select
+the NEXT interval's viscosities and shares. This is a first-order
+thermal/coefficient split, not a simultaneous within-interval nonlinear
+mechanical integration. Refine the shared time step for feedback accuracy.
+Every endpoint viscosity must support DC through the actual sampled Nyquist
+band; the complete fixed elastic spectrum was admitted when constructing the
+frame. Changing an ideal dashpot has no stored energy or parameter-work impulse.
+Temperature-dependent elasticity, changing density/geometry, phase change and
+thermoelastic work are outside this fixed-reference rung and refuse.
+
+The live section accessor `viscous_sections()` and report's
+`interval_viscosity`/`next_viscosity` distinguish current source state from
+the fixed `basis()` construction records. Independently altered thermal
+temperatures cannot be paired silently with old accepted viscosity.
+Source evaluation, independent heat/energy admission, endpoint reaction checks
+and operator preparation all finish before either accepted trajectory advances.
+A refused step preserves the modal clock, states, port ledger, finite cells,
+current coefficients and heat shares, so the same input can be retried.
+
+### Resistance refresh on the complete coupled propagator
+
+`CoupledModalSystem::set_connection_damping` replaces a sorted, unique subset
+of the original nonnegative physical resistances. It rebuilds the SAME
+ordinary/prepared operator with all original attachments, springs, source port
+identities, Maxwell relaxation branches and acoustic radiation bindings. Modal
+coordinates, stored material/acoustic histories, sample clock and previous
+frame/transfer ledger remain unchanged. Constant-loss anchors retain their
+positive-coefficient requirement. Existing setup budgets and instantaneous
+reaction bounds apply; failed preparation or cancellation is atomic. Empty or
+unchanged updates allocate and rebuild nothing. The next ordinary step retains
+its full-interval force and energy checks.
+
+The finite-frame owner prepares its resistance change against the staged
+mechanical endpoint inside the native admission callback. The subsequent
+publication consists only of moves/assignments. Regressions cover analytical
+axial/bending motion and original layer integrals; independent two-cell thermal
+conduction; heat-capacity data swaps; temperature-dependent viscosity driving
+both subsequent motion and heat partition; ordinary/prepared continuation;
+independent Maxwell/acoustic physical ODEs; coefficient/refusal/cancellation
+atomicity and deterministic retry. These are native test targets; source review
+or formatting checks alone are not evidence of numerical execution.
