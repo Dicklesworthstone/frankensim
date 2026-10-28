@@ -739,6 +739,156 @@ fn network_expanded_unknown_cap_and_singular_edge_refuse() {
     ));
 }
 
+// G1: sin(kL)=0 is a pole of the edge's pressure-to-flow chart, not of
+// a lossless line terminated in a finite dissipative load. Never add loss,
+// perturb the frequency or subdivide the geometry to make this solve exist.
+#[test]
+fn network_retains_scattering_at_half_wave_and_low_frequency() {
+    let gas = gas();
+    let radius = 0.008;
+    let length = 0.2;
+    let zc = gas.density * gas.sound_speed / (core::f64::consts::PI * radius * radius);
+    let net = DuctNetwork {
+        nodes: vec![
+            port("input"),
+            node(
+                "end",
+                NodeBoundary::Termination(NetworkLoad::Impedance(C64::from_re(zc))),
+            ),
+        ],
+        edges: vec![edge("tube", 0, 1, radius, length)],
+    };
+    let half_wave = core::f64::consts::PI * gas.sound_speed / length;
+    for omega in [1.0e-9, half_wave, 2.0 * half_wave, 3.0 * half_wave] {
+        assert!(
+            network_chain_admittance(
+                &net.edges[0].duct,
+                &gas,
+                omega,
+                LossModel::Lossless,
+                JunctionCorrections::Disabled,
+            )
+            .is_err()
+        );
+        let response = network_port_impedance(&net, &gas, omega, LossModel::Lossless).unwrap();
+        assert_eq!(response.wave_constraint_edges, 1);
+        assert!(
+            relative(response.z[0], C64::from_re(zc)) < 2.0e-12,
+            "omega={omega}: {:?}",
+            response.z
+        );
+        assert!(response.condition_estimate < 100.0);
+    }
+}
+
+// G3: equivalent subdivisions must retain the same complex resonance loading,
+// including when only one subdivision places a component exactly at a pole.
+#[test]
+fn network_half_wave_subdivision_preserves_loaded_response() {
+    let gas = gas();
+    let radius = 0.008;
+    let length = 0.6;
+    let zc = gas.density * gas.sound_speed / (core::f64::consts::PI * radius * radius);
+    let load = C64::new(0.3 * zc, -0.7 * zc);
+    for detuning in [-1.0e-6, 0.0, 1.0e-6] {
+        let omega = 3.0 * core::f64::consts::PI * gas.sound_speed / length * (1.0 + detuning);
+        let expected = cylinder_input(&gas, radius, length, omega, LossModel::Lossless, load);
+        for pieces in [1, 2, 3, 7] {
+            let mut net = DuctNetwork {
+                nodes: vec![port("input")],
+                edges: Vec::new(),
+            };
+            for i in 0..pieces {
+                let boundary = if i + 1 == pieces {
+                    NodeBoundary::Termination(NetworkLoad::Impedance(load))
+                } else {
+                    NodeBoundary::Junction
+                };
+                net.nodes.push(node(&format!("node-{i}"), boundary));
+                net.edges.push(edge(
+                    &format!("edge-{i}"),
+                    i,
+                    i + 1,
+                    radius,
+                    length / pieces as f64,
+                ));
+            }
+            let response = network_port_impedance(&net, &gas, omega, LossModel::Lossless).unwrap();
+            assert!(
+                relative(response.z[0], expected) < 5.0e-10,
+                "pieces={pieces}, detuning={detuning}: {:?} vs {expected:?}",
+                response.z
+            );
+        }
+    }
+}
+
+// G1: an antiresonance has zero driving pressure at finite flow. A truly
+// undamped closed-cavity eigenfrequency still refuses; no regularizer hides it.
+#[test]
+fn network_half_wave_antiresonance_is_not_a_closed_cavity_pole() {
+    let gas = gas();
+    let radius = 0.008;
+    let length = 0.2;
+    let zc = gas.density * gas.sound_speed / (core::f64::consts::PI * radius * radius);
+    let omega = core::f64::consts::PI * gas.sound_speed / length;
+    let mut net = DuctNetwork {
+        nodes: vec![
+            port("input"),
+            node(
+                "end",
+                NodeBoundary::Termination(NetworkLoad::PressureRelease),
+            ),
+        ],
+        edges: vec![edge("tube", 0, 1, radius, length)],
+    };
+    let response = network_port_impedance(&net, &gas, omega, LossModel::Lossless).unwrap();
+    assert_eq!(response.wave_constraint_edges, 1);
+    assert!(response.z[0].abs() / zc < 1.0e-12);
+    net.nodes[1].boundary = NodeBoundary::Termination(NetworkLoad::Closed);
+    assert!(matches!(
+        network_port_impedance(&net, &gas, omega, LossModel::Lossless),
+        Err(DuctError::Singular)
+    ));
+}
+
+// G1/G3: a loaded half-wave connecting two driven ports has a finite,
+// reciprocal rank-one impedance. Its singular pressure chart cannot be used
+// to eliminate either port, but the complete wave/KCL system is regular.
+#[test]
+fn network_half_wave_multiport_retains_reciprocal_mutual_loading() {
+    let gas = gas();
+    let radius = 0.008;
+    let length = 0.2;
+    let zc = gas.density * gas.sound_speed / (core::f64::consts::PI * radius * radius);
+    let omega = core::f64::consts::PI * gas.sound_speed / length;
+    let net = DuctNetwork {
+        nodes: vec![
+            port("left"),
+            port("right"),
+            node(
+                "load",
+                NodeBoundary::Termination(NetworkLoad::Impedance(C64::from_re(zc))),
+            ),
+        ],
+        edges: vec![
+            edge("half-wave", 0, 1, radius, length),
+            edge("load-line", 1, 2, radius, 0.137),
+        ],
+    };
+    let response = network_port_impedance(&net, &gas, omega, LossModel::Lossless).unwrap();
+    assert_eq!(response.wave_constraint_edges, 2);
+    for (observed, sign) in response.z.iter().zip([1.0, -1.0, -1.0, 1.0]) {
+        assert!(relative(*observed, C64::from_re(sign * zc)) < 2.0e-12);
+    }
+    assert!(relative(response.z[1], response.z[2]) < 1.0e-12);
+    let repeat = network_port_impedance(&net, &gas, omega, LossModel::Lossless).unwrap();
+    for (a, b) in response.z.iter().zip(&repeat.z) {
+        assert_eq!(a.re.to_bits(), b.re.to_bits());
+        assert_eq!(a.im.to_bits(), b.im.to_bits());
+    }
+}
+
 #[test]
 fn network_coupled_termination_even_mode_and_diagonal_limit() {
     // A symmetric Y-branch: equal branches see equal flows, so a symmetric

@@ -960,8 +960,14 @@ Stable node/edge IDs are required. Assembly and LU use canonical integer indices
 sorted by those identities, not a hash-map traversal; reindexing nodes changes
 only the returned port permutation. Each edge consumes the existing chain owner
 through its stable local-wave scattering composition and physical admittance
-stamp. No opposite signed load probes or global growing ABCD product are needed
-by the nodal solver. Propagation, loss and local chimney physics have one owner.
+stamp. If an edge's pressure-to-flow chart or the resulting nodal solve is
+singular or exceeds its condition allowance, the same composed edge scattering
+operators are retained in the complete graph solve. The equations
+`(I-S)p - (I+S) R U = 0` and nodal volume-flow balance preserve finite loaded
+half-wave resonances and antiresonances without an artificial loss, frequency
+shift or geometry subdivision. No opposite signed load probes or global
+growing ABCD product are needed. Propagation, loss and local chimney physics
+have one owner; this alternate algebraic elimination does not change them.
 
 `JunctionCorrections::ChainLocal` retains existing compact-hole corrections.
 `Disabled` retains each complete chimney and mouth, but removes its compact
@@ -977,12 +983,28 @@ No such producer or local junction correction is synthesized by this module.
 Caps are 128 graph nodes, 256 edges, 32 labelled ports, 4096 aggregate segments
 and 256 pressure unknowns after feature expansion. Structural admission runs
 before dense allocation. Disconnected graphs, invalid indices, duplicate IDs,
-zero axial-length edges and absent ports refuse. Edge normalized ABCD, edge
-admittance and the grounded nodal solve have full infinity-norm condition
-estimates; values above 1e10 (or nonfinite/singular blocks) return `Singular`.
-The stable scattering successor M2.1-W9 is required outside this envelope.
-Accepted edge estimates and the nodal estimate accompany the response. These
-are floating-point solves, not interval accuracy certificates for every graph.
+zero axial-length edges and absent ports refuse. The retained-wave route adds
+two inward-flow unknowns per edge, capped at 768 total unknowns before allocation.
+It uses pressure-valued currents `R_edge U` and row equilibration; the ordinary
+nodal route retains its original arithmetic and smaller factorization. Both
+complete solves have full infinity-norm condition estimates and refuse above
+1e10 or on nonfinite/singular operators. In particular a genuine undamped
+closed-network pole still refuses. `wave_constraint_edges` records the selected
+representation (zero for the nodal route). Accepted edge estimates report
+composition and admittance conditioning on the nodal route, and composition
+conditioning alone when currents are retained. The graph condition then refers
+to the dimensionless row-equilibrated constraints. These are floating-point
+solves, not interval accuracy certificates for every graph. The returned
+open-circuit N-port impedance itself must exist: a load attached later through
+`drive` cannot regularize an already singular open-circuit network query.
+
+G1/G3 tests `network_retains_scattering_at_half_wave_and_low_frequency`,
+`network_half_wave_subdivision_preserves_loaded_response`,
+`network_half_wave_antiresonance_is_not_a_closed_cavity_pole` and
+`network_half_wave_multiport_retains_reciprocal_mutual_loading` compare analytic
+matched loads, complex terminated cylinders, zero-pressure antiresonances and
+reciprocal rank-one N-port impedances. They retain the exact queried frequency;
+the subdivision comparison includes detuning on both sides of the edge poles.
 
 Loads are explicit closed, pressure-release, passive finite impedances,
 tabulated loads, a material-backed rigid porous termination, or an explicit radiation model/radius. Exact thin-wall LS is
@@ -1140,11 +1162,13 @@ equal-mode Redheffer products use the existing complex LU; modal diagonal
 reflection propagation calls the same bounded primitive with its exact prior
 multiplication order. No second factorization or loss model is introduced.
 
-Network assembly now consumes the finite admittance `(I-S)(I+S)^-1/R` from this
-same owner, including long opaque edges. `network_chain_two_port` remains an
+Network assembly consumes the finite admittance `(I-S)(I+S)^-1/R` from this
+same owner, including long opaque edges, when that pressure-to-flow chart is
+admissible. It retains the original scattering constraints at component poles
+as described above. `network_chain_two_port` remains an
 explicit finite, conditioned ABCD export; graph assembly no longer depends on
 its envelope or reconstructs ABCD through opposite signed load probes. Existing
-network nodal/admittance condition caps remain 1e10. Local compact corrections
+network complete-solve condition caps remain 1e10. Local compact corrections
 remain explicit and disabled means no inner/series/mutual correction.
 
 Controlled composition polls cancellation between blocks, profile/cone steps,

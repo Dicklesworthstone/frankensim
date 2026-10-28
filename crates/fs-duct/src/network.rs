@@ -27,7 +27,9 @@ pub const MAX_NETWORK_PORTS: usize = 32;
 pub const MAX_NETWORK_SEGMENTS: usize = 4096;
 /// Cap after supplied junction multiports expand their incident-edge pressures.
 pub const MAX_NETWORK_UNKNOWNS: usize = 256;
-/// Maximum infinity-norm condition number for normalized edge and nodal solves.
+/// Pressure unknowns plus two inward-flow unknowns per retained scattering edge.
+pub const MAX_NETWORK_WAVE_UNKNOWNS: usize = MAX_NETWORK_UNKNOWNS + 2 * MAX_NETWORK_EDGES;
+/// Maximum infinity-norm condition number for normalized edge and graph solves.
 pub const MAX_NETWORK_CONDITION: f64 = 1.0e10;
 
 /// Explicit treatment of the chain-local compact tone-hole corrections.
@@ -250,10 +252,16 @@ pub struct NetworkResponse {
     pub ports: Vec<String>,
     /// Row-major p=Z*U in Pa s/m³; unexcited ports have exactly zero injection.
     pub z: Vec<C64>,
-    /// Infinity-norm condition of the grounded nodal system.
+    /// Infinity-norm condition of the grounded nodal system, or of the
+    /// dimensionless row-equilibrated scattering constraints when retained.
     pub condition_estimate: f64,
-    /// Maximum normalized ABCD/admittance condition per edge, in stable id order.
+    /// Maximum composition/admittance condition per edge, in stable id order.
+    /// With retained wave constraints these are composition conditions only:
+    /// a singular pressure-to-flow chart is not a singular physical edge.
     pub edge_conditions: Vec<(String, f64)>,
+    /// Number of edges whose scattering equations were retained in the solve.
+    /// Zero selects the original, smaller nodal-admittance solve.
+    pub wave_constraint_edges: usize,
     /// Minimum shear number over all edges.
     pub min_shear_number: f64,
 }
@@ -511,6 +519,21 @@ pub fn network_chain_admittance_in_exterior(
     loss: LossModel,
     corrections: JunctionCorrections,
 ) -> Result<([C64; 4], f64, f64), DuctError> {
+    let (s, condition, shear) =
+        network_chain_scattering(duct, interior, exterior, omega, loss, corrections)?;
+    let (y, c) = s.admittance(MAX_NETWORK_CONDITION)?;
+    let (_, yc) = inverse(&y, 2)?;
+    Ok((y, condition.max(c).max(yc), shear))
+}
+
+fn network_chain_scattering(
+    duct: &Duct,
+    interior: &GasState,
+    exterior: &GasState,
+    omega: f64,
+    loss: LossModel,
+    corrections: JunctionCorrections,
+) -> Result<(crate::compose::TwoPort, f64, f64), DuctError> {
     let gas = interior;
     validate_medium(gas, omega)?;
     crate::exterior::admit(interior, exterior)?;
@@ -533,9 +556,83 @@ pub fn network_chain_admittance_in_exterior(
         || false,
     )?;
     let (s, condition) = crate::compose::compose_scattering(&chain.blocks, options, &mut || false)?;
-    let (y, c) = s.admittance(MAX_NETWORK_CONDITION)?;
-    let (_, yc) = inverse(&y, 2)?;
-    Ok((y, condition.max(c).max(yc), chain.min_shear_number))
+    Ok((s, condition, chain.min_shear_number))
+}
+
+struct WaveEdge {
+    ends: [Option<usize>; 2],
+    two_port: crate::compose::TwoPort,
+    condition: f64,
+}
+
+// A half-wave edge has singular I+S although its loaded graph can be regular.
+// Keep b=S*a instead of eliminating the currents through (I+S)^-1:
+// (I-S)p - (I+S)R*U = 0. KCL closes the graph, including pressure-release ends.
+// Each current unknown is R_edge*U; multiplying KCL by one graph reference
+// puts every unknown/equation in pressure units before row equilibration.
+fn wave_pressure_inverse(
+    boundary_y: &[C64],
+    pressures: usize,
+    edges: &[WaveEdge],
+) -> Result<(Vec<C64>, f64), DuctError> {
+    let n = pressures + 2 * edges.len();
+    if n > MAX_NETWORK_WAVE_UNKNOWNS {
+        return Err(bad("network scattering-constraint cap exceeded (768)"));
+    }
+    let reference = edges
+        .first()
+        .ok_or(DuctError::Singular)?
+        .two_port
+        .reference_impedance;
+    let mut a = vec![C64::ZERO; n * n];
+    for i in 0..pressures {
+        for j in 0..pressures {
+            a[i * n + j] = boundary_y[i * pressures + j].scale(reference);
+        }
+    }
+    for (e, edge) in edges.iter().enumerate() {
+        let current = pressures + 2 * e;
+        let flow_scale = reference / edge.two_port.reference_impedance;
+        for row in 0..2 {
+            if let Some(node) = edge.ends[row] {
+                a[node * n + current + row] =
+                    a[node * n + current + row] + C64::from_re(flow_scale);
+            }
+            for col in 0..2 {
+                let identity = if row == col { C64::ONE } else { C64::ZERO };
+                let s = edge.two_port.scattering[2 * row + col];
+                if let Some(node) = edge.ends[col] {
+                    a[(current + row) * n + node] = a[(current + row) * n + node] + identity - s;
+                }
+                a[(current + row) * n + current + col] = -(identity + s);
+            }
+        }
+    }
+    let mut source_scale = vec![0.0; pressures];
+    for (row, values) in a.chunks_exact_mut(n).enumerate() {
+        let scale = values.iter().map(|z| z.abs()).fold(0.0, f64::max);
+        if !scale.is_finite() || scale == 0.0 || values.iter().any(|&z| !finite(z)) {
+            return Err(DuctError::Singular);
+        }
+        for value in values {
+            *value = C64::new(value.re / scale, value.im / scale);
+        }
+        if row < pressures {
+            source_scale[row] = reference / scale;
+        }
+    }
+    let (inv, condition) = inverse(&a, n)?;
+    let mut pressure_inverse = vec![C64::ZERO; pressures * pressures];
+    for i in 0..pressures {
+        for j in 0..pressures {
+            let value = inv[i * n + j].scale(source_scale[j]);
+            if !finite(value) {
+                return Err(DuctError::Singular);
+            }
+            pressure_inverse[i * pressures + j] = value;
+        }
+    }
+    Ok((pressure_inverse, condition))
 }
 
 /// Compute the complete chain's physical ABCD block and reject an unqualified
@@ -874,6 +971,9 @@ fn network_port_impedance_bound(
     }
     let mut edges: Vec<&NetworkEdge> = net.edges.iter().collect();
     edges.sort_unstable_by(|a, b| a.id.cmp(&b.id));
+    let boundary_y = y.clone();
+    let mut wave_edges = Vec::with_capacity(edges.len());
+    let mut keep_waves = false;
     let mut edge_conditions = Vec::with_capacity(edges.len());
     let mut shear = f64::INFINITY;
     for e in edges {
@@ -882,14 +982,8 @@ fn network_port_impedance_bound(
                 .edge_gas(&e.id)
                 .expect("complete edge identities admitted")
         });
-        let (stamp, condition, edge_shear) = network_chain_admittance_in_exterior(
-            &e.duct,
-            interior,
-            exterior,
-            omega,
-            loss,
-            e.corrections,
-        )?;
+        let (two_port, composition_condition, edge_shear) =
+            network_chain_scattering(&e.duct, interior, exterior, omega, loss, e.corrections)?;
         let endpoint = |node: usize, end: EdgeEnd| {
             if matches!(net.nodes[node].boundary, NodeBoundary::JunctionMultiport(_)) {
                 terminal_slots
@@ -903,17 +997,54 @@ fn network_port_impedance_bound(
             }
         };
         let ends = [endpoint(e.from, EdgeEnd::From), endpoint(e.to, EdgeEnd::To)];
-        for row in 0..2 {
-            for col in 0..2 {
-                if let (Some(i), Some(j)) = (ends[row], ends[col]) {
-                    y[i * n + j] = y[i * n + j] + stamp[2 * row + col];
+        wave_edges.push(WaveEdge {
+            ends,
+            two_port,
+            condition: composition_condition,
+        });
+        let admittance = two_port
+            .admittance(MAX_NETWORK_CONDITION)
+            .and_then(|(stamp, c)| {
+                let (_, yc) = inverse(&stamp, 2)?;
+                Ok((stamp, composition_condition.max(c).max(yc)))
+            });
+        let condition = match admittance {
+            Ok((stamp, condition)) => {
+                for row in 0..2 {
+                    for col in 0..2 {
+                        if let (Some(i), Some(j)) = (ends[row], ends[col]) {
+                            y[i * n + j] = y[i * n + j] + stamp[2 * row + col];
+                        }
+                    }
                 }
+                condition
             }
-        }
+            Err(DuctError::Singular) => {
+                keep_waves = true;
+                composition_condition
+            }
+            Err(error) => return Err(error),
+        };
         edge_conditions.push((e.id.clone(), condition));
         shear = shear.min(edge_shear);
     }
-    let (inv, condition) = inverse(&y, n)?;
+    let nodal = if keep_waves {
+        Err(DuctError::Singular)
+    } else {
+        inverse(&y, n)
+    };
+    let (inv, condition) = match nodal {
+        Ok(result) => result,
+        Err(DuctError::Singular) => {
+            keep_waves = true;
+            let result = wave_pressure_inverse(&boundary_y, n, &wave_edges)?;
+            for ((_, condition), edge) in edge_conditions.iter_mut().zip(&wave_edges) {
+                *condition = edge.condition;
+            }
+            result
+        }
+        Err(error) => return Err(error),
+    };
     let port_nodes: Vec<usize> = net
         .nodes
         .iter()
@@ -941,6 +1072,7 @@ fn network_port_impedance_bound(
         z,
         condition_estimate: condition,
         edge_conditions,
+        wave_constraint_edges: if keep_waves { wave_edges.len() } else { 0 },
         min_shear_number: shear,
     })
 }
