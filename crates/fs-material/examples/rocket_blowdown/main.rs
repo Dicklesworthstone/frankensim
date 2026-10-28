@@ -44,7 +44,8 @@ options (SI):
 The synthetic route reuses the existing manufactured gas-spring source format.
 The pack route accepts one canonical species/NASA-9/material-card triple and
 an existing thermochemical gas record. All nozzle and tank states must remain
-within the supplied source domains; overexpanded flow is refused.";
+within the supplied source domains. Ideal unchoked and normal-shock regimes
+are supported; viscous separation and transient shock motion are not modeled.";
 
 #[derive(Clone, Copy)]
 struct Config {
@@ -241,7 +242,7 @@ fn simulate(initial: ClosedGasParcel, config: Config, mut output: impl Write) ->
     let (mut expelled, mut exhausted, mut impulse) =
         (Sum::default(), Sum::default(), Sum::default());
     let mut flow = reservoir.rocket_nozzle_flow(config.ambient_pressure_pa, nozzle, controls.nozzle, || false)
-        .map_err(|error| format!("initial nozzle refused: {error}; the source temperature and pressure domains must cover the tank, sonic throat and supersonic exit"))?;
+        .map_err(|error| format!("initial nozzle refused: {error}; the source temperature and pressure domains must cover the actual tank, throat, shock and exit states"))?;
     let (mut mass_residual, mut energy_residual) = (0.0, 0.0);
     writeln!(
         output,

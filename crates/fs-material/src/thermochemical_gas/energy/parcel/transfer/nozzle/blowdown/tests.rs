@@ -273,7 +273,8 @@ fn invalid_inventory_source_bounds_iteration_limits_and_cancellation_never_publi
 }
 
 #[test]
-fn endpoint_cannot_cross_nozzle_applicability_boundary() {
+fn endpoint_can_cross_into_supported_external_compression_without_losing_impulse() {
+    use super::super::rocket::RocketNozzleRegime;
     let initial = gas(0.0);
     let initial_flow = initial
         .rocket_nozzle_flow(0.0, nozzle(), rocket_controls().nozzle, || false)
@@ -284,9 +285,20 @@ fn endpoint_cannot_cross_nozzle_applicability_boundary() {
             .rocket_nozzle_flow(ambient, nozzle(), rocket_controls().nozzle, || false)
             .is_ok()
     );
-    assert!(
-        initial
-            .rocket_blowdown(ambient, nozzle(), 0.3, rocket_controls(), || false)
-            .is_err()
+    let candidate = initial
+        .rocket_blowdown(ambient, nozzle(), 0.3, rocket_controls(), || false)
+        .unwrap();
+    let endpoint = candidate.reservoir().endpoint();
+    let flow = endpoint
+        .rocket_nozzle_flow(ambient, nozzle(), rocket_controls().nozzle, || false)
+        .unwrap();
+    assert_eq!(flow.regime, RocketNozzleRegime::ChokedExternalCompression);
+    assert!(flow.pressure_thrust_n < 0.0);
+    assert!(endpoint.mass_kg() < initial.mass_kg());
+    assert!(candidate.reservoir().step().mass_residual_kg.abs() <= controls().mass_tolerance_kg);
+    near(
+        candidate.axial_impulse_n_s,
+        0.3 * candidate.midpoint_flow().thrust_n,
+        1e-13,
     );
 }

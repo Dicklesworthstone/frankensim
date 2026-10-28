@@ -770,10 +770,11 @@ states retain full source and transport resolution. Explicit mass, energy and
 entropy residuals are checked before publication. Outputs include exit Mach,
 momentum and pressure thrust, total thrust, effective exhaust velocity,
 characteristic velocity and specific impulse. The latter uses standard
-gravity only as a unit convention. This ordinary continuous gas branch admits
-vacuum, pressure-matched and underexpanded operation; overexpansion refuses
-pending a shock/separation model. It does not supply combustion equilibrium,
-real-gas validity, nozzle losses, adjoints or resolved multidimensional flow.
+gravity only as a unit convention. The off-design extension below admits
+source-supported unchoked discharge, ideal internal normal shocks and attached
+external compression in addition to matched/underexpanded and vacuum flow.
+It does not infer viscous separation, combustion equilibrium, real-gas
+validity, nozzle losses, adjoints or resolved multidimensional flow.
 
 `nozzle::blowdown` removes finite mass from a frozen, well-mixed, adiabatic
 fixed-volume reservoir on the original density/entropy path: `d(mu)=h dm`
@@ -3515,3 +3516,45 @@ uptake/desorption energy and entropy, equilibrium turnover, reference invariance
 piecewise caloric inversion and atomic/source refusals. All pass actual-source
 Rust test typechecking together with the wet/DGM/pore-domain tests. Native
 execution of these new coupled tests remains blocked by full executor storage.
+
+
+## Variable-caloric off-design converging-diverging nozzle
+
+`RocketNozzleRegime` distinguishes `UnchokedSubsonic`, `ChokedSupersonic`,
+`ChokedExternalCompression` and `ChokedNormalShock`. Subsonic exit pressure at
+the actual exit/throat area ratio determines unchoking; sonic throat pressure
+alone is not the back-pressure threshold. A valid near-stagnation subsonic
+solution does not require source support at a hypothetical sonic station.
+
+`ClosedGasParcel::normal_shock_flow` treats its unchanged source parcel as the
+upstream static state. Actual mass and momentum invariants determine the
+velocity/temperature relation, and a bounded variable-caloric energy solve
+factors out the trivial unchanged upstream root. The accepted shock reports
+original source-resolved upstream/downstream states, actual entropy production
+and conservation residuals. Internal nozzle shocks are located by section
+area, followed by the same downstream isentrope and subsonic pressure recovery;
+axial shock location requires a separately supplied nozzle contour.
+
+`RocketNozzleFlow` retains throat Mach, regime, optional shock report and an
+optional back-pressure residual for subsonic discharge. Its existing entropy
+energy residual now subtracts the separately reported physical shock entropy
+rise. Total axial thrust remains `mdot*u_exit+(p_exit-p_ambient)*A_exit` with
+pressure thrust counted once, including at shock-on-exit transitions. Inner
+caloric stations allocate no material receipts; accepted physical stations
+retain the original complete property/transport evidence. Vacuum and low back
+pressure skip the unnecessary subsonic-threshold solve. Existing blowdown and
+vehicle consumers use the same entry point and original accepted impulse.
+
+The model is quasi-steady, quasi-one-dimensional, inviscid, adiabatic frozen
+ideal gas on an ordinary branch with one sonic crossing. External compression
+is the attached ideal-flow branch, not a claim that a real nozzle will remain
+attached. No viscous separation/side-load prediction, oblique plume solution,
+shock train, transient shock tracking or reaction relaxation is supplied.
+Equal/higher ambient pressure still refuses forward propulsion flow.
+
+Native actual-source checks: 38 nozzle-family tests passed, including perfect-
+gas shock oracles from Mach 1.0001 through 5, variable-cp conservation and
+entropy, independent internal shock areas, unchoking thresholds, pressure-thrust
+continuity, restricted caloric/transport domains, cancellation and actual finite
+blowdown through the shock regime. The lower standard atmosphere's three native
+tests also passed. This is a scoped native build, not a full workspace result.

@@ -47,7 +47,7 @@ or synthesize material data. Records are bounded to 8 KiB, each pack to 16 MiB,
 and synthetic input to 64 KiB. Frozen-gas phase policy is explicit; no reaction
 or condensation model is implied.
 
-Every tank, sonic-throat and nozzle-exit query must fit the actual source
+Every accepted tank, throat, shock and nozzle-exit query must fit the actual source
 temperature **and pressure** domains. The included nitrogen and helium
 near-atmospheric transport packs cover only 75,000–101,325 Pa, so they do not
 cover the pressure drop across a choked nozzle. This example refuses those
@@ -71,8 +71,9 @@ step mass-quadrature residual expose the underlying numerical closures.
 
 The nozzle is ideal, inviscid, adiabatic and frozen in composition. This
 example has no combustion, real-gas EOS, nozzle heat transfer, external vehicle
-motion or drag. Overexpanded operation refuses because shocks and separation
-are outside the implemented nozzle model. A failed step prints its time and
+motion or drag. The nozzle supports source-valid unchoked discharge, internal
+normal shocks and the attached ideal external-compression branch. It does not
+predict viscous separation, side loads or transient shock motion. A failed step prints its time and
 reason and exits with failure; earlier CSV rows remain the accepted prefix.
 
 ## Advance a vehicle with the same finite gas
