@@ -32,6 +32,8 @@ pub mod electrical_interface;
 pub mod liquid;
 pub mod liquid_temperature;
 pub mod elastic;
+/// Bounded streaming rainflow and explicitly scoped empirical stress-life damage.
+pub mod fatigue;
 pub mod fiber;
 /// Source-derived dielectric and magnetic storage for shared circuit consumers.
 pub mod field_storage;
