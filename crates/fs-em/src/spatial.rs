@@ -19,6 +19,9 @@
 //! P1 H/B are cellwise constant. Interface normal-flux jumps are reported rather
 //! than presenting the raw field as an exactly equilibrated H(div) field.
 
+/// Saturation from the original reversible H(B) source and its dual energy.
+pub mod nonlinear;
+
 use crate::planar::permanent::MagneticEnergyReference;
 use fs_feec::{
     assembly::{incidence_to_csr, stiffness},
@@ -210,6 +213,305 @@ fn root(parent: &mut [usize], mut v: usize) -> usize {
     v
 }
 
+/// Shared checked volume geometry; physical formulations retain their own laws.
+struct SpatialGeometry {
+    mesh: TetComplex,
+    positions_m: Vec<[f64; 3]>,
+    geometry: ElementGeometry,
+    faces: Vec<Face>,
+    components: Vec<usize>,
+}
+
+fn prepare_geometry(
+    positions_m: Vec<[f64; 3]>,
+    tetrahedra: Vec<[u32; 4]>,
+    limits: WeightedAssemblyLimits,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<SpatialGeometry, SpatialMagneticError> {
+    poll(cancelled)?;
+    if tetrahedra.is_empty()
+        || tetrahedra.len() > limits.max_cells
+        || positions_m.len() > limits.max_dofs
+        || tetrahedra
+            .len()
+            .checked_mul(36)
+            .is_none_or(|n| n > limits.max_triplets)
+    {
+        return Err(invalid(
+            "nonempty tetrahedral geometry within assembly limits required",
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    let mut used = vec![false; positions_m.len()];
+    for tet in &tetrahedra {
+        poll(cancelled)?;
+        let mut sorted = *tet;
+        sorted.sort_unstable();
+        if sorted.windows(2).any(|p| p[0] == p[1])
+            || sorted.iter().any(|&v| v as usize >= positions_m.len())
+            || !seen.insert(sorted)
+        {
+            return Err(invalid("invalid, repeated or duplicate tetrahedron"));
+        }
+        for &v in tet {
+            used[v as usize] = true;
+        }
+    }
+    if used.iter().any(|v| !v) {
+        return Err(invalid("isolated vertices are not magnetic volume"));
+    }
+    let mesh = TetComplex::from_tets(positions_m.len(), tetrahedra);
+    if mesh.edges.len() > limits.max_dofs {
+        return Err(invalid("magnetic edge assembly exceeds dof limit"));
+    }
+    let geometry =
+        try_element_geometry(&mesh, &positions_m).map_err(SpatialMagneticError::Geometry)?;
+    poll(cancelled)?;
+    let mut parent: Vec<_> = (0..positions_m.len()).collect();
+    for &[a, b] in &mesh.edges {
+        let ra = root(&mut parent, a as usize);
+        let rb = root(&mut parent, b as usize);
+        if ra != rb {
+            parent[ra.max(rb)] = ra.min(rb);
+        }
+    }
+    let components = (0..parent.len())
+        .map(|v| root(&mut parent, v))
+        .collect::<Vec<_>>();
+    let mut adjacency = vec![Vec::new(); mesh.faces.len()];
+    for (cell, tet) in mesh.tets.iter().enumerate() {
+        poll(cancelled)?;
+        for skip in 0..4 {
+            let mut face = [0u32; 3];
+            let mut n = 0;
+            for (j, &v) in tet.iter().enumerate() {
+                if j != skip {
+                    face[n] = v;
+                    n += 1;
+                }
+            }
+            face.sort_unstable();
+            let id = mesh
+                .faces
+                .binary_search(&face)
+                .map_err(|_| invalid("missing tetrahedral face"))?;
+            adjacency[id].push(cell);
+            if adjacency[id].len() > 2 {
+                return Err(invalid("nonmanifold magnetic face"));
+            }
+        }
+    }
+    let mut faces = Vec::with_capacity(mesh.faces.len());
+    for (vertices, cells) in mesh.faces.iter().zip(adjacency) {
+        poll(cancelled)?;
+        let [a, b, c] = vertices.map(|v| positions_m[v as usize]);
+        let raw = cross(sub(b, a), sub(c, a));
+        let length = finite(norm(raw))?;
+        if length <= 0.0 {
+            return Err(invalid("degenerate magnetic face"));
+        }
+        let opposite = |cell: usize| {
+            mesh.tets[cell]
+                .iter()
+                .copied()
+                .find(|v| !vertices.contains(v))
+                .unwrap()
+        };
+        let side = finite(dot(raw, sub(positions_m[opposite(cells[0]) as usize], a)))?;
+        if side == 0.0 {
+            return Err(invalid("unrepresentable tetrahedron side"));
+        }
+        if cells.len() == 2 {
+            let other = finite(dot(raw, sub(positions_m[opposite(cells[1]) as usize], a)))?;
+            if other == 0.0 || side.is_sign_positive() == other.is_sign_positive() {
+                return Err(invalid(
+                    "neighbor tetrahedra must lie on opposite face sides",
+                ));
+            }
+        }
+        let direction = if side > 0.0 { -1.0 } else { 1.0 };
+        faces.push(Face {
+            cells,
+            area_m2: 0.5 * length,
+            outward_normal: raw.map(|v| direction * v / length),
+        });
+    }
+    poll(cancelled)?;
+    Ok(SpatialGeometry {
+        mesh,
+        positions_m,
+        geometry,
+        faces,
+        components,
+    })
+}
+
+struct ScalarBoundary {
+    prescribed: Vec<Option<f64>>,
+    physical_prescribed: Vec<bool>,
+    flux_load_wb: Vec<f64>,
+    gauges: Vec<usize>,
+    references: Vec<f64>,
+}
+
+fn prepare_scalar_boundary(
+    mesh: &TetComplex,
+    faces: &[Face],
+    components: &[usize],
+    boundary: &SpatialMagneticBoundary,
+    flux_tolerance_wb: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<ScalarBoundary, SpatialMagneticError> {
+    let n = mesh.vertex_count;
+    let mut prescribed = vec![None; n];
+    let mut has_potential = vec![false; n];
+    let mut used_faces = BTreeSet::new();
+    for trace in &boundary.potential {
+        poll(cancelled)?;
+        if faces.get(trace.face).is_none_or(|f| f.cells.len() != 1)
+            || !used_faces.insert(trace.face)
+            || trace.potential_a.iter().any(|v| !v.is_finite())
+        {
+            return Err(invalid(
+                "potential trace needs unique exterior faces and finite values",
+            ));
+        }
+        for (&v, &value) in mesh.faces[trace.face].iter().zip(&trace.potential_a) {
+            let v = v as usize;
+            if prescribed[v].is_some_and(|old| old != value) {
+                return Err(invalid("inconsistent potential at shared trace vertex"));
+            }
+            prescribed[v] = Some(value);
+            has_potential[components[v]] = true;
+        }
+    }
+    let physical_prescribed: Vec<_> = prescribed.iter().map(Option::is_some).collect();
+    let mut flux_load_wb = vec![0.0; n];
+    let mut net_flux = vec![0.0; n];
+    for trace in &boundary.flux {
+        poll(cancelled)?;
+        if faces.get(trace.face).is_none_or(|f| f.cells.len() != 1)
+            || !used_faces.insert(trace.face)
+            || !trace.outward_flux_density_t.is_finite()
+        {
+            return Err(invalid(
+                "flux trace needs unique exterior faces disjoint from potential traces",
+            ));
+        }
+        let amount = finite(trace.outward_flux_density_t * faces[trace.face].area_m2)?;
+        let vertices = mesh.faces[trace.face];
+        let component = components[vertices[0] as usize];
+        net_flux[component] = finite(net_flux[component] + amount)?;
+        for v in vertices {
+            flux_load_wb[v as usize] = finite(flux_load_wb[v as usize] + amount / 3.0)?;
+        }
+    }
+    let mut gauges = Vec::new();
+    let mut references = vec![0.0; n];
+    for v in 0..n {
+        if components[v] != v {
+            continue;
+        }
+        if !has_potential[v] {
+            if net_flux[v].abs() > flux_tolerance_wb {
+                return Err(invalid(
+                    "net outward magnetic flux must vanish in a pure-flux component",
+                ));
+            }
+            prescribed[v] = Some(0.0);
+            gauges.push(v);
+        } else {
+            references[v] = (0..n)
+                .find_map(|i| (components[i] == v).then(|| prescribed[i]).flatten())
+                .unwrap();
+        }
+    }
+    // Work in component-relative coordinates so a common gauge offset does
+    // not create magnetic fields or contaminate the Hodge energy.
+    for v in 0..n {
+        if let Some(value) = prescribed[v] {
+            prescribed[v] = Some(finite(value - references[components[v]])?);
+        }
+    }
+    Ok(ScalarBoundary {
+        prescribed,
+        physical_prescribed,
+        flux_load_wb,
+        gauges,
+        references,
+    })
+}
+
+fn solve_scalar_system(
+    matrix: &Csr,
+    rhs: &[f64],
+    prescribed: &[Option<f64>],
+    config: CheckedCgConfig,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Vec<f64>, Option<SolveReport>), SpatialMagneticError> {
+    let n = matrix.nrows();
+    let free: Vec<_> = (0..n).filter(|&v| prescribed[v].is_none()).collect();
+    let mut index = vec![usize::MAX; n];
+    for (i, &v) in free.iter().enumerate() {
+        index[v] = i;
+    }
+    let mut row_ptr = vec![0];
+    let mut columns = Vec::new();
+    let mut values = Vec::new();
+    let mut loads = Vec::with_capacity(free.len());
+    let mut inverse = Vec::with_capacity(free.len());
+    for &v in &free {
+        poll(cancelled)?;
+        let mut load = rhs[v];
+        let mut diagonal = 0.0;
+        let (cols, vals) = matrix.row(v);
+        for (&w, &value) in cols.iter().zip(vals) {
+            if w == v {
+                diagonal = value;
+            }
+            if let Some(p) = prescribed[w] {
+                load = finite((-value).mul_add(p, load))?;
+            } else {
+                columns.push(index[w]);
+                values.push(value);
+            }
+        }
+        if !diagonal.is_finite() || diagonal <= 0.0 || !diagonal.recip().is_finite() {
+            return Err(invalid(
+                "magnetic Jacobi diagonal is not representably positive",
+            ));
+        }
+        inverse.push(diagonal.recip());
+        loads.push(load);
+        row_ptr.push(columns.len());
+    }
+    let mut relative_potential_a: Vec<_> = prescribed.iter().map(|v| v.unwrap_or(0.0)).collect();
+    let report = if free.is_empty() {
+        None
+    } else {
+        let matrix = Csr::from_parts(free.len(), free.len(), row_ptr, columns, values);
+        let result = checked_cg(
+            &CsrOp::symmetric(matrix),
+            &Diagonal(inverse),
+            &loads,
+            config,
+            |_| poll(cancelled),
+        )
+        .map_err(|e| match e {
+            CheckedCgError::InvalidInput(s) => invalid(s),
+            CheckedCgError::Interrupted(e) => e,
+        })?;
+        if !result.report.converged_euclidean() {
+            return Err(SpatialMagneticError::Nonconvergence(result.report));
+        }
+        for (&v, &value) in free.iter().zip(&result.x) {
+            relative_potential_a[v] = value;
+        }
+        Some(result.report)
+    };
+    Ok((relative_potential_a, report))
+}
+
 impl SpatialMagnetostatics {
     pub fn new(
         positions_m: Vec<[f64; 3]>,
@@ -219,114 +521,18 @@ impl SpatialMagnetostatics {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, SpatialMagneticError> {
         poll(cancelled)?;
-        if tetrahedra.is_empty()
-            || tetrahedra.len() != materials.len()
-            || tetrahedra.len() > limits.max_cells
-            || positions_m.len() > limits.max_dofs
-            || tetrahedra
-                .len()
-                .checked_mul(36)
-                .is_none_or(|n| n > limits.max_triplets)
-        {
+        if tetrahedra.len() != materials.len() {
             return Err(invalid(
-                "nonempty matching tetrahedra/materials within assembly limits required",
+                "one magnetic material per original tetrahedron required",
             ));
         }
-        let mut seen = BTreeSet::new();
-        let mut used = vec![false; positions_m.len()];
-        for tet in &tetrahedra {
-            poll(cancelled)?;
-            let mut sorted = *tet;
-            sorted.sort_unstable();
-            if sorted.windows(2).any(|p| p[0] == p[1])
-                || sorted.iter().any(|&v| v as usize >= positions_m.len())
-                || !seen.insert(sorted)
-            {
-                return Err(invalid("invalid, repeated or duplicate tetrahedron"));
-            }
-            for &v in tet {
-                used[v as usize] = true;
-            }
-        }
-        if used.iter().any(|v| !v) {
-            return Err(invalid("isolated vertices are not magnetic volume"));
-        }
-        let mesh = TetComplex::from_tets(positions_m.len(), tetrahedra);
-        if mesh.edges.len() > limits.max_dofs {
-            return Err(invalid("magnetic edge assembly exceeds dof limit"));
-        }
-        let geometry =
-            try_element_geometry(&mesh, &positions_m).map_err(SpatialMagneticError::Geometry)?;
-        poll(cancelled)?;
-        let mut parent: Vec<_> = (0..positions_m.len()).collect();
-        for &[a, b] in &mesh.edges {
-            let ra = root(&mut parent, a as usize);
-            let rb = root(&mut parent, b as usize);
-            if ra != rb {
-                parent[ra.max(rb)] = ra.min(rb);
-            }
-        }
-        let components = (0..parent.len())
-            .map(|v| root(&mut parent, v))
-            .collect::<Vec<_>>();
-        let mut adjacency = vec![Vec::new(); mesh.faces.len()];
-        for (cell, tet) in mesh.tets.iter().enumerate() {
-            poll(cancelled)?;
-            for skip in 0..4 {
-                let mut face = [0u32; 3];
-                let mut n = 0;
-                for (j, &v) in tet.iter().enumerate() {
-                    if j != skip {
-                        face[n] = v;
-                        n += 1;
-                    }
-                }
-                face.sort_unstable();
-                let id = mesh
-                    .faces
-                    .binary_search(&face)
-                    .map_err(|_| invalid("missing tetrahedral face"))?;
-                adjacency[id].push(cell);
-                if adjacency[id].len() > 2 {
-                    return Err(invalid("nonmanifold magnetic face"));
-                }
-            }
-        }
-        let mut faces = Vec::with_capacity(mesh.faces.len());
-        for (vertices, cells) in mesh.faces.iter().zip(adjacency) {
-            poll(cancelled)?;
-            let [a, b, c] = vertices.map(|v| positions_m[v as usize]);
-            let raw = cross(sub(b, a), sub(c, a));
-            let length = finite(norm(raw))?;
-            if length <= 0.0 {
-                return Err(invalid("degenerate magnetic face"));
-            }
-            let opposite = |cell: usize| {
-                mesh.tets[cell]
-                    .iter()
-                    .copied()
-                    .find(|v| !vertices.contains(v))
-                    .unwrap()
-            };
-            let side = finite(dot(raw, sub(positions_m[opposite(cells[0]) as usize], a)))?;
-            if side == 0.0 {
-                return Err(invalid("unrepresentable tetrahedron side"));
-            }
-            if cells.len() == 2 {
-                let other = finite(dot(raw, sub(positions_m[opposite(cells[1]) as usize], a)))?;
-                if other == 0.0 || side.is_sign_positive() == other.is_sign_positive() {
-                    return Err(invalid(
-                        "neighbor tetrahedra must lie on opposite face sides",
-                    ));
-                }
-            }
-            let direction = if side > 0.0 { -1.0 } else { 1.0 };
-            faces.push(Face {
-                cells,
-                area_m2: 0.5 * length,
-                outward_normal: raw.map(|v| direction * v / length),
-            });
-        }
+        let SpatialGeometry {
+            mesh,
+            positions_m,
+            geometry,
+            faces,
+            components,
+        } = prepare_geometry(positions_m, tetrahedra, limits, cancelled)?;
         let mut permeability_h_m = Vec::with_capacity(materials.len());
         let mut remanence_t = Vec::with_capacity(materials.len());
         for material in &materials {
@@ -440,142 +646,28 @@ impl SpatialMagnetostatics {
             ));
         }
         let n = self.positions_m.len();
-        let mut prescribed = vec![None; n];
-        let mut has_potential = vec![false; n];
-        let mut used_faces = BTreeSet::new();
-        for trace in &boundary.potential {
-            poll(cancelled)?;
-            if self
-                .faces
-                .get(trace.face)
-                .is_none_or(|f| f.cells.len() != 1)
-                || !used_faces.insert(trace.face)
-                || trace.potential_a.iter().any(|v| !v.is_finite())
-            {
-                return Err(invalid(
-                    "potential trace needs unique exterior faces and finite values",
-                ));
-            }
-            for (&v, &value) in self.mesh.faces[trace.face].iter().zip(&trace.potential_a) {
-                let v = v as usize;
-                if prescribed[v].is_some_and(|old| old != value) {
-                    return Err(invalid("inconsistent potential at shared trace vertex"));
-                }
-                prescribed[v] = Some(value);
-                has_potential[self.components[v]] = true;
-            }
-        }
-        let physical_prescribed: Vec<_> = prescribed.iter().map(Option::is_some).collect();
-        let mut rhs = self.remanence_load_wb.clone();
-        let mut net_flux = vec![0.0; n];
-        for trace in &boundary.flux {
-            poll(cancelled)?;
-            if self
-                .faces
-                .get(trace.face)
-                .is_none_or(|f| f.cells.len() != 1)
-                || !used_faces.insert(trace.face)
-                || !trace.outward_flux_density_t.is_finite()
-            {
-                return Err(invalid(
-                    "flux trace needs unique exterior faces disjoint from potential traces",
-                ));
-            }
-            let amount = finite(trace.outward_flux_density_t * self.faces[trace.face].area_m2)?;
-            let vertices = self.mesh.faces[trace.face];
-            let component = self.components[vertices[0] as usize];
-            net_flux[component] = finite(net_flux[component] + amount)?;
-            for v in vertices {
-                rhs[v as usize] = finite(rhs[v as usize] - amount / 3.0)?;
-            }
-        }
-        let mut gauges = Vec::new();
-        let mut references = vec![0.0; n];
-        for v in 0..n {
-            if self.components[v] != v {
-                continue;
-            }
-            if !has_potential[v] {
-                if net_flux[v].abs() > controls.flux_tolerance_wb {
-                    return Err(invalid(
-                        "net outward magnetic flux must vanish in a pure-flux component",
-                    ));
-                }
-                prescribed[v] = Some(0.0);
-                gauges.push(v);
-            } else {
-                references[v] = (0..n)
-                    .find_map(|i| (self.components[i] == v).then(|| prescribed[i]).flatten())
-                    .unwrap();
-            }
-        }
-        // Work in component-relative coordinates so a common gauge offset does
-        // not create magnetic fields or contaminate the Hodge energy.
-        for v in 0..n {
-            if let Some(value) = prescribed[v] {
-                prescribed[v] = Some(finite(value - references[self.components[v]])?);
-            }
-        }
-        let free: Vec<_> = (0..n).filter(|&v| prescribed[v].is_none()).collect();
-        let mut index = vec![usize::MAX; n];
-        for (i, &v) in free.iter().enumerate() {
-            index[v] = i;
-        }
-        let mut row_ptr = vec![0];
-        let mut columns = Vec::new();
-        let mut values = Vec::new();
-        let mut loads = Vec::with_capacity(free.len());
-        let mut inverse = Vec::with_capacity(free.len());
-        for &v in &free {
-            poll(cancelled)?;
-            let mut load = rhs[v];
-            let mut diagonal = 0.0;
-            let (cols, vals) = self.stiffness.row(v);
-            for (&w, &value) in cols.iter().zip(vals) {
-                if w == v {
-                    diagonal = value;
-                }
-                if let Some(p) = prescribed[w] {
-                    load = finite((-value).mul_add(p, load))?;
-                } else {
-                    columns.push(index[w]);
-                    values.push(value);
-                }
-            }
-            if !diagonal.is_finite() || diagonal <= 0.0 || !diagonal.recip().is_finite() {
-                return Err(invalid(
-                    "magnetic Jacobi diagonal is not representably positive",
-                ));
-            }
-            inverse.push(diagonal.recip());
-            loads.push(load);
-            row_ptr.push(columns.len());
-        }
-        let mut relative_potential_a: Vec<_> =
-            prescribed.iter().map(|v| v.unwrap_or(0.0)).collect();
-        let report = if free.is_empty() {
-            None
-        } else {
-            let matrix = Csr::from_parts(free.len(), free.len(), row_ptr, columns, values);
-            let result = checked_cg(
-                &CsrOp::symmetric(matrix),
-                &Diagonal(inverse),
-                &loads,
-                controls.cg,
-                |_| poll(cancelled),
-            )
-            .map_err(|e| match e {
-                CheckedCgError::InvalidInput(s) => invalid(s),
-                CheckedCgError::Interrupted(e) => e,
-            })?;
-            if !result.report.converged_euclidean() {
-                return Err(SpatialMagneticError::Nonconvergence(result.report));
-            }
-            for (&v, &value) in free.iter().zip(&result.x) {
-                relative_potential_a[v] = value;
-            }
-            Some(result.report)
-        };
+        let ScalarBoundary {
+            prescribed,
+            physical_prescribed,
+            flux_load_wb,
+            gauges,
+            references,
+        } = prepare_scalar_boundary(
+            &self.mesh,
+            &self.faces,
+            &self.components,
+            boundary,
+            controls.flux_tolerance_wb,
+            cancelled,
+        )?;
+        let rhs = self
+            .remanence_load_wb
+            .iter()
+            .zip(&flux_load_wb)
+            .map(|(&source, &flux)| finite(source - flux))
+            .collect::<Result<Vec<_>, _>>()?;
+        let (relative_potential_a, report) =
+            solve_scalar_system(&self.stiffness, &rhs, &prescribed, controls.cg, cancelled)?;
         let mut applied = vec![0.0; n];
         for v in 0..n {
             poll(cancelled)?;

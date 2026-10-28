@@ -950,3 +950,31 @@ harmonic-field mesh convergence, disconnected compatibility and malformed
 geometry/boundaries, original recoil limits, true solver-budget exhaustion and
 late cancellation. These are synthetic physical oracles, not measured device
 validation or a general 3D electromagnetic capability claim.
+
+### Saturating three-dimensional current-free fields
+
+`spatial::nonlinear` uses the original current-free H = -grad(phi) weak flux
+problem and source-resolved linear, reversible H(B), or oriented fixed-recoil
+materials on the same tetrahedral mesh. It inverts the original monotone H(B)
+segments without fitting a second law. The exact radial differential
+permeability supplies a tensor Whitney tangent; bounded Newton/checked-CG
+steps use decreasing integrated coenergy with source-range-preserving
+backtracking. Geometry, scalar boundary admission, component gauges and the
+reduced checked-CG owner are shared with the original linear spatial solver.
+
+Results retain distinct source-integrated energy and coenergy, a Legendre
+identity audit, full weak flux residuals (including gauge vertices), raw
+interface flux jumps and recoil operating points. Physical boundary work uses
+unknown reactions only on physically prescribed potential traces; elsewhere
+it uses the authored normal flux. A loose residual allowance cannot turn an
+interior defect into boundary supply. Invalid source ranges, unbalanced
+Neumann flux, exhaustion and cancellation return no accepted field.
+
+The focused spatial_nonlinear target covers reduction to the original linear
+solver, rotated saturating/air layers, recoil/core/air flux and exact energy,
+a refined nonlinear radial manufactured field, differential material response,
+and source, energy, budget and cancellation refusals. This is a fixed-state
+single-valued scalar-potential model; currents, hysteresis, eddy currents,
+moving work and thermal evolution require their respective owners. P1 flux
+jumps and finite exterior truncation remain discretization errors; these tests
+do not establish an experimental material calibration or a performance claim.
