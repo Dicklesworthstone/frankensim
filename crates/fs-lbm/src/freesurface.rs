@@ -11,6 +11,8 @@
 //! EVERY step; contact-line physics is deliberately MODEL-BRACKETED
 //! (neutral vs wetting wall ghosts), not pretended-certain.
 
+mod curvature;
+
 use crate::core2::{Cell, Grid};
 use crate::{CS2, E, OPP, Q, equilibrium};
 use fs_matdb::{InterfaceSystemCard, MatDbError, MaterialAnswer, QueryPoint, SelectionPolicy};
@@ -303,7 +305,8 @@ pub struct FreeSurface {
     /// Per-cell tracked mass (meaningful for Interface; Fluid uses
     /// Σf, Gas is 0).
     pub mass: Vec<f64>,
-    /// Surface tension coefficient (0 = off).
+    /// Surface tension in lattice units (finite and nonnegative; 0 = off).
+    /// Convert SI tension with `sigma_lu = sigma_si * dt^2 / (rho_si * dx^3)`.
     pub sigma: f64,
     /// Contact-line model (curvature ghost at walls).
     pub contact: ContactModel,
@@ -312,6 +315,7 @@ pub struct FreeSurface {
     /// Cell-conversion statistics (cumulative).
     pub conversions: ConversionStats,
     scratch: Vec<[f64; Q]>,
+    fill_raw: Vec<f64>,
     fill_smooth: Vec<f64>,
 }
 
@@ -337,10 +341,14 @@ impl FreeSurface {
     /// (fluid = ρ, interface = ρ/2).
     ///
     /// # Panics
-    /// If a fluid cell touches a gas cell after interface insertion
-    /// (impossible by construction).
+    /// If surface tension is negative or non-finite, or a fluid cell touches
+    /// a gas cell after interface insertion (impossible by construction).
     #[must_use]
     pub fn new(mut grid: Grid, sigma: f64, contact: ContactModel) -> FreeSurface {
+        assert!(
+            sigma.is_finite() && sigma >= 0.0,
+            "surface tension must be finite and nonnegative"
+        );
         let (nx, ny) = (grid.nx, grid.ny);
         // Insert interface cells: any fluid cell with a gas neighbor.
         let mut promote = Vec::new();
@@ -379,6 +387,7 @@ impl FreeSurface {
             carry: 0.0,
             conversions: ConversionStats::default(),
             scratch: Vec::new(),
+            fill_raw: vec![0.0; nx * ny],
             fill_smooth: vec![0.0; nx * ny],
         };
         fs.assert_closure();
@@ -476,15 +485,16 @@ impl FreeSurface {
     fn phi_at(&self, i: usize, from: usize) -> f64 {
         match self.grid.flags[i] {
             Cell::Wall => match self.contact {
-                ContactModel::Neutral => self.fill(from),
+                ContactModel::Neutral => self.fill_smooth[from],
                 ContactModel::Wetting => 1.0,
             },
             _ => self.fill_smooth[i],
         }
     }
 
-    /// Curvature of the smoothed fill field at (x, y): div(n̂) with
-    /// n̂ = −∇φ/|∇φ| (outward from fluid), central differences.
+    /// Outward liquid curvature in inverse lattice cells. Resolved, wall-free
+    /// interfaces use conservative height functions; incomplete stencils retain
+    /// the smoothed normal-divergence fallback and its one-cell curvature cap.
     fn curvature(&self, x: usize, y: usize) -> f64 {
         let g = &self.grid;
         let i = g.idx(x, y);
@@ -498,6 +508,30 @@ impl FreeSurface {
                 _ => self.fill_smooth[i],
             }
         };
+        // The original normal-divergence operator sees axial wall ghosts two
+        // cells away. A height stencil must not bypass that wetting support.
+        let wall_free = [(-2, 0), (2, 0), (0, -2), (0, 2)]
+            .into_iter()
+            .all(|(dx, dy)| {
+                match (
+                    offset_coord(x, dx, g.nx, g.periodic_x),
+                    offset_coord(y, dy, g.ny, g.periodic_y),
+                ) {
+                    (Some(xx), Some(yy)) => g.flags[g.idx(xx, yy)] != Cell::Wall,
+                    _ => false,
+                }
+            });
+        let gradient = [phi(1, 0) - phi(-1, 0), phi(0, 1) - phi(0, -1)];
+        if wall_free
+            && let Some(kappa) = curvature::height_curvature2(gradient, |dx, dy| {
+                let xx = offset_coord(x, dx, g.nx, g.periodic_x)?;
+                let yy = offset_coord(y, dy, g.ny, g.periodic_y)?;
+                let sample = g.idx(xx, yy);
+                (g.flags[sample] != Cell::Wall).then_some(self.fill_raw[sample])
+            })
+        {
+            return kappa.clamp(-1.0, 1.0);
+        }
         let nhat = |dx: i32, dy: i32| -> [f64; 2] {
             let gx = (phi(dx + 1, dy) - phi(dx - 1, dy)) / 2.0;
             let gy = (phi(dx, dy + 1) - phi(dx, dy - 1)) / 2.0;
@@ -510,21 +544,26 @@ impl FreeSurface {
 
     fn refresh_fill(&mut self) {
         let (nx, ny) = (self.grid.nx, self.grid.ny);
-        let raw: Vec<f64> = (0..nx * ny).map(|i| self.fill(i)).collect();
+        // One frozen geometry serves capillary pressure and antisymmetric
+        // mass exchange. Wall ghosts cannot observe masses already changed
+        // during this step's streaming traversal.
+        for i in 0..nx * ny {
+            self.fill_raw[i] = self.fill(i);
+        }
         for y in 0..ny {
             for x in 0..nx {
                 let i = self.grid.idx(x, y);
                 if self.grid.flags[i] == Cell::Wall {
-                    self.fill_smooth[i] = raw[i];
+                    self.fill_smooth[i] = self.fill_raw[i];
                     continue;
                 }
-                let mut acc = raw[i];
+                let mut acc = self.fill_raw[i];
                 let mut count = 1.0;
                 for q in 1..Q {
                     if let Some(nb) = neighbor(&self.grid, x, y, q)
                         && self.grid.flags[nb] != Cell::Wall
                     {
-                        acc += raw[nb];
+                        acc += self.fill_raw[nb];
                         count += 1.0;
                     }
                 }
@@ -535,14 +574,20 @@ impl FreeSurface {
 
     /// One free-surface step: collide, mass exchange + reconstruction
     /// + stream, conversion cascade with conservative redistribution.
+    ///
+    /// # Panics
+    /// If the publicly editable surface tension is negative or non-finite.
     pub fn step(&mut self) {
+        assert!(
+            self.sigma.is_finite() && self.sigma >= 0.0,
+            "surface tension must be finite and nonnegative"
+        );
         let (nx, ny) = (self.grid.nx, self.grid.ny);
         self.refresh_fill();
         self.grid.collide_into(&mut self.scratch);
         let post = std::mem::take(&mut self.scratch);
         // Mass exchange (pairwise antisymmetric, from POST populations)
         // and streaming with gas reconstruction.
-        let fills: Vec<f64> = (0..nx * ny).map(|i| self.fill(i)).collect();
         let mut new_f = self.grid.f.clone();
         for y in 0..ny {
             for x in 0..nx {
@@ -559,7 +604,9 @@ impl FreeSurface {
                         if let Some(nb) = neighbor(&self.grid, x, y, q) {
                             let w = match self.grid.flags[nb] {
                                 Cell::Fluid => 1.0,
-                                Cell::Interface => f64::midpoint(fills[i], fills[nb]),
+                                Cell::Interface => {
+                                    f64::midpoint(self.fill_raw[i], self.fill_raw[nb])
+                                }
                                 _ => 0.0,
                             };
                             if w > 0.0 {
@@ -571,12 +618,16 @@ impl FreeSurface {
                 }
                 // Stream (pull) with reconstruction from gas sources.
                 let mm = self.grid.moments(i);
+                // All missing populations share this cell's curvature and
+                // velocity. Reconstruct the gas equilibrium only once.
+                let mut gas_equilibrium = None;
                 for q in 0..Q {
                     let src = self.grid.source(x, y, q);
                     new_f[i][q] = match src {
                         Some(s) if self.grid.flags[s] == Cell::Gas => {
-                            let rho_ref = self.reference_density(x, y);
-                            let eq = equilibrium(rho_ref, mm.u[0], mm.u[1]);
+                            let eq = gas_equilibrium.get_or_insert_with(|| {
+                                equilibrium(self.reference_density(x, y), mm.u[0], mm.u[1])
+                            });
                             eq[q] + eq[OPP[q]] - post[i][OPP[q]]
                         }
                         Some(s) if self.grid.flags[s] == Cell::Wall => post[i][OPP[q]],
@@ -779,4 +830,80 @@ pub fn surge_front(fs: &FreeSurface) -> usize {
         }
     }
     front
+}
+
+#[cfg(test)]
+mod capillary_tests {
+    use super::*;
+
+    fn planar_wall_fixture() -> FreeSurface {
+        let mut grid = Grid::uniform(12, 12, 0.8);
+        grid.periodic_x = false;
+        grid.periodic_y = false;
+        for y in 0..12 {
+            for x in 0..12 {
+                let i = grid.idx(x, y);
+                grid.flags[i] = if x == 0 {
+                    Cell::Wall
+                } else if y < 5 {
+                    Cell::Fluid
+                } else {
+                    Cell::Gas
+                };
+            }
+        }
+        let mut sim = FreeSurface::new(grid, 0.002, ContactModel::Neutral);
+        sim.refresh_fill();
+        sim
+    }
+
+    #[test]
+    fn wall_curvature_uses_the_frozen_geometry_until_refresh() {
+        let mut sim = planar_wall_fixture();
+        let interface = sim.grid.idx(1, 4);
+        let wall = sim.grid.idx(0, 4);
+        let ghost = sim.phi_at(wall, interface);
+        let pressure_density = sim.reference_density(1, 4);
+        sim.mass[interface] *= 0.1;
+        assert_eq!(sim.phi_at(wall, interface), ghost);
+        assert_eq!(sim.reference_density(1, 4), pressure_density);
+        sim.refresh_fill();
+        assert_ne!(sim.phi_at(wall, interface), ghost);
+    }
+
+    #[test]
+    fn height_function_preserves_the_existing_wetting_stencil() {
+        let mut sim = planar_wall_fixture();
+        // The three height columns at x=1,2,3 do not touch x=0, but
+        // normal divergence uses the wall ghost at x-2. Preserve that law.
+        let neutral = sim.reference_density(2, 4);
+        sim.contact = ContactModel::Wetting;
+        let wetting = sim.reference_density(2, 4);
+        assert!((neutral - wetting).abs() > 1e-9);
+    }
+
+    #[test]
+    fn planar_capillary_equilibrium_has_no_pressure_or_velocity_jump() {
+        let mut grid = Grid::uniform(16, 16, 0.8);
+        grid.periodic_y = false;
+        for y in 8..16 {
+            for x in 0..16 {
+                let i = grid.idx(x, y);
+                grid.flags[i] = Cell::Gas;
+            }
+        }
+        let mut sim = FreeSurface::new(grid, 0.003, ContactModel::Neutral);
+        let initial_mass = sim.ledger_mass();
+        for _ in 0..20 {
+            sim.step();
+        }
+        assert!((sim.ledger_mass() - initial_mass).abs() < 1e-11);
+        for i in 0..16 * 16 {
+            if matches!(sim.grid.flags[i], Cell::Fluid | Cell::Interface) {
+                let state = sim.grid.moments(i);
+                assert!((state.rho - 1.0).abs() < 1e-12);
+                assert!(state.u[0].hypot(state.u[1]) < 1e-12);
+            }
+        }
+    }
 }
