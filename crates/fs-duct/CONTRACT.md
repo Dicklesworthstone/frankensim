@@ -1121,6 +1121,46 @@ tolerance, assert, golden or line-ladder baseline is weakened. Native proof,
 wasm compilation, causality and reed rerender remain pending centrally.
 
 
+## Continuous DG response and retained-state composition
+
+`DgDuct::continuous_operator()` borrows the original complete energy-coordinate
+generator and original typed inflow columns: `x' = L*x + B*U`, pressure `B^T*x`,
+and storage `x^T*x/2`. Gas, geometry, endpoint laws, side ports, spatial mass
+maps, every viscothermal arm and compliant/Maxwell wall coordinate are retained.
+The view carries the original operator identity. It permits joint assembly at
+an isolated duct impedance pole without dividing by that impedance.
+
+For lossless boundaries, the stored generator is exactly `[0,-G;G^T,0]`, the
+operator already advanced by `SkewModal`. The independently mass-normalized
+`H` must first agree with `-G^T` within `64*n_local^2*epsilon` of their common
+maximum norm (`n_local <= 9`). Larger or nonfinite transpose defects refuse;
+floating-point normalization roundoff is not represented as physical damping.
+
+`DgDuct::harmonic_response` solves `(-i*omega*I-L)*x = B*U` with the existing
+cancellable complex LU. Phasors are peak amplitudes in `exp(-i*omega*t)`.
+`DgContinuous::observe_harmonic` observes a complete supplied original state,
+including one solved jointly with another physical owner, and checks those
+same equations using the actual supplied port flows. Undeclared or duplicate
+input ports refuse; omitted declared ports receive zero flow. The admitted
+viscothermal frequency band is enforced. Accepted time histories are untouched.
+
+Responses include physical nodal pressure/axial flow, conjugate port pressure,
+mean gas/wall storage, original positive wall-loss squares and matched-boundary
+absorption. The latter is `(|p|^2/Zc + Zc*|q|^2)/4` at each matched endpoint,
+using its actual local gas and area. Mean port work is `Re(p*conj(U))/2`.
+The independently computed power residual is diagnostic. The infinity-norm
+backward residual is gated by the caller's explicit tolerance; it is not a
+conditioning or forward-error certificate near an undamped resonance.
+
+Before allocation, the standalone solve charges `n^2*(n+ports+8)` work and
+observation charges `n^2*(ports+8)`, with the existing complete-state DG cap.
+Cancellation, singular LU, invalid budgets/tolerance, nonfinite solutions or
+observations, and failed original-equation residual checks return no response.
+This is the frozen linear DG spatial model, with its original plane-wave,
+constitutive-band and geometric validity limits. It is not the finite-step
+held-flow transfer or a replacement for spatial, wall-pole or coupling-clock
+convergence. External loads enter only through an explicitly composed owner.
+
 ## DG interior point-flow junctions
 
 `DgDuct::with_side_ports` attaches at most 32 explicitly identified interior

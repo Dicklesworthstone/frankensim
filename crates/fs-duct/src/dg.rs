@@ -80,6 +80,9 @@ use fs_material::gas::GasState;
 use fs_material::gas_field::AxialGasField;
 use fs_math::det;
 
+pub mod continuous;
+pub use continuous::{DgContinuous, DgHarmonicPort, DgHarmonicResponse};
+
 mod viscothermal;
 pub use viscothermal::{DgWallAdmission, DgWallResolution};
 mod compliant_wall;
@@ -986,19 +989,30 @@ impl DgDuct {
         let d_pp_tilde = Self::scale_diag_operator(&elements, n_local, field_dofs, &d_pp, true);
         let d_qq_tilde = Self::scale_diag_operator(&elements, n_local, field_dofs, &d_qq, false);
 
+        let is_lossless_bcs =
+            !matches!(inlet, DgBoundary::Matched) && !matches!(outlet, DgBoundary::Matched);
+        if is_lossless_bcs {
+            Self::admit_lossless_transpose_pair(&g_mat, &h_mat, field_dofs, n_local)?;
+        }
         let mut l_tilde = vec![0.0; total_dofs * total_dofs];
         for i in 0..field_dofs {
             for j in 0..field_dofs {
                 l_tilde[i * total_dofs + j] = -d_pp_tilde[i * field_dofs + j];
                 l_tilde[i * total_dofs + (field_dofs + j)] = -g_mat[i * field_dofs + j];
-                l_tilde[(field_dofs + i) * total_dofs + j] = -h_mat[i * field_dofs + j];
+                // The existing SkewModal time owner propagates [0,-G;G^T,0].
+                // Store that SAME generator, after checking the independently
+                // assembled SBP pair, so roundoff is not exported as indefinite
+                // physical damping to a continuous or composed-time consumer.
+                l_tilde[(field_dofs + i) * total_dofs + j] = if is_lossless_bcs {
+                    g_mat[j * field_dofs + i]
+                } else {
+                    -h_mat[i * field_dofs + j]
+                };
                 l_tilde[(field_dofs + i) * total_dofs + (field_dofs + j)] =
                     -d_qq_tilde[i * field_dofs + j];
             }
         }
 
-        let is_lossless_bcs =
-            !matches!(inlet, DgBoundary::Matched) && !matches!(outlet, DgBoundary::Matched);
         let g_block = is_lossless_bcs.then_some(g_mat);
         let operator_identity = hash_operator(mesh, inlet, outlet, &elements, &l_tilde, &ports);
 
@@ -1024,6 +1038,43 @@ impl DgDuct {
             ports,
             side_ports: Vec::new(),
         })
+    }
+
+    /// Check the SBP identity H=-G^T before selecting the original lossless
+    /// time owner's exact transpose. Two local mass-normalization products and
+    /// the LGL/face arithmetic get a conservative 64*n_local^2*epsilon normwise
+    /// roundoff allowance (n_local <= 9); larger defects are source errors, not
+    /// damping to project away. Scaling before subtraction also avoids overflow.
+    fn admit_lossless_transpose_pair(
+        g: &[f64],
+        h: &[f64],
+        field_dofs: usize,
+        n_local: usize,
+    ) -> Result<(), DuctError> {
+        let mut scale = 0.0_f64;
+        for &value in g.iter().chain(h) {
+            if !value.is_finite() {
+                return Err(DuctError::BadParameter {
+                    what: "lossless DG weak operators must be finite",
+                });
+            }
+            scale = scale.max(value.abs());
+        }
+        if scale == 0.0 {
+            return Ok(());
+        }
+        let allowance = 64.0 * (n_local * n_local) as f64 * f64::EPSILON;
+        for i in 0..field_dofs {
+            for j in 0..field_dofs {
+                let defect = h[i * field_dofs + j] / scale + g[j * field_dofs + i] / scale;
+                if defect.abs() > allowance {
+                    return Err(DuctError::BadParameter {
+                        what: "lossless DG weak operators exceed the roundoff SBP transpose allowance",
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     fn scale_operator(
