@@ -92,6 +92,9 @@ pub use flanged::{FLANGED_MAX_KA, FLANGED_MAX_MODES, FLANGED_MODES, flanged_pipe
     flanged_pipe_impedance_with_exterior};
 /// Lossless variable-area plane-wave DG in the time domain (M2.2-W3a).
 pub mod dg;
+/// Source-owned finite-amplitude Euler propagation on existing duct geometry.
+#[cfg(feature = "nonlinear-euler")]
+pub mod nonlinear;
 #[cfg(test)]
 mod gas_admission_tests;
 /// Tone holes whose chimney is a chain of duct sections (undercuts).

@@ -10,8 +10,14 @@ description = "1D viscothermal duct/horn acoustics: transfer matrices over cylin
 [package.metadata.frankensim]
 layer = "L3"
 
+[features]
+default = []
+nonlinear-euler = ["dep:fs-gas", "fs-gas/experimental-euler", "dep:fs-qty"]
+
 [dependencies]
 fs-blake3 = { path = "../fs-blake3" }
+fs-gas = { path = "../fs-gas", optional = true }
+fs-qty = { path = "../fs-qty", optional = true }
 fs-la = { path = "../fs-la" }
 fs-material = { path = "../fs-material" }
 fs-math = { path = "../fs-math" }
@@ -28,6 +34,10 @@ fsci-runtime = { path = "../../../frankenscipy/crates/fsci-runtime", version = "
 fs-qty = { path = "../fs-qty" }
 fs-bem = { path = "../fs-bem" }
 fs-vvreg = { path = "../fs-vvreg" }
+
+[[example]]
+name = "nonlinear_horn"
+required-features = ["nonlinear-euler"]
 
 [lints]
 workspace = true

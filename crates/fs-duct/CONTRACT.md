@@ -1516,3 +1516,65 @@ environment. Native compilation and execution were unavailable (no Rust/Cargo,
 DSR or RCH); these definitions are not executed or experimental evidence.
 Focused native command:
 `cargo test -p fs-duct --lib dg::viscothermal::spatial::update::tests`.
+
+## Experimental nonlinear Euler propagation
+
+Feature `nonlinear-euler` exposes `nonlinear::NonlinearDuct`, an inviscid
+finite-volume propagation image of the existing `Duct`. It consumes the
+original source-owning `fs_gas::dynamics::FrozenGas` and delegates every
+accepted step to the shared `Euler1d` solver. Density, momentum, total energy,
+temperature-dependent heat capacities, shock heating and bidirectional
+reflections are evolved together. No separate instrument-specific gas law is
+introduced.
+
+Each original segment boundary is a mesh face. Cylinder and cone cell volumes
+are integrated analytically. Profile areas use the original radius evaluator;
+four-point Gaussian quadrature is split at original spline knots and refined
+within a 256-subdivision cap until repeated integrals agree to roundoff.
+This is a bounded numerical estimate for nonpolynomial profiles, not a
+certified enclosure. Physical face areas and integrated volumes feed the
+shared pressure-area balance and local CFL calculation.
+
+Construction requires explicit source gas, per-segment mesh counts, physical
+boundaries, and initial absolute density/velocity/pressure. Every call to
+`step(Time, StepControl, cancelled)` accepts at most one CFL-limited step;
+refusal/cancellation leaves that step's original state and time unchanged.
+Construction and snapshot allocations are fallible. The gas solver reuses
+its numerical workspace.
+
+`sample` and `samples` expose pressure, temperature, density, sound speed,
+axial velocity, volume flow and mass flow at original geometric cell centres.
+These local diagnostics are not a substitute for accepted boundary fluxes or
+the gas solver's extensive conservation report.
+
+Empty geometry, invalid counts, tone holes, and abrupt radius steps refuse.
+A side branch or abrupt junction needs its own conservative interface law.
+This image does not inherit linear DG's exact exponential or high-order
+certificate, viscothermal memory, radiation-impedance boundaries, wall
+compliance, multidimensional modes or an entropy-stability theorem. It
+contributes to `frankensim-irp-v5-instrument-realism-pexfp.91` without closing
+that full nonlinear DG/physical-loss program.
+
+Eight focused integration tests cover exact conical volumes, exponential and
+spline profile integrals, tapered rest, Sod propagation, finite-amplitude wall
+reflection with reversed volume flow, evolving source-dependent heat capacity,
+source identity retention, unsupported topology and atomic cancellation.
+Focused native checks compile the complete gas solver and the actual duct
+geometry source; a full `fs-duct`/DSR run remains a separate verification gate.
+
+Run the source-backed, finite-amplitude tapered-horn consumer with:
+
+```bash
+cargo run -p fs-duct --features nonlinear-euler --example nonlinear_horn -- 160
+```
+
+It emits solved gas observables as CSV and conservation diagnostics on stderr.
+The example's nitrogen source association is explicitly declared; it is not
+an experimentally validated horn or shock-tube prediction.
+
+Focused native execution of this consumer at 32 and 160 cells reached 0.0024 s
+in 89 and 435 accepted steps respectively. Both stayed within the declared
+200--1000 K source domain. The 160-cell run's mass residual was zero and its
+physical total-energy balance residual was -1.421085e-14 J. These checks used
+the complete wall-enabled gas source and exact production duct geometry;
+they are execution/conservation evidence, not a spatial-convergence study.
