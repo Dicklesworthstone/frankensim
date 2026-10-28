@@ -1,5 +1,30 @@
 # CONTRACT: fs-conduction
 
+## Sourced planar layered steady conduction
+
+`layered::LayeredWall` solves an ordered equal-area planar stack from the existing
+`ConductivityTable` owner. Each layer retains its source tables and usage
+receipts; `PlanarThermalLayer::from_card` additionally records the actual
+material-card identity. All contact and film resistances are explicit scenario
+inputs in m2 K/W. Explicit zero means perfect contact or a prescribed surface
+temperature; no boundary correlation is inferred.
+
+The constant-conductivity solve returns signed heat flux, total heat rate,
+U-value, and separate temperatures on both sides of every material/contact.
+It checks each layer's actual face temperatures against that source table's
+span and reports independently recomputed Fourier-law and boundary residuals.
+The immutable input is unchanged on failure. Layer/knot caps bound work, and
+the solver checks the existing executor cancellation gate between layers.
+
+Varying conductivity is refused by the constant solve entry point. No varying
+source is frozen, and no density/Cp, transient history, lateral spreading,
+radiation, moisture transport, propagated material uncertainty or experimental
+qualification is inferred. Geometric/process matching beyond the explicit
+temperature span remains the caller's duty, including thickness-dependent
+product declarations. G0/G1/G3/G4 cases in `tests/layered.rs` exercise the
+analytical series-resistance law, contact jumps, exact source context,
+material/thickness substitution, reversal, subdivision and transactional refusal.
+
 ## Growing deposition thermal network (issue #1)
 
 `transient::deposition` accepts a resolved absolute-time schedule with stable

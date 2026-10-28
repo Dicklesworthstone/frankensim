@@ -4,6 +4,48 @@ This directory retains the human-reviewable source inputs compiled by
 `xtask matdb-pack`. Generated binary packs are deliberately not committed:
 the compiler must reproduce them from the pinned manifest and source record.
 
+## Run a sourced layered heat calculation
+
+The steady planar wall consumer is in
+`fs_conduction::layered`. Each layer retains its own `ConductivityTable`,
+selected source receipts, thickness and optional material-card identity.
+Film and contact resistances are explicit inputs. The result includes heat
+flux, total heat rate, U-value, and the temperature on both faces of every
+layer. Density and heat capacity are not required for a steady calculation.
+
+This example uses three existing NIST CFAST nominal model-input records:
+
+```sh
+mkdir -p /tmp/frankensim-wall
+cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/gypsum-board-5-8-cfast/manifest.tsv --out /tmp/frankensim-wall/gypsum.fsmatpk
+cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/glass-fiber-insulation-cfast/manifest.tsv --out /tmp/frankensim-wall/glass-fiber.fsmatpk
+cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/brick-common-cfast-sp1041/manifest.tsv --out /tmp/frankensim-wall/brick.fsmatpk
+cargo run -p fs-conduction --example material_wall -- /tmp/frankensim-wall/gypsum.fsmatpk /tmp/frankensim-wall/glass-fiber.fsmatpk /tmp/frankensim-wall/brick.fsmatpk
+```
+
+The scenario declares 16 mm gypsum, 88 mm glass-fiber insulation and 76 mm brick,
+293.15/273.15 K reservoirs, 10 m² area, film resistances of 0.13/0.04 m² K/W
+and contact resistances of 0.01/0.002 m² K/W. The analytical reference is
+R'' = 2.5875555556 m² K/W, U = 0.3864651323 W/(m² K), q'' = 7.7293026451 W/m²
+and heat rate = 77.2930264514 W.
+
+These source records identify CFAST inputs rather than measured specimens.
+Unknown temperature, moisture, manufacturing and measurement conditions stay
+explicitly unknown in the query receipts. The example's temperature span is a
+declared nominal-model operating interval; it does not establish experimental
+coverage. Film/contact values are scenario assumptions. This planar steady
+calculation includes no moisture transport, lateral thermal bridging, thermal
+radiation, heat sources or transient storage.
+
+The focused catalog integration regression also compiles these sources, stores
+and reopens their immutable cards, discovers the exact conductivity keys, and
+passes those selections to the physical wall owner:
+
+```sh
+cargo test -p fs-conduction --test layered
+cargo test -p xtask --test catalog_layered_wall -- --nocapture
+```
+
 ## October 2026 material expansion
 
 The October 28 expansion adds **34 source bundles and 272 property claims**:

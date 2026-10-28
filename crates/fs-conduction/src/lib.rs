@@ -63,6 +63,8 @@ pub mod fixtures;
 /// Declared Joule-input to gray-body-radiation balance for incandescent filaments.
 pub mod incandescent;
 pub mod interface;
+/// Source-backed ordered planar layers with explicit contact and boundary films.
+pub mod layered;
 /// The lumped-network reduced transient rung: the cheap fidelity tier, gated
 /// on the Biot number that decides whether lumping is admissible at all.
 pub mod lumped;
