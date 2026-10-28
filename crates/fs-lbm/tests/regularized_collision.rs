@@ -184,6 +184,128 @@ fn moments_of(f: &[f64; Q]) -> (f64, [f64; 2]) {
     (mass, mom)
 }
 
+fn raw_guo_source(u: [f64; 2], force: [f64; 2]) -> [f64; Q] {
+    let uf = u[0] * force[0] + u[1] * force[1];
+    std::array::from_fn(|q| {
+        let c = [f64::from(E[q].0), f64::from(E[q].1)];
+        let cu = c[0] * u[0] + c[1] * u[1];
+        let cf = c[0] * force[0] + c[1] * force[1];
+        W[q] * (cf / CS2 + (cu * cf - CS2 * uf) / (CS2 * CS2))
+    })
+}
+
+/// G0: acceleration must not be scaled by the selected shear viscosity,
+/// projection, or TRT odd relaxation rate. Exercise gravity and local loads
+/// together on a nonequilibrium state, independently of constitutive details.
+#[test]
+fn all_modes_deliver_force_independent_of_viscosity() {
+    let state = hermite_state(1.03, [0.06, -0.04], [[4e-4, -2e-4], [-2e-4, 1e-4]]);
+    let (rho, before) = moments_of(&state);
+    let gravity = [2e-4, -3e-4];
+    let external = [5e-4, 4e-4];
+    let force: [f64; 2] = std::array::from_fn(|d| rho * gravity[d] + external[d]);
+    for mode in ALL_MODES {
+        for tau in [0.53, 0.8, 1.4] {
+            let mut grid = Grid::uniform(1, 1, tau);
+            grid.collision = mode;
+            grid.f[0] = state;
+            grid.g = gravity;
+            grid.fext[0] = external;
+            let mut post = Vec::new();
+            grid.collide_into(&mut post);
+            let (after_rho, after) = moments_of(&post[0]);
+            assert!((after_rho - rho).abs() < 2e-14, "{mode:?}, tau={tau}: mass");
+            for d in 0..2 {
+                assert!(
+                    (after[d] - before[d] - force[d]).abs() < 2e-14,
+                    "{mode:?}, tau={tau}, axis={d}: impulse {} vs {}",
+                    after[d] - before[d], force[d]
+                );
+            }
+        }
+    }
+}
+
+/// G0: the Guo half-source convention stores an unstrained flow as feq-S/2.
+/// Colliding it produces second moment Pi_eq+(uF+Fu)/2 for every mode; RR3
+/// must also avoid creating third-order ghost stress from the body force.
+#[test]
+fn forced_uniform_flow_has_no_spurious_viscous_stress() {
+    let (rho, u, force) = (1.1, [0.05, -0.03], [8e-4, -5e-4]);
+    let eq = equilibrium(rho, u[0], u[1]);
+    let source = raw_guo_source(u, force);
+    let initial = std::array::from_fn(|q| eq[q] - 0.5 * source[q]);
+    for mode in ALL_MODES {
+        for tau in [0.57, 0.85, 1.2] {
+            let mut grid = Grid::uniform(1, 1, tau);
+            grid.collision = mode;
+            grid.f[0] = initial;
+            grid.fext[0] = force;
+            let mut post = Vec::new();
+            grid.collide_into(&mut post);
+            let mut residual = [[0.0; 2]; 2];
+            for q in 0..Q {
+                let difference = post[0][q] - eq[q] - 0.5 * source[q];
+                let c = [f64::from(E[q].0), f64::from(E[q].1)];
+                for a in 0..2 {
+                    for b in 0..2 {
+                        residual[a][b] += c[a] * c[b] * difference;
+                    }
+                }
+                if matches!(mode, CollisionModel2::Regularized | CollisionModel2::RecursiveRegularized) {
+                    assert!(difference.abs() < 2e-14, "{mode:?}, tau={tau}, q={q}: ghost stress");
+                }
+            }
+            assert!(
+                residual.iter().flatten().all(|v| v.abs() < 2e-14),
+                "{mode:?}, tau={tau}: spurious stress {residual:?}"
+            );
+        }
+    }
+}
+
+/// G2: viscosity inferred from actual force-driven channel throughput must
+/// agree with nu=(tau-1/2)/3. The peak-normalized error allows the existing
+/// second-order halfway-wall truncation; an incorrectly scaled force fails
+/// by tens of percent. Evolve from rest for twelve continuum decay times.
+#[test]
+fn forced_poiseuille_viscosity_identity_all_modes() {
+    let (nx, ny) = (4, 18);
+    let height = (ny - 2) as f64;
+    let peak_speed = 0.015;
+    for mode in ALL_MODES {
+        for tau in [0.6, 1.1] {
+            let nu = (tau - 0.5) / 3.0;
+            let acceleration = 8.0 * nu * peak_speed / (height * height);
+            let steps = (12.0 * height * height / (std::f64::consts::PI.powi(2) * nu)).ceil() as usize;
+            let mut grid = Grid::uniform(nx, ny, tau);
+            grid.collision = mode;
+            grid.g = [acceleration, 0.0];
+            grid.periodic_y = false;
+            for x in 0..nx {
+                grid.flags[x] = Cell::Wall;
+                grid.flags[(ny - 1) * nx + x] = Cell::Wall;
+            }
+            let mut scratch = Vec::new();
+            for _ in 0..steps {
+                grid.step(&mut scratch);
+            }
+            let mut max_error = 0.0_f64;
+            for y in 1..ny - 1 {
+                let distance = y as f64 - 0.5;
+                let exact = acceleration * distance * (height - distance) / (2.0 * nu);
+                let velocity = grid.moments(grid.idx(0, y)).u;
+                max_error = max_error.max((velocity[0] - exact).abs() / peak_speed);
+                assert!(velocity[1].abs() < 2e-12, "{mode:?}: transverse flow");
+            }
+            assert!(
+                max_error < 0.015,
+                "{mode:?}, tau={tau}: force-driven profile error {max_error}"
+            );
+        }
+    }
+}
+
 /// Project the ux field onto sin(2 pi y / ny) (single-k shear-wave
 /// amplitude).
 fn shear_amplitude(grid: &Grid) -> f64 {

@@ -307,11 +307,14 @@ rollback. Their addition does not establish executed native validation.
   repairs that but hits a temporal-Nyquist parity artifact with
   bounce-back at high shear, and every `Trt` magic above the BGK
   point REDUCED the stable window at tau near 1/2 (the "magic = 1/4
-  optimal" folklore is false on this family). Body forces under the
-  non-BGK modes reuse the BGK-form Guo term (exact for unforced
-  cells; disclosed approximation otherwise); combining non-BGK modes
-  with the partial-saturation or free-surface operators is
-  mechanically possible but unvalidated.
+  optimal" folklore is false on this family). Body forces in the regularized
+  and central-moment modes act through the physical `f + S/2` frame and
+  return `C(f + S/2) + S/2`; TRT splits the Guo source into even/odd parts
+  with their corresponding relaxation rates. All modes deliver the imposed
+  momentum increment independently of viscosity. Forced uniform-flow stress
+  and laminar Poiseuille profiles are checked in the collision battery.
+  Combining non-BGK modes with the partial-saturation or free-surface
+  operators remains mechanically possible but unvalidated.
 - `core2::Grid` / re-exported `Grid` — a general dense D2Q9 grid with cell
   flags, vector gravity, per-cell relaxation time, per-cell external force,
   periodicity flags, deterministic collide/stream steps, and gas/wall
@@ -975,8 +978,9 @@ redistributed.
 
 Hermite-state BGK equivalence of the projected regularization (and
 RR3 at zero velocity); TRT-at-BGK-magic equivalence; exact
-mass/momentum conservation of every operator; the shear-wave
-viscosity identity for every operator; the executed
+mass/momentum conservation of every operator; force-independent impulse
+and stress under homogeneous forcing; the shear-wave and body-force-driven
+Poiseuille viscosity identities for every operator; the executed
 unresolved-shear-layer stability asymmetry (BGK/RR3/CM survive,
 projected Regularized destabilizes — also the mode-discrimination
 control); bitwise determinism of every non-BGK path.

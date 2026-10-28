@@ -28,11 +28,12 @@ const UNIT_NORMAL_TOLERANCE: f64 = 128.0 * f64::EPSILON;
 ///
 /// Scope: honored by the plain [`Grid::collide_into`] path (and
 /// everything built on it, including the stepping drivers and the
-/// partial-saturation proposal). Combining `Regularized` with the
-/// partial-saturation solid operator or body forces is possible but
-/// UNVALIDATED here: with Guo forcing the bare non-equilibrium is
-/// regularized without subtracting the half-force moment — exact
-/// for unforced cells, a disclosed approximation otherwise.
+/// partial-saturation proposal). Body forcing uses the physical half-source
+/// transform before projection; TRT applies each mode's own forcing rate.
+/// The collision battery checks force-independent momentum delivery and
+/// laminar channel viscosity. Combining non-BGK collision with the
+/// partial-saturation solid operator or free-surface bookkeeping remains
+/// unvalidated.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum CollisionModel2 {
     /// Plain BGK single-relaxation-time collision (historical path).
@@ -987,13 +988,23 @@ impl Grid {
                 self.g[1].mul_add(rho, self.fext[i][1]),
             );
             if matches!(model, CollisionModel2::CentralMoment) {
-                // Central moments K[m][n] = Sum f (ex-ux)^m (ey-uy)^n.
+                // Collide the physical populations f + S/2, then publish
+                // f_post = C(f + S/2) + S/2. At frozen u this is the MRT
+                // forcing rule (I - Lambda/2)S in EACH central mode,
+                // including the conserved first moments (zero rate).
+                // Premnath et al. (2009), Eq. (1): arXiv:0901.2786.
+                let mut source = [0.0; Q];
                 let mut k = [[0.0f64; 3]; 3];
                 for q in 0..Q {
-                    let cx = f64::from(E[q].0) - ux;
-                    let cy = f64::from(E[q].1) - uy;
+                    let (ex, ey) = (f64::from(E[q].0), f64::from(E[q].1));
+                    let eu = ex * ux + ey * uy;
+                    let fx = (ex - ux) / CS2 + eu * ex / (CS2 * CS2);
+                    let fy = (ey - uy) / CS2 + eu * ey / (CS2 * CS2);
+                    source[q] = W[q] * (fx * gx + fy * gy);
+                    let cx = ex - ux;
+                    let cy = ey - uy;
                     let (cx2, cy2) = (cx * cx, cy * cy);
-                    let fi = self.f[i][q];
+                    let fi = self.f[i][q] + 0.5 * source[q];
                     let xs = [1.0, cx, cx2];
                     let ys = [1.0, cy, cy2];
                     for (m, xv) in xs.iter().enumerate() {
@@ -1048,12 +1059,7 @@ impl Grid {
                         g([m_raw[0][1], m_raw[1][1], m_raw[2][1]], ax),
                         g([m_raw[0][2], m_raw[1][2], m_raw[2][2]], ax),
                     ];
-                    let (ex, ey) = (f64::from(ax), f64::from(ay));
-                    let eu = ex * ux + ey * uy;
-                    let fx = (ex - ux) / CS2 + eu * ex / (CS2 * CS2);
-                    let fy = (ey - uy) / CS2 + eu * ey / (CS2 * CS2);
-                    let force = coef * W[q] * (fx * gx + fy * gy);
-                    out[q] = g(partial, ay) + force;
+                    out[q] = g(partial, ay) + 0.5 * source[q];
                 }
             } else if let CollisionModel2::Trt { magic } = model {
                 // Even/odd split of the non-equilibrium; the odd
@@ -1068,9 +1074,14 @@ impl Grid {
                 for q in 0..Q {
                     let (ex, ey) = (f64::from(E[q].0), f64::from(E[q].1));
                     let eu = ex * ux + ey * uy;
-                    let fx = (ex - ux) / CS2 + eu * ex / (CS2 * CS2);
-                    let fy = (ey - uy) / CS2 + eu * ey / (CS2 * CS2);
-                    let force = coef * W[q] * (fx * gx + fy * gy);
+                    let ef = ex * gx + ey * gy;
+                    // Guo's source has an odd first-order part and an even
+                    // second-order part. In particular, the odd force rate
+                    // must match omega_odd so momentum receives exactly F.
+                    let source_odd = W[q] * ef / CS2;
+                    let source_even = W[q] * (eu * ef / (CS2 * CS2) - (ux * gx + uy * gy) / CS2);
+                    let force = (1.0 - 0.5 * omega_even) * source_even
+                        + (1.0 - 0.5 * omega_odd) * source_odd;
                     let even = 0.5 * (fneq[q] + fneq[OPP[q]]);
                     let odd = 0.5 * (fneq[q] - fneq[OPP[q]]);
                     out[q] = self.f[i][q] - omega_even * even - omega_odd * odd + force;
@@ -1079,7 +1090,10 @@ impl Grid {
                 model,
                 CollisionModel2::Regularized | CollisionModel2::RecursiveRegularized
             ) {
-                // Second moment of the non-equilibrium.
+                // Physical non-equilibrium stress of f + S/2. Projecting
+                // f itself would discard its -F/2 first moment, and RR3
+                // would also mistake force stress for physical third-order
+                // stress. Both defects disappear before reconstruction.
                 let (mut pxx, mut pyy, mut pxy) = (0.0f64, 0.0f64, 0.0f64);
                 for q in 0..Q {
                     let (ex, ey) = (f64::from(E[q].0), f64::from(E[q].1));
@@ -1088,6 +1102,9 @@ impl Grid {
                     pyy += ey * ey * fneq;
                     pxy += ex * ey * fneq;
                 }
+                pxx += ux * gx;
+                pyy += uy * gy;
+                pxy += 0.5 * (ux * gy + uy * gx);
                 let relax = 1.0 - 1.0 / tau;
                 // Recursive third-order Hermite coefficients (RR3);
                 // zero for the plain projected operator.
@@ -1101,7 +1118,7 @@ impl Grid {
                     let eu = ex * ux + ey * uy;
                     let fx = (ex - ux) / CS2 + eu * ex / (CS2 * CS2);
                     let fy = (ey - uy) / CS2 + eu * ey / (CS2 * CS2);
-                    let force = coef * W[q] * (fx * gx + fy * gy);
+                    let force = 0.5 * W[q] * (fx * gx + fy * gy);
                     // w_i / (2 cs^4) = 4.5 w_i; Q_i : Pi_neq with the
                     // symmetric off-diagonal counted twice.
                     let qxx = ex * ex - CS2;
