@@ -1,0 +1,866 @@
+//! Event-resolved isotropic sphere motion against one prescribed plane.
+//!
+//! The plane normal and velocity are constant. External force is parallel to
+//! the normal; ideal Coulomb friction has equal static/kinetic coefficients.
+//! Ballistic contact timing and both impulse laws remain in fs-contact.
+//! Centre trajectories and world momenta use analytic constant-force segments.
+//! Attitude is exact when spin and torque commute, including torque-free
+//! flight and sliding from rest. Otherwise bounded second-order Lie midpoint
+//! steps resolve the changing spin axis. There is no penetration projection.
+
+use crate::{DynamicsError, MassProperties, Pose, RigidBodyState, Vec3};
+use core::fmt;
+use fs_contact::ballistic::{
+    BallisticContactError, BallisticContactInput, first_ballistic_contact,
+};
+use fs_contact::impact::{NormalImpactError, NormalImpactInput, solve_normal_impact};
+use fs_contact::tangential::impact::{
+    CoulombImpulseError, CoulombImpulseInput, CoulombImpulseResult, FrictionLaw,
+    solve_isotropic_coulomb_impulse,
+};
+
+/// Physical parameters of the bounded sphere/plane trajectory.
+#[derive(Clone, Copy, Debug)]
+pub struct SpherePlane {
+    /// Positive mass and equal principal moments about the sphere centre.
+    pub properties: MassProperties,
+    /// Bounding sphere radius in metres; I <= 2 m r^2 / 3 is required.
+    pub radius: f64,
+    /// A world point on the plane at absolute time zero.
+    pub point_world: Vec3,
+    /// Nonzero fixed outward normal, normalized internally.
+    pub normal_world: Vec3,
+    /// Constant prescribed material velocity of the plane, in m/s.
+    pub velocity_world: Vec3,
+    /// Constant applied centre force, parallel to the normal, in newtons.
+    pub force_world: Vec3,
+    /// Newton normal restitution in [0,1].
+    pub restitution: f64,
+    /// Common nonnegative static and kinetic Coulomb coefficient.
+    pub friction_coefficient: f64,
+}
+
+/// Contact mode; rolling means zero relative point slip to numerical resolution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpherePlaneMode {
+    /// Unconstrained motion, including separation after impact.
+    Flight,
+    /// Supported contact with tangential slip.
+    Sliding,
+    /// Supported contact without resolved tangential slip.
+    Rolling,
+}
+
+/// Momentum state and private event-continuation information.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpherePlaneState {
+    body: RigidBodyState,
+    time_s: f64,
+    mode: SpherePlaneMode,
+    contact_known: bool,
+    zero_normal: bool,
+    velocity_scale: f64,
+}
+impl SpherePlaneState {
+    /// Start a new trajectory. Geometry is checked strictly by advance:
+    /// even a tiny negative initial gap refuses.
+    pub fn new(body: RigidBodyState, time_s: f64) -> Result<Self, SpherePlaneError> {
+        finite(time_s)?;
+        Ok(Self {
+            body,
+            time_s,
+            mode: SpherePlaneMode::Flight,
+            contact_known: false,
+            zero_normal: false,
+            velocity_scale: 0.0,
+        })
+    }
+    /// Physical state, using the existing rigid-body momentum owner.
+    pub const fn body(self) -> RigidBodyState {
+        self.body
+    }
+    /// Absolute time in seconds.
+    pub const fn time_s(self) -> f64 {
+        self.time_s
+    }
+    /// Last resolved contact mode.
+    pub const fn mode(self) -> SpherePlaneMode {
+        self.mode
+    }
+}
+
+/// Event and attitude accuracy/work limits.
+#[derive(Clone, Copy, Debug)]
+pub struct SpherePlaneConfig {
+    /// Maximum published impacts and contact-mode events, at most 4096.
+    pub max_events: usize,
+    /// Maximum Lie-midpoint substep for noncommuting spin and contact torque.
+    /// Commuting spin uses one exact exponential. Translation and momenta
+    /// do not use these substeps.
+    pub max_attitude_step_s: f64,
+    /// Maximum attitude substeps per advance, at most one million.
+    pub max_attitude_substeps: usize,
+}
+impl Default for SpherePlaneConfig {
+    fn default() -> Self {
+        Self {
+            max_events: 128,
+            max_attitude_step_s: 0.01,
+            max_attitude_substeps: 65_536,
+        }
+    }
+}
+
+/// Discrete events in chronological order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpherePlaneEventKind {
+    /// Normal/tangential instantaneous contact response.
+    Impact,
+    /// Entry into persistent normal support.
+    Support,
+    /// Sliding has reached zero relative point slip.
+    Rolling,
+    /// A supported sphere departs from the plane.
+    LiftOff,
+}
+
+/// One event; continuous support is accounted in the aggregate impulses.
+#[derive(Clone, Copy, Debug)]
+pub struct SpherePlaneEvent {
+    /// Absolute event time, in seconds.
+    pub time_s: f64,
+    /// Event kind.
+    pub kind: SpherePlaneEventKind,
+    /// Normal impact impulse; zero for mode-only events.
+    pub normal_impulse: f64,
+    /// Tangential impact impulse; zero for mode-only events.
+    pub tangent_impulse_world: Vec3,
+}
+
+/// Complete advance, published only after momentum and work admission.
+#[derive(Clone, Debug)]
+pub struct SpherePlaneAdvance {
+    /// State at exactly the requested end time.
+    pub state_after: SpherePlaneState,
+    /// Bounded chronological event sequence.
+    pub events: Vec<SpherePlaneEvent>,
+    /// Total impact plus sustained-contact impulse, in N s.
+    pub contact_impulse_world: Vec3,
+    /// Total contact angular impulse about the world origin, in N m s.
+    pub contact_angular_impulse_world: Vec3,
+    /// Work of the declared constant applied force, in J.
+    pub external_force_work: f64,
+    /// Signed work supplied by the moving plane, in J.
+    pub plane_work: f64,
+    /// Normal impact and tangential slip loss, in J; not a heat allocation.
+    pub dissipated_energy: f64,
+    /// Actual kinetic-energy change minus supplied work plus loss, in J.
+    pub energy_balance_residual: f64,
+    /// Actual momentum change minus applied force and contact impulses.
+    pub linear_momentum_residual: Vec3,
+    /// Actual orbital-plus-spin change minus all world-origin torque integrals.
+    pub angular_momentum_residual: Vec3,
+    /// Measured final geometric gap. Known contact may have only the recorded
+    /// floating-point geometry residual; position is never projected.
+    pub gap_after: f64,
+}
+
+/// Atomic refusal; no partial trajectory or repaired state is returned.
+#[derive(Debug)]
+pub enum SpherePlaneError {
+    /// Unsupported physical parameters or invalid work limits.
+    Invalid(&'static str),
+    /// Newly supplied or unresolved penetrating geometry.
+    Penetration {
+        /// Signed sphere/plane gap in metres.
+        gap: f64,
+    },
+    /// Existing rigid-body owner refused.
+    Dynamics(DynamicsError),
+    /// Existing normal impulse owner refused.
+    Contact(NormalImpactError),
+    /// Existing Coulomb owner refused.
+    Friction(CoulombImpulseError),
+    /// Ballistic event timing refused.
+    Detection(BallisticContactError),
+    /// Impact/mode event cap, including unresolved accumulating bounces.
+    EventBudget,
+    /// Attitude accuracy request exceeds its explicit work cap.
+    AttitudeBudget,
+    /// A positive event interval cannot advance the floating-point clock.
+    NoProgress,
+    /// Cancellation before publication.
+    Cancelled,
+    /// Physical geometry, velocity, momentum, or work did not resolve.
+    Unresolved(&'static str),
+}
+impl fmt::Display for SpherePlaneError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "sphere/plane trajectory: {self:?}")
+    }
+}
+impl std::error::Error for SpherePlaneError {}
+impl From<DynamicsError> for SpherePlaneError {
+    fn from(e: DynamicsError) -> Self {
+        Self::Dynamics(e)
+    }
+}
+impl From<NormalImpactError> for SpherePlaneError {
+    fn from(e: NormalImpactError) -> Self {
+        Self::Contact(e)
+    }
+}
+impl From<CoulombImpulseError> for SpherePlaneError {
+    fn from(e: CoulombImpulseError) -> Self {
+        Self::Friction(e)
+    }
+}
+impl From<BallisticContactError> for SpherePlaneError {
+    fn from(e: BallisticContactError) -> Self {
+        Self::Detection(e)
+    }
+}
+
+#[derive(Default)]
+struct Ledger {
+    contact: Vec3,
+    contact_angular: Vec3,
+    external_angular: Vec3,
+    force_work: f64,
+    plane_work: f64,
+    loss: f64,
+    impulse_scale: f64,
+    angular_scale: f64,
+}
+struct Engine {
+    scene: SpherePlane,
+    config: SpherePlaneConfig,
+    n: Vec3,
+    tangent: [Vec3; 2],
+    mass: f64,
+    inertia: f64,
+    inverse_tangent_mass: f64,
+    acceleration_normal: f64,
+    arm: Vec3,
+    ledger: Ledger,
+    events: Vec<SpherePlaneEvent>,
+    attitude_steps: usize,
+    velocity_scale: f64,
+}
+impl Engine {
+    fn new(scene: SpherePlane, config: SpherePlaneConfig) -> Result<Self, SpherePlaneError> {
+        scene.properties.validate()?;
+        if !(scene.radius.is_finite() && scene.radius > 0.0)
+            || !(scene.restitution.is_finite() && (0.0..=1.0).contains(&scene.restitution))
+            || !(scene.friction_coefficient.is_finite() && scene.friction_coefficient >= 0.0)
+            || config.max_events == 0
+            || config.max_events > 4096
+            || !(config.max_attitude_step_s.is_finite() && config.max_attitude_step_s > 0.0)
+            || config.max_attitude_substeps == 0
+            || config.max_attitude_substeps > 1_000_000
+        {
+            return Err(SpherePlaneError::Invalid(
+                "sphere, restitution, friction, or work limits",
+            ));
+        }
+        vector(scene.point_world)?;
+        vector(scene.velocity_world)?;
+        vector(scene.force_world)?;
+        let n = scene.normal_world.normalized("plane normal")?;
+        let mass = scene.properties.mass();
+        let moments = scene.properties.principal_inertia_body();
+        let inertia_bound = finite((mass * scene.radius) * scene.radius * (2.0 / 3.0))?;
+        if moments.x != moments.y || moments.x != moments.z || moments.x > inertia_bound {
+            return Err(SpherePlaneError::Invalid(
+                "isotropic inertia must fit within the sphere",
+            ));
+        }
+        let force_n = finite(scene.force_world.dot(n))?;
+        if norm(scene.force_world.sub(n.scale(force_n)))?
+            > 128.0 * f64::EPSILON * norm(scene.force_world)?
+        {
+            return Err(SpherePlaneError::Invalid(
+                "external force must be parallel to the plane normal",
+            ));
+        }
+        let axis = if n.x.abs() < 0.8 {
+            Vec3::new(1.0, 0.0, 0.0)
+        } else {
+            Vec3::new(0.0, 1.0, 0.0)
+        };
+        let t0 = n.cross(axis).normalized("plane tangent")?;
+        let t1 = n.cross(t0).normalized("plane bitangent")?;
+        let inverse_tangent_mass =
+            finite(mass.recip() + (scene.radius / moments.x) * scene.radius)?;
+        if inverse_tangent_mass <= 0.0 {
+            return Err(SpherePlaneError::Invalid("tangent inverse mass"));
+        }
+        Ok(Self {
+            scene,
+            config,
+            n,
+            tangent: [t0, t1],
+            mass,
+            inertia: moments.x,
+            inverse_tangent_mass,
+            acceleration_normal: finite(force_n / mass)?,
+            arm: n.scale(-scene.radius),
+            ledger: Ledger::default(),
+            events: Vec::new(),
+            attitude_steps: 0,
+            velocity_scale: 0.0,
+        })
+    }
+    fn plane_point(&self, time: f64) -> Result<Vec3, SpherePlaneError> {
+        let p = self
+            .scene
+            .point_world
+            .add(self.scene.velocity_world.scale(time));
+        vector(p)?;
+        Ok(p)
+    }
+    fn gap(&self, body: RigidBodyState, time: f64) -> Result<f64, SpherePlaneError> {
+        finite(
+            body.pose()
+                .position_world()
+                .sub(self.plane_point(time)?)
+                .dot(self.n)
+                - self.scene.radius,
+        )
+    }
+    fn geometry_allowance(&self, body: RigidBodyState, time: f64) -> Result<f64, SpherePlaneError> {
+        finite(
+            512.0
+                * f64::EPSILON
+                * (norm(body.pose().position_world())?
+                    + norm(self.plane_point(time)?)?
+                    + self.scene.radius),
+        )
+    }
+    fn kinematics(&mut self, body: RigidBodyState) -> Result<(f64, [f64; 2]), SpherePlaneError> {
+        let velocity = body.center_of_mass_velocity_world(self.scene.properties)?;
+        let omega = world_spin(body).scale(self.inertia.recip());
+        let relative = velocity
+            .sub(self.scene.velocity_world)
+            .add(omega.cross(self.arm));
+        vector(relative)?;
+        self.velocity_scale = self
+            .velocity_scale
+            .max(norm(velocity)?)
+            .max(norm(self.scene.velocity_world)?)
+            .max(norm(omega)? * self.scene.radius);
+        Ok((
+            finite(velocity.sub(self.scene.velocity_world).dot(self.n))?,
+            [
+                finite(relative.dot(self.tangent[0]))?,
+                finite(relative.dot(self.tangent[1]))?,
+            ],
+        ))
+    }
+    fn tangent_vector(&self, components: [f64; 2]) -> Vec3 {
+        self.tangent[0]
+            .scale(components[0])
+            .add(self.tangent[1].scale(components[1]))
+    }
+    fn friction(
+        &self,
+        slip: [f64; 2],
+        normal_impulse: f64,
+    ) -> Result<CoulombImpulseResult, SpherePlaneError> {
+        Ok(solve_isotropic_coulomb_impulse(
+            CoulombImpulseInput {
+                normal_impulse,
+                relative_tangent_velocity: slip,
+                inverse_tangent_mass: self.inverse_tangent_mass,
+            },
+            &FrictionLaw::Coulomb {
+                static_mu: self.scene.friction_coefficient,
+                kinetic_mu: self.scene.friction_coefficient,
+            },
+        )?)
+    }
+    fn event(
+        &mut self,
+        time: f64,
+        kind: SpherePlaneEventKind,
+        normal: f64,
+        tangent: Vec3,
+    ) -> Result<(), SpherePlaneError> {
+        if self.events.len() >= self.config.max_events {
+            return Err(SpherePlaneError::EventBudget);
+        }
+        self.events.push(SpherePlaneEvent {
+            time_s: time,
+            kind,
+            normal_impulse: normal,
+            tangent_impulse_world: tangent,
+        });
+        Ok(())
+    }
+    fn impact(
+        &mut self,
+        body: RigidBodyState,
+        time: f64,
+    ) -> Result<(RigidBodyState, bool), SpherePlaneError> {
+        let (normal_speed, slip) = self.kinematics(body)?;
+        let normal = solve_normal_impact(NormalImpactInput {
+            gap: 0.0,
+            activation_tolerance: 0.0,
+            relative_normal_speed: normal_speed,
+            inverse_effective_mass: self.mass.recip(),
+            restitution: self.scene.restitution,
+        })?;
+        let friction = self.friction(slip, normal.normal_impulse)?;
+        let tangent = self.tangent_vector(friction.tangent_impulse);
+        let impulse = self.n.scale(normal.normal_impulse).add(tangent);
+        let arm_body = body.pose().orientation().rotate_world_to_body(self.arm);
+        let result = body.apply_impulse_at_body_point(self.scene.properties, arm_body, impulse)?;
+        let angular = body.pose().position_world().add(self.arm).cross(impulse);
+        self.ledger.contact = self.ledger.contact.add(impulse);
+        self.ledger.contact_angular = self.ledger.contact_angular.add(angular);
+        self.ledger.plane_work =
+            finite(self.ledger.plane_work + impulse.dot(self.scene.velocity_world))?;
+        self.ledger.loss =
+            finite(self.ledger.loss + normal.dissipated_energy + friction.dissipated_energy)?;
+        self.ledger.impulse_scale = finite(self.ledger.impulse_scale + norm(impulse)?)?;
+        self.ledger.angular_scale = finite(self.ledger.angular_scale + norm(angular)?)?;
+        let (actual_normal, actual_slip) = self.kinematics(result.state_after)?;
+        let allowance = 4096.0 * f64::EPSILON * self.velocity_scale;
+        if (actual_normal - normal.relative_normal_speed_after).abs() > allowance
+            || (actual_slip[0] - friction.relative_tangent_velocity_after[0]).abs() > allowance
+            || (actual_slip[1] - friction.relative_tangent_velocity_after[1]).abs() > allowance
+        {
+            return Err(SpherePlaneError::Unresolved("impact endpoint velocity"));
+        }
+        self.event(
+            time,
+            SpherePlaneEventKind::Impact,
+            normal.normal_impulse,
+            tangent,
+        )?;
+        Ok((
+            result.state_after,
+            normal.relative_normal_speed_after == 0.0,
+        ))
+    }
+    fn segment(
+        &mut self,
+        body: RigidBodyState,
+        h: f64,
+        normal_force: f64,
+        tangent_force: Vec3,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<RigidBodyState, SpherePlaneError> {
+        poll(cancelled)?;
+        // On this admitted normal-force rung the reaction exactly cancels
+        // the declared applied force, including its floating representation.
+        let supported = normal_force > 0.0;
+        let reaction = if supported {
+            self.scene.force_world.scale(-1.0)
+        } else {
+            Vec3::ZERO
+        };
+        let contact = reaction.add(tangent_force);
+        let total = if supported {
+            tangent_force
+        } else {
+            self.scene.force_world.add(contact)
+        };
+        let acceleration = total.scale(self.mass.recip());
+        let x0 = body.pose().position_world();
+        let v0 = body.center_of_mass_velocity_world(self.scene.properties)?;
+        let displacement = v0.add(acceleration.scale(0.5 * h)).scale(h);
+        let x1 = x0.add(displacement);
+        let p1 = body.linear_momentum_world().add(total.scale(h));
+        let l0 = world_spin(body);
+        // The normal support line passes through the centre exactly.
+        let torque = self.arm.cross(tangent_force);
+        let l1 = l0.add(torque.scale(h));
+        let mut orientation = body.pose().orientation();
+        if commuting_directions(l0, torque) {
+            // Commuting world angular velocities have this exact integral,
+            // including zero initial spin and torque-free flight.
+            let rotation = l0.add(torque.scale(0.5 * h)).scale(h / self.inertia);
+            orientation = orientation.right_exp(orientation.rotate_world_to_body(rotation))?;
+        } else {
+            let steps_float = (h / self.config.max_attitude_step_s).ceil().max(1.0);
+            if !steps_float.is_finite()
+                || steps_float > (self.config.max_attitude_substeps - self.attitude_steps) as f64
+            {
+                return Err(SpherePlaneError::AttitudeBudget);
+            }
+            let steps = steps_float as usize;
+            self.attitude_steps += steps;
+            let substep = h / steps as f64;
+            for step in 0..steps {
+                poll(cancelled)?;
+                let midpoint = (step as f64 + 0.5) * substep;
+                let world_rotation = l0.add(torque.scale(midpoint)).scale(substep / self.inertia);
+                orientation =
+                    orientation.right_exp(orientation.rotate_world_to_body(world_rotation))?;
+            }
+        }
+        let next = RigidBodyState::new(
+            Pose::new(x1, orientation)?,
+            p1,
+            orientation.rotate_world_to_body(l1),
+        )?;
+        let contact_impulse = contact.scale(h);
+        let external_angular = torque_integral(x0, v0, acceleration, self.scene.force_world, h);
+        let contact_angular = torque_integral(x0.add(self.arm), v0, acceleration, contact, h);
+        vector(external_angular)?;
+        vector(contact_angular)?;
+        self.ledger.contact = self.ledger.contact.add(contact_impulse);
+        self.ledger.contact_angular = self.ledger.contact_angular.add(contact_angular);
+        self.ledger.external_angular = self.ledger.external_angular.add(external_angular);
+        self.ledger.force_work =
+            finite(self.ledger.force_work + self.scene.force_world.dot(displacement))?;
+        self.ledger.plane_work =
+            finite(self.ledger.plane_work + contact_impulse.dot(self.scene.velocity_world))?;
+        self.ledger.impulse_scale = finite(self.ledger.impulse_scale + norm(contact_impulse)?)?;
+        self.ledger.angular_scale =
+            finite(self.ledger.angular_scale + norm(external_angular)? + norm(contact_angular)?)?;
+        self.kinematics(next)?;
+        Ok(next)
+    }
+}
+
+/// Advance through detected impacts, normal support, Coulomb sliding and rolling.
+///
+/// Newly constructed penetrating states always refuse. Only a returned state's
+/// private known-contact mode may carry a bounded floating-point geometry/zero-
+/// velocity residual through continuation; no position or momentum is projected.
+/// Rebound accumulation or an unresolvable event time refuses at the event/work
+/// boundary, rather than silently changing restitution to stick.
+///
+/// Arbitrary spin and tangential velocity are admitted. Applied force must be
+/// normal, so supported slip keeps a constant direction and its stopping time
+/// is resolved exactly. Attitude is exact for commuting spin/torque; the general
+/// changing-axis case uses the declared second-order attitude substeps.
+/// Spin about the normal has no torsional/rolling friction.
+/// A constant-velocity plane supplies explicitly signed work. This is floating
+/// analytic event detection, not interval-certified general-purpose CCD.
+pub fn advance_sphere_plane(
+    scene: &SpherePlane,
+    state: SpherePlaneState,
+    duration_s: f64,
+    config: SpherePlaneConfig,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<SpherePlaneAdvance, SpherePlaneError> {
+    poll(&mut cancelled)?;
+    if !(duration_s.is_finite() && duration_s > 0.0) {
+        return Err(SpherePlaneError::Invalid(
+            "positive finite duration required",
+        ));
+    }
+    let end_time = finite(state.time_s + duration_s)?;
+    if end_time == state.time_s {
+        return Err(SpherePlaneError::NoProgress);
+    }
+    let mut engine = Engine::new(*scene, config)?;
+    engine.velocity_scale = state.velocity_scale;
+    let initial_energy = state.body.kinetic_energy(scene.properties)?;
+    let mut body = state.body;
+    let mut mode = state.mode;
+    let raw_gap = engine.gap(body, state.time_s)?;
+    let geometry_allowance = engine.geometry_allowance(body, state.time_s)?;
+    if raw_gap < 0.0 && (!state.contact_known || -raw_gap > geometry_allowance) {
+        return Err(SpherePlaneError::Penetration { gap: raw_gap });
+    }
+    let mut touching =
+        raw_gap == 0.0 || (state.contact_known && raw_gap.abs() <= geometry_allowance);
+    let mut zero_normal = touching && state.zero_normal;
+    if !touching {
+        mode = SpherePlaneMode::Flight;
+    }
+    let mut elapsed = 0.0;
+    while elapsed < duration_s {
+        poll(&mut cancelled)?;
+        let remaining = duration_s - elapsed;
+        let time = finite(state.time_s + elapsed)?;
+        let (normal_raw, slip) = engine.kinematics(body)?;
+        let velocity_allowance = 4096.0 * f64::EPSILON * engine.velocity_scale;
+        let normal_speed = if zero_normal && normal_raw.abs() <= velocity_allowance {
+            0.0
+        } else {
+            normal_raw
+        };
+        let slip_speed = finite(slip[0].hypot(slip[1]))?;
+        if touching && normal_speed < 0.0 {
+            (body, zero_normal) = engine.impact(body, time)?;
+            mode = SpherePlaneMode::Flight;
+            if zero_normal && engine.acceleration_normal <= 0.0 {
+                let (_, after_slip) = engine.kinematics(body)?;
+                mode = if after_slip[0].hypot(after_slip[1])
+                    <= 4096.0 * f64::EPSILON * engine.velocity_scale
+                {
+                    SpherePlaneMode::Rolling
+                } else {
+                    SpherePlaneMode::Sliding
+                };
+            }
+            continue;
+        }
+        if touching && normal_speed == 0.0 && engine.acceleration_normal <= 0.0 {
+            zero_normal = true;
+            if mode == SpherePlaneMode::Flight {
+                engine.event(time, SpherePlaneEventKind::Support, 0.0, Vec3::ZERO)?;
+            }
+            let normal_force = finite(-scene.force_world.dot(engine.n))?;
+            let rolling = slip_speed == 0.0
+                || (mode == SpherePlaneMode::Rolling && slip_speed <= velocity_allowance);
+            let friction_force = finite(scene.friction_coefficient * normal_force)?;
+            if rolling || friction_force == 0.0 {
+                mode = if rolling {
+                    SpherePlaneMode::Rolling
+                } else {
+                    SpherePlaneMode::Sliding
+                };
+                progress(time, remaining)?;
+                body = engine.segment(body, remaining, normal_force, Vec3::ZERO, &mut cancelled)?;
+                elapsed = duration_s;
+                continue;
+            }
+            mode = SpherePlaneMode::Sliding;
+            let stopping_time =
+                finite((slip_speed / engine.inverse_tangent_mass) / friction_force)?;
+            let h = remaining.min(stopping_time);
+            progress(elapsed, h)?;
+            progress(time, h)?;
+            let friction = engine.friction(slip, finite(normal_force * h)?)?;
+            let tangent_force = engine
+                .tangent_vector(friction.tangent_impulse)
+                .scale(h.recip());
+            body = engine.segment(body, h, normal_force, tangent_force, &mut cancelled)?;
+            engine.ledger.loss = finite(engine.ledger.loss + friction.dissipated_energy)?;
+            elapsed = if h == remaining {
+                duration_s
+            } else {
+                elapsed + h
+            };
+            if stopping_time <= remaining {
+                let (_, after_slip) = engine.kinematics(body)?;
+                if after_slip[0].hypot(after_slip[1])
+                    > 8192.0 * f64::EPSILON * engine.velocity_scale
+                {
+                    return Err(SpherePlaneError::Unresolved("sliding stop velocity"));
+                }
+                mode = SpherePlaneMode::Rolling;
+                engine.event(
+                    finite(state.time_s + elapsed)?,
+                    SpherePlaneEventKind::Rolling,
+                    0.0,
+                    Vec3::ZERO,
+                )?;
+            }
+            continue;
+        }
+        if mode != SpherePlaneMode::Flight {
+            engine.event(time, SpherePlaneEventKind::LiftOff, 0.0, Vec3::ZERO)?;
+        }
+        mode = SpherePlaneMode::Flight;
+        let gap = if touching {
+            0.0
+        } else {
+            engine.gap(body, time)?
+        };
+        let event = first_ballistic_contact(BallisticContactInput {
+            gap,
+            relative_normal_speed: normal_speed,
+            relative_normal_acceleration: engine.acceleration_normal,
+            duration_s: remaining,
+        })?;
+        let Some(event) = event else {
+            progress(time, remaining)?;
+            body = engine.segment(body, remaining, 0.0, Vec3::ZERO, &mut cancelled)?;
+            elapsed = duration_s;
+            touching = false;
+            zero_normal = false;
+            continue;
+        };
+        if event.time_s > 0.0 {
+            progress(elapsed, event.time_s)?;
+            progress(time, event.time_s)?;
+            body = engine.segment(body, event.time_s, 0.0, Vec3::ZERO, &mut cancelled)?;
+            elapsed = if event.time_s == remaining {
+                duration_s
+            } else {
+                elapsed + event.time_s
+            };
+        } else if !touching && gap > 0.0 {
+            return Err(SpherePlaneError::NoProgress);
+        }
+        let event_time = finite(state.time_s + elapsed)?;
+        if engine.gap(body, event_time)?.abs() > engine.geometry_allowance(body, event_time)? {
+            return Err(SpherePlaneError::Unresolved("detected contact geometry"));
+        }
+        touching = true;
+        zero_normal = event.relative_normal_speed == 0.0;
+        if event.relative_normal_speed < 0.0 {
+            (body, zero_normal) = engine.impact(body, finite(state.time_s + elapsed)?)?;
+            if zero_normal && engine.acceleration_normal <= 0.0 {
+                let (_, after_slip) = engine.kinematics(body)?;
+                mode = if after_slip[0].hypot(after_slip[1])
+                    <= 4096.0 * f64::EPSILON * engine.velocity_scale
+                {
+                    SpherePlaneMode::Rolling
+                } else {
+                    SpherePlaneMode::Sliding
+                };
+            }
+        } else if engine.acceleration_normal < 0.0 {
+            engine.event(
+                finite(state.time_s + elapsed)?,
+                SpherePlaneEventKind::Support,
+                0.0,
+                Vec3::ZERO,
+            )?;
+            mode = if slip_speed == 0.0 {
+                SpherePlaneMode::Rolling
+            } else {
+                SpherePlaneMode::Sliding
+            };
+        }
+        // Grazing with outward acceleration returns to flight; the next
+        // query starts with gap=0, normal speed=0 and therefore cannot loop.
+    }
+    poll(&mut cancelled)?;
+    let gap_after = engine.gap(body, end_time)?;
+    let geometry_allowance = engine.geometry_allowance(body, end_time)?;
+    if (touching && gap_after.abs() > geometry_allowance) || (!touching && gap_after < 0.0) {
+        return Err(SpherePlaneError::Unresolved("trajectory geometric gap"));
+    }
+    let final_energy = body.kinetic_energy(scene.properties)?;
+    let ledger = engine.ledger;
+    let energy_balance_residual = finite(
+        (final_energy - initial_energy) - ledger.force_work - ledger.plane_work + ledger.loss,
+    )?;
+    let linear_momentum_residual = body
+        .linear_momentum_world()
+        .sub(state.body.linear_momentum_world())
+        .sub(scene.force_world.scale(duration_s))
+        .sub(ledger.contact);
+    let angular_momentum_residual = total_angular(body)
+        .sub(total_angular(state.body))
+        .sub(ledger.external_angular)
+        .sub(ledger.contact_angular);
+    vector(linear_momentum_residual)?;
+    vector(angular_momentum_residual)?;
+    let tolerance = 8192.0 * f64::EPSILON * (engine.events.len() + 1) as f64;
+    let energy_scale = initial_energy.abs()
+        + final_energy.abs()
+        + ledger.force_work.abs()
+        + ledger.plane_work.abs()
+        + ledger.loss;
+    let linear_scale = norm(state.body.linear_momentum_world())?
+        + norm(body.linear_momentum_world())?
+        + norm(scene.force_world)? * duration_s
+        + ledger.impulse_scale;
+    let angular_scale =
+        angular_magnitude(state.body)? + angular_magnitude(body)? + ledger.angular_scale;
+    if energy_balance_residual.abs() > finite(tolerance * energy_scale)?
+        || norm(linear_momentum_residual)? > finite(tolerance * linear_scale)?
+        || norm(angular_momentum_residual)? > finite(tolerance * angular_scale)?
+    {
+        return Err(SpherePlaneError::Unresolved(
+            "global momentum or energy balance",
+        ));
+    }
+    Ok(SpherePlaneAdvance {
+        state_after: SpherePlaneState {
+            body,
+            time_s: end_time,
+            mode,
+            contact_known: touching,
+            zero_normal,
+            velocity_scale: engine.velocity_scale,
+        },
+        events: engine.events,
+        contact_impulse_world: ledger.contact,
+        contact_angular_impulse_world: ledger.contact_angular,
+        external_force_work: ledger.force_work,
+        plane_work: ledger.plane_work,
+        dissipated_energy: ledger.loss,
+        energy_balance_residual,
+        linear_momentum_residual,
+        angular_momentum_residual,
+        gap_after,
+    })
+}
+// Compare directions, not dimensionful products: a common length or mass
+// rescaling must not turn noncommuting angular motion into a zero cross product.
+fn commuting_directions(spin: Vec3, torque: Vec3) -> bool {
+    if spin == Vec3::ZERO || torque == Vec3::ZERO {
+        return true;
+    }
+    let spin_scale = spin.x.abs().max(spin.y.abs()).max(spin.z.abs());
+    let torque_scale = torque.x.abs().max(torque.y.abs()).max(torque.z.abs());
+    let a = Vec3::new(
+        spin.x / spin_scale,
+        spin.y / spin_scale,
+        spin.z / spin_scale,
+    );
+    let b = Vec3::new(
+        torque.x / torque_scale,
+        torque.y / torque_scale,
+        torque.z / torque_scale,
+    );
+    a.cross(b) == Vec3::ZERO
+}
+fn world_spin(body: RigidBodyState) -> Vec3 {
+    body.pose()
+        .orientation()
+        .rotate_body_to_world(body.angular_momentum_body())
+}
+fn total_angular(body: RigidBodyState) -> Vec3 {
+    body.pose()
+        .position_world()
+        .cross(body.linear_momentum_world())
+        .add(world_spin(body))
+}
+fn angular_magnitude(body: RigidBodyState) -> Result<f64, SpherePlaneError> {
+    finite(
+        norm(
+            body.pose()
+                .position_world()
+                .cross(body.linear_momentum_world()),
+        )? + norm(world_spin(body))?,
+    )
+}
+fn torque_integral(x: Vec3, v: Vec3, a: Vec3, force: Vec3, h: f64) -> Vec3 {
+    x.cross(force)
+        .scale(h)
+        .add(v.cross(force).scale(0.5 * h).scale(h))
+        .add(a.cross(force).scale(h / 6.0).scale(h).scale(h))
+}
+fn norm(value: Vec3) -> Result<f64, SpherePlaneError> {
+    Ok(value.stable_norm("sphere vector magnitude")?)
+}
+fn vector(value: Vec3) -> Result<(), SpherePlaneError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(SpherePlaneError::Invalid("nonfinite sphere arithmetic"))
+    }
+}
+fn finite(value: f64) -> Result<f64, SpherePlaneError> {
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(SpherePlaneError::Invalid("nonfinite sphere arithmetic"))
+    }
+}
+fn progress(elapsed: f64, h: f64) -> Result<(), SpherePlaneError> {
+    if h > 0.0 && elapsed + h > elapsed {
+        Ok(())
+    } else {
+        Err(SpherePlaneError::NoProgress)
+    }
+}
+fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), SpherePlaneError> {
+    if cancelled() {
+        Err(SpherePlaneError::Cancelled)
+    } else {
+        Ok(())
+    }
+}

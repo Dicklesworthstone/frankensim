@@ -634,3 +634,41 @@ deliverables remain open. Three physical regression groups cover rotated
 anisotropic off-center bodies with analytic shear/torsional recoil, multiple
 contacts sharing a body with exact input-order invariance, and late balance,
 cancellation, duplicate-work, and geometry refusal without body/history mutation.
+
+## Event-resolved sphere/plane trajectories
+
+`sphere_plane::advance_sphere_plane` advances the existing momentum-form rigid
+body through ballistic detection, restitution, frictional impact, persistent
+normal support, sliding-to-rolling transition and liftoff. It admits one
+isotropic sphere with centre-of-mass mass properties, a fixed-normal plane
+moving at constant velocity, a constant external force parallel to the normal,
+and a common static/kinetic ideal Coulomb coefficient. The inertia must fit
+within the sphere. Contact timing and impulse laws are consumed from
+`fs-contact`; there is no copied friction constitutive owner.
+
+Translation and world linear/angular momentum use analytic constant-force
+segments, split at the collision and slip-arrest times. Attitude uses a single
+exact rotation when spin and torque share an axis; changing-axis spin uses
+bounded second-order Lie midpoint substeps with explicit accuracy/work limits.
+The geometric gap is checked at each event and the requested end time.
+Newly supplied penetration refuses. Private continuation state retains only
+bounded floating-point contact residuals; no pose or momentum is projected.
+
+Every accepted complete advance checks total linear impulse, orbital-plus-spin
+angular impulse about the world origin, and
+`K_after - K_before = external_force_work + plane_work - dissipated_energy`.
+Moving-plane work includes both impacts and sustained contact. Loss is
+nonnegative and is not automatically credited as heat. Cancellation, unresolved
+geometry/work, a nonadvancing event clock, and exhausted event/attitude budgets
+return no partially advanced state. Accumulating rebounds do not silently
+change restitution to a sticking model.
+
+Eight focused G0/G1/G3/G4 integration tests cover ballistic impact and return,
+hidden crossings, gravity support and liftoff, exact sliding-to-rolling motion,
+spin-dependent two-dimensional impacts, moving-plane energy supply, frame
+covariance, attitude refinement and the common-axis exact fast path, split-step
+continuation, and typed atomic refusals. This bounded trajectory does not
+complete the general Moreau-Jean multicontact stepper. Oblique applied forces,
+anisotropic bodies, finite-mass plane recoil, rolling/torsional resistance,
+arbitrary-shape certified CCD, material calibration and contact adjoints remain
+outside its scope.
