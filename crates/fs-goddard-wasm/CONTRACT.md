@@ -22,7 +22,15 @@ dependency-clean.
 | Entry | Kind | Contract |
 |---|---|---|
 | `goddard_apparatus_step(elapsed_seconds, primary_spin_rpm, gyro_spin_rpm, tube_length_ratio, auxiliary_release_fraction, primary_charge_substantially_consumed, gyro_enabled) -> String` | wasm + native | Admits one bounded finite source-apparatus tuple, executes normalized torque-free poses through `fs_mbd::goddard::step_goddard_apparatus`, and returns quaternions, SI angular rates, and explicit Claim 1/2/7 states or a typed refusal. Ideal Claim 7 isolation applies only when the declared gyroscope is present and spinning; a stopped gyroscope shares the primary world rate. |
-| `goddard_rocket_step(chamber_pressure_psi, fuel_flow_kg_per_sec, throat_area_cm2, expansion_ratio) -> String` | wasm + native | Admits one bounded positive finite input tuple, executes one deterministic Goddard rocket step through `fs_mbd::goddard::step_goddard_rocket`, and returns either `{"ok":{...}}` or a typed `{"refusal":{...}}` envelope. |
+| `goddard_rocket_step(chamber_pressure_psi, chamber_temperature_k, specific_gas_constant_j_kg_k, heat_capacity_ratio, throat_area_cm2, expansion_ratio, ambient_pressure_pa) -> String` | wasm + native | Resolves an ideal calorically-perfect nozzle through `fs_mbd::goddard::step_goddard_rocket`, with explicit chamber thermodynamics and ambient pressure. The sonic throat determines mass flow. Returns exit T/p/Mach/speed, choked mass flow, momentum and pressure thrust, total thrust, specific impulse and characteristic velocity inside `{"ok":{...}}`, or a typed refusal. |
+
+The previous four-argument rocket signature is replaced. No repository browser
+caller uses it; external callers must provide the seven explicit inputs and
+consume `mass_flow_kg_per_sec` as a result. The source-bounded apparatus export
+keeps its existing signature and semantics. For example,
+`goddard_rocket_step(350, 2800, 365, 1.24, 4.2, 3.5, 0)` declares an assumed
+calorically-perfect chamber in vacuum; those gas properties are caller inputs,
+not historical or empirically validated propellant data.
 
 ## Invariants
 
@@ -49,8 +57,16 @@ ranked repairs. `non-finite-input` covers NaN and infinity;
 `non-finite-output` catches a broken downstream result; and
 `rigid-body-refusal` preserves a refusal from the generic owner. The source
 apparatus admits 0–600 s, 0–1,200 primary RPM, 0–60,000 gyro RPM, `L/D` from
-1–12, and release fraction from 0–1. The adjacent liquid model retains its
-separate positive-input caps.
+1–12, and release fraction from 0–1. The ideal-nozzle boundary admits positive
+chamber pressure up to 10,000 psi, temperature up to 10,000 K, gas constant up
+to 10,000 J/(kg K), throat area up to 100,000 cm², gamma in `(1,5/3]`, area
+ratio in `[1,1000]`, and nonnegative ambient pressure up to 100 MPa. These are
+input/work bounds, not material-validity claims. The kernel additionally
+requires ambient pressure no higher than its isentropic exit pressure;
+`unsupported-back-pressure` explicitly refuses overexpanded operation instead
+of ignoring shocks or separation. Vacuum is admitted without evaluating gas
+at zero pressure. `output-outside-domain` covers a required positive quantity
+lost to overflow or underflow; `nozzle-refusal` preserves other kernel failures.
 
 ## Determinism class
 
@@ -60,8 +76,9 @@ shortest-roundtrip display).
 
 ## Cancellation behavior
 
-Synchronous single-step entry; there is nothing to cancel. A JS caller can
-discard the returned string if the result is no longer needed.
+Synchronous single-step entry. The rocket area-Mach inversion has a hard cap
+of 80 allocation-free iterations. A JS caller can discard the returned string
+if the result is no longer needed; this is not an asynchronous solver.
 
 ## Unsafe boundary
 
@@ -76,10 +93,13 @@ None. The wasm32 binding is selected by target architecture
 ## Conformance tests
 
 Native unit tests exercise a valid source apparatus state, both claim-failure
-probes, non-finite and bounded-domain refusals, a valid adjacent liquid result,
-its lower/upper admission boundaries, underflowed output refusal, and ranked
-repairs. The fs-mbd kernel tests and dependency-policy/contract gates remain
-complementary evidence.
+probes, non-finite and bounded-domain refusals, an ideal-nozzle result, its
+lower/upper admission boundaries, underflowed output refusal, sonic/vacuum
+operation, unsupported back pressure and exact replay. The owning fs-mbd
+physics tests independently check the analytic Mach-2 nozzle, near-sonic and
+gamma-to-one limits, mass/enthalpy balance, area and pressure scaling, and
+pressure thrust. The dependency-policy/contract gates remain complementary
+evidence.
 
 ## No-claim boundaries
 
@@ -89,5 +109,9 @@ that normalized poses establish mass properties or loads, or that the rendered
 numbers carry uncertainty bounds. The source apparatus returns no thrust,
 Mach, liquid propellant, de Laval, or trajectory quantity. The older liquid
 export must never be described as a mechanism claimed or disclosed by US
-1,102,653. Physics claims, if any ever, belong to `fs-mbd` evidence artifacts —
-never to this renderer.
+1,102,653. Its declared constant heat capacities are a reduced-model
+assumption, not a chemistry or high-temperature real-gas solution; use the
+source-backed `fs-material` thermochemical nozzle for temperature-dependent
+properties. No tank depletion, shock/separation, viscous loss or vehicle
+trajectory is inferred. Physics claims belong to the owning kernels and
+their evidence, never to this renderer.

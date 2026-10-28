@@ -30,8 +30,24 @@ The `goddard` module also exposes a narrow museum-facing composition for US
 1,102,653. It reuses the single-body owner for torque-free primary and
 gyroscope display poses, then reports only source sequence predicates and the
 Claim 2 tapered-tube ratio. The older `step_goddard_rocket` liquid-nozzle
-calculation remains an explicitly adjacent interpretive model; it is not a
-model of the mechanism claimed in US 1,102,653.
+calculation remains an explicitly adjacent ideal calorically-perfect model;
+it is not a model of the mechanism claimed in US 1,102,653. Its chamber
+stagnation pressure and temperature, specific gas constant, constant cp/cv,
+throat area, exit/throat area ratio and ambient pressure are all explicit.
+The sonic throat determines mass flow; there is no independently prescribed
+inconsistent fuel-flow input or temperature inferred from pressure.
+An allocation-free, at-most-80-iteration inversion selects the supersonic
+area-Mach branch (exactly sonic for unit area ratio). The exit obeys the same
+ideal-gas energy and mass balances as the throat. Total thrust includes both
+`mdot*ve` and `(pe-pa)*Ae`; specific impulse uses total thrust and standard
+gravity, and no physical output is rounded for presentation. Deterministic
+elementary functions and cancellation-safe near-sonic and gamma-near-one
+expressions are used. Accepted gamma is `(1,5/3]`, area ratio is `[1,1000]`,
+and ambient pressure must lie in `[0,pe]`; overexpanded operation refuses
+until a shock/separation model is available. Invalid or unrepresentable states
+return `GoddardRocketError`, never a partial result. The G1 tests use the
+analytic gamma=7/5, Mach=2 solution, the sonic and gamma-to-one limits,
+mass/enthalpy balance, pressure-thrust differences and geometric scaling.
 
 The `daimler` module exposes a second narrow museum-facing composition for US
 361,931. It constructs the printed longitudinal propeller-shaft freedom through
@@ -492,7 +508,13 @@ fault injection, or G5 cross-ISA evidence.
   limit, not a prediction that the printed mechanism rejects arbitrary loads.
 - `goddard::step_goddard_rocket` uses an adjacent liquid-propellant/de Laval
   interpretation. No consumer may present those outputs as a claim, disclosed
-  embodiment, or source-derived parameter of US 1,102,653.
+  embodiment, or source-derived parameter of US 1,102,653. It is an ideal
+  calorically-perfect nozzle calculation under declared inputs, not a
+  propellant model: no chemistry, temperature-dependent heat capacities,
+  real-gas behavior, boundary-layer loss, shock/separation, tank depletion,
+  vehicle dynamics or empirical performance accuracy is claimed. The general
+  source-backed thermochemical nozzle belongs to `fs-material`, not this
+  museum teaching surface.
 - The source-bounded `otis` lane composes twelve generic scalar joints for
   platform D, safety bar F, levers E and pawls f, winding drum H, shaft I,
   power drum N, shipper S, brake linkage X/Y/Z, and counterpoise R. It enforces
