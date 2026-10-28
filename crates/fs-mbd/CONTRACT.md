@@ -659,55 +659,19 @@ cancellation, duplicate-work, and geometry refusal without body/history mutation
 
 ## Event-resolved sphere/plane trajectories
 
-`sphere_plane::advance_sphere_plane` advances the existing momentum-form rigid
-body through ballistic detection, restitution, frictional impact, persistent
-normal support, driven rolling/sliding and liftoff. It admits one isotropic
-sphere with physically enclosed centre-of-mass inertia, a fixed-normal plane
-moving at constant velocity, a constant world force at the centre, and a common
-static/kinetic ideal Coulomb coefficient. Contact timing and impulse response
-are consumed from the existing `fs-contact` and `fs-tribo` owners.
+`sphere_plane::advance_sphere_plane` advances the original momentum-form rigid body through ballistic detection, restitution, frictional impact, persistent normal support, driven rolling/sliding and liftoff. It admits one isotropic sphere with physically enclosed COM inertia, a fixed-normal plane moving at constant velocity, a constant world force at the centre, and a common static/kinetic ideal Coulomb coefficient. Timing and impulse response remain with the original `fs-contact`/`fs-tribo` owners.
 
-Free flight admits arbitrary constant force. During support, only the normal
-force component is balanced; tangent drive remains in the physical dynamics.
-With tangent inverse mass `kappa = 1/m + radius^2/I`, rolling needs traction
-`-(F_t/m)/kappa` within the friction limit. Insufficient traction starts slip.
-Frictional sliding admits collinear tangent drive, including exact arrest and
-force-driven reversal. Resolved changing-direction sliding returns the typed
-`NonCollinearSliding` refusal; a transverse change below the declared segment
-arithmetic resolution is admitted only as roundoff. Frictionless support
-admits arbitrary tangent drive.
+During support, only the normal applied force is balanced. With tangent inverse mass `kappa = 1/m + radius^2/I`, rolling requires traction `-(F_t/m)/kappa` inside the circular friction limit. Collinear sliding retains analytic constant-force motion, exact slip-arrest times and resolved reversal. Frictionless support admits arbitrary tangent drive.
 
-Translation and world momenta use analytic constant-force segments split at
-collision and slip-arrest times. The existing Coulomb disk owner selects each
-segment's integrated traction from its force-driven free slip. Continuous
-dissipation is independently evaluated from actual midpoint slip work, not
-the instantaneous impulse-law loss at that free velocity. Rolling traction
-has zero relative loss, while a moving plane supplies signed work. A Rolling
-event denotes a zero-slip instant; supercritical opposing drive may immediately
-start reverse sliding. No infeasible sustained rolling mode is imposed.
+Resolved changing-direction sliding uses the original isotropic Coulomb disk in a velocity-implicit discretization, bounded by `max_sliding_step_s` and `max_sliding_substeps`. Actual translation, world momentum, contact-point slip and torque include the original spin inertia. Each accepted step uses its resolved constant force in the native trajectory; endpoint Coulomb feasibility does not assert an exact continuous force direction. The curved trajectory is first order and arrest is resolved at a timestep boundary. Refinement is necessary. Coarse trials that would make friction assist the initial slip are halved, including apparent endpoint arrest. Supercritical transverse drive cannot be silently converted to persistent rolling. Rejected trials count toward the work cap.
 
-Attitude uses one exact exponential for commuting spin/torque; changing-axis
-spin uses bounded second-order Lie midpoint substeps. Actual geometric gaps
-are checked at each event and the end time. Newly supplied penetration refuses.
-Private continuation state retains bounded floating-point contact residuals;
-no pose or momentum is projected.
+Both routes evaluate lost work from actual midpoint relative slip on each constant-force segment, never from the fictitious impulse-law loss at the force-driven free velocity. Curved-step work belongs to the declared time discretization and converges with its sliding timestep. Rolling traction has zero relative loss; the moving plane supplies signed work. No mechanical loss is automatically assigned to heat.
 
-Every accepted complete advance checks total linear impulse,
-orbital-plus-spin angular impulse about the world origin, and
-`K_after - K_before = external_force_work + plane_work - dissipated_energy`.
-Loss is nonnegative mechanical loss, not automatically heat. Cancellation,
-unresolved geometry/work, nonadvancing clocks and exhausted event/attitude
-budgets return no partially advanced state. Accumulating rebounds do not
-silently change restitution to a sticking model.
+Attitude uses an exact exponential for commuting spin/torque and bounded second-order Lie midpoint substeps otherwise. Newly supplied penetration refuses. Each curved supported segment checks its complete quadratic normal-gap path against the original floating geometry allowance, in addition to actual endpoint kinematics. Private continuation retains only bounded contact roundoff; no pose or momentum is projected.
 
-Eleven focused integration groups retain ballistic, support, spin, frame/unit,
-attitude-refinement, continuation and refusal coverage, and add incline/static
-traction, moving-support work under drive, exact forced slip arrest/reversal,
-arbitrary-force flight and zero-friction support. This bounded lane does not
-complete the general Moreau-Jean multicontact stepper. General curved sliding,
-external torque, anisotropic bodies, multiple planes, finite-mass plane recoil,
-rolling/torsional resistance, arbitrary-shape certified CCD, material
-calibration and contact adjoints remain outside its scope.
+Every accepted advance independently checks total linear impulse, orbital-plus-spin angular impulse about the world origin, and `K_after - K_before = external_force_work + plane_work - dissipated_energy`. Cancellation, unresolved geometry/work, nonadvancing clocks and exhausted event, attitude or sliding budgets publish no partial state. Accumulating rebounds do not alter restitution.
+
+Fifteen focused native integration groups pass: the eleven original ballistic, support, collinear, incline, spin, frame, attitude and refusal groups plus four curved-flow groups. An independent separable continuum solution for `u' = a - B*u/|u|` verifies velocity, position, spin and loss convergence at 16/32/64 steps, with error ratios 1.8–2.2; a separate 32/64/128 ladder verifies arrest followed by driven rolling. Coarse-step passivity, supercritical non-arrest, moving-plane work, split continuation, cancellation and late sliding-budget rollback are also exercised. These are focused actual-source native tests, not a full Cargo/DSR workspace gate. General multicontact Moreau-Jean dynamics, external torque, anisotropic bodies, multiple planes, finite-mass plane recoil, rolling/torsional resistance, arbitrary-shape certified CCD, source calibration and contact adjoints remain outside this owner.
 
 ## Native rigid-body simultaneous frictional impacts
 

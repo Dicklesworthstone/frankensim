@@ -2,10 +2,12 @@
 //!
 //! The plane normal, velocity and applied centre force are constant. Ideal
 //! Coulomb friction has equal static/kinetic coefficients. Persistent contact
-//! admits driven rolling and collinear sliding with exact slip-arrest events;
-//! noncollinear forced sliding refuses instead of approximating its curved path.
+//! admits driven rolling and collinear sliding with exact slip-arrest events.
+//! Changing-direction sliding uses explicitly bounded implicit Coulomb steps,
+//! with first-order continuum convergence and timestep-resolved slip arrest.
 //! Ballistic contact timing and both impulse laws remain in fs-contact.
-//! Centre trajectories and world momenta use analytic constant-force segments.
+//! Centre trajectories and world momenta use analytic constant-force segments;
+//! their curved-sliding force is a time-discrete approximation of Coulomb flow.
 //! Attitude is exact when spin and torque commute, including torque-free
 //! flight and sliding from rest. Otherwise bounded second-order Lie midpoint
 //! steps resolve the changing spin axis. There is no penetration projection.
@@ -34,9 +36,8 @@ pub struct SpherePlane {
     pub normal_world: Vec3,
     /// Constant prescribed material velocity of the plane, in m/s.
     pub velocity_world: Vec3,
-    /// Constant applied centre force in newtons; arbitrary in free flight.
-    /// Supported frictional sliding requires its tangent component to be
-    /// collinear with the relative point slip. Rolling has no such restriction.
+    /// Constant applied centre force in newtons. Resolved transverse driving
+    /// uses the declared curved-sliding timestep and work bounds.
     pub force_world: Vec3,
     /// Newton normal restitution in [0,1].
     pub restitution: f64,
@@ -93,7 +94,7 @@ impl SpherePlaneState {
     }
 }
 
-/// Event and attitude accuracy/work limits.
+/// Event, curved-sliding and attitude accuracy/work limits.
 #[derive(Clone, Copy, Debug)]
 pub struct SpherePlaneConfig {
     /// Maximum published impacts and contact-mode events, at most 4096.
@@ -104,6 +105,14 @@ pub struct SpherePlaneConfig {
     pub max_attitude_step_s: f64,
     /// Maximum attitude substeps per advance, at most one million.
     pub max_attitude_substeps: usize,
+    /// Maximum step for changing-direction Coulomb sliding. This is a
+    /// first-order velocity-implicit discretization, separate from the exact
+    /// collinear segments and their exact slip-arrest times. Refine this value
+    /// to resolve the curved trajectory and its timestep-boundary arrest.
+    pub max_sliding_step_s: f64,
+    /// Maximum curved-sliding trials per advance, at most one million.
+    /// Rejected direction-reversal trials count toward this work bound.
+    pub max_sliding_substeps: usize,
 }
 impl Default for SpherePlaneConfig {
     fn default() -> Self {
@@ -111,6 +120,8 @@ impl Default for SpherePlaneConfig {
             max_events: 128,
             max_attitude_step_s: 0.01,
             max_attitude_substeps: 65_536,
+            max_sliding_step_s: 0.01,
+            max_sliding_substeps: 65_536,
         }
     }
 }
@@ -159,7 +170,9 @@ pub struct SpherePlaneAdvance {
     pub external_force_work: f64,
     /// Signed work supplied by the moving plane, in J.
     pub plane_work: f64,
-    /// Normal impact and tangential slip loss, in J; not a heat allocation.
+    /// Normal impact and actual tangent-force work loss, in J; not a heat
+    /// allocation. Curved-sliding loss belongs to the declared time-discrete
+    /// trajectory and converges with its sliding timestep.
     pub dissipated_energy: f64,
     /// Actual kinetic-energy change minus supplied work plus loss, in J.
     pub energy_balance_residual: f64,
@@ -170,6 +183,8 @@ pub struct SpherePlaneAdvance {
     /// Measured final geometric gap. Known contact may have only the recorded
     /// floating-point geometry residual; position is never projected.
     pub gap_after: f64,
+    /// Accepted plus rejected curved-sliding trials; zero for analytic paths.
+    pub sliding_substeps: usize,
 }
 
 /// Atomic refusal; no partial trajectory or repaired state is returned.
@@ -194,9 +209,8 @@ pub enum SpherePlaneError {
     EventBudget,
     /// Attitude accuracy request exceeds its explicit work cap.
     AttitudeBudget,
-    /// Forced sliding would change slip direction continuously. This analytic
-    /// constant-force contact rung admits only collinear frictional sliding.
-    NonCollinearSliding,
+    /// Curved-sliding accuracy request exceeds its explicit work cap.
+    SlidingBudget,
     /// A positive event interval cannot advance the floating-point clock.
     NoProgress,
     /// Cancellation before publication.
@@ -257,6 +271,7 @@ struct Engine {
     ledger: Ledger,
     events: Vec<SpherePlaneEvent>,
     attitude_steps: usize,
+    sliding_steps: usize,
     velocity_scale: f64,
 }
 impl Engine {
@@ -270,6 +285,9 @@ impl Engine {
             || !(config.max_attitude_step_s.is_finite() && config.max_attitude_step_s > 0.0)
             || config.max_attitude_substeps == 0
             || config.max_attitude_substeps > 1_000_000
+            || !(config.max_sliding_step_s.is_finite() && config.max_sliding_step_s > 0.0)
+            || config.max_sliding_substeps == 0
+            || config.max_sliding_substeps > 1_000_000
         {
             return Err(SpherePlaneError::Invalid(
                 "sphere, restitution, friction, or work limits",
@@ -320,6 +338,7 @@ impl Engine {
             ledger: Ledger::default(),
             events: Vec::new(),
             attitude_steps: 0,
+            sliding_steps: 0,
             velocity_scale: 0.0,
         })
     }
@@ -531,6 +550,115 @@ impl Engine {
         self.kinematics(next)?;
         Ok(next)
     }
+
+    /// Velocity-implicit Coulomb time discretization for resolved curved slip.
+    /// The disk owner chooses the full tangent impulse, including spin inertia.
+    /// The native segment uses it as a constant force over this step. The
+    /// endpoint satisfies Coulomb; continuum direction and arrest need refinement.
+    fn curved_sliding(
+        &mut self,
+        body: RigidBodyState,
+        time: f64,
+        remaining: f64,
+        normal_force: f64,
+        slip: [f64; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(RigidBodyState, f64, bool), SpherePlaneError> {
+        let slip_speed = finite(slip[0].hypot(slip[1]))?;
+        let acceleration = self.acceleration_tangent;
+        let acceleration_speed = finite(acceleration[0].hypot(acceleration[1]))?;
+        let capacity = finite(self.scene.friction_coefficient * normal_force)?;
+        let can_hold = self.inverse_tangent_mass > 1.0
+            && capacity > f64::MAX / self.inverse_tangent_mass
+            || acceleration_speed <= self.inverse_tangent_mass * capacity;
+        let mut h = remaining.min(self.config.max_sliding_step_s);
+        let (friction, arrested) = loop {
+            poll(cancelled)?;
+            if self.sliding_steps >= self.config.max_sliding_substeps {
+                return Err(SpherePlaneError::SlidingBudget);
+            }
+            self.sliding_steps += 1;
+            progress(time, h)?;
+            let free_slip = [
+                finite(acceleration[0].mul_add(h, slip[0]))?,
+                finite(acceleration[1].mul_add(h, slip[1]))?,
+            ];
+            let friction = self.friction(free_slip, finite(normal_force * h)?)?;
+            let after = friction.relative_tangent_velocity_after;
+            let after_speed = finite(after[0].hypot(after[1]))?;
+            let arrested = after_speed <= 4096.0 * f64::EPSILON * self.velocity_scale;
+            // Resolve a turning trajectory without allowing the discrete force
+            // to do positive work on an initial part of its linear slip path.
+            // A supercritical transverse drive cannot arrest at a finite time;
+            // a coarse disk projection to zero must therefore be refined.
+            // Check arrested trials too: an opposing drive can carry the free
+            // velocity through zero and make a coarse stopping impulse assist
+            // the initial slip. Endpoint arrest alone does not make that passive.
+            let impulse_speed = friction.tangent_impulse[0].hypot(friction.tangent_impulse[1]);
+            let positive_initial_work = impulse_speed > 0.0
+                && (friction.tangent_impulse[0] / impulse_speed).mul_add(
+                    slip[0] / slip_speed,
+                    (friction.tangent_impulse[1] / impulse_speed) * (slip[1] / slip_speed),
+                ) > 0.0;
+            if positive_initial_work || (arrested && !can_hold) {
+                h *= 0.5;
+                continue;
+            }
+            break (friction, arrested);
+        };
+        let impulse = self.tangent_vector(friction.tangent_impulse);
+        let tangent_force = impulse.scale(h.recip());
+        vector(tangent_force)?;
+        let next = self.segment(body, h, normal_force, tangent_force, cancelled)?;
+        let (_, after) = self.kinematics(next)?;
+        let allowance = 8192.0 * f64::EPSILON * self.velocity_scale;
+        if (after[0] - friction.relative_tangent_velocity_after[0]).abs() > allowance
+            || (after[1] - friction.relative_tangent_velocity_after[1]).abs() > allowance
+            || (arrested && after[0].hypot(after[1]) > allowance)
+        {
+            return Err(SpherePlaneError::Unresolved(
+                "curved sliding endpoint velocity",
+            ));
+        }
+        let midpoint = [
+            0.5 * slip[0] + 0.5 * after[0],
+            0.5 * slip[1] + 0.5 * after[1],
+        ];
+        let loss = finite(-impulse.dot(self.tangent_vector(midpoint)))?;
+        if loss < 0.0 {
+            return Err(SpherePlaneError::Unresolved("curved sliding friction work"));
+        }
+        self.ledger.loss = finite(self.ledger.loss + loss)?;
+
+        // Normal support is exact in the declared equations. Also bound the
+        // complete native quadratic path's floating geometry residual, not
+        // merely its endpoint, without changing the pose or momentum.
+        let gap0 = self.gap(body, time)?;
+        let gap1 = self.gap(next, finite(time + h)?)?;
+        let normal_velocity = body
+            .center_of_mass_velocity_world(self.scene.properties)?
+            .sub(self.scene.velocity_world)
+            .dot(self.n);
+        let normal_acceleration =
+            self.force_tangent_world.add(tangent_force).dot(self.n) / self.mass;
+        let extremum = -normal_velocity / normal_acceleration;
+        let mut maximum_gap = gap0.abs().max(gap1.abs());
+        if extremum > 0.0 && extremum < h {
+            maximum_gap = maximum_gap.max(
+                finite(gap0 + extremum * (normal_velocity + 0.5 * normal_acceleration * extremum))?
+                    .abs(),
+            );
+        }
+        let geometry_allowance = self
+            .geometry_allowance(body, time)?
+            .max(self.geometry_allowance(next, finite(time + h)?)?);
+        if maximum_gap > geometry_allowance {
+            return Err(SpherePlaneError::Unresolved(
+                "curved sliding supported path",
+            ));
+        }
+        Ok((next, h, arrested))
+    }
 }
 
 /// Advance through detected impacts, normal support, Coulomb sliding and rolling.
@@ -544,11 +672,15 @@ impl Engine {
 /// Arbitrary spin, tangential velocity and constant centre force are admitted
 /// in flight. Persistent contact admits arbitrary driven rolling, and sliding
 /// when the tangent applied force is collinear with slip (including opposing
-/// force and resolved reversal). Noncollinear forced frictional sliding refuses;
-/// frictionless support admits arbitrary tangent force. Static traction keeps
+/// force and resolved reversal). Changing-direction sliding uses explicitly
+/// bounded, first-order velocity-implicit Coulomb steps and resolves arrest at
+/// a timestep boundary. Refinement is required for its continuum trajectory;
+/// no exact curved slip-arrest time is claimed. Static traction keeps
 /// zero slip when its required magnitude fits the Coulomb limit. Sliding arrest
-/// and force-driven slip onset are resolved explicitly, with continuous loss
-/// measured from midpoint slip work. Attitude is exact for commuting spin/torque; the general
+/// and force-driven slip onset are resolved explicitly. Loss is measured from
+/// actual midpoint slip work; curved-step force-direction error is part of the
+/// declared discretization and is not assigned to thermal cells. Attitude is
+/// exact for commuting spin/torque; the general
 /// changing-axis case uses the declared second-order attitude substeps.
 /// Spin about the normal has no torsional/rolling friction.
 /// A constant-velocity plane supplies explicitly signed work. This is floating
@@ -670,7 +802,7 @@ pub fn advance_sphere_plane(
                 };
                 if acceleration_speed > 0.0 && !rolling {
                     // Dimensionless collinearity admits rotation roundoff only;
-                    // a resolved changing slip direction requires another owner.
+                    // resolved transverse drive uses the bounded curved path.
                     let turn = direction[0].mul_add(
                         acceleration[1] / acceleration_speed,
                         -direction[1] * (acceleration[0] / acceleration_speed),
@@ -701,7 +833,31 @@ pub fn advance_sphere_plane(
             // direction after rotation. Admit it only below the velocity
             // resolution of this segment, never as a resolved curved path.
             if transverse_acceleration > (256.0 * f64::EPSILON * slip_speed) / h {
-                return Err(SpherePlaneError::NonCollinearSliding);
+                let (next, step, arrested) = engine.curved_sliding(
+                    body,
+                    time,
+                    remaining,
+                    normal_force,
+                    slip,
+                    &mut cancelled,
+                )?;
+                progress(elapsed, step)?;
+                body = next;
+                elapsed = if step == remaining {
+                    duration_s
+                } else {
+                    elapsed + step
+                };
+                if arrested {
+                    mode = SpherePlaneMode::Rolling;
+                    engine.event(
+                        finite(state.time_s + elapsed)?,
+                        SpherePlaneEventKind::Rolling,
+                        0.0,
+                        Vec3::ZERO,
+                    )?;
+                }
+                continue;
             }
             // The existing disk owner selects the integrated traction from
             // the force-driven free slip. Event splitting ensures this impulse
@@ -885,6 +1041,7 @@ pub fn advance_sphere_plane(
         linear_momentum_residual,
         angular_momentum_residual,
         gap_after,
+        sliding_substeps: engine.sliding_steps,
     })
 }
 // Compare directions, not dimensionful products: a common length or mass

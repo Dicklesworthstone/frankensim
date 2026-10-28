@@ -6,6 +6,9 @@ use fs_mbd::sphere_plane::{
 };
 use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 
+#[path = "sphere_plane/curved.rs"]
+mod curved;
+
 const MASS: f64 = 2.0;
 const RADIUS: f64 = 0.5;
 const INERTIA: f64 = 0.2;
@@ -653,10 +656,13 @@ fn unsupported_physics_and_exhausted_event_budget_refuse_atomically() {
             &noncollinear,
             sliding,
             0.3,
-            SpherePlaneConfig::default(),
+            SpherePlaneConfig {
+                max_sliding_substeps: 1,
+                ..SpherePlaneConfig::default()
+            },
             || false,
         ),
-        Err(SpherePlaneError::NonCollinearSliding)
+        Err(SpherePlaneError::SlidingBudget)
     ));
     let anisotropic = SpherePlane {
         properties: MassProperties::new(MASS, Vec3::ZERO, Vec3::new(0.2, 0.21, 0.22)).unwrap(),
