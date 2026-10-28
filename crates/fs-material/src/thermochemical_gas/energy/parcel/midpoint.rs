@@ -1,16 +1,17 @@
 //! Simultaneous closed-gas heating and volume work in conservative coordinates.
 //!
-//! This is the implicit midpoint material update in (specific internal energy,
-//! volume), NOT an average of endpoint temperatures or an isentropic shortcut.
-//! At Vm=(V0+V1)/2, solve 2*(u(Tm)-u0)+pm*(V1-V0)/m=Q/m. The endpoint then uses
-//! the existing density/energy closure with m*(u1-u0)=Q-pm*(V1-V0). Both stages
-//! resolve the original NASA-9, EOS and transport sources. Mechanical consumers
-//! must use THIS pm for their work-conjugate load, not endpoint pressure.
+//! This is implicit midpoint in (specific internal energy, volume), NOT an
+//! average of endpoint temperatures or an isentropic shortcut. At Vm=(V0+V1)/2,
+//! solve Delta u(T0,Tm)+pm*(V1-V0)/(2m)=Q/(2m), then reconstruct the endpoint
+//! from Delta u(T0,T1)=2*Delta u(T0,Tm), independently auditing Q-pm*(V1-V0).
+//! Both increments use the original NASA-9
+//! difference law, so formation references cannot erase heat or boundary work.
+//! Mechanical consumers must use THIS pm, not endpoint pressure, in their load.
 //!
 //! Frozen composition and spatially uniform gas only. Midpoint is a time
 //! discretization, not an exact finite isentrope: entropy is reported, not
-//! constrained to be conserved or nondecreasing. A caller still owns physical
-//! heat transfer, motion, entropy accounting and timestep-refinement checks.
+//! constrained to be conserved or nondecreasing. The caller owns physical heat
+//! transfer, motion, entropy accounting and timestep-refinement checks.
 //! First-law sign convention: https://www.grc.nasa.gov/www/k-12/airplane/thermo1.html
 
 /// Discrete mechanical force and sensitivity pullbacks for the same midpoint state.
@@ -32,13 +33,13 @@ pub struct GasHeatVolumeStep {
     pub supplied_heat_j: f64,
     /// Work OUT of the gas: midpoint pressure times volume change [J].
     pub work_by_gas_j: f64,
-    /// Actual m*(u1-u0) from the accepted material states [J].
+    /// Original-law m*Delta u between accepted temperatures [J].
     pub stored_energy_change_j: f64,
     /// Actual stored energy plus work minus heat [J].
     pub energy_residual_j: f64,
     /// Actual m*(s1-s0) [J/K]; NOT entropy production or an isentropy certificate.
     pub entropy_change_j_k: f64,
-    /// Actual 2*(um-u0)-(u1-u0) [J/kg].
+    /// Original-law 2*Delta u(T0,Tm)-Delta u(T0,T1) [J/kg].
     pub midpoint_energy_residual_j_kg: f64,
     /// d(pm)/d(V1) with initial state and total heat held fixed [Pa/m3].
     pub pressure_final_volume_derivative_pa_m3: f64,
@@ -78,15 +79,14 @@ impl ClosedGasParcel {
     /// `heat_j` is whole-step energy, not watts; positive heat enters the gas.
     /// The caller owns the time interval and its work-conjugate motion solve.
     ///
-    /// Each bounded inversion uses at most maximum_iterations+2 thermal samples;
-    /// each accepted stage then resolves the original transport cards. Both
-    /// stages, the old temperature and all source conditions must be admitted.
-    /// Absolute joule and stage-energy gates precede return. No bracket-width,
-    /// nominal-gamma, clipped-temperature or partial-state fallback is present.
-    ///
-    /// For fixed volume this agrees with the existing nonlinear add_heat result,
-    /// while retaining the midpoint needed by other physical consumers. At zero
-    /// heat AND zero motion the endpoint is preserved bit-for-bit.
+    /// Prepare source continuity and positive-capacity bounds once for both
+    /// stages, then evaluate original caloric increments without trial receipts.
+    /// Each bounded inversion uses at most maximum_iterations+2 samples; each
+    /// accepted stage resolves original transport cards. Both stages and the old
+    /// temperature must lie in the continuous admitted branch. Joule and stage-
+    /// energy gates precede return, without bracket-width or clipped fallbacks.
+    /// For fixed volume this agrees with nonlinear add_heat. At zero heat AND
+    /// zero motion the endpoint is preserved bit-for-bit.
     pub fn midpoint_heat_volume(
         &self, volume_m3: f64, heat_j: f64, controls: GasEnergySolve,
         mut cancelled: impl FnMut() -> bool,
@@ -111,8 +111,15 @@ impl ClosedGasParcel {
             return Err(invalid("midpoint density, heat or absolute joule tolerance is unrepresentable"));
         }
         let ratio = dv / vm;
-        let initial_u = old.state.specific_internal_energy_j_kg();
         let unchanged = dv == 0.0 && heat_j == 0.0;
+        let branch = if unchanged { None }
+            else { Some(old.model.prepare_caloric_branch(inner, &mut cancelled)?) };
+        let increment = |t| -> Result<f64, GasEnergyError> {
+            old.model.thermodynamics().specific_internal_energy_change(
+                Temperature::new(temperature), Temperature::new(t),
+            ).map(|value| value.value())
+                .map_err(|error| super::super::super::failure("midpoint energy increment", error).into())
+        };
         let (midpoint, midpoint_iterations) = if unchanged {
             (old.state.clone(), 0)
         } else {
@@ -121,9 +128,8 @@ impl ClosedGasParcel {
                 let properties = old.model.thermodynamics().evaluate_properties(Temperature::new(t), reference)
                     .map_err(|error| super::super::super::failure("midpoint energy", error))?;
                 let r = properties.mass_specific_gas_constant().value();
-                let u = properties.u().value() / properties.molar_mass().value();
                 Ok(root::Sample {
-                    residual: (u - initial_u) + 0.5 * (ratio * r * t - q),
+                    residual: increment(t)? + 0.5 * (ratio * r * t - q),
                     tangent: properties.mass_specific_cv().value() + 0.5 * ratio * r,
                     pressure_pa: density * r * t,
                 })
@@ -139,25 +145,26 @@ impl ClosedGasParcel {
         };
         let gas = midpoint.state();
         let work = gas.pressure * dv;
-        let change = (heat_j - work) / old.mass_kg;
+        // Enforce the actual caloric midpoint relation at the endpoint. The
+        // independent first-law gate below still checks the requested heat and
+        // actual pressure work, not a recomputed or rounded heat input.
+        let change = 2.0 * increment(gas.temperature)?;
         if !work.is_finite() || !change.is_finite() || (dv != 0.0 && work == 0.0) {
             return Err(invalid("midpoint pressure work or specific energy change is unrepresentable"));
         }
-        let (endpoint, endpoint_iterations) = if unchanged {
-            (self.clone(), 0)
-        } else {
-            let solved = old.model.solve_energy_change(&old.point, old.mass_kg / volume_m3,
-                initial_u, change, inner, &mut cancelled)?;
+        let (endpoint, endpoint_iterations) = if let Some(branch) = branch {
+            let solved = branch.reconstruct_density_internal_energy_increment(
+                &old.point, old.mass_kg / volume_m3, change, &mut cancelled)?;
             let mut parcel = old.clone();
             parcel.point = updated_point(&old.point, solved.state().state().temperature, solved.state().state().pressure)?;
             parcel.state = solved.state().clone();
             parcel.volume_m3 = volume_m3;
             (ClosedGasParcel::from_isochoric(parcel), solved.iterations())
-        };
-        let du = endpoint.state().specific_internal_energy_j_kg() - initial_u;
+        } else { (self.clone(), 0) };
+        let du = increment(endpoint.state().state().temperature)?;
         let stored = old.mass_kg * du;
         let residual = (stored + work) - heat_j;
-        let stage_residual = 2.0 * (midpoint.specific_internal_energy_j_kg() - initial_u) - du;
+        let stage_residual = 2.0 * increment(midpoint.state().temperature)? - du;
         let entropy_change = old.mass_kg * old.model.specific_entropy_change_j_kg_k(
             &old.point, endpoint.point())?;
         if !stored.is_finite() || !residual.is_finite() || residual.abs() > tolerance_j
@@ -165,9 +172,7 @@ impl ClosedGasParcel {
             || !entropy_change.is_finite() {
             return Err(invalid("midpoint/endpoint material states did not close heat-work energy balance"));
         }
-        // Differentiate the same residual, using the owner's actual cv(Tm).
-        // These are DISCRETE derivatives; the isentropic static tangent is not
-        // interchangeable with them during a heated midpoint coupling solve.
+        // Differentiate the same discrete residual, not a static isentropic law.
         let cv = midpoint.thermodynamics().properties().mass_specific_cv().value();
         let r = gas.specific_gas_constant;
         let denominator = cv + 0.5 * ratio * r;
@@ -190,3 +195,5 @@ impl ClosedGasParcel {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod increments;
