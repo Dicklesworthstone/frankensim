@@ -30,6 +30,12 @@ pub mod radiation;
 pub use radiation::{
     FreeSurfaceRadiationExchange, FreeSurfaceRadiationFace, FreeSurfaceRadiationSample,
 };
+/// Solved liquid/gas/radiation interface temperatures with finite gas feedback.
+pub mod surface;
+pub use surface::{
+    FreeSurfaceInterfaceContact, FreeSurfaceInterfaceExchange, FreeSurfaceInterfaceFace,
+    FreeSurfaceInterfaceSample, FreeSurfaceInterfaceSolve,
+};
 /// Finite atmospheric storage on the same thermal and native VOF interval.
 pub mod atmosphere;
 pub use atmosphere::FreeSurfaceFiniteGasExchange;
@@ -94,6 +100,9 @@ pub struct FreeSurfaceConductionReport {
     /// Radiant heat from prescribed surroundings, already counted once in
     /// external heat. Gas-film heat remains a distinct, parallel mechanism.
     pub radiation: Option<FreeSurfaceRadiationExchange>,
+    /// Gas and radiant exchange through a solved zero-storage surface node.
+    /// Its two signed supplies already enter external heat exactly once.
+    pub surface: Option<FreeSurfaceInterfaceExchange>,
     /// Additional finite gas storage account when the environment has an owner.
     /// Gas/liquid exchange is internal to this combined thermal system.
     pub finite_gas: Option<FreeSurfaceFiniteGasExchange>,
@@ -147,6 +156,15 @@ struct Conduction<'a, 'm> {
     radiation_endpoint: Vec<FreeSurfaceRadiationSample>,
     radiation_heat_j: f64,
     radiation_absolute_heat_j: f64,
+    surfaces: &'a [FreeSurfaceInterfaceContact<'a>],
+    surface_solve: FreeSurfaceInterfaceSolve,
+    surface_endpoints: Vec<CellId>,
+    surface_last: Vec<FreeSurfaceInterfaceSample>,
+    surface_endpoint: Vec<FreeSurfaceInterfaceSample>,
+    surface_reference: Vec<FreeSurfaceInterfaceSample>,
+    surface_gas_heat_j: f64,
+    surface_radiant_heat_j: f64,
+    surface_absolute_heat_j: f64,
     finite_atmosphere: Option<atmosphere::FiniteAtmosphere>,
     electrical: Option<electrical::ElectricalTimeline>,
 }
@@ -319,6 +337,15 @@ impl DepositionObserver for Conduction<'_, '_> {
             let watts = powers.entry(id).or_insert(0.0);
             *watts = environment::finite(*watts + sample.heat_into_liquid_w)?;
         }
+        self.surface_last = self.sample_surfaces(thermal, check)?;
+        if self.surface_reference.is_empty() {
+            self.surface_reference = self.surface_last.clone();
+        }
+        for (&id, sample) in self.surface_endpoints.iter().zip(&self.surface_last) {
+            check()?;
+            let watts = powers.entry(id).or_insert(0.0);
+            *watts = environment::finite(*watts + sample.heat_into_liquid_w)?;
+        }
         Ok(powers)
     }
 
@@ -379,6 +406,17 @@ impl DepositionObserver for Conduction<'_, '_> {
             self.environment_absolute_heat_j =
                 environment::finite(self.environment_absolute_heat_j + heat.abs())?;
         }
+        for sample in &self.surface_last {
+            check()?;
+            let gas_j = environment::finite(duration_s * sample.heat_from_gas_w)?;
+            let radiant_j = environment::finite(duration_s * sample.heat_from_radiation_w)?;
+            gas_heat = environment::finite(gas_heat + gas_j)?;
+            self.surface_gas_heat_j = environment::finite(self.surface_gas_heat_j + gas_j)?;
+            self.surface_radiant_heat_j = environment::finite(self.surface_radiant_heat_j + radiant_j)?;
+            self.surface_absolute_heat_j = environment::finite(
+                self.surface_absolute_heat_j + gas_j.abs() + radiant_j.abs(),
+            )?;
+        }
         if let Some(gas) = &mut self.finite_atmosphere {
             gas.accept_heat(-gas_heat, check)?;
         }
@@ -392,6 +430,7 @@ impl DepositionObserver for Conduction<'_, '_> {
                 environment::finite(self.radiation_absolute_heat_j + heat.abs())?;
         }
         self.radiation_endpoint = self.sample_radiation(thermal, check)?;
+        self.surface_endpoint = self.sample_surfaces(thermal, check)?;
         Ok(())
     }
 }
@@ -534,6 +573,30 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         finite_atmosphere: Option<&mut atmosphere::FiniteAtmosphere>,
         gate: &CancelGate,
     ) -> Result<FreeSurfaceConductionReport, Error> {
+        self.advance_with_thermal_boundaries(
+            faces, heat, controls, viscous, bodies, contacts, interfaces,
+            environment, radiation, &[], FreeSurfaceInterfaceSolve::default(),
+            finite_atmosphere, gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_with_thermal_boundaries(
+        &mut self,
+        faces: &[FreeSurfaceConductionFace],
+        heat: &[FreeSurfaceCellHeat],
+        controls: FreeSurfaceConductionControls,
+        viscous: &[viscous::FreeSurfaceViscousCell],
+        bodies: &mut [FreeSurfaceThermalBody<'_>],
+        contacts: &[FreeSurfaceBodyContact],
+        interfaces: &[FreeSurfaceBodyInterface<'_>],
+        environment: &[FreeSurfaceGasContact<'_>],
+        radiation: &[FreeSurfaceRadiationFace],
+        surfaces: &[FreeSurfaceInterfaceContact<'_>],
+        surface_solve: FreeSurfaceInterfaceSolve,
+        finite_atmosphere: Option<&mut atmosphere::FiniteAtmosphere>,
+        gate: &CancelGate,
+    ) -> Result<FreeSurfaceConductionReport, Error> {
         poll(gate)?;
         if controls.maximum_faces > self.controls.max_mass_routes
             || faces
@@ -541,6 +604,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 .saturating_add(contacts.len())
                 .saturating_add(environment.len())
                 .saturating_add(radiation.len())
+                .saturating_add(surfaces.len())
                 > controls.maximum_faces
             || bodies.len() > self.controls.max_cells
             || heat.len() > self.controls.max_cells
@@ -750,6 +814,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         }
         let environment_endpoints = self.admit_environment(environment, &cell_id, dx, gate)?;
         let radiation_endpoints = self.admit_radiation(radiation, &cell_id, dx, gate)?;
+        let surface_endpoints = self.admit_surfaces(surfaces, surface_solve, &cell_id, dx, gate)?;
         let mut powers = BTreeMap::new();
         let mut absolute_heat = 0.0;
         let mut external_heat = 0.0;
@@ -855,6 +920,15 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             radiation_endpoint: Vec::new(),
             radiation_heat_j: 0.0,
             radiation_absolute_heat_j: 0.0,
+            surfaces,
+            surface_solve,
+            surface_endpoints,
+            surface_last: Vec::new(),
+            surface_endpoint: Vec::new(),
+            surface_reference: Vec::new(),
+            surface_gas_heat_j: 0.0,
+            surface_radiant_heat_j: 0.0,
+            surface_absolute_heat_j: 0.0,
             finite_atmosphere: finite_atmosphere.as_deref().cloned(),
             electrical,
         };
@@ -866,7 +940,8 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             .map(|current| current.average_forces(&self.flow.scaling)).transpose()?.flatten();
         let joule_heat = electrical_report.as_ref().map_or(0.0, |current| current.joule_heat_j);
         let mut finite_gas_report = observer.finite_atmosphere.as_ref()
-            .map(|gas| gas.balance(observer.environment_heat_j, &audit, controls.energy_tolerance_j))
+            .map(|gas| gas.balance(observer.environment_heat_j + observer.surface_gas_heat_j,
+                &audit, controls.energy_tolerance_j))
             .transpose()?;
         let mut heated = self.h.clone();
         for (location, id) in ids {
@@ -876,19 +951,22 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         let external = if viscous.is_empty()
             && environment.is_empty()
             && radiation.is_empty()
+            && surfaces.is_empty()
             && electrical_report.is_none()
         {
             audit.external_heat_j
         } else {
             let defect =
                 audit.external_heat_j - external_heat - viscous_heat - observer.environment_heat_j
-                    - observer.radiation_heat_j - joule_heat;
+                    - observer.radiation_heat_j - observer.surface_gas_heat_j
+                    - observer.surface_radiant_heat_j - joule_heat;
             if !defect.is_finite() || defect.abs() > controls.energy_tolerance_j {
                 return Err(Error::Invalid(
                     "authored, molecular, electrical, gas-film and radiant liquid heat do not close",
                 ));
             }
-            external_heat + observer.environment_heat_j + observer.radiation_heat_j + joule_heat
+            external_heat + observer.environment_heat_j + observer.radiation_heat_j
+                + observer.surface_gas_heat_j + observer.surface_radiant_heat_j + joule_heat
         };
         let mut body_after = 0.0;
         let mut body_change = 0.0;
@@ -924,6 +1002,12 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             last_applied: observer.radiation_last,
             thermal_endpoint: observer.radiation_endpoint,
         });
+        let surface_report = (!surfaces.is_empty()).then_some(FreeSurfaceInterfaceExchange {
+            heat_from_gas_j: observer.surface_gas_heat_j,
+            heat_from_radiation_j: observer.surface_radiant_heat_j,
+            last_applied: observer.surface_last,
+            thermal_endpoint: observer.surface_endpoint,
+        });
         let flow = self.advance_prepared_enthalpy(
             heated,
             external,
@@ -933,6 +1017,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 + body_heat.abs()
                 + observer.environment_absolute_heat_j
                 + observer.radiation_absolute_heat_j
+                + observer.surface_absolute_heat_j
                 + joule_heat,
             electrical_forces.as_ref(),
             gate,
@@ -970,6 +1055,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             bodies: body_report,
             environment: environment_report,
             radiation: radiation_report,
+            surface: surface_report,
             finite_gas: finite_gas_report,
             electrical: electrical_report,
         })

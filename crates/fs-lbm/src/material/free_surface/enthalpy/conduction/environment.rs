@@ -286,6 +286,11 @@ impl Conduction<'_, '_> {
                 *g = finite(*g + sample.conductance_w_k)?;
             }
         }
+        for (&id, sample) in self.surface_endpoints.iter().zip(&self.surface_last) {
+            check()?;
+            let g = outgoing.entry(id).or_insert(0.0);
+            *g = finite(*g + sample.liquid_decay_conductance_w_k)?;
+        }
         if outgoing.is_empty() {
             return Ok(proposed_s);
         }
@@ -317,6 +322,12 @@ impl Conduction<'_, '_> {
             for sample in &self.environment_last {
                 check()?;
                 conductance = finite(conductance + sample.conductance_w_k)?;
+            }
+            // Eliminating the surface also couples gas to the radiative bath.
+            // Its finite capacity must include BOTH gas-side decay channels.
+            for sample in &self.surface_last {
+                check()?;
+                conductance = finite(conductance + sample.gas_decay_conductance_w_k)?;
             }
             let decay = finite(gas.temperature_slope * conductance / gas.parcel.mass_kg())?;
             if decay > 0.0 {

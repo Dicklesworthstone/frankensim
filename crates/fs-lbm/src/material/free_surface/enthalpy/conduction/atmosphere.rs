@@ -7,8 +7,8 @@ use fs_material::thermochemical_gas::energy::{GasEnergySolve, IsochoricGasParcel
 
 /// Finite gas account over one accepted native VOF/enthalpy interval.
 ///
-/// The original `environment.heat_to_liquid_j` appears in the liquid subsystem's
-/// external heat, but is INTERNAL to liquid + finite walls + this atmosphere.
+/// Gas-supplied heat in `environment` or a solved `surface` appears in the liquid
+/// subsystem's external heat, but is INTERNAL to liquid + walls + atmosphere.
 /// Molecular heat retains its original account; it is not gas work or an
 /// additional external heat source. No full VOF kinetic-energy claim is added.
 #[derive(Clone, Debug, PartialEq)]
@@ -17,7 +17,8 @@ pub struct FreeSurfaceFiniteGasExchange {
     pub internal_energy_change_j: f64,
     /// Actual gas storage change plus its opposite supplied liquid heat.
     pub gas_balance_defect_j: f64,
-    /// Combined actual liquid/wall/gas storage minus authored and molecular heat.
+    /// Combined actual liquid/wall/gas storage minus authored, molecular,
+    /// electrical and radiant heat, according to their original accounts.
     pub combined_thermal_balance_defect_j: f64,
     /// Accumulated absolute allowance from the original gas energy inversion.
     pub gas_energy_tolerance_j: f64,
@@ -34,7 +35,7 @@ pub(super) struct FiniteAtmosphere {
 }
 
 impl FiniteAtmosphere {
-    fn try_new(parcel: &IsochoricGasParcel, controls: GasEnergySolve) -> Result<Self, Error> {
+    pub(super) fn try_new(parcel: &IsochoricGasParcel, controls: GasEnergySolve) -> Result<Self, Error> {
         let temperature_slope = parcel
             .model()
             .maximum_isochoric_temperature_slope(controls)?;

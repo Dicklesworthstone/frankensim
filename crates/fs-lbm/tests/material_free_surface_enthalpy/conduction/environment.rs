@@ -17,6 +17,9 @@ mod atmosphere;
 #[path = "radiation.rs"]
 mod radiation;
 
+#[path = "surface.rs"]
+mod surface;
+
 const EXPOSED: [usize; 3] = [3, 3, 3];
 
 fn gas_contact<'a>(

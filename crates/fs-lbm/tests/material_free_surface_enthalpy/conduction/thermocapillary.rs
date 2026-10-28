@@ -1,6 +1,9 @@
 //! Numerical planar thermocapillary flow; authored coefficients, not validation.
 
 use super::*;
+use fs_lbm::material::free_surface::enthalpy::conduction::{
+    FreeSurfaceInterfaceContact, FreeSurfaceInterfaceFace, FreeSurfaceInterfaceSolve,
+};
 use fs_lbm::material::free_surface::enthalpy::thermocapillary::PlanarThermocapillarity;
 
 const DX: f64 = 0.001;
@@ -50,6 +53,19 @@ fn plane() -> PlanarThermocapillarity {
         surface_position_m: 3.5 * DX,
         maximum_departure_m: 0.01 * DX,
         minimum_surface_fill: 0.25,
+    }
+}
+
+fn heat_surface() -> FreeSurfaceInterfaceFace {
+    FreeSurfaceInterfaceFace {
+        face: FreeSurfaceGasFace {
+            liquid: SURFACE,
+            gas: [3, 3, 4],
+            area_m2: DX * DX,
+            distances_m: [0.25 * DX, 0.5 * DX],
+        },
+        emissivity: 0.8,
+        surroundings_k: 400.0,
     }
 }
 
@@ -239,6 +255,35 @@ fn g1_constant_planar_limit_preserves_original_thermal_population_bits() {
             original.total_enthalpy_j().unwrap(),
             planar.total_enthalpy_j().unwrap()
         );
+        // A true source-declared constant sigma is compatible with the solved
+        // thermal surface, including when the planar traction owner is bound.
+        let gas = gas_source::model(0.0, 250000.0, 1.0);
+        let context = gas_source::point(400.0, 100000.0);
+        for thermal in [&mut original, &mut planar] {
+            let report = thermal
+                .step_with_surface_exchange(
+                    &[],
+                    &[],
+                    controls(),
+                    &mut [],
+                    &[],
+                    &[],
+                    &[FreeSurfaceInterfaceContact {
+                        surface: heat_surface(),
+                        model: &gas,
+                        context: &context,
+                    }],
+                    FreeSurfaceInterfaceSolve::default(),
+                    false,
+                    &gate,
+                )
+                .unwrap();
+            assert_eq!(report.conduction.flow.external_heat_j, 0.0);
+        }
+        assert_eq!(
+            original.flow().lattice().grid().state_bits(),
+            planar.flow().lattice().grid().state_bits()
+        );
     });
 }
 
@@ -254,6 +299,44 @@ fn g4_late_source_geometry_and_work_refusals_keep_all_accepted_histories() {
             let bits = thermal.flow().lattice().grid().state_bits();
             let energy = thermal.total_enthalpy_j().unwrap();
             let source = thermal.material_at(SURFACE).unwrap().clone();
+            let mut gas = IsochoricGasParcel::new(
+                gas_source::model(0.0, 250000.0, 1.0),
+                gas_source::point(400.0, 100000.0),
+                1e-7,
+            )
+            .unwrap();
+            let gas_before = gas.state().clone();
+            let error = thermal
+                .step_with_finite_gas_surface_exchange(
+                    &[],
+                    &[],
+                    controls(),
+                    &mut [],
+                    &[],
+                    &[],
+                    &mut gas,
+                    &[heat_surface()],
+                    GasEnergySolve {
+                        minimum_temperature_k: 200.0,
+                        maximum_temperature_k: 690.0,
+                        energy_tolerance_j_kg: 1e-7,
+                        maximum_iterations: 128,
+                    },
+                    FreeSurfaceInterfaceSolve::default(),
+                    false,
+                    gate,
+                )
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                FreeSurfaceEnthalpyError::Invalid(
+                    "solved surface temperature needs a shared thermocapillary surface field"
+                )
+            ));
+            assert_eq!(gas.state(), &gas_before);
+            assert_eq!(bits, thermal.flow().lattice().grid().state_bits());
+            assert_eq!(energy, thermal.total_enthalpy_j().unwrap());
+            assert_eq!(&source, thermal.material_at(SURFACE).unwrap());
             // One half-full cell has 0.5mg and 0.001J/K heat capacity.
             // The candidate would warm it 2K beyond the pinned sigma domain.
             assert!(

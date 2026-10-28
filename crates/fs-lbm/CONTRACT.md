@@ -3405,3 +3405,69 @@ Test targets are the native `d3q19::freesurface3::thermocapillary` unit module
 and `material_free_surface_enthalpy`'s
 `conduction::capillarity::thermocapillary` module with `enthalpy-coupling` enabled.
 The broad MR26/MR27 deliveries remain open.
+
+### Solved liquid/gas/radiative surface temperature (MR19/MR20 increment)
+
+`MaterialFreeSurfaceEnthalpy3::step_with_surface_exchange` solves one shared
+zero-storage interface temperature for liquid conduction, a declared gas film
+and gray opaque radiation to black isothermal surroundings. The companion
+`step_with_finite_gas_surface_exchange` attaches the existing fixed-mass,
+fixed-volume NASA-9 atmosphere. These entrypoints run on the original thermal
+substeps before the same native rheology, VOF enthalpy and momentum update.
+
+The caller supplies currently exposed face area, liquid-centroid distance,
+gas-film thickness, emissivity and radiative-bath temperature. Liquid half-cell
+conductivity is sampled at its current bulk temperature; gas conductivity is
+resolved at the mean of solved surface and actual gas-bulk temperatures, with
+the gas's current EOS pressure and original composition/source conditions.
+The surface balance is `Gl (Tl - Ts) + Gg (Tg - Ts) + Gr (Tr - Ts) = 0`, where
+`Gr = emissivity sigma A (Ts + Tr) (Ts^2 + Tr^2)` is the exact fourth-power
+secant. The finite-volume liquid half-cell approximation remains explicit;
+there is no inferred convective coefficient or parallel radiation path that
+bypasses its resistance.
+
+A bounded safeguarded scalar solve requires both temperature and power
+residual tolerances. Its trials intersect the current pure-liquid caloric
+interval, connected NASA temperature support and original gas transport
+claim domains. A hot radiative reservoir is never queried as gas, so a
+supported interior root can exist when that reservoir is outside the gas
+source range. Every film trial still passes through the original complete
+source evaluator; invalid interpolation trials backtrack within the same work
+budget, and switched source claims cannot supply an accepted root. Neither an
+unsupported phase/film solution nor exhausted work publishes partial state.
+
+With `S = Gl + Gg + Gr`, eliminating the surface produces nonnegative pair
+conductances `Gl Gg / S`, `Gl Gr / S`, and `Gg Gr / S`. The resulting pair
+powers conserve exchange independently of the bounded scalar residual. Liquid
+and finite-gas CFL rows each include all incident conductances, together with
+the liquid's original conduction/contact losses. In particular, the finite
+gas limit includes its radiative-reservoir path through the shared surface.
+Every accepted interval stores the exact opposite gas-supplied joules in the
+original internal-energy owner. Radiation can therefore warm initially
+equal-temperature liquid and gas, with only the radiant supply external to
+their union. Separate surface reports already enter thermal/flow heat once;
+endpoint diagnostics supply no additional energy.
+
+This is a first-order explicit thermal/flow split with a quasi-steady film,
+bulk-sampled liquid half-cell conductivity and prescribed view factor one.
+It requires temporal and spatial refinement for accuracy. No evaporation,
+surface heat capacity, gas momentum/pressure work, participating-gas radiation,
+moving-solid handoff or liquid phase conversion is supplied. The existing
+resolved-cell radiation entrypoint retains its cell-temperature semantics.
+Combining this mode with temperature-dependent thermocapillarity refuses:
+the existing traction owner reads cell temperature and does not consume a
+complete solved interface-temperature field. Source-declared constant
+capillarity remains supported, including its planar limit. All original
+resolved-cell thermal/thermocapillary entrypoints retain their behavior.
+
+Six focused regressions in `material_free_surface_enthalpy`'s
+`conduction::environment::surface` module cover independent nonlinear film
+roots and heat, NASA gas storage/pressure, small-gas radiative stiffness,
+supported roots under hotter out-of-domain radiant baths and partially
+supported gas-source interpolation, and actual native
+viscosity/population changes, and atomic liquid/wall/gas refusal/retry.
+Their source coefficients are authored synthetic data, not experimental
+validation. The broader MR19/MR20 multiphysics deliveries remain open.
+The existing planar capillarity regressions additionally check constant-source
+native parity and transactional refusal of a conflicting temperature-dependent
+surface-stress closure.
