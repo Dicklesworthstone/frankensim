@@ -421,11 +421,14 @@ fn cnt_004_tight_clearance_and_circle() {
 /// μ times the normal load than when it sits inside the cone.
 #[test]
 fn cnt_005_friction_cone() {
-    let mesh = Mesh2::quads(1.0, 1.0, 6, 6);
+    // A squat block separates sliding from the original tall fixture's
+    // initial overturning moment. The large pull still causes lift-off
+    // and an indefinite tangent after friction loses sticking stiffness.
+    let mesh = Mesh2::quads(1.0, 0.25, 2, 2);
     let material = card();
     let mu = 0.5;
     let q = 0.2;
-    let run = |tx: f64| -> f64 {
+    let run = |tx: f64| -> (f64, u32) {
         let pull = move |_: f64, _: f64| [tx, -q];
         let hyper = HyperProblem {
             mesh: &mesh,
@@ -448,17 +451,67 @@ fn cnt_005_friction_cone() {
             friction: Some(Friction {
                 mu,
                 eps_v: 1e-4,
-                rounds: 4,
+                rounds: 40,
             }),
             // Minimal x-pins remove the rigid-body nullspace; this
             // gate measures the friction law's stick/slip response,
             // not nullspace regularization.
             pins: x_pins(&mesh),
-            max_newton: 300,
-            tol: 6.5e-2,
+            max_newton: 30,
+            tol: 1e-8,
         };
         let sol = problem.solve(1.0).expect("friction equilibrium");
         assert!(sol.min_gap_ever > 0.0, "intersection-free under friction");
+        assert!(sol.residual < problem.tol);
+        assert!(
+            sol.iterations <= 100,
+            "sliding must not crawl along raw gradients"
+        );
+        // The x-pin carries the tangential load in excess of the Coulomb
+        // bound. Include that actual reaction in global force balance.
+        let (elastic_residual, _) = hyper
+            .residual_and_tangent(&sol.u, 1.0)
+            .expect("elastic residual");
+        let mut force = [tx, -q];
+        for (normal, tangent) in sol.reactions.iter().zip(&sol.friction_reactions) {
+            for a in 0..2 {
+                force[a] += normal[a] + tangent[a];
+            }
+        }
+        for &(dof, _) in &problem.pins {
+            let i = dof / 2;
+            let a = dof % 2;
+            force[a] += elastic_residual[dof] - sol.reactions[i][a] - sol.friction_reactions[i][a];
+        }
+        assert!(
+            force.iter().all(|f| f.abs() < 1e-7),
+            "force imbalance {force:?}"
+        );
+        let mut sliding_contacts = 0;
+        for (i, (normal, tangent)) in sol
+            .reactions
+            .iter()
+            .zip(&sol.friction_reactions)
+            .enumerate()
+        {
+            let normal_force = normal[0].hypot(normal[1]);
+            let tangent_force = tangent[0].hypot(tangent[1]);
+            assert!(tangent_force <= mu * normal_force + 1e-12);
+            assert!(
+                tangent[0] * sol.u[2 * i] <= 1e-14,
+                "friction must oppose slip"
+            );
+            if normal_force > 1e-8 && sol.u[2 * i].abs() > 1.01e-4 {
+                sliding_contacts += 1;
+                assert!((tangent_force - mu * normal_force).abs() < 1e-10);
+            }
+        }
+        if tx > mu * q {
+            assert!(
+                sliding_contacts > 0,
+                "gross sliding must reach the Coulomb bound"
+            );
+        }
         // Mean tangential displacement of the bottom row.
         let mut acc = 0.0;
         let mut cnt = 0.0;
@@ -468,15 +521,15 @@ fn cnt_005_friction_cone() {
                 cnt += 1.0;
             }
         }
-        (acc / cnt).abs()
+        ((acc / cnt).abs(), sol.iterations)
     };
-    let stick = run(0.5 * mu * q); // half the cone
-    let slip = run(2.0 * mu * q); // double the cone
+    let (stick, stick_iterations) = run(0.5 * mu * q); // half the cone
+    let (slip, slip_iterations) = run(2.0 * mu * q); // double the cone
     verdict(
         "cnt-005-friction-cone",
         slip > 10.0 * stick.max(1e-12) && stick < 5e-3,
         &format!(
-            "bottom-row slip: inside cone {stick:.3e}, outside cone {slip:.3e} (ratio {:.1})",
+            "bottom-row slip: inside cone {stick:.3e}, outside cone {slip:.3e} (ratio {:.1}); Newton iterations {stick_iterations}/{slip_iterations}, tolerance 1e-8",
             slip / stick.max(1e-12)
         ),
     );

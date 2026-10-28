@@ -1052,7 +1052,10 @@ atomic failure, cancellation/retry, clone identity and fully prescribed limits.
   Numerical lag rounds refresh normal loads and tangent frames only,
   and success requires the refreshed friction residual to meet tolerance.
   The frozen-frame Huber energy, gradient, and Hessian agree in both
-  sticking and sliding branches. `eps_v` is a displacement smoothing
+  sticking and sliding branches. When sliding exposes an indefinite
+  tangent, a stiffness-scaled diagonal shift produces a descent search
+  direction while preserving the physical force law, tangent, pin
+  equations, and final residual gate. `eps_v` is a displacement smoothing
   width; this regularized law permits small creep and does not claim exact
   set-valued static friction. Solutions expose separate normal and
   tangential reactions plus nonnegative endpoint incremental friction work.

@@ -377,6 +377,60 @@ impl ContactProblem<'_> {
         Ok(norm)
     }
 
+    /// Keep the exact Newton step when it descends. Sliding can remove
+    /// tangential stiffness and expose an indefinite elastic tangent;
+    /// then regularize the search matrix, never the physical residual.
+    fn descent_direction(
+        h: &[f64],
+        r: &[f64],
+        pins: &[(usize, f64)],
+    ) -> Result<Vec<f64>, SolidError> {
+        let ndof = r.len();
+        Self::finite_max_norm(h, "contact tangent")?;
+        let solve = |matrix: &[f64]| -> Option<Vec<f64>> {
+            let factor = fs_la::factor::lu(matrix, ndof).ok()?;
+            let mut direction: Vec<f64> = r.iter().map(|v| -v).collect();
+            factor.solve(&mut direction);
+            let slope: f64 = r.iter().zip(&direction).map(|(a, b)| a * b).sum();
+            (direction.iter().all(|v| v.is_finite()) && slope.is_finite() && slope < 0.0)
+                .then_some(direction)
+        };
+        if let Some(direction) = solve(h) {
+            return Ok(direction);
+        }
+
+        let mut fixed = vec![false; ndof];
+        for &(d, _) in pins {
+            fixed[d] = true;
+        }
+        let scale = (0..ndof)
+            .filter(|&i| !fixed[i])
+            .map(|i| h[i * ndof + i].abs())
+            .fold(0.0_f64, f64::max);
+        let diagonal: Vec<f64> = (0..ndof)
+            .map(|i| h[i * ndof + i].abs().max(scale * 1e-12))
+            .collect();
+        // A dimensionless shift follows local stiffness units. Pins keep
+        // their identity equations; no artificial support enters equilibrium.
+        let mut shift = 1e-6;
+        for _ in 0..16 {
+            let mut regularized = h.to_vec();
+            for i in 0..ndof {
+                if !fixed[i] {
+                    regularized[i * ndof + i] += shift * diagonal[i];
+                }
+            }
+            if let Some(direction) = solve(&regularized) {
+                return Ok(direction);
+            }
+            shift *= 10.0;
+        }
+        Err(SolidError::SolveFailed {
+            iters: 0,
+            rel_residual: f64::INFINITY,
+        })
+    }
+
     /// Solve the barrier-augmented equilibrium at `load`.
     ///
     /// # Errors
@@ -466,13 +520,9 @@ impl ContactProblem<'_> {
                     stalled = false;
                     break;
                 }
-                // Newton direction.
-                let f = fs_la::factor::lu(&h, ndof).map_err(|_| SolidError::SolveFailed {
-                    iters: 0,
-                    rel_residual: f64::INFINITY,
-                })?;
-                let mut du: Vec<f64> = r.iter().map(|v| -v).collect();
-                f.solve(&mut du);
+                // A non-descent Newton direction must not consume forty
+                // expensive trial residuals before the gradient fallback.
+                let du = Self::descent_direction(&h, &r, &self.pins)?;
                 // Normal-closing filter: tangential slip should not be
                 // throttled by the normal gap. The subsequent φ > 0
                 // audit rejects any curved-SDF trial this first-order
@@ -861,6 +911,56 @@ mod tests {
     use crate::mesh2::Mesh2;
     use fs_cutfem::sdf::Circle;
     use fs_material::hyper::{Hyperelastic, HyperelasticModel};
+
+    #[test]
+    fn contact_direction_preserves_newton_and_regularizes_ascent() {
+        let positive = [4.0, 1.0, 1.0, 3.0];
+        let residual = [1.0, -2.0];
+        let direction = ContactProblem::descent_direction(&positive, &residual, &[])
+            .expect("exact Newton direction");
+        for i in 0..2 {
+            let defect =
+                positive[2 * i] * direction[0] + positive[2 * i + 1] * direction[1] + residual[i];
+            assert!(defect.abs() < 1e-14, "well-posed Newton must stay exact");
+        }
+
+        // The unregularized solve would ascend: [1, -0.1]·[1, 0.2] > 0.
+        let indefinite = [-1.0, 0.0, 0.0, 2.0];
+        let residual = [1.0, 0.2];
+        let direction = ContactProblem::descent_direction(&indefinite, &residual, &[])
+            .expect("regularized descent");
+        assert!(direction[0] < 0.0 && direction[1] < 0.0);
+        assert!(
+            residual
+                .iter()
+                .zip(&direction)
+                .map(|(r, d)| r * d)
+                .sum::<f64>()
+                < 0.0
+        );
+        assert_eq!(
+            indefinite,
+            [-1.0, 0.0, 0.0, 2.0],
+            "physical tangent unchanged"
+        );
+
+        let pinned = [1.0, 0.0, 0.0, 3.0, -1.0, 0.0, 0.0, 0.0, 2.0];
+        let residual = [0.25, 1.0, 0.2];
+        let direction = ContactProblem::descent_direction(&pinned, &residual, &[(0, 0.0)])
+            .expect("pin-preserving descent");
+        assert!(
+            (direction[0] + 0.25).abs() < 1e-14,
+            "pin equation unchanged"
+        );
+        assert!(
+            residual
+                .iter()
+                .zip(&direction)
+                .map(|(r, d)| r * d)
+                .sum::<f64>()
+                < 0.0
+        );
+    }
 
     #[test]
     fn friction_curved_frame_derivatives() {
