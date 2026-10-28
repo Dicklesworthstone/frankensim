@@ -11,8 +11,13 @@
 
 /// Source-derived C/L and explicit fixed-coordinate reconfiguration work.
 pub mod storage;
+/// Reversible material C(T)/L(T) on the same spatial circuit/enthalpy residual.
+pub mod thermal;
 
 use super::*;
+use crate::circuit_enthalpy::field_storage::{
+    FieldThermalBinding, FieldThermalSource, PreparedFieldThermal,
+};
 use crate::circuit_enthalpy::{ResistorCell, material::CellResistor};
 use crate::material_circuit::storage::MaterialStorage;
 use crate::material_circuit::{
@@ -36,11 +41,12 @@ pub struct ConductionCircuitTerminal {
 
 /// One accepted electrical history and its complete spatial material operator.
 /// Only native fluxes and charges carry electrical storage. The field remains
-/// quasistatic at the circuit's common midpoint. C/L remain fixed; the other
-/// resistors may be explicit ideal components or complete material conductors
-/// refreshed by the SAME finite-heat network as the spatial body.
-/// Source-bound C/L retain their original dielectric/core geometry and fixed
-/// material context; changing them requires explicit parameter-work accounting.
+/// quasistatic at the circuit's common midpoint. Other resistors may be explicit
+/// ideal components or complete material conductors refreshed by the SAME
+/// finite-heat network as the spatial body. Source-bound C/L retain their
+/// original geometry/context. They remain fixed on ordinary steps; the explicit
+/// field-thermal step refreshes their temperature with reversible energy/entropy
+/// transfer to their original caloric cells.
 pub struct ConductionCircuit<C = ResolvedConductorState> {
     problem: PlanarConduction<C>,
     graph: CircuitGraph,
@@ -337,19 +343,23 @@ impl<C: PlanarConductorMaterial> ThermalDriver for CircuitFieldCandidate<C> {
 }
 
 /// Joint proposal for finite heat, conserved circuit storage and spatial sources.
-pub struct ConductionCircuitEnthalpyCandidate<'t, C = ResolvedConductorState> {
+pub struct ConductionCircuitEnthalpyCandidate<
+    't,
+    C = ResolvedConductorState,
+    S = MaterialNetworkSample,
+> {
     thermal: DepositionSimulation<'t>,
     circuit: ConductionCircuit<C>,
-    report: CircuitEnthalpyReport<MaterialNetworkSample, ConductionCircuitStep>,
+    report: CircuitEnthalpyReport<S, ConductionCircuitStep>,
 }
-impl<'t, C: PlanarConductorMaterial> ConductionCircuitEnthalpyCandidate<'t, C> {
+impl<'t, C: PlanarConductorMaterial, S> ConductionCircuitEnthalpyCandidate<'t, C, S> {
     pub fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
     pub fn circuit(&self) -> &ConductionCircuit<C> {
         &self.circuit
     }
-    pub fn report(&self) -> &CircuitEnthalpyReport<MaterialNetworkSample, ConductionCircuitStep> {
+    pub fn report(&self) -> &CircuitEnthalpyReport<S, ConductionCircuitStep> {
         &self.report
     }
     pub fn into_parts(
@@ -357,7 +367,7 @@ impl<'t, C: PlanarConductorMaterial> ConductionCircuitEnthalpyCandidate<'t, C> {
     ) -> (
         DepositionSimulation<'t>,
         ConductionCircuit<C>,
-        CircuitEnthalpyReport<MaterialNetworkSample, ConductionCircuitStep>,
+        CircuitEnthalpyReport<S, ConductionCircuitStep>,
     ) {
         (self.thermal, self.circuit, self.report)
     }
@@ -404,12 +414,14 @@ impl ConductionThermalNetwork<'_> {
             ports,
             graph_resistors,
             &[],
+            None,
             assembly,
             field_controls,
             controls,
             initial_energy_increments_j,
             cancelled,
         )
+        .map(ConductionCircuitEnthalpyCandidate::without_thermal_fields)
     }
 
     /// Refresh the spatial conductor AND every other source-bound resistor
@@ -456,12 +468,14 @@ impl ConductionThermalNetwork<'_> {
             ports,
             &destinations,
             graph_resistors,
+            None,
             assembly,
             field_controls,
             controls,
             initial_energy_increments_j,
             cancelled,
         )
+        .map(ConductionCircuitEnthalpyCandidate::without_thermal_fields)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -473,12 +487,13 @@ impl ConductionThermalNetwork<'_> {
         ports: &[f64],
         graph_resistors: &[ResistorCell],
         material_resistors: &[CellResistor],
+        field_bindings: Option<&[FieldThermalBinding]>,
         assembly: WeightedAssemblyLimits,
         field_controls: ConductionControls,
         controls: CircuitEnthalpySolve,
         initial_energy_increments_j: &[f64],
         cancelled: impl FnMut() -> bool,
-    ) -> Result<ConductionCircuitEnthalpyCandidate<'t, C>, Error> {
+    ) -> Result<ConductionCircuitEnthalpyCandidate<'t, C, FieldThermalSource>, Error> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
         super::super::admit_driver_unknowns(thermal, controls, initial_energy_increments_j)?;
@@ -590,6 +605,18 @@ impl ConductionThermalNetwork<'_> {
                 "accepted spatial circuit sources must match the actual thermal state",
             ));
         }
+        let fields = field_bindings
+            .map(|bindings| {
+                PreparedFieldThermal::new(
+                    &network,
+                    thermal,
+                    circuit.field_view(),
+                    bindings,
+                    &cancel,
+                )
+                .map_err(thermal::field_thermal_error)
+            })
+            .transpose()?;
         let (thermal, circuit, report) = cell_driver_candidate(
             thermal,
             target_s,
@@ -597,7 +624,7 @@ impl ConductionThermalNetwork<'_> {
             initial_energy_increments_j,
             |state, _remaining| {
                 check(&cancel)?;
-                let coefficients = prepared
+                let mut coefficients = prepared
                     .resolve(state, || (*cancel.borrow_mut())())
                     .map_err(material)?;
                 let sources = self.materials_at(problem, &coefficients.source, &routes, &cancel)?;
@@ -606,7 +633,22 @@ impl ConductionThermalNetwork<'_> {
                         (*cancel.borrow_mut())()
                     })
                     .map_err(field_error)?;
-                let candidate = circuit.trial(
+                let refreshed = fields
+                    .as_ref()
+                    .map(|fields| {
+                        let (storage, samples) = fields
+                            .refresh(state, &cancel)
+                            .map_err(thermal::field_thermal_error)?;
+                        let rebound = circuit.rebind_storage_candidate(storage, ports, || {
+                            (*cancel.borrow_mut())()
+                        })?;
+                        Ok::<_, Error>((rebound, samples))
+                    })
+                    .transpose()?;
+                let driver = refreshed
+                    .as_ref()
+                    .map_or(circuit, |(rebound, _)| rebound.circuit());
+                let candidate = driver.trial(
                     next,
                     coefficients.resistors,
                     target_s,
@@ -615,11 +657,33 @@ impl ConductionThermalNetwork<'_> {
                     controls.circuit,
                     &cancel,
                 )?;
+                let source = if let (Some(fields), Some((rebound, samples))) = (&fields, refreshed)
+                {
+                    fields
+                        .account(
+                            samples,
+                            candidate.circuit.field_view(),
+                            rebound.parameter_work_j(),
+                            dt,
+                            coefficients.source,
+                            &mut coefficients.sources_w,
+                            controls.total_energy_tolerance_j,
+                            &cancel,
+                        )
+                        .map_err(thermal::field_thermal_error)?
+                } else {
+                    FieldThermalSource {
+                        network: coefficients.source,
+                        fields: Vec::new(),
+                        field_internal_energy_j: [0.0; 2],
+                        reversible_heat_j: 0.0,
+                    }
+                };
                 Ok(DrivenCoefficients {
                     circuit: candidate,
                     sources_w: coefficients.sources_w,
                     conductances_w_k: coefficients.conductances_w_k,
-                    source: coefficients.source,
+                    source,
                     circuit_trials: 1,
                 })
             },

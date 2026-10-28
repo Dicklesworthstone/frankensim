@@ -145,6 +145,7 @@ pub enum ConductionThermalError {
     Heat(super::contacts::heat::HeatNetworkError),
     Conductor(ConductorError),
     Field(ConductionError),
+    Storage(super::field_storage::FieldThermalError),
     Dielectric(fs_em::electrostatic::relaxation::DielectricRelaxationError),
     Invalid(&'static str),
 }

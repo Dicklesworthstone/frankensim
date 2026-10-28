@@ -18,16 +18,19 @@ use super::{
     material::{MaterialNetwork, MaterialNetworkError, MaterialNetworkSample},
 };
 use crate::material_circuit::storage::{MaterialStorage, MaterialStorageElement};
-use crate::material_circuit::{MaterialCircuit, MaterialCircuitCandidate};
+use crate::material_circuit::{MaterialCircuit, MaterialCircuitCandidate, MaterialCircuitStep};
 use fs_material::{
     conductor::ElectricalPropertyBasis,
     field_storage::{
         FieldStorageError,
-        thermal::{FieldThermalState, ThermalFieldElement, ThermalFieldStorage},
+        thermal::{
+            FieldThermalState, ResolvedThermalFieldStorage, ThermalFieldElement,
+            ThermalFieldStorage,
+        },
     },
     state_point::ResolvedMaterialStatePoint,
 };
-use fs_phs::circuit::Branch;
+use fs_phs::circuit::{Branch, CircuitGraph};
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation};
 use std::{cell::RefCell, collections::BTreeMap};
 
@@ -86,11 +89,11 @@ pub struct FieldThermalSource {
 }
 
 /// Independent physical account, using U rather than the isothermal psi alone.
-pub struct FieldThermalReport {
+pub struct FieldThermalReport<D = MaterialCircuitStep> {
     /// Original native circuit and thermal reports. The native circuit's
     /// stored_before_j is psi at the proposed endpoint temperature and the
     /// INITIAL charge/flux. non_electrical_heat_j includes reversible heat.
-    pub coupled: CircuitEnthalpyReport<FieldThermalSource>,
+    pub coupled: CircuitEnthalpyReport<FieldThermalSource, D>,
     /// Authored thermal boundaries/sources, excluding Joule AND reversible heat.
     pub external_heat_j: f64,
     /// delta(U_field) + delta(U_caloric) - electrical work - external heat [J].
@@ -98,28 +101,33 @@ pub struct FieldThermalReport {
 }
 
 /// One publishable electrical/thermal endpoint; trials mutate no accepted state.
-pub struct FieldThermalCandidate<'m> {
+pub struct FieldThermalCandidate<'m, C = MaterialCircuit, D = MaterialCircuitStep> {
     thermal: DepositionSimulation<'m>,
-    circuit: MaterialCircuit,
-    report: FieldThermalReport,
+    circuit: C,
+    report: FieldThermalReport<D>,
 }
-impl<'m> FieldThermalCandidate<'m> {
+impl<'m, C, D> FieldThermalCandidate<'m, C, D> {
+    pub(super) fn new(
+        thermal: DepositionSimulation<'m>,
+        circuit: C,
+        report: FieldThermalReport<D>,
+    ) -> Self {
+        Self {
+            thermal,
+            circuit,
+            report,
+        }
+    }
     pub const fn thermal(&self) -> &DepositionSimulation<'m> {
         &self.thermal
     }
-    pub const fn circuit(&self) -> &MaterialCircuit {
+    pub const fn circuit(&self) -> &C {
         &self.circuit
     }
-    pub const fn report(&self) -> &FieldThermalReport {
+    pub const fn report(&self) -> &FieldThermalReport<D> {
         &self.report
     }
-    pub fn into_parts(
-        self,
-    ) -> (
-        DepositionSimulation<'m>,
-        MaterialCircuit,
-        FieldThermalReport,
-    ) {
+    pub fn into_parts(self) -> (DepositionSimulation<'m>, C, FieldThermalReport<D>) {
         (self.thermal, self.circuit, self.report)
     }
 }
@@ -203,11 +211,29 @@ fn volume(value: &ThermalFieldElement) -> f64 {
         ThermalFieldElement::Inductor(l) => l.area_m2() * l.path_length_m(),
     }
 }
-fn coordinates(circuit: &MaterialCircuit) -> Result<BTreeMap<usize, f64>, Error> {
-    let mut charges = circuit.charges_c().iter();
-    let mut fluxes = circuit.fluxes_wb().iter();
+// Borrow the original native storage; this view owns no electrical history or
+// stepping law. Lumped and spatial circuits use the same field thermodynamics.
+pub(super) struct FieldCircuitView<'a> {
+    pub graph: &'a CircuitGraph,
+    pub storage: &'a [MaterialStorage],
+    pub charges_c: &'a [f64],
+    pub fluxes_wb: &'a [f64],
+}
+impl<'a> From<&'a MaterialCircuit> for FieldCircuitView<'a> {
+    fn from(circuit: &'a MaterialCircuit) -> Self {
+        Self {
+            graph: circuit.graph(),
+            storage: circuit.storage(),
+            charges_c: circuit.charges_c(),
+            fluxes_wb: circuit.fluxes_wb(),
+        }
+    }
+}
+fn coordinates(circuit: &FieldCircuitView<'_>) -> Result<BTreeMap<usize, f64>, Error> {
+    let mut charges = circuit.charges_c.iter();
+    let mut fluxes = circuit.fluxes_wb.iter();
     let mut result = BTreeMap::new();
-    for (branch, (_, _, kind)) in circuit.graph().branches.iter().enumerate() {
+    for (branch, (_, _, kind)) in circuit.graph.branches.iter().enumerate() {
         let value = match kind {
             Branch::Capacitor { .. } => charges.next(),
             Branch::Inductor { .. } => fluxes.next(),
@@ -237,19 +263,18 @@ struct InitialField {
 fn admit(
     material: &MaterialNetwork<'_>,
     thermal: &DepositionSimulation<'_>,
-    circuit: &MaterialCircuit,
+    circuit: &FieldCircuitView<'_>,
     bindings: &[FieldThermalBinding],
     cancel: &RefCell<impl FnMut() -> bool>,
 ) -> Result<Vec<InitialField>, Error> {
     let initial = coordinates(circuit)?;
     if bindings.is_empty()
         || bindings.len() != initial.len()
-        || bindings.len() != circuit.storage().len()
-        || !circuit.contacts().is_empty()
+        || bindings.len() != circuit.storage.len()
         || bindings.len() > crate::material_circuit::MAX_MATERIAL_CIRCUIT_BRANCHES
     {
         return Err(invalid(
-            "complete bounded thermal binding for all native field storage and bulk-only resistors required",
+            "complete bounded thermal binding for all native field storage required",
         ));
     }
     let mut branches = BTreeMap::new();
@@ -268,7 +293,7 @@ fn admit(
             ));
         }
         let source = circuit
-            .storage()
+            .storage
             .iter()
             .find(|s| s.branch == binding.branch)
             .ok_or_else(|| invalid("field branch lacks original source-bound storage"))?;
@@ -374,6 +399,151 @@ fn admit(
     Ok(result)
 }
 
+/// Shared source admission and reversible transfer for original circuit owners.
+/// All trials refer to these SAME accepted field coordinates and caloric cells.
+pub(super) struct PreparedFieldThermal<'a> {
+    bindings: &'a [FieldThermalBinding],
+    initial: Vec<InitialField>,
+}
+impl<'a> PreparedFieldThermal<'a> {
+    pub fn new(
+        material: &MaterialNetwork<'_>,
+        thermal: &DepositionSimulation<'_>,
+        circuit: FieldCircuitView<'_>,
+        bindings: &'a [FieldThermalBinding],
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            bindings,
+            initial: admit(material, thermal, &circuit, bindings, cancel)?,
+        })
+    }
+
+    pub fn refresh(
+        &self,
+        trial: &DepositionSimulation<'_>,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<(Vec<MaterialStorage>, Vec<ResolvedThermalFieldStorage>), Error> {
+        let mut sources = Vec::with_capacity(self.bindings.len());
+        let mut samples = Vec::with_capacity(self.bindings.len());
+        for binding in self.bindings {
+            check(cancel)?;
+            let sample = binding
+                .law
+                .at_temperature(trial.temperature_k(binding.cell)?)
+                .map_err(field)?;
+            sources.push(MaterialStorage {
+                branch: binding.branch,
+                element: element(sample.element()),
+            });
+            samples.push(sample);
+        }
+        Ok((sources, samples))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn account(
+        &self,
+        samples: Vec<ResolvedThermalFieldStorage>,
+        endpoint: FieldCircuitView<'_>,
+        native_parameter_work_j: f64,
+        dt: f64,
+        network: MaterialNetworkSample,
+        sources_w: &mut BTreeMap<CellId, f64>,
+        tolerance_j: f64,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<FieldThermalSource, Error> {
+        if samples.len() != self.bindings.len() || !dt.is_finite() || dt <= 0.0 {
+            return Err(invalid(
+                "complete field endpoint and positive interval required",
+            ));
+        }
+        let endpoints = coordinates(&endpoint)?;
+        let mut fields = Vec::with_capacity(self.bindings.len());
+        let mut internal = [0.0; 2];
+        let mut parameter_work = 0.0;
+        let mut reversible_heat_j = 0.0;
+        for ((binding, before), sample) in self.bindings.iter().zip(&self.initial).zip(samples) {
+            check(cancel)?;
+            let coordinate = *endpoints
+                .get(&binding.branch)
+                .ok_or_else(|| invalid("native endpoint lost an original field coordinate"))?;
+            if coordinate.abs() > binding.maximum_abs_coordinate {
+                return Err(invalid(
+                    "proposed field coordinate exceeds the thermal capacity envelope",
+                ));
+            }
+            let frozen = sample.state(before.coordinate).map_err(field)?;
+            let after = sample.state(coordinate).map_err(field)?;
+            let work = finite(frozen.free_energy_j - before.state.free_energy_j)?;
+            let delta_ts = finite(
+                sample.temperature_k() * after.entropy_j_k
+                    - before.temperature_k * before.state.entropy_j_k,
+            )?;
+            let heat = finite(-work - delta_ts)?;
+            let power = finite(heat / dt)?;
+            if heat != 0.0 && power == 0.0 {
+                return Err(invalid(
+                    "field reversible heat disappeared during power conversion",
+                ));
+            }
+            let destination = sources_w.entry(binding.cell).or_insert(0.0);
+            *destination = finite(*destination + power)?;
+            internal[0] = finite(internal[0] + before.state.internal_energy_j)?;
+            internal[1] = finite(internal[1] + after.internal_energy_j)?;
+            parameter_work = finite(parameter_work + work)?;
+            reversible_heat_j = finite(reversible_heat_j + dt * power)?;
+            fields.push(FieldThermalSample {
+                branch: binding.branch,
+                cell: binding.cell,
+                temperature_k: [before.temperature_k, sample.temperature_k()],
+                coordinate: [before.coordinate, coordinate],
+                state: [before.state, after],
+                material: sample.element().clone(),
+                parameter_work_j: work,
+                reversible_heat_j: heat,
+            });
+        }
+        if finite(parameter_work - native_parameter_work_j)?.abs() > tolerance_j {
+            return Err(invalid(
+                "original circuit parameter work and sourced thermodynamic field change disagree",
+            ));
+        }
+        Ok(FieldThermalSource {
+            network,
+            fields,
+            field_internal_energy_j: internal,
+            reversible_heat_j,
+        })
+    }
+}
+
+pub(super) fn close_report<D>(
+    coupled: CircuitEnthalpyReport<FieldThermalSource, D>,
+    electrical_work_j: f64,
+    tolerance_j: f64,
+) -> Result<FieldThermalReport<D>, Error> {
+    let external_heat_j = finite(coupled.non_electrical_heat_j - coupled.source.reversible_heat_j)?;
+    // Reconstruct physical U at both actual endpoints; the native electrical
+    // report instead measures isothermal psi after the coefficient update.
+    let total_energy_residual_j = finite(
+        coupled.source.field_internal_energy_j[1] - coupled.source.field_internal_energy_j[0]
+            + coupled.thermal.stored_energy_change_j
+            - electrical_work_j
+            - external_heat_j,
+    )?;
+    if total_energy_residual_j.abs() > tolerance_j {
+        return Err(invalid(
+            "physical field and caloric internal energy do not close the external supply",
+        ));
+    }
+    Ok(FieldThermalReport {
+        coupled,
+        external_heat_j,
+        total_energy_residual_j,
+    })
+}
+
 /// Evolve source-dependent C/L, native circuit charge/flux, and caloric enthalpy.
 ///
 /// Geometry/topology stay fixed. The original prepared network owns all
@@ -408,7 +578,12 @@ pub fn step_candidate<'m>(
     let prepared = material
         .prepare_with_bases(thermal, electrical_bases, || (*cancel.borrow_mut())())
         .map_err(network)?;
-    let initial = admit(material, thermal, circuit, bindings, &cancel)?;
+    if !circuit.contacts().is_empty() {
+        return Err(invalid(
+            "field thermal circuit requires bulk-only resistors",
+        ));
+    }
+    let fields = PreparedFieldThermal::new(material, thermal, circuit.into(), bindings, &cancel)?;
     let destinations = material
         .resistors
         .iter()
@@ -431,20 +606,7 @@ pub fn step_candidate<'m>(
             let mut coefficients = prepared
                 .resolve(trial, || (*cancel.borrow_mut())())
                 .map_err(network)?;
-            let mut sources = Vec::with_capacity(bindings.len());
-            let mut samples = Vec::with_capacity(bindings.len());
-            for binding in bindings {
-                check(&cancel)?;
-                let sample = binding
-                    .law
-                    .at_temperature(trial.temperature_k(binding.cell)?)
-                    .map_err(field)?;
-                sources.push(MaterialStorage {
-                    branch: binding.branch,
-                    element: element(sample.element()),
-                });
-                samples.push(sample);
-            }
+            let (sources, samples) = fields.refresh(trial, &cancel)?;
             let rebound =
                 circuit.rebind_storage_candidate(sources, ports, || (*cancel.borrow_mut())())?;
             let candidate: MaterialCircuitCandidate = rebound.circuit().step_candidate(
@@ -454,96 +616,28 @@ pub fn step_candidate<'m>(
                 controls.circuit,
                 || (*cancel.borrow_mut())(),
             )?;
-            let endpoints = coordinates(candidate.circuit())?;
-            let mut fields = Vec::with_capacity(bindings.len());
-            let mut internal = [0.0; 2];
-            let mut parameter_work = 0.0;
-            let mut reversible_heat_j = 0.0;
-            for ((binding, before), sample) in bindings.iter().zip(&initial).zip(samples) {
-                check(&cancel)?;
-                let coordinate = *endpoints
-                    .get(&binding.branch)
-                    .ok_or_else(|| invalid("native endpoint lost an original field coordinate"))?;
-                if coordinate.abs() > binding.maximum_abs_coordinate {
-                    return Err(invalid(
-                        "proposed field coordinate exceeds the thermal capacity envelope",
-                    ));
-                }
-                let frozen = sample.state(before.coordinate).map_err(field)?;
-                let after = sample.state(coordinate).map_err(field)?;
-                let work = finite(frozen.free_energy_j - before.state.free_energy_j)?;
-                let delta_ts = finite(
-                    sample.temperature_k() * after.entropy_j_k
-                        - before.temperature_k * before.state.entropy_j_k,
-                )?;
-                let heat = finite(-work - delta_ts)?;
-                let power = finite(heat / dt)?;
-                if heat != 0.0 && power == 0.0 {
-                    return Err(invalid(
-                        "field reversible heat disappeared during power conversion",
-                    ));
-                }
-                let destination = coefficients.sources_w.entry(binding.cell).or_insert(0.0);
-                *destination = finite(*destination + power)?;
-                internal[0] = finite(internal[0] + before.state.internal_energy_j)?;
-                internal[1] = finite(internal[1] + after.internal_energy_j)?;
-                parameter_work = finite(parameter_work + work)?;
-                reversible_heat_j = finite(reversible_heat_j + dt * power)?;
-                fields.push(FieldThermalSample {
-                    branch: binding.branch,
-                    cell: binding.cell,
-                    temperature_k: [before.temperature_k, sample.temperature_k()],
-                    coordinate: [before.coordinate, coordinate],
-                    state: [before.state, after],
-                    material: sample.element().clone(),
-                    parameter_work_j: work,
-                    reversible_heat_j: heat,
-                });
-            }
-            if finite(parameter_work - rebound.parameter_work_j())?.abs()
-                > controls.total_energy_tolerance_j
-            {
-                return Err(invalid(
-                    "original circuit parameter work and sourced thermodynamic field change disagree",
-                ));
-            }
+            let source = fields.account(
+                samples,
+                candidate.circuit().into(),
+                rebound.parameter_work_j(),
+                dt,
+                coefficients.source,
+                &mut coefficients.sources_w,
+                controls.total_energy_tolerance_j,
+                &cancel,
+            )?;
             Ok(DrivenCoefficients {
                 circuit: candidate,
                 sources_w: coefficients.sources_w,
                 conductances_w_k: coefficients.conductances_w_k,
                 circuit_trials: 1,
-                source: FieldThermalSource {
-                    network: coefficients.source,
-                    fields,
-                    field_internal_energy_j: internal,
-                    reversible_heat_j,
-                },
+                source,
             })
         },
         || (*cancel.borrow_mut())(),
     )?;
-    let external_heat_j = finite(coupled.non_electrical_heat_j - coupled.source.reversible_heat_j)?;
-    // Independently reconstruct physical U at both actual endpoints; the
-    // native electrical report instead measures isothermal psi after rebind.
-    let total_energy_residual_j = finite(
-        coupled.source.field_internal_energy_j[1] - coupled.source.field_internal_energy_j[0]
-            + coupled.thermal.stored_energy_change_j
-            - coupled.electrical.native.supplied
-            - external_heat_j,
-    )?;
-    if total_energy_residual_j.abs() > controls.total_energy_tolerance_j {
-        return Err(invalid(
-            "physical field and caloric internal energy do not close the external supply",
-        ));
-    }
+    let supplied_j = coupled.electrical.native.supplied;
+    let report = close_report(coupled, supplied_j, controls.total_energy_tolerance_j)?;
     check(&cancel)?;
-    Ok(FieldThermalCandidate {
-        thermal: next,
-        circuit: electrical,
-        report: FieldThermalReport {
-            coupled,
-            external_heat_j,
-            total_energy_residual_j,
-        },
-    })
+    Ok(FieldThermalCandidate::new(next, electrical, report))
 }
