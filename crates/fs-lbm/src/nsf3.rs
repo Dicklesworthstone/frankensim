@@ -182,7 +182,7 @@ pub enum WallThermal {
 
 /// Everything the grid needs, in physical units. Nothing is defaulted.
 #[derive(Clone, Debug)]
-pub struct NsfSpec<G = GasSpec> {
+pub struct NsfSpec<G = GasSpec, S = &'static str> {
     /// Cell counts per axis.
     pub dims: [usize; 3],
     /// Periodic axes; a non-periodic face initially has a halfway bounce-back
@@ -205,7 +205,9 @@ pub struct NsfSpec<G = GasSpec> {
     /// range 0.67 to 0.84; see the CONTRACT). The trace rate follows from `(2/3) theta0 (1/w_b - 1/2) = ratio * mu / rho`.
     pub bulk_to_shear_ratio: f64,
     /// Citation of the ratio; must be non-empty so that no ratio is anonymous.
-    pub bulk_ratio_source: &'static str,
+    /// Construction retains an owned string, accepting both string literals
+    /// and source text loaded from a physical description without leaking it.
+    pub bulk_ratio_source: S,
     /// Cap on the number of cells (cap admitted, cap + 1 refused).
     pub maximum_cells: usize,
     /// Thermal condition of every wall face.
@@ -216,8 +218,8 @@ pub struct NsfSpec<G = GasSpec> {
     pub transport_points: usize,
 }
 
-impl<G> NsfSpec<G> {
-    fn map_gas<H>(self, map: impl FnOnce(G) -> H) -> NsfSpec<H> {
+impl<G, S: Into<String>> NsfSpec<G, S> {
+    fn map_gas<H>(self, map: impl FnOnce(G) -> H) -> NsfSpec<H, String> {
         NsfSpec {
             dims: self.dims,
             periodic: self.periodic,
@@ -229,7 +231,7 @@ impl<G> NsfSpec<G> {
             maximum_mach: self.maximum_mach,
             maximum_temperature_ratio: self.maximum_temperature_ratio,
             bulk_to_shear_ratio: self.bulk_to_shear_ratio,
-            bulk_ratio_source: self.bulk_ratio_source,
+            bulk_ratio_source: self.bulk_ratio_source.into(),
             maximum_cells: self.maximum_cells,
             wall: self.wall,
             workers: self.workers,
@@ -536,7 +538,7 @@ pub type SourceFn = Box<dyn Fn([usize; 3], f64) -> (f64, [f64; 3], f64) + Send +
 
 /// The hybrid grid. See the module documentation for the formulation and its conservation class.
 pub struct NsfGrid3<L: Lattice3<27>> {
-    spec: NsfSpec<NsfGasMedium>,
+    spec: NsfSpec<NsfGasMedium, String>,
     law: NsfLaw,
     /// Local source response only; empty for the bit-preserving GasSpec route.
     material: Vec<Option<NsfCellMaterial>>,
@@ -574,8 +576,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     ///
     /// # Errors
     /// [`NsfError`] for any refused input or state.
-    pub fn new<G: Into<NsfGasMedium>>(
-        spec: NsfSpec<G>,
+    pub fn new<G: Into<NsfGasMedium>, S: Into<String>>(
+        spec: NsfSpec<G, S>,
         solid: impl Fn([usize; 3]) -> bool,
         initial: impl Fn([usize; 3]) -> (f64, [f64; 3], f64),
     ) -> Result<Self, NsfError> {
@@ -587,8 +589,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     ///
     /// # Errors
     /// [`NsfError`] for any refused input or state.
-    pub fn new_with_sources<G: Into<NsfGasMedium>>(
-        spec: NsfSpec<G>,
+    pub fn new_with_sources<G: Into<NsfGasMedium>, S: Into<String>>(
+        spec: NsfSpec<G, S>,
         solid: impl Fn([usize; 3]) -> bool,
         initial: impl Fn([usize; 3]) -> (f64, [f64; 3], f64),
         sources: Option<SourceFn>,
@@ -1286,7 +1288,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                     }
                 }
                 out[q] = match edge {
-                    Some((a, side)) if self.open.as_ref().is_some_and(|open| open.axis == a) => {
+                    Some((a, side))
+                        if self.open.as_ref().is_some_and(|open| open.axis == a)
+                            && self.characteristic_link_is_open(x, c, -1) =>
+                    {
                         incoming
                             .expect("open stream has prepared incoming populations")
                             .at(x, self.spec.dims, side)[q]
@@ -1752,6 +1757,12 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     pub fn law(&self) -> &NsfLaw {
         &self.law
     }
+    /// Retained citation of the bulk/shear viscosity ratio used by this grid.
+    /// Ownership is independent of the caller's input buffer lifetime.
+    #[must_use]
+    pub fn bulk_ratio_source(&self) -> &str {
+        &self.spec.bulk_ratio_source
+    }
     /// Steps completed.
     #[must_use]
     pub fn steps(&self) -> usize {
@@ -1778,7 +1789,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
 }
 
 fn check_state(
-    spec: &NsfSpec<NsfGasMedium>,
+    spec: &NsfSpec<NsfGasMedium, String>,
     gamma: f64,
     cell: usize,
     rho: f64,

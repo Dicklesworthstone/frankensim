@@ -183,7 +183,7 @@ fn gas_error(error: impl core::fmt::Display) -> NsfError {
 }
 
 impl NsfGasMedium {
-    pub(super) fn reference(&self, spec: &NsfSpec<Self>) -> Result<GasState, NsfError> {
+    pub(super) fn reference(&self, spec: &NsfSpec<Self, String>) -> Result<GasState, NsfError> {
         if let Self::Thermochemical(source) = self {
             let controls = source.energy_solve;
             if source.reference.temperature != spec.temperature_k

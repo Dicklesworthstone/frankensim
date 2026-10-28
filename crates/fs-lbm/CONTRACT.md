@@ -3113,10 +3113,16 @@ executed numerical or experimental validation.
 ### Open NSF axis with source-bound local linear characteristics
 
 `NsfGrid3::with_characteristic_axis` opens two opposed faces of the original
-NSF owner. One non-periodic axis (at least four cells), periodic transverse
-axes and a two-cell all-fluid collar are required. Interior stationary
-obstacles remain supported. Topology binds before stepping; manufactured body
-sources and moving edge walls are excluded. This supersedes the original
+NSF owner. One non-periodic axis (at least four cells) and a two-cell all-fluid
+collar are required. Transverse axes may be periodic or stationary halfway
+bounce-back walls; interior stationary obstacles remain supported. A diagonal
+population link touching both an open plane and a transverse wall belongs to
+the wall, independently of axis ordering. The original pull streaming and
+outgoing/incoming mass/momentum quadrature share this ownership, including
+one-cell-wide wall channels. The normal FV face keeps its original pressure,
+enthalpy/conduction/viscous-work flux; stationary transverse wall heat remains
+in the separate wall-heat account. Topology binds before stepping; manufactured
+body sources and moving edge walls are excluded. This supersedes the original
 closed-grid "no open boundary" limitation only within this narrow domain.
 
 Each face prescribes one incoming outward-normal acoustic characteristic
@@ -3158,13 +3164,26 @@ determinism. Face storage is proportional to face cells, not volume cells.
 faces; its residual now subtracts this term separately from wall heat. The
 viscous-heating bookkeeping subtracts open internal-energy advection and heat,
 not the enthalpy/kinetic flux. Its remainder still is not independent evidence
-of physical dissipation. Momentum exchange closes the no-obstacle domain;
-stationary internal obstacle reactions are additional wall impulses.
+of physical dissipation. Momentum exchange closes the periodic-transverse,
+no-obstacle domain;
+stationary internal obstacle and transverse-wall reactions are additional wall
+impulses. A finite walled passage does not claim periodic-domain momentum closure.
 
 Focused tests in `nsf3_open_boundaries.rs` exercise analytic uniform throughflow
 on all axes, separately summed mass/momentum/energy budgets, incoming-wave work,
 outgoing-pulse refinement, NASA9 formation-offset invariance and source support,
-atomic refusals and workers. `nsf_open_channel` is an executable throughflow and
+atomic refusals and workers. Finite-passage cases exercise independent mass and
+FV total-energy balance, cyclic coordinate permutations, opposed wall corners,
+and separate isothermal-wall heat. `nsf_dg::tests` additionally composes a finite
+walled constriction with the original live DG bore. These are numerical-owner
+tests, not a measured nozzle or instrument campaign.
+
+The ratio citation in `NsfSpec<G, S>` accepts both literal and owned source text
+(`S: Into<String>`). The grid retains its own string through characteristic
+previews and acceptance, available from `bulk_ratio_source()`. Data-file input
+therefore does not leak buffers or replace a supplied source with a static label.
+
+`nsf_open_channel` is an executable throughflow and
 incoming-pulse example with pressure/temperature/speed inputs; dry-air GasSpec
 owns its thermodynamics and transport. NASA9 source replacement is exercised
 through the same API in the focused tests. These tests/example have not been
