@@ -12,6 +12,273 @@ use core::f64::consts::PI;
 use fs_blake3::ContentHash;
 use fs_tribo::{InputAuthority, TriboError, adhesive::AdhesiveContactState};
 
+mod history {
+    //! Displacement-controlled metastable continuation of the original Maugis law.
+    //! The transition is a proposal: the caller publishes its successor only after
+    //! the complete mechanical transaction accepts. Jump release is not caloric heat.
+    use super::*;
+    use super::super::{MaugisWorkBudget, MaugisWorkEstimate};
+
+    /// Which loss of stability caused a fixed-displacement transition.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum MaugisSnapKind {
+        /// The separated state reaches the finite interaction range.
+        AttractionOnset,
+        /// A contacting or noncontacting branch reaches its displacement fold.
+        Separation,
+    }
+
+    /// Localized fixed-displacement event. Its potential decrease is an explicit
+    /// energy output, not automatically assigned to heat, damage or radiation.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct MaugisSnap {
+        kind: MaugisSnapKind,
+        indentation_m: f64,
+        before: MaugisEquilibrium,
+        after: MaugisEquilibrium,
+        released_energy_j: f64,
+    }
+    impl MaugisSnap {
+        #[must_use] pub const fn kind(&self) -> MaugisSnapKind { self.kind }
+        #[must_use] pub const fn indentation_m(&self) -> f64 { self.indentation_m }
+        #[must_use] pub const fn before(&self) -> &MaugisEquilibrium { &self.before }
+        #[must_use] pub const fn after(&self) -> &MaugisEquilibrium { &self.after }
+        #[must_use] pub const fn released_energy_j(&self) -> f64 { self.released_energy_j }
+    }
+
+    /// Immutable source-bound accepted history. The requested control coordinate is
+    /// distinct from the contact root's reconstructed indentation (roundoff only).
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct MaugisDisplacementHistory {
+        model_identity: ContentHash,
+        control_indentation_m: f64,
+        equilibrium: MaugisEquilibrium,
+    }
+    impl MaugisDisplacementHistory {
+        #[must_use] pub const fn indentation_m(&self) -> f64 { self.control_indentation_m }
+        #[must_use] pub const fn equilibrium(&self) -> &MaugisEquilibrium { &self.equilibrium }
+        #[must_use] pub const fn model_identity(&self) -> ContentHash { self.model_identity }
+    }
+
+    /// Separate force-work integration and independent full-energy closure budgets.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct MaugisContinuationBudget {
+        pub work: MaugisWorkBudget,
+        pub energy_absolute_tolerance_j: f64,
+        pub energy_relative_tolerance: f64,
+    }
+    impl MaugisContinuationBudget {
+        fn validate(self) -> Result<(), MaugisContinuationError> {
+            if !self.work.absolute_tolerance_j.is_finite() || self.work.absolute_tolerance_j <= 0.0
+                || !self.work.relative_tolerance.is_finite() || !(0.0..1.0).contains(&self.work.relative_tolerance)
+                || self.work.maximum_evaluations < 5
+                || !self.energy_absolute_tolerance_j.is_finite() || self.energy_absolute_tolerance_j < 0.0
+                || !self.energy_relative_tolerance.is_finite() || !(0.0..1.0).contains(&self.energy_relative_tolerance)
+            {
+                return Err(MaugisError::InvalidInput { field: "Maugis continuation work/energy budget" }.into());
+            }
+            Ok(())
+        }
+    }
+
+    /// An accepted numerical proposal; no state inside the owner was advanced.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct MaugisDisplacementStep {
+        pub next: MaugisDisplacementHistory,
+        pub snap: Option<MaugisSnap>,
+        /// Integral of original force over continuous portions only.
+        pub work: MaugisWorkEstimate,
+        pub potential_change_j: f64,
+        pub released_energy_j: f64,
+        /// work - potential change - released energy, independently reconstructed.
+        pub energy_residual_j: f64,
+        pub energy_tolerance_j: f64,
+    }
+
+    /// Prepared source-preserving continuation. Fold locations, jump states and
+    /// their energies are computed once, not rediscovered in every mechanical step.
+    /// This is massless quasistatic DISPLACEMENT control, not force control or a
+    /// trajectory through the jump. Finite fixture compliance has a different fold.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct MaugisDisplacementContinuation {
+        law: SourceMaugisSphereContact,
+        noncontact: Option<MaugisNoncontactLimits>,
+        onset: MaugisSnap,
+        separation: MaugisSnap,
+    }
+    impl MaugisDisplacementContinuation {
+        pub fn new(law: SourceMaugisSphereContact) -> Result<Self, MaugisContinuationError> {
+            let noncontact = law.noncontact_limits()?;
+            let onset_d = -law.interaction_range_m();
+            let before = law.evaluate_detached(onset_d)?;
+            let after = match noncontact {
+                Some(limits) if onset_d < limits.first_contact_indentation_m => law.evaluate_noncontact(onset_d)?,
+                _ => law.evaluate_contact_energy(onset_d)?,
+            };
+            let onset = snap(MaugisSnapKind::AttractionOnset, onset_d, before, after)?;
+            let (separation_d, before) = match noncontact {
+                Some(limits) => (limits.minimum_indentation_m, law.evaluate_noncontact(limits.minimum_indentation_m)?),
+                None => {
+                    let d = law.minimum_attached_indentation_m();
+                    let before = law.evaluate_contact_energy(d)?;
+                    if before.contact_response().is_some_and(|r| r.contact_radius_m == 0.0) {
+                        return Err(MaugisError::Unrepresentable { field: "unresolved contact/noncontact stability crossover" }.into());
+                    }
+                    (d, before)
+                }
+            };
+            if separation_d >= onset_d {
+                return Err(MaugisError::Unrepresentable { field: "ordered Maugis stability limits" }.into());
+            }
+            let after = law.evaluate_detached(separation_d)?;
+            let separation = snap(MaugisSnapKind::Separation, separation_d, before, after)?;
+            Ok(Self { law, noncontact, onset, separation })
+        }
+        /// Original full source owner, not a fitted replacement potential.
+        #[must_use] pub const fn law(&self) -> &SourceMaugisSphereContact { &self.law }
+        #[must_use] pub const fn onset(&self) -> &MaugisSnap { &self.onset }
+        #[must_use] pub const fn separation(&self) -> &MaugisSnap { &self.separation }
+
+        /// Choose the initial physical branch explicitly. No unreported jump or
+        /// previous loading history is inferred from an initial displacement.
+        pub fn initialize(&self, phase: MaugisPhase, indentation_m: f64)
+            -> Result<MaugisDisplacementHistory, MaugisContinuationError>
+        {
+            let equilibrium = match phase {
+                MaugisPhase::Detached => self.law.evaluate_detached(indentation_m)?,
+                MaugisPhase::Noncontact => self.law.evaluate_noncontact(indentation_m)?,
+                MaugisPhase::Contact => self.law.evaluate_contact_energy(indentation_m)?,
+            };
+            Ok(MaugisDisplacementHistory { model_identity: self.law.identity(), control_indentation_m: indentation_m, equilibrium })
+        }
+
+        /// Follow one monotone segment, preserving metastability in a coexistence
+        /// interval. Reversals require separate calls. A crossed endpoint is consumed
+        /// at equality; a zero-length proposal never emits a new event. Retrying from
+        /// the same token is deterministic; adopting `next` prevents repeated release.
+        /// The caller remains responsible for publishing each proposal only once.
+        pub fn advance(&self, old: &MaugisDisplacementHistory, target_m: f64, budget: MaugisContinuationBudget)
+            -> Result<MaugisDisplacementStep, MaugisContinuationError>
+        {
+            budget.validate()?;
+            if old.model_identity != self.law.identity() || old.equilibrium.model_identity() != self.law.identity() {
+                return Err(MaugisContinuationError::HistoryMismatch);
+            }
+            if !target_m.is_finite() {
+                return Err(MaugisError::InvalidInput { field: "continuation target indentation" }.into());
+            }
+            let from = old.control_indentation_m;
+            let detached = old.equilibrium.phase() == MaugisPhase::Detached;
+            let event = if target_m > from && detached && target_m >= self.onset.indentation_m {
+                Some(self.onset)
+            } else if target_m < from && !detached && target_m <= self.separation.indentation_m {
+                Some(self.separation)
+            } else { None };
+            let (equilibrium, work) = if target_m == from {
+                (old.equilibrium, zero_work())
+            } else if let Some(event) = event {
+                match event.kind {
+                    MaugisSnapKind::AttractionOnset => (
+                        self.connected_equilibrium(target_m)?,
+                        self.connected_work(event.indentation_m, target_m, budget.work)?,
+                    ),
+                    MaugisSnapKind::Separation => (
+                        self.law.evaluate_detached(target_m)?,
+                        self.connected_work(from, event.indentation_m, budget.work)?,
+                    ),
+                }
+            } else if detached {
+                (self.law.evaluate_detached(target_m)?, zero_work())
+            } else {
+                (self.connected_equilibrium(target_m)?, self.connected_work(from, target_m, budget.work)?)
+            };
+            let released = event.map_or(0.0, |e| e.released_energy_j);
+            let change = equilibrium.potential_j()-old.equilibrium.potential_j();
+            let residual = (work.work_j-change)-released;
+            let scale = old.equilibrium.potential_j().abs().max(equilibrium.potential_j().abs())
+                .max(work.work_j.abs()).max(released);
+            let tolerance = budget.energy_absolute_tolerance_j+budget.energy_relative_tolerance*scale;
+            if [change, residual, tolerance].iter().any(|v| !v.is_finite()) || residual.abs() > tolerance {
+                return Err(MaugisContinuationError::EnergyClosure { residual_j: residual, tolerance_j: tolerance });
+            }
+            Ok(MaugisDisplacementStep {
+                next: MaugisDisplacementHistory { model_identity: self.law.identity(), control_indentation_m: target_m, equilibrium },
+                snap: event, work, potential_change_j: change, released_energy_j: released,
+                energy_residual_j: residual, energy_tolerance_j: tolerance,
+            })
+        }
+        fn connected_equilibrium(&self, d: f64) -> Result<MaugisEquilibrium, MaugisContinuationError> {
+            match self.noncontact {
+                Some(limits) if d < limits.first_contact_indentation_m => self.law.evaluate_noncontact(d),
+                _ => self.law.evaluate_contact_energy(d),
+            }
+        }
+        fn connected_work(&self, from: f64, to: f64, budget: MaugisWorkBudget)
+            -> Result<MaugisWorkEstimate, MaugisContinuationError>
+        {
+            if from == to { return Ok(zero_work()); }
+            let Some(limits) = self.noncontact else {
+                return self.law.reversible_work_between(from, to, budget).map_err(Into::into);
+            };
+            let sign = if to > from { 1.0 } else { -1.0 };
+            let lo = from.min(to);
+            let hi = from.max(to);
+            let touch = limits.first_contact_indentation_m;
+            let mut work = zero_work();
+            if lo < touch {
+                work.work_j = self.noncontact_work(lo, hi.min(touch))?;
+            }
+            if hi > touch {
+                let contact = self.law.reversible_work_between(lo.max(touch), hi, budget)?;
+                work.work_j += contact.work_j;
+                work.estimated_absolute_error_j = contact.estimated_absolute_error_j;
+                work.evaluations = contact.evaluations;
+            }
+            work.work_j *= sign;
+            if !work.work_j.is_finite() { return Err(MaugisError::Unrepresentable { field: "continuation path work" }.into()); }
+            Ok(work)
+        }
+        fn noncontact_work(&self, from: f64, to: f64) -> Result<f64, MaugisContinuationError> {
+            let a = self.law.evaluate_noncontact(from)?;
+            let b = self.law.evaluate_noncontact(to)?;
+            if from == to { return Ok(0.0); }
+            let c0 = a.cohesive_radius_m()/self.law.radius_scale_m;
+            let c1 = b.cohesive_radius_m()/self.law.radius_scale_m;
+            let fold = (8.0/(3.0*PI))*self.law.lambda;
+            let x0 = c0-fold;
+            let x1 = c1-fold;
+            // Exact integral P(c)*(c-fold) dc. Translate to x=c-fold so the
+            // polynomial terms have one sign and remain well conditioned at fold.
+            // Rationalize x1-x0 from the displacement difference, rather than
+            // subtracting nearly equal radii (or absolute endpoint energies).
+            let dx = (2.0*((to-from)/self.law.indentation_scale_m))/(x0+x1);
+            let i1 = 0.5*(x0+x1);
+            let i2 = (x0*x0+x0*x1+x1*x1)/3.0;
+            let i3 = 0.25*(x0+x1)*(x0*x0+x1*x1);
+            let value = -(PI/2.0)*self.law.lambda*dx*(fold*fold*i1+2.0*fold*i2+i3)
+                * self.law.continuation_energy_scale()?;
+            if !dx.is_finite() || dx <= 0.0 || !value.is_finite() || value == 0.0 {
+                return Err(MaugisError::Unrepresentable { field: "noncontact work increment" }.into());
+            }
+            Ok(value)
+        }
+    }
+    fn zero_work() -> MaugisWorkEstimate {
+        MaugisWorkEstimate { work_j: 0.0, estimated_absolute_error_j: 0.0, evaluations: 0 }
+    }
+    fn snap(kind: MaugisSnapKind, indentation_m: f64, before: MaugisEquilibrium, after: MaugisEquilibrium)
+        -> Result<MaugisSnap, MaugisContinuationError>
+    {
+        let released = before.potential_j()-after.potential_j();
+        if !released.is_finite() || released < 0.0 {
+            return Err(MaugisContinuationError::NonpassiveSnap { released_energy_j: released });
+        }
+        Ok(MaugisSnap { kind, indentation_m, before, after, released_energy_j: released })
+    }
+}
+pub use history::{MaugisContinuationBudget, MaugisDisplacementContinuation,
+    MaugisDisplacementHistory, MaugisDisplacementStep, MaugisSnap, MaugisSnapKind};
+
 /// Physical branch; attraction does not imply real solid contact.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MaugisPhase {
@@ -24,6 +291,9 @@ pub enum MaugisPhase {
 #[derive(Clone, Debug, PartialEq)]
 pub enum MaugisContinuationError {
     Contact(MaugisError),
+    HistoryMismatch,
+    NonpassiveSnap { released_energy_j: f64 },
+    EnergyClosure { residual_j: f64, tolerance_j: f64 },
     NoNoncontactEquilibrium { indentation_m: f64 },
     NoDetachedEquilibrium { indentation_m: f64, cutoff_m: f64 },
 }
@@ -197,7 +467,7 @@ impl SourceMaugisSphereContact {
         let gap = (zero.c-c)*(0.5*(zero.c+c)+(4.0/3.0-8.0/(3.0*PI))*self.lambda)*self.indentation_scale_m;
         let endpoint = indentation_m == limits.minimum_indentation_m || indentation_m == limits.first_contact_indentation_m;
         let tangent = if endpoint { None } else {
-            Some(-PI*self.lambda*c*(c/(c-fold))*(self.force_scale_n/self.indentation_scale_m))
+            Some(-PI*self.lambda*(c/(c-fold))*(self.force_scale_n/self.indentation_scale_m))
         };
         let scale = self.continuation_energy_scale()?;
         let result = MaugisEquilibrium { model_identity: self.identity(), phase: MaugisPhase::Noncontact,
@@ -254,7 +524,8 @@ impl SourceMaugisSphereContact {
     }
 }
 fn check_energy(result: &MaugisEquilibrium) -> Result<(), MaugisError> {
-    if [result.elastic_energy_j, result.surface_energy_j, result.potential_j].iter().any(|v| !v.is_finite())
+    if [result.elastic_energy_j, result.surface_energy_j, result.potential_j,
+        result.normal_force_n, result.cohesive_radius_m, result.indentation_m, result.central_gap_m].iter().any(|v| !v.is_finite())
         || result.elastic_energy_j < 0.0 || result.surface_energy_j > 0.0 {
         Err(MaugisError::Unrepresentable { field: "absolute elastic/surface energy" })
     } else { Ok(()) }
