@@ -586,3 +586,14 @@ matches the dissipation ledger within 2%.
   do not mint a clarinet, voice, or valve product.
 - fs-time strategy wiring is a follow-up owned at L3 (fs-time depends
   down, not up).
+
+### Frozen storage during algebraic initialization
+
+`CircuitDae::consistent_initial_state` admits a converged zero-duration Newton
+result only when every differential coordinate retains its original bits. Any
+roundoff drift retries the existing rank-aware algebraic solve at the original
+storage, with the original unscaled constraint rows and solve budget. No charge,
+flux, or other differential coordinate is projected or newly created to make
+an ideal source fit. The source-onset regression covers an interleaved RLC
+network with zero stored coordinates and nonzero instantaneous source/capacitor
+currents; incompatible ideal clamps still refuse.

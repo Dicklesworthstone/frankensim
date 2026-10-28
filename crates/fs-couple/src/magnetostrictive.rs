@@ -198,7 +198,11 @@ impl MagnetostrictiveRod {
     pub fn coupling_wb_m(&self) -> f64 {
         f64::from(self.turns) * self.area_m2 * self.material.stress_coefficient_t() / self.length_m
     }
-    fn response(&self, extension: f64, linkage: f64) -> Result<MagnetostrictiveResponse> {
+    pub(crate) fn response(
+        &self,
+        extension: f64,
+        linkage: f64,
+    ) -> Result<MagnetostrictiveResponse> {
         let strain = extension / self.length_m;
         let response = self
             .material
@@ -212,7 +216,7 @@ impl MagnetostrictiveRod {
         }
         Ok(response)
     }
-    fn energy(&self, state: &[f64]) -> Result<f64> {
+    pub(crate) fn energy(&self, state: &[f64]) -> Result<f64> {
         let response = self.response(state[0], state[2])?;
         let kinetic = 0.5 * state[1] * (state[1] / self.modal_mass_kg);
         let constitutive = self.volume_m3 * response.incremental_energy_j_m3;

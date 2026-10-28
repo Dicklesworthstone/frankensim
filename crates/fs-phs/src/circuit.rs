@@ -598,8 +598,9 @@ impl CircuitDae {
     ///
     /// Compatible redundant constraints can leave branch-current splitting
     /// free, such as a capacitor directly across an ideal voltage source.
-    /// After a Newton refusal, the existing SVD owner solves only the linear
-    /// algebraic block. Original rows and the original solve budget must
+    /// After a Newton refusal or any conserved-coordinate drift, the existing
+    /// SVD owner solves only the linear algebraic block. Original rows and the
+    /// original solve budget must
     /// accept the represented midpoint efforts; stored coordinates never move.
     /// A minimum-norm multiplier choice does not claim unique initial currents.
     ///
@@ -613,8 +614,20 @@ impl CircuitDae {
         u0: &[f64],
     ) -> Result<Vec<f64>, CircuitError> {
         match step_descriptor(&self.system, x0, u0, 0.0) {
-            Ok(rec) => Ok(rec.x),
-            Err(PhsError::NewtonStalled { .. } | PhsError::NewtonRefused { .. }) => {
+            Ok(rec)
+                if rec
+                    .x
+                    .iter()
+                    .zip(x0)
+                    .take(self.system.differential_dim())
+                    .all(|(after, before)| after.to_bits() == before.to_bits()) =>
+            {
+                Ok(rec.x)
+            }
+            // A converged dt=0 Newton step can retain roundoff in a conserved
+            // coordinate. Resolve only the algebraic block at the ORIGINAL
+            // storage instead; never project or publish that fictitious drift.
+            Ok(_) | Err(PhsError::NewtonStalled { .. } | PhsError::NewtonRefused { .. }) => {
                 self.consistent_initial_state_rank_aware(x0, u0)
             }
             Err(e) => Err(CircuitError::Phs(e)),

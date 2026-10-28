@@ -18,6 +18,8 @@ pub mod conductivity;
 pub mod contacts;
 /// Source-derived piezoelectric motion on the same Kirchhoff storage solver.
 pub mod piezoelectric;
+/// Reciprocal biased magnetostrictive motion inside the native RLC descriptor.
+pub mod magnetostrictive;
 /// Voltage-driven magnetic memory and core heating through native circuit ports.
 pub mod hysteretic;
 use contacts::{SeriesElectricalContact, ContactHeat};

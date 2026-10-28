@@ -9287,3 +9287,42 @@ claimed by this fixed-query binding.
 
 Cold internal-coordinate extension preserves the same adhesive binding alongside
 existing source interfaces and nonlinear storage.
+
+## Material magnetostrictive rod inside a Kirchhoff RLC circuit
+
+`material_circuit::magnetostrictive::MagnetostrictiveCircuit` binds one original
+inductor branch to `magnetostrictive::MagnetostrictiveRod`. The selected numeric
+inductance is replaced by the source-derived clamped inductance; its uncoupled
+flux energy is removed before inserting the original rod's coupled strain/flux
+and kinetic energy. Native charges, other fluxes, source indices (including
+gaps), resistor stamps and transformer constraints keep their original owner.
+Appending the actual extension and momentum coordinates to that descriptor
+gives reciprocal actuation and motional voltage from the same material
+derivatives. No mechanical time integrator, independent sensing gain or fitted
+damping is introduced.
+
+The complete network uses perturbations about the rod's explicitly held
+DC-biased, stress-free reference. The original material snapshot, reference
+geometry, uniform magnetic path and caller-declared strain/H envelope stay
+fixed. Electrical and mechanical source work close against combined incremental
+storage and source-resolved `R*(Delta i)^2` resistance dissipation. The reported
+branch records are explicitly incremental: this loss is neither the total
+`R*(I_bias+Delta i)^2` winding heat nor generally its change from a DC baseline.
+Bias preparation/supply and cross terms are outside this account; no thermal
+deposition or temperature-dependent magnetic law is inferred.
+
+The original bounded descriptor and discrete-gradient stepper own evolution.
+For this fixed quadratic tangent and held inputs the method reduces to
+second-order midpoint; source discontinuities require interval cuts and motion
+requires time refinement. Candidates preserve both histories on source/domain,
+constraint, work or cancellation refusal. The same source energy supplies an
+exact quadratic Hessian to the native residual roundoff bound. Small energy
+residuals do not certify trajectory accuracy.
+
+Focused synthetic regressions compare an independent coupled RL/mechanical
+midpoint solution, source-free mechanical-to-resistive energy transfer, a
+continuous damped eigenmode and second-order refinement, zero-coupling reduction
+to an interleaved native RLC graph, reversed coil orientation, and true coupled
+current clamps with rollback. This extends MR60 with loaded axial motion and
+sensing; it does not close its spatial-wave, hysteretic, thermal, acoustic-pressure
+or experimental-validation scope.

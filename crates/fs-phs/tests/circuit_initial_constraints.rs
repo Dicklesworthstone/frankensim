@@ -30,11 +30,16 @@ fn compatible_ideal_voltage_clamp_keeps_charge_and_flux_from_any_multiplier_gues
         before[circuit.flux_index[0]] = flux;
         before[circuit.charge_index[0]] = charge;
         before[nd..].copy_from_slice(&guess);
-        let after = circuit.consistent_initial_state(&before, &[voltage]).unwrap();
+        let after = circuit
+            .consistent_initial_state(&before, &[voltage])
+            .unwrap();
         for i in 0..nd {
             assert_eq!(after[i].to_bits(), before[i].to_bits());
         }
-        assert_eq!(circuit.system.hamiltonian(&after), circuit.system.hamiltonian(&before));
+        assert_eq!(
+            circuit.system.hamiltonian(&after),
+            circuit.system.hamiltonian(&before)
+        );
         // The existing IC result represents endpoint multipliers, so the
         // actual constraint effort is their midpoint with the caller's guess.
         let v = f64::midpoint(before[node], after[node]);
@@ -49,8 +54,7 @@ fn compatible_ideal_voltage_clamp_keeps_charge_and_flux_from_any_multiplier_gues
         let dt = 1e-3;
         let step = circuit.step_audited(&after, &[voltage], dt).unwrap().0;
         let expected_flux = flux + dt * voltage;
-        let expected_source_current = voltage / 10.0
-            + f64::midpoint(flux, expected_flux) / 0.05;
+        let expected_source_current = voltage / 10.0 + f64::midpoint(flux, expected_flux) / 0.05;
         assert!((step.x[circuit.flux_index[0]] - expected_flux).abs() < 2e-11);
         assert!((step.x[circuit.charge_index[0]] - charge).abs() < 2e-13);
         assert!((step.y[0] - expected_source_current).abs() < 2e-9);
@@ -125,4 +129,37 @@ fn source_free_lc_stamps_have_exact_empty_port_shape_and_rebuild_unchanged() {
         original = a.x;
         copy = b.x;
     }
+}
+
+#[test]
+fn finite_voltage_onset_admits_algebraic_currents_without_creating_stored_charge_or_flux() {
+    // Original branch order deliberately interleaves C/L, with two unused
+    // source ports. A nonzero source can establish immediate capacitor/source
+    // currents while every differential coordinate remains exactly zero.
+    let circuit = assemble_circuit(&CircuitGraph {
+        node_count: 4,
+        branches: vec![
+            (3, 0, Branch::Capacitor { farads: 0.4 }),
+            (2, 3, Branch::Inductor { henries: 0.7 }),
+            (1, 2, Branch::Resistor { ohms: 0.8 }),
+            (1, 0, Branch::VoltageSource { port: 2 }),
+            (2, 0, Branch::Capacitor { farads: 0.3 }),
+            (3, 0, Branch::Inductor { henries: 4.5 }),
+        ],
+        transformers: vec![],
+    })
+    .unwrap();
+    let before = vec![0.0; circuit.system.state_dim()];
+    let ports = [0.0, 0.0, 0.03];
+    let after = circuit.consistent_initial_state(&before, &ports).unwrap();
+    for index in 0..circuit.system.differential_dim() {
+        assert_eq!(after[index].to_bits(), before[index].to_bits());
+    }
+    assert_eq!(circuit.system.hamiltonian(&after), 0.0);
+    for (&node, expected) in circuit.node_potential_index.iter().zip([0.03, 0.0, 0.0]) {
+        assert!((f64::midpoint(before[node], after[node]) - expected).abs() < 2e-12);
+    }
+    let step = circuit.step_audited(&after, &ports, 0.02).unwrap().0;
+    assert!(step.supplied > 0.0 && step.delta_h > 0.0 && step.dissipated > 0.0);
+    assert!(step.balance_residual().abs() < 2e-12);
 }
