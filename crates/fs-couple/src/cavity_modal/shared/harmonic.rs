@@ -58,32 +58,88 @@ impl SharedCavity {
         maximum_work: usize,
         gate: &CancelGate,
     ) -> Result<SharedCavityHarmonicResponse, ModalCouplingError> {
-        if gate.is_requested() { return Err(ModalCouplingError::Cancelled); }
+        let force = self.prepare_harmonic_force(
+            omega_rad_s,
+            surface_force,
+            incident_neck_pressure_pa,
+            gate,
+        )?;
+        let network = self
+            .system
+            .harmonic_response(omega_rad_s, &force, maximum_work, gate)?;
+        self.observe_harmonic_network(
+            omega_rad_s,
+            surface_force,
+            incident_neck_pressure_pa,
+            network,
+            gate,
+        )
+    }
+
+    pub(super) fn prepare_harmonic_force(
+        &self,
+        omega_rad_s: f64,
+        surface_force: &[C64],
+        incident_neck_pressure_pa: C64,
+        gate: &CancelGate,
+    ) -> Result<Vec<C64>, ModalCouplingError> {
+        if gate.is_requested() {
+            return Err(ModalCouplingError::Cancelled);
+        }
         let finite = |z: C64| z.re.is_finite() && z.im.is_finite();
-        if !omega_rad_s.is_finite() || omega_rad_s <= 0.0
+        if !omega_rad_s.is_finite()
+            || omega_rad_s <= 0.0
             || surface_force.len() != self.surface_modes
             || surface_force.iter().any(|&z| !finite(z))
             || !finite(incident_neck_pressure_pa)
         {
-            return Err(network_invalid("harmonic cavity needs positive frequency and finite original physical forces"));
+            return Err(network_invalid(
+                "harmonic cavity needs positive frequency and finite original physical forces",
+            ));
         }
-        for band in self.viscous_neck.as_ref().map(|m| m.band_rad_s()).into_iter()
-            .chain(self.thermal_compression.as_ref().map(|m| m.options().band_rad_s))
+        for band in self
+            .viscous_neck
+            .as_ref()
+            .map(|m| m.band_rad_s())
+            .into_iter()
+            .chain(
+                self.thermal_compression
+                    .as_ref()
+                    .map(|m| m.options().band_rad_s),
+            )
         {
             if !(band[0]..=band[1]).contains(&omega_rad_s) {
-                return Err(network_invalid("harmonic cavity query is outside an admitted wall-diffusion band"));
+                return Err(network_invalid(
+                    "harmonic cavity query is outside an admitted wall-diffusion band",
+                ));
             }
         }
         let projection = self.source.neck_volume_shape_m2_per_sqrt_kg();
         let mut force = vec![C64::ZERO; self.system.mode_count()];
         force[..self.surface_modes].copy_from_slice(surface_force);
         force[self.surface_modes] = incident_neck_pressure_pa.scale(-projection);
-        let network = self.system.harmonic_response(omega_rad_s, &force, maximum_work, gate)?;
-        let extension = self.column.iter().zip(&network.displacement_m_sqrt_kg)
+        Ok(force)
+    }
+
+    pub(super) fn observe_harmonic_network(
+        &self,
+        omega_rad_s: f64,
+        surface_force: &[C64],
+        incident_neck_pressure_pa: C64,
+        network: ModalHarmonicResponse,
+        gate: &CancelGate,
+    ) -> Result<SharedCavityHarmonicResponse, ModalCouplingError> {
+        let finite = |z: C64| z.re.is_finite() && z.im.is_finite();
+        let projection = self.source.neck_volume_shape_m2_per_sqrt_kg();
+        let extension = self
+            .column
+            .iter()
+            .zip(&network.displacement_m_sqrt_kg)
             .fold(C64::ZERO, |sum, (&c, &q)| sum + q.scale(c));
         let area = self.source.neck_area_m2();
         let volume = extension.scale(area);
-        let surface_rate = self.column[..self.surface_modes].iter()
+        let surface_rate = self.column[..self.surface_modes]
+            .iter()
             .zip(&network.velocity_m_sqrt_kg_per_s)
             .fold(C64::ZERO, |sum, (&c, &v)| sum + v.scale(c * area));
         let neck_velocity = network.velocity_m_sqrt_kg_per_s[self.surface_modes];
@@ -105,17 +161,28 @@ impl SharedCavity {
             }
             None => {
                 let stiffness = self.source.compression_stiffness_n_m();
-                (extension.scale(stiffness), 0.25 * stiffness * extension.norm_sq())
+                (
+                    extension.scale(stiffness),
+                    0.25 * stiffness * extension.norm_sq(),
+                )
             }
         };
         let mut exterior = C64::ZERO;
-        if let (Some(port), Some(model)) = (self.radiation_neck_port, self.system.radiation_model()) {
-            for (pole, state) in model.poles.iter().zip(network.radiation_state.chunks_exact(2)) {
+        if let (Some(port), Some(model)) = (self.radiation_neck_port, self.system.radiation_model())
+        {
+            for (pole, state) in model
+                .poles
+                .iter()
+                .zip(network.radiation_state.chunks_exact(2))
+            {
                 exterior = exterior + state[1].scale(pole.coupling[port] / projection);
             }
         }
-        let surface_power = surface_force.iter().zip(&network.velocity_m_sqrt_kg_per_s)
-            .map(|(&f, &v)| 0.5 * (f * v.conj()).re).sum();
+        let surface_power = surface_force
+            .iter()
+            .zip(&network.velocity_m_sqrt_kg_per_s)
+            .map(|(&f, &v)| 0.5 * (f * v.conj()).re)
+            .sum();
         let result = SharedCavityHarmonicResponse {
             volume_change_m3: volume,
             fractional_volume_change: volume.scale(self.source.geometry().volume_m3.recip()),
@@ -126,19 +193,36 @@ impl SharedCavity {
             mean_compression_energy_j: compression_energy,
             mean_neck_kinetic_energy_j: 0.25 * neck_velocity.norm_sq(),
             surface_input_power_w: surface_power,
-            incident_pressure_input_power_w: -0.5 * (incident_neck_pressure_pa * neck_flow.conj()).re,
+            incident_pressure_input_power_w: -0.5
+                * (incident_neck_pressure_pa * neck_flow.conj()).re,
             network,
         };
-        if [result.volume_change_m3, result.fractional_volume_change, result.pressure_increment_pa,
-            result.surface_volume_rate_m3_s, result.neck_outflow_m3_s, result.neck_exterior_pressure_pa]
-            .iter().any(|&z| !finite(z))
-            || [result.mean_compression_energy_j, result.mean_neck_kinetic_energy_j,
-                result.surface_input_power_w, result.incident_pressure_input_power_w]
-                .iter().any(|x| !x.is_finite())
+        if [
+            result.volume_change_m3,
+            result.fractional_volume_change,
+            result.pressure_increment_pa,
+            result.surface_volume_rate_m3_s,
+            result.neck_outflow_m3_s,
+            result.neck_exterior_pressure_pa,
+        ]
+        .iter()
+        .any(|&z| !finite(z))
+            || [
+                result.mean_compression_energy_j,
+                result.mean_neck_kinetic_energy_j,
+                result.surface_input_power_w,
+                result.incident_pressure_input_power_w,
+            ]
+            .iter()
+            .any(|x| !x.is_finite())
         {
-            return Err(network_invalid("harmonic cavity physical observation overflows"));
+            return Err(network_invalid(
+                "harmonic cavity physical observation overflows",
+            ));
         }
-        if gate.is_requested() { return Err(ModalCouplingError::Cancelled); }
+        if gate.is_requested() {
+            return Err(ModalCouplingError::Cancelled);
+        }
         Ok(result)
     }
 }

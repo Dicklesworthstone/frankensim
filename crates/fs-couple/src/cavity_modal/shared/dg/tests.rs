@@ -20,7 +20,7 @@ fn config(pressure: f64) -> ModalCouplingConfig {
         energy_relative_tolerance: 1e-8,
     }
 }
-fn cavity(rate: u32, memory: bool, pressure: f64) -> SharedCavity {
+pub(super) fn cavity(rate: u32, memory: bool, pressure: f64) -> SharedCavity {
     let source = HelmholtzModalCavity::new(
         HelmholtzCavity {
             volume_m3: 1e-6,
@@ -87,7 +87,7 @@ fn cavity(rate: u32, memory: bool, pressure: f64) -> SharedCavity {
         .unwrap()
     }
 }
-fn load(rate: u32, walls: bool, radius: f64) -> DgPortLoad {
+pub(super) fn load(rate: u32, walls: bool, radius: f64) -> DgPortLoad {
     let duct = DgDuct::new(
         &Duct {
             segments: vec![Segment::Cylinder {

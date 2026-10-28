@@ -6,6 +6,8 @@
 //! radiation belongs to the supplied original `DgPortLoad`.
 
 use super::*;
+pub mod harmonic;
+pub use harmonic::SharedCavityDgHarmonicResponse;
 use crate::dg_port::DgPortLoad;
 use crate::render::schedule::force::coupled::dg::PreparedModalDg;
 pub use crate::render::schedule::force::coupled::dg::{
