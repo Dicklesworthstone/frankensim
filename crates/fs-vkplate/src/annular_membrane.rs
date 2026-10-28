@@ -103,10 +103,16 @@ pub(super) struct AnnularMembrane {
     nc: usize,
 }
 
-fn outer(m: &mut [BTreeMap<usize, f64>], a: &Row, b: &Row, scale: f64) {
+// Assemble the lower triangle of the complementary-energy Hessian. Self
+// products are symmetric; mixed products are supplied in both orders below.
+// Computing both triangles independently can round a cancelling entry to zero
+// on only one side, violating reciprocity and the exported CSR's structure.
+fn outer_lower(m: &mut [BTreeMap<usize, f64>], a: &Row, b: &Row, scale: f64) {
     for &(i, x) in a {
         for &(j, y) in b {
-            add(m, i, j, scale * x * y);
+            if j <= i {
+                add(m, i, j, scale * x * y);
+            }
         }
     }
 }
@@ -184,10 +190,10 @@ impl AnnularMembrane {
                 continue;
             }
             let weight = compliance(i as f64 * h, j as f64 * h)?;
-            outer(&mut matrix, &xx, &xx, weight);
-            outer(&mut matrix, &yy, &yy, weight);
-            outer(&mut matrix, &xx, &yy, -nu * weight);
-            outer(&mut matrix, &yy, &xx, -nu * weight);
+            outer_lower(&mut matrix, &xx, &xx, weight);
+            outer_lower(&mut matrix, &yy, &yy, weight);
+            outer_lower(&mut matrix, &xx, &yy, -nu * weight);
+            outer_lower(&mut matrix, &yy, &xx, -nu * weight);
             for (stress, di, dj) in [(&yy, 1, 0), (&xx, 0, 1)] {
                 // Integrate the squared slope on both halves of the nodal
                 // control interval. Squaring the centered average instead
@@ -233,8 +239,17 @@ impl AnnularMembrane {
                 .zip([-0.5 / h, -0.5 / h, 0.5 / h, 0.5 / h])
                 .collect();
             let weight = 2.0 * (1.0 + nu) * compliance((i as f64 + 0.5) * h, (j as f64 + 0.5) * h)?;
-            outer(&mut matrix, &xy, &xy, weight);
+            outer_lower(&mut matrix, &xy, &xy, weight);
             quadratic(&mut load, &xy, &dx, &dy, -1.0);
+        }
+        // Reflect the completed triangle exactly, including cancelling zeros.
+        // Preserve the original lower-triangle accumulation used by Band, and
+        // give the Schur cross block and exported operator the same Hessian.
+        for i in 0..matrix.len() {
+            let (earlier, remaining) = matrix.split_at_mut(i);
+            for (&j, &value) in remaining[0].range(..i) {
+                earlier[j].insert(i, value);
+            }
         }
         // Keep the narrow band. Only the three boundary modes are dense;
         // eliminate them with the exact Schur complement, factored once.
@@ -428,6 +443,38 @@ impl AnnularMembrane {
 mod tests {
     use super::super::{Body, Edge, Nonlinear, PlateSpec};
     use super::{MembraneTerm, OrderedGradient};
+
+    #[test]
+    fn full_grid_hihat_airy_hessians_are_exactly_reciprocal() {
+        // Both real plates matter: the lower plate's affine hole trace exposed
+        // a stored off-diagonal with an absent transpose after cancellation.
+        let piece = super::super::kit::hihat_scaled(0.002, 0.0, &[(0.0, 2.5)], 1.0)
+            .expect("full-grid hi-hat");
+        let mut plates = 0;
+        for body in &piece.instrument.bodies {
+            let Some((matrix, _, _)) = body.airy_system() else {
+                continue;
+            };
+            plates += 1;
+            assert!(matrix.n > 3000, "exercise the full physical grid");
+            for row in 0..matrix.n {
+                for entry in matrix.ptr[row]..matrix.ptr[row + 1] {
+                    let column = matrix.col[entry];
+                    let transpose_row = matrix.ptr[column]..matrix.ptr[column + 1];
+                    let offset = matrix.col[transpose_row.clone()]
+                        .binary_search(&row)
+                        .expect("every stored Hessian entry needs its transpose");
+                    let transpose = transpose_row.start + offset;
+                    assert_eq!(
+                        matrix.val[entry].to_bits(),
+                        matrix.val[transpose].to_bits(),
+                        "plate {plates}, ({row}, {column}): reciprocal stiffness"
+                    );
+                }
+            }
+        }
+        assert_eq!(plates, 2);
+    }
 
     // Frozen original scatter, independent of the candidate's transposed rows.
     fn scatter(
