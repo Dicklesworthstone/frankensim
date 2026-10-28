@@ -217,7 +217,20 @@ impl NsfGasMedium {
         theta: f64,
     ) -> Result<Option<NsfCellMaterial>, NsfError> {
         match self {
-            Self::CaloricallyPerfect(_) => Ok(None),
+            Self::CaloricallyPerfect(_) => {
+                // A dilute cell has a larger relaxation time even though the
+                // gas's dynamic viscosity is pressure-independent. The
+                // reference-density table check cannot admit rarefied cells
+                // or reservoir states on its own.
+                let nu = law.mu_lattice(theta) / density_lattice;
+                if !nu.is_finite() || nu <= 0.0 || nu > MAX_VERIFIED_LATTICE_VISCOSITY {
+                    return Err(NsfError::Viscosity {
+                        observed: nu,
+                        maximum: MAX_VERIFIED_LATTICE_VISCOSITY,
+                    });
+                }
+                Ok(None)
+            }
             Self::Thermochemical(source) => {
                 let temperature = law.kelvin_of_theta(theta);
                 let pressure = law.pressure_pa(density_lattice, theta);

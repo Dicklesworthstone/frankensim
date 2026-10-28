@@ -8,7 +8,7 @@
 //! acoustic non-reflection condition. In particular a prescribed state does not
 //! preserve the outgoing characteristic of an impinging sound wave.
 
-use super::{NsfError, NsfGrid3, Q, THETA0, check_state};
+use super::{NsfError, NsfGrid3, THETA0, check_state};
 use crate::lattice3::Lattice3;
 
 /// Physical state at an exterior ghost centre, held until explicitly changed.
@@ -59,7 +59,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         state: Option<NsfOpenState>,
     ) -> Result<(), NsfError> {
         if self.sgs.is_some() {
-            return Err(NsfError::Input("NSF SGS does not support prescribed-reservoir faces"));
+            return Err(NsfError::Input(
+                "NSF SGS does not support prescribed-reservoir faces",
+            ));
         }
         if self.open.is_some() {
             return Err(NsfError::Input(
@@ -105,14 +107,13 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             if self.solid[i] {
                 continue;
             }
-            // The pre-collision first moment is rho*u - F/2. Changing the
-            // pressure-force boundary must not itself give the gas an impulse.
-            for q in 0..Q {
-                let delta = (0..3)
-                    .map(|a| f64::from(L::E[q][a]) * (self.force[i][a] - force[i][a]))
-                    .sum::<f64>();
-                f[q] += 0.5 * L::W[q] * delta / THETA0;
-            }
+            // Preserve the whole physical distribution, including its stress,
+            // when changing the thermal-pressure force of a reservoir face.
+            super::rebase_force::<L>(
+                f,
+                u[i],
+                std::array::from_fn(|a| self.force[i][a] - force[i][a]),
+            );
         }
         let sig = self.stress_field(&populations, &force, &rho, &self.theta, &self.material, &[]);
         let history = self.flux_divergence(&self.e, &rho, &u, &self.theta, &sig, &[], None);
@@ -366,6 +367,142 @@ mod tests {
         assert!(corner.set_open_face(0, false, Some(s)).is_err());
         assert_eq!(corner.state_hash(), before);
         assert!(corner.reservoir_faces[0][0].is_none());
+    }
+
+    #[test]
+    fn g0_reservoir_rebinding_preserves_physical_stress_and_energy() {
+        use crate::nsf3::{Q, neq_second};
+
+        for axis in 0..3 {
+            let s = state([8.0, -4.0, 3.0], 293.15);
+            let mut grid = uniform(axis, 1, s);
+            // Nonzero shear and bulk stresses must survive the rebase too.
+            // These Hermite coefficients have zero mass and first moment.
+            let physical = [2e-4, -1e-4, 3e-4, 1.5e-4, -2.5e-4, 5e-5];
+            let trace = physical[0] + physical[1] + physical[2];
+            for f in &mut grid.f {
+                for q in 0..Q {
+                    let [x, y, z] = D3q27::E[q].map(f64::from);
+                    let cpc = x * x * physical[0]
+                        + y * y * physical[1]
+                        + z * z * physical[2]
+                        + 2.0 * (x * y * physical[3] + x * z * physical[4] + y * z * physical[5]);
+                    f[q] += D3q27::W[q] * (cpc - THETA0 * trace) / (2.0 * THETA0.powi(2));
+                }
+            }
+            let moments = |grid: &NsfGrid3<D3q27>| -> Vec<[f64; 6]> {
+                (0..grid.n)
+                    .map(|i| {
+                        let (rho, u, _) = grid.cell(grid.at(i));
+                        let eq = super::super::equilibrium::<D3q27>(rho, u, THETA0);
+                        let mut second = neq_second::<D3q27>(&grid.f[i], &eq);
+                        let f = grid.force[i];
+                        second[0] += u[0] * f[0];
+                        second[1] += u[1] * f[1];
+                        second[2] += u[2] * f[2];
+                        second[3] += 0.5 * (u[0] * f[1] + u[1] * f[0]);
+                        second[4] += 0.5 * (u[0] * f[2] + u[2] * f[0]);
+                        second[5] += 0.5 * (u[1] * f[2] + u[2] * f[1]);
+                        second
+                    })
+                    .collect()
+            };
+            let before = moments(&grid);
+            let cells: Vec<_> = (0..grid.n).map(|i| grid.cell(grid.at(i))).collect();
+            let energy = grid.total_energy_j();
+            for ghost in [
+                Some(state(s.velocity_m_s, 303.15)),
+                Some(state(s.velocity_m_s, 283.15)),
+                None,
+            ] {
+                grid.set_open_face(axis, false, ghost).unwrap();
+                let after = moments(&grid);
+                for i in 0..grid.n {
+                    for component in 0..6 {
+                        assert!(
+                            (after[i][component] - before[i][component]).abs() < 2e-14,
+                            "axis={axis} cell={i} component={component}: {:?} -> {:?}",
+                            before[i],
+                            after[i]
+                        );
+                    }
+                    let cell = grid.cell(grid.at(i));
+                    assert!((cell.0 - cells[i].0).abs() < 2e-14);
+                    assert_eq!(cell.2, cells[i].2);
+                    for a in 0..3 {
+                        assert!((cell.1[a] - cells[i].1[a]).abs() < 2e-14);
+                    }
+                }
+                assert_eq!(grid.total_energy_j(), energy);
+                if ghost.is_some() {
+                    assert!(grid.force.iter().any(|f| f[axis].abs() > 1e-5));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g0_local_density_controls_viscosity_admission_and_step_rollback() {
+        use crate::nsf3::MAX_VERIFIED_LATTICE_VISCOSITY;
+
+        let s = state([0.0; 3], 293.15);
+        let mut grid = uniform(0, 1, s);
+        let minimum_density = grid.law.mu_lattice(THETA0) / MAX_VERIFIED_LATTICE_VISCOSITY;
+        let admitted = 1.01 * minimum_density;
+        let refused = 0.99 * minimum_density;
+        assert!(matches!(
+            NsfGrid3::<D3q27>::new(spec(0, 1), |_| false, |_| (refused, [0.0; 3], 293.15)),
+            Err(NsfError::Viscosity { .. })
+        ));
+        NsfGrid3::<D3q27>::new(spec(0, 1), |_| false, |_| (admitted, [0.0; 3], 293.15)).unwrap();
+
+        // The same source law must reject a dilute prescribed reservoir
+        // before publishing its boundary or any half-force rebase.
+        let before = (grid.state_hash(), grid.total_energy_j());
+        assert!(matches!(
+            grid.set_open_face(
+                0,
+                false,
+                Some(NsfOpenState {
+                    density_kg_m3: refused * grid.law.rho_ref_kg_m3,
+                    ..s
+                })
+            ),
+            Err(NsfError::Viscosity { .. })
+        ));
+        assert_eq!((grid.state_hash(), grid.total_energy_j()), before);
+        assert!(grid.reservoir_faces[0][0].is_none());
+
+        // A constant-temperature manufactured rarefaction crosses the local
+        // envelope after streaming. Match removed energy to removed mass so
+        // that a temperature-domain check cannot mask the viscosity defect.
+        let removed = refused - admitted;
+        let cv_theta = THETA0 / (grid.law.gamma - 1.0);
+        let mut periodic = spec(0, 1);
+        periodic.periodic = [true; 3];
+        let mut evolving = NsfGrid3::<D3q27>::new_with_sources(
+            periodic,
+            |_| false,
+            |_| (admitted, [0.0; 3], 293.15),
+            Some(Box::new(move |_, _| {
+                (removed, [0.0; 3], removed * cv_theta)
+            })),
+        )
+        .unwrap();
+        let before = (
+            evolving.state_hash(),
+            evolving.steps(),
+            evolving.cumulative_ledger(),
+        );
+        assert!(matches!(evolving.step(), Err(NsfError::Viscosity { .. })));
+        assert_eq!(
+            (
+                evolving.state_hash(),
+                evolving.steps(),
+                evolving.cumulative_ledger()
+            ),
+            before
+        );
     }
 
     #[test]

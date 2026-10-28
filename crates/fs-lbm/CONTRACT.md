@@ -1361,6 +1361,22 @@ trace/deviatoric relaxation against prescribed physical moments, including
 unequal rates, nonparallel velocity/forcing, and the equal-rate limit. These
 local identities do not extend the existing Mach or transport envelopes.
 
+**Physical initialization and boundary rebinding (`NSF3_BIT_SEMANTICS_VERSION`
+5).** Initial populations now use `feq(rho,u) - S(u,F)/2`. A shifted-velocity
+equilibrium alone introduced an artificial `F tensor F/(4 rho)` second moment.
+Prescribed reservoir changes and characteristic boundary changes share the
+same complete Guo half-source rebase, preserving physical normal/shear stress
+as well as mass, velocity and total energy. The shared source helper allocates
+no memory. G0 regressions exercise nonparallel pressure/body forcing, both
+viscous modes, every boundary orientation and reservoir attach/change/remove.
+
+Calorically perfect gas admission also checks the actual local kinematic
+viscosity `mu(T)/rho` at construction, boundary admission, predictors and accepted
+endpoints. Checking the reference-density transport table alone admitted dilute
+states outside the existing verified viscosity limit. Such states now refuse
+transactionally, with no clipping, extra material-cache allocation or expansion
+of the declared flow regime. A focused rarefaction regression checks rollback.
+
 **Why not a temperature-corrected equilibrium (measured).** The first formulation put `theta - theta0` into the equilibrium
 (Hermite through third order). Its Bloch-linearised one-step matrix (28 x 28: 27 populations and the energy) about a
 quiescent uniform state has a REAL eigenvalue of 1.4 to 2.0 at oblique wavevectors near the Nyquist limit at air

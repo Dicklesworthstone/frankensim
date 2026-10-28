@@ -94,9 +94,9 @@ pub const MAX_VERIFIED_LATTICE_VISCOSITY: f64 = 0.03;
 /// of a decay rate below 5e-3 of the quiescent rate up to this value, and nothing was measured above it. A larger declared
 /// `maximum_mach` is refused ([`NsfError::MachBound`]), not extrapolated.
 pub const MAX_QUALIFIED_MACH: f64 = 0.2;
-/// Version of the arithmetic order, coefficients and coupling (bump on any change that moves bits). 4: the trace of the
-/// Guo source uses the bulk relaxation rate, consistently with the half-force stress in the energy flux.
-pub const NSF3_BIT_SEMANTICS_VERSION: u32 = 4;
+/// Version of the arithmetic order, coefficients and coupling (bump on any change that moves bits). 5: initialization
+/// and reservoir updates preserve the full Guo half-source chart, including its physical stress.
+pub const NSF3_BIT_SEMANTICS_VERSION: u32 = 5;
 
 /// Refusals of the NSF grid. A failed step leaves the published state unchanged.
 #[derive(Clone, Debug, PartialEq)]
@@ -395,6 +395,25 @@ fn half_force_velocity(rho: f64, mom: [f64; 3], force: [f64; 3]) -> [f64; 3] {
         (mom[1] + 0.5 * force[1]) / rho,
         (mom[2] + 0.5 * force[2]) / rho,
     ]
+}
+
+/// Add half the unrelaxed Guo source for `difference = F_old - F_new`.
+/// The physical populations are `f + S(u,F)/2`: preserving only their first
+/// moment would add `(u delta_F + delta_F u)/2` to the physical second moment
+/// and turn a force-chart change into viscous stress and energy transport.
+/// Guo, Zheng and Shi (2002), Phys. Rev. E 65, 046308,
+/// https://doi.org/10.1103/PhysRevE.65.046308.
+fn rebase_force<L: Lattice3<27>>(f: &mut [f64; Q], u: [f64; 3], difference: [f64; 3]) {
+    if difference == [0.0; 3] {
+        return;
+    }
+    let uf = (0..3).map(|a| u[a] * difference[a]).sum::<f64>();
+    for q in 0..Q {
+        let c = L::E[q];
+        let cf = (0..3).map(|a| f64::from(c[a]) * difference[a]).sum::<f64>();
+        let cu = (0..3).map(|a| f64::from(c[a]) * u[a]).sum::<f64>();
+        f[q] += 0.5 * L::W[q] * ((cf - uf) / THETA0 + cu * cf / (THETA0 * THETA0));
+    }
 }
 
 /// Isothermal regularised collision with Guo forcing: shear relaxation `ws`, trace relaxation `wb`. The first-moment
@@ -751,25 +770,32 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 }
             }
         }
-        // first moment sum c f = rho u - F/2 so that the half-force velocity equals the requested one
+        // Initialize local physical equilibrium in the full Guo chart.
+        // feq(rho, u - F/(2 rho)) has the correct first moment but leaves a
+        // spurious physical second moment F F / (4 rho). Subtract S(u,F)/2
+        // instead, keeping both the requested velocity and zero initial stress.
         for i in 0..n {
             grid.f[i] = if grid.solid[i] {
                 equilibrium::<L>(1.0, [0.0; 3], THETA0)
             } else {
-                let f = grid.force[i];
-                let u = [
-                    vel[i][0] - 0.5 * f[0] / rho[i],
-                    vel[i][1] - 0.5 * f[1] / rho[i],
-                    vel[i][2] - 0.5 * f[2] / rho[i],
-                ];
-                equilibrium::<L>(rho[i], u, THETA0)
+                let mut f = equilibrium::<L>(rho[i], vel[i], THETA0);
+                rebase_force::<L>(&mut f, vel[i], grid.force[i].map(|force| -force));
+                f
             };
         }
         let (rho_g, mom) = grid.macro_fields(&grid.f);
         let u = grid.velocity_field(&rho_g, &mom, &grid.force);
         grid.material = grid.material_field(&rho_g, &grid.theta)?;
-        let sig = grid.stress_field(&grid.f, &grid.force, &rho_g, &grid.theta, &grid.material, &[]);
-        let (div, wall, _) = grid.flux_divergence(&grid.e, &rho_g, &u, &grid.theta, &sig, &[], None)?;
+        let sig = grid.stress_field(
+            &grid.f,
+            &grid.force,
+            &rho_g,
+            &grid.theta,
+            &grid.material,
+            &[],
+        );
+        let (div, wall, _) =
+            grid.flux_divergence(&grid.e, &rho_g, &u, &grid.theta, &sig, &[], None)?;
         grid.div = div;
         grid.wall_out = wall;
         Ok(grid)
@@ -870,7 +896,14 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 return Err(error);
             }
         };
-        let sig = self.stress_field(&self.f, &self.force, &rho, &self.theta, &self.material, &transport);
+        let sig = self.stress_field(
+            &self.f,
+            &self.force,
+            &rho,
+            &self.theta,
+            &self.material,
+            &transport,
+        );
         let (div, wall, open) = match self.flux_divergence(
             &self.e,
             &rho,
@@ -937,11 +970,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         rho: &[f64],
         theta: &[f64],
     ) -> Result<Vec<Option<NsfCellMaterial>>, NsfError> {
-        if matches!(&self.spec.gas, NsfGasMedium::CaloricallyPerfect(_)) {
-            return Ok(Vec::new());
-        }
-        let mut values = vec![Ok(None); self.n];
-        par_fill(&mut values, self.spec.workers, &|i| {
+        let resolve = |i: usize| {
             if self.solid[i] {
                 return Ok(None);
             }
@@ -959,7 +988,17 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 });
             }
             self.spec.gas.resolve(&self.law, rho[i], theta[i])
-        });
+        };
+        if matches!(&self.spec.gas, NsfGasMedium::CaloricallyPerfect(_)) {
+            // Keep the legacy path allocation-free while admitting its
+            // actual local kinematic viscosity at each corrector state.
+            for i in 0..self.n {
+                resolve(i)?;
+            }
+            return Ok(Vec::new());
+        }
+        let mut values = vec![Ok(None); self.n];
+        par_fill(&mut values, self.spec.workers, &resolve);
         values.into_iter().collect()
     }
 
@@ -1028,7 +1067,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 [0.0; 6]
             } else {
                 let (ws, wb) = self.sgs_rates(
-                    rho[i], theta[i], material.get(i).and_then(Option::as_ref), transport.get(i),
+                    rho[i],
+                    theta[i],
+                    material.get(i).and_then(Option::as_ref),
+                    transport.get(i),
                 );
                 stress::<L>(&f[i], force[i], ws, wb)
             }
@@ -1378,8 +1420,15 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 })
                 .collect();
             let sig = self.stress_field(&next, &f1, &rho1, &th1, &trial_material, &trial_transport);
-            let (div1, wall1, open1) =
-                self.flux_divergence(&et_trial, &rho1, &u1, &th1, &sig, &trial_transport, faces1.as_ref())?;
+            let (div1, wall1, open1) = self.flux_divergence(
+                &et_trial,
+                &rho1,
+                &u1,
+                &th1,
+                &sig,
+                &trial_transport,
+                faces1.as_ref(),
+            )?;
             let mut material_new = trial_material;
             let mut e1 = self.e.clone();
             let mut th_new = th1.clone();
@@ -1440,6 +1489,12 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                     low_k: self.spec.temperature_window_k[0],
                     high_k: self.spec.temperature_window_k[1],
                 });
+            }
+            if material_new.is_empty() {
+                // The final caloric corrector changes temperature after the
+                // trial material check. Admit the actual published legacy
+                // endpoint too; source reconstruction already does this.
+                self.spec.gas.resolve(&self.law, rho1[i], th1[i])?;
             }
         }
         // The last corrector changes temperature after faces1 was evaluated.
@@ -1776,6 +1831,66 @@ mod tests {
             0.5 * (u[0] * force[2] + u[2] * force[0]),
             0.5 * (u[1] * force[2] + u[2] * force[1]),
         ]
+    }
+
+    #[test]
+    fn g0_initial_forced_gas_has_requested_velocity_and_no_spurious_stress() {
+        let velocity = [0.07, -0.03, 0.02];
+        let source_force = [0.001, -0.0017, 0.0004];
+        for workers in [1, 3] {
+            let spec = NsfSpec {
+                dims: [8, 2, 2],
+                periodic: [true; 3],
+                gas: GasSpec::dry_air_ussa1976(),
+                temperature_k: 293.15,
+                pressure_pa: 101325.0,
+                dx_m: 5e-5,
+                temperature_window_k: [273.15, 333.15],
+                maximum_mach: MAX_QUALIFIED_MACH,
+                maximum_temperature_ratio: 0.2,
+                bulk_to_shear_ratio: 0.73,
+                bulk_ratio_source: "Cramer 2012, N2 at 293 K",
+                maximum_cells: 32,
+                wall: WallThermal::Adiabatic,
+                workers,
+                transport_points: 17,
+            };
+            let initial = |x: [usize; 3]| {
+                let temperature = 293.15 + 3.0 * x[0] as f64;
+                (1.2, velocity, temperature)
+            };
+            let grid = NsfGrid3::<D3q27>::new_with_sources(
+                spec,
+                |_| false,
+                initial,
+                Some(Box::new(move |_, _| (0.0, source_force, 0.0))),
+            )
+            .unwrap();
+            // Both a nonuniform thermal-pressure force and a nonparallel
+            // manufactured force enter the actual constructor's chart.
+            for i in 0..grid.n {
+                let (rho, u, temperature) = grid.cell(grid.at(i));
+                assert!((rho - 1.2).abs() < 2e-14);
+                for a in 0..3 {
+                    assert!((u[a] - velocity[a]).abs() < 2e-14);
+                }
+                assert!((temperature - initial(grid.at(i)).2).abs() < 1e-12);
+                let (ws, wb) = grid.rates(rho, grid.theta[i], None);
+                let sigma = stress::<D3q27>(&grid.f[i], grid.force[i], ws, wb);
+                assert!(
+                    sigma.iter().all(|component| component.abs() < 2e-14),
+                    "cell={i} workers={workers} initial stress={sigma:?}"
+                );
+                // Independently check the physical second moment itself,
+                // without allowing a near-two relaxation rate to hide error.
+                let eq = equilibrium::<D3q27>(rho, velocity, THETA0);
+                let second = neq_second::<D3q27>(&grid.f[i], &eq);
+                let half_source = half_source_second(velocity, grid.force[i]);
+                for component in 0..6 {
+                    assert!((second[component] + half_source[component]).abs() < 2e-14);
+                }
+            }
+        }
     }
 
     #[test]

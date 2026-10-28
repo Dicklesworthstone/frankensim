@@ -270,16 +270,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let mut f = self.f.clone();
         for i in 0..self.n {
             if self.solid[i] { continue; }
-            for q in 0..Q {
-                let c = L::E[q];
-                let difference: [f64; 3] = std::array::from_fn(|a| self.force[i][a] - force[i][a]);
-                let cf = (0..3).map(|a| f64::from(c[a]) * difference[a]).sum::<f64>();
-                let uf = (0..3).map(|a| u[i][a] * difference[a]).sum::<f64>();
-                let cu = (0..3).map(|a| f64::from(c[a]) * u[i][a]).sum::<f64>();
-                // Rebase the WHOLE Guo half source, including its second
-                // moment, so a data change cannot masquerade as viscous stress.
-                f[i][q] += 0.5 * L::W[q] * ((cf - uf) / THETA0 + cu * cf / (THETA0 * THETA0));
-            }
+            super::rebase_force::<L>(&mut f[i], u[i],
+                std::array::from_fn(|a| self.force[i][a] - force[i][a]));
         }
         let sig = self.stress_field(&f, &force, &rho, &self.theta, &self.material, &[]);
         let (div, wall, flux) = self.flux_divergence(&self.e, &rho, &u, &self.theta, &sig, &[], faces.as_ref())?;
