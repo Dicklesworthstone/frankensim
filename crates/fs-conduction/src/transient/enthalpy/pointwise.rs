@@ -14,6 +14,7 @@ pub(super) enum PointwiseBoundary<'a> {
     Enclosure(&'a PointwiseEnclosureRadiation<'a>),
 }
 
+#[derive(Debug)]
 pub(super) enum PointwiseBoundaryAssembly {
     Ambient(PointwiseRadiationAssembly),
     Enclosure(PointwiseEnclosureAssembly),
@@ -57,6 +58,43 @@ impl PointwiseBoundary<'_> {
 }
 
 impl PointwiseBoundaryAssembly {
+    pub(super) fn admit_adjoint(&self, cx: &Cx<'_>) -> Result<(), ConductionError> {
+        match self {
+            Self::Ambient(assembly) => assembly.admit_adjoint(cx),
+            Self::Enclosure(assembly) => assembly.admit_adjoint(cx),
+        }
+    }
+
+    pub(super) fn parameter_pullback(
+        &self,
+        cx: &Cx<'_>,
+        outward_load_weights: &[f64],
+    ) -> Result<crate::radiation::pointwise::PointwiseRadiationParameterGradient, ConductionError> {
+        match self {
+            Self::Ambient(assembly) => assembly.parameter_pullback(cx, outward_load_weights),
+            Self::Enclosure(assembly) => assembly.parameter_pullback(cx, outward_load_weights),
+        }
+    }
+
+    pub(super) fn add_scaled_tangent_transpose(
+        &self,
+        cx: &Cx<'_>,
+        direction: &[f64],
+        column_scale: Option<&[f64]>,
+        scale: f64,
+        include_row: impl Fn(usize) -> bool,
+        output: &mut [f64],
+    ) -> Result<(), ConductionError> {
+        match self {
+            Self::Ambient(assembly) => assembly.add_scaled_tangent_transpose(
+                cx, direction, column_scale, scale, include_row, output,
+            ),
+            Self::Enclosure(assembly) => assembly.add_scaled_tangent_transpose(
+                cx, direction, column_scale, scale, include_row, output,
+            ),
+        }
+    }
+
     // Use the positive local emission diagonal as the enclosure Picard
     // preconditioner; all nonsymmetric reflection stays in the true action.
     pub(super) fn preconditioner_diagonal(&self, vertex: usize) -> f64 {

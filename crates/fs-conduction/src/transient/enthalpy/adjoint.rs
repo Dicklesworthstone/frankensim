@@ -5,7 +5,9 @@
 //! `dt*M_source^T*lambda` for nodal volumetric source density. Here
 //! the spatial `J_h` already includes temperature-column scaling and any
 //! declared phase-conductivity chain rule. The shared bounded FGMRES solver
-//! sees its explicit transpose action and the exact diagonal Jacobi inverse.
+//! sees its explicit transpose action and a checked diagonal preconditioner.
+//! Pointwise reflection retains its full nonsymmetric action and uses the
+//! positive local emission contribution in that preconditioner.
 //! Radiation and declared Robin state laws can retain rank-one feedback terms;
 //! these participate in both actions, Jacobi and all history/source pullbacks.
 //!
@@ -33,9 +35,12 @@ use fs_sparse::{Coo, Csr};
 
 /// Convection-only response of the checked total-enthalpy endpoint.
 pub mod robin;
+/// Accepted-state adjoints of spatially resolved radiation.
+pub mod pointwise;
 pub use robin::{EnthalpyRobinGradient, EnthalpyRobinResponse};
 mod conductivity;
 
+use super::pointwise::{PointwiseBoundary, PointwiseBoundaryAssembly};
 use super::{
     EnthalpyBackwardEuler, EnthalpyError, EnthalpyStepConfig, EnthalpyStepSolution, StepContext,
     poll,
@@ -194,6 +199,8 @@ pub struct EnthalpyStepLinearization<'m> {
     // Four local K_eff*T loads per element, at this accepted constitutive state.
     // Sources, Robin rows and contact conductances are excluded.
     conductive_loads: Vec<[f64; 4]>,
+    // Full spatial radiation tangent at the accepted physical temperature.
+    pointwise_radiation: Option<PointwiseBoundaryAssembly>,
 }
 
 #[derive(Debug)]
@@ -262,6 +269,25 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
                 "the base adjoint does not own the pointwise radiation boundary tangent",
             ));
         }
+        self.linearize_accepted_model_with_target(
+            cx, problem, interfaces, old_h, dt_s, config, accepted, physical_target, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn linearize_accepted_model_with_target(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        accepted: EnthalpyStepSolution,
+        physical_target: Option<f64>,
+        pointwise_radiation: Option<PointwiseBoundary<'_>>,
+    ) -> Result<EnthalpyStepLinearization<'m>, EnthalpyAdjointError> {
+        poll(cx, 0)?;
         let n = self.masses.len();
         if !std::ptr::eq(self.mesh, problem.mesh)
             || old_h.len() != n
@@ -279,9 +305,12 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             interfaces,
             old: old_h,
             dt: dt_s,
-            pointwise_radiation: None,
+            pointwise_radiation,
         };
         let stage = context.stage(&accepted.specific_enthalpy_j_kg)?;
+        if let Some(radiation) = &stage.radiation {
+            radiation.admit_adjoint(cx)?;
+        }
         let initial = NewtonKrylovState::new(&stage, context.initial_values()?, config.newton)
             .map_err(|error| stage.take_failure().unwrap_or(EnthalpyError::Newton(error)))?;
         let tolerance_j = finite(physical_target.unwrap_or_else(|| {
@@ -334,7 +363,11 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             let diagonal = if prescribed[row] {
                 self.masses[row]
             } else {
-                finite(self.masses[row] + dt_s * stage.tangent.get(row, row))?
+                let radiation_diagonal = stage.radiation.as_ref()
+                    .map_or(0.0, |radiation| radiation.preconditioner_diagonal(row));
+                finite(self.masses[row] + dt_s * finite(
+                    stage.tangent.get(row, row) + radiation_diagonal * stage.slope[row],
+                )?)?
             };
             if diagonal == 0.0 {
                 return Err(EnthalpyAdjointError::InvalidInput(
@@ -357,6 +390,7 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             robin_feedback: None,
             convection_boundary: problem.boundary.clone(),
             conductive_loads,
+            pointwise_radiation: stage.radiation,
         })
     }
 }
@@ -443,7 +477,11 @@ impl EnthalpyStepLinearization<'_> {
             let mut diagonal = if self.prescribed[row] {
                 self.masses[row]
             } else {
-                finite(self.masses[row] + self.dt * self.tangent.get(row, row))?
+                let radiation_diagonal = self.pointwise_radiation.as_ref()
+                    .map_or(0.0, |radiation| radiation.preconditioner_diagonal(row));
+                finite(self.masses[row] + self.dt * finite(
+                    self.tangent.get(row, row) + radiation_diagonal * self.slopes[row],
+                )?)?
             };
             for update in &self.feedback {
                 diagonal = finite(diagonal + update.left[row] * update.right[row])?;
@@ -457,6 +495,23 @@ impl EnthalpyStepLinearization<'_> {
         }
         poll(cx, n)?;
         Ok(self)
+    }
+
+    /// Contract frozen pointwise radiation controls with outward-load weights.
+    /// For a solved endpoint gradient, negate `nodal_load_pullback` before
+    /// calling: outward radiation enters the residual with a positive sign.
+    /// Geometry, view factors and the local temperature field are fixed here;
+    /// their temperature feedback already participates in the thermal transpose.
+    pub fn pointwise_parameter_pullback(
+        &self,
+        cx: &Cx<'_>,
+        outward_load_weights: &[f64],
+    ) -> Result<crate::radiation::pointwise::PointwiseRadiationParameterGradient, EnthalpyAdjointError> {
+        vector(cx, outward_load_weights, self.masses.len())?;
+        let radiation = self.pointwise_radiation.as_ref().ok_or(
+            EnthalpyAdjointError::InvalidInput("endpoint has no retained pointwise radiation tangent"),
+        )?;
+        Ok(radiation.parameter_pullback(cx, outward_load_weights)?)
     }
 
     /// Physically rechecked endpoint and independently integrated energy audit.
@@ -559,6 +614,19 @@ impl EnthalpyStepLinearization<'_> {
                     sum = finite(entry.mul_add(x[column], sum))?;
                 }
                 y[row] = finite(self.dt * sum)?;
+            }
+        }
+        if let Some(radiation) = &self.pointwise_radiation {
+            if transpose {
+                radiation.add_scaled_tangent_transpose(
+                    cx, x, Some(&self.slopes), self.dt,
+                    |row| !self.prescribed[row], y,
+                )?;
+            } else {
+                radiation.add_scaled_tangent(
+                    cx, x, Some(&self.slopes), self.dt,
+                    |row| !self.prescribed[row], y,
+                )?;
             }
         }
         for (row, value) in y.iter_mut().enumerate() {

@@ -132,7 +132,8 @@ impl EnthalpyStepLinearization<'_> {
                 right: coefficient_right,
             });
         }
-        // Admit the COMPLETE diagonal. Two valid law terms can cancel an
+        // Retain the pointwise preconditioner and admit all law updates.
+        // Two valid law terms can cancel an
         // intermediate zero; no partial-update Jacobi gate may reject that.
         let mut inverse_diagonal = Vec::with_capacity(n);
         for vertex in 0..n {
@@ -142,7 +143,11 @@ impl EnthalpyStepLinearization<'_> {
             let mut diagonal = if self.prescribed[vertex] {
                 self.masses[vertex]
             } else {
-                finite(self.masses[vertex] + self.dt * self.tangent.get(vertex, vertex))?
+                let radiation_diagonal = self.pointwise_radiation.as_ref()
+                    .map_or(0.0, |radiation| radiation.preconditioner_diagonal(vertex));
+                finite(self.masses[vertex] + self.dt * finite(
+                    self.tangent.get(vertex, vertex) + radiation_diagonal * self.slopes[vertex],
+                )?)?
             };
             for update in self.feedback.iter().chain(&updates) {
                 diagonal = finite(update.left[vertex].mul_add(update.right[vertex], diagonal))?;

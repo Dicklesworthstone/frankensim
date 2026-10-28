@@ -537,3 +537,6 @@ fn radiative_adjoint_rechecks_primal_and_refuses_kinks_budgets_and_cancellation(
         ));
     });
 }
+
+#[path = "adjoint/pointwise.rs"]
+mod pointwise;

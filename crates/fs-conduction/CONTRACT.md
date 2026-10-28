@@ -149,8 +149,9 @@ The result's `pointwise_radiation` report is a separate outward heat account
 already included in `energy_residual_j`; only the original Robin heat goes
 to a convection/coolant consumer. Physical history remains immutable on
 refusal. Existing mean-patch APIs retain their explicitly reduced model.
-The old adjoint binder refuses these endpoints, including zero-net-radiation
-equilibrium, until its boundary ownership includes this operator.
+Explicit pointwise accepted-state binders attach the same spatial operator to
+the enthalpy transpose. The base binder retains its ownership refusal for a
+pointwise endpoint, including zero-net-radiation equilibrium.
 
 Focused G1/G3 tests independently expand barycentric simplex moments, check
 the analytic tangent and passive quadratic form, compare uniform cooling to
@@ -179,11 +180,44 @@ reported exact diagonal retains the reflected term even when it is negative.
 Each candidate independently gates the radiosity equations and closed heat
 sum in watts. The final `pointwise_enclosure_radiation` report participates
 exactly once in the joule balance; original Robin and Neumann accounts retain
-only their authored heat. The base adjoint refuses these endpoints until its
-owner includes the reflected spatial tangent. Tests in
+only their authored heat. Explicit pointwise accepted-state binders retain the
+complete reflected spatial tangent and its genuine transpose. Tests in
 `tests/enthalpy_enclosure/pointwise.rs` compare independent simplex moments,
 reflected derivatives, nonuniform nodal balances, finite latent heat transfer,
 and a strong-self-view case with a negative exact diagonal.
+
+Both pointwise assemblies expose `tangent_apply_transpose` and
+`parameter_pullback`. The latter contracts a caller-supplied full nodal
+outward-load weight with absolute surface emissivity and, for ambient exchange,
+reservoir-temperature controls in declared surface order. The enclosure
+contraction keeps each spatially weighted emission integral and differentiates
+reflected irradiation through the already prepared patch response. It adds no
+parameter linear solve. Sharing an emissivity source does not merge distinct
+surface controls. Geometry, view factors and the immutable emissivity query
+remain fixed; every surface node must be strictly inside the source temperature
+support for a classical derivative.
+
+`linearize_accepted_with_pointwise_ambient_radiation` and
+`linearize_accepted_with_pointwise_enclosure_radiation` are available on both
+homogeneous and heterogeneous enthalpy engines. Callers supply the original
+accepted physical residual target and an explicit radiation workspace cap.
+The producer freshly evaluates the complete physical residual and energy,
+checks constitutive smoothness and retains one active face/patch assembly.
+Its transpose applies the physical free-row mask before the transposed
+radiation action, and the timestep and temperature-to-enthalpy slopes on the
+correct side. Fixed columns remain present for prescribed-temperature controls.
+Natural/air Robin and contact feedback attachments retain that operator when
+refreshing their diagonal.
+
+The existing history, source, fixed-bath, conductivity and reference-density
+pullbacks consume the same complete dual. `pointwise_parameter_pullback` on
+the checked transport linearization accepts outward-load weights; an objective
+uses minus `nodal_load_pullback`, whose timestep and prescribed-row mask are
+already included. The shared `adjoint::pointwise::workspace_entries` admits
+bounded nodal scratch, sparse face storage and the small patch matrices with
+checked arithmetic. This is an entry allowance, not a peak allocator/RSS proof.
+A latent plateau still has zero direct temperature seed while energetic
+enthalpy history and its boundary parameter sensitivities can remain nonzero.
 
 `transient::MaterialHeatCapacity` resolves constant density and specific heat
 from one immutable material card at an explicit reference state, then pins both

@@ -519,3 +519,6 @@ fn strong_self_view_keeps_negative_exact_diagonal_without_breaking_positive_prec
     });
 }
 
+
+#[path = "pointwise/adjoint.rs"]
+mod adjoint;

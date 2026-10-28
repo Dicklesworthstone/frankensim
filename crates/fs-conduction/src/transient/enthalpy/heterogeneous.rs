@@ -870,6 +870,52 @@ impl<'m> HeterogeneousEnthalpyBackwardEuler<'m, '_> {
         self.bind_linearization(cx, old_h, inner)
     }
 
+    /// Bind the actual pointwise ambient endpoint with heterogeneous charts
+    /// and frozen reference densities. The original residual target is retained.
+    #[allow(clippy::too_many_arguments)]
+    pub fn linearize_accepted_with_pointwise_ambient_radiation(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        radiation: &crate::PointwiseAmbientRadiation<'_>,
+        accepted: EnthalpyStepSolution,
+        physical_target_j: f64,
+        max_radiation_entries: usize,
+    ) -> Result<HeterogeneousEnthalpyStepLinearization<'m>, EnthalpyAdjointError> {
+        let inner = self.inner.linearize_accepted_with_pointwise_ambient_radiation(
+            cx, problem, interfaces, old_h, dt_s, config, radiation, accepted,
+            physical_target_j, max_radiation_entries,
+        )?;
+        self.bind_linearization(cx, old_h, inner)
+    }
+
+    /// Bind local P1 emission and full reflected irradiation while preserving
+    /// the existing storage-density, source, bath and transport reverse owners.
+    #[allow(clippy::too_many_arguments)]
+    pub fn linearize_accepted_with_pointwise_enclosure_radiation(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        radiation: &crate::PointwiseEnclosureRadiation<'_>,
+        accepted: EnthalpyStepSolution,
+        physical_target_j: f64,
+        max_radiation_entries: usize,
+    ) -> Result<HeterogeneousEnthalpyStepLinearization<'m>, EnthalpyAdjointError> {
+        let inner = self.inner.linearize_accepted_with_pointwise_enclosure_radiation(
+            cx, problem, interfaces, old_h, dt_s, config, radiation, accepted,
+            physical_target_j, max_radiation_entries,
+        )?;
+        self.bind_linearization(cx, old_h, inner)
+    }
+
     fn bind_linearization(
         &self,
         cx: &Cx<'_>,
