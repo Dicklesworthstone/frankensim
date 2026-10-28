@@ -4,6 +4,39 @@ This directory retains the human-reviewable source inputs compiled by
 `xtask matdb-pack`. Generated binary packs are deliberately not committed:
 the compiler must reproduce them from the pinned manifest and source record.
 
+## Engineering alloys with independent elastic parameters
+
+Three added copper-alloy packs contain density, Young's modulus, shear modulus,
+specific heat and thermal conductivity. Their original source data are sufficient
+for the explicit `YoungShear` resolver in `fs-material::state_point`; no
+Poisson ratio is fabricated in the database.
+
+| Pack | Primary source | Mechanical use |
+|---|---|---|
+| `phosphor-bronze-c52100-cda-reference` | [Copper Development Association C52100](https://alloys.copper.org/alloy/C52100) | Nominal copper-tin-phosphorus alloy elasticity from the published E/G pair |
+| `beryllium-copper-c17200-ngk-reference` | [NGK physical properties](https://www.ngkmetals.com/technical/properties/physical-properties/) | Supplier-specific copper-beryllium E/G reference |
+| `copper-nickel-beryllium-c17510-ngk-reference` | [NGK physical properties](https://www.ngkmetals.com/technical/properties/physical-properties/) | Supplier-specific copper-nickel-beryllium E/G reference |
+
+The canonical source property keys are `density`, `young-modulus`,
+`shear-modulus`, `specific-heat-capacity`, and `thermal-conductivity`.
+Density and the two thermal properties retain the printed 68 °F / 293.15 K state.
+The moduli have no reported test temperature and require
+`source-test-temperature-known=0`; they have no invented temperature interval.
+All five properties retain unknown temper and pressure through
+`source-temper-known=0` and `source-pressure-known=0`.
+
+A combined density/E/G query uses those three explicit unknown-condition flags
+and `temperature=293.15`. Using the elastic values in this nominal isotropic
+model is a caller assumption; it does not establish co-measured compatibility,
+a particular heat treatment, strength allowables or a temperature-independent
+constitutive law. Source observations retain original imperial values, exact SI
+conversion factors and the explicit Btu_IT convention. Conversion digits do not
+increase the source precision.
+
+Compile any of these manifests through the same `matdb-pack` command used below.
+All three were admitted by the actual compiler, including its repeat-compilation
+and hash-pinned decode checks.
+
 ## Run a sourced layered heat calculation
 
 The steady planar wall consumer is in

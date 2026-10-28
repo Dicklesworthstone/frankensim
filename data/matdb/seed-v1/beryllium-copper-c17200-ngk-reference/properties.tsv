@@ -1,0 +1,33 @@
+frankensim.matdb-source.v1
+observation	alloy-reference	UNS C17200 copper-beryllium supplier reference	NGK Typical Physical Properties, C17200 column	The physical table does not assign a temper, product form, specimen direction, pressure or statistical uncertainty. Separate NGK mechanical-product conditions are not imported into these entries. Density, Cp and conductivity retain the printed 68 F state. Elastic test temperature is unspecified and guarded by source-test-temperature-known=0; no physical temperature validity is asserted for the moduli. Using these constants in a room-temperature isotropic model is an explicit caller approximation, not a matched aged-product qualification, relaxation law, strength allowance or all-temperature prediction. No Poisson ratio is invented in the source pack.
+observation	conversion	Original source units normalized to coherent SI	Exact inch, pound, standard gravity and explicitly chosen international-table Btu	Use 1 in=0.0254 m, 1 lb=0.45359237 kg and g0=9.80665 m/s2; 1 psi=6894.757293168361 Pa and 1 lb/in3=27679.90471020312 kg/m3. Use 1 Btu_IT=1055.05585262 J, giving 4186.8 J/(kg K) per Btu/(lb F) and 1.730734666371391 W/(m K) per Btu/(h ft F). NGK does not identify its Btu realization; IT is an explicit normalization assumption. Conversion digits do not add measurement precision.
+observation	density	NGK C17200 reference	NGK density at 68 F	Literal 0.298 lb/in3; 68 F=293.15 K. The value remains specific to this supplier table and is not replaced with density from a different product or aging condition.
+observation	young-modulus	NGK C17200 reference	NGK modulus of elasticity	Literal 18.5e6 psi. The source does not state test temperature, strain rate or direction for the elastic entry.
+observation	shear-modulus	NGK C17200 reference	NGK modulus of rigidity, torsion modulus	Literal 7.2e6 psi. Test temperature, loading rate, geometry and direction are unspecified.
+observation	heat-capacity	NGK C17200 reference	NGK specific heat at 68 F	Literal 0.1 Btu/(lb F), at exactly 293.15 K; no temperature interval or uncertainty is inferred.
+observation	conductivity	NGK C17200 reference	NGK thermal conductivity at 68 F	Literal 60 Btu/(h ft F), at exactly 293.15 K. No annealed/aged state is inferred from this typical value.
+scalar	density	density,conversion,alloy-reference	density	8248.61160364053	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	293.15	293.15	K
+validity	density	source_temper_known	0	0	1
+validity	density	source_pressure_known	0	0	1
+scalar	young-modulus	young-modulus,conversion,alloy-reference	young_modulus	127553009923.61469	Pa	constant
+uncertainty	young-modulus	unstated	-	-	-	-
+validity	young-modulus	source_test_temperature_known	0	0	1
+validity	young-modulus	source_temper_known	0	0	1
+validity	young-modulus	source_pressure_known	0	0	1
+scalar	shear-modulus	shear-modulus,conversion,alloy-reference	shear_modulus	49642252510.8122	Pa	constant
+uncertainty	shear-modulus	unstated	-	-	-	-
+validity	shear-modulus	source_test_temperature_known	0	0	1
+validity	shear-modulus	source_temper_known	0	0	1
+validity	shear-modulus	source_pressure_known	0	0	1
+scalar	heat-capacity	heat-capacity,conversion,alloy-reference	specific_heat_capacity	418.68	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	293.15	293.15	K
+validity	heat-capacity	source_temper_known	0	0	1
+validity	heat-capacity	source_pressure_known	0	0	1
+scalar	conductivity	conductivity,conversion,alloy-reference	thermal_conductivity	103.84407998228346	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	293.15	293.15	K
+validity	conductivity	source_temper_known	0	0	1
+validity	conductivity	source_pressure_known	0	0	1

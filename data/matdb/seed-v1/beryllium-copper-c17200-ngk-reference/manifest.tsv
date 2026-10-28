@@ -1,0 +1,15 @@
+frankensim.matdb-manifest.v3
+pack_id	beryllium-copper-c17200-ngk-reference
+redistribution	permitted	Selected attributed numerical facts and original conversion notes only; no source document, prose or table layout is redistributed
+citation	NGK Metals, Typical Physical Properties, C17200 column, accessed 2026-10-28; https://www.ngkmetals.com/technical/properties/physical-properties/
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	primary	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	young_modulus	young-modulus	dimensional
+property	shear_modulus	shear-modulus	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+axis	temperature	temperature	absolute-temperature
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_temper_known	source-temper-known	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional

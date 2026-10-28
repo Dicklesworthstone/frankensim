@@ -1,0 +1,33 @@
+frankensim.matdb-source.v1
+observation	alloy-reference	UNS C52100 wrought phosphor bronze, alloy-family physical reference	CDA Physical Properties, selected density, elastic and thermal entries	Temper, product form, specimen direction, pressure and uncertainty are unspecified. These are nominal reference inputs, not strength allowables or a qualified spring or bearing. Density and thermal properties retain the exact printed 68 F state. The elastic entries have no reported test temperature: their source-test-temperature-known=0 guard records that absence, and no temperature axis or physical support interval is invented for them. A caller may select them for a nominal room-temperature isotropic calculation, but this neither establishes co-measured compatibility nor a temperature-independent constitutive law. No synthetic Poisson ratio is stored; the physical consumer must explicitly select its independent parameter pair.
+observation	conversion	Original source units normalized to coherent SI	Exact inch, pound, standard gravity and explicitly chosen international-table Btu	Use 1 in=0.0254 m, 1 lb=0.45359237 kg and g0=9.80665 m/s2; 1 ksi=6894757.293168361 Pa and 1 lb/in3=27679.90471020312 kg/m3. Use 1 Btu_IT=1055.05585262 J, giving 4186.8 J/(kg K) per Btu/(lb F) and 1.730734666371391 W/(m K) per Btu/(h ft F). The source does not identify its Btu realization; IT is the explicit normalization convention. Converted digits do not increase source precision.
+observation	density	C52100 alloy reference	CDA density at 68 F	Literal 0.318 lb/in3 is used rather than the independently rounded specific gravity 8.8; 68 F=293.15 K.
+observation	young-modulus	C52100 alloy reference	CDA modulus of elasticity in tension	Literal 16000 ksi. Temperature, loading rate, texture and specimen orientation are not stated.
+observation	shear-modulus	C52100 alloy reference	CDA modulus of rigidity	Literal 6000 ksi. This is the CDA entry; inconsistent values in other suppliers' tables are not substituted. Temperature, loading rate and orientation are not stated.
+observation	heat-capacity	C52100 alloy reference	CDA specific heat capacity at 68 F	Literal 0.09 Btu/(lb F), at exactly 293.15 K; no thermal slope or confidence is inferred.
+observation	conductivity	C52100 alloy reference	CDA thermal conductivity at 68 F	Literal 36 Btu/(h ft F), at exactly 293.15 K. The source's Btu per square foot per foot per hour per degree F label is interpreted in the conventional conductivity sense.
+scalar	density	density,conversion,alloy-reference	density	8802.209697844593	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	293.15	293.15	K
+validity	density	source_temper_known	0	0	1
+validity	density	source_pressure_known	0	0	1
+scalar	young-modulus	young-modulus,conversion,alloy-reference	young_modulus	110316116690.69379	Pa	constant
+uncertainty	young-modulus	unstated	-	-	-	-
+validity	young-modulus	source_test_temperature_known	0	0	1
+validity	young-modulus	source_temper_known	0	0	1
+validity	young-modulus	source_pressure_known	0	0	1
+scalar	shear-modulus	shear-modulus,conversion,alloy-reference	shear_modulus	41368543759.01017	Pa	constant
+uncertainty	shear-modulus	unstated	-	-	-	-
+validity	shear-modulus	source_test_temperature_known	0	0	1
+validity	shear-modulus	source_temper_known	0	0	1
+validity	shear-modulus	source_pressure_known	0	0	1
+scalar	heat-capacity	heat-capacity,conversion,alloy-reference	specific_heat_capacity	376.812	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	293.15	293.15	K
+validity	heat-capacity	source_temper_known	0	0	1
+validity	heat-capacity	source_pressure_known	0	0	1
+scalar	conductivity	conductivity,conversion,alloy-reference	thermal_conductivity	62.30644798937008	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	293.15	293.15	K
+validity	conductivity	source_temper_known	0	0	1
+validity	conductivity	source_pressure_known	0	0	1
