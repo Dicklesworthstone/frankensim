@@ -213,8 +213,7 @@ fn g3_scheduled_watts_override_the_random_static_power_coordinate() {
     assert_eq!(low.to_bits(), high.to_bits());
 }
 
-#[test]
-fn g1_enthalpy_power_mean_control_consumes_the_existing_enthalpy_adjoint() {
+fn enthalpy_fixture() -> Fixture {
     use fs_project::{TransientEnthalpy, TransientEnthalpyKnot, TransientRegionEnthalpy};
     let mut fixture = fixture();
     let card = fixture.project.materials.as_ref().unwrap()[0].card.clone();
@@ -251,6 +250,12 @@ fn g1_enthalpy_power_mean_control_consumes_the_existing_enthalpy_adjoint() {
         }],
     });
     write_project(&fixture);
+    fixture
+}
+
+#[test]
+fn g1_enthalpy_power_mean_control_consumes_the_existing_enthalpy_adjoint() {
+    let fixture = enthalpy_fixture();
     // Prescribed Robin controls are intentionally not published by the
     // enthalpy adjoint; a constant ambient needs no invented derivative.
     let text = study_text(false, false, true).replace(":high 300K", ":high 294K");
@@ -265,4 +270,106 @@ fn g1_enthalpy_power_mean_control_consumes_the_existing_enthalpy_adjoint() {
     let high = fixture.independent_solve(121, &[5.0 + h, 294.0]).2;
     let difference = (high - low) / (2.0 * h);
     assert!((coefficients[0] - difference).abs() <= 1e-5 * difference.abs().max(1.0));
+}
+
+#[test]
+fn g1_g5_enthalpy_bath_mean_control_matches_physics_and_survives_resume() {
+    let bath_fixture = |controlled| {
+        let mut fixture = enthalpy_fixture();
+        fixture
+            .project
+            .cooling
+            .as_mut()
+            .unwrap()
+            .conduction
+            .as_mut()
+            .unwrap()
+            .boundaries[0]
+            .condition = fs_project::ThermalBoundaryCondition::FixedTemperature {
+            temperature: QtyAny::new(297.0, dims::TEMPERATURE),
+        };
+        write_project(&fixture);
+        let text = study_text(false, false, controlled)
+            .replace(":target convection-temperature", ":target fixed-temperature")
+            .replace(":wall-time 120s", ":wall-time 240s");
+        std::fs::write(fixture.sources.join("study.fsim"), text).unwrap();
+        fixture
+    };
+
+    let raw = bath_fixture(false);
+    let result = raw.study(None, fs_cli::exit::SUCCESS);
+    let (_, raw_report) = raw.report(&result);
+    let full = bath_fixture(true);
+    let result = full.study(None, fs_cli::exit::SUCCESS);
+    let (expected, report) = full.report(&result);
+    let coefficients = gradient(&report);
+    assert_eq!(coefficients[0], 0.0, "fixed nodes reject power influence");
+    assert!(
+        (coefficients[1] - 1.0).abs() < 1e-12,
+        "a fully prescribed body's final temperature follows its bath: {coefficients:?}"
+    );
+    assert_eq!(
+        rows(&report),
+        rows(&raw_report),
+        "bath calibration must preserve every raw probability trajectory"
+    );
+    assert_eq!(report.get("statistics"), raw_report.get("statistics"));
+    for row in rows(&report) {
+        let bath = row.get("parameters").unwrap().as_array().unwrap()[1]
+            .as_f64()
+            .unwrap();
+        assert!((row.f64_field("value_k").unwrap() - bath).abs() < 1e-10);
+    }
+
+    // Bind the ordinary native project directly, independently of the
+    // uncertainty adapter and its retained derivative report.
+    let h = 0.01;
+    let mut temperatures = Vec::new();
+    for (side, sign) in [-1.0, 1.0].into_iter().enumerate() {
+        let mut project = full.project.clone();
+        let fs_project::ThermalBoundaryCondition::FixedTemperature { temperature } =
+            &mut project
+                .cooling
+                .as_mut()
+                .unwrap()
+                .conduction
+                .as_mut()
+                .unwrap()
+                .boundaries[0]
+                .condition
+        else {
+            panic!("prescribed enthalpy bath fixture");
+        };
+        temperature.value += sign * h;
+        temperatures.push(full.solve_project(130 + side, &project).2);
+    }
+    let difference = (temperatures[1] - temperatures[0]) / (2.0 * h);
+    assert!((coefficients[1] - difference).abs() < 1e-8);
+
+    let split = bath_fixture(true);
+    let prefix = split.study(Some("1"), fs_cli::exit::BUDGET);
+    let (_, prefix_report) = split.report(&prefix);
+    assert!(rows(&prefix_report).is_empty());
+    assert_eq!(gradient(&prefix_report), coefficients);
+    let frozen = prefix_report
+        .get("mean_control")
+        .unwrap()
+        .get("calibration")
+        .unwrap()
+        .clone();
+    std::fs::rename(&split.sources, split.dir.join("retained-bath-inputs")).unwrap();
+    let finished = split.resume(
+        prefix.str_field("run").unwrap(),
+        None,
+        fs_cli::exit::SUCCESS,
+    );
+    let (actual, restored) = split.report(&finished);
+    assert_eq!(
+        restored.get("mean_control").unwrap().get("calibration"),
+        Some(&frozen)
+    );
+    assert_eq!(
+        actual, expected,
+        "sealed bath calibration resumes to the uninterrupted native report"
+    );
 }

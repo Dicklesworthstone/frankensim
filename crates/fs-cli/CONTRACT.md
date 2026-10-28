@@ -1173,8 +1173,15 @@ zero derivative. Prescribed convection coefficients convert the sampled
 surfaces retain their distinct physical identities. Constant-capacity storage
 also supplies prescribed Robin temperature/coefficient controls; the enthalpy
 producer does not, and varying unsupported coordinates refuse with a secant
-alternative. Sampled-peak and steady adjoint requests are never silently
-reinterpreted as the final-time objective.
+alternative. Enthalpy storage supplies independent uniform prescribed-bath
+temperature controls held through the full selected trajectory. Calibration
+checks the exact nominal kelvin value, boundary ownership, available status and
+fine-grid coverage; shared prescribed vertices cannot supply independent
+coordinates. Constant-capacity fixed-temperature controls remain unsupported.
+The native bath regression checks a fresh physical finite difference, unchanged
+raw sample statistics and source-independent resume of the frozen calibration.
+Sampled-peak and steady adjoint requests are never silently reinterpreted as the
+final-time objective.
 
 Raw probability trajectories, compliance and retained temperatures are unchanged.
 The frozen mean control and calibration receipt use the existing budget and

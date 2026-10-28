@@ -74,7 +74,9 @@ jobs:
       - name: Test native cooling QMC recovery
         run: cargo test --release -p fs-cli --test cooling_network_qmc --test cooling_qmc_recovery_admission --test cooling_sensitivity --test cooling_uq_mean_control
       - name: Test nominal adjoint mean-control admission and parameter binding
-        run: cargo test --release -p fs-cli --bin frankensim mean_control
+        run: |
+          cargo test --release -p fs-cli --bin frankensim mean_control
+          cargo test --release -p fs-cli --bin frankensim study_uncertainty::model::adjoint::transient::tests
       - name: Test native project uncertainty admission and physical child solves
         run: cargo test --release -p fs-project --lib uncertainty && cargo test --release -p fs-cli --test native_uncertainty
   monte-carlo-source:

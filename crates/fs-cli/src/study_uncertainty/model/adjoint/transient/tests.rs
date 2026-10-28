@@ -244,7 +244,6 @@ fn g0_enthalpy_uses_its_own_producer_and_refuses_unprovided_coordinates() {
         Target::ConvectionCoefficient,
         Target::ConvectionTemperature,
         Target::HeatFlux,
-        Target::FixedTemperature,
         Target::ContactPressure,
         Target::ContactThickness,
         Target::ContactGap,
@@ -273,4 +272,45 @@ fn g0_reference_transient_study_binds_existing_native_inputs() {
     study.clone().bind(&project).unwrap();
     configure(&mut project, study.parameters()).unwrap();
     assert_eq!(project.outputs.unwrap().last().unwrap().name, FINAL);
+}
+
+#[test]
+fn g0_enthalpy_bath_coefficients_bind_temperature_ownership_and_entire_history() {
+    let mut spec = base();
+    let parameter = parameter(Target::FixedTemperature, "solid");
+    assert!(configure(&mut spec, std::slice::from_ref(&parameter)).is_err(),
+        "constant-capacity bath controls remain outside this producer");
+    let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+    setup.boundaries[0].condition = ThermalBoundaryCondition::FixedTemperature {
+        temperature: QtyAny::new(310.0, dims::TEMPERATURE),
+    };
+    setup.transient.as_mut().unwrap().enthalpy = Some(TransientEnthalpy {
+        materials: Vec::new(), max_newton_iterations: 20, max_backtracks: 12,
+    });
+    configure(&mut spec, std::slice::from_ref(&parameter)).unwrap();
+    let controls = r#", "prescribed_temperature":{"control_steps":8,"parameter_scope":"independent-uniform-bath-temperatures-held-throughout-selected-trajectory","boundaries":[{"target":"solid","temperature_k":310,"status":"available","mapped_vertices":3,"dtemperature_dprescribed_temperature_k_per_k":0.625}]}"#;
+    assert_eq!(coefficients(&receipt(true, controls), &spec,
+        std::slice::from_ref(&parameter), 301.0, "solid").unwrap(), [0.625]);
+    for changed in [
+        controls.replace("\"control_steps\":8", "\"control_steps\":0"),
+        controls.replace("held-throughout-selected-trajectory", "single-endpoint"),
+        controls.replace("\"target\":\"solid\"", "\"target\":\"other\""),
+        controls.replace("\"temperature_k\":310", "\"temperature_k\":309"),
+        controls.replace("\"status\":\"available\"", "\"status\":\"unsupported\",\"reason\":\"shared prescribed vertices\""),
+        controls.replace("dtemperature_dprescribed_temperature_k_per_k", "unrelated_same_unit_control"),
+        controls.replace("0.625", "null"),
+    ] {
+        assert!(coefficients(&receipt(true, &changed), &spec,
+            std::slice::from_ref(&parameter), 301.0, "solid").is_err());
+    }
+    assert!(coefficients(&receipt(true, ""), &spec,
+        std::slice::from_ref(&parameter), 301.0, "solid").is_err());
+    let duplicate = controls.replace(
+        "\"boundaries\":[{",
+        "\"boundaries\":[{\"target\":\"solid\",\"temperature_k\":310,\"status\":\"available\",\"dtemperature_dprescribed_temperature_k_per_k\":0.25},{",
+    );
+    assert!(coefficients(&receipt(true, &duplicate), &spec,
+        std::slice::from_ref(&parameter), 301.0, "solid").is_err());
+    let constant = UniformParameter { high: parameter.low, ..parameter };
+    assert_eq!(coefficients(&receipt(true, ""), &spec, &[constant], 301.0, "solid").unwrap(), [0.0]);
 }
