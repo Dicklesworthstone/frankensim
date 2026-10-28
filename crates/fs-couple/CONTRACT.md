@@ -9394,3 +9394,41 @@ late cancellation, source/mechanical budgets and exact-gas closed-valve coast.
 The existing point-gas coupling and frame-correct environment suite also passed
 all nine tests, including wind-relative drag, rotational application-point
 power and central-gravity potential. Full workspace validation remains separate.
+
+
+## Finite winding temperature in the biased magnetostrictive circuit
+
+`material_circuit::magnetostrictive::thermal` composes the original
+`MagnetostrictiveCircuit`, source-pinned conductor resolver and
+`circuit_enthalpy::cell_driver_candidate`. A fixed three-branch series circuit
+contains one stationary winding resistor, the reciprocal rod/coil storage and
+a source specified by TOTAL voltage. The bias current is a linearization
+reference, not an implicitly maintained current source. Every thermal endpoint
+trial restarts the original native descriptor from identical accepted linkage,
+extension and momentum, with incremental voltage
+`V_total - R(T_endpoint) * I_bias`.
+
+The winding receives the actual nonnegative
+`R(T_endpoint) * (I_bias + delta_i_mid)^2 * dt`, including the DC and cross
+terms. The total magnetic/mechanical storage CHANGE includes
+`I_bias * delta_lambda`; this is not an invented absolute biased energy datum.
+Independent work and power gates check total terminal work, reciprocal mechanical
+work, stored-energy change and this heat before the thermal owner deposits it
+once. Conductivity/resistivity source identity, accepted winding state, clocks,
+source envelopes, actual solver budgets and late cancellation remain active.
+Only a jointly accepted candidate advances either history.
+
+The winding cell must have its original wholly solid, constant-density caloric
+chart and stationary geometry. Other bound cells/reservoirs are passive thermal
+recipients. Magnetic/core coefficients and the rod's prepared biased reference
+remain at their independently held preparation temperature; no magnetic
+temperature law, core heating, hysteresis, eddy loss, thermal strain or expansion
+is inferred. Endpoint electrical coefficients plus backward-Euler enthalpy give
+first-order coupled trajectories, despite the native circuit's midpoint substep.
+
+The focused `thermal::tests` qualify actual DC heat with zero incremental loss,
+independent reciprocal midpoint/current/total-work equations and regeneration, both conductivity
+and resistivity thermal feedback at the same accepted endpoint, refinement
+against independent continuous coupled equations, simultaneous bias/winding
+orientation reversal, and source/budget/cancellation rollback. Synthetic cards
+qualify this numerical/physical composition, not empirical device accuracy.

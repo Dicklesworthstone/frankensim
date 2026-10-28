@@ -12,10 +12,13 @@
 //! dissipates R*(Delta i)^2 in this incremental account. That is NOT generally
 //! the total R*(I_bias+Delta i)^2 heat of a biased winding, or its change from
 //! the DC heating baseline. Bias preparation, bias supply and their cross terms
-//! remain outside this model. No total winding heat or thermal law is inferred.
+//! remain outside this incremental owner. The `thermal` child adds actual
+//! total winding heat, terminal work and finite winding enthalpy.
 //! Fixed source context, ideal uniform linkage, small axial deformation and the
 //! original strain/H envelope apply. Hysteresis, eddy loss, magnetic-path motion
 //! and acoustic radiation remain separate physical owners.
+
+pub mod thermal;
 
 use super::{
     MaterialCircuit, MaterialCircuitError, MaterialCircuitSolve, MaterialResistor, ResistorHeat,
