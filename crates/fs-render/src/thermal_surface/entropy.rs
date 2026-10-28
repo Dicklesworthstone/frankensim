@@ -2,6 +2,7 @@
 use super::GrayDiffuseThermalSurface;
 use fs_conduction::radiation_entropy::{
     GrayPhotonEmission, PhotonEmissionFlux, PhotonEntropyQuadrature, RadiationEntropyError,
+    bath::GrayBlackBathExchange,
 };
 
 impl GrayDiffuseThermalSurface {
@@ -32,6 +33,28 @@ impl GrayDiffuseThermalSurface {
         cancelled: impl FnMut() -> bool) -> Result<PhotonEmissionFlux, RadiationEntropyError>
     {
         self.photon_emission()?.bolometric(controls, cancelled)
+    }
+
+    /// Observe this same reciprocal gray surface in an explicitly isotropic
+    /// black view-factor-one bath. Outgoing occupation combines reflection and
+    /// emission before entropy is evaluated. This does not sample an arbitrary
+    /// scene or infer its incident directional spectrum. The immutable surface
+    /// retains its source identity; no tracer energy or cooling state changes.
+    pub fn black_bath_photon_exchange(self, bath_temperature_k: f64)
+        -> Result<GrayBlackBathExchange, RadiationEntropyError>
+    {
+        self.photon_emission()?.in_black_bath(bath_temperature_k)
+    }
+
+    /// Combined outgoing entropy radiance in W/(m² sr K nm), not merely emission.
+    /// Division by pi applies only to this declared isotropic diffuse model.
+    /// Reuse `black_bath_photon_exchange` for repeated wavelength queries.
+    pub fn outgoing_entropy_radiance_in_black_bath(self,
+        wavelength_nm: f64, bath_temperature_k: f64)
+        -> Result<f64, RadiationEntropyError>
+    {
+        Ok(self.black_bath_photon_exchange(bath_temperature_k)?
+            .spectrum_nm(wavelength_nm)?.outgoing_entropy_w_m2_k_nm/core::f64::consts::PI)
     }
 }
 
@@ -91,5 +114,47 @@ mod tests {
         assert_eq!(s.entropy_radiance_w_m2_sr_k_nm(f64::NAN), Err(RadiationEntropyError::Wavelength));
         assert_eq!(saved, (s.identity(), s.radiance_w_m2_sr_nm(500.0).unwrap()));
         assert!(s.photon_emission_flux(PhotonEntropyQuadrature::default(), || false).is_ok());
+    }
+
+    #[test]
+    fn illuminated_surface_reuses_exact_shared_modes_and_retains_source() {
+        let s = surface(400.0,0.4);
+        let saved = (s,s.identity(),s.radiance_w_m2_sr_nm(10_000.0).unwrap());
+        for ambient in [250.0,400.0,900.0] {
+            let observation = s.black_bath_photon_exchange(ambient).unwrap();
+            let shared = GrayPhotonEmission::new(400.0,0.4).unwrap().in_black_bath(ambient).unwrap();
+            assert_eq!(observation,shared);
+            for lambda in [500.0,10_000.0,100_000.0] {
+                let flux = shared.spectrum_nm(lambda).unwrap();
+                assert_eq!(s.outgoing_entropy_radiance_in_black_bath(lambda,ambient).unwrap(),
+                    flux.outgoing_entropy_w_m2_k_nm/core::f64::consts::PI);
+            }
+        }
+        assert_eq!(saved,(s,s.identity(),s.radiance_w_m2_sr_nm(10_000.0).unwrap()));
+    }
+
+    #[test]
+    fn equilibrium_reflection_reconstructs_black_radiance_without_double_counting_entropy() {
+        let s = surface(400.0,0.4);
+        for lambda in [500.0,10_000.0,100_000.0] {
+            let black = GrayPhotonEmission::new(400.0,1.0).unwrap().spectrum_nm(lambda).unwrap();
+            close(s.outgoing_entropy_radiance_in_black_bath(lambda,400.0).unwrap(),black.entropy_w_m2_sr_k_nm);
+            let result = s.black_bath_photon_exchange(400.0).unwrap().spectrum_nm(lambda).unwrap();
+            assert_eq!(result.total_generation_w_m2_k_nm,0.0);
+            assert_eq!(result.heat_out_w_m2_nm,0.0);
+        }
+    }
+
+    #[test]
+    fn perfect_reflector_and_invalid_bath_keep_the_original_surface() {
+        let s = surface(400.0,0.0);
+        let result = s.black_bath_photon_exchange(900.0).unwrap().spectrum_nm(10_000.0).unwrap();
+        assert_eq!(result.outgoing_entropy_w_m2_k_nm,result.incoming_entropy_w_m2_k_nm);
+        assert_eq!(result.total_generation_w_m2_k_nm,0.0);
+        for t in [0.0,-1.0,f64::INFINITY,f64::NAN] {
+            assert_eq!(s.black_bath_photon_exchange(t),Err(RadiationEntropyError::Temperature));
+        }
+        assert_eq!(s.emissivity(),0.0);
+        assert_eq!(s.reflectance(),1.0);
     }
 }
