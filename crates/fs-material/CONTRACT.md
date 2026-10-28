@@ -2862,3 +2862,41 @@ they do not evolve condensation or change a downstream acoustic standard's
 humidity convention. Seven native shared-mixture regressions passed, including
 four new reference/domain cases. The source-resolution wrapper was syntax
 checked and reviewed, but was outside that native numerical closure.
+
+### Scalar magnetic hysteresis and uniform-core constitutive coupling
+
+`field_storage::hysteresis::ScalarHysteresis` is an opt-in, fixed-condition
+energy-based play model with explicit caller-supplied branch susceptibilities,
+pinning fields and saturation polarizations. Each branch owns retained internal
+polarization. The immutable law and accepted state stay separate; trial field or
+flux updates do not mutate accepted memory or silently replace model parameters.
+This supplies remanence, reversal/minor-loop memory and saturation independently
+of the existing reversible B-H sources.
+
+For B = mu_b H + sum(z), stored energy is
+W = mu_b H²/2 + sum(z²/(2 chi)); irreversible heat is sum(Hc |delta z|).
+The exact scalar constrained minimizer gives pinning/sliding/saturation behavior.
+For each declared monotone segment, magnetic work is the analytical integral
+H dB = delta W + Q, including crossed corners. Every field reversal must be
+supplied; endpoint trapezoids do not replace this work. Positive background
+permeability makes the B-driven inverse strictly monotone. Safeguarded Newton
+uses the active-set tangent, has bounded work, and allocates state only for the
+final candidate. Tangent values at kinks select the pinned/saturated side.
+
+`UniformHystereticCore` exposes current- and linkage-driven candidates through
+lambda=N A B and I=l H/N, including signed winding orientation. Core energy and
+pinning heat scale by the actual A l volume; reported mean current is conjugate
+to linkage work. Circuit trials must all use the same accepted magnetic history
+until the complete coupled step accepts. This is a constitutive adapter, not an
+alternate circuit time integrator or automatic spatial-field hookup.
+
+The branch potential is quadratic with explicit saturation bounds, following
+the scalar dry-friction energy construction discussed in Prigozhin et al.,
+IEEE Trans. Magn. 52 (2016), doi:10.1109/TMAG.2016.2599143.
+It does not reproduce the paper's general vector model or confer measured
+material authority on supplied coefficients. Temperature, stress and parameters
+remain fixed. Eddy/excess losses, dynamic/vector hysteresis, demagnetization
+damage and thermal parameter work require separate models. Never add a loss map
+for the same resolved hysteretic heat. Eleven focused tests cover analytic
+segments/loop area, minor memory, monotone subdivision, inverse histories,
+tangents, reversible limits, refusal and winding energy/heat conjugacy.

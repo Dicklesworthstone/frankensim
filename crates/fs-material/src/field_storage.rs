@@ -19,6 +19,8 @@
 pub mod permanent;
 /// Source-resolved reversible nonlinear isotropic magnetic storage.
 pub mod nonlinear;
+/// Opt-in scalar magnetic history with explicit stored energy and pinning heat.
+pub mod hysteresis;
 /// Source-bound reversible thermal field energy and entropy at fixed geometry.
 pub mod thermal;
 /// Source-backed scalar or oriented planar dielectric response.
