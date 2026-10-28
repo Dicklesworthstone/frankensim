@@ -9334,3 +9334,29 @@ or experimental-validation scope.
 Independent native point-wrench, linear/angular momentum, kinetic work and `Delta(K+U_contact+H_caloric)+D_numerical-Q_external` checks gate one atomic candidate. Physical microslip heat, reversible per-surface entropy exchange, stored contact energy and numerical loss remain separate. A translational material source solves only its two admitted shear coordinates; genuine spin still reaches and fails the original applicability gate. Fixed poses and positive supplied normal load remain explicit; the designated caloric cells need not represent either complete rigid body. This does not provide normal contact evolution, moving footprints, nonlinear stiffness thermodynamics or measured calibration.
 
 Four native physical groups pass: loaded two-axis shear/spin with variable stiffness against an independent two-temperature entropy solution; gross sliding with original arm and spin moments and heat/storage/loss separation; pinned mu(Ta) with affine stiffness against an independent native/caloric reference (including a deliberately reversed legacy heat-fraction hint that cannot override the derived 3:1 partition); and late source/budget/cancellation/geometry refusal with exact retry. The source fixture also verifies actual-spin refusal and retained pinned claims/history. These are focused source-selected original-owner builds with the pinned nightly, not full workspace Cargo/DSR verification.
+
+
+## Air-relative rocket loads and explicit gravity
+
+`rocket_blowdown::environment` consumes the existing coherent `GasState`
+and native `fs_mbd` quaternion/vector owners. `FlightAirSample` binds the
+ambient pressure, thermodynamic/transport snapshot and world wind velocity
+to a declared inertial frame. Flow at a body-fixed application point uses
+`v_center + R(omega cross arm) - v_wind`, including rotational point velocity.
+Mach number, Reynolds number and dynamic pressure are derived from that same
+sample and retained immutably. The explicit drag law applies `-q Cd A v/|v|`
+and its matching moment about the center of mass. Its relative mechanical
+power is nonpositive; this does not allocate dissipation to vehicle heating.
+A common Galilean velocity boost leaves the air-relative load unchanged.
+
+The caller supplies the coefficient, area and reference length and remains
+responsible for the coefficient's Mach/Reynolds/attitude/configuration domain.
+No hidden coefficient, lift law, stability derivative or rarefied-flow model
+is supplied. Source authority remains with the original atmospheric/property
+producer. `CentralGravity` separately accepts an explicit positive G M,
+source center and frame, returning consistent acceleration and specific
+potential; it does not infer Earth rotation, J2 or a terrestrial constant.
+Frame mismatches, invalid data and unrepresentable loads refuse. Focused
+regressions cover co-motion, a common velocity boost, rotational drag work,
+inverse-square gravity and the potential gradient. These are instantaneous
+loads; trajectory accuracy remains the time integrator's responsibility.

@@ -13,6 +13,9 @@
 //! inputs. This adapter has no attitude, rotating-frame transformation, slosh,
 //! combustion, wall heating, or full exhaust/world-frame energy audit.
 
+/// Frame-checked atmosphere, relative-flow loads and central gravity.
+pub mod environment;
+
 use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::blowdown::{
     GasBlowdownError, GasBlowdownStep, RocketBlowdownSolve,
