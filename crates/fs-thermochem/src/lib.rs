@@ -14,6 +14,7 @@
 //! composition-equilibrium solve, mechanism evolution, kinetics integrator,
 //! or L3 protocol.
 
+mod entropy;
 pub mod eos;
 pub mod equilibrium;
 pub mod mixture;
@@ -1098,6 +1099,7 @@ impl Nasa9EvaluationV1 {
 
 #[cfg(test)]
 mod tests {
+    mod entropy;
     use super::*;
     use fs_evidence::ValidityDomain;
     use fs_matdb::{LawId, LawParameter, Provenance};
