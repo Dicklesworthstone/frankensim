@@ -1,14 +1,19 @@
-//! Pressure restrictions and molecular mixing on one original material snapshot.
+//! Pressure restrictions, porous leakage and selective transport on one snapshot.
 //!
-//! Sample the existing nozzle and Maxwell-Stefan laws without changing any gas.
+//! Sample nozzle, Darcy, membrane and Maxwell-Stefan laws without changing gas.
 //! Lower bulk outflow to its original species masses, combine it with selective
 //! fluxes, then invoke the ONE conservative species/enthalpy update. No inlet can
 //! replenish an outgoing allowance or forward arrivals in this explicit step.
 //!
-//! The two connection lists declare separate physical paths, not two models of
+//! Connection lists declare separate physical paths, not two models of
 //! the same aperture. In particular, a molar-average diffusion velocity is not
 //! silently equated to a nozzle's bulk velocity. This is not a spatial CFD
 //! advection-diffusion discretization, pressure diffusion, or jet momentum law.
+
+/// Isothermal pressure-driven leakage through actual porous materials.
+pub mod porous;
+/// Species-selective solution-diffusion through dense membranes.
+pub mod membrane;
 
 use std::collections::BTreeMap;
 use super::{ClosedGasParcel, GasEnergySolve, SpeciesNetworkError, SpeciesNetworkSolve,
@@ -17,6 +22,21 @@ use super::super::diffusion::network::{self as molecular, DiffusionNetworkError,
     DiffusionNetworkLink, DiffusionNetworkLinkStep, DiffusionNetworkSolve};
 use super::super::super::nozzle::network::snapshot::{self as pressure,
     SnapshotNozzleError, SnapshotNozzleLink, SnapshotNozzleLinkStep};
+use porous::{PorousNetworkError, PorousNetworkLink, PorousNetworkLinkStep};
+use membrane::{MembraneNetworkError, MembraneNetworkLink, MembraneNetworkLinkStep};
+
+/// All authored mechanisms read the same original parcel inventory.
+///
+/// Empty slices close that mechanism. Paths may connect the same volumes, but
+/// must describe distinct exposed areas or explicitly decomposed mechanisms;
+/// adding a nozzle and Darcy law for the same aperture would double its flux.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GasTransportPaths<'a> {
+    pub nozzles: &'a [SnapshotNozzleLink],
+    pub diffusion: &'a [DiffusionNetworkLink<'a>],
+    pub porous: &'a [PorousNetworkLink<'a>],
+    pub membranes: &'a [MembraneNetworkLink<'a>],
+}
 
 /// One aggregate allowance for all original species, irrespective of mechanism.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -33,6 +53,8 @@ pub enum GasTransportError {
     Invalid(&'static str),
     Nozzle(SnapshotNozzleError),
     Diffusion(DiffusionNetworkError),
+    Porous(PorousNetworkError),
+    Membrane(MembraneNetworkError),
     Exchange(SpeciesNetworkError),
     Cancelled,
 }
@@ -57,6 +79,16 @@ impl From<SpeciesNetworkError> for GasTransportError {
         match error { SpeciesNetworkError::Cancelled => Self::Cancelled, other => Self::Exchange(other) }
     }
 }
+impl From<PorousNetworkError> for GasTransportError {
+    fn from(error: PorousNetworkError) -> Self {
+        match error { PorousNetworkError::Cancelled => Self::Cancelled, other => Self::Porous(other) }
+    }
+}
+impl From<MembraneNetworkError> for GasTransportError {
+    fn from(error: MembraneNetworkError) -> Self {
+        match error { MembraneNetworkError::Cancelled => Self::Cancelled, other => Self::Membrane(other) }
+    }
+}
 
 /// Original source-bearing rates plus the single accepted inventory accounting.
 #[derive(Clone, Debug, PartialEq)]
@@ -66,6 +98,10 @@ pub struct GasTransportStep {
     pub nozzles: Vec<SnapshotNozzleLinkStep>,
     /// Diffusion IDs are unique within this list; they do not order updates.
     pub diffusion: Vec<DiffusionNetworkLinkStep>,
+    /// Source-resolved porous rates before any accepted inventory was changed.
+    pub porous: Vec<PorousNetworkLinkStep>,
+    /// Per-species partial-pressure-driven permeation on the same snapshot.
+    pub membranes: Vec<MembraneNetworkLinkStep>,
     /// Partial enthalpies, including formation references, are transported once.
     pub exchange: SpeciesNetworkStep,
     /// Actual extensive entropy change, not a stability/accuracy certificate.
@@ -73,15 +109,26 @@ pub struct GasTransportStep {
 }
 
 impl GasTransportStep {
-    /// Reapply the ORIGINAL active-nozzle ordering gate after an enclosing
+    /// Reapply ORIGINAL transport driving-force ordering after an enclosing
     /// thermal/mechanical proposal changes the transported gas endpoints.
     ///
     /// This does not sample another flow or spend inventory again. The supplied
     /// map must retain every original parcel identity; the actual positive
-    /// transfers and directions in this report remain authoritative. It checks
-    /// pressure ordering only: heat/work can change entropy, and the transport
+    /// transfers and directions in this report remain authoritative. Nozzles and
+    /// porous paths retain total-pressure order; membranes retain each active
+    /// species' partial-pressure order. Heat/work can change entropy, and the transport
     /// entropy report is not a certificate for that subsequent process.
     pub fn admit_endpoint_nozzle_pressures(
+        &self, parcels: &BTreeMap<u64, ClosedGasParcel>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(), GasTransportError> {
+        self.admit_endpoint_driving_forces(parcels, cancelled)
+    }
+
+    /// Admit every sampled pressure/permeation mechanism on the actual endpoint.
+    /// The original nozzle-named entry point delegates here so existing coupled
+    /// consumers cannot accidentally bypass newly authored porous or membrane paths.
+    pub fn admit_endpoint_driving_forces(
         &self, parcels: &BTreeMap<u64, ClosedGasParcel>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(), GasTransportError> {
@@ -89,12 +136,16 @@ impl GasTransportStep {
         if !parcels.keys().copied().eq(self.exchange.parcels.iter().map(|row| row.id))
             || self.nozzles.iter().any(|row| !parcels.contains_key(&row.donor)
                 || !parcels.contains_key(&row.receiver))
+            || self.porous.iter().any(|row| row.parcels.iter().any(|id| !parcels.contains_key(id)))
+            || self.membranes.iter().any(|row| row.parcels.iter().any(|id| !parcels.contains_key(id)))
         {
             return Err(GasTransportError::Invalid(
-                "final nozzle admission needs the complete original parcel identity map",
+                "final transport admission needs the complete original parcel identity map",
             ));
         }
         pressure::admit_pressures(parcels, &self.nozzles, &mut cancelled)?;
+        porous::admit_pressures(parcels, &self.porous, &mut cancelled)?;
+        membrane::admit_partial_pressures(parcels, &self.membranes, &mut cancelled)?;
         check(&mut cancelled)
     }
 }
@@ -140,19 +191,46 @@ pub fn step_candidate(
     parcels: &BTreeMap<u64, ClosedGasParcel>, nozzles: &[SnapshotNozzleLink],
     diffusion: &[DiffusionNetworkLink<'_>], duration_s: f64,
     endpoints: &BTreeMap<u64, GasEnergySolve>, controls: GasTransportSolve,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
+) -> Result<GasTransportCandidate, Error> {
+    step_candidate_with_paths(parcels, GasTransportPaths {
+        nozzles, diffusion, ..GasTransportPaths::default()
+    }, duration_s, endpoints, controls, cancelled)
+}
+
+/// Advance all pressure, porous, diffusive and membrane paths transactionally.
+///
+/// Every mechanism samples the original gases. Their combined GROSS species
+/// withdrawal is admitted before one caloric reconstruction per finite volume.
+/// Pressure-order and entropy checks apply to the FINAL combined endpoint.
+/// The caller controls first-order time refinement; failed proposals publish
+/// no partial state. Constitutive source domains remain owned by each law.
+pub fn step_candidate_with_paths(
+    parcels: &BTreeMap<u64, ClosedGasParcel>, paths: GasTransportPaths<'_>,
+    duration_s: f64, endpoints: &BTreeMap<u64, GasEnergySolve>,
+    controls: GasTransportSolve, mut cancelled: impl FnMut() -> bool,
 ) -> Result<GasTransportCandidate, Error> {
     check(&mut cancelled)?;
-    if nozzles.len().checked_add(diffusion.len()).is_none_or(|n| n > MAX_SNAPSHOT_TRANSFERS) {
+    let count = [paths.nozzles.len(), paths.diffusion.len(), paths.porous.len(), paths.membranes.len()]
+        .into_iter().try_fold(0usize, |total, n| total.checked_add(n));
+    if count.is_none_or(|n| n > MAX_SNAPSHOT_TRANSFERS) {
         return Err(Error::Invalid("combined connection count exceeds the shared transport bound"));
     }
     let (bulk, nozzle_reports) = pressure::sample_transfers(
-        parcels, nozzles, duration_s, endpoints, &mut cancelled)?;
+        parcels, paths.nozzles, duration_s, endpoints, &mut cancelled)?;
     let (mut transfers, diffusion_reports) = molecular::sample_transfers(
-        parcels, diffusion, duration_s, endpoints,
+        parcels, paths.diffusion, duration_s, endpoints,
         DiffusionNetworkSolve { exchange: controls.exchange,
             entropy_tolerance_j_k: controls.entropy_tolerance_j_k }, &mut cancelled)?;
-    for row in bulk {
+    let (porous_bulk, porous_reports) = porous::sample_transfers(
+        parcels, paths.porous, duration_s, &mut cancelled)?;
+    let (selective, membrane_reports) = membrane::sample_transfers(
+        parcels, paths.membranes, duration_s, &mut cancelled)?;
+    if transfers.len().checked_add(selective.len()).is_none_or(|n| n > MAX_SNAPSHOT_TRANSFERS) {
+        return Err(Error::Invalid("combined selective flux count exceeds the shared work bound"));
+    }
+    transfers.extend(selective);
+    for row in bulk.into_iter().chain(porous_bulk) {
         check(&mut cancelled)?;
         if row.mass_kg == 0.0 { continue; }
         // The original composition owner converts mole fractions to mass.
@@ -174,12 +252,15 @@ pub fn step_candidate(
     // Evaluate pressure crossing on the FINAL combined inventory, not on either
     // mechanism in isolation. Neither failed proposal publishes a subset.
     pressure::admit_pressures(proposal.parcels(), &nozzle_reports, &mut cancelled)?;
+    porous::admit_pressures(proposal.parcels(), &porous_reports, &mut cancelled)?;
+    membrane::admit_partial_pressures(proposal.parcels(), &membrane_reports, &mut cancelled)?;
     let entropy_change_j_k = molecular::admit_entropy(parcels, proposal.parcels(),
         controls.entropy_tolerance_j_k, &mut cancelled)?;
     check(&mut cancelled)?;
     let (parcels, exchange) = proposal.into_parts();
     Ok(GasTransportCandidate { parcels, step: GasTransportStep { duration_s,
-        nozzles: nozzle_reports, diffusion: diffusion_reports, exchange, entropy_change_j_k } })
+        nozzles: nozzle_reports, diffusion: diffusion_reports, porous: porous_reports,
+        membranes: membrane_reports, exchange, entropy_change_j_k } })
 }
 
 #[cfg(test)]

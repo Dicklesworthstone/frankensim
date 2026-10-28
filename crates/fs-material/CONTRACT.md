@@ -2909,3 +2909,43 @@ damage and thermal parameter work require separate models. Never add a loss map
 for the same resolved hysteretic heat. Eleven focused tests cover analytic
 segments/loop area, minor memory, monotone subdivision, inverse histories,
 tangents, reversible limits, refusal and winding energy/heat conjugacy.
+
+
+### Compressible porous leakage and selective membrane permeation
+
+`porous::permeability` separates intrinsic permeability [m²] from gas viscosity,
+dense-membrane molar permeability [mol/(m·s·Pa)] and thickness-normalized
+permeance [mol/(m²·s·Pa)]. The porous owner compiles orthotropic normal
+permeability and series layer resistance once. Its isothermal ideal-gas Darcy
+law conserves mass with distinct face volume rates, includes an explicitly
+gas-model-bound common Klinkenberg factor when calibrated, and refuses unsupported
+temperature, absolute pressure, speed or material conditions. A zero normal
+permeability seals the path exactly. The acoustic gas-substitution owner uses the
+same intrinsic-permeability type. This is dry rigid-skeleton quasi-steady flow;
+Knudsen/transition diffusion, pore storage, wet multiphase flow, pore heat storage,
+Forchheimer inertia and evolving deformation are not inferred.
+
+`thermochemical_gas::energy::parcel::transfer::species::network::transport::step_candidate_with_paths` accepts `GasTransportPaths` containing nozzles,
+Maxwell–Stefan diffusion, porous barriers and dense membranes. All rates sample
+the same original inventory and enter one conservative species/partial-enthalpy
+exchange. Gross outgoing species allowances are shared across every mechanism;
+incoming gas cannot replenish those allowances or traverse another edge during
+the same explicit step. Final endpoints must preserve active total-pressure or
+species partial-pressure order and pass the existing extensive entropy gate.
+The original two-mechanism API delegates with empty porous/membrane slices.
+
+The membrane owner uses source-selected, constant-at-fixed-temperature molar
+permeability and actual species partial pressures, allowing counterpermeation.
+It checks the selected claim at both gas boundaries, retains explicit zero
+permeability for blocked species, and refuses missing species, stale temperature
+aliases, wrong units and unsupported pressure-dependent sorption. The closure
+assumes a steady negligible-storage, near-isothermal dense film with dilute Henry
+sorption; competitive sorption, plasticization, swelling, transient breakthrough,
+nonideal fugacity and thermal transpiration need additional constitutive laws.
+Authored mixture/humidity applicability remains a source requirement.
+
+Analytic regressions cover compressible and layered rates, anisotropy, gas
+substitution, slip calibration, selective flux and reversal, common species
+withdrawal, mass/enthalpy conservation, equilibrium overshoot and cancellation.
+These are constitutive and numerical checks, not validation for an unnamed
+porous solid or polymer. The existing measured acoustic fixtures remain active.

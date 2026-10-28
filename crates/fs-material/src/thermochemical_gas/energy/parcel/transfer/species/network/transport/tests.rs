@@ -177,3 +177,141 @@ fn combined_material_states_feed_the_original_heat_work_and_load_owner() {
     near(moved.step().stored_energy_change_j+moved.step().work_by_gas_j,1.0,1e-8);
     assert_eq!(moved.endpoint().model(),gas.model());
 }
+
+fn porous_barrier(k: f64) -> crate::porous::permeability::DarcyGasBarrier {
+    use crate::porous::permeability::{DarcyGasBarrier, IntrinsicPermeability,
+        PorousGasLayer, PorousGasSupport};
+    DarcyGasBarrier::try_new(vec![PorousGasLayer::try_new(
+        IntrinsicPermeability::isotropic(k).unwrap(), 0.001, 0.0,
+        "synthetic Darcy slab; analytic transport regression",
+    ).unwrap()], [1.0, 0.0, 0.0], PorousGasSupport {
+        temperature_k: (200.0, 1800.0), pressure_pa: (1000.0, 1e7),
+        maximum_superficial_speed_m_s: 100.0,
+    }).unwrap()
+}
+
+fn porous_link(barrier: &crate::porous::permeability::DarcyGasBarrier) -> PorousNetworkLink<'_> {
+    PorousNetworkLink { id: 11, parcels: [0, 2], barrier, area_m2: 1e-4,
+        maximum_temperature_difference_k: 1e-5 }
+}
+
+#[test]
+fn porous_g1_compressible_rate_drives_actual_species_and_enthalpy_exchange() {
+    let p = gases(); let saved = p.clone(); let bounds = endpoints(&p);
+    let barrier = porous_barrier(1e-14); let link = porous_link(&barrier); let dt = 0.01;
+    let result = step_candidate_with_paths(&p, GasTransportPaths {
+        porous: &[link], ..GasTransportPaths::default()
+    }, dt, &bounds, solve(), || false).unwrap();
+    let state = p[&0].state().state();
+    // Independent integrated ideal-gas Darcy slab: rho varies through the layer.
+    let expected_rate = link.area_m2 * 1e-14 * (100000.0_f64.powi(2)-50000.0_f64.powi(2))
+        / (2.0 * state.dynamic_viscosity * state.specific_gas_constant * state.temperature * 0.001);
+    near(result.step().porous[0].flow.mass_rate_left_to_right_kg_s, expected_rate,
+        expected_rate * 2e-14);
+    near(p[&0].mass_kg()-result.parcels()[&0].mass_kg(), dt*expected_rate, 1e-17);
+    near(result.parcels()[&2].mass_kg()-p[&2].mass_kg(), dt*expected_rate, 1e-17);
+    let expected: Vec<_> = inventory(p[&0].model(), dt*expected_rate).unwrap()
+        .into_iter().map(|(species,mass_kg)| SpeciesNetworkTransfer {
+            donor:0, receiver:2, species, mass_kg,
+        }).collect();
+    let direct = super::super::exchange_candidate(&p,&expected,&bounds,solve().exchange,||false).unwrap();
+    for id in [0,2] {
+        near(result.parcels()[&id].mass_kg(),direct.parcels()[&id].mass_kg(),1e-16);
+        near(result.parcels()[&id].state().state().temperature,
+            direct.parcels()[&id].state().state().temperature,1e-9);
+    }
+    assert!(result.step().exchange.total_mass_residual_kg.abs() <= 1e-13);
+    assert!(result.step().exchange.maximum_species_mass_residual_kg <= 1e-13);
+    assert!(result.step().exchange.total_energy_residual_j.abs() <= 1e-8);
+    assert!(result.step().entropy_change_j_k >= -1e-10);
+    assert!(result.parcels()[&0].state().state().pressure < state.pressure);
+    assert!(result.parcels()[&2].state().state().pressure > p[&2].state().state().pressure);
+    assert_eq!(result.parcels()[&1],p[&1]); assert_eq!(result.parcels()[&3],p[&3]);
+    assert_eq!(p,saved);
+}
+
+#[test]
+fn porous_g3_closed_and_reoriented_paths_preserve_the_same_physics() {
+    let p=gases();let bounds=endpoints(&p);let barrier=porous_barrier(1e-14);
+    let link=porous_link(&barrier);
+    let run=|links:&[PorousNetworkLink<'_>]| step_candidate_with_paths(&p,GasTransportPaths {
+        porous:links,..GasTransportPaths::default()
+    },0.01,&bounds,solve(),||false).unwrap();
+    let forward=run(&[link]);let mut reverse=link;reverse.parcels.reverse();
+    let backward=run(&[reverse]);
+    assert_eq!(forward.parcels(),backward.parcels());
+    assert_eq!(forward.step().exchange,backward.step().exchange);
+    assert_eq!(forward.step().porous[0].flow.mass_rate_left_to_right_kg_s,
+        -backward.step().porous[0].flow.mass_rate_left_to_right_kg_s);
+    let mut closed=link;closed.area_m2=0.0;
+    assert_eq!(run(&[closed]).parcels(),&p);
+    let sealed=porous_barrier(0.0);closed=porous_link(&sealed);
+    assert_eq!(run(&[closed]).parcels(),&p);
+    let mut equilibrium=link;equilibrium.parcels=[0,1];
+    assert_eq!(run(&[equilibrium]).parcels(),&p);
+    let mut other=link;other.id=12;other.parcels=[1,3];
+    let first=run(&[link,other]);let mut renamed=link;renamed.id=500;other.id=1;
+    let second=run(&[other,renamed]);
+    assert_eq!(first.parcels(),second.parcels());
+    assert_eq!(first.step().exchange,second.step().exchange);
+}
+
+#[test]
+fn porous_and_nozzle_paths_share_one_gross_withdrawal_allowance() {
+    let p=gases();let bounds=endpoints(&p);let barrier=porous_barrier(1e-14);
+    let mut porous=porous_link(&barrier);let mut nozzle=nozzle(9,[0,2]);let dt=0.1;
+    let sample=step_candidate_with_paths(&p,GasTransportPaths {
+        nozzles:&[nozzle],porous:&[porous],..GasTransportPaths::default()
+    },dt,&bounds,solve(),||false).unwrap();
+    let wanted=0.06*p[&0].mass_kg();
+    porous.area_m2*=wanted/sample.step().porous[0].transferred_mass_kg;
+    nozzle.nozzle.area_m2*=wanted/sample.step().nozzles[0].transferred_mass_kg;
+    step_candidate_with_paths(&p,GasTransportPaths {porous:&[porous],..GasTransportPaths::default()},
+        dt,&bounds,solve(),||false).unwrap();
+    step_candidate(&p,&[nozzle],&[],dt,&bounds,solve(),||false).unwrap();
+    assert!(matches!(step_candidate_with_paths(&p,GasTransportPaths {
+        nozzles:&[nozzle],porous:&[porous],..GasTransportPaths::default()
+    },dt,&bounds,solve(),||false),Err(GasTransportError::Exchange(
+        SpeciesNetworkError::Withdrawal {id:0,..}))));
+}
+
+#[test]
+fn porous_final_pressure_order_is_checked_after_all_mechanisms_and_heat_work() {
+    let p=BTreeMap::from([(0,gas(0.75,100000.0)),(2,gas(0.75,99900.0))]);
+    let bounds=endpoints(&p);let barrier=porous_barrier(1e-14);let mut link=porous_link(&barrier);
+    let sample=step_candidate_with_paths(&p,GasTransportPaths {
+        porous:&[link],..GasTransportPaths::default()
+    },0.01,&bounds,solve(),||false).unwrap();
+    let mut reversed=sample.parcels().clone();reversed.insert(2,gas(0.75,110000.0));
+    assert!(matches!(sample.step().admit_endpoint_nozzle_pressures(&reversed,||false),
+        Err(GasTransportError::Porous(PorousNetworkError::EquilibriumCrossed {id:11}))));
+    link.area_m2*=0.01*p[&0].mass_kg()/sample.step().porous[0].transferred_mass_kg;
+    assert!(matches!(step_candidate_with_paths(&p,GasTransportPaths {
+        porous:&[link],..GasTransportPaths::default()
+    },0.01,&bounds,solve(),||false),Err(GasTransportError::Porous(
+        PorousNetworkError::EquilibriumCrossed {id:11}))));
+}
+
+#[test]
+fn porous_g4_source_temperature_graph_and_cancellation_refuse_without_partial_state() {
+    let p=gases();let saved=p.clone();let bounds=endpoints(&p);let barrier=porous_barrier(1e-14);
+    let link=porous_link(&barrier);
+    assert!(matches!(step_candidate_with_paths(&p,GasTransportPaths {
+        porous:&[link,link],..GasTransportPaths::default()
+    },0.01,&bounds,solve(),||false),Err(GasTransportError::Porous(PorousNetworkError::Invalid(_)))));
+    let mut hot=p.clone();hot.insert(2,ClosedGasParcel::new(
+        model(vec![0.25,0.75],0.0),point(500.0,50000.0),0.001).unwrap());
+    assert!(matches!(step_candidate_with_paths(&hot,GasTransportPaths {
+        porous:&[link],..GasTransportPaths::default()
+    },0.01,&bounds,solve(),||false),Err(GasTransportError::Porous(PorousNetworkError::Invalid(_)))));
+    let mut polls=0;
+    step_candidate_with_paths(&p,GasTransportPaths {porous:&[link],..GasTransportPaths::default()},
+        0.01,&bounds,solve(),||{polls+=1;false}).unwrap();
+    for stop in [1,polls/2,polls] {
+        let mut calls=0;
+        assert_eq!(step_candidate_with_paths(&p,GasTransportPaths {
+            porous:&[link],..GasTransportPaths::default()
+        },0.01,&bounds,solve(),||{calls+=1;calls==stop}),Err(GasTransportError::Cancelled));
+    }
+    assert_eq!(p,saved);
+}
