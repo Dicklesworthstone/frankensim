@@ -3261,3 +3261,109 @@ volume model; they are not new density measurements. The consumer preserves
 source receipts and ovendry mass while accounting for the prescribed water mass.
 Independent shrinkage averages do not supply longitudinal strain, drying rates
 or a temperature-dependent density law.
+
+## Source-backed relaxation, creep, recovery and rate-dependent cycles
+
+Two attributed CC BY 4.0 bundles add 24 claims, including 15 discrete measured
+points. [Deng et al. (2025)](https://pmc.ncbi.nlm.nih.gov/articles/PMC12348320/)
+supplies the five-arm Hongda PU65 foam spectrum and density.
+[Golovkin et al. (2026)](https://www.techscience.com/cmc/v86n3/65492/html)
+supplies the two-arm printed REC TPU creep-fit spectrum, original viscosities,
+first-cycle work, and tangent-modulus means and reported specimen standard
+deviations. Printed TPU at 100% infill is distinct from flexible foam.
+
+`fs_material::visco::source::ResolvedPronyReference` resolves explicit axial
+Maxwell coefficients from original material claims and retains their receipts.
+Its specimen shares one persistent history across strain and nominal-force
+control. A strain hold relaxes stress; a force hold creeps; zero force allows
+recovery. The response separates external model work, recoverable storage and
+nonnegative integrated dissipation. Work may decrease during unloading.
+
+These are small incremental, fixed-temperature models about the source operating
+point. Strain, rate and duration bounds are authored model-use limits. Fitted
+coefficients and these calculations do not establish an independently validated
+finite-strain foam law, densification, permanent set or damage. Original length,
+area and volume define conjugate engineering strain, nominal stress and energy.
+Optional source-geometry bindings reject a mismatched specimen; missing density
+remains `unstated` rather than preventing quasistatic mechanical evaluation.
+
+For the Hongda PU65 source, the 25% preload does not replace the original 80 mm
+height with 60 mm. The spectrum was fitted from 1–20 Hz measurements at that
+preload. Its transient predictions are explicitly selected with
+`--time-domain-reference`; the source retains `source-time-domain-validation-known=0`.
+
+Compile to a new output filename, then run a 1 N creep and zero-load recovery:
+
+```sh
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/hongda-pu65-deng2025-prony-reference/manifest.tsv \
+  --out /tmp/hongda-pu65-history.fsmatpk
+cargo run -p fs-material --example material_viscoelastic_reference -- \
+  /tmp/hongda-pu65-history.fsmatpk 0.08 0.0064 -0.1 0.1 1 2000 \
+  --time-domain-reference \
+  --source-length-axis source-original-height \
+  --source-area-axis source-original-area \
+  --axis source-sample-hongda-pu65-deng2025 1 \
+  --axis source-test-temperature-known 0 \
+  --axis source-moisture-condition-known 0 \
+  --axis source-pressure-known 0 \
+  --axis source-fitted-spectrum-reference 1 \
+  --axis source-time-domain-validation-known 0 \
+  --axis source-precompression 0.25 \
+  --axis source-original-height 0.08 \
+  --axis source-original-area 0.0064 \
+  --axis source-frequency 1 \
+  --axis source-acceleration-peak-to-peak 0.25 \
+  --axis source-preconditioning-section2-2 1 \
+  --force 1 1 --force 1 120 --force 0 1 --force 0 300
+```
+
+This reference calculation gives strains 0.00496924, 0.02197976, 0.01708397
+and 0.00486161 at the four endpoints. Replacing the four controls with
+`--strain 0.001 1 --strain 0.001 30 --strain 0 1 --force 0 60` demonstrates
+relaxation and mixed control: the hold decreases stress from 30.84127 Pa to
+9.63770 Pa. These values are model predictions, not added measurements.
+
+The REC TPU EasyFlex pack preserves a two-arm creep-fit spectrum and measured
+first-cycle loop work for a 20 mm × 20 mm, 100% infill printed cylinder. Its
+density is absent. An explicit triangular reference at 12 mm/min is runnable as:
+
+```sh
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/rec-tpu-easyflex-golovkin2026-creep-reference/manifest.tsv \
+  --out /tmp/rec-tpu-history.fsmatpk
+cargo run -p fs-material --example material_viscoelastic_reference -- \
+  /tmp/rec-tpu-history.fsmatpk 0.02 0.0003141592653589793 -0.05 0.2 1 6000 \
+  --time-domain-reference --source-length-axis source-original-height \
+  --axis source-sample-rec-tpu-easyflex-golovkin2026 1 \
+  --axis source-density-known 0 --axis source-infill-fraction 1 \
+  --axis source-original-height 0.02 --axis source-original-diameter 0.02 \
+  --axis source-moisture-condition-known 0 --axis source-pressure-known 0 \
+  --axis source-fitted-spectrum-reference 1 --axis source-fit-method-creep 1 \
+  --axis source-canonical-parallel-maxwell-interpretation 1 \
+  --axis source-time-domain-validation-known 0 \
+  --axis source-time-domain-experiments-reported 1 \
+  --axis source-loading-level-definition-ambiguous 1 \
+  --axis source-test-temperature-known 0 --axis source-test-duration 6000 \
+  --strain 0.15 15 --strain 0 15
+```
+
+The source's measured loops and this ideal triangular reference are different
+histories. The paper's accuracy statement used reconstructed experimental
+stress histories and must not be transferred to this prescribed triangle.
+Changing both ramp durations gives the following explicitly reported comparison:
+
+| Speed, mm/min | Each ramp, s | Measured loop work, J/m³ | Model loop work, J/m³ | Model dissipation, J/m³ | Remaining model storage, J/m³ |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 0.12 | 1500 | 119000 | 33494.882 | 32353.493 | 1141.389 |
+| 1.2 | 150 | 134000 | 67255.760 | 54974.683 | 12281.078 |
+| 12 | 15 | 159000 | 124389.558 | 116327.531 | 8062.028 |
+| 60 | 3 | 194000 | 146415.741 | 112166.839 | 34248.901 |
+| 120 | 1.5 | 218000 | 102422.473 | 81137.174 | 21285.298 |
+
+A closed strain path can retain internal spring energy, so loop work is not
+automatically all dissipative heat. The source measurements remain discrete
+`TabulatedOnly` claims. The example emits every source coefficient and receipt,
+authored limits, per-step work/storage/dissipation and deterministic identities.
+It admits at most 64 axes and 256 steps and validates the complete history before
+printing a successful result; a late failure emits no partial history.

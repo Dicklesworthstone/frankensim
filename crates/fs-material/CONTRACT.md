@@ -3695,3 +3695,46 @@ The earlier wet/DGM/pore/adsorption selection passed test typechecking at commit
 642daa253c4136a65787ad22eae82c20c7344438, and nine standalone wet-law tests ran
 successfully. Full-workspace validation and execution of the expanded coupled
 suite, including subsequent network/effusion changes, remain unverified.
+
+## Source-bound Prony histories and exact stress control
+
+`visco::stress_control::StressControlledMaxwell` extends the existing
+`GeneralizedMaxwell`/ `PronyState` owner to exact piecewise-linear stress
+ramps, holds and zero-load recovery. The symmetric positive-definite transformed
+branch system is diagonalized once through the existing Jacobi eigensolver.
+Work integrates stress times strain rate; dashpot heat is integrated
+independently. State admission checks the constitutive stress, finite values,
+positive storage and numerical energy balance before mutation. At most 64
+strictly positive branches are admitted, or an empty elastic spectrum.
+Instantaneous stress jumps have zero viscous heat.
+
+`visco::source::ResolvedPronyReference` consumes dimensioned scalar
+`prony-branch-count`, `prony-equilibrium-modulus`, and indexed
+`prony-modulus-N` / `prony-relaxation-time-N` claims under the original typed
+query and selection policy. It verifies and retains every source receipt and
+unstated uncertainty. Optional density supplies mass only when present.
+Sampled curves, missing arms, wrong dimensions, invalid spectra, unowned query
+coordinates and mismatched bound original geometry refuse.
+
+The specimen starts relaxed in incremental coordinates about the fixed source
+operating point. Its nominal stress/engineering strain and work use original
+area/length/volume. Strain and force controls share one persistent history and
+allow holds, unloading and reversal. Positive duration and authored strain,
+absolute strain-rate and elapsed-time limits are mandatory. Stress-controlled
+whole-ramp bounds are conservative floating-point interval sums, not certified
+outward-rounded enclosures; a large step can require subdivision. Rejected
+steps preserve the entire previous state and identity. Accepted responses expose
+cumulative and incremental model work and dissipation, current storage, energy
+residual and a history identity. Unloading can return work; dissipation remains
+nonnegative. A closed strain loop can retain branch storage.
+
+The runnable `material_viscoelastic_reference` example requires explicit
+`--time-domain-reference`, bounds input/step counts and emits output only after
+the complete history is admitted. Source-fitted coefficients do not independently
+validate the simulated history. No unknown preload stress/energy, nonlinear
+crushing, densification, permanent set, damage, acoustic absorption or thermal
+evolution is inferred. The Deng foam's dynamic calibration and the printed TPU
+model-versus-measured cycle-work discrepancy remain explicit in the seed catalog.
+Focused G0/G1/G3 tests cover analytic creep/recovery, independent work/heat
+quadrature, subdivision, source transport, mixed controls, identity and atomic
+refusals; the existing strain-ramp energy regressions remain applicable.

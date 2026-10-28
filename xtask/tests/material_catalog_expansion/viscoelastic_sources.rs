@@ -261,3 +261,169 @@ fn g0_g3_tpu_creep_fit_and_measured_cycle_work_remain_separate() {
         refuses(&pack, "first-cycle-work-density", PA, &bad);
     }
 }
+
+fn prony_card(pack: &NormalizedPack) -> fs_matdb::NormalizedMaterialCardPack {
+    fs_matdb::NormalizedMaterialCardPack::new(
+        fs_matdb::MaterialStateId {
+            chemistry: pack.pack_id().into(),
+            phase: "source specimen solid".into(),
+            process:
+                "source-fitted incremental Prony reference; no independent transient validation"
+                    .into(),
+            revision: 0,
+        },
+        pack.clone(),
+    )
+    .unwrap()
+}
+
+fn close_history(actual: f64, expected: f64) {
+    assert!(
+        (actual - expected).abs() <= 1e-12 + 2e-9 * expected.abs(),
+        "history response {actual} != independent reference {expected}"
+    );
+}
+
+#[test]
+fn g1_g3_source_foam_drives_relaxation_creep_and_zero_force_recovery() {
+    use fs_material::visco::source::{
+        PronyReferenceLimits, PronyReferenceRequest, ResolvedPronyReference,
+    };
+    let pack = compile("hongda-pu65-deng2025-prony-reference", 13);
+    let card = prony_card(&pack);
+    let reference = ResolvedPronyReference::resolve(
+        card.card(),
+        &deng_reference_point(),
+        &PronyReferenceRequest {
+            // Authored bounds for this numerical exercise, not measured limits.
+            limits: PronyReferenceLimits {
+                minimum_incremental_strain: -0.1,
+                maximum_incremental_strain: 0.1,
+                maximum_absolute_strain_rate_s: 1.0,
+                maximum_elapsed_s: 2000.0,
+            },
+            original_length_axis: Some("source-original-height".into()),
+            original_area_axis: Some("source-original-area".into()),
+        },
+        SelectionPolicy::SingleClaimOnly,
+    )
+    .unwrap();
+    assert_eq!(reference.properties().len(), 13);
+    assert_eq!(reference.card_identity(), card.card().content_hash());
+    assert!(reference.coupon(0.06, 0.0064).is_err());
+    let volume = 0.08 * 0.0064;
+    let mut relaxed = reference.coupon(0.08, 0.0064).unwrap();
+    close_history(relaxed.mass_kg().unwrap(), 65.0 * volume);
+    let loaded = relaxed.advance_strain(0.01, 1.0).unwrap();
+    let held = relaxed.advance_strain(0.01, 10.0).unwrap();
+    // Independent analytic solution for a 1 s ramp followed by a 10 s hold,
+    // using the published coefficients and the standard library exponential.
+    let terms: [(f64, f64); 5] = [
+        (23900.0, 0.01),
+        (19700.0, 0.1),
+        (8990.0, 1.0),
+        (12400.0, 10.0),
+        (8140.0, 100.0),
+    ];
+    let mut expected_stress = 3050.0 * 0.01;
+    let mut expected_storage = 0.5 * 3050.0 * 0.01_f64.powi(2);
+    for (e, tau) in terms {
+        let q = -0.01 * tau * (-1.0 / tau).exp_m1() * (-10.0 / tau).exp();
+        expected_stress += e * q;
+        expected_storage += 0.5 * e * q * q;
+    }
+    close_history(held.incremental_stress_pa, expected_stress);
+    close_history(held.incremental_force_n, expected_stress * 0.0064);
+    close_history(held.stored_energy_j, expected_storage * volume);
+    assert!(held.incremental_stress_pa < loaded.incremental_stress_pa);
+    assert_eq!(held.incremental_model_work_j, 0.0);
+    close_history(
+        held.incremental_dissipated_energy_j,
+        loaded.stored_energy_j - held.stored_energy_j,
+    );
+
+    let mut creep = reference.coupon(0.08, 0.0064).unwrap();
+    let loaded = creep.advance_force(0.32, 1.0).unwrap();
+    let held = creep.advance_force(0.32, 100.0).unwrap();
+    assert!(held.incremental_strain > loaded.incremental_strain);
+    close_history(held.incremental_force_n, 0.32);
+    close_history(
+        held.incremental_model_work_j,
+        0.32 * (held.incremental_displacement_m - loaded.incremental_displacement_m),
+    );
+    let unloaded = creep.advance_force(0.0, 1.0).unwrap();
+    let recovered = creep.advance_force(0.0, 1000.0).unwrap();
+    assert!(unloaded.incremental_strain > 0.0);
+    assert!(unloaded.incremental_strain < held.incremental_strain);
+    assert!(recovered.incremental_strain > 0.0);
+    assert!(recovered.incremental_strain < unloaded.incremental_strain);
+    close_history(recovered.incremental_force_n, 0.0);
+    close_history(recovered.incremental_model_work_j, 0.0);
+    close_history(
+        recovered.incremental_dissipated_energy_j,
+        unloaded.stored_energy_j - recovered.stored_energy_j,
+    );
+    for response in [loaded, held, unloaded, recovered] {
+        assert!(response.incremental_dissipated_energy_j >= 0.0);
+        close_history(
+            response.model_work_j,
+            response.stored_energy_j + response.dissipated_energy_j,
+        );
+        close_history(response.energy_balance_residual_j, 0.0);
+    }
+}
+
+#[test]
+fn g3_tpu_triangular_reference_exposes_measured_cycle_work_mismatch() {
+    use fs_material::visco::source::{
+        PronyReferenceLimits, PronyReferenceRequest, ResolvedPronyReference,
+    };
+    let pack = compile("rec-tpu-easyflex-golovkin2026-creep-reference", 11);
+    let card = prony_card(&pack);
+    let reference = ResolvedPronyReference::resolve(
+        card.card(),
+        &tpu_reference_point(),
+        &PronyReferenceRequest {
+            limits: PronyReferenceLimits {
+                minimum_incremental_strain: 0.0,
+                maximum_incremental_strain: 0.15,
+                maximum_absolute_strain_rate_s: 0.02,
+                maximum_elapsed_s: 30.0,
+            },
+            original_length_axis: Some("source-original-height".into()),
+            original_area_axis: None,
+        },
+        SelectionPolicy::SingleClaimOnly,
+    )
+    .unwrap();
+    let area = std::f64::consts::PI * 0.01_f64.powi(2);
+    let volume = area * 0.02;
+    let mut coupon = reference.coupon(0.02, area).unwrap();
+    assert_eq!(coupon.mass_kg(), None);
+    // 12 mm/min = 0.0002 m/s; 15% of 20 mm takes 15 s per ramp.
+    coupon.advance_strain(0.15, 15.0).unwrap();
+    let cycle = coupon.advance_strain(0.0, 15.0).unwrap();
+    let measured = sample(
+        &pack,
+        "first-cycle-work-density",
+        PA,
+        &tpu_cycle_point(0.0002),
+        159000.0,
+    )
+    .evidence
+    .value
+    .value;
+    let predicted = cycle.model_work_j / volume;
+    assert!((predicted - 124389.558).abs() < 0.001);
+    let relative_error = (predicted - measured).abs() / measured;
+    // This is an observed mismatch, deliberately not a physical-accuracy pass:
+    // the paper's reconstructed stress-driven paths are a different experiment.
+    assert!(relative_error > 0.20);
+    assert!(cycle.stored_energy_j > 0.0);
+    assert!(cycle.dissipated_energy_j > 0.0);
+    close_history(
+        cycle.model_work_j,
+        cycle.stored_energy_j + cycle.dissipated_energy_j,
+    );
+    close_history(cycle.energy_balance_residual_j, 0.0);
+}

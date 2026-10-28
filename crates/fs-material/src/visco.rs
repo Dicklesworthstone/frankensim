@@ -42,6 +42,7 @@ use fs_math::det;
 pub mod tensor;
 /// Zener thermoelastic damping of solid circular sections (exact thermal-mode series).
 pub mod circular_ted;
+pub mod source;
 pub mod stress_control;
 pub use tensor::{Mandel6, PronyBranch, TensorProny, TensorPronyState};
 
