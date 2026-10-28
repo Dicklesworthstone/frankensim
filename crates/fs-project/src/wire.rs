@@ -29,7 +29,7 @@ use crate::spec::{
     Envelope, Fan, FanCurveDecl, FanCurvePoint, FanEfficiency, FanToleranceBasis, GeometryArtifact,
     GeometryAssignment, InterfaceCardBinding, InterfaceState, MaterialBinding, MaterialTolerance,
     Metadata, OutputRequest, PerfectContactBinding, PowerDissipation, ProjectSpec,
-    RadiatingSurface, RequirementDirection, RequirementSeverity, RequirementSource,
+    RadiatingSurface, RadiationSpatialModel, RequirementDirection, RequirementSeverity, RequirementSource,
     RequirementSourceKind, SafetyFactorPolicy, Seeds, SolverSettings, SurfaceOffset,
     ThermalBoundary, ThermalBoundaryCondition, ThermalLimit, TransientEnthalpy,
     TransientEnthalpyKnot, TransientInitialTemperature, TransientPhaseConductivity, TransientPowerStep,
@@ -833,7 +833,7 @@ fn lower_radiation(radiation: &ConductionRadiation) -> Result<Node, ProjectError
         ]);
         surfaces.push(list(row));
     }
-    Ok(list(vec![
+    let mut declaration = vec![
         sym("radiation"),
         kw("surfaces"),
         list(surfaces),
@@ -845,7 +845,11 @@ fn lower_radiation(radiation: &ConductionRadiation) -> Result<Node, ProjectError
         qty(radiation.heat_tolerance)?,
         kw("relaxation"),
         float(radiation.relaxation),
-    ]))
+    ];
+    if let Some(model) = radiation.spatial_model {
+        declaration.extend([kw("spatial-model"), sym(model.slug())]);
+    }
+    Ok(list(declaration))
 }
 
 fn lower_cooling(cooling: &Cooling, sections: &mut Vec<Node>) -> Result<(), ProjectError> {
@@ -3159,6 +3163,30 @@ fn read_transient_power_schedules(node: &Node, out: &mut Vec<Violation>) -> Vec<
     result
 }
 
+fn read_radiation_spatial_model(
+    node: Option<&Node>,
+    context: &'static str,
+    out: &mut Vec<Violation>,
+) -> Option<RadiationSpatialModel> {
+    let node = node?;
+    let NodeKind::Symbol(value) = &node.kind else {
+        out.push(Violation {
+            code: "project-malformed-clause",
+            what: format!("`{context}` expected a radiation model symbol"),
+            fix: "use symbol `patch-mean` or `pointwise`".to_string(),
+        });
+        return None;
+    };
+    match value.as_str() {
+        "patch-mean" => Some(RadiationSpatialModel::PatchMean),
+        "pointwise" => Some(RadiationSpatialModel::Pointwise),
+        _ => {
+            invalid_enum(out, context, value, "`patch-mean`, `pointwise`");
+            None
+        }
+    }
+}
+
 fn read_radiation(node: &Node, out: &mut Vec<Violation>) -> Option<ConductionRadiation> {
     let Some(("radiation", body)) = section_name(node) else {
         out.push(Violation {
@@ -3172,6 +3200,7 @@ fn read_radiation(node: &Node, out: &mut Vec<Violation>) -> Option<ConductionRad
         body,
         "radiation",
         &[
+            "spatial-model",
             "surfaces",
             "max-iterations",
             "temperature-tolerance",
@@ -3245,6 +3274,11 @@ fn read_radiation(node: &Node, out: &mut Vec<Violation>) -> Option<ConductionRad
         }
     };
     Some(ConductionRadiation {
+        spatial_model: read_radiation_spatial_model(
+            field(&pairs, "spatial-model"),
+            "radiation.spatial-model",
+            out,
+        ),
         surfaces,
         max_iterations,
         temperature_tolerance: expect_qty(

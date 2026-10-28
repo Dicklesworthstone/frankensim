@@ -1,7 +1,8 @@
 //! Declared closed-enclosure irradiation, separate from ambient reservoirs.
 
 use super::{
-    BTreeSet, ConductionSetup, QtyAny, ThermalBoundaryCondition, Violation, check_dims, dims,
+    BTreeSet, ConductionSetup, QtyAny, RadiationSpatialModel, ThermalBoundaryCondition, Violation,
+    check_dims, dims,
     is_canonical_binding_text, is_hex_digest, violation,
 };
 
@@ -46,6 +47,9 @@ pub enum EnclosureViewFactorEvidence {
 /// Row closure alone cannot validate geometric visibility or occlusion.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConductionEnclosure {
+    /// Explicit emission discretization. Absence retains patch-mean emission;
+    /// irradiation still follows the declared fixed patch view factors.
+    pub spatial_model: Option<RadiationSpatialModel>,
     /// Two to 64 uniquely named, nonoverlapping boundary targets.
     pub surfaces: Vec<EnclosureRadiatingSurface>,
     /// Complete square matrix in the exact declared surface order.

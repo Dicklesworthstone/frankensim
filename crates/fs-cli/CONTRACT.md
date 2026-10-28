@@ -2595,6 +2595,46 @@ validate/import/solve commands. Its two equal-area patches use a deliberately
 manufactured matrix; this example demonstrates the native coupling and does
 not supply measured geometry or material validation.
 
+### Explicit pointwise radiation in total-enthalpy transients
+
+A native ambient or closed-enclosure declaration can select
+`:spatial-model pointwise`. Omission and explicit `patch-mean` retain the
+existing area-mean emission model. Pointwise selection uses the existing
+heterogeneous total-enthalpy Newton/FGMRES owner: positive degree-five surface
+quadrature integrates the actual local P1 fourth-power emission, and its
+analytic tangent enters that same solve. The enclosure owner retains declared
+patch-uniform reflected irradiation and the supplied reciprocal view factors.
+Mean, minimum and maximum surface temperatures are observations; the mean is
+never substituted into the nonlinear emission law.
+
+Each accepted substep and each fresh natural-convection or transported-air
+endpoint evaluation uses that same selected radiation owner. The original
+old enthalpy, regional phase charts, reference nodal masses, conductivity,
+contact and prescribed-temperature reactions remain in the common residual.
+Every radiation boundary trial consumes one solid Newton solve, with actual
+Newton and Krylov work retained. Original convection alone heats transported
+air. Original prescribed Neumann heat stays separate from radiation, including
+pointwise enclosure patches declared with a zero or signed heat flux. The
+actual enclosure heat closure defect remains in the storage/heat audit.
+
+The final native radiation receipt identifies `spatial_model: "pointwise"`,
+the source card/query and emissivity receipt for every surface, integrated
+outward heat, surface temperature extrema, and the selected Newton owner.
+Enclosure receipts also retain the actual area-mean blackbody emission,
+radiosity, irradiation, view-factor identity and signed heat closure. The
+trajectory retains original physical residual and joule-energy targets;
+pointwise radiation does not create a frozen-radiation history or a shifted
+convective reference. Pointwise fields and sampled peaks remain Estimated.
+Steady or volumetric-capacity pointwise selection, native adjoint requests and
+continuum mean bounds explicitly refuse until their corresponding pointwise
+owners exist; a patch-mean result or derivative is never substituted.
+
+Focused product regressions compare ambient heating and cooling with
+independent scalar roots, exact triangular fourth moments and reflected
+two-surface enclosure heat with a nonuniform native field, vacuum exchange
+with separately authored flux and reference storage, and simultaneous latent
+storage, natural reservoir heat and transported-air heating.
+
 ### Forward sampled thermal peak in native transient solves
 
 Every completed native constant-capacity or total-enthalpy transient retains

@@ -35,6 +35,11 @@ pub(super) fn advance(
     deadline: Option<(Instant, f64)>,
 ) -> Result<Step, SolveRefusal> {
     poll(cx, deadline)?;
+    if lowering.is_pointwise() {
+        return pointwise::advance(
+            cx, engine, problem, interfaces, old, dt_s, config, lowering, model, deadline,
+        );
+    }
     if lowering.is_enclosure() != model.is_some() {
         return Err(bad("radiation boundary iteration lost its exact enclosure model"));
     }
@@ -105,6 +110,11 @@ pub(super) fn evaluate(
     radiation: Option<&radiation::LoweredRadiation>,
     model: Option<&GrayDiffuseEnclosure>,
 ) -> Result<EnthalpyEndpointEvaluation, SolveRefusal> {
+    if let Some(lowering) = radiation.filter(|lowering| lowering.is_pointwise()) {
+        return pointwise::evaluate(
+            cx, engine, problem, interfaces, old, candidate, dt_s, config, lowering, model,
+        );
+    }
     match (radiation, model) {
         (Some(lowering), Some(model)) if lowering.is_enclosure() => {
             engine.evaluate_endpoint_with_enclosure(

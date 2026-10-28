@@ -11,6 +11,7 @@ fn enclosure_project() -> ProjectSpec {
         reference_temperature: kelvin(300.0),
     };
     setup.enclosure_radiation = Some(ConductionEnclosure {
+        spatial_model: None,
         surfaces: [("sink-finish", "sink-base"), ("cpu-finish", "cpu")]
             .into_iter()
             .map(|(name, target)| EnclosureRadiatingSurface {
@@ -48,6 +49,11 @@ fn declaration(spec: &mut ProjectSpec) -> &mut ConductionEnclosure {
 }
 
 #[test]
+fn g0_enclosure_radiation_spatial_model_roundtrip_identity_and_refusal() {
+    check_radiation_spatial_models(enclosure_project());
+}
+
+#[test]
 fn g0_enclosure_roundtrips_without_inventing_external_reservoirs() {
     let mut spec = enclosure_project();
     for evidence in [
@@ -70,6 +76,29 @@ fn g0_enclosure_roundtrips_without_inventing_external_reservoirs() {
         assert_eq!(decoded.spec, spec);
         assert_eq!(parse_json(&print_json(&spec).unwrap()).unwrap().spec, spec);
         assert_eq!(decoded.canonical, text);
+    }
+}
+
+#[test]
+fn g0_pointwise_enclosure_admits_vacuum_and_authored_heat_flux_without_fake_convection() {
+    for outward_flux in [0.0, -3.0] {
+        let mut spec = enclosure_project();
+        let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+        setup.enclosure_radiation.as_mut().unwrap().spatial_model =
+            Some(fs_project::RadiationSpatialModel::Pointwise);
+        setup.transient = enthalpy_project().cooling.unwrap().conduction.unwrap().transient;
+        for boundary in &mut setup.boundaries {
+            if ["sink-base", "cpu"].contains(&boundary.target.as_str()) {
+                boundary.condition = ThermalBoundaryCondition::HeatFlux {
+                    outward_flux: QtyAny::new(outward_flux, fs_project::spec::dims::HEAT_FLUX),
+                };
+            }
+        }
+        assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+        for model in [None, Some(fs_project::RadiationSpatialModel::PatchMean)] {
+            declaration(&mut spec).spatial_model = model;
+            assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+        }
     }
 }
 

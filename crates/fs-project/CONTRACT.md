@@ -110,6 +110,20 @@ bindings; it runs no solves and admits no scenarios itself.
   its own versioned source, `SolverSettings`, and `OutputRequest`s. Sections
   are `Option`s so
   recognition stays lenient and validation can name every omission at once.
+- Both ambient `ConductionRadiation` and closed `ConductionEnclosure`
+  retain an optional `RadiationSpatialModel`. The wire keyword
+  `:spatial-model` accepts the symbols `patch-mean` and `pointwise`;
+  pointwise denotes integration of the fourth power of the native P1 surface
+  temperature. The enclosure still uses its fixed patch view factors.
+  Both spatial models admit authored heat-flux boundaries,
+  including zero-flux vacuum boundaries, without a fictitious convection law.
+  Omission retains the original patch-mean declaration and byte-identical
+  canonical spelling; no default receipt or physical datum is invented.
+  Explicit choices survive S-expression/JSON round trips and enter canonical
+  identity. Unknown values, incorrect value types and duplicate keywords
+  produce named findings. Actual solver and derivative support is admitted by
+  the consuming solve path; project well-formedness does not grant it.
+
 - `Seeds.root` and canonical `(seeds :root 0x...)` name the root of every
   logical RNG derivation. There is one spelling: the superseded keyword was
   refused as unknown during pre-freeze v1 and stays refused under the frozen

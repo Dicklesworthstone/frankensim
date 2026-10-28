@@ -166,6 +166,7 @@ pub(super) fn lower(
             relaxation: declaration.relaxation,
         },
         surfaces,
+        pointwise: declaration.spatial_model == Some(fs_project::RadiationSpatialModel::Pointwise),
         enclosure: Some(LoweredEnclosure {
             declaration: declaration.clone(),
         }),
@@ -324,6 +325,7 @@ pub(super) fn solve(
         convective_fluxes: Some(solved.convective_robin_fluxes),
         convective_out: Some(solved.convective_out_w),
         radiation: None,
+        pointwise: None,
         combined_boundary: Some(solved.combined_boundary),
         enclosure: Some(EnclosureResult {
             model,

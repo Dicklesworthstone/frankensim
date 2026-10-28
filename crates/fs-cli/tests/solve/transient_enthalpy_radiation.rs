@@ -554,6 +554,97 @@ fn g1_native_radiating_latent_plateau_accounts_for_pulse_and_boundary_energy_onc
 }
 
 #[test]
+fn g1_pointwise_ambient_uses_one_newton_solve_and_matches_independent_heating_cooling_roots() {
+    let (cards, card) = radiation_product::emissivity_cards(&fixture_cards(), EMISSIVITY);
+    for reservoir in [270.0, 400.0] {
+        let mut spec = project(&card, reservoir);
+        let radiation = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+            .radiation.as_mut().unwrap();
+        radiation.spatial_model = Some(fs_project::RadiationSpatialModel::Pointwise);
+        // A single radiation solve suffices because emission is in Newton.
+        radiation.max_iterations = 1;
+        let solved = run(&spec, &cards);
+        assert_eq!(solved.temperature.len(), 4);
+        let history = solved.transient();
+        let work = history.get("radiation").unwrap();
+        assert_eq!(work.str_field("method"), Some("implicit-pointwise-p1-gray-radiation"));
+        close(n(work, "total_trials"), n(history, "total_steps"), 0.0);
+        close(n(work, "max_trials_per_boundary_iteration"), 1.0, 0.0);
+        let final_report = solved.receipt.get("radiation").unwrap();
+        assert_eq!(final_report.str_field("model"),
+            Some("pointwise-p1-gray-surface-to-black-reservoir"));
+        assert_eq!(final_report.str_field("spatial_model"), Some("pointwise"));
+        let surface = &final_report.get("surfaces").unwrap().as_array().unwrap()[0];
+        assert_eq!(surface.str_field("card"), Some(card.as_str()));
+        close(n(surface, "area_m2"), area_m2(), 2e-12);
+        for grid in ["coarse", "fine"] {
+            let mut old = INITIAL_K;
+            for row in solved.rows(grid) {
+                let dt = n(row, "dt_s");
+                let expected = uniform_step(old, dt, reservoir, 5.0);
+                close(n(row, "final_region_max_k"), expected, 2e-8);
+                let radiation = row.get("radiation").unwrap();
+                close(n(radiation, "solid_solves"), 1.0, 0.0);
+                close(n(radiation, "convective_out_w"), convective_w(expected), 3e-6);
+                close(n(radiation, "nonlinear_radiative_out_w"),
+                    radiative_w(expected, reservoir), 3e-6);
+                close(n(row, "stored_energy_change_j"),
+                    mass_kg(DENSITY) * CP * (expected - old), 3e-6);
+                assert!(n(radiation, "physical_residual_j")
+                    <= n(radiation, "physical_residual_threshold_j"));
+                assert!(n(radiation, "physical_energy_residual_j").abs()
+                    <= n(history, "energy_tolerance_j"));
+                old = expected;
+            }
+            if grid == "fine" {
+                for &temperature in &solved.temperature {
+                    close(temperature, old, 2e-8);
+                }
+                close(n(final_report, "nonlinear_radiative_out_w"),
+                    radiative_w(old, reservoir), 3e-6);
+            }
+        }
+    }
+}
+
+#[test]
+fn g0_pointwise_radiation_refuses_unsupported_storage_and_derivatives_before_publishing_a_field() {
+    let (cards, card) = radiation_product::emissivity_cards(&fixture_cards(), EMISSIVITY);
+    for variant in ["steady", "capacity", "adjoint"] {
+        let mut spec = project(&card, 270.0);
+        spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+            .radiation.as_mut().unwrap().spatial_model =
+                Some(fs_project::RadiationSpatialModel::Pointwise);
+        match variant {
+            "steady" => spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap().transient = None,
+            "capacity" => {
+                let time = time(&mut spec);
+                time.enthalpy = None;
+                time.capacities = vec![fs_project::TransientRegionCapacity {
+                    region: "air".into(),
+                    volumetric_heat_capacity: QtyAny::new(DENSITY * CP, dims::VOLUMETRIC_HEAT_CAPACITY),
+                    source: "synthetic unchanged reference capacity".into(),
+                }];
+            }
+            _ => spec.outputs.as_mut().unwrap().push(OutputRequest {
+                name: "temperature-final-adjoint".into(), kind: "report".into(), region: None,
+            }),
+        }
+        let ledger = Ledger::open(":memory:").unwrap();
+        import_fixture(&ledger, &spec, transient_radiation::regular_tetra_stl());
+        let decoded = decode(&spec);
+        assert!(decoded.findings().is_empty(), "{variant}: {:?}", decoded.findings());
+        let error = run_solve(&ledger, &CancelGate::new_clock_free(), &mut benign_clock(),
+            &decoded, &cards, &mut Vec::new()).unwrap_err();
+        assert_eq!(error.code, "cli-solve-conduction-pointwise-radiation", "{variant}: {error:?}");
+        if let Some(run) = &error.run {
+            assert!(stage_receipt_hashes(&ledger, run).len() <= 4,
+                "{variant}: no unsupported pointwise conduction field may be published");
+        }
+    }
+}
+
+#[test]
 fn g0_native_enthalpy_radiation_refuses_work_and_source_domain_failures_without_a_field() {
     for failure in [
         "outer-iteration-cap",

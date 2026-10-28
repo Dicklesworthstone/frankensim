@@ -21,12 +21,16 @@ use crate::import::json_string;
 
 pub(super) mod adaptive;
 mod enclosure;
+mod pointwise;
+use pointwise::PointwiseEndpoint;
+pub(super) use pointwise::receipt as pointwise_receipt;
 
 pub(super) struct LoweredRadiation {
     pub(super) patches: Vec<AmbientRadiationPatch>,
     pub(super) config: AmbientRadiationConfig,
     surfaces: Vec<SurfaceSource>,
     enclosure: Option<enclosure::LoweredEnclosure>,
+    pointwise: bool,
 }
 
 struct SurfaceSource {
@@ -36,6 +40,15 @@ struct SurfaceSource {
 }
 
 impl LoweredRadiation {
+    pub(super) fn is_pointwise(&self) -> bool {
+        self.pointwise
+    }
+
+    /// Pointwise emission is inside one Newton solve, without a radiation fixed point.
+    pub(super) fn max_solid_solves(&self) -> usize {
+        if self.pointwise { 1 } else { self.config.max_iterations }
+    }
+
     pub(super) fn is_enclosure(&self) -> bool {
         self.enclosure.is_some()
     }
@@ -63,11 +76,24 @@ impl LoweredRadiation {
     }
 }
 
+pub(super) fn pointwise_requested(spec: &ProjectSpec) -> bool {
+    use fs_project::RadiationSpatialModel::Pointwise;
+    spec.cooling.as_ref().and_then(|cooling| cooling.conduction.as_ref())
+        .is_some_and(|setup| {
+            setup.radiation.as_ref().is_some_and(|row| row.spatial_model == Some(Pointwise))
+                || setup.enclosure_radiation.as_ref()
+                    .is_some_and(|row| row.spatial_model == Some(Pointwise))
+        })
+}
+
 pub(super) fn lower(
     spec: &ProjectSpec,
     setup: &ConductionSetup,
     cards: &CardPackSet,
 ) -> Result<Option<LoweredRadiation>, SolveRefusal> {
+    if pointwise_requested(spec) {
+        super::transient::admit(spec)?;
+    }
     if setup.enclosure_radiation.is_some() {
         return enclosure::lower(spec, setup, cards).map(Some);
     }
@@ -130,6 +156,7 @@ pub(super) fn lower(
         },
         surfaces,
         enclosure: None,
+        pointwise: declaration.spatial_model == Some(fs_project::RadiationSpatialModel::Pointwise),
     }))
 }
 
@@ -185,6 +212,7 @@ pub(super) struct SolidSolution {
     convective_out: Option<f64>,
     radiation: Option<AmbientRadiationReport>,
     enclosure: Option<enclosure::EnclosureResult>,
+    pointwise: Option<PointwiseEndpoint>,
     /// The exact combined convective + radiative Robin partition behind a
     /// radiating field; the roundoff bound must see this operator.
     pub(super) combined_boundary: Option<fs_conduction::ThermalBoundary>,
@@ -199,6 +227,7 @@ impl SolidSolution {
             convective_out: None,
             radiation: None,
             enclosure: None,
+            pointwise: None,
             combined_boundary: None,
         }
     }
@@ -219,6 +248,7 @@ impl SolidSolution {
             convective_out: Some(convective_out_w),
             radiation: Some(radiation),
             enclosure: None,
+            pointwise: None,
             combined_boundary: Some(combined_boundary),
         }
     }
@@ -235,8 +265,37 @@ impl SolidSolution {
             convective_out: Some(endpoint.convective_out_w),
             radiation: None,
             enclosure: Some(enclosure),
+            pointwise: None,
             combined_boundary: Some(endpoint.combined_boundary),
         }
+    }
+
+    pub(super) fn from_pointwise_endpoint(
+        conduction: ConductionSolution,
+        ambient: Option<fs_conduction::PointwiseRadiationReport>,
+        enclosure: Option<fs_conduction::PointwiseEnclosureReport>,
+    ) -> Result<Self, SolveRefusal> {
+        let endpoint = PointwiseEndpoint::new(ambient, enclosure)?;
+        // Original convection is unmodified by the pointwise owner. The common
+        // energy row includes radiation, so retain its independently summed
+        // convection account rather than inferring it from that combined row.
+        let convective_out_w = conduction.report.robin_fluxes.iter()
+            .try_fold(0.0, |sum, row| {
+                let value = sum + row.heat_rate_w;
+                if value.is_finite() { Ok(value) } else {
+                    Err(conduction_error("cli-solve-conduction-radiation-nonfinite",
+                        "pointwise convection sum is nonfinite", "inspect the physical heat inputs"))
+                }
+            })?;
+        Ok(Self {
+            conduction,
+            convective_fluxes: None,
+            convective_out: Some(convective_out_w),
+            radiation: None,
+            enclosure: None,
+            pointwise: Some(endpoint),
+            combined_boundary: None,
+        })
     }
 
     pub(super) fn enclosure_model(&self) -> Option<&GrayDiffuseEnclosure> {
@@ -266,6 +325,12 @@ impl SolidSolution {
         &self,
         lowering: Option<&LoweredRadiation>,
     ) -> Result<Option<String>, SolveRefusal> {
+        if let Some(endpoint) = &self.pointwise {
+            return endpoint.receipt(lowering.ok_or_else(|| conduction_error(
+                "cli-solve-conduction-pointwise-radiation",
+                "pointwise endpoint lost its declaration", "retain the original radiation model",
+            ))?, self.convective_out_w()).map(Some);
+        }
         if let Some(report) = &self.enclosure {
             return report
                 .receipt(
@@ -512,6 +577,7 @@ pub(super) fn solve(
             convective_out: None,
             radiation: None,
             enclosure: None,
+            pointwise: None,
             combined_boundary: None,
         })
     }

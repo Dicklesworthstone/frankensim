@@ -38,6 +38,7 @@ fn enclosure_project(card: &str) -> ProjectSpec {
         .collect();
     setup.adiabatic_remainder = true;
     setup.enclosure_radiation = Some(ConductionEnclosure {
+        spatial_model: None,
         surfaces: ["wall-x", "wall-z"]
             .into_iter()
             .enumerate()

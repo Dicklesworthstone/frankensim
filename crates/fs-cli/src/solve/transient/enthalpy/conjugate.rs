@@ -209,7 +209,7 @@ pub(super) fn advance(
         .ok_or_else(|| bad("enthalpy airflow/natural work allowance overflows"))?;
     let max_natural_endpoint_evaluations = max_natural_iterations.checked_mul(2)
         .ok_or_else(|| bad("enthalpy airflow/natural audit allowance overflows"))?;
-    let radiation_factor = radiation.map_or(1, |lowering| lowering.config.max_iterations);
+    let radiation_factor = radiation.map_or(1, radiation::LoweredRadiation::max_solid_solves);
     let max_solid_solves = max_natural_iterations
         .checked_mul(radiation_factor)
         .ok_or_else(|| bad("enthalpy airflow/radiation work allowance overflows"))?;

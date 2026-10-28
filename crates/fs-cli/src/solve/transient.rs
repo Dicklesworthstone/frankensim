@@ -137,6 +137,24 @@ pub(super) fn admit(spec: &ProjectSpec) -> Result<(), SolveRefusal> {
     // Also reject a transient-adjoint output on a steady project; an ignored
     // report request must never look like a completed derivative calculation.
     adjoint::requested(spec)?;
+    if radiation::pointwise_requested(spec) {
+        if !policy(spec).is_some_and(|time| time.enthalpy.is_some()) {
+            return Err(conduction_error(
+                "cli-solve-conduction-pointwise-radiation",
+                "pointwise radiation requires the native total-enthalpy transient owner",
+                "declare total-enthalpy storage and finite-time integration, or select patch-mean radiation",
+            ));
+        }
+        if spec.outputs.iter().flatten().any(|output| {
+            output.name.contains("adjoint") || output.name == "temperature-volume-mean-bound"
+        }) {
+            return Err(conduction_error(
+                "cli-solve-conduction-pointwise-radiation",
+                "pointwise radiation does not yet expose the native trajectory adjoint or continuum mean bound",
+                "request the forward temperature field or sampled peak; no mean-patch derivative is substituted",
+            ));
+        }
+    }
     let Some(transient) = policy(spec) else {
         return Ok(());
     };

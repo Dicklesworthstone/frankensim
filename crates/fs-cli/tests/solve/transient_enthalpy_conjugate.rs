@@ -625,6 +625,30 @@ fn check_mixed_plateau(solved: &ThermalRun, air_area: f64, natural_area: f64, br
 }
 
 #[test]
+fn g1_pointwise_radiation_composes_with_natural_and_forced_air_without_double_counting_latent_heat() {
+    let (cards, card) = radiation_product::emissivity_cards(&fixture_cards(), EMISSIVITY);
+    let (mut spec, bytes) = mixed_plateau_project(&card);
+    let declaration = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .radiation.as_mut().unwrap();
+    declaration.spatial_model = Some(fs_project::RadiationSpatialModel::Pointwise);
+    declaration.max_iterations = 1;
+    let solved = run(&spec, &cards, &bytes);
+    // This existing oracle independently closes Churchill-Chu reservoir heat,
+    // exponential branch air heating, radiation, and the latent mass account.
+    check_mixed_plateau(&solved, 0.75 * area_m2(), 0.25 * area_m2(), "air");
+    assert_eq!(solved.receipt.get("radiation").unwrap().str_field("spatial_model"), Some("pointwise"));
+    for grid in ["coarse", "fine"] {
+        for row in solved.rows(grid) {
+            let radiation = row.get("radiation").unwrap();
+            assert_eq!(radiation.str_field("model"), Some("pointwise-p1"));
+            close(n(radiation, "solid_solves"), 1.0, 0.0);
+            assert!(n(row.get("conjugate").unwrap(), "physical_residual_norm_j")
+                <= n(row.get("conjugate").unwrap(), "physical_residual_tolerance_j"));
+        }
+    }
+}
+
+#[test]
 fn g1_native_mixed_enthalpy_keeps_signed_natural_heat_and_radiation_out_of_air() {
     let (cards, card) = radiation_product::emissivity_cards(&fixture_cards(), EMISSIVITY);
     let (spec, bytes) = mixed_plateau_project(&card);

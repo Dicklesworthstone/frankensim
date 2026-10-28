@@ -322,6 +322,20 @@ pub fn migrate_envelope(
     let decoded = parse_sexpr(&migrated)?;
     if declared_version > 0 && declared_version < 16
         && decoded.spec.cooling.as_ref().and_then(|cooling| cooling.conduction.as_ref())
+            .is_some_and(|setup| {
+                setup.radiation.as_ref().is_some_and(|radiation| radiation.spatial_model.is_some())
+                    || setup.enclosure_radiation.as_ref()
+                        .is_some_and(|enclosure| enclosure.spatial_model.is_some())
+            })
+    {
+        return Err(ProjectError {
+            code: "fsim-migration-payload",
+            detail: format!("schema version {declared_version} predates explicit radiation spatial models but its payload declares one"),
+            hint: "declare the spatial model in a current-version project; migration preserves historical patch-mean radiation".into(),
+        });
+    }
+    if declared_version > 0 && declared_version < 16
+        && decoded.spec.cooling.as_ref().and_then(|cooling| cooling.conduction.as_ref())
             .is_some_and(|setup| setup.enclosure_radiation.is_some())
     {
         return Err(ProjectError {

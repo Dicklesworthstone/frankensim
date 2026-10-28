@@ -55,6 +55,7 @@ fn fixture(nonlinear: bool, radiation: bool) -> Fixture {
     f.project.solver.as_mut().unwrap().tolerance_rel = 1e-8;
     if radiation {
         f.project.cooling.as_mut().unwrap().conduction.as_mut().unwrap().radiation = Some(ConductionRadiation {
+            spatial_model: None,
             surfaces: vec![RadiatingSurface { name: "gray-wall".into(), target: "air".into(),
                 card: card.card().to_hex(), claim: None,
                 query_temperature: QtyAny::new(300.0,dims::TEMPERATURE),

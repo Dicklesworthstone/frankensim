@@ -85,6 +85,7 @@ fn project(card: &str) -> ProjectSpec {
         }).collect();
     setup.adiabatic_remainder = true;
     setup.enclosure_radiation = Some(ConductionEnclosure {
+        spatial_model: None,
         surfaces: ["wall-x", "wall-z"].into_iter().enumerate()
             .map(|(index, target)| EnclosureRadiatingSurface {
                 name: format!("radiator-{index}"), target: target.into(),
@@ -298,6 +299,105 @@ fn check_history(solved: &Solved, card: &str, latent: bool) {
     assert!(solved.html.contains("closed-gray-diffuse-enclosure"));
     assert!(solved.html.contains("total-enthalpy"));
     assert!(solved.html.contains("Estimated"));
+}
+
+// For one triangular P1 patch, its reported min/max/mean determine all three
+// nodal temperatures. Exact simplex moments give mean(T_h^4)=h_4(T0,T1,T2)/15.
+fn pointwise_emission_oracle(surface: &J) -> f64 {
+    let low = n(surface, "minimum_temperature_k");
+    let high = n(surface, "maximum_temperature_k");
+    let middle = 3.0 * n(surface, "mean_temperature_k") - low - high;
+    let mut fourth = 0.0;
+    for a in 0..=4 {
+        for b in 0..=4-a {
+            fourth += low.powi(a) * middle.powi(b) * high.powi(4-a-b);
+        }
+    }
+    SIGMA * fourth / 15.0
+}
+
+#[test]
+fn g1_pointwise_enclosure_retains_hot_spots_and_changes_the_actual_native_field() {
+    let (cards, card) = radiation_product::emissivity_cards(&fixture_cards(), EPSILON);
+    let mean = project(&card);
+    let mean_result = run(&mean, &cards);
+    let mut spec = mean;
+    let declaration = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .enclosure_radiation.as_mut().unwrap();
+    declaration.spatial_model = Some(fs_project::RadiationSpatialModel::Pointwise);
+    declaration.max_iterations = 1;
+    let solved = run(&spec, &cards);
+    let field = values(&J::parse(&solved.field).unwrap(), "temperature");
+    let mean_field = values(&J::parse(&mean_result.field).unwrap(), "temperature");
+    assert_eq!(field.len(), 4, "the independent moment oracle requires one tetrahedron");
+    assert!(field.iter().zip(&mean_field).any(|(a,b)| (a-b).abs() > 1e-7),
+        "pointwise emission must change the solve, not just its report label");
+    let receipt = J::parse(&solved.conduction).unwrap();
+    let radiation = receipt.get("radiation").unwrap();
+    assert_eq!(radiation.str_field("model"), Some("pointwise-p1-closed-gray-diffuse-enclosure"));
+    let surfaces = radiation.get("surfaces").unwrap().as_array().unwrap();
+    assert_eq!(surfaces.len(), 2);
+    let mut emission = [0.0;2];
+    let mut spatial_excess = 0.0_f64;
+    for (i,surface) in surfaces.iter().enumerate() {
+        close(n(surface, "area_m2"), 0.5, 1e-12);
+        emission[i] = pointwise_emission_oracle(surface);
+        close(n(surface, "mean_blackbody_emission_w_m2"), emission[i], 1e-8);
+        spatial_excess = spatial_excess.max(
+            emission[i] - SIGMA * n(surface, "mean_temperature_k").powi(4));
+    }
+    assert!(spatial_excess > 1e-8, "fixture must resolve a nonuniform emitting patch");
+    let heat = 0.5 * (emission[0]-emission[1]) / (2.0/EPSILON-1.0);
+    close(n(&surfaces[0], "outward_heat_w"), heat, 1e-8);
+    close(n(&surfaces[1], "outward_heat_w"), -heat, 1e-8);
+    close(n(radiation, "enclosure_energy_closure_w"), 0.0, 1e-6);
+    let history = receipt.get("transient").unwrap();
+    let work = history.get("radiation").unwrap();
+    assert_eq!(work.str_field("method"), Some("implicit-pointwise-p1-closed-gray-diffuse-enclosure"));
+    close(n(work, "total_trials"), n(history, "total_steps"), 0.0);
+    for grid in ["coarse", "fine"] {
+        for row in history.get(grid).unwrap().as_array().unwrap() {
+            let exchange = row.get("radiation").unwrap();
+            close(n(exchange, "solid_solves"), 1.0, 0.0);
+            close(n(row, "stored_energy_change_j"),
+                n(row,"dt_s") * (n(row,"source_w")-n(exchange,"convective_out_w")), 3e-6);
+            assert!(n(exchange,"physical_residual_j") <= n(exchange,"physical_residual_threshold_j"));
+        }
+    }
+}
+
+#[test]
+fn g1_pointwise_enclosure_in_vacuum_preserves_authored_flux_and_reference_storage() {
+    let (cards, card) = radiation_product::emissivity_cards(&fixture_cards(), EPSILON);
+    let mut spec = project(&card);
+    let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+    setup.enclosure_radiation.as_mut().unwrap().spatial_model =
+        Some(fs_project::RadiationSpatialModel::Pointwise);
+    setup.enclosure_radiation.as_mut().unwrap().max_iterations = 1;
+    // One insulated exchanging face and one independently authored 1 W/m2 loss.
+    for (index, boundary) in setup.boundaries.iter_mut().enumerate() {
+        boundary.condition = ThermalBoundaryCondition::HeatFlux {
+            outward_flux: QtyAny::new(index as f64, dims::HEAT_FLUX),
+        };
+    }
+    let solved = run(&spec, &cards);
+    let receipt = J::parse(&solved.conduction).unwrap();
+    let history = receipt.get("transient").unwrap();
+    let endpoint = history.get("endpoint").unwrap();
+    let stored: f64 = values(endpoint, "reference_nodal_mass_kg").iter()
+        .zip(values(endpoint, "specific_enthalpy_j_kg")).map(|(mass,h)|mass*h).sum();
+    close(stored, 9.0 - 0.5, 3e-6);
+    close(n(receipt.get("radiation").unwrap(), "convective_out_w"), 0.0, 0.0);
+    for grid in ["coarse", "fine"] {
+        for row in history.get(grid).unwrap().as_array().unwrap() {
+            let radiation = row.get("radiation").unwrap();
+            close(n(radiation,"convective_out_w"), 0.0, 0.0);
+            close(n(radiation,"prescribed_neumann_out_w"), 0.5, 1e-12);
+            close(n(radiation,"nonlinear_radiative_out_w"), 0.0, 1e-6);
+            close(n(row,"stored_energy_change_j"),
+                n(row,"dt_s") * (n(row,"source_w") - 0.5), 3e-6);
+        }
+    }
 }
 
 #[test]

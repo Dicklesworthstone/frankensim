@@ -63,7 +63,7 @@ fn native_conductivity_multiplier_matches_full_material_and_cooling_resolves() {
             hydraulic_diameter:QtyAny::new(0.02,dims::LENGTH),flow_area:QtyAny::new(0.004,dims::AREA),
             channel_length:QtyAny::new(0.3,dims::LENGTH),correlation:"convection.gnielinski".into(),
         }; }
-        if radiation { setup.radiation=Some(ConductionRadiation {surfaces:vec![RadiatingSurface {
+        if radiation { setup.radiation=Some(ConductionRadiation {spatial_model:None,surfaces:vec![RadiatingSurface {
             name:"gray-wall".into(),target:"air".into(),card:String::new(),claim:None,
             query_temperature:QtyAny::new(300.0,dims::TEMPERATURE),
             reservoir_temperature:QtyAny::new(285.0,dims::TEMPERATURE)}],max_iterations:128,

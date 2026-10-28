@@ -51,7 +51,7 @@ pub(super) fn lower(enclosure: &ConductionEnclosure) -> Result<Node, ProjectErro
             ])
         }
     };
-    Ok(list(vec![
+    let mut declaration = vec![
         sym("enclosure-radiation"),
         kw("surfaces"),
         list(surfaces),
@@ -71,7 +71,11 @@ pub(super) fn lower(enclosure: &ConductionEnclosure) -> Result<Node, ProjectErro
         qty(enclosure.heat_tolerance)?,
         kw("relaxation"),
         float(enclosure.relaxation),
-    ]))
+    ];
+    if let Some(model) = enclosure.spatial_model {
+        declaration.extend([kw("spatial-model"), sym(model.slug())]);
+    }
+    Ok(list(declaration))
 }
 
 fn malformed(out: &mut Vec<Violation>, what: impl Into<String>) {
@@ -94,6 +98,7 @@ pub(super) fn read(node: &Node, out: &mut Vec<Violation>) -> Option<ConductionEn
         body,
         "enclosure-radiation",
         &[
+            "spatial-model",
             "surfaces",
             "view-factors",
             "evidence",
@@ -249,6 +254,11 @@ pub(super) fn read(node: &Node, out: &mut Vec<Violation>) -> Option<ConductionEn
         }
     };
     Some(ConductionEnclosure {
+        spatial_model: read_radiation_spatial_model(
+            field(&pairs, "spatial-model"),
+            "enclosure.spatial-model",
+            out,
+        ),
         surfaces,
         view_factors,
         evidence,

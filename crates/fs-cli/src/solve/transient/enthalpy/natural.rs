@@ -109,7 +109,7 @@ pub(super) fn advance(
         );
     }
     let mut coefficients = boundary_law::initial_coefficients(laws, pressure_pa)?;
-    let radiation_factor = radiation.map_or(1, |lowering| lowering.config.max_iterations);
+    let radiation_factor = radiation.map_or(1, radiation::LoweredRadiation::max_solid_solves);
     let max_solid_solves = boundary_law::MAX_ITERATIONS
         .checked_mul(radiation_factor)
         .ok_or_else(|| bad("natural-convection/radiation work allowance overflows"))?;

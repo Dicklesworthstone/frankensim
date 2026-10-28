@@ -1080,6 +1080,7 @@ fn radiation_project() -> ProjectSpec {
         reference_temperature: kelvin(293.15),
     };
     conduction.radiation = Some(ConductionRadiation {
+        spatial_model: None,
         surfaces: vec![RadiatingSurface {
             name: "black-anodized-sink".to_string(),
             target: "sink-base".to_string(),
@@ -1094,6 +1095,69 @@ fn radiation_project() -> ProjectSpec {
         relaxation: 0.5,
     });
     spec
+}
+
+fn check_radiation_spatial_models(mut spec: ProjectSpec) {
+    use fs_project::RadiationSpatialModel;
+    let historical = print_sexpr(&spec).unwrap();
+    assert!(!historical.contains(":spatial-model"));
+    for model in [
+        None,
+        Some(RadiationSpatialModel::PatchMean),
+        Some(RadiationSpatialModel::Pointwise),
+    ] {
+        let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+        if let Some(radiation) = &mut setup.radiation {
+            radiation.spatial_model = model;
+        } else {
+            setup.enclosure_radiation.as_mut().unwrap().spatial_model = model;
+        }
+        assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+        let canonical = print_sexpr(&spec).unwrap();
+        match model {
+            None => assert_eq!(canonical, historical),
+            Some(model) => {
+                assert!(canonical.contains(&format!(":spatial-model {}", model.slug())));
+                assert_ne!(
+                    canonical_hash(canonical.as_bytes()),
+                    canonical_hash(historical.as_bytes()),
+                );
+            }
+        }
+        let decoded = parse_sexpr(&canonical).unwrap();
+        assert_eq!(decoded.spec, spec);
+        assert!(decoded.defaults.is_empty());
+        assert!(decoded.findings().is_empty());
+        let json = print_json(&spec).unwrap();
+        let from_json = parse_json(&json).unwrap();
+        assert_eq!(from_json.spec, spec);
+        assert_eq!(from_json.canonical, canonical);
+    }
+    let canonical = print_sexpr(&spec).unwrap();
+    for (replacement, code) in [
+        ("unknown-model", "project-field-enum"),
+        ("1.0", "project-malformed-clause"),
+    ] {
+        let malformed = canonical.replacen(":spatial-model pointwise",
+            &format!(":spatial-model {replacement}"), 1);
+        assert_ne!(malformed, canonical);
+        let decoded = parse_sexpr_lenient(&malformed).unwrap();
+        assert!(decoded.recognition.iter().any(|v| v.code == code));
+        assert!(parse_sexpr(&malformed).is_err());
+    }
+    let json = print_json(&spec).unwrap();
+    let malformed = json.replacen("\"pointwise\"", "\"unknown-model\"", 1);
+    assert_ne!(malformed, json);
+    assert!(parse_json(&malformed).is_err());
+    let mislabeled = canonical
+        .replacen(&format!("(fsim-project :version {FSIM_VERSION}"), "(fsim-project :version 15", 1)
+        .replacen(&format!("(versions :schema {FSIM_VERSION}"), "(versions :schema 15", 1);
+    assert_eq!(parse_sexpr_migrating(&mislabeled).unwrap_err().code, "fsim-migration-payload");
+}
+
+#[test]
+fn g0_ambient_radiation_spatial_model_roundtrip_identity_and_refusal() {
+    check_radiation_spatial_models(radiation_project());
 }
 
 #[test]

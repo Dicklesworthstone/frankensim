@@ -730,12 +730,35 @@ pub struct RadiatingSurface {
     pub reservoir_temperature: QtyAny,
 }
 
+/// Spatial discretization of radiation emission on each declared surface patch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RadiationSpatialModel {
+    /// Evaluate emission at the patch mean temperature.
+    PatchMean,
+    /// Integrate the fourth power of the native P1 surface temperature.
+    Pointwise,
+}
+
+impl RadiationSpatialModel {
+    /// Stable project/report spelling of this physical model choice.
+    #[must_use]
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::PatchMean => "patch-mean",
+            Self::Pointwise => "pointwise",
+        }
+    }
+}
+
 /// Explicit controls for ambient surface-radiation coupling (schema v5).
 ///
 /// Each declared surface sees its own isothermal reservoir with view factor
 /// one. This declaration does not model mutual irradiation or occlusion.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConductionRadiation {
+    /// Explicit spatial model. Absence retains the historical patch-mean law
+    /// and its canonical spelling; solver support is admitted by the consumer.
+    pub spatial_model: Option<RadiationSpatialModel>,
     /// Nonempty, uniquely named exterior surface declarations.
     pub surfaces: Vec<RadiatingSurface>,
     /// Positive, finite outer-iteration budget.
