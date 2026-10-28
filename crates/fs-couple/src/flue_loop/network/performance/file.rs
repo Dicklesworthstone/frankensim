@@ -194,6 +194,10 @@ impl FlueFilePerformance {
     /// after the windway row binds the existing separated-flow law to the actual
     /// mouth window and inlet gas. Omission or `mouth_loss none` retains the
     /// original linear mouth. The closure's source and Mach limit stay explicit.
+    /// Optional `jet_speed card-centreline` after the `jet` row feeds the jet card the exit's centre
+    /// speed (`FlueVoice::with_card_centreline_speed`, pexfp.135.5) where by default it reads the
+    /// windway's bulk speed; the bulk speed still carries the flux. Omission keeps every default
+    /// result bit-identical.
     /// Optional `jet_transfer nolle-price-2015 long-channel|short-channel CHAMFER_DEPTH_M` after the
     /// `jet` row replaces the island's receptivity chain by the published Nolle/Price jet transfer
     /// (`flue_loop::nolle_jet`), with the measured phase velocity of the channel class. Omission keeps
@@ -507,6 +511,15 @@ impl FlueFilePerformance {
         let voice_seed = row.number()?;
         let voice_index = row.number()?;
         row.end()?;
+        // Optional, by name (pexfp.135.5): the card reads the exit's centre speed, not the bulk speed.
+        let card_centreline = if rows.next_is("jet_speed") {
+            let mut row = rows.row("jet_speed")?;
+            if row.fields.next() != Some("card-centreline") {
+                return Err(bad(rows.line, "jet_speed requires card-centreline"));
+            }
+            row.end()?;
+            true
+        } else { false };
         // Optional, by name: the published Nolle/Price jet transfer replaces the island's own
         // receptivity chain (the `jet` gain above is then unused). The channel class picks the
         // measured phase velocity (de la Cuadra 2005): `long-channel` 0.3 U0, `short-channel` 0.5 U0.
@@ -663,6 +676,10 @@ impl FlueFilePerformance {
                 voice.with_unsteady_windway(length_m, transverse_cells, convection_cells)
                     .map_err(FlueInputError::Physics)?,
         };
+        let voice = if card_centreline {
+            voice.with_card_centreline_speed(held_blowing_pressure(&schedule, control_source.as_ref()))
+                .map_err(FlueInputError::Physics)?
+        } else { voice };
         let voice = match jet_transfer {
             Some(spec) => voice.with_nolle_jet(spec).map_err(FlueInputError::Physics)?,
             None => voice,

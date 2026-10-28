@@ -216,6 +216,47 @@ fn developing_windway_data_holds_the_regional_jet_and_reports_its_validity_measu
 }
 
 #[test]
+fn card_centreline_speed_data_feeds_the_card_the_core_and_keeps_the_flux() {
+    let row = "jet 90 1e-6 3 0\n";
+    let plain = source().replace("windway slit 0.015", "windway slit-developing 0.015");
+    let text = plain.replace(row, &format!("{row}jet_speed card-centreline\n"));
+    let file = FlueFilePerformance::from_bytes(text.as_bytes(),37,&CancelGate::new_clock_free()).unwrap();
+    let voice = file.renderer().voice();
+    let held = *voice.developing_windway().unwrap().1;
+    let speed = voice.card_centreline_speed().unwrap();
+    assert!(!held.developed);
+    assert_eq!(speed.held_pressure_pa, 3e2, "the card speed binds the schedule's held pressure");
+    assert_eq!(speed.held_bulk_speed_m_s, held.bulk_speed_m_s, "the bulk speed keeps the flux");
+    assert_eq!(speed.held_card_speed_m_s, held.core_speed_m_s);
+    let expected = physical(&text).0;
+    assert_ne!(expected,physical(&plain).0,"the card's centre speed must reach the receiver");
+    let wav = encode_pcm16_wav(&expected,48000,1.0).unwrap().0;
+    let dir = directory();
+    let input = dir.join("card-centreline.performance");
+    std::fs::write(&input,&text).unwrap();
+    let output = dir.join("card-centreline.wav");
+    success(run(&input,&output,37,false));
+    assert_eq!(std::fs::read(&output).unwrap(),wav);
+    let sidecar = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
+    for token in ["\"jet_card_speed\":{\"definition\":\"centreline\"".to_string(),
+        format!("\"held_card_speed_m_s\":{:e}",held.core_speed_m_s)] {
+        assert!(sidecar.contains(&token),"{token}: {sidecar}");
+    }
+    // At 300 Pa the fully developed slit's Poiseuille centre would exceed sqrt(2P/rho).
+    for (i, changed) in [
+        source().replace(row, &format!("{row}jet_speed card-centreline\n")),
+        text.replace("jet_speed card-centreline","jet_speed bulk"),
+        text.replace("jet_speed card-centreline","jet_speed"),
+    ].iter().enumerate() {
+        std::fs::write(&input,changed).unwrap();
+        let output = dir.join(format!("refused-card-centreline-{i}.wav"));
+        assert!(!run(&input,&output,37,false).status.success());
+        assert!(!output.exists());
+        assert!(!output.with_extension("provenance.json").exists());
+    }
+}
+
+#[test]
 fn current_sample_windway_feedback_retains_regional_gas_pressure_and_pcm() {
     // A manufactured short cut-up makes transit less than the mechanical
     // sample period. Its current-mouth term must use the same physical

@@ -955,6 +955,25 @@ The jet transfers refuse it (their exit profiles assume Poiseuille or uniform
 flow; pexfp.135.5 owns the core speed). A converging windway declared as its
 exit-height slit most likely overstates the loss.
 
+`jet_speed card-centreline` (opt-in, pexfp.135.5) after the `jet` record feeds the
+jet card the exit's centre speed. By default the card reads the windway's bulk
+speed, but its Strouhal number and band are defined on the centre (peak) speed of
+a near-top-hat jet (`MeanJetProfile::u_centerline`). The rule is:
+
+| windway | card speed |
+| --- | --- |
+| none | the bulk speed `sqrt(2P/rho)`; nothing changes |
+| `slit-developing` | the inviscid core `sqrt(2P/rho)` while the layers have not met, then the Poiseuille centre `1.5 U` |
+| `slit` | the Poiseuille centre `1.5 U`, refused where it exceeds `sqrt(2P/rho)` at the held pressure |
+
+The card speed sets the convection `c_p = (c_p/U) U`, the growth band with its
+band-lag tap, the onset seed and the card Reynolds number. The bulk speed alone
+carries the flux, so the held flow is unchanged. The unsteady channel and the jet
+transfers, which own their exit speed, refuse it. The sidecar records the law and
+the held bulk and card speeds. Omission keeps every default result bit-identical.
+No card selects it: under it the island's loop-phase window moves every flue card
+off its pitch (pexfp.135.5 A/B), and that window is the open defect.
+
 `bernoulli_aperture::slit_channel` resolves fixed, fully developed planar
 Newtonian momentum from the retained `GasState` density and viscosity. Its
 2..=4096 cell-centred finite volumes share a no-slip wall diffusion operator;
