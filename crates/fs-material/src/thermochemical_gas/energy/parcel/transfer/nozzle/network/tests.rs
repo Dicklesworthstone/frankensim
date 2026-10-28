@@ -1,6 +1,6 @@
 //! Exercise the original nozzle, source merge and caloric reconstruction owners.
 use super::*;
-use crate::thermochemical_gas::tests::{point, species, transport};
+use crate::thermochemical_gas::tests::{point, species_with_energy_reference, transport};
 use crate::thermochemical_gas::ThermochemicalGasModel;
 use crate::thermochemical_gas::energy::GasEnergySolve;
 use crate::thermochemical_gas::energy::parcel::transfer::GasMassTransferSolve;
@@ -8,8 +8,11 @@ use fs_thermochem::{Composition, CompositionBasis};
 use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
 
 fn parcel(name: &str, molar_mass: f64, pressure: f64, slope: f64) -> ClosedGasParcel {
+    reference_parcel(name, molar_mass, pressure, slope, 0.0)
+}
+fn reference_parcel(name: &str, molar_mass: f64, pressure: f64, slope: f64, reference: f64) -> ClosedGasParcel {
     let model = ThermochemicalGasModel::new(FrozenIdealGasMixtureModelV1::new(
-        vec![species(name, molar_mass, 3.5, slope)],
+        vec![species_with_energy_reference(name, molar_mass, 3.5, slope, reference)],
         Composition::new(CompositionBasis::MoleFraction, vec![1.0]).unwrap()).unwrap(),
         vec![transport(name, 1.7e-5, 0.025)], None).unwrap();
     ClosedGasParcel::new(model, point(500.0, pressure).with("cell-lot", pressure).unwrap(), 0.001).unwrap()
@@ -31,6 +34,48 @@ fn controls() -> GasNetworkSolve {
 fn initial() -> BTreeMap<u64, ClosedGasParcel> {
     BTreeMap::from([(30, parcel("A", 0.028, 300000.0, 0.0)),
         (10, parcel("B", 0.004, 200000.0, 0.001)), (90, parcel("C", 0.040, 100000.0, 0.0))])
+}
+
+#[test]
+fn g3_sequential_network_energy_balance_is_invariant_to_independent_species_datums() {
+    let ordinary = initial();
+    let shifted = BTreeMap::from([
+        (30, reference_parcel("A", 0.028, 300000.0, 0.0, 1e24)),
+        (10, reference_parcel("B", 0.004, 200000.0, 0.001, -2e24)),
+        (90, reference_parcel("C", 0.040, 100000.0, 0.0, 3e24)),
+    ]);
+    let mut edges = links().to_vec();
+    edges.push(GasNetworkLink { id: 20, parcels: [30, 90], ..edges[0] });
+    let expected = step_candidate(&ordinary, &edges, 1e-4, controls(), || false).unwrap();
+    let actual = step_candidate(&shifted, &edges, 1e-4, controls(), || false).unwrap();
+    let mut physical_balance = 0.0;
+    let mut rounded_absolute_balance = 0.0;
+    for (&id, new) in actual.parcels() {
+        let original = &ordinary[&id];
+        let reference = &expected.parcels()[&id];
+        assert_eq!(new.state().state(), reference.state().state());
+        assert_eq!(new.mass_kg(), reference.mass_kg());
+        physical_balance += reference.mass_kg() * reference.state().specific_internal_energy_j_kg()
+            - original.mass_kg() * original.state().specific_internal_energy_j_kg();
+        let old = &shifted[&id];
+        rounded_absolute_balance += new.mass_kg()
+            * (new.state().specific_internal_energy_j_kg() - old.state().specific_internal_energy_j_kg())
+            + (new.mass_kg() - old.mass_kg()) * old.state().specific_internal_energy_j_kg();
+    }
+    assert!(physical_balance.abs() <= controls().energy_tolerance_j);
+    assert!(rounded_absolute_balance.abs() > controls().energy_tolerance_j,
+        "absolute formation-energy subtraction cannot resolve this network balance");
+    assert_eq!(actual.step().total_energy_residual_j, expected.step().total_energy_residual_j);
+    assert!(actual.step().total_energy_residual_j.abs() <= controls().energy_tolerance_j);
+    assert!(actual.step().total_mass_residual_kg.abs() <= controls().mass_tolerance_kg);
+    assert!(actual.step().maximum_species_mass_residual_kg <= controls().mass_tolerance_kg);
+    for (a, b) in actual.step().links.iter().zip(&expected.step().links) {
+        assert_eq!(a.flow.mass_flow_kg_s, b.flow.mass_flow_kg_s);
+        assert_eq!(a.flow.velocity_m_s, b.flow.velocity_m_s);
+        assert_eq!(a.transfer.transferred_mass_kg, b.transfer.transferred_mass_kg);
+    }
+    edges.reverse();
+    assert_eq!(actual, step_candidate(&shifted, &edges, 1e-4, controls(), || false).unwrap());
 }
 #[test]
 fn one_link_is_the_exact_original_pair_and_zero_links_preserve_all_parcels() {

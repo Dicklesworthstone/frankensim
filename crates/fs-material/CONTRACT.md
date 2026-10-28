@@ -3862,3 +3862,26 @@ No isotropy, Cp/Cv conversion, caloric integration, phase change, evolving
 moisture, covariance or coupled mechanics is inferred. Re-prepare after changing
 the card, fixed conditions or selected claims. Focused integration tests cover
 numerical evaluation, source selection, typed refusal and the real NASA 316 pack.
+
+## Unified gas enthalpy transport
+
+Bulk pair transfer, bulk snapshot networks and selective pair exchange share
+the original species-network caloric reconstruction. Conserved species
+formation datums cancel before sensible enthalpy/internal-energy increments
+are evaluated; ideal-gas pressure-flow work remains explicit. Each affected
+volume is reconstructed once from its simultaneous original-inventory fluxes.
+This reference invariance applies to nonreacting transport with unchanged
+species source conventions; it does not remove reaction formation energy.
+Displayed extensive changes retain their original reference convention, while
+conservation uses local datum-cancelled energy residuals. Actual total and
+per-species inventory rounding remain separately bounded. Bulk-edge and public
+selective-network work limits, source conflicts, gross donor allowances,
+cancellation and atomic publication remain enforced.
+
+The sequential nozzle network retains its stable-ID Lie splitting. Its energy
+audit telescopes the accepted original-caloric link residuals, since each staged
+endpoint becomes the next link's initial state; actual final total and species
+masses are independently checked. Per-parcel energy reports accumulate the
+same accepted storage increments. The global residual is not reconstructed by
+subtracting large rounded formation-energy reports. This is a balance of the
+chosen first-order split trajectory, not an entropy or temporal-error bound.

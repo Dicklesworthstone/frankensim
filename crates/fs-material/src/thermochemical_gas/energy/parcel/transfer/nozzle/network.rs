@@ -9,7 +9,7 @@
 pub mod snapshot;
 
 use super::{GasNozzle, GasNozzleFlow, GasNozzleStepSolve};
-use super::super::{inventory, stored_change, ClosedGasParcel, GasEnergyError, GasMassTransferStep};
+use super::super::{inventory, ClosedGasParcel, GasEnergyError, GasMassTransferStep};
 use std::collections::BTreeMap;
 
 /// One physical restriction. Direction follows its current staged pressures.
@@ -32,7 +32,7 @@ pub struct GasNetworkSolve {
     pub maximum_withdrawn_fraction: f64,
     /// Absolute net mass AND every global species-mass residual [kg].
     pub mass_tolerance_kg: f64,
-    /// Absolute sum of actual extensive internal-energy changes [J].
+    /// Absolute sum of original-caloric link residuals after species datums cancel [J].
     pub energy_tolerance_j: f64,
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -63,6 +63,8 @@ pub struct GasNetworkLinkStep {
 pub struct GasNetworkParcelStep {
     pub id: u64,
     pub mass_change_kg: f64,
+    /// Sum of this parcel's accepted species-reference and sensible changes [J].
+    /// Inventory rounding is separately bounded by the actual mass/species audit.
     pub energy_change_j: f64,
     pub gross_withdrawn_mass_kg: f64,
 }
@@ -73,6 +75,8 @@ pub struct GasNetworkStep {
     pub parcels: Vec<GasNetworkParcelStep>,
     pub total_mass_residual_kg: f64,
     pub maximum_species_mass_residual_kg: f64,
+    /// Telescoping sum of accepted link energy residuals, after datum cancellation.
+    /// Subtracting the rounded absolute parcel reports need not resolve this value.
     pub total_energy_residual_j: f64,
 }
 /// All endpoints, or none. No mutation of accepted parcels occurs in a trial.
@@ -93,11 +97,30 @@ fn check(cancelled: &mut impl FnMut() -> bool) -> Result<(), GasNetworkError> {
 }
 fn positive(x: f64) -> bool { x.is_finite() && x > 0.0 }
 
+#[derive(Default)]
+struct Sum { value: f64, correction: f64 }
+impl Sum {
+    fn add(&mut self, term: f64) -> Result<(), GasNetworkError> {
+        let adjusted = term - self.correction;
+        let value = self.value + adjusted;
+        let correction = (value - self.value) - adjusted;
+        if ![term, adjusted, value, correction].iter().all(|x| x.is_finite()) {
+            return Err(GasNetworkError::Invalid("gas network energy accumulation is unrepresentable"));
+        }
+        self.value = value; self.correction = correction;
+        Ok(())
+    }
+}
+
 /// Compose arbitrary, including branching/cyclic, fixed nozzle graphs.
 /// Each pair's source consistency, donor limit and pressure-crossing refusal
 /// remains active. Shared nodes retain their current staged composition, not
-/// an averaged medium. Final mass, each species and energy are checked from
-/// actual endpoints, independently of summing the individual step reports.
+/// an averaged medium. Final mass and every species are independently checked
+/// from actual endpoints. Energy telescopes the original-caloric link residuals:
+/// each link has already checked its actual sensible endpoint storage against
+/// the conserved species enthalpy flux. Re-subtracting large absolute formation
+/// energies would lose that physical balance; inventory rounding has its own
+/// mass allowance. This is a sequential balance, not a time-discretization bound.
 ///
 /// No clock advances during edge composition; surrounding heat, reaction and
 /// motion operators act over this same interval. Network storage is the sum of
@@ -133,6 +156,8 @@ pub fn step_candidate(
     }
     let mut withdrawn = BTreeMap::<u64, f64>::new();
     let mut steps = Vec::with_capacity(links.len());
+    let mut storage_changes = BTreeMap::<u64, Sum>::new();
+    let mut energy = Sum::default();
     for (&id, link) in &ordered {
         check(&mut cancelled)?;
         let [a, b] = link.parcels;
@@ -149,23 +174,27 @@ pub fn step_candidate(
             return Err(Error::Withdrawal { id: donor, fraction, maximum: controls.maximum_withdrawn_fraction });
         }
         let (upstream, downstream, transfer) = candidate.into_parts();
+        storage_changes.entry(donor).or_default().add(transfer.donor_energy_change_j)?;
+        storage_changes.entry(receiver).or_default().add(transfer.receiver_energy_change_j)?;
+        // The staged endpoint of one link is exactly the initial state of the
+        // next link. Internal enthalpy fluxes cancel before these small residuals
+        // are accumulated; no new storage or heat is introduced by the network.
+        energy.add(transfer.energy_residual_j)?;
         withdrawn.insert(donor, gross);
         next.insert(donor, upstream);
         next.insert(receiver, downstream);
         steps.push(GasNetworkLinkStep { id, donor, receiver, flow, transfer });
     }
-    let mut energy = 0.0;
     let mut mass = 0.0;
     let mut species = BTreeMap::new();
     let mut accounts = Vec::with_capacity(parcels.len());
     for (&id, old) in parcels {
         check(&mut cancelled)?;
         let new = &next[&id];
-        let du = stored_change(old, new);
+        let du = storage_changes.get(&id).map_or(0.0, |sum| sum.value);
         let dm = new.mass_kg() - old.mass_kg();
-        energy += du;
         mass += dm;
-        if !du.is_finite() || !dm.is_finite() || !energy.is_finite() || !mass.is_finite() {
+        if !du.is_finite() || !dm.is_finite() || !mass.is_finite() {
             return Err(Error::Invalid("gas network extensive balance is unrepresentable"));
         }
         let map_error = |error| Error::Parcel { id, error };
@@ -188,13 +217,13 @@ pub fn step_candidate(
         maximum_species = maximum_species.max(value.abs());
     }
     if mass.abs() > controls.mass_tolerance_kg || maximum_species > controls.mass_tolerance_kg
-        || energy.abs() > controls.energy_tolerance_j {
+        || energy.value.abs() > controls.energy_tolerance_j {
         return Err(Error::Invalid("gas network endpoints do not conserve total mass, each species and internal energy"));
     }
     check(&mut cancelled)?;
     Ok(GasNetworkCandidate { parcels: next, step: GasNetworkStep { duration_s, links: steps,
         parcels: accounts, total_mass_residual_kg: mass,
-        maximum_species_mass_residual_kg: maximum_species, total_energy_residual_j: energy } })
+        maximum_species_mass_residual_kg: maximum_species, total_energy_residual_j: energy.value } })
 }
 
 #[cfg(test)]
