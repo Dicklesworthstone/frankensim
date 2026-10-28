@@ -11,10 +11,16 @@ use super::{KAPPA, SPALDING_E};
 use crate::conjugate::{ChtError, domain::FluidProperties, poll};
 use fs_exec::CancelGate;
 
-mod coupling;
+pub(in crate::conjugate) mod coupling;
 pub use coupling::{
     PreparedWallHeat, WallHeatFace, WallHeatFaceReport, WallHeatSolution,
     prepare_wall_heat, solve_energy_with_wall_heat,
+};
+pub(in crate::conjugate) mod boundary;
+pub use boundary::{
+    BoundaryWallHeat, BoundaryWallHeatReport, BoundaryWallHeatExchange,
+    PreparedWallHeatBoundaries, WallHeatBoundarySolution,
+    prepare_wall_heat_boundaries, solve_energy_with_wall_heat_boundaries,
 };
 
 /// Explicit quadrature and gradient-diffusion controls.

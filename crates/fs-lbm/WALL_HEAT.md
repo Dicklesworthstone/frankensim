@@ -42,7 +42,8 @@ resistance is replaced by the integrated wall resistance by adding only the
 missing nonnegative sublayer resistance to the original face coefficient.
 Solid conduction and any physical contact stay in series. Temperatures on both
 sides remain unknowns of the same solve. No external heat sink or second heat
-source is introduced.
+source is introduced for an internal wall. An empty internal selection prepares
+bulk tangent transport only, allowing composition with exterior walls.
 
 `solve_energy_with_wall_heat` performs this preparation and calls the original
 energy solver. `EnergySolution::solid_to_fluid_heat_w` and global balance consume
@@ -54,17 +55,55 @@ while that velocity/eddy field is held fixed. When flow changes, prepare again
 from the **original** setup; applying preparation to its own output refuses.
 No new flow integrator, clock or temperature storage is introduced.
 
+## Exterior walls and wall temperatures
+
+`prepare_wall_heat_boundaries` and `solve_energy_with_wall_heat_boundaries`
+compose the internal selection with explicit `BoundaryWallHeat` selections.
+Each exterior selection gives its fluid cell, outward face, a Temperature,
+Convective or inward HeatFlux condition, and independent physical contact
+resistance. Mechanical face rules must identify a no-slip Wall with finite
+purely tangential motion. Friction uses fluid velocity minus wall velocity;
+normal velocity never contributes to the wall-law friction calculation.
+
+The original thermal face must be Adiabatic, explicitly delegating transport
+on the selected cell faces. No other cells on that side are reconfigured.
+Temperature and film conditions contribute the exact native linear exchange
+`G = area / (R_fluid + R_contact + 1/h)` (omit `1/h` for Temperature).
+There is no second fluid half-cell resistance. Prescribed heat flux contributes
+its exact watts, independently of the wall resistance. The solved cell field
+then gives the fluid-side wall temperature, including its modeled temperature
+drop. Coating resistance and external films have no storage in this model.
+
+As with the existing `boundary_exchange` adapter, the native energy balance
+counts delegated temperature/film heat in `sink_outflow_w` and imposed inward
+wall flux in `source_w`. `boundary_exchanges` disaggregates those exact terms
+as signed outward watts and surface temperatures. They must NOT be added again
+to the native energy balance. Internal interfaces remain equal/opposite face
+fluxes. Caller-authored sources, sinks and contacts are preserved.
+
+A per-preparation cache shares identical exterior speed/distance evaluations
+using exact floating-point keys, not rounding or interpolation. The returned
+quadrature count reports actual work, while each face retains its own condition,
+area, contact and coefficient. The existing equilibrium momentum model is not
+modified; a thermal wall-relative calculation is not a claim that arbitrary
+supplied momentum fields have been validated in a moving frame.
+
 ## Scope and refusals
 
 This is a smooth-wall equilibrium closure suitable for explicitly selected
 LVEL cooling studies. It does not establish the origin or validity of an
 arbitrary supplied flow field. It does not model separation, roughness,
 variable fluid properties, viscous heating or resolved-wall LES. Open faces,
-domain-boundary walls and compact-component links are not replaced. A bulk
-eddy field requiring a negative correction is incompatible and refuses rather
-than inventing negative thermal resistance. Duplicate walls/contacts,
-competing thermal eddy fields, through-flow, invalid inputs, exhausted
-quadrature and cancellation also refuse without mutating inputs.
+symmetry boundaries and compact-component links are not thermal walls.
+An internal bulk eddy field requiring a negative correction is incompatible
+and refuses rather than inventing negative thermal resistance. Duplicate
+walls/contacts, competing thermal owners, through-flow, invalid inputs,
+exhausted quadrature and cancellation refuse without mutating inputs.
+
+Equilibrium applicability is also stated in Idaho National Laboratory's
+`INSFVTurbulentTemperatureWallFunction` documentation: detachment and
+recirculation require a different model, not an uncalibrated correction to
+this law. The same limitation applies during an evolving-flow calculation.
 
 ## Focused checks
 
@@ -72,11 +111,17 @@ quadrature and cancellation also refuse without mutating inputs.
 cargo test -p fs-lbm --lib conjugate::turbulence::thermal_wall
 ```
 
-The five kernel groups cover laminar and exact analogy limits, independently
-integrated values, scaling and refusals. Five coupled groups cover all six
-wall orientations on a graded grid, free solid temperature and series heat,
+Five kernel groups cover laminar and exact analogy limits, independently
+integrated values, scaling and refusals. Five internal-coupling groups cover
+six orientations on a graded grid, free solid temperature and series heat,
 physical contacts, tangent/interior ownership, zero-speed equivalence and
-atomic refusals. These Rust tests and the native example were added but not
-compiled or executed in the authoring session: no Rust toolchain was available.
-Independent Python numerical comparisons passed 30 kernel cases and 18
-conservative matrix cases; they are not a substitute for the native test run.
+atomic refusals. Five exterior groups add graded temperature/film boundaries,
+imposed flux and wall temperature, relative motion and exact cache reuse,
+joint internal/exterior transport, and boundary ownership/cancellation.
+
+Native compilation/execution was unavailable in the authoring environment
+(no Rust toolchain). Earlier independent Python checks covered 30 kernel and
+18 conservative matrix cases. The exterior extension additionally passed 54
+independent quadrature/series-resistance/matrix cases with maximum steady
+energy imbalance 2.7e-16 W. These mathematical checks do not replace executing
+the Rust tests or empirical turbulent heat-transfer benchmarks.

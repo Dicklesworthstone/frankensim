@@ -58,6 +58,22 @@ pub struct WallHeatSolution {
     pub faces: Vec<WallHeatFaceReport>,
 }
 
+/// Borrowed transport image of one accepted momentum state. This avoids
+/// fabricating a flow report or copying pressure and solver caches for heat.
+#[derive(Clone, Copy)]
+pub(in crate::conjugate) struct WallHeatFlow<'a> {
+    pub flux: &'a super::super::super::FlowField,
+    pub velocity: &'a [[f64; 3]],
+    /// Empty means laminar, otherwise one tangent eddy value per cell.
+    pub eddy: &'a [f64],
+}
+
+impl<'a> From<&'a FvFlow> for WallHeatFlow<'a> {
+    fn from(flow: &'a FvFlow) -> Self {
+        Self { flux: &flow.field, velocity: &flow.velocity_m_s, eddy: &flow.eddy_viscosity_m2_s }
+    }
+}
+
 /// Prepare wall-modeled heat transfer without modifying either input.
 ///
 /// Interior fluid conductivity uses the accepted TANGENT eddy viscosity,
@@ -67,11 +83,13 @@ pub struct WallHeatSolution {
 /// couples both temperatures implicitly, preserves solid conduction and any
 /// physical contact resistance, and transfers equal/opposite watts once.
 /// Only tangential cell velocity drives the stationary-wall friction law.
+/// An empty wall selection prepares bulk transport only, for composition
+/// with explicitly selected exterior wall laws.
 ///
 /// This explicitly selects an equilibrium thermal wall model; it does not
 /// infer or certify how the supplied flow was obtained. It is intended for
 /// smooth equilibrium LVEL cooling, not separated or resolved-wall LES.
-/// Domain-boundary walls and compact-component links are not replaced.
+/// Compact-component links are not replaced.
 ///
 /// # Errors
 /// Invalid shapes/values, duplicate walls/contacts, non-internal or non-solid
@@ -87,17 +105,29 @@ pub fn prepare_wall_heat(
     config: WallHeatConfig,
     gate: &CancelGate,
 ) -> Result<PreparedWallHeat, ChtError> {
+    prepare_wall_heat_fields(domain, fluid, flow.into(), thermal, walls, config, gate)
+}
+
+pub(in crate::conjugate) fn prepare_wall_heat_fields(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    flow: WallHeatFlow<'_>,
+    thermal: &ThermalSetup,
+    walls: &[WallHeatFace],
+    config: WallHeatConfig,
+    gate: &CancelGate,
+) -> Result<PreparedWallHeat, ChtError> {
     poll(gate)?;
     config.validate()?;
     fluid.validate()?;
     let count = domain.cell_count();
-    if flow.field.dims() != domain.dims() || flow.velocity_m_s.len() != count
-        || flow.eddy_viscosity_m2_s.len() != count
+    if flow.flux.dims() != domain.dims() || flow.velocity.len() != count
+        || (!flow.eddy.is_empty() && flow.eddy.len() != count)
     {
         return Err(invalid("wall heat requires the accepted flow on this exact cell grid"));
     }
-    if walls.is_empty() || walls.len() > count.saturating_mul(3) {
-        return Err(invalid("select at least one internal wall, within the Cartesian face budget"));
+    if walls.len() > count.saturating_mul(3) {
+        return Err(invalid("internal wall selection exceeds the Cartesian face budget"));
     }
     if !thermal.eddy_conductivity_w_m_k.is_empty() {
         return Err(invalid("wall heat owns turbulent conductivity; use the original unprepared thermal setup"));
@@ -110,9 +140,9 @@ pub fn prepare_wall_heat(
     prepared.eddy_conductivity_w_m_k = Vec::with_capacity(count);
     for cell in 0..count {
         if cell % 64 == 0 { poll(gate)?; }
-        let nu = flow.eddy_viscosity_m2_s[cell];
+        let nu = flow.eddy.get(cell).copied().unwrap_or(0.0);
         if !nu.is_finite() || nu < 0.0
-            || !flow.velocity_m_s[cell].iter().all(|v| v.is_finite())
+            || !flow.velocity[cell].iter().all(|v| v.is_finite())
             || (!domain.is_fluid(cell) && nu != 0.0)
         {
             return Err(invalid(format!("cell {cell}: invalid velocity or eddy viscosity")));
@@ -152,7 +182,7 @@ pub fn prepare_wall_heat(
         if !selected.insert(key) {
             return Err(invalid("duplicate selected wall"));
         }
-        if flow.field.outward(domain, cell, face) != 0.0 {
+        if flow.flux.outward(domain, cell, face) != 0.0 {
             return Err(invalid("stationary thermal walls cannot carry normal through-flow"));
         }
         let position = domain.coords(solid);
@@ -162,7 +192,7 @@ pub fn prepare_wall_heat(
             return Err(invalid("compact-component links own this wall's thermal transport"));
         }
         let axis = face / 2;
-        let velocity = flow.velocity_m_s[cell];
+        let velocity = flow.velocity[cell];
         let (a, b) = (velocity[(axis + 1) % 3].abs(), velocity[(axis + 2) % 3].abs());
         let magnitude = a.max(b);
         let speed = if magnitude == 0.0 { 0.0 } else {
