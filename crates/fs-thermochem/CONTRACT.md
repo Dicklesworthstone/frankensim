@@ -62,6 +62,23 @@ term and cancel their unchanged ideal mixing term. Successful calls allocate
 nothing. These are relative state functions, not reaction or mixing entropy,
 and endpoint admission does not establish continuous source-path coverage.
 
+### Thermodynamic mass-action entropy
+
+The declared stoichiometric mass-action evaluator uses A/(R T) =
+log(P_forward) - log(P_reverse) + log(K_p), with compensated fixed-order
+summation. Net progress uses the dominant directional rate and deterministic
+expm1, retaining near-equilibrium differences without subtracting rounded
+gross rates. The original finite-range directional statuses remain authoritative;
+unrepresentable nonzero net rates remain unavailable. dimensionless_affinity
+exposes that same force; entropy_production_w_m3_k returns R*r*A/(R T).
+One-sided exact species absence retains the positive-infinite ideal-mixture
+limit. Both absent directions and exact kinetic shutdown give zero; numerical
+range loss gives None. These are instantaneous local constitutive quantities,
+not a finite-step entropy or global passivity certificate. Common kinetic
+multipliers preserve affinity. G0/G1/G3 regressions cover detailed balance,
+tiny departures in both directions over 400 decades of rate scale, multiplier
+semantics, exact absence and numerical underflow.
+
 ## Public types and semantics
 
 - `SpeciesId`, `ElementId`, `ReactionId`, `ElementalMatrix`,

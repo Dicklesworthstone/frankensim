@@ -25,10 +25,10 @@ pub const REACTION_EQUILIBRIUM_EVALUATOR_VERSION_V1: u32 = 1;
 /// Version of the reverse-progress-rate consistency operation tree.
 pub const REVERSE_RATE_CLOSURE_EVALUATOR_VERSION_V1: u32 = 1;
 /// Version of the declared stoichiometric mass-action operation tree.
-/// Version 3 retains an explicit nonnegative common kinetic multiplier.
-/// Exact activity absence and a physical zero multiplier remain distinct
-/// from exponential/product underflow.
-pub const STOICHIOMETRIC_MASS_ACTION_EVALUATOR_VERSION_V1: u32 = 3;
+/// Version 4 evaluates net progress with the thermodynamic affinity and
+/// cancellation-safe `expm1`. Exact activity absence and a physical zero
+/// multiplier remain distinct from exponential/product underflow.
+pub const STOICHIOMETRIC_MASS_ACTION_EVALUATOR_VERSION_V1: u32 = 4;
 /// Maximum species rows retained or scanned by one reaction model.
 pub const MAX_REACTION_SPECIES_V1: usize = 128;
 /// Maximum reaction columns whose matrix identity may be bound by one model.
@@ -1926,23 +1926,15 @@ impl DeclaredStoichiometricMassActionV1 {
                 reverse_rate.reverse_progress_rate_scale(),
                 MassActionDirectionV1::Reverse,
             )?;
-        let net_progress_rate = match (forward_progress_rate, reverse_progress_rate) {
-            (Some(forward), Some(reverse)) => {
-                let value = forward.value() - reverse.value();
-                if !value.is_finite() {
-                    return Err(
-                        StoichiometricMassActionErrorV1::UnrepresentableArithmeticValue {
-                            species: None,
-                            direction: None,
-                            value: MassActionArithmeticValueV1::NetProgressRate,
-                            bits: value.to_bits(),
-                        },
-                    );
-                }
-                Some(NetReactionProgressRateV1::new(value))
-            }
-            _ => None,
-        };
+        let net_progress_rate = thermodynamic_net_progress(
+            forward_progress_rate,
+            reverse_progress_rate,
+            mass_action_affinity(
+                log_forward_activity_product,
+                log_reverse_activity_product,
+                reverse_rate.log_reverse_to_forward_ratio().value(),
+            ),
+        );
         let receipt = DeclaredStoichiometricMassActionReceiptV1 {
             evaluator_version: STOICHIOMETRIC_MASS_ACTION_EVALUATOR_VERSION_V1,
             fs_math_version: fs_math::VERSION,
@@ -2017,19 +2009,11 @@ impl DeclaredStoichiometricMassActionV1 {
         let (reverse_status, reverse) = multiply_mass_action_direction(
             evaluated.reverse_status, evaluated.reverse_progress_rate, factor,
         );
-        let net = match (forward, reverse) {
-            (Some(forward), Some(reverse)) => {
-                let value = forward.value() - reverse.value();
-                if !value.is_finite() {
-                    return Err(StoichiometricMassActionErrorV1::UnrepresentableArithmeticValue {
-                        species: None, direction: None,
-                        value: MassActionArithmeticValueV1::NetProgressRate, bits: value.to_bits(),
-                    });
-                }
-                Some(NetReactionProgressRateV1::new(value))
-            }
-            _ => None,
-        };
+        let net = thermodynamic_net_progress(
+            forward,
+            reverse,
+            evaluated.dimensionless_affinity().map(|value| value.value()),
+        );
         evaluated.forward_status = forward_status;
         evaluated.reverse_status = reverse_status;
         evaluated.forward_progress_rate = forward;
@@ -2042,6 +2026,60 @@ impl DeclaredStoichiometricMassActionV1 {
         evaluated.receipt.reverse_progress_rate_bits = reverse.map(|rate| rate.value().to_bits());
         evaluated.receipt.net_progress_rate_bits = net.map(|rate| rate.value().to_bits());
         Ok(evaluated)
+    }
+}
+
+// A/(R T) = log(P_forward) - log(P_reverse) - log(k_reverse/k_forward).
+// Neumaier's fixed three-term sum retains a small chemical driving force when
+// large activity/equilibrium logs cancel. No duplicate chemical-potential law.
+fn mass_action_affinity(forward: f64, reverse: f64, log_ratio: f64) -> Option<f64> {
+    match (forward == f64::NEG_INFINITY, reverse == f64::NEG_INFINITY) {
+        (true, true) => return None,
+        (true, false) => return Some(f64::NEG_INFINITY),
+        (false, true) => return Some(f64::INFINITY),
+        (false, false) => {}
+    }
+    let mut sum = 0.0_f64;
+    let mut correction = 0.0_f64;
+    for term in [forward, -reverse, -log_ratio] {
+        let next = sum + term;
+        correction += if sum.abs() >= term.abs() {
+            (sum - next) + term
+        } else {
+            (term - next) + sum
+        };
+        sum = next;
+    }
+    let value = sum + correction;
+    value.is_finite().then_some(value)
+}
+
+fn thermodynamic_net_progress(
+    forward: Option<DirectionalReactionProgressRateV1>,
+    reverse: Option<DirectionalReactionProgressRateV1>,
+    affinity: Option<f64>,
+) -> Option<NetReactionProgressRateV1> {
+    let forward = forward?.value();
+    let reverse = reverse?.value();
+    // Direct zeros denote actual species absence or a zero common multiplier,
+    // never exponential underflow. This also resolves the 0*infinity limit.
+    if forward == 0.0 || reverse == 0.0 {
+        return Some(NetReactionProgressRateV1::new(forward - reverse));
+    }
+    let affinity = affinity?;
+    let value = if affinity > 0.0 {
+        forward * -fs_math::det::expm1(-affinity)
+    } else if affinity < 0.0 {
+        reverse * fs_math::det::expm1(affinity)
+    } else {
+        0.0
+    };
+    // A nonzero driving force lost to floating-point range is unavailable,
+    // not an equilibrium or a physical zero.
+    if !value.is_finite() || (affinity != 0.0 && value == 0.0) {
+        None
+    } else {
+        Some(NetReactionProgressRateV1::new(value))
     }
 }
 
@@ -2385,11 +2423,57 @@ impl DeclaredStoichiometricMassActionEvaluationV1 {
         self.reverse_progress_rate
     }
 
-    /// Signed net progress rate when both directions are directly
-    /// representable.
+    /// Signed net progress rate when both directions and their difference
+    /// are representable. The thermodynamic driving force sets its direction;
+    /// near equilibrium this retains differences lost by direct subtraction.
     #[must_use]
     pub const fn net_progress_rate(&self) -> Option<NetReactionProgressRateV1> {
         self.net_progress_rate
+    }
+
+    /// Reaction affinity divided by R T, positive in the forward direction.
+    ///
+    /// Uses the original standard-state closure and dimensionless activities.
+    /// An exactly absent participant gives the appropriate signed infinite
+    /// ideal-mixture limit; absent species on BOTH sides give None. No trace
+    /// concentration or activity floor is introduced. Numerical range failure
+    /// also returns None; it is not an equilibrium declaration.
+    #[must_use]
+    pub fn dimensionless_affinity(&self) -> Option<Dimensionless> {
+        mass_action_affinity(
+            self.log_forward_activity_product.value(),
+            self.log_reverse_activity_product.value(),
+            self.reverse_rate.log_reverse_to_forward_ratio().value(),
+        ).map(Dimensionless::new)
+    }
+
+    /// Instantaneous chemical entropy production R * net_rate * A/(R T)
+    /// in W/(m^3 K), for this declared detailed-balance ideal-gas reaction.
+    ///
+    /// This is a local constitutive rate, not entropy generated by a finite
+    /// numerical step. One-sided exact species absence with a nonzero rate
+    /// has a positive-infinite ideal-mixture limit. Equilibrium, both absent
+    /// directions, and an exactly zero multiplier give exact zero. Numerical
+    /// underflow/overflow or unavailable direct rates return None rather than
+    /// a false physical zero or an invented finite value.
+    #[must_use]
+    pub fn entropy_production_w_m3_k(&self) -> Option<Qty<-1, 1, -3, -1, 0, 0>> {
+        let net = self.net_progress_rate?.value();
+        if net == 0.0 {
+            return Some(Qty::new(0.0));
+        }
+        let affinity = self.dimensionless_affinity()?.value();
+        if affinity.is_infinite() {
+            return ((net > 0.0) == (affinity > 0.0))
+                .then_some(Qty::new(f64::INFINITY));
+        }
+        let (smaller, larger) = if affinity.abs() <= net.abs() {
+            (affinity, net)
+        } else {
+            (net, affinity)
+        };
+        let value = (UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * smaller) * larger;
+        (value.is_finite() && value > 0.0).then_some(Qty::new(value))
     }
 
     /// Forward direct representation status.
@@ -2414,6 +2498,7 @@ impl DeclaredStoichiometricMassActionEvaluationV1 {
 
 #[cfg(test)]
 mod tests {
+    mod entropy;
     mod rate_multiplier;
     use super::*;
     use fs_evidence::ValidityDomain;
@@ -3140,14 +3225,10 @@ mod tests {
             reverse_rate.value().to_bits(),
             (reverse_scale.value() * reverse_product.value()).to_bits()
         );
-        assert_eq!(
-            evaluation
-                .net_progress_rate()
-                .expect("direct net rate")
-                .value()
-                .to_bits(),
-            (forward_rate.value() - reverse_rate.value()).to_bits()
-        );
+        let direct = forward_rate.value() - reverse_rate.value();
+        let stable = evaluation.net_progress_rate().expect("direct net rate").value();
+        assert!((stable - direct).abs() <= 64.0 * f64::EPSILON
+            * forward_rate.value().max(reverse_rate.value()));
 
         assert_eq!(
             evaluation.receipt().kinetic_order_convention(),
@@ -3231,7 +3312,7 @@ mod tests {
 
     #[test]
     fn g3_declared_mass_action_refuses_activity_and_coverage_drift() {
-        for value in [0.0, -1.0, f64::INFINITY, f64::NAN] {
+        for value in [-1.0, f64::INFINITY, f64::NAN] {
             assert!(matches!(
                 IdealGasSpeciesActivityV1::new(species("H2"), Dimensionless::new(value)),
                 Err(StoichiometricMassActionErrorV1::InvalidActivity { bits, .. })
@@ -3435,8 +3516,9 @@ mod tests {
             2.5 * base.forward_progress_rate().unwrap().value());
         assert_eq!(scaled.reverse_progress_rate().unwrap().value(),
             2.5 * base.reverse_progress_rate().unwrap().value());
-        assert_eq!(scaled.net_progress_rate().unwrap().value(),
-            scaled.forward_progress_rate().unwrap().value() - scaled.reverse_progress_rate().unwrap().value());
+        let expected_net = 2.5 * base.net_progress_rate().unwrap().value();
+        assert!((scaled.net_progress_rate().unwrap().value() - expected_net).abs()
+            <= 16.0 * f64::EPSILON * expected_net.abs());
 
         let stopped = law.evaluate_with_kinetic_multiplier(
             Temperature::new(500.0), activities, Dimensionless::new(0.0),
