@@ -13,8 +13,10 @@ use crate::render::schedule::force::coupled::{
 use fs_exec::CancelGate;
 
 pub mod exterior;
+pub mod dg;
 pub mod harmonic;
 pub mod thermal;
+pub use dg::{SharedCavityDg, SharedCavityDgError, SharedCavityDgFrame};
 pub use thermal::{CylindricalCavityThermalOptions, CylindricalThermalCompression, ThermalCompressionArm};
 
 /// Circular-neck viscous diffusion, prepared from the actual geometry and gas.
@@ -387,6 +389,17 @@ impl SharedCavity {
         exterior_neck_pressure_pa: f64,
         gate: &CancelGate,
     ) -> Result<&CoupledModalFrame, ModalCouplingError> {
+        let before = self.prepare_external_step(surface_force, exterior_neck_pressure_pa, gate)?;
+        self.system.step_under_gate(&self.external, gate)?;
+        self.record_accepted_step(before);
+        Ok(self.system.last_frame().expect("step accepted"))
+    }
+
+    // Shared by ordinary and transactional downstream-DG stepping. Scratch
+    // preparation never changes accepted physical state or port observations.
+    fn prepare_external_step(
+        &mut self, surface_force: &[f64], exterior_neck_pressure_pa: f64, gate: &CancelGate,
+    ) -> Result<f64, ModalCouplingError> {
         if gate.is_requested() {return Err(ModalCouplingError::Cancelled);}
         if surface_force.len()!=self.surface_modes || surface_force.iter().any(|v|!v.is_finite())
             || !exterior_neck_pressure_pa.is_finite() {
@@ -403,9 +416,13 @@ impl SharedCavity {
         {
             *old = state.displacement_m_sqrt_kg;
         }
-        let before = self.system.total_energy_j()?;
+        self.system.total_energy_j()
+    }
+
+    // Infallible physical port publication after all participating owners accept.
+    fn record_accepted_step(&mut self, before: f64) {
         let (sample, after, loss, tolerance) = {
-            let frame = self.system.step_under_gate(&self.external, gate)?;
+            let frame = self.system.last_frame().expect("step accepted");
             (
                 frame.sample,
                 frame.total_energy_j(),
@@ -439,7 +456,6 @@ impl SharedCavity {
                     )
                 }),
         );
-        Ok(self.system.last_frame().expect("step accepted"))
     }
 
     /// Pure observation of the already accepted network. An observation error

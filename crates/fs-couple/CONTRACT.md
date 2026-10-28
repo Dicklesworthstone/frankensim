@@ -48,6 +48,38 @@ without conversion or duplicate types. That lower boundary depends only on
 
 ## Public types and semantics
 
+### Shared cavity and distributed downstream duct
+
+`SharedCavity::with_downstream_duct` binds the unchanged compact cavity/neck
+to an additional source-bound `DgPortLoad`. Admission requires an
+`ExteriorMouth` neck with no direct exterior load, equal inlet gas and area
+(roundoff-only area allowance), an ordinary non-driven inlet, cold accepted
+clocks and identical step duration. The original neck retains its bore, inner
+end inertia and selected viscous law. DG owns additional distributed length,
+wall memory, branches and outlet terminals.
+
+A scalar displacement mobility is prepared once. Each step solves mean inlet
+pressure against current complete DG history; the original modal and DG
+candidates publish together only after finite pressure, swept-volume,
+equal/opposite port work and joint budget checks. The original energy ceiling
+covers both owners' represented storage; the pressure ceiling also bounds mean
+DG inlet pressure. Rational terminal work remains signed boundary exchange.
+Dense-DG loss inferred from its storage deficit is explicitly reported as such,
+not as an independently integrated heat channel.
+
+The held-pressure/held-mean-flow connection approximates the continuous
+interconnection; it is not the joint continuous exponential. Coupling-clock,
+spatial and constitutive-band convergence remain separate. Tests replay both
+original propagators with accepted interface quantities, retain actual viscous
+and thermal memories, refine the coupling clock at fixed geometry, and refuse
+late candidates without publishing either owner. The returned cavity accessor's
+harmonic response describes the cavity subsystem and excludes the attached DG
+load. A broadband 5 cm/order-2 fixture had nonmonotone 24-to-48 kHz
+endpoint error. Its retained DG spectrum reached 47,649 rad/s; the unchanged
+error gates passed at 96/192/384 kHz against a 1.536 MHz fixed-spatial reference.
+This is fixture convergence evidence, not a universal timestep certificate or
+a continuum validation.
+
 ### Continuous loaded modal and cavity response
 
 `CoupledModalSystem::harmonic_response` solves the original continuous linear
