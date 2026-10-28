@@ -664,3 +664,27 @@ from explicitly declared engineering free-expansion sources. These use the
 existing source evaluator and preserve parent evidence and conditions. Missing
 temperature trajectories, matched specimens, full laminate tensors and complete
 cementitious constitutive laws remain separate acquisition/model gaps.
+
+## 2026-10-28 compatible thermal-curve and panel increment
+
+This increment adds **13 profiles and 100 claims**: four FSRI foam products
+(32), four FSRI polymer sheets (32), and five Kronobuild/GUTEX/STEICO construction
+boards (36). Exact manifests and source distinctions are linked in the
+[seed catalog](../data/matdb/seed-v1/README.md#compatible-foam-plastic-and-panel-thermal-data-2026-10-28).
+The eight FSRI sets preserve native C_vol(T), rounded published Cp, apparent
+conductivity, an explicit local-k approximation, separate scatter statistics and
+temperature-unspecified normalization density. Their common C_vol/k interval is
+15–40 C. The construction sets are producer thermal references; unknown test
+temperatures do not acquire a temperature trajectory.
+
+The new prepared volumetric consumer evaluates transport and integrates/inverts
+fixed-volume storage directly from those curves. A separate composition uses the
+existing constant-mass free-expansion density with compatible Cp/k sources.
+Both preserve original inputs and assumptions without new measured-property
+claims. The five new focused test files contain 15 passing tests; 13 existing
+thermal regressions also pass in the focused native build. This verifies the
+actual changed modules, production material libraries and real pack compiler.
+Full workspace Cargo validation remains blocked in the authoring environment by
+the absent sibling frankenscipy/fsci-special manifest; no full-workspace pass is
+claimed. Spatial heat flow, matched thermomechanical qualification, phase
+transitions and complete material laws remain outside this bounded increment.

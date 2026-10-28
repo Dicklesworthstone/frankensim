@@ -4110,3 +4110,44 @@ coefficients, evolve temperature/moisture, or establish measured-material
 authority. Five focused source tests cover full coefficients, shear convention,
 orthotropy, shared names, source bands and refusals; native execution of these
 new tests remains unverified in the resource-constrained authoring environment.
+
+## Continuous volumetric storage and expansion-aware transport
+
+`thermal::transport::volumetric::PreparedVolumetricThermalTransport` prepares
+positive, continuously supported volumetric capacity C_vol(T) and directional
+scalar k(T) on one fixed typed source context. It retains both original source
+lines, selections, receipts, uncertainties and the immutable card identity.
+Every source breakpoint enters the union grid. Point evaluation uses one binary
+search, interpolates the independent inputs, then derives k/C_vol and effusivity;
+no density, mass-specific heat or covariance is invented.
+
+`storage_change_j_m3(T0,T1)` integrates the piecewise-linear C_vol chart directly
+over crossed segments. `temperature_after_storage_change(T0,delta_storage)`
+inverts that same monotone relation for heating and cooling using bounded knot
+traversal and a scaled quadratic solve. Both use the caller's fixed volume and
+caloric convention. They do not automatically represent internal energy,
+enthalpy, pressure work, changing volume, latent heat or phase change. Numerical
+exactness is for the selected affine model, subject to roundoff, not a measured
+interpolation-error claim. Nonrepresentable updates and unsupported temperatures
+refuse without mutation. A representable local inverse remains available when
+the unused whole-interval integral overflows. Successful runtime calls allocate
+nothing and perform no material queries.
+
+Thermal path admission distinguishes an explicitly typed, fixed
+`TemperatureDifference` test condition from a second absolute temperature.
+Unknown or extra absolute-temperature response coordinates remain unsupported.
+
+`thermal::transport::expanding::PreparedExpandingThermalTransport` composes the
+original `PreparedFreeExpansionDensity` with selected Cp(T) and k(T), requiring
+the same card, exact endpoints, axis and fixed context. It keeps the original
+density model and its volume/reference assumptions intact. At runtime it
+evaluates that model and the Cp/k grid, then derives transport; it never replaces
+free-expansion density with a linear endpoint fit or a new measured claim.
+Preparation checks density-only knots as well as thermal knots. Evaluation uses
+at most two binary searches without allocation, hashing, queries or mutation.
+
+Focused integration tests are `material_expanding_transport`,
+`material_volumetric_curves` and `fsri_plastic_thermal_profiles` in xtask.
+They cover analytic piecewise storage/inverse identities, source and numerical
+refusals, original NIST expansion/Cp/k with an explicitly assumed reference
+density, and real FSRI foam/plastic heating and cooling at fixed volume.

@@ -3784,3 +3784,48 @@ Only the engineering strains interpolate; volume and density are derived after
 interpolation. Original parent evidence survives without a new measured-density
 claim or fabricated uncertainty propagation. Mass loss, moisture uptake,
 constraints, rotating axes and phase change require their own physical owners.
+
+## Compatible foam, plastic and panel thermal data (2026-10-28)
+
+This increment adds **13 profiles and 100 claims**. Claims include reference
+values, explicit derived approximations and separate statistics; they are not
+100 independent measurements or 13 complete constitutive laws.
+
+| Family | New source profiles | Claims |
+| --- | --- | ---: |
+| FSRI foams | [PE pipe insulation](fsri-pe-foam-pipe-unconditioned-2022/manifest.tsv), [rubber pipe insulation](fsri-rubber-foam-pipe-unconditioned-2022/manifest.tsv), [memory-foam padding](fsri-memory-foam-pad-unconditioned-2022/manifest.tsv), [XPS board](fsri-xps-board-unconditioned-2022/manifest.tsv) | 32 |
+| FSRI plastics | [HDPE](fsri-hdpe-unconditioned-2021/manifest.tsv), [PVC](fsri-pvc-unconditioned-2021/manifest.tsv), [PC](fsri-pc-unconditioned-2021/manifest.tsv), [PET-G](fsri-petg-unconditioned-2021/manifest.tsv) | 32 |
+| Construction boards | [OSB Superfinish ECO](kronobuild-osb-superfinish-eco-dry/manifest.tsv), [DFP MDF.RWH](kronobuild-dfp-thermal-reference/manifest.tsv), [Betonyp cement-bonded board](kronobuild-betonyp-thermal-reference/manifest.tsv), [GUTEX Thermowall](gutex-thermowall-thermal-reference/manifest.tsv), [STEICOtherm dry](steico-therm-dry-v2-2026/manifest.tsv) | 36 |
+
+The eight FSRI products have native volumetric heat-capacity data at 10/20/30/40 C
+and apparent through-thickness conductivity at mean temperatures 15/45 C.
+Their common transport interval is **15–40 C**. Linear interpolation is an
+explicit model approximation. The local conductivity key additionally requires
+`mean-test-temperature-as-local-model=1`; the original apparent conductivity
+retains its separate test-mean-temperature axis and 20 K plate difference.
+
+Raw FSRI “Wet” denotes unconditioned specimens, not water saturation.
+The source's published Cp is normalized by its reported mean density and rounded;
+native volumetric capacity, rounded Cp and normalization density remain distinct,
+algebraically related records. The density has no measured temperature support
+and cannot be promoted into rho(T). Standard deviations remain named, discrete
+statistics; printed zero scatter does not imply zero uncertainty. Grade,
+formulation, exact moisture, contact pressure and covariance remain unknown.
+The source folder named EPS_Foam_Board identifies an XPS product in its metadata;
+the pack preserves that discrepancy. PET-G preserves the CSV normalization
+density of 1314 kg/m3 separately from the metadata headline of 1315 kg/m3.
+
+The five construction profiles provide same-table density/Cp/conductivity
+references. DFP is an MDF.RWH board; Betonyp is cement-bonded pine particleboard.
+Unspecified numerical test temperatures remain unspecified. Declared, design
+and reference conductivities are separate keys. Humidity-specific vapour factors
+and thickness-specific resistances retain their original discrete support.
+
+`fs_material::thermal::transport::volumetric::PreparedVolumetricThermalTransport`
+now consumes the native C_vol(T)/k(T) curves directly, computes transport and
+integrates/inverts fixed-volume thermal storage without manufacturing missing
+rho(T). The [foam consumer test](../../../xtask/tests/material_volumetric_curves.rs)
+compares equal-volume specimens receiving the same heat and checks cooling,
+independent energy integrals and unsupported excursions. The
+[plastic integration](../../../xtask/tests/fsri_plastic_thermal_profiles.rs)
+exercises all four polymer datasets through the same production API.
