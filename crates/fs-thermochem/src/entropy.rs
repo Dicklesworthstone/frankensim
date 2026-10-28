@@ -15,7 +15,7 @@ use fs_qty::{Pressure, Temperature};
 
 /// ln(a/b), retaining small representable differences and avoiding ratio overflow.
 /// Ordering the arguments also makes reversal exactly antisymmetric.
-fn log_ratio(a: f64, b: f64) -> f64 {
+pub(crate) fn log_ratio(a: f64, b: f64) -> f64 {
     if a == b {
         return 0.0;
     }
@@ -33,7 +33,7 @@ fn log_ratio(a: f64, b: f64) -> f64 {
     sign * value
 }
 
-fn accumulate(sum: &mut f64, correction: &mut f64, value: f64) {
+pub(crate) fn accumulate(sum: &mut f64, correction: &mut f64, value: f64) {
     let increment = value - *correction;
     let next = *sum + increment;
     *correction = (next - *sum) - increment;

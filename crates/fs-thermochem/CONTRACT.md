@@ -62,6 +62,19 @@ term and cancel their unchanged ideal mixing term. Successful calls allocate
 nothing. These are relative state functions, not reaction or mixing entropy,
 and endpoint admission does not establish continuous source-path coverage.
 
+### Relative enthalpy
+
+NASA-9 species and frozen ideal-gas mixtures also expose direct molar and
+mass-specific enthalpy changes. Factored differences of the original NASA-9
+energy powers cancel common formation references before rounding, preserving
+small sensible-energy changes for nozzle acceleration. Distinct region
+coefficients and reference jumps remain observable. Ideal-gas enthalpy is
+pressure-independent; these APIs keep composition fixed and do not replace
+reaction, mixing, or open-volume chemical-energy balances. Successful calls
+allocate nothing and reversing endpoints negates the result exactly. G0/G1
+tests cover every caloric term, reference shifts, region jumps, variable heat
+capacity, mixture mass basis and physical/numerical refusal boundaries.
+
 ### Thermodynamic mass-action entropy
 
 The declared stoichiometric mass-action evaluator uses A/(R T) =

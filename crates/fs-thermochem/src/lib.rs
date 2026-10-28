@@ -14,6 +14,7 @@
 //! composition-equilibrium solve, mechanism evolution, kinetics integrator,
 //! or L3 protocol.
 
+mod enthalpy;
 mod entropy;
 pub mod eos;
 pub mod equilibrium;
@@ -52,6 +53,8 @@ pub const UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K: f64 = 8.314_462_618_153_24;
 pub type MolarEnergyQuantityV1 = Qty<2, 1, -2, 0, 0, -1>;
 /// Coherent-SI molar thermal quantity, J/(mol K).
 pub type MolarThermalQuantityV1 = Qty<2, 1, -2, -1, 0, -1>;
+/// Coherent-SI mass-specific energy quantity, J/kg.
+pub type MassSpecificEnergyQuantityV1 = Qty<2, 0, -2, 0, 0, 0>;
 /// Coherent-SI mass-specific thermal quantity, J/(kg K).
 pub type MassSpecificThermalQuantityV1 = Qty<2, 0, -2, -1, 0, 0>;
 
@@ -1099,6 +1102,7 @@ impl Nasa9EvaluationV1 {
 
 #[cfg(test)]
 mod tests {
+    mod enthalpy;
     mod entropy;
     use super::*;
     use fs_evidence::ValidityDomain;
