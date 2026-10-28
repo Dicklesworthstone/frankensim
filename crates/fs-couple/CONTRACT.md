@@ -8967,6 +8967,34 @@ refinement must resolve reversals within a sample. A three-rung elastic-limit
 test checks second-order convergence to the independent stiffness-shifted
 oscillator frequency; energy closure alone is not a time-accuracy claim.
 
+### Two-axis retained shear on the original modal response
+
+`friction::tangential::planar::PlanarTangentialModalSystem<L>` attaches both
+physical tangent directions to the original modal bodies. It computes the full
+2-by-2 response `C_ij = b_i^T D_network b_j` through the existing exact network,
+including unequal principal responses, cross-axis terms, bilateral connections
+and retained material/acoustic loads. Both directions on each side retain the
+same original component and modal basis. The caller supplies their projections
+in an unchanged orthonormal physical tangent frame; no shape is normalized or
+replaced with an effective isotropic mass.
+
+The shared `fs-tribo` matrix adapter owns the bounded constitutive solve. Every
+trial starts from the accepted law state. The two held efforts then stage one
+original network update, and actual driver-minus-body displacement must agree
+with both returned constitutive increments. Reversible shear storage, physical
+friction heat, original network losses, external work and driver work close
+together before the network, history and sample clock publish. Source refusal,
+nonconvergence and cancellation leave all accepted state unchanged. Response
+columns and force workspace are retained between samples. Normal load and
+temperature remain explicit; this owner exports heat and does not evolve the
+normal geometry, tangent frame or thermal state.
+
+`tests/modal_planar_tangential.rs` checks an independent coupled elastic matrix
+solution, nonproportional two-axis viscoplastic histories, basis covariance,
+anisotropic static/sliding Coulomb behavior, singular response and exact retry
+after refusal. This unlocks the original vector layer law in modal motion; it
+does not turn the scalar Hertz--Mindlin law into a vector partial-slip solution.
+
 ### Stateful shear memory and finite-body thermal evolution
 
 `friction::tangential::heat` connects `TangentialModalSystem<L>` to the original

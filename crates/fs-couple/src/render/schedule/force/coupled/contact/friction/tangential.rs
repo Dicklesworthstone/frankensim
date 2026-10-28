@@ -22,6 +22,9 @@ use fs_tribo::{FrictionRegime, TangentialLaw, TangentialSolveConfig, TangentialS
 /// Stateful shear and the original finite thermal network accept together.
 pub mod heat;
 
+/// Two retained tangent directions with the full original network response.
+pub mod planar;
+
 /// One held driver motion and its explicitly supplied contact environment.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TangentialModalDrive {
