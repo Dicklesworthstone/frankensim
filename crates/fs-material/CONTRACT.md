@@ -2371,7 +2371,12 @@ Program anchor: MR43 (`frankensim-material-reality-ui2if.7.1`), remains open.
 
 `ThermochemicalGasModel::maximum_isochoric_temperature_slope` bounds `dT/du`
 over an explicit single-region temperature bracket using the original NASA-9
-coefficient interval bound and each species' `cv = cp - R/M`. The bound is a
+coefficient interval bounds with bounded deterministic temperature subdivision
+and each species' `cv = cp - R/M`. Every accepted subinterval proves positive
+`cv`; an unresolved or unstable source range refuses. A fixed 13-entry stack
+limits construction to 8,191 interval evaluations per species, and the exact
+NASA caloric values remain unchanged. Cross-region brackets remain refused.
+The bound is a
 timestep aid; the existing source model still owns actual `u(T)` and inversion.
 `IsochoricGasParcel::model` exposes that same immutable composition/source model
 for coupled film queries. No constant heat capacity, enthalpy substitution or

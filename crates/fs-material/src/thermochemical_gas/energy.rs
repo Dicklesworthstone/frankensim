@@ -216,9 +216,8 @@ impl ThermochemicalGasModel {
             // Ideal-gas u and cv do not depend on pressure. Use the retained
             // standard pressure only during inversion, then the actual EOS p.
             let reference = self.thermodynamics().components()[0].convention().reference_pressure();
-            let evaluated = self.thermodynamics().evaluate(Temperature::new(t), reference)
+            let properties = self.thermodynamics().evaluate_properties(Temperature::new(t), reference)
                 .map_err(|error| super::failure("energy thermodynamics", error))?;
-            let properties = evaluated.properties();
             let u = properties.u().value() / properties.molar_mass().value();
             Ok(root::Sample {
                 residual: (u - reference_u) - change,

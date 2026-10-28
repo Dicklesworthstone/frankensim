@@ -118,9 +118,8 @@ impl ClosedGasParcel {
         } else {
             let thermal = |t: f64| -> Result<root::Sample, GasEnergyError> {
                 let reference = old.model.thermodynamics().components()[0].convention().reference_pressure();
-                let evaluated = old.model.thermodynamics().evaluate(Temperature::new(t), reference)
+                let properties = old.model.thermodynamics().evaluate_properties(Temperature::new(t), reference)
                     .map_err(|error| super::super::super::failure("midpoint energy", error))?;
-                let properties = evaluated.properties();
                 let r = properties.mass_specific_gas_constant().value();
                 let u = properties.u().value() / properties.molar_mass().value();
                 Ok(root::Sample {

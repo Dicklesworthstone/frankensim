@@ -39,9 +39,8 @@ fn temperature(
         return Err(GasEnergyError::Invalid("finite specific enthalpy required"));
     }
     let thermal = |t| -> Result<root::Sample, GasEnergyError> {
-        let evaluated = model.thermodynamics().evaluate(Temperature::new(t), pressure)
+        let properties = model.thermodynamics().evaluate_properties(Temperature::new(t), pressure)
             .map_err(|error| crate::thermochemical_gas::failure("enthalpy thermodynamics", error))?;
-        let properties = evaluated.properties();
         Ok(root::Sample {
             residual: properties.h().value() / properties.molar_mass().value() - enthalpy_j_kg,
             tangent: properties.mass_specific_cp().value(),
@@ -133,9 +132,82 @@ impl Interval {
     fn multiply_positive(self, rhs: Self) -> Self {
         Self { lo: (self.lo * rhs.lo).next_down(), hi: (self.hi * rhs.hi).next_up() }
     }
-    fn scaled_lower(self, scale: f64) -> f64 {
-        (scale * if scale >= 0.0 { self.lo } else { self.hi }).next_down()
+    fn scaled(self, scale: f64) -> Self {
+        let (lo, hi) = if scale >= 0.0 { (self.lo, self.hi) } else { (self.hi, self.lo) };
+        Self { lo: (scale * lo).next_down(), hi: (scale * hi).next_up() }
     }
+}
+
+// Deterministic depth-first subdivision uses 13 stack slots and at most
+// 8191 interval evaluations per source region. This is initialization work;
+// actual caloric evaluations continue to use the original NASA-9 owner.
+const MAX_CAPACITY_BOUND_DEPTH: usize = 12;
+
+fn capacity_interval(
+    region: &fs_thermochem::Nasa9RegionV1, molar_mass: f64, lo: f64, hi: f64,
+) -> Interval {
+    let t = Interval { lo, hi };
+    let inverse = Interval { lo: (1.0 / hi).next_down(), hi: (1.0 / lo).next_up() };
+    let square = t.multiply_positive(t);
+    let cube = square.multiply_positive(t);
+    let fourth = cube.multiply_positive(t);
+    let basis = [inverse.multiply_positive(inverse), inverse,
+        Interval { lo: 1.0, hi: 1.0 }, t, square, cube, fourth];
+    let mut bound = Interval { lo: 0.0, hi: 0.0 };
+    for (&coefficient, term) in region.coefficients()[..7].iter().zip(basis) {
+        if coefficient != 0.0 {
+            let contribution = term.scaled(coefficient);
+            bound.lo = (bound.lo + contribution.lo).next_down();
+            bound.hi = (bound.hi + contribution.hi).next_up();
+        }
+    }
+    Interval {
+        lo: ((bound.lo * UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K).next_down()
+            / molar_mass).next_down(),
+        hi: ((bound.hi * UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K).next_up()
+            / molar_mass).next_up(),
+    }
+}
+
+fn region_minimum_cp(
+    region: &fs_thermochem::Nasa9RegionV1, molar_mass: f64, lo: f64, hi: f64,
+) -> Result<f64, GasEnergyError> {
+    let gas_constant = (UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / molar_mass).next_up();
+    let mut stack = [(0.0, 0.0, 0usize); MAX_CAPACITY_BOUND_DEPTH + 1];
+    stack[0] = (lo, hi, 0);
+    let mut pending = 1;
+    let mut minimum = f64::INFINITY;
+    while pending != 0 {
+        pending -= 1;
+        let (lo, hi, depth) = stack[pending];
+        let bound = capacity_interval(region, molar_mass, lo, hi);
+        let cv_lower = (bound.lo - gas_constant).next_down();
+        if !bound.lo.is_finite() || !bound.hi.is_finite() || bound.hi <= gas_constant {
+            return Err(GasEnergyError::Invalid(
+                "source coefficient bound cannot establish positive cv; narrow the caloric bracket",
+            ));
+        }
+        let midpoint = lo + 0.5 * (hi - lo);
+        let can_split = depth < MAX_CAPACITY_BOUND_DEPTH && midpoint > lo && midpoint < hi;
+        // Refine relative to cv, not cp: stopping at a positive cp can still
+        // leave the isochoric consumer with a nonpositive capacity bound.
+        // The width target improves timestep usefulness, not source accuracy.
+        if cv_lower > 0.0
+            && ((bound.hi - bound.lo) <= 0.125 * cv_lower || !can_split)
+        {
+            minimum = minimum.min(bound.lo);
+            continue;
+        }
+        if !can_split {
+            return Err(GasEnergyError::Invalid(
+                "bounded source subdivision cannot establish positive cv; narrow the caloric bracket",
+            ));
+        }
+        stack[pending] = (midpoint, hi, depth + 1);
+        stack[pending + 1] = (lo, midpoint, depth + 1);
+        pending += 2;
+    }
+    Ok(minimum)
 }
 
 pub(super) fn minimum_cp(
@@ -152,25 +224,7 @@ pub(super) fn minimum_cp(
             && (hi < upper || (index + 1 == regions.len() && hi <= upper))
         { Some(region) } else { None }
     }).ok_or(GasEnergyError::Invalid("caloric bracket must stay within one NASA-9 region per active species"))?;
-    let t = Interval { lo, hi };
-    let inverse = Interval { lo: (1.0 / hi).next_down(), hi: (1.0 / lo).next_up() };
-    let square = t.multiply_positive(t);
-    let cube = square.multiply_positive(t);
-    let fourth = cube.multiply_positive(t);
-    let basis = [inverse.multiply_positive(inverse), inverse,
-        Interval { lo: 1.0, hi: 1.0 }, t, square, cube, fourth];
-    let mut lower = 0.0;
-    for (&coefficient, term) in region.coefficients()[..7].iter().zip(basis) {
-        if coefficient != 0.0 {
-            lower = (lower + term.scaled_lower(coefficient)).next_down();
-        }
-    }
-    let cp = ((lower * UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K).next_down()
-        / species.molar_mass().value()).next_down();
-    if !cp.is_finite() || cp <= 0.0 {
-        return Err(GasEnergyError::Invalid("source coefficient bound cannot establish positive cp; narrow the caloric bracket"));
-    }
-    Ok(cp)
+    region_minimum_cp(region, species.molar_mass().value(), lo, hi)
 }
 
 impl GasEnthalpyLaw {
@@ -253,9 +307,8 @@ impl GasEnthalpyLaw {
             return Err(GasEnergyError::Invalid("temperature outside the declared caloric bracket"));
         }
         let (_, pressure) = coordinates(&self.context)?;
-        let state = self.model.thermodynamics().evaluate(Temperature::new(temperature_k), pressure)
+        let properties = self.model.thermodynamics().evaluate_properties(Temperature::new(temperature_k), pressure)
             .map_err(conversion_error)?;
-        let properties = state.properties();
         let h = properties.h().value() / properties.molar_mass().value();
         if !h.is_finite() { return Err(GasEnergyError::Invalid("source enthalpy is not finite")); }
         Ok(h)

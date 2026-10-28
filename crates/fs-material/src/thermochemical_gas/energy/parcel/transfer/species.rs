@@ -136,8 +136,8 @@ fn model_for_inventory(
 fn source_enthalpy(source: &ClosedGasParcel, id: &SpeciesId) -> Result<f64, GasEnergyError> {
     let species = source.model().thermodynamics().components().iter()
         .find(|s| s.species() == id).ok_or(invalid("species absent from its declared upstream"))?;
-    let evaluated = species.evaluate(Temperature::new(source.state().state().temperature)).map_err(source_error)?;
-    let h = evaluated.properties().h().value() / species.molar_mass().value();
+    let properties = species.evaluate_properties(Temperature::new(source.state().state().temperature)).map_err(source_error)?;
+    let h = properties.h().value() / species.molar_mass().value();
     if !h.is_finite() { return Err(invalid("source species enthalpy is unrepresentable")); }
     Ok(h)
 }

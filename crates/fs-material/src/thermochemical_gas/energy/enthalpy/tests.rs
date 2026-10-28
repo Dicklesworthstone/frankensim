@@ -80,3 +80,131 @@ fn caloric_domain_work_and_cancellation_refuse_without_publishing_a_state() {
         GasEnergySolve { maximum_iterations: 0, ..controls() }).is_err());
     assert!(law.enthalpy_at_temperature(279.0).is_err());
 }
+
+fn coefficient_species(coefficients: [f64; 9], temperatures: [f64; 2]) -> Nasa9StandardStateModelV1 {
+    let original = crate::thermochemical_gas::tests::species_in_domain(
+        "N2", 0.0280134, 3.5, 0.0, 0.0, temperatures,
+    );
+    let mut card = original.regions()[0].card().clone();
+    for (index, value) in coefficients.into_iter().enumerate() {
+        card.parameters.get_mut(&format!("a{index}")).unwrap().value = value;
+    }
+    Nasa9StandardStateModelV1::new(original.species().clone(), original.molar_mass(),
+        original.convention().clone(), vec![fs_thermochem::Nasa9RegionV1::from_card(card).unwrap()]).unwrap()
+}
+
+// Read the actual checked-in NASA source coefficients, not a second fitted law.
+fn nitrogen_coefficients(region: &str) -> [f64; 9] {
+    let text = include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+        "/../../data/matdb/seed-v1/nitrogen-nasa9-mcbride2002/nasa9.tsv"));
+    let mut coefficients = [0.0; 9];
+    let mut count = 0;
+    for line in text.lines() {
+        let fields: Vec<_> = line.split('\t').collect();
+        if fields.first() == Some(&"coefficient") && fields[2] == region {
+            let index: usize = fields[3].strip_prefix('a').unwrap().parse().unwrap();
+            coefficients[index] = fields[4].parse().unwrap();
+            count += 1;
+        }
+    }
+    assert_eq!(count, 9);
+    coefficients
+}
+
+fn nitrogen_model(region: &str) -> ThermochemicalGasModel {
+    let temperatures = if region == "low" { [200.0, 1000.0] } else { [1000.0, 6000.0] };
+    ThermochemicalGasModel::new(
+        fs_thermochem::mixture::FrozenIdealGasMixtureModelV1::new(
+            vec![coefficient_species(nitrogen_coefficients(region), temperatures)],
+            mole(vec![1.0]),
+        ).unwrap(),
+        vec![crate::thermochemical_gas::tests::transport_in_domain(
+            "N2", 1.8e-5, 0.03, [200.0, 6000.0], [1000.0, 1.0e7],
+        )], None,
+    ).unwrap()
+}
+
+fn hot_controls(lo: f64, hi: f64) -> GasEnergySolve {
+    GasEnergySolve { minimum_temperature_k: lo, maximum_temperature_k: hi,
+        energy_tolerance_j_kg: 1e-6, maximum_iterations: 128 }
+}
+
+#[test]
+fn nasa9_nitrogen_capacity_bounds_cover_real_cancelling_polynomials() {
+    for (region, lo, hi) in [("low", 280.0, 900.0), ("high", 1000.0, 6000.0)] {
+        let gas = nitrogen_model(region);
+        let species = &gas.thermodynamics().components()[0];
+        let controls = hot_controls(lo, hi);
+        // This is the previous failing whole-bracket coefficient enclosure.
+        assert!(capacity_interval(&species.regions()[0], species.molar_mass().value(), lo, hi).lo < 0.0);
+        let cp_lower = minimum_cp(species, controls).unwrap();
+        let law = GasEnthalpyLaw::from_mole(&gas, mole(vec![1.0]),
+            point(lo, 100000.0), controls).unwrap();
+        let isochoric_slope = gas.maximum_isochoric_temperature_slope(controls).unwrap();
+        let mut sampled_min = f64::INFINITY;
+        for index in 0..=64 {
+            let t = lo + (hi - lo) * index as f64 / 64.0;
+            let state = gas.evaluate(&point(t, 100000.0)).unwrap();
+            let properties = state.thermodynamics().properties();
+            let cp = properties.mass_specific_cp().value();
+            let cv = properties.mass_specific_cv().value();
+            sampled_min = sampled_min.min(cp);
+            assert!(cp_lower <= cp);
+            assert!(law.maximum_temperature_slope() >= 1.0 / cp);
+            assert!(isochoric_slope >= 1.0 / cv);
+        }
+        // A useful bound avoids the old false refusal and arbitrary tiny steps.
+        assert!(cp_lower > 0.8 * sampled_min);
+        assert_eq!(cp_lower.to_bits(), minimum_cp(species, controls).unwrap().to_bits());
+    }
+}
+
+fn nitrogen_specific_enthalpy(t: f64) -> f64 {
+    let a = nitrogen_coefficients("low");
+    // Independent integrated polynomial, rather than T times h/(RT).
+    let h_over_r = -a[0] / t + a[1] * t.ln() + a[2] * t
+        + a[3] * t * t / 2.0 + a[4] * t * t * t / 3.0
+        + a[5] * t * t * t * t / 4.0 + a[6] * t * t * t * t * t / 5.0 + a[7];
+    UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * h_over_r / 0.0280134
+}
+
+#[test]
+fn nitrogen_heating_closes_integrated_energy_with_admitted_capacity() {
+    let gas = nitrogen_model("low");
+    let controls = hot_controls(280.0, 900.0);
+    gas.maximum_isochoric_temperature_slope(controls).unwrap();
+    let law = GasEnthalpyLaw::from_mole(&gas, mole(vec![1.0]),
+        point(300.0, 100000.0), controls).unwrap();
+    let h300 = nitrogen_specific_enthalpy(300.0);
+    let h850 = nitrogen_specific_enthalpy(850.0);
+    let solved = law.resolve_enthalpy(h850, || false).unwrap();
+    assert!((solved.state().state().temperature - 850.0).abs() < 1e-8);
+    let cp300 = gas.evaluate(&point(300.0, 100000.0)).unwrap().state().specific_heat_cp;
+    assert!((h850 - h300 - cp300 * 550.0).abs() > 1000.0);
+    let mut parcel = super::super::IsochoricGasParcel::new(gas, point(300.0, 100000.0), 0.01).unwrap();
+    let mass = parcel.mass_kg();
+    let heat = mass * (h850 - h300 - UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / 0.0280134 * 550.0);
+    let report = parcel.add_heat(heat, controls, || false).unwrap();
+    assert!((parcel.state().state().temperature - 850.0).abs() < 1e-8);
+    assert!((parcel.state().state().pressure - 100000.0 * 850.0 / 300.0).abs() < 1e-5);
+    assert!(report.residual_j.abs() <= mass * controls.energy_tolerance_j_kg);
+    assert!((report.stored_energy_change_j - heat).abs() <= mass * controls.energy_tolerance_j_kg);
+}
+
+#[test]
+fn capacity_bound_refuses_nonpositive_cv_including_interior_dips() {
+    for cp_over_r in [0.5, 1.0] {
+        let mut coefficients = [0.0; 9];
+        coefficients[2] = cp_over_r;
+        let species = coefficient_species(coefficients, [200.0, 1000.0]);
+        assert!(minimum_cp(&species, hot_controls(300.0, 900.0)).is_err());
+    }
+    // Cp/R = 0.9 + 1e-5*(T-600)^2: both endpoints have positive cv,
+    // while the interior violates the ideal-gas caloric stability condition.
+    let mut coefficients = [0.0; 9];
+    coefficients[2] = 4.5;
+    coefficients[3] = -0.012;
+    coefficients[4] = 1e-5;
+    let species = coefficient_species(coefficients, [200.0, 1000.0]);
+    assert!(minimum_cp(&species, hot_controls(300.0, 900.0)).is_err());
+}
