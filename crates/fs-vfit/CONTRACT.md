@@ -211,6 +211,21 @@ empty/index errors and each allocation-free cap/cap+1 admission.
 
 ## Multiport impedances (IRP M2.5-W3b)
 
+`mimo::common_pole_vector_fit(omega, responses, opts)` fits multiple FRF
+channels jointly through this same shared-denominator relocation and
+unconstrained residue kernel. It returns one real-rational model per original
+channel, with exactly the same pole set and channel-specific residues.
+Weight presets apply to the channel-vector norm at each frequency; jointly
+zero samples use unit weight. All channels require compatible calibrated units;
+this is not sensor-noise whitening. The fit does not average channels or merge
+independent fitted pole lists, so opposite sensor polarity cannot erase a mode.
+The report gives weighted normalized vector error and physical vector-norm
+error. No impedance passivity or repeated-eigenspace resolution is inferred.
+`common_pole_residue_fit` reuses the same weighting and unconstrained residue
+pass at admitted fixed poles. The first direct consumer is
+`fs-modalid::identify_multichannel`; opposite-polarity accelerance/transfer
+channels retain their signed feedthrough instead of absorbing it into shapes.
+
 `mimo::mimo_vector_fit(omega, data, ports, opts, reciprocal)` fits a row-major
 `ports x ports` impedance with one shared pole set.
 - It uses relaxed vector fitting with a single sigma shared across all fitted

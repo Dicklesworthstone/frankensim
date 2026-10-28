@@ -39,6 +39,16 @@ measurement side of the simulate-vs-measure calibration loop.
   unmatched half-grid pole yields a NaN interval, never zero) ->
   optional exponential-window damping correction with raw values
   logged. Ladder options are validated (`order_step >= 1` etc.).
+- `identify_multichannel` — the common-pole multi-sensor path. All calibrated
+  response channels jointly drive the original `fs-vfit` shared-denominator
+  vector fit at every stabilization order and in both even/odd half-grid fits.
+  A nodal reference sensor or opposite sensor polarity therefore cannot erase
+  a mode observed by another channel. The existing significance, residue-shape,
+  window correction, sorting and calibration comparison owners are reused.
+  Fixed-pole shape refits use the original unconstrained shared-channel residue
+  owner, admitting signed feedthrough for opposite-polarity accelerance sensors.
+  Shapes stay in input-channel order. `identify` retains its explicit
+  reference-channel behavior for compatibility.
 - `rfp_fit` — classical rational-fraction-polynomial identifier on a
   Forsythe-recurrence basis. HONEST MECHANISM (review-corrected): on
   a positive-frequencies-only grid the basis is NOT orthonormal in
@@ -127,6 +137,15 @@ None.
 
 ## Conformance tests
 
+`tests/multichannel.rs` exercises two physical modes missed by a nodal
+reference sensor, signed channels that would cancel under averaging, actual
+mode-table calibration, channel permutation and unit rescaling, all-channel
+half-grid/window correction, signed accelerance feedthrough, and coincident-pole
+combined-residue semantics.
+These analytic receptance fixtures verify the joint numerical identification
+path; they do not establish measured-specimen agreement, statistical interval
+coverage, or a uniquely resolved basis for repeated eigenspaces.
+
 `tests/window_poles.rs` checks exact pole recovery over damping and window
 strength, strongly windowed end-to-end identification, corrected split-sample
 spread, reordering with shape/raw-damping identity, and invalid-window refusal.
@@ -161,9 +180,11 @@ SNR refusal/acceptance boundaries. Native results are batch-pending.
 
 ## No-claim boundaries
 
-- MIMO identification (matrix-valued Loewner over simultaneous
-  references) is a follow-up; v1 is common-pole multi-channel from a
-  reference channel.
+- Common-pole multi-channel vector fitting is available through
+  `identify_multichannel`; simultaneous-input MIMO residue factorization and
+  matrix-valued Loewner identification remain follow-ups. Channels must share
+  one physical input and compatible calibrated response units. The existing
+  median SNR gate remains conservative for collections of weak/noisy sensors.
 - No measured-trace benchmark: no license-compatible published FRF
   TRACE was available (figures-only across the CC-BY literature);
   the published-parameter round-trip is the honest v1 benchmark, and

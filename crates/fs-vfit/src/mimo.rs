@@ -19,11 +19,11 @@
 //!   stability cannot change. Each `(frequency, eigenvector)` pair gives a
 //!   linear constraint. The constraints accumulate over rounds against the
 //!   original model, and every round is re-certified.
-use crate::model::PoleTerm;
+use crate::model::{PoleTerm, RationalModel};
 use crate::passivity::{CertificateClass, PassivityError};
 use crate::vf::{
-    FitOptions, VfError, basis_columns, conjugate_close, initial_poles, magnitude_scale,
-    pole_movement, solve_ls_equilibrated, terms_with_residues,
+    FitOptions, FitReport, VfError, WeightPreset, basis_columns, conjugate_close, initial_poles,
+    magnitude_scale, pole_movement, solve_ls_equilibrated, terms_with_residues,
 };
 use fs_la::eigen::jacobi_eigh;
 use fs_la::eigen_complex::{EigFailure, eig, lu_complex};
@@ -232,6 +232,208 @@ fn entries(ports: usize, reciprocal: bool) -> Vec<(usize, usize)> {
 
 fn frobenius(z: &[C64]) -> f64 {
     det::sqrt(z.iter().map(|v| v.norm_sq()).sum())
+}
+
+/// Joint common-pole fit of multiple FRF channels on one angular-frequency grid.
+///
+/// Each entry of responses is one channel, in caller order. A single relaxed
+/// denominator is fitted to ALL channels simultaneously through the same
+/// relocation kernel as [mimo_vector_fit]. A mode absent at one sensor can
+/// therefore be identified from another; responses are never averaged together.
+///
+/// The weighting preset applies to the Euclidean norm of the channel vector
+/// at each frequency. Channels must have compatible calibrated units; this is
+/// not automatic sensor-noise whitening. A jointly zero sample uses unit weight.
+/// The returned models have identical poles and channel-specific residues.
+/// Direct and improper terms are unconstrained, as for the general MIMO fit;
+/// no impedance passivity is inferred from a displacement or transfer FRF.
+///
+/// The report's weighted_rms is the weighted channel-vector error on normalized
+/// data (relative vector error with InverseMagnitude); max_abs_error is the
+/// largest physical channel-vector error norm. Coincident physical modes with
+/// the same pole appear as a combined residue, not separately resolved shapes.
+///
+/// # Errors
+/// [VfError] for invalid order, empty/ragged/nonfinite or entirely zero data,
+/// unrepresentable normalization, sigma collapse, or eigensolve failure.
+pub fn common_pole_vector_fit(
+    omega: &[f64],
+    responses: &[&[C64]],
+    opts: &FitOptions,
+) -> Result<(Vec<RationalModel>, FitReport), VfError> {
+    fit_common_responses(omega, responses, opts, None)
+}
+
+/// Fit channel-specific residues at one declared shared pole set.
+///
+/// This uses the same vector weighting, normalization and unconstrained
+/// residue owner as [common_pole_vector_fit], without relocating the poles.
+/// Signed direct terms remain admissible for opposite-polarity transfer or
+/// accelerance sensors; this is not an impedance passivity certificate.
+///
+/// # Errors
+/// [VfError] for invalid poles/data or unrepresentable numerical results.
+pub fn common_pole_residue_fit(
+    omega: &[f64],
+    responses: &[&[C64]],
+    poles: &[PoleTerm],
+    opts: &FitOptions,
+) -> Result<(Vec<RationalModel>, FitReport), VfError> {
+    for (index, pole) in poles.iter().enumerate() {
+        let valid = match pole {
+            PoleTerm::Real { pole, .. } => pole.is_finite(),
+            PoleTerm::Pair { pole, .. } => {
+                pole.re.is_finite() && pole.im.is_finite() && pole.im > 0.0
+            }
+        };
+        if !valid {
+            return Err(VfError::BadSample { index });
+        }
+    }
+    let order = poles.iter().map(PoleTerm::state_dim).sum();
+    let options = FitOptions { order, ..*opts };
+    fit_common_responses(omega, responses, &options, Some(poles))
+}
+
+fn fit_common_responses(
+    omega: &[f64],
+    responses: &[&[C64]],
+    opts: &FitOptions,
+    fixed_poles: Option<&[PoleTerm]>,
+) -> Result<(Vec<RationalModel>, FitReport), VfError> {
+    if opts.order == 0 {
+        return Err(VfError::BadOrder { order: opts.order });
+    }
+    if omega.len() < opts.order.saturating_add(2) {
+        return Err(VfError::TooFewSamples {
+            samples: omega.len(),
+            needed: opts.order.saturating_add(2),
+        });
+    }
+    if responses.is_empty() || responses.iter().any(|h| h.len() != omega.len()) {
+        return Err(VfError::BadSample { index: 0 });
+    }
+    for (i, &w) in omega.iter().enumerate() {
+        if !w.is_finite()
+            || w <= 0.0
+            || responses
+                .iter()
+                .any(|h| !h[i].re.is_finite() || !h[i].im.is_finite())
+        {
+            return Err(VfError::BadSample { index: i });
+        }
+    }
+    let all: Vec<C64> = responses.iter().flat_map(|h| h.iter().copied()).collect();
+    if !all.iter().any(|v| v.re != 0.0 || v.im != 0.0) {
+        return Err(VfError::BadSample { index: 0 });
+    }
+    let scale = magnitude_scale(&all);
+    if !scale.is_finite() || scale <= 0.0 {
+        return Err(VfError::BadSample { index: 0 });
+    }
+    let h: Vec<Vec<C64>> = responses
+        .iter()
+        .map(|channel| {
+            channel
+                .iter()
+                .map(|v| C64::new(v.re / scale, v.im / scale))
+                .collect()
+        })
+        .collect();
+    let mut weights = Vec::with_capacity(omega.len());
+    for i in 0..omega.len() {
+        let norm = h
+            .iter()
+            .fold(0.0, |norm, channel| det::hypot(norm, channel[i].abs()));
+        if !norm.is_finite() {
+            return Err(VfError::BadSample { index: i });
+        }
+        let weight = match opts.weights {
+            WeightPreset::Uniform => 1.0,
+            WeightPreset::InverseMagnitude if norm > 0.0 => 1.0 / norm,
+            WeightPreset::LogBand if norm > 0.0 => 1.0 / det::sqrt(norm),
+            _ => 1.0,
+        };
+        if !weight.is_finite() {
+            return Err(VfError::BadSample { index: i });
+        }
+        weights.push(weight);
+    }
+    let per_entry = vec![*opts; responses.len()];
+    let mut terms =
+        fixed_poles.map_or_else(|| initial_poles(omega, opts.order), <[PoleTerm]>::to_vec);
+    let (mut iterations_run, mut final_pole_movement) = (0, 0.0);
+    let hi = omega.iter().copied().fold(0.0, f64::max);
+    let iterations = if fixed_poles.is_some() {
+        0
+    } else {
+        opts.iterations
+    };
+    for _ in 0..iterations {
+        let (next, movement) = relocate_shared(omega, &h, &weights, &terms, &per_entry)?;
+        terms = next;
+        iterations_run += 1;
+        final_pole_movement = movement;
+        if movement < 1.0e-9 * hi {
+            break;
+        }
+    }
+    let normalized: Vec<_> = h
+        .iter()
+        .map(|channel| {
+            let (coords, d, e) = residue_solve(omega, channel, &weights, &terms, opts);
+            RationalModel {
+                terms: terms_with_residues(&terms, &coords),
+                d,
+                e,
+            }
+        })
+        .collect();
+    let (mut weighted_sq, mut max_abs_error) = (0.0_f64, 0.0_f64);
+    for (i, &w) in omega.iter().enumerate() {
+        let error = normalized
+            .iter()
+            .zip(&h)
+            .fold(0.0, |norm, (model, channel)| {
+                det::hypot(norm, (model.eval_iw(w) - channel[i]).abs())
+            });
+        if !error.is_finite() || !(error * scale).is_finite() {
+            return Err(VfError::BadSample { index: i });
+        }
+        weighted_sq += (weights[i] * error).powi(2);
+        max_abs_error = max_abs_error.max(error * scale);
+    }
+    let models = normalized
+        .into_iter()
+        .map(|model| RationalModel {
+            terms: model
+                .terms
+                .into_iter()
+                .map(|term| match term {
+                    PoleTerm::Real { pole, residue } => PoleTerm::Real {
+                        pole,
+                        residue: residue * scale,
+                    },
+                    PoleTerm::Pair { pole, residue } => PoleTerm::Pair {
+                        pole,
+                        residue: residue.scale(scale),
+                    },
+                })
+                .collect(),
+            d: model.d * scale,
+            e: model.e * scale,
+        })
+        .collect();
+    Ok((
+        models,
+        FitReport {
+            weighted_rms: det::sqrt(weighted_sq / omega.len() as f64),
+            max_abs_error,
+            weights: opts.weights.label(),
+            iterations_run,
+            final_pole_movement,
+        },
+    ))
 }
 
 /// Shared-pole relaxed vector fit of `data[i]` (row-major `ports x ports`)
@@ -1181,8 +1383,11 @@ impl MimoModel {
             let (phi1, phi2) = zoh_mean_phi(x, decay);
             let mean_input = phi2.scale(time_step_s);
             for (d, residue) in mean_d.iter_mut().zip(r) {
-                *d += if pair { 2.0 * (*residue * mean_input).re }
-                    else { residue.re * mean_input.re };
+                *d += if pair {
+                    2.0 * (*residue * mean_input).re
+                } else {
+                    residue.re * mean_input.re
+                };
             }
             mean_state_gains.push(phi1);
             terms.push((decay, phi1.scale(time_step_s), r.clone(), pair));
@@ -1225,15 +1430,26 @@ impl MimoZoh {
         let (s, c) = det::sin_cos(omega * self.time_step_s);
         let z = C64::new(c, s);
         let direct = if mean { &self.mean_d } else { &self.d };
-        let mut y: Vec<C64> = direct.iter().zip(&self.e).map(|(&d, &e)|
-            C64::from_re(d) + (C64::ONE - z.conj()).scale(e / self.time_step_s)).collect();
+        let mut y: Vec<C64> = direct
+            .iter()
+            .zip(&self.e)
+            .map(|(&d, &e)| C64::from_re(d) + (C64::ONE - z.conj()).scale(e / self.time_step_s))
+            .collect();
         for (k, (decay, gain, r, pair)) in self.terms.iter().enumerate() {
-            let weight = if mean { self.mean_state_gains[k] } else { C64::ONE };
+            let weight = if mean {
+                self.mean_state_gains[k]
+            } else {
+                C64::ONE
+            };
             let first = weight * *gain * (z - *decay).recip();
             let second = weight.conj() * gain.conj() * (z - decay.conj()).recip();
             for (y, r) in y.iter_mut().zip(r) {
-                *y = *y + if *pair { *r * first + r.conj() * second }
-                    else { first.scale(r.re) };
+                *y = *y
+                    + if *pair {
+                        *r * first + r.conj() * second
+                    } else {
+                        first.scale(r.re)
+                    };
             }
         }
         y
@@ -1269,14 +1485,28 @@ impl MimoZoh {
         for i in 0..points {
             let w = core::f64::consts::PI / self.time_step_s * (i as f64 / (points - 1) as f64);
             let response = self.eval_output_discrete_iw(w, mean);
-            let lambda = if response.iter().all(|z| z.re.is_finite() && z.im.is_finite()) {
+            let lambda = if response
+                .iter()
+                .all(|z| z.re.is_finite() && z.im.is_finite())
+            {
                 hermitian_part(&response, self.ports).0[0]
-            } else { f64::NAN };
-            if !lambda.is_finite() || lambda < 0.0 { violation_freqs.push(w); }
-            if lambda < worst.0 { worst = (lambda, w); }
+            } else {
+                f64::NAN
+            };
+            if !lambda.is_finite() || lambda < 0.0 {
+                violation_freqs.push(w);
+            }
+            if lambda < worst.0 {
+                worst = (lambda, w);
+            }
         }
-        MimoPassivityReport { passive: violation_freqs.is_empty(), class: CertificateClass::GridOnly,
-            worst, crossings: Vec::new(), violation_freqs }
+        MimoPassivityReport {
+            passive: violation_freqs.is_empty(),
+            class: CertificateClass::GridOnly,
+            worst,
+            crossings: Vec::new(),
+            violation_freqs,
+        }
     }
 
     pub(crate) fn mean_history_output_into(&self, y: &mut [f64]) {
@@ -1286,14 +1516,18 @@ impl MimoZoh {
             let x = &self.state[k * n..(k + 1) * n];
             for (a, ya) in y.iter_mut().enumerate() {
                 let mut acc = C64::ZERO;
-                for (b, xb) in x.iter().enumerate() { acc = acc + r[a * n + b] * *xb; }
+                for (b, xb) in x.iter().enumerate() {
+                    acc = acc + r[a * n + b] * *xb;
+                }
                 acc = acc * self.mean_state_gains[k];
                 *ya += if *pair { 2.0 * acc.re } else { acc.re };
             }
         }
     }
 
-    pub(crate) fn mean_direct_term(&self) -> &[f64] { &self.mean_d }
+    pub(crate) fn mean_direct_term(&self) -> &[f64] {
+        &self.mean_d
+    }
 
     /// Advance the same pole states and return the interval-mean output for a
     /// held input. For proper models, `dot(mean_output, input) * dt` is the exact
@@ -1310,8 +1544,12 @@ impl MimoZoh {
         let mut y = vec![0.0; n];
         self.mean_history_output_into(&mut y);
         for (a, ya) in y.iter_mut().enumerate() {
-            *ya += (0..n).map(|b| self.mean_d[a*n+b] * u[b]
-                + self.e[a*n+b] * (u[b] - self.last_input[b]) / self.time_step_s).sum::<f64>();
+            *ya += (0..n)
+                .map(|b| {
+                    self.mean_d[a * n + b] * u[b]
+                        + self.e[a * n + b] * (u[b] - self.last_input[b]) / self.time_step_s
+                })
+                .sum::<f64>();
         }
         self.preview_state(u);
         self.accept_state(u);
@@ -1327,7 +1565,9 @@ impl MimoZoh {
                 self.candidate_state[k * n + b] = *decay * self.state[k * n + b] + gain.scale(u);
             }
         }
-        self.candidate_state.iter().all(|z| z.re.is_finite() && z.im.is_finite())
+        self.candidate_state
+            .iter()
+            .all(|z| z.re.is_finite() && z.im.is_finite())
     }
     pub(crate) fn accept_state(&mut self, u: &[f64]) {
         self.state.copy_from_slice(&self.candidate_state);
@@ -1335,7 +1575,9 @@ impl MimoZoh {
     }
     /// Accepted original pole states, in pole-term then input-port order.
     #[must_use]
-    pub fn pole_states(&self) -> &[C64] { &self.state }
+    pub fn pole_states(&self) -> &[C64] {
+        &self.state
+    }
 
     /// Advance one sample with the held input `u` (one value per port) and
     /// return the output at the start of the interval.

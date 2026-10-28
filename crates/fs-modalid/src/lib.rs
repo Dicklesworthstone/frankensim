@@ -926,8 +926,60 @@ fn model_poles(model: &RationalModel) -> Vec<(f64, f64)> {
 ///
 /// # Errors
 /// [`ModalIdError::SnrTooLow`] below the floor; fit failures.
-#[allow(clippy::too_many_lines)] // one linear pipeline: gate -> ladder -> verdicts -> shapes -> CI
 pub fn identify(data: &FrfData, opts: &IdentifyOptions) -> Result<Identification, ModalIdError> {
+    identify_channels(data, opts, false)
+}
+
+/// Identify shared structural poles from ALL measured response channels jointly.
+///
+/// Unlike the reference-channel entry point, this path does not lose a mode
+/// merely because channel 0 is at its node. It uses the original fs-vfit shared
+/// denominator kernel, then the same stabilization, residue/shape, window
+/// correction and significance owners as [identify]. Even/odd uncertainty
+/// refits also use every channel. No response averaging or union of independent
+/// fitted pole lists is used.
+///
+/// Channels must share the frequency grid, physical input and compatible
+/// calibrated response units. Shapes are residues in the original channel
+/// order. Coincident poles yield a combined residue; this does not identify
+/// the multiplicity or a basis of a repeated eigenspace, nor a general MIMO
+/// input/output residue factorization. The existing SNR and nearest-match
+/// split-sample gates and their uncertainty limitations still apply.
+///
+/// # Errors
+/// As [identify], including refusal from the shared-pole vector-fitting owner.
+pub fn identify_multichannel(
+    data: &FrfData,
+    opts: &IdentifyOptions,
+) -> Result<Identification, ModalIdError> {
+    identify_channels(data, opts, true)
+}
+
+fn fit_identification_poles(
+    omega: &[f64],
+    responses: &[&[C64]],
+    opts: &FitOptions,
+    multichannel: bool,
+) -> Result<Vec<(f64, f64)>, ModalIdError> {
+    if multichannel {
+        let (models, _) = fs_vfit::mimo::common_pole_vector_fit(omega, responses, opts)
+            .map_err(|e| ModalIdError::Fit(e.to_string()))?;
+        // Every channel model carries the shared denominator, including a
+        // zero-residue nodal channel. Significance uses all channels below.
+        Ok(model_poles(&models[0]))
+    } else {
+        let outcome =
+            vector_fit(omega, responses[0], opts).map_err(|e| ModalIdError::Fit(e.to_string()))?;
+        Ok(model_poles(&outcome.model))
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn identify_channels(
+    data: &FrfData,
+    opts: &IdentifyOptions,
+    multichannel: bool,
+) -> Result<Identification, ModalIdError> {
     if opts.order_step == 0 || opts.min_order == 0 || opts.max_order < opts.min_order {
         return Err(ModalIdError::Shape {
             what: "ladder needs min_order >= 1, order_step >= 1, max_order >= min_order",
@@ -944,7 +996,14 @@ pub fn identify(data: &FrfData, opts: &IdentifyOptions) -> Result<Identification
         });
     }
     let omega = &data.omega;
-    let href = &data.channels[0].h;
+    let responses: Vec<&[C64]> = if multichannel {
+        data.channels
+            .iter()
+            .map(|channel| channel.h.as_slice())
+            .collect()
+    } else {
+        vec![data.channels[0].h.as_slice()]
+    };
     let fit_opts = FitOptions {
         fit_e: false,
         iterations: 60,
@@ -955,8 +1014,12 @@ pub fn identify(data: &FrfData, opts: &IdentifyOptions) -> Result<Identification
     let mut order = opts.min_order;
     while order <= opts.max_order {
         let fo = FitOptions { order, ..fit_opts };
-        let outcome = vector_fit(omega, href, &fo).map_err(|e| ModalIdError::Fit(e.to_string()))?;
-        diagram.push(model_poles(&outcome.model));
+        diagram.push(fit_identification_poles(
+            omega,
+            &responses,
+            &fo,
+            multichannel,
+        )?);
         order += opts.order_step;
     }
     let verdicts = stabilization(&diagram, &opts.rule);
@@ -1011,17 +1074,33 @@ pub fn identify(data: &FrfData, opts: &IdentifyOptions) -> Result<Identification
     let terms = terms_from_poles(&poles);
     // Shapes: per-channel residues at the SHARED accepted poles.
     let mut shapes: Vec<Vec<C64>> = vec![Vec::new(); accepted.len()];
-    for ch in &data.channels {
-        let fo = FitOptions {
-            order: 2 * accepted.len(),
-            ..fit_opts
+    let residue_opts = FitOptions {
+        order: 2 * accepted.len(),
+        ..fit_opts
+    };
+    let joint_residues = if multichannel {
+        Some(
+            fs_vfit::mimo::common_pole_residue_fit(omega, &responses, &terms, &residue_opts)
+                .map_err(|e| ModalIdError::Fit(e.to_string()))?
+                .0,
+        )
+    } else {
+        None
+    };
+    for (channel_index, ch) in data.channels.iter().enumerate() {
+        let single_model;
+        let model = if let Some(models) = &joint_residues {
+            &models[channel_index]
+        } else {
+            single_model = residue_fit_at_poles(omega, &ch.h, &terms, &residue_opts)
+                .map_err(|e| ModalIdError::Fit(e.to_string()))?
+                .model;
+            &single_model
         };
-        let outcome = residue_fit_at_poles(omega, &ch.h, &terms, &fo)
-            .map_err(|e| ModalIdError::Fit(e.to_string()))?;
         // Match model pair terms back to accepted poles by frequency.
         for (k, &(wn, _)) in accepted.iter().enumerate() {
             let mut best: Option<(f64, C64)> = None;
-            for t in &outcome.model.terms {
+            for t in &model.terms {
                 if let fs_vfit::PoleTerm::Pair { pole, residue } = t {
                     let d = (pole.abs() - wn).abs();
                     if best.is_none_or(|(bd, _)| d < bd) {
@@ -1077,15 +1156,19 @@ pub fn identify(data: &FrfData, opts: &IdentifyOptions) -> Result<Identification
             .filter(|(i, _)| i % 2 == parity)
             .map(|(_, &w)| w)
             .collect();
-        let hh: Vec<C64> = href
+        let hh: Vec<Vec<C64>> = responses
             .iter()
-            .enumerate()
-            .filter(|(i, _)| i % 2 == parity)
-            .map(|(_, &v)| v)
+            .map(|channel| {
+                channel
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| i % 2 == parity)
+                    .map(|(_, &v)| v)
+                    .collect()
+            })
             .collect();
-        let outcome =
-            vector_fit(&om, &hh, &fit_opts).map_err(|e| ModalIdError::Fit(e.to_string()))?;
-        Ok(model_poles(&outcome.model))
+        let references: Vec<&[C64]> = hh.iter().map(Vec::as_slice).collect();
+        fit_identification_poles(&om, &references, &fit_opts, multichannel)
     };
     let (even, odd) = (half(0)?, half(1)?);
     // Nearest-match with a CAP (review finding: an uncapped nearest
