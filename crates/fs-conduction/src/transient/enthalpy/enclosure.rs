@@ -21,7 +21,7 @@ use super::{
 use crate::{
     AmbientRadiationConfig, ConductionError, ConductionProblem, RobinFlux, ScalarField, ThermalBc,
     ThermalBoundary, ThermalInterfaces,
-    radiation::{GrayDiffuseEnclosure, RadiosityReport},
+    radiation::{GrayDiffuseEnclosure, PreparedRadiosity, RadiosityReport},
 };
 
 pub use crate::radiation::EnclosureExchangeReport as EnthalpyEnclosureReport;
@@ -96,7 +96,8 @@ impl EnthalpyBackwardEuler<'_, '_> {
         let old_temperature = context.temperatures(old_h)?;
         let patches = bind(cx, problem, enclosure, &old_temperature)?;
         let prescribed_neumann_out_w = prescribed_neumann_heat(cx, problem)?;
-        let target = initial_target(&context, step_config, enclosure, &patches, radiation_config)?;
+        let prepared = enclosure.prepare_radiosity(cx)?;
+        let target = initial_target(&context, step_config, &prepared, &patches, radiation_config)?;
         let mut driving = means(cx, problem, enclosure, &old_temperature)?;
         let mut solid_iterations = 0_usize;
         let mut krylov_iterations = 0_usize;
@@ -104,7 +105,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
         let mut last_mismatch = 0.0_f64;
         for iteration in 0..radiation_config.max_iterations {
             poll(cx, iteration)?;
-            let applied = radiosity(cx, enclosure, &driving, radiation_config)?;
+            let applied = prepared_radiosity(cx, &prepared, &driving, radiation_config)?;
             let boundary = shifted_boundary(problem, &patches, &applied)?;
             let trial_context = StepContext {
                 problem: ConductionProblem {
@@ -141,7 +142,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
                 )?;
             }
             let actual = means(cx, problem, enclosure, &solid.temperature)?;
-            let fresh = radiosity(cx, enclosure, &actual, radiation_config)?;
+            let fresh = prepared_radiosity(cx, &prepared, &actual, radiation_config)?;
             let (convection, convective_out) = convection(cx, problem, &solid)?;
             let mut heat_ok = true;
             last_mismatch = 0.0;
@@ -273,6 +274,11 @@ fn radiosity(cx: &Cx<'_>, enclosure: &GrayDiffuseEnclosure, temperature: &[f64],
     Ok(exchange::radiosity(cx, enclosure, temperature, config)?)
 }
 
+fn prepared_radiosity(cx: &Cx<'_>, prepared: &PreparedRadiosity<'_>, temperature: &[f64],
+    config: AmbientRadiationConfig) -> Result<RadiosityReport, EnthalpyError> {
+    Ok(exchange::prepared_radiosity(cx, prepared, temperature, config)?)
+}
+
 fn shifted_boundary(problem: ConductionProblem<'_>, patches: &[Patch],
     radiosity: &RadiosityReport) -> Result<ThermalBoundary, EnthalpyError> {
     Ok(exchange::shifted_boundary(problem, patches, radiosity)?)
@@ -291,14 +297,14 @@ fn convection(cx: &Cx<'_>, problem: ConductionProblem<'_>, solid: &EnthalpyStepS
 fn initial_target(
     context: &StepContext<'_, '_, '_, '_>,
     config: EnthalpyStepConfig,
-    enclosure: &GrayDiffuseEnclosure,
+    prepared: &PreparedRadiosity<'_>,
     patches: &[Patch],
     radiation_config: AmbientRadiationConfig,
 ) -> Result<f64, EnthalpyError> {
     let initial_h = context.initial_values()?;
     let temperature = context.temperatures(&initial_h)?;
-    let means = means(context.cx, context.problem, enclosure, &temperature)?;
-    let initial = radiosity(context.cx, enclosure, &means, radiation_config)?;
+    let means = means(context.cx, context.problem, prepared.enclosure(), &temperature)?;
+    let initial = prepared_radiosity(context.cx, prepared, &means, radiation_config)?;
     let boundary = shifted_boundary(context.problem, patches, &initial)?;
     let physical = StepContext {
         problem: ConductionProblem {

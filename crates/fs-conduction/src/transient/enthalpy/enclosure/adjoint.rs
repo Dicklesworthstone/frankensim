@@ -8,12 +8,13 @@
 use fs_exec::Cx;
 
 use super::{
-    bind, convection, initial_target, means, prescribed_neumann_heat, radiosity, shifted_boundary,
+    bind, convection, initial_target, means, prescribed_neumann_heat, prepared_radiosity,
+    shifted_boundary,
 };
 use crate::{
     AmbientRadiationConfig, ConductionProblem, ThermalInterfaces,
     assemble::ASSEMBLY_TILE,
-    radiation::{GrayDiffuseEnclosure, STEFAN_BOLTZMANN_W_M2_K4, solve_dense},
+    radiation::{GrayDiffuseEnclosure, PreparedRadiosity, STEFAN_BOLTZMANN_W_M2_K4},
     transient::enthalpy::{
         EnthalpyBackwardEuler, EnthalpyStepConfig, EnthalpyStepSolution, StepContext,
         adjoint::{EnthalpyAdjointError, EnthalpyStepLinearization},
@@ -79,9 +80,10 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
         };
         let temperature = context.temperatures(&accepted.specific_enthalpy_j_kg)?;
         let patches = bind(cx, problem, enclosure, &temperature)?;
-        let target = initial_target(&context, step_config, enclosure, &patches, radiation_config)?;
+        let prepared = enclosure.prepare_radiosity(cx)?;
+        let target = initial_target(&context, step_config, &prepared, &patches, radiation_config)?;
         let means = means(cx, problem, enclosure, &temperature)?;
-        let fresh = radiosity(cx, enclosure, &means, radiation_config)?;
+        let fresh = prepared_radiosity(cx, &prepared, &means, radiation_config)?;
         let boundary = shifted_boundary(problem, &patches, &fresh)?;
         let mut transport = self.linearize_accepted_with_target(
             cx,
@@ -96,11 +98,11 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             accepted,
             Some(target),
         )?;
-        // The small patch system uses the same pivoted radiosity solver as the
-        // primal, with independently checked derivative equation residuals.
+        // Reuse the primal factorization for every derivative column while
+        // independently checking the original derivative equations.
         let slopes = flux_temperature_jacobian(
             cx,
-            enclosure,
+            &prepared,
             &means,
             step_config.newton.relative_tolerance,
         )?;
@@ -152,10 +154,11 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
 
 fn flux_temperature_jacobian(
     cx: &Cx<'_>,
-    enclosure: &GrayDiffuseEnclosure,
+    prepared: &PreparedRadiosity<'_>,
     temperatures: &[f64],
     relative: f64,
 ) -> Result<Vec<Vec<f64>>, EnthalpyAdjointError> {
+    let enclosure = prepared.enclosure();
     let n = enclosure.surfaces().len();
     let factors = enclosure.view_factors().factors();
     let mut matrix = vec![vec![0.0; n]; n];
@@ -184,7 +187,7 @@ fn flux_temperature_jacobian(
         poll(cx, column)?;
         let mut rhs = vec![0.0; n];
         rhs[column] = slopes[column];
-        let response = solve_dense(cx, &matrix, &rhs)?;
+        let response = prepared.solve_rhs(cx, &rhs)?;
         let scale = slopes[column].abs().max(f64::MIN_POSITIVE);
         for row in 0..n {
             let mut applied = 0.0;

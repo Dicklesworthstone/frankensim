@@ -87,6 +87,7 @@ fn capacity_enclosure_preserves_finite_storage_original_convection_and_prescribe
                 let audit = engine.evaluate_prescribed_enclosure_endpoint(cx, problem, None,
                     &old, &got.conduction.temperature, DT, capacity_config(),
                     &fixture.enclosure, radiation_config()).unwrap();
+                assert_eq!(audit.radiosity, got.radiation.radiosity);
                 close(audit.physical.energy_residual_j, got.physical_energy_residual_j, 1e-11);
                 close(audit.physical.convective_out_w, convection, 2e-9);
                 if htc[0] == 0.0 && htc[1] > 0.0 {

@@ -61,10 +61,13 @@ impl<'a> PreparedRadiosity<'a> {
         self.enclosure.solve_with_factors(cx, surface_temperatures_k, Some(&self.factors))
     }
 
-    // The spatial emission owner validates every contributing surface node,
-    // integrates its own physical RHS and checks the original heat equations.
-    // Reuse exactly the same factorization for that load and its derivative.
-    pub(super) fn solve_rhs(&self, cx: &Cx<'_>, rhs: &[f64]) -> Result<Vec<f64>, ConductionError> {
+    pub(crate) fn enclosure(&self) -> &GrayDiffuseEnclosure {
+        self.enclosure
+    }
+
+    // Load and tangent owners validate their physical inputs and independently
+    // check the original equations. Reuse the same factorization for each RHS.
+    pub(crate) fn solve_rhs(&self, cx: &Cx<'_>, rhs: &[f64]) -> Result<Vec<f64>, ConductionError> {
         self.factors.solve(cx, rhs)
     }
 }

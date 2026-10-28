@@ -8,7 +8,7 @@ use crate::{
     ScalarField, ThermalBc, ThermalBoundary,
     assemble::ASSEMBLY_TILE,
 };
-use super::{GrayDiffuseEnclosure, RadiosityReport};
+use super::{GrayDiffuseEnclosure, PreparedRadiosity, RadiosityReport};
 
 /// Accepted exchange and actual work over all enclosure trials.
 #[derive(Debug, Clone)]
@@ -143,6 +143,25 @@ pub(crate) fn radiosity(
 ) -> Result<RadiosityReport, ConductionError> {
     poll(cx, 0)?;
     let report = enclosure.solve(cx, temperature)?;
+    checked_radiosity(enclosure, report, config)
+}
+
+pub(crate) fn prepared_radiosity(
+    cx: &Cx<'_>,
+    prepared: &PreparedRadiosity<'_>,
+    temperature: &[f64],
+    config: AmbientRadiationConfig,
+) -> Result<RadiosityReport, ConductionError> {
+    poll(cx, 0)?;
+    let report = prepared.solve(cx, temperature)?;
+    checked_radiosity(prepared.enclosure(), report, config)
+}
+
+fn checked_radiosity(
+    enclosure: &GrayDiffuseEnclosure,
+    report: RadiosityReport,
+    config: AmbientRadiationConfig,
+) -> Result<RadiosityReport, ConductionError> {
     for &value in report.radiosity_w_m2.iter().chain(&report.irradiation_w_m2) {
         if !value.is_finite() || value < 0.0 {
             return Err(invalid("nonphysical enclosure radiosity"));

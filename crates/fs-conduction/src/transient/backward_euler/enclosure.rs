@@ -150,8 +150,12 @@ impl BackwardEuler<'_> {
             predictor[vertex] = dofs.prescribed()[vertex];
         }
         let patches = exchange::bind(cx, problem, enclosure, &predictor)?;
-        let initial = self.evaluate_prescribed_enclosure_endpoint(cx, problem, interfaces,
-            old, &predictor, dt_s, step_config, enclosure, radiation_config)?;
+        let prepared = enclosure.prepare_radiosity(cx)?;
+        let initial_means = exchange::means(cx, problem, enclosure, &predictor)?;
+        let initial_radiosity =
+            exchange::prepared_radiosity(cx, &prepared, &initial_means, radiation_config)?;
+        let initial = self.enclosure_endpoint_from_radiosity(cx, problem, interfaces,
+            old, &predictor, dt_s, step_config, &patches, initial_radiosity)?;
         let initial_norm_j = initial.physical.residual_norm_j;
         let target = match nonlinear {
             Some(policy) => finite(policy.residual_atol_j + policy.residual_rtol * initial_norm_j)?,
@@ -167,7 +171,7 @@ impl BackwardEuler<'_> {
         let mut last_mismatch = 0.0_f64;
         for iteration in 0..radiation_config.max_iterations {
             poll(cx, iteration)?;
-            let applied = exchange::radiosity(cx, enclosure, &driving, radiation_config)?;
+            let applied = exchange::prepared_radiosity(cx, &prepared, &driving, radiation_config)?;
             let boundary = exchange::shifted_boundary(problem, &patches, &applied)?;
             let combined = ConductionProblem { boundary: &boundary, ..problem };
             let inner_norm_j = self.evaluate_endpoint(
@@ -197,7 +201,7 @@ impl BackwardEuler<'_> {
             krylov_iterations = krylov_iterations.checked_add(conduction.krylov_iterations)
                 .ok_or_else(|| invalid("enclosure capacity Krylov count overflow"))?;
             let actual = exchange::means(cx, problem, enclosure, &conduction.temperature)?;
-            let fresh = exchange::radiosity(cx, enclosure, &actual, radiation_config)?;
+            let fresh = exchange::prepared_radiosity(cx, &prepared, &actual, radiation_config)?;
             let audited = self.enclosure_endpoint_from_radiosity(cx, problem, interfaces,
                 old, &conduction.temperature, dt_s, step_config, &patches, fresh)?;
             let physical = audited.physical;

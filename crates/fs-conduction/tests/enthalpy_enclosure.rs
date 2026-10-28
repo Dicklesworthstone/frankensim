@@ -273,6 +273,9 @@ fn two_spatial_bodies_match_independent_reflected_exchange_and_energy() {
                     .unwrap()
             };
             let got = solve();
+            assert_eq!(got.radiation.radiosity, fixture.enclosure.solve(
+                cx, &got.radiation.radiosity.surface_temperatures_k,
+            ).unwrap());
             let capacity = RHO * CP * 2.0_f64.sqrt() / 12.0;
             let area = 3.0_f64.sqrt();
             let sum = (capacity * (temperatures[0] + temperatures[1]) + DT * HTC * area * 600.0)
@@ -397,6 +400,17 @@ fn complete_h_tangent_and_history_source_pullbacks_match_perturbed_physics() {
         let jv = linear.apply_jacobian(cx, &direction).unwrap();
         let jtu = linear.apply_jacobian_transpose(cx, &goal).unwrap();
         close(dot(&goal, &jv), dot(&jtu, &direction), 1e-12);
+        // Standalone audits use fresh one-shot radiosity, independently of the
+        // factors retained by the complete reflected-radiation tangent.
+        let delta = 0.03;
+        let residuals = [-delta, delta].map(|offset| {
+            let candidate = linear.primal().specific_enthalpy_j_kg.iter().zip(direction)
+                .map(|(&h, v)| h + offset * v).collect::<Vec<_>>();
+            engine.evaluate_endpoint_with_enclosure(cx, fixture.problem(&source), None,
+                &old, &candidate, DT, step_config(), &fixture.enclosure, radiation_config())
+                .unwrap().residual_norm_j
+        });
+        close((residuals[0] + residuals[1]) / (2.0 * delta), dot(&jv, &jv).sqrt(), 1e-7);
         let seed = linear.temperature_pullback(cx, &goal).unwrap();
         let gradient = linear
             .pullback(
