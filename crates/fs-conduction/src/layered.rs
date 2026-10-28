@@ -1,8 +1,8 @@
 //! Planar, one-dimensional steady heat flow through an ordered material stack.
 //!
 //! Each layer retains the existing conductivity table and its source receipts.
-//! This rung admits only temperature-independent conductivity; it never freezes
-//! a varying source curve at a representative temperature. Contacts and surface
+//! Separate constant and positive piecewise-linear conductivity solves retain
+//! source curves without freezing them at a representative temperature. Surface
 //! films are explicit area-specific resistances, including explicit zero for
 //! perfect contact or a prescribed surface temperature. There is no volumetric
 //! heating, lateral spreading, radiation, moisture transport or transient claim.
@@ -12,6 +12,11 @@ use fs_exec::Cx;
 use fs_matdb::{ClaimSelection, MaterialCard, PropertyKey, QueryPoint};
 
 use crate::{ConductionError, ConductivityTable};
+
+mod nonlinear;
+pub use nonlinear::{
+    NonlinearLayerTemperatures, NonlinearLayeredWallSolution, NonlinearWallOptions,
+};
 
 /// Maximum layers in one bounded planar solve.
 pub const MAX_LAYERED_WALL_LAYERS: usize = 256;

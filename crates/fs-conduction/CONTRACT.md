@@ -16,8 +16,17 @@ span and reports independently recomputed Fourier-law and boundary residuals.
 The immutable input is unchanged on failure. Layer/knot caps bound work, and
 the solver checks the existing executor cancellation gate between layers.
 
-Varying conductivity is refused by the constant solve entry point. No varying
-source is frozen, and no density/Cp, transient history, lateral spreading,
+Varying conductivity is refused by the constant solve entry point. The separate
+`LayeredWall::solve_temperature_dependent` entry point integrates every positive
+piecewise-linear source segment with a scaled analytic inverse and bounded
+monotone common-flux shooting. Each source table must support the entire reservoir
+interval at its original fixed nonthermal context. Caller-declared iteration,
+temperature and constitutive-flux limits gate the returned candidate. Cancellation
+is checked between layers and every 128 source segments. Effective resistance and
+transmittance belong to this boundary pair; they are not tangent conductances.
+Seven cases in `tests/layered_nonlinear.rs` cover affine and interior-knot laws,
+contacts/films, reversal, equal temperatures, original source receipts and bounded
+refusal. No density/Cp, transient history, lateral spreading,
 radiation, moisture transport, propagated material uncertainty or experimental
 qualification is inferred. Geometric/process matching beyond the explicit
 temperature span remains the caller's duty, including thickness-dependent
