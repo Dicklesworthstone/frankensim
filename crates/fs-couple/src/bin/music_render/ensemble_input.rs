@@ -125,6 +125,21 @@ enum Listener {
 struct ListenerMedium { density: f64, sound_speed: f64, gas: Option<GasState> }
 impl ListenerMedium {
     fn of(gas: &GasState) -> Self { Self { density: gas.density, sound_speed: gas.sound_speed, gas: Some(*gas) } }
+    fn provenance_json(&self) -> String {
+        match self.gas {
+            Some(gas) => format!(
+                "{{\"density_kg_m3\":{:e},\"sound_speed_m_s\":{:e},\"state_authority\":\"complete_gas_state\",\"temperature_k\":{:e},\"pressure_pa\":{:e},\"dynamic_viscosity_pa_s\":{:e},\"thermal_conductivity_w_m_k\":{:e},\"heat_capacity_ratio\":{:e},\"specific_gas_constant_j_kg_k\":{:e},\"specific_heat_cp_j_kg_k\":{:e},\"prandtl\":{:e},\"characteristic_impedance_pa_s_m\":{:e},\"water_mole_fraction\":{:e}}}",
+                gas.density, gas.sound_speed, gas.temperature, gas.pressure,
+                gas.dynamic_viscosity, gas.thermal_conductivity, gas.gamma,
+                gas.specific_gas_constant, gas.specific_heat_cp, gas.prandtl,
+                gas.characteristic_impedance, gas.water_mole_fraction,
+            ),
+            None => format!(
+                "{{\"density_kg_m3\":{:e},\"sound_speed_m_s\":{:e},\"state_authority\":\"receiver_coefficients_only\"}}",
+                self.density, self.sound_speed,
+            ),
+        }
+    }
     /// The observer consumes rho (amplitude) and c (time of flight) bit for bit.
     /// If either source claims a complete gas state, both must retain and match
     /// that complete state. A receiver-only (rho, c) tuple cannot prove that its
@@ -507,8 +522,8 @@ pub(super) fn run_with_gas_sources(
     let listener = match sources.iter().enumerate().find_map(|(i, s)| match s.listener {
         Listener::Gas(m) => Some((i, m)), Listener::Unconstrained(_) => None,
     }) {
-        Some((first, m)) => format!("{{\"density_kg_m3\":{:e},\"sound_speed_m_s\":{:e},\"set_by_part\":{first},\"unconstrained_parts\":[{}]}}",
-            m.density, m.sound_speed, unconstrained.join(",")),
+        Some((first, m)) => format!("{{\"medium\":{},\"set_by_part\":{first},\"unconstrained_parts\":[{}]}}",
+            m.provenance_json(), unconstrained.join(",")),
         None => format!("{{\"declared\":\"none\",\"unconstrained_parts\":[{}]}}", unconstrained.join(",")),
     };
     let provenance = format!("{{\"schema\":\"frankensim-music-render-provenance-v1\",\"fixture\":\"ensemble-input\",\
@@ -564,6 +579,26 @@ mod tests {
             "two receiver-only media with the same consumed coefficients remain compatible"
         );
     }
+    #[test]
+    fn listener_provenance_distinguishes_complete_state_from_receiver_coefficients() {
+        let gas = GasState::try_new_moist_air(293.15, 101325.0, 0.35).unwrap();
+        let complete = ListenerMedium::of(&gas).provenance_json();
+        assert!(complete.contains("\"state_authority\":\"complete_gas_state\""));
+        assert!(complete.contains("\"temperature_k\":"));
+        assert!(complete.contains("\"pressure_pa\":"));
+        assert!(complete.contains("\"water_mole_fraction\":"));
+
+        let receiver = ListenerMedium {
+            density: gas.density,
+            sound_speed: gas.sound_speed,
+            gas: None,
+        }
+        .provenance_json();
+        assert!(receiver.contains("\"state_authority\":\"receiver_coefficients_only\""));
+        assert!(!receiver.contains("\"temperature_k\":"));
+        assert!(!receiver.contains("\"pressure_pa\":"));
+    }
+
     #[test]
     fn physical_duration_stays_in_sources_and_pcm_scale_is_explicit() {
         let valid = args(&["out.wav", "--plate", "a.performance", "--modal", "b.performance", "--full-scale-pa", "2", "--block", "37", "--decimate"]);
