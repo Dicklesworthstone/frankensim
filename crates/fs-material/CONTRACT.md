@@ -3256,3 +3256,23 @@ withdrawal and constitutive admission. An additional extreme-range underflow
 regression and the merge onto the concurrently improved entropy API were
 source-reviewed after recovery; full native rerun and workspace validation
 remain unverified because the restart removed the dependency caches.
+
+
+### Runnable evolving-gas ice cold trap
+
+`cargo run -p fs-material --example nonisothermal_ice_cold_trap` advances two
+10-micrometer ice films at 260/252 K through one 100 mL water-vapor chamber,
+initially 256 K and 130 Pa, for 2 ms. The original NASA-9 H2O coefficients and
+IAPWS ice pressure/latent law remain the thermodynamic owners. The example
+explicitly derives h_s(T)=h_v(T)-L(T)-datum on 250--270 K; this compatible reduced
+ice chart is not independently measured ice calorimetry. Original dilute-vapor
+transport remains within its stated sub-triple continuation. Fixed film area,
+917 kg/m3 density, accommodation one and a well-mixed local vapor are explicit
+scenario assumptions; no chamber-design or spatial-flow validation is claimed.
+
+The actual native example passed both default and tenfold tighter local-error
+runs. Warm loss/cold deposition were 26.567540/23.881098 micrograms by default,
+with gas temperature 255.821736 K; tighter results were 26.564590/23.878148
+micrograms and 255.821858 K. Both runs assert whole-history original-datum mass
+and energy conservation and report gross counterflux, adaptive work and residuals.
+Run with argument `0.1` to tighten local temporal error targets tenfold.
