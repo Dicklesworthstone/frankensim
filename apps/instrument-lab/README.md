@@ -126,6 +126,14 @@ complete editable configuration as `*.native.json`. This is the existing
 the browser and service share its reader. No material property or physical
 record is translated into a browser-specific model.
 
+Use **Edit text…** beside an attached profile to change its original body
+geometry, finger/stop paths or contact-thermal controls. **Apply source edit**
+keeps the file's path and profile association and marks previous audio as stale;
+render again to hear the change. **Cancel edit**, or applying unchanged text,
+keeps every original byte, including line endings. Apply or cancel before
+saving or rendering so the experiment always contains the displayed sources.
+Binary bulk, interface and model packs use **Replace…** at their existing path.
+
 The material-string launcher can prepare this packet from the same source
 assembly used for native research renders. For the committed four-string
 il Cannone assembly, from the repository root:
@@ -151,7 +159,13 @@ with the appropriate `--pack-root`, `--body-profile`, `--stop-profile` and
 `--contact-thermal` inputs. A prepared body profile needs no executable during
 this staging step; generating a shell profile still requires `--renderer`.
 `--stop-profile` includes the original finger, fret and material bow-contact
-data, including moving contacts. Source-backed gases retain every original
+data, including moving contacts. Material-derived normal contacts retain their
+receiver bulk `.fsmatpk`, ordered interface `.fsintpk` and normal-law
+`.fsmodelpk` sources in the prepared experiment. For a source using another
+filename, bind that exact referenced path with
+`--pack contacts/normal.model-data=/path/to/original-model-pack`; its bytes
+still go to the original native decoder. No contact coefficient is inferred
+by the launcher or editor. Source-backed gases retain every original
 `--gas-component SPECIES NASA9 TRANSPORT` triple and require explicit
 `--gas-water none|ID` and `--gas-phase frozen|liquid-water` choices for export.
 `--lab-experiment` saves the packet alongside a normal native audio render.

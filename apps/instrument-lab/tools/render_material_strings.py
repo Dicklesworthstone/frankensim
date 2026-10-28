@@ -108,19 +108,22 @@ def assembly_geometry(text: str, report: str) -> str:
 def stage_packs(texts: list[str], root: Path, replacements: list[str], output: Path) -> list[str]:
     # These are the existing binary pack formats, copied byte for byte.
     # Rust remains the material decoder and property/domain authority.
-    available = {str(p.relative_to(root)): p for suffix in ("*.fsmatpk", "*.fsintpk") for p in root.rglob(suffix)}
+    suffixes = (".fsmatpk", ".fsintpk", ".fsmodelpk")
+    available = {str(p.relative_to(root)): p for suffix in suffixes for p in root.rglob("*" + suffix)}
     tokens = {token for text in texts for line in text.splitlines() if not line.startswith("#") for token in line.split()}
     replaced = set()
     for binding in replacements:
         name, sep, source = binding.partition("=")
-        if not sep or not name or name not in tokens or name in replaced or not name.endswith((".fsmatpk", ".fsintpk")):
+        # An explicit binding may use any native-referenced filename. The Rust
+        # consumer selects and decodes the actual bulk/interface/model format.
+        if not sep or not name or name not in tokens or name in replaced:
             raise ValueError(f"--pack must name one distinct referenced path: {binding!r}")
         path = Path(name)
         if path.is_absolute() or any(p in (".", "..") for p in name.split("/")):
             raise ValueError("material pack paths must stay relative to the performance directory")
         available[name] = Path(source).expanduser().resolve()
         replaced.add(name)
-    required = {t for t in tokens if t.endswith((".fsmatpk", ".fsintpk"))} | replaced
+    required = {t for t in tokens if t.endswith(suffixes)} | replaced
     for name in sorted(required):
         if name not in available:
             raise ValueError(f"missing material pack {name}; supply --pack-root or --pack {name}=PATH")

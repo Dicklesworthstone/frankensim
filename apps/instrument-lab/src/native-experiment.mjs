@@ -91,6 +91,31 @@ function validateStringProfiles(value, renderer, attachedNames) {
   return Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]]));
 }
 
+/** Decode an attached text source for editing; binary packs stay byte attachments. */
+export function editableAttachmentText(bytes) {
+  if (!(bytes instanceof Uint8Array) || !bytes.length)
+    throw new NativeWindError(400, 'Choose a nonempty text source to edit.');
+  if (bytes.length > MAX_ATTACHMENT_FILE_BYTES)
+    throw new NativeWindError(413, 'Text source exceeds the 8 MiB attachment limit.');
+  let text;
+  try { text = new TextDecoder('utf-8', {fatal:true, ignoreBOM:true}).decode(bytes); }
+  catch { throw new NativeWindError(400, 'This attachment is not UTF-8 text. Use Replace for binary source packs.'); }
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text))
+    throw new NativeWindError(400, 'This attachment contains binary controls. Use Replace for binary source packs.');
+  return text;
+}
+
+/** Preserve original bytes when a textarea has only normalized its line endings. */
+export function editedAttachmentBytes(original, text) {
+  const before = editableAttachmentText(original);
+  if (typeof text !== 'string')
+    throw new NativeWindError(400, 'The edited source must be text.');
+  if (text === before || text === before.replace(/\r\n?/g, '\n')) return original;
+  const bytes = new TextEncoder().encode(text);
+  editableAttachmentText(bytes);
+  return bytes;
+}
+
 /** Transport envelope only: no physics records or material constants are interpreted. */
 export function validateInput(bytes, bundled = false) {
   if (!bundled) return {source:validateSource(bytes), attachments:[], decimate:false};

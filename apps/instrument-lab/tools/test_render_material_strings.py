@@ -62,6 +62,50 @@ class MaterialPreparation(unittest.TestCase):
             with self.assertRaises(ValueError):
                 R.stage_packs(["string wire.fsmatpk 0.3"], packs, bindings, output)
 
+
+    def test_material_stop_model_sources_and_explicit_native_paths_reach_the_complete_experiment(self):
+        root = Path(tempfile.mkdtemp())
+        original = (EXAMPLES / "pluck.material-strings").read_text()
+        source = root / "source.material-strings"
+        source.write_text(original)
+        sources = {"wire.fsmatpk": b"original-wire", "body.fsmatpk": b"original-body",
+                   "contacts/receiver.fsmatpk": b"receiver-bulk\x00\xff",
+                   "contacts/normal.fsintpk": b"ordered-interface\x00\xff",
+                   "contacts/normal.fsmodelpk": b"original-normal-model\x00\xff"}
+        for name, data in sources.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        stop = root / "fingers.stops"
+        stop.write_bytes(b"frankensim-string-stops-v1\r\n"
+                         b"material-stop finger 0 0.25 positive fixed -1e-9 contacts/receiver.fsmatpk "
+                         b"contacts/normal.fsintpk contacts/normal.fsmodelpk "
+                         b"5000 5000 0.1 0.00005 0.00005 0.01 0.02 0.03 10 1e-8\r\n")
+        for index, explicit in enumerate([False, True]):
+            profile = stop.read_bytes()
+            args = []
+            expected = dict(sources)
+            if explicit:
+                # The native loader permits arbitrary declared paths; suffixes
+                # discover conventional sources but cannot restrict an explicit binding.
+                profile = profile.replace(b"contacts/normal.fsmodelpk", b"contacts/normal.model-data")
+                replacement = root / "replacement.pack"
+                replacement.write_bytes(b"substituted-source-model\x00\xff")
+                args = ["--pack", f"contacts/normal.model-data={replacement}"]
+                del expected["contacts/normal.fsmodelpk"]
+                expected["contacts/normal.model-data"] = replacement.read_bytes()
+            chosen = root / f"fingers-{index}.stops"
+            chosen.write_bytes(profile)
+            output = root / f"prepared-{index}"
+            self.assertEqual(R.main(["--prepare-only", "--performance", str(source), "--out", str(output),
+                                     "--stop-profile", str(chosen), *args]), 0)
+            packet = json.loads((output / "experiment.native.json").read_text())
+            attached = {file["path"]: base64.b64decode(file["bytes"]) for file in packet["attachments"]}
+            self.assertEqual(packet["stringProfiles"]["stopPath"], "stops.profile")
+            self.assertEqual(attached.pop("stops.profile"), profile)
+            self.assertEqual(attached, expected)
+            self.assertEqual(base64.b64decode(packet["source"]), original.encode())
+
     def test_native_launch_consumes_the_substituted_gas_pack_and_original_tension(self):
         root = Path(tempfile.mkdtemp())
         # This executable is an I/O witness, not a mock physical model. It checks

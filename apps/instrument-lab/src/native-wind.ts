@@ -12,7 +12,7 @@ import { el } from "./util";
 import { createNativeGasControls } from "./native-wind-gases";
 import { createNativeStringProfiles } from "./native-string-profiles";
 import { createNativeComparisonPanel } from "./native-comparison";
-import { MAX_REQUEST_BYTES, serializeNativeExperiment, validateInput } from "./native-experiment.mjs";
+import { MAX_REQUEST_BYTES, editableAttachmentText, editedAttachmentBytes, serializeNativeExperiment, validateInput } from "./native-experiment.mjs";
 
 const EXAMPLES = [
   {
@@ -135,6 +135,18 @@ export function createNativeWindPanel(): HTMLElement {
   let replacing: Attached | null = null;
   const replacementFile = el("input", {type:"file", "aria-label":"Replace an attached source without changing its path"});
   replacementFile.hidden = true;
+  let editingAttachment: Attached | null = null;
+  let attachmentEditorInitialValue = "";
+  const attachmentEditorTitle = el("label", {for:"native-attachment-source"});
+  const attachmentSource = el("textarea", {id:"native-attachment-source", class:"nw-source", rows:"12",
+    spellcheck:"false", autocapitalize:"off", autocomplete:"off", wrap:"off"});
+  const applyAttachment = el("button", {type:"button", class:"btn primary"}, "Apply source edit");
+  const cancelAttachment = el("button", {type:"button", class:"btn"}, "Cancel edit");
+  const attachmentEditor = el("section", {"aria-label":"Edit attached physical source"},
+    attachmentEditorTitle,
+    el("p", {class:"small muted"}, "Edit original profile, geometry or control records. Apply keeps this file's path and all profile associations; the native renderer checks the physical data. Binary material, interface and model packs use Replace."),
+    attachmentSource, el("div", {class:"btn-row"}, applyAttachment, cancelAttachment));
+  attachmentEditor.hidden = true;
   const attachmentIdentity = (): string => JSON.stringify(attachments.map(file => [file.path, file.sha256]));
   const gas = createNativeGasControls(() => edited());
   const profiles = createNativeStringProfiles(() => edited());
@@ -166,24 +178,28 @@ export function createNativeWindPanel(): HTMLElement {
 
   const controls = (): void => {
     const active = rendering !== null;
-    render.disabled = active || loadingFile || checking !== null || !rendererAvailable(status) || Boolean(status?.busy) || !source.value.trim();
+    const locked = active || loadingFile || editingAttachment !== null;
+    render.disabled = locked || checking !== null || !rendererAvailable(status) || Boolean(status?.busy) || !source.value.trim();
     cancel.hidden = !active;
     check.disabled = active || checking !== null;
-    open.disabled = active || loadingFile;
-    openExperiment.disabled = active || loadingFile;
-    saveExperiment.disabled = active || loadingFile || !source.value.trim();
-    reset.disabled = active || loadingFile;
-    starter.disabled = active || loadingFile;
-    renderer.disabled = active || loadingFile;
-    attach.disabled = active || loadingFile;
-    decimate.disabled = active || loadingFile;
-    gas.setDisabled(active || loadingFile);
+    open.disabled = locked;
+    openExperiment.disabled = locked;
+    saveExperiment.disabled = locked || !source.value.trim();
+    reset.disabled = locked;
+    starter.disabled = locked;
+    renderer.disabled = locked;
+    attach.disabled = locked;
+    decimate.disabled = locked;
+    gas.setDisabled(locked);
     profiles.element.hidden = selectedRenderer() !== "strings";
-    profiles.setDisabled(active || loadingFile || selectedRenderer() !== "strings");
+    profiles.setDisabled(locked || selectedRenderer() !== "strings");
     attachmentList.querySelectorAll<HTMLInputElement | HTMLButtonElement>("input,button")
-      .forEach(control => { control.disabled = active || loadingFile; });
-    source.readOnly = active || loadingFile;
+      .forEach(control => { control.disabled = locked; });
+    source.readOnly = locked;
     source.setAttribute("aria-busy", String(active));
+    attachmentSource.readOnly = active || loadingFile;
+    applyAttachment.disabled = active || loadingFile;
+    cancelAttachment.disabled = active || loadingFile;
     render.textContent = active ? "Rendering…" : "Render WAV";
   };
   const edited = (): void => {
@@ -369,6 +385,20 @@ export function createNativeWindPanel(): HTMLElement {
         attached.path = path.value; gas.setAttachments(attachments.map(file => file.path));
         profiles.setAttachments(attachments.map(file => file.path)); edited();
       });
+      const editText = el("button", {type:"button", class:"btn"}, "Edit text…");
+      editText.addEventListener("click", () => {
+        if (rendering || loadingFile || editingAttachment) return;
+        try {
+          const text = editableAttachmentText(attached.bytes);
+          attachmentSource.value = text;
+          attachmentEditorInitialValue = attachmentSource.value;
+          editingAttachment = attached;
+          attachmentEditorTitle.textContent = `Editing ${attached.path}`;
+          attachmentEditor.hidden = false;
+          controls(); attachmentSource.focus();
+          showResult("Apply or cancel the attached-source edit before rendering or saving.");
+        } catch (error) { showResult(message(error), true); }
+      });
       const replace = el("button", {type:"button", class:"btn"}, "Replace…");
       replace.addEventListener("click", () => {
         if (rendering || loadingFile) return;
@@ -381,10 +411,58 @@ export function createNativeWindPanel(): HTMLElement {
       });
       attachmentList.append(el("div", { class: "nw-attachment" }, path,
         el("span", { class: "small muted", title: `SHA-256 ${attached.sha256}` },
-          `${attached.bytes.byteLength.toLocaleString()} bytes · ${attached.sha256.slice(0, 12)}…`), replace, remove));
+          `${attached.bytes.byteLength.toLocaleString()} bytes · ${attached.sha256.slice(0, 12)}…`), editText, replace, remove));
     }
     controls();
   };
+  const replaceAttachedSource = async (target: Attached, bytes: Uint8Array): Promise<void> => {
+    const maximumFile = Math.min(8 * 1024 * 1024, status?.maximumAttachmentFileBytes ?? 8 * 1024 * 1024);
+    const maximumTotal = Math.min(32 * 1024 * 1024, status?.maximumAttachmentBytes ?? 32 * 1024 * 1024);
+    const otherBytes = attachments.reduce((sum, file) => sum + (file === target ? 0 : file.bytes.byteLength), 0);
+    if (!bytes.length || bytes.length > maximumFile || otherBytes + bytes.length > maximumTotal)
+      throw new Error("Replacement exceeds the source-file limit. The original source remains attached.");
+    const digest = await crypto.subtle.digest("SHA-256", new Uint8Array(bytes));
+    const sha256 = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+    const index = attachments.indexOf(target);
+    if (index === -1) throw new Error("The source is no longer attached.");
+    // Publish bytes and identity together; paths, associations and prior audio stay intact.
+    attachments[index] = {path:target.path, bytes, sha256};
+    drawAttachments(); edited();
+  };
+  const closeAttachmentEditor = (): void => {
+    editingAttachment = null;
+    attachmentEditorInitialValue = "";
+    attachmentSource.value = "";
+    attachmentEditor.hidden = true;
+    controls();
+  };
+  cancelAttachment.addEventListener("click", () => {
+    if (rendering || loadingFile) return;
+    closeAttachmentEditor();
+    showResult("Edit cancelled. The original attached source is unchanged.");
+  });
+  applyAttachment.addEventListener("click", () => {
+    const target = editingAttachment;
+    if (!target || rendering || loadingFile) return;
+    let bytes: Uint8Array;
+    try {
+      bytes = attachmentSource.value === attachmentEditorInitialValue ? target.bytes
+        : editedAttachmentBytes(target.bytes, attachmentSource.value);
+    }
+    catch (error) { showResult(message(error), true); return; }
+    if (bytes === target.bytes) {
+      closeAttachmentEditor();
+      showResult("No source change. The original bytes and line endings are retained.");
+      return;
+    }
+    loadingFile = true; controls();
+    void replaceAttachedSource(target, bytes).then(() => {
+      closeAttachmentEditor();
+      showResult(`Updated ${target.path}. Render again to hear the new physical configuration; reference A is unchanged.`);
+    }).catch(error => {
+      showResult(`Edit was not applied: ${message(error)}`, true);
+    }).finally(() => { loadingFile = false; controls(); });
+  });
   decimate.addEventListener("change", edited);
   attach.addEventListener("click", () => attachmentFile.click());
   openExperiment.addEventListener("click", () => experimentFile.click());
@@ -482,17 +560,9 @@ export function createNativeWindPanel(): HTMLElement {
       return;
     }
     loadingFile = true; controls();
-    void selected.arrayBuffer().then(async buffer => {
-      const digest = await crypto.subtle.digest("SHA-256", buffer);
-      const sha256 = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
-      const index = attachments.indexOf(target);
-      if (index === -1) return;
-      // Swap bytes, never the declared path. Existing gas/profile associations
-      // and performance references survive; earlier render snapshots stay intact.
-      attachments[index] = {path:target.path, bytes:new Uint8Array(buffer), sha256};
-      drawAttachments(); edited();
-      showResult(`Replaced ${target.path}. Render again to hear the new source; reference A is unchanged.`);
-    }).catch(() => showResult("The replacement could not be read. The original material remains attached.", true))
+    void selected.arrayBuffer().then(buffer => replaceAttachedSource(target, new Uint8Array(buffer)))
+      .then(() => showResult(`Replaced ${target.path}. Render again to hear the new source; reference A is unchanged.`))
+      .catch(error => showResult(`The replacement was not applied: ${message(error)}`, true))
       .finally(() => { loadingFile = false; controls(); });
   });
   file.addEventListener("change", () => {
@@ -552,7 +622,7 @@ export function createNativeWindPanel(): HTMLElement {
         " · ", el("a", { href: "https://github.com/Dicklesworthstone/frankensim/tree/main/apps/instrument-lab#native-wind-and-string-renderer", target: "_blank", rel: "noopener" }, "Local renderer setup"))),
     el("div", { class: "nw-source-head" }, el("label", { for: "native-wind-source" }, "Performance source"),
       sourceInfo),
-    source, attachmentPanel, profiles.element, gas.element, decimation,
+    source, attachmentPanel, attachmentEditor, profiles.element, gas.element, decimation,
     el("div", { class: "btn-row nw-actions" }, render, cancel, openExperiment, saveExperiment, open, attach, reset, check,
       file, experimentFile, attachmentFile, replacementFile),
     result, playback, comparison.element);

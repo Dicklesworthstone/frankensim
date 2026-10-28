@@ -1,7 +1,7 @@
 // Exact source-packet round trips, not a surrogate physical model.
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {serializeNativeExperiment, validateInput} from '../src/native-experiment.mjs';
+import {editableAttachmentText, editedAttachmentBytes, serializeNativeExperiment, validateInput} from '../src/native-experiment.mjs';
 import {validateInput as serviceInput} from '../tools/native-wind-protocol.mjs';
 
 const encode = text => new TextEncoder().encode(text);
@@ -16,7 +16,8 @@ test('complete string experiments retain original moving contact, thermal, mater
     gasSources:{components:[{speciesPath:'gas/oxygen.species', nasa9Path:'gas/oxygen.nasa9', transportPath:'gas/oxygen.transport'},
       {speciesPath:'gas/inert.species', nasa9Path:'gas/inert.nasa9', transportPath:'gas/inert.transport'}],
       waterSpecies:null, phase:'frozen'}};
-  const paths = ['materials/wire.fsmatpk', ...Object.values(options.stringProfiles),
+  const paths = ['materials/wire.fsmatpk', 'materials/receiver.fsmatpk',
+    'contacts/normal.fsintpk', 'contacts/normal.fsmodelpk', ...Object.values(options.stringProfiles),
     ...options.gasSources.components.flatMap(component => Object.values(component))];
   const files = paths.map((path, i) => ({path, bytes:new Uint8Array([0, 255, i, 13, 10, 128])}));
   const stored = serializeNativeExperiment(source, files, options);
@@ -61,4 +62,47 @@ test('an incomplete experiment cannot drop material profiles or gas source bindi
     components:[{speciesPath:'wire.fsmatpk', nasa9Path:'missing.model', transportPath:'wire.fsmatpk'}]}})), true), /attached source files/);
   assert.throws(() => validateInput(encode(JSON.stringify({...packet, attachments:[{path:'../wire.fsmatpk', bytes:'AQID'}]})), true), /relative paths/);
   assert.throws(() => validateInput(encode(JSON.stringify({...packet, renderer:'wind'})), true), /native reed/);
+});
+
+test('opening or applying an unchanged text source preserves every original byte', () => {
+  const original = encode('\ufefffrankensim-string-stops-v1\r\n# µ specimen\r\n');
+  const snapshot = original.slice();
+  const text = editableAttachmentText(original);
+  assert.equal(text, '\ufefffrankensim-string-stops-v1\r\n# µ specimen\r\n');
+  assert.deepEqual(original, snapshot, 'viewing and cancelling edits cannot mutate the attachment');
+  assert.equal(editedAttachmentBytes(original, text), original);
+  assert.equal(editedAttachmentBytes(original, text.replace(/\r\n?/g, '\n')), original,
+    'a textarea normalizing CRLF must not replace untouched source bytes');
+});
+
+test('an edited material-stop profile round-trips with its original bulk interface and model packs', () => {
+  const path = 'contacts/fingers.profile';
+  const source = 'frankensim-material-strings-v3\naudio 144000 432000 5 128\n';
+  const text = 'frankensim-string-stops-v1\n'
+    + 'material-stop finger 0 0.25 positive fixed -1e-9 materials/receiver.fsmatpk contacts/normal.fsintpk contacts/normal.fsmodelpk 5000 5000 0.1 0.00005 0.00005 0.01 0.02 0.03 10 1e-8\n';
+  const files = [{path, bytes:encode(text)},
+    ...['materials/wire.fsmatpk', 'materials/receiver.fsmatpk',
+      'contacts/normal.fsintpk', 'contacts/normal.fsmodelpk'].map((path, i) =>
+      ({path, bytes:new Uint8Array([0, 255, i, 13, 10, 128])}))];
+  const options = {renderer:'strings', decimate:true, stringProfiles:{stopPath:path}};
+  const before = validateInput(encode(serializeNativeExperiment(source, files, options)), true);
+  const changed = editedAttachmentBytes(files[0].bytes, text.replace('0.25 positive', '0.35 positive'));
+  const after = validateInput(encode(serializeNativeExperiment(source,
+    [{path, bytes:changed}, ...files.slice(1)], options)), true);
+  assert.equal(decode(after.attachments[0].bytes), text.replace('0.25 positive', '0.35 positive'));
+  assert.equal(decode(before.attachments[0].bytes), text);
+  assert.equal(decode(files[0].bytes), text, 'the edit creates a candidate without changing the old attachment');
+  assert.deepEqual(after.attachments.slice(1), before.attachments.slice(1));
+  assert.deepEqual(after.source, before.source);
+  assert.deepEqual(after.stringProfiles, before.stringProfiles);
+  assert.equal(after.decimate, true);
+});
+
+test('binary source packs and invalid edited text cannot enter the text editor', () => {
+  for (const bytes of [new Uint8Array([255]), encode('FSMODELPK\u0000binary'), new Uint8Array()]) {
+    assert.throws(() => editableAttachmentText(bytes), /UTF-8|binary|nonempty/);
+  }
+  const original = encode('frankensim-contact-thermal-v1\n');
+  for (const text of ['', 'profile\u0000data']) assert.throws(() => editedAttachmentBytes(original, text), /nonempty|binary/);
+  assert.equal(decode(original), 'frankensim-contact-thermal-v1\n');
 });
