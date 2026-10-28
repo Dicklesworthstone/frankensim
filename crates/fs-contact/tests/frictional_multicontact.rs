@@ -3,6 +3,9 @@ use fs_contact::frictional_multicontact::{
     solve_frictional_contacts,
 };
 
+#[path = "frictional_multicontact/range.rs"]
+mod range;
+
 fn contact(id: u64, velocity: [f64; 3], mu: f64) -> FrictionalContact {
     FrictionalContact {
         id,

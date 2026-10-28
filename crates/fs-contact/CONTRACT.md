@@ -648,3 +648,12 @@ near-touch cancellation, rotation, and large/small length scaling.
 This is analytic floating-point sphere geometry. It does not certify arbitrary
 shapes, accelerating relative trajectories, or general motion tubes; the
 mechanics owner still checks the actual event geometry and momentum response.
+
+
+### Redundant Coulomb contacts with determined velocity
+
+`frictional_multicontact` admits a bounded semidefinite mobility range when a separate Coulomb feedback witness determines its active velocity image. It reuses `fs-la` eigendecomposition, independently checks original-matrix spectral/orthogonality residuals and a separated numerical rank, and never replaces the mobility matrix or adds compliance. All nonlinear, complementarity, cone and energy checks retain the original matrix.
+
+`FrictionalContactDeterminacy::UniqueImpulses` retains the prior independent-row admission. `UniqueVelocity(PsdVelocityWitness)` reports one admissible impulse representative and a unique active velocity image, without claiming unique local pressure, friction heat or independently moving-support work. Friction-weighted normal rows must be observable from the mobility range and the numerical feedback bound must be below one. For an actual mechanical Gram matrix, the unique image implies unique generalized body velocity. General frictionful normal-load indeterminacy remains refused; the witness is a sufficient floating-point admission, not an interval rank/uniqueness certificate or general Painleve classification.
+
+Five new G1/G3/G4 test groups cover finite-height tripod stick/slide with independent force, torque and kinetic-energy balances, an explicit second admissible sticking impulse allocation, exact input permutation, four-point frictionless support, indefinite/ambiguous/unproven-feedback refusals, and cancellation/budget/exact retry. All seven existing core regressions remain passing. The twelve-test native source-selected check does not replace whole-workspace Cargo/DSR verification. Advances `frankensim-ext-contact-nonsmooth-lane-oh0i` without closing its broader Moreau-Jean and classification scope.

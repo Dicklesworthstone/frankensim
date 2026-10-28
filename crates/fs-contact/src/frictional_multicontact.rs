@@ -7,10 +7,12 @@
 //! All rows participate in one Newton--Krylov natural-map solve. Existing
 //! numerical owners provide matrix admission and nonlinear globalization.
 //!
-//! This bounded first owner admits numerically independent (SPD) contact rows.
-//! A weighted contraction witness establishes determinacy within that admitted
-//! numerical model; without it, distinct checked roots report nonuniqueness and
-//! an otherwise checked candidate remains explicitly unresolved. Singular rigid
+//! Independent contact rows use a weighted contraction witness for impulse
+//! determinacy. A separate PSD range witness admits redundant rows only when
+//! the coupled law determines velocity despite a possible contact-impulse gauge.
+//! It does not manufacture per-contact load authority from that gauge. Without
+//! a determinacy witness, distinct checked roots report nonuniqueness and an
+//! otherwise checked candidate remains explicitly unresolved. General singular
 //! manifolds, Painleve existence decisions, poses, CCD, gap repair, persistent
 //! time stepping, and classical adjoints are not supplied by this event solve.
 //! Total midpoint loss is an impact dissipation receipt, NOT a friction-heat
@@ -22,6 +24,43 @@ use fs_solver::{
     NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonReport, SolverRunProgress,
 };
 use std::cell::{Cell, RefCell};
+
+mod range;
+
+/// What the numerical witness establishes about this accepted response.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FrictionalContactDeterminacy {
+    /// All contact impulse coordinates are determined by the admitted law.
+    UniqueImpulses,
+    /// The active contact mobility image `W_active*p` is determined, while
+    /// impulses can differ by a mobility-null vector. For an actual complete
+    /// mechanical Gram matrix this determines the body's velocity increment
+    /// and inactive kinematics; arbitrary inactive cross rows have no such
+    /// guarantee. The returned
+    /// impulses are one law-satisfying representative, not authoritative local
+    /// loads or a heat/support-work allocation.
+    UniqueVelocity(PsdVelocityWitness),
+}
+
+/// Sufficient numerical determinacy witness on a semidefinite mobility range.
+/// The admission is floating point, not an interval rank/uniqueness proof.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PsdVelocityWitness {
+    pub dimension: usize,
+    pub rank: usize,
+    /// Upper bound on the Coulomb normal-load feedback, strictly below one.
+    pub friction_feedback_bound: f64,
+    /// Maximum row sum of `diag(mu) * N * Q_null` in the admitted basis.
+    pub weighted_normal_nullspace_residual: f64,
+    /// Maximum entry of `W/scale * Q - Q*Lambda`.
+    pub spectral_residual: f64,
+    /// Maximum entry of `Q^T Q - I`.
+    pub orthogonality_residual: f64,
+    /// Smallest retained eigenvalue of `W/scale` (positive and separated from
+    /// the numerical zero band). `scale` is the maximum absolute row sum of W.
+    pub minimum_retained_eigenvalue: f64,
+    pub maximum_null_eigenvalue_magnitude: f64,
+}
 
 /// Explicit choice of normal endpoint law; these alternatives are not aliases.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -49,7 +88,7 @@ pub struct FrictionalContact {
 /// Bounded work and separate numerical/physical acceptance controls.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrictionalContactConfig {
-    /// At most 21 contacts (63 scalar rows), matching the numerical SPD owner.
+    /// At most 21 contacts (63 scalar rows), bounding both numerical owners.
     pub maximum_contacts: usize,
     pub maximum_evaluations: usize,
     pub maximum_newton_iterations: usize,
@@ -102,6 +141,7 @@ pub struct FrictionalContactResiduals {
 /// Complete accepted candidate, in the ORIGINAL caller contact order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FrictionalContactResult {
+    pub determinacy: FrictionalContactDeterminacy,
     pub impulses: Vec<[f64; 3]>,
     pub relative_velocities_after: Vec<[f64; 3]>,
     pub normal_targets: Vec<f64>,
@@ -113,12 +153,14 @@ pub struct FrictionalContactResult {
     pub dissipated_energy: f64,
     pub passivity_residual: f64,
     pub residuals: FrictionalContactResiduals,
-    /// Weighted block maximum-norm contraction bound, strictly below one.
-    /// This is a sufficient floating-point admission, not an interval proof.
+    /// Weighted block maximum-norm impulse contraction bound, strictly below
+    /// one for UniqueImpulses. It is one for UniqueVelocity, which carries its
+    /// own range witness. This is numerical admission, not an interval proof.
     pub contraction_bound: f64,
     /// Positive weights [normal magnitude, tangential Euclidean norm] for each
     /// contact in active_indices order, allowing independent witness checking.
     pub contraction_weights: Vec<f64>,
+    /// Minimum SPD pivot, or zero for the admitted semidefinite range lane.
     pub minimum_normalized_pivot: f64,
     pub evaluations: usize,
     pub nonlinear: Option<NewtonReport>,
@@ -132,8 +174,9 @@ pub enum FrictionalContactError {
         index: usize,
         gap: f64,
     },
-    /// Singular/near-dependent and indefinite systems retain the numerical
-    /// owner's distinct classifications; none means proven physical nonexistence.
+    /// Indefinite, rank-ambiguous, or unsupported semidefinite mobility retains
+    /// the original SPD refusal when the additional range witness cannot
+    /// establish velocity determinacy. This is not physical nonexistence.
     MobilityNotAdmitted(SpdOrthantError),
     Newton(NewtonError),
     NotConverged(NewtonReport),
@@ -243,11 +286,22 @@ pub fn solve_frictional_contacts(
             }
         }
     }
-    let admission = solve_spd_orthant(&matrix, &vec![0.0; d], config.matrix, &mut cancelled)
-        .map_err(|e| match e {
-            SpdOrthantError::Cancelled => E::Cancelled,
-            e => E::MobilityNotAdmitted(e),
-        })?;
+    let (minimum_pivot, range_witness) =
+        match solve_spd_orthant(&matrix, &vec![0.0; d], config.matrix, &mut cancelled) {
+            Ok(admission) => (admission.min_normalized_pivot, None),
+            Err(SpdOrthantError::Cancelled) => return Err(E::Cancelled),
+            Err(
+                error @ (SpdOrthantError::NotPositiveDefinite { .. }
+                | SpdOrthantError::Degenerate { .. }),
+            ) => {
+                let witness = range::velocity_witness(&matrix, &mu, config.matrix, &mut cancelled)?;
+                match witness {
+                    Some(witness) => (0.0, Some(witness)),
+                    None => return Err(E::MobilityNotAdmitted(error)),
+                }
+            }
+            Err(error) => return Err(E::MobilityNotAdmitted(error)),
+        };
     let mut steps = Vec::with_capacity(d);
     for k in 0..active.len() {
         let a = 3 * k;
@@ -259,7 +313,11 @@ pub fn solve_frictional_contacts(
         }
         steps.extend_from_slice(&[rn, rt, rt]);
     }
-    let witness = contraction_witness(&matrix, &steps, &mu, &mut cancelled)?;
+    let witness = if range_witness.is_some() {
+        None
+    } else {
+        contraction_witness(&matrix, &steps, &mu, &mut cancelled)?
+    };
     let evaluations = Cell::new(0);
     let cancel = RefCell::new(&mut cancelled);
     let solve = |seed: Vec<f64>| -> Result<(Vec<f64>, NewtonReport), E> {
@@ -344,7 +402,9 @@ pub fn solve_frictional_contacts(
         config,
         &mut **cancel.borrow_mut(),
     )?;
-    if let Some((bound, weights)) = witness {
+    if let Some(witness) = range_witness {
+        result.determinacy = FrictionalContactDeterminacy::UniqueVelocity(witness);
+    } else if let Some((bound, weights)) = witness {
         result.contraction_bound = bound;
         result.contraction_weights = weights;
     } else {
@@ -400,7 +460,7 @@ pub fn solve_frictional_contacts(
             candidate_impulses: result.impulses,
         });
     }
-    result.minimum_normalized_pivot = admission.min_normalized_pivot;
+    result.minimum_normalized_pivot = minimum_pivot;
     result.evaluations = evaluations.get();
     result.nonlinear = report;
     poll(&mut **cancel.borrow_mut())?;
@@ -576,6 +636,7 @@ fn audit(
     }
     poll(cancelled)?;
     Ok(FrictionalContactResult {
+        determinacy: FrictionalContactDeterminacy::UniqueImpulses,
         impulses,
         relative_velocities_after: velocities,
         normal_targets: targets.to_vec(),
@@ -584,9 +645,9 @@ fn audit(
         dissipated_energy: (-work).max(0.0),
         passivity_residual: work.max(0.0),
         residuals: r,
-        contraction_bound: f64::NAN,
+        contraction_bound: 1.0,
         contraction_weights: vec![],
-        minimum_normalized_pivot: f64::NAN,
+        minimum_normalized_pivot: 0.0,
         evaluations: 0,
         nonlinear: None,
     })
