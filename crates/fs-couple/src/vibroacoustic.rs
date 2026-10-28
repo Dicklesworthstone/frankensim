@@ -34,6 +34,11 @@
 //! ([`project_radiation_impedance`]; produced upstream by
 //! `fs_bem::helmholtz::radiation_impedance_matrix`). Hysteretic loss
 //! factors `eta_s`, `eta_a` model structural and cavity dissipation.
+//! Alternatively, [`VibroacousticModel::with_structural_viscosity`] admits
+//! the existing full PSD modal material/joint viscosity instead of `eta_s`:
+//! its force is `-i omega C b` on the left, retaining cross-mode damping
+//! and exact undamped directions. The structural work audit uses the same
+//! owner's passive channels, including in truncated solves.
 //!
 //! POWER ACCOUNTING (the audit surface this module exists to make
 //! real): at every solved frequency the response carries the complete
@@ -57,6 +62,7 @@
 //! plug into the same [`CavityModes`] carrier), and modal-density /
 //! statistical-energy regimes.
 
+use crate::plate_viscosity::ModalPlateViscosity;
 use fs_la::eigen_complex::lu_complex;
 use fs_la::factor::svd_jacobi;
 use fs_material::gas::{GasSpec, GasState};
@@ -450,7 +456,8 @@ pub fn project_radiation_impedance(
 pub struct PowerBreakdown {
     /// Input power `1/2 Re SUM F_r conj(v_r)`.
     pub input: f64,
-    /// Structural hysteretic dissipation.
+    /// Structural dissipation from the exclusive hysteretic or full modal
+    /// viscous owner. Viscous loss is `1/2 Re(v^H C v)`.
     pub structural: f64,
     /// Power flowing through the interface into the cavity.
     pub interface: f64,
@@ -496,6 +503,7 @@ pub struct ConvergedResponse {
 pub struct VibroacousticModel {
     omegas_s: Vec<f64>,
     eta_s: f64,
+    structural_viscosity: Option<ModalPlateViscosity>,
     omegas_a: Vec<f64>,
     lambdas: Vec<f64>,
     eta_a: f64,
@@ -597,6 +605,7 @@ impl VibroacousticModel {
         Ok(Self {
             omegas_s: structure.omegas.clone(),
             eta_s: structure.loss_factor,
+            structural_viscosity: None,
             omegas_a: cavity.omegas.clone(),
             lambdas: cavity.lambdas.clone(),
             eta_a: cavity.loss_factor,
@@ -604,6 +613,42 @@ impl VibroacousticModel {
             coupling,
             z_modal,
         })
+    }
+
+    /// Attach a full passive modal viscosity in this model's structural
+    /// coordinate order and mass normalization (`phi^T M phi = I`).
+    ///
+    /// This consumes the same admitted PSD matrix produced by the material,
+    /// plate, shell, or localized-joint owner. It retains off-diagonal terms
+    /// and rank-deficient loss: no diagonal damping approximation is made.
+    /// Cavity loss and exterior radiation remain their separate owners.
+    ///
+    /// Set `StructuralModes::loss_factor` to zero before attaching this
+    /// viscosity. A nonzero scalar loss is refused so material dissipation
+    /// cannot be counted both through the matrix and the hysteretic factor.
+    /// To combine several viscous mechanisms, admit their summed matrix
+    /// once through `ModalPlateViscosity` before attaching it.
+    ///
+    /// # Errors
+    /// [`VibroError`] when the mode count differs or scalar structural loss
+    /// is already active. The caller owns matching the actual mode basis,
+    /// not only its size; this method does not reproject between bases.
+    pub fn with_structural_viscosity(
+        mut self,
+        viscosity: ModalPlateViscosity,
+    ) -> Result<Self, VibroError> {
+        if viscosity.mode_count() != self.omegas_s.len() {
+            return Err(VibroError::ShapeMismatch {
+                what: "structural viscosity must use the structural mode count and basis",
+            });
+        }
+        if self.eta_s != 0.0 {
+            return Err(VibroError::BadParameter {
+                what: "structural viscosity and scalar hysteretic loss are exclusive",
+            });
+        }
+        self.structural_viscosity = Some(viscosity);
+        Ok(self)
     }
 
     /// Structural mode count.
@@ -750,6 +795,13 @@ impl VibroacousticModel {
             // is k (1 - i eta); the +i eta sign feeds energy in (the
             // power audit below is the executable proof).
             mat[r * n + r] = C64::new(wr2 - w2, -wr2 * self.eta_s);
+            if let Some(viscosity) = &self.structural_viscosity {
+                let c = viscosity.matrix_per_s();
+                for s in 0..keep_s {
+                    mat[r * n + s] = mat[r * n + s]
+                        - C64::new(0.0, omega * c[r * n_s_full + s]);
+                }
+            }
             for q in 0..keep_a {
                 mat[r * n + (keep_s + q)] = C64::from_re(-self.coupling[r * n_a_full + q]);
             }
@@ -796,6 +848,21 @@ impl VibroacousticModel {
                 f_p = f_p + aq.scale(self.coupling[r * n_a_full + q]);
             }
             interface -= 0.5 * (f_p * v.conj()).re;
+        }
+        if let Some(viscosity) = &self.structural_viscosity {
+            // C = SUM (sqrt(R) h) (sqrt(R) h)^T. Channel squares retain
+            // nonnegative work even near a loss nullspace; use the retained
+            // prefix of each original channel, exactly as the principal C
+            // block assembled above. Scaling before squaring also avoids
+            // an arbitrary reference resistance underflowing the work.
+            let root_r = viscosity.reference_resistance_n_s_m().sqrt();
+            for channel in viscosity.channel_shapes() {
+                let mut rate = C64::ZERO;
+                for r in 0..keep_s {
+                    rate = rate + vel(b[r]).scale(channel[r] * root_r);
+                }
+                structural += 0.5 * rate.norm_sq();
+            }
         }
         let mut cavity = 0.0;
         for (q, aq) in a.iter().enumerate() {
@@ -1459,6 +1526,7 @@ mod review_regressions {
             omegas_s: ws,
             omegas_a: wa,
             eta_s: 0.0,
+            structural_viscosity: None,
             eta_a: 0.0,
             rho_c2: 1.0,
             coupling,
@@ -1683,3 +1751,6 @@ mod review_regressions {
         );
     }
 }
+
+#[cfg(test)]
+mod viscosity_tests;

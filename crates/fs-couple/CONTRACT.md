@@ -619,6 +619,19 @@ cavity (composes with the BEM's outward panel velocities).
   pinned against closed-form sin x cos overlap integrals.
 - `project_radiation_impedance` — panel-space `Z` (`p = Z v`) reduced
   to modal `Zm` with area weighting on the force side only.
+- `VibroacousticModel::with_structural_viscosity` — attaches the existing
+  `ModalPlateViscosity` PSD owner in the same mass-normalized modal basis.
+  The full signed matrix enters the coupled structural dynamic stiffness as
+  `-i omega C`; passive-channel squares supply `1/2 Re(v^H C v)` to the
+  structural power account. Cross-mode damping and undamped nullspaces are
+  retained, including each principal block used by the truncation solve.
+  Scalar structural hysteretic loss must be zero when this matrix owner is
+  attached; cavity loss and exterior radiation retain separate accounts.
+  No basis reprojection or frequency-dependent relaxation law is inferred.
+  `src/vibroacoustic/viscosity_tests.rs` checks an independent analytic
+  two-mode/cavity response, integrated cycle work with radiation, a relative
+  dashpot's common-motion nullspace, signed-basis invariance, and truncation.
+
 - `VibroacousticModel::frf` / `frf_truncated` — dense complex coupled
   solve; every response carries the complete power breakdown with BOTH
   audit residuals (`input = structural + interface + radiated`,

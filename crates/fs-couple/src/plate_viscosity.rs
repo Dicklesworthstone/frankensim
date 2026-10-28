@@ -528,6 +528,8 @@ impl ModalPlateViscosity {
     /// Borrow the admitted passive columns without rebuilding connection objects.
     /// Their reference resistance is the one supplied to this factor's constructor.
     pub(crate) fn channel_shapes(&self)->&[Vec<f64>] { &self.columns }
+    /// Reference resistance of these passive channel shapes [N s/m].
+    pub(crate) fn reference_resistance_n_s_m(&self)->f64 { self.resistance }
     /// Realize C through the original bilateral dashpot law on one component.
     /// Its coordinate origin is zero; no added spring, mass, or external forcing.
     /// The same component on both sides keeps the complete coordinate order.
