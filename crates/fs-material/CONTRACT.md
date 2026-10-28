@@ -44,6 +44,13 @@ rejected steps:
 cargo test -p fs-material axial_reference
 ```
 
+The `material_axial_reference` example reads a canonical source pack and derives
+axis types from its selected source properties. It accepts explicit geometry,
+loading mode, source coordinates and up to 64 monotonic displacement ramps.
+It validates the entire requested path before emitting a successful response.
+The material seed README includes complete PEEK tension and ROHACELL compression
+recipes with independent force, mass and model-work expectations.
+
 ## Purpose and layer
 
 Layer **L3** (FLUX support). Runtime deps: `std`, fs-ad (dual-number

@@ -4,6 +4,62 @@ This directory retains the human-reviewable source inputs compiled by
 `xtask matdb-pack`. Generated binary packs are deliberately not committed:
 the compiler must reproduce them from the pinned manifest and source record.
 
+## Run axial reference calculations for plastics and foams
+
+`material_axial_reference` resolves density and a named tensile or compression
+modulus from a compiled source pack. It reports nominal axial force, displacement,
+mass and model loading work for a declared geometry and monotonic loading path.
+
+Compile PEEK and ROHACELL 51 IG-F:
+
+```sh
+cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/ensinger-tecapeek-natural/manifest.tsv --out /tmp/peek-axial.fsmatpk
+cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/evonik-rohacell-51-igf-2022/manifest.tsv --out /tmp/rohacell-axial.fsmatpk
+```
+
+The following PEEK reference uses a 50 mm length, 100 mm² original area, 0.1%
+strain ceiling, and a 50 µm displacement over three seconds. The ramp matches
+the producer's declared tensile-modulus crosshead speed.
+
+```sh
+cargo run -p fs-material --example material_axial_reference -- \
+  /tmp/peek-axial.fsmatpk tension density tensile-modulus 0.05 0.0001 0.001 \
+  --axis source-grade-tecapeek-natural 1 --axis source-temperature-known 0 \
+  --axis source-moisture-condition-known 0 --axis source-pressure-known 0 \
+  --axis test-speed 1.6666666666666667e-5 --speed-axis test-speed \
+  --step 0.00005 3
+```
+
+This ROHACELL compression reference uses the same geometry and displacement
+magnitude. The source test rate is unstated, so the one-second duration is an
+explicit scenario choice.
+
+```sh
+cargo run -p fs-material --example material_axial_reference -- \
+  /tmp/rohacell-axial.fsmatpk compression density compression-modulus 0.05 0.0001 0.001 \
+  --axis source-grade-rohacell-51-igf-2022 1 --axis source-temperature-known 0 \
+  --axis source-moisture-condition-known 0 --axis source-test-rate-known 0 \
+  --axis full-sheet-at-least-10mm 1 --step -0.00005 1
+```
+
+Independent linear-reference expectations are:
+
+| Case | Force (N) | Mass (kg) | Model loading work (J) |
+| --- | ---: | ---: | ---: |
+| PEEK tension | 420 | 0.00655 | 0.0105 |
+| ROHACELL compression | -4.3 | 0.00026 | 0.0001075 |
+
+These are authored zero-origin linear references using the reported moduli.
+The strain ceiling is not a measured linearity or failure limit. The calculation
+does not infer Poisson ratio, lateral contraction, unloading, relaxation,
+recovery or strength. Tensile, flexural and compression moduli remain distinct,
+and discrete compression-stress points are not consumed as moduli.
+
+Supply repeated `--step` arguments for a monotonic history. At most 64 source
+axes and 64 steps are accepted; a rejected step prevents the example from
+emitting a successful path. The module documentation describes the complete
+argument format and required source conditions.
+
 ## Run spatial transient heating from catalog curves
 
 The `material_transient` example connects source Cp(T), rho(T) and k(T)
