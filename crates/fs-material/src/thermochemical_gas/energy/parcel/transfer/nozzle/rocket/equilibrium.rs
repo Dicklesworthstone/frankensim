@@ -10,9 +10,9 @@
 //! quasi-one-dimensional, adiabatic inviscid limit. The supplied bracket must
 //! describe an ordinary single-sonic branch; uniqueness is not certified for
 //! arbitrary authored caloric laws. Matched/underexpanded operation and vacuum
-//! are admitted. Reacting shocks, separation, losses, finite-rate chemistry,
-//! transport coefficients and vehicle/tank evolution are not inferred. The
-//! original frozen off-design nozzle remains unchanged.
+//! are admitted. Reacting shocks, separation, losses, finite-rate chemistry
+//! and transport coefficients are not inferred. The original frozen off-design
+//! nozzle remains unchanged. Finite reservoir evolution is in `blowdown`.
 
 use super::{RocketNozzle, STANDARD_GRAVITY_M_S2};
 use fs_qty::{Amount, Pressure, Temperature};
@@ -20,6 +20,9 @@ use fs_thermochem::{SpeciesId, equilibrium::composition::{
     EquilibriumEntropySolveV1, EquilibriumExpansionErrorV1, EquilibriumThermodynamicStateV1,
     IdealGasEquilibriumV1, isentrope::{EquilibriumIsentropeSampleV1, EquilibriumIsentropeV1},
 }};
+
+/// Finite, well-mixed equilibrium propellant with one retained energy reference.
+pub mod blowdown;
 
 /// Explicit source, numerical-residual and total nested-work ceilings.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -36,13 +39,13 @@ pub struct EquilibriumRocketNozzleSolve {
     pub relative_mass_flow_tolerance: f64,
     /// Absolute h-h_chamber+v^2/2 arithmetic residual [J/kg].
     pub energy_tolerance_j_kg: f64,
-    /// At most 256 bisections for each of the two pressure roots. Each sample
-    /// inherits the original bounded temperature/composition/backtrack limits.
+    /// At most 256 bisections for each pressure root. Each sample inherits
+    /// the original bounded temperature/composition/backtrack limits.
     pub maximum_pressure_iterations: usize,
 }
 
-#[derive(Clone, Debug, PartialEq)]
 /// Typed refusal; no partially resolved flow accompanies an error.
+#[derive(Clone, Debug, PartialEq)]
 pub enum EquilibriumRocketNozzleError {
     /// Original thermochemical source, convergence or cancellation refusal.
     Thermochemistry(EquilibriumExpansionErrorV1),
@@ -81,13 +84,14 @@ pub struct EquilibriumRocketStation {
     pub mach_number: f64,
     /// Actual density times velocity [kg/(m2 s)].
     pub mass_flux_kg_m2_s: f64,
-    /// Source enthalpy change plus v^2/2 [J/kg].
+    /// Source enthalpy change from this chamber plus v^2/2 [J/kg].
     pub energy_residual_j_kg: f64,
 }
 impl EquilibriumRocketStation {
     /// Complete original thermochemical endpoint and accepted source receipts.
     pub const fn state(&self) -> &EquilibriumThermodynamicStateV1 { &self.state }
-    /// Includes the directly evaluated source-relative entropy residual [J/K].
+    /// Direct entropy residual [J/K] and enthalpy change from the path reference.
+    /// For finite blowdown that reference is tank BIRTH, not the current chamber.
     pub const fn sample(&self) -> &EquilibriumIsentropeSampleV1 { &self.sample }
 }
 
@@ -113,11 +117,11 @@ pub struct EquilibriumRocketNozzleFlow {
     pub specific_impulse_s: f64,
     /// Actual exit mass rate divided by throat mass rate minus one.
     pub relative_mass_flow_residual: f64,
-    /// Total actual composition iterations over all successful trial queries.
+    /// Actual composition work in the enclosing prepared query, including trials.
     pub composition_iterations: usize,
-    /// Total temperature iterations across successful pressure trials.
+    /// Actual temperature iterations in that query.
     pub temperature_iterations: usize,
-    /// Number of SP queries, including final publication checks.
+    /// Number of nozzle SP queries in that query.
     pub pressure_samples: usize,
 }
 impl EquilibriumRocketNozzleFlow {
@@ -137,19 +141,22 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), Error> {
     if cancelled() { Err(Error::Cancelled) } else { Ok(()) }
 }
 fn positive(v: f64) -> bool { v.is_finite() && v > 0.0 }
-fn sample(path: &mut EquilibriumIsentropeV1<'_>, p: f64, controls: EquilibriumRocketNozzleSolve,
-    work: &mut Work, cancelled: &mut impl FnMut() -> bool) -> Result<Trial, Error> {
+fn sample(path: &mut EquilibriumIsentropeV1<'_>, p: f64, stagnation_change: f64,
+    controls: EquilibriumRocketNozzleSolve, work: &mut Work,
+    cancelled: &mut impl FnMut() -> bool) -> Result<Trial, Error> {
     poll(cancelled)?;
     let sample = path.sample(Pressure::new(p), &mut *cancelled)?;
     work.samples += 1;
     work.composition += sample.composition_iterations;
     work.temperature += sample.temperature_iterations;
-    let speed_squared = -2.0 * sample.specific_enthalpy_change_j_kg;
+    // Both values are relative to the SAME original elemental/energy reference.
+    let dh = sample.specific_enthalpy_change_j_kg - stagnation_change;
+    let speed_squared = -2.0 * dh;
     if !positive(speed_squared) { return Err(Error::Balance("nonpositive available nozzle energy")); }
     let velocity = fs_math::det::sqrt(speed_squared);
     let mach = velocity / sample.response.sound_speed_m_s;
     let flux = sample.response.density_kg_m3 * velocity;
-    let energy = sample.specific_enthalpy_change_j_kg + 0.5 * velocity * velocity;
+    let energy = dh + 0.5 * velocity * velocity;
     if !positive(velocity) || !positive(mach) || !positive(flux)
         || !energy.is_finite() || energy.abs() > controls.energy_tolerance_j_kg {
         return Err(Error::Balance("flow arithmetic or stagnation enthalpy balance"));
@@ -158,8 +165,8 @@ fn sample(path: &mut EquilibriumIsentropeV1<'_>, p: f64, controls: EquilibriumRo
 }
 fn root(path: &mut EquilibriumIsentropeV1<'_>, low: f64, high: f64, mut f_low: f64, f_high: f64,
     tolerance: f64, quantity: &'static str, residual: impl Fn(Trial) -> f64,
-    controls: EquilibriumRocketNozzleSolve, work: &mut Work, cancelled: &mut impl FnMut() -> bool)
-    -> Result<Trial, Error> {
+    stagnation_change: f64, controls: EquilibriumRocketNozzleSolve, work: &mut Work,
+    cancelled: &mut impl FnMut() -> bool) -> Result<Trial, Error> {
     if !f_low.is_finite() || !f_high.is_finite() || f_low.signum() == f_high.signum() {
         return Err(Error::NotBracketed(quantity));
     }
@@ -168,7 +175,7 @@ fn root(path: &mut EquilibriumIsentropeV1<'_>, low: f64, high: f64, mut f_low: f
     for _ in 0..controls.maximum_pressure_iterations {
         let mid = lo + 0.5 * (hi - lo);
         if mid == lo || mid == hi { break; }
-        let trial = sample(path, fs_math::det::exp(mid), controls, work, cancelled)?;
+        let trial = sample(path, fs_math::det::exp(mid), stagnation_change, controls, work, cancelled)?;
         last = residual(trial);
         if !last.is_finite() { return Err(Error::Balance("nonfinite pressure-root residual")); }
         if last.abs() <= tolerance { return Ok(trial); }
@@ -187,85 +194,97 @@ fn publish(path: &mut EquilibriumIsentropeV1<'_>, trial: Trial, cancelled: &mut 
     Ok(EquilibriumRocketStation { state, sample: trial.sample, velocity_m_s: trial.velocity,
         mach_number: trial.mach, mass_flux_kg_m2_s: trial.flux, energy_residual_j_kg: trial.energy })
 }
-
-/// Solve smooth equilibrium expansion from an explicitly declared equilibrium
-/// chamber. A previous HP chamber calculation can supply its accepted T,p and
-/// original feed; no combustion temperature or reactant mixture is invented.
-///
-/// The feed determines elemental ratios, not mass flow. The sonic throat sets
-/// mdot, the supersonic exit closes that same mass flux, and total thrust is
-/// mdot*v_exit+(p_exit-p_ambient)*A_exit. The same source equilibrium workspace
-/// is reused across all scalar roots; only chamber/throat/exit retain receipts.
-/// Any source, chemistry, pressure, balance or cancellation refusal returns no
-/// partial flow. Composition may change throughout the nozzle. No transport
-/// data is fabricated for product species that lack a transport source.
-pub fn equilibrium_rocket_nozzle_flow(
-    chemistry: &IdealGasEquilibriumV1, chamber_temperature: Temperature, chamber_pressure: Pressure,
-    feed: &[(SpeciesId, Amount)], ambient_pressure_pa: f64, nozzle: RocketNozzle,
-    controls: EquilibriumRocketNozzleSolve, mut cancelled: impl FnMut() -> bool,
-) -> Result<EquilibriumRocketNozzleFlow, Error> {
+fn validate_inputs(pc: f64, ambient: f64, nozzle: RocketNozzle, c: EquilibriumRocketNozzleSolve)
+    -> Result<(), Error> {
     nozzle.validate().map_err(|_| Error::Invalid("invalid native rocket nozzle geometry"))?;
-    let pc = chamber_pressure.value();
-    if !positive(pc) || !positive(controls.minimum_pressure_pa) || controls.minimum_pressure_pa >= pc
-        || !ambient_pressure_pa.is_finite() || ambient_pressure_pa < 0.0 || ambient_pressure_pa >= pc
-        || !positive(controls.energy_tolerance_j_kg)
-        || !positive(controls.sonic_tolerance) || controls.sonic_tolerance >= 0.01
-        || !positive(controls.relative_mass_flow_tolerance) || controls.relative_mass_flow_tolerance >= 0.01
-        || !(1..=256).contains(&controls.maximum_pressure_iterations) {
+    if !positive(pc) || !positive(c.minimum_pressure_pa) || c.minimum_pressure_pa >= pc
+        || !ambient.is_finite() || ambient < 0.0 || ambient >= pc
+        || !positive(c.energy_tolerance_j_kg) || !positive(c.sonic_tolerance) || c.sonic_tolerance >= 0.01
+        || !positive(c.relative_mass_flow_tolerance) || c.relative_mass_flow_tolerance >= 0.01
+        || !(1..=256).contains(&c.maximum_pressure_iterations) {
         return Err(Error::Invalid("invalid equilibrium nozzle pressures, residual tolerances or work ceiling"));
     }
-    poll(&mut cancelled)?;
-    let mut path = EquilibriumIsentropeV1::new(chemistry, chamber_temperature, chamber_pressure,
-        feed, controls.thermochemistry, &mut cancelled)?;
-    let chamber = path.reference_state().clone();
-    let mut work = Work { composition: chamber.equilibrium().composition_iterations(), ..Work::default() };
-    let minimum = sample(&mut path, controls.minimum_pressure_pa, controls, &mut work, &mut cancelled)?;
+    Ok(())
+}
+
+// Mass-rate trials need only the sonic station, not an expensive exit solve
+// or new source receipts. Finite depletion and the snapshot use this same owner.
+fn sonic_throat(path: &mut EquilibriumIsentropeV1<'_>, pc: f64, stagnation_change: f64,
+    c: EquilibriumRocketNozzleSolve, work: &mut Work, cancelled: &mut impl FnMut() -> bool)
+    -> Result<(Trial, Trial), Error> {
+    if c.minimum_pressure_pa >= pc { return Err(Error::NotBracketed("sonic throat pressure interval")); }
+    let minimum = sample(path, c.minimum_pressure_pa, stagnation_change, c, work, cancelled)?;
     let sonic = |v: Trial| v.mach * v.mach - 1.0;
     if sonic(minimum) <= 0.0 { return Err(Error::NotBracketed("sonic throat")); }
-    let throat_trial = root(&mut path, controls.minimum_pressure_pa, pc, sonic(minimum), -1.0,
-        controls.sonic_tolerance, "sonic throat", sonic, controls, &mut work, &mut cancelled)?;
-    let throat = publish(&mut path, throat_trial, &mut cancelled)?;
+    let throat = root(path, c.minimum_pressure_pa, pc, sonic(minimum), -1.0,
+        c.sonic_tolerance, "sonic throat", sonic, stagnation_change, c, work, cancelled)?;
+    Ok((minimum, throat))
+}
+
+fn flow_at(path: &mut EquilibriumIsentropeV1<'_>, chamber: EquilibriumThermodynamicStateV1,
+    stagnation_change: f64, ambient: f64, nozzle: RocketNozzle, c: EquilibriumRocketNozzleSolve,
+    work: &mut Work, cancelled: &mut impl FnMut() -> bool) -> Result<EquilibriumRocketNozzleFlow, Error> {
+    let pc = chamber.equilibrium().pressure().value();
+    validate_inputs(pc, ambient, nozzle, c)?;
+    let (minimum, throat_trial) = sonic_throat(path, pc, stagnation_change, c, work, cancelled)?;
+    let throat = publish(path, throat_trial, cancelled)?;
     let rate = throat.mass_flux_kg_m2_s * nozzle.throat_area_m2;
     if !positive(rate) { return Err(Error::Balance("choked mass rate")); }
-    let exit = if nozzle.exit_area_m2 == nozzle.throat_area_m2 {
-        throat.clone()
-    } else {
+    let exit = if nozzle.exit_area_m2 == nozzle.throat_area_m2 { throat.clone() } else {
         let target = rate / nozzle.exit_area_m2;
         if !positive(target) { return Err(Error::Balance("exit mass flux target")); }
         let flux_residual = |v: Trial| v.flux / target - 1.0;
         if flux_residual(minimum) >= 0.0 { return Err(Error::NotBracketed("supersonic exit mass flux")); }
-        let exit_trial = root(&mut path, controls.minimum_pressure_pa, throat_trial.sample.pressure.value(),
-            flux_residual(minimum), flux_residual(throat_trial), controls.relative_mass_flow_tolerance,
-            "supersonic exit mass flux", flux_residual, controls, &mut work, &mut cancelled)?;
+        let exit_trial = root(path, c.minimum_pressure_pa, throat_trial.sample.pressure.value(),
+            flux_residual(minimum), flux_residual(throat_trial), c.relative_mass_flow_tolerance,
+            "supersonic exit mass flux", flux_residual, stagnation_change, c, work, cancelled)?;
         if exit_trial.mach <= 1.0 { return Err(Error::Balance("exit is not on the supersonic branch")); }
-        publish(&mut path, exit_trial, &mut cancelled)?
+        publish(path, exit_trial, cancelled)?
     };
     let pe = exit.sample.pressure.value();
-    if ambient_pressure_pa > pe {
-        return Err(Error::UnsupportedBackPressure { ambient_pressure_pa, exit_pressure_pa: pe });
+    if ambient > pe {
+        return Err(Error::UnsupportedBackPressure { ambient_pressure_pa: ambient, exit_pressure_pa: pe });
     }
     let mass_residual = exit.mass_flux_kg_m2_s * nozzle.exit_area_m2 / rate - 1.0;
-    if !mass_residual.is_finite() || mass_residual.abs() > controls.relative_mass_flow_tolerance {
+    if !mass_residual.is_finite() || mass_residual.abs() > c.relative_mass_flow_tolerance {
         return Err(Error::Balance("accepted exit mass flow"));
     }
     let momentum_thrust = rate * exit.velocity_m_s;
-    let pressure_thrust = (pe - ambient_pressure_pa) * nozzle.exit_area_m2;
+    let pressure_thrust = (pe - ambient) * nozzle.exit_area_m2;
     let thrust = momentum_thrust + pressure_thrust;
     let effective_velocity = thrust / rate;
     let characteristic_velocity = pc * (nozzle.throat_area_m2 / rate);
     let specific_impulse = effective_velocity / STANDARD_GRAVITY_M_S2;
     if [momentum_thrust, thrust, effective_velocity, characteristic_velocity, specific_impulse]
         .into_iter().any(|v| !positive(v)) || !pressure_thrust.is_finite()
-        || pressure_thrust < 0.0 || (pe != ambient_pressure_pa && pressure_thrust == 0.0) {
+        || pressure_thrust < 0.0 || (pe != ambient && pressure_thrust == 0.0) {
         return Err(Error::Balance("unrepresentable thrust or performance"));
     }
-    poll(&mut cancelled)?;
+    poll(cancelled)?;
     Ok(EquilibriumRocketNozzleFlow { chamber, throat, exit, mass_flow_kg_s: rate,
         momentum_thrust_n: momentum_thrust, pressure_thrust_n: pressure_thrust, thrust_n: thrust,
         effective_exhaust_velocity_m_s: effective_velocity, characteristic_velocity_m_s: characteristic_velocity,
         specific_impulse_s: specific_impulse, relative_mass_flow_residual: mass_residual,
         composition_iterations: work.composition, temperature_iterations: work.temperature,
         pressure_samples: work.samples })
+}
+
+/// Resolve smooth equilibrium expansion from a declared equilibrium chamber.
+/// Feed sets elemental ratios, not mass flow. The same source workspace is reused
+/// across all roots; only chamber/throat/exit allocate source receipts. No tank
+/// inventory, heat, momentum or material source is changed by this query.
+pub fn equilibrium_rocket_nozzle_flow(
+    chemistry: &IdealGasEquilibriumV1, chamber_temperature: Temperature, chamber_pressure: Pressure,
+    feed: &[(SpeciesId, Amount)], ambient_pressure_pa: f64, nozzle: RocketNozzle,
+    controls: EquilibriumRocketNozzleSolve, mut cancelled: impl FnMut() -> bool,
+) -> Result<EquilibriumRocketNozzleFlow, Error> {
+    validate_inputs(chamber_pressure.value(), ambient_pressure_pa, nozzle, controls)?;
+    poll(&mut cancelled)?;
+    let mut path = EquilibriumIsentropeV1::new(chemistry, chamber_temperature, chamber_pressure,
+        feed, controls.thermochemistry, &mut cancelled)?;
+    let chamber = path.reference_state().clone();
+    let mut work = Work { composition: chamber.equilibrium().composition_iterations(), ..Work::default() };
+    flow_at(&mut path, chamber, 0.0, ambient_pressure_pa, nozzle, controls, &mut work, &mut cancelled)
 }
 
 #[cfg(test)]
