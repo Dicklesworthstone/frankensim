@@ -590,8 +590,26 @@ This first-order coupling admits at most 16 windings within the existing
 32-node/64-branch/32-port/128-state allocating circuit bounds. The native graph
 must admit its held private-current trials; ideal current-only constraint
 topologies can refuse this partitioned lane. Geometry, proposed magnetic law and
-native graph coefficients stay fixed during each native trial. No hysteresis,
-moving-conductor or experimental material-qualification claim is introduced.
+native graph coefficients stay fixed during each native trial. No hysteresis
+or experimental material-qualification claim is introduced.
+
+`NonlinearWindingCircuit::step_with_eulerian_velocity_candidate` resolves
+moving bulk conductors inside this same terminal Newton solve. Its actual
+nonlinear moving-field candidate changes the winding flux linkage and solved
+load current; no fitted speed voltage or independent force current is added.
+The public controls, step and candidate retain stationary default field types
+and carry the complete moving-field step when this operation is selected.
+The combined balance is `delta(storage) + Q + D_BE + W_mechanical = W_external`;
+signed mechanical work is positive out of the field, while stranded, graph and
+bulk conductor-frame Joule heat remain separate nonnegative physical losses.
+Every trial preserves the accepted circuit/field history, and terminal voltage,
+source/linkage reciprocity and the combined energy account are checked before
+publication. Complete finite P1 velocity is required. Stranded winding cells
+and fixed-recoil magnet cells must be stationary; source laws, conductivity,
+mesh, material occupancy and profiles stay fixed. The underlying moving-field
+divergence, connected-current, source-envelope, magnetic Peclet and nonlinear
+residual bounds apply. Moving winding geometry, transported magnetization and
+sliding interfaces remain outside this operation.
 
 ### Oriented permanent magnets with saturating cores and induction history
 
