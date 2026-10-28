@@ -10246,3 +10246,35 @@ invalid inertia, exact velocity quadrature and a three-rung continuum-frequency
 ladder. Existing membrane and distributed-loading tests also pass. This remains
 a linear-kinematics membrane with the original exact tensor-memory limitations;
 it does not add bending, prestress or finite deformation.
+
+## Prepared complete plate vibration on a fixed clock
+
+`VkBody::into_prepared(dt_s)` consumes an accepted body and preserves every
+original displacement, momentum and Maxwell-history component. The opt-in
+`PreparedVkBody` keeps the fixed positive physical clock and the complete
+original force, surface, damping and storage owners. It does not reduce the
+state or replace a coupled operator with a diagonal approximation.
+
+Quadratic bodies use the owned `PreparedExactZoh` cache, including independent
+integrated heat and source work. Nonlinear bodies reuse the canonical Gonzalez
+equation and `StepWorkspace`, with the existing midpoint pole-rate admission
+checked for the fixed clock. Both paths reuse scratch during accepted warm
+steps. This is an allocation-reuse guarantee for these plate storage owners,
+not a hard real-time timing certificate.
+
+`drive_and_radiate[_controlled]` returns a `PreparedVkStep` containing the
+original mechanical/material work record, endpoint volume velocity, and compact
+baffled-monopole pressure from interval-mean acceleration. Density and listener
+distance remain observation parameters; the prepared API adds no radiation
+backreaction or finite-wavelength approximation. Invalid inputs, solver or
+observation refusal, and cancellation publish no physical-state or
+constitutive-history change.
+
+The three prepared-plate regressions compare 150 forced steps against the
+original quadratic and nonlinear bodies with full damping and Maxwell memory,
+independently check physical force work and the complete energy balance, and
+measure zero allocations over 128 accepted warm steps in each path. They also
+cover preserving a moving initial body, the nonlinear phase bound, invalid
+clock/observer admission, early and late cancellation, and retry after refusal.
+These checks exercise the production numerical owners through the focused
+native target; they do not assert full workspace qualification.

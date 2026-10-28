@@ -311,6 +311,9 @@ impl CompactBody {
     }
 }
 
+mod prepared;
+pub use prepared::{PreparedVkBody, PreparedVkStep};
+
 /// A von Karman plate as one pHS.
 ///
 /// Isotropic simply-supported plates use analytic sine modes.
