@@ -759,7 +759,24 @@ impl Nasa9StandardStateModelV1 {
         &self.regions
     }
 
-    /// Evaluate standard-state molar properties and retain exact provenance.
+    /// Evaluate the same source-bound molar properties without allocating a receipt.
+    ///
+    /// Intended for nonlinear trial states whose immutable model already owns
+    /// the source cards. Successful calls allocate nothing. The arithmetic,
+    /// region selection and refusals are identical to the full evaluation;
+    /// accepted states should use evaluate to retain their exact provenance.
+    ///
+    /// # Errors
+    /// Refuses the same invalid temperatures and non-finite properties as evaluate.
+    pub fn evaluate_properties(
+        &self,
+        temperature: Temperature,
+    ) -> Result<StandardStateMolarPropertiesV1, ThermochemErrorV1> {
+        self.evaluate_core(temperature)
+            .map(|(_, properties)| properties)
+    }
+
+    /// Shared arithmetic for trial properties and receipt-bearing evaluations.
     ///
     /// The operation tree is the NASA/TP-2002-211556 nine-coefficient form.
     /// `fs_math::det::ln` avoids platform libm drift. `u` is derived only
@@ -769,10 +786,10 @@ impl Nasa9StandardStateModelV1 {
     /// # Errors
     /// Refuses invalid/out-of-range temperature or the first non-finite
     /// computed property. No partial evaluation escapes.
-    pub fn evaluate(
+    fn evaluate_core(
         &self,
         temperature: Temperature,
-    ) -> Result<Nasa9EvaluationV1, ThermochemErrorV1> {
+    ) -> Result<(usize, StandardStateMolarPropertiesV1), ThermochemErrorV1> {
         let t = temperature.value();
         if !t.is_finite() || t <= 0.0 {
             return Err(ThermochemErrorV1::InvalidEvaluationTemperature { bits: t.to_bits() });
@@ -835,6 +852,22 @@ impl Nasa9StandardStateModelV1 {
             u: MolarInternalEnergyV1::new(u),
             g: MolarGibbsEnergyV1::new(g),
         };
+        Ok((region_index, properties))
+    }
+
+    /// Evaluate standard-state molar properties with the complete source receipt.
+    ///
+    /// Uses the same NASA-9 operation tree and validity checks as evaluate_properties.
+    ///
+    /// # Errors
+    /// Refuses invalid/out-of-range temperature or the first non-finite property.
+    pub fn evaluate(
+        &self,
+        temperature: Temperature,
+    ) -> Result<Nasa9EvaluationV1, ThermochemErrorV1> {
+        let (region_index, properties) = self.evaluate_core(temperature)?;
+        let t = temperature.value();
+        let region = &self.regions[region_index];
         let receipt = Nasa9EvaluationReceiptV1 {
             evaluator_version: NASA9_EVALUATOR_VERSION_V1,
             fs_math_version: fs_math::VERSION,
@@ -1136,6 +1169,92 @@ mod tests {
         assert!(
             (actual - expected).abs() <= 64.0 * f64::EPSILON * scale,
             "actual {actual:?} differs from expected {expected:?}",
+        );
+    }
+
+    #[test]
+    fn g5_trial_properties_match_full_nasa9_across_source_regions() {
+        let low = [
+            2.210371497e4,
+            -3.818461820e2,
+            6.082738360,
+            -8.530914410e-3,
+            1.384646189e-5,
+            -9.625793620e-9,
+            2.519705809e-12,
+            7.108460860e2,
+            -1.076003744e1,
+        ];
+        let high = [
+            5.877124060e5,
+            -2.239249073e3,
+            6.066949220,
+            -6.139685500e-4,
+            1.491806679e-7,
+            -1.923105485e-11,
+            1.061954386e-15,
+            1.283210415e4,
+            -1.586640027e1,
+        ];
+        let species = Nasa9StandardStateModelV1::new(
+            SpeciesId::new("N2").unwrap(),
+            MolarMass::new(0.028_013_4),
+            convention(100_000.0),
+            vec![
+                Nasa9RegionV1::from_card(card(200.0, 1_000.0, 100_000.0, low)).unwrap(),
+                Nasa9RegionV1::from_card(card(1_000.0, 6_000.0, 100_000.0, high)).unwrap(),
+            ],
+        )
+        .unwrap();
+        let bits = |p: StandardStateMolarPropertiesV1| {
+            [
+                p.cp().value(),
+                p.h().value(),
+                p.s().value(),
+                p.u().value(),
+                p.g().value(),
+            ]
+            .map(f64::to_bits)
+        };
+        for t in [
+            200.0,
+            280.0,
+            900.0,
+            1_000.0_f64.next_down(),
+            1_000.0,
+            1_000.0_f64.next_up(),
+            3_500.0,
+            6_000.0,
+        ] {
+            let full = species.evaluate(Temperature::new(t)).unwrap();
+            let trial = species.evaluate_properties(Temperature::new(t)).unwrap();
+            assert_eq!(bits(trial), bits(full.properties()), "T={t}");
+        }
+        for t in [
+            0.0,
+            -1.0,
+            199.0,
+            6_000.0_f64.next_up(),
+            f64::INFINITY,
+            f64::NAN,
+        ] {
+            assert_eq!(
+                species
+                    .evaluate_properties(Temperature::new(t))
+                    .unwrap_err(),
+                species.evaluate(Temperature::new(t)).unwrap_err(),
+            );
+        }
+        let mut overflow = [0.0; 9];
+        overflow[6] = f64::MAX;
+        let overflow_model = model(overflow);
+        assert_eq!(
+            overflow_model
+                .evaluate_properties(Temperature::new(300.0))
+                .unwrap_err(),
+            overflow_model
+                .evaluate(Temperature::new(300.0))
+                .unwrap_err(),
         );
     }
 

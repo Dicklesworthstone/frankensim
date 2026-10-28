@@ -39,6 +39,19 @@ inside `fs-matdb` cards. The crate has no L2-L6 dependency and owns no solver,
 transport protocol, evolving state, session, persistence, or orchestration
 behavior.
 
+### Trial-state caloric evaluation
+
+Both NASA-9 species and frozen-mixture models expose an
+allocation-free-on-success evaluate_properties path for nonlinear trial
+states. It shares the full evaluator's operation tree, canonical reduction
+order, domain checks, formation reference, mixing entropy and pressure
+correction; it is not a constant-capacity approximation or a second law.
+The immutable model retains its original source cards. Trial properties
+do not contain a new evaluation receipt; accepted/publication states use
+the full evaluate path. G5 tests require bit-identical properties across
+NASA region boundaries, compositions and pressures, and identical physical
+refusals. Existing receipt fields and evaluator versions are unchanged.
+
 ## Public types and semantics
 
 - `SpeciesId`, `ElementId`, `ReactionId`, `ElementalMatrix`,

@@ -4,7 +4,7 @@
 //! reacting derivative, equilibrium solve, phase-stability decision, transport
 //! rule, or evolving gas state. Composition basis is the shared `fs-qty`
 //! authority; components are canonicalized by `SpeciesId`, and every successful
-//! evaluation retains the complete component receipts.
+//! full evaluation retains the complete component receipts.
 
 use core::fmt;
 
@@ -16,7 +16,8 @@ use crate::{
     Composition, CompositionBasis, ElementalReferenceIdV1, MolarEnthalpyV1, MolarEntropyV1,
     MolarGibbsEnergyV1, MolarHeatCapacityV1, MolarInternalEnergyV1, MolarThermalQuantityV1,
     Nasa9EvaluationReceiptV1, Nasa9StandardStateModelV1, ReferenceEquationOfStateV1, SemanticError,
-    SpeciesId, StandardStatePhaseV1, ThermochemErrorV1, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K,
+    SpeciesId, StandardStateMolarPropertiesV1, StandardStatePhaseV1, ThermochemErrorV1,
+    UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K,
 };
 
 /// Version of the frozen ideal-gas mixture operation tree and receipt layout.
@@ -474,6 +475,26 @@ impl FrozenIdealGasMixtureModelV1 {
         &self.mole_composition
     }
 
+    /// Evaluate frozen-mixture properties without constructing source receipts.
+    ///
+    /// Successful calls allocate nothing and use exactly the full evaluator's
+    /// species arithmetic, canonical reduction order, mixing/pressure terms
+    /// and refusal checks. This is for trial states in iterative solvers;
+    /// resolve accepted states with evaluate to retain their complete receipt.
+    ///
+    /// # Errors
+    /// Identical physical/source-domain refusals to evaluate.
+    pub fn evaluate_properties(
+        &self,
+        temperature: Temperature,
+        pressure: Pressure,
+    ) -> Result<FrozenIdealGasMixturePropertiesV1, FrozenIdealGasMixtureErrorV1> {
+        self.evaluate_core(temperature, pressure, |model, t| {
+            model.evaluate_properties(t)
+        })
+        .map(|(properties, _)| properties)
+    }
+
     /// Evaluate frozen ideal-gas mixture properties at absolute `T` and `p`.
     ///
     /// Molar `cp`, `h`, and standard entropy are mole-fraction sums of species
@@ -484,12 +505,17 @@ impl FrozenIdealGasMixtureModelV1 {
     /// # Errors
     /// Refuses invalid pressure, any active species evaluation failure, or the
     /// first non-finite mixture field. Nothing partial escapes.
-    #[allow(clippy::too_many_lines)] // One fixed operation tree and its exact receipt stay adjacent.
-    pub fn evaluate(
+    #[allow(clippy::too_many_lines)] // Preserve the existing fixed operation tree.
+    fn evaluate_core(
         &self,
         temperature: Temperature,
         pressure: Pressure,
-    ) -> Result<FrozenIdealGasMixtureEvaluationV1, FrozenIdealGasMixtureErrorV1> {
+        mut evaluate_component: impl FnMut(
+            &Nasa9StandardStateModelV1,
+            Temperature,
+        )
+            -> Result<StandardStateMolarPropertiesV1, ThermochemErrorV1>,
+    ) -> Result<(FrozenIdealGasMixturePropertiesV1, f64), FrozenIdealGasMixtureErrorV1> {
         let pressure_value = pressure.value();
         if !pressure_value.is_finite() || pressure_value <= 0.0 {
             return Err(FrozenIdealGasMixtureErrorV1::InvalidPressure {
@@ -504,25 +530,22 @@ impl FrozenIdealGasMixtureModelV1 {
         let mut standard_entropy = 0.0;
         let mut molar_mass = 0.0;
         let mut x_log_x = 0.0;
-        let mut component_receipts = Vec::with_capacity(self.components.len());
 
         for (component, (model, &mole_fraction)) in
             self.components.iter().zip(mole_fractions).enumerate()
         {
-            let evaluation = model.evaluate(temperature).map_err(|source| {
+            let properties = evaluate_component(model, temperature).map_err(|source| {
                 FrozenIdealGasMixtureErrorV1::ComponentEvaluation {
                     component,
                     species: model.species().clone(),
                     source: Box::new(source),
                 }
             })?;
-            let properties = evaluation.properties();
             cp += mole_fraction * properties.cp().value();
             h += mole_fraction * properties.h().value();
             standard_entropy += mole_fraction * properties.s().value();
             molar_mass += mole_fraction * model.molar_mass().value();
             x_log_x += mole_fraction * fs_math::det::ln(mole_fraction);
-            component_receipts.push(evaluation.receipt().clone());
         }
 
         let pressure_log = fs_math::det::ln(pressure_value) - fs_math::det::ln(reference_pressure);
@@ -580,6 +603,32 @@ impl FrozenIdealGasMixtureModelV1 {
             mass_specific_cv: MassSpecificIsochoricHeatCapacityV1::new(mass_specific_cv),
             mass_specific_gas_constant: MassSpecificGasConstantV1::new(mass_specific_gas_constant),
         };
+        Ok((properties, x_log_x))
+    }
+
+    /// Evaluate the frozen mixture and retain its complete source provenance.
+    ///
+    /// Shares the exact operation tree with evaluate_properties, including
+    /// formation enthalpy, ideal mixing and the pressure-dependent entropy.
+    ///
+    /// # Errors
+    /// Refuses invalid pressure, active species failures and non-finite properties.
+    pub fn evaluate(
+        &self,
+        temperature: Temperature,
+        pressure: Pressure,
+    ) -> Result<FrozenIdealGasMixtureEvaluationV1, FrozenIdealGasMixtureErrorV1> {
+        let mut component_receipts = Vec::with_capacity(self.components.len());
+        let (properties, x_log_x) = self.evaluate_core(temperature, pressure, |model, t| {
+            let evaluation = model.evaluate(t)?;
+            component_receipts.push(evaluation.receipt);
+            Ok(evaluation.properties)
+        })?;
+        let t = temperature.value();
+        let pressure_value = pressure.value();
+        let reference_pressure = self.components[0].convention().reference_pressure().value();
+        let mole_fractions = self.mole_composition.fractions();
+        let molar_mass = properties.molar_mass().value();
         let receipt = FrozenIdealGasMixtureReceiptV1 {
             evaluator_version: FROZEN_IDEAL_GAS_MIXTURE_EVALUATOR_VERSION_V1,
             fs_math_version: fs_math::VERSION,
@@ -960,6 +1009,79 @@ mod tests {
             (actual - expected).abs() <= 128.0 * f64::EPSILON * scale,
             "actual {actual:?} differs from expected {expected:?}",
         );
+    }
+
+    #[test]
+    fn g5_trial_mixture_properties_match_full_evaluations_and_refusals() {
+        let components = vec![
+            standard_state_model(
+                "N2",
+                0.028_013_4,
+                3.5,
+                REFERENCE_PRESSURE,
+                "reference-elements",
+            ),
+            standard_state_model(
+                "O2",
+                0.031_998_8,
+                4.0,
+                REFERENCE_PRESSURE,
+                "reference-elements",
+            ),
+        ];
+        let bits = |p: FrozenIdealGasMixturePropertiesV1| {
+            [
+                p.cp().value(),
+                p.cv().value(),
+                p.h().value(),
+                p.u().value(),
+                p.s().value(),
+                p.g().value(),
+                p.molar_mass().value(),
+                p.mass_specific_cp().value(),
+                p.mass_specific_cv().value(),
+                p.mass_specific_gas_constant().value(),
+            ]
+            .map(f64::to_bits)
+        };
+        for basis in [
+            CompositionBasis::MoleFraction,
+            CompositionBasis::MassFraction,
+        ] {
+            let mixture = FrozenIdealGasMixtureModelV1::new(
+                components.clone(),
+                composition(basis, vec![0.75, 0.25]),
+            )
+            .unwrap();
+            for t in [200.0, 500.0, 1_000.0, 6_000.0] {
+                for p in [0.001, REFERENCE_PRESSURE, 1.0e9] {
+                    let temperature = Temperature::new(t);
+                    let pressure = Pressure::new(p);
+                    let trial = mixture.evaluate_properties(temperature, pressure).unwrap();
+                    let full = mixture.evaluate(temperature, pressure).unwrap();
+                    assert_eq!(bits(trial), bits(full.properties()), "T={t}, p={p}");
+                    assert_eq!(full.receipt().component_receipts().len(), 2);
+                }
+            }
+            for (t, p) in [
+                (0.0, REFERENCE_PRESSURE),
+                (199.0, REFERENCE_PRESSURE),
+                (6_001.0, REFERENCE_PRESSURE),
+                (f64::NAN, REFERENCE_PRESSURE),
+                (300.0, 0.0),
+                (300.0, f64::INFINITY),
+                (300.0, f64::NAN),
+            ] {
+                assert_eq!(
+                    mixture
+                        .evaluate_properties(Temperature::new(t), Pressure::new(p))
+                        .unwrap_err(),
+                    mixture
+                        .evaluate(Temperature::new(t), Pressure::new(p))
+                        .unwrap_err(),
+                );
+            }
+        }
     }
 
     #[test]
