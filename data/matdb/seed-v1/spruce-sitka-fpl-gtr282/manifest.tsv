@@ -1,6 +1,7 @@
-frankensim.matdb-manifest.v1
+frankensim.matdb-manifest.v3
 pack_id	spruce-sitka-fpl-gtr282
 redistribution	permitted	United States Government work (USDA Forest Service Forest Products Laboratory); public domain in the United States; retain the report number, chapter, table numbers, and URL
 citation	Forest Products Laboratory (2021), Wood Handbook - Wood as an Engineering Material, General Technical Report FPL-GTR-282, U.S. Department of Agriculture Forest Service, Chapter 5 Mechanical Properties of Wood (C.A. Senalik and B. Kretschmann), Tables 5-1, 5-2, and 5-3a; and Chapter 4 Moisture Relations and Physical Properties of Wood (S.V. Glass and S.L. Zelinka), Table 4-3 and Equation (4-9), with Chapter 5 Table 5-13 and Equation (5-3) for the moisture-content adjustment; https://www.fpl.fs.usda.gov/documnts/fplgtr/fplgtr282/chapter_05_fpl_gtr282.pdf; Chapter 4 and Table 5-13 read from the full handbook https://research.fs.usda.gov/download/treesearch/62200.pdf
 license	Work-of-the-US-Government-Public-Use-Permitted
 source	primary	properties.tsv	material-tsv-v1
+axis	temperature	temperature	absolute-temperature

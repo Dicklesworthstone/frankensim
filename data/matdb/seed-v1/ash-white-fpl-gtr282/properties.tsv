@@ -42,3 +42,16 @@ validity	specific-gravity	moisture_content	12	12	%
 scalar	density-12pct	wh-clear-wood	density	672.0	kg/m3	constant
 uncertainty	density-12pct	unstated	-	-	-	-
 validity	density-12pct	moisture_content	12	12	%
+observation	wood-thermal	White ash clear wood at fixed 12 percent dry-basis moisture content	FPL-GTR-282 Chapter 4, equations (4-17)-(4-20), https://research.fs.usda.gov/download/treesearch/62243.pdf	Engineering correlations, not additional species measurements. Cp in J/(kg K) is 1000*((0.1031+0.003867*T+4.18*0.12)/1.12+12*(-0.06191+0.000236*T-0.000133*12)); its fixed-moisture dependence is affine in absolute T over 280-420 K, so linear interpolation reproduces this model. Transverse conductivity at 297.15 K is G12*(0.1941+0.004064*12)+0.01864 using this bundle's G12=0.60. The source restricts conductivity to G12>0.3 and MC<25 percent and reports actual conductivity may differ by 20 percent; this is not a statistical confidence interval. No longitudinal conductivity, drying, phase change, pressure dependence, or graded-lumber qualification is supplied.
+curve	heat-capacity-12pct	wood-thermal	specific_heat_capacity	temperature	K	J/kg/K	280:1537.5487142857143,420:2417.4037142857143	linear
+uncertainty	heat-capacity-12pct	unstated	-	-	-	-
+validity	heat-capacity-12pct	temperature	280	420	K
+validity	heat-capacity-12pct	moisture_content	12	12	%
+validity	heat-capacity-12pct	engineering_reference_model	1	1	1
+validity	heat-capacity-12pct	source_pressure_known	0	0	1
+scalar	conductivity-transverse-12pct	wood-thermal	thermal_conductivity_transverse	0.16436080	W/m/K	constant
+uncertainty	conductivity-transverse-12pct	unstated	-	-	-	-
+validity	conductivity-transverse-12pct	temperature	297.15	297.15	K
+validity	conductivity-transverse-12pct	moisture_content	12	12	%
+validity	conductivity-transverse-12pct	engineering_reference_model	1	1	1
+validity	conductivity-transverse-12pct	source_pressure_known	0	0	1
