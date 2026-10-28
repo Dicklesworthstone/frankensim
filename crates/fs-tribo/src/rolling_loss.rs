@@ -1,7 +1,8 @@
 //! Finite-patch rolling and contour-deformation loss candidates.
 //!
-//! This module keeps three rival rungs separate: a Leine-style Coulomb contour
-//! force, a viscous contour force, and a finite-patch hysteretic rolling moment.
+//! This module keeps distinct rungs separate: a Leine-style Coulomb contour
+//! force, a viscous contour force, a finite-patch hysteretic rolling moment,
+//! and material-derived first-order viscoelastic sphere rolling.
 //! They retain their source cards and are never selected or blended from an
 //! apparatus response. Tangential creepage, torsional microslip, stick, and
 //! gross slide are intentionally outside this module.
@@ -10,6 +11,10 @@ use core::fmt;
 
 use crate::partial_slip::GeneralizedWorkOwnership;
 use crate::{ApplicabilityRange, InputAuthority, InterfaceMedium, InterfaceSystemRef};
+
+/// Material-derived first-order bulk deformation loss on a rigid plane.
+pub mod viscoelastic;
+use viscoelastic::ViscoelasticSphereRollingCard;
 
 const EPSILON: f64 = 128.0 * f64::EPSILON;
 
@@ -520,6 +525,8 @@ pub enum RollingLossLaw {
     ViscousContour(ViscousContourCard),
     /// Finite-patch hysteretic rolling-moment candidate.
     HystereticRollingMoment(HystereticRollingCard),
+    /// First-order Kelvin–Voigt sphere deformation on a rigid plane.
+    ViscoelasticSphere(ViscoelasticSphereRollingCard),
 }
 
 impl RollingLossLaw {
@@ -530,6 +537,7 @@ impl RollingLossLaw {
             Self::CoulombContour(card) => card.model_id(),
             Self::ViscousContour(card) => card.model_id(),
             Self::HystereticRollingMoment(card) => card.model_id(),
+            Self::ViscoelasticSphere(card) => card.model_id(),
         }
     }
 
@@ -540,6 +548,7 @@ impl RollingLossLaw {
             Self::CoulombContour(card) => card.source_id(),
             Self::ViscousContour(card) => card.source_id(),
             Self::HystereticRollingMoment(card) => card.source_id(),
+            Self::ViscoelasticSphere(card) => card.source_id(),
         }
     }
 
@@ -550,6 +559,7 @@ impl RollingLossLaw {
             Self::CoulombContour(card) => card.authority(),
             Self::ViscousContour(card) => card.authority(),
             Self::HystereticRollingMoment(card) => card.authority(),
+            Self::ViscoelasticSphere(card) => card.authority(),
         }
     }
 
@@ -558,6 +568,7 @@ impl RollingLossLaw {
             Self::CoulombContour(card) => card.applicability(),
             Self::ViscousContour(card) => card.applicability(),
             Self::HystereticRollingMoment(card) => card.applicability(),
+            Self::ViscoelasticSphere(card) => card.applicability(),
         }
     }
 
@@ -566,7 +577,9 @@ impl RollingLossLaw {
             Self::CoulombContour(_) | Self::ViscousContour(_) => {
                 RollingLossChannel::ContourDeformation
             }
-            Self::HystereticRollingMoment(_) => RollingLossChannel::RollingHysteresis,
+            Self::HystereticRollingMoment(_) | Self::ViscoelasticSphere(_) => {
+                RollingLossChannel::RollingHysteresis
+            }
         }
     }
 
@@ -575,6 +588,7 @@ impl RollingLossLaw {
             Self::CoulombContour(card) => card.validate(),
             Self::ViscousContour(card) => card.validate(),
             Self::HystereticRollingMoment(card) => card.validate(),
+            Self::ViscoelasticSphere(card) => card.validate(),
         }
     }
 
@@ -651,6 +665,18 @@ impl RollingLossLaw {
                     )
                 }
             }
+            Self::ViscoelasticSphere(card) => {
+                let response = card.response(patch, interface, kinematics)?;
+                (
+                    if response.rolling_moment_nm == 0.0 {
+                        RollingLossStateKind::Quiescent
+                    } else {
+                        RollingLossStateKind::RollingHysteresis
+                    },
+                    0.0,
+                    response.rolling_moment_nm,
+                )
+            }
         };
         let endpoint_body_power_w = checked_add(
             checked_mul(
@@ -716,7 +742,10 @@ impl RollingLossLaw {
                 } else {
                     0.0
                 },
-                rolling_hysteresis_heat_j: if matches!(self, Self::HystereticRollingMoment(_)) {
+                rolling_hysteresis_heat_j: if matches!(
+                    self,
+                    Self::HystereticRollingMoment(_) | Self::ViscoelasticSphere(_)
+                ) {
                     heat_j
                 } else {
                     0.0
@@ -791,6 +820,9 @@ impl RollingLossLaw {
             Self::ViscousContour(_) => RollingLossApplicabilityKind::ViscousContour,
             Self::HystereticRollingMoment(_) => {
                 RollingLossApplicabilityKind::FinitePatchHystereticRollingMoment
+            }
+            Self::ViscoelasticSphere(_) => {
+                RollingLossApplicabilityKind::FirstOrderViscoelasticSphere
             }
         }
     }
@@ -1093,6 +1125,8 @@ pub enum RollingLossApplicabilityKind {
     ViscousContour,
     /// Finite-patch hysteretic rolling-moment candidate.
     FinitePatchHystereticRollingMoment,
+    /// Small-deformation first-order sphere/rigid-plane bulk viscous loss.
+    FirstOrderViscoelasticSphere,
 }
 
 /// Explicit no-certificate uncertainty statement.

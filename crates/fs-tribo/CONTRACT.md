@@ -292,7 +292,7 @@ independent fixed-coordinate MDR spring quadrature under mixed loading/reversal.
 
 ### Rolling and contour-deformation loss rungs
 
-`rolling_loss` provides three immutable, separately sourced candidates:
+`rolling_loss` provides three immutable, separately sourced coefficient candidates:
 the `Leine-style Coulomb contour-force rung` (`F_c = -sign(v_c)c_cN`), a
 viscous contour alternative (`F_v = -c_vv_c`, with `c_v` in N s/m), and a
 finite-patch hysteretic rolling moment (`M_h = -sign(omega_r)N l_h eta_h`).
@@ -306,6 +306,41 @@ authority. The rungs have no blend/preference operation, no numerical error
 certificate, and no torsional microslip or gross-slide contribution. Pure spin
 therefore produces no torque in this slice; a separately sourced torsional
 material-hysteresis rung would need a disjoint work channel.
+
+### Material-derived first-order viscoelastic sphere rolling
+
+`rolling_loss::viscoelastic` supplies a separate `RollingLossLaw::ViscoelasticSphere`
+candidate for a deforming Kelvin–Voigt sphere on a rigid plane. Explicit radius,
+Young modulus, Poisson ratio, density and standard shear/bulk viscosities determine
+the response; no rolling coefficient is fitted or defaulted. The corrected
+first-order normal-stress relation of Brilliantov, Pimenova and Goldobin
+(2014, <https://arxiv.org/abs/1410.3289>, equations 54–56) gives
+`A = (1+nu)/(E(1-nu)) [4 eta_s (1-nu+nu^2)/3 + eta_b (1-2nu)^2]`.
+Applying this relation to an advected Hertz pressure and integrating its first
+moment gives `M = -A N R omega`. This rolling inference uses the pressure-moment
+argument of Brilliantov and Pöschel (1998), not its older nonlinear-viscosity
+coefficient. `A` is linear and monotone in both viscosities, regular at `nu=0`,
+and equals the common material time for proportional Kelvin–Voigt viscosity.
+
+The original `HertzSpherePlane` checks load/area/material consistency; principal
+curvatures must identify the actual sphere and signed contour speed must equal
+`R omega`. Caller ceilings bound indentation/radius, speed/shear-wave-speed and
+maximum material time divided by indentation/speed. These are explicit
+applicability choices, not error certificates. This normal-pressure-only,
+small-contact perturbation does not solve the shifted contact boundary,
+arbitrary-speed rolling, contact discovery, normal evolution, static traction,
+sliding or torsional microslip. A released patch, zero viscosities or zero rolling
+rate produces zero loss; spin contributes no torque. Normal Hertz storage remains
+with its original owner. Held rolling work enters the existing rolling heat and
+checkpoint path, with all generated bulk heat assigned to the declared sphere.
+The existing caloric consumer requires that sphere's temperature and heat
+destination; subsequent transport remains owned by its thermal network.
+
+Eight physical regression groups compare the material coefficient with an
+independent complex reduced-modulus limit, integrate the two-dimensional Hertz
+pressure moment under refinement, and check viscosity monotonicity, proportional
+viscosity, zero/reversal/scale limits, original patch geometry, source and
+approximation refusals, retained checkpoints and interval subdivision.
 
 ## Invariants
 

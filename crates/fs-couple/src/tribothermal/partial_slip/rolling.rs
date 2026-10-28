@@ -197,6 +197,23 @@ impl<'a> CaloricRollingContact<'a> {
             RollingLossLaw::HystereticRollingMoment(c) => {
                 (RollingLossChannel::RollingHysteresis, c.applicability())
             }
+            RollingLossLaw::ViscoelasticSphere(c) => {
+                use fs_tribo::rolling_loss::viscoelastic::DeformingSphereSurface;
+                let sphere_index = match c.parameters().sphere_surface {
+                    DeformingSphereSurface::SurfaceA => 0,
+                    DeformingSphereSurface::SurfaceB => 1,
+                };
+                let heat_shares = [partition.surface_a(), partition.surface_b()];
+                if temperature_surface.index() != sphere_index
+                    || heat_shares[sphere_index] != 1.0
+                    || heat_shares[1 - sphere_index] != 0.0
+                {
+                    return Err(CaloricRollingError::Invalid(
+                        "viscoelastic rolling needs the sphere's temperature and bulk heat destination",
+                    ));
+                }
+                (RollingLossChannel::RollingHysteresis, c.applicability())
+            }
         };
         let temperature = partial_slip.temperature_k[temperature_surface.index()];
         if ownership.channel() != channel
