@@ -1,9 +1,6 @@
 //! `frankensim electrothermal`: canonical material packs -> coupled spatial fields.
 //! Fixed-geometry isotropic conduction with optional prescribed fluid transport.
 
-#[path = "json_read.rs"]
-#[allow(dead_code)]
-mod json;
 mod interfaces;
 mod source;
 mod radiation;
@@ -31,10 +28,9 @@ use fs_lbm::conjugate::{
     EnergyConfig, ThermalFace, ThermalSetup, Voxel, VoxelDomain,
 };
 use fs_matdb::{NormalizedMaterialCardPack, QueryPoint};
-use fs_qty::parse::parse_qty;
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Dims, QuantitySpec, Temperature};
-use json::JsonValue as J;
+use crate::material_state_input::{JsonValue as J, quantity, state_point};
 use source::{Problem, ResultField, Source};
 
 const MAX_CELLS: usize = 65_536;
@@ -145,44 +141,6 @@ fn triple(value: &J) -> Result<[usize; 3], String> {
 fn budget(value: &J, key: &str, cap: usize) -> Result<usize, String> {
     let n = integer(required(value, key)?)?;
     if n == 0 || n > cap { Err(format!("{key} must be in 1..={cap}")) } else { Ok(n) }
-}
-
-/// Explicit legacy, dimensional or semantic coordinate convention. This is
-/// the same scalar convention used by the discovery CLI, never inferred from
-/// a material name or from numerically equal dimensions.
-fn quantity(name: &str, dims: Dims) -> Result<Option<QuantitySpec>, String> {
-    if name == "legacy" { return Ok(None); }
-    if name == "dimensional" { return Ok(Some(QuantitySpec::dimensional(dims))); }
-    let kind = match name {
-        "absolute-temperature" => QuantityKind::AbsoluteTemperature,
-        "temperature-difference" => QuantityKind::TemperatureDifference,
-        "pressure" => QuantityKind::Pressure,
-        "stress" => QuantityKind::Stress,
-        "energy" => QuantityKind::Energy,
-        "torque" => QuantityKind::Torque,
-        "entropy" => QuantityKind::Entropy,
-        "heat-capacity" => QuantityKind::HeatCapacity,
-        name => QuantityKind::from_material_convention_name(name)
-            .ok_or_else(|| format!("unsupported quantity kind {name:?}"))?,
-    };
-    if kind.expected_dims() != dims { return Err("quantity kind and unit dimensions disagree".into()); }
-    Ok(Some(QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))))
-}
-
-/// Shared fixed-coordinate parser for bulk and ordered-interface source queries.
-fn state_point(definition: &J) -> Result<QueryPoint, String> {
-    let mut point = QueryPoint::new();
-    for axis in array(definition, "state", 32)? {
-        fields(axis, &["name", "value", "kind"])?;
-        let name = string(axis, "name")?;
-        if point.axes().contains_key(name) { return Err(format!("duplicate state axis {name}")); }
-        let v = parse_qty(string(axis, "value")?).map_err(|e| e.to_string())?;
-        point = match quantity(string(axis, "kind")?, v.dims)? {
-            Some(q) => point.with_quantity(name, q, v.value),
-            None => point.with(name, v.value),
-        }.map_err(|e| e.to_string())?;
-    }
-    Ok(point)
 }
 
 fn load(path: &Path) -> Result<Problem, String> {

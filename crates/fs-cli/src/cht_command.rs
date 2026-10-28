@@ -9,9 +9,7 @@
 //! solid cells (fs-lbm `conjugate`).
 
 mod convergence;
-#[path = "json_read.rs"]
-#[allow(dead_code)]
-mod json;
+mod material;
 mod study;
 
 use std::ffi::OsString;
@@ -34,7 +32,7 @@ use fs_lbm::conjugate::{
     solve_energy, solve_energy_radiating,
 };
 use fs_rep_mesh::{Soup, WindingOctree, winding_exact};
-use json::JsonValue as J;
+use crate::material_state_input::JsonValue as J;
 
 const MAX_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_CELLS: usize = 4_000_000;
@@ -677,7 +675,9 @@ struct Scene {
     dx: f64,
     grid: Grid,
     fluid: FluidProperties,
+    fluid_source: Option<material::FluidSource>,
     materials: Vec<SolidMaterial>,
+    solid_sources: Vec<material::SolidSource>,
     contacts: Vec<ContactResistance>,
     solids: Vec<(u16, Shape)>,
     sources: Vec<Source>,
@@ -862,6 +862,28 @@ const FACE_KEYS: [&str; 6] = ["x-", "x+", "y-", "y+", "z-", "z+"];
 const COMPACT_MATERIAL: &str = "compact-model";
 
 impl Scene {
+    fn append_material_inputs(&self, out: &mut String) {
+        let _ = write!(
+            out,
+            concat!(
+                ",\"material_inputs\":{{\"fluid\":{{\"density_kg_m3\":{},\"specific_heat_j_kg_k\":{},",
+                "\"conductivity_w_m_k\":{},\"kinematic_viscosity_m2_s\":{},\"source\":{}}},\"solids\":[{}]}}"
+            ),
+            self.fluid.density_kg_m3,
+            self.fluid.specific_heat_j_kg_k,
+            self.fluid.conductivity_w_m_k,
+            self.fluid.kinematic_viscosity_m2_s,
+            self.fluid_source
+                .as_ref()
+                .map_or_else(|| "null".into(), material::FluidSource::json),
+            self.solid_sources
+                .iter()
+                .map(material::SolidSource::json)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+    }
+
     fn from_root(root: &J, base: &std::path::Path) -> Result<Self> {
         Self::from_root_split(root, base, 1)
     }
@@ -925,10 +947,17 @@ impl Scene {
                 ),
             });
         }
+        let mut source_bytes = 0;
+        let mut fluid_source = None;
         let fluid = match root.get("fluid") {
             None => FluidProperties::dry_air_300k(),
             Some(value) if value.as_str() == Some("dry-air-300k") => {
                 FluidProperties::dry_air_300k()
+            }
+            Some(value) if value.get("gas").is_some() || value.get("pack").is_some() => {
+                let (properties, source) = material::fluid(value, base, &mut source_bytes)?;
+                fluid_source = Some(source);
+                properties
             }
             Some(value) if value.as_object().is_some() => FluidProperties {
                 density_kg_m3: number(value, "density_kg_m3", "fluid")?,
@@ -943,6 +972,7 @@ impl Scene {
             }
         };
         let mut materials = Vec::new();
+        let mut solid_sources = Vec::new();
         let mut emissivities = Vec::new();
         let mut names = Vec::new();
         for (i, item) in root
@@ -965,12 +995,30 @@ impl Scene {
             names.push(name);
             // A number (isotropic) or [k_x, k_y, k_z] (orthotropic along the
             // grid axes, e.g. a PCB laminate).
-            let material = match item.get("conductivity_w_m_k").and_then(J::as_array) {
-                Some(_) => {
-                    let k = vec3(item, "conductivity_w_m_k", &at)?;
-                    SolidMaterial::new(name, (k[0] * k[1] * k[2]).cbrt()).with_orthotropic(k)
+            let material = if let Some(source) = item.get("source") {
+                if [
+                    "conductivity_w_m_k",
+                    "volumetric_heat_capacity_j_m3_k",
+                    "conductivity_table",
+                ]
+                .iter()
+                .any(|key| item.get(key).is_some())
+                {
+                    return Err(bad(format!(
+                        "{at}: source-derived thermal coefficients cannot be overridden"
+                    )));
                 }
-                None => SolidMaterial::new(name, number(item, "conductivity_w_m_k", &at)?),
+                let (material, source) = material::solid(source, base, &mut source_bytes, name, i)?;
+                solid_sources.push(source);
+                material
+            } else {
+                match item.get("conductivity_w_m_k").and_then(J::as_array) {
+                    Some(_) => {
+                        let k = vec3(item, "conductivity_w_m_k", &at)?;
+                        SolidMaterial::new(name, (k[0] * k[1] * k[2]).cbrt()).with_orthotropic(k)
+                    }
+                    None => SolidMaterial::new(name, number(item, "conductivity_w_m_k", &at)?),
+                }
             };
             let material = match optional_number(item, "volumetric_heat_capacity_j_m3_k", &at)? {
                 Some(rho_c) => material.with_heat_capacity(rho_c),
@@ -1302,18 +1350,46 @@ impl Scene {
             return Err(bad("limits.wall_seconds must be positive"));
         }
         let lengths = [0, 1, 2].map(|a| grid.length(a));
+        let mut reference = optional_number(&root, "reference_temperature_k", "scene")?;
+        let mut expansion = optional_number(&root, "expansion_per_k", "scene")?;
+        if let Some(t) = fluid_source
+            .as_ref()
+            .and_then(material::FluidSource::gas_reference_temperature)
+        {
+            if reference.is_some_and(|value| value != t)
+                || expansion.is_some_and(|value| (value * t - 1.0).abs() > 128.0 * f64::EPSILON)
+            {
+                return Err(bad(
+                    "source-backed gas buoyancy must use its original reference temperature and ideal-gas expansion 1/T",
+                ));
+            }
+            reference = Some(t);
+            expansion = Some(1.0 / t);
+        }
+        if fluid_source
+            .as_ref()
+            .is_some_and(material::FluidSource::requires_expansion)
+            && gravity.is_some_and(|g| g.iter().any(|v| *v != 0.0))
+            && (expansion.is_none() || reference.is_none())
+        {
+            return Err(bad(
+                "a source-backed liquid with buoyancy requires expansion_per_k and reference_temperature_k; ideal-gas 1/T does not describe a liquid",
+            ));
+        }
         Ok(Self {
             dx,
             grid,
             fluid,
+            fluid_source,
             materials,
+            solid_sources,
             contacts,
             solids,
             sources,
             faces,
             gravity,
-            expansion: optional_number(&root, "expansion_per_k", "scene")?,
-            reference: optional_number(&root, "reference_temperature_k", "scene")?,
+            expansion,
+            reference,
             tolerance,
             turbulence,
             internal_fans,
@@ -1612,6 +1688,7 @@ fn execute_unsteady(
             num(scene.dx)?,
             scene.grid.uniform.is_none()
         );
+        scene.append_material_inputs(&mut out);
         let _ = write!(
             out,
             ",\"flow\":{{\"steps\":{},\"sweeps\":{sweeps},\"max_step_sweeps\":{max_step_sweeps},\"final_mass_residual\":{},\"final_momentum_residual\":{},\"inflow_m3_s\":{},\"outflow_m3_s\":{},\"final_kinetic_energy_j\":{}}}",
@@ -2043,6 +2120,7 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
             num(scene.dx)?,
             scene.grid.uniform.is_none()
         );
+        scene.append_material_inputs(&mut out);
         let _ = write!(
             out,
             ",\"flow\":{{\"iterations\":{},\"mass_residual\":{},\"momentum_residual\":{},\"inflow_m3_s\":{},\"outflow_m3_s\":{},\"max_divergence_m3_s\":{},\"max_speed_m_s\":{},\"max_cell_reynolds\":{}",
@@ -2342,16 +2420,19 @@ fn execute_within_budget(scene: &Scene, json_mode: bool) -> Result<String> {
 
 pub(super) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
     if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
+        let help = format!(
+            "{HELP}\nSource-backed materials: fluid may declare {{mode: \"frozen\", gas: <shared gas record>}}\nor {{mode: \"frozen\", pack, state, viscosity: \"dynamic\"|\"kinematic\"}}.\nA solid material may declare source: {{mode: \"frozen\", pack, state}}.\nCanonical packs and typed state coordinates are shared with the material\nlibraries; source coefficients cannot be overridden. See docs/COOLING_CHT_MATERIALS.md.\n"
+        );
         return CommandOutput {
             exit_code: exit::SUCCESS,
             stdout: if json_mode {
                 format!(
                     "{{\"schema\":{},\"help\":{}}}\n",
                     quote(RESULT_SCHEMA),
-                    quote(HELP)
+                    quote(&help)
                 )
             } else {
-                HELP.into()
+                help
             },
             stderr: String::new(),
         };

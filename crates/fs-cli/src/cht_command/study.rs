@@ -13,7 +13,7 @@
 use std::fmt::Write as _;
 use std::time::Instant;
 
-use super::json::JsonValue as J;
+use super::J;
 use super::{NO_CLAIM, Result, Scene, bad, execute_within_budget, num, quote};
 
 const STUDY_SCHEMA: &str = "frankensim.cooling-cht.study.v1";

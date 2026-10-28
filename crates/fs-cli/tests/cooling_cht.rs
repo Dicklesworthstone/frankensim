@@ -52,6 +52,220 @@ const DUCT: &str = r#"{
 }"#;
 
 #[test]
+fn atmosphere_data_drives_the_shared_flow_and_thermal_coefficients() {
+    let solve = |name: &str, gas: &str| {
+        let scene = DUCT.replacen(
+            "{",
+            &format!("{{\"fluid\":{{\"mode\":\"frozen\",\"gas\":\"{gas}\"}},"),
+            1,
+        );
+        let (code, result, stderr) = run(&scratch(name, &scene));
+        assert_eq!(code, 0, "{stderr}");
+        assert!(f(&result, &["energy", "relative_residual"]) < 1e-6);
+        result
+    };
+    let air = solve("gas-air.json", "mixture 300 100000 mole 2 N2 0.8 O2 0.2");
+    let thin = solve("gas-thin.json", "mixture 300 50000 mole 2 N2 0.8 O2 0.2");
+    let helium = solve("gas-helium.json", "mixture 300 100000 mole 1 He 1");
+    let property = |result: &J, key| f(result, &["material_inputs", "fluid", key]);
+    assert!(
+        (property(&thin, "density_kg_m3") / property(&air, "density_kg_m3") - 0.5).abs() < 1e-12
+    );
+    assert!(
+        (property(&thin, "kinematic_viscosity_m2_s") / property(&air, "kinematic_viscosity_m2_s")
+            - 2.0)
+            .abs()
+            < 1e-12
+    );
+    assert!(property(&helium, "conductivity_w_m_k") > 4.0 * property(&air, "conductivity_w_m_k"));
+    assert!(f(&thin, &["max_solid_temperature_k"]) > f(&air, &["max_solid_temperature_k"]));
+    assert!(f(&helium, &["max_solid_temperature_k"]) < f(&air, &["max_solid_temperature_k"]));
+    assert_eq!(
+        air.path(&["material_inputs", "fluid", "source"])
+            .unwrap()
+            .str_field("mode"),
+        Some("frozen")
+    );
+}
+
+fn thermal_pack(k: f64, cp: f64) -> Vec<u8> {
+    thermal_pack_with_frequency(k, cp, false)
+}
+
+fn thermal_pack_with_frequency(k: f64, cp: f64, frequency: bool) -> Vec<u8> {
+    use fs_blake3::hash_bytes;
+    use fs_evidence::ValidityDomain;
+    use fs_matdb::{
+        ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedMaterialCardPack, NormalizedPack,
+        PropertyClaim, PropertyKey, PropertyValue, Provenance, UncertaintyModel,
+    };
+    use fs_material::state_point::{
+        DENSITY_PROPERTY, SPECIFIC_HEAT_CAPACITY_DIMS, SPECIFIC_HEAT_CAPACITY_PROPERTY,
+        THERMAL_CONDUCTIVITY_DIMS, THERMAL_CONDUCTIVITY_PROPERTY,
+    };
+    let mut claims = ClaimSet::new();
+    for (name, dims, value) in [
+        (DENSITY_PROPERTY, fs_qty::Density::DIMS, 2.0),
+        (
+            SPECIFIC_HEAT_CAPACITY_PROPERTY,
+            SPECIFIC_HEAT_CAPACITY_DIMS,
+            cp,
+        ),
+        (THERMAL_CONDUCTIVITY_PROPERTY, THERMAL_CONDUCTIVITY_DIMS, k),
+    ] {
+        let validity = ValidityDomain::unconstrained().with("T", 290.0, 350.0);
+        let validity = if frequency {
+            validity.with("f", 1.0, 100.0)
+        } else {
+            validity
+        };
+        claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::new(name, dims),
+                value: PropertyValue::Scalar { value, dims },
+                validity,
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::ConstantWithinValidity,
+                observations: vec![],
+                provenance: Provenance {
+                    source: "authored CHT thermal fixture".into(),
+                    license: "CC0 synthetic data".into(),
+                    artifact: None,
+                },
+            })
+            .unwrap();
+    }
+    let pack = NormalizedPack::new(
+        "cht-thermal-fixture",
+        "v1",
+        hash_bytes(b"synthetic thermal source"),
+        "CC0 synthetic data",
+        claims,
+        vec![],
+        vec![],
+    )
+    .unwrap();
+    NormalizedMaterialCardPack::new(
+        MaterialStateId {
+            chemistry: "synthetic".into(),
+            phase: "solid".into(),
+            process: "test fixture".into(),
+            revision: 0,
+        },
+        pack,
+    )
+    .unwrap()
+    .to_bytes()
+}
+
+const SOURCED_SOLID: &str = r#"{
+ "schema":"frankensim.cooling-cht.v1", "size_m":[3,2,1], "voxel_m":1,
+ "fluid":{"density_kg_m3":1,"specific_heat_j_kg_k":1,
+   "conductivity_w_m_k":1e-12,"kinematic_viscosity_m2_s":0.001},
+ "materials":[{"name":"body","source":{"mode":"frozen","pack":"PACK",
+   "state":[{"name":"T","value":"300 K","kind":"legacy"}]}}],
+ "solids":[{"material":"body","min_m":[0,0,0],"max_m":[3,1,1]}],
+ "sources":[{"name":"heater","power_w":3,"min_m":[1,0,0],"max_m":[2,1,1]}],
+ "faces":{"x-":{"type":"wall","temperature_k":300},"x+":{"type":"wall","temperature_k":300}},
+ "transient":{"time_step_s":0.1,"steps":1,"initial_temperature_k":300},
+ "solver":{"tolerance":1e-10}
+}"#;
+
+#[test]
+fn canonical_solid_pack_changes_conduction_and_storage_without_solver_changes() {
+    let solve = |name: &str, k: f64, cp: f64| {
+        let path = scratch(
+            &format!("{name}.json"),
+            &SOURCED_SOLID.replace("PACK", &format!("{name}.fsmcdpk")),
+        );
+        std::fs::write(
+            path.parent().unwrap().join(format!("{name}.fsmcdpk")),
+            thermal_pack(k, cp),
+        )
+        .unwrap();
+        let (code, result, stderr) = run(&path);
+        assert_eq!(code, 0, "{stderr}");
+        assert!((f(&result, &["max_solid_temperature_k"]) - 300.0 - 2.25 / k).abs() < 1e-7);
+        assert!(f(&result, &["transient", "worst_step_closure_j"]) < 1e-8);
+        result
+    };
+    let base = solve("source-base", 1.0, 10.0);
+    let conducting = solve("source-conducting", 10.0, 10.0);
+    let storing = solve("source-storing", 1.0, 100.0);
+    assert!(f(&conducting, &["max_solid_temperature_k"]) < f(&base, &["max_solid_temperature_k"]));
+    assert!(
+        f(&storing, &["transient", "final_max_solid_temperature_k"])
+            < f(&base, &["transient", "final_max_solid_temperature_k"])
+    );
+    let source = base
+        .path(&["material_inputs", "solids"])
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(source.len(), 1);
+    assert!(source[0].str_field("material_state").is_some());
+    assert!(source[0].str_field("pack_identity").is_some());
+}
+
+#[test]
+fn material_sources_refuse_ambiguous_overrides_and_unsupported_reference_states() {
+    let invalid_gases = [
+        r#"{"gas":"300 100000 0"}"#,
+        r#"{"mode":"frozen","gas":"mixture 300 100000 mole 1 He 1 trailing"}"#,
+        r#"{"mode":"frozen","gas":"300 100000 0","density_kg_m3":1}"#,
+        r#"{"mode":"frozen","gas":"thermochemical 300 100000 mole 1 arbitrary 1"}"#,
+    ];
+    for (i, fluid) in invalid_gases.iter().enumerate() {
+        let scene = DUCT.replacen("{", &format!("{{\"fluid\":{fluid},"), 1);
+        assert_ne!(run(&scratch(&format!("invalid-gas-{i}.json"), &scene)).0, 0);
+    }
+    let path = scratch(
+        "invalid-solid-source.json",
+        &SOURCED_SOLID
+            .replace("PACK", "domain.fsmcdpk")
+            .replace("300 K", "400 K"),
+    );
+    std::fs::write(
+        path.parent().unwrap().join("domain.fsmcdpk"),
+        thermal_pack(1.0, 10.0),
+    )
+    .unwrap();
+    assert_ne!(run(&path).0, 0);
+    let override_scene = SOURCED_SOLID.replace("PACK", "domain.fsmcdpk").replace(
+        r#""name":"body","source""#,
+        r#""name":"body","conductivity_w_m_k":99,"source""#,
+    );
+    assert_ne!(
+        run(&scratch("invalid-source-override.json", &override_scene)).0,
+        0
+    );
+    let frequency_scene = SOURCED_SOLID.replace("PACK", "frequency.fsmcdpk").replace(
+        r#""kind":"legacy"}]"#,
+        r#""kind":"legacy"},{"name":"f","value":"10 Hz","kind":"cyclic-frequency"}]"#,
+    );
+    let frequency_path = scratch("invalid-frequency-source.json", &frequency_scene);
+    std::fs::write(
+        frequency_path.parent().unwrap().join("frequency.fsmcdpk"),
+        thermal_pack_with_frequency(1.0, 10.0, true),
+    )
+    .unwrap();
+    let (code, _, error) = run(&frequency_path);
+    assert_ne!(code, 0);
+    assert!(error.contains("static material coefficients"), "{error}");
+
+    let unused_sources = DUCT.replacen(
+        "{",
+        r#"{"fluid":{"mode":"frozen",
+        "gas":"300 100000 0","phase":"frozen-gas","sources":[{
+          "species":"domain.fsmcdpk","nasa9":"domain.fsmcdpk","transport":"domain.fsmcdpk"}]},"#,
+        1,
+    );
+    let (code, _, error) = run(&scratch("unused-gas-sources.json", &unused_sources));
+    assert_ne!(code, 0);
+    assert!(error.contains("require a thermochemical record"), "{error}");
+}
+
+#[test]
 fn radiating_transient_settles_on_the_steady_radiating_solution() {
     // The duct scene with an emissive heatsink: the frozen-flow march
     // carries radiation through the inlet and opening, and a long march

@@ -862,12 +862,13 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             report.combined_thermal_balance_defect_j =
                 flow.balance_defect_j + report.gas_balance_defect_j;
         }
+        let accepted_finite_atmosphere = observer.finite_atmosphere.take();
         // Flow has passed every endpoint/advection gate; accepting the already
         // admitted solid candidate is now infallible. No partial thermal commit.
         for ((body, h), material) in bodies.iter_mut().zip(body_enthalpies).zip(body_sources) {
             body.accept(h, material);
         }
-        if let (Some(target), Some(accepted)) = (finite_atmosphere, observer.finite_atmosphere.take()) {
+        if let (Some(target), Some(accepted)) = (finite_atmosphere, accepted_finite_atmosphere) {
             *target = accepted;
         }
         let body_report = (!bodies.is_empty()).then_some(FreeSurfaceBodyExchange {
