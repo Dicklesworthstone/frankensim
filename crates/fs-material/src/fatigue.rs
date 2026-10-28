@@ -49,7 +49,7 @@ pub enum MeanStressCorrection {
     /// Explicit mean-independent approximation. Does not imply its validation.
     Uncorrected,
     /// Modified Goodman for tensile means; compressive means receive no credit.
-    /// The declared ultimate strength also bounds the tensile cycle peak.
+    /// The declared ultimate strength bounds every accepted tensile sample.
     GoodmanTensionOnly { ultimate_strength_pa: f64 },
 }
 
@@ -259,6 +259,10 @@ impl RainflowMiner {
         if self.samples >= self.limits.maximum_samples {
             return Err(FatigueError::SampleLimit { limit: self.limits.maximum_samples });
         }
+        // A constant or unfinished monotone history need not close any cycle.
+        // Admit its instantaneous tensile peak BEFORE changing accepted state;
+        // otherwise an overload can finish with zero reported fatigue damage.
+        self.correction.corrected_amplitude(0.0, stress_pa)?;
         let point = TurningPoint { stress: stress_pa };
         let mut direction = self.direction;
         if let Some(previous) = self.pending {
@@ -504,6 +508,77 @@ mod tests {
             RainflowLimits { maximum_samples: 100, maximum_residue: 16 }).unwrap();
         c.push_block(&[2.0, 8.0, 2.0], &mut || false).unwrap();
         close(c.finish().unwrap().miner_damage, 0.004);
+    }
+
+    #[test]
+    fn goodman_refuses_overload_without_waiting_for_a_reversal() {
+        let rule = MeanStressCorrection::GoodmanTensionOnly { ultimate_strength_pa: 20.0 };
+        for stress in [20.0, 21.0, f64::MAX] {
+            let mut c = RainflowMiner::new(curve(), rule,
+                RainflowLimits { maximum_samples: 100, maximum_residue: 16 }).unwrap();
+            let before = c.clone();
+            let expected = FatigueError::StaticStrengthExceeded {
+                peak_pa: stress, ultimate_strength_pa: 20.0,
+            };
+            assert_eq!(c.push(stress), Err(expected.clone()));
+            assert_eq!(c, before);
+            assert_eq!(c.push_block(&[stress; 4], &mut || false), Err(expected));
+            assert_eq!(c, before);
+        }
+    }
+
+    #[test]
+    fn goodman_overload_preserves_pending_history_and_permits_retry() {
+        let rule = MeanStressCorrection::GoodmanTensionOnly { ultimate_strength_pa: 20.0 };
+        let mut c = RainflowMiner::new(curve(), rule,
+            RainflowLimits { maximum_samples: 100, maximum_residue: 16 }).unwrap();
+        c.push_block(&[2.0, 8.0], &mut || false).unwrap();
+        let before = c.clone();
+        // The earlier samples in this block would already have counted cycles.
+        assert!(matches!(c.push_block(&[2.0, 8.0, 21.0], &mut || false),
+            Err(FatigueError::StaticStrengthExceeded { .. })));
+        assert_eq!(c, before);
+        assert!(matches!(c.push(20.0), Err(FatigueError::StaticStrengthExceeded { .. })));
+        assert_eq!(c, before);
+        c.push_block(&[2.0, 8.0, 2.0], &mut || false).unwrap();
+        let mut reference = before;
+        for stress in [2.0, 8.0, 2.0] { reference.push(stress).unwrap(); }
+        assert_eq!(c.finish().unwrap(), reference.finish().unwrap());
+        close(c.summary().miner_damage, 0.008);
+    }
+
+    #[test]
+    fn instantaneous_admission_does_not_invent_compressive_or_uncorrected_strength() {
+        let rule = MeanStressCorrection::GoodmanTensionOnly { ultimate_strength_pa: 20.0 };
+        let just_below = f64::from_bits(20.0_f64.to_bits() - 1);
+        for stress in [just_below, -100.0] {
+            let mut c = RainflowMiner::new(curve(), rule,
+                RainflowLimits { maximum_samples: 100, maximum_residue: 16 }).unwrap();
+            c.push_block(&[stress; 4], &mut || false).unwrap();
+            assert_eq!(c.finish().unwrap().miner_damage, 0.0);
+        }
+        // Uncorrected means no static-strength law was supplied, not a hidden cap.
+        let mut c = counter();
+        c.push_block(&[100.0; 4], &mut || false).unwrap();
+        assert_eq!(c.finish().unwrap().miner_damage, 0.0);
+    }
+
+    #[test]
+    fn supported_goodman_history_is_identical_at_every_callback_boundary() {
+        let samples = [2.0, 8.0, 2.0, 8.0, 2.0];
+        let rule = MeanStressCorrection::GoodmanTensionOnly { ultimate_strength_pa: 20.0 };
+        let empty = RainflowMiner::new(curve(), rule,
+            RainflowLimits { maximum_samples: 100, maximum_residue: 16 }).unwrap();
+        let mut whole = empty.clone();
+        whole.push_block(&samples, &mut || false).unwrap();
+        let expected = whole.finish().unwrap();
+        close(expected.miner_damage, 0.008);
+        for split in 0..=samples.len() {
+            let mut chunked = empty.clone();
+            chunked.push_block(&samples[..split], &mut || false).unwrap();
+            chunked.push_block(&samples[split..], &mut || false).unwrap();
+            assert_eq!(chunked.finish().unwrap(), expected);
+        }
     }
 
     #[test]
