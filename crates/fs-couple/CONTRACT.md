@@ -9012,6 +9012,46 @@ anisotropic static/sliding Coulomb behavior, singular response and exact retry
 after refusal. This unlocks the original vector layer law in modal motion; it
 does not turn the scalar Hertz--Mindlin law into a vector partial-slip solution.
 
+### Simultaneous two-axis retained shear on shared modal bodies
+
+`friction::tangential::multiple::MultiTangentialModalSystem<L>` advances a
+bounded set of original `TangentialLaw` contacts in one mechanical transaction.
+Each contact has its own law, retained history, physical limits, prescribed
+normal load, drive and fixed pair of tangent projections. All response entries
+`C_ij = b_i^T D_network b_j` are computed through the original modal response,
+including cross-contact and cross-axis terms. Shared bodies, bilateral links,
+material memory and admitted acoustic loads retain their existing evolution.
+Setup caches the complete matrix and its shared constitutive admission; it
+checks contact, matrix-storage and projection-work budgets before allocation.
+
+The shared `fs-tribo` simultaneous solver queries every law from its accepted
+history. Its held efforts are summed before one original network update.
+Actual driver-minus-body motion is then checked independently for every
+contact, including local stored-energy change and dissipated work. Original
+network storage/loss, all contact storage/heat, external work and all drive
+work must close together. Only then do the original network, all contact
+histories, sample clock and observations publish. A late physical-budget
+failure or source refusal preserves the complete accepted state and permits
+an identical retry. Reversible contact energy is included in the network's
+total-storage ceiling; irreversible heat is exported once per contact.
+
+This retains the original time integrator and constitutive displacement-segment
+meaning. It is a frozen-geometry, prescribed-normal-load contact interval,
+without contact discovery, normal/shear evolution, tangent-frame transport or
+a multiple-interface thermal solver. Redundant response rows are admitted
+without physical regularization when the constitutive problem resolves.
+Nonunique friction roots and iteration limits retain the shared solver's
+explicit selection/refusal; no universal convergence or ordering-independence
+claim is made. Scalar Mindlin keeps its transverse-motion refusal. Setup is
+reused, but candidate constitutive histories and reports may allocate.
+
+`tests/modal_multi_tangential.rs` checks an independent four-axis elastic
+solution and all original body recoils, nonproportional plastic histories,
+independent tangent rotations and contact permutation on a resolved problem,
+simultaneous static/sliding behavior, redundant contact rows, loaded-history
+rollback/retry, and a three-rung comparison with the analytic elastic frequency
+of a body loaded by two retained contacts.
+
 ### Stateful shear memory and finite-body thermal evolution
 
 `friction::tangential::heat` connects `TangentialModalSystem<L>` to the original

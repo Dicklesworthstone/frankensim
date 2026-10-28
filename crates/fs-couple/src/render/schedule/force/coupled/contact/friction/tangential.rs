@@ -25,6 +25,9 @@ pub mod heat;
 /// Two retained tangent directions with the full original network response.
 pub mod planar;
 
+/// Simultaneous retained shear at several contacts on the same modal bodies.
+pub mod multiple;
+
 /// One held driver motion and its explicitly supplied contact environment.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TangentialModalDrive {
