@@ -17,6 +17,8 @@
 //! no Coulomb saddle/HX/higher-order/eddy-current/saturation or TEAM claim.
 //! Weak-form reference: https://mfem.org/tesla-notes/ .
 
+pub mod nonlinear;
+
 use super::{
     SpatialGeometry, SpatialMagneticError, SpatialMagneticMaterial, cross, dot, finite, invalid,
     poll, prepare_geometry,
@@ -66,7 +68,7 @@ struct CellVectors {
 
 /// Fixed geometry/material curl-curl preparation, reused across current loads.
 pub struct SpatialVectorMagnetostatics {
-    geometry: SpatialGeometry,
+    pub(super) geometry: SpatialGeometry,
     materials: Vec<SpatialMagneticMaterial>,
     permeability: Vec<f64>,
     remanence: Vec<[f64; 3]>,
@@ -220,43 +222,18 @@ impl SpatialVectorMagnetostatics {
         })?;
         let curl = incidence_to_csr(&geometry.mesh.d1());
         let stiffness = stiffness(&curl, mass.matrix());
-        let mut cells = Vec::with_capacity(materials.len());
+        let cells = prepare_cells(&geometry, cancelled)?;
         let mut remanence_load = vec![0.0; geometry.mesh.edges.len()];
-        for (cell, tet) in geometry.mesh.tets.iter().enumerate() {
+        for (cell, vectors) in cells.iter().enumerate() {
             poll(cancelled)?;
-            let grads = &geometry.geometry.grads[cell];
             let volume = geometry.geometry.vol_signed[cell].abs();
-            let mut edges = [0; 6];
-            let mut curls = [[0.0; 3]; 6];
-            let mut integrals = [[0.0; 3]; 6];
-            let mut e = 0;
-            for a in 0..4 {
-                for b in a + 1..4 {
-                    let (a, b) = if tet[a] < tet[b] { (a, b) } else { (b, a) };
-                    let edge = geometry
-                        .mesh
-                        .edges
-                        .binary_search(&[tet[a], tet[b]])
-                        .map_err(|_| invalid("missing canonical magnetic edge"))?;
-                    let curl = cross(grads[a], grads[b]).map(|v| 2.0 * v);
-                    let integral =
-                        std::array::from_fn(|j| volume * (grads[b][j] - grads[a][j]) / 4.0);
-                    for value in curl.into_iter().chain(integral) {
-                        finite(value)?;
-                    }
-                    let load = finite(volume * dot(curl, remanence[cell]) / permeability[cell])?;
-                    remanence_load[edge] = finite(remanence_load[edge] + load)?;
-                    edges[e] = edge;
-                    curls[e] = curl;
-                    integrals[e] = integral;
-                    e += 1;
-                }
+            for local in 0..6 {
+                let edge = vectors.edges[local];
+                let load = finite(
+                    volume * dot(vectors.curls[local], remanence[cell]) / permeability[cell],
+                )?;
+                remanence_load[edge] = finite(remanence_load[edge] + load)?;
             }
-            cells.push(CellVectors {
-                edges,
-                curls,
-                integrals,
-            });
         }
         poll(cancelled)?;
         Ok(Self {
@@ -306,106 +283,20 @@ impl SpatialVectorMagnetostatics {
         controls: VectorMagneticControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialVectorField<'_>> {
-        poll(cancelled)?;
-        if current_a_m2.len() != self.cells.len()
-            || current_a_m2.iter().flatten().any(|v| !v.is_finite())
-            || [
-                controls.current_tolerance_a,
-                controls.flux_tolerance_wb,
-                controls.energy_tolerance_j,
-            ]
-            .iter()
-            .any(|v| !v.is_finite() || *v <= 0.0)
-            || [controls.field.tolerance, controls.gauge.tolerance]
-                .iter()
-                .any(|v| !v.is_finite() || *v <= 0.0 || *v >= 1.0)
-        {
-            return Err(invalid(
-                "complete finite cell current and positive physical/solver allowances required",
-            ));
+        let VectorSources {
+            prescribed,
+            free,
+            projector,
+            current_load,
+            maximum_current_flux_defect_a,
+            source_compatibility_defect_a,
+            source_report,
+        } = VectorTopology {
+            geometry: &self.geometry,
+            cells: &self.cells,
         }
+        .prepare_sources(current_a_m2, boundary, controls, cancelled)?;
         let ne = self.mesh().edges.len();
-        let mut prescribed = vec![None; ne];
-        let mut fixed_faces = BTreeSet::new();
-        for trace in &boundary.potential {
-            poll(cancelled)?;
-            if self
-                .geometry
-                .faces
-                .get(trace.face)
-                .is_none_or(|f| f.cells.len() != 1)
-                || !fixed_faces.insert(trace.face)
-                || trace.edge_integrals_wb.iter().any(|v| !v.is_finite())
-            {
-                return Err(invalid(
-                    "unique exterior tangential-potential faces with finite edge integrals required",
-                ));
-            }
-            let edges = self
-                .face_edges(trace.face)
-                .ok_or(invalid("missing potential trace edge"))?;
-            for (edge, value) in edges.into_iter().zip(trace.edge_integrals_wb) {
-                if prescribed[edge].is_some_and(|old| old != value) {
-                    return Err(invalid(
-                        "conflicting tangential potential on a shared boundary edge",
-                    ));
-                }
-                prescribed[edge] = Some(value);
-            }
-        }
-        let mut maximum_current_flux_defect_a = 0.0_f64;
-        for (i, face) in self.geometry.faces.iter().enumerate() {
-            poll(cancelled)?;
-            let current = if face.cells.len() == 2 {
-                std::array::from_fn(|j| {
-                    current_a_m2[face.cells[0]][j] - current_a_m2[face.cells[1]][j]
-                })
-            } else if fixed_faces.contains(&i) {
-                continue;
-            } else {
-                current_a_m2[face.cells[0]]
-            };
-            let defect = finite(face.area_m2 * dot(current, face.outward_normal))?.abs();
-            maximum_current_flux_defect_a = maximum_current_flux_defect_a.max(defect);
-        }
-        if maximum_current_flux_defect_a > controls.current_tolerance_a {
-            return Err(invalid(
-                "impressed current violates interface or natural-exterior charge continuity",
-            ));
-        }
-        let mut current_load = vec![0.0; ne];
-        for (cell, vectors) in self.cells.iter().enumerate() {
-            poll(cancelled)?;
-            for local in 0..6 {
-                let e = vectors.edges[local];
-                current_load[e] =
-                    finite(current_load[e] + dot(current_a_m2[cell], vectors.integrals[local]))?;
-            }
-        }
-        let free: Vec<_> = (0..ne).filter(|&e| prescribed[e].is_none()).collect();
-        let projector = PreparedCoexact1::new(
-            self.mesh(),
-            self.positions_m(),
-            &self.geometry.geometry,
-            &free,
-            controls.maximum_gauge_product_terms,
-            cancelled,
-        )
-        .map_err(gauge_error)?;
-        let free_current: Vec<_> = free.iter().map(|&e| current_load[e]).collect();
-        let riesz: Vec<_> = free_current
-            .iter()
-            .zip(projector.metric())
-            .map(|(j, m)| finite(j / m))
-            .collect::<Result<_>>()?;
-        let (_, projected_source, source_report) =
-            project(&projector, &riesz, controls.gauge, cancelled)?;
-        let source_compatibility_defect_a = max_difference(&free_current, &projected_source)?;
-        if source_compatibility_defect_a > controls.current_tolerance_a {
-            return Err(invalid(
-                "impressed current contains a gradient or harmonic component incompatible with the magnetic boundary",
-            ));
-        }
         let mut index = vec![usize::MAX; ne];
         for (i, &e) in free.iter().enumerate() {
             index[e] = i;
@@ -733,5 +624,195 @@ impl<'m> SpatialVectorField<'m> {
         } else {
             MagneticEnergyReference::ZeroFlux
         }
+    }
+}
+
+fn prepare_cells(
+    geometry: &SpatialGeometry,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<CellVectors>> {
+    let mut cells = Vec::with_capacity(geometry.mesh.tets.len());
+    for (cell, tet) in geometry.mesh.tets.iter().enumerate() {
+        poll(cancelled)?;
+        let grads = &geometry.geometry.grads[cell];
+        let volume = geometry.geometry.vol_signed[cell].abs();
+        let mut edges = [0; 6];
+        let mut curls = [[0.0; 3]; 6];
+        let mut integrals = [[0.0; 3]; 6];
+        let mut e = 0;
+        for a in 0..4 {
+            for b in a + 1..4 {
+                let (a, b) = if tet[a] < tet[b] { (a, b) } else { (b, a) };
+                let edge = geometry
+                    .mesh
+                    .edges
+                    .binary_search(&[tet[a], tet[b]])
+                    .map_err(|_| invalid("missing canonical magnetic edge"))?;
+                let curl = cross(grads[a], grads[b]).map(|v| 2.0 * v);
+                let integral = std::array::from_fn(|j| volume * (grads[b][j] - grads[a][j]) / 4.0);
+                for value in curl.into_iter().chain(integral) {
+                    finite(value)?;
+                }
+                edges[e] = edge;
+                curls[e] = curl;
+                integrals[e] = integral;
+                e += 1;
+            }
+        }
+        cells.push(CellVectors {
+            edges,
+            curls,
+            integrals,
+        });
+    }
+    Ok(cells)
+}
+
+/// Borrowed original geometry shared by the linear and nonlinear current owners.
+struct VectorTopology<'a> {
+    geometry: &'a SpatialGeometry,
+    cells: &'a [CellVectors],
+}
+struct VectorSources {
+    prescribed: Vec<Option<f64>>,
+    free: Vec<usize>,
+    projector: PreparedCoexact1,
+    current_load: Vec<f64>,
+    maximum_current_flux_defect_a: f64,
+    source_compatibility_defect_a: f64,
+    source_report: Option<SolveReport>,
+}
+impl VectorTopology<'_> {
+    fn mesh(&self) -> &TetComplex {
+        &self.geometry.mesh
+    }
+    fn positions_m(&self) -> &[[f64; 3]] {
+        &self.geometry.positions_m
+    }
+    fn face_edges(&self, face: usize) -> Option<[usize; 3]> {
+        let [a, b, c] = *self.mesh().faces.get(face)?;
+        let mut result = [0; 3];
+        for (i, key) in [[a, b], [a, c], [b, c]].iter().enumerate() {
+            result[i] = self.mesh().edges.binary_search(key).ok()?;
+        }
+        Some(result)
+    }
+
+    fn prepare_sources(
+        &self,
+        current_a_m2: &[[f64; 3]],
+        boundary: &VectorMagneticBoundary,
+        controls: VectorMagneticControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<VectorSources> {
+        poll(cancelled)?;
+        if current_a_m2.len() != self.cells.len()
+            || current_a_m2.iter().flatten().any(|v| !v.is_finite())
+            || [
+                controls.current_tolerance_a,
+                controls.flux_tolerance_wb,
+                controls.energy_tolerance_j,
+            ]
+            .iter()
+            .any(|v| !v.is_finite() || *v <= 0.0)
+            || [controls.field.tolerance, controls.gauge.tolerance]
+                .iter()
+                .any(|v| !v.is_finite() || *v <= 0.0 || *v >= 1.0)
+        {
+            return Err(invalid(
+                "complete finite cell current and positive physical/solver allowances required",
+            ));
+        }
+        let ne = self.mesh().edges.len();
+        let mut prescribed = vec![None; ne];
+        let mut fixed_faces = BTreeSet::new();
+        for trace in &boundary.potential {
+            poll(cancelled)?;
+            if self
+                .geometry
+                .faces
+                .get(trace.face)
+                .is_none_or(|f| f.cells.len() != 1)
+                || !fixed_faces.insert(trace.face)
+                || trace.edge_integrals_wb.iter().any(|v| !v.is_finite())
+            {
+                return Err(invalid(
+                    "unique exterior tangential-potential faces with finite edge integrals required",
+                ));
+            }
+            let edges = self
+                .face_edges(trace.face)
+                .ok_or(invalid("missing potential trace edge"))?;
+            for (edge, value) in edges.into_iter().zip(trace.edge_integrals_wb) {
+                if prescribed[edge].is_some_and(|old| old != value) {
+                    return Err(invalid(
+                        "conflicting tangential potential on a shared boundary edge",
+                    ));
+                }
+                prescribed[edge] = Some(value);
+            }
+        }
+        let mut maximum_current_flux_defect_a = 0.0_f64;
+        for (i, face) in self.geometry.faces.iter().enumerate() {
+            poll(cancelled)?;
+            let current = if face.cells.len() == 2 {
+                std::array::from_fn(|j| {
+                    current_a_m2[face.cells[0]][j] - current_a_m2[face.cells[1]][j]
+                })
+            } else if fixed_faces.contains(&i) {
+                continue;
+            } else {
+                current_a_m2[face.cells[0]]
+            };
+            let defect = finite(face.area_m2 * dot(current, face.outward_normal))?.abs();
+            maximum_current_flux_defect_a = maximum_current_flux_defect_a.max(defect);
+        }
+        if maximum_current_flux_defect_a > controls.current_tolerance_a {
+            return Err(invalid(
+                "impressed current violates interface or natural-exterior charge continuity",
+            ));
+        }
+        let mut current_load = vec![0.0; ne];
+        for (cell, vectors) in self.cells.iter().enumerate() {
+            poll(cancelled)?;
+            for local in 0..6 {
+                let e = vectors.edges[local];
+                current_load[e] =
+                    finite(current_load[e] + dot(current_a_m2[cell], vectors.integrals[local]))?;
+            }
+        }
+        let free: Vec<_> = (0..ne).filter(|&e| prescribed[e].is_none()).collect();
+        let projector = PreparedCoexact1::new(
+            self.mesh(),
+            self.positions_m(),
+            &self.geometry.geometry,
+            &free,
+            controls.maximum_gauge_product_terms,
+            cancelled,
+        )
+        .map_err(gauge_error)?;
+        let free_current: Vec<_> = free.iter().map(|&e| current_load[e]).collect();
+        let riesz: Vec<_> = free_current
+            .iter()
+            .zip(projector.metric())
+            .map(|(j, m)| finite(j / m))
+            .collect::<Result<_>>()?;
+        let (_, projected_source, source_report) =
+            project(&projector, &riesz, controls.gauge, cancelled)?;
+        let source_compatibility_defect_a = max_difference(&free_current, &projected_source)?;
+        if source_compatibility_defect_a > controls.current_tolerance_a {
+            return Err(invalid(
+                "impressed current contains a gradient or harmonic component incompatible with the magnetic boundary",
+            ));
+        }
+        Ok(VectorSources {
+            prescribed,
+            free,
+            projector,
+            current_load,
+            maximum_current_flux_defect_a,
+            source_compatibility_defect_a,
+            source_report,
+        })
     }
 }

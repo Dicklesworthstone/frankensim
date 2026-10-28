@@ -1012,3 +1012,31 @@ harmonic source that passes local continuity but must be refused globally,
 recoil energy and limits, actual budgets/cancellation, and the current-free
 Maxwell collar. The stored static source/trace pairings are not time-integrated
 work or Ohmic heat.
+
+### Current-driven reversible saturation in three dimensions
+
+`spatial::vector_potential::nonlinear` extends the original Whitney edge
+magnetostatics to source-bound reversible H(B), linear and oriented fixed-recoil
+cells. Exact original source energy supplies H and its full symmetric radial
+reluctivity tangent; only the changing material Hodge is rebuilt. Geometry,
+current loading, boundary admission and complete relative-kernel compatibility
+remain shared with the linear vector owner. Newton minimizes integrated source
+energy minus impressed-current pairing at fixed tangential A, with bounded
+source-preserving backtracking and the existing checked CG/coexact owners.
+
+Newton's assembled dual residual is projected into the admitted coexact tangent
+space before its relative linear solve. The measured compatibility defect must
+stay inside the original physical current allowance. Impressed current is never
+changed: every accepted field must satisfy the original full free-edge equations,
+source Legendre identity, div-curl/reconstructed face flux and independent
+current/physical-trace energy pairing. Energy and coenergy remain distinct.
+Maxwell loads use the existing current-free, source-identical linear collar.
+
+The six focused nonlinear-vector tests cover reduction to the original linear
+current solver, gradient-shifted traces, first-order saturated current-driven
+manufactured-field convergence, rotated source energy derivatives, recoil/core/
+air tangential-field and dual-energy agreement, actual source/iteration/work/
+cancellation refusals, and force admission. The six original vector regressions
+also pass after the shared extraction. This is fixed-state static reversible
+magnetism; hysteresis, nonlinear induction, thermomagnetic evolution and
+validated engineering force bounds are separate extensions.
