@@ -20,6 +20,8 @@ use core::fmt;
 use fs_qty::{Amount, Energy, Mass, Pressure, Temperature};
 
 mod solve;
+/// Reusable source-bound equilibrium isentropes for flow consumers.
+pub use solve::expansion::path as isentrope;
 pub use solve::expansion::{
     EquilibriumEntropySolveV1, EquilibriumExpansionErrorV1,
     EquilibriumThermodynamicResponseV1, EquilibriumThermodynamicStateV1,

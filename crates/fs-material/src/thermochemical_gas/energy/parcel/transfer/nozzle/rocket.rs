@@ -14,6 +14,8 @@
 //! <https://www.grc.nasa.gov/www/BGH/normal.html>
 
 mod offdesign;
+/// Smooth choked expansion with composition in chemical equilibrium throughout.
+pub mod equilibrium;
 /// Source-backed conservation of mass, momentum and enthalpy across a normal shock.
 pub mod shock;
 

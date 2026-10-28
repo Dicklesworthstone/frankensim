@@ -14,6 +14,9 @@
 
 use super::*;
 
+/// Prepared isentropic queries sharing the original equilibrium workspace.
+pub mod path;
+
 /// Temperature bracket and total-entropy tolerance for an equilibrium SP solve.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EquilibriumEntropySolveV1 {
@@ -386,30 +389,50 @@ impl Workspace {
     fn solve_sp(&mut self, owner: &IdealGasEquilibriumV1, target: f64,
         controls: EquilibriumEntropySolveV1, cancelled: &mut impl FnMut() -> bool)
         -> Result<(Temperature, usize, usize), EquilibriumExpansionErrorV1> {
+        self.solve_entropy(owner, target, controls, None, cancelled, |work, t, cancel| {
+            Ok(work.entropy(owner, t, cancel)?)
+        })
+    }
+
+    // Absolute SP and reference-relative isentropes share every root decision.
+    fn solve_entropy<C: FnMut() -> bool>(&mut self, owner: &IdealGasEquilibriumV1, target: f64,
+        controls: EquilibriumEntropySolveV1, preferred_temperature: Option<f64>, cancelled: &mut C,
+        mut entropy: impl FnMut(&Self, Temperature, &mut C) -> Result<f64, EquilibriumExpansionErrorV1>)
+        -> Result<(Temperature, usize, usize), EquilibriumExpansionErrorV1> {
         let (mut low, mut high) = (controls.minimum_temperature_k, controls.maximum_temperature_k);
-        let mut iterations = self.solve(owner, Temperature::new(low), controls.equilibrium, cancelled)?;
-        let lower = self.entropy(owner, Temperature::new(low), cancelled)?;
+        let preferred = preferred_temperature.filter(|t| t.is_finite() && *t > low && *t < high);
+        let mut iterations = 0;
+        let mut preliminary_steps = 0;
+        if let Some(t) = preferred {
+            preliminary_steps = 1;
+            iterations += self.solve(owner, Temperature::new(t), controls.equilibrium, cancelled)?;
+            if (entropy(self, Temperature::new(t), cancelled)? - target).abs() <= controls.entropy_tolerance_j_k {
+                return Ok((Temperature::new(t), iterations, 1));
+            }
+        }
+        iterations += self.solve(owner, Temperature::new(low), controls.equilibrium, cancelled)?;
+        let lower = entropy(self, Temperature::new(low), cancelled)?;
         if (lower - target).abs() <= controls.entropy_tolerance_j_k {
-            return Ok((Temperature::new(low), iterations, 0));
+            return Ok((Temperature::new(low), iterations, preliminary_steps));
         }
         iterations += self.solve(owner, Temperature::new(high), controls.equilibrium, cancelled)?;
-        let upper = self.entropy(owner, Temperature::new(high), cancelled)?;
+        let upper = entropy(self, Temperature::new(high), cancelled)?;
         if (upper - target).abs() <= controls.entropy_tolerance_j_k {
-            return Ok((Temperature::new(high), iterations, 0));
+            return Ok((Temperature::new(high), iterations, preliminary_steps));
         }
         if !(lower < target && target < upper) {
             return Err(EquilibriumExpansionErrorV1::EntropyNotBracketed {
                 lower_entropy_j_k: lower, upper_entropy_j_k: upper,
             });
         }
-        let mut t = low + 0.5 * (high - low);
+        let mut t = preferred.unwrap_or_else(|| low + 0.5 * (high - low));
         let mut residual = upper - target;
-        let mut steps = 0;
-        for step in 1..=controls.maximum_temperature_iterations {
+        let mut steps = preliminary_steps;
+        for step in (preliminary_steps + 1)..=controls.maximum_temperature_iterations {
             poll(cancelled)?;
             steps = step;
             iterations += self.solve(owner, Temperature::new(t), controls.equilibrium, cancelled)?;
-            residual = self.entropy(owner, Temperature::new(t), cancelled)? - target;
+            residual = entropy(self, Temperature::new(t), cancelled)? - target;
             if residual.abs() <= controls.entropy_tolerance_j_k {
                 return Ok((Temperature::new(t), iterations, step));
             }
@@ -419,7 +442,9 @@ impl Workspace {
                 Err(E::Cancelled) => return Err(E::Cancelled.into()),
                 Err(_) => f64::NAN,
             };
-            let margin = 0.05 * (high - low);
+            // A nearby isentrope predictor should not be thrown back to the
+            // bracket midpoint merely because its Newton correction is small.
+            let margin = if preferred.is_some() { 0.0 } else { 0.05 * (high - low) };
             t = if newton.is_finite() && newton > low + margin && newton < high - margin {
                 newton
             } else { low + 0.5 * (high - low) };

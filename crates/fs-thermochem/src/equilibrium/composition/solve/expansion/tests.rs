@@ -187,3 +187,40 @@ fn g3_multiregion_sp_requires_the_original_explicit_caloric_policy() {
     close(solve(&corrected_owner).unwrap().equilibrium().temperature().value(),
         1600.0 * 0.3_f64.powf(2.0 / 7.0), 2e-9);
 }
+
+#[test]
+fn g1_prepared_isentrope_retains_actual_chemical_energy_and_source_endpoints() {
+    use crate::equilibrium::composition::isentrope::EquilibriumIsentropeV1;
+    let o = dissociation(0.0, 0.0);
+    let mut path = EquilibriumIsentropeV1::new(&o, Temperature::new(2000.0), Pressure::new(100000.0),
+        &[(id("H2"), Amount::new(1.0))], controls(1.0), || false).unwrap();
+    let initial_h = path.reference_state().equilibrium().enthalpy().value();
+    for p in [30000.0, 80000.0, 30000.0] {
+        let sample = path.sample(Pressure::new(p), || false).unwrap();
+        let state = path.publish_current(|| false).unwrap();
+        close(sample.specific_enthalpy_change_j_kg,
+            (state.equilibrium().enthalpy().value() - initial_h) / 0.002, 3e-8);
+        assert!(sample.specific_enthalpy_change_j_kg < 0.0);
+        assert!(sample.entropy_change_j_k.abs() <= controls(1.0).entropy_tolerance_j_k);
+        assert_eq!(sample.temperature, state.equilibrium().temperature());
+        assert_eq!(sample.response, state.response());
+        assert!(state.equilibrium().species().iter().all(|s| s.source.is_some()));
+    }
+}
+
+#[test]
+fn g4_failed_prepared_query_cannot_publish_a_stale_success() {
+    use crate::equilibrium::composition::isentrope::EquilibriumIsentropeV1;
+    let o = inert();
+    let mut path = EquilibriumIsentropeV1::new(&o, Temperature::new(1600.0), Pressure::new(100000.0),
+        &[(id("H2"), Amount::new(1.0))], controls(1.0), || false).unwrap();
+    path.sample(Pressure::new(30000.0), || false).unwrap();
+    assert!(path.publish_current(|| false).is_ok());
+    assert!(path.sample(Pressure::new(0.0), || false).is_err());
+    assert!(path.publish_current(|| false).is_err());
+    path.sample(Pressure::new(50000.0), || false).unwrap();
+    assert!(path.sample(Pressure::new(40000.0), || true).is_err());
+    assert!(path.publish_current(|| false).is_err());
+    let recovered = path.sample(Pressure::new(30000.0), || false).unwrap();
+    close(recovered.temperature.value(), 1600.0 * 0.3_f64.powf(2.0 / 7.0), 2e-9);
+}
