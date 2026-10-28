@@ -1,0 +1,52 @@
+frankensim.matdb-source.v1
+observation	wh-strength	Northern red oak, clear straight-grained small specimens, air-dried to 12 percent moisture content	FPL-GTR-282 Table 5-3a, Oak/red/Northern red, 12% row; definitions in chapter 5 and table footnotes	Species averages, not generic red-oak-group values, graded lumber or structural design allowables. Specific gravity uses ovendry mass divided by volume at 12% moisture; density = 1000 * 0.63 * 1.12 = 705.6 kg/m3. Bending MOE includes shear deflection in a center-loaded beam at span/depth 14; longitudinal modulus is the source's approximate 10% correction, 1.1 * 12500 = 13750 MPa. MOR is a bending failure index, not uniaxial tensile strength. Compression perpendicular is stress at proportional limit, not ultimate strength; shear and perpendicular tension average radial and tangential tests. Side hardness is modified-Janka force for half-diameter penetration of an 11.28 mm ball, not pressure. Tables 5-1 and 5-2 label their elastic ratios only as red oak, so those group values are not silently assigned to this named species. Temperature and uncertainty are unspecified. No full stiffness tensor, moisture/temperature extrapolation, heat capacity, conductivity, loss or fracture law is supplied.
+scalar	density-12pct	wh-strength	density	705.6	kg/m3	constant
+uncertainty	density-12pct	unstated	-	-	-	-
+validity	density-12pct	moisture_content	12	12	%
+validity	density-12pct	clear_specimen	1	1	1
+validity	density-12pct	source_test_temperature_known	0	0	1
+scalar	specific-gravity	wh-strength	specific_gravity	0.63	1	constant
+uncertainty	specific-gravity	unstated	-	-	-	-
+validity	specific-gravity	moisture_content	12	12	%
+validity	specific-gravity	clear_specimen	1	1	1
+validity	specific-gravity	source_test_temperature_known	0	0	1
+scalar	moe-bending	wh-strength	modulus_of_elasticity_bending	12500	MPa	constant
+uncertainty	moe-bending	unstated	-	-	-	-
+validity	moe-bending	moisture_content	12	12	%
+validity	moe-bending	clear_specimen	1	1	1
+validity	moe-bending	source_test_temperature_known	0	0	1
+scalar	young-modulus-longitudinal	wh-strength	young_modulus_longitudinal	13750	MPa	constant
+uncertainty	young-modulus-longitudinal	unstated	-	-	-	-
+validity	young-modulus-longitudinal	moisture_content	12	12	%
+validity	young-modulus-longitudinal	clear_specimen	1	1	1
+validity	young-modulus-longitudinal	source_test_temperature_known	0	0	1
+scalar	bending-mor	wh-strength	bending_mor	99000	kPa	constant
+uncertainty	bending-mor	unstated	-	-	-	-
+validity	bending-mor	moisture_content	12	12	%
+validity	bending-mor	clear_specimen	1	1	1
+validity	bending-mor	source_test_temperature_known	0	0	1
+scalar	compression-parallel	wh-strength	compression_parallel_maximum	46600	kPa	constant
+uncertainty	compression-parallel	unstated	-	-	-	-
+validity	compression-parallel	moisture_content	12	12	%
+validity	compression-parallel	clear_specimen	1	1	1
+validity	compression-parallel	source_test_temperature_known	0	0	1
+scalar	compression-perpendicular	wh-strength	compression_perpendicular_proportional_limit	7000	kPa	constant
+uncertainty	compression-perpendicular	unstated	-	-	-	-
+validity	compression-perpendicular	moisture_content	12	12	%
+validity	compression-perpendicular	clear_specimen	1	1	1
+validity	compression-perpendicular	source_test_temperature_known	0	0	1
+scalar	shear-parallel	wh-strength	shear_parallel_maximum	12300	kPa	constant
+uncertainty	shear-parallel	unstated	-	-	-	-
+validity	shear-parallel	moisture_content	12	12	%
+validity	shear-parallel	clear_specimen	1	1	1
+validity	shear-parallel	source_test_temperature_known	0	0	1
+scalar	tension-perpendicular	wh-strength	tension_perpendicular_maximum	5500	kPa	constant
+uncertainty	tension-perpendicular	unstated	-	-	-	-
+validity	tension-perpendicular	moisture_content	12	12	%
+validity	tension-perpendicular	clear_specimen	1	1	1
+validity	tension-perpendicular	source_test_temperature_known	0	0	1
+scalar	side-hardness	wh-strength	side_hardness	5700	N	constant
+uncertainty	side-hardness	unstated	-	-	-	-
+validity	side-hardness	moisture_content	12	12	%
+validity	side-hardness	clear_specimen	1	1	1
+validity	side-hardness	source_test_temperature_known	0	0	1

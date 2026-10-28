@@ -1,0 +1,19 @@
+frankensim.matdb-manifest.v3
+pack_id	oak-northern-red-fpl-gtr282
+redistribution	permitted	United States Government work (USDA Forest Service); public domain in the United States; retain report, chapter, table numbers, authors and URL
+citation	Senalik, C. Adam and Farber, Benjamin (2021), Mechanical Properties of Wood, Chapter 5 in Wood Handbook, FPL-GTR-282, Table 5-3a, Oak/red/Northern red, 12% row (p. 5-5; footnotes p. 5-8); https://research.fs.usda.gov/download/treesearch/62244.pdf
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	primary	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_gravity	specific_gravity	dimensional
+property	modulus_of_elasticity_bending	modulus_of_elasticity_bending	dimensional
+property	young_modulus_longitudinal	young_modulus_longitudinal	dimensional
+property	bending_mor	bending_mor	dimensional
+property	compression_parallel_maximum	compression_parallel_maximum	dimensional
+property	compression_perpendicular_proportional_limit	compression_perpendicular_proportional_limit	dimensional
+property	shear_parallel_maximum	shear_parallel_maximum	dimensional
+property	tension_perpendicular_maximum	tension_perpendicular_maximum	dimensional
+property	side_hardness	side_hardness	dimensional
+axis	moisture_content	moisture-content	dimensional
+axis	clear_specimen	clear-specimen	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional

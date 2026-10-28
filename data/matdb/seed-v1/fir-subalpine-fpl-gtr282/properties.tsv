@@ -1,0 +1,93 @@
+frankensim.matdb-source.v1
+observation	wh-strength	Subalpine fir, clear straight-grained small specimens, air-dried to 12 percent moisture content	FPL-GTR-282 Table 5-3a, Fir/Subalpine, 12% row; definitions in chapter 5 and table footnotes	Species averages, not graded lumber or structural design allowables. Specific gravity uses ovendry mass divided by volume at 12% moisture; density = 1000 * 0.32 * 1.12 = 358.4 kg/m3. Bending MOE includes shear deflection at span/depth 14; longitudinal modulus is the source's approximate 10% correction, 1.1 * 8900 = 9790 MPa. MOR is a bending failure index, not uniaxial tensile strength. Compression perpendicular is stress at proportional limit, not ultimate strength; shear averages radial and tangential tests. Side hardness is modified-Janka force for half-diameter penetration of an 11.28 mm ball, not pressure. Perpendicular tension is absent from the source and is not borrowed from another fir. Temperature and per-value uncertainty are unspecified. No moisture/temperature/grade extrapolation, heat capacity, conductivity or loss law is supplied.
+observation	wh-ratios	Subalpine fir, samples at approximately 12 percent moisture content	FPL-GTR-282 Tables 5-1 and 5-2, Fir/subalpine	Separately tabulated species averages, not a common specimen or measured covariance with Table 5-3a. L is along grain, R radial, T tangential; first Poisson subscript is applied stress and second lateral strain. Printed ratios need not satisfy exact reciprocity. Missing nu_RL and nu_TL are not fabricated; no isotropic reduction or confidence interval is inferred.
+scalar	density-12pct	wh-strength	density	358.4	kg/m3	constant
+uncertainty	density-12pct	unstated	-	-	-	-
+validity	density-12pct	moisture_content	12	12	%
+validity	density-12pct	clear_specimen	1	1	1
+validity	density-12pct	source_test_temperature_known	0	0	1
+scalar	specific-gravity	wh-strength	specific_gravity	0.32	1	constant
+uncertainty	specific-gravity	unstated	-	-	-	-
+validity	specific-gravity	moisture_content	12	12	%
+validity	specific-gravity	clear_specimen	1	1	1
+validity	specific-gravity	source_test_temperature_known	0	0	1
+scalar	moe-bending	wh-strength	modulus_of_elasticity_bending	8900	MPa	constant
+uncertainty	moe-bending	unstated	-	-	-	-
+validity	moe-bending	moisture_content	12	12	%
+validity	moe-bending	clear_specimen	1	1	1
+validity	moe-bending	source_test_temperature_known	0	0	1
+scalar	young-modulus-longitudinal	wh-strength	young_modulus_longitudinal	9790	MPa	constant
+uncertainty	young-modulus-longitudinal	unstated	-	-	-	-
+validity	young-modulus-longitudinal	moisture_content	12	12	%
+validity	young-modulus-longitudinal	clear_specimen	1	1	1
+validity	young-modulus-longitudinal	source_test_temperature_known	0	0	1
+scalar	et-over-el	wh-ratios	et_over_el	0.039	1	constant
+uncertainty	et-over-el	unstated	-	-	-	-
+validity	et-over-el	moisture_content	12	12	%
+validity	et-over-el	clear_specimen	1	1	1
+validity	et-over-el	source_test_temperature_known	0	0	1
+scalar	er-over-el	wh-ratios	er_over_el	0.102	1	constant
+uncertainty	er-over-el	unstated	-	-	-	-
+validity	er-over-el	moisture_content	12	12	%
+validity	er-over-el	clear_specimen	1	1	1
+validity	er-over-el	source_test_temperature_known	0	0	1
+scalar	glr-over-el	wh-ratios	glr_over_el	0.070	1	constant
+uncertainty	glr-over-el	unstated	-	-	-	-
+validity	glr-over-el	moisture_content	12	12	%
+validity	glr-over-el	clear_specimen	1	1	1
+validity	glr-over-el	source_test_temperature_known	0	0	1
+scalar	glt-over-el	wh-ratios	glt_over_el	0.058	1	constant
+uncertainty	glt-over-el	unstated	-	-	-	-
+validity	glt-over-el	moisture_content	12	12	%
+validity	glt-over-el	clear_specimen	1	1	1
+validity	glt-over-el	source_test_temperature_known	0	0	1
+scalar	grt-over-el	wh-ratios	grt_over_el	0.006	1	constant
+uncertainty	grt-over-el	unstated	-	-	-	-
+validity	grt-over-el	moisture_content	12	12	%
+validity	grt-over-el	clear_specimen	1	1	1
+validity	grt-over-el	source_test_temperature_known	0	0	1
+scalar	nu-lr	wh-ratios	nu_lr	0.341	1	constant
+uncertainty	nu-lr	unstated	-	-	-	-
+validity	nu-lr	moisture_content	12	12	%
+validity	nu-lr	clear_specimen	1	1	1
+validity	nu-lr	source_test_temperature_known	0	0	1
+scalar	nu-lt	wh-ratios	nu_lt	0.332	1	constant
+uncertainty	nu-lt	unstated	-	-	-	-
+validity	nu-lt	moisture_content	12	12	%
+validity	nu-lt	clear_specimen	1	1	1
+validity	nu-lt	source_test_temperature_known	0	0	1
+scalar	nu-rt	wh-ratios	nu_rt	0.437	1	constant
+uncertainty	nu-rt	unstated	-	-	-	-
+validity	nu-rt	moisture_content	12	12	%
+validity	nu-rt	clear_specimen	1	1	1
+validity	nu-rt	source_test_temperature_known	0	0	1
+scalar	nu-tr	wh-ratios	nu_tr	0.336	1	constant
+uncertainty	nu-tr	unstated	-	-	-	-
+validity	nu-tr	moisture_content	12	12	%
+validity	nu-tr	clear_specimen	1	1	1
+validity	nu-tr	source_test_temperature_known	0	0	1
+scalar	bending-mor	wh-strength	bending_mor	59000	kPa	constant
+uncertainty	bending-mor	unstated	-	-	-	-
+validity	bending-mor	moisture_content	12	12	%
+validity	bending-mor	clear_specimen	1	1	1
+validity	bending-mor	source_test_temperature_known	0	0	1
+scalar	compression-parallel	wh-strength	compression_parallel_maximum	33500	kPa	constant
+uncertainty	compression-parallel	unstated	-	-	-	-
+validity	compression-parallel	moisture_content	12	12	%
+validity	compression-parallel	clear_specimen	1	1	1
+validity	compression-parallel	source_test_temperature_known	0	0	1
+scalar	compression-perpendicular	wh-strength	compression_perpendicular_proportional_limit	2700	kPa	constant
+uncertainty	compression-perpendicular	unstated	-	-	-	-
+validity	compression-perpendicular	moisture_content	12	12	%
+validity	compression-perpendicular	clear_specimen	1	1	1
+validity	compression-perpendicular	source_test_temperature_known	0	0	1
+scalar	shear-parallel	wh-strength	shear_parallel_maximum	7400	kPa	constant
+uncertainty	shear-parallel	unstated	-	-	-	-
+validity	shear-parallel	moisture_content	12	12	%
+validity	shear-parallel	clear_specimen	1	1	1
+validity	shear-parallel	source_test_temperature_known	0	0	1
+scalar	side-hardness	wh-strength	side_hardness	1600	N	constant
+uncertainty	side-hardness	unstated	-	-	-	-
+validity	side-hardness	moisture_content	12	12	%
+validity	side-hardness	clear_specimen	1	1	1
+validity	side-hardness	source_test_temperature_known	0	0	1
