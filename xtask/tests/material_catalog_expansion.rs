@@ -137,6 +137,7 @@ fn refuses(pack: &NormalizedPack, name: &str, dims: Dims, point: &QueryPoint) {
 
 #[test]
 fn g0_g3_clear_wood_density_stiffness_and_moisture_are_preserved() {
+    let mut final_temperatures = Vec::new();
     for (species, count, sg, bending_mpa, rupture_kpa) in [
         ("pine-loblolly", 21, 0.51, 12300.0, 88000.0),
         ("pine-longleaf", 21, 0.59, 13700.0, 100000.0),
@@ -237,7 +238,81 @@ fn g0_g3_clear_wood_density_stiffness_and_moisture_are_preserved() {
                 &at.clone().with("temperature", t).unwrap(),
             );
         }
+        final_temperatures.push(catalog_wood_sensible_heat(&pack, &at));
     }
+    // Equal reference volumes and deposited heat: the denser white oak heats
+    // less than northern white cedar. No wood conductivity is extrapolated.
+    assert!(final_temperatures[6] > final_temperatures[5] + 15.0);
+}
+
+/// Fixed-mass sensible heating uses the new Cp(T) in the production enthalpy
+/// law. Moisture is fixed and the initial mass uses the species' reference
+/// density; this does not infer thermal expansion, drying or internal gradients.
+fn catalog_wood_sensible_heat(pack: &NormalizedPack, point: &QueryPoint) -> f64 {
+    use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack};
+    use fs_material::phase::{
+        HeatCapacitySourceQuery, ResolvedHeatCapacityCurve, SolidLiquidPhase,
+    };
+
+    let normalized = NormalizedMaterialCardPack::new(
+        MaterialStateId {
+            chemistry: pack.pack_id().into(),
+            phase: "solid clear wood at fixed 12 percent dry-basis moisture".into(),
+            process: "FPL engineering thermal correlation; fixed reference mass".into(),
+            revision: 0,
+        },
+        pack.clone(),
+    )
+    .unwrap();
+    let card = normalized.card();
+    let lower = point.clone().with("temperature", 280.0).unwrap();
+    let upper = point.clone().with("temperature", 420.0).unwrap();
+    let resolved = ResolvedHeatCapacityCurve::try_new(
+        card,
+        HeatCapacitySourceQuery {
+            heat_capacity: &key("specific-heat-capacity", CP),
+            density: &key("density", RHO),
+            temperature_axis: "temperature",
+            lower: &lower,
+            upper: &upper,
+            selection: SelectionPolicy::SingleClaimOnly,
+        },
+        SolidLiquidPhase::Solid,
+        0.0,
+        0.01,
+    )
+    .unwrap();
+    for receipt in resolved.receipts() {
+        card.claims().verify_receipt(receipt).unwrap();
+    }
+    let curve = resolved.curve();
+    let mut state = curve.state_at_specific_enthalpy(0.0).unwrap();
+    let mass_kg = state.bulk_density_kg_m3() * 0.0001;
+    // Independent integration/inversion of FPL 4-18 through 4-20 at MC=12%.
+    let cp0 = 1000.0
+        * ((0.1031 + 0.003867 * 280.0 + 4.18 * 0.12) / 1.12
+            + 12.0 * (-0.06191 + 0.000236 * 280.0 - 0.000133 * 12.0));
+    let slope = 1000.0 * (0.003867 / 1.12 + 12.0 * 0.000236);
+    for step in 1..=20 {
+        state = curve
+            .advance_specific_energy(state, 125.0 / mass_kg)
+            .unwrap();
+        let heat = f64::from(step) * 125.0 / mass_kg;
+        let expected_t = 280.0 + 2.0 * heat / (cp0 + (cp0 * cp0 + 2.0 * slope * heat).sqrt());
+        assert!((state.temperature_k() - expected_t).abs() < 0.01 / cp0 + 1e-8);
+        assert!((mass_kg * state.specific_enthalpy_j_kg() - f64::from(step) * 125.0).abs() < 1e-9);
+        assert_eq!(state.material_card_identity(), card.content_hash());
+        assert_eq!(state.phase(), SolidLiquidPhase::Solid);
+    }
+    // Using a single initial Cp would give a different thermal response.
+    assert!((280.0 + 2500.0 / mass_kg / cp0 - state.temperature_k()).abs() > 0.5);
+    assert!(curve.advance_specific_energy(state, 1e6).is_err());
+    eprintln!(
+        "{}: 2500 J into fixed reference volume = {:.6} K",
+        pack.pack_id(),
+        state.temperature_k()
+    );
+    state.temperature_k()
 }
 
 #[test]
@@ -401,7 +476,7 @@ fn catalog_slab_cooling(
     cp: f64,
     k: f64,
 ) -> f64 {
-    use fs_conduction::reduced_slab::{FirstModeSlabInput, step_first_mode_slab_cooling};
+    use fs_conduction::reduced_slab::{MaterialFirstModeSlabCooling, MaterialFirstModeSlabInput};
     use fs_conduction::transient::{MaterialHeatCapacity, MaterialHeatCapacitySource};
     use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack};
     use fs_material::state_point::MaterialPropertySelection;
@@ -447,30 +522,42 @@ fn catalog_slab_cooling(
                 .unwrap();
         }
     }
-    let conductivity = capacity
-        .isotropic_conductivity_with_property(card, &k_key, SelectionPolicy::SingleClaimOnly)
-        .unwrap();
-    let input = FirstModeSlabInput {
+    let input = MaterialFirstModeSlabInput {
         thickness_m: 0.001,
-        thermal_diffusivity_m2_s: conductivity.tensor_at(low_k + 0.5).unwrap()[0][0]
-            / capacity.value_j_per_m3_k(),
         initial_temperature_k: low_k + 0.75,
         boundary_temperature_k: low_k + 0.25,
         threshold_temperature_k: low_k + 0.5,
     };
-    let result = step_first_mode_slab_cooling(input).unwrap();
+    let screen = MaterialFirstModeSlabCooling::from_card(
+        &capacity,
+        card,
+        &k_key,
+        SelectionPolicy::SingleClaimOnly,
+        input,
+    )
+    .unwrap();
+    let result = screen.step();
+    assert_eq!(screen.source(), &capacity);
+    for receipt in screen.conductivity_receipts() {
+        card.claims().verify_receipt(receipt).unwrap();
+    }
     let expected_tau = 1e-6 * rho * cp / (std::f64::consts::PI.powi(2) * k);
     assert!((result.time_constant_s / expected_tau - 1.0).abs() < 1e-12);
     assert!((result.time_to_threshold_s / (expected_tau * 2.0_f64.ln()) - 1.0).abs() < 1e-12);
-    let crossing = result
-        .temperature_at_s(input, result.time_to_threshold_s)
-        .unwrap();
+    let crossing = screen.temperature_at_s(result.time_to_threshold_s).unwrap();
     assert!((crossing - input.threshold_temperature_k).abs() < 1e-10);
-    let thick = step_first_mode_slab_cooling(FirstModeSlabInput {
-        thickness_m: 0.002,
-        ..input
-    })
-    .unwrap();
+    let thick = MaterialFirstModeSlabCooling::from_card(
+        &capacity,
+        card,
+        &k_key,
+        SelectionPolicy::SingleClaimOnly,
+        MaterialFirstModeSlabInput {
+            thickness_m: 0.002,
+            ..input
+        },
+    )
+    .unwrap()
+    .step();
     assert!((thick.time_to_threshold_s / result.time_to_threshold_s - 4.0).abs() < 1e-12);
     assert!(
         MaterialHeatCapacity::from_card_at_query_points(
