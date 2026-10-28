@@ -19,6 +19,8 @@ use fs_sparse::{Coo, Csr};
 
 mod sparse;
 
+/// Discrete adjoints with checked dense and sparse transposed solves.
+pub mod adjoint;
 /// Checked steady velocity/total-traction boundary partition.
 pub mod boundary;
 
@@ -679,24 +681,18 @@ impl<'m> FluxSystem<'m> {
         Ok(self.solve_sparse(a, rhs, params))
     }
 
-    /// Solve the TRANSPOSED system (discrete adjoint), dense path.
+    /// Solve the transposed system with default linear-solver controls.
+    /// Uses refined dense LU for small systems and sparse block FGMRES above
+    /// the dense cutoff. Use `solve_adjoint_checked` for explicit tolerances,
+    /// iteration budgets, convergence diagnostics and recoverable errors.
     ///
     /// # Panics
-    /// On singular systems or above the dense cutoff.
+    /// On invalid input, detected singularity or failed convergence.
     #[must_use]
     pub fn solve_adjoint(&self, a: &Csr, j: &[f64]) -> Vec<f64> {
-        assert!(self.n <= 1500, "adjoint fixture path is dense-only");
-        let flat = a.to_dense();
-        let mut flat_t = vec![0.0f64; self.n * self.n];
-        for r in 0..self.n {
-            for c in 0..self.n {
-                flat_t[c * self.n + r] = flat[r * self.n + c];
-            }
-        }
-        let f = lu(&flat_t, self.n).expect("adjoint system nonsingular");
-        let mut lam = j.to_vec();
-        f.solve(&mut lam);
-        lam
+        self.solve_adjoint_checked(a, j, FluxParams::default())
+            .expect("flow adjoint must converge")
+            .multipliers
     }
 
     /// Picard iteration for steady NS: Stokes start, then relinearized

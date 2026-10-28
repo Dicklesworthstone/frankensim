@@ -85,6 +85,21 @@ adjoints.
   `max_iters` is a strict Krylov iteration budget, including the last short
   restart. An approximate factorization breakdown falls back to identity
   preconditioning without changing the equations or asserting convergence.
+- `FluxSystem::solve_adjoint_checked` solves the actual transposed assembled
+  operator, including strong boundary rows, the pressure datum and nonsymmetric
+  convection. It uses sparse counting-sort transposition, refined dense LU
+  below the 1500-unknown cutoff and the same block-preconditioned FGMRES above
+  it. Both independently recomputed transposed residuals must pass before a
+  `FluxAdjointSolution` is returned; `FluxAdjointError` reports invalid inputs,
+  detected singularity and exhausted sparse iterations. The legacy
+  `solve_adjoint` uses default controls through this path and no longer has a
+  dense-only size restriction. For A(theta)x=b(theta), sensitivities contract
+  the returned multipliers with b_theta - A_theta*x and add any direct objective
+  derivative. Parameter-dependent boundary loads belong in that derivative.
+  The supplied matrix must be the intended linearization: a frozen Picard
+  matrix omits constitutive and convecting-velocity derivatives and cannot
+  supply a complete nonlinear rheology/Navier–Stokes gradient. Algebraic
+  convergence does not establish a condition-number or gradient-error bound.
 - `FluxSystem::assemble_variable_viscosity` assembles the full Newtonian
   stress `-div(2 nu D(u))`, where `D=(grad u + grad u^T)/2`. Its callback
   receives the cell index and quadrature point and returns positive finite
@@ -288,6 +303,13 @@ above the cutoff with independent all-cell divergence and boundary-moment gates.
 These remain 2-D finite-element checks,
 not a high-Re, large-scale, or cross-ISA qualification.
 
+`tests/adjoint.rs` checks the actual transpose against independently scattered
+rows of a nonsymmetric constrained flow matrix; viscosity sensitivities above
+1500 unknowns against central finite differences with heterogeneous viscosity,
+transient mass and frozen convection; an exact viscosity-dependent boundary
+load derivative; and finite input, singularity and strict iteration-budget
+refusals.
+
 `tests/material_flow.rs` (G1/G3): hydrostatic pressure from physical force
 density at different material densities, inverse-dynamic-viscosity Stokes flow
 under material swaps, density-weighted kinetic energy, shared-gas pressure
@@ -347,7 +369,8 @@ geometry and must never be labelled as volts or discharge reach.
   ledgered in invariants 2 and 4.
 - Mesh-independent iteration counts, multilevel saddle preconditioning and
   production-scale throughput are not established by the sparse finite-element
-  fixtures. The discrete adjoint still uses the dense path up to 1500 dofs.
+  fixtures. Full nonlinear constitutive/convection Jacobians and time-dependent
+  adjoint checkpointing are not supplied by the assembled linear adjoint API.
 - Nonlinear/backflow and transient open-boundary conditions. Steady linear
   Stokes velocity/total-traction boundaries are provided by the API below.
 - The affine-triangle GCL receipt does not remap fields, assemble or

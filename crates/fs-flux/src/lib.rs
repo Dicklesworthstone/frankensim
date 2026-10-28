@@ -56,6 +56,8 @@ pub use material::{
     MaterialFluxRheologyStep, MaterialFluxSolution, MaterialFluxSystem,
 };
 #[cfg(feature = "continuum")]
+pub use ns::adjoint::{FluxAdjointError, FluxAdjointSolution};
+#[cfg(feature = "continuum")]
 pub use ns::boundary::{
     StokesAssembly, StokesBoundary, StokesBoundaryError, StokesPressureReference, StokesSolution,
 };
