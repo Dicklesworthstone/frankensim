@@ -4,6 +4,11 @@
 //! immutable source model and amortizes continuous-domain/capacity admission
 //! across repeated solves. Absolute formation references remain in full states.
 
+/// Pressure/entropy inversion on the same prepared continuous caloric branch.
+pub mod pressure;
+/// Source-law adiabatic steady-flow compressors and turbines.
+pub mod machine;
+
 use super::{
     GasEnergyError, GasEnergySolution, GasEnergySolve, ResolvedThermochemicalGasState,
     ThermochemicalGasModel, enthalpy, map_root, poll, positive, root, updated_point,
