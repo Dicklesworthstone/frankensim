@@ -198,93 +198,129 @@ impl TangentialLaw for FrictionLaw {
         x: &TangentialStepInput,
     ) -> Result<TangentialStep<Self::State>, TriboError> {
         self.validate()?;
-        x.solve.validate()?;
-        nonnegative_finite(x.normal_n, "normal_force")?;
-        nonnegative_finite(x.compliance_m_per_n, "compliance_m_per_n")?;
-        positive_finite(x.dt_s, "dt_s")?;
-        if let Some(t) = x.contact_temperature_k {
-            positive_finite(t, "temperature_kelvin")?;
-        }
-        if let Some(p) = x.nominal_pressure_pa {
-            nonnegative_finite(p, "contact_pressure_pa")?;
-        }
-        for value in x.slip_increment_m {
-            finite(value, "slip_increment_m")?;
-        }
-
-        // The scalar x-axis case preserves the modal owner's operation order.
-        let distance = if x.slip_increment_m[1] == 0.0 {
-            x.slip_increment_m[0].abs()
-        } else {
-            det::hypot(x.slip_increment_m[0], x.slip_increment_m[1])
-        };
-        finite(distance, "free_slip_distance_m")?;
-        let (magnitude, regime, iterations) = solve_magnitude(self, x, distance)?;
-        let direction = if distance == 0.0 {
-            [0.0; 2]
-        } else {
-            [
-                x.slip_increment_m[0] / distance,
-                x.slip_increment_m[1] / distance,
-            ]
-        };
-        let mut traction_n = [0.0; 2];
-        let mut slip_increment_m = [0.0; 2];
-        let mut compatibility_residual_m = [0.0; 2];
-        let mut slip_m = s.slip_m;
-        for i in 0..2 {
-            traction_n[i] = if magnitude == 0.0 {
-                0.0
-            } else {
-                checked_mul(magnitude, direction[i], "traction_n")?
-            };
-            let response = checked_mul(x.compliance_m_per_n, traction_n[i], "body_response_m")?;
-            let actual = finite(x.slip_increment_m[i] - response, "resolved_slip_m")?;
-            slip_increment_m[i] = if regime == FrictionRegime::Sticking {
-                0.0
-            } else {
-                actual
-            };
-            compatibility_residual_m[i] =
-                finite(slip_increment_m[i] - actual, "compatibility_residual_m")?;
-            slip_m[i] = checked_add(s.slip_m[i], slip_increment_m[i], "accumulated_slip_m")?;
-        }
-        if regime == FrictionRegime::Sliding
-            && x.normal_n > 0.0
-            && distance > 0.0
-            && slip_increment_m == [0.0; 2]
-        {
-            // A near-static endpoint may satisfy a loose force tolerance but
-            // cannot be published as a kinetic branch at exactly zero slip.
-            // The modal owner applies the same actual-state refusal after solve.
-            return Err(TriboError::InvalidInput {
-                field: "zero_sliding_increment",
-            });
-        }
-        let work = checked_add(
-            checked_mul(traction_n[0], slip_increment_m[0], "tangent_work_j")?,
-            checked_mul(traction_n[1], slip_increment_m[1], "tangent_work_j")?,
-            "tangent_work_j",
-        )?;
-        nonnegative_finite(work, "tangent_work_j")?;
-        let state = DryTangentialState {
-            slip_m,
-            contact_temperature_k: x.contact_temperature_k,
-        };
-        let stored_change_j = self.stored_energy_j(&state) - self.stored_energy_j(s);
-        let dissipated_j = work;
-        Ok(TangentialStep {
-            traction_n,
-            slip_increment_m,
-            state,
-            regime,
-            stored_change_j,
-            dissipated_j,
-            closure_residual_j: stored_change_j + dissipated_j - work,
-            compatibility_residual_m,
-            iterations,
-        })
+        advance_with_capacity(
+            s,
+            x,
+            x.normal_n == 0.0,
+            checked_mul(self.static_mu(), x.normal_n, "static_limit")?,
+            |speed| {
+                let mu = if speed == 0.0 {
+                    self.zero_speed_kinetic_coefficient()?
+                } else {
+                    self.kinetic_coefficient(speed)?
+                };
+                checked_mul(mu, x.normal_n, "traction_n")
+            },
+            |distance, compliance, dt| {
+                self.affine_sliding_traction_n(x.normal_n, distance, compliance, dt)
+            },
+        )
     }
+}
+
+// Share the actual force-capacity solve. Adhesion does not become a fictitious
+// normal load or coefficient; dry callers retain their original arithmetic.
+pub(crate) fn advance_with_capacity(
+    s: &DryTangentialState,
+    x: &TangentialStepInput,
+    released: bool,
+    static_capacity_n: f64,
+    kinetic_capacity_n: impl Fn(f64) -> Result<f64, TriboError>,
+    affine_capacity_n: impl Fn(f64, f64, f64) -> Result<Option<f64>, TriboError>,
+) -> Result<TangentialStep<DryTangentialState>, TriboError> {
+    x.solve.validate()?;
+    nonnegative_finite(x.normal_n, "normal_force")?;
+    nonnegative_finite(x.compliance_m_per_n, "compliance_m_per_n")?;
+    positive_finite(x.dt_s, "dt_s")?;
+    if let Some(t) = x.contact_temperature_k {
+        positive_finite(t, "temperature_kelvin")?;
+    }
+    if let Some(p) = x.nominal_pressure_pa {
+        nonnegative_finite(p, "contact_pressure_pa")?;
+    }
+    for value in x.slip_increment_m {
+        finite(value, "slip_increment_m")?;
+    }
+
+    // The scalar x-axis case preserves the modal owner's operation order.
+    let distance = if x.slip_increment_m[1] == 0.0 {
+        x.slip_increment_m[0].abs()
+    } else {
+        det::hypot(x.slip_increment_m[0], x.slip_increment_m[1])
+    };
+    finite(distance, "free_slip_distance_m")?;
+    let (magnitude, regime, iterations) = solve_magnitude(
+        x,
+        distance,
+        released,
+        static_capacity_n,
+        &kinetic_capacity_n,
+        &affine_capacity_n,
+    )?;
+    let direction = if distance == 0.0 {
+        [0.0; 2]
+    } else {
+        [
+            x.slip_increment_m[0] / distance,
+            x.slip_increment_m[1] / distance,
+        ]
+    };
+    let mut traction_n = [0.0; 2];
+    let mut slip_increment_m = [0.0; 2];
+    let mut compatibility_residual_m = [0.0; 2];
+    let mut slip_m = s.slip_m;
+    for i in 0..2 {
+        traction_n[i] = if magnitude == 0.0 {
+            0.0
+        } else {
+            checked_mul(magnitude, direction[i], "traction_n")?
+        };
+        let response = checked_mul(x.compliance_m_per_n, traction_n[i], "body_response_m")?;
+        let actual = finite(x.slip_increment_m[i] - response, "resolved_slip_m")?;
+        slip_increment_m[i] = if regime == FrictionRegime::Sticking {
+            0.0
+        } else {
+            actual
+        };
+        compatibility_residual_m[i] =
+            finite(slip_increment_m[i] - actual, "compatibility_residual_m")?;
+        slip_m[i] = checked_add(s.slip_m[i], slip_increment_m[i], "accumulated_slip_m")?;
+    }
+    if regime == FrictionRegime::Sliding
+        && !released
+        && distance > 0.0
+        && slip_increment_m == [0.0; 2]
+    {
+        // A near-static endpoint may satisfy a loose force tolerance but
+        // cannot be published as a kinetic branch at exactly zero slip.
+        // The modal owner applies the same actual-state refusal after solve.
+        return Err(TriboError::InvalidInput {
+            field: "zero_sliding_increment",
+        });
+    }
+    let work = checked_add(
+        checked_mul(traction_n[0], slip_increment_m[0], "tangent_work_j")?,
+        checked_mul(traction_n[1], slip_increment_m[1], "tangent_work_j")?,
+        "tangent_work_j",
+    )?;
+    nonnegative_finite(work, "tangent_work_j")?;
+    let state = DryTangentialState {
+        slip_m,
+        contact_temperature_k: x.contact_temperature_k,
+    };
+    let stored_change_j = 0.0;
+    let dissipated_j = work;
+    Ok(TangentialStep {
+        traction_n,
+        slip_increment_m,
+        state,
+        regime,
+        stored_change_j,
+        dissipated_j,
+        closure_residual_j: stored_change_j + dissipated_j - work,
+        compatibility_residual_m,
+        iterations,
+    })
 }
 
 impl TangentialLaw for DryInterfaceSystemCard {
@@ -382,24 +418,22 @@ impl FrictionLaw {
 // fs-couple's modal friction scalar owner. Its in-crate comparison exercises both
 // implementations bitwise; no modal/network type enters this constitutive leaf.
 fn solve_magnitude(
-    law: &FrictionLaw,
     x: &TangentialStepInput,
     distance: f64,
+    released: bool,
+    cap: f64,
+    kinetic_capacity_n: &impl Fn(f64) -> Result<f64, TriboError>,
+    affine_capacity_n: &impl Fn(f64, f64, f64) -> Result<Option<f64>, TriboError>,
 ) -> Result<(f64, FrictionRegime, usize), TriboError> {
-    if x.normal_n == 0.0 {
+    if released {
         return Ok((0.0, FrictionRegime::Sliding, 0));
     }
-    let cap = checked_mul(law.static_mu(), x.normal_n, "static_limit")?;
     let compliance = x.compliance_m_per_n;
     if distance == 0.0 {
         return Ok((0.0, FrictionRegime::Sticking, 0));
     }
     if compliance == 0.0 {
-        let force = checked_mul(
-            law.kinetic_coefficient(finite(distance / x.dt_s, "slip_speed_mps")?)?,
-            x.normal_n,
-            "traction_n",
-        )?;
+        let force = kinetic_capacity_n(finite(distance / x.dt_s, "slip_speed_mps")?)?;
         require_force_budget(force, x.solve)?;
         return Ok((force, FrictionRegime::Sliding, 0));
     }
@@ -410,18 +444,13 @@ fn solve_magnitude(
     }
     let evaluate = |magnitude: f64| -> Result<(f64, f64), TriboError> {
         let slip = finite(distance - compliance * magnitude, "resolved_slip_m")?.max(0.0);
-        let mu = if slip == 0.0 {
-            law.zero_speed_kinetic_coefficient()?
-        } else {
-            law.kinetic_coefficient(finite(slip / x.dt_s, "slip_speed_mps")?)?
-        };
-        let expected = checked_mul(mu, x.normal_n, "traction_n")?;
+        let expected = kinetic_capacity_n(finite(slip / x.dt_s, "slip_speed_mps")?)?;
         Ok((
             finite(magnitude - expected, "constitutive_residual_n")?,
             x.solve.tolerance(magnitude, expected)?,
         ))
     };
-    if let Some(force) = law.affine_sliding_traction_n(x.normal_n, distance, compliance, x.dt_s)? {
+    if let Some(force) = affine_capacity_n(distance, compliance, x.dt_s)? {
         require_force_budget(force, x.solve)?;
         if force < required {
             let (residual, tolerance) = evaluate(force)?;

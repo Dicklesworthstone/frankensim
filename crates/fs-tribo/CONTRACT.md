@@ -431,3 +431,24 @@ pressure term is an explicit uncoupled model choice, not a universal fit.
 `PartialSlipLaw::advance_with_coefficients` continues the same contact/source model with changed Coulomb coefficients or translational/torsional stiffness. It retains both regions' elastic strains and kinetic branches and runs the original return map; regional stiffness/capacity fractions and the torsional capacity factor remain fixed. Its independent parameter-work port supplies `C = psi(new coefficients, old history) - psi(old coefficients, old history)` before motion. Returned storage change refers to the actual old law, so `delta(psi) + physical slip heat + numerical loss = wrench work + C`. Softening can export parameter work; reduced yield strength can relax stored strains even at zero imposed motion. Ordinary restore remains coefficient-exact.
 
 The coupled owner must accept the coefficient driver and contact history together and balance the signed parameter port. This first-order parameter-then-motion split supplies no temperature-dependent material data or caloric closure: temperature-dependent spring free energy requires mechanical internal energy `U = psi - T d(psi)/dT`, so parameter work alone is not heat. Numerical dissipation also remains nonthermal. G0/G3 tests in `tests/partial_slip_coefficients.rs` cover signed stiffness work, independent mixed shear/spin energy, retained preload and normal-load changes, zero-motion relaxation, unchanged-law identity, and strict source/decomposition refusal.
+
+## Adhesive held-effort tangential contact
+
+`adhesive::AdhesiveTangentialContact` freezes caller-resolved real contact area
+and nonnegative repulsive force and implements the existing `TangentialLaw`.
+The shared two-axis held-effort solver selects actual static reactions inside
+`tau_static A + mu_static N_rep`, or solves compliant sliding using
+`tau_kinetic A + mu(v) N_rep`. It does not substitute signed net normal force
+or an effective Coulomb load. Finite real area carries shear at zero repulsion;
+a detached patch carries no traction or heat. The redundant input normal load
+must equal the frozen repulsive load.
+
+The original dry checkpoint and immutable candidate protocol are retained.
+Reversible tangential storage is zero, and exported heat is the applied force
+dotted with the solved relative increment, not the released predictor. The
+pressure-only limit retains the original law and arithmetic. Coulomb and
+linear velocity laws have checked affine solutions, including a pressure
+coefficient clamped to zero while junction shear persists. Other laws use the
+existing bounded root rule; no new multiroot history or branch certificate is
+claimed. Normal evolution, partial slip, shear-induced peeling, ageing and
+thermal material refresh require their own owners.

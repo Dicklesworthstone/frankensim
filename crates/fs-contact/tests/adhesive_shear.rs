@@ -17,7 +17,10 @@ use fs_material::state_point::{
 };
 use fs_qty::{Dims, Pressure};
 use fs_tribo::adhesive::AdhesiveContactState;
-use fs_tribo::{ContactFrame, InputAuthority, TangentialSlip};
+use fs_tribo::{
+    ContactFrame, FrictionRegime, InputAuthority, TangentialLaw, TangentialSlip,
+    TangentialSolveConfig, TangentialStepInput,
+};
 
 fn claim(name: &str, value: f64, dims: Dims, rate_axis: bool) -> PropertyClaim {
     let mut validity = ValidityDomain::unconstrained().with("T", 280.0, 320.0);
@@ -261,6 +264,61 @@ fn sourced_jkr_area_drives_shear_at_zero_and_tensile_net_force_then_detaches() {
             response.dissipated_power_w,
             2e6 * contact.contact_area_m2 * 0.05,
         );
+        let held = shear.bind_jkr(&normal, &contact).unwrap();
+        assert_eq!(held.normal_state().identity(), normal.identity());
+        assert_eq!(held.shear_source().resolved(), shear.resolved());
+        let x = TangentialStepInput {
+            normal_n: contact.repulsive_normal_force_n,
+            slip_increment_m: [0.5 * response.static_capacity_n, 0.0],
+            dt_s: 1.0,
+            contact_temperature_k: Some(293.15),
+            nominal_pressure_pa: None,
+            compliance_m_per_n: 1.0,
+            solve: TangentialSolveConfig {
+                max_iterations: 80,
+                maximum_force_n: 10.0,
+                force_absolute_tolerance_n: 1e-14,
+                force_relative_tolerance: 1e-12,
+            },
+        };
+        let initial = held.initial_state();
+        let stuck = held.advance(&initial, &x).unwrap();
+        assert_eq!(stuck.regime, FrictionRegime::Sticking);
+        common::close(stuck.traction_n[0], 0.5 * response.static_capacity_n);
+        assert_eq!(stuck.dissipated_j, 0.0);
+        let slide = held
+            .advance(
+                &initial,
+                &TangentialStepInput {
+                    slip_increment_m: [2.0 * response.static_capacity_n, 0.0],
+                    ..x
+                },
+            )
+            .unwrap();
+        assert_eq!(slide.regime, FrictionRegime::Sliding);
+        common::close(slide.traction_n[0], response.sliding_capacity_n.unwrap());
+        assert!(slide.dissipated_j > 0.0);
+        assert!(
+            held.advance(
+                &initial,
+                &TangentialStepInput {
+                    contact_temperature_k: Some(300.0),
+                    ..x
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            held.advance(
+                &initial,
+                &TangentialStepInput {
+                    normal_n: -1.0,
+                    ..x
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(initial, held.initial_state());
         assert_eq!(contact.authority, InputAuthority::SyntheticFixture);
         assert_eq!(
             response.provenance.authority(),

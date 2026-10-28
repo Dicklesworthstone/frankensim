@@ -199,3 +199,6 @@ impl SourceAdhesiveShear {
         self.evaluate(normal, response.friction_contact_state()?, slip)
     }
 }
+
+mod held;
+pub use held::SourceAdhesiveTangential;

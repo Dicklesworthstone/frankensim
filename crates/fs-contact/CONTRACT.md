@@ -683,3 +683,15 @@ collapse to one representable branch coordinate refuse zero-work inference.
 No detached-reference absolute potential, deformed noncontact continuation,
 attachment/snap dynamics, roughness, plasticity or universal material calibration
 is claimed.
+
+## Source-preserving adhesive held friction
+
+`SourceAdhesiveShear::bind_jkr`, `bind_dmt`, and `bind_maugis` retain the original
+ordered normal state, original shear claims and receipts, and actual solid
+contact area in `SourceAdhesiveTangential`. Response/source identity mismatch
+refuses. The Maugis cohesive annulus and DMT noncontact attraction contribute
+no solid junction shear. The explicit source query remains frozen; the held
+input must preserve its common contact temperature and repulsive load. A
+nominal-pressure source refresh is not inferred. Original synthetic/caller
+authority is preserved. The adapter implements the existing tangential trial
+trait and neither owns normal-area evolution nor claims mixed-mode peeling.

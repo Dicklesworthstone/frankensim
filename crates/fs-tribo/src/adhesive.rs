@@ -10,7 +10,8 @@
 //! Both shear strengths are explicit interface data, not bulk yield strength
 //! and not inferred from work of adhesion. This is an uncoupled junction model:
 //! the normal owner supplies area; shear-induced peeling, partial slip, static
-//! reaction selection, ageing and wear require additional models. It does not
+//! ageing and wear require additional models. `AdhesiveTangentialContact`
+//! resolves static reactions and compliant sliding through the shared held-effort solver. It does not
 //! upgrade the caller's provenance. Evaluation is allocation-free and O(1).
 
 use crate::{
@@ -205,3 +206,6 @@ fn capacity(strength: f64, mu: f64, contact: AdhesiveContactState) -> Result<f64
         "adhesive total friction capacity",
     )
 }
+
+mod held;
+pub use held::AdhesiveTangentialContact;
