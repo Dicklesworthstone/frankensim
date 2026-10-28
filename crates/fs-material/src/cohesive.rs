@@ -283,6 +283,62 @@ impl<'a> CohesivePoint<'a> {
 
 fn active(jump: [f64; 3]) -> [f64; 3] { [jump[0].max(0.0), jump[1], jump[2]] }
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 { a[0]*b[0]+a[1]*b[1]+a[2]*b[2] }
+
+// First outward crossing of ||[<x_n>, x_t1, x_t2]|| = radius on a straight
+// path. Inputs may already be scaled by strength or sqrt(stiffness). Starting
+// at `lower`, the path must be inside the sphere and its endpoint outside.
+// Split the normal-contact switch, then solve the affine-vector quadratic in
+// radius-scaled coordinates. Unlike a fixed number of bisections in [0, 1],
+// this retains crossings arbitrarily close to the beginning of an increment.
+fn outward_crossing(old: [f64; 3], end: [f64; 3], radius: f64, lower: f64)
+    -> Result<f64, CohesiveError> {
+    positive(radius)?;
+    for value in old.into_iter().chain(end) { finite(value)?; }
+    if !(0.0..=1.0).contains(&lower) {
+        return Err(CohesiveError::Invalid("invalid cohesive crossing interval"));
+    }
+    let at = |s: f64| core::array::from_fn(|i| (1.0-s)*old[i]+s*end[i]);
+    let switch = if (old[0] < 0.0 && end[0] > 0.0) || (old[0] > 0.0 && end[0] < 0.0) {
+        let scale = old[0].abs().max(end[0].abs());
+        let a = old[0].abs()/scale;
+        a/(a+end[0].abs()/scale)
+    } else { 1.0 };
+    let mut start = lower;
+    let mut finish = 1.0;
+    if switch > lower && switch < 1.0 {
+        if norm(active(at(switch)))? >= radius { finish = switch; }
+        else { start = switch; }
+    }
+    let a = active(at(start));
+    let b = active(at(finish));
+    let delta = core::array::from_fn(|i| b[i]-a[i]);
+    let length = norm(delta)?;
+    let u = a.map(|v| v/radius);
+    let r = norm(u)?;
+    let roundoff = 64.0*f64::EPSILON;
+    if r > 1.0+roundoff || norm(b)?/radius < 1.0-roundoff {
+        return Err(CohesiveError::Invalid("cohesive crossing is not bracketed"));
+    }
+    if length == 0.0 { return Ok(start); }
+    let direction = delta.map(|v| v/length);
+    let projection = dot(u, direction);
+    // c = |a/radius|^2-1; factorization preserves small distances to the
+    // surface. The rationalized outward root avoids cancellation on loading.
+    let c = ((r-1.0)*(r+1.0)).min(0.0);
+    let root = det::sqrt(projection*projection-c);
+    let distance = if projection >= 0.0 {
+        let denominator = projection+root;
+        if denominator == 0.0 { 0.0 } else { -c/denominator }
+    } else { root-projection };
+    let fraction = finite(if distance <= 1.0 {
+        (distance*radius)/length
+    } else { distance*(radius/length) })?;
+    if fraction < -roundoff || fraction > 1.0+roundoff {
+        return Err(CohesiveError::Invalid("cohesive crossing lies outside its segment"));
+    }
+    finite(start+(finish-start)*fraction.clamp(0.0,1.0))
+}
+
 fn norm(value: [f64; 3]) -> Result<f64, CohesiveError> {
     for x in value { finite(x)?; }
     let scale = value.iter().fold(0.0_f64, |a, b| a.max(b.abs()));

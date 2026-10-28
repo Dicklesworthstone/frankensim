@@ -15,7 +15,7 @@
 
 use super::{
     BilinearCohesive, CohesiveError, CohesivePoint, CohesiveStep, active, det, dot, finite, norm,
-    positive,
+    outward_crossing, positive,
 };
 
 /// Explicit physical viscosity and caller-declared local rate applicability.
@@ -253,27 +253,17 @@ fn mean_integrity(old: &CohesivePoint<'_>, end: &CohesivePoint<'_>) -> Result<f6
         None => ([1.0; 3], old.law.onset, old.law.failure, old.maximum, 0.0),
     };
     let delta = core::array::from_fn::<_, 3, _>(|i| end.jump[i] - old.jump[i]);
-    let at = |s: f64| core::array::from_fn::<_, 3, _>(|i| old.jump[i] + s * delta[i]);
+    let at =
+        |s: f64| core::array::from_fn::<_, 3, _>(|i| (1.0 - s) * old.jump[i] + s * end.jump[i]);
     let radius = |s: f64| norm(core::array::from_fn(|i| weights[i] * active(at(s))[i]));
     let threshold = maximum.max(onset);
     if radius(1.0)? <= threshold {
         return Ok(old_intact);
     }
-    let crossing = |target: f64, start: f64| -> Result<f64, CohesiveError> {
-        let (mut a, mut b) = (start, 1.0);
-        for _ in 0..64 {
-            let m = 0.5 * a + 0.5 * b;
-            if m == a || m == b {
-                break;
-            }
-            if radius(m)? <= target {
-                a = m;
-            } else {
-                b = m;
-            }
-        }
-        Ok(0.5 * a + 0.5 * b)
-    };
+    let weighted_old = core::array::from_fn(|i| weights[i] * old.jump[i]);
+    let weighted_end = core::array::from_fn(|i| weights[i] * end.jump[i]);
+    let crossing =
+        |target: f64, start: f64| outward_crossing(weighted_old, weighted_end, target, start);
     let start = crossing(threshold, lower)?;
     let finish = if radius(1.0)? >= failure {
         crossing(failure, start)?
@@ -320,7 +310,7 @@ fn softening_average(
     let l = norm(d)?;
     let ud = dot(u, d);
     let dd = dot(d, d);
-    let inverse_change = if 2.0 * ud.abs() + dd <= 0.001 {
+    let value = if 2.0 * ud.abs() + dd <= 0.001 {
         // Analytic binomial integral of (1+2 u.d t+d.d t^2)^(-1/2)-1.
         // Eight terms leave < 2e-28 absolute truncation here and retain the
         // small difference from unity near complete failure.
@@ -338,15 +328,16 @@ fn softening_average(
             }
             sum += binomial * moment;
         }
-        sum
+        (onset / (failure - onset)) * ((failure - r0) / r0 + (failure / r0) * sum)
     } else {
         let end_radius = norm(core::array::from_fn(|i| u[i] + d[i]))?;
         let radial_change = (2.0 * ud + dd) / (end_radius + 1.0);
         let logarithm = det::ln(1.0 + (l + radial_change) / (1.0 + ud / l));
-        logarithm / l - 1.0
+        // For long ramps, integral(1/r) can be far smaller than 1/r0. Do not
+        // subtract one from it and then cancel failure/r0: that erases the
+        // logarithmic work at large failure/onset ratios.
+        (onset / (failure - onset)) * ((failure / r0) * (logarithm / l) - 1.0)
     };
-    let value =
-        (onset / (failure - onset)) * ((failure - r0) / r0 + (failure / r0) * inverse_change);
     finite(value)
 }
 fn powi(x: f64, n: i32) -> f64 {

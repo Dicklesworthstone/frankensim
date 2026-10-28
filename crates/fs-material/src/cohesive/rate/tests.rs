@@ -215,3 +215,65 @@ fn tiny_softening_intervals_retain_positive_loss_and_refusals_are_atomic() {
     assert!(CohesiveViscosity::new(-1.0, 1.0, 1.0).is_err());
     assert!(CohesiveViscosity::new(1.0, f64::NAN, 1.0).is_err());
 }
+
+#[test]
+fn complete_rupture_ramp_retains_the_analytic_logarithmic_viscous_work() {
+    // G0/G3: independent integral for a monotonic full-rupture ramp:
+    // mean(1-d) = onset*failure*ln(failure/onset)/((failure-onset)*end).
+    // Very small initiation fractions must not set a timestep-dependent
+    // fracture threshold or erase the nonnegative logarithmic contribution.
+    for stiffness in [1e9, 1e12, 1e24] {
+        let law = BilinearCohesive::new(stiffness, 1.0, 1e-3, stiffness, 0.01)
+            .unwrap()
+            .with_viscosity(CohesiveViscosity::new(1e6, 1e6, 1.0).unwrap());
+        let end = 0.004;
+        let dt = 0.1;
+        let onset = 1.0 / stiffness;
+        let failure = 0.002;
+        let mean = (onset / end) * (failure / (failure - onset)) * (failure / onset).ln();
+        let expected = 1e6 * end * end / dt * mean;
+        let result = law
+            .bonded_point()
+            .trial_over_time([end, 0.0, 0.0], dt, 1e-12)
+            .unwrap();
+        assert!(result.equilibrium.point.failed());
+        assert_eq!(result.traction_pa, [0.0; 3]);
+        assert!(
+            (result.viscous_dissipated_j_m2 / expected - 1.0).abs() < 1e-12,
+            "K={stiffness}: {} != {expected}",
+            result.viscous_dissipated_j_m2
+        );
+        close(result.equilibrium.energy.dissipated, 1e-3, 1e-13);
+    }
+}
+
+#[test]
+fn viscous_reversal_through_compression_preserves_subdivided_work() {
+    // G3: damage arrests during unloading and resumes only at the outward
+    // retained-maximum crossing, possibly beyond the normal-contact switch.
+    for law in [law(), mixed()] {
+        let start = law
+            .bonded_point()
+            .trial_over_time([0.0012, 0.0004, 0.0], 0.2, 1e-8)
+            .unwrap()
+            .equilibrium
+            .point;
+        for end in [[-0.002, -0.003, 0.0006], [0.006, -0.003, 0.0005]] {
+            let whole = start.trial_over_time(end, 0.8, 1e-8).unwrap();
+            let mut point = start;
+            let mut loss = 0.0;
+            let mut work = 0.0;
+            for n in 1..=64 {
+                let s = f64::from(n) / 64.0;
+                let jump = core::array::from_fn(|i| (1.0 - s) * start.jump[i] + s * end[i]);
+                let step = point.trial_over_time(jump, 0.8 / 64.0, 1e-8).unwrap();
+                loss += step.viscous_dissipated_j_m2;
+                work += step.total_work_j_m2();
+                point = step.equilibrium.point;
+            }
+            close(loss, whole.viscous_dissipated_j_m2, 4e-12);
+            close(work, whole.total_work_j_m2(), 4e-12);
+            close(point.damage(), whole.equilibrium.point.damage(), 1e-13);
+        }
+    }
+}

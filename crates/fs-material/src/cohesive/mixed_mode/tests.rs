@@ -241,3 +241,62 @@ fn compression_shear_and_invalid_data_keep_explicit_bounds() {
     assert!(BilinearCohesive::new_mixed_mode(p, 2e9, 0.02).is_err());
     assert!(BilinearCohesive::new_mixed_mode(parameters(), 2e9, 0.002).is_err());
 }
+
+#[test]
+fn small_initiation_fraction_does_not_break_a_surviving_bond_early() {
+    // G0/G3: a highly stiff but weak interface is admitted by both owners.
+    // Its initiation fraction is 1e-21 of this increment. Sixty-four uniform
+    // bisections cannot resolve that fraction and used to select an onset 54x
+    // too large, making the mixed law report complete failure prematurely.
+    let parameters = MixedModeParameters {
+        normal_stiffness_pa_m: 1e24,
+        tangential_stiffness_pa_m: 1e24,
+        normal_strength_pa: 1.0,
+        tangential_strength_pa: 1.0,
+        mode_i_fracture_energy_j_m2: 1e-3,
+        mode_ii_fracture_energy_j_m2: 1e-3,
+        bk_exponent: 2.0,
+    };
+    let mixed = BilinearCohesive::new_mixed_mode(parameters, 1e24, 0.01).unwrap();
+    let common = BilinearCohesive::new(1e24, 1.0, 1e-3, 1e24, 0.01).unwrap();
+    for jump in [[0.001, 0.0, 0.0], [0.0006, 0.0008, 0.0]] {
+        let expected = common.bonded_point().trial(jump, 1e-12).unwrap();
+        let actual = mixed.bonded_point().trial(jump, 1e-12).unwrap();
+        assert!(!actual.point.failed());
+        let history = actual.point.mixed_mode_history().unwrap();
+        assert!((history.onset_sqrt_energy / 1e-12 - 1.0).abs() < 1e-14);
+        for i in 0..3 {
+            close(actual.traction_pa[i], expected.traction_pa[i], 1e-13);
+        }
+        close(actual.energy.work, expected.energy.work, 1e-14);
+        close(actual.energy.dissipated, 5e-4, 1e-14);
+    }
+}
+
+#[test]
+fn analytic_initiation_resolves_compression_switch_and_shear_reversal() {
+    // G0/G3: independent roots of the quadratic strength criterion, before
+    // and after the normal clipping switch and after initial unloading.
+    let p = parameters();
+    let dn = p.normal_strength_pa / p.normal_stiffness_pa_m;
+    let dt = p.tangential_strength_pa / p.tangential_stiffness_pa_m;
+    for (old, end, expected) in [
+        ([-2.0, 0.0, 0.0], [3.0, 0.0, 0.0], 0.6),
+        ([0.5, 0.0, 0.0], [-2.0, 3.0, 0.0], 1.0 / 3.0),
+        ([0.5, 0.0, 0.0], [3.0, 0.0, 0.0], 0.2),
+        ([0.0, 0.5, 0.0], [0.0, -2.0, 0.0], 0.6),
+    ] {
+        let a = [dn * old[0], dt * old[1], dt * old[2]];
+        let b = [dn * end[0], dt * end[1], dt * end[2]];
+        let (history, fraction) = initiate(p, a, b).unwrap();
+        close(fraction, expected, 1e-14);
+        let at = core::array::from_fn(|i| (1.0 - fraction) * a[i] + fraction * b[i]);
+        close(strength_coordinate(p, at).unwrap(), 1.0, 1e-14);
+        let pure_shear = old[1] != 0.0 || end[1] != 0.0;
+        close(
+            history.fracture_energy_j_m2,
+            if pure_shear { 400.0 } else { 100.0 },
+            1e-13,
+        );
+    }
+}

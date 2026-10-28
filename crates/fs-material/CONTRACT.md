@@ -2916,8 +2916,12 @@ declared model extension, not experimental qualification of arbitrary histories.
 The consistent algorithmic tangent includes the sensitivity of the initiation
 crossing and selected toughness when a trial first initiates damage. It can be
 nonsymmetric; the existing Newton/FGMRES owner consumes it without an SPD
-assumption. Evaluation allocates nothing; first initiation has a bounded scalar
-solve and retained-envelope steps use closed-form arithmetic. Equal mode
+assumption. Evaluation allocates nothing; initiation and timed damage/failure
+events use analytic quadratic crossings, split at the normal compression switch.
+Radius-scaled coefficients and a rationalized outward root retain initiation
+fractions below `2^-64`, preventing a long increment from changing the physical
+strength threshold or causing premature rupture. Retained-envelope steps
+use closed-form arithmetic. Equal mode
 parameters recover the original common-mode response. The scalar law getters
 continue to describe pure opening; each point exposes its selected mixed envelope.
 
@@ -3182,7 +3186,11 @@ separate from the original equilibrium account. Exact piecewise analytic
 constant-rate path integration reports nonnegative viscous loss independently
 from intrinsic fracture. Energy uses that integral, not endpoint traction times
 jump. The short-interval binomial evaluation has below-roundoff truncation in
-its admitted range. No stored dashpot state, healing, fracture heat partition,
+its admitted range. Longer ramps evaluate the logarithmic integral directly,
+preserving nonzero loss at large failure/onset ratios without cancellation of
+the leading terms. G0/G3 regressions compare full-rupture viscous work with its
+independent closed form and retain the same work under reversal-path subdivision.
+No stored dashpot state, healing, fracture heat partition,
 evolving-temperature refresh or universal adhesive calibration is inferred.
 
 The source adapter queries intrinsic coefficients and explicit interface

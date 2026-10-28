@@ -22,7 +22,7 @@
 
 use super::{
     BilinearCohesive, CohesiveEnergy, CohesiveError, CohesivePoint, CohesiveStep, active, det, dot,
-    finite, norm, positive,
+    finite, norm, outward_crossing, positive,
 };
 
 /// Explicit ordered-interface coefficients. All values are coherent SI.
@@ -331,24 +331,18 @@ pub(super) fn initiate(
     old: [f64; 3],
     end: [f64; 3],
 ) -> Result<(MixedModeHistory, f64), CohesiveError> {
-    let delta = core::array::from_fn::<_, 3, _>(|i| end[i] - old[i]);
-    let (mut lower, mut upper) = (0.0, 1.0);
-    // The strength coordinate is convex on a straight jump segment. Starting
-    // inside, its first outward crossing is unique even if the segment initially
-    // unloads or passes from compression into tension.
-    for _ in 0..64 {
-        let middle = 0.5 * lower + 0.5 * upper;
-        if middle == lower || middle == upper {
-            break;
-        }
-        let g = core::array::from_fn(|i| old[i] + middle * delta[i]);
-        if strength_coordinate(p, g)? < 1.0 {
-            lower = middle;
-        } else {
-            upper = middle;
-        }
-    }
-    let g = core::array::from_fn(|i| old[i] + upper * delta[i]);
+    let scales = [
+        p.normal_strength_pa / p.normal_stiffness_pa_m,
+        p.tangential_strength_pa / p.tangential_stiffness_pa_m,
+        p.tangential_strength_pa / p.tangential_stiffness_pa_m,
+    ];
+    let lambda = outward_crossing(
+        core::array::from_fn(|i| old[i] / scales[i]),
+        core::array::from_fn(|i| end[i] / scales[i]),
+        1.0,
+        0.0,
+    )?;
+    let g = core::array::from_fn(|i| (1.0 - lambda) * old[i] + lambda * end[i]);
     let onset = positive(coordinate(p, g)?)?;
     let shear = det::sqrt(p.tangential_stiffness_pa_m) * norm([0.0, g[1], g[2]])?;
     let beta = finite((shear / onset) * (shear / onset))?.clamp(0.0, 1.0);
@@ -370,7 +364,7 @@ pub(super) fn initiate(
             failure_sqrt_energy: failure,
             fracture_energy_j_m2: fracture,
         },
-        upper,
+        lambda,
     ))
 }
 fn initiation_gradient(
