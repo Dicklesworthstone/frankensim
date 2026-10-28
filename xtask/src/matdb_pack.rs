@@ -70,6 +70,8 @@ use fs_qty::parse::{ParseBudget, parse_qty_with_budget};
 use fs_qty::semantic::{FrequencyConvention, QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Dims, QuantitySpec};
 
+mod catalog;
+pub(super) use catalog::cmd_matdb_catalog;
 mod constitutive;
 mod surface;
 #[cfg(test)]

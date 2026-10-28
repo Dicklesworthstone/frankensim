@@ -4,6 +4,84 @@ This directory retains the human-reviewable source inputs compiled by
 `xtask matdb-pack`. Generated binary packs are deliberately not committed:
 the compiler must reproduce them from the pinned manifest and source record.
 
+## Search and inspect the material catalog
+
+`matdb-catalog` searches the shipped source bundles using the actual offline
+compiler. It supports case-insensitive text search and repeated required-property
+filters; all supplied filters must match.
+
+```bash
+cargo run -p xtask -- matdb-catalog --search melamine
+cargo run -p xtask -- matdb-catalog --search ensinger \
+  --property thermal-conductivity --property specific-heat-capacity
+cargo run -p xtask -- matdb-catalog --pack g10cr-nist-cryogenic
+cargo run -p xtask -- matdb-catalog --pack smartply-strongdeck-osb4-30mm-reference
+```
+
+The list is deterministic TSV with source ID, internal pack ID, family, claim
+count, canonical property names, manifest path, compilation status and diagnostic.
+`--pack` selects the exact **source directory name**: internal pack IDs can be
+shared by independent sources, including argon species and thermochemical packs.
+Material/interface inspection includes coherent-SI values, curve knots, surface
+samples and triangles, typed validity axes, interpolation, uncertainty, source
+citations, observation methods and caveats. Species/model inspection is explicitly
+metadata-only. No generated binary pack is published by inspection.
+
+A source that the compiler refuses remains visible with its diagnostic in an
+unfiltered listing; it cannot satisfy a required-property filter. Exact inspection
+of that source fails. An unrelated refused source does not hide usable materials.
+Property presence is a discovery aid: consumers still need a compatible state,
+the required quantities and their own physical admission checks.
+
+## Everyday materials expansion: boards, polymers, alloys and composites
+
+This increment adds **38 source-specific packs and 195 property claims**.
+Together with the existing wood, plywood, metal, insulation and resin sources,
+these additions provide substantially broader everyday construction and fabrication
+coverage. Counts refer to source conditions and claims, rather than complete
+constitutive models or independent experimental measurements.
+
+| Source group | Packs | Claims | Named additions |
+|---|---:|---:|---|
+| Elements and minerals | 8 | 31 | Chromium, niobium, sapphire, barium fluoride, zinc selenide, magnesium fluoride, crystalline quartz and calcite |
+| Alloys | 3 | 12 | Hydro 6063-T6 and 6082-T6 extrusions; Special Metals INCONEL 625 with thermal/electrical temperature curves |
+| Fibers and composites | 4 | 20 | NIST G10-CR fiberglass/epoxy; Norplex NP510A FR-4 coupons; Toray T700S fiber and separately identified epoxy-composite coupons |
+| Plastics, films, resins, glues and foam | 12 | 71 | Ensinger PA66/POM-H/PEI; PLEXIGLAS GS; Mylar 92A and 1000A; 3M DP420 epoxy; DOWSIL 732 silicone; Basotect G+ melamine foam; SABIC LDPE; Titebond Original; Smooth-Cast 300 polyurethane |
+| Boards and cementitious products | 11 | 61 | Finsa MDF/HDF/particleboard; Kronospan melamine-faced P2; Fermacell gypsum-fiber and cement boards; Sika repair mortar; two Bauroc AAC grades; SMARTPLY OSB/4; Metsa Kerto S LVL |
+
+Every new source directory retains its primary citation, attributed numerical
+facts, original condition notes, source units or explicit conversion notes and
+unstated uncertainty where no uncertainty was supplied. The following distinctions
+are enforced by property names and query coordinates:
+
+- Mylar machine/transverse directions and film gauges remain separate.
+- Crystal/G10-CR conduction and OSB/LVL stiffness retain their published directions.
+- Tensile, flexural and compression moduli retain their measurement meanings.
+- Product specifications, tolerances and fifth-percentile values remain explicit;
+  density ranges and strength limits do not become invented point measurements.
+- Fresh mortar, uncured wood glue, cured silicone and seven-day casting resin
+  retain different states. Discrete cure ages do not imply a continuous curing law.
+- Bare carbon fiber, FR-4 coupons and normalized epoxy composites retain their
+  own constructions, thicknesses, cure conditions and available property sets.
+- INCONEL transport retains its anneal condition; its nominal reference density
+  does not supply an elevated-temperature density curve.
+
+The focused test targets are:
+
+```bash
+cargo test -p xtask --test elements_alloys_composites_expansion
+cargo test -p xtask --test building_products_expansion
+cargo test -p xtask --test polymers_resins_expansion
+cargo test -p xtask --test material_catalog_search
+```
+
+The 20 material source/query integration cases and three catalog CLI cases passed
+in a narrow native build using the pinned `nightly-2026-07-06` compiler and the
+actual repository compiler/runtime modules. They cover compilation, canonical
+serialization, hash-verified decoding, SI queries, receipt replay and unsupported
+state refusals. Full workspace/DSR validation and solver-level or experimental
+qualification were not performed for this increment.
+
 ## Continuous NASA PEEK thermal-model curves
 
 `peek-nasa-thermic-plate-linearized-model/` makes the published NASA THERMIC

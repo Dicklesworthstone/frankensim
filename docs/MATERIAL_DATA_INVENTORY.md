@@ -1,8 +1,38 @@
 # Material data inventory
 
-## Current additions: 2026-10-28
+## Additional everyday-material coverage: 2026-10-28
 
-The source catalog now contains **336 manifest-bearing source bundles**, up from
+A further **38 source-specific packs add 195 property claims** across:
+
+| Group | New packs | New claims |
+|---|---:|---:|
+| Elements and minerals | 8 | 31 |
+| Aluminum alloys and INCONEL 625 | 3 | 12 |
+| Fiberglass, FR-4, carbon fiber and epoxy-composite coupons | 4 | 20 |
+| Plastics, Mylar, resins, glues, silicone and melamine foam | 12 | 71 |
+| MDF/HDF/particleboard, melamine-faced boards, OSB/LVL, cementitious products | 11 | 61 |
+| **Total for this increment** | **38** | **195** |
+
+See the [source catalog's everyday-material section](../data/matdb/seed-v1/README.md#everyday-materials-expansion-boards-polymers-alloys-and-composites)
+for the named products, condition boundaries and test commands.
+`cargo run -p xtask -- matdb-catalog` now supplies the live source inventory,
+including canonical property names and compilation/refusal status;
+`--search`, repeated `--property` filters and `--pack SOURCE_DIRECTORY` expose
+individual records without maintaining another hand-written material list.
+
+These are source-condition and claim counts. Some records are specification
+limits, typical producer values or explicitly identified reference models.
+Missing density profiles, full anisotropic tensors, history-dependent laws and
+matched-state properties remain explicit gaps rather than inferred constants.
+
+Verification for this increment: 20 source/query integration cases and three
+catalog CLI cases passed through the actual compiler and runtime modules using
+the pinned Rust toolchain. This was a focused native fallback; the full
+workspace/DSR lane and physical-consumer qualification were not run.
+
+## Earlier October expansion checkpoint
+
+That earlier expansion brought the catalog to **336 manifest-bearing source bundles**, up from
 302 before this expansion. The **34 new bundles contain 272 property claims**:
 61 across elements/minerals/glass/alloys, 131 across eight wood species, and 80
 across engineering plastics, foams, insulation and cured resins. These are exact

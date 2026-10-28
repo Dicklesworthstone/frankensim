@@ -37,6 +37,7 @@
 //!                      `--only <a,b>` restricts the verdict/exit code to named checks.
 //! - `lock-constellation` / `check-constellation` — pin/verify the Franken library states.
 //! - `matdb-pack`     — compile licensed material TSV or NASA-9 sources into normalized packs.
+//! - `matdb-catalog`  — search shipped material sources and inspect compiled properties/conditions.
 //!
 //! Output is JSON-lines (one verdict object per check per crate) so agents parse
 //! outcomes without scraping; a human-readable summary goes to stderr.
@@ -8551,6 +8552,16 @@ fn main() -> ExitCode {
                 }
             };
         }
+        "matdb-catalog" => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            return match matdb_pack::cmd_matdb_catalog(&root, &rest) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
         _ => {}
     }
     let manifests = match load_workspace(&root) {
@@ -8798,7 +8809,7 @@ fn main() -> ExitCode {
                  check-goldens|check-docs|check-claims|check-closures|check-maturity|check-instrument-claims|check-critical-path|check-moonshots|check-claim-integrity|check-schemas|check-consolidation|check-program-metrics|\
                  check-identities|check-state-charters|check-manifest-fixture|check-constellation-assessment|check-constellation-drift|check-oracle-determinism|check-source-manifest|check-vv-scorecard|check-color-admission|check-no-promotion|check-citable-producers|\
                  check-all|generate-identities|generate-constellation-assessment|generate-source-manifest|generate-vv-scorecard|generate-program-metrics|generate-spine-metrics|generate-tropical-path|generate-suite-receipt|record-program-metrics|compatibility-report|lock-constellation|\
-                 check-constellation|check-spine-metrics|check-tropical-path|check-suite-receipt|depgraph-receipt|matdb-pack"
+                 check-constellation|check-spine-metrics|check-tropical-path|check-suite-receipt|depgraph-receipt|matdb-pack|matdb-catalog"
             );
             return ExitCode::FAILURE;
         }
