@@ -3176,3 +3176,27 @@ Six new native regressions cover warm/cold redistribution, different volatile
 species, exact single-surface equivalence, order independence, shared gross
 withdrawal, energy-reference invariance and atomic refusal. All 18 actual-source
 joint/scalar/species-boundary tests passed with the original gas reconstruction.
+
+
+### Adaptive closed-chamber histories
+
+`sublimation::gas::chamber::advance::advance_chamber_adaptive` compares one joint
+explicit interval with two half intervals and accepts the finer conservative
+history without extrapolation. Local absolute/relative tolerances cover every
+solid mass and temperature, gas temperature and EACH retained species mass,
+including trace vapor. Stable surface ordering makes states and retry decisions
+independent of caller ordering on the same ISA. Typed inventory-limit refusals
+reduce the whole interval; invalid source/caloric data and cancellation remain
+immediate failures. Trial, minimum-step and maximum-step controls bound work.
+
+The candidate retains only accepted endpoints and cumulative molecular streams.
+Actual full-history total and per-species mass, combined energy, and each side's
+stream/storage energy account must meet the original absolute balance budgets;
+those tolerances are not multiplied by step count. Gas/solid inputs remain
+unchanged on a late refusal. Areas and source bindings stay fixed throughout
+this driver; thermal events use their separate owner. Step doubling supplies a
+local time-error estimate, not a rigorous global accuracy or physical-validation
+certificate. Six focused adaptive tests passed, including convergence toward a
+2048-step reference, shared-inventory retries, trace-species refinement, exact
+order invariance, work limits and late cancellation. The combined native
+adaptive/joint/scalar/boundary suite passed 24 tests with no failures.

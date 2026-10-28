@@ -12,6 +12,9 @@
 //! Each keeps its fixed datum offset and must satisfy latent compatibility at
 //! both endpoints. The local molecular assumptions in the parent module apply.
 
+/// Bounded adaptive histories using the same conservative joint interval.
+pub mod advance;
+
 use super::{
     ClosedGasParcel, GasSpeciesBoundaryCandidate, GasSpeciesSnapshot, GasSurfaceBinding,
     GasSurfaceError, GasSurfaceSolve, PreparedSurface, SolidSurfaceState, SpeciesBoundaryTransfer,
