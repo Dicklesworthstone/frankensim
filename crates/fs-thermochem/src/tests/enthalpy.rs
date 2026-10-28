@@ -1,6 +1,8 @@
 use super::*;
 use crate::mixture::FrozenIdealGasMixtureModelV1;
 
+mod internal_energy;
+
 #[test]
 fn g0_enthalpy_change_retains_small_sensible_energy_under_large_formation_reference() {
     let mut coefficients = [0.0; 9];
