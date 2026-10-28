@@ -9182,3 +9182,14 @@ This is the fixed-normal, nonnegative-indentation contact branch. An interval cr
 Five focused native reference groups cover all three original loss alternatives, unequal-temperature conduction, loaded elastic thermal response, immediate source mu(T) feedback, separate torsional work, rollback and replay. The normal patch is fixed; rolling kinematics are prescribed, with original constant coefficients and their domains. No mean surface temperature or new empirical law is invented. Endpoint composition is first order; synthetic fixtures do not establish measured calibration or full Euler coupling.
 
 This wrapper uses the prescribed-partition contact entrypoint. The separate conductance-resolved routing API is preserved; it is not automatically substituted for either declared rolling or microslip partition.
+
+
+### Inertial motion with retained finite-caloric microslip
+
+`tribothermal::partial_slip::dynamics::InertialContactPair` advances two translating bodies in a fixed contact tangent plane. Its two outer unknowns are contact impulses [N s]. Every trial reuses the original loaded partial-slip/finite-enthalpy candidate at actual midpoint relative travel, preserving strains, kinetic branches, pinned friction sources and thermal history. Equal and opposite impulses update both momenta; exterior forces do work on each actual displacement. Midpoint kinetic work introduces no fictitious kinetic heat. Native backward-Euler spring dissipation remains a separate numerical account.
+
+Each moving body occupies one complete finite caloric cell. Optional original `ResolvedBody` bindings retain source density/geometry and must match ordered material, total mass and volume; heating never replaces mass or momentum. Independent momentum, native wrench/travel, kinetic-work and full `delta(K+U_contact+H)+D_numerical-W_external-Q_external` gates precede atomic publication. Late source refusal, work exhaustion and cancellation preserve both histories.
+
+The normal patch/load and tangent frame remain fixed. Rotations, moving thermal footprints and changing normal geometry are outside this rung. Elastic sticking retains finite shear compliance and can have relative motion; event-exact Coulomb arrest is not claimed. Endpoint contact/thermal composition is first order and requires refinement. Five focused analytical reference groups cover planar inertia/force work, source mass and mu(T) feedback, reciprocal stiffness/heat/inertia, loaded elastic reversal with 24/48/96-step refinement, and refusal/replay. Sources are authored references, not measured validation.
+
+This motion wrapper uses the prescribed-partition contact entrypoint. The separate conductance-resolved route remains available through its original API and is not implicitly substituted here.

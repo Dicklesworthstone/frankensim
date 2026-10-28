@@ -906,3 +906,6 @@ fn difference_error<E>(e: FiniteDifferenceError<CaloricContactError<E>>) -> Calo
 
 /// Original rolling loss and retained microslip in one finite thermal solve.
 pub mod rolling;
+
+/// Inertial body motion with retained microslip and finite thermal feedback.
+pub mod dynamics;

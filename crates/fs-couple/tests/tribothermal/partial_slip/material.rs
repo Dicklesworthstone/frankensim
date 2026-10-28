@@ -375,3 +375,6 @@ mod resolved;
 
 #[path = "rolling.rs"]
 mod rolling;
+
+#[path = "dynamics.rs"]
+mod dynamics;
