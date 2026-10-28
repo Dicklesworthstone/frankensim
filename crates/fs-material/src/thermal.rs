@@ -11,6 +11,8 @@ pub mod interface;
 /// Original caloric charts restricted to their actual all-solid phase interval.
 pub mod solid;
 pub use solid::PureSolidThermalLaw;
+/// Integrated temperature-dependent conduction through finite planar layers.
+pub mod conduction;
 
 use crate::phase::EquilibriumEnthalpyPhaseCurve;
 use fs_thermal::enthalpy::{DepositionError, ThermalLaw};
