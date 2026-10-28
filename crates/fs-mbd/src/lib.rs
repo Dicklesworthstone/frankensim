@@ -40,6 +40,8 @@ pub mod roomba;
 pub mod salisbury;
 /// Ballistic sphere/plane impacts, sustained support, sliding, and rolling.
 pub mod sphere_plane;
+/// Complete finite-mass sphere-pair flight, frictional impact, and recoil.
+pub mod sphere_pair;
 pub mod tri_wheel_cluster;
 pub mod versatran;
 

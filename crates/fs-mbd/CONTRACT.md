@@ -773,3 +773,28 @@ constant-force integration, burnout, split steps, tiny burns, frame changes
 and Galilean invariance. The module supplies no attitude, atmosphere,
 aerodynamic coefficients, staging or accuracy guarantee for forcing that
 changes within a step.
+
+## Complete finite-mass two-sphere trajectories
+
+`sphere_pair::advance_sphere_pair` advances two original rigid-body states
+through their earliest sphere contact and the entire remaining duration. Both
+bodies have finite, possibly unequal masses/radii, physically enclosed isotropic
+inertia and arbitrary spin. Their applied acceleration is the same constant
+world vector. Relative flight is linear, so the shared swept-sphere detector
+and a nonclosing accepted impact require at most one event and two analytic
+flight phases. Torque-free attitudes use exact exponentials without substeps.
+
+The adapter supplies both bodies' translational and rotational effective mass
+to the existing normal and Coulomb owners. Equal and opposite impulses act at
+the actual facing surface points. Actual endpoint velocities, relative impulse
+work, total linear momentum, orbital-plus-spin angular momentum, applied-force
+work, mechanical loss and final separation are independently admitted before a
+complete result is returned. New initial overlap refuses; positions are never
+snapped together, and cancellation returns no partial state.
+
+Focused physical tests cover unequal-mass restitution, two-tangent spin/friction
+recoil, interior crossings, noncollision, common-acceleration and frame/velocity
+covariance, and atomic refusals. This is a floating analytic two-body lane with
+equal static/kinetic Coulomb coefficients, not a many-body contact network,
+unequal-acceleration detector, compliant/adhesive model, anisotropic solver,
+rolling-resistance model or automatic heat allocation.
