@@ -22,6 +22,8 @@ use crate::CS2;
 
 mod sgs;
 pub use sgs::{BoundarySgsError3, BoundarySgsReport3};
+mod profile;
+pub use profile::{BoundaryProfileError3, InletFlux3, VelocityProfileReport3};
 
 /// Bit-semantics version for the D3Q19 boundary surface.
 ///
@@ -549,6 +551,9 @@ pub struct BoundaryGrid3 {
     /// topology is immutable from then on, so the per-step pass visits only
     /// these cells instead of scanning the whole grid.
     open_cells: Option<Vec<([usize; 3], [usize; 3], Face3)>>,
+    /// Explicit spatial velocity traces, sampled outside the lattice step.
+    /// Each face owns two reusable plane buffers for atomic profile updates.
+    velocity_profiles: [Option<profile::ProfileState3>; 6],
 }
 
 /// Lattice tiles per pooled kernel tile (512 cells).
@@ -716,6 +721,7 @@ impl BoundaryGrid3 {
             next: None,
             force_field: None,
             open_cells: None,
+            velocity_profiles: core::array::from_fn(|_| None),
         };
         let (wall_masks, open_masks, stationary_masks) = grid.compile_link_masks(&grid.solid);
         grid.link_masks = wall_masks;
@@ -1752,7 +1758,10 @@ impl BoundaryGrid3 {
             let (neighbor_rho, neighbor_velocity, stress) =
                 self.regularized_source(interior[0], interior[1], interior[2]);
             let (rho, velocity) = match self.boundaries.face(face) {
-                FaceBoundary3::Velocity { velocity } => (neighbor_rho, velocity),
+                FaceBoundary3::Velocity { velocity } => (
+                    neighbor_rho,
+                    self.profile_velocity(face, [x, y, z]).unwrap_or(velocity),
+                ),
                 FaceBoundary3::Pressure { density } => (density, neighbor_velocity),
                 FaceBoundary3::Periodic | FaceBoundary3::Wall { .. } => unreachable!(),
             };

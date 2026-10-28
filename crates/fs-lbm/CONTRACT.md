@@ -1190,6 +1190,34 @@ Couette and quadratic inlet gradients, force-frame consistency, actual
 SGS wall loads and worker-count identity, plus refusal/retry behavior. These
 are focused integration regressions, not a turbulent-flow validation campaign.
 
+### Spatial and evolving D3Q19 inlet velocity
+
+`BoundaryGrid3::set_velocity_profile` samples an explicit vector trace on an
+existing velocity face in canonical z/y/x order. Coordinates are lattice-node
+indices; the caller owns physical units, time and the coherent incident field.
+The same accepted trace feeds the original open-population reconstruction in
+ordinary, pooled and SGS steps. Sampling does not advance populations; the
+trace supplies the next boundary endpoint. Uniform face specifications remain
+the fallback, and `clear_velocity_profile` restores them.
+
+`InletFlux3::MeanNormal` applies one uniform normal correction to attain a
+declared signed outward-normal mean velocity (inflow is negative on either
+end). Tangential components are unchanged. This constrains the prescribed
+volumetric velocity trace, not density-weighted or reconstructed population
+mass flux. Partially reconstructed wall seams refuse this control. Every raw
+and corrected sample must satisfy the existing velocity bound. Invalid source
+values, geometry, cancellation or callback errors preserve the previous
+complete trace and populations. Two face buffers are reused after admission;
+the first successful profile locks geometry as ordinary stepping does.
+
+`tests/boundary_profiles.rs` covers all six orientations, normal-mean control,
+exact uniform/clear trajectories, coherent evolving serial/pooled SGS input,
+buffer reuse and refusal atomicity. `examples/sgs_spatial_inlet.rs` drives the
+actual WALE boundary step with two advected, divergence-free periodic Fourier
+modes and reports transport, shear dissipation and mass. It demonstrates the
+spatial inlet path; it supplies neither a measured turbulent spectrum nor a
+developed turbulent inflow or a newly qualified transparent outlet.
+
 ### Transient finite-volume momentum and heat
 
 `conjugate::simple_unsteady_with_sgs` and `march_conjugate_with_sgs` select the
