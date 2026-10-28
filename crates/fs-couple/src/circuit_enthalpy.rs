@@ -7,6 +7,9 @@
 //! with circuit midpoint currents and ENDPOINT material coefficients: first-order
 //! coupled accuracy in general, not a second-order or unconditional-stability claim.
 
+/// Entropy of accepted electrical loss, reservoirs and original caloric storage.
+pub mod entropy;
+
 /// Material field/current response coupled to the same finite enthalpy solve.
 pub mod conductivity;
 /// Spatial DC current and local Joule heating on the same finite thermal solve.
@@ -306,6 +309,22 @@ pub(crate) fn coupled_driver_candidate<'m, S, E, D: ThermalDriver>(
     resolve: impl Fn(&DepositionSimulation<'m>, usize) -> Result<DrivenCoefficients<S, D>, CircuitEnthalpyError<E>>,
     cancelled: impl FnMut() -> bool,
 ) -> Result<(DepositionSimulation<'m>, D::Model, CircuitEnthalpyReport<S, D::Step>), CircuitEnthalpyError<E>> {
+    coupled_driver_candidate_entropy_option(thermal, target_s, input, contact_cells,
+        controls, initial_energy_increments_j, resolve, false, cancelled)
+        .map(|(thermal, model, report, _)| (thermal, model, report))
+}
+
+// Final-only entropy follows the same source, loss routing and physical gates.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn coupled_driver_candidate_entropy_option<'m, S, E, D: ThermalDriver>(
+    thermal: &DepositionSimulation<'m>, target_s: f64,
+    input: CircuitEnthalpyInput<'_>, contact_cells: &[contacts::ContactHeatCells],
+    controls: CircuitEnthalpySolve, initial_energy_increments_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'m>, usize) -> Result<DrivenCoefficients<S, D>, CircuitEnthalpyError<E>>,
+    with_entropy: bool,
+    cancelled: impl FnMut() -> bool,
+) -> Result<(DepositionSimulation<'m>, D::Model, CircuitEnthalpyReport<S, D::Step>,
+    Option<entropy::CircuitEntropyAudit>), CircuitEnthalpyError<E>> {
     let cancel = RefCell::new(cancelled);
     let checkpoint = || if (*cancel.borrow_mut())() { Err(DepositionError::Cancelled) } else { Ok(()) };
     checkpoint()?;
@@ -322,7 +341,7 @@ pub(crate) fn coupled_driver_candidate<'m, S, E, D: ThermalDriver>(
         }
     }
     let contact_routes = contacts::admit_routes(thermal, input.circuit, contact_cells, checkpoint)?;
-    cell_driver_candidate(thermal, target_s, controls, initial_energy_increments_j, resolve,
+    cell_driver_candidate_entropy_option(thermal, target_s, controls, initial_energy_increments_j, resolve,
         |driver: &D, dt, check| {
         let account = driver.account();
         let mut powers = BTreeMap::new();
@@ -339,7 +358,7 @@ pub(crate) fn coupled_driver_candidate<'m, S, E, D: ThermalDriver>(
         }
         contacts::deposit(account.contacts, &contact_routes, dt, &mut powers, || check())?;
         Ok(powers)
-    }, || (*cancel.borrow_mut())())
+    }, with_entropy, || (*cancel.borrow_mut())())
 }
 
 fn admit_driver_unknowns<E>(
@@ -384,6 +403,38 @@ pub(crate) fn cell_driver_candidate<'m, S, E, D: ThermalDriver>(
     ),
     CircuitEnthalpyError<E>,
 > {
+    cell_driver_candidate_entropy_option(thermal, target_s, controls,
+        initial_energy_increments_j, resolve, deposit, false, cancelled)
+        .map(|(thermal, model, report, _)| (thermal, model, report))
+}
+
+// Entropy requires no work in Newton stencils or ordinary energy-only calls.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cell_driver_candidate_entropy_option<'m, S, E, D: ThermalDriver>(
+    thermal: &DepositionSimulation<'m>,
+    target_s: f64,
+    controls: CircuitEnthalpySolve,
+    initial_energy_increments_j: &[f64],
+    resolve: impl Fn(
+        &DepositionSimulation<'m>,
+        usize,
+    ) -> Result<DrivenCoefficients<S, D>, CircuitEnthalpyError<E>>,
+    deposit: impl Fn(
+        &D,
+        f64,
+        &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, CircuitEnthalpyError<E>>,
+    with_entropy: bool,
+    cancelled: impl FnMut() -> bool,
+) -> Result<
+    (
+        DepositionSimulation<'m>,
+        D::Model,
+        CircuitEnthalpyReport<S, D::Step>,
+        Option<entropy::CircuitEntropyAudit>,
+    ),
+    CircuitEnthalpyError<E>,
+> {
     let cancel = RefCell::new(cancelled);
     let checkpoint = || if (*cancel.borrow_mut())() { Err(DepositionError::Cancelled) } else { Ok(()) };
     checkpoint()?;
@@ -391,7 +442,8 @@ pub(crate) fn cell_driver_candidate<'m, S, E, D: ThermalDriver>(
     let step = BackwardEulerStep::new(thermal, target_s, checkpoint)?;
     let dt = step.duration_s();
     let trials = Cell::new(0usize);
-    let evaluate = |x: &[f64]| step.evaluate(x, |state| {
+    let evaluate = |x: &[f64], entropy_requested: bool| {
+        let coefficients = |state: &DepositionSimulation<'m>| {
         checkpoint()?;
         if trials.get() >= controls.maximum_circuit_trials { return Err(CircuitEnthalpyError::CircuitBudget); }
         let remaining = controls.maximum_circuit_trials-trials.get();
@@ -413,6 +465,10 @@ pub(crate) fn cell_driver_candidate<'m, S, E, D: ThermalDriver>(
         if coefficients.sources_w.len() > state.cells().len() {
             return Err(CircuitEnthalpyError::Invalid("too many external source cells"));
         }
+        let entropy = if entropy_requested {
+            Some(entropy::SourceSample::new(thermal, state, &powers,
+                &coefficients.sources_w, dt, checkpoint)?)
+        } else { None };
         for (cell, power) in coefficients.sources_w {
             checkpoint()?; finite(power)?;
             if !state.cells().contains_key(&cell) { return Err(CircuitEnthalpyError::Invalid("inactive external source cell")); }
@@ -421,10 +477,16 @@ pub(crate) fn cell_driver_candidate<'m, S, E, D: ThermalDriver>(
         }
         Ok::<_, CircuitEnthalpyError<E>>(StepCoefficients { sources_w: powers,
             conductances_w_k: coefficients.conductances_w_k,
-            payload: (circuit, coefficients.source, deposited) })
-    }, checkpoint);
+            payload: (circuit, coefficients.source, deposited, entropy) })
+        };
+        if entropy_requested {
+            step.evaluate_with_entropy(x, coefficients, checkpoint)
+        } else {
+            step.evaluate(x, coefficients, checkpoint)
+        }
+    };
     let problem = FallibleFiniteDifference::new(step.cell_ids().len(), controls.difference_step_j,
-        |x: &[f64]| evaluate(x).map(|t| t.residual_j().to_vec())).map_err(numerical)?;
+        |x: &[f64]| evaluate(x, false).map(|t| t.residual_j().to_vec())).map_err(numerical)?;
     let construction = NewtonKrylovState::new(&problem, initial_energy_increments_j.to_vec(), controls.newton);
     if let Some(e) = problem.take_failure() { return Err(numerical(e)); }
     let mut solver = construction?;
@@ -434,9 +496,13 @@ pub(crate) fn cell_driver_candidate<'m, S, E, D: ThermalDriver>(
     checkpoint()?;
     if result.progress != SolverRunProgress::Complete { return Err(CircuitEnthalpyError::Interrupted(result.progress)); }
     if !result.report.converged { return Err(CircuitEnthalpyError::NotConverged(result.report)); }
-    let trial = evaluate(&solver.x)?;
+    let trial = evaluate(&solver.x, with_entropy)?;
+    let entropy = trial.payload().3.as_ref().map(|sample| {
+        sample.finish(trial.entropy_audit().ok_or(DepositionError::Arithmetic)?,
+            trial.residual_j(), checkpoint)
+    }).transpose()?;
     let maximum_cell_residual_j = trial.maximum_cell_residual_j();
-    let (next, (candidate, source, deposited_joule_j), audit) = trial.accept(
+    let (next, (candidate, source, deposited_joule_j, _), audit) = trial.accept(
         controls.cell_energy_tolerance_j, controls.thermal_energy_tolerance_j, checkpoint)?;
     let non_electrical_heat_j = finite(audit.external_heat_j - deposited_joule_j)?;
     let account = candidate.account();
@@ -449,5 +515,5 @@ pub(crate) fn cell_driver_candidate<'m, S, E, D: ThermalDriver>(
     let (circuit, electrical) = candidate.into_parts();
     Ok((next, circuit, CircuitEnthalpyReport { electrical, thermal: audit, source, nonlinear: result.report,
             maximum_cell_residual_j, circuit_trials: trials.get(), deposited_joule_j,
-            non_electrical_heat_j, total_energy_residual_j: total }))
+            non_electrical_heat_j, total_energy_residual_j: total }, entropy))
 }
