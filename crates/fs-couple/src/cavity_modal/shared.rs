@@ -12,6 +12,19 @@ use crate::render::schedule::force::coupled::{
 };
 use fs_exec::CancelGate;
 
+/// Circular-neck viscous diffusion, prepared from the actual geometry and gas.
+/// Admission checks sampled complex impedance AND real-loss error against the
+/// existing Bessel owner, not an interval enclosure or a thermal-wall model.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViscousNeckOptions {
+    /// Positive diffusion arms; every arm consumes one mode and one connection.
+    pub poles: usize,
+    /// Angular-frequency accuracy band [rad/s], within the original Nyquist guard.
+    pub band_rad_s: [f64; 2],
+    /// Maximum sampled relative complex and real-loss error, strictly in (0,1).
+    pub maximum_relative_error: f64,
+}
+
 /// One material/geometry-derived modal surface, with its ORIGINAL signed basis.
 /// Source receipts stay with the upstream owner (e.g. MembraneVibration), not
 /// inside the modal time integrator. Positive shapes point out of this cavity.
@@ -43,13 +56,15 @@ pub struct SharedCavityObservation {
 }
 
 /// Original modal components coupled through a single material-gas volume.
-/// Surface order is retained; the free neck is appended last. No frequency
-/// tuning, per-surface gas springs or one-way pressure playback occurs here.
+/// Surface order is retained; the free neck precedes any viscous memory. No
+/// frequency tuning, per-surface gas springs or one-way pressure playback occurs.
 pub struct SharedCavity {
     source: HelmholtzModalCavity,
     system: CoupledModalSystem,
     column: Vec<f64>,
     surface_modes: usize,
+    neck_component: usize,
+    viscous_neck: Option<fs_phs::ZkDiffusive>,
     external: Vec<f64>,
     ports: crate::port_adoption::ModulePorts,
     old_q: Vec<f64>,
@@ -69,15 +84,82 @@ impl SharedCavity {
         config: ModalCouplingConfig,
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
+        Self::new_inner(source, surfaces, sample_rate_hz, neck_initial, neck_budget,
+            config, None, gate)
+    }
+
+    /// Replace the resonance-frozen neck resistance with physical viscous memory.
+    ///
+    /// The source must use `ExteriorMouth`: bore and inner-end inertia are retained
+    /// once, while a separately attached exterior load owns radiation. A cavity
+    /// without that attachment is an explicitly unloaded exterior reference.
+    /// The Poiseuille resistance and positive diffusion arms use the actual bore
+    /// length, excluding end corrections. Each arm `R s/(s+p)` is a dashpot
+    /// connected to a free auxiliary mass `R/p`; the SAME whole-system exponential
+    /// advances its storage and dissipates its slip. No fitted frequency or second
+    /// time integrator is introduced. Histories start at rest, even for a nonzero
+    /// supplied neck velocity (an impulsively established flow).
+    ///
+    /// All auxiliary modes and connections consume the original setup budgets;
+    /// insufficient budgets refuse construction rather than truncate memory.
+    /// This is a linear, lumped, cylindrical viscous neck model: thermal wall
+    /// compliance, distributed propagation and nonlinear flow are not included.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_viscous_neck(
+        source: HelmholtzModalCavity,
+        surfaces: Vec<CavitySurface>,
+        sample_rate_hz: u32,
+        neck_initial: ModalAcousticState,
+        neck_budget: ModalAcousticTimeBudget,
+        config: ModalCouplingConfig,
+        options: ViscousNeckOptions,
+        gate: &CancelGate,
+    ) -> Result<Self, ModalCouplingError> {
+        if gate.is_requested() { return Err(ModalCouplingError::Cancelled); }
+        if source.loss() != CavityNeckLoss::ExteriorMouth {
+            return Err(network_invalid("viscous memory requires an internal-only exterior-mouth neck"));
+        }
+        if options.band_rad_s[1] > core::f64::consts::PI * sample_rate_hz as f64 * config.nyquist_guard_fraction {
+            return Err(network_invalid("viscous neck band exceeds the original Nyquist guard"));
+        }
+        let gas = source.gas();
+        let memory = fs_phs::ZkDiffusive::new(source.geometry().neck_radius_m,
+            gas.density, gas.dynamic_viscosity, gas.gamma, gas.prandtl,
+            options.poles, options.band_rad_s, options.maximum_relative_error)
+            .map_err(ModalCouplingError::Propagation)?;
+        Self::new_inner(source, surfaces, sample_rate_hz, neck_initial, neck_budget,
+            config, Some(memory), gate)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_inner(
+        source: HelmholtzModalCavity,
+        surfaces: Vec<CavitySurface>,
+        sample_rate_hz: u32,
+        neck_initial: ModalAcousticState,
+        neck_budget: ModalAcousticTimeBudget,
+        config: ModalCouplingConfig,
+        viscous_neck: Option<fs_phs::ZkDiffusive>,
+        gate: &CancelGate,
+    ) -> Result<Self, ModalCouplingError> {
         if gate.is_requested() { return Err(ModalCouplingError::Cancelled); }
         if surfaces.is_empty() || surfaces.len()>64 {
             return Err(network_invalid("shared cavity requires 1..=64 moving surfaces"));
         }
         let surface_modes = surfaces.iter().try_fold(0usize, |n,s| n.checked_add(s.model.modes().len()))
             .ok_or_else(||network_invalid("shared cavity mode count overflow"))?;
-        let count = surface_modes.checked_add(1).ok_or_else(||network_invalid("shared cavity mode count overflow"))?;
+        let memory_modes = viscous_neck.as_ref().map_or(0, |m| m.series_terms().len());
+        let physical_count = surface_modes.checked_add(1).ok_or_else(||network_invalid("shared cavity mode count overflow"))?;
+        let count = physical_count.checked_add(memory_modes).ok_or_else(||network_invalid("shared cavity mode count overflow"))?;
         if count>4096 || count>config.max_modes {
             return Err(network_invalid("shared cavity exceeds the original mode budget"));
+        }
+        if memory_modes > 0 && memory_modes + 2 > config.max_connections {
+            return Err(network_invalid("viscous neck exceeds the original connection budget"));
+        }
+        let bore_mass = source.gas().density * source.geometry().neck_length_m * source.neck_area_m2();
+        if viscous_neck.is_some() && (!bore_mass.is_finite() || bore_mass <= 0.0) {
+            return Err(network_invalid("viscous neck bore mass is not representable"));
         }
         let neck_index=surfaces.len();
         let mut charts = Vec::with_capacity(count);
@@ -105,8 +187,13 @@ impl SharedCavity {
                 if let Some(damper)=pair.get(1) {
                     let mut c=vec![0.0;count];
                     c[surface_modes]=damper.left.shapes[0]-damper.right.shapes[0];
+                    let damping = viscous_neck.as_ref().map_or(damper.damping_n_s_m,
+                        |m| bore_mass * m.series_drag_per_s());
+                    if !damping.is_finite() || (viscous_neck.is_some() && damping <= 0.0) {
+                        return Err(network_invalid("viscous neck Poiseuille resistance is not representable"));
+                    }
                     loss=Some(ModalColumnConnection {column:c,stiffness_n_m:damper.stiffness_n_m,
-                        damping_n_s_m:damper.damping_n_s_m,rest_extension_m:damper.rest_extension_m});
+                        damping_n_s_m:damping,rest_extension_m:damper.rest_extension_m});
                 }
             }
             offset=end;models.push(surface.model);
@@ -117,6 +204,30 @@ impl SharedCavity {
         let mut links=vec![ModalColumnConnection {column:column.clone(),
             stiffness_n_m:source.compression_stiffness_n_m(),damping_n_s_m:0.0,rest_extension_m:0.0}];
         if let Some(loss)=loss {links.push(loss);}
+        if let Some(memory) = &viscous_neck {
+            let auxiliary = ModalAcousticTimeModel::try_new_with_free_coordinates(sample_rate_hz,
+                vec![ModalAcousticMode { angular_frequency_rad_s: 0.0, damping_ratio: 0.0,
+                    pressure_per_modal_velocity: C64::ZERO }; memory_modes], neck_budget)
+                .map_err(|source| ModalCouplingError::Component { component: neck_index + 1, source })?;
+            models.push(auxiliary);
+            let neck_shape = det::sqrt(source.neck_mass_kg()).recip();
+            for (i, term) in memory.series_terms().iter().enumerate() {
+                if gate.is_requested() { return Err(ModalCouplingError::Cancelled); }
+                // U = A x_dot: acoustic R maps to mechanical R A². Scaling the
+                // bore's rho L/A by A² gives rho L A, excluding both end loads.
+                let resistance = bore_mass * term.gain_per_s;
+                let mass = resistance / term.rate_per_s;
+                let shape = det::sqrt(mass).recip();
+                if ![resistance, mass, shape].iter().all(|v| v.is_finite() && *v > 0.0) {
+                    return Err(network_invalid("viscous neck diffusion arm is not representable"));
+                }
+                let mut c = vec![0.0; count];
+                c[surface_modes] = neck_shape;
+                c[physical_count + i] = -shape;
+                links.push(ModalColumnConnection { column: c, stiffness_n_m: 0.0,
+                    damping_n_s_m: resistance, rest_extension_m: 0.0 });
+            }
+        }
         let system=CoupledModalSystem::new_with_columns(models,links,config,gate)?;
         let names: Vec<_> = (0..surface_modes)
             .map(|i| format!("surface/generalized/{i}"))
@@ -143,6 +254,8 @@ impl SharedCavity {
             system,
             column,
             surface_modes,
+            neck_component: neck_index,
+            viscous_neck,
             external: vec![0.0; count],
             ports,
             old_q: vec![0.0; count],
@@ -152,8 +265,12 @@ impl SharedCavity {
         if gate.is_requested() {return Err(ModalCouplingError::Cancelled);}
         Ok(result)
     }
-    /// Original coherent gas, geometry, neck inertia, compliance and loss.
+    /// Original coherent gas, geometry, neck inertia, compliance and loss choice.
+    /// `new_with_viscous_neck` replaces this descriptor's frozen resistance in
+    /// the runtime; `neck_viscous_diffusion` exposes the admitted replacement.
     pub fn source(&self)->&HelmholtzModalCavity {&self.source}
+    /// The admitted viscous coefficients and sampled error evidence, if enabled.
+    pub fn neck_viscous_diffusion(&self) -> Option<&fs_phs::ZkDiffusive> { self.viscous_neck.as_ref() }
     /// Original accepted bank; no mutable access that could bypass coupling.
     pub fn network(&self)->&CoupledModalSystem {&self.system}
     /// Number of external surface forces, excluding the appended neck.
@@ -185,6 +302,7 @@ impl SharedCavity {
         if self.source.loss() != CavityNeckLoss::ExteriorMouth
             || self.radiation_neck_port.is_some()
             || source_modes.len() != model.ports
+            || source_modes.iter().any(|&i| i > self.surface_modes)
             || source_modes.iter().filter(|&&i| i == self.surface_modes).count() != 1 {
             return Err(network_invalid("exterior cavity load needs an internal-only neck and exactly one physical neck port"));
         }
@@ -226,7 +344,7 @@ impl SharedCavity {
     /// surface/mode order [N/sqrt(kg)]. Positive EXTERIOR neck pressure [Pa]
     /// acts inward. It is not another internal-pressure drive: that reaction
     /// already comes from the collective compression connection.
-    /// No allocation occurs here. Rejection leaves all accepted states/clock
+    /// Rejection leaves all accepted states/clock
     /// unchanged; scratch forces may be overwritten and are recomputed on retry.
     pub fn step(
         &mut self,
@@ -277,6 +395,7 @@ impl SharedCavity {
                 .components()
                 .iter()
                 .flat_map(|m| m.states())
+                .take(self.surface_modes + 1)
                 .enumerate()
                 .map(|(i, state)| {
                     crate::port_adoption::PortTransfer::work(
@@ -298,7 +417,7 @@ impl SharedCavity {
             if index<self.surface_modes {surface_rate+=self.column[index]*state.velocity_m_sqrt_kg_per_s;}
             index+=1;
         }}
-        let neck=self.system.components().last().expect("admitted neck").states()[0];
+        let neck=self.system.components()[self.neck_component].states()[0];
         let volume=extension*self.source.neck_area_m2();
         let pressure=-(self.source.compression_stiffness_n_m()*extension)/self.source.neck_area_m2();
         let observation=SharedCavityObservation {

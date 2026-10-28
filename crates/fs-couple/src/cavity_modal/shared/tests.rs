@@ -241,3 +241,161 @@ fn shared_cavity_exterior_load_refuses_double_counting_and_preserves_rejected_st
     assert_eq!(cavity.neck_exterior_pressure_pa().unwrap(),pressure);
     assert_eq!(cavity.network().last_frame().unwrap(),&frame);
 }
+
+fn viscous_source() -> HelmholtzModalCavity {
+    HelmholtzModalCavity::new(HelmholtzCavity { volume_m3: 1e-4, neck_radius_m: 0.001,
+        neck_length_m: 0.02, inner_end: fs_scenario::NeckEnd::Flanged,
+        outer_end: fs_scenario::NeckEnd::Flanged },
+        GasState::try_new(&GasSpec::dry_air_ussa1976(),293.15,101325.0).unwrap(),
+        CavityNeckLoss::ExteriorMouth).unwrap()
+}
+
+fn viscous_options() -> ViscousNeckOptions {
+    ViscousNeckOptions { poles: 4, band_rad_s: [10.0, 1000.0], maximum_relative_error: 1e-3 }
+}
+
+fn viscous_cavity(rate: u32, source: HelmholtzModalCavity, config: ModalCouplingConfig,
+    options: ViscousNeckOptions) -> Result<SharedCavity, ModalCouplingError>
+{
+    let surface = ModalAcousticTimeModel::try_new(rate, vec![mode(500.0)],
+        ModalAcousticTimeBudget::audible_reference()).unwrap();
+    SharedCavity::new_with_viscous_neck(source, vec![CavitySurface { model: surface,
+        outward_volume_shapes: vec![0.0] }], rate,
+        ModalAcousticState { displacement_m_sqrt_kg: 0.0, velocity_m_sqrt_kg_per_s: 1e-4 },
+        ModalAcousticTimeBudget::audible_reference(), config, options,
+        &CancelGate::new_clock_free())
+}
+
+fn viscous_budget() -> ModalCouplingConfig {
+    ModalCouplingConfig { max_connections: 6, max_setup_terms: 4096, ..budget() }
+}
+
+#[test]
+fn viscous_neck_impedance_matches_independent_duct_bessel_and_low_shear_inertia() {
+    // G2: the independently implemented duct Bessel wave supplies the acoustic
+    // series impedance; neither thermal shunt nor either end length becomes drag.
+    let cavity = viscous_cavity(48000,viscous_source(),viscous_budget(),viscous_options()).unwrap();
+    let source = cavity.source(); let geometry = source.geometry(); let gas = source.gas();
+    let memory = cavity.neck_viscous_diffusion().unwrap();
+    let area = source.neck_area_m2();
+    let bore_inertia = gas.density * geometry.neck_length_m / area;
+    let total_inertia = source.neck_mass_kg() / (area * area);
+    let poiseuille = 8.0 * gas.dynamic_viscosity * geometry.neck_length_m
+        / (core::f64::consts::PI * geometry.neck_radius_m.powi(4));
+    close(bore_inertia * memory.series_drag_per_s(),poiseuille);
+    let additional_inertia: f64 = memory.series_terms().iter()
+        .map(|t| bore_inertia * t.gain_per_s / t.rate_per_s).sum();
+    close(additional_inertia,bore_inertia/3.0);
+    assert!(additional_inertia > 0.30*total_inertia);
+    for omega in [10.0, 73.0, 250.0, 610.0, 1000.0] {
+        let wave = fs_duct::segment_wave(gas,geometry.neck_radius_m,omega,LossModel::Bessel).unwrap();
+        let minus_i = (C64::new(0.0,-1.0)*wave.wavenumber*wave.characteristic_impedance)
+            .scale(geometry.neck_length_m);
+        let exact = C64::new(minus_i.re,-minus_i.im + omega*(total_inertia-bore_inertia));
+        let actual = memory.response_at(omega).unwrap().0.scale(bore_inertia)
+            + C64::new(0.0,omega*(total_inertia-bore_inertia));
+        assert!((actual-exact).abs()/exact.abs() < 1e-3);
+        assert!((actual.re-exact.re).abs()/exact.re < 1e-3);
+    }
+}
+
+#[test]
+fn viscous_neck_runtime_matches_physical_flow_ode_and_passive_storage() {
+    // G1/G3: integrate the physical volume-flow ODE independently with refined
+    // RK4. The production owner retains the mass-normalized exact exponential.
+    let gate = CancelGate::new_clock_free();
+    let mut cavity = viscous_cavity(48000,viscous_source(),viscous_budget(),viscous_options()).unwrap();
+    let source = cavity.source().clone(); let area = source.neck_area_m2();
+    let bore = source.gas().density*source.geometry().neck_length_m/area;
+    let inertia = source.neck_mass_kg()/(area*area);
+    let stiffness = source.compression_stiffness_n_m()/(area*area);
+    let memory = cavity.neck_viscous_diffusion().unwrap().clone();
+    let drag = bore*memory.series_drag_per_s();
+    let terms = memory.series_terms();
+    let mut x = vec![0.0;2+terms.len()]; // cavity volume, physical neck U, arm U_j
+    x[1] = cavity.observe().unwrap().neck_outflow_m3_s;
+    let initial = cavity.network().total_energy_j().unwrap();
+    let (mut loss,mut work) = (0.0,0.0);
+    let derivative = |x: &[f64], pressure: f64| {
+        let mut d = vec![0.0;x.len()]; d[0] = x[1];
+        d[1] = (-stiffness*x[0]-drag*x[1]-pressure)/inertia;
+        for (i,term) in terms.iter().enumerate() {
+            let slip = x[1]-x[2+i];
+            d[1] -= bore*term.gain_per_s*slip/inertia;
+            d[2+i] = term.rate_per_s*slip;
+        }
+        d
+    };
+    for tick in 0..128 {
+        let pressure = if tick<16 {0.02} else {0.0};
+        let dt = (48000.0*16.0_f64).recip();
+        for _ in 0..16 {
+            let k1=derivative(&x,pressure);
+            let stage = |k: &[f64], scale: f64| x.iter().zip(k).map(|(x,k)|x+dt*scale*k).collect::<Vec<_>>();
+            let k2=derivative(&stage(&k1,0.5),pressure);
+            let k3=derivative(&stage(&k2,0.5),pressure);
+            let k4=derivative(&stage(&k3,1.0),pressure);
+            for i in 0..x.len() {x[i]+=dt*(k1[i]+2.0*k2[i]+2.0*k3[i]+k4[i])/6.0;}
+        }
+        let frame=cavity.step(&[0.0],pressure,&gate).unwrap().clone();
+        let observed=cavity.observe().unwrap();
+        assert!((observed.neck_outflow_m3_s-x[1]).abs()<1e-14);
+        assert!((observed.volume_change_m3-x[0]).abs()<1e-16);
+        let mut physical_energy=0.5*(inertia*x[1]*x[1]+stiffness*x[0]*x[0]);
+        for (i,term) in terms.iter().enumerate() {
+            let arm_inertia=bore*term.gain_per_s/term.rate_per_s;
+            physical_energy+=0.5*arm_inertia*x[i+2]*x[i+2];
+            let actual=cavity.network().components()[2].states()[i].velocity_m_sqrt_kg_per_s
+                /det::sqrt(arm_inertia);
+            assert!((actual-x[i+2]).abs()<1e-14);
+        }
+        close(frame.total_energy_j(),physical_energy);
+        assert!(frame.total_dissipation_j()>=0.0);
+        assert!(frame.energy_residual_j.abs()<=frame.energy_tolerance_j);
+        loss+=frame.total_dissipation_j();work+=frame.external_work_j;
+        assert_eq!(cavity.ports.schemas.len(),2);
+        assert_eq!(cavity.ports.transfers().unwrap().len(),2);
+    }
+    close(cavity.network().total_energy_j().unwrap()+loss,initial+work);
+    assert!(loss>0.0);
+    assert!(cavity.network().components()[2].states().iter().any(|s|s.velocity_m_sqrt_kg_per_s!=0.0));
+}
+
+#[test]
+fn viscous_memory_composes_with_radiation_and_rejects_hidden_ports_or_underbudgeting() {
+    use crate::render::plate::impact::radiation::Pole;
+    let gate=CancelGate::new_clock_free();
+    let create=|rate|viscous_cavity(rate,viscous_source(),viscous_budget(),viscous_options()).unwrap();
+    let load=RadiationModel {ports:1,poles:vec![Pole {omega:700.0,zeta:0.1,coupling:vec![20000.0]}]};
+    let mut whole=create(48000).with_exterior_radiation(&load,&[1],1,&gate).unwrap();
+    let mut half=create(96000).with_exterior_radiation(&load,&[1],1,&gate).unwrap();
+    for _ in 0..16 {
+        let full=whole.step(&[0.0],0.03,&gate).unwrap().clone();
+        let first=half.step(&[0.0],0.03,&gate).unwrap().clone();
+        let second=half.step(&[0.0],0.03,&gate).unwrap().clone();
+        for (a,b) in whole.network().components().iter().zip(half.network().components()) {
+            for (a,b) in a.states().iter().zip(b.states()) {
+                close(a.displacement_m_sqrt_kg,b.displacement_m_sqrt_kg);
+                close(a.velocity_m_sqrt_kg_per_s,b.velocity_m_sqrt_kg_per_s);
+            }
+        }
+        close(full.total_dissipation_j(),first.total_dissipation_j()+second.total_dissipation_j());
+        close(whole.neck_exterior_pressure_pa().unwrap(),half.neck_exterior_pressure_pa().unwrap());
+    }
+    let state:Vec<_>=whole.network().components().iter().map(|m|m.states().to_vec()).collect();
+    let frame=whole.network().last_frame().unwrap().clone();
+    let acoustic=whole.network().radiation_state().to_vec();
+    let cancelled=CancelGate::new_clock_free();cancelled.request();
+    assert!(matches!(whole.step(&[0.0],0.0,&cancelled),Err(ModalCouplingError::Cancelled)));
+    assert!(whole.step(&[0.0],1e30,&gate).is_err());
+    assert_eq!(whole.network().last_frame().unwrap(),&frame);
+    assert_eq!(whole.network().radiation_state(),acoustic);
+    for (m,expected) in whole.network().components().iter().zip(state) {assert_eq!(m.states(),expected);}
+    let hidden=RadiationModel {ports:2,poles:vec![Pole {omega:700.0,zeta:0.1,coupling:vec![1.0,1.0]}]};
+    assert!(create(48000).with_exterior_radiation(&hidden,&[1,2],1,&gate).is_err());
+    assert!(viscous_cavity(48000,source(101325.0),viscous_budget(),viscous_options()).is_err());
+    assert!(viscous_cavity(48000,viscous_source(),budget(),viscous_options()).is_err());
+    assert!(viscous_cavity(48000,viscous_source(),ModalCouplingConfig {max_modes:5,..viscous_budget()},viscous_options()).is_err());
+    assert!(viscous_cavity(48000,viscous_source(),viscous_budget(),
+        ViscousNeckOptions {band_rad_s:[10.0,1e6],..viscous_options()}).is_err());
+}

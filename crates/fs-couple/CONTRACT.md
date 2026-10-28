@@ -64,6 +64,20 @@ step preservation are tested in `cavity_modal::shared::tests`. Geometry/band
 validity of the supplied impedance remains with its producer; this composition
 does not claim a new BEM fit, distributed neck field or experimental validation.
 
+`SharedCavity::new_with_viscous_neck` replaces the frozen internal neck
+resistance with the existing positive `ZkDiffusive` circular-bore law:
+Poiseuille drag plus passive `R s/(s+p)` arms, represented by free auxiliary
+masses in the same coupled exponential. Only actual bore length contributes
+viscous drag and storage; inviscid bore and inner-end inertia remain counted
+once, and `ExteriorMouth` radiation can be attached separately. Auxiliary
+states consume the original mode, connection and work budgets, retain their
+kinetic storage, receive no external port or radiation column, and participate
+in accepted-state rollback. `ViscousNeckOptions` declares the sampled Bessel
+accuracy band and error budget. This does not claim thermal wall compliance,
+distributed neck propagation, nonlinear flow, measured fit accuracy or realtime
+throughput. Tests compare independent duct Bessel impedance, a physical-flow
+RK4 reference, energy balance and exact timestep partition.
+
 ### Accelerating material-fiber supports
 
 `MultiBowPerformance::with_fiber_support_program` supplies declared continuous
