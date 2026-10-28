@@ -17,8 +17,8 @@ use fs_conduction::enthalpy::{
 /// Finite source-bound solid cells exchanging heat with native stationary walls.
 pub mod body;
 pub use body::{
-    FreeSurfaceBodyContact, FreeSurfaceBodyContactSample, FreeSurfaceBodyExchange,
-    FreeSurfaceThermalBody,
+    FreeSurfaceBodyConductionSample, FreeSurfaceBodyContact, FreeSurfaceBodyContactSample,
+    FreeSurfaceBodyExchange, FreeSurfaceBodyLink, FreeSurfaceThermalBody,
 };
 /// Source-resolved gas-film exchange on explicitly exposed liquid faces.
 pub mod environment;
@@ -143,6 +143,9 @@ struct Conduction<'a, 'm> {
     body_last: Vec<FreeSurfaceBodyContactSample>,
     body_endpoint: Vec<FreeSurfaceBodyContactSample>,
     body_states_endpoint: Vec<ResolvedMaterialStatePoint>,
+    solid_links: Vec<(FreeSurfaceBodyLink, [usize; 2])>,
+    solid_last: Vec<FreeSurfaceBodyConductionSample>,
+    solid_endpoint: Vec<FreeSurfaceBodyConductionSample>,
     environment: &'a [FreeSurfaceGasContact<'a>],
     environment_endpoints: Vec<CellId>,
     environment_last: Vec<FreeSurfaceGasSample>,
@@ -175,6 +178,7 @@ struct Samples {
     liquid: Vec<FreeSurfaceConductionSample>,
     contacts: Vec<FreeSurfaceBodyContactSample>,
     bodies: Vec<ResolvedMaterialStatePoint>,
+    solids: Vec<FreeSurfaceBodyConductionSample>,
 }
 
 impl Conduction<'_, '_> {
@@ -283,10 +287,30 @@ impl Conduction<'_, '_> {
                 conductance_w_k,
             });
         }
+        let mut solids = Vec::with_capacity(self.solid_links.len());
+        for &(link, [a, b]) in &self.solid_links {
+            check()?;
+            let materials = [bodies[a].clone(), bodies[b].clone()];
+            let conductance_w_k = series_conductance_w_k(
+                link.area_m2,
+                link.distances_m,
+                [
+                    self.bodies[a].conductivity(&materials[0]),
+                    self.bodies[b].conductivity(&materials[1]),
+                ],
+            )?;
+            solids.push(FreeSurfaceBodyConductionSample {
+                body_id: self.bodies[a].id(),
+                link,
+                materials,
+                conductance_w_k,
+            });
+        }
         Ok(Samples {
             liquid: samples,
             contacts,
             bodies,
+            solids,
         })
     }
 }
@@ -360,6 +384,7 @@ impl DepositionObserver for Conduction<'_, '_> {
         let samples = self.sample(thermal, check)?;
         self.last = samples.liquid;
         self.body_last = samples.contacts;
+        self.solid_last = samples.solids;
         let mut values: BTreeMap<_, _> = self
             .last
             .iter()
@@ -368,6 +393,12 @@ impl DepositionObserver for Conduction<'_, '_> {
             .collect();
         for (i, sample) in self.body_last.iter().enumerate() {
             values.insert((self.faces.len() + i) as u64, sample.conductance_w_k);
+        }
+        for (i, sample) in self.solid_last.iter().enumerate() {
+            values.insert(
+                (self.faces.len() + self.contacts.len() + i) as u64,
+                sample.conductance_w_k,
+            );
         }
         Ok(values)
     }
@@ -394,6 +425,7 @@ impl DepositionObserver for Conduction<'_, '_> {
         self.endpoint = samples.liquid;
         self.body_endpoint = samples.contacts;
         self.body_states_endpoint = samples.bodies;
+        self.solid_endpoint = samples.solids;
         if let Some(endpoint) = self.sample_current(thermal, check)? {
             self.electrical.as_mut().expect("bound electrical core")
                 .accept(start_s, duration_s, endpoint)?;
@@ -628,6 +660,21 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 "invalid liquid-conduction work or time/energy bounds",
             ));
         }
+        let other_faces = faces.len()
+            .saturating_add(contacts.len())
+            .saturating_add(environment.len())
+            .saturating_add(radiation.len())
+            .saturating_add(surfaces.len());
+        let mut solid_link_count = 0usize;
+        for body in bodies.iter() {
+            poll(gate)?;
+            solid_link_count = solid_link_count.saturating_add(body.conduction_links().len());
+            if other_faces.saturating_add(solid_link_count) > controls.maximum_faces {
+                return Err(Error::Invalid(
+                    "solid conduction exceeds the shared thermal face budget",
+                ));
+            }
+        }
         let mut interface_contacts = BTreeMap::new();
         if interfaces.len() > contacts.len() {
             return Err(Error::Invalid(
@@ -821,6 +868,40 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 }),
             });
         }
+        let mut solid_links = Vec::with_capacity(solid_link_count);
+        let mut solid_pairs = BTreeSet::new();
+        for (a, body) in bodies.iter().enumerate() {
+            for &link in body.conduction_links() {
+                poll(gate)?;
+                let b = *body_by_id.get(&link.other_body_id).ok_or(Error::Invalid(
+                    "solid conduction names an absent finite body",
+                ))?;
+                if a == b
+                    || !link.area_m2.is_finite()
+                    || link.area_m2 < 0.0
+                    || link.distances_m.iter().any(|d| !d.is_finite() || *d <= 0.0)
+                    || !solid_pairs.insert((a.min(b), a.max(b)))
+                {
+                    return Err(Error::Invalid(
+                        "solid conduction needs distinct unique bodies and finite face geometry",
+                    ));
+                }
+                let id = (faces.len() + contacts.len() + solid_links.len()) as u64;
+                solid_links.push((link, [a, b]));
+                // The shared owner checks the sum of solid/solid AND liquid/
+                // solid coverage, including insulating links, on each body.
+                events.push(TimedEvent {
+                    time_s: 0.0,
+                    event: Event::Contact(ThermalLink {
+                        id,
+                        a: body_ids[a],
+                        b: body_ids[b],
+                        area_m2: link.area_m2,
+                        conductance_w_k: 0.0,
+                    }),
+                });
+            }
+        }
         let environment_endpoints = self.admit_environment(environment, &cell_id, dx, gate)?;
         let radiation_endpoints = self.admit_radiation(radiation, &cell_id, dx, gate)?;
         let surface_endpoints = self.admit_surfaces(surfaces, surface_solve, &cell_id, dx, gate)?;
@@ -916,6 +997,9 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             body_last: Vec::new(),
             body_endpoint: Vec::new(),
             body_states_endpoint: Vec::new(),
+            solid_links,
+            solid_last: Vec::new(),
+            solid_endpoint: Vec::new(),
             environment,
             environment_endpoints,
             environment_last: Vec::new(),
@@ -1031,6 +1115,8 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         let body_sources = observer.body_states_endpoint;
         let body_last = observer.body_last;
         let body_endpoint = observer.body_endpoint;
+        let solid_last_applied = observer.solid_last;
+        let solid_thermal_endpoint = observer.solid_endpoint;
         let last_applied = observer.last;
         let thermal_endpoint = observer.endpoint;
         let environment_report = (!environment.is_empty()).then_some(FreeSurfaceGasExchange {
@@ -1074,6 +1160,8 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             combined_balance_defect_j: flow.balance_defect_j,
             last_applied: body_last,
             thermal_endpoint: body_endpoint,
+            solid_last_applied,
+            solid_thermal_endpoint,
         });
         Ok(FreeSurfaceConductionReport {
             thermal: audit,

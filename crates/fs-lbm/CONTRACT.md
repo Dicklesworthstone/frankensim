@@ -128,6 +128,28 @@ temperature, with the initial source claim pinned throughout its lifetime.
 Changing material data changes the actual contact heat, subsequent liquid
 viscosity/buoyancy and native VOF populations.
 
+Finite wall cells may also retain explicit `FreeSurfaceBodyLink` geometry
+through `with_conduction_links`. Each unordered solid pair is declared once,
+with its actual shared area and two thermal-centroid distances. All existing
+finite-wall, environmental and solved-surface entry points use those links.
+The common observer reuses each body's pinned k(T) evaluation to form the
+series bulk conductance; the original thermal owner applies equal and opposite
+pair heat and includes every solid link in its capacity-based time-step bound.
+Solid/solid and liquid/solid patches share each body's surface-area budget.
+Missing/duplicate/self links, invalid geometry and work-budget excess refuse.
+
+This permits nonuniform temperature and heat spreading through a discretized
+wall without a second thermal integrator. Each cell retains its original mass,
+caloric chart and solid-phase gate. Solid-internal exchange cancels from the
+reported wall-to-liquid heat; applied and endpoint samples retain both original
+material sources. All endpoint and native-flow refusals still publish none of
+the liquid, wall or gas candidates. Body geometry is explicitly supplied and
+fixed; perfect solid/solid thermal contact is the declared approximation.
+Spatial/contact resolution and finite-volume accuracy remain caller obligations.
+G1/G4 tests in `tests/material_free_surface_enthalpy/conduction/body/network.rs`
+check independent three-store heat spreading, conductance-limited substeps,
+combined energy, surface coverage, source-domain refusal and atomic rollback.
+
 Explicit `FreeSurfaceBodyContact` patches must join a positive liquid cell to
 a face-adjacent permanent solid tile or outer domain wall. Inactive gas tiles
 cannot become thermal solids. Contact area, liquid/solid centroid distances

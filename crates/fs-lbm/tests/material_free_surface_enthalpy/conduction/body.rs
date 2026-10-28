@@ -1,5 +1,8 @@
 //! G1/G3/G4: two finite material stores share heat, source feedback and rollback.
 
+#[path = "body/network.rs"]
+mod network;
+
 use super::*;
 use fs_conduction::enthalpy::CellGeometry;
 use fs_lbm::material::free_surface::enthalpy::conduction::{

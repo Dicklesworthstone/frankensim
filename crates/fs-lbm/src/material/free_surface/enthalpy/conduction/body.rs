@@ -33,6 +33,33 @@ pub struct FreeSurfaceThermalBody<'m> {
     requirement: ScalarPropertyRequirement,
     selection: MaterialPropertySelection,
     material: ResolvedMaterialStatePoint,
+    conduction_links: Vec<FreeSurfaceBodyLink>,
+}
+
+/// One declared solid/solid face, owned by the cell on its first side.
+///
+/// Declare each unordered body pair ONCE, on either participant. The two
+/// distances follow owner/neighbor order. Both cells retain finite storage;
+/// scalar half-cell resistances are in series with zero contact resistance.
+/// Actual face area and centroid geometry are explicit caller data. The
+/// complete timeline checks both surface-coverage budgets before advancing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FreeSurfaceBodyLink {
+    /// Stable identity of the other finite solid cell in the same step.
+    pub other_body_id: u64,
+    pub area_m2: f64,
+    /// Positive owner and neighbor centroid-to-face distances [m].
+    pub distances_m: [f64; 2],
+}
+
+/// Source data actually used by one finite solid/solid conduction link.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FreeSurfaceBodyConductionSample {
+    pub body_id: u64,
+    pub link: FreeSurfaceBodyLink,
+    /// Original pinned conductivity sources, in owner/neighbor order.
+    pub materials: [ResolvedMaterialStatePoint; 2],
+    pub conductance_w_k: f64,
 }
 
 /// One explicitly resolved wetted patch on a native stationary wall.
@@ -83,6 +110,11 @@ pub struct FreeSurfaceBodyExchange {
     pub last_applied: Vec<FreeSurfaceBodyContactSample>,
     /// Supported source/conductance samples at the thermal endpoint.
     pub thermal_endpoint: Vec<FreeSurfaceBodyContactSample>,
+    /// Finite solid/solid links used by the last thermal substep. Their heat is
+    /// internal to solid storage and does not enter `heat_to_liquid_j`.
+    pub solid_last_applied: Vec<FreeSurfaceBodyConductionSample>,
+    /// The same links reevaluated at the accepted thermal endpoint.
+    pub solid_thermal_endpoint: Vec<FreeSurfaceBodyConductionSample>,
 }
 
 impl<'m> FreeSurfaceThermalBody<'m> {
@@ -150,6 +182,7 @@ impl<'m> FreeSurfaceThermalBody<'m> {
             requirement,
             selection,
             material,
+            conduction_links: Vec::new(),
         };
         // The common owner admits geometry, extensive storage and the actual
         // borrowed caloric law; there is no separate wall thermal integrator.
@@ -181,6 +214,26 @@ impl<'m> FreeSurfaceThermalBody<'m> {
     pub const fn id(&self) -> u64 {
         self.id
     }
+    /// Attach explicit solid/solid geometry without changing accepted storage.
+    ///
+    /// Each pair must be declared only once, on either of its two bodies.
+    /// Every neighbor must be supplied alongside this body on EACH subsequent
+    /// thermal step. Full graph, geometry, surface coverage and work-budget
+    /// admission happens on that common timeline; invalid data cannot advance
+    /// liquid, solid or gas history. Empty links retain isolated-cell behavior.
+    /// All existing finite-wall and surface-exchange entry points use these
+    /// links, including finite-gas and thermocapillary coupling.
+    #[must_use]
+    pub fn with_conduction_links(mut self, links: Vec<FreeSurfaceBodyLink>) -> Self {
+        self.conduction_links = links;
+        self
+    }
+
+    /// Explicit outgoing geometry, with the owning cell on the first side.
+    pub fn conduction_links(&self) -> &[FreeSurfaceBodyLink] {
+        &self.conduction_links
+    }
+
     /// Fixed mass from the original chart density and cell volume [kg].
     pub const fn mass_kg(&self) -> f64 {
         self.mass_kg
