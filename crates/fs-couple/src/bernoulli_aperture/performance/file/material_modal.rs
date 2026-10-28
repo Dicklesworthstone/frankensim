@@ -38,6 +38,15 @@
 //! acoustic traction and swept volume, including full material-loss histories.
 //! Omission retains whole positive-side exposure; an explicit empty selection
 //! shelters a blade from this acoustic pressure port without removing mechanics.
+//!
+//! `supply circular LENGTH_M RADIUS_M RADIAL_CELLS` selects a fixed cylindrical
+//! no-slip passage instead of `supply slit LENGTH_M WIDTH_M HEIGHT_M CELLS`.
+//! Both retain the same material-gas finite-volume momentum and work owner,
+//! with their actual section measures. The channel's flow inertia and shear
+//! feed back into both reeds and both ducts in the original accepted step.
+//! The fully developed laminar incompressible passage is additional geometry;
+//! it must not also be represented in either acoustic network. Taper, entrance
+//! development and compressibility require other physical models.
 /// Material modal mechanics bound to the shared exact DG bore and source clock.
 pub mod dg;
 
@@ -60,7 +69,8 @@ use crate::bernoulli_aperture::performance::AperturePerformanceConfig;
 use crate::bernoulli_aperture::radiation::environment::BaffledOutletBinding;
 use crate::bernoulli_aperture::radiation::environment::multiport::input::MimoRadiationRecord;
 use crate::bernoulli_aperture::radiation::environment::multiport::source::ComputedBaffledRecord;
-use crate::bernoulli_aperture::slit_channel::{SlitChannel, SlitChannelSpec, SlitExit};
+use crate::bernoulli_aperture::slit_channel::{FixedChannel, SlitChannel, SlitChannelSpec, SlitExit};
+use crate::bernoulli_aperture::slit_channel::circular::{CircularChannel, CircularChannelSpec};
 use crate::bernoulli_aperture::two_sided::{TwoSidedLimits, ValveSide, combined_inlet_state};
 use crate::bernoulli_aperture::two_sided::supply::combined_inlet_state_with_supply;
 use crate::bernoulli_aperture::two_sided::observer::TwoSidedPressure;
@@ -231,8 +241,12 @@ impl MaterialModalValvePerformance {
             "slit" => Some(SlitChannel::from_gas(&inlet, SlitChannelSpec {
                 length_m: row.scalar()?, width_m: row.scalar()?, height_m: row.scalar()?,
                 transverse_cells: row.count(4096)?, sample_period_s: dt, exit: SlitExit::StaticPressure,
-            }).map_err(PlateValveInputError::Physics)?),
-            _ => return Err(bad(row.line, "supply must be none or slit LENGTH WIDTH HEIGHT CELLS")),
+            }).map_err(PlateValveInputError::Physics)?.into()),
+            "circular" => Some(CircularChannel::from_gas(&inlet, CircularChannelSpec {
+                length_m: row.scalar()?, radius_m: row.scalar()?, radial_cells: row.count(4096)?,
+                sample_period_s: dt, exit: SlitExit::StaticPressure,
+            }).map_err(PlateValveInputError::Physics)?.into()),
+            _ => return Err(bad(row.line, "supply must be none, slit LENGTH WIDTH HEIGHT CELLS or circular LENGTH RADIUS CELLS")),
         };
         row.finish()?;
         if let Some(channel) = &channel {

@@ -12,6 +12,34 @@ const INPUT: &str = include_str!("../../examples/material_modal_valve/paired-mut
 const ARTIFACT: &str = include_str!("../../examples/material_modal_valve/mutual.radiation");
 
 #[test]
+fn circular_supply_reaches_cli_pcm_and_geometry_metadata_without_an_instrument_solver() {
+    let dir = directory();
+    let text = include_str!("../../examples/material_modal_valve/paired.performance")
+        .replace("audio 768000 48000 2400 0.005", "audio 768000 48000 512 0.005")
+        .replace("supply none", "supply circular 0.02 0.0005 32");
+    let input = dir.join("circular-supply.performance");
+    let material = pack();
+    std::fs::write(&input, &text).unwrap();
+    std::fs::write(dir.join("blade.matpack"), material.to_bytes()).unwrap();
+    let source = MaterialModalValvePerformance::from_bytes_with_sources(text.as_bytes(), 37,
+        &CancelGate::new_clock_free(), None, |_| Ok(material.clone())).unwrap();
+    let mut source = source.into_renderer();
+    let mut pressure = vec![0.0; 512];
+    for block in pressure.chunks_mut(37) { source.block(block).unwrap(); }
+    let expected = encode_pcm16_wav(&pressure, 48000, 0.005).unwrap().0;
+    assert!(pressure.iter().any(|p| p.abs() > 1e-15));
+    for block in [1, 37] {
+        let output = dir.join(format!("circular-supply-{block}.wav"));
+        success(run(&input, &output, block, false));
+        assert_eq!(std::fs::read(&output).unwrap(), expected);
+        let metadata = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
+        for token in ["\"kind\":\"circular\"", "\"radius_m\":5e-4", "\"radial_cells\":32"] {
+            assert!(metadata.contains(token), "missing {token}: {metadata}");
+        }
+    }
+}
+
+#[test]
 fn material_key_file_reaches_actual_wav_through_the_existing_reed_renderer() {
     let dir = directory();
     let text = include_str!("../../examples/material_modal_valve/paired-keyed.performance")

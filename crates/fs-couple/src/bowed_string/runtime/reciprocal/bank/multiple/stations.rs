@@ -10,7 +10,7 @@ use super::*;
 use crate::render::RenderError;
 use crate::render::schedule::force::coupled::contact::friction::multiple::{
     obstacles::geometry::ObstacleGeometry,
-    surfaces::geometry::{FrictionGeometry, FrictionGeometryConfig},
+    surfaces::geometry::{FrictionEndpointGeometry, FrictionGeometry, FrictionGeometryConfig},
 };
 
 /// Physical and numerical admission of prescribed longitudinal bow motion.
@@ -42,8 +42,9 @@ impl BowStationMotionLimits {
 }
 
 pub(super) struct BowStationState {
-    accepted: Vec<f64>,
-    limits: BowStationMotionLimits,
+    pub(super) accepted: Vec<f64>,
+    pub(super) limits: BowStationMotionLimits,
+    pub(super) fiber_support: Option<ribbon::motion::FiberSupportState>,
 }
 
 fn error(what: &'static str) -> ModalFrictionError {
@@ -106,11 +107,12 @@ impl MultiBowStringBank {
                 .map(|b| b.location.station_fraction)
                 .collect(),
             limits,
+            fiber_support: None,
         });
         Ok(self)
     }
 
-    fn admit_bow_station_sources(&self) -> Result<(), ModalFrictionError> {
+    pub(super) fn admit_bow_station_sources(&self) -> Result<(), ModalFrictionError> {
         for port in 0..self.source.bows.len() {
             if self.system.contact_normal_load(port).is_some() {
                 return Err(error(
@@ -229,12 +231,15 @@ impl MultiBowStringBank {
             .as_ref()
             .ok_or_else(|| error("bow station motion has not been admitted"))?;
         let end = stations.unwrap_or(&state.accepted);
-        if end.len() != self.source.bows.len() {
+        if end.len() != self.source.bows.len() || drives.len() != self.source.bows.len() {
             return Err(error(
-                "bow migration needs one station per original contact",
+                "bow migration needs one station and drive per original contact",
             ));
         }
         let limits = state.limits;
+        let support = state.fiber_support.as_ref()
+            .map(|motion| motion.prepare(&self.source, &self.system, external, drives, gate))
+            .transpose()?;
         for ((&end, &start), bow) in end.iter().zip(&state.accepted).zip(&self.source.bows) {
             let distance = (end - start) * self.cards[bow.location.string].length_m;
             let speed = distance / self.system.sample_period_s();
@@ -256,6 +261,8 @@ impl MultiBowStringBank {
         // binding. After a move it also replaces the previous midpoint map by
         // the accepted endpoint, without altering vibration or material memory.
         let mut geometry = Vec::with_capacity(end.len());
+        let mut endpoints = (0..end.len()).any(|port| self.system.interface(port).is_some())
+            .then(|| Vec::with_capacity(end.len()));
         for (i, ((&end, &start), bow)) in end
             .iter()
             .zip(&state.accepted)
@@ -275,30 +282,52 @@ impl MultiBowStringBank {
                 .source
                 .surface_shape(&self.cards[string], station)
                 .map_err(source_error)?;
+            if let Some(endpoints) = &mut endpoints {
+                let left = |station| self.source.bank.strings[string].source
+                    .surface_shape(&self.cards[string], station)
+                    .map(|shapes| ModalAttachment { component: string, shapes })
+                    .map_err(source_error);
+                let initial = left(start)?;
+                let final_attachment = left(end)?;
+                endpoints.push(match &support {
+                    Some(support) => support.endpoint_geometry(i, initial, final_attachment),
+                    None => {
+                        let right = self.system.port(i)
+                            .ok_or_else(|| error("original bow port is absent"))?.right.clone();
+                        FrictionEndpointGeometry {
+                            start: FrictionGeometry { left: initial, right: right.clone() },
+                            end: FrictionGeometry { left: final_attachment, right },
+                            start_speed_m_s: drives[i].speed_m_s, end_speed_m_s: drives[i].speed_m_s,
+                        }
+                    },
+                });
+            }
             geometry.push(FrictionGeometry {
                 left: ModalAttachment {
                     component: string,
                     shapes,
                 },
-                right: self
-                    .system
-                    .port(i)
-                    .ok_or_else(|| error("original bow port is absent"))?
-                    .right
-                    .clone(),
+                right: match &support {
+                    Some(support) => Some(support.receiver(i)),
+                    None => self.system.port(i)
+                        .ok_or_else(|| error("original bow port is absent"))?.right.clone(),
+                },
             });
         }
-        let frame = self.system.step_with_friction_geometry(
-            external,
-            drives,
-            &geometry,
-            normal_geometry,
-            stop_offsets_m,
-            FrictionGeometryConfig {
-                max_update_terms: limits.max_update_terms,
-            },
-            gate,
-        )?;
+        let (external, drives) = support.as_ref()
+            .map_or((external, drives), |s| (s.forces.as_slice(), s.drives.as_slice()));
+        let config = FrictionGeometryConfig { max_update_terms: limits.max_update_terms };
+        let frame = if let Some(endpoints) = &endpoints {
+            self.system.step_with_friction_geometry_and_endpoints(external, drives, &geometry,
+                endpoints, normal_geometry, stop_offsets_m, config, gate)?
+        } else {
+            self.system.step_with_friction_geometry(external, drives, &geometry,
+                normal_geometry, stop_offsets_m, config, gate)?
+        };
+        if let Some(support) = support {
+            self.bow_stations.as_mut().expect("admitted bow motion")
+                .fiber_support.as_mut().expect("admitted fiber support").accept(support);
+        }
         if let Some(end) = stations {
             self.bow_stations
                 .as_mut()

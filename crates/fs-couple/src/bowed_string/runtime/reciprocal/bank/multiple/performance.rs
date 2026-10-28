@@ -203,6 +203,19 @@ pub struct MultiBowPerformance {
     shell_observer: Option<observation::BoundShellObserver>,
 }
 impl MultiBowPerformance {
+    /// Add fiber support acceleration and material contact travel to the SAME
+    /// performance clock. Bind after optional bow-station paths. Schedule speeds
+    /// denote support endpoint velocities; acceleration limits apply to every
+    /// compiled control transition. A control tick activates a target at its
+    /// unchanged sample boundary; constant acceleration reaches that target at
+    /// the following mechanical endpoint (one physical interval later).
+    pub fn with_fiber_support_motion(mut self, initial_velocity_m_s: f64,
+        limits: super::ribbon::motion::FiberSupportMotionLimits,
+        gate: &fs_exec::CancelGate) -> Result<Self, RenderError> {
+        self.validate_sample_count(0)?;
+        self.bank = self.bank.with_fiber_support_motion(initial_velocity_m_s, limits, gate)?;
+        Ok(self)
+    }
     /// Original material bank, actual contact maps and accepted joint physics.
     #[must_use] pub const fn bank(&self) -> &MultiBowStringBank { &self.bank }
     /// Original authoring schedule, with no rewritten ramps or time labels.

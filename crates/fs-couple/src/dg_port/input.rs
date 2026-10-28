@@ -180,13 +180,14 @@ impl DgSourceInput {
     /// The axial outlet is matrix channel zero, followed by the authored order.
     ///
     /// After any side openings and before dg_radiation, an optional block
-    /// declares finite fixed slit channels or exact closures in series with
+    /// declares finite fixed slit/circular channels or exact closures in series with
     /// existing terminals:
     /// dg_terminal_channels COUNT MAX_TOTAL_TRANSVERSE_CELLS
     /// dg_terminal_closed PORT_ID
     /// dg_terminal_slit PORT_ID WIDTH_M HEIGHT_M LENGTH_M CELLS MAX_MACH
+    /// dg_terminal_circular PORT_ID RADIUS_M LENGTH_M CELLS MAX_MACH
     /// Omitted ports remain directly connected to the full exterior matrix.
-    /// A slit uses the actual terminal gas and the original unsteady transverse
+    /// Each passage uses the actual terminal gas and the original unsteady transverse
     /// momentum owner. Its fluid memory has a separate explicit cell budget;
     /// it is not a resolved moving pad, annular gap or turbulent jet model.
     ///
@@ -406,20 +407,28 @@ impl DgSourceInput {
                             if maximum_mach > 0.3 {
                                 return Err(bad(line, "terminal slit Mach ceiling must be in (0, 0.3]").into());
                             }
-                            total_cells = total_cells.checked_add(transverse_cells)
-                                .ok_or_else(|| bad(line, "complete terminal cell count overflow"))?;
-                            if total_cells > allowance {
-                                return Err(bad(line, "complete slit state exceeds its transverse-cell allowance").into());
-                            }
                             DgTerminalChannelKind::Slit {
                                 width_m, height_m, length_m, transverse_cells, maximum_mach,
                             }
                         },
-                        _ => return Err(bad(line, "expected a closed terminal or finite slit channel").into()),
+                        "dg_terminal_circular" => DgTerminalChannelKind::Circular {
+                            radius_m: row.positive()?,
+                            length_m: row.positive()?,
+                            radial_cells: row.count(MAX_DG_TERMINAL_TRANSVERSE_CELLS)?,
+                            maximum_mach: row.positive()?,
+                        },
+                        _ => return Err(bad(line, "expected a closed terminal or finite slit/circular channel").into()),
                     };
                     row.finish()?;
                     let channel = DgTerminalChannelInput { port, kind };
                     channel.validate().map_err(DgSourceError::Physics)?;
+                    if let Some((_, cells)) = kind.section() {
+                        total_cells = total_cells.checked_add(cells)
+                            .ok_or_else(|| bad(line, "complete terminal cell count overflow"))?;
+                        if total_cells > allowance {
+                            return Err(bad(line, "complete channel state exceeds its transverse-cell allowance").into());
+                        }
+                    }
                     source.terminal_channels.push(channel);
                 }
                 (radiation_line, fields) = next_row()?;

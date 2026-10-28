@@ -40,6 +40,30 @@ fn closures_need_no_transverse_states_and_omitted_terminals_remain_direct() {
 }
 
 #[test]
+fn circular_terminal_is_geometry_data_with_the_original_regional_gas_and_cell_budget() {
+    let block = "dg_terminal_channels 2 24\ndg_terminal_slit 1 0.004 0.00008 0.001 8 0.1\ndg_terminal_circular 7 0.0001 0.002 16 0.1";
+    let (source, records) = read_receipted(&input(block), None).unwrap();
+    assert_eq!(source.maximum_terminal_transverse_cells, 24);
+    assert_eq!(source.terminal_channels[1], DgTerminalChannelInput {
+        port: PortId(7), kind: DgTerminalChannelKind::Circular {
+            radius_m: 0.0001, length_m: 0.002, radial_cells: 16, maximum_mach: 0.1,
+        },
+    });
+    assert_eq!(source.chimneys[0].gas, records[0]);
+    for (from, to) in [
+        ("channels 2 24", "channels 2 23"),
+        ("0.0001 0.002 16 0.1", "0 0.002 16 0.1"),
+        ("0.0001 0.002 16 0.1", "0.0003 0.002 16 0.1"),
+        ("0.0001 0.002 16 0.1", "0.0001 0.002 1 0.1"),
+        ("0.0001 0.002 16 0.1", "0.0001 0.002 16 NaN"),
+        ("0.0001 0.002 16 0.1", "0.0001 0.002 16 0.31"),
+        ("0.0001 0.002 16 0.1", "0.0001 0.002 16 0.1 ignored"),
+    ] {
+        assert!(read(&input(&block.replace(from, to))).is_err(), "admitted {to}");
+    }
+}
+
+#[test]
 fn terminal_source_refuses_undeclared_ports_duplicate_losses_and_unbounded_states() {
     let valid = input(CHANNELS);
     for (from, to) in [

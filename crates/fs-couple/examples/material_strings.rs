@@ -457,6 +457,12 @@ impl input::Spec {
         if let Some(program)=bow_station_program {
             performance=performance.with_bow_station_motion(program,gate)?;
         }
+        if let Some(limits)=self.bow_fibers.as_ref().and_then(|fibers|fibers.motion) {
+            let GestureValue::Bow {velocity_m_per_s,..}=self.schedule.tracks()[0].initial else {
+                return Err("fiber motion requires an explicit initial bow speed".into());
+            };
+            performance=performance.with_fiber_support_motion(velocity_m_per_s,limits,gate)?;
+        }
         if let Some(observer)=&self.shell_observer {
             performance=performance.with_material_shell_observer_with_quadrature(
                 observer.clone(),self.shell_receiver_quadrature,gate)?;
@@ -692,8 +698,9 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     }
     if let Some(ribbon)=ready.performance.bank().source().ribbon() { eprintln!("bow_ribbon={ribbon:?}"); }
     if let Some(fibers)=ready.performance.bank().source().fiber_ribbon() {
-        eprintln!("bow_fibers={:?}; resolution={:?}; mass_kg={}; station={}; frozen-station rigid-end model, not thermal rosin",
-            fibers.model().geometry(),fibers.model().resolution(),fibers.model().mass_kg(),fibers.station_fraction());
+        eprintln!("bow_fibers={:?}; resolution={:?}; mass_kg={}; station={}; support_motion={:?}; rigid-end material fibers, not validated thermal rosin",
+            fibers.model().geometry(),fibers.model().resolution(),fibers.model().mass_kg(),fibers.station_fraction(),
+            ready.performance.bank().fiber_support_motion_limits());
         if let Some(strain)=fibers.model().strain() {
             eprintln!("bow_fiber_strain={:?}; joint_solve={:?}; moderate-slope fixed-end material strain",
                 strain.limits(),strain.config());

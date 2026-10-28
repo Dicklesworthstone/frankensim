@@ -38,7 +38,7 @@ use super::radiation::environment::multiport::MimoEnvironment;
 use super::viscothermal::{ViscothermalSection, ViscothermalSectionSpec,
     with_regional_viscothermal_sections, with_regional_fractional_viscothermal_sections};
 use crate::acoustic_realize::AcousticRealizeError;
-use super::slit_channel::SlitChannel;
+use super::slit_channel::FixedChannel;
 use supply::SupplyChannelFrame;
 use fs_exec::CancelGate;
 use fs_material::gas::GasState;
@@ -314,7 +314,7 @@ pub struct TwoSidedAperture {
     sides: [DuctSide; 2],
     limits: TwoSidedLimits,
     material_ducts: [Option<material::MaterialDuctWalls>; 2],
-    supply_channel: Option<SlitChannel>,
+    supply_channel: Option<FixedChannel>,
     spatial_pressure_work_j: [f64; 2],
 }
 impl TwoSidedAperture {
@@ -344,7 +344,7 @@ impl TwoSidedAperture {
 
     fn build(valve: LoadedAperture, sources: [ApertureDuctSpec; 2],
         limits: TwoSidedLimits, gate: &CancelGate, policies: Option<[FractionalTubePolicy; 2]>,
-        supply_channel: Option<SlitChannel>)
+        supply_channel: Option<FixedChannel>)
         -> Result<Self, AcousticRealizeError>
     {
         poll(gate)?;
@@ -361,7 +361,7 @@ impl TwoSidedAperture {
             || matches!(&valve, LoadedAperture::Modal(a) if a.gas().is_some_and(|g| *g != gas))
         { return Err(invalid("two-sided coupling requires an unadvanced valve with the actual inlet gas and summed load")); }
         let dt = valve.time_step_s();
-        if supply_channel.as_ref().is_some_and(|c| c.spec().sample_period_s.to_bits() != dt.to_bits()) {
+        if supply_channel.as_ref().is_some_and(|c| c.sample_period_s().to_bits() != dt.to_bits()) {
             return Err(invalid("supply passage and moving valve must share the exact physical clock"));
         }
         let prepare = |source: ApertureDuctSpec, policy: Option<FractionalTubePolicy>| -> Result<DuctSide, AcousticRealizeError> {
@@ -532,7 +532,7 @@ impl TwoSidedAperture {
         let before = self.stored_energy_j();
         let a = self.sides.each_ref().map(|s| s.network.incoming_pressure_pa());
         let z = self.sides.each_ref().map(|s| s.network.inlet_impedance_pa_s_m3());
-        let supply_load = self.supply_channel.as_ref().map(SlitChannel::pressure_load).transpose()?;
+        let supply_load = self.supply_channel.as_ref().map(FixedChannel::pressure_load).transpose()?;
         let effective_source = drive.source_pressure_pa + 2.0 * a[0];
         let effective_source = match supply_load {
             Some(load) => effective_source + load.history_pressure_pa,

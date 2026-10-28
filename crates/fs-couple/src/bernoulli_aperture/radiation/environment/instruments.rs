@@ -62,7 +62,7 @@ impl TwoSidedPressure {
         valve: LoadedAperture,
         sources: [ApertureDuctSpec; 2],
         walls: [Option<MaterialWallInput>; 2],
-        channel: crate::bernoulli_aperture::slit_channel::SlitChannel,
+        channel: impl Into<crate::bernoulli_aperture::slit_channel::FixedChannel>,
         limits: TwoSidedLimits,
         policies: Option<[FractionalTubePolicy; 2]>,
         radiation: DuctRadiationSpec,
@@ -70,7 +70,7 @@ impl TwoSidedPressure {
         gate: &CancelGate,
     ) -> Result<(Self, Vec<BaffledOutletBinding>), RenderError> {
         Self::build_baffled_environment(valve, sources, walls, limits, policies,
-            radiation, max_block, gate, Some(channel))
+            radiation, max_block, gate, Some(channel.into()))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -83,7 +83,7 @@ impl TwoSidedPressure {
         radiation: DuctRadiationSpec,
         max_block: usize,
         gate: &CancelGate,
-        supply: Option<crate::bernoulli_aperture::slit_channel::SlitChannel>,
+        supply: Option<crate::bernoulli_aperture::slit_channel::FixedChannel>,
     ) -> Result<(Self, Vec<BaffledOutletBinding>), RenderError> {
         poll(gate).map_err(RenderError::Voice)?;
         let rate = radiation.reconstruction.mechanics_rate_hz();

@@ -19,7 +19,10 @@
 
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_material::gas::GasState;
-use fs_math::det;
+mod profile;
+/// Axisymmetric passages using the same no-slip momentum and work owner.
+pub mod circular;
+use profile::MomentumProfile;
 
 /// Maximum transverse cells. All hot-step storage is allocated at construction.
 pub const MAX_TRANSVERSE_CELLS: usize = 4096;
@@ -103,32 +106,78 @@ impl SlitChannelLoad {
 pub struct SlitChannel {
     gas: GasState,
     spec: SlitChannelSpec,
-    cell_mass_kg: f64,
-    viscous_factor: f64,
-    area_m2: f64,
-    inverse_diagonal: Vec<f64>,
-    upper_ratio: Vec<f64>,
-    pressure_response: Vec<f64>,
-    mean_pressure_response: f64,
-    velocity_m_s: Vec<f64>,
-    trial: Vec<f64>,
-    last: SlitChannelStep,
+    profile: MomentumProfile,
+}
+
+/// Explicit cross-section of one fixed material-gas passage. Both variants
+/// share the same finite-volume momentum, pressure condensation and energy
+/// owner; their actual geometry is retained instead of a hydraulic-diameter fit.
+#[derive(Debug, Clone)]
+pub enum FixedChannel {
+    /// Parallel, planar, no-slip walls.
+    Slit(SlitChannel),
+    /// Axisymmetric circular no-slip wall, with symmetry at the axis.
+    Circular(circular::CircularChannel),
+}
+impl From<SlitChannel> for FixedChannel {
+    fn from(value: SlitChannel) -> Self { Self::Slit(value) }
+}
+impl From<circular::CircularChannel> for FixedChannel {
+    fn from(value: circular::CircularChannel) -> Self { Self::Circular(value) }
+}
+impl From<&SlitChannel> for FixedChannel {
+    fn from(value: &SlitChannel) -> Self { Self::Slit(value.clone()) }
+}
+impl From<&circular::CircularChannel> for FixedChannel {
+    fn from(value: &circular::CircularChannel) -> Self { Self::Circular(value.clone()) }
+}
+impl From<&FixedChannel> for FixedChannel {
+    fn from(value: &FixedChannel) -> Self { value.clone() }
+}
+impl FixedChannel {
+    /// Original planar field when the supplied geometry is a slit.
+    pub const fn slit(&self) -> Option<&SlitChannel> {
+        match self { Self::Slit(v) => Some(v), Self::Circular(_) => None }
+    }
+    /// Original annular field when the supplied geometry is circular.
+    pub const fn circular(&self) -> Option<&circular::CircularChannel> {
+        match self { Self::Circular(v) => Some(v), Self::Slit(_) => None }
+    }
+    /// Original complete material state; no caller-owned density override.
+    pub const fn gas(&self) -> &GasState {
+        match self { Self::Slit(v) => v.gas(), Self::Circular(v) => v.gas() }
+    }
+    /// One unchanged physical integration period [s].
+    pub const fn sample_period_s(&self) -> f64 {
+        match self { Self::Slit(v) => v.spec.sample_period_s, Self::Circular(v) => v.spec().sample_period_s }
+    }
+    /// Original accepted transverse velocity field.
+    pub fn velocities_m_s(&self) -> &[f64] {
+        match self { Self::Slit(v) => v.velocities_m_s(), Self::Circular(v) => v.velocities_m_s() }
+    }
+    /// Original accepted fluid work and storage account.
+    pub const fn last_step(&self) -> SlitChannelStep {
+        match self { Self::Slit(v) => v.last_step(), Self::Circular(v) => v.last_step() }
+    }
+    /// Exact next-step affine pressure boundary of the actual geometry.
+    pub fn pressure_load(&self) -> Result<SlitChannelLoad, AcousticRealizeError> {
+        match self { Self::Slit(v) => v.pressure_load(), Self::Circular(v) => v.pressure_load() }
+    }
+    /// Candidate original field at the common through-flow; no state publishes.
+    pub fn preview_at_flow(&self, flow: f64) -> Result<Self, AcousticRealizeError> {
+        match self {
+            Self::Slit(v) => v.preview_at_flow(flow).map(Self::Slit),
+            Self::Circular(v) => v.preview_at_flow(flow).map(Self::Circular),
+        }
+    }
+    /// Advance with the shared implicit field and work acceptance.
+    pub fn step(&mut self, pressure: f64) -> Result<SlitChannelStep, AcousticRealizeError> {
+        match self { Self::Slit(v) => v.step(pressure), Self::Circular(v) => v.step(pressure) }
+    }
 }
 
 fn invalid(what: &'static str) -> AcousticRealizeError {
     AcousticRealizeError::InvalidDescription { what }
-}
-
-// Thomas elimination for the factored symmetric diffusion matrix.
-// Both arrays are cold allocations; no state is shared between channels.
-fn solve(inverse: &[f64], upper: &[f64], rhs: &mut [f64]) {
-    rhs[0] *= inverse[0];
-    for i in 1..rhs.len() {
-        rhs[i] = rhs[i] * inverse[i] + upper[i] * rhs[i - 1];
-    }
-    for i in (0..rhs.len() - 1).rev() {
-        rhs[i] += upper[i] * rhs[i + 1];
-    }
 }
 
 impl SlitChannel {
@@ -146,42 +195,20 @@ impl SlitChannel {
         }
         let n = spec.transverse_cells;
         let dy = spec.height_m / n as f64;
-        let r = gas.dynamic_viscosity / gas.density * spec.sample_period_s / (dy * dy);
-        let pressure_scale = spec.sample_period_s / (gas.density * spec.length_m);
-        let area_m2 = spec.width_m * spec.height_m;
-        let cell_mass_kg = gas.density * spec.length_m * spec.width_m * dy;
-        let viscous_factor = gas.dynamic_viscosity * spec.length_m * spec.width_m / dy;
-        if ![dy, r, pressure_scale, area_m2, cell_mass_kg, viscous_factor]
+        let area = spec.width_m * dy;
+        let conductance = gas.dynamic_viscosity * spec.length_m * spec.width_m / dy;
+        if ![dy, area, conductance]
             .iter().all(|x| x.is_finite() && *x > 0.0)
         {
             return Err(invalid("unsteady slit coefficients cannot be represented"));
         }
-        let mut inverse_diagonal = vec![0.0; n];
-        let mut upper_ratio = vec![0.0; n];
-        for i in 0..n {
-            // A wall is half a cell from its centre: 2r at the wall plus r
-            // at the interior face. Replacing 3r by 2r would move the wall.
-            let diagonal = 1.0 + if i == 0 || i + 1 == n { 3.0 * r } else { 2.0 * r };
-            let pivot = diagonal - if i == 0 { 0.0 } else { r * upper_ratio[i - 1] };
-            inverse_diagonal[i] = 1.0 / pivot;
-            upper_ratio[i] = r * inverse_diagonal[i];
-            if !pivot.is_finite() || pivot <= 0.0 || !upper_ratio[i].is_finite()
-                || !inverse_diagonal[i].is_finite() || inverse_diagonal[i] <= 0.0
-            {
-                return Err(invalid("unsteady slit diffusion factorization is not finite positive definite"));
-            }
-        }
-        let mut pressure_response = vec![pressure_scale; n];
-        solve(&inverse_diagonal, &upper_ratio, &mut pressure_response);
-        let mean_pressure_response = pressure_response.iter().sum::<f64>() / n as f64;
-        if !pressure_response.iter().all(|v| v.is_finite() && *v > 0.0)
-            || !mean_pressure_response.is_finite() || mean_pressure_response <= 0.0
-        {
-            return Err(invalid("unsteady slit pressure response cannot be represented"));
-        }
-        Ok(Self { gas: *gas, spec, cell_mass_kg, viscous_factor, area_m2,
-            inverse_diagonal, upper_ratio, pressure_response, mean_pressure_response,
-            velocity_m_s: vec![0.0; n], trial: vec![0.0; n], last: SlitChannelStep::default() })
+        let mut faces = vec![conductance; n + 1];
+        // Both stationary walls lie half a cell from the adjacent centre.
+        faces[0] *= 2.0;
+        faces[n] *= 2.0;
+        let profile = MomentumProfile::new(gas.density, spec.length_m,
+            spec.sample_period_s, spec.exit, vec![area; n], faces)?;
+        Ok(Self { gas: *gas, spec, profile })
     }
 
     /// Unchanged source material driving storage and wall friction.
@@ -194,11 +221,11 @@ impl SlitChannel {
 
     /// Actual cell-centre velocities from the lower to the upper wall [m/s].
     #[must_use]
-    pub fn velocities_m_s(&self) -> &[f64] { &self.velocity_m_s }
+    pub fn velocities_m_s(&self) -> &[f64] { self.profile.velocities() }
 
     /// Last accepted exchange, all zero before the first step.
     #[must_use]
-    pub const fn last_step(&self) -> SlitChannelStep { self.last }
+    pub const fn last_step(&self) -> SlitChannelStep { self.profile.last_step() }
 
     /// Exact next-step affine load of this fixed, no-slip channel.
     ///
@@ -209,21 +236,7 @@ impl SlitChannel {
     /// step(). The positive impedance is constant at fixed geometry/gas/clock;
     /// the history pressure must be recomputed from every accepted field.
     pub fn pressure_load(&self) -> Result<SlitChannelLoad, AcousticRealizeError> {
-        if self.spec.exit != SlitExit::StaticPressure {
-            return Err(invalid("affine channel condensation requires the actual static-pressure terminal"));
-        }
-        let mut free = self.velocity_m_s.clone();
-        solve(&self.inverse_diagonal, &self.upper_ratio, &mut free);
-        let bulk = free.iter().sum::<f64>() / free.len() as f64;
-        let load = SlitChannelLoad {
-            impedance_pa_s_m3: 1.0 / (self.area_m2 * self.mean_pressure_response),
-            history_pressure_pa: bulk / self.mean_pressure_response,
-        };
-        if !load.impedance_pa_s_m3.is_finite() || load.impedance_pa_s_m3 <= 0.0
-            || !load.history_pressure_pa.is_finite() {
-            return Err(invalid("unsteady slit affine pressure boundary cannot be represented"));
-        }
-        Ok(load)
+        self.profile.pressure_load()
     }
 
     /// Prepare the next channel state at a requested signed volume flow.
@@ -244,21 +257,7 @@ impl SlitChannel {
     /// Exact steady bulk response of THIS spatial discretization [m/s].
     /// It is useful for cold admission, but never replaces the live field.
     pub fn steady_bulk_speed_m_s(&self, pressure_pa: f64) -> Result<f64, AcousticRealizeError> {
-        if !pressure_pa.is_finite() { return Err(invalid("unsteady slit pressure must be finite")); }
-        // Cell-centred no-slip FV conductance differs from continuum Poiseuille
-        // by 1+2/N². Retain it so the admitted pressure agrees with the actual mesh.
-        let n = self.spec.transverse_cells as f64;
-        let resistance = 12.0 * self.gas.dynamic_viscosity * self.spec.length_m
-            / (self.spec.height_m * self.spec.height_m * (1.0 + 2.0 / (n * n)));
-        let speed = match self.spec.exit {
-            SlitExit::StaticPressure => pressure_pa / resistance,
-            SlitExit::UniformKineticHead => 2.0 * pressure_pa / (resistance
-                + det::hypot(resistance, det::sqrt(2.0 * self.gas.density * pressure_pa.abs()))),
-        };
-        if !resistance.is_finite() || resistance <= 0.0 || !speed.is_finite() {
-            return Err(invalid("unsteady slit steady pressure response cannot be represented"));
-        }
-        Ok(speed)
+        self.profile.steady_bulk_speed(pressure_pa)
     }
 
     /// Advance one physical pressure interval, allowing signed pressure and flow.
@@ -268,67 +267,6 @@ impl SlitChannel {
     /// Its analytic solution feeds the complete factored transverse field; no
     /// fitted flow coefficient, nonlinear iteration or one-sample lag appears.
     pub fn step(&mut self, pressure_pa: f64) -> Result<SlitChannelStep, AcousticRealizeError> {
-        if !pressure_pa.is_finite() { return Err(invalid("unsteady slit pressure must be finite")); }
-        self.trial.copy_from_slice(&self.velocity_m_s);
-        solve(&self.inverse_diagonal, &self.upper_ratio, &mut self.trial);
-        let base = self.trial.iter().sum::<f64>() / self.trial.len() as f64;
-        let target = base + self.mean_pressure_response * pressure_pa;
-        let speed = match self.spec.exit {
-            SlitExit::StaticPressure => target,
-            SlitExit::UniformKineticHead => 2.0 * target / (1.0 + det::sqrt(
-                1.0 + 2.0 * self.mean_pressure_response * self.gas.density * target.abs())),
-        };
-        let exit_pressure = match self.spec.exit {
-            SlitExit::StaticPressure => 0.0,
-            SlitExit::UniformKineticHead => 0.5 * self.gas.density * speed * speed.abs(),
-        };
-        let channel_pressure = pressure_pa - exit_pressure;
-        if ![target, speed, exit_pressure, channel_pressure].iter().all(|x| x.is_finite()) {
-            return Err(invalid("unsteady slit implicit pressure/flow solve is not finite"));
-        }
-        let mut sum = 0.0;
-        let mut energy_sum = 0.0;
-        let mut delta_sum = 0.0;
-        let mut numerical_sum = 0.0;
-        let mut shear_sum = 0.0;
-        for i in 0..self.trial.len() {
-            let old = self.velocity_m_s[i];
-            self.trial[i] += self.pressure_response[i] * channel_pressure;
-            let v = self.trial[i];
-            sum += v;
-            energy_sum += v * v;
-            delta_sum += (v - old) * (v + old);
-            numerical_sum += (v - old) * (v - old);
-            if i != 0 { shear_sum += (v - self.trial[i - 1]).powi(2); }
-        }
-        shear_sum += 2.0 * (self.trial[0].powi(2) + self.trial[self.trial.len() - 1].powi(2));
-        let bulk = sum / self.trial.len() as f64;
-        let flow = self.area_m2 * bulk;
-        let dt = self.spec.sample_period_s;
-        let mut step = SlitChannelStep {
-            bulk_speed_m_s: bulk, flow_m3_s: flow,
-            kinetic_energy_j: 0.5 * self.cell_mass_kg * energy_sum,
-            stored_delta_j: 0.5 * self.cell_mass_kg * delta_sum,
-            pressure_work_j: pressure_pa * flow * dt,
-            viscous_dissipation_j: self.viscous_factor * shear_sum * dt,
-            exit_work_j: exit_pressure * flow * dt,
-            numerical_dissipation_j: 0.5 * self.cell_mass_kg * numerical_sum,
-            energy_residual_j: 0.0,
-        };
-        step.energy_residual_j = step.pressure_work_j - step.stored_delta_j
-            - step.viscous_dissipation_j - step.exit_work_j - step.numerical_dissipation_j;
-        let scale = step.pressure_work_j.abs() + step.stored_delta_j.abs()
-            + step.viscous_dissipation_j + step.exit_work_j + step.numerical_dissipation_j;
-        if ![bulk, flow, step.kinetic_energy_j, step.stored_delta_j, step.pressure_work_j,
-            step.viscous_dissipation_j, step.exit_work_j, step.numerical_dissipation_j,
-            step.energy_residual_j, scale].iter().all(|x| x.is_finite())
-            || step.exit_work_j < 0.0
-            || step.energy_residual_j.abs() > 4096.0 * f64::EPSILON * scale
-        {
-            return Err(invalid("unsteady slit step does not close finite dissipation and kinetic storage"));
-        }
-        core::mem::swap(&mut self.velocity_m_s, &mut self.trial);
-        self.last = step;
-        Ok(step)
+        self.profile.step(pressure_pa)
     }
 }

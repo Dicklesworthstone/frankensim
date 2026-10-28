@@ -12,7 +12,7 @@
 use super::{ApertureDuctSpec, FractionalTubePolicy, LoadedAperture,
     TwoSidedAperture, TwoSidedLimits, combined_inlet_state, invalid};
 use crate::acoustic_realize::AcousticRealizeError;
-use crate::bernoulli_aperture::slit_channel::{SlitChannel, SlitChannelStep};
+use crate::bernoulli_aperture::slit_channel::{FixedChannel, SlitChannelStep};
 use crate::bernoulli_aperture::wall::material::MaterialWallInput;
 use fs_exec::CancelGate;
 use fs_material::gas::GasState;
@@ -36,8 +36,9 @@ pub struct SupplyChannelFrame {
 /// Its history pressure is state, never an additional authored blowing command.
 /// A nonlinear kinetic-head terminal refuses rather than silently losing its law.
 pub fn combined_inlet_state_with_supply(
-    sides: &[ApertureDuctSpec; 2], channel: &SlitChannel,
+    sides: &[ApertureDuctSpec; 2], channel: impl Into<FixedChannel>,
 ) -> Result<(GasState, f64), AcousticRealizeError> {
+    let channel = channel.into();
     let (gas, z) = combined_inlet_state(sides)?;
     if channel.gas() != &gas {
         return Err(invalid("reed supply passage and both physical inlets must share the complete material gas"));
@@ -62,15 +63,15 @@ impl TwoSidedAperture {
     /// the channel time step must exactly match the valve clock.
     ///
     /// The supplied channel must have fixed walls and StaticPressure terminals.
-    /// Its planar, incompressible, fully developed scope remains unchanged; this
+    /// Its declared planar or circular, incompressible, fully developed scope remains; this
     /// does not attach the fixed mesh to a closing or spatially varying reed gap.
     #[allow(clippy::too_many_arguments)]
     pub fn with_supply_channel(
-        valve: LoadedAperture, sources: [ApertureDuctSpec; 2], channel: SlitChannel,
+        valve: LoadedAperture, sources: [ApertureDuctSpec; 2], channel: impl Into<FixedChannel>,
         limits: TwoSidedLimits, policies: Option<[FractionalTubePolicy; 2]>,
         gate: &CancelGate,
     ) -> Result<Self, AcousticRealizeError> {
-        Self::build(valve, sources, limits, gate, policies, Some(channel))
+        Self::build(valve, sources, limits, gate, policies, Some(channel.into()))
     }
 
     /// The same supply passage together with original regional duct materials,
@@ -80,16 +81,16 @@ impl TwoSidedAperture {
     #[allow(clippy::too_many_arguments)]
     pub fn with_material_walls_and_supply_channel(
         valve: LoadedAperture, sources: [ApertureDuctSpec; 2],
-        walls: [Option<MaterialWallInput>; 2], channel: SlitChannel,
+        walls: [Option<MaterialWallInput>; 2], channel: impl Into<FixedChannel>,
         limits: TwoSidedLimits, policies: Option<[FractionalTubePolicy; 2]>,
         gate: &CancelGate,
     ) -> Result<Self, AcousticRealizeError> {
-        Self::build_material_walls(valve, sources, walls, limits, policies, gate, Some(channel))
+        Self::build_material_walls(valve, sources, walls, limits, policies, gate, Some(channel.into()))
     }
 
     /// Actual accepted transverse profile, source gas, geometry and energy ledger.
     #[must_use]
-    pub const fn supply_channel(&self) -> Option<&SlitChannel> {
+    pub const fn supply_channel(&self) -> Option<&FixedChannel> {
         self.supply_channel.as_ref()
     }
 }

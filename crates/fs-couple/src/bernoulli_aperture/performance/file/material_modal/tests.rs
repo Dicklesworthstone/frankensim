@@ -130,7 +130,7 @@ fn g0_original_material_modes_gases_loss_sections_and_radiation_are_retained() {
     assert_eq!(p.radiation_bindings()[0].opening().node, 2);
     assert_eq!(p.renderer().source().mechanics_per_output(), 16);
     assert_eq!(p.renderer().source().mechanical_samples_rendered(), 0);
-    assert_eq!(system.supply_channel().unwrap().spec().length_m, 0.00002);
+    assert_eq!(system.supply_channel().unwrap().slit().unwrap().spec().length_m, 0.00002);
     assert_eq!(system.supply_channel().unwrap().gas(), &system.source(ValveSide::Upstream).gases[0]);
     let mut renderer = p.into_renderer();
     renderer.block(&mut [0.0; 8]).unwrap();
@@ -161,6 +161,52 @@ fn g3_data_only_material_and_pressure_changes_reach_the_actual_microphone() {
     assert_eq!(pressure, partitioned);
     assert_eq!(encode_pcm16_wav(&pressure, 48000, 0.005).unwrap(),
         encode_pcm16_wav(&partitioned, 48000, 0.005).unwrap());
+}
+
+#[test]
+fn g3_circular_supply_geometry_gas_and_reed_material_reach_the_same_microphone() {
+    let text = input().replace("supply none", "supply circular 0.02 0.0005 32");
+    let source = build(&text, 37);
+    let system = source.renderer().source().system();
+    let channel = system.supply_channel().unwrap().circular().unwrap();
+    assert_eq!(channel.spec().radial_cells, 32);
+    assert_eq!(channel.spec().length_m, 0.02);
+    assert_eq!(channel.spec().radius_m, 0.0005);
+    assert_eq!(channel.gas(), &system.source(ValveSide::Upstream).gases[0]);
+    let (pressure, source) = render(source);
+    assert!(pressure.iter().all(|p| p.is_finite()));
+    assert!(pressure.iter().any(|p| p.abs() > 1e-15));
+    let channel = source.source().system().supply_channel().unwrap();
+    assert!(channel.last_step().kinetic_energy_j > 0.0);
+    assert!(channel.last_step().viscous_dissipation_j > 0.0);
+    assert!(channel.velocities_m_s().windows(2).any(|v| v[0] != v[1]));
+    let states = |source: &ScheduledTwoSidedPressure| match source.source().system().valve() {
+        LoadedAperture::Modal(valve) => valve.modal_states().to_vec(),
+        _ => panic!("original modal material source must remain active"),
+    };
+    for changed in [text.replace("0.02 0.0005 32", "0.02 0.0007 32"),
+        text.replace("101325", "65000"),
+        text.replacen("section blade.matpack", "section altered.matpack", 1)] {
+        let (altered_pressure, altered) = render(build(&changed, 37));
+        assert!(pressure.iter().zip(&altered_pressure).any(|(a, b)| (a - b).abs() > 1e-15));
+        assert_ne!(states(&source), states(&altered),
+            "geometry, atmosphere and material must alter actual reed mechanics, not only audio gain");
+    }
+    let (partitioned, partitioned_source) = render(build(&text, 1));
+    assert_eq!(pressure, partitioned);
+    assert_eq!(states(&source), states(&partitioned_source));
+    assert_eq!(channel.last_step(), partitioned_source.source().system().supply_channel().unwrap().last_step());
+}
+
+#[test]
+fn g0_circular_supply_malformed_geometry_refuses_before_material_loading() {
+    for supply in ["circular 0.02 -0.0005 32", "circular 0.02 0.0005 1",
+        "circular 0.02 0.0005 4097", "circular 0.02 0.0005", "circular NaN 0.0005 32"] {
+        let text = input().replace("supply none", &format!("supply {supply}"));
+        assert!(MaterialModalValvePerformance::from_bytes_with_sources(text.as_bytes(), 37,
+            &CancelGate::new_clock_free(), None,
+            |_| panic!("invalid supply geometry must refuse before material loading")).is_err());
+    }
 }
 
 #[test]

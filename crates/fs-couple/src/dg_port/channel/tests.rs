@@ -42,7 +42,10 @@ fn model() -> MimoModel {
 }
 
 fn load(walls: bool, branch_gas: Option<GasState>) -> DgPortLoad {
-    let main = duct(&air(), 0.05, 2, INLET, OUTLET, walls)
+    // Connected ducts share equilibrium pressure, including pressure-change fixtures.
+    let pressure = branch_gas.as_ref().map_or(101325.0, |gas| gas.pressure);
+    let main_gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, pressure).unwrap();
+    let main = duct(&main_gas, 0.05, 2, INLET, OUTLET, walls)
         .with_side_ports(&[DgSidePort { id: SIDE, downstream_element: 1 }]).unwrap();
     let branches = branch_gas.map_or_else(Vec::new, |gas| vec![DgBranch {
         port: SIDE, duct: duct(&gas, 0.012, 1, PortId(0), PortId(1), walls),
@@ -62,6 +65,12 @@ fn slit(port: PortId, height_m: f64) -> DgTerminalChannelInput {
     } }
 }
 
+fn circular(port: PortId, radius_m: f64) -> DgTerminalChannelInput {
+    DgTerminalChannelInput { port, kind: DgTerminalChannelKind::Circular {
+        radius_m, length_m: 0.002, radial_cells: 16, maximum_mach: 0.2,
+    } }
+}
+
 fn near(actual: f64, expected: f64, scale: f64) {
     assert!((actual - expected).abs() <= 2e-9 * scale.max(1e-300),
         "actual={actual}, expected={expected}, scale={scale}");
@@ -69,10 +78,12 @@ fn near(actual: f64, expected: f64, scale: f64) {
 
 #[test]
 fn full_gap_group_matches_uncondensed_pressure_rows_and_original_fluid_histories() {
-    for walls in [false, true] {
+    for (walls, round) in [(false, false), (true, false), (false, true), (true, true)] {
         for branched in [false, true] {
+            let channels = if round { vec![circular(SIDE, 8e-5), slit(OUTLET, 7e-5)] }
+                else { vec![slit(SIDE, 4e-5), slit(OUTLET, 7e-5)] };
             let mut load = load(walls, branched.then(air)).with_terminal_channels(
-                vec![slit(SIDE, 4e-5), slit(OUTLET, 7e-5)], 32).unwrap();
+                channels, 32).unwrap();
             let main = load.propagator().clone();
             let mut main_state = load.state().clone();
             let branch = load.branches().first().map(|branch| branch.propagator().clone());
@@ -237,6 +248,50 @@ fn actual_branch_gas_and_gap_geometry_change_source_impedance_and_outer_flow() {
 }
 
 #[test]
+fn circular_passage_keeps_its_local_mixture_pressure_and_radial_history_in_the_joint_solve() {
+    let mixture = fs_material::gas_species::input::read_gas_record(
+        &mut "mixture 303.15 101325 mole 2 N2 0.6 CO2 0.4".split_ascii_whitespace(), None, None,
+    ).unwrap();
+    let dense = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 202650.0).unwrap();
+    let build = |gas, radius| load(true, Some(gas))
+        .with_terminal_channels(vec![circular(SIDE, radius)], 16).unwrap();
+    let mut reference = build(air(), 8e-5);
+    let mut changed = [build(*mixture.state(), 8e-5), build(dense, 8e-5), build(air(), 1.2e-4)];
+    for (load, gas) in changed.iter().zip([*mixture.state(), dense, air()]) {
+        let channel = load.terminal_channels()[0].channel().unwrap().circular().unwrap();
+        assert_eq!(*channel.gas(), gas);
+        assert_eq!(channel.spec().radial_cells, 16);
+        assert_ne!(load.port_response().unwrap(), reference.port_response().unwrap());
+    }
+    let mut differences = [0.0; 3];
+    for sample in 0..48 {
+        let q = if sample < 9 { 1e-8 } else { 0.0 };
+        reference.preview_step(q).unwrap().accept();
+        let expected = reference.last_terminal_frames()[0].outward_flow_m3_s;
+        for (load, difference) in changed.iter_mut().zip(&mut differences) {
+            load.preview_step(q).unwrap().accept();
+            *difference += (load.last_terminal_frames()[0].outward_flow_m3_s - expected).abs();
+            let frame = load.last_terminal_channel_frames()[0];
+            let step = frame.step.unwrap();
+            near(frame.mean_pressure_drop_pa, frame.constitutive_pressure_drop_pa,
+                frame.mean_pressure_drop_pa.abs() + frame.constitutive_pressure_drop_pa.abs());
+            near(step.energy_residual_j, 0.0, step.pressure_work_j.abs()
+                + step.stored_delta_j.abs() + step.viscous_dissipation_j
+                + step.numerical_dissipation_j);
+        }
+    }
+    assert!(differences.iter().all(|difference| *difference > 1e-15));
+    assert!(reference.terminal_channels()[0].channel().unwrap().velocities_m_s()
+        .windows(2).any(|pair| pair[0] != pair[1]), "radial shear must remain resolved");
+    let accepted = reference.clone();
+    assert!(reference.preview_step(1.0).is_err());
+    assert_eq!(reference.state(), accepted.state());
+    assert_eq!(reference.last_terminal_channel_frames(), accepted.last_terminal_channel_frames());
+    assert_eq!(reference.terminal_channels()[0].channel().unwrap().velocities_m_s(),
+        accepted.terminal_channels()[0].channel().unwrap().velocities_m_s());
+}
+
+#[test]
 fn dropped_and_late_mach_refused_trials_preserve_every_original_field_and_retry() {
     let mut load = load(true, Some(air())).with_terminal_channels(vec![slit(SIDE, 4e-5)], 16).unwrap();
     for q in [1e-8, -2e-8, 3e-8] { load.preview_step(q).unwrap().accept(); }
@@ -304,6 +359,17 @@ fn source_preflight_checks_thin_geometry_unique_ports_and_combined_field_budget(
     for height in [0.0, -1.0, f64::NAN, f64::INFINITY, 2e-4] {
         assert!(slit(SIDE, height).validate().is_err());
     }
+    for radius in [0.0, -1.0, f64::NAN, f64::INFINITY, 3e-4] {
+        assert!(circular(SIDE, radius).validate().is_err());
+    }
+    assert!(source.clone().with_terminal_channels(vec![circular(SIDE, 8e-5)], 15).is_err());
+    assert!(source.clone().with_terminal_channels(vec![circular(SIDE, 8e-5), input], 32).is_err());
+    let wide = DgTerminalChannelInput { port: SIDE, kind: DgTerminalChannelKind::Circular {
+        radius_m: 0.002, length_m: 0.04, radial_cells: 16, maximum_mach: 0.2,
+    } };
+    assert!(wide.validate().is_ok());
+    assert!(source.clone().with_terminal_channels(vec![wide], 16).is_err(),
+        "a passage cannot exceed its actual attached duct section");
     let mut empty = source.clone().with_terminal_channels(Vec::new(), 0).unwrap();
     let mut original = source;
     for q in [1e-8, 0.0, -2e-8, 0.0] {

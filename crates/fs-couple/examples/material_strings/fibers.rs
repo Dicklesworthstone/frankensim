@@ -1,6 +1,7 @@
 //! Data-only fiber geometry and material selection for the existing renderer.
 use super::*;
 pub use fs_couple::fiber_ribbon::strain::FiberStrainLimits;
+pub use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::ribbon::motion::FiberSupportMotionLimits;
 use fs_couple::fiber_ribbon::{FiberRibbonGeometry, FiberRibbonResolution, TensionedFiberRibbon};
 use fs_material::section::{
     ConcentricElasticSection, ConcentricMaterialLayer, axial::YOUNG_VISCOSITY_PROPERTY,
@@ -17,6 +18,7 @@ pub struct Input {
     pub axial_modes: usize,
     pub transverse_modes: usize,
     pub strain: Option<(FiberStrainLimits, NonlinearModalConfig)>,
+    pub motion: Option<FiberSupportMotionLimits>,
 }
 impl Input {
     pub fn mode_count(&self, spec: &input::Spec) -> Result<usize> {
@@ -61,8 +63,14 @@ impl Input {
                 return Err("fiber strain requires retained initial state; nonlinear static preload is not implemented".into());
             }
         }
-        // The current geometry freezes the contact along a uniformly translating
-        // fiber. Do not silently model an accelerating/reversing bow as one.
+        if let Some(limits) = self.motion {
+            limits.validate()?;
+            if spec.contact_thermal || spec.friction.shear_layers().is_some() {
+                return Err("fiber support motion requires transported shear/thermal material patches".into());
+            }
+        }
+        // An accelerating stroke must opt into source-derived inertia and
+        // contact travel; omission retains the explicit frozen-station rung.
         for track in spec.schedule.tracks() {
             let GestureValue::Bow {
                 velocity_m_per_s: initial,
@@ -72,7 +80,7 @@ impl Input {
                 return Err("fiber ribbon needs a complete bow drive".into());
             };
             for event in &track.events {
-                if !matches!(event.value, GestureValue::Bow { velocity_m_per_s, .. }
+                if self.motion.is_none() && !matches!(event.value, GestureValue::Bow { velocity_m_per_s, .. }
                     if velocity_m_per_s.to_bits() == initial.to_bits())
                 {
                     return Err("frozen-station fiber ribbon requires constant support speed; load may vary".into());

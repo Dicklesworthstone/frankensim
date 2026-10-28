@@ -6468,12 +6468,24 @@ publication advances the string, thermal network and gas together;
 source-domain exits, failed balances, work limits and cancellation leave all
 three accepted owners unchanged.
 
-The parcel is a well-mixed fixed-volume thermal inventory with frozen species.
-This first-order partitioned path does not supply chamber acoustics, gas flow,
-pressure-volume work, reactions, evolving geometry or complete bowed-instrument
-body/radiation feedback. The inherited fixed-section, solid-caloric,
-small-strain and source-law limits still apply. The compact pressure observer
-is diagnostic; it is not a second heat source.
+The heat-only path keeps species fixed. The optional
+`ThermalConcentricStringRuntime::step_with_isochoric_gas_nozzle` composition
+then exchanges species and upstream enthalpy with a second finite gas parcel
+using the original source-resolved nozzle. Both directions preserve species
+inventories and total extensive gas storage; transported flow work and jet
+energy are not deposited again as heat. Final drag and pressure use the
+conserved mixture on the continuing layered motion, with one sample and the
+previous accepted observer acceleration. Heat-stage gas/source receipts remain
+explicitly separate from the subsequent flow endpoint. All four owners publish
+together.
+
+These are well-mixed fixed-volume gas inventories. Heat followed by flow is
+an explicit first-order partition and needs physical timestep refinement.
+No chamber acoustics, resolved jet force, pressure-volume work, reactions,
+evolving geometry or complete bowed-instrument body/radiation feedback is
+supplied. The inherited fixed-section, solid-caloric, small-strain and source-law
+limits still apply. The compact pressure observer is diagnostic; it is not a
+second heat source.
 
 The source-bound conduction adapter also checks the actual exposed outer area,
 original conductivity claim and conditions, and the native lumped Biot limit.
@@ -8319,3 +8331,33 @@ material-only substitutions, full phase-chart retention and late refusal/retry.
 All four changed Rust files passed syntax parsing; independent two-element
 reference equations and bounded source/API/physics reviews were completed.
 Native compilation, Cargo tests and rustfmt remain unexecuted in this environment.
+
+
+### Shared unsteady planar and circular fluid passages
+
+`slit_channel::FixedChannel` retains either the original planar slit or an
+explicit circular passage. Both use one finite-volume momentum owner with
+geometry-supplied cell areas, masses and no-slip shear conductances. Circular
+annuli implement radial symmetry at the axis and the half-cell outer-wall
+condition. The same pressure/flow condensation, continuing velocity field and
+signed work account distinguish kinetic storage, physical viscous loss and
+backward-Euler numerical loss. Failed proposals publish no accepted history.
+The original public `SlitChannel` constructors and methods remain available;
+coupled consumers select `.slit()` or `.circular()` for geometry-specific data.
+
+Material-modal reed files accept `supply circular LENGTH_M RADIUS_M CELLS`.
+The shared DG grammar accepts
+`dg_terminal_circular PORT_ID RADIUS_M LENGTH_M CELLS MAX_MACH`. Each uses
+the actual retained local gas and mechanical clock. Circular and slit terminal
+fields share the declared cell budget and original duct/radiation transaction;
+microphone pressure follows the accepted physical flow. CLI provenance retains
+the actual radius and radial resolution. No instrument-name dispatch, fitted
+oscillator or independent material constants are introduced.
+
+This is a fixed, fully developed, incompressible laminar passage reduction.
+Additional passage length must not duplicate either acoustic duct. Entrance
+development, taper, turbulent transport, compressible passage storage and moving
+walls require separate admitted models. Regression definitions cover radial
+Poiseuille and temporal Fourier–Bessel refinement, signed work and rollback,
+material/atmosphere changes through reed and flute mechanics and pressure,
+and the original uncondensed multiport equations with mixed passage geometries.

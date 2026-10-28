@@ -8,7 +8,8 @@
 
 use super::*;
 use crate::bernoulli_aperture::slit_channel::{
-    SlitChannel, SlitChannelSpec, SlitChannelStep, SlitExit,
+    FixedChannel, SlitChannel, SlitChannelSpec, SlitChannelStep, SlitExit,
+    circular::{CircularChannel, CircularChannelSpec},
 };
 use fs_material::gas::GasState;
 
@@ -31,6 +32,37 @@ pub enum DgTerminalChannelKind {
         /// Maximum absolute resolved cell speed / local sound speed, in (0,.3].
         maximum_mach: f64,
     },
+    /// Fixed circular no-slip passage with an independently resolved radial
+    /// momentum field. This is additional geometry between the duct pressure
+    /// plane and its exterior load, not a second loss on an existing chimney.
+    /// Axial development, compressible storage and entrance jets are absent.
+    Circular {
+        radius_m: f64,
+        length_m: f64,
+        radial_cells: usize,
+        /// Maximum absolute resolved cell speed / local sound speed, in (0,.3].
+        maximum_mach: f64,
+    },
+}
+
+impl DgTerminalChannelKind {
+    pub(super) fn section(self) -> Option<(f64, usize)> {
+        match self {
+            Self::Closed => None,
+            Self::Slit { width_m, height_m, transverse_cells, .. } =>
+                Some((width_m * height_m, transverse_cells)),
+            Self::Circular { radius_m, radial_cells, .. } =>
+                Some((core::f64::consts::PI * radius_m * radius_m, radial_cells)),
+        }
+    }
+
+    fn maximum_mach(self) -> Option<f64> {
+        match self {
+            Self::Closed => None,
+            Self::Slit { maximum_mach, .. } | Self::Circular { maximum_mach, .. } =>
+                Some(maximum_mach),
+        }
+    }
 }
 
 /// Original external port and an explicit finite gap or fixed closure.
@@ -42,7 +74,8 @@ pub struct DgTerminalChannelInput {
 
 impl DgTerminalChannelInput {
     /// Geometry-only admission, usable before source preparation/material I/O.
-    /// The planar reduction requires height <= width/10 and length/10.
+    /// The planar reduction requires height <= width/10 and length/10;
+    /// the circular reduction requires radius <= length/10.
     pub fn validate(&self) -> Result<(), AcousticRealizeError> {
         if let DgTerminalChannelKind::Slit {
             width_m, height_m, length_m, transverse_cells, maximum_mach,
@@ -57,6 +90,19 @@ impl DgTerminalChannelInput {
                 return Err(invalid("DG terminal slit requires a finite thin planar gap, 2..=4096 cells and Mach in (0,.3]"));
             }
         }
+        if let DgTerminalChannelKind::Circular {
+            radius_m, length_m, radial_cells, maximum_mach,
+        } = self.kind {
+            if ![radius_m, length_m, maximum_mach].iter()
+                .all(|value| value.is_finite() && *value > 0.0)
+                || radius_m > 0.1 * length_m
+                || !(2..=MAX_DG_TERMINAL_TRANSVERSE_CELLS).contains(&radial_cells)
+                || maximum_mach > 0.3
+                || !(core::f64::consts::PI * radius_m * radius_m).is_finite()
+            {
+                return Err(invalid("DG terminal circular passage requires a finite slender cylinder, 2..=4096 cells and Mach in (0,.3]"));
+            }
+        }
         Ok(())
     }
 }
@@ -67,7 +113,7 @@ impl DgTerminalChannelInput {
 pub struct DgTerminalChannelLoad {
     input: DgTerminalChannelInput,
     gas: GasState,
-    channel: Option<SlitChannel>,
+    channel: Option<FixedChannel>,
     cumulative_pressure_work_j: f64,
     cumulative_viscous_dissipation_j: f64,
     cumulative_numerical_dissipation_j: f64,
@@ -76,7 +122,7 @@ pub struct DgTerminalChannelLoad {
 impl DgTerminalChannelLoad {
     pub const fn input(&self) -> &DgTerminalChannelInput { &self.input }
     pub const fn gas(&self) -> &GasState { &self.gas }
-    pub const fn channel(&self) -> Option<&SlitChannel> { self.channel.as_ref() }
+    pub const fn channel(&self) -> Option<&FixedChannel> { self.channel.as_ref() }
     pub fn stored_energy_j(&self) -> f64 {
         self.channel.as_ref().map_or(0.0, |channel| channel.last_step().kinetic_energy_j)
     }
@@ -93,7 +139,7 @@ impl DgTerminalChannelLoad {
     pub(super) fn pressure_load(&self)
         -> Result<Option<crate::bernoulli_aperture::slit_channel::SlitChannelLoad>, AcousticRealizeError>
     {
-        self.channel.as_ref().map(SlitChannel::pressure_load).transpose()
+        self.channel.as_ref().map(FixedChannel::pressure_load).transpose()
     }
 }
 
@@ -129,7 +175,7 @@ impl DgTerminalChannelFrame {
 }
 
 impl DgPortLoad {
-    /// Insert fixed finite slit channels or rigid closures before the existing
+    /// Insert fixed finite slit/circular channels or rigid closures before the existing
     /// full exterior impedance. Unspecified terminals retain their original
     /// direct connection. Material density, viscosity and sound speed come from
     /// the ACTUAL local terminal, including the end of a finite DG chimney.
@@ -137,8 +183,10 @@ impl DgPortLoad {
     /// All supplied geometry is cold; runtime opening changes would require
     /// moving-boundary work, displaced volume and conservative field transfer
     /// and are deliberately not exposed by this fixed-geometry constructor.
-    /// The slit is the original laminar planar Stokes reduction. This does not
-    /// change the exterior surface geometry or resolve an annular pad opening.
+    /// Both geometries use the original laminar unsteady Stokes owner. This
+    /// does not change the exterior surface geometry or resolve an annular pad
+    /// opening. Each channel is an additional supplied passage; it must not
+    /// duplicate geometry or losses already resolved by a DG chimney.
     pub fn with_terminal_channels(
         mut self, inputs: Vec<DgTerminalChannelInput>, maximum_transverse_cells: usize,
     ) -> Result<Self, AcousticRealizeError> {
@@ -161,13 +209,13 @@ impl DgPortLoad {
             {
                 return Err(invalid("DG terminal channels require distinct actual terminal ports"));
             }
-            if let DgTerminalChannelKind::Slit { width_m, height_m, transverse_cells, .. } = input.kind {
+            if let Some((channel_area, transverse_cells)) = input.kind.section() {
                 cells = cells.checked_add(transverse_cells)
                     .ok_or_else(|| invalid("DG terminal transverse state count overflow"))?;
                 if self.terminal_area_m2(input.port)?.is_some_and(|area|
-                    width_m * height_m > area * (1.0 + 64.0 * f64::EPSILON))
+                    channel_area > area * (1.0 + 64.0 * f64::EPSILON))
                 {
-                    return Err(invalid("DG terminal gap area exceeds its actual attached duct area"));
+                    return Err(invalid("DG terminal channel area exceeds its actual attached duct area"));
                 }
             }
         }
@@ -183,7 +231,13 @@ impl DgPortLoad {
                     Some(SlitChannel::from_gas(&gas, SlitChannelSpec {
                         length_m, width_m, height_m, transverse_cells,
                         sample_period_s: self.propagator.dt(), exit: SlitExit::StaticPressure,
-                    })?)
+                    })?.into())
+                }
+                DgTerminalChannelKind::Circular { radius_m, length_m, radial_cells, .. } => {
+                    Some(CircularChannel::from_gas(&gas, CircularChannelSpec {
+                        length_m, radius_m, radial_cells,
+                        sample_period_s: self.propagator.dt(), exit: SlitExit::StaticPressure,
+                    })?.into())
                 }
             };
             channels.push(DgTerminalChannelLoad { input, gas, channel,
@@ -225,18 +279,18 @@ impl DgPortLoad {
                 let constitutive_drop = relation.pressure_drop_pa(flow)?;
                 let next = channel.preview_at_flow(flow)?;
                 let step = next.last_step();
-                let DgTerminalChannelKind::Slit { maximum_mach, .. } = owner.input.kind
-                    else { return Err(invalid("DG terminal channel lost its physical kind")); };
+                let maximum_mach = owner.input.kind.maximum_mach()
+                    .ok_or_else(|| invalid("DG terminal channel lost its physical kind"))?;
                 if next.velocities_m_s().iter().any(|speed|
                     speed.abs() > maximum_mach * owner.gas.sound_speed)
                 {
-                    return Err(invalid("DG terminal slit exceeded its declared local resolved-speed Mach limit"));
+                    return Err(invalid("DG terminal channel exceeded its declared local resolved-speed Mach limit"));
                 }
                 let flow_residual = step.flow_m3_s - flow;
                 let scale = step.flow_m3_s.abs() + flow.abs()
                     + relation.history_pressure_pa.abs() / relation.impedance_pa_s_m3;
                 if !scale.is_finite() || flow_residual.abs() > 1e-10 * scale.max(1e-300) {
-                    return Err(invalid("DG terminal slit disagrees with the shared held flow"));
+                    return Err(invalid("DG terminal channel disagrees with the shared held flow"));
                 }
                 candidate.cumulative_pressure_work_j += step.pressure_work_j;
                 candidate.cumulative_viscous_dissipation_j += step.viscous_dissipation_j;

@@ -511,10 +511,20 @@ pub(super) fn material_modal_provenance(
     let wall_model = if directional_walls { "isotropic or principal-aligned orthotropic" } else { "isotropic" };
     let wall_json = format!(",\"material_duct_walls\":[{walls}],\"duct_wall_scope\":\"fixed-state local {wall_model} membrane; original regional duct gas; no full shell or exterior wall radiation\"");
     let supply = system.supply_channel().map_or_else(|| "null".into(), |channel| {
-        let spec = channel.spec();
-        format!("{{\"length_m\":{:e},\"width_m\":{:e},\"height_m\":{:e},\"transverse_cells\":{},\"density_kg_m3\":{:e},\"viscosity_pa_s\":{:e}}}",
-            spec.length_m, spec.width_m, spec.height_m, spec.transverse_cells,
-            channel.gas().density, channel.gas().dynamic_viscosity)
+        match channel {
+            fs_couple::bernoulli_aperture::slit_channel::FixedChannel::Slit(channel) => {
+                let spec = channel.spec();
+                format!("{{\"length_m\":{:e},\"width_m\":{:e},\"height_m\":{:e},\"transverse_cells\":{},\"density_kg_m3\":{:e},\"viscosity_pa_s\":{:e}}}",
+                    spec.length_m, spec.width_m, spec.height_m, spec.transverse_cells,
+                    channel.gas().density, channel.gas().dynamic_viscosity)
+            }
+            fs_couple::bernoulli_aperture::slit_channel::FixedChannel::Circular(channel) => {
+                let spec = channel.spec();
+                format!("{{\"kind\":\"circular\",\"length_m\":{:e},\"radius_m\":{:e},\"radial_cells\":{},\"density_kg_m3\":{:e},\"viscosity_pa_s\":{:e}}}",
+                    spec.length_m, spec.radius_m, spec.radial_cells,
+                    channel.gas().density, channel.gas().dynamic_viscosity)
+            }
+        }
     });
     let (propagator, linear_scope) = match i.propagator {
         fs_couple::bernoulli_aperture::paired::BladePropagator::Midpoint =>

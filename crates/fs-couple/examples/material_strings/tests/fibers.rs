@@ -500,3 +500,86 @@ fn fiber_strain_domain_resolution_and_joint_config_refuse_before_material_io() {
         assert_eq!(reads, 0);
     });
 }
+
+fn moving_fiber_spec() -> input::Spec {
+    let text=include_str!("../fiber-ribbon.material-strings")
+        .replace("48000 4096","48000 256")
+        .replace("\nforces ","\nbow_fiber_motion 1 1000 0.001 1048576\nforces ");
+    let schedule=GestureSchedule::try_new(48000,vec![GestureTrack {
+        id:"bow".into(),target:GestureTarget::BowStroke {string:0},
+        initial:GestureValue::Bow {velocity_m_per_s:0.01,normal_force_n:0.01,station:0.2},
+        events:vec![GestureEvent {time_s:0.001,transition_s:0.001,
+            value:GestureValue::Bow {velocity_m_per_s:-0.01,normal_force_n:0.01,station:0.2}}],
+    }]).unwrap();
+    let mut bytes=format!("{}\nschedule\n",text.split_once("\nschedule\n").unwrap().0).into_bytes();
+    bytes.extend(schedule.to_canonical_bytes());
+    input::Spec::parse(&bytes).unwrap()
+}
+fn moving_fiber_ready(cx:&Cx<'_>,gate:&CancelGate) -> Ready {
+    moving_fiber_spec().compile(cx,gate,|name| Ok(if name=="fiber.fsmatpk" {
+        fiber_pack(1300.0,false)
+    } else { pack(name,7800.0,200_000.0,None) })).unwrap()
+}
+#[test]
+fn native_fiber_acceleration_and_reversal_reach_the_same_pressure_and_pcm_writer() {
+    scoped(|cx,gate| {
+        let mut run=moving_fiber_ready(cx,gate);
+        let original=run.spec.schedule.to_canonical_bytes();
+        let source=run.performance.bank().source().fiber_ribbon().unwrap().station_fraction();
+        let expected=pressure(&mut run,37);
+        assert!(expected.iter().any(|p|p.abs()>1e-12));
+        let state=run.performance.bank().fiber_support_kinematics().unwrap();
+        assert_eq!(state.velocity_m_s,-0.01);
+        assert_ne!(state.station_fraction,source);
+        assert_eq!(run.performance.schedule().to_canonical_bytes(),original);
+        let mut encoded_run=moving_fiber_ready(cx,gate);
+        let (encoded,summary)=encoded_run.write(Cursor::new(Vec::new()),gate).unwrap();
+        let (direct,clips)=fs_couple::pcm_wav::encode_pcm16_wav(&expected,48000,0.01).unwrap();
+        assert_eq!(encoded.into_inner(),direct);
+        assert_eq!(summary.samples,256);
+        assert_eq!(summary.clipped_samples,clips as u64);
+    });
+}
+#[test]
+fn source_motion_does_not_admit_untransported_normal_or_thermal_hair_patches() {
+    scoped(|cx,gate| {
+        let mut contact=contact_spec();
+        contact.bow_fibers.as_mut().unwrap().motion=moving_fiber_spec().bow_fibers.unwrap().motion;
+        let parsed=stops::Profile::parse(include_str!("../fiber-contact.stops").as_bytes());
+        // Compile using the actual source profile through the same helper as
+        // the existing normal-contact fixture, not a fabricated modal map.
+        assert!(parsed.is_ok());
+        let result=contact.compile_with_profiles(cx,gate,None,Some(parsed.unwrap()),|name|Ok(if name=="fiber.fsmatpk" {
+            fiber_pack(1300.0,false)
+        } else {pack(name,7800.0,200_000.0,None)}));
+        assert!(result.is_err());
+    });
+    let text=include_str!("../fiber-ribbon.material-strings");
+    for limits in ["1 0 0.001 1048576","1 1000 0.001 0","NaN 1000 0.001 1048576"] {
+        let text=text.replace("\nforces ",&format!("\nbow_fiber_motion {limits}\nforces "));
+        assert!(input::Spec::parse(text.as_bytes()).is_err());
+    }
+}
+
+#[test]
+fn fiber_control_ticks_activate_targets_for_the_following_mechanical_endpoint() {
+    scoped(|cx,gate| {
+        let mut run=moving_fiber_ready(cx,gate);
+        for sample in 0..97 {
+            let GestureValue::Bow {velocity_m_per_s,..}=run.spec.schedule.sample_value("bow",sample).unwrap()
+                else {panic!("original bow track")};
+            run.performance.block(&mut [0.0]).unwrap();
+            let kinematics=run.performance.bank().fiber_support_kinematics().unwrap();
+            assert_eq!(kinematics.velocity_m_s,velocity_m_per_s);
+            assert_eq!(run.performance.bank().system().samples_rendered(),sample+1);
+            if sample==48 {assert_eq!(kinematics.velocity_m_s,0.01);}
+            if sample==95 {assert!(kinematics.velocity_m_s> -0.01);}
+            if sample==96 {
+                assert_eq!(kinematics.velocity_m_s,-0.01);
+                // Forty-nine initial intervals, then a 48-interval linear
+                // reversal whose integrated support displacement is zero.
+                assert!((kinematics.displacement_m-49.0/48000.0*0.01).abs()<1e-17);
+            }
+        }
+    });
+}
