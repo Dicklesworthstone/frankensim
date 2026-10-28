@@ -274,3 +274,28 @@ fn g0_native_workload_step_cap_accounts_for_switches_before_numerical_work() {
     time(&mut spec).max_steps = 12;
     assert!(spec.validate().is_empty(), "{:?}", spec.validate());
 }
+
+
+#[test]
+fn g1_g3_spatial_ladder_restarts_the_same_event_aligned_power_history_on_each_mesh() {
+    let mut spec = project(1000.0, 2.0, 0.5, true);
+    schedule(&mut spec, &[(0.6, 0.0), (0.8, 10.0), (2.0, 0.0)]);
+    spec.solver.as_mut().unwrap().fidelity = "ladder".into();
+    let steps_per_rung = time(&mut spec).coarse_step_ends_s().unwrap().len() * 3;
+    time(&mut spec).max_steps = (3 * steps_per_rung) as u32;
+    let result = run(&spec);
+    let ladder = result.conduction.get("ladder").unwrap();
+    assert_eq!(ladder.get("rungs").unwrap().as_array().unwrap().len(), 3);
+    close(n(ladder.get("space_time").unwrap(), "forward_steps_completed"),
+        (3 * steps_per_rung) as f64, 0.0);
+    close(result.final_k(), INITIAL_K + 2.0 / (1000.0 * TETRA_VOLUME_M3), 2e-9);
+    close(n(result.transient().get("energy").unwrap(), "stored_change_j"), 2.0, 2e-6);
+    for grid in ["coarse", "fine"] {
+        let rows = result.grid(grid);
+        close(delivered_source_j(rows), 2.0, 2e-12);
+        for event in [0.6_f64, 0.8, 2.0] {
+            assert!(rows.iter().any(|row| n(row, "time_s").to_bits() == event.to_bits()),
+                "every spatial rung retains every source switch");
+        }
+    }
+}

@@ -564,3 +564,24 @@ fn g0_native_enthalpy_refusals_leave_no_published_conduction_field() {
         );
     }
 }
+
+
+#[test]
+fn g1_native_enthalpy_spatial_ladder_preserves_mass_energy_and_shared_time_allowance() {
+    let mut spec = project(6.0, 2.0, &[(-90.0, 203.15, 0.0), (100.0, 393.15, 0.0)]);
+    spec.solver.as_mut().unwrap().fidelity = "ladder".into();
+    time(&mut spec).max_steps = 36;
+    let (_, qoi, conduction, field, _) = run(&spec);
+    let ladder = conduction.get("ladder").unwrap();
+    assert_eq!(ladder.get("rungs").unwrap().as_array().unwrap().len(), 3);
+    close(n(ladder.get("space_time").unwrap(), "forward_steps_completed"), 36.0, 0.0);
+    let history = conduction.get("transient").unwrap();
+    assert_eq!(history.str_field("schema"), Some("fs-cli-transient-enthalpy-v1"));
+    close(n(history, "total_steps"), 12.0, 0.0);
+    close(n(history.get("energy").unwrap(), "stored_change_j"), 10.0, 2e-6);
+    let endpoint = history.get("endpoint").unwrap();
+    close(values(endpoint, "reference_nodal_mass_kg").sum(), 1.0, 2e-12);
+    for h in values(endpoint, "specific_enthalpy_j_kg") { close(h, 10.0, 2e-7); }
+    for temperature in values(&field, "temperature") { close(temperature, 303.15, 2e-7); }
+    close(n(&qoi.get("qoi").unwrap().as_array().unwrap()[0], "value"), 303.15, 2e-7);
+}

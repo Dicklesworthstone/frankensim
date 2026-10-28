@@ -51,10 +51,11 @@ fn close(actual: f64, expected: f64, tolerance: f64) {
 
 #[test]
 fn g1_native_transient_shipped_example_completes_with_retained_time_evidence() {
-    let decoded = fs_project::parse_sexpr(include_str!(
+    let decoded = fs_project::parse_sexpr_migrating(include_str!(
         "../../../../data/reference-project/cooling-transient.fsim"
     ))
-    .unwrap();
+    .unwrap()
+    .decoded;
     assert!(decoded.findings().is_empty(), "{:?}", decoded.findings());
     let ledger = Ledger::open(":memory:").unwrap();
     import_fixture(
@@ -425,12 +426,12 @@ fn g0_native_transient_nonlinear_domain_failure_publishes_no_endpoint() {
 
 #[test]
 fn g0_native_transient_refuses_steady_only_combinations_before_a_field_is_published() {
-    for variant in ["ladder", "adjoint"] {
+    for variant in ["adaptive", "adjoint"] {
         let bytes = tetra_stl();
         let mut spec = conduction_fixture_project(7, &bytes);
         declaration(&mut spec, 1000.0, 2.0);
-        if variant == "ladder" {
-            spec.solver.as_mut().unwrap().fidelity = "ladder".to_string();
+        if variant == "adaptive" {
+            spec.solver.as_mut().unwrap().fidelity = "adaptive".to_string();
         }
         if variant == "adjoint" {
             spec.outputs.as_mut().unwrap().push(OutputRequest {
@@ -459,5 +460,67 @@ fn g0_native_transient_refuses_steady_only_combinations_before_a_field_is_publis
             stage_receipt_hashes(&ledger, error.run.as_ref().unwrap()).len(),
             4
         );
+    }
+}
+
+
+#[test]
+fn g1_g3_g5_native_transient_spatial_ladder_shares_time_work_and_retains_final_mesh() {
+    let mut repeated = None;
+    for allowance in [12, 24, 36, 36] {
+        let bytes = tetra_stl();
+        let mut spec = conduction_fixture_project(7, &bytes);
+        declaration(&mut spec, 100.0, 2.0);
+        spec.solver.as_mut().unwrap().fidelity = "ladder".into();
+        spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+            .transient.as_mut().unwrap().max_steps = allowance;
+        let ledger = Ledger::open(":memory:").unwrap();
+        import_fixture(&ledger, &spec, bytes);
+        let (run, qoi, conduction, field) =
+            run_conjugate_to_completion(&ledger, &decode(&spec), &fixture_cards());
+        let receipt = J::parse(&conduction).unwrap();
+        let ladder = receipt.get("ladder").unwrap();
+        let rungs = ladder.get("rungs").unwrap().as_array().unwrap();
+        assert_eq!(rungs.len(), (allowance / 12) as usize);
+        for pair in rungs.windows(2) {
+            close(n(&pair[1], "tets"), 8.0 * n(&pair[0], "tets"), 0.0);
+            close(n(&pair[1], "h_m"), 0.5 * n(&pair[0], "h_m"), 1e-13);
+        }
+        close(n(receipt.get("mesh").unwrap(), "elements"),
+            n(rungs.last().unwrap(), "tets"), 0.0);
+        let time = receipt.get("transient").unwrap();
+        close(n(time, "total_steps"), 12.0, 0.0);
+        close(n(time, "final_time_s"), 2.0, 0.0);
+        let combined = ladder.get("space_time").unwrap();
+        close(n(combined, "forward_steps_completed"), allowance as f64, 0.0);
+        close(n(combined, "max_forward_steps"), allowance as f64, 0.0);
+        assert_eq!(combined.get("rungs").unwrap().as_array().unwrap().len(), rungs.len());
+        assert_eq!(combined.get("final_temporal_half_width_k"),
+            time.get("temporal_error").unwrap().get("estimated_half_width_k"));
+        assert_eq!(ladder.str_field("stop"),
+            Some(if allowance < 36 { "time-step-budget" } else { "complete" }));
+        close(receipt_number_field(&qoi, "value"),
+            n(time.get("temporal_error").unwrap(), "fine_final_k"), 0.0);
+        let qoi_json = J::parse(&qoi).unwrap();
+        let terms = qoi_json.get("budget").unwrap().as_array().unwrap()[0]
+            .get("terms").unwrap().as_array().unwrap();
+        let discretization = terms.iter()
+            .find(|term| term.str_field("kind") == Some("discretization")).unwrap();
+        if let Some(total) = combined.f64_field("estimated_half_width_k") {
+            close(total, n(combined, "spatial_half_width_k")
+                + n(combined, "final_temporal_half_width_k"), 0.0);
+            assert_eq!(discretization.str_field("state"), Some("interval"));
+            assert_eq!(discretization.get("derivation").unwrap().str_field("method"),
+                Some("spatial-gci-plus-temporal-order-one"));
+        } else {
+            assert_eq!(discretization.str_field("state"), Some("no-data"),
+                "partial or coincident convergence evidence cannot fill the full budget");
+        }
+        if allowance == 36 {
+            let current = (run, qoi, conduction, field);
+            if let Some(previous) = &repeated {
+                assert_eq!(previous, &current, "same spatial/temporal work replays exactly");
+            } else { repeated = Some(current); }
+        }
     }
 }

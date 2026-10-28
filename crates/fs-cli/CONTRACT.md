@@ -1618,11 +1618,25 @@ Native transient conduction is available without a feature flag through the
 schema-v13 `conduction.transient` declaration. The runnable input and commands
 are in `data/reference-project/cooling-transient.fsim` and `TRANSIENT.md`.
 Both backward-Euler grids start from the declared initial state; their
-combined step cap includes the coarse and nested fine solves. The ordinary
-field, thermal QoIs and requirement margin describe the fine final-time
-state. Temporal comparison is separate from the unknown spatial error, and
-no steady algebraic/roundoff certificate or steady input-propagation solve
-is attached. See the retained step/storage receipts for energy and work.
+combined step cap includes the coarse and nested fine solves. With
+`solver.fidelity = "ladder"`, the same cap covers every spatial rung's complete
+coarse/fine trajectory; the next refinement stops with `time-step-budget`
+before allocating a mesh when the remaining allowance cannot fit both grids.
+Each rung independently restarts the original physical initial state and lands
+on the same workload switches. The ordinary field, thermal QoIs and requirement
+margin describe the final completed mesh's fine final-time state.
+
+The conduction receipt's `ladder.space_time` retains per-rung temporal
+estimates and cumulative forward work. Only an observed spatial Richardson
+order plus a measured final-mesh temporal difference supplies the additive
+Estimated Discretization term. The spatial comparison holds the fine time grid
+fixed; the temporal estimate assumes backward-Euler order one. Their sum is
+an asymptotic estimate, not a continuum or continuous-time maximum bound.
+Partial spatial ladders, unobserved spatial order, bitwise spatial agreement,
+or missing temporal evidence leave the full term NO-DATA. A single trajectory
+still has unknown spatial error. Transient adaptive refinement remains refused
+until its own trajectory goal estimator exists; no steady DWR estimator,
+algebraic/roundoff certificate, or input-propagation solve is attached. See the retained step/storage receipts for energy and work.
 Bound temperature-dependent conductivity selects the shared endpoint
 Newton/FGMRES solve with its full k′(T) tangent. Each accepted endpoint retains
 nonlinear work and the joule residual/threshold; material-domain and iteration

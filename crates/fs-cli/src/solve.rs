@@ -236,7 +236,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// and reports independent bath-temperature controls with complete fixed-row
 /// semantics. Previous trajectory receipts and uncertainty calibrations must
 /// not resume under these changed physical and derivative semantics.
-pub const SOLVE_DRIVER_VERSION: u32 = 80;
+/// Version 81 admits native transient spatial ladders with one shared forward
+/// time-step allowance and explicit combined spatial/temporal error evidence.
+pub const SOLVE_DRIVER_VERSION: u32 = 81;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -2265,7 +2267,8 @@ fn richardson(rungs: &[LadderRung], stop: &'static str) -> LadderEstimate {
 #[derive(Debug, Clone, Copy)]
 struct LadderDiscretization {
     half_width_k: f64,
-    /// `observed-order`, `data-range`, or `converged-exactly`.
+    /// Spatial-estimate status, or transient-space-time for the additive
+    /// observed spatial / assumed first-order temporal estimate.
     status: &'static str,
     order: Option<f64>,
     rungs: usize,
@@ -4655,6 +4658,10 @@ fn qoi_receipt(
                             ladder.order.unwrap_or(f64::NAN),
                             ladder.rungs
                         ),
+                        "transient-space-time" => format!(
+                            "additive space-time estimate for the final temperature maximum: spatial Richardson/GCI at the common fine time grid (observed order {:.4}, {} spatial rungs, ratio 2, safety factor 1.25), plus the final mesh's coarse/fine backward-Euler estimate (assumed temporal order one, safety factor 1.25); no continuum or continuous-time maximum bound",
+                            ladder.order.unwrap_or(f64::NAN), ladder.rungs
+                        ),
                         "adaptive-enrichment" => format!(
                             "goal-oriented adaptive refinement met its tolerance after {} solved meshes; half-width = 2 x the larger of the dual-weighted estimate and the measured change against the published mesh's uniform ratio-2 enrichment (Richardson at an ASSUMED pointwise order >= 1)",
                             ladder.rungs
@@ -4875,6 +4882,7 @@ fn qoi_receipt(
                 measured_terms += 1;
                 let (method, factor) = match ladder.status {
                     "observed-order" => ("richardson-gci", LADDER_SAFETY_FACTOR),
+                    "transient-space-time" => ("spatial-gci-plus-temporal-order-one", 1.0),
                     "adaptive-enrichment" => ("adaptive-enrichment-order-one", ADAPTIVE_ORDER_ONE_FACTOR),
                     "converged-exactly" => ("bitwise-agreement", 0.0),
                     _ => ("eca-hoekstra-data-range", LADDER_DATA_RANGE_FACTOR),
@@ -6682,6 +6690,7 @@ fn conduction_solve_receipt(
         // the region-owned mesh, source lumping, interface lowering, boundary
         // lowering by parent facet, the conjugate exchange), so it is one
         // function of the labeled complex and runs once per rung.
+        let spatial_time_work = transient::spatial::SpatialWork::new(spec)?;
         let solve_rung = |labeled: &fs_mesh::LabeledTetComplex| -> Result<RungSolved, SolveRefusal> {
         check_deadline()?;
         let census = labeled.quality();
@@ -6945,17 +6954,22 @@ fn conduction_solve_receipt(
                 mesh: solve_mesh, boundary: &boundary, material: &fallback,
                 element_materials: Some(&element_materials), source: &source,
             };
+            if let Some(study) = &spatial_time_work {
+                study.begin_rung()?;
+            }
             let time = transient::solve(
                 &cx, spec, problem, interfaces.as_ref(), &labels, &region_ids,
                 radiation.as_ref(), airflow_path.as_ref(), &natural_laws,
                 pressure_pa, linear, deadline,
             )?;
+            if let Some(study) = &spatial_time_work {
+                study.finish_rung(time.temporal_half_width_k)?;
+            }
             transient_energy_w = Some((time.endpoint_storage_w, time.endpoint_energy_residual_w));
             transient_fragment = Some(time.receipt);
             natural_fragment = time.natural_receipt;
-            // The temporal estimate belongs to the retained time comparison.
-            // Spatial error remains unknown, so it cannot fill Discretization.
-            let _ = time.temporal_half_width_k;
+            // The spatial-study owner retains this rung's temporal evidence.
+            // A single trajectory still cannot fill full Discretization.
             (time.solution, time.conjugate_receipt, time.derived_boundary,
                 airflow_path.as_ref().map_or_else(Vec::new, conjugate::ConjugatePath::air_paths))
         } else if !laws.is_empty() && !natural_laws.is_empty() {
@@ -7206,6 +7220,10 @@ fn conduction_solve_receipt(
                 ladder_stop = "memory-budget";
                 break;
             }
+            if spatial_time_work.as_ref().is_some_and(|study| !study.can_start_rung()) {
+                ladder_stop = "time-step-budget";
+                break;
+            }
             if work.is_requested() {
                 return Err(cancelled());
             }
@@ -7244,6 +7262,8 @@ fn conduction_solve_receipt(
             }
         }
         let estimate = richardson(&rungs, ladder_stop);
+        let space_time = spatial_time_work.as_ref()
+            .map(|study| study.report(&estimate)).transpose()?;
         let roundoff = match temperature_maximum_region(spec) {
             Some(region) if roundoff_wanted => Some(roundoff_term(&cx, &solved, region, &region_ids, work)?),
             _ => None,
@@ -7258,9 +7278,9 @@ fn conduction_solve_receipt(
             Some(mean_bound::extract(&cx, spec, cards, &solved, &region_ids, work)?)
         } else { None };
         check_deadline()?;
-        Ok((audited, solved, region_ids, rungs, estimate, adaptive_fragment, adaptive_discretization, roundoff, nominal_adjoint_fragment, mean_bound_fragment))
+        Ok((audited, solved, region_ids, rungs, estimate, space_time, adaptive_fragment, adaptive_discretization, roundoff, nominal_adjoint_fragment, mean_bound_fragment))
     })?;
-    let (audited, solved, region_ids, ladder_rungs, ladder_estimate, adaptive_fragment, adaptive_discretization, roundoff, nominal_adjoint_fragment, mean_bound_fragment) =
+    let (audited, solved, region_ids, ladder_rungs, ladder_estimate, space_time, adaptive_fragment, adaptive_discretization, roundoff, nominal_adjoint_fragment, mean_bound_fragment) =
         result;
     let nominal_adjoint_fragment = nominal_adjoint_fragment.map_or_else(String::new,
         |receipt| format!(",\"nominal_adjoint\":{receipt}"));
@@ -7429,17 +7449,22 @@ fn conduction_solve_receipt(
         optional("ladder.half_width_k", ladder_estimate.half_width_k)?,
         json_string(&ladder_estimate.detail),
     );
-    // The ladder and adaptive fidelities are exclusive; either may supply
-    // the Discretization term, and neither is a continuum bound.
-    let discretization = ladder_estimate
-        .half_width_k
-        .map(|half_width_k| LadderDiscretization {
+    let (space_time_json, space_time_discretization) = space_time.map_or_else(
+        || (String::new(), None),
+        |(receipt, term)| (format!(",\"space_time\":{receipt}"), term),
+    );
+    // A transient maximum needs BOTH spatial and temporal evidence. A
+    // fixed-time-grid spatial difference alone cannot fill Discretization.
+    let discretization = if transient_requested {
+        space_time_discretization
+    } else {
+        ladder_estimate.half_width_k.map(|half_width_k| LadderDiscretization {
             half_width_k,
             status: ladder_estimate.status,
             order: ladder_estimate.order,
             rungs: ladder_estimate.rungs,
-        })
-        .or(adaptive_discretization);
+        }).or(adaptive_discretization)
+    };
     // For a transient field the net input is physical heat storage. Numerical
     // closure additionally subtracts the independently checked final ΔU/dt.
     let (energy_closure_w, energy_relative_closure, storage_fragment) =
@@ -7466,7 +7491,7 @@ fn conduction_solve_receipt(
          \"dirichlet_in_w\":{},\"closure_w\":{},\"relative_closure\":{}{storage_fragment}}},\
          \"recovery\":{{\"memory_bytes\":{},\"max_depth\":{},\"max_steiner\":{},\
          \"segments\":{},\"facets\":{},\"flat_tets\":{}}},\
-         \"ladder\":{{\"rungs\":[{}],\"stop\":{},\"richardson\":{}}},\
+         \"ladder\":{{\"rungs\":[{}],\"stop\":{},\"richardson\":{}{space_time_json}}},\
          \"adaptive\":{},\"conjugate\":{},\"radiation\":{},\"solver_control\":{},{}\"authority\":{},\"no_claim\":{}{nominal_adjoint_fragment}{mean_bound_fragment}{transient_json}}}",
         json_string(CONDUCTION_RECEIPT_SCHEMA),
         json_string(&run.to_hex()),

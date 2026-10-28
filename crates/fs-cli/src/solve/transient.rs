@@ -34,6 +34,7 @@ mod adjoint;
 mod conjugate;
 mod enthalpy;
 mod natural;
+pub(super) mod spatial;
 mod workload;
 use workload::{TimeGrids, Workload};
 
@@ -148,10 +149,10 @@ pub(super) fn admit(spec: &ProjectSpec) -> Result<(), SolveRefusal> {
     if spec
         .solver
         .as_ref()
-        .is_some_and(|solver| matches!(solver.fidelity.as_str(), "adaptive" | "ladder"))
+        .is_some_and(|solver| solver.fidelity == "adaptive")
     {
         return Err(bad(
-            "the declared transient time-work cap applies to one fixed mesh; spatial ladder/adaptive runs are not yet admitted together with it",
+            "transient adaptive refinement requires a trajectory goal estimator; use the uniform spatial ladder with its shared time-step allowance",
         ));
     }
     if spec
