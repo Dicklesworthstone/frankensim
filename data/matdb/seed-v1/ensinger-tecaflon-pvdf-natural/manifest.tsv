@@ -12,6 +12,9 @@ property	tensile_strength	tensile-strength	dimensional
 property	flexural_modulus	flexural-modulus	dimensional
 property	compression_modulus	compression-modulus	dimensional
 property	compressive_stress	compressive-stress	dimensional
+property	mean_longitudinal_thermal_expansion_coefficient_from_23c	mean-longitudinal-thermal-expansion-coefficient-from-23c	dimensional
+axis	source_reference_temperature	source-reference-temperature	absolute-temperature
+axis	source_range_end_temperature	source-range-end-temperature	absolute-temperature
 axis	source_grade_tecaflon_pvdf_natural	source-grade-tecaflon-pvdf-natural	dimensional
 axis	source_temperature_known	source-temperature-known	dimensional
 axis	source_moisture_condition_known	source-moisture-condition-known	dimensional

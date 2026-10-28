@@ -54,3 +54,20 @@ validity	compression-points	source_temperature_known	0	0	1
 validity	compression-points	source_moisture_condition_known	0	0	1
 validity	compression-points	source_pressure_known	0	0	1
 validity	compression-points	test_speed	8.333333333333333e-5	8.333333333333333e-5	m/s
+observation	longitudinal-clte	TECAPET white PET stock shapes	Ensinger 2023-07-19 AE, p. 1 longitudinal CLTE rows, DIN EN ISO 11359-1;2	The source gives 8 and 10 times 10^-5 K^-1 longitudinal CLTE over 23–60 C and 23–100 C respectively. These are separate interval means: endpoint engineering strain relative to the 23 C length is the mean coefficient times the temperature interval. Producer comparison guidelines for extruded/machined reference specimens, typically rods of diameter 40–60 mm; not guaranteed limits, batch measurements, PET film, PETG or printed parts. The stated longitudinal direction and interval endpoints do not establish transverse, volumetric or instantaneous expansion, a continuous strain law, or a temperature-dependent density law. The source temperature intervals are explicit; moisture conditioning, pressure and statistical uncertainty remain unstated. Service-temperature limits do not widen either interval observation.
+scalar	mean-longitudinal-60c	longitudinal-clte	mean_longitudinal_thermal_expansion_coefficient_from_23c	8e-5	K^-1	constant
+uncertainty	mean-longitudinal-60c	unstated	-	-	-	-
+validity	mean-longitudinal-60c	source_reference_temperature	296.15	296.15	K
+validity	mean-longitudinal-60c	source_range_end_temperature	333.15	333.15	K
+validity	mean-longitudinal-60c	source_grade_tecapet_white	1	1	1
+validity	mean-longitudinal-60c	source_temperature_known	1	1	1
+validity	mean-longitudinal-60c	source_moisture_condition_known	0	0	1
+validity	mean-longitudinal-60c	source_pressure_known	0	0	1
+scalar	mean-longitudinal-100c	longitudinal-clte	mean_longitudinal_thermal_expansion_coefficient_from_23c	10e-5	K^-1	constant
+uncertainty	mean-longitudinal-100c	unstated	-	-	-	-
+validity	mean-longitudinal-100c	source_reference_temperature	296.15	296.15	K
+validity	mean-longitudinal-100c	source_range_end_temperature	373.15	373.15	K
+validity	mean-longitudinal-100c	source_grade_tecapet_white	1	1	1
+validity	mean-longitudinal-100c	source_temperature_known	1	1	1
+validity	mean-longitudinal-100c	source_moisture_condition_known	0	0	1
+validity	mean-longitudinal-100c	source_pressure_known	0	0	1

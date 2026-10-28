@@ -2,6 +2,27 @@ frankensim.matdb-source.v1
 observation	tk14401-physical-reference	stainless steel 1.4401 producer reference	thyssenkrupp Materials UK, November 2017, page 2 physical properties	Grade-level reference inputs, not coupon measurements. The physical table does not identify pressure, uncertainty or a specific heat treatment. The separate page-1 strength table specifies solution annealing; that condition is not silently assigned here. No equivalence to the generic NASA 316 specimen, 316L or a common measured property distribution is asserted.
 observation	modulus	stainless steel 1.4401	page 2 modulus column	Source units kN/mm2 convert to GPa. Piecewise-linear interpolation between the four listed temperatures is an explicit engineering approximation, not measured interior values or an error certificate. No Poisson ratio or complete elastic tensor is supplied.
 observation	mean-expansion	stainless steel 1.4401	page 2 expansion intervals	Each coefficient is a mean between 20 C and its named endpoint. Endpoint engineering strain relative to the 20 C length is mean coefficient times the temperature interval. These distinct interval observations must not be integrated as instantaneous alpha(T). No continuous strain law or density law is inferred.
+observation	reference-state	stainless steel 1.4401	page 2 density, thermal conductivity, specific thermal capacity and specific electrical resistivity columns at 20 C	Each property is a grade-level producer reference at exactly 20 C. Density 8.0 kg/dm3 converts to 8000 kg/m3; specific electrical resistivity 0.75 Ohm mm2/m converts to 7.5e-7 Ohm m. The source gives thermal conductivity 15 W/(m K) and specific heat capacity 500 J/(kg K). No temperature dependence or validity away from 20 C is inferred from the neighboring modulus and expansion tables. Heat treatment, pressure, test method and statistical uncertainty are not specified for these reference values.
+scalar	density-20c	tk14401-physical-reference,reference-state	density	8000	kg/m3	constant
+uncertainty	density-20c	unstated	-	-	-	-
+validity	density-20c	temperature	293.15	293.15	K
+validity	density-20c	source_heat_treatment_known	0	0	1
+validity	density-20c	source_pressure_known	0	0	1
+scalar	conductivity-20c	tk14401-physical-reference,reference-state	thermal_conductivity	15	W/m/K	constant
+uncertainty	conductivity-20c	unstated	-	-	-	-
+validity	conductivity-20c	temperature	293.15	293.15	K
+validity	conductivity-20c	source_heat_treatment_known	0	0	1
+validity	conductivity-20c	source_pressure_known	0	0	1
+scalar	heat-capacity-20c	tk14401-physical-reference,reference-state	specific_heat_capacity	500	J/kg/K	constant
+uncertainty	heat-capacity-20c	unstated	-	-	-	-
+validity	heat-capacity-20c	temperature	293.15	293.15	K
+validity	heat-capacity-20c	source_heat_treatment_known	0	0	1
+validity	heat-capacity-20c	source_pressure_known	0	0	1
+scalar	resistivity-20c	tk14401-physical-reference,reference-state	electrical_resistivity	7.5e-7	Ohm*m	constant
+uncertainty	resistivity-20c	unstated	-	-	-	-
+validity	resistivity-20c	temperature	293.15	293.15	K
+validity	resistivity-20c	source_heat_treatment_known	0	0	1
+validity	resistivity-20c	source_pressure_known	0	0	1
 curve	E	tk14401-physical-reference,modulus	young_modulus	temperature	K	GPa	293.15:200,473.15:186,673.15:172,773.15:165	linear
 uncertainty	E	unstated	-	-	-	-
 validity	E	temperature	293.15	773.15	K

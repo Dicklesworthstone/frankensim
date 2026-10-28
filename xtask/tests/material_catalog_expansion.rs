@@ -621,7 +621,11 @@ fn g0_g3_plastics_keep_grade_test_speed_and_discrete_compression() {
         ("tecason-s-natural", 1240.0, 1200.0, 0.21, 2.7e9),
         ("tecamid-66-natural", 1150.0, 1500.0, 0.36, 3.5e9),
     ] {
-        let pack = compile(&format!("ensinger-{grade}"), 8);
+        let expanded = matches!(
+            grade,
+            "tecaform-ah-natural" | "tecamid-6-natural" | "tecapet-white" | "tecaflon-pvdf-natural"
+        );
+        let pack = compile(&format!("ensinger-{grade}"), if expanded { 10 } else { 8 });
         let grade_axis = format!("source-grade-{grade}");
         let p = plastic_point(&grade_axis);
         sample(&pack, "density", RHO, &p, rho);
@@ -672,6 +676,181 @@ fn g0_g3_plastics_keep_grade_test_speed_and_discrete_compression() {
             refuses(&pack, "compressive-stress", PA, &between);
         }
     }
+}
+
+#[test]
+fn g0_g3_four_polymer_longitudinal_intervals_drive_source_bound_length() {
+    for (grade, expected) in [
+        ("tecaform-ah-natural", [(13e-5, 0.00481), (14e-5, 0.01078)]),
+        ("tecamid-6-natural", [(12e-5, 0.00444), (13e-5, 0.01001)]),
+        ("tecapet-white", [(8e-5, 0.00296), (10e-5, 0.00770)]),
+        (
+            "tecaflon-pvdf-natural",
+            [(16e-5, 0.00592), (18e-5, 0.01386)],
+        ),
+    ] {
+        let pack = compile(&format!("ensinger-{grade}"), 10);
+        let at = plastic_point(&format!("source-grade-{grade}"));
+        catalog_longitudinal_expansion(&pack, &at, expected);
+    }
+}
+
+/// Longitudinal interval means reach the original engineering-strain owner.
+/// This supplies no transverse strain or continuous instantaneous-alpha law.
+fn catalog_longitudinal_expansion(
+    pack: &NormalizedPack,
+    original: &QueryPoint,
+    expected: [(f64, f64); 2],
+) {
+    use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack};
+    use fs_material::state_point::{
+        MaterialPropertySelection, resolve_mean_thermal_expansion_strain,
+    };
+    let normalized = NormalizedMaterialCardPack::new(
+        MaterialStateId {
+            chemistry: pack.pack_id().into(),
+            phase: "solid polymer stock shape".into(),
+            process: "producer longitudinal interval means; original grade and conditioning".into(),
+            revision: 0,
+        },
+        pack.clone(),
+    )
+    .unwrap();
+    let card = normalized.card();
+    let coefficient = key(
+        "mean-longitudinal-thermal-expansion-coefficient-from-23c",
+        Dims([0, 0, 0, -1, 0, 0]),
+    );
+    for (endpoint, (alpha, strain)) in [333.15, 373.15].into_iter().zip(expected) {
+        let at = temperature(
+            temperature(
+                original
+                    .clone()
+                    .with("source-temperature-known", 1.0)
+                    .unwrap(),
+                "source-reference-temperature",
+                296.15,
+            ),
+            "source-range-end-temperature",
+            endpoint,
+        );
+        let resolve = |p: &QueryPoint| {
+            resolve_mean_thermal_expansion_strain(
+                card,
+                &coefficient,
+                p,
+                "source-reference-temperature",
+                "source-range-end-temperature",
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+        };
+        sample(pack, coefficient.name(), coefficient.dims(), &at, alpha);
+        let result = resolve(&at).unwrap();
+        assert!((result.engineering_strain() - strain).abs() < 1e-14);
+        assert_eq!(result.reference_temperature_k(), 296.15);
+        assert_eq!(result.endpoint_temperature_k(), endpoint);
+        assert_eq!(result.resolved().card_identity(), card.content_hash());
+        for property in result.resolved().properties() {
+            card.claims()
+                .verify_receipt(&property.answer().receipt)
+                .unwrap();
+        }
+        // Free endpoint length of a 250 mm longitudinal coupon.
+        let length_m = 0.25 * (1.0 + result.engineering_strain());
+        assert!((length_m - 0.25 - 0.25 * strain).abs() < 1e-15);
+        for wrong in [
+            at.clone()
+                .with("source-range-end-temperature", endpoint - 1.0)
+                .unwrap(),
+            at.clone()
+                .with("source-reference-temperature", 293.15)
+                .unwrap(),
+            at.clone().with("source-temperature-known", 0.0).unwrap(),
+            at.clone().with("source-pressure-known", 1.0).unwrap(),
+        ] {
+            assert!(resolve(&wrong).is_err());
+        }
+        refuses(
+            pack,
+            "linear_thermal_expansion_coefficient",
+            coefficient.dims(),
+            &at,
+        );
+        eprintln!(
+            "{}: longitudinal interval ending {endpoint} K gives strain {strain}, length {length_m} m",
+            pack.pack_id()
+        );
+    }
+}
+
+#[test]
+fn g0_g3_stainless_reference_properties_drive_only_the_supported_slab_state() {
+    use fs_conduction::{SlabConductivityQuery, ThermalResistanceTerm};
+    use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack};
+    let pack = compile("stainless-14401-thyssenkrupp-2017", 10);
+    let at = temperature(
+        flags(&[
+            ("source-heat-treatment-known", 0.0),
+            ("source-pressure-known", 0.0),
+        ]),
+        "temperature",
+        293.15,
+    );
+    for (name, dims, value) in [
+        ("density", RHO, 8000.0),
+        ("specific-heat-capacity", CP, 500.0),
+        ("thermal-conductivity", K, 15.0),
+        ("electrical-resistivity", Dims([3, 1, -3, 0, -2, 0]), 7.5e-7),
+    ] {
+        sample(&pack, name, dims, &at, value);
+        for wrong in [
+            at.clone().with("temperature", 293.16).unwrap(),
+            at.clone().with("source-heat-treatment-known", 1.0).unwrap(),
+            at.clone().with("source-pressure-known", 1.0).unwrap(),
+        ] {
+            refuses(&pack, name, dims, &wrong);
+        }
+    }
+    let normalized = NormalizedMaterialCardPack::new(
+        MaterialStateId {
+            chemistry: pack.pack_id().into(),
+            phase: "solid".into(),
+            process: "producer grade reference at exactly 20 C; heat treatment unknown".into(),
+            revision: 0,
+        },
+        pack,
+    )
+    .unwrap();
+    let conductivity = key("thermal-conductivity", K);
+    let card = normalized.card();
+    let term = ThermalResistanceTerm::slab_from_card(
+        "reference steel wall",
+        0.02,
+        0.004,
+        card,
+        &conductivity,
+        &at,
+        SelectionPolicy::SingleClaimOnly,
+    )
+    .unwrap();
+    assert!((term.value_k_per_w() - 1.0 / 3.0).abs() < 1e-14);
+    // The neighboring E(T) curve does not widen these singleton thermal facts.
+    assert!(
+        ThermalResistanceTerm::slab_over_temperature_span_from_card(
+            "unsupported warm wall",
+            0.02,
+            0.004,
+            card,
+            SlabConductivityQuery {
+                property: &conductivity,
+                temperature_axis: "temperature",
+                lower: &at,
+                upper: &at.clone().with("temperature", 294.15).unwrap(),
+                selection: SelectionPolicy::SingleClaimOnly
+            }
+        )
+        .is_err()
+    );
 }
 
 #[test]
