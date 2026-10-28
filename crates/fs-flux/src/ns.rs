@@ -4,7 +4,8 @@
 //! H(div)-DG theory prescribes), fully weak Dirichlet velocity BCs,
 //! upwinded DG convection on the normal-continuous advecting field
 //! (w·n is single-valued on faces — H(div)'s gift to upwinding),
-//! Picard iteration for steady NS, IMEX BDF1 for transients, and the
+//! Picard iteration for steady NS, IMEX and fully implicit rheological BDF1
+//! for transients, and the
 //! discrete adjoint of the linearized system. Dirichlet velocity BCs
 //! split by component: u·n STRONG (boundary-edge BDM dofs are exactly
 //! the normal moments — identity rows), tangential weak via SIP;
@@ -77,6 +78,81 @@ pub struct FluxSolution {
     /// Final relative residual.
     pub rel_residual: f64,
 }
+
+/// Accepted fully implicit generalized-Newtonian time step. The nonlinear
+/// residual is independently reassembled at the returned velocity and viscosity.
+pub struct FluxRheologyStep {
+    /// Accepted endpoint velocity and pressure.
+    pub solution: FluxSolution,
+    /// Coupled viscosity/convection iterations.
+    pub iterations: usize,
+    /// Last relative velocity update.
+    pub relative_update: f64,
+    /// Relative residual of the actual nonlinear BDF1 equations.
+    pub nonlinear_residual: f64,
+}
+
+/// A refused implicit step leaves the caller's previous state intact.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FluxRheologyError {
+    /// Invalid dimensions, timestep or numerical controls.
+    Invalid(&'static str),
+    /// Prescribed normal boundary moments violate global mass conservation.
+    IncompatibleBoundaryFlux {
+        /// Signed integrated outward boundary velocity.
+        net_flux: f64,
+        /// Integrated absolute normal-velocity contributions used for scaling.
+        absolute_flux: f64,
+    },
+    /// Unconverged linearized saddle solve or nonfinite solver output.
+    LinearConvergence {
+        /// Picard iteration that failed.
+        iteration: usize,
+        /// Relative linear residual.
+        residual: f64,
+    },
+    /// The coupled constitutive/momentum iteration exhausted its budget.
+    NonlinearConvergence {
+        /// Completed Picard iterations.
+        iterations: usize,
+        /// Last relative velocity update.
+        relative_update: f64,
+        /// Reassembled nonlinear residual at the last candidate.
+        residual: f64,
+    },
+}
+
+impl core::fmt::Display for FluxRheologyError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Invalid(message) => write!(f, "implicit rheology: {message}"),
+            Self::IncompatibleBoundaryFlux {
+                net_flux,
+                absolute_flux,
+            } => write!(
+                f,
+                "implicit rheology: incompatible boundary flux {net_flux} (absolute contributions {absolute_flux})"
+            ),
+            Self::LinearConvergence {
+                iteration,
+                residual,
+            } => write!(
+                f,
+                "implicit rheology: linear solve {iteration} failed (residual {residual})"
+            ),
+            Self::NonlinearConvergence {
+                iterations,
+                relative_update,
+                residual,
+            } => write!(
+                f,
+                "implicit rheology: exhausted {iterations} iterations (update {relative_update}, nonlinear residual {residual})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FluxRheologyError {}
 
 /// The assembled operator pieces for one mesh.
 pub struct FluxSystem<'m> {
@@ -741,6 +817,169 @@ impl<'m> FluxSystem<'m> {
             Some(uprev),
         );
         self.solve_linear(&a, &rhs, params)
+    }
+
+    /// One fully implicit generalized-Newtonian BDF1 step in seconds.
+    /// Viscosity, symmetric traction and upwind convection all use the NEW
+    /// velocity. `law(cell, point, shear_rate)` returns positive finite
+    /// kinematic viscosity and can capture endpoint temperature/material data.
+    /// Loads and boundary velocities also belong to that endpoint. Density
+    /// remains the same constant reference density at both time levels.
+    ///
+    /// The previous velocity initializes Picard. Acceptance requires both a
+    /// small velocity update and a small residual reassembled with the final
+    /// constitutive state. A converged frozen-coefficient solve alone is not
+    /// accepted. Residual reassembly is deferred until the update is small or
+    /// the budget is exhausted, avoiding a second assembly on ordinary iterates.
+    ///
+    /// # Errors
+    /// Refuses invalid controls/state, incompatible integrated boundary flux,
+    /// unconverged linear or nonlinear solves, and nonfinite solver output.
+    /// A refusal never mutates `previous_velocity`.
+    /// # Panics
+    /// Inherits positive-finite constitutive-law and nonsingular-mesh contracts
+    /// from primitive assembly. Load and boundary samples must be finite.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bdf1_rheology_step(
+        &self,
+        params: FluxParams,
+        law: &dyn Fn(usize, [f64; 2], f64) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundary: &dyn Fn([f64; 2]) -> [f64; 2],
+        previous_velocity: &[f64],
+        timestep_s: f64,
+        maximum_iterations: usize,
+        relative_tolerance: f64,
+    ) -> Result<FluxRheologyStep, FluxRheologyError> {
+        if self.mesh.tris.is_empty()
+            || previous_velocity.len() != self.n_u
+            || previous_velocity.iter().any(|value| !value.is_finite())
+            || !timestep_s.is_finite()
+            || timestep_s <= 0.0
+            || !timestep_s.recip().is_finite()
+            || maximum_iterations == 0
+            || !relative_tolerance.is_finite()
+            || relative_tolerance <= 0.0
+            || !params.sigma.is_finite()
+            || params.sigma <= 0.0
+            || !params.tol.is_finite()
+            || params.tol <= 0.0
+            || params.max_iters == 0
+        {
+            return Err(FluxRheologyError::Invalid(
+                "finite velocity dofs, positive timestep/tolerances and nonzero iteration budgets required",
+            ));
+        }
+        // Pressure pinning omits cell zero's continuity equation. Its physical
+        // compatibility follows from the prescribed boundary flux, not from
+        // the residual of the pinned matrix. Use exactly the boundary moment
+        // quadrature and outward normals used by assembly, with compensated
+        // summation so a large balanced inflow/outflow is still admissible.
+        let mut net_flux = 0.0;
+        let mut compensation = 0.0;
+        let mut absolute_flux = 0.0;
+        for edge in &self.mesh.edges {
+            if edge.tris.1 != usize::MAX {
+                continue;
+            }
+            let (va, vb) = (self.mesh.verts[edge.verts.0], self.mesh.verts[edge.verts.1]);
+            for (point, weight) in crate::bdm::edge_gauss_pub(va, vb) {
+                let velocity = boundary(point);
+                let contributions = [
+                    weight * velocity[0] * edge.normal[0],
+                    weight * velocity[1] * edge.normal[1],
+                ];
+                if velocity
+                    .iter()
+                    .chain(contributions.iter())
+                    .any(|v| !v.is_finite())
+                {
+                    return Err(FluxRheologyError::Invalid(
+                        "boundary velocity must be finite",
+                    ));
+                }
+                for value in contributions {
+                    let corrected = value - compensation;
+                    let sum = net_flux + corrected;
+                    compensation = (sum - net_flux) - corrected;
+                    net_flux = sum;
+                    absolute_flux += value.abs();
+                }
+            }
+        }
+        if !net_flux.is_finite() || !absolute_flux.is_finite() {
+            return Err(FluxRheologyError::Invalid("boundary flux must be finite"));
+        }
+        if net_flux.abs() > 256.0 * f64::EPSILON * absolute_flux.max(f64::MIN_POSITIVE) {
+            return Err(FluxRheologyError::IncompatibleBoundaryFlux {
+                net_flux,
+                absolute_flux,
+            });
+        }
+        let inv_dt = timestep_s.recip();
+        let mut current = vec![0.0; self.n];
+        current[..self.n_u].copy_from_slice(previous_velocity);
+        let assemble = |velocity: &[f64]| {
+            let rates = self.shear_rates(velocity);
+            self.assemble_viscous_transient(
+                params,
+                &|cell, point| law(cell, point, rates[cell]),
+                force,
+                boundary,
+                Some(&velocity[..self.n_u]),
+                inv_dt,
+                Some(previous_velocity),
+            )
+        };
+        for iteration in 1..=maximum_iterations {
+            let (operator, rhs) = assemble(&current);
+            let next = self.solve_linear(&operator, &rhs, params);
+            if !next.rel_residual.is_finite()
+                || next.rel_residual > params.tol
+                || next.x.iter().any(|value| !value.is_finite())
+            {
+                return Err(FluxRheologyError::LinearConvergence {
+                    iteration,
+                    residual: next.rel_residual,
+                });
+            }
+            let mut difference = 0.0_f64;
+            let mut magnitude = 0.0_f64;
+            for i in 0..self.n_u {
+                difference = difference.hypot(next.x[i] - current[i]);
+                magnitude = magnitude.hypot(next.x[i]);
+            }
+            let update = difference / magnitude.max(f64::MIN_POSITIVE);
+            if update <= relative_tolerance || iteration == maximum_iterations {
+                let (nonlinear, rhs) = assemble(&next.x);
+                let mut residual = vec![0.0; self.n];
+                nonlinear.spmv(&next.x, &mut residual);
+                let mut defect = 0.0_f64;
+                let mut scale = 0.0_f64;
+                for i in 0..self.n {
+                    defect = defect.hypot(residual[i] - rhs[i]);
+                    scale = scale.hypot(rhs[i]);
+                }
+                let defect = defect / scale.max(f64::MIN_POSITIVE);
+                if update <= relative_tolerance && defect <= relative_tolerance {
+                    return Ok(FluxRheologyStep {
+                        solution: next,
+                        iterations: iteration,
+                        relative_update: update,
+                        nonlinear_residual: defect,
+                    });
+                }
+                if iteration == maximum_iterations {
+                    return Err(FluxRheologyError::NonlinearConvergence {
+                        iterations: iteration,
+                        relative_update: update,
+                        residual: defect,
+                    });
+                }
+            }
+            current = next.x;
+        }
+        unreachable!("the nonzero iteration budget either accepts or refuses its final candidate")
     }
 
     /// Cell pressures shifted to zero area-weighted mean.

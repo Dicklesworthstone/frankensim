@@ -273,6 +273,243 @@ fn flux_012_generalized_newtonian_channel_mms_refines() {
     assert!(errors[1] < 0.02 * amplitude / 30.0_f64.sqrt());
 }
 
+/// G1: nonlinear startup with independently differentiated Carreau stress.
+/// A(t) grows linearly from zero, so BDF1 represents acceleration exactly;
+/// this isolates the new-time constitutive solve from time truncation error.
+#[test]
+fn flux_013_implicit_rheology_closes_endpoint_equations() {
+    let mesh = unit_mesh(6);
+    let sys = FluxSystem::new(&mesh);
+    let params = FluxParams::default();
+    let dt = 0.2;
+    let amplitude = 0.4;
+    let law = |_: usize, _: [f64; 2], rate: f64| 0.2 + 0.8 / (1.0 + (3.0 * rate).powi(2)).sqrt();
+    let velocity = |x: [f64; 2]| [amplitude * x[1] * (1.0 - x[1]), 0.0];
+    let force = |x: [f64; 2]| {
+        let denominator = 1.0 + (3.0 * amplitude * (1.0 - 2.0 * x[1])).powi(2);
+        [
+            amplitude / dt * x[1] * (1.0 - x[1])
+                + 2.0 * amplitude * (0.2 + 0.8 / denominator.powf(1.5)),
+            0.0,
+        ]
+    };
+    let previous = vec![0.0; sys.n_u];
+    let step = sys
+        .bdf1_rheology_step(params, &law, &force, &velocity, &previous, dt, 60, 1e-10)
+        .unwrap();
+    let (error, div) = sys.velocity_error(&step.solution.x, &velocity);
+    assert!(step.iterations > 2 && step.iterations < 60);
+    assert!(step.relative_update < 1e-10 && step.nonlinear_residual < 1e-10);
+    assert!(error < 0.02 * amplitude / 30.0_f64.sqrt() && div < 1e-10);
+
+    // Check the actual endpoint equations independently of the step receipt.
+    let rates = sys.shear_rates(&step.solution.x);
+    let (operator, rhs) = sys.assemble_viscous_transient(
+        params,
+        &|cell, point| law(cell, point, rates[cell]),
+        &force,
+        &velocity,
+        Some(&step.solution.x[..sys.n_u]),
+        dt.recip(),
+        Some(&previous),
+    );
+    let mut ax = vec![0.0; sys.n];
+    operator.spmv(&step.solution.x, &mut ax);
+    let defect = ax
+        .iter()
+        .zip(&rhs)
+        .map(|(a, b)| (a - b).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let scale = rhs.iter().map(|v| v * v).sum::<f64>().sqrt();
+    assert!(defect / scale < 1e-10);
+
+    // Freezing viscosity at the resting state's zero-shear value changes
+    // the physical answer even though that linearized system solves tightly.
+    let frozen = sys
+        .bdf1_rheology_step(
+            params,
+            &|_, _, _| 1.0,
+            &force,
+            &velocity,
+            &previous,
+            dt,
+            30,
+            1e-10,
+        )
+        .unwrap();
+    let frozen_error = sys.velocity_error(&frozen.solution.x, &velocity).0;
+    let frozen_rates = sys.shear_rates(&frozen.solution.x);
+    let (physical_operator, physical_rhs) = sys.assemble_viscous_transient(
+        params,
+        &|cell, point| law(cell, point, frozen_rates[cell]),
+        &force,
+        &velocity,
+        Some(&frozen.solution.x[..sys.n_u]),
+        dt.recip(),
+        Some(&previous),
+    );
+    physical_operator.spmv(&frozen.solution.x, &mut ax);
+    let frozen_defect = ax
+        .iter()
+        .zip(&physical_rhs)
+        .map(|(a, b)| (a - b).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let frozen_scale = physical_rhs.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let frozen_residual = frozen_defect / frozen_scale;
+    verdict(
+        "flux-013-implicit-carreau-startup",
+        frozen_error > error && frozen_residual > 1e-5,
+        &format!(
+            "L2={error:.6e}, frozen L2={frozen_error:.6e}, frozen nonlinear residual={frozen_residual:.3e}, divergence={div:.3e}, nonlinear residual={:.3e}, iterations={}",
+            step.nonlinear_residual, step.iterations
+        ),
+    );
+}
+
+/// G1: affine shear lies exactly in BDM1, eliminating spatial truncation.
+/// For A=exp(-t), u=(A*y,0), nu=(1+x²+y/4)*eta(A), the force is
+/// (-A*y-A*eta/4, -2*A*eta*x). Time refinement must recover BDF1 order.
+#[test]
+fn flux_014_implicit_rheology_has_first_order_time_accuracy() {
+    let mesh = unit_mesh(3);
+    let sys = FluxSystem::new(&mesh);
+    let params = FluxParams::default();
+    let law = |_: usize, x: [f64; 2], rate: f64| {
+        (1.0 + x[0] * x[0] + 0.25 * x[1]) * (0.2 + 0.8 / (1.0 + 4.0 * rate * rate).sqrt())
+    };
+    let final_time = 0.2;
+    let mut errors = Vec::new();
+    for steps in [5, 10, 20] {
+        let dt = final_time / steps as f64;
+        let mut state = interpolate(&mesh, sys.n_u, &|x| [x[1], 0.0]);
+        for k in 1..=steps {
+            let amplitude = (-(k as f64) * dt).exp();
+            let eta = 0.2 + 0.8 / (1.0 + 4.0 * amplitude * amplitude).sqrt();
+            let velocity = |x: [f64; 2]| [amplitude * x[1], 0.0];
+            let force = |x: [f64; 2]| {
+                [
+                    -amplitude * x[1] - 0.25 * amplitude * eta,
+                    -2.0 * amplitude * eta * x[0],
+                ]
+            };
+            let step = sys
+                .bdf1_rheology_step(params, &law, &force, &velocity, &state, dt, 50, 1e-10)
+                .unwrap();
+            assert!(sys.velocity_error(&step.solution.x, &velocity).1 < 1e-10);
+            state.copy_from_slice(&step.solution.x[..sys.n_u]);
+        }
+        let exact = |x: [f64; 2]| [(-final_time).exp() * x[1], 0.0];
+        errors.push(sys.velocity_error(&state, &exact).0);
+    }
+    let order1 = (errors[0] / errors[1]).log2();
+    let order2 = (errors[1] / errors[2]).log2();
+    verdict(
+        "flux-014-implicit-rheology-time-order",
+        (0.8..1.2).contains(&order1) && (0.8..1.2).contains(&order2),
+        &format!("L2 errors={errors:?}, orders={order1:.5},{order2:.5}"),
+    );
+}
+
+/// G1: an unforced no-slip vortex loses kinetic energy through positive
+/// shear-dependent viscosity; the fully implicit update stays divergence-free.
+#[test]
+fn flux_015_implicit_rheology_dissipates_unforced_energy() {
+    let mesh = unit_mesh(4);
+    let sys = FluxSystem::new(&mesh);
+    let params = FluxParams::default();
+    let law = |_: usize, _: [f64; 2], rate: f64| 0.01 + 0.09 / (1.0 + 100.0 * rate * rate).sqrt();
+    let mut state = interpolate(&mesh, sys.n_u, &|x| mms_u(x).map(|v| 0.05 * v));
+    let initial_energy = sys.kinetic_energy(&state);
+    let mut energy = initial_energy;
+    for _ in 0..5 {
+        let step = sys
+            .bdf1_rheology_step(
+                params,
+                &law,
+                &|_| [0.0; 2],
+                &|_| [0.0; 2],
+                &state,
+                0.04,
+                60,
+                1e-10,
+            )
+            .unwrap();
+        let next_energy = sys.kinetic_energy(&step.solution.x);
+        assert!(
+            next_energy > 0.0 && next_energy < energy,
+            "energy increased: {energy} -> {next_energy}"
+        );
+        assert!(sys.velocity_error(&step.solution.x, &|_| [0.0; 2]).1 < 1e-10);
+        state.copy_from_slice(&step.solution.x[..sys.n_u]);
+        energy = next_energy;
+    }
+    verdict(
+        "flux-015-implicit-rheology-energy-decay",
+        energy < 0.8 * initial_energy,
+        &format!("initial energy={initial_energy:.6e}, final energy={energy:.6e}"),
+    );
+}
+
+/// G0/G3: never return a successful step from a single unconverged Picard
+/// solve, or hide incompatible mass flux in the pressure-pinned cell.
+#[test]
+fn flux_016_implicit_rheology_refuses_invalid_or_unconverged_steps() {
+    use fs_flux::ns::FluxRheologyError;
+    let mesh = unit_mesh(2);
+    let sys = FluxSystem::new(&mesh);
+    let params = FluxParams::default();
+    let previous = vec![0.0; sys.n_u];
+    let snapshot = previous.clone();
+    let law = |_: usize, _: [f64; 2], rate: f64| 0.2 + 0.8 / (1.0 + 9.0 * rate * rate).sqrt();
+    let force = |x: [f64; 2]| [(PI * x[1]).sin(), 0.0];
+    let refused = sys.bdf1_rheology_step(
+        params,
+        &law,
+        &force,
+        &|_| [0.0; 2],
+        &previous,
+        0.1,
+        1,
+        1e-10,
+    );
+    assert!(matches!(
+        refused,
+        Err(FluxRheologyError::NonlinearConvergence { iterations: 1, .. })
+    ));
+    assert_eq!(previous, snapshot);
+    let incompatible = sys.bdf1_rheology_step(
+        params,
+        &law,
+        &force,
+        &|x| [x[0], 0.0],
+        &previous,
+        0.1,
+        30,
+        1e-10,
+    );
+    match incompatible {
+        Err(FluxRheologyError::IncompatibleBoundaryFlux { net_flux, .. }) => {
+            assert!((net_flux - 1.0).abs() < 1e-14);
+        }
+        _ => panic!("incompatible net boundary flux must be rejected"),
+    }
+    assert!(matches!(
+        sys.bdf1_rheology_step(
+            params,
+            &law,
+            &force,
+            &|_| [0.0; 2],
+            &previous,
+            0.0,
+            30,
+            1e-10
+        ),
+        Err(FluxRheologyError::Invalid(_))
+    ));
+}
+
 /// flux-001: the BDM1 basis reproduces its defining dofs (Kronecker
 /// identity), its divergence is the constant matching the net normal
 /// flux, and the normal trace is single-valued across interior edges

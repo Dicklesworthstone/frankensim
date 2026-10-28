@@ -8,7 +8,8 @@ pressures, giving EXACTLY divergence-free discrete velocities and
 therefore PRESSURE-ROBUSTNESS — velocity errors independent of the
 pressure, the correctness property most production CFD lacks. 2D
 triangle-mesh instantiation: interior-penalty viscosity, upwinded DG
-convection, Picard steady solves, IMEX BDF1 transients, discrete
+convection, Picard steady solves, IMEX and fully implicit rheological BDF1
+transients, discrete
 adjoints.
 
 ## Public types and semantics
@@ -92,6 +93,26 @@ adjoints.
   They do not solve variable-density momentum, advect material interfaces,
   supply a thermal field, or add viscoelastic memory. The nonlinear adjoint
   of the constitutive update is not provided by the linear transpose solve.
+- `FluxSystem::bdf1_rheology_step` advances generalized-Newtonian flow with
+  viscosity, symmetric viscous traction, and convection at the new time level.
+  Its BDF1 mass load always uses the immutable previous velocity. The law,
+  loads, and boundary callbacks describe the endpoint; the law can capture
+  caller-supplied endpoint temperature and material fields. The previous
+  velocity supplies the initial iterate. Acceptance requires both the relative
+  velocity update and an independently reassembled nonlinear residual to meet
+  the supplied tolerance. This extra residual assembly is deferred until the
+  update is small or the iteration budget is exhausted.
+  `FluxRheologyStep` returns the accepted solution, iteration count, update, and
+  nonlinear residual. `FluxRheologyError` refuses invalid controls/state,
+  unconverged linear or nonlinear solves, and incompatible prescribed boundary
+  flux; a refused step never modifies the caller's previous state. The flux
+  check uses the same edge quadrature and outward normals as the constrained
+  BDM moments, with compensated summation and a roundoff-scaled tolerance.
+  It prevents pressure pinning from hiding the omitted continuity equation.
+  Picard convergence is conditional on the constitutive response, flow state,
+  and timestep; exhausted budgets return an error rather than an accepted
+  lagged-viscosity result. This is a fixed-mesh, constant-density BDF1 step,
+  without a coupled thermal solve or nonlinear constitutive adjoint.
 - `MaterialFluxSystem` (`material`) binds that same FEEC operator to the shared
   `fs-material::fluid_transport::FluidTransport` owner. Gas, mixture and liquid
   evaluations supply one frozen `FluidTransportState`; `nu=mu/rho`, force
@@ -165,6 +186,12 @@ instead returns `AleGclError2` for malformed topology, non-finite input,
 collapse, arithmetic overflow, and receipt allocation failure. Its finite
 roundoff defect is evidence, not an admission failure.
 
+The fully implicit rheological step instead refuses failed linear/nonlinear
+convergence through `FluxRheologyError` and validates global boundary mass
+compatibility before replacing a continuity equation with the pressure gauge.
+Positive-finite constitutive samples and nonsingular mesh/factorization remain
+primitive programmer contracts; callbacks must return finite physical data.
+
 ## Determinism class
 
 Bit-deterministic across runs on a platform: BTree edge ordering,
@@ -212,7 +239,12 @@ reciprocal force and BDF1 fixed point, flux-010 layered Couette flow with
 continuous traction through viscosity contrasts up to 10,000:1, flux-011
 the objective constitutive-rate update, and flux-012 a nonuniform Carreau
 manufactured flow with near-second-order refinement and an independently
-reassembled nonlinear residual. These remain 2-D finite-element checks,
+reassembled nonlinear residual. The fully implicit lane adds flux-013 nonlinear
+Carreau startup against its independently differentiated stress and endpoint
+equations, flux-014 temporal refinement of a spatially exact shear field,
+flux-015 unforced viscous energy decay, and flux-016 refusal of exhausted
+nonlinear iterations, invalid timesteps, and incompatible boundary mass flux.
+These remain 2-D finite-element checks,
 not a high-Re, large-scale, or cross-ISA qualification.
 
 `tests/material_flow.rs` (G1/G3): hydrostatic pressure from physical force

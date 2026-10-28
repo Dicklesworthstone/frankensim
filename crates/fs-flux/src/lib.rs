@@ -6,7 +6,8 @@
 //! property most production codes lack). Interior-penalty viscosity
 //! (jumps are purely tangential by conformity), upwinded DG
 //! convection on the single-valued face flux w·n, Picard steady
-//! solves, IMEX BDF1 transients, and discrete adjoints. 2D
+//! solves, IMEX and fully implicit rheological BDF1 transients, and discrete
+//! adjoints. 2D
 //! triangle-mesh instantiation; 3D, BDM2+, projection time stepping,
 //! and LES closures are recorded successors with honesty labels —
 //! no turbulence model ships here, and nothing pretends otherwise.
@@ -53,7 +54,7 @@ pub use material::{
     MaterialFluxError, MaterialFluxNumerics, MaterialFluxSolution, MaterialFluxSystem,
 };
 #[cfg(feature = "continuum")]
-pub use ns::{FluxParams, FluxSolution, FluxSystem};
+pub use ns::{FluxParams, FluxRheologyError, FluxRheologyStep, FluxSolution, FluxSystem};
 #[cfg(feature = "continuum")]
 pub use reduced_aero::{
     AlternativeWrenchSet, ApplicabilityEnvelope, BodyKinematics, CandidateWrench, ClosedRange,
