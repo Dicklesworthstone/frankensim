@@ -2456,8 +2456,10 @@ publication.
 
 Schema 16 adds optional `:enclosure-radiation (enclosure-radiation ...)` to
 the existing conduction declaration. Ordered, named surfaces each select an
-existing positive convective boundary and an immutable hemispherical-total
-emissivity claim. An explicit square view-factor matrix carries declared
+existing uniform convective or prescribed-flux boundary and an immutable
+hemispherical-total emissivity claim. Driver 88 admits actual zero-flux vacuum
+patches as well as finite authored outward heat flux; no artificial convection
+coefficient or reservoir is introduced. An explicit square view-factor matrix carries declared
 analytic or external-QMC provenance. Native binding uses the actual areas of
 the exact selected mesh faces to check row closure and reciprocity on every
 uniform mesh rung. Declared provenance is retained; these checks do not
@@ -2533,10 +2535,38 @@ Future interval controls have zero influence on an earlier selected peak. A true
 all-prescribed capacity endpoint retains its exact zero residual target without
 inflating the allowance. Requesting derivatives leaves the forward field unchanged.
 
-Temperature-dependent emissivity, native flux-only enclosure patches, adaptive
-enclosure goals and continuum mean bounds retain explicit refusals. The driver never performs a
+Temperature-dependent emissivity, adaptive enclosure goals and continuum mean
+bounds retain explicit refusals. The driver never performs a
 frozen-enclosure algebraic goal correction or presents its fixed-load linear
 roundoff calculation as an enclosure bound. Results remain Estimated.
+
+Driver 88 unifies steady and transient mixed Robin/Neumann exchange. Both
+forward owners preserve authored external Neumann watts independently of the
+applied internal radiosity load. The native common energy report, dynamic
+natural/air residuals and net trajectory input all use that physical account.
+A storage-backed enclosure may have zero Robin ports. A steady enclosure still
+requires a solvable original conduction problem with a real prescribed or
+convective anchor; radiation-only anchoring of disconnected components is
+not inferred.
+
+The shared steady/capacity transpose now admits independent flux patches through
+`MeanFluxFeedback`: exact P1 outward-flux injections and full-node area means
+supply the remaining cross-patch derivatives. Existing Robin reference feedback
+retains its arithmetic on all-convection enclosures. Mixed models include each
+radiative derivative once, preserve fixed vertices in prescribed-temperature
+lifts, restore original convection controls and contract absolute emissivity
+through the complete dual. Robin controls and radiation patches have independent
+orders and limits; zero controls and more patches than controls are valid.
+Retained factor admission covers `4*nodes*Robin_ports + 2*nodes*patches`.
+The enthalpy owner already supplies its own complete direct flux tangent in
+enthalpy coordinates and consumes the same admitted physical model.
+
+Vacuum regression children cover a closed 9 J pulse, a nonuniform all-flux 14 J
+trajectory with both storage models, reflected emissivity/source/initial-state
+finite differences, original external heat through natural and transported-air
+boundaries, and steady mixed/all-flux cases with a separate prescribed bath.
+Schema roundtrips retain finite signed fluxes and reject malformed quantities
+or a fixed-temperature law substituted for a radiating patch.
 
 G1/G3/G5 regressions in `tests/solve/radiation_product/enclosure_product.rs`
 use an independent two-gray-surface exchange formula, original convection

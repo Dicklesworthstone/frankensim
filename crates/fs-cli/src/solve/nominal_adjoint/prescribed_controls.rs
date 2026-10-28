@@ -39,9 +39,9 @@ pub(super) fn append(
     let names: Vec<_> = bound.names.iter().map(String::as_str).collect();
     let problem = ConductionProblem {mesh:&solved.mesh,boundary:&bound.boundary,
         material:&data.fallback,element_materials:Some(&data.materials),source:&data.source};
-    let bars = RobinResponse::prescribed_temperature_pullback(cx,problem,data.interfaces.as_ref(),
+    let bars = RobinResponse::prescribed_temperature_pullback_with_flux_feedback(cx,problem,data.interfaces.as_ref(),
         &solved.solution.temperature,weights,lambda,&names,&bound.h_slopes,
-        &bound.reference_slopes,&bound.feedback,max_entries).map_err(lower)?;
+        &bound.reference_slopes,&bound.feedback,bound.flux_feedback.as_ref(),max_entries).map_err(lower)?;
     let mut seen = BTreeSet::new();
     for (ordinal, declared) in setup.boundaries.iter().enumerate() {
         poll(cx)?;

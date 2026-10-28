@@ -10,7 +10,7 @@ use super::{
 pub struct EnclosureRadiatingSurface {
     /// Unique result identity. Matrix rows and columns follow surface order.
     pub name: String,
-    /// Existing complete convective boundary assignment target.
+    /// Existing complete uniform convective or prescribed-flux boundary target.
     pub target: String,
     /// Immutable surface-finish material-card content hash.
     pub card: String,
@@ -212,12 +212,13 @@ pub(super) fn validate(
                     ThermalBoundaryCondition::Convection { .. }
                         | ThermalBoundaryCondition::AirflowConvection { .. }
                         | ThermalBoundaryCondition::NaturalConvection { .. }
+                        | ThermalBoundaryCondition::HeatFlux { .. }
                 )
         }) {
             out.push(violation(
                 "project-enclosure-radiation-boundary",
-                format!("enclosure surface {} lacks a convective boundary", surface.name),
-                "bind each patch to an existing complete positive Robin law; fixed-temperature and flux-only patches are not admitted",
+                format!("enclosure surface {} lacks a supported original boundary", surface.name),
+                "bind each patch to complete uniform convection or prescribed outward heat flux; zero flux declares vacuum, and fixed-temperature patches remain separate",
             ));
         }
         if !is_hex_digest(&surface.card)

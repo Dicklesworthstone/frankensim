@@ -32,9 +32,14 @@ pub(in crate::solve::transient) fn natural_storage_bytes(
 }
 
 pub(in crate::solve::transient) fn radiation_storage_bytes(
-    n: usize, ports: usize, patches: usize,
+    n: usize, ports: usize, patches: usize, is_enclosure: bool,
 ) -> Result<usize, SolveRefusal> {
-    usize::try_from(radiation::storage_bytes(n, ports, patches)?)
+    let bytes = if is_enclosure {
+        radiation::enclosure_storage_bytes(n, ports, patches)?
+    } else {
+        radiation::storage_bytes(n, ports, patches)?
+    };
+    usize::try_from(bytes)
         .map_err(|_| bad("native capacity radiation workspace does not fit this platform"))
 }
 
@@ -156,7 +161,7 @@ pub(in crate::solve::transient) fn finish(
             .then_some(problem.boundary.region_names()[i].as_str())).collect();
     if ports.len() > 64 { return Err(bad("transient adjoint exceeds 64 boundary controls")); }
     let radiation_workspace = radiation.map(|lowering|
-        radiation_storage_bytes(n, ports.len(), lowering.surface_count()))
+        radiation_storage_bytes(n, ports.len(), lowering.surface_count(), lowering.is_enclosure()))
         .transpose()?.unwrap_or(0);
     let natural_workspace = natural.map(|coupling|
         natural_storage_bytes(n, ports.len(), coupling.laws.len()))
@@ -199,7 +204,14 @@ pub(in crate::solve::transient) fn finish(
             || airflow.is_some_and(|path| path.segments.iter().any(|segment| segment.target == name));
         (!owned).then_some(index)
     }).collect();
+    // Enclosure flux feedback is independent of the convective port layout:
+    // vacuum walls need two node-by-patch factors even with no Robin controls.
+    let flux_entries = if enclosure.is_some() {
+        n.checked_mul(patch_count).and_then(|entries| entries.checked_mul(2))
+            .ok_or_else(|| bad("capacity enclosure flux feedback entry count overflows"))?
+    } else { 0 };
     let feedback_entry_cap = n.checked_mul(ports.len()).and_then(|v| v.checked_mul(4))
+        .and_then(|entries| entries.checked_add(flux_entries))
         .ok_or_else(|| bad("capacity cooling feedback entry count overflows"))?;
     let zero_feedback = if enclosure.is_some() || natural.is_some() || airflow.is_some() {
         vec![0.0; ports.len() * ports.len()]
@@ -321,9 +333,9 @@ pub(in crate::solve::transient) fn finish(
             }
         }
         let gradient = if let Some(bound) = &enclosure_bound {
-            let combined = step.pullback_with_robin_feedback(
+            let combined = step.pullback_with_robin_and_flux_feedback(
                 cx, bound.convective_mean_slopes(), bound.local_reference_slopes(),
-                bound.reference_feedback(), &carry, feedback_entry_cap,
+                bound.reference_feedback(), bound.flux_feedback(), &carry, feedback_entry_cap,
             ).map_err(lower)?;
             let physical = bound.remap_gradient(cx, combined, config.linear).map_err(lower)?;
             let model = enclosure.ok_or_else(|| bad("capacity enclosure gradient lost its model"))?;
@@ -466,3 +478,4 @@ pub(in crate::solve::transient) fn finish(
     };
     report::render(cx, &result, ends_s, objective, config, deadline)
 }
+

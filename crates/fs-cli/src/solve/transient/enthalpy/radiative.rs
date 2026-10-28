@@ -17,6 +17,7 @@ pub(super) struct Step {
     pub(super) residual_norm_j: f64,
     pub(super) residual_tolerance_j: f64,
     pub(super) energy_residual_j: f64,
+    pub(super) neumann_out_w: f64,
     pub(super) dirichlet_in_w: f64,
 }
 
@@ -50,6 +51,7 @@ pub(super) fn advance(
             residual_norm_j: solved.endpoint.physical_residual_norm_j,
             residual_tolerance_j: solved.endpoint.physical_residual_tolerance_j,
             energy_residual_j: solved.endpoint.physical_energy_residual_j,
+            neumann_out_w: solved.physical_neumann_out_w,
             dirichlet_in_w: solved.physical_dirichlet_in_w,
             endpoint: solved.conduction,
             ambient: None,
@@ -73,6 +75,7 @@ pub(super) fn advance(
             residual_norm_j: solved.physical_residual_norm_j,
             residual_tolerance_j: solved.physical_residual_tolerance_j,
             energy_residual_j: solved.physical_energy_residual_j,
+            neumann_out_w: solved.conduction.neumann_out_w,
             dirichlet_in_w: solved.physical_dirichlet_in_w,
             endpoint: solved.conduction,
             ambient: Some(RadiativeEndpoint {
@@ -146,3 +149,4 @@ pub(super) fn convective_out_w(
         |row| row.convective_out_w,
     )
 }
+

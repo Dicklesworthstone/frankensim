@@ -49,6 +49,7 @@ pub(super) struct AirflowStep {
     pub(super) physical_energy_residual_j: f64,
     pub(super) physical_convective_out_w: f64,
     pub(super) physical_radiative_out_w: f64,
+    pub(super) physical_neumann_out_w: f64,
     pub(super) physical_dirichlet_in_w: f64,
     pub(super) air_heat_gain_w: f64,
     pub(super) off_path_convective_out_w: f64,
@@ -519,9 +520,11 @@ pub(super) fn advance(
         physical_energy_residual_j: physical.energy_residual_j,
         physical_convective_out_w: physical.convective_out_w,
         physical_radiative_out_w: physical.radiation_out_w,
+        physical_neumann_out_w: physical.neumann_out_w,
         physical_dirichlet_in_w: physical.dirichlet_in_w,
         air_heat_gain_w,
         off_path_convective_out_w,
         coupled_energy_residual_j,
     })
 }
+

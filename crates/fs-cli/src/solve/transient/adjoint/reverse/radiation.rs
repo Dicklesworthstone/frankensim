@@ -64,6 +64,32 @@ pub(in crate::solve::transient) fn storage_bytes(
         .ok_or_else(|| bad("capacity radiation feedback workspace overflows"))
 }
 
+/// Enclosure exchange has its own patch basis, including Neumann-only walls.
+/// Reserve the Robin workspace plus the independent node-by-patch factors,
+/// their assembly scratch and dense patch-space radiosity/transpose work.
+/// A closed vacuum enclosure therefore remains admissible with zero ports.
+pub(in crate::solve::transient) fn enclosure_storage_bytes(
+    nodes: usize, ports: usize, patches: usize,
+) -> Result<u64, SolveRefusal> {
+    if nodes == 0 || ports > 64 || patches == 0 || patches > 64 {
+        return Err(bad("capacity enclosure adjoint requires one to 64 patches and at most 64 Robin ports"));
+    }
+    let nodes = u64::try_from(nodes).map_err(|_| bad("capacity enclosure node count overflows"))?;
+    let ports = ports as u64;
+    let patches = patches as u64;
+    nodes.checked_mul(ports).and_then(|v| v.checked_mul(96))
+        .and_then(|v| ports.checked_mul(ports).and_then(|m| m.checked_mul(48))
+            .and_then(|m| v.checked_add(m)))
+        .and_then(|v| nodes.checked_mul(patches).and_then(|p| p.checked_mul(64))
+            .and_then(|p| v.checked_add(p)))
+        .and_then(|v| patches.checked_mul(patches).and_then(|p| p.checked_mul(64))
+            .and_then(|p| v.checked_add(p)))
+        .and_then(|v| nodes.checked_mul(128).and_then(|n| v.checked_add(n)))
+        .and_then(|v| ports.checked_mul(4096).and_then(|p| v.checked_add(p)))
+        .and_then(|v| patches.checked_mul(4096).and_then(|p| v.checked_add(p)))
+        .ok_or_else(|| bad("capacity enclosure feedback workspace overflows"))
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) fn bind(
     cx: &Cx<'_>, problem: ConductionProblem<'_>, accepted: &[f64],
@@ -328,6 +354,36 @@ pub(super) fn fragment(
 mod tests {
     use super::*;
 
+    #[test]
+    fn enclosure_workspace_admits_independent_flux_patches_without_relaxing_ambient() {
+        let vacuum = enclosure_storage_bytes(32, 0, 6).unwrap();
+        let mixed = enclosure_storage_bytes(32, 1, 6).unwrap();
+        let all_robin = enclosure_storage_bytes(32, 6, 6).unwrap();
+        assert!(vacuum > 0 && mixed > vacuum && all_robin > mixed);
+        // The ambient secant is carried by an existing Robin row; it cannot
+        // use the enclosure's separate mean-flux factors.
+        assert!(storage_bytes(32, 0, 6).is_err());
+        assert!(storage_bytes(32, 1, 6).is_err());
+        assert!(storage_bytes(32, 6, 6).is_ok());
+        assert!(all_robin > storage_bytes(32, 6, 6).unwrap());
+        for (ports, patches) in [(0, 1), (0, 64), (1, 6), (64, 1), (64, 64)] {
+            let bytes = enclosure_storage_bytes(32, ports, patches).unwrap();
+            let retained_factor_bytes = 8 * (4 * 32 * ports + 2 * 32 * patches) as u64;
+            assert!(bytes >= retained_factor_bytes);
+        }
+    }
+
+    #[test]
+    fn enclosure_workspace_refuses_unbounded_layouts_and_checked_overflow() {
+        for (nodes, ports, patches) in [(0, 0, 1), (32, 65, 1), (32, 0, 0), (32, 0, 65)] {
+            assert!(enclosure_storage_bytes(nodes, ports, patches).is_err());
+        }
+        if usize::BITS == 64 {
+            assert!(enclosure_storage_bytes(usize::MAX, 0, 1).is_err());
+            assert!(enclosure_storage_bytes(usize::MAX, 1, 64).is_err());
+        }
+    }
+
     fn point(wall: f64, reservoir: f64, emissivity: f64, convection_h: f64, reference: f64)
         -> (PhysicalPort, RadiativePort)
     {
@@ -379,3 +435,4 @@ mod tests {
         }
     }
 }
+

@@ -7,6 +7,7 @@ use super::{
 };
 use super::super::{convective_feedback, enclosure_feedback};
 use fs_conduction::radiation::EnclosureRadiationLinearization;
+use fs_conduction::adjoint::MeanFluxFeedback;
 
 pub(super) struct Law {
     pub boundary: ThermalBoundary,
@@ -14,6 +15,7 @@ pub(super) struct Law {
     pub h_slopes: Vec<f64>,
     pub reference_slopes: Vec<f64>,
     pub feedback: Vec<f64>,
+    pub flux_feedback: Option<MeanFluxFeedback>,
 }
 
 pub(super) fn bind(
@@ -45,6 +47,7 @@ pub(super) fn bind(
             h_slopes: radiation.convective_mean_slopes().to_vec(),
             reference_slopes: radiation.local_reference_slopes().to_vec(),
             feedback: radiation.reference_feedback().to_vec(),
+            flux_feedback: radiation.flux_feedback().cloned(),
         });
     }
     let m = bound.names.len();
@@ -102,5 +105,5 @@ pub(super) fn bind(
         reference_slopes[i] = point[3];
     }
     poll(cx)?;
-    Ok(Law { boundary, names: bound.names, h_slopes, reference_slopes, feedback })
+    Ok(Law { boundary, names: bound.names, h_slopes, reference_slopes, feedback, flux_feedback: None })
 }

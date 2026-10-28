@@ -15,7 +15,7 @@ use super::{
     convective_feedback, lower, poll, row,
 };
 
-pub(super) const SCOPE: &str = "Closed-enclosure mode differentiates the complete reflected gray-diffuse radiosity, smooth material/contact laws, natural convection and transported-air feedback at the unchanged final field. Only original convection heats the air; internal enclosure exchange retains its exact view-factor order. Natural-reservoir and air-inlet controls contract the same complete dual as source, convection, fan, material, contact and emissivity controls. Enclosure emissivity rows are local absolute coefficient partials at the selected immutable card query. This is a local discrete derivative at fixed geometry and view factors, not a continuum or geometric error certificate.";
+pub(super) const SCOPE: &str = "Closed-enclosure mode differentiates the complete reflected gray-diffuse radiosity, smooth material/contact laws, natural convection and transported-air feedback at the unchanged final field. Uniform prescribed-flux patches, including vacuum, retain their original external heat and need no convection control. Only original convection heats the air; internal enclosure exchange retains its exact view-factor order. Natural-reservoir and air-inlet controls contract the same complete dual as source, convection, fan, material, contact and emissivity controls. Enclosure emissivity rows are local absolute coefficient partials at the selected immutable card query. This is a local discrete derivative at fixed geometry and view factors, not a continuum or geometric error certificate.";
 
 pub(super) struct Pullback {
     pub gradient: RobinGradient,
@@ -77,36 +77,38 @@ pub(super) fn model<'a>(
             return Err(bad("enclosure derivative lost the exact emissivity source or target"));
         }
         let original = setup.boundaries.iter().find(|r| r.target == declared.target)
-            .ok_or_else(|| bad("enclosure target lost its declared convection"))?;
+            .ok_or_else(|| bad("enclosure target lost its declared boundary law"))?;
         let region = data.boundary.region_names().iter().position(|name| name == &declared.target)
             .ok_or_else(|| bad("enclosure target has no original native boundary"))?;
-        let ThermalBc::Robin {
-            htc: ScalarField::Uniform(h), t_ref: ScalarField::Uniform(reference),
-        } = &data.boundary.conditions()[region] else {
-            return Err(bad("enclosure derivative needs original uniform Robin traces"));
-        };
-        if !h.is_finite() || *h <= 0.0 || !reference.is_finite() || *reference <= 0.0 {
-            return Err(bad("enclosure derivative needs positive original convection and absolute reference"));
-        }
-        match &original.condition {
-            B::Convection { coefficient, reference_temperature } => {
+        match (&original.condition, &data.boundary.conditions()[region]) {
+            (B::Convection { coefficient, reference_temperature },
+                ThermalBc::Robin { htc: ScalarField::Uniform(h), t_ref: ScalarField::Uniform(reference) }) => {
                 if *h != coefficient.value || *reference != reference_temperature.value {
                     return Err(bad("enclosure derivative cannot substitute a shifted radiative reference for original convection"));
                 }
             }
-            B::NaturalConvection { ambient_temperature, .. } => {
-                if *reference != ambient_temperature.value {
-                    return Err(bad("enclosure natural convection lost its original ambient"));
+            (B::NaturalConvection { ambient_temperature, .. },
+                ThermalBc::Robin { htc: ScalarField::Uniform(h), t_ref: ScalarField::Uniform(reference) }) => {
+                if !h.is_finite() || *h <= 0.0 || *reference != ambient_temperature.value {
+                    return Err(bad("enclosure natural convection lost its original law"));
                 }
             }
-            B::AirflowConvection { .. } => {
-                if !data.air_paths.iter().any(|path|
-                    path.segments().iter().any(|segment| segment.region() == declared.target))
+            (B::AirflowConvection { .. },
+                ThermalBc::Robin { htc: ScalarField::Uniform(h), t_ref: ScalarField::Uniform(reference) }) => {
+                if !h.is_finite() || *h <= 0.0 || !reference.is_finite() || *reference <= 0.0
+                    || !data.air_paths.iter().any(|path|
+                        path.segments().iter().any(|segment| segment.region() == declared.target))
                 {
                     return Err(bad("enclosure derivative lost its original transported-air path"));
                 }
             }
-            _ => return Err(bad("enclosure patch has no supported original convection law")),
+            (B::HeatFlux { outward_flux },
+                ThermalBc::Neumann { outward_flux: ScalarField::Uniform(original_flux) }) => {
+                if !original_flux.is_finite() || *original_flux != outward_flux.value {
+                    return Err(bad("enclosure derivative lost its original prescribed heat flux"));
+                }
+            }
+            _ => return Err(bad("enclosure patch has no matching original uniform convection or prescribed-flux law")),
         }
     }
     poll(cx)?;

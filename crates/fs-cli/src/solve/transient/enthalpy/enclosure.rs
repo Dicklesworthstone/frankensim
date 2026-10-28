@@ -8,6 +8,7 @@ pub(super) struct Step {
     pub(super) conduction: EnthalpyStepSolution,
     pub(super) endpoint: radiation::EnclosureEndpoint,
     pub(super) net_input_w: f64,
+    pub(super) physical_neumann_out_w: f64,
     pub(super) physical_dirichlet_in_w: f64,
     pub(super) row: String,
 }
@@ -33,11 +34,14 @@ pub(super) fn advance(
     let report = &solved.radiation;
     let fresh = &report.radiosity;
     let applied = finite(report.applied_heat_w.iter().sum())?;
-    let decomposition = finite(solved.conduction.robin_out_w - solved.convective_out_w - applied)?;
-    // Native admission permits original positive Robin traces only. A closed
-    // enclosure is internal exchange, and may never masquerade as convection.
+    let decomposition = finite(
+        solved.conduction.robin_out_w + solved.conduction.neumann_out_w
+            - solved.convective_out_w - solved.prescribed_neumann_out_w - applied,
+    )?;
+    // Applied exchange may be carried by either Robin or Neumann rows.
+    // Only the original prescribed flux belongs to the external heat ledger.
     if decomposition.abs() > radiation_config.balance_tolerance_w {
-        return Err(bad("transient enclosure failed its original-convection decomposition allowance"));
+        return Err(bad("transient enclosure failed its original boundary decomposition allowance"));
     }
     let net_input_w = finite(
         solved.conduction.source_w + solved.physical_dirichlet_in_w
@@ -79,7 +83,9 @@ pub(super) fn advance(
             decomposition_residual_w: decomposition,
         },
         net_input_w,
+        physical_neumann_out_w: solved.prescribed_neumann_out_w,
         physical_dirichlet_in_w: solved.physical_dirichlet_in_w,
         row,
     })
 }
+

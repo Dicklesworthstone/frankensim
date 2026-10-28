@@ -372,3 +372,6 @@ fn g0_native_transient_enclosure_refuses_incompatible_goals_and_adaptive_claims(
         }
     }
 }
+
+#[path = "transient_enclosure/vacuum.rs"]
+mod vacuum;

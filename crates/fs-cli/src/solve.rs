@@ -250,7 +250,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// natural/air boundaries and final or sampled-peak trajectory sensitivities.
 /// Version 87 connects original enthalpy convection controls to native
 /// final-time nominal-adjoint uncertainty calibration.
-pub const SOLVE_DRIVER_VERSION: u32 = 87;
+/// Version 88 admits genuine vacuum and prescribed-flux enclosure patches,
+/// preserving external heat accounts and complete steady/trajectory derivatives.
+pub const SOLVE_DRIVER_VERSION: u32 = 88;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

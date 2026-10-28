@@ -294,6 +294,7 @@ fn march(
             ..problem
         };
         let mut physical = None;
+        let mut physical_neumann_out_w = None;
         let mut physical_dirichlet_in_w = None;
         let mut radiation_fragment = String::new();
         let mut natural_fragment = String::new();
@@ -307,7 +308,7 @@ fn march(
                 finite(
                     solved.endpoint.source_w
                         + solved.physical_dirichlet_in_w
-                        - solved.endpoint.neumann_out_w
+                        - solved.physical_neumann_out_w
                         - solved.off_path_convective_out_w
                         - solved.air_heat_gain_w
                         - solved.physical_radiative_out_w,
@@ -316,6 +317,7 @@ fn march(
                 solved.physical_residual_tolerance_j,
                 solved.coupled_energy_residual_j,
             ));
+            physical_neumann_out_w = Some(solved.physical_neumann_out_w);
             physical_dirichlet_in_w = Some(solved.physical_dirichlet_in_w);
             airflow_fragment = format!(",\"conjugate\":{}", airflow_step_row(path, &solved)?);
             airflow_iterations += solved.outcome.solution.iterations;
@@ -370,7 +372,7 @@ fn march(
                 finite(
                     solved.endpoint.source_w
                         + solved.physical_dirichlet_in_w
-                        - solved.endpoint.neumann_out_w
+                        - solved.physical_neumann_out_w
                         - solved.physical_convective_out_w
                         - solved.physical_radiative_out_w,
                 )?,
@@ -378,6 +380,7 @@ fn march(
                 solved.physical_residual_tolerance_j,
                 solved.physical_energy_residual_j,
             ));
+            physical_neumann_out_w = Some(solved.physical_neumann_out_w);
             physical_dirichlet_in_w = Some(solved.physical_dirichlet_in_w);
             natural_fragment = format!(",\"natural\":{}", natural_step_row(&solved)?);
             natural_iterations += solved.iterations;
@@ -410,6 +413,7 @@ fn march(
                 solved.net_input_w, solved.residual_norm_j,
                 solved.residual_tolerance_j, solved.energy_residual_j,
             ));
+            physical_neumann_out_w = Some(solved.neumann_out_w);
             physical_dirichlet_in_w = Some(solved.dirichlet_in_w);
             radiation_fragment = format!(",\"radiation\":{}", solved.evidence);
             radiation_trials += solved.solid_solves;
@@ -464,16 +468,17 @@ fn march(
         threshold_j = accepted_threshold_j;
         endpoint_residual_j = residual_j;
         endpoint_energy_residual_j = energy_residual_j;
+        let neumann_out_w = physical_neumann_out_w.unwrap_or(endpoint.neumann_out_w);
         let bath_w = physical_dirichlet_in_w.unwrap_or(endpoint.dirichlet_in_w);
         // Keep the fresh accepted heat law in the common report. The retained
         // endpoint still carries its last applied boundary for inner evidence.
         let robin_out_w = if physical.is_some() {
-            finite(endpoint.source_w + bath_w - endpoint.neumann_out_w - net_w)?
+            finite(endpoint.source_w + bath_w - neumann_out_w - net_w)?
         } else {
             endpoint.robin_out_w
         };
         endpoint_energy = Some(PhysicalEnergy {
-            neumann_out_w: endpoint.neumann_out_w,
+            neumann_out_w,
             robin_out_w,
             dirichlet_in_w: bath_w,
             net_input_w: net_w,
@@ -1293,3 +1298,4 @@ pub(super) fn solve(
         endpoint_energy_residual_w,
     })
 }
+

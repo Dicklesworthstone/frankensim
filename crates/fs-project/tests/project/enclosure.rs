@@ -137,14 +137,15 @@ fn g0_closed_exchange_is_not_an_absolute_temperature_anchor() {
             .any(|row| row.code == "project-conduction-boundary-unanchored")
     );
     assert!(
-        findings
+        !findings
             .iter()
-            .any(|row| row.code == "project-enclosure-radiation-boundary")
+            .any(|row| row.code == "project-enclosure-radiation-boundary"),
+        "zero flux is an admissible enclosure law; it simply supplies no steady anchor"
     );
 }
 
 #[test]
-fn g0_enclosure_refuses_ambient_overlap_and_unimplemented_transient_combination() {
+fn g0_enclosure_refuses_ambient_overlap() {
     let mut spec = enclosure_project();
     let ambient = radiation_project()
         .cooling
@@ -152,31 +153,13 @@ fn g0_enclosure_refuses_ambient_overlap_and_unimplemented_transient_combination(
         .conduction
         .unwrap()
         .radiation;
-    let transient = parse_sexpr_migrating(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../data/reference-project/cooling-transient.fsim"
-    )))
-    .unwrap()
-    .decoded
-    .spec
-    .cooling
-    .unwrap()
-    .conduction
-    .unwrap()
-    .transient;
     let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
     setup.radiation = ambient;
-    setup.transient = transient;
     let findings = spec.validate();
     assert!(
         findings
             .iter()
             .any(|row| row.code == "project-enclosure-radiation-overlap")
-    );
-    assert!(
-        findings
-            .iter()
-            .any(|row| row.code == "project-enclosure-radiation-transient")
     );
 }
 
@@ -275,4 +258,62 @@ fn g0_shipped_enclosure_example_is_an_admissible_native_project() {
         .unwrap();
     assert_eq!(enclosure.surfaces.len(), 2);
     assert_eq!(enclosure.view_factors, vec![vec![0.0, 1.0], vec![1.0, 0.0]]);
+}
+
+#[test]
+fn g0_enclosure_flux_laws_roundtrip_with_an_external_anchor_or_transient_storage() {
+    use fs_project::spec::dims;
+
+    for value in [0.0, -12.0, 2.0] {
+        let mut spec = enclosure_project();
+        // The other radiating patch retains convection as an independent anchor.
+        spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap().boundaries[0].condition =
+            ThermalBoundaryCondition::HeatFlux {
+                outward_flux: QtyAny::new(value, dims::HEAT_FLUX),
+            };
+        assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+        let text = print_sexpr(&spec).unwrap();
+        assert_eq!(parse_sexpr(&text).unwrap().spec, spec);
+        assert_eq!(parse_json(&print_json(&spec).unwrap()).unwrap().spec, spec);
+    }
+
+    for storage in [transient_project(), enthalpy_project()] {
+        let mut spec = enclosure_project();
+        let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+        setup.transient = storage.cooling.unwrap().conduction.unwrap().transient;
+        // Storage retains the absolute initial state without a fluid reservoir.
+        for (index, boundary) in setup.boundaries.iter_mut().enumerate() {
+            boundary.condition = ThermalBoundaryCondition::HeatFlux {
+                outward_flux: QtyAny::new(if index == 0 { -12.0 } else { 2.0 }, dims::HEAT_FLUX),
+            };
+        }
+        assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+        let text = print_sexpr(&spec).unwrap();
+        assert_eq!(parse_sexpr(&text).unwrap().spec, spec);
+        assert_eq!(parse_json(&print_json(&spec).unwrap()).unwrap().spec, spec);
+    }
+}
+
+#[test]
+fn g0_enclosure_flux_admission_keeps_quantity_and_boundary_ownership_checks() {
+    use fs_project::spec::dims;
+
+    for (value, dimension, code) in [
+        (f64::NAN, dims::HEAT_FLUX, "project-conduction-flux-finite"),
+        (f64::INFINITY, dims::HEAT_FLUX, "project-conduction-flux-finite"),
+        (0.0, dims::POWER, "project-conduction-boundary-dims"),
+    ] {
+        let mut spec = enclosure_project();
+        spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap().boundaries[0].condition =
+            ThermalBoundaryCondition::HeatFlux { outward_flux: QtyAny::new(value, dimension) };
+        let findings = spec.validate();
+        assert!(findings.iter().any(|row| row.code == code), "{findings:?}");
+    }
+
+    let mut spec = enclosure_project();
+    spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap().boundaries[0].condition =
+        ThermalBoundaryCondition::FixedTemperature { temperature: kelvin(300.0) };
+    assert!(spec.validate().iter().any(|row|
+        row.code == "project-enclosure-radiation-boundary"),
+        "the bath must be a separately declared face, not a replaced radiating law");
 }

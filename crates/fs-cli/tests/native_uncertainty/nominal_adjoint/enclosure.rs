@@ -372,3 +372,6 @@ fn mixed_enclosure_mean_control_calibrates_natural_and_air_inputs_from_one_probe
     assert_eq!(gradient.len(), 2);
     assert!(gradient.iter().all(|v| v.as_f64().unwrap() > 0.0));
 }
+
+#[path = "enclosure/vacuum.rs"]
+mod vacuum;

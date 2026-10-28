@@ -766,7 +766,7 @@ pub(super) fn solve(
             .count();
         if let Some(lowering) = radiation {
             additional = additional.checked_add(adjoint::radiation_storage_bytes(
-                problem.mesh.vertex_count(), ports, lowering.surface_count(),
+                problem.mesh.vertex_count(), ports, lowering.surface_count(), lowering.is_enclosure(),
             )?).ok_or_else(|| bad("combined radiative adjoint memory estimate overflows"))?;
         }
         if natural_requested {
@@ -1227,4 +1227,5 @@ pub(super) fn solve(
         endpoint_energy_residual_w,
     })
 }
+
 

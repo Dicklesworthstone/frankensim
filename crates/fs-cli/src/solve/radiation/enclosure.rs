@@ -46,7 +46,7 @@ fn bad(what: impl Into<String>) -> SolveRefusal {
     conduction_error(
         "cli-solve-conduction-enclosure",
         what,
-        "declare a closed enclosure with sourced emissivities, explicit ordered view factors, positive convective traces, and explicit capacity or total-enthalpy storage for a trajectory",
+        "declare sourced emissivities, explicit ordered view factors, uniform convection or prescribed-flux traces, and explicit capacity or total-enthalpy storage for a trajectory",
     )
 }
 
@@ -138,9 +138,10 @@ pub(super) fn lower(
             ThermalBoundaryCondition::Convection { .. }
                 | ThermalBoundaryCondition::AirflowConvection { .. }
                 | ThermalBoundaryCondition::NaturalConvection { .. }
+                | ThermalBoundaryCondition::HeatFlux { .. }
         ) {
             return Err(bad(
-                "each native enclosure patch must retain its original positive convective law",
+                "each native enclosure patch must retain its original convection or prescribed outward flux; zero flux declares vacuum",
             ));
         }
         surfaces.push(SurfaceSource {
@@ -223,7 +224,7 @@ pub(super) fn bind(
                 faces.insert(face.vertices);
             }
         }
-        // The numerical owner keys its exact Robin trace by target. The
+        // The numerical owner keys its exact physical trace by target. The
         // distinct authored surface name remains in the retained source rows.
         surfaces.push(RadiationSurface::new(
             problem.mesh,
@@ -259,7 +260,7 @@ pub(super) fn solve(
         .ok_or_else(|| physical("missing enclosure lowering"))?
         .declaration;
     let model = bind(cx, problem, lowering)?;
-    let solved = solve_with_convective_gray_diffuse_enclosure(
+    let mut solved = solve_with_convective_gray_diffuse_enclosure(
         cx,
         problem,
         interfaces,
@@ -282,7 +283,8 @@ pub(super) fn solve(
         .map(RadiationSurface::area_m2)
         .fold(0.0_f64, f64::max);
     let decomposition = solved.conduction.report.energy.robin_out_w
-        - solved.convective_out_w
+        + solved.conduction.report.energy.neumann_out_w
+        - solved.convective_out_w - solved.prescribed_neumann_out_w
         - applied.enclosure_energy_closure_w;
     // The owner already gates the full nonlinear free residual. Additionally
     // enforce the project's explicit patch-watt and closed-energy allowances.
@@ -307,6 +309,16 @@ pub(super) fn solve(
             "the converged enclosure failed its declared patch heat, radiosity, closed-energy or convection decomposition gate",
         ));
     }
+    // Native common energy always exposes authored Neumann heat separately.
+    // Its existing combined convection/radiation channel includes the signed
+    // internal enclosure closure; applied per-trace evidence remains retained.
+    let energy = &mut solved.conduction.report.energy;
+    energy.neumann_out_w = solved.prescribed_neumann_out_w;
+    energy.robin_out_w = solved.convective_out_w + applied.enclosure_energy_closure_w;
+    energy.closure_w = energy.source_w + energy.dirichlet_in_w
+        - energy.neumann_out_w - energy.robin_out_w;
+    energy.scale_w = energy.source_w.abs().max(energy.dirichlet_in_w.abs())
+        .max(energy.neumann_out_w.abs()).max(energy.robin_out_w.abs()).max(f64::MIN_POSITIVE);
     Ok(SolidSolution {
         conduction: solved.conduction,
         convective_fluxes: Some(solved.convective_robin_fluxes),
@@ -453,4 +465,4 @@ impl EnclosureResult {
     }
 }
 
-const SCOPE: &str = "Card-backed opaque gray-diffuse closed-enclosure exchange between exact native P1 boundary traces. User-declared view factors are checked for row closure and actual-area reciprocity on every mesh, not generated or geometrically validated. The shared owner checks the full fresh nonlinear residual; original convection alone exchanges heat with reservoirs or air, while mutual radiation is internal. Emissivity is frozen at its selected material-card query and retains its source validity. Surface names and matrix order are explicit. Capacity and total-enthalpy endpoints keep the same accepted temperature or enthalpy history in every radiation, natural-convection and air trial and report complete storage/heat residuals in joules; their separate trajectory receipt retains both time grids and all trial work. This receipt describes the accepted primal endpoint; requested steady or final/sampled-peak trajectory derivatives have their own complete-transpose receipt. No continuum error bound, shadowing reconstruction, participating medium, temperature-dependent emissivity or experimental validation is claimed. Solid-solves counts work in this retained enclosure endpoint; nested natural/air iteration counts remain in their own receipts.";
+const SCOPE: &str = "Card-backed opaque gray-diffuse closed-enclosure exchange between exact native P1 boundary traces. User-declared view factors are checked for row closure and actual-area reciprocity on every mesh, not generated or geometrically validated. The shared owner checks the full fresh nonlinear residual; original convection alone exchanges heat with reservoirs or air, prescribed Neumann heat remains external, and mutual radiation is internal. A zero-flux patch declares vacuum without an artificial convection coefficient. Steady initialization still needs a physical conductive thermal anchor; an isolated steady enclosure cannot set its own absolute temperature. Emissivity is frozen at its selected material-card query and retains its source validity. Surface names and matrix order are explicit. Capacity and total-enthalpy endpoints keep the same accepted temperature or enthalpy history in every radiation, natural-convection and air trial and report complete storage/heat residuals in joules; their separate trajectory receipt retains both time grids and all trial work. This receipt describes the accepted primal endpoint; requested steady or final/sampled-peak trajectory derivatives have their own complete-transpose receipt. No continuum error bound, shadowing reconstruction, participating medium, temperature-dependent emissivity or experimental validation is claimed. Solid-solves counts work in this retained enclosure endpoint; nested natural/air iteration counts remain in their own receipts.";
