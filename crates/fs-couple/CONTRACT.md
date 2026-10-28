@@ -3195,6 +3195,22 @@ None.
   modeled and silent linear forte is the lie the refusal prevents.
   Card = authored datasheet-class Estimate; low-ka piston load
   disclosed; cabinet IR packs are FORBIDDEN and absent.
+  The opt-in `MagneticTsDriver` retains that original mechanical assembly and
+  admits caller-supplied quadratic Bl(x)/L(x) profiles over an explicit closed
+  displacement interval. L must remain positive throughout, including interior
+  extrema; the interval must fit inside the suspension's original travel limit.
+  Total linkage lambda is stored with H_m=(lambda-psi_pm(x))^2/(2L(x)), where
+  psi_pm is the analytic integral of Bl. The same gradient supplies current,
+  Bl(x)i + L'(x)i^2/2 cone force, and reciprocal voltage including L'(x)i*x_dot.
+  No additional linear gyrator duplicates the interaction. The existing
+  descriptor discrete-gradient solver owns the common step and work/heat ledger;
+  rejected trials do not change accepted state. This nonlinear path is second
+  order and needs timestep refinement; the linear TsDriver keeps ExactZoh.
+  Tests in `speaker/magnetic/tests.rs` cover constitutive energy derivatives,
+  independent voltage/power identities, finite-domain admission, constant-model
+  convergence, nonlinear cabinet/panel evolution, and source/heat balance.
+  These bounded profiles do not add data authority, current-dependent core
+  saturation, hysteresis, eddy losses, coil heating or nonlinear suspension.
 
 - Electric chain (bead 3ez8g.9.5): `tests/electric_chain.rs`
   composes string -> pickup -> tone RC -> triode island -> TS driver

@@ -23,12 +23,20 @@
 //! extrapolation presented as forte is exactly the lie this refusal
 //! exists to prevent. FORBIDDEN and absent: cabinet IR packs — the
 //! cabinet is charts and cards, never a convolution.
+//!
+//! [`MagneticTsDriver`] additionally accepts bounded caller-supplied Bl(x) and
+//! L(x) profiles. It retains this same cone/cabinet model and uses one magnetic
+//! energy for nonlinear force, reluctance force and reciprocal back EMF. The
+//! original [`TsDriver`] keeps its exact linear held-input propagation.
 
 use fs_material::gas::{GasSpec, GasState};
 use fs_phs::linear_exact::{
     LinearPropagator, LinearSplit, LinearSplitBudget, split_quadratic, step_split,
 };
 use fs_phs::{PhsError, PortHamiltonian, QuadraticStorage, StepRecord};
+
+mod magnetic;
+pub use magnetic::{MagneticCoilSample, MagneticTsDriver, VoiceCoilMagnetics};
 
 /// Thiele–Small parameter card (datasheet-class, with provenance).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -153,6 +161,17 @@ fn declared_air() -> GasState {
     .expect("declared dry-air room state is within GasState's validity window")
 }
 
+// Shared physical assembly; the two drivers differ only in their magnetic
+// constitutive law and time integrator, never in cone/cavity/panel mechanics.
+struct DriverAssembly {
+    n: usize,
+    q: Vec<f64>,
+    j: Vec<f64>,
+    r: Vec<f64>,
+    g: Vec<f64>,
+    moving_mass_kg: f64,
+}
+
 impl TsDriver {
     /// Compose the driver. `box_volume_m3 = None` is free air;
     /// `panel = Some(..)` adds one cabinet-panel mode coupled through
@@ -188,73 +207,8 @@ impl TsDriver {
         panel: Option<PanelMode>,
         gas: GasState,
     ) -> Result<Self, SpeakerError> {
-        card.validate()?;
-        gas.validate_coherence().map_err(SpeakerError::Gas)?;
-        if let Some(v) = box_volume_m3
-            && !(v.is_finite() && v > 0.0)
-        {
-            return Err(SpeakerError::Invalid {
-                what: "box volume must be positive",
-            });
-        }
-        if panel.is_some() && box_volume_m3.is_none() {
-            return Err(SpeakerError::Invalid {
-                what: "a panel mode needs a box to couple through",
-            });
-        }
-        // Low-ka baffled-piston load: added mass 8 rho a^3 / 3 and a
-        // small frequency-independent resistance class (disclosed
-        // approximation).
-        let a_eff = (card.sd_m2 / core::f64::consts::PI).sqrt();
-        let m_air = 8.0 * gas.density * a_eff.powi(3) / 3.0;
-        let m_tot = card.mms_kg + m_air;
-        let r_rad = gas.density * gas.sound_speed * card.sd_m2 * 0.05;
-        let k_susp = 1.0 / card.cms_m_per_n;
-        // State: [phi_Le, x_cone, p_cone] (+ [x_p, p_p] with a panel).
-        let n = if panel.is_some() { 5 } else { 3 };
-        let mut q = vec![0.0; n * n];
-        q[0] = 1.0 / card.le_h;
-        q[n + 1] = k_susp;
-        q[2 * n + 2] = 1.0 / m_tot;
-        if let Some(vb) = box_volume_m3 {
-            let k_box_scale = gas.density * gas.sound_speed * gas.sound_speed / vb;
-            if let Some(p) = panel {
-                if !(p.frequency_hz > 0.0 && p.mass_kg > 0.0 && p.area_m2 > 0.0) {
-                    return Err(SpeakerError::Invalid {
-                        what: "panel mode values must be positive",
-                    });
-                }
-                // Cavity term (Sd x - Sp xp)^2 * rho c^2 / 2V couples
-                // cone and panel; panel's own stiffness/mass added.
-                q[n + 1] += k_box_scale * card.sd_m2 * card.sd_m2;
-                q[n + 3] -= k_box_scale * card.sd_m2 * p.area_m2;
-                q[3 * n + 1] -= k_box_scale * card.sd_m2 * p.area_m2;
-                let w_p = core::f64::consts::TAU * p.frequency_hz;
-                q[3 * n + 3] = p.mass_kg * w_p * w_p + k_box_scale * p.area_m2 * p.area_m2;
-                q[4 * n + 4] = 1.0 / p.mass_kg;
-            } else {
-                q[n + 1] += k_box_scale * card.sd_m2 * card.sd_m2;
-            }
-        }
-        let mut j = vec![0.0; n * n];
-        let set = |j: &mut Vec<f64>, r_: usize, c: usize, v: f64| {
-            j[r_ * n + c] += v;
-            j[c * n + r_] -= v;
-        };
-        // Gyrator: phi row gets -Bl * v (col p), p row gets +Bl * i.
-        set(&mut j, 0, 2, -card.bl);
-        // Kinematics: x_dot = v; p row gets -dH/dx by antisymmetry.
-        set(&mut j, 1, 2, 1.0);
-        let mut r = vec![0.0; n * n];
-        r[0] = card.re_ohm;
-        r[2 * n + 2] = card.rms_n_s_m + r_rad;
-        if let Some(p) = panel {
-            set(&mut j, 3, 4, 1.0);
-            let w_p = core::f64::consts::TAU * p.frequency_hz;
-            r[4 * n + 4] = 2.0 * p.damping_ratio * p.mass_kg * w_p;
-        }
-        let mut g = vec![0.0; n];
-        g[0] = 1.0;
+        let DriverAssembly { n, q, j, r, g, .. } =
+            assemble_driver(card, box_volume_m3, panel, &gas)?;
         let storage = Box::new(QuadraticStorage::new(q, n)?);
         let phs = PortHamiltonian::new(n, 1, j, r, g, storage)?;
         let linear = split_quadratic(
@@ -329,6 +283,89 @@ impl TsDriver {
     pub fn has_panel(&self) -> bool {
         self.has_panel
     }
+}
+
+fn assemble_driver(
+    card: TsCard,
+    box_volume_m3: Option<f64>,
+    panel: Option<PanelMode>,
+    gas: &GasState,
+) -> Result<DriverAssembly, SpeakerError> {
+    card.validate()?;
+    gas.validate_coherence().map_err(SpeakerError::Gas)?;
+    if let Some(v) = box_volume_m3
+        && !(v.is_finite() && v > 0.0)
+    {
+        return Err(SpeakerError::Invalid {
+            what: "box volume must be positive",
+        });
+    }
+    if panel.is_some() && box_volume_m3.is_none() {
+        return Err(SpeakerError::Invalid {
+            what: "a panel mode needs a box to couple through",
+        });
+    }
+    // Low-ka baffled-piston load: added mass 8 rho a^3 / 3 and a
+    // small frequency-independent resistance class (disclosed
+    // approximation).
+    let a_eff = (card.sd_m2 / core::f64::consts::PI).sqrt();
+    let m_air = 8.0 * gas.density * a_eff.powi(3) / 3.0;
+    let m_tot = card.mms_kg + m_air;
+    let r_rad = gas.density * gas.sound_speed * card.sd_m2 * 0.05;
+    let k_susp = 1.0 / card.cms_m_per_n;
+    // State: [phi_Le, x_cone, p_cone] (+ [x_p, p_p] with a panel).
+    let n = if panel.is_some() { 5 } else { 3 };
+    let mut q = vec![0.0; n * n];
+    q[0] = 1.0 / card.le_h;
+    q[n + 1] = k_susp;
+    q[2 * n + 2] = 1.0 / m_tot;
+    if let Some(vb) = box_volume_m3 {
+        let k_box_scale = gas.density * gas.sound_speed * gas.sound_speed / vb;
+        if let Some(p) = panel {
+            if !(p.frequency_hz > 0.0 && p.mass_kg > 0.0 && p.area_m2 > 0.0) {
+                return Err(SpeakerError::Invalid {
+                    what: "panel mode values must be positive",
+                });
+            }
+            // Cavity term (Sd x - Sp xp)^2 * rho c^2 / 2V couples
+            // cone and panel; panel's own stiffness/mass added.
+            q[n + 1] += k_box_scale * card.sd_m2 * card.sd_m2;
+            q[n + 3] -= k_box_scale * card.sd_m2 * p.area_m2;
+            q[3 * n + 1] -= k_box_scale * card.sd_m2 * p.area_m2;
+            let w_p = core::f64::consts::TAU * p.frequency_hz;
+            q[3 * n + 3] = p.mass_kg * w_p * w_p + k_box_scale * p.area_m2 * p.area_m2;
+            q[4 * n + 4] = 1.0 / p.mass_kg;
+        } else {
+            q[n + 1] += k_box_scale * card.sd_m2 * card.sd_m2;
+        }
+    }
+    let mut j = vec![0.0; n * n];
+    let set = |j: &mut Vec<f64>, r_: usize, c: usize, v: f64| {
+        j[r_ * n + c] += v;
+        j[c * n + r_] -= v;
+    };
+    // Gyrator: phi row gets -Bl * v (col p), p row gets +Bl * i.
+    set(&mut j, 0, 2, -card.bl);
+    // Kinematics: x_dot = v; p row gets -dH/dx by antisymmetry.
+    set(&mut j, 1, 2, 1.0);
+    let mut r = vec![0.0; n * n];
+    r[0] = card.re_ohm;
+    r[2 * n + 2] = card.rms_n_s_m + r_rad;
+    if let Some(p) = panel {
+        set(&mut j, 3, 4, 1.0);
+        let w_p = core::f64::consts::TAU * p.frequency_hz;
+        r[4 * n + 4] = 2.0 * p.damping_ratio * p.mass_kg * w_p;
+    }
+    let mut g = vec![0.0; n];
+    g[0] = 1.0;
+    Ok(DriverAssembly {
+        n,
+        q,
+        j,
+        r,
+        g,
+        moving_mass_kg: m_tot,
+    })
 }
 
 #[cfg(test)]
@@ -684,8 +721,11 @@ mod speaker_tests {
         }
 
         let changed = GasState::try_new(
-            &GasSpec::dry_air_ussa1976(), original.temperature, 2.0 * original.pressure,
-        ).unwrap();
+            &GasSpec::dry_air_ussa1976(),
+            original.temperature,
+            2.0 * original.pressure,
+        )
+        .unwrap();
         let driver = TsDriver::new_with_gas(card(), Some(0.02), None, changed).unwrap();
         assert_eq!(driver.rho, 2.0 * original.density);
     }
