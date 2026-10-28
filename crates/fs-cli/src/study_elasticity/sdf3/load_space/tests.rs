@@ -3,7 +3,7 @@ use super::*;
 const FIXTURE: &str = include_str!("../../../../../../examples/marquee/bracket-3d-load-space.fsim");
 
 fn compute(spec: &Spec, updates: usize) -> Computation {
-    compute_observed(spec, &CancelGate::new(), updates, |_, _| Ok(())).unwrap()
+    compute_observed(spec, &CancelGate::new(), updates, None, 0.0, |_, _| Ok(())).unwrap()
 }
 
 #[test]
@@ -135,14 +135,14 @@ fn g4_native_load_space_stops_respect_cancellation_and_original_work_caps() {
     let mut spec = spec::parse(FIXTURE).unwrap();
     let gate = CancelGate::new();
     gate.request();
-    let error = compute_observed(&spec, &gate, 1, |_, _| {
+    let error = compute_observed(&spec, &gate, 1, None, 0.0, |_, _| {
         panic!("no accepted output before geometry")
     })
     .err()
     .expect("precancellation must refuse");
     assert_eq!(error.exit, exit::CANCELLED);
     spec.linear = 1;
-    let error = compute_observed(&spec, &CancelGate::new(), 1, |_, _| {
+    let error = compute_observed(&spec, &CancelGate::new(), 1, None, 0.0, |_, _| {
         panic!("no admitted baseline")
     })
     .err()
@@ -164,7 +164,7 @@ fn g4_native_load_space_stops_respect_cancellation_and_original_work_caps() {
     let spec = spec::parse(FIXTURE).unwrap();
     let gate = CancelGate::new();
     let mut retained = 0;
-    let stopped = compute_observed(&spec, &gate, 4, |study, state| {
+    let stopped = compute_observed(&spec, &gate, 4, None, 0.0, |study, state| {
         assert_eq!(study.cells(), state.accepted.rho.len());
         assert!(state.gradient.numerical.passed());
         retained += 1;
@@ -188,7 +188,7 @@ fn g3_native_load_space_retains_real_designs_for_standard_report_and_package_exp
     assert_eq!(retained.value.str_field("driver"), Some(LOAD_SPACE3_DRIVER));
     assert_eq!(
         retained.value.get("resume_supported"),
-        Some(&JsonValue::Bool(false))
+        Some(&JsonValue::Bool(true))
     );
     let summary = linked(&ledger, &retained.value, "report_json", "study-report-json").unwrap();
     let report = JsonValue::parse(std::str::from_utf8(&summary).unwrap()).unwrap();
@@ -219,6 +219,9 @@ fn g3_native_load_space_retains_real_designs_for_standard_report_and_package_exp
     let package = linked(&ledger, &retained.value, "package", "study-package").unwrap();
     let package = EvidencePackage::from_json(std::str::from_utf8(&package).unwrap()).unwrap();
     assert!(fs_checker::check(&package).passed());
-    let error = super::super::resume(&ledger, &retained, None, &CancelGate::new()).unwrap_err();
-    assert_eq!(error.code, "cli-study-sdf3-resume-unsupported");
+    let continued = super::super::resume(&ledger, &retained, Some("1"), &CancelGate::new()).unwrap();
+    let continued = load(&ledger, &continued.pointer).unwrap();
+    assert!(integer(&continued.value, "iterations_completed").unwrap()
+        >= integer(&retained.value, "iterations_completed").unwrap());
+    assert_eq!(load(&ledger, &out.pointer).unwrap().bytes, retained.bytes);
 }

@@ -30,15 +30,27 @@ fn g1_load_space_cli_uses_the_continuous_force_set_and_exports_its_actual_fields
     let fields = design.path(&["selected", "basis_displacements_m"]).and_then(J::as_array).unwrap();
     assert_eq!(fields.len(), 2);
     assert_ne!(fields[0], fields[1]);
-    assert_eq!(result.path(&["receipt", "resume_supported"]), Some(&J::Bool(false)));
+    assert_eq!(result.path(&["receipt", "resume_supported"]), Some(&J::Bool(true)));
     let pointer = result.str_field("run_id").unwrap();
     let exported = document(&command("report").arg(pointer).arg(&ledger).output().unwrap(), 0);
     let bytes = fs::read(exported.str_field("report_json").unwrap()).unwrap();
     assert_eq!(bytes, retained(&ledger, &result, "report_json"));
     document(&command("package").arg(pointer).arg(&ledger).output().unwrap(), 0);
-    let refused = command("study").args(["--resume", pointer]).arg(&ledger).output().unwrap();
-    assert_eq!(refused.status.code(), Some(4));
-    assert!(String::from_utf8_lossy(&refused.stdout).contains("cli-study-sdf3-resume-unsupported"));
+    let split_ledger = dir.join("split.db");
+    let prefix = document(&command("study").arg(dir.join("robust.fsim"))
+        .arg(&split_ledger).args(["--budget", "1"]).output().unwrap(), 6);
+    let prefix_id = prefix.str_field("run_id").unwrap();
+    let resumed = document(&command("study").args(["--resume", prefix_id])
+        .arg(&split_ledger).args(["--budget", "1"]).output().unwrap(), 6);
+    for artifact in ["design", "iterations"] {
+        assert_eq!(retained(&split_ledger, &resumed, artifact), retained(&ledger, &result, artifact));
+    }
+    let work = resumed.path(&["receipt", "optimizer_work"]).unwrap();
+    assert!(number(work, "restoration_evaluations") >= 1.0);
+    assert_eq!(resumed.path(&["receipt", "trace_hash"]), result.path(&["receipt", "trace_hash"]));
+    let unchanged = document(&command("study").args(["--resume", resumed.str_field("run_id").unwrap()])
+        .arg(&split_ledger).output().unwrap(), 6);
+    assert_eq!(unchanged.str_field("run_id"), resumed.str_field("run_id"));
 }
 
 fn scratch(label: &str) -> PathBuf {

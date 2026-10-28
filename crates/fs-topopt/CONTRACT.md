@@ -173,6 +173,22 @@ second-proposal cancellation preserving the first refined solution exactly,
 and an enrichment leaf-cap stop. This does not close the full marquee bead's
 moving-boundary, witness-oracle, continuum-bound or both-ISA golden requirements.
 
+### Load-space optimizer restoration
+
+`LoadSpaceDesignStudy3` and `LoadSpaceLimitedDesign3` share the existing projected
+augmented-Lagrangian state and expose `checkpoint` / `restore`. Restoration
+preserves accepted history, the original gradient experiment and the distinct
+feasible incumbent. It freshly solves the accepted and incumbent endpoints and
+compares physical responses and all objective/constraint gradients before
+continuing. These one or two evaluations count against the original optimizer
+allowance; the supplied control charges every solve. Earlier search steps and
+the original gradient experiment are not replayed. The consumer must bind the
+checkpoint to unchanged geometry, loads, material, physical regions and policy;
+an endpoint comparison alone cannot establish global source equivalence.
+G3/G4/G5 regressions cover changed responses, lost incumbents, cancellation,
+exhausted allowances and split/restored trajectory equivalence. The checkpoint
+conveys numerical state, not a continuum certificate or a new resource grant.
+
 ## Invariants
 
 - Every stage of the density chain has an exact derivative; the

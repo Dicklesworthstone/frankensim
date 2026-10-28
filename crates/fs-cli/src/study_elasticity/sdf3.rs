@@ -325,8 +325,7 @@ pub(super) fn resume(
     gate: &CancelGate,
 ) -> Result<Outcome> {
     if old.value.str_field("driver") == Some(LOAD_SPACE3_DRIVER) {
-        return Err(fail("cli-study-sdf3-resume-unsupported",
-            "load-space studies retain accepted designs and reports, but do not yet restore optimizer state; export this run or start a new explicitly budgeted study"));
+        return load_space::resume(ledger, old, budget(override_text)?, gate);
     }
     if old.value.str_field("driver") == Some(STRESS3_DRIVER) {
         return stress::resume(ledger, old, budget(override_text)?, gate);

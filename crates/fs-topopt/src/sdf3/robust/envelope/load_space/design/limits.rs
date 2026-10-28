@@ -80,6 +80,19 @@ impl<'a, 'callback, O: Sdf3Elasticity> LoadSpaceLimitedDesign3<'a, 'callback, O>
             engine_options(options), Some(cap), control)?;
         Ok(Self { inner })
     }
+    /// Restore accepted AL state under the same force ellipsoid and physical
+    /// cap. Fresh accepted/incumbent solves spend the original allowances;
+    /// neither earlier search steps nor the original gradient gate are replayed.
+    pub fn restore(study: &'a mut CutDensityStudy3<O>, basis: &'a [&'a [f64]],
+        checkpoint: LoadSpaceDesignCheckpoint3, cap: LoadSpaceCap3,
+        options: LoadSpaceLimitedOptions3, control: &'a mut SolveControl<'callback>)
+        -> Result<Self, ProjectedAlError<EvaluationStop>> {
+        let inner = LoadSpaceDesignStudy3::restore_family(study, basis, checkpoint,
+            cap.policy.clone(), engine_options(options), Some(cap), control)?;
+        Ok(Self { inner })
+    }
+    #[must_use]
+    pub fn checkpoint(&self) -> LoadSpaceDesignCheckpoint3 { self.inner.checkpoint() }
     #[must_use] pub fn cap(&self) -> &LoadSpaceCap3 { self.inner.cap.as_ref().expect("cap-bound engine") }
     #[must_use] pub fn accepted(&self) -> &LoadSpaceDesignPoint3 { self.inner.accepted() }
     #[must_use] pub fn best_feasible(&self) -> Option<&LoadSpaceDesignPoint3> { self.inner.best_feasible() }

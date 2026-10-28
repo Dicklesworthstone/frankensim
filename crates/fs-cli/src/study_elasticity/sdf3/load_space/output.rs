@@ -82,11 +82,14 @@ fn gradient(state: &State) -> String {
         p.compliance_difference, p.compliance_relative_error, p.volume_analytic,
         p.volume_difference, p.volume_relative_error)).collect::<Vec<_>>().join(",");
     format!(
-        "{{\"passed\":{},\"step\":{},\"relative_tolerance\":{},\"evaluations\":{},\"probes\":[{rows}]}}",
+        "{{\"passed\":{},\"step\":{},\"relative_tolerance\":{},\"evaluations\":{},\"baseline_spectral\":{:.17e},\"baseline_material\":{:.17e},\"work\":{{\"linear_iterations\":{},\"linear_solves\":{},\"preconditioner_operator_applications\":{},\"preconditioner_galerkin_products\":{}}},\"probes\":[{rows}]}}",
         check.passed(),
         check.options.step,
         check.options.relative_tolerance,
-        1 + 2 * check.probes.len()
+        1 + 2 * check.probes.len(),
+        check.baseline_compliance, check.baseline_volume_fraction,
+        check.work.linear_iterations, check.work.linear_solves,
+        check.work.preconditioner_operator_applications, check.work.preconditioner_galerkin_products,
     )
 }
 
@@ -115,6 +118,7 @@ pub(super) fn persist(
     ledger: &Ledger,
     study: &CutDensityStudy3<AdaptiveSolveSpace3>,
     state: &State,
+    producer: ContentHash,
     previous: Option<ContentHash>,
     limit: usize,
 ) -> Result<Outcome> {
@@ -158,12 +162,13 @@ pub(super) fn persist(
     let stop = stopping(state);
     let check = gradient(state);
     let optimizer = format!(
-        "{{\"iterations\":{},\"evaluations\":{},\"multiplier_updates\":{},\"rejected_trials\":{},\"gradient_probe_evaluations\":{},\"evaluation_budget_scope\":\"optimizer evaluations only; gradient probes share the original Krylov and wall budgets\"}}",
+        "{{\"iterations\":{},\"evaluations\":{},\"multiplier_updates\":{},\"rejected_trials\":{},\"gradient_probe_evaluations\":{},\"restoration_evaluations\":{},\"evaluation_budget_scope\":\"optimizer and restoration evaluations; gradient probes share the original Krylov and wall budgets\"}}",
         state.optimizer.iterations,
         state.optimizer.evaluations,
         state.optimizer.multiplier_updates,
         state.optimizer.rejected_trials,
-        1 + 2 * state.gradient.numerical.probes.len()
+        1 + 2 * state.gradient.numerical.probes.len(),
+        state.checkpoint.restoration_evaluations,
     );
     let model = format!(
         "{{\"force_set\":\"f=Fq, ||q||_2<=1\",\"basis_columns\":{},\"compliance_limit_j\":{},\"spectral_temperature\":{},\"smooth_bias_bound\":{},\"threshold_offset\":{},\"nominal_threshold\":{},\"penal\":{},\"beta\":{},\"constraint_material\":\"eroded\",\"objective_material\":\"dilated\"}}",
@@ -177,11 +182,12 @@ pub(super) fn persist(
         spec.schedule[0].beta
     );
     let summary = format!(
-        "{{\"driver\":{LOAD_SPACE3_DRIVER:?},\"study_id\":{:?},\"status\":{:?},\"objective\":\"dilated-volume-fraction\",\"objective_unit\":\"1\",\"iterations_completed\":{},\"target_iterations\":{},\"selected_design\":{selection:?},\"selected_feasible\":{feasible},\"selected\":{selected},\"last_accepted\":{accepted},\"model\":{model},\"gradient_check\":{check},\"optimizer_work\":{optimizer},\"work\":{work},\"stop\":{stop},\"resume_supported\":false,\"authority\":\"Estimated\",\"no_claim\":{}}}",
+        "{{\"driver\":{LOAD_SPACE3_DRIVER:?},\"study_id\":{:?},\"status\":{:?},\"objective\":\"dilated-volume-fraction\",\"objective_unit\":\"1\",\"iterations_completed\":{},\"target_iterations\":{},\"selected_design\":{selection:?},\"selected_feasible\":{feasible},\"selected\":{selected},\"last_accepted\":{accepted},\"model\":{model},\"gradient_check\":{check},\"optimizer_work\":{optimizer},\"work\":{work},\"stop\":{stop},\"resume_supported\":true,\"resume_mode\":{:?},\"producer\":{:?},\"authority\":\"Estimated\",\"no_claim\":{}}}",
         spec.id.to_hex(),
         state.status,
         state.optimizer.iterations,
         spec.updates,
+        resume::MODE, producer.to_hex(),
         quoted(SCOPE)
     );
     let html = format!(
@@ -219,12 +225,14 @@ pub(super) fn persist(
     let package = package
         .to_json()
         .map_err(|e| fail("cli-study-sdf3-package", e.to_string()))?;
+    let checkpoint = resume::encode(spec, state, producer, &design, &rows);
     let artifacts = [
         ("iterations", "study-iterations", rows.as_bytes()),
         ("design", "study-design", design.as_bytes()),
         ("report_html", "study-report-html", html.as_bytes()),
         ("report_json", "study-report-json", summary.as_bytes()),
         ("package", "study-package", package.as_bytes()),
+        ("checkpoint", resume::KIND, checkpoint.as_bytes()),
     ];
     if artifacts
         .iter()
@@ -236,8 +244,8 @@ pub(super) fn persist(
         ));
     }
     let versions = format!(
-        "{{\"driver\":{LOAD_SPACE3_DRIVER:?},\"crate\":{:?},\"constellation_lock\":{constellation:?}}}",
-        env!("CARGO_PKG_VERSION")
+        "{{\"driver\":{LOAD_SPACE3_DRIVER:?},\"crate\":{:?},\"constellation_lock\":{constellation:?},\"producer\":{:?}}}",
+        env!("CARGO_PKG_VERSION"), producer.to_hex()
     );
     let budgets = format!(
         "{{\"wall_s\":{},\"memory_bytes\":{},\"linear_iterations\":{},\"per_solve_iterations\":{},\"quadrature_boxes\":{},\"quadrature_points\":{},\"max_optimizer_evaluations\":{},\"consumed_wall_s\":{},\"work\":{work},\"optimizer_work\":{optimizer}}}",
@@ -272,14 +280,15 @@ pub(super) fn persist(
             let _ = write!(refs, ",{name:?}:\"{}\"", artifact.hash.to_hex());
         }
         let receipt = format!(
-            "{{\"schema\":{STUDY_RUN_RECEIPT_SCHEMA:?},\"driver\":{LOAD_SPACE3_DRIVER:?},\"study_id\":{:?},\"status\":{:?},\"source\":{:?},\"iterations_completed\":{},\"target_iterations\":{},\"iteration_limit_this_invocation\":{limit},\"trace_hash\":{:?},\"consumed_wall_s\":{},\"work\":{work},\"optimizer_work\":{optimizer},\"selected_design\":{selection:?},\"selected_feasible\":{feasible},\"stop\":{stop},\"predecessor\":{predecessor},\"resume_supported\":false{refs}}}",
+            "{{\"schema\":{STUDY_RUN_RECEIPT_SCHEMA:?},\"driver\":{LOAD_SPACE3_DRIVER:?},\"study_id\":{:?},\"status\":{:?},\"source\":{:?},\"iterations_completed\":{},\"target_iterations\":{},\"iteration_limit_this_invocation\":{limit},\"trace_hash\":{:?},\"consumed_wall_s\":{},\"work\":{work},\"optimizer_work\":{optimizer},\"selected_design\":{selection:?},\"selected_feasible\":{feasible},\"stop\":{stop},\"predecessor\":{predecessor},\"resume_supported\":true,\"resume_mode\":{:?},\"producer\":{:?}{refs}}}",
             spec.id.to_hex(),
             state.status,
             source.hash.to_hex(),
             state.optimizer.iterations,
             spec.updates,
             trace.to_hex(),
-            state.spent.wall_s
+            state.spent.wall_s,
+            resume::MODE, producer.to_hex()
         );
         let stored = ledger.put_artifact(RECEIPT_KIND, receipt.as_bytes(), None)?;
         ledger.link(op, &stored.hash, EdgeRole::Out)?;

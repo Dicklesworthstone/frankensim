@@ -1061,10 +1061,20 @@ Geometry, supports, material, physical regions and projection thresholds stay
 fixed. The original wall, Krylov and quadrature budgets cover all solves;
 `max-optimizer-evaluations` excludes the separately reported initial gradient
 probes. Accepted prefixes are committed before further updates and standard
-report/package exports contain their actual fields without a re-solve. This
-mode explicitly refuses cross-process optimizer resume. Authority remains
-Estimated, with no stress, buckling, continuum, mesh-independent optimum,
-geometric manufacturing tolerance or experimental-validation claim.
+report/package exports contain their actual fields without a re-solve.
+`study --resume study-<receipt-hash> <ledger.db> --budget N` restores the shared
+projected AL state, preserving its multipliers, spectral step, penalty schedule,
+accepted history and least-material feasible incumbent. The original source
+and executable are pinned. Geometry is rebuilt and accepted/incumbent responses
+are independently re-solved; one or two endpoint evaluations are charged to the
+original optimizer allowance, and all geometry/Krylov/wall work is cumulative.
+Earlier search updates and the initial gradient experiment are not replayed.
+The invocation cap adds updates without extending the original target. Historical
+receipts without optimizer checkpoints remain exportable but cannot resume.
+Failed restoration and uncheckpointed work lost after a crash cannot be durably
+charged; previous results remain intact. Authority remains Estimated, with no
+stress, buckling, continuum, mesh-independent optimum, geometric manufacturing
+tolerance or experimental-validation claim.
 
 ### Native cooling probability study
 

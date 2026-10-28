@@ -1,5 +1,7 @@
 //! Optimize the continuous load set with the existing projected AL solver.
 pub mod limits;
+mod resume;
+pub use resume::LoadSpaceDesignCheckpoint3;
 use super::*;
 use super::super::optimize::EnvelopeDesignOptions3;
 use crate::sdf3::robust::{RobustDesignOptions3, continuation::controlled_sdf3_robust_feasible_start};
@@ -80,6 +82,7 @@ pub struct LoadSpaceDesignStudy3<'a, 'callback, O: Sdf3Elasticity> {
     accepted: LoadSpaceDesignPoint3,
     best: Option<LoadSpaceDesignPoint3>,
     history: Vec<LoadSpaceDesignIteration3>,
+    restoration_evaluations: usize,
 }
 impl<'a, 'callback, O: Sdf3Elasticity> LoadSpaceDesignStudy3<'a, 'callback, O> {
     pub fn new(study: &'a mut CutDensityStudy3<O>, basis: &'a [&'a [f64]], rho: &[f64],
@@ -112,7 +115,8 @@ impl<'a, 'callback, O: Sdf3Elasticity> LoadSpaceDesignStudy3<'a, 'callback, O> {
         let accepted = last.expect("admitted sample retains its complete physical fields");
         let first = row(&accepted, 0, options, cap.as_ref());
         let best = first.feasible.then(|| accepted.clone());
-        Ok(Self { study, basis, control, policy, options, cap, check, state, accepted, best, history: vec![first] })
+        Ok(Self { study, basis, control, policy, options, cap, check, state, accepted, best,
+            history: vec![first], restoration_evaluations: 0 })
     }
     #[must_use] pub fn accepted(&self) -> &LoadSpaceDesignPoint3 { &self.accepted }
     #[must_use] pub fn best_feasible(&self) -> Option<&LoadSpaceDesignPoint3> { self.best.as_ref() }

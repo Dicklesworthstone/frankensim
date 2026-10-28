@@ -7,15 +7,17 @@ use fs_ascent::projected_al::{
 use fs_topopt::sdf3::robust::envelope::load_space::{
     LoadSpaceGradientCheck3,
     design::{
-        LoadSpaceDesignIteration3, LoadSpaceDesignPoint3,
+        LoadSpaceDesignCheckpoint3, LoadSpaceDesignIteration3, LoadSpaceDesignPoint3,
         limits::{LoadSpaceCap3, LoadSpaceLimitedDesign3, LoadSpaceLimitedOptions3},
     },
 };
 
 #[path = "load_space/output.rs"]
 mod output;
+#[path = "load_space/resume.rs"]
+mod resume;
 
-const SCOPE: &str = "Estimated fixed-grid linear-elastic minimum-material design over every simultaneous force f=Fq with ||q||_2<=1. Authored basis forces include their amplitudes and correlations; they are not probabilities or mutually exclusive scenarios. The worst compliance is computed from the complete cross-compliance spectrum on eroded material. A smooth spectral upper surrogate drives the existing projected augmented-Lagrangian optimizer; physical feasibility additionally checks the unrelaxed compliance cap. The objective is dilated material fraction, with nominal and eroded fields retained separately. Projection-threshold robustness is a discrete density model, not a geometric manufacturing tolerance. Initial spectral and material gradients are checked by independently solved directional differences. Only accepted feasible points compete for the least-material incumbent; KKT values refer to the last accepted iterate. Accepted outputs are durable before more optimization. Partial runs remain exportable but this mode does not restore optimizer state across processes. No stress, buckling, continuum error, mesh-independent optimum, safety or experimental-validation claim. Memory is an admission envelope and wall/cancellation checks are cooperative.";
+const SCOPE: &str = "Estimated fixed-grid linear-elastic minimum-material design over every simultaneous force f=Fq with ||q||_2<=1. Authored basis forces include their amplitudes and correlations; they are not probabilities or mutually exclusive scenarios. The worst compliance is computed from the complete cross-compliance spectrum on eroded material. A smooth spectral upper surrogate drives the existing projected augmented-Lagrangian optimizer; physical feasibility additionally checks the unrelaxed compliance cap. The objective is dilated material fraction, with nominal and eroded fields retained separately. Projection-threshold robustness is a discrete density model, not a geometric manufacturing tolerance. Initial spectral and material gradients are checked by independently solved directional differences. Only accepted feasible points compete for the least-material incumbent; KKT values refer to the last accepted iterate. Accepted outputs are durable before more optimization. Cross-process resume restores accepted optimizer state under the same source and executable, rebuilding geometry and re-solving the accepted and distinct feasible incumbent endpoints against the original work allowances. Earlier optimizer steps and the initial gradient experiment are not replayed. Failed restoration and uncheckpointed work lost after a crash cannot be durably charged; previous results remain intact. No stress, buckling, continuum error, mesh-independent optimum, safety or experimental-validation claim. Memory is an admission envelope and wall/cancellation checks are cooperative.";
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Config {
@@ -65,6 +67,7 @@ struct State {
     optimizer: ProjectedAlWork,
     spent: Spent,
     status: &'static str,
+    checkpoint: LoadSpaceDesignCheckpoint3,
 }
 impl State {
     fn capture(
@@ -81,6 +84,7 @@ impl State {
             optimizer: design.optimizer_work(),
             spent: Spent::default(),
             status: "checkpointed",
+            checkpoint: design.checkpoint(),
         }
     }
     fn selected(&self) -> &LoadSpaceDesignPoint3 {
@@ -144,15 +148,20 @@ fn compute_observed(
     spec: &Spec,
     gate: &CancelGate,
     limit: usize,
+    recovery: Option<&resume::Recovery>,
+    preparation_wall_s: f64,
     mut observed: impl FnMut(&CutDensityStudy3<AdaptiveSolveSpace3>, &State) -> Result<()>,
 ) -> Result<Computation> {
     let config = spec
         .load_space
         .ok_or_else(|| fail("cli-study-sdf3-input", "missing load-space optimizer"))?;
     let cap = config.cap(spec.loads.len())?;
+    let prior = recovery.map_or(Spent::default(), |r| r.spent)
+        .add(SolveWork::default(), QuadratureWork3::default(), preparation_wall_s)?;
+    prior.validate(spec)?;
     let start = Instant::now();
     let poll = || {
-        if gate.is_requested() || start.elapsed().as_secs_f64() >= spec.wall_s {
+        if gate.is_requested() || prior.wall_s + start.elapsed().as_secs_f64() >= spec.wall_s {
             ControlFlow::Break(())
         } else {
             ControlFlow::Continue(())
@@ -188,8 +197,8 @@ fn compute_observed(
     let mut cp = |_| poll();
     let mut quadrature = QuadratureControl3::new(
         QuadratureOptions3 {
-            max_boxes: spec.boxes,
-            max_points: spec.points,
+            max_boxes: spec.boxes - prior.geometry.boxes,
+            max_points: spec.points - prior.geometry.points,
             ..Default::default()
         },
         &mut cp,
@@ -228,7 +237,7 @@ fn compute_observed(
     let mut cp = |_| poll();
     let mut control = SolveControl::new(
         SolveBudget {
-            total_iterations: spec.linear,
+            total_iterations: spec.linear - prior.linear.linear_iterations,
             per_solve_iterations: spec.per_solve,
         },
         &mut cp,
@@ -255,18 +264,15 @@ fn compute_observed(
                 },
             })?;
         let basis: Vec<_> = forces.iter().map(Vec::as_slice).collect();
-        let mut design = LoadSpaceLimitedDesign3::new(
-            &mut study,
-            &basis,
-            &raw,
-            cap,
-            config.options,
-            &mut control,
-        )
-        .map_err(|e| numerical_failure(e, gate, poll().is_break()))?;
+        let mut design = match recovery {
+            None => LoadSpaceLimitedDesign3::new(&mut study, &basis, &raw, cap,
+                config.options, &mut control),
+            Some(recovery) => LoadSpaceLimitedDesign3::restore(&mut study, &basis,
+                recovery.checkpoint.clone(), cap, config.options, &mut control),
+        }.map_err(|e| numerical_failure(e, gate, poll().is_break()))?;
         let result = design.run(0);
         let mut state = State::capture(&design, result);
-        let updates = limit.min(spec.updates);
+        let updates = limit.min(spec.updates - design.optimizer_work().iterations);
         for _ in 0..updates {
             if state.error.is_some()
                 || state
@@ -277,14 +283,14 @@ fn compute_observed(
                 break;
             }
             state.spent =
-                Spent::default().add(design.work(), geometry, start.elapsed().as_secs_f64())?;
+                prior.add(design.work(), geometry, start.elapsed().as_secs_f64())?;
             observed(design.study(), &state)?;
             let result = design.run(1);
             state = State::capture(&design, result);
         }
         Ok(state)
     })?;
-    state.spent = Spent::default().add(control.work(), geometry, start.elapsed().as_secs_f64())?;
+    state.spent = prior.add(control.work(), geometry, start.elapsed().as_secs_f64())?;
     state.status = state.terminal(gate, state.spent.wall_s >= spec.wall_s);
     Ok(Computation { study, state })
 }
@@ -295,25 +301,15 @@ pub(super) fn drive(
     cap: Option<usize>,
     gate: &CancelGate,
 ) -> Result<Outcome> {
-    let limit = cap.unwrap_or(spec.updates).min(spec.updates);
-    let mut previous = None;
-    let run = compute_observed(spec, gate, limit, |study, state| {
-        let out = output::persist(spec, ledger, study, state, previous, limit)?;
-        previous = out
-            .pointer
-            .strip_prefix("study-")
-            .and_then(ContentHash::from_hex);
-        // A progress pointer names already durable fields, even after a crash.
-        use std::io::Write as _;
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "{{\"schema\":\"frankensim.cli.sdf3-load-space-progress.v1\",\"run_id\":{},\"iterations_completed\":{}}}",
-            quoted(&out.pointer),
-            state.optimizer.iterations,
-        );
-        Ok(())
-    })?;
-    output::persist(spec, ledger, &run.study, &run.state, previous, limit)
+    resume::drive(spec, ledger, cap, gate, None)
+}
+
+pub(super) fn resume(ledger: &Ledger, old: &Loaded, cap: Option<usize>, gate: &CancelGate) -> Result<Outcome> {
+    let source = linked(ledger, &old.value, "source", "study-source")?;
+    let source = std::str::from_utf8(&source)
+        .map_err(|e| fail("cli-study-sdf3-load-space-checkpoint", e.to_string()))?;
+    let spec = spec::parse(source)?;
+    resume::drive(&spec, ledger, cap, gate, Some(old))
 }
 
 #[cfg(test)]
