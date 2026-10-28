@@ -20,6 +20,9 @@ use super::{
 };
 use crate::CS2;
 
+mod sgs;
+pub use sgs::{BoundarySgsError3, BoundarySgsReport3};
+
 /// Bit-semantics version for the D3Q19 boundary surface.
 ///
 /// This covers face ordering, link-mask construction, solid-cell
@@ -933,7 +936,7 @@ impl BoundaryGrid3 {
         pool: &P,
         gate: &CancelGate,
     ) -> Result<(), BoundaryStepError3> {
-        self.step_pooled_inner(pool, gate, None).map(|_| ())
+        self.step_pooled_inner(pool, gate, None, None).map(|_| ())
     }
 
     /// Pooled counterpart of [`Self::step_with_wall_momentum`]. Loads reduce
@@ -951,7 +954,7 @@ impl BoundaryGrid3 {
         moment_origin: [f64; 3],
     ) -> Result<WallMomentumExchange3, BoundaryStepError3> {
         self.validate_wall_measurement(links, moment_origin)?;
-        self.step_pooled_inner(pool, gate, Some((links, moment_origin)))
+        self.step_pooled_inner(pool, gate, Some((links, moment_origin)), None)
     }
 
     fn step_pooled_inner<P: KernelRunner>(
@@ -959,6 +962,7 @@ impl BoundaryGrid3 {
         pool: &P,
         gate: &CancelGate,
         measurement: Option<(&[BoundaryLink3], [f64; 3])>,
+        models: Option<&[CollisionModel3]>,
     ) -> Result<WallMomentumExchange3, BoundaryStepError3> {
         self.topology_locked = true;
         {
@@ -967,6 +971,7 @@ impl BoundaryGrid3 {
                 solid: &self.solid,
                 post: chunk_groups(&mut self.post),
                 model: self.collision_model,
+                models,
                 force: self.force,
                 force_field: self.force_field.as_deref(),
             };
@@ -1005,6 +1010,18 @@ impl BoundaryGrid3 {
             self.next = Some(next);
             return Err(error);
         }
+        self.publish_next(next, gate, measurement.is_some() || models.is_some())?;
+        Ok(exchange)
+    }
+
+    /// Shared publication for the pooled owner and explicit serial SGS.
+    /// All boundary reconstruction preconditions are checked before the swap.
+    fn publish_next(
+        &mut self,
+        mut next: [Vec<Tile>; Q3],
+        gate: &CancelGate,
+        check_cancellation: bool,
+    ) -> Result<(), BoundaryStepError3> {
         // The open-face reconstruction asserts a positive density at its
         // source cells; check them on the unpublished state so a lattice
         // that left its physical regime refuses instead of panicking.
@@ -1021,14 +1038,14 @@ impl BoundaryGrid3 {
                 }
             }
         }
-        if measurement.is_some() && gate.is_requested() {
+        if check_cancellation && gate.is_requested() {
             self.next = Some(next);
             return Err(BoundaryStepError3::Cancelled);
         }
         core::mem::swap(&mut self.f, &mut next);
         self.next = Some(next);
         self.apply_open_boundaries();
-        Ok(exchange)
+        Ok(())
     }
 
     /// Velocity component over one z section, row-major in `(y, x)`.
@@ -1703,6 +1720,7 @@ struct CollidePass<'a> {
     solid: &'a [u64],
     post: Vec<Mutex<[&'a mut [Tile]; Q3]>>,
     model: CollisionModel3,
+    models: Option<&'a [CollisionModel3]>,
     force: [f64; 3],
     force_field: Option<&'a [[f64; 3]]>,
 }
@@ -1730,7 +1748,10 @@ impl TileKernel for CollidePass<'_> {
                 }
                 let populations = core::array::from_fn(|q| self.f[q][tile].0[lane]);
                 let force = cell_force(self.force, self.force_field, tile, lane);
-                match collide_cell3(populations, self.model, force) {
+                let model = self
+                    .models
+                    .map_or(self.model, |field| field[tile * TILE_CELLS + lane]);
+                match collide_cell3(populations, model, force) {
                     Ok(post) => {
                         for (field, value) in chunk.iter_mut().zip(post) {
                             field[local].0[lane] = value;

@@ -1108,6 +1108,40 @@ developed turbulent TGV dissipation histories, a channel DNS profile, jet
 physics or finest-rung acoustic equivalence. Those full M3.2-W5/G2 campaigns
 remain open. Neither SGS nor LVEL is a resolved-turbulence acceptance render.
 
+### Moving/open D3Q19 boundaries and turbulent wall loads
+
+`BoundaryGrid3::{sgs_workspace, prepare_sgs, step_with_sgs,
+step_pooled_with_sgs}` apply the same explicit Smagorinsky/WALE kernel to the
+existing tiled boundary owner. Molecular transport comes from its constructor
+collision law on every step; no previous eddy viscosity is compounded. The
+cached velocity includes both uniform and per-cell Guo force corrections.
+Workspace collision entries follow native `tile * TILE_CELLS + lane` order.
+
+Interior and periodic derivatives are centred. Halfway-wall derivatives use
+the actual moving-wall value and the streaming owner's stationary wall/open
+seam and corner conventions. On-site velocity faces use a quadratic one-sided
+derivative through two interior fluid cells, with a linear fallback when the
+second is solid; pressure faces use their zero-normal-velocity-gradient rule.
+The original regularized open-face population reconstruction remains the
+boundary model. No synthetic turbulent inflow, transparent outlet, developed
+jet qualification or improvement of that model's existing accuracy envelope
+is implied by adding SGS.
+
+Optional canonical wall-link selections return `BoundarySgsReport3` with the
+actual same-step wall impulse, angular impulse and work, alongside pre-step
+shear-dissipation diagnostics. Both serial and pooled paths reuse the original
+collision, link streaming, open reconstruction and wall-momentum kernels.
+Closure sweeps allocate no buffers after workspace creation; publication uses
+the existing reusable stream destination. Input, ratio, collision, load and
+cancellation refusals publish neither new populations nor a load result.
+Ordinary stepping does not enable SGS. The zero coefficient retains original
+collision bits and ordinary trajectories; independent higher rates survive.
+
+`tests/boundary_sgs.rs` covers moving/open/periodic zero controls, analytic
+Couette and quadratic inlet gradients, force-frame consistency, actual
+SGS wall loads and worker-count identity, plus refusal/retry behavior. These
+are focused integration regressions, not a turbulent-flow validation campaign.
+
 ### Transient finite-volume momentum and heat
 
 `conjugate::simple_unsteady_with_sgs` and `march_conjugate_with_sgs` select the

@@ -28,8 +28,8 @@ mod simd;
 pub mod sparse;
 
 pub use boundary::{
-    BoundaryGrid3, BoundaryLink3, BoundarySpec3, BoundaryStepError3,
-    D3Q19_BOUNDARY_BIT_SEMANTICS_VERSION, Face3, FaceBoundary3, LinkMaskTile3,
+    BoundaryGrid3, BoundaryLink3, BoundarySgsError3, BoundarySgsReport3, BoundarySpec3,
+    BoundaryStepError3, D3Q19_BOUNDARY_BIT_SEMANTICS_VERSION, Face3, FaceBoundary3, LinkMaskTile3,
     WallMomentumExchange3,
 };
 pub(crate) use coupled::force_corrected_shear_rate3;
