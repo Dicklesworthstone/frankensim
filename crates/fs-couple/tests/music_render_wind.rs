@@ -7,6 +7,9 @@ use fs_couple::pcm_wav::observation::PressureRenderer;
 use fs_couple::render::plate::file::PlatePerformance;
 use fs_couple::render::schedule::reed::ReedPerformance;
 
+#[path = "music_render_wind/resolved.rs"]
+mod resolved;
+
 const REED: &str = include_str!("../examples/reed-duct.performance");
 const PLATE: &str = include_str!("../examples/plate-mesh.performance");
 static NEXT: AtomicU64 = AtomicU64::new(0);

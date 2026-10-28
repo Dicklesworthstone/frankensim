@@ -93,6 +93,36 @@ pub struct NsfDgLimits {
     pub projection_relative_tolerance: f64,
 }
 
+impl NsfDgLimits {
+    /// Admit the complete trial work and numerical allowances before allocating
+    /// a source volume. File and programmatic callers use this same rule; gas,
+    /// area, topology and clock equality still require both physical owners.
+    pub fn validate_for_cells(&self, cells: usize) -> Result<(), NsfDgError> {
+        let work = cells.checked_mul(self.substeps)
+            .and_then(|n| n.checked_mul(self.maximum_evaluations));
+        if cells == 0 || cells > self.maximum_cells || self.maximum_cells == 0
+            || !(1..=65_536).contains(&self.substeps)
+            || !(3..=256).contains(&self.maximum_evaluations)
+            || work.is_none_or(|n| n > self.maximum_cell_steps)
+            || self.maximum_steps == 0
+            || self.maximum_steps > (usize::MAX / self.substeps.max(1)) as u64
+            || !self.incoming_bracket_m_s.iter().all(|x| x.is_finite())
+            || self.incoming_bracket_m_s[0] >= self.incoming_bracket_m_s[1]
+            || !self.pressure_absolute_tolerance_pa.is_finite()
+            || self.pressure_absolute_tolerance_pa < 0.0
+            || !self.pressure_relative_tolerance.is_finite()
+            || !(0.0 < self.pressure_relative_tolerance && self.pressure_relative_tolerance <= 1e-3)
+            || !self.projection_absolute_tolerance_j.is_finite()
+            || self.projection_absolute_tolerance_j < 0.0
+            || !self.projection_relative_tolerance.is_finite()
+            || !(0.0..=1.0).contains(&self.projection_relative_tolerance)
+        {
+            return Err(NsfDgError::Input("resolved coupling requires finite complete cell-work, horizon, root and projection budgets"));
+        }
+        Ok(())
+    }
+}
+
 /// One accepted resolved/acoustic interval, with no duplicated excitation owner.
 #[derive(Debug, Clone)]
 pub struct NsfDgFrame {
@@ -177,30 +207,13 @@ impl<L: Lattice3<27>> NsfDg<L> {
             "resolved coupling requires a nonempty characteristic face"))?.area_m2
             * traces.len() as f64;
         let duct_area = load.duct().inlet_area_m2();
-        let work = zone.cell_count().checked_mul(limits.substeps)
-            .and_then(|n| n.checked_mul(limits.maximum_evaluations));
-        let bracket = limits.incoming_bracket_m_s;
+        limits.validate_for_cells(zone.cell_count())?;
         if zone.steps() != 0 || load.state().step_count() != 0 || load.has_driven_mouth()
-            || zone.cell_count() > limits.maximum_cells || limits.maximum_cells == 0
-            || !(1..=65_536).contains(&limits.substeps)
-            || !(3..=256).contains(&limits.maximum_evaluations)
-            || work.is_none_or(|n| n > limits.maximum_cell_steps)
-            || limits.maximum_steps == 0
-            || limits.maximum_steps > (usize::MAX / limits.substeps) as u64
-            || !bracket.iter().all(|x| x.is_finite()) || bracket[0] >= bracket[1]
             || open.faces.iter().any(|face| face.reference_velocity_m_s != [0.0; 3])
             || load.duct().inlet_gas() != &reference
             || !area.is_finite() || area <= 0.0 || !duct_area.is_finite()
             || (area-duct_area).abs() > 32.0 * f64::EPSILON * area.max(duct_area)
             || !same_clock(zone.law().dt_s * limits.substeps as f64, load.propagator().dt())
-            || !limits.pressure_absolute_tolerance_pa.is_finite()
-            || limits.pressure_absolute_tolerance_pa < 0.0
-            || !limits.pressure_relative_tolerance.is_finite()
-            || !(0.0 < limits.pressure_relative_tolerance && limits.pressure_relative_tolerance <= 1e-3)
-            || !limits.projection_absolute_tolerance_j.is_finite()
-            || limits.projection_absolute_tolerance_j < 0.0
-            || !limits.projection_relative_tolerance.is_finite()
-            || !(0.0..=1.0).contains(&limits.projection_relative_tolerance)
         {
             return Err(NsfDgError::Input("NSF/DG requires cold matching gas, area and clock, zero reference flow and finite complete work/projection budgets"));
         }

@@ -192,21 +192,48 @@ pub(super) fn dg_baffled_observation_provenance(
     receiver: fs_couple::pcm_wav::baffled::CircularOutletReceiver,
     microphone: &fs_couple::pcm_wav::baffled::BaffledPressure,
 ) -> String {
+    dg_baffled_observation_on_clock(load, receiver, microphone, None)
+}
+
+pub(super) fn dg_baffled_projected_observation_provenance(
+    load: &fs_couple::dg_port::DgPortLoad,
+    receiver: fs_couple::pcm_wav::baffled::CircularOutletReceiver,
+    microphone: &fs_couple::pcm_wav::baffled::BaffledPressure,
+    observation_rate_hz: u32,
+) -> String {
+    dg_baffled_observation_on_clock(load, receiver, microphone, Some(observation_rate_hz))
+}
+
+fn dg_baffled_observation_on_clock(
+    load: &fs_couple::dg_port::DgPortLoad,
+    receiver: fs_couple::pcm_wav::baffled::CircularOutletReceiver,
+    microphone: &fs_couple::pcm_wav::baffled::BaffledPressure,
+    observation_rate_hz: Option<u32>,
+) -> String {
     let source = load.radiation_record().expect("admitted bound DG radiation source");
     let exterior = gas_state(source.gas_record().state());
+    let (clock, reconstruction, flow_scope) = if observation_rate_hz.is_some() {
+        ("observation", "overlap-projected-terminal-flow-bandlimited-differentiating-Rayleigh",
+            "interval-mean DG terminal flows projected onto the declared observation clock")
+    } else {
+        ("mechanical", "same-clock-bandlimited-differentiating-Rayleigh", "every accepted held DG terminal flow")
+    };
+    let clock_record = observation_rate_hz.map_or_else(String::new,
+        |rate| format!(",\"sample_rate_hz\":{rate}"));
     if !load.duct().side_ports().is_empty() {
         let apertures = load.terminal_ports().iter().zip(source.apertures()).map(|(port, aperture)|
             format!("{{\"port\":{},\"center_m\":[{:e},{:e}],\"radius_m\":{:e}}}",
                 port.0, aperture.center_m[0], aperture.center_m[1], aperture.radius_m)
         ).collect::<Vec<_>>().join(",");
-        return format!(",\"observation_scope\":\"exterior Rayleigh pressure from every accepted held DG terminal flow in original matrix order and bound source gas; uniform circular openings in one infinite rigid baffle; full mutual terminal feedback through any declared finite DG chimney; no mouth, free-field body or room radiation\",\"terminal_receiver\":{{\"position_m\":[{:e},{:e},{:e}],\"apertures\":[{apertures}],\"exterior_gas\":{exterior},\"radial_rings\":{},\"angular_points\":{},\"maximum_frequency_hz\":{:e},\"reconstruction\":\"same-clock-bandlimited-differentiating-Rayleigh\",\"kernel_support_mechanical_samples\":[{},{}],\"filter_delay_mechanical_samples\":{:e},\"delay_compensated\":false,\"radiation_feedback_added\":true,\"delay_scope\":\"kernel support includes fractional travel-time interpolation; filter delay excludes physical propagation\"}}",
+        return format!(",\"observation_scope\":\"exterior Rayleigh pressure from {flow_scope} in original matrix order and bound source gas; uniform circular openings in one infinite rigid baffle; full mutual terminal feedback through any declared finite DG chimney; no mouth, free-field body or room radiation\",\"terminal_receiver\":{{\"position_m\":[{:e},{:e},{:e}],\"apertures\":[{apertures}],\"exterior_gas\":{exterior},\"radial_rings\":{},\"angular_points\":{},\"maximum_frequency_hz\":{:e},\"reconstruction\":\"{reconstruction}\",\"kernel_support_{clock}_samples\":[{},{}],\"filter_delay_{clock}_samples\":{:e}{clock_record},\"delay_compensated\":false,\"radiation_feedback_added\":true,\"delay_scope\":\"kernel support includes fractional travel-time interpolation; filter delay excludes physical propagation\"}}",
             receiver.position_m[0], receiver.position_m[1], receiver.position_m[2],
             receiver.radial_rings, receiver.angular_points, receiver.maximum_frequency_hz,
             microphone.delay_samples.0, microphone.delay_samples.1,
             microphone.filter_delay_samples());
     }
     let aperture = source.apertures().first().expect("admitted bound DG outlet");
-    format!(",\"observation_scope\":\"exterior Rayleigh pressure from each accepted held DG outlet flow in the bound computed-source gas; one uniform circular opening in an infinite rigid baffle; no mouth, free-field body or room radiation\",\"outlet_receiver\":{{\"position_m\":[{:e},{:e},{:e}],\"radius_m\":{:e},\"exterior_gas\":{exterior},\"radial_rings\":{},\"angular_points\":{},\"maximum_frequency_hz\":{:e},\"reconstruction\":\"same-clock-bandlimited-differentiating-Rayleigh\",\"kernel_support_mechanical_samples\":[{},{}],\"filter_delay_mechanical_samples\":{:e},\"delay_compensated\":false,\"radiation_feedback_added\":true,\"delay_scope\":\"kernel support includes fractional travel-time interpolation; filter delay excludes physical propagation\"}}",
+    let flow_scope = if observation_rate_hz.is_none() { "each accepted held DG outlet flow" } else { flow_scope };
+    format!(",\"observation_scope\":\"exterior Rayleigh pressure from {flow_scope} in the bound computed-source gas; one uniform circular opening in an infinite rigid baffle; no mouth, free-field body or room radiation\",\"outlet_receiver\":{{\"position_m\":[{:e},{:e},{:e}],\"radius_m\":{:e},\"exterior_gas\":{exterior},\"radial_rings\":{},\"angular_points\":{},\"maximum_frequency_hz\":{:e},\"reconstruction\":\"{reconstruction}\",\"kernel_support_{clock}_samples\":[{},{}],\"filter_delay_{clock}_samples\":{:e}{clock_record},\"delay_compensated\":false,\"radiation_feedback_added\":true,\"delay_scope\":\"kernel support includes fractional travel-time interpolation; filter delay excludes physical propagation\"}}",
         receiver.position_m[0], receiver.position_m[1], receiver.position_m[2],
         aperture.radius_m, receiver.radial_rings, receiver.angular_points,
         receiver.maximum_frequency_hz, microphone.delay_samples.0,

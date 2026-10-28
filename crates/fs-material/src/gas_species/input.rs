@@ -136,16 +136,34 @@ pub fn read_isochoric_parcel(
     sources: &ThermochemicalSources<'_>,
     volume_m3: f64,
 ) -> Result<IsochoricGasParcel, ParcelInputError> {
-    if sources.phase != ThermochemicalPhase::FrozenGas {
-        return Err(GasInputError::Input(
-            "finite gas evolution requires an explicit FrozenGas phase policy",
-        ).into());
-    }
     let mut remaining = fields.clone();
-    let (model, point) = read_thermochemical_model(&mut remaining, sources)?;
+    let (model, point) = read_frozen_thermochemical_model(&mut remaining, sources)?;
     let parcel = IsochoricGasParcel::new(model, point, volume_m3)?;
     *fields = remaining;
     Ok(parcel)
+}
+
+/// Retain the original source model for spatial or finite-volume evolution.
+///
+/// This is the same registry, composition and typed-condition parser used by
+/// snapshots and closed parcels. The caller owns subsequent state evolution;
+/// a single resolved snapshot must not replace its temperature-dependent laws.
+/// Only an explicit frozen-gas phase policy is admitted. A one-time saturation
+/// check cannot establish the phase of future cell states. On refusal the input
+/// iterator is unchanged; successful callers must consume any remaining suffix.
+pub fn read_frozen_thermochemical_model(
+    fields: &mut SplitAsciiWhitespace<'_>,
+    sources: &ThermochemicalSources<'_>,
+) -> Result<(ThermochemicalGasModel, fs_matdb::QueryPoint), GasInputError> {
+    if sources.phase != ThermochemicalPhase::FrozenGas {
+        return Err(GasInputError::Input(
+            "finite gas evolution requires an explicit FrozenGas phase policy",
+        ));
+    }
+    let mut remaining = fields.clone();
+    let result = read_thermochemical_model(&mut remaining, sources)?;
+    *fields = remaining;
+    Ok(result)
 }
 
 /// Consume exactly one gas declaration, leaving any caller-owned suffix intact.

@@ -98,9 +98,66 @@ impl DgPortLoad {
         branches: Vec<DgBranch>,
         gate: &CancelGate,
     ) -> Result<Self, MimoRadiationInputError> {
-        if gate.is_requested() { return Err(MimoRadiationInputError::Cancelled); }
         let dt = 1.0 / f64::from(mechanics_rate_hz);
-        if mechanics_rate_hz == 0
+        Self::new_with_computed_baffled_branches_clock(
+            duct, dt, mechanics_rate_hz, exponential_tolerance, maximum_dofs,
+            exterior, source, openings, branches, gate,
+        )
+    }
+
+    /// Retain an arbitrary original physical step for the same baffled load.
+    ///
+    /// The integer-Hz source baker covers Nyquist using `ceil(1 / dt)` only as
+    /// its band ceiling. Both the DG exponential and terminal realization use
+    /// the exact supplied `dt`, including their actual sampled-passivity check.
+    /// No geometry, gas state or physical clock is rounded to the bake rate.
+    /// Exact reciprocal integer clocks retain the existing bake and arithmetic.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_computed_baffled_branches_at_dt(
+        duct: DgDuct,
+        dt: f64,
+        exponential_tolerance: f64,
+        maximum_dofs: usize,
+        exterior: &GasRecord,
+        source: ComputedBaffledInput,
+        openings: &[(PortId, CircularOpening)],
+        branches: Vec<DgBranch>,
+        gate: &CancelGate,
+    ) -> Result<Self, MimoRadiationInputError> {
+        if gate.is_requested() { return Err(MimoRadiationInputError::Cancelled); }
+        let rate = 1.0 / dt;
+        let nearest = rate.round();
+        let bake_rate = if (1.0..=f64::from(u32::MAX)).contains(&nearest)
+            && dt.to_bits() == (1.0 / nearest).to_bits()
+        { nearest } else { rate.ceil() };
+        if !dt.is_finite() || dt <= 0.0
+            || !bake_rate.is_finite() || !(1.0..=f64::from(u32::MAX)).contains(&bake_rate)
+        {
+            return Err(MimoRadiationInputError::Physics(invalid(
+                "computed DG radiation requires a finite positive physical step within its source bake band budget",
+            )));
+        }
+        Self::new_with_computed_baffled_branches_clock(
+            duct, dt, bake_rate as u32, exponential_tolerance, maximum_dofs,
+            exterior, source, openings, branches, gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_computed_baffled_branches_clock(
+        duct: DgDuct,
+        dt: f64,
+        bake_rate_hz: u32,
+        exponential_tolerance: f64,
+        maximum_dofs: usize,
+        exterior: &GasRecord,
+        source: ComputedBaffledInput,
+        openings: &[(PortId, CircularOpening)],
+        branches: Vec<DgBranch>,
+        gate: &CancelGate,
+    ) -> Result<Self, MimoRadiationInputError> {
+        if gate.is_requested() { return Err(MimoRadiationInputError::Cancelled); }
+        if bake_rate_hz == 0 || !dt.is_finite() || dt <= 0.0
             || !matches!(duct.inlet(), DgBoundary::Port(_))
             || duct.total_dofs() > maximum_dofs
             || duct.viscothermal_band_rad_s().is_some_and(|band|
@@ -118,11 +175,11 @@ impl DgPortLoad {
         let apertures: Vec<_> = openings.iter().map(|(_, aperture)| *aperture).collect();
         let (model, record) = source.build_apertures(
             exterior, &apertures,
-            mechanics_rate_hz, gate,
+            bake_rate_hz, gate,
         )?;
         let limits = source.limits();
-        // The band endpoint is the same physical Nyquist as the source's Hz
-        // declaration, evaluated in the runtime's own clock arithmetic.
+        // The source covers this band, but its integer-Hz ceiling is not the
+        // physical step. Admit the actual runtime through its own Nyquist.
         let terminal = PreparedMimoLoad::new(&model.impedance, dt, MimoLoadLimits {
             band_rad_s: [
                 core::f64::consts::TAU * model.band_hz[0],
@@ -238,12 +295,52 @@ impl DgPortLoad {
         ).map_err(AcousticRealizeError::Nonlinear)
     }
 
+    /// Observe conservatively projected ORIGINAL terminal flows on an
+    /// independent regular clock. The caller must perform that explicit time
+    /// projection before `step_trace`; this constructor never retimes the DG
+    /// reaction or interprets raw physical-step samples at another rate.
+    /// Receiver bandwidth must fit both physical and output Nyquist, plus the
+    /// retained radiation and material-wall bands. Projection/aliasing error
+    /// remains a caller-owned refinement axis, not an observer accuracy claim.
+    pub fn baffled_receiver_projected(
+        &self, output_rate_hz: u32, receiver: CircularOutletReceiver,
+    ) -> Result<BaffledPressure, AcousticRealizeError> {
+        self.admit_baffled_receiver_clock(output_rate_hz, receiver, true)?;
+        let source = self.radiation_record().expect("admitted exterior source");
+        BaffledPressure::circular_openings_multirate_differentiating(
+            source.apertures(), output_rate_hz, output_rate_hz,
+            receiver, source.gas_record().state().into(),
+        ).map_err(AcousticRealizeError::Nonlinear)
+    }
+
+    /// The same explicit terminal-flow projection with original gas absorption
+    /// and dispersion on every retained source-to-receiver path.
+    pub fn baffled_receiver_projected_with_gas(
+        &self, output_rate_hz: u32, receiver: CircularOutletReceiver,
+        propagation: &GasPropagation, gate: &CancelGate,
+    ) -> Result<(BaffledPressure, GasPropagationReport), AcousticRealizeError> {
+        self.admit_baffled_receiver_clock(output_rate_hz, receiver, true)?;
+        let source = self.radiation_record().expect("admitted exterior source");
+        BaffledPressure::circular_openings_multirate_gas_differentiating(
+            source.apertures(), output_rate_hz, output_rate_hz,
+            receiver, source.gas_record().state(), propagation,
+            &mut || gate.is_requested(),
+        ).map_err(AcousticRealizeError::Nonlinear)
+    }
+
     fn admit_baffled_receiver(
         &self, mechanics_rate_hz: u32, receiver: CircularOutletReceiver,
     ) -> Result<(), AcousticRealizeError> {
+        self.admit_baffled_receiver_clock(mechanics_rate_hz, receiver, false)
+    }
+
+    fn admit_baffled_receiver_clock(
+        &self, mechanics_rate_hz: u32, receiver: CircularOutletReceiver,
+        projected: bool,
+    ) -> Result<(), AcousticRealizeError> {
         if mechanics_rate_hz == 0 || self.state().step_count() != 0
-            || self.propagator().dt().to_bits()
-                != (1.0 / f64::from(mechanics_rate_hz)).to_bits()
+            || (!projected && self.propagator().dt().to_bits()
+                != (1.0 / f64::from(mechanics_rate_hz)).to_bits())
         {
             return Err(invalid("DG receiver requires a cold source and its original physical clock"));
         }
@@ -260,12 +357,25 @@ impl DgPortLoad {
         }
         if source.apertures().is_empty()
             || source.apertures().len() != self.terminal_ports().len()
-            || source.band_hz()[1].to_bits()
-                != (0.5 * f64::from(mechanics_rate_hz)).to_bits()
+            || (!projected && source.band_hz()[1].to_bits()
+                != (0.5 * f64::from(mechanics_rate_hz)).to_bits())
         {
             return Err(invalid(
                 "baffled DG observation must use its original terminal geometry and physical clock",
             ));
+        }
+        // Exact integer source clocks retain their original endpoint even
+        // when the reciprocal dt rounds by an ULP (for example 8001 Hz).
+        // A fractional physical clock still uses its actual Nyquist; this
+        // equality does not admit a source baked below that band.
+        let physical_nyquist = if self.propagator().dt().to_bits()
+            == (1.0 / (2.0 * source.band_hz()[1])).to_bits()
+        { source.band_hz()[1] } else { 0.5 / self.propagator().dt() };
+        if projected && (source.band_hz()[1] < physical_nyquist
+            || receiver.maximum_frequency_hz > physical_nyquist
+            || receiver.maximum_frequency_hz > 0.5 * f64::from(mechanics_rate_hz))
+        {
+            return Err(invalid("projected DG receiver must fit original physical, source-bake and output Nyquist bands"));
         }
         // Compare in the wall owner's native angular-frequency arithmetic.
         // Converting its endpoint back to Hz can reject the identical endpoint

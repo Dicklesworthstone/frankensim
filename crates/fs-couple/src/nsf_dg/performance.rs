@@ -15,7 +15,28 @@ use fs_exec::CancelGate;
 use fs_lbm::lattice3::Lattice3;
 use std::sync::Arc;
 
+/// Generic, source-bound resolved geometry and finite boundary history.
+pub mod file;
+mod clock;
+use clock::IntervalClock;
+
 fn sizing(what: &'static str) -> RenderError { RenderError::Sizing { what } }
+
+/// Number of original physical intervals needed to cover an output window.
+/// Endpoint products determine coverage; neither geometry nor physical dt is
+/// rounded to the observer clock. A derived same-clock pair retains its exact
+/// one-interval-per-sample path and the existing clock-roundoff admission.
+pub fn source_intervals_for(physical_dt_s: f64, output_rate_hz: u32, output_samples: u64)
+    -> Result<usize, RenderError>
+{
+    if same_clock(physical_dt_s, 1.0 / f64::from(output_rate_hz)) {
+        if output_samples == 0 || output_samples > clock::EXACT_INTEGER_LIMIT {
+            return Err(sizing("resolved observer requires positive exactly representable sample indices"));
+        }
+        usize::try_from(output_samples).map_err(|_| sizing("resolved output sample count exceeds addressable source data"))
+    } else { Ok(IntervalClock::new(physical_dt_s, output_rate_hz, output_samples)
+        .map_err(sizing)?.source_intervals()) }
+}
 
 /// A finite source on the existing pressure, decimation, ensemble and PCM path.
 /// Failed individual physical steps publish neither owner. A failed callback
@@ -31,6 +52,10 @@ pub struct NsfDgPerformance<L: Lattice3<27>> {
     maximum_block: usize,
     gate: Arc<CancelGate>,
     last: Option<NsfDgFrame>,
+    clock: Option<IntervalClock>,
+    projected_observer: bool,
+    output_samples: u64,
+    output_cursor: u64,
     poisoned: bool,
 }
 
@@ -43,20 +68,76 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
         incoming_characteristics_m_s: Vec<f64>, maximum_block: usize,
         gate: Arc<CancelGate>,
     ) -> Result<Self, RenderError> {
+        if !same_clock(system.load().propagator().dt(), 1.0 / f64::from(sample_rate_hz)) {
+            return Err(sizing("resolved performance requires its original matching physical clock"));
+        }
+        let output_samples = incoming_characteristics_m_s.len() as u64;
+        Self::build(system, observation, sample_rate_hz, incoming_characteristics_m_s,
+            output_samples, maximum_block, gate, None, false)
+    }
+
+    /// Observe the unchanged physical solver on an independent regular clock.
+    /// Incoming data has one value per ORIGINAL coupled interval; its length
+    /// must equal `source_intervals_for`. Each original interval-mean pressure
+    /// and terminal flow is held only for conservative overlap integration onto
+    /// output intervals, then the original Rayleigh observer runs on that clock.
+    ///
+    /// This is a piecewise-constant temporal projection, with a box-average sinc
+    /// response; it is not a band-limited anti-alias filter or an accuracy claim.
+    /// Refine the physical and observation clocks for the intended bandwidth,
+    /// and use the existing output decimator when needed. Physical state may be
+    /// ahead of output time by less than one original interval; it is never
+    /// slowed, retimed or reconstructed from observer values. Matching clocks
+    /// retain the original one-frame arithmetic and callback behavior; a
+    /// bit-identical clock delegates to `new` itself.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_resampled(
+        system: NsfDg<L>, observation: ApertureObservation, output_rate_hz: u32,
+        incoming_characteristics_m_s: Vec<f64>, output_samples: u64,
+        maximum_block: usize, gate: Arc<CancelGate>,
+    ) -> Result<Self, RenderError> {
+        let dt = system.load().propagator().dt();
+        if incoming_characteristics_m_s.len() != source_intervals_for(dt, output_rate_hz, output_samples)? {
+            return Err(sizing("resolved boundary data must cover exactly the original physical intervals of its output window"));
+        }
+        if same_clock(dt, 1.0 / f64::from(output_rate_hz)) {
+            if dt.to_bits() == (1.0 / f64::from(output_rate_hz)).to_bits() {
+                return Self::new(system, observation, output_rate_hz,
+                    incoming_characteristics_m_s, maximum_block, gate);
+            }
+            // Existing derived-clock roundoff admission still uses exactly
+            // one physical frame per output interval. Only the observer's
+            // source-band check differs from the bit-exact legacy API.
+            return Self::build(system, observation, output_rate_hz,
+                incoming_characteristics_m_s, output_samples, maximum_block, gate, None, true);
+        }
+        let clock = IntervalClock::new(dt, output_rate_hz, output_samples).map_err(sizing)?;
+        Self::build(system, observation, output_rate_hz, incoming_characteristics_m_s,
+            output_samples, maximum_block, gate, Some(clock), true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        system: NsfDg<L>, observation: ApertureObservation, sample_rate_hz: u32,
+        incoming_characteristics_m_s: Vec<f64>, output_samples: u64,
+        maximum_block: usize, gate: Arc<CancelGate>, clock: Option<IntervalClock>,
+        projected_observer: bool,
+    ) -> Result<Self, RenderError> {
         if gate.is_requested() || system.accepted_steps() != 0
             || sample_rate_hz == 0 || !(1..=65_536).contains(&maximum_block)
             || incoming_characteristics_m_s.is_empty()
             || incoming_characteristics_m_s.len() as u64 > system.limits().maximum_steps
             || !incoming_characteristics_m_s.iter().all(|x| x.is_finite())
-            || !same_clock(system.load().propagator().dt(), 1.0 / f64::from(sample_rate_hz))
+            || output_samples == 0
         {
             return Err(sizing("resolved performance requires a cold matching clock and finite boundary samples/capacity"));
         }
         let receiver = match observation {
             ApertureObservation::Inlet => None,
-            ApertureObservation::TubeBaffled(location) => Some(
-                system.load().baffled_receiver(sample_rate_hz, location)
-                    .map_err(RenderError::Voice)?),
+            ApertureObservation::TubeBaffled(location) => Some(if projected_observer {
+                system.load().baffled_receiver_projected(sample_rate_hz, location)
+            } else { system.load().baffled_receiver(sample_rate_hz, location) }
+                .map_err(RenderError::Voice)?),
             _ => return Err(sizing("resolved pressure observation must name its DG inlet or computed baffled outlet")),
         };
         let terminal_flows = if receiver.is_some() {
@@ -65,7 +146,7 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
         Ok(Self {
             system, incoming: incoming_characteristics_m_s, observation, receiver,
             observer_gas: None, terminal_flows, sample_rate_hz, maximum_block, gate,
-            last: None, poisoned: false,
+            last: None, clock, projected_observer, output_samples, output_cursor: 0, poisoned: false,
         })
     }
     /// Bind the shared physical atmosphere law to every original outlet-to-microphone
@@ -84,9 +165,12 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
         let ApertureObservation::TubeBaffled(location) = self.observation else {
             return Err(sizing("resolved material gas propagation requires an exterior receiver"));
         };
-        let (receiver, report) = self.system.load().baffled_receiver_with_gas(
-            self.sample_rate_hz, location, propagation, &self.gate,
-        ).map_err(RenderError::Voice)?;
+        let (receiver, report) = if self.projected_observer {
+            self.system.load().baffled_receiver_projected_with_gas(
+                self.sample_rate_hz, location, propagation, &self.gate)
+        } else { self.system.load().baffled_receiver_with_gas(
+            self.sample_rate_hz, location, propagation, &self.gate)
+        }.map_err(RenderError::Voice)?;
         self.receiver = Some(receiver);
         self.observer_gas = Some(report);
         Ok(self)
@@ -106,34 +190,72 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
     pub fn baffled_receiver(&self) -> Option<&BaffledPressure> { self.receiver.as_ref() }
     /// Shared cancellation owner, also polled during each nonlinear interval.
     pub fn cancellation_gate(&self) -> &CancelGate { &self.gate }
-    /// Remaining physical source samples.
+    /// Remaining observer intervals. Original physical progress remains on
+    /// `system().accepted_steps()` and can differ under temporal projection.
     pub fn remaining_samples(&self) -> u64 {
-        self.incoming.len() as u64 - self.system.accepted_steps()
+        self.output_samples - self.output_cursor
+    }
+
+    fn advance_source(&mut self) -> Result<(), RenderError> {
+        let incoming = *self.incoming.get(self.system.accepted_steps() as usize)
+            .ok_or_else(|| sizing("resolved physical boundary history is exhausted"))?;
+        let frame = self.system.step(incoming, &self.gate)
+            .map_err(|e| RenderError::Voice(AcousticRealizeError::Nonlinear(e.to_string())))?;
+        self.last = Some(frame);
+        Ok(())
     }
 
     fn advance(&mut self) -> Result<f64, RenderError> {
-        let incoming = self.incoming[self.system.accepted_steps() as usize];
-        let frame = self.system.step(incoming, &self.gate)
-            .map_err(|e| RenderError::Voice(AcousticRealizeError::Nonlinear(e.to_string())))?;
-        // Accepted source samples are consumed before their fallible observer.
-        // The cursor derives from the sole accepted physical clock.
-        self.last = Some(frame);
+        if let Some(clock) = self.clock { return self.advance_projected(clock); }
+        self.advance_source()?;
+        // Preserve the strict path's accepted-prefix semantics even if the
+        // subsequent observer fails. Source and output indices coincide here.
+        self.output_cursor += 1;
         let frame = self.last.as_ref().expect("accepted original resolved interval");
-        let pressure = match self.observation {
-            ApertureObservation::Inlet => frame.inlet_pressure_pa,
-            ApertureObservation::TubeBaffled(_) => {
+        if self.receiver.is_some() {
+            if frame.terminals.len() != self.terminal_flows.len() || frame.terminals.is_empty() {
+                return Err(sizing("resolved DG microphone requires every accepted terminal flow"));
+            }
+            for (flow, terminal) in self.terminal_flows.iter_mut().zip(&frame.terminals) {
+                *flow = terminal.outward_flow_m3_s;
+            }
+        }
+        self.observe(frame.inlet_pressure_pa)
+    }
+
+    fn advance_projected(&mut self, clock: IntervalClock) -> Result<f64, RenderError> {
+        if self.gate.is_requested() {
+            return Err(RenderError::Voice(AcousticRealizeError::Nonlinear("resolved observation cancelled".into())));
+        }
+        let (mut cursor, end) = clock.output_bounds(self.output_cursor).map_err(sizing)?;
+        let mut pressure = 0.0;
+        self.terminal_flows.fill(0.0);
+        while cursor < end {
+            while self.last.is_none() || clock.source_end(self.system.accepted_steps()) <= cursor {
+                self.advance_source()?;
+            }
+            let (weight, next) = clock.overlap(cursor, end, self.system.accepted_steps()).map_err(sizing)?;
+            let frame = self.last.as_ref().expect("accepted covering physical interval");
+            pressure += weight * frame.inlet_pressure_pa;
+            if self.receiver.is_some() {
                 if frame.terminals.len() != self.terminal_flows.len() || frame.terminals.is_empty() {
-                    return Err(sizing("resolved DG microphone requires every accepted terminal flow"));
+                    return Err(sizing("resolved projected microphone requires every original terminal flow"));
                 }
                 for (flow, terminal) in self.terminal_flows.iter_mut().zip(&frame.terminals) {
-                    *flow = terminal.outward_flow_m3_s;
+                    *flow += weight * terminal.outward_flow_m3_s;
                 }
-                self.receiver.as_mut().expect("admitted original DG receiver")
-                    .step_trace(&self.terminal_flows)
-                    .map_err(|e| RenderError::Voice(AcousticRealizeError::Nonlinear(e)))?
             }
-            _ => unreachable!("observation admitted at construction"),
-        };
+            cursor = next;
+        }
+        self.output_cursor += 1;
+        self.observe(pressure)
+    }
+
+    fn observe(&mut self, inlet_pressure: f64) -> Result<f64, RenderError> {
+        let pressure = if let Some(receiver) = &mut self.receiver {
+            receiver.step_trace(&self.terminal_flows)
+                .map_err(|e| RenderError::Voice(AcousticRealizeError::Nonlinear(e)))?
+        } else { inlet_pressure };
         if !pressure.is_finite() {
             return Err(sizing("resolved observer produced nonfinite physical pressure"));
         }
@@ -142,12 +264,12 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
 }
 
 impl<L: Lattice3<27>> PressureRenderer for NsfDgPerformance<L> {
-    fn samples_rendered(&self) -> u64 { self.system.accepted_steps() }
+    fn samples_rendered(&self) -> u64 { self.output_cursor }
     fn max_block_len(&self) -> usize { self.maximum_block }
     fn validate_sample_rate(&self, rate: u32) -> Result<(), RenderError> {
         self.validate_sample_count(0)?;
         if rate != self.sample_rate_hz {
-            return Err(sizing("resolved pressure uses its admitted physical clock"));
+            return Err(sizing("resolved pressure uses its admitted observer clock"));
         }
         Ok(())
     }

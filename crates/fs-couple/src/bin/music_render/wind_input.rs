@@ -399,6 +399,44 @@ struct Loaded {
     // clock/filter history; the identity PCM wrapper must not call it 48k mechanics.
     observation_json:Option<String>,
 }
+
+fn resolved_provenance(
+    p: &fs_couple::nsf_dg::performance::file::ResolvedDgFilePerformance,
+) -> String {
+    let info = p.info();
+    let renderer = p.renderer();
+    let system = renderer.system();
+    let law = system.zone().law();
+    let limits = system.limits();
+    let load = system.load();
+    let duct = load.duct();
+    let (point, observer) = match renderer.observation() {
+        ApertureObservation::Inlet => ("mean-inlet",
+            ",\"observation_scope\":\"internal interval-mean DG pressure; not an exterior microphone\"".into()),
+        ApertureObservation::TubeBaffled(receiver) => ("baffled-outlet",
+            super::duct_metadata::dg_baffled_projected_observation_provenance(load, receiver,
+                renderer.baffled_receiver().expect("admitted resolved microphone"), info.sample_rate_hz)),
+        _ => unreachable!("resolved input admits only its actual DG pressure observers"),
+    };
+    let gas = super::duct_metadata::gas_state(system.reference_gas());
+    let gas_sources = super::thermochemical::provenance(p.gas_records());
+    let solid_wall = dg_wall_provenance(p.wall_layout());
+    let radiation = super::duct_metadata::dg_radiation_provenance(load);
+    let propagation = super::duct_metadata::observer_gas_provenance(renderer.observer_gas());
+    let timing = format!(",\"time_projection\":{{\"physical_interval_s\":{:e},\"declared_physical_intervals\":{},\"declared_physical_duration_s\":{:e},\"observation_rate_hz\":{},\"declared_observation_samples\":{},\"declared_observation_duration_s\":{:e},\"method\":\"conservative overlap of original interval means; direct same-clock path\",\"boundary_control\":\"held value at each physical interval start; event error at most one physical interval\",\"bandlimited_antialias_filter\":false,\"scope\":\"box-average temporal projection requires clock refinement; physical prefix may lead observation by less than one physical interval; shared PCM decimation may truncate an incomplete output interval\"}}",
+        load.propagator().dt(), info.physical_intervals,
+        load.propagator().dt() * info.physical_intervals as f64,
+        info.sample_rate_hz, info.samples, info.samples as f64 / f64::from(info.sample_rate_hz));
+    format!("\"resolved_input\":{{\"schema\":\"frankensim-resolved-dg-performance-v1\",\"blake3\":\"{}\",\"source_owner\":\"original-NsfGrid3-D3Q27\",\"dimensions\":[{},{},{}],\"solid_cells\":{},\"initial_state_cells\":{},\"boundary_segments\":{},\"dx_m\":{:e},\"nsf_dt_s\":{:e},\"substeps\":{},\"source_gas\":{gas},\"bulk_to_shear_ratio\":{:e},\"bulk_ratio_source\":{},\"coupled_area_m2\":{:e},\"maximum_root_evaluations\":{},\"maximum_cell_steps\":{},\"pressure_absolute_tolerance_pa\":{:e},\"pressure_relative_tolerance\":{:e},\"projection_absolute_tolerance_j\":{:e},\"projection_relative_tolerance\":{:e},\"duct_operator_identity\":\"{}\",\"duct_total_dofs\":{},\"pressure_point\":\"{point}\",\"observer_gas\":{propagation},\"model_scope\":\"original resolved fixed-composition fluid and live material DG bore; uniform acoustic interface projection with separate mass/energy flux; stationary voxel walls and two-cell fluid collars; source, geometry, boundary and coupling convergence remain required; no measured flute/reed qualification\"{timing}{observer}{radiation}{solid_wall}{gas_sources}}}",
+        info.input_hash.to_hex(), info.dimensions[0], info.dimensions[1], info.dimensions[2],
+        info.solid_cells, info.initial_state_cells, info.boundary_segments, law.dx_m, law.dt_s,
+        limits.substeps, law.bulk_to_shear_ratio, json_string(system.zone().bulk_ratio_source()),
+        system.area_m2(), limits.maximum_evaluations, limits.maximum_cell_steps,
+        limits.pressure_absolute_tolerance_pa, limits.pressure_relative_tolerance,
+        limits.projection_absolute_tolerance_j, limits.projection_relative_tolerance,
+        duct.operator_identity().to_hex(), duct.total_dofs())
+}
+
 fn flue_duct_provenance(p: &fs_couple::flue_loop::network::performance::FlueOutletPerformance) -> String {
     use fs_couple::bernoulli_aperture::network::NetworkNode;
     let source = p.voice().network().expect("physical flue network").source();
@@ -934,6 +972,21 @@ fn load_with_all_sources(
     if flow_tap.is_some() && !bytes.starts_with(b"frankensim-flue-performance-v1\n") {
         return Err("--aperture-flows observes flue files only".into());
     }
+    if bytes.starts_with(b"frankensim-resolved-dg-performance-v1\n") {
+        if policy == ObservationPolicy::Acceptance {
+            return Err("resolved flow still requires source geometry, boundary and coupling convergence plus measured specimen qualification before --acceptance".into());
+        }
+        let p = fs_couple::nsf_dg::performance::file::ResolvedDgFilePerformance::from_bytes_with_sources(
+            bytes, block, std::sync::Arc::new(CancelGate::new()), sources, load_material,
+        ).map_err(|e| e.to_string())?;
+        let info = p.info();
+        let source_json = resolved_provenance(&p);
+        return Ok(Loaded {
+            source: Box::new(p.into_renderer()), rate: info.sample_rate_hz, samples: info.samples,
+            full_scale_pa: info.full_scale_pa, hash: info.input_hash,
+            fixture: "resolved-dg-input", source_json, observation_json: None,
+        });
+    }
     if bytes.starts_with(b"frankensim-material-modal-dg-valve-v1\n") {
         if policy == ObservationPolicy::Acceptance {
             return Err("material-modal DG files retain flat DKT plates and a finite modal interface; exact propagation does not qualify a measured instrument".into());
@@ -1081,20 +1134,32 @@ pub(super) fn run_with_gas_options(
     args: &[String],
     gas_options: &super::thermochemical::Options,
 ) -> Result<(), String> {
-    gas_sources::run_with_gas_options(args, gas_options)
+    gas_sources::run_with_gas_options(args, gas_options, None)
+}
+
+pub(super) fn run_resolved_with_gas_options(
+    args: &[String],
+    gas_options: &super::thermochemical::Options,
+) -> Result<(), String> {
+    if options(args)?.5.is_some() {
+        return Err("resolved flow does not provide the flue aperture-flow export".into());
+    }
+    gas_sources::run_with_gas_options(args, gas_options,
+        Some(fs_couple::nsf_dg::performance::file::RESOLVED_DG_PERFORMANCE_SCHEMA))
 }
 
 pub(super) fn run_with_gas_sources(
     args: &[String],
     sources: Option<&ThermochemicalSources<'_>>,
 ) -> Result<(), String> {
-    run_with_prepared_sources(args, sources, None)
+    run_with_prepared_sources(args, sources, None, None)
 }
 
 fn run_with_prepared_sources(
     args: &[String],
     sources: Option<&ThermochemicalSources<'_>>,
     prepared: Option<attachments::AttachedSources>,
+    required_schema: Option<&'static str>,
 ) -> Result<(), String> {
     let (input, output, block, decimate, policy, flows, self_contained, attached_names) = options(args)?;
     let output = Path::new(output);
@@ -1114,6 +1179,11 @@ fn run_with_prepared_sources(
     let mut bytes = Vec::new();
     file.take((MAX_PLATE_VALVE_PERFORMANCE_BYTES + 1) as u64).read_to_end(&mut bytes)
         .map_err(|e| format!("wind input read failed: {e}"))?;
+    if let Some(schema) = required_schema {
+        if !bytes.strip_prefix(schema.as_bytes()).is_some_and(|rest| rest.starts_with(b"\n")) {
+            return Err("resolved command requires frankensim-resolved-dg-performance-v1 source bytes".into());
+        }
+    }
     let parent = Path::new(input).parent().unwrap_or(Path::new("."));
     let attached_sources = match prepared {
         Some(snapshot) => snapshot,
@@ -1178,8 +1248,9 @@ fn run_with_prepared_sources(
     let input_hash = loaded.hash.to_hex();
     let wav_hash = rendered.hash.to_hex();
     let fixture=loaded.fixture;
+    let source_clock = if fixture == "resolved-dg-input" { "observation" } else { "mechanics" };
     let observation_json = loaded.observation_json.unwrap_or_else(|| format!(
-        "{{\"mechanics_sample_rate_hz\":{},\"mechanics_samples\":{},\"output_sample_rate_hz\":{RATE},\"ratio\":{},\"filter\":\"{}\",\"delay_output_samples\":{},\"first_output_source_index\":{},\"initial_history\":\"zero\",\"delay_compensated\":false,\"tail\":\"no-flush-declared-window\"}}",
+        "{{\"{source_clock}_sample_rate_hz\":{},\"{source_clock}_samples\":{},\"output_sample_rate_hz\":{RATE},\"ratio\":{},\"filter\":\"{}\",\"delay_output_samples\":{},\"first_output_source_index\":{},\"initial_history\":\"zero\",\"delay_compensated\":false,\"tail\":\"no-flush-declared-window\"}}",
         loaded.rate,loaded.samples,observation.ratio,observation.filter_profile,
         observation.delay_output_samples,observation.first_output_source_index));
     let provenance = format!(

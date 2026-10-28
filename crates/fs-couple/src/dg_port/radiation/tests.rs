@@ -94,3 +94,55 @@ fn computed_mutual_load_and_microphone_keep_the_same_complete_ordered_flow_basis
 
 #[path = "tests/chimneys.rs"]
 mod chimneys;
+
+#[test]
+fn computed_radiation_preserves_fractional_physical_steps_and_integer_clock_bits() {
+    let gas = exterior("293.15 101325 0");
+    let openings = openings();
+    let controls = ComputedBaffledInput::parse(
+        "20 65 4 8 12 20 0.01 67108864 2 100 1e-8 64 1048576 257",
+    ).unwrap();
+    let gate = CancelGate::new_clock_free();
+    let prepare = |dt| DgPortLoad::new_with_computed_baffled_branches_at_dt(
+        duct(&gas), dt, 1e-11, 64, &gas, controls, &openings, Vec::new(), &gate,
+    );
+    let mut original = DgPortLoad::new_with_computed_baffled_branches(
+        duct(&gas), 8001, 1e-11, 64, &gas, controls, &openings, Vec::new(), &gate,
+    ).unwrap();
+    // Reciprocal roundoff would incorrectly ceil this legacy clock to 8002 Hz.
+    let mut same = prepare(1.0 / 8001.0).unwrap();
+    assert_eq!(original.radiation_record().unwrap().declaration_identity(),
+        same.radiation_record().unwrap().declaration_identity());
+    assert_eq!(original.radiation_record().unwrap().realization_identity(),
+        same.radiation_record().unwrap().realization_identity());
+    for step in 0..16 {
+        let flow = if step < 3 { 1e-9 } else { 0.0 };
+        assert_eq!(original.preview_step(flow).unwrap().accept(),
+            same.preview_step(flow).unwrap().accept());
+        assert_eq!(original.last_terminal_frames(), same.last_terminal_frames());
+        for (a, b) in original.state().pressure().iter().zip(same.state().pressure()) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
+    }
+    // A physical material clock need not be the reciprocal of a whole hertz.
+    // The extra source-band margin must never enter either live propagator.
+    let dt = 1.0 / 8000.25;
+    let mut fractional = prepare(dt).unwrap();
+    assert_eq!(fractional.propagator().dt().to_bits(), dt.to_bits());
+    let terminal = fractional.terminal().unwrap();
+    assert_eq!(terminal.time_step_s().to_bits(), dt.to_bits());
+    assert_eq!(terminal.limits().band_rad_s[1].to_bits(),
+        (core::f64::consts::PI / dt).to_bits());
+    assert!(terminal.reports().1.passive);
+    let source = fractional.radiation_record().unwrap();
+    assert_eq!(source.band_hz(), [20.0, 4000.5]);
+    assert_eq!(source.gas_record(), &gas);
+    assert_eq!(source.apertures(), &[openings[0].1, openings[1].1]);
+    assert_eq!(fractional.terminal_ports(), &PORTS);
+    assert_eq!(fractional.duct().operator_identity(), same.duct().operator_identity());
+    fractional.preview_step(1e-9).unwrap().accept();
+    assert_eq!(fractional.state().step_count(), 1);
+    for dt in [0.0, -1.0, f64::NAN, f64::INFINITY, 1.0 / (f64::from(u32::MAX) + 1.0)] {
+        assert!(prepare(dt).is_err());
+    }
+}

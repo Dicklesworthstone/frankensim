@@ -14,11 +14,78 @@ use fs_lbm::nsf3::{
 use fs_material::gas::GasSpec;
 use fs_material::thermochemical_gas::energy::GasEnergySolve;
 use std::sync::Arc;
+use super::performance::source_intervals_for;
 #[path = "../../../fs-lbm/tests/nsf3_thermochemical/source.rs"]
 mod source;
 
 const RATE: u32 = 96000;
 const CELLS: usize = 32;
+
+fn projected_performance(rate: u32, samples: u64, gate: Arc<CancelGate>) -> NsfDgPerformance<D3q27> {
+    let system = system(100000.0, true, 1, DgBoundary::Matched);
+    let count = source_intervals_for(system.load().propagator().dt(), rate, samples).unwrap();
+    NsfDgPerformance::new_resampled(system, ApertureObservation::Inlet, rate,
+        vec![0.0; count], samples, 8, gate).unwrap()
+}
+
+#[test]
+fn independent_observer_clock_averages_original_intervals_and_reuses_the_physical_prefix() {
+    let gate = Arc::new(CancelGate::new_clock_free());
+    let mut physical = system(100000.0, true, 1, DgBoundary::Matched);
+    let original: Vec<_> = (0..4).map(|_| physical.step(0.0, &gate).unwrap().inlet_pressure_pa).collect();
+    for (rate, expected) in [
+        (72000, vec![0.75*original[0] + 0.25*original[1],
+            0.5*original[1] + 0.5*original[2], 0.25*original[2] + 0.75*original[3]]),
+        (144000, vec![original[0], 0.5*original[0] + 0.5*original[1], original[1],
+            original[2], 0.5*original[2] + 0.5*original[3], original[3]]),
+    ] {
+        let mut renderer = projected_performance(rate, expected.len() as u64, Arc::clone(&gate));
+        let mut result = vec![0.0; expected.len()];
+        renderer.block(&mut result[..1]).unwrap();
+        renderer.block(&mut result[1..]).unwrap();
+        for (actual, expected) in result.iter().zip(&expected) {
+            assert!((actual-expected).abs() <= 64.0*f64::EPSILON*expected.abs().max(1e-12));
+        }
+        assert_eq!(renderer.samples_rendered(), expected.len() as u64);
+        assert_eq!(renderer.system().accepted_steps(), 4);
+        assert_eq!(renderer.system().zone().state_hash(), physical.zone().state_hash());
+        assert_eq!(renderer.system().load().state(), physical.load().state());
+        assert_eq!(renderer.remaining_samples(), 0);
+    }
+}
+
+#[test]
+fn matching_observer_clock_preserves_existing_bits_and_exact_source_count() {
+    let gate = Arc::new(CancelGate::new_clock_free());
+    assert_eq!(source_intervals_for(1.0 / f64::from(RATE), RATE, 4).unwrap(), 4);
+    let dt = 1.0 / f64::from(RATE);
+    assert_eq!(source_intervals_for(f64::from_bits(dt.to_bits()+1), RATE, 4).unwrap(), 4);
+    let mut strict = NsfDgPerformance::new(system(100000.0, true, 1, DgBoundary::Matched),
+        ApertureObservation::Inlet, RATE, vec![0.0; 4], 8, Arc::clone(&gate)).unwrap();
+    let mut projected = projected_performance(RATE, 4, Arc::clone(&gate));
+    let mut a = [0.0; 4]; let mut b = [0.0; 4];
+    strict.block(&mut a).unwrap(); projected.block(&mut b[..1]).unwrap(); projected.block(&mut b[1..]).unwrap();
+    assert_eq!(a, b);
+    assert_eq!(strict.system().zone().state_hash(), projected.system().zone().state_hash());
+    assert_eq!(strict.system().load().state(), projected.system().load().state());
+    assert!(NsfDgPerformance::new_resampled(system(100000.0, true, 1, DgBoundary::Matched),
+        ApertureObservation::Inlet, 144000, vec![0.0; 3], 6, 8, gate).is_err());
+}
+
+#[test]
+fn cancellation_also_refuses_an_output_interval_covered_by_a_cached_physical_frame() {
+    let gate = Arc::new(CancelGate::new_clock_free());
+    let mut renderer = projected_performance(288000, 3, Arc::clone(&gate));
+    renderer.block(&mut [0.0]).unwrap();
+    assert_eq!(renderer.system().accepted_steps(), 1);
+    let before = (renderer.system().zone().state_hash(), renderer.system().load().state().clone());
+    gate.request();
+    assert!(renderer.block(&mut [0.0]).is_err());
+    assert_eq!(before, (renderer.system().zone().state_hash(), renderer.system().load().state().clone()));
+    assert_eq!(renderer.samples_rendered(), 1);
+    assert_eq!(renderer.remaining_samples(), 2);
+    assert!(matches!(renderer.block(&mut [0.0]), Err(crate::render::RenderError::Poisoned)));
+}
 
 fn limits(substeps: usize) -> NsfDgLimits {
     NsfDgLimits {

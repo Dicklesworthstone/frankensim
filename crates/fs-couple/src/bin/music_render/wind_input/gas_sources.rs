@@ -6,6 +6,7 @@ use std::path::Path;
 pub(super) fn run_with_gas_options(
     args: &[String],
     gas_options: &thermochemical::Options,
+    required_schema: Option<&'static str>,
 ) -> Result<(), String> {
     let (input, _, _, _, _, _, self_contained, attached_names) = options(args)?;
     if gas_options.record.is_some() {
@@ -32,5 +33,5 @@ pub(super) fn run_with_gas_options(
     };
     let bindings = loaded.bindings();
     let registry = loaded.registry(&bindings);
-    run_with_prepared_sources(args, registry.as_ref(), attached)
+    run_with_prepared_sources(args, registry.as_ref(), attached, required_schema)
 }

@@ -49,6 +49,12 @@
 //! Inline physical data and the shared gas laws are unchanged; gas declarations
 //! remain in the performance, not in an external `--gas-record` file.
 //!
+//! `music_render resolved INPUT.performance OUT.wav [--block N] [--decimate]`
+//! assembles the original resolved NSF volume and live material DG bore from
+//! physical grid, solid-cell, initial-state and finite boundary-history data.
+//! It shares the wind source snapshots, gas options, observer and PCM writer.
+//! See `docs/RESOLVED_NSF_DG_COUPLING.md`; this is not a qualified flute fixture.
+//!
 //! `music_render lip INPUT.performance OUT.wav [--block N]` renders a lip-valve performance
 //! (`fs_couple::brass_loop::performance`): a measured lip, a held bore of cylinders, cones and
 //! Bessel horns, a pressure phrase, and a baffled-disk microphone on the bore's mouth flow. The
@@ -360,6 +366,10 @@ fn main() {
     let (args, gas_options) = thermochemical::Options::extract(&args).unwrap_or_else(|e| fail(&e));
     if args.first().is_some_and(|arg| arg == "wind") {
         wind_input::run_with_gas_options(&args[1..], &gas_options).unwrap_or_else(|e| fail(&e));
+        return;
+    }
+    if args.first().is_some_and(|arg| arg == "resolved") {
+        wind_input::run_resolved_with_gas_options(&args[1..], &gas_options).unwrap_or_else(|e| fail(&e));
         return;
     }
     let gas_sources = gas_options.load().unwrap_or_else(|e| fail(&e));

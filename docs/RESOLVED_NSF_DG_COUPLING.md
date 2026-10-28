@@ -34,6 +34,13 @@ or independently chosen atmosphere from silently entering the acoustic path.
 The original thermochemical model, caloric chart, transport support and all
 original per-cell material refusals remain active.
 
+Stationary halfway-bounceback walls may bound the transverse directions. The
+two complete fluid layers at each characteristic face remain mandatory; solid
+cells cannot occupy those collars. At a diagonal characteristic/wall corner,
+the stationary wall takes precedence over an open link. Streaming and the
+reported open mass/momentum flux use the same link selection. Finite-volume
+energy, pressure work, conduction and wall heat retain their original owners.
+
 Each candidate retains the complete NSF populations, force chart, energy,
 material caches and histories. Both fluid and DG candidates remain unpublished
 until root convergence, original-source admission, integrated port-work checks,
@@ -95,6 +102,137 @@ not change either physical owner or source timing. A failed physical step rolls
 back both owners; a later observation failure preserves the accepted physical
 prefix and poisons further playback.
 
+### Independent physical and observation clocks
+
+`NsfDgPerformance::new_resampled` accepts a fixed observation rate and output
+sample count while retaining the original physical interval. Supply exactly
+`source_intervals_for(dt, output_rate, output_samples)` incoming values, one per
+**physical** interval. The original NSF step remains
+`dx / sqrt(3 R T_reference)`; the DG interval is the declared integer number of
+those steps. Changing gas composition or temperature therefore changes the
+physical clock without changing grid geometry, source duration or playback rate.
+
+The adapter integrates overlaps between original interval-mean pressure/terminal
+flows and regular observation intervals. One physical frame can contribute to
+several observation intervals, or several physical frames to one observation
+interval. Only the original physical owners advance state. The shared Rayleigh
+microphone consumes the projected terminal flows; exterior absorption and PCM
+decimation then use their existing owners. Callback boundaries do not affect
+the partitions. Matching clocks retain the original one-frame path, including
+its arithmetic; derived-clock roundoff is admitted without retiming geometry.
+
+This is a piecewise-constant temporal projection with a box-average frequency
+response, **not a band-limited antialias filter**. Refine both clocks against the
+intended bandwidth, and use the existing decimator for the final output where
+appropriate. Receiver bandwidth must fit physical and observation Nyquist as
+well as original wall/radiation bands. Physical state can lead the observation
+window by less than one original interval. The source duration, physical prefix,
+receiver delay basis and this approximation are explicit in native provenance.
+
+`DgPortLoad::new_with_computed_baffled_branches_at_dt` also retains this exact
+physical interval in the DG propagator and terminal realization. Its computed
+radiation source uses `ceil(1 / dt)` solely as a finite source-band ceiling; actual
+sampled-passivity admission uses `PI / dt`. Exact reciprocal integer clocks keep
+the existing bake and arithmetic. The source ceiling never becomes a rounded
+mechanical step.
+
+## Native file and Instrument Lab
+
+`nsf_dg::performance::file::ResolvedDgFilePerformance` assembles the original
+owners from UTF-8 data. The native entry point is:
+
+```sh
+music_render resolved crates/fs-couple/examples/resolved-dg.performance output.wav --decimate --self-contained
+```
+
+The canonical example observes at 96 kHz; `--decimate` uses the shared pressure
+decimator for 48 kHz PCM. Pressure remains in pascals and the authored full-scale
+value controls PCM conversion; there is no peak normalization. The existing
+`wind` schema dispatcher can also read the format. The explicit `resolved`
+command refuses other schemas. Instrument Lab exposes this same native route,
+raw-file import and attachment transport, including original solid-material
+packs and gas-source associations. It does not translate resolved inputs into a
+flue/reed closure. `--acceptance` remains unavailable for this source class.
+
+The grammar below shows the fixed record order. Uppercase tokens are fields;
+bracketed sections and comments explain the grammar and are **not literal input**.
+Records have no ignored suffixes, blank rows or inline comments.
+
+```text
+frankensim-resolved-dg-performance-v1
+clock OBSERVATION_RATE_HZ NSF_SUBSTEPS_PER_DG_INTERVAL
+output OUTPUT_SAMPLES FULL_SCALE_PA
+gas dry-air TEMPERATURE_K PRESSURE_PA
+grid NX NY NZ DX_M PERIODIC_X PERIODIC_Y PERIODIC_Z
+fluid_limits MAX_CELLS TMIN_K TMAX_K MAX_MACH MAX_TEMPERATURE_RATIO TRANSPORT_POINTS WORKERS
+bulk_viscosity BULK_TO_SHEAR_RATIO SOURCE_TOKEN
+wall adiabatic
+characteristic AXIS low|high MAX_RELATIVE_PERTURBATION
+initial rest
+solids COUNT
+solid X Y Z
+[repeat exactly COUNT solid records]
+states COUNT
+state X Y Z DENSITY_KG_M3 VX_M_S VY_M_S VZ_M_S TEMPERATURE_K
+[repeat exactly COUNT state records]
+coupling MAX_ROOT_EVALUATIONS MAX_CELL_STEPS JMIN_M_S JMAX_M_S PRESSURE_ABS_PA PRESSURE_REL WORK_ABS_J WORK_REL
+dg_tube [existing shared DgSourceInput fields and subsidiary records]
+[optional existing dg_wall material-layout records]
+observation inlet-pressure
+[optional existing observer_gas record, only with a baffled observer]
+boundary COUNT
+hold END_OBSERVATION_SAMPLE INCOMING_CHARACTERISTIC_M_S
+[repeat exactly COUNT increasing hold records]
+end
+```
+
+Alternatives use the same original parsers and owners:
+
+- `gas thermochemical T_K P_PA mole|mass COUNT ID FRACTION ...` selects a complete
+  source-backed thermochemical model. An `energy_solve ENERGY_J_KG_TOL MAXITER`
+  record is then mandatory immediately after `fluid_limits`. Source packs and
+  species associations come from the shared native gas options; the phase policy
+  must explicitly be `FrozenGas`. A mixture snapshot alone cannot supply the
+  temperature-dependent law for evolving cells.
+- `wall isothermal TEMPERATURE_K` selects the original prescribed thermal wall;
+  this is not a moving or finite-capacity solid. `initial uniform DENSITY_KG_M3
+  VX_M_S VY_M_S VZ_M_S TEMPERATURE_K` replaces the reference-rest default. Each
+  `state` record overrides one distinct fluid cell in SI units. Duplicate,
+  out-of-bounds and solid-cell assignments are refused.
+- `dg_bore` uses the existing shared axial geometry, regional gas and finite
+  chimney records. `dg_wall` retains material-card identities and selected
+  constitutive sources for the bore/chimney wall layout. The original load
+  checks inlet area, complete inlet gas, material bands and work admission.
+- `observation baffled X_M Y_M Z_M RADIAL_RINGS ANGULAR_POINTS FMAX_HZ` binds the
+  existing computed-radiation source and all its actual terminal openings. An
+  optional `observer_gas` record selects the same atmospheric propagation law
+  used by other native pressure renderers. The source, bore and exterior can
+  have explicitly different temperatures/compositions at their admitted common
+  equilibrium pressure; changing the whole atmosphere requires changing each
+  explicitly authored region/exterior declaration.
+
+Cell indices are zero-based. Axes are `0`, `1`, `2`; periodic flags are `0` or
+`1`, and the characteristic axis must be nonperiodic. The `low|high` field
+selects the face coupled to the DG inlet. The `hold` history drives the opposite
+face. Endpoints are exclusive indices on the **observation** clock and must
+cover the declared window exactly. Each physical interval uses the held value
+at its start, so a discontinuous control can incur up to one physical interval
+of event timing error; that error refines with the original discretization.
+
+The cold reader bounds bytes, cells, transport quadrature, workers, history,
+root work and physical intervals before constructing the original solvers. It
+polls the retained cancellation gate during parsing and around bounded cold
+construction, then during physical solves and observation. The original NSF
+constructor has no internal cancellation callback, so cancellation during that
+one bounded construction is observed when it returns. No files are opened by
+the library reader; native/Lab source loaders own attachment access.
+
+The canonical file is a **synthetic numerical example**, with a coarse fixed
+obstacle mask, an explicitly cited illustrative bulk-viscosity ratio and loose
+projection-work tolerance. It is not a specimen description or measured flute
+calibration. Its purpose is to exercise the actual fluid → bore → radiation →
+material atmosphere → PCM path with data-owned geometry and source histories.
+
 ## Scope and refinement
 
 This first composition is a uniform acoustic-mode projection with a held DG flow
@@ -110,3 +248,13 @@ Focused tests are in `fs-lbm/tests/nsf3_characteristic_trial.rs` and
 candidate cancellation, reference-relative work, both face signs, real downstream
 feedback, gas-pressure substitution, thermochemical support, projection refusal,
 cold area/clock/work admission, and physical-pressure/PCM partition identity.
+
+Additional regressions live in `fs-lbm/tests/nsf3_open_boundaries.rs`,
+`fs-couple/src/nsf_dg/performance/clock.rs`,
+`fs-couple/src/nsf_dg/performance/file/tests.rs`,
+`fs-couple/src/dg_port/radiation/tests.rs` and
+`fs-couple/tests/music_render_wind/resolved.rs`. These cover finite-wall corner
+selection, original interval overlap, source-backed temperature/composition
+substitutions at fixed geometry, exact-step radiation, native schema refusal,
+PCM partition identity and provenance clocks. These are numerical/interface
+regressions; they do not establish measured instrument fidelity.

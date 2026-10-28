@@ -638,18 +638,14 @@ impl DgSourceInput {
         checkpoint(gate, self.line)?;
         let branches = bind_branches(self.prepare_chimneys(gate)?)?;
         let load = if let Some((controls, exterior)) = self.radiation {
-            let rate = (1.0 / dt + 0.5) as u32;
-            if rate == 0 || dt.to_bits() != (1.0 / f64::from(rate)).to_bits() {
-                return Err(bad(self.line, "computed DG radiation requires an exact whole-Hz mechanics clock"));
-            }
             let mut openings = Vec::with_capacity(self.side_openings.len() + 1);
             openings.push((PortId(1), CircularOpening {
                 center_m: [0.0; 2],
                 radius_m: fs_math::det::sqrt(owner.outlet_area_m2() / core::f64::consts::PI),
             }));
             openings.extend(self.side_openings.iter().map(|(port, aperture)| (port.id, *aperture)));
-            DgPortLoad::new_with_computed_baffled_branches(
-                owner, rate, self.exponential_tolerance, self.maximum_dofs,
+            DgPortLoad::new_with_computed_baffled_branches_at_dt(
+                owner, dt, self.exponential_tolerance, self.maximum_dofs,
                 &exterior, controls, &openings, branches, gate,
             ).map_err(|source| DgSourceError::Radiation { line: self.line, source })?
         } else {
