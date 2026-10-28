@@ -657,3 +657,29 @@ mechanics owner still checks the actual event geometry and momentum response.
 `FrictionalContactDeterminacy::UniqueImpulses` retains the prior independent-row admission. `UniqueVelocity(PsdVelocityWitness)` reports one admissible impulse representative and a unique active velocity image, without claiming unique local pressure, friction heat or independently moving-support work. Friction-weighted normal rows must be observable from the mobility range and the numerical feedback bound must be below one. For an actual mechanical Gram matrix, the unique image implies unique generalized body velocity. General frictionful normal-load indeterminacy remains refused; the witness is a sufficient floating-point admission, not an interval rank/uniqueness certificate or general Painleve classification.
 
 Five new G1/G3/G4 test groups cover finite-height tripod stick/slide with independent force, torque and kinetic-energy balances, an explicit second admissible sticking impulse allocation, exact input permutation, four-point frictionless support, indefinite/ambiguous/unproven-feedback refusals, and cancellation/budget/exact retry. All seven existing core regressions remain passing. The twelve-test native source-selected check does not replace whole-workspace Cargo/DSR verification. Advances `frankensim-ext-contact-nonsmooth-lane-oh0i` without closing its broader Moreau-Jean and classification scope.
+
+### Finite-zone Maugis adhesion
+
+`normal_patch::maugis::SourceMaugisSphereContact` solves the Maugis--Dugdale
+cohesive-zone equations (Maugis 1992, DOI 10.1016/0021-9797(92)90285-T;
+Leroy and Willert 2021, DOI 10.1002/zamm.201900313, equations 2--8).
+Original elastic/interface sources and explicit interaction range select the
+constant cohesive traction W/z0. The outer-zone closure is a positive quadratic
+at fixed annulus angle; a single bounded scalar inversion selects stable
+displacement- or force-controlled contacting equilibria across JKR/DMT limits.
+
+Responses retain signed resultant force, true contact area, the Hertz repulsive
+component, analytic tangent, and the finite radial pressure distribution.
+The cohesive annulus contributes attraction but no solid junction-shear area.
+Source identity and synthetic authority survive unchanged. Geometric smallness,
+half-space/layer depth, nominal strain, cohesive stress and compressive pressure
+limits are checked on the authored envelope. Smooth ports preserve action/reaction.
+
+A zero-area contacting endpoint can retain attraction; a displacement fold is
+also not a detached state. Endpoint smooth tangents refuse. Explicit-budget work
+quadrature integrates the original force along the stable contact branch and
+returns an error estimate, not an interval certificate. Distinct inputs that
+collapse to one representable branch coordinate refuse zero-work inference.
+No detached-reference absolute potential, deformed noncontact continuation,
+attachment/snap dynamics, roughness, plasticity or universal material calibration
+is claimed.

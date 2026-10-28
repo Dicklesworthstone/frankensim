@@ -17,3 +17,6 @@ pub use embed::*;
 pub use finite_gap::*;
 pub use law::*;
 pub use response_curve::*;
+
+/// Finite-zone Maugis--Dugdale adhesive sphere contact.
+pub mod maugis;
