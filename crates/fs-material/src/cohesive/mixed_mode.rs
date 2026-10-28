@@ -326,7 +326,7 @@ fn strength_coordinate(p: MixedModeParameters, g: [f64; 3]) -> Result<f64, Cohes
         g[2] / (p.tangential_strength_pa / p.tangential_stiffness_pa_m),
     ])
 }
-fn initiate(
+pub(super) fn initiate(
     p: MixedModeParameters,
     old: [f64; 3],
     end: [f64; 3],

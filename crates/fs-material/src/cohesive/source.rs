@@ -9,6 +9,10 @@
 pub mod mixed_mode;
 pub use mixed_mode::*;
 
+/// Original ordered-interface source binding for physical bond viscosity.
+pub mod rate;
+pub use rate::*;
+
 use super::BilinearCohesive;
 use crate::state_point::{
     MaterialPropertySelection, MaterialStatePointError, ResolvedInterfaceStatePoint,

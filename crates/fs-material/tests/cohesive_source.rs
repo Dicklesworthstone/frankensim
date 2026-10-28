@@ -389,3 +389,39 @@ fn mixed_source_does_not_infer_missing_modes_or_freeze_rate_conditions() {
         .is_err()
     );
 }
+
+#[test]
+fn sourced_physical_viscosity_retains_the_original_interface_bundle() {
+    let mut inputs=properties();
+    inputs.push(claim(COHESIVE_NORMAL_VISCOSITY_PROPERTY,COHESIVE_VISCOSITY_DIMS,2e7));
+    inputs.push(claim(COHESIVE_TANGENTIAL_VISCOSITY_PROPERTY,COHESIVE_VISCOSITY_DIMS,3e7));
+    let card=card(inputs.clone(),"explicit physical bond viscosity");
+    let resolved=bundle(&card,&inputs);
+    let owner=ResolvedBilinearCohesive::try_from_viscous_resolved(&card,resolved.clone(),
+        CohesiveEnvelope::CommonMode,0.02,0.2).unwrap();
+    assert_eq!(owner.resolved(),&resolved);
+    assert_eq!(owner.surfaces(),&[card.surface_a().clone(),card.surface_b().clone()]);
+    let step=owner.law().bonded_point().trial_over_time([0.0003,0.0,0.0],0.5,1e-8).unwrap();
+    assert!((step.traction_pa[0]-312000.0).abs()<1e-8);
+    assert!((step.viscous_dissipated_j_m2-3.6).abs()<1e-12);
+    assert!(owner.law().bonded_point().trial([0.0003,0.0,0.0],1e-8).is_err());
+    let queried=resolve_viscous_bilinear_cohesive(&card,&QueryPoint::new().with("T",300.0).unwrap(),
+        MaterialPropertySelection::SingleClaimOnly,CohesiveEnvelope::CommonMode,0.02,0.2).unwrap();
+    assert_eq!(queried.law(),owner.law());
+}
+
+#[test]
+fn physical_viscosity_refuses_missing_bulk_units_and_unowned_rate_axes() {
+    for (dims,rate_bound) in [(Dims([-1,1,-1,0,0,0]),false),(COHESIVE_VISCOSITY_DIMS,true)] {
+        let mut inputs=properties();
+        let mut normal=claim(COHESIVE_NORMAL_VISCOSITY_PROPERTY,dims,2e7);
+        if rate_bound { normal.validity=normal.validity.with("separation_rate",0.0,1.0); }
+        inputs.push(normal);inputs.push(claim(COHESIVE_TANGENTIAL_VISCOSITY_PROPERTY,COHESIVE_VISCOSITY_DIMS,3e7));
+        let card=card(inputs,"incompatible viscosity source");
+        assert!(resolve_viscous_bilinear_cohesive(&card,&QueryPoint::new().with("T",300.0).unwrap(),
+            MaterialPropertySelection::SingleClaimOnly,CohesiveEnvelope::CommonMode,0.02,0.2).is_err());
+    }
+    assert!(resolve_viscous_bilinear_cohesive(&card(properties(),"missing viscosity"),
+        &QueryPoint::new().with("T",300.0).unwrap(),MaterialPropertySelection::SingleClaimOnly,
+        CohesiveEnvelope::CommonMode,0.02,0.2).is_err());
+}

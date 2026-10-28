@@ -1,4 +1,4 @@
-//! Rate-independent bilinear cohesive failure in a fixed local interface frame.
+//! Bilinear cohesive failure in a fixed local interface frame.
 //!
 //! The jump is [normal opening, shear 1, shear 2] in metres. Positive normal
 //! opening and both shear components drive a common irreversible damage variable.
@@ -6,11 +6,12 @@
 //! fracture energy. `new_mixed_mode` explicitly selects separate opening/shear
 //! data, quadratic initiation and frozen-onset BK toughness through `mixed_mode`.
 //! Both paths retain the same immutable point, work and structural solver APIs.
+//! `with_viscosity` explicitly adds physical bond dashpots and requires timed steps.
 //!
 //! Unloading/reloading is elastic at the retained damaged stiffness. Compression
 //! has a separate, undamaged penalty; after complete failure only that normal
 //! penalty remains (frictionless reclosure, not exact nonpenetration). No healing,
-//! fatigue, viscosity, automatic bond creation, temperature dependence, calibrated
+//! fatigue, automatic bond creation, temperature dependence, calibrated
 //! adhesion, evolving contact geometry or finite-rotation objectivity is claimed.
 //!
 //! Reference formulation: Camanho and Davila (2002), as described by the Abaqus
@@ -24,6 +25,10 @@ pub mod source;
 
 /// Anisotropic initiation and source-defined mode-dependent fracture energy.
 pub mod mixed_mode;
+
+/// Explicit physical bond viscosity and timed constitutive steps.
+pub mod rate;
+pub use rate::{CohesiveRateStep, CohesiveViscosity};
 
 /// A refusal never mutates an accepted point.
 #[derive(Debug, Clone, PartialEq)]
@@ -53,6 +58,7 @@ pub struct BilinearCohesive {
     onset: f64,
     failure: f64,
     mixed_mode: Option<mixed_mode::MixedModeParameters>,
+    viscosity: Option<CohesiveViscosity>,
 }
 impl BilinearCohesive {
     /// Coherent SI inputs: Pa/m, Pa, J/m2, Pa/m and m, respectively.
@@ -75,7 +81,7 @@ impl BilinearCohesive {
         positive(strength_pa / (failure - onset))?;
         Ok(Self { stiffness: stiffness_pa_m, strength: strength_pa,
             fracture_energy: fracture_energy_j_m2, compression_stiffness: compression_stiffness_pa_m,
-            maximum_separation: maximum_separation_m, onset, failure, mixed_mode: None })
+            maximum_separation: maximum_separation_m, onset, failure, mixed_mode: None, viscosity: None })
     }
 
     #[must_use]
@@ -210,6 +216,16 @@ impl<'a> CohesivePoint<'a> {
     /// excursions: split a physical path at each reversal/contact-frame change.
     /// This fixed-size operation is bounded O(1); batch owners poll cancellation.
     pub fn trial(&self, jump_m: [f64; 3], energy_tolerance_j_m2: f64)
+        -> Result<CohesiveStep<'a>, CohesiveError> {
+        if self.law.viscosity.is_some() {
+            return Err(CohesiveError::Invalid("physical bond viscosity requires trial_over_time and an explicit time interval"));
+        }
+        self.trial_equilibrium(jump_m, energy_tolerance_j_m2)
+    }
+
+    // Shared rate-independent owner. Timed updates add physical dashpot traction
+    // without replacing its irreversible history, storage or fracture work.
+    fn trial_equilibrium(&self, jump_m: [f64; 3], energy_tolerance_j_m2: f64)
         -> Result<CohesiveStep<'a>, CohesiveError> {
         positive(energy_tolerance_j_m2)?;
         if norm(jump_m)? > self.law.maximum_separation { return Err(CohesiveError::SeparationLimit); }

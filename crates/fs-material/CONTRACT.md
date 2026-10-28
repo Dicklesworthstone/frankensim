@@ -3082,3 +3082,26 @@ regressions also passed in the same actual-source native executable.
 For a fixed-geometry native Hertz potential `psi=G(delta)*E*`, the derivatives support surface entropy `s_i=-G*dE*/dT_i`, internal energy `U=psi+sum(T_i*s_i)` and reciprocal thermal capacity. Returned source states retain their original identities and receipts. This is a constitutive capability, not a contact or thermal integrator; coupled owners must retain physical heat/work, total heat capacity, source domains and mechanical state. No geometry expansion, changing reference mass, phase change, plasticity, measured calibration or full Euler thermal closure is inferred.
 
 Focused native G1/G3 tests compare the modulus and all first/second derivatives with independent rational compliance and finite differences, check thermodynamic internal-energy derivatives, ordered surface exchange, the constant-modulus limit, and original-card/domain/non-affine-source refusal. Synthetic source fixtures establish implementation behavior only.
+
+### Physical cohesive viscosity
+
+`BilinearCohesive::with_viscosity` selects explicit Kelvin--Voigt traction
+`(1-d) eta_i gdot_i` with independent normal/shear interface viscosities in Pa s/m.
+`trial_over_time` requires positive physical time and a declared jump-rate limit;
+untimed trials refuse this law. The original intrinsic common-mode or frozen-onset
+BK fracture owner still owns damage and storage. Normal viscosity acts in both
+opening and compression while bonds survive, and all viscous traction vanishes
+after complete failure; the separate compression penalty remains.
+
+Endpoint total traction and its consistent, possibly nonsymmetric tangent are
+separate from the original equilibrium account. Exact piecewise analytic
+constant-rate path integration reports nonnegative viscous loss independently
+from intrinsic fracture. Energy uses that integral, not endpoint traction times
+jump. The short-interval binomial evaluation has below-roundoff truncation in
+its admitted range. No stored dashpot state, healing, fracture heat partition,
+evolving-temperature refresh or universal adhesive calibration is inferred.
+
+The source adapter queries intrinsic coefficients and explicit interface
+viscosities in the same ordered original bundle, retains receipts, and rejects
+bulk viscosity units and unowned evolving axes. Intrinsic fracture work must
+exclude viscous losses to avoid double counting measured finite-rate work.

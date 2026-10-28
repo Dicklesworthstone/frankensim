@@ -102,7 +102,7 @@ pub fn resolve_mixed_mode_bilinear_cohesive(
     ResolvedBilinearCohesive::try_from_mixed_mode_resolved(card, resolved, maximum_separation_m)
 }
 
-fn mixed_properties() -> [(&'static str, Dims); 8] {
+pub(super) fn mixed_properties() -> [(&'static str, Dims); 8] {
     let stiffness = interface_stiffness_per_area_dims();
     [
         (COHESIVE_NORMAL_STIFFNESS_PROPERTY, stiffness),
