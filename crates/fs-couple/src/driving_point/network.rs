@@ -140,6 +140,16 @@ impl NetworkDrivingPoint {
         loss: LossModel,
         coupled: &CoupledTermination,
     ) -> Result<NetworkDriveResponse, DuctError> {
+        self.admit_coupled_labels(coupled)?;
+        network_port_impedance(&self.network, gas, omega, loss)?.drive_coupled(
+            &self.active_port,
+            &self.terminations,
+            coupled,
+            gas,
+        )
+    }
+
+    fn admit_coupled_labels(&self, coupled: &CoupledTermination) -> Result<(), DuctError> {
         // The producer builds the matrix in the declared order
         // (`coupled_labels`); a permuted or empty label list is refused, never
         // reinterpreted, as in 937d0c442.
@@ -148,12 +158,7 @@ impl NetworkDrivingPoint {
                 what: "coupled boundary must use the declared nonempty port order",
             });
         }
-        network_port_impedance(&self.network, gas, omega, loss)?.drive_coupled(
-            &self.active_port,
-            &self.terminations,
-            coupled,
-            gas,
-        )
+        Ok(())
     }
 
     /// Realize the driving point as a causal characteristic line with the
@@ -191,37 +196,14 @@ impl NetworkDrivingPoint {
         // The single-duct arithmetic, so a one-edge network keeps its ladder.
         let dt = 1.0 / f64::from(sample_rate_hz);
         let geo_delay = 2.0 * self.longest_path()? / gas.sound_speed / dt;
-        let first_bin = core::f64::consts::TAU * f64::from(sample_rate_hz) / ladder.max_taps as f64;
-        let mut solve = |omega: f64| -> Result<C64, DuctError> {
+        let solve = |omega: f64| -> Result<C64, DuctError> {
             let response = match coupled_at.as_mut() {
                 Some(source) => self.response_coupled(gas, omega, loss, &source(omega)?)?,
                 None => self.response(gas, omega, loss)?,
             };
             Ok(reflectance(response.impedance, zc))
         };
-        realize_characteristic_response(
-            geo_delay,
-            // Selects the realizer's near-DC sample of R for the DC bin; the
-            // network's own loads decide its value.
-            Termination::IdealOpen,
-            sample_rate_hz,
-            zc,
-            vec![bulk_delay_pole_state(geo_delay)],
-            ladder,
-            |omega| match solve(omega) {
-                Err(DuctError::Singular) if omega < first_bin => {
-                    let mut w = omega;
-                    loop {
-                        w = (10.0 * w).min(first_bin);
-                        match solve(w) {
-                            Err(DuctError::Singular) if w < first_bin => {}
-                            other => return other,
-                        }
-                    }
-                }
-                other => other,
-            },
-        )
+        realize_response_line(geo_delay, sample_rate_hz, zc, ladder, solve)
     }
 
     /// Radius of the active port's plane: the matching end of its one edge.
@@ -260,11 +242,20 @@ impl NetworkDrivingPoint {
 
     // Bellman-Ford over axial edge lengths; validated graphs are connected.
     fn longest_path(&self) -> Result<f64, DrivingPointError> {
+        self.longest_path_by(|edge| edge.duct.segments.iter().map(Segment::axial_length).sum())
+    }
+
+    // The same traversal accepts either lengths or travel times. A regional
+    // medium cannot use one global sound speed to extract the bulk delay.
+    fn longest_path_by(
+        &self,
+        mut weight: impl FnMut(&fs_duct::network::NetworkEdge) -> f64,
+    ) -> Result<f64, DrivingPointError> {
         let mut distance = vec![f64::INFINITY; self.network.nodes.len()];
         distance[self.active_node()] = 0.0;
         for _ in 0..self.network.nodes.len() {
             for e in &self.network.edges {
-                let length: f64 = e.duct.segments.iter().map(Segment::axial_length).sum();
+                let length = weight(e);
                 let (a, b) = (distance[e.from], distance[e.to]);
                 distance[e.to] = distance[e.to].min(a + length);
                 distance[e.from] = distance[e.from].min(b + length);
@@ -357,6 +348,41 @@ impl NetworkDrivingPoint {
         })
     }
 }
+
+// Shared operator realization: both uniform and regional networks retain the
+// original sampled response, near-DC fallback, tail ladder and passivity gate.
+fn realize_response_line(
+    geo_delay: f64,
+    sample_rate_hz: u32,
+    zc: f64,
+    ladder: &LineLadder,
+    mut solve: impl FnMut(f64) -> Result<C64, DuctError>,
+) -> Result<(DelayedFilter, LineRealization), DrivingPointError> {
+    let first_bin = core::f64::consts::TAU * f64::from(sample_rate_hz) / ladder.max_taps as f64;
+    realize_characteristic_response(
+        geo_delay,
+        Termination::IdealOpen,
+        sample_rate_hz,
+        zc,
+        vec![bulk_delay_pole_state(geo_delay)],
+        ladder,
+        |omega| match solve(omega) {
+            Err(DuctError::Singular) if omega < first_bin => {
+                let mut w = omega;
+                loop {
+                    w = (10.0 * w).min(first_bin);
+                    match solve(w) {
+                        Err(DuctError::Singular) if w < first_bin => {}
+                        other => return other,
+                    }
+                }
+            }
+            other => other,
+        },
+    )
+}
+
+mod regional;
 
 #[cfg(test)]
 mod tests;

@@ -6,8 +6,9 @@
 //! fields, weighted by the flows solved with that matrix. Mutual loading and
 //! coherent radiation therefore cannot accidentally describe different sources.
 //!
-//! This is a harmonic, rigid-wall, uniform-gas coupling, not a causal time
-//! realization. Openings retain one uniform-flow coordinate each. The caller
+//! This is a harmonic, rigid-wall coupling with one exterior atmosphere and
+//! optional source-bound regional interior gases, not a causal time realization.
+//! Openings retain one uniform-flow coordinate each. The caller
 //! supplies physical caps and their correspondence to duct reference planes;
 //! this does not infer that geometry or resolve interior evanescent modes.
 //! Mesh/port-basis refinement and measured validation remain separate. Raw BEM
@@ -18,6 +19,7 @@ use fs_bem::{helmholtz::{self, Formulation, HelmholtzError, Medium, laplace::{se
     near_field::Geometry, panel3d::SpherePanels};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::CancelGate;
+use fs_duct::network::NetworkMedia;
 
 /// One actual opening on a closed, outward-oriented, capped surface. All other
 /// panels are rigid. Panels cannot belong to two different flow coordinates.
@@ -74,6 +76,7 @@ pub struct RadiatingNetwork {
     traces: Vec<Vec<C64>>,
     areas: Vec<f64>,
     gas: GasState,
+    media: Option<NetworkMedia>,
     receivers: Vec<[f64;3]>,
     clearance_m: f64,
     source: ContentHash,
@@ -114,8 +117,30 @@ impl RadiatingNetwork {
     pub fn new(driving:NetworkDrivingPoint, surface:SpherePanels, patches:Vec<OpeningPatch>,
         gas:GasState, receivers:Vec<[f64;3]>, clearance_m:f64, source:ContentHash,
         budget:ExteriorNetworkBudget, gate:&CancelGate)->Result<Self,ExteriorNetworkError> {
+        Self::new_inner(driving,surface,patches,gas,None,receivers,clearance_m,source,budget,gate)
+    }
+
+    /// Bind a complete gas record to every original network edge and retain a
+    /// separate exterior record for BOTH radiation reaction and microphone
+    /// pressure. All regions share static pressure; composition, temperature,
+    /// transport and density may differ. Original thermochemical/pack identities
+    /// remain available through [`Self::media`]. No mixing or mean flow is added.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_regional(driving:NetworkDrivingPoint, surface:SpherePanels, patches:Vec<OpeningPatch>,
+        media:NetworkMedia, receivers:Vec<[f64;3]>, clearance_m:f64, source:ContentHash,
+        budget:ExteriorNetworkBudget, gate:&CancelGate)->Result<Self,ExteriorNetworkError> {
         poll(gate)?;
-        gas.validate_coherence().map_err(|_| bad("a coherent common gas state is required"))?;
+        media.validate_for(driving.network())?;
+        let gas=*media.exterior_gas();
+        Self::new_inner(driving,surface,patches,gas,Some(media),receivers,clearance_m,source,budget,gate)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_inner(driving:NetworkDrivingPoint, surface:SpherePanels, patches:Vec<OpeningPatch>,
+        gas:GasState, media:Option<NetworkMedia>, receivers:Vec<[f64;3]>, clearance_m:f64, source:ContentHash,
+        budget:ExteriorNetworkBudget, gate:&CancelGate)->Result<Self,ExteriorNetworkError> {
+        poll(gate)?;
+        gas.validate_coherence().map_err(|_| bad("a coherent exterior gas state is required"))?;
         let n=surface.areas().len(); let p=patches.len(); let r=receivers.len();
         if n==0 || n>budget.max_panels || n>helmholtz::MAX_DENSE_PANELS
             || p==0 || p!=driving.coupled_labels().len() || p>fs_duct::network::MAX_NETWORK_PORTS
@@ -166,7 +191,7 @@ impl RadiatingNetwork {
         }
         let boundary_hash=h.finalize();
         poll(gate)?;
-        Ok(Self{driving,surface,patches,traces,areas,gas,receivers,clearance_m,source,boundary_hash,budget})
+        Ok(Self{driving,surface,patches,traces,areas,gas,media,receivers,clearance_m,source,boundary_hash,budget})
     }
     /// Original duct geometry, scalar loads and coupled-port partition.
     #[must_use] pub fn driving_point(&self)->&NetworkDrivingPoint { &self.driving }
@@ -176,8 +201,11 @@ impl RadiatingNetwork {
     #[must_use] pub fn patches(&self)->&[OpeningPatch] { &self.patches }
     /// Physical patch areas used for both velocity and work projection.
     #[must_use] pub fn opening_areas_m2(&self)->&[f64] { &self.areas }
-    /// One coherent medium shared by the interior and exterior owners.
+    /// Exterior medium; also the common interior gas for the uniform constructor.
     #[must_use] pub fn gas(&self)->GasState { self.gas }
+    /// Complete original gas records on a regional assembly. A uniform assembly
+    /// has no fabricated source records and returns `None`.
+    #[must_use] pub fn media(&self)->Option<&NetworkMedia> { self.media.as_ref() }
     /// Original exterior pressure/gradient locations [m].
     #[must_use] pub fn receivers(&self)->&[[f64;3]] { &self.receivers }
     /// Caller-supplied description provenance, not a validation certificate.
@@ -218,7 +246,10 @@ impl RadiatingNetwork {
             source_id:format!("fs-bem:network-openings:{}",self.boundary_hash)};
         // Complete Hermitian passivity is checked by the original duct owner.
         // A coarse active BEM matrix refuses; it is not repaired or diagonalized.
-        let response=self.driving.response_coupled(&self.gas,omega,loss,&boundary)?;
+        let response=match &self.media {
+            Some(media)=>self.driving.response_coupled_regional(media,omega,loss,&boundary)?,
+            None=>self.driving.response_coupled(&self.gas,omega,loss,&boundary)?,
+        };
         poll(gate)?;
         let labels:Vec<_>=self.driving.network().nodes.iter().filter_map(|n|match &n.boundary {
             NodeBoundary::Port{label}=>Some(label.as_str()), _=>None }).collect();

@@ -8418,3 +8418,78 @@ walls require separate admitted models. Regression definitions cover radial
 Poiseuille and temporal Fourier–Bessel refinement, signed work and rollback,
 material/atmosphere changes through reed and flute mechanics and pressure,
 and the original uncondensed multiport equations with mixed passage geometries.
+
+### Moving material fibers retain solved normal contact
+
+The existing accelerating-fiber owner now carries canonical normal receivers
+along the same material hair crossing as tangential contact. It reprojects the
+original normal basis at each accepted endpoint and supplies that geometry to
+the original simultaneous unilateral-contact/friction solve. Indentation,
+release, material-domain checks and traction therefore share one physical step.
+String-side station motion, retained body/cavity waves, and the source-bound
+normal law remain with their original owners. Noncanonical receiver maps refuse
+because they do not identify a physical material station.
+
+`FiberSupportFrame::normal_attachment_work_j` is the fiber-side contribution of
+the existing endpoint product rule. It is included in laboratory support work
+and already appears in native obstacle work; the laboratory balance subtracts
+that share from the native obstacle account exactly once. String-side migration
+and independent normal indentation retain their separate accounts. Support
+kinematics and accounts publish only after the complete mechanical step accepts.
+
+The material-strings executable composes its existing fiber-contact profile with
+`bow_fiber_program`, including continuous reversal and simultaneous bow station
+motion. No force envelope replaces solved normal reaction. Normal translation
+of hair supports, stick flexure, and transport of rosin/shear/thermal patch
+histories remain outside this axial-support model. Regression definitions cover
+canonical projection, normal loading/release, laboratory work, refusal/retry,
+callback partition identity and source input through the physical PCM path.
+
+### Spatial current with sourced thermal contacts and radiation
+
+`PreparedHeatNetwork::step_conduction_candidate` binds the existing spatial
+Ohmic field to the original complete heat assembly. Every implicit trial uses
+the same cell enthalpy endpoint to reevaluate material conductivity, pinned
+thermal-interface resistance and pinned surface emissivity. The original
+spatial field deposits its actual per-triangle E.J integral into the admitted
+cells exactly once. The bulk-only and complete-heat APIs share one private
+current/enthalpy solver and retain their own complete source samples.
+
+The original geometry/volume, material/caloric identity and phase-density
+admission remains mandatory. Electrical graph bindings refuse on this path
+because no graph circuit is being advanced. Thermal contact resistance is not
+an electrical contact model. Closed-enclosure radiosity remains internal heat
+exchange; its signed numerical net is checked against the original total-energy
+allowance. Geometry, contact areas, emitting areas and view factors are fixed.
+The composition does not imply volume-changing melting or moving interfaces.
+Regressions define an independent two-body nonlinear balance, source-only
+emissivity/contact substitutions changing current and temperature, continuation,
+bulk-path equivalence and atomic domain/cancellation refusal.
+
+### Source-bound regional acoustic networks and their exterior
+
+`NetworkDrivingPoint::response_regional` and `response_coupled_regional` use
+`fs_duct::network::NetworkMedia` on the original nodal/chain solve. Each exact edge ID
+retains its original gas record; an independently declared exterior supplies
+the external loads. No mixture or wave impedance is averaged at a junction.
+`realize_line_regional` shares the existing operator-realization ladder and
+passivity gate. Its nominal delay uses the longest shortest travel path with
+each edge's own L/c, rather than assigning one speed to the complete graph.
+
+`RadiatingNetwork::new_regional` retains those same records. Its full BEM
+opening matrix and coherent microphone fields use the same exterior medium,
+surface, flow basis and solved opening flows. Changing only an interior gas
+therefore changes excitation of the exterior without changing that exterior's
+operator. Changing the exterior changes both reaction and observation. Raw BEM
+matrices are not clipped, diagonalized or repaired for passivity.
+
+The `network_exterior` executable accepts one `--edge-gas EDGE FILE` per edge
+and `--exterior-gas FILE`. It reuses the original gas grammar and native
+thermochemical pack loader, including explicit water/phase policy. This is
+static, no-mean-flow, rigid-wall acoustics at one common background pressure;
+composition and temperature may vary by edge. It does not evolve mixing, heat
+transport, reaction or a moving gas interface. The exterior remains homogeneous
+with one uniform-flow coordinate per declared opening. Regression definitions
+cover uniform equivalence, local travel times, source-only gas substitutions,
+full-matrix reaction/pressure and lossless exterior-work closure. Compiler
+checks do not establish numerical convergence or instrument realism.
