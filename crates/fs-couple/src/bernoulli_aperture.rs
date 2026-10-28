@@ -31,6 +31,8 @@ mod uniform;
 pub mod paired_network;
 /// Same-sample material valve feedback from both upstream and downstream ducts.
 pub mod two_sided;
+/// Original material valves on a source-retaining regional network response.
+pub mod network_line;
 /// Moving aperture coupled to a geometry-bound passive uniform tube.
 pub mod tube;
 /// Exact DG mean-port feedback on the retained nonlinear aperture.

@@ -421,7 +421,7 @@ impl WindLineBank {
 /// Its last output is the history term needed by the NEXT boundary solve.
 /// Priming the newest sample is necessary: the carry-history constructor
 /// restores the ring, but deliberately leaves `incoming()` at zero.
-fn history_line(dt: f64, taps: &[f64], history: &[f64])
+pub(crate) fn history_line(dt: f64, taps: &[f64], history: &[f64])
     -> Result<DelayedFilter, WindLineError>
 {
     if taps.len() < 4 || taps.iter().any(|x| !x.is_finite()) {

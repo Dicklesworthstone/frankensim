@@ -4,6 +4,18 @@ use super::*;
 use fs_duct::network::{NetworkMedia, network_port_impedance_regional};
 
 impl NetworkDrivingPoint {
+    /// Full gas source record at the active edge end. The same unique plane
+    /// supplies its radius and medium; edge order never supplies either.
+    /// An ambiguous branching port or a self-loop refuses even if gases agree.
+    pub fn active_port_record<'m>(
+        &self,
+        media: &'m NetworkMedia,
+    ) -> Result<&'m fs_material::gas_species::input::GasRecord, DuctError> {
+        media.validate_for(&self.network)?;
+        let (edge, _) = self.active_port_edge()?;
+        Ok(media.edge_record(&edge.id).expect("complete media binding admitted"))
+    }
+
     /// Solve a branched graph with a source record for each edge and an explicit
     /// exterior atmosphere. Gas-dependent scalar loads use that exterior.
     /// Geometry, material records, source domains and common static pressure are

@@ -211,20 +211,26 @@ impl NetworkDrivingPoint {
     /// # Errors
     /// An active port with other than one incident edge.
     pub fn active_port_radius(&self) -> Result<f64, DuctError> {
+        let (edge, inlet) = self.active_port_edge()?;
+        Ok(if inlet {
+            edge.duct.segments.first().expect("validated duct").inlet_radius()
+        } else {
+            edge.duct.segments.last().expect("validated duct").outlet_radius()
+        })
+    }
+
+    // A port plane identifies one END, not merely one edge. In particular a
+    // self-loop contributes two ends and cannot define a single source plane.
+    fn active_port_edge(&self) -> Result<(&fs_duct::network::NetworkEdge, bool), DuctError> {
         let node = self.active_node();
-        let mut ends = self.network.edges.iter().filter_map(|e| {
-            if e.from == node {
-                e.duct.segments.first().map(Segment::inlet_radius)
-            } else if e.to == node {
-                e.duct.segments.last().map(Segment::outlet_radius)
-            } else {
-                None
-            }
+        let mut ends = self.network.edges.iter().flat_map(|edge| {
+            [(edge.from == node).then_some((edge, true)),
+                (edge.to == node).then_some((edge, false))].into_iter().flatten()
         });
         match (ends.next(), ends.next()) {
-            (Some(radius), None) => Ok(radius),
+            (Some(end), None) => Ok(end),
             _ => Err(DuctError::BadParameter {
-                what: "network active port needs exactly one incident edge",
+                what: "network active port needs exactly one incident edge end",
             }),
         }
     }

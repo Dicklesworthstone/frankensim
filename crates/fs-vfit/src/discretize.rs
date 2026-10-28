@@ -682,6 +682,24 @@ impl DelayedFilter {
         })
     }
 
+    /// Read the complete clock and taps of a quiescent, plain FIR owner.
+    /// No impulse probe, horizon truncation or copy is needed to eliminate its
+    /// same-sample coefficient at a nonlinear boundary. Stateful, IIR, dispersive,
+    /// compliance and exact-pole loads refuse; their memories cannot be replaced
+    /// by these taps. This is an inspection seam, not a passivity certificate.
+    #[must_use]
+    pub fn quiescent_fir(&self) -> Option<(f64, &[f64])> {
+        if self.fir.is_empty()
+            || !self.disp_x1.is_empty() || !self.disp_y1.is_empty()
+            || self.compliance_gain != 0.0 || self.compliance_state != 0.0
+            || !self.exact_poles.is_empty()
+            || self.last != 0.0 || self.buf.iter().any(|x| *x != 0.0)
+        {
+            return None;
+        }
+        Some((self.filter.t_s, &self.fir))
+    }
+
     /// Fit the delay-peeled response `H(ω) exp(+iωτ)` and build the
     /// line. `delay_samples = τ / t_s`.
     ///
