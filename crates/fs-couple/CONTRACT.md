@@ -78,6 +78,23 @@ distributed neck propagation, nonlinear flow, measured fit accuracy or realtime
 throughput. Tests compare independent duct Bessel impedance, a physical-flow
 RK4 reference, energy balance and exact timestep partition.
 
+### Cylindrical cavity thermal compression
+
+`SharedCavity::new_with_cylindrical_thermal_wall` uses an explicit physical
+cavity radius and the original volume, with an isothermal cylindrical sidewall,
+insulated endcaps and the existing uniform-pressure assumption. Positive ZK
+thermal compliance is inverted through the existing Jacobi owner into
+isothermal equilibrium compression plus positive Maxwell arms, retaining the
+adiabatic instantaneous limit. Thermal history, acoustic availability and
+diffusion dissipation remain in the original constitutive-memory/exact account.
+Pressure and compression-energy observations include accepted thermal branch
+reactions once. Relaxed versus instantaneous initial compression is explicit;
+viscous-neck and exterior radiation loading compose without changing physical
+port count. Three-rung independent Bessel and physical pressure/diffusion
+time-domain tests cover this compact reference. No arbitrary-cavity geometry,
+finite wall conductivity, distributed acoustics or full wall-temperature
+evolution is inferred.
+
 ### Accelerating material-fiber supports
 
 `MultiBowPerformance::with_fiber_support_program` supplies declared continuous

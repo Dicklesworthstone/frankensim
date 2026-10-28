@@ -12,6 +12,9 @@ use crate::render::schedule::force::coupled::{
 };
 use fs_exec::CancelGate;
 
+pub mod thermal;
+pub use thermal::{CylindricalCavityThermalOptions, CylindricalThermalCompression, ThermalCompressionArm};
+
 /// Circular-neck viscous diffusion, prepared from the actual geometry and gas.
 /// Admission checks sampled complex impedance AND real-loss error against the
 /// existing Bessel owner, not an interval enclosure or a thermal-wall model.
@@ -49,7 +52,7 @@ pub struct SharedCavityObservation {
     pub surface_volume_rate_m3_s: f64,
     /// Outward neck flow [m3/s], suitable for the original acoustic receiver.
     pub neck_outflow_m3_s: f64,
-    /// Compression storage already included in network connection energy [J].
+    /// Compression storage already included in connection and thermal-memory energy [J].
     pub compression_energy_j: f64,
     /// Neck kinetic energy already included in network modal energy [J].
     pub neck_kinetic_energy_j: f64,
@@ -65,6 +68,7 @@ pub struct SharedCavity {
     surface_modes: usize,
     neck_component: usize,
     viscous_neck: Option<fs_phs::ZkDiffusive>,
+    thermal_compression: Option<CylindricalThermalCompression>,
     external: Vec<f64>,
     ports: crate::port_adoption::ModulePorts,
     old_q: Vec<f64>,
@@ -85,7 +89,7 @@ impl SharedCavity {
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
         Self::new_inner(source, surfaces, sample_rate_hz, neck_initial, neck_budget,
-            config, None, gate)
+            config, None, None, gate)
     }
 
     /// Replace the resonance-frozen neck resistance with physical viscous memory.
@@ -115,6 +119,15 @@ impl SharedCavity {
         options: ViscousNeckOptions,
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
+        let memory=Self::prepare_viscous_neck(&source,sample_rate_hz,config,options,gate)?;
+        Self::new_inner(source, surfaces, sample_rate_hz, neck_initial, neck_budget,
+            config, Some(memory), None, gate)
+    }
+
+    fn prepare_viscous_neck(
+        source:&HelmholtzModalCavity,sample_rate_hz:u32,config:ModalCouplingConfig,
+        options:ViscousNeckOptions,gate:&CancelGate,
+    )->Result<fs_phs::ZkDiffusive,ModalCouplingError> {
         if gate.is_requested() { return Err(ModalCouplingError::Cancelled); }
         if source.loss() != CavityNeckLoss::ExteriorMouth {
             return Err(network_invalid("viscous memory requires an internal-only exterior-mouth neck"));
@@ -123,12 +136,10 @@ impl SharedCavity {
             return Err(network_invalid("viscous neck band exceeds the original Nyquist guard"));
         }
         let gas = source.gas();
-        let memory = fs_phs::ZkDiffusive::new(source.geometry().neck_radius_m,
+        fs_phs::ZkDiffusive::new(source.geometry().neck_radius_m,
             gas.density, gas.dynamic_viscosity, gas.gamma, gas.prandtl,
             options.poles, options.band_rad_s, options.maximum_relative_error)
-            .map_err(ModalCouplingError::Propagation)?;
-        Self::new_inner(source, surfaces, sample_rate_hz, neck_initial, neck_budget,
-            config, Some(memory), gate)
+            .map_err(ModalCouplingError::Propagation)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -140,6 +151,7 @@ impl SharedCavity {
         neck_budget: ModalAcousticTimeBudget,
         config: ModalCouplingConfig,
         viscous_neck: Option<fs_phs::ZkDiffusive>,
+        thermal_compression: Option<(CylindricalThermalCompression,Option<Vec<f64>>)>,
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
         if gate.is_requested() { return Err(ModalCouplingError::Cancelled); }
@@ -201,8 +213,10 @@ impl SharedCavity {
         let mut neck=source.neck_component(sample_rate_hz,neck_budget)?;
         neck.restore_states(&[neck_initial]).map_err(|source|ModalCouplingError::Component {component:neck_index,source})?;
         models.push(neck);
+        let compression_stiffness=thermal_compression.as_ref().map_or(
+            source.compression_stiffness_n_m(),|(law,_)|law.equilibrium_stiffness_n_m());
         let mut links=vec![ModalColumnConnection {column:column.clone(),
-            stiffness_n_m:source.compression_stiffness_n_m(),damping_n_s_m:0.0,rest_extension_m:0.0}];
+            stiffness_n_m:compression_stiffness,damping_n_s_m:0.0,rest_extension_m:0.0}];
         if let Some(loss)=loss {links.push(loss);}
         if let Some(memory) = &viscous_neck {
             let auxiliary = ModalAcousticTimeModel::try_new_with_free_coordinates(sample_rate_hz,
@@ -228,7 +242,20 @@ impl SharedCavity {
                     damping_n_s_m: resistance, rest_extension_m: 0.0 });
             }
         }
-        let system=CoupledModalSystem::new_with_columns(models,links,config,gate)?;
+        let mut system=CoupledModalSystem::new_with_columns(models,links,config,gate)?;
+        let thermal_compression=match thermal_compression {
+            Some((law,initial_memory))=>{
+                let mut projection=vec![0.0;2*count];
+                for (i,&shape) in column.iter().enumerate() {projection[2*i]=shape;}
+                let branches=law.arms().iter().map(|arm|fs_phs::RelaxationBranch {
+                    projection:projection.clone(),stiffness:arm.stiffness_n_m,
+                    relaxation_time_s:arm.relaxation_time_s,
+                }).collect();
+                system=system.with_material_relaxation(branches,initial_memory,gate)?;
+                Some(law)
+            }
+            None=>None,
+        };
         let names: Vec<_> = (0..surface_modes)
             .map(|i| format!("surface/generalized/{i}"))
             .collect();
@@ -256,6 +283,7 @@ impl SharedCavity {
             surface_modes,
             neck_component: neck_index,
             viscous_neck,
+            thermal_compression,
             external: vec![0.0; count],
             ports,
             old_q: vec![0.0; count],
@@ -265,12 +293,17 @@ impl SharedCavity {
         if gate.is_requested() {return Err(ModalCouplingError::Cancelled);}
         Ok(result)
     }
-    /// Original coherent gas, geometry, neck inertia, compliance and loss choice.
-    /// `new_with_viscous_neck` replaces this descriptor's frozen resistance in
-    /// the runtime; `neck_viscous_diffusion` exposes the admitted replacement.
+    /// Original coherent gas, geometry, neck inertia, adiabatic compliance and loss choice.
+    /// Viscous and thermal builders replace the descriptor's frozen resistance
+    /// and adiabatic compression law in the runtime. Their respective accessors
+    /// expose the admitted physical memory; this source remains unchanged.
     pub fn source(&self)->&HelmholtzModalCavity {&self.source}
     /// The admitted viscous coefficients and sampled error evidence, if enabled.
     pub fn neck_viscous_diffusion(&self) -> Option<&fs_phs::ZkDiffusive> { self.viscous_neck.as_ref() }
+    /// Actual cylindrical thermal geometry, positive compression arms and sampled band.
+    pub fn cavity_thermal_compression(&self)->Option<&CylindricalThermalCompression> {
+        self.thermal_compression.as_ref()
+    }
     /// Original accepted bank; no mutable access that could bypass coupling.
     pub fn network(&self)->&CoupledModalSystem {&self.system}
     /// Number of external surface forces, excluding the appended neck.
@@ -419,12 +452,17 @@ impl SharedCavity {
         }}
         let neck=self.system.components()[self.neck_component].states()[0];
         let volume=extension*self.source.neck_area_m2();
-        let pressure=-(self.source.compression_stiffness_n_m()*extension)/self.source.neck_area_m2();
+        let (compression_force,compression_energy)=match &self.thermal_compression {
+            Some(law)=>law.observation(extension,self.system.material_memory())?,
+            None=>(self.source.compression_stiffness_n_m()*extension,
+                0.5*self.source.compression_stiffness_n_m()*extension*extension),
+        };
+        let pressure=-compression_force/self.source.neck_area_m2();
         let observation=SharedCavityObservation {
             volume_change_m3:volume,fractional_volume_change:volume/self.source.geometry().volume_m3,
             pressure_increment_pa:pressure,surface_volume_rate_m3_s:surface_rate*self.source.neck_area_m2(),
             neck_outflow_m3_s:self.source.neck_volume_shape_m2_per_sqrt_kg()*neck.velocity_m_sqrt_kg_per_s,
-            compression_energy_j:0.5*self.source.compression_stiffness_n_m()*extension*extension,
+            compression_energy_j:compression_energy,
             neck_kinetic_energy_j:0.5*neck.velocity_m_sqrt_kg_per_s*neck.velocity_m_sqrt_kg_per_s,
         };
         if [observation.volume_change_m3,observation.fractional_volume_change,observation.pressure_increment_pa,
