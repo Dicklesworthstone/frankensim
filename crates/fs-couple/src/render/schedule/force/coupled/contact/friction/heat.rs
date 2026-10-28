@@ -20,6 +20,9 @@ use fs_thermal::enthalpy::backward_euler::StepCoefficients;
 use fs_thermal::enthalpy::{DepositionError, DepositionSimulation};
 use std::cell::{Cell, RefCell};
 
+/// Same-step modal friction with an existing finite thermal layer.
+pub mod third_body;
+
 /// Endpoint constitutive and transport data, all evaluated at the same trial.
 pub struct ModalHeatSource<P> {
     /// Original source's dry-friction law at the common interface temperature.

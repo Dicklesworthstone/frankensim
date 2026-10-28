@@ -26,6 +26,9 @@ use fs_thermal::enthalpy::{
 use fs_tribo::{TangentialLaw, TangentialStep, TangentialStepInput, TriboError};
 use std::cell::RefCell;
 
+/// Physical finite-layer storage and source-derived conduction into both bodies.
+pub mod third_body;
+
 fn invalid(message: &'static str) -> DepositionError {
     DepositionError::InvalidInput(message)
 }
