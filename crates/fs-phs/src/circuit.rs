@@ -11,7 +11,7 @@
 //! MNA library is passivity BY CONSTRUCTION): extended state
 //! `[φ_L…, q_C… | v_node…, i_C…, i_V…, i_T…]` — fluxes and charges
 //! are differential and carry ALL the energy
-//! (`H = Σ φ²/2L + Σ q²/2C`); node potentials and constraint
+//! (`H = φᵀ L⁻¹ φ/2 + Σ q²/2C`); node potentials and constraint
 //! currents are algebraic multipliers with zero storage. Every
 //! constraint enters the composite `J` ONCE, and Dirac ANTISYMMETRY
 //! manufactures its dual for free: the inductor's KVL row
@@ -25,6 +25,13 @@
 //! branch's nodes — power-conserving by antisymmetry, never by
 //! bookkeeping. Resistors are pure `R`-matrix dissipation
 //! (`(v_a − v_b)²/R`, PSD stamps).
+//!
+//! [`assemble_circuit_with_mutual_inductance`] admits signed couplings
+//! between inductor branches. The full inductance matrix must be positive
+//! definite, so finite magnetizing and leakage storage enter the same flux
+//! states and Kirchhoff equations. Its inverse is prepared once, never during
+//! stepping. Perfect coupling is singular in independent flux coordinates;
+//! use an ideal [`TransformerLink`] or declare physical leakage instead.
 //!
 //! Admission is LOUD: floating nodes, shorted or parallel voltage
 //! sources, and non-physical element values refuse BY NAME before any
@@ -83,6 +90,22 @@ pub struct TransformerLink {
     pub ratio: f64,
 }
 
+/// Signed mutual inductance between two existing inductor branches.
+///
+/// Branch indices refer to [`CircuitGraph::branches`], not to the compressed
+/// inductor order. Positive currents run from each branch's first terminal to
+/// its second. Positive `henries` means those currents reinforce flux (both
+/// enter dotted terminals); reversing one winding's orientation reverses M.
+/// The two branch self-inductances already include all their stored flux;
+/// mutual inductance fills only the off-diagonal entries of the same matrix.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MutualInductance {
+    /// Indices of two distinct inductor branches.
+    pub branches: (usize, usize),
+    /// Reciprocal coupling M [H], including winding polarity.
+    pub henries: f64,
+}
+
 /// A circuit graph: `node_count` nodes (0 = ground), branches, and
 /// ideal transformer links.
 #[derive(Debug, Clone, PartialEq)]
@@ -139,7 +162,8 @@ impl From<PhsError> for CircuitError {
 pub struct CircuitDae {
     /// The composed descriptor-pHS.
     pub system: DescriptorPortHamiltonian,
-    /// Extended-state offsets of each inductor flux, in branch order.
+    /// Extended-state offsets of each inductor's total flux linkage, in branch
+    /// order. With mutual coupling, current is `L⁻¹ φ`, not `φ_i / L_ii`.
     pub flux_index: Vec<usize>,
     /// Extended-state offsets of each capacitor charge, in branch order.
     pub charge_index: Vec<usize>,
@@ -153,8 +177,34 @@ pub struct CircuitDae {
 ///
 /// # Errors
 /// [`CircuitError`] refusals as documented on the module.
-#[allow(clippy::too_many_lines)] // one assembly pass, kept whole
 pub fn assemble_circuit(graph: &CircuitGraph) -> Result<CircuitDae, CircuitError> {
+    assemble_circuit_with_mutual_inductance(graph, &[])
+}
+
+/// Assemble the same Kirchhoff DAE with linear magnetic coupling.
+///
+/// The original branch inductances form the diagonal of L and each link sets
+/// `L_ij = L_ji = M`. Flux coordinates store `φ = L i`; magnetic energy is
+/// `φᵀ L⁻¹ φ/2` and its gradient gives the actual branch currents. This models
+/// finite magnetizing/leakage inductance and any number of reciprocal windings
+/// without adding algebraic ideal-transformer constraints. Resistors, sources,
+/// capacitor charges, state order and all Kirchhoff stamps are unchanged.
+///
+/// Preparation factors a diagonally scaled L and checks its represented
+/// inverse before storing it. No factorization is added to the time step.
+/// Empty links retain the ordinary uncoupled circuit bit for bit. These are
+/// caller-supplied linear parameters: saturation, core loss, motion and
+/// temperature dependence are not inferred from a coupling coefficient.
+///
+/// # Errors
+/// Ordinary circuit refusals; invalid/duplicate coupling endpoints; nonfinite
+/// M; a nonpositive-definite or numerically unresolved inductance matrix.
+/// Pairwise `|M_ij| < sqrt(L_i L_j)` alone does not admit a multiwinding core.
+#[allow(clippy::too_many_lines)] // one assembly pass, kept whole
+pub fn assemble_circuit_with_mutual_inductance(
+    graph: &CircuitGraph,
+    mutual: &[MutualInductance],
+) -> Result<CircuitDae, CircuitError> {
     if graph.node_count < 2 {
         return Err(CircuitError::Invalid {
             what: "a circuit needs ground plus at least one node",
@@ -250,6 +300,11 @@ pub fn assemble_circuit(graph: &CircuitGraph) -> Result<CircuitDae, CircuitError
         .iter()
         .filter(|(_, _, e)| matches!(e, Branch::Inductor { .. }))
         .count();
+    let inverse_inductance = if mutual.is_empty() {
+        None
+    } else {
+        Some(coupled_inverse_inductance(graph, mutual, n_l)?)
+    };
     let n_c = graph
         .branches
         .iter()
@@ -385,6 +440,13 @@ pub fn assemble_circuit(graph: &CircuitGraph) -> Result<CircuitDae, CircuitError
         }
     }
 
+    if let Some(inverse) = inverse_inductance {
+        for row in 0..n_l {
+            for col in 0..n_l {
+                q_storage[flux_index[row] * n + flux_index[col]] = inverse[row * n_l + col];
+            }
+        }
+    }
     let storage = Box::new(QuadraticStorage::new(q_storage, n)?);
     let system = DescriptorPortHamiltonian {
         n,
@@ -405,7 +467,131 @@ pub fn assemble_circuit(graph: &CircuitGraph) -> Result<CircuitDae, CircuitError
     })
 }
 
+/// L = D C D, D_ii = sqrt(L_ii). Factoring the dimensionless coupling matrix
+/// avoids making energy admission depend on winding turns or inductance units.
+fn coupled_inverse_inductance(
+    graph: &CircuitGraph,
+    mutual: &[MutualInductance],
+    n: usize,
+) -> Result<Vec<f64>, CircuitError> {
+    let invalid = |what| CircuitError::Invalid { what };
+    let mut slots = vec![None; graph.branches.len()];
+    let mut scales = Vec::with_capacity(n);
+    for (branch, &(_, _, element)) in graph.branches.iter().enumerate() {
+        if let Branch::Inductor { henries } = element {
+            slots[branch] = Some(scales.len());
+            scales.push(henries.sqrt());
+        }
+    }
+    let mut coupling = vec![0.0; n * n];
+    for i in 0..n {
+        coupling[i * n + i] = 1.0;
+    }
+    let mut pairs = std::collections::BTreeSet::new();
+    for &MutualInductance {
+        branches: (a, b),
+        henries,
+    } in mutual
+    {
+        let (Some(Some(i)), Some(Some(j))) = (slots.get(a), slots.get(b)) else {
+            return Err(invalid("mutual inductance must name two inductor branches"));
+        };
+        let (i, j) = (*i, *j);
+        if i == j || !pairs.insert((i.min(j), i.max(j))) {
+            return Err(invalid("self or duplicate mutual-inductance link"));
+        }
+        // Divide by the larger scale first: sqrt(L_i L_j) itself may
+        // overflow even though the dimensionless coefficient is representable.
+        let value = henries / scales[i].max(scales[j]) / scales[i].min(scales[j]);
+        if !henries.is_finite() || !value.is_finite() || value.abs() >= 1.0 {
+            return Err(invalid(
+                "mutual inductance requires finite positive leakage energy",
+            ));
+        }
+        coupling[i * n + j] = value;
+        coupling[j * n + i] = value;
+    }
+    let factor = fs_la::factor::cholesky(&coupling, n)
+        .map_err(|_| invalid("full inductance matrix must be positive definite"))?;
+    // Rounded sqrt(L_ii) scaling can turn an exactly singular physical L
+    // into a coupling matrix with a tiny positive pivot. Such a pivot does
+    // not establish leakage storage. Refuse below the dimensionless panel's
+    // roundoff scale instead of inventing an extremely stiff magnetic mode.
+    let pivot_floor = 16.0 * f64::EPSILON * n as f64;
+    if (0..n).any(|i| factor.l(i, i).powi(2) <= pivot_floor) {
+        return Err(invalid("coupled leakage energy is numerically unresolved"));
+    }
+    let mut inverse = vec![0.0; n * n];
+    let mut column = vec![0.0; n];
+    for j in 0..n {
+        column.fill(0.0);
+        column[j] = 1.0;
+        factor.solve(&mut column);
+        for i in 0..n {
+            inverse[i * n + j] = column[i];
+        }
+    }
+    // The mathematical inverse is symmetric. Share one rounded value for the
+    // two entries, then validate THAT represented inverse against the input.
+    for i in 0..n {
+        for j in 0..i {
+            let value = f64::midpoint(inverse[i * n + j], inverse[j * n + i]);
+            inverse[i * n + j] = value;
+            inverse[j * n + i] = value;
+        }
+    }
+    for i in 0..n {
+        for j in 0..n {
+            let mut residual = if i == j { -1.0 } else { 0.0 };
+            for k in 0..n {
+                residual = coupling[i * n + k].mul_add(inverse[k * n + j], residual);
+            }
+            if !residual.is_finite() || residual.abs() > 1e-10 {
+                return Err(invalid(
+                    "coupled inductance inverse is numerically unresolved",
+                ));
+            }
+        }
+    }
+    for i in 0..n {
+        for j in 0..=i {
+            let value = inverse[i * n + j] / scales[i].max(scales[j]) / scales[i].min(scales[j]);
+            if !value.is_finite() || (i == j && value <= 0.0) {
+                return Err(invalid("coupled magnetic storage is not representable"));
+            }
+            inverse[i * n + j] = value;
+            inverse[j * n + i] = value;
+        }
+    }
+    Ok(inverse)
+}
+
 impl CircuitDae {
+    /// Read inductor currents [A] in the original inductor-branch order.
+    ///
+    /// This evaluates the actual storage gradient, retaining every mutual term
+    /// when the circuit has coupled windings. The supplied state includes the
+    /// original algebraic coordinates; they do not contribute magnetic energy.
+    ///
+    /// # Errors
+    /// Refuses a malformed/nonfinite state or unrepresentable current.
+    pub fn inductor_currents(&self, state: &[f64]) -> Result<Vec<f64>, CircuitError> {
+        if state.len() != self.system.state_dim() || state.iter().any(|v| !v.is_finite()) {
+            return Err(CircuitError::Invalid {
+                what: "inductor currents require a complete finite circuit state",
+            });
+        }
+        let mut effort = vec![0.0; state.len()];
+        self.system.storage().gradient(state, &mut effort);
+        let currents: Vec<_> = self.flux_index.iter().map(|&i| effort[i]).collect();
+        if currents.iter().any(|v| !v.is_finite()) {
+            return Err(CircuitError::Invalid {
+                what: "inductor currents are not representable",
+            });
+        }
+        Ok(currents)
+    }
+
     /// Solve consistent initial conditions from the given differential
     /// state (fluxes/charges kept; algebraic coordinates solved by a
     /// `dt = 0` descriptor step).
@@ -453,9 +639,7 @@ impl CircuitDae {
                 what: "descriptor state/input length",
             }));
         }
-        if x0.iter().chain(u0).any(|v| !v.is_finite())
-            || !sys.storage.hamiltonian(x0).is_finite()
-        {
+        if x0.iter().chain(u0).any(|v| !v.is_finite()) || !sys.storage.hamiltonian(x0).is_finite() {
             return Err(invalid());
         }
         let mut effort = vec![0.0; n];
@@ -478,8 +662,8 @@ impl CircuitDae {
             let physical_row = nd + row;
             let mut known = gu[physical_row];
             for col in 0..nd {
-                known += (sys.j[physical_row * n + col] - sys.r[physical_row * n + col])
-                    * effort[col];
+                known +=
+                    (sys.j[physical_row * n + col] - sys.r[physical_row * n + col]) * effort[col];
             }
             rhs[row] = -known;
             for col in 0..na {
@@ -505,7 +689,13 @@ impl CircuitDae {
             return Err(invalid());
         }
         let svd = fs_la::factor::svd_jacobi(&a, na, na);
-        if svd.sigma.iter().chain(&svd.u).chain(&svd.v).any(|v| !v.is_finite()) {
+        if svd
+            .sigma
+            .iter()
+            .chain(&svd.u)
+            .chain(&svd.v)
+            .any(|v| !v.is_finite())
+        {
             return Err(invalid());
         }
         let largest = svd.sigma.first().copied().unwrap_or(0.0);
@@ -555,8 +745,16 @@ impl CircuitDae {
         }
         let scale = x0.iter().chain(u0).fold(1e-30_f64, |s, v| s.max(v.abs()));
         let floor = crate::newton::residual_rounding_floor(
-            sys.storage.as_ref(), x0, &candidate, &effort,
-            &sys.j, &sys.r, &gu, 0.0, nd, &[],
+            sys.storage.as_ref(),
+            x0,
+            &candidate,
+            &effort,
+            &sys.j,
+            &sys.r,
+            &gu,
+            0.0,
+            nd,
+            &[],
         );
         if !floor.is_finite() {
             return Err(invalid());

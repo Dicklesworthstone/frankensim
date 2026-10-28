@@ -513,6 +513,27 @@ matches the dissipation ledger within 2%.
   stamps reconstruct through the same descriptor constructor.
   `tests/circuit_initial_constraints.rs` checks compatible and conflicting
   voltage clamps, a subsequent physical RLC step, and source-free reconstruction.
+  `assemble_circuit_with_mutual_inductance` accepts signed reciprocal links
+  between original inductor branch indices. It admits the complete positive-
+  definite L after scaling by sqrt(L_ii), prepares its inverse once, and stores
+  H_m = phi^T L^-1 phi / 2 in the existing flux coordinates. The represented
+  squared Cholesky pivots must exceed 16*n*EPSILON in that dimensionless matrix;
+  this refuses unresolved leakage instead of inventing it through roundoff.
+  The represented
+  dimensionless inverse must satisfy max|C C^-1 - I| <= 1e-10; nonfinite or
+  unresolved inverses refuse. Each pair is unique and names distinct inductors;
+  pairwise coupling limits do not replace whole-matrix energy admission.
+  `CircuitDae::inductor_currents` evaluates the actual storage gradient,
+  including mutual terms. No source, capacitor, Kirchhoff stamp, integrator or
+  energy ledger is duplicated. Empty links preserve the uncoupled path exactly.
+  G0/G1 tests in `tests/circuit_mutual_inductance.rs` check interleaved branch
+  mapping, independent coupled-RL KVL/heat, winding polarity equivariance,
+  unequal winding scales, and the finite magnetizing/leakage transient of a
+  loaded transformer against its closed form with second-order refinement.
+  Negative-energy multiwinding data and perfect coupling refuse; exact ideal
+  transformers retain the algebraic TransformerLink representation. Authored
+  or measured L/M values carry no inferred core saturation, hysteresis,
+  eddy-current loss, moving geometry or temperature law.
   The ledger stays exact
   through constraints, and `step_audited` returns the SUPPLY-DEFECT
   residual |dH + dissipated - supplied| — the independent check
