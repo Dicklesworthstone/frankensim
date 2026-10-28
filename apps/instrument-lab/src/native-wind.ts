@@ -10,6 +10,7 @@ import fieldMolecularFlueSource from "../../../crates/fs-couple/examples/flue-dg
 import materialReedSource from "../../../crates/fs-couple/examples/material_modal_valve/paired-walls.performance?raw";
 import materialReedDgSource from "../../../crates/fs-couple/examples/material_modal_valve/paired-dg-chimney.performance?raw";
 import stringExampleSource from "../../../crates/fs-couple/examples/material_strings/pluck-and-bow.material-strings?raw";
+import nonlinearPreloadStringSource from "../../../crates/fs-couple/examples/material_strings/nonlinear-preload.material-strings?raw";
 import observedStringSource from "../../../crates/fs-couple/examples/material_strings/rayleigh-observed.material-strings?raw";
 import regionalCavityStringSource from "../../../crates/fs-couple/examples/material_strings/regional-cavity.material-strings?raw";
 import layeredStringSource from "../../../crates/fs-couple/examples/material_strings/relaxing-layered-strings.material-strings?raw";
@@ -112,6 +113,15 @@ const EXAMPLES = [
     decimate: false,
     intro: "Starter: one material-derived string, body and cavity, with a physical preload and bow gesture. Attach wire.fsmatpk and body.fsmatpk using the source-pack instructions linked below, or open your own complete material-string performance.",
     help: "The string performer accepts the same full material cards as the reed and wall solvers, along with legacy claim packs. Replace an attached source at its declared path to change the solved material without browser coefficients. Optional profiles add body geometry, fingers/frets and contact heat. This is a numerical integration fixture, not a measured violin, cello or bass.",
+  },
+  {
+    name: "material_strings/nonlinear-preload.material-strings",
+    label: "Strings — force-loaded nonlinear pizzicato",
+    renderer: "strings",
+    source: nonlinearPreloadStringSource,
+    decimate: false,
+    intro: "Starter: a force-loaded material string with bonded layers, two transverse planes, torsion, geometric stretching and a coupled body/cavity. Attach wire.fsmatpk, sleeve.fsmatpk and body.fsmatpk from the native string examples. The force is released at sample zero from the solved coupled equilibrium.",
+    help: "Change material sources, geometry or the declared preload force. The native solver derives the initial deformation from the same storage law used during playback, retaining the original relaxed material histories. Longitudinal-wave descriptions use this same preload path. This manufactured specimen does not establish measured violin, cello or bass accuracy.",
   },
   {
     name: "material_strings/rayleigh-observed.material-strings",

@@ -96,6 +96,15 @@ pub enum ModalFrictionError {
     Sticking { /// Signed mismatch [m].
         residual_m: f64, /// Explicit tolerance [m].
         tolerance_m: f64 },
+    /// A bounded static constitutive solve did not close the actual force law.
+    NonlinearEquilibrium {
+        /// Force mismatch at the worst normalized residual [N/sqrt(kg)].
+        residual: f64,
+        /// Its absolute-plus-relative allowance [N/sqrt(kg)].
+        tolerance: f64,
+        /// Constitutive trial evaluations spent, including line-search trials.
+        iterations: usize,
+    },
     /// The active-set rescue (frankensim-o7qbp) could not resolve a consistent
     /// joint stick/slip partition within its pivot budget. Carries the pivots
     /// spent against the budget, the last active set tried (S/+/- per port) and
@@ -138,6 +147,8 @@ impl core::fmt::Display for ModalFrictionError {
             Self::AdhesiveSource(e) => write!(f, "friction source: {e}"),
             Self::Sticking { residual_m, tolerance_m } => write!(f,
                 "sticking mismatch {residual_m:e} m exceeds {tolerance_m:e} m"),
+            Self::NonlinearEquilibrium { residual, tolerance, iterations } => write!(f,
+                "nonlinear static force residual {residual:e} exceeds {tolerance:e} N/sqrt(kg) after {iterations} trials"),
             Self::ActiveSetExhausted { pivots, budget, last_active_set, worst_port, worst_condition, worst_size } => write!(f,
                 "active-set rescue exhausted: {pivots}/{budget} pivots, last active set {last_active_set}, \
                  worst KKT violation at port {worst_port} ({worst_condition}) size {worst_size:e}"),
@@ -368,16 +379,21 @@ impl FrictionModalSystem {
         else { Ok(linear) }
     }
     /// Settle external loads against the COMPLETE connected instrument with all
-    /// friction contacts released. Delegates to the original static solver;
+    /// friction contacts released. Uses the original static inverse stiffness;
     /// compression/bridge springs and any supported free coordinates remain
     /// coupled. Requires sample zero and zero initial Q/V, so existing vibration
     /// cannot be erased. No clock advances and no state publishes on refusal.
-    /// Returned stored energy is an initial condition, NOT measured settling work.
+    /// Bound conservative storage participates through its exact gradient and
+    /// the existing nonlinear force/iteration limits. Returned stored energy is
+    /// an initial condition, NOT measured settling work.
     pub fn initialize_released_equilibrium(&mut self, external: &[f64], gate: &CancelGate)
         -> Result<f64, ModalFrictionError>
     {
-        if self.nonlinear.is_some() {
-            return Err(invalid("linear static preload cannot discard bound nonlinear storage").into());
+        if let Some(state) = &mut self.nonlinear {
+            let report = state.initialize_equilibrium(&mut self.network, external, gate)?;
+            let energy = report.total_energy_j;
+            state.preload = Some(report);
+            return Ok(energy);
         }
         self.network.initialize_static_equilibrium(external, gate).map_err(Into::into)
     }

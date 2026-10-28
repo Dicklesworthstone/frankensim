@@ -661,6 +661,27 @@ fn fiber_strain_domain_resolution_and_joint_config_refuse_before_material_io() {
     });
 }
 
+#[test]
+fn conservative_fiber_and_string_strain_share_force_loaded_initialization() {
+    scoped(|cx,gate| {
+        let text=include_str!("../fiber-strain-contact.material-strings")
+            .replace("48000 4096","48000 129")
+            .replace("forces retain 0 0","forces preload 1 1\nport 0 0.2 centreline 0.01\nforce 0 0 0");
+        let build=||input::Spec::parse(text.as_bytes()).unwrap().compile(cx,gate,|name|Ok(
+            if name=="fiber.fsmatpk" {fiber_pack(1300.0,false)} else {pack(name,7800.0,200_000.0,None)}
+        )).unwrap();
+        let mut run=build();let bank=run.performance.bank();
+        assert!(bank.source().bank().geometric_stretching().is_some());
+        assert!(bank.source().fiber_ribbon().unwrap().model().strain().is_some());
+        let report=bank.system().nonlinear_preload_diagnostics().unwrap();
+        assert!(report.force_residual<=report.force_tolerance);
+        assert_eq!(run.performance.preload_energy_j(),Some(bank.system().total_energy_j().unwrap()));
+        let expected=pressure(&mut run,37);
+        assert!(expected.iter().any(|p|p.abs()>1e-12));
+        assert_eq!(expected,pressure(&mut build(),128));
+    });
+}
+
 fn moving_fiber_spec() -> input::Spec {
     let text=include_str!("../fiber-ribbon.material-strings")
         .replace("48000 4096","48000 256")

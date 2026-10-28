@@ -59,13 +59,6 @@ impl Input {
                     "fiber and string strain must use the same joint solve configuration".into(),
                 );
             }
-            if spec
-                .forces
-                .as_ref()
-                .is_some_and(|program| program.initialization == ForceInitialization::StaticPreload)
-            {
-                return Err("fiber strain requires retained initial state; nonlinear static preload is not implemented".into());
-            }
         }
         if let Some(program) = &self.support_program {
             program.validate(spec.samples, spec.rate, &CancelGate::new_clock_free())?;

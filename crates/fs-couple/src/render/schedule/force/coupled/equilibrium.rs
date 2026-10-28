@@ -58,7 +58,7 @@ impl CoupledModalSystem {
         preload::initialize(self, external, contacts, config, gate)
     }
 
-    fn require_static_initialization(&self, external: &[f64]) -> Result<(), ModalCouplingError> {
+    pub(super) fn require_static_initialization(&self, external: &[f64]) -> Result<(), ModalCouplingError> {
         if self.samples_rendered() != 0 || external.len() != self.mode_count()
             || external.iter().any(|x| !x.is_finite())
             || self.material_memory.iter().any(|z| *z != 0.0)
@@ -75,6 +75,18 @@ impl CoupledModalSystem {
     fn stage_static_equilibrium(&mut self, q: &[f64], external: &[f64], gate: &CancelGate)
         -> Result<f64, ModalCouplingError>
     {
+        self.stage_static_equilibrium_with_allowance(q, external, None, gate)
+    }
+
+    // Constitutive equilibrium may have an explicitly bounded force residual.
+    // The ordinary linear/contact paths retain their original arithmetic.
+    pub(super) fn stage_static_equilibrium_with_allowance(&mut self, q: &[f64], external: &[f64],
+        allowance: Option<&[f64]>, gate: &CancelGate) -> Result<f64, ModalCouplingError>
+    {
+        if allowance.is_some_and(|a| a.len() != self.mode_count()
+            || a.iter().any(|v| !v.is_finite() || *v < 0.0)) {
+            return Err(invalid("static constitutive force allowances must be finite complete nonnegative values"));
+        }
         for i in 0..self.models.len() {
             poll(Some(gate))?;
             let states: Vec<_> = (self.offsets[i]..self.offsets[i+1]).map(|j|
@@ -111,6 +123,10 @@ impl CoupledModalSystem {
                 let actual = finite(mode.angular_frequency_rad_s*mode.angular_frequency_rad_s*state.displacement_m_sqrt_kg)?;
                 let denominator = finite(scale[j]+actual.abs())?;
                 let residual = finite(actual-implied[j])?.abs();
+                let residual = match allowance {
+                    Some(a) => (residual-a[j]).max(0.0),
+                    None => residual,
+                };
                 relative = relative.max(if denominator == 0.0 { 0.0 } else { residual/denominator });
                 j += 1;
             }
@@ -129,7 +145,7 @@ impl CoupledModalSystem {
 
 // One static inverse-stiffness owner, also used for contact cross-compliance.
 // The dynamic exact-ZOH response is NOT the static inverse stiffness.
-struct StaticResponse {
+pub(super) struct StaticResponse {
     compliance: Vec<f64>,
     roots: Vec<f64>,
     matrix: Vec<f64>,
@@ -138,7 +154,7 @@ struct StaticResponse {
     gauges: Vec<usize>,
 }
 impl StaticResponse {
-    fn new(network: &CoupledModalSystem, gate: &CancelGate) -> Result<Self, ModalCouplingError> {
+    pub(super) fn new(network: &CoupledModalSystem, gate: &CancelGate) -> Result<Self, ModalCouplingError> {
         let free_count = network.models.iter().flat_map(|m| m.modes())
             .filter(|m| m.angular_frequency_rad_s == 0.0).count();
         let mut indices = Vec::with_capacity(free_count);
@@ -177,7 +193,7 @@ impl StaticResponse {
         Ok(Self { compliance, roots, matrix, factor, free, gauges })
     }
 
-    fn solve(&self, network: &CoupledModalSystem, external: &[f64], include_rest: bool,
+    pub(super) fn solve(&self, network: &CoupledModalSystem, external: &[f64], include_rest: bool,
         enforce_limits: bool, gate: &CancelGate) -> Result<Vec<f64>, ModalCouplingError>
     {
         for &index in &self.gauges {

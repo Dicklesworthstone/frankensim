@@ -76,7 +76,8 @@ impl ReciprocalStringBank {
     /// Additional bows and compliant stops may then be attached. Prescribed or
     /// contact-derived bow loads and normal support translation at fixed string
     /// stations share this same constitutive iteration and complete network.
-    /// Nonlinear static preload still requires a separate equilibrium solve.
+    /// With released bows and no normal obstacles, static force preload solves
+    /// this same strain potential against the complete connected network.
     ///
     /// Moderate-slope fixed-end Kirchhoff--Carrier mechanics; no axial wave
     /// inertia, dynamic temperature, helical winding slip or full rod. The

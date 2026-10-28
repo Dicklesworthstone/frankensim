@@ -306,9 +306,10 @@ selected relaxation law, excitation, mechanical clock and pressure scale.
 Native decimation is selected for the source's 96 kHz mechanics.
 
 This is a generic tapered-bore integration fixture. The spatial wall model uses
-the local cylindrical approximation; a varying axial temperature/composition
-field and live molecular-history transfer are not supported by this molecular
-path. The same gas law still enforces its source domain. The example's interim
+the local cylindrical approximation. Its uniform medium can be replaced by an
+explicit source-backed axial field, as demonstrated by the field starter above;
+live molecular-history transfer remains unsupported. The same gas law still
+enforces its source domain. The example's interim
 jet does not provide measured oboe, saxophone or flute qualification.
 
 ### Material reeds and compliant walls
@@ -328,6 +329,17 @@ give the pack-building commands and physical declarations. These are
 manufactured integration specimens, not measured clarinet or oboe models.
 
 ### Material-string performances
+
+The **Strings — force-loaded nonlinear pizzicato** starter opens
+`nonlinear-preload.material-strings`. Attach `wire.fsmatpk`, `sleeve.fsmatpk`
+and `body.fsmatpk` using the [native string source instructions](../../crates/fs-couple/examples/material_strings/README.md).
+Its `forces preload` declaration solves the full coupled static force balance
+with geometric stretching, then releases the force at sample zero. The same
+path accepts longitudinal-wave storage. Changing a material changes both the
+initial deformation and subsequent motion through the original constitutive
+law; no displacement shape, settling damping or retuning is inserted by the
+browser. The source retains its bonded section, two transverse planes, torsion,
+body/cavity and gas-loading states. This is a manufactured integration specimen.
 
 The **Strings — material plate and exterior microphone** starter exposes the
 canonical `rayleigh-observed.material-strings` performance. Attach its original

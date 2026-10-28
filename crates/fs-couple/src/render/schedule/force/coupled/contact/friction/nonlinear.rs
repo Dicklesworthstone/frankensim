@@ -11,6 +11,9 @@ use super::*;
 use fs_phs::Storage;
 use std::borrow::Cow;
 
+mod equilibrium;
+pub use equilibrium::NonlinearPreloadDiagnostics;
+
 /// Displacement-only positive constitutive energy. Contiguous bindings supply
 /// additional energy; mapped bindings may explicitly replace selected original
 /// diagonal stiffness. Inertia remains with the original linear owner. The
@@ -56,7 +59,8 @@ pub struct MappedModalPotentialBinding {
 /// refinement, not clipping a reaction or publishing a partial solve.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NonlinearModalConfig {
-    /// Maximum complete linear/friction trials, in 1..=128.
+    /// Maximum complete linear/friction trials, in 1..=128. Static preload
+    /// uses the same cap for constitutive evaluations, including backtracking.
     pub max_iterations: usize,
     /// Maximum generalized reaction magnitude [N/sqrt(kg)].
     pub maximum_generalized_force: f64,
@@ -213,6 +217,7 @@ pub(super) struct NonlinearFrictionState {
     potentials: Vec<BoundPotential>,
     config: NonlinearModalConfig,
     last: Option<NonlinearFrictionFrame>,
+    pub(super) preload: Option<NonlinearPreloadDiagnostics>,
 }
 impl FrictionModalSystem {
     /// Bind disjoint additional storage before playback. Existing nonzero initial
@@ -316,6 +321,7 @@ impl FrictionModalSystem {
             potentials,
             config,
             last: None,
+            preload: None,
         };
         let q = coordinates(self.components());
         let total = finite(self.network.total_energy_j()? + state.potential_energy(&q)?)?;
@@ -445,6 +451,11 @@ impl FrictionModalSystem {
     }
 }
 impl NonlinearFrictionState {
+    pub(super) fn initialize_equilibrium(&self, network: &mut CoupledModalSystem,
+        external: &[f64], gate: &CancelGate) -> Result<NonlinearPreloadDiagnostics, ModalFrictionError>
+    {
+        equilibrium::initialize(self, network, external, gate)
+    }
     fn potential_energy(&self, q: &[f64]) -> Result<f64, ModalCouplingError> {
         let mut energy = 0.0;
         for binding in &self.potentials {

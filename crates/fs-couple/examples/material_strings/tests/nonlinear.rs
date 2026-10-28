@@ -92,7 +92,7 @@ fn data_only_material_gas_and_geometric_selection_change_real_pressure() {
     });
 }
 #[test]
-fn impossible_geometric_inputs_and_linear_preload_refuse_before_loading_materials() {
+fn impossible_geometric_inputs_refuse_and_static_preload_reaches_its_owner() {
     let original = text();
     for replacement in [
         "geometric-stretching 0.31 64 100000 1e-11 1e-10",
@@ -117,7 +117,82 @@ fn impossible_geometric_inputs_and_linear_preload_refuse_before_loading_material
         "forces retain 0 0",
         "forces preload 1 0\nport 0 0.2 surface 0.001",
     );
-    assert!(input::Spec::parse(preload.as_bytes()).is_err());
+    assert!(input::Spec::parse(preload.as_bytes()).is_ok());
+}
+
+fn preload_text() -> String {
+    include_str!("../nonlinear-preload.material-strings").replace("48000 4096", "48000 129")
+}
+fn elastic_pack(name: &str, young: f64) -> NormalizedPack {
+    if name != "wire.fsmatpk" { return pack(name,7800.0,200_000.0,None); }
+    let base=pack(name,7800.0,200_000.0,Some("young_modulus"));
+    let mut claims=base.claims().clone();
+    let observations=claims.claims_for("density")[0].1.observations.clone();
+    claims.insert_claim(PropertyClaim {
+        key:PropertyKey::new("young_modulus",Pressure::DIMS),
+        value:PropertyValue::Scalar {value:young,dims:Pressure::DIMS},
+        validity:ValidityDomain::unconstrained().with("T",280.0,320.0).with("omega",0.0,200_000.0),
+        uncertainty:UncertaintyModel::Unstated,interpolation:InterpolationPolicy::ConstantWithinValidity,
+        observations,provenance:Provenance {source:"manufactured nonlinear preload elasticity".into(),
+            license:"CC0-1.0".into(),artifact:Some(fs_blake3::ContentHash([8;32]))},
+    }).unwrap();
+    NormalizedPack::new(name,"synthetic-preload-v1",fs_blake3::ContentHash([8;32]),
+        "CC0-1.0",claims,vec![],vec![]).unwrap()
+}
+#[test]
+fn nonlinear_force_loaded_material_pluck_reaches_shared_body_gas_cavity_and_pcm() {
+    scoped(|cx,gate| {
+        let text=preload_text();
+        let build=|young|input::Spec::parse(text.as_bytes()).unwrap().compile(cx,gate,
+            |name|Ok(elastic_pack(name,young))).unwrap();
+        let mut direct=build(200e9);let mut changed=build(400e9);
+        assert_eq!(direct.spec.bytes,changed.spec.bytes,"only the original material pack changes");
+        let bank=direct.performance.bank();
+        let source=bank.source().bank();
+        assert!(source.geometric_stretching().is_some());
+        assert!(source.cylinder_gas_loading().is_some() && source.material_cavity().is_some());
+        assert_eq!(bank.system().components().iter().map(|m|m.modes().len()).collect::<Vec<_>>(),vec![3,2,1,8]);
+        assert!(bank.stretching_observation(0).unwrap().tension_n>bank.cards()[0].tension_n);
+        let stored=direct.performance.preload_energy_j().unwrap();
+        assert!(stored>0.0);assert_eq!(stored,bank.system().total_energy_j().unwrap());
+        let report=bank.system().nonlinear_preload_diagnostics().unwrap();
+        assert!(report.force_residual<=report.force_tolerance && report.iterations<=64);
+        assert_eq!(bank.system().samples_rendered(),0);assert!(bank.system().last_frame().is_none());
+        assert_ne!(bank.system().components()[0].states(),changed.performance.bank().system().components()[0].states());
+        assert_ne!(direct.catalog["wire.fsmatpk"].pack.content_hash(),changed.catalog["wire.fsmatpk"].pack.content_hash());
+        assert_eq!(direct.catalog["body.fsmatpk"].pack.content_hash(),changed.catalog["body.fsmatpk"].pack.content_hash());
+        assert!(bank.system().components()[1].states().iter().any(|s|s.displacement_m_sqrt_kg!=0.0));
+        let expected=pressure(&mut direct,37);let actual=pressure(&mut changed,128);
+        assert!(expected.iter().any(|p|p.abs()>1e-12));
+        assert!(expected.iter().zip(actual).any(|(a,b)|(a-b).abs()>1e-12));
+        for block in [1,128] {assert_eq!(pressure(&mut build(200e9),block),expected);}
+        let (wav,summary)=build(200e9).write(Cursor::new(Vec::<u8>::new()),gate).unwrap();
+        assert_eq!(wav.into_inner(),fs_couple::pcm_wav::encode_pcm16_wav(&expected,48000,0.01).unwrap().0);
+        assert_eq!(summary.samples,129);
+        let frame=direct.performance.bank().system().last_frame().unwrap();
+        assert!(frame.energy_residual_j.abs()<=frame.energy_tolerance_j);
+    });
+}
+
+#[test]
+fn retained_axial_modes_equilibrate_with_the_same_force_loaded_string() {
+    scoped(|cx,gate| {
+        let text=preload_text().replace("geometric-stretching 0.2 64 100000 1e-11 1e-10",
+            "longitudinal-waves 0.2 0.01 128 100000 1e-11 1e-10 2 1 2");
+        let build=||compile(cx,gate,input::Spec::parse(text.as_bytes()).unwrap(),7800.0);
+        let mut direct=build();let bank=direct.performance.bank();
+        assert!(bank.source().bank().longitudinal_waves().is_some());
+        assert_eq!(bank.system().components().iter().map(|m|m.modes().len()).collect::<Vec<_>>(),vec![3,2,1,8,2]);
+        assert!(bank.system().components()[4].states().iter().any(|s|s.displacement_m_sqrt_kg!=0.0));
+        assert!(bank.longitudinal_observation(0).unwrap().minimum_tension_n>0.0);
+        let report=bank.system().nonlinear_preload_diagnostics().unwrap();
+        assert!(report.force_residual<=report.force_tolerance);
+        let expected=pressure(&mut direct,37);
+        assert_eq!(expected,pressure(&mut build(),128));
+        assert!(expected.iter().any(|p|p.abs()>1e-12));
+        let frame=direct.performance.bank().system().last_frame().unwrap();
+        assert!(frame.energy_residual_j.abs()<=frame.energy_tolerance_j);
+    });
 }
 
 #[test]

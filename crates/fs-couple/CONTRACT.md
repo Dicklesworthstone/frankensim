@@ -4532,11 +4532,33 @@ bounds, strain, positive local tension and nonlinear closure remain explicit
 admission conditions. Axial modes are conservatively elastic; original bending,
 torsion, bridge, body and fluid losses remain active. Omitted axial channels are
 statically equilibrated. No axial viscosity is inferred, and no independent
-longitudinal end-force port, moving endpoint, helical slip, temperature evolution
-or nonlinear preload is added. Focused regressions cover exact axial linear
+longitudinal end-force port, moving endpoint, helical slip or temperature evolution
+is added. The shared nonlinear force preload below also equilibrates retained
+axial coordinates. Focused regressions cover exact axial linear
 limits, material frequency scaling, distinct fluid/solid mass, sympathetic motion,
 total work, source-band refusal and callback-identical PCM. They do not qualify
 measured violin/cello/bass fidelity or close the full string-unification program.
+
+`FrictionModalSystem::initialize_released_equilibrium` and its simultaneous-bow
+wrapper admit conservative nonlinear storage before sample zero. The existing
+bilateral static response is factored once and preconditions a bounded energy
+descent with safeguarded secant step lengths. Original storage energies and
+exact static gradients include mapped replacement stiffness exactly once.
+Every generalized force must close its existing absolute/relative tolerance;
+the existing nonlinear iteration cap includes rejected backtracking trials.
+No trial publishes state. Final component, connection-force and total-energy
+checks stage the same original coordinates and relaxed Maxwell histories, then
+publish them together without advancing a clock. Initialization storage is not
+pre-window actuator work. `NonlinearPreloadDiagnostics` records the accepted
+residual and storage; no stability or uniqueness certificate is implied.
+The native material-string `forces preload` path therefore supports geometric
+stretching, retained longitudinal waves and compatible conservative bow fibers
+through their original coupled body/cavity/fluid network. Normal obstacles,
+retained shear films and nonlinear-only support of otherwise free coordinates
+still refuse this static path; their dynamic owners remain unchanged. Focused
+regressions cover independent cubic and mapped-strain equilibria, strong
+nonlinear loading, held/released motion, relaxed material histories, refusal
+atomicity, source substitution and callback-identical native pressure/PCM.
 
 `ReciprocalStringBank::with_geometric_stretching` adds those same source-owned
 quartic channels to the existing `FrictionModalSystem`, preserving every original

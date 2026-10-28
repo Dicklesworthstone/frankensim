@@ -954,9 +954,6 @@ impl Spec {
             }
         }
         let schedule = GestureSchedule::from_canonical_bytes(schedule.as_bytes())?;
-        if (geometric_stretching.is_some() || longitudinal_waves.is_some()) && initialization == ForceInitialization::StaticPreload {
-            return Err("nonlinear string strain requires retained initial state; nonlinear static preload is not implemented".into());
-        }
         if schedule.to_canonical_bytes() != text.split_once("\nschedule\n").unwrap().1.as_bytes()
             || schedule.control_rate_hz > rate || schedule.tracks().is_empty() || schedule.tracks().len() > 16 {
             return Err("canonical bow schedule and control rate no greater than physics required".into());

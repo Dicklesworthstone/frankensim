@@ -427,8 +427,10 @@ cargo run --release -p fs-couple --example material_strings -- \
 This remains a physical integration fixture, not a measured violin or horsehair
 model. Retained axial harmonics must be refined alongside normal modes; omitted
 axial harmonics equilibrate statically. Excess slope/strain, local loss of
-tension, unsupported resolution, incompatible solve settings, nonlinear static
-preload and a failed joint solve refuse. Viscosity remains the original
+tension, unsupported resolution, incompatible solve settings and a failed
+joint solve refuse. Force-loaded initialization without normal obstacles or
+retained shear layers uses the same nonlinear preload owner described below.
+Viscosity remains the original
 small-strain operator; finite-slope viscous coupling is not supplied.
 
 Without `bow_fiber_motion` or `bow_fiber_program`, changing support speed still
@@ -1588,8 +1590,8 @@ torsional, bridge, body and gas losses remain active; bending viscosity is not
 reused as an unsupported axial loss law. Unretained axial channels equilibrate
 statically, so a two-mode selection is not a fully resolved longitudinal wave
 field. Fixed endpoints, moderate slopes, small constitutive strain and positive
-local tension remain required. There is no winding slip, temperature evolution,
-nonlinear static preload or independent longitudinal end-force port into the
+local tension remain required. There is no winding slip, temperature evolution
+or independent longitudinal end-force port into the
 body. Axial strain reaches the receiver through its reciprocal effect on
 transverse motion and the original bridge connections. This is not a claim of
 measured violin/cello/bass equivalence.
@@ -1649,11 +1651,49 @@ This is the moderate-slope, fixed-end Kirchhoff–Carrier model. Nonlinear
 harmonics and strong coupling require clock/mode refinement; residual closure
 alone does not establish trajectory accuracy. This selection supports multiple
 prescribed or contact-loaded bows, fixed, normally translating or migrating independent supports and
-`forces retain`. Static preload still refuses because it requires a joint
-nonlinear equilibrium solve. Select gas loading and rotational bridges before
+`forces retain`. A released force-loaded pluck can instead use `forces preload`
+as described below. Select gas loading and rotational bridges before
 attaching stretching. Axial wave
 inertia, winding slip, evolving temperature and measured instrument qualification
 remain outside this composition.
+
+### Force-loaded nonlinear plucks
+
+`nonlinear-preload.material-strings` uses the same wire/body/sleeve packs as the
+other bonded examples. It holds a declared transverse load against the complete
+string, shared body and cavity before sample zero, then releases that load:
+
+```text
+forces preload 1 1
+port 0 0.2 centreline 0.5
+force 0 0 0
+```
+
+Both `geometric-stretching` and `longitudinal-waves` use their original
+positive strain energy and exact static gradient during this initialization.
+Selected conservative bow-fiber strain participates in that same solve.
+The latter also equilibrates its retained axial coordinates; selected linear
+axial stiffness is replaced exactly once. Both transverse planes, material
+torsion, body/cavity motion and selected gas memory remain in the same network.
+Changing the material EA changes the loaded shape, tension and released sound.
+No pitch target or mode-by-mode pluck amplitude is introduced.
+
+One factorization of the existing bilateral static response preconditions a
+bounded energy-descent solve with safeguarded secant steps. The existing
+constitutive iteration cap counts trial evaluations including backtracking;
+its force tolerances and source strain bounds apply to the actual equilibrium.
+The accepted report is available from `nonlinear_preload_diagnostics()`. No
+sample advances during initialization. Its stored energy is an initial condition,
+not an inferred history of actuator work. Selected Maxwell arms start relaxed at
+that shape, and unloaded gas-memory position gauges retain zero displacement.
+
+Normal-contact obstacles, retained shear layers and nonlinear-only support of
+otherwise free coordinates still require a more general static solve and refuse
+this initialization. Their existing dynamic `forces retain` path is unchanged.
+Failed convergence, cancellation or any source/energy/force limit publishes no
+accepted mechanical or material state. Refine modes, time and the physical
+model before claiming instrument accuracy; the example is manufactured
+integration data, not a measured violin/cello/bass specimen.
 
 ## Source-bound axial bearings on the full string span
 

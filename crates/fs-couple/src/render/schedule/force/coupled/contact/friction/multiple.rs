@@ -361,8 +361,9 @@ impl MultiFrictionModalSystem {
     /// compliance matrix. Original per-obstacle limits, joint sweep count and
     /// obstacle setup budget apply. Dashpots carry no static load.
     ///
-    /// Bound nonlinear storage refuses before the contact-equilibrium solve:
-    /// that owner cannot silently omit an additional geometric potential.
+    /// Bound nonlinear storage uses the joint constitutive preload when no
+    /// normal obstacles are attached. Their combined static problem still
+    /// refuses; neither mechanism is silently omitted.
     /// Refuses after any sample or nonzero initial vibration; all sources,
     /// observers and clocks survive. No fallible work follows state publication.
     /// Returns initial storage INCLUDING obstacles, not prior actuator work.
@@ -371,8 +372,8 @@ impl MultiFrictionModalSystem {
     {
         // This must precede the obstacle branch: that original equilibrium
         // owner has no bound geometric potential and cannot silently omit it.
-        if self.core.has_nonlinear_potentials() {
-            return Err(invalid("static preload requires a joint nonlinear equilibrium solve").into());
+        if self.core.has_nonlinear_potentials() && self.obstacles.is_some() {
+            return Err(invalid("nonlinear static preload with normal obstacles requires a joint constrained equilibrium solve").into());
         }
         if self.shear_layers.iter().any(Option::is_some) {
             return Err(invalid("released static preload cannot discard retained material-layer shear").into());
@@ -382,6 +383,11 @@ impl MultiFrictionModalSystem {
                 self.config.max_sweeps, gate).map_err(Into::into);
         }
         self.core.initialize_released_equilibrium(external, gate)
+    }
+    /// Accepted nonlinear initialization on this same mechanical owner. The
+    /// initial storage is not a reconstructed pre-window actuator work.
+    pub fn nonlinear_preload_diagnostics(&self) -> Option<&super::nonlinear::NonlinearPreloadDiagnostics> {
+        self.core.nonlinear_preload_diagnostics()
     }
     /// Last joint report; absent until this wrapper accepts a sample.
     #[must_use] pub fn last_frame(&self) -> Option<&MultiFrictionFrame> { self.accepted.then_some(&self.frame) }

@@ -130,7 +130,7 @@ fn parser_counts_longitudinal_coordinates_and_refuses_conflicts_before_source_io
                 )
                 .as_bytes()
         )
-        .is_err()
+        .is_ok()
     );
 }
 #[test]
