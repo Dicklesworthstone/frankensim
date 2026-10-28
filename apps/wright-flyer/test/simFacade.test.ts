@@ -12,7 +12,9 @@ import { createRequire } from "node:module";
 import { test } from "node:test";
 
 import {
+  type EngineInitializationApi,
   fillPayload,
+  initializeScenario,
   parseCheckpointEnvelope,
   parseDigestEnvelope,
   parseInitEnvelope,
@@ -42,12 +44,55 @@ import {
   PHASE_CODES,
   payloadLayoutHash,
   type WorkerToMain,
+  type SpatialWindInit,
 } from "../src/sim/protocol.ts";
 import { SimClient } from "../src/sim/simClient.ts";
 
 const jlog = (payload: Record<string, unknown>): void => {
   console.info(JSON.stringify({ suite: "wf-e52a-facade", ...payload }));
 };
+
+test("spatial initialization routes the complete field and refuses a legacy-only bundle", () => {
+  const scenario = dec17Scenario(1903n, MODE_FIXED);
+  const wind: SpatialWindInit = {
+    sampling: "distributed", roughnessLengthM: 0.001, displacementHeightM: 0,
+    referenceHeightM: 2, sigmaMps: 0.3, lengthM: 15, advectionMps: 11,
+    correlationTimesS: [0.2, 0.5, 1.2],
+  };
+  let legacyCalls = 0;
+  let spatialCalls = 0;
+  let observed: unknown[] = [];
+  const engine: EngineInitializationApi = {
+    flyer_engine_init() { legacyCalls += 1; return "legacy"; },
+    flyer_engine_init_spatial_wind(...args) {
+      spatialCalls += 1;
+      observed = args;
+      return "spatial";
+    },
+  };
+  assert.equal(initializeScenario(engine, scenario), "legacy");
+  for (const sampling of ["cg", "distributed"] as const) {
+    assert.equal(initializeScenario(engine, { ...scenario, spatialWind: { ...wind, sampling } }), "spatial");
+    assert.deepEqual(observed.slice(0, 9), [
+      scenario.seed, scenario.rhoKgM3, scenario.headwindMps, scenario.mode,
+      scenario.member, scenario.railLengthM, scenario.maxTicks, scenario.assist, scenario.catapult,
+    ]);
+    assert.deepEqual(observed.slice(9, 16), [sampling === "distributed", 0.001, 0, 2, 0.3, 15, 11]);
+    assert.deepEqual(observed[16], new Float64Array(wind.correlationTimesS));
+  }
+  const unavailable = parseInitEnvelope(initializeScenario(
+    { flyer_engine_init: engine.flyer_engine_init }, { ...scenario, spatialWind: wind },
+  ));
+  assert.equal(unavailable.kind, "refusal");
+  if (unavailable.kind === "refusal") assert.equal(unavailable.refusal.code, "spatial-wind-unavailable");
+  const invalid = parseInitEnvelope(initializeScenario(engine, {
+    ...scenario, spatialWind: { ...wind, correlationTimesS: [0] },
+  }));
+  assert.equal(invalid.kind, "refusal");
+  if (invalid.kind === "refusal") assert.equal(invalid.refusal.code, "spatial-wind-invalid");
+  assert.equal(legacyCalls, 1, "spatial requests never reach the legacy fallback");
+  assert.equal(spatialCalls, 2, "invalid fields never reach WASM");
+});
 
 const STEP_OK =
   '{"ok":{"tick":42,"phase":"airborne","x_m":10.5,"h_m":3.25,"u_mps":13.5,"w_mps":0.5,' +
@@ -150,24 +195,29 @@ test("hostile twins refuse fail-closed (malformed, never a guess)", () => {
 
 test("checkpoint envelope decodes only bounded lowercase hex bytes", () => {
   const checkpoint = parseCheckpointEnvelope(
-    `{"ok":{"run_intent_id":"${"a".repeat(32)}","checkpoint_hex":"0001fe"}}`,
+    `{"ok":{"run_intent_id":"${"a".repeat(64)}","checkpoint_hex":"0001fe"}}`,
   );
   assert.equal(checkpoint.kind, "ok");
   if (checkpoint.kind === "ok") {
     assert.deepEqual([...checkpoint.bytes], [0, 1, 254]);
-    assert.equal(checkpoint.runIntentId, "a".repeat(32));
+    assert.equal(checkpoint.runIntentId, "a".repeat(64));
   }
   assert.equal(parseCheckpointEnvelope('{"ok":{"checkpoint_hex":"0"}}').kind, "malformed");
   assert.equal(
-    parseCheckpointEnvelope(`{"ok":{"run_intent_id":"${"A".repeat(32)}","checkpoint_hex":"00"}}`)
+    parseCheckpointEnvelope(`{"ok":{"run_intent_id":"${"A".repeat(64)}","checkpoint_hex":"00"}}`)
       .kind,
     "malformed",
   );
   assert.equal(
-    parseCheckpointEnvelope(`{"ok":{"run_intent_id":"${"a".repeat(32)}","checkpoint_hex":"00FF"}}`)
+    parseCheckpointEnvelope(`{"ok":{"run_intent_id":"${"a".repeat(64)}","checkpoint_hex":"00FF"}}`)
       .kind,
     "malformed",
   );
+  for (const length of [32, 63, 65]) {
+    assert.equal(parseCheckpointEnvelope(
+      `{"ok":{"run_intent_id":"${"a".repeat(length)}","checkpoint_hex":"00"}}`,
+    ).kind, "malformed", `the native content hash is 64 hex characters, not ${length}`);
+  }
   const refusal = parseCheckpointEnvelope(
     '{"refusal":{"code":"checkpoint-after-terminal","message":"m","ranked_repairs":["r"]}}',
   );
@@ -223,8 +273,8 @@ test("checkpoint replies bind the request and active run across reinit races", (
     },
     () => worker as unknown as Worker,
   );
-  const runA = "a".repeat(32);
-  const runB = "b".repeat(32);
+  const runA = "a".repeat(64);
+  const runB = "b".repeat(64);
   const scenarioA = dec17Scenario(1903n, MODE_FIXED);
   const scenarioB = dec17Scenario(1904n, MODE_FIXED);
 

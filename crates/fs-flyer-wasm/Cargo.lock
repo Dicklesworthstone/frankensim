@@ -628,6 +628,7 @@ version = "0.0.1"
 dependencies = [
  "asupersync",
  "fs-airscrew",
+ "fs-atmo",
  "fs-blake3",
  "fs-flyer",
  "fs-ga",

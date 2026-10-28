@@ -5,6 +5,7 @@
 //! bit-identically; envelopes are well-formed for ok AND refusal.
 //! Repro: cd crates/fs-flyer-wasm && cargo test --test engine_battery
 
+use fs_flyer::simloop::{PilotMode, ScenarioSpec, SimLoop, SpatialWindSpec};
 use fs_flyer_wasm::engine::{EngineSlot, MODE_FIXED, MODE_HISTORICAL, MODE_HUMAN};
 
 fn jlog(case: &str, payload: &str) {
@@ -16,6 +17,148 @@ const DEC17: (f64, f64, f64, u64) = (1.294, 11.0, 18.3, 40);
 fn init_short(slot: &mut EngineSlot, seed: u64, mode: u32, member: u32) -> String {
     let (rho, wind, rail, ticks) = DEC17;
     slot.init(seed, rho, wind, mode, member, rail, ticks, false, false)
+}
+
+fn explicit_wind() -> SpatialWindSpec {
+    SpatialWindSpec {
+        mean: fs_atmo::FlatSiteLogLaw {
+            scenario_effective_z0_m: 0.004,
+            displacement_height_m: 0.02,
+            reference_height_m: 2.6,
+            reference_speed_mps: 11.0,
+        },
+        sigma_mps: 0.08,
+        length_m: 18.0,
+        advection_mps: 9.5,
+        correlation_times_s: vec![0.8, 1.1, 1.7, 2.4, 3.0, 3.5, 4.0, 4.8],
+    }
+}
+
+fn init_spatial(slot: &mut EngineSlot, distributed: bool, wind: &SpatialWindSpec) -> String {
+    let (rho, headwind, rail, ticks) = DEC17;
+    slot.init_with_spatial_wind(
+        1903,
+        rho,
+        headwind,
+        MODE_FIXED,
+        0,
+        rail,
+        ticks,
+        false,
+        false,
+        distributed,
+        wind.mean.scenario_effective_z0_m,
+        wind.mean.displacement_height_m,
+        wind.mean.reference_height_m,
+        wind.sigma_mps,
+        wind.length_m,
+        wind.advection_mps,
+        &wind.correlation_times_s,
+    )
+}
+
+#[test]
+fn spatial_initializer_matches_native_modes_and_live_checkpoints() {
+    let mut identities = Vec::new();
+    for distributed in [false, true] {
+        let wind = explicit_wind();
+        let mut slot = EngineSlot::default();
+        let envelope = init_spatial(&mut slot, distributed, &wind);
+        assert!(envelope.starts_with("{\"ok\":{"), "{envelope}");
+        let (rho, headwind, rail, ticks) = DEC17;
+        let scenario = ScenarioSpec {
+            seed: 1903,
+            rho_kg_m3: rho,
+            headwind_mps: headwind,
+            pilot_mode: PilotMode::FixedControls,
+            rail_length_m: rail,
+            max_ticks: ticks,
+            assist: None,
+            catapult: None,
+        };
+        let mut native = if distributed {
+            SimLoop::init_with_distributed_spatial_wind(scenario, wind)
+        } else {
+            SimLoop::init_with_spatial_wind(scenario, wind)
+        }
+        .unwrap();
+        assert!(envelope.contains(&native.run_intent_id));
+        assert!(envelope.contains(&native.tick0().digest));
+        identities.push(native.run_intent_id.clone());
+        for tick in 0..=4 {
+            if tick > 0 {
+                let step = slot.step(false, 0.0, 0.0);
+                assert!(step.starts_with("{\"ok\":{"), "{step}");
+                native.step(None).unwrap();
+            }
+            let bytes = native.save_checkpoint().unwrap();
+            assert_eq!(
+                u32::from_le_bytes(bytes[..4].try_into().unwrap()),
+                if distributed { 4 } else { 3 }
+            );
+            let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(
+                slot.checkpoint(),
+                format!(
+                    "{{\"ok\":{{\"run_intent_id\":\"{}\",\"checkpoint_hex\":\"{hex}\"}}}}",
+                    native.run_intent_id
+                )
+            );
+            assert_eq!(
+                slot.digest(),
+                format!("{{\"ok\":{{\"digest\":\"{}\"}}}}", native.digest_hex())
+            );
+        }
+    }
+    assert_ne!(identities[0], identities[1]);
+}
+
+#[test]
+fn spatial_admission_refuses_without_legacy_fallback_or_stale_run() {
+    let mut slot = EngineSlot::default();
+    assert!(init_short(&mut slot, 1903, MODE_FIXED, 0).starts_with("{\"ok\":{"));
+    for case in 0..6 {
+        let mut wind = explicit_wind();
+        let code = match case {
+            0 => {
+                wind.mean.scenario_effective_z0_m = 0.0;
+                "z0-outside-domain"
+            }
+            1 => {
+                wind.correlation_times_s.clear();
+                "mode-count-invalid"
+            }
+            2 => {
+                wind.correlation_times_s[0] = 0.0;
+                "ou-params-invalid"
+            }
+            3 => {
+                wind.sigma_mps = f64::NAN;
+                "non-finite-input"
+            }
+            4 => {
+                wind.correlation_times_s = vec![1.0; fs_atmo::MAX_MODES + 1];
+                "mode-count-invalid"
+            }
+            _ => {
+                wind.length_m = -1.0;
+                "turbulence-params-invalid"
+            }
+        };
+        let refusal = init_spatial(&mut slot, case % 2 == 0, &wind);
+        assert!(
+            refusal.contains(&format!("\"code\":\"{code}\"")),
+            "{refusal}"
+        );
+        assert!(
+            slot.checkpoint()
+                .contains("\"code\":\"engine-not-initialized\"")
+        );
+        assert!(
+            slot.step(false, 0.0, 0.0)
+                .contains("\"code\":\"engine-not-initialized\"")
+        );
+    }
 }
 
 #[test]

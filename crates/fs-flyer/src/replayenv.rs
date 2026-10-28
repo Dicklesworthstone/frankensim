@@ -10,6 +10,11 @@
 //! at or below t and re-marches the remainder — the battery proves the
 //! result equals uninterrupted execution BITWISE at t.
 //!
+//! Explicit spatial-wind recorders retain the complete V3/V4 tick-zero
+//! checkpoint, so scrubbing before the first periodic checkpoint preserves
+//! the original wind model and sampling mode. Legacy recording bytes are
+//! unchanged. Initial and restored identities are checked before remarching.
+//!
 //! v1 records deterministic pilot modes (FixedControls / Historical);
 //! a Human run needs its applied input trace bound in — that is the
 //! 7.1.3 A/B lane, and recording a Human run here REFUSES rather than
@@ -19,7 +24,7 @@ use crate::Refusal;
 use crate::assist::ASSIST_V1;
 use crate::simloop::{
     CATAPULT_1904_V1, CatapultSpec, Phase, PilotMode, ScenarioSpec, SimLoop, SimStateOut,
-    TerminalEvent,
+    SpatialWindSpec, TerminalEvent,
 };
 use fs_blake3::hash_domain;
 
@@ -57,7 +62,8 @@ pub struct ReplayEnvelope {
     pub run_intent_id: String,
     /// Checkpoint interval K.
     pub interval: u64,
-    /// (tick, CheckpointStateV1 bytes) in ascending tick order.
+    /// (tick, versioned checkpoint bytes) in ascending tick order. Explicit
+    /// spatial-wind recordings always begin with their actual tick-zero state.
     pub checkpoints: Vec<(u64, Vec<u8>)>,
     /// Scrubber events.
     pub events: EventIndex,
@@ -83,6 +89,51 @@ fn phase_code(phase: Phase) -> u8 {
 /// `replay-human-needs-trace` (v1 law); `replay-interval-invalid`
 /// (cap AND cap+1); init/step refusals pass through.
 pub fn record_replay(spec: ScenarioSpec, interval: u64) -> Result<ReplayEnvelope, Refusal> {
+    record_initialized(spec, interval, SimLoop::init, false)
+}
+
+/// Record the explicit CG-sampled spatial-wind lifecycle. Its tick-zero V3
+/// checkpoint carries the complete declared field and sequential OU state.
+///
+/// # Errors
+/// As [`record_replay`] and [`SimLoop::init_with_spatial_wind`].
+pub fn record_replay_with_spatial_wind(
+    spec: ScenarioSpec,
+    wind: SpatialWindSpec,
+    interval: u64,
+) -> Result<ReplayEnvelope, Refusal> {
+    record_initialized(
+        spec,
+        interval,
+        |scenario| SimLoop::init_with_spatial_wind(scenario, wind),
+        true,
+    )
+}
+
+/// Record distributed wing/canard/rotor wind sampling. The initial V4
+/// checkpoint preserves this mode even when the run ends before checkpoint K.
+///
+/// # Errors
+/// As [`record_replay`] and [`SimLoop::init_with_distributed_spatial_wind`].
+pub fn record_replay_with_distributed_spatial_wind(
+    spec: ScenarioSpec,
+    wind: SpatialWindSpec,
+    interval: u64,
+) -> Result<ReplayEnvelope, Refusal> {
+    record_initialized(
+        spec,
+        interval,
+        |scenario| SimLoop::init_with_distributed_spatial_wind(scenario, wind),
+        true,
+    )
+}
+
+fn record_initialized(
+    spec: ScenarioSpec,
+    interval: u64,
+    initialize: impl FnOnce(ScenarioSpec) -> Result<SimLoop, Refusal>,
+    retain_initial: bool,
+) -> Result<ReplayEnvelope, Refusal> {
     if matches!(spec.pilot_mode, PilotMode::Human) {
         return Err(Refusal {
             code: "replay-human-needs-trace",
@@ -97,10 +148,13 @@ pub fn record_replay(spec: ScenarioSpec, interval: u64) -> Result<ReplayEnvelope
             ranked_repairs: vec!["a few hundred ticks is the scrubber class".into()],
         });
     }
-    let mut sim = SimLoop::init(spec.clone())?;
+    let mut sim = initialize(spec.clone())?;
     let tick0_digest = sim.tick0().digest.clone();
     let run_intent_id = sim.run_intent_id.clone();
     let mut checkpoints = Vec::new();
+    if retain_initial {
+        checkpoints.push((0, sim.save_checkpoint()?));
+    }
     let mut liftoff = None;
     let mut undulation_ticks = Vec::new();
     let mut last_sign = 0i8;
@@ -299,13 +353,13 @@ impl ReplayEnvelope {
             return Err(bad("checkpoint count"));
         }
         let mut checkpoints = Vec::with_capacity(n_ckpts);
-        let mut last_tick = 0u64;
+        let mut last_tick = None;
         for _ in 0..n_ckpts {
             let tick = u64le!();
-            if tick <= last_tick && last_tick != 0 {
+            if last_tick.is_some_and(|previous| tick <= previous) {
                 return Err(bad("checkpoint ticks not ascending"));
             }
-            last_tick = tick;
+            last_tick = Some(tick);
             let len = u32le!() as usize;
             if len > (1 << 20) {
                 return Err(bad("checkpoint length"));
@@ -324,7 +378,7 @@ impl ReplayEnvelope {
         }
         let terminal_tick = u64le!();
         let terminal_code = take(&mut pos, 1)?[0];
-        if !(2..=5).contains(&terminal_code) {
+        if !(2..=6).contains(&terminal_code) {
             return Err(bad("terminal code"));
         }
         let final_digest = String::from_utf8(take(&mut pos, 64)?.to_vec())
@@ -358,35 +412,90 @@ impl ReplayEnvelope {
     }
 
     /// Scrub: reconstruct the state AT tick `t` from the nearest
-    /// checkpoint at or below t (or tick 0), re-marching the remainder.
+    /// checkpoint strictly before t, re-marching the remainder. Tick zero
+    /// returns the actual initial state without advancing physics or wind.
+    /// Spatial recordings must retain their original initial checkpoint;
+    /// an absent/downgraded initial state never selects legacy physics.
     ///
     /// # Errors
-    /// `replay-scrub-out-of-range` (t past the terminal — the edge
-    /// admits, one past refuses); restore/step refusals pass through.
+    /// `replay-scrub-out-of-range` (t past the terminal),
+    /// `replay-initial-state-missing`, `replay-identity-mismatch`,
+    /// `replay-checkpoint-index`; restore/step refusals pass through.
     pub fn scrub_to_tick(&self, t: u64) -> Result<SimStateOut, Refusal> {
-        if t == 0 || t > self.events.terminal_tick {
+        if t > self.events.terminal_tick {
             return Err(Refusal {
                 code: "replay-scrub-out-of-range",
-                message: format!("tick {t} outside [1, {}]", self.events.terminal_tick),
+                message: format!("tick {t} outside [0, {}]", self.events.terminal_tick),
                 ranked_repairs: vec!["scrub inside the recorded run".into()],
             });
         }
-        // Strictly BELOW t: the state OUT at t comes from stepping tick
-        // t itself (a checkpoint holds state, not the step envelope).
+        let missing = || Refusal {
+            code: "replay-initial-state-missing",
+            message: "the recorded lifecycle requires its original tick-zero checkpoint".into(),
+            ranked_repairs: vec![
+                "retain the initial V3/V4 checkpoint; never replay spatial wind as legacy OU"
+                    .into(),
+            ],
+        };
+        let check_identity = |sim: &SimLoop| -> Result<(), Refusal> {
+            if sim.tick0().digest != self.tick0_digest || sim.run_intent_id != self.run_intent_id {
+                return Err(Refusal {
+                    code: "replay-identity-mismatch",
+                    message: "checkpoint/initialization belongs to a different recorded lifecycle"
+                        .into(),
+                    ranked_repairs: vec![
+                        "use the original wind mode, field parameters and scenario".into(),
+                    ],
+                });
+            }
+            Ok(())
+        };
+        let initial = self.checkpoints.first().filter(|(tick, _)| *tick == 0);
+        // A step envelope at t>0 comes from stepping t itself. The exact-zero
+        // request instead selects checkpoint zero explicitly.
         let base = self
             .checkpoints
             .iter()
             .rev()
-            .find(|(ct, _)| *ct < t)
-            .map(|(ct, bytes)| (*ct, bytes.clone()));
-        let start = base.as_ref().map_or(0, |(ct, _)| *ct);
-        let mut sim = match &base {
+            .find(|(ct, _)| *ct < t || (t == 0 && *ct == 0));
+        let start = base.map_or(0, |(ct, _)| *ct);
+        let mut sim = match base {
             Some((_, bytes)) => SimLoop::restore_checkpoint(self.spec.clone(), bytes)?,
-            None => SimLoop::init(self.spec.clone())?,
+            None => {
+                let sim = SimLoop::init(self.spec.clone())?;
+                // Old envelopes have no explicit initial checkpoint. Only a
+                // matching legacy initialization is a valid fallback.
+                check_identity(&sim).map_err(|_| missing())?;
+                sim
+            }
         };
+        check_identity(&sim)?;
+        if sim.spatial_ground_velocity_mps().is_some() {
+            let (_, bytes) = initial.ok_or_else(missing)?;
+            if start != 0 {
+                // A later checkpoint must not conceal a missing or downgraded
+                // initial field. Reuse the source owner's admission/decoder.
+                let initial_sim = SimLoop::restore_checkpoint(self.spec.clone(), bytes)?;
+                check_identity(&initial_sim)?;
+                initial_sim.replay_initial_state()?;
+            }
+        }
+        if t == 0 {
+            return sim.replay_initial_state();
+        }
         let mut last: Option<SimStateOut> = None;
-        for _ in start..t {
-            last = Some(sim.step(None)?);
+        for previous in start..t {
+            let out = sim.step(None)?;
+            if out.tick != previous + 1 {
+                return Err(Refusal {
+                    code: "replay-checkpoint-index",
+                    message: "checkpoint's actual tick disagrees with the envelope index".into(),
+                    ranked_repairs: vec![
+                        "retain checkpoint ticks with their original state bytes".into(),
+                    ],
+                });
+            }
+            last = Some(out);
         }
         last.ok_or_else(|| Refusal {
             code: "replay-scrub-out-of-range",

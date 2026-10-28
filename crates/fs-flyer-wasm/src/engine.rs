@@ -22,7 +22,8 @@ use crate::{Refusal, json_escape, refusal_envelope};
 use fs_flyer::assist::ASSIST_V1;
 use fs_flyer::simloop::CATAPULT_1904_V1;
 use fs_flyer::simloop::{
-    ControlInput, Phase, PilotMode, ScenarioSpec, SimLoop, SimStateOut, TerminalEvent,
+    ControlInput, Phase, PilotMode, ScenarioSpec, SimLoop, SimStateOut, SpatialWindSpec,
+    TerminalEvent,
 };
 
 /// Pilot-mode words at the ABI (frozen v1).
@@ -185,6 +186,101 @@ impl EngineSlot {
         assist: bool,
         catapult: bool,
     ) -> String {
+        self.init_configured(
+            seed,
+            rho_kg_m3,
+            headwind_mps,
+            mode,
+            member,
+            rail_length_m,
+            max_ticks,
+            assist,
+            catapult,
+            None,
+        )
+    }
+
+    /// Initialize explicit evolving spatial wind. `distributed` selects
+    /// local wing/canard-strip and separate disk-center sampling; false
+    /// selects CG sampling. The log-law reference speed is `headwind_mps`.
+    /// Every spectral/mean/time parameter is supplied by the caller; the
+    /// correlation-time count sets the number of modes. Native admissions
+    /// and checkpoint versions pass through without a legacy-wind fallback.
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+    pub fn init_with_spatial_wind(
+        &mut self,
+        seed: u64,
+        rho_kg_m3: f64,
+        headwind_mps: f64,
+        mode: u32,
+        member: u32,
+        rail_length_m: f64,
+        max_ticks: u64,
+        assist: bool,
+        catapult: bool,
+        distributed: bool,
+        z0_m: f64,
+        displacement_m: f64,
+        reference_height_m: f64,
+        sigma_mps: f64,
+        length_m: f64,
+        advection_mps: f64,
+        correlation_times_s: &[f64],
+    ) -> String {
+        self.sim = None;
+        if !(1..=fs_atmo::MAX_MODES).contains(&correlation_times_s.len()) {
+            return refusal_envelope(&Refusal {
+                code: "mode-count-invalid",
+                message: format!(
+                    "{} modes outside [1, {}]",
+                    correlation_times_s.len(),
+                    fs_atmo::MAX_MODES
+                ),
+                ranked_repairs: vec![
+                    "supply one correlation time per mode within the admitted mode cap".into(),
+                ],
+            });
+        }
+        let wind = SpatialWindSpec {
+            mean: fs_atmo::FlatSiteLogLaw {
+                scenario_effective_z0_m: z0_m,
+                displacement_height_m: displacement_m,
+                reference_height_m,
+                reference_speed_mps: headwind_mps,
+            },
+            sigma_mps,
+            length_m,
+            advection_mps,
+            correlation_times_s: correlation_times_s.to_vec(),
+        };
+        self.init_configured(
+            seed,
+            rho_kg_m3,
+            headwind_mps,
+            mode,
+            member,
+            rail_length_m,
+            max_ticks,
+            assist,
+            catapult,
+            Some((wind, distributed)),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+    fn init_configured(
+        &mut self,
+        seed: u64,
+        rho_kg_m3: f64,
+        headwind_mps: f64,
+        mode: u32,
+        member: u32,
+        rail_length_m: f64,
+        max_ticks: u64,
+        assist: bool,
+        catapult: bool,
+        wind: Option<(SpatialWindSpec, bool)>,
+    ) -> String {
         // A failed replacement must never leave the previous lifecycle
         // checkpointable. Clear before validating the new request so every
         // init attempt is a hard generation boundary, not only successful
@@ -219,7 +315,12 @@ impl EngineSlot {
             rail_length_m,
             max_ticks,
         };
-        match SimLoop::init(spec) {
+        let initialized = match wind {
+            None => SimLoop::init(spec),
+            Some((wind, false)) => SimLoop::init_with_spatial_wind(spec, wind),
+            Some((wind, true)) => SimLoop::init_with_distributed_spatial_wind(spec, wind),
+        };
+        match initialized {
             Ok(sim) => {
                 let out = format!(
                     "{{\"ok\":{{\"run_intent_id\":\"{}\",\"tick0_digest\":\"{}\",\"trim_v_mps\":{},\"trim_alpha_rad\":{},\"trim_dc_rad\":{},\"trim_omega_rad_s\":{}}}}}",

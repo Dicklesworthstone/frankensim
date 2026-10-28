@@ -135,6 +135,21 @@ parasite/classical induced-drag estimates and reduced longitudinal motion.
 It does not supply chordwise gust memory, crossflow dynamics, disk harmonics,
 or a validation of historical turbulent flight.
 
+### Recording and scrubbing the selected wind model
+
+`replayenv::{record_replay_with_spatial_wind,
+record_replay_with_distributed_spatial_wind}` retain the exact V3/V4 tick-zero
+checkpoint in the existing envelope layout. Legacy `record_replay` keeps its
+checkpoint sequence and serialized bytes. `scrub_to_tick(0)` reads the actual
+initial state without advancing either physics or the wind; positive ticks
+resume the nearest strictly earlier checkpoint and reproduce that step's output.
+Both tick-zero digest and run intent must match. Spatial replay requires its
+original initial checkpoint even when a later checkpoint is available. Missing,
+downgraded, duplicate or wrongly indexed initialization refuses instead of
+selecting legacy gusts. The existing deterministic-pilot recording restriction
+remains; this does not add an applied human-input trace. The already emitted
+damage-model-unavailable terminal code also round-trips through the parser.
+
 ## Error model
 
 Typed `Refusal { code, message, ranked_repairs }`. Codes:

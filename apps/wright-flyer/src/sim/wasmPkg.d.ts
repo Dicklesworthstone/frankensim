@@ -19,6 +19,25 @@ declare module "*/wasm-pkg/fs_flyer_wasm.js" {
     lever_force_n: number,
     warp_cmd_rad: number,
   ): string;
+  export function flyer_engine_init_spatial_wind(
+    seed: bigint,
+    rho_kg_m3: number,
+    headwind_mps: number,
+    mode: number,
+    member: number,
+    rail_length_m: number,
+    max_ticks: bigint,
+    assist: boolean,
+    catapult: boolean,
+    distributed: boolean,
+    z0_m: number,
+    displacement_m: number,
+    reference_height_m: number,
+    sigma_mps: number,
+    length_m: number,
+    advection_mps: number,
+    correlation_times_s: Float64Array,
+  ): string;
   export function flyer_engine_digest(): string;
   export function flyer_engine_checkpoint(): string;
 }

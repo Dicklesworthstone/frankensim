@@ -22,7 +22,54 @@ import {
   PHASE_CODES,
   type PhaseWord,
   type RefusalEnvelope,
+  type ScenarioInit,
+  spatialWindError,
 } from "./protocol.ts";
+
+/** The initialization ABI, with an explicit capability check for old bundles. */
+export interface EngineInitializationApi {
+  flyer_engine_init(
+    seed: bigint, rho: number, headwind: number, mode: number, member: number,
+    railM: number, maxTicks: bigint, assist: boolean, catapult: boolean,
+  ): string;
+  flyer_engine_init_spatial_wind?(
+    seed: bigint, rho: number, headwind: number, mode: number, member: number,
+    railM: number, maxTicks: bigint, assist: boolean, catapult: boolean,
+    distributed: boolean, roughnessM: number, displacementM: number,
+    referenceHeightM: number, sigmaMps: number, lengthM: number,
+    advectionMps: number, correlationTimesS: Float64Array,
+  ): string;
+}
+
+/** Route the real force model explicitly; an old bundle cannot downgrade wind. */
+export function initializeScenario(engine: EngineInitializationApi, scenario: ScenarioInit): string {
+  const args = [
+    scenario.seed, scenario.rhoKgM3, scenario.headwindMps, scenario.mode,
+    scenario.member, scenario.railLengthM, scenario.maxTicks, scenario.assist,
+    scenario.catapult,
+  ] as const;
+  const wind = scenario.spatialWind;
+  if (wind === undefined) return engine.flyer_engine_init(...args);
+  const error = spatialWindError(wind);
+  if (error !== null) {
+    return JSON.stringify({ refusal: {
+      code: "spatial-wind-invalid", message: error,
+      ranked_repairs: ["supply the complete admitted spatial wind configuration"],
+    } });
+  }
+  if (typeof engine.flyer_engine_init_spatial_wind !== "function") {
+    return JSON.stringify({ refusal: {
+      code: "spatial-wind-unavailable",
+      message: "the loaded engine does not implement the requested spatial wind mode",
+      ranked_repairs: ["rebuild the wasm package with spatial wind support"],
+    } });
+  }
+  return engine.flyer_engine_init_spatial_wind(
+    ...args, wind.sampling === "distributed", wind.roughnessLengthM,
+    wind.displacementHeightM, wind.referenceHeightM, wind.sigmaMps,
+    wind.lengthM, wind.advectionMps, Float64Array.from(wind.correlationTimesS),
+  );
+}
 
 export interface EngineInitOk {
   readonly kind: "ok";
@@ -267,7 +314,7 @@ export function parseCheckpointEnvelope(
   const hex = ok?.checkpoint_hex;
   if (
     typeof runIntentId !== "string" ||
-    !/^[0-9a-f]{32}$/.test(runIntentId) ||
+    !/^[0-9a-f]{64}$/.test(runIntentId) ||
     typeof hex !== "string" ||
     hex.length === 0 ||
     hex.length % 2 !== 0 ||

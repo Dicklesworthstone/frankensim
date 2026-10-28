@@ -998,6 +998,29 @@ impl SimLoop {
         Ok(out)
     }
 
+    /// Read the real tick-zero state without advancing either wind or physics.
+    /// No per-tick assist contribution exists before the first accepted step.
+    pub(crate) fn replay_initial_state(&self) -> Result<SimStateOut, Refusal> {
+        if self.tick != 0 || self.phase != Phase::OnRail {
+            return Err(Refusal {
+                code: "replay-initial-state-invalid",
+                message: "the initial replay checkpoint is not the tick-zero rail state".into(),
+                ranked_repairs: vec!["retain the original initialization checkpoint".into()],
+            });
+        }
+        let gust_w = match &self.spatial_wind {
+            Some(wind) => wind.sample([self.x_m, 0.0, self.h_m])?.u[2],
+            None => self
+                .ou
+                .amplitudes()
+                .iter()
+                .enumerate()
+                .map(|(i, a)| a * 0.12 / (1.0 + i as f64))
+                .sum(),
+        };
+        Ok(self.state_out(gust_w, false, 0.0))
+    }
+
     fn state_out(&self, gust_w: f64, assist_active: bool, assist_dc_rad: f64) -> SimStateOut {
         SimStateOut {
             tick: self.tick,

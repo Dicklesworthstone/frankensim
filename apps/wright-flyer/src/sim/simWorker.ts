@@ -12,7 +12,9 @@
 import { TickScheduler } from "../transport/schedule.ts";
 import { SeqlockWriter } from "../transport/seqlock.ts";
 import {
+  type EngineInitializationApi,
   fillPayload,
+  initializeScenario,
   parseCheckpointEnvelope,
   parseDigestEnvelope,
   parseInitEnvelope,
@@ -30,18 +32,7 @@ import {
 
 const TICK_MS = 1000 / 120;
 
-interface WasmEngine {
-  flyer_engine_init(
-    seed: bigint,
-    rho: number,
-    headwind: number,
-    mode: number,
-    member: number,
-    railM: number,
-    maxTicks: bigint,
-    assist: boolean,
-    catapult: boolean,
-  ): string;
+interface WasmEngine extends EngineInitializationApi {
   flyer_engine_step(hasInput: boolean, leverN: number, warpRad: number): string;
   flyer_engine_digest(): string;
   flyer_engine_checkpoint(): string;
@@ -187,17 +178,7 @@ async function handleInit(msg: Extract<MainToWorker, { kind: "init" }>): Promise
   mode = msg.scenario.mode;
   ended = false;
   hold = new ControlHold();
-  const initJson = engine.flyer_engine_init(
-    msg.scenario.seed,
-    msg.scenario.rhoKgM3,
-    msg.scenario.headwindMps,
-    msg.scenario.mode,
-    msg.scenario.member,
-    msg.scenario.railLengthM,
-    msg.scenario.maxTicks,
-    msg.scenario.assist,
-    msg.scenario.catapult,
-  );
+  const initJson = initializeScenario(engine, msg.scenario);
   const init = parseInitEnvelope(initJson);
   if (init.kind === "refusal") {
     postInitRefusal(msg.initGeneration, init.refusal);

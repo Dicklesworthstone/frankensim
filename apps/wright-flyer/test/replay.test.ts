@@ -16,7 +16,9 @@ import {
   parseInitEnvelope,
   parseStepEnvelope,
 } from "../src/sim/engineFacade.ts";
-import { dec17Scenario, MODE_FIXED, PAYLOAD_F64S, PAYLOAD_F64S_V1 } from "../src/sim/protocol.ts";
+import {
+  dec17Scenario, MODE_FIXED, PAYLOAD_F64S, PAYLOAD_F64S_V1, type SpatialWindInit,
+} from "../src/sim/protocol.ts";
 import {
   FlightRecorder,
   type FlightRecording,
@@ -24,6 +26,7 @@ import {
   parseRecording,
   RECORDING_SCHEMA,
   RECORDING_SCHEMA_V1,
+  RECORDING_SCHEMA_SPATIAL,
   recordedToScenario,
   replayVerdict,
   scenarioToRecorded,
@@ -73,6 +76,60 @@ test("scenario round-trips through the recorded form (bigints exact)", () => {
   const s = dec17Scenario(18446744073709551615n, MODE_FIXED); // u64::MAX seed
   const round = recordedToScenario(scenarioToRecorded(s));
   assert.deepEqual(round, s);
+});
+
+test("spatial recording preserves mode and every field parameter without aliasing", () => {
+  const times = [0.2, 0.5, 1.2];
+  const wind: SpatialWindInit = {
+    sampling: "distributed", roughnessLengthM: 0.001, displacementHeightM: 0.02,
+    referenceHeightM: 2, sigmaMps: 0.3, lengthM: 15, advectionMps: 11,
+    correlationTimesS: times,
+  };
+  for (const sampling of ["cg", "distributed"] as const) {
+    const scenario = { ...dec17Scenario(1903n, MODE_FIXED), spatialWind: { ...wind, sampling } };
+    const recorded = scenarioToRecorded(scenario);
+    const parsed = parseRecording(JSON.stringify({
+      ...sealedFixture(), schema: RECORDING_SCHEMA_SPATIAL, scenario: recorded,
+    }));
+    assert.ok(!("error" in parsed), JSON.stringify(parsed));
+    if ("error" in parsed) throw new Error(parsed.error);
+    const restored = recordedToScenario(parsed.scenario);
+    assert.deepEqual(restored, scenario);
+    assert.notEqual(recorded.spatialWind?.correlationTimesS, times);
+    assert.notEqual(restored.spatialWind?.correlationTimesS, parsed.scenario.spatialWind?.correlationTimesS);
+  }
+  const recorded = scenarioToRecorded({ ...dec17Scenario(1n, MODE_FIXED), spatialWind: wind });
+  times[0] = 99;
+  assert.equal(recorded.spatialWind?.correlationTimesS[0], 0.2, "sealed parameters cannot follow caller mutation");
+  assert.ok(!("spatialWind" in scenarioToRecorded(dec17Scenario(1n, MODE_FIXED))), "legacy shape stays unchanged");
+  const recorder = new FlightRecorder();
+  recorder.append(1, payloadAt(1));
+  const sealed = recorder.seal({
+    ...sealedFixture(), scenario: { ...dec17Scenario(1n, MODE_FIXED), spatialWind: wind },
+  });
+  assert.equal(sealed.schema, RECORDING_SCHEMA_SPATIAL, "older readers must refuse before dropping the wind mode");
+  assert.ok("error" in parseRecording(JSON.stringify({ ...sealed, schema: RECORDING_SCHEMA })));
+  assert.ok("error" in parseRecording(JSON.stringify({ ...sealed, scenario: sealedFixture().scenario })));
+});
+
+test("spatial recording refuses missing, invalid or excessive field parameters", () => {
+  const wind: SpatialWindInit = {
+    sampling: "distributed", roughnessLengthM: 0.001, displacementHeightM: 0,
+    referenceHeightM: 2, sigmaMps: 0.3, lengthM: 15, advectionMps: 11,
+    correlationTimesS: [0.2, 0.5],
+  };
+  const parse = (spatialWind: unknown) => parseRecording(JSON.stringify({
+    ...sealedFixture(), schema: RECORDING_SCHEMA_SPATIAL,
+    scenario: { ...sealedFixture().scenario, spatialWind },
+  }));
+  for (const invalid of [
+    null, {}, { ...wind, sampling: "legacy" }, { ...wind, roughnessLengthM: 0 },
+    { ...wind, referenceHeightM: 0 }, { ...wind, sigmaMps: -1 },
+    { ...wind, lengthM: 0 }, { ...wind, advectionMps: Number.NaN },
+    { ...wind, correlationTimesS: [] }, { ...wind, correlationTimesS: [0] },
+    { ...wind, correlationTimesS: ["0.2"] }, { ...wind, correlationTimesS: Array(257).fill(1) },
+  ]) assert.ok("error" in parse(invalid), JSON.stringify(invalid));
+  assert.ok(!("error" in parse({ ...wind, correlationTimesS: Array(256).fill(1) })));
 });
 
 test("parse: fail-closed hostile twins", () => {

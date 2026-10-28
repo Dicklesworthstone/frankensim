@@ -519,6 +519,57 @@ mod js {
         })
     }
 
+    /// Initialize explicit evolving wind: false selects CG sampling, true
+    /// selects wing/canard strips and separate propeller disk centers.
+    /// All mean/spectral/time parameters are required. Correlation times
+    /// arrive as a JS Float64Array, one positive time in seconds per mode.
+    /// The existing headwind is the mean speed at `reference_height_m`.
+    /// Refusals invalidate the prior run; no legacy fallback is attempted.
+    #[wasm_bindgen]
+    #[must_use]
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+    pub fn flyer_engine_init_spatial_wind(
+        seed: u64,
+        rho_kg_m3: f64,
+        headwind_mps: f64,
+        mode: u32,
+        member: u32,
+        rail_length_m: f64,
+        max_ticks: u64,
+        assist: bool,
+        catapult: bool,
+        distributed: bool,
+        z0_m: f64,
+        displacement_m: f64,
+        reference_height_m: f64,
+        sigma_mps: f64,
+        length_m: f64,
+        advection_mps: f64,
+        correlation_times_s: &[f64],
+    ) -> String {
+        ENGINE.with(|e| {
+            e.borrow_mut().init_with_spatial_wind(
+                seed,
+                rho_kg_m3,
+                headwind_mps,
+                mode,
+                member,
+                rail_length_m,
+                max_ticks,
+                assist,
+                catapult,
+                distributed,
+                z0_m,
+                displacement_m,
+                reference_height_m,
+                sigma_mps,
+                length_m,
+                advection_mps,
+                correlation_times_s,
+            )
+        })
+    }
+
     /// One 120 Hz engine step. `has_input` gates whether (lever, warp)
     /// is a ControlInput (Human mode requires it every tick).
     #[wasm_bindgen]

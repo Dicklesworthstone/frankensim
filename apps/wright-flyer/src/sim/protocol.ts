@@ -61,6 +61,59 @@ export const MODE_FIXED = 0;
 export const MODE_HISTORICAL = 1;
 export const MODE_HUMAN = 2;
 
+/** Explicit synthetic atmosphere for the actual force/propeller solver.
+ * The scenario headwind supplies the log-law reference speed. Visualization
+ * fields remain separate; this configuration controls physics and replay. */
+export interface SpatialWindInit {
+  readonly sampling: "cg" | "distributed";
+  readonly roughnessLengthM: number;
+  readonly displacementHeightM: number;
+  readonly referenceHeightM: number;
+  /** Spatial strength parameter, not a certified RMS gust speed. */
+  readonly sigmaMps: number;
+  readonly lengthM: number;
+  readonly advectionMps: number;
+  /** One positive finite time per spatial mode (1..=256). */
+  readonly correlationTimesS: readonly number[];
+}
+
+/** Validate serialized/worker input before allocating a WASM mode buffer.
+ * Native atmosphere admission remains the authority for the actual solve. */
+export function spatialWindError(value: unknown): string | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return "spatialWind must be an explicit parameter object";
+  }
+  const wind = value as Record<string, unknown>;
+  if (wind.sampling !== "cg" && wind.sampling !== "distributed") {
+    return "spatialWind sampling must be cg or distributed";
+  }
+  for (const key of [
+    "roughnessLengthM", "displacementHeightM", "referenceHeightM",
+    "sigmaMps", "lengthM", "advectionMps",
+  ]) {
+    if (typeof wind[key] !== "number" || !Number.isFinite(wind[key])) {
+      return `spatialWind ${key} must be finite`;
+    }
+  }
+  const w = value as SpatialWindInit;
+  if (w.roughnessLengthM < 1e-5 || w.roughnessLengthM > 1) {
+    return "spatialWind roughnessLengthM must lie in [0.00001, 1]";
+  }
+  if (w.displacementHeightM < 0 || w.displacementHeightM > 1 ||
+      w.referenceHeightM <= w.displacementHeightM + w.roughnessLengthM) {
+    return "spatialWind reference height must exceed displacement plus roughness";
+  }
+  if (w.sigmaMps < 0 || w.lengthM <= 0) {
+    return "spatialWind requires nonnegative strength and positive length";
+  }
+  if (!Array.isArray(w.correlationTimesS) || w.correlationTimesS.length === 0 ||
+      w.correlationTimesS.length > 256 ||
+      w.correlationTimesS.some((time) => typeof time !== "number" || !Number.isFinite(time) || time <= 0)) {
+    return "spatialWind requires 1..256 positive finite correlation times";
+  }
+  return null;
+}
+
 export interface ScenarioInit {
   readonly seed: bigint;
   readonly rhoKgM3: number;
@@ -73,6 +126,8 @@ export interface ScenarioInit {
   readonly assist: boolean;
   /** E5.4: registered 1904 catapult tow (CATAPULT_1904_V1). */
   readonly catapult: boolean;
+  /** Omitted selects the unchanged legacy scalar-OU flight model. */
+  readonly spatialWind?: SpatialWindInit;
 }
 
 /** The Dec-17 reference scenario (mirror of dec17_scenario). */

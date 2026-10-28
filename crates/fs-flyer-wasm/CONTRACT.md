@@ -106,6 +106,50 @@ Terminal events arrive IN-BAND as `phase` words (`ended:ground-contact`,
 `ended:envelope-exceeded` with `envelope_refusal_code` carried in the
 same envelope — the UI gets a receipted flight ending, never a trap.
 
+### Explicit spatial wind in browser physics and recordings
+
+`EngineSlot::init_with_spatial_wind` and
+`flyer_engine_init_spatial_wind` take the existing scenario inputs, an explicit
+CG/distributed flag, roughness/displacement/reference heights, spatial strength,
+length scale, phase-advection speed and one correlation time per spatial mode.
+The scenario headwind is the log-law speed at the supplied reference height.
+The borrowed mode count is admitted before copying the array. Failed admission
+invalidates the previous slot and returns the native refusal; it never selects
+legacy wind. CG sampling produces V3 checkpoints; distributed strip/disk
+sampling produces V4. Existing initialization retains its previous behavior.
+
+The browser worker selects this entry when `ScenarioInit.spatialWind` is
+present. An older WASM bundle without the entry refuses the request. The
+recording stores every declared wind parameter and sampling choice, with copied
+correlation times. Spatial recordings use `flight-recording.v3`, which older
+readers reject before dropping the wind model; legacy v1/v2 payloads retain
+their existing meanings and frame strides. Missing or invalid v3 wind data
+refuses. The scene's atmospheric visualization remains a separate field model.
+
+For example, an explicitly exploratory distributed scenario can use:
+
+```ts
+const scenario = {
+  ...dec17Scenario(1903n, MODE_FIXED),
+  spatialWind: {
+    sampling: "distributed" as const,
+    roughnessLengthM: 0.003,
+    displacementHeightM: 0,
+    referenceHeightM: 2.4,
+    sigmaMps: 0.3,
+    lengthM: 20,
+    advectionMps: 11,
+    correlationTimesS: Array(8).fill(1.8),
+  },
+};
+```
+
+These are supplied synthetic-field parameters, not calibrated historical
+weather or a new default. Native boundary tests compare both selected modes
+against independently initialized `SimLoop` states, digests and complete live
+checkpoints. Browser adapter/recording tests cover parameter routing, mode
+preservation and refusal without fallback.
+
 ## No-claim boundaries
 
 - The hello kernel is a torque-free rigid body. It makes **no aerodynamic,

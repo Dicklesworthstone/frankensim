@@ -6,11 +6,15 @@
 // (The full scrubber/ABComparisonReceiptV1 machinery is E6.1; this is
 // the milestone ghost slice.)
 
-import { PAYLOAD_F64S, PAYLOAD_F64S_V1, type ScenarioInit } from "./protocol.ts";
+import {
+  PAYLOAD_F64S, PAYLOAD_F64S_V1, type ScenarioInit, type SpatialWindInit, spatialWindError,
+} from "./protocol.ts";
 import { decodeSnapshot, type SimSnapshot } from "./snapshotView.ts";
 
 export const RECORDING_SCHEMA_V1 = "org.frankensim.wf.flight-recording.v1";
 export const RECORDING_SCHEMA = "org.frankensim.wf.flight-recording.v2";
+/** Spatial recordings require a reader that preserves their force model. */
+export const RECORDING_SCHEMA_SPATIAL = "org.frankensim.wf.flight-recording.v3";
 
 /** Scenario identity fields (bigints carried as decimal strings). */
 export interface RecordedScenario {
@@ -23,10 +27,11 @@ export interface RecordedScenario {
   readonly maxTicks: string;
   readonly assist: boolean;
   readonly catapult: boolean;
+  readonly spatialWind?: SpatialWindInit;
 }
 
 export interface FlightRecording {
-  readonly schema: typeof RECORDING_SCHEMA | typeof RECORDING_SCHEMA_V1;
+  readonly schema: typeof RECORDING_SCHEMA | typeof RECORDING_SCHEMA_V1 | typeof RECORDING_SCHEMA_SPATIAL;
   readonly scenario: RecordedScenario;
   readonly runIntentId: string;
   readonly tick0Digest: string;
@@ -58,6 +63,9 @@ export function scenarioToRecorded(s: ScenarioInit): RecordedScenario {
     maxTicks: s.maxTicks.toString(),
     assist: s.assist,
     catapult: s.catapult,
+    ...(s.spatialWind === undefined ? {} : {
+      spatialWind: { ...s.spatialWind, correlationTimesS: [...s.spatialWind.correlationTimesS] },
+    }),
   };
 }
 
@@ -72,6 +80,9 @@ export function recordedToScenario(r: RecordedScenario): ScenarioInit {
     maxTicks: BigInt(r.maxTicks),
     assist: r.assist,
     catapult: r.catapult,
+    ...(r.spatialWind === undefined ? {} : {
+      spatialWind: { ...r.spatialWind, correlationTimesS: [...r.spatialWind.correlationTimesS] },
+    }),
   };
 }
 
@@ -109,7 +120,7 @@ export class FlightRecorder {
       throw new RangeError("empty recording cannot be sealed");
     }
     return {
-      schema: RECORDING_SCHEMA,
+      schema: meta.scenario.spatialWind === undefined ? RECORDING_SCHEMA : RECORDING_SCHEMA_SPATIAL,
       scenario: scenarioToRecorded(meta.scenario),
       runIntentId: meta.runIntentId,
       tick0Digest: meta.tick0Digest,
@@ -152,8 +163,19 @@ export function parseRecording(json: string): FlightRecording | { readonly error
     return { error: "not an object" };
   }
   const r = value as Record<string, unknown>;
-  if (r.schema !== RECORDING_SCHEMA && r.schema !== RECORDING_SCHEMA_V1) {
+  if (r.schema !== RECORDING_SCHEMA && r.schema !== RECORDING_SCHEMA_V1 && r.schema !== RECORDING_SCHEMA_SPATIAL) {
     return { error: `unsupported schema ${String(r.schema)}` };
+  }
+  if (typeof r.scenario !== "object" || r.scenario === null || Array.isArray(r.scenario)) {
+    return { error: "scenario missing or malformed" };
+  }
+  const scenario = r.scenario as Record<string, unknown>;
+  if ((r.schema === RECORDING_SCHEMA_SPATIAL) !== (scenario.spatialWind !== undefined)) {
+    return { error: "spatial recordings require the v3 schema and their complete wind configuration" };
+  }
+  if (scenario.spatialWind !== undefined) {
+    const error = spatialWindError(scenario.spatialWind);
+    if (error !== null) return { error };
   }
   if (
     typeof r.runIntentId !== "string" ||
