@@ -22,11 +22,11 @@ pub struct FrictionHeatEntropy {
     /// Actual ambient/support reservoir heat divided by its own temperature.
     pub reservoir_entropy_input_j_k: f64,
     /// Original network links and ambient/support contacts. The direct friction
-    /// link is suppressed, so its heat cannot be counted here a second time.
+    /// links are suppressed, so their heat cannot be counted here a second time.
     pub network_conduction_generation_j_k: f64,
     /// Sum Q_i*(1/T_i - 1/T_interface), using signed heat into each body.
     pub interface_conduction_generation_j_k: f64,
-    /// Exported physical friction loss divided by the solved interface Kelvin.
+    /// Sum of each physical friction loss divided by its own interface Kelvin.
     /// Stored mechanical energy and numerical damping are not thermalized here.
     pub friction_generation_j_k: f64,
     /// OTHER authored/callback source energy divided by receiving cell Kelvin.
@@ -36,7 +36,8 @@ pub struct FrictionHeatEntropy {
     pub has_unclassified_sources: bool,
     /// Remaining signed temporal/algebraic/roundoff defect, never physical heat.
     pub temporal_defect_j_k: f64,
-    /// (Sum Q_i - D)/T_interface; independently visible until energy acceptance.
+    /// Sum of (Sum Q_i - D)/T_interface over the distinct physical interfaces;
+    /// independently visible until energy acceptance.
     pub interface_residual_entropy_j_k: f64,
 }
 #[derive(Clone, Copy, Default)]
@@ -118,9 +119,34 @@ impl FrictionHeatEntropy {
         interface_temperature_k: f64,
         interface_residual_j: f64,
     ) -> Result<Self, DepositionError> {
-        let friction = finite(dissipated_j / interface_temperature_k)?;
+        Self::from_interfaces(
+            thermal,
+            interface,
+            [(dissipated_j, interface_temperature_k, interface_residual_j)],
+            || Ok(()),
+        )
+    }
+
+    pub(super) fn from_interfaces(
+        thermal: &EntropyAudit,
+        interface: InterfaceEntropy,
+        interfaces: impl IntoIterator<Item = (f64, f64, f64)>,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, DepositionError> {
+        let mut friction = Sum::default();
+        let mut residual = Sum::default();
+        for (index, (dissipated_j, temperature_k, residual_j)) in
+            interfaces.into_iter().enumerate()
+        {
+            if index % 256 == 0 {
+                checkpoint()?;
+            }
+            friction.add(finite(dissipated_j / temperature_k)?)?;
+            residual.add(finite(residual_j / temperature_k)?)?;
+        }
+        let friction = friction.total()?;
         let conduction = interface.conduction.total()?;
-        let interface_residual = finite(interface_residual_j / interface_temperature_k)?;
+        let interface_residual = residual.total()?;
         let mut defect = Sum::default();
         for value in [
             thermal.thermal_storage_change_j_k,

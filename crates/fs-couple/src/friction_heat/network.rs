@@ -5,7 +5,7 @@
 //! several contacts share a finite cell. No intermediate thermal state is
 //! accepted, no capacitance is added and no heat share is prescribed.
 
-use super::{FrictionHeatRoute, FrictionHeatTolerances, finite, invalid};
+use super::{FrictionHeatEntropy, FrictionHeatRoute, FrictionHeatTolerances, entropy, finite, invalid};
 use fs_thermal::enthalpy::backward_euler::{
     BackwardEulerStep, BackwardEulerTrial, StepCoefficients,
 };
@@ -47,6 +47,9 @@ pub struct FrictionHeatNetworkReport {
     pub external_heat_j: f64,
     pub thermal: EnergyAudit,
     pub total_energy_residual_j: f64,
+    /// Optional aggregate physical/source/numerical entropy from the same trial.
+    /// Each contact retains its own solved interface temperature.
+    pub entropy: Option<FrictionHeatEntropy>,
 }
 
 /// N original cell energy increments and M distinct common temperatures.
@@ -107,6 +110,41 @@ impl<'s, 'm> FrictionHeatNetworkStep<'s, 'm> {
         ) -> Result<FrictionHeatNetworkInput<P>, E>,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<FrictionHeatNetworkTrial<'m, P>, E> {
+        self.evaluate_entropy_option(energy_increments_j, interface_temperatures_k,
+            resolve, false, checkpoint)
+    }
+
+    /// Audit this same candidate with exact caloric entropy, without another solve.
+    /// Every interface contributes D_i/T_i and its signed heat transfer at the
+    /// actual receiving-body temperature. Shared cells store entropy once; all
+    /// replaced original contact links stay suppressed. Other sources remain
+    /// unclassified. Every active material must provide its entropy integral.
+    /// Prefer this on the final candidate, outside root iterations.
+    pub fn evaluate_with_entropy<P, E: From<DepositionError>>(
+        &self,
+        energy_increments_j: &[f64],
+        interface_temperatures_k: &[f64],
+        resolve: impl FnOnce(
+            &DepositionSimulation<'m>,
+            &[f64],
+        ) -> Result<FrictionHeatNetworkInput<P>, E>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<FrictionHeatNetworkTrial<'m, P>, E> {
+        self.evaluate_entropy_option(energy_increments_j, interface_temperatures_k,
+            resolve, true, checkpoint)
+    }
+
+    fn evaluate_entropy_option<P, E: From<DepositionError>>(
+        &self,
+        energy_increments_j: &[f64],
+        interface_temperatures_k: &[f64],
+        resolve: impl FnOnce(
+            &DepositionSimulation<'m>,
+            &[f64],
+        ) -> Result<FrictionHeatNetworkInput<P>, E>,
+        with_entropy: bool,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<FrictionHeatNetworkTrial<'m, P>, E> {
         if interface_temperatures_k.len() != self.routes.len()
             || interface_temperatures_k
                 .iter()
@@ -117,9 +155,8 @@ impl<'s, 'm> FrictionHeatNetworkStep<'s, 'm> {
         let checkpoint = RefCell::new(checkpoint);
         let check = || (*checkpoint.borrow_mut())();
         let dt = self.duration_s();
-        let trial = self.thermal.evaluate(
-            energy_increments_j,
-            |state| -> Result<StepCoefficients<Payload<P>>, E> {
+        let coefficients =
+            |state: &DepositionSimulation<'m>| -> Result<StepCoefficients<Payload<P>>, E> {
                 let FrictionHeatNetworkInput {
                     interfaces,
                     transport,
@@ -143,6 +180,13 @@ impl<'s, 'm> FrictionHeatNetworkStep<'s, 'm> {
                 let external_heat_j = finite(
                     dt * state.external_step_power_w(&sources_w, &conductances_w_k, &check)?,
                 )?;
+                // Classify other sources before any interface injects heat,
+                // including contacts sharing the same finite cell.
+                let mut interface_entropy = if with_entropy {
+                    Some(entropy::InterfaceEntropy::new(state, &sources_w, dt, &check)?)
+                } else {
+                    None
+                };
                 let mut reports = Vec::with_capacity(self.routes.len());
                 let mut dissipated_j = 0.0;
                 for (i, route) in self.routes.iter().enumerate() {
@@ -157,13 +201,18 @@ impl<'s, 'm> FrictionHeatNetworkStep<'s, 'm> {
                     let conductances = route.conductances(input.conductivity_w_m_k)?;
                     let mut body_heat_j = [0.0; 2];
                     for (side, id) in route.cells().into_iter().enumerate() {
+                        let body_temperature_k = state.temperature_k(id)?;
                         let power = finite(
                             conductances[side]
-                                * (interface_temperatures_k[i] - state.temperature_k(id)?),
+                                * (interface_temperatures_k[i] - body_temperature_k),
                         )?;
                         body_heat_j[side] = finite(dt * power)?;
                         if power != 0.0 && body_heat_j[side] == 0.0 {
                             return Err(DepositionError::Arithmetic.into());
+                        }
+                        if let Some(entropy) = &mut interface_entropy {
+                            entropy.add_transfer(body_heat_j[side], body_temperature_k,
+                                interface_temperatures_k[i])?;
                         }
                         let source = sources_w.entry(id).or_insert(0.0);
                         *source = finite(*source + power)?;
@@ -189,12 +238,25 @@ impl<'s, 'm> FrictionHeatNetworkStep<'s, 'm> {
                         reports,
                         dissipated_j,
                         external_heat_j,
+                        interface_entropy,
                     },
                 })
-            },
-            &check,
-        )?;
+            };
+        let trial = if with_entropy {
+            self.thermal.evaluate_with_entropy(energy_increments_j, coefficients, &check)?
+        } else {
+            self.thermal.evaluate(energy_increments_j, coefficients, &check)?
+        };
         let payload = trial.payload();
+        let entropy = payload.interface_entropy.map(|interface| {
+            let thermal = trial.entropy_audit().ok_or(DepositionError::Arithmetic)?;
+            FrictionHeatEntropy::from_interfaces(thermal, interface,
+                payload.reports.iter().map(|report| (
+                    report.dissipated_j,
+                    report.interface_temperature_k,
+                    report.interface_residual_j,
+                )), &check)
+        }).transpose()?;
         let report = FrictionHeatNetworkReport {
             interfaces: payload.reports.clone(),
             dissipated_j: payload.dissipated_j,
@@ -205,6 +267,7 @@ impl<'s, 'm> FrictionHeatNetworkStep<'s, 'm> {
                     - payload.external_heat_j
                     - payload.dissipated_j,
             )?,
+            entropy,
         };
         let mut residual = trial.residual_j().to_vec();
         residual.extend(report.interfaces.iter().map(|r| r.interface_residual_j));
@@ -221,6 +284,7 @@ struct Payload<P> {
     reports: Vec<InterfaceHeatReport>,
     dissipated_j: f64,
     external_heat_j: f64,
+    interface_entropy: Option<entropy::InterfaceEntropy>,
 }
 
 pub struct FrictionHeatNetworkTrial<'m, P> {

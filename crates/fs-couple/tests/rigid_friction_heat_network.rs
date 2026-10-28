@@ -16,6 +16,9 @@ use fs_thermal::enthalpy::*;
 use fs_tribo::partial_slip::*;
 use std::collections::BTreeMap;
 
+#[path = "rigid_friction_heat_network/entropy.rs"]
+mod entropy;
+
 const DT: f64 = 0.01;
 const A: f64 = 0.01;
 const AREA: f64 = core::f64::consts::PI * 0.02 * 0.02;
@@ -37,6 +40,13 @@ impl ThermalLaw for Caloric {
     fn maximum_temperature_slope(&self) -> f64 {
         1.0
     }
+    fn specific_entropy_change_j_kg_k(
+        &self, from: f64, to: f64,
+    ) -> Result<Option<f64>, DepositionError> {
+        let t = self.temperature_k(from)?;
+        self.temperature_k(to)?;
+        Ok(Some(((to - from) / t).ln_1p()))
+    }
 }
 static CALORIC: Caloric = Caloric;
 fn law(i: usize, t: f64) -> PartialSlipLaw {
@@ -56,6 +66,12 @@ fn law(i: usize, t: f64) -> PartialSlipLaw {
     .unwrap()
 }
 fn thermal(temperatures: [f64; 3]) -> DepositionSimulation<'static> {
+    thermal_with_law(temperatures, &CALORIC)
+}
+fn thermal_with_law(
+    temperatures: [f64; 3],
+    law: &'static dyn ThermalLaw,
+) -> DepositionSimulation<'static> {
     let mut events = Vec::new();
     for i in 0..3 {
         events.push(TimedEvent {
@@ -96,7 +112,7 @@ fn thermal(temperatures: [f64; 3]) -> DepositionSimulation<'static> {
     }
     DepositionSimulation::new(
         events,
-        &[(MaterialId(0), &CALORIC as &dyn ThermalLaw)],
+        &[(MaterialId(0), law)],
         DepositionBudget {
             max_cells: 3,
             max_links: 2,
