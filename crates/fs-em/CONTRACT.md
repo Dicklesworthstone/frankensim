@@ -1040,3 +1040,40 @@ cancellation refusals, and force admission. The six original vector regressions
 also pass after the shared extraction. This is fixed-state static reversible
 magnetism; hysteresis, nonlinear induction, thermomagnetic evolution and
 validated engineering force bounds are separate extensions.
+
+
+## Prepared distributed Maxwell force and torque
+
+`spatial::force::eggshell::PreparedSpatialEggshell` caches an original-mesh
+P1 virtual-displacement functional. Nodal weights are one over a complete
+target plateau and zero on every exterior mesh vertex. All changing-weight
+cells and intermediate constant plateaus require one identical original
+induced-linear, current-free exterior material when the functional is applied.
+Source/current-carrying targets cannot hide inside fractional plateaus.
+Preparation binds the actual immutable mesh/positions, not merely matching
+dimensions or topology, and is reusable across accepted excitations.
+
+Translation integrates `-T grad(w)` using original cell B/H and volumes.
+Rotation uses the original P1 interpolant
+`sum_i N_i w_i (omega cross (x_i - origin))`, including its complete gradient
+moment. It is exactly rigid over the target plateau and vanishes outside.
+Both functionals integrate the discrete constant cell fields exactly without
+smoothing interfaces, inferring a stress inside magnetic matter, or requiring
+another field solve. Deterministic compensated reduction returns the canonical
+`fs_ga::Wrench`, transformed through the caller's SE(3) frame and moment origin.
+
+Scalar linear/recoil, scalar reversible nonlinear, current-driven linear/recoil
+vector, and current-driven nonlinear vector owners share this same sealed
+geometry/stress implementation. Original source identity, current-free exterior,
+field provenance, geometry budgets and cancellation gate every application.
+This is instantaneous mechanical load transfer. It does not supply a moving
+domain energy exchange, material striction, a source/control shape adjoint,
+equilibrated stress or a verified physical error bound. Collar-profile and
+mesh refinement remain necessary.
+
+The six added cases in `spatial_maxwell_force/eggshell` check raw cuboid
+force/torque against analytic targets and two collar profiles, independent
+re-solved coenergy translation finite differences, reuse/frame/origin/geometry
+identity, complete closed weights and source/fractional-plateau refusal,
+a saturated enclosed core, and vector/current-collar admission. The original
+surface-force regressions remain in the same target.

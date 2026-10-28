@@ -14,6 +14,10 @@
 //! enclosed body. Exact quadrature of the discrete field does not bound its
 //! physical error: field and surface refinement remain necessary. This is not
 //! a virtual-work comparison, an equilibrated stress, or a Verified force bound.
+//! The `eggshell` child adds a prepared distributed virtual-displacement
+//! functional with independent coenergy and force/torque accuracy tests.
+
+pub mod eggshell;
 
 use super::{
     Face, SpatialMagneticError, SpatialMagneticField, SpatialMagneticMaterial, cross, dot, finite,

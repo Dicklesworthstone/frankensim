@@ -727,3 +727,6 @@ fn saturated_core_uses_linear_exterior_traction_and_refuses_its_material_interfa
         ))
     ));
 }
+
+#[path = "spatial_maxwell_force/eggshell.rs"]
+mod eggshell;
