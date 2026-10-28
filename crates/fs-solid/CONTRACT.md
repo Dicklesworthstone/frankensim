@@ -2100,6 +2100,34 @@ Repeated eigenvalues define a mass-orthonormal subspace, not unique vectors.
 participation, full-mass orthogonality and reconstruction, free rigid motion,
 and an axially compressed column crossing its Euler instability.
 
+### Material-defined frame members
+
+`Frame2d::add_material_element` consumes the existing
+`fs-material::section::ConcentricElasticSection`. It derives axial rigidity,
+bending rigidity and reference line mass together from the original layer
+integrals and retains the full section through `material_section`. There are
+no independent stiffness/mass overrides on this entry point. Heterogeneous
+member assignments and perfectly bonded concentric layers retain their own
+material cards, query states and receipts; no average material replaces them.
+
+The original force-based static, signed-modal, reference-mass, gravity and
+Newmark owners consume those coefficients. A sampled frequency/rate law is
+refused, as is a finite frequency-applicability band that this general time
+history cannot enforce. Constant or temperature-only coefficients are frozen
+at the declared state. This constructs a new stress-free reference specimen;
+it does not implement thermal expansion, live mass exchange, plasticity,
+interlayer slip or material-derived damping. Existing planar Euler–Bernoulli
+and reference-inertia assumptions still apply. Missing data and source/geometry
+admission failures publish no partial member or added mass.
+
+`tests/frame2d_material.rs` exercises independent cantilever compliance,
+`sqrt(E/rho)` frequency scaling, integrated weight, layered and spatial
+assignments, and a guided-tip oscillator's actual Newmark history and energy
+balance. `cargo run -p fs-solid --example material_frame -- 1000 2e9 4000 2e9`
+demonstrates data-only substitution through the same geometry and solvers.
+The example inputs and regression data are synthetic, not measured alloy
+qualification.
+
 ### Physical bond rates in native cohesive equilibrium
 
 `CohesiveState::solve_over_time[_controlled]` uses the same accepted history,

@@ -46,6 +46,7 @@
 
 use crate::SolidError;
 use crate::fiber::{Section, SectionState};
+use fs_material::section::ConcentricElasticSection;
 
 mod mass;
 pub use mass::FrameMassFormulation;
@@ -163,6 +164,7 @@ pub struct FrameElement {
     pub j: usize,
     /// Reference mass per unit length, integrated by the frame mass formulation.
     pub mass_per_length: f64,
+    material_section: Option<ConcentricElasticSection>,
     sections: Vec<SectionModel>,
     xi: Vec<f64>,
     w: Vec<f64>,
@@ -610,6 +612,7 @@ impl Frame2d {
             i,
             j,
             mass_per_length,
+            material_section: None,
             sections: (0..np).map(|_| make_section()).collect(),
             commit: ElementCommit {
                 q: [0.0; 3],
@@ -623,6 +626,95 @@ impl Frame2d {
             sin0: dy / l0,
         });
         Ok(self.elements.len() - 1)
+    }
+
+    /// Add a perfectly bonded circular or concentric layered member using its
+    /// original source-resolved section. The common section owner supplies
+    /// `EA = sum(E A)`, `EI = sum(E I)` and line mass `sum(rho A)` together;
+    /// there are no independently authored stiffness or mass overrides.
+    ///
+    /// Every layer's source bundle and physical state remain attached to the
+    /// element. Static equilibrium, gravity through [`Self::inertial_forces`],
+    /// modes and Newmark dynamics use the same original frame solver. Layers
+    /// may differ in material and temperature; no average material is invented.
+    /// The selected state describes a new stress-free reference specimen, not
+    /// a live temperature update, free expansion or material-exchange event.
+    ///
+    /// The elastic coefficients must be constant at the retained temperature
+    /// and have no explicit frequency restriction. A sampled frequency/rate
+    /// response is not a time-domain elastic constitutive law; a bounded
+    /// frequency claim needs a separately band-limited dynamics model.
+    /// Existing planar Euler–Bernoulli and reference-inertia limits apply.
+    ///
+    /// # Errors
+    /// Unsupported source dependence, invalid geometry or Lobatto count, or
+    /// unrepresentable member/nodal mass. Refusal leaves the frame unchanged.
+    pub fn add_material_element(
+        &mut self,
+        i: usize,
+        j: usize,
+        np: usize,
+        section: ConcentricElasticSection,
+    ) -> Result<usize, SolidError> {
+        use fs_material::state_point::{DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY};
+        for (index, layer) in section.layers().iter().enumerate() {
+            for name in [DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY] {
+                let refused = || SolidError::MaterialRefused {
+                    what: format!(
+                        "frame layer {index} property {name} needs a frozen elastic coefficient without a frequency restriction"
+                    ),
+                };
+                let property = layer.material.property(name).ok_or_else(refused)?;
+                if !property.is_constant_at_fixed_temperature()
+                    || property
+                        .angular_frequency_band_rad_s()
+                        .map_err(|_| refused())?
+                        .is_some()
+                {
+                    return Err(refused());
+                }
+            }
+        }
+        // Check the values before the original mutating constructor. It keeps
+        // the reference mass in both nodal and consistent representations, so
+        // neither may receive an overflowing or underflowed material inventory.
+        let [Some(a), Some(b)] = [self.nodes.get(i), self.nodes.get(j)] else {
+            return Err(SolidError::InvalidInput {
+                what: format!("element nodes ({i}, {j}) invalid"),
+            });
+        };
+        let length = (b[0] - a[0]).hypot(b[1] - a[1]);
+        let mass = section.line_density_kg_m() * length;
+        let half = 0.5 * section.line_density_kg_m() * length;
+        if !length.is_finite()
+            || length <= 0.0
+            || !mass.is_finite()
+            || half <= 0.0
+            || [i, j].iter().any(|&node| {
+                [0, 1].iter().any(|&axis| {
+                    let current = self.nodal_mass[3 * node + axis];
+                    !current.is_finite() || current < 0.0 || !(current + half).is_finite()
+                })
+            })
+        {
+            return Err(SolidError::InvalidInput {
+                what: "material frame needs finite positive length and representable member/nodal mass".into(),
+            });
+        }
+        let make_section = || SectionModel::Elastic {
+            ea: section.axial_stiffness_n(),
+            ei: section.bending_stiffness_n_m2(),
+        };
+        let element = self.add_element(i, j, np, section.line_density_kg_m(), &make_section)?;
+        self.elements[element].material_section = Some(section);
+        Ok(element)
+    }
+
+    /// Original immutable source/geometry bundle for a material-defined member.
+    /// Raw-coefficient members and unknown element indices return `None`.
+    #[must_use]
+    pub fn material_section(&self, element: usize) -> Option<&ConcentricElasticSection> {
+        self.elements.get(element)?.material_section.as_ref()
     }
 
     /// Number of DOFs (3 per node).
