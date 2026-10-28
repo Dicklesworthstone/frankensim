@@ -159,8 +159,8 @@ impl ClosedGasParcel {
         let stored = old.mass_kg * du;
         let residual = (stored + work) - heat_j;
         let stage_residual = 2.0 * (midpoint.specific_internal_energy_j_kg() - initial_u) - du;
-        let entropy_change = old.mass_kg * (endpoint.state().specific_entropy_j_kg_k()?
-            - old.state.specific_entropy_j_kg_k()?);
+        let entropy_change = old.mass_kg * old.model.specific_entropy_change_j_kg_k(
+            &old.point, endpoint.point())?;
         if !stored.is_finite() || !residual.is_finite() || residual.abs() > tolerance_j
             || !stage_residual.is_finite() || stage_residual.abs() > controls.energy_tolerance_j_kg
             || !entropy_change.is_finite() {

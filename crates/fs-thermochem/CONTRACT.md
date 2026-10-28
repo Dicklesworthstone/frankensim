@@ -52,6 +52,16 @@ the full evaluate path. G5 tests require bit-identical properties across
 NASA region boundaries, compositions and pressures, and identical physical
 refusals. Existing receipt fields and evaluator versions are unchanged.
 
+### Relative entropy
+
+NASA-9 species and frozen ideal-gas mixtures expose direct entropy changes
+between admitted endpoints. Factored polynomial differences and a stable
+logarithmic ratio cancel common entropy references before rounding; distinct
+region reference offsets are retained. Frozen mixtures include the pressure
+term and cancel their unchanged ideal mixing term. Successful calls allocate
+nothing. These are relative state functions, not reaction or mixing entropy,
+and endpoint admission does not establish continuous source-path coverage.
+
 ## Public types and semantics
 
 - `SpeciesId`, `ElementId`, `ReactionId`, `ElementalMatrix`,

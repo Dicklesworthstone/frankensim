@@ -98,7 +98,8 @@ impl GasEntropySolution {
     /// Same material state for momentum, heat and acoustic consumers.
     #[must_use]
     pub const fn state(&self) -> &ResolvedThermochemicalGasState { &self.state }
-    /// Actual accepted specific entropy minus the requested value [J/(kg K)].
+    /// Accepted specific entropy (or entropy change for the relative solve)
+    /// minus the requested value [J/(kg K)].
     #[must_use]
     pub const fn residual_j_kg_k(&self) -> f64 { self.residual_j_kg_k }
     /// Interior iterations, excluding bracket and reference evaluations.
@@ -121,6 +122,21 @@ impl ResolvedThermochemicalGasState {
 }
 
 impl ThermochemicalGasModel {
+    /// Relative entropy from the SAME frozen-composition NASA-9/EOS owner.
+    ///
+    /// Cancels species reference entropy and ideal mixing before rounding.
+    /// Both points need typed absolute T/p; this evaluates thermodynamics, not
+    /// transport source support or a reacting/composition-changing path.
+    pub fn specific_entropy_change_j_kg_k(
+        &self, initial: &QueryPoint, final_point: &QueryPoint,
+    ) -> Result<f64, MaterialError> {
+        let (t0, p0) = coordinates(initial)?;
+        let (t1, p1) = coordinates(final_point)?;
+        self.thermodynamics().specific_entropy_change(t0, p0, t1, p1)
+            .map(|value| value.value())
+            .map_err(|error| super::super::failure("relative entropy thermodynamics", error))
+    }
+
     /// Reconstruct the common gas state at conserved density and entropy.
     /// `context` must supply typed T/p and all other source conditions. Only
     /// T/p are replaced; composition and source selections remain on this model.
@@ -134,10 +150,31 @@ impl ThermochemicalGasModel {
     /// Cancellation is checked between bounded evaluations and before returning.
     pub fn reconstruct_density_entropy(
         &self, context: &QueryPoint, density_kg_m3: f64, entropy_j_kg_k: f64,
-        controls: GasEntropySolve, mut cancelled: impl FnMut() -> bool,
+        controls: GasEntropySolve, cancelled: impl FnMut() -> bool,
+    ) -> Result<GasEntropySolution, GasEntropyError> {
+        self.solve_density_entropy(context, density_kg_m3, entropy_j_kg_k, controls, false, cancelled)
+    }
+
+    /// Reconstruct at a prescribed density and entropy CHANGE from `context`.
+    ///
+    /// A zero change follows the reversible adiabat without subtracting large
+    /// absolute entropy references. The original T/p must also lie in the
+    /// thermodynamic source domain. Frozen composition and source selections
+    /// remain unchanged; controls, work bounds, cancellation and final transport
+    /// admission are identical to the absolute-entropy closure.
+    pub fn reconstruct_density_entropy_change(
+        &self, context: &QueryPoint, density_kg_m3: f64, entropy_change_j_kg_k: f64,
+        controls: GasEntropySolve, cancelled: impl FnMut() -> bool,
+    ) -> Result<GasEntropySolution, GasEntropyError> {
+        self.solve_density_entropy(context, density_kg_m3, entropy_change_j_kg_k, controls, true, cancelled)
+    }
+
+    fn solve_density_entropy(
+        &self, context: &QueryPoint, density_kg_m3: f64, entropy_j_kg_k: f64,
+        controls: GasEntropySolve, relative: bool, mut cancelled: impl FnMut() -> bool,
     ) -> Result<GasEntropySolution, GasEntropyError> {
         controls.validate()?;
-        coordinates(context)?;
+        let (initial_temperature, initial_pressure) = coordinates(context)?;
         if !positive(density_kg_m3) || !entropy_j_kg_k.is_finite() {
             return Err(GasEntropyError::Invalid("positive finite density and finite specific entropy required"));
         }
@@ -146,19 +183,30 @@ impl ThermochemicalGasModel {
         // owner once, at the already-required lower bracket, never recompute it.
         let reference = self.thermodynamics().components()[0].convention().reference_pressure();
         let reference_state = self.thermodynamics()
-            .evaluate(Temperature::new(controls.minimum_temperature_k), reference)
+            .evaluate_properties(Temperature::new(controls.minimum_temperature_k), reference)
             .map_err(|e| super::super::failure("entropy thermodynamics", e))?;
-        let gas_constant = reference_state.properties().mass_specific_gas_constant().value();
+        let gas_constant = reference_state.mass_specific_gas_constant().value();
+        let entropy_residual = |t: f64, p: f64, absolute_entropy: f64| -> Result<f64, GasEntropyError> {
+            let entropy = if relative {
+                self.thermodynamics().specific_entropy_change(
+                    initial_temperature, initial_pressure, Temperature::new(t), Pressure::new(p))
+                    .map_err(|error| super::super::failure("relative entropy thermodynamics", error))?
+                    .value()
+            } else {
+                absolute_entropy
+            };
+            Ok(entropy - entropy_j_kg_k)
+        };
         let evaluate = |t: f64| -> Result<root::Sample, GasEntropyError> {
             let pressure_pa = density_kg_m3 * gas_constant * t;
             if !positive(pressure_pa) {
                 return Err(GasEntropyError::Invalid("entropy EOS pressure is unrepresentable"));
             }
-            let evaluated = self.thermodynamics().evaluate(Temperature::new(t), Pressure::new(pressure_pa))
+            let properties = self.thermodynamics().evaluate_properties(Temperature::new(t), Pressure::new(pressure_pa))
                 .map_err(|e| super::super::failure("entropy thermodynamics", e))?;
-            let properties = evaluated.properties();
             Ok(root::Sample {
-                residual: properties.s().value() / properties.molar_mass().value() - entropy_j_kg_k,
+                residual: entropy_residual(t, pressure_pa,
+                    properties.s().value() / properties.molar_mass().value())?,
                 tangent: properties.mass_specific_cv().value() / t,
                 pressure_pa,
             })
@@ -169,7 +217,8 @@ impl ThermochemicalGasModel {
         poll(&mut cancelled).map_err(map_context)?;
         let point = updated_point(context, solved.temperature_k, solved.sample.pressure_pa).map_err(map_context)?;
         let state = self.evaluate(&point)?;
-        let residual = state.specific_entropy_j_kg_k()? - entropy_j_kg_k;
+        let residual = entropy_residual(state.state().temperature, state.state().pressure,
+            state.specific_entropy_j_kg_k()?)?;
         if !residual.is_finite() || residual.abs() > controls.entropy_tolerance_j_kg_k {
             return Err(GasEntropyError::NotConverged { iterations: solved.iterations, residual_j_kg_k: residual });
         }

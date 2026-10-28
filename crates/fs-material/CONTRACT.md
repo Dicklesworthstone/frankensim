@@ -698,6 +698,15 @@ test failures after accounting separately for each printed half-unit. Relative
 bands are unchanged; cp also satisfies its relative-only gate. Rows absent from
 the source are recorded as absent, never interpolated into alleged facts.
 
+Frozen gas parcels and nozzles use the thermochemical owner's direct entropy
+differences instead of subtracting absolute reference entropies. The relative
+density/entropy closure targets a requested change from the retained initial
+state and preserves the original bracket, cancellation and source checks.
+Reversible volume changes target zero entropy change. Midpoint advancement
+reports its actual numerical entropy change without asserting exact adiabatic
+reversibility. Iterative entropy and nozzle trial states use allocation-free
+caloric properties; accepted states retain complete source receipts.
+
 Source-backed gas temperature and pressure support comes from the selected
 NASA-9 regions and every pure-transport claim, not from the legacy USSA/Sutherland
 air constructor's 50..2000 K and 100 bar bounds. `GasState::validate_coherence`

@@ -125,12 +125,16 @@ impl ClosedGasParcel {
                 velocity_m_s: 0.0, mach_number: 0.0, choked: false,
                 upstream_enthalpy_j_kg: h0, entropy_energy_residual_j_kg: 0.0, iterations: 0 });
         }
-        let s0 = self.state().specific_entropy_j_kg_k()?;
-        let log_back = det::ln(back_pressure_pa)-det::ln(p0);
+        let thermodynamics = self.parcel.model.thermodynamics();
+        // Entropy references and ideal mixing cancel BEFORE rounding. This also
+        // preserves the pressure signal for very small reservoir pressure drops.
+        let log_back = -thermodynamics.specific_entropy_change(
+            Temperature::new(t0), Pressure::new(p0),
+            Temperature::new(t0), Pressure::new(back_pressure_pa))
+            .map_err(source_error)?.value()/r;
         let sample = |t: f64| -> Result<Sample, GasEnergyError> {
-            let eval = self.parcel.model.thermodynamics().evaluate(Temperature::new(t), Pressure::new(p0))
+            let properties = thermodynamics.evaluate_properties(Temperature::new(t), Pressure::new(p0))
                 .map_err(source_error)?;
-            let properties = eval.properties();
             let cp = properties.mass_specific_cp().value();
             let cv = properties.mass_specific_cv().value();
             let gamma = cp / cv;
@@ -139,7 +143,10 @@ impl ClosedGasParcel {
                 return Err(invalid("nozzle caloric sample has inadmissible heat capacities"));
             }
             let mass = properties.molar_mass().value();
-            let entropy_shift = (properties.s().value()/mass-s0)/r;
+            let entropy_shift = thermodynamics.specific_entropy_change(
+                Temperature::new(t0), Pressure::new(p0),
+                Temperature::new(t), Pressure::new(p0))
+                .map_err(source_error)?.value()/r;
             let sonic_residual = properties.h().value()/mass-h0+0.5*gamma*r*t;
             let pressure_residual = r*t0*(entropy_shift-log_back);
             if !entropy_shift.is_finite() || !sonic_residual.is_finite() || !pressure_residual.is_finite() {
@@ -182,7 +189,9 @@ impl ClosedGasParcel {
         let speed_squared = 2.0*(h0-throat.specific_enthalpy_j_kg());
         let c = throat.state().sound_speed;
         let sonic = 0.5*(c*c-speed_squared);
-        let entropy_residual = t0*(throat.specific_entropy_j_kg_k()?-s0);
+        let entropy_residual = t0*thermodynamics.specific_entropy_change(
+            Temperature::new(t0), Pressure::new(p0),
+            Temperature::new(temperature), Pressure::new(pressure)).map_err(source_error)?.value();
         if !positive(speed_squared) || !sonic.is_finite() || !entropy_residual.is_finite()
             || entropy_residual.abs() > 2.0*controls.energy_tolerance_j_kg
             || (choked && sonic.abs() > 2.0*controls.energy_tolerance_j_kg)

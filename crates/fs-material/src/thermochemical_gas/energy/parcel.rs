@@ -109,7 +109,6 @@ impl ClosedGasParcel {
         {
             return Err(GasEntropyError::Invalid("positive finite volume and a bracket containing the initial temperature required"));
         }
-        let initial_entropy = old.state.specific_entropy_j_kg_k()?;
         let tolerance = old.mass_kg * controls.entropy_tolerance_j_kg_k;
         if !positive(tolerance) {
             return Err(GasEntropyError::Invalid("total entropy tolerance is unrepresentable"));
@@ -127,11 +126,11 @@ impl ClosedGasParcel {
         if !positive(density) || density == old.mass_kg / old.volume_m3 {
             return Err(GasEntropyError::Invalid("volume change does not give a representable positive density change"));
         }
-        let solved = old.model.reconstruct_density_entropy(&old.point, density,
-            initial_entropy, controls, &mut cancelled)?;
+        let solved = old.model.reconstruct_density_entropy_change(&old.point, density,
+            0.0, controls, &mut cancelled)?;
         let stored = old.mass_kg * (solved.state().specific_internal_energy_j_kg()
             - old.state.specific_internal_energy_j_kg());
-        let entropy_change = old.mass_kg * (solved.state().specific_entropy_j_kg_k()? - initial_entropy);
+        let entropy_change = old.mass_kg * solved.residual_j_kg_k();
         // Positive cv and pressure imply heating on compression and cooling on
         // expansion. Do not accept vanished work under an overly loose tolerance.
         if !stored.is_finite() || !entropy_change.is_finite() || entropy_change.abs() > tolerance
