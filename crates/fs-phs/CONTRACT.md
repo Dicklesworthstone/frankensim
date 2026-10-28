@@ -11,6 +11,49 @@ stepping, and Galerkin reduction preserves the structure.
 
 ## Public types and semantics
 
+### Continuous harmonic response of the complete linear system
+
+`harmonic::HarmonicModel::{from_ode,from_descriptor}` prepares the original
+quadratic pHS once. `factor(omega)` factors its continuous AC operator once per
+frequency, and the returned `HarmonicFactor::response` reuses that LU for any
+number of source phasors. Peak amplitudes follow `exp(-i omega t)`; cycle means
+therefore carry the appropriate one-half power and one-quarter energy factors.
+No integration clock, frequency warping, peak fitting or artificial damping is
+part of this path.
+
+For a descriptor, the solved equation is
+`[-i omega diag(I_diff,0) - (J-R) diag(Q_diff,I_alg)] x = G u`.
+All algebraic multipliers, mutual storage, internal relaxation states and
+original port directions are retained. Algebraic variables enter as efforts,
+including source currents and transformer reactions, but store zero energy.
+The singular descriptor mass is never inverted, and individual resonant
+components are not eliminated through a singular impedance. A genuinely
+singular complete operator still refuses. Nonlinear or undeclared storage
+refuses; this is not an implicit tangent approximation.
+
+The response exposes state, effort and port-output phasors, mean stored energy,
+per-port supplied power, and independently evaluated `Re(e* R e)/2` loss.
+Loss minus supply is reported without clipping or inferring heat from balance.
+Independent row/column equilibration handles mixed units; the original equations
+must pass a componentwise backward-residual ceiling, including small algebraic
+constraints. This residual is not a forward-error, linewidth or pole certificate.
+
+Dimension (hard cap 1024), internal numerical payload and dense work are admitted
+before matrix allocation through `HarmonicBudget`; no state is truncated to fit.
+The payload bound excludes source-owned storage, allocator overhead and process
+RSS. Cancellation is polled during assembly, scaling, the existing complex LU,
+response and diagnostics; source and prepared factors are immutable on refusal.
+Repeat execution on the same host follows the existing deterministic LU owner.
+No cross-ISA proof, transient-decay guarantee, nonlinear sounding threshold or
+physical validity beyond the supplied coefficient laws is inferred.
+
+G1/G3 regressions in `tests/harmonic_response.rs` compare mechanical amplitude,
+phase and power with the damped-oscillator solution; Maxwell dispersion/loss
+with its analytic complex stiffness; a high-Q RLC with its Kirchhoff impedance;
+mutual-winding resonance splitting in both polarities; pure algebraic
+transformer power; and coordinate scales `1e-120..1e120`. True lossless poles,
+capacity limits, unsupported storage and cancelled reusable solves are tested.
+
 ### Stable constitutive energy changes
 
 Quadratic storage evaluates its midpoint remainder analytically, retaining

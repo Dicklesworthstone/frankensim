@@ -48,6 +48,8 @@ use fs_la::factor::lu;
 
 /// Opt-in exact linear evolution and frequency-matched discrete gradients.
 pub mod linear_exact;
+/// Continuous AC response of complete linear ODE and constrained DAE systems.
+pub mod harmonic;
 /// Work-conjugate physical coupling of complete subsystems on different clocks.
 pub mod multirate;
 
