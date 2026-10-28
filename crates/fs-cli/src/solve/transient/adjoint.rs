@@ -135,7 +135,7 @@ impl Tape {
     pub(super) fn record_physical(&mut self, cx: &Cx<'_>, values: &[f64],
         physical_target_j: f64, deadline: Option<(Instant, f64)>) -> Result<(), SolveRefusal> {
         poll(cx, deadline)?;
-        if !(physical_target_j.is_finite() && physical_target_j > 0.0)
+        if !(physical_target_j.is_finite() && physical_target_j >= 0.0)
             || self.physical_targets_j.len().checked_add(1) != Some(self.states.len())
         {
             return Err(bad("coupled adjoint physical target or checkpoint order differs"));

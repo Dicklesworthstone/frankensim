@@ -19,6 +19,7 @@ use super::*;
 pub(super) struct AirflowStep {
     pub(super) endpoint: EnthalpyStepSolution,
     pub(super) radiation: Option<RadiativeEndpoint>,
+    pub(super) enclosure: Option<radiation::EnclosureEndpoint>,
     pub(super) radiation_evidence: String,
     pub(super) natural: Option<NaturalEndpoint>,
     pub(super) natural_evidence: String,
@@ -57,6 +58,7 @@ pub(super) struct AirflowStep {
 struct SolidTrial {
     endpoint: EnthalpyStepSolution,
     radiation: Option<RadiativeEndpoint>,
+    enclosure: Option<radiation::EnclosureEndpoint>,
     radiation_evidence: String,
     natural: Option<NaturalEndpoint>,
     natural_evidence: String,
@@ -138,6 +140,7 @@ pub(super) fn advance(
     dt_s: f64,
     config: EnthalpyStepConfig,
     radiation: Option<&radiation::LoweredRadiation>,
+    enclosure: Option<&fs_conduction::radiation::GrayDiffuseEnclosure>,
     laws: &[buoyancy::NaturalLaw],
     pressure_pa: f64,
     path: &exchange::ConjugatePath,
@@ -251,7 +254,6 @@ pub(super) fn advance(
     if seed_segments != path.segments.len() {
         return Err(bad("enthalpy airflow branch ordering omits solid segments"));
     }
-    let patches = radiation.map(|lowering| lowering.patches.as_slice());
     let mut endpoint_evaluations = 0;
     // Air-reference updates replace Robin rows only; the prescribed trace is
     // unchanged across the seed and every inner coupling trial.
@@ -263,19 +265,10 @@ pub(super) fn advance(
     let initial_seed_residual_norm_j = {
         let seed_boundary = boundary_at(problem.boundary, &regions, &seed_references)?;
         count(&mut endpoint_evaluations, 1, max_endpoint_evaluations)?;
-        engine
-            .evaluate_endpoint(
-                cx,
-                ConductionProblem { boundary: &seed_boundary, ..problem },
-                interfaces,
-                old,
-                &initial_candidate,
-                dt_s,
-                config,
-                patches,
-            )
-            .map_err(failed)?
-            .residual_norm_j
+        radiative::evaluate(
+            cx, engine, ConductionProblem { boundary: &seed_boundary, ..problem },
+            interfaces, old, &initial_candidate, dt_s, config, radiation, enclosure,
+        )?.residual_norm_j
     };
     let physical_residual_tolerance_j = finite(
         config
@@ -322,24 +315,22 @@ pub(super) fn advance(
         let mut boundary = boundary_at(problem.boundary, &regions, references)?;
         let trial_problem = ConductionProblem { boundary: &boundary, ..problem };
         count(&mut endpoint_evaluations, 1, max_endpoint_evaluations)?;
-        let initial_norm_j = engine
-            .evaluate_endpoint(
-                cx, trial_problem, interfaces, old, &initial_candidate, dt_s, config, patches,
-            )
-            .map_err(failed)?
-            .residual_norm_j;
+        let initial_norm_j = radiative::evaluate(
+            cx, engine, trial_problem, interfaces, old, &initial_candidate,
+            dt_s, config, radiation, enclosure,
+        )?.residual_norm_j;
         let inner = inner_config(config, inner_allowance_j, initial_norm_j)?;
         let mut natural_endpoint = None;
         let mut natural_evidence = "null".to_string();
         let mut physical_natural_boundary = None;
-        let (endpoint, radiation_evidence, radiative) = if !laws.is_empty() {
+        let (endpoint, radiation_evidence, ambient, enclosed) = if !laws.is_empty() {
             let mut natural_config = inner;
             // Reserve room below the original endpoint energy and residual
             // allowances for the remaining air-reference discrepancy.
             natural_config.energy_tolerance_j = finite(config.energy_tolerance_j * 0.125)?;
             let solved = natural::advance(
                 cx, engine, trial_problem, interfaces, old, dt_s, natural_config,
-                radiation, laws, pressure_pa, deadline,
+                radiation, enclosure, laws, pressure_pa, deadline,
             )?;
             natural_evidence = natural_step_row(&solved)?;
             count(&mut natural_iterations, solved.iterations, max_natural_iterations)?;
@@ -372,28 +363,19 @@ pub(super) fn advance(
                 applied_coefficients: solved.applied_coefficients,
                 boundary: boundary.clone(),
             });
-            (solved.endpoint, solved.radiation_evidence, solved.radiation)
+            (solved.endpoint, solved.radiation_evidence, solved.radiation, solved.enclosure)
         } else if let Some(lowering) = radiation {
-            let solved = engine
-                .advance_with_ambient_radiation(
-                    cx, trial_problem, interfaces, old, dt_s, inner,
-                    &lowering.patches, lowering.config,
-                )
-                .map_err(failed)?;
-            count(&mut solid_solves, solved.radiation.iterations, max_solid_solves)?;
-            count(&mut radiation_trials, solved.radiation.iterations, max_solid_solves)?;
-            count(&mut nonlinear_updates, solved.radiation.solid_iterations, max_updates)?;
-            count(&mut krylov_iterations, solved.radiation.krylov_iterations, max_krylov)?;
+            let solved = radiative::advance(
+                cx, engine, trial_problem, interfaces, old, dt_s, inner,
+                lowering, enclosure, deadline,
+            )?;
+            count(&mut solid_solves, solved.solid_solves, max_solid_solves)?;
+            count(&mut radiation_trials, solved.solid_solves, max_solid_solves)?;
+            count(&mut nonlinear_updates, solved.updates, max_updates)?;
+            count(&mut krylov_iterations, solved.krylov_iterations, max_krylov)?;
             maximum_radiation_energy_residual_j =
-                maximum_radiation_energy_residual_j.max(solved.physical_energy_residual_j.abs());
-            let evidence = radiation_step_row(&solved)?;
-            let radiative = RadiativeEndpoint {
-                combined_boundary: solved.combined_boundary,
-                convective_robin_fluxes: solved.convective_robin_fluxes,
-                convective_out_w: solved.convective_out_w,
-                report: solved.radiation,
-            };
-            (solved.conduction, evidence, Some(radiative))
+                maximum_radiation_energy_residual_j.max(solved.energy_residual_j.abs());
+            (solved.endpoint, solved.evidence, solved.ambient, solved.enclosure)
         } else {
             let endpoint = engine
                 .advance(cx, trial_problem, interfaces, old, dt_s, inner)
@@ -403,15 +385,14 @@ pub(super) fn advance(
             for row in &endpoint.newton.history {
                 count(&mut krylov_iterations, row.linear_iterations, max_krylov)?;
             }
-            (endpoint, "null".to_string(), None)
+            (endpoint, "null".to_string(), None, None)
         };
         poll(cx, deadline)?;
-        let (fluxes, convective_out_w) = radiative.as_ref().map_or(
-            (endpoint.robin_fluxes.as_slice(), endpoint.robin_out_w),
-            |result| (result.convective_robin_fluxes.as_slice(), result.convective_out_w),
-        );
+        let fluxes = radiative::fluxes(&endpoint, ambient.as_ref(), enclosed.as_ref());
+        let convective_out_w =
+            radiative::convective_out_w(&endpoint, ambient.as_ref(), enclosed.as_ref());
         // Only original convection reaches the air owner. Radiation on the
-        // same trace exchanges with its own reservoir and is excluded here.
+        // same trace exchanges with its reservoir or closed enclosure and is excluded here.
         let states = path
             .segments
             .iter()
@@ -431,7 +412,8 @@ pub(super) fn advance(
         )?;
         last = Some(SolidTrial {
             endpoint,
-            radiation: radiative,
+            radiation: ambient,
+            enclosure: enclosed,
             radiation_evidence,
             natural: natural_endpoint,
             natural_evidence,
@@ -473,18 +455,11 @@ pub(super) fn advance(
         &regions, &physical_references,
     )?;
     count(&mut endpoint_evaluations, 1, max_endpoint_evaluations)?;
-    let physical = engine
-        .evaluate_endpoint(
-            cx,
-            ConductionProblem { boundary: &physical_boundary, ..problem },
-            interfaces,
-            old,
-            &last.endpoint.specific_enthalpy_j_kg,
-            dt_s,
-            config,
-            patches,
-        )
-        .map_err(failed)?;
+    let physical = radiative::evaluate(
+        cx, engine, ConductionProblem { boundary: &physical_boundary, ..problem },
+        interfaces, old, &last.endpoint.specific_enthalpy_j_kg,
+        dt_s, config, radiation, enclosure,
+    )?;
     poll(cx, deadline)?;
     let off_path_convective_out_w = sum(
         physical
@@ -519,6 +494,7 @@ pub(super) fn advance(
     Ok(AirflowStep {
         endpoint: last.endpoint,
         radiation: last.radiation,
+        enclosure: last.enclosure,
         radiation_evidence: last.radiation_evidence,
         natural: last.natural,
         natural_evidence: last.natural_evidence,

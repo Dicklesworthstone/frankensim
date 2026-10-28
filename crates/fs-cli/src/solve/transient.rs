@@ -33,14 +33,17 @@ use super::{
 mod adjoint;
 mod conjugate;
 mod enthalpy;
+mod enclosure;
 mod natural;
+mod radiative;
+use radiative::PhysicalEnergy;
 mod sampled_peak;
 use sampled_peak::SampledPeak;
 pub(super) mod spatial;
 mod workload;
 use workload::{TimeGrids, Workload};
 
-pub(super) const NO_CLAIM: &str = "Estimated finite-mesh final-time temperature from backward Euler with declared temperature-independent regional heat capacity and the bound conductivity evaluated at each endpoint. Temperature-dependent conductivity uses residual-gated Newton/FGMRES with the full k'(T) tangent and immutable physical history. Explicit regional power histories replace delivered watts on their named volume regions; both grids land on every workload switch. A forward sampled peak covers the original initial field and every accepted fine endpoint in the requirement region, retaining the earliest exact tie. It is a sampled-time observation and does not bound unsampled temperatures. The nested-grid final-maximum difference estimates temporal error at assumed order one; it is not a spatial error bound, observed-order proof, continuum or continuous-time maximum bound, validated heat capacity, or compliance certificate. Prescribed temperatures are endpoint data, including their discrete boundary-node storage reaction. Declared ambient radiation uses the shared area-mean gray-patch model with an independent endpoint residual and energy gate; every coupling trial retains the same physical history. Declared airflow uses quasi-steady branch transport at the retained flow-network operating point, with solid storage, a full nodal residual gate at actual marched references and a separate actual-air energy gate. Declared natural convection evaluates its admitted card at each endpoint and checks the full physical free residual and energy balance; exact equilibrium and out-of-domain Rayleigh states remain refused. Natural reservoirs and forced-air paths on distinct patches compose through the same stored solid: every natural update encloses a complete air solve, and the outer endpoint is independently checked under actual natural coefficients and actual air-law references with a separate air-enthalpy energy gate. The final air row describes its last natural iteration; natural and trajectory counters include all nested responses without advancing physical history. No airflow storage, time-varying fan dynamics, enclosure radiation, latent heat or transient adjoint is inferred. Endpoint heat storage is reported separately from numerical energy closure; transient energy_residual_j is the checked storage-minus-net-input balance.";
+pub(super) const NO_CLAIM: &str = "Estimated finite-mesh final-time temperature from backward Euler with declared temperature-independent regional heat capacity and the bound conductivity evaluated at each endpoint. Temperature-dependent conductivity uses residual-gated Newton/FGMRES with the full k'(T) tangent and immutable physical history. Explicit regional power histories replace delivered watts on their named volume regions; both grids land on every workload switch. A forward sampled peak covers the original initial field and every accepted fine endpoint in the requirement region, retaining the earliest exact tie. It is a sampled-time observation and does not bound unsampled temperatures. The nested-grid final-maximum difference estimates temporal error at assumed order one; it is not a spatial error bound, observed-order proof, continuum or continuous-time maximum bound, validated heat capacity, or compliance certificate. Prescribed temperatures are endpoint data, including their discrete boundary-node storage reaction. Declared ambient radiation uses the shared area-mean gray-patch model. Declared closed gray-diffuse enclosures use the shared reflected-radiosity owner with genuine declared volumetric capacity, original convection and prescribed-flux heat, and an independent fresh endpoint residual and storage-energy gate. Every coupling trial retains the same physical history. Declared airflow uses quasi-steady branch transport at the retained flow-network operating point, with solid storage, a full nodal residual gate at actual marched references and a separate actual-air energy gate. Declared natural convection evaluates its admitted card at each endpoint and checks the full physical free residual and energy balance; exact equilibrium and out-of-domain Rayleigh states remain refused. Natural reservoirs and forced-air paths on distinct patches compose through the same stored solid: every natural update encloses a complete air solve, and the outer endpoint is independently checked under actual natural coefficients and actual air-law references with a separate air-enthalpy energy gate. The final air row describes its last natural iteration; natural and trajectory counters include all nested responses without advancing physical history. No airflow storage, time-varying fan dynamics, latent heat or undeclared transient adjoint is inferred. Endpoint heat storage is reported separately from numerical energy closure; transient energy_residual_j is the checked storage-minus-net-input balance.";
 
 pub(super) struct NativeTransientResult {
     pub(super) solution: radiation::SolidSolution,
@@ -175,6 +178,7 @@ pub(super) fn admit(spec: &ProjectSpec) -> Result<(), SolveRefusal> {
 struct GridResult {
     endpoint: StepSolution,
     endpoint_dt_s: f64,
+    endpoint_energy: PhysicalEnergy,
     rows: String,
     sampled_peak: SampledPeak,
     /// Present only on an explicitly requested fine-grid derivative path.
@@ -219,11 +223,30 @@ struct NaturalEndpoint {
 /// Retained final physical boundary. Inner secant and nonlinear physical heat
 /// remain distinct, so neither a frozen operator nor a prescribed reaction is
 /// silently relabeled as the full radiative model.
-struct RadiativeEndpoint {
-    combined_boundary: fs_conduction::ThermalBoundary,
-    convective_robin_fluxes: Vec<fs_conduction::RobinFlux>,
-    convective_out_w: f64,
-    report: fs_conduction::AmbientRadiationReport,
+enum RadiativeEndpoint {
+    Ambient {
+        combined_boundary: fs_conduction::ThermalBoundary,
+        convective_robin_fluxes: Vec<fs_conduction::RobinFlux>,
+        convective_out_w: f64,
+        report: fs_conduction::AmbientRadiationReport,
+    },
+    Enclosure(radiation::EnclosureEndpoint),
+}
+
+impl RadiativeEndpoint {
+    fn convective_robin_fluxes(&self) -> &[fs_conduction::RobinFlux] {
+        match self {
+            Self::Ambient { convective_robin_fluxes, .. } => convective_robin_fluxes,
+            Self::Enclosure(endpoint) => &endpoint.convective_robin_fluxes,
+        }
+    }
+
+    fn convective_out_w(&self) -> f64 {
+        match self {
+            Self::Ambient { convective_out_w, .. } => *convective_out_w,
+            Self::Enclosure(endpoint) => endpoint.convective_out_w,
+        }
+    }
 }
 
 fn nonlinear_row(solved: &NonlinearStepSolution) -> Result<String, SolveRefusal> {
@@ -325,6 +348,7 @@ fn march(
     linear: LinearConfig,
     nonlinear: Option<NonlinearStepConfig>,
     radiation: Option<&radiation::LoweredRadiation>,
+    enclosure: Option<&fs_conduction::radiation::GrayDiffuseEnclosure>,
     airflow: Option<&airflow::ConjugatePath>,
     natural: &[buoyancy::NaturalLaw],
     pressure_pa: f64,
@@ -351,6 +375,7 @@ fn march(
     let mut nonlinear_updates = 0;
     let mut nonlinear_backtracks = 0;
     let mut endpoint_dt_s = 0.0;
+    let mut endpoint_energy = None;
     let mut last_radiation = None;
     let mut radiation_trials = 0;
     let mut maximum_physical_energy_residual_j = 0.0_f64;
@@ -388,12 +413,14 @@ fn march(
         let mut conjugate_row = "null".to_string();
         let mut natural_evidence = "null".to_string();
         let mut physical_target_j = None;
+        let mut physical_energy = None;
         let (endpoint, nonlinear_evidence, krylov_iterations) = if !natural.is_empty() {
             let solved = natural::advance(
                 cx, engine, step_problem, interfaces, &old, dt, config,
-                nonlinear, radiation, airflow, natural, pressure_pa, deadline,
+                nonlinear, radiation, enclosure, airflow, natural, pressure_pa, deadline,
             )?;
             natural_evidence = natural_row(&solved)?;
+            physical_energy = Some(solved.physical_energy);
             // The outer natural owner accepted the complete physical model.
             // An inner radiation target belongs to its frozen natural trial.
             physical_target_j = Some(solved.physical_residual_tolerance_j);
@@ -429,9 +456,10 @@ fn march(
         } else if let Some(path) = airflow {
             let solved = conjugate::advance(
                 cx, engine, step_problem, interfaces, &old, dt, config,
-                nonlinear, radiation, path, deadline,
+                nonlinear, radiation, enclosure, path, deadline,
             )?;
             conjugate_row = airflow_row(path, &solved)?;
+            physical_energy = Some(solved.physical_energy);
             physical_target_j = Some(solved.physical_residual_tolerance_j);
             airflow_iterations += solved.outcome.solution.iterations;
             airflow_solid_solves += solved.solid_solves;
@@ -444,7 +472,7 @@ fn march(
             maximum_coupled_energy_residual_j = maximum_coupled_energy_residual_j
                 .max(solved.coupled_energy_residual_j.abs());
             coupled_net_input_j += dt * (solved.endpoint.source_w
-                + solved.physical_dirichlet_in_w - solved.endpoint.neumann_out_w
+                + solved.physical_dirichlet_in_w - solved.physical_energy.neumann_out_w
                 - solved.off_path_convective_out_w - solved.air_heat_gain_w
                 - solved.radiation_out_w);
             radiative_row = solved.radiation_evidence;
@@ -456,29 +484,20 @@ fn march(
             });
             (solved.endpoint, solved.nonlinear_evidence, solved.krylov_iterations)
         } else if let Some(radiation) = radiation {
-            let solved = engine.advance_prescribed_with_ambient_radiation(
-                cx, step_problem, interfaces, &old, dt, config, nonlinear,
-                &radiation.patches, radiation.config,
-            ).map_err(lower)?;
-            radiative_row = radiation_row(&solved)?;
+            let solved = radiative::advance(
+                cx, engine, step_problem, interfaces, &old, dt, config,
+                nonlinear, radiation, enclosure, deadline,
+            )?;
+            radiative_row = solved.radiation_evidence;
             physical_target_j = Some(solved.physical_residual_tolerance_j);
-            let nonlinear_evidence = solved.nonlinear.as_ref()
-                .map(nonlinear_row).transpose()?.unwrap_or_else(|| "null".to_string());
-            radiation_trials += solved.radiation.iterations;
-            if nonlinear.is_some() {
-                nonlinear_updates += solved.radiation.solid_iterations;
-                nonlinear_backtracks += solved.nonlinear_backtracks;
-            }
+            physical_energy = Some(solved.physical_energy);
+            radiation_trials += solved.solid_solves;
+            nonlinear_updates += solved.nonlinear_updates;
+            nonlinear_backtracks += solved.nonlinear_backtracks;
             maximum_physical_energy_residual_j = maximum_physical_energy_residual_j
-                .max(solved.physical_energy_residual_j.abs());
-            let krylov_iterations = solved.radiation.krylov_iterations;
-            last_radiation = Some(RadiativeEndpoint {
-                combined_boundary: solved.combined_boundary,
-                convective_robin_fluxes: solved.convective_robin_fluxes,
-                convective_out_w: solved.convective_out_w,
-                report: solved.radiation,
-            });
-            (solved.conduction, nonlinear_evidence, krylov_iterations)
+                .max(solved.physical_energy.energy_residual_j.abs());
+            last_radiation = Some(solved.radiation);
+            (solved.conduction, solved.nonlinear_evidence, solved.krylov_iterations)
         } else if let Some(nonlinear) = nonlinear {
             let solved = engine.advance_nonlinear_prescribed(
                 cx, step_problem, interfaces, &old, dt, config, nonlinear,
@@ -525,15 +544,21 @@ fn march(
             goal_region,
         );
         sampled_peak.record(end, qoi)?;
-        let net_w = endpoint.source_w + endpoint.dirichlet_in_w
-            - endpoint.neumann_out_w
-            - endpoint.robin_out_w;
+        // Enclosure heat is internal exchange. Common trajectory energy must
+        // use the fresh physical bath, original Neumann/convection and closed
+        // reflected heat, while the inner StepSolution retains its applied law.
+        let energy = if enclosure.is_some() {
+            physical_energy.ok_or_else(|| bad("enclosure endpoint lost its physical energy audit"))?
+        } else {
+            PhysicalEnergy::inner(&endpoint)
+        };
+        let net_w = energy.net_input_w;
         stored_j += endpoint.stored_energy_change_j;
         net_input_j += dt * net_w;
-        maximum_energy_residual_j = maximum_energy_residual_j.max(endpoint.energy_residual_j.abs());
+        maximum_energy_residual_j = maximum_energy_residual_j.max(energy.energy_residual_j.abs());
         rows.push(format!("{{\"step\":{ordinal},\"time_s\":{},\"dt_s\":{},\"final_region_max_k\":{},\"stored_energy_change_j\":{},\"net_input_w\":{},\"source_w\":{},\"energy_residual_j\":{},\"relative_residual\":{},\"krylov_iterations\":{},\"nonlinear\":{nonlinear_evidence},\"radiation\":{radiative_row},\"conjugate\":{conjugate_row},\"natural\":{natural_evidence}}}",
             number(end)?, number(dt)?, number(qoi)?, number(endpoint.stored_energy_change_j)?,
-            number(net_w)?, number(endpoint.source_w)?, number(endpoint.energy_residual_j)?, number(endpoint.relative_residual)?,
+            number(net_w)?, number(endpoint.source_w)?, number(energy.energy_residual_j)?, number(endpoint.relative_residual)?,
             krylov_iterations));
         evidence.push(LinearSolveEvidence {
             nonlinear_iteration: ordinal - 1,
@@ -575,6 +600,7 @@ fn march(
         }
         old.clone_from(&endpoint.temperature);
         endpoint_dt_s = dt;
+        endpoint_energy = Some(energy);
         last = Some(endpoint);
         time = end;
     }
@@ -582,6 +608,7 @@ fn march(
     Ok(GridResult {
         endpoint: last.ok_or_else(|| bad("the transient grid has no steps"))?,
         endpoint_dt_s,
+        endpoint_energy: endpoint_energy.ok_or_else(|| bad("transient grid lost its final energy audit"))?,
         rows: rows.join(","),
         sampled_peak,
         tape,
@@ -688,8 +715,7 @@ pub(super) fn solve(
     let row_bytes = radiation
         .map_or(Some(2048_usize), |lowering| {
             lowering
-                .patches
-                .len()
+                .surface_count()
                 .checked_mul(1024)
                 .and_then(|bytes| bytes.checked_add(4096))
         })
@@ -719,6 +745,14 @@ pub(super) fn solve(
         })
         .and_then(|n| total_steps.checked_mul(row_bytes).and_then(|s| n.checked_add(s)))
         .ok_or_else(|| bad("transient memory estimate overflows"))?;
+    // The enclosure owner retains dense patch-space radiosity work, bounded
+    // independently from the sparse solid. Include it in forward admission.
+    let bytes = if let Some(lowering) = radiation {
+        lowering.surface_count().checked_mul(lowering.surface_count())
+            .and_then(|entries| entries.checked_mul(128))
+            .and_then(|additional| bytes.checked_add(additional))
+            .ok_or_else(|| bad("transient radiation workspace estimate overflows"))?
+    } else { bytes };
     let bytes = if objective.is_some() {
         let mut additional = adjoint::storage_bytes(problem.mesh.vertex_count(), fine_steps,
             policy.capacities.len())?;
@@ -732,7 +766,7 @@ pub(super) fn solve(
             .count();
         if let Some(lowering) = radiation {
             additional = additional.checked_add(adjoint::radiation_storage_bytes(
-                problem.mesh.vertex_count(), ports, lowering.patches.len(),
+                problem.mesh.vertex_count(), ports, lowering.surface_count(),
             )?).ok_or_else(|| bad("combined radiative adjoint memory estimate overflows"))?;
         }
         if natural_requested {
@@ -748,8 +782,15 @@ pub(super) fn solve(
         bytes.checked_add(additional)
             .ok_or_else(|| bad("combined forward/adjoint memory estimate overflows"))?
     } else { bytes };
-    if objective.is_some() && fine_steps.checked_mul(linear.max_iterations).is_none() {
-        return Err(bad("reverse reconstruction and transpose work allowances overflow"));
+    if objective.is_some() {
+        let reverse_solves = radiation.map_or(Some(1), |lowering| {
+            lowering.surface_count().checked_add(2)
+        }).ok_or_else(|| bad("reverse radiation work allowance overflows"))?;
+        if fine_steps.checked_mul(reverse_solves)
+            .and_then(|solves| solves.checked_mul(linear.max_iterations)).is_none()
+        {
+            return Err(bad("reverse reconstruction and transpose work allowances overflow"));
+        }
     }
     if u64::try_from(bytes).unwrap_or(u64::MAX)
         > spec.budgets.as_ref().map_or(0, |b| b.memory_bytes)
@@ -873,6 +914,10 @@ pub(super) fn solve(
         return Err(bad("combined transient numerical work allowance overflows"));
     }
     let engine = BackwardEuler::per_element(cx, problem.mesh, &capacities).map_err(lower)?;
+    // One exact geometric binding per spatial rung is shared by both time
+    // grids and every outer natural, air, radiation and reverse evaluation.
+    let enclosure = radiation.map(|lowering| lowering.bind_enclosure(cx, problem))
+        .transpose().map_err(lower)?.flatten();
     let workload = Workload::bind(cx, spec, policy, problem.mesh, labels, region_ids, deadline)?;
     let coarse = march(
         cx,
@@ -885,6 +930,7 @@ pub(super) fn solve(
         linear,
         nonlinear,
         radiation,
+        enclosure.as_ref(),
         airflow,
         natural,
         pressure_pa,
@@ -904,6 +950,7 @@ pub(super) fn solve(
         linear,
         nonlinear,
         radiation,
+        enclosure.as_ref(),
         airflow,
         natural,
         pressure_pa,
@@ -921,7 +968,7 @@ pub(super) fn solve(
             let derivative = adjoint::finish(cx, spec, &engine, problem, interfaces, &grids.fine,
                 workload.as_ref(), StepConfig { linear, energy_tolerance_j: policy.energy_tolerance.value },
                 nonlinear, labels, region_ids, goal_region.expect("admitted goal region"),
-                radiation, natural_coupling.as_ref(), airflow, tape, objective, deadline)?;
+                radiation, enclosure.as_ref(), natural_coupling.as_ref(), airflow, tape, objective, deadline)?;
             format!(",\"adjoint\":{derivative}")
         }
         None => String::new(),
@@ -969,8 +1016,13 @@ pub(super) fn solve(
     };
     let radiation_trials = coarse.radiation_trials + fine.radiation_trials;
     let radiation_receipt = if let Some(lowering) = radiation {
+        let method = if enclosure.is_some() {
+            "implicit-closed-gray-diffuse-enclosure"
+        } else {
+            "implicit-area-mean-gray-radiation"
+        };
         format!(
-            "{{\"method\":\"implicit-area-mean-gray-radiation\",\"max_trials_per_step\":{},\"max_trials_per_coupling_iteration\":{},\"max_krylov_iterations_per_solid_solve\":{},\"max_krylov_iterations_per_step\":{max_krylov_per_step},\"coarse_trials\":{},\"fine_trials\":{},\"total_trials\":{radiation_trials},\"maximum_physical_energy_residual_j\":{},\"history\":\"unchanged-physical-old-temperature-in-every-trial\",\"nonlinear_detail\":\"per-step nonlinear rows describe the final inner solve; radiation rows include that evaluation's trials; trajectory counters include every outer convection evaluation\"}}",
+            "{{\"method\":\"{method}\",\"max_trials_per_step\":{},\"max_trials_per_coupling_iteration\":{},\"max_krylov_iterations_per_solid_solve\":{},\"max_krylov_iterations_per_step\":{max_krylov_per_step},\"coarse_trials\":{},\"fine_trials\":{},\"total_trials\":{radiation_trials},\"maximum_physical_energy_residual_j\":{},\"history\":\"unchanged-physical-old-temperature-in-every-trial\",\"nonlinear_detail\":\"per-step nonlinear rows describe the final inner solve; radiation rows include that evaluation's trials; trajectory counters include every outer convection evaluation\"}}",
             max_solid_solves_per_step, lowering.config.max_iterations, linear.max_iterations,
             coarse.radiation_trials, fine.radiation_trials,
             number(coarse.maximum_physical_energy_residual_j
@@ -1081,15 +1133,13 @@ pub(super) fn solve(
     let endpoint = fine.endpoint;
     let endpoint_dt = fine.endpoint_dt_s;
     let endpoint_storage_w = endpoint.stored_energy_change_j / endpoint_dt;
-    let endpoint_energy_residual_w = endpoint.energy_residual_j / endpoint_dt;
-    let net_w =
-        endpoint.source_w + endpoint.dirichlet_in_w - endpoint.neumann_out_w - endpoint.robin_out_w;
-    let scale_w = endpoint
-        .source_w
-        .abs()
-        .max(endpoint.dirichlet_in_w.abs())
-        .max(endpoint.neumann_out_w.abs())
-        .max(endpoint.robin_out_w.abs())
+    let energy = fine.endpoint_energy;
+    let endpoint_energy_residual_w = energy.energy_residual_j / endpoint_dt;
+    let net_w = energy.net_input_w;
+    let scale_w = endpoint.source_w.abs()
+        .max(energy.dirichlet_in_w.abs())
+        .max(energy.neumann_out_w.abs())
+        .max(energy.robin_out_w.abs())
         .max(f64::MIN_POSITIVE);
     let mut linear_evidence = coarse.linear;
     for mut row in fine.linear {
@@ -1130,9 +1180,9 @@ pub(super) fn solve(
         linear: linear_evidence,
         energy: EnergyBalance {
             source_w: endpoint.source_w,
-            neumann_out_w: endpoint.neumann_out_w,
-            robin_out_w: endpoint.robin_out_w,
-            dirichlet_in_w: endpoint.dirichlet_in_w,
+            neumann_out_w: energy.neumann_out_w,
+            robin_out_w: energy.robin_out_w,
+            dirichlet_in_w: energy.dirichlet_in_w,
             closure_w: net_w,
             scale_w,
         },
@@ -1155,9 +1205,14 @@ pub(super) fn solve(
         report,
     };
     let solution = match fine.radiation {
-        Some(endpoint) => radiation::SolidSolution::from_radiative_endpoint(
-            conduction, endpoint.combined_boundary, endpoint.convective_robin_fluxes,
-            endpoint.convective_out_w, endpoint.report,
+        Some(RadiativeEndpoint::Ambient {
+            combined_boundary, convective_robin_fluxes, convective_out_w, report,
+        }) => radiation::SolidSolution::from_radiative_endpoint(
+            conduction, combined_boundary, convective_robin_fluxes, convective_out_w, report,
+        ),
+        Some(RadiativeEndpoint::Enclosure(endpoint)) => radiation::SolidSolution::from_enclosure_endpoint(
+            conduction, enclosure.ok_or_else(|| bad("final enclosure endpoint lost its bound model"))?,
+            endpoint,
         ),
         None => radiation::SolidSolution::from_conduction(conduction),
     };
@@ -1172,3 +1227,4 @@ pub(super) fn solve(
         endpoint_energy_residual_w,
     })
 }
+

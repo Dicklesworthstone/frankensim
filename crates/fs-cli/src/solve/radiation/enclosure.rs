@@ -32,8 +32,9 @@ pub(super) struct EnclosureResult {
 
 enum EnclosureReport {
     Steady(CoupledRadiationReport),
-    Enthalpy {
+    Transient {
         radiation: EnthalpyEnclosureReport,
+        time_integration: &'static str,
         dt_s: f64,
         residual_j: f64,
         threshold_j: f64,
@@ -45,7 +46,7 @@ fn bad(what: impl Into<String>) -> SolveRefusal {
     conduction_error(
         "cli-solve-conduction-enclosure",
         what,
-        "declare a closed enclosure with sourced emissivities, explicit ordered view factors, and positive convective traces; transient storage requires the total-enthalpy model and prescribed convection",
+        "declare a closed enclosure with sourced emissivities, explicit ordered view factors, positive convective traces, and explicit capacity or total-enthalpy storage for a trajectory",
     )
 }
 
@@ -79,22 +80,6 @@ pub(super) fn lower(
             "ambient-reservoir and closed-enclosure radiation cannot own the same native model",
         ));
     }
-    if let Some(time) = &setup.transient {
-        if time.enthalpy.is_none() {
-            return Err(bad(
-                "native transient enclosure exchange requires declared total-enthalpy storage; capacity-only storage is not connected",
-            ));
-        }
-        if setup.boundaries.iter().any(|boundary| matches!(
-            boundary.condition,
-            ThermalBoundaryCondition::NaturalConvection { .. }
-                | ThermalBoundaryCondition::AirflowConvection { .. }
-        )) || spec.outputs.iter().flatten().any(|output| output.name.contains("adjoint")) {
-            return Err(bad(
-                "transient enclosure exchange currently requires prescribed convection and forward outputs; natural/airflow coupling and history adjoints need the complete enclosure feedback",
-            ));
-        }
-    }
     if spec
         .solver
         .as_ref()
@@ -107,19 +92,26 @@ pub(super) fn lower(
             "enclosure adaptive goals and continuum mean bounds require their own complete enclosure error estimator; a frozen radiative load is not that model",
         ));
     }
-    let mut adjoint = false;
-    for output in spec.outputs.iter().flatten().filter(|output| output.name.contains("adjoint")) {
-        if !matches!(output.name.as_str(),
-            "temperature-max-adjoint" | "temperature-max-contact-adjoint"
-                | "temperature-max-boundary-adjoint" | "temperature-max-contact-boundary-adjoint"
-                | "temperature-volume-mean-adjoint")
-        {
-            return Err(bad("the requested enclosure adjoint is not a supported native steady objective"));
+    if setup.transient.is_some() {
+        // The trajectory owner admits final/selected-prefix goals and rejects
+        // steady objectives before any physical solve. It also owns the
+        // storage, differentiated natural-card and time-grid contracts.
+        super::super::transient::admit(spec)?;
+    } else {
+        let mut adjoint = false;
+        for output in spec.outputs.iter().flatten().filter(|output| output.name.contains("adjoint")) {
+            if !matches!(output.name.as_str(),
+                "temperature-max-adjoint" | "temperature-max-contact-adjoint"
+                    | "temperature-max-boundary-adjoint" | "temperature-max-contact-boundary-adjoint"
+                    | "temperature-volume-mean-adjoint")
+            {
+                return Err(bad("the requested enclosure adjoint is not a supported native steady objective"));
+            }
+            adjoint = true;
         }
-        adjoint = true;
-    }
-    if adjoint {
-        super::super::nominal_adjoint::requested(spec)?;
+        if adjoint {
+            super::super::nominal_adjoint::requested(spec)?;
+        }
     }
     if !(2..=64).contains(&declaration.surfaces.len()) {
         return Err(bad("a native enclosure needs 2..=64 ordered surfaces"));
@@ -334,14 +326,15 @@ impl EnclosureResult {
         &self.model
     }
 
-    pub(super) fn from_enthalpy(
+    pub(super) fn from_transient(
         model: GrayDiffuseEnclosure,
         endpoint: &super::EnclosureEndpoint,
     ) -> Self {
         Self {
             model,
-            report: EnclosureReport::Enthalpy {
+            report: EnclosureReport::Transient {
                 radiation: endpoint.report.clone(),
+                time_integration: endpoint.time_integration,
                 dt_s: endpoint.dt_s,
                 residual_j: endpoint.physical_residual_norm_j,
                 threshold_j: endpoint.physical_residual_tolerance_j,
@@ -375,15 +368,15 @@ impl EnclosureResult {
                     num(report.equilibrium.residual_threshold_w)?,
                 ),
             ),
-            EnclosureReport::Enthalpy {
-                radiation, dt_s, residual_j, threshold_j, energy_residual_j,
+            EnclosureReport::Transient {
+                radiation, time_integration, dt_s, residual_j, threshold_j, energy_residual_j,
             } => (
                 &radiation.radiosity,
                 radiation.applied_heat_w.as_slice(),
                 radiation.applied_heat_w.iter().sum(),
                 format!(
-                    "\"time_integration\":\"backward-euler-total-enthalpy\",\"time_step_s\":{},\"solid_solves\":{},\"solid_iterations\":{},\"krylov_iterations\":{},\"max_heat_mismatch_w\":{},\"nonlinear_residual_j\":{},\"nonlinear_residual_threshold_j\":{},\"nonlinear_residual_w\":{},\"nonlinear_residual_threshold_w\":{},\"physical_energy_residual_j\":{}",
-                    num(*dt_s)?, radiation.iterations, radiation.solid_iterations,
+                    "\"time_integration\":{},\"time_step_s\":{},\"solid_solves\":{},\"solid_iterations\":{},\"krylov_iterations\":{},\"max_heat_mismatch_w\":{},\"nonlinear_residual_j\":{},\"nonlinear_residual_threshold_j\":{},\"nonlinear_residual_w\":{},\"nonlinear_residual_threshold_w\":{},\"physical_energy_residual_j\":{}",
+                    json_string(time_integration), num(*dt_s)?, radiation.iterations, radiation.solid_iterations,
                     radiation.krylov_iterations, num(radiation.max_heat_mismatch_w)?,
                     num(*residual_j)?, num(*threshold_j)?,
                     num(*residual_j / *dt_s)?, num(*threshold_j / *dt_s)?,
@@ -460,4 +453,4 @@ impl EnclosureResult {
     }
 }
 
-const SCOPE: &str = "Card-backed opaque gray-diffuse closed-enclosure exchange between exact native P1 boundary traces. User-declared view factors are checked for row closure and actual-area reciprocity on every mesh, not generated or geometrically validated. The shared owner checks the full fresh nonlinear residual; original convection alone exchanges heat with reservoirs or air, while mutual radiation is internal. Emissivity is frozen at its selected material-card query and retains its source validity. Surface names and matrix order are explicit. Total-enthalpy endpoints keep the same old physical enthalpy in every trial and report complete storage/heat residuals in joules; their separate trajectory receipt retains both time grids and all trial work. This receipt describes the accepted primal endpoint; requested steady derivatives have their own complete-transpose receipt. No continuum error bound, shadowing reconstruction, participating medium, temperature-dependent emissivity or experimental validation is claimed. Solid-solves counts work in this retained enclosure endpoint; nested natural/air iteration counts remain in their own receipts.";
+const SCOPE: &str = "Card-backed opaque gray-diffuse closed-enclosure exchange between exact native P1 boundary traces. User-declared view factors are checked for row closure and actual-area reciprocity on every mesh, not generated or geometrically validated. The shared owner checks the full fresh nonlinear residual; original convection alone exchanges heat with reservoirs or air, while mutual radiation is internal. Emissivity is frozen at its selected material-card query and retains its source validity. Surface names and matrix order are explicit. Capacity and total-enthalpy endpoints keep the same accepted temperature or enthalpy history in every radiation, natural-convection and air trial and report complete storage/heat residuals in joules; their separate trajectory receipt retains both time grids and all trial work. This receipt describes the accepted primal endpoint; requested steady or final/sampled-peak trajectory derivatives have their own complete-transpose receipt. No continuum error bound, shadowing reconstruction, participating medium, temperature-dependent emissivity or experimental validation is claimed. Solid-solves counts work in this retained enclosure endpoint; nested natural/air iteration counts remain in their own receipts.";

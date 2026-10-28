@@ -1,8 +1,15 @@
-//! Native total-enthalpy enclosure histories through import, solve, QoI and report.
+//! Native capacity and total-enthalpy enclosure histories, controls and reports.
 //! Equal-area tetrahedral patches are an algebraic exchange fixture, not a
 //! claim that these two finite faces geometrically close a real enclosure.
 
 use super::*;
+
+#[path = "transient_enclosure/adjoint.rs"]
+mod adjoint;
+#[path = "transient_enclosure/capacity.rs"]
+mod capacity;
+#[path = "transient_enclosure/capacity_adjoint.rs"]
+mod capacity_adjoint;
 use fs_project::{
     ConductionEnclosure, ConductionTransient, EnclosureRadiatingSurface,
     EnclosureViewFactorEvidence, TransientEnthalpy, TransientEnthalpyKnot,
@@ -146,6 +153,17 @@ fn run(spec: &ProjectSpec, cards: &CardPackSet) -> Solved {
     let ledger = Ledger::open(":memory:").unwrap();
     import_fixture(&ledger, spec, tetra_stl());
     let (run, qoi, conduction, field) = run_conjugate_to_completion(&ledger, &decoded, cards);
+    let retained = J::parse(&conduction).unwrap();
+    let history = retained.get("transient").unwrap();
+    let last = history.get("fine").unwrap().as_array().unwrap().last().unwrap();
+    let energy = retained.get("energy").unwrap();
+    // The common endpoint report and trajectory must describe the same fresh
+    // physical heat law, including dynamic convection and prescribed storage.
+    let net_w = n(energy, "source_w") + n(energy, "dirichlet_in_w")
+        - n(energy, "neumann_out_w") - n(energy, "robin_out_w");
+    close(net_w, n(last, "net_input_w"), 2e-8);
+    close(n(energy, "storage_w"), n(last, "stored_energy_change_j") / n(last, "dt_s"), 2e-8);
+    close(n(energy, "closure_w"), n(last, "energy_residual_j") / n(last, "dt_s"), 2e-8);
     let receipts = stage_receipt_hashes(&ledger, &run);
     let report = String::from_utf8(artifact_bytes(&ledger, &receipts[6])).unwrap();
     let html = String::from_utf8(artifact_bytes(&ledger,
@@ -325,71 +343,32 @@ fn g3_native_enthalpy_enclosure_ladder_rebinds_trace_and_shares_trajectory_allow
 }
 
 #[test]
-fn g0_native_transient_enclosure_refuses_unjoined_storage_feedback_and_adjoints() {
+fn g0_native_transient_enclosure_refuses_incompatible_goals_and_adaptive_claims() {
     let (cards, card) = radiation_product::emissivity_cards(&fixture_cards(), EPSILON);
-    for variant in ["capacity-only", "natural", "airflow", "adjoint"] {
+    for variant in ["steady-adjoint", "adaptive", "mean-bound"] {
         let mut spec = project(&card);
         match variant {
-            "capacity-only" => {
-                let policy = time(&mut spec);
-                policy.enthalpy = None;
-                policy.capacities = vec![TransientRegionCapacity {
-                    region: "air".into(),
-                    volumetric_heat_capacity: QtyAny::new(DENSITY * CP, dims::VOLUMETRIC_HEAT_CAPACITY),
-                    source: "synthetic positive capacity".into(),
-                }];
-            }
-            "natural" => {
-                spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap().boundaries[0].condition =
-                    ThermalBoundaryCondition::NaturalConvection {
-                        characteristic_length: QtyAny::new(1.0, dims::LENGTH),
-                        ambient_temperature: QtyAny::new(290.0, dims::TEMPERATURE),
-                        correlation: "convection.churchill-chu-vertical-plate".into(),
-                    };
-            }
-            "airflow" => {
-                spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap().boundaries[0].condition =
-                    ThermalBoundaryCondition::AirflowConvection {
-                        branch: "air".into(), order: 0,
-                        inlet_temperature: QtyAny::new(290.0, dims::TEMPERATURE),
-                        hydraulic_diameter: QtyAny::new(0.02, dims::LENGTH),
-                        flow_area: QtyAny::new(0.004, dims::AREA),
-                        channel_length: QtyAny::new(0.3, dims::LENGTH),
-                        correlation: "convection.gnielinski".into(),
-                    };
-            }
+            "adaptive" => spec.solver.as_mut().unwrap().fidelity = "adaptive".into(),
             _ => spec.outputs.as_mut().unwrap().push(OutputRequest {
-                name: "temperature-final-adjoint".into(), kind: "report".into(), region: None,
+                name: if variant == "steady-adjoint" {
+                    "temperature-max-adjoint"
+                } else {
+                    "temperature-volume-mean-bound"
+                }.into(),
+                kind: "report".into(), region: None,
             }),
         }
-        let source = print_sexpr(&spec).unwrap();
-        let decoded = fs_project::parse_sexpr(&source).unwrap();
+        let decoded = fs_project::parse_sexpr(&print_sexpr(&spec).unwrap()).unwrap();
         let ledger = Ledger::open(":memory:").unwrap();
-        if variant != "adjoint" {
-            let expected = if variant == "capacity-only" {
-                "project-enclosure-radiation-transient"
-            } else {
-                "project-enclosure-radiation-transient-boundary"
-            };
-            let findings = decoded.findings();
-            assert!(findings.iter().any(|finding| finding.code == expected),
-                "{variant}: {findings:?}");
-            let mut progress = Vec::new();
-            let error = run_solve(&ledger, &CancelGate::new_clock_free(),
-                &mut benign_clock(), &decoded, &cards, &mut progress).unwrap_err();
-            assert_eq!(error.code, "cli-solve-project-invalid", "{variant}: {error:?}");
-            assert!(error.run.is_none());
-            assert!(error.stage.is_none());
-            assert!(progress.is_empty());
-            assert!(ledger.visible_op_ids(fs_ledger::MAIN_BRANCH, None).unwrap().is_empty());
-            continue;
-        }
-        assert!(decoded.findings().is_empty(), "{variant}: {:?}", decoded.findings());
         import_fixture(&ledger, &spec, tetra_stl());
         let error = run_solve(&ledger, &CancelGate::new_clock_free(), &mut benign_clock(),
             &decoded, &cards, &mut Vec::new()).unwrap_err();
-        assert!(error.what.contains("enclosure"), "{variant}: {error:?}");
-        assert_eq!(stage_receipt_hashes(&ledger, error.run.as_ref().unwrap()).len(), 4,
-            "{variant}: an unsupported trajectory must publish no conduction field");
+        assert!(error.what.contains("steady") || error.what.contains("adaptive")
+            || error.what.contains("bound") || error.what.contains("trajectory"),
+            "{variant}: {error:?}");
+        if let Some(run) = &error.run {
+            assert!(stage_receipt_hashes(&ledger, run).len() <= 4,
+                "{variant}: an unsupported objective must publish no conduction field");
+        }
     }
 }

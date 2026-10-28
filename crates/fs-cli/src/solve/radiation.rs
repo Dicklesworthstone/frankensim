@@ -164,13 +164,14 @@ fn resolve_emissivity(
     ))
 }
 
-/// Last accepted total-enthalpy enclosure endpoint. The model is bound once
+/// Last accepted enclosure endpoint for either declared storage coordinate. The model is bound once
 /// per spatial rung; only endpoint evidence is retained between time steps.
 pub(super) struct EnclosureEndpoint {
     pub(super) combined_boundary: fs_conduction::ThermalBoundary,
     pub(super) convective_robin_fluxes: Vec<RobinFlux>,
     pub(super) convective_out_w: f64,
     pub(super) report: EnthalpyEnclosureReport,
+    pub(super) time_integration: &'static str,
     pub(super) dt_s: f64,
     pub(super) physical_residual_norm_j: f64,
     pub(super) physical_residual_tolerance_j: f64,
@@ -227,7 +228,7 @@ impl SolidSolution {
         model: GrayDiffuseEnclosure,
         endpoint: EnclosureEndpoint,
     ) -> Self {
-        let enclosure = enclosure::EnclosureResult::from_enthalpy(model, &endpoint);
+        let enclosure = enclosure::EnclosureResult::from_transient(model, &endpoint);
         Self {
             conduction,
             convective_fluxes: Some(endpoint.convective_robin_fluxes),

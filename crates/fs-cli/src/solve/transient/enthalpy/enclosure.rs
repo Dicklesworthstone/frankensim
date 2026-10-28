@@ -71,6 +71,7 @@ pub(super) fn advance(
             convective_robin_fluxes: solved.convective_robin_fluxes,
             convective_out_w: solved.convective_out_w,
             report: solved.radiation,
+            time_integration: "backward-euler-total-enthalpy",
             dt_s,
             physical_residual_norm_j: solved.physical_residual_norm_j,
             physical_residual_tolerance_j: solved.physical_residual_tolerance_j,

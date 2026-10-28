@@ -164,7 +164,6 @@ impl Controls {
             finite(weight)?;
             finite(temperature[vertex])?;
         }
-        let mut regions = Vec::with_capacity(m);
         let mut htc = zeros(m)?;
         let mut reference_k = zeros(m)?;
         for (index, name) in bound.names.iter().enumerate() {
@@ -189,34 +188,10 @@ impl Controls {
             if *h <= 0.0 {
                 return Err(bad("enthalpy parameter control has nonpositive convection"));
             }
-            regions.push(region);
         }
-        let mut references = zeros(m)?;
-        let mut log_htc = zeros(m)?;
-        for (slot, face) in problem.mesh.boundary().iter().enumerate() {
-            if slot % 256 == 0 {
-                poll(cx, deadline)?;
-            }
-            let Some(index) = problem
-                .boundary
-                .region_for(slot)
-                .and_then(|region| regions.iter().position(|&found| found == region))
-            else {
-                continue;
-            };
-            for (a, &row) in face.vertices.iter().enumerate() {
-                let weight = load_weights[row as usize];
-                references[index] =
-                    finite(references[index] + weight * htc[index] * face.area / 3.0)?;
-                for (b, &column) in face.vertices.iter().enumerate() {
-                    let mass = htc[index] * (face.area / 12.0) * if a == b { 2.0 } else { 1.0 };
-                    log_htc[index] = finite(
-                        log_htc[index]
-                            + weight * mass * (reference_k[index] - temperature[column as usize]),
-                    )?;
-                }
-            }
-        }
+        let (references, log_htc) = super::super::robin_controls::partials(
+            cx, problem, temperature, &bound.names, load_weights, deadline,
+        )?;
         for (index, control) in self.natural.iter_mut().enumerate() {
             if bound.names[index] != control.target || reference_k[index] != control.ambient_k {
                 return Err(bad(

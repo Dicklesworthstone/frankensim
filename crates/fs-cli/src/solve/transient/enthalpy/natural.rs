@@ -12,6 +12,7 @@ use super::*;
 pub(super) struct NaturalStep {
     pub(super) endpoint: EnthalpyStepSolution,
     pub(super) radiation: Option<RadiativeEndpoint>,
+    pub(super) enclosure: Option<radiation::EnclosureEndpoint>,
     pub(super) radiation_evidence: String,
     pub(super) applied_boundary: fs_conduction::ThermalBoundary,
     pub(super) applied_coefficients: BTreeMap<String, f64>,
@@ -72,6 +73,7 @@ pub(super) fn advance(
     dt_s: f64,
     config: EnthalpyStepConfig,
     radiation: Option<&radiation::LoweredRadiation>,
+    enclosure: Option<&fs_conduction::radiation::GrayDiffuseEnclosure>,
     laws: &[boundary_law::NaturalLaw],
     pressure_pa: f64,
     deadline: Option<(Instant, f64)>,
@@ -120,7 +122,6 @@ pub(super) fn advance(
     let max_endpoint_evaluations = boundary_law::MAX_ITERATIONS
         .checked_mul(2)
         .ok_or_else(|| bad("natural-convection endpoint allowance overflows"))?;
-    let patches = radiation.map(|lowering| lowering.patches.as_slice());
     let mut solid_solves = 0;
     let mut krylov_iterations = 0;
     let mut nonlinear_updates = 0;
@@ -158,18 +159,10 @@ pub(super) fn advance(
             // This evaluates the current FROZEN natural coefficient, avoiding
             // an undefined natural-card query at an ambient initial state.
             count(&mut endpoint_evaluations, 1, max_endpoint_evaluations)?;
-            let initial = engine
-                .evaluate_endpoint(
-                    cx,
-                    trial_problem,
-                    interfaces,
-                    old,
-                    &initial_candidate,
-                    dt_s,
-                    config,
-                    patches,
-                )
-                .map_err(failed)?;
+            let initial = radiative::evaluate(
+                cx, engine, trial_problem, interfaces, old, &initial_candidate,
+                dt_s, config, radiation, enclosure,
+            )?;
             inner.newton.absolute_tolerance = config.newton.absolute_tolerance.min(target * 0.125);
             inner.newton.relative_tolerance = tighter_relative(
                 config.newton.relative_tolerance,
@@ -177,49 +170,18 @@ pub(super) fn advance(
                 initial.residual_norm_j,
             )?;
         }
-        let (endpoint, radiation_evidence, radiative) = if let Some(lowering) = radiation {
-            let solved = engine
-                .advance_with_ambient_radiation(
-                    cx,
-                    trial_problem,
-                    interfaces,
-                    old,
-                    dt_s,
-                    inner,
-                    &lowering.patches,
-                    lowering.config,
-                )
-                .map_err(failed)?;
-            count(
-                &mut solid_solves,
-                solved.radiation.iterations,
-                max_solid_solves,
+        let (endpoint, radiation_evidence, ambient, enclosed) = if let Some(lowering) = radiation {
+            let solved = radiative::advance(
+                cx, engine, trial_problem, interfaces, old, dt_s, inner,
+                lowering, enclosure, deadline,
             )?;
-            count(
-                &mut radiation_trials,
-                solved.radiation.iterations,
-                max_solid_solves,
-            )?;
-            count(
-                &mut krylov_iterations,
-                solved.radiation.krylov_iterations,
-                max_krylov,
-            )?;
-            count(
-                &mut nonlinear_updates,
-                solved.radiation.solid_iterations,
-                max_updates,
-            )?;
+            count(&mut solid_solves, solved.solid_solves, max_solid_solves)?;
+            count(&mut radiation_trials, solved.solid_solves, max_solid_solves)?;
+            count(&mut krylov_iterations, solved.krylov_iterations, max_krylov)?;
+            count(&mut nonlinear_updates, solved.updates, max_updates)?;
             maximum_radiation_energy_residual_j =
-                maximum_radiation_energy_residual_j.max(solved.physical_energy_residual_j.abs());
-            let evidence = radiation_step_row(&solved)?;
-            let radiative = RadiativeEndpoint {
-                combined_boundary: solved.combined_boundary,
-                convective_robin_fluxes: solved.convective_robin_fluxes,
-                convective_out_w: solved.convective_out_w,
-                report: solved.radiation,
-            };
-            (solved.conduction, evidence, Some(radiative))
+                maximum_radiation_energy_residual_j.max(solved.energy_residual_j.abs());
+            (solved.endpoint, solved.evidence, solved.ambient, solved.enclosure)
         } else {
             let endpoint = engine
                 .advance(cx, trial_problem, interfaces, old, dt_s, inner)
@@ -233,14 +195,10 @@ pub(super) fn advance(
             for row in &endpoint.newton.history {
                 count(&mut krylov_iterations, row.linear_iterations, max_krylov)?;
             }
-            (endpoint, "null".to_string(), None)
+            (endpoint, "null".to_string(), None, None)
         };
         poll(cx, deadline)?;
-        let fluxes = radiative
-            .as_ref()
-            .map_or(endpoint.robin_fluxes.as_slice(), |result| {
-                result.convective_robin_fluxes.as_slice()
-            });
+        let fluxes = radiative::fluxes(&endpoint, ambient.as_ref(), enclosed.as_ref());
         let mut next = BTreeMap::new();
         let mut points = Vec::with_capacity(laws.len());
         let mut worst_change = 0.0_f64;
@@ -268,21 +226,11 @@ pub(super) fn advance(
             .with_uniform_robin_replacements(&physical_rows)
             .map_err(lower)?;
         count(&mut endpoint_evaluations, 1, max_endpoint_evaluations)?;
-        let physical = engine
-            .evaluate_endpoint(
-                cx,
-                ConductionProblem {
-                    boundary: &physical_boundary,
-                    ..problem
-                },
-                interfaces,
-                old,
-                &endpoint.specific_enthalpy_j_kg,
-                dt_s,
-                config,
-                patches,
-            )
-            .map_err(failed)?;
+        let physical = radiative::evaluate(
+            cx, engine, ConductionProblem { boundary: &physical_boundary, ..problem },
+            interfaces, old, &endpoint.specific_enthalpy_j_kg, dt_s, config,
+            radiation, enclosure,
+        )?;
         let target = match physical_target {
             Some(target) => target,
             None => {
@@ -329,7 +277,8 @@ pub(super) fn advance(
             let receipt = boundary_law::receipt_fragment(&converged, iteration)?;
             return Ok(NaturalStep {
                 endpoint,
-                radiation: radiative,
+                radiation: ambient,
+                enclosure: enclosed,
                 radiation_evidence,
                 applied_boundary: boundary,
                 applied_coefficients: coefficients,

@@ -2475,13 +2475,20 @@ mismatch, radiosity residual and the convection/radiation decomposition.
 
 The native report exposes the radiation model, and QoI propagation retains
 the existing radiation-on/off model sensitivity without turning that
-comparison into an omitted-physics bound. Driver 84 also connects native
-total-enthalpy trajectories and complete steady enclosure derivatives.
+comparison into an omitted-physics bound. Driver 84 connects native
+total-enthalpy trajectories and complete steady enclosure derivatives;
+driver 86 completes both transient storage coordinates and their dynamic
+boundary and selected-trajectory derivative paths.
 
-With declared total-enthalpy storage and prescribed positive convection,
-the native driver binds the same exact enclosure on every spatial rung and
-uses `HeterogeneousEnthalpyBackwardEuler::advance_with_enclosure_radiation`.
-The same accepted old enthalpy is supplied to every trial. Both independent
+With declared total-enthalpy storage, the native driver binds the same exact
+enclosure on every spatial rung and uses
+`HeterogeneousEnthalpyBackwardEuler::advance_with_enclosure_radiation`.
+Declared regional volumetric capacities instead use
+`BackwardEuler::advance_prescribed_with_enclosure_radiation`, preserving
+the actual capacity matrix and the full smooth `k(T)` tangent. No density or
+phase chart is inferred for capacity storage. Both storage owners share exact
+patch binding, reflected radiosity and physical heat decomposition. Every
+inner solve keeps the same accepted old temperature or enthalpy. Both independent
 time grids include authored workload events, preserve heterogeneous
 conductivity, phase multipliers and finite-resistance contact, and count all
 radiation/Newton/Krylov work. History advances only after the complete fresh
@@ -2490,6 +2497,13 @@ Neumann heat remain external; mutual exchange remains internal. The final
 enclosure receipt retains patch heat, reflected radiosity, exact view-factor
 identity and physical residuals in joules and watts. The existing spatial
 ladder shares one forward-step allowance across all complete trajectories.
+
+Natural-convection and transported-air loops call the same radiation dispatcher
+for both storage models. Each outer acceptance independently re-evaluates the
+unchanged candidate with fresh radiosity, actual natural coefficients and actual
+air references. Only original convection heats the air. Original Neumann heat,
+closed internal exchange and prescribed-temperature reaction, including fixed
+node storage, remain separate in common trajectory and endpoint energy reports.
 
 Steady `temperature-max-adjoint`, contact variants and the volume-mean
 objective use the shared `pullback_gray_diffuse_enclosure` owner. The lab
@@ -2507,10 +2521,20 @@ air heat ledger. Prescribed-temperature controls use the complete lift,
 including fixed vertices in radiating patch means. A shared unchanged-field
 convection binder also supplies the ambient coupled and prescribed-lift paths.
 
-Capacity-only enclosure trajectories, transient enclosure adjoints,
-transient natural/airflow coupling, temperature-dependent emissivity,
-adaptive enclosure goals and continuum
-mean bounds retain explicit refusals. The driver never performs a
+Final and sampled-peak trajectory adjoints consume only the selected prefix of
+the accepted fine grid. They freshly revalidate every consumed physical state
+against its original taped residual and energy targets, then compose the complete
+reflected tangent with material, natural and air feedback. Capacity history uses
+`C/dt + J(T)` directly; enthalpy history uses its heterogeneous storage and phase
+charts. Existing initial-state, regional power, storage, original convection,
+material/contact, natural-reservoir, air-inlet and fan controls share that dual;
+per-surface absolute emissivity controls use the same shared radiosity transpose.
+Future interval controls have zero influence on an earlier selected peak. A true
+all-prescribed capacity endpoint retains its exact zero residual target without
+inflating the allowance. Requesting derivatives leaves the forward field unchanged.
+
+Temperature-dependent emissivity, native flux-only enclosure patches, adaptive
+enclosure goals and continuum mean bounds retain explicit refusals. The driver never performs a
 frozen-enclosure algebraic goal correction or presents its fixed-load linear
 roundoff calculation as an enclosure bound. Results remain Estimated.
 
@@ -2522,7 +2546,12 @@ two-patch matrix exercises algebraic enclosure exchange and does not claim
 finite-geometry view-factor validation. Additional regressions in
 `tests/solve/transient_enclosure.rs` cover original-convection/storage
 balance, an independent latent-plateau energy oracle, event-aligned workloads,
-cached deterministic replay and shared spatial/time work limits.
+cached deterministic replay and shared spatial/time work limits. Its capacity
+child compares genuine volumetric storage with independently declared sensible
+enthalpy charts, exercises smooth `k(T)` and all dynamic boundary combinations,
+and checks the shared spatial/time allowance. Its derivative children exercise
+physical finite differences, initial/interior sampled peaks, unchanged forward
+fields and mixed natural/air/fan/emissivity controls.
 `tests/native_uncertainty/nominal_adjoint/enclosure.rs` exercises native
 max/mean physical perturbations, natural reservoir, multisegment air,
 nonunit fan-speed and prescribed-temperature controls, and one-probe reuse
