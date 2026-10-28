@@ -181,6 +181,41 @@ impl ThermochemicalGasModel {
         Ok(revised)
     }
 
+    /// Resolve a generated composition from nonnegative species amounts [mol].
+    ///
+    /// Amounts use this bank's canonical species order. Only exact zeros are
+    /// omitted; a positive amount that cannot be represented as a positive
+    /// mole fraction refuses instead of silently losing a reaction product.
+    /// The existing generated-simplex closure corrects floating-point roundoff
+    /// before the original composition owner checks its exact unit sum. Every
+    /// surviving NASA-9, transport, water and pack identity is retained.
+    /// This changes an immutable constitutive model, not parcel mass or energy.
+    pub fn with_mole_amounts(&self, amounts: &[fs_qty::Amount]) -> Result<Self, MaterialError> {
+        if amounts.len() != self.thermodynamics.components().len()
+            || amounts.iter().any(|amount| !amount.value().is_finite() || amount.value() < 0.0)
+        {
+            return Err(invalid("mole amounts must cover every source species and be finite/nonnegative"));
+        }
+        // Scaling first avoids overflowing a valid extensive inventory. It also
+        // makes composition independent of the caller's total parcel size.
+        let scale = amounts.iter().map(|amount| amount.value()).fold(0.0_f64, f64::max);
+        if !positive(scale) {
+            return Err(invalid("at least one positive species amount is required"));
+        }
+        let mut fractions: Vec<_> = amounts.iter().map(|amount| amount.value() / scale).collect();
+        let total: f64 = fractions.iter().sum();
+        for fraction in &mut fractions { *fraction /= total; }
+        if fractions.iter().zip(amounts).any(|(&fraction, amount)| amount.value() > 0.0 && !positive(fraction)) {
+            return Err(invalid("positive species amount has an unrepresentable mole fraction"));
+        }
+        fs_thermal::enthalpy::advection::species::close_generated_simplex(&mut fractions)
+            .map_err(|error| failure("generated mole composition", error))?;
+        let composition = fs_thermochem::Composition::new(
+            fs_thermochem::CompositionBasis::MoleFraction, fractions,
+        ).map_err(|error| failure("generated mole composition", error))?;
+        self.with_composition(composition)
+    }
+
     /// Resolve a declared vapor in equilibrium with liquid water. The caller
     /// chooses this phase condition explicitly; the ordinary frozen-gas
     /// evaluator makes no condensation claim. Uses the existing Buck owner

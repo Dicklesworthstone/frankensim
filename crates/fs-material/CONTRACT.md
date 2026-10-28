@@ -3704,6 +3704,26 @@ identity, impossible energy brackets and late cancellation.
 
 
 
+### Generated amounts and finite-rate gas reactors
+
+`ThermochemicalGasModel::with_mole_amounts` accepts nonnegative amounts in the
+bank's canonical species order and reuses the original exact-simplex and
+source-preserving composition owners. Largest-amount scaling avoids overflow
+while normalizing extensive inventories. Exact zeros may disappear; a positive
+amount that cannot retain a positive mole fraction refuses. The resulting
+immutable model retains active NASA-9, transport, water and source-pack identity.
+This constructor does not change parcel mass or energy.
+
+The L3 `fs-gas` optional `material` feature supplies the actual finite-rate
+consumer through `advance_closed_parcel_adiabatic`. It integrates a declared
+reversible elementary mechanism for a specified elapsed time, then uses the
+existing material composition/energy replacement to publish one common gas
+state. Original stored internal energy is the target; no extra reaction heat
+is applied. Mass and volume retain their original bits. Source identity,
+actual material balances, zero-duration identity and final cancellation are
+checked before publication. Kinetics stays in L3; this crate gains no time
+integrator dependency. The endpoint's acoustic composition remains frozen.
+
 ### Stable simultaneous species and additional-energy exchange
 
 `species::network::exchange_candidate_with_heat` combines original species

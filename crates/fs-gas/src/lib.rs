@@ -9,5 +9,11 @@
 /// Crate version retained by callers in their simulation records.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod chemistry;
+
 #[cfg(feature = "experimental-euler")]
 pub mod dynamics;
+
+/// Finite-rate updates of the existing source-bearing material gas parcel.
+#[cfg(feature = "material")]
+pub mod material;

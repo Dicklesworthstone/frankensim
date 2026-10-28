@@ -11,6 +11,41 @@ use fs_thermochem::{Composition, CompositionBasis, ElementalReferenceIdV1,
     StandardStateConventionV1, StandardStatePhaseV1, required_nasa9_parameter_dims,
     UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R};
 
+#[test]
+fn generated_mole_amounts_preserve_sources_and_extensive_scaling() {
+    let bank = model(vec![0.5, 0.5], 0.001);
+    let expected = bank.with_composition(
+        Composition::new(CompositionBasis::MoleFraction, vec![0.75, 0.25]).unwrap(),
+    ).unwrap();
+    for scale in [1.0e-280, 1.0, 1.0e280] {
+        let gas = bank.with_mole_amounts(&[
+            fs_qty::Amount::new(3.0 * scale), fs_qty::Amount::new(scale),
+        ]).unwrap();
+        assert_eq!(gas, expected);
+    }
+    // A normalized constitutive composition does not need a representable
+    // total amount; the largest-first scaling avoids an overflowing sum.
+    assert_eq!(bank.with_mole_amounts(&[
+        fs_qty::Amount::new(f64::MAX), fs_qty::Amount::new(f64::MAX),
+    ]).unwrap(), bank);
+    let pure = bank.with_mole_amounts(&[
+        fs_qty::Amount::new(0.0), fs_qty::Amount::new(2.0),
+    ]).unwrap();
+    assert_eq!(pure.thermodynamics().components(), &bank.thermodynamics().components()[1..]);
+    assert_eq!(pure.transport_materials(), &bank.transport_materials()[1..]);
+}
+
+#[test]
+fn generated_mole_amounts_refuse_lost_traces_and_invalid_inventories() {
+    let bank = model(vec![0.5, 0.5], 0.001);
+    for amounts in [vec![], vec![1.0], vec![0.0, 0.0], vec![-1.0, 2.0],
+        vec![f64::NAN, 1.0], vec![f64::INFINITY, 1.0], vec![f64::from_bits(1), f64::MAX]]
+    {
+        let amounts: Vec<_> = amounts.into_iter().map(fs_qty::Amount::new).collect();
+        assert!(bank.with_mole_amounts(&amounts).is_err());
+    }
+}
+
 pub(crate) fn species(name: &str, mass: f64, cp_r: f64, slope: f64) -> Nasa9StandardStateModelV1 {
     species_with_energy_reference(name, mass, cp_r, slope, 0.0)
 }

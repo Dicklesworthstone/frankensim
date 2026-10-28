@@ -1,5 +1,6 @@
 use super::{Conserved, Error, Primitive, poll, positive};
 use fs_qty::{Pressure, Temperature};
+use fs_thermochem::kinetics::{KineticsErrorV1, admit_caloric_interval};
 use fs_thermochem::mixture::{FrozenIdealGasMixtureEvaluationV1, FrozenIdealGasMixtureModelV1};
 
 /// Explicit source-temperature path and bounded caloric inversion controls.
@@ -68,39 +69,19 @@ impl FrozenGas {
             return Err(Error::Invalid("caloric domain or inversion controls"));
         }
         for component in source.components() {
-            poll(&mut cancelled)?;
-            let regions = component.regions();
-            let selected = |t| {
-                regions.iter().rposition(|r| {
-                    r.temperature_min().value() <= t && t <= r.temperature_max().value()
-                })
-            };
-            let first = selected(domain.minimum_temperature)
-                .ok_or(Error::CaloricPath("lower endpoint unsupported"))?;
-            let last = selected(domain.maximum_temperature)
-                .ok_or(Error::CaloricPath("upper endpoint unsupported"))?;
-            if first != last && component.caloric_reference().is_none() {
-                return Err(Error::CaloricPath(
-                    "cross-region flow requires explicit source caloric continuity",
-                ));
-            }
-            for i in first..=last {
-                if i > first
-                    && regions[i - 1].temperature_max().value()
-                        != regions[i].temperature_min().value()
-                {
-                    return Err(Error::CaloricPath("source temperature gap"));
+            admit_caloric_interval(
+                component,
+                Temperature::new(domain.minimum_temperature),
+                Temperature::new(domain.maximum_temperature),
+                &mut cancelled,
+            )
+            .map_err(|error| match error {
+                KineticsErrorV1::Cancelled => Error::Cancelled,
+                KineticsErrorV1::Invalid(reason) | KineticsErrorV1::Arithmetic(reason) => {
+                    Error::CaloricPath(reason)
                 }
-                let lo = regions[i]
-                    .temperature_min()
-                    .value()
-                    .max(domain.minimum_temperature);
-                let hi = regions[i]
-                    .temperature_max()
-                    .value()
-                    .min(domain.maximum_temperature);
-                positive_cv(*regions[i].coefficients(), lo, hi, &mut cancelled)?;
-            }
+                _ => Error::CaloricPath("shared thermochemical source-path admission refused"),
+            })?;
         }
         let reference_pressure = source.components()[0]
             .convention()
@@ -339,77 +320,6 @@ impl FrozenGas {
         }
         Err(Error::TemperatureIterations)
     }
-}
-
-// Each term is monotone on positive T. Directed rounding bounds each original
-// NASA-9 Cv/R monomial; subdivision resolves cancellation without sampling a
-// polynomial at a few points and mistaking that for positive-path admission.
-fn cv_lower_bound(a: [f64; 9], lo: f64, hi: f64) -> f64 {
-    let mut low = (a[2] - 1.0).next_down();
-    for (coefficient, lower, upper) in [
-        (a[0], (1.0 / hi).next_down(), (1.0 / lo).next_up()),
-        (a[1], (1.0 / hi).next_down(), (1.0 / lo).next_up()),
-        (a[3], lo, hi),
-        (a[4], lo, hi),
-        (a[5], lo, hi),
-        (a[6], lo, hi),
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(i, (c, l, h))| {
-        let power = match i {
-            0 => 2,
-            1 | 2 => 1,
-            3 => 2,
-            4 => 3,
-            _ => 4,
-        };
-        let (mut lower, mut upper) = (1.0_f64, 1.0_f64);
-        for _ in 0..power {
-            lower = (lower * l).next_down();
-            upper = (upper * h).next_up();
-        }
-        (c, lower, upper)
-    }) {
-        if coefficient == 0.0 {
-            continue;
-        }
-        let term = coefficient * if coefficient > 0.0 { lower } else { upper };
-        low = (low + term.next_down()).next_down();
-    }
-    low
-}
-fn positive_cv(
-    a: [f64; 9],
-    lo: f64,
-    hi: f64,
-    cancelled: &mut impl FnMut() -> bool,
-) -> Result<(), Error> {
-    // Depth-first fixed-size stack: at most 13 active pieces, 4095 work items.
-    let mut stack = [(0.0, 0.0, 0_u8); 14];
-    stack[0] = (lo, hi, 0);
-    let mut n = 1;
-    let mut work = 0;
-    while n > 0 {
-        poll(cancelled)?;
-        n -= 1;
-        let (l, h, depth) = stack[n];
-        work += 1;
-        let bound = cv_lower_bound(a, l, h);
-        if bound.is_finite() && bound > 0.0 {
-            continue;
-        }
-        let mid = l + 0.5 * (h - l);
-        if depth == 12 || work >= 4095 || mid <= l || mid >= h {
-            return Err(Error::CaloricPath(
-                "positive component Cv could not be bounded on the source path",
-            ));
-        }
-        stack[n] = (mid, h, depth + 1);
-        stack[n + 1] = (l, mid, depth + 1);
-        n += 2;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

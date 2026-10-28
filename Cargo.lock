@@ -1762,6 +1762,7 @@ version = "0.0.1"
 dependencies = [
  "fs-evidence",
  "fs-matdb",
+ "fs-material",
  "fs-math",
  "fs-qty",
  "fs-thermochem",

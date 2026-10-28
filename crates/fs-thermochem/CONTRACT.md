@@ -889,7 +889,7 @@ Seven new native regressions cover Arrhenius scaling and heat release,
 dissociation equilibrium against the Gibbs owner, zero species and catalysts,
 400-decade rate scales near equilibrium, the complete constrained-UV Jacobian,
 source/conservation/range/cancellation refusals and deterministic scratch reuse.
-All 110 `fs-thermochem` library tests passed through the existing scoped native
+All 111 `fs-thermochem` library tests passed through the existing scoped native
 Cargo manifest using the full original crate source. This is not a workspace
 or cross-ISA qualification. The primary rate convention follows the
 [Cantera 3.2 elementary-reaction and modified-Arrhenius reference](https://cantera.org/3.2/reference/kinetics/reaction-rates.html).
@@ -898,3 +898,17 @@ This L1 module owns immutable laws and algebra. It supplies no time integrator,
 empirical mechanism inference, generic collider/falloff law, irreversible or
 fractional-order global reaction, ions, or real-gas kinetics. A supplied
 mechanism's physical accuracy remains a property of its original source data.
+
+### Shared caloric-path admission for evolving gas
+
+`kinetics::admit_caloric_interval` is the common L1 admission used by the
+finite-rate reactor and frozen compressible Euler owner in `fs-gas`. It checks
+original source support and explicit continuity across NASA regions, and uses
+bounded outward-rounded polynomial subdivision to establish strictly positive
+species Cv throughout the requested interval. Positive endpoint samples alone
+do not admit a path. Unresolved bounds, gaps, discontinuity or cancellation
+refuse without changing source coefficients or formation/entropy references.
+The subdivision uses a fixed-size stack with at most 4095 work items per region.
+The native regression includes positive endpoint heat capacities with a
+negative interior Cv. This addition brings the full-source native library
+suite to 111 passing tests. Time integration remains in L3.

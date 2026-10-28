@@ -179,3 +179,90 @@ variable-Cp Hugoniot and entropy balance, compare expansion with an independent
 and verify source-window refusal and cancellation. These qualify the
 one-dimensional inviscid boundary implementation, not viscous wall layers,
 heat transfer, physical shock thickness or a fully discrete entropy theorem.
+
+## Adaptive sealed finite-rate reactors
+
+`chemistry::{advance_adiabatic, advance_adiabatic_energy}` advances an actual
+caller-declared duration at fixed volume and total internal energy. The former
+obtains the energy from the original feed temperature; the latter accepts the
+actual stored energy from another conservative owner. The complete original
+`IdealGasKineticsV1` mechanism, source receipts, canonical species amounts,
+elapsed time, final pressure/temperature and balances remain in the result.
+This implements a bounded homogeneous reactor slice of
+`frankensim-ext-gas-chemistry-ladder-paqh`, not the complete combustion ladder.
+
+The solver advances reaction extents with damped implicit Euler and adaptive
+step doubling. Every candidate reconstructs amounts from the original feed
+plus the exact admitted stoichiometric matrix; there is no independent species
+clipping, positive trace seeding, or equilibrium projection. Temperature solves
+the original total internal energy at each candidate composition, with the
+formation contribution present exactly once. No separate reaction heat source
+is added. The source-path/positive-Cv interval admission is the same L1 helper
+used by the Euler EOS, including possible products absent from the feed.
+
+The Newton Jacobian combines the analytic concentration and temperature rate
+derivatives with `dT/dxi_j = -sum_i(nu_ij u_i)/sum_i(c_i Cv_i)`. A bounded scaled
+partial-pivot solve and positivity/energy backtracking support stiff reactions.
+Stage, Newton and root scratch is allocated once and reused. Local error control
+compares the complete step with two half steps, covering species and temperature;
+the two-half-step result is accepted. This is a first-order, L-stable implicit
+base method with an estimated local error, not a global accuracy certificate.
+
+Caller controls separately bound absolute energy, absolute amount, relative
+species/temperature error, relative element/mass balance, numerical entropy
+decrease, minimum/initial/maximum time step and all nonlinear/root/attempt work.
+Every accepted step and the complete integration check actual ideal-mixture
+entropy. Final element, molecular-mass and energy balances are checked again
+before publication. A budget exhaustion, unsupported source state, arithmetic
+failure or cancellation returns no partial integration. Zero duration preserves
+the admitted initial state. No ignition delay or empirical rate accuracy is
+inferred from successful integration of a caller-authored mechanism.
+
+The focused reactor fixtures cover analytic reversible-isomer time evolution,
+stiff relaxation to the independent Gibbs/UV endpoint, exothermic energy and
+entropy balance, molecular-count-changing dissociation, extensive scaling,
+one-correction Newton convergence, overflow/refusal and cancellation. Source
+interval admission also rejects negative interior Cv despite positive endpoint
+values. These are numerical/constitutive conformance tests, not experimental
+validation of a real-fuel mechanism.
+
+## Common material gas integration
+
+Optional feature `material` exposes
+`material::advance_closed_parcel_adiabatic`. It evolves an existing
+`fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel`, using its
+actual stored internal energy as the one target. The complete product bank
+must match the mechanism's original NASA-9 models and retain every active
+feed transport card, source-pack identity and declared water identity.
+
+Generated amounts pass through `ThermochemicalGasModel::with_mole_amounts`,
+which uses the existing exact-simplex closure and refuses unrepresentable
+positive traces. The existing material composition/energy replacement resolves
+all final transport and acoustic properties at the preserved mass and volume.
+The final material state is checked against both the original stored energy
+and the kinetic endpoint, including mass, density, temperature, pressure and
+composition-roundoff discrepancies. Mass and volume retain their original
+bits; zero duration retains the entire original parcel. Publication follows
+the last source, balance and cancellation check.
+
+Five material-consumer regressions exercise finite elapsed reaction against an
+analytic solution, reaction-driven heating and pressure rise, updated common
+transport/acoustics, exact storage preservation, source/water identity refusal,
+zero-time identity, early/late cancellation, exhausted work and final transport
+domain refusal. The numerical reactor and source model are the production
+implementations; the bounded native material test closure selects original
+material storage/resolver/caloric bodies and excludes unrelated runtime and
+mechanical modules. It does not establish a full `fs-material` or workspace
+build. The existing workspace/runtime resource limits remain applicable.
+
+Across the final focused native runs, all eight reactor tests, fifteen Euler
+tests and five material-reactor tests passed. Eighteen selected original
+material tests also passed, including the two generated-amount regressions;
+the complete original thermochemistry library passed all 111 tests. The
+material-consumer run compiled the actual `fs-gas` library with both features
+enabled against the bounded original material source closure described above.
+
+The Euler field remains frozen-composition. The zero-dimensional reactor does
+not add species advection or chemistry/flow splitting to that field. Neither
+path supplies diffusion flames, generic third-body/falloff mechanisms, spray,
+knock, real-gas phases, moving volumes or a validated ignition model.

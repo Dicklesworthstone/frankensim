@@ -15,7 +15,7 @@
 //! <https://cantera.org/3.2/reference/kinetics/reaction-rates.html> and
 //! <https://cantera.org/3.2/reference/kinetics/rate-constants.html>.
 
-use crate::equilibrium::ReactionProgressRateQuantityV1;
+pub use crate::equilibrium::ReactionProgressRateQuantityV1;
 use crate::equilibrium::composition::IdealGasEquilibriumV1;
 use crate::{
     ChemistryError, ConservationCertificate, MolarEnergyQuantityV1, ReactionId, SpeciesId,
@@ -23,6 +23,9 @@ use crate::{
     verify_conservation,
 };
 use fs_qty::{Pressure, Temperature};
+
+mod caloric;
+pub use caloric::admit_caloric_interval;
 
 /// Maximum admitted reversible elementary reactions in one mechanism.
 pub const MAX_KINETIC_REACTIONS_V1: usize = 128;
@@ -367,6 +370,7 @@ impl IdealGasKineticsV1 {
         &self,
         lower: Temperature,
         upper: Temperature,
+        mut cancelled: impl FnMut() -> bool,
     ) -> Result<(), KineticsErrorV1> {
         if !positive(lower.value()) || !positive(upper.value()) || lower.value() > upper.value() {
             return Err(KineticsErrorV1::Invalid(
@@ -374,23 +378,7 @@ impl IdealGasKineticsV1 {
             ));
         }
         for model in self.thermodynamics.models() {
-            let lo = model
-                .region_for_temperature(lower.value())
-                .ok_or(KineticsErrorV1::Invalid(
-                    "lower kinetic temperature lacks source support",
-                ))?
-                .0;
-            let hi = model
-                .region_for_temperature(upper.value())
-                .ok_or(KineticsErrorV1::Invalid(
-                    "upper kinetic temperature lacks source support",
-                ))?
-                .0;
-            if lo != hi && model.caloric_reference().is_none() {
-                return Err(KineticsErrorV1::Invalid(
-                    "cross-region kinetic path requires explicit caloric continuity",
-                ));
-            }
+            admit_caloric_interval(model, lower, upper, &mut cancelled)?;
         }
         Ok(())
     }
