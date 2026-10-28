@@ -1387,3 +1387,144 @@ fn g0_g3_peek_model_curves_preserve_cubic_accuracy_and_explicit_model_domain() {
 
 #[path = "material_catalog_expansion/engineering.rs"]
 mod engineering;
+
+#[test]
+fn g0_g3_airex_moduli_require_method_direction_and_preserve_minimums() {
+    for (grade, iso_mpa, astm_mpa, iso_min_mpa, astm_min_mpa, strength_mpa, strength_min_mpa) in [
+        ("55", 69.0, 58.0, 55.0, 45.0, 0.90, 0.75),
+        ("130", 170.0, 145.0, 145.0, 123.0, 3.0, 2.6),
+    ] {
+        let slug = format!("airex-c70-{grade}-2022");
+        let pack = compile(&slug, 18);
+        let grade_axis = format!("source-grade-{slug}");
+        let compression = flags(&[
+            (&grade_axis, 1.0),
+            ("source-temperature-known", 0.0),
+            ("source-moisture-condition-known", 0.0),
+            ("source-pressure-known", 0.0),
+            ("source-test-rate-known", 0.0),
+            ("block-center-specimen", 1.0),
+            ("source-specimen-at-least-40mm", 1.0),
+            ("loading-in-sheet-plane", 0.0),
+            ("loading-normal-to-sheet", 1.0),
+        ]);
+        // The strength row lists ISO 844 / ASTM C365 together, but the
+        // modulus rows report different results under those methods.
+        sample(
+            &pack,
+            "compression-strength",
+            PA,
+            &compression,
+            strength_mpa * 1e6,
+        );
+        sample(
+            &pack,
+            "compression-strength-minimum",
+            PA,
+            &compression,
+            strength_min_mpa * 1e6,
+        );
+        for name in ["compression-modulus", "compression-modulus-minimum"] {
+            refuses(&pack, name, PA, &compression);
+        }
+        for (method, average, minimum) in
+            [(0.0, iso_mpa, iso_min_mpa), (1.0, astm_mpa, astm_min_mpa)]
+        {
+            let point = compression
+                .clone()
+                .with_quantity(
+                    "compression-modulus-method-astm-c365",
+                    QuantitySpec::dimensional(Dims::NONE),
+                    method,
+                )
+                .unwrap();
+            // DNV-GL-defined minimums remain distinct source properties,
+            // not uncertainty bounds on the approximate nominal averages.
+            sample(&pack, "compression-modulus", PA, &point, average * 1e6);
+            sample(
+                &pack,
+                "compression-modulus-minimum",
+                PA,
+                &point,
+                minimum * 1e6,
+            );
+            let in_plane = point
+                .clone()
+                .with("loading-in-sheet-plane", 1.0)
+                .unwrap()
+                .with("loading-normal-to-sheet", 0.0)
+                .unwrap();
+            let unknown_method = point
+                .with("compression-modulus-method-astm-c365", 2.0)
+                .unwrap();
+            for name in ["compression-modulus", "compression-modulus-minimum"] {
+                refuses(&pack, name, PA, &in_plane);
+                refuses(&pack, name, PA, &unknown_method);
+            }
+        }
+    }
+}
+
+#[test]
+fn g0_g3_ppsu_compression_points_do_not_create_an_interpolated_curve() {
+    let pack = compile("ensinger-tecason-p-black-radel-5500", 10);
+    let base = temperature(
+        flags(&[
+            ("source-grade-tecason-p-black-radel-5500", 1.0),
+            ("source-moisture-condition-known", 0.0),
+            ("source-pressure-known", 0.0),
+            ("source-measurement-orientation-known", 0.0),
+            ("source-test-rate-known", 0.0),
+        ]),
+        "temperature",
+        295.92777777777775, // 73 F; the mechanical table's test condition
+    );
+    let at = |strain| {
+        base.clone()
+            .with_quantity(
+                "compressive-strain",
+                QuantitySpec::dimensional(Dims::NONE),
+                strain,
+            )
+            .unwrap()
+    };
+    // Independently convert the source's 1,990 and 14,350 psi values.
+    // The 10% row retains its producer-secondary observation in the pack.
+    let psi_to_pa = 0.45359237 * 9.80665 / (0.0254 * 0.0254);
+    sample(
+        &pack,
+        "compressive-stress",
+        PA,
+        &at(0.01),
+        1990.0 * psi_to_pa,
+    );
+    sample(
+        &pack,
+        "compressive-stress",
+        PA,
+        &at(0.10),
+        14350.0 * psi_to_pa,
+    );
+    refuses(&pack, "compressive-stress", PA, &base);
+    for unsupported_strain in [0.0, 0.02, 0.05, 0.11] {
+        refuses(&pack, "compressive-stress", PA, &at(unsupported_strain));
+    }
+    refuses(
+        &pack,
+        "compressive-stress",
+        PA,
+        &at(0.01).with("temperature", 296.15).unwrap(),
+    );
+    assert!(
+        pack.claims()
+            .query_line_typed(
+                &key("compressive-stress", PA),
+                "compressive-strain",
+                &at(0.01),
+                &at(0.10),
+                fs_matdb::ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly),
+            )
+            .is_err(),
+        "two isolated test points must not become a compression constitutive curve"
+    );
+}

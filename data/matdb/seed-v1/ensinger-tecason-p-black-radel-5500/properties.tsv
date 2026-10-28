@@ -1,0 +1,85 @@
+frankensim.matdb-source.v1
+observation	producer-table	PPSU, industrial TECASON P black Radel 5500	Industrial PPSU stock-shape comparison table, printed revision 2024-12-09 A0	Mechanical properties are at 73 F. Density/thermal test temperatures are not given. Rate, force setting, specimen dimensions, modulus fitting interval, moisture, pressure, orientation and statistical uncertainty are unstated. Tensile strength is explicitly yield strength. This is industrial Radel 5500 stock, not the medical TECASON P MT grade.
+observation	mechanical-protocol	PPSU, industrial TECASON P black Radel 5500	ASTM D638 tension, D790 flexure, D695 compression; 73 F	Native psi values are converted using the international pound, standard gravity and exact inch. Added SI digits are conversion digits, not measurement precision. The two compression strains are separate point claims and cannot be interpolated or used as a recoverable-energy law.
+observation	producer-secondary	PPSU, industrial TECASON P black Radel 5500	Producer footnote: data from unspecified public sources	This qualification applies to Cp, conductivity and the 10 percent compression stress. Source Btu variant is unstated; source-btu-conversion-it=1 explicitly selects International Table Btu for the two thermal conversions. Cp=0.27 Btu/(lb F), k=1.74 Btu in/(h ft2 F). The 1 percent compression point has no such footnote.
+scalar	density	producer-table	density	1290	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade_tecason_p_black_radel_5500	1	1	1
+validity	density	source_moisture_condition_known	0	0	1
+validity	density	source_pressure_known	0	0	1
+validity	density	source_measurement_orientation_known	0	0	1
+validity	density	source_density_temperature_known	0	0	1
+scalar	specific-heat-capacity	producer-table,producer-secondary	specific_heat_capacity	1130.436	J/kg/K	constant
+uncertainty	specific-heat-capacity	unstated	-	-	-	-
+validity	specific-heat-capacity	source_grade_tecason_p_black_radel_5500	1	1	1
+validity	specific-heat-capacity	source_moisture_condition_known	0	0	1
+validity	specific-heat-capacity	source_pressure_known	0	0	1
+validity	specific-heat-capacity	source_measurement_orientation_known	0	0	1
+validity	specific-heat-capacity	source_thermal_temperature_known	0	0	1
+validity	specific-heat-capacity	source_btu_conversion_it	1	1	1
+scalar	thermal-conductivity	producer-table,producer-secondary	thermal_conductivity	0.25095652662385165	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	source_grade_tecason_p_black_radel_5500	1	1	1
+validity	thermal-conductivity	source_moisture_condition_known	0	0	1
+validity	thermal-conductivity	source_pressure_known	0	0	1
+validity	thermal-conductivity	source_measurement_orientation_known	0	0	1
+validity	thermal-conductivity	source_thermal_temperature_known	0	0	1
+validity	thermal-conductivity	source_btu_conversion_it	1	1	1
+scalar	tensile-modulus	producer-table,mechanical-protocol	tensile_modulus	2344217479.6772428	Pa	constant
+uncertainty	tensile-modulus	unstated	-	-	-	-
+validity	tensile-modulus	source_grade_tecason_p_black_radel_5500	1	1	1
+validity	tensile-modulus	source_moisture_condition_known	0	0	1
+validity	tensile-modulus	source_pressure_known	0	0	1
+validity	tensile-modulus	source_measurement_orientation_known	0	0	1
+validity	tensile-modulus	temperature	295.92777777777775	295.92777777777775	K
+validity	tensile-modulus	source_test_rate_known	0	0	1
+scalar	tensile-yield-strength	producer-table,mechanical-protocol	tensile_yield_strength	79289708.87143615	Pa	constant
+uncertainty	tensile-yield-strength	unstated	-	-	-	-
+validity	tensile-yield-strength	source_grade_tecason_p_black_radel_5500	1	1	1
+validity	tensile-yield-strength	source_moisture_condition_known	0	0	1
+validity	tensile-yield-strength	source_pressure_known	0	0	1
+validity	tensile-yield-strength	source_measurement_orientation_known	0	0	1
+validity	tensile-yield-strength	temperature	295.92777777777775	295.92777777777775	K
+validity	tensile-yield-strength	source_test_rate_known	0	0	1
+scalar	flexural-modulus	producer-table,mechanical-protocol	flexural_modulus	2413165052.6089263	Pa	constant
+uncertainty	flexural-modulus	unstated	-	-	-	-
+validity	flexural-modulus	source_grade_tecason_p_black_radel_5500	1	1	1
+validity	flexural-modulus	source_moisture_condition_known	0	0	1
+validity	flexural-modulus	source_pressure_known	0	0	1
+validity	flexural-modulus	source_measurement_orientation_known	0	0	1
+validity	flexural-modulus	temperature	295.92777777777775	295.92777777777775	K
+validity	flexural-modulus	source_test_rate_known	0	0	1
+scalar	flexural-strength	producer-table,mechanical-protocol	flexural_strength	91010796.26982236	Pa	constant
+uncertainty	flexural-strength	unstated	-	-	-	-
+validity	flexural-strength	source_grade_tecason_p_black_radel_5500	1	1	1
+validity	flexural-strength	source_moisture_condition_known	0	0	1
+validity	flexural-strength	source_pressure_known	0	0	1
+validity	flexural-strength	source_measurement_orientation_known	0	0	1
+validity	flexural-strength	temperature	295.92777777777775	295.92777777777775	K
+validity	flexural-strength	source_test_rate_known	0	0	1
+scalar	compression-modulus	producer-table,mechanical-protocol	compression_modulus	1613373206.6013963	Pa	constant
+uncertainty	compression-modulus	unstated	-	-	-	-
+validity	compression-modulus	source_grade_tecason_p_black_radel_5500	1	1	1
+validity	compression-modulus	source_moisture_condition_known	0	0	1
+validity	compression-modulus	source_pressure_known	0	0	1
+validity	compression-modulus	source_measurement_orientation_known	0	0	1
+validity	compression-modulus	temperature	295.92777777777775	295.92777777777775	K
+validity	compression-modulus	source_test_rate_known	0	0	1
+scalar	compression-stress-one-percent	producer-table,mechanical-protocol	compressive_stress	13720567.013405038	Pa	constant
+uncertainty	compression-stress-one-percent	unstated	-	-	-	-
+validity	compression-stress-one-percent	source_grade_tecason_p_black_radel_5500	1	1	1
+validity	compression-stress-one-percent	source_moisture_condition_known	0	0	1
+validity	compression-stress-one-percent	source_pressure_known	0	0	1
+validity	compression-stress-one-percent	source_measurement_orientation_known	0	0	1
+validity	compression-stress-one-percent	temperature	295.92777777777775	295.92777777777775	K
+validity	compression-stress-one-percent	source_test_rate_known	0	0	1
+validity	compression-stress-one-percent	compressive_strain	0.01	0.01	1
+scalar	compression-stress-ten-percent	producer-table,mechanical-protocol,producer-secondary	compressive_stress	98939767.15696597	Pa	constant
+uncertainty	compression-stress-ten-percent	unstated	-	-	-	-
+validity	compression-stress-ten-percent	source_grade_tecason_p_black_radel_5500	1	1	1
+validity	compression-stress-ten-percent	source_moisture_condition_known	0	0	1
+validity	compression-stress-ten-percent	source_pressure_known	0	0	1
+validity	compression-stress-ten-percent	source_measurement_orientation_known	0	0	1
+validity	compression-stress-ten-percent	temperature	295.92777777777775	295.92777777777775	K
+validity	compression-stress-ten-percent	source_test_rate_known	0	0	1
+validity	compression-stress-ten-percent	compressive_strain	0.1	0.1	1

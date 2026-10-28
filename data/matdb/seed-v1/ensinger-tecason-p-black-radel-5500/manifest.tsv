@@ -1,0 +1,25 @@
+frankensim.matdb-manifest.v3
+pack_id	ensinger-tecason-p-black-radel-5500
+redistribution	permitted	Selected attributed numerical facts and original notes only; neither the producer document nor its table layout is redistributed
+citation	Ensinger, tecason-p-black-radel-5500, printed 2024-12-09 A0, p. 1; https://www.ensinger-online.com/modules/public/sheet/createsheet.php?FILENAME=TECASON_P_black_%28Radel_5500%29_14.PDF&FL=14&SID=1659&ZOOM=1.0; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	ensinger-tecason-p-black-radel-5500	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	tensile_modulus	tensile-modulus	dimensional
+property	tensile_yield_strength	tensile-yield-strength	dimensional
+property	flexural_modulus	flexural-modulus	dimensional
+property	flexural_strength	flexural-strength	dimensional
+property	compression_modulus	compression-modulus	dimensional
+property	compressive_stress	compressive-stress	dimensional
+axis	source_grade_tecason_p_black_radel_5500	source-grade-tecason-p-black-radel-5500	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	source_measurement_orientation_known	source-measurement-orientation-known	dimensional
+axis	source_density_temperature_known	source-density-temperature-known	dimensional
+axis	source_thermal_temperature_known	source-thermal-temperature-known	dimensional
+axis	source_btu_conversion_it	source-btu-conversion-it	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	source_test_rate_known	source-test-rate-known	dimensional
+axis	compressive_strain	compressive-strain	dimensional

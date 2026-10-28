@@ -1,0 +1,69 @@
+frankensim.matdb-source.v1
+observation	producer-table	PEEK with producer-described 30 percent carbon fibre; percentage basis unspecified	Producer comparison table, printed revision 2023-07-19 AI	Extruded and machined reference specimens, typically 40-60 mm rod stock. Temperature, moisture, pressure, orientation and statistical uncertainty are unspecified. This revision supplies no compression modulus; older sheets are not substituted. The 30 percent reinforcement label has unspecified percentage basis and orientation; no isotropic/orthotropic stiffness closure is supplied.
+observation	mechanical-protocol	PEEK with producer-described 30 percent carbon fibre; percentage basis unspecified	Tension ISO 527-2: type 1b, modulus 1 mm/min, strength 50 mm/min; flexure ISO 178: 2 mm/min, 64 mm support span; compression ISO 604: 5 mm/min	Flexure and compression print a 10 N setting without explaining its role; it is not inferred to be preload or the calculated specimen force. Compression stress uses 10 mm cubes. This revision reports no compression modulus or modulus fitting interval. Stress points remain discrete. No unloading, yield criterion, Poisson ratio or shear modulus is inferred.
+observation	thermal-protocol	PEEK with producer-described 30 percent carbon fibre; percentage basis unspecified	ISO 22007-4:2008 thermal table	Density and Cp are converted from g/cm3 and J/(g K) to SI. Temperature service ratings do not extend these property domains.
+scalar	density	producer-table	density	1380	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade_tecapeek_cf30_black	1	1	1
+validity	density	source_moisture_condition_known	0	0	1
+validity	density	source_pressure_known	0	0	1
+validity	density	source_measurement_orientation_known	0	0	1
+validity	density	source_temperature_known	0	0	1
+scalar	specific-heat-capacity	producer-table,thermal-protocol	specific_heat_capacity	1200	J/kg/K	constant
+uncertainty	specific-heat-capacity	unstated	-	-	-	-
+validity	specific-heat-capacity	source_grade_tecapeek_cf30_black	1	1	1
+validity	specific-heat-capacity	source_moisture_condition_known	0	0	1
+validity	specific-heat-capacity	source_pressure_known	0	0	1
+validity	specific-heat-capacity	source_measurement_orientation_known	0	0	1
+validity	specific-heat-capacity	source_temperature_known	0	0	1
+scalar	thermal-conductivity	producer-table,thermal-protocol	thermal_conductivity	0.66	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	source_grade_tecapeek_cf30_black	1	1	1
+validity	thermal-conductivity	source_moisture_condition_known	0	0	1
+validity	thermal-conductivity	source_pressure_known	0	0	1
+validity	thermal-conductivity	source_measurement_orientation_known	0	0	1
+validity	thermal-conductivity	source_temperature_known	0	0	1
+scalar	tensile-modulus	producer-table,mechanical-protocol	tensile_modulus	6000	MPa	constant
+uncertainty	tensile-modulus	unstated	-	-	-	-
+validity	tensile-modulus	source_grade_tecapeek_cf30_black	1	1	1
+validity	tensile-modulus	source_moisture_condition_known	0	0	1
+validity	tensile-modulus	source_pressure_known	0	0	1
+validity	tensile-modulus	source_measurement_orientation_known	0	0	1
+validity	tensile-modulus	source_temperature_known	0	0	1
+validity	tensile-modulus	test_speed	0.000016666666666666667	0.000016666666666666667	m/s
+scalar	tensile-strength	producer-table,mechanical-protocol	tensile_strength	112	MPa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	source_grade_tecapeek_cf30_black	1	1	1
+validity	tensile-strength	source_moisture_condition_known	0	0	1
+validity	tensile-strength	source_pressure_known	0	0	1
+validity	tensile-strength	source_measurement_orientation_known	0	0	1
+validity	tensile-strength	source_temperature_known	0	0	1
+validity	tensile-strength	test_speed	0.0008333333333333334	0.0008333333333333334	m/s
+scalar	flexural-modulus	producer-table,mechanical-protocol	flexural_modulus	6100	MPa	constant
+uncertainty	flexural-modulus	unstated	-	-	-	-
+validity	flexural-modulus	source_grade_tecapeek_cf30_black	1	1	1
+validity	flexural-modulus	source_moisture_condition_known	0	0	1
+validity	flexural-modulus	source_pressure_known	0	0	1
+validity	flexural-modulus	source_measurement_orientation_known	0	0	1
+validity	flexural-modulus	source_temperature_known	0	0	1
+validity	flexural-modulus	test_speed	0.000033333333333333335	0.000033333333333333335	m/s
+validity	flexural-modulus	source_force_setting	10	10	N
+scalar	flexural-strength	producer-table,mechanical-protocol	flexural_strength	184	MPa	constant
+uncertainty	flexural-strength	unstated	-	-	-	-
+validity	flexural-strength	source_grade_tecapeek_cf30_black	1	1	1
+validity	flexural-strength	source_moisture_condition_known	0	0	1
+validity	flexural-strength	source_pressure_known	0	0	1
+validity	flexural-strength	source_measurement_orientation_known	0	0	1
+validity	flexural-strength	source_temperature_known	0	0	1
+validity	flexural-strength	test_speed	0.000033333333333333335	0.000033333333333333335	m/s
+validity	flexural-strength	source_force_setting	10	10	N
+curve	compression-points	producer-table,mechanical-protocol	compressive_stress	compressive_strain	1	MPa	0.01:25,0.02:47,0.05:111	tabulated
+uncertainty	compression-points	unstated	-	-	-	-
+validity	compression-points	source_grade_tecapeek_cf30_black	1	1	1
+validity	compression-points	source_moisture_condition_known	0	0	1
+validity	compression-points	source_pressure_known	0	0	1
+validity	compression-points	source_measurement_orientation_known	0	0	1
+validity	compression-points	source_temperature_known	0	0	1
+validity	compression-points	test_speed	0.00008333333333333333	0.00008333333333333333	m/s
+validity	compression-points	source_force_setting	10	10	N
+validity	compression-points	compressive_strain	0.01	0.05	1

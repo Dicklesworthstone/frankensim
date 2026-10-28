@@ -4,6 +4,61 @@ This directory retains the human-reviewable source inputs compiled by
 `xtask matdb-pack`. Generated binary packs are deliberately not committed:
 the compiler must reproduce them from the pinned manifest and source record.
 
+## Reinforced engineering plastics and industrial PPSU
+
+Four additional Ensinger packs contribute 36 claims for PPS, glass-filled PBT,
+carbon-filled PEEK and industrial PPSU. They retain each producer sheet's printed
+revision; a newer-looking download filename is not treated as a new revision.
+
+| Pack | Material | Printed revision | Claims |
+| --- | --- | --- | ---: |
+| `ensinger-tecatron-natural` | PPS | 2023-07-19 AD | 9 |
+| `ensinger-tecadur-pbt-gf30-natural` | PBT GF30 | 2023-07-19 AE | 9 |
+| `ensinger-tecapeek-cf30-black` | PEEK CF30 | 2023-07-19 AI | 8 |
+| `ensinger-tecason-p-black-radel-5500` | PPSU, Radel 5500 stock shapes | 2024-12-09 A0 | 10 |
+
+The first three packs include density, heat capacity, conductivity, independently
+named tensile/flexural properties and discrete compression-stress points. PPS
+and PBT also have reported compression moduli. The current CF30 sheet supplies
+no compression modulus; neither an older revision nor a stress/strain quotient
+fills that gap. Reinforcement percentage basis and measurement orientation
+remain unspecified. These scalar values do not supply an isotropic or
+orthotropic stiffness tensor.
+
+For these three ISO-based sheets, each mechanical claim carries its source
+crosshead speed; flexure and compression also retain the printed 10 N setting
+as `source-force-setting`. Its role is unspecified, so it is not interpreted as
+preload or the calculated specimen force. Compression points are tabulated
+only. Thermal properties have no numerical test temperature or temperature law.
+
+The industrial PPSU pack uses the separate ASTM sheet. Its mechanical
+properties are point-bound to 73 °F (295.92777777777775 K), with test rate unknown.
+The tensile strength is explicitly a yield-strength property. Compression at
+1% and 10% consists of two separate scalar point claims: the latter carries
+the producer's public-source footnote, as do heat capacity and conductivity.
+Intermediate strains and continuous compression-curve queries refuse.
+The source's unspecified Btu variant is made explicit through the
+`source-btu-conversion-it=1` choice for thermal conversions. Density and
+thermal test temperatures remain unknown.
+
+For a PPSU tensile reference using the same authored 50 mm / 100 mm² geometry:
+
+```sh
+cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/ensinger-tecason-p-black-radel-5500/manifest.tsv --out /tmp/ppsu-radel-5500.fsmatpk
+cargo run -p fs-material --example material_axial_reference -- \
+  /tmp/ppsu-radel-5500.fsmatpk tension density tensile-modulus 0.05 0.0001 0.001 \
+  --axis source-grade-tecason-p-black-radel-5500 1 \
+  --axis source-moisture-condition-known 0 --axis source-pressure-known 0 \
+  --axis source-measurement-orientation-known 0 \
+  --axis source-density-temperature-known 0 --axis source-test-rate-known 0 \
+  --axis temperature 295.92777777777775 --step 0.00005 1
+```
+
+The duration and strain ceiling are authored model choices. Each manifest
+links its exact producer PDF, and each claim retains the relevant protocol
+and secondary-source observations. No medical-grade equivalence or
+three-dimensional constitutive law is inferred.
+
 ## Additional structural foams: ROHACELL and AIREX
 
 Four producer-attributed packs add 50 claims for low-density PMI and structural
