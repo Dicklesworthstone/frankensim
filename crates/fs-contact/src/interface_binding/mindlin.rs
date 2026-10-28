@@ -27,6 +27,14 @@ use super::BoundNormalContactLaw;
 use crate::normal_patch::source::{PointContactGeometry, SourcePointContact};
 use crate::normal_patch::{NormalPatchError, PointNormalPatchReceipt};
 
+/// Sourced normal loading, unloading and recontact with retained shear history.
+#[path = "mindlin/loading.rs"]
+pub mod loading;
+
+/// Exact source-backed gross sliding and normal-axis spin on the circular patch.
+#[path = "mindlin/sliding.rs"]
+pub mod sliding;
+
 /// Original bulk, interface and patch sources around one stateful friction law.
 ///
 /// The scalar shear coordinate is tangent axis 0. Its fixed physical direction

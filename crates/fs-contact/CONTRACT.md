@@ -95,6 +95,67 @@ frictionless data, domain refusals and exact retry from retained preload. These
 synthetic G1/G3 checks establish numerical/source integration, not calibration
 against a measured specimen.
 
+### Source-backed circular Hertz sliding and spin
+
+`interface_binding::mindlin::sliding::SourceHertzSlidingPatch` reuses the
+original `SourceMindlinContact` admission, including its explicit ordered
+interface coefficient, bulk materials, fixed external conditions and exact
+normal response. The native Hertz law integrates local Coulomb traction under
+the original pressure distribution for simultaneous two-axis translation and
+normal-axis spin. Mixed motion reduces both the resultant sliding force and
+spin moment relative to independently saturated limits. The response retains
+the original normal-model and resolved-friction identities; complete source
+receipts, uncertainty and authority remain available through the binding.
+
+Construction checks a borrowed, source-matching elastic checkpoint with exactly
+zero retained shear energy and force. It leaves that checkpoint unchanged and
+does not transfer or erase loaded Mindlin history. This selects a distinct
+zero-storage gross-sliding model. It does not solve partial slip, static
+friction, rolling deformation or a transition between these constitutive laws.
+At complete rest its zero wrench is one admissible set-valued selection.
+
+The evaluator requires the original normal load and temperature, rejects a
+pressure refresh and enforces the original step envelope. Prescribed slip and
+spin are held over the admitted interval: heat is exactly the pressure-integrated
+sliding power times that duration. Bodies, changing kinematics and heat
+partition remain owned by their mechanical and thermal consumers.
+`tests/source_mindlin/sliding.rs` checks actual pure/mixed force, moment and heat,
+material/interface/geometry substitutions, complete source retention and
+loaded-history, foreign-source and operating-domain refusals.
+
+### Source-backed Hertz--Mindlin normal loading and recontact
+
+`interface_binding::mindlin::loading::SourceHertzMindlinContact` reuses an
+original admitted `SourceMindlinContact` and the shared analytic changing-load
+owner. Its initial positive indentation and normal storage are original Hertz
+initial conditions; no new normal work is inferred at construction. Shear
+storage remains separate from that normal potential in `TangentialLaw`.
+
+Each `normal_step` takes an explicit target indentation and duration. The
+original `SourcePointContact` admits the whole monotonic constant-rate segment's
+operating box and evaluates its endpoint force, pressure and footprint. Native
+history transfer must agree with the original Hertz geometry/energy within
+arithmetic roundoff; source-domain bounds are never relaxed. Normal work and
+normal energy come from the original source potential. Shear memory/heat come
+from the existing analytic Hertz--Mindlin owner, including unloaded recontact.
+No private modulus, friction default, coefficient refresh or memory reset is
+introduced. Both normal and friction source identities bind every checkpoint.
+
+All selected bulk, normal-interface and friction properties must retain static
+source support. Complete query coordinates use the canonical material role
+policy, with pressure excluded: a pressure-dependent value, pressure-only
+validity bound, or even an extra pressure query cannot silently survive a change
+in actual load and footprint. This also refuses unowned force, area, stress,
+rate and unknown roles without guessing from axis names. Fixed temperature,
+composition, moisture and concentration retain their declared meanings.
+
+The path is explicitly normal-at-fixed-shear followed by held-load shear;
+simultaneous body motion needs a separate coupled trajectory owner and temporal
+refinement. Temperature stays at the original source condition. Five source
+integration groups cover original Hertz work/authority, growth and release,
+separation/recontact, typed condition refusal, material/interface substitutions
+and exact retry after operating-envelope or foreign-source refusal.
+
 ### Generic normal-patch embedding (bead `frankensim-b8bxd.5.2`)
 
 `normal_patch::embed` maps public constitutive requests into a generic contact

@@ -2,6 +2,12 @@
 #[path = "source_point/common.rs"]
 mod common;
 
+#[path = "source_mindlin/loading.rs"]
+mod loading;
+
+#[path = "source_mindlin/sliding.rs"]
+mod sliding;
+
 use fs_contact::interface_binding::mindlin::{SourceMindlinContact, SourceMindlinError};
 use fs_contact::interface_binding::*;
 use fs_contact::normal_patch::source::*;
