@@ -320,11 +320,40 @@ pub struct VkBody {
     sys: fs_phs::PortHamiltonian,
     linear: fs_phs::linear_exact::LinearSplit,
     x: Vec<f64>,
-    /// Modal monopole areas [m²].
+    /// Signed surface projections in mass-normalized coordinates [m²/sqrt(kg)].
     pub areas: Vec<f64>,
 }
 
 impl VkBody {
+    /// Realize a source-reduced nonlinear plate with its complete viscous
+    /// damping matrix, including cross-mode terms and undamped subspaces.
+    ///
+    /// All inputs use the SAME mass-normalized coordinates as `storage`:
+    /// `modal_damping_per_s` is row-major C in `q'' + C q' + dV/dq = b F`,
+    /// `force_participation` is the physical force projection b [1/sqrt(kg)],
+    /// and `areas` contains the signed surface integrals [m²/sqrt(kg)].
+    /// A source reducer must supply these projections; no damping ratio or
+    /// modal area is fitted, inferred, or added to the supplied operator.
+    ///
+    /// The existing pHS owner checks passive damping and advances the same
+    /// nonlinear storage. Radiation remains the compact baffled monopole
+    /// observation of this body, with no radiation back-reaction inferred.
+    ///
+    /// # Errors
+    /// Inconsistent/nonfinite projections, non-passive damping, invalid
+    /// storage, or the original pHS/time-resolution admission refusal.
+    pub fn from_modal_storage_with_damping(
+        storage: fs_nlmodal::SosModalStorage,
+        modal_damping_per_s: &[f64],
+        force_participation: &[f64],
+        areas: Vec<f64>,
+    ) -> Result<Self, AcousticRealizeError> {
+        finish_vk_damping(
+            storage, VkDamping::Matrix(modal_damping_per_s),
+            force_participation, areas, false,
+        )
+    }
+
     /// Build from a thin plate.
     ///
     /// # Errors
@@ -376,24 +405,10 @@ impl VkBody {
                 *z += fraction * loss.zeta(omega)?;
             }
         }
-        let mut areas = Vec::with_capacity(disp.len());
-        let mut drive = Vec::with_capacity(disp.len());
-        let norm = (2.0
-            / (plate.density_kg_m3 * plate.thickness_m * plate.length_m * plate.width_m))
-            .sqrt();
-        for md in &disp {
-            let mf = md.m as f64;
-            let nf = md.n as f64;
-            let pi = core::f64::consts::PI;
-            let a = if md.m % 2 == 1 && md.n % 2 == 1 {
-                norm * (2.0 * plate.length_m / (mf * pi)) * (2.0 * plate.width_m / (nf * pi))
-            } else {
-                0.0
-            };
-            areas.push(a);
-            let phi = norm * det::sin(mf * pi * 0.25) * det::sin(nf * pi * 0.5);
-            drive.push(phi);
-        }
+        let (drive, areas) = ss_sine_ports(
+            plate.length_m, plate.width_m,
+            plate.density_kg_m3 * plate.thickness_m, &disp,
+        );
         finish_vk(model.storage, &zetas, &drive, areas, with_area)
     }
 
@@ -545,6 +560,33 @@ impl VkBody {
     }
 }
 
+// The same mass-normalized sine basis as fs-nlmodal's nonlinear storage.
+// Point drive is at (Lx/4, Ly/2); the face port integrates the entire surface.
+fn ss_sine_ports(
+    length_m: f64,
+    width_m: f64,
+    surface_density_kg_m2: f64,
+    modes: &[fs_nlmodal::SineMode],
+) -> (Vec<f64>, Vec<f64>) {
+    // Integral sin²(m*pi*x/Lx) sin²(n*pi*y/Ly) dA = Lx*Ly/4.
+    // Using the one-dimensional factor 2 halves physical force-to-flow gain.
+    let norm = (4.0 / (surface_density_kg_m2 * length_m * width_m)).sqrt();
+    let mut drive = Vec::with_capacity(modes.len());
+    let mut areas = Vec::with_capacity(modes.len());
+    for mode in modes {
+        let mf = mode.m as f64;
+        let nf = mode.n as f64;
+        let pi = core::f64::consts::PI;
+        areas.push(if mode.m % 2 == 1 && mode.n % 2 == 1 {
+            norm * (2.0 * length_m / (mf * pi)) * (2.0 * width_m / (nf * pi))
+        } else {
+            0.0
+        });
+        drive.push(norm * det::sin(mf * pi * 0.25) * det::sin(nf * pi * 0.5));
+    }
+    (drive, areas)
+}
+
 fn finish_vk(
     storage: fs_nlmodal::SosModalStorage,
     zetas: &[f64],
@@ -552,7 +594,30 @@ fn finish_vk(
     areas: Vec<f64>,
     with_area: bool,
 ) -> Result<VkBody, AcousticRealizeError> {
-    let n = areas.len();
+    finish_vk_damping(storage, VkDamping::Ratios(zetas), drive, areas, with_area)
+}
+
+enum VkDamping<'a> {
+    Ratios(&'a [f64]),
+    Matrix(&'a [f64]),
+}
+
+fn finish_vk_damping(
+    storage: fs_nlmodal::SosModalStorage,
+    damping: VkDamping<'_>,
+    drive: &[f64],
+    areas: Vec<f64>,
+    with_area: bool,
+) -> Result<VkBody, AcousticRealizeError> {
+    storage.validate().map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+    let n = storage.omegas.len();
+    if drive.len() != n || areas.len() != n
+        || drive.iter().chain(&areas).any(|x| !x.is_finite())
+    {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "nonlinear plate needs finite force and surface projections on every storage mode",
+        });
+    }
     let m = if with_area { 2 } else { 1 };
     let mut g = vec![0.0; (2 * n) * m];
     for k in 0..n {
@@ -562,8 +627,12 @@ fn finish_vk(
         }
     }
     let omegas = storage.omegas.clone();
-    let sys = fs_nlmodal::assemble_storage(n, &omegas, zetas, m, g, Box::new(storage))
-        .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+    let sys = match damping {
+        VkDamping::Ratios(zetas) =>
+            fs_nlmodal::assemble_storage(n, &omegas, zetas, m, g, Box::new(storage)),
+        VkDamping::Matrix(matrix) =>
+            fs_nlmodal::assemble_storage_with_damping(n, &omegas, matrix, m, g, Box::new(storage)),
+    }.map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
     let linear = prepare_render_linear(&sys)?;
     Ok(VkBody {
         sys,
@@ -1944,6 +2013,32 @@ fn map_plate(err: PlateError) -> AcousticRealizeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// G1: the 2-D modal mass integral and virtual work use the same basis.
+    #[test]
+    fn nonlinear_sine_ports_use_the_storage_mass_normalization() {
+        let modes = [
+            fs_nlmodal::SineMode { m: 1, n: 1 },
+            fs_nlmodal::SineMode { m: 3, n: 1 },
+            fs_nlmodal::SineMode { m: 2, n: 1 },
+        ];
+        let (lx, ly, mu) = (0.4, 0.3, 2.1);
+        let (drive, area) = ss_sine_ports(lx, ly, mu, &modes);
+        let pi = core::f64::consts::PI;
+        let norm = drive[0] / (pi/4.0).sin();
+        assert!((mu * lx * ly * norm * norm / 4.0 - 1.0).abs() < 2e-13);
+        assert!((area[0] - norm*4.0*lx*ly/(pi*pi)).abs() < 2e-13);
+        assert!((area[1] - area[0]/3.0).abs() < 2e-13);
+        assert_eq!(area[2], 0.0);
+        // At rest, a unit physical point force gives this face acceleration.
+        // It contains BOTH projections; a mismatched normalization loses 1/2.
+        let expected = 16.0 * (pi/4.0).sin() / (mu*pi*pi);
+        assert!((drive[0] * area[0] - expected).abs() < 2e-13);
+        // Same specimen dimensions and twice the surface density: all modes
+        // keep unit modal mass, while force-to-flow gain scales inversely.
+        let (heavy_drive, heavy_area) = ss_sine_ports(lx, ly, 2.0*mu, &modes);
+        assert!((heavy_drive[0]*heavy_area[0] / (drive[0]*area[0]) - 0.5).abs() < 2e-13);
+    }
 
     /// Complete baffled-piston face impedance [Pa s/m] under e^{+iwt},
     /// rho c [1 - J1(2ka)/ka + i H1(2ka)/ka], continued to complex ka by the

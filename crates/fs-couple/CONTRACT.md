@@ -9844,3 +9844,25 @@ The thermal path admits scalar conductivity and induced-linear globally affine
 source-backed mu(T), fixed geometry and prescribed velocity. Recoil, saturation,
 hysteresis, thermal expansion, moving interfaces and mechanical integration
 require compatible additional physical owners; they are not inferred here.
+
+## Nonlinear plate damping and physical port normalization
+
+`VkBody::from_modal_storage_with_damping` binds a source-reduced quartic
+storage, the complete mass-normalized viscous matrix, physical force
+projections, and signed surface integrals to the original `fs-nlmodal`/`fs-phs`
+stepper. The same basis must supply all four inputs. Off-diagonal loss and
+coupled lossless directions survive; no extra damping ratio or loss floor is
+added. The original storage owner admits frequencies and quartic channels,
+and the original pHS owner admits the resistance matrix. This does not infer a
+constitutive model, a material source, or radiation back-reaction.
+
+Analytic simply-supported plate force and face ports now use the same
+`2/sqrt(rho*h*Lx*Ly)` sine-product normalization as nonlinear storage. The
+independent two-dimensional modal mass integral is one, and the conjugate
+point-force-to-volume-flow gain scales inversely with surface density.
+
+G1/G3 tests retain the exact common/differential motion of a rank-one damper,
+held-force subdivision in the linear limit, signed compact pressure/flow,
+and physical-input refusals. The compact pressure observation uses step-mean
+acceleration; it is not a retarded or finite-wavelength acoustic field. The
+existing nonlinear time-resolution gate and source/reduction limits remain.
