@@ -4231,3 +4231,38 @@ apply to constant-sigma sources; those sources do not acquire a persistent
 temperature-dependent force-boundary requirement. These closures retain the
 existing held-force time split and do not
 add surfactant transport, surface entropy, contact-line laws or capillary heat.
+
+### Implicit source-resolved surface exchange for stiff thermal capacities
+
+With `implicit-enthalpy-coupling`, `FreeSurfaceInterfaceSolve::implicit` selects
+the original thermal owner's backward-Euler residual. The default remains the
+existing explicit trajectory. The optional path supports prescribed solved
+surface reservoirs and declared liquid-liquid conduction links, with the same
+material, caloric, gas-film and radiation laws. Finite gas, finite bodies,
+electrical coupling and the separate gas/radiation APIs require additional
+coupled residuals and refuse this initial implicit entry.
+
+Unknowns are specific-enthalpy increments in J/kg, mapped to actual cell energy
+increments with the original masses. A small cut cell therefore does not receive
+the same finite-difference joule probe as a large cell. Frozen positive row
+scales combine cell mass and the interval's conductance/caloric slope bound.
+The existing bounded Newton-Krylov and fallible directional-difference owners
+solve these scaled coordinates. The derivative is numerical, not an analytic
+material tangent; unsupported probes retain their original source refusals.
+
+Every trial privately re-evaluates surface temperature, source conductivity,
+gas-film properties, radiation and liquid-link conductances at its endpoint.
+Trial evaluations never integrate heat. Only the accepted endpoint payload
+supplies heat for that interval through the original conduction observer, once.
+The resulting interface sigma continues into the same native pressure/traction
+refresh and conservative mass/enthalpy transport.
+
+Acceptance independently checks every unscaled cell energy residual and the
+total energy residual in joules. The whole-call storage change is also checked
+against accumulated external supply. Unknown count, Krylov dimension, Newton
+attempts, residual evaluations and interval count are explicitly bounded;
+cancellation or any refusal publishes no accepted fluid/material state.
+`maximum_dt_s` still limits each interval for accuracy, and `maximum_substeps`
+still bounds total intervals. This removes the explicit thermal stability limit
+without enlarging capacity, clipping geometry or inferring heat. Backward Euler
+and the thermal/flow split remain first-order; temporal refinement is required.

@@ -37,6 +37,8 @@ pub use surface::{
     FreeSurfaceInterfaceFace, FreeSurfaceInterfaceSample, FreeSurfaceInterfaceSolve,
     FreeSurfaceLocalPatch, LocalSurfaceBoundaryEvolution,
 };
+#[cfg(feature = "implicit-enthalpy-coupling")]
+pub use surface::{FreeSurfaceImplicitReport, FreeSurfaceImplicitSolve};
 /// Finite atmospheric storage on the same thermal and native VOF interval.
 pub mod atmosphere;
 pub use atmosphere::FreeSurfaceFiniteGasExchange;
@@ -172,6 +174,8 @@ struct Conduction<'a, 'm> {
     surface_gas_heat_j: f64,
     surface_radiant_heat_j: f64,
     surface_absolute_heat_j: f64,
+    #[cfg(feature = "implicit-enthalpy-coupling")]
+    implicit_surface_report: Option<FreeSurfaceImplicitReport>,
     finite_atmosphere: Option<atmosphere::FiniteAtmosphere>,
     electrical: Option<electrical::ElectricalTimeline>,
 }
@@ -1037,9 +1041,20 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             surface_gas_heat_j: 0.0,
             surface_radiant_heat_j: 0.0,
             surface_absolute_heat_j: 0.0,
+            #[cfg(feature = "implicit-enthalpy-coupling")]
+            implicit_surface_report: None,
             finite_atmosphere: finite_atmosphere.as_deref().cloned(),
             electrical,
         };
+        #[cfg(feature = "implicit-enthalpy-coupling")]
+        let implicit_surface = surface_solve.implicit;
+        #[cfg(feature = "implicit-enthalpy-coupling")]
+        let (thermal, mut observer, audit) = if let Some(solve) = implicit_surface {
+            surface::implicit::advance(thermal, observer, duration, controls, solve)?
+        } else {
+            thermal.advance_observed(&observer, duration, config, || checkpoint(gate))?
+        };
+        #[cfg(not(feature = "implicit-enthalpy-coupling"))]
         let (thermal, mut observer, audit) =
             thermal.advance_observed(&observer, duration, config, || checkpoint(gate))?;
         let electrical_report = observer.electrical.as_ref()
@@ -1143,6 +1158,8 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             thermal_endpoint: observer.radiation_endpoint,
         });
         let surface_report = (!surfaces.is_empty()).then_some(FreeSurfaceInterfaceExchange {
+            #[cfg(feature = "implicit-enthalpy-coupling")]
+            implicit: observer.implicit_surface_report,
             heat_from_gas_j: observer.surface_gas_heat_j,
             heat_from_radiation_j: observer.surface_radiant_heat_j,
             last_applied: observer.surface_last,

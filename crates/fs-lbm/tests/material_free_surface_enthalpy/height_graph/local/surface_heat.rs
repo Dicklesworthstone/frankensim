@@ -10,6 +10,10 @@ use fs_lbm::material::free_surface::enthalpy::conduction::{
 #[path = "../../../nsf3_thermochemical/source.rs"]
 mod gas_source;
 
+#[cfg(feature = "implicit-enthalpy-coupling")]
+#[path = "surface_heat/implicit.rs"]
+mod implicit;
+
 fn heat_controls() -> FreeSurfaceConductionControls {
     FreeSurfaceConductionControls {
         maximum_faces: 12000,

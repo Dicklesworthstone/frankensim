@@ -160,6 +160,9 @@ pub enum FreeSurfaceEnthalpyError {
     /// The original scalar electrical source could not adopt the liquid bundle.
     #[cfg(feature = "enthalpy-coupling")]
     Conductor(fs_material::conductor::ConductorError),
+    /// The original implicit thermal/nonlinear owners refused surface exchange.
+    #[cfg(feature = "implicit-enthalpy-coupling")]
+    ImplicitSurface(conduction::surface::implicit::FreeSurfaceImplicitFailure),
     /// Missing physical closure, invalid input or exhausted explicit budget.
     Invalid(&'static str),
 }
@@ -186,6 +189,8 @@ impl core::fmt::Display for FreeSurfaceEnthalpyError {
             Self::Gas(e) => write!(f, "free-surface finite atmosphere: {e}"),
             #[cfg(feature = "enthalpy-coupling")]
             Self::Conductor(e) => write!(f, "free-surface electrical source: {e}"),
+            #[cfg(feature = "implicit-enthalpy-coupling")]
+            Self::ImplicitSurface(e) => write!(f, "free-surface implicit heat: {e}"),
             Self::Invalid(e) => write!(f, "free-surface enthalpy: {e}"),
         }
     }

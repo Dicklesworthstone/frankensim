@@ -16,6 +16,12 @@ mod local;
 mod stress;
 pub use local::{FreeSurfaceLocalPatch, LocalSurfaceBoundaryEvolution};
 
+/// Source-resolved implicit surface exchange on the original thermal owner.
+#[cfg(feature = "implicit-enthalpy-coupling")]
+pub mod implicit;
+#[cfg(feature = "implicit-enthalpy-coupling")]
+pub use implicit::{FreeSurfaceImplicitReport, FreeSurfaceImplicitSolve};
+
 /// Explicit geometry of one liquid/gas interface facing black surroundings.
 /// Both gas-film and liquid-centroid distances are positive physical inputs.
 /// A Local PLIC patch names distinct liquid/gas subvolumes of the same voxel;
@@ -87,6 +93,10 @@ pub struct FreeSurfaceInterfaceSolve {
     pub relative_heat_tolerance: f64,
     /// Explicit continuation of detached-interface boundary data after flow.
     pub local_boundary_evolution: LocalSurfaceBoundaryEvolution,
+    /// Opt into endpoint-evaluated backward Euler for stiff prescribed-bath
+    /// exchange. None retains the original explicit thermal subcycling.
+    #[cfg(feature = "implicit-enthalpy-coupling")]
+    pub implicit: Option<FreeSurfaceImplicitSolve>,
 }
 
 impl Default for FreeSurfaceInterfaceSolve {
@@ -97,6 +107,8 @@ impl Default for FreeSurfaceInterfaceSolve {
             absolute_heat_tolerance_w: 1e-12,
             relative_heat_tolerance: 1e-10,
             local_boundary_evolution: LocalSurfaceBoundaryEvolution::FixedOwners,
+            #[cfg(feature = "implicit-enthalpy-coupling")]
+            implicit: None,
         }
     }
 }
@@ -136,6 +148,10 @@ pub struct FreeSurfaceInterfaceSample {
 
 #[derive(Clone, Debug)]
 pub struct FreeSurfaceInterfaceExchange {
+    /// Original implicit solver work and independently checked joule residuals.
+    /// Present only when implicit surface exchange was explicitly selected.
+    #[cfg(feature = "implicit-enthalpy-coupling")]
+    pub implicit: Option<FreeSurfaceImplicitReport>,
     /// Already counted once in the liquid's external account. Its opposite is
     /// finite gas storage when present, making it internal to their union.
     pub heat_from_gas_j: f64,
@@ -349,9 +365,13 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
     /// under one identical prescribed reservoir and physical boundary; it does
     /// not interpolate boundary metadata or remap finite gas storage.
     ///
-    /// The eliminated positive conductances share the original explicit CFL
-    /// and timeline. Time/mesh refinement remains required for this first-order,
-    /// frozen-coefficient split. Geometry is supplied anew after native motion.
+    /// By default the eliminated positive conductances share the original
+    /// explicit CFL and timeline. With `implicit-enthalpy-coupling`, selecting
+    /// `solve.implicit` uses the original backward-Euler energy residual and
+    /// endpoint source evaluations. Its intervals retain `maximum_dt_s` and
+    /// the declared work budgets without an explicit thermal stability limit.
+    /// Both paths require time/mesh refinement for the first-order thermal/flow
+    /// split. Geometry is supplied anew after native motion.
     /// The older resolved-cell radiation API retains its explicit cell-T model.
     #[allow(clippy::too_many_arguments)]
     pub fn step_with_surface_exchange(
