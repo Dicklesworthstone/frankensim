@@ -2,7 +2,7 @@
 //!
 //! The ordinary path uses local caloric cell temperature. A complete solved
 //! heat boundary can instead supply source sigma at its interface temperature,
-//! extended normally within each admitted surface column. Bulk material states
+//! sampled on each admitted graph or local PLIC patch. Bulk material states
 //! retain their actual caloric temperature. Normal pressure and tangential
 //! traction share that surface sigma; neither supplies inferred capillary heat.
 
@@ -51,8 +51,9 @@ pub struct PlanarThermocapillarity {
 /// This is a resolved graph reduction, not an arbitrary-drop or overhang model.
 /// Internal solid walls, imposed contact angles and a nonzero mass carry refuse.
 /// Raw interface fractions must remain in [0,1] and monotone along each column.
-/// The native conversion hysteresis can temporarily retain over/underfilled
-/// cells; such a candidate is refused by this stricter geometric model.
+/// Before endpoint reconstruction, native over/underfill is resolved through
+/// local conservative mass routes and the same enthalpy transport solve.
+/// Unresolved geometry or insufficient transport budget refuses atomically.
 /// The original Guo force owner distributes each curved patch's traction over
 /// its interface band's occupied liquid volume. Bulk heat and material states
 /// retain their own temperatures; no artificial capillary heat is introduced.
@@ -84,11 +85,15 @@ pub(super) enum ThermocapillarySurface {
 /// plane/cube cut supplies actual patch area; a local affine liquid-source fit
 /// extrapolates sigma to that patch and removes its normal gradient from the
 /// tangential stress. The reconstructed sigma also drives Laplace pressure.
+/// With a complete solved heat boundary, the shared interface temperature
+/// instead supplies sigma directly at PLIC centroids; a connected tangent-plane
+/// fit reconstructs its surface gradient without a second normal extrapolation.
 /// Walls/contact lines, unresolved thin structures, unlocated carry and poorly
 /// conditioned source fits refuse. This is not a surfactant or surface-energy
 /// evolution model, and cell-source extrapolation requires spatial refinement.
-/// Raw interface fractions outside [0,1], including transient native conversion
-/// hysteresis states, also refuse; no geometric clamp discards their volume.
+/// Native conversion hysteresis is completed with actual local mass transfers
+/// before enthalpy transport and endpoint geometry; unresolved raw fractions
+/// outside [0,1] refuse without discarding volume through a geometric clamp.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LocalThermocapillarity {
     /// Lower bound on a positive cut-cell fill, finite and strictly in (0,1).
@@ -100,7 +105,7 @@ pub struct LocalThermocapillarity {
 }
 
 impl LocalThermocapillarity {
-    fn native(self) -> LocalSurface3 {
+    pub(crate) fn native(self) -> LocalSurface3 {
         LocalSurface3 {
             minimum_fill: self.minimum_surface_fill,
             maximum_gradient_condition: self.maximum_gradient_condition,
@@ -151,8 +156,9 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
     /// replace the global tank-column requirement, so detached drops and smooth
     /// surfaces spanning different Cartesian orientations are admitted.
     ///
-    /// A solved-interface-temperature heat boundary is not supplied by this
-    /// entry; sigma is extrapolated from actual bulk material temperatures.
+    /// Ordinary evolution extrapolates sigma from actual bulk temperatures.
+    /// With `enthalpy-coupling`, `local_interface_patches` exposes the same PLIC
+    /// geometry for a complete solved-interface-temperature heat boundary.
     #[allow(clippy::too_many_arguments)]
     pub fn free_surface3_from_cells_with_local_thermocapillarity<'m>(
         self,
@@ -315,7 +321,6 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         }
     }
 
-    #[cfg(feature = "enthalpy-coupling")]
     pub(super) fn temperature_dependent_thermocapillarity(&self) -> bool {
         self.thermocapillary.is_some()
             && self
@@ -338,6 +343,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             return Ok(None);
         };
         let scaling = &self.flow.scaling;
+        let surface_samples = solved_tensions.is_some();
         let mut tensions =
             if let Some(tensions) = solved_tensions {
                 tensions
@@ -370,7 +376,11 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 lattice.height_graph_marangoni_forces(surface.native(), &mut tensions, gate)?
             }
             ThermocapillarySurface::Local(surface) => {
-                lattice.local_marangoni_forces(surface.native(), &mut tensions, gate)?
+                if surface_samples {
+                    lattice.local_surface_marangoni_forces(surface.native(), &mut tensions, gate)?
+                } else {
+                    lattice.local_marangoni_forces(surface.native(), &mut tensions, gate)?
+                }
             }
         };
         if !extra.is_empty() {

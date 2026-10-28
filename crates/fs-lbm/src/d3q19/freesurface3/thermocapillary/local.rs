@@ -4,11 +4,15 @@
 //! A volume-matching plane cuts each partial cell; its area localizes the
 //! tangential stress in that cell's occupied liquid volume. An affine fit of
 //! connected, wet, cell-centered sigma samples supplies the ambient gradient
-//! and an extrapolated surface coefficient. This is a local reconstruction,
-//! not an exact source evaluation at an independently solved surface temperature.
+//! and an extrapolated surface coefficient. Independently solved surface values
+//! instead use the separate tangent-plane fit at the same PLIC centroids; that
+//! path neither samples bulk sigma nor extrapolates surface values again.
 
 use super::super::curvature;
 use super::*;
+
+mod surface;
+pub(crate) use surface::LocalSurfacePatch3;
 
 /// Resolution envelope for local, detached-interface reconstruction.
 #[derive(Clone, Copy, Debug)]
@@ -16,7 +20,7 @@ pub(crate) struct LocalSurface3 {
     /// Positive lower bound below one for every nonzero partial-cell fill.
     pub minimum_fill: f64,
     /// Upper bound, at least one, on the infinity-norm condition number of
-    /// the three-dimensional wet-sample least-squares normal matrix.
+    /// the ambient three-dimensional or surface-tangent two-dimensional fit.
     pub maximum_gradient_condition: f64,
 }
 
@@ -314,12 +318,23 @@ impl FreeSurface3 {
             direction[axis] = below - self.local_geometric_fill(p)?.0;
         }
         let mut axes = [0, 1, 2];
-        axes.sort_unstable_by(|&a, &b| {
-            direction[b]
-                .abs()
-                .total_cmp(&direction[a].abs())
-                .then(a.cmp(&b))
-        });
+        // Directions subtract unit fills, whose population-density reductions
+        // can move by a few ulps under a momentum-preserving force-frame change.
+        // Resolve only that arithmetic ambiguity in coordinate order; choosing
+        // a different height graph can otherwise rotate a curved-cell normal
+        // by percent-scale amounts. Select against each remaining maximum,
+        // rather than using a nontransitive tolerance-based sort comparator.
+        for first in 0..axes.len() {
+            let largest = axes[first..]
+                .iter()
+                .map(|&axis| direction[axis].abs())
+                .fold(0.0_f64, f64::max);
+            let selected = (first..axes.len())
+                .filter(|&i| largest - direction[axes[i]].abs() <= 64.0 * f64::EPSILON)
+                .min_by_key(|&i| axes[i])
+                .expect("nonempty remaining height axes");
+            axes.swap(first, selected);
+        }
         for axis in axes {
             if direction[axis] == 0.0 {
                 continue;
@@ -409,6 +424,40 @@ impl FreeSurface3 {
         gate: &CancelGate,
     ) -> Result<BTreeMap<(u64, usize), [f64; 3]>, FreeSurfaceError3> {
         self.admit_surface_tensions(sigma, gate)?;
+        let geometry: Vec<LocalSurfacePatch3> = self.local_interface_geometry(model, gate)?;
+        let mut patches = BTreeMap::new();
+        let mut forces = BTreeMap::new();
+        for patch in geometry {
+            check_cancel(gate)?;
+            let center = patch.liquid.map(|v| v as i64);
+            let gradient = self.local_sigma_gradient(center, sigma, model.maximum_gradient_condition).ok_or(invalid("local surface sigma gradient has insufficient or ill-conditioned connected wet support"))?;
+            let surface_sigma = sigma[&patch.location] + dot(gradient, patch.offset);
+            if !surface_sigma.is_finite()
+                || surface_sigma <= 0.0
+                || surface_sigma * Self::CURVATURE_LIMIT / CS2_3 >= 1.0
+            {
+                return Err(invalid(
+                    "extrapolated surface tension exceeds native pressure-boundary domain",
+                ));
+            }
+            let normal_gradient = dot(gradient, patch.outward_normal);
+            let force = core::array::from_fn(|d| {
+                (gradient[d] - normal_gradient * patch.outward_normal[d]) * patch.area
+                    / patch.volume
+            });
+            if force.iter().any(|f| !f.is_finite()) {
+                return Err(invalid("local surface traction is not representable"));
+            }
+            if force != [0.0; 3] {
+                forces.insert(patch.location, force);
+            }
+            patches.insert(patch.location, (patch.area, surface_sigma));
+        }
+        self.extend_local_surface_tensions(patches, sigma, gate)?;
+        Ok(forces)
+    }
+
+    fn admit_local_surface_model(&self, model: LocalSurface3) -> Result<(), FreeSurfaceError3> {
         if !model.minimum_fill.is_finite()
             || !(0.0..1.0).contains(&model.minimum_fill)
             || model.minimum_fill == 0.0
@@ -424,8 +473,15 @@ impl FreeSurface3 {
                 "local thermocapillarity needs resolved liquid, neutral walls and bounded reconstruction conditioning",
             ));
         }
-        let mut patches = BTreeMap::new();
-        let mut forces = BTreeMap::new();
+        Ok(())
+    }
+
+    fn extend_local_surface_tensions(
+        &self,
+        patches: BTreeMap<(u64, usize), (f64, f64)>,
+        sigma: &mut BTreeMap<(u64, usize), f64>,
+        gate: &CancelGate,
+    ) -> Result<(), FreeSurfaceError3> {
         let mut ghosts = Vec::new();
         for (&key, tile) in &self.tiles {
             check_cancel(gate)?;
@@ -443,39 +499,7 @@ impl FreeSurface3 {
                     .0;
                 if fill == 0.0 || fill == 1.0 {
                     ghosts.push(((key, lane), center));
-                    continue;
                 }
-                if fill < model.minimum_fill {
-                    return Err(invalid(
-                        "local surface cut cell is below its admitted liquid volume",
-                    ));
-                }
-                let normal = self.local_height_normal(center).ok_or(invalid(
-                    "local surface needs a complete well-conditioned monotone height stencil",
-                ))?;
-                let patch = cut_patch(normal, fill)
-                    .ok_or(invalid("local surface plane has no representable cut area"))?;
-                let gradient = self.local_sigma_gradient(center, sigma, model.maximum_gradient_condition).ok_or(invalid("local surface sigma gradient has insufficient or ill-conditioned connected wet support"))?;
-                let surface_sigma = sigma[&(key, lane)] + dot(gradient, patch.centroid);
-                if !surface_sigma.is_finite()
-                    || surface_sigma <= 0.0
-                    || surface_sigma * Self::CURVATURE_LIMIT / CS2_3 >= 1.0
-                {
-                    return Err(invalid(
-                        "extrapolated surface tension exceeds native pressure-boundary domain",
-                    ));
-                }
-                let normal_gradient = dot(gradient, normal);
-                let force = core::array::from_fn(|d| {
-                    (gradient[d] - normal_gradient * normal[d]) * patch.area / fill
-                });
-                if force.iter().any(|f| !f.is_finite()) {
-                    return Err(invalid("local surface traction is not representable"));
-                }
-                if force != [0.0; 3] {
-                    forces.insert((key, lane), force);
-                }
-                patches.insert((key, lane), (patch.area, surface_sigma));
             }
         }
         if patches.is_empty() {
@@ -551,7 +575,7 @@ impl FreeSurface3 {
         for (location, value) in extension {
             sigma.insert(location, value);
         }
-        Ok(forces)
+        Ok(())
     }
 }
 
@@ -848,6 +872,91 @@ mod tests {
     }
 
     #[test]
+    fn g1_force_frame_rebind_preserves_roundoff_tied_local_height_geometry() {
+        let gate = CancelGate::new_clock_free();
+        let (original, center) = drop_surface(16);
+        let geometry: BTreeMap<_, _> = original
+            .local_interface_geometry(model(), &gate)
+            .unwrap()
+            .into_iter()
+            .map(|patch| (patch.location, patch))
+            .collect();
+        let wet: Vec<_> = field(&original, |_| 0.0).into_keys().collect();
+        // Cyclic source rotations exercise each Cartesian ranking. The larger
+        // source exposes a second tied-column flip without advancing any time.
+        for gradient in [
+            [1e-6, -0.7e-6, 0.3e-6],
+            [0.3e-6, 1e-6, -0.7e-6],
+            [-0.7e-6, 0.3e-6, 1e-6],
+            [1e-4, -0.7e-4, 0.3e-4],
+        ] {
+            let mut surface = original.clone();
+            let mut sigma = field(&surface, |p| {
+                0.01 + dot(gradient, core::array::from_fn(|d| p[d] - center[d]))
+            });
+            let traction = surface
+                .local_marangoni_forces(model(), &mut sigma, &gate)
+                .unwrap();
+            assert!(!traction.is_empty());
+            let forces = wet
+                .iter()
+                .map(|&location| {
+                    (
+                        location,
+                        traction.get(&location).copied().unwrap_or([0.0; 3]),
+                    )
+                })
+                .collect();
+            surface.rebind_surface_tensions(sigma, &gate).unwrap();
+            surface.rebind_force_field(forces, &gate).unwrap();
+            assert_ne!(surface.grid().state_bits(), original.grid().state_bits());
+            assert_eq!(
+                surface.ledger_mass().to_bits(),
+                original.ledger_mass().to_bits()
+            );
+            for &(key, lane) in &wet {
+                assert_eq!(
+                    surface.tiles[&key].cells[lane],
+                    original.tiles[&key].cells[lane]
+                );
+                assert_eq!(
+                    surface.tiles[&key].mass[lane].to_bits(),
+                    original.tiles[&key].mass[lane].to_bits()
+                );
+                let (x, y, z) = FreeSurface3::global_of(key, lane);
+                let before = original
+                    .sample_at(x as usize, y as usize, z as usize)
+                    .unwrap();
+                let after = surface
+                    .sample_at(x as usize, y as usize, z as usize)
+                    .unwrap();
+                assert!((after.density - before.density).abs() < 4e-15);
+                assert!((0..3).all(|d| (after.velocity[d] - before.velocity[d]).abs() < 1e-14));
+            }
+            let after = surface.local_interface_geometry(model(), &gate).unwrap();
+            assert_eq!(after.len(), geometry.len());
+            for patch in after {
+                let before = geometry[&patch.location];
+                let normal_change = (0..3)
+                    .map(|d| (patch.outward_normal[d] - before.outward_normal[d]).abs())
+                    .fold(0.0_f64, f64::max);
+                assert!(
+                    normal_change <= 64.0 * f64::EPSILON,
+                    "force-frame-only height switch at {:?}: {:?} -> {:?}",
+                    patch.liquid,
+                    before.outward_normal,
+                    patch.outward_normal
+                );
+                assert!((patch.volume - before.volume).abs() <= 4.0 * f64::EPSILON);
+                // Almost-full corner cuts amplify a one-ulp fill change in
+                // area. This absolute cell-scale bound covers that observed
+                // arithmetic sensitivity; normals retain the much tighter gate.
+                assert!((patch.area - before.area).abs() <= 256.0 * f64::EPSILON);
+            }
+        }
+    }
+
+    #[test]
     fn g1_local_spherical_manufactured_tangential_force_refines() {
         let gate = CancelGate::new_clock_free();
         let (mut previous, mut previous_radial) = (f64::INFINITY, f64::INFINITY);
@@ -1012,5 +1121,105 @@ mod tests {
                 .is_err()
         );
         assert_eq!(sigma, before);
+    }
+
+    #[test]
+    fn g1_local_cut_liquid_boundary_area_matches_independent_slabs() {
+        for axis in 0..3 {
+            for sign in [-1.0, 1.0] {
+                for fill in [0.001, 0.2, 0.5, 0.8, 0.999] {
+                    let mut normal = [0.0; 3];
+                    normal[axis] = sign;
+                    let cut = cut_patch(normal, fill).unwrap();
+                    let patch = LocalSurfacePatch3 {
+                        location: (0, 0),
+                        liquid: [0; 3],
+                        centroid: cut.centroid,
+                        outward_normal: normal,
+                        area: cut.area,
+                        volume: fill,
+                        offset: cut.centroid,
+                    };
+                    assert!((patch.liquid_boundary_area() - (2.0 + 4.0 * fill)).abs() < 3e-14);
+                }
+            }
+        }
+        let normal = [1.0 / 3.0_f64.sqrt(); 3];
+        let cut = cut_patch(normal, 0.5).unwrap();
+        let patch = LocalSurfacePatch3 {
+            location: (0, 0),
+            liquid: [0; 3],
+            centroid: cut.centroid,
+            outward_normal: normal,
+            area: cut.area,
+            volume: 0.5,
+            offset: cut.centroid,
+        };
+        assert!((patch.liquid_boundary_area() - (3.0 + 0.75 * 3.0_f64.sqrt())).abs() < 3e-14);
+    }
+
+    #[test]
+    fn g1_local_solved_surface_sigma_ignores_unrelated_bulk_gradient() {
+        let gate = CancelGate::new_clock_free();
+        let (surface, center) = drop_surface(16);
+        let geometry = surface.local_interface_geometry(model(), &gate).unwrap();
+        let mut sigma = field(&surface, |p| 0.01 + 0.00001 * (p[0] - center[0]));
+        for patch in &geometry {
+            sigma.insert(patch.location, 0.01);
+        }
+        assert!(
+            surface
+                .local_surface_marangoni_forces(model(), &mut sigma, &gate)
+                .unwrap()
+                .is_empty()
+        );
+        for patch in &geometry {
+            assert_eq!(sigma[&patch.location], 0.01);
+        }
+
+        let gradient = [1e-6, -0.6e-6, 0.4e-6];
+        let mut sigma = field(&surface, |p| 0.02 + 0.0001 * (p[1] - center[1]));
+        for patch in &geometry {
+            sigma.insert(
+                patch.location,
+                0.01 + dot(
+                    gradient,
+                    core::array::from_fn(|d| patch.centroid[d] - center[d]),
+                ),
+            );
+        }
+        let before = sigma.clone();
+        let forces = surface
+            .local_surface_marangoni_forces(model(), &mut sigma, &gate)
+            .unwrap();
+        let mut total = [0.0; 3];
+        for patch in &geometry {
+            assert_eq!(sigma[&patch.location], before[&patch.location]);
+            let force = forces.get(&patch.location).copied().unwrap_or([0.0; 3]);
+            assert!(dot(force, patch.outward_normal).abs() < 2e-16);
+            for d in 0..3 {
+                total[d] += force[d] * patch.volume;
+            }
+        }
+        let scale = 8.0 * core::f64::consts::PI * 16.0_f64.powi(2) / 3.0;
+        for d in 0..3 {
+            assert!((total[d] / (scale * gradient[d]) - 1.0).abs() < 0.03);
+        }
+
+        let mut invalid = before;
+        let original = invalid.clone();
+        assert!(
+            surface
+                .local_surface_marangoni_forces(
+                    LocalSurface3 {
+                        maximum_gradient_condition: 1.0,
+                        ..model()
+                    },
+                    &mut invalid,
+                    &gate
+                )
+                .is_err()
+        );
+        assert_eq!(invalid, original);
     }
 }

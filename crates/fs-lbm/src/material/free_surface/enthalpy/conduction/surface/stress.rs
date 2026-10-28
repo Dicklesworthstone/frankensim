@@ -1,7 +1,8 @@
-//! The solved heat interface supplies the SAME planar/graph pressure and traction.
+//! The solved heat interface supplies the SAME native pressure and traction.
 //!
 //! Each tank column owns one surface state. Its sigma extends normally onto
 //! native wet/zero-mass ghost lanes; it never replaces their bulk material T.
+//! Detached PLIC patches use their separate surface-tangent sample path.
 
 use super::*;
 use crate::d3q19::TILE;
@@ -17,7 +18,7 @@ fn column(p: [usize; 3], normal: usize) -> [usize; 2] {
     }
 }
 
-fn same_area(actual: f64, expected: f64) -> bool {
+pub(super) fn same_area(actual: f64, expected: f64) -> bool {
     actual.is_finite()
         && actual > 0.0
         && (actual - expected).abs() <= 64.0 * f64::EPSILON * actual.max(expected)
@@ -72,6 +73,9 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         dx: f64,
         gate: &CancelGate,
     ) -> Result<(), Error> {
+        if self.local_thermocapillary_surface().is_some() {
+            return self.admit_local_surface_geometry(surfaces, gate);
+        }
         if let Some(graph) = self.height_graph_thermocapillary_surface() {
             let patches = self
                 .flow
@@ -173,10 +177,9 @@ impl Conduction<'_, '_> {
         let (normal_axis, graph) = match surface {
             ThermocapillarySurface::Planar(plane) => (plane.normal_axis, None),
             ThermocapillarySurface::HeightGraph(graph) => (graph.normal_axis, Some(graph)),
-            ThermocapillarySurface::Local(_) => {
-                return Err(Error::Invalid(
-                    "detached-interface stress has no column-based solved heat-boundary closure",
-                ));
+            ThermocapillarySurface::Local(model) => {
+                return self
+                    .local_surface_force_field(lattice, states, model, scaling, prepared, gate);
             }
         };
         let patches = graph

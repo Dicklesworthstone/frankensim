@@ -35,6 +35,7 @@ pub mod surface;
 pub use surface::{
     FreeSurfaceHeightGraphPatch, FreeSurfaceInterfaceContact, FreeSurfaceInterfaceExchange,
     FreeSurfaceInterfaceFace, FreeSurfaceInterfaceSample, FreeSurfaceInterfaceSolve,
+    FreeSurfaceLocalPatch, LocalSurfaceBoundaryEvolution,
 };
 /// Finite atmospheric storage on the same thermal and native VOF interval.
 pub mod atmosphere;
@@ -161,6 +162,7 @@ struct Conduction<'a, 'm> {
     radiation_absolute_heat_j: f64,
     surfaces: &'a [FreeSurfaceInterfaceContact<'a>],
     surface_solve: FreeSurfaceInterfaceSolve,
+    maximum_surface_patches: usize,
     surface_stress: bool,
     surface_endpoints: Vec<CellId>,
     surface_last: Vec<FreeSurfaceInterfaceSample>,
@@ -633,7 +635,9 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         gate: &CancelGate,
     ) -> Result<FreeSurfaceConductionReport, Error> {
         poll(gate)?;
-        let surface_stress = !surfaces.is_empty() && self.temperature_dependent_thermocapillarity();
+        let surface_stress = !surfaces.is_empty()
+            && (self.temperature_dependent_thermocapillarity()
+                || self.local_thermocapillary_surface().is_some());
         if self.surface_temperature_forces && !surface_stress {
             return Err(Error::Invalid(
                 "surface-temperature stress requires its complete solved heat boundary",
@@ -707,7 +711,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         let graph_area_corrections = if surfaces.is_empty() {
             BTreeMap::new()
         } else {
-            self.height_graph_area_corrections(gate)?
+            self.interface_area_corrections(gate)?
         };
         let masses = self.flow.lattice.mass_snapshot();
         admit_masses(&masses, self.controls.max_cells)?;
@@ -1021,6 +1025,9 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             radiation_absolute_heat_j: 0.0,
             surfaces,
             surface_solve,
+            maximum_surface_patches: controls.maximum_faces
+                - (other_faces - surfaces.len())
+                - solid_link_count,
             surface_stress,
             surface_endpoints,
             surface_last: Vec::new(),

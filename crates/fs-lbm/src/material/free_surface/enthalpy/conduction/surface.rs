@@ -12,10 +12,14 @@ use fs_material::state_point::ResolvedScalarProperty;
 use fs_material::thermochemical_gas::energy::{GasEnergySolve, IsochoricGasParcel};
 use fs_material::thermochemical_gas::{ResolvedThermochemicalGasState, ThermochemicalGasModel};
 
+mod local;
 mod stress;
+pub use local::{FreeSurfaceLocalPatch, LocalSurfaceBoundaryEvolution};
 
 /// Explicit geometry of one liquid/gas interface facing black surroundings.
 /// Both gas-film and liquid-centroid distances are positive physical inputs.
+/// A Local PLIC patch names distinct liquid/gas subvolumes of the same voxel;
+/// its equal coordinates are admitted only by that resolved geometric mode.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FreeSurfaceInterfaceFace {
     pub face: FreeSurfaceGasFace,
@@ -81,6 +85,8 @@ pub struct FreeSurfaceInterfaceSolve {
     pub temperature_tolerance_k: f64,
     pub absolute_heat_tolerance_w: f64,
     pub relative_heat_tolerance: f64,
+    /// Explicit continuation of detached-interface boundary data after flow.
+    pub local_boundary_evolution: LocalSurfaceBoundaryEvolution,
 }
 
 impl Default for FreeSurfaceInterfaceSolve {
@@ -90,6 +96,7 @@ impl Default for FreeSurfaceInterfaceSolve {
             temperature_tolerance_k: 1e-9,
             absolute_heat_tolerance_w: 1e-12,
             relative_heat_tolerance: 1e-10,
+            local_boundary_evolution: LocalSurfaceBoundaryEvolution::FixedOwners,
         }
     }
 }
@@ -136,8 +143,9 @@ pub struct FreeSurfaceInterfaceExchange {
     pub heat_from_radiation_j: f64,
     pub last_applied: Vec<FreeSurfaceInterfaceSample>,
     pub thermal_endpoint: Vec<FreeSurfaceInterfaceSample>,
-    /// Present for temperature-dependent surface stress: re-solved after native
-    /// advection using actual bulk state and the same finite gas endpoint.
+    /// Present for temperature-dependent stress and Local surface exchange:
+    /// re-solved after native advection using actual bulk state and the same
+    /// finite gas endpoint or declared prescribed reservoir.
     /// These diagnostics update pressure/traction only and supply no heat.
     pub native_endpoint: Vec<FreeSurfaceInterfaceSample>,
 }
@@ -151,9 +159,10 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
     /// several cut cells vertically; heat is attached to its outermost positive
     /// liquid cell as a declared column-patch finite-volume reduction. Its
     /// liquid-normal distance remains a physical input, not a guessed half dx.
-    /// Native conversion hysteresis can temporarily admit over/underfilled
-    /// cells that this monotone graph cannot represent. Such a candidate
-    /// refuses transactionally; its mass or geometry is never clipped here.
+    /// Native conversion hysteresis is completed conservatively through the
+    /// original mass/enthalpy routes before endpoint reconstruction. Unresolved
+    /// geometry or correction capacity still refuses transactionally; this
+    /// query never clips mass or repairs a nonmonotone height column.
     pub fn height_graph_interface_patches(
         &self,
         gate: &CancelGate,
@@ -188,12 +197,26 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             .collect()
     }
 
-    /// Replace the projected outer Cartesian face by its actual graph area in
-    /// the original thermal owner's exposed-area budget. Values are in m².
-    pub(super) fn height_graph_area_corrections(
+    /// Correct the original thermal owner's exposed-area budget in m². Graphs
+    /// replace their projected outer face; local cuts use their actual liquid
+    /// polyhedron boundary, including clipped wet Cartesian faces.
+    pub(super) fn interface_area_corrections(
         &self,
         gate: &CancelGate,
     ) -> Result<BTreeMap<[usize; 3], f64>, Error> {
+        if self.local_thermocapillary_surface().is_some() {
+            let dx = self.flow.scaling.cell_size_m();
+            return self
+                .local_interface_patches(gate)?
+                .into_iter()
+                .map(|patch| {
+                    Ok((
+                        patch.liquid,
+                        environment::finite(patch.liquid_boundary_area_m2 - 6.0 * dx * dx)?,
+                    ))
+                })
+                .collect();
+        }
         if self.height_graph_thermocapillary_surface().is_none() {
             return Ok(BTreeMap::new());
         }
@@ -233,13 +256,18 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         }
         if !surfaces.is_empty()
             && (self.height_graph_thermocapillary_surface().is_some()
+                || self.local_thermocapillary_surface().is_some()
                 || self.temperature_dependent_thermocapillarity())
         {
             self.admit_surface_stress_geometry(surfaces, dx, gate)?;
         }
-        if !surfaces.is_empty() && self.height_graph_thermocapillary_surface().is_some() {
-            // The shared graph reconstruction has already checked each live
-            // liquid/gas owner, unique column and actual curved patch area.
+        self.admit_local_boundary_evolution(surfaces, solve.local_boundary_evolution)?;
+        if !surfaces.is_empty()
+            && (self.height_graph_thermocapillary_surface().is_some()
+                || self.local_thermocapillary_surface().is_some())
+        {
+            // The shared reconstruction has checked each live liquid/gas owner,
+            // unique column or cut cell, and actual curved patch area.
             // Cartesian face-area limits remain on the separate voxel APIs.
             let mut endpoints = Vec::with_capacity(surfaces.len());
             for contact in surfaces {
@@ -312,6 +340,15 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
     /// Once active, steps omitting this complete boundary refuse transactionally.
     /// Bulk viscosity, density and caloric storage retain their actual bulk state.
     ///
+    /// Local detached interfaces instead supply every patch from
+    /// [`Self::local_interface_patches`]. Source sigma is evaluated at each
+    /// solved patch temperature; a separate tangent-plane surface fit supplies
+    /// Marangoni stress without treating these values as ambient bulk samples.
+    /// `FixedOwners` retains each declared patch boundary or refuses owner
+    /// changes. Explicit `UniformReservoir` permits newly reconstructed owners
+    /// under one identical prescribed reservoir and physical boundary; it does
+    /// not interpolate boundary metadata or remap finite gas storage.
+    ///
     /// The eliminated positive conductances share the original explicit CFL
     /// and timeline. Time/mesh refinement remains required for this first-order,
     /// frozen-coefficient split. Geometry is supplied anew after native motion.
@@ -382,6 +419,11 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         gate: &CancelGate,
     ) -> Result<viscous::FreeSurfaceViscousConductionReport, Error> {
         poll(gate)?;
+        if solve.local_boundary_evolution == LocalSurfaceBoundaryEvolution::UniformReservoir {
+            return Err(Error::Invalid(
+                "uniform-reservoir boundary evolution requires a prescribed gas reservoir",
+            ));
+        }
         if surfaces.is_empty() || surfaces.len() > controls.maximum_faces {
             return Err(Error::Invalid(
                 "finite atmosphere requires bounded exposed liquid patches",

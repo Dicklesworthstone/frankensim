@@ -4114,6 +4114,14 @@ Complete monotone raw-VOF height stencils share their derivatives with native
 curvature; local traction may try bounded axial depths of 7, 11 and 15 cells.
 The selected graph must have a normal-axis magnitude of at least one half.
 Native pressure keeps its existing seven-cell curvature stencil and fallback.
+Cartesian direction magnitudes that differ only within unit-fill arithmetic
+uncertainty use a deterministic coordinate tie rule. This prevents a force-frame
+rebind from switching equivalent height columns and rotating the local normal;
+it changes neither mass nor the surface/source admission envelope.
+Force rebinding preserves the canonical population density exactly, preventing
+full cells from becoming phantom partial owners through a reduction ulp. A
+bounded rest correction and verified final-add fallback retain physical
+velocity and force-corrected stress to population roundoff without mass routes.
 
 A volume-matching plane/cube intersection supplies each partial cell's surface
 area and centroid. A weighted affine fit uses only face-connected wet samples
@@ -4127,9 +4135,10 @@ bounded plane inversion; it performs no global surface solve.
 Source fitting, cut geometry, tiny volumes, pressure-domain violations, missing
 support or cancellation refuse before publishing a candidate field. Walls,
 contact lines, ambiguous disconnected ghost neighborhoods and all-full/all-empty
-unresolved interfaces are not admitted. Sigma is reconstructed from sourced
-bulk cell values, not evaluated at an independently solved surface temperature;
-the approximation requires spatial refinement. This extension does not add
+unresolved interfaces are not admitted. Ordinary evolution reconstructs sigma
+from sourced bulk cell values and requires spatial refinement. A complete
+solved-temperature boundary can instead sample source sigma at each actual
+PLIC centroid, as described below. This extension does not add
 surfactant transport, capillary heating or a conservative surface-energy step.
 
 ### Curved solved-interface heat exchange
@@ -4155,8 +4164,8 @@ After native advection, the adapter reconstructs live graph geometry and
 re-solves interface temperatures using the advected liquid states and retained
 gas boundary. This endpoint refresh supplies no second thermal interval and no
 extra heat. It retains the graph's strict raw-fill and slope envelope, explicit
-normal distances and held-force time split. Detached local interfaces have no
-column-based solved heat closure and refuse this entry.
+normal distances and held-force time split. Detached local interfaces use their
+own PLIC patch geometry and connected surface gradient, described below.
 
 Focused tests check all six orientations, a curved cap crossing lattice layers,
 the corrected exposed-area budget with five internal contacts, shared source
@@ -4187,3 +4196,38 @@ interface-front expansion, bounded work and cancellation, and advancing curved
 graphs of both curvature signs crossing lattice layers. A separate regression
 passes the amended trace through the actual enthalpy transport solver and
 compares extensive heat and local temperatures with an analytic two-cell case.
+
+### Solved interface temperature on detached local surfaces
+
+`local_interface_patches` returns each actual partial-cell PLIC patch's centroid,
+normal, area and occupied-liquid boundary area. `FreeSurfaceLocalPatch::with_exchange`
+binds explicit liquid-normal and gas-film distances, emissivity and surroundings.
+The interface divides liquid and gas subvolumes of the same partial voxel;
+equal liquid/gas coordinates are admitted only by this resolved Local entry.
+Empty/full closure ghosts own no patch and receive no duplicate thermal supply.
+The thermal area budget uses the actual cut surface plus clipped wet Cartesian
+faces, while independent Cartesian contact limits remain unchanged.
+
+The original zero-storage surface solver supplies one interface temperature for
+liquid conduction, gas-film exchange and radiation. Original source sigma at
+that temperature supplies both native capillary pressure and tangential stress.
+A weighted tangent-plane fit uses connected PLIC centroids, excludes opposing
+surface normals and admits its conditioning explicitly. It does not reuse bulk
+temperature gradients or extrapolate solved surface sigma a second time.
+
+`FreeSurfaceInterfaceSolve::local_boundary_evolution` defaults to `FixedOwners`:
+each reconstructed owner must retain a declared boundary. `UniformReservoir`
+explicitly permits newly exposed patches when every contact has identical
+source binding, complete context, normal distances and radiative data. The
+number of live patches remains bounded by the declared thermal face budget.
+This prescribed-bath mode refuses finite gas; it does not invent a remapping
+of finite gas storage or spatially varying boundary data.
+
+After native motion, live PLIC geometry and advected material states re-solve
+the endpoint interface temperatures for pressure/traction only. Heat remains
+accounted once by the original thermal interval, and bulk material temperatures
+retain their caloric values. Endpoint ownership and geometry validation also
+apply to constant-sigma sources; those sources do not acquire a persistent
+temperature-dependent force-boundary requirement. These closures retain the
+existing held-force time split and do not
+add surfactant transport, surface entropy, contact-line laws or capillary heat.

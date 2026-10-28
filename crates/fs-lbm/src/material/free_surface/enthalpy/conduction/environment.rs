@@ -17,12 +17,17 @@ use fs_material::thermochemical_gas::{ResolvedThermochemicalGasState, Thermochem
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FreeSurfaceGasFace {
     pub liquid: [usize; 3],
-    /// Face-adjacent in-domain gas cell. Permanent walls and wet cells refuse.
+    /// Face-adjacent in-domain gas cell for Cartesian exchange. Resolved Local
+    /// surface exchange instead names this partial cell's gas subvolume using
+    /// the same coordinate as `liquid`; other wet-cell bindings refuse.
     pub gas: [usize; 3],
-    /// Physical patch area [m2], at most one Cartesian face. Zero insulates.
+    /// Physical patch area [m2]. Cartesian exchange admits at most one cell
+    /// face and zero insulates. Resolved graph/Local surface exchange requires
+    /// its complete positive reconstructed patch area.
     pub area_m2: f64,
     /// Liquid-centroid-to-interface and gas-film thicknesses [m]. Both are
-    /// positive; the liquid distance cannot exceed the cell width.
+    /// positive. Cartesian exchange bounds the liquid distance by cell width;
+    /// resolved surface exchange retains an explicit positive normal distance.
     pub distances_m: [f64; 2],
 }
 

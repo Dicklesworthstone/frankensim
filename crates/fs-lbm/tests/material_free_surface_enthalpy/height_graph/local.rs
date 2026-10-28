@@ -4,6 +4,10 @@
 use super::*;
 use fs_lbm::material::free_surface::enthalpy::thermocapillary::LocalThermocapillarity;
 
+#[cfg(feature = "enthalpy-coupling")]
+#[path = "local/surface_heat.rs"]
+mod surface_heat;
+
 const SIZE: usize = 56;
 const CENTER: usize = SIZE / 2;
 const RADIUS: f64 = 16.0;
@@ -96,6 +100,15 @@ fn with_drop<R>(
     slope: f64,
     run: impl FnOnce(&mut MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> R,
 ) -> R {
+    with_moving_drop(slope, [0.0; 3], [1.0, 0.0, 0.0], run)
+}
+
+fn with_moving_drop<R>(
+    slope: f64,
+    velocity_m_s: [f64; 3],
+    temperature_gradient_k: [f64; 3],
+    run: impl FnOnce(&mut MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> R,
+) -> R {
     let card = source_card(slope);
     let source = source(&card);
     let law = LiquidTemperatureLaw::try_from_material(
@@ -108,11 +121,15 @@ fn with_drop<R>(
     let caloric = caloric(&card);
     let gate = CancelGate::new_clock_free();
     with_cx(&gate, |cx| {
+        let mut cells = drop_cells();
+        for cell in &mut cells {
+            cell.velocity_m_s = velocity_m_s;
+        }
         let mut thermal = plan_free_surface_from_material(&source, DX, DT, 0.1)
             .unwrap()
             .free_surface3_from_cells_with_local_thermocapillarity(
                 drop_domain(),
-                &drop_cells(),
+                &cells,
                 &law,
                 &caloric,
                 FreeSurfaceEnthalpyControls {
@@ -123,7 +140,13 @@ fn with_drop<R>(
                 local(),
                 None,
                 None,
-                |p| 200000.0 + 2000.0 * (p[0] as f64 - CENTER as f64),
+                |p| {
+                    200000.0
+                        + 2000.0
+                            * (0..3)
+                                .map(|d| temperature_gradient_k[d] * (p[d] as f64 - CENTER as f64))
+                                .sum::<f64>()
+                },
                 cx,
                 &gate,
             )

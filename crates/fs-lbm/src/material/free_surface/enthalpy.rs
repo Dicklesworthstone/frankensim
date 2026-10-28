@@ -10,7 +10,8 @@
 //! validity-wide constant surface tension retains the native capillary mechanics.
 //! Capillary work and surface-energy accuracy remain the native model's scope;
 //! no surface heat or total-energy closure is invented here. Optional
-//! `thermocapillary` admits source-varying sigma on checked planar or height-graph tank surfaces.
+//! `thermocapillary` admits source-varying sigma on checked planar, height-graph
+//! and detached local surfaces.
 //! Optional `wetting` evolves the original planar contact law using
 //! local liquid temperature. Phase mobility and pressure work are not supplied. Optional `viscous`
 //! converts the molecular stress power into heat on the same VOF mass routes.
@@ -564,7 +565,10 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 "surface-temperature stress requires its complete solved heat boundary",
             ));
         }
-        let uses_surface_temperature = surface.is_some();
+        // Local heat also refreshes geometry for constant sigma. Only a
+        // temperature-dependent force field needs that boundary on later steps.
+        let uses_surface_temperature =
+            surface.is_some() && self.temperature_dependent_thermocapillarity();
         let masses = self.flow.lattice.mass_snapshot();
         let mass_unit = self.flow.scaling.mass_unit_kg();
         let before = total(&masses, &self.h, mass_unit)?;
