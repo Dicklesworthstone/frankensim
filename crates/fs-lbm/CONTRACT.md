@@ -3713,3 +3713,27 @@ impulse solution, very light walls, common translation, passive relaxation,
 fluid-plus-wall momentum, external work/support reactions, and refusal without
 publication. A separate pooled regression covers multi-group replay and
 cancellation/refusal. The broad moving-boundary bead remains open.
+
+### Electrically insulating interfaces in moving conductors
+
+`ElectricSetup::solve_with_cell_motion_topology` and
+`solve_isolated_cell_motion_topology` admit explicit electrically open faces
+alongside finite resistive contacts. One validated face map removes the same
+interface from current continuity, motional EMF, Joule heat and reciprocal
+Lorentz-force transfer, while preserving both cells and their bulk material,
+mechanical and thermal laws. Existing motion entry points delegate with no open
+faces and preserve their previous results.
+
+Isolated-body potential gauges follow the actual conducting graph after cuts;
+each separate lamination receives its own reference and can retain an independent
+circulating current. Breaking a closed loop extinguishes its eddy current and
+braking loss rather than leaving a fictitious path across insulation. Wired
+components still require voltage references. Invalid or duplicate faces,
+overlapping open/resistive definitions, unreferenced wired islands and cancellation
+refuse without mutating the inputs.
+
+This remains a frozen-state, imposed-field low-induction solve. It does not add
+dielectric charging, displacement current, arcing, changing material occupancy or
+self-induced magnetic storage. The original `electric_isolated_motion` and
+`electrical_open_faces` targets cover slit opening/reclosing, independent
+laminations, reversed motion, coupled power balance and input refusals.

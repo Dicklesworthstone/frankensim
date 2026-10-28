@@ -221,7 +221,7 @@ impl ContactField {
         Ok(Self { resistive: field, open: BTreeSet::new() })
     }
 
-    fn with_open_faces(mut self, domain: &VoxelDomain, open_faces: &[[usize; 2]],
+    pub(super) fn with_open_faces(mut self, domain: &VoxelDomain, open_faces: &[[usize; 2]],
         gate: &CancelGate) -> Result<Self, ChtError> {
         if open_faces.len().saturating_add(self.resistive.len())
             > domain.cell_count().saturating_mul(3) {

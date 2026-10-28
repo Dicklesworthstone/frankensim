@@ -31,6 +31,39 @@ impl ElectricSetup {
         resolve: impl FnMut(usize, Voxel, f64) -> Result<Option<f64>, ChtError>,
         gate: &CancelGate,
     ) -> Result<MovingConductorSolution, ChtError> {
+        self.solve_isolated_cell_motion_topology(
+            domain, temperature, contacts, &[], motion, current_tolerance_a, resolve, gate,
+        )
+    }
+
+    /// Eddy/braking currents in electrically isolated, segmented conductors.
+    ///
+    /// Explicit open faces interrupt current loops without removing either
+    /// bulk cell, changing its resistivity or changing mechanical/thermal
+    /// contact. Numerical gauges follow the ACTUAL conducting graph after
+    /// openings: each separate component receives exactly one deterministic
+    /// potential reference and all of its cells still receive current, Joule
+    /// heat and force. An insulating slit can therefore extinguish a loop;
+    /// separated laminations can retain independent circulating currents.
+    ///
+    /// The original current and transpose-force assembly consume the same
+    /// face map as gauge selection. Closed faces and finite resistive contacts
+    /// retain their original laws. All electrode-free, continuity, power,
+    /// material, cancellation and low-induction restrictions of
+    /// [`Self::solve_isolated_cell_motion`] apply. No infinite-resistance
+    /// surrogate, capacitive gap current or topological history is inferred.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_isolated_cell_motion_topology(
+        &self,
+        domain: &VoxelDomain,
+        temperature: &[f64],
+        contacts: &[ElectricalContact],
+        open_faces: &[[usize; 2]],
+        motion: ElectricMotionInput<'_>,
+        current_tolerance_a: f64,
+        resolve: impl FnMut(usize, Voxel, f64) -> Result<Option<f64>, ChtError>,
+        gate: &CancelGate,
+    ) -> Result<MovingConductorSolution, ChtError> {
         poll(gate)?;
         if !self.electrodes.is_empty() || !current_tolerance_a.is_finite() || current_tolerance_a < 0.0 {
             return Err(invalid("isolated motion requires no electrodes and a finite nonnegative current tolerance"));
@@ -39,9 +72,11 @@ impl ElectricSetup {
         let (nodes, rho) = super::super::contact::resolve_admitted_cells(
             domain, temperature, vec![Node::Off; domain.cell_count()], resolve, gate,
         )?;
-        transfer.isolation = Some(Isolation::new(domain, &nodes, current_tolerance_a, gate)?);
-        let electric = solve_electric_field_with_motion(
-            domain, self, nodes, &rho, contacts, Some(&mut transfer), gate,
+        let field = super::super::contact::ContactField::new(domain, &nodes, contacts, gate)?
+            .with_open_faces(domain, open_faces, gate)?;
+        transfer.isolation = Some(Isolation::new(domain, &nodes, &field, current_tolerance_a, gate)?);
+        let electric = solve_electric_field_with_contact_field(
+            domain, self, nodes, &rho, field, Some(&mut transfer), gate,
         )?;
         transfer.finish(domain, electric, gate)
     }
@@ -54,7 +89,8 @@ pub(super) struct Isolation {
 }
 
 impl Isolation {
-    fn new(domain: &VoxelDomain, nodes: &[Node], tolerance_a: f64, gate: &CancelGate) -> Result<Self, ChtError> {
+    fn new(domain: &VoxelDomain, nodes: &[Node], contacts: &super::super::contact::ContactField,
+        tolerance_a: f64, gate: &CancelGate) -> Result<Self, ChtError> {
         let n = domain.cell_count();
         let mut visited = vec![false; n];
         let mut potential_gauges = vec![false; n];
@@ -72,6 +108,7 @@ impl Isolation {
                 for face in 0..6 {
                     if let Some(next) = domain.neighbor(cell, face)
                         && !visited[next] && nodes[next] == Node::Conductor
+                        && !contacts.is_open(cell, next)
                     {
                         visited[next] = true;
                         stack.push(next);
@@ -108,7 +145,8 @@ mod tests {
     #[test]
     fn gauge_cell_current_balance_is_checked_not_just_unknown_rows() {
         let domain=VoxelDomain::new(2,2,1,1.0).unwrap();let gate=CancelGate::new();
-        let mut isolation=Isolation::new(&domain,&[Node::Conductor;4],1e-12,&gate).unwrap();
+        let contacts=super::super::super::contact::ContactField::new(&domain,&[Node::Conductor;4],&[],&gate).unwrap();
+        let mut isolation=Isolation::new(&domain,&[Node::Conductor;4],&contacts,1e-12,&gate).unwrap();
         assert_eq!(isolation.potential_gauges,vec![true,false,false,false]);
         isolation.current_balance_a[0]=1.0;
         assert!(isolation.check(&gate).is_err());

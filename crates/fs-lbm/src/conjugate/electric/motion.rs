@@ -9,7 +9,7 @@
 
 use super::{
     ChtError, ElectricSetup, ElectricSolution, ElectricalContact, Node, Voxel,
-    VoxelDomain, finite, finite_positive, poll, poll_every, solve_electric_field_with_motion,
+    VoxelDomain, finite, finite_positive, poll, poll_every, solve_electric_field_with_contact_field,
 };
 use fs_exec::CancelGate;
 
@@ -72,11 +72,42 @@ impl ElectricSetup {
         resolve: impl FnMut(usize, Voxel, f64) -> Result<Option<f64>, ChtError>,
         gate: &CancelGate,
     ) -> Result<MovingConductorSolution, ChtError> {
+        self.solve_with_cell_motion_topology(domain, temperature, contacts, &[], motion, resolve, gate)
+    }
+
+    /// Moving-conductor counterpart with explicitly insulating electrical faces.
+    ///
+    /// An opening removes that face from current continuity, motional EMF,
+    /// Joule heating and reciprocal magnetic force together. Its two bulk cells
+    /// remain intact and retain their complete material laws. This models an
+    /// insulating slit/coating in the admitted low-induction regime without a
+    /// fictitious huge resistance or deleting mechanical/thermal material.
+    ///
+    /// Open and resistive face lists must be disjoint and unique in either
+    /// orientation. Every conducting component still needs a voltage reference;
+    /// an opening which leaves an unreferenced moving body refuses rather than
+    /// dropping its possible eddy currents. Electrode-free bodies instead use
+    /// [`Self::solve_isolated_cell_motion_topology`]. No dielectric charging,
+    /// displacement current, arc law or changing-field induction is introduced.
+    /// The result remains a frozen-state solve; inputs and topology are borrowed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_with_cell_motion_topology(
+        &self,
+        domain: &VoxelDomain,
+        temperature: &[f64],
+        contacts: &[ElectricalContact],
+        open_faces: &[[usize; 2]],
+        motion: ElectricMotionInput<'_>,
+        resolve: impl FnMut(usize, Voxel, f64) -> Result<Option<f64>, ChtError>,
+        gate: &CancelGate,
+    ) -> Result<MovingConductorSolution, ChtError> {
         poll(gate)?;
         let mut transfer = MotionCoupling::new(domain, motion, gate)?;
         let (nodes, rho) = super::contact::resolve_cells(self, domain, temperature, resolve, gate)?;
-        let electric = solve_electric_field_with_motion(
-            domain, self, nodes, &rho, contacts, Some(&mut transfer), gate,
+        let field = super::contact::ContactField::new(domain, &nodes, contacts, gate)?
+            .with_open_faces(domain, open_faces, gate)?;
+        let electric = solve_electric_field_with_contact_field(
+            domain, self, nodes, &rho, field, Some(&mut transfer), gate,
         )?;
         transfer.finish(domain, electric, gate)
     }

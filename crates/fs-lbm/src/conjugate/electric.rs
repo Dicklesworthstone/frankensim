@@ -454,7 +454,7 @@ fn solve_electric_field_with_motion(
 }
 
 // A single numerical owner consumes both resistive and explicitly open faces.
-// Existing motion APIs supply no openings, preserving their component gauges.
+// Moving-conductor gauges use this same face topology when finding components.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn solve_electric_field_with_contact_field(
     domain: &VoxelDomain,

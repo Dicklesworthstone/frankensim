@@ -126,3 +126,147 @@ fn isolated_opt_in_preserves_old_refusals_and_rejects_invalid_inputs_without_que
     assert_eq!(setup.solve_isolated_cell_motion(&domain,&[300.0;4],&[],input(&u,&b),1e-10,
         |_,_,_| {gate.request();Ok(Some(1.0))},&gate),Err(ChtError::Cancelled));
 }
+
+#[test]
+fn insulating_slit_extinguishes_the_loop_without_removing_bulk_material() {
+    let domain = VoxelDomain::new(2, 2, 1, 1.0).unwrap();
+    let before = domain.clone();
+    let setup = ElectricSetup::default();
+    let velocity = [[1.0, 0.0, 0.0]; 4];
+    let field = loop_field();
+    let gate = CancelGate::new();
+    let closed = setup.solve_isolated_cell_motion_topology(
+        &domain, &[300.0; 4], &[], &[], input(&velocity, &field), 1e-10,
+        |_, _, _| Ok(Some(1.0)), &gate,
+    ).unwrap();
+    assert_eq!(closed, square(1.0, &[]));
+    for slit in [[0, 1], [1, 0]] {
+        let mut queried = Vec::new();
+        let open = setup.solve_isolated_cell_motion_topology(
+            &domain, &[300.0; 4], &[], &[slit], input(&velocity, &field), 1e-10,
+            |cell, _, _| { queried.push(cell); Ok(Some(1.0)) }, &gate,
+        ).unwrap();
+        assert_eq!(queried, [0, 1, 2, 3]);
+        // Remaining graph is the chain 0->2->3->1, whose motional voltages
+        // cancel exactly against the electrostatic field. No current loop.
+        for (&p, expected) in open.electric.potential_v.iter().zip([0.0, 2.0, -1.0, -1.0]) {
+            close(p, expected, 1e-10);
+        }
+        assert!(open.electric.total_joule_w < 1e-20);
+        assert!(open.lorentz_force_density_n_m3.iter().flatten().all(|f| f.abs() < 1e-10));
+        close(open.mechanical_power_w, 0.0, 1e-10);
+        close(open.electric.delivered_w, 0.0, 0.0);
+    }
+    // Reclosing is a fresh physical solve, not a mutable topology history.
+    let restored = setup.solve_isolated_cell_motion_topology(
+        &domain, &[300.0; 4], &[], &[], input(&velocity, &field), 1e-10,
+        |_, _, _| Ok(Some(1.0)), &gate,
+    ).unwrap();
+    assert_eq!(closed, restored);
+    assert_eq!(domain, before);
+}
+
+#[test]
+fn insulating_laminations_keep_independent_gauges_currents_force_and_heat() {
+    let domain = VoxelDomain::new(4, 2, 1, 1.0).unwrap();
+    let velocity = [[1.0, 0.0, 0.0]; 8];
+    let field: Vec<_> = (0..8).map(|c| [0.0, 0.0, if c % 2 == 0 { 1.0 } else { 3.0 }]).collect();
+    let setup = ElectricSetup::default();
+    let gate = CancelGate::new();
+    let result = setup.solve_isolated_cell_motion_topology(
+        &domain, &[300.0; 8], &[], &[[1, 2], [5, 6]], input(&velocity, &field), 1e-10,
+        |c, _, _| Ok(Some(if c % 4 < 2 { 1.0 } else { 2.0 })), &gate,
+    ).unwrap();
+    // Two four-edge loops: |emf|=2 V, R_left=4 ohm, R_right=8 ohm.
+    // No removed volume or mechanical occupancy is needed at the interface.
+    close(result.electric.potential_v[0], 0.0, 0.0);
+    close(result.electric.potential_v[2], 0.0, 0.0);
+    for c in [0, 1, 4, 5] { close(result.electric.joule_w[c], 0.25, 1e-10); }
+    for c in [2, 3, 6, 7] { close(result.electric.joule_w[c], 0.125, 1e-10); }
+    close(result.electric.total_joule_w, 1.5, 1e-10);
+    close(result.mechanical_power_w, -1.5, 1e-10);
+    close(result.power_defect_w, 0.0, 1e-10);
+    close(result.transfer_defect_w, 0.0, 1e-10);
+
+    // Open every remaining loop across y: each row component has its own
+    // reference and zero circulation, including components without cell 0.
+    let open = setup.solve_isolated_cell_motion_topology(
+        &domain, &[300.0; 8], &[], &[[1, 2], [5, 6], [0, 4], [1, 5], [2, 6], [3, 7]],
+        input(&velocity, &field), 1e-10, |_, _, _| Ok(Some(1.0)), &gate,
+    ).unwrap();
+    for c in [0, 2, 4, 6] { close(open.electric.potential_v[c], 0.0, 0.0); }
+    assert_eq!(open.electric.joule_w, vec![0.0; 8]);
+    assert_eq!(open.lorentz_force_density_n_m3, vec![[0.0; 3]; 8]);
+}
+
+#[test]
+fn wired_motion_openings_close_electrical_mechanical_and_heat_power_together() {
+    let domain = VoxelDomain::new(4, 1, 1, 1.0).unwrap();
+    let setup = ElectricSetup { conductors: vec![], electrodes: vec![
+        Electrode { lo: [0, 0, 0], hi: [1, 1, 1], drive: ElectrodeDrive::Voltage(0.0) },
+        Electrode { lo: [3, 0, 0], hi: [4, 1, 1], drive: ElectrodeDrive::Voltage(0.0) },
+    ] };
+    let gate = CancelGate::new();
+    let field = [[0.0, 0.0, 1.0]; 4];
+    for speed in [1.0, -1.0] {
+        let velocity = [[0.0, speed, 0.0]; 4];
+        let closed = setup.solve_with_cell_motion_topology(
+            &domain, &[300.0; 4], &[], &[], input(&velocity, &field),
+            |_, _, _| Ok(Some(1.0)), &gate,
+        ).unwrap();
+        let old = setup.solve_with_cell_motion(&domain, &[300.0; 4], &[], input(&velocity, &field),
+            |_, _, _| Ok(Some(1.0)), &gate).unwrap();
+        assert_eq!(closed, old);
+        // Two metres of moving bulk at |u x B|=1 V/m and rho_e=1 ohm m:
+        // |I|=1 A, Q=2 W, Lorentz mechanical power=-2 W, electrode power=0.
+        close(closed.electric.electrodes[0].current_a, speed, 1e-10);
+        close(closed.electric.total_joule_w, 2.0, 1e-10);
+        close(closed.mechanical_power_w, -2.0, 1e-10);
+        let open = setup.solve_with_cell_motion_topology(
+            &domain, &[300.0; 4], &[], &[[1, 2]], input(&velocity, &field),
+            |_, _, _| Ok(Some(1.0)), &gate,
+        ).unwrap();
+        close(open.electric.potential_v[1], 0.5 * speed, 1e-10);
+        close(open.electric.potential_v[2], -0.5 * speed, 1e-10);
+        assert!(open.electric.total_joule_w < 1e-20);
+        close(open.mechanical_power_w, 0.0, 1e-10);
+        assert!(open.lorentz_force_density_n_m3.iter().flatten().all(|f| f.abs() < 1e-10));
+    }
+}
+
+#[test]
+fn moving_openings_reject_ambiguous_faces_or_ungauged_islands_and_preserve_inputs() {
+    let domain = VoxelDomain::new(2, 2, 1, 1.0).unwrap();
+    let setup = ElectricSetup::default();
+    let velocity = [[1.0, 0.0, 0.0]; 4];
+    let field = loop_field();
+    let gate = CancelGate::new();
+    for openings in [vec![[0, 0]], vec![[0, 3]], vec![[0, 99]], vec![[0, 1], [1, 0]]] {
+        let error = setup.solve_isolated_cell_motion_topology(
+            &domain, &[300.0; 4], &[], &openings, input(&velocity, &field), 1e-10,
+            |_, _, _| Ok(Some(1.0)), &gate,
+        ).unwrap_err();
+        assert!(matches!(error, ChtError::InvalidInput { field: "electric.open_faces", .. }));
+    }
+    let contact = ElectricalContact { cells: [0, 1], resistance_ohm_m2: 0.0, heat_fraction_to_first: 0.5 };
+    assert!(setup.solve_isolated_cell_motion_topology(
+        &domain, &[300.0; 4], &[contact], &[[1, 0]], input(&velocity, &field), 1e-10,
+        |_, _, _| Ok(Some(1.0)), &gate,
+    ).is_err());
+    let mut wired = setup.clone();
+    wired.electrodes.push(Electrode { lo: [0, 0, 0], hi: [1, 1, 1], drive: ElectrodeDrive::Voltage(0.0) });
+    assert!(wired.solve_with_cell_motion_topology(
+        &domain, &[300.0; 4], &[], &[[0, 1], [0, 2]], input(&velocity, &field),
+        |_, _, _| Ok(Some(1.0)), &gate,
+    ).is_err());
+    let cancelled = CancelGate::new();
+    cancelled.request();
+    assert_eq!(setup.solve_isolated_cell_motion_topology(
+        &domain, &[300.0; 4], &[], &[[0, 1]], input(&velocity, &field), 1e-10,
+        |_, _, _| panic!("cancellation precedes material queries"), &cancelled,
+    ), Err(ChtError::Cancelled));
+    assert_eq!(square(1.0, &[]), setup.solve_isolated_cell_motion_topology(
+        &domain, &[300.0; 4], &[], &[], input(&velocity, &field), 1e-10,
+        |_, _, _| Ok(Some(1.0)), &gate,
+    ).unwrap());
+}
