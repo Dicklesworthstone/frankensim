@@ -109,8 +109,167 @@ fn klinkenberg_is_exact_and_bound_to_calibrated_gas_composition() {
     assert!(b.mass_flow(state.state(),200000.0,100000.0,0.01).is_err());
     assert!(b.mass_flow_for_model(state.state(),&model(vec![0.25,0.75],0.0),200000.0,100000.0,0.01).is_err());
     assert!(b.linear_volume_resistance(state.state(),0.01).is_err());
-    assert!(DarcyGasBarrier::try_new_for_gas_model(vec![l,layer(1e-12,0.01)],
-        [1.,0.,0.],support(),&m).is_err());
+    assert_eq!(b.klinkenberg_slip_pa(),Some(50000.0));
+    let heterogeneous=DarcyGasBarrier::try_new_for_gas_model(vec![l,layer(1e-12,0.01)],
+        [1.,0.,0.],support(),&m).unwrap();
+    assert_eq!(heterogeneous.klinkenberg_slip_pa(),None);
+}
+
+fn slip_layer(k: f64, thickness: f64, slip: f64) -> PorousGasLayer {
+    PorousGasLayer::try_new(IntrinsicPermeability::isotropic(k).unwrap(),thickness,slip,
+        "synthetic layer-specific gas calibration, not experimental evidence").unwrap()
+}
+
+fn manufactured_laminate(m: &ThermochemicalGasModel) -> DarcyGasBarrier {
+    // Each r_i equals its independent integrated potential for C=j*mu*R*T=1:
+    // 90000*(195000+10000) and 70000*(115000+100000), respectively.
+    DarcyGasBarrier::try_new_for_gas_model(vec![
+        slip_layer(1e-12,0.01845,10000.0),slip_layer(1e-12,0.01505,100000.0),
+    ],[1.,0.,0.],support(),m).unwrap()
+}
+
+#[test]
+fn heterogeneous_slip_recovers_manufactured_interface_and_each_layer_mass_balance() {
+    let m=model(vec![0.75,0.25],0.0); let state=m.evaluate(&point(300.0,150000.0)).unwrap();
+    let g=state.state(); let b=manufactured_laminate(&m);
+    let profile=b.mass_flow_profile_for_model(g,&m,240000.0,80000.0,0.02).unwrap();
+    let pressures=profile.interface_pressures_pa.as_ref().unwrap();
+    for (actual,expected) in pressures.iter().zip([240000.0,150000.0,80000.0]) { near(*actual,expected); }
+    let scaled_flux=profile.flow.mass_flux_left_to_right_kg_m2_s*g.dynamic_viscosity
+        *g.specific_gas_constant*g.temperature;
+    near(scaled_flux,1.0);
+    for (i,layer) in b.layers().iter().enumerate() {
+        let r=layer.thickness_m()/layer.permeability().normal_permeability(b.normal()).unwrap();
+        let independent=(pressures[i]-pressures[i+1])
+            *(0.5*pressures[i]+0.5*pressures[i+1]+layer.klinkenberg_slip_pa())/r;
+        near(independent,scaled_flux);
+    }
+    assert!(profile.iterations>0 && profile.iterations<=MAX_LAYERED_DARCY_ITERATIONS);
+    assert!(profile.normalized_pressure_residual.abs()<=b.pressure_residual_tolerance());
+    assert_eq!(profile.flow,b.mass_flow_for_model(g,&m,240000.0,80000.0,0.02).unwrap());
+    let averaged=(240000.0-80000.0)*(160000.0+55000.0)/b.geometric_resistance_per_m().unwrap();
+    assert!((averaged-scaled_flux).abs()>0.01*scaled_flux);
+}
+
+#[test]
+fn heterogeneous_orientation_reversal_and_layer_subdivision_preserve_the_physical_stack() {
+    let m=model(vec![0.75,0.25],0.0); let state=m.evaluate(&point(300.0,150000.0)).unwrap();
+    let g=state.state(); let b=manufactured_laminate(&m);
+    let original=b.mass_flow_profile_for_model(g,&m,240000.0,80000.0,0.02).unwrap();
+    let mut reversed=b.layers().to_vec(); reversed.reverse();
+    let reversed=DarcyGasBarrier::try_new_for_gas_model(reversed,[1.,0.,0.],support(),&m).unwrap();
+    let flipped=reversed.mass_flow_profile_for_model(g,&m,80000.0,240000.0,0.02).unwrap();
+    assert_eq!(flipped.flow.mass_rate_left_to_right_kg_s,-original.flow.mass_rate_left_to_right_kg_s);
+    let mut pressures=original.interface_pressures_pa.clone().unwrap(); pressures.reverse();
+    assert_eq!(flipped.interface_pressures_pa.unwrap(),pressures);
+    // Swapping only reservoirs is physically different for unequal b_i.
+    let opposed=b.mass_flow_for_model(g,&m,80000.0,240000.0,0.02).unwrap();
+    assert!((opposed.mass_rate_left_to_right_kg_s+original.flow.mass_rate_left_to_right_kg_s).abs()
+        >1e-3*original.flow.mass_rate_left_to_right_kg_s);
+    let split=b.layers().iter().flat_map(|layer| {
+        let mut half=layer.clone(); half.thickness_m*=0.5; [half.clone(),half]
+    }).collect();
+    let split=DarcyGasBarrier::try_new_for_gas_model(split,[1.,0.,0.],support(),&m).unwrap();
+    let refined=split.mass_flow_profile_for_model(g,&m,240000.0,80000.0,0.02).unwrap();
+    near(refined.flow.mass_rate_left_to_right_kg_s,original.flow.mass_rate_left_to_right_kg_s);
+    near(refined.interface_pressures_pa.unwrap()[2],150000.0);
+    let scaled=b.layers().iter().map(|layer| {
+        let mut layer=layer.clone(); layer.thickness_m*=2.0; layer
+    }).collect();
+    let scaled=DarcyGasBarrier::try_new_for_gas_model(scaled,[1.,0.,0.],support(),&m).unwrap();
+    let changed=scaled.mass_flow_profile_for_model(g,&m,240000.0,80000.0,0.04).unwrap();
+    near(changed.flow.mass_rate_left_to_right_kg_s,original.flow.mass_rate_left_to_right_kg_s);
+    assert_eq!(changed.interface_pressures_pa,original.interface_pressures_pa);
+}
+
+#[test]
+fn heterogeneous_equilibrium_and_adjacent_float_drop_use_exact_small_signal_series_limit() {
+    let m=model(vec![0.75,0.25],0.0); let state=m.evaluate(&point(300.0,150000.0)).unwrap();
+    let g=state.state(); let b=manufactured_laminate(&m); let p=150000.0_f64;
+    let resistance:f64=b.layers().iter().map(|layer| layer.thickness_m()
+        /layer.permeability().normal_permeability(b.normal()).unwrap()
+        /(1.0+layer.klinkenberg_slip_pa()/p)).sum();
+    let conductance=0.02/(g.dynamic_viscosity*resistance);
+    let equilibrium=b.mass_flow_profile_for_model(g,&m,p,p,0.02).unwrap();
+    near(equilibrium.flow.mean_volume_conductance_m3_pa_s,conductance);
+    assert_eq!(equilibrium.flow.mass_rate_left_to_right_kg_s,0.0);
+    assert_eq!(equilibrium.interface_pressures_pa.unwrap(),vec![p;3]);
+    assert_eq!(equilibrium.iterations,0);
+    let next=f64::from_bits(p.to_bits()+1);
+    let tiny=b.mass_flow_profile_for_model(g,&m,next,p,0.02).unwrap();
+    near(tiny.flow.mass_rate_left_to_right_kg_s,
+        conductance*(next-p)*p/(g.specific_gas_constant*g.temperature));
+    assert!(tiny.flow.drag_dissipation_w>0.0);
+    assert!(tiny.normalized_pressure_residual.abs()<=b.pressure_residual_tolerance());
+}
+
+#[test]
+fn common_factor_profile_keeps_analytic_fast_path_and_sealed_interiors_are_not_invented() {
+    let m=model(vec![0.75,0.25],0.0); let state=m.evaluate(&point(300.0,150000.0)).unwrap();
+    let g=state.state();
+    for slip in [0.0,50000.0] {
+        let b=DarcyGasBarrier::try_new_for_gas_model(vec![slip_layer(1e-12,0.01,slip);2],
+            [1.,0.,0.],support(),&m).unwrap();
+        let profile=b.mass_flow_profile_for_model(g,&m,200000.0,100000.0,0.01).unwrap();
+        assert_eq!(profile.iterations,0);
+        assert_eq!(b.klinkenberg_slip_pa(),Some(slip));
+        let expected=(0.5*(200000.0+slip).powi(2)+0.5*(100000.0+slip).powi(2)).sqrt()-slip;
+        near(profile.interface_pressures_pa.unwrap()[1],expected);
+        near(profile.flow.mass_flux_left_to_right_kg_m2_s,
+            100000.0*(150000.0+slip)/(g.dynamic_viscosity*g.specific_gas_constant*g.temperature*2e10));
+    }
+    let sealed=DarcyGasBarrier::try_new_for_gas_model(vec![layer(0.0,0.01),slip_layer(1e-12,0.01,50000.0)],
+        [1.,0.,0.],support(),&m).unwrap();
+    for (b,area) in [(sealed,0.01),(manufactured_laminate(&m),0.0)] {
+        let profile=b.mass_flow_profile_for_model(g,&m,200000.0,100000.0,area).unwrap();
+        assert_eq!(profile.flow.mass_rate_left_to_right_kg_s,0.0);
+        assert_eq!(profile.interface_pressures_pa,None);
+        assert_eq!(profile.iterations,0);
+    }
+}
+
+#[test]
+fn heterogeneous_slip_preserves_calibration_source_support_and_bounded_refusals() {
+    let m=model(vec![0.75,0.25],0.0); let state=m.evaluate(&point(300.0,150000.0)).unwrap();
+    let g=state.state();
+    let source=PorousGasLayer::from_material_isotropic(material(INTRINSIC_PERMEABILITY_DIMS),
+        "intrinsic_permeability",0.01,None).unwrap();
+    let layers=vec![source,slip_layer(1e-12,0.01,50000.0)];
+    assert!(DarcyGasBarrier::try_new(layers.clone(),[1.,0.,0.],support()).is_err());
+    let b=DarcyGasBarrier::try_new_for_gas_model(layers,[1.,0.,0.],support(),&m).unwrap();
+    assert!(b.mass_flow(g,200000.0,100000.0,0.01).is_err());
+    assert!(b.mass_flow_profile(g,200000.0,100000.0,0.01).is_err());
+    assert!(b.linear_volume_resistance(g,0.01).is_err());
+    assert!(b.mass_flow_profile_for_model(g,&model(vec![0.25,0.75],0.0),200000.0,100000.0,0.01).is_err());
+    assert!(b.mass_flow_profile_for_model(g,&m,200000.0,99999.0,0.01).is_err());
+    let profile=b.mass_flow_profile_for_model(g,&m,200000.0,100000.0,0.01).unwrap();
+    assert!(profile.interface_pressures_pa.unwrap().iter().all(|p| (100000.0..=200000.0).contains(p)));
+    let query=LayeredQuery::new(200000.0,100000.0,b.maximum_slip_pa).unwrap();
+    assert!(b.solve_layered(query,0).is_err());
+    let nontrivial=manufactured_laminate(&m);
+    let query=LayeredQuery::new(240000.0,80000.0,nontrivial.maximum_slip_pa).unwrap();
+    assert!(nontrivial.solve_layered(query,1).is_err());
+}
+
+#[test]
+fn extreme_slip_contrast_and_maximum_laminate_size_remain_bounded_and_repeatable() {
+    let m=model(vec![0.75,0.25],0.0); let state=m.evaluate(&point(300.0,150000.0)).unwrap();
+    let g=state.state();
+    let b=DarcyGasBarrier::try_new_for_gas_model(vec![layer(1e-12,0.01),slip_layer(1e-12,0.01,1e100)],
+        [1.,0.,0.],support(),&m).unwrap();
+    let result=b.mass_flow_profile_for_model(g,&m,200000.0,100000.0,0.01).unwrap();
+    let limit=barrier(1e-12,0.01).mass_flow(g,200000.0,100000.0,0.01).unwrap();
+    near(result.flow.mass_rate_left_to_right_kg_s,limit.mass_rate_left_to_right_kg_s);
+    assert!(result.iterations<=MAX_LAYERED_DARCY_ITERATIONS);
+    let layers=(0..MAX_POROUS_LAYERS).map(|i| slip_layer(1e-12,0.01,
+        if i%2==0 {0.0} else {50000.0})).collect();
+    let b=DarcyGasBarrier::try_new_for_gas_model(layers,[1.,0.,0.],support(),&m).unwrap();
+    let first=b.mass_flow_profile_for_model(g,&m,200000.0,100000.0,0.01).unwrap();
+    assert_eq!(first,b.mass_flow_profile_for_model(g,&m,200000.0,100000.0,0.01).unwrap());
+    let pressures=first.interface_pressures_pa.unwrap();
+    assert_eq!(pressures.len(),MAX_POROUS_LAYERS+1);
+    assert!(pressures.windows(2).all(|p| p[0]>=p[1] && p[1]>0.0));
+    assert!(first.normalized_pressure_residual.abs()<=b.pressure_residual_tolerance());
 }
 
 fn material(dims: Dims) -> ResolvedMaterialStatePoint {

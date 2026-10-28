@@ -2974,7 +2974,7 @@ dense-membrane molar permeability [mol/(m·s·Pa)] and thickness-normalized
 permeance [mol/(m²·s·Pa)]. The porous owner compiles orthotropic normal
 permeability and series layer resistance once. Its isothermal ideal-gas Darcy
 law conserves mass with distinct face volume rates, includes an explicitly
-gas-model-bound common Klinkenberg factor when calibrated, and refuses unsupported
+gas-model-bound per-layer Klinkenberg factors when calibrated, and refuses unsupported
 temperature, absolute pressure, speed or material conditions. A zero normal
 permeability seals the path exactly. The acoustic gas-substitution owner uses the
 same intrinsic-permeability type. This is dry rigid-skeleton quasi-steady flow;
@@ -3105,3 +3105,27 @@ The source adapter queries intrinsic coefficients and explicit interface
 viscosities in the same ordered original bundle, retains receipts, and rejects
 bulk viscosity units and unowned evolving axes. Intrinsic fracture work must
 exclude viscous losses to avoid double counting measured finite-rate work.
+
+
+### Heterogeneous calibrated slip in layered gas barriers
+
+`porous::permeability::DarcyGasBarrier` admits a different calibrated Klinkenberg
+factor in each layer. One bounded scalar solve conserves mass through the
+original ordered layers; factors are never averaged into one apparent material.
+The exact common-factor fast path remains constant-time and ordinary flow
+queries remain allocation-free. The shared support intersection and actual gas
+model/composition admission still apply to every layer. The continuum linear
+resistance adapter refuses any nonzero slip.
+
+`mass_flow_profile[_for_model]` additionally returns the absolute layer-interface
+pressures, iteration count and normalized pressure-closure residual. Sealed and
+zero-area paths do not invent interior pressures. Reversing both the physical
+stack and its reservoirs reverses the flow; reversing only the reservoirs can
+change its magnitude when the layer factors differ. Equilibrium conductance
+uses the exact small-signal series resistance. This is rigid, isothermal,
+constant-composition slip flow, not a Knudsen or thermal-transpiration model.
+
+Six new native regressions and all 19 existing porous/acoustic regressions pass,
+including independent per-layer mass balance, manufactured interfaces, stack
+orientation, subdivision, adjacent-float pressure differences, exact closed
+limits, calibration refusal, extreme slip contrast and bounded 64-layer work.

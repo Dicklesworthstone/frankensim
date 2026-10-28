@@ -6,6 +6,9 @@
 //! j*mu*R*T*sum(L/k) = (p_left-p_right)*(p_mean+b).
 //! This is exact for constant temperature/composition and common-b layers.
 //! Factoring the pressure difference avoids cancellation of pressure squares.
+//! With different layer factors, each layer instead obeys its own integrated
+//! potential. A bounded scalar flux solve propagates from low to high pressure;
+//! the factors are never averaged into an apparent common material.
 //! Formulation references:
 //! <https://doc.comsol.com/6.3/doc/com.comsol.help.echem/echem_ug_fluidflow.08.111.html>
 //! <https://documentation.pflotran.org/user_guide/cards/subsurface/klinkenberg_effect_card.html>
@@ -21,8 +24,10 @@ use crate::{MaterialError, gas::GasState, state_point::ResolvedMaterialStatePoin
 use fs_qty::{Dims, QuantitySpec};
 
 pub const INTRINSIC_PERMEABILITY_DIMS: Dims = Dims([2, 0, 0, 0, 0, 0]);
-/// Compile at most this many layers; flow queries then take constant work.
+/// Maximum compiled laminate size. Common-factor queries take constant work.
 pub const MAX_POROUS_LAYERS: usize = 64;
+/// Maximum scalar iterations for a heterogeneous-factor laminate.
+pub const MAX_LAYERED_DARCY_ITERATIONS: usize = 128;
 
 fn invalid(what: &str) -> MaterialError {
     MaterialError::Parameters { what: what.into() }
@@ -212,8 +217,9 @@ fn source_axis(axis: &str, quantity: Option<QuantitySpec>) -> Result<Option<Sour
     Ok(None)
 }
 
-/// Precompiled series resistance. Different per-layer slip factors would need
-/// an interface-pressure solve and are refused by this exact common-b rung.
+/// Precompiled series geometry and calibrated per-layer slip factors.
+/// Common-factor flow is analytic; heterogeneous factors use a bounded,
+/// allocation-free interface-pressure solve in the original layer order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DarcyGasBarrier {
     layers: Vec<PorousGasLayer>,
@@ -221,7 +227,10 @@ pub struct DarcyGasBarrier {
     support: PorousGasSupport,
     /// None is exactly sealed, not an artificially enormous finite resistance.
     geometric_resistance_per_m: Option<f64>,
-    slip_pa: f64,
+    resistance_fractions: [f64; MAX_POROUS_LAYERS],
+    common_slip_pa: Option<f64>,
+    minimum_slip_pa: f64,
+    maximum_slip_pa: f64,
     slip_gas_model: Option<ThermochemicalGasModel>,
 }
 
@@ -233,6 +242,8 @@ pub struct DarcyGasFlow {
     pub mass_flux_left_to_right_kg_m2_s: f64,
     pub left_volume_rate_m3_s: f64,
     pub right_volume_rate_m3_s: f64,
+    /// Mean-density volume flow divided by pressure difference; at equilibrium
+    /// this is the infinitesimal conductance, including every layer's slip.
     pub mean_volume_conductance_m3_pa_s: f64,
     /// A*integral(u*(-dp)), excluding thermal storage. Diagnostic, not extra heat.
     pub drag_dissipation_w: f64,
@@ -240,6 +251,54 @@ pub struct DarcyGasFlow {
     pub left_pressure_pa: f64,
     pub right_pressure_pa: f64,
 }
+
+/// Optional resolved laminate profile; normal flow queries do not allocate it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DarcyGasFlowProfile {
+    pub flow: DarcyGasFlow,
+    /// Absolute pressures at all n+1 layer faces, in original left-to-right
+    /// order, including the prescribed endpoints. None for a sealed path or
+    /// zero exposed area: those inputs do not determine the interior pressure.
+    /// Very small layer drops can round to equal absolute face pressures.
+    pub interface_pressures_pa: Option<Vec<f64>>,
+    /// Scalar iterations; zero for the exact common-factor/equilibrium paths.
+    pub iterations: usize,
+    /// Reconstructed total pressure rise minus the prescribed rise, divided
+    /// by that rise, evaluated in scaled increments before absolute-pressure
+    /// rounding. Zero at equilibrium. This is a floating-point residual,
+    /// not an interval enclosure or independent experimental validation.
+    pub normalized_pressure_residual: f64,
+}
+
+#[derive(Clone, Copy)]
+struct LayeredRoot { scaled_flux: f64, iterations: usize }
+
+#[derive(Clone, Copy)]
+struct LayeredQuery {
+    low: f64,
+    drop: f64,
+    scale: f64,
+    low_scaled: f64,
+    drop_scaled: f64,
+    reverse_layers: bool,
+}
+
+impl LayeredQuery {
+    fn new(left: f64, right: f64, maximum_slip: f64) -> Result<Self, MaterialError> {
+        let low = left.min(right);
+        let drop = (left-right).abs();
+        let scale = left.max(right).max(maximum_slip);
+        let low_scaled = low/scale;
+        let drop_scaled = drop/scale;
+        if ![low_scaled, drop_scaled].into_iter().all(positive) {
+            return Err(invalid("laminate pressure scaling is unrepresentable"));
+        }
+        Ok(Self { low, drop, scale, low_scaled, drop_scaled, reverse_layers: left > right })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PressureMarch { fraction: f64, derivative: f64 }
 
 impl DarcyGasBarrier {
     /// Nonzero slip requires the gas-model constructor because GasState has
@@ -260,11 +319,12 @@ impl DarcyGasBarrier {
         if layers.is_empty() || layers.len() > MAX_POROUS_LAYERS || !unit(normal) {
             return Err(invalid("Darcy barrier needs 1..64 layers and an explicit unit normal"));
         }
-        let slip = layers[0].klinkenberg_slip_pa;
-        if layers.iter().any(|layer| layer.klinkenberg_slip_pa != slip) {
-            return Err(invalid("exact compiled laminate requires one common Klinkenberg factor"));
-        }
-        if slip > 0.0 && model.is_none() {
+        let first_slip = layers[0].klinkenberg_slip_pa;
+        let common_slip = layers.iter().all(|layer| layer.klinkenberg_slip_pa == first_slip)
+            .then_some(first_slip);
+        let minimum_slip = layers.iter().map(|layer| layer.klinkenberg_slip_pa).fold(f64::INFINITY, f64::min);
+        let maximum_slip = layers.iter().map(|layer| layer.klinkenberg_slip_pa).fold(0.0, f64::max);
+        if maximum_slip > 0.0 && model.is_none() {
             return Err(invalid("nonzero Klinkenberg slip requires its explicit calibrated gas model"));
         }
         let mut permeabilities = [0.0; MAX_POROUS_LAYERS];
@@ -289,25 +349,36 @@ impl DarcyGasBarrier {
             }
         }
         let mut resistance = 0.0;
+        let mut resistance_fractions = [0.0; MAX_POROUS_LAYERS];
         if !sealed {
-            for (layer, k) in layers.iter().zip(permeabilities) {
+            for (i, (layer, k)) in layers.iter().zip(permeabilities).enumerate() {
                 let part = layer.thickness_m/k;
                 if !positive(part) || !positive(resistance+part) {
                     return Err(invalid("porous layer series resistance is unrepresentable"));
                 }
+                resistance_fractions[i] = part;
                 resistance += part;
+            }
+            for fraction in &mut resistance_fractions[..layers.len()] {
+                *fraction /= resistance;
+                if common_slip.is_none() && !positive(*fraction) {
+                    return Err(invalid("heterogeneous laminate resistance fractions are unrepresentable"));
+                }
             }
         }
         support.validate()?;
         Ok(Self { layers, normal, support,
             geometric_resistance_per_m: if sealed { None } else { Some(resistance) },
-            slip_pa: slip, slip_gas_model: model })
+            resistance_fractions, common_slip_pa: common_slip,
+            minimum_slip_pa: minimum_slip, maximum_slip_pa: maximum_slip, slip_gas_model: model })
     }
     pub fn layers(&self) -> &[PorousGasLayer] { &self.layers }
     pub const fn normal(&self) -> [f64; 3] { self.normal }
     pub const fn support(&self) -> PorousGasSupport { self.support }
     pub const fn geometric_resistance_per_m(&self) -> Option<f64> { self.geometric_resistance_per_m }
-    pub const fn klinkenberg_slip_pa(&self) -> f64 { self.slip_pa }
+    /// The factor only when every layer has exactly the same calibrated b.
+    /// None means heterogeneous factors, never an averaged or inferred factor.
+    pub const fn klinkenberg_slip_pa(&self) -> Option<f64> { self.common_slip_pa }
     pub const fn calibrated_gas_model(&self) -> Option<&ThermochemicalGasModel> { self.slip_gas_model.as_ref() }
 
     /// Frozen, low-pressure-drop resistance [Pa s/m3]. None means sealed.
@@ -316,7 +387,7 @@ impl DarcyGasBarrier {
     pub fn linear_volume_resistance(&self, gas: &GasState, area_m2: f64)
         -> Result<Option<f64>, MaterialError> {
         self.support.admit(gas, gas.pressure, gas.pressure)?;
-        if !nonnegative(area_m2) || self.slip_pa != 0.0 {
+        if !nonnegative(area_m2) || self.maximum_slip_pa != 0.0 {
             return Err(invalid("linear Darcy resistance needs nonnegative area and continuum no-slip permeability"));
         }
         let Some(geometry) = self.geometric_resistance_per_m.filter(|_| area_m2 > 0.0) else { return Ok(None); };
@@ -327,23 +398,171 @@ impl DarcyGasBarrier {
 
     pub fn mass_flow(&self, gas: &GasState, left_pressure_pa: f64,
         right_pressure_pa: f64, area_m2: f64) -> Result<DarcyGasFlow, MaterialError> {
-        if self.slip_pa > 0.0 {
+        if self.maximum_slip_pa > 0.0 {
             return Err(invalid("gas-specific Klinkenberg flow requires mass_flow_for_model"));
         }
-        self.evaluate(gas, left_pressure_pa, right_pressure_pa, area_m2)
+        self.evaluate(gas, left_pressure_pa, right_pressure_pa, area_m2).map(|(flow, _)| flow)
     }
     /// State and model must be supplied from the same gas owner. That owner
     /// admits gas T/p/source/phase; this adds the permeability-domain checks.
     pub fn mass_flow_for_model(&self, gas: &GasState, model: &ThermochemicalGasModel,
         left_pressure_pa: f64, right_pressure_pa: f64, area_m2: f64)
         -> Result<DarcyGasFlow, MaterialError> {
-        if self.slip_pa > 0.0 && self.slip_gas_model.as_ref() != Some(model) {
+        if self.maximum_slip_pa > 0.0 && self.slip_gas_model.as_ref() != Some(model) {
             return Err(invalid("Klinkenberg calibration does not cover this gas model/composition"));
         }
-        self.evaluate(gas, left_pressure_pa, right_pressure_pa, area_m2)
+        self.evaluate(gas, left_pressure_pa, right_pressure_pa, area_m2).map(|(flow, _)| flow)
     }
+
+    /// Flow plus interface pressures. This diagnostic path allocates at most
+    /// n+1 pressures; ordinary mass-flow queries remain allocation-free.
+    pub fn mass_flow_profile(&self, gas: &GasState, left: f64, right: f64, area: f64)
+        -> Result<DarcyGasFlowProfile, MaterialError> {
+        if self.maximum_slip_pa > 0.0 {
+            return Err(invalid("gas-specific Klinkenberg profile requires mass_flow_profile_for_model"));
+        }
+        let evaluated = self.evaluate(gas, left, right, area)?;
+        self.profile(left, right, area, evaluated)
+    }
+
+    /// Gas-calibrated flow and interface pressures, using the same accepted
+    /// flux as the ordinary query. No averaged layer slip factor is introduced.
+    pub fn mass_flow_profile_for_model(&self, gas: &GasState, model: &ThermochemicalGasModel,
+        left: f64, right: f64, area: f64) -> Result<DarcyGasFlowProfile, MaterialError> {
+        if self.maximum_slip_pa > 0.0 && self.slip_gas_model.as_ref() != Some(model) {
+            return Err(invalid("Klinkenberg calibration does not cover this gas model/composition"));
+        }
+        let evaluated = self.evaluate(gas, left, right, area)?;
+        self.profile(left, right, area, evaluated)
+    }
+
+    fn profile(&self, left: f64, right: f64, area: f64,
+        (flow, root): (DarcyGasFlow, Option<LayeredRoot>)) -> Result<DarcyGasFlowProfile, MaterialError> {
+        let mut result = DarcyGasFlowProfile { flow, interface_pressures_pa: None,
+            iterations: root.map_or(0, |root| root.iterations), normalized_pressure_residual: 0.0 };
+        if self.geometric_resistance_per_m.is_none() || area == 0.0 { return Ok(result); }
+        let mut pressures = vec![left; self.layers.len()+1];
+        if left != right {
+            let query = LayeredQuery::new(left, right, self.maximum_slip_pa)?;
+            let scaled_flux = if let Some(root) = root { root.scaled_flux } else {
+                (0.5*left/query.scale + 0.5*right/query.scale)
+                    + self.common_slip_pa.ok_or_else(|| invalid("missing laminate flux solve"))?/query.scale
+            };
+            let marched = self.march(query, scaled_flux, false, Some(&mut pressures))?
+                .ok_or_else(|| invalid("laminate pressure reconstruction failed"))?;
+            result.normalized_pressure_residual = marched.fraction-1.0;
+            if result.normalized_pressure_residual.abs() > self.pressure_residual_tolerance() {
+                return Err(invalid("laminate interface-pressure residual exceeds its bound"));
+            }
+            // Preserve the exact prescribed endpoints; the separately retained
+            // scaled residual discloses reconstruction roundoff before this.
+            pressures[0] = left;
+            pressures[self.layers.len()] = right;
+        }
+        result.interface_pressures_pa = Some(pressures);
+        Ok(result)
+    }
+
+    fn pressure_residual_tolerance(&self) -> f64 {
+        64.0*f64::EPSILON*self.layers.len() as f64
+    }
+
+    // lambda = |j| mu R T sum(L/k) / (delta_p * pressure_scale).
+    // Its exact bracket uses min/max b, since sum(b_i delta_p_i) lies
+    // between min(b)*delta_p and max(b)*delta_p for monotone pressure.
+    fn solve_layered(&self, query: LayeredQuery, budget: usize) -> Result<LayeredRoot, MaterialError> {
+        let mean_scaled = query.low_scaled+0.5*query.drop_scaled;
+        let mut lower = mean_scaled+self.minimum_slip_pa/query.scale;
+        let mut upper = mean_scaled+self.maximum_slip_pa/query.scale;
+        let mut candidate = if upper > 4.0*lower {
+            fs_math::det::sqrt(lower)*fs_math::det::sqrt(upper)
+        } else { 0.5*lower+0.5*upper };
+        for iteration in 1..=budget.min(MAX_LAYERED_DARCY_ITERATIONS) {
+            let marched = self.march(query, candidate, true, None)?;
+            let mut newton = f64::NAN;
+            if let Some(marched) = marched {
+                if marched.fraction == 1.0 {
+                    return Ok(LayeredRoot { scaled_flux: candidate, iterations: iteration });
+                }
+                lower = candidate;
+                if positive(marched.derivative) {
+                    newton = candidate+(1.0-marched.fraction)/marched.derivative;
+                }
+            } else { upper = candidate; }
+            if (upper-lower)/lower <= 64.0*f64::EPSILON {
+                let solved = 0.5*lower+0.5*upper;
+                let residual = self.march(query, solved, false, None)?
+                    .ok_or_else(|| invalid("laminate flux reconstruction failed"))?.fraction-1.0;
+                if residual.abs() <= self.pressure_residual_tolerance() {
+                    return Ok(LayeredRoot { scaled_flux: solved, iterations: iteration });
+                }
+                return Err(invalid("laminate scalar flux bracket does not close its pressure residual"));
+            }
+            candidate = if upper > 4.0*lower {
+                // Geometric bisection handles extreme positive slip contrasts
+                // without hundreds of additive halvings near a tiny root.
+                fs_math::det::sqrt(lower)*fs_math::det::sqrt(upper)
+            } else {
+                let width = upper-lower;
+                if newton > lower+0.25*width && newton < upper-0.25*width { newton }
+                else { 0.5*lower+0.5*upper }
+            };
+            if !(candidate > lower && candidate < upper) {
+                return Err(invalid("laminate scalar flux solve stagnated before acceptance"));
+            }
+        }
+        Err(invalid("laminate scalar flux solve exhausted its bounded iteration budget"))
+    }
+
+    // Integrate from the lower-pressure face. The rationalized positive root
+    // solves c = a*ds + drop_scaled*ds^2/2, without pressure-square subtraction
+    // or a negative radicand. Trial overshoots stop before leaving the physical
+    // pressure interval; only an accepted flux is reconstructed in full.
+    fn march(&self, query: LayeredQuery, scaled_flux: f64, stop_at_high: bool,
+        mut interfaces: Option<&mut [f64]>) -> Result<Option<PressureMarch>, MaterialError> {
+        let mut fraction = 0.0;
+        let mut correction = 0.0;
+        let mut derivative = 0.0;
+        for ordinal in 0..self.layers.len() {
+            let i = if query.reverse_layers { self.layers.len()-1-ordinal } else { ordinal };
+            let weight = self.resistance_fractions[i];
+            let c = scaled_flux*weight;
+            let a = query.low_scaled+self.layers[i].klinkenberg_slip_pa/query.scale
+                + query.drop_scaled*fraction;
+            if stop_at_high {
+                let remaining = (1.0-fraction).max(0.0);
+                if c > remaining*(a+0.5*query.drop_scaled*remaining) { return Ok(None); }
+            }
+            if weight > 0.0 && !positive(c) {
+                return Err(invalid("laminate layer pressure increment underflowed"));
+            }
+            let cross = fs_math::det::sqrt(query.drop_scaled)*fs_math::det::sqrt(c);
+            let scale = a.max(cross);
+            let root = scale*fs_math::det::sqrt((a/scale)*(a/scale)+2.0*(cross/scale)*(cross/scale));
+            let increment = c/(0.5*a+0.5*root);
+            if !nonnegative(increment) || !positive(a) {
+                return Err(invalid("laminate layer pressure propagation is unrepresentable"));
+            }
+            let end_a = a+query.drop_scaled*increment;
+            derivative = (a/end_a)*derivative+weight/end_a;
+            let adjusted = increment-correction;
+            let next = fraction+adjusted;
+            correction = (next-fraction)-adjusted;
+            fraction = next;
+            if let Some(pressures) = interfaces.as_deref_mut() {
+                let face = if query.reverse_layers { i } else { i+1 };
+                pressures[face] = query.low+query.drop*fraction.clamp(0.0,1.0);
+            }
+        }
+        if !nonnegative(fraction) {
+            return Err(invalid("laminate total pressure propagation is unrepresentable"));
+        }
+        if stop_at_high && fraction > 1.0 { return Ok(None); }
+        Ok(Some(PressureMarch { fraction, derivative }))
+    }
+
     fn evaluate(&self, gas: &GasState, left: f64, right: f64, area: f64)
-        -> Result<DarcyGasFlow, MaterialError> {
+        -> Result<(DarcyGasFlow, Option<LayeredRoot>), MaterialError> {
         self.support.admit(gas, left, right)?;
         if !nonnegative(area) { return Err(invalid("Darcy flow area must be finite and nonnegative")); }
         let mut flow = DarcyGasFlow { mass_rate_left_to_right_kg_s: 0.0,
@@ -351,19 +570,38 @@ impl DarcyGasBarrier {
             right_volume_rate_m3_s: 0.0, mean_volume_conductance_m3_pa_s: 0.0,
             drag_dissipation_w: 0.0, temperature_k: gas.temperature,
             left_pressure_pa: left, right_pressure_pa: right };
-        let Some(geometry) = self.geometric_resistance_per_m.filter(|_| area > 0.0) else { return Ok(flow); };
+        let Some(geometry) = self.geometric_resistance_per_m.filter(|_| area > 0.0) else { return Ok((flow, None)); };
         let mean = 0.5*left + 0.5*right;
         let rt = gas.specific_gas_constant*gas.temperature;
         let hydraulic = gas.dynamic_viscosity*geometry;
         let conductance = 1.0/hydraulic;
-        let slip = 1.0 + self.slip_pa/mean;
-        if ![rt, hydraulic, conductance, slip].into_iter().all(positive) {
+        if ![rt, hydraulic, conductance].into_iter().all(positive) {
             return Err(invalid("gas permeation coefficients are unrepresentable"));
         }
-        flow.mean_volume_conductance_m3_pa_s = area*conductance*slip;
         let difference = left-right;
+        let mut solved = None;
+        let (enhancement, pressure_over_rt) = if let Some(slip) = self.common_slip_pa {
+            (1.0+slip/mean, (mean+slip)/rt)
+        } else if difference == 0.0 {
+            // At equilibrium every interface has the same pressure, so the
+            // exact infinitesimal series resistance is sum[r_i/(1+b_i/p)].
+            let scale = mean.max(self.maximum_slip_pa);
+            let p = mean/scale;
+            let fraction: f64 = self.layers.iter().zip(&self.resistance_fractions).map(|(layer, &weight)|
+                weight*(p/(p+layer.klinkenberg_slip_pa/scale))).sum();
+            (1.0/fraction, 0.0)
+        } else {
+            let query = LayeredQuery::new(left, right, self.maximum_slip_pa)?;
+            let root = self.solve_layered(query, MAX_LAYERED_DARCY_ITERATIONS)?;
+            solved = Some(root);
+            (root.scaled_flux*(query.scale/mean), root.scaled_flux*(query.scale/rt))
+        };
+        if !positive(enhancement) || difference != 0.0 && !positive(pressure_over_rt) {
+            return Err(invalid("gas permeation slip coefficients are unrepresentable"));
+        }
+        flow.mean_volume_conductance_m3_pa_s = area*conductance*enhancement;
         if difference != 0.0 {
-            let flux = (difference*conductance) * ((mean+self.slip_pa)/rt);
+            let flux = (difference*conductance)*pressure_over_rt;
             let left_speed = flux*rt/left;
             let right_speed = flux*rt/right;
             if !flux.is_finite() || flux == 0.0
@@ -394,7 +632,7 @@ impl DarcyGasBarrier {
             || flow.mean_volume_conductance_m3_pa_s <= 0.0 || flow.drag_dissipation_w < 0.0 {
             return Err(invalid("gas permeation flow/power is unrepresentable"));
         }
-        Ok(flow)
+        Ok((flow, solved))
     }
 }
 
