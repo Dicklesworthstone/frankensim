@@ -1951,3 +1951,17 @@ softening still requires independent surface and load-path refinement. Tests
 cover crossed-diagonal area and analytic linear energy, virtual work and rigid
 motion, matching-mesh stiffness recovery, force-controlled softening/fracture/compressive
 reclosure, source retention, malformed coverage and construction budgets.
+
+
+### Exact native transient continuation across material lifetimes
+
+`loads3::transient::checkpoint::TetTransientCheckpoint3` detaches accepted native
+motion from its borrowed material problem. It retains original geometry, shared
+assembled operators, motion/acceleration, thermal field, applied loads, support
+state, controls and accepted step count. Binding requires the same mesh, fixed
+components and complete material values/source identities. It neither
+reassembles nor restarts dynamics; changed coefficients still use the existing
+thermal/rebind owners. This immutable in-process continuation is not portable
+serialization. G3 continuation, step-budget preservation and changed-material
+refusal are exercised by the reciprocal dynamic thermoelastic tests in
+`fs-couple`.

@@ -280,3 +280,6 @@ fn g4_complete_phase_chart_is_retained_and_failed_coupling_publishes_no_history(
         assert_eq!(retry.observer,accepted.observer);
     });
 }
+
+#[path = "thermoelastic/dynamic.rs"]
+mod dynamic;

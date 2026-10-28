@@ -33,6 +33,8 @@ pub mod motion;
 /// Source-refreshed thermal strain with physical elastic energy and input work.
 pub mod thermal;
 mod thermal_damping;
+/// Detached exact native history across changing material-state lifetimes.
+pub mod checkpoint;
 
 /// Explicit resource, solve, motion and energy allowances, all in coherent SI.
 #[derive(Debug, Clone, Copy)]

@@ -18,6 +18,9 @@
 //! entropy conservation or add inertia, plasticity, phase flow, moving supports,
 //! follower loads or deformation-dependent heat-transfer geometry.
 
+/// Reciprocal finite heat coupled to the original inertial Newmark trajectory.
+pub mod dynamic;
+
 use super::*;
 use std::convert::Infallible;
 use fs_material::elastic::thermal::{

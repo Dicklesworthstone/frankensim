@@ -8858,3 +8858,38 @@ enthalpy and live mixed-state kinetic scales, backward-Euler reaction extent,
 and the adiabatic reversible-isomer solution under complete-interval refinement.
 They also check exact empty-chemistry equivalence, deterministic link reordering,
 late source/identity failures, cancellation and replay without partial state.
+
+
+### Reciprocal inertial thermoelasticity
+
+`solid_enthalpy::thermoelastic::dynamic` launches the original sparse
+average-acceleration tetrahedral trajectory from admitted loaded equilibrium
+and supplied nodal velocity. Later states evolve actual inertia. It retains the
+existing source-pinned affine E(T), fixed Poisson ratio, constant instantaneous
+expansion potential, finite caloric charts, stationary supports, fixed reference
+mass and positive total-capacity/strain/source admissions.
+
+Each cell receives reversible `Q = W_stress - delta(U_elastic)`, with
+`U_elastic = Psi + T*S` and source-derived `S = -dPsi/dT` at fixed total strain.
+Native kinetic energy stays separate. The accepted balance is
+`delta(K + U_elastic + H_caloric) + D_Rayleigh = W_external + Q_external + E_incoming`;
+both native mechanical and thermal gates remain active. Rayleigh loss is
+explicitly exported without invented spatial heating. Supplied damping must
+exclude mechanisms already resolved by coupled transport.
+
+Every nonlinear trial restarts both owners from accepted history; only the
+balanced thermal state, native checkpoint, source state and original observer
+are returned. Matrices and step count survive changing endpoint material
+lifetimes without a second solve. Cancellation, source/strain exit, iteration
+or energy refusal leave both owners unchanged. Accepted nodal motion and native
+stress remain exposed.
+
+G1 compares heated inertia and multi-step adiabatic oscillation against
+independent consistent-mass, momentum, free-energy and finite-capacity equations.
+G3 covers uncoupled/damping limits and native continuation; G4 covers late
+refusal, state pairing and replay. Five new dynamic/checkpoint references and
+three existing reciprocal quasistatic references pass focused native execution.
+Fixtures are authored, not measured-material validation. Endpoint coupling
+generally has first-order path error and needs time refinement; no exact entropy
+conservation, finite-strain/phase dynamics, moving supports, downstream contact
+recoupling or arbitrary initial free-body state is claimed.
