@@ -149,8 +149,8 @@ impl GrayBlackBathExchange {
             } else { ns-nb };
         if !d.is_finite() || d == 0.0 { return Err(RadiationEntropyError::Unrepresentable); }
         let e = self.surface.emissivity;
-        let out_bath = mixed_log_ratio(d, e)?;
-        let out_surface = mixed_log_ratio(-d, 1.0-e)?;
+        let out_bath = mixed_log_ratio(d, e, self.surface.log_emissivity, self.log_reflectance)?;
+        let out_surface = mixed_log_ratio(-d, 1.0-e, self.log_reflectance, self.surface.log_emissivity)?;
         let no = if d > 0.0 { ns+out_surface } else { nb+out_bath };
         let mut generation = self.surface.log_emissivity+bose_divergence(ns, -d)?;
         if out_surface != 0.0 {
@@ -202,11 +202,15 @@ fn log_difference(a: f64, b: f64) -> Result<f64, RadiationEntropyError> {
     if a <= b { return Err(RadiationEntropyError::Unrepresentable); }
     finite(a+det::ln(-det::expm1(b-a)))
 }
-fn mixed_log_ratio(d: f64, weight: f64) -> Result<f64, RadiationEntropyError> {
-    if weight == 0.0 { return Ok(0.0); }
-    if weight == 1.0 { return Ok(d); }
+// Retain BOTH original logarithmic weights. Recovering epsilon from
+// 1-(1-epsilon) loses weak emission even when its outgoing spectrum dominates.
+fn mixed_log_ratio(d: f64, weight: f64, log_weight: f64, log_complement: f64)
+    -> Result<f64, RadiationEntropyError>
+{
+    if log_weight == f64::NEG_INFINITY { return Ok(0.0); }
+    if log_complement == f64::NEG_INFINITY { return Ok(d); }
     let result = if d.abs() < 0.5 { signed_log1p(weight*det::expm1(d)) }
-        else { log_add(det::ln(weight)+d, signed_log1p(-weight)) };
+        else { log_add(log_weight+d, log_complement) };
     if result == 0.0 && d != 0.0 { return Err(RadiationEntropyError::Unrepresentable); }
     finite(result)
 }
@@ -334,6 +338,24 @@ fn invalid_coordinates_and_unrepresentable_departures_refuse() {
     for lambda in [0.0,-1.0,f64::NAN,f64::INFINITY] {
         assert_eq!(bath(400.0,300.0,0.5).spectrum_nm(lambda),Err(RadiationEntropyError::Wavelength));
     }
-    assert!(matches!(mixed_log_ratio(1e-100,f64::from_bits(1)),Err(RadiationEntropyError::Unrepresentable)));
+    assert!(matches!(mixed_log_ratio(1e-100,f64::from_bits(1),f64::from_bits(1).ln(),-f64::from_bits(1)),Err(RadiationEntropyError::Unrepresentable)));
+}
+#[test]
+fn weak_emission_is_not_recovered_from_rounded_reflectance() {
+    for (ts,tb,e,x) in [
+        (4970.073407978646_f64,315.9702342255864_f64,4.9586473872939026e-12_f64,14.401644010609393_f64),
+        (900.0,9.0,1e-200,10.0),
+    ] {
+        let wavelength = C2_NM_K/(x*ts);
+        let s = bath(ts,tb,e).spectrum_nm(wavelength).unwrap();
+        let emitted = GrayPhotonEmission::new(ts,e).unwrap().spectrum_nm(wavelength).unwrap();
+        let reflected = GrayPhotonEmission::new(tb,1.0-e).unwrap().spectrum_nm(wavelength).unwrap();
+        let expected = PI*(emitted.energy_w_m2_sr_nm+reflected.energy_w_m2_sr_nm);
+        close(s.outgoing_energy_w_m2_nm,expected,2e-11);
+        assert!(s.outgoing_energy_w_m2_nm>0.0);
+        assert!(s.surface_generation_w_m2_k_nm>0.0 && s.bath_generation_w_m2_k_nm>0.0);
+        close(s.surface_generation_w_m2_k_nm+s.bath_generation_w_m2_k_nm,
+            s.total_generation_w_m2_k_nm,2e-10);
+    }
 }
 }
