@@ -12,6 +12,8 @@
 pub mod enthalpy;
 /// Density/entropy closure for reversible adiabatic gas-state changes.
 pub mod entropy;
+/// Reference-invariant temperature-anchored enthalpy/internal-energy increments.
+pub mod increment;
 /// Closed gas storage with heating and reversible adiabatic boundary work.
 pub mod parcel;
 mod root;
@@ -30,7 +32,7 @@ pub struct GasEnergySolve {
     pub minimum_temperature_k: f64,
     /// Upper absolute temperature [K], inside the supported gas phase.
     pub maximum_temperature_k: f64,
-    /// Maximum absolute internal-energy residual [J/kg].
+    /// Maximum absolute residual of the selected caloric quantity [J/kg].
     pub energy_tolerance_j_kg: f64,
     /// At most 128 safeguarded Newton/bisection iterations, plus two endpoints.
     pub maximum_iterations: usize,
@@ -258,7 +260,8 @@ pub struct IsochoricGasParcel {
 pub struct GasHeatStep {
     /// Signed prescribed heat: positive enters the parcel.
     pub supplied_heat_j: f64,
-    /// `m * (u_new - u_old)` from the actual accepted material states.
+    /// Original-law `m Delta u` between accepted temperatures, with common
+    /// formation references canceled before floating-point evaluation.
     pub stored_energy_change_j: f64,
     /// Stored energy change minus supplied heat. No formation-energy normalization.
     pub residual_j: f64,
@@ -296,6 +299,9 @@ impl IsochoricGasParcel {
     /// Add signed heat atomically. Outside-domain states, insufficient work,
     /// unrepresentable balances and cancellation leave the parcel unchanged.
     /// The caller can bind cancellation to its existing runtime context.
+    /// Nonzero updates require a stable continuous caloric bracket containing
+    /// the initial temperature. Heat and its residual use direct original-law
+    /// increments; full source references remain in the published gas state.
     pub fn add_heat(
         &mut self, heat_j: f64, controls: GasEnergySolve, mut cancelled: impl FnMut() -> bool,
     ) -> Result<GasHeatStep, GasEnergyError> {
@@ -310,10 +316,13 @@ impl IsochoricGasParcel {
         if !change.is_finite() || change == 0.0 || !positive(tolerance_j) {
             return Err(GasEnergyError::Invalid("specific heat input or total energy tolerance is unrepresentable"));
         }
-        let initial = self.state.specific_internal_energy_j_kg();
-        let solution = self.model.solve_energy_change(&self.point, self.mass_kg / self.volume_m3,
-            initial, change, controls, &mut cancelled)?;
-        let stored = self.mass_kg * (solution.state.specific_internal_energy_j_kg() - initial);
+        let solution = self.model.reconstruct_density_internal_energy_increment(
+            &self.point, self.mass_kg / self.volume_m3, change, controls, &mut cancelled,
+        )?;
+        let stored = self.mass_kg * self.model.thermodynamics().specific_internal_energy_change(
+            Temperature::new(self.state.state().temperature),
+            Temperature::new(solution.state.state().temperature),
+        ).map_err(|error| super::failure("parcel heat increment", error))?.value();
         let residual = stored - heat_j;
         if !stored.is_finite() || !residual.is_finite() || residual.abs() > tolerance_j {
             return Err(GasEnergyError::Invalid("accepted parcel did not close the requested joule balance"));
