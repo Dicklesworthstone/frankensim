@@ -151,6 +151,25 @@ linear-Gaussian core of weak-constraint assimilation.
   The process-noise independence and discrete dynamics are model assumptions,
   not inferred truths or certified continuous-flow bounds. See
   `SHARED_NOISE_STREAM.md` and `tests/factor_forecast.rs`.
+- `factor::forecast::NonlinearDynamics` and
+  `SharedNoiseStream::forecast_physical_nonlinear` — extended-Kalman prediction
+  through an actual vector-valued discrete model. Caller-provided absolute
+  component steps define central differences; exactly `1+2*n` model calls occur
+  on success. The directly evaluated `f(mean)` is retained without subtracting
+  and restoring a large affine offset. The existing square-root kernel
+  propagates `J P J^T + Q`, including learned physical/nuisance cross terms.
+  The nuisance posterior remains static. Numerical/hash work and model-call
+  checkpoints share one cumulative forecast accountant; model-internal work
+  remains the callback's responsibility under its supplied `Cx`. Stream
+  history preparation retains its existing separate scope. Invalid shapes,
+  unrepresentable probes, callback-domain errors, non-finite outputs and
+  cancellation publish no state, time, history, or replay changes. The history
+  binds the model/noise/step declaration and actual probe values. This local
+  Gaussian approximation does not compute exact nonlinear moments, certify
+  smoothness or derivative accuracy, select steps, or authenticate callback
+  code. Units, process-noise independence and model truth remain caller
+  assumptions. See `examples/nonlinear_cooling.rs` and
+  `tests/factor_forecast.rs`.
 - `dimensioned::DimensionedBelief` / `dimensioned::DimensionedObservation`
   — the dimensionally typed front door (bead sj31i.7.3) binding
   `fs_qty::inference` schemas to the checked belief/observation carriers:
@@ -508,7 +527,7 @@ and clean pre-cancellation.
   Censored, saturated, and delayed records are typed audited refusals, not
   silently Gaussianized data. A time constant is retained as metadata but is
   not a delay correction.
-- The nonlinear v1 seam is one local central-finite-difference linearization,
+- The nonlinear observation v1 seam is one local central-finite-difference linearization,
   not Gauss-Newton iteration, `fs-ad` automatic differentiation, a derivative
   certificate, or a nonlinear-posterior accuracy guarantee. It does not select
   or adapt the step, compare multiple steps for truncation/roundoff stability,

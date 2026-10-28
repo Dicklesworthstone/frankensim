@@ -1,5 +1,5 @@
 //! Direct Gaussian matrix formulas are independent of the root-rotation kernel.
-use fs_assimilate::factor::forecast::LinearDynamics;
+use fs_assimilate::factor::forecast::{LinearDynamics, NonlinearDynamics};
 use fs_assimilate::factor::{FactorBelief, assimilate_scalar};
 use fs_assimilate::groups::RowId;
 use fs_assimilate::groups::jacobian::{JacobianBatch, JacobianRecord, SharedNoiseModel};
@@ -524,5 +524,185 @@ fn forecast_history_binds_models_intervals_and_invalidates_sensor_plans() {
         later.forecast_physical(&a, 0.0, 2.0, cx).unwrap();
         assert_eq!(first.joint(), later.joint());
         assert_ne!(first.history_id(), later.history_id());
+    });
+}
+
+
+#[test]
+fn nonlinear_vector_prediction_matches_analytic_jacobian_and_affine_limit() {
+    with_cx(&CancelGate::new(), Budget::INFINITE, |cx| {
+        let covariance = vec![vec![2.0, 0.5], vec![0.5, 1.0]];
+        let noise_covariance = vec![vec![0.125, 0.015625], vec![0.015625, 0.25]];
+        let prior = FactorBelief::from_belief(
+            &Belief::new(vec![2.0, -1.0], covariance.clone(), cx).unwrap(), cx,
+        ).unwrap();
+        let noise = FactorBelief::from_belief(
+            &Belief::new(vec![0.0; 2], noise_covariance.clone(), cx).unwrap(), cx,
+        ).unwrap();
+        let dynamics = NonlinearDynamics::new(
+            noise.clone(), vec![0.25, 0.125], "quadratic-transition", cx,
+        ).unwrap();
+        let mut calls = 0;
+        let predicted = dynamics.predict_fd(&prior, |x, _| {
+            calls += 1;
+            Ok(vec![x[0] * x[0] + 0.5 * x[1], x[0] * x[1]])
+        }, cx).unwrap();
+        assert_eq!(calls, 5, "one baseline and two vector probes per component");
+        assert_eq!(predicted.mean(), &[3.5, -2.0]);
+        let jacobian = [[4.0, 0.5], [-1.0, 2.0]];
+        let actual = predicted.to_dense_covariance();
+        for i in 0..2 {
+            for j in 0..2 {
+                let mut expected = noise_covariance[i][j];
+                for k in 0..2 {
+                    for l in 0..2 {
+                        expected += jacobian[i][k] * covariance[k][l] * jacobian[j][l];
+                    }
+                }
+                close(actual[i][j], expected);
+            }
+        }
+        let affine = NonlinearDynamics::new(
+            noise.clone(), vec![0.25, 0.125], "affine-oracle", cx,
+        ).unwrap();
+        let linear = LinearDynamics::new(
+            vec![vec![0.5, 0.25], vec![-1.0, 2.0]], vec![0.125, -0.5],
+            noise, "affine-oracle", cx,
+        ).unwrap();
+        let local = affine.predict_fd(&prior, |x, _| {
+            Ok(vec![0.5 * x[0] + 0.25 * x[1] + 0.125, -x[0] + 2.0 * x[1] - 0.5])
+        }, cx).unwrap();
+        assert_eq!(local, linear.predict(&prior, cx).unwrap());
+    });
+}
+
+#[test]
+fn nonlinear_mean_is_not_lost_by_constructing_a_large_affine_offset() {
+    with_cx(&CancelGate::new(), Budget::INFINITE, |cx| {
+        let prior = FactorBelief::diagonal(vec![1.0], &[1e-32], cx).unwrap();
+        let dynamics = NonlinearDynamics::new(
+            zero_noise(1, cx), vec![1.0 / 1024.0], "locally-steep", cx,
+        ).unwrap();
+        let predicted = dynamics.predict_fd(
+            &prior, |x, _| Ok(vec![1.0 + 1e16 * (x[0] - 1.0)]), cx,
+        ).unwrap();
+        assert_eq!(predicted.mean(), &[1.0]);
+        close(predicted.variance(0).unwrap(), 1.0);
+    });
+}
+
+#[test]
+fn nonlinear_stream_keeps_learned_calibration_and_matches_next_joint_update() {
+    with_cx(&CancelGate::new(), Budget::INFINITE, |cx| {
+        let model = SharedNoiseModel::new(
+            "nonlinear-calibration", vec!["offset".into()], vec![vec![1.0]], cx,
+        ).unwrap();
+        let mut stream = SharedNoiseStream::new(
+            &Belief::scalar(1.0, 4.0).unwrap(), &model, 4, cx,
+        ).unwrap();
+        let first = sample(&model, "nonlinear-first", 3.0, cx);
+        stream.assimilate(&first, cx).unwrap();
+        let before = stream.clone();
+        let p = before.joint().to_dense_covariance();
+        let m = before.joint().mean()[0];
+        let derivative = 2.0 * m;
+        let dynamics = NonlinearDynamics::new(
+            FactorBelief::diagonal(vec![0.0], &[0.2], cx).unwrap(),
+            vec![0.25], "square-dynamics", cx,
+        ).unwrap();
+        stream.forecast_physical_nonlinear(
+            &dynamics, 0.0, 1.0, |x, _| Ok(vec![x[0] * x[0]]), cx,
+        ).unwrap();
+        let expected = Belief::new(
+            vec![m * m, before.joint().mean()[1]],
+            vec![
+                vec![derivative * derivative * p[0][0] + 0.2, derivative * p[0][1]],
+                vec![derivative * p[1][0], p[1][1]],
+            ], cx,
+        ).unwrap();
+        let predicted = stream.clone();
+        assert_eq!(stream.time(), Some(1.0));
+        assert_ne!(stream.history_id(), before.history_id());
+        assert_eq!(stream.joint().diag(1), before.joint().diag(1));
+        for i in 0..2 {
+            close(stream.joint().mean()[i], expected.mean()[i]);
+            for j in 0..2 {
+                close(stream.joint().to_dense_covariance()[i][j], expected.covariance()[i][j]);
+            }
+        }
+        stream.assimilate(&first, cx).unwrap();
+        assert_eq!(stream, predicted, "time evolution must not reissue an old reading");
+        let mut calls = 0;
+        assert!(stream.forecast_physical_nonlinear(&dynamics, 0.0, 1.0, |x, _| {
+            calls += 1;
+            Ok(x.to_vec())
+        }, cx).is_err());
+        assert_eq!(calls, 0, "a bad frontier is refused before model work");
+        assert_eq!(stream, predicted);
+        let next = sample(&model, "nonlinear-second", 6.0, cx);
+        stream.assimilate(&next, cx).unwrap();
+        let oracle = assimilate(
+            &expected, &Observation::new(vec![1.0, 1.0], 6.0, 0.25, "joint").unwrap(), cx,
+        ).unwrap();
+        let covariance = stream.joint().to_dense_covariance();
+        for i in 0..2 {
+            close(stream.joint().mean()[i], oracle.mean()[i]);
+            for j in 0..2 { close(covariance[i][j], oracle.covariance()[i][j]); }
+        }
+    });
+}
+
+#[test]
+fn nonlinear_probe_failures_and_cancellation_never_advance_the_stream() {
+    with_cx(&CancelGate::new(), Budget::INFINITE, |cx| {
+        let model = SharedNoiseModel::new(
+            "probe-calibration", vec!["offset".into()], vec![vec![1.0]], cx,
+        ).unwrap();
+        let mut stream = SharedNoiseStream::new(
+            &Belief::scalar(1.0, 1.0).unwrap(), &model, 4, cx,
+        ).unwrap();
+        let dynamics = NonlinearDynamics::new(
+            zero_noise(1, cx), vec![0.25], "domain-limited", cx,
+        ).unwrap();
+        let saved = stream.clone();
+        for failure in 0..3 {
+            let result = stream.forecast_physical_nonlinear(&dynamics, 0.0, 1.0, |x, _| {
+                if x[0] < 1.0 {
+                    match failure {
+                        0 => Err(AssimError::InvalidForecast { reason: "outside model domain" }),
+                        1 => Ok(vec![f64::NAN]),
+                        _ => Ok(vec![]),
+                    }
+                } else { Ok(vec![x[0] * x[0]]) }
+            }, cx);
+            assert!(result.is_err());
+            assert_eq!(stream, saved);
+        }
+        let gate = CancelGate::new();
+        with_cx(&gate, Budget::INFINITE, |cancelled| {
+            assert!(matches!(stream.forecast_physical_nonlinear(
+                &dynamics, 0.0, 1.0, |x, _| { gate.request(); Ok(x.to_vec()) }, cancelled,
+            ), Err(AssimError::Cancelled { .. })));
+        });
+        assert_eq!(stream, saved);
+        let mut calls = 0;
+        with_cx(&CancelGate::new(), Budget { cost_quota: Some(1), ..Budget::INFINITE }, |tiny| {
+            assert!(stream.forecast_physical_nonlinear(&dynamics, 0.0, 1.0, |x, _| {
+                calls += 1;
+                Ok(x.to_vec())
+            }, tiny).is_err());
+        });
+        assert_eq!(calls, 0);
+        assert_eq!(stream, saved);
+        let large = FactorBelief::diagonal(vec![1e30], &[1.0], cx).unwrap();
+        assert!(matches!(dynamics.predict_fd(&large, |x, _| {
+            calls += 1;
+            Ok(x.to_vec())
+        }, cx), Err(AssimError::FiniteDifferenceStepUnrepresentable { component: 0 })));
+        assert_eq!(calls, 0);
+        stream.forecast_physical_nonlinear(
+            &dynamics, 0.0, 1.0, |x, _| Ok(vec![x[0] * x[0]]), cx,
+        ).unwrap();
+        assert_eq!(stream.time(), Some(1.0), "a failed attempt leaves the interval retryable");
     });
 }
