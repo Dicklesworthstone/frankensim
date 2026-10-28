@@ -6,8 +6,10 @@
 //! `s = s_initial - X(t)`. Its material velocity is `X_t + phi(s)^T q_t`, NOT
 //! the time derivative of `phi(s(t))^T q` (which follows the moving crossing).
 //!
-//! Straight parallel fibers and prescribed normal loads remain this rung's
-//! assumptions. Normal patches and rosin histories are not transported. The
+//! Straight parallel fibers remain this rung's assumption. A canonical normal
+//! fiber receiver follows the SAME material crossing through the existing
+//! normal-contact product rule; its solved reaction supplies friction. Rosin
+//! and thermal patch histories are not transported. The
 //! native mechanical ledger is a SUPPORT-FRAME balance: external work includes
 //! the inertial load. `FiberSupportFrame` additionally accounts for rigid
 //! translation and momentum cross terms in laboratory energy and support work.
@@ -16,6 +18,7 @@ use super::super::stations::BowStationMotionLimits;
 use super::super::*;
 use crate::fiber_ribbon::FiberDirection;
 use crate::render::RenderError;
+use crate::render::schedule::force::coupled::contact::friction::multiple::obstacles::geometry::ObstacleGeometry;
 use crate::render::schedule::force::coupled::contact::friction::multiple::surfaces::geometry::{
     FrictionEndpointGeometry, FrictionGeometry, FrictionGeometryConfig,
 };
@@ -67,8 +70,14 @@ pub struct FiberSupportFrame {
     /// `V sum Gamma_n qdot_n + M V^2/2`, added to native storage [J].
     pub laboratory_kinetic_correction_j: f64,
     /// Native drive work + inertial work + change of kinetic correction [J].
-    /// Other applied forces and moving normal supports keep their own accounts.
+    /// Also includes `normal_attachment_work_j`. Other applied forces, string
+    /// station migration and normal support translations keep their own accounts.
     pub support_work_j: f64,
+    /// Normal-contact work from migration along the fibers [J]. Already part
+    /// of native `obstacle_work_j` AND this frame's `support_work_j`; when using
+    /// the laboratory balance, subtract this share from native obstacle work.
+    /// String-side migration and prescribed normal indentation are excluded.
+    pub normal_attachment_work_j: f64,
     /// Complete accepted mechanical storage plus the kinetic correction [J].
     pub laboratory_mechanical_energy_j: f64,
 }
@@ -78,7 +87,18 @@ pub(crate) struct FiberSupportState {
     participation: Vec<f64>,
     force_start: usize,
     mass_kg: f64,
+    normal_contacts: Vec<FiberNormalContact>,
     last_frame: Option<FiberSupportFrame>,
+}
+#[derive(Clone, Copy)]
+struct FiberNormalContact {
+    stop: usize,
+    component: usize,
+    sign: f64,
+}
+struct FiberNormalStep {
+    contact: FiberNormalContact,
+    previous_transport_m: f64,
 }
 pub(crate) struct FiberSupportStep {
     accepted: FiberSupportKinematics,
@@ -90,6 +110,9 @@ pub(crate) struct FiberSupportStep {
     acceleration_m_s2: f64,
     previous_displacement_moment: f64,
     previous_kinetic_correction_j: f64,
+    normal_end_shape: Vec<f64>,
+    normal_change_shape: Vec<f64>,
+    normal_contacts: Vec<FiberNormalStep>,
     pub(crate) forces: Vec<f64>,
     pub(crate) drives: Vec<FrictionDrive>,
 }
@@ -125,6 +148,40 @@ impl FiberSupportStep {
             shapes: self.shape.clone(),
         }
     }
+    pub(crate) fn has_normal_contacts(&self) -> bool {
+        !self.normal_contacts.is_empty()
+    }
+    /// Change only the original fiber receiver. The string-side map, clearance,
+    /// material law and optional normal translation belong to their owners.
+    pub(crate) fn normal_geometry(
+        &self,
+        geometry: Option<&[ObstacleGeometry]>,
+    ) -> Result<Option<Vec<ObstacleGeometry>>, ModalFrictionError> {
+        if !self.has_normal_contacts() {
+            return Ok(None);
+        }
+        let mut geometry = geometry
+            .ok_or_else(|| error("moving normal fibers require complete endpoint geometry"))?
+            .to_vec();
+        for step in &self.normal_contacts {
+            let contact = step.contact;
+            let right = &mut geometry
+                .get_mut(contact.stop)
+                .ok_or_else(|| error("moving normal fiber contact is absent"))?
+                .right;
+            if right.component != contact.component {
+                return Err(error(
+                    "moving normal fibers must retain their original participant",
+                ));
+            }
+            right.shapes = self
+                .normal_end_shape
+                .iter()
+                .map(|x| contact.sign * x)
+                .collect();
+        }
+        Ok(Some(geometry))
+    }
 }
 fn error(what: &'static str) -> ModalFrictionError {
     ModalCouplingError::Invalid { what }.into()
@@ -137,20 +194,17 @@ fn admit_sources(
         .ok_or_else(|| error("support motion requires material fibers"))?;
     let start = fiber.component_start();
     let end = start + fiber.model().resolution().cells;
-    // Bow-position motion on the string may carry a normal patch, but travel
-    // along accelerating hair still lacks that normal footprint's transport.
-    // Keep this restriction local to fiber motion rather than the shared
-    // bow-station admission, which also serves fixed material receivers.
-    if !source.bow_contact_loads().is_empty()
-        || source.stops().iter().any(|stop| {
-            stop.body.as_ref().is_some_and(|body| {
-                (start..end).contains(&(source.bank().strings().len() + body.component))
-            })
-        })
-    {
-        return Err(error(
-            "fiber support motion requires transported normal hair contacts",
-        ));
+    // Only a source-owned normal map can be reprojected. Arbitrary authored
+    // receiver rows have no implied physical station or orientation.
+    for stop in source.stops() {
+        if let Some(body) = &stop.body {
+            let component = source.bank().strings().len() + body.component;
+            if (start..end).contains(&component) && body.shapes != fiber.normal_shapes {
+                return Err(error(
+                    "moving normal fibers require their canonical source receiver",
+                ));
+            }
+        }
     }
     Ok(fiber)
 }
@@ -161,8 +215,10 @@ impl MultiBowStringBank {
     /// interval mean; each fiber receives its mass-projected inertial load and
     /// a moving contact in the original basis, without restarting its waves.
     ///
-    /// Bind after source contacts. Only prescribed-load dry friction is admitted;
-    /// loaded normals and shear/thermal history transport remain unsupported.
+    /// Bind after source contacts. Canonical normal fiber receivers follow the
+    /// same material crossing; the original unilateral law resolves load and
+    /// release in the joint friction solve. Shear/thermal history transport
+    /// remains unsupported. Arbitrary authored normal receiver maps refuse.
     /// Initial speed declares an already co-moving state, not an impulse. A
     /// velocity step in a low-rate schedule remains a finite-interval acceleration
     /// and may fail the stated acceleration bound. Refine control timing too.
@@ -198,6 +254,23 @@ impl MultiBowStringBank {
         let component_end = component_start
             .checked_add(fiber.model().resolution().cells)
             .ok_or_else(|| RenderError::Friction(error("fiber component span overflow")))?;
+        let normal_contacts: Vec<_> = self
+            .source
+            .stops()
+            .iter()
+            .enumerate()
+            .filter_map(|(stop, source)| {
+                let body = source.body.as_ref()?;
+                let component = self.source.bank().strings().len() + body.component;
+                (component_start..component_end)
+                    .contains(&component)
+                    .then_some(FiberNormalContact {
+                        stop,
+                        component,
+                        sign: source.side.sign(),
+                    })
+            })
+            .collect();
         let components = self
             .system
             .components()
@@ -240,11 +313,27 @@ impl MultiBowStringBank {
                     * self.system.sample_period_s()
             })
             .sum::<f64>();
+        let normal_scale =
+            (0.5 * fiber.model().cell_line_density_kg_m() * fiber.model().geometry().length_m)
+                .sqrt()
+                .recip();
+        let mut normal_work_bound = 0.0;
+        for contact in &normal_contacts {
+            let q_bound = self.system.components()[contact.component]
+                .budget()
+                .maximum_abs_displacement_m_sqrt_kg;
+            normal_work_bound += self.source.stops()[contact.stop].limits.maximum_force_n
+                * (2.0
+                    * normal_scale
+                    * fiber.model().resolution().transverse_modes as f64
+                    * q_bound);
+        }
         // The joint owner bounds total storage, including admitted obstacles.
         // Reserve each separately reported storage field too, independently
         // of its partition into network, normal, residual and shear accounts.
         let account_bound = 4.0 * self.source.bank().options().network.maximum_total_energy_j
             + drive_bound
+            + normal_work_bound
             + inertial_work_bound
             + 2.0 * correction_bound;
         if !account_bound.is_finite() || account_bound > f64::MAX / 16.0 {
@@ -266,6 +355,18 @@ impl MultiBowStringBank {
                 gate,
             )?;
         }
+        // Normal contacts independent of a bow-load binding still travel over
+        // the same fibers. Reuse the original geometry owner for all of them.
+        if !normal_contacts.is_empty() && self.stop_stations.is_none() {
+            self = self.with_stop_station_motion(
+                stops::stations::StopStationMotionLimits {
+                    maximum_speed_m_s: limits.maximum_speed_m_s,
+                    maximum_step_m: limits.maximum_step_m,
+                    max_update_terms: limits.max_update_terms,
+                },
+                gate,
+            )?;
+        }
         let state = self.bow_stations.as_mut().expect("admitted geometry");
         let max_update_terms = state.limits.max_update_terms.min(limits.max_update_terms);
         self.system
@@ -277,6 +378,7 @@ impl MultiBowStringBank {
             participation,
             force_start,
             mass_kg,
+            normal_contacts,
             last_frame: None,
             accepted: FiberSupportKinematics {
                 velocity_m_s: initial_velocity_m_s,
@@ -393,6 +495,32 @@ impl FiberSupportState {
             .model()
             .displacement_map(station, FiberDirection::Axial)
             .map_err(|_| error("final fiber endpoint projection is unrepresentable"))?;
+        let normal_end_shape = fiber
+            .model()
+            .displacement_map(station, FiberDirection::Normal)
+            .map_err(|_| error("final normal fiber projection is unrepresentable"))?;
+        let normal_start_shape = fiber
+            .model()
+            .displacement_map(self.accepted.station_fraction, FiberDirection::Normal)
+            .map_err(|_| error("initial normal fiber projection is unrepresentable"))?;
+        let normal_change_shape: Vec<_> = normal_end_shape
+            .iter()
+            .zip(&normal_start_shape)
+            .map(|(end, start)| end - start)
+            .collect();
+        let normal_contacts = self
+            .normal_contacts
+            .iter()
+            .map(|&contact| FiberNormalStep {
+                contact,
+                previous_transport_m: system.components()[contact.component]
+                    .states()
+                    .iter()
+                    .zip(&normal_change_shape)
+                    .map(|(state, shape)| shape * state.displacement_m_sqrt_kg)
+                    .sum(),
+            })
+            .collect();
         let mut forces = external.to_vec();
         for cell in 0..cells {
             if gate.is_requested() {
@@ -434,6 +562,9 @@ impl FiberSupportState {
             acceleration_m_s2: acceleration,
             previous_displacement_moment,
             previous_kinetic_correction_j,
+            normal_end_shape,
+            normal_change_shape,
+            normal_contacts,
             forces,
             drives,
         })
@@ -450,6 +581,27 @@ impl FiberSupportState {
         let correction = velocity * momentum + 0.5 * self.mass_kg * velocity * velocity;
         let inertial_work =
             -step.acceleration_m_s2 * (displacement - step.previous_displacement_moment);
+        let normal_work = step
+            .normal_contacts
+            .iter()
+            .map(|normal| {
+                let contact = normal.contact;
+                let final_transport: f64 = system.components()[contact.component]
+                    .states()
+                    .iter()
+                    .zip(&step.normal_change_shape)
+                    .map(|(state, shape)| shape * state.displacement_m_sqrt_kg)
+                    .sum();
+                let reaction = system
+                    .last_obstacle_frames()
+                    .expect("accepted normal contacts")[contact.stop]
+                    .normal_force_n;
+                // Closure is left minus right: only the fiber part of delta_N.
+                -reaction
+                    * contact.sign
+                    * (0.5 * normal.previous_transport_m + 0.5 * final_transport)
+            })
+            .sum::<f64>();
         // Material-fiber banks have no lumped series-drive storage; retained
         // fiber modes already represent that compliance. Moving shear/thermal
         // patches remain inadmissible under this owner's transport restrictions.
@@ -465,8 +617,9 @@ impl FiberSupportState {
             acceleration_m_s2: step.acceleration_m_s2,
             inertial_coordinate_work_j: inertial_work,
             laboratory_kinetic_correction_j: correction,
-            support_work_j: frame.drive_work_j + inertial_work + correction
+            support_work_j: frame.drive_work_j + normal_work + inertial_work + correction
                 - step.previous_kinetic_correction_j,
+            normal_attachment_work_j: normal_work,
             laboratory_mechanical_energy_j: laboratory_energy,
         });
         self.accepted = step.accepted;

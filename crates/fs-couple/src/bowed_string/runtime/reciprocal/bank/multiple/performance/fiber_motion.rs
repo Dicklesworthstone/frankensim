@@ -3,7 +3,8 @@
 //! This scheduler supplies endpoint velocities only. The existing ribbon motion
 //! owner supplies source-derived inertia, moving material contact, midpoint
 //! traction and laboratory work accounting. No second force or motion law is
-//! applied. Its normal/shear/thermal transport restrictions remain unchanged.
+//! applied. Canonical normal contacts share that owner; shear/thermal patch
+//! history transport remains unsupported.
 
 pub use super::super::ribbon::motion::FiberSupportFrame;
 use super::super::ribbon::motion::FiberSupportMotionLimits;
@@ -183,8 +184,9 @@ impl MultiBowPerformance {
     /// This explicit velocity program owns tangential support motion. All bow
     /// gesture speeds must be zero; their normal loads still act. Endpoint speed
     /// enters the SAME source-derived support inertia and migrating hair contact
-    /// used by `with_fiber_support_motion`. Normal and shear/thermal material
-    /// transport remain unsupported. Bind after optional bow-station motion,
+    /// used by `with_fiber_support_motion`. Source-projected normal contacts
+    /// follow that crossing and supply solved loads. Shear/thermal material
+    /// history transport remains unsupported. Bind after optional bow-station motion,
     /// before absolute sample zero; the two support controls are exclusive.
     pub fn with_fiber_support_program(
         mut self,

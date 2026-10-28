@@ -73,7 +73,7 @@ impl MultiBowStringBank {
     /// This models motion along the string, not travel along bow hair, support
     /// acceleration, a change of speaking length, or a frequency assignment.
     /// Separate `with_fiber_support_motion` can add hair travel and inertia for
-    /// prescribed-load dry friction; it retains its normal-patch restrictions.
+    /// dry friction and source-projected normal fiber contacts.
     ///
     /// Bind once before playback, after any normal-load bindings. Each bound
     /// normal follows its bow's SAME endpoint automatically. Its existing
@@ -271,7 +271,8 @@ impl MultiBowStringBank {
         // and the original normal law, receiver, material state and clearance.
         // Explicit stop endpoints have already been checked by the joint entry
         // point. Keep automatically generated locations staged until acceptance.
-        let normal_stations = if normal_geometry.is_none() && !self.source.bow_contact_loads.is_empty() {
+        let normal_stations = if normal_geometry.is_none() && (!self.source.bow_contact_loads.is_empty()
+            || support.as_ref().is_some_and(|s| s.has_normal_contacts())) {
             let mut stations = self.stop_station_fractions()
                 .ok_or_else(|| error("moving bow patch lost its admitted normal geometry"))?.to_vec();
             for binding in &self.source.bow_contact_loads {
@@ -287,6 +288,9 @@ impl MultiBowStringBank {
                 _ => error("joint bow/normal station projection exceeds its source or motion limits"),
             })?;
         let normal_geometry = normal_geometry.or(automatic_normal_geometry.as_deref());
+        let fiber_normal_geometry = support.as_ref()
+            .map(|s| s.normal_geometry(normal_geometry)).transpose()?.flatten();
+        let normal_geometry = fiber_normal_geometry.as_deref().or(normal_geometry);
         // An unchanged interval uses the same source arithmetic as original
         // binding. After a move it also replaces the previous midpoint map by
         // the accepted endpoint, without altering vibration or material memory.

@@ -10,6 +10,9 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::f
     FiberSupportKnot, FiberSupportProgram,
 };
 
+#[path = "fiber_normal_motion.rs"]
+mod normal_motion;
+
 fn support_program(knots: &[(u64, f64)]) -> FiberSupportProgram {
     FiberSupportProgram { initial_velocity_m_s: 0.0,
         knots: knots.iter().map(|&(sample,velocity_m_s)|FiberSupportKnot { sample,velocity_m_s }).collect(),
@@ -473,8 +476,12 @@ fn physical_fibers_receive_opposite_traction_and_change_string_body_pressure() {
     });
 }
 
-#[test]
-fn fiber_tension_participates_in_the_simultaneous_normal_load_and_friction_solve() {
+fn normal_fiber_bank(cx: &Cx<'_>, gate: &CancelGate, tension: f64, gap_m: f64) -> MultiBowStringBank {
+    normal_fiber_bank_with_receiver_scale(cx, gate, tension, gap_m, 1.0)
+}
+
+fn normal_fiber_bank_with_receiver_scale(cx: &Cx<'_>, gate: &CancelGate,
+    tension: f64, gap_m: f64, receiver_scale: f64) -> MultiBowStringBank {
     use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::contact_load::BowContactLoad;
     use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::stops::{
         MaterialStringStop, StringStopSide,
@@ -484,7 +491,6 @@ fn fiber_tension_participates_in_the_simultaneous_normal_load_and_friction_solve
     };
     use fs_couple::render::schedule::force::coupled::contact::ModalContactConfig;
     use fs_couple::render::schedule::force::coupled::contact::friction::multiple::obstacles::FrictionObstacleConfig;
-    scoped_normal(|cx, gate, tension| {
         let original = base(cx, gate, 7800.0);
         let mut members = original.source().strings().to_vec();
         members[0].source = members[0]
@@ -522,7 +528,10 @@ fn fiber_tension_participates_in_the_simultaneous_normal_load_and_friction_solve
             .source()
             .bows()
             .iter()
-            .zip(normal)
+            .zip(normal.into_iter().map(|mut receiver| {
+                for shape in &mut receiver.shapes { *shape *= receiver_scale; }
+                receiver
+            }))
             .map(|(bow, body)| MaterialStringStop {
                 location: bow.location,
                 side: StringStopSide::Along(TransverseDirection::try_new([0.0, 1.0]).unwrap()),
@@ -531,7 +540,7 @@ fn fiber_tension_participates_in_the_simultaneous_normal_load_and_friction_solve
                     vec![-1.0],
                     1,
                     1,
-                    vec![-1e-6],
+                    vec![gap_m],
                     vec![1.0],
                     5000.0,
                     1.0,
@@ -563,7 +572,11 @@ fn fiber_tension_participates_in_the_simultaneous_normal_load_and_friction_solve
             gate,
         )
         .unwrap()
-    });
+}
+
+#[test]
+fn fiber_tension_participates_in_the_simultaneous_normal_load_and_friction_solve() {
+    scoped_normal(|cx, gate, tension| normal_fiber_bank(cx, gate, tension, -1e-6));
 }
 
 fn scoped_normal(make: impl Fn(&Cx<'_>, &CancelGate, f64) -> MultiBowStringBank) {

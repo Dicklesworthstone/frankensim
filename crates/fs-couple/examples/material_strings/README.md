@@ -252,14 +252,22 @@ hide an out-of-domain endpoint. These sampled checks do not certify unsampled
 continuous-time extrema. Endpoint columns reserve `2 * modes * ports` additional
 terms within the same explicit map-work budget.
 
-This motion rung presently accepts prescribed normal loads and dry friction.
-Normal contacts on hair, contact-loaded bows and retained rosin/thermal patches
-require spatial history transport and still refuse. The native mechanical ledger
+This motion rung accepts prescribed loads or the solved reactions of canonical
+normal fiber contacts, with dry friction. The normal receiver follows the same
+moving material crossing as the tangent. The original unilateral contact law
+resolves indentation and release, so separation releases friction automatically;
+there is no independent force envelope for a contact-loaded bow. Arbitrary
+authored normal receiver rows and retained rosin/thermal patches still refuse.
+The native mechanical ledger
 is in the accelerating support frame, with inertial-force work included in
 external work. `FiberSupportFrame` also reports laboratory mechanical energy
 and physical support work. It adds the rigid-translation kinetic energy and
 the cross term between support velocity and the original fibers' modal momentum;
-coordinate inertia work is never classified as frictional heat.
+coordinate inertia work is never classified as frictional heat. Normal work
+from migration along the fibers is included in physical support work and exposed
+as `normal_attachment_work_j`. That share is already in native `obstacle_work_j`:
+subtract it when combining the native accounts with laboratory support work.
+String-side contact migration and normal indentation keep their separate work.
 
 For a continuous acceleration or reversal, use this alternative record followed
 by velocity endpoints on the original mechanical sample clock:
@@ -280,8 +288,9 @@ fiber_speed 384 0
 
 Velocity varies linearly between declared endpoints, and holds its final value
 after the last knot. Sample 1 is the end of the first physical interval. The
-original bow track must have zero tangential speeds and continues to prescribe
-normal load. The program supplies endpoint velocities to the **same** support
+original bow track must have zero tangential speeds. It prescribes normal load
+only for unbound contacts; contact-loaded bows require zero authored load and
+use their solved normal reaction. The program supplies endpoint velocities to the **same** support
 inertia and moving-contact owner as `bow_fiber_motion`; choosing both refuses.
 Velocity, acceleration, translation at reversal extrema, and held final travel
 are checked before playback. The finite material hair span is also enforced by

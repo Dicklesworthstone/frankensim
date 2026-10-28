@@ -30,7 +30,7 @@ pub enum StringStopSide {
     Along(TransverseDirection),
 }
 impl StringStopSide {
-    fn sign(self) -> f64 {
+    pub(super) fn sign(self) -> f64 {
         match self { Self::Positive | Self::Along(_) => 1.0, Self::Negative => -1.0 }
     }
 }
@@ -102,6 +102,9 @@ impl MultiBowStringBank {
     {
         if gate.is_requested() { return Err(RenderError::Coupled(ModalCouplingError::Cancelled)); }
         if stops.is_empty() { return Ok(self); }
+        if self.fiber_support_motion_limits().is_some() {
+            return Err(error("normal stops bind before fiber support motion"));
+        }
         if !self.source.stops.is_empty() || self.system.samples_rendered() != 0
             || !(1..=32).contains(&limits.max_contacts) || stops.len() > limits.max_contacts
             || stops.len()+self.system.port_count() > 64 {

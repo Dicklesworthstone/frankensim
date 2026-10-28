@@ -351,6 +351,51 @@ fn moving_fiber_contact_patch_uses_source_materials_and_the_original_wav_path() 
 }
 
 #[test]
+fn accelerating_fibers_keep_solved_normal_loads_through_input_and_pcm_output() {
+    scoped(|cx, gate| {
+        let text = include_str!("../fiber-contact.material-strings")
+            .replace("48000 4096", "48000 256")
+            .replace("initial\tbow\t1e-2\t", "initial\tbow\t0\t")
+            .replace("forces retain", concat!(
+                "bow_fiber_program 0 0.1 20 0.01 1048576 3\n",
+                "fiber_speed 64 0.01\nfiber_speed 128 -0.01\nfiber_speed 192 0\n",
+                "forces retain"));
+        let profile = include_str!("../fiber-contact.stops");
+        let build = |density| input::Spec::parse(text.as_bytes()).unwrap().compile_with_profiles(
+            cx, gate, None, Some(crate::stops::Profile::parse(profile.as_bytes()).unwrap()),
+            |name| Ok(if name == "fiber.fsmatpk" { fiber_pack(density, false) }
+                else { pack(name, 7800.0, 200_000.0, None) }),
+        ).unwrap();
+        let mut run = build(1300.0);
+        let mut output = Vec::new();
+        let mut normal_work = 0.0;
+        let mut loaded = false;
+        for _ in 0..256 {
+            let mut sample = [0.0];
+            run.performance.block(&mut sample).unwrap();
+            output.push(sample[0]);
+            normal_work += run.performance.fiber_support_frame().unwrap().normal_attachment_work_j.abs();
+            let system = run.performance.bank().system();
+            for (bow, normal) in system.last_frame().unwrap().ports.iter()
+                .zip(system.last_obstacle_frames().unwrap()) {
+                assert_eq!(bow.normal_force_n, normal.normal_force_n);
+                loaded |= bow.normal_force_n > 0.0;
+            }
+        }
+        assert!(loaded && normal_work > 0.0 && output.iter().any(|x| x.abs() > 1e-12));
+        assert_eq!(output, pressure(&mut build(1300.0), 37));
+        assert!(output.iter().zip(pressure(&mut build(5200.0), 128)).any(|(a, b)| (a-b).abs() > 1e-12));
+        let mut wav = build(1300.0);
+        let (bytes, summary) = wav.write(Cursor::new(Vec::<u8>::new()), gate).unwrap();
+        let (expected, clips) = fs_couple::pcm_wav::encode_pcm16_wav(
+            &output, wav.spec.rate, wav.spec.full_scale,
+        ).unwrap();
+        assert_eq!(bytes.into_inner(), expected);
+        assert_eq!(summary.clipped_samples, clips as u64);
+    });
+}
+
+#[test]
 fn fiber_tension_and_surface_clearance_change_load_and_sound_without_rewriting_physics() {
     scoped(|cx, gate| {
         let profile = include_str!("../fiber-contact.stops");
