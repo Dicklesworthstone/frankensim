@@ -3,6 +3,8 @@
 //! an endpoint. No newly received species can leave again within this interval.
 /// Pressure restrictions and molecular mixing share one inventory update.
 pub mod transport;
+/// External phases share the original gas budgets and caloric reconstruction.
+pub mod boundary;
 
 use super::super::snapshot::{MAX_SNAPSHOT_PARCELS, MAX_SNAPSHOT_TRANSFERS};
 use super::{
@@ -14,6 +16,7 @@ use crate::thermochemical_gas::energy::updated_point;
 use fs_qty::Temperature;
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 use std::collections::{BTreeMap, BTreeSet};
+use boundary::{SpeciesNetworkBoundary, SpeciesNetworkBoundaryFlux};
 
 /// Nonnegative integrated mass of ONE species, not the whole donor mixture.
 #[derive(Clone, Debug, PartialEq)]
@@ -92,7 +95,11 @@ pub struct SpeciesNetworkStep {
     /// Nonzero combined edges in ascending parcel-pair order; endpoints are
     /// canonical ascending IDs and the retained heat may have either sign.
     pub heat: Vec<SpeciesNetworkHeatTransfer>,
+    /// External source streams in owner-ID/species order. Opposite phase
+    /// storage must be accounted by the enclosing coupled owner.
+    pub boundaries: Vec<SpeciesNetworkBoundaryFlux>,
     pub parcels: Vec<SpeciesNetworkParcelStep>,
+    /// Actual gas mass change minus the declared external net mass.
     pub total_mass_residual_kg: f64,
     pub maximum_species_mass_residual_kg: f64,
     /// Sum of local original-caloric residuals after conserved species datums
@@ -136,6 +143,9 @@ struct Budget {
     incoming: BTreeSet<u64>,
     mass_in: Sum,
     mass_out: Sum,
+    boundary_mass_in: Sum,
+    boundary_mass_out: Sum,
+    boundary_delta_mass: Sum,
     sensible_enthalpy: Sum,
     heat: Sum,
     relative_energy: Sum,
@@ -220,14 +230,33 @@ pub fn exchange_candidate_with_heat(
     heat: &[SpeciesNetworkHeatTransfer],
     endpoints: &BTreeMap<u64, GasEnergySolve>,
     controls: SpeciesNetworkSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<SpeciesNetworkCandidate, Error> {
+    exchange_candidate_with_boundaries(parcels, transfers, heat, &[], endpoints, controls, cancelled)
+}
+
+/// Joint gas/gas and external-phase exchange on one original snapshot.
+/// Every boundary's gross uptake joins every internal donor allowance BEFORE
+/// one original-caloric inversion per gas. Incoming/desorbed mass cannot fund
+/// outgoing flow. Gas-only entropy is not asserted for this open subsystem;
+/// an enclosing owner must audit its actual finite external phase endpoints.
+pub fn exchange_candidate_with_boundaries(
+    parcels: &BTreeMap<u64, ClosedGasParcel>,
+    transfers: &[SpeciesNetworkTransfer],
+    heat: &[SpeciesNetworkHeatTransfer],
+    boundaries: &[SpeciesNetworkBoundary<'_>],
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    controls: SpeciesNetworkSolve,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<SpeciesNetworkCandidate, Error> {
     check(&mut cancelled)?;
+    let boundary_work = boundary::work_count(boundaries)?;
     if parcels.is_empty()
         || parcels.len() > MAX_SNAPSHOT_PARCELS
         || transfers
             .len()
             .checked_add(heat.len())
+            .and_then(|n| n.checked_add(boundary_work))
             .is_none_or(|n| n > MAX_SNAPSHOT_TRANSFERS)
         || !parcels.keys().eq(endpoints.keys())
         || !positive(controls.maximum_species_fraction)
@@ -405,6 +434,7 @@ pub fn exchange_candidate_with_heat(
             heat_left_to_right_j: value,
         });
     }
+    let external = boundary::accumulate(parcels, boundaries, &mut budgets, controls, &mut cancelled)?;
     // Check aggregate donor allowances before the first nonlinear material solve.
     let mut originals = BTreeMap::new();
     for (&id, budget) in &budgets {
@@ -474,8 +504,15 @@ pub fn exchange_candidate_with_heat(
             portions.push((original.model(), original.mass_kg()));
             catalog_mass.add(original.mass_kg()).map_err(map)?;
         }
+        if let Some(catalogs) = external.catalogs.get(&id) {
+            for &catalog in catalogs {
+                check(&mut cancelled)?;
+                portions.push((catalog, old.mass_kg()));
+                catalog_mass.add(old.mass_kg()).map_err(map)?;
+            }
+        }
         let catalog = mixed_model_from_portions(&portions, catalog_mass.value).map_err(map)?;
-        let delta_mass = budget.mass_in.value - budget.mass_out.value;
+        let delta_mass = (budget.mass_in.value - budget.mass_out.value) + budget.boundary_delta_mass.value;
         let mass = old.mass_kg() + delta_mass;
         if !positive(mass) {
             return Err(Error::Invalid(
@@ -594,10 +631,15 @@ pub fn exchange_candidate_with_heat(
         }
         total_mass.add(dm).map_err(map)?;
         total_energy.add(er).map_err(map)?;
+        let incoming_mass_kg = budget.mass_in.value + budget.boundary_mass_in.value;
+        let outgoing_mass_kg = budget.mass_out.value + budget.boundary_mass_out.value;
+        if !incoming_mass_kg.is_finite() || !outgoing_mass_kg.is_finite() {
+            return Err(Error::Invalid("combined gross gas mass reports overflowed"));
+        }
         accounts.push(SpeciesNetworkParcelStep {
             id,
-            incoming_mass_kg: budget.mass_in.value,
-            outgoing_mass_kg: budget.mass_out.value,
+            incoming_mass_kg,
+            outgoing_mass_kg,
             net_enthalpy_j: net_enthalpy.value,
             net_additional_heat_j: budget.heat.value,
             energy_change_j: du,
@@ -607,6 +649,11 @@ pub fn exchange_candidate_with_heat(
             iterations,
         });
         next.insert(id, new);
+    }
+    total_mass.add(-external.mass.value).map_err(|e| material(0, e))?;
+    for (species, amount) in &external.species {
+        global_species.entry(species.clone()).or_default()
+            .add(-amount.value).map_err(|e| material(0, e))?;
     }
     let maximum = global_species
         .values()
@@ -626,6 +673,7 @@ pub fn exchange_candidate_with_heat(
         step: SpeciesNetworkStep {
             fluxes,
             heat: heat_fluxes,
+            boundaries: external.fluxes,
             parcels: accounts,
             total_mass_residual_kg: total_mass.value,
             maximum_species_mass_residual_kg: maximum,
