@@ -8,6 +8,9 @@
 pub mod source;
 /// Ordered two-surface thermal conditions shared by interface physics.
 pub mod interface;
+/// Original caloric charts restricted to their actual all-solid phase interval.
+pub mod solid;
+pub use solid::PureSolidThermalLaw;
 
 use crate::phase::EquilibriumEnthalpyPhaseCurve;
 use fs_thermal::enthalpy::{DepositionError, ThermalLaw};
