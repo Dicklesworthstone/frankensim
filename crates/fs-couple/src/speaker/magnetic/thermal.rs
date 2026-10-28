@@ -15,7 +15,7 @@
 //! Suspension, compact radiation and panel losses leave this represented
 //! system through an explicit mechanical/acoustic sink; they are NOT coil heat.
 
-use super::{MagneticTsDriver, SpeakerError};
+use super::{MagneticTsDriver, PanelMode, SpeakerError, TsCard, VoiceCoilMagnetics};
 use crate::circuit_enthalpy::{
     CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, DrivenCoefficients,
     DriverAccount, ThermalDriver, cell_driver_candidate,
@@ -24,6 +24,7 @@ use crate::circuit_enthalpy::{
     },
 };
 use fs_material::conductor::{ElectricalPropertyBasis, ResolvedConductor};
+use fs_material::gas::GasState;
 use fs_phs::{StepRecord, discrete_gradient};
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation};
 use std::{cell::RefCell, collections::BTreeMap, sync::Arc};
@@ -57,6 +58,80 @@ fn invalid(what: &'static str) -> Error {
     CircuitEnthalpyError::Invalid(what)
 }
 
+/// Mechanical inputs independent of the source-defined electrical coil.
+///
+/// The non-coil mass includes the cone, former and other moving parts, but
+/// excludes both the coil and the native acoustic added mass. Suspension,
+/// damping and piston geometry remain explicit model inputs; coil composition
+/// does not imply any of them or a permanent-magnet constitutive law.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpeakerMechanics {
+    /// Finite nonnegative moving mass excluding the whole electrical coil [kg].
+    pub non_coil_moving_mass_kg: f64,
+    /// Suspension compliance [m/N].
+    pub cms_m_per_n: f64,
+    /// Mechanical loss [N s/m], not electrical heating.
+    pub rms_n_s_m: f64,
+    /// Effective piston area [m²].
+    pub sd_m2: f64,
+    /// Linear suspension excursion limit [m].
+    pub x_max_m: f64,
+}
+
+// Both new-specimen construction and continuing-state binding admit the same
+// whole-cell geometry, original source pins and frozen solid mass inventory.
+fn prepare_coil<'n, 'a>(
+    thermal: &DepositionSimulation<'_>,
+    network: &'n MaterialNetwork<'a>,
+    basis: ElectricalPropertyBasis,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<
+    (
+        PreparedMaterialNetwork<'n, 'a>,
+        CellId,
+        ResolvedConductor,
+        f64,
+    ),
+    Error,
+> {
+    if cancelled() {
+        return Err(CircuitEnthalpyError::Cancelled);
+    }
+    if network.resistors.len() != 1 || network.resistors[0].destination.branch != 0 {
+        return Err(invalid("one whole-cell coil binding at branch 0 required"));
+    }
+    let prepared = network
+        .prepare_with_bases(thermal, &[(0, basis)], &mut *cancelled)
+        .map_err(material)?;
+    let coil_cell = network.resistors[0].destination.cell;
+    let cell = &thermal.cells()[&coil_cell];
+    let binding = network
+        .cells
+        .iter()
+        .find(|b| b.cell == coil_cell)
+        .ok_or_else(|| invalid("coil lacks its original caloric binding"))?;
+    let density = cell.mass_kg / cell.geometry.volume_m3;
+    if !density.is_finite()
+        || density <= 0.0
+        || binding.curve.knots().iter().any(|k| {
+            k.liquid_mass_fraction != 0.0
+                || (k.bulk_density_kg_m3 - density).abs() > 1e-10 * density
+        })
+    {
+        return Err(invalid(
+            "coil requires fixed solid density and unchanged matter",
+        ));
+    }
+    let mut initial = prepared
+        .resolve(thermal, &mut *cancelled)
+        .map_err(material)?;
+    let coil = initial.resistors.remove(0).conductor;
+    if cancelled() {
+        return Err(CircuitEnthalpyError::Cancelled);
+    }
+    Ok((prepared, coil_cell, coil, cell.mass_kg))
+}
+
 /// One native electrical/mechanical work record with physically separated losses.
 #[derive(Clone, Debug)]
 pub struct MagneticSpeakerThermalStep {
@@ -83,9 +158,74 @@ pub struct ThermalMagneticTsDriver<'n, 'a> {
     prepared: Arc<PreparedMaterialNetwork<'n, 'a>>,
     coil_cell: CellId,
     coil: ResolvedConductor,
+    coil_mass_kg: f64,
 }
 
 impl<'n, 'a> ThermalMagneticTsDriver<'n, 'a> {
+    /// Construct a material-defined coil and a new mechanical state at rest.
+    ///
+    /// Initial Re and coil inertia come from the SAME prepared material network,
+    /// caloric cell and whole-cell conductor geometry. Total dry moving mass is
+    /// that original cell mass plus `non_coil_moving_mass_kg`; the native driver
+    /// separately adds the supplied gas's acoustic load. Bl and Le at zero are
+    /// taken directly from the original magnetic profile, with no duplicated
+    /// card parameters to become stale under substitution.
+    ///
+    /// Motion starts at rest at the supplied thermal clock. This creates a new
+    /// specimen, not a momentum-conserving replacement of a moving coil. Use
+    /// [`Self::step_candidate`] to continue its physical history, or [`Self::bind`]
+    /// to attach an already-running native driver without resetting its state.
+    /// The original solid-density, source-domain and excursion limits apply;
+    /// heating updates R(T), not coil geometry, mass or magnetic profiles.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_material(
+        mechanics: SpeakerMechanics,
+        box_volume_m3: Option<f64>,
+        panel: Option<PanelMode>,
+        gas: GasState,
+        profile: VoiceCoilMagnetics,
+        thermal: &DepositionSimulation<'_>,
+        network: &'n MaterialNetwork<'a>,
+        basis: ElectricalPropertyBasis,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        if cancelled() {
+            return Err(CircuitEnthalpyError::Cancelled);
+        }
+        if !mechanics.non_coil_moving_mass_kg.is_finite() || mechanics.non_coil_moving_mass_kg < 0.0
+        {
+            return Err(invalid(
+                "non-coil moving mass must be finite and nonnegative",
+            ));
+        }
+        let (prepared, coil_cell, coil, coil_mass_kg) =
+            prepare_coil(thermal, network, basis, &mut cancelled)?;
+        let origin = profile.sample(0.0).map_err(speaker)?;
+        let card = TsCard {
+            re_ohm: coil.resistance_ohm(),
+            le_h: origin.inductance_h,
+            bl: origin.force_factor_tm,
+            mms_kg: mechanics.non_coil_moving_mass_kg + coil_mass_kg,
+            cms_m_per_n: mechanics.cms_m_per_n,
+            rms_n_s_m: mechanics.rms_n_s_m,
+            sd_m2: mechanics.sd_m2,
+            x_max_m: mechanics.x_max_m,
+        };
+        let mut driver = MagneticTsDriver::new_with_gas(card, box_volume_m3, panel, gas, profile)
+            .map_err(speaker)?;
+        driver.time_s = thermal.time_s();
+        if cancelled() {
+            return Err(CircuitEnthalpyError::Cancelled);
+        }
+        Ok(Self {
+            driver,
+            prepared: Arc::new(prepared),
+            coil_cell,
+            coil,
+            coil_mass_kg,
+        })
+    }
+
     /// Bind a driver to actual thermal/material history at its current clock.
     ///
     /// `network` must contain exactly one CellResistor, with branch 0 denoting
@@ -106,41 +246,16 @@ impl<'n, 'a> ThermalMagneticTsDriver<'n, 'a> {
         if cancelled() {
             return Err(CircuitEnthalpyError::Cancelled);
         }
-        if driver.time_s().to_bits() != thermal.time_s().to_bits()
-            || network.resistors.len() != 1
-            || network.resistors[0].destination.branch != 0
-        {
+        if driver.time_s().to_bits() != thermal.time_s().to_bits() {
+            return Err(invalid("matching speaker/thermal clocks required"));
+        }
+        let (prepared, coil_cell, coil, coil_mass_kg) =
+            prepare_coil(thermal, network, basis, &mut cancelled)?;
+        if coil_mass_kg > driver.card.mms_kg * (1.0 + 1e-10) {
             return Err(invalid(
-                "matching speaker/thermal clocks and one coil binding at branch 0 required",
+                "coil mass must fit within the original moving assembly",
             ));
         }
-        let prepared = network
-            .prepare_with_bases(thermal, &[(0, basis)], &mut cancelled)
-            .map_err(material)?;
-        let coil_cell = network.resistors[0].destination.cell;
-        let cell = &thermal.cells()[&coil_cell];
-        let binding = network
-            .cells
-            .iter()
-            .find(|b| b.cell == coil_cell)
-            .ok_or_else(|| invalid("coil lacks its original caloric binding"))?;
-        let density = cell.mass_kg / cell.geometry.volume_m3;
-        if !density.is_finite()
-            || density <= 0.0
-            || cell.mass_kg > driver.card.mms_kg * (1.0 + 1e-10)
-            || binding.curve.knots().iter().any(|k| {
-                k.liquid_mass_fraction != 0.0
-                    || (k.bulk_density_kg_m3 - density).abs() > 1e-10 * density
-            })
-        {
-            return Err(invalid(
-                "coil requires fixed solid density and mass within the original moving assembly",
-            ));
-        }
-        let mut initial = prepared
-            .resolve(thermal, &mut cancelled)
-            .map_err(material)?;
-        let coil = initial.resistors.remove(0).conductor;
         if (coil.resistance_ohm() - driver.coil_resistance_ohm()).abs()
             > 1e-12 * driver.coil_resistance_ohm()
         {
@@ -156,6 +271,7 @@ impl<'n, 'a> ThermalMagneticTsDriver<'n, 'a> {
             prepared: Arc::new(prepared),
             coil_cell,
             coil,
+            coil_mass_kg,
         })
     }
 
@@ -172,6 +288,16 @@ impl<'n, 'a> ThermalMagneticTsDriver<'n, 'a> {
     /// Actual receiving thermal cell; only electrical coil loss is deposited.
     pub const fn coil_cell(&self) -> CellId {
         self.coil_cell
+    }
+
+    /// Original whole-cell coil mass, retained through thermal continuation [kg].
+    pub const fn coil_mass_kg(&self) -> f64 {
+        self.coil_mass_kg
+    }
+
+    /// Coil plus explicitly authored other moving mass, excluding gas load [kg].
+    pub const fn moving_assembly_mass_kg(&self) -> f64 {
+        self.driver.card.mms_kg
     }
 
     /// Advance voltage, magnetic motion, R(T), finite heat storage and cooling
@@ -208,6 +334,10 @@ impl<'n, 'a> ThermalMagneticTsDriver<'n, 'a> {
         };
         check()?;
         if self.driver.time_s().to_bits() != thermal.time_s().to_bits()
+            || thermal
+                .cells()
+                .get(&self.coil_cell)
+                .is_none_or(|cell| cell.mass_kg.to_bits() != self.coil_mass_kg.to_bits())
             || !target_s.is_finite()
             || target_s <= thermal.time_s()
             || !voltage_v.is_finite()
@@ -219,7 +349,7 @@ impl<'n, 'a> ThermalMagneticTsDriver<'n, 'a> {
             .any(|v| !v.is_finite() || *v < 0.0)
         {
             return Err(invalid(
-                "matching clocks, positive interval and finite voltage/work controls required",
+                "matching clocks and original coil mass, positive interval and finite voltage/work controls required",
             ));
         }
         let initial = self
@@ -289,6 +419,7 @@ impl<'n, 'a> ThermalMagneticTsDriver<'n, 'a> {
                     prepared: Arc::clone(&self.prepared),
                     coil_cell: self.coil_cell,
                     coil,
+                    coil_mass_kg: self.coil_mass_kg,
                 };
                 Ok(DrivenCoefficients {
                     circuit: SpeakerCandidate { driver: next, step },

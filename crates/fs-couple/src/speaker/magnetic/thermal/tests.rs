@@ -35,19 +35,29 @@ fn material(
     basis: ElectricalPropertyBasis,
     upper: f64,
 ) -> (MaterialCard, ResolvedHeatCapacityCurve) {
+    material_with_properties(alpha, basis, upper, 1.0, 1.0)
+}
+
+fn material_with_properties(
+    alpha: f64,
+    basis: ElectricalPropertyBasis,
+    upper: f64,
+    density_kg_m3: f64,
+    resistance_scale: f64,
+) -> (MaterialCard, ResolvedHeatCapacityCurve) {
     let heat = PropertyKey::new("specific_heat_capacity", SPECIFIC_HEAT_CAPACITY_DIMS);
     let density = PropertyKey::new("density", Density::DIMS);
     let electrical = PropertyKey::new(basis.property_name(), basis.dimensions());
     // length/area = 10 m^-1, so either source gives R(300 K)=0.8 ohm.
     let base = if basis == ElectricalPropertyBasis::Resistivity {
-        0.08
+        0.08 * resistance_scale
     } else {
-        12.5
+        12.5 / resistance_scale
     };
     let mut claims = ClaimSet::new();
     for (key, a, b, limit) in [
         (heat.clone(), 1.0, 1.0, 2000.0),
-        (density.clone(), 1.0, 1.0, 2000.0),
+        (density.clone(), density_kg_m3, density_kg_m3, 2000.0),
         (
             electrical,
             base * (1.0 - 100.0 * alpha),
@@ -115,6 +125,20 @@ fn initial(
     temperature: f64,
     htc: f64,
 ) -> DepositionSimulation<'_> {
+    let density = curve
+        .curve()
+        .state_at_specific_enthalpy(temperature - 200.0)
+        .unwrap()
+        .bulk_density_kg_m3();
+    initial_with_mass(curve, temperature, htc, MASS * density)
+}
+
+fn initial_with_mass(
+    curve: &ResolvedHeatCapacityCurve,
+    temperature: f64,
+    htc: f64,
+    mass_kg: f64,
+) -> DepositionSimulation<'_> {
     DepositionSimulation::new(
         vec![TimedEvent {
             time_s: 0.0,
@@ -123,7 +147,7 @@ fn initial(
                 segment_id: 0,
                 body_id: 0,
                 material_id: MaterialId(0),
-                mass_kg: MASS,
+                mass_kg,
                 specific_h_j_kg: temperature - 200.0,
                 geometry: CellGeometry {
                     start_m: [0.0; 3],
@@ -466,4 +490,210 @@ fn source_failure_cancellation_and_work_exhaustion_publish_neither_history() {
     assert_eq!(coupled.driver().x, state);
     assert_eq!(coupled.driver().time_s(), 0.0);
     near(coupled.coil().resistance_ohm(), 0.8, 2e-15);
+}
+
+fn source_mechanics() -> SpeakerMechanics {
+    SpeakerMechanics {
+        non_coil_moving_mass_kg: 0.002,
+        cms_m_per_n: 0.9,
+        rms_n_s_m: 0.1,
+        sd_m2: 0.001,
+        x_max_m: 0.1,
+    }
+}
+
+fn source_profile() -> VoiceCoilMagnetics {
+    VoiceCoilMagnetics::new([-0.05, 0.05], 0.01, [1.2, 0.0, 0.0], [0.006, 0.0, 0.0]).unwrap()
+}
+
+#[test]
+fn source_coil_mass_and_resistance_swaps_reach_native_motion_and_pressure() {
+    let mut first_steps = Vec::new();
+    for (density, resistance_scale, basis) in [
+        (1.0, 1.0, ElectricalPropertyBasis::Resistivity),
+        (4.0, 1.0, ElectricalPropertyBasis::Resistivity),
+        (1.0, 2.0, ElectricalPropertyBasis::Resistivity),
+        (1.0, 1.0, ElectricalPropertyBasis::Conductivity),
+    ] {
+        let (card, curve) = material_with_properties(0.0, basis, 2000.0, density, resistance_scale);
+        let context = point(300.0);
+        let (cells, resistors) = bindings(&card, &curve, &context);
+        let network = MaterialNetwork {
+            cells: &cells,
+            resistors: &resistors,
+            links: &[],
+        };
+        let mut thermal = initial(&curve, 300.0, 0.0);
+        let mechanics = source_mechanics();
+        let mut coupled = ThermalMagneticTsDriver::from_material(
+            mechanics,
+            None,
+            None,
+            crate::speaker::declared_air(),
+            source_profile(),
+            &thermal,
+            &network,
+            basis,
+            || false,
+        )
+        .unwrap();
+        // Independent geometry/source inventory: same length*area in every run.
+        let coil_mass = density * 0.1 * 0.01;
+        let total_mass = mechanics.non_coil_moving_mass_kg + coil_mass;
+        let resistance = 0.08 * resistance_scale * 0.1 / 0.01;
+        near(coupled.coil_mass_kg(), coil_mass, 1e-17);
+        near(coupled.moving_assembly_mass_kg(), total_mass, 1e-17);
+        near(coupled.coil().resistance_ohm(), resistance, 2e-15);
+        near(coupled.driver().card.bl, 1.2, 0.0);
+        near(coupled.driver().card.le_h, 0.006, 0.0);
+        assert_eq!(
+            coupled.coil().material().card_identity(),
+            card.content_hash()
+        );
+
+        let mut native = MagneticTsDriver::new_with_gas(
+            TsCard {
+                re_ohm: resistance,
+                le_h: 0.006,
+                bl: 1.2,
+                mms_kg: total_mass,
+                cms_m_per_n: 0.9,
+                rms_n_s_m: 0.1,
+                sd_m2: 0.001,
+                x_max_m: 0.1,
+            },
+            None,
+            None,
+            crate::speaker::declared_air(),
+            source_profile(),
+        )
+        .unwrap();
+        for tick in 1..=5 {
+            let (reference, pressure) = native.step(0.05, 0.001).unwrap();
+            let proposal = coupled
+                .step_candidate(
+                    &thermal,
+                    f64::from(tick) * 0.001,
+                    0.05,
+                    controls(),
+                    &[0.0],
+                    || false,
+                )
+                .unwrap();
+            for (&actual, &expected) in proposal
+                .report()
+                .electrical
+                .native
+                .x
+                .iter()
+                .zip(&reference.x)
+            {
+                near(actual, expected, 3e-13);
+            }
+            near(proposal.report().electrical.pressure_pa, pressure, 1e-12);
+            near(proposal.report().total_energy_residual_j, 0.0, 2e-9);
+            if tick == 1 {
+                first_steps.push([
+                    proposal.driver().driver().coil_current_a(),
+                    proposal.driver().driver().excursion_m(),
+                    proposal.report().electrical.pressure_pa,
+                ]);
+            }
+            let (next_thermal, next_driver, _) = proposal.into_parts();
+            thermal = next_thermal;
+            coupled = next_driver;
+            near(coupled.coil_mass_kg(), coil_mass, 1e-17);
+            if tick == 2 {
+                // Rebinding accepted nonzero motion must preserve linkage,
+                // momentum, displacement and clock, not recreate a cold driver.
+                let state = coupled.driver().x.clone();
+                coupled = ThermalMagneticTsDriver::bind(
+                    coupled.driver,
+                    &thermal,
+                    &network,
+                    basis,
+                    || false,
+                )
+                .unwrap();
+                assert_eq!(coupled.driver().x, state);
+                assert_eq!(coupled.driver().time_s(), thermal.time_s());
+            }
+        }
+    }
+    let [base, dense, resistive, conductivity] = first_steps.as_slice() else {
+        panic!("all four source substitutions must run");
+    };
+    assert!((dense[0] - base[0]).abs() > 1e-8); // Reciprocal back EMF also changes.
+    assert!(dense[1] > 0.0 && dense[1] < 0.75 * base[1]);
+    assert!(dense[2] > 0.0 && dense[2] < 0.75 * base[2]);
+    for axis in 0..3 {
+        assert!(resistive[axis] > 0.0 && resistive[axis] < base[axis]);
+        near(conductivity[axis], base[axis], 1e-12);
+    }
+}
+
+#[test]
+fn material_construction_preserves_thermal_clock_and_refuses_stale_coil_mass() {
+    let (card, curve) = material(0.0, ElectricalPropertyBasis::Resistivity, 2000.0);
+    let context = point(300.0);
+    let (cells, resistors) = bindings(&card, &curve, &context);
+    let network = MaterialNetwork {
+        cells: &cells,
+        resistors: &resistors,
+        links: &[],
+    };
+    let thermal = initial(&curve, 300.0, 0.0);
+    let make = |mechanics, thermal: &DepositionSimulation<'_>, cancel| {
+        ThermalMagneticTsDriver::from_material(
+            mechanics,
+            None,
+            None,
+            crate::speaker::declared_air(),
+            source_profile(),
+            thermal,
+            &network,
+            ElectricalPropertyBasis::Resistivity,
+            move || cancel,
+        )
+    };
+    let coupled = make(source_mechanics(), &thermal, false).unwrap();
+    let saved = thermal.cells().clone();
+    for mass in [-0.1, f64::NAN, f64::INFINITY] {
+        let mut mechanics = source_mechanics();
+        mechanics.non_coil_moving_mass_kg = mass;
+        assert!(make(mechanics, &thermal, false).is_err());
+    }
+    assert!(matches!(
+        make(source_mechanics(), &thermal, true),
+        Err(CircuitEnthalpyError::Cancelled)
+    ));
+    let changed_mass = initial_with_mass(&curve, 300.0, 0.0, 2.0 * MASS);
+    assert!(make(source_mechanics(), &changed_mass, false).is_err());
+    assert!(matches!(
+        coupled.step_candidate(&changed_mass, 0.001, 0.05, controls(), &[0.0], || false,),
+        Err(CircuitEnthalpyError::Invalid(_))
+    ));
+    assert_eq!(thermal.cells(), &saved);
+    assert_eq!(coupled.driver().stored_energy_j(), 0.0);
+
+    let advanced = thermal
+        .advance_to(
+            0.01,
+            StepConfig {
+                max_dt_s: 0.01,
+                energy_tolerance_j: 1e-10,
+            },
+            || Ok(()),
+        )
+        .unwrap()
+        .0;
+    let fresh = make(source_mechanics(), &advanced, false).unwrap();
+    assert_eq!(fresh.driver().time_s(), 0.01);
+    assert_eq!(fresh.driver().stored_energy_j(), 0.0);
+    assert_eq!(fresh.driver().coil_current_a(), 0.0);
+    let next = fresh
+        .step_candidate(&advanced, 0.011, 0.05, controls(), &[0.0], || false)
+        .unwrap();
+    assert_eq!(next.driver().driver().time_s(), 0.011);
+    assert!(next.driver().driver().excursion_m() > 0.0);
 }
