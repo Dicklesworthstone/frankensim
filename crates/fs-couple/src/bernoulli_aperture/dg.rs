@@ -24,6 +24,9 @@ use crate::dg_port::{DgTerminalFrame, sum_terminal_work};
 
 /// Original single, paired and material-modal sources on the shared DG load.
 pub mod loaded;
+mod tract;
+/// Actual upstream tract exchange and cold preparation of the series load.
+pub use tract::{DgTractFrame, series_inlet_state};
 /// Independent blades or material modes on the same DG pressure/work coupling.
 pub use loaded::LoadedApertureDg;
 
@@ -44,6 +47,9 @@ pub struct DgApertureFrame {
     pub spatial_pressure: [MaterialPressureFrame; 2],
     /// External mean ports and summed original bore/branch propagation ledgers.
     pub duct: DgStepOutput,
+    /// Optional original upstream tract. Its inlet points away from the valve;
+    /// its work and terminal exchange are included once in the total accounts.
+    pub upstream: Option<DgTractFrame>,
     /// Mechanical, contact, material, acoustic, and wall-memory storage [J].
     pub stored_energy_j: f64,
     /// Actual axial outlet exchange, when loaded. This convenience is also in
@@ -57,7 +63,8 @@ pub struct DgApertureFrame {
     /// Aperture loss plus inferred duct loss [J]. This is NOT an independent
     /// wall/terminal heat integral when `duct.ledger.balance_checked` is false.
     pub inferred_total_dissipation_j: f64,
-    /// Upstream pressure work on aperture flow, excluding body-supplied flow [J].
+    /// Prescribed source pressure work on aperture flow, excluding body flow [J].
+    /// With a tract this is SERIES-source work; tract feedback is not a source.
     pub upstream_work_j: f64,
     /// Inlet pressure work on independently supplied body flow [J].
     pub body_work_j: f64,
@@ -71,11 +78,13 @@ impl DgApertureFrame {
     /// a new independent energy certificate.
     #[must_use]
     pub fn balance_residual_j(&self) -> f64 {
-        self.storage_change_j + self.inferred_total_dissipation_j
+        let residual = self.storage_change_j + self.inferred_total_dissipation_j
             + sum_terminal_work(&self.terminals)
             - self.upstream_work_j
             - self.body_work_j
-            - self.aperture.mechanical_work_j
+            - self.aperture.mechanical_work_j;
+        self.upstream.as_ref().map_or(residual,
+            |tract| residual + sum_terminal_work(&tract.terminals))
     }
 }
 
@@ -85,6 +94,7 @@ impl DgApertureFrame {
 pub struct ApertureDg<A = DynamicAperture> {
     aperture: A,
     load: ApertureDgLoad,
+    upstream: Option<ApertureDgLoad>,
 }
 
 impl<A> ApertureDg<A> {
@@ -95,6 +105,10 @@ impl<A> ApertureDg<A> {
     /// Immutable cold source and original exponential metadata.
     #[must_use]
     pub const fn load(&self) -> &ApertureDgLoad { &self.load }
+
+    /// Optional retained upstream tract; its inlet points AWAY from the valve.
+    #[must_use]
+    pub const fn upstream_load(&self) -> Option<&ApertureDgLoad> { self.upstream.as_ref() }
 
     /// Accepted acoustic and memory state; its physical nodal arrays are current.
     #[must_use]
@@ -124,7 +138,7 @@ impl ApertureDg {
                 "DG coupling requires a new ExactZoh aperture bound to its mean inlet-pressure impedance, gas density and clock; driven exterior mouth effort is unsupported",
             ));
         }
-        Ok(Self { aperture, load })
+        Ok(Self { aperture, load, upstream: None })
     }
 
     /// Accepted aperture and DG stored energy [J]. Rational terminal exchange
@@ -223,7 +237,7 @@ fn accept_acoustic_candidate(
     }
     let duct = acoustic.accept();
     Ok(DgApertureFrame {
-        aperture, spatial_pressure, duct, terminal, terminals, stored_energy_j, storage_change_j, inferred_total_dissipation_j,
+        aperture, spatial_pressure, duct, upstream: None, terminal, terminals, stored_energy_j, storage_change_j, inferred_total_dissipation_j,
         upstream_work_j, body_work_j, port_work_residual_j,
     })
 }

@@ -196,3 +196,44 @@ radial motion and returning pressure in the same source-to-microphone path.
 The existing thin cylindrical membrane, frozen material state and linear
 acoustic limits remain; this does not resolve axial shell waves or exterior
 radiation from the solid wall.
+
+## Upstream tract on the material-modal DG source
+
+The optional `upstream_tract` block follows the downstream DG bore and its
+optional material-wall declarations, before `slit_length`. It contains another
+complete `dg_tube` or `dg_bore` source and optional `dg_wall` layout. For example:
+
+```text
+upstream_tract
+dg_tube 0.04 0.001 closed 1 2 8 50 2000 0.01 1e-11 256
+dg_wall isotropic blade.matpack 293.15 100 0.00002 stress-free 50 2000 maxwell 1 1 0.5 boundary_modulus boundary_time
+```
+
+These dimensions are an illustrative source declaration, not a measured vocal
+tract. The shared DG reader also accepts a tapered geometry, axial gas field,
+finite side chimneys, terminal passages, computed exterior reaction and regional
+or chimney material walls. Every source retains its own explicit DG, branch,
+terminal and material budgets. Both loads use the source's mechanical clock.
+Tract, bore and reed material declarations share the same immutable pack cache.
+
+The tract inlet points away from the valve. The same current through-flow leaves
+the tract and enters the bore, including the original work-conjugate swept flow
+of the moving material reed. The two exact mean-port impedances add inside the
+existing nonlinear modal solve. Tract geometry, gas and solid-wall memory
+therefore change the actual blade motion and bore sound. The original one-sided
+source remains unchanged when the block is omitted.
+
+Blowing pressure is an ideal series pressure rise with work `P_source Q dt`;
+tract feedback is never counted as another prescribed source. Both acoustic
+candidates and the original mechanics are validated before any accepted history
+advances. Frames retain the actual pressures, signed work and terminal exchange
+of each side. Inlet-pressure and baffled-outlet observations continue to refer
+to the downstream bore. Upstream terminal radiation is reported in its own
+exchange ledger and is not silently mixed into that microphone.
+
+Both valve-face gas states must match completely; remote gas fields may differ
+at a common equilibrium pressure. This is the existing small-signal series-tract
+approximation, with frozen source composition and held mean flow per step. It
+does not add lungs, transported mixture exchange, live tract shape changes or
+resolved turbulent mouth flow. The original DG inferred-loss qualification and
+independent spatial/time convergence requirements still apply.

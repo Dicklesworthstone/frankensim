@@ -471,7 +471,20 @@ pub(super) fn material_modal_dg_provenance(
     let gas_sources = super::thermochemical::provenance(p.gas_records());
     let radiation = super::duct_metadata::dg_radiation_provenance(load);
     let solid_wall = dg_wall_provenance(p.wall_layout());
-    let source_json = format!("\"material_modal_dg_valve_input\":{{\"schema\":\"frankensim-material-modal-dg-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"mechanics_rate_hz\":{},\"pressure_point\":\"{pressure_point}\",\"material_sources\":[{materials}],\"structural_propagator\":\"exact-zoh\",\"dg_operator_identity\":\"{}\",\"length_m\":{:e},\"inlet_gas\":{inlet},\"outlet_gas\":{outlet},\"model_scope\":\"original regional material plates, signed modal pressure/force projections and retained material memory coupled to the shared exact DG bore; flat DKT and finite-mode interface; nonlinear time and DG spatial convergence require separate refinement; no measured-instrument qualification\"{observation}{radiation}{gas_sources}{solid_wall}}}",
+    let upstream = source.system().upstream_load().map_or_else(String::new, |tract| {
+        let duct = tract.duct();
+        let mesh = duct.mesh();
+        let field = duct.gas_field().map_or_else(String::new, super::duct_metadata::dg_field_provenance);
+        let radiation = super::duct_metadata::dg_radiation_provenance(tract);
+        let wall = dg_wall_provenance(p.upstream_wall_layout()
+            .expect("source-bound upstream DG wall layout"));
+        format!(",\"upstream_tract\":{{\"dg_operator_identity\":\"{}\",\"length_m\":{:e},\"inlet_gas\":{},\"outlet_gas\":{},\"elements\":{},\"order\":{},\"total_dofs\":{},\"scope\":\"same-step original upstream and downstream mean-port laws in the sole material-valve solve; blowing pressure is a series source; matching inlet gases; original upstream terminal exchange stays separate from the downstream microphone\"{field}{radiation}{wall}}}",
+            duct.operator_identity().to_hex(), duct.total_length(),
+            super::duct_metadata::gas_state(duct.inlet_gas()),
+            super::duct_metadata::gas_state(duct.outlet_gas()),
+            mesh.elements, mesh.order, duct.total_dofs())
+    });
+    let source_json = format!("\"material_modal_dg_valve_input\":{{\"schema\":\"frankensim-material-modal-dg-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"mechanics_rate_hz\":{},\"pressure_point\":\"{pressure_point}\",\"material_sources\":[{materials}],\"structural_propagator\":\"exact-zoh\",\"dg_operator_identity\":\"{}\",\"length_m\":{:e},\"inlet_gas\":{inlet},\"outlet_gas\":{outlet},\"model_scope\":\"original regional material plates, signed modal pressure/force projections and retained material memory coupled to the shared exact DG bore; flat DKT and finite-mode interface; nonlinear time and DG spatial convergence require separate refinement; no measured-instrument qualification\"{observation}{radiation}{gas_sources}{solid_wall}{upstream}}}",
         i.input_hash.to_hex(), i.blades, i.modes, i.nodes, i.triangles,
         i.mechanics_rate_hz, load.duct().operator_identity().to_hex(),
         load.duct().total_length());

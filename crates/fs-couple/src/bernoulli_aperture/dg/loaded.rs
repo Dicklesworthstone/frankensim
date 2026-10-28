@@ -44,14 +44,15 @@ impl ApertureDg<LoadedAperture> {
                 "loaded DG coupling requires cold ExactZoh mechanics bound to its inlet gas, mean inlet-pressure impedance and clock; driven exterior mouth effort is unsupported",
             ));
         }
-        Ok(Self { aperture, load })
+        Ok(Self { aperture, load, upstream: None })
     }
 
     /// Mechanical, contact, material and DG storage [J]. The original rational
     /// terminal's signed exchange stays separate from its unmodeled storage.
     #[must_use]
     pub fn stored_energy_j(&self) -> f64 {
-        self.aperture.energy() + self.load.stored_energy_j()
+        let energy = self.aperture.energy() + self.load.stored_energy_j();
+        self.upstream.as_ref().map_or(energy, |tract| energy + tract.stored_energy_j())
     }
 
     /// Continue all original mechanical, acoustic and material histories.
@@ -84,6 +85,9 @@ impl ApertureDg<LoadedAperture> {
         forces_n: [f64; 2],
         pressures_pa: [f64; 2],
     ) -> Result<DgApertureFrame, AcousticRealizeError> {
+        if self.upstream.is_some() {
+            return self.step_with_upstream(drive, forces_n, pressures_pa);
+        }
         let relation = self.load.port_response()?;
         let trial = self.aperture.preview(ApertureDrive {
             upstream_pressure_pa: drive.upstream_pressure_pa,

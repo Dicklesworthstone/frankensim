@@ -7,7 +7,9 @@
 //!
 //! Record order: schema; audio RATE RATE SAMPLES FULL_SCALE_PA;
 //! propagator exact-zoh; ambient GAS_RECORD; shared dg_tube/dg_bore and its
-//! geometry/gas/radiation records; slit_length none|LENGTH; observation
+//! geometry/gas/radiation records and optional material walls; optional
+//! upstream_tract followed by the same DG source/wall records; slit_length
+//! none|LENGTH; observation
 //! inlet-pressure|baffled-outlet X Y Z RINGS ANGLES FMAX_HZ; valve REST_GAP;
 //! limits; contact; loss; blades and original plate records; optional
 //! wetted_surfaces, pressure_shapes, closure, source_forces, source_pressures;
@@ -48,6 +50,7 @@ pub struct MaterialModalDgValvePerformance {
     gases: Vec<GasRecord>,
     ambient: GasState,
     wall: DgMaterialWallLayout,
+    upstream_wall: Option<DgMaterialWallLayout>,
 }
 
 impl MaterialModalDgValvePerformance {
@@ -127,6 +130,45 @@ impl MaterialModalDgValvePerformance {
             declaration.resolve(gate, &mut |path, line|
                 cache.load(path, line, &mut load_material, gate))?
         } else { DgMaterialWallLayout::default() };
+        // The optional tract is another original DG source, not an input
+        // pressure filter. Its inlet points away from the valve. Resolve its
+        // geometry, gas, branches, radiation and walls through the same owners
+        // and immutable material cache as the bore and source plates.
+        let upstream = if rows.lines.clone().next().and_then(|line|
+            line.split_ascii_whitespace().next()) == Some("upstream_tract")
+        {
+            rows.row("upstream_tract")?.finish()?;
+            let kind = if rows.lines.clone().next().and_then(|line|
+                line.split_ascii_whitespace().next()) == Some("dg_tube")
+            {
+                "dg_tube"
+            } else { "dg_bore" };
+            let mut row = rows.row(kind)?;
+            let source = DgSourceInput::read(
+                kind, row.line, &mut row.fields,
+                &mut || {
+                    let row = rows.next()?;
+                    Ok::<_, PlateValveInputError>((row.line, row.fields))
+                },
+                &ambient, gas_sources, &mut gases, gate,
+            )?;
+            row.finish()?;
+            let walls = if rows.lines.clone().next().and_then(|line|
+                line.split_ascii_whitespace().next()) == Some("dg_wall")
+            {
+                let mut row = rows.row("dg_wall")?;
+                let declaration = DgMaterialWallLayoutInput::read(
+                    row.line, &mut row.fields, &mut || {
+                        let row = rows.next()?;
+                        Ok::<_, PlateValveInputError>((row.line, row.fields))
+                    },
+                )?;
+                row.finish()?;
+                declaration.resolve(gate, &mut |path, line|
+                    cache.load(path, line, &mut load_material, gate))?
+            } else { DgMaterialWallLayout::default() };
+            Some((source, walls))
+        } else { None };
         let mut row = rows.row("slit_length")?;
         let slit = optional_positive(&mut row)?;
         row.finish()?;
@@ -201,8 +243,16 @@ impl MaterialModalDgValvePerformance {
         let schedule = super::super::decode_schedule(gestures)?;
         checkpoint(gate)?;
         let load = duct.prepare_with_material_wall_layout(&ambient, dt, gate, &wall)?;
-        let inlet = *load.duct().inlet_gas();
-        let impedance = load.impedance_pa_s_m3();
+        let upstream = upstream.map(|(source, walls)|
+            -> Result<_, PlateValveInputError> {
+                let load = source.prepare_with_material_wall_layout(&ambient, dt, gate, &walls)?;
+                Ok((load, walls))
+            }).transpose()?;
+        let (inlet, impedance) = match &upstream {
+            Some((tract, _)) => crate::bernoulli_aperture::dg::series_inlet_state(tract, &load)
+                .map_err(PlateValveInputError::Physics)?,
+            None => (*load.duct().inlet_gas(), load.impedance_pa_s_m3()),
+        };
         let mut prepared_plates = Vec::with_capacity(plates.len());
         for (source, options) in plates {
             let tensor = if let LossSelection::Tensor { properties, limits: projection } = &loss {
@@ -233,8 +283,15 @@ impl MaterialModalDgValvePerformance {
         if let Some(length) = slit {
             valve.set_material_viscous_slit(length).map_err(PlateValveInputError::Physics)?;
         }
-        let system = LoadedApertureDg::new_loaded(valve, load)
-            .map_err(PlateValveInputError::Physics)?;
+        let (system, upstream_wall) = match upstream {
+            Some((tract, walls)) => (
+                LoadedApertureDg::new_loaded_with_upstream(valve, tract, load)
+                    .map_err(PlateValveInputError::Physics)?,
+                Some(walls),
+            ),
+            None => (LoadedApertureDg::new_loaded(valve, load)
+                .map_err(PlateValveInputError::Physics)?, None),
+        };
         let mut renderer = LoadedDgPerformance::new(system, observation, schedule,
             AperturePerformanceConfig {
                 sample_rate_hz: mechanics, samples, max_block, max_compile_work, max_controls,
@@ -259,7 +316,7 @@ impl MaterialModalDgValvePerformance {
                 mechanics_rate_hz: mechanics, propagator, output_rate_hz: output,
                 samples, full_scale_pa, blades, modes, nodes, triangles,
             },
-            renderer, materials, gases, ambient, wall,
+            renderer, materials, gases, ambient, wall, upstream_wall,
         })
     }
 
@@ -275,6 +332,10 @@ impl MaterialModalDgValvePerformance {
     pub const fn wall_record(&self) -> Option<&DgMaterialWallRecord> { self.wall.uniform_record() }
     /// Original physical wall regions, retaining the shared source artifacts.
     pub const fn wall_layout(&self) -> &DgMaterialWallLayout { &self.wall }
+    /// Original optional tract wall regions, sharing the same material cache.
+    pub const fn upstream_wall_layout(&self) -> Option<&DgMaterialWallLayout> {
+        self.upstream_wall.as_ref()
+    }
     /// Declared default gas; the actual DG inlet/field is retained by the renderer.
     pub const fn ambient_gas(&self) -> &GasState { &self.ambient }
     /// Move the complete accepted physical and scheduling state without a reset.
