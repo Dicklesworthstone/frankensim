@@ -18,6 +18,8 @@ pub mod conductivity;
 pub mod transport;
 /// Source-backed solid/liquid Cp branches joined by one sharp fusion plateau.
 pub mod melting;
+/// Source-backed liquid/vapor coexistence and isobaric heat with expansion work.
+pub mod vaporization;
 /// Fixed-mass calorimetry with explicit constant-pressure boundary work.
 pub mod isobaric {
     //! Fixed-mass calorimetry at a caller-declared constant absolute pressure.

@@ -17,7 +17,33 @@ pub use solid::PureSolidThermalLaw;
 pub mod conduction;
 
 use crate::phase::EquilibriumEnthalpyPhaseCurve;
+use crate::phase::vaporization::IsobaricWaterVaporization;
 use fs_thermal::enthalpy::{DepositionError, ThermalLaw};
+
+// The external constant-pressure load permits expansion/contraction. The
+// thermal kernel's fixed geometry is reference heat-exchange geometry, not a
+// rigid vessel or an automatically updated vapor volume.
+impl ThermalLaw for IsobaricWaterVaporization {
+    fn temperature_k(&self, specific_h_j_kg: f64) -> Result<f64, DepositionError> {
+        self.state_at_specific_enthalpy(specific_h_j_kg)
+            .map(|state| state.temperature_k())
+            .map_err(|_| DepositionError::MaterialDomain)
+    }
+
+    fn maximum_temperature_slope(&self) -> f64 { 0.0 }
+
+    fn specific_entropy_change_j_kg_k(
+        &self, initial_h_j_kg: f64, final_h_j_kg: f64,
+    ) -> Result<Option<f64>, DepositionError> {
+        // Exact integral on the represented h interval. Original-source
+        // absolute entropy endpoints can differ by source roundoff.
+        self.state_at_specific_enthalpy(initial_h_j_kg)
+            .map_err(|_| DepositionError::MaterialDomain)?;
+        let final_state = self.state_at_specific_enthalpy(final_h_j_kg)
+            .map_err(|_| DepositionError::MaterialDomain)?;
+        Ok(Some((final_h_j_kg - initial_h_j_kg) / final_state.temperature_k()))
+    }
+}
 
 impl ThermalLaw for EquilibriumEnthalpyPhaseCurve {
     fn temperature_k(&self, specific_h_j_kg: f64) -> Result<f64, DepositionError> {

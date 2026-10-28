@@ -4015,3 +4015,30 @@ derived density. Positive stretches, volume and density must remain representabl
 an extreme interior refusal publishes no sample and leaves the path unchanged.
 There is no inferred mass transfer, constrained strain, phase law, evolving frame,
 cross-source specimen match or propagated uncertainty.
+
+## Saturated-water boiling and condensation
+
+`phase::vaporization::IsobaricWaterVaporization` binds the original
+`fs-thermochem::water` IAPWS source to a fixed-pressure liquid/vapor enthalpy
+plateau. It evolves actual vapor mass fraction, additive specific volume,
+bulk density, internal energy and entropy; vapor is not represented as liquid.
+The fixed total mass may expand against an external pressure load. The
+returned pressure is the original source evaluation within the caller's
+pressure-inversion tolerance, not a patched target pressure.
+
+Finite heat increments independently audit Q - Delta H and
+Q - Delta U - p Delta V against one explicit absolute joule budget.
+Pressure work, internal energy and entropy changes use the actual represented
+vapor-mass change and the original source's direct phase gaps. Exact requested
+heat to either pure endpoint selects that source endpoint; excess heat still
+refuses rather than extrapolating into subcooling or superheating. Critical
+coalescence, unrepresentable increments and cancellation also refuse.
+
+The existing shared-thermal `ThermalLaw` consumer uses T(h)=T_sat and the exact
+plateau entropy integral Delta h/T_sat. Its geometry is reference heat-exchange
+geometry, not a rigid-vessel constraint or a dynamically updated fluid mesh.
+Real timeline tests cover heating/cooling with ambient loss, finite contact
+between a steam condenser and a lower-pressure boiler, positive heat-transfer
+entropy production, complete phase depletion/reentry and atomic refusal.
+`cargo run -p fs-material --example water_boiling` runs a heating/cooling cycle
+with phase inventory, volume, expansion work and independent energy checks.
