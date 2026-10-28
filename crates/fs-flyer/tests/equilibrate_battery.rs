@@ -220,8 +220,10 @@ fn golden_digest() {
     let d = wright_openloop_v1();
     let t0 = equilibrate(&d, &CANARD_MECH_V1, &spec()).unwrap();
     jlog("golden", &format!("\"digest\":\"{}\"", t0.digest));
+    // Golden bump 2026-10-28: the converged passive hinge-friction solve
+    // changes the mechanical settling history carried into tick zero.
     assert_eq!(
-        t0.digest, "62c7f865c5625edc7c85208b379b658423b0abc81d55f9c48fd0b2c5e4e0cab9",
+        t0.digest, "f302c2ec0c8912a625149d0a5c7187734625f98825e48dcdee32cc228f0dd39d",
         "tick-0 golden moved — determinism regression or an intentional \
          closure change requiring the golden-bump protocol"
     );

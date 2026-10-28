@@ -268,8 +268,147 @@ fn determinism_and_golden() {
         fs_blake3::hash_domain("org.frankensim.fs-flyer.e46bi-golden.v1", &payload).to_hex();
     jlog("golden", &format!("\"digest\":\"{digest}\""));
     assert_eq!(
-        digest, "112479f9beb415ec588ceedca70aad11b3159a86fa0ea2cca992e73bc322186e",
+        // 2026-10-28: converged passive friction/stop solve replaces twelve
+        // unchecked Picard substitutions; the physical trajectory changes.
+        digest,
+        "4d12178e5ff2df74427cf7d4b1ca6b97c65bc6d84901d64b40185275460db4a9",
         "canard-mechanism golden moved — determinism regression or an \
          intentional model change requiring the golden-bump protocol"
+    );
+}
+
+fn mechanical_energy(m: CanardMechanism, state: MechState) -> f64 {
+    let penetration = (state.delta_rad.abs() - m.stop_rad).max(0.0);
+    0.5 * m.inertia_kg_m2 * state.rate_rad_s.powi(2)
+        + 0.5 * m.stop_stiffness_nm_per_rad * penetration.powi(2)
+}
+
+#[test]
+fn stiff_friction_solves_the_positive_sub_coulomb_drift() {
+    // The old twelve Picard substitutions reversed the motion under this
+    // positive load and reported negative dissipation. Independently solve
+    // the scalar momentum balance with the standard-library tanh.
+    let m = CanardMechanism {
+        friction_reg_rad_s: 1e-5,
+        ..CANARD_MECH_V1
+    };
+    let dt = 0.005;
+    let drive = 1.0;
+    let (next, receipt) = m.step(REST, drive, 0.0, dt).unwrap();
+    let mut lower = 0.0;
+    let mut upper = drive * dt / (2.0 * m.inertia_kg_m2);
+    for _ in 0..100 {
+        let middle = 0.5 * (lower + upper);
+        let residual = 2.0 * m.inertia_kg_m2 * middle / dt
+            + m.coulomb_nm * (middle / m.friction_reg_rad_s).tanh()
+            + m.viscous_nm_s * middle
+            - drive;
+        if residual < 0.0 {
+            lower = middle;
+        } else {
+            upper = middle;
+        }
+    }
+    let expected_rate = lower + upper;
+    assert!(next.delta_rad > 0.0 && next.rate_rad_s > 0.0);
+    assert!((next.rate_rad_s - expected_rate).abs() < 1e-13);
+    assert!(receipt.friction_dissipation_j > 0.0);
+    assert_eq!(receipt.stop_dissipation_j, 0.0);
+    let defect =
+        mechanical_energy(m, next) + receipt.friction_dissipation_j - drive * next.delta_rad;
+    assert!(
+        defect.abs() < 1e-15,
+        "stiff friction work defect {defect:e}"
+    );
+}
+
+#[test]
+fn fully_engaged_stop_retains_the_linear_midpoint_solution() {
+    let m = CanardMechanism {
+        coulomb_nm: 0.0,
+        ..CANARD_MECH_V1
+    };
+    let before = MechState {
+        delta_rad: m.stop_rad + 0.04,
+        rate_rad_s: 0.2,
+    };
+    let dt = 0.01;
+    let drive = 3.0;
+    let expected_midpoint = (2.0 * m.inertia_kg_m2 * before.rate_rad_s / dt + drive
+        - m.stop_stiffness_nm_per_rad * (before.delta_rad - m.stop_rad))
+        / (2.0 * m.inertia_kg_m2 / dt
+            + m.viscous_nm_s
+            + m.stop_damping_nm_s
+            + 0.5 * dt * m.stop_stiffness_nm_per_rad);
+    let (after, receipt) = m.step(before, drive, 0.0, dt).unwrap();
+    assert!(after.delta_rad > m.stop_rad);
+    assert!((after.rate_rad_s - (2.0 * expected_midpoint - before.rate_rad_s)).abs() < 1e-13);
+    assert!((after.delta_rad - before.delta_rad - dt * expected_midpoint).abs() < 1e-15);
+    let defect = mechanical_energy(m, after) - mechanical_energy(m, before)
+        + receipt.friction_dissipation_j
+        + receipt.stop_dissipation_j
+        - receipt.drive_work_j;
+    assert!(defect.abs() < 1e-11, "engaged-stop work defect {defect:e}");
+}
+
+#[test]
+fn stop_entry_and_release_close_mechanical_work_on_both_sides() {
+    let m = CANARD_MECH_V1;
+    let dt = 0.02;
+    for sign in [-1.0, 1.0] {
+        for (offset, rate) in [(-0.005, 1.0), (0.01, -1.0)] {
+            let before = MechState {
+                delta_rad: sign * (m.stop_rad + offset),
+                rate_rad_s: sign * rate,
+            };
+            let (after, receipt) = m.step(before, 0.0, 0.0, dt).unwrap();
+            let penetration_before = (before.delta_rad.abs() - m.stop_rad).max(0.0);
+            let penetration_after = (after.delta_rad.abs() - m.stop_rad).max(0.0);
+            if offset < 0.0 {
+                assert!(penetration_after > 0.0, "entry must cross the stop");
+            } else {
+                assert!(
+                    after.delta_rad.abs() < m.stop_rad,
+                    "release must cross the stop"
+                );
+            }
+            // Independent path-length oracle: during either one-sided crossing
+            // the distance spent in contact is exactly the nonzero penetration.
+            let contact_distance = penetration_before + penetration_after;
+            let midpoint_rate = 0.5 * (before.rate_rad_s + after.rate_rad_s);
+            let expected_stop_loss = m.stop_damping_nm_s * midpoint_rate.abs() * contact_distance;
+            assert!((receipt.stop_dissipation_j - expected_stop_loss).abs() < 1e-12);
+            assert!(receipt.friction_dissipation_j >= 0.0 && receipt.stop_dissipation_j >= 0.0);
+            let defect = mechanical_energy(m, after) - mechanical_energy(m, before)
+                + receipt.friction_dissipation_j
+                + receipt.stop_dissipation_j;
+            assert!(defect.abs() < 1e-11, "crossing work defect {defect:e}");
+        }
+    }
+}
+
+#[test]
+fn stiff_unforced_hinge_dissipates_without_invalid_steps() {
+    let m = CanardMechanism {
+        friction_reg_rad_s: 1e-5,
+        ..CANARD_MECH_V1
+    };
+    let mut state = MechState {
+        delta_rad: m.stop_rad + 0.01,
+        rate_rad_s: 0.4,
+    };
+    for _ in 0..100 {
+        let (next, receipt) = m.step(state, 0.0, 0.0, 0.05).unwrap();
+        let before = mechanical_energy(m, state);
+        let after = mechanical_energy(m, next);
+        assert!(after <= before + 1e-11);
+        assert!(receipt.friction_dissipation_j >= 0.0 && receipt.stop_dissipation_j >= 0.0);
+        let defect = after - before + receipt.friction_dissipation_j + receipt.stop_dissipation_j;
+        assert!(defect.abs() < 1e-11, "passive work defect {defect:e}");
+        state = next;
+    }
+    assert_eq!(
+        m.step(REST, f64::MAX, f64::MAX, 0.1).unwrap_err().code,
+        "mech-step-non-finite"
     );
 }

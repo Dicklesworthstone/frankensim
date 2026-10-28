@@ -42,6 +42,19 @@ the browser boundary remains in `fs-flyer-wasm`.
   still perform body/state/timestep/group admission and return that canonical
   state without invoking the load callback.
 
+## Canard hinge friction and stops
+
+`canardmech::step` solves one monotone scalar midpoint-velocity equation
+with a bounded safeguarded Newton/bisection iteration. A successful step
+uses that same velocity for friction, stop damping, and applied work;
+`StepReceipt` exposes all three. The quadratic stop spring uses its discrete
+energy gradient across engagement/release, and stop damping acts over the
+fraction of the configuration path beyond either stop. Mechanical energy
+change plus both losses equals held-drive work to solve/roundoff tolerance.
+The smooth Coulomb law still permits sub-Coulomb creep; exact static sticking
+is not claimed. Non-finite derived steps and unresolved bounded solves refuse
+with `mech-step-non-finite` and `mech-step-unresolved`, respectively.
+
 ## Invariants
 
 - Admission precedes every computation; an unadmitted design cannot produce

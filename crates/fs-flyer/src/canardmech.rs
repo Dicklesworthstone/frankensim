@@ -16,8 +16,11 @@
 //! guesses forbidden; admission-gated). Quantitative hinge-moment levels
 //! remain Estimated (A7a is the only promotion path).
 //!
-//! Integration: deterministic implicit midpoint (stiff-safe for the
-//! stop spring), fixed iteration count — bitwise repeatable.
+//! Integration: a bounded, safeguarded scalar solve for midpoint velocity.
+//! The stop spring uses its discrete energy gradient when a step crosses a
+//! stop; within one contact branch this is ordinary implicit midpoint. Stop
+//! damping acts over the fraction of the step spent beyond either stop.
+//! Friction, stop loss, and drive work use the same accepted velocity.
 
 use crate::Refusal;
 use fs_math::det;
@@ -26,8 +29,8 @@ use fs_math::det;
 /// unknown_priors — admission refuses outside it).
 pub const HINGE_AXIS_PRIOR_PCT: (f64, f64) = (25.0, 50.0);
 
-/// Fixed midpoint iterations (deterministic).
-pub const MIDPOINT_ITERATIONS: u32 = 12;
+/// Maximum safeguarded midpoint iterations (deterministic).
+pub const MIDPOINT_ITERATIONS: u32 = 64;
 
 /// The mechanism parameters.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -83,9 +86,13 @@ pub struct MechState {
 pub struct StepReceipt {
     /// Friction dissipation this step [J] (must be ≥ 0).
     pub friction_dissipation_j: f64,
-    /// Stop torque at the midpoint [N·m] (0 unless penetrating).
+    /// Stop damping dissipation this step [J] (must be ≥ 0).
+    pub stop_dissipation_j: f64,
+    /// Work supplied by the held aero and pilot torques [J].
+    pub drive_work_j: f64,
+    /// Discrete stop torque [N·m], averaged across any stop crossing.
     pub stop_torque_nm: f64,
-    /// Net torque at the midpoint [N·m].
+    /// Net torque at the accepted midpoint velocity [N·m].
     pub net_torque_nm: f64,
 }
 
@@ -135,32 +142,39 @@ impl CanardMechanism {
         Ok(())
     }
 
-    /// Torque at a state (aero + pilot held constant over the step).
-    fn torque(&self, delta: f64, rate: f64, m_aero: f64, pilot_n: f64) -> (f64, f64, f64) {
-        let friction =
-            self.coulomb_nm * det::tanh(rate / self.friction_reg_rad_s) + self.viscous_nm_s * rate;
-        let stop = if delta > self.stop_rad {
-            -self.stop_stiffness_nm_per_rad * (delta - self.stop_rad)
-                - self.stop_damping_nm_s * rate
-        } else if delta < -self.stop_rad {
-            -self.stop_stiffness_nm_per_rad * (delta + self.stop_rad)
-                - self.stop_damping_nm_s * rate
+    /// Friction, stop resistance, stop damping, and their rate derivative.
+    fn resistance(&self, start: f64, rate: f64, dt: f64) -> (f64, f64, f64, f64) {
+        let displacement = dt * rate;
+        let end = start + displacement;
+        let positive = stop_segment(start - self.stop_rad, end - self.stop_rad, displacement);
+        let negative = stop_segment(-start - self.stop_rad, -end - self.stop_rad, -displacement);
+        let spring = self.stop_stiffness_nm_per_rad * (positive.0 - negative.0);
+        let damping = self.stop_damping_nm_s * (positive.1 + negative.1) * rate;
+        let tanh = det::tanh(rate / self.friction_reg_rad_s);
+        let friction = self.coulomb_nm * tanh + self.viscous_nm_s * rate;
+        let friction_slope = self.coulomb_nm * ((1.0 - tanh * tanh) / self.friction_reg_rad_s);
+        let spring_slope = self.stop_stiffness_nm_per_rad * dt * (positive.2 + negative.2);
+        let damping_slope = if end.abs() > self.stop_rad {
+            self.stop_damping_nm_s
         } else {
             0.0
         };
-        // Statement-split (guzez.7.2.1): no fused mul-add.
-        let pilot_nm = pilot_n * self.lever_gain_nm_per_n;
-        let net = m_aero + pilot_nm - friction + stop;
-        (net, friction, stop)
+        (
+            friction,
+            spring + damping,
+            damping,
+            friction_slope + self.viscous_nm_s + spring_slope + damping_slope,
+        )
     }
 
-    /// One implicit-midpoint step. `m_aero_nm` is the coupled-solution
+    /// One passive midpoint/discrete-gradient step. `m_aero_nm` is the coupled-solution
     /// hinge load (E4.2b) held over the step; `pilot_force_n` positive =
     /// pull back = positive pitch command (control-signs-v1).
     ///
     /// # Errors
     /// Admission refusals; `mech-state-invalid` (non-finite state or
-    /// inputs, dt ≤ 0).
+    /// inputs, dt ≤ 0); `mech-step-non-finite` for derived overflow;
+    /// `mech-step-unresolved` if the bounded scalar solve does not converge.
     pub fn step(
         &self,
         state: MechState,
@@ -182,31 +196,116 @@ impl CanardMechanism {
                 ranked_repairs: vec!["check the tick inputs".into()],
             });
         }
-        // Implicit midpoint: x1 = x0 + dt*f((x0+x1)/2), fixed-point
-        // iterated a FIXED count (deterministic; converges for dt well
-        // under the stop-spring period, and the fixed count makes the
-        // result bitwise stable regardless).
-        let (mut d1, mut r1) = (state.delta_rad, state.rate_rad_s);
-        let mut mid = (0.0, 0.0, 0.0);
-        for _ in 0..MIDPOINT_ITERATIONS {
-            let dm = 0.5 * (state.delta_rad + d1);
-            let rm = 0.5 * (state.rate_rad_s + r1);
-            mid = self.torque(dm, rm, m_aero_nm, pilot_force_n);
-            d1 = state.delta_rad + dt_s * rm;
-            r1 = state.rate_rad_s + dt_s * mid.0 / self.inertia_kg_m2;
+        // q1=q0+dt*vm, v1=2*vm-v0 reduces the coupled solve to one
+        // strictly increasing residual: (2I/dt)(vm-v0)+R(vm)-drive.
+        // A fixed number of Picard substitutions is not an implicit solve:
+        // its contraction fails exactly at stiff friction/stops.
+        let inertia_scale = 2.0 * (self.inertia_kg_m2 / dt_s);
+        let drive = m_aero_nm + pilot_force_n * self.lever_gain_nm_per_n;
+        let initial_inertia = inertia_scale * state.rate_rad_s;
+        let at_zero = self.resistance(state.delta_rad, 0.0, dt_s);
+        let residual_zero = at_zero.1 - initial_inertia - drive;
+        // R is monotone, so the inertial-only correction from zero is a
+        // valid opposite endpoint. No unbounded bracket search is needed.
+        let bound = -residual_zero / inertia_scale;
+        if ![inertia_scale, initial_inertia, drive, residual_zero, bound]
+            .iter()
+            .all(|value| value.is_finite())
+            || inertia_scale <= 0.0
+        {
+            return Err(step_refusal("mech-step-non-finite"));
         }
-        let rm = 0.5 * (state.rate_rad_s + r1);
-        let receipt = StepReceipt {
-            friction_dissipation_j: mid.1 * rm * dt_s,
-            stop_torque_nm: mid.2,
-            net_torque_nm: mid.0,
-        };
-        Ok((
-            MechState {
-                delta_rad: d1,
-                rate_rad_s: r1,
-            },
-            receipt,
-        ))
+        let (mut lower, mut upper) = (bound.min(0.0), bound.max(0.0));
+        let mut rate = 0.0;
+        for _ in 0..MIDPOINT_ITERATIONS {
+            let (friction, stop, damping, slope) = self.resistance(state.delta_rad, rate, dt_s);
+            let inertia = inertia_scale * rate;
+            let net = drive - friction - stop;
+            let residual = inertia - initial_inertia - net;
+            if ![friction, stop, damping, inertia, net, residual]
+                .iter()
+                .all(|value| value.is_finite())
+            {
+                return Err(step_refusal("mech-step-non-finite"));
+            }
+            let scale = inertia
+                .abs()
+                .max(initial_inertia.abs())
+                .max(drive.abs())
+                .max(friction.abs())
+                .max(stop.abs())
+                .max(f64::MIN_POSITIVE);
+            if residual.abs() <= 128.0 * f64::EPSILON * scale {
+                let displacement = dt_s * rate;
+                let next = MechState {
+                    delta_rad: state.delta_rad + displacement,
+                    rate_rad_s: 2.0 * rate - state.rate_rad_s,
+                };
+                let receipt = StepReceipt {
+                    friction_dissipation_j: friction * displacement,
+                    stop_dissipation_j: damping * displacement,
+                    drive_work_j: drive * displacement,
+                    stop_torque_nm: -stop,
+                    net_torque_nm: net,
+                };
+                if ![
+                    next.delta_rad,
+                    next.rate_rad_s,
+                    receipt.friction_dissipation_j,
+                    receipt.stop_dissipation_j,
+                    receipt.drive_work_j,
+                ]
+                .iter()
+                .all(|value| value.is_finite())
+                {
+                    return Err(step_refusal("mech-step-non-finite"));
+                }
+                return Ok((next, receipt));
+            }
+            if residual < 0.0 {
+                lower = rate;
+            } else {
+                upper = rate;
+            }
+            let newton = rate - residual / (inertia_scale + slope);
+            rate = if newton.is_finite() && newton >= lower && newton <= upper && newton != rate {
+                newton
+            } else {
+                0.5 * lower + 0.5 * upper
+            };
+        }
+        Err(step_refusal("mech-step-unresolved"))
+    }
+}
+
+/// Discrete gradient of 1/2 max(x,0)^2, contact fraction, and its
+/// derivative with respect to displacement. Factoring the energy difference
+/// avoids subtracting nearly equal squared penetrations. The fractions also
+/// integrate the stop damper along the step's linear configuration path.
+fn stop_segment(start: f64, end: f64, displacement: f64) -> (f64, f64, f64) {
+    if start <= 0.0 && end <= 0.0 {
+        (0.0, 0.0, 0.0)
+    } else if start > 0.0 && end > 0.0 {
+        (0.5 * start + 0.5 * end, 1.0, 0.5)
+    } else if start > 0.0 {
+        let fraction = (-start / displacement).clamp(0.0, 1.0);
+        (0.5 * start * fraction, fraction, 0.5 * fraction * fraction)
+    } else {
+        let fraction = (end / displacement).clamp(0.0, 1.0);
+        (
+            0.5 * end * fraction,
+            fraction,
+            fraction * (1.0 - 0.5 * fraction),
+        )
+    }
+}
+
+fn step_refusal(code: &'static str) -> Refusal {
+    Refusal {
+        code,
+        message: "canard friction/stop step has no finite converged result".into(),
+        ranked_repairs: vec![
+            "reduce the time step or rescale the declared mechanism inputs".into(),
+        ],
     }
 }
