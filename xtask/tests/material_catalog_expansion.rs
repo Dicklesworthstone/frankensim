@@ -85,7 +85,10 @@ fn temperature(point: QueryPoint, name: &str, kelvin: f64) -> QueryPoint {
 }
 
 fn key(name: &str, dims: Dims) -> PropertyKey {
-    let quantity = if name == "thermal-conductivity" {
+    let quantity = if matches!(
+        name,
+        "thermal-conductivity" | "thermal-conductivity-transverse"
+    ) {
         assert_eq!(dims, K);
         QuantitySpec::semantic(SemanticType::new(
             QuantityKind::ThermalConductivity,
@@ -135,14 +138,14 @@ fn refuses(pack: &NormalizedPack, name: &str, dims: Dims, point: &QueryPoint) {
 #[test]
 fn g0_g3_clear_wood_density_stiffness_and_moisture_are_preserved() {
     for (species, count, sg, bending_mpa, rupture_kpa) in [
-        ("pine-loblolly", 19, 0.51, 12300.0, 88000.0),
-        ("pine-longleaf", 19, 0.59, 13700.0, 100000.0),
-        ("pine-slash", 17, 0.59, 13700.0, 112000.0),
-        ("pine-ponderosa", 19, 0.40, 8900.0, 65000.0),
-        ("oak-northern-red", 10, 0.63, 12500.0, 99000.0),
-        ("oak-white", 10, 0.68, 12300.0, 105000.0),
-        ("cedar-northern-white", 19, 0.31, 5500.0, 45000.0),
-        ("fir-subalpine", 18, 0.32, 8900.0, 59000.0),
+        ("pine-loblolly", 21, 0.51, 12300.0, 88000.0),
+        ("pine-longleaf", 21, 0.59, 13700.0, 100000.0),
+        ("pine-slash", 19, 0.59, 13700.0, 112000.0),
+        ("pine-ponderosa", 21, 0.40, 8900.0, 65000.0),
+        ("oak-northern-red", 12, 0.63, 12500.0, 99000.0),
+        ("oak-white", 12, 0.68, 12300.0, 105000.0),
+        ("cedar-northern-white", 21, 0.31, 5500.0, 45000.0),
+        ("fir-subalpine", 20, 0.32, 8900.0, 59000.0),
     ] {
         let pack = compile(&format!("{species}-fpl-gtr282"), count);
         let p = flags(&[
@@ -176,6 +179,63 @@ fn g0_g3_clear_wood_density_stiffness_and_moisture_are_preserved() {
         refuses(&pack, "young_modulus", PA, &p); // no isotropic substitution
         if species.starts_with("oak-") {
             refuses(&pack, "er_over_el", Dims::NONE, &p);
+        }
+
+        // FPL Chapter 4 engineering correlations complete the same species'
+        // thermal inputs. They are estimates at fixed moisture, not added
+        // specimen measurements or permission to treat wood as isotropic.
+        let thermal = p
+            .clone()
+            .with_quantity(
+                "engineering-reference-model",
+                QuantitySpec::dimensional(Dims::NONE),
+                1.0,
+            )
+            .unwrap()
+            .with_quantity(
+                "source-pressure-known",
+                QuantitySpec::dimensional(Dims::NONE),
+                0.0,
+            )
+            .unwrap();
+        for t in [280.0, 297.15, 350.0, 420.0] {
+            let cp = 1000.0
+                * ((0.1031 + 0.003867 * t + 4.18 * 0.12) / 1.12
+                    + 12.0 * (-0.06191 + 0.000236 * t - 0.000133 * 12.0));
+            sample(
+                &pack,
+                "specific-heat-capacity",
+                CP,
+                &temperature(thermal.clone(), "temperature", t),
+                cp,
+            );
+        }
+        let at = temperature(thermal, "temperature", 297.15);
+        sample(
+            &pack,
+            "thermal-conductivity-transverse",
+            K,
+            &at,
+            sg * (0.1941 + 0.004064 * 12.0) + 0.01864,
+        );
+        // No isotropic/longitudinal coefficient or conductivity-temperature
+        // extrapolation is manufactured to complete a solver requirement set.
+        refuses(&pack, "thermal-conductivity", K, &at);
+        for bad in [
+            at.clone().with("temperature", 297.16).unwrap(),
+            at.clone().with("engineering-reference-model", 0.0).unwrap(),
+            at.clone().with("moisture-content", 0.10).unwrap(),
+            at.clone().with("source-pressure-known", 1.0).unwrap(),
+        ] {
+            refuses(&pack, "thermal-conductivity-transverse", K, &bad);
+        }
+        for t in [279.99, 420.01] {
+            refuses(
+                &pack,
+                "specific-heat-capacity",
+                CP,
+                &at.clone().with("temperature", t).unwrap(),
+            );
         }
     }
 }

@@ -2241,3 +2241,20 @@ geriatric and cadaveric; test temperature is unstated in three of the four. No c
 no active stress of the muscle, no tongue and no fingertip value is admitted here: they are UNKNOWN. The
 fold model's per-mass damping ratio of 0.1 in `glottis.rs` has no counterpart in these packs (the cover
 loss factor is a different quantity).
+
+## Clear-wood thermal completion, October 2026
+
+The existing `pine-loblolly`, `pine-longleaf`, `pine-slash`, `pine-ponderosa`,
+`oak-northern-red`, `oak-white`, `cedar-northern-white`, and `fir-subalpine`
+FPL-GTR-282 bundles now also carry `specific-heat-capacity` and
+`thermal-conductivity-transverse`. These are the same handbook's engineering
+correlations from [Chapter 4, equations (4-17)–(4-20)](https://research.fs.usda.gov/download/treesearch/62243.pdf),
+evaluated at fixed 12% dry-basis moisture, with explicit
+`engineering-reference-model=1`, `clear-specimen=1` and
+`source-pressure-known=0` conditions. Cp is affine in absolute temperature
+over 280–420 K. Conductivity uses each bundle's own specific gravity and is
+admitted only at 297.15 K across the grain; it is neither an isotropic value
+nor a temperature-dependent conductivity law. The reported possible 20%
+conductivity variation is retained as a model caveat, not fabricated confidence
+metadata. These additions do not extend the original mechanical data's unknown
+test temperatures, supply a thermal-density law, or qualify graded lumber.
