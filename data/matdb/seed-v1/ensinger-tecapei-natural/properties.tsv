@@ -54,3 +54,28 @@ validity	compression-points	source_temperature_known	0	0	1
 validity	compression-points	source_moisture_condition_known	0	0	1
 validity	compression-points	source_pressure_known	0	0	1
 validity	compression-points	test_speed	8.333333333333333e-5	8.333333333333333e-5	m/s
+observation	longitudinal-clte	TECAPEI natural unfilled PEI stock shapes, international metric dataset	Ensinger 2023-07-19 AF, p. 1 longitudinal CLTE rows, DIN EN ISO 11359-1;2; producer PDF linked by the international product page	The source gives 5, 5 and 6 times 10^-5 K^-1 longitudinal CLTE over 23–60 C, 23–100 C and 100–150 C respectively. Each interval is retained as a separate mean coefficient with its own reference-temperature length: multiplying by that interval gives the endpoint engineering strain relative to that reference length. The 100–150 C result is relative to 100 C, not 23 C. No continuous law, interval stitching, transverse or volumetric expansion, or temperature-dependent density is inferred. Producer comparison guidelines for extruded/machined reference specimens, typically rods of diameter 40–60 mm; not guaranteed limits or batch measurements. Temperature intervals and longitudinal direction are explicit; moisture conditioning, pressure and statistical uncertainty are unstated. The linked PDF retains the same international ISO dataset and density 1.28 g/cm3; no US ASTM population is substituted. Service limits do not widen the interval observations.
+scalar	mean-longitudinal-60c	longitudinal-clte	mean_longitudinal_thermal_expansion_coefficient_from_23c	5e-5	K^-1	constant
+uncertainty	mean-longitudinal-60c	unstated	-	-	-	-
+validity	mean-longitudinal-60c	source_reference_temperature	296.15	296.15	K
+validity	mean-longitudinal-60c	source_range_end_temperature	333.15	333.15	K
+validity	mean-longitudinal-60c	source_grade_tecapei_natural	1	1	1
+validity	mean-longitudinal-60c	source_temperature_known	1	1	1
+validity	mean-longitudinal-60c	source_moisture_condition_known	0	0	1
+validity	mean-longitudinal-60c	source_pressure_known	0	0	1
+scalar	mean-longitudinal-100c	longitudinal-clte	mean_longitudinal_thermal_expansion_coefficient_from_23c	5e-5	K^-1	constant
+uncertainty	mean-longitudinal-100c	unstated	-	-	-	-
+validity	mean-longitudinal-100c	source_reference_temperature	296.15	296.15	K
+validity	mean-longitudinal-100c	source_range_end_temperature	373.15	373.15	K
+validity	mean-longitudinal-100c	source_grade_tecapei_natural	1	1	1
+validity	mean-longitudinal-100c	source_temperature_known	1	1	1
+validity	mean-longitudinal-100c	source_moisture_condition_known	0	0	1
+validity	mean-longitudinal-100c	source_pressure_known	0	0	1
+scalar	mean-longitudinal-150c-from-100c	longitudinal-clte	mean_longitudinal_thermal_expansion_coefficient_from_100c	6e-5	K^-1	constant
+uncertainty	mean-longitudinal-150c-from-100c	unstated	-	-	-	-
+validity	mean-longitudinal-150c-from-100c	source_reference_temperature	373.15	373.15	K
+validity	mean-longitudinal-150c-from-100c	source_range_end_temperature	423.15	423.15	K
+validity	mean-longitudinal-150c-from-100c	source_grade_tecapei_natural	1	1	1
+validity	mean-longitudinal-150c-from-100c	source_temperature_known	1	1	1
+validity	mean-longitudinal-150c-from-100c	source_moisture_condition_known	0	0	1
+validity	mean-longitudinal-150c-from-100c	source_pressure_known	0	0	1

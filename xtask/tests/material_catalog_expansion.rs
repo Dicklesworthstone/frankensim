@@ -621,11 +621,12 @@ fn g0_g3_plastics_keep_grade_test_speed_and_discrete_compression() {
         ("tecason-s-natural", 1240.0, 1200.0, 0.21, 2.7e9),
         ("tecamid-66-natural", 1150.0, 1500.0, 0.36, 3.5e9),
     ] {
-        let expanded = matches!(
-            grade,
-            "tecaform-ah-natural" | "tecamid-6-natural" | "tecapet-white" | "tecaflon-pvdf-natural"
-        );
-        let pack = compile(&format!("ensinger-{grade}"), if expanded { 10 } else { 8 });
+        let count = if matches!(grade, "tecapeek-natural" | "tecapei-natural") {
+            11
+        } else {
+            10
+        };
+        let pack = compile(&format!("ensinger-{grade}"), count);
         let grade_axis = format!("source-grade-{grade}");
         let p = plastic_point(&grade_axis);
         sample(&pack, "density", RHO, &p, rho);
@@ -647,6 +648,81 @@ fn g0_g3_plastics_keep_grade_test_speed_and_discrete_compression() {
             RHO,
             &p.clone().with(&grade_axis, 0.0).unwrap(),
         );
+        if grade == "tecamid-66-natural" {
+            let missing_machining = flags(&[
+                (&grade_axis, 1.0),
+                ("source-temperature-known", 0.0),
+                ("source-moisture-condition-known", 0.0),
+                ("source-pressure-known", 0.0),
+            ]);
+            // All eight original claims share the producer's condition, not
+            // only the newly transcribed thermal-expansion intervals.
+            for (name, dims, value, speed, strain) in [
+                ("density", RHO, 1150.0, None, None),
+                ("thermal-conductivity", K, 0.36, None, None),
+                ("specific-heat-capacity", CP, 1500.0, None, None),
+                (
+                    "tensile-modulus",
+                    PA,
+                    3.5e9,
+                    Some(1.6666666666666667e-5),
+                    None,
+                ),
+                (
+                    "tensile-strength",
+                    PA,
+                    85e6,
+                    Some(8.333333333333334e-4),
+                    None,
+                ),
+                (
+                    "flexural-modulus",
+                    PA,
+                    3.1e9,
+                    Some(3.3333333333333335e-5),
+                    None,
+                ),
+                (
+                    "compression-modulus",
+                    PA,
+                    2.7e9,
+                    Some(8.333333333333333e-5),
+                    None,
+                ),
+                (
+                    "compressive-stress",
+                    PA,
+                    20e6,
+                    Some(8.333333333333333e-5),
+                    Some(0.01),
+                ),
+            ] {
+                let test_conditions = |mut query: QueryPoint| {
+                    if let Some(speed) = speed {
+                        query = query
+                            .with_quantity("test-speed", QuantitySpec::dimensional(SPEED), speed)
+                            .unwrap();
+                    }
+                    if let Some(strain) = strain {
+                        query = query
+                            .with_quantity(
+                                "compressive-strain",
+                                QuantitySpec::dimensional(Dims::NONE),
+                                strain,
+                            )
+                            .unwrap();
+                    }
+                    query
+                };
+                sample(&pack, name, dims, &test_conditions(p.clone()), value);
+                for wrong in [
+                    missing_machining.clone(),
+                    p.clone().with("immediately-after-machining", 0.0).unwrap(),
+                ] {
+                    refuses(&pack, name, dims, &test_conditions(wrong));
+                }
+            }
+        }
         if grade == "tecaform-ah-natural" {
             let compression = p
                 .with_quantity(
@@ -695,12 +771,90 @@ fn g0_g3_four_polymer_longitudinal_intervals_drive_source_bound_length() {
     }
 }
 
+#[test]
+fn g0_g3_additional_polymer_intervals_keep_distinct_reference_lengths() {
+    for (grade, expected, upper_interval) in [
+        (
+            "tecapeek-natural",
+            [(5e-5, 0.00185), (5e-5, 0.00385)],
+            Some((7e-5, 0.0035)),
+        ),
+        (
+            "tecapei-natural",
+            [(5e-5, 0.00185), (5e-5, 0.00385)],
+            Some((6e-5, 0.003)),
+        ),
+        (
+            "tecason-s-natural",
+            [(6e-5, 0.00222), (6e-5, 0.00462)],
+            None,
+        ),
+        (
+            "tecamid-66-natural",
+            [(11e-5, 0.00407), (12e-5, 0.00924)],
+            None,
+        ),
+    ] {
+        let pack = compile(
+            &format!("ensinger-{grade}"),
+            if upper_interval.is_some() { 11 } else { 10 },
+        );
+        let at = plastic_point(&format!("source-grade-{grade}"));
+        catalog_longitudinal_expansion(&pack, &at, expected);
+        if let Some((alpha, strain)) = upper_interval {
+            catalog_longitudinal_intervals(
+                &pack,
+                &at,
+                "mean-longitudinal-thermal-expansion-coefficient-from-100c",
+                373.15,
+                &[(423.15, alpha, strain)],
+            );
+            // The separate 100 C reference observation cannot extend the
+            // 23 C reference law to 150 C or supply a stitched strain law.
+            let unsupported = temperature(
+                temperature(
+                    at.clone().with("source-temperature-known", 1.0).unwrap(),
+                    "source-reference-temperature",
+                    296.15,
+                ),
+                "source-range-end-temperature",
+                423.15,
+            );
+            refuses(
+                &pack,
+                "mean-longitudinal-thermal-expansion-coefficient-from-23c",
+                Dims([0, 0, 0, -1, 0, 0]),
+                &unsupported,
+            );
+        }
+    }
+}
+
 /// Longitudinal interval means reach the original engineering-strain owner.
 /// This supplies no transverse strain or continuous instantaneous-alpha law.
 fn catalog_longitudinal_expansion(
     pack: &NormalizedPack,
     original: &QueryPoint,
     expected: [(f64, f64); 2],
+) {
+    catalog_longitudinal_intervals(
+        pack,
+        original,
+        "mean-longitudinal-thermal-expansion-coefficient-from-23c",
+        296.15,
+        &[
+            (333.15, expected[0].0, expected[0].1),
+            (373.15, expected[1].0, expected[1].1),
+        ],
+    );
+}
+
+fn catalog_longitudinal_intervals(
+    pack: &NormalizedPack,
+    original: &QueryPoint,
+    coefficient_name: &str,
+    reference: f64,
+    expected: &[(f64, f64, f64)],
 ) {
     use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack};
     use fs_material::state_point::{
@@ -717,11 +871,8 @@ fn catalog_longitudinal_expansion(
     )
     .unwrap();
     let card = normalized.card();
-    let coefficient = key(
-        "mean-longitudinal-thermal-expansion-coefficient-from-23c",
-        Dims([0, 0, 0, -1, 0, 0]),
-    );
-    for (endpoint, (alpha, strain)) in [333.15, 373.15].into_iter().zip(expected) {
+    let coefficient = key(coefficient_name, Dims([0, 0, 0, -1, 0, 0]));
+    for &(endpoint, alpha, strain) in expected {
         let at = temperature(
             temperature(
                 original
@@ -729,7 +880,7 @@ fn catalog_longitudinal_expansion(
                     .with("source-temperature-known", 1.0)
                     .unwrap(),
                 "source-reference-temperature",
-                296.15,
+                reference,
             ),
             "source-range-end-temperature",
             endpoint,
@@ -747,7 +898,7 @@ fn catalog_longitudinal_expansion(
         sample(pack, coefficient.name(), coefficient.dims(), &at, alpha);
         let result = resolve(&at).unwrap();
         assert!((result.engineering_strain() - strain).abs() < 1e-14);
-        assert_eq!(result.reference_temperature_k(), 296.15);
+        assert_eq!(result.reference_temperature_k(), reference);
         assert_eq!(result.endpoint_temperature_k(), endpoint);
         assert_eq!(result.resolved().card_identity(), card.content_hash());
         for property in result.resolved().properties() {
@@ -755,7 +906,8 @@ fn catalog_longitudinal_expansion(
                 .verify_receipt(&property.answer().receipt)
                 .unwrap();
         }
-        // Free endpoint length of a 250 mm longitudinal coupon.
+        // Free endpoint length of a longitudinal coupon measuring 250 mm at
+        // THIS interval's reference temperature, including the 100 C cases.
         let length_m = 0.25 * (1.0 + result.engineering_strain());
         assert!((length_m - 0.25 - 0.25 * strain).abs() < 1e-15);
         for wrong in [
@@ -765,10 +917,36 @@ fn catalog_longitudinal_expansion(
             at.clone()
                 .with("source-reference-temperature", 293.15)
                 .unwrap(),
+            at.clone()
+                .with(
+                    "source-reference-temperature",
+                    if reference == 296.15 { 373.15 } else { 296.15 },
+                )
+                .unwrap(),
             at.clone().with("source-temperature-known", 0.0).unwrap(),
             at.clone().with("source-pressure-known", 1.0).unwrap(),
         ] {
             assert!(resolve(&wrong).is_err());
+        }
+        if pack.pack_id() == "ensinger-tecamid-66-natural" {
+            let missing = temperature(
+                temperature(
+                    flags(&[
+                        ("source-grade-tecamid-66-natural", 1.0),
+                        ("source-temperature-known", 1.0),
+                        ("source-moisture-condition-known", 0.0),
+                        ("source-pressure-known", 0.0),
+                    ]),
+                    "source-reference-temperature",
+                    reference,
+                ),
+                "source-range-end-temperature",
+                endpoint,
+            );
+            assert!(resolve(&missing).is_err());
+            assert!(
+                resolve(&at.clone().with("immediately-after-machining", 0.0).unwrap()).is_err()
+            );
         }
         refuses(
             pack,
@@ -777,7 +955,7 @@ fn catalog_longitudinal_expansion(
             &at,
         );
         eprintln!(
-            "{}: longitudinal interval ending {endpoint} K gives strain {strain}, length {length_m} m",
+            "{}: longitudinal interval {reference}–{endpoint} K gives strain {strain}, length {length_m} m",
             pack.pack_id()
         );
     }

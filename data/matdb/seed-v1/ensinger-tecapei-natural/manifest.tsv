@@ -1,7 +1,7 @@
 frankensim.matdb-manifest.v3
 pack_id	ensinger-tecapei-natural
 redistribution	permitted	Selected attributed numerical facts and original notes only; no source document or table layout is redistributed
-citation	Ensinger GmbH, TECAPEI natural international product datasheet, mechanical and thermal properties; https://www.ensingerplastics.com/en/shapes/tecapei-natural ; accessed 2026-10-28
+citation	Ensinger GmbH, TECAPEI natural international product datasheet, mechanical and thermal properties; https://www.ensingerplastics.com/en/shapes/tecapei-natural ; linked producer sheet 2023-07-19 version AF, p. 1 longitudinal CLTE rows: https://www.ensinger-online.com/modules/public/sheet/createsheet.php?FILENAME=TECAPEI_natural_0.PDF&FL=0&SID=1356&ZOOM=1.2 ; accessed 2026-10-28
 license	Attributed-Numerical-Facts-Only-No-Source-Document-License
 source	ensinger-tecapei-natural	properties.tsv	material-tsv-v1
 property	density	density	dimensional
@@ -12,6 +12,10 @@ property	tensile_strength	tensile-strength	dimensional
 property	flexural_modulus	flexural-modulus	dimensional
 property	compression_modulus	compression-modulus	dimensional
 property	compressive_stress	compressive-stress	dimensional
+property	mean_longitudinal_thermal_expansion_coefficient_from_23c	mean-longitudinal-thermal-expansion-coefficient-from-23c	dimensional
+property	mean_longitudinal_thermal_expansion_coefficient_from_100c	mean-longitudinal-thermal-expansion-coefficient-from-100c	dimensional
+axis	source_reference_temperature	source-reference-temperature	absolute-temperature
+axis	source_range_end_temperature	source-range-end-temperature	absolute-temperature
 axis	source_grade_tecapei_natural	source-grade-tecapei-natural	dimensional
 axis	source_temperature_known	source-temperature-known	dimensional
 axis	source_moisture_condition_known	source-moisture-condition-known	dimensional

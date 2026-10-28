@@ -54,3 +54,20 @@ validity	compression-points	source_temperature_known	0	0	1
 validity	compression-points	source_moisture_condition_known	0	0	1
 validity	compression-points	source_pressure_known	0	0	1
 validity	compression-points	test_speed	8.333333333333333e-5	8.333333333333333e-5	m/s
+observation	longitudinal-clte	TECASON S natural unfilled PSU stock shapes	Ensinger Ltd 2023-07-19 AE, p. 1 longitudinal CLTE rows, DIN EN ISO 11359-1;2	The source gives 6 times 10^-5 K^-1 longitudinal CLTE for each of 23–60 C and 23–100 C. Equal reported numbers remain two independent interval means: multiplying the coefficient by the named interval gives the endpoint engineering strain relative to the 23 C length. Equality does not establish a constant instantaneous coefficient or a continuous strain law. Producer comparison guidelines for extruded/machined reference specimens, typically rods of diameter 40–60 mm; not guaranteed limits or batch measurements. Temperature intervals and longitudinal direction are explicit; moisture conditioning, pressure and statistical uncertainty are unstated. No transverse, volumetric or temperature-dependent density law is inferred. This PSU stock shape is distinct from PPSU and PES; service limits do not widen the interval observations.
+scalar	mean-longitudinal-60c	longitudinal-clte	mean_longitudinal_thermal_expansion_coefficient_from_23c	6e-5	K^-1	constant
+uncertainty	mean-longitudinal-60c	unstated	-	-	-	-
+validity	mean-longitudinal-60c	source_reference_temperature	296.15	296.15	K
+validity	mean-longitudinal-60c	source_range_end_temperature	333.15	333.15	K
+validity	mean-longitudinal-60c	source_grade_tecason_s_natural	1	1	1
+validity	mean-longitudinal-60c	source_temperature_known	1	1	1
+validity	mean-longitudinal-60c	source_moisture_condition_known	0	0	1
+validity	mean-longitudinal-60c	source_pressure_known	0	0	1
+scalar	mean-longitudinal-100c	longitudinal-clte	mean_longitudinal_thermal_expansion_coefficient_from_23c	6e-5	K^-1	constant
+uncertainty	mean-longitudinal-100c	unstated	-	-	-	-
+validity	mean-longitudinal-100c	source_reference_temperature	296.15	296.15	K
+validity	mean-longitudinal-100c	source_range_end_temperature	373.15	373.15	K
+validity	mean-longitudinal-100c	source_grade_tecason_s_natural	1	1	1
+validity	mean-longitudinal-100c	source_temperature_known	1	1	1
+validity	mean-longitudinal-100c	source_moisture_condition_known	0	0	1
+validity	mean-longitudinal-100c	source_pressure_known	0	0	1

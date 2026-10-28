@@ -6,24 +6,28 @@ validity	density	source_grade_tecamid_66_natural	1	1	1
 validity	density	source_temperature_known	0	0	1
 validity	density	source_moisture_condition_known	0	0	1
 validity	density	source_pressure_known	0	0	1
+validity	density	immediately_after_machining	1	1	1
 scalar	thermal-conductivity	stock-shapes	thermal_conductivity	0.36	W/m/K	constant
 uncertainty	thermal-conductivity	unstated	-	-	-	-
 validity	thermal-conductivity	source_grade_tecamid_66_natural	1	1	1
 validity	thermal-conductivity	source_temperature_known	0	0	1
 validity	thermal-conductivity	source_moisture_condition_known	0	0	1
 validity	thermal-conductivity	source_pressure_known	0	0	1
+validity	thermal-conductivity	immediately_after_machining	1	1	1
 scalar	specific-heat-capacity	stock-shapes	specific_heat_capacity	1500	J/kg/K	constant
 uncertainty	specific-heat-capacity	unstated	-	-	-	-
 validity	specific-heat-capacity	source_grade_tecamid_66_natural	1	1	1
 validity	specific-heat-capacity	source_temperature_known	0	0	1
 validity	specific-heat-capacity	source_moisture_condition_known	0	0	1
 validity	specific-heat-capacity	source_pressure_known	0	0	1
+validity	specific-heat-capacity	immediately_after_machining	1	1	1
 scalar	tensile-modulus	stock-shapes	tensile_modulus	3500	MPa	constant
 uncertainty	tensile-modulus	unstated	-	-	-	-
 validity	tensile-modulus	source_grade_tecamid_66_natural	1	1	1
 validity	tensile-modulus	source_temperature_known	0	0	1
 validity	tensile-modulus	source_moisture_condition_known	0	0	1
 validity	tensile-modulus	source_pressure_known	0	0	1
+validity	tensile-modulus	immediately_after_machining	1	1	1
 validity	tensile-modulus	test_speed	1.6666666666666667e-5	1.6666666666666667e-5	m/s
 scalar	tensile-strength	stock-shapes	tensile_strength	85	MPa	constant
 uncertainty	tensile-strength	unstated	-	-	-	-
@@ -31,6 +35,7 @@ validity	tensile-strength	source_grade_tecamid_66_natural	1	1	1
 validity	tensile-strength	source_temperature_known	0	0	1
 validity	tensile-strength	source_moisture_condition_known	0	0	1
 validity	tensile-strength	source_pressure_known	0	0	1
+validity	tensile-strength	immediately_after_machining	1	1	1
 validity	tensile-strength	test_speed	8.333333333333334e-4	8.333333333333334e-4	m/s
 scalar	flexural-modulus	stock-shapes	flexural_modulus	3100	MPa	constant
 uncertainty	flexural-modulus	unstated	-	-	-	-
@@ -38,6 +43,7 @@ validity	flexural-modulus	source_grade_tecamid_66_natural	1	1	1
 validity	flexural-modulus	source_temperature_known	0	0	1
 validity	flexural-modulus	source_moisture_condition_known	0	0	1
 validity	flexural-modulus	source_pressure_known	0	0	1
+validity	flexural-modulus	immediately_after_machining	1	1	1
 validity	flexural-modulus	test_speed	3.3333333333333335e-5	3.3333333333333335e-5	m/s
 scalar	compression-modulus	stock-shapes	compression_modulus	2700	MPa	constant
 uncertainty	compression-modulus	unstated	-	-	-	-
@@ -45,6 +51,7 @@ validity	compression-modulus	source_grade_tecamid_66_natural	1	1	1
 validity	compression-modulus	source_temperature_known	0	0	1
 validity	compression-modulus	source_moisture_condition_known	0	0	1
 validity	compression-modulus	source_pressure_known	0	0	1
+validity	compression-modulus	immediately_after_machining	1	1	1
 validity	compression-modulus	test_speed	8.333333333333333e-5	8.333333333333333e-5	m/s
 curve	compression-points	stock-shapes	compressive_stress	compressive_strain	1	MPa	0.01:20,0.02:35,0.05:81	tabulated
 uncertainty	compression-points	unstated	-	-	-	-
@@ -53,4 +60,24 @@ validity	compression-points	source_grade_tecamid_66_natural	1	1	1
 validity	compression-points	source_temperature_known	0	0	1
 validity	compression-points	source_moisture_condition_known	0	0	1
 validity	compression-points	source_pressure_known	0	0	1
+validity	compression-points	immediately_after_machining	1	1	1
 validity	compression-points	test_speed	8.333333333333333e-5	8.333333333333333e-5	m/s
+observation	longitudinal-clte	TECAMID 66 natural unfilled PA66 extruded and machined stock shapes	Ensinger 2023-07-19 AD, p. 1 longitudinal CLTE rows, DIN EN ISO 11359-1;2	The source gives 11 and 12 times 10^-5 K^-1 longitudinal CLTE over 23–60 C and 23–100 C respectively. These are separate interval means: endpoint engineering strain relative to the 23 C length is the mean coefficient times the named temperature interval. Producer comparison guidelines for extruded/machined reference specimens, typically rods of diameter 40–60 mm; data generated directly after machining in German standard climate with no numerical moisture condition supplied. These are not equilibrated wet-nylon data or guaranteed limits. The new interval observations explicitly retain the immediately-after-machining condition. Temperature intervals and longitudinal direction are explicit; moisture conditioning, pressure and statistical uncertainty remain unstated. No transverse, volumetric or instantaneous expansion, continuous strain law, or temperature-dependent density is inferred. Service limits do not widen either interval observation.
+scalar	mean-longitudinal-60c	longitudinal-clte	mean_longitudinal_thermal_expansion_coefficient_from_23c	11e-5	K^-1	constant
+uncertainty	mean-longitudinal-60c	unstated	-	-	-	-
+validity	mean-longitudinal-60c	source_reference_temperature	296.15	296.15	K
+validity	mean-longitudinal-60c	source_range_end_temperature	333.15	333.15	K
+validity	mean-longitudinal-60c	source_grade_tecamid_66_natural	1	1	1
+validity	mean-longitudinal-60c	source_temperature_known	1	1	1
+validity	mean-longitudinal-60c	source_moisture_condition_known	0	0	1
+validity	mean-longitudinal-60c	source_pressure_known	0	0	1
+validity	mean-longitudinal-60c	immediately_after_machining	1	1	1
+scalar	mean-longitudinal-100c	longitudinal-clte	mean_longitudinal_thermal_expansion_coefficient_from_23c	12e-5	K^-1	constant
+uncertainty	mean-longitudinal-100c	unstated	-	-	-	-
+validity	mean-longitudinal-100c	source_reference_temperature	296.15	296.15	K
+validity	mean-longitudinal-100c	source_range_end_temperature	373.15	373.15	K
+validity	mean-longitudinal-100c	source_grade_tecamid_66_natural	1	1	1
+validity	mean-longitudinal-100c	source_temperature_known	1	1	1
+validity	mean-longitudinal-100c	source_moisture_condition_known	0	0	1
+validity	mean-longitudinal-100c	source_pressure_known	0	0	1
+validity	mean-longitudinal-100c	immediately_after_machining	1	1	1
