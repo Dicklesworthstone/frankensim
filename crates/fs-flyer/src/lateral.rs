@@ -29,6 +29,9 @@
 
 use crate::Refusal;
 
+mod gust;
+pub use gust::{DistributedLateralLoads, LateralMomentsNm};
+
 /// Declared roll inertia [kg·m²] (Estimated): strip-model bound for the
 /// 340 kg flyer at 12.29 m span, Ix ≈ m·(b/8)²; no source publishes the
 /// measured roll inertia.
@@ -101,6 +104,20 @@ pub struct LateralTick {
     pub loaded_twist_rad: f64,
 }
 
+/// One accepted lateral step with independently resolved physical moments.
+/// The original reduced attribution stays separate from the incident loads.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ForcedLateralTick {
+    /// Original control/damping attribution and the resulting accepted state.
+    pub reduced: LateralTick,
+    /// Additional body-FRD moments, applied once in the original rate update.
+    pub incident: LateralMomentsNm,
+    /// Total roll moment including control, damping and incident load [N m].
+    pub net_roll_moment_nm: f64,
+    /// Total yaw moment including control, damping and incident load [N m].
+    pub net_yaw_moment_nm: f64,
+}
+
 /// Rudder linkage configuration.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RudderLinkage {
@@ -164,6 +181,39 @@ impl LateralModel {
         rho_kg_m3: f64,
         dt_s: f64,
     ) -> Result<LateralTick, Refusal> {
+        self.step_with_moments(state, loaded_twist_rad, u_mps, rho_kg_m3, dt_s,
+            LateralMomentsNm::default()).map(|step| step.reduced)
+    }
+
+    /// Advance the same reduced lateral state with resolved incident torques.
+    ///
+    /// `incident` is the sum of actual distributed panel, profile-drag and
+    /// propeller moments, not a second warp or damping law. Both controls and
+    /// incident moments use the same accepted starting rates and one rate/
+    /// attitude update. Zero moments preserve the original arithmetic. The
+    /// additional load remains separate from the original yaw attribution.
+    /// This remains a reduced lateral response, not a banked six-DoF path.
+    ///
+    /// # Errors
+    /// As [`Self::step`], also on nonfinite incident moments. Every refusal
+    /// leaves the supplied lateral state unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_moments(
+        &self,
+        state: &mut LateralState,
+        loaded_twist_rad: f64,
+        u_mps: f64,
+        rho_kg_m3: f64,
+        dt_s: f64,
+        incident: LateralMomentsNm,
+    ) -> Result<ForcedLateralTick, Refusal> {
+        if !incident.is_finite() {
+            return Err(Refusal {
+                code: "lateral-envelope-exceeded",
+                message: "non-finite incident lateral moment".into(),
+                ranked_repairs: vec!["retain the finite accepted distributed loads".into()],
+            });
+        }
         if ![loaded_twist_rad, u_mps, rho_kg_m3, dt_s]
             .iter()
             .all(|v| v.is_finite())
@@ -192,7 +242,11 @@ impl LateralModel {
             * self.cl_alpha
             * 0.25
             * (state.p_rad_s * self.wing_span_m / (4.0 * speed_floor));
-        let p_dot = (roll_moment + roll_damping) / FLYER_ROLL_INERTIA_KG_M2;
+        let mut net_roll_moment_nm = roll_moment + roll_damping;
+        if incident.roll_nm != 0.0 {
+            net_roll_moment_nm += incident.roll_nm;
+        }
+        let p_dot = net_roll_moment_nm / FLYER_ROLL_INERTIA_KG_M2;
         let p_new = state.p_rad_s + p_dot * dt_s;
         let phi_new = state.phi_rad + p_new * dt_s;
         if !phi_new.is_finite() || !p_new.is_finite() || phi_new.abs() > PHI_CAP_RAD {
@@ -231,7 +285,11 @@ impl LateralModel {
             rudder_yaw_nm: rudder,
             profile_yaw_nm: profile,
         };
-        let r_dot = yaw.net() / REDUCED_YAW_INERTIA_KG_M2;
+        let mut net_yaw_moment_nm = yaw.net();
+        if incident.yaw_nm != 0.0 {
+            net_yaw_moment_nm += incident.yaw_nm;
+        }
+        let r_dot = net_yaw_moment_nm / REDUCED_YAW_INERTIA_KG_M2;
         let r_new = state.r_rad_s + r_dot * dt_s;
         if r_new.abs() > R_CAP_RAD_S {
             return Err(Refusal {
@@ -257,11 +315,16 @@ impl LateralModel {
             psi_rad: psi_new,
             r_rad_s: r_new,
         };
-        Ok(LateralTick {
-            state: *state,
-            roll_moment_nm: roll_moment,
-            yaw,
-            loaded_twist_rad,
+        Ok(ForcedLateralTick {
+            reduced: LateralTick {
+                state: *state,
+                roll_moment_nm: roll_moment,
+                yaw,
+                loaded_twist_rad,
+            },
+            incident,
+            net_roll_moment_nm,
+            net_yaw_moment_nm,
         })
     }
 }
