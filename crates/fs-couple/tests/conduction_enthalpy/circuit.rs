@@ -6,6 +6,454 @@ use fs_couple::circuit_enthalpy::{
 };
 use fs_phs::circuit::{Branch, CircuitGraph};
 
+mod material_load {
+    use super::*;
+    use fs_couple::circuit_enthalpy::material::{CellResistor, MaterialNetwork};
+    use fs_thermal::enthalpy::{
+        CellGeometry, DepositedCell, DepositionBudget, DepositionSimulation, Event, StepConfig,
+        ThermalLaw, ThermalLink, TimedEvent,
+    };
+
+    fn thermal<'a>(
+        curves: &'a [ResolvedHeatCapacityCurve; 2],
+        load: &'a ResolvedHeatCapacityCurve,
+    ) -> DepositionSimulation<'a> {
+        let mut events = Vec::new();
+        for (i, (cell, cp)) in [(CellId(30), 1.0), (CellId(10), 2.0), (CellId(50), 3.0)]
+            .into_iter()
+            .enumerate()
+        {
+            events.push(TimedEvent {
+                time_s: 0.0,
+                event: Event::Birth(DepositedCell {
+                    id: cell,
+                    segment_id: i as u64,
+                    body_id: i as u64,
+                    material_id: MaterialId(i as u64),
+                    mass_kg: 1.0,
+                    specific_h_j_kg: 100.0 * cp,
+                    geometry: CellGeometry {
+                        start_m: [i as f64, 0.0, 0.0],
+                        end_m: [i as f64 + 1.0, 0.0, 0.0],
+                        volume_m3: 1.0,
+                        surface_area_m2: 6.0,
+                    },
+                    boundary: common::boundary(),
+                }),
+            });
+        }
+        events.push(TimedEvent {
+            time_s: 0.0,
+            event: Event::Contact(ThermalLink {
+                id: 7,
+                a: CellId(30),
+                b: CellId(10),
+                area_m2: 1.0,
+                conductance_w_k: 999.0,
+            }),
+        });
+        DepositionSimulation::new(
+            events,
+            &[
+                (MaterialId(0), curves[0].curve() as &dyn ThermalLaw),
+                (MaterialId(1), curves[1].curve() as &dyn ThermalLaw),
+                (MaterialId(2), load.curve() as &dyn ThermalLaw),
+            ],
+            DepositionBudget {
+                max_cells: 8,
+                max_links: 8,
+                max_events: 16,
+                max_substeps: 1000,
+            },
+        )
+        .unwrap()
+        .advance_to(
+            0.0,
+            StepConfig {
+                max_dt_s: 0.1,
+                energy_tolerance_j: 1e-7,
+            },
+            || Ok(()),
+        )
+        .unwrap()
+        .0
+    }
+
+    fn resistor() -> CellResistor {
+        CellResistor {
+            destination: ResistorCell {
+                branch: 1,
+                cell: CellId(50),
+            },
+            selection: MaterialPropertySelection::SingleClaimOnly,
+            length_m: 2.0,
+            area_m2: 0.5,
+        }
+    }
+
+    fn graph(storage: bool) -> CircuitGraph {
+        CircuitGraph {
+            node_count: 3,
+            branches: vec![
+                (2, 0, Branch::Resistor { ohms: 123.0 }),
+                (1, 2, Branch::Resistor { ohms: 999.0 }),
+                if storage {
+                    (1, 0, Branch::Capacitor { farads: 0.5 })
+                } else {
+                    (1, 0, Branch::CurrentSource { port: 0 })
+                },
+            ],
+            transformers: vec![],
+        }
+    }
+
+    #[test]
+    fn g1_material_load_uses_temperature_and_both_source_bases_in_the_spatial_circuit() {
+        let mut heats = Vec::new();
+        for (basis, value) in [
+            (ElectricalPropertyBasis::Resistivity, 0.5),
+            (ElectricalPropertyBasis::Resistivity, 1.0),
+            (ElectricalPropertyBasis::Conductivity, 0.5),
+        ] {
+            let alpha = 0.002;
+            let (a, ca) = material(1.0, 1.0, 0.0);
+            let (b, cb) = material(3.0, 2.0, 0.0);
+            let cards = [a, b];
+            let curves = [ca, cb];
+            let (load, load_curve) = material_with_electrical_basis(basis, value, 3.0, alpha, 1.0);
+            let thermal = thermal(&curves, &load_curve);
+            let context = point(300.0);
+            let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
+            let mut bindings = cells(&cards, &curves, &context, &key);
+            bindings.push(MaterialCell {
+                cell: CellId(50),
+                material_id: MaterialId(2),
+                curve: load_curve.curve(),
+                point: ThermalMaterialPoint {
+                    material: &load,
+                    context: &context,
+                    temperature_axis: "T",
+                    liquid_fraction_axis: None,
+                },
+                conductivity: Some((&key, MaterialPropertySelection::SingleClaimOnly)),
+            });
+            let resistors = [resistor()];
+            let sources = MaterialNetwork {
+                cells: &bindings,
+                resistors: &resistors,
+                links: &LINKS,
+            }
+            .resolve_with_bases(&thermal, &[(1, basis)], || false)
+            .unwrap()
+            .resistors;
+            let circuit = ConductionCircuit::new_with_material_resistors(
+                problem(
+                    &cards,
+                    [ElectricalPropertyBasis::Resistivity; 2],
+                    300.0,
+                    1.0,
+                ),
+                graph(false),
+                terminal(),
+                sources,
+                0.0,
+                vec![],
+                vec![],
+                &[2.0],
+                field_controls(),
+                || false,
+            )
+            .unwrap();
+            let next = network(&bindings)
+                .step_material_circuit_candidate(
+                    &thermal,
+                    0.5,
+                    &circuit,
+                    &[2.0],
+                    &resistors,
+                    limits(),
+                    field_controls(),
+                    config(),
+                    &[0.0; 3],
+                    || false,
+                )
+                .unwrap();
+
+            // The actual path L/A=4 m^-1 comes from data. At fixed I=2 A,
+            // Cp*dT=dt*I²*R(T). Resistivity is affine; conductivity is affine
+            // before inversion. These independent closed forms distinguish them.
+            let r0 = 4.0
+                * match basis {
+                    ElectricalPropertyBasis::Resistivity => value,
+                    ElectricalPropertyBasis::Conductivity => 1.0 / value,
+                };
+            let k = 0.5 * 4.0 * r0 / 3.0;
+            let dt_load = match basis {
+                ElectricalPropertyBasis::Resistivity => k / (1.0 - alpha * k),
+                ElectricalPropertyBasis::Conductivity => {
+                    2.0 * k / (1.0 + (1.0 + 4.0 * alpha * k).sqrt())
+                }
+            };
+            let resistance = match basis {
+                ElectricalPropertyBasis::Resistivity => r0 * (1.0 + alpha * dt_load),
+                ElectricalPropertyBasis::Conductivity => r0 / (1.0 + alpha * dt_load),
+            };
+            let report = &next.report().electrical;
+            near(report.spatial_current_a, 2.0);
+            near(report.spatial_voltage_v, 8.0);
+            near(report.spatial.heat_j, 8.0);
+            near(report.graph_resistors[0].heat_j, 3.0 * dt_load);
+            near(
+                next.thermal().temperature_k(CellId(50)).unwrap(),
+                300.0 + dt_load,
+            );
+            near(
+                next.thermal().temperature_k(CellId(30)).unwrap(),
+                300.0 + 8.0 / 3.5,
+            );
+            near(
+                next.thermal().temperature_k(CellId(10)).unwrap(),
+                300.0 + 10.0 / 3.5,
+            );
+            let source = report.graph_resistors[0].conductor.as_ref().unwrap();
+            assert_eq!(source.source_basis(), basis);
+            near(source.resistance_ohm(), resistance);
+            assert_eq!(source, &next.circuit().material_resistors()[0].conductor);
+            assert_eq!(
+                source.source_property().answer().receipt.selected,
+                circuit.material_resistors()[0]
+                    .conductor
+                    .source_property()
+                    .answer()
+                    .receipt
+                    .selected
+            );
+            near(report.native.supplied, report.heat_j);
+            near(
+                next.thermal().energy_j() - thermal.energy_j(),
+                report.heat_j,
+            );
+            assert!(
+                next.report().total_energy_residual_j.abs() < config().total_energy_tolerance_j
+            );
+            heats.push(report.graph_resistors[0].heat_j);
+            assert_eq!(thermal.time_s(), 0.0);
+            near(
+                circuit.material_resistors()[0].conductor.resistance_ohm(),
+                r0,
+            );
+        }
+        assert!(heats[1] > heats[0]);
+    }
+
+    #[test]
+    fn g3_material_only_load_swap_changes_charge_spatial_current_and_local_heating() {
+        let mut charges = Vec::new();
+        for r0 in [2.0, 6.0] {
+            let alpha = 0.005;
+            let (a, ca) = material(1.0, 1.0, 0.0);
+            let (b, cb) = material(3.0, 2.0, 0.0);
+            let cards = [a, b];
+            let curves = [ca, cb];
+            let (load, load_curve) = material(r0 / 4.0, 3.0, alpha);
+            let thermal = thermal(&curves, &load_curve);
+            let context = point(300.0);
+            let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
+            let mut bindings = cells(&cards, &curves, &context, &key);
+            bindings.push(MaterialCell {
+                cell: CellId(50),
+                material_id: MaterialId(2),
+                curve: load_curve.curve(),
+                point: ThermalMaterialPoint {
+                    material: &load,
+                    context: &context,
+                    temperature_axis: "T",
+                    liquid_fraction_axis: None,
+                },
+                conductivity: Some((&key, MaterialPropertySelection::SingleClaimOnly)),
+            });
+            let resistors = [resistor()];
+            let sources = MaterialNetwork {
+                cells: &bindings,
+                resistors: &resistors,
+                links: &LINKS,
+            }
+            .resolve(&thermal, || false)
+            .unwrap()
+            .resistors;
+            let circuit = ConductionCircuit::new_with_material_resistors(
+                problem(
+                    &cards,
+                    [ElectricalPropertyBasis::Resistivity; 2],
+                    300.0,
+                    1.0,
+                ),
+                graph(true),
+                terminal(),
+                sources,
+                0.0,
+                vec![],
+                vec![4.0],
+                &[],
+                field_controls(),
+                || false,
+            )
+            .unwrap();
+            let layout = network(&bindings);
+            let mut calls = 0;
+            let next = layout
+                .step_material_circuit_candidate(
+                    &thermal,
+                    0.5,
+                    &circuit,
+                    &[],
+                    &resistors,
+                    limits(),
+                    field_controls(),
+                    config(),
+                    &[0.0; 3],
+                    || {
+                        calls += 1;
+                        false
+                    },
+                )
+                .unwrap();
+            // Exact midpoint RC relation and an independent scalar heat balance:
+            // I=2*q0/(2*C*(Rfield+Rload(T))+dt), Cp*dT=dt*I²*Rload(T).
+            let (mut lo, mut hi) = (0.0, 50.0);
+            for _ in 0..80 {
+                let d = 0.5 * (lo + hi);
+                let resistance = r0 * (1.0 + alpha * d);
+                let current = 8.0 / (4.5 + resistance);
+                if 3.0 * d > 0.5 * current * current * resistance {
+                    hi = d;
+                } else {
+                    lo = d;
+                }
+            }
+            let d = 0.5 * (lo + hi);
+            let current = 8.0 / (4.5 + r0 * (1.0 + alpha * d));
+            near(next.circuit().charges_c()[0], 4.0 - 0.5 * current);
+            near(next.report().electrical.spatial_current_a, current);
+            near(next.report().electrical.graph_resistors[0].heat_j, 3.0 * d);
+            near(next.thermal().temperature_k(CellId(50)).unwrap(), 300.0 + d);
+            near(
+                next.thermal().energy_j() + next.report().electrical.stored_after_j,
+                thermal.energy_j() + 16.0,
+            );
+            charges.push(next.circuit().charges_c()[0]);
+            let continued = layout
+                .step_material_circuit_candidate(
+                    next.thermal(),
+                    1.0,
+                    next.circuit(),
+                    &[],
+                    &resistors,
+                    limits(),
+                    field_controls(),
+                    config(),
+                    &[0.0; 3],
+                    || false,
+                )
+                .unwrap();
+            assert!(continued.circuit().charges_c()[0] < next.circuit().charges_c()[0]);
+            assert!(
+                continued.circuit().material_resistors()[0]
+                    .conductor
+                    .resistance_ohm()
+                    > next.circuit().material_resistors()[0]
+                        .conductor
+                        .resistance_ohm()
+            );
+            near(
+                continued.thermal().energy_j() + continued.report().electrical.stored_after_j,
+                thermal.energy_j() + 16.0,
+            );
+
+            // A material circuit cannot enter the ideal-resistor path or alias
+            // one physical whole-cell load with the spatial body's volume.
+            assert!(
+                layout
+                    .step_circuit_candidate(
+                        &thermal,
+                        0.5,
+                        &circuit,
+                        &[],
+                        &[resistors[0].destination],
+                        limits(),
+                        field_controls(),
+                        config(),
+                        &[0.0; 3],
+                        || false
+                    )
+                    .is_err()
+            );
+            let mut aliased = resistor();
+            aliased.destination.cell = CellId(30);
+            assert!(
+                layout
+                    .step_material_circuit_candidate(
+                        &thermal,
+                        0.5,
+                        &circuit,
+                        &[],
+                        &[aliased],
+                        limits(),
+                        field_controls(),
+                        config(),
+                        &[0.0; 3],
+                        || false
+                    )
+                    .is_err()
+            );
+            let mut resized = resistor();
+            resized.length_m = 1.0;
+            resized.area_m2 = 1.0;
+            assert!(
+                layout
+                    .step_material_circuit_candidate(
+                        &thermal,
+                        0.5,
+                        &circuit,
+                        &[],
+                        &[resized],
+                        limits(),
+                        field_controls(),
+                        config(),
+                        &[0.0; 3],
+                        || false
+                    )
+                    .is_err()
+            );
+            let saved_cells = thermal.cells().clone();
+            let saved_sources = circuit.material_resistors().to_vec();
+            let mut polls = 0;
+            assert!(matches!(
+                layout.step_material_circuit_candidate(
+                    &thermal,
+                    0.5,
+                    &circuit,
+                    &[],
+                    &resistors,
+                    limits(),
+                    field_controls(),
+                    config(),
+                    &[0.0; 3],
+                    || {
+                        polls += 1;
+                        polls >= calls - 1
+                    },
+                ),
+                Err(CircuitEnthalpyError::Cancelled)
+            ));
+            assert_eq!(thermal.cells(), &saved_cells);
+            assert_eq!(circuit.material_resistors(), &saved_sources);
+            assert_eq!(circuit.charges_c(), &[4.0]);
+        }
+        assert!(charges[1] > charges[0]);
+    }
+}
+
 fn terminal() -> ConductionCircuitTerminal {
     ConductionCircuitTerminal {
         branch: 0,

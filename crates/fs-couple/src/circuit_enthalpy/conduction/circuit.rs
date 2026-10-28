@@ -10,8 +10,11 @@
 //! principal source properties and the fixed frame survive every thermal trial.
 
 use super::*;
-use crate::circuit_enthalpy::ResistorCell;
-use crate::material_circuit::{MaterialCircuitError, MaterialCircuitSolve, admit_graph, extended};
+use crate::circuit_enthalpy::{ResistorCell, material::CellResistor};
+use crate::material_circuit::{
+    MaterialCircuitError, MaterialCircuitSolve, MaterialResistor, admit_graph, extended,
+};
+use fs_material::conductor::ResolvedConductor;
 use fs_phs::{
     StepRecord,
     circuit::{Branch, CircuitDae, CircuitError, CircuitGraph, assemble_circuit},
@@ -29,8 +32,9 @@ pub struct ConductionCircuitTerminal {
 
 /// One accepted electrical history and its complete spatial material operator.
 /// Only native fluxes and charges carry electrical storage. The field remains
-/// quasistatic at the circuit's common midpoint; C/L and other graph resistors
-/// are explicitly authored fixed parameters on this bounded rung.
+/// quasistatic at the circuit's common midpoint. C/L remain fixed; the other
+/// resistors may be explicit ideal components or complete material conductors
+/// refreshed by the SAME finite-heat network as the spatial body.
 pub struct ConductionCircuit<C = ResolvedConductorState> {
     problem: PlanarConduction<C>,
     graph: CircuitGraph,
@@ -38,6 +42,7 @@ pub struct ConductionCircuit<C = ResolvedConductorState> {
     fluxes_wb: Vec<f64>,
     charges_c: Vec<f64>,
     time_s: f64,
+    material_resistors: Vec<MaterialResistor>,
 }
 
 fn electrical(error: CircuitError) -> Error {
@@ -97,6 +102,57 @@ fn stamp(
     Ok(next)
 }
 
+// This is only graph lowering. Resistance and its source/geometry admission
+// remain with ResolvedConductor; no second material evaluator is introduced.
+fn stamp_material_resistors(
+    graph: &CircuitGraph,
+    terminal: &ConductionCircuitTerminal,
+    materials: &mut [MaterialResistor],
+) -> Result<CircuitGraph, Error> {
+    let count = admit_graph(graph)?;
+    if materials.len() != count.saturating_sub(1) {
+        return Err(invalid(
+            "every nonspatial resistor needs exactly one complete material binding",
+        ));
+    }
+    materials.sort_by_key(|m| m.branch);
+    let mut next = graph.clone();
+    for (i, material) in materials.iter().enumerate() {
+        if material.branch == terminal.branch
+            || (i > 0 && materials[i - 1].branch == material.branch)
+        {
+            return Err(invalid(
+                "duplicate or spatial branch in material-resistor bindings",
+            ));
+        }
+        let branch = next
+            .branches
+            .get_mut(material.branch)
+            .ok_or_else(|| invalid("material resistor names an absent circuit branch"))?;
+        let ohms = material.conductor.resistance_ohm();
+        if !matches!(branch.2, Branch::Resistor { .. })
+            || !ohms.is_finite()
+            || ohms <= 0.0
+            || !ohms.recip().is_finite()
+            || ohms.recip() <= 0.0
+        {
+            return Err(invalid(
+                "material resistor needs a resistor slot and representable conductance",
+            ));
+        }
+        branch.2 = Branch::Resistor { ohms };
+    }
+    Ok(next)
+}
+
+fn same_conductor(a: &ResolvedConductor, b: &ResolvedConductor) -> bool {
+    a.source_basis() == b.source_basis()
+        && a.source_key() == b.source_key()
+        && a.length_m().to_bits() == b.length_m().to_bits()
+        && a.area_m2().to_bits() == b.area_m2().to_bits()
+        && same_material(a.material(), b.material())
+}
+
 impl<C: PlanarConductorMaterial> ConductionCircuit<C> {
     /// Bind the native spatial resistance and initialize conserved branch-order
     /// fluxes/charges using the original descriptor. The named resistor slot's
@@ -151,7 +207,49 @@ impl<C: PlanarConductorMaterial> ConductionCircuit<C> {
             fluxes_wb,
             charges_c,
             time_s,
+            material_resistors: Vec::new(),
         })
+    }
+
+    /// Bind source-resolved conductors to EVERY other resistor slot. Obtain
+    /// these complete snapshots from [`MaterialNetwork::resolve_with_bases`]
+    /// at the accepted thermal state. Authored ohms in those graph slots are
+    /// replaced by the original conductor's material-and-geometry resistance.
+    ///
+    /// Advance this circuit with
+    /// [`ConductionThermalNetwork::step_material_circuit_candidate`], which
+    /// refreshes those same sources at every thermal trial. No material state
+    /// is held at its initialization temperature during later evolution.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_material_resistors(
+        problem: PlanarConduction<C>,
+        graph: CircuitGraph,
+        terminal: ConductionCircuitTerminal,
+        mut material_resistors: Vec<MaterialResistor>,
+        time_s: f64,
+        fluxes_wb: Vec<f64>,
+        charges_c: Vec<f64>,
+        ports: &[f64],
+        field_controls: ConductionControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        if cancelled() {
+            return Err(CircuitEnthalpyError::Cancelled);
+        }
+        let graph = stamp_material_resistors(&graph, &terminal, &mut material_resistors)?;
+        let mut circuit = Self::new(
+            problem,
+            graph,
+            terminal,
+            time_s,
+            fluxes_wb,
+            charges_c,
+            ports,
+            field_controls,
+            cancelled,
+        )?;
+        circuit.material_resistors = material_resistors;
+        Ok(circuit)
     }
 
     pub fn problem(&self) -> &PlanarConduction<C> {
@@ -172,12 +270,20 @@ impl<C: PlanarConductorMaterial> ConductionCircuit<C> {
     pub fn time_s(&self) -> f64 {
         self.time_s
     }
+    /// Complete nonspatial conductor sources at the accepted thermal endpoint,
+    /// in original branch order. Empty for explicitly authored ideal resistors.
+    pub fn material_resistors(&self) -> &[MaterialResistor] {
+        &self.material_resistors
+    }
 }
 
-/// An explicitly authored fixed resistor outside the represented spatial body.
+/// Native branch current and heat outside the represented spatial body.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConductionCircuitResistorHeat {
     pub branch: usize,
+    /// Exact source/geometry used by the native branch. None denotes an
+    /// explicitly authored ideal resistance, never an inferred material.
+    pub conductor: Option<ResolvedConductor>,
     pub voltage_v: f64,
     pub current_a: f64,
     pub power_w: f64,
@@ -283,9 +389,96 @@ impl ConductionThermalNetwork<'_> {
         initial_energy_increments_j: &[f64],
         cancelled: impl FnMut() -> bool,
     ) -> Result<ConductionCircuitEnthalpyCandidate<'t, C>, Error> {
+        self.step_circuit_bound(
+            thermal,
+            target_s,
+            circuit,
+            ports,
+            graph_resistors,
+            &[],
+            assembly,
+            field_controls,
+            controls,
+            initial_energy_increments_j,
+            cancelled,
+        )
+    }
+
+    /// Refresh the spatial conductor AND every other source-bound resistor
+    /// from the same cell temperatures and phase coordinates in each coupled
+    /// trial. Geometry, electrical basis and the accepted source selections are
+    /// retained; the original material network owns all property evaluation.
+    ///
+    /// Each lumped resistor occupies its whole receiving cell. That cell must
+    /// be distinct from the spatial body's full-volume cells, so two electrical
+    /// representations cannot heat the same material volume twice. Thermal
+    /// links may connect these bodies through the existing shared network.
+    /// Source failure, missing/changed binding or cancellation publishes none
+    /// of the proposed field, charge, flux, material or enthalpy states.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_material_circuit_candidate<'t, C: PlanarConductorMaterial>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        circuit: &ConductionCircuit<C>,
+        ports: &[f64],
+        graph_resistors: &[CellResistor],
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<ConductionCircuitEnthalpyCandidate<'t, C>, Error> {
+        if cancelled() {
+            return Err(CircuitEnthalpyError::Cancelled);
+        }
+        if graph_resistors.len() != circuit.material_resistors.len() {
+            return Err(invalid(
+                "complete accepted material-resistor bindings required",
+            ));
+        }
+        let destinations = graph_resistors
+            .iter()
+            .map(|r| r.destination)
+            .collect::<Vec<_>>();
+        self.step_circuit_bound(
+            thermal,
+            target_s,
+            circuit,
+            ports,
+            &destinations,
+            graph_resistors,
+            assembly,
+            field_controls,
+            controls,
+            initial_energy_increments_j,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_circuit_bound<'t, C: PlanarConductorMaterial>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        circuit: &ConductionCircuit<C>,
+        ports: &[f64],
+        graph_resistors: &[ResistorCell],
+        material_resistors: &[CellResistor],
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ConductionCircuitEnthalpyCandidate<'t, C>, Error> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
         super::super::admit_driver_unknowns(thermal, controls, initial_energy_increments_j)?;
+        if material_resistors.len() != circuit.material_resistors.len() {
+            return Err(invalid(
+                "source-bound graph resistors require the material circuit thermal step",
+            ));
+        }
         let dt = finite(target_s - thermal.time_s())?;
         if dt <= 0.0
             || circuit.time_s.to_bits() != thermal.time_s().to_bits()
@@ -343,16 +536,42 @@ impl ConductionThermalNetwork<'_> {
         }
         let network = MaterialNetwork {
             cells: self.cells,
-            resistors: &[],
+            resistors: material_resistors,
             links: self.links,
         };
+        let bases = circuit
+            .material_resistors
+            .iter()
+            .map(|r| (r.branch, r.conductor.source_basis()))
+            .collect::<Vec<_>>();
         let prepared = network
-            .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
+            .prepare_with_bases(thermal, &bases, || (*cancel.borrow_mut())())
             .map_err(material)?;
         let routes = self.admit_routes(thermal, problem, &cancel)?;
+        for binding in material_resistors {
+            check(&cancel)?;
+            if routes.contains(&binding.destination.cell) {
+                return Err(invalid(
+                    "a whole-cell material resistor cannot reuse the spatial conductor's volume",
+                ));
+            }
+        }
         let accepted = prepared
             .resolve(thermal, || (*cancel.borrow_mut())())
             .map_err(material)?;
+        for original in &circuit.material_resistors {
+            check(&cancel)?;
+            let next = accepted
+                .resistors
+                .iter()
+                .find(|r| r.branch == original.branch)
+                .ok_or_else(|| invalid("accepted material-resistor branch is absent"))?;
+            if !same_conductor(&original.conductor, &next.conductor) {
+                return Err(invalid(
+                    "accepted graph-resistor geometry and sources must match the actual thermal state",
+                ));
+            }
+        }
         let initial = self.materials_at(problem, &accepted.source, &routes, &cancel)?;
         if initial.iter().zip(problem.conductors()).any(|(a, b)| {
             !a.has_same_electrical_source(b)
@@ -381,6 +600,7 @@ impl ConductionThermalNetwork<'_> {
                     .map_err(field_error)?;
                 let candidate = circuit.trial(
                     next,
+                    coefficients.resistors,
                     target_s,
                     ports,
                     field_controls,
@@ -433,6 +653,7 @@ impl<C: PlanarConductorMaterial> ConductionCircuit<C> {
     fn trial(
         &self,
         problem: PlanarConduction<C>,
+        mut material_resistors: Vec<MaterialResistor>,
         target_s: f64,
         ports: &[f64],
         field_controls: ConductionControls,
@@ -450,7 +671,10 @@ impl<C: PlanarConductorMaterial> ConductionCircuit<C> {
             )
             .map_err(field_error)?;
         let ohms = resistance.resistance_ohm();
-        let graph = stamp(&self.graph, &self.terminal, ohms)?;
+        let mut graph = stamp(&self.graph, &self.terminal, ohms)?;
+        if !self.material_resistors.is_empty() {
+            graph = stamp_material_resistors(&graph, &self.terminal, &mut material_resistors)?;
+        }
         let dae = assemble_circuit(&graph).map_err(electrical)?;
         let x0 = consistent(&dae, &self.fluxes_wb, &self.charges_c, ports)?;
         check(cancel)?;
@@ -546,21 +770,35 @@ impl<C: PlanarConductorMaterial> ConductionCircuit<C> {
                 continue;
             }
             if let Branch::Resistor { ohms } = law {
+                let conductor = material_resistors
+                    .iter()
+                    .find(|r| r.branch == branch)
+                    .map(|r| &r.conductor);
                 let voltage_v = finite(voltage(a) - voltage(b))?;
                 let current_a = finite(voltage_v / ohms)?;
-                let power_w = finite(voltage_v * current_a)?;
+                let electrical_power_w = finite(voltage_v * current_a)?;
+                let power_w = match conductor {
+                    Some(source) => source
+                        .joule_power_w(current_a)
+                        .map_err(MaterialCircuitError::Conductor)?,
+                    None => electrical_power_w,
+                };
                 let q = finite(dt * power_w)?;
                 if power_w < 0.0
                     || (voltage_v != 0.0 && power_w == 0.0)
                     || (power_w != 0.0 && q == 0.0)
                     || finite(current_a * ohms * current_a - power_w)?.abs()
                         > controls.power_tolerance_w
+                    || finite(electrical_power_w - power_w)?.abs() > controls.power_tolerance_w
                 {
-                    return Err(invalid("fixed graph-resistor work/heat is unrepresentable"));
+                    return Err(invalid(
+                        "graph-resistor work/heat is unrepresentable or inconsistent",
+                    ));
                 }
                 heat_j = finite(heat_j + q)?;
                 graph_resistors.push(ConductionCircuitResistorHeat {
                     branch,
+                    conductor: conductor.cloned(),
                     voltage_v,
                     current_a,
                     power_w,
@@ -588,6 +826,7 @@ impl<C: PlanarConductorMaterial> ConductionCircuit<C> {
             fluxes_wb,
             charges_c,
             time_s: target_s,
+            material_resistors,
         };
         let step = ConductionCircuitStep {
             native,
