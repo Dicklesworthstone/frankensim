@@ -125,12 +125,18 @@ enum Listener {
 struct ListenerMedium { density: f64, sound_speed: f64, gas: Option<GasState> }
 impl ListenerMedium {
     fn of(gas: &GasState) -> Self { Self { density: gas.density, sound_speed: gas.sound_speed, gas: Some(*gas) } }
-    /// The observer consumes rho (amplitude) and c (time of flight) bit for bit;
-    /// two complete states must also be the same state.
+    /// The observer consumes rho (amplitude) and c (time of flight) bit for bit.
+    /// If either source claims a complete gas state, both must retain and match
+    /// that complete state. A receiver-only (rho, c) tuple cannot prove that its
+    /// composition, temperature and pressure are the same as a sourced medium.
     fn agrees(&self, other: &Self) -> bool {
         self.density.to_bits() == other.density.to_bits()
             && self.sound_speed.to_bits() == other.sound_speed.to_bits()
-            && match (self.gas, other.gas) { (Some(a), Some(b)) => a == b, _ => true }
+            && match (self.gas, other.gas) {
+                (Some(a), Some(b)) => a == b,
+                (None, None) => true,
+                _ => false,
+            }
     }
 }
 // The receiver's numerical medium must agree with the complete state being
@@ -539,11 +545,23 @@ mod tests {
         );
         assert!(receiver_listener(observed, Some(&inlet)).is_err());
         assert!(!ListenerMedium::of(&exterior).agrees(&ListenerMedium::of(&inlet)));
+        let receiver_only = match receiver_listener(observed, None).unwrap() {
+            Listener::Gas(medium) => medium,
+            Listener::Unconstrained(_) => unreachable!("receiver declares a gas medium"),
+        };
         assert_eq!(
-            receiver_listener(observed, None).unwrap(),
-            Listener::Gas(ListenerMedium {
+            receiver_only,
+            ListenerMedium {
                 density: exterior.density, sound_speed: exterior.sound_speed, gas: None,
-            }),
+            },
+        );
+        assert!(
+            !receiver_only.agrees(&ListenerMedium::of(&exterior)),
+            "matching rho/c without a retained complete gas cannot prove material compatibility"
+        );
+        assert!(
+            receiver_only.agrees(&receiver_only),
+            "two receiver-only media with the same consumed coefficients remain compatible"
         );
     }
     #[test]
