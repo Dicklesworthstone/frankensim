@@ -9204,3 +9204,38 @@ This motion wrapper uses the prescribed-partition contact entrypoint. The separa
 The scope remains frozen poses, supplied positive normal patches, matching finite elliptical contact and orthogonal thermal faces, negligible interface resistance/storage, and uniform temperature within each patch. Temperature continuation may change static/kinetic Coulomb coefficients only; stiffness, region decomposition and source/model identities remain fixed. Normal solving, moving footprints, impact-loss partition and variable-stiffness thermoelastic work remain separate owners.
 
 Four G0/G1/G5 tests in `rigid_friction_heat_network.rs` cover an independently eliminated three-body/two-interface reference with shared middle-body mobility and shared finite heat capacity, retained second-step input permutation, source/budget/cancellation/competing-owner rollback and exact retry, and zero-friction hot-to-cold conduction. The reference interface temperatures are 304.69405993744004 K and 303.18187043010846 K; physical heats are 0.17343547971344292 J and 0.088803662273099 J. Tests admit 2e-7 K and 1e-9 J respectively. Four existing single-interface regressions also pass in the bounded native source-selected lane; this is not full workspace/DSR verification.
+
+
+## Finite-gas rocket propulsion and translation
+
+`rocket_blowdown::GasRocketState` binds an immutable source-bearing finite
+reservoir to the native `fs_mbd::rocket::RocketState`. Propellant mass is derived
+from the reservoir, while dry mass includes the tank/container. Callers cannot
+author or mutate the two inventories independently. Each step accepts the
+original material owner's source-resolved adiabatic blowdown and derives the
+mechanical forcing from its accepted extensive quantities:
+`mass_flow = expelled_mass / duration` and
+`effective_exhaust_velocity = axial_impulse / expelled_mass` along an explicit
+finite unit thrust direction in the matching caller-declared inertial frame.
+The frame identity is an admission check, not a coordinate transform or proof
+that the caller's frame is inertial. Endpoint rate resampling cannot substitute
+for the accepted mass and impulse, and nozzle pressure thrust is included once.
+
+The adapter retains the original gas, source/nozzle and dynamics reports. Both
+candidate endpoints publish together only after remaining/consumed propellant
+mass checks, a directed thrust-impulse check, and a final cancellation poll.
+Invalid state or forcing, source-domain failures, unsupported nozzle regimes,
+failed balances and cancellation publish neither endpoint. The existing gas
+mass tolerance bounds cross-owner discrepancies; the actual residuals remain
+visible rather than being repaired or hidden.
+
+The remaining reservoir follows the exact frozen-composition adiabatic
+thermodynamic path. The finite-time mass-flow/thrust quadrature is second order
+for smooth solutions; native mechanics integrates the resulting step-held
+forcing analytically. Refinement tests cover both velocity and position. This
+is comoving, spatially mixed, fixed-volume gas storage on a point vehicle, not
+an attitude, slosh, combustion, real-gas, wall-heating, rotating-frame or full
+world-frame exhaust-energy model. The `rocket_flight` example runs the complete
+source -> nozzle -> finite tank -> variable-mass translation journey using the
+existing explicitly manufactured gas-source fixture and emits time-resolved
+mass, thrust, position, velocity and coupling residuals.
