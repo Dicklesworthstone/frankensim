@@ -565,39 +565,27 @@ impl IdealGasReactionEquilibriumV1 {
         &self.terms
     }
 
-    /// Evaluate standard reaction Gibbs energy and its dimensionless
-    /// pressure-activity equilibrium constant.
-    ///
-    /// Version 1 evaluates every NASA-9 model once in canonical species order,
-    /// accumulates `delta_g = sum_i(nu_i g_i^0)`, then computes
-    /// `ln(K_p) = -delta_g / (R T)`. `K_p` uses dimensionless ideal-gas
-    /// activities `p_i / p0`; the common `p0` is retained in every receipt.
-    /// If deterministic exponentiation overflows or underflows, the finite log
-    /// value remains successful and the direct constant is explicitly absent.
-    ///
-    /// # Errors
-    /// Refuses the first nested species evaluation or non-finite fixed-order
-    /// intermediate. No partial evaluation escapes.
-    pub fn evaluate(
+    // One arithmetic owner for complete reports and receipt-free kinetic trials.
+    fn evaluate_numbers(
         &self,
         temperature: Temperature,
-    ) -> Result<IdealGasReactionEquilibriumEvaluationV1, ReactionEquilibriumErrorV1> {
-        let mut term_receipts = Vec::new();
-        term_receipts
-            .try_reserve_exact(self.terms.len())
-            .map_err(|_| ReactionEquilibriumErrorV1::AllocationRefused {
-                stage: ReactionEquilibriumAllocationStageV1::EvaluationReceipts,
-                requested: self.terms.len(),
-            })?;
+        mut term_receipts: Option<&mut Vec<ReactionEquilibriumTermReceiptV1>>,
+    ) -> Result<
+        (f64, f64, EquilibriumConstantStatusV1, Option<ReactionEquilibriumConstantV1>),
+        ReactionEquilibriumErrorV1,
+    > {
         let mut delta_g = 0.0f64;
         for term in &self.terms {
-            let evaluation = term.model.evaluate(temperature).map_err(|source| {
-                ReactionEquilibriumErrorV1::SpeciesEvaluation {
-                    species: term.species().clone(),
-                    source,
-                }
+            let (gibbs, source_receipt) = if term_receipts.is_some() {
+                term.model.evaluate(temperature).map(|evaluation| {
+                    (evaluation.properties().g().value(), Some(evaluation.receipt().clone()))
+                })
+            } else {
+                term.model.evaluate_properties(temperature)
+                    .map(|properties| (properties.g().value(), None))
+            }.map_err(|source| ReactionEquilibriumErrorV1::SpeciesEvaluation {
+                species: term.species().clone(), source,
             })?;
-            let gibbs = evaluation.properties().g().value();
             let contribution = (term.coefficient as f64) * gibbs;
             if !contribution.is_finite() {
                 return Err(ReactionEquilibriumErrorV1::UnrepresentableArithmeticValue {
@@ -614,13 +602,15 @@ impl IdealGasReactionEquilibriumV1 {
                     bits: delta_g.to_bits(),
                 });
             }
-            term_receipts.push(ReactionEquilibriumTermReceiptV1 {
-                species: term.species().clone(),
-                coefficient: term.coefficient,
-                standard_gibbs_bits: gibbs.to_bits(),
-                contribution_bits: contribution.to_bits(),
-                standard_state_receipt: evaluation.receipt().clone(),
-            });
+            if let Some(receipts) = term_receipts.as_mut() {
+                receipts.push(ReactionEquilibriumTermReceiptV1 {
+                    species: term.species().clone(),
+                    coefficient: term.coefficient,
+                    standard_gibbs_bits: gibbs.to_bits(),
+                    contribution_bits: contribution.to_bits(),
+                    standard_state_receipt: source_receipt.expect("complete source evaluation"),
+                });
+            }
         }
 
         let rt = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * temperature.value();
@@ -650,6 +640,35 @@ impl IdealGasReactionEquilibriumV1 {
                 Some(ReactionEquilibriumConstantV1::new(raw_equilibrium_constant)),
             )
         };
+        Ok((delta_g, log_equilibrium_constant, status, equilibrium_constant))
+    }
+
+    /// Evaluate standard reaction Gibbs energy and its dimensionless
+    /// pressure-activity equilibrium constant.
+    ///
+    /// Version 1 evaluates every NASA-9 model once in canonical species order,
+    /// accumulates `delta_g = sum_i(nu_i g_i^0)`, then computes
+    /// `ln(K_p) = -delta_g / (R T)`. `K_p` uses dimensionless ideal-gas
+    /// activities `p_i / p0`; the common `p0` is retained in every receipt.
+    /// If deterministic exponentiation overflows or underflows, the finite log
+    /// value remains successful and the direct constant is explicitly absent.
+    ///
+    /// # Errors
+    /// Refuses the first nested species evaluation or non-finite fixed-order
+    /// intermediate. No partial evaluation escapes.
+    pub fn evaluate(
+        &self,
+        temperature: Temperature,
+    ) -> Result<IdealGasReactionEquilibriumEvaluationV1, ReactionEquilibriumErrorV1> {
+        let mut term_receipts = Vec::new();
+        term_receipts
+            .try_reserve_exact(self.terms.len())
+            .map_err(|_| ReactionEquilibriumErrorV1::AllocationRefused {
+                stage: ReactionEquilibriumAllocationStageV1::EvaluationReceipts,
+                requested: self.terms.len(),
+            })?;
+        let (delta_g, log_equilibrium_constant, status, equilibrium_constant) =
+            self.evaluate_numbers(temperature, Some(&mut term_receipts))?;
         let receipt = IdealGasReactionEquilibriumReceiptV1 {
             evaluator_version: REACTION_EQUILIBRIUM_EVALUATOR_VERSION_V1,
             fs_math_version: fs_math::VERSION,
@@ -1208,51 +1227,9 @@ impl ThermodynamicReverseRateClosureV1 {
             .equilibrium
             .evaluate(temperature)
             .map_err(|source| ReverseRateClosureErrorV1::Equilibrium { source })?;
-        let log_ratio = -equilibrium.log_equilibrium_constant().value();
-        let raw_ratio = fs_math::det::exp(log_ratio);
-        let (status, ratio, reverse_progress_rate_scale) = if raw_ratio.is_infinite() {
-            (
-                ReverseProgressRateStatusV1::LogOnlyRatioOverflow,
-                None,
-                None,
-            )
-        } else if raw_ratio == 0.0 {
-            (
-                ReverseProgressRateStatusV1::LogOnlyRatioUnderflow,
-                None,
-                None,
-            )
-        } else {
-            let ratio = ReverseToForwardProgressRateRatioV1::new(raw_ratio);
-            let raw_reverse = self.forward_progress_rate_scale.value() * raw_ratio;
-            if raw_reverse.is_infinite() {
-                (
-                    ReverseProgressRateStatusV1::LogOnlyScaleOverflow,
-                    Some(ratio),
-                    None,
-                )
-            } else if raw_reverse == 0.0 {
-                (
-                    ReverseProgressRateStatusV1::LogOnlyScaleUnderflow,
-                    Some(ratio),
-                    None,
-                )
-            } else if raw_reverse.is_finite() {
-                (
-                    ReverseProgressRateStatusV1::FinitePositive,
-                    Some(ratio),
-                    Some(ReactionProgressRateScaleV1(
-                        ReactionProgressRateQuantityV1::new(raw_reverse),
-                    )),
-                )
-            } else {
-                return Err(
-                    ReverseRateClosureErrorV1::UnrepresentableReverseProgressRateScale {
-                        bits: raw_reverse.to_bits(),
-                    },
-                );
-            }
-        };
+        let (log_ratio, status, ratio, reverse_progress_rate_scale) = reverse_rate_numbers(
+            self.forward_progress_rate_scale, equilibrium.log_equilibrium_constant().value(),
+        )?;
         let receipt = ThermodynamicReverseRateReceiptV1 {
             evaluator_version: REVERSE_RATE_CLOSURE_EVALUATOR_VERSION_V1,
             fs_math_version: fs_math::VERSION,
@@ -1274,6 +1251,62 @@ impl ThermodynamicReverseRateClosureV1 {
             receipt,
         })
     }
+}
+
+fn reverse_rate_numbers(
+    forward_progress_rate_scale: ReactionProgressRateScaleV1,
+    log_equilibrium_constant: f64,
+) -> Result<
+    (f64, ReverseProgressRateStatusV1, Option<ReverseToForwardProgressRateRatioV1>,
+        Option<ReactionProgressRateScaleV1>),
+    ReverseRateClosureErrorV1,
+> {
+    let log_ratio = -log_equilibrium_constant;
+    let raw_ratio = fs_math::det::exp(log_ratio);
+    let (status, ratio, reverse_progress_rate_scale) = if raw_ratio.is_infinite() {
+        (
+            ReverseProgressRateStatusV1::LogOnlyRatioOverflow,
+            None,
+            None,
+        )
+    } else if raw_ratio == 0.0 {
+        (
+            ReverseProgressRateStatusV1::LogOnlyRatioUnderflow,
+            None,
+            None,
+        )
+    } else {
+        let ratio = ReverseToForwardProgressRateRatioV1::new(raw_ratio);
+        let raw_reverse = forward_progress_rate_scale.value() * raw_ratio;
+        if raw_reverse.is_infinite() {
+            (
+                ReverseProgressRateStatusV1::LogOnlyScaleOverflow,
+                Some(ratio),
+                None,
+            )
+        } else if raw_reverse == 0.0 {
+            (
+                ReverseProgressRateStatusV1::LogOnlyScaleUnderflow,
+                Some(ratio),
+                None,
+            )
+        } else if raw_reverse.is_finite() {
+            (
+                ReverseProgressRateStatusV1::FinitePositive,
+                Some(ratio),
+                Some(ReactionProgressRateScaleV1(
+                    ReactionProgressRateQuantityV1::new(raw_reverse),
+                )),
+            )
+        } else {
+            return Err(
+                ReverseRateClosureErrorV1::UnrepresentableReverseProgressRateScale {
+                    bits: raw_reverse.to_bits(),
+                },
+            );
+        }
+    };
+    Ok((log_ratio, status, ratio, reverse_progress_rate_scale))
 }
 
 /// Exact-field replay receipt for one reverse-progress-rate closure.
@@ -1774,26 +1807,12 @@ impl DeclaredStoichiometricMassActionV1 {
         self.kinetic_order_convention
     }
 
-    /// Evaluate forward, reverse, and net progress for one activity state.
-    ///
-    /// Activities are canonicalized by `SpeciesId` and must cover all and only
-    /// the selected reaction's active terms. Version 1 evaluates directional
-    /// products in log space using the exact coefficient magnitudes, retains
-    /// finite positive-state log products across direct range loss, and publishes a signed
-    /// net rate only when both directional rates are directly representable.
-    /// An exactly absent participant gives its direction a zero rate with a
-    /// `ZeroActivity` status and negative-infinite log. No trace gas is invented.
-    ///
-    /// # Errors
-    /// Refuses activity count/identity drift, bounded receipt allocation,
-    /// nested thermodynamic closure failure, or an impossible non-finite
-    /// fixed-order intermediate. Expected exponential and multiplication
-    /// range loss is a successful explicit status.
-    pub fn evaluate(
+    fn activity_products(
         &self,
-        temperature: Temperature,
-        mut activities: Vec<IdealGasSpeciesActivityV1>,
-    ) -> Result<DeclaredStoichiometricMassActionEvaluationV1, StoichiometricMassActionErrorV1> {
+        activities: &mut [IdealGasSpeciesActivityV1],
+        retain_receipts: bool,
+    ) -> Result<(f64, f64, Vec<StoichiometricMassActionTermReceiptV1>),
+        StoichiometricMassActionErrorV1> {
         if activities.len() > MAX_REACTION_SPECIES_V1 {
             return Err(StoichiometricMassActionErrorV1::TooManyActivities {
                 offered: activities.len(),
@@ -1819,7 +1838,7 @@ impl DeclaredStoichiometricMassActionV1 {
                 });
             }
         }
-        for (term, activity) in terms.iter().zip(&activities) {
+        for (term, activity) in terms.iter().zip(activities.iter()) {
             match term.species().cmp(activity.species()) {
                 core::cmp::Ordering::Less => {
                     return Err(StoichiometricMassActionErrorV1::MissingSpeciesActivity {
@@ -1836,17 +1855,19 @@ impl DeclaredStoichiometricMassActionV1 {
         }
 
         let mut term_receipts = Vec::new();
-        term_receipts.try_reserve_exact(terms.len()).map_err(|_| {
-            StoichiometricMassActionErrorV1::AllocationRefused {
-                stage: MassActionAllocationStageV1::TermReceipts,
-                requested: terms.len(),
-            }
-        })?;
+        if retain_receipts {
+            term_receipts.try_reserve_exact(terms.len()).map_err(|_| {
+                StoichiometricMassActionErrorV1::AllocationRefused {
+                    stage: MassActionAllocationStageV1::TermReceipts,
+                    requested: terms.len(),
+                }
+            })?;
+        }
         let mut log_forward_activity_product = 0.0f64;
         let mut log_reverse_activity_product = 0.0f64;
         let mut zero_forward = false;
         let mut zero_reverse = false;
-        for (term, activity) in terms.iter().zip(&activities) {
+        for (term, activity) in terms.iter().zip(activities.iter()) {
             let absent = activity.value() == 0.0;
             let log_activity = if absent { f64::NEG_INFINITY }
                 else { fs_math::det::ln(activity.value()) };
@@ -1898,18 +1919,45 @@ impl DeclaredStoichiometricMassActionV1 {
                     },
                 );
             }
-            term_receipts.push(StoichiometricMassActionTermReceiptV1 {
-                species: activity.species().clone(),
-                coefficient: term.coefficient(),
-                activity_bits: activity.value().to_bits(),
-                log_activity_bits: log_activity.to_bits(),
-                direction,
-                log_contribution_bits: contribution.to_bits(),
-            });
+            if retain_receipts {
+                term_receipts.push(StoichiometricMassActionTermReceiptV1 {
+                    species: activity.species().clone(),
+                    coefficient: term.coefficient(),
+                    activity_bits: activity.value().to_bits(),
+                    log_activity_bits: log_activity.to_bits(),
+                    direction,
+                    log_contribution_bits: contribution.to_bits(),
+                });
+            }
         }
         if zero_forward { log_forward_activity_product = f64::NEG_INFINITY; }
         if zero_reverse { log_reverse_activity_product = f64::NEG_INFINITY; }
 
+        Ok((log_forward_activity_product, log_reverse_activity_product, term_receipts))
+    }
+
+    /// Evaluate forward, reverse, and net progress for one activity state.
+    ///
+    /// Activities are canonicalized by `SpeciesId` and must cover all and only
+    /// the selected reaction's active terms. Version 1 evaluates directional
+    /// products in log space using the exact coefficient magnitudes, retains
+    /// finite positive-state log products across direct range loss, and publishes a signed
+    /// net rate only when both directional rates are directly representable.
+    /// An exactly absent participant gives its direction a zero rate with a
+    /// `ZeroActivity` status and negative-infinite log. No trace gas is invented.
+    ///
+    /// # Errors
+    /// Refuses activity count/identity drift, bounded receipt allocation,
+    /// nested thermodynamic closure failure, or an impossible non-finite
+    /// fixed-order intermediate. Expected exponential and multiplication
+    /// range loss is a successful explicit status.
+    pub fn evaluate(
+        &self,
+        temperature: Temperature,
+        mut activities: Vec<IdealGasSpeciesActivityV1>,
+    ) -> Result<DeclaredStoichiometricMassActionEvaluationV1, StoichiometricMassActionErrorV1> {
+        let (log_forward_activity_product, log_reverse_activity_product, term_receipts) =
+            self.activity_products(&mut activities, true)?;
         let reverse_rate = self
             .reverse_rate_closure
             .evaluate(temperature)
@@ -1972,6 +2020,59 @@ impl DeclaredStoichiometricMassActionV1 {
             reverse_status,
             receipt,
         })
+    }
+
+    /// Evaluate only the signed net rate for a temporary numerical trial.
+    ///
+    /// The explicit forward scale and common kinetic multiplier come from the
+    /// caller's original kinetic source. The immutable equilibrium model is
+    /// borrowed rather than cloned to rebind that scale. All activity checks,
+    /// NASA values, detailed balance and directional range statuses use the
+    /// same arithmetic owners as complete evaluation. No receipt is constructed.
+    ///
+    /// The input activity allocation is supplied by the caller. Successful
+    /// evaluation performs no further allocation; errors may retain species
+    /// identities. A missing direct rate remains None, never a physical zero.
+    /// Accepted physical states must use the complete evaluation/report path.
+    ///
+    /// # Errors
+    /// Refuses the same physical inputs as a complete evaluation with the
+    /// supplied scale and multiplier, including invalid sources at zero multiplier.
+    pub fn evaluate_net_progress_with_scale(
+        &self,
+        temperature: Temperature,
+        mut activities: Vec<IdealGasSpeciesActivityV1>,
+        forward_scale: ReactionProgressRateScaleV1,
+        multiplier: Dimensionless,
+    ) -> Result<Option<NetReactionProgressRateV1>, StoichiometricMassActionErrorV1> {
+        let factor = multiplier.value();
+        if !factor.is_finite() || factor < 0.0 {
+            return Err(StoichiometricMassActionErrorV1::InvalidKineticMultiplier {
+                bits: factor.to_bits(),
+            });
+        }
+        let (log_forward, log_reverse, _) = self.activity_products(&mut activities, false)?;
+        let (_, log_equilibrium, _, _) = self.reverse_rate_closure.equilibrium()
+            .evaluate_numbers(temperature, None)
+            .map_err(|source| StoichiometricMassActionErrorV1::ReverseRateClosure {
+                source: ReverseRateClosureErrorV1::Equilibrium { source },
+            })?;
+        let (log_ratio, _, _, reverse_scale) = reverse_rate_numbers(forward_scale, log_equilibrium)
+            .map_err(|source| StoichiometricMassActionErrorV1::ReverseRateClosure { source })?;
+        let (forward_status, _, forward) = evaluate_mass_action_direction(
+            log_forward, Some(forward_scale), MassActionDirectionV1::Forward,
+        )?;
+        let (reverse_status, _, reverse) = evaluate_mass_action_direction(
+            log_reverse, reverse_scale, MassActionDirectionV1::Reverse,
+        )?;
+        let affinity = mass_action_affinity(log_forward, log_reverse, log_ratio);
+        let net = thermodynamic_net_progress(forward, reverse, affinity);
+        if factor == 1.0 {
+            return Ok(net);
+        }
+        let (_, forward) = multiply_mass_action_direction(forward_status, forward, factor);
+        let (_, reverse) = multiply_mass_action_direction(reverse_status, reverse, factor);
+        Ok(thermodynamic_net_progress(forward, reverse, affinity))
     }
 
     /// Apply one explicit nonnegative factor to BOTH kinetic directions.
@@ -2498,6 +2599,87 @@ impl DeclaredStoichiometricMassActionEvaluationV1 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn g5_trial_kinetic_progress_matches_complete_source_bound_evaluations() {
+        for law in [water_mass_action(2.5), isomer_mass_action(1, 7.0),
+            isomer_mass_action(1i128 << 53, 1.0)] {
+            for (temperature, reactant, product, scale, factor) in [
+                (200.0, 0.75, 0.5, 2.5, 1.0),
+                (800.0, 0.75, 0.5, 3.0, 2.5),
+                (6000.0, 2.0, 0.5, 1e300, 1e300),
+                (1000.0, 0.75, 0.5, 1e-300, 1e-100),
+                (800.0, 0.0, 0.5, 3.0, 1.0),
+                (800.0, 0.75, 0.0, 3.0, 1.0),
+                (800.0, 0.0, 0.0, 3.0, 2.5),
+                (800.0, 0.75, 0.5, 3.0, 0.0),
+                (500.0, f64::from_bits(1), 1.0, 3.0, 1.0),
+                (500.0, 1.0_f64.next_up(), 1.0, 7.0, 1.0),
+            ] {
+                let activities: Vec<_> = law.reverse_rate_closure().equilibrium().terms()
+                    .iter().rev().map(|term| {
+                        activity(term.species().as_str(),
+                            if term.coefficient() < 0 { reactant } else { product })
+                    }).collect();
+                let scale = progress_rate_scale(scale);
+                let complete = DeclaredStoichiometricMassActionV1::new(
+                    ThermodynamicReverseRateClosureV1::new(
+                        law.reverse_rate_closure().equilibrium().clone(), scale,
+                    ), law.kinetic_order_convention(),
+                ).evaluate_with_kinetic_multiplier(
+                    Temperature::new(temperature), activities.clone(), Dimensionless::new(factor),
+                ).unwrap();
+                let trial = law.evaluate_net_progress_with_scale(
+                    Temperature::new(temperature), activities, scale, Dimensionless::new(factor),
+                ).unwrap();
+                assert_eq!(trial.map(|value| value.value().to_bits()),
+                    complete.net_progress_rate().map(|value| value.value().to_bits()));
+                assert_eq!(complete.receipt().terms().len(),
+                    law.reverse_rate_closure().equilibrium().terms().len());
+                assert_eq!(complete.reverse_rate().forward_progress_rate_scale(), scale);
+            }
+        }
+        let law = isomer_mass_action(1, 7.0);
+        let near_equilibrium = law.evaluate_net_progress_with_scale(
+            Temperature::new(500.0),
+            vec![activity("B", 1.0), activity("A", 1.0_f64.next_up())],
+            progress_rate_scale(7.0), Dimensionless::new(1.0),
+        ).unwrap().unwrap().value();
+        assert!(near_equilibrium > 0.0, "small chemical driving force must not become equilibrium");
+    }
+
+    #[test]
+    fn g3_trial_kinetic_progress_preserves_source_activity_and_multiplier_refusals() {
+        let law = water_mass_action(1.0);
+        let scale = progress_rate_scale(1.7);
+        let complete = DeclaredStoichiometricMassActionV1::new(
+            ThermodynamicReverseRateClosureV1::new(
+                law.reverse_rate_closure().equilibrium().clone(), scale,
+            ), law.kinetic_order_convention(),
+        );
+        let valid = vec![activity("H2", 0.75), activity("H2O", 0.5), activity("O2", 1.25)];
+        for (temperature, factor, activities) in [
+            (0.0, 1.0, valid.clone()),
+            (f64::NAN, 1.0, valid.clone()),
+            (1e6, 0.0, valid.clone()),
+            (800.0, -1.0, valid.clone()),
+            (800.0, f64::INFINITY, valid.clone()),
+            (800.0, f64::NAN, valid.clone()),
+            (800.0, 1.0, vec![]),
+            (800.0, 1.0, vec![activity("H2", 1.0), activity("H2", 2.0), activity("H2O", 1.0)]),
+            (800.0, 1.0, vec![activity("A", 1.0), activity("H2O", 1.0), activity("O2", 1.0)]),
+            (800.0, 1.0, vec![activity("H2", 1.0), activity("H2O", 1.0), activity("X", 1.0)]),
+        ] {
+            let expected = complete.evaluate_with_kinetic_multiplier(
+                Temperature::new(temperature), activities.clone(), Dimensionless::new(factor),
+            ).map(|value| value.net_progress_rate().map(|rate| rate.value().to_bits()));
+            let trial = law.evaluate_net_progress_with_scale(
+                Temperature::new(temperature), activities, scale, Dimensionless::new(factor),
+            ).map(|value| value.map(|rate| rate.value().to_bits()));
+            assert!(expected.is_err());
+            assert_eq!(trial, expected);
+        }
+    }
+
     mod entropy;
     mod rate_multiplier;
     use super::*;
