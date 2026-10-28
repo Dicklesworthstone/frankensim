@@ -192,4 +192,69 @@ mod tests {
         assert_eq!(rod.tension_link_states().unwrap()[0].tension_n, 0.0);
         assert!(SpatialEnergy::new(&rod).coupled(1, 4));
     }
+
+    #[test]
+    fn root_reaction_keeps_small_weight_beside_remote_stored_energy() {
+        let gate = CancelGate::new();
+        let mut rod = SpatialMaterialRod::try_straight(1.0, vec![section(); 4]).unwrap()
+            .with_gravity([0.0, -1e-6, 0.0], &gate).unwrap();
+        rod.rod.positions[4][0] = 1e8;
+        assert!(rod.energy_j().unwrap() > 1e17);
+        let before = rod.positions_m().to_vec();
+        let force = rod.gravity_nodal_forces_n().unwrap()[0][1];
+        let reaction = rod.root_support_reaction(&gate).unwrap();
+        assert_eq!(reaction.force_n[1], Some(-force));
+        assert_eq!(rod.positions_m(), before.as_slice());
+        gate.request();
+        assert!(rod.root_support_reaction(&gate).is_err());
+        assert_eq!(rod.positions_m(), before.as_slice());
+    }
+
+    #[test]
+    fn root_offset_link_and_weight_reactions_match_direct_force_and_moment() {
+        let gate = CancelGate::new();
+        let section = section();
+        let ea = section.elastic().axial_stiffness_n();
+        let offset = [0.0, 0.02, 0.01];
+        let link = MaterialTensionLink::try_new(section.elastic().clone(), [
+            TensionLinkAttachment { node: 0, offset_body_m: offset },
+            TensionLinkAttachment { node: 4, offset_body_m: offset },
+        ], 0.9, 1, 0.2).unwrap();
+        let link_mass = link.reference_mass_kg();
+        let rod = SpatialMaterialRod::try_straight(1.0, vec![section; 4]).unwrap()
+            .with_tension_links(vec![link], &gate).unwrap()
+            .with_gravity([0.0, -9.0, 1.0], &gate).unwrap();
+        let tension = ea * ((1.0 - 0.9) / 0.9);
+        let weight = rod.gravity_nodal_forces_n().unwrap()[0];
+        let expected_force = [-tension, -weight[1], -weight[2]];
+        let expected_moment = Vec3::new(offset[0], offset[1], offset[2])
+            .cross(Vec3::new(-tension, 4.5 * link_mass, -0.5 * link_mass));
+        let reaction = rod.root_support_reaction(&gate).unwrap();
+        for c in 0..3 {
+            assert!((reaction.force_n[c].unwrap() - expected_force[c]).abs() < 1e-9);
+            assert!((reaction.moment_body_nm.unwrap()[c]
+                - [expected_moment.x, expected_moment.y, expected_moment.z][c]).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn tension_link_span_and_forces_ignore_large_common_world_translation() {
+        let rod = linked([0.0, 0.02, 0.01], 0.7);
+        let mut base = rod.rod.clone();
+        perturb(&mut base, 4, 5, 0.1).unwrap();
+        let link = &rod.tension_links[0];
+        let reference = link.state_for(&base).unwrap();
+        let mut translated = base.clone();
+        for position in &mut translated.positions {
+            for value in position { *value += 2.0_f64.powi(40); }
+        }
+        let moved = link.state_for(&translated).unwrap();
+        assert_eq!(moved.length_m, reference.length_m);
+        assert_eq!(moved.stored_energy_j, reference.stored_energy_j);
+        assert_eq!(moved.force_n, reference.force_n);
+        assert_eq!(moved.moment_body_nm, reference.moment_body_nm);
+        let rounded = (0..3).map(|c|
+            (moved.endpoints_m[1][c] - moved.endpoints_m[0][c]).powi(2)).sum::<f64>().sqrt();
+        assert!((rounded - reference.length_m).abs() > 1e-6);
+    }
 }

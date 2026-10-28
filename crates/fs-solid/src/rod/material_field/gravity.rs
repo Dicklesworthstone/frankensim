@@ -7,12 +7,12 @@
 //! It is a consistent static body-load vector, NOT a dynamic mass matrix.
 
 use fs_exec::CancelGate;
-use fs_ga::{So3Tangent, Vec3};
 use fs_material::section::ConcentricShearSection;
 
 use super::{SpatialMaterialRod, SpatialRodError, checkpoint};
 use super::supports::RodSupportReaction;
 use crate::rod::Rod;
+use crate::rod::derivatives::{RodEnergy, perturb};
 
 /// Immutable reference inventory shared by thermal snapshots of one specimen.
 /// Original sections retain the actual density receipts and reference geometry.
@@ -149,9 +149,8 @@ impl SpatialMaterialRod {
                 [node as f64 * rod.l0, 0.0, 0.0], |geometry| geometry.positions_m()[node]);
             for c in 0..3 { potential -= force[c] * (position[c] - reference[c]); }
         }
-        // Nodal forces above already account for link centerline translations.
-        // Only their rotating offsets remain; adding whole endpoint potentials
-        // here would count that translational work twice.
+        // Nodal forces already include link translations; only rotating offsets
+        // remain. Adding complete endpoint potentials would count weight twice.
         if !self.tension_links.is_empty() {
             potential += self.link_gravity_offset_potential(rod, load.acceleration_m_s2)?;
         }
@@ -162,7 +161,6 @@ impl SpatialMaterialRod {
     }
 
     // Same objective in every Newton probe, line search and reaction recovery.
-    // The legacy no-gravity path preserves its original arithmetic exactly.
     pub(super) fn equilibrium_energy_for(&self, rod: &Rod) -> Result<f64, SpatialRodError> {
         let internal = self.energy_for(rod)?;
         if self.gravity.is_none() { return Ok(internal); }
@@ -173,12 +171,12 @@ impl SpatialMaterialRod {
         Ok(value)
     }
 
-    /// Recover the implicit root clamp's force and body-frame moment by the
-    /// same centred energy differences used by the existing residual. Root
-    /// weight participates, even though root coordinates never enter Newton.
-    /// Tip loads act on a different node and have zero root partial derivative.
-    /// Use `support_reactions` with the applied tip load to assess free residuals.
-    /// This is a numerical reaction, not a forced whole-body balance closure.
+    /// Recover root-clamp force and body-frame moment through the SAME local
+    /// derivative owner as Newton and additional-support recovery. Only incident
+    /// segment energies are differenced; root link forces and gravitational
+    /// force/offset moments are included analytically, once each.
+    /// Tip loads have zero root derivative. This is a numerical reaction, not a
+    /// forced whole-body balance closure. The accepted pose is never modified.
     ///
     /// # Errors
     /// Source-domain, canonical-rotation, arithmetic or cancellation failures.
@@ -186,25 +184,21 @@ impl SpatialMaterialRod {
         &self, gate: &CancelGate,
     ) -> Result<RodSupportReaction, SpatialRodError> {
         checkpoint(gate)?;
+        let energy = super::derivatives::SpatialEnergy::new(self);
+        energy.value(&self.rod)?;
+        let mut plus = self.rod.clone();
+        let mut minus = self.rod.clone();
         let mut reaction = [0.0; 6];
         for (coordinate, value) in reaction.iter_mut().enumerate() {
             checkpoint(gate)?;
             let eps = super::super::fd_step(coordinate, self.probe_translation_scale_m(), 3e-6)?;
-            let mut plus = self.rod.clone();
-            let mut minus = self.rod.clone();
-            if coordinate < 3 {
-                plus.positions[0][coordinate] += eps;
-                minus.positions[0][coordinate] -= eps;
-            } else {
-                let mut angle = [0.0; 3];
-                angle[coordinate - 3] = eps;
-                let tangent = So3Tangent::new(Vec3::new(angle[0], angle[1], angle[2]));
-                plus.frames[0] = plus.frames[0].body_plus(tangent)
-                    .map_err(super::super::group_error)?;
-                minus.frames[0] = minus.frames[0].body_plus(tangent.scale(-1.0))
-                    .map_err(super::super::group_error)?;
-            }
-            *value = (self.equilibrium_energy_for(&plus)? - self.equilibrium_energy_for(&minus)?) / (2.0 * eps);
+            perturb(&mut plus, 0, coordinate, eps)?;
+            perturb(&mut minus, 0, coordinate, -eps)?;
+            *value = energy.derivative(&self.rod, &plus, &minus, 0, coordinate, eps)?;
+            plus.positions[0] = self.rod.positions[0];
+            minus.positions[0] = self.rod.positions[0];
+            plus.frames[0] = self.rod.frames[0];
+            minus.frames[0] = self.rod.frames[0];
         }
         if !reaction.iter().all(|v| v.is_finite()) {
             return Err(SpatialRodError::Invalid("root reaction is unrepresentable"));

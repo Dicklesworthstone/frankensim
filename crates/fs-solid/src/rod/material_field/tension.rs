@@ -5,6 +5,8 @@
 //! rotate with the original nodal frames, so the original energy gradient also
 //! supplies their moments. This is a quasistatic taut-link reduction, not a
 //! sagging cable, a dynamic hair ribbon, or a friction/thermal-history model.
+//! Constitutive spans use relative centerline positions and relative rotated
+//! offsets, not differences of rounded absolute endpoint observations.
 
 use fs_exec::CancelGate;
 use fs_ga::{So3, Vec3};
@@ -41,9 +43,11 @@ pub struct MaterialTensionLink {
 /// Physical observations at the actual rod configuration.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TensionLinkState {
-    /// Current endpoint coordinates [m], in attachment order.
+    /// Current endpoint coordinates [m], in attachment order. These absolute
+    /// observations can lose small offsets at large world translations; the
+    /// constitutive span and forces below are computed from relative geometry.
     pub endpoints_m: [[f64; 3]; 2],
-    /// Current endpoint distance [m].
+    /// Current endpoint distance [m], evaluated without absolute-offset cancellation.
     pub length_m: f64,
     /// max((length-natural_length)/natural_length, 0).
     pub tensile_strain: f64,
@@ -171,6 +175,7 @@ impl MaterialTensionLink {
 
     pub(super) fn state_for(&self, rod: &Rod) -> Result<TensionLinkState, SpatialRodError> {
         let mut endpoints_m = [[0.0; 3]; 2];
+        let mut offsets_world_m = [[0.0; 3]; 2];
         for (i, attachment) in self.attachments.iter().enumerate() {
             let position = rod
                 .positions
@@ -178,10 +183,20 @@ impl MaterialTensionLink {
                 .ok_or(SpatialRodError::Invalid(
                     "tension link attachment is outside the rod",
                 ))?;
-            let offset = rotate(rod.frames[attachment.node], attachment.offset_body_m)?;
-            endpoints_m[i] = std::array::from_fn(|c| position[c] + offset[c]);
+            offsets_world_m[i] = rotate(rod.frames[attachment.node], attachment.offset_body_m)?;
+            endpoints_m[i] = std::array::from_fn(|c| position[c] + offsets_world_m[i][c]);
         }
-        let delta: [f64; 3] = std::array::from_fn(|c| endpoints_m[1][c] - endpoints_m[0][c]);
+        if endpoints_m.iter().flatten().any(|value| !value.is_finite()) {
+            return Err(SpatialRodError::Invalid(
+                "tension link absolute endpoint observation is unrepresentable",
+            ));
+        }
+        // Do not round small rotating offsets into large absolute positions
+        // before subtraction. Already-lost centerline precision is not recovered.
+        let [a, b] = self.attachments.map(|attachment| attachment.node);
+        let delta: [f64; 3] = std::array::from_fn(|c|
+            (rod.positions[b][c] - rod.positions[a][c])
+                + (offsets_world_m[1][c] - offsets_world_m[0][c]));
         let length_m = det::hypot(det::hypot(delta[0], delta[1]), delta[2]);
         if !length_m.is_finite() || length_m <= 0.0 {
             return Err(SpatialRodError::Invalid(
