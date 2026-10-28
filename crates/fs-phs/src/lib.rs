@@ -133,6 +133,25 @@ impl QuadraticStorage {
 }
 
 impl Storage for QuadraticStorage {
+    fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], mid: &[f64]) -> Option<f64> {
+        // Evaluate H(b)-H(a)-gradH(mid)·(b-a) without subtracting endpoint
+        // energies. Retain represented-midpoint rounding and admitted tiny
+        // matrix asymmetry. Scale coefficients before sums to avoid overflow.
+        let mut remainder = 0.0;
+        for i in 0..self.n {
+            let mut row = 0.0;
+            for j in 0..self.n {
+                let qij = self.q[i * self.n + j];
+                let qji = self.q[j * self.n + i];
+                let offset = (a[j] - mid[j]) + (b[j] - mid[j]);
+                row += (0.25 * qij + 0.25 * qji) * offset
+                    + (0.5 * qji - 0.5 * qij) * mid[j];
+            }
+            remainder += (b[i] - a[i]) * row;
+        }
+        Some(remainder)
+    }
+
     fn exact_quadratic_matrix(&self) -> Option<&[f64]> {
         Some(&self.q)
     }
@@ -209,6 +228,13 @@ pub struct SumStorage {
 }
 
 impl Storage for SumStorage {
+    fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], mid: &[f64]) -> Option<f64> {
+        let na = self.a.1;
+        let left = self.a.0.midpoint_energy_remainder(&a[..na], &b[..na], &mid[..na])?;
+        let right = self.b.0.midpoint_energy_remainder(&a[na..], &b[na..], &mid[na..])?;
+        Some(left + right)
+    }
+
     fn quadratic_part(&self) -> Option<linear_exact::QuadraticPart> {
         let a = self.a.0.quadratic_part()?;
         let b = self.b.0.quadratic_part()?;
@@ -1265,7 +1291,8 @@ pub fn step_descriptor(
         y[p] = acc;
     }
     let h1 = sys.storage.hamiltonian(&x1);
-    let delta_h = h1 - h0;
+    let delta_h = storage_energy_change(sys.storage.as_ref(), x0, &x1,
+        &mut vec![0.0; n], &mut vec![0.0; n]);
     let mut dissipated = 0.0;
     for i in 0..n {
         let mut rd = 0.0;
@@ -1394,6 +1421,34 @@ fn discrete_gradient_into_prefix_unchecked(
             dg[i] += corr * (b[i] - a[i]);
         }
     }
+}
+
+// Constitutive H(b)-H(a), independent of the update equation, port work and
+// dissipation. Owners with an analytic remainder avoid cancellation of large
+// arbitrary energy datums. Prepared stepping lends its existing scratch.
+fn storage_energy_change(
+    storage: &dyn Storage,
+    a: &[f64],
+    b: &[f64],
+    mid: &mut [f64],
+    gradient: &mut [f64],
+) -> f64 {
+    for ((m, &left), &right) in mid.iter_mut().zip(a).zip(b) {
+        *m = f64::midpoint(left, right);
+    }
+    let Some(remainder) = storage.midpoint_energy_remainder(a, b, mid) else {
+        return storage.hamiltonian(b) - storage.hamiltonian(a);
+    };
+    gradient.fill(0.0);
+    storage.gradient(mid, gradient);
+    let (mut sum, mut tail) = (remainder, 0.0);
+    for ((&effort, &left), &right) in gradient.iter().zip(a).zip(b) {
+        let term = effort * (right - left);
+        let next = sum + term;
+        tail += if sum.abs() >= term.abs() { (sum - next) + term } else { (term - next) + sum };
+        sum = next;
+    }
+    sum + tail
 }
 
 /// One completed step with its energy ledger.
@@ -1609,7 +1664,7 @@ fn ledger(
     solver_certificate: SolveCertificate,
 ) -> StepRecord {
     let n = sys.n;
-    let dg = discrete_gradient(sys.storage.as_ref(), x0, &x1);
+    let mut dg = discrete_gradient(sys.storage.as_ref(), x0, &x1);
     let mut dissipated = 0.0;
     for i in 0..n {
         let mut row = 0.0;
@@ -1621,7 +1676,8 @@ fn ledger(
     dissipated *= dt;
     let y = sys.output_from_effort(&dg);
     let supplied = dt * u.iter().zip(&y).map(|(&a, &b)| a * b).sum::<f64>();
-    let delta_h = sys.storage.hamiltonian(&x1) - sys.storage.hamiltonian(x0);
+    let delta_h = storage_energy_change(sys.storage.as_ref(), x0, &x1,
+        &mut vec![0.0; n], &mut dg);
     StepRecord {
         x: x1,
         y,

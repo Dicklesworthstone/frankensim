@@ -536,7 +536,8 @@ impl StepWorkspace {
             for row in 0..n { self.output[port] += sys.g[row * self.m + port] * self.effort[row]; }
         }
         let supplied = dt * u.iter().zip(&self.output).map(|(a, b)| a * b).sum::<f64>();
-        let delta_h = sys.hamiltonian(&self.x) - h0;
+        let delta_h = crate::storage_energy_change(sys.storage.as_ref(), x0, &self.x,
+            &mut self.midpoint, &mut self.effort);
         norm(&self.output)?;
         norm(&[delta_h, dissipated, supplied, solver_residual])?;
         let record = PreparedStepRecord {

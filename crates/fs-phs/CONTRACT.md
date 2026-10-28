@@ -11,6 +11,24 @@ stepping, and Galerkin reduction preserves the structure.
 
 ## Public types and semantics
 
+### Stable constitutive energy changes
+
+Quadratic storage evaluates its midpoint remainder analytically, retaining
+represented-midpoint rounding and admitted matrix asymmetry without subtracting
+large endpoint energies. Direct sums retain this capability only when both
+children provide a complete remainder. Native, descriptor and prepared stepping
+use the same constitutive endpoint difference in their energy reports; the
+prepared path reuses its scratch buffers. This calculation remains independent
+of source work, physical dissipation and the solved update equation. It does not
+force a residual to zero or turn numerical error into heat. The regression
+source checks a quartic system shifted by an arbitrary 1e30 J datum, composition,
+large quadratic states, represented midpoint rounding and finite extreme Q.
+
+A resistor whose terminals are the same node has zero incidence and contributes
+neither dissipation nor a ground connection. Its conductance is not stamped, and
+it cannot hide a floating node. The circuit regression compares the actual
+source work and Joule heat with the independent V²/R result.
+
 ### Exact-Bessel circular wall memory
 
 `ZkDiffusive` converts even truncations of the exact cylindrical Bessel

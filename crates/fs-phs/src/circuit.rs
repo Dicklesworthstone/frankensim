@@ -223,8 +223,10 @@ pub fn assemble_circuit_with_mutual_inductance(
                 what: "branch terminal out of range",
             });
         }
-        incident[a] += 1;
-        incident[b] += 1;
+        if a != b {
+            incident[a] += 1;
+            incident[b] += 1;
+        }
         match el {
             Branch::Resistor { ohms } => {
                 if !(ohms.is_finite() && ohms > 0.0) {
@@ -381,6 +383,9 @@ pub fn assemble_circuit_with_mutual_inductance(
             }
             Branch::Resistor { ohms } => {
                 let cond = 1.0 / ohms;
+                // A self-loop has zero incidence and zero voltage drop. It
+                // must neither dissipate power nor anchor a floating node.
+                if a == b { continue; }
                 let stamp = |r: &mut Vec<f64>, i: Option<usize>, k: Option<usize>| {
                     if let (Some(i), Some(k)) = (i, k) {
                         r[i * n + k] += if i == k { cond } else { -cond };
@@ -805,6 +810,35 @@ impl CircuitDae {
 mod circuit_tests {
     use super::*;
     use crate::det;
+
+    #[test]
+    fn same_node_resistors_cannot_change_circuit_power_or_anchor_a_node() {
+        let original = CircuitGraph {
+            node_count: 2,
+            branches: vec![(1, 0, Branch::VoltageSource { port: 0 }),
+                (1, 0, Branch::Resistor { ohms: 10.0 })],
+            transformers: vec![],
+        };
+        let mut with_loops = original.clone();
+        with_loops.branches.extend([(1, 1, Branch::Resistor { ohms: 0.01 }),
+            (0, 0, Branch::Resistor { ohms: 1.0 })]);
+        let baseline = assemble_circuit(&original).unwrap();
+        let looped = assemble_circuit(&with_loops).unwrap();
+        let initial = baseline.consistent_initial_state(
+            &vec![0.0; baseline.system.state_dim()], &[3.0]).unwrap();
+        let (expected, _) = baseline.step_audited(&initial, &[3.0], 0.25).unwrap();
+        let (actual, defect) = looped.step_audited(&initial, &[3.0], 0.25).unwrap();
+        assert_eq!(actual.x, expected.x);
+        assert_eq!(actual.y, expected.y);
+        assert_eq!(actual.dissipated, expected.dissipated);
+        assert!((actual.dissipated - 0.225).abs() < 1e-14);
+        assert!((actual.supplied - 0.225).abs() < 1e-14);
+        assert!(defect < 1e-14);
+        with_loops.node_count = 3;
+        with_loops.branches.push((2, 2, Branch::Resistor { ohms: 1.0 }));
+        assert!(matches!(assemble_circuit(&with_loops),
+            Err(CircuitError::FloatingNode { node: 2 })));
+    }
 
     fn series_rlc(r_ohm: f64, l_h: f64, c_f: f64) -> CircuitGraph {
         // node 0 = ground; V source 0->1; L 1->2; C 2->3; R 3->0.
