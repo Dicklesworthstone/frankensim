@@ -1,5 +1,6 @@
 //! Physical reservoir and fan parameters of the complete trajectory transpose.
-//! All contractions use dt times the SAME accepted joule-residual multiplier.
+//! All contractions use the SAME accepted nodal-load pullback, with prescribed
+//! residual rows masked and dt included exactly once by the shared core.
 
 use fs_airflow::conjugate::{AirPath, goal::maximum::pullback_inlet_temperatures};
 use fs_conduction::{ConductionProblem, ScalarField, ThermalBc};
@@ -140,8 +141,7 @@ impl Controls {
         problem: ConductionProblem<'_>,
         temperature: &[f64],
         bound: &Bound,
-        dt_s: f64,
-        multiplier: &[f64],
+        load_weights: &[f64],
         deadline: Option<(Instant, f64)>,
     ) -> Result<(), SolveRefusal> {
         poll(cx, deadline)?;
@@ -149,21 +149,19 @@ impl Controls {
         let m = bound.names.len();
         let air_count: usize = self.paths.iter().map(|path| path.segments().len()).sum();
         if temperature.len() != n
-            || multiplier.len() != n
+            || load_weights.len() != n
             || m != self.natural.len() + air_count
             || bound.ambient_slopes.len() != m
-            || !(dt_s.is_finite() && dt_s > 0.0)
         {
             return Err(bad(
                 "enthalpy boundary controls lost their complete endpoint/port layout",
             ));
         }
-        let mut load_weights = zeros(n)?;
-        for (vertex, (weight, &lambda)) in load_weights.iter_mut().zip(multiplier).enumerate() {
+        for (vertex, &weight) in load_weights.iter().enumerate() {
             if vertex % 256 == 0 {
                 poll(cx, deadline)?;
             }
-            *weight = finite(dt_s * lambda)?;
+            finite(weight)?;
             finite(temperature[vertex])?;
         }
         let mut regions = Vec::with_capacity(m);
@@ -253,7 +251,7 @@ impl Controls {
             problem.boundary,
             temperature,
             &self.paths,
-            &load_weights,
+            load_weights,
         )?;
         if fans.len() != self.fans.len() {
             return Err(bad("enthalpy fan-speed pullback lost a bank"));

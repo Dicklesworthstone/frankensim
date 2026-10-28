@@ -13,6 +13,8 @@ use fs_project::{
 mod json;
 use json::JsonValue as J;
 
+mod prescribed;
+
 const CP: f64 = 10.0;
 const VOLUME: f64 = 8.0 / 3.0;
 const HORIZON: f64 = 2.0;

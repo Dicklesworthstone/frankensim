@@ -48,6 +48,7 @@ pub(super) struct AirflowStep {
     pub(super) physical_energy_residual_j: f64,
     pub(super) physical_convective_out_w: f64,
     pub(super) physical_radiative_out_w: f64,
+    pub(super) physical_dirichlet_in_w: f64,
     pub(super) air_heat_gain_w: f64,
     pub(super) off_path_convective_out_w: f64,
     pub(super) coupled_energy_residual_j: f64,
@@ -252,6 +253,13 @@ pub(super) fn advance(
     }
     let patches = radiation.map(|lowering| lowering.patches.as_slice());
     let mut endpoint_evaluations = 0;
+    // Air-reference updates replace Robin rows only; the prescribed trace is
+    // unchanged across the seed and every inner coupling trial.
+    let initial_candidate = engine.prescribed_endpoint_initial_guess(cx, problem.boundary, old)
+        .map_err(|error| match error {
+            HeterogeneousEnthalpyError::Enthalpy(inner) => failed(inner),
+            other => bad(format!("enthalpy initial bath state refused: {other}")),
+        })?;
     let initial_seed_residual_norm_j = {
         let seed_boundary = boundary_at(problem.boundary, &regions, &seed_references)?;
         count(&mut endpoint_evaluations, 1, max_endpoint_evaluations)?;
@@ -261,7 +269,7 @@ pub(super) fn advance(
                 ConductionProblem { boundary: &seed_boundary, ..problem },
                 interfaces,
                 old,
-                old,
+                &initial_candidate,
                 dt_s,
                 config,
                 patches,
@@ -316,7 +324,7 @@ pub(super) fn advance(
         count(&mut endpoint_evaluations, 1, max_endpoint_evaluations)?;
         let initial_norm_j = engine
             .evaluate_endpoint(
-                cx, trial_problem, interfaces, old, old, dt_s, config, patches,
+                cx, trial_problem, interfaces, old, &initial_candidate, dt_s, config, patches,
             )
             .map_err(failed)?
             .residual_norm_j;
@@ -489,7 +497,7 @@ pub(super) fn advance(
         outcome.solution.branches.iter().map(|branch| branch.march.total_heat_rate_w),
     )?;
     let net_input_w = finite(
-        physical.source_w - physical.neumann_out_w - off_path_convective_out_w
+        physical.source_w + physical.dirichlet_in_w - physical.neumann_out_w - off_path_convective_out_w
             - air_heat_gain_w - physical.radiation_out_w,
     )?;
     let coupled_energy_residual_j =
@@ -535,6 +543,7 @@ pub(super) fn advance(
         physical_energy_residual_j: physical.energy_residual_j,
         physical_convective_out_w: physical.convective_out_w,
         physical_radiative_out_w: physical.radiation_out_w,
+        physical_dirichlet_in_w: physical.dirichlet_in_w,
         air_heat_gain_w,
         off_path_convective_out_w,
         coupled_energy_residual_j,

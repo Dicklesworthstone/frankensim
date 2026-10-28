@@ -27,6 +27,7 @@ use super::super::{SolveRefusal, Workload, airflow, bad, buoyancy, json_string,
     lower, number, poll, radiation};
 
 mod convection;
+mod prescribed_controls;
 pub(super) mod material_controls;
 pub(in crate::solve::transient) use material_controls::storage_bytes as material_control_storage_bytes;
 pub(in crate::solve::transient) use convection::storage_bytes as convection_storage_bytes;
@@ -66,7 +67,8 @@ fn failed(error: EnthalpyAdjointError) -> SolveRefusal {
 
 /// Additional checkpoints, source bases, one revalidation/transpose workspace
 /// and derivative output, including capped per-cycle Krylov history/report
-/// copies. Flux/card strings and Newton rows have generous
+/// copies, the prescribed-node owner/trace map and the masked nodal-load dual.
+/// Flux/card strings and Newton rows have generous
 /// per-element/per-port allowances; this admission estimate is not an RSS proof.
 pub(in crate::solve::transient) fn storage_bytes(
     n: usize,
@@ -84,7 +86,7 @@ pub(in crate::solve::transient) fn storage_bytes(
         .and_then(|v| v.checked_add(std::mem::size_of::<EnthalpyStepSolution>() + 8))
         .ok_or_else(|| bad("enthalpy adjoint checkpoint allowance overflows"))?;
     let bytes = steps.checked_mul(per_endpoint)
-        .and_then(|v| n.checked_mul(8 * (1 + 2 * REVERSE_RESTART_LIMIT + 32))
+        .and_then(|v| n.checked_mul(8 * (1 + 2 * REVERSE_RESTART_LIMIT + 36))
             .and_then(|b| v.checked_add(b)))
         .and_then(|v| v.checked_add(65_536))
         .and_then(|v| max_krylov_iterations.checked_mul(32)
@@ -210,13 +212,13 @@ impl EnthalpyTape {
             return Err(bad("enthalpy adjoint checkpoint shape or count differs"));
         }
         let copied = EnthalpyStepSolution {
+            pointwise_radiation: endpoint.pointwise_radiation.clone(),
             specific_enthalpy_j_kg: clone_values(cx, &endpoint.specific_enthalpy_j_kg, deadline)?,
             temperature: clone_values(cx, &endpoint.temperature, deadline)?,
             liquid_mass_fraction: clone_values(cx, &endpoint.liquid_mass_fraction, deadline)?,
             source_w: finite(endpoint.source_w)?,
             neumann_out_w: finite(endpoint.neumann_out_w)?,
             robin_out_w: finite(endpoint.robin_out_w)?,
-            pointwise_radiation: endpoint.pointwise_radiation.clone(),
             dirichlet_in_w: finite(endpoint.dirichlet_in_w)?,
             stored_energy_change_j: finite(endpoint.stored_energy_change_j)?,
             energy_residual_j: finite(endpoint.energy_residual_j)?,
@@ -465,6 +467,7 @@ pub(in crate::solve::transient) fn finish(
     let mut dual_iterations = 0usize;
     let mut worst_dual = 0.0_f64;
     let mut convection_controls = convection::Controls::new(cx, spec, natural, airflow, deadline)?;
+    let mut prescribed_controls = prescribed_controls::Controls::new(cx, spec, problem, deadline)?;
     let mut material_controls = material_controls::Controls::new(
         cx, spec, problem, interfaces, labels, region_ids, &tape.temperature.states[0], deadline,
     )?;
@@ -621,17 +624,21 @@ pub(in crate::solve::transient) fn finish(
         let conductivity = step.transport().conductivity_scale_pullback(
             cx, &gradient.transport.adjoint, elements,
         ).map_err(failed)?;
+        let nodal_load_adjoint = step.transport().nodal_load_pullback(
+            cx, &gradient.transport.adjoint,
+        ).map_err(failed)?;
         material_controls.add(
             cx, step_problem, interfaces, expected, &conductivity,
-            &gradient.transport.adjoint, dt, deadline,
+            &nodal_load_adjoint, deadline,
         )?;
         match (convection_controls.as_mut(), feedback.as_ref()) {
             (Some(controls), Some(bound)) => controls.add(
-                cx, spec, step_problem, expected, bound, dt, &gradient.transport.adjoint, deadline,
+                cx, spec, step_problem, expected, bound, &nodal_load_adjoint, deadline,
             )?,
             (None, None) => {},
             _ => return Err(bad("enthalpy physical boundary controls lost their bound endpoint")),
         }
+        prescribed_controls.add(cx, &gradient.transport.prescribed_temperature, deadline)?;
         for (region, basis) in bases.iter().enumerate() {
             source_controls[index][region] = dot(
                 cx, &gradient.transport.source_density, basis, deadline,
@@ -736,6 +743,7 @@ pub(in crate::solve::transient) fn finish(
         ))
     }).transpose()?.unwrap_or_default();
     let material_fragment = material_controls.fragment(selected.state)?;
+    let prescribed_fragment = prescribed_controls.fragment(selected.state)?;
     let controls_fragment = convection_controls.as_ref()
         .map(|controls| controls.fragment(selected.state)).transpose()?.unwrap_or_default();
     let convection_fragment = if convection_ports == 0 { String::new() } else { format!(
@@ -744,7 +752,7 @@ pub(in crate::solve::transient) fn finish(
     ) };
     poll(cx, deadline)?;
     Ok(format!(
-        "{{\"schema\":\"fs-cli-native-enthalpy-adjoint-v1\",\"output\":{},\"method\":\"discrete-total-enthalpy-backward-euler-reverse\",\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"active_ties\":{},\"unique_sampled_maximum\":{},\"dtemperature_duniform_initial_specific_enthalpy_k_kg_per_j\":{},\"dtemperature_dinitial_specific_enthalpy_k_kg_per_j\":[{}],\"dtemperature_dreference_density_multiplier_k\":{},\"regional_storage\":[{}],\"regional_power\":[{}],\"intervals\":[{}],\"revalidated_solid_endpoints\":{},\"adjoint_krylov_iterations\":{},\"maximum_dual_relative_residual\":{},\"max_reverse_steps\":{},\"max_krylov_iterations_per_linear_solve\":{},\"max_restart_columns_per_linear_solve\":{},\"max_adjoint_krylov_iterations\":{},\"additional_storage_estimate_bytes\":{}{radiation_fragment}{convection_fragment}{material_fragment},\"authority\":\"Estimated\",\"scope\":{}}}",
+        "{{\"schema\":\"fs-cli-native-enthalpy-adjoint-v1\",\"output\":{},\"method\":\"discrete-total-enthalpy-backward-euler-reverse\",\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"active_ties\":{},\"unique_sampled_maximum\":{},\"dtemperature_duniform_initial_specific_enthalpy_k_kg_per_j\":{},\"dtemperature_dinitial_specific_enthalpy_k_kg_per_j\":[{}],\"dtemperature_dreference_density_multiplier_k\":{},\"regional_storage\":[{}],\"regional_power\":[{}],\"intervals\":[{}],\"revalidated_solid_endpoints\":{},\"adjoint_krylov_iterations\":{},\"maximum_dual_relative_residual\":{},\"max_reverse_steps\":{},\"max_krylov_iterations_per_linear_solve\":{},\"max_restart_columns_per_linear_solve\":{},\"max_adjoint_krylov_iterations\":{},\"additional_storage_estimate_bytes\":{}{radiation_fragment}{convection_fragment}{material_fragment}{prescribed_fragment},\"authority\":\"Estimated\",\"scope\":{}}}",
         json_string(objective.name()), number(selected.value)?, number(selected_time)?,
         selected.state, selected.vertex, selected.ties, selected.ties == 1,
         number(initial_uniform)?, initial_rows.join(","), number(density_multiplier)?,

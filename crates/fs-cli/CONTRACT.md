@@ -1654,7 +1654,7 @@ Every coarse and fine grid starts from the original regional enthalpies.
 Each accepted endpoint uses actual endpoint conductivity and the original
 physical old enthalpy throughout Newton, FGMRES and line-search trials. The
 shared nonlinear residual and independent joule-energy gate must both pass
-before history advances. Prescribed Neumann/Robin laws, matching contact and
+before history advances. Prescribed temperature, Neumann/Robin laws, matching contact and
 event-aligned regional power schedules remain active. The declared Newton,
 backtracking and existing linear allowances bound each response; checked
 products and memory estimates include both trajectories and retained evidence.
@@ -1669,7 +1669,14 @@ fine-grid final temperature. Coarse/fine enthalpy and phase differences remain
 visible even when both temperatures agree on a plateau; equal temperatures
 do not become a zero-error temporal claim. This is Estimated fixed-domain
 transport, with source attribution rather than authentication of supplied
-phase data. Prescribed temperature is refused for this storage model.
+phase data. Prescribed temperatures require a unique enthalpy on every incident
+phase chart; latent-plateau ambiguity and out-of-domain baths refuse. The
+original initial enthalpy remains physical history. Fixed endpoint constraints
+therefore charge their complete startup storage to the bath once, including
+when the whole body is prescribed. Step rows retain both the applied
+`dirichlet_in_w` and fresh `physical_dirichlet_in_w`; radiation, natural and
+airflow audits use the latter with physical reservoir fluxes and actual air
+heat gain. The final solver report counts only free degrees of freedom.
 Native trajectory adjoints are admitted under the scope below. Expansion,
 motion and phase kinetics are not inferred.
 `data/reference-project/cooling-enthalpy.fsim` and `TRANSIENT.md` give a complete
@@ -1759,6 +1766,20 @@ power, including zero-baseline regions. Density differentiation changes
 fixed reference storage mass while holding the phase chart, conductivity,
 contact and geometry fixed; it models no density-driven expansion.
 Initial enthalpy gradients are not labeled initial-temperature gradients.
+
+`transient.adjoint.prescribed_temperature` reports independent uniform bath
+temperature controls held through the selected trajectory. Each declared
+boundary retains its target, nominal kelvin value and
+`dtemperature_dprescribed_temperature_k_per_k`. The shared transpose retains
+the fixed-node objective and free-node coupling; source, history, density,
+conductivity, contact and convection contractions exclude fixed residual
+rows while retaining source basis columns that load neighboring free nodes.
+Each bath trace vertex contributes once. Declarations sharing prescribed
+vertices report an explicit unsupported reason without a numeric derivative.
+An initial sampled peak has zero future bath influence. Chart endpoints and
+slope-changing branches continue to refuse classical derivatives.
+The native prescribed-bath tests compare fully fixed storage and radiation
+reactions, a one-free-node P1 recurrence and freshly perturbed trajectories.
 
 The reverse carry remains in h coordinates through latent plateaus;
 temperature seeds are pulled back only at the selected objective state.

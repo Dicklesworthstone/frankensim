@@ -30,6 +30,7 @@ pub(super) struct NaturalStep {
     pub(super) physical_energy_residual_j: f64,
     pub(super) physical_convective_out_w: f64,
     pub(super) physical_radiative_out_w: f64,
+    pub(super) physical_dirichlet_in_w: f64,
 }
 
 fn count(total: &mut usize, added: usize, cap: usize) -> Result<(), SolveRefusal> {
@@ -127,6 +128,11 @@ pub(super) fn advance(
     let mut endpoint_evaluations = 0;
     let mut maximum_radiation_energy_residual_j = 0.0_f64;
     let mut physical_target = None;
+    let initial_candidate = engine.prescribed_endpoint_initial_guess(cx, problem.boundary, old)
+        .map_err(|error| match error {
+            HeterogeneousEnthalpyError::Enthalpy(inner) => failed(inner),
+            other => bad(format!("enthalpy initial bath state refused: {other}")),
+        })?;
     for iteration in 1..=boundary_law::MAX_ITERATIONS {
         poll(cx, deadline)?;
         let replacements = laws
@@ -158,7 +164,7 @@ pub(super) fn advance(
                     trial_problem,
                     interfaces,
                     old,
-                    old,
+                    &initial_candidate,
                     dt_s,
                     config,
                     patches,
@@ -342,6 +348,7 @@ pub(super) fn advance(
                 physical_energy_residual_j: physical.energy_residual_j,
                 physical_convective_out_w: physical.convective_out_w,
                 physical_radiative_out_w: physical.radiation_out_w,
+                physical_dirichlet_in_w: physical.dirichlet_in_w,
             });
         }
         if iteration == boundary_law::MAX_ITERATIONS {

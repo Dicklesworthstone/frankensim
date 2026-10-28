@@ -301,6 +301,7 @@ impl Bound {
         }
         let net_w = finite(
             physical.source_w
+                + physical.dirichlet_in_w
                 - physical.neumann_out_w
                 - off_path_w
                 - air_heat_w

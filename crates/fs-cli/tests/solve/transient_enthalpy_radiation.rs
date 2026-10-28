@@ -209,6 +209,84 @@ fn check_sources_and_report(solved: &ThermalRun, card: &str, reservoir: f64) {
 }
 
 #[test]
+fn g1_native_enthalpy_prescribed_radiating_bath_counts_physical_reaction_once() {
+    let (cards, card) = radiation_product::emissivity_cards(&fixture_cards(), EMISSIVITY);
+    const BATH_K: f64 = 340.0;
+    const RESERVOIR_K: f64 = 270.0;
+    let mut spec = project(&card, RESERVOIR_K);
+    spec.assignments.as_mut().unwrap()[0].allow_overlap = true;
+    let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+    setup.boundaries.clear();
+    setup.adiabatic_remainder = true;
+    setup.radiation.as_mut().unwrap().surfaces[0].target = "radiating-face".into();
+    // Two separate fixed faces cover all four vertices. Radiation acts on a
+    // third, explicitly zero-flux face; its incident vertices are constrained
+    // by those other faces, without replacing a fixed boundary's physical law.
+    for (target, normal, fixed) in [
+        ("bath-a", [1.0, -1.0, -1.0], true),
+        ("bath-b", [-1.0, 1.0, -1.0], true),
+        ("radiating-face", [1.0, 1.0, 1.0], false),
+    ] {
+        spec.assembly.as_mut().unwrap().push(EntityDecl::Surface {
+            parent: "enclosure".into(), name: target.into(),
+            display: target.into(), expect_id: None,
+        });
+        spec.assignments.as_mut().unwrap().push(GeometryAssignment {
+            artifact: "enclosure".into(), target: target.into(), length_unit: "m".into(),
+            selector: MeshSelector::HalfSpace {
+                normal, offset: -1.0, side: HalfSpaceSide::AtMost, tolerance: 0.0,
+            },
+            allow_overlap: true,
+        });
+        spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap().boundaries.push(
+            ThermalBoundary {
+                target: target.into(),
+                condition: if fixed {
+                    ThermalBoundaryCondition::FixedTemperature {
+                        temperature: QtyAny::new(BATH_K, dims::TEMPERATURE),
+                    }
+                } else {
+                    ThermalBoundaryCondition::HeatFlux {
+                        outward_flux: QtyAny::new(0.0, dims::HEAT_FLUX),
+                    }
+                },
+            },
+        );
+    }
+    let solved = run(&spec, &cards);
+    let stored_j = mass_kg(DENSITY) * CP * (BATH_K - INITIAL_K);
+    let radiation_w = radiative_w(BATH_K, RESERVOIR_K) / 4.0;
+    close(n(solved.receipt.get("solver").unwrap(), "free_dofs"), 0.0, 0.0);
+    for &temperature in &solved.temperature {
+        close(temperature, BATH_K, 2e-12);
+    }
+    for grid in ["coarse", "fine"] {
+        let mut reservoir_j = 0.0;
+        for (index, row) in solved.rows(grid).iter().enumerate() {
+            let dt = n(row, "dt_s");
+            let step_storage = if index == 0 { stored_j } else { 0.0 };
+            let reaction_w = step_storage / dt - 5.0 + radiation_w;
+            let radiative = row.get("radiation").unwrap();
+            close(n(radiative, "convective_out_w"), 0.0, 2e-9);
+            close(n(radiative, "nonlinear_radiative_out_w"), radiation_w, 2e-8);
+            close(n(radiative, "physical_dirichlet_in_w"), reaction_w, 2e-8);
+            close(n(row, "physical_dirichlet_in_w"), reaction_w, 2e-8);
+            close(n(row, "stored_energy_change_j"), step_storage, 2e-8);
+            close(n(row, "net_input_w"), step_storage / dt, 2e-8);
+            close(n(row, "energy_residual_j"), 0.0, 2e-8);
+            assert!(n(radiative, "physical_residual_norm_j")
+                <= n(radiative, "physical_residual_tolerance_j"));
+            reservoir_j += dt * n(row, "physical_dirichlet_in_w");
+        }
+        close(reservoir_j, stored_j + radiation_w - 5.0, 2e-8);
+    }
+    let energy = solved.transient().get("energy").unwrap();
+    close(n(energy, "stored_change_j"), stored_j, 2e-8);
+    close(n(energy, "integrated_net_input_j"), stored_j, 2e-8);
+    close(n(energy, "window_residual_j"), 0.0, 2e-8);
+}
+
+#[test]
 fn g1_native_enthalpy_radiation_matches_cooling_and_heating_energy_roots() {
     let (cards, card) = radiation_product::emissivity_cards(&fixture_cards(), EMISSIVITY);
     for reservoir in [270.0, 400.0] {

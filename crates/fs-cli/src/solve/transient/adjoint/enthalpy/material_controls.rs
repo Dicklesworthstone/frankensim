@@ -1,9 +1,10 @@
 //! Regional conductivity and named contact controls of the accepted trajectory.
 //!
-//! Enthalpy conductivity bars already include dt; its contact dual converts
-//! from joules to watts once. Capacity storage supplies watt-coordinate bars
-//! directly. Both use the SAME complete dual and original material/contact
-//! owners. Neither path resolves a primal or another transpose.
+//! Enthalpy conductivity bars already include dt; its contact dual is the
+//! shared masked nodal-load pullback, with dt included exactly once. Capacity
+//! storage also supplies watt-coordinate bars. Both use the SAME complete dual
+//! and original material/contact owners. Neither path resolves a primal or
+//! another transpose.
 
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -191,7 +192,8 @@ impl<'m> Controls<'m> {
 
     /// Aggregate one accepted endpoint after its complete multiplier passes the
     /// original true-transpose gate. Conductivity already includes dt; contact
-    /// receives dt*lambda once. Source and boundary values may vary by step.
+    /// receives the masked watt-coordinate dual. Source and boundary values
+    /// may vary by step.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub(super) fn add(
         &mut self,
@@ -200,13 +202,12 @@ impl<'m> Controls<'m> {
         interfaces: Option<&ThermalInterfaces>,
         temperature: &[f64],
         element_conductivity: &[f64],
-        full_joule_multiplier: &[f64],
-        dt_s: f64,
+        nodal_load_adjoint: &[f64],
         deadline: Option<(Instant, f64)>,
     ) -> Result<(), SolveRefusal> {
         self.add_scaled(
             cx, problem, interfaces, temperature, element_conductivity,
-            full_joule_multiplier, dt_s, deadline,
+            nodal_load_adjoint, 1.0, deadline,
         )
     }
 
@@ -239,8 +240,8 @@ impl<'m> Controls<'m> {
         )
     }
 
-    /// Element bars are already objective derivatives. Only the contact dual
-    /// changes residual coordinates: dt for joules, identity for watts.
+    /// Element bars are already objective derivatives. Contact uses the
+    /// supplied masked nodal-load dual with its explicit coordinate scale.
     /// Both storage formulations retain the same owner checks and aggregation.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn add_scaled(

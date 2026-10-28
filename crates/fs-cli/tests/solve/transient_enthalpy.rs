@@ -150,6 +150,62 @@ fn g1_native_enthalpy_constant_cp_recovers_mass_scaled_heating_and_deterministic
 }
 
 #[test]
+fn g1_native_enthalpy_prescribed_bath_retains_initial_storage_and_reservoir_heat() {
+    const DENSITY: f64 = 6.0;
+    const CP: f64 = 10.0;
+    const INITIAL_K: f64 = 293.15;
+    const HORIZON: f64 = 2.0;
+    let knots = [(-200.0, 273.15, 0.0), (200.0, 313.15, 0.0)];
+    for bath_k in [283.15, 303.15] {
+        let mut spec = project(DENSITY, HORIZON, &knots);
+        spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap().boundaries[0]
+            .condition = ThermalBoundaryCondition::FixedTemperature {
+                temperature: QtyAny::new(bath_k, dims::TEMPERATURE),
+            };
+        let (_, qoi, conduction, field, _) = run(&spec);
+        let history = conduction.get("transient").unwrap();
+        let expected_h = CP * (bath_k - INITIAL_K);
+        let stored_j = (DENSITY / 6.0) * expected_h;
+        close(n(conduction.get("solver").unwrap(), "free_dofs"), 0.0, 0.0);
+        close(n(history, "initial_temperature_k"), INITIAL_K, 0.0);
+        for temperature in values(&field, "temperature") {
+            close(temperature, bath_k, 2e-12);
+        }
+        for h in values(history.get("endpoint").unwrap(), "specific_enthalpy_j_kg") {
+            close(h, expected_h, 2e-11);
+        }
+        let qoi_value = &qoi.get("qoi").unwrap().as_array().unwrap()[0];
+        close(n(qoi_value, "value"), bath_k, 2e-12);
+        for grid in ["coarse", "fine"] {
+            let rows = history.get(grid).unwrap().as_array().unwrap();
+            let mut reservoir_j = 0.0;
+            for (index, row) in rows.iter().enumerate() {
+                let dt = n(row, "dt_s");
+                let step_storage = if index == 0 { stored_j } else { 0.0 };
+                let reaction_w = step_storage / dt - 5.0;
+                close(n(row, "stored_energy_change_j"), step_storage, 2e-10);
+                close(n(row, "dirichlet_in_w"), reaction_w, 2e-9);
+                close(n(row, "physical_dirichlet_in_w"), reaction_w, 2e-9);
+                close(n(row, "net_input_w"), step_storage / dt, 2e-9);
+                close(n(row, "energy_residual_j"), 0.0, 2e-10);
+                reservoir_j += dt * n(row, "physical_dirichlet_in_w");
+            }
+            // Initial history remains at 293.15 K. Its complete jump is
+            // charged to the bath once, even though every endpoint is fixed.
+            close(reservoir_j, stored_j - 5.0 * HORIZON, 2e-9);
+        }
+        let energy = history.get("energy").unwrap();
+        close(n(energy, "stored_change_j"), stored_j, 2e-10);
+        close(n(energy, "integrated_net_input_j"), stored_j, 2e-9);
+        close(n(energy, "window_residual_j"), 0.0, 2e-9);
+        let endpoint = conduction.get("energy").unwrap();
+        close(n(endpoint, "dirichlet_in_w"), -5.0, 2e-10);
+        close(n(endpoint, "storage_w"), 0.0, 2e-10);
+        close(n(endpoint, "closure_w"), 0.0, 2e-10);
+    }
+}
+
+#[test]
 fn g1_native_enthalpy_constant_cp_matches_two_body_contact_and_conserves_total_energy() {
     const DENSITY: f64 = 10.0;
     const CP: f64 = 10.0;
@@ -462,9 +518,16 @@ fn g1_native_enthalpy_shipped_example_runs_through_the_existing_report_stage() {
 
 #[test]
 fn g0_native_enthalpy_refusals_leave_no_published_conduction_field() {
-    for variant in ["domain", "temperature-boundary"] {
-        let mut spec = project(6.0, 2.0, &[(-1.0, 292.15, 0.0), (2.0, 295.15, 0.0)]);
-        if variant == "temperature-boundary" {
+    for variant in ["domain", "latent-temperature-boundary", "outside-temperature-boundary"] {
+        let mut spec = if variant == "latent-temperature-boundary" {
+            project(6.0, 2.0, &[
+                (-10.0, 283.15, 0.0), (0.0, 293.15, 0.0),
+                (10.0, 293.15, 1.0), (20.0, 303.15, 1.0),
+            ])
+        } else {
+            project(6.0, 2.0, &[(-1.0, 292.15, 0.0), (2.0, 295.15, 0.0)])
+        };
+        if variant != "domain" {
             spec.cooling
                 .as_mut()
                 .unwrap()
@@ -473,7 +536,10 @@ fn g0_native_enthalpy_refusals_leave_no_published_conduction_field() {
                 .unwrap()
                 .boundaries[0]
                 .condition = ThermalBoundaryCondition::FixedTemperature {
-                temperature: QtyAny::new(293.15, dims::TEMPERATURE),
+                temperature: QtyAny::new(
+                    if variant == "latent-temperature-boundary" { 293.15 } else { 300.0 },
+                    dims::TEMPERATURE,
+                ),
             };
         }
         let ledger = Ledger::open(":memory:").unwrap();

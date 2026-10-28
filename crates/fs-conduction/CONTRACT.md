@@ -1185,8 +1185,24 @@ authority.
   under the physical endpoint radiation law; `physical_dirichlet_in_w` belongs
   to that audit while the inner solution retains its applied-boundary reaction.
   The mixed-bath/radiation regression checks both against an independent scalar
-  balance and the shared physical endpoint evaluator. Prescribed-temperature adjoints
-  and the natural-boundary history runner remain explicitly unsupported.
+  balance and the shared physical endpoint evaluator. The enthalpy adjoint
+  retains prescribed constraints and their independent bath-temperature controls.
+  Fixed residual rows impose `m_i*(h_i-h_prescribed_i)=0`; their history and
+  physical-load derivatives are zero. Free residual rows retain their coupling
+  to prescribed columns. `prescribed_temperature` returns
+  `m_i*lambda_i/(dT/dh)_i` per prescribed vertex, while `nodal_load_pullback`
+  returns `dt*lambda_i` on free residual rows and zero on fixed rows. P1 source
+  basis columns at prescribed vertices remain active wherever they load
+  neighboring free residual rows.
+
+  `EnthalpyHistoryRun` admits unique prescribed temperatures without changing
+  initial physical enthalpy. Event-aligned, adaptive and ambient-radiation
+  histories charge prescribed storage jumps to the bath once. Held boundary
+  knots retain the exact left limit for the interval ending at a switch; the
+  new bath acts on the next finite interval. Ambiguous latent temperatures
+  and out-of-domain charts refuse without advancing state. Scanning and
+  state-dependent-contact histories retain their explicit Dirichlet refusal.
+  The natural-boundary history runner remains unsupported.
   Geometry and energetic internal
   variables are frozen; there is no material motion, expansion, pressure work,
   remapping, phase kinetics or vaporization. The basic `advance` entry point

@@ -18,7 +18,7 @@ mod conductivity;
 mod conjugate;
 mod natural;
 
-const NO_CLAIM: &str = "Estimated stationary P1 total-enthalpy transport with frozen reference mass and caller-declared equilibrium phase charts. Latent heat is stored only in specific enthalpy; no apparent heat capacity or additional latent account is used. Existing sourced conductivity, finite-resistance contact and prescribed Neumann/Robin boundaries remain active. Declared regional conductivity multipliers use each element's mean nodal liquid mass fraction and the shared exact enthalpy tangent, including phase feedback on latent plateaus. The base tensor retains its temperature dependence and source support; multipliers are declared phenomenological data, not a volume-fraction mixture or validated material claim. Declared ambient radiation uses sourced area-mean gray patches; every trial retains the same old enthalpy and the accepted endpoint passes independent physical residual and nonlinear-heat energy checks. Declared natural convection evaluates the existing card at each candidate wall temperature and requires the complete physical residual and energy balance to close; exact equilibrium and out-of-domain Rayleigh states retain their refusals. Declared quasi-steady airflow uses the existing branch heat-exchange owner and checks the complete endpoint at updated air references, with actual air enthalpy gain, off-path convection and nonlinear radiation counted separately. Natural reservoirs on distinct boundary targets compose with forced-air transport: every air trial encloses the existing natural/radiation endpoint solve while retaining the same accepted old enthalpy. The final physical audit evaluates updated natural coefficients and air references at the counted state; natural-reservoir and radiation heat stay separate from the forced-convective flux sent to air. Every workload switch is represented on both independent time grids. The final field comes only from the completed fine grid. The temperature difference is an assumed-first-order temporal estimate, not a spatial or continuous-time maximum bound; agreement on a latent plateau does not prove convergence of enthalpy or phase fraction. Supplied material-card identities and source text are attribution, not verification of the declared curves. Requested final or sampled-peak history derivatives revalidate the accepted fine endpoints and carry the shared exact specific-enthalpy transpose through prescribed convection, contact, complete declared ambient-radiation feedback, and the full natural-convection and streamwise-air boundary derivatives. Reported controls are initial enthalpy, delivered regional power, fixed reference density, per-surface absolute emissivity and radiation reservoir temperature, natural-reservoir and air-inlet temperatures, and independently controlled absolute fan-bank speed ratios. Fan controls include the retained hydraulic, convection-card and downstream-air parameter chain; unsupported coordinates keep explicit reasons. Constitutive calibration and time-grid derivatives are fixed. Radiative controls hold query temperature and selected claim support fixed, retain source identities and restrict emissivity increments to feasible directions. Geometry, reference density and energetic internal variables are fixed during each forward trajectory. No material motion, density-driven expansion, phase kinetics, enclosure radiation, pointwise T^4 quadrature, airflow storage, time-varying fan dynamics is inferred.";
+const NO_CLAIM: &str = "Estimated stationary P1 total-enthalpy transport with frozen reference mass and caller-declared equilibrium phase charts. Latent heat is stored only in specific enthalpy; no apparent heat capacity or additional latent account is used. Existing sourced conductivity, finite-resistance contact and prescribed temperature, Neumann and Robin boundaries remain active. A prescribed temperature requires a unique enthalpy on every incident phase chart; a latent plateau cannot silently select a phase fraction. The initial physical enthalpy remains unchanged, and prescribed-temperature reactions include its complete storage jump and all physical boundary heat exactly once. Declared regional conductivity multipliers use each element's mean nodal liquid mass fraction and the shared exact enthalpy tangent, including phase feedback on latent plateaus. The base tensor retains its temperature dependence and source support; multipliers are declared phenomenological data, not a volume-fraction mixture or validated material claim. Declared ambient radiation uses sourced area-mean gray patches; every trial retains the same old enthalpy and the accepted endpoint passes independent physical residual and nonlinear-heat energy checks. Declared natural convection evaluates the existing card at each candidate wall temperature and requires the complete physical residual and energy balance to close; exact equilibrium and out-of-domain Rayleigh states retain their refusals. Declared quasi-steady airflow uses the existing branch heat-exchange owner and checks the complete endpoint at updated air references, with actual air enthalpy gain, off-path convection and nonlinear radiation counted separately. Natural reservoirs on distinct boundary targets compose with forced-air transport: every air trial encloses the existing natural/radiation endpoint solve while retaining the same accepted old enthalpy. The final physical audit evaluates updated natural coefficients and air references at the counted state; natural-reservoir and radiation heat stay separate from the forced-convective flux sent to air. Every workload switch is represented on both independent time grids. The final field comes only from the completed fine grid. The temperature difference is an assumed-first-order temporal estimate, not a spatial or continuous-time maximum bound; agreement on a latent plateau does not prove convergence of enthalpy or phase fraction. Supplied material-card identities and source text are attribution, not verification of the declared curves. Requested final or sampled-peak history derivatives revalidate the accepted fine endpoints and carry the shared exact specific-enthalpy transpose through prescribed convection, contact, complete declared ambient-radiation feedback, and the full natural-convection and streamwise-air boundary derivatives. Reported controls are initial enthalpy, delivered regional power, fixed reference density, independently declared prescribed-bath temperatures, per-surface absolute emissivity and radiation reservoir temperature, natural-reservoir and air-inlet temperatures, and independently controlled absolute fan-bank speed ratios. Fan controls include the retained hydraulic, convection-card and downstream-air parameter chain; unsupported coordinates keep explicit reasons. Independently varied prescribed boundaries sharing vertices are unsupported; a peak selected at the initial state has zero future bath sensitivity. Constitutive calibration and time-grid derivatives are fixed. Radiative controls hold query temperature and selected claim support fixed, retain source identities and restrict emissivity increments to feasible directions. Geometry, reference density and energetic internal variables are fixed during each forward trajectory. No material motion, density-driven expansion, phase kinetics, enclosure radiation, pointwise T^4 quadrature, airflow storage, time-varying fan dynamics is inferred.";
 
 /// Storage-specific scope carried by the outer conduction report.
 pub(super) fn no_claim() -> &'static str {
@@ -30,24 +30,9 @@ pub(super) fn admit(spec: &ProjectSpec) -> Result<(), SolveRefusal> {
     let Some(policy) = policy(spec).filter(|time| time.enthalpy.is_some()) else {
         return Ok(());
     };
-    let setup = spec
-        .cooling
-        .as_ref()
-        .and_then(|c| c.conduction.as_ref())
-        .ok_or_else(|| bad("enthalpy storage has no spatial conduction declaration"))?;
     if !policy.capacities.is_empty() {
         return Err(bad(
             "enthalpy and volumetric heat-capacity storage cannot both be active",
-        ));
-    }
-    if setup.boundaries.iter().any(|row| {
-        matches!(
-            row.condition,
-            ThermalBoundaryCondition::FixedTemperature { .. }
-        )
-    }) {
-        return Err(bad(
-            "native enthalpy supports Neumann, prescribed Robin and checked natural-convection and airflow boundaries; temperature alone does not select latent enthalpy",
         ));
     }
     adjoint::requested(spec)?;
@@ -139,7 +124,7 @@ fn airflow_step_row(
         ))
     }).collect::<Result<Vec<_>, SolveRefusal>>()?;
     Ok(format!(
-        "{{\"iterations\":{},\"solid_solves\":{},\"krylov_iterations\":{},\"nonlinear_iterations\":{},\"radiation_trials\":{},\"endpoint_evaluations\":{},\"reference_tolerance_k\":{},\"applied_references_k\":{{{}}},\"physical_references_k\":{{{}}},\"residual_reference\":{},\"initial_seed_residual_norm_j\":{},\"physical_residual_norm_j\":{},\"physical_residual_tolerance_j\":{},\"physical_energy_residual_j\":{},\"physical_convective_out_w\":{},\"radiative_out_w\":{},\"physical_dirichlet_in_w\":0,\"air_heat_gain_w\":{},\"off_path_convective_out_w\":{},\"coupled_energy_residual_j\":{},\"physical_convective_robin_fluxes\":[{}],\"exchange\":{}}}",
+        "{{\"iterations\":{},\"solid_solves\":{},\"krylov_iterations\":{},\"nonlinear_iterations\":{},\"radiation_trials\":{},\"endpoint_evaluations\":{},\"reference_tolerance_k\":{},\"applied_references_k\":{{{}}},\"physical_references_k\":{{{}}},\"residual_reference\":{},\"initial_seed_residual_norm_j\":{},\"physical_residual_norm_j\":{},\"physical_residual_tolerance_j\":{},\"physical_energy_residual_j\":{},\"physical_convective_out_w\":{},\"radiative_out_w\":{},\"physical_dirichlet_in_w\":{},\"air_heat_gain_w\":{},\"off_path_convective_out_w\":{},\"coupled_energy_residual_j\":{},\"physical_convective_robin_fluxes\":[{}],\"exchange\":{}}}",
         solved.outcome.solution.iterations,
         solved.solid_solves,
         solved.krylov_iterations,
@@ -156,6 +141,7 @@ fn airflow_step_row(
         number(solved.physical_energy_residual_j)?,
         number(solved.physical_convective_out_w)?,
         number(solved.physical_radiative_out_w)?,
+        number(solved.physical_dirichlet_in_w)?,
         number(solved.air_heat_gain_w)?,
         number(solved.off_path_convective_out_w)?,
         number(solved.coupled_energy_residual_j)?,
@@ -180,7 +166,7 @@ fn natural_step_row(solved: &natural::NaturalStep) -> Result<String, SolveRefusa
         ))
     }).collect::<Result<Vec<_>, SolveRefusal>>()?;
     Ok(format!(
-        "{{\"iterations\":{},\"solid_solves\":{},\"krylov_iterations\":{},\"nonlinear_iterations\":{},\"radiation_trials\":{},\"endpoint_evaluations\":{},\"applied_coefficients_w_m2_k\":{{{}}},\"physical_coefficients_w_m2_k\":{{{}}},\"physical_residual_norm_j\":{},\"physical_residual_tolerance_j\":{},\"physical_energy_residual_j\":{},\"physical_convective_out_w\":{},\"physical_radiative_out_w\":{},\"physical_convective_robin_fluxes\":[{}],\"exchange\":{}}}",
+        "{{\"iterations\":{},\"solid_solves\":{},\"krylov_iterations\":{},\"nonlinear_iterations\":{},\"radiation_trials\":{},\"endpoint_evaluations\":{},\"applied_coefficients_w_m2_k\":{{{}}},\"physical_coefficients_w_m2_k\":{{{}}},\"physical_residual_norm_j\":{},\"physical_residual_tolerance_j\":{},\"physical_energy_residual_j\":{},\"physical_convective_out_w\":{},\"physical_radiative_out_w\":{},\"physical_dirichlet_in_w\":{},\"physical_convective_robin_fluxes\":[{}],\"exchange\":{}}}",
         solved.iterations,
         solved.solid_solves,
         solved.krylov_iterations,
@@ -194,6 +180,7 @@ fn natural_step_row(solved: &natural::NaturalStep) -> Result<String, SolveRefusa
         number(solved.physical_energy_residual_j)?,
         number(solved.physical_convective_out_w)?,
         number(solved.physical_radiative_out_w)?,
+        number(solved.physical_dirichlet_in_w)?,
         fluxes.join(","),
         solved.receipt,
     ))
@@ -211,7 +198,7 @@ fn radiation_step_row(solved: &EnthalpyRadiationStepSolution) -> Result<String, 
         ))
     }).collect::<Result<Vec<_>, SolveRefusal>>()?;
     Ok(format!(
-        "{{\"iterations\":{},\"solid_iterations\":{},\"krylov_iterations\":{},\"convective_out_w\":{},\"radiative_out_w\":{},\"nonlinear_radiative_out_w\":{},\"max_temperature_change_k\":{},\"max_heat_mismatch_w\":{},\"decomposition_residual_w\":{},\"physical_residual_norm_j\":{},\"physical_residual_tolerance_j\":{},\"physical_energy_residual_j\":{},\"final_inner_residual_j\":{},\"patches\":[{}]}}",
+        "{{\"iterations\":{},\"solid_iterations\":{},\"krylov_iterations\":{},\"convective_out_w\":{},\"radiative_out_w\":{},\"nonlinear_radiative_out_w\":{},\"max_temperature_change_k\":{},\"max_heat_mismatch_w\":{},\"decomposition_residual_w\":{},\"physical_residual_norm_j\":{},\"physical_residual_tolerance_j\":{},\"physical_energy_residual_j\":{},\"physical_dirichlet_in_w\":{},\"final_inner_residual_j\":{},\"patches\":[{}]}}",
         report.iterations,
         report.solid_iterations,
         report.krylov_iterations,
@@ -224,6 +211,7 @@ fn radiation_step_row(solved: &EnthalpyRadiationStepSolution) -> Result<String, 
         number(solved.physical_residual_norm_j)?,
         number(solved.physical_residual_tolerance_j)?,
         number(solved.physical_energy_residual_j)?,
+        number(solved.physical_dirichlet_in_w)?,
         number(solved.conduction.newton.residual_norm)?,
         patches.join(","),
     ))
@@ -296,6 +284,7 @@ fn march(
             ..problem
         };
         let mut physical = None;
+        let mut physical_dirichlet_in_w = None;
         let mut radiation_fragment = String::new();
         let mut natural_fragment = String::new();
         let mut airflow_fragment = String::new();
@@ -307,6 +296,7 @@ fn march(
             physical = Some((
                 finite(
                     solved.endpoint.source_w
+                        + solved.physical_dirichlet_in_w
                         - solved.endpoint.neumann_out_w
                         - solved.off_path_convective_out_w
                         - solved.air_heat_gain_w
@@ -316,6 +306,7 @@ fn march(
                 solved.physical_residual_tolerance_j,
                 solved.coupled_energy_residual_j,
             ));
+            physical_dirichlet_in_w = Some(solved.physical_dirichlet_in_w);
             airflow_fragment = format!(",\"conjugate\":{}", airflow_step_row(path, &solved)?);
             airflow_iterations += solved.outcome.solution.iterations;
             airflow_solid_solves += solved.solid_solves;
@@ -366,6 +357,7 @@ fn march(
             physical = Some((
                 finite(
                     solved.endpoint.source_w
+                        + solved.physical_dirichlet_in_w
                         - solved.endpoint.neumann_out_w
                         - solved.physical_convective_out_w
                         - solved.physical_radiative_out_w,
@@ -374,6 +366,7 @@ fn march(
                 solved.physical_residual_tolerance_j,
                 solved.physical_energy_residual_j,
             ));
+            physical_dirichlet_in_w = Some(solved.physical_dirichlet_in_w);
             natural_fragment = format!(",\"natural\":{}", natural_step_row(&solved)?);
             natural_iterations += solved.iterations;
             natural_solid_solves += solved.solid_solves;
@@ -413,6 +406,7 @@ fn march(
             physical = Some((
                 finite(
                     solved.conduction.source_w
+                        + solved.physical_dirichlet_in_w
                         - solved.conduction.neumann_out_w
                         - solved.convective_out_w
                         - solved.radiation.nonlinear_radiation_out_w,
@@ -421,6 +415,7 @@ fn march(
                 solved.physical_residual_tolerance_j,
                 solved.physical_energy_residual_j,
             ));
+            physical_dirichlet_in_w = Some(solved.physical_dirichlet_in_w);
             radiation_fragment = format!(",\"radiation\":{}", radiation_step_row(&solved)?);
             radiation_trials += solved.radiation.iterations;
             radiation_updates += solved.radiation.solid_iterations;
@@ -469,7 +464,7 @@ fn march(
         let (net_w, residual_j, accepted_threshold_j, energy_residual_j) = match physical {
             Some(values) => values,
             None => (
-                finite(endpoint.source_w - endpoint.neumann_out_w - endpoint.robin_out_w)?,
+                finite(endpoint.source_w + endpoint.dirichlet_in_w - endpoint.neumann_out_w - endpoint.robin_out_w)?,
                 endpoint.newton.residual_norm,
                 inner_threshold_j,
                 endpoint.energy_residual_j,
@@ -532,8 +527,13 @@ fn march(
         if index != 0 {
             rows.push(',');
         }
+        let bath_fragment = if problem.boundary.dirichlet().is_empty() { String::new() } else {
+            format!(",\"dirichlet_in_w\":{},\"physical_dirichlet_in_w\":{}",
+                number(endpoint.dirichlet_in_w)?,
+                number(physical_dirichlet_in_w.unwrap_or(endpoint.dirichlet_in_w))?)
+        };
         rows.push_str(&format!(
-            "{{\"step\":{},\"time_s\":{},\"dt_s\":{},\"final_region_max_k\":{},\"stored_energy_change_j\":{},\"net_input_w\":{},\"source_w\":{},\"energy_residual_j\":{},\"residual_j\":{},\"threshold_j\":{},\"newton_iterations\":{},\"krylov_iterations\":{krylov_iterations},\"liquid_mass_kg\":{},\"mean_liquid_mass_fraction\":{}{radiation_fragment}{natural_fragment}{airflow_fragment}}}",
+            "{{\"step\":{},\"time_s\":{},\"dt_s\":{},\"final_region_max_k\":{},\"stored_energy_change_j\":{},\"net_input_w\":{},\"source_w\":{},\"energy_residual_j\":{},\"residual_j\":{},\"threshold_j\":{},\"newton_iterations\":{},\"krylov_iterations\":{krylov_iterations},\"liquid_mass_kg\":{},\"mean_liquid_mass_fraction\":{}{bath_fragment}{radiation_fragment}{natural_fragment}{airflow_fragment}}}",
             index + 1, number(end)?, number(dt)?, number(qoi)?,
             number(endpoint.stored_energy_change_j)?, number(net_w)?, number(endpoint.source_w)?,
             number(energy_residual_j)?, number(residual_j)?,
@@ -1167,7 +1167,7 @@ pub(super) fn solve(
             }
         };
     let endpoint = fine.endpoint;
-    let net_w = finite(endpoint.source_w - endpoint.neumann_out_w - endpoint.robin_out_w)?;
+    let net_w = finite(endpoint.source_w + endpoint.dirichlet_in_w - endpoint.neumann_out_w - endpoint.robin_out_w)?;
     let endpoint_storage_w = finite(endpoint.stored_energy_change_j / fine.endpoint_dt_s)?;
     let endpoint_energy_residual_w = finite(fine.endpoint_energy_residual_j / fine.endpoint_dt_s)?;
     let (provenance, receipts, assignment) = match problem.element_materials {
@@ -1200,11 +1200,12 @@ pub(super) fn solve(
             source_w: endpoint.source_w,
             neumann_out_w: endpoint.neumann_out_w,
             robin_out_w: endpoint.robin_out_w,
-            dirichlet_in_w: 0.0,
+            dirichlet_in_w: endpoint.dirichlet_in_w,
             closure_w: net_w,
             scale_w: endpoint
                 .source_w
                 .abs()
+                .max(endpoint.dirichlet_in_w.abs())
                 .max(endpoint.neumann_out_w.abs())
                 .max(endpoint.robin_out_w.abs())
                 .max(f64::MIN_POSITIVE),
@@ -1214,7 +1215,7 @@ pub(super) fn solve(
         element_material_identity: assignment,
         interface_fluxes: endpoint.contact_fluxes,
         robin_fluxes: endpoint.robin_fluxes,
-        free_dofs: n,
+        free_dofs: n - problem.boundary.dirichlet().len(),
         elements,
     };
     poll(cx, deadline)?;
