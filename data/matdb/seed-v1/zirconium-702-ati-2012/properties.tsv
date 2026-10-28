@@ -1,0 +1,67 @@
+frankensim.matdb-source.v1
+observation	physical	ATI Zircadyne 702, UNS R60702, commercially pure zirconium with permitted hafnium	Tables 2 and 4 typical physical data	SI columns retained. The density, Poisson ratio and unspecified room-temperature moduli use an authored 293.15 K reference, not a measured temperature. Thermal constants retain only their printed ranges. Property sets need not share specimens. No thermal-density law, isotropic tensor, phase transformation or design allowable is inferred.
+observation	modulus	ATI Zircadyne 702	Table 4 modulus versus explicitly numbered Celsius temperatures	Seven numerical temperatures form an author-declared piecewise-linear approximation. The unnumbered room-temperature value remains separate. Direction, test method, temper and statistical uncertainty are unstated; Table 5 processing conditions are not transferred here.
+observation	strength	ATI Zircadyne 702, cold worked and annealed	Table 5 typical tensile and 0.2 percent offset yield strengths	Six numbered temperatures retained as an author-declared linear approximation. Values average longitudinal and transverse results; rate and specimen details are unknown. ASTM minimum and unnumbered room-temperature columns are excluded. No orientation-specific strength, failure distribution or hardening curve follows.
+scalar	density	physical	density	6510	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	293.15	293.15	K
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_specimens_matched	0	0	1
+scalar	heat-capacity	physical	specific_heat_capacity	284.7	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	273.15	373.15	K
+validity	heat-capacity	engineering_reference_model	1	1	1
+validity	heat-capacity	source_specimens_matched	0	0	1
+scalar	conductivity	physical	thermal_conductivity	22	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	300	800	K
+validity	conductivity	engineering_reference_model	1	1	1
+validity	conductivity	source_specimens_matched	0	0	1
+scalar	young-room	physical,modulus	young_modulus	99.2e9	Pa	constant
+uncertainty	young-room	unstated	-	-	-	-
+validity	young-room	temperature	293.15	293.15	K
+validity	young-room	engineering_reference_model	1	1	1
+validity	young-room	source_specimens_matched	0	0	1
+validity	young-room	source_elastic_temperature_known	0	0	1
+validity	young-room	source_elastic_direction_known	0	0	1
+validity	young-room	source_elastic_temper_known	0	0	1
+curve	young-temperature	modulus	young_modulus	temperature	K	Pa	311.15:98.6e9,366.15:93.1e9,422.15:86.9e9,477.15:80.7e9,533.15:75.2e9,589.15:69.6e9,644.15:64.1e9	linear
+uncertainty	young-temperature	unstated	-	-	-	-
+validity	young-temperature	temperature	311.15	644.15	K
+validity	young-temperature	engineering_reference_model	1	1	1
+validity	young-temperature	source_specimens_matched	0	0	1
+validity	young-temperature	source_elastic_temperature_known	1	1	1
+validity	young-temperature	source_elastic_direction_known	0	0	1
+validity	young-temperature	source_elastic_temper_known	0	0	1
+scalar	shear-room	physical	shear_modulus	36.2e9	Pa	constant
+uncertainty	shear-room	unstated	-	-	-	-
+validity	shear-room	temperature	293.15	293.15	K
+validity	shear-room	engineering_reference_model	1	1	1
+validity	shear-room	source_specimens_matched	0	0	1
+validity	shear-room	source_elastic_temperature_known	0	0	1
+validity	shear-room	source_elastic_direction_known	0	0	1
+validity	shear-room	source_elastic_temper_known	0	0	1
+scalar	poisson-room	physical	poisson_ratio	0.35	1	constant
+uncertainty	poisson-room	unstated	-	-	-	-
+validity	poisson-room	temperature	293.15	293.15	K
+validity	poisson-room	engineering_reference_model	1	1	1
+validity	poisson-room	source_specimens_matched	0	0	1
+validity	poisson-room	source_elastic_temperature_known	0	0	1
+validity	poisson-room	source_elastic_direction_known	0	0	1
+validity	poisson-room	source_elastic_temper_known	0	0	1
+curve	ultimate-temperature	strength	ultimate_tensile_strength	temperature	K	Pa	366.15:364.0e6,422.15:303.7e6,477.15:229.6e6,533.15:200.6e6,589.15:197.9e6,644.15:156.5e6	linear
+uncertainty	ultimate-temperature	unstated	-	-	-	-
+validity	ultimate-temperature	temperature	366.15	644.15	K
+validity	ultimate-temperature	engineering_reference_model	1	1	1
+validity	ultimate-temperature	source_specimens_matched	0	0	1
+validity	ultimate-temperature	cold_worked_and_annealed	1	1	1
+validity	ultimate-temperature	longitudinal_transverse_average	1	1	1
+validity	ultimate-temperature	source_test_rate_known	0	0	1
+curve	proof-temperature	strength	proof_stress_02	temperature	K	Pa	366.15:267.5e6,422.15:195.8e6,477.15:139.3e6,533.15:128.9e6,589.15:97.2e6,644.15:82.0e6	linear
+uncertainty	proof-temperature	unstated	-	-	-	-
+validity	proof-temperature	temperature	366.15	644.15	K
+validity	proof-temperature	engineering_reference_model	1	1	1
+validity	proof-temperature	source_specimens_matched	0	0	1
+validity	proof-temperature	cold_worked_and_annealed	1	1	1
+validity	proof-temperature	longitudinal_transverse_average	1	1	1
+validity	proof-temperature	source_test_rate_known	0	0	1

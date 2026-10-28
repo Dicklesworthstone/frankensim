@@ -1,0 +1,42 @@
+frankensim.matdb-source.v1
+observation	thermal	Kyocera SN240O silicon nitride	Manufacturer in-house representative property comparison	Density and Cp convert from g/cm3 and J/g/K. Only conductivity has a stated 20 C measurement temperature. The authored 293.15-294.15 K frozen thermal reference does not establish matched temperatures, coupons or lots. Values are representative, not specification limits; pressure and uncertainty are unstated.
+observation	mechanical	Kyocera SN240O silicon nitride	Reported Young modulus, Poisson ratio and three-point bending strength	Measurement temperatures, specimen geometry and directions are unspecified. 293.15 K is an authored calculation reference. Scalar isotropic use requires explicit model consent; no measured tensor or tensile/compression strength is implied.
+observation	expansion	Kyocera SN240O silicon nitride	Reported interval CTE from 40 to 400 C and 40 to 800 C	Retained as two mean coefficients with a required 313.15 K reference. Intermediate endpoints and instantaneous alpha are not inferred. Thermal-shock test temperature differences are not operating-temperature bounds.
+scalar	density	thermal	density	3300	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	293.15	294.15	K
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_temperatures_matched	0	0	1
+scalar	heat-capacity	thermal	specific_heat_capacity	650	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	293.15	294.15	K
+validity	heat-capacity	engineering_reference_model	1	1	1
+validity	heat-capacity	source_temperatures_matched	0	0	1
+scalar	conductivity	thermal	thermal_conductivity	27	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	293.15	294.15	K
+validity	conductivity	engineering_reference_model	1	1	1
+validity	conductivity	source_temperatures_matched	0	0	1
+scalar	young	mechanical	young_modulus	300e9	Pa	constant
+uncertainty	young	unstated	-	-	-	-
+validity	young	temperature	293.15	293.15	K
+validity	young	engineering_reference_model	1	1	1
+validity	young	source_temperatures_matched	0	0	1
+validity	young	isotropic_engineering_model	1	1	1
+scalar	poisson	mechanical	poisson_ratio	0.28	1	constant
+uncertainty	poisson	unstated	-	-	-	-
+validity	poisson	temperature	293.15	293.15	K
+validity	poisson	engineering_reference_model	1	1	1
+validity	poisson	source_temperatures_matched	0	0	1
+validity	poisson	isotropic_engineering_model	1	1	1
+scalar	flexural	mechanical	flexural_strength	1020e6	Pa	constant
+uncertainty	flexural	unstated	-	-	-	-
+validity	flexural	temperature	293.15	293.15	K
+validity	flexural	engineering_reference_model	1	1	1
+validity	flexural	source_temperatures_matched	0	0	1
+curve	mean-expansion	expansion	mean_expansion	temperature	K	K^-1	673.15:2.8e-6,1073.15:3.3e-6	tabulated
+uncertainty	mean-expansion	unstated	-	-	-	-
+validity	mean-expansion	reference_temperature	313.15	313.15	K
+validity	mean-expansion	temperature	673.15	1073.15	K
+validity	mean-expansion	engineering_reference_model	1	1	1
+validity	mean-expansion	source_temperatures_matched	0	0	1

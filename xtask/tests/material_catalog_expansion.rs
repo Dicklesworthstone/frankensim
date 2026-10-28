@@ -1540,3 +1540,6 @@ mod adhesives;
 
 #[path = "material_catalog_expansion/cushioning.rs"]
 mod cushioning;
+
+#[path = "material_catalog_expansion/thermal_engineering.rs"]
+mod thermal_engineering;

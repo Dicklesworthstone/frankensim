@@ -1,0 +1,17 @@
+frankensim.matdb-manifest.v3
+pack_id	silicon-carbide-cvd-morgan-2013
+redistribution	permitted	Selected attributed numerical facts and original modeling notes only; no source document, prose or table layout is redistributed
+citation	Morgan Advanced Materials, Performance SiC Data Sheet, 2013, Physical Properties table; https://www.morgantechnicalceramics.com/media/4w2fxqma/performance-sic.pdf
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	morgan-reference	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	flexural_strength	flexural-strength	dimensional
+property	mean_expansion	mean-linear-thermal-expansion-coefficient	dimensional
+property	resistivity_lower_limit	electrical-resistivity-exclusive-lower-limit	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	reference_temperature	reference-temperature	absolute-temperature
+axis	engineering_reference_model	engineering-reference-model	dimensional
+axis	source_temperatures_matched	source-temperatures-matched	dimensional
+axis	extremely_low_resistivity_grade	extremely-low-resistivity-grade	dimensional

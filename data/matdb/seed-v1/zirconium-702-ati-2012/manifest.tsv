@@ -1,0 +1,23 @@
+frankensim.matdb-manifest.v3
+pack_id	zirconium-702-ati-2012
+redistribution	permitted	Selected attributed numerical facts and original modeling notes only; no source document, prose or table layout is redistributed
+citation	ATI, Zircadyne 702/705 Zirconium Technical Data Sheet, version 1, 26 February 2012, Tables 2, 4 and 5, pages 2-4; https://www.atimaterials.com/Products/Documents/datasheets/zirconium/alloy/zircadyne_702_705_1_v1.pdf
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	ati-reference	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	young_modulus	young-modulus	dimensional
+property	shear_modulus	shear-modulus	dimensional
+property	poisson_ratio	poisson-ratio	dimensional
+property	ultimate_tensile_strength	ultimate-tensile-strength	dimensional
+property	proof_stress_02	proof-stress-0.2-percent	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	engineering_reference_model	engineering-reference-model	dimensional
+axis	source_specimens_matched	source-specimens-matched	dimensional
+axis	source_elastic_temperature_known	source-elastic-temperature-known	dimensional
+axis	source_elastic_direction_known	source-elastic-direction-known	dimensional
+axis	source_elastic_temper_known	source-elastic-temper-known	dimensional
+axis	cold_worked_and_annealed	cold-worked-and-annealed	dimensional
+axis	longitudinal_transverse_average	longitudinal-transverse-average	dimensional
+axis	source_test_rate_known	source-test-rate-known	dimensional

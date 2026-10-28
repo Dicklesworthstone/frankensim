@@ -1,0 +1,64 @@
+frankensim.matdb-source.v1
+observation	thermal	Corning MACOR glass ceramic, 2012 brochure edition	Reported density and thermal properties	Density converts from 2.52 g/cm3; Cp, conductivity and diffusivity are specified at 25 C. Density temperature is unknown. Holding density, Cp and conductivity over 298.15-299.15 K is an authored frozen approximation, not a measured range. Reported diffusivity remains independent of rounded rho, Cp and k. Source uncertainty and specimen matching are unstated.
+observation	mechanical	Corning MACOR glass ceramic	Reported elastic and strength properties	Young and shear moduli are specified at 25 C; Poisson ratio and compression test temperatures are unknown. Scalar isotropic use of E and nu requires explicit model consent; the independently reported E, G and nu are not an exactly consistent triplet. The 94 MPa flexural datum is a minimum specified average, not an individual lower bound. The polishing-enhanced compression upper result is excluded.
+observation	expansion	Corning MACOR glass ceramic	Four temperature-interval expansion coefficients	Retains the 2012 values, not older brochure numbers. Mean coefficients bind both interval endpoints. Warm endpoints stay tabulated-only; no instantaneous alpha, interpolated expansion or extrapolated high-temperature strength is implied.
+scalar	density	thermal	density	2520	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	298.15	299.15	K
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_temperatures_matched	0	0	1
+scalar	heat-capacity	thermal	specific_heat_capacity	790	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	298.15	299.15	K
+validity	heat-capacity	engineering_reference_model	1	1	1
+validity	heat-capacity	source_temperatures_matched	0	0	1
+scalar	conductivity	thermal	thermal_conductivity	1.46	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	298.15	299.15	K
+validity	conductivity	engineering_reference_model	1	1	1
+validity	conductivity	source_temperatures_matched	0	0	1
+scalar	diffusivity	thermal	thermal_diffusivity	7.3e-7	m2/s	constant
+uncertainty	diffusivity	unstated	-	-	-	-
+validity	diffusivity	temperature	298.15	298.15	K
+validity	diffusivity	engineering_reference_model	1	1	1
+validity	diffusivity	source_temperatures_matched	0	0	1
+scalar	young	mechanical	young_modulus	66.9e9	Pa	constant
+uncertainty	young	unstated	-	-	-	-
+validity	young	temperature	298.15	298.15	K
+validity	young	engineering_reference_model	1	1	1
+validity	young	source_temperatures_matched	0	0	1
+validity	young	isotropic_engineering_model	1	1	1
+scalar	shear	mechanical	shear_modulus	25.5e9	Pa	constant
+uncertainty	shear	unstated	-	-	-	-
+validity	shear	temperature	298.15	298.15	K
+validity	shear	engineering_reference_model	1	1	1
+validity	shear	source_temperatures_matched	0	0	1
+scalar	poisson	mechanical	poisson_ratio	0.29	1	constant
+uncertainty	poisson	unstated	-	-	-	-
+validity	poisson	temperature	298.15	298.15	K
+validity	poisson	engineering_reference_model	1	1	1
+validity	poisson	source_temperatures_matched	0	0	1
+validity	poisson	isotropic_engineering_model	1	1	1
+scalar	flexural-minimum-average	mechanical	flexural_strength_minimum_average	94e6	Pa	constant
+uncertainty	flexural-minimum-average	unstated	-	-	-	-
+validity	flexural-minimum-average	temperature	298.15	298.15	K
+validity	flexural-minimum-average	engineering_reference_model	1	1	1
+validity	flexural-minimum-average	source_temperatures_matched	0	0	1
+scalar	compression	mechanical	compressive_strength	345e6	Pa	constant
+uncertainty	compression	unstated	-	-	-	-
+validity	compression	temperature	298.15	298.15	K
+validity	compression	engineering_reference_model	1	1	1
+validity	compression	source_temperatures_matched	0	0	1
+validity	compression	polished_strength_enhancement	0	0	1
+scalar	cold-mean-expansion	expansion	mean_expansion	8.1e-6	K^-1	constant
+uncertainty	cold-mean-expansion	unstated	-	-	-	-
+validity	cold-mean-expansion	reference_temperature	173.15	173.15	K
+validity	cold-mean-expansion	temperature	298.15	298.15	K
+validity	cold-mean-expansion	engineering_reference_model	1	1	1
+validity	cold-mean-expansion	source_temperatures_matched	0	0	1
+curve	warm-mean-expansion	expansion	mean_expansion	temperature	K	K^-1	573.15:9.0e-6,873.15:11.2e-6,1073.15:12.3e-6	tabulated
+uncertainty	warm-mean-expansion	unstated	-	-	-	-
+validity	warm-mean-expansion	reference_temperature	298.15	298.15	K
+validity	warm-mean-expansion	temperature	573.15	1073.15	K
+validity	warm-mean-expansion	engineering_reference_model	1	1	1
+validity	warm-mean-expansion	source_temperatures_matched	0	0	1

@@ -1,0 +1,42 @@
+frankensim.matdb-source.v1
+observation	thermal	Morgan chemical-vapor-deposited Performance SiC, high-resistivity grade	2013 typical density, specific heat and ASTM E1461 conductivity	The source distinguishes Performance SiC from its ELR grade; this pack requires extremely-low-resistivity-grade=0. Density and Cp temperatures are unstated; conductivity is specified at 20 C. The 293.15-294.15 K frozen thermal interval is authored, not measured. Density converts from 3.21 g/cc and Cp from 0.66 J/g/K. No impurity-dependent model or matched specimens are asserted.
+observation	flexure	Morgan CVD Performance SiC	ASTM C1161 flexural strength at 20 and 1300 C	The two SI strengths remain discrete observations. No 1280-degree interpolation, tensile strength, specimen-size scaling or failure distribution is supplied.
+observation	expansion	Morgan CVD Performance SiC	ASTM E228 interval expansion from -40 to 950 C	The reported 4.5 ppm/K is retained as a mean coefficient for those endpoints; no instantaneous alpha or intermediate interval is inferred.
+observation	resistivity	Morgan Performance SiC high-resistivity grade	Van der Pauw resistivity at 20 C	The strict greater-than-1 ohm-cm result becomes an exclusive lower-limit property at 0.01 ohm m. It is not an exact resistivity, conductivity or uncertainty interval. Typical-property variability is not quantified.
+scalar	density	thermal	density	3210	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	293.15	294.15	K
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_temperatures_matched	0	0	1
+validity	density	extremely_low_resistivity_grade	0	0	1
+scalar	heat-capacity	thermal	specific_heat_capacity	660	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	293.15	294.15	K
+validity	heat-capacity	engineering_reference_model	1	1	1
+validity	heat-capacity	source_temperatures_matched	0	0	1
+validity	heat-capacity	extremely_low_resistivity_grade	0	0	1
+scalar	conductivity	thermal	thermal_conductivity	250	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	293.15	294.15	K
+validity	conductivity	engineering_reference_model	1	1	1
+validity	conductivity	source_temperatures_matched	0	0	1
+validity	conductivity	extremely_low_resistivity_grade	0	0	1
+curve	flexural-points	flexure	flexural_strength	temperature	K	Pa	293.15:370e6,1573.15:560e6	tabulated
+uncertainty	flexural-points	unstated	-	-	-	-
+validity	flexural-points	temperature	293.15	1573.15	K
+validity	flexural-points	engineering_reference_model	1	1	1
+validity	flexural-points	source_temperatures_matched	0	0	1
+validity	flexural-points	extremely_low_resistivity_grade	0	0	1
+scalar	mean-expansion	expansion	mean_expansion	4.5e-6	K^-1	constant
+uncertainty	mean-expansion	unstated	-	-	-	-
+validity	mean-expansion	reference_temperature	233.15	233.15	K
+validity	mean-expansion	temperature	1223.15	1223.15	K
+validity	mean-expansion	engineering_reference_model	1	1	1
+validity	mean-expansion	source_temperatures_matched	0	0	1
+validity	mean-expansion	extremely_low_resistivity_grade	0	0	1
+scalar	resistivity-limit	resistivity	resistivity_lower_limit	0.01	Ohm*m	constant
+uncertainty	resistivity-limit	unstated	-	-	-	-
+validity	resistivity-limit	temperature	293.15	293.15	K
+validity	resistivity-limit	engineering_reference_model	1	1	1
+validity	resistivity-limit	source_temperatures_matched	0	0	1
+validity	resistivity-limit	extremely_low_resistivity_grade	0	0	1
