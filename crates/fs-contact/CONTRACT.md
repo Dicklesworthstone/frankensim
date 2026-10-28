@@ -566,6 +566,41 @@ The fixture is a direct energy derivation for the existing DMT-M/Dugdale model;
 the machine-stiffness motivation is Deng and Kesari (2019),
 <https://doi.org/10.1016/j.jmps.2019.07.009>.
 
+`normal_patch::dmt::dynamics::DmtInertialContact` resolves finite-mass normal
+motion on the same original potential. With explicit mass m, loading spring
+K, fixed-reference dashpot c and held external force Q, it advances
+`m x'' = Q + K(D-x) - F_DMT(x) - c x'`. K=0 admits load control, c=0 retains
+conservative motion, and the prescribed stage D has its own work port.
+The source's exact-piece reversible work supplies the discrete contact force;
+inertia, spring and damping use work-conjugate midpoint quantities. Snap-in
+and pull-off therefore pass through finite-gap motion and kinetic energy,
+without equilibrium jumps or automatic conversion of released potential to
+heat. Only the explicit dashpot reports dissipation. Endpoint `DmtResponse`
+retains the actual evolving solid area, repulsive load, original identities and
+authority for tangential consumers. Gap attraction still supplies no shear area.
+
+Each allocation-free proposal has explicit time, iteration, displacement,
+velocity, force and source-range limits. `4m/dt^2 + 2c/dt + K > S` is required:
+the original force slope is bounded below by -S, so this admits a unique
+discrete-gradient root even through the two corners. A safeguarded scalar
+solve refuses an out-of-range or unresolved step. Immutable history retains
+geometry, velocity, stage, clock and physical model identity; rejected trials
+or discarded successors change no accepted state. Separate stage work, held
+load work, contact work and damping loss close kinetic/contact/spring storage,
+with explicit force and energy residual gates. Mass may be a declared reduced
+mass; this scalar owner does not invent the rest of a multibody assembly.
+
+G1/G3 `tests/adhesive_dmt_dynamics.rs` checks detached impulse/work, conservative
+attachment and detachment with finite kinetic release, damped settlement to
+the original spring equilibrium, separate driven work ports, second-order
+convergence to an independent unstable-gap trajectory, dimensional similarity
+and transactional refusals. The scalar discrete-gradient method follows
+Gonzalez (1996), *J. Nonlinear Science* 6, 449-467,
+<https://web.ma.utexas.edu/users/og/PUBLICATIONS/paper_DisHamSys.pdf>.
+Energy closure is not a temporal error certificate. Source conditions remain
+fixed; adhesion kinetics, elastic-wave propagation, viscoelastic contact and
+shear-driven peeling need their own constitutive and mechanical owners.
+
 ## Simultaneous normal impact admission
 
 `multicontact::solve_normal_impacts` consumes one full contact-space inverse

@@ -15,6 +15,9 @@
 //! Roughness, viscoelasticity, fluid bridges, mixed-mode fracture and changes
 //! of the frozen source conditions require other owners.
 
+/// Finite-mass normal motion with original contact work and explicit damping.
+#[path = "dmt/dynamics.rs"]
+pub mod dynamics;
 #[path = "dmt/energy.rs"]
 mod energy;
 /// Stable loading-machine branches and finite-range snap events.
