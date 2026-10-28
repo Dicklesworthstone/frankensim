@@ -130,6 +130,59 @@ is the reusable hot-path surface for slowly changing geometry state such as
 inclination; it remains `Estimate` and does not hide configuration-grid
 refinement error.
 
+### Source-bound JKR adhesion
+
+`normal_patch::adhesive::SourceJkrSphereContact` supplies the short-range JKR
+sphere/plane approximation from the original ordered dry interface, two bulk
+elastic states and their explicit `adhesion-energy` work-of-adhesion claim.
+Construction requires static sources at fixed external conditions, an explicit
+attraction range, a Tabor parameter of at least five, and declared small-patch,
+half-space, layer, nominal-strain, repulsive-pressure/yield and process-zone
+limits. These are model applicability screens, not a certified approximation
+error or a finite bound on the singular tensile edge stress. Original sources
+remain attached to the owner; responses are model estimates, with explicitly
+synthetic inputs retaining their synthetic classification.
+
+The allocation-free evaluator preserves signed approach and force, actual
+attached area, the Hertz repulsive contribution, the elastic-plus-surface
+potential and its consistent tangent. A bounded safeguarded scalar solve avoids
+subtractive cancellation near the displacement spinodal by using an offset from
+its radius. `friction_contact_state` feeds the same area and repulsive load
+to `fs-tribo` junction shear; a zero or tensile resultant never erases attachment.
+`point_port` maps signed action/reaction forces and moments and refuses the
+spinodal's unbounded tangent. Existing nonadhesive rungs retain their refusals.
+
+`advance_monotone` follows explicit source-bound history tokens. Attachment at
+zero approach and detachment at the displacement-controlled spinodal localize
+each jump and report its released energy separately from smooth elastic work.
+A prescribed-displacement segment satisfies `work = delta(stored energy) +
+jump loss`; accepting the returned token prevents repeated detachment losses.
+Load-controlled pull-off is exposed separately and is not used as a displacement
+event. Finite machine stiffness, roughness, precontact finite-range attraction,
+rate-dependent adhesion, viscoelasticity, mixed-mode peeling and experimental
+validation require additional models. The original theory is Johnson, Kendall
+and Roberts (1971), <https://doi.org/10.1098/rspa.1971.0141>.
+
+`tests/adhesive_jkr.rs` reconstructs the original physical equations, independently
+integrates cycle work, checks potential/force/tangent derivatives, distinguishes
+force and displacement pull-off, exercises attachment and repeated separation,
+checks zero-load/tensile friction and port signs, and verifies source scaling,
+the weak-adhesion Hertz limit and applicability/history refusals.
+
+`interface_binding::adhesive_shear::SourceAdhesiveShear` selects constant
+junction shear from explicit `adhesive_static_shear_strength` and
+`adhesive_kinetic_shear_strength` claims in Pa at the SAME ordered interface and
+query point. Both source receipts are retained. Missing data, incorrect units,
+unowned rate/history restrictions, inverted strengths or normal-state identity
+drift refuse. No shear strength is inferred from work of adhesion or bulk yield,
+and no extra Coulomb term is silently added. `evaluate_jkr` checks the response's
+normal-source identity and supplies its real area to the existing passive shear
+leaf, including zero and tensile net load. The original input authority remains
+unchanged, and frictional power is returned once for the thermal owner.
+`tests/adhesive_shear.rs` covers source/refusal cases and the coupled JKR-to-shear
+path through zero load, tensile load and detachment. This uncoupled local model
+does not evolve shear-induced peeling, partial slip, wear or bond aging.
+
 ### Ordered material/interface binding
 
 `interface_binding` retains the complete immutable `InterfaceSystemCard`, its
@@ -171,7 +224,7 @@ rollback and restart preserve the same frame/history transaction.
   sort keys everywhere; no HashMap iteration).
 - Refusals leave no partial claim: budget exhaustion returns the
   unresolved remainder, capability gaps name the pair.
-- Normal-patch laws refuse non-finite/negative and overflowing inputs, invalid
+- Nonadhesive normal-patch laws refuse non-finite/negative and overflowing inputs, invalid
   curvature/modulus, adhesive, plastic, layered, out-of-rate, or out-of-
   temperature requests rather than silently extrapolating. Solver
   complementarity, residual assembly, and resolved contact state remain
@@ -308,7 +361,8 @@ through-shot's sphere-entry window survives as Retained).
 
 - Normal-patch receipts are local analytic constitutive evaluations, not
   finite-element contact solutions, material-card admission, friction or heat
-  partitioning, lubrication/EHL, plasticity, adhesion, roughness, calibration,
+  partitioning, lubrication/EHL, plasticity, general adhesion beyond the explicit
+  source-bound JKR rung, roughness, calibration,
   experimental validation, Euler-disc target fitting, or any one-millimetre
   optimum/ranking claim. Hunt--Crossley dissipation is a declared point-contact
   model rung, not a measured loss mechanism or coefficient-of-restitution

@@ -1,5 +1,7 @@
 //! Safe-Rust, solver-independent finite-patch normal-response laws.
 
+/// Source-bound, displacement-controlled JKR adhesion with explicit jump events.
+pub mod adhesive;
 mod binding;
 mod embed;
 mod finite_gap;

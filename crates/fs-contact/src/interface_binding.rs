@@ -9,6 +9,8 @@
 
 /// Explicit per-body temperature binding; the common-state API remains strict.
 pub mod temperature;
+/// Source-bound junction shear on the same ordered interface as normal adhesion.
+pub mod adhesive_shear;
 
 use core::fmt;
 use std::collections::BTreeMap;
