@@ -60,7 +60,7 @@ fn relative(a: &[C64], b: &[C64]) -> f64 {
 // Eliminate ALL actual auxiliary coordinates by an independent dense solve.
 // In particular, do not use a diagonal-pole shortcut: molecular/thermal
 // auxiliaries are coupled and no longer form independent scalar arms.
-fn pressure_schur(duct: &DgDuct, omega: f64) -> Vec<C64> {
+pub(super) fn pressure_schur(duct: &DgDuct, omega: f64) -> Vec<C64> {
     let m = duct.field_dofs;
     let n = duct.total_dofs();
     let start = 2 * m;

@@ -1,5 +1,7 @@
 use super::*;
 
+mod field;
+
 // Deliberately synthetic constitutive rates: this test verifies the shared
 // material/duct/render connection, not N2/O2 source-data accuracy.
 const LAW: &str =

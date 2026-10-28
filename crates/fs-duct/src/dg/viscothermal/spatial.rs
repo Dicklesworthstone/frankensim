@@ -67,6 +67,7 @@ struct WallChannel {
 #[derive(Debug)]
 pub(in crate::dg) struct ThermalQuadrature {
     pub(in crate::dg) field_start: usize,
+    pub(in crate::dg) point_m: f64,
     pub(in crate::dg) projection: Vec<f64>,
     pub(in crate::dg) terms: Vec<ZkDiffusiveTerm>,
 }
@@ -78,6 +79,16 @@ pub(in crate::dg) struct SpatialViscothermal {
 }
 
 impl SpatialViscothermal {
+    /// Original pointwise thermal measure, before molecular replacement.
+    pub(in crate::dg) fn thermal_quadrature(&self, field_dofs: usize) -> Vec<ThermalQuadrature> {
+        self.channels.iter().filter(|channel| channel.field_start < field_dofs)
+            .map(|channel| ThermalQuadrature {
+                field_start: channel.field_start,
+                point_m: channel.point_m,
+                projection: channel.projection.clone(),
+                terms: channel.terms.clone(),
+            }).collect()
+    }
     /// Reindex only the surviving viscous coordinates. Thermal coordinates are
     /// replaced by the joint heat/molecular law after the returned prefix.
     /// Original thermal channels remain available as constitutive metadata.
@@ -91,6 +102,7 @@ impl SpatialViscothermal {
             if channel.field_start < field_dofs {
                 thermal.push(ThermalQuadrature {
                     field_start: channel.field_start,
+                    point_m: channel.point_m,
                     projection: channel.projection.clone(),
                     terms: channel.terms.clone(),
                 });
@@ -125,7 +137,9 @@ impl DgDuct {
     /// cylindrical ZK law does not provide mean flow, finite wall temperature,
     /// spherical-cone corrections or a 3-D solution. For uniform material gas,
     /// with_molecular_relaxation can subsequently couple internal molecular
-    /// reservoirs to these original thermal quadrature channels.
+    /// reservoirs to these original thermal quadrature channels. A nonuniform
+    /// source field instead uses with_molecular_relaxation_field, evaluating
+    /// the same material law at each original point without inlet averaging.
     /// All memories start at zero when an acoustic initial state is projected.
     /// The original ledger retains total energy and still infers cumulative
     /// loss; wall_dissipated_power_w supplies an independent instantaneous rate.

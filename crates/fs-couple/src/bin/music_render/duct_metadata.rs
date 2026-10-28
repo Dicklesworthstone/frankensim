@@ -176,6 +176,12 @@ pub(super) fn dg_radiation_provenance(load: &fs_couple::dg_port::DgPortLoad) -> 
 }
 
 fn dg_molecular_provenance(duct: &fs_duct::dg::DgDuct) -> String {
+    if duct.molecular_relaxation_field().is_some() {
+        let field = duct.gas_field().expect("spatial molecular owner retains its source field");
+        let stations = field.stations_m().iter().map(|position| format!("{position:e}"))
+            .collect::<Vec<_>>().join(",");
+        return format!(",\"molecular_gas\":{{\"model\":\"shared-heat-capacity-reservoirs-v1\",\"medium\":\"original-axial-thermochemical-field\",\"stations_m\":[{stations}],\"scope\":\"same DG exponential; original local composition and temperature determine every molecular and radial thermal reservoir; integrated frozen pressure mass and power-preserving port coordinates; original Bessel error is not a combined-law certificate; no mean flow, axial conduction or live material transfer\"}}");
+    }
     let Some(state) = duct.molecular_relaxation() else { return String::new(); };
     let reservoirs = state.processes().iter().map(|process| format!(
         "{{\"species\":{},\"reservoir\":{},\"heat_capacity_j_kg_k\":{:e},\"relaxation_time_s\":{:e}}}",

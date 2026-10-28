@@ -6,6 +6,7 @@ import flueDgSource from "../../../crates/fs-couple/examples/flue-dg-baffled.per
 import resolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg.performance?raw";
 import molecularFlueSource from "../../../crates/fs-couple/examples/flue-dg-molecular.performance?raw";
 import conicalMolecularFlueSource from "../../../crates/fs-couple/examples/flue-dg-conical-molecular.performance?raw";
+import fieldMolecularFlueSource from "../../../crates/fs-couple/examples/flue-dg-field-molecular.performance?raw";
 import materialReedSource from "../../../crates/fs-couple/examples/material_modal_valve/paired-walls.performance?raw";
 import materialReedDgSource from "../../../crates/fs-couple/examples/material_modal_valve/paired-dg-chimney.performance?raw";
 import stringExampleSource from "../../../crates/fs-couple/examples/material_strings/pluck-and-bow.material-strings?raw";
@@ -75,6 +76,15 @@ const EXAMPLES = [
     decimate: true,
     intro: "Starter: a flue drives a conical bore with coupled molecular and wall heat exchange. Change the cone geometry or its uniform gas data, then render the resulting pressure through the original exterior atmosphere.",
     help: "The dg_segment record owns the taper; dg_molecular owns the selected gas relaxation law. The atmosphere controls preserve both. The ISO terrestrial-air law may refuse enriched or additional species until a compatible law is supplied. This example uses a local cylindrical wall approximation and an interim jet source; it does not establish measured oboe, saxophone or flute accuracy. Native decimation retains the 96 kHz mechanics.",
+  },
+  {
+    name: "flue-dg-field-molecular.performance",
+    label: "Wind bore — temperature and composition gradients",
+    renderer: "wind",
+    source: fieldMolecularFlueSource,
+    decimate: true,
+    intro: "Starter: a conical bore with independently editable temperature and composition stations. Attach the N2 and CO2 species, NASA-9 and transport packs using the axial-gas example recipe. Each local gas state enters the native molecular and wall dynamics; the exterior has its own atmosphere.",
+    help: "Select a gas_station in Regional atmosphere to edit its temperature and mole fractions. The dg_bore header owns the shared species columns, and gas owns the common static pressure. This exploration uses manufactured relaxation coefficients and an interim jet; it is not a measured breath field or a qualified instrument. Native decimation retains the 96 kHz mechanics.",
   },
   {
     name: "material_modal_valve/paired-walls.performance",

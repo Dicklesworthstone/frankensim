@@ -17,6 +17,14 @@ export interface NativeGasRegion {
   label: string;
   values: NativeGasValues;
   pressureSpan: [number, number] | null;
+  /** Station metadata is inherited from one complete native dg_bore field. */
+  field?: {
+    columns: string[];
+    headerLine: number;
+    position: string;
+    station: number;
+    stations: number;
+  };
 }
 export function nativeGasRegions(source:string): NativeGasRegion[];
 export function editNativeGasRegion(source:string, region:NativeGasRegion, values:NativeGasValues, commonPressure?:boolean): string;

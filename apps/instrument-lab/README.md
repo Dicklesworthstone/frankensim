@@ -224,7 +224,8 @@ the local companion described above.
 absolute pressure (pascals), relative humidity or declared composition directly.
 Choose a region, change its values, then **Apply atmosphere** and render again.
 The same controls work with material-string exterior and cavity gases, flute/reed
-bore and exterior gases, DG chimneys and explicit cylinder/cone/hole/duct-section gas overrides. Every
+bore and exterior gases, DG chimneys, prescribed DG gas-field stations and
+explicit cylinder/cone/hole/duct-section gas overrides. Every
 other source record, including geometry, gestures, mechanical clock, observer
 law and pressure-to-PCM scale, is preserved. Apply or discard pending atmosphere
 edits before rendering, saving or switching performances.
@@ -241,9 +242,27 @@ The browser supplies no density, sound speed, loss or pitch coefficients.
 For a common static-pressure comparison, select **Apply this absolute pressure
 to every editable region**. Only explicit pressure fields are changed; legacy
 segment declarations continue to inherit ambient pressure and `exterior same`
-continues to use its original alias. Pack references and spatial gas-field
-records remain untouched in the source editor. Boundary conditions requiring a
+continues to use its original alias. Spatial field stations inherit that common
+pressure; their coordinates, temperatures and fractions are unchanged by the
+pressure action. Pack references remain untouched. Boundary conditions requiring a
 common pressure are still enforced by the native solver.
+
+For a `dg_bore` with an explicit `gas_field`, select a `gas_station` to edit its
+temperature and mole fractions independently. Station coordinates and the
+header's species columns are retained exactly. Change the common pressure in
+the enclosing `gas`/`ambient` record. Changes to species IDs, their column order,
+or station geometry belong in the full performance editor, with matching edits
+to all affected rows and original source associations.
+
+The **Wind bore — temperature and composition gradients** starter opens
+`flue-dg-field-molecular.performance`. Build and attach the six N2/CO2 source
+packs using the [canonical axial-gas recipe](../../crates/fs-couple/examples/reed-axial-gas-field.md#build-the-supplied-source-packs-and-render),
+enable attached thermochemical sources, and declare their species/NASA-9/transport
+triples, frozen phase and no water species. The field reaches the native bore's
+integrated pressure storage, local molecular reservoirs and wall diffusion;
+the exterior atmosphere stays independent. The fixture's relaxation rates are
+manufactured, and its jet is interim. It demonstrates source wiring, without
+claiming measured breath-field or complete instrument accuracy.
 
 The **Flute — resolved duct and material atmosphere** starter opens the original
 `flue-dg-baffled.performance`. Its spatial duct, outlet and rectangular mouth

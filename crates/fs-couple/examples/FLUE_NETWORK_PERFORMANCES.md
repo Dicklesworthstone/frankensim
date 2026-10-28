@@ -41,10 +41,12 @@ The material-modal DG reed path accepts the same row for its bore and optional
 upstream tract. Every finite side chimney evaluates the law against its own gas
 record. The complete state allowance includes all thermal/molecular states
 before propagator or radiation preparation. `dg_bore` retains the original
-spatial wall quadrature for cones, flares and other admitted geometry with a
-uniform gas. Each axial sample uses the local radius and its own radial thermal
-diffusion rates. Axial gas fields still refuse: substituting their mean or inlet
-state would discard the prescribed temperature/composition field.
+spatial wall quadrature for cones, flares and other admitted geometry. Each
+axial sample uses its local radius, material gas, radial thermal diffusion and
+molecular rates. An explicit `gas_field` retains its original primitive
+temperature/composition interpolation and thermochemical source packs. Its
+frozen pressure mass is integrated through the original element mass owner;
+the same change of coordinates preserves physical pressure and port work.
 
 `flue-dg-conical-molecular.performance` exercises this path with a declared
 1-to-2 mm radius cone, twelve radial poles and four axial quadrature points.
@@ -60,7 +62,34 @@ measured flute or oboe. Axial quadrature, radial-pole and acoustic-mesh errors
 remain separate convergence axes; low-frequency storage is exact only to the
 admitted spatial quadrature's accuracy. Molecular state counts follow the
 actual thermal coordinates: `elements * quadrature_points * poles * reservoirs`
-for `dg_bore`, rather than the nodal count used by `dg_tube`.
+for uniform-gas `dg_bore`, rather than the nodal count used by `dg_tube`. A
+nonuniform field counts the active reservoirs separately at every original
+thermal quadrature point, before allocating its augmented generator.
+
+`flue-dg-field-molecular.performance` supplies a conical bore with three
+temperature/composition stations and an independent exterior. It uses the
+same N2 and CO2 species, NASA-9 and transport packs built by the
+[existing axial-gas example](reed-axial-gas-field.md#build-the-supplied-source-packs-and-render).
+After building those six packs, render with:
+
+```sh
+cargo run -p fs-couple --bin music_render -- wind \
+  crates/fs-couple/examples/flue-dg-field-molecular.performance \
+  target/flue-dg-field-molecular.wav --block 113 --decimate \
+  --gas-component target/reed-field-packs/nitrogen.pack \
+    target/reed-field-packs/nitrogen-nasa9-mcbride2002.pack \
+    target/reed-field-packs/nitrogen-transport-lemmon2004.pack \
+  --gas-component target/reed-field-packs/carbon-dioxide.pack \
+    target/reed-field-packs/carbon-dioxide-nasa9-mcbride2002.pack \
+    target/reed-field-packs/carbon-dioxide-transport-laesecke2017-huber2016.pack \
+  --gas-water none --gas-phase frozen
+```
+
+The molecular coefficients in this field fixture are deliberately manufactured
+to exercise material feedback; they are not measured N2/CO2 relaxation data.
+The prescribed field is frozen, with no species transport, cooling solve or
+flow-driven breath field. Source-pack validity, molecular-law validity and
+thermal quadrature resolution remain independent admission requirements.
 
 The exterior choice stays independent:
 

@@ -35,25 +35,34 @@ export function createNativeAtmosphereControls(readSource: () => string, writeSo
       el("label", {}, "Absolute pressure (Pa)", pressure), humidityLabel),
     mixture, modelHelp, commonLabel,
     el("div", {class:"btn-row"}, apply, cancel), status);
-  const empty = el("p", {class:"small muted"}, "No editable primitive gas records were found. Source-pack references, inherited aliases and spatial-field declarations remain in the performance editor.");
+  const empty = el("p", {class:"small muted"}, "No editable primitive gas records were found. Source-pack references, inherited aliases and unsupported field declarations remain in the performance editor.");
   const element = el("section", {class:"nw-gas-controls nw-atmosphere", "aria-label":"Edit physical atmosphere"},
     el("p", {class:"small muted"}, "Change a region's temperature, absolute pressure or composition, then render to hear the native physics. Geometry, excitation and pressure-to-PCM scale stay in the performance. Apply or discard these edits before continuing."), fields, empty);
   let regions: NativeGasRegion[] = [], selected: NativeGasRegion | undefined;
   let snapshot = "", locked = false, dirty = false;
-  let rows: {species:HTMLInputElement; fraction:HTMLInputElement; element:HTMLElement}[] = [];
+  let rows: {species:HTMLInputElement; fraction:HTMLInputElement; remove:HTMLButtonElement; element:HTMLElement}[] = [];
   const controls = (): void => {
     fields.disabled = locked;
     selection.disabled = locked || dirty;
     const legacy = kind.value === "moist-air";
+    const station = Boolean(selected?.field);
+    kind.disabled = locked || station;
+    basis.disabled = locked || station;
     humidityLabel.hidden = !legacy;
     mixture.hidden = kind.value !== "mixture" && kind.value !== "thermochemical";
-    pressure.disabled = locked || (legacy && Boolean(selected?.inherited));
+    pressure.disabled = locked || station || (legacy && Boolean(selected?.inherited));
     common.disabled = locked || pressure.disabled;
     if (common.disabled) common.checked = false;
-    add.disabled = locked || rows.length >= (kind.value === "mixture" ? 6 : 128);
+    add.disabled = locked || station || rows.length >= (kind.value === "mixture" ? 6 : 128);
+    for (const row of rows) {
+      row.species.disabled = locked || station;
+      row.remove.disabled = locked || station;
+    }
     apply.disabled = locked || !dirty;
     cancel.disabled = locked || !dirty;
-    modelHelp.textContent = kind.value === "dry-air"
+    modelHelp.textContent = station
+      ? "Edit this station's temperature and mole fractions in the declared column order. Position, gas model and species columns belong to the complete field header; change them and their source registry in the performance editor. Static pressure is inherited: select the ambient gas region to change it."
+      : kind.value === "dry-air"
       ? "The native dry-air law evolves the resolved gas fields. To select thermochemical species, first author energy_solve TOLERANCE_J_PER_KG MAX_ITERATIONS after fluid_limits in the performance editor. Switching back requires removing that record yourself."
       : legacy
       ? `The native moist-air owner derives the gas state from temperature, pressure and relative humidity.${selected?.inherited ? " This segment inherits ambient pressure; select ambient to change it." : ""}`
@@ -71,7 +80,7 @@ export function createNativeAtmosphereControls(readSource: () => string, writeSo
     const fraction = field("Gas component fraction");
     species.value = value.species; fraction.value = value.fraction;
     const remove = el("button", {type:"button", class:"btn"}, "Remove species");
-    const row = {species, fraction, element:el("div", {class:"nw-gas-species"},
+    const row = {species, fraction, remove, element:el("div", {class:"nw-gas-species"},
       el("label", {}, "Species ID", species), el("label", {}, "Fraction (0–1)", fraction), remove)};
     species.addEventListener("input", changed); fraction.addEventListener("input", changed);
     remove.addEventListener("click", () => { rows = rows.filter(item => item !== row); row.element.remove(); changed(); });

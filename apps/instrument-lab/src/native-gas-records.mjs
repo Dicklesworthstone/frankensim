@@ -10,7 +10,7 @@ const resolvedSchema = 'frankensim-resolved-dg-performance-v1';
 
 /** Locate only supported primitive records; aliases, packs and unknown forms stay untouched. */
 export function nativeGasRegions(source) {
-  const regions = [];
+  const regions = [], rows = [];
   const resolved = sourceRows(source)[0] === resolvedSchema;
   let line = 0;
   for (const match of source.matchAll(/[^\r\n]+|\r\n|\r|\n/g)) {
@@ -18,6 +18,7 @@ export function nativeGasRegions(source) {
     const tokens = [...match[0].matchAll(/[^ \t\v\f]+/g)];
     const words = tokens.map(token => token[0]);
     const key = words[0];
+    if (key && !key.startsWith('#')) rows.push({start:match.index, line:line + 1, tokens, words});
     let first = standalone.has(key) ? 1 : -1;
     const inherited = segments.has(key);
     if (inherited) {
@@ -63,7 +64,67 @@ export function nativeGasRegions(source) {
       label:`${key}${inherited ? ' gas' : ''} · line ${line + 1}`, values,
       pressureSpan:pressureToken ? [match.index + pressureToken.index, match.index + pressureToken.index + pressureToken[0].length] : null});
   }
-  return regions;
+  return [...regions, ...fieldStationRegions(source, rows, regions)].sort((a, b) => a.start - b.start);
+}
+
+// A station owns only T and fractions. Its column identities, x coordinate and
+// common static pressure belong to the complete native bore declaration.
+function fieldStationRegions(source, rows, regions) {
+  const result = [];
+  const count = (value, maximum, minimum = 1) => /^\d+$/.test(value ?? '')
+    && Number(value) >= minimum && Number(value) <= maximum;
+  const positive = value => finite(value) && Number(value) > 0;
+  for (let i = 0; i < rows.length; i++) {
+    const header = rows[i], words = header.words;
+    if (words[0] !== 'dg_bore' || words[12] !== 'gas_field' || words[14] !== 'mole'
+        || !count(words[1], 512) || !count(words[3], 512) || !count(words[4], 8)
+        || !count(words[5], 64) || !count(words[10], 2048) || !count(words[11], 64)
+        || !count(words[13], 4096, 2) || !count(words[15], 128)
+        || !['open', 'closed', 'matched', 'baffled'].includes(words[2])
+        || !words.slice(6, 10).every(positive)) continue;
+    const segments = Number(words[1]), stations = Number(words[13]), size = Number(words[15]);
+    if (words.length !== 16 + size || stations * size > 16384
+        || Number(words[3]) < segments || Number(words[11]) < Number(words[4]) + 1
+        || Number(words[6]) >= Number(words[7]) || Number(words[8]) >= 1 || Number(words[9]) >= 1) continue;
+    const columns = words.slice(16);
+    if (new Set(columns).size !== columns.length || columns.some(id => id.includes('#'))) continue;
+    const geometry = rows.slice(i + 1, i + 1 + segments);
+    if (geometry.length !== segments || geometry.some(({words:fields}) =>
+      fields[0] !== 'dg_segment'
+      || !((fields[1] === 'cylinder' && fields.length === 4) || (fields[1] === 'cone' && fields.length === 5))
+      || !fields.slice(2).every(positive))) continue;
+    const length = geometry.reduce((sum, row) => sum + Number(row.words.at(-1)), 0);
+    const first = i + 1 + segments, samples = rows.slice(first, first + stations);
+    if (!Number.isFinite(length) || samples.length !== stations
+        || rows[first + stations]?.words[0] === 'gas_station') continue;
+    let previous = -1, valid = true;
+    for (const sample of samples) {
+      const fields = sample.words, position = Number(fields[1]);
+      if (fields[0] !== 'gas_station' || fields.length !== 3 + size
+          || !finite(fields[1]) || position <= previous || !positive(fields[2])
+          || fields.slice(3).some(value => !finite(value) || Number(value) < 0 || Number(value) > 1)
+          || Math.abs(fields.slice(3).reduce((sum, value) => sum + Number(value), 0) - 1) > 1e-12) {
+        valid = false; break;
+      }
+      previous = position;
+    }
+    if (!valid || Number(samples[0].words[1]) !== 0 || previous !== length) continue;
+    const ambient = regions.filter(region => region.start < header.start
+      && ['gas', 'ambient'].includes(region.key) && region.pressureSpan).at(-1);
+    if (!ambient || !positive(ambient.values.pressure)) continue;
+    samples.forEach((sample, index) => {
+      const {tokens, words:fields} = sample;
+      const last = tokens.at(-1);
+      result.push({source, start:sample.start + tokens[2].index,
+        end:sample.start + last.index + last[0].length, line:sample.line,
+        key:'gas_station', inherited:true, supportedKinds:['thermochemical'], pressureSpan:null,
+        label:'DG field line ' + header.line + ' · x = ' + fields[1] + ' m · station ' + (index + 1) + '/' + stations,
+        field:{columns:[...columns], headerLine:header.line, position:fields[1], station:index + 1, stations},
+        values:{kind:'thermochemical', temperature:fields[2], pressure:ambient.values.pressure, basis:'mole',
+          components:columns.map((species, column) => ({species, fraction:fields[3 + column]}))}});
+    });
+  }
+  return result;
 }
 
 function gasText(values, inherited) {
@@ -120,7 +181,17 @@ export function editNativeGasRegion(source, region, values, commonPressure = fal
       throw new Error('For resolved dry-air gas, remove the thermochemical energy_solve record in the performance editor before applying. It is not removed automatically.');
     }
   }
-  const next = gasText(values, region.inherited);
+  if (region.field) {
+    if (commonPressure || values.pressure !== region.values.pressure) {
+      throw new Error('A gas-field station inherits static pressure. Select the ambient gas region to change it.');
+    }
+    if (values.basis !== 'mole' || values.components?.length !== region.field.columns.length
+        || values.components.some((component, index) => component.species !== region.field.columns[index])) {
+      throw new Error('Keep the gas-field mole basis and declared species columns in their original order. Change the complete header and source registry in the performance editor.');
+    }
+  }
+  const text = gasText(values, region.inherited);
+  const next = region.field ? [values.temperature, ...values.components.map(component => component.fraction)].join(' ') : text;
   const edits = [];
   if (JSON.stringify(values) !== JSON.stringify(region.values)) edits.push([region.start, region.end, next]);
   if (commonPressure) {

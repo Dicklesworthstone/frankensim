@@ -473,27 +473,36 @@ impl DgSourceInput {
         } else {
             nodes * (self.poles + if ambient.gamma == 1.0 { 0 } else { self.poles })
         };
-        let branch_dofs: usize = self.chimneys.iter()
-            .map(|chimney| chimney.state_dofs(self.poles)).sum();
         let active = |state: &fs_material::relaxation::RelaxationState|
             state.processes().iter().filter(|p| p.heat_capacity_j_kg_k > 0.0).count();
         // Molecular reservoirs live at the original thermal coordinates:
         // exact-mass nodal arms for dg_tube, axial quadrature arms for dg_bore.
         let thermal_points = self.wall_quadrature
             .map_or(nodes, |points| self.mesh.elements * points);
-        let mut molecular_dofs = self.molecular.as_ref()
+        let molecular_dofs = self.molecular.as_ref()
             .map_or(0, |state| thermal_points * self.poles * active(state));
+        self.check_complete_state_budget(2 * nodes + memory + molecular_dofs)
+    }
+
+    // A field's reservoir count belongs to the original DG quadrature owner.
+    // Before construction, check_state_budget reserves its acoustic/wall state;
+    // prepare checks the exact augmented count here before allocating it.
+    fn check_complete_state_budget(&self, bore_dofs: usize) -> Result<(), DgSourceError> {
+        let mut total = bore_dofs + self.chimneys.iter()
+            .map(|chimney| chimney.state_dofs(self.poles)).sum::<usize>();
         if let Some(law) = &self.molecular_law {
             for chimney in &self.chimneys {
                 let medium = fs_material::relaxation::input::medium_from_record(&chimney.gas)
                     .map_err(|source| DgSourceError::Gas { line: self.line, source })?;
                 let state = law.evaluate(&medium)
                     .map_err(|source| DgSourceError::Gas { line: self.line, source })?;
-                molecular_dofs += chimney.mesh.elements * (chimney.mesh.order + 1)
-                    * self.poles * active(&state);
+                let active = state.processes().iter()
+                    .filter(|process| process.heat_capacity_j_kg_k > 0.0).count();
+                total += chimney.mesh.elements * (chimney.mesh.order + 1)
+                    * self.poles * active;
             }
         }
-        if 2 * nodes + memory + branch_dofs + molecular_dofs > self.maximum_dofs {
+        if total > self.maximum_dofs {
             return Err(bad(self.line, "complete DG bore and chimney state exceeds the declared DOF allowance"));
         }
         Ok(())
@@ -503,20 +512,35 @@ impl DgSourceInput {
     /// declaration is evaluated independently for every finite chimney; no
     /// atmosphere, species composition or material coefficient is copied from
     /// another region. Arbitrary admitted bore geometry uses its original
-    /// local-cylinder spatial wall quadrature; the bore gas must be uniform.
+    /// local-cylinder spatial wall quadrature. An axial field retains its
+    /// original thermochemical sources and evaluates the law pointwise.
     pub fn with_molecular_relaxation(
         mut self,
         law: fs_material::relaxation::RelaxationAbsorption,
         ambient: &GasRecord,
     ) -> Result<Self, DgSourceError> {
-        if self.field.is_some() || self.molecular.is_some() {
+        if self.molecular_law.is_some() {
             return Err(bad(self.line,
-                "DG molecular relaxation requires one uniform gas declaration and cannot bind an axial gas field"));
+                "DG molecular relaxation requires one constitutive declaration"));
         }
-        let medium = fs_material::relaxation::input::medium_from_record(ambient)
-            .map_err(|source| DgSourceError::Gas { line: self.line, source })?;
-        self.molecular = Some(law.evaluate(&medium)
-            .map_err(|source| DgSourceError::Gas { line: self.line, source })?);
+        if let Some(field) = &self.field {
+            // Validate original source knots now; the core additionally checks
+            // every mass and wall quadrature point before making a propagator.
+            // Ambient is not a proxy for a varying interior material.
+            for &position in field.stations_m() {
+                let state = field.state_at(position)
+                    .map_err(|source| DgSourceError::Gas { line: self.line, source })?;
+                let medium = fs_material::relaxation::RelaxingMedium::from_thermochemical(&state)
+                    .map_err(|source| DgSourceError::Gas { line: self.line, source })?;
+                law.evaluate(&medium)
+                    .map_err(|source| DgSourceError::Gas { line: self.line, source })?;
+            }
+        } else {
+            let medium = fs_material::relaxation::input::medium_from_record(ambient)
+                .map_err(|source| DgSourceError::Gas { line: self.line, source })?;
+            self.molecular = Some(law.evaluate(&medium)
+                .map_err(|source| DgSourceError::Gas { line: self.line, source })?);
+        }
         // Validate every region now. A missing partner or unsupported local
         // temperature must refuse before a propagator or radiation bake starts.
         for chimney in &self.chimneys {
@@ -635,7 +659,14 @@ impl DgSourceInput {
                 .map_err(|error| DgSourceError::Physics(AcousticRealizeError::Duct(error)))?
         };
         checkpoint(gate, self.line)?;
-        let owner = if let Some(molecular) = &self.molecular {
+        let owner = if let (Some(_), Some(law)) = (&self.field, &self.molecular_law) {
+            let dofs = owner.molecular_relaxation_field_dofs_controlled(law, &mut || gate.is_requested())
+                .map_err(|error| field_error(self.line, error))?;
+            self.check_complete_state_budget(dofs)?;
+            checkpoint(gate, self.line)?;
+            owner.with_molecular_relaxation_field_controlled(law.clone(), &mut || gate.is_requested())
+                .map_err(|error| field_error(self.line, error))?
+        } else if let Some(molecular) = &self.molecular {
             owner.with_molecular_relaxation_controlled(molecular.clone(), &mut || gate.is_requested())
                 .map_err(|error| DgSourceError::Physics(AcousticRealizeError::Duct(error)))?
         } else { owner };

@@ -105,11 +105,58 @@ fn remote_tract_composition_and_temperature_reach_the_same_material_reed() {
     let mismatched = text.replace("gas_station 0 293.15", "gas_station 0 303.15");
     assert!(build_gas(&mismatched).is_err(),
         "one small-signal through-flow requires matching complete inlet gases");
-    let unsupported = text.replace("slit_length", concat!(
+    let nonrelaxing = text.replace("slit_length", concat!(
         "dg_molecular declared 2 tracta 0 tractb 0\nslit_length",
     ));
-    assert!(build_gas(&unsupported).is_err(),
-        "a molecular law must not silently replace an authored axial gas field by its inlet");
+    let (same, _) = render(build_gas(&nonrelaxing).unwrap());
+    assert_eq!(reference, same, "explicit zero-reservoir field preserves the original response");
+}
+
+#[test]
+fn molecular_tract_keeps_remote_temperature_and_composition_in_reed_feedback() {
+    let a = gas_support::packs("tracta", 0.028, 3.5, 200.0);
+    let b = gas_support::packs("tractb", 0.044, 4.5, 200.0);
+    let bindings = [a.binding(), b.binding()];
+    let sources = ThermochemicalSources {
+        species: &bindings, water_species: None, phase: ThermochemicalPhase::FrozenGas,
+    };
+    let gate = CancelGate::new_clock_free();
+    let build_gas = |text: &str, block| MaterialModalDgValvePerformance::from_bytes_with_sources(
+        text.as_bytes(), block, &gate, Some(&sources), |_| Ok(pack(900.0, false)),
+    ).unwrap();
+    // Manufactured constitutive data isolate the native shared-law connection.
+    let law = "dg_molecular declared 2 tracta 1 vibration 1 1000 1 power 10 293.15 0 273.15 323.15 tractb 0\n";
+    let tract = format!(concat!(
+        "upstream_tract\n",
+        "dg_bore 1 closed 1 2 12 50 2000 0.01 1e-11 256 4 gas_field 2 mole 2 tracta tractb\n",
+        "dg_segment cone 0.001 0.0015 0.04\n",
+        "gas_station 0 293.15 0.7 0.3\n",
+        "gas_station 0.04 303.15 0.5 0.5\n{}"), law);
+    let text = input().replace("ambient 293.15 101325 0",
+        "ambient thermochemical 293.15 101325 mole 2 tracta 0.7 tractb 0.3")
+        .replace("slit_length", &format!("{tract}slit_length"));
+    let original = build_gas(&text, 37);
+    let load = original.renderer().system().upstream_load().unwrap();
+    assert!(load.duct().molecular_relaxation_field().is_some());
+    assert!(load.duct().molecular_relaxation().is_none());
+    assert_eq!(load.duct().total_dofs(), 150);
+    let (reference, accepted) = render(original);
+    let (partitioned, other) = render(build_gas(&text, 512));
+    assert_eq!(reference, partitioned);
+    assert_eq!(states(&accepted), states(&other));
+    assert_eq!(accepted.system().upstream_load().unwrap().state(),
+        other.system().upstream_load().unwrap().state());
+    for changed in [
+        text.replace(law, ""),
+        text.replace("power 10 ", "power 1 "),
+        text.replace("gas_station 0.04 303.15 0.5 0.5", "gas_station 0.04 313.15 0.5 0.5"),
+        text.replace("gas_station 0.04 303.15 0.5 0.5", "gas_station 0.04 303.15 0.3 0.7"),
+    ] {
+        let (pressure, other) = render(build_gas(&changed, 37));
+        assert_ne!(reference, pressure);
+        assert_ne!(states(&accepted), states(&other));
+        assert_eq!(accepted.system().load().duct().inlet_gas(), other.system().load().duct().inlet_gas());
+    }
 }
 
 #[test]

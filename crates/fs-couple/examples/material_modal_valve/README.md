@@ -18,10 +18,14 @@ finite side chimneys and exterior observers. `observer_gas molecular MAX_PATHS
 MAX_FILTER_TAPS MAX_KERNEL_TERMS LAW` binds the exterior's own composition.
 See [the shared gas declaration and its physical limits](../FLUE_NETWORK_PERFORMANCES.md#molecular-gas-response-inside-dg-bores-and-along-exterior-paths).
 The native allowance includes every molecular state at the actual nodal or
-spatial wall quadrature coordinates. Tapered geometry with uniform gas uses
-its original local-cylinder thermal diffusion owner. Spatial gas fields,
-absent species data and ineligible ISO mixtures refuse; the
-source never substitutes a generic air-loss coefficient.
+spatial wall quadrature coordinates. Tapered geometry and prescribed axial
+gas fields use the original local-cylinder thermal diffusion owner. A field
+evaluates its molecular law at the actual thermochemical material points,
+retains the integrated frozen pressure mass and preserves pressure/flow work.
+The main bore and upstream tract may bind independently declared field laws.
+Absent species data, unsupported local temperatures and ineligible ISO mixtures
+refuse; the source never substitutes a generic air-loss coefficient. Fields
+remain frozen during a performance; live molecular-history transfer is absent.
 
 ## Run
 

@@ -31,18 +31,22 @@
 //! bore therefore needs axial refinement; the original mass is never lumped.
 //! This is a convergent local-cylinder Webster wall discretization on tapered
 //! geometry. It does not introduce spherical-cone or three-dimensional physics.
+//! The pointwise field attachment additionally resolves the same law on the
+//! original primitive field and integrates its frozen mass. A local matrix
+//! congruence replaces the scalar rescaling; see [`DgDuct::with_molecular_relaxation_field`].
 
 use super::viscothermal::ViscothermalMemory;
 use super::*;
-use fs_material::relaxation::RelaxationState;
+use fs_material::relaxation::{RelaxationAbsorption, RelaxationState};
+
+mod field;
 
 #[derive(Clone, Debug)]
 pub(super) struct MolecularMemory {
-    state: RelaxationState,
+    state: Option<RelaxationState>,
+    field_law: Option<RelaxationAbsorption>,
     bulk: f64,
     modes: Vec<ThermalMode>,
-    reservoir_scales: Vec<f64>,
-    rates: Vec<f64>,
 }
 
 #[derive(Clone, Debug)]
@@ -51,6 +55,8 @@ struct ThermalMode {
     pressure_scale: f64,
     heat_rate: f64,
     projection: PressureProjection,
+    reservoir_scales: Vec<f64>,
+    rates: Vec<f64>,
 }
 
 #[derive(Clone, Debug)]
@@ -111,6 +117,46 @@ fn stamp_square(operator: &mut [f64], n: usize, terms: &[(usize, f64)], rate: f6
     }
 }
 
+fn restore_pressure_boundaries(duct: &DgDuct, operator: &mut [f64], n: usize) {
+    let m = duct.field_dofs;
+    for i in 0..m {
+        operator[i * n..i * n + m].fill(0.0);
+    }
+    let local = duct.mesh.order + 1;
+    let last = duct.elements.len() - 1;
+    for (boundary, element, node, gas) in [
+        (duct.inlet, 0, 0, &duct.gas),
+        (duct.outlet, last, local - 1, &duct.outlet_gas),
+    ] {
+        if boundary != DgBoundary::Matched {
+            continue;
+        }
+        let e = &duct.elements[element];
+        let resistance = gas.density * gas.sound_speed / e.areas[node];
+        let factor = det::sqrt(0.5 / resistance);
+        let entries: Vec<_> = (0..local)
+            .map(|i| (element * local + i, factor * e.mp_inv_sqrt[i * local + node]))
+            .collect();
+        stamp_square(operator, n, &entries, 1.0);
+    }
+}
+
+fn stamp_mode(operator: &mut [f64], n: usize, mode: &ThermalMode, field_dofs: usize) {
+    let width = mode.projection.width(field_dofs);
+    for i in 0..width {
+        let mut temperature = mode.projection.entries(i, mode.pressure_scale);
+        temperature.push((mode.start + i, 1.0));
+        if mode.heat_rate != 0.0 {
+            stamp_square(operator, n, &temperature, mode.heat_rate);
+        }
+        for (j, (&b, &rate)) in mode.reservoir_scales.iter().zip(&mode.rates).enumerate() {
+            let mut slip: Vec<_> = temperature.iter().map(|&(index, value)| (index, -b * value)).collect();
+            slip.push((mode.start + (j + 1) * width + i, 1.0));
+            stamp_square(operator, n, &slip, rate);
+        }
+    }
+}
+
 impl DgDuct {
     /// Couple the exact evaluated molecular reservoirs to the original pressure
     /// and the original circular thermal diffusion histories.
@@ -161,11 +207,10 @@ impl DgDuct {
             .all(|p| p.heat_capacity_j_kg_k == 0.0)
         {
             self.molecular = Some(MolecularMemory {
-                state,
+                state: Some(state),
+                field_law: None,
                 bulk: equilibrium_bulk,
                 modes: Vec::new(),
-                reservoir_scales: Vec::new(),
-                rates: Vec::new(),
             });
             return Ok(self);
         }
@@ -218,6 +263,8 @@ impl DgDuct {
                         pressure_scale: det::sqrt(weight * gas.specific_gas_constant / cv),
                         heat_rate,
                         projection: projection.clone(),
+                        reservoir_scales: reservoir_scales.clone(),
+                        rates: rates.clone(),
                     });
                 }
                 Ok(())
@@ -283,31 +330,7 @@ impl DgDuct {
         // plus the thermal arms being replaced. Re-form its original boundary
         // squares; subtracting large thermal rates would leave roundoff of
         // either sign in a physically lossless pressure direction.
-        for i in 0..m {
-            operator[i * total..i * total + m].fill(0.0);
-        }
-        let local = self.mesh.order + 1;
-        let last = self.elements.len() - 1;
-        for (boundary, element, node, gas) in [
-            (self.inlet, 0, 0, &self.gas),
-            (self.outlet, last, local - 1, &self.outlet_gas),
-        ] {
-            if boundary != DgBoundary::Matched {
-                continue;
-            }
-            let e = &self.elements[element];
-            let resistance = gas.density * gas.sound_speed / e.areas[node];
-            let factor = det::sqrt(0.5 / resistance);
-            let entries: Vec<_> = (0..local)
-                .map(|i| {
-                    (
-                        element * local + i,
-                        factor * e.mp_inv_sqrt[i * local + node],
-                    )
-                })
-                .collect();
-            stamp_square(&mut operator, total, &entries, 1.0);
-        }
+        restore_pressure_boundaries(&self, &mut operator, total);
         if operator.iter().any(|v| !v.is_finite()) {
             return Err(invalid(
                 "original pressure boundary loss is unrepresentable",
@@ -326,22 +349,7 @@ impl DgDuct {
         }
         for mode in &modes {
             poll(cancelled)?;
-            let width = mode.projection.width(m);
-            for i in 0..width {
-                let mut temperature = mode.projection.entries(i, mode.pressure_scale);
-                temperature.push((mode.start + i, 1.0));
-                if mode.heat_rate != 0.0 {
-                    stamp_square(&mut operator, total, &temperature, mode.heat_rate);
-                }
-                for (j, (&b, &rate)) in reservoir_scales.iter().zip(&rates).enumerate() {
-                    let mut slip: Vec<_> = temperature
-                        .iter()
-                        .map(|&(index, value)| (index, -b * value))
-                        .collect();
-                    slip.push((mode.start + (j + 1) * width + i, 1.0));
-                    stamp_square(&mut operator, total, &slip, rate);
-                }
-            }
+            stamp_mode(&mut operator, total, mode, m);
         }
         if operator.iter().any(|v| !v.is_finite()) {
             return Err(invalid("coupled molecular/thermal operator is not finite"));
@@ -364,11 +372,10 @@ impl DgDuct {
         self.memory_dofs = total - 2 * m;
         self.g_block = None;
         self.molecular = Some(MolecularMemory {
-            state,
+            state: Some(state),
+            field_law: None,
             bulk,
             modes,
-            reservoir_scales,
-            rates,
         });
         self.operator_identity = hash_operator(
             self.mesh,
@@ -385,7 +392,7 @@ impl DgDuct {
     /// Original material evaluation; no fitted relaxation parameters.
     #[must_use]
     pub fn molecular_relaxation(&self) -> Option<&RelaxationState> {
-        self.molecular.as_ref().map(|m| &m.state)
+        self.molecular.as_ref().and_then(|m| m.state.as_ref())
     }
 
     pub(super) fn pressure_bulk_modulus(&self) -> f64 {
@@ -433,10 +440,10 @@ impl DgDuct {
             for i in 0..width {
                 let temperature = state.tilde[mode.start + i]
                     + mode.pressure_scale * mode.projection.value(&state.tilde, i);
-                for (j, (&b, &rate)) in memory
+                for (j, (&b, &rate)) in mode
                     .reservoir_scales
                     .iter()
-                    .zip(&memory.rates)
+                    .zip(&mode.rates)
                     .enumerate()
                 {
                     let slip = state.tilde[mode.start + (j + 1) * width + i] - b * temperature;

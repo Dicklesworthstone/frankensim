@@ -7,11 +7,135 @@ import {serializeNativeExperiment, validateInput} from '../src/native-experiment
 
 const fixture = name => readFile(new URL(`../../../crates/fs-couple/examples/${name}`, import.meta.url), 'utf8');
 
+const fieldBore = [
+  'dg_bore 2 open 2 2 8 50 2000 0.01 1e-11 1024 4 gas_field 3 mole 2 Z-N2 A-CO2',
+  'dg_segment cylinder 0.001 0.02',
+  '# original cone and independently declared station columns',
+  'dg_segment cone 0.001 0.002 0.03',
+  'gas_station\t0\t300\t1 0',
+  'gas_station\t0.02\t310\t0.75 0.25',
+  'gas_station\t0.05\t320\t0.5 0.5',
+].join('\r\n') + '\r\n';
+const upstreamField = [
+  'upstream_tract',
+  'dg_bore 1 closed 1 2 8 50 2000 0.01 1e-11 1024 4 gas_field 2 mole 2 A-CO2 Z-N2',
+  'dg_segment cylinder 0.003 0.04',
+  'gas_station 0 310 0.1 0.9',
+  'gas_station 0.04 300 0.2 0.8',
+].join('\r\n') + '\r\n';
+const fieldSource = '\ufefffrankensim-material-modal-dg-valve-v1\r\n'
+  + 'ambient thermochemical 300 101325 mole 2 Z-N2 0.8 A-CO2 0.2\r\n'
+  + fieldBore + 'dg_molecular declared 2 Z-N2 0 A-CO2 0\r\n' + upstreamField;
+
+test('complete main and upstream DG fields expose original station columns and preserve no-op CRLF', () => {
+  const regions = nativeGasRegions(fieldSource), stations = regions.filter(region => region.field);
+  assert.equal(regions.length, 6);
+  assert.equal(stations.length, 5);
+  assert.deepEqual(stations.map(region => region.field.position), ['0', '0.02', '0.05', '0', '0.04']);
+  assert.deepEqual(stations.map(region => region.field.station), [1, 2, 3, 1, 2]);
+  assert.deepEqual(stations[0].field.columns, ['Z-N2', 'A-CO2']);
+  assert.deepEqual(stations[3].field.columns, ['A-CO2', 'Z-N2']);
+  assert.notEqual(stations[0].field.headerLine, stations[3].field.headerLine);
+  for (const region of regions) {
+    assert.equal(editNativeGasRegion(fieldSource, region, region.values), fieldSource);
+    if (region.field) {
+      assert.equal(region.pressureSpan, null);
+      assert.equal(region.values.pressure, '101325');
+      assert.deepEqual(region.supportedKinds, ['thermochemical']);
+    }
+  }
+});
+
+test('a field station edit changes only its temperature and fractions, preserving header, geometry and upstream gas', () => {
+  const selected = nativeGasRegions(fieldSource).filter(region => region.field)[1];
+  const changed = editNativeGasRegion(fieldSource, selected, {...selected.values, temperature:'315',
+    components:[{species:'Z-N2', fraction:'0.6'}, {species:'A-CO2', fraction:'0.4'}]});
+  assert.equal(changed, fieldSource.replace('gas_station\t0.02\t310\t0.75 0.25',
+    'gas_station\t0.02\t315 0.6 0.4'));
+  const upstream = nativeGasRegions(changed).filter(region => region.field)[3];
+  const twice = editNativeGasRegion(changed, upstream, {...upstream.values, temperature:'305'});
+  assert.equal(twice, changed.replace('gas_station 0 310 0.1 0.9', 'gas_station 0 305 0.1 0.9'));
+});
+
+test('field station edits refuse changes to inherited pressure, basis and original species columns', () => {
+  const selected = nativeGasRegions(fieldSource).find(region => region.field);
+  assert.throws(() => editNativeGasRegion(fieldSource, selected, selected.values, true), /inherits static pressure/);
+  assert.throws(() => editNativeGasRegion(fieldSource, selected, {...selected.values, pressure:'90000'}), /inherits static pressure/);
+  for (const changed of [
+    {basis:'mass'},
+    {components:[...selected.values.components].reverse()},
+    {components:[{species:'He', fraction:'1'}, {species:'A-CO2', fraction:'0'}]},
+    {components:[{species:'Z-N2', fraction:'1'}]},
+    {components:[...selected.values.components, {species:'He', fraction:'0'}]},
+  ]) {
+    assert.throws(() => editNativeGasRegion(fieldSource, selected, {...selected.values, ...changed}), /declared species columns/);
+  }
+  assert.throws(() => editNativeGasRegion(fieldSource, selected, {...selected.values, temperature:'0'}), /Temperature/);
+  assert.throws(() => editNativeGasRegion(fieldSource, selected, {...selected.values,
+    components:[{species:'Z-N2', fraction:'0.6'}, {species:'A-CO2', fraction:'0.5'}]}), /sum/);
+});
+
+test('common pressure changes the ambient owner while every original station row stays exact', () => {
+  const ambient = nativeGasRegions(fieldSource)[0];
+  const changed = editNativeGasRegion(fieldSource, ambient, {...ambient.values, pressure:'90000'}, true);
+  assert.equal(changed, fieldSource.replace('300 101325 mole', '300 90000 mole'));
+  const stations = nativeGasRegions(changed).filter(region => region.field);
+  assert.equal(stations.length, 5);
+  assert.ok(stations.every(region => region.values.pressure === '90000'));
+});
+
+test('malformed, oversized and unknown field blocks stay outside the station editor', () => {
+  const ambient = 'ambient 300 101325 0\r\n';
+  const malformed = [
+    fieldBore.replace('gas_field 3 mole', 'gas_field 4 mole'),
+    fieldBore.replace('gas_field 3 mole', 'gas_field 4097 mole'),
+    fieldBore.replace('gas_field 3 mole 2', 'gas_field 3 mole 129'),
+    fieldBore.replace('gas_field 3 mole', 'gas_field 3 mass'),
+    fieldBore.replace('Z-N2 A-CO2', 'Z-N2 Z-N2'),
+    fieldBore.replace('dg_segment cone', 'dg_segment profile'),
+    fieldBore.replace('0.02\t310', '0\t310'),
+    fieldBore.replace('0.05\t320', '0.06\t320'),
+    fieldBore.replace('0.75 0.25', '0.75'),
+    fieldBore.replace('0.75 0.25', '0.75 NaN'),
+    fieldBore.replace('0.75 0.25', '0.75 0.35'),
+    fieldBore + 'gas_station 0.05 300 0.5 0.5\r\n',
+    'gas_field continuous 16 2 mole 2 Z-N2 A-CO2\r\ngas_station 0 300 1 0\r\ngas_station 0.05 320 0.5 0.5\r\n',
+  ];
+  for (const block of malformed) {
+    const source = ambient + block, regions = nativeGasRegions(source);
+    assert.equal(regions.filter(region => region.field).length, 0);
+    assert.equal(editNativeGasRegion(source, regions[0], regions[0].values), source);
+  }
+  // A malformed first bore cannot donate its columns to a later valid tract.
+  const later = nativeGasRegions(ambient + malformed[0] + upstreamField).filter(region => region.field);
+  assert.equal(later.length, 2);
+  assert.deepEqual(later[0].field.columns, ['A-CO2', 'Z-N2']);
+});
+
+test('field station experiments preserve raw source, both fields and every original source triple', () => {
+  // The transport admits an exact first-line schema; BOM preservation is
+  // covered separately by the source editor's no-op test above.
+  const source = fieldSource.slice(1);
+  const components = ['Z-N2', 'A-CO2'].map(id => ({
+    speciesPath:'gas/' + id + '.species', nasa9Path:'gas/' + id + '.nasa9', transportPath:'gas/' + id + '.transport'}));
+  const options = {renderer:'wind', decimate:true, gasSources:{phase:'frozen', waterSpecies:null, components}};
+  const files = components.flatMap(component => Object.values(component)).map((path, i) =>
+    ({path, bytes:new Uint8Array([0, 255, i, 13, 10])}));
+  const selected = nativeGasRegions(source).filter(region => region.field)[4];
+  const changed = editNativeGasRegion(source, selected, {...selected.values, temperature:'299'});
+  const packet = validateInput(new TextEncoder().encode(serializeNativeExperiment(changed, files, options)), true);
+  assert.equal(new TextDecoder().decode(packet.source), changed);
+  assert.deepEqual(packet.attachments, files);
+  assert.deepEqual(packet.gasSources, options.gasSources);
+  assert.equal(packet.decimate, true);
+});
+
 test('one data editor reaches canonical flute, reed, chimney and string gases', async () => {
   const cases = [
     ['flue-dg-baffled.performance', ['gas', 'dg_exterior']],
     ['flue-dg-molecular.performance', ['gas', 'dg_exterior']],
     ['flue-dg-conical-molecular.performance', ['gas', 'dg_exterior']],
+    ['flue-dg-field-molecular.performance', ['gas', 'gas_station', 'gas_station', 'gas_station', 'dg_exterior']],
     ['resolved-dg.performance', ['gas', 'dg_exterior']],
     ['reed-two-medium-tone-hole.performance', ['ambient', 'exterior', 'cylinder']],
     ['material_modal_valve/paired-dg-chimney.performance', ['ambient', 'dg_chimney_gas', 'dg_exterior']],

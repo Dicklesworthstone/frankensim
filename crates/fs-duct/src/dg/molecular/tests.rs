@@ -10,6 +10,7 @@ use fs_math::c64::C64;
 use fs_thermochem::SpeciesId;
 
 mod spatial;
+mod field;
 
 fn gas() -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101325.0).unwrap()
@@ -75,7 +76,7 @@ fn measured_compliance(duct: &DgDuct, omega: f64) -> C64 {
     let memory = duct.molecular.as_ref().unwrap();
     let mut rows = vec![0];
     for mode in &memory.modes {
-        for j in 0..=memory.rates.len() {
+        for j in 0..=mode.rates.len() {
             rows.push(mode.start + j * duct.field_dofs);
         }
     }

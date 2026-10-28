@@ -489,8 +489,9 @@ pipe `Z_in = +i Zc cot(kL)`.
     surviving viscous coordinates are explicitly reindexed before the joint
     thermal/molecular coordinates are appended. No radius average is used.
     A spatial attachment adds `elements * quadrature_points * poles * J`
-    states for J active molecular reservoirs. Nonuniform gas fields and live
-    gas changes refuse; finite reservoir history transfer is not guessed.
+    states for J active molecular reservoirs. That evaluated-state API refuses
+    nonuniform gas; the pointwise-law API below handles the original field.
+    Live gas changes refuse; finite reservoir history transfer is not guessed.
     Compliant and Maxwell material walls can subsequently use the frozen
     pressure map. Independent molecular loss is separate from wall loss in
     harmonic responses and their coupled power accounts. The existing dense
@@ -504,6 +505,30 @@ pipe `Z_in = +i Zc cot(kL)`.
     tapered or curved profile. Axial quadrature, mesh and radial pole counts
     remain independent refinement axes. This is the local-cylinder Webster
     wall model; spherical-cone and three-dimensional corrections are absent.
+    `with_molecular_relaxation_field[_controlled](RelaxationAbsorption)`
+    resolves that SAME material law through the original `AxialGasField` at
+    every original thermal quadrature point and adaptive pressure-mass point.
+    A varying field requires the spatial wall owner. The frozen pressure mass
+    is integrated on the original element basis, retaining all source/geometry
+    station splits. For `T=Mp_inf^(-1/2) Mp_eq^(1/2)`, retained pressure
+    couplings use the congruence `T L T^T`, and ports use `T B`; the roots are
+    not assumed to commute. Every old thermal functional becomes
+    `sqrt(C_inf(x)/C_eq(x)) T v_eq`, with its own local cp and reservoir rates.
+    Shear histories, original matched boundary impedances and physical p/q
+    remain intact. Subsequent compliant walls consume the frozen mass map.
+    Uniform fields delegate the original path bitwise; an all-zero law keeps
+    the original operator. Non-relaxing regions retain their thermal arms.
+    `molecular_relaxation_field_dofs[_controlled]` counts the exact complete
+    state before dense allocation; inactive zero-capacity reservoirs do not
+    consume states. Count admission validates field stations and thermal
+    points, while construction also checks adaptive mass points. At finite
+    quadrature the physical pressure map is the exact frozen mass plus the
+    quadrature of `A(x)*(kappa(s,x)-1/B_inf(x))`; its isothermal limit still
+    needs axial refinement. No temperature/composition average, background
+    transport or live molecular-history transfer is substituted. Five native
+    regressions cover local constitutive Schur elimination, quadrature
+    refinement, original port/wall/loss work, uniform/zero parity and local
+    reservoir count/domain refusals; their native execution remains pending.
     The original equilibrium Bessel band/error is retained; it is NOT a new
     accuracy certificate for the combined constitutive approximation. No bulk
     SK term, axial heat conduction, evolving chemistry or finite wall thermal
