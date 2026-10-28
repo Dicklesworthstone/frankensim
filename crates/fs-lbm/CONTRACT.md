@@ -363,6 +363,9 @@ rollback. Their addition does not establish executed native validation.
   fractions and velocities blend fluid and non-equilibrium-bounce-back solid
   collisions while the receipt retains aggregate equal-and-opposite
   fluid/solid impulse, angular impulse, solid work, and coupling-weight sum.
+  `core2::PartialSaturationBody2`, `core2::PartialSaturationBodyExchange2`,
+  and the paired finite-body collision/step methods couple that same operator
+  to finite planar translational and rotational inertia at the midpoint.
   `core2::UnderResolvedCylinderPair2` and
   `core2::UnderResolvedLubricationExchange2` add a separate pair-local,
   per-unit-depth normal-resistance correction for smooth circular cylinders
@@ -1689,8 +1692,10 @@ Their presence does not claim native execution or empirical gas validation.
   overlapping bodies, or attribute the aggregate receipt among bodies. This
   first rung is force-free dense D2Q9 and selects the published
   non-equilibrium-bounce-back variant. It has no stresslet-accuracy,
-  convergence-order, free-surface coexistence, rigid-body integration,
-  high-Re stability, or FSI claim.
+  convergence-order, free-surface coexistence or high-Re stability claim.
+  Its prescribed-velocity entry does not integrate rigid-body inertia; the
+  finite-inertia coupling below adds a bounded velocity update, while pose
+  evolution, geometry rasterization and complete moving-body FSI remain open.
 - `UnderResolvedCylinderPair2` is a leading normal squeeze-film correction for
   smooth convex circular or osculating-cylinder geometry, Newtonian fully
   wetted creeping-gap flow, and raw lattice quantities per unit out-of-plane
@@ -3891,6 +3896,46 @@ impulse solution, very light walls, common translation, passive relaxation,
 fluid-plus-wall momentum, external work/support reactions, and refusal without
 publication. A separate pooled regression covers multi-group replay and
 cancellation/refusal. The broad moving-boundary bead remains open.
+
+## Finite-inertia immersed D2Q9 translation and rotation
+
+`Grid::collide_into_with_partial_saturation_body` and
+`Grid::step_with_partial_saturation_body` couple one planar rigid velocity
+state to the original Noble-Torczynski partial-saturation operator. The caller
+supplies total mass, polar inertia about the center of mass, the current rigid
+velocities, frozen center/fractions, and external impulse/couple in lattice
+units. Linear external impulse acts at the center of mass. Both rigid
+velocities and actual fluid populations advance; pose/fraction updates stay
+with the geometry owner.
+
+At each coupled cell, the original collision supplies solid impulse
+`B rho (u - G v_mid)`, where `G v = V + omega cross (x - center)`. A single
+3-by-3 positive-definite `fs-la` solve determines the rigid velocity increment
+with inertia `diag(m, m, I) + sum(B rho G^T G)/2`. This retains off-center
+translation/rotation coupling and avoids dividing an explicitly sampled load
+by a small body mass. One ordinary collision evaluation at that midpoint
+then supplies the measured reciprocal linear/angular impulse and solid work.
+The receipt reports body kinetic-energy change, midpoint work, and the
+momentum residual using the actual representable endpoint
+velocity differences. There is no repeated fluid solve.
+
+The coupled entry admits only force-free BGK fluid/wall domains. It checks
+positive finite inertia, the matrix response, and initial/midpoint/endpoint
+body point speeds before publishing body state or caller scratch. The
+collision exchange conserves fluid-plus-body linear momentum and total
+orbital-plus-spin angular momentum to floating-point roundoff. Streaming
+can additionally transfer momentum to stationary walls or angular momentum
+through periodic seams; those are distinct from immersed-body exchange.
+
+This is a frozen-geometry velocity-coupling substep, not a complete moving-body
+solver or a fluid total-energy model. The inertia belongs to the solid degree
+of freedom of this discrete fluid/solid model. Geometry-derived displaced- or
+interior-fluid mass/inertia corrections, overlapping bodies, pose integration,
+free surfaces and physical FSI validation remain outside this entry. Tests in
+`tests/partial_saturation_body.rs` independently reduce an off-center point
+mobility, sum actual population/body momentum, verify passive light-body
+collision energy and replay, and exercise common rigid motion, the zero-solid
+limit and atomic early/late refusals.
 
 ### Electrically insulating interfaces in moving conductors
 

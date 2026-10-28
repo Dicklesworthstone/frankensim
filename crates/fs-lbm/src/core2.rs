@@ -278,6 +278,52 @@ pub struct PartialSaturationExchange2 {
     pub coupling_weight_sum: f64,
 }
 
+/// Finite inertia and accepted velocity of one planar immersed solid.
+///
+/// All quantities use lattice units (`dx = dt = 1`), with mass and polar
+/// inertia per the same out-of-plane depth as the fluid populations. `center`
+/// is the center of mass in lattice coordinates; inertia is about that center.
+/// The partial-saturation body step updates velocities only. The caller owns
+/// pose integration and the geometry-derived cell fractions for each step.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PartialSaturationBody2 {
+    /// Positive finite total body mass.
+    pub mass: f64,
+    /// Positive finite planar moment of inertia about the center of mass.
+    pub inertia: f64,
+    /// Frozen center of mass for this collision/stream interval.
+    pub center: [f64; 2],
+    /// Accepted center-of-mass velocity.
+    pub velocity: [f64; 2],
+    /// Accepted counterclockwise angular velocity.
+    pub angular_velocity: f64,
+}
+
+/// Coupled rigid-body response to the actual partial-saturation collision.
+///
+/// Hydrodynamic angular impulse is about the body's supplied center of mass.
+/// Applied linear impulse acts at that center; `external_angular_impulse` in
+/// the stepping API is an additional couple about it. Work uses the same
+/// midpoint velocity as the fluid collision. This is a body kinetic-energy
+/// account, not a compressible-fluid total-energy or thermal model.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[must_use]
+pub struct PartialSaturationBodyExchange2 {
+    /// Measured equal-and-opposite exchange from the native collision.
+    pub hydrodynamic: PartialSaturationExchange2,
+    /// Center-of-mass velocity imposed on the fluid during this interval.
+    pub velocity_midpoint: [f64; 2],
+    /// Angular velocity imposed on the fluid during this interval.
+    pub angular_velocity_midpoint: f64,
+    /// Change in translational plus rotational body kinetic energy.
+    pub kinetic_energy_change: f64,
+    /// Work of the declared external linear impulse and couple.
+    pub external_work: f64,
+    /// `M delta_velocity - external_impulse - measured_hydrodynamic_impulse`.
+    /// The third component uses polar inertia and angular impulse.
+    pub momentum_residual: [f64; 3],
+}
+
 /// Checked local geometry and motion for one under-resolved pair of circular
 /// cylinders in a D2Q9 plane.
 ///
@@ -1265,6 +1311,224 @@ impl Grid {
         receipt
     }
 
+    /// Couple a finite-inertia solid to the existing partial-saturation collision.
+    ///
+    /// At cell offset `r`, solid velocity is `G v = V + omega cross r`, and
+    /// the native operator gives solid impulse `B rho (u - G v)`. Summing
+    /// these cell responses gives the positive-semidefinite resistance
+    /// `K = sum(B rho G^T G)`. One 3-by-3 Cholesky solve determines the rigid
+    /// velocity increment from `(M + K/2) delta_v = sum(B rho G^T (u-G v_n))
+    /// + external_impulse`, where `M = diag(mass, mass, inertia)`.
+    ///
+    /// The original collision then runs once with the solved midpoint rigid
+    /// velocity. Translation and rotation are coupled even when the sampled
+    /// solid fractions are not symmetric about the center of mass. Updating
+    /// with a prescribed-velocity impulse divided by mass instead would be
+    /// unstable for sufficiently light bodies. The solve uses increments and
+    /// never divides the measured near-canceling load by a tiny body mass.
+    ///
+    /// Fractions and center are frozen during this velocity-coupling substep;
+    /// geometry motion, displaced/interior-fluid mass correction, overlapping
+    /// bodies, and free surfaces remain outside this API. Inertias therefore
+    /// describe the solid velocity degree of freedom in this discrete model.
+    /// External linear impulse acts at the center; angular impulse is a couple.
+    ///
+    /// # Panics
+    /// Refuses invalid or unresolved inertia, non-BGK/forced/free-surface
+    /// grids, nonfinite data, and body point speeds outside the same low-Mach
+    /// envelope as prescribed partial saturation. The body and output buffer
+    /// are unchanged on refusal.
+    #[allow(clippy::too_many_lines)] // Keep the coupled proposal and publication together.
+    pub fn collide_into_with_partial_saturation_body(
+        &self,
+        post: &mut Vec<[f64; Q]>,
+        solid_fractions: &[f64],
+        body: &mut PartialSaturationBody2,
+        external_impulse: [f64; 2],
+        external_angular_impulse: f64,
+    ) -> PartialSaturationBodyExchange2 {
+        assert!(
+            self.nx > 0 && self.ny > 0,
+            "partial-saturation grid dimensions must be positive"
+        );
+        assert!(
+            body.mass.is_finite()
+                && body.mass > 0.0
+                && body.inertia.is_finite()
+                && body.inertia > 0.0,
+            "partial-saturation body mass and inertia must be finite and positive"
+        );
+        assert!(
+            body.center
+                .into_iter()
+                .chain(body.velocity)
+                .chain([body.angular_velocity, external_angular_impulse])
+                .chain(external_impulse)
+                .all(f64::is_finite),
+            "partial-saturation body state and impulses must be finite"
+        );
+        assert_eq!(
+            self.collision,
+            CollisionModel2::Bgk,
+            "finite-inertia partial saturation currently requires BGK collision"
+        );
+        assert!(
+            self.flags
+                .iter()
+                .all(|&flag| matches!(flag, Cell::Fluid | Cell::Wall)),
+            "finite-inertia partial saturation requires a fluid/wall domain"
+        );
+        assert_eq!(
+            solid_fractions.len(),
+            self.f.len(),
+            "partial-saturation solid fractions must cover the grid"
+        );
+        let point_velocity = |index: usize, velocity: [f64; 2], angular_velocity: f64| {
+            let r = [index % self.nx, index / self.nx];
+            [
+                (-angular_velocity).mul_add(r[1] as f64 - body.center[1], velocity[0]),
+                angular_velocity.mul_add(r[0] as f64 - body.center[0], velocity[1]),
+            ]
+        };
+        let mut cells: Vec<_> = solid_fractions
+            .iter()
+            .enumerate()
+            .map(|(index, &fraction)| {
+                let velocity = if fraction > 0.0 {
+                    point_velocity(index, body.velocity, body.angular_velocity)
+                } else {
+                    [0.0; 2]
+                };
+                PartialSaturationCell2::new(fraction, velocity)
+            })
+            .collect();
+        self.validate_partial_saturation_fields(&cells, body.center);
+
+        let mut matrix = [0.0; 9];
+        let mut increment = [
+            external_impulse[0],
+            external_impulse[1],
+            external_angular_impulse,
+        ];
+        for (index, cell) in cells.iter().copied().enumerate() {
+            if cell.solid_fraction == 0.0 {
+                continue;
+            }
+            let fluid = self.moments(index);
+            let weight = cell.coupling_weight(self.tau[index]) * fluid.rho;
+            let r = [index % self.nx, index / self.nx];
+            let rx = r[0] as f64 - body.center[0];
+            let ry = r[1] as f64 - body.center[1];
+            let slip = [
+                fluid.u[0] - cell.solid_velocity[0],
+                fluid.u[1] - cell.solid_velocity[1],
+            ];
+            let half_weight = 0.5 * weight;
+            matrix[0] += half_weight;
+            matrix[2] -= half_weight * ry;
+            matrix[5] += half_weight * rx;
+            matrix[8] += half_weight * rx.mul_add(rx, ry * ry);
+            increment[0] = weight.mul_add(slip[0], increment[0]);
+            increment[1] = weight.mul_add(slip[1], increment[1]);
+            increment[2] = weight.mul_add(rx.mul_add(slip[1], -ry * slip[0]), increment[2]);
+        }
+        matrix[0] += body.mass;
+        matrix[4] = matrix[0];
+        matrix[6] = matrix[2];
+        matrix[7] = matrix[5];
+        matrix[8] += body.inertia;
+        assert!(
+            matrix.into_iter().chain(increment).all(f64::is_finite),
+            "partial-saturation rigid response overflowed"
+        );
+        fs_la::factor::cholesky(&matrix, 3)
+            .expect("partial-saturation rigid inertia must be numerically positive definite")
+            .solve(&mut increment);
+        let midpoint = [
+            body.velocity[0] + 0.5 * increment[0],
+            body.velocity[1] + 0.5 * increment[1],
+        ];
+        let after = [
+            body.velocity[0] + increment[0],
+            body.velocity[1] + increment[1],
+        ];
+        let angular_midpoint = body.angular_velocity + 0.5 * increment[2];
+        let angular_after = body.angular_velocity + increment[2];
+        for velocity in [body.velocity, midpoint, after] {
+            assert!(
+                velocity[0].mul_add(velocity[0], velocity[1] * velocity[1])
+                    < MAX_REGULARIZED_BOUNDARY_SPEED_SQ,
+                "partial-saturation body translation exceeds the low-Mach envelope"
+            );
+        }
+        assert!(
+            [angular_midpoint, angular_after]
+                .into_iter()
+                .all(f64::is_finite),
+            "partial-saturation body rotation must remain finite"
+        );
+        for (index, cell) in cells.iter_mut().enumerate() {
+            if cell.solid_fraction > 0.0 {
+                // Admit the endpoint as well as the velocity actually used by
+                // the fluid, before publishing either subsystem's state.
+                let _ = PartialSaturationCell2::new(
+                    cell.solid_fraction,
+                    point_velocity(index, after, angular_after),
+                );
+                *cell = PartialSaturationCell2::new(
+                    cell.solid_fraction,
+                    point_velocity(index, midpoint, angular_midpoint),
+                );
+            }
+        }
+
+        let mut proposal = Vec::new();
+        let hydrodynamic =
+            self.collide_into_with_partial_saturation(&mut proposal, &cells, body.center);
+        // Read the accepted velocity changes, including their final rounding.
+        // A small algebraic increment can be unrepresentable beside a large
+        // initial velocity; the residual must not hide that lost impulse.
+        let accepted_increment = [
+            after[0] - body.velocity[0],
+            after[1] - body.velocity[1],
+            angular_after - body.angular_velocity,
+        ];
+        let kinetic_energy_change = 0.5
+            * body.mass
+            * (accepted_increment[0] * (after[0] + body.velocity[0])
+                + accepted_increment[1] * (after[1] + body.velocity[1]))
+            + 0.5 * body.inertia * accepted_increment[2] * (angular_after + body.angular_velocity);
+        let external_work = external_impulse[0]
+            .mul_add(midpoint[0], external_impulse[1] * midpoint[1])
+            + external_angular_impulse * angular_midpoint;
+        let momentum_residual = [
+            body.mass * accepted_increment[0] - external_impulse[0] - hydrodynamic.solid_impulse[0],
+            body.mass * accepted_increment[1] - external_impulse[1] - hydrodynamic.solid_impulse[1],
+            body.inertia * accepted_increment[2]
+                - external_angular_impulse
+                - hydrodynamic.solid_angular_impulse,
+        ];
+        assert!(
+            [kinetic_energy_change, external_work]
+                .into_iter()
+                .chain(momentum_residual)
+                .all(f64::is_finite),
+            "partial-saturation body energy and momentum must remain finite"
+        );
+        let receipt = PartialSaturationBodyExchange2 {
+            hydrodynamic,
+            velocity_midpoint: midpoint,
+            angular_velocity_midpoint: angular_midpoint,
+            kinetic_energy_change,
+            external_work,
+            momentum_residual,
+        };
+        *post = proposal;
+        body.velocity = after;
+        body.angular_velocity = angular_after;
+        receipt
+    }
+
     /// Source cell for pull-streaming direction `q` into (x, y);
     /// `None` when the pull crosses a non-periodic boundary (treated
     /// as wall bounce-back).
@@ -1971,6 +2235,35 @@ impl Grid {
         moment_origin: [f64; 2],
     ) -> PartialSaturationExchange2 {
         let receipt = self.collide_into_with_partial_saturation(scratch, cells, moment_origin);
+        let post = std::mem::take(scratch);
+        self.stream_from(&post);
+        *scratch = post;
+        receipt
+    }
+
+    /// Couple finite body inertia, then stream the same admitted populations.
+    ///
+    /// The body velocity kick is owned by
+    /// [`Self::collide_into_with_partial_saturation_body`]. Stationary outer
+    /// walls can exchange further momentum during streaming; periodic seams
+    /// transport angular momentum across the coordinate cut. Those effects
+    /// are separate from the immersed-body collision receipt. Geometry stays
+    /// frozen; this is not a pose/rasterization integrator.
+    pub fn step_with_partial_saturation_body(
+        &mut self,
+        scratch: &mut Vec<[f64; Q]>,
+        solid_fractions: &[f64],
+        body: &mut PartialSaturationBody2,
+        external_impulse: [f64; 2],
+        external_angular_impulse: f64,
+    ) -> PartialSaturationBodyExchange2 {
+        let receipt = self.collide_into_with_partial_saturation_body(
+            scratch,
+            solid_fractions,
+            body,
+            external_impulse,
+            external_angular_impulse,
+        );
         let post = std::mem::take(scratch);
         self.stream_from(&post);
         *scratch = post;
