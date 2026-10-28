@@ -29,6 +29,7 @@
 use fs_eproc::GaussianMixtureCs;
 use fs_scenario::ensemble::StochasticEnsemble;
 use fs_solid::fiber::rc_section;
+use fs_solid::frame2d::FrameMassFormulation;
 use fs_solid::{Frame2d, Geometry, Rayleigh, SectionModel, SolidError};
 use fs_uq::mlmc::{MlmcReport, mlmc_estimate};
 
@@ -145,6 +146,31 @@ impl BuildingFrame {
     /// the gravity preload or modal extraction fails.
     #[allow(clippy::needless_range_loop)] // floor/bay grid indexing
     pub fn new(spec: BuildingSpec) -> Result<BuildingFrame, SolidError> {
+        Self::with_member_mass(spec, 0.0, 0.0, FrameMassFormulation::Lumped)
+    }
+
+    /// Include explicitly supplied column/beam line mass in gravity, modes and
+    /// the earthquake history. Floor mass must exclude these member masses to
+    /// avoid double counting. Consistent inertia remains in the original frame;
+    /// this is not geometrically exact moving-mass dynamics.
+    ///
+    /// # Errors
+    /// Invalid line masses/specification, gravity equilibrium or modal solve.
+    #[allow(clippy::needless_range_loop)]
+    pub fn with_member_mass(
+        spec: BuildingSpec,
+        column_mass_per_length: f64,
+        beam_mass_per_length: f64,
+        mass_formulation: FrameMassFormulation,
+    ) -> Result<BuildingFrame, SolidError> {
+        if [column_mass_per_length, beam_mass_per_length]
+            .iter()
+            .any(|m| !m.is_finite() || *m < 0.0)
+        {
+            return Err(SolidError::InvalidInput {
+                what: "member line mass must be finite and nonnegative".into(),
+            });
+        }
         if spec.stories == 0
             || spec.bays == 0
             || !(spec.story_height > 0.0 && spec.bay_width > 0.0 && spec.floor_mass > 0.0)
@@ -156,7 +182,7 @@ impl BuildingFrame {
                     .into(),
             });
         }
-        let mut frame = Frame2d::new(Geometry::Corotational);
+        let mut frame = Frame2d::with_mass_formulation(Geometry::Corotational, mass_formulation);
         let mut floors = Vec::with_capacity(spec.stories + 1);
         for s in 0..=spec.stories {
             let row: Vec<usize> = (0..=spec.bays)
@@ -173,20 +199,30 @@ impl BuildingFrame {
         let beam = || scaled(spec.beam, 1.0);
         for s in 1..=spec.stories {
             for b in 0..=spec.bays {
-                frame.add_element(floors[s - 1][b], floors[s][b], np, 0.0, &column)?;
+                frame.add_element(
+                    floors[s - 1][b],
+                    floors[s][b],
+                    np,
+                    column_mass_per_length,
+                    &column,
+                )?;
                 frame.add_mass(floors[s][b], node_mass);
             }
             for b in 0..spec.bays {
-                frame.add_element(floors[s][b], floors[s][b + 1], np, 0.0, &beam)?;
+                frame.add_element(
+                    floors[s][b],
+                    floors[s][b + 1],
+                    np,
+                    beam_mass_per_length,
+                    &beam,
+                )?;
             }
         }
-        // Gravity preload: the floor weight on its nodes.
-        let mut gravity = vec![0.0; frame.ndof()];
-        for row in &floors[1..] {
-            for &n in row {
-                gravity[3 * n + 1] = -node_mass * G;
-            }
-        }
+        // The same reference mass projects floor/member gravity and base forcing.
+        let acceleration: Vec<f64> = (0..frame.ndof())
+            .map(|d| if d % 3 == 1 { -G } else { 0.0 })
+            .collect();
+        let gravity = frame.inertial_forces(&acceleration)?;
         frame.static_load(&gravity, 4)?;
         let w = frame.natural_frequencies()?;
         let lateral: Vec<f64> = w.iter().copied().filter(|x| *x > 0.0).collect();

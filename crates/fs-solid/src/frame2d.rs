@@ -37,7 +37,7 @@
 //! threads — bit-identical for the same input on the same build/ISA.
 //!
 //! No-claim: planar Euler–Bernoulli members (no shear deformation, no
-//! warping/torsion, no out-of-plane buckling); lumped translational mass;
+//! warping/torsion, no out-of-plane buckling); reference-configuration inertia;
 //! no element-level shear failure, bond-slip, or joint panel flexibility;
 //! the corotational strains are small (large rotation, small strain).
 
@@ -46,6 +46,9 @@
 
 use crate::SolidError;
 use crate::fiber::{Section, SectionState};
+
+mod mass;
+pub use mass::FrameMassFormulation;
 
 /// A section constitutive model for frame elements.
 #[derive(Debug, Clone)]
@@ -156,7 +159,7 @@ pub struct FrameElement {
     pub i: usize,
     /// End node.
     pub j: usize,
-    /// Mass per unit length (lumped half to each end).
+    /// Reference mass per unit length, integrated by the frame mass formulation.
     pub mass_per_length: f64,
     sections: Vec<SectionModel>,
     xi: Vec<f64>,
@@ -363,6 +366,8 @@ pub struct Frame2d {
     elements: Vec<FrameElement>,
     fixed: Vec<bool>,
     nodal_mass: Vec<f64>,
+    point_mass: Vec<f64>,
+    mass_formulation: FrameMassFormulation,
     geometry: Geometry,
     u: Vec<f64>,
     vel: Vec<f64>,
@@ -507,11 +512,24 @@ impl Frame2d {
     /// An empty frame with the given geometric transformation.
     #[must_use]
     pub fn new(geometry: Geometry) -> Frame2d {
+        Self::with_mass_formulation(geometry, FrameMassFormulation::Lumped)
+    }
+
+    /// Create a frame with a fixed element-inertia formulation. Consistent mass
+    /// uses the original geometry and Euler–Bernoulli interpolation; it does not
+    /// rotate with a deformed chord or include cross-section rotary inertia.
+    #[must_use]
+    pub fn with_mass_formulation(
+        geometry: Geometry,
+        mass_formulation: FrameMassFormulation,
+    ) -> Frame2d {
         Frame2d {
             nodes: Vec::new(),
             elements: Vec::new(),
             fixed: Vec::new(),
             nodal_mass: Vec::new(),
+            point_mass: Vec::new(),
+            mass_formulation,
             geometry,
             u: Vec::new(),
             vel: Vec::new(),
@@ -524,6 +542,7 @@ impl Frame2d {
         self.nodes.push([x, y]);
         self.fixed.extend([false; 3]);
         self.nodal_mass.extend([0.0; 3]);
+        self.point_mass.extend([0.0; 3]);
         self.u.extend([0.0; 3]);
         self.vel.extend([0.0; 3]);
         self.acc.extend([0.0; 3]);
@@ -541,6 +560,8 @@ impl Frame2d {
     pub fn add_mass(&mut self, node: usize, mass: f64) {
         self.nodal_mass[3 * node] += mass;
         self.nodal_mass[3 * node + 1] += mass;
+        self.point_mass[3 * node] += mass;
+        self.point_mass[3 * node + 1] += mass;
     }
 
     /// Add a force-based element with `np` Gauss–Lobatto sections built by
@@ -579,8 +600,10 @@ impl Frame2d {
             });
         }
         let half = 0.5 * mass_per_length * l0;
-        self.add_mass(i, half);
-        self.add_mass(j, half);
+        for node in [i, j] {
+            self.nodal_mass[3 * node] += half;
+            self.nodal_mass[3 * node + 1] += half;
+        }
         self.elements.push(FrameElement {
             i,
             j,
@@ -951,18 +974,18 @@ impl Frame2d {
     }
 
     /// Free DOFs carrying mass (the dynamic DOFs) and the massless free ones.
-    fn mass_partition(&self) -> (Vec<usize>, Vec<usize>) {
+    fn mass_partition(&self, mass: &mass::MassMatrix) -> (Vec<usize>, Vec<usize>) {
         let n = self.ndof();
         let free: Vec<usize> = (0..n).filter(|&d| !self.fixed[d]).collect();
         let massive = free
             .iter()
             .copied()
-            .filter(|&d| self.nodal_mass[d] > 0.0)
+            .filter(|&d| mass.entry(d, d) > 0.0)
             .collect();
         let massless = free
             .iter()
             .copied()
-            .filter(|&d| self.nodal_mass[d] <= 0.0)
+            .filter(|&d| mass.entry(d, d) <= 0.0)
             .collect();
         (massive, massless)
     }
@@ -975,7 +998,8 @@ impl Frame2d {
     pub fn natural_frequencies(&self) -> Result<Vec<f64>, SolidError> {
         let n = self.ndof();
         let (_, k, _) = self.assemble(&self.u)?;
-        let (t, r) = self.mass_partition();
+        let mass = self.reference_mass()?;
+        let (t, r) = self.mass_partition(&mass);
         let (nt, nr) = (t.len(), r.len());
         // K_cc = K_tt − K_tr K_rr⁻¹ K_rt.
         let mut krr = vec![0.0; nr * nr];
@@ -1006,16 +1030,8 @@ impl Frame2d {
                 }
             }
         }
-        // M^{-1/2} K_cc M^{-1/2} (M diagonal), symmetric eigenvalues.
-        let mut a = vec![vec![0.0; nt]; nt];
-        for i in 0..nt {
-            for j in 0..nt {
-                let mi = self.nodal_mass[t[i]].sqrt();
-                let mj = self.nodal_mass[t[j]].sqrt();
-                a[i][j] = 0.5 * (kcc[i * nt + j] + kcc[j * nt + i]) / (mi * mj);
-            }
-        }
-        let mut ev = jacobi_eigenvalues(a);
+        // The same generalized pencil, reduced by the admitted reference mass.
+        let mut ev = jacobi_eigenvalues(mass.modal_matrix(&kcc, &t)?);
         ev.sort_by(f64::total_cmp);
         Ok(ev.iter().map(|l| l.max(0.0).sqrt()).collect())
     }
@@ -1072,7 +1088,7 @@ impl Frame2d {
             });
         }
         let (gamma, beta) = (0.5, 0.25);
-        let m = self.nodal_mass.clone();
+        let m = self.reference_mass()?;
         let infl: Vec<f64> = (0..n)
             .map(|d| match d % 3 {
                 0 => dir.0,
@@ -1080,11 +1096,12 @@ impl Frame2d {
                 _ => 0.0,
             })
             .collect();
+        let mass_influence: Vec<f64> = (0..n).map(|d| m.row_action(d, &infl)).collect();
         let (_, k0, _) = self.assemble(&self.u)?;
         let cmat: Vec<f64> = (0..n * n)
             .map(|idx| {
                 let (i, j) = (idx / n, idx % n);
-                damping.a1 * k0[idx] + if i == j { damping.a0 * m[i] } else { 0.0 }
+                damping.a1 * k0[idx] + damping.a0 * m.entry(i, j)
             })
             .collect();
         let cv = |v: &[f64]| -> Vec<f64> {
@@ -1094,11 +1111,11 @@ impl Frame2d {
         };
         let pext = |ag: f64| -> Vec<f64> {
             (0..n)
-                .map(|d| sustained_load[d] - m[d] * infl[d] * ag)
+                .map(|d| sustained_load[d] - mass_influence[d] * ag)
                 .collect()
         };
         let fref = (0..n)
-            .map(|d| (m[d] * infl[d]).abs())
+            .map(|d| mass_influence[d].abs())
             .fold(0.0f64, f64::max)
             * ground.iter().fold(0.0f64, |a, g| a.max(g.abs()))
             + sustained_load.iter().fold(0.0f64, |a, p| a.max(p.abs()))
@@ -1108,11 +1125,7 @@ impl Frame2d {
             u: vec![self.u.clone()],
             base_shear: vec![0.0],
             input_energy: vec![0.0],
-            kinetic_energy: vec![
-                0.5 * (0..n)
-                    .map(|d| m[d] * self.vel[d] * self.vel[d])
-                    .sum::<f64>(),
-            ],
+            kinetic_energy: vec![m.kinetic_energy(&self.vel)],
             damping_energy: vec![0.0],
             internal_work: vec![0.0],
             iterations: vec![0],
@@ -1121,13 +1134,12 @@ impl Frame2d {
         let (f0, _, _) = self.assemble(&self.u)?;
         let p0 = pext(ground.first().copied().unwrap_or(0.0));
         let c0 = cv(&self.vel);
-        for d in 0..n {
-            self.acc[d] = if m[d] > 0.0 && !self.fixed[d] {
-                (p0[d] - c0[d] - f0[d]) / m[d]
-            } else {
-                0.0
-            };
-        }
+        let initial_force: Vec<f64> = (0..n).map(|d| p0[d] - c0[d] - f0[d]).collect();
+        self.acc = m.acceleration(&initial_force, &self.fixed)?;
+        hist.base_shear[0] = (0..n)
+            .filter(|&d| self.fixed[d] && d % 3 == 0)
+            .map(|d| p0[d] - m.row_action(d, &self.acc) - c0[d] - f0[d])
+            .sum();
         let mut f_prev = f0;
         let mut p_prev = p0;
         let mut c_prev = c0;
@@ -1154,7 +1166,7 @@ impl Frame2d {
                 let (acc, vel) = kin(u);
                 let cvel = cv(&vel);
                 (0..n)
-                    .map(|d| p1[d] - m[d] * acc[d] - cvel[d] - f[d])
+                    .map(|d| p1[d] - m.row_action(d, &acc) - cvel[d] - f[d])
                     .collect()
             };
             let (mut f, mut kt, mut trials) = self.assemble(&u)?;
@@ -1170,8 +1182,8 @@ impl Frame2d {
                 }
                 let mut keff = kt;
                 let (cm, cc) = (1.0 / (beta * dt * dt), gamma / (beta * dt));
+                m.add_scaled(&mut keff, cm);
                 for i in 0..n {
-                    keff[i * n + i] += cm * m[i];
                     for j in 0..n {
                         keff[i * n + j] += cc * cmat[i * n + j];
                     }
@@ -1200,10 +1212,10 @@ impl Frame2d {
             let e_in = 0.5 * (0..n).map(|d| du[d] * (p_prev[d] + p1[d])).sum::<f64>();
             let e_int = 0.5 * (0..n).map(|d| du[d] * (f_prev[d] + f[d])).sum::<f64>();
             let e_d = 0.5 * (0..n).map(|d| du[d] * (c_prev[d] + cvel[d])).sum::<f64>();
-            let kin = 0.5 * (0..n).map(|d| m[d] * vel[d] * vel[d]).sum::<f64>();
+            let kin = m.kinetic_energy(&vel);
             let base: f64 = (0..n)
                 .filter(|&d| self.fixed[d] && d % 3 == 0)
-                .map(|d| -f[d])
+                .map(|d| p1[d] - m.row_action(d, &acc) - cvel[d] - f[d])
                 .sum();
             self.u = u;
             self.vel = vel;

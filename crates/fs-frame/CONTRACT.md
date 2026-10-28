@@ -236,3 +236,22 @@ and degenerate-spec refusal.
 - No `explain()` artifact chain yet — the diagnostic and evidence fields are
   the auditable record; the fs-ledger integration is staged with the
   study-program (Appendix C) runner.
+
+## Explicit distributed member inertia
+
+`BuildingFrame::with_member_mass(spec, column_mass_per_length,
+beam_mass_per_length, formulation)` includes explicit nonnegative column/beam
+line masses in the existing force-based building. The chosen frame mass
+formulation supplies member/floor gravity, gravity-loaded modes, Rayleigh
+damping, earthquake forcing, kinetic work and full support reactions.
+`BuildingFrame::new` remains the zero-member-mass lumped configuration.
+Floor seismic mass must exclude any member mass supplied here, so that the
+same physical inventory is not counted twice.
+
+Consistent member inertia uses the reference Euler–Bernoulli centerline
+interpolation. It retains cross-coordinate inertia but does not claim
+configuration-dependent moving mass or large-rotation inertial completeness.
+The original frame mechanics and model-fragility scope remain unchanged.
+`tests/building_gravity.rs` covers loaded modal shifts, retained gravity at
+rest, a forced full-mass building history and exact zero-member-mass
+compatibility, as well as invalid line-mass refusal.

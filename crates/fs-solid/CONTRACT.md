@@ -1611,7 +1611,8 @@ preload, modal Rayleigh damping and an 8 s synthetic record (energy balance <
 ## No-claim boundaries
 
 - `frame2d` members are planar Euler–Bernoulli (no shear deformation, torsion,
-  warping or out-of-plane buckling); mass is lumped on translational DOFs; no
+  warping or out-of-plane buckling); reference mass is lumped by default or
+  consistently integrated when explicitly selected; no
   shear failure, bond-slip, joint-panel flexibility, P-Δ of leaning columns,
   or soil–structure interaction; the corotational formulation is large
   rotation / small strain. The dense LU global solve is sized for building
@@ -1965,3 +1966,40 @@ thermal/rebind owners. This immutable in-process continuation is not portable
 serialization. G3 continuation, step-budget preservation and changed-material
 refusal are exercised by the reciprocal dynamic thermoelastic tests in
 `fs-couple`.
+
+## Consistent reference inertia for planar frame vibration
+
+`frame2d::FrameMassFormulation::ConsistentReference`, selected by
+`Frame2d::with_mass_formulation`, integrates linear axial and cubic Hermite
+transverse centerline motion on each original Euler–Bernoulli member. The
+result retains translation/rotation and endpoint cross terms; separately
+added point masses remain diagonal. `Frame2d::new` retains the original
+lumped default, and a model with only nodal mass retains the diagonal path
+even when consistent element inertia is selected.
+
+One reference mass owner supplies the generalized vibration pencil, the
+initial acceleration solve, every Newmark inertial residual/tangent, Rayleigh
+mass damping, uniform-base excitation, kinetic energy and support reactions.
+Massless free coordinates still use the original static stiffness condensation;
+the full massive block is reduced with the existing fs-la Cholesky owner before
+the existing symmetric eigenvalue solve. Mass is prepared once per analysis,
+not rebuilt within Newton iterations. `inertial_forces` applies the same M to
+an explicit full acceleration vector, including consistent gravity/body loads
+and their generalized nodal moments. Reaction records include supported inertia,
+damping and applied loads, including the initial endpoint.
+
+This is fixed reference-configuration inertia for linear or moderate-rotation
+vibration. It does not include configuration-dependent mass, centrifugal or
+gyroscopic terms, or cross-section rotary inertia. Distributed body loads are
+projected through the reference interpolation; one force-based element does
+not certify spatial convergence of dynamic stress or distributed-load section
+recovery. The existing dense building-scale solver and constitutive/kinematic
+limits remain. Selecting a mass model does not alter the material law.
+
+`tests/frame2d_mass.rs` checks exact rigid translation/rotation inertia in
+rotated frames, two cantilever frequencies under mesh refinement, free-body
+base acceleration and work, full supported inertia reactions, a loaded
+two-coordinate history against independently solved generalized eigenvalues,
+and unchanged nodal-only behavior. The one-element first bending-frequency
+error falls from about 30% for endpoint lumping to below 0.5% with consistent
+mass; higher-mode accuracy still requires member refinement.
