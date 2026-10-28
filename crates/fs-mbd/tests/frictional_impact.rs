@@ -4,6 +4,9 @@ use fs_exec::CancelGate;
 use fs_mbd::frictional_impact::*;
 use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 
+#[path = "frictional_impact/redundant.rs"]
+mod redundant;
+
 fn close(a: f64, b: f64) {
     assert!(
         (a - b).abs() <= 2e-8 * a.abs().max(b.abs()).max(1.0),

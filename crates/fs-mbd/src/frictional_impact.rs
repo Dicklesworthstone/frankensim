@@ -10,8 +10,8 @@ pub mod step;
 
 use crate::{DynamicsError, MassProperties, RigidBodyState, Vec3};
 use fs_contact::frictional_multicontact::{
-    FrictionalContact, FrictionalContactConfig, FrictionalContactError, FrictionalContactResult,
-    NormalVelocityLaw, solve_frictional_contacts,
+    FrictionalContact, FrictionalContactConfig, FrictionalContactDeterminacy,
+    FrictionalContactError, FrictionalContactResult, NormalVelocityLaw, solve_frictional_contacts,
 };
 use fs_exec::CancelGate;
 
@@ -88,6 +88,11 @@ pub enum RigidFrictionalImpactError {
     Invalid(&'static str),
     Dynamics(DynamicsError),
     Contact(FrictionalContactError),
+    /// A unique body velocity does not determine the work exchanged between
+    /// independently moving supports when contact impulses remain indeterminate.
+    /// Velocity-only admission permits one common support translation, whose
+    /// work is that velocity dotted with the uniquely determined net impulse.
+    UnresolvedSupportWork,
     Cancelled,
     Audit(Box<RigidFrictionalImpactReport>),
 }
@@ -128,8 +133,13 @@ struct PreparedContact {
 /// to an invented common point: a finite gap can therefore refuse the angular
 /// balance even when a geometric activation tolerance admitted it.
 ///
-/// The contact core's positive-definite mobility scope is retained: redundant
-/// point manifolds can return a typed determinacy/numerical refusal. Impact loss
+/// Redundant contact rows may be admitted when the original contact operator
+/// proves a unique body velocity. Their individual impulses then remain one
+/// admissible representative, not uniquely determined local forces or heat.
+/// This velocity-only route admits dynamic bodies and supports with one common
+/// translation. Their total work follows the uniquely determined net impulse.
+/// Independently moving supports require unique impulses to determine work.
+/// Other unresolved manifolds retain a typed determinacy refusal. Impact loss
 /// remains unallocated mechanical loss; a physical thermal/plastic/damage law
 /// must determine its disposition. No finite-patch preload, spin friction or
 /// pose integration is silently substituted for this point-impact law.
@@ -261,6 +271,24 @@ pub fn apply_rigid_frictional_impacts(
     }
     let contact =
         solve_frictional_contacts(&laws, &delassus, controls.contact, || gate.is_requested())?;
+    if matches!(
+        contact.determinacy,
+        FrictionalContactDeterminacy::UniqueVelocity(_)
+    ) {
+        // A null impulse changes no body's momentum. Consequently it changes
+        // neither total support impulse nor U dot total_support_impulse for a
+        // common prescribed translation U. Distinct support velocities need
+        // a separate work-determinacy witness, which this owner does not infer.
+        let mut common_support_velocity = None;
+        for c in contacts {
+            if let RigidImpactCounterpart::PrescribedPlane { velocity_world, .. } = c.other {
+                if common_support_velocity.is_some_and(|u| u != velocity_world) {
+                    return Err(RigidFrictionalImpactError::UnresolvedSupportWork);
+                }
+                common_support_velocity = Some(velocity_world);
+            }
+        }
+    }
     let mut candidate = bodies.to_vec();
     let mut support_work = 0.0;
     let mut support_impulse = Vec3::ZERO;

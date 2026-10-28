@@ -156,7 +156,7 @@ pub struct RigidContactStepReport<P> {
 /// itself rejects every negative supplied initial/endpoint gap, with no repair.
 ///
 /// This is a first-order kick/contact/drift composition. Its impact solve keeps
-/// its SPD/determinacy scope and its total unallocated mechanical loss. It is
+/// its explicit impulse/velocity determinacy scope and total unallocated loss. It is
 /// not general collision discovery, a full Moreau-Jean method, or a guarantee
 /// of rigid-contact existence. Timestep refinement remains necessary.
 ///

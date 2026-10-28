@@ -812,3 +812,12 @@ covariance, and atomic refusals. This is a floating analytic two-body lane with
 equal static/kinetic Coulomb coefficients, not a many-body contact network,
 unequal-acceleration detector, compliant/adhesive model, anisotropic solver,
 rolling-resistance model or automatic heat allocation.
+
+
+### Native redundant support and prescribed-support work
+
+`frictional_impact::apply_rigid_frictional_impacts` consumes the contact core's explicit impulse/velocity determinacy receipt. Its original shared-body Gram mobility makes a unique contact velocity image sufficient for unique native body momenta, even when individual contact impulses are indeterminate. Such impulses remain an admissible representative; the report does not promote them to unique local pressure or heat.
+
+A velocity-only event may contain dynamic bodies and prescribed supports sharing one common translation. Their total support work is that translation dotted with the uniquely determined net support impulse. Independently moving prescribed supports require a separate work-determinacy witness; this consumer returns `UnresolvedSupportWork` instead of publishing an arbitrary work allocation. Existing actual endpoint-velocity, kinetic/work, linear/angular-momentum and cancellation gates still precede atomic body publication.
+
+Three new native G1/G3 groups in `tests/frictional_impact/redundant.rs` cover a finite-height, three-point body in stick and gross slide with independently derived load transfer, energy and momenta; frictionless duplicate normal rows with restitution; common conveyor translation/work and refusal of independently moving supports. Canonical input permutation is exact. These and four original impact regressions pass, together with four existing configuration-step regressions, in the bounded native source-selected lane. Generic rank/feedback, configuration, contact discovery and physical heat-partition boundaries remain explicit.
