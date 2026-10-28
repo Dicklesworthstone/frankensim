@@ -52,6 +52,8 @@ mod mass;
 pub use mass::FrameMassFormulation;
 mod modes;
 pub use modes::{FrameModalAnalysis, FrameMode, FrameModeStatus};
+mod viscosity;
+pub use viscosity::{FrameMaterialDamping, FrameViscousPort, FrameViscousSection};
 
 /// A section constitutive model for frame elements.
 #[derive(Debug, Clone)]
@@ -165,6 +167,7 @@ pub struct FrameElement {
     /// Reference mass per unit length, integrated by the frame mass formulation.
     pub mass_per_length: f64,
     material_section: Option<ConcentricElasticSection>,
+    viscous_section: Option<FrameViscousSection>,
     sections: Vec<SectionModel>,
     xi: Vec<f64>,
     w: Vec<f64>,
@@ -425,6 +428,12 @@ pub struct DynamicHistory {
     pub kinetic_energy: Vec<f64>,
     /// Cumulative damping dissipation.
     pub damping_energy: Vec<f64>,
+    /// Cumulative work of the original source-bound axial/bending viscosities.
+    /// This is a part of `damping_energy`, not additional dissipated energy.
+    pub material_damping_energy: Vec<f64>,
+    /// Cumulative work of the separately authored Rayleigh mechanism.
+    /// This is a part of `damping_energy`, not additional dissipated energy.
+    pub rayleigh_damping_energy: Vec<f64>,
     /// Cumulative internal work (recoverable strain + hysteretic).
     pub internal_work: Vec<f64>,
     /// Newton iterations per step.
@@ -613,6 +622,7 @@ impl Frame2d {
             j,
             mass_per_length,
             material_section: None,
+            viscous_section: None,
             sections: (0..np).map(|_| make_section()).collect(),
             commit: ElementCommit {
                 q: [0.0; 3],
@@ -1086,8 +1096,9 @@ impl Frame2d {
 
     /// Implicit Newmark-β (average acceleration, γ = ½, β = ¼) response to a
     /// uniform base acceleration record `ground` (sampled every `dt`) acting
-    /// along the global direction `(dir_x, dir_y)`, with Rayleigh damping on
-    /// the initial stiffness. Displacements are RELATIVE to the base.
+    /// along the global direction `(dir_x, dir_y)`, with authored Rayleigh
+    /// damping and any attached source-derived section viscosity. Displacements
+    /// are RELATIVE to the base. Material and Rayleigh losses remain separate.
     /// No sustained nodal load is applied: use [`Self::newmark_with_load`] to
     /// retain gravity or another static preload during the record.
     ///
@@ -1111,6 +1122,9 @@ impl Frame2d {
     /// and the external-work ledger. It is never inferred from the current
     /// displacement or material state. Existing displacement and material history
     /// are retained; static equilibrium is not recomputed by this method.
+    /// Attached material viscosity enters the full physical damping matrix;
+    /// it is never replaced by a fitted independent damping ratio per mode.
+    /// Its source-band and linear-model admission occurs before state changes.
     ///
     /// # Errors
     /// [`SolidError::InvalidInput`] for a wrong-length or non-finite sustained
@@ -1146,12 +1160,39 @@ impl Frame2d {
             .collect();
         let mass_influence: Vec<f64> = (0..n).map(|d| m.row_action(d, &infl)).collect();
         let (_, k0, _) = self.assemble(&self.u)?;
-        let cmat: Vec<f64> = (0..n * n)
+        let rayleigh_matrix: Vec<f64> = (0..n * n)
             .map(|idx| {
                 let (i, j) = (idx / n, idx % n);
                 damping.a1 * k0[idx] + damping.a0 * m.entry(i, j)
             })
             .collect();
+        let material_damping = self.material_damping_operator()?;
+        if let Some(operator) = &material_damping {
+            operator.admit_timestep(dt)?;
+        }
+        let material_matrix = material_damping.as_ref().map(FrameMaterialDamping::entries);
+        if material_matrix.is_some()
+            && (ground
+                .iter()
+                .chain([dir.0, dir.1, damping.a0, damping.a1].iter())
+                .any(|v| !v.is_finite())
+                || damping.a0 < 0.0
+                || damping.a1 < 0.0)
+        {
+            return Err(SolidError::InvalidInput {
+                what: "material-damped frame requires finite forcing and nonnegative finite authored Rayleigh coefficients".into(),
+            });
+        }
+        let cmat: Vec<f64> = rayleigh_matrix
+            .iter()
+            .enumerate()
+            .map(|(i, value)| value + material_matrix.as_ref().map_or(0.0, |matrix| matrix[i]))
+            .collect();
+        if material_matrix.is_some() && cmat.iter().any(|value| !value.is_finite()) {
+            return Err(SolidError::InvalidInput {
+                what: "combined frame damping is unrepresentable".into(),
+            });
+        }
         let cv = |v: &[f64]| -> Vec<f64> {
             (0..n)
                 .map(|i| (0..n).map(|j| cmat[i * n + j] * v[j]).sum())
@@ -1175,6 +1216,8 @@ impl Frame2d {
             input_energy: vec![0.0],
             kinetic_energy: vec![m.kinetic_energy(&self.vel)],
             damping_energy: vec![0.0],
+            material_damping_energy: vec![0.0],
+            rayleigh_damping_energy: vec![0.0],
             internal_work: vec![0.0],
             iterations: vec![0],
         };
@@ -1260,6 +1303,28 @@ impl Frame2d {
             let e_in = 0.5 * (0..n).map(|d| du[d] * (p_prev[d] + p1[d])).sum::<f64>();
             let e_int = 0.5 * (0..n).map(|d| du[d] * (f_prev[d] + f[d])).sum::<f64>();
             let e_d = 0.5 * (0..n).map(|d| du[d] * (c_prev[d] + cvel[d])).sum::<f64>();
+            let e_material = material_matrix.as_ref().map_or(0.0, |matrix| {
+                0.5 * (0..n)
+                    .map(|i| {
+                        du[i]
+                            * (0..n)
+                                .map(|j| matrix[i * n + j] * (v0[j] + vel[j]))
+                                .sum::<f64>()
+                    })
+                    .sum::<f64>()
+            });
+            let e_rayleigh = if material_matrix.is_none() {
+                e_d
+            } else {
+                0.5 * (0..n)
+                    .map(|i| {
+                        du[i]
+                            * (0..n)
+                                .map(|j| rayleigh_matrix[i * n + j] * (v0[j] + vel[j]))
+                                .sum::<f64>()
+                    })
+                    .sum::<f64>()
+            };
             let kin = m.kinetic_energy(&vel);
             let base: f64 = (0..n)
                 .filter(|&d| self.fixed[d] && d % 3 == 0)
@@ -1276,6 +1341,10 @@ impl Frame2d {
             hist.input_energy.push(hist.input_energy[last] + e_in);
             hist.kinetic_energy.push(kin);
             hist.damping_energy.push(hist.damping_energy[last] + e_d);
+            hist.material_damping_energy
+                .push(hist.material_damping_energy[last] + e_material);
+            hist.rayleigh_damping_energy
+                .push(hist.rayleigh_damping_energy[last] + e_rayleigh);
             hist.internal_work.push(hist.internal_work[last] + e_int);
             hist.iterations.push(iters);
             f_prev = f;
