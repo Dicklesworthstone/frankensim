@@ -3587,3 +3587,44 @@ validation. The broader MR19/MR20 multiphysics deliveries remain open.
 The existing planar capillarity regressions additionally check constant-source
 native parity and transactional refusal of a conflicting temperature-dependent
 surface-stress closure.
+
+## Finite-mass planar D3Q19 wall coupling
+
+`BoundaryGrid3::step_with_finite_mass_walls` and its pooled counterpart advance
+fluid populations and the tangential velocities of two opposite complete planar
+walls in one transaction. `FiniteMassWall3::mass` is the total mass of one face
+in lattice units (`dx = dt = 1`), not an areal density. The other two axes must
+be periodic; voxel solids, open faces, and additional walls refuse. The grid's
+boundary velocities hold the accepted endpoint wall state.
+
+The existing collision runs once. Two face-only reductions use its actual
+post-collision populations: the first obtains the affine tangential reaction
+`J(u) = J(0) - D*u`, with `D = sum(rho_post)/3`; a direct midpoint solve couples
+that reaction to finite wall inertia and the declared external impulse. The
+second evaluates the shared link-wise momentum-exchange owner at the solved
+midpoint velocity. Streaming uses that same velocity. This avoids repeated
+fluid solves, full-state cloning on the serial path, and explicit added-mass
+instability for light walls. The ordinary prescribed-wall step is unchanged.
+
+`FiniteMassWallReceipt3` reports before/midpoint/after velocities, measured
+hydrodynamic impulse and moment, wall kinetic-energy change, and hydrodynamic
+and external work. Tangential fluid-plus-wall momentum includes the declared
+external impulses. Wall work uses the midpoint velocity and closes its
+kinetic-energy increment to floating-point roundoff. External impulse acts at
+the geometric face center. Normal translation and all rotation remain
+constrained: the receipt explicitly reports the support impulse and angular
+impulse about the caller's moment origin. Periodic transport contributes angular
+momentum flux, so this is not a closed-domain global angular-momentum claim.
+
+Geometry, finite positive mass, finite inputs, collision state, load arithmetic,
+and midpoint/endpoint low-Mach wall speeds are checked before publication.
+Pooled cancellation preserves the old populations and wall velocities; the
+unpublished destination follows the existing pooled stream path. This capability
+has fixed planar geometry: it does not cover rotating immersed bodies, changing
+voxel occupancy, fresh-cell reconstruction, or arbitrary moving interfaces.
+
+Focused serial regressions cover every normal axis, an independent implicit
+impulse solution, very light walls, common translation, passive relaxation,
+fluid-plus-wall momentum, external work/support reactions, and refusal without
+publication. A separate pooled regression covers multi-group replay and
+cancellation/refusal. The broad moving-boundary bead remains open.

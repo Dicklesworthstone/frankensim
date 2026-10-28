@@ -380,6 +380,125 @@ pub struct WallMomentumExchange3 {
     pub measured_links: usize,
 }
 
+impl WallMomentumExchange3 {
+    fn add_link(
+        &mut self,
+        link: BoundaryLink3,
+        outgoing: f64,
+        rho: f64,
+        velocity: [f64; 3],
+        origin: [f64; 3],
+    ) {
+        let q = link.direction;
+        let e = [f64::from(E3[q].0), f64::from(E3[q].1), f64::from(E3[q].2)];
+        let incoming = wall_population(outgoing, rho, q, velocity);
+        let mass_change = incoming - outgoing;
+        let fluid = e.map(|component| component * (outgoing + incoming));
+        let moving_mass = velocity.map(|component| component * mass_change);
+        let wall = core::array::from_fn::<_, 3, _>(|axis| {
+            (-e[axis] - velocity[axis]) * outgoing - (e[axis] - velocity[axis]) * incoming
+        });
+        let offset = core::array::from_fn::<_, 3, _>(|axis| {
+            link.cell[axis] as f64 + 0.5 - 0.5 * e[axis] - origin[axis]
+        });
+        for axis in 0..3 {
+            let b = (axis + 1) % 3;
+            let c = (axis + 2) % 3;
+            self.wall_impulse[axis] += wall[axis];
+            self.fluid_population_impulse[axis] += fluid[axis];
+            self.wall_velocity_mass_impulse[axis] += moving_mass[axis];
+            self.wall_angular_impulse[axis] += offset[b] * wall[c] - offset[c] * wall[b];
+            self.fluid_population_angular_impulse[axis] +=
+                offset[b] * fluid[c] - offset[c] * fluid[b];
+            self.wall_velocity_mass_angular_impulse[axis] +=
+                offset[b] * moving_mass[c] - offset[c] * moving_mass[b];
+            self.wall_work += wall[axis] * velocity[axis];
+        }
+        self.fluid_mass_change += mass_change;
+        self.measured_links += 1;
+    }
+
+    fn checked(self) -> Result<Self, BoundaryStepError3> {
+        if ![
+            self.wall_impulse,
+            self.fluid_population_impulse,
+            self.wall_velocity_mass_impulse,
+            self.wall_angular_impulse,
+            self.fluid_population_angular_impulse,
+            self.wall_velocity_mass_angular_impulse,
+        ]
+        .into_iter()
+        .flatten()
+        .chain([self.fluid_mass_change, self.wall_work])
+        .all(f64::is_finite)
+        {
+            return Err(BoundaryStepError3::WallMomentum {
+                reason: "wall momentum exchange is non-finite",
+            });
+        }
+        Ok(self)
+    }
+}
+
+/// Inertia and applied impulse of one translating planar wall for one lattice
+/// step. Supply the minimum face first, then the opposite maximum face.
+///
+/// The wall velocity is the corresponding [`FaceBoundary3::Wall`] velocity
+/// stored in the grid. Mass is the total mass of the complete periodic face,
+/// in the same lattice mass units as the sum of fluid densities (`dx = dt = 1`).
+/// The wall has two tangential translation degrees of freedom; its normal
+/// position and orientation are constrained.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FiniteMassWall3 {
+    /// Positive finite total wall mass, not an areal density.
+    pub mass: f64,
+    /// Applied impulse at the geometric face center during this step. A normal
+    /// component is carried by the support reaction and does no work.
+    pub external_impulse: [f64; 3],
+}
+
+/// Accepted two-way fluid/wall exchange for one finite-mass planar wall.
+/// All quantities use lattice units. Angular impulses use the moment origin
+/// supplied to the step; external impulse acts at the geometric face center.
+///
+/// Tangential wall momentum changes by the hydrodynamic plus external
+/// impulse. Normal and rotational support reactions are reported explicitly.
+/// The hydrodynamic and external work sum to the wall kinetic-energy change
+/// to roundoff because the boundary uses the wall's midpoint velocity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[must_use]
+pub struct FiniteMassWallReceipt3 {
+    /// Face carrying this wall.
+    pub face: Face3,
+    /// Total wall mass used in the solve.
+    pub mass: f64,
+    /// Wall velocity before the step.
+    pub velocity_before: [f64; 3],
+    /// Wall velocity used by bounce-back during the step.
+    pub velocity_midpoint: [f64; 3],
+    /// Wall velocity published in the boundary specification after the step.
+    pub velocity_after: [f64; 3],
+    /// Actual link-wise fluid impulse, torque, mass exchange, and work.
+    pub hydrodynamic: WallMomentumExchange3,
+    /// Applied impulse at the geometric face center.
+    pub external_impulse: [f64; 3],
+    /// Support impulse on the wall, canceling the total normal impulse.
+    pub constraint_impulse: [f64; 3],
+    /// Support angular impulse on the wall: the moment of the normal support
+    /// force plus the couple that prevents rotation about the face center.
+    pub constraint_angular_impulse: [f64; 3],
+    /// Change in the wall's tangential translational kinetic energy.
+    pub kinetic_energy_change: f64,
+    /// Applied impulse dotted with midpoint velocity.
+    pub external_work: f64,
+}
+
+struct FiniteMassWallProposal3 {
+    midpoint_boundaries: BoundarySpec3,
+    final_boundaries: BoundarySpec3,
+    receipts: [FiniteMassWallReceipt3; 2],
+}
+
 enum PullSource {
     Fluid { tile: usize, lane: usize },
     Wall { voxel: bool },
@@ -435,8 +554,8 @@ pub struct BoundaryGrid3 {
 /// Lattice tiles per pooled kernel tile (512 cells).
 const POOLED_GROUP_TILES: usize = 8;
 
-/// Refusal from one pooled [`BoundaryGrid3`] step. The published state is the
-/// pre-step state in every case.
+/// Refusal from a pooled or finite-mass-wall [`BoundaryGrid3`] step. The
+/// published state is the pre-step state in every case.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BoundaryStepError3 {
     /// The cancel gate tripped during the collide or stream pass.
@@ -450,14 +569,19 @@ pub enum BoundaryStepError3 {
     },
     /// Pool-level refusal (worker fault or admission), rendered.
     Pool(String),
-    /// A cell the open-face reconstruction reads would carry a non-positive
-    /// or non-finite density: the lattice left its physical regime.
+    /// A cell used by open-face reconstruction or finite-wall coupling has
+    /// non-positive or non-finite density: the lattice left its physical regime.
     Unphysical {
         /// Cell coordinates.
         cell: [usize; 3],
     },
     /// Invalid wall-link selection/origin, or non-finite momentum exchange.
     WallMomentum {
+        /// Stable refusal detail.
+        reason: &'static str,
+    },
+    /// Inadmissible finite wall mass, impulse, geometry, or solved velocity.
+    FiniteMassWall {
         /// Stable refusal detail.
         reason: &'static str,
     },
@@ -474,10 +598,13 @@ impl core::fmt::Display for BoundaryStepError3 {
             Self::Unphysical { cell } => {
                 write!(
                     f,
-                    "D3Q19 open-face source cell {cell:?} lost positive finite density"
+                    "D3Q19 boundary source cell {cell:?} lost positive finite density"
                 )
             }
             Self::WallMomentum { reason } => write!(f, "D3Q19 wall momentum refused: {reason}"),
+            Self::FiniteMassWall { reason } => {
+                write!(f, "D3Q19 finite-mass wall coupling refused: {reason}")
+            }
         }
     }
 }
@@ -915,6 +1042,44 @@ impl BoundaryGrid3 {
         exchange
     }
 
+    /// Advance the fluid and two finite-mass planar walls together. The grid
+    /// must have exactly two opposite complete wall faces, periodic tangent
+    /// directions, and no voxel solids. `walls` is in minimum/maximum face
+    /// order. Initial velocities come from the boundary specification;
+    /// accepted final velocities replace them for the next step.
+    ///
+    /// With the actual post-collision populations held fixed, each complete
+    /// face has tangential impulse `J(u) = J(0) - D u`, where
+    /// `D = sum_face(rho_post)/3`. The direct midpoint solve is
+    /// `u_mid = (M u_old + (J(0) + J_external)/2)/(M + D/2)`.
+    /// This couples even light walls without explicit impulse/velocity
+    /// feedback, repeated collisions, or a fluid-state clone. The actual
+    /// bounce-back populations are then evaluated at `u_mid`.
+    ///
+    /// Normal translation and rotation are constrained. This is tangential
+    /// motion of fixed planar geometry, not moving-voxel topology. Body
+    /// forces on the fluid remain separate external momentum input; periodic
+    /// angular-momentum balances also require the periodic transport flux.
+    ///
+    /// # Errors
+    /// Invalid geometry, nonpositive/nonfinite mass, nonfinite impulse or
+    /// origin, collision failure, nonfinite exchange, or midpoint/final wall
+    /// speed outside the existing low-Mach envelope. Every refusal leaves
+    /// fluid populations and wall velocities unchanged.
+    pub fn step_with_finite_mass_walls(
+        &mut self,
+        walls: [FiniteMassWall3; 2],
+        moment_origin: [f64; 3],
+    ) -> Result<[FiniteMassWallReceipt3; 2], BoundaryStepError3> {
+        let faces = self.validate_finite_mass_walls(walls, moment_origin)?;
+        self.try_collide()?;
+        let proposal = self.finite_mass_wall_proposal(faces, walls, moment_origin, None)?;
+        self.topology_locked = true;
+        self.stream_with_boundaries(proposal.midpoint_boundaries);
+        self.boundaries = proposal.final_boundaries;
+        Ok(proposal.receipts)
+    }
+
     /// Run a fixed number of deterministic steps.
     pub fn run(&mut self, steps: usize) {
         for _ in 0..steps {
@@ -958,6 +1123,24 @@ impl BoundaryGrid3 {
         self.step_pooled_inner(pool, gate, Some((links, moment_origin)), None)
     }
 
+    /// Pooled counterpart of [`Self::step_with_finite_mass_walls`]. Both
+    /// face reductions have a fixed order independent of worker count. A
+    /// canceled or refused step publishes neither fluid nor wall motion.
+    ///
+    /// # Errors
+    /// [`BoundaryStepError3`], including cancellation before publication.
+    pub fn step_pooled_with_finite_mass_walls<P: KernelRunner>(
+        &mut self,
+        pool: &P,
+        gate: &CancelGate,
+        walls: [FiniteMassWall3; 2],
+        moment_origin: [f64; 3],
+    ) -> Result<[FiniteMassWallReceipt3; 2], BoundaryStepError3> {
+        let faces = self.validate_finite_mass_walls(walls, moment_origin)?;
+        self.step_pooled_coupling_inner(pool, gate, None, None, Some((faces, walls, moment_origin)))
+            .map(|(_, receipts)| receipts.expect("finite wall step returns its receipts"))
+    }
+
     fn step_pooled_inner<P: KernelRunner>(
         &mut self,
         pool: &P,
@@ -965,7 +1148,22 @@ impl BoundaryGrid3 {
         measurement: Option<(&[BoundaryLink3], [f64; 3])>,
         models: Option<&[CollisionModel3]>,
     ) -> Result<WallMomentumExchange3, BoundaryStepError3> {
-        self.topology_locked = true;
+        self.step_pooled_coupling_inner(pool, gate, measurement, models, None)
+            .map(|(exchange, _)| exchange)
+    }
+
+    fn step_pooled_coupling_inner<P: KernelRunner>(
+        &mut self,
+        pool: &P,
+        gate: &CancelGate,
+        measurement: Option<(&[BoundaryLink3], [f64; 3])>,
+        models: Option<&[CollisionModel3]>,
+        finite_walls: Option<([Face3; 2], [FiniteMassWall3; 2], [f64; 3])>,
+    ) -> Result<(WallMomentumExchange3, Option<[FiniteMassWallReceipt3; 2]>), BoundaryStepError3>
+    {
+        if finite_walls.is_none() {
+            self.topology_locked = true;
+        }
         {
             let kernel = CollidePass {
                 f: &self.f,
@@ -990,6 +1188,12 @@ impl BoundaryGrid3 {
             Some((links, origin)) => self.wall_momentum(links, origin, Some(gate))?,
             None => WallMomentumExchange3::default(),
         };
+        let proposal = match finite_walls {
+            Some((faces, walls, origin)) => {
+                Some(self.finite_mass_wall_proposal(faces, walls, origin, Some(gate))?)
+            }
+            None => None,
+        };
         let mut next = self.next.take().unwrap_or_else(|| self.f.clone());
         let outcome = {
             let kernel = StreamPass {
@@ -999,7 +1203,9 @@ impl BoundaryGrid3 {
                     link_masks: &self.link_masks,
                     open_link_masks: &self.open_link_masks,
                     stationary_link_masks: &self.stationary_link_masks,
-                    boundaries: self.boundaries,
+                    boundaries: proposal
+                        .as_ref()
+                        .map_or(self.boundaries, |proposal| proposal.midpoint_boundaries),
                     dims: [self.nx, self.ny, self.nz],
                 },
                 solid: &self.solid,
@@ -1011,8 +1217,17 @@ impl BoundaryGrid3 {
             self.next = Some(next);
             return Err(error);
         }
-        self.publish_next(next, gate, measurement.is_some() || models.is_some())?;
-        Ok(exchange)
+        self.publish_next(
+            next,
+            gate,
+            measurement.is_some() || models.is_some() || proposal.is_some(),
+        )?;
+        let receipts = proposal.map(|proposal| {
+            self.boundaries = proposal.final_boundaries;
+            self.topology_locked = true;
+            proposal.receipts
+        });
+        Ok((exchange, receipts))
     }
 
     /// Shared publication for the pooled owner and explicit serial SGS.
@@ -1065,6 +1280,227 @@ impl BoundaryGrid3 {
             }
         }
         section
+    }
+
+    fn validate_finite_mass_walls(
+        &self,
+        walls: [FiniteMassWall3; 2],
+        origin: [f64; 3],
+    ) -> Result<[Face3; 2], BoundaryStepError3> {
+        let refuse = |reason| BoundaryStepError3::FiniteMassWall { reason };
+        if !origin.into_iter().all(f64::is_finite) {
+            return Err(refuse("moment origin must be finite"));
+        }
+        for wall in walls {
+            if !(wall.mass.is_finite() && wall.mass > 0.0) {
+                return Err(refuse("wall mass must be positive and finite"));
+            }
+            if !wall.external_impulse.into_iter().all(f64::is_finite) {
+                return Err(refuse("external wall impulse must be finite"));
+            }
+        }
+        if self.solid.iter().any(|&word| word != 0) {
+            return Err(refuse("finite planar walls do not admit voxel solids"));
+        }
+        let mut faces = None;
+        for min in [Face3::XMin, Face3::YMin, Face3::ZMin] {
+            let max = min.opposite();
+            match (self.boundaries.face(min), self.boundaries.face(max)) {
+                (FaceBoundary3::Periodic, FaceBoundary3::Periodic) => {}
+                (FaceBoundary3::Wall { velocity: lo }, FaceBoundary3::Wall { velocity: hi })
+                    if faces.is_none() =>
+                {
+                    if lo[min.axis()] != 0.0 || hi[min.axis()] != 0.0 {
+                        return Err(refuse("finite planar walls require zero normal velocity"));
+                    }
+                    faces = Some([min, max]);
+                }
+                _ => {
+                    return Err(refuse(
+                        "finite walls require one opposite wall pair and periodic tangent axes",
+                    ));
+                }
+            }
+        }
+        faces.ok_or_else(|| refuse("finite walls require one opposite wall pair"))
+    }
+
+    fn finite_mass_wall_proposal(
+        &self,
+        faces: [Face3; 2],
+        walls: [FiniteMassWall3; 2],
+        origin: [f64; 3],
+        gate: Option<&CancelGate>,
+    ) -> Result<FiniteMassWallProposal3, BoundaryStepError3> {
+        let receipts = [
+            self.finite_mass_wall_receipt(faces[0], walls[0], origin, gate)?,
+            self.finite_mass_wall_receipt(faces[1], walls[1], origin, gate)?,
+        ];
+        let mut midpoint_boundaries = self.boundaries;
+        let mut final_boundaries = self.boundaries;
+        for receipt in receipts {
+            midpoint_boundaries.faces[receipt.face.index()] = FaceBoundary3::Wall {
+                velocity: receipt.velocity_midpoint,
+            };
+            final_boundaries.faces[receipt.face.index()] = FaceBoundary3::Wall {
+                velocity: receipt.velocity_after,
+            };
+        }
+        Ok(FiniteMassWallProposal3 {
+            midpoint_boundaries,
+            final_boundaries,
+            receipts,
+        })
+    }
+
+    fn finite_mass_wall_receipt(
+        &self,
+        face: Face3,
+        wall: FiniteMassWall3,
+        origin: [f64; 3],
+        gate: Option<&CancelGate>,
+    ) -> Result<FiniteMassWallReceipt3, BoundaryStepError3> {
+        let dims = [self.nx, self.ny, self.nz];
+        let normal = face.axis();
+        let mut face_mass = 0.0;
+        let mut stationary_impulse = [0.0; 3];
+        for (index, cell) in planar_face_cells(dims, face).enumerate() {
+            if index.is_multiple_of(32) && gate.is_some_and(CancelGate::is_requested) {
+                return Err(BoundaryStepError3::Cancelled);
+            }
+            let (tile, lane) = self.addr(cell[0], cell[1], cell[2]);
+            let rho = (0..Q3).map(|q| self.post[q][tile].0[lane]).sum::<f64>();
+            if !(rho.is_finite() && rho > 0.0) {
+                return Err(BoundaryStepError3::Unphysical { cell });
+            }
+            face_mass += rho;
+            let mask = self.link_masks[tile].0[lane];
+            for q in 1..Q3 {
+                if mask & (1u32 << q) != 0 {
+                    let outgoing = self.post[OPP3[q]][tile].0[lane];
+                    let e = [f64::from(E3[q].0), f64::from(E3[q].1), f64::from(E3[q].2)];
+                    for axis in 0..3 {
+                        stationary_impulse[axis] -= 2.0 * e[axis] * outgoing;
+                    }
+                }
+            }
+        }
+        // Complete tangential link pairs cancel the moving-mass term, and
+        // sum(2*w*e_t*e_t/c_s^2) = 1/3 on every planar boundary cell.
+        let damping = face_mass / 3.0;
+        let denominator = wall.mass + 0.5 * damping;
+        if !(damping.is_finite() && denominator.is_finite() && denominator > 0.0) {
+            return Err(BoundaryStepError3::FiniteMassWall {
+                reason: "finite-wall inertia and fluid response must remain finite",
+            });
+        }
+        let FaceBoundary3::Wall { velocity: before } = self.boundaries.face(face) else {
+            unreachable!("finite-wall geometry was validated before collision")
+        };
+        let mut midpoint = [0.0; 3];
+        let mut after = [0.0; 3];
+        for axis in 0..3 {
+            if axis != normal {
+                // Solve for the increment: this avoids M*u overflow for a
+                // heavy wall and never divides a load residual by a tiny M.
+                let increment = (stationary_impulse[axis] + wall.external_impulse[axis]
+                    - damping * before[axis])
+                    / denominator;
+                midpoint[axis] = before[axis] + 0.5 * increment;
+                after[axis] = before[axis] + increment;
+            }
+        }
+        for velocity in [midpoint, after] {
+            if !velocity.into_iter().all(f64::is_finite)
+                || velocity.into_iter().map(|u| u * u).sum::<f64>() >= 0.03
+            {
+                return Err(BoundaryStepError3::FiniteMassWall {
+                    reason: "solved wall velocity exceeds the finite low-Mach envelope",
+                });
+            }
+        }
+        let mut hydrodynamic = WallMomentumExchange3::default();
+        for (index, cell) in planar_face_cells(dims, face).enumerate() {
+            if index.is_multiple_of(32) && gate.is_some_and(CancelGate::is_requested) {
+                return Err(BoundaryStepError3::Cancelled);
+            }
+            let (tile, lane) = self.addr(cell[0], cell[1], cell[2]);
+            let rho = (0..Q3).map(|q| self.post[q][tile].0[lane]).sum();
+            let mask = self.link_masks[tile].0[lane];
+            for (direction, opposite) in OPP3.into_iter().enumerate().skip(1) {
+                if mask & (1u32 << direction) != 0 {
+                    hydrodynamic.add_link(
+                        BoundaryLink3 {
+                            tile,
+                            lane,
+                            cell,
+                            direction,
+                        },
+                        self.post[opposite][tile].0[lane],
+                        rho,
+                        midpoint,
+                        origin,
+                    );
+                }
+            }
+        }
+        let hydrodynamic = hydrodynamic.checked()?;
+        let mut constraint_impulse = [0.0; 3];
+        constraint_impulse[normal] =
+            -(hydrodynamic.wall_impulse[normal] + wall.external_impulse[normal]);
+        let arm = core::array::from_fn::<_, 3, _>(|axis| {
+            let center = if axis == normal {
+                if face.is_min() {
+                    0.0
+                } else {
+                    dims[axis] as f64
+                }
+            } else {
+                0.5 * dims[axis] as f64
+            };
+            center - origin[axis]
+        });
+        let constraint_angular_impulse = core::array::from_fn(|axis| {
+            let b = (axis + 1) % 3;
+            let c = (axis + 2) % 3;
+            arm[b] * (hydrodynamic.wall_impulse[c] + constraint_impulse[c])
+                - arm[c] * (hydrodynamic.wall_impulse[b] + constraint_impulse[b])
+                - hydrodynamic.wall_angular_impulse[axis]
+        });
+        let kinetic_energy_change = (0..3)
+            .map(|axis| {
+                0.5 * wall.mass * (after[axis] - before[axis]) * (after[axis] + before[axis])
+            })
+            .sum();
+        let external_work = (0..3)
+            .map(|axis| wall.external_impulse[axis] * midpoint[axis])
+            .sum();
+        if !constraint_impulse
+            .into_iter()
+            .chain(constraint_angular_impulse)
+            .chain([kinetic_energy_change, external_work])
+            .all(f64::is_finite)
+        {
+            return Err(BoundaryStepError3::FiniteMassWall {
+                reason: "wall constraint reaction and work must remain finite",
+            });
+        }
+        if gate.is_some_and(CancelGate::is_requested) {
+            return Err(BoundaryStepError3::Cancelled);
+        }
+        Ok(FiniteMassWallReceipt3 {
+            face,
+            mass: wall.mass,
+            velocity_before: before,
+            velocity_midpoint: midpoint,
+            velocity_after: after,
+            hydrodynamic,
+            external_impulse: wall.external_impulse,
+            constraint_impulse,
+            constraint_angular_impulse,
+            kinetic_energy_change,
+            external_work,
+        })
     }
 
     fn validate_wall_measurement(
@@ -1133,56 +1569,18 @@ impl BoundaryGrid3 {
             } else {
                 exterior_velocity
             };
-            let q = link.direction;
-            let e = [f64::from(E3[q].0), f64::from(E3[q].1), f64::from(E3[q].2)];
-            let outgoing = self.post[OPP3[q]][link.tile].0[link.lane];
-            let incoming = wall_population(outgoing, rho, q, velocity);
-            let mass_change = incoming - outgoing;
-            let fluid = e.map(|component| component * (outgoing + incoming));
-            let moving_mass = velocity.map(|component| component * mass_change);
-            let wall = core::array::from_fn::<_, 3, _>(|axis| {
-                (-e[axis] - velocity[axis]) * outgoing - (e[axis] - velocity[axis]) * incoming
-            });
-            let offset = core::array::from_fn::<_, 3, _>(|axis| {
-                link.cell[axis] as f64 + 0.5 - 0.5 * e[axis] - origin[axis]
-            });
-            for axis in 0..3 {
-                let b = (axis + 1) % 3;
-                let c = (axis + 2) % 3;
-                exchange.wall_impulse[axis] += wall[axis];
-                exchange.fluid_population_impulse[axis] += fluid[axis];
-                exchange.wall_velocity_mass_impulse[axis] += moving_mass[axis];
-                exchange.wall_angular_impulse[axis] += offset[b] * wall[c] - offset[c] * wall[b];
-                exchange.fluid_population_angular_impulse[axis] +=
-                    offset[b] * fluid[c] - offset[c] * fluid[b];
-                exchange.wall_velocity_mass_angular_impulse[axis] +=
-                    offset[b] * moving_mass[c] - offset[c] * moving_mass[b];
-                exchange.wall_work += wall[axis] * velocity[axis];
-            }
-            exchange.fluid_mass_change += mass_change;
-            exchange.measured_links += 1;
+            exchange.add_link(
+                *link,
+                self.post[OPP3[link.direction]][link.tile].0[link.lane],
+                rho,
+                velocity,
+                origin,
+            );
         }
         if gate.is_some_and(CancelGate::is_requested) {
             return Err(BoundaryStepError3::Cancelled);
         }
-        if ![
-            exchange.wall_impulse,
-            exchange.fluid_population_impulse,
-            exchange.wall_velocity_mass_impulse,
-            exchange.wall_angular_impulse,
-            exchange.fluid_population_angular_impulse,
-            exchange.wall_velocity_mass_angular_impulse,
-        ]
-        .into_iter()
-        .flatten()
-        .chain([exchange.fluid_mass_change, exchange.wall_work])
-        .all(f64::is_finite)
-        {
-            return Err(BoundaryStepError3::WallMomentum {
-                reason: "wall momentum exchange is non-finite",
-            });
-        }
-        Ok(exchange)
+        exchange.checked()
     }
 
     fn addr(&self, x: usize, y: usize, z: usize) -> (usize, usize) {
@@ -1231,6 +1629,11 @@ impl BoundaryGrid3 {
     }
 
     fn collide(&mut self) {
+        self.try_collide()
+            .expect("BoundaryGrid3 constructor and prior state admit selected collision");
+    }
+
+    fn try_collide(&mut self) -> Result<(), BoundaryStepError3> {
         for tile in 0..self.f[0].len() {
             for lane in 0..TILE_CELLS {
                 if self.solid[tile] & (1u64 << lane) != 0 {
@@ -1238,16 +1641,26 @@ impl BoundaryGrid3 {
                 }
                 let populations = core::array::from_fn(|direction| self.f[direction][tile].0[lane]);
                 let force = cell_force(self.force, self.force_field.as_deref(), tile, lane);
-                let post = collide_cell3(populations, self.collision_model, force)
-                    .expect("BoundaryGrid3 constructor and prior state admit selected collision");
+                let post =
+                    collide_cell3(populations, self.collision_model, force).map_err(|source| {
+                        BoundaryStepError3::Collision {
+                            cell: self.coords(tile, lane),
+                            source,
+                        }
+                    })?;
                 for (field, value) in self.post.iter_mut().zip(post) {
                     field[tile].0[lane] = value;
                 }
             }
         }
+        Ok(())
     }
 
     fn stream(&mut self) {
+        self.stream_with_boundaries(self.boundaries);
+    }
+
+    fn stream_with_boundaries(&mut self, boundaries: BoundarySpec3) {
         // Canonical tile/lane traversal. Every destination population is a
         // pure read of the immutable post-collision state, so the visiting
         // order cannot move result bits.
@@ -1257,7 +1670,7 @@ impl BoundaryGrid3 {
             link_masks: &self.link_masks,
             open_link_masks: &self.open_link_masks,
             stationary_link_masks: &self.stationary_link_masks,
-            boundaries: self.boundaries,
+            boundaries,
             dims: [self.nx, self.ny, self.nz],
         };
         for tile in 0..self.f[0].len() {
@@ -1577,6 +1990,24 @@ fn tile_lane_coords(dims: [usize; 3], tile: usize, lane: usize) -> [usize; 3] {
     let ly = (lane / TILE) % TILE;
     let lz = lane / (TILE * TILE);
     [tx * TILE + lx, ty * TILE + ly, tz * TILE + lz]
+}
+
+/// Face-only traversal in global coordinate order; no grid-volume scan or
+/// temporary link list is needed by the finite-wall response calculation.
+fn planar_face_cells(dims: [usize; 3], face: Face3) -> impl Iterator<Item = [usize; 3]> {
+    let normal = face.axis();
+    let tangents = match normal {
+        0 => [1, 2],
+        1 => [0, 2],
+        _ => [0, 1],
+    };
+    (0..dims[tangents[0]] * dims[tangents[1]]).map(move |index| {
+        let mut cell = [0; 3];
+        cell[normal] = if face.is_min() { 0 } else { dims[normal] - 1 };
+        cell[tangents[0]] = index % dims[tangents[0]];
+        cell[tangents[1]] = index / dims[tangents[0]];
+        cell
+    })
 }
 
 /// One velocity owns every exterior wall link of a boundary cell. At a

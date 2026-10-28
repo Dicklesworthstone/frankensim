@@ -4,7 +4,8 @@
 //! pressure-driven duct accuracy, and a boundary-surface golden.
 
 use fs_lbm::d3q19::{
-    CollisionModel3, D3Q19_BOUNDARY_BIT_SEMANTICS_VERSION, E3, OPP3, Q3, TILE, W3, collide_cell3,
+    CollisionModel3, D3Q19_BOUNDARY_BIT_SEMANTICS_VERSION, E3, FiniteMassWall3, OPP3, Q3, TILE, W3,
+    collide_cell3,
 };
 use fs_lbm::{
     BoundaryGrid3, BoundarySpec3, CS2, Face3, FaceBoundary3, duct_analytic, equilibrium3,
@@ -1256,4 +1257,411 @@ fn wall_momentum_couette_matches_physical_shear_under_common_boost() {
             "common-boost shear residual on axis {axis}"
         );
     }
+}
+
+fn finite_wall_fixture(
+    normal_axis: usize,
+    wall_velocity: [[f64; 3]; 2],
+    fluid_velocity: [f64; 3],
+    density: f64,
+) -> BoundaryGrid3 {
+    let mut faces = [FaceBoundary3::Periodic; 6];
+    for side in 0..2 {
+        faces[2 * normal_axis + side] = FaceBoundary3::Wall {
+            velocity: wall_velocity[side],
+        };
+    }
+    let mut grid = BoundaryGrid3::new(4, 4, 4, 0.8, [0.0; 3], BoundarySpec3::new(faces));
+    let populations = equilibrium3(density, fluid_velocity);
+    for z in 0..4 {
+        for y in 0..4 {
+            for x in 0..4 {
+                grid.set_populations(x, y, z, &populations);
+            }
+        }
+    }
+    grid
+}
+
+fn finite_wall_velocities(grid: &BoundaryGrid3, normal_axis: usize) -> [[f64; 3]; 2] {
+    core::array::from_fn(
+        |side| match grid.boundaries().face(Face3::ALL[2 * normal_axis + side]) {
+            FaceBoundary3::Wall { velocity } => velocity,
+            _ => panic!("finite wall disappeared"),
+        },
+    )
+}
+
+fn resolved_fluid_kinetic_energy(grid: &BoundaryGrid3) -> f64 {
+    let mut energy = 0.0;
+    let [nx, ny, nz] = grid.dimensions();
+    for z in 0..nz {
+        for y in 0..ny {
+            for x in 0..nx {
+                let velocity = grid.velocity(x, y, z);
+                energy +=
+                    0.5 * grid.density(x, y, z) * velocity.into_iter().map(|v| v * v).sum::<f64>();
+            }
+        }
+    }
+    energy
+}
+
+/// G0/G3: independently reduce a uniformly translating equilibrium fluid to
+/// its planar shear impulse D(u_fluid-u_mid), D=area*rho/3. The finite wall
+/// must solve this impulse and its own midpoint inertia simultaneously. All
+/// three face normals and both tangential directions exercise the actual grid.
+#[test]
+fn finite_walls_match_implicit_impulse_oracle_on_every_axis() {
+    for normal_axis in 0..3 {
+        let tangent = [(normal_axis + 1) % 3, (normal_axis + 2) % 3];
+        let mut fluid_velocity = [0.0; 3];
+        fluid_velocity[tangent[0]] = 0.012;
+        fluid_velocity[tangent[1]] = -0.007;
+        let mut initial = [[0.0; 3]; 2];
+        initial[0][tangent[0]] = -0.02;
+        initial[0][tangent[1]] = 0.013;
+        initial[1][tangent[0]] = 0.017;
+        initial[1][tangent[1]] = -0.011;
+        let density = 1.125;
+        let drag = 16.0 * density / 3.0;
+        let walls = [0.04, 22.0].map(|mass| FiniteMassWall3 {
+            mass,
+            external_impulse: [0.0; 3],
+        });
+        let mut grid = finite_wall_fixture(normal_axis, initial, fluid_velocity, density);
+        let momentum_before = population_momenta(&grid, [0.0; 3]).0;
+        let receipts = grid.step_with_finite_mass_walls(walls, [0.0; 3]).unwrap();
+        let momentum_after = population_momenta(&grid, [0.0; 3]).0;
+        for (side, receipt) in receipts.iter().enumerate() {
+            assert_eq!(receipt.face, Face3::ALL[2 * normal_axis + side]);
+            assert_eq!(receipt.velocity_before, initial[side]);
+            assert_eq!(receipt.hydrodynamic.measured_links, 80);
+            assert_eq!(receipt.velocity_after[normal_axis], 0.0);
+            assert!(receipt.hydrodynamic.fluid_mass_change.abs() < 1e-14);
+            for axis in tangent {
+                let midpoint = (walls[side].mass * initial[side][axis]
+                    + 0.5 * drag * fluid_velocity[axis])
+                    / (walls[side].mass + 0.5 * drag);
+                let endpoint = 2.0 * midpoint - initial[side][axis];
+                let impulse = drag * (fluid_velocity[axis] - midpoint);
+                assert!((receipt.velocity_midpoint[axis] - midpoint).abs() < 2e-15);
+                assert!((receipt.velocity_after[axis] - endpoint).abs() < 3e-15);
+                assert!((receipt.hydrodynamic.wall_impulse[axis] - impulse).abs() < 3e-14);
+                assert_eq!(receipt.constraint_impulse[axis], 0.0);
+            }
+        }
+        for axis in tangent {
+            let wall_change = receipts
+                .iter()
+                .map(|r| r.mass * (r.velocity_after[axis] - r.velocity_before[axis]))
+                .sum::<f64>();
+            assert!((momentum_after[axis] - momentum_before[axis] + wall_change).abs() < 2e-13);
+        }
+        assert_eq!(
+            finite_wall_velocities(&grid, normal_axis),
+            receipts.map(|r| r.velocity_after)
+        );
+    }
+}
+
+/// G0: a common tangential translation is an equilibrium even for a very
+/// light wall. Pressure loads go into the normal support without accelerating
+/// the plane or doing work; zero velocity is included as an exact rest case.
+#[test]
+fn finite_walls_preserve_rest_and_common_translation() {
+    for velocity in [[0.0; 3], [0.024, 0.0, -0.013]] {
+        let mut grid = finite_wall_fixture(1, [velocity; 2], velocity, 1.0);
+        let walls = [1e-6, 17.0].map(|mass| FiniteMassWall3 {
+            mass,
+            external_impulse: [0.0; 3],
+        });
+        for _ in 0..16 {
+            let receipts = grid.step_with_finite_mass_walls(walls, [0.0; 3]).unwrap();
+            for receipt in receipts {
+                for axis in 0..3 {
+                    assert!((receipt.velocity_after[axis] - velocity[axis]).abs() < 2e-13);
+                    assert!((grid.velocity(2, 1, 3)[axis] - velocity[axis]).abs() < 2e-14);
+                }
+                assert!(receipt.kinetic_energy_change.abs() < 1e-14);
+                assert!(receipt.hydrodynamic.wall_work.abs() < 1e-14);
+                assert!(receipt.constraint_impulse[1].abs() > 5.0);
+            }
+        }
+        assert!((grid.total_mass() - 64.0).abs() < 2e-11);
+    }
+}
+
+/// G1/G3: freely sliding planes and fluid relax toward their shared center-of-
+/// mass velocity. The light-wall case would explode with an explicit lagged
+/// force update; the midpoint solve remains bounded without clipping impulses.
+/// Only resolved kinetic energy is checked here: this isothermal lattice does
+/// not expose physical viscous heat or a complete thermodynamic energy store.
+#[test]
+fn finite_walls_relax_passively_and_conserve_total_tangent_momentum() {
+    let initial = [[0.03, 0.0, -0.013], [-0.014, 0.0, 0.007]];
+    for (masses, steps) in [([5.0, 9.0], 600), ([1e-8, 0.05], 128)] {
+        let walls = masses.map(|mass| FiniteMassWall3 {
+            mass,
+            external_impulse: [0.0; 3],
+        });
+        let mut grid = finite_wall_fixture(1, initial, [0.0; 3], 1.0);
+        let initial_momentum: [f64; 3] =
+            core::array::from_fn(|a| masses[0] * initial[0][a] + masses[1] * initial[1][a]);
+        let initial_energy: f64 = (0..2)
+            .map(|side| 0.5 * masses[side] * initial[side].into_iter().map(|v| v * v).sum::<f64>())
+            .sum();
+        let mut final_energy = initial_energy;
+        for step in 0..steps {
+            let receipts = grid.step_with_finite_mass_walls(walls, [2.0; 3]).unwrap();
+            let fluid_momentum = population_momenta(&grid, [0.0; 3]).0;
+            for axis in [0, 2] {
+                let wall_momentum = receipts
+                    .iter()
+                    .map(|r| r.mass * r.velocity_after[axis])
+                    .sum::<f64>();
+                let residual = fluid_momentum[axis] + wall_momentum - initial_momentum[axis];
+                assert!(
+                    residual.abs() < 3e-12,
+                    "step {step}, axis {axis}: {residual:e}"
+                );
+            }
+            let mut wall_energy = 0.0;
+            for receipt in receipts {
+                let before: f64 = receipt.velocity_before.into_iter().map(|v| v * v).sum();
+                let after: f64 = receipt.velocity_after.into_iter().map(|v| v * v).sum();
+                let kinetic_change = 0.5 * receipt.mass * (after - before);
+                assert!((kinetic_change - receipt.kinetic_energy_change).abs() < 2e-14);
+                assert!((kinetic_change - receipt.hydrodynamic.wall_work).abs() < 2e-14);
+                assert!(receipt.velocity_after.into_iter().all(|v| v.abs() <= 0.031));
+                wall_energy += 0.5 * receipt.mass * after;
+            }
+            final_energy = wall_energy + resolved_fluid_kinetic_energy(&grid);
+            assert!(
+                final_energy <= initial_energy * (1.0 + 1e-9),
+                "passive startup gained energy at step {step}"
+            );
+        }
+        assert!(final_energy < initial_energy * 0.05);
+        assert!((grid.total_mass() - 64.0).abs() < 5e-11);
+        if masses[0] > 1.0 {
+            let equilibrium = initial_momentum.map(|p| p / (64.0 + masses[0] + masses[1]));
+            for velocity in finite_wall_velocities(&grid, 1) {
+                for axis in [0, 2] {
+                    assert!((velocity[axis] - equilibrium[axis]).abs() < 2e-8);
+                    assert!((grid.velocity(1, 2, 3)[axis] - equilibrium[axis]).abs() < 2e-8);
+                }
+            }
+        }
+    }
+}
+
+/// G0/G3: arbitrary applied impulses act at each face center. The normal and
+/// rotational support reactions are retained explicitly; only tangential
+/// translation stores momentum and the same midpoint computes external work.
+#[test]
+fn finite_walls_account_for_external_impulse_and_support_reactions() {
+    let mut grid = finite_wall_fixture(
+        1,
+        [[0.012, 0.0, -0.006], [-0.008, 0.0, 0.004]],
+        [0.0; 3],
+        1.0,
+    );
+    let walls = [
+        FiniteMassWall3 {
+            mass: 4.0,
+            external_impulse: [0.003, 0.02, -0.001],
+        },
+        FiniteMassWall3 {
+            mass: 11.0,
+            external_impulse: [-0.002, -0.03, 0.004],
+        },
+    ];
+    let origin = [0.25, -0.6, 1.3];
+    for _ in 0..8 {
+        let before = population_momenta(&grid, origin).0;
+        let receipts = grid.step_with_finite_mass_walls(walls, origin).unwrap();
+        let after = population_momenta(&grid, origin).0;
+        let mut wall_momentum_change = [0.0; 3];
+        let mut supplied_impulse = [0.0; 3];
+        for (side, receipt) in receipts.into_iter().enumerate() {
+            let change: [f64; 3] = core::array::from_fn(|a| {
+                receipt.mass * (receipt.velocity_after[a] - receipt.velocity_before[a])
+            });
+            let offset = [
+                2.0 - origin[0],
+                4.0 * side as f64 - origin[1],
+                2.0 - origin[2],
+            ];
+            let angular_change = cross(offset, change);
+            let external_angular = cross(offset, walls[side].external_impulse);
+            for axis in 0..3 {
+                let supplied = receipt.external_impulse[axis] + receipt.constraint_impulse[axis];
+                assert!(
+                    (change[axis] - receipt.hydrodynamic.wall_impulse[axis] - supplied).abs()
+                        < 4e-14
+                );
+                assert!(
+                    (angular_change[axis]
+                        - receipt.hydrodynamic.wall_angular_impulse[axis]
+                        - external_angular[axis]
+                        - receipt.constraint_angular_impulse[axis])
+                        .abs()
+                        < 8e-14
+                );
+                wall_momentum_change[axis] += change[axis];
+                supplied_impulse[axis] += supplied;
+            }
+            let external_work: f64 = (0..3)
+                .map(|a| walls[side].external_impulse[a] * receipt.velocity_midpoint[a])
+                .sum();
+            let kinetic_change: f64 = (0..3)
+                .map(|a| {
+                    0.5 * receipt.mass
+                        * (receipt.velocity_after[a].powi(2) - receipt.velocity_before[a].powi(2))
+                })
+                .sum();
+            assert!((receipt.external_work - external_work).abs() < 1e-15);
+            assert!(
+                (kinetic_change - receipt.hydrodynamic.wall_work - external_work).abs() < 2e-14
+            );
+            assert!(receipt.constraint_impulse[1].abs() > 5.0);
+            assert_eq!(receipt.velocity_after[1], 0.0);
+        }
+        for axis in 0..3 {
+            let residual =
+                after[axis] - before[axis] + wall_momentum_change[axis] - supplied_impulse[axis];
+            assert!(residual.abs() < 2e-13, "axis {axis}: {residual:e}");
+        }
+    }
+}
+
+/// G4/G5: native pooled execution publishes fluid and finite-wall state
+/// together, preserves the serial operation order, and can retry after a
+/// refused input or pre-cancelled call without losing mechanical history.
+#[test]
+fn finite_walls_pooled_replay_and_refusal_are_atomic() {
+    use fs_exec::{CancelGate, TilePool};
+    let initial = [[0.018, 0.0, -0.01], [-0.009, 0.0, 0.003]];
+    let spec = finite_wall_fixture(1, initial, [0.0; 3], 1.0).boundaries();
+    let walls = [0.02, 8.0].map(|mass| FiniteMassWall3 {
+        mass,
+        external_impulse: [0.0; 3],
+    });
+    for workers in [1, 3] {
+        let mut serial = pooled_fixture(spec, false);
+        let mut pooled = pooled_fixture(spec, false);
+        let pool = TilePool::for_host(workers, 7);
+        let gate = CancelGate::new();
+        for _ in 0..4 {
+            let expected = serial.step_with_finite_mass_walls(walls, [1.0; 3]).unwrap();
+            let actual = pooled
+                .step_pooled_with_finite_mass_walls(&pool, &gate, walls, [1.0; 3])
+                .unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(fluid_bits(&pooled), fluid_bits(&serial));
+            assert_eq!(
+                finite_wall_velocities(&pooled, 1),
+                finite_wall_velocities(&serial, 1)
+            );
+        }
+        let bits = fluid_bits(&pooled);
+        let velocities = finite_wall_velocities(&pooled, 1);
+        for mass in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mut invalid = walls;
+            invalid[1].mass = mass;
+            assert!(
+                pooled
+                    .step_pooled_with_finite_mass_walls(&pool, &gate, invalid, [1.0; 3])
+                    .is_err()
+            );
+            assert_eq!(fluid_bits(&pooled), bits);
+            assert_eq!(finite_wall_velocities(&pooled, 1), velocities);
+        }
+        gate.request();
+        assert_eq!(
+            pooled.step_pooled_with_finite_mass_walls(&pool, &gate, walls, [1.0; 3]),
+            Err(fs_lbm::BoundaryStepError3::Cancelled)
+        );
+        assert_eq!(fluid_bits(&pooled), bits);
+        assert_eq!(finite_wall_velocities(&pooled, 1), velocities);
+        let actual = pooled
+            .step_pooled_with_finite_mass_walls(&pool, &CancelGate::new(), walls, [1.0; 3])
+            .unwrap();
+        let expected = serial.step_with_finite_mass_walls(walls, [1.0; 3]).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(fluid_bits(&pooled), fluid_bits(&serial));
+    }
+}
+
+/// G4: incompatible geometry and a failed collision cannot partially advance
+/// either wall. Full planes are required for the affine, mass-balanced force;
+/// voxel obstructions and additional walls are not silently assigned to them.
+#[test]
+fn finite_walls_refuse_unsupported_geometry_and_failed_collision() {
+    let walls = [FiniteMassWall3 {
+        mass: 1.0,
+        external_impulse: [0.0; 3],
+    }; 2];
+    let mut periodic = BoundaryGrid3::new(4, 4, 4, 0.8, [0.0; 3], BoundarySpec3::periodic());
+    let before = fluid_bits(&periodic);
+    assert!(
+        periodic
+            .step_with_finite_mass_walls(walls, [0.0; 3])
+            .is_err()
+    );
+    assert_eq!(fluid_bits(&periodic), before);
+    let mut cavity = BoundaryGrid3::new(
+        4,
+        4,
+        4,
+        0.8,
+        [0.0; 3],
+        BoundarySpec3::lid_cavity([0.02, 0.0, 0.0]),
+    );
+    let before = fluid_bits(&cavity);
+    assert!(cavity.step_with_finite_mass_walls(walls, [0.0; 3]).is_err());
+    assert_eq!(fluid_bits(&cavity), before);
+    let initial = [[0.01, 0.0, 0.0], [-0.01, 0.0, 0.0]];
+    let mut voxel = finite_wall_fixture(1, initial, [0.0; 3], 1.0);
+    voxel.voxelize_sdf(|point| {
+        (point[0] - 1.5).powi(2) + (point[1] - 1.5).powi(2) + (point[2] - 1.5).powi(2) - 0.1
+    });
+    let before = fluid_bits(&voxel);
+    assert!(voxel.step_with_finite_mass_walls(walls, [0.0; 3]).is_err());
+    assert_eq!(fluid_bits(&voxel), before);
+    assert_eq!(finite_wall_velocities(&voxel, 1), initial);
+    let mut collision = finite_wall_fixture(1, initial, [0.0; 3], 1.0);
+    let before = fluid_bits(&collision);
+    for mass in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let mut invalid = walls;
+        invalid[0].mass = mass;
+        assert!(
+            collision
+                .step_with_finite_mass_walls(invalid, [0.0; 3])
+                .is_err()
+        );
+    }
+    let mut invalid = walls;
+    invalid[1].external_impulse[0] = f64::NAN;
+    assert!(
+        collision
+            .step_with_finite_mass_walls(invalid, [0.0; 3])
+            .is_err()
+    );
+    assert!(
+        collision
+            .step_with_finite_mass_walls(walls, [f64::NAN; 3])
+            .is_err()
+    );
+    assert_eq!(fluid_bits(&collision), before);
+    assert_eq!(finite_wall_velocities(&collision, 1), initial);
+    collision.set_populations(2, 2, 2, &[0.0; Q3]);
+    let before = fluid_bits(&collision);
+    assert!(matches!(
+        collision.step_with_finite_mass_walls(walls, [0.0; 3]),
+        Err(fs_lbm::BoundaryStepError3::Collision { .. })
+    ));
+    assert_eq!(fluid_bits(&collision), before);
+    assert_eq!(finite_wall_velocities(&collision, 1), initial);
 }

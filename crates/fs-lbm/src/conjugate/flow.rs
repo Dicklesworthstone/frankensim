@@ -770,7 +770,9 @@ pub fn lbm_duct_flow(
                     .map_err(|error| match error {
                         BoundaryStepError3::Cancelled => ChtError::Cancelled,
                         BoundaryStepError3::Collision { .. }
-                        | BoundaryStepError3::Unphysical { .. } => {
+                        | BoundaryStepError3::Unphysical { .. }
+                        | BoundaryStepError3::WallMomentum { .. }
+                        | BoundaryStepError3::FiniteMassWall { .. } => {
                             ChtError::FlowDiverged { step: steps }
                         }
                         BoundaryStepError3::Pool(detail) => ChtError::Executor { detail },
