@@ -38,6 +38,8 @@ pub mod continuation;
 pub mod cutfront;
 /// Thermoviscoelastic deposited strips with retained history and release geometry.
 pub mod deposition;
+/// Signed stress-life histories driven by the original tetrahedral load solver.
+pub mod fatigue;
 pub mod fiber;
 pub mod frame2d;
 pub mod hyper2d;
