@@ -16,6 +16,7 @@ use crate::cavity_phs::piston::thermal::{
 use crate::cavity_phs::piston::thermal::boundary::heat::conductive_heat;
 use crate::cavity_phs::piston::thermal::boundary::ports::{ThermalPort, ThermalPortSample};
 use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
+use std::cell::Cell;
 use std::collections::BTreeMap;
 
 /// Heat-root limits plus a strict shared cap across ALL nested chemistry work.
@@ -188,9 +189,21 @@ impl Sum {
 fn solve<S, E, C: FnMut() -> bool>(
     law: &GasReaction, gas: &ClosedGasParcel, duration_s: f64, external_heat_j: f64,
     chemistry: GasReactionSolve, controls: IsobaricHeatSolve,
-    mut resolve: impl FnMut(f64, &ResolvedThermochemicalGasState, &mut C)
+    resolve: impl FnMut(f64, &ResolvedThermochemicalGasState, &mut C)
         -> Result<HeatSample<S>, IsobaricThermalError<E>>,
     cancelled: &mut C,
+) -> Result<IsobaricBoundaryCandidate<S>, IsobaricThermalError<E>> {
+    solve_counted(law, gas, duration_s, external_heat_j, chemistry, controls,
+        resolve, cancelled, &Cell::new(0))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn solve_counted<S, E, C: FnMut() -> bool>(
+    law: &GasReaction, gas: &ClosedGasParcel, duration_s: f64, external_heat_j: f64,
+    chemistry: GasReactionSolve, controls: IsobaricHeatSolve,
+    mut resolve: impl FnMut(f64, &ResolvedThermochemicalGasState, &mut C)
+        -> Result<HeatSample<S>, IsobaricThermalError<E>>,
+    cancelled: &mut C, chemical_work: &Cell<usize>,
 ) -> Result<IsobaricBoundaryCandidate<S>, IsobaricThermalError<E>> {
     use IsobaricThermalError::{Invalid, ChemicalEvaluationLimit};
     feedback::admit(controls.exchange)?;
@@ -218,18 +231,21 @@ fn solve<S, E, C: FnMut() -> bool>(
                 return Err(Invalid("prescribed or exchanged heat vanished or overflowed"));
             }
             policy.maximum_evaluations = per_trial.min(remaining);
-            let proposal = law.isobaric_candidate_with_policy(gas, duration_s, heat,
-                chemistry, &policy, cancel).map_err(|error| match error {
-                    GasReactionError::ImplicitEvaluationLimit { evaluations, .. }
+            let work = Cell::new(0);
+            let proposal = law.isobaric_candidate_counted(gas, duration_s, heat,
+                chemistry, &policy, cancel, &work);
+            // Expose all work, even when chemistry or a later thermal source
+            // refuses this trial, before an enclosing trajectory may retry.
+            spent += work.get();
+            chemical_work.set(spent);
+            let proposal = proposal.map_err(|error| match error {
+                    GasReactionError::ImplicitEvaluationLimit { .. }
                         if remaining <= per_trial => ChemicalEvaluationLimit {
-                            evaluations: spent + evaluations,
+                            evaluations: spent,
                             maximum: controls.maximum_chemical_evaluations,
                         },
                     other => other.into(),
                 })?;
-            let used = proposal.step().boundary.reaction.implicit_mechanism.as_ref()
-                .ok_or(Invalid("isobaric endpoint lost its implicit mechanism report"))?.evaluations;
-            spent = spent.checked_add(used).ok_or(Invalid("chemical work counter overflowed"))?;
             if spent > controls.maximum_chemical_evaluations {
                 return Err(ChemicalEvaluationLimit { evaluations: spent,
                     maximum: controls.maximum_chemical_evaluations });

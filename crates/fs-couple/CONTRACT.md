@@ -10296,3 +10296,37 @@ energy and entropy accounts. Tests retain identical physics under positive
 and negative common reference shifts, replay the original isobaric and
 fixed-volume heat owners, resolve free-expansion entropy, and refuse
 compression with no supplied heat or work.
+
+### Adaptive reciprocal finite-body heat and chemistry
+
+`GasReaction::isobaric_thermal_body_adaptive_candidate` advances the reacting
+gas and original finite solid/liquid body together through the existing
+simultaneous chemical/thermal endpoint. The corresponding
+`isobaric_thermal_layers_adaptive_candidate` retains original material-card
+conductivity selection and source receipts at every actual reacted gas/body
+endpoint. Both continuing states are returned together, with contact heat
+already applied once to each side with opposite signs.
+
+Temporal comparison extends the shared gas species/extents/temperature/volume
+controls with body temperature and body specific enthalpy. The body's relative
+enthalpy scale is its change from the initial state, so an arbitrary datum does
+not loosen accuracy and latent progress can force refinement at constant T.
+Only the finer physical history is retained, with every joint source report
+stored once. Prescribed gas/body heats are uniform powers; subinterval heat
+brackets retain the declared exchange-power bounds.
+
+Whole-window gates independently check gas Delta H, gas Delta U plus actual
+p Delta V, body storage against actual final m Delta h, reciprocal/evaluated
+contact heat, and combined first/second-law accounts. Both prescribed heat
+entropy contributions use the actual local endpoint temperatures. Source
+tolerances divide over accepted substeps; absolute conservation and entropy
+budgets never grow with substep count. Failed thermal roots and subsequent
+source refusals spend their actual nested chemical evaluations before retry.
+
+Tests compare hot/cold exchange with its exact solution and nonlinear-Cp
+exothermic feedback with an independent coupled ODE, resolve sensible-to-latent
+entry and body-enthalpy-only refinement, retain original material-layer sources,
+and independently count refused heat-root work and final cancellation. This
+remains homogeneous ideal gas plus a uniform fixed-geometry solid/liquid body
+with negligible body pressure-volume work; water-boiling expansion is not
+folded into that body assumption.

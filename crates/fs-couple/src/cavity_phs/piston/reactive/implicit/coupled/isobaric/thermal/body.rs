@@ -83,9 +83,23 @@ impl GasReaction {
         &self, gas: &ClosedGasParcel, duration_s: f64, external_heat_j: f64,
         body: UniformEnthalpyStepInput<'_>, chemistry: GasReactionSolve,
         controls: IsobaricBodySolve,
+        resolve: impl FnMut(&ResolvedThermochemicalGasState, EquilibriumPhaseState)
+            -> Result<ConductanceSample<S>, E>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<IsobaricBodyCandidate<S>, IsobaricThermalError<E>> {
+        self.isobaric_thermal_body_counted(gas, duration_s, external_heat_j, body,
+            chemistry, controls, resolve, cancelled, &Cell::new(0))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::cavity_phs::piston::reactive::implicit::coupled::isobaric)
+    fn isobaric_thermal_body_counted<S, E>(
+        &self, gas: &ClosedGasParcel, duration_s: f64, external_heat_j: f64,
+        body: UniformEnthalpyStepInput<'_>, chemistry: GasReactionSolve,
+        controls: IsobaricBodySolve,
         mut resolve: impl FnMut(&ResolvedThermochemicalGasState, EquilibriumPhaseState)
             -> Result<ConductanceSample<S>, E>,
-        mut cancelled: impl FnMut() -> bool,
+        mut cancelled: impl FnMut() -> bool, chemical_work: &Cell<usize>,
     ) -> Result<IsobaricBodyCandidate<S>, IsobaricThermalError<E>> {
         use IsobaricThermalError::Invalid;
         poll(&mut cancelled)?;
@@ -100,7 +114,7 @@ impl GasReaction {
             return Err(Invalid("body state does not belong to its original enthalpy chart"));
         }
         let tolerance = controls.heat.exchange.energy_tolerance_j;
-        let candidate = solve(self, gas, duration_s, external_heat_j, chemistry, controls.heat,
+        let candidate = solve_counted(self, gas, duration_s, external_heat_j, chemistry, controls.heat,
             |q, gas, cancel| {
                 poll(cancel)?;
                 let heat = body.internal_heat_j - q;
@@ -127,7 +141,7 @@ impl GasReaction {
                     source: (UniformEnthalpyStep { state, external_heat_j: -q,
                         energy_residual_tolerance_j: tolerance, report: source.source },
                         stored, residual, source.conductance_w_k) })
-            }, &mut cancelled)?;
+            }, &mut cancelled, chemical_work)?;
         let (next, (thermal, stored, residual, conductance), boundary) = candidate.into_parts();
         let total_h = (boundary.chemistry.enthalpy_change_j+stored)-external_heat_j-body.internal_heat_j;
         let total_u = (boundary.chemistry.boundary.reaction.stored_energy_change_j+stored)

@@ -1,4 +1,6 @@
 use super::*;
+#[path = "body/adaptive.rs"]
+mod adaptive;
 use fs_blake3::ContentHash;
 use fs_couple::cavity_phs::piston::reactive::implicit::coupled::isobaric::thermal::body::IsobaricBodySolve;
 use fs_couple::cavity_phs::piston::thermal::layers::MaterialConductionLayers;

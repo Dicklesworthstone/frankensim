@@ -7,6 +7,9 @@
 //! This is dyadic refinement of backward Euler, not a higher-order integrator
 //! or a rigorous error bound for arbitrary stiff mechanisms.
 
+/// Adaptive reciprocal exchange with a finite original enthalpy/phase body.
+pub mod body;
+
 use super::{ClosedGasParcel, GasReaction, GasReactionError, GasReactionSolve,
     IsobaricGasReactionStep};
 use super::super::ImplicitMechanismSolve;
@@ -90,7 +93,7 @@ pub struct IsobaricAdvanceSubstep {
 /// Whole-window balances and accepted history. An aggregate extent is not the
 /// root of one backward-Euler equation; those roots remain in `steps` only.
 #[derive(Clone, Debug, PartialEq)]
-pub struct IsobaricAdvanceReport {
+pub struct IsobaricAdvanceReport<I = IsobaricAdvanceSubstep> {
     pub duration_s: f64,
     pub pressure_pa: f64,
     pub endpoint_evaluations: usize,
@@ -120,7 +123,8 @@ pub struct IsobaricAdvanceReport {
     /// Delta S minus that accepted heat entropy. Includes backward-Euler
     /// discretization entropy; an external reservoir still owns its entropy.
     pub entropy_residual_j_k: f64,
-    pub steps: Vec<IsobaricAdvanceSubstep>,
+    /// Complete original reports, retained once for the selected physical owner.
+    pub steps: Vec<I>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -178,7 +182,8 @@ impl GasReaction {
             {
                 Ok(mut fine) => {
                     if let Some(previous) = coarse.as_ref() {
-                        let ratio = compare(previous, &fine, accuracy)?;
+                        let ratio = compare(&previous.gas, &previous.report,
+                            &fine.gas, &fine.report, accuracy)?;
                         last_ratio = Some(ratio);
                         if ratio <= 1.0 {
                             fine.report.endpoint_evaluations = work.endpoints;
@@ -268,15 +273,18 @@ fn march(
         steps.push(IsobaricAdvanceSubstep { start_s: start, end_s: end, chemistry });
         (start, heat_given) = (end, heat_end);
     }
-    summarize(law, initial, gas, duration, heat, controls, steps, cancelled)
+    let (gas, report) = summarize(law, initial, gas, duration, heat, controls, steps,
+        |interval| &interval.chemistry, cancelled)?;
+    Ok(IsobaricAdvanceCandidate { gas, report })
 }
 
 #[allow(clippy::too_many_arguments)]
-fn summarize(
+fn summarize<I>(
     law: &GasReaction, initial: &ClosedGasParcel, gas: ClosedGasParcel,
     duration: f64, heat: f64, controls: GasReactionSolve,
-    steps: Vec<IsobaricAdvanceSubstep>, cancelled: &mut impl FnMut() -> bool,
-) -> Result<IsobaricAdvanceCandidate, IsobaricAdvanceError> {
+    steps: Vec<I>, chemistry: impl Fn(&I) -> &IsobaricGasReactionStep,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(ClosedGasParcel, IsobaricAdvanceReport<I>), IsobaricAdvanceError> {
     let before = law.inventory(initial)?;
     let after = law.inventory(&gas)?;
     let mut extents = vec![Sum::default(); law.channels().count()];
@@ -289,7 +297,8 @@ fn summarize(
     let mut consumed = 0.0_f64;
     for interval in &steps {
         poll(cancelled)?;
-        let boundary = &interval.chemistry.boundary;
+        let interval = chemistry(interval);
+        let boundary = &interval.boundary;
         for (sum, (_, extent)) in extents.iter_mut().zip(boundary.reaction.reaction_extents()) {
             sum.add(extent)?;
         }
@@ -299,10 +308,10 @@ fn summarize(
         supplied.add(boundary.boundary.heat_j)?;
         heat_entropy.add(boundary.endpoint_heat_entropy_j_k)?;
         work_sum.add(boundary.boundary.work_by_gas_j)?;
-        enthalpy_sum.add(interval.chemistry.enthalpy_change_j)?;
+        enthalpy_sum.add(interval.enthalpy_change_j)?;
         energy_sum.add(boundary.reaction.stored_energy_change_j)?;
         entropy_sum.add(boundary.reaction.entropy_change_j_k)?;
-        enthalpy_residual.add(interval.chemistry.enthalpy_residual_j)?;
+        enthalpy_residual.add(interval.enthalpy_residual_j)?;
         energy_residual.add(boundary.energy_residual_j)?;
         consumed = consumed.max(boundary.reaction.maximum_consumed_fraction);
     }
@@ -343,7 +352,7 @@ fn summarize(
         }.into());
     }
     poll(cancelled)?;
-    Ok(IsobaricAdvanceCandidate { gas, report: IsobaricAdvanceReport {
+    Ok((gas, IsobaricAdvanceReport {
         duration_s: duration, pressure_pa: pressure, endpoint_evaluations: 0,
         chemical_evaluations: 0, meshes_attempted: 0, refused_meshes: 0,
         estimated_error_ratio: 0.0, species,
@@ -355,7 +364,7 @@ fn summarize(
         enthalpy_residual_j: h_residual, energy_residual_j: u_residual,
         entropy_change_j_k: entropy, endpoint_heat_entropy_j_k: heat_entropy.value,
         entropy_residual_j_k: s_residual, steps,
-    } })
+    }))
 }
 
 fn scaled(a: f64, b: f64, absolute: f64, relative: f64) -> Result<f64, IsobaricAdvanceError> {
@@ -366,19 +375,20 @@ fn scaled(a: f64, b: f64, absolute: f64, relative: f64) -> Result<f64, IsobaricA
     }
     Ok(ratio)
 }
-fn compare(a: &IsobaricAdvanceCandidate, b: &IsobaricAdvanceCandidate,
+fn compare<A, B>(a_gas: &ClosedGasParcel, a: &IsobaricAdvanceReport<A>,
+    b_gas: &ClosedGasParcel, b: &IsobaricAdvanceReport<B>,
     policy: IsobaricAdvanceSolve,
 ) -> Result<f64, IsobaricAdvanceError> {
-    let mut error = scaled(a.gas.state().state().temperature, b.gas.state().state().temperature,
+    let mut error = scaled(a_gas.state().state().temperature, b_gas.state().state().temperature,
         policy.absolute_temperature_k, policy.relative_tolerance)?;
-    error = error.max(scaled(a.gas.volume_m3(), b.gas.volume_m3(),
+    error = error.max(scaled(a_gas.volume_m3(), b_gas.volume_m3(),
         policy.absolute_volume_m3, policy.relative_tolerance)?);
-    for (left, right) in a.report.species.iter().zip(&b.report.species) {
+    for (left, right) in a.species.iter().zip(&b.species) {
         error = error.max(scaled(left.final_mol, right.final_mol,
             policy.absolute_amount_mol, policy.relative_tolerance)?);
     }
     // Reaction cycles may hide substantial progress behind unchanged species.
-    for ((_, left), (_, right)) in a.report.reaction_extents_mol.iter().zip(&b.report.reaction_extents_mol) {
+    for ((_, left), (_, right)) in a.reaction_extents_mol.iter().zip(&b.reaction_extents_mol) {
         error = error.max(scaled(*left, *right, policy.absolute_amount_mol, policy.relative_tolerance)?);
     }
     Ok(error)
