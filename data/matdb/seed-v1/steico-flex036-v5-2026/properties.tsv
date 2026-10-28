@@ -1,0 +1,42 @@
+frankensim.matdb-source.v1
+observation	product	STEICOflex 036 flexible wood-fibre batt, GBR/IRL version 5	Producer EN 13171 product data, 21 September 2026 p. 1	Wood fibres with polyolefin fibres and ammonium sulfate. Approximate density is 50 kg/m3; this version is not combined with older 60 kg/m3 products. Density and heat capacity are product references with unstated test temperature, moisture, pressure and specimen matching. The <=100 C service statement is not measurement validity.
+observation	declared	STEICOflex 036 declared transport and acoustic resistance	Version 5 p. 1 declared values	Conductivity 0.036 W/m/K is lambda-D, a declared value, not an independently measured local k(T). The lower airflow-resistance level 5 kPa s/m2 is retained as a lower-limit flow-resistivity role. No frequency-dependent acoustic impedance, absorption coefficient or porosity law is inferred.
+scalar	density	product	density	50	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	grade	1	1	1
+validity	density	moisture_known	0	0	1
+validity	density	pressure_known	0	0	1
+validity	density	matched	0	0	1
+validity	density	temperature_known	0	0	1
+scalar	heat-capacity	product	specific_heat_capacity	2100	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	grade	1	1	1
+validity	heat-capacity	moisture_known	0	0	1
+validity	heat-capacity	pressure_known	0	0	1
+validity	heat-capacity	matched	0	0	1
+validity	heat-capacity	temperature_known	0	0	1
+scalar	vapour	product	water_vapor_diffusion_resistance_factor	2	1	constant
+uncertainty	vapour	unstated	-	-	-	-
+validity	vapour	grade	1	1	1
+validity	vapour	moisture_known	0	0	1
+validity	vapour	pressure_known	0	0	1
+validity	vapour	matched	0	0	1
+validity	vapour	temperature_known	0	0	1
+scalar	conductivity	product,declared	declared_thermal_conductivity	0.036	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	grade	1	1	1
+validity	conductivity	moisture_known	0	0	1
+validity	conductivity	pressure_known	0	0	1
+validity	conductivity	matched	0	0	1
+validity	conductivity	temperature_known	0	0	1
+validity	conductivity	declared	1	1	1
+validity	conductivity	direction_known	0	0	1
+scalar	airflow	product,declared	airflow_resistivity_lower_limit	5000	Pa*s/m2	constant
+uncertainty	airflow	unstated	-	-	-	-
+validity	airflow	grade	1	1	1
+validity	airflow	moisture_known	0	0	1
+validity	airflow	pressure_known	0	0	1
+validity	airflow	matched	0	0	1
+validity	airflow	temperature_known	0	0	1
+validity	airflow	declared	1	1	1
+validity	airflow	direction_known	0	0	1

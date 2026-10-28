@@ -1,5 +1,39 @@
 # Material data inventory
 
+## Identified-family expansion: 2026-10-28
+
+The latest increment adds **31 source-specific profiles with 240 property
+claims**. The nine cured-laminate profiles described below are included in this
+total, not an additional increment.
+
+| Group | Added profiles | Added claims |
+| --- | ---: | ---: |
+| Cured carbon-fiber and fiberglass/epoxy laminates | 9 | 78 |
+| Copper alloys, nickel grades, cobalt and halide crystals | 9 | 46 |
+| PA12, UHMWPE, PTFE and polyimide | 4 | 40 |
+| Cured acrylic adhesive and three epoxy recipes | 4 | 30 |
+| Modified wood, wood-fiber insulation, cellular glass and mineral boards | 5 | 46 |
+| **Total** | **31** | **240** |
+
+The [identified-family catalog section](../data/matdb/seed-v1/README.md#identified-material-families-october-2026-extension)
+lists every source directory, use boundary and query command. Seven nickel
+curves retain 67 source knots; the construction profiles distinguish original
+conductivity tables, declared ratings and separately selected engineering
+models. Mechanical direction, test rate, cure recipe, moisture, temperature and
+frequency remain query conditions. Unknown or unsupported properties are not
+filled from a related grade or a different physical state.
+
+Verification: **17 focused G0/G3 test groups passed** across
+`cured_composites_expansion` (2), `elements_minerals_transport` (5),
+`polymer_adhesive_families` (6) and `construction_thermal_expansion` (4).
+They execute the actual material compiler and runtime owners, checking SI
+normalization, canonical pack decoding, source receipts and unsupported-state
+refusals. These were pinned-toolchain native builds. Full workspace Cargo/DSR
+verification remains unavailable: DSR/RCH are absent and Cargo dependency
+resolution stops at the missing `frankenscipy/crates/fsci-special` sibling.
+This establishes source transport and query behavior, not experimental or
+coupled-physics qualification of every profile.
+
 ## Cured-laminate expansion: 2026-10-28
 
 Nine additional identified carbon-fiber/epoxy and fiberglass/epoxy source

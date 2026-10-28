@@ -1,0 +1,66 @@
+frankensim.matdb-source.v1
+observation	physical	PROMATECT-L calcium-silicate insulation board, 450 kg/m3 grade	September 2017 p. 1 technical data	Density and specific heat are producer reference values with unknown test temperature and conditioning. The separate typical air-dry moisture range 3.5-6 percent is not a record of the density, heat-capacity or mechanical specimens. No dehydration, moisture evolution or fire-transient constitutive response is supplied.
+observation	transport	PROMATECT-L conductivity versus mean test temperature	September 2017 p. 1 numerical rows; p. 2 graph explicitly identifies mean temperature	Three printed source points are retained without digitizing the graph. Temperature difference, thickness, direction, moisture condition, pressure and matched specimens are unstated. The 500 C classification temperature is not a fourth conductivity point or an extension of source coverage.
+observation	local-model	PROMATECT-L local-temperature engineering reference	Explicit linear interpolation and mean-temperature-to-local-temperature approximation	Requires both engineering-reference-model=1 and mean-test-temperature-as-local-model=1. The source values remain separate tabulated-only apparent conductivity claims. No interpolation accuracy or measured local law is claimed.
+observation	mechanical	PROMATECT-L cold compression and bending reference	September 2017 p. 1 producer values	The source gives cold compression 2.4 MPa and bending strength 3.1 MPa without a numerical test temperature, direction, rate or confidence level. These are reference strengths, not elastic moduli or a failure surface.
+scalar	density	physical	density	450	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	grade	1	1	1
+validity	density	moisture_known	0	0	1
+validity	density	pressure_known	0	0	1
+validity	density	matched	0	0	1
+validity	density	temperature_known	0	0	1
+scalar	heat-capacity	physical	specific_heat_capacity	950	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	grade	1	1	1
+validity	heat-capacity	moisture_known	0	0	1
+validity	heat-capacity	pressure_known	0	0	1
+validity	heat-capacity	matched	0	0	1
+validity	heat-capacity	temperature_known	0	0	1
+scalar	vapour	physical	water_vapor_diffusion_resistance_factor	3.2	1	constant
+uncertainty	vapour	unstated	-	-	-	-
+validity	vapour	grade	1	1	1
+validity	vapour	moisture_known	0	0	1
+validity	vapour	pressure_known	0	0	1
+validity	vapour	matched	0	0	1
+validity	vapour	temperature_known	0	0	1
+scalar	compression	mechanical	cold_compression_strength	2.4	MPa	constant
+uncertainty	compression	unstated	-	-	-	-
+validity	compression	grade	1	1	1
+validity	compression	moisture_known	0	0	1
+validity	compression	pressure_known	0	0	1
+validity	compression	matched	0	0	1
+validity	compression	temperature_known	0	0	1
+validity	compression	direction_known	0	0	1
+validity	compression	rate_known	0	0	1
+scalar	bending	mechanical	bending_strength	3.1	MPa	constant
+uncertainty	bending	unstated	-	-	-	-
+validity	bending	grade	1	1	1
+validity	bending	moisture_known	0	0	1
+validity	bending	pressure_known	0	0	1
+validity	bending	matched	0	0	1
+validity	bending	temperature_known	0	0	1
+validity	bending	direction_known	0	0	1
+validity	bending	rate_known	0	0	1
+curve	conductivity-source	transport	apparent_thermal_conductivity	mean_test_temperature	degC	W/m/K	20:0.08,200:0.1,400:0.11	tabulated
+uncertainty	conductivity-source	unstated	-	-	-	-
+validity	conductivity-source	mean_test_temperature	20	400	degC
+validity	conductivity-source	grade	1	1	1
+validity	conductivity-source	moisture_known	0	0	1
+validity	conductivity-source	pressure_known	0	0	1
+validity	conductivity-source	matched	0	0	1
+validity	conductivity-source	thermal_direction_known	0	0	1
+validity	conductivity-source	test_delta_known	0	0	1
+validity	conductivity-source	thickness_known	0	0	1
+curve	conductivity-local-model	transport,local-model	thermal_conductivity	temperature	degC	W/m/K	20:0.08,200:0.1,400:0.11	linear
+uncertainty	conductivity-local-model	unstated	-	-	-	-
+validity	conductivity-local-model	temperature	20	400	degC
+validity	conductivity-local-model	grade	1	1	1
+validity	conductivity-local-model	moisture_known	0	0	1
+validity	conductivity-local-model	pressure_known	0	0	1
+validity	conductivity-local-model	matched	0	0	1
+validity	conductivity-local-model	thermal_direction_known	0	0	1
+validity	conductivity-local-model	test_delta_known	0	0	1
+validity	conductivity-local-model	thickness_known	0	0	1
+validity	conductivity-local-model	engineering_reference	1	1	1
+validity	conductivity-local-model	source_as_local	1	1	1

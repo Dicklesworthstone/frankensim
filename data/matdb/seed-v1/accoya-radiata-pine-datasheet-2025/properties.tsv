@@ -1,0 +1,127 @@
+frankensim.matdb-source.v1
+observation	identity	Accoya acetylated radiata-pine solid wood, ungraded product reference	Accsys datasheet v1001 p. 2; v4.0 guide p. 6 identifies radiata-pine source	Acetylated wood is distinct from untreated radiata pine. Data are not assigned to A1/C22, A2/C16, finger-jointed, laminated or coated product variants. The reported average/range and strength-grade classifications have different meanings. This bundle retains numerical physical and test-reference properties, not structural design allowables.
+observation	conditioned	Accoya density and equilibrium moisture at 20 C, 65 percent relative humidity	Datasheet p. 2 density and equilibrium-moisture rows	Average density 515 kg/m3 and reported range 400-600 kg/m3 are separate roles, not a standard deviation or confidence interval. Moisture content has reported endpoints 3 and 5 percent, not a single invented midpoint. Relative humidity is the conditioning environment, not wood water mass fraction.
+observation	shrinkage	Accoya radial and tangential wet-to-dry shrinkage	ISO 4469; datasheet p. 2	Radial/tangential wet-to-65-percent-RH shrinkage is 0.4/0.8 percent at final 20 C. Wet-to-oven-dry shrinkage is 0.7/1.5 percent; oven temperature is not supplied. These are finite endpoint dimensional changes, not thermal expansion coefficients or continuous moisture-response derivatives.
+observation	transport	Accoya EN 12667 thermal-conductivity reference	Datasheet p. 2, EN 12667	0.12 W/m/K has no numerical test temperature, moisture conditioning or heat-flow direction in this table. The density row conditions are not silently copied onto conductivity. Heat capacity, local temperature dependence and a thermal-expansion law are absent.
+observation	mechanical	Accoya bending stiffness and Janka indentation forces	Datasheet p. 2; EN 408 and ASTM D143	Bending stiffness is 8800 N/mm2, retained as bending-moe, not isotropic Young modulus. Janka side and end-grain results are forces 4100 and 6600 N, not pressure hardness. Test temperature, moisture and rate are unstated. No Poisson ratio, axial tensile modulus or full wood tensor is inferred.
+scalar	density	identity,conditioned	density	515	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	grade	1	1	1
+validity	density	strength_grade_known	0	0	1
+validity	density	pressure_known	0	0	1
+validity	density	matched	0	0	1
+validity	density	temperature	293.15	293.15	K
+validity	density	rh	0.65	0.65	1
+scalar	density-low	identity,conditioned	density_reported_range_low	400	kg/m3	constant
+uncertainty	density-low	unstated	-	-	-	-
+validity	density-low	grade	1	1	1
+validity	density-low	strength_grade_known	0	0	1
+validity	density-low	pressure_known	0	0	1
+validity	density-low	matched	0	0	1
+validity	density-low	temperature	293.15	293.15	K
+validity	density-low	rh	0.65	0.65	1
+scalar	density-high	identity,conditioned	density_reported_range_high	600	kg/m3	constant
+uncertainty	density-high	unstated	-	-	-	-
+validity	density-high	grade	1	1	1
+validity	density-high	strength_grade_known	0	0	1
+validity	density-high	pressure_known	0	0	1
+validity	density-high	matched	0	0	1
+validity	density-high	temperature	293.15	293.15	K
+validity	density-high	rh	0.65	0.65	1
+scalar	moisture-low	identity,conditioned	equilibrium_moisture_content_low	3	%	constant
+uncertainty	moisture-low	unstated	-	-	-	-
+validity	moisture-low	grade	1	1	1
+validity	moisture-low	strength_grade_known	0	0	1
+validity	moisture-low	pressure_known	0	0	1
+validity	moisture-low	matched	0	0	1
+validity	moisture-low	temperature	293.15	293.15	K
+validity	moisture-low	rh	0.65	0.65	1
+scalar	moisture-high	identity,conditioned	equilibrium_moisture_content_high	5	%	constant
+uncertainty	moisture-high	unstated	-	-	-	-
+validity	moisture-high	grade	1	1	1
+validity	moisture-high	strength_grade_known	0	0	1
+validity	moisture-high	pressure_known	0	0	1
+validity	moisture-high	matched	0	0	1
+validity	moisture-high	temperature	293.15	293.15	K
+validity	moisture-high	rh	0.65	0.65	1
+scalar	shrink-conditioned-1	identity,shrinkage	linear_shrinkage	0.4	%	constant
+uncertainty	shrink-conditioned-1	unstated	-	-	-	-
+validity	shrink-conditioned-1	grade	1	1	1
+validity	shrink-conditioned-1	strength_grade_known	0	0	1
+validity	shrink-conditioned-1	pressure_known	0	0	1
+validity	shrink-conditioned-1	matched	0	0	1
+validity	shrink-conditioned-1	temperature	293.15	293.15	K
+validity	shrink-conditioned-1	rh	0.65	0.65	1
+validity	shrink-conditioned-1	radial	1	1	1
+validity	shrink-conditioned-1	wet_initial	1	1	1
+validity	shrink-conditioned-1	oven_dry_final	0	0	1
+scalar	shrink-oven-dry-1	identity,shrinkage	linear_shrinkage	0.7	%	constant
+uncertainty	shrink-oven-dry-1	unstated	-	-	-	-
+validity	shrink-oven-dry-1	grade	1	1	1
+validity	shrink-oven-dry-1	strength_grade_known	0	0	1
+validity	shrink-oven-dry-1	pressure_known	0	0	1
+validity	shrink-oven-dry-1	matched	0	0	1
+validity	shrink-oven-dry-1	temperature_known	0	0	1
+validity	shrink-oven-dry-1	radial	1	1	1
+validity	shrink-oven-dry-1	wet_initial	1	1	1
+validity	shrink-oven-dry-1	oven_dry_final	1	1	1
+scalar	shrink-conditioned-0	identity,shrinkage	linear_shrinkage	0.8	%	constant
+uncertainty	shrink-conditioned-0	unstated	-	-	-	-
+validity	shrink-conditioned-0	grade	1	1	1
+validity	shrink-conditioned-0	strength_grade_known	0	0	1
+validity	shrink-conditioned-0	pressure_known	0	0	1
+validity	shrink-conditioned-0	matched	0	0	1
+validity	shrink-conditioned-0	temperature	293.15	293.15	K
+validity	shrink-conditioned-0	rh	0.65	0.65	1
+validity	shrink-conditioned-0	radial	0	0	1
+validity	shrink-conditioned-0	wet_initial	1	1	1
+validity	shrink-conditioned-0	oven_dry_final	0	0	1
+scalar	shrink-oven-dry-0	identity,shrinkage	linear_shrinkage	1.5	%	constant
+uncertainty	shrink-oven-dry-0	unstated	-	-	-	-
+validity	shrink-oven-dry-0	grade	1	1	1
+validity	shrink-oven-dry-0	strength_grade_known	0	0	1
+validity	shrink-oven-dry-0	pressure_known	0	0	1
+validity	shrink-oven-dry-0	matched	0	0	1
+validity	shrink-oven-dry-0	temperature_known	0	0	1
+validity	shrink-oven-dry-0	radial	0	0	1
+validity	shrink-oven-dry-0	wet_initial	1	1	1
+validity	shrink-oven-dry-0	oven_dry_final	1	1	1
+scalar	conductivity	identity,transport	apparent_thermal_conductivity	0.12	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	grade	1	1	1
+validity	conductivity	strength_grade_known	0	0	1
+validity	conductivity	pressure_known	0	0	1
+validity	conductivity	matched	0	0	1
+validity	conductivity	temperature_known	0	0	1
+validity	conductivity	moisture_known	0	0	1
+validity	conductivity	direction_known	0	0	1
+scalar	bending	identity,mechanical	bending_moe	8800	MPa	constant
+uncertainty	bending	unstated	-	-	-	-
+validity	bending	grade	1	1	1
+validity	bending	strength_grade_known	0	0	1
+validity	bending	pressure_known	0	0	1
+validity	bending	matched	0	0	1
+validity	bending	temperature_known	0	0	1
+validity	bending	moisture_known	0	0	1
+validity	bending	direction_known	0	0	1
+validity	bending	rate_known	0	0	1
+scalar	janka-0	identity,mechanical	janka_hardness_force	4100	N	constant
+uncertainty	janka-0	unstated	-	-	-	-
+validity	janka-0	grade	1	1	1
+validity	janka-0	strength_grade_known	0	0	1
+validity	janka-0	pressure_known	0	0	1
+validity	janka-0	matched	0	0	1
+validity	janka-0	temperature_known	0	0	1
+validity	janka-0	moisture_known	0	0	1
+validity	janka-0	rate_known	0	0	1
+validity	janka-0	end_grain	0	0	1
+scalar	janka-1	identity,mechanical	janka_hardness_force	6600	N	constant
+uncertainty	janka-1	unstated	-	-	-	-
+validity	janka-1	grade	1	1	1
+validity	janka-1	strength_grade_known	0	0	1
+validity	janka-1	pressure_known	0	0	1
+validity	janka-1	matched	0	0	1
+validity	janka-1	temperature_known	0	0	1
+validity	janka-1	moisture_known	0	0	1
+validity	janka-1	rate_known	0	0	1
+validity	janka-1	end_grain	1	1	1

@@ -1,0 +1,29 @@
+frankensim.matdb-manifest.v3
+pack_id	accoya-radiata-pine-datasheet-2025
+redistribution	permitted	Selected attributed numerical facts and original notes only; no source document, prose or table layout is redistributed
+citation	Accsys, Accoya Technical Datasheet EN/UK version 1001, August 2025, p. 2; https://www.accoya.com/app/uploads/2026/09/Accoya-Datasheet-EN.pdf . Radiata-pine material identity: Accoya Wood Information Guide v4.0 January 2026, p. 6 section 3.2, https://www.accoya.com/app/uploads/2026/09/Accoya-Wood-Information-Guide-US.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	producer-properties	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	density_reported_range_low	density-reported-range-low	dimensional
+property	density_reported_range_high	density-reported-range-high	dimensional
+property	equilibrium_moisture_content_low	equilibrium-moisture-content-low	dimensional
+property	equilibrium_moisture_content_high	equilibrium-moisture-content-high	dimensional
+property	linear_shrinkage	linear-shrinkage	dimensional
+property	apparent_thermal_conductivity	apparent-thermal-conductivity	thermal-conductivity
+property	bending_moe	bending-moe	dimensional
+property	janka_hardness_force	janka-hardness-force	dimensional
+axis	grade	source-grade-accoya-radiata-pine-datasheet-2025	dimensional
+axis	moisture_known	source-moisture-condition-known	dimensional
+axis	pressure_known	source-gas-pressure-known	dimensional
+axis	matched	source-specimens-matched	dimensional
+axis	temperature_known	source-temperature-known	dimensional
+axis	direction_known	source-measurement-direction-known	dimensional
+axis	rate_known	source-test-rate-known	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	strength_grade_known	source-strength-grade-known	dimensional
+axis	rh	conditioning-relative-humidity	dimensional
+axis	radial	radial-direction	dimensional
+axis	wet_initial	initial-state-wet	dimensional
+axis	oven_dry_final	final-state-oven-dry	dimensional
+axis	end_grain	load-on-end-grain	dimensional

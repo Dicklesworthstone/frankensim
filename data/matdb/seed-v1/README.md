@@ -4,6 +4,106 @@ This directory retains the human-reviewable source inputs compiled by
 `xtask matdb-pack`. Generated binary packs are deliberately not committed:
 the compiler must reproduce them from the pinned manifest and source record.
 
+## Identified material families: October 2026 extension
+
+This increment adds **31 source-specific profiles and 240 claims**. These are
+source and condition counts, not a count of fully characterized materials.
+The existing compiler, typed queries and catalog discovery load every addition;
+no parallel material registry or material-name defaults are required.
+
+| Family | Profiles | Claims | Main additions |
+| --- | ---: | ---: | --- |
+| Cured carbon-fiber and fiberglass composites | 9 | 78 | Identified HexPly 8552/913 resin, reinforcement and direction; see the next section |
+| Metals and minerals | 9 | 46 | C36000, C46400, C65500, Nickel 200/201, cobalt, KBr, NaF and CsI |
+| Engineering polymers | 4 | 40 | PA12, UHMWPE, PTFE and polyimide stock shapes |
+| Cured adhesives and resins | 4 | 30 | Acrylic AA326 and three distinct WEST epoxy recipes |
+| Building and insulation materials | 5 | 46 | Modified wood, wood-fiber insulation, cellular glass and calcium-silicate boards |
+
+### Engineering polymers and cured adhesives
+
+| Source directory | Material and retained property distinctions |
+| --- | --- |
+| `ensinger-tecamid-12-natural` | PA12: thermal properties, loading-speed-qualified mechanical data, discrete compression stresses and interval-mean longitudinal expansion |
+| `ensinger-tecafine-pe1000-natural-2017` | UHMWPE: density, tensile/yield data, indentation and dielectric breakdown; missing thermal data stay absent |
+| `ensinger-tecaflon-ptfe-natural` | PTFE: density/conductivity, tension, compression at 1% strain, electrical properties and film-thickness-qualified dielectric breakdown |
+| `ensinger-tecasint-2011-natural-2025` | Polyimide: separate thermal test temperatures, compression roles and discrete dielectric frequencies |
+| `henkel-loctite-aa326-seven-day-cure-2020` | Acrylic adhesive after seven days at 23 °C; cured mechanical/thermal/electrical data, with no substitution of liquid specific gravity |
+| `west-system-105-205-neat-cured-reference` | 105/205 epoxy: neat two-week-cured mechanical data and dimensionless cured specific gravity |
+| `west-system-105-207-neat-cured-reference` | 105/207 clear epoxy: its own recipe, cure and mechanical properties |
+| `west-system-gflex-650-neat-cured-reference` | G/flex 650 toughened epoxy: distinct from thickened 655 and unfilled 105-system recipes |
+
+Ensinger source-sheet URLs and revisions are pinned in each manifest.
+The cured adhesive sources are [Henkel AA326, August 2020](https://datasheets.tdx.henkel.com/LOCTITE-AA-326-en_GL.pdf)
+and [WEST SYSTEM's comparison table](https://www.westsystem.com/compare-epoxy-physical-properties/),
+with product sheets identifying the mixing recipes. Bulk resin data do not
+supply joint shear strength, substrate compatibility or an interface law.
+Unspecified reference-water temperature prevents converting WEST specific
+gravity into a fabricated measured density.
+
+### Metals and optical minerals
+
+`brass-c36000-cda-reference`, `brass-c46400-cda-reference` and
+`bronze-c65500-cda-reference` retain the Copper Development Association's
+separate grade records, their 20 °C thermal values, unknown elastic-test
+temperature and interval-mean expansion. Imperial conversion uses the explicitly
+declared International Table Btu convention.
+
+`nickel-200-annealed-special-metals-2006` and
+`nickel-201-annealed-special-metals-2006` retain separate annealed transport
+tables from [Special Metals SMC-061](https://www.specialmetals.com/documents/technical-bulletins/nickel-200.pdf).
+Seven curves preserve 67 source knots. Interpolation is an explicit linear
+engineering approximation. Nickel 200 dynamic elasticity remains distinct from
+static properties and from Nickel 201's nominal tension modulus. Unspecified
+constant-property temperatures do not become heat-capacity or density laws.
+
+`potassium-bromide-crystran-reference`, `sodium-fluoride-crystran-reference` and
+`caesium-iodide-crystran-reference` add source-specific thermal and dielectric
+data. Their conductivity temperatures are respectively 319 K, 273 K and 298 K;
+their dielectric frequency is 1 MHz. `cobalt-goodfellow-reference` retains
+separate 20 °C and 25 °C properties and an explicitly selected interval
+conductivity reference. No incomplete crystal elastic table becomes an
+invented isotropic stiffness tensor.
+
+For example, evaluate the Nickel 200 conductivity curve at 100 °C:
+
+```bash
+cargo run -p xtask -- matdb-catalog \
+  --pack nickel-200-annealed-special-metals-2006 \
+  --property thermal-conductivity --at temperature=373.15 \
+  --at engineering-reference-model=1 --at source-specimens-matched=0 \
+  --at annealed-material=1
+```
+
+The result is 66.5 W/(m K), with the selected source claim and query context.
+Changing the annealed selector or requesting an unsupported temperature refuses.
+
+### Building, insulation and modified-wood products
+
+| Source directory | Material and source boundaries |
+| --- | --- |
+| `foamglas-one-astm-2022` | Cellular glass: nominal density, Cp at 25 °C, 13 mean-temperature conductivity samples, separate approximate modulus and strength averages/specification limits |
+| `promatect-l-2017` | Calcium-silicate board: thermal and mechanical references; conductivity uses mean test temperature |
+| `promatect-h-2017` | Cement-bonded calcium-silicate board: directional mechanics and conductivity; Cp is supplied only at 400 °C |
+| `steico-flex036-v5-2026` | Version-5 wood-fiber insulation: 50 kg/m³ nominal density, Cp, declared conductivity, vapor resistance and airflow-resistivity lower limit |
+| `accoya-radiata-pine-datasheet-2025` | Acetylated radiata pine: conditioned density/moisture, finite radial/tangential shrinkage, bending stiffness, thermal reference and Janka forces |
+
+FOAMGLAS conductivity samples are the producer's polynomial evaluations,
+not independent measurements. The original source-temperature tables remain
+tabulated-only. Separate local-temperature linear models for FOAMGLAS and the
+PROMATECT boards require explicit engineering-model selectors. STEICO's declared
+conductivity stays a declared value rather than silently becoming a local law.
+Accoya conditioning RH is distinct from moisture content; finite shrinkage is
+not thermal expansion, and Janka force is not pressure hardness.
+
+The four focused suites exercise the actual compiler and typed runtime queries:
+
+```bash
+cargo test -p xtask --test cured_composites_expansion
+cargo test -p xtask --test elements_minerals_transport
+cargo test -p xtask --test polymer_adhesive_families
+cargo test -p xtask --test construction_thermal_expansion
+```
+
 ## Cured carbon-fiber and fiberglass epoxy laminates
 
 Nine identified Hexcel laminates add 78 claims. These describe cured composites

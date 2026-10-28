@@ -1,0 +1,85 @@
+frankensim.matdb-source.v1
+observation	physical	FOAMGLAS ONE ASTM C552 Type 1 block, Grade 6; closed-cell soda-lime cellular glass	June 2022 p. 2, C303 density and E1461 heat capacity	Nominal density is 115 kg/m3 with a separately reported manufacturing tolerance of 10 percent, not a confidence interval. Density test temperature is unstated. Heat capacity is 0.77 kJ/kg/K specifically at 25 C. Moisture conditioning, gas pressure and common-specimen identity are unstated. Service-temperature ratings are not property validity.
+observation	transport	FOAMGLAS ONE ASTM Grade 6 conductivity table	June 2022 p. 2, product row and footnote 3; ASTM C518/C177	These 13 printed SI values are evaluations of a producer polynomial at insulation mean temperatures. They are not independently measured knots. The separate ASTM C552 specification row is not imported as material data. Polynomial coefficients, temperature difference, specimen thickness and heat-flow direction are not given. The source table admits only its printed mean-temperature points.
+observation	local-model	FOAMGLAS ONE local-temperature engineering reference	Explicit piecewise-linear interpretation of the producer table	The local model linearly interpolates the printed product values and maps mean temperature to local temperature only with both engineering-reference-model=1 and mean-test-temperature-as-local-model=1. This is an authored approximation, not the unpublished producer polynomial, measured local k(T), or an error bound. No separate pore-radiation contribution is added.
+observation	mechanical	FOAMGLAS ONE ASTM Grade 6 mechanical reference	C165/C240/C552 compression, C203/C240 flexure, C623 approximate elastic modulus	Compression average 620 kPa is distinct from the lower specification limit 414 kPa; flexure supplies only a lower specification limit of 283 kPa. The approximate elastic modulus 900 MPa is qualified by source-assumed Poisson ratio 0.25, not an independently measured Poisson ratio. Direction, exact temperature and rate/frequency are unstated. No constitutive failure curve, static isotropic elastic tuple or statistical uncertainty is supplied.
+scalar	density	physical	density	115	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	grade	1	1	1
+validity	density	moisture_known	0	0	1
+validity	density	pressure_known	0	0	1
+validity	density	matched	0	0	1
+validity	density	temperature_known	0	0	1
+scalar	density-tolerance	physical	density_relative_manufacturing_tolerance	0.1	1	constant
+uncertainty	density-tolerance	unstated	-	-	-	-
+validity	density-tolerance	grade	1	1	1
+validity	density-tolerance	moisture_known	0	0	1
+validity	density-tolerance	pressure_known	0	0	1
+validity	density-tolerance	matched	0	0	1
+validity	density-tolerance	temperature_known	0	0	1
+scalar	heat-capacity	physical	specific_heat_capacity	770	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	grade	1	1	1
+validity	heat-capacity	moisture_known	0	0	1
+validity	heat-capacity	pressure_known	0	0	1
+validity	heat-capacity	matched	0	0	1
+validity	heat-capacity	temperature	298.15	298.15	K
+scalar	compression-average	mechanical	compression_strength_average	620	kPa	constant
+uncertainty	compression-average	unstated	-	-	-	-
+validity	compression-average	grade	1	1	1
+validity	compression-average	moisture_known	0	0	1
+validity	compression-average	pressure_known	0	0	1
+validity	compression-average	matched	0	0	1
+validity	compression-average	temperature_known	0	0	1
+validity	compression-average	direction_known	0	0	1
+validity	compression-average	rate_known	0	0	1
+scalar	compression-limit	mechanical	compression_strength_lower_specification_limit	414	kPa	constant
+uncertainty	compression-limit	unstated	-	-	-	-
+validity	compression-limit	grade	1	1	1
+validity	compression-limit	moisture_known	0	0	1
+validity	compression-limit	pressure_known	0	0	1
+validity	compression-limit	matched	0	0	1
+validity	compression-limit	temperature_known	0	0	1
+validity	compression-limit	direction_known	0	0	1
+validity	compression-limit	rate_known	0	0	1
+scalar	flexure-limit	mechanical	flexural_strength_lower_specification_limit	283	kPa	constant
+uncertainty	flexure-limit	unstated	-	-	-	-
+validity	flexure-limit	grade	1	1	1
+validity	flexure-limit	moisture_known	0	0	1
+validity	flexure-limit	pressure_known	0	0	1
+validity	flexure-limit	matched	0	0	1
+validity	flexure-limit	temperature_known	0	0	1
+validity	flexure-limit	direction_known	0	0	1
+validity	flexure-limit	rate_known	0	0	1
+scalar	modulus	mechanical	elastic_modulus_approximation	900	MPa	constant
+uncertainty	modulus	unstated	-	-	-	-
+validity	modulus	grade	1	1	1
+validity	modulus	moisture_known	0	0	1
+validity	modulus	pressure_known	0	0	1
+validity	modulus	matched	0	0	1
+validity	modulus	temperature_known	0	0	1
+validity	modulus	direction_known	0	0	1
+validity	modulus	assumed_poisson	0.25	0.25	1
+validity	modulus	frequency_known	0	0	1
+curve	conductivity-source	transport	apparent_thermal_conductivity	mean_test_temperature	degC	W/m/K	-165:0.02,-157:0.021,-129:0.023,-101:0.026,-73:0.029,-46:0.032,-18:0.036,10:0.04,24:0.042,38:0.044,93:0.054,149:0.066,204:0.078	tabulated
+uncertainty	conductivity-source	unstated	-	-	-	-
+validity	conductivity-source	mean_test_temperature	-165	204	degC
+validity	conductivity-source	grade	1	1	1
+validity	conductivity-source	moisture_known	0	0	1
+validity	conductivity-source	pressure_known	0	0	1
+validity	conductivity-source	matched	0	0	1
+validity	conductivity-source	thermal_direction_known	0	0	1
+validity	conductivity-source	test_delta_known	0	0	1
+validity	conductivity-source	thickness_known	0	0	1
+curve	conductivity-local-model	transport,local-model	thermal_conductivity	temperature	degC	W/m/K	-165:0.02,-157:0.021,-129:0.023,-101:0.026,-73:0.029,-46:0.032,-18:0.036,10:0.04,24:0.042,38:0.044,93:0.054,149:0.066,204:0.078	linear
+uncertainty	conductivity-local-model	unstated	-	-	-	-
+validity	conductivity-local-model	temperature	-165	204	degC
+validity	conductivity-local-model	grade	1	1	1
+validity	conductivity-local-model	moisture_known	0	0	1
+validity	conductivity-local-model	pressure_known	0	0	1
+validity	conductivity-local-model	matched	0	0	1
+validity	conductivity-local-model	thermal_direction_known	0	0	1
+validity	conductivity-local-model	test_delta_known	0	0	1
+validity	conductivity-local-model	thickness_known	0	0	1
+validity	conductivity-local-model	engineering_reference	1	1	1
+validity	conductivity-local-model	source_as_local	1	1	1
