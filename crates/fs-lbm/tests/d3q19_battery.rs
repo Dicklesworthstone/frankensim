@@ -25,7 +25,7 @@ fn verdict(name: &str, pass: bool, details: &str) {
 #[test]
 fn lattice_invariants_hold_exactly() {
     assert_eq!(D3Q19_BIT_SEMANTICS_VERSION, 1);
-    assert_eq!(D3Q19_MOMENT_COLLISION_SEMANTICS_VERSION, 1);
+    assert_eq!(D3Q19_MOMENT_COLLISION_SEMANTICS_VERSION, 2);
     // The float weights are exactly the ×36 integers.
     for i in 0..Q3 {
         assert_eq!(W3[i].to_bits(), (W36[i] as f64 / 36.0).to_bits());
@@ -255,7 +255,7 @@ fn shared_bgk_collision_is_bit_compatible_and_fail_closed() {
 
 /// lbm3-002c (G0): the correctness-first central-moment rung preserves the
 /// collision invariants, reduces to BGK within solve roundoff at equal rates,
-/// and refuses unverified forcing/rate combinations.
+/// and refuses invalid relaxation-rate combinations.
 #[test]
 fn central_moment_collision_is_conservative_and_explicitly_bounded() {
     let rho = 1.01;
@@ -342,7 +342,7 @@ fn central_moment_collision_is_conservative_and_explicitly_bounded() {
             ..
         })
     ));
-    assert!(matches!(
+    assert!(
         collide_cell3(
             populations,
             CollisionModel3::CentralMoment {
@@ -350,9 +350,9 @@ fn central_moment_collision_is_conservative_and_explicitly_bounded() {
                 higher_order_rate: 1.0,
             },
             [1e-7, 0.0, 0.0],
-        ),
-        Err(CollisionError3::CentralMomentForceUnsupported { .. })
-    ));
+        )
+        .is_ok()
+    );
 }
 
 /// lbm3-002d (G0/G3): the reduced D3Q19 cumulant projection preserves
@@ -477,10 +477,7 @@ fn reduced_cumulant_projection_is_conservative_covariant_and_nonlinear() {
             ..
         })
     ));
-    assert!(matches!(
-        collide_cell3(populations, model, [0.0, 0.0, 1e-7]),
-        Err(CollisionError3::ReducedCumulantForceUnsupported { .. })
-    ));
+    assert!(collide_cell3(populations, model, [0.0, 0.0, 1e-7]).is_ok());
 }
 
 /// lbm3-003: mass is conserved to the 2-D crate's roundoff bar (1e-11)
@@ -735,14 +732,8 @@ fn run_taylor_green_3d(n: usize, steps: usize, model: CollisionModel3) -> (f64, 
     let nu = model.kinematic_viscosity();
     let k = 2.0 * core::f64::consts::PI / (n as f64);
     let u0 = 1e-4;
-    let mut grid = BoundaryGrid3::with_collision_model(
-        n,
-        n,
-        n,
-        model,
-        [0.0; 3],
-        BoundarySpec3::periodic(),
-    );
+    let mut grid =
+        BoundaryGrid3::with_collision_model(n, n, n, model, [0.0; 3], BoundarySpec3::periodic());
     for z in 0..n {
         let kz = k * (z as f64);
         let (sz, cz) = (kz.sin(), kz.cos());
@@ -777,11 +768,7 @@ fn run_taylor_green_3d(n: usize, steps: usize, model: CollisionModel3) -> (f64, 
                 let feq = equilibrium3(1.0, u);
                 let mut f = [0.0; Q3];
                 for q in 0..Q3 {
-                    let c = [
-                        f64::from(E3[q].0),
-                        f64::from(E3[q].1),
-                        f64::from(E3[q].2),
-                    ];
+                    let c = [f64::from(E3[q].0), f64::from(E3[q].1), f64::from(E3[q].2)];
                     let mut contraction = 0.0;
                     for a in 0..3 {
                         for b in 0..3 {
@@ -918,11 +905,7 @@ fn high_re_cavity_stability_falsifier_and_albensoeder_kuhlmann_coarse_band() {
             for y in 0..n {
                 for x in 0..n {
                     let parity = if (x + y + z) % 2 == 0 { 1.0 } else { -1.0 };
-                    let u = [
-                        0.04 * parity,
-                        -0.03 * parity,
-                        0.02 * parity,
-                    ];
+                    let u = [0.04 * parity, -0.03 * parity, 0.02 * parity];
                     let mut f = equilibrium3(1.0, u);
                     f[0] += parity * (-12.0 * amp);
                     for q in 1..Q3 {
@@ -934,8 +917,7 @@ fn high_re_cavity_stability_falsifier_and_albensoeder_kuhlmann_coarse_band() {
             }
         }
     };
-    let mut bgk_re1000 =
-        BoundaryGrid3::new(n, n, n, tau_falsifier, [0.0; 3], spec_falsifier);
+    let mut bgk_re1000 = BoundaryGrid3::new(n, n, n, tau_falsifier, [0.0; 3], spec_falsifier);
     seed_fourth_order_ghost(&mut bgk_re1000);
     let mut cum_re1000 = BoundaryGrid3::with_collision_model(
         n,
@@ -1131,7 +1113,8 @@ fn reduced_cumulant_candidate_hash() -> u64 {
 }
 
 /// lbm3-010 (G5, bead frankensim-vrif): seeded deterministic run for the
-/// ReducedCumulant D3Q19 operator under `D3Q19_MOMENT_COLLISION_SEMANTICS_VERSION = 1`.
+/// ReducedCumulant D3Q19 operator: the version-1 unforced bits are retained
+/// under version 2, which adds the separate physical-frame forcing path.
 #[test]
 fn d3q19_reduced_cumulant_candidate_hash_is_replay_stable() {
     let first = reduced_cumulant_candidate_hash();
@@ -1236,5 +1219,3 @@ fn acceptance_lid_cavity_re1000_albensoeder_kuhlmann() {
         &format!("24^3 Re=1000 vs AK2005: ux_dev={worst_ux:.4}, uy_dev={worst_uy:.4}"),
     );
 }
-
-

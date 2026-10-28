@@ -511,8 +511,9 @@ impl BoundaryGrid3 {
     /// Unit-density fluid at rest under an explicit collision model.
     ///
     /// Every dimension must be a positive multiple of [`TILE`]. The collision
-    /// model and force must be finite and admissible. Moment-space models are
-    /// currently unforced by contract.
+    /// model and force must be finite and admissible. BGK and moment-space
+    /// models support body forces on periodic/walled domains; regularized
+    /// open velocity/pressure faces still require a force-free domain.
     ///
     /// # Panics
     /// Panics when dimensions, allocation geometry, collision parameters,
@@ -547,7 +548,7 @@ impl BoundaryGrid3 {
                 || force
                     .iter()
                     .all(|value| matches!(value.classify(), core::num::FpCategory::Zero)),
-            "moment-space D3Q19 collision models currently require zero body force"
+            "the selected D3Q19 collision model does not admit body forcing"
         );
         boundaries.validate();
         let has_open_face = Face3::ALL
@@ -875,7 +876,7 @@ impl BoundaryGrid3 {
         }
     }
 
-    /// One BGK/Guo collide, link-wise pull-stream, and open-face
+    /// One selected collision, link-wise pull-stream, and open-face
     /// reconstruction step.
     pub fn step(&mut self) {
         self.topology_locked = true;

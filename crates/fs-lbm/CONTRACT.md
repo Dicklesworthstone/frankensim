@@ -354,17 +354,29 @@ rollback. Their addition does not establish executed native validation.
   periodic y closure; density/velocity and non-equilibrium stress are
   extrapolated from the respective first-interior columns.
 - `rheology::Rheology`, `rheology::update_tau`, and
-  `rheology::channel_flow` — local apparent-viscosity laws and explicit
-  τ updates with floor/cap counts for cells outside the representable
-  relaxation window. Both D2Q9 `update_tau` and D3Q19 `update_tau3` infer
-  strain from `Pi_neq + (u F + F u)/2` in the physical Guo frame. D2Q9
-  includes both `rho*g` and the local external force density. Uniform
-  acceleration is not shear. The shared estimators correct three/six tensor
-  entries directly, avoiding source-array construction and an extra population
-  pass; the material-driven rheology paths reuse them. The force-reframing
-  regressions cover zero/full strain, density and relaxation changes, and
-  independent force directions; the existing analytic channel gates remain
-  the flow-level checks.
+  `rheology::channel_flow` — local apparent-viscosity laws with a shared,
+  self-consistent constitutive solve in D2Q9 and D3Q19 `update_tau3`.
+  Both dimensions infer strain from `Pi_neq + (u F + F u)/2` in the
+  physical Guo frame. D2Q9 includes both `rho*g` and the local external
+  force density; uniform acceleration is not shear. The shared estimators
+  correct three/six tensor entries directly, avoiding source-array
+  construction and an extra population pass; material-driven rheology paths
+  reuse these estimators.
+  The population stress supplies `A = gamma*tau`; a safeguarded bracketed
+  Newton solve closes `tau = 1/2 + nu(A/tau)/CS2` for the same local state.
+  The previous tau is only a warm start. Unclipped solutions require a
+  relative tau defect at most `1e-12`, with a 96-iteration bound and an
+  explicit failure if convergence is exhausted. Constant Newtonian and
+  constant-limit power-law/Carreau laws are evaluated once per grid update,
+  avoiding per-cell iteration. The existing power-law shear regularization
+  at `gamma = 1e-12` remains explicit in the evaluator.
+  `TAU_FLOOR = 0.505` and `TAU_CAP = 3.0` bound representable relaxation;
+  activating either changes the requested constitutive law and is counted
+  in `RheologyStats`. The reported shear rate uses the applied tau. A local
+  constitutive solve does not make the collide/stream time integration
+  implicit. Force-reframing regressions cover zero/full strain, density and
+  relaxation changes, and independent force directions; analytic channel
+  gates remain the flow-level checks.
 - `thermal::ThermalLbm` and `thermal::gbeta_for_rayleigh` — D2Q9 flow plus
   D2Q5 temperature populations for Rayleigh-Bénard-style onset fixtures with
   fixed-temperature wall rows.
@@ -478,16 +490,22 @@ rollback. Their addition does not establish executed native validation.
 - `d3q19::{CollisionModel3, collide_cell3, CollisionError3}` — the checked
   per-cell collision authority used by `BoundaryGrid3` and public cell calls.
   `Bgk { tau }` retains the frozen general-force projection; the Duct tile
-  scalar/SIMD twin is separately bit-locked to its test-only axial oracle. The unforced
-  `CentralMoment` reference rung relaxes a full-rank centered D3Q19 monomial
-  basis with independent second/higher-order rates. `ReducedCumulant` applies
-  the nonlinear `C220`/`C202`/`C022` corrections to the three independent
-  fourth-order rows represented by that basis. All paths reject invalid
-  parameters or state before publication.
+  scalar/SIMD twin is separately bit-locked to its test-only axial oracle.
+  `CentralMoment` relaxes a full-rank centered D3Q19 monomial basis with
+  independent second/higher-order rates. `ReducedCumulant` applies the
+  nonlinear `C220`/`C202`/`C022` corrections to the three independent
+  fourth-order rows represented by that basis. Both moment families admit
+  uniform and per-cell body forces through `C(f + S/2) + S/2`, using the
+  original Guo source `S` and force-corrected velocity. Central moments thus
+  receive `(I - Lambda/2) S` with each mode's own rate; reduced cumulants
+  are evaluated in the physical frame with zero first central moments.
+  All paths reject invalid parameters or state before publication.
 - `D3Q19_MOMENT_COLLISION_SEMANTICS_VERSION` — independent version for the
   optional moment-space basis, rate grouping, `mul_add` chains, cumulant
-  projection, and deterministic back-transform. It does not refreeze the
-  established BGK grid golden.
+  projection, and deterministic back-transform. Version 2 adds the physical
+  population forcing transform; the zero-force branch retains the original
+  version-1 arithmetic and reduced-cumulant golden. The established BGK grid
+  golden is unchanged.
 - `Face3`, `FaceBoundary3`, and `BoundarySpec3` — six-face axis-aligned
   boundary declarations: paired periodic faces, tangential moving/stationary
   halfway walls, regularized velocity faces, and isothermal pressure/density
@@ -622,8 +640,10 @@ rollback. Their addition does not establish executed native validation.
   roundoff. The boundary grid delegates to the public cell authority; the Duct
   tile scalar/SIMD twin is differential-tested against its frozen axial oracle.
 - Equal-rate central-moment collision reduces to BGK within deterministic
-  transform/solve roundoff. Split higher-order relaxation changes
-  nonequilibrium modes without relaxing degree-zero/one invariants.
+  transform/solve roundoff, including nonzero body force. Split higher-order
+  relaxation changes nonequilibrium modes without relaxing degree-zero/one
+  invariants. Both moment families deliver the imposed momentum increment
+  and relax physical viscous stress at the declared second-order rate.
 - Reduced-cumulant collision preserves degree-zero/one invariants, fixes the
   discrete equilibrium to solve roundoff, and is covariant under Cartesian
   axis permutation when rates are equal within each represented order. Its
@@ -708,9 +728,11 @@ rollback. Their addition does not establish executed native validation.
   density to roundoff while copying the complementary moment and independently
   measured non-equilibrium stress from the first interior column. The measured
   and unmeasured open-step paths are bit-identical.
-- Rheology laws reject non-finite or non-positive physical parameters, and
-  every update reports floor/cap counts when viscosity leaves the representable
-  τ window.
+- Rheology laws reject inadmissible physical parameters. An unclipped local
+  update closes its stress/viscosity relation to a relative tau defect of
+  `1e-12`; the previous tau only initializes the solve. Every update reports
+  floor/cap counts when the requested law leaves the representable tau window,
+  and `max_shear` is consistent with the applied relaxation time.
 - Thermal wall populations encode the declared wall temperatures, so the
   public `temperature` query is consistent on wall and fluid rows.
 - Free-surface steps conserve the tracked ledger mass (fluid `Σf` plus
@@ -827,8 +849,9 @@ polls cancellation at intervals of at most 256 measured links and before
 publication, and returns no loads or new fluid populations on refusal.
 `collide_cell3` returns typed errors rather than publishing non-finite or
 non-positive cell states. Both moment-space rungs additionally refuse rates
-outside `(0, 2)`, nonzero body forcing, or a numerically rank-deficient moment
-transform.
+outside `(0, 2)` or a numerically rank-deficient moment transform. Body
+forcing is supported by all three collision families; the regularized open
+velocity/pressure boundary closure retains its separate force-free admission.
 
 ## Determinism class
 
@@ -904,8 +927,16 @@ contact-model bracketing, qualitative jet fragmentation, and dynamic wetting
 selection, receipt replay, interface-system identity binding, and typed
 refusal paths.
 
+The rheology unit battery independently checks strongly thinning and
+thickening constitutive roots, previous-tau independence in both dimensions,
+repeated-update identity, and clipping at the applied strain rate.
+`strongly_thickening_channel_matches_analytic_profile` adds an n = 5 channel
+with 33 fluid rows: it must reach steady state before 80,000 steps and keep
+worst pointwise velocity error below 3% of the analytic peak.
+
 `tests/extensions.rs` (tfz.19): lbm-101 power-law/Carreau profiles vs
-analytic (0.12% with τ floor+cap ledger); lbm-102 Rayleigh–Bénard onset
+analytic (0.14% for the n = 0.8 profile with τ floor+cap ledger);
+lbm-102 Rayleigh–Bénard onset
 bracket (decay Ra=1200 / growth Ra=2500, Nu>1); lbm-104 STRICT free-
 surface mass ledger (5e-14 over 600 dam-break steps, conversions
 counted); lbm-105 dam-break front envelope (coarse honesty band);
@@ -922,7 +953,9 @@ moments/opposites, equilibrium moments, mass conservation, analytic
 rectangular-duct flow, replay determinism, the registered core golden, shared
 kernel bit-equivalence, BGK/central-moment equal-rate equivalence, split-rate
 conservation, reduced-cumulant equilibrium/nonlinearity/axis-covariance laws,
-and fail-closed inputs.
+and fail-closed inputs. The D3Q19 `forcing_tests` unit module adds independent
+uniform-acceleration populations, forced equal-rate central/BGK equivalence,
+and prescribed physical-stress relaxation for both moment families.
 
 The D3Q19 SIMD module adds G0 seeded differential batteries for both operations.
 Collision compares every lane to its scalar tile twin and directly locks that
@@ -945,8 +978,12 @@ link masks, aligned deterministic mask ordering, the exact 18 links around one
 voxel, atomic immutable SDF topology and rejection paths, axis-generic
 regularized face density/velocity plus independent inlet/outlet stress
 reconstruction, grid-level collision selection and equal-rate BGK/central
-agreement, split-rate cumulant conservation, open/wall and moving/open rim
-ownership, stationary planar and voxel mass conservation, exact one-step
+agreement, split-rate cumulant conservation, uniform plus per-cell force
+impulse, and force-driven planar Poiseuille flow for both moment families.
+The forced channel gate requires less than 0.4% peak-normalized profile error
+at 16 fluid rows and better than 2.5-fold error reduction from 8 to 16 rows.
+The battery also covers open/wall and moving/open rim ownership, stationary
+planar and voxel mass conservation, exact one-step
 moving-lid momentum oracles, qualitative primary cavity circulation,
 pressure-driven Poiseuille shape, and a boundary replay-hash candidate. Ignored
 release fixtures carry the full 10,000-step leak and 32x32 full-rim 3%
@@ -1440,11 +1477,11 @@ Their presence does not claim native execution or empirical gas validation.
 
 ## No-claim boundaries
 
-- D3Q19 grids remain BGK + Guo on a dense set of aligned SoA tiles. The
-  selectable central-moment and `ReducedCumulant` cell operators are
-  deterministic `O(Q^3)` correctness references: they are unforced and have no
-  performance or high-Re stability claim. D3Q27 has the separate checked full
-  collision/reference-grid surface above, pending native qualification.
+- Tiled D3Q19 grids default to BGK + Guo on a dense set of aligned SoA
+  tiles. The selectable central-moment and `ReducedCumulant` cell operators
+  support body force but remain deterministic `O(Q^3)` correctness references
+  with no performance or high-Re stability claim. D3Q27 has the separate
+  checked full collision/reference-grid surface above, pending native qualification.
   Normalized drag/lift histories and bandwidth roofline /
   fs-tilelang kernels remain staged. The sparse active-tile layer
   (`d3q19::sparse`) claims determinism and active-set memory proportionality
@@ -1601,13 +1638,15 @@ path without forking constitutive code. `PlatesGrid3` is a plain-storage
 D3Q19 plate channel (rigid z-plates via halfway bounce-back, periodic
 x/y) with per-cell relaxation time and per-cell external force, colliding
 through the SHARED `collide_cell3` BGK + Guo kernel; the tiled SoA
-`Duct`/`BoundaryGrid3` fast paths and their frozen bit-semantics goldens
-are untouched. `ThermalLbm3` adds a D3Q7 advection-diffusion temperature
+`Duct`/`BoundaryGrid3` frozen BGK arithmetic remains unchanged.
+`ThermalLbm3` adds a D3Q7 advection-diffusion temperature
 population (c_s² = ¼) with anti-bounce-back fixed-temperature plates and
-Boussinesq coupling into the Guo term. `update_tau3` adapts τ from the
-local D3Q19 non-equilibrium second moment through the SAME
-`rheology::Rheology` law, `TAU_FLOOR`/`TAU_CAP`, and `RheologyStats`
-ledger as 2-D; the plate-channel profile is certified against the SHARED
+Boussinesq coupling into the Guo term. `update_tau3` closes tau and shear
+rate from the force-corrected D3Q19 non-equilibrium second moment through the
+SAME safeguarded local constitutive solver, `rheology::Rheology` law,
+`TAU_FLOOR`/`TAU_CAP`, and `RheologyStats` ledger as 2-D. Its previous tau is
+only a warm start, and the flow time integration remains explicit. The
+plate-channel profile is certified against the SHARED
 `powerlaw_poiseuille_analytic` (the geometry is 1-D in the wall-normal
 axis). Battery (tests/d3q19_coupled.rs, verdict-JSON): Rayleigh–Bénard
 onset bracket (decay at Ra = 1200, growth at Ra = 2500, Nu > 1), n ∈
@@ -1711,9 +1750,10 @@ panic.
 Two-way Boussinesq coupling in a CLOSED enclosure (walls, or periodic
 lattice axes whose thermal faces are adiabatic — exact for solutions
 invariant along that axis). `BoundaryGrid3::set_force_field` installs a
-per-cell Guo force added to the uniform force (refused with open faces or a
-collision model without body forcing; without a field every result is
-bit-identical to before). Each coupling sets the buoyancy
+per-cell Guo force added to the uniform force for BGK, central moments, and
+reduced cumulants; open velocity/pressure faces still refuse this field.
+Without a field, the existing population arithmetic is unchanged. Each
+coupling sets the buoyancy
 `-beta (T - T_ref) g` in lattice units, advances `coupling_interval`
 pooled steps, projects the cell mass fluxes, and takes one implicit
 energy step whose storage uses the fluid's volumetric heat capacity in

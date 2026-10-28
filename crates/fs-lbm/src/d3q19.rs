@@ -53,8 +53,9 @@ pub const D3Q19_BIT_SEMANTICS_VERSION: u32 = 1;
 /// frozen BGK grids keep their established golden, while changes to the
 /// centered basis, relaxation grouping, cumulant projection, `mul_add` chains,
 /// or deterministic solve order bump this version and require their own
-/// golden evidence.
-pub const D3Q19_MOMENT_COLLISION_SEMANTICS_VERSION: u32 = 1;
+/// golden evidence. Version 2 adds symmetric Guo forcing in the physical
+/// population frame; the zero-force numerical path retains version 1 bits.
+pub const D3Q19_MOMENT_COLLISION_SEMANTICS_VERSION: u32 = 2;
 
 /// The D3Q19 population count.
 pub const Q3: usize = 19;
@@ -178,7 +179,7 @@ const CENTRAL_MOMENT_EXPONENTS3: [[u8; 3]; Q3] = [
 /// Selectable D3Q19 collision law for the shared per-cell kernel.
 ///
 /// The frozen BGK law remains the grid default. The central-moment and reduced
-/// cumulant rungs are unforced, correctness-first reference operators; neither
+/// cumulant rungs are correctness-first reference operators; neither
 /// claims a production high-Reynolds-number model.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CollisionModel3 {
@@ -192,8 +193,8 @@ pub enum CollisionModel3 {
     /// Rates must be finite and strictly between zero and two. Rows of total
     /// degree zero and one are conserved; degree-two rows use
     /// `second_order_rate`, and all remaining rows use `higher_order_rate`.
-    /// Body forcing is deliberately refused until a moment-space forcing
-    /// contract is separately verified.
+    /// Body forcing uses the physical-population transform `f + S/2` before
+    /// relaxation and restores `S/2` afterward, with the original Guo source.
     CentralMoment {
         /// Relaxation rate for the six degree-two moments.
         second_order_rate: f64,
@@ -207,6 +208,8 @@ pub enum CollisionModel3 {
     /// use the nonlinear product corrections from Geier et al. This is not the
     /// paper's D3Q27 operator: D3Q19 omits eight velocities and the associated
     /// independent moments, corrections, and isotropy.
+    /// Guo forcing uses the same physical-population transform as central
+    /// moments, so the cumulants are evaluated in their zero-first-moment frame.
     ReducedCumulant {
         /// Relaxation rate for the six degree-two cumulants.
         second_order_rate: f64,
@@ -268,7 +271,9 @@ impl CollisionModel3 {
     /// Whether the current collision contract admits a nonzero body force.
     #[must_use]
     pub const fn supports_body_force(self) -> bool {
-        matches!(self, Self::Bgk { .. })
+        match self {
+            Self::Bgk { .. } | Self::CentralMoment { .. } | Self::ReducedCumulant { .. } => true,
+        }
     }
 }
 
@@ -321,12 +326,14 @@ pub enum CollisionError3 {
         /// Computed component.
         value: f64,
     },
-    /// Central-moment forcing is not yet admitted by its contract.
+    /// Legacy central-moment force refusal, retained for diagnostic compatibility.
+    /// Version 2's physical-population forcing no longer emits this variant.
     CentralMomentForceUnsupported {
         /// Rejected body-force vector.
         force: [f64; 3],
     },
-    /// Reduced-cumulant forcing is not yet admitted by its contract.
+    /// Legacy reduced-cumulant force refusal, retained for diagnostic compatibility.
+    /// Version 2's physical-population forcing no longer emits this variant.
     ReducedCumulantForceUnsupported {
         /// Rejected body-force vector.
         force: [f64; 3],
@@ -508,40 +515,66 @@ fn collide_cell3_with_projection(
         CollisionModel3::CentralMoment {
             second_order_rate,
             higher_order_rate,
-        } => {
-            if has_nonzero_force3(force) {
-                return Err(CollisionError3::CentralMomentForceUnsupported { force });
-            }
+        } => collide_moment_with_force3(populations, velocity, force, |physical| {
             collide_central_moments3(
-                populations,
+                physical,
                 equilibrium,
                 velocity,
                 second_order_rate,
                 higher_order_rate,
             )
-        }
+        }),
         CollisionModel3::ReducedCumulant {
             second_order_rate,
             third_order_rate,
             fourth_order_rate,
-        } => {
-            if has_nonzero_force3(force) {
-                return Err(CollisionError3::ReducedCumulantForceUnsupported { force });
-            }
+        } => collide_moment_with_force3(populations, velocity, force, |physical| {
             collide_reduced_cumulants3(
-                populations,
+                physical,
                 equilibrium,
                 velocity,
                 second_order_rate,
                 third_order_rate,
                 fourth_order_rate,
             )
-        }
+        }),
     }
 }
 
-fn has_nonzero_force3(force: [f64; 3]) -> bool {
-    force.iter().any(|component| component.abs() > 0.0)
+/// Symmetric source transform around the existing collision operator.
+/// For the linear central-moment operator this is `(I - Lambda/2) S`
+/// in every represented mode (Premnath et al., 2009, Eq. (1),
+/// https://arxiv.org/abs/0901.2786). For reduced cumulants the nonlinear
+/// projection acts on physical populations, whose first central moments
+/// vanish; applying it to the stored `-F/2` momentum would violate that
+/// projection's assumptions. No collision rate or source is fitted here.
+fn collide_moment_with_force3(
+    populations: [f64; Q3],
+    velocity: [f64; 3],
+    force: [f64; 3],
+    collision: impl FnOnce([f64; Q3]) -> Result<[f64; Q3], CollisionError3>,
+) -> Result<[f64; Q3], CollisionError3> {
+    if force.iter().all(|&component| component == 0.0) {
+        // Preserve the existing unforced operator and its exact golden bits.
+        return collision(populations);
+    }
+    let half_source: [f64; Q3] = core::array::from_fn(|q| {
+        let e = [f64::from(E3[q].0), f64::from(E3[q].1), f64::from(E3[q].2)];
+        let eu = e.iter().zip(velocity).map(|(e, u)| e * u).sum();
+        0.5 * W3[q] * guo_projection3(e, velocity, eu, force)
+    });
+    let physical = core::array::from_fn(|q| populations[q] + half_source[q]);
+    let mut post = collision(physical)?;
+    for q in 0..Q3 {
+        post[q] += half_source[q];
+        if !post[q].is_finite() {
+            return Err(CollisionError3::NonFiniteOutput {
+                direction: q,
+                value: post[q],
+            });
+        }
+    }
+    Ok(post)
 }
 
 fn centered_power3(value: f64, exponent: u8) -> f64 {
@@ -723,6 +756,138 @@ fn solve_moment_system3(
         solution[row] = value / matrix[row][row];
     }
     Ok(solution)
+}
+
+#[cfg(test)]
+mod forcing_tests {
+    use super::*;
+
+    const MODELS: [CollisionModel3; 2] = [
+        CollisionModel3::CentralMoment {
+            second_order_rate: 1.23,
+            higher_order_rate: 1.71,
+        },
+        CollisionModel3::ReducedCumulant {
+            second_order_rate: 1.23,
+            third_order_rate: 1.35,
+            fourth_order_rate: 1.72,
+        },
+    ];
+
+    fn source(u: [f64; 3], force: [f64; 3]) -> [f64; Q3] {
+        let uf: f64 = u.iter().zip(force).map(|(u, f)| u * f).sum();
+        core::array::from_fn(|q| {
+            let c = [f64::from(E3[q].0), f64::from(E3[q].1), f64::from(E3[q].2)];
+            let cu: f64 = c.iter().zip(u).map(|(c, u)| c * u).sum();
+            let cf: f64 = c.iter().zip(force).map(|(c, f)| c * f).sum();
+            W3[q] * (3.0 * cf + 9.0 * cu * cf - 3.0 * uf)
+        })
+    }
+
+    #[test]
+    fn forced_moment_modes_follow_exact_uniform_acceleration() {
+        // G0/G3: with no gradients the quadratic equilibrium evolves exactly
+        // under trapezoidal forcing. Shear/bulk relaxation must not alter
+        // momentum delivery or create stress over repeated accelerated steps.
+        let rho = 1.07;
+        let initial_u = [0.03, -0.02, 0.01];
+        let force = [3e-5, -4e-5, 2e-5];
+        let eq = equilibrium3(rho, initial_u);
+        let initial_source = source(initial_u, force);
+        for model in MODELS {
+            assert!(model.supports_body_force());
+            let mut f = core::array::from_fn(|q| eq[q] - 0.5 * initial_source[q]);
+            for step in 1..=32 {
+                f = collide_cell3(f, model, force).expect("supported physical-frame forcing");
+                let velocity =
+                    core::array::from_fn(|d| initial_u[d] + step as f64 * force[d] / rho);
+                let expected_eq = equilibrium3(rho, velocity);
+                let expected_source = source(velocity, force);
+                for q in 0..Q3 {
+                    let expected = expected_eq[q] - 0.5 * expected_source[q];
+                    assert!(
+                        (f[q] - expected).abs() < 1e-12,
+                        "{model:?}, step {step}, direction {q}: {} vs {expected}",
+                        f[q]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn forced_equal_rate_central_moments_recover_bgk() {
+        // G0: independent production BGK is an oracle when every central
+        // relaxation rate equals 1/tau, including non-equilibrium ghost modes.
+        let mut populations = equilibrium3(0.97, [-0.025, 0.04, 0.013]);
+        for (q, population) in populations.iter_mut().enumerate() {
+            *population += (q as f64 - 9.0) * 2e-5;
+        }
+        let force = [6e-4, -3e-4, 2e-4];
+        for tau in [0.56, 0.85, 1.3] {
+            let bgk = collide_cell3(populations, CollisionModel3::Bgk { tau }, force).unwrap();
+            let central = collide_cell3(
+                populations,
+                CollisionModel3::CentralMoment {
+                    second_order_rate: 1.0 / tau,
+                    higher_order_rate: 1.0 / tau,
+                },
+                force,
+            )
+            .unwrap();
+            for q in 0..Q3 {
+                assert!((central[q] - bgk[q]).abs() < 5e-13, "tau={tau}, q={q}");
+            }
+        }
+    }
+
+    #[test]
+    fn forced_moment_modes_relax_physical_stress_at_the_viscous_rate() {
+        // G0: physical Pi_neq is independent of the force-frame shift; both
+        // the nonlinear fourth-order projection and independent higher rates
+        // must leave the prescribed second-moment relaxation law intact.
+        let (rho, u, force) = (1.02, [0.05, -0.03, 0.02], [7e-4, -2e-4, 5e-4]);
+        let a = [
+            [3e-4, -2e-4, 1e-4],
+            [-2e-4, -1e-4, 2.5e-4],
+            [1e-4, 2.5e-4, 4e-4],
+        ];
+        let eq = equilibrium3(rho, u);
+        let source = source(u, force);
+        let trace = a[0][0] + a[1][1] + a[2][2];
+        let initial = core::array::from_fn(|q| {
+            let c = [f64::from(E3[q].0), f64::from(E3[q].1), f64::from(E3[q].2)];
+            let mut cac = 0.0;
+            for i in 0..3 {
+                for j in 0..3 {
+                    cac += c[i] * c[j] * a[i][j];
+                }
+            }
+            eq[q] + 4.5 * W3[q] * (cac - trace / 3.0) - 0.5 * source[q]
+        });
+        for model in MODELS {
+            let post = collide_cell3(initial, model, force).unwrap();
+            let mut observed = [[0.0; 3]; 3];
+            for q in 0..Q3 {
+                let c = [f64::from(E3[q].0), f64::from(E3[q].1), f64::from(E3[q].2)];
+                let physical_neq = post[q] - eq[q] - 0.5 * source[q];
+                for i in 0..3 {
+                    for j in 0..3 {
+                        observed[i][j] += c[i] * c[j] * physical_neq;
+                    }
+                }
+            }
+            for i in 0..3 {
+                for j in 0..3 {
+                    let expected = (1.0 - 1.23) * a[i][j];
+                    assert!(
+                        (observed[i][j] - expected).abs() < 5e-13,
+                        "{model:?}, stress {i}{j}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// A D3Q19 duct: halfway bounce-back walls on the x and y boundaries,

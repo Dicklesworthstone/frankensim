@@ -134,7 +134,8 @@ fn link_masks_cover_planar_and_voxelized_boundaries() {
 /// lbm3bc-001b (G0/G3): the general grid exposes collision selection without
 /// changing the legacy BGK constructor. Equal-rate central moments follow the
 /// BGK macroscopic trajectory to solve roundoff, while a split-rate reduced
-/// cumulant grid remains conservative and refuses unverified forcing.
+/// cumulant grid remains conservative. Both moment families accept uniform
+/// and per-cell forces with the same physical momentum increment as BGK.
 #[test]
 fn collision_model_selection_is_backward_compatible_and_conservative() {
     let tau = 0.81;
@@ -199,17 +200,94 @@ fn collision_model_selection_is_backward_compatible_and_conservative() {
     reduced.run(4);
     assert!((reduced.total_mass() - mass_before).abs() < 1e-11);
 
-    let forced_moment_grid = std::panic::catch_unwind(|| {
-        BoundaryGrid3::with_collision_model(
-            8,
-            8,
-            8,
-            central_model,
-            [1e-7, 0.0, 0.0],
-            BoundarySpec3::periodic(),
-        )
-    });
-    assert!(forced_moment_grid.is_err());
+    for model in [central_model, reduced_model] {
+        let uniform = [1e-7, 2e-7, -4e-8];
+        let local = [2e-7, -1e-7, 3e-8];
+        let mut forced =
+            BoundaryGrid3::with_collision_model(4, 4, 4, model, uniform, BoundarySpec3::periodic());
+        forced.set_force_field(|_| local);
+        forced.run(4);
+        for z in 0..4 {
+            for y in 0..4 {
+                for x in 0..4 {
+                    let rho = forced.density(x, y, z);
+                    let u = forced.velocity(x, y, z);
+                    for axis in 0..3 {
+                        // Initial stored momentum is zero; the reported
+                        // physical momentum includes the initial half force.
+                        let expected = 4.5 * (uniform[axis] + local[axis]);
+                        assert!((rho * u[axis] - expected).abs() < 5e-13, "{model:?}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A body force must produce the viscosity set by the second-order rate,
+/// including when higher moments have different rates. This exercises the
+/// real collide/stream/halfway-wall path and an independent continuum oracle.
+#[test]
+fn forced_moment_channels_recover_poiseuille_viscosity() {
+    let tau = 0.8;
+    let nu = (tau - 0.5) * CS2;
+    let peak = 0.01;
+    let models = [
+        CollisionModel3::CentralMoment {
+            second_order_rate: 1.0 / tau,
+            higher_order_rate: 1.35,
+        },
+        CollisionModel3::ReducedCumulant {
+            second_order_rate: 1.0 / tau,
+            third_order_rate: 1.35,
+            fourth_order_rate: 1.72,
+        },
+    ];
+    let walls = BoundarySpec3::new([
+        FaceBoundary3::Periodic,
+        FaceBoundary3::Periodic,
+        FaceBoundary3::stationary_wall(),
+        FaceBoundary3::stationary_wall(),
+        FaceBoundary3::Periodic,
+        FaceBoundary3::Periodic,
+    ]);
+    for model in models {
+        let mut errors = [0.0_f64; 2];
+        for (level, height) in [8, 16].into_iter().enumerate() {
+            let h = height as f64;
+            let force = 8.0 * nu * peak / (h * h);
+            let mut grid =
+                BoundaryGrid3::with_collision_model(4, height, 4, model, [force, 0.0, 0.0], walls);
+            let initial_mass = grid.total_mass();
+            // Twelve slowest-mode decay times leave less than 7e-6 of the
+            // start-up transient, well below the finite-grid wall error.
+            let steps = (12.0 * h * h / (std::f64::consts::PI.powi(2) * nu)).ceil() as usize;
+            grid.run(steps);
+            for y in 0..height {
+                // Halfway walls are at -1/2 and height-1/2.
+                let distance = y as f64 + 0.5;
+                let expected = force * distance * (h - distance) / (2.0 * nu);
+                for z in 0..4 {
+                    for x in 0..4 {
+                        let u = grid.velocity(x, y, z);
+                        errors[level] = errors[level].max((u[0] - expected).abs() / peak);
+                        assert!(u[1].abs() < 2e-11 && u[2].abs() < 2e-11, "{model:?}: {u:?}");
+                    }
+                }
+            }
+            let mass_error = (grid.total_mass() - initial_mass).abs() / initial_mass;
+            assert!(
+                mass_error < 5e-11,
+                "{model:?}: relative mass drift {mass_error:e}"
+            );
+        }
+        assert!(errors[1] < 0.004, "{model:?}: profile errors {errors:?}");
+        assert!(
+            errors[0] > 2.5 * errors[1],
+            "{model:?}: wall error must converge under refinement: {errors:?}"
+        );
+        println!("{model:?}: force-driven Poiseuille relative profile errors {errors:?}");
+    }
 }
 
 /// lbm3bc-002: regularized faces impose their declared macroscopic moments;

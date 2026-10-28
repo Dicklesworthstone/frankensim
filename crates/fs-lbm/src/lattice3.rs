@@ -8,9 +8,9 @@ use core::{fmt, marker::PhantomData, ops::ControlFlow};
 use fs_exec::{CancelGate, Cancelled, Cx, KernelRunner, Reduce, TileKernel, TilePlan};
 use std::sync::Mutex;
 
+mod sgs;
 /// Spatial and time-dependent force fields on the same native step owner.
 pub mod sources;
-mod sgs;
 
 /// A fixed population lattice and its caller-selected collision law.
 pub trait Lattice3<const Q: usize>: Send + Sync + 'static {
@@ -377,7 +377,7 @@ impl<L: Lattice3<Q>, const Q: usize> Grid3<L, Q> {
 /// A collision family that can bind material shear viscosity without choosing
 /// a different equilibrium, bulk rate or higher-order damping model.
 /// D3Q19's moment models tie ALL second-order rates together; their existing
-/// bulk/shear tie and unforced-only contract are retained. D3Q27 changes only
+/// bulk/shear tie and physical-frame forcing are retained. D3Q27 changes only
 /// omega1, leaving its independent trace and eight higher groups untouched.
 pub trait ViscousLattice3<const Q: usize>: Lattice3<Q> {
     /// Replace the viscous relaxation time, refusing invalid/unrepresentable
@@ -398,19 +398,21 @@ impl ViscousLattice3<19> for D3q19 {
         CollisionModel3::Bgk { tau }.validate()?;
         let updated = match collision {
             CollisionModel3::Bgk { .. } => CollisionModel3::Bgk { tau },
-            CollisionModel3::CentralMoment { higher_order_rate, .. } => {
-                CollisionModel3::CentralMoment {
-                    second_order_rate: 1.0 / tau,
-                    higher_order_rate,
-                }
-            }
-            CollisionModel3::ReducedCumulant { third_order_rate, fourth_order_rate, .. } => {
-                CollisionModel3::ReducedCumulant {
-                    second_order_rate: 1.0 / tau,
-                    third_order_rate,
-                    fourth_order_rate,
-                }
-            }
+            CollisionModel3::CentralMoment {
+                higher_order_rate, ..
+            } => CollisionModel3::CentralMoment {
+                second_order_rate: 1.0 / tau,
+                higher_order_rate,
+            },
+            CollisionModel3::ReducedCumulant {
+                third_order_rate,
+                fourth_order_rate,
+                ..
+            } => CollisionModel3::ReducedCumulant {
+                second_order_rate: 1.0 / tau,
+                third_order_rate,
+                fourth_order_rate,
+            },
         };
         updated.validate()?;
         Ok(updated)
@@ -471,26 +473,42 @@ impl<L: ViscousLattice3<Q>, const Q: usize> Grid3<L, Q> {
             return Err(GridError3::Input("material field length"));
         }
         let mut field = Vec::new();
-        field.try_reserve_exact(materials.len()).map_err(|_| GridError3::Allocation)?;
+        field
+            .try_reserve_exact(materials.len())
+            .map_err(|_| GridError3::Allocation)?;
         for (cell, local) in materials.iter().enumerate() {
             if cell % 64 == 0 {
                 cx.checkpoint().map_err(|_| GridError3::Cancelled)?;
             }
             if self.solid[cell] {
                 if local.is_some() {
-                    return Err(GridError3::MaterialField { cell, reason: "solid cell has fluid material" });
+                    return Err(GridError3::MaterialField {
+                        cell,
+                        reason: "solid cell has fluid material",
+                    });
                 }
                 field.push(self.collision);
                 continue;
             }
-            let local = local.ok_or(GridError3::MaterialField { cell, reason: "fluid material missing" })?;
+            let local = local.ok_or(GridError3::MaterialField {
+                cell,
+                reason: "fluid material missing",
+            })?;
             if local.cell_size_m().to_bits() != reference.cell_size_m().to_bits()
                 || local.timestep_s().to_bits() != reference.timestep_s().to_bits()
             {
-                return Err(GridError3::MaterialField { cell, reason: "material dx/dt differs from reference" });
+                return Err(GridError3::MaterialField {
+                    cell,
+                    reason: "material dx/dt differs from reference",
+                });
             }
-            if local.transport().density_kg_m3().to_bits() != reference.transport().density_kg_m3().to_bits() {
-                return Err(GridError3::MaterialField { cell, reason: "material reference density differs" });
+            if local.transport().density_kg_m3().to_bits()
+                != reference.transport().density_kg_m3().to_bits()
+            {
+                return Err(GridError3::MaterialField {
+                    cell,
+                    reason: "material reference density differs",
+                });
             }
             let tau = 0.5 + local.flow().viscosity / L::CS2;
             let collision = L::with_shear_relaxation(self.collision, tau)
@@ -746,7 +764,12 @@ mod collision_field_tests {
             let cx = Cx::new(
                 &gate,
                 arena,
-                fs_exec::StreamKey { seed: SEED, kernel_id: 3, tile: 0, iteration: 0 },
+                fs_exec::StreamKey {
+                    seed: SEED,
+                    kernel_id: 3,
+                    tile: 0,
+                    iteration: 0,
+                },
                 fs_exec::Budget::INFINITE,
                 fs_exec::ExecMode::Deterministic,
             );
@@ -759,14 +782,18 @@ mod collision_field_tests {
             collision,
             [1e-7, 0.0, 0.0],
             [true, false, true],
-            GridBudget3 { maximum_cells: CELLS, maximum_mach: 0.2 },
+            GridBudget3 {
+                maximum_cells: CELLS,
+                maximum_mach: 0.2,
+            },
             |p| p == [4, 2, 1],
             |p| {
                 let u = 0.001 * (p[1] + 1) as f64;
                 let mut f = core::array::from_fn(|q| {
                     let eu = f64::from(L::E[q][0]) * u;
-                    L::W[q] * (1.0 + eu / L::CS2
-                        + 0.5 * eu * eu / (L::CS2 * L::CS2) - 0.5 * u * u / L::CS2)
+                    L::W[q]
+                        * (1.0 + eu / L::CS2 + 0.5 * eu * eu / (L::CS2 * L::CS2)
+                            - 0.5 * u * u / L::CS2)
                 });
                 // Non-equilibrium stress makes the very first collision sensitive
                 // to the rate, without changing density or momentum.
@@ -776,14 +803,22 @@ mod collision_field_tests {
                 f[2] += stress;
                 f
             },
-        ).unwrap()
+        )
+        .unwrap()
     }
     fn bits<L: Lattice3<Q>, const Q: usize>(g: &Grid3<L, Q>) -> Vec<u64> {
-        g.populations().iter().flatten().map(|v| v.to_bits()).collect()
+        g.populations()
+            .iter()
+            .flatten()
+            .map(|v| v.to_bits())
+            .collect()
     }
     fn bgk27(tau: f64) -> CollisionConfig27 {
         CollisionConfig27 {
-            model: CollisionModel27::Bgk { tau, equilibrium: Equilibrium27::Quadratic },
+            model: CollisionModel27::Bgk {
+                tau,
+                equilibrium: Equilibrium27::Quadratic,
+            },
             maximum_mach: 0.2,
         }
     }
@@ -804,19 +839,31 @@ mod collision_field_tests {
     fn constant_fields_preserve_d19_and_all_d27_collision_paths() {
         constant_parity::<D3q19, 19>(CollisionModel3::Bgk { tau: 0.8 });
         constant_parity::<D3q27, 27>(bgk27(0.8));
-        let rates = Rates27 { omega: [1.25, 1.0, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5] };
-        for model in [CollisionModel27::CentralMoment { rates }, CollisionModel27::Cumulant { rates }] {
-            constant_parity::<D3q27, 27>(CollisionConfig27 { model, maximum_mach: 0.2 });
+        let rates = Rates27 {
+            omega: [1.25, 1.0, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5],
+        };
+        for model in [
+            CollisionModel27::CentralMoment { rates },
+            CollisionModel27::Cumulant { rates },
+        ] {
+            constant_parity::<D3q27, 27>(CollisionConfig27 {
+                model,
+                maximum_mach: 0.2,
+            });
         }
     }
     #[test]
     fn heterogeneous_field_matches_independent_push_stencil_and_does_not_latch() {
         let mut grid = make::<D3q27, 27>(bgk27(0.8));
-        let laws: Vec<_> = (0..CELLS).map(|i| bgk27(if i % 3 == 0 { 0.7 } else { 1.2 })).collect();
+        let laws: Vec<_> = (0..CELLS)
+            .map(|i| bgk27(if i % 3 == 0 { 0.7 } else { 1.2 }))
+            .collect();
         let mut expected = grid.f.clone();
         // Independent PUSH traversal, not StepData's pull/index implementation.
         for i in 0..CELLS {
-            if grid.solid[i] { continue; }
+            if grid.solid[i] {
+                continue;
+            }
             let post = D3q27::collide(grid.f[i], laws[i], grid.force).unwrap();
             let p = [i % 9, (i / 9) % 5, i / 45];
             for q in 0..27 {
@@ -848,7 +895,9 @@ mod collision_field_tests {
         uniform.f.clone_from(&grid.f);
         with_cx(|cx| {
             grid.step_serial(cx).unwrap();
-            uniform.step_serial_with_collisions(cx, &vec![bgk27(0.8); CELLS]).unwrap();
+            uniform
+                .step_serial_with_collisions(cx, &vec![bgk27(0.8); CELLS])
+                .unwrap();
         });
         assert_eq!(bits(&grid), bits(&uniform));
     }
@@ -863,7 +912,8 @@ mod collision_field_tests {
                     Err(GridError3::Input("collision field length"))
                 ));
             }
-            for bad in [CELLS - 1, 67] { // late fluid entry, then the solid cell
+            for bad in [CELLS - 1, 67] {
+                // late fluid entry, then the solid cell
                 let mut laws = vec![bgk27(0.8); CELLS];
                 laws[bad] = bgk27(f64::NAN);
                 assert!(matches!(grid.step_serial_with_collisions(cx, &laws),
@@ -875,46 +925,68 @@ mod collision_field_tests {
     }
     #[test]
     fn heterogeneous_pooled_steps_match_serial_for_ragged_tiles() {
-        let laws: Vec<_> = (0..CELLS).map(|i| bgk27(0.7 + 0.05 * (i % 7) as f64)).collect();
+        let laws: Vec<_> = (0..CELLS)
+            .map(|i| bgk27(0.7 + 0.05 * (i % 7) as f64))
+            .collect();
         let mut serial = make::<D3q27, 27>(bgk27(0.8));
         with_cx(|cx| {
-            for _ in 0..5 { serial.step_serial_with_collisions(cx, &laws).unwrap(); }
+            for _ in 0..5 {
+                serial.step_serial_with_collisions(cx, &laws).unwrap();
+            }
         });
         for workers in [1, 2, 4] {
             let pool = TilePool::for_host(workers, SEED);
             let gate = CancelGate::new_clock_free();
             let mut parallel = make::<D3q27, 27>(bgk27(0.8));
             for _ in 0..5 {
-                parallel.step_pooled_with_collisions(&pool, &gate, &laws).unwrap();
+                parallel
+                    .step_pooled_with_collisions(&pool, &gate, &laws)
+                    .unwrap();
             }
             assert_eq!(bits(&serial), bits(&parallel), "workers={workers}");
         }
     }
     #[test]
     fn field_cancellation_between_passes_rolls_back_and_retries() {
-        struct CancelAfterCollision { pool: TilePool, calls: AtomicUsize }
+        struct CancelAfterCollision {
+            pool: TilePool,
+            calls: AtomicUsize,
+        }
         impl KernelRunner for CancelAfterCollision {
-            fn workers(&self) -> usize { self.pool.workers() }
-            fn run_with_gate<K: TileKernel>(&self, kernel: &K, gate: &CancelGate)
-                -> (Result<K::Out, RunError>, RunReport) {
+            fn workers(&self) -> usize {
+                self.pool.workers()
+            }
+            fn run_with_gate<K: TileKernel>(
+                &self,
+                kernel: &K,
+                gate: &CancelGate,
+            ) -> (Result<K::Out, RunError>, RunReport) {
                 let result = self.pool.run_with_gate(kernel, gate);
-                if self.calls.fetch_add(1, Ordering::AcqRel) == 0 { gate.request(); }
+                if self.calls.fetch_add(1, Ordering::AcqRel) == 0 {
+                    gate.request();
+                }
                 result
             }
         }
         let runner = CancelAfterCollision {
-            pool: TilePool::for_host(2, SEED), calls: AtomicUsize::new(0),
+            pool: TilePool::for_host(2, SEED),
+            calls: AtomicUsize::new(0),
         };
         let mut grid = make::<D3q27, 27>(bgk27(0.8));
         let before = bits(&grid);
-        let laws: Vec<_> = (0..CELLS).map(|i| bgk27(0.7 + 0.1 * (i % 4) as f64)).collect();
+        let laws: Vec<_> = (0..CELLS)
+            .map(|i| bgk27(0.7 + 0.1 * (i % 4) as f64))
+            .collect();
         let cancelled = CancelGate::new_clock_free();
-        assert!(matches!(grid.step_pooled_with_collisions(&runner, &cancelled, &laws),
-            Err(GridError3::Cancelled)));
+        assert!(matches!(
+            grid.step_pooled_with_collisions(&runner, &cancelled, &laws),
+            Err(GridError3::Cancelled)
+        ));
         assert_eq!(bits(&grid), before);
         assert_eq!(grid.completed_steps(), 0);
         let fresh = CancelGate::new_clock_free();
-        grid.step_pooled_with_collisions(&runner.pool, &fresh, &laws).unwrap();
+        grid.step_pooled_with_collisions(&runner.pool, &fresh, &laws)
+            .unwrap();
         let mut reference = make::<D3q27, 27>(bgk27(0.8));
         with_cx(|cx| reference.step_serial_with_collisions(cx, &laws).unwrap());
         assert_eq!(bits(&grid), bits(&reference));
@@ -930,13 +1002,27 @@ mod collision_field_tests {
         let a = plan_scaling_from_material(&thin, 0.001, 0.01, 0.001).unwrap();
         let b = plan_scaling_from_material(&thick, 0.001, 0.01, 0.001).unwrap();
         let mut grid = make::<D3q27, 27>(bgk27(a.flow().tau));
-        let materials: Vec<_> = (0..CELLS).map(|i| {
-            if grid.solid[i] { None } else if i % 2 == 0 { Some(&a) } else { Some(&b) }
-        }).collect();
+        let materials: Vec<_> = (0..CELLS)
+            .map(|i| {
+                if grid.solid[i] {
+                    None
+                } else if i % 2 == 0 {
+                    Some(&a)
+                } else {
+                    Some(&b)
+                }
+            })
+            .collect();
         let field = with_cx(|cx| grid.material_collision_field(cx, &a, &materials).unwrap());
-        let explicit: Vec<_> = (0..CELLS).map(|i| {
-            bgk27(if grid.solid[i] || i % 2 == 0 { a.flow().tau } else { b.flow().tau })
-        }).collect();
+        let explicit: Vec<_> = (0..CELLS)
+            .map(|i| {
+                bgk27(if grid.solid[i] || i % 2 == 0 {
+                    a.flow().tau
+                } else {
+                    b.flow().tau
+                })
+            })
+            .collect();
         assert_eq!(field, explicit);
         assert!(core::ptr::eq(a.material(), &thin));
         assert!(core::ptr::eq(b.material(), &thick));
@@ -967,21 +1053,31 @@ mod collision_field_tests {
         let dt = plan_scaling_from_material(&fluid, 0.001, 0.02, 0.001).unwrap();
         let grid = make::<D3q27, 27>(bgk27(0.8));
         let before = bits(&grid);
-        let materials: Vec<_> = grid.solid.iter().map(|&solid| if solid { None } else { Some(&reference) }).collect();
+        let materials: Vec<_> = grid
+            .solid
+            .iter()
+            .map(|&solid| if solid { None } else { Some(&reference) })
+            .collect();
         with_cx(|cx| {
-            assert!(matches!(grid.material_collision_field(cx, &reference, &materials[..CELLS-1]),
-                Err(GridError3::Input("material field length"))));
+            assert!(matches!(
+                grid.material_collision_field(cx, &reference, &materials[..CELLS - 1]),
+                Err(GridError3::Input("material field length"))
+            ));
             for bad in [&density, &dx, &dt] {
                 let mut changed = materials.clone();
                 changed[CELLS - 1] = Some(bad);
-                assert!(matches!(grid.material_collision_field(cx, &reference, &changed),
-                    Err(GridError3::MaterialField { cell, .. }) if cell == CELLS - 1));
+                assert!(
+                    matches!(grid.material_collision_field(cx, &reference, &changed),
+                    Err(GridError3::MaterialField { cell, .. }) if cell == CELLS - 1)
+                );
             }
             for (cell, value) in [(0, None), (67, Some(&reference))] {
                 let mut changed = materials.clone();
                 changed[cell] = value;
-                assert!(matches!(grid.material_collision_field(cx, &reference, &changed),
-                    Err(GridError3::MaterialField { cell: rejected, .. }) if rejected == cell));
+                assert!(
+                    matches!(grid.material_collision_field(cx, &reference, &changed),
+                    Err(GridError3::MaterialField { cell: rejected, .. }) if rejected == cell)
+                );
             }
         });
         assert_eq!(bits(&grid), before);
@@ -990,24 +1086,48 @@ mod collision_field_tests {
 
     #[test]
     fn viscosity_retuning_preserves_collision_families_and_free_rates() {
-        let rates = Rates27 { omega: [1.25, 1.0, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5] };
-        for model in [CollisionModel27::CentralMoment { rates }, CollisionModel27::Cumulant { rates }] {
-            let original = CollisionConfig27 { model, maximum_mach: 0.1 };
+        let rates = Rates27 {
+            omega: [1.25, 1.0, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5],
+        };
+        for model in [
+            CollisionModel27::CentralMoment { rates },
+            CollisionModel27::Cumulant { rates },
+        ] {
+            let original = CollisionConfig27 {
+                model,
+                maximum_mach: 0.1,
+            };
             let updated = D3q27::with_shear_relaxation(original, 1.7).unwrap();
-            let expected = Rates27 { omega: [1.0/1.7, 1.0, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5] };
+            let expected = Rates27 {
+                omega: [1.0 / 1.7, 1.0, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5],
+            };
             let expected_model = match model {
-                CollisionModel27::CentralMoment { .. } => CollisionModel27::CentralMoment { rates: expected },
+                CollisionModel27::CentralMoment { .. } => {
+                    CollisionModel27::CentralMoment { rates: expected }
+                }
                 _ => CollisionModel27::Cumulant { rates: expected },
             };
-            assert_eq!(updated, CollisionConfig27 { model: expected_model, maximum_mach: 0.1 });
+            assert_eq!(
+                updated,
+                CollisionConfig27 {
+                    model: expected_model,
+                    maximum_mach: 0.1
+                }
+            );
         }
         let d19 = CollisionModel3::ReducedCumulant {
-            second_order_rate: 1.2, third_order_rate: 0.8, fourth_order_rate: 0.7,
+            second_order_rate: 1.2,
+            third_order_rate: 0.8,
+            fourth_order_rate: 0.7,
         };
-        assert_eq!(D3q19::with_shear_relaxation(d19, 1.5).unwrap(),
+        assert_eq!(
+            D3q19::with_shear_relaxation(d19, 1.5).unwrap(),
             CollisionModel3::ReducedCumulant {
-                second_order_rate: 1.0/1.5, third_order_rate: 0.8, fourth_order_rate: 0.7,
-            });
+                second_order_rate: 1.0 / 1.5,
+                third_order_rate: 0.8,
+                fourth_order_rate: 0.7,
+            }
+        );
         for tau in [0.0, 0.5, f64::NAN, f64::INFINITY] {
             assert!(D3q19::with_shear_relaxation(d19, tau).is_err());
             assert!(D3q27::with_shear_relaxation(bgk27(0.8), tau).is_err());
@@ -1031,8 +1151,10 @@ mod collision_field_tests {
         assert_eq!(grid.completed_steps(), 0);
         let pool = TilePool::for_host(2, SEED);
         let gate = CancelGate::new_clock_free();
-        assert!(matches!(grid.step_pooled_with_collisions(&pool, &gate, &field),
-            Err(GridError3::Collision { cell, .. }) if cell == CELLS - 1));
+        assert!(
+            matches!(grid.step_pooled_with_collisions(&pool, &gate, &field),
+            Err(GridError3::Collision { cell, .. }) if cell == CELLS - 1)
+        );
         assert_eq!(bits(&grid), before);
         assert_eq!(grid.completed_steps(), 0);
     }
@@ -1054,14 +1176,26 @@ mod collision_field_tests {
         let a = plan_scaling_from_material(&thin, dx, dt, 0.0001).unwrap();
         let b = plan_scaling_from_material(&thick, dx, dt, 0.0001).unwrap();
         let mut grid = Grid3::<L, Q>::try_new(
-            [1, n, 1], collision, [force, 0.0, 0.0], [true, false, true],
-            GridBudget3 { maximum_cells: n, maximum_mach: 0.2 },
-            |_| false, |_| L::W,
-        ).unwrap();
-        let materials: Vec<_> = (0..n).map(|i| Some(if i < n/2 { &a } else { &b })).collect();
+            [1, n, 1],
+            collision,
+            [force, 0.0, 0.0],
+            [true, false, true],
+            GridBudget3 {
+                maximum_cells: n,
+                maximum_mach: 0.2,
+            },
+            |_| false,
+            |_| L::W,
+        )
+        .unwrap();
+        let materials: Vec<_> = (0..n)
+            .map(|i| Some(if i < n / 2 { &a } else { &b }))
+            .collect();
         let field = with_cx(|cx| grid.material_collision_field(cx, &a, &materials).unwrap());
         with_cx(|cx| {
-            for _ in 0..12*n*n { grid.step_serial_with_collisions(cx, &field).unwrap(); }
+            for _ in 0..12 * n * n {
+                grid.step_serial_with_collisions(cx, &field).unwrap();
+            }
         });
         // Independent piecewise-quadratic solution of (nu*u')' = -g:
         // continuous velocity/traction at 8 mm, no slip at 0 and 16 mm.
@@ -1082,7 +1216,8 @@ mod collision_field_tests {
             } else {
                 (traction * interface - acceleration * interface * interface / 2.0) / nu_a
                     + (traction * (y - interface)
-                        - acceleration * (y * y - interface * interface) / 2.0) / nu_b
+                        - acceleration * (y * y - interface * interface) / 2.0)
+                        / nu_b
             };
             let (rho, velocity) = grid.macroscopic(i).unwrap();
             let observed = velocity[0] * dx / dt;
@@ -1096,10 +1231,14 @@ mod collision_field_tests {
     #[test]
     fn two_material_poiseuille_flow_refines_against_traction_continuity() {
         for (coarse, fine) in [
-            (layered_material_channel::<D3q19, 19>(16, CollisionModel3::Bgk { tau: 0.8 }),
-             layered_material_channel::<D3q19, 19>(32, CollisionModel3::Bgk { tau: 0.8 })),
-            (layered_material_channel::<D3q27, 27>(16, bgk27(0.8)),
-             layered_material_channel::<D3q27, 27>(32, bgk27(0.8))),
+            (
+                layered_material_channel::<D3q19, 19>(16, CollisionModel3::Bgk { tau: 0.8 }),
+                layered_material_channel::<D3q19, 19>(32, CollisionModel3::Bgk { tau: 0.8 }),
+            ),
+            (
+                layered_material_channel::<D3q27, 27>(16, bgk27(0.8)),
+                layered_material_channel::<D3q27, 27>(32, bgk27(0.8)),
+            ),
         ] {
             assert!(coarse < 0.02, "coarse relative error={coarse}");
             assert!(fine < 0.005, "fine relative error={fine}");
