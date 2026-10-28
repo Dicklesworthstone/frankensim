@@ -1,0 +1,108 @@
+frankensim.matdb-source.v1
+observation	physical	H+H Celcon Standard autoclaved aerated concrete	BBA 01/3816 Table 1, page 5	Cement, lime, sand and pulverised fuel ash; aluminium aerating agent. Dry density and declared range are distinct. Exact mix proportions, cure age and matching specimens are unknown.
+observation	strength	H+H Celcon Standard block strength requirements	Table 3, page 6; BS EN 771-4:2011	Passed mean and individual-block requirements, not specimen measurements or masonry wall allowables. Intended block loading orientation only; temperature, moisture and test rate are not given.
+observation	thermal	H+H Celcon Standard thermal declarations	Table 6, page 8; BS EN 12664:2001 tests and BS EN 1745:2020/ISO 10456:2007 calculations	Dry lambda10 is a 10 C mean-temperature declaration with reported 50-percent fractile, not a confidence interval. Design cases: exposure 0 protected, 1 exposed or below DPC above ground, 2 below ground. No local k(T), moisture curve, Cp or thermal-stress law.
+observation	moisture	H+H Celcon Standard moisture declarations	Sections 3.3 and 3.4, page 7	Maximum moisture movement is finite strain, not thermal expansion. Vapor-direction +1 means into block; -1 means out. Moisture endpoints and numeric temperatures are unspecified. No transport dynamics inferred.
+scalar	dry-density	physical	density	600	kg/m3	constant
+uncertainty	dry-density	unstated	-	-	-	-
+validity	dry-density	grade	1	1	1
+validity	dry-density	cure_age_known	0	0	1
+validity	dry-density	matched	0	0	1
+validity	dry-density	temperature_known	0	0	1
+validity	dry-density	dry	1	1	1
+validity	dry-density	moisture_known	1	1	1
+scalar	dry-density-range-lower	physical	density_lower	550	kg/m3	constant
+uncertainty	dry-density-range-lower	unstated	-	-	-	-
+validity	dry-density-range-lower	grade	1	1	1
+validity	dry-density-range-lower	cure_age_known	0	0	1
+validity	dry-density-range-lower	matched	0	0	1
+validity	dry-density-range-lower	temperature_known	0	0	1
+validity	dry-density-range-lower	dry	1	1	1
+validity	dry-density-range-lower	moisture_known	1	1	1
+scalar	dry-density-range-upper	physical	density_upper	650	kg/m3	constant
+uncertainty	dry-density-range-upper	unstated	-	-	-	-
+validity	dry-density-range-upper	grade	1	1	1
+validity	dry-density-range-upper	cure_age_known	0	0	1
+validity	dry-density-range-upper	matched	0	0	1
+validity	dry-density-range-upper	temperature_known	0	0	1
+validity	dry-density-range-upper	dry	1	1	1
+validity	dry-density-range-upper	moisture_known	1	1	1
+scalar	mean-compression-requirement	strength	compressive_mean	3.6	MPa	constant
+uncertainty	mean-compression-requirement	unstated	-	-	-	-
+validity	mean-compression-requirement	grade	1	1	1
+validity	mean-compression-requirement	cure_age_known	0	0	1
+validity	mean-compression-requirement	matched	0	0	1
+validity	mean-compression-requirement	temperature_known	0	0	1
+validity	mean-compression-requirement	moisture_known	0	0	1
+validity	mean-compression-requirement	intended_loading	1	1	1
+validity	mean-compression-requirement	rate_known	0	0	1
+scalar	individual-compression-requirement	strength	compressive_individual	2.9	MPa	constant
+uncertainty	individual-compression-requirement	unstated	-	-	-	-
+validity	individual-compression-requirement	grade	1	1	1
+validity	individual-compression-requirement	cure_age_known	0	0	1
+validity	individual-compression-requirement	matched	0	0	1
+validity	individual-compression-requirement	temperature_known	0	0	1
+validity	individual-compression-requirement	moisture_known	0	0	1
+validity	individual-compression-requirement	intended_loading	1	1	1
+validity	individual-compression-requirement	rate_known	0	0	1
+scalar	dry-conductivity	thermal	dry_conductivity	0.13	W/m/K	constant
+uncertainty	dry-conductivity	unstated	-	-	-	-
+validity	dry-conductivity	grade	1	1	1
+validity	dry-conductivity	cure_age_known	0	0	1
+validity	dry-conductivity	matched	0	0	1
+validity	dry-conductivity	temperature_known	1	1	1
+validity	dry-conductivity	dry	1	1	1
+validity	dry-conductivity	moisture_known	1	1	1
+validity	dry-conductivity	mean_temperature	283.15	283.15	K
+validity	dry-conductivity	direction_known	0	0	1
+validity	dry-conductivity	delta_known	0	0	1
+scalar	design-conductivity-0	thermal	design_conductivity	0.15	W/m/K	constant
+uncertainty	design-conductivity-0	unstated	-	-	-	-
+validity	design-conductivity-0	grade	1	1	1
+validity	design-conductivity-0	cure_age_known	0	0	1
+validity	design-conductivity-0	matched	0	0	1
+validity	design-conductivity-0	temperature_known	0	0	1
+validity	design-conductivity-0	moisture_content_known	0	0	1
+validity	design-conductivity-0	exposure	0	0	1
+validity	design-conductivity-0	direction_known	0	0	1
+scalar	design-conductivity-1	thermal	design_conductivity	0.16	W/m/K	constant
+uncertainty	design-conductivity-1	unstated	-	-	-	-
+validity	design-conductivity-1	grade	1	1	1
+validity	design-conductivity-1	cure_age_known	0	0	1
+validity	design-conductivity-1	matched	0	0	1
+validity	design-conductivity-1	temperature_known	0	0	1
+validity	design-conductivity-1	moisture_content_known	0	0	1
+validity	design-conductivity-1	exposure	1	1	1
+validity	design-conductivity-1	direction_known	0	0	1
+scalar	design-conductivity-2	thermal	design_conductivity	0.24	W/m/K	constant
+uncertainty	design-conductivity-2	unstated	-	-	-	-
+validity	design-conductivity-2	grade	1	1	1
+validity	design-conductivity-2	cure_age_known	0	0	1
+validity	design-conductivity-2	matched	0	0	1
+validity	design-conductivity-2	temperature_known	0	0	1
+validity	design-conductivity-2	moisture_content_known	0	0	1
+validity	design-conductivity-2	exposure	2	2	1
+validity	design-conductivity-2	direction_known	0	0	1
+scalar	moisture-movement-maximum	moisture	moisture_movement	0.0004	1	constant
+uncertainty	moisture-movement-maximum	unstated	-	-	-	-
+validity	moisture-movement-maximum	grade	1	1	1
+validity	moisture-movement-maximum	cure_age_known	0	0	1
+validity	moisture-movement-maximum	matched	0	0	1
+validity	moisture-movement-maximum	temperature_known	0	0	1
+validity	moisture-movement-maximum	moisture_endpoints_known	0	0	1
+scalar	vapor-resistance-1	moisture	vapor_resistance	5	1	constant
+uncertainty	vapor-resistance-1	unstated	-	-	-	-
+validity	vapor-resistance-1	grade	1	1	1
+validity	vapor-resistance-1	cure_age_known	0	0	1
+validity	vapor-resistance-1	matched	0	0	1
+validity	vapor-resistance-1	temperature_known	0	0	1
+validity	vapor-resistance-1	moisture_known	0	0	1
+validity	vapor-resistance-1	vapor_flow	1	1	1
+scalar	vapor-resistance--1	moisture	vapor_resistance	10	1	constant
+uncertainty	vapor-resistance--1	unstated	-	-	-	-
+validity	vapor-resistance--1	grade	1	1	1
+validity	vapor-resistance--1	cure_age_known	0	0	1
+validity	vapor-resistance--1	matched	0	0	1
+validity	vapor-resistance--1	temperature_known	0	0	1
+validity	vapor-resistance--1	moisture_known	0	0	1
+validity	vapor-resistance--1	vapor_flow	-1	-1	1

@@ -1,0 +1,30 @@
+frankensim.matdb-manifest.v3
+pack_id	hh-celcon-super-strength-bba-2026
+redistribution	permitted	Selected attributed numerical facts and original annotations only; source document, prose and table layout are not redistributed
+citation	British Board of Agrement, H+H Celcon Super Strength Grade, certificate 01/3816 Product Sheet 2 Issue 5, 15 January 2026, tables 1, 3, 5 and 6 and section 3.3; https://www.hplush.com/fileadmin/UK/Certificates/BBA/BBA_Cert_01_3816_Sheet_2_High_and_Super_Strength__Jan_2026_.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	bba-product	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	density_lower	density-declared-range-lower	dimensional
+property	density_upper	density-declared-range-upper	dimensional
+property	compressive_mean	mean-compressive-strength-requirement	dimensional
+property	compressive_individual	individual-block-compressive-strength-requirement	dimensional
+property	dry_conductivity	declared-dry-thermal-conductivity	thermal-conductivity
+property	design_conductivity	design-thermal-conductivity	thermal-conductivity
+property	moisture_movement	maximum-declared-moisture-movement	dimensional
+property	vapor_resistance	water-vapor-diffusion-resistance-factor	dimensional
+axis	grade	source-grade-hh-celcon-super-strength-bba-2026	dimensional
+axis	temperature_known	source-temperature-known	dimensional
+axis	cure_age_known	source-cure-age-known	dimensional
+axis	matched	source-specimens-matched	dimensional
+axis	dry	dry-condition	dimensional
+axis	moisture_known	source-moisture-condition-known	dimensional
+axis	moisture_content_known	source-moisture-content-known	dimensional
+axis	mean_temperature	mean-test-temperature	absolute-temperature
+axis	direction_known	source-thermal-direction-known	dimensional
+axis	delta_known	source-test-temperature-difference-known	dimensional
+axis	exposure	blockwork-exposure-class	dimensional
+axis	intended_loading	intended-block-loading-orientation	dimensional
+axis	rate_known	source-test-rate-known	dimensional
+axis	vapor_flow	vapor-diffusion-direction	dimensional
+axis	moisture_endpoints_known	source-moisture-endpoints-known	dimensional
