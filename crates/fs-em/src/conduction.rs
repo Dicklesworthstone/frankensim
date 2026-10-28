@@ -12,6 +12,10 @@
 //! already accepted field. No electrical storage or thermal evolution is added.
 //! The separate [`crate::electrostatic::relaxation`] owner composes these same
 //! cell currents/losses with retained dielectric charge and displacement current.
+//! The [`motion`] owner uses the same source conductivity and charge operator
+//! for prescribed in-plane velocity in an imposed normal magnetic field.
+
+pub mod motion;
 
 use fs_feec::{
     assembly::{incidence_to_csr, stiffness},
@@ -35,7 +39,8 @@ pub struct ConductionControls {
     pub linear: CheckedCgConfig,
     /// Absolute net terminal current and free-node current residual [A].
     pub current_tolerance_a: f64,
-    /// Absolute difference between integrated Joule and terminal power [W].
+    /// Absolute terminal-work balance tolerance [W]. With prescribed motion,
+    /// this includes signed mechanical power as well as irreversible heat.
     pub power_tolerance_w: f64,
 }
 
@@ -116,6 +121,14 @@ pub(crate) struct ConductionCellResponse {
     pub current_density_a_m2: Vec<[f64; 2]>,
     pub cell_power_w: Vec<f64>,
     pub power_w: f64,
+}
+
+struct ConductionBoundaryResponse {
+    nodal_boundary_current_a: Vec<Option<f64>>,
+    boundary_current_a: f64,
+    maximum_free_current_residual_a: f64,
+    terminal_power_w: f64,
+    power_balance_residual_w: f64,
 }
 impl<C: PlanarConductorMaterial> PlanarConduction<C> {
     /// Assemble the same native weighted FEEC operator used by other scalar
@@ -264,16 +277,7 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ConductionField<'_, C>, ConductionError> {
         poll(cancelled)?;
-        if boundary_voltage_v.len() > self.mesh.vertices().len()
-            || !positive(controls.linear.tolerance)
-            || controls.linear.tolerance >= 1.0
-            || !positive(controls.current_tolerance_a)
-            || !positive(controls.power_tolerance_w)
-        {
-            return Err(ConductionError::Invalid(
-                "bounded boundary traces and positive solve/current/power tolerances required",
-            ));
-        }
+        self.validate_controls(boundary_voltage_v.len(), controls)?;
         let prescribed =
             scalar_potential::prescribed_boundary(&self.mesh, boundary_voltage_v, cancelled)?;
         let applied = self.current_loads(current_traces, &prescribed, cancelled)?;
@@ -294,6 +298,24 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
             report,
             cancelled,
         )
+    }
+
+    fn validate_controls(
+        &self,
+        boundary_count: usize,
+        controls: ConductionControls,
+    ) -> Result<(), ConductionError> {
+        if boundary_count > self.mesh.vertices().len()
+            || !positive(controls.linear.tolerance)
+            || controls.linear.tolerance >= 1.0
+            || !positive(controls.current_tolerance_a)
+            || !positive(controls.power_tolerance_w)
+        {
+            return Err(ConductionError::Invalid(
+                "bounded boundary traces and positive solve/current/power tolerances required",
+            ));
+        }
+        Ok(())
     }
 
     fn current_loads(
@@ -373,8 +395,19 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
         voltage: &[f64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ConductionCellResponse, ConductionError> {
+        self.cell_response_with_motion(voltage, None, cancelled)
+    }
+
+    fn cell_response_with_motion(
+        &self,
+        voltage: &[f64],
+        motional_field: Option<&[[f64; 2]]>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ConductionCellResponse, ConductionError> {
         if voltage.len() != self.mesh.vertices().len() || voltage.iter().any(|v| !v.is_finite()) {
-            return Err(ConductionError::Invalid("complete finite native potentials required"));
+            return Err(ConductionError::Invalid(
+                "complete finite native potentials required",
+            ));
         }
         let mut electric_field_v_m = Vec::with_capacity(self.conductors.len());
         let mut current_density_a_m2 = Vec::with_capacity(self.conductors.len());
@@ -391,15 +424,23 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
                     e[axis] = finite((-delta).mul_add(gradients[local][axis], e[axis]))?;
                 }
             }
-            let current = self.conductivity[cell].current_density_a_m2(e);
+            let conductor_e = if let Some(motion) = motional_field {
+                [
+                    finite(e[0] + motion[cell][0])?,
+                    finite(e[1] + motion[cell][1])?,
+                ]
+            } else {
+                e
+            };
+            let current = self.conductivity[cell].current_density_a_m2(conductor_e);
             let j = [finite(current[0])?, finite(current[1])?];
             let volume = self
                 .mesh
                 .face_measure(cell)
                 .ok_or(ConductionError::Invalid("missing conductor cell volume"))?;
             // This is irreversible POWER, with no dielectric-energy factor 1/2.
-            let power = finite(volume * e[0].mul_add(j[0], e[1] * j[1]))?;
-            if power < 0.0 || (e != [0.0; 2] && power == 0.0) {
+            let power = finite(volume * conductor_e[0].mul_add(j[0], conductor_e[1] * j[1]))?;
+            if power < 0.0 || (conductor_e != [0.0; 2] && power == 0.0) {
                 return Err(ConductionError::Invalid(
                     "conductor Joule power is not representably positive",
                 ));
@@ -410,7 +451,10 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
             cell_power_w.push(power);
         }
         Ok(ConductionCellResponse {
-            electric_field_v_m, current_density_a_m2, cell_power_w, power_w,
+            electric_field_v_m,
+            current_density_a_m2,
+            cell_power_w,
+            power_w,
         })
     }
 
@@ -425,10 +469,51 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
         report: Option<SolveReport>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ConductionField<'_, C>, ConductionError> {
-        let n = self.mesh.vertices().len();
         let ConductionCellResponse {
-            electric_field_v_m, current_density_a_m2, cell_power_w, power_w,
+            electric_field_v_m,
+            current_density_a_m2,
+            cell_power_w,
+            power_w,
         } = self.cell_response(&voltage, cancelled)?;
+        let boundary = self.boundary_response(
+            &voltage,
+            prescribed,
+            &applied,
+            None,
+            power_w,
+            current_tolerance_a,
+            power_tolerance_w,
+            cancelled,
+        )?;
+        Ok(ConductionField {
+            problem: self,
+            voltage_v: voltage,
+            electric_field_v_m,
+            current_density_a_m2,
+            cell_power_w,
+            power_w,
+            nodal_boundary_current_a: boundary.nodal_boundary_current_a,
+            nodal_applied_current_a: applied,
+            boundary_current_a: boundary.boundary_current_a,
+            maximum_free_current_residual_a: boundary.maximum_free_current_residual_a,
+            power_balance_residual_w: boundary.power_balance_residual_w,
+            report,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn boundary_response(
+        &self,
+        voltage: &[f64],
+        prescribed: &[Option<f64>],
+        applied: &[Option<f64>],
+        motional_load: Option<&[f64]>,
+        electrical_power_w: f64,
+        current_tolerance_a: f64,
+        power_tolerance_w: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ConductionBoundaryResponse, ConductionError> {
+        let n = self.mesh.vertices().len();
         let mut nodal_boundary_current_a = vec![None; n];
         let mut boundary_current_a = 0.0;
         let mut maximum_free_current_residual_a: f64 = 0.0;
@@ -443,6 +528,9 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
             for (&w, &value) in cols.iter().zip(vals) {
                 let difference = finite(voltage[w] - voltage[v])?;
                 reaction = finite(value.mul_add(difference, reaction))?;
+            }
+            if let Some(load) = motional_load {
+                reaction = finite(reaction - load[v])?;
             }
             let injection = applied[v].unwrap_or(0.0);
             if prescribed[v].is_none() {
@@ -465,7 +553,7 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
                 terminal_power_w = finite(difference.mul_add(current, terminal_power_w))?;
             }
         }
-        let power_balance_residual_w = finite(power_w - terminal_power_w)?;
+        let power_balance_residual_w = finite(electrical_power_w - terminal_power_w)?;
         if boundary_current_a.abs() > current_tolerance_a
             || maximum_free_current_residual_a > current_tolerance_a
             || power_balance_residual_w.abs() > power_tolerance_w
@@ -477,19 +565,12 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
             });
         }
         poll(cancelled)?;
-        Ok(ConductionField {
-            problem: self,
-            voltage_v: voltage,
-            electric_field_v_m,
-            current_density_a_m2,
-            cell_power_w,
-            power_w,
+        Ok(ConductionBoundaryResponse {
             nodal_boundary_current_a,
-            nodal_applied_current_a: applied,
             boundary_current_a,
             maximum_free_current_residual_a,
+            terminal_power_w,
             power_balance_residual_w,
-            report,
         })
     }
 

@@ -887,3 +887,25 @@ Five physical regressions cover an independently assembled nonlinear P1
 residual and heat/work quadrature, an analytic stationary-magnet/moving-metal
 transient with time refinement, stationary continuation, saturated uniform-field
 charge cancellation and source/domain/work/cancellation refusals.
+
+### Anisotropic moving-conductor charge, heat and force
+
+`PlanarConduction::solve_with_motion` reuses the original source-resolved
+scalar/rotated SPD conductivity Hodge and checked charge solve for per-original-cell
+planar velocity and an imposed normal magnetic field. The weak motional load,
+total-current boundary reactions, `J = Sigma(E + u cross B)`, conductor-frame
+Joule heat and `J cross B` force share one current/material/volume owner.
+`MovingConductionField` retains the authored motion and field snapshots and
+separately reports heat, signed mechanical work, volume `E dot J` and independently
+recovered terminal work. Admission checks current continuity, the sum of absolute
+local work-pair defects, and `heat + mechanical = terminal power`. Unloaded
+exterior boundaries insulate the total current. Velocity or field changes reuse
+the prepared conductivity matrix. Original stationary and zero-motional-field
+recovery remain intact.
+
+Scope is a prescribed fixed-geometry quasistatic snapshot; no self-consistent
+induction, Hall law, moving mesh or fluid/solid time integrator is inferred.
+Six analytical tests cover open-circuit charge separation without spurious drag,
+shorted braking, loaded generation and motor signs, rotated anisotropic currents,
+imposed-current EMF, heterogeneous counter-moving layers and stationary/refusal
+behavior. Synthetic sources verify these equations, not an empirical material fit.
