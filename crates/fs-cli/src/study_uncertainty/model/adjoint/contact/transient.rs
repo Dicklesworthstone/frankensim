@@ -155,3 +155,69 @@ fn g0_contact_history_rows_bind_the_complete_prefix_scale_units_and_owner() {
         }
     }
 }
+
+#[test]
+fn g1_g3_g5_mixed_contact_bath_flux_calibration_matches_physics_and_resumes() {
+    for enthalpy in [false, true] {
+        let f = fixture(enthalpy);
+        let raw_source = SOURCE.replace(":high 6W)))", concat!(
+            ":high 6W)\n",
+            " (uniform :name \"bath\" :target fixed-temperature :entity \"cold\" :low 293.5K :high 294.5K)\n",
+            " (uniform :name \"flux\" :target heat-flux :entity \"hot\" :low -0.1W/m^2 :high 0.3W/m^2)))",
+        ));
+        assert!(raw_source.contains(":target heat-flux"));
+        let source = raw_source.replace(":version 1",
+            ":version 3 :mean-control (nominal-adjoint :max-solves 1)");
+        let (raw, raw_path) = f.run(&raw_source, "raw-mixed-boundary", crate::exit::SUCCESS);
+        let (full, full_path) = f.run(&source, "mixed-boundary", crate::exit::SUCCESS);
+        let raw = Fixture::report(&raw, &raw_path);
+        let expected = Fixture::report(&full, &full_path);
+        assert_eq!(expected.get("observations"), raw.get("observations"));
+        assert_eq!(expected.get("statistics"), raw.get("statistics"));
+        let control = expected.get("mean_control").unwrap();
+        assert_eq!(control.f64_field("probe_solves_completed"), Some(1.0));
+        let gradient: Vec<_> = control.get("gradient").unwrap().as_array().unwrap()
+            .iter().map(|value| value.as_f64().unwrap()).collect();
+        assert_eq!(gradient.len(), 4);
+        assert!(gradient[2] > 0.0 && gradient[3] < 0.0,
+            "warming the bath heats the body; outward flux removes heat");
+        let units: Vec<_> = control.get("parameter_units").unwrap().as_array().unwrap()
+            .iter().map(|value| value.as_str().unwrap()).collect();
+        assert_eq!(units, ["Pa", "W", "K", "W/m^2"]);
+        let model = Model::load(&f.inputs.join("mixed-boundary.fsim")).unwrap();
+        let ledger = Ledger::open(full_path.to_str().unwrap()).unwrap();
+        let gate = CancelGate::new_clock_free();
+        for (coordinate, epsilon) in [(2, 0.002), (3, 0.0002)] {
+            let mut lo = [900000.0, 5.0, 294.0, 0.1];
+            let mut hi = lo;
+            lo[coordinate] -= epsilon;
+            hi[coordinate] += epsilon;
+            let low = model.sample(&ledger, &gate, &lo, 120.0).unwrap().unwrap();
+            let high = model.sample(&ledger, &gate, &hi, 120.0).unwrap().unwrap();
+            let finite_difference = (high.value_k - low.value_k) / (2.0 * epsilon);
+            assert!((gradient[coordinate] - finite_difference).abs()
+                <= 5e-4 * finite_difference.abs().max(1e-8),
+                "enthalpy={enthalpy}, coordinate={coordinate}: adjoint={} FD={finite_difference}",
+                gradient[coordinate]);
+        }
+        if !enthalpy {
+            // One common recovery path owns all four frozen coordinates. No
+            // source file or replacement physical probe is needed on resume.
+            let path = f.inputs.join("mixed-boundary-split.fsim");
+            std::fs::write(&path, &source).unwrap();
+            let split = f.root.join("mixed-boundary-split.db");
+            let prefix = crate::study::study_path(&path, &split, Some("1"), crate::OutputMode::Json);
+            assert_eq!(prefix.exit_code, crate::exit::BUDGET, "{}", prefix.stderr);
+            let prefix = J::parse(&prefix.stdout).unwrap();
+            let report = Fixture::report(&prefix, &split);
+            assert!(report.get("observations").unwrap().as_array().unwrap().is_empty());
+            std::fs::rename(&f.inputs, f.root.join("retained-mixed-boundary-inputs")).unwrap();
+            let resumed = crate::study::resume_path(prefix.str_field("run").unwrap(),
+                &split, None, crate::OutputMode::Json);
+            assert_eq!(resumed.exit_code, crate::exit::SUCCESS, "{}", resumed.stderr);
+            let resumed = Fixture::report(&J::parse(&resumed.stdout).unwrap(), &split);
+            assert_eq!(resumed.get("mean_control"), expected.get("mean_control"));
+            assert_eq!(resumed.get("observations"), expected.get("observations"));
+        }
+    }
+}

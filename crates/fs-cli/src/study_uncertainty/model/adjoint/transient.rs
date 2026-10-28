@@ -26,7 +26,7 @@ fn admit_controls(spec: &ProjectSpec, parameters: &[UniformParameter]) -> Result
         .as_ref()
         .and_then(|c| c.conduction.as_ref())
         .ok_or_else(|| invalid("transient calibration has no conduction setup"))?;
-    let time = policy(spec).ok_or_else(|| invalid("transient calibration has no time policy"))?;
+    policy(spec).ok_or_else(|| invalid("transient calibration has no time policy"))?;
     for parameter in parameters.iter().filter(|p| p.low != p.high) {
         let supported = match parameter.target {
             Target::Power => setup.regions.iter().any(|r| r.region == parameter.entity),
@@ -35,13 +35,18 @@ fn admit_controls(spec: &ProjectSpec, parameters: &[UniformParameter]) -> Result
             | Target::FanSpeedRatio
             | Target::NaturalConvectionAmbient
             | Target::RadiationReservoirTemperature => true,
-            Target::FixedTemperature => time.enthalpy.is_some(),
+            Target::FixedTemperature | Target::HeatFlux => setup.boundaries.iter().any(|boundary| {
+                boundary.target == parameter.entity && matches!(
+                    (&boundary.condition, parameter.target),
+                    (ThermalBoundaryCondition::FixedTemperature { .. }, Target::FixedTemperature)
+                        | (ThermalBoundaryCondition::HeatFlux { .. }, Target::HeatFlux)
+                )
+            }),
             Target::ContactPressure
             | Target::ContactThickness
             | Target::ContactGap
             | Target::ContactTorque => spec.interface_cards.as_deref().unwrap_or(&[])
                 .iter().any(|binding| binding.interface == parameter.entity),
-            Target::HeatFlux => false,
         };
         if !supported {
             return Err(invalid(format!(
@@ -179,6 +184,62 @@ fn enthalpy_convection(
     })
 }
 
+/// Prescribed bath and outward-flux coordinates retain the same meaning in
+/// capacity and enthalpy storage. Bind them to their original native law,
+/// sampled value and complete reverse prefix before consuming the derivative.
+fn prescribed_boundary(
+    report: &J,
+    spec: &ProjectSpec,
+    entity: &str,
+    target: Target,
+    fine_steps: usize,
+) -> Result<f64> {
+    let (name, scope, value_key, derivative_key) = match target {
+        Target::FixedTemperature => (
+            "prescribed_temperature",
+            "independent-uniform-bath-temperatures-held-throughout-selected-trajectory",
+            "temperature_k", "dtemperature_dprescribed_temperature_k_per_k",
+        ),
+        Target::HeatFlux => (
+            "prescribed_heat_flux",
+            "independent-uniform-outward-heat-fluxes-held-throughout-selected-trajectory",
+            "flux_w_m2", "dtemperature_doutward_flux_k_per_w_m2",
+        ),
+        _ => return Err(invalid("requested coordinate is not a prescribed boundary")),
+    };
+    let controls = family(report, name)?;
+    if controls.f64_field("control_steps") != Some(fine_steps as f64)
+        || controls.str_field("parameter_scope") != Some(scope)
+    {
+        return Err(invalid(format!("{name} controls do not span the final trajectory")));
+    }
+    let row = named(controls, "boundaries", "target", entity)?;
+    if target == Target::FixedTemperature && row.str_field("status") != Some("available") {
+        return Err(invalid(format!("transient prescribed-temperature control {entity} is unavailable: {}",
+            row.str_field("reason").unwrap_or("no independent bath derivative"))));
+    }
+    let setup = spec.cooling.as_ref().and_then(|cooling| cooling.conduction.as_ref())
+        .ok_or_else(|| invalid("missing sampled prescribed-boundary setup"))?;
+    let mut values = setup.boundaries.iter().filter_map(|boundary| {
+        if boundary.target != entity { return None; }
+        match (&boundary.condition, target) {
+            (ThermalBoundaryCondition::FixedTemperature { temperature }, Target::FixedTemperature) =>
+                Some(temperature.value),
+            (ThermalBoundaryCondition::HeatFlux { outward_flux }, Target::HeatFlux) =>
+                Some(outward_flux.value),
+            _ => None,
+        }
+    });
+    let sampled = values.next()
+        .ok_or_else(|| invalid("transient calibration lost its original prescribed boundary"))?;
+    if values.next().is_some() || !sampled.is_finite()
+        || number(row, value_key)?.to_bits() != sampled.to_bits()
+    {
+        return Err(invalid(format!("{name} control differs from the sampled original boundary")));
+    }
+    number(row, derivative_key)
+}
+
 /// The caller first verifies the sealed run, its project and its selected QoI.
 /// These checks additionally bind the derivative to the same accepted final
 /// state, storage law and fine grid; a coincident sampled peak is insufficient.
@@ -283,42 +344,12 @@ pub(super) fn coefficients(
                 }
                 number(row, "dtemperature_dspeed_ratio_k")?
             }
-            Target::FixedTemperature => {
-                let controls = family(report, "prescribed_temperature")?;
-                if controls.f64_field("control_steps") != Some(fine_steps as f64)
-                    || controls.str_field("parameter_scope")
-                        != Some("independent-uniform-bath-temperatures-held-throughout-selected-trajectory")
-                {
-                    return Err(invalid("prescribed-temperature control does not span the final trajectory"));
-                }
-                let row = named(controls, "boundaries", "target", entity)?;
-                if row.str_field("status") != Some("available") {
-                    return Err(invalid(format!("transient prescribed-temperature control {entity} is unavailable: {}",
-                        row.str_field("reason").unwrap_or("no independent bath derivative"))));
-                }
-                let setup = spec.cooling.as_ref().and_then(|c| c.conduction.as_ref())
-                    .ok_or_else(|| invalid("missing sampled prescribed-temperature setup"))?;
-                let mut temperatures = setup.boundaries.iter().filter_map(|boundary| {
-                    match &boundary.condition {
-                        ThermalBoundaryCondition::FixedTemperature { temperature }
-                            if boundary.target == entity => Some(temperature.value),
-                        _ => None,
-                    }
-                });
-                let sampled = temperatures.next()
-                    .ok_or_else(|| invalid("transient calibration lost its prescribed-temperature boundary"))?;
-                if temperatures.next().is_some() || !sampled.is_finite()
-                    || number(row, "temperature_k")?.to_bits() != sampled.to_bits()
-                {
-                    return Err(invalid("prescribed-temperature control differs from the sampled boundary"));
-                }
-                number(row, "dtemperature_dprescribed_temperature_k_per_k")?
-            }
+            Target::FixedTemperature | Target::HeatFlux =>
+                prescribed_boundary(report, spec, entity, parameter.target, fine_steps)?,
             Target::RadiationReservoirTemperature => number(named(family(report, "radiation")?,
                 "surfaces", "name", entity)?, "dtemperature_dreservoir_temperature_k_per_k")?,
             Target::ContactPressure | Target::ContactThickness | Target::ContactGap
             | Target::ContactTorque => super::contact::transient_coefficient(report, entity)?,
-            _ => return Err(invalid(format!("unsupported transient calibration coordinate {}", parameter.name))),
         };
         if !derivative.is_finite() {
             return Err(invalid(format!("nonfinite transient nominal coefficient for {}", parameter.name)));

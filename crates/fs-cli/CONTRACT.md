@@ -1242,18 +1242,23 @@ the existing final-time accepted-trajectory adjoint. Calibration binds the seale
 run's storage law, final temperature, horizon and fine-grid state count before
 using its accumulated derivatives. Power coordinates retain the authored duty;
 a workload schedule that replaces static power gives that static coordinate a
-zero derivative. Prescribed convection coefficients convert the sampled
-`dT/dlog(h)` to `dT/dh`. Natural reservoirs, air branches, fan banks and radiating
-surfaces retain their distinct physical identities. Constant-capacity storage
-also supplies prescribed Robin temperature/coefficient controls; the enthalpy
-producer does not, and varying unsupported coordinates refuse with a secant
-alternative. Enthalpy storage supplies independent uniform prescribed-bath
-temperature controls held through the full selected trajectory. Calibration
-checks the exact nominal kelvin value, boundary ownership, available status and
-fine-grid coverage; shared prescribed vertices cannot supply independent
-coordinates. Constant-capacity fixed-temperature controls remain unsupported.
-The native bath regression checks a fresh physical finite difference, unchanged
-raw sample statistics and source-independent resume of the frozen calibration.
+zero derivative. Capacity convection coefficients convert the sampled
+`dT/dlog(h)` to `dT/dh`; enthalpy convection uses the accumulated absolute
+derivative of the original declared law. Natural reservoirs, air branches, fan
+banks and radiating surfaces retain their distinct physical identities.
+Varying unsupported coordinates refuse with a secant alternative.
+
+Both storage modes supply independent uniform prescribed-bath temperatures and
+original outward heat-flux densities held through the full selected trajectory.
+Calibration checks the exact sampled kelvin or W/m2 value, the original boundary
+law, unique target, control scope and fine-grid coverage. Baths additionally
+require available independent-control status; shared prescribed vertices cannot
+supply independent coordinates. Flux derivatives retain their absolute W/m2
+coordinate and outward sign without a second timestep factor or nominal-flux
+division. The native mixed-control regression combines contact pressure, power,
+bath temperature and heat flux, comparing boundary gradients to fresh physical
+finite differences and checking unchanged raw sample statistics plus
+source-independent resume of the frozen calibration.
 Sampled-peak and steady adjoint requests are never silently reinterpreted as the
 final-time objective.
 

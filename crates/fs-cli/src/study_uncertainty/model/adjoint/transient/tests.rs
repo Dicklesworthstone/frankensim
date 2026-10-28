@@ -274,21 +274,24 @@ fn g0_reference_transient_study_binds_existing_native_inputs() {
 }
 
 #[test]
-fn g0_enthalpy_bath_coefficients_bind_temperature_ownership_and_entire_history() {
+fn g0_bath_coefficients_bind_temperature_ownership_and_entire_history_for_both_storage_laws() {
+    for enthalpy in [false, true] {
     let mut spec = base();
     let parameter = parameter(Target::FixedTemperature, "solid");
     assert!(configure(&mut spec, std::slice::from_ref(&parameter)).is_err(),
-        "constant-capacity bath controls remain outside this producer");
+        "a convection reservoir is not a prescribed solid temperature");
     let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
     setup.boundaries[0].condition = ThermalBoundaryCondition::FixedTemperature {
         temperature: QtyAny::new(310.0, dims::TEMPERATURE),
     };
-    setup.transient.as_mut().unwrap().enthalpy = Some(TransientEnthalpy {
-        materials: Vec::new(), max_newton_iterations: 20, max_backtracks: 12,
-    });
+    if enthalpy {
+        setup.transient.as_mut().unwrap().enthalpy = Some(TransientEnthalpy {
+            materials: Vec::new(), max_newton_iterations: 20, max_backtracks: 12,
+        });
+    }
     configure(&mut spec, std::slice::from_ref(&parameter)).unwrap();
     let controls = r#", "prescribed_temperature":{"control_steps":8,"parameter_scope":"independent-uniform-bath-temperatures-held-throughout-selected-trajectory","boundaries":[{"target":"solid","temperature_k":310,"status":"available","mapped_vertices":3,"dtemperature_dprescribed_temperature_k_per_k":0.625}]}"#;
-    assert_eq!(coefficients(&receipt(true, controls), &spec,
+    assert_eq!(coefficients(&receipt(enthalpy, controls), &spec,
         std::slice::from_ref(&parameter), 301.0, "solid").unwrap(), [0.625]);
     for changed in [
         controls.replace("\"control_steps\":8", "\"control_steps\":0"),
@@ -299,19 +302,62 @@ fn g0_enthalpy_bath_coefficients_bind_temperature_ownership_and_entire_history()
         controls.replace("dtemperature_dprescribed_temperature_k_per_k", "unrelated_same_unit_control"),
         controls.replace("0.625", "null"),
     ] {
-        assert!(coefficients(&receipt(true, &changed), &spec,
+        assert!(coefficients(&receipt(enthalpy, &changed), &spec,
             std::slice::from_ref(&parameter), 301.0, "solid").is_err());
     }
-    assert!(coefficients(&receipt(true, ""), &spec,
+    assert!(coefficients(&receipt(enthalpy, ""), &spec,
         std::slice::from_ref(&parameter), 301.0, "solid").is_err());
     let duplicate = controls.replace(
         "\"boundaries\":[{",
         "\"boundaries\":[{\"target\":\"solid\",\"temperature_k\":310,\"status\":\"available\",\"dtemperature_dprescribed_temperature_k_per_k\":0.25},{",
     );
-    assert!(coefficients(&receipt(true, &duplicate), &spec,
+    assert!(coefficients(&receipt(enthalpy, &duplicate), &spec,
         std::slice::from_ref(&parameter), 301.0, "solid").is_err());
     let constant = UniformParameter { high: parameter.low, ..parameter };
-    assert_eq!(coefficients(&receipt(true, ""), &spec, &[constant], 301.0, "solid").unwrap(), [0.0]);
+    assert_eq!(coefficients(&receipt(enthalpy, ""), &spec, &[constant], 301.0, "solid").unwrap(), [0.0]);
+    }
+}
+
+#[test]
+fn g0_outward_flux_coefficients_bind_original_flux_and_complete_history_for_both_storage_laws() {
+    for enthalpy in [false, true] {
+        let mut spec = base();
+        let parameter = parameter(Target::HeatFlux, "solid");
+        assert!(configure(&mut spec, std::slice::from_ref(&parameter)).is_err(),
+            "a Robin boundary cannot supply a prescribed Neumann control");
+        let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+        setup.boundaries[0].condition = ThermalBoundaryCondition::HeatFlux {
+            outward_flux: QtyAny::new(-2.5, dims::HEAT_FLUX),
+        };
+        if enthalpy {
+            setup.transient.as_mut().unwrap().enthalpy = Some(TransientEnthalpy {
+                materials: Vec::new(), max_newton_iterations: 20, max_backtracks: 12,
+            });
+        }
+        configure(&mut spec, std::slice::from_ref(&parameter)).unwrap();
+        let row = r#"{"target":"solid","flux_w_m2":-2.5,"dtemperature_doutward_flux_k_per_w_m2":-0.125}"#;
+        let controls = format!(r#", "prescribed_heat_flux":{{"control_steps":8,"parameter_scope":"independent-uniform-outward-heat-fluxes-held-throughout-selected-trajectory","boundaries":[{row}]}}"#);
+        assert_eq!(coefficients(&receipt(enthalpy, &controls), &spec,
+            std::slice::from_ref(&parameter), 301.0, "solid").unwrap(), [-0.125],
+            "absolute outward-flux derivative retains its sign and timestep convention");
+        for changed in [
+            controls.replace("\"control_steps\":8", "\"control_steps\":7"),
+            controls.replace("held-throughout-selected-trajectory", "single-endpoint"),
+            controls.replace("\"target\":\"solid\"", "\"target\":\"other\""),
+            controls.replace("\"flux_w_m2\":-2.5", "\"flux_w_m2\":2.5"),
+            controls.replace("dtemperature_doutward_flux_k_per_w_m2", "unrelated_same_unit_control"),
+            controls.replace("-0.125", "null"),
+            controls.replace(row, &format!("{row},{row}")),
+        ] {
+            assert!(coefficients(&receipt(enthalpy, &changed), &spec,
+                std::slice::from_ref(&parameter), 301.0, "solid").is_err());
+        }
+        assert!(coefficients(&receipt(enthalpy, ""), &spec,
+            std::slice::from_ref(&parameter), 301.0, "solid").is_err());
+        let constant = UniformParameter { high: parameter.low, ..parameter };
+        assert_eq!(coefficients(&receipt(enthalpy, ""), &spec, &[constant], 301.0, "solid")
+            .unwrap(), [0.0]);
+    }
 }
 
 #[test]
