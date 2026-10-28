@@ -32,6 +32,9 @@ pub mod normal_patch;
 /// Frictionless single-contact impulse laws with explicit admissibility and work.
 pub mod impact;
 
+/// Simultaneous frictionless normal impacts with assembled passivity admission.
+pub mod multicontact;
+
 /// Ordered fs-matdb interface-card binding for generic contact consumers.
 pub mod interface_binding;
 /// Solver-facing tangential contact adapters.

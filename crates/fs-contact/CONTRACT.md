@@ -503,3 +503,34 @@ references: <https://doi.org/10.1016/0021-9797(75)90018-1> and
 cover original equations, derivative/energy consistency, corners, work cycles,
 contact/noncontact friction, scaling and applicability; `adhesive_shear` adds
 the original-source DMT-to-shear integration case.
+
+## Simultaneous normal impact admission
+
+`multicontact::solve_normal_impacts` consumes one full contact-space inverse
+mass `W = J M^-1 J^T` and solves all geometrically active normal impulses
+together through `fs-solver::orthant::active_set`. Active contacts include
+initially separating witnesses: an impulse elsewhere may make them approach.
+Each declared rebound target is `-e*min(v_before,0)`; the coupled quadratic
+imposes nonnegative impulse, endpoint speed above that target and normal
+complementarity. Geometrically inactive contacts receive zero impulse while
+their cross-contact velocity response is still reported.
+
+Every gap must be finite and nonnegative, including values inside the activation
+tolerance. Restitution remains the caller's coefficient in `[0,1]`; positions
+are not projected and coefficients are never reduced silently. A solution of
+the normal complementarity problem alone is insufficient for acceptance. The
+owner reconstructs all endpoint speeds from the original supplied matrix and
+checks separation, complementarity and the assembled relative midpoint work
+`sum(p_i*(v_before_i+v_after_i)/2)`. Positive relative work beyond the explicit
+energy allowance and arithmetic roundoff returns `EnergyIncrease`. Any admitted
+positive numerical work is retained as `passivity_residual`; dissipation is not
+a hidden thermal-heat assignment. For a physical assembly, relative work equals
+kinetic-energy change minus prescribed-support work.
+
+The positive-definite numerical candidate admits at most 64 contact rows.
+Redundant/singular or unresolved active contact directions refuse explicitly;
+the API does not pick an arbitrary impulse from a nonunique set. Cancellation
+returns no accepted partial event. The existing one-contact law is unchanged.
+This is a bounded frictionless instantaneous response, not CCD, a Moreau–Jean
+time stepper, persistent contact, a Coulomb-cone solve, or a general
+Painleve/nonuniqueness classifier. The nonsmooth-contact bead remains open.

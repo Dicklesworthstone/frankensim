@@ -571,3 +571,39 @@ and intermediate restitution, moving-plane work, activation/penetration, and
 actual endpoint limits. Existing articulated impulse and multibody unit tests
 also cover the shared inverse-mass extraction. The broad contact and multibody
 beads remain open for their remaining dynamics and constraint deliverables.
+
+## Simultaneous articulated contact response
+
+`articulated_contacts::resolve_articulated_contacts` advances the velocities of
+up to 128 free articulated systems through one event with at most 64 declared
+frictionless normal contacts. A contact joins a link-fixed point to a prescribed
+plane or another dynamic link point, including two links in the same tree.
+The adapter normalizes each world normal and checks dynamic witnesses share a
+normal line of action so paired impulses cannot invent an angular couple.
+Strict negative gaps refuse; activation tolerance admits proximity only.
+
+The contact Delassus matrix is assembled through the shared zero-bias ABA
+inverse-mass owner, probing only the one or two systems involved in each
+contact. A single globally admitted contact-law solve produces all impulses.
+The adapter accumulates equal/opposite link loads before applying one physical
+impulse update per system; it never performs sequential pairwise state updates
+or assembles a dense generalized-coordinate mass matrix. Existing joint-speed
+admission applies to the actual endpoints, not the unit-response probes.
+
+Before returning any states, the adapter measures endpoint contact velocities
+from the actual updated articulated kinematics and checks them against the
+coupled predictions. Global linear and angular momentum changes must equal the
+prescribed-plane impulses. Plane work is signed and explicit; measured total
+kinetic-energy change minus that work plus the contact loss must close within
+the declared numerical energy allowance and roundoff. A failed body update,
+contact-law refusal, unresolved balance, or cancellation publishes no candidate
+state; input positions and borrowed velocities remain unchanged.
+
+Independent analytic regressions cover two and three coupled contacts on one
+body, an unequal-mass three-body impact chain, an internal prismatic-link pair,
+contact-order invariance, moving-support work, world-frame/common-velocity
+transforms, and a rebound candidate that satisfies local constraints but would
+inject global energy. The latter refuses while its explicitly requested
+inelastic counterpart succeeds. Redundant directions remain a typed numerical
+refusal. No friction, collision-time search, position repair, continuous contact
+force or nonsmooth timestep claim is made.

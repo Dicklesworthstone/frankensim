@@ -21,6 +21,7 @@
 #![warn(missing_docs)]
 
 pub mod articulated;
+pub mod articulated_contacts;
 pub mod articulated_impact;
 pub mod daimler;
 pub mod davinci;
