@@ -1,7 +1,7 @@
 frankensim.matdb-manifest.v3
 pack_id	pine-slash-fpl-gtr282
 redistribution	permitted	United States Government work (USDA Forest Service); public domain in the United States; retain report, chapter, table numbers, authors and URL
-citation	Senalik, C. Adam and Farber, Benjamin (2021), Mechanical Properties of Wood, Chapter 5 in Wood Handbook, FPL-GTR-282, Tables 5-1, 5-2 and 5-3a (pp. 5-2, 5-3 and 5-8); https://research.fs.usda.gov/download/treesearch/62244.pdf ; Glass, Samuel V. and Zelinka, Samuel L. (2021), Moisture Relations and Physical Properties of Wood, Chapter 4, equations (4-17)-(4-20), pp. 4-13 to 4-14; https://research.fs.usda.gov/download/treesearch/62243.pdf
+citation	Senalik, C. Adam and Farber, Benjamin (2021), Mechanical Properties of Wood, Chapter 5 in Wood Handbook, FPL-GTR-282, Tables 5-1, 5-2 and 5-3a (pp. 5-2, 5-3 and 5-8); https://research.fs.usda.gov/download/treesearch/62244.pdf ; Glass, Samuel V. and Zelinka, Samuel L. (2021), Moisture Relations and Physical Properties of Wood, Chapter 4, Table 4-3, equation (4-9), and equations (4-17)-(4-20), pp. 4-8, 4-10 and 4-13 to 4-14; https://research.fs.usda.gov/download/treesearch/62243.pdf
 license	Work-of-the-US-Government-Public-Use-Permitted
 source	primary	properties.tsv	material-tsv-v1
 property	density	density	dimensional
@@ -29,3 +29,7 @@ property	thermal_conductivity_transverse	thermal-conductivity-transverse	thermal
 axis	temperature	temperature	absolute-temperature
 axis	engineering_reference_model	engineering-reference-model	dimensional
 axis	source_pressure_known	source-pressure-known	dimensional
+property	radial_shrinkage_green_to_ovendry	radial_shrinkage_green_to_ovendry	dimensional
+property	tangential_shrinkage_green_to_ovendry	tangential_shrinkage_green_to_ovendry	dimensional
+property	volumetric_shrinkage_green_to_ovendry	volumetric_shrinkage_green_to_ovendry	dimensional
+property	fiber_saturation_moisture_content	fiber_saturation_moisture_content	dimensional

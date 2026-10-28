@@ -1,4 +1,30 @@
 frankensim.matdb-source.v1
+observation	wood-shrinkage	White oak clear wood, green-to-ovendry dimensional change	FPL-GTR-282 Chapter 4, Table 4-3, Oak, white/White, p. 4-8; https://research.fs.usda.gov/download/treesearch/62243.pdf	Radial, tangential and volumetric shrinkage are separate tabulated species averages, expressed as percentages of the green dimension or volume. They are total green-to-ovendry parameters, not measured shrinkage at every moisture content. The 0-30 percent moisture applicability permits their use in the approximate Equation (4-9) model with the separately declared 30 percent fiber-saturation approximation. The source reports about 15 percent coefficient of variation for shrinkage generally, not per-value uncertainty; uncertainty remains Unstated. No longitudinal shrinkage, same-specimen covariance, graded-lumber qualification or temperature dependence is supplied.
+observation	wood-moisture-model	White oak clear wood with prescribed uniform dry-basis moisture content	FPL-GTR-282 Chapter 4, Equation (4-9) and accompanying text, p. 4-10; https://research.fs.usda.gov/download/treesearch/62243.pdf	The source permits 30 percent moisture as an approximation when the fiber saturation point is unknown; this value is an explicit engineering assumption, not a measured species-specific fiber saturation point. Below fiber saturation, S(M)=S0*(1-M/0.30), with moisture and shrinkage as fractions. The linear approximation assumes a sufficiently small piece without significant moisture gradients. The existing density at 12 percent remains its independent reference observation; prescribed-moisture density must account separately for water mass and the independently tabulated volumetric shrinkage. No moisture transport, drying rate or coupled thermal-density law is supplied.
+scalar	shrinkage-radial	wood-shrinkage	radial_shrinkage_green_to_ovendry	5.6	%	constant
+uncertainty	shrinkage-radial	unstated	-	-	-	-
+validity	shrinkage-radial	moisture_content	0	30	%
+validity	shrinkage-radial	clear_specimen	1	1	1
+validity	shrinkage-radial	engineering_reference_model	1	1	1
+validity	shrinkage-radial	source_test_temperature_known	0	0	1
+scalar	shrinkage-tangential	wood-shrinkage	tangential_shrinkage_green_to_ovendry	10.5	%	constant
+uncertainty	shrinkage-tangential	unstated	-	-	-	-
+validity	shrinkage-tangential	moisture_content	0	30	%
+validity	shrinkage-tangential	clear_specimen	1	1	1
+validity	shrinkage-tangential	engineering_reference_model	1	1	1
+validity	shrinkage-tangential	source_test_temperature_known	0	0	1
+scalar	shrinkage-volumetric	wood-shrinkage	volumetric_shrinkage_green_to_ovendry	16.3	%	constant
+uncertainty	shrinkage-volumetric	unstated	-	-	-	-
+validity	shrinkage-volumetric	moisture_content	0	30	%
+validity	shrinkage-volumetric	clear_specimen	1	1	1
+validity	shrinkage-volumetric	engineering_reference_model	1	1	1
+validity	shrinkage-volumetric	source_test_temperature_known	0	0	1
+scalar	fiber-saturation	wood-moisture-model	fiber_saturation_moisture_content	30	%	constant
+uncertainty	fiber-saturation	unstated	-	-	-	-
+validity	fiber-saturation	moisture_content	0	30	%
+validity	fiber-saturation	clear_specimen	1	1	1
+validity	fiber-saturation	engineering_reference_model	1	1	1
+validity	fiber-saturation	source_test_temperature_known	0	0	1
 observation	wh-strength	White oak, the White species row within the white-oak group; clear straight-grained small specimens at 12 percent moisture content	FPL-GTR-282 Table 5-3a, Oak/white/White, 12% row; definitions in chapter 5 and table footnotes	Species averages, not pooled white-oak-group values, graded lumber or structural design allowables. Specific gravity uses ovendry mass divided by volume at 12% moisture; density = 1000 * 0.68 * 1.12 = 761.6 kg/m3. Bending MOE includes shear deflection at span/depth 14; longitudinal modulus is the source's approximate 10% correction, 1.1 * 12300 = 13530 MPa. MOR is a bending failure index, not uniaxial tensile strength. Compression perpendicular is stress at proportional limit, not ultimate strength; shear and perpendicular tension average radial and tangential tests. Side hardness is modified-Janka force for half-diameter penetration of an 11.28 mm ball, not pressure. The separately tabulated white-oak elastic ratios are not joined because their group/species population is not identified. Temperature and uncertainty are unspecified. No full stiffness tensor, moisture/temperature extrapolation, heat capacity, conductivity, loss or fracture law is supplied.
 scalar	density-12pct	wh-strength	density	761.6	kg/m3	constant
 uncertainty	density-12pct	unstated	-	-	-	-

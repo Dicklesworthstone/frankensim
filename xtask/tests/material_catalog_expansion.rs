@@ -139,14 +139,14 @@ fn refuses(pack: &NormalizedPack, name: &str, dims: Dims, point: &QueryPoint) {
 fn g0_g3_clear_wood_density_stiffness_and_moisture_are_preserved() {
     let mut final_temperatures = Vec::new();
     for (species, count, sg, bending_mpa, rupture_kpa) in [
-        ("pine-loblolly", 21, 0.51, 12300.0, 88000.0),
-        ("pine-longleaf", 21, 0.59, 13700.0, 100000.0),
-        ("pine-slash", 19, 0.59, 13700.0, 112000.0),
-        ("pine-ponderosa", 21, 0.40, 8900.0, 65000.0),
-        ("oak-northern-red", 12, 0.63, 12500.0, 99000.0),
-        ("oak-white", 12, 0.68, 12300.0, 105000.0),
-        ("cedar-northern-white", 21, 0.31, 5500.0, 45000.0),
-        ("fir-subalpine", 20, 0.32, 8900.0, 59000.0),
+        ("pine-loblolly", 25, 0.51, 12300.0, 88000.0),
+        ("pine-longleaf", 25, 0.59, 13700.0, 100000.0),
+        ("pine-slash", 23, 0.59, 13700.0, 112000.0),
+        ("pine-ponderosa", 25, 0.40, 8900.0, 65000.0),
+        ("oak-northern-red", 16, 0.63, 12500.0, 99000.0),
+        ("oak-white", 16, 0.68, 12300.0, 105000.0),
+        ("cedar-northern-white", 25, 0.31, 5500.0, 45000.0),
+        ("fir-subalpine", 24, 0.32, 8900.0, 59000.0),
     ] {
         let pack = compile(&format!("{species}-fpl-gtr282"), count);
         let p = flags(&[
