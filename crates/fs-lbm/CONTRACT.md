@@ -222,6 +222,30 @@ Focused tests in `tests/material_free_surface_enthalpy/conduction/environment.rs
 compare independent layer/storage calculations, data-driven native population
 changes, combined heat accounting, stiff exchange and transactional refusal.
 
+### Surface radiation on the native free-surface thermal timeline
+
+`step_with_radiative_environment` adds prescribed gray diffuse radiation on
+explicitly exposed liquid/gas patches. The nonlinear Stefan–Boltzmann law is
+reevaluated every thermal substep, using a factored fourth-power difference
+to preserve fluxes near equilibrium. Its positive secant conductance joins
+gas-film and internal-contact conductances in the same monotonicity bound;
+no temperature or energy clipping supplies stability. Radiant and gas-film
+heat may share a physical surface and are each counted exactly once. Finite
+walls, source-bound interfaces, optional molecular heat and attached electrical
+sources retain their original owners. The resulting enthalpy feeds the actual
+material viscosity and native VOF momentum/transport transaction.
+
+This is a gray opaque surface with prescribed constant hemispherical emissivity,
+view factor one to black isothermal surroundings, and cell temperature used as
+surface temperature. It needs a resolved thermal boundary layer or a justified
+lumped-cell approximation, plus time refinement for the explicit first-order
+split. It does not infer emissivity, visibility, multiple reflections, spectral
+transparency, gas radiation, evaporation or finite surrounding storage. Source,
+geometry, budget and cancellation refusals publish no partial state. Focused
+G1/G3/G4 tests compare the analytic nonlinear cooling integral and its time
+refinement, combined gas/radiant energy, native viscosity/momentum response,
+stiff subcycling and atomic refusal on synthetic constitutive fixtures.
+
 ### Finite atmosphere on the native free-surface thermal timeline
 
 `step_with_finite_gas_environment` gives the same moving-liquid thermal owner

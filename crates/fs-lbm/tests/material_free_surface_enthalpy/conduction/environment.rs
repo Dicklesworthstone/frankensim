@@ -14,6 +14,9 @@ mod gas_source;
 #[path = "atmosphere.rs"]
 mod atmosphere;
 
+#[path = "radiation.rs"]
+mod radiation;
+
 const EXPOSED: [usize; 3] = [3, 3, 3];
 
 fn gas_contact<'a>(
@@ -37,6 +40,16 @@ fn with_exposed_liquid<T>(
     moving: bool,
     run: impl FnOnce(&mut MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> T,
 ) -> T {
+    with_exposed_caloric_liquid(card, moving, &caloric(card), 200000.0, run)
+}
+
+fn with_exposed_caloric_liquid<T>(
+    card: &MaterialCard,
+    moving: bool,
+    chart: &EquilibriumEnthalpyPhaseCurve,
+    initial_h: f64,
+    run: impl FnOnce(&mut MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> T,
+) -> T {
     let law = LiquidTemperatureLaw::try_new(
         card,
         &point(400.0),
@@ -53,7 +66,6 @@ fn with_exposed_liquid<T>(
         MaterialPropertySelection::SingleClaimOnly,
     )
     .unwrap();
-    let chart = caloric(card);
     let mut cells = Vec::new();
     for z in 1..=6 {
         for y in 1..=6 {
@@ -79,9 +91,9 @@ fn with_exposed_liquid<T>(
         let mut thermal = flow
             .with_enthalpy(
                 &law,
-                &chart,
+                chart,
                 FreeSurfaceEnthalpyControls::default(),
-                |_| 200000.0,
+                |_| initial_h,
                 &gate,
             )
             .unwrap();

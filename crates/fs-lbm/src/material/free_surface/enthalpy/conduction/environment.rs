@@ -275,12 +275,23 @@ impl Conduction<'_, '_> {
             let g = outgoing.entry(id).or_insert(0.0);
             *g = finite(*g + sample.conductance_w_k)?;
         }
+        for (&id, sample) in self
+            .radiation_endpoints
+            .iter()
+            .zip(&self.radiation_last)
+        {
+            check()?;
+            if sample.conductance_w_k != 0.0 {
+                let g = outgoing.entry(id).or_insert(0.0);
+                *g = finite(*g + sample.conductance_w_k)?;
+            }
+        }
         if outgoing.is_empty() {
             return Ok(proposed_s);
         }
         // The thermal owner has already installed this substep's material
-        // conductances. Include them WITH environmental decay, not as separate
-        // CFL minima, so a cell with both mechanisms cannot overshoot a bath.
+        // conductances. Include them WITH gas-film and radiative decay, not as
+        // separate CFL minima, so their sum cannot overshoot a passive bath.
         for link in thermal.links().values() {
             check()?;
             for id in [link.a, link.b] {

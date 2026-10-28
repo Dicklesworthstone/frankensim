@@ -25,6 +25,11 @@ pub mod environment;
 pub use environment::{
     FreeSurfaceGasContact, FreeSurfaceGasExchange, FreeSurfaceGasFace, FreeSurfaceGasSample,
 };
+/// Gray surface radiation sharing the original thermal and native VOF interval.
+pub mod radiation;
+pub use radiation::{
+    FreeSurfaceRadiationExchange, FreeSurfaceRadiationFace, FreeSurfaceRadiationSample,
+};
 /// Finite atmospheric storage on the same thermal and native VOF interval.
 pub mod atmosphere;
 pub use atmosphere::FreeSurfaceFiniteGasExchange;
@@ -86,6 +91,9 @@ pub struct FreeSurfaceConductionReport {
     /// Environmental heat entering the liquid subsystem's external heat once.
     /// `finite_gas` supplies the opposite gas storage when that bath is finite.
     pub environment: Option<FreeSurfaceGasExchange>,
+    /// Radiant heat from prescribed surroundings, already counted once in
+    /// external heat. Gas-film heat remains a distinct, parallel mechanism.
+    pub radiation: Option<FreeSurfaceRadiationExchange>,
     /// Additional finite gas storage account when the environment has an owner.
     /// Gas/liquid exchange is internal to this combined thermal system.
     pub finite_gas: Option<FreeSurfaceFiniteGasExchange>,
@@ -133,6 +141,12 @@ struct Conduction<'a, 'm> {
     environment_reference: Vec<FreeSurfaceGasSample>,
     environment_heat_j: f64,
     environment_absolute_heat_j: f64,
+    radiation: &'a [FreeSurfaceRadiationFace],
+    radiation_endpoints: Vec<CellId>,
+    radiation_last: Vec<FreeSurfaceRadiationSample>,
+    radiation_endpoint: Vec<FreeSurfaceRadiationSample>,
+    radiation_heat_j: f64,
+    radiation_absolute_heat_j: f64,
     finite_atmosphere: Option<atmosphere::FiniteAtmosphere>,
     electrical: Option<electrical::ElectricalTimeline>,
 }
@@ -295,6 +309,16 @@ impl DepositionObserver for Conduction<'_, '_> {
             let watts = powers.entry(id).or_insert(0.0);
             *watts = environment::finite(*watts + sample.heat_into_liquid_w)?;
         }
+        self.radiation_last = self.sample_radiation(thermal, check)?;
+        for (&id, sample) in self
+            .radiation_endpoints
+            .iter()
+            .zip(&self.radiation_last)
+        {
+            check()?;
+            let watts = powers.entry(id).or_insert(0.0);
+            *watts = environment::finite(*watts + sample.heat_into_liquid_w)?;
+        }
         Ok(powers)
     }
 
@@ -360,6 +384,14 @@ impl DepositionObserver for Conduction<'_, '_> {
         }
         // Both film endpoints use the actually accepted gas T and EOS pressure.
         self.environment_endpoint = self.sample_environment(thermal, check)?;
+        for sample in &self.radiation_last {
+            check()?;
+            let heat = environment::finite(duration_s * sample.heat_into_liquid_w)?;
+            self.radiation_heat_j = environment::finite(self.radiation_heat_j + heat)?;
+            self.radiation_absolute_heat_j =
+                environment::finite(self.radiation_absolute_heat_j + heat.abs())?;
+        }
+        self.radiation_endpoint = self.sample_radiation(thermal, check)?;
         Ok(())
     }
 }
@@ -472,12 +504,43 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         finite_atmosphere: Option<&mut atmosphere::FiniteAtmosphere>,
         gate: &CancelGate,
     ) -> Result<FreeSurfaceConductionReport, Error> {
+        self.advance_with_radiative_environment(
+            faces,
+            heat,
+            controls,
+            viscous,
+            bodies,
+            contacts,
+            interfaces,
+            environment,
+            &[],
+            finite_atmosphere,
+            gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_with_radiative_environment(
+        &mut self,
+        faces: &[FreeSurfaceConductionFace],
+        heat: &[FreeSurfaceCellHeat],
+        controls: FreeSurfaceConductionControls,
+        viscous: &[viscous::FreeSurfaceViscousCell],
+        bodies: &mut [FreeSurfaceThermalBody<'_>],
+        contacts: &[FreeSurfaceBodyContact],
+        interfaces: &[FreeSurfaceBodyInterface<'_>],
+        environment: &[FreeSurfaceGasContact<'_>],
+        radiation: &[FreeSurfaceRadiationFace],
+        finite_atmosphere: Option<&mut atmosphere::FiniteAtmosphere>,
+        gate: &CancelGate,
+    ) -> Result<FreeSurfaceConductionReport, Error> {
         poll(gate)?;
         if controls.maximum_faces > self.controls.max_mass_routes
             || faces
                 .len()
                 .saturating_add(contacts.len())
                 .saturating_add(environment.len())
+                .saturating_add(radiation.len())
                 > controls.maximum_faces
             || bodies.len() > self.controls.max_cells
             || heat.len() > self.controls.max_cells
@@ -686,6 +749,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             });
         }
         let environment_endpoints = self.admit_environment(environment, &cell_id, dx, gate)?;
+        let radiation_endpoints = self.admit_radiation(radiation, &cell_id, dx, gate)?;
         let mut powers = BTreeMap::new();
         let mut absolute_heat = 0.0;
         let mut external_heat = 0.0;
@@ -785,6 +849,12 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             environment_reference: Vec::new(),
             environment_heat_j: 0.0,
             environment_absolute_heat_j: 0.0,
+            radiation,
+            radiation_endpoints,
+            radiation_last: Vec::new(),
+            radiation_endpoint: Vec::new(),
+            radiation_heat_j: 0.0,
+            radiation_absolute_heat_j: 0.0,
             finite_atmosphere: finite_atmosphere.as_deref().cloned(),
             electrical,
         };
@@ -803,18 +873,22 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             poll(gate)?;
             heated.insert(location, thermal.cells()[&id].specific_h_j_kg);
         }
-        let external = if viscous.is_empty() && environment.is_empty() && electrical_report.is_none() {
+        let external = if viscous.is_empty()
+            && environment.is_empty()
+            && radiation.is_empty()
+            && electrical_report.is_none()
+        {
             audit.external_heat_j
         } else {
             let defect =
                 audit.external_heat_j - external_heat - viscous_heat - observer.environment_heat_j
-                    - joule_heat;
+                    - observer.radiation_heat_j - joule_heat;
             if !defect.is_finite() || defect.abs() > controls.energy_tolerance_j {
                 return Err(Error::Invalid(
-                    "authored, molecular, electrical and environmental liquid heat do not close",
+                    "authored, molecular, electrical, gas-film and radiant liquid heat do not close",
                 ));
             }
-            external_heat + observer.environment_heat_j + joule_heat
+            external_heat + observer.environment_heat_j + observer.radiation_heat_j + joule_heat
         };
         let mut body_after = 0.0;
         let mut body_change = 0.0;
@@ -845,12 +919,21 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             last_applied: observer.environment_last,
             thermal_endpoint: observer.environment_endpoint,
         });
+        let radiation_report = (!radiation.is_empty()).then_some(FreeSurfaceRadiationExchange {
+            heat_to_liquid_j: observer.radiation_heat_j,
+            last_applied: observer.radiation_last,
+            thermal_endpoint: observer.radiation_endpoint,
+        });
         let flow = self.advance_prepared_enthalpy(
             heated,
             external,
             viscous_heat,
             body_heat,
-            absolute_heat + body_heat.abs() + observer.environment_absolute_heat_j + joule_heat,
+            absolute_heat
+                + body_heat.abs()
+                + observer.environment_absolute_heat_j
+                + observer.radiation_absolute_heat_j
+                + joule_heat,
             electrical_forces.as_ref(),
             gate,
         )?;
@@ -886,6 +969,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             thermal_endpoint,
             bodies: body_report,
             environment: environment_report,
+            radiation: radiation_report,
             finite_gas: finite_gas_report,
             electrical: electrical_report,
         })
