@@ -542,6 +542,12 @@ lowers the declared interface to the correct `from`/`to` boundary slots, and
 proves wrong orientation, source-face budget exhaustion, and pre-cancellation
 refuse atomically.
 
+## Native delivered-power design declaration
+
+The existing native study binder also admits the explicit `fsim-native-design-study :version 1` declaration. It reuses the native project/geometry/card coordinate binding without a sampling law. Required controls are one `regional-power` volumetric entity with nonnegative strictly ordered delivered-watt bounds, positive watt and kelvin tolerances, 2..=256 evaluations, a positive wall allowance at most 86400 seconds, seed, and `nondecreasing-temperature-with-power` assumption. Unknown/repeated fields, wrong dimensions and unsupported control families refuse.
+
+Binding requires one matching static power row with positive duty and refuses a transient schedule overriding that region. Candidate projects preserve duty and all unrelated fields while setting authored watts to delivered watts divided by duty; every candidate is independently validated. The unchanged single at-most `temperature-max` requirement supplies its limit minus margin. The execution layer owns actual steady or sampled-trajectory temperature evaluation, feasibility, search and recovery. Admission proves neither monotonicity nor physical or numerical safety.
+
 ## No-claim boundaries
 
 - An admissible `.fsim` document proves the project is well-formed and

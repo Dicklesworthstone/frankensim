@@ -408,7 +408,7 @@ impl Model {
         Ok(model)
     }
 
-    fn project(&self, values: &[f64]) -> Result<DecodedProject> {
+    pub(super) fn project(&self, values: &[f64]) -> Result<DecodedProject> {
         let project = self.bound.sample_project(values).map_err(project_error)?;
         let source = fs_project::print_sexpr(&project).map_err(project_error)?;
         fs_project::parse_sexpr(&source).map_err(project_error)

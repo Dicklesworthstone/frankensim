@@ -1,4 +1,5 @@
-//! A probability study of an existing native cooling project, not another
+//! Probability studies and deterministic delivered-power sizing of an existing
+//! native cooling project, not another
 //! physical-model grammar. Every sample changes only explicit project inputs;
 //! geometry, material identities, solver policy and requirements stay intact.
 //!
@@ -26,6 +27,8 @@ use crate::{ConsequenceClass, DecisionGate, ProjectError, ProjectSpec,
     RequirementDirection, ThermalBoundaryCondition};
 
 mod contact_inputs;
+mod design;
+pub use design::DesignPolicy;
 mod lhs;
 pub use lhs::LhsLayout;
 pub mod mean_control;
@@ -117,7 +120,8 @@ impl Target {
     }
 }
 
-/// An explicit probability law in coherent units, in sampler declaration order.
+/// A bounded physical coordinate in coherent units. Probability studies declare
+/// a uniform law; deterministic native design uses only its closed search range.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UniformParameter {
     /// Unique statistical parameter name.
@@ -191,6 +195,7 @@ pub struct UncertaintyStudy {
     lhs: Option<LhsLayout>,
     sobol_sensitivity: bool,
     mean_control: Option<MeanControlPolicy>,
+    design: Option<DesignPolicy>,
 }
 
 /// A study bound to one admitted base project. Samples are fresh copies, so
@@ -323,6 +328,9 @@ impl UncertaintyStudy {
         if source.len() > MAX_SOURCE_BYTES { return Err(error("study source exceeds 64 KiB")); }
         let root = fs_ir::sexpr::parse(source).map_err(|e| error(e.to_string()))?;
         let nodes = list(&root)?;
+        if matches!(nodes.first().map(|node| &node.kind), Some(NodeKind::Symbol(name)) if name == "fsim-native-design-study") {
+            return design::parse(&root);
+        }
         symbol(nodes.first().ok_or_else(|| error("empty study"))?, "fsim-uncertainty-study")?;
         let f = fields_with_optional(&nodes[1..], &["version", "project", "samples", "seed", "wall-time",
             "method", "correlation", "qoi", "geometry", "materials", "interfaces", "parameters"], &["compliance", "qmc", "lhs", "mean-control"])?;
@@ -444,7 +452,7 @@ impl UncertaintyStudy {
         Ok(Self { canonical: fs_ir::sexpr::print(&root).map_err(|e| error(e.to_string()))?,
             project: text(f["project"])?, samples, seed: integer(f["seed"])?, wall_seconds, qoi,
             geometry, materials: paths(f["materials"])?, interfaces: paths(f["interfaces"])?, parameters,
-            latent_correlation, compliance, qmc, lhs, sobol_sensitivity, mean_control })
+            latent_correlation, compliance, qmc, lhs, sobol_sensitivity, mean_control, design: None })
     }
     /// Canonical source, including all explicit path and parameter declarations.
     #[must_use] pub fn canonical(&self) -> &str { &self.canonical }
@@ -479,6 +487,9 @@ impl UncertaintyStudy {
     #[must_use] pub const fn sobol_sensitivity(&self) -> bool { self.sobol_sensitivity }
     /// Explicit whole-model mean calibration; absent in versions 1 and 2.
     #[must_use] pub const fn mean_control(&self) -> Option<MeanControlPolicy> { self.mean_control }
+    /// Deterministic delivered-power sizing policy. Its coordinate bounds are
+    /// search bounds, never a probability law; no statistical executor applies.
+    #[must_use] pub const fn design(&self) -> Option<DesignPolicy> { self.design }
     /// Geometry sources, matched by role, not by path order.
     #[must_use] pub fn geometry(&self) -> &[MeshSource] { &self.geometry }
     /// Material pack sources.
@@ -495,6 +506,7 @@ impl UncertaintyStudy {
     /// declared envelope. This never expands a material or operating domain.
     pub fn bind(self, base: &ProjectSpec) -> Result<BoundStudy> {
         validate_project(base)?;
+        design::admit(&self, base)?;
         let metadata = base.metadata.as_ref().ok_or_else(|| error("missing metadata"))?;
         if metadata.decision_gate != DecisionGate::ScopingEstimate || metadata.consequence != ConsequenceClass::Advisory {
             return Err(error("empirical native UQ is advisory scoping, not a compliance signoff"));
@@ -556,7 +568,14 @@ impl BoundStudy {
         let mut project = self.base.clone();
         for (parameter, &value) in self.study.parameters.iter().zip(values) {
             if !value.is_finite() || value < parameter.low || value > parameter.high { return Err(error("sample outside declared probability support")); }
-            apply(&mut project, parameter, value)?;
+            let authored_value = if self.study.design.is_some() {
+                let duty = self.base.power.iter().flatten().find(|row| row.region == parameter.entity)
+                    .ok_or_else(|| error("missing delivered-power design row"))?.duty;
+                let authored = value / duty;
+                if !authored.is_finite() { return Err(error("delivered-power coordinate exceeds finite authored watts")); }
+                authored
+            } else { value };
+            apply(&mut project, parameter, authored_value)?;
         }
         validate_project(&project)?;
         Ok(project)

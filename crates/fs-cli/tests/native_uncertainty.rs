@@ -7,6 +7,8 @@ mod compliance;
 mod copula;
 #[path = "native_uncertainty/fan_speed.rs"]
 mod fan_speed;
+#[path = "native_uncertainty/design.rs"]
+mod design;
 #[path = "../src/json_read.rs"]
 mod json_read;
 #[path = "native_uncertainty/nominal_adjoint.rs"]

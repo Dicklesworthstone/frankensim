@@ -1,0 +1,19 @@
+; Deterministic sizing of the existing synthetic native cooling reference.
+; The coordinate is DELIVERED watts; no probability law or sampler is implied.
+(fsim-native-design-study
+  :version 1
+  :project "../../data/reference-project/cooling-reference.fsim"
+  :evaluations 32
+  :seed 29
+  :wall-time 600s
+  :qoi "temperature-max"
+  :geometry (
+    (mesh :role "enclosure"
+      :path "../../data/reference-project/plate.stl"
+      :unit "m" :max-hole-edges 0))
+  :materials ("../../data/reference-project/aa6061.fsmcdpk")
+  :interfaces ()
+  :control (regional-power :entity "air"
+    :minimum 0W :maximum 1500W :tolerance 0.5W)
+  :temperature-tolerance 0.1K
+  :assumption nondecreasing-temperature-with-power)

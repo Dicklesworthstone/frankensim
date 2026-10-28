@@ -38,6 +38,8 @@ pub(crate) use model::{PreparedStudy, StudyPins};
 use execution::Execution;
 #[path = "study_uncertainty/mean_control.rs"]
 mod mean_control;
+#[path = "study_uncertainty/design.rs"]
+mod design;
 
 const DRIVER: &str = "native-cooling-uncertainty-v1";
 const RECEIPT_KIND: &str = "study-run-receipt";
@@ -283,6 +285,7 @@ struct Outcome {
     pointer: String,
     receipt: String,
     status: String,
+    authority: &'static str,
 }
 fn render(out: Outcome, mode: OutputMode) -> CommandOutput {
     let exit_code = match out.status.as_str() {
@@ -300,8 +303,8 @@ fn render(out: Outcome, mode: OutputMode) -> CommandOutput {
             out.receipt
         ),
         OutputMode::Text => format!(
-            "command=study\nstatus={}\nrun={}\nauthority=estimated-native-model-sampling\n",
-            out.status, out.pointer
+            "command=study\nstatus={}\nrun={}\nauthority={}\n",
+            out.status, out.pointer, out.authority
         ),
     };
     CommandOutput {
@@ -569,6 +572,7 @@ fn persist(
             pointer: format!("study-{}", a.hash.to_hex()),
             receipt,
             status: status.into(),
+            authority: "estimated-native-model-sampling",
         })
     })();
     match result {
@@ -603,6 +607,9 @@ fn load(ledger: &Ledger, pointer: &str) -> Result<Loaded> {
         })?;
     let bytes = artifact(ledger, hash, RECEIPT_KIND, MAX_ARTIFACT_BYTES)?;
     let value = parse(&bytes)?;
+    if value.str_field("driver") == Some(design::DRIVER) {
+        return design::validate_loaded(ledger, hash, value, bytes);
+    }
     if value.str_field("schema") != Some(STUDY_RUN_RECEIPT_SCHEMA)
         || value.str_field("driver") != Some(DRIVER)
     {
@@ -857,11 +864,12 @@ pub(crate) fn looks_like(path: &Path) -> bool {
         return false;
     }
     // This is only routing. The full typed parser owns all admission.
-    text.lines()
+    let routing = text.lines()
         .map(|line| line.split(';').next().unwrap_or(""))
-        .collect::<String>()
-        .trim_start()
-        .starts_with("(fsim-uncertainty-study")
+        .collect::<String>();
+    let routing = routing.trim_start();
+    routing.starts_with("(fsim-uncertainty-study")
+        || routing.starts_with("(fsim-native-design-study")
 }
 pub(crate) fn owns_run(pointer: &str, path: &Path) -> bool {
     if legacy::owns(pointer) {
@@ -884,7 +892,7 @@ pub(crate) fn owns_run(pointer: &str, path: &Path) -> bool {
     };
     artifact(&ledger, hash, RECEIPT_KIND, MAX_ARTIFACT_BYTES)
         .and_then(|bytes| parse(&bytes))
-        .is_ok_and(|value| value.str_field("driver") == Some(DRIVER))
+        .is_ok_and(|value| matches!(value.str_field("driver"), Some(DRIVER | design::DRIVER)))
 }
 pub(crate) fn study_path(
     path: &Path,
@@ -897,20 +905,19 @@ pub(crate) fn study_path(
         let model = Model::load(path)?;
         // Admit the entire joint law, including numerical PSD, before opening
         // a ledger. The bounded sampler is reconstructed when driving the run.
-        Execution::new(&model)?;
+        if model.bound.study().design().is_none() { Execution::new(&model)?; }
         let ledger = Ledger::open(
             ledger_path
                 .to_str()
                 .ok_or_else(|| fail("cli-uncertainty-ledger", "ledger path is not UTF-8"))?,
         )?;
-        drive(
-            &model,
-            &ledger,
-            cap,
-            &CancelGate::new_clock_free(),
-            Instant::now(),
-            None,
-        )
+        let gate = CancelGate::new_clock_free();
+        let started = Instant::now();
+        if model.bound.study().design().is_some() {
+            design::drive(&model, &ledger, cap, &gate, started, None)
+        } else {
+            drive(&model, &ledger, cap, &gate, started, None)
+        }
     })();
     match result {
         Ok(out) => render(out, mode),
@@ -946,24 +953,26 @@ pub(crate) fn resume_path(
             .ok_or_else(|| fail("cli-uncertainty-run", "missing status"))?;
         if matches!(status, "completed" | "refused" | "decision-reached")
             || (status == "budget-exhausted"
-                && old.value.str_field("termination") == Some("lifetime-sample-budget"))
+                && matches!(old.value.str_field("termination"),
+                    Some("lifetime-sample-budget" | "lifetime-evaluation-budget")))
         {
             return Ok(Outcome {
                 pointer: pointer.into(),
                 receipt: String::from_utf8(old.bytes)
                     .map_err(|e| fail("cli-uncertainty-run", e.to_string()))?,
                 status: status.into(),
+                authority: if old.value.str_field("driver") == Some(design::DRIVER) {
+                    "estimated-native-design"
+                } else { "estimated-native-model-sampling" },
             });
         }
         let model = Model::restore(&ledger, hash_field(&old.value, "model")?)?;
-        drive(
-            &model,
-            &ledger,
-            cap,
-            &CancelGate::new_clock_free(),
-            started,
-            Some(&old),
-        )
+        let gate = CancelGate::new_clock_free();
+        if model.bound.study().design().is_some() {
+            design::drive(&model, &ledger, cap, &gate, started, Some(&old))
+        } else {
+            drive(&model, &ledger, cap, &gate, started, Some(&old))
+        }
     })();
     match result {
         Ok(out) => render(out, mode),
@@ -991,17 +1000,21 @@ pub(crate) fn export(
                 .ok_or_else(|| fail("cli-uncertainty-ledger", "ledger path is not UTF-8"))?,
         )?;
         let old = load(&ledger, pointer)?;
-        let fields: &[(&str, &str, &str)] = if command == "package" {
-            &[("package", "study-package", "fspkg")]
+        let mut fields = if command == "package" {
+            vec![("package", "study-package", "fspkg")]
         } else {
-            &[
+            vec![
                 ("report_json", "study-report-json", "json"),
                 ("report_html", "study-report-html", "html"),
             ]
         };
+        if command != "package" && old.value.str_field("driver") == Some(design::DRIVER)
+            && old.value.str_field("selected_project").is_some() {
+            fields.push(("selected_project", "solve-project-source", "fsim"));
+        }
         let mut paths = String::new();
         let mut text_paths = String::new();
-        for &(key, kind, extension) in fields {
+        for &(key, kind, extension) in &fields {
             let bytes = linked(&ledger, &old.value, key, kind)?;
             if key == "package" {
                 let package = EvidencePackage::from_json(

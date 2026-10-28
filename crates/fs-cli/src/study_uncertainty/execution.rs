@@ -55,6 +55,9 @@ fn admit_contact_inputs(model: &Model) -> Result<()> {
 
 impl Execution {
     pub(super) fn new(model: &Model) -> Result<Self> {
+        if model.bound.study().design().is_some() {
+            return Err(fail("cli-native-power-design", "deterministic design uses its physical bracket, not a probability sampler"));
+        }
         admit_contact_inputs(model)?;
         if let Some(plan) = lhs_plan(model) {
             return LhsExecution::new(&plan).map(Self::LatinHypercube)

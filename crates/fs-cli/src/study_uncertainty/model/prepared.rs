@@ -65,7 +65,9 @@ impl PreparedStudy {
             .map_err(|error| error.to_string())?;
         // Includes the joint law's numerical PSD and executor-specific gates,
         // which syntax-only study binding does not establish.
-        Execution::new(&model).map_err(|error| error.to_string())?;
+        if model.bound.study().design().is_none() {
+            Execution::new(&model).map_err(|error| error.to_string())?;
+        }
         let input_bytes = model.input_bytes().map_err(|error| error.to_string())?;
         Ok(Self { model, input_bytes })
     }
@@ -82,7 +84,13 @@ impl PreparedStudy {
             let cap = budget(override_text)?;
             let ledger = Ledger::open(ledger_path.to_str()
                 .ok_or_else(|| fail("cli-uncertainty-ledger", "ledger path is not UTF-8"))?)?;
-            drive(&self.model, &ledger, cap, &CancelGate::new_clock_free(), Instant::now(), None)
+            let gate = CancelGate::new_clock_free();
+            let started = Instant::now();
+            if self.model.bound.study().design().is_some() {
+                super::super::design::drive(&self.model, &ledger, cap, &gate, started, None)
+            } else {
+                drive(&self.model, &ledger, cap, &gate, started, None)
+            }
         })();
         match result {
             Ok(out) => render(out, mode),

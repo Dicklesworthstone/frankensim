@@ -1119,6 +1119,16 @@ surface or manufactured solid. Export preserves the selected incumbent's
 Estimated authority. Bounded allocation and validation reject malformed field
 dimensions, nonfinite data and inconsistent voxel geometry.
 
+### Native delivered-power design
+
+The existing command accepts `study examples/native-uncertainty/power-design.fsim design.db [--budget N]`. A `fsim-native-design-study :version 1` declaration maximizes one volumetric region's delivered power using complete native cooling solves. Geometry, materials, contact, solver settings, the initial state and requirements come from the referenced ordinary project. The physical coordinate is delivered watts: a positive authored duty is preserved, and authored watts become delivered watts divided by that duty. A transient schedule that replaces power in the selected region refuses before any candidate; zero duty is not a controllable power source.
+
+The declaration supplies minimum/maximum watts, watt and kelvin tolerances, a total evaluation count, wall allowance, seed, asset paths and the explicit `nondecreasing-temperature-with-power` assumption. The lower endpoint must produce a feasible baseline. A passing upper endpoint is the largest allowed coordinate. Otherwise bisection retains a passing/failing bracket; completion requires both declared tolerances. An observed violation of monotonicity refuses. Each decision uses the original requirement limit minus margin. Steady projects use their native maximum-temperature QoI. Transient projects use the forward receipt's region-bound fine-grid sampled peak, including the original initial state, and retain the final native QoI separately. No adjoint is required.
+
+The `native-cooling-power-design-v1` result retains every actual child run, project hash, QoI and conduction receipt, decision temperature, final temperature, and transient peak time/state. It always retains the highest-power observed feasible project. An infeasible lower endpoint, refused child or observed nonmonotonicity never becomes successful completion; budget exhaustion retains the accepted baseline with exit 6. Reported feasibility is for the declared finite numerical model, not the child's engineering uncertainty verdict, continuous-time safety, a continuum bound or global optimality.
+
+`--budget N` limits additional candidates in one invocation; zero retains the model without solving. `study --resume study-<receipt-hash> design.db` restores the original model, assets and deterministic bracket without reopening source paths or re-solving accepted candidates. Original lifetime evaluation and wall limits persist. `report <study-run> design.db` exports JSON, HTML and the actual selected `.fsim` project when one is feasible; `package` uses the existing retained-artifact export. The package introduces no optimality or physical-error certificate.
+
 ### Native cooling probability study
 
 `study <study.fsim> <ledger.db> [--budget N]` recognizes
