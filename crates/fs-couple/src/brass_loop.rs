@@ -33,7 +33,7 @@ use fs_phs::linear_exact::{
 };
 use fs_phs::{PortHamiltonian, mass_spring_damper};
 
-use crate::mm_line::{CupState, MmLineBank, MmLineConfig, MmLineError, MmLoad, cup_junction};
+use crate::mm_line::{CupState, MmBankLoad, MmLineBank, MmLineConfig, MmLineError, cup_junction};
 use fs_duct::Duct;
 
 /// File-driven lip-valve performances observed at a baffled microphone.
@@ -119,14 +119,16 @@ pub struct BrassVoice {
 impl BrassVoice {
     /// Compose the voice: valve-combination ducts + the lip card + a
     /// mouthpiece-cup volume (authored; D18 electrically-short).
+    /// A shared mouth load or [`MmBankLoad::PerCombo`] is realized once, then
+    /// valve changes carry the outgoing-wave history through the same bank.
     ///
     /// # Errors
     /// [`MmLineError`] from the bank realization or lip admission.
-    pub fn new(
+    pub fn new<'a>(
         combos: &[Duct],
         labels: &[&str],
         gas: &GasState,
-        load: &MmLoad<'_>,
+        load: impl Into<MmBankLoad<'a>>,
         config: &MmLineConfig,
         lip: LipIsland,
         cup_volume_m3: f64,
@@ -466,6 +468,129 @@ pub(crate) mod brass_loop_tests {
             rest_gap_m: 5.0e-4,
             face_area_m2: 2.0e-5,
             provenance: "AUTHORED probe values (Estimate)".to_string(),
+        }
+    }
+
+    /// G0/G3: distinct referenced mouth loads participate in the live lip/cup
+    /// loop. Both hard and faded valve changes retain the actual outgoing waves.
+    #[test]
+    fn per_combo_strict_loads_render_and_carry_waves_through_valve_changes() {
+        use fs_duct::{TabulatedLoad, TabulatedMouth};
+        use fs_math::c64::C64;
+
+        let gas = air(293.15);
+        let cfg = MmLineConfig {
+            sample_rate_hz: 48_000,
+            n_modes: 2,
+            extra_slices: 1,
+            loss: LossModel::Lossless,
+        };
+        let radius = 0.002;
+        let zc = gas.density * gas.sound_speed / (core::f64::consts::PI * radius * radius);
+        let dt = 1.0 / f64::from(cfg.sample_rate_hz);
+        let ceiling = crate::driving_point::LineLadder::default().max_taps;
+        let resistances = [0.7, 1.3];
+        let mut ducts = Vec::new();
+        let mut tables = Vec::new();
+        for (transit_samples, resistance) in [8.0, 12.0].into_iter().zip(resistances) {
+            let length = transit_samples * gas.sound_speed * dt;
+            ducts.push(Duct {
+                segments: vec![Segment::Cylinder { radius, length }],
+            });
+            tables.push(
+                TabulatedLoad::try_new(
+                    vec![
+                        core::f64::consts::TAU / (ceiling as f64 * dt),
+                        core::f64::consts::PI / dt,
+                    ],
+                    vec![C64::new(resistance * zc, 0.0); 2],
+                    "analytic resistive valve-path control",
+                    0.0,
+                )
+                .unwrap()
+                .with_mouth(TabulatedMouth {
+                    axial_position_m: length,
+                    radius_m: radius,
+                    gas,
+                    dc_impedance: resistance * zc,
+                })
+                .unwrap(),
+            );
+        }
+        let loads: Vec<_> = tables.iter().map(MmLoad::Tabulated).collect();
+        let mut voice = BrassVoice::new(
+            &ducts,
+            &["short", "long"],
+            &gas,
+            MmBankLoad::PerCombo(&loads),
+            &cfg,
+            authored_lip(),
+            1.5e-6,
+        )
+        .expect("each valve path has its own strict load");
+        for (combo, resistance) in resistances.into_iter().enumerate() {
+            let receipt = &voice.receipts()[combo];
+            assert_eq!(receipt.table_bins, receipt.n_fft / 2);
+            assert_eq!(receipt.fallback_bins, 0);
+            let dc: f64 = voice.bank.combo_taps(combo).iter().sum();
+            let expected_dc = (resistance - 1.0) / (resistance + 1.0);
+            assert!((dc - expected_dc).abs() < 2.0e-11);
+        }
+        assert_eq!(voice.receipts()[0].n_fft, voice.receipts()[1].n_fft);
+        voice
+            .apply(BrassControl::SetBlowingPressure(1_500.0))
+            .unwrap();
+        let mut history = Vec::new();
+        let mut previous_combo = 0;
+        for (combo, fade_samples, samples) in [(0, 0, 256), (1, 16, 64), (0, 0, 64)] {
+            let lip_before = voice.lip_state.clone();
+            let cup_before = voice.cup;
+            voice
+                .apply(BrassControl::SetValve {
+                    combo,
+                    fade_samples,
+                })
+                .unwrap();
+            assert_eq!(voice.lip_state, lip_before);
+            assert_eq!(voice.cup.p_prev, cup_before.p_prev);
+            assert_eq!(voice.cup.u_prev, cup_before.u_prev);
+            for sample in 0..samples {
+                let mut pressure = [0.0];
+                let mut outgoing = [0.0];
+                voice
+                    .step_block_outgoing(&mut pressure, &mut outgoing)
+                    .unwrap();
+                assert!(pressure[0].is_finite() && outgoing[0].is_finite());
+                history.push(outgoing[0]);
+                // Independent direct convolution of the rendered source trace,
+                // including waves emitted before this valve was selected.
+                let reflected = |which| -> f64 {
+                    voice
+                        .bank
+                        .combo_taps(which)
+                        .iter()
+                        .zip(history.iter().rev())
+                        .map(|(tap, wave)| tap * wave)
+                        .sum()
+                };
+                let expected = if sample < fade_samples {
+                    let weight = (sample + 1) as f64 / fade_samples as f64;
+                    (1.0 - weight) * reflected(previous_combo) + weight * reflected(combo)
+                } else {
+                    reflected(combo)
+                };
+                let actual = voice.bank.incoming();
+                assert!(
+                    (actual - expected).abs() <= 2.0e-12 * expected.abs().max(1.0),
+                    "combo {combo}, sample {sample}: incoming {actual} != history {expected}"
+                );
+            }
+            previous_combo = combo;
+        }
+        assert!(history.iter().any(|wave| wave.abs() > 1.0));
+        assert_eq!(voice.lift_log().len(), 2);
+        for lift in voice.lift_log() {
+            assert_eq!(lift.carried, voice.receipts()[0].n_fft);
         }
     }
 

@@ -134,6 +134,45 @@ impl MmLoad<'_> {
     }
 }
 
+/// Mouth loads for a bank of valve-combination ducts.
+///
+/// Each table's physical reference belongs to its own original duct. Changing
+/// a valve path does not authorize moving or rebinding a table's mouth plane.
+#[derive(Clone, Copy)]
+pub enum MmBankLoad<'a> {
+    /// One load shared by every duct; its reference must match every combo.
+    Shared(MmLoad<'a>),
+    /// One load per duct, in the same order as the ducts and labels.
+    PerCombo(&'a [MmLoad<'a>]),
+}
+
+impl<'a> From<MmLoad<'a>> for MmBankLoad<'a> {
+    fn from(load: MmLoad<'a>) -> Self {
+        Self::Shared(load)
+    }
+}
+
+impl<'a> From<&MmLoad<'a>> for MmBankLoad<'a> {
+    fn from(load: &MmLoad<'a>) -> Self {
+        Self::Shared(*load)
+    }
+}
+
+impl<'a> From<MouthLoad<'a>> for MmBankLoad<'a> {
+    fn from(load: MouthLoad<'a>) -> Self {
+        Self::Shared(load.into())
+    }
+}
+
+impl<'a> MmBankLoad<'a> {
+    fn at(self, combo: usize) -> MmLoad<'a> {
+        match self {
+            Self::Shared(load) => load,
+            Self::PerCombo(loads) => loads[combo],
+        }
+    }
+}
+
 /// Configuration for one bank realization.
 #[derive(Debug, Clone, Copy)]
 pub struct MmLineConfig {
@@ -404,6 +443,9 @@ impl MmLineBank {
     /// [`MouthLoad::Tabulated`] requires a matching physical mouth reference and
     /// covers the whole ladder's positive-frequency band. Its declared DC load
     /// passes through the same multimodal bore; no analytic splice is inferred.
+    /// Use [`MmBankLoad::PerCombo`] when each duct needs its own referenced load.
+    /// All loads are admitted against their corresponding ducts before the
+    /// shared FFT ladder starts; no reference plane is inferred or relocated.
     ///
     /// # Errors
     /// [`MmLineError`] on refusal: geometry, authority, non-passivity, or
@@ -413,14 +455,21 @@ impl MmLineBank {
         ducts: &[Duct],
         labels: &[&str],
         gas: &GasState,
-        load: impl Into<MmLoad<'a>>,
+        load: impl Into<MmBankLoad<'a>>,
         config: &MmLineConfig,
     ) -> Result<MmLineBank, MmLineError> {
-        let load = load.into();
+        let loads = load.into();
         if ducts.is_empty() || ducts.len() != labels.len() {
             return Err(MmLineError::Invalid {
                 what: "combos and labels must be non-empty and match",
             });
+        }
+        if let MmBankLoad::PerCombo(per_combo) = loads {
+            if per_combo.len() != ducts.len() {
+                return Err(MmLineError::Invalid {
+                    what: "per-combo loads must match the ducts and labels in count and order",
+                });
+            }
         }
         if config.sample_rate_hz == 0 {
             return Err(MmLineError::Invalid {
@@ -434,7 +483,7 @@ impl MmLineBank {
 
         let mut max_geo_delay = 0.0_f64;
         let mut delays = Vec::with_capacity(ducts.len());
-        for duct in ducts {
+        for (combo, duct) in ducts.iter().enumerate() {
             if (input_radius(duct)? - r_in).abs() > 1e-12 * r_in {
                 return Err(MmLineError::Invalid {
                     what: "every combo must share the input radius (one zc)",
@@ -459,7 +508,13 @@ impl MmLineBank {
             }
             max_geo_delay = max_geo_delay.max(geo_delay);
             delays.push(geo_delay);
-            validate_mouth_load(duct, gas, &load, config.sample_rate_hz, ladder.max_taps)?;
+            validate_mouth_load(
+                duct,
+                gas,
+                &loads.at(combo),
+                config.sample_rate_hz,
+                ladder.max_taps,
+            )?;
         }
 
         // DC: each combo's own plane-reflectance limit (DC flow resistance
@@ -467,7 +522,9 @@ impl MmLineBank {
         // a spectral jump, which leaves an N-independent tail in the IR.
         let r_dc: Vec<C64> = ducts
             .iter()
-            .map(|duct| {
+            .enumerate()
+            .map(|(combo, duct)| {
+                let load = loads.at(combo);
                 if load.is_strict() {
                     let response = dc_response(duct, gas, config, &load)?;
                     let r = admit_plane_reflection(reflectance(response.plane_impedance, zc0))?;
@@ -524,6 +581,7 @@ impl MmLineBank {
             let half = n_fft / 2;
             let mut all_converged = true;
             for (combo, duct) in ducts.iter().enumerate() {
+                let load = loads.at(combo);
                 let rung = &mut rungs[combo];
                 let mut r_pos = vec![C64::ZERO; half + 1];
                 let mut from_table = vec![false; half + 1];
@@ -1430,6 +1488,43 @@ mod mm_line_tests {
             MatrixFirLine::new(&duct, &gas, MouthLoad::Matched, &config,),
             Err(MmLineError::Invalid { .. })
         ));
+    }
+
+    /// G0: every original duct owns its load reference, including combinations
+    /// that are inactive at startup. Counts are never silently truncated.
+    #[test]
+    fn per_combo_loads_require_exact_count_and_each_original_mouth() {
+        let (duct, gas, table, config) = full_band_load(48_000);
+        let mut longer = duct.clone();
+        if let Segment::Cylinder { length, .. } = &mut longer.segments[0] {
+            *length *= 1.5;
+        }
+        let ducts = [duct, longer];
+        let labels = ["short", "long"];
+        let three = [MmLoad::Tabulated(&table); 3];
+        for count in [0, 1, 3] {
+            assert!(matches!(
+                MmLineBank::new(
+                    &ducts,
+                    &labels,
+                    &gas,
+                    MmBankLoad::PerCombo(&three[..count]),
+                    &config,
+                ),
+                Err(MmLineError::Invalid { .. })
+            ));
+        }
+        // The first table is valid for combo zero, but not for the longer
+        // path. A per-combo selector cannot reinterpret that physical plane.
+        for load in [
+            MmBankLoad::Shared(three[0]),
+            MmBankLoad::PerCombo(&three[..2]),
+        ] {
+            assert!(matches!(
+                MmLineBank::new(&ducts, &labels, &gas, load, &config),
+                Err(MmLineError::Duct(_))
+            ));
+        }
     }
 
     #[test]
