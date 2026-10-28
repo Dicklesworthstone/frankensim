@@ -166,3 +166,23 @@ A trial audit is accepted only with its trial. Ordinary energy-only APIs do no
 entropy integration. G1/G3 tests cover isolated exchange, refinement, reservoirs,
 latent storage, equilibrium, deferred birth, resolved implicit sources, missing
 material entropy and cancellation without publication.
+
+
+## Shared chambers on actual multi-cell heat histories
+
+`enthalpy::sublimation::chamber` applies one joint phase exchange to canonical
+cell identities using each cell's original caloric law and exposed area.
+`sublimate_chamber` validates every candidate before committing any solid or
+vapor state. `advance_chamber_sublimating_to` composes original heat transport
+with joint exchange, honors start-of-interval exposure and exact scheduled
+birth/contact boundaries, and retains one whole-advance thermal work budget.
+The report checks combined solid/vapor mass and the original total energy
+account, while keeping each surface's recession separate.
+
+Whole cells must remain pure solid; gas temperature and reference geometry
+remain fixed. Complete extinction requires a separate topology owner and
+refuses atomically. Ten native integration regressions passed for inventory,
+redistribution, original caloric charts and heat graph, canonical order,
+event timing, work ceilings and late cancellation. The runnable fs-material
+example `ice_cold_trap` uses the real ice law to compute frost growth on a cold
+film supplied by a warmer film through an initially empty shared chamber.

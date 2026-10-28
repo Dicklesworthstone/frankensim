@@ -18,6 +18,10 @@
 //! vapor reservoir has a mass balance and an energy-transfer account, not a
 //! solved gas temperature or flow field.
 
+/// Multiple thermal cells sharing one finite vapor inventory.
+#[path = "sublimation/chamber.rs"]
+pub mod chamber;
+
 use super::{CellId, DepositionError, DepositionSimulation, EnergyAudit, Event, StepConfig};
 use crate::sublimation::{
     SolidSurfaceState, SolverConfig, SublimationError, SublimationLaw, SurfaceKinetics,
