@@ -6,9 +6,13 @@
 //! survive both operations. The separate [`transfer`] operation exchanges mass
 //! between volumes; no piston inertia or combustion is implied. The opt-in [`midpoint`] update couples heat and volume work in
 //! conservative coordinates; it is not an exact finite isentropic operation.
+//! The [`isobaric`] path heats against a quasistatic constant-pressure load,
+//! with enthalpy and the actual pressure-volume work checked independently.
 
 /// Conservative composition/model replacement at fixed mass, volume and total internal energy.
 pub mod composition;
+/// Constant-pressure heating with independent enthalpy and boundary-work balances.
+pub mod isobaric;
 /// Work-conjugate mechanical loads using the common acoustic compressibility.
 pub mod mechanics;
 /// Simultaneous heating and volume work through the original material laws.
@@ -35,7 +39,8 @@ pub struct GasVolumeStep {
     pub initial_volume_m3: f64,
     /// Accepted final volume [m3].
     pub final_volume_m3: f64,
-    /// Actual `m*(u_final-u_initial)` [J].
+    /// Original-law `m Delta u` [J], canceling common formation references
+    /// before rounding rather than subtracting absolute stored energies.
     pub stored_energy_change_j: f64,
     /// Work delivered by the gas [J], equal to minus its stored-energy change.
     /// This is the thermodynamic work on the admitted isentrope, NOT an
@@ -128,8 +133,10 @@ impl ClosedGasParcel {
         }
         let solved = old.model.reconstruct_density_entropy_change(&old.point, density,
             0.0, controls, &mut cancelled)?;
-        let stored = old.mass_kg * (solved.state().specific_internal_energy_j_kg()
-            - old.state.specific_internal_energy_j_kg());
+        let stored = old.mass_kg * old.model.thermodynamics().specific_internal_energy_change(
+            fs_qty::Temperature::new(temperature),
+            fs_qty::Temperature::new(solved.state().state().temperature),
+        ).map_err(|error| crate::thermochemical_gas::failure("isentropic volume work", error))?.value();
         let entropy_change = old.mass_kg * solved.residual_j_kg_k();
         // Positive cv and pressure imply heating on compression and cooling on
         // expansion. Do not accept vanished work under an overly loose tolerance.
