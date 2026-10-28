@@ -23,6 +23,7 @@ pub(crate) mod dg;
 pub mod harmonic;
 pub mod radiation;
 pub mod damping;
+pub mod coefficients;
 pub use exact::prepared::{MAX_PREPARED_MODAL_MODES, PreparedModalBudget};
 
 /// One attachment in a component's unchanged mass-normalized modal basis.
@@ -545,6 +546,8 @@ impl CoupledModalSystem {
     /// Accepted components in original order; callers cannot mutate their basis.
     #[must_use]
     pub fn components(&self) -> &[ModalAcousticTimeModel] { &self.models }
+    /// Read-only endpoint for the native stage/admit/publish composition boundary.
+    pub(crate) fn staged_components(&self) -> &[ModalAcousticTimeModel] { &self.candidates }
     /// Flattened force layout: component order, then each component's mode order.
     #[must_use]
     pub fn mode_count(&self) -> usize { self.forces.len() }

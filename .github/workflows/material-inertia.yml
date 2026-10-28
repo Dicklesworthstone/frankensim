@@ -18,6 +18,8 @@ on:
       - 'crates/fs-couple/src/render/schedule/force/coupled.rs'
       - 'crates/fs-couple/src/render/schedule/force/coupled/damping.rs'
       - 'crates/fs-couple/tests/coupled_damping_update.rs'
+      - 'crates/fs-couple/src/render/schedule/force/coupled/coefficients.rs'
+      - 'crates/fs-couple/tests/coupled_coefficient_update.rs'
       - 'crates/fs-couple/examples/frame_vibration.rs'
       - 'crates/fs-contact/src/normal_patch/**'
       - 'crates/fs-contact/tests/source_point*'
@@ -86,7 +88,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           cargo test -p fs-solid --test frame2d_material --test frame2d_viscosity -- --test-threads=1
-          cargo test -p fs-couple --test frame_vibration --test frame_vibration_material --test frame_vibration_thermal --test coupled_damping_update -- --test-threads=1
+          cargo test -p fs-couple --test frame_vibration --test frame_vibration_material --test frame_vibration_thermal --test coupled_damping_update --test coupled_coefficient_update -- --test-threads=1
           cargo build -p fs-couple --example frame_vibration
       - name: Source-bound normal contact through the original finite-patch law
         run: cargo test -p fs-contact --test source_point -- --test-threads=1
