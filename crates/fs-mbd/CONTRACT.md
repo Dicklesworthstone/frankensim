@@ -855,3 +855,57 @@ rigid/staging tests and eight prior translation tests). Checks include analytic
 translation/burnout, free asymmetric rotation, co-rotating mass-loss spin,
 thrust-arm torque, measured second-order position/velocity/attitude refinement,
 frame and Galilean invariance, staging momentum/work and atomic refusals.
+
+## Automatic forced sphere scenes and translating supports
+
+`frictional_impact::sphere_scene::advance_sphere_scene` discovers contacts and
+advances complete COM-centred native spheres against other spheres and
+prescribed infinite planes with constant translation. It composes the shared
+bounded spatial broad phase with the original native force/contact/drift step;
+it does not introduce a second impulse solver. Each body retains its actual
+mass, orientation, spin and physically enclosed principal inertia. Applied
+world force, body torque and uniform gravity remain explicit inputs.
+
+Stable sphere and plane IDs identify the material-law lookup. A missing law
+refuses the update; it cannot disable a discovered collision. Contact arms are
+the actual radial sphere surface arms. The normal restitution target uses
+pre-kick incoming velocity, so a resting body under gravity requests support
+without converting its force kick into repeated restitution bounces. The
+original simultaneous Coulomb solver still admits actual endpoint velocities,
+passivity and support-work determinacy.
+
+Every proposed drift checks the complete straight relative sphere path and
+the affine sphere/plane gap, including the actual native endpoints. A rejected
+path can suggest an earlier encounter time; every shorter retry repeats the
+force kick, contact solve and complete-path admission because the post-kick
+velocity depends on the new duration. Initial overlap refuses. No position
+projection repairs penetration. Nearby contacts enter the same simultaneous
+solve within the declared activation resolution.
+
+The complete requested duration is staged. Cancellation, missing laws,
+geometry failure, exhausted comparison/candidate/plane-query/step/retry
+budgets, or failed native conservation gates leave caller bodies unchanged.
+The report retains accepted native step receipts, geometry work counts,
+contact identities and whole-trajectory linear/angular momentum and energy
+accounts. Force impulse work, force-displacement work, splitting defect,
+torque work, prescribed-support work, contact loss and native drift defect
+remain separate. Contact loss is unallocated mechanical dissipation, including
+possible normal timestep loss; it is not automatically friction heat.
+
+The caller's maximum step controls the original first-order force/contact/drift
+approximation. Geometry retries do not establish an adaptive time-error
+estimate. This numerical lane supports straight drift of spheres and fixed
+normal translating planes; it does not claim interval-certified CCD, arbitrary
+shapes, rotating supports, deformability, adhesion, rolling/torsional resistance
+or thermal allocation. The original simultaneous solver's coupled-contact cap
+still applies. The broader contact and multibody beads remain open.
+
+Six focused native G1/G3/G4 groups cover resting support with nonzero material
+restitution, falling contact and settling, two-layer stack load transfer,
+independently derived incline rolling/sliding trajectories, conveyor impulse
+and work, hidden interior collisions with encounter-time retries, and complete
+rollback after retry/plane-query exhaustion or cancellation. All six pass with
+the original native dynamics, contact, Newton/Krylov, geometry and math owners;
+the seven shared broad-phase groups pass separately. This selected-source
+native verification uses the pinned nightly. It does not establish a full
+Cargo/DSR workspace gate; the required sibling constellation was unavailable.

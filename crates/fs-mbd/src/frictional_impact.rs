@@ -11,6 +11,9 @@ pub mod step;
 /// Automatic swept sphere geometry and event-resolved native body trajectories.
 pub mod spheres;
 
+/// Automatic sphere/plane scenes with sustained native contact and path admission.
+pub mod sphere_scene;
+
 use crate::{DynamicsError, MassProperties, RigidBodyState, Vec3};
 use fs_contact::frictional_multicontact::{
     FrictionalContact, FrictionalContactConfig, FrictionalContactDeterminacy,
