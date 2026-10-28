@@ -58,6 +58,11 @@ All three candidates are checked before publication. Separation removes the
 thermal link and changes subsequent cooling. The internal gap is never a
 prescribed input. Fracture energy is reported, not injected into enthalpy.
 
+For explicit endpoint heat conversion, callers can synchronize the same staged
+point through `FractureCooling::synchronize_with_heat`, supplying conversion and
+two-cell partition fractions. That adapter preserves latent storage and reports
+the unconverted fracture energy; it does not update toughness within the step.
+
 This uses endpoint-staggered coupling; refine both the thermal timestep and
 the mechanical/coupling interval. Unlike an explicitly prescribed linear gap
 history, sparse equilibrium endpoints do not certify intervening contact events.

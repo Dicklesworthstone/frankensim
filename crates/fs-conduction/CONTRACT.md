@@ -124,6 +124,20 @@ cell is uniform; the caller must justify that approximation and conductances.
 Geometry grows by adding supplied cells and changing interfaces, but does not
 move. This is a useful reduced R1 foundation, not completion of umbrella #1.
 
+`enthalpy::deposition::fracture::FractureCooling::synchronize_with_heat`
+optionally converts an explicit per-interface fraction of NEW cohesive
+dissipation into heat at the original two finite cells. One authoritative
+cohesive trial supplies the work; elastic storage, initial damage, unloading,
+reclosure and numerical defects never become heat. The original caloric law
+resolves temperature and latent storage, and contact/history/enthalpy changes
+publish together. Nonthermal fracture energy remains separately reported.
+Partition, aggregation, cell-storage and report rounding share one declared
+joule budget; compensated totals retain small terms beside large work values.
+The legacy contact-only `synchronize` retains its arithmetic. This is fixed-area,
+staggered endpoint heating with immutable toughness, not resolved crack-tip
+temperatures, within-step thermomechanical equilibrium or a full entropy model.
+Seven focused heat-conversion regressions extend the existing contact tests.
+
 > Beads `frankensim-extreal-program-f85xj.5.1`, `.5.3`, `.5.4`, and `.5.6`. The
 > cooling vertical's steady heat-conduction solve, matching-P1 contact rung,
 > first card-backed surface-radiation rung, and receipt-preserving PCB

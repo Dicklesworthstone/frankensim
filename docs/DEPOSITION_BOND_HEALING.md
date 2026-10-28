@@ -63,8 +63,8 @@ compression stiffness and metre separation limit.
 
 `freeze_bond` carries the actual area, cell IDs, dose and mapping into a fresh
 mechanical stage. A separated or never-contacted interface refuses. Never use
-this handoff to reset existing cohesive damage. Concurrent healing/fracture,
-fracture-heat feedback and a coupled thermodynamic balance are not implemented.
+this handoff to reset existing cohesive damage. Concurrent healing/fracture
+and a full coupled thermodynamic balance are not implemented.
 The separate `fracture::FractureCooling` stage now consumes real cohesive
 endpoints and changes the following thermal interval's contact. It can import
 existing damage; reclosure restores only the explicitly supplied thermal
@@ -130,9 +130,41 @@ thermoviscoelastic feedback or calibrated detachment time is claimed. The
 contact classification governs the next thermal interval; a missed within-step
 opening is not retroactively corrected. Refine physical coupling times to
 resolve events. Full geometry motion, new contact search, simultaneous healing,
-fracture heating and a closed thermodynamic balance remain outside this stage.
+within-step toughness/temperature feedback and a closed thermodynamic balance
+remain outside this stage. Explicit endpoint heat conversion is available below.
 
 Eight additional Rust regressions cover analytical contact/no-contact cooling,
 independent reclosure conductance without healing, shear/partial damage,
 cohort/history/time/area refusals, scheduled ownership conflicts, cancellation,
 area partition and restart. Native execution remains unverified here.
+
+## Optional heat from new fracture work
+
+Use `FractureCooling::synchronize_with_heat` with one `FractureHeatPartition`
+for every bound interface. `fraction_to_heat` declares the fraction of new
+cohesive dissipation converted to immediate heat; `fraction_to_first` partitions
+that heat between the original two cells. No universal conversion or partition
+is inferred. For each original area, the same authoritative cohesive trial gives
+`D = area * new_dissipation`; the method deposits `fraction_to_heat * D` and
+reports the remainder as nonthermal fracture energy. Do not add either heat or
+the upstream mechanical debit again to a combined balance.
+
+The existing `DepositionSimulation::apply_heat_j` owner updates each cell through
+its original enthalpy law, including latent plateaus. No thermal time advances,
+source watts are not reintegrated, and no elastic storage, old damage, unloading,
+reclosure or numerical dissipation becomes heat. Replaying an accepted point
+produces zero new heat. The original `synchronize` remains contact-only.
+
+Contact changes, irreversible history and thermal enthalpy form one candidate.
+Domain, cancellation or energy refusal publishes none of them. An explicit
+joule tolerance covers local partition defects, heat aggregation, represented
+cell-storage errors and final work/nonthermal/thermal report rounding. The
+returned `transfer_residual_j` equals reported thermal storage plus reported
+nonthermal fracture energy minus reported fracture work, without subtracting
+large absolute thermal reference energies.
+
+Seven added regressions cover analytic work and unequal masses, latent heat,
+replay/unloading/imported damage, zero conversion, shared-cell area partition,
+atomic refusals and disparate-magnitude report rounding. This is an endpoint
+staggered model with fixed areas and immutable toughness; it does not resolve
+crack-tip temperatures or certify a material's heat-conversion fraction.

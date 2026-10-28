@@ -63,6 +63,13 @@ jump, traction, damage and failure. These observables can inform an explicit
 thermal/contact update. Thermal conductance and cohesive strength remain
 independent; this module does not convert one into the other.
 
+The separate `fs-conduction` `FractureCooling::synchronize_with_heat` adapter
+can deposit an explicitly supplied fraction of NEW cohesive dissipation into
+the original thermal cells. It retains nonthermal fracture energy separately,
+uses the original enthalpy law for latent heat, and commits contacts, damage and
+heat together. Prior damage, unloading and numerical defects do not supply heat;
+the adapter neither infers conversion fractions nor changes this constitutive law.
+
 ## Applicability and verification
 
 The model is quasistatic, fixed-topology and fixed-frame. It does not establish
