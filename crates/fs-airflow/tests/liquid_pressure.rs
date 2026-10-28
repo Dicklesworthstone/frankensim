@@ -28,6 +28,9 @@ fn point(t: f64) -> QueryPoint {
     QueryPoint::new().with("T",t).unwrap().with("pressure",100000.0).unwrap()
 }
 fn card(variable: bool, viscosity_scale: f64) -> MaterialCard {
+    card_with_transport_ceiling(variable,viscosity_scale,450.0)
+}
+fn card_with_transport_ceiling(variable: bool, viscosity_scale: f64, ceiling: f64) -> MaterialCard {
     let mut claims = ClaimSet::new();
     for (name,value,dims) in [
         ("density",1000.0,Dims([-3,1,0,0,0,0])),
@@ -43,7 +46,9 @@ fn card(variable: bool, viscosity_scale: f64) -> MaterialCard {
             value: if varying { PropertyValue::Curve { abscissa: "T".into(), abscissa_dims: Temperature::DIMS,
                 knots: vec![(250.0,0.0025*viscosity_scale),(450.0,0.0005*viscosity_scale)],dims }
             } else { PropertyValue::Scalar { value,dims } },
-            validity: ValidityDomain::unconstrained().with("T",250.0,450.0).with("pressure",100000.0,100000.0),
+            validity: ValidityDomain::unconstrained().with("T",250.0,
+                if name == "dynamic_viscosity" || name == "thermal_conductivity" { ceiling } else { 450.0 })
+                .with("pressure",100000.0,100000.0),
             uncertainty: UncertaintyModel::Unstated,
             interpolation: if varying { InterpolationPolicy::LinearInside } else { InterpolationPolicy::ConstantWithinValidity },
             observations: vec![], provenance: Provenance { source: "synthetic hydraulic thermal fixture".into(),
@@ -56,6 +61,10 @@ fn card(variable: bool, viscosity_scale: f64) -> MaterialCard {
 fn with_path<R>(variable: bool, viscosity_scale: f64, convention: LiquidPropertyTemperature,
     run: impl FnOnce(&Cx<'_>, &LiquidHeatPath<'_, '_>) -> R) -> R {
     let card = card(variable,viscosity_scale);
+    with_card_path(&card,convention,run)
+}
+fn with_card_path<R>(card: &MaterialCard, convention: LiquidPropertyTemperature,
+    run: impl FnOnce(&Cx<'_>, &LiquidHeatPath<'_, '_>) -> R) -> R {
     let law = LiquidTemperatureLaw::try_new(&card,&point(300.0),"T",LiquidViscosityBasis::Dynamic,
         MaterialPropertySelection::SingleClaimOnly).unwrap();
     let cp = PropertyKey::with_quantity("specific_heat_capacity",QuantitySpec::dimensional(Dims([2,0,-2,-1,0,0])));
@@ -245,4 +254,99 @@ fn malformed_hydraulic_assignment_and_solid_reply_cannot_publish_a_solution() {
         assert!(matches!(result,Err(PressureDrivenError::Thermal(_))));
         assert_eq!(called,1);
     });
+}
+
+fn heated_resistances(factor: f64) -> [LiquidResistanceSection<'static>;2] {
+    let resistance = MaterialFlowResistance::try_new(factor,0.0,area(),Length::new(0.01),(0.0,2300.0)).unwrap();
+    [LiquidResistanceSection { region: "first",resistance }, LiquidResistanceSection { region: "last",resistance }]
+}
+
+// Independent closed form for constant Cp/HTC and affine bulk viscosity.
+// Eliminating mu(T_bulk) from the exponential regional solution gives one
+// linear equation in each outlet. No production thermal or pressure solve.
+fn heated_reference(mass: f64, variable: bool) -> (f64,f64,f64) {
+    let ua = 3.66*0.5/0.01*0.003;
+    let e = (-ua/(mass*2000.0)).exp();
+    let f = 1.0-e;
+    let q = mass/1000.0;
+    let c = 5e15*q*q;
+    let (a,b) = if variable { (0.005,1e-5) } else { (0.002,0.0) };
+    let (mut inlet,mut pressure,mut power) = (300.0,0.0,0.0);
+    for _ in 0..2 {
+        let outlet = (e*inlet+f*300.0+f*c/ua*(a-0.5*b*inlet))/(1.0+0.5*f*c*b/ua);
+        let viscosity = a-0.5*b*(inlet+outlet);
+        pressure += 5e15*viscosity*q;
+        power += c*viscosity;
+        inlet = outlet;
+    }
+    (inlet,pressure,power)
+}
+
+#[test]
+fn hydraulic_heat_and_temperature_dependent_viscosity_close_together() {
+    for variable in [false,true] {
+        with_path(variable,1.0,LiquidPropertyTemperature::BulkMean,|cx,path| {
+            let report = path.march_with_dissipation(cx,&[300.0,300.0],&heated_resistances(5e15),local()).unwrap();
+            let (outlet,pressure,power) = heated_reference(0.001,variable);
+            close(report.thermal.regions[1].outlet.temperature_k(),outlet);
+            close(report.hydraulics.total_pressure_drop_pa,pressure);
+            close(report.hydraulics.total_dissipated_power_w,power);
+            close(report.enthalpy_gain_w,2.0*(outlet-300.0));
+            close(report.enthalpy_gain_w,report.thermal.total_heat_rate_w+power);
+            close(report.balance_residual_w,0.0);
+            assert!(report.thermal.total_heat_rate_w<0.0);
+            for (region,loss) in report.thermal.regions.iter().zip(&report.hydraulics.regions) {
+                let wall = region.boundary.coefficient().value.value()*0.003
+                    *(300.0-region.boundary.reference_temperature().value());
+                close(wall,region.heat_rate_w);
+                close(region.heat_rate_w+loss.loss.dissipated_power_w,0.001*
+                    (region.outlet.specific_enthalpy_j_kg()-region.inlet.specific_enthalpy_j_kg()));
+            }
+        });
+    }
+}
+
+#[test]
+fn pressure_driven_heating_matches_an_independent_coupled_operating_point() {
+    with_path(true,1.0,LiquidPropertyTemperature::BulkMean,|cx,path| {
+        let mut lo = 0.0008;
+        let mut hi = 0.0013;
+        for _ in 0..80 {
+            let mass = 0.5*(lo+hi);
+            if heated_reference(mass,true).1 < 2e7 { lo=mass; } else { hi=mass; }
+        }
+        let expected_mass = 0.5*(lo+hi);
+        let expected = heated_reference(expected_mass,true);
+        let report = path.solve_pressure_driven_with_dissipation(cx,&[300.0,300.0],
+            &heated_resistances(5e15),Pressure::new(2e7),local(),PressureDrivenBudget {
+                mass_flow_bracket_kg_per_s: (0.0008,0.0013), maximum_neglected_hydraulic_power_w: 0.0,
+                ..pressure_budget()
+            }).unwrap();
+        assert!((report.mass_flow_kg_per_s/expected_mass-1.0).abs()<2e-8);
+        assert!(report.mass_flow_kg_per_s>0.001);
+        close(report.thermal.regions[1].outlet.temperature_k(),expected.0);
+        close(report.hydraulics.total_pressure_drop_pa,2e7);
+        close(report.hydraulics.total_dissipated_power_w,expected.2);
+        close(report.thermal.total_heat_rate_w+expected.2,
+            report.mass_flow_kg_per_s*2000.0*(expected.0-300.0));
+        assert!(path.solve_pressure_driven_with_dissipation(cx,&[300.0,300.0],
+            &heated_resistances(5e15),Pressure::new(2e7),local(),pressure_budget()).is_err());
+    });
+}
+
+#[test]
+fn heated_outlet_prediction_stays_inside_narrow_transport_support() {
+    let card = card_with_transport_ceiling(false,1.0,340.0);
+    for convention in [LiquidPropertyTemperature::BulkMean,LiquidPropertyTemperature::FilmMean] {
+        with_card_path(&card,convention,|cx,path| {
+            let budget = LiquidFeedbackBudget { max_region_iterations: 1,..local() };
+            let result = path.march_with_dissipation(cx,&[300.0,300.0],&heated_resistances(5e15),budget).unwrap();
+            close(result.thermal.regions[1].outlet.temperature_k(),heated_reference(0.001,false).0);
+            // Cp reaches450 K, but actual property queries above340 K still
+            // fail through the original source owner, without extrapolation.
+            assert!(matches!(path.march_with_dissipation(cx,&[300.0,300.0],&heated_resistances(5e16),budget),
+                Err(PressureDrivenError::Thermal(
+                    fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::LiquidFeedbackError::Material(_)))));
+        });
+    }
 }

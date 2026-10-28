@@ -8,13 +8,17 @@
 //! reference. This is a low-compressibility, regional approximation, not an
 //! evolving pressure EOS, buoyancy, boiling, momentum-acceleration or pump model.
 //!
-//! The caloric marcher does not include viscous heating. That omission requires
+//! The default pressure path does not include viscous heating. That omission requires
 //! an explicit absolute hydraulic-power allowance; excessive omitted power
 //! refuses. No global energy certificate is inferred from pressure closure.
 //! A user-supplied positive mass-flow bracket is mandatory. All trials must be
 //! source/correlation supported; errors never trigger a different material law.
+//! The opt-in [`heating`] path instead integrates the original pressure loss
+//! into the same fluid enthalpy trajectory and requires zero omitted power.
 
 pub mod solid;
+/// Local pressure-loss heating on the original temperature-feedback trajectory.
+pub mod heating;
 /// Parallel material-driven paths with enthalpy-conserving outlet mixing.
 pub mod parallel;
 

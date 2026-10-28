@@ -58,13 +58,17 @@ fn liquid(card: &MaterialCard, pressure: f64) -> ResolvedLiquidState {
     resolve_liquid_state(card, &point(300.0,pressure), MaterialPropertySelection::SingleClaimOnly).unwrap()
 }
 fn caloric(card: &MaterialCard, pressure: f64, phase: SolidLiquidPhase) -> ResolvedHeatCapacityCurve {
+    caloric_with_reference(card,pressure,phase,0.0)
+}
+fn caloric_with_reference(card: &MaterialCard, pressure: f64, phase: SolidLiquidPhase,
+    reference_h: f64) -> ResolvedHeatCapacityCurve {
     let cp = PropertyKey::with_quantity("specific_heat_capacity", QuantitySpec::dimensional(Dims([2,0,-2,-1,0,0])));
     let rho = PropertyKey::with_quantity("density", QuantitySpec::dimensional(Dims([-3,1,0,0,0,0])));
     ResolvedHeatCapacityCurve::try_new(card, HeatCapacitySourceQuery {
         heat_capacity: &cp, density: &rho, temperature_axis: "T",
         lower: &point(250.0,pressure), upper: &point(450.0,pressure),
         selection: SelectionPolicy::SingleClaimOnly,
-    }, phase, 0.0, 0.5).unwrap()
+    }, phase, reference_h, 0.5).unwrap()
 }
 fn section(region: &str, area: f64) -> FlowHeatSection<'_> {
     FlowHeatSection { region, geometry: FlowHeatGeometry {
@@ -343,5 +347,37 @@ fn advected_energy_remains_independent_of_large_cancelling_heat_reports() {
         assert_eq!(report.total_heat_rate_w()+report.hydraulic_heat_rate_w(),0.0);
         assert_eq!(report.enthalpy_gain_w(),actual);
         assert_eq!(report.balance_residual_w(),actual);
+    });
+}
+
+#[test]
+fn caloric_rounding_cannot_turn_unstored_hydraulic_power_into_wall_heat() {
+    let card = card(false,"unrepresentable-caloric-increment");
+    let liquid = liquid(&card,1.0);
+    let ordinary = caloric(&card,1.0,SolidLiquidPhase::Liquid);
+    // The source-backed caloric slope and its entire temperature range remain
+    // representable. Only this deliberately tiny increment is below one ULP.
+    let shifted = caloric_with_reference(&card,1.0,SolidLiquidPhase::Liquid,2.0_f64.powi(45));
+    let path = FrozenFlowMedium::Liquid(&liquid).channel_series(VolumetricFlowRate::new(1e-6),
+        Temperature::new(300.0), &[section("wall",0.008)]).unwrap();
+    with_cx(|cx| {
+        let resistance = heating_resistance(1e6);
+        let actual = path.march_liquid_enthalpy_with_dissipation(cx,&ordinary,"T",&[300.0],&[resistance]).unwrap();
+        assert!(actual.enthalpy_gain_w()>0.0);
+        assert!(actual.hydraulic_heat_rate_w()>0.0);
+        assert!(matches!(path.march_liquid_enthalpy_with_dissipation(cx,&shifted,"T",&[300.0],&[resistance]),
+            Err(LiquidEnthalpyError::Invalid("nonzero specific-enthalpy increment is unrepresentable"))));
+        // The prior source shift has its own representation boundary: a lost
+        // driving-temperature rise must not bypass the caloric guard either.
+        assert!(matches!(path.march_liquid_enthalpy_with_dissipation(cx,&ordinary,"T",&[300.0],&[heating_resistance(1e-10)]),
+            Err(LiquidEnthalpyError::Invalid("nonzero hydraulic driving-temperature increment is unrepresentable"))));
+        // The same guard belongs to the original caloric owner: ordinary
+        // wall heating and cooling must not silently lose their physical work.
+        for wall in [300.0+1e-9,300.0-1e-9] {
+            assert!(path.march_liquid_enthalpy(cx,&ordinary,"T",&[wall]).unwrap().enthalpy_gain_w()!=0.0);
+            assert!(matches!(path.march_liquid_enthalpy(cx,&shifted,"T",&[wall]),
+                Err(LiquidEnthalpyError::Invalid("nonzero specific-enthalpy increment is unrepresentable"))));
+        }
+        assert_eq!(path.path().inlet_temperature_k(),300.0);
     });
 }

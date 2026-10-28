@@ -14,6 +14,30 @@ model gas throttling, pump inefficiency or a
 porous skeleton's share of dissipation. Unsupported source/Reynolds/geometry
 states and cancellation return no partial trajectory. Analytic constant-Cp,
 variable-Cp subdivision and original-owner refusal tests cover this opt-in path.
+The shared caloric marcher refuses a nonzero physical exponential transfer if
+division by mass flow underflows or its specific-enthalpy addition rounds back
+to the old value. This applies to ordinary and dissipative marches alike:
+unrepresented storage must not masquerade as wall cooling. A source-backed
+large-reference-enthalpy regression covers hydraulic, wall-heating and
+wall-cooling refusal while the same increments remain valid at an ordinary datum.
+The hydraulic source shift also refuses a nonzero driving-temperature increment
+that underflows or disappears on addition, before it can bypass that caloric guard.
+
+`LiquidHeatPath::march_with_dissipation` closes regional outlet temperature,
+convection coefficient and hydraulic power together. The original liquid law
+evaluates viscosity at the arithmetic bulk mean and convection at the selected
+bulk/film convention. Bounded outlet predictions establish a local bracket,
+then bisection closes it; the solver never probes an unrelated caloric maximum
+outside a narrower transport source. Every trial still obeys original source
+and Reynolds validity. The final re-evaluation checks temperature, HTC and
+hydraulic power with the caller's existing tolerances. Wall-only Robin rows
+retain the actual wall load and source-backed endpoint states independently
+report advected energy. `solve_pressure_driven_with_dissipation` composes this
+trajectory with the existing bounded pressure root and requires zero omitted
+hydraulic-power allowance. Analytic affine-viscosity, pressure-selected flow,
+narrow-source and minimum-iteration regressions exercise the complete path.
+Existing solid IQN, parallel-pump and recirculation entry points retain their
+original explicit omission budgets; they do not silently acquire this model.
 
 > Status: ACTIVE for beads `frankensim-extreal-program-f85xj.5.5` and
 > `frankensim-extreal-program-f85xj.5.7` (conjugate coupling).

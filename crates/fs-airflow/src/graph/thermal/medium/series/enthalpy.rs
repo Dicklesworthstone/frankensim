@@ -306,7 +306,11 @@ fn march_region_with_heat(
     if !hydraulic_power_w.is_finite() || hydraulic_power_w < 0.0 {
         return Err(LiquidEnthalpyError::Invalid("hydraulic heat must be finite and nonnegative"));
     }
-    let driving = wall + hydraulic_power_w / (segment.htc_w_per_m2_k() * segment.area_m2());
+    let hydraulic_rise = hydraulic_power_w / (segment.htc_w_per_m2_k() * segment.area_m2());
+    let driving = wall + hydraulic_rise;
+    if hydraulic_power_w != 0.0 && (hydraulic_rise == 0.0 || driving == wall) {
+        return Err(LiquidEnthalpyError::Invalid("nonzero hydraulic driving-temperature increment is unrepresentable"));
+    }
     if !positive(driving) {
         return Err(LiquidEnthalpyError::Invalid("hydraulic-heating driving temperature is unrepresentable"));
     }
@@ -360,7 +364,14 @@ fn march_region(
         let local = AirPath::new(temperature, mass_flow, cp,
             vec![AirSegment::new(segment.region(), area, segment.htc_w_per_m2_k())?])?;
         let step = local.march(&[wall])?;
-        let trial_enthalpy = enthalpy + step.total_heat_rate_w / mass_flow;
+        let increment = step.total_heat_rate_w / mass_flow;
+        let trial_enthalpy = enthalpy + increment;
+        // The original exponential owns a nonzero physical transfer even when
+        // division underflows or a large caloric datum hides its addition. Do
+        // not accept unchanged fluid storage and turn that loss into wall heat.
+        if step.total_heat_rate_w != 0.0 && (increment == 0.0 || trial_enthalpy == enthalpy) {
+            return Err(LiquidEnthalpyError::Invalid("nonzero specific-enthalpy increment is unrepresentable"));
+        }
         if !trial_enthalpy.is_finite() {
             return Err(LiquidEnthalpyError::Invalid("specific-enthalpy advance is unrepresentable"));
         }

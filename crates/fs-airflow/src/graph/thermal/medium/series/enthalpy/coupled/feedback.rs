@@ -64,7 +64,8 @@ pub struct LiquidFeedbackBudget {
     pub temperature_tolerance_k: f64,
     /// Maximum relative coefficient change on a final property re-evaluation.
     pub coefficient_relative_tolerance: f64,
-    /// Bisection iterations per region, in 1..=128 (plus endpoint/final checks).
+    /// Bisection or heated-outlet prediction updates per region, in 1..=128
+    /// (plus endpoint/final checks).
     pub max_region_iterations: usize,
 }
 impl LiquidFeedbackBudget {
@@ -309,7 +310,8 @@ pub struct LiquidHeatRegion {
     pub inlet: EquilibriumPhaseState,
     /// Leaving caloric state.
     pub outlet: EquilibriumPhaseState,
-    /// Signed mass-flow times enthalpy gain, W.
+    /// Signed wall heat received by the fluid, W. In a dissipative march the
+    /// separate hydraulic report supplies the additional pressure-loss heat.
     pub heat_rate_w: f64,
     /// Actual energy-equivalent Robin boundary, not a separately authored h.
     pub boundary: CorrelationRobinBoundary,
@@ -330,6 +332,6 @@ pub struct LiquidHeatMarch<'a> {
     pub regions: Vec<LiquidHeatRegion>,
     /// One conserved mass-flow rate, kg/s.
     pub mass_flow_kg_per_s: f64,
-    /// Sum of regional signed heat transfers, W.
+    /// Sum of regional signed wall heat transfers, W.
     pub total_heat_rate_w: f64,
 }
