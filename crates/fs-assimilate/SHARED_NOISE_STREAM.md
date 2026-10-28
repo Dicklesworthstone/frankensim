@@ -8,9 +8,10 @@ state and nuisance; it is not the correct update for shared errors across calls.
 The stream retains `[physical state, nuisance parameters]` in a UD factor,
 including learned cross-covariance. It consumes checked `JacobianBatch` values
 but applies `[H, J]` with **independent instrument noise only**. Initial physical
-state and zero-mean nuisance are independent. This is a static additive Gaussian
-model; there is no time propagation, nuisance drift, nonlinear relinearization,
-or certification that the supplied calibration/units are scientifically valid.
+state and zero-mean nuisance are independent. Physical state may evolve through
+declared discrete linear Gaussian transitions; nuisance remains static. There
+is no nonlinear relinearization or certification that the supplied dynamics,
+calibration, noise independence, or units are scientifically valid.
 
 ## Retained updates
 
@@ -36,6 +37,41 @@ still performs bounded dense covariance admission. Factor updates cost
 O(m (n+k)^2); optional dense publication costs O((n+k)^3). Preparation and the
 factor sequence retain separate budget scopes, not one global stream-lifetime
 quota. Neither a history hash nor scalar diagnostics authenticate a calibration.
+
+## Evolve the physical state between acquisitions
+
+Create `factor::forecast::LinearDynamics::new(F, offset, process_noise,
+model_identity, cx)` for the complete discrete transition
+`x_next = F*x + offset + w`. `process_noise` is a zero-mean `FactorBelief`
+describing `Cov(w)`; zero and singular noise are allowed. It must be independent
+of both the current physical state and its calibration parameters.
+
+`dynamics.predict(&factor, cx)` supplies a standalone Kalman prediction.
+`stream.forecast_physical(&dynamics, from_time, to_time, cx)` advances the
+physical prefix while preserving the retained nuisance posterior and propagating
+its cross-covariance. A first forecast anchors the existing state at `from_time`;
+each later step must start exactly at `stream.time()`. The transition already
+covers that interval and is not multiplied by its duration. Caller-chosen time
+units must be consistent. New readings entering `assimilate` belong to the
+current frontier; backdated readings require a smoother and are not supported.
+
+Prediction uses orthogonal rotations of square-root columns, never a dense
+covariance reconstruction or subtraction. With `n` physical and `k` nuisance
+components, work is `O(n^3+n^2*k)` and storage is quadratic in `n+k`.
+Nuisance UD columns are retained exactly; their physical cross block becomes
+`F*U_xb`. The root factor is a numerical PSD representation, not a rigorous
+flow enclosure or rank certificate. Unrepresentable arithmetic refuses.
+
+A forecast atomically publishes the factor, increasing time, and history root
+bound to the prior history, transition declaration, interval and actual result.
+Previously selected sensor plans become stale. Observation replay protection
+survives prediction, while retrying a successfully applied time interval
+refuses. Failed or cancelled predictions preserve the entire stream and may be
+retried. Prediction and history work retain separate checked budget scopes.
+
+`cargo test -p fs-assimilate --test factor_forecast` compares the implementation
+with direct Gaussian propagation and conditioning, including correlated
+calibration across time, singular/noiseless dynamics, rescaling and cancellation.
 
 ## Choose the next measurement without reading its outcome
 

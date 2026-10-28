@@ -136,6 +136,21 @@ linear-Gaussian core of weak-constraint assimilation.
 - `factor::scalar_factor_work_estimate(dim)` — checked construction,
   update-with-receipt, and checker work totals for parent admission
   sealing.
+- `factor::forecast::LinearDynamics` — checked finite discrete transition,
+  affine offset and independent zero-mean process noise in UD form. `predict`
+  performs a Gaussian time update through right Givens rotations of square-root
+  columns, without dense covariance formation or subtraction. The factor state
+  dimension remains bounded by 256; work is cubic and scratch is quadratic,
+  fallible, and polled through one cumulative work accountant. Exact zero
+  directions require no jitter; unrepresentable nonzero pivots refuse.
+- `groups::stream::SharedNoiseStream::forecast_physical` — evolves the physical
+  state while retaining the static nuisance posterior and learned cross terms.
+  The posterior, increasing time frontier, and source/result-bound history
+  publish atomically. Observation replay protection survives; existing sensor
+  plans become stale. New observations are assumed current, not backdated.
+  The process-noise independence and discrete dynamics are model assumptions,
+  not inferred truths or certified continuous-flow bounds. See
+  `SHARED_NOISE_STREAM.md` and `tests/factor_forecast.rs`.
 - `dimensioned::DimensionedBelief` / `dimensioned::DimensionedObservation`
   — the dimensionally typed front door (bead sj31i.7.3) binding
   `fs_qty::inference` schemas to the checked belief/observation carriers:

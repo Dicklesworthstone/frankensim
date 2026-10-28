@@ -7,8 +7,9 @@
 //! independent instrument noise. Batches may arrive in chunks; exact row replay
 //! is a no-op and changed content under an already accepted row ID is refused.
 //!
-//! This is a static additive Gaussian model, not a dynamic filter. State and
-//! nuisance start independent; nuisance has zero prior mean. Callers own units,
+//! Linear physical forecasts preserve the retained shared-error correlations;
+//! the nuisance itself remains static. State and nuisance start independent;
+//! nuisance has zero prior mean. Callers own units,
 //! calibration quality, and independent-noise declarations. State/row tracking
 //! is in memory, not a durable replay database or an authenticated certificate.
 
@@ -42,6 +43,8 @@ pub struct SharedNoiseStream {
     // Sorted by RowId for bounded binary lookup; never evict replay protection.
     seen: Vec<SeenRow>,
     history: ContentHash,
+    // None retains the original static-stream semantics until a first forecast.
+    time: Option<f64>,
 }
 
 /// Indices refer to the supplied batch, in its original declaration order.
@@ -104,7 +107,7 @@ impl SharedNoiseStream {
         let physical = FactorBelief::from_belief(prior, cx)?;
         let joint = physical.independent_product(&model.factor, cx)?;
         progress.checkpoint("shared stream publication")?;
-        Ok(Self { joint, physical_dim: n, model_id, row_capacity, seen: Vec::new(), history: hash.finalize() })
+        Ok(Self { joint, physical_dim: n, model_id, row_capacity, seen: Vec::new(), history: hash.finalize(), time: None })
     }
 
     /// Joint factor ordering: physical components, then named nuisance parameters.
@@ -129,6 +132,12 @@ impl SharedNoiseStream {
     /// a content identity, not authentication or a posterior accuracy claim.
     #[must_use]
     pub const fn history_id(&self) -> ContentHash { self.history }
+
+    /// Current forecast frontier, or `None` before the first dynamic step.
+    /// New observations passed to `assimilate` belong to this current state;
+    /// this API does not backdate or smooth delayed measurements.
+    #[must_use]
+    pub const fn time(&self) -> Option<f64> { self.time }
 
     /// Reconstruct a checked physical marginal without discarding the retained
     /// joint factor. Only the physical block is reconstructed and PSD-checked;
@@ -297,3 +306,5 @@ fn number(hash: &mut DomainHasher, value: f64, progress: &mut WorkProgress<'_, '
 
 /// Outcome-free sensor planning under the retained joint posterior.
 pub mod design;
+
+mod forecast;

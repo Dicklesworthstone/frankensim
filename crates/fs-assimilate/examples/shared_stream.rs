@@ -4,6 +4,7 @@ use fs_assimilate::groups::jacobian::{JacobianBatch, SharedNoiseModel};
 use fs_assimilate::groups::stream::SharedNoiseStream;
 use fs_assimilate::groups::stream::design::SharedNoiseProbe;
 use fs_assimilate::{AssimError, Belief};
+use fs_assimilate::factor::{FactorBelief, forecast::LinearDynamics};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey, VirtualClock};
 
 fn main() -> Result<(), AssimError> {
@@ -39,6 +40,14 @@ fn main() -> Result<(), AssimError> {
         let replay = stream.assimilate(&batch, &cx)?;
         assert!(replay.accepted_indices().is_empty());
         println!("exact replay ignored; retained history {}", stream.history_id());
+        // A complete synthetic one-second transition, with independent process
+        // variance. The learned calibration state and cross-covariance survive.
+        let dynamics = LinearDynamics::new(vec![vec![0.9]], vec![0.2],
+            FactorBelief::diagonal(vec![0.0], &[0.05], &cx)?, "synthetic-one-second", &cx)?;
+        stream.forecast_physical(&dynamics, 0.0, 1.0, &cx)?;
+        let forecast = stream.physical_belief(&cx)?;
+        println!("forecast t=1: physical mean {:.8}; variance {:.8}; calibration mean {:.8}",
+            forecast.mean()[0], forecast.variance(0)?, stream.joint().mean()[1]);
         Ok(())
     })
 }

@@ -46,6 +46,9 @@ use crate::{
 /// Factor-retaining sequences and checked dense publication.
 pub mod batch;
 
+/// Affine Gaussian prediction without dense covariance reconstruction.
+pub mod forecast;
+
 /// Contraction authority attached to one factor-form scalar update.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContractionState {

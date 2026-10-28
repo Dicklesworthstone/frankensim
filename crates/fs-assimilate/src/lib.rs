@@ -903,6 +903,11 @@ pub enum AssimError {
     },
     /// An aggregate operation requires at least one observation.
     EmptyObservations,
+    /// A linear forecast has an invalid shape, parameter, or time interval.
+    InvalidForecast {
+        /// Stable explanation of the rejected declaration.
+        reason: &'static str,
+    },
     /// A robust observation batch declared a different covariance row count
     /// than its number of numerically available observations.
     ObservationCovarianceDimensionMismatch {
@@ -1151,6 +1156,7 @@ impl fmt::Display for AssimError {
                 write!(f, "invalid {field} identity: {reason}")
             }
             Self::EmptyObservations => write!(f, "at least one observation is required"),
+            Self::InvalidForecast { reason } => write!(f, "invalid linear forecast: {reason}"),
             Self::ObservationCovarianceDimensionMismatch { observations, rows } => write!(
                 f,
                 "robust batch has {observations} available observations but {rows} covariance rows"
