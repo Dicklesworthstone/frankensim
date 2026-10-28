@@ -52,12 +52,13 @@ jobs:
             cargo run --manifest-path tools/bootstrap/Cargo.toml -- --offline
           fi
       - name: Test the actual crate, factor kernels, and correlated batches
-        run: cargo test -p fs-assimilate --test factor --test robust --test factor_batch --test shared_noise --test shared_design --example shared_calibration
+        run: cargo test -p fs-assimilate --test factor --test factor_forecast --test robust --test factor_batch --test shared_noise --test shared_design --example shared_calibration
       - name: Test outcome-free SensorForge measurement studies
         run: cargo test -p fs-oed-e2e --test measurement --test seeded_acquisition --example measured_sensorforge
       - name: Run calibration and joint acquisition examples
         run: |
           cargo run -p fs-assimilate --example shared_calibration
+          cargo run -p fs-assimilate --example shared_stream
           cargo run -p fs-assimilate --example shared_batch_design
           cargo run -p fs-assimilate --example shared_batch_design -- 3.2 0.9
           printf 'A 10.1 synthetic-meter\nB 10.2 synthetic-meter\n' | cargo run -p fs-oed-e2e --example measured_sensorforge

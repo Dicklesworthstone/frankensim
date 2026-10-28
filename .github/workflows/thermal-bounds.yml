@@ -7,6 +7,9 @@ on:
       - 'crates/fs-conduction/**'
       - 'crates/fs-solver/**'
       - 'crates/fs-cli/src/network_command/transient/**'
+      - 'crates/fs-cli/src/solve/transient/**'
+      - 'crates/fs-cli/tests/solve/transient_enthalpy*'
+      - 'crates/fs-cli/tests/solve/transient_enthalpy_adjoint/**'
       - '.github/workflows/thermal-bounds.yml'
   workflow_dispatch:
 permissions:
@@ -75,6 +78,10 @@ jobs:
           PY
             cargo run --manifest-path tools/bootstrap/Cargo.toml
           fi
+      - name: Test prescribed-temperature enthalpy physics and trajectories
+        run: cargo test --release -p fs-conduction --test enthalpy_adjoint --test enthalpy_transport --test enthalpy_radiation --test heterogeneous_enthalpy --test thermal_history_enthalpy -- --test-threads=1
+      - name: Test native enthalpy storage, bath reactions and controls
+        run: cargo test --release -p fs-cli --test solve transient_enthalpy -- --test-threads=1
       - name: Test checked CG and immutable-history cooling
         run: |
           cargo test --release -p fs-solver --lib checked_cg::

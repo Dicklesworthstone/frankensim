@@ -499,14 +499,11 @@ fn prescribed_wall_matches_independent_p1_balance_and_counts_boundary_storage_on
             assert_eq!(audit.free_dofs, 1);
             assert!((audit.dirichlet_in_w - reaction).abs() < 1e-8);
             assert!(audit.residual_norm_j < 1e-9 && audit.energy_residual_j.abs() < 1e-9);
-            assert!(matches!(
-                stepper.linearize_accepted(cx, p, None, &old, dt, config(), got.clone()),
-                Err(
-                    fs_conduction::transient::enthalpy::adjoint::EnthalpyAdjointError::Enthalpy(
-                        EnthalpyError::UnsupportedDirichlet
-                    )
-                )
-            ));
+            let retained = stepper
+                .linearize_accepted(cx, p, None, &old, dt, config(), got.clone())
+                .unwrap();
+            assert_eq!(retained.primal().specific_enthalpy_j_kg, got.specific_enthalpy_j_kg);
+            assert_eq!(retained.primal().temperature, got.temperature);
             let mut bad = got.specific_enthalpy_j_kg.clone();
             bad[0] += 1.0;
             assert!(

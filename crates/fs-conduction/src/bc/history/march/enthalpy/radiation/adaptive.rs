@@ -2,7 +2,7 @@
 
 use super::{RadiativeEnthalpyHistoryRun, HeterogeneousEnthalpyError, EnthalpyStepConfig,
     EnthalpyRadiationStepSolution, ConductionProblem, conduction, poll};
-use super::super::{natural_only, adaptive::{PhaseErrorTolerance, phase_error}};
+use super::super::adaptive::{PhaseErrorTolerance, phase_error};
 use super::super::super::{events::{self, adaptive::{AdaptiveHistoryConfig, AdaptiveHistoryStep,
     admit_proposal, select_step}}, radiation::patches_before};
 use fs_exec::Cx;
@@ -31,7 +31,7 @@ impl RadiativeEnthalpyHistoryRun<'_, '_, '_> {
             self.patches.iter().map(|p| &p.ambient_temperature), start, target_s, cap).map_err(conduction)?;
         let solve = |old: &[f64], from: f64, to: f64| -> Result<EnthalpyRadiationStepSolution, HeterogeneousEnthalpyError> {
             let boundary = events::boundary_before(cx, self.run.problem.boundary, to).map_err(conduction)?;
-            natural_only(&boundary)?;
+            self.run.storage.admit_prescribed_boundary(cx, &boundary)?;
             let source = events::source_before(&self.run.problem.source, to, old.len()).map_err(conduction)?;
             let patches = patches_before(cx, &self.patches, to).map_err(conduction)?;
             Ok(self.run.storage.advance_with_ambient_radiation(cx, ConductionProblem {

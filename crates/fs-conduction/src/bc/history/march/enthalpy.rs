@@ -3,9 +3,9 @@
 //! Specific enthalpy, not temperature, is the persistent state. Latent heat is
 //! stored once in each original phase chart; neither apparent heat capacity nor
 //! equilibrium-density changes are substituted into the reference masses.
-//! Natural boundary/source histories use the same explicit endpoint quadrature
-//! as the temperature runner. Temperature Dirichlet rows remain refused because
-//! a plateau temperature does not uniquely specify the boundary enthalpy.
+//! Boundary/source histories use the same explicit endpoint quadrature as the
+//! temperature runner. Prescribed temperatures use each node's original chart;
+//! ambiguous plateau temperatures and out-of-domain values remain refused.
 //!
 //! This is stationary P1 transport, not melt flow, nucleation, expansion, moving
 //! interfaces or remeshing. Constitutive charts, conductivity assignments,
@@ -82,7 +82,8 @@ impl<'h, 'm, 'c> EnthalpyHistoryRun<'h, 'm, 'c> {
     ///
     /// # Errors
     /// Original material/mesh/budget/chart refusals, malformed source or boundary
-    /// data, zero step allowance, or cancellation. Dirichlet rows are unsupported.
+    /// data, zero step allowance, cancellation, or a prescribed temperature with
+    /// no unique admissible enthalpy in its original material chart.
     pub fn new(
         cx: &Cx<'_>,
         problem: ThermalHistoryProblem<'h, 'm>,
@@ -109,7 +110,7 @@ impl<'h, 'm, 'c> EnthalpyHistoryRun<'h, 'm, 'c> {
         }
         let time_s = problem.boundary.initial_time_s();
         let boundary = problem.boundary.at(cx, time_s).map_err(conduction)?;
-        natural_only(&boundary)?;
+        storage.admit_prescribed_boundary(cx, &boundary)?;
         problem.source.at(time_s, mesh.vertex_count()).map_err(conduction)?;
         let mut temperature = Vec::with_capacity(initial_specific_h.len());
         let mut liquid_mass_fraction = Vec::with_capacity(initial_specific_h.len());
@@ -210,7 +211,7 @@ impl<'h, 'm, 'c> EnthalpyHistoryRun<'h, 'm, 'c> {
         let end_time_s = events::next_endpoint(cx, self.problem.boundary, &self.problem.source,
             std::iter::empty(), start_time_s, target_s, max_step_s).map_err(conduction)?;
         let boundary = events::boundary_before(cx, self.problem.boundary, end_time_s).map_err(conduction)?;
-        natural_only(&boundary)?;
+        self.storage.admit_prescribed_boundary(cx, &boundary)?;
         let source = events::source_before(&self.problem.source, end_time_s, self.specific_h.len())
             .map_err(conduction)?;
         let report = self.storage.advance(cx, ConductionProblem {
@@ -234,7 +235,7 @@ impl<'h, 'm, 'c> EnthalpyHistoryRun<'h, 'm, 'c> {
             return Err(invalid("enthalpy endpoint must be strictly later with a finite positive interval"));
         }
         let boundary = self.problem.boundary.at(cx, time_s).map_err(conduction)?;
-        natural_only(&boundary)?;
+        self.storage.admit_prescribed_boundary(cx, &boundary)?;
         let source = self.problem.source.at(time_s, self.problem.boundary.mesh().vertex_count())
             .map_err(conduction)?;
         poll(cx, self.accepted_steps).map_err(conduction)?;

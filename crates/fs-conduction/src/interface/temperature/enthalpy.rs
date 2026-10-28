@@ -218,7 +218,6 @@ impl TemperatureContacts<'_, '_> {
 pub struct ContactEnthalpyLinearization<'m> {
     step: crate::transient::enthalpy::heterogeneous::HeterogeneousEnthalpyStepLinearization<'m>,
     contact: super::tangent::ContactTemperatureLinearization,
-    dt_s: f64,
 }
 
 /// One complete physical transpose and named whole-law resistance controls.
@@ -260,11 +259,7 @@ impl ContactEnthalpyLinearization<'_> {
     ) -> Result<ContactEnthalpyGradient, crate::transient::enthalpy::adjoint::EnthalpyAdjointError> {
         poll(cx, 0)?;
         let storage = self.step.pullback(cx, seed, linear)?;
-        let mut load_dual = Vec::with_capacity(storage.transport.adjoint.len());
-        for (index, &lambda) in storage.transport.adjoint.iter().enumerate() {
-            if index % 256 == 0 { poll(cx, index)?; }
-            load_dual.push(super::finite(self.dt_s * lambda)?);
-        }
+        let load_dual = self.step.transport().nodal_load_pullback(cx, &storage.transport.adjoint)?;
         let resistance_multipliers = self.contact.physical_contacts().frozen_interfaces()
             .matching_resistance_scale_pullback(
                 cx, self.contact.temperature(), &load_dual, max_face_pairs,
@@ -313,7 +308,7 @@ impl TemperatureContacts<'_, '_> {
             cx, problem, Some(contact.physical_contacts().frozen_interfaces()),
             old_h, dt_s, config, accepted.conduction, physical_residual_tolerance_j,
         )?.with_contact_temperature_feedback(cx, &contact)?;
-        Ok(ContactEnthalpyLinearization { step, contact, dt_s })
+        Ok(ContactEnthalpyLinearization { step, contact })
     }
 }
 
@@ -321,7 +316,6 @@ impl TemperatureContacts<'_, '_> {
 pub struct ContactEnthalpyRadiationLinearization<'m> {
     step: crate::transient::enthalpy::heterogeneous::HeterogeneousEnthalpyRadiationStepLinearization<'m>,
     contact: super::tangent::ContactTemperatureLinearization,
-    dt_s: f64,
 }
 
 #[derive(Debug)]
@@ -363,11 +357,7 @@ impl ContactEnthalpyRadiationLinearization<'_> {
     ) -> Result<ContactEnthalpyRadiationGradient, crate::transient::enthalpy::adjoint::EnthalpyAdjointError> {
         poll(cx, 0)?;
         let radiation = self.step.pullback(cx, seed, linear)?;
-        let mut load_dual = Vec::with_capacity(radiation.storage.transport.adjoint.len());
-        for (index, &lambda) in radiation.storage.transport.adjoint.iter().enumerate() {
-            if index % 256 == 0 { poll(cx, index)?; }
-            load_dual.push(super::finite(self.dt_s * lambda)?);
-        }
+        let load_dual = self.step.transport().nodal_load_pullback(cx, &radiation.storage.transport.adjoint)?;
         let resistance_multipliers = self.contact.physical_contacts().frozen_interfaces()
             .matching_resistance_scale_pullback(
                 cx, self.contact.temperature(), &load_dual, max_face_pairs,
@@ -426,6 +416,6 @@ impl TemperatureContacts<'_, '_> {
                 physical_residual_tolerance_j,
             )?
             .with_contact_temperature_feedback(cx, &contact)?;
-        Ok(ContactEnthalpyRadiationLinearization { step, contact, dt_s })
+        Ok(ContactEnthalpyRadiationLinearization { step, contact })
     }
 }

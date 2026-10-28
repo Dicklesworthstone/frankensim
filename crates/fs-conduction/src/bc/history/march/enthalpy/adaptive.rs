@@ -1,7 +1,7 @@
 //! Time adaptation that cannot confuse a latent plateau with an unchanged state.
 
 use super::{EnthalpyHistoryRun, EnthalpyStepConfig, EnthalpyStepSolution,
-    HeterogeneousEnthalpyError, conduction, invalid, natural_only, poll};
+    HeterogeneousEnthalpyError, conduction, invalid, poll};
 use super::super::events::{self, adaptive::{AdaptiveHistoryConfig, AdaptiveHistoryStep,
     admit_proposal, component_error, select_step, temperature_error}};
 use crate::ConductionProblem;
@@ -63,7 +63,7 @@ impl EnthalpyHistoryRun<'_, '_, '_> {
             std::iter::empty(), start, target_s, cap).map_err(conduction)?;
         let solve = |old: &[f64], from: f64, to: f64| -> Result<EnthalpyStepSolution, HeterogeneousEnthalpyError> {
             let boundary = events::boundary_before(cx, self.problem.boundary, to).map_err(conduction)?;
-            natural_only(&boundary)?;
+            self.storage.admit_prescribed_boundary(cx, &boundary)?;
             let source = events::source_before(&self.problem.source, to, old.len()).map_err(conduction)?;
             Ok(self.storage.advance(cx, ConductionProblem { mesh: self.problem.boundary.mesh(),
                 boundary: &boundary, material: self.problem.material, element_materials: self.problem.element_materials,

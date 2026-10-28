@@ -119,7 +119,7 @@ impl<'h, 'm, 'c> RadiativeEnthalpyHistoryRun<'h, 'm, 'c> {
             self.patches.iter().map(|p| &p.ambient_temperature), start_time_s, target_s, max_step_s)
             .map_err(conduction)?;
         let boundary = events::boundary_before(cx, self.run.problem.boundary, end_time_s).map_err(conduction)?;
-        super::natural_only(&boundary)?;
+        self.run.storage.admit_prescribed_boundary(cx, &boundary)?;
         let source = events::source_before(&self.run.problem.source, end_time_s, self.run.specific_h.len())
             .map_err(conduction)?;
         let patches = patches_before(cx, &self.patches, end_time_s).map_err(conduction)?;

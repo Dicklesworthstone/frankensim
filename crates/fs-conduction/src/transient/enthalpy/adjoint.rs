@@ -18,9 +18,10 @@
 //! tensor entries or table knots, moving geometry or chart selection is inferred.
 //! Chart corners and validity endpoints refuse classical two-sided derivatives; a latent
 //! plateau interior has exactly zero temperature sensitivity.
-//! Prescribed-temperature adjoints remain explicitly unsupported; their
-//! constraint, history and reservoir-control derivatives are not inferred from
-//! the unconstrained transport tangent.
+//! Prescribed rows instead impose `m_i*(h_i-h_i(T_bath))=0`. Their transport,
+//! source and history derivatives vanish, while the bath-temperature pullback
+//! is `m_i*lambda_i/(dT/dh)_i`. Free rows retain the full coupling to fixed
+//! columns; dropping those columns would lose the bath's physical influence.
 
 use std::{cell::RefCell, fmt};
 
@@ -37,10 +38,10 @@ mod conductivity;
 
 use super::{
     EnthalpyBackwardEuler, EnthalpyError, EnthalpyStepConfig, EnthalpyStepSolution, StepContext,
-    poll, validate_work,
+    poll,
 };
 use crate::{
-    ConductionError, ConductionMesh, ConductionProblem, LinearConfig, ThermalBc, ThermalInterfaces,
+    ConductionError, ConductionMesh, ConductionProblem, LinearConfig, ThermalInterfaces,
     assemble::ASSEMBLY_TILE,
 };
 
@@ -154,6 +155,11 @@ pub struct EnthalpyStepGradient {
     /// Derivative with respect to each P1 nodal source density [W/m3].
     /// Sum these entries for a spatially uniform source-amplitude derivative.
     pub source_density: Vec<f64>,
+    /// Derivative per kelvin of independently prescribed nodal temperatures,
+    /// in mesh vertex order; zero at free nodes. Sum each distinct prescribed
+    /// vertex once for a uniform bath control. A shared vertex is one control,
+    /// not independently variable copies for adjacent boundary declarations.
+    pub prescribed_temperature: Vec<f64>,
     /// Multiplier of the physical residual in joules, `J_h^T lambda=h_bar`.
     pub adjoint: Vec<f64>,
     /// Independently recomputed true Euclidean relative transpose residual.
@@ -174,6 +180,7 @@ pub struct EnthalpyStepLinearization<'m> {
     tangent: Csr,
     slopes: Vec<f64>,
     masses: Vec<f64>,
+    prescribed: Vec<bool>,
     inverse_diagonal: Vec<f64>,
     dt: f64,
     // Physical radiation binders and the typed Robin-law attachment own these.
@@ -264,18 +271,7 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
                 "history, endpoint and reference mass must match the exact mesh",
             ));
         }
-        if problem
-            .boundary
-            .conditions()
-            .iter()
-            .any(|bc| matches!(bc, ThermalBc::Dirichlet { .. }))
-        {
-            return Err(EnthalpyError::UnsupportedDirichlet.into());
-        }
-        validate_work(n, dt_s, config)?;
-        for condition in problem.boundary.conditions() {
-            condition.validate(n)?;
-        }
+        self.admit_step(cx, problem, old_h, dt_s, config)?;
         let context = StepContext {
             storage: self,
             cx,
@@ -286,7 +282,7 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             pointwise_radiation: None,
         };
         let stage = context.stage(&accepted.specific_enthalpy_j_kg)?;
-        let initial = NewtonKrylovState::new(&stage, old_h.to_vec(), config.newton)
+        let initial = NewtonKrylovState::new(&stage, context.initial_values()?, config.newton)
             .map_err(|error| stage.take_failure().unwrap_or(EnthalpyError::Newton(error)))?;
         let tolerance_j = finite(physical_target.unwrap_or_else(|| {
             config.newton.absolute_tolerance.max(
@@ -326,12 +322,20 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             let phase_scales = context.phase_scales(&primal.specific_enthalpy_j_kg)?;
             conductivity::element_loads(cx, problem, &primal.temperature, phase_scales.as_deref())?
         };
+        let mut prescribed = vec![false; n];
+        for &(vertex, _) in problem.boundary.dirichlet() {
+            prescribed[vertex] = true;
+        }
         let mut inverse_diagonal = Vec::with_capacity(n);
         for row in 0..n {
             if row % ASSEMBLY_TILE == 0 {
                 poll(cx, row)?;
             }
-            let diagonal = finite(self.masses[row] + dt_s * stage.tangent.get(row, row))?;
+            let diagonal = if prescribed[row] {
+                self.masses[row]
+            } else {
+                finite(self.masses[row] + dt_s * stage.tangent.get(row, row))?
+            };
             if diagonal == 0.0 {
                 return Err(EnthalpyAdjointError::InvalidInput(
                     "nonzero exact enthalpy Jacobian diagonal required for Jacobi",
@@ -346,6 +350,7 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             tangent: stage.tangent,
             slopes: stage.slope,
             masses: self.masses.clone(),
+            prescribed,
             inverse_diagonal,
             dt: dt_s,
             feedback: Vec::new(),
@@ -357,6 +362,10 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
 }
 
 impl EnthalpyStepLinearization<'_> {
+    pub(super) fn is_prescribed(&self, vertex: usize) -> bool {
+        self.prescribed[vertex]
+    }
+
     pub(super) fn retain_convection_boundary(&mut self, boundary: &crate::ThermalBoundary) {
         self.convection_boundary = boundary.clone();
     }
@@ -366,7 +375,7 @@ impl EnthalpyStepLinearization<'_> {
     pub(super) fn add_radiation_feedback(
         &mut self,
         cx: &Cx<'_>,
-        left: Vec<f64>,
+        mut left: Vec<f64>,
         right: Vec<f64>,
     ) -> Result<(), EnthalpyAdjointError> {
         let n = self.masses.len();
@@ -375,6 +384,9 @@ impl EnthalpyStepLinearization<'_> {
         for i in 0..n {
             if i % ASSEMBLY_TILE == 0 {
                 poll(cx, i)?;
+            }
+            if self.prescribed[i] {
+                left[i] = 0.0;
             }
             let diagonal = finite(1.0 / self.inverse_diagonal[i] + left[i] * right[i])?;
             if diagonal == 0.0 {
@@ -428,7 +440,11 @@ impl EnthalpyStepLinearization<'_> {
         self.tangent = coo.assemble();
         for row in 0..n {
             if row % ASSEMBLY_TILE == 0 { poll(cx, row)?; }
-            let mut diagonal = finite(self.masses[row] + self.dt * self.tangent.get(row, row))?;
+            let mut diagonal = if self.prescribed[row] {
+                self.masses[row]
+            } else {
+                finite(self.masses[row] + self.dt * self.tangent.get(row, row))?
+            };
             for update in &self.feedback {
                 diagonal = finite(diagonal + update.left[row] * update.right[row])?;
             }
@@ -466,6 +482,25 @@ impl EnthalpyStepLinearization<'_> {
         }
         poll(cx, seed.len())?;
         Ok(result)
+    }
+
+    /// Contract an assembled nodal load [W] with the same full residual dual.
+    /// Prescribed constraint rows contain no external load; their multiplier
+    /// belongs to the bath-temperature control and must not enter heat, source,
+    /// contact or radiation parameter contractions.
+    pub fn nodal_load_pullback(
+        &self,
+        cx: &Cx<'_>,
+        full_joule_multiplier: &[f64],
+    ) -> Result<Vec<f64>, EnthalpyAdjointError> {
+        vector(cx, full_joule_multiplier, self.masses.len())?;
+        let mut load = Vec::with_capacity(self.masses.len());
+        for (vertex, &lambda) in full_joule_multiplier.iter().enumerate() {
+            if vertex % ASSEMBLY_TILE == 0 { poll(cx, vertex)?; }
+            load.push(if self.prescribed[vertex] { 0.0 } else { finite(self.dt * lambda)? });
+        }
+        poll(cx, load.len())?;
+        Ok(load)
     }
 
     /// Apply the exact endpoint Jacobian in residual-joule coordinates.
@@ -509,6 +544,9 @@ impl EnthalpyStepLinearization<'_> {
         for (row, &x_row) in x.iter().enumerate() {
             if row % ASSEMBLY_TILE == 0 {
                 poll(cx, row)?;
+            }
+            if self.prescribed[row] {
+                continue;
             }
             let (columns, entries) = self.tangent.row(row);
             if transpose {
@@ -636,12 +674,19 @@ impl EnthalpyStepLinearization<'_> {
             });
         }
         let mut previous_specific_enthalpy = Vec::with_capacity(n);
+        let mut prescribed_temperature = vec![0.0; n];
         for (row, value) in state.x.iter_mut().enumerate() {
             if row % ASSEMBLY_TILE == 0 {
                 poll(cx, row)?;
             }
             *value = finite(*value * scale)?;
-            previous_specific_enthalpy.push(finite(self.masses[row] * *value)?);
+            let storage_dual = finite(self.masses[row] * *value)?;
+            if self.prescribed[row] {
+                prescribed_temperature[row] = finite(storage_dual / self.slopes[row])?;
+                previous_specific_enthalpy.push(0.0);
+            } else {
+                previous_specific_enthalpy.push(storage_dual);
+            }
         }
         let mut source_density = vec![0.0; n];
         for element in 0..self.mesh.element_count() {
@@ -655,6 +700,7 @@ impl EnthalpyStepLinearization<'_> {
             for (b, &vertex) in tet.iter().enumerate() {
                 let mut value = 0.0;
                 for (a, &row) in tet.iter().enumerate() {
+                    if self.prescribed[row] { continue; }
                     let mass = if a == b { volume / 10.0 } else { volume / 20.0 };
                     value = finite(mass.mul_add(state.x[row], value))?;
                 }
@@ -665,6 +711,7 @@ impl EnthalpyStepLinearization<'_> {
         Ok(EnthalpyStepGradient {
             previous_specific_enthalpy,
             source_density,
+            prescribed_temperature,
             adjoint: state.x,
             relative_residual,
             iterations: state.iters,

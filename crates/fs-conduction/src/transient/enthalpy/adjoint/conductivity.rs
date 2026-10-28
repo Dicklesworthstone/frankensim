@@ -120,6 +120,7 @@ impl EnthalpyStepLinearization<'_> {
             if element % ASSEMBLY_TILE == 0 { poll(cx, element)?; }
             let mut contraction = 0.0;
             for (&vertex, &load) in tet.iter().zip(loads) {
+                if self.is_prescribed(vertex as usize) { continue; }
                 contraction = finite(
                     full_joule_multiplier[vertex as usize].mul_add(load, contraction),
                 )?;

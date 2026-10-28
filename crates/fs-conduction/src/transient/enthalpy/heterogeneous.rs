@@ -274,6 +274,55 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
             .map(|_| self.inner.curve_for_vertex(vertex))
     }
 
+    /// Check scheduled bath values without changing the accepted caloric state.
+    /// The original transport owner supplies chart inversion and ambiguity rules.
+    pub(crate) fn admit_prescribed_boundary(
+        &self,
+        cx: &Cx<'_>,
+        boundary: &crate::ThermalBoundary,
+    ) -> Result<(), HeterogeneousEnthalpyError> {
+        poll(cx, 0)?;
+        for (index, &(vertex, temperature)) in boundary.dirichlet().iter().enumerate() {
+            if index % ASSEMBLY_TILE == 0 { poll(cx, index)?; }
+            if vertex >= self.vertex_material_ids.len() {
+                return Err(EnthalpyError::InvalidInput(
+                    "prescribed vertex is outside the reference mesh",
+                ).into());
+            }
+            self.inner.prescribed_enthalpy(vertex, temperature)?;
+        }
+        Ok(())
+    }
+
+    /// Build the same boundary-compatible candidate used to initialize a
+    /// physical endpoint solve, without advancing or replacing history.
+    /// Coupled boundary owners can evaluate their initial residual at this
+    /// candidate while retaining the original `old_h` for storage accounting.
+    /// A latent bath temperature never selects a liquid fraction implicitly.
+    pub fn prescribed_endpoint_initial_guess(
+        &self,
+        cx: &Cx<'_>,
+        boundary: &crate::ThermalBoundary,
+        old_h: &[f64],
+    ) -> Result<Vec<f64>, HeterogeneousEnthalpyError> {
+        self.admit_prescribed_boundary(cx, boundary)?;
+        if old_h.len() != self.vertex_material_ids.len() {
+            return Err(EnthalpyError::InvalidInput("initial enthalpy must match the reference mesh").into());
+        }
+        for (vertex, &h) in old_h.iter().enumerate() {
+            if vertex % ASSEMBLY_TILE == 0 { poll(cx, vertex)?; }
+            self.inner.curve_for_vertex(vertex).state_at_specific_enthalpy(h)
+                .map_err(|source| EnthalpyError::Phase { vertex, source })?;
+        }
+        let mut candidate = old_h.to_vec();
+        for (index, &(vertex, temperature)) in boundary.dirichlet().iter().enumerate() {
+            if index % ASSEMBLY_TILE == 0 { poll(cx, index)?; }
+            candidate[vertex] = self.inner.prescribed_enthalpy(vertex, temperature)?;
+        }
+        poll(cx, old_h.len())?;
+        Ok(candidate)
+    }
+
     /// Reference-material identities in mesh tetrahedron order.
     #[must_use]
     pub fn element_material_ids(&self) -> &[usize] {
@@ -510,7 +559,7 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
             accepted,
             max_feedback_entries,
         )?;
-        let density = self.bind_reference_density(cx, old_h, inner.primal())?;
+        let density = self.bind_reference_density(cx, old_h, inner.transport())?;
         Ok(HeterogeneousEnthalpyRadiationStepLinearization { inner, density })
     }
 
@@ -536,7 +585,7 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
             cx, problem, interfaces, old_h, dt_s, config, patches, accepted,
             max_feedback_entries, Some(physical_target_j),
         )?;
-        let density = self.bind_reference_density(cx, old_h, inner.primal())?;
+        let density = self.bind_reference_density(cx, old_h, inner.transport())?;
         Ok(HeterogeneousEnthalpyRadiationStepLinearization { inner, density })
     }
 
@@ -725,7 +774,7 @@ impl<'m> HeterogeneousEnthalpyBackwardEuler<'m, '_> {
         old_h: &[f64],
         inner: EnthalpyStepLinearization<'m>,
     ) -> Result<HeterogeneousEnthalpyStepLinearization<'m>, EnthalpyAdjointError> {
-        let density = self.bind_reference_density(cx, old_h, inner.primal())?;
+        let density = self.bind_reference_density(cx, old_h, &inner)?;
         Ok(HeterogeneousEnthalpyStepLinearization { inner, density })
     }
 
@@ -733,14 +782,16 @@ impl<'m> HeterogeneousEnthalpyBackwardEuler<'m, '_> {
         &self,
         cx: &Cx<'_>,
         old_h: &[f64],
-        primal: &EnthalpyStepSolution,
+        step: &EnthalpyStepLinearization<'_>,
     ) -> Result<ReferenceDensityLinearization<'m>, EnthalpyAdjointError> {
         let mut specific_enthalpy_change = Vec::with_capacity(old_h.len());
-        for (vertex, (&new, &old)) in primal.specific_enthalpy_j_kg.iter().zip(old_h).enumerate() {
+        for (vertex, (&new, &old)) in step.primal().specific_enthalpy_j_kg.iter().zip(old_h).enumerate() {
             if vertex % ASSEMBLY_TILE == 0 {
                 poll(cx, vertex)?;
             }
-            specific_enthalpy_change.push(finite(new - old)?);
+            // At a fixed row dR/drho scales h-h_bath, which is exactly zero;
+            // its physical storage jump belongs to the reservoir reaction.
+            specific_enthalpy_change.push(if step.is_prescribed(vertex) { 0.0 } else { finite(new - old)? });
         }
         poll(cx, old_h.len())?;
         Ok(ReferenceDensityLinearization {

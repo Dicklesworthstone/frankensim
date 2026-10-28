@@ -87,6 +87,7 @@ impl EnthalpyStepLinearization<'_> {
             for (vertices, area) in &port.faces {
                 poll(cx, i)?;
                 for (a, &row) in vertices.iter().enumerate() {
+                    if self.prescribed[row] { continue; }
                     reference_left[row] =
                         finite(reference_left[row] - self.dt * port.htc_w_m2_k * (area / 3.0))?;
                     for (b, &column) in vertices.iter().enumerate() {
@@ -138,8 +139,11 @@ impl EnthalpyStepLinearization<'_> {
             if vertex % ASSEMBLY_TILE == 0 {
                 poll(cx, vertex)?;
             }
-            let mut diagonal =
-                finite(self.masses[vertex] + self.dt * self.tangent.get(vertex, vertex))?;
+            let mut diagonal = if self.prescribed[vertex] {
+                self.masses[vertex]
+            } else {
+                finite(self.masses[vertex] + self.dt * self.tangent.get(vertex, vertex))?
+            };
             for update in self.feedback.iter().chain(&updates) {
                 diagonal = finite(update.left[vertex].mul_add(update.right[vertex], diagonal))?;
             }

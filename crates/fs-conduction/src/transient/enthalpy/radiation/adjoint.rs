@@ -271,12 +271,12 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             for (&column, &entry) in columns.iter().zip(entries) {
                 flux = finite(entry.mul_add(temperature[column], flux))?;
             }
-            transport_w.push(finite(flux - system.load[row])?);
+            transport_w.push(if transport.is_prescribed(row) { 0.0 } else { finite(flux - system.load[row])? });
         }
         // Recheck physical heat separately from the numerically combined Robin
         // reference. This is not inferred from storage or from a small residual.
         let original = context.assemble(&temperature, phase_scales.as_deref())?;
-        let dofs = crate::assemble::DofMap::new(problem.boundary, n)?;
+        let dofs = crate::assemble::DofMap::new_allow_fully_prescribed(problem.boundary, n)?;
         let (energy, _) = crate::solve::energy_balance(
             problem.mesh,
             problem.boundary,
@@ -300,8 +300,8 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             radiation_w =
                 finite(radiation_w + area * entry.patch.heat_flux_w_m2(integral / area)?)?;
         }
-        let net =
-            finite(energy.source_w - energy.neumann_out_w - energy.robin_out_w - radiation_w)?;
+        let net = finite(energy.source_w + transport.primal().dirichlet_in_w
+            - energy.neumann_out_w - energy.robin_out_w - radiation_w)?;
         let defect = finite(transport.primal().stored_energy_change_j - dt_s * net)?;
         if defect.abs() > step_config.energy_tolerance_j {
             return Err(EnthalpyError::EnergyBalance {
@@ -433,6 +433,7 @@ impl<'m> EnthalpyRadiationStepLinearization<'m> {
                     poll(cx, index)?;
                 }
                 for (a, &row) in vertices.iter().enumerate() {
+                    if self.transport.is_prescribed(row) { continue; }
                     let lambda = transport.adjoint[row];
                     load_pair = finite(lambda.mul_add(area / 3.0, load_pair))?;
                     for (b, &column) in vertices.iter().enumerate() {

@@ -203,7 +203,7 @@ fn g0_ambiguous_temperature_constraints_and_invalid_initial_enthalpy_are_refused
         assert!(matches!(EnthalpyHistoryRun::new(cx,problem(&fixed,&material,
             HeatSourceHistory::Fixed(ScalarField::Uniform(0.))),
             EnthalpyHistoryMaterials {table:&table,of_element:&[0],phase_conductivity:None},
-            &[150.;4],budget(&mesh,1)), Err(HeterogeneousEnthalpyError::Enthalpy(EnthalpyError::UnsupportedDirichlet))));
+            &[150.;4],budget(&mesh,1)), Err(HeterogeneousEnthalpyError::Enthalpy(EnthalpyError::AmbiguousPrescribedTemperature { .. }))));
         let boundary=natural(cx,&mesh);
         for bad in [f64::NAN,f64::INFINITY,-201.,1001.] {
             assert!(EnthalpyHistoryRun::new(cx,problem(&boundary,&material,

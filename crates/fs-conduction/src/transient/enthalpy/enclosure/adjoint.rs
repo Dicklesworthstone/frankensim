@@ -130,7 +130,7 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             primal.stored_energy_change_j
                 + dt_s
                     * (primal.neumann_out_w + convective_out + fresh.enclosure_energy_closure_w
-                        - primal.source_w),
+                        - primal.source_w - primal.dirichlet_in_w),
         )?;
         if energy.abs() > step_config.energy_tolerance_j {
             return Err(super::super::EnthalpyError::EnergyBalance {

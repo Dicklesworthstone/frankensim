@@ -28,7 +28,8 @@ pub struct EnthalpyRobinGradient {
     pub references: Vec<f64>,
     /// Derivative per ln(HTC), with radiation properties held fixed.
     pub log_htc: Vec<f64>,
-    /// Derivative per watt of assembled nodal load: dt times the multiplier.
+    /// Derivative per watt of assembled nodal load: dt times the multiplier,
+    /// with prescribed residual rows masked because they contain no convection load.
     pub nodal_load: Vec<f64>,
 }
 
@@ -173,13 +174,7 @@ impl<'m> EnthalpyRobinResponse<'_, 'm> {
             *value = finite(*value + carry)?;
         }
         let transport = self.step.pullback(cx, &seed, self.linear)?;
-        let mut nodal_load = Vec::with_capacity(n);
-        for (index, &lambda) in transport.adjoint.iter().enumerate() {
-            if index % ASSEMBLY_TILE == 0 {
-                poll(cx, index)?;
-            }
-            nodal_load.push(finite(self.step.dt * lambda)?);
-        }
+        let nodal_load = self.step.nodal_load_pullback(cx, &transport.adjoint)?;
         let mut references = Vec::with_capacity(self.ports.len());
         let mut log_htc = Vec::with_capacity(self.ports.len());
         for (index, port) in self.ports.iter().enumerate() {
