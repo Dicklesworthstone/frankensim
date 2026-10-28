@@ -95,6 +95,18 @@ impl AdhesiveFrictionLaw {
         &self.pressure_law
     }
 
+    /// Independently supplied static junction strength [Pa].
+    #[must_use]
+    pub const fn static_shear_strength_pa(&self) -> f64 {
+        self.static_shear_strength_pa
+    }
+
+    /// Independently supplied positive-speed junction strength [Pa].
+    #[must_use]
+    pub const fn kinetic_shear_strength_pa(&self) -> f64 {
+        self.kinetic_shear_strength_pa
+    }
+
     /// Set-valued static capacity [N]; the mechanical solver chooses the reaction.
     pub fn static_capacity_n(&self, contact: AdhesiveContactState) -> Result<f64, TriboError> {
         capacity(

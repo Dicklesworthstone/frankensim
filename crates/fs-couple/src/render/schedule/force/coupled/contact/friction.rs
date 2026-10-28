@@ -185,7 +185,7 @@ pub struct FrictionModalFrame {
 /// slip speed with the cone first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrictionRoots {
-    /// Intersections found, 1..=3.
+    /// Intersections found, 1..=4; four requires a static/kinetic junction drop.
     pub found: u8,
     /// Index of the committed intersection.
     pub selected: u8,
@@ -484,14 +484,19 @@ impl FrictionModalSystem {
     fn solve_contact(&mut self, free_slip: f64, normal: f64, gate: Option<&CancelGate>)
         -> Result<(f64, ModalFrictionRegime, usize, Option<FrictionRoots>), ModalFrictionError>
     {
-        if let Some(binding) = &self.adhesive {
-            let (traction, regime, iterations) = binding.solve(self.config, self.compliance,
-                self.network.dt, free_slip, normal, gate)?;
-            self.staged_branch = ContactBranch::Fresh;
-            return Ok((traction, regime, iterations, None));
-        }
         let continued = matches!(self.port.law, FrictionLaw::Stribeck { .. } | FrictionLaw::Hyperbolic { .. });
-        if !continued || normal == 0.0 {
+        if let Some(binding) = &self.adhesive {
+            let contact = binding.tangential().contact();
+            if normal != contact.repulsive_normal_force_n() {
+                return Err(invalid("held adhesive input must retain the frozen repulsive normal load").into());
+            }
+            if !continued || contact.area_m2() == 0.0 {
+                let (traction, regime, iterations) = binding.solve(self.config, self.compliance,
+                    self.network.dt, free_slip, normal, gate)?;
+                self.staged_branch = ContactBranch::Fresh;
+                return Ok((traction, regime, iterations, None));
+            }
+        } else if !continued || normal == 0.0 {
             self.staged_branch = ContactBranch::Fresh;
             let (traction, regime, iterations) = scalar::solve(&self.port.law, self.config, self.compliance, self.network.dt, free_slip, normal, gate)?;
             return Ok((traction, regime, iterations, None));
@@ -505,7 +510,11 @@ impl FrictionModalSystem {
             ImplicitFrictionError::NoConvergence => invalid("set-valued friction root did not resolve within max_iterations").into(),
         }};
         if !self.load_line.as_ref().is_some_and(|line| line.matches(normal, mobility)) {
-            self.load_line = Some(StribeckLoadLine::new(&self.port.law, normal, mobility).map_err(refusal)?);
+            self.load_line = Some(if let Some(binding) = &self.adhesive {
+                StribeckLoadLine::for_adhesive(binding.tangential(), mobility).map_err(refusal)?
+            } else {
+                StribeckLoadLine::new(&self.port.law, normal, mobility).map_err(refusal)?
+            });
         }
         let line = self.load_line.as_ref().ok_or_else(|| invalid("missing set-valued load line"))?;
         let (step, iterations) = line.step_within(finite(free_slip/self.network.dt)?, self.branch,

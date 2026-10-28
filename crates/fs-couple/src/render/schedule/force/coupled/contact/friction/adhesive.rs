@@ -14,12 +14,10 @@ pub struct AdhesiveModalBinding {
 }
 impl AdhesiveModalBinding {
     /// Bind explicitly declared physical contact geometry and coefficients.
-    /// This owner currently admits Coulomb and affine pressure laws. Nonlinear
-    /// weakening needs its own continuation history and refuses here.
+    /// Coulomb and affine laws use the held-effort solve. Stribeck/hyperbolic
+    /// pressure laws use the native network's retained branch continuation,
+    /// including the independent static/kinetic junction-strength drop.
     pub fn new(law: AdhesiveTangentialContact) -> Result<Self, ModalFrictionError> {
-        if matches!(law.law().pressure_law(), FrictionLaw::Stribeck {..} | FrictionLaw::Hyperbolic {..}) {
-            return Err(invalid("adhesive modal weakening requires an admitted branch-continuation owner").into());
-        }
         Ok(Self { law, source: None })
     }
     /// Retain the original normal/shear sources and their exact fixed query.
@@ -110,6 +108,11 @@ impl FrictionModalSystem {
             return Err(invalid("adhesive binding must match the unchanged pressure law and cannot replace a retained source").into());
         }
         self.adhesive = Some(binding);
+        // A former dry load line lacks the new junction force. Mechanical
+        // motion is retained, but its old friction branch is not transferable.
+        self.load_line = None;
+        self.branch = ContactBranch::Fresh;
+        self.staged_branch = ContactBranch::Fresh;
         Ok(self)
     }
     /// Complete retained adhesive geometry, law and original sources.

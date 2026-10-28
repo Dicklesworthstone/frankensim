@@ -9433,8 +9433,23 @@ and zero repulsion with real contact area does not release the junction.
 
 The `FrictionDrive` normal input must equal the frozen repulsive force. It is
 not the signed net adhesive reaction. Coulomb and affine pressure contributions
-are supported. Nonlinear weakening refuses until its adhesive continuation
-history is supported. Normal-area evolution, mixed-mode peeling and tangential
+use the original held-effort solve. Stribeck and hyperbolic pressure contributions
+use the same cached `StribeckLoadLine` continuation as dry friction, with actual
+`tau_kinetic A` added to sliding force and independent `tau_static A` in the
+static cone. This offset changes the residual without changing its critical
+slips; no effective normal load or division by repulsion is needed. A junction
+strength drop can create four intersections (the cone plus three sliding roots).
+The retained low/high sliding branch persists inside the static cone until its
+root ends; a finite-slip fold jumps branches, whereas unloading to zero slip or
+reversal allows sticking. Only accepted native steps publish branch history.
+Binding adhesion invalidates a former dry load line without erasing body motion.
+
+G1/G3 load-line tests compare all four intersections with an independent physical
+residual scan, test fold hysteresis and zero-repulsion sliding, and recover dry
+continuation exactly at zero junction strength. `tests/adhesive_modal.rs` exercises
+both weakening laws on two real finite bodies, including static-cone overlap,
+equal/opposite momentum, actual friction-work balance and failed-trial rollback.
+Normal-area evolution, mixed-mode peeling and tangential
 elastic storage are not inferred. Dry source replacement, simultaneous-port
 promotion, and all dry-law thermal refresh entry points refuse to discard or
 reinterpret an attached adhesive source. Friction loss remains available for

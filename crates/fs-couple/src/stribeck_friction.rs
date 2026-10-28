@@ -229,7 +229,7 @@ pub struct SetValuedFrictionStep {
     pub branch: ContactBranch,
     /// Intersections of the discrete load line with the friction graph:
     /// the static cone (when it admits the held no-slip force) plus every
-    /// sliding root, so 1 or 3 away from a fold.
+    /// sliding root. A static/kinetic junction-strength drop permits up to four.
     pub roots: u8,
     /// Zero-based index of the committed intersection, ordered by slip speed
     /// with the static cone first.
@@ -250,24 +250,35 @@ pub struct SetValuedFrictionStep {
 /// inside the cone.
 ///
 /// Root selection (McIntyre–Schumacher–Woodhouse hysteresis):
-/// - From a fresh touch, from rest, from the low branch, or after the free slip
-///   reverses direction, the contact sticks when admissible. Otherwise it takes
-///   the low root, or the high root when the low root does not exist.
+/// - From a fresh touch, from rest, or after the free slip reverses direction,
+///   the contact sticks when admissible. Otherwise it takes the low root, or
+///   the high root when the low root does not exist.
+/// - A low-branch slide stays on its root while that root exists. At a finite
+///   slip fold it jumps to the high root; unloading to zero slip permits arrest.
 /// - A high-branch slide stays on its root while that root exists. When the root
 ///   folds away, the contact falls to the low root, or else sticks.
 ///
-/// So the only retained memory is a high-branch slide and its direction.
+/// The retained memory is the occupied sliding branch and its direction.
 ///
 /// The same line admits the fs-tribo hyperbolic law
 /// `mu(v) = mu_k + (mu_s - mu_k)/(1 + v/v0)`. Its residual is convex, with
-/// `g'(v) = 1 - m N (mu_s - mu_k) v0/(v + v0)^2`, so there is no low branch:
-/// the critical slips are `0` and `sqrt(m N (mu_s - mu_k) v0) - v0`.
+/// `g'(v) = 1 - m N (mu_s - mu_k) v0/(v + v0)^2`. When this derivative starts
+/// negative, the critical slips are `0` and `sqrt(m N (mu_s - mu_k) v0) - v0`;
+/// otherwise the residual is monotone and has only its low sliding branch.
+///
+/// [`Self::for_adhesive`] adds the actual junction forces `tau_static A` and
+/// `tau_kinetic A`. The kinetic offset shifts `g` without moving its critical
+/// points. When the two strengths differ, a stable low sliding root can coexist
+/// with the static cone; its retained sliding branch continues until that root
+/// ends. No signed net normal load or fictitious friction coefficient is used.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StribeckLoadLine {
     law: fs_tribo::FrictionLaw,
     normal_n: f64,
     mobility_m_per_n_s: f64,
     static_capacity_n: f64,
+    kinetic_junction_n: f64,
+    zero_speed_capacity_n: f64,
     local_max_m_s: f64,
     local_min_m_s: f64,
 }
@@ -275,16 +286,52 @@ pub struct StribeckLoadLine {
 type SetValuedError = ImplicitFrictionError<fs_tribo::TriboError>;
 
 impl StribeckLoadLine {
-    /// Admit a Stribeck law at a positive load and positive discrete mobility,
+    /// Admit a Stribeck or hyperbolic law at positive load and discrete mobility,
     /// and locate the residual's critical points once.
     ///
     /// # Errors
-    /// A non-Stribeck or invalid law, a non-positive or non-finite load or
+    /// An unsupported or invalid law, a non-positive or non-finite load or
     /// mobility, or an unrepresentable static capacity.
     pub fn new(
         law: &fs_tribo::FrictionLaw,
         normal_n: f64,
         mobility_m_per_n_s: f64,
+    ) -> Result<Self, SetValuedError> {
+        if !(normal_n.is_finite() && normal_n > 0.0) {
+            return Err(ImplicitFrictionError::InvalidInput("normal_force"));
+        }
+        Self::with_junction(law, normal_n, mobility_m_per_n_s, 0.0, 0.0)
+    }
+
+    /// Continue a frozen adhesive junction's complete Stribeck/hyperbolic law.
+    /// The real area and nonnegative repulsive load stay with the normal owner.
+    /// Zero repulsive load is admitted: the independent junction still carries
+    /// shear. This adds no normal evolution, shear peeling or elastic storage.
+    ///
+    /// # Errors
+    /// An unsupported pressure law, non-positive or non-finite mobility, or
+    /// an unrepresentable force capacity or load-line scale.
+    pub fn for_adhesive(
+        contact: &fs_tribo::adhesive::AdhesiveTangentialContact,
+        mobility_m_per_n_s: f64,
+    ) -> Result<Self, SetValuedError> {
+        let law = contact.law();
+        let area = contact.contact().area_m2();
+        Self::with_junction(
+            law.pressure_law(),
+            contact.contact().repulsive_normal_force_n(),
+            mobility_m_per_n_s,
+            law.static_shear_strength_pa() * area,
+            law.kinetic_shear_strength_pa() * area,
+        )
+    }
+
+    fn with_junction(
+        law: &fs_tribo::FrictionLaw,
+        normal_n: f64,
+        mobility_m_per_n_s: f64,
+        static_junction_n: f64,
+        kinetic_junction_n: f64,
     ) -> Result<Self, SetValuedError> {
         let (static_mu, kinetic_mu, characteristic_speed, viscous_per_speed, hyperbolic) = match *law {
             fs_tribo::FrictionLaw::Stribeck { static_mu, kinetic_mu, characteristic_speed, viscous_per_speed } =>
@@ -296,14 +343,15 @@ impl StribeckLoadLine {
         // Validates the law through its owner before any root work.
         law.kinetic_coefficient(characteristic_speed)
             .map_err(ImplicitFrictionError::Constitutive)?;
-        if !(normal_n.is_finite() && normal_n > 0.0) {
+        if !(normal_n.is_finite() && normal_n >= 0.0) {
             return Err(ImplicitFrictionError::InvalidInput("normal_force"));
         }
         if !(mobility_m_per_n_s.is_finite() && mobility_m_per_n_s > 0.0) {
             return Err(ImplicitFrictionError::InvalidInput("discrete_mobility"));
         }
-        let static_capacity_n = static_mu * normal_n;
-        if !static_capacity_n.is_finite() {
+        let static_capacity_n = static_junction_n + static_mu * normal_n;
+        let zero_speed_capacity_n = kinetic_junction_n + static_mu * normal_n;
+        if !static_capacity_n.is_finite() || !zero_speed_capacity_n.is_finite() {
             return Err(ImplicitFrictionError::InvalidInput("static_capacity"));
         }
         // With x = v/c, g'(v) = 0 exactly where x exp(-x^2) = b c / (2a); the
@@ -343,6 +391,8 @@ impl StribeckLoadLine {
             normal_n,
             mobility_m_per_n_s,
             static_capacity_n,
+            kinetic_junction_n,
+            zero_speed_capacity_n,
             local_max_m_s,
             local_min_m_s,
         })
@@ -400,9 +450,12 @@ impl StribeckLoadLine {
         let positive = free_relative_velocity_m_s > 0.0;
         let speed = free_relative_velocity_m_s.abs();
         let stick_admissible = pin.abs() <= self.static_capacity_n;
+        // The static cone and the one-sided kinetic limit differ for a
+        // junction-strength drop. A low sliding root can exist inside the cone.
+        let starts_below = pin.abs() > self.zero_speed_capacity_n;
         let force = |v: f64| -> Result<f64, SetValuedError> {
             let mu = self.law.kinetic_coefficient(v).map_err(ImplicitFrictionError::Constitutive)?;
-            Ok(mu * self.normal_n)
+            Ok(self.kinetic_junction_n + mu * self.normal_n)
         };
         let residual = |v: f64| -> Result<f64, SetValuedError> {
             let r = v - speed + mobility * force(v)?;
@@ -424,7 +477,7 @@ impl StribeckLoadLine {
         };
         let low = || -> Result<Option<f64>, SetValuedError> {
             let top = self.local_max_m_s.min(speed);
-            if stick_admissible || top <= 0.0 || residual(top)? <= 0.0 {
+            if !starts_below || top <= 0.0 || residual(top)? < 0.0 {
                 return Ok(None);
             }
             root_on(0.0, top).map(Some)
@@ -440,10 +493,20 @@ impl StribeckLoadLine {
             ContactBranch::SlidingLow { positive: p } | ContactBranch::SlidingHigh { positive: p }
                 if p != positive);
         let stays_high = matches!(previous, ContactBranch::SlidingHigh { .. }) && !reversed;
+        let stays_low = matches!(previous, ContactBranch::SlidingLow { .. }) && !reversed;
         let choice = if stays_high {
             match high()? {
                 Some(v) => Some((v, true)),
                 None => low()?.map(|v| (v, false)),
+            }
+        } else if stays_low {
+            match low()? {
+                Some(v) => Some((v, false)),
+                // Loss at a finite-slip fold goes to the high branch, even
+                // inside the larger static cone. Only reaching v=0 on
+                // unloading permits arrest without reversing the drive.
+                None if stick_admissible && !starts_below => None,
+                None => high()?.map(|v| (v, true)),
             }
         } else if stick_admissible {
             None
@@ -462,15 +525,16 @@ impl StribeckLoadLine {
         };
         // Disclosure. The residual rises on (0, a], falls on (a, b] and rises
         // on (b, speed], with a and b its critical slips clipped to the free
-        // slip. The low root exists when the cone refuses and g(a) > 0, the
+        // slip. The low root exists when g(0+) < 0 and g(a) > 0, the
         // middle one when g(a) > 0 > g(b), and the high one when g(b) <= 0
         // (the same existence tests the branch selection uses).
         let a = self.local_max_m_s.min(speed);
         let b = self.local_min_m_s.min(speed);
-        // An empty rising piece (hyperbolic law) ends at g(0+) = m N mu_s - |v_free|.
-        let g_a = if a > 0.0 { residual(a)? } else { mobility * self.static_capacity_n - speed };
+        // An empty rising piece uses the KINETIC one-sided capacity; the
+        // static junction strength is a separate set-valued reaction bound.
+        let g_a = if a > 0.0 { residual(a)? } else { mobility * self.zero_speed_capacity_n - speed };
         let g_b = if b < speed { residual(b)? } else { 1.0 };
-        let has_low = !stick_admissible && g_a > 0.0;
+        let has_low = starts_below && g_a >= 0.0;
         let has_middle = b < speed && g_a > 0.0 && g_b < 0.0;
         let has_high = b < speed && g_b <= 0.0;
         let counted = u8::from(stick_admissible)
@@ -546,6 +610,120 @@ mod set_valued_contact_tests {
             kinetic_mu,
             characteristic_speed: speed,
             viscous_per_speed: viscous,
+        }
+    }
+
+    fn adhesive_line(normal: f64, mobility: f64, static_force: f64, kinetic_force: f64)
+        -> StribeckLoadLine
+    {
+        use fs_tribo::adhesive::{AdhesiveContactState, AdhesiveFrictionLaw, AdhesiveTangentialContact};
+        let area = 1e-6;
+        let junction = AdhesiveTangentialContact::new(
+            AdhesiveFrictionLaw::new(law(1.2, 0.35, 0.05, 0.0),
+                static_force / area, kinetic_force / area).unwrap(),
+            AdhesiveContactState::new(area, normal).unwrap(),
+        ).unwrap();
+        StribeckLoadLine::for_adhesive(&junction, mobility).unwrap()
+    }
+
+    /// G1: a real junction retains kinetic sliding inside its larger static
+    /// cone. An algebraic no-slip test on every step would falsely arrest it.
+    #[test]
+    fn adhesive_strength_drop_preserves_sliding_at_zero_repulsive_load() {
+        let line = adhesive_line(0.0, 2.0, 0.8, 0.4);
+        let stuck = line.step(1.2, ContactBranch::Fresh).unwrap();
+        assert_eq!(stuck.branch, ContactBranch::Stuck);
+        assert_eq!(stuck.roots, 2);
+        assert_eq!(stuck.traction_n, 0.6);
+        let sliding = line.step(1.2, ContactBranch::SlidingLow { positive: true }).unwrap();
+        assert_eq!(sliding.branch, ContactBranch::SlidingLow { positive: true });
+        assert_eq!((sliding.roots, sliding.selected), (2, 1));
+        assert!((sliding.traction_n - 0.4).abs() < 1e-15);
+        assert!((sliding.relative_velocity_m_s - 0.4).abs() < 1e-15);
+        assert_eq!(line.step(0.7, sliding.branch).unwrap().branch, ContactBranch::Stuck);
+        let reversed = line.step(-1.2, sliding.branch).unwrap();
+        assert_eq!(reversed.branch, ContactBranch::Stuck);
+        assert_eq!(reversed.traction_n, -0.6);
+
+        let frictionless_slide = adhesive_line(0.0, 2.0, 0.8, 0.0)
+            .step(1.2, sliding.branch).unwrap();
+        assert_eq!(frictionless_slide.traction_n, 0.0);
+        assert_eq!(frictionless_slide.relative_velocity_m_s, 1.2);
+        assert_eq!((frictionless_slide.roots, frictionless_slide.selected), (2, 1));
+    }
+
+    /// G1: independently scan the physical equation including the junction
+    /// offset. Here the cone coexists with THREE sliding roots; the middle
+    /// root is unstable. Source forces are never divided by the normal load.
+    #[test]
+    fn adhesive_four_intersections_keep_both_stable_sliding_branches() {
+        let (normal, mobility, speed) = (1.0, 0.1, 0.128);
+        let line = adhesive_line(normal, mobility, 0.1, 0.05);
+        let pressure = law(1.2, 0.35, 0.05, 0.0);
+        let g = |v: f64| {
+            let mu = if v == 0.0 { 1.2 } else { pressure.kinetic_coefficient(v).unwrap() };
+            v - speed + mobility * (0.05 + normal * mu)
+        };
+        let mut roots = Vec::new();
+        let mut left = 0.0;
+        let mut previous = g(left);
+        for i in 1..=20_000_u32 {
+            let right = speed * f64::from(i) / 20_000.0;
+            let current = g(right);
+            if previous.is_sign_negative() != current.is_sign_negative() {
+                let (mut lo, mut hi) = (left, right);
+                for _ in 0..60 {
+                    let mid = f64::midpoint(lo, hi);
+                    if g(mid).is_sign_negative() == previous.is_sign_negative() { lo = mid; } else { hi = mid; }
+                }
+                roots.push(f64::midpoint(lo, hi));
+            }
+            left = right;
+            previous = current;
+        }
+        assert_eq!(roots.len(), 3);
+        for (branch, selected, slip) in [
+            (ContactBranch::Fresh, 0, 0.0),
+            (ContactBranch::SlidingLow { positive: true }, 1, roots[0]),
+            (ContactBranch::SlidingHigh { positive: true }, 3, roots[2]),
+        ] {
+            let step = line.step(speed, branch).unwrap();
+            assert_eq!((step.roots, step.selected), (4, selected));
+            assert!((step.relative_velocity_m_s - slip).abs() < 1e-14);
+            assert!((speed - mobility * step.traction_n - slip).abs() < 1e-14);
+            assert!(step.traction_n * step.relative_velocity_m_s >= 0.0);
+        }
+    }
+
+    /// G1: increasing drive past the low sliding fold cannot arrest a moving
+    /// junction merely because its larger static cone still contains the force.
+    #[test]
+    fn adhesive_low_branch_jumps_at_fold_before_static_threshold() {
+        let line = adhesive_line(1.0, 0.1, 0.2, 0.05);
+        let low = line.step(0.128, ContactBranch::SlidingLow { positive: true }).unwrap();
+        assert_eq!(low.branch, ContactBranch::SlidingLow { positive: true });
+        let high = line.step(0.133, low.branch).unwrap();
+        assert_eq!(high.branch, ContactBranch::SlidingHigh { positive: true });
+        assert_eq!(high.selected, high.roots - 1);
+        assert!(high.relative_velocity_m_s > low.relative_velocity_m_s);
+        let remains_high = line.step(0.128, high.branch).unwrap();
+        assert_eq!(remains_high.branch, high.branch);
+        assert_eq!(line.step(0.119, remains_high.branch).unwrap().branch, ContactBranch::Stuck);
+        assert_eq!(line.step(0.133, ContactBranch::Stuck).unwrap().branch, ContactBranch::Stuck);
+    }
+
+    /// G3: zero junction strength reproduces the original pressure graph and
+    /// its branch selection exactly, including reversal and fold crossings.
+    #[test]
+    fn zero_junction_strength_recovers_dry_continuation() {
+        let pressure = law(1.2, 0.35, 0.05, 0.0);
+        let dry = StribeckLoadLine::new(&pressure, 1.0, 0.1).unwrap();
+        let adhesive = adhesive_line(1.0, 0.1, 0.0, 0.0);
+        for previous in [ContactBranch::Fresh, ContactBranch::Stuck,
+            ContactBranch::SlidingLow { positive: true }, ContactBranch::SlidingHigh { positive: true }] {
+            for free in [-0.3, -0.128, 0.0, 0.1, 0.12, 0.128, 0.3] {
+                assert_eq!(dry.step(free, previous).unwrap(), adhesive.step(free, previous).unwrap());
+            }
         }
     }
 
