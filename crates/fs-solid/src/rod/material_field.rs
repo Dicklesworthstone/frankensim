@@ -25,6 +25,7 @@ pub mod gravity;
 pub mod reference;
 /// Source-bound tension-only links sharing this rod's equilibrium and gravity.
 pub mod tension;
+mod derivatives;
 
 use super::{MAX_MATERIAL_ROD_SEGMENTS, Rod, RodSection, TipLoad};
 use crate::SolidError;
@@ -200,20 +201,28 @@ impl SpatialMaterialRod {
         Ok((g, k))
     }
 
+    // One constitutive owner for total storage and element-local derivatives.
+    fn segment_energy_for(&self, rod: &Rod, segment: usize) -> Result<f64, SpatialRodError> {
+        let section = &self.stiffness[segment];
+        let (g, k) = self.strains_for(rod, segment)?;
+        let energy = match &self.thermal {
+            Some(field) => {
+                let axial_energy = field.summary(segment, g[0])?.1;
+                rod.l0 * axial_energy + 0.5 * rod.l0
+                    * section.twice_energy_per_length([0.0, g[1], g[2]], k)
+            }
+            None => 0.5 * rod.l0 * section.twice_energy_per_length(g, k),
+        };
+        if !energy.is_finite() {
+            return Err(SpatialRodError::Invalid("material segment strain energy is unrepresentable"));
+        }
+        Ok(energy)
+    }
+
     fn energy_for(&self, rod: &Rod) -> Result<f64, SpatialRodError> {
         let mut energy = 0.0;
-        for (segment, section) in self.stiffness.iter().enumerate() {
-            let (g, k) = self.strains_for(rod, segment)?;
-            energy += match &self.thermal {
-                Some(field) => {
-                    // Replace, never add to, the old axial stored energy.
-                    // Keep shear/twist/bending in the common mechanical law.
-                    let axial_energy = field.summary(segment, g[0])?.1;
-                    rod.l0 * axial_energy + 0.5 * rod.l0
-                        * section.twice_energy_per_length([0.0, g[1], g[2]], k)
-                }
-                None => 0.5 * rod.l0 * section.twice_energy_per_length(g, k),
-            };
+        for segment in 0..self.stiffness.len() {
+            energy += self.segment_energy_for(rod, segment)?;
         }
         for link in &self.tension_links {
             energy += link.state_for(rod)?.stored_energy_j;
@@ -225,9 +234,13 @@ impl SpatialMaterialRod {
     }
 
     /// Solve ONE compatible equilibrium using the original Newton/Lie-group path.
-    /// All tangent probes use this same spatial energy. Cancellation is checked
-    /// at load/Newton steps, every residual coordinate and tangent column, and
-    /// around the bounded dense solve. There is no millisecond latency claim.
+    /// Derivatives are assembled from incident segment energies and the native
+    /// analytical link/gravity forces. The prepared dependency graph includes
+    /// every nonlocal link, including slack links. Full energy/domain admission
+    /// still runs before accepting a trial. The original dense linear solve is
+    /// retained; no sparse-solver or analytic-rod-tangent claim is made.
+    /// Cancellation is checked at load/Newton steps, every residual coordinate
+    /// and tangent column, and around the bounded dense solve.
     /// Only a complete finite candidate replaces the previous geometry.
     ///
     /// `tolerance` retains the legacy norm mixing force and moment residuals;
@@ -249,8 +262,9 @@ impl SpatialMaterialRod {
             return Err(SpatialRodError::Invalid("finite loads, positive tolerance and 1..=256 load steps are required"));
         }
         let mut candidate = self.rod.clone();
+        let energy = derivatives::SpatialEnergy::new(self);
         let residuals = candidate.solve_static_with_energy(
-            load, steps, tolerance, &|rod| self.equilibrium_energy_for(rod), &|| checkpoint(gate),
+            load, steps, tolerance, &energy, &|| checkpoint(gate),
             Some(&self.free_dofs), self.probe_translation_scale_m(),
         )?;
         self.equilibrium_energy_for(&candidate)?;

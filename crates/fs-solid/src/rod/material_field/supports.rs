@@ -99,12 +99,12 @@ impl SpatialMaterialRod {
     #[must_use]
     pub fn supports(&self) -> &[RodSupport] { &self.supports }
 
-    /// Recover `dE/dq - applied_load` in constrained coordinates using the same
-    /// body/right FD residual as the Newton solve. Pass the load used to solve
-    /// this pose. The returned free residual prevents a reaction-only report
-    /// from hiding an unequilibrated configuration. FD probes must fit the same
-    /// source strain bounds; no analytical stress or exact balance is claimed.
-    /// The same gravitational potential participates when gravity is enabled.
+    /// Recover `dE/dq - applied_load` using the SAME element-local body/right
+    /// derivatives and analytical link/gravity loads as the Newton solve.
+    /// Pass the load used to solve this pose. The free residual prevents a
+    /// reaction-only report from hiding an unequilibrated configuration.
+    /// Segment probes retain their source strain bounds; reactions are numerical
+    /// estimates, not forced whole-body balance closures.
     ///
     /// # Errors
     /// Refuses nonfinite loads/residuals, source/kinematic failures and cancellation.
@@ -115,7 +115,9 @@ impl SpatialMaterialRod {
         if !load.force.iter().chain(&load.moment).all(|x| x.is_finite()) {
             return Err(SpatialRodError::Invalid("reaction loads must be finite"));
         }
-        let residual = self.rod.residual(load, 1.0, &|rod| self.equilibrium_energy_for(rod),
+        self.equilibrium_energy_for(&self.rod)?;
+        let energy = super::derivatives::SpatialEnergy::new(self);
+        let residual = self.rod.residual(load, 1.0, &energy,
             &|| checkpoint(gate), self.probe_translation_scale_m())?;
         let free_residual_norm = self.free_dofs.iter().map(|&k| residual[k] * residual[k]).sum::<f64>().sqrt();
         if !residual.iter().all(|v| v.is_finite()) || !free_residual_norm.is_finite() {

@@ -7,17 +7,18 @@
 //! exactly zero strain (the objectivity battery checks the energy is
 //! invariant, not just small).
 //!
-//! Statics: finite-difference internal residual with exact dead tip loads
-//! (body/right rotational perturbations — `R <- R Exp(delta)`, never
-//! component nudging) and FD
-//! tangent, dense-LU Newton with load stepping. Fixture-scale by
-//! design (≤ a few hundred DOFs); analytic tangents and SE(3)
-//! DYNAMICS under fs-time's symplectic integrators are the recorded
-//! successor scope. [`MaterialRod`] binds the shared source-resolved concentric
-//! section to this same energy and equilibrium solver, retaining all layers.
+//! Statics: element-local finite-difference internal residual with exact dead
+//! tip loads (body/right rotational perturbations — `R <- R Exp(delta)`),
+//! and a residual Jacobian assembled over the actual interaction graph.
+//! Dense-LU Newton with load stepping remains fixture-scale by design
+//! (≤ a few hundred DOFs); analytic rod tangents and SE(3) dynamics remain
+//! successor scope. [`MaterialRod`] retains its source-resolved section.
 
 use crate::SolidError;
 use fs_ga::{GaError, So3, Vec3};
+
+mod derivatives;
+use derivatives::{RodEnergy, UniformEnergy};
 
 /// Spatial material assignments using this same rod kinematics/Newton owner.
 pub mod material_field;
@@ -159,41 +160,57 @@ impl Rod {
         Ok(())
     }
 
-    /// FD internal residual in body/right perturbation coordinates, with
-    /// exact subtraction of the applied tip force and body-frame tip moment.
-    /// The energy callback may also contain distributed-load potentials.
+    /// Body/right residual with exact tip-load subtraction. Known energy owners
+    /// differentiate incident terms before summation; arbitrary callbacks retain
+    /// full-energy differentiation and a complete dependency graph.
     fn residual<E: From<SolidError>>(
         &self, load: &TipLoad, factor: f64,
-        energy: &impl Fn(&Self) -> Result<f64, E>,
+        energy: &impl RodEnergy<E>,
         checkpoint: &impl Fn() -> Result<(), E>,
         translation_scale_m: f64,
     ) -> Result<Vec<f64>, E> {
-        let n = self.ndof();
-        let mut r = vec![0.0f64; n];
-        // FD scales: the tangent is FD-of-FD — the residual step must
-        // sit well above energy roundoff or the nested difference is
-        // noise (measured: a junk Newton direction that creeps).
-        let mut probe = self.clone();
-        for k in 0..n {
+        let coordinates: Vec<_> = (0..self.ndof()).collect();
+        self.residual_on(load, factor, energy, checkpoint, translation_scale_m,
+            &coordinates, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn residual_on<E: From<SolidError>>(
+        &self, load: &TipLoad, factor: f64,
+        energy: &impl RodEnergy<E>,
+        checkpoint: &impl Fn() -> Result<(), E>,
+        translation_scale_m: f64,
+        coordinates: &[usize], column: Option<usize>,
+    ) -> Result<Vec<f64>, E> {
+        let mut r = vec![0.0; self.ndof()];
+        // Allocate two complete probe states once, then change/restore only the
+        // active node. In particular, untouched frames keep their exact bits.
+        let mut plus = self.clone();
+        let mut minus = self.clone();
+        for &k in coordinates {
             checkpoint()?;
+            let (node, component) = (k / 6 + 1, k % 6);
+            if column.is_some_and(|c| !energy.coupled(node, c / 6 + 1)) { continue; }
             let eps = fd_step(k, translation_scale_m, 3e-6)?;
-            let mut d = vec![0.0f64; n];
-            d[k] = eps;
-            probe.clone_from(self);
-            probe.apply_increment(&d, 1.0)?;
-            let ep = energy(&probe)?;
-            probe.clone_from(self);
-            probe.apply_increment(&d, -1.0)?;
-            let em = energy(&probe)?;
-            r[k] = (ep - em) / (2.0 * eps);
+            derivatives::perturb(&mut plus, node, component, eps)?;
+            derivatives::perturb(&mut minus, node, component, -eps)?;
+            let mut value = energy.derivative(self, &plus, &minus, node, component, eps)?;
+            if node + 1 == self.positions.len() {
+                value -= factor * if component < 3 { load.force[component] }
+                    else { load.moment[component - 3] };
+            }
+            if !value.is_finite() {
+                return Err(SolidError::InvalidInput {
+                    what: "rod residual derivative is not finite".into(),
+                }.into());
+            }
+            r[k] = value;
+            plus.positions[node] = self.positions[node];
+            minus.positions[node] = self.positions[node];
+            plus.frames[node] = self.frames[node];
+            minus.frames[node] = self.frames[node];
         }
-        // Differencing the external potential against a much larger stored
-        // energy can erase a real load. These derivatives are known exactly.
-        let tipk = n - 6;
-        for c in 0..3 {
-            r[tipk + c] -= factor * load.force[c];
-            r[tipk + 3 + c] -= factor * load.moment[c];
-        }
+        checkpoint()?;
         Ok(r)
     }
 
@@ -208,7 +225,7 @@ impl Rod {
         steps: usize,
         tol: f64,
     ) -> Result<Vec<f64>, SolidError> {
-        self.solve_static_with_energy(load, steps, tol, &Self::energy, &|| Ok(()), None, 1.0)
+        self.solve_static_with_energy(load, steps, tol, &UniformEnergy, &|| Ok(()), None, 1.0)
     }
 
     // Both uniform and spatial material paths use the SAME nodal update,
@@ -217,15 +234,13 @@ impl Rod {
     #[allow(clippy::too_many_lines, clippy::too_many_arguments)] // one Newton/line-search owner
     fn solve_static_with_energy<E: From<SolidError>>(
         &mut self, load: &TipLoad, steps: usize, tol: f64,
-        energy: &impl Fn(&Self) -> Result<f64, E>,
+        energy: &impl RodEnergy<E>,
         checkpoint: &impl Fn() -> Result<(), E>,
         free_dofs: Option<&[usize]>,
         translation_scale_m: f64,
     ) -> Result<Vec<f64>, E> {
         checkpoint()?;
         let full_n = self.ndof();
-        // These indices are admitted by the spatial support owner. The legacy
-        // path uses the full identity projection and keeps its operation order.
         let free = match free_dofs {
             Some(dofs) => dofs.to_vec(),
             None => (0..full_n).collect(),
@@ -235,8 +250,6 @@ impl Rod {
         for &k in &free { fixed[k] = false; }
         let anchored_positions = self.positions.clone();
         let anchored_frames = self.frames.clone();
-        // Even a zero group increment may canonicalize a frame's bits. Restore
-        // fixed coordinates explicitly rather than letting a clamp drift.
         let constrain = |rod: &mut Self| {
             for node in 1..rod.positions.len() {
                 let k = 6 * (node - 1);
@@ -248,8 +261,16 @@ impl Rod {
                 }
             }
         };
+        let admit = |rod: &Self| -> Result<(), E> {
+            if !energy.value(rod)?.is_finite() {
+                return Err(SolidError::InvalidInput {
+                    what: "rod equilibrium energy is not finite".into(),
+                }.into());
+            }
+            Ok(())
+        };
+        admit(self)?;
         if n == 0 {
-            energy(self)?;
             checkpoint()?;
             return Ok(vec![0.0; steps]);
         }
@@ -262,31 +283,41 @@ impl Rod {
             let mut converged = false;
             for _ in 0..40 {
                 checkpoint()?;
-                let r = self.residual(load, factor, energy, checkpoint, translation_scale_m)?;
+                let r = self.residual_on(load, factor, energy, checkpoint,
+                    translation_scale_m, &free, None)?;
                 let rn = residual_norm(&r);
                 history.push(rn);
                 if rn < tol {
                     converged = true;
                     break;
                 }
-                // FD tangent (fixture-scale dense).
+                // The Jacobian follows actual interactions, including nonlocal
+                // links. Its dense storage and original LU owner are unchanged.
                 let mut kmat = vec![0.0f64; n * n];
                 let mut probe = self.clone();
                 for col in 0..n {
                     checkpoint()?;
-                    let eps = fd_step(free[col], translation_scale_m, 3e-4)?;
-                    let mut d = vec![0.0f64; full_n];
-                    d[free[col]] = eps;
-                    probe.clone_from(self);
-                    probe.apply_increment(&d, 1.0)?;
-                    constrain(&mut probe);
-                    let rp = probe.residual(load, factor, energy, checkpoint, translation_scale_m)?;
-                    probe.clone_from(self);
-                    probe.apply_increment(&d, -1.0)?;
-                    constrain(&mut probe);
-                    let rm = probe.residual(load, factor, energy, checkpoint, translation_scale_m)?;
+                    let coordinate = free[col];
+                    let (node, component) = (coordinate / 6 + 1, coordinate % 6);
+                    let eps = fd_step(coordinate, translation_scale_m, 3e-4)?;
+                    derivatives::perturb(&mut probe, node, component, eps)?;
+                    let rp = probe.residual_on(&TipLoad::default(), 0.0, energy, checkpoint,
+                        translation_scale_m, &free, Some(coordinate))?;
+                    probe.positions[node] = self.positions[node];
+                    probe.frames[node] = self.frames[node];
+                    derivatives::perturb(&mut probe, node, component, -eps)?;
+                    let rm = probe.residual_on(&TipLoad::default(), 0.0, energy, checkpoint,
+                        translation_scale_m, &free, Some(coordinate))?;
+                    probe.positions[node] = self.positions[node];
+                    probe.frames[node] = self.frames[node];
                     for row in 0..n {
-                        kmat[row * n + col] = (rp[free[row]] - rm[free[row]]) / (2.0 * eps);
+                        let value = (rp[free[row]] - rm[free[row]]) / (2.0 * eps);
+                        if !value.is_finite() {
+                            return Err(SolidError::InvalidInput {
+                                what: "rod tangent derivative is not finite".into(),
+                            }.into());
+                        }
+                        kmat[row * n + col] = value;
                     }
                 }
                 checkpoint()?;
@@ -308,7 +339,11 @@ impl Rod {
                     let mut trial = self.clone();
                     trial.apply_increment(&d, alpha)?;
                     constrain(&mut trial);
-                    let rt = trial.residual(load, factor, energy, checkpoint, translation_scale_m)?;
+                    // Full source-domain admission is never replaced by a
+                    // partial energy evaluation, including fully fixed regions.
+                    admit(&trial)?;
+                    let rt = trial.residual_on(load, factor, energy, checkpoint,
+                        translation_scale_m, &free, None)?;
                     let rtn = residual_norm(&rt);
                     if rtn < rn {
                         *self = trial;
@@ -626,35 +661,18 @@ mod tests {
             position[0] *= 1.01;
         }
         assert!(rod.energy().unwrap() > 1e12);
-
         let load = TipLoad {
             force: [0.0, 0.0, 1e-3],
             moment: [0.0; 3],
         };
         let factor = 0.25;
-        let unloaded = rod
-            .residual(
-                &TipLoad::default(),
-                factor,
-                &Rod::energy,
-                &|| Ok(()),
-                1.0,
-            )
-            .unwrap();
-        let loaded = rod
-            .residual(&load, factor, &Rod::energy, &|| Ok(()), 1.0)
-            .unwrap();
+        let unloaded = rod.residual(&TipLoad::default(), factor, &Rod::energy, &|| Ok(()), 1.0).unwrap();
+        let loaded = rod.residual(&load, factor, &Rod::energy, &|| Ok(()), 1.0).unwrap();
         let tip_z = rod.ndof() - 4;
-
-        // Reflection symmetry makes this internal force exactly zero. The old
-        // total-potential stencil rounds away F * eps beside the axial energy.
         assert_eq!(unloaded[tip_z], 0.0);
         assert_eq!(loaded[tip_z], -factor * load.force[2]);
         for k in 0..rod.ndof() {
-            if k != tip_z {
-                assert_eq!(loaded[k], unloaded[k]);
-            }
+            if k != tip_z { assert_eq!(loaded[k], unloaded[k]); }
         }
     }
-
 }
