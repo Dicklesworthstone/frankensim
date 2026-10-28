@@ -2639,3 +2639,27 @@ source/schema/domain refusals. All three changed Rust files passed syntax
 parsing. Independent finite-difference reference calculations and bounded
 physics/API reviews completed. Native compilation, Cargo tests and rustfmt
 remain unexecuted in this environment.
+
+## Source-defined bilinear cohesive interfaces
+
+`cohesive::source` projects an original ordered `InterfaceSystemCard` or an
+already resolved multiphysics interface bundle into the existing
+`BilinearCohesive` law. Explicit `cohesive_stiffness` [Pa/m],
+`cohesive_strength` [Pa], `cohesive_fracture_energy` [J/m²], and
+`cohesive_compression_stiffness` [Pa/m] are required. The numerical maximum
+separation is supplied separately and must include complete failure. No bulk
+material name, absent property, or geometric proximity creates an adhesive bond.
+
+The full bundle, exact source selections, ordered surfaces and texture frames
+remain accessible. The canonical fixed-external-condition policy applies to
+both value dependence and applicability: evolving gap, damage, stress, rate or
+frequency coordinates cannot be frozen into this rate-independent law. All
+external conditions remain fixed during the accepted damage history; there is
+no implicit coefficient/history refresh or inference of fracture heat.
+
+The existing common-mode cohesive law still owns traction, tangents,
+irreversibility, compression after failure and fracture-energy accounting.
+This is not a calibrated mixed-mode adhesion model. The focused
+`cohesive_source` regressions cover shared electrical/mechanical source bundles,
+fixed-temperature substitution, independent fracture work and source/unit/domain
+refusals; structural source-to-force tests live in `fs-solid`.

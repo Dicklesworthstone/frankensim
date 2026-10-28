@@ -77,6 +77,7 @@ Two doctrine rules govern every row:
 | Property | Why | Consumed by |
 |---|---|---|
 | Surface energy; contact angle vs named liquids (hydrophobicity — owner-named); work of adhesion | Wetting, coating, condensation on optics | interface packs |
+| `cohesive_stiffness`, `cohesive_compression_stiffness` [Pa/m]; `cohesive_strength` [Pa]; `cohesive_fracture_energy` [J/m²] | Ordered bonded surfaces at fixed external conditions; common-mode bilinear damage, fracture work and compressive reclosure. These are interface parameters, not bulk elastic modulus or K_IC toughness. | fs-material cohesive source; fs-solid reduced/P1 interfaces |
 | Equilibrium moisture content vs RH; hygroscopic expansion coefficients; moisture diffusivity | Wood swells/detunes with weather — first-order for instruments | wood modeling |
 | Gas/liquid permeability; diffusion coefficients (incl. hydrogen) | Seals leak; hydrogen embrittles steel | seals, embrittlement |
 | Solubility/compatibility vs named fluids (fuels, oils, refrigerants) | Engine seals and hoses | chemical compat |

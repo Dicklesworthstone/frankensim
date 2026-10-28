@@ -1781,3 +1781,21 @@ adapters. Bare laws retain the default native response. The actual total
 deformation must have a finite positive Jacobian independently of the
 material's elastic-gradient admission. Reference geometry and the consistent
 reference mass remain fixed; a thermal adapter does not alter the mass mesh.
+
+### Source-defined cohesive load paths
+
+`cohesive::CohesivePatch::from_interface` consumes
+`fs-material::cohesive::source::ResolvedBilinearCohesive`, checks the actual
+ordered surface material assignments, and retains the original source bundle
+through every accepted displacement/damage state. `p1::MaterialFacePair` and
+`P1Interfaces::from_interfaces` lower the same source through the existing
+matching-face quadrature and work-conjugate maps; both full and reduced patches
+retain their source. No constitutive, quadrature or nonlinear solver is copied.
+
+Swapping an interface dataset changes the traction/separation envelope, failure
+point and area-integrated fracture work in the native equilibrium solver.
+Conditions remain fixed for a damage history. Source refresh across thermal or
+chemical evolution, adaptive fracture topology and complete structural/thermal
+energy accounting are not introduced. The `cohesive_source` integration tests
+check an independently solved compliant pull, material substitution, exact P1
+area/fracture accounting, surface-order refusal and atomic cancellation.

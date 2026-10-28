@@ -24,6 +24,9 @@ use std::collections::BTreeSet;
 
 use fs_exec::Cx;
 use fs_material::cohesive::{BilinearCohesive, CohesiveEnergy, CohesiveError, CohesivePoint, CohesiveStep};
+use fs_material::cohesive::source::ResolvedBilinearCohesive;
+use fs_material::state_point::MaterialStatePointError;
+use fs_matdb::MaterialStateId;
 use fs_solver::{LinearOp, NewtonKrylovConfig, NewtonKrylovState, NewtonReport, NonlinearProblem, SolverRunProgress};
 
 /// Geometry-backed matching P1 interfaces and displacement transfer.
@@ -46,6 +49,7 @@ pub struct CohesivePatch<'a> {
     id: u64,
     area_m2: f64,
     law: &'a BilinearCohesive,
+    source: Option<&'a ResolvedBilinearCohesive>,
     terms: Vec<JumpTerm>,
 }
 impl<'a> CohesivePatch<'a> {
@@ -62,8 +66,22 @@ impl<'a> CohesivePatch<'a> {
         }
         terms.sort_by_key(|term| term.dof);
         if terms.windows(2).any(|p| p[0].dof == p[1].dof) { return Err(Error::Invalid("duplicate patch DOF")); }
-        Ok(Self { id, area_m2, law, terms })
+        Ok(Self { id, area_m2, law, source: None, terms })
     }
+    /// Bind ordered interface data to the same work-conjugate mechanics owner.
+    /// Actual receiving material states must match the source surface roles.
+    /// Source conditions remain fixed for every damage history of this patch.
+    pub fn from_interface(id: u64, area_m2: f64, source: &'a ResolvedBilinearCohesive,
+        surface_materials: [&MaterialStateId; 2], terms: Vec<JumpTerm>) -> Result<Self, Error> {
+        source.require_surface_materials(surface_materials[0], surface_materials[1])
+            .map_err(|error| Error::Source { patch: id, error })?;
+        let mut patch = Self::new(id, area_m2, source.law(), terms)?;
+        patch.source = Some(source);
+        Ok(patch)
+    }
+    /// Original source bundle when this patch was constructed from interface data.
+    #[must_use]
+    pub fn source(&self) -> Option<&'a ResolvedBilinearCohesive> { self.source }
     #[must_use]
     pub fn id(&self) -> u64 { self.id }
     #[must_use]
@@ -164,6 +182,7 @@ pub enum Error {
     Invalid(&'static str),
     Budget(&'static str),
     Material { patch: u64, error: CohesiveError },
+    Source { patch: u64, error: MaterialStatePointError },
     Cancelled,
     Solver(String),
     NotConverged(NewtonReport),

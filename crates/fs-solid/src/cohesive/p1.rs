@@ -8,6 +8,8 @@
 
 use std::collections::BTreeMap;
 use super::{BilinearCohesive, CohesivePatch, Cx, Error, JumpTerm, dot, finite};
+use fs_material::cohesive::source::ResolvedBilinearCohesive;
+use fs_matdb::MaterialStateId;
 
 /// Explicitly bonded exterior faces. Node order is arbitrary on either side.
 /// The two traces must use distinct DOFs even though their coordinates coincide.
@@ -17,6 +19,18 @@ pub struct FacePair<'a> {
     pub side_a: [usize; 3],
     pub side_b: [usize; 3],
     pub law: &'a BilinearCohesive,
+}
+
+/// An explicit bonded face pair with the original ordered interface material.
+/// Surface material IDs describe the actual assignments on A and B; their order
+/// follows the geometric jump, independently of vertex permutation on a face.
+#[derive(Debug, Clone, Copy)]
+pub struct MaterialFacePair<'a> {
+    pub id: u64,
+    pub side_a: [usize; 3],
+    pub side_b: [usize; 3],
+    pub source: &'a ResolvedBilinearCohesive,
+    pub surface_materials: [&'a MaterialStateId; 2],
 }
 
 /// Bound allocations and admit a minimum dimensionless doubled-area/edge^2.
@@ -55,6 +69,47 @@ pub struct P1Interfaces<'a> {
 }
 
 impl<'a> P1Interfaces<'a> {
+    /// Lower source-bound bonds through the same geometric pairing, quadrature
+    /// and work-conjugate jump maps as [`Self::new`]. No second assembly exists.
+    pub fn from_interfaces(nodes_m: &[[f64; 3]], tetrahedra: &[[usize; 4]],
+        free_dofs: &[usize], pairs: &[MaterialFacePair<'a>], budget: TraceBudget,
+        cx: &Cx<'_>) -> Result<Self, Error> {
+        Self::from_interfaces_controlled(nodes_m, tetrahedra, free_dofs, pairs, budget,
+            &mut || cx.checkpoint().is_err())
+    }
+
+    /// Predicate form with identical source, geometry and cancellation checks.
+    /// Every full/reduced quadrature patch retains the original source bundle.
+    pub fn from_interfaces_controlled<C: FnMut() -> bool>(nodes_m: &[[f64; 3]],
+        tetrahedra: &[[usize; 4]], free_dofs: &[usize], pairs: &[MaterialFacePair<'a>],
+        budget: TraceBudget, cancelled: &mut C) -> Result<Self, Error> {
+        poll(cancelled)?;
+        if pairs.is_empty() || pairs.len() > budget.maximum_interfaces {
+            return Err(Error::Budget("P1 source interface count"));
+        }
+        let mut geometric = Vec::with_capacity(pairs.len());
+        for pair in pairs {
+            poll(cancelled)?;
+            pair.source.require_surface_materials(pair.surface_materials[0], pair.surface_materials[1])
+                .map_err(|error| Error::Source { patch: pair.id, error })?;
+            geometric.push(FacePair { id: pair.id, side_a: pair.side_a,
+                side_b: pair.side_b, law: pair.source.law() });
+        }
+        let mut result = Self::new_controlled(nodes_m, tetrahedra, free_dofs,
+            &geometric, budget, cancelled)?;
+        for (index, pair) in pairs.iter().enumerate() {
+            poll(cancelled)?;
+            for patch in &mut result.patches[3*index..3*index+3] {
+                patch.source = Some(pair.source);
+            }
+            for patch in &mut result.full_patches[3*index..3*index+3] {
+                patch.source = Some(pair.source);
+            }
+        }
+        poll(cancelled)?;
+        Ok(result)
+    }
+
     /// Validate that each requested face has exactly one incident tetrahedron,
     /// each partner lies on the opposite side, and each face is used once.
     /// Free DOFs must be strictly increasing full node-major xyz indices.

@@ -18,6 +18,9 @@
 
 use fs_math::det;
 
+/// Ordered interface data bound to the existing cohesive constitutive law.
+pub mod source;
+
 /// A refusal never mutates an accepted point.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CohesiveError {
