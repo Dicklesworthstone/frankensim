@@ -1,0 +1,25 @@
+frankensim.matdb-source.v1
+observation	crystal	Caesium iodide optical crystal	Crystran product reference	Source-optical-crystal=1 and source-specimens-matched=0 are required. This is the undoped CsI reference, not a thallium-doped scintillator or a CsBr composition. Purity, processing history, pressure, moisture exposure and statistical uncertainty are unspecified. No isotropic elastic tensor is inferred from the supplier's scalar entries.
+observation	thermal	CsI thermal facts	Density, conductivity and heat-capacity entries	4.51 g/cc converts to 4510 kg/m3; Cp is 201 J/(kg K). Their temperatures are unstated and require source-test-temperature-known=0. Conductivity 1.1 W/(m K) is at exactly 298 K. No common-temperature bundle or thermal expansion law is implied.
+observation	dielectric	CsI relative permittivity	Dielectric constant entry	The value 5.65 is at 1 MHz with unspecified temperature. No frequency law, dielectric loss or scintillation response is supplied.
+scalar	rho	crystal,thermal	density	4510	kg/m3	constant
+uncertainty	rho	unstated	-	-	-	-
+validity	rho	source_optical_crystal	1	1	1
+validity	rho	source_specimens_matched	0	0	1
+validity	rho	source_test_temperature_known	0	0	1
+scalar	cp	crystal,thermal	specific_heat_capacity	201	J/kg/K	constant
+uncertainty	cp	unstated	-	-	-	-
+validity	cp	source_optical_crystal	1	1	1
+validity	cp	source_specimens_matched	0	0	1
+validity	cp	source_test_temperature_known	0	0	1
+scalar	k	crystal,thermal	thermal_conductivity	1.1	W/m/K	constant
+uncertainty	k	unstated	-	-	-	-
+validity	k	temperature	298	298	K
+validity	k	source_optical_crystal	1	1	1
+validity	k	source_specimens_matched	0	0	1
+scalar	eps	crystal,dielectric	relative_permittivity	5.65	1	constant
+uncertainty	eps	unstated	-	-	-	-
+validity	eps	frequency	1e6	1e6	Hz
+validity	eps	source_optical_crystal	1	1	1
+validity	eps	source_specimens_matched	0	0	1
+validity	eps	source_test_temperature_known	0	0	1

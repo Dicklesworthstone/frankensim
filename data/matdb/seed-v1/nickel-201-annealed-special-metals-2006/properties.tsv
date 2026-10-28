@@ -1,0 +1,35 @@
+frankensim.matdb-source.v1
+observation	grade	Nickel 201 UNS N02201	SMC-061 low-carbon nickel reference	Requires engineering-reference-model=1 and source-specimens-matched=0. Annealing schedule, texture, pressure and statistical uncertainty are unstated. Linear interpolation of retained SI table knots is an authored approximation, without an experimental interpolation-error bound. These data do not qualify creep, corrosion, magnetism or service lifetime. Nickel 200 remains a separate grade.
+observation	constants	Nickel 201 physical constants	Table 29	Density 8.89 g/cm3 converts to 8890 kg/m3; specific heat is 456 J/(kg K) and tension modulus is 207 GPa. Test temperature and heat treatment are unspecified. Elastic method and rate are unspecified. Required unknown-condition flags prevent these nominal constants from acquiring a measured temperature law or a dynamic-test identity.
+observation	transport	Annealed Nickel 201	Table 30 SI columns	The Celsius column is retained literally, converted by adding 273.15; independently rounded Fahrenheit rows are not merged. Conductivity and electrical resistivity span -100 through 1000 C; micro-ohm metre is multiplied by 1e-6. The annealed state is query-enforced. Constant Cp from Table 29 must not be extrapolated to this transport interval.
+scalar	rho	grade,constants	density	8890	kg/m3	constant
+uncertainty	rho	unstated	-	-	-	-
+validity	rho	engineering_reference_model	1	1	1
+validity	rho	source_specimens_matched	0	0	1
+validity	rho	source_constant_temperature_known	0	0	1
+validity	rho	source_constant_heat_treatment_known	0	0	1
+scalar	cp	grade,constants	specific_heat_capacity	456	J/kg/K	constant
+uncertainty	cp	unstated	-	-	-	-
+validity	cp	engineering_reference_model	1	1	1
+validity	cp	source_specimens_matched	0	0	1
+validity	cp	source_constant_temperature_known	0	0	1
+validity	cp	source_constant_heat_treatment_known	0	0	1
+scalar	e	grade,constants	tensile_modulus	207e9	Pa	constant
+uncertainty	e	unstated	-	-	-	-
+validity	e	engineering_reference_model	1	1	1
+validity	e	source_specimens_matched	0	0	1
+validity	e	source_constant_temperature_known	0	0	1
+validity	e	source_constant_heat_treatment_known	0	0	1
+validity	e	source_elastic_method_known	0	0	1
+curve	k	grade,transport	thermal_conductivity	temperature	K	W/m/K	173.15:88.3,293.15:79.3,373.15:73.4,473.15:66.3,573.15:59.9,673.15:56.1,773.15:58.2,873.15:60.6,973.15:62.8,1073.15:65.1,1173.15:67.7,1273.15:69.9	linear
+uncertainty	k	unstated	-	-	-	-
+validity	k	temperature	173.15	1273.15	K
+validity	k	engineering_reference_model	1	1	1
+validity	k	source_specimens_matched	0	0	1
+validity	k	annealed_material	1	1	1
+curve	resistivity	grade,transport	electrical_resistivity	temperature	K	Ohm*m	173.15:4.0e-8,293.15:8.5e-8,373.15:1.25e-7,473.15:1.75e-7,573.15:2.50e-7,673.15:3.30e-7,773.15:3.75e-7,873.15:4.05e-7,973.15:4.35e-7,1073.15:4.65e-7,1173.15:4.90e-7,1273.15:5.15e-7	linear
+uncertainty	resistivity	unstated	-	-	-	-
+validity	resistivity	temperature	173.15	1273.15	K
+validity	resistivity	engineering_reference_model	1	1	1
+validity	resistivity	source_specimens_matched	0	0	1
+validity	resistivity	annealed_material	1	1	1

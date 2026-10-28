@@ -1,0 +1,25 @@
+frankensim.matdb-source.v1
+observation	crystal	Sodium fluoride optical crystal	Crystran product reference	Source-optical-crystal=1 and source-specimens-matched=0 are required. Purity, annealing history, pressure, porosity, moisture exposure and uncertainty are unspecified. No powder or solution properties, isotropic elastic tensor or refractive law is inferred.
+observation	thermal	NaF thermal facts	Density, conductivity and heat-capacity entries	Density 2.79 g/cc is at 20 C=293.15 K; conductivity 3.746 W/(m K) is at 273 K, not 273.15 K. Cp is 1088 J/(kg K) at an unstated temperature, requiring source-test-temperature-known=0. The two exact source temperatures must not be collapsed to one common reference state.
+observation	dielectric	NaF relative permittivity	Dielectric constant entry	The value 6 is at 1 MHz with unspecified temperature. No loss tangent, breakdown or frequency law is supplied.
+scalar	rho	crystal,thermal	density	2790	kg/m3	constant
+uncertainty	rho	unstated	-	-	-	-
+validity	rho	temperature	293.15	293.15	K
+validity	rho	source_optical_crystal	1	1	1
+validity	rho	source_specimens_matched	0	0	1
+scalar	cp	crystal,thermal	specific_heat_capacity	1088	J/kg/K	constant
+uncertainty	cp	unstated	-	-	-	-
+validity	cp	source_optical_crystal	1	1	1
+validity	cp	source_specimens_matched	0	0	1
+validity	cp	source_test_temperature_known	0	0	1
+scalar	k	crystal,thermal	thermal_conductivity	3.746	W/m/K	constant
+uncertainty	k	unstated	-	-	-	-
+validity	k	temperature	273	273	K
+validity	k	source_optical_crystal	1	1	1
+validity	k	source_specimens_matched	0	0	1
+scalar	eps	crystal,dielectric	relative_permittivity	6	1	constant
+uncertainty	eps	unstated	-	-	-	-
+validity	eps	frequency	1e6	1e6	Hz
+validity	eps	source_optical_crystal	1	1	1
+validity	eps	source_specimens_matched	0	0	1
+validity	eps	source_test_temperature_known	0	0	1

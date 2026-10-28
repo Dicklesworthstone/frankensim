@@ -1,0 +1,37 @@
+frankensim.matdb-source.v1
+observation	grade	C65500 high-silicon bronze A	CDA grade-level physical-property reference	Requires engineering-reference-model=1 and source-specimens-matched=0. Temper, product form, grain texture, loading protocol and statistical uncertainty are unspecified. No strength, plasticity, fatigue or isotropic tensor is inferred.
+observation	units	CDA US-customary normalization	Literal values and SI definitions	Use 0.45359237 kg/lb, 0.0254 m/in, 0.3048 m/ft, 9.80665 m/s2 and International Table Btu=1055.05585262 J. This Btu realization is an explicit normalization assumption. Density 0.308 lb/in3, Cp 0.09 Btu/(lb F), conductivity 21 Btu/(h ft F), tension modulus 15000 ksi, rigidity 5600 ksi and mean expansion 10e-6/F are retained without increasing source precision.
+observation	thermal	C65500 thermal reference at 68 F	CDA density, heat capacity and conductivity	68 F is exactly 293.15 K. Support is one source temperature, not a continuous heating law. The separately rounded specific gravity is not substituted for density.
+observation	elastic	C65500 modulus reference	CDA tension and rigidity entries	Test temperature is unspecified. Source-elastic-temperature-known=0 is required; these constants do not supply a measured temperature range or a Poisson ratio.
+observation	expansion	C65500 interval expansion	CDA 68-572 F coefficient	The interval is 293.15-573.15 K; 10e-6/F becomes 18e-6/K. It is an endpoint mean, not instantaneous alpha or a temperature-density law.
+scalar	rho	grade,units,thermal	density	8525.410650742562	kg/m3	constant
+uncertainty	rho	unstated	-	-	-	-
+validity	rho	temperature	293.15	293.15	K
+validity	rho	engineering_reference_model	1	1	1
+validity	rho	source_specimens_matched	0	0	1
+scalar	cp	grade,units,thermal	specific_heat_capacity	376.812	J/kg/K	constant
+uncertainty	cp	unstated	-	-	-	-
+validity	cp	temperature	293.15	293.15	K
+validity	cp	engineering_reference_model	1	1	1
+validity	cp	source_specimens_matched	0	0	1
+scalar	k	grade,units,thermal	thermal_conductivity	36.34542799379921	W/m/K	constant
+uncertainty	k	unstated	-	-	-	-
+validity	k	temperature	293.15	293.15	K
+validity	k	engineering_reference_model	1	1	1
+validity	k	source_specimens_matched	0	0	1
+scalar	e	grade,units,elastic	young_modulus	103421359397.52542	Pa	constant
+uncertainty	e	unstated	-	-	-	-
+validity	e	engineering_reference_model	1	1	1
+validity	e	source_specimens_matched	0	0	1
+validity	e	source_elastic_temperature_known	0	0	1
+scalar	g	grade,units,elastic	shear_modulus	38610640841.74283	Pa	constant
+uncertainty	g	unstated	-	-	-	-
+validity	g	engineering_reference_model	1	1	1
+validity	g	source_specimens_matched	0	0	1
+validity	g	source_elastic_temperature_known	0	0	1
+scalar	alpha-mean	grade,units,expansion	mean_linear_thermal_expansion	1.8e-5	K^-1	constant
+uncertainty	alpha-mean	unstated	-	-	-	-
+validity	alpha-mean	source_reference_temperature	293.15	293.15	K
+validity	alpha-mean	source_range_end_temperature	573.15	573.15	K
+validity	alpha-mean	engineering_reference_model	1	1	1
+validity	alpha-mean	source_specimens_matched	0	0	1

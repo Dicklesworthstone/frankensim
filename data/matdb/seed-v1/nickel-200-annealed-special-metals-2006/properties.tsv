@@ -1,0 +1,53 @@
+frankensim.matdb-source.v1
+observation	grade	Nickel 200 UNS N02200	SMC-061 grade-level engineering reference	Requires engineering-reference-model=1 and source-specimens-matched=0. Annealing schedule, texture, pressure and statistical uncertainty are unstated. Linear interpolation of retained SI table knots is an authored approximation, without an experimental interpolation-error bound. High-temperature values do not qualify aging, embrittlement, magnetic phase or service lifetime. Nickel 201 remains a separate grade.
+observation	constants	Nickel 200 physical constants	Table 2	Density 8.89 g/cm3 converts to 8890 kg/m3; specific heat is 456 J/(kg K). Test temperature and heat treatment are not printed and must remain acknowledged unknowns. Neither constant supplies a density or heat-capacity temperature law.
+observation	transport	Annealed Nickel 200	Table 3 SI columns	The Celsius column is retained literally, converted by adding 273.15; independently rounded Fahrenheit rows are not merged. Conductivity spans -100 through 1000 C. Electrical resistivity spans -100 through 1100 C; micro-ohm metre is multiplied by 1e-6. Blank table cells do not become zero values. The annealed state is query-enforced.
+observation	elastic	Annealed Nickel 200 dynamic elasticity	Table 4 SI columns and page 1 physical-property method statement	At 26/100/200/300/400/500 C, E is 205/200/195/190/183/177 GPa, G is 79.6/77.9/75.8/73.8/71.4/69.0 GPa, and nu is 0.29/0.28/0.29/0.29/0.28/0.28. Test frequency is unstated. These independently rounded dynamic quantities are not forced into exact isotropic consistency or relabeled static properties.
+scalar	rho	grade,constants	density	8890	kg/m3	constant
+uncertainty	rho	unstated	-	-	-	-
+validity	rho	engineering_reference_model	1	1	1
+validity	rho	source_specimens_matched	0	0	1
+validity	rho	source_constant_temperature_known	0	0	1
+validity	rho	source_constant_heat_treatment_known	0	0	1
+scalar	cp	grade,constants	specific_heat_capacity	456	J/kg/K	constant
+uncertainty	cp	unstated	-	-	-	-
+validity	cp	engineering_reference_model	1	1	1
+validity	cp	source_specimens_matched	0	0	1
+validity	cp	source_constant_temperature_known	0	0	1
+validity	cp	source_constant_heat_treatment_known	0	0	1
+curve	k	grade,transport	thermal_conductivity	temperature	K	W/m/K	173.15:75.5,293.15:70.3,373.15:66.5,473.15:61.6,573.15:56.8,673.15:55.4,773.15:57.6,873.15:59.7,973.15:61.8,1073.15:64.0,1173.15:66.1,1273.15:68.2	linear
+uncertainty	k	unstated	-	-	-	-
+validity	k	temperature	173.15	1273.15	K
+validity	k	engineering_reference_model	1	1	1
+validity	k	source_specimens_matched	0	0	1
+validity	k	annealed_material	1	1	1
+curve	resistivity	grade,transport	electrical_resistivity	temperature	K	Ohm*m	173.15:5.0e-8,293.15:9.6e-8,373.15:1.30e-7,473.15:1.85e-7,573.15:2.60e-7,673.15:3.30e-7,773.15:3.65e-7,873.15:4.00e-7,973.15:4.30e-7,1073.15:4.60e-7,1173.15:4.85e-7,1273.15:5.10e-7,1373.15:5.40e-7	linear
+uncertainty	resistivity	unstated	-	-	-	-
+validity	resistivity	temperature	173.15	1373.15	K
+validity	resistivity	engineering_reference_model	1	1	1
+validity	resistivity	source_specimens_matched	0	0	1
+validity	resistivity	annealed_material	1	1	1
+curve	dynamic-e	grade,elastic	dynamic_young_modulus	temperature	K	Pa	299.15:205e9,373.15:200e9,473.15:195e9,573.15:190e9,673.15:183e9,773.15:177e9	linear
+uncertainty	dynamic-e	unstated	-	-	-	-
+validity	dynamic-e	temperature	299.15	773.15	K
+validity	dynamic-e	engineering_reference_model	1	1	1
+validity	dynamic-e	source_specimens_matched	0	0	1
+validity	dynamic-e	annealed_material	1	1	1
+validity	dynamic-e	source_dynamic_method	1	1	1
+validity	dynamic-e	source_frequency_known	0	0	1
+curve	dynamic-g	grade,elastic	dynamic_shear_modulus	temperature	K	Pa	299.15:79.6e9,373.15:77.9e9,473.15:75.8e9,573.15:73.8e9,673.15:71.4e9,773.15:69.0e9	linear
+uncertainty	dynamic-g	unstated	-	-	-	-
+validity	dynamic-g	temperature	299.15	773.15	K
+validity	dynamic-g	engineering_reference_model	1	1	1
+validity	dynamic-g	source_specimens_matched	0	0	1
+validity	dynamic-g	annealed_material	1	1	1
+validity	dynamic-g	source_dynamic_method	1	1	1
+validity	dynamic-g	source_frequency_known	0	0	1
+curve	dynamic-nu	grade,elastic	dynamic_poisson_ratio	temperature	K	1	299.15:0.29,373.15:0.28,473.15:0.29,573.15:0.29,673.15:0.28,773.15:0.28	linear
+uncertainty	dynamic-nu	unstated	-	-	-	-
+validity	dynamic-nu	temperature	299.15	773.15	K
+validity	dynamic-nu	engineering_reference_model	1	1	1
+validity	dynamic-nu	source_specimens_matched	0	0	1
+validity	dynamic-nu	annealed_material	1	1	1
+validity	dynamic-nu	source_dynamic_method	1	1	1
+validity	dynamic-nu	source_frequency_known	0	0	1

@@ -1,0 +1,25 @@
+frankensim.matdb-source.v1
+observation	crystal	Potassium bromide optical crystal	Crystran product reference	Source-optical-crystal=1 and source-specimens-matched=0 are required. Purity, processing history, pressure, porosity, moisture exposure and uncertainty are unspecified. These are not powder, aqueous-solution or porous-rock data. The source's scalar elastic constants are not imported as an isotropic stiffness tensor.
+observation	thermal	KBr thermal facts	Density, conductivity and heat-capacity entries	2.753 g/cc converts to 2753 kg/m3; Cp is 435 J/(kg K). Their temperatures are unstated and require source-test-temperature-known=0. Conductivity 4.816 W/(m K) is explicitly at 319 K. This does not establish common-temperature thermal data or an extrapolation law.
+observation	dielectric	KBr relative permittivity	Dielectric constant entry	The value 4.9 is at 1 MHz. Temperature is unspecified and remains query-visible. No loss tangent, dielectric strength or frequency interpolation is supplied.
+scalar	rho	crystal,thermal	density	2753	kg/m3	constant
+uncertainty	rho	unstated	-	-	-	-
+validity	rho	source_optical_crystal	1	1	1
+validity	rho	source_specimens_matched	0	0	1
+validity	rho	source_test_temperature_known	0	0	1
+scalar	cp	crystal,thermal	specific_heat_capacity	435	J/kg/K	constant
+uncertainty	cp	unstated	-	-	-	-
+validity	cp	source_optical_crystal	1	1	1
+validity	cp	source_specimens_matched	0	0	1
+validity	cp	source_test_temperature_known	0	0	1
+scalar	k	crystal,thermal	thermal_conductivity	4.816	W/m/K	constant
+uncertainty	k	unstated	-	-	-	-
+validity	k	temperature	319	319	K
+validity	k	source_optical_crystal	1	1	1
+validity	k	source_specimens_matched	0	0	1
+scalar	eps	crystal,dielectric	relative_permittivity	4.9	1	constant
+uncertainty	eps	unstated	-	-	-	-
+validity	eps	frequency	1e6	1e6	Hz
+validity	eps	source_optical_crystal	1	1	1
+validity	eps	source_specimens_matched	0	0	1
+validity	eps	source_test_temperature_known	0	0	1

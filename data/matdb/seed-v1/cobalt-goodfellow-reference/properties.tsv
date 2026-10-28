@@ -1,0 +1,27 @@
+frankensim.matdb-source.v1
+observation	element	Elemental cobalt supplier reference	Goodfellow Cobalt Disk material-property listing	The product family includes multiple purities and tempers; the selected property rows do not identify a shared specimen, grade purity, texture or processing state. Source-process-known=0 and source-specimens-matched=0 are required. Pressure and uncertainty are unspecified. No magnetic law, anisotropic elasticity or grade-specific strength is supplied.
+observation	density	Cobalt density	Physical-properties row at 20 C	8.9 g/cm3 converts to 8900 kg/m3 at 293.15 K.
+observation	cp	Cobalt specific heat	Thermal-properties row at 25 C	456 J/(kg K) is supported at 298.15 K, distinct from the density/resistivity temperature.
+observation	k	Cobalt interval conductivity reference	Thermal-properties row labeled 0-100 C	The source reports 100 W/(m K) for this interval without variation or experimental-error data. Using that value as a constant over 273.15-373.15 K is an explicitly acknowledged interval reference, requiring source-interval-reference=1. No higher-temperature extrapolation or source precision bound is claimed.
+observation	resistivity	Cobalt electrical volume resistivity	Electrical-properties row at 20 C	6.34 micro-ohm cm converts to 6.34e-8 Ohm m at 293.15 K. The separately supplied temperature coefficient is not used to manufacture a resistivity curve.
+scalar	rho	element,density	density	8900	kg/m3	constant
+uncertainty	rho	unstated	-	-	-	-
+validity	rho	temperature	293.15	293.15	K
+validity	rho	source_process_known	0	0	1
+validity	rho	source_specimens_matched	0	0	1
+scalar	cp	element,cp	specific_heat_capacity	456	J/kg/K	constant
+uncertainty	cp	unstated	-	-	-	-
+validity	cp	temperature	298.15	298.15	K
+validity	cp	source_process_known	0	0	1
+validity	cp	source_specimens_matched	0	0	1
+scalar	k	element,k	thermal_conductivity	100	W/m/K	constant
+uncertainty	k	unstated	-	-	-	-
+validity	k	temperature	273.15	373.15	K
+validity	k	source_process_known	0	0	1
+validity	k	source_specimens_matched	0	0	1
+validity	k	source_interval_reference	1	1	1
+scalar	resistivity	element,resistivity	electrical_resistivity	6.34e-8	Ohm*m	constant
+uncertainty	resistivity	unstated	-	-	-	-
+validity	resistivity	temperature	293.15	293.15	K
+validity	resistivity	source_process_known	0	0	1
+validity	resistivity	source_specimens_matched	0	0	1

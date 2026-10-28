@@ -1,0 +1,18 @@
+frankensim.matdb-manifest.v3
+pack_id	brass-c46400-cda-reference
+redistribution	permitted	Selected attributed numerical facts and original normalization notes only; no source document, prose or table layout is redistributed
+citation	Copper Development Association Inc., UNS C46400 naval brass, Physical Properties, accessed 2026-10-28; https://alloys.copper.org/alloy/C46400
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	cda-reference	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	young_modulus	young-modulus	dimensional
+property	shear_modulus	shear-modulus	dimensional
+property	mean_linear_thermal_expansion	mean-linear-thermal-expansion-coefficient	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	engineering_reference_model	engineering-reference-model	dimensional
+axis	source_specimens_matched	source-specimens-matched	dimensional
+axis	source_elastic_temperature_known	source-elastic-temperature-known	dimensional
+axis	source_reference_temperature	source-reference-temperature	absolute-temperature
+axis	source_range_end_temperature	source-range-end-temperature	absolute-temperature

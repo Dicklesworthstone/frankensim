@@ -1,0 +1,15 @@
+frankensim.matdb-manifest.v3
+pack_id	caesium-iodide-crystran-reference
+redistribution	permitted	Selected attributed numerical facts and original normalization notes only; no source document, prose or table layout is redistributed
+citation	Crystran Ltd., Caesium Iodide CsI, Product Data, accessed 2026-10-28; https://www.crystran.com/optical-materials/caesium-iodide-csi/
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	optical-crystal-reference	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	relative_permittivity	relative-permittivity	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	frequency	frequency	dimensional
+axis	source_optical_crystal	source-optical-crystal	dimensional
+axis	source_specimens_matched	source-specimens-matched	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional

@@ -1,0 +1,18 @@
+frankensim.matdb-manifest.v3
+pack_id	nickel-201-annealed-special-metals-2006
+redistribution	permitted	Selected attributed numerical facts and original normalization notes only; no source document, prose or table layout is redistributed
+citation	Special Metals Corporation, Nickel 200 and 201, SMC-061, September 2006, Tables 29-30, page 16; https://www.specialmetals.com/documents/technical-bulletins/nickel-200.pdf
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	special-metals-reference	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	electrical_resistivity	electrical-resistivity	dimensional
+property	tensile_modulus	tensile-modulus	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	engineering_reference_model	engineering-reference-model	dimensional
+axis	source_specimens_matched	source-specimens-matched	dimensional
+axis	annealed_material	annealed-material	dimensional
+axis	source_constant_temperature_known	source-constant-temperature-known	dimensional
+axis	source_constant_heat_treatment_known	source-constant-heat-treatment-known	dimensional
+axis	source_elastic_method_known	source-elastic-method-known	dimensional
