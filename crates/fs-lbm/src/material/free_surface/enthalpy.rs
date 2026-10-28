@@ -74,6 +74,11 @@ pub struct FreeSurfaceEnthalpyControls {
     pub max_iterations: usize,
     /// True scaled transport residual and extensive balance allowance.
     pub relative_tolerance: f64,
+    /// Absolute L2 residual allowance [J/kg] for the enthalpies actually
+    /// stored after restoring their datum. The Krylov iteration still uses
+    /// `relative_tolerance`; zero opts into a strict relative endpoint check.
+    /// Must be finite and nonnegative.
+    pub absolute_transport_tolerance_j_kg: f64,
 }
 
 impl Default for FreeSurfaceEnthalpyControls {
@@ -83,6 +88,7 @@ impl Default for FreeSurfaceEnthalpyControls {
             max_mass_routes: 400_000,
             max_iterations: 2_000,
             relative_tolerance: 1e-11,
+            absolute_transport_tolerance_j_kg: 1e-8,
         }
     }
 }
@@ -119,8 +125,16 @@ pub struct FreeSurfaceEnthalpyReport {
     /// `H_after - H_before - external_heat - viscous_heat - body_heat` [J]. No balancing
     /// heat or numerical kinetic-energy residual is added.
     pub balance_defect_j: f64,
-    /// True residual returned by the existing sparse solver.
+    /// True relative residual of the component-centered enthalpy system,
+    /// recomputed after restoring the datum to the enthalpies actually stored.
+    /// An arbitrary caloric datum is excluded from its normalization; native
+    /// mass-closure defects remain. May exceed the relative tolerance only
+    /// within the separately declared absolute transport allowance.
     pub relative_transport_residual: f64,
+    /// Actual L2 norm of the represented, row-scaled transport residual [J/kg].
+    /// Endpoint acceptance requires this to be at most the absolute transport
+    /// tolerance plus `relative_tolerance * norm(centered_rhs)`.
+    pub absolute_transport_residual_j_kg: f64,
     /// Actual sparse transport iterations.
     pub transport_iterations: usize,
     /// Count of native nonzero mass routes, including conversion redistribution.
@@ -335,6 +349,8 @@ impl<'s> MaterialFreeSurface3<'s> {
             || controls.max_iterations > 100_000
             || !controls.relative_tolerance.is_finite()
             || !(1e-14..=1e-6).contains(&controls.relative_tolerance)
+            || !controls.absolute_transport_tolerance_j_kg.is_finite()
+            || controls.absolute_transport_tolerance_j_kg < 0.0
         {
             return Err(Error::Invalid(
                 "invalid bounded enthalpy transport controls",
@@ -695,6 +711,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             body_heat_j: body_heat,
             balance_defect_j: defect,
             relative_transport_residual: outcome.relative_residual,
+            absolute_transport_residual_j_kg: outcome.absolute_residual_j_kg,
             transport_iterations: outcome.iterations,
             mass_routes: trace.routes.len(),
             #[cfg(feature = "enthalpy-coupling")]

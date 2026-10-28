@@ -38,6 +38,14 @@ fn residual(a: &Csr, b: &[f64], x: &[f64], r: &mut [f64]) {
     }
 }
 
+/// Residual and right-hand-side L2 norms using the same SpMV and reduction as
+/// the solve, for callers with explicit absolute and relative accuracy budgets.
+pub(crate) fn residual_norms(a: &Csr, b: &[f64], x: &[f64]) -> (f64, f64) {
+    let mut r = vec![0.0; b.len()];
+    residual(a, b, x, &mut r);
+    (norm(&r), norm(b))
+}
+
 /// Solve `A x = b` from the supplied initial `x`.
 #[allow(clippy::too_many_lines)] // one textbook iteration with explicit restarts
 pub(crate) fn bicgstab_ilu0(

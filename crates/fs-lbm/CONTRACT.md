@@ -92,7 +92,25 @@ and `EquilibriumEnthalpyPhaseCurve`. Native collision emits its actual pair
 mass exchanges; the original interface conversion cascade emits its exact
 carry/redistribution transfers. The companion transports extensive `mass*h`
 over those same routes with implicit donor upwinding and the existing sparse
-BiCGStab/ILU owner. It does not reconstruct a separate flux from velocities.
+BiCGStab/ILU owner. The solve uses specific-enthalpy differences from one
+deterministic old-storage reference per connected route component, so an
+arbitrary caloric datum or disconnected reservoir cannot suppress real mixing
+through the relative residual tolerance. Born cells and empty conversion carry
+inherit their connected storage reference. Any admitted roundoff mass-closure
+defect retains its reference-energy contribution in the same donor equation;
+neither masses nor fluxes are repaired. Datum invariance is therefore to the
+native continuity and stored-enthalpy rounding precision. After restoring the
+datum, the reported residual is recomputed from the enthalpies actually stored
+against the same centered system. Endpoint acceptance requires the actual L2
+residual [J/kg] to satisfy `absolute_transport_tolerance_j_kg +
+relative_tolerance * norm(centered_rhs)`. The absolute allowance is an explicit
+finite nonnegative control, defaulting to `1e-8 J/kg`; setting it to zero opts
+into strict relative acceptance. Both actual absolute and relative residuals
+are reported. This permits explicitly budgeted representation roundoff without
+allowing a large datum to hide a materially inaccurate mixing result. The
+Krylov iteration itself retains its original relative convergence criterion.
+Extensive enthalpy diagnostics retain the original caloric datum. It does not
+reconstruct a separate flux from velocities.
 Positive old storage must anchor every participating route component; both
 local mass closure and the final extensive-enthalpy defect are checked. The
 conversion carry retains its own enthalpy. No regularization, balancing heat
