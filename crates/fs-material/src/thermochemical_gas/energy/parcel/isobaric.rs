@@ -7,6 +7,9 @@
 //! The existing parcel remains the sole state owner; this is not piston
 //! dynamics, an open-system mixing step or a chemical heat-release model.
 
+/// Composition-changing enthalpy closure at one constant-pressure endpoint.
+pub mod composition;
+
 use super::ClosedGasParcel;
 use super::super::{GasEnergyError, GasEnergySolve, poll, positive, updated_point};
 use crate::thermochemical_gas::failure;
