@@ -133,6 +133,61 @@ fn run(flow: &mut MixtureEuler1d, end: f64) -> usize {
 }
 
 #[test]
+fn frozen_reservoir_cannot_silently_become_a_transmissive_mixture_boundary() {
+    let gas = standard(0.0);
+    let frozen = crate::dynamics::FrozenGas::new(
+        fs_thermochem::mixture::FrozenIdealGasMixtureModelV1::new(
+            vec![source("A", R, 3.5, 0.0, 0.0)],
+            fs_thermochem::Composition::new(
+                fs_thermochem::CompositionBasis::MoleFraction,
+                vec![1.0],
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+        CaloricDomain::new(Temperature::new(0.001), Temperature::new(50.0)),
+        || false,
+    )
+    .unwrap();
+    let reservoir = Boundary::Reservoir(frozen.conserved(1.0, 0.0, 1.0).unwrap());
+    let q = gas.conserved(&[0.7, 0.3], 0.0, 1.0).unwrap();
+    let expected =
+        Error::Invalid("mixture reservoir requires species-bearing state and energy references");
+    for boundaries in [
+        Boundaries::Ends {
+            left: reservoir,
+            right: Boundary::Transmissive,
+        },
+        Boundaries::Ends {
+            left: Boundary::Transmissive,
+            right: reservoir,
+        },
+        Boundaries::Ends {
+            left: reservoir,
+            right: reservoir,
+        },
+    ] {
+        let uniform = MixtureEuler1d::new(
+            gas.clone(),
+            Length::new(0.1),
+            1.0,
+            vec![q.clone(), q.clone()],
+            boundaries,
+            || false,
+        );
+        assert_eq!(uniform.err(), Some(expected.clone()));
+        let on_mesh = MixtureEuler1d::new_on_mesh(
+            gas.clone(),
+            Mesh1d::uniform(2, Length::new(0.1), 1.0).unwrap(),
+            vec![q.clone(), q.clone()],
+            boundaries,
+            || false,
+        );
+        assert_eq!(on_mesh.err(), Some(expected.clone()));
+    }
+}
+
+#[test]
 fn caloric_mixture_uses_species_masses_variable_cp_and_frozen_sound_speed() {
     let gas = gas(vec![
         source("A", R, 3.5, 0.25, 7.0),

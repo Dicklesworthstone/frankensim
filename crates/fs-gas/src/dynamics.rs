@@ -8,6 +8,7 @@
 //! DOI 10.1007/BF01414629; Ketcheson, LeVeque and del Razo, *Riemann Problems
 //! and Jupyter Solutions* (2020), Euler and approximate-Euler chapters.
 
+mod characteristic;
 mod eos;
 mod evolve;
 mod flux;

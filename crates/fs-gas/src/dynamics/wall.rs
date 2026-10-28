@@ -289,7 +289,7 @@ impl FrozenGas {
         Ok(value)
     }
 
-    fn rarefaction_integral(
+    pub(super) fn rarefaction_integral(
         &self,
         low: f64,
         high: f64,

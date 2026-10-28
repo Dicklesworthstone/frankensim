@@ -392,3 +392,47 @@ implicit-Euler chemistry to a certified second-order time method. Local
 chemistry error estimates are not global coupled error bounds. Physical
 species diffusion, heat conduction, viscosity, flames, sprays, real-gas phases,
 moving meshes and arbitrary reacting junction networks remain separate work.
+
+## Characteristic compact-reservoir boundaries
+
+Frozen Euler `Boundary::Reservoir` retains a stationary conservative state in
+the original gas owner's energy gauge. Its pressure and temperature supply
+stagnation conditions for inflow; its pressure supplies the outflow backpressure.
+A one-sided classical-wave compatibility relation determines the actual port.
+A stationary two-sided ghost would add an artificial acoustic impedance and is
+not used for this compact-volume model.
+
+Incoming gas accelerates isentropically using the source's temperature-dependent
+enthalpy and entropy. A safeguarded velocity solve matches the outgoing duct
+wave; an admitted sonic state limits choked inflow. The energy flux carries the
+reservoir's original total enthalpy exactly once. Outgoing gas follows the
+thermally perfect shock Hugoniot or rarefaction invariant and carries its
+resolved total enthalpy. The fixed interface samples departing supersonic waves
+and sonic fans rather than overprescribing an outlet.
+
+Scaled pressure-wave roots retain weak-shock/rarefaction increments. All caloric
+differences come from the original source, without constant-gamma replacement.
+Actual states and classical wave ordering must be admitted; cancellation and
+bounded root work remain explicit. Unused stopped shocks or downstream fan
+tails may lie outside the caloric interval without disqualifying an admitted
+accelerating inlet or sonic outlet. A genuinely unsupported port state refuses.
+
+`set_boundaries` updates prescribed end conditions atomically between steps.
+Reservoir conditions are held fixed during each SSPRK2 step. The accepted
+`left_boundary_change` and `right_boundary_change` are each signed into the
+interval and retain the two-stage mass, momentum and energy exchange, alongside
+the existing aggregate report. This supports driven inlets/outlets without
+inferring exchange from a sampled pressure or flow value.
+
+Seven focused native boundary regressions compare gamma-law shock/rarefaction
+jumps and pressure derivatives (including 1e-10 pressure increments), analytic
+sonic inlet/outlet limits, independent variable-Cp Hugoniot and quadrature,
+reference-gauge invariance, source-window edge cases and driven-field balances.
+All 28 frozen-dynamics tests passed with the integrated source. A separate
+regression verifies that multicomponent flow refuses this frozen-state reservoir:
+it requires a species-bearing state and energy-reference closure and must not
+silently reinterpret this boundary as transmissive.
+
+This estimated inviscid model assumes an ideal compact reservoir/entrance.
+It supplies neither an empirical discharge coefficient nor finite neck inertia,
+wall loss, multidimensional mixing, moving-volume work or an entropy theorem.

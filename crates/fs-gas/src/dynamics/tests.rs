@@ -66,7 +66,7 @@ fn source(
     )
     .unwrap()
 }
-fn gas(cp_linear: f64, formation: f64) -> FrozenGas {
+pub(super) fn gas(cp_linear: f64, formation: f64) -> FrozenGas {
     FrozenGas::new(
         source(cp_linear, formation, 0.001, 50.0),
         CaloricDomain::new(Temperature::new(0.001), Temperature::new(50.0)),

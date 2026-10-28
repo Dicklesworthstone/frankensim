@@ -2,16 +2,22 @@ use super::{Conserved, Error, FaceFlux, FrozenGas, Mesh1d, Primitive, allocated,
 use fs_qty::{Length, Time};
 
 /// Physical boundary on one end of a stationary interval.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Boundary {
     /// Zero-gradient ghost state. This is not a nonreflecting subsonic outlet.
     Transmissive,
     /// Stationary impermeable adiabatic wall, with exactly zero mass/energy flux.
     Reflecting,
+    /// Fixed, stationary reservoir state in this gas owner's energy reference.
+    /// Its pressure and temperature are stagnation conditions for inflow and
+    /// its pressure is the backpressure for outflow. Momentum must be zero.
+    /// A source-aware characteristic interface supplies the shared flux;
+    /// this is not a zero-gradient or nonreflecting boundary.
+    Reservoir(Conserved),
 }
 
 /// End conditions; a periodic face is computed once and shared bit-for-bit.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Boundaries {
     /// Both ends are the same periodic interface.
     Periodic,
@@ -64,14 +70,14 @@ pub struct Totals {
     pub energy: f64,
 }
 impl Totals {
-    fn from_array(v: [f64; 3]) -> Self {
+    pub(super) fn from_array(v: [f64; 3]) -> Self {
         Self {
             mass: v[0],
             momentum: v[1],
             energy: v[2],
         }
     }
-    fn array(self) -> [f64; 3] {
+    pub(super) fn array(self) -> [f64; 3] {
         [self.mass, self.momentum, self.energy]
     }
     /// Recover the physical total energy with the original signed source reference.
@@ -101,18 +107,22 @@ pub struct StepReport {
     pub after: Totals,
     /// Area- and time-integrated left inflow minus right outflow, using both RK stages.
     pub boundary_change: Totals,
+    /// Accepted left-face exchange, signed into this interval, using both RK stages.
+    pub left_boundary_change: Totals,
+    /// Accepted right-face exchange, signed into this interval, using both RK stages.
+    pub right_boundary_change: Totals,
     /// Integrated p*dA/dx force on the gas [kg m/s]. Stationary walls do no work.
     pub area_momentum_impulse: f64,
     /// `after - before - boundary_change - area momentum impulse`.
     pub conservation_residual: Totals,
 }
 
-struct Workspace {
-    primitive: Vec<Primitive>,
-    slopes: Vec<[f64; 3]>,
-    faces: Vec<FaceFlux>,
-    stage: Vec<Conserved>,
-    candidate: Vec<Conserved>,
+pub(super) struct Workspace {
+    pub(super) primitive: Vec<Primitive>,
+    pub(super) slopes: Vec<[f64; 3]>,
+    pub(super) faces: Vec<FaceFlux>,
+    pub(super) stage: Vec<Conserved>,
+    pub(super) candidate: Vec<Conserved>,
 }
 
 /// Quasi-one-dimensional finite-volume field of one frozen source-owned mixture.
@@ -123,12 +133,12 @@ struct Workspace {
 /// and pressure. Refusal/cancellation preserves every cell and the original time.
 /// Workspace is allocated once at construction, not in a successful step.
 pub struct Euler1d {
-    gas: FrozenGas,
-    states: Vec<Conserved>,
-    mesh: Mesh1d,
-    boundaries: Boundaries,
-    time: f64,
-    work: Workspace,
+    pub(super) gas: FrozenGas,
+    pub(super) states: Vec<Conserved>,
+    pub(super) mesh: Mesh1d,
+    pub(super) boundaries: Boundaries,
+    pub(super) time: f64,
+    pub(super) work: Workspace,
 }
 
 impl Euler1d {
@@ -167,6 +177,7 @@ impl Euler1d {
                 "periodic end faces must have identical physical area",
             ));
         }
+        validate_reservoirs(&gas, boundaries, &mut cancelled)?;
         let mut primitive = allocated(n, Primitive::default())?;
         for (i, &state) in states.iter().enumerate() {
             primitive[i] = gas.decode(state, None, &mut cancelled)?;
@@ -191,6 +202,31 @@ impl Euler1d {
     /// Original frozen-mixture EOS and source.
     pub const fn gas(&self) -> &FrozenGas {
         &self.gas
+    }
+    /// Physical end conditions used by this interval.
+    pub const fn boundaries(&self) -> Boundaries {
+        self.boundaries
+    }
+    /// Replace prescribed physical end conditions without advancing the field.
+    /// Reservoirs remain fixed throughout each subsequent RK step. A caller
+    /// may update them between accepted steps to supply a prescribed drive.
+    /// Invalid source states or cancellation retain the previous boundaries.
+    pub fn set_boundaries(
+        &mut self,
+        boundaries: Boundaries,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(), Error> {
+        poll(&mut cancelled)?;
+        let areas = self.mesh.face_areas();
+        if boundaries == Boundaries::Periodic && areas[0] != areas[self.states.len()] {
+            return Err(Error::Invalid(
+                "periodic end faces must have identical physical area",
+            ));
+        }
+        validate_reservoirs(&self.gas, boundaries, &mut cancelled)?;
+        poll(&mut cancelled)?;
+        self.boundaries = boundaries;
+        Ok(())
     }
     /// Current conservative cell averages, all sharing the owner's energy reference.
     pub fn states(&self) -> &[Conserved] {
@@ -294,6 +330,12 @@ impl Euler1d {
                             * (left_area * (a.left.array()[k] + b.left.array()[k])
                                 - right_area * (a.right.array()[k] + b.right.array()[k]))
                     }));
+                    let left_boundary_change = Totals::from_array(core::array::from_fn(|k| {
+                        factor * left_area * (a.left.array()[k] + b.left.array()[k])
+                    }));
+                    let right_boundary_change = Totals::from_array(core::array::from_fn(|k| {
+                        -factor * right_area * (a.right.array()[k] + b.right.array()[k])
+                    }));
                     let area_momentum_impulse = factor * (a.area_force + b.area_force);
                     let residual = Totals::from_array(core::array::from_fn(|k| {
                         after.array()[k]
@@ -305,6 +347,8 @@ impl Euler1d {
                         .array()
                         .iter()
                         .chain(&boundary.array())
+                        .chain(&left_boundary_change.array())
+                        .chain(&right_boundary_change.array())
                         .chain(&residual.array())
                         .all(|x| x.is_finite())
                     {
@@ -324,6 +368,8 @@ impl Euler1d {
                         before,
                         after,
                         boundary_change: boundary,
+                        left_boundary_change,
+                        right_boundary_change,
                         area_momentum_impulse,
                         conservation_residual: residual,
                     });
@@ -348,13 +394,13 @@ impl Euler1d {
 }
 
 #[derive(Clone, Copy)]
-struct Stage {
-    left: FaceFlux,
-    right: FaceFlux,
-    signal_rate: f64,
-    area_force: f64,
-    fallbacks: usize,
-    limited: usize,
+pub(super) struct Stage {
+    pub(super) left: FaceFlux,
+    pub(super) right: FaceFlux,
+    pub(super) signal_rate: f64,
+    pub(super) area_force: f64,
+    pub(super) fallbacks: usize,
+    pub(super) limited: usize,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -378,6 +424,7 @@ fn attempt(
         &mut work.primitive,
         &mut work.slopes,
         &mut work.faces,
+        [None; 2],
         cancelled,
     )?;
     if a.signal_rate * dt > cfl * (1.0 + 64.0 * f64::EPSILON) {
@@ -402,6 +449,7 @@ fn attempt(
         &mut work.primitive,
         &mut work.slopes,
         &mut work.faces,
+        [None; 2],
         cancelled,
     )?;
     if b.signal_rate * dt > cfl * (1.0 + 64.0 * f64::EPSILON) {
@@ -427,7 +475,7 @@ fn attempt(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn operator(
+pub(super) fn operator(
     gas: &FrozenGas,
     states: &[Conserved],
     mesh: &Mesh1d,
@@ -436,6 +484,7 @@ fn operator(
     primitive: &mut [Primitive],
     slopes: &mut [[f64; 3]],
     faces: &mut [FaceFlux],
+    endpoint_overrides: [Option<FaceFlux>; 2],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Stage, Error> {
     let n = states.len();
@@ -511,6 +560,32 @@ fn operator(
     let mut fallbacks = 0;
     for face in 0..=n {
         poll(cancelled)?;
+        if face == 0 || face == n {
+            if let Some(flux) = endpoint_overrides[usize::from(face == n)] {
+                fallbacks += usize::from(flux.used_hll_fallback);
+                faces[face] = flux;
+                continue;
+            }
+            if let Boundaries::Ends { left, right } = boundaries {
+                if let Boundary::Reservoir(reservoir) = if face == 0 { left } else { right } {
+                    let inner = if face == 0 {
+                        reconstruct(0, -0.5)?
+                    } else {
+                        reconstruct(n - 1, 0.5)?
+                    };
+                    let exterior = gas.decode(reservoir, None, cancelled)?;
+                    faces[face] = gas.plenum_flux(
+                        inner.0,
+                        inner.1,
+                        reservoir,
+                        exterior,
+                        if face == 0 { -1.0 } else { 1.0 },
+                        cancelled,
+                    )?;
+                    continue;
+                }
+            }
+        }
         if face == n && boundaries == Boundaries::Periodic {
             faces[n] = faces[0];
             continue;
@@ -590,7 +665,7 @@ fn minmod(a: f64, b: f64, c: f64) -> f64 {
         0.0
     }
 }
-fn forward(
+pub(super) fn forward(
     q: Conserved,
     i: usize,
     dt: f64,
@@ -610,7 +685,7 @@ fn forward(
         q.array()[k] + ratio * (al * (left[k] - pressure) - ar * (right[k] - pressure))
     }))
 }
-fn totals(
+pub(super) fn totals(
     states: &[Conserved],
     volumes: &[f64],
     cancelled: &mut impl FnMut() -> bool,
@@ -629,4 +704,23 @@ fn totals(
         }
     }
     Ok(Totals::from_array(sum))
+}
+
+fn validate_reservoirs(
+    gas: &FrozenGas,
+    boundaries: Boundaries,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), Error> {
+    if let Boundaries::Ends { left, right } = boundaries {
+        for boundary in [left, right] {
+            poll(cancelled)?;
+            if let Boundary::Reservoir(state) = boundary {
+                if state.momentum != 0.0 {
+                    return Err(Error::Invalid("stationary reservoir has nonzero momentum"));
+                }
+                gas.decode(state, None, cancelled)?;
+            }
+        }
+    }
+    Ok(())
 }

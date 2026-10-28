@@ -100,6 +100,9 @@ struct Workspace {
 /// and face buffers keep successful numerical steps allocation-free. All
 /// species share each face's wave speeds and one conservative energy flux.
 /// No species clipping, trace seeding or composition normalization is applied.
+/// Periodic, reflecting and transmissive boundaries are supported. The shared
+/// frozen-gas `Boundary::Reservoir` variant refuses because it cannot specify
+/// the required species masses and their separate formation-energy references.
 pub struct MixtureEuler1d {
     pub(super) gas: MixtureGas,
     pub(super) states: Vec<f64>,
@@ -130,6 +133,7 @@ impl MixtureEuler1d {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, Error> {
         poll(&mut cancelled)?;
+        admit_boundaries(boundaries)?;
         let count = mesh.cell_count();
         let n = gas.species_count();
         let m = n + 2;
@@ -156,6 +160,7 @@ impl MixtureEuler1d {
         time: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, Error> {
+        admit_boundaries(boundaries)?;
         let count = mesh.cell_count();
         let m = gas.species_count() + 2;
         if states.len() != count * m {
@@ -382,6 +387,24 @@ impl MixtureEuler1d {
             last: Box::new(last),
         })
     }
+}
+
+fn admit_boundaries(boundaries: Boundaries) -> Result<(), Error> {
+    if matches!(
+        boundaries,
+        Boundaries::Ends {
+            left: Boundary::Reservoir(_),
+            ..
+        } | Boundaries::Ends {
+            right: Boundary::Reservoir(_),
+            ..
+        }
+    ) {
+        return Err(Error::Invalid(
+            "mixture reservoir requires species-bearing state and energy references",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]

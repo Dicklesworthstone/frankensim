@@ -6,6 +6,11 @@
 //! HLLC/MUSCL is an Estimated engineering lane. It does not establish a fully
 //! discrete entropy inequality or exact pressure equilibrium across a moving
 //! material interface with different caloric laws.
+//!
+//! Shared boundary types admit periodic, reflecting and transmissive ends here.
+//! A frozen `Boundary::Reservoir` has no species-mass axis or species energy
+//! references and therefore refuses; a mixture reservoir needs its own
+//! species-bearing conservative closure.
 
 mod eos;
 mod evolve;
