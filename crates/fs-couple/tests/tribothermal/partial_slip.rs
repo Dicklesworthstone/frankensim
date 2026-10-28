@@ -1,5 +1,8 @@
 //! G1/G3 analytical references use explicit synthetic stiffness and material
 //! sources; these are implementation checks, not measured contact calibration.
+#[path = "partial_slip/material.rs"]
+mod material;
+
 use super::common;
 use fs_couple::tribothermal::partial_slip::*;
 use fs_material::phase::ResolvedHeatCapacityCurve;

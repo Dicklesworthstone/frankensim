@@ -7,7 +7,8 @@
 //! and U_contact = psi + Ta*sa + Tb*sb. The caloric network receives physical
 //! microslip heat and reversible exchange -Ci-d(Ti*si), never numerical loss.
 //!
-//! Fixed normal patch/load, fixed Coulomb coefficients and declared heat split;
+//! Fixed normal patch/load and declared heat split. Coulomb coefficients are
+//! fixed or re-queried through the original pinned material sliding binding.
 //! no normal work, expansion, wear, adhesion, flash-temperature or resolved
 //! traction-field claim. The existing caloric objects and transport sources
 //! retain their own source domains. Every nonlinear trial starts from the same
@@ -15,19 +16,25 @@
 //! nonlinear convergence is not a temporal or experimental accuracy claim.
 
 use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, PhaseStateError};
+use fs_math::det;
 use fs_solver::finite_difference::{FallibleFiniteDifference, FiniteDifferenceError};
 use fs_solver::{
     NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonReport, SolverRunProgress,
 };
 use fs_thermal::enthalpy::backward_euler::{BackwardEulerStep, StepCoefficients};
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation, EnergyAudit};
-use fs_tribo::HeatPartition;
 use fs_tribo::partial_slip::{
     GeneralizedWorkOwnership, PartialSlipCheckpoint, PartialSlipError, PartialSlipKinematics,
     PartialSlipLaw, PartialSlipState, PartialSlipStep, TangentFrame,
 };
+use fs_tribo::{FrictionLaw, HeatPartition, InputAuthority};
 use std::cell::{Cell, RefCell};
 use std::convert::Infallible;
+
+use super::{
+    MaterialSlidingContact, SlidingError, SlidingHeatPartition, SlidingInterface,
+    SlidingMaterialSample,
+};
 
 /// Derivatives of the two complete-patch stiffnesses with respect to ONE
 /// surface temperature, holding the other temperature and elastic strains fixed.
@@ -192,6 +199,9 @@ pub struct CaloricPartialSlip<'a> {
     temperature_k: [f64; 2],
     thermodynamics: ContactThermodynamics,
     time_s: f64,
+    // Reuse only the original immutable pinned binding/query owner. Native
+    // partial-slip history above remains the sole mechanical history owner.
+    material_friction: Option<MaterialSlidingContact<'a>>,
 }
 
 /// Explicit nonlinear work and independently enforced cell/global energy gates.
@@ -212,6 +222,7 @@ pub struct CaloricContactSolve {
 pub enum CaloricContactError<E = Infallible> {
     Invalid(&'static str),
     Contact(PartialSlipError),
+    Material(SlidingError<E>),
     Phase(PhaseStateError),
     Thermal(DepositionError),
     Source(E),
@@ -239,6 +250,9 @@ impl<E: std::error::Error + 'static> std::error::Error for CaloricContactError<E
 
 pub struct CaloricContactReport<S> {
     pub contact: PartialSlipStep,
+    /// Exact pinned friction claims at the accepted two-temperature endpoint.
+    /// Independent of the declared affine stiffness/free-energy source identity.
+    pub material: Option<SlidingMaterialSample>,
     pub thermodynamics: ContactThermodynamics,
     pub contact_internal_energy_change_j: f64,
     /// Signed reversible heat into each surface; may heat or cool.
@@ -322,7 +336,89 @@ impl<'a> CaloricPartialSlip<'a> {
             temperature_k,
             thermodynamics,
             time_s: thermal.time_s(),
+            material_friction: None,
         })
+    }
+
+    /// Attach the ORIGINAL pinned Coulomb source resolver without resetting
+    /// loaded strains, kinetic branches or the affine free-energy model.
+    ///
+    /// Ordered interface/history/source identities, caloric objects, cells and
+    /// the declared heat split must match. The source's initial coefficients
+    /// must match the accepted native law; changing them requires a real step.
+    /// Rebinding an existing source is refused. The stiffness model's identity
+    /// and the friction claim identities remain distinct.
+    ///
+    /// This ingress admits translational contact only: no retained twist,
+    /// relative torsional motion, accumulated-distance law or effusivity model.
+    /// The source speed is the actual norm of creepage times rolling speed,
+    /// not rolling speed alone or an invented torsional equivalent. Pressure
+    /// uses the held normal load and the binding's explicit nominal area.
+    /// Reported travel is actual prescribed translational arc length since this
+    /// attachment; it is diagnostic and cannot supply a prehistory-dependent
+    /// source axis. Its counter advances only with an accepted candidate.
+    pub fn with_material_friction(
+        mut self,
+        thermal: &DepositionSimulation<'_>,
+        data: SlidingInterface<'a>,
+        initial_speed_mps: f64,
+        authority: InputAuthority,
+    ) -> Result<Self, CaloricContactError> {
+        if self.material_friction.is_some()
+            || thermal.time_s() != self.time_s
+            || temperatures(thermal, self.curves, self.cells)? != self.temperature_k
+            || data.cells != self.cells
+            || (0..2).any(|i| !std::ptr::eq(data.caloric[i], self.curves[i]))
+            || data.accumulated_distance_axis.is_some()
+            || !matches!(&data.partition, SlidingHeatPartition::Prescribed(p) if *p == self.partition)
+            || self.checkpoint.state().region_elastic_twist_rad() != [0.0; 2]
+        {
+            return Err(CaloricContactError::Invalid(
+                "material contact needs original ordered cells/curves, fixed heat split and translational history",
+            ));
+        }
+        let source = MaterialSlidingContact::new(
+            thermal,
+            data,
+            self.checkpoint.normal_patch().normal_load_n(),
+            initial_speed_mps,
+            authority,
+        )
+        .map_err(CaloricContactError::Material)?;
+        let bound = source.interface().interface();
+        let original = self.checkpoint.interface();
+        if original.ordered_interface_id() != bound.ordered_system_id()
+            || original.history_id() != bound.history_id()
+            || original.source_id() != bound.provenance().source_id()
+        {
+            return Err(CaloricContactError::Invalid(
+                "material friction differs from retained ordered contact identity",
+            ));
+        }
+        let sample = source
+            .sample(
+                thermal,
+                self.checkpoint.normal_patch().normal_load_n(),
+                initial_speed_mps,
+                0.0,
+            )
+            .map_err(CaloricContactError::Material)?;
+        let [static_mu, kinetic_mu] = coulomb(&sample)?;
+        let p = self.checkpoint.law().parameters();
+        if p.static_mu != static_mu || p.kinetic_mu != kinetic_mu {
+            return Err(CaloricContactError::Invalid(
+                "material friction differs from accepted initial coefficients",
+            ));
+        }
+        self.material_friction = Some(source);
+        Ok(self)
+    }
+
+    /// Immutable original binding including exact pinned friction claims.
+    pub fn material_friction_binding(&self) -> Option<&SlidingInterface<'a>> {
+        self.material_friction
+            .as_ref()
+            .map(MaterialSlidingContact::binding)
     }
 
     pub const fn checkpoint(&self) -> &PartialSlipCheckpoint {
@@ -398,6 +494,11 @@ impl<'a> CaloricPartialSlip<'a> {
                 "contact and caloric physical intervals must match",
             ));
         }
+        if self.material_friction.is_some() && kinematics.torsional_spin_rad_per_s != 0.0 {
+            return Err(CaloricContactError::Invalid(
+                "material friction has no torsional-speed mapping",
+            ));
+        }
         // Keep the actual physical interval identical in all native calls.
         kinematics.dt_s = dt;
         let trials = Cell::new(0usize);
@@ -411,7 +512,39 @@ impl<'a> CaloricPartialSlip<'a> {
                     }
                     trials.set(trials.get() + 1);
                     let temperature_k = temperatures(state, self.curves, self.cells)?;
-                    let law = self.model.law_at(temperature_k)?;
+                    let mut law = self.model.law_at(temperature_k)?;
+                    let material = self
+                        .material_friction
+                        .as_ref()
+                        .map(|source| {
+                            let vx = finite(kinematics.creepage[0] * kinematics.rolling_speed_mps)?;
+                            let vy = finite(kinematics.creepage[1] * kinematics.rolling_speed_mps)?;
+                            let speed = finite(det::hypot(vx, vy))?;
+                            let distance = finite(speed * dt)?;
+                            let accumulated = finite(source.distance_m + distance)?;
+                            if distance > 0.0 && accumulated == source.distance_m {
+                                return Err(CaloricContactError::Invalid(
+                                    "material contact travel is unrepresentable",
+                                ));
+                            }
+                            source
+                                .sample(
+                                    state,
+                                    self.checkpoint.normal_patch().normal_load_n(),
+                                    speed,
+                                    accumulated,
+                                )
+                                .map_err(CaloricContactError::Material)
+                        })
+                        .transpose()?;
+                    if let Some(sample) = &material {
+                        let [static_mu, kinetic_mu] = coulomb(sample)?;
+                        let mut parameters = law.parameters();
+                        parameters.static_mu = static_mu;
+                        parameters.kinetic_mu = kinetic_mu;
+                        law = PartialSlipLaw::new(law.model_id(), law.source_id(), parameters)
+                            .map_err(CaloricContactError::Contact)?;
+                    }
                     let contact = law
                         .advance_with_coefficients(
                             self.checkpoint.normal_patch(),
@@ -493,6 +626,7 @@ impl<'a> CaloricPartialSlip<'a> {
                         conductances_w_k,
                         payload: (
                             contact,
+                            material,
                             thermodynamics,
                             temperature_k,
                             internal_change,
@@ -538,6 +672,7 @@ impl<'a> CaloricPartialSlip<'a> {
             next,
             (
                 contact,
+                material,
                 thermodynamics,
                 temperature_k,
                 contact_internal_energy_change_j,
@@ -570,12 +705,17 @@ impl<'a> CaloricPartialSlip<'a> {
         next_contact.temperature_k = temperature_k;
         next_contact.thermodynamics = thermodynamics;
         next_contact.time_s = target_s;
+        if let (Some(binding), Some(sample)) = (&mut next_contact.material_friction, &material) {
+            binding.distance_m = sample.accumulated_distance_m;
+            binding.time_s = target_s;
+        }
         poll()?;
         Ok(CaloricContactCandidate {
             thermal: next,
             contact: next_contact,
             report: CaloricContactReport {
                 contact,
+                material,
                 thermodynamics,
                 contact_internal_energy_change_j,
                 reversible_heat_j,
@@ -622,6 +762,18 @@ fn temperatures<E>(
         temperatures[i] = phase.temperature_k();
     }
     Ok(temperatures)
+}
+
+fn coulomb<E>(sample: &SlidingMaterialSample) -> Result<[f64; 2], CaloricContactError<E>> {
+    match sample.law {
+        FrictionLaw::Coulomb {
+            static_mu,
+            kinetic_mu,
+        } => Ok([static_mu, kinetic_mu]),
+        _ => Err(CaloricContactError::Invalid(
+            "source must retain the original resolved Coulomb law",
+        )),
+    }
 }
 
 fn quadratic_coordinates<E>(

@@ -8775,8 +8775,9 @@ gates before the coupled candidate can publish. Retained strains, slip
 branches, frame transport, source/caloric object identity, and the physical
 clock continue together; late failures and cancellation publish neither owner.
 
-This rung holds normal patch/load and Coulomb coefficients fixed and uses an
-explicit constant physical-heat partition. It does not claim normal work,
+The fixed-coefficient ingress holds normal patch/load and Coulomb coefficients
+fixed and uses an explicit constant physical-heat partition. The material
+friction ingress below re-evaluates pinned Coulomb sources. Neither claims normal work,
 expansion, wear, flash temperature, sourced stiffness admission, Euler-body
 integration, total entropy production, uniqueness, or unconditional convergence.
 Endpoint coupling is first order and needs independent timestep refinement.
@@ -8933,3 +8934,36 @@ Independent depth and time ladders show observed orders 1.945 and 0.978; axial
 refinement also reduces the temperature increment. Two native modal regression
 groups check local temperature-dependent friction and heat, original mechanical
 energy, and bitwise-identical retry after a staged refusal.
+
+
+### Source-resolved friction on a loaded caloric contact
+
+`CaloricPartialSlip::with_material_friction` optionally attaches the original
+`MaterialSlidingContact` resolver and its pinned friction claims. Admission
+requires the same ordered interface/history/provenance, original caloric
+objects and cell order, accepted initial coefficients, and declared heat split.
+The affine contact free-energy model retains its own independent identity.
+Rebinding an attached source is refused.
+
+Each thermal endpoint re-evaluates the original Coulomb sources at both actual
+surface temperatures, held normal load divided by the binding's explicit
+nominal area, and actual translational speed `norm(creepage * rolling_speed)`.
+Those coefficients update the original native capacity while preserving all
+retained elastic/kinetic history. Source receipts are returned with the accepted
+report. A temperature-driven capacity reduction may relax loaded strain and
+produce physical heat even with zero imposed motion; numerical loss remains
+separate from both physical and reversible heat.
+
+This material ingress admits translational contact and a fixed prescribed heat
+split. It refuses retained twist, relative torsional motion, distance-dependent
+source axes and semi-infinite effusivity partitioning; it invents no torsional
+speed or preattachment sliding history. Diagnostic relative travel starts at
+attachment and advances only with accepted physical motion. Original source
+range failures and all other late refusals leave both accepted owners unchanged.
+
+Three additional G1/G3/G4 references independently solve the coupled
+mu(T)/finite-capacity two-slider equations, stationary thermally triggered
+relaxation, and pinned-source/domain/unsupported-motion behavior. Together with
+the six fixed-mode references, all nine focused tests pass. These use declared
+synthetic material claims, not measured friction validation. The fixed normal
+patch and first-order endpoint/parameter-update limits remain in force.
