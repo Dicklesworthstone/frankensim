@@ -37,12 +37,12 @@ fn legacy() -> String {
     let text = CARD
         .replace(&radiating, "")
         .replace("output 120000 5", "output 1024 1");
-    let events = "events\t2\nevent\t0e0\t5e-2\tpressure-pa\t6.715e1\nevent\t2.2e0\t1.05e-2\tpressure-pa\t0e0";
+    let events = "events\t2\nevent\t0e0\t5e-2\tpressure-pa\t9.3447e1\nevent\t2.2e0\t1.05e-2\tpressure-pa\t0e0";
     assert!(
         text.contains(events),
         "the D5 gesture changed; update this test"
     );
-    text.replace(events, "events\t1\nevent\t0e0\t5e-2\tpressure-pa\t6.715e1")
+    text.replace(events, "events\t1\nevent\t0e0\t5e-2\tpressure-pa\t9.3447e1")
 }
 
 fn with_window(text: &str, row: &str) -> String {

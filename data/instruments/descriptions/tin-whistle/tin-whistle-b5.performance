@@ -37,7 +37,7 @@ duct_section 13 14 0.0015000 0.0033050 1e-10
 duct_section 13 15 0.0377000 0.0061000 1e-10
 radiation compact-baffled
 flue 0.00800 0.00148 0.00530 0 0 0
-windway slit 0.02455
+windway slit-developing 0.02455
 jet_card tonal-interim
 jet 90 1e-6 3 0
 jet_limits 0.2 0.3 65536
@@ -69,5 +69,5 @@ tracks	1
 track	blow	blowing-pressure
 initial	pressure-pa	0e0
 events	2
-event	0e0	5e-2	pressure-pa	1.416e2
+event	0e0	5e-2	pressure-pa	1.9832e2
 event	2.2e0	1.05e-2	pressure-pa	0e0

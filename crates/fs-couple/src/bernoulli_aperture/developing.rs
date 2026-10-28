@@ -19,9 +19,11 @@
 //! The held state is refused outside the correlation's validity, never
 //! extrapolated ([`DevelopingSlitState::validity`]):
 //! - `x+ < 4e-4`: the correlation agrees with Bodoia and Osterle's solution within
-//!   2.5 % for `x+ > 0.0004` (and with Liu's within 2.4 %), as Shah and London state.
+//!   2.5 % for `x+ > 0.0004` (and with Liu's within 2.4 %), as Shah and London state
+//!   (secondary, search snippet only; primary not read).
 //! - low Reynolds number: the developing-flow solutions depend on Re there; Chen
-//!   (1973) gives `K(inf) = 0.64 + 38/Re`. Refused where that inlet term departs
+//!   (1973) gives `K(inf) = 0.64 + 38/Re` (secondary, search snippet of Shah and
+//!   London's text only; primary not read). Refused where that inlet term departs
 //!   from Shah's 0.674 by enough to move the held drop by more than the stated 2.4 %.
 //! - laminarity: an undeveloped exit is refused above `Re_delta* = 520`, where the
 //!   flat-plate (Blasius) layer turns linearly unstable to Tollmien-Schlichting waves,

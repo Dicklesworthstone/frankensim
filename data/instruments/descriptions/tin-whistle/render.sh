@@ -33,9 +33,23 @@
 # `mouth_reaction window-cylinder`).
 # Player: the air flow the same paper measured for each note of the major scale at its tempered frequency (Table 1: l/min D5 6.2, E5 6.9,
 # F#5 9.0, G5 8.2, A5 10.0, B5 9.55, C#6 11.3, D6 with only hole 6 open 11.9; and the paper's overblown series with every hole closed, Fig. 2 and
-# Table 1: D6 12.0, A6 17.9, D7 23.8, files d6c, a6c, d7c, a test of the overblowing ladder whose answer is a result), turned into mouth pressure by the island's own viscous windway law
-# p = 12 mu L v / h^2 + rho v^2 / 2 with L = 24.55 mm, h = 1.48 mm (exit depth over the whole length: an upper bound, u-flue-taper), flue width 8 mm,
-# v = flow / (8 x 1.48 mm^2), dry air at 20 C. The gesture is 50 ms attack, hold, 10.5 ms release.
+# Table 1: D6 12.0, A6 17.9, D7 23.8, files d6c, a6c, d7c, a test of the overblowing ladder whose answer is a result), turned into mouth pressure by
+# the windway law the cards name, `windway slit-developing 0.02455` (pexfp.135.4; the binary must contain e2414832f): Shah's (1978) laminar
+# developing-flow law for a straight slit fed through a uniform inlet, p = rho v^2/2 + mu L v (f_app Re)/(2 h^2) with
+# f_app Re = 3.44/sqrt(x+) + (24 + 0.674/(4 x+) - 3.44/sqrt(x+))/(1 + 0.000029/x+^2) and x+ = mu L/(4 rho v h^2) (form and constants as McCreery
+# et al., NURETH-15 2013, eq. 2, state them), L = 24.55 mm, h = 1.48 mm (exit depth over the whole length: the straight stand-in most likely
+# overstates the loss, u-flue-taper), flue width 8 mm, v = flow / (8 x 1.48 mm^2), dry air at 20 C (rho 1.2041 kg/m^3, mu 1.8134e-5 Pa s, the
+# gas model's own). Pressures D5 to D7c in card order d5 e5 fs5 g5 a5 b5 cs6 d6 d6c a6c d7c: 93.447, 112.43, 178.71, 151.84, 215.06, 198.32,
+# 266.83, 292.44, 296.81, 606.64, 1016.5 Pa, 1.34 to 1.40 times those of the fully developed law 12 mu L v/h^2 + rho v^2/2 the cards used
+# before; the voice holds the measured flow either way. Each held note is inside the law's cited validity, which the binary checks and the
+# sidecar records (windway_held): x+ 1.26e-3 to 4.84e-3 (floor 4e-4), Re_Dh 1715 to 6585, Re_L 2.0e4 to 6.7e4, the core still inviscid at the
+# exit with Re_delta* 183 to 373 (bound 520), Chen's low-Re inlet term moving the drop 0.6 to 1.9 % (bound 2.4 %). The attack and release
+# use the same quasi-steady law and are not covered. Cross-code check of the law against Segoufin's laminar RNS-p straight channel
+# (thesis Fig. 5.14; laminar vs laminar, it verifies the law in x+ only, laminarity is bounded separately): the thesis states two Reynolds
+# length scales, so the status is split, MET under Re_Dh = 2 Re (2/2) and MISSED under Re_Dh = 4 Re (1/3). Reading II misses by 7 to 9 %
+# at x+ 1.6e-3 to 3.3e-3, which is a6c's x+ (1.68e-3); d7c (x+ 1.26e-3) lies below the graded range. Chen's 0.64 + 38/Re and Shah and
+# London's agreement statement behind the x+ floor are secondary, search snippet only; primary not read. The four *-nolle gate files keep
+# `windway slit` and its pressures: the Nolle/Price transfer refuses this windway. The gesture is 50 ms attack, hold, 10.5 ms release.
 # Dry air at 20 C is the measurement's own gas, not an omission: the paper blew the whistle from a regulated, metered air supply in an anechoic
 # room at 20 C (specimen.tsv, environment), not by mouth. Do not change it to breath; breath gas belongs to recipes whose data were played.
 # Unknown or authored: labium offset and jet angle (zero, UNKNOWN), onset ramp (50 ms), jet displacement gain (90, as in the
@@ -45,7 +59,7 @@
 # Numerical controls forced by the generic route (none is a physical parameter, none was tuned): mechanics clock 288 kHz because a viscothermal loss
 # cell needs four transit samples and under 0.5 rad at its band edge (3 kHz); loss only on bore sections of 17 mm or more; finger holes are chimney
 # sections of 1.5 mm (a section under one propagation step is refused, the wall is 0.3 mm: u-hole-chimney); compact baffled radiation loads, which
-# hold for ka <= 0.5 and so cap the receiver band at 2.8 kHz; minimum jet speed 0.2 m/s (the viscous windway gives a jet slower than 1 m/s at the
+# hold for ka <= 0.5 and so cap the receiver band at 2.8 kHz; minimum jet speed 0.2 m/s (the windway gives a jet slower than 1 m/s at the
 # first control tick of the attack, which the default limit refuses); the pressure release lasts 10.5 ms because a release that ends exactly on a
 # control tick can leave a rounding-sized pressure that the jet domain check refuses.
 #

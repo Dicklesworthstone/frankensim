@@ -798,7 +798,9 @@ friction factor for developing laminar flow, as stated openly by McCreery et al.
 fully developed slit law plus `0.674 rho U^2/2`. The held note's pressure (the
 gesture's highest blowing pressure) must lie inside the correlation's validity
 or the input is refused: `x+ >= 4e-4`; Chen's low-Re inlet term
-`0.64 + 38/Re` may move the held drop by at most the stated 2.4 %; an
+`0.64 + 38/Re` may move the held drop by at most the stated 2.4 % (Chen's term
+and Shah and London's agreement statement behind the `x+` floor are secondary,
+search snippet only; primary not read); an
 undeveloped exit keeps `Re_delta* <= 520` (core speed and displacement thickness;
 the Blasius layer's linear instability, Manneville 2016); and a developed exit
 keeps `Re_Dh <= 1760` (`Re_cl = 660` of the laminar centreline speed and half gap,
