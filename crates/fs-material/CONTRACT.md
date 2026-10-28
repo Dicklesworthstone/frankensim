@@ -2925,6 +2925,19 @@ use closed-form arithmetic. Equal mode
 parameters recover the original common-mode response. The scalar law getters
 continue to describe pure opening; each point exposes its selected mixed envelope.
 
+`CohesivePoint::trial_with_mean_traction` additionally returns the analytic
+three-component traction average along that same straight jump path. It splits
+retained-history elasticity, softening, compression and complete failure using
+the original initiation/envelope history. Affine-vector/norm integrals preserve
+transverse traction under nonproportional loading; a short-interval binomial
+evaluation retains small tractions near failure. The mean's dot product with the
+full jump change must reproduce the original independent path work within the
+supplied J/m2 gate. No scalar work projection, quadrature, new damage law or
+allocation is introduced. Endpoint traction and endpoint tangents remain separate
+and do not differentiate the path average. Regressions compare vector means with
+independent traction quadrature, shear rotations, full rupture, reversals and
+straight-path subdivision.
+
 `resolve_mixed_mode_bilinear_cohesive` requires eight explicit ordered-interface
 claims: normal/shear stiffness [Pa/m], normal/shear strength [Pa], mode-I/mode-II
 fracture energy [J/m2], dimensionless BK exponent, and compression stiffness. No
@@ -3190,6 +3203,10 @@ its admitted range. Longer ramps evaluate the logarithmic integral directly,
 preserving nonzero loss at large failure/onset ratios without cancellation of
 the leading terms. G0/G3 regressions compare full-rupture viscous work with its
 independent closed form and retain the same work under reversal-path subdivision.
+`trial_over_time_with_mean_traction` adds the same exactly integrated surviving
+bond fraction times `eta_i gdot_i` to the equilibrium vector mean. Its three-mode
+work equals intrinsic work plus the separately reported physical viscous loss;
+it reuses the timed owner's integral rather than a second damage evolution.
 No stored dashpot state, healing, fracture heat partition,
 evolving-temperature refresh or universal adhesive calibration is inferred.
 

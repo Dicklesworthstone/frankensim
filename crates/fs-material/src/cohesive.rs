@@ -30,6 +30,9 @@ pub mod mixed_mode;
 pub mod rate;
 pub use rate::{CohesiveRateStep, CohesiveViscosity};
 
+// Work-conjugate vector averages for native dynamic interface owners.
+mod path;
+
 /// A refusal never mutates an accepted point.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CohesiveError {

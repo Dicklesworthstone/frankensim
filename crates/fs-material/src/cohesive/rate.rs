@@ -121,10 +121,22 @@ impl<'a> CohesivePoint<'a> {
         dt_s: f64,
         energy_tolerance_j_m2: f64,
     ) -> Result<CohesiveRateStep<'a>, CohesiveError> {
+        self.trial_over_time_integrated(jump_m, dt_s, energy_tolerance_j_m2)
+            .map(|(step, _)| step)
+    }
+
+    // Preserve the exact mean integrity for the work-conjugate traction owner,
+    // without evaluating its damage/failure path integral a second time.
+    pub(super) fn trial_over_time_integrated(
+        &self,
+        jump_m: [f64; 3],
+        dt_s: f64,
+        energy_tolerance_j_m2: f64,
+    ) -> Result<(CohesiveRateStep<'a>, f64), CohesiveError> {
         positive(dt_s)?;
         let equilibrium = self.trial_equilibrium(jump_m, energy_tolerance_j_m2)?;
         let Some(viscosity) = self.law.viscosity else {
-            return Ok(equilibrium.into());
+            return Ok((equilibrium.into(), 0.0));
         };
         let delta = core::array::from_fn::<_, 3, _>(|i| jump_m[i] - self.jump[i]);
         let rate = delta.map(|v| v / dt_s);
@@ -159,13 +171,16 @@ impl<'a> CohesivePoint<'a> {
             loss = finite(loss + eta[i] * rate[i].abs() * delta[i].abs() * mean_intact)?;
         }
         finite(equilibrium.energy.work + loss)?;
-        Ok(CohesiveRateStep {
-            tangent_pa_m: equilibrium.tangent_pa_m.map(|_| tangent),
-            branch_tangent_pa_m: tangent,
-            traction_pa: traction,
-            viscous_dissipated_j_m2: loss,
-            equilibrium,
-        })
+        Ok((
+            CohesiveRateStep {
+                tangent_pa_m: equilibrium.tangent_pa_m.map(|_| tangent),
+                branch_tangent_pa_m: tangent,
+                traction_pa: traction,
+                viscous_dissipated_j_m2: loss,
+                equilibrium,
+            },
+            mean_intact,
+        ))
     }
 }
 
