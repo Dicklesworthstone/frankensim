@@ -20,6 +20,10 @@ pub mod atmosphere;
 pub mod plate;
 /// Directional swelling, compatible shape, stress and native vibration tangent.
 pub mod solid;
+/// Source-backed finite surface exchange in the dry-basis flux convention.
+pub mod surface;
+
+use surface::ResolvedMoistureFace;
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
@@ -126,6 +130,15 @@ pub enum MoistureFace {
     Sealed,
     /// Explicit reservoir value in kg water/kg dry solid.
     PrescribedDryBasis(f64),
+    /// Pinned source sorption at prescribed ambient RH. A surface transfer law
+    /// attached to `law` limits uptake/desorption; otherwise the surface is at
+    /// equilibrium. This boundary is an infinite isothermal vapor reservoir.
+    SourceSorption {
+        /// Original equilibrium isotherm and optional surface-emission source.
+        law: atmosphere::DryBasisSorption,
+        /// Prescribed environmental vapor activity in [0,1].
+        relative_humidity: f64,
+    },
     /// Source-evaluated FPL sorption boundary at a declared T and RH.
     WoodEquilibrium {
         /// Immutable coefficient card consumed by the original FPL law.
@@ -137,10 +150,13 @@ pub enum MoistureFace {
     },
 }
 impl MoistureFace {
-    fn content(&self, temperature: f64) -> Result<Option<f64>, MoistureError> {
+    fn resolve(&self, temperature: f64) -> Result<ResolvedMoistureFace, MoistureError> {
         let value = match self {
-            Self::Sealed => return Ok(None),
+            Self::Sealed => return Ok(ResolvedMoistureFace::default()),
             Self::PrescribedDryBasis(value) => *value,
+            Self::SourceSorption { law, relative_humidity } => {
+                return law.resolve(temperature, *relative_humidity);
+            }
             Self::WoodEquilibrium {
                 card,
                 temperature_k,
@@ -166,7 +182,10 @@ impl MoistureFace {
                 "surface moisture must be finite nonnegative dry-basis content",
             ));
         }
-        Ok(Some(value))
+        Ok(ResolvedMoistureFace {
+            equilibrium: Some(value),
+            ..ResolvedMoistureFace::default()
+        })
     }
 }
 
@@ -219,8 +238,16 @@ pub struct MoistureStepReport {
     /// Signed water received through the left and right prescribed surfaces
     /// [kg]. The finite-atmosphere wrapper debits that same external inventory.
     pub boundary_water_kg: [f64; 2],
-    /// Resolved surface dry-basis values; None denotes a sealed face.
+    /// Actual surface dry-basis content. Finite exchange permits a difference
+    /// from reservoir equilibrium; None denotes an explicitly sealed face.
     pub surface_moisture: [Option<f64>; 2],
+    /// Reservoir equilibrium content; unchanged from the prescribed value in
+    /// the instantaneous surface-equilibrium limit.
+    pub reservoir_moisture: [Option<f64>; 2],
+    /// Pinned source sorption at the actual environmental RH, when used.
+    pub surface_sorption: [Option<ResolvedMaterialStatePoint>; 2],
+    /// Pinned surface-emission source at the same RH, when exchange is finite.
+    pub surface_transfer: [Option<ResolvedMaterialStatePoint>; 2],
     /// Water stored before and after [kg].
     pub stored_water_kg: [f64; 2],
     /// Stored change minus external transfer [kg].
@@ -455,12 +482,32 @@ impl MoistureSlab {
     /// Propose one conservative interval without mutating the accepted slab.
     /// Face values are constant over this interval; cut intervals at RH events.
     /// Interior face diffusivity is the harmonic mean of the two accepted-start
-    /// values. The boundary lies half a cell from its cell center. Numerical
+    /// values. The boundary lies half a cell from its cell center; optional
+    /// finite surface exchange adds its resistance in series. Numerical
     /// coefficients are refreshed on EVERY call; no stale material operator is reused.
     pub fn advance(
         &self,
         dt_s: f64,
         faces: &[MoistureFace; 2],
+        config: MoistureStepConfig,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, MoistureStepReport), MoistureError> {
+        poll(cx)?;
+        let temperature = self
+            .reference
+            .query_point()
+            .iter()
+            .find(|(name, _)| name == "temperature")
+            .expect("admitted temperature")
+            .1;
+        let boundary = [faces[0].resolve(temperature)?, faces[1].resolve(temperature)?];
+        self.advance_resolved(dt_s, boundary, config, cx)
+    }
+
+    fn advance_resolved(
+        &self,
+        dt_s: f64,
+        faces: [ResolvedMoistureFace; 2],
         config: MoistureStepConfig,
         cx: &Cx<'_>,
     ) -> Result<(Self, MoistureStepReport), MoistureError> {
@@ -476,17 +523,7 @@ impl MoistureSlab {
                 "representable forward interval and positive admission tolerances required",
             ));
         }
-        let temperature = self
-            .reference
-            .query_point()
-            .iter()
-            .find(|(name, _)| name == "temperature")
-            .expect("admitted temperature")
-            .1;
-        let surface = [
-            faces[0].content(temperature)?,
-            faces[1].content(temperature)?,
-        ];
+        let surface = [faces[0].equilibrium, faces[1].equilibrium];
         for m in surface.into_iter().flatten() {
             if m > self.geometry.maximum_moisture {
                 return Err(MoistureError::Invalid(
@@ -528,18 +565,11 @@ impl MoistureSlab {
             operator.diagonal[i] += a;
             operator.diagonal[i + 1] += a;
         }
-        let boundary = [
-            if surface[0].is_some() {
-                2.0 * scale * d[0]
-            } else {
-                0.0
-            },
-            if surface[1].is_some() {
-                2.0 * scale * d[n - 1]
-            } else {
-                0.0
-            },
+        let coupling = [
+            faces[0].coupling(dt_s, dx, d[0], scale)?,
+            faces[1].coupling(dt_s, dx, d[n - 1], scale)?,
         ];
+        let boundary = [coupling[0].0, coupling[1].0];
         let mut rhs = self.moisture.clone();
         for (side, i) in [0, n - 1].into_iter().enumerate() {
             if let Some(m) = surface[side] {
@@ -551,8 +581,9 @@ impl MoistureSlab {
             || operator.off.iter().any(|v| !positive(*v))
             || rhs.iter().any(|v| !v.is_finite())
             || boundary.iter().any(|v| !v.is_finite())
-            || (surface[0].is_some() && !positive(boundary[0]))
-            || (surface[1].is_some() && !positive(boundary[1]))
+            || (0..2).any(|side| surface[side].is_some()
+                && faces[side].coefficient_m_s != Some(0.0)
+                && !positive(boundary[side]))
         {
             return Err(MoistureError::Invalid(
                 "diffusion coefficients overflow or underflow",
@@ -593,6 +624,22 @@ impl MoistureSlab {
             }
         }
         let endpoint = self.transport_states(&solution.x, cx)?;
+        let mut actual_surface = [None, None];
+        for (side, i) in [0, n - 1].into_iter().enumerate() {
+            poll(cx)?;
+            if let Some(equilibrium) = surface[side] {
+                let fraction = coupling[side].1;
+                let value = if fraction == 1.0 {
+                    equilibrium
+                } else {
+                    fraction.mul_add(equilibrium - solution.x[i], solution.x[i])
+                };
+                // The real surface, not just the reservoir and cell center,
+                // must be inside the original transport source domain.
+                self.transport.at_query_point(&self.card, &self.point_at(value)?)?;
+                actual_surface[side] = Some(value);
+            }
+        }
         let transfer = [
             self.dry_mass_per_cell_kg
                 * boundary[0]
@@ -619,10 +666,14 @@ impl MoistureSlab {
                 tolerance_kg: config.water_balance_tolerance_kg,
             });
         }
+        let [left, right] = faces;
         let report = MoistureStepReport {
             interval_s: [self.time_s, end],
             boundary_water_kg: transfer,
-            surface_moisture: surface,
+            surface_moisture: actual_surface,
+            reservoir_moisture: surface,
+            surface_sorption: [left.sorption, right.sorption],
+            surface_transfer: [left.transfer, right.transfer],
             stored_water_kg: [water_before, water_after],
             water_balance_residual_kg: residual,
             transport_start: start,

@@ -5499,6 +5499,51 @@ consumption, complete mechanical-source refusal, budgets, quantity-basis
 refusal and cancellation. Native Cargo execution is a separate gate; parsing
 and independent numerical oracles do not establish executed native test results.
 
+### Source-backed finite surface moisture exchange
+
+`moisture::surface::DryBasisSurfaceTransfer` admits the canonical
+`dry_basis_surface_emission_coefficient` source in m/s. Its convention is
+`j_water,in = rho_dry * h_s * (M_equilibrium - M_surface)`, with both moisture
+contents in kg water/kg dry solid. A coefficient normalized to vapor
+concentration or vapor pressure is not interchangeable with this source.
+The reference dry density and inventory remain owned by the original slab.
+This surface-emission boundary follows the explicit surface-resistance form
+in [USDA FPL's diffusion treatment](https://www.fpl.fs.usda.gov/documnts/pdf1993/simps93a.pdf);
+the implementation imports no material coefficients from that paper.
+
+`DryBasisSorption::with_surface_transfer` attaches the pinned coefficient to
+the existing isotherm. Both sources accept only the same fixed absolute
+temperature and actual relative humidity; additional dynamic surface axes
+refuse. `MoistureFace::SourceSorption` exposes this law to prescribed ambient
+RH histories. Existing finite-atmosphere, native plate and native solid
+entry points consume the same attached law without a separate solver.
+
+The boundary coefficient combines the half-cell diffusion resistance
+`dx/(2*D)` and surface resistance `1/h_s` in series. The native backward-Euler
+operator remains SPD with nonnegative exchange coefficients. A zero `h_s`
+has the sealed diffusion limit; omitting the surface law preserves the
+original instantaneous-equilibrium arithmetic. Surface content is recovered
+from that same flux and admitted against the original transport source.
+Reports distinguish actual surface content from reservoir equilibrium and
+retain sorption and transfer source evaluations. No surface water is stored,
+clipped or counted twice.
+
+For a finite atmosphere, every conserved-water residual trial resolves both
+the equilibrium and transfer coefficient at its endpoint RH. Thus a changing
+humidity-dependent surface law changes uptake, vapor depletion, native wet
+inertia, stiffness and compatible swelling through the existing owners.
+This adds no spatial vapor diffusion, airflow solve, coating storage,
+surface-moisture-dependent kinetics, hysteresis or sorption heat. A source's
+calibration and the original isothermal dilute bound-water limits remain
+required. Broad MR46 stays open.
+
+Focused authored regressions cover independent one-cell uptake/desorption
+and surface-flux formulas, sealed and instantaneous limits, a closed-form
+finite-vapor balance with humidity-dependent surface transfer, continuation
+and deterministic replay, actual native plate response, and late source,
+mechanical and cancellation refusals. Native test execution and physical
+validation remain distinct from these authored verification cases.
+
 ### Finite atmospheric water inventory and native material response
 
 `moisture::atmosphere::FiniteMoistureAtmosphere` replaces the infinite surface
@@ -5512,9 +5557,10 @@ dry-basis finite-volume field and conserved dry skeleton.
 `DryBasisSorption` pins an equilibrium surface-content property with semantic
 kg-water/kg-dry-solid output. Its two query coordinates are typed absolute
 temperature and relative humidity; duplicate aliases, wrong moisture bases,
-additional conditions and unsupported source states refuse. The surface
-content changes the existing backward-Euler Fick boundary, not the entire
-interior field. Both ends may share the same atmosphere or be sealed.
+additional conditions and unsupported source states refuse. Its equilibrium
+content and optional finite surface resistance enter the existing
+backward-Euler Fick boundary, not the entire interior field. Both ends may
+share the same atmosphere or be sealed.
 
 A bounded scalar solve chooses endpoint RH so endpoint vapor plus endpoint
 bound water equals their initial total. Every trial uses the original slab

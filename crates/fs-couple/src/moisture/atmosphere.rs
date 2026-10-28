@@ -14,11 +14,12 @@
 //! There is no condensation, hysteresis, gas momentum or moving interface.
 
 use super::{
-    MaterialCard, MaterialPropertySelection, MoistureError, MoistureFace, MoistureSlab,
+    MaterialCard, MaterialPropertySelection, MoistureError, MoistureSlab,
     MoistureStepConfig, MoistureStepReport, QueryPoint, ResolvedMaterialStatePoint,
     ScalarAdmissibility, ScalarPropertyRequirement, poll, positive, quantity,
     resolve_material_state_point,
 };
+use super::surface::{DryBasisSurfaceTransfer, ResolvedMoistureFace, admit_environment};
 use fs_exec::Cx;
 use fs_material::thermochemical_gas::{
     ThermochemicalGasModel,
@@ -34,6 +35,7 @@ pub struct DryBasisSorption {
     card: MaterialCard,
     source: ResolvedMaterialStatePoint,
     property: String,
+    surface_transfer: Option<DryBasisSurfaceTransfer>,
 }
 impl DryBasisSorption {
     /// Pin one property with semantic kg-water/kg-dry-solid output. The query
@@ -47,27 +49,7 @@ impl DryBasisSorption {
         selection: MaterialPropertySelection,
     ) -> Result<Self, MoistureError> {
         let rh = quantity(QuantityKind::Moisture(MoistureBasis::RelativeHumidity));
-        if point.axis_quantities().get("temperature")
-            != Some(&quantity(QuantityKind::AbsoluteTemperature))
-            || point.axis_quantities().get("relative_humidity") != Some(&rh)
-            || !point
-                .axes()
-                .get("temperature")
-                .copied()
-                .is_some_and(positive)
-            || !point
-                .axes()
-                .get("relative_humidity")
-                .is_some_and(|v| v.is_finite() && (0.0..=1.0).contains(v))
-            || point
-                .axes()
-                .keys()
-                .any(|key| key != "temperature" && key != "relative_humidity")
-        {
-            return Err(MoistureError::Invalid(
-                "sorption requires only typed temperature and relative humidity coordinates",
-            ));
-        }
+        admit_environment(&point)?;
         let requirement = ScalarPropertyRequirement::try_with_quantity(
             property,
             quantity(QuantityKind::Moisture(MoistureBasis::DryMass)),
@@ -87,6 +69,40 @@ impl DryBasisSorption {
             card,
             source,
             property: property.into(),
+            surface_transfer: None,
+        })
+    }
+
+    /// Limit exchange by the original source-backed surface emission law.
+    /// Both laws are re-evaluated at the actual environment RH on each trial.
+    /// This does not change the equilibrium isotherm or create a surface store.
+    pub fn with_surface_transfer(
+        mut self,
+        transfer: DryBasisSurfaceTransfer,
+    ) -> Result<Self, MoistureError> {
+        let point = self.source.query();
+        transfer.at(point.axes()["temperature"], point.axes()["relative_humidity"])?;
+        self.surface_transfer = Some(transfer);
+        Ok(self)
+    }
+
+    pub(super) fn resolve(
+        &self,
+        temperature: f64,
+        rh: f64,
+    ) -> Result<ResolvedMoistureFace, MoistureError> {
+        let (equilibrium, sorption) = self.at(temperature, rh)?;
+        let (coefficient_m_s, transfer) = self
+            .surface_transfer
+            .as_ref()
+            .map(|law| law.at(temperature, rh))
+            .transpose()?
+            .unzip();
+        Ok(ResolvedMoistureFace {
+            equilibrium: Some(equilibrium),
+            coefficient_m_s,
+            sorption: Some(sorption),
+            transfer,
         })
     }
 
@@ -95,9 +111,12 @@ impl DryBasisSorption {
         temperature: f64,
         rh: f64,
     ) -> Result<(f64, ResolvedMaterialStatePoint), MoistureError> {
-        if self.source.query().axes()["temperature"].to_bits() != temperature.to_bits() {
+        if self.source.query().axes()["temperature"].to_bits() != temperature.to_bits()
+            || !rh.is_finite()
+            || !(0.0..=1.0).contains(&rh)
+        {
             return Err(MoistureError::Invalid(
-                "gas, sorption and slab must have the same fixed temperature",
+                "gas, sorption and slab need the same fixed temperature and RH in [0,1]",
             ));
         }
         let point = self
@@ -360,7 +379,8 @@ impl FiniteMoistureAtmosphere {
     }
 
     /// Solve one interval using endpoint RH in the existing backward-Euler slab
-    /// boundary. Nonlinear interior diffusivity keeps the original accepted-start
+    /// boundary. Optional finite surface exchange is resolved at the same trial
+    /// RH; nonlinear interior diffusivity keeps the original accepted-start
     /// lagging. No accepted state is changed during trials or endpoint checks.
     pub fn advance(
         &self,
@@ -401,16 +421,14 @@ impl FiniteMoistureAtmosphere {
 
         let evaluate = |rh| -> Result<_, AtmosphereMoistureError> {
             poll(cx)?;
-            let mut boundary = [MoistureFace::Sealed, MoistureFace::Sealed];
-            let mut sources = [None, None];
+            let mut boundary = std::array::from_fn(|_| ResolvedMoistureFace::default());
             for side in 0..2 {
                 if let Some(law) = &faces[side] {
-                    let (value, resolved) = law.at(temperature, rh)?;
-                    boundary[side] = MoistureFace::PrescribedDryBasis(value);
-                    sources[side] = Some(resolved);
+                    boundary[side] = law.resolve(temperature, rh)?;
                 }
             }
-            let (next, report) = slab.advance(dt_s, &boundary, transport, cx)?;
+            let (next, report) = slab.advance_resolved(dt_s, boundary, transport, cx)?;
+            let sources = report.surface_sorption.clone();
             let residual = self.saturation_mass_kg * rh + next.water_mass_kg() - total_water;
             if !residual.is_finite() {
                 return Err(invalid("coupled water residual is unrepresentable"));
