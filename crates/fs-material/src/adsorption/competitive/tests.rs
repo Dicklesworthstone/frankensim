@@ -36,7 +36,7 @@ pub(super) fn fixture(loadings:[f64;2])->(CompetitiveSolid,ClosedGasParcel,Therm
             claim(LANGMUIR_CAPACITY_PROPERTY,LANGMUIR_CAPACITY_DIMS,0.5),
             claim(LANGMUIR_REFERENCE_AFFINITY_PROPERTY,LANGMUIR_AFFINITY_DIMS,affinity),
             claim(LANGMUIR_DESORPTION_RATE_PROPERTY,LANGMUIR_RATE_DIMS,0.4),
-            claim("adsorbed_surface_diffusivity",Dims([2,0,-1,0,0,0]),if name=="A"{1e-8}else{2e-8}),
+            claim("adsorbed_vacancy_hopping_diffusivity",Dims([2,0,-1,0,0,0]),if name=="A"{1e-8}else{2e-8}),
         ]),point:point(300.0,1e5),selection:MaterialPropertySelection::SingleClaimOnly,reference_temperature_k:300.0 };
         laws.push(LangmuirAdsorbent::try_new(&catalog,species,source,AdsorptionCaloricBinding {
             dry_skeleton:dry.clone(),bound_adsorbate:bound,bound_enthalpy_offset_j_kg:hg-hb-heat/mass,

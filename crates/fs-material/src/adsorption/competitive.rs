@@ -30,6 +30,8 @@ use super::*;
 use std::collections::BTreeMap;
 
 pub mod sites;
+/// Source-bound isothermal diffusion of bound species through shared vacancies.
+pub mod surface;
 pub use sites::{CompetitiveSiteStep, backward_euler_sites};
 pub const MAX_COMPETITIVE_SPECIES: usize = 32;
 
@@ -319,7 +321,8 @@ pub fn advance_candidate<'catalog>(solid: &CompetitiveSolid, gas: &ClosedGasParc
     let turnover=sum(sites.gross_adsorption_mol.iter().chain(&sites.gross_desorption_mol).copied())?/solid.capacity_moles();
     let mut maximum_gross: f64=0.0;
     for (i,law) in solid.model.channels.iter().enumerate() {
-        let amount=sites.gross_adsorption_mol[i]*law.molar_mass();
+        let amount=finite(sites.gross_adsorption_mol[i]*law.molar_mass())?;
+        if sites.gross_adsorption_mol[i]>0.0 && amount==0.0 { return Err(invalid("competitive gross gas withdrawal underflow")); }
         let fraction=if amount==0.0 { 0.0 } else { amount/gas.species_mass_kg(&law.species)? };
         if !nonnegative(fraction) { return Err(AdsorptionError::InventoryLimit { gross_gas_fraction:fraction,site_turnover:turnover }); }
         maximum_gross=maximum_gross.max(fraction);
