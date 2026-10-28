@@ -4,12 +4,12 @@
 //! measured quantity it gates so a failure names the physics, not just
 //! the boolean.
 
-use fs_ga::{Motor, Se3, So3, Twist, Vec3};
+use fs_ga::{Motor, Se3, So3, So3Tangent, Twist, Vec3};
 use fs_time::se3::{
     DepSolveParams, RenormPolicy, Se3ClaimClass, Se3Error, dep_free_step, dep_momentum_adjoint,
     run_dep_free, se3_exp_step, se3_exp_step_renorm, se3_rigid_body_step, se3_space_exp_step,
 };
-use fs_time::{rigid_body_step, so3_body_exp_step, so3_space_exp_step};
+use fs_time::{rigid_body_momentum_step, rigid_body_step, so3_body_exp_step, so3_space_exp_step};
 
 const INERTIA: Vec3 = Vec3 {
     x: 1.0,
@@ -254,11 +254,145 @@ fn se3_008_rigid_body_step_tracks_so3_lane_and_conserves_free_velocity() {
         .rotate(twist2.linear)
         .expect("finite spatial velocity");
     let drift = (spatial_velocity - spatial0).norm();
-    println!("se3-008: spatial free-velocity drift {drift:e} over 2000 midpoint steps");
-    // Midpoint (order-2) integration: the drift is discretization
-    // error, not conservation-by-construction; gate it at the
-    // measured-order level rather than roundoff.
-    assert!(drift < 5e-6, "spatial velocity drift {drift:e}");
+    println!("se3-008: spatial free-velocity drift {drift:e} over 2000 split steps");
+    assert!(drift < 1e-10, "spatial velocity drift {drift:e}");
+}
+
+fn rotational_energy(momentum: Vec3, inertia: Vec3) -> f64 {
+    0.5 * (momentum.x * (momentum.x / inertia.x)
+        + momentum.y * (momentum.y / inertia.y)
+        + momentum.z * (momentum.z / inertia.z))
+}
+
+#[test]
+fn g0_split_free_rotation_conserves_spatial_momentum_and_bounds_energy() {
+    let inertia = Vec3::new(1.0, 1.5, 2.0);
+    let mut rotation = So3::exp(So3Tangent::new(Vec3::new(0.3, -0.6, 0.2))).unwrap();
+    let mut momentum = Vec3::new(0.4, 0.7, 1.1);
+    let spatial0 = rotation.rotate(momentum).unwrap();
+    let energy0 = rotational_energy(momentum, inertia);
+    let mut max_momentum_error = 0.0_f64;
+    let mut max_energy_error = 0.0_f64;
+    for _ in 0..20_000 {
+        (rotation, momentum) = rigid_body_momentum_step(rotation, momentum, inertia, 0.05).unwrap();
+        max_momentum_error =
+            max_momentum_error.max((rotation.rotate(momentum).unwrap() - spatial0).norm());
+        max_energy_error =
+            max_energy_error.max((rotational_energy(momentum, inertia) - energy0).abs());
+    }
+    println!(
+        "split rotation: spatial momentum {max_momentum_error:e}, energy envelope {max_energy_error:e}"
+    );
+    assert!(max_momentum_error < 5e-10);
+    assert!(max_energy_error < 1e-5 * energy0);
+}
+
+#[test]
+fn g1_split_axisymmetric_top_matches_exact_attitude_and_precession() {
+    let initial_rotation = So3::exp(So3Tangent::new(Vec3::new(-0.2, 0.5, 0.3))).unwrap();
+    let initial_momentum = Vec3::new(0.4, -0.6, 3.0);
+    let duration = 15.0;
+    for axis in 0..3 {
+        let mut moments = [2.0; 3];
+        moments[axis] = 1.0;
+        let inertia = Vec3::new(moments[0], moments[1], moments[2]);
+        let mut residual = [0.0; 3];
+        residual[axis] = 0.5 * [initial_momentum.x, initial_momentum.y, initial_momentum.z][axis];
+        let residual_rotation = So3::exp(So3Tangent::new(
+            Vec3::new(residual[0], residual[1], residual[2]).scale(duration),
+        ))
+        .unwrap();
+        let exact_rotation = initial_rotation
+            .compose(So3::exp(So3Tangent::new(initial_momentum.scale(0.5 * duration))).unwrap())
+            .unwrap()
+            .compose(residual_rotation)
+            .unwrap();
+        let exact_momentum = residual_rotation
+            .inverse()
+            .rotate(initial_momentum)
+            .unwrap();
+        let (mut rotation, mut momentum) = (initial_rotation, initial_momentum);
+        for _ in 0..100 {
+            (rotation, momentum) =
+                rigid_body_momentum_step(rotation, momentum, inertia, 0.15).unwrap();
+        }
+        assert!(rotation.body_minus(exact_rotation).unwrap().angular.norm() < 2e-11);
+        assert!((momentum - exact_momentum).norm() < 2e-11);
+    }
+}
+
+#[test]
+fn g3_split_rotation_is_reversible_and_second_order() {
+    let inertia = Vec3::new(1.0, 1.5, 2.0);
+    let initial_momentum = Vec3::new(0.4, 0.7, 1.1);
+    let integrate = |steps: usize| {
+        let (mut rotation, mut momentum) = (So3::identity(), initial_momentum);
+        for _ in 0..steps {
+            (rotation, momentum) =
+                rigid_body_momentum_step(rotation, momentum, inertia, 5.0 / steps as f64).unwrap();
+        }
+        (rotation, momentum)
+    };
+    let coarse = integrate(40);
+    let medium = integrate(80);
+    let fine = integrate(160);
+    let distance = |a: (So3, Vec3), b: (So3, Vec3)| {
+        a.0.body_minus(b.0).unwrap().angular.norm() + (a.1 - b.1).norm()
+    };
+    let ratio = distance(coarse, medium) / distance(medium, fine);
+    assert!((3.6..4.4).contains(&ratio), "second-order ratio {ratio}");
+    let (mut rotation, mut momentum) = fine;
+    for _ in 0..160 {
+        (rotation, momentum) =
+            rigid_body_momentum_step(rotation, momentum, inertia, -5.0 / 160.0).unwrap();
+    }
+    assert!(rotation.log().angular.norm() < 2e-12);
+    assert!((momentum - initial_momentum).norm() < 2e-12);
+}
+
+#[test]
+fn g0_free_se3_conserves_linear_and_total_angular_momentum() {
+    let inertia = Vec3::new(1.0, 1.5, 2.0);
+    let mass = 2.5;
+    let rotation = So3::exp(So3Tangent::new(Vec3::new(0.2, 0.4, -0.3))).unwrap();
+    let position = Vec3::new(2.0, -1.0, 3.0);
+    let velocity = Vec3::new(0.7, -0.2, 0.4);
+    let mut pose = Se3::from_parts(rotation, position).unwrap();
+    let mut twist = Twist::new(
+        Vec3::new(0.4, 0.7, 1.1),
+        rotation.inverse().rotate(velocity).unwrap(),
+    );
+    let linear0 = velocity.scale(mass);
+    let angular0 = rotation
+        .rotate(Vec3::new(
+            inertia.x * twist.angular.x,
+            inertia.y * twist.angular.y,
+            inertia.z * twist.angular.z,
+        ))
+        .unwrap()
+        + position.cross(linear0);
+    for _ in 0..5_000 {
+        (pose, twist) = se3_rigid_body_step(pose, twist, inertia, 0.02).unwrap();
+    }
+    let linear = pose.rotation().rotate(twist.linear).unwrap().scale(mass);
+    let angular = pose
+        .rotation()
+        .rotate(Vec3::new(
+            inertia.x * twist.angular.x,
+            inertia.y * twist.angular.y,
+            inertia.z * twist.angular.z,
+        ))
+        .unwrap()
+        + pose.translation().cross(linear);
+    let linear_error = (linear - linear0).norm();
+    let angular_error = (angular - angular0).norm();
+    let position_error = (pose.translation() - (position + velocity.scale(100.0))).norm();
+    println!(
+        "free SE(3): linear {linear_error:e}, total angular {angular_error:e}, position {position_error:e}"
+    );
+    assert!(linear_error < 1e-10);
+    assert!(angular_error < 1e-8);
+    assert!(position_error < 1e-9);
 }
 
 #[test]

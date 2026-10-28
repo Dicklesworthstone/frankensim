@@ -26,13 +26,13 @@ pub mod slabs;
 pub mod stiff;
 pub mod symplectic;
 
-pub use adaptive::{
-    AdaptiveError, AdaptiveReport, AdaptiveState, AdaptiveStatus, PiController,
-    rk45_adaptive, rk45_adaptive_checked, rk45_adaptive_controlled,
-};
 pub use adaptive::events::{
     DenseAdvance, DenseStep, EventAdvance, EventDirection, EventError, EventOccurrence,
     EventOptions, InitialEvent, rk45_dense_step, rk45_until_event,
+};
+pub use adaptive::{
+    AdaptiveError, AdaptiveReport, AdaptiveState, AdaptiveStatus, PiController, rk45_adaptive,
+    rk45_adaptive_checked, rk45_adaptive_controlled,
 };
 pub use fs_ga::{Se3, So3, Twist, Vec3};
 pub use galpha::{
@@ -41,7 +41,9 @@ pub use galpha::{
     OperatorFirstOrderGeneralizedAlpha, OperatorGeneralizedAlpha, SecondOrderProblem,
     SecondOrderState, TimeSolveError, first_order_galpha_step, galpha_step,
 };
-pub use lie::{LieStepError, rigid_body_step, so3_body_exp_step, so3_space_exp_step};
+pub use lie::{
+    LieStepError, rigid_body_momentum_step, rigid_body_step, so3_body_exp_step, so3_space_exp_step,
+};
 pub use se3::{
     BalanceReceipt, DepSolveParams, DepStepReceipt, RattleProjection, RenormPolicy, RenormReceipt,
     Se3ClaimClass, Se3Error, Se3FixtureDeclaration, Unconstrained, claim_for, dep_free_step,

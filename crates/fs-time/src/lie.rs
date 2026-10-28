@@ -68,15 +68,74 @@ pub fn so3_space_exp_step(rotation: So3, omega_space: Vec3, h: f64) -> Result<So
     Ok(rotation.space_plus(So3Tangent::new(omega_space.scale(h)))?)
 }
 
-/// One commutator-free CG2 midpoint step of a free rigid body with diagonal
-/// principal inertia. Euler's equations advance body angular velocity and the
-/// attitude uses the same midpoint velocity in a right/body group step.
+/// Second-order, symmetric free rotation with diagonal principal inertia.
+///
+/// Exact Hamiltonian subflows transport body momentum by the inverse of the
+/// same rotation that advances the attitude. Spatial angular momentum is
+/// therefore preserved to roundoff, with bounded symplectic energy error.
+/// Spherical and axisymmetric free rotation are exact up to roundoff. There
+/// are no allocations, nonlinear solves, or quaternion renormalizations.
 ///
 /// # Errors
 /// Refuses non-finite values, a zero step, or non-positive inertia.
 pub fn rigid_body_step(
     rotation: So3,
     omega_body: Vec3,
+    inertia: Vec3,
+    h: f64,
+) -> Result<(So3, Vec3), LieStepError> {
+    if ![omega_body.x, omega_body.y, omega_body.z]
+        .iter()
+        .all(|value| value.is_finite())
+    {
+        return Err(LieStepError::InvalidParameter {
+            context: "rigid-body angular velocity",
+        });
+    }
+    let momentum = Vec3::new(
+        inertia.x * omega_body.x,
+        inertia.y * omega_body.y,
+        inertia.z * omega_body.z,
+    );
+    let (next_rotation, next_momentum) = rigid_body_momentum_step(rotation, momentum, inertia, h)?;
+    let next_omega = Vec3::new(
+        next_momentum.x / inertia.x,
+        next_momentum.y / inertia.y,
+        next_momentum.z / inertia.z,
+    );
+    if ![next_omega.x, next_omega.y, next_omega.z]
+        .iter()
+        .all(|value| value.is_finite())
+    {
+        return Err(LieStepError::InvalidParameter {
+            context: "rigid-body angular velocity",
+        });
+    }
+    Ok((next_rotation, next_omega))
+}
+
+/// Momentum-state version of [`rigid_body_step`].
+///
+/// The input and output momentum are about the center of mass in the body's
+/// principal-axis frame. Keeping momentum as the state avoids repeated
+/// velocity-to-momentum conversions in long conservative trajectories.
+///
+/// For the median principal inertia `I0`, split
+/// `H = |L|²/(2 I0) + (1/Ia - 1/I0) La²/2 + (1/Ib - 1/I0) Lb²/2`.
+/// The spherical part commutes with both residual flows. A symmetric
+/// `a(h/2), b(h), a(h/2)` composition followed by the spherical flow is
+/// second order and time reversible. Each residual pairs `R <- R F` with
+/// `L <- F⁻¹ L`; the spherical flow rotates about `L` itself. This is the
+/// rigid-body Hamiltonian splitting of Dullweber, Leimkuhler and McLachlan
+/// (J. Chem. Phys. 107, 5840, 1997), with the commuting spherical part
+/// extracted to integrate symmetric tops exactly.
+///
+/// # Errors
+/// Refuses non-finite momentum, zero/non-finite step size, non-positive
+/// principal inertia, and non-representable rotation or momentum results.
+pub fn rigid_body_momentum_step(
+    mut rotation: So3,
+    mut momentum: Vec3,
     inertia: Vec3,
     h: f64,
 ) -> Result<(So3, Vec3), LieStepError> {
@@ -93,39 +152,61 @@ pub fn rigid_body_step(
             context: "rigid-body principal inertia",
         });
     }
-    if ![omega_body.x, omega_body.y, omega_body.z]
+    if ![momentum.x, momentum.y, momentum.z]
         .iter()
         .all(|value| value.is_finite())
     {
         return Err(LieStepError::InvalidParameter {
-            context: "rigid-body angular velocity",
+            context: "rigid-body angular momentum",
         });
     }
 
-    let torque_free = |omega: Vec3| -> Vec3 {
-        let momentum = Vec3::new(
-            inertia.x * omega.x,
-            inertia.y * omega.y,
-            inertia.z * omega.z,
-        );
-        Vec3::new(
-            momentum.y.mul_add(omega.z, -(momentum.z * omega.y)) / inertia.x,
-            momentum.z.mul_add(omega.x, -(momentum.x * omega.z)) / inertia.y,
-            momentum.x.mul_add(omega.y, -(momentum.y * omega.x)) / inertia.z,
-        )
+    let moments = [inertia.x, inertia.y, inertia.z];
+    let mut axes = [0, 1, 2];
+    axes.sort_unstable_by(|&a, &b| moments[a].total_cmp(&moments[b]));
+    let reference = moments[axes[1]];
+    let a = axes[0];
+    let b = axes[2];
+    let mut axis_step = |axis: usize, step: f64| -> Result<(), LieStepError> {
+        let component = [momentum.x, momentum.y, momentum.z][axis];
+        let angle = step * (component / moments[axis] - component / reference);
+        if angle == 0.0 {
+            return Ok(());
+        }
+        let mut angular = [0.0; 3];
+        angular[axis] = angle;
+        let increment = So3::exp(So3Tangent::new(Vec3::new(
+            angular[0], angular[1], angular[2],
+        )))?;
+        momentum = increment.inverse().rotate(momentum)?;
+        rotation = rotation.compose(increment)?;
+        Ok(())
     };
-    let first_slope = torque_free(omega_body);
-    let midpoint = Vec3::new(
-        (0.5 * h).mul_add(first_slope.x, omega_body.x),
-        (0.5 * h).mul_add(first_slope.y, omega_body.y),
-        (0.5 * h).mul_add(first_slope.z, omega_body.z),
-    );
-    let second_slope = torque_free(midpoint);
-    let next_omega = Vec3::new(
-        h.mul_add(second_slope.x, omega_body.x),
-        h.mul_add(second_slope.y, omega_body.y),
-        h.mul_add(second_slope.z, omega_body.z),
-    );
-    let next_rotation = so3_body_exp_step(rotation, midpoint, h)?;
-    Ok((next_rotation, next_omega))
+    if moments[a] == reference {
+        axis_step(b, h)?;
+    } else if moments[b] == reference {
+        axis_step(a, h)?;
+    } else {
+        axis_step(a, 0.5 * h)?;
+        axis_step(b, h)?;
+        axis_step(a, 0.5 * h)?;
+    }
+    rotation = so3_body_exp_step(
+        rotation,
+        Vec3::new(
+            momentum.x / reference,
+            momentum.y / reference,
+            momentum.z / reference,
+        ),
+        h,
+    )?;
+    if ![momentum.x, momentum.y, momentum.z]
+        .iter()
+        .all(|value| value.is_finite())
+    {
+        return Err(LieStepError::InvalidParameter {
+            context: "rigid-body angular momentum",
+        });
+    }
+    Ok((rotation, momentum))
 }

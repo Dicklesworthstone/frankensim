@@ -33,8 +33,16 @@ where claimed below.
   representation. `lie::{so3_body_exp_step, so3_space_exp_step}` name the
   right/body update `R Exp(h ω_body)` and left/space update
   `Exp(h ω_space) R` explicitly. `lie::rigid_body_step(R, ω, I, h)`
-  advances torque-free Euler equations via midpoint RK2 and performs the CG2
-  right/body attitude update at midpoint ω; it returns `(R′, ω′)`.
+  advances free rotation with a symmetric Hamiltonian splitting and returns
+  `(R′, ω′)`. `rigid_body_momentum_step(R, L, I, h)` exposes body angular
+  momentum directly, avoiding repeated velocity/momentum conversions.
+  Each exact subflow pairs the attitude rotation with its inverse acting on
+  body momentum, preserving spatial angular momentum to roundoff. Extracting
+  the commuting spherical Hamiltonian at the median principal inertia makes
+  spherical and axisymmetric tops exact; asymmetric tops have second-order,
+  reversible symplectic evolution with a tested bounded energy envelope.
+  Both APIs allocate nothing, iterate no nonlinear solve, and do not
+  renormalize the stored attitude; invalid/non-finite states refuse.
 - `galpha::GeneralizedAlpha::new(m, c, k, n, h, rho_inf)` +
   `galpha_step(ga, q, v, a, f_next)` — Chung–Hulbert: αm = (2ρ−1)/(ρ+1),
   αf = ρ/(ρ+1), γ = ½ − αm + αf, β = ¼(1 − αm + αf)²; one prefactored
@@ -218,9 +226,12 @@ where claimed below.
   drift-controlled versor renormalization gated by `RenormPolicy` and
   returns a `RenormReceipt` (defect before, whether renormalized,
   reported drift) — drift is ledger fodder, never silently absorbed.
-  `se3_rigid_body_step` — free-body Euler equations + body transport
-  of the spatially constant velocity, midpoint RK2 in the algebra with
-  one exp update at the midpoint twist. `dep_free_step` — discrete
+  `se3_rigid_body_step` uses the same free-rotation splitting and advances the
+  center of mass with its constant spatial velocity. The pose origin must
+  be the center of mass and inertia is diagonal in the body principal frame.
+  Body linear velocity is transported through the accepted attitude, keeping
+  linear and total angular momentum to roundoff instead of integrating a
+  separate drifting transport ODE. `dep_free_step` — discrete
   Euler–Poincaré free-body step in body-momentum form (fixed-point
   solve controlled by `DepSolveParams`, per-step `DepStepReceipt`);
   spatial angular momentum is conserved EXACTLY by construction.
@@ -473,7 +484,7 @@ budget-pie localization, adaptive-vs-uniform cost, G3 repartition
 envelope, activation gate, and fail-fast validation for invalid slab
 counts/substeps/tolerances/budgets, malformed public ledger entries,
 and non-finite couplings.
-`tests/se3.rs` (bead 3ol0, 10 cases, printed measurements on numerical gates):
+`tests/se3.rs` (bead 3ol0, printed measurements on numerical gates):
 SO(3)-lane agreement for pure rotations (se3-001); constant-twist
 one-parameter composition exactness (se3-002); double-cover
 canonicalization determinism, `M`/`−M` bit-equality, and bitwise
@@ -485,11 +496,15 @@ honesty fixture — a damped run demotes to `MeasuredOnly` with nonzero
 measured drift despite converged solves (se3-006); 10⁵-step
 renormalization receipts bounding the final unit defect (se3-007);
 SE(3) rigid-body agreement with the SO(3) lane and spatial
-free-velocity drift at the measured-order level (se3-008); explicit
+free-velocity conservation to roundoff (se3-008); explicit
 body/right versus adjoint-related space/left equivalence for both groups plus
 bitwise replay of all four stepping lanes (se3-009); invalid solver controls
 and out-of-domain damping refuse even when a zero-step horizon could otherwise
-bypass the step loop (se3-010).
+bypass the step loop (se3-010). G0/G1/G3 splitting regressions cover a
+20,000-step asymmetric top's spatial momentum and bounded energy, exact
+axisymmetric precession for each principal axis, second-order refinement and
+time reversal, and a translating/rotating body's linear momentum, total
+angular momentum, and analytic center-of-mass trajectory.
 `tests/hybrid.rs` (RE.Z1; G0/G3/G4/G5): relay-chatter and positive-dwell
 microcases; mode/event input-order and schema replay; model-version identity
 sensitivity; event-cap and numerical-trace theorem falsifiers; finite

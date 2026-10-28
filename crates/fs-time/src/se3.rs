@@ -196,11 +196,14 @@ fn validate_angular_step(omega: Vec3, h: f64) -> Result<(), Se3Error> {
     }
 }
 
-/// Free rigid-body dynamics on SE(3): Euler's equations for the
-/// angular velocity plus the body-frame transport of a spatially
-/// constant linear velocity (`v̇_b = v_b × ω`), midpoint (RK2) in the
-/// algebra and one exp-map motor update at the midpoint twist.
-/// Returns the canonical motor and the updated twist.
+/// Free rigid-body dynamics about its center of mass on SE(3).
+///
+/// Rotation uses the symmetric Hamiltonian split in
+/// [`crate::lie::rigid_body_step`]. Translation follows the constant spatial
+/// velocity exactly; body velocity is transported by the accepted rotation
+/// instead of independently integrating `v̇_b = v_b × ω`. Both spatial linear
+/// and angular momentum are preserved to roundoff. Returns the canonical
+/// motor and updated body twist. The pose origin must be the center of mass.
 pub fn se3_rigid_body_step(
     pose: Se3,
     twist: Twist,
@@ -213,52 +216,25 @@ pub fn se3_rigid_body_step(
             context: "rigid-body twist or nonzero step size",
         });
     }
-    let torque_free = |omega: Vec3| -> Vec3 {
-        let momentum = Vec3::new(
-            inertia.x * omega.x,
-            inertia.y * omega.y,
-            inertia.z * omega.z,
-        );
-        Vec3::new(
-            momentum.y.mul_add(omega.z, -(momentum.z * omega.y)) / inertia.x,
-            momentum.z.mul_add(omega.x, -(momentum.x * omega.z)) / inertia.y,
-            momentum.x.mul_add(omega.y, -(momentum.y * omega.x)) / inertia.z,
-        )
-    };
-    let velocity_derivative = |linear: Vec3, angular: Vec3| -> Vec3 {
-        // v̇_b = v_b × ω  (spatially constant free velocity).
-        linear.cross(angular)
-    };
-    let first_angular_slope = torque_free(twist.angular);
-    let first_linear_slope = velocity_derivative(twist.linear, twist.angular);
-    let midpoint = Twist::new(
-        Vec3::new(
-            (0.5 * h).mul_add(first_angular_slope.x, twist.angular.x),
-            (0.5 * h).mul_add(first_angular_slope.y, twist.angular.y),
-            (0.5 * h).mul_add(first_angular_slope.z, twist.angular.z),
-        ),
-        Vec3::new(
-            (0.5 * h).mul_add(first_linear_slope.x, twist.linear.x),
-            (0.5 * h).mul_add(first_linear_slope.y, twist.linear.y),
-            (0.5 * h).mul_add(first_linear_slope.z, twist.linear.z),
-        ),
+    let velocity_space = pose.rotation().rotate(twist.linear)?;
+    let (rotation, angular) =
+        crate::lie::rigid_body_step(pose.rotation(), twist.angular, inertia, h).map_err(
+            |error| match error {
+                crate::lie::LieStepError::Group(error) => Se3Error::Group(error),
+                crate::lie::LieStepError::InvalidParameter { context } => {
+                    Se3Error::InvalidParameter { context }
+                }
+            },
+        )?;
+    let position = pose.translation();
+    let next_position = Vec3::new(
+        h.mul_add(velocity_space.x, position.x),
+        h.mul_add(velocity_space.y, position.y),
+        h.mul_add(velocity_space.z, position.z),
     );
-    let second_angular_slope = torque_free(midpoint.angular);
-    let second_linear_slope = velocity_derivative(midpoint.linear, midpoint.angular);
-    let next = Twist::new(
-        Vec3::new(
-            h.mul_add(second_angular_slope.x, twist.angular.x),
-            h.mul_add(second_angular_slope.y, twist.angular.y),
-            h.mul_add(second_angular_slope.z, twist.angular.z),
-        ),
-        Vec3::new(
-            h.mul_add(second_linear_slope.x, twist.linear.x),
-            h.mul_add(second_linear_slope.y, twist.linear.y),
-            h.mul_add(second_linear_slope.z, twist.linear.z),
-        ),
-    );
-    let next_pose = se3_exp_step(pose, midpoint, h)?;
-    Ok((next_pose, next))
+    let next_linear = rotation.inverse().rotate(velocity_space)?;
+    let next_pose = Se3::from_parts(rotation, next_position)?;
+    Ok((next_pose, Twist::new(angular, next_linear)))
 }
 
 /// Solve controls for the variational fixed point.
