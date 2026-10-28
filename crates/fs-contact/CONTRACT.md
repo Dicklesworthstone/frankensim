@@ -595,3 +595,37 @@ and any slip-arrest event splitting. No finite-patch storage, heat partition,
 unequal static/kinetic coefficients, general anisotropic or multicontact
 friction, calibrated material authority, or certified nonintersection is
 claimed by these two primitives.
+
+## Simultaneous non-associated normal/Coulomb point impacts
+
+`frictional_multicontact::solve_frictional_contacts` solves the complete
+normal/tangent Delassus coupling in one Newton–Krylov natural-map problem.
+Separate nonnegative normal complementarity and tangential disk projection
+implement Signorini–Coulomb without the artificial normal dilation of an
+associated cone quadratic. Newton restitution and caller-owned nonnegative
+normal velocity targets remain explicit, distinct laws. Initial penetration
+refuses, and geometrically inactive contacts receive no impulse.
+
+Stable contact identities canonicalize assembly and reduction. Independent
+normal primal/dual feasibility, friction-cone, complementarity, sliding and
+tangential duality checks follow the nonlinear solve. Actual midpoint contact
+work then gates global passivity; a locally valid restitution candidate that
+creates assembled energy is refused. All impact loss remains unallocated
+mechanical loss, not an automatic thermal or friction-heat source.
+
+This bounded owner admits numerically SPD active rows (at most 21 contacts).
+A positive weighted contraction witness for the exact normal/disk map is
+required for determined numerical authority. Distinct independently checked
+passive roots return `Nonunique`; a checked root without the sufficient
+witness returns `UnresolvedDeterminacy`. Rank-deficient manifolds and a complete
+Painleve existence classifier remain outside this scope. Configuration
+stepping, CCD, contact manifold discovery and a complete Moreau–Jean integrator
+are separate owners.
+
+Seven native physical test groups cover analytic oblique coupling, 3D sticking,
+explicit target/restitution semantics, shared-body simultaneous response and
+permutation/tangent-frame invariance, the existing frictionless oracle,
+adversarial global energy injection, independently derived multiple Coulomb
+roots, and numerical/geometry/cancellation refusal. The finite-difference inner
+forcing floor is 1e-6; the 1e-12 outer target and independent physical gates are
+unchanged.

@@ -36,6 +36,8 @@ pub mod impact;
 
 /// Simultaneous frictionless normal impacts with assembled passivity admission.
 pub mod multicontact;
+/// Simultaneous normal/Coulomb events with complete contact-space coupling.
+pub mod frictional_multicontact;
 
 /// Ordered fs-matdb interface-card binding for generic contact consumers.
 pub mod interface_binding;
