@@ -449,6 +449,31 @@ struct RelaxationStorage {
 }
 
 impl Storage for RelaxationStorage {
+    fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], mid: &[f64]) -> Option<f64> {
+        let mut remainder = self.base.midpoint_energy_remainder(
+            &a[..self.base_dim],
+            &b[..self.base_dim],
+            &mid[..self.base_dim],
+        )?;
+        // Every arm is quadratic in the COMPLETE state, including its memory.
+        // For e = coupling.x - z, the midpoint remainder is
+        // (e(b)-e(a)) * (e(a)+e(b)-2*e(mid)) / 2. Form both factors
+        // from coordinate increments; large stored material energy must not
+        // erase the base's small nonlinear restoring force or energy change.
+        // The second factor retains rounding of the represented midpoint.
+        for (arm, row) in self.couplings.iter().enumerate() {
+            let z = self.base_dim + arm;
+            let mut change = -(b[z] - a[z]);
+            let mut offset = -((a[z] - mid[z]) + (b[z] - mid[z]));
+            for (i, &coupling) in row.iter().enumerate() {
+                change += coupling * (b[i] - a[i]);
+                offset += coupling * ((a[i] - mid[i]) + (b[i] - mid[i]));
+            }
+            remainder += (0.5 * change) * offset;
+        }
+        Some(remainder)
+    }
+
     fn quadratic_part(&self) -> Option<linear_exact::QuadraticPart> {
         let base = self.base.quadratic_part()?;
         let n = self.base_dim.checked_add(self.couplings.len())?;

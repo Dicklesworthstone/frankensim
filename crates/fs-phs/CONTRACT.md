@@ -190,6 +190,16 @@ inventoried and measured in fs-couple `tests/integrator_warping_audit.rs`.
   second-order convergence, and the hereditary ramp integral through the actual
   stress port. The same step and interconnection machinery applies. No material
   identification, frequency-domain validity or thermal evolution is inferred.
+  The composed storage keeps the original nonlinear storage's stable midpoint
+  remainder and adds every Maxwell arm's exact quadratic remainder directly
+  from coordinate increments, including represented-midpoint rounding. This
+  preserves small restoring forces and material work beside a large stored
+  energy or arbitrary energy datum; no extra state or hot-path allocation is
+  introduced. An unavailable base remainder retains the original fallback.
+  `fs-nlmodal/tests/relaxation.rs` checks identical nonlinear motion and work
+  after adding a 1e24 J energy datum, nested material histories, and independent
+  polarized stored-energy, force-work and Maxwell/Kelvin heat identities.
+
 - `discrete_gradient` — the PINNED Gonzalez midpoint formula (order
   2): satisfies `dg . (b - a) = H(b) - H(a)` identically.
   `Storage::midpoint_energy_remainder` optionally supplies a cancellation-stable
