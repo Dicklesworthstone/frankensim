@@ -10,11 +10,16 @@
 //!
 //! These inputs are piecewise constant over the requested step. A caller must
 //! refine changing nozzle states, gravity, drag, guidance or environment. This
-//! module supplies no atmosphere, propellant chemistry, attitude, staging,
-//! rotating-frame force or empirical vehicle parameters.
+//! point-translation owner supplies no atmosphere, propellant chemistry,
+//! rotating-frame force or empirical vehicle parameters. Native attitude,
+//! rotational exhaust flux and staging are provided by [`rigid`].
 
 use crate::Vec3;
 use fs_math::det;
+
+/// Native rigid attitude, rotational exhaust flux and conservative staging.
+#[path = "rocket/rigid.rs"]
+pub mod rigid;
 
 /// Inertial-frame point-vehicle state in SI units.
 #[derive(Clone, Copy, Debug, PartialEq)]

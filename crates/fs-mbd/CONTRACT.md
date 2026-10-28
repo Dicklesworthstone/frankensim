@@ -748,9 +748,10 @@ mass, with zero engine thrust afterward. The operation is deterministic and
 allocation-free, validates representability and polls cancellation before
 publication. G1/G3 tests cover independent analytic velocity/position,
 constant-force integration, burnout, split steps, tiny burns, frame changes
-and Galilean invariance. The module supplies no attitude, atmosphere,
-aerodynamic coefficients, staging or accuracy guarantee for forcing that
-changes within a step.
+and Galilean invariance. This point-vehicle operation supplies no atmosphere or aerodynamic
+coefficients and no accuracy guarantee for forcing that changes within a step.
+The separate `rocket::rigid` extension below adds native attitude and staging
+under explicit mass-distribution and exhaust-momentum assumptions.
 
 ## Complete finite-mass two-sphere trajectories
 
@@ -813,3 +814,42 @@ The original native impact and force/contact/drift owners now consume the contac
 Three new native groups verify sticking, exact Coulomb threshold and sliding; oblique two-axis circular friction and both pressure moments; canonical contact permutation; and sustained load/trajectory refinement. The latter advances loads below, at and above threshold at 8, 16 and 32 steps over one second (168 accepted steps), checking whole-cube path separation, actual body momentum and work. Sliding position errors are 0.00625, 0.003125 and 0.0015625 m against the continuum reference, halving with the original first-order time step.
 
 All eleven native impact groups, all ten gravity-aware sphere groups and all four existing contact-step groups pass against the frozen new core. The old duplicate-contact refusal fixture now uses different friction coefficients on the unresolved shared reaction, preserving a genuine ambiguous-motion refusal instead of rejecting determined motion merely because impulses are redundant. These focused source-selected native checks do not establish a full Cargo/DSR gate. Existing support-work restrictions, fixed contact-law scope and unallocated impact-loss semantics remain in force.
+
+
+## Native rigid rocket attitude and conservative staging
+
+`rocket::rigid` composes the original analytic variable-mass translation with
+native `UnitQuaternion`, `MassProperties`, `RigidBodyState` and the existing
+momentum-preserving free-rotation map. Its mass model has a fixed common COM,
+shared principal axes, and inertia linear in remaining propellant. Dry and
+propellant principal moments are checked for physical admissibility.
+
+Body-directed equivalent exhaust velocity supplies total thrust, including
+pressure thrust once. Its application arm supplies the matching thrust torque.
+A separately declared diagonal co-rotating exhaust moment and optional swirl
+account for exported spin; neither is silently inferred from the thrust arm
+or reservoir inertia. Symmetric torque/outflow kicks surround free rotation
+at midpoint inertia, and the original analytic translation uses midpoint
+attitude. The smooth coupled map is second order, bounded by caller-owned
+substeps, allocation-free, and segmented at actual burnout. Results retain
+scalar axial impulse separately from directed world impulse, expelled-mass
+closure and world angular-momentum accounting. Cancellation publishes nothing.
+
+`rocket::rigid::staging` returns both separated rigid bodies. It admits the
+specified child masses, COMs and full parallel-axis inertia against the parent,
+applies equal-and-opposite internal recoil, and reports actual mass, linear
+momentum, orbital-plus-spin angular momentum and separation-work residuals.
+Children use the declared shared principal-axis convention; incompatible
+geometry or nonrepresentable bookkeeping is refused.
+
+These operations do not infer internal relative-flow momentum/Coriolis
+transport, slosh, shifting COM/principal axes or arbitrary outlet inertia
+tensors. Prescribed equivalent thrust is not a complete internal-fluid model,
+and constant inputs over one step do not imply exact varying-force flight.
+
+Native verification with the pinned compiler used the actual dynamics core
+and actual `fs_math` dependency. All 17 focused rocket tests passed (nine new
+rigid/staging tests and eight prior translation tests). Checks include analytic
+translation/burnout, free asymmetric rotation, co-rotating mass-loss spin,
+thrust-arm torque, measured second-order position/velocity/attitude refinement,
+frame and Galilean invariance, staging momentum/work and atomic refusals.
