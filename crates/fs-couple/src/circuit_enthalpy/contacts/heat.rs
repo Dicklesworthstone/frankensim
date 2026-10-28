@@ -183,6 +183,18 @@ impl<'a> MaterialHeatNetwork<'a> {
 }
 
 impl PreparedHeatNetwork<'_, '_> {
+    // Native field/circuit consumers may resolve ordinary graph resistors but
+    // have no series-contact owner. Never silently drop electrical interfaces.
+    pub(crate) fn field_material_network(
+        &self,
+    ) -> Result<&crate::circuit_enthalpy::material::MaterialNetwork<'_>, HeatNetworkError> {
+        if !self.network.electrical.contacts.is_empty() {
+            return Err(HeatNetworkError::Invalid(
+                "field circuits require their own electrical-contact work and heat owner"));
+        }
+        Ok(self.network.electrical.bulk)
+    }
+
     // Spatial electrical consumers retain this exact original material assembly.
     // A graph resistor/contact must not disappear when no graph is being stepped.
     pub(crate) fn thermal_material_network(

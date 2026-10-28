@@ -35,8 +35,8 @@ pub use super::magnetic::{
 
 /// Original caloric/conductive samples and every magnetic region's source.
 #[derive(Clone, Debug, PartialEq)]
-pub struct WindingThermalSample {
-    pub network: MaterialNetworkSample,
+pub struct WindingThermalSample<S = MaterialNetworkSample> {
+    pub network: S,
     pub magnetic: Vec<MagneticThermalSample>,
     /// Source-derived field entropy and internal energy when magnetic thermal
     /// feedback is active. Ordinary fixed-magnetic steps leave this absent.

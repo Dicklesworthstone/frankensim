@@ -8,6 +8,8 @@
 
 /// Reversible magnetic temperature feedback on this same circuit/field solve.
 pub mod thermal;
+// Full sourced thermal contacts and radiation enter this same field/circuit solve.
+mod heat;
 
 use super::{
     CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, DrivenCoefficients,
@@ -17,7 +19,10 @@ use super::{
 use crate::circuit_enthalpy::magnetic::caloric::{
     MagneticEnergyCell, MagneticThermalLaw, PreparedMagneticCaloric,
 };
-use crate::circuit_enthalpy::material::{CellResistor, MaterialNetwork};
+use crate::circuit_enthalpy::{
+    CircuitThermalCoefficients,
+    material::{CellResistor, MaterialNetwork, MaterialNetworkSample},
+};
 use fs_em::planar::nonlinear::IsotropicMagneticMaterial;
 use fs_em::{
     planar::eddy::EddyConductor,
@@ -37,19 +42,19 @@ use std::{cell::RefCell, collections::BTreeMap};
 use thermal::MagneticCaloricBalance;
 
 /// The circuit, field and finite thermal histories accepted over one interval.
-pub struct NonlinearWindingEnthalpyCandidate<'t, 'm> {
+pub struct NonlinearWindingEnthalpyCandidate<'t, 'm, S = MaterialNetworkSample> {
     thermal: DepositionSimulation<'t>,
     circuit: NonlinearWindingCircuit<'m>,
-    report: CircuitEnthalpyReport<WindingThermalSample, NonlinearWindingStep>,
+    report: CircuitEnthalpyReport<WindingThermalSample<S>, NonlinearWindingStep>,
 }
-impl<'t, 'm> NonlinearWindingEnthalpyCandidate<'t, 'm> {
+impl<'t, 'm, S> NonlinearWindingEnthalpyCandidate<'t, 'm, S> {
     pub fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
     pub fn circuit(&self) -> &NonlinearWindingCircuit<'m> {
         &self.circuit
     }
-    pub fn report(&self) -> &CircuitEnthalpyReport<WindingThermalSample, NonlinearWindingStep> {
+    pub fn report(&self) -> &CircuitEnthalpyReport<WindingThermalSample<S>, NonlinearWindingStep> {
         &self.report
     }
     /// Independent physical internal-energy balance for a magnetic thermal
@@ -64,7 +69,7 @@ impl<'t, 'm> NonlinearWindingEnthalpyCandidate<'t, 'm> {
     ) -> (
         DepositionSimulation<'t>,
         NonlinearWindingCircuit<'m>,
-        CircuitEnthalpyReport<WindingThermalSample, NonlinearWindingStep>,
+        CircuitEnthalpyReport<WindingThermalSample<S>, NonlinearWindingStep>,
     ) {
         (self.thermal, self.circuit, self.report)
     }
@@ -226,10 +231,67 @@ impl WindingThermalNetwork<'_> {
                 || (*cancel.borrow_mut())(),
             )
             .map_err(material)?;
+        self.step_nonlinear_resolved(
+            thermal,
+            target_s,
+            circuit,
+            external_inputs,
+            graph_material.map(|(resistors, _)| resistors),
+            magnetic_thermal,
+            controls,
+            winding_controls,
+            initial_energy_increments_j,
+            |state| {
+                prepared
+                    .resolve(state, || (*cancel.borrow_mut())())
+                    .map_err(material)
+            },
+            |sample| sample,
+            &cancel,
+        )
+    }
+
+    // One native field/circuit/enthalpy transaction for both bulk conduction
+    // and complete sourced contact/radiation heat. Only the source report varies.
+    #[allow(clippy::too_many_arguments)]
+    fn step_nonlinear_resolved<'t, 'm, S>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        circuit: &NonlinearWindingCircuit<'m>,
+        external_inputs: &[f64],
+        graph_resistors: Option<&[CellResistor]>,
+        magnetic_thermal: Option<(&[MagneticThermalLaw], WeightedAssemblyLimits)>,
+        controls: CircuitEnthalpySolve,
+        winding_controls: NonlinearWindingControls,
+        initial_energy_increments_j: &[f64],
+        resolve: impl Fn(&DepositionSimulation<'_>) -> Result<CircuitThermalCoefficients<S>, Error>,
+        sample: impl Fn(&S) -> &MaterialNetworkSample,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<NonlinearWindingEnthalpyCandidate<'t, 'm, S>, Error> {
+        check(cancel)?;
+        crate::circuit_enthalpy::admit_driver_unknowns(
+            thermal,
+            controls,
+            initial_energy_increments_j,
+        )?;
+        if circuit.time_s().to_bits() != thermal.time_s().to_bits()
+            || circuit.field().time_s().to_bits() != thermal.time_s().to_bits()
+            || self.cells.len() != thermal.cells().len()
+        {
+            return Err(invalid(
+                "matching nonlinear field/circuit/thermal clocks and complete cell bindings required",
+            ));
+        }
+        if graph_resistors.is_none() && !circuit.graph_resistor_materials().is_empty() {
+            return Err(invalid(
+                "source-bound graph resistors require their complete thermal material bindings",
+            ));
+        }
         let mut conductors = BTreeMap::new();
         let mut core_regions = BTreeMap::new();
         for source in circuit.field().conductors() {
-            check(&cancel)?;
+            check(cancel)?;
             if conductors
                 .insert(source.triangle, &source.conductor)
                 .is_some()
@@ -241,7 +303,7 @@ impl WindingThermalNetwork<'_> {
             }
         }
         for source in circuit.conductors() {
-            check(&cancel)?;
+            check(cancel)?;
             if conductors
                 .insert(source.triangle, &source.conductor)
                 .is_some()
@@ -257,11 +319,11 @@ impl WindingThermalNetwork<'_> {
             circuit.field().problem().mesh(),
             &triangles,
             circuit.graph(),
-            &cancel,
+            cancel,
         )?;
-        if graph_material.is_some()
-            && (network.resistors.len() != routes.graph.len()
-                || network.resistors.iter().any(|source| {
+        if graph_resistors.is_some()
+            && (graph_resistors.unwrap_or(&[]).len() != routes.graph.len()
+                || graph_resistors.unwrap_or(&[]).iter().any(|source| {
                     routes.graph.get(&source.destination.branch) != Some(&source.destination.cell)
                         || routes
                             .magnetic
@@ -313,17 +375,15 @@ impl WindingThermalNetwork<'_> {
                 field.magnetic_flux_density_t(),
                 bindings,
                 &routes.magnetic,
-                &cancel,
+                cancel,
             )?)
         } else {
             None
         };
-        let accepted = prepared
-            .resolve(thermal, || (*cancel.borrow_mut())())
-            .map_err(material)?;
-        if graph_material.is_some() {
+        let accepted = resolve(thermal)?;
+        if graph_resistors.is_some() {
             for source in &accepted.resistors {
-                check(&cancel)?;
+                check(cancel)?;
                 let Some((_, _, Branch::Resistor { ohms })) =
                     circuit.graph().branches.get(source.branch)
                 else {
@@ -363,7 +423,7 @@ impl WindingThermalNetwork<'_> {
                         &conductors,
                         sample,
                         &routes.magnetic,
-                        &cancel,
+                        cancel,
                     )
                 } else {
                     layout.nonlinear_materials_at(
@@ -372,13 +432,13 @@ impl WindingThermalNetwork<'_> {
                         &conductors,
                         sample,
                         &routes.magnetic,
-                        &cancel,
+                        cancel,
                     )
                 }
             };
-        let (initial, initial_magnetic) = resolve_materials(thermal, &accepted.source)?;
+        let (initial, initial_magnetic) = resolve_materials(thermal, sample(&accepted.source))?;
         if let Some(caloric) = &caloric {
-            caloric.validate_sources(thermal, &initial_magnetic, &cancel)?;
+            caloric.validate_sources(thermal, &initial_magnetic, cancel)?;
         }
         if initial.len() != conductors.len()
             || initial.iter().any(|(triangle, source)| {
@@ -401,18 +461,16 @@ impl WindingThermalNetwork<'_> {
             controls,
             initial_energy_increments_j,
             |state, _remaining| {
-                check(&cancel)?;
-                let mut coefficients = prepared
-                    .resolve(state, || (*cancel.borrow_mut())())
-                    .map_err(material)?;
-                let (sources, magnetic) = resolve_materials(state, &coefficients.source)?;
+                check(cancel)?;
+                let mut coefficients = resolve(state)?;
+                let (sources, magnetic) = resolve_materials(state, sample(&coefficients.source))?;
                 if let Some(caloric) = &caloric {
-                    caloric.validate_sources(state, &magnetic, &cancel)?;
+                    caloric.validate_sources(state, &magnetic, cancel)?;
                 }
                 let mut core = Vec::new();
                 let mut winding = Vec::new();
                 for (triangle, conductor) in sources {
-                    check(&cancel)?;
+                    check(cancel)?;
                     if let Some(&region) = core_regions.get(&triangle) {
                         core.push(EddyConductor {
                             triangle,
@@ -426,7 +484,7 @@ impl WindingThermalNetwork<'_> {
                         });
                     }
                 }
-                let driven = if graph_material.is_some() {
+                let driven = if graph_resistors.is_some() {
                     circuit
                         .with_graph_resistors(
                             coefficients
@@ -485,7 +543,7 @@ impl WindingThermalNetwork<'_> {
                         &mut coefficients.sources_w,
                         target_s - thermal.time_s(),
                         controls.total_energy_tolerance_j,
-                        &cancel,
+                        cancel,
                     )?)
                 } else {
                     None
@@ -517,7 +575,7 @@ impl WindingThermalNetwork<'_> {
         )?;
         report.source.magnetic_balance =
             thermal::balance(&report, controls.total_energy_tolerance_j)?;
-        check(&cancel)?;
+        check(cancel)?;
         Ok(NonlinearWindingEnthalpyCandidate {
             thermal,
             circuit,

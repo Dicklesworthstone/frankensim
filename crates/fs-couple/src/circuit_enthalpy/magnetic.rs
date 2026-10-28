@@ -58,6 +58,7 @@ pub struct MagneticThermalSample {
 #[derive(Debug)]
 pub enum MagneticThermalError {
     Material(MaterialNetworkError),
+    Heat(super::contacts::heat::HeatNetworkError),
     Conductor(ConductorError),
     Winding(OhmicWindingError),
     NonlinearWinding(fs_em::winding::nonlinear::NonlinearWindingError),

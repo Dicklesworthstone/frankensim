@@ -3,6 +3,8 @@
 //! constitutive data exercise coupling; they are not measured coil validation.
 
 use super::*;
+#[path = "heat.rs"]
+mod heat;
 #[path = "../../../fs-em/tests/winding_ohmic/common.rs"]
 mod linear;
 
@@ -210,7 +212,7 @@ fn reference(i0: f64, t0: f64, slope: f64) -> Reference {
         (2.0 * DEPTH * b0 + END_H * i0 + DT * VOLTAGE)
             / (2.0 * DEPTH * mu(t, slope) + END_H + DT * resistance(t))
     };
-    let numerical = |t, i| {
+    let numerical = |t: f64, i: f64| {
         VOLUME * (mu(t, slope) * i - b0).powi(2) / (2.0 * mu(t, slope))
             + 0.5 * END_H * (i - i0).powi(2)
     };

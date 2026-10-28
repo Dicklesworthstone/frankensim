@@ -125,8 +125,8 @@ pub(super) fn materials_at(
     )
 }
 
-pub(super) fn balance(
-    report: &CircuitEnthalpyReport<WindingThermalSample, NonlinearWindingStep>,
+pub(super) fn balance<S>(
+    report: &CircuitEnthalpyReport<WindingThermalSample<S>, NonlinearWindingStep>,
     tolerance_j: f64,
 ) -> Result<Option<MagneticCaloricBalance>, Error> {
     let Some(source) = &report.source.magnetic_caloric else {
