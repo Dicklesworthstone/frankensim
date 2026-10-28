@@ -28,12 +28,14 @@ use super::super::{SolveRefusal, Workload, airflow, bad, buoyancy, json_string,
 
 mod convection;
 mod enclosure;
+mod pointwise;
 mod prescribed_controls;
 mod robin_controls;
 pub(super) mod material_controls;
 pub(in crate::solve::transient) use material_controls::storage_bytes as material_control_storage_bytes;
 pub(in crate::solve::transient) use convection::storage_bytes as convection_storage_bytes;
 pub(in crate::solve::transient) use convection::control_storage_bytes;
+pub(in crate::solve::transient) use pointwise::storage_bytes as pointwise_storage_bytes;
 
 // Forward native enthalpy also admits at most 24 Arnoldi columns. Keep the
 // transpose within the same bounded column scale before allocating its basis.
@@ -355,15 +357,28 @@ pub(in crate::solve::transient) fn finish(
     if linear.restart == 0 {
         return Err(bad("enthalpy transpose needs a nonzero admitted restart"));
     }
+    let pointwise = radiation.filter(|lowering| lowering.is_pointwise());
+    // Pointwise parameters contract the already prepared local/reflected load.
+    // The patch-mean enclosure additionally runs its radiosity control transpose.
     let iteration_limit = ends_s.len().checked_mul(linear.max_iterations)
-        .and_then(|v| v.checked_mul(if enclosure.is_some() { 2 } else { 1 }))
+        .and_then(|v| v.checked_mul(if enclosure.is_some() && pointwise.is_none() { 2 } else { 1 }))
         .ok_or_else(|| bad("enthalpy reverse iteration allowance overflows"))?;
     if radiation.is_some_and(|lowering| lowering.is_enclosure()) != enclosure.is_some() {
         return Err(bad("enthalpy adjoint lost its exact bound enclosure model"));
     }
-    let radiation_workspace = radiation.map(|lowering|
-        radiation_storage_bytes(n, elements, lowering.surface_count())).transpose()?.unwrap_or(0);
-    let max_feedback_entries = radiation.map(|lowering|
+    let radiation_workspace = radiation.map(|lowering| {
+        if lowering.is_pointwise() {
+            pointwise_storage_bytes(
+                n, problem.mesh.boundary().len(), lowering.surface_count(), ends_s.len(),
+            )
+        } else {
+            radiation_storage_bytes(n, elements, lowering.surface_count())
+        }
+    }).transpose()?.unwrap_or(0);
+    let max_radiation_entries = pointwise.map(|lowering|
+        pointwise::workspace_entries(n, problem.mesh.boundary().len(), lowering.surface_count()))
+        .transpose()?.unwrap_or(0);
+    let max_feedback_entries = radiation.filter(|lowering| !lowering.is_pointwise()).map(|lowering|
         feedback_entries(n, lowering.surface_count())).transpose()?.unwrap_or(0);
     let convection_ports = convection::ports(natural, airflow)?;
     let convection_workspace = convection_storage_bytes(n, elements, convection_ports)?;
@@ -473,8 +488,11 @@ pub(in crate::solve::transient) fn finish(
     let surface_count = radiation.map_or(0, |lowering| lowering.surface_count());
     let mut emissivity_controls = zeros(surface_count)?;
     let mut reservoir_controls = zeros(surface_count)?;
-    let mut enclosure_controls = enclosure
+    let mut enclosure_controls = enclosure.filter(|_| pointwise.is_none())
         .map(|model| enclosure::Controls::new(model))
+        .transpose()?;
+    let mut pointwise_controls = pointwise
+        .map(|lowering| pointwise::Controls::new(lowering, enclosure))
         .transpose()?;
     let mut carry = zeros(n)?;
     let mut dual_iterations = 0usize;
@@ -534,22 +552,30 @@ pub(in crate::solve::transient) fn finish(
             ..source_problem
         };
         let mut endpoint_config = config;
-        if feedback.is_some() || enclosure.is_some() {
+        if feedback.is_some() || enclosure.is_some() || pointwise.is_some() {
             // The physical target belongs to the accepted forward solve.
             // Reconstructing a target from old h with endpoint-frozen boundary
             // values could loosen that contract. Recheck it explicitly here.
-            let physical = if let Some(model) = enclosure {
-                let lowering = radiation.ok_or_else(|| bad("enclosure adjoint lost its controls"))?;
-                engine.evaluate_endpoint_with_enclosure(
-                    cx, step_problem, interfaces, old_h, &endpoint.specific_enthalpy_j_kg,
-                    dt, config, model, lowering.config,
-                )
+            let physical = if let Some(lowering) = pointwise {
+                super::super::enthalpy::evaluate_pointwise_endpoint(
+                    cx, engine, step_problem, interfaces, old_h, &endpoint.specific_enthalpy_j_kg,
+                    dt, config, lowering, enclosure,
+                )?
             } else {
-                engine.evaluate_endpoint(
-                    cx, step_problem, interfaces, old_h, &endpoint.specific_enthalpy_j_kg,
-                    dt, config, radiation.map(|lowering| lowering.patches.as_slice()),
-                )
-            }.map_err(|error| failed(EnthalpyAdjointError::Enthalpy(error)))?;
+                let physical = if let Some(model) = enclosure {
+                    let lowering = radiation.ok_or_else(|| bad("enclosure adjoint lost its controls"))?;
+                    engine.evaluate_endpoint_with_enclosure(
+                        cx, step_problem, interfaces, old_h, &endpoint.specific_enthalpy_j_kg,
+                        dt, config, model, lowering.config,
+                    )
+                } else {
+                    engine.evaluate_endpoint(
+                        cx, step_problem, interfaces, old_h, &endpoint.specific_enthalpy_j_kg,
+                        dt, config, radiation.map(|lowering| lowering.patches.as_slice()),
+                    )
+                };
+                physical.map_err(|error| failed(EnthalpyAdjointError::Enthalpy(error)))?
+            };
             if !physical.residual_norm_j.is_finite()
                 || physical.residual_norm_j > physical_tolerance_j
                 || !physical.energy_residual_j.is_finite()
@@ -567,7 +593,12 @@ pub(in crate::solve::transient) fn finish(
             }
             poll(cx, deadline)?;
         }
-        let mut step = if let Some(model) = enclosure {
+        let mut step = if let Some(lowering) = pointwise {
+            BoundEndpoint::Prescribed(pointwise::linearize(
+                cx, engine, step_problem, interfaces, old_h, dt, endpoint_config,
+                lowering, enclosure, endpoint, physical_tolerance_j, max_radiation_entries, deadline,
+            )?)
+        } else if let Some(model) = enclosure {
             let lowering = radiation.ok_or_else(|| bad("enclosure adjoint lost its controls"))?;
             BoundEndpoint::Prescribed(engine.linearize_accepted_parameters_with_enclosure_radiation(
                 cx, step_problem, interfaces, old_h, dt, endpoint_config, model,
@@ -661,7 +692,9 @@ pub(in crate::solve::transient) fn finish(
             &nodal_load_adjoint, deadline,
         )?;
         robin_controls.add(cx, step_problem, expected, &nodal_load_adjoint, deadline)?;
-        if let (Some(model), Some(controls)) = (enclosure, enclosure_controls.as_mut()) {
+        if let Some(controls) = pointwise_controls.as_mut() {
+            controls.add(cx, step.transport(), &nodal_load_adjoint, deadline)?;
+        } else if let (Some(model), Some(controls)) = (enclosure, enclosure_controls.as_mut()) {
             let lowering = radiation.ok_or_else(|| bad("enclosure controls lost their source"))?;
             controls.add(
                 cx, model, step_problem, expected, &nodal_load_adjoint,
@@ -748,6 +781,9 @@ pub(in crate::solve::transient) fn finish(
     ))).collect::<Result<Vec<_>, SolveRefusal>>()?;
     let selected_time = if selected.state == 0 { 0.0 } else { ends_s[selected.state - 1] };
     let radiation_fragment = radiation.map(|lowering| -> Result<String, SolveRefusal> {
+        if let Some(controls) = pointwise_controls.as_ref() {
+            return controls.fragment(selected.state, max_radiation_entries, radiation_workspace);
+        }
         if let (Some(model), Some(controls)) = (enclosure, enclosure_controls.as_ref()) {
             return controls.fragment(
                 lowering, model, selected.state, max_feedback_entries, radiation_workspace,
@@ -798,6 +834,7 @@ pub(in crate::solve::transient) fn finish(
         ",\"convection\":{{\"method\":\"complete-natural-and-streamwise-air-enthalpy-feedback\",\"natural_ports\":{},\"air_ports\":{},\"max_combined_feedback_entries\":{combined_feedback_entries},\"additional_workspace_bytes\":{convection_workspace},\"control_workspace_bytes\":{control_workspace},\"physical_endpoint_rechecks\":{},\"residual_target\":\"original-accepted-forward-physical-tolerance\",\"air_energy\":\"actual-air-enthalpy-gain-with-separate-natural-and-radiation-reservoirs\"{controls_fragment}}}",
         natural.len(), airflow.map_or(0, |path| path.segments.len()), selected.state,
     ) };
+    let pointwise_scope = pointwise.is_some().then(|| pointwise::history_scope(SCOPE));
     poll(cx, deadline)?;
     Ok(format!(
         "{{\"schema\":\"fs-cli-native-enthalpy-adjoint-v1\",\"output\":{},\"method\":\"discrete-total-enthalpy-backward-euler-reverse\",\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"active_ties\":{},\"unique_sampled_maximum\":{},\"dtemperature_duniform_initial_specific_enthalpy_k_kg_per_j\":{},\"dtemperature_dinitial_specific_enthalpy_k_kg_per_j\":[{}],\"dtemperature_dreference_density_multiplier_k\":{},\"regional_storage\":[{}],\"regional_power\":[{}],\"intervals\":[{}],\"revalidated_solid_endpoints\":{},\"adjoint_krylov_iterations\":{},\"maximum_dual_relative_residual\":{},\"max_reverse_steps\":{},\"max_krylov_iterations_per_linear_solve\":{},\"max_restart_columns_per_linear_solve\":{},\"max_adjoint_krylov_iterations\":{},\"additional_storage_estimate_bytes\":{}{radiation_fragment}{convection_fragment}{material_fragment}{prescribed_fragment}{robin_fragment},\"authority\":\"Estimated\",\"scope\":{}}}",
@@ -806,8 +843,10 @@ pub(in crate::solve::transient) fn finish(
         number(initial_uniform)?, initial_rows.join(","), number(density_multiplier)?,
         regional_storage.join(","), regional_power.join(","), intervals.join(","),
         selected.state, dual_iterations, number(worst_dual)?, ends_s.len(),
-        linear.max_iterations, linear.restart, iteration_limit, estimate, json_string(SCOPE),
+        linear.max_iterations, linear.restart, iteration_limit, estimate,
+        json_string(pointwise_scope.as_deref().unwrap_or(SCOPE)),
     ))
 }
 
 const SCOPE: &str = "Selected final or earliest sampled-peak nodal branch on the accepted fine grid, including the initial state for sampled peaks. Exact ties have no unique maximum derivative. Only the selected prefix is reversed; future interval controls are zero. Each consumed endpoint is independently revalidated through the physical heterogeneous enthalpy balance, energy gate, chart smoothness and complete k(T)/phase-conductivity tangent; no nonlinear endpoint is re-solved or replaced. Initial controls are additive nodal or regional specific-enthalpy offsets, not initial temperatures. Native input edits must preserve initial-temperature/enthalpy consistency or use from-regional-enthalpy. Reference-density controls change frozen storage mass while holding initial enthalpy, charts, conductivity laws and geometry fixed; the multiplier scales all regional reference densities together. Regional power controls add absolute delivered watts through the same P1 source projector, including zero-baseline intervals; sum interval derivatives for one declared workload segment. Prescribed Neumann data, phase-law parameters and the time grid are fixed. Each declared prescribed convection law has independent absolute reference-temperature and coefficient controls held throughout the selected trajectory; its complete consistent P1 face mass is contracted with the same physical multiplier. Regional conductivity controls multiply each region's entire effective tensor/curve by one positive scale at one, retaining its declared phase multiplier; contact controls scale every retained face resistance of one named matching interface together at one. Their trajectory derivatives use the same complete physical multiplier and preserve separate region/interface/card identities. These normalized material controls are not absolute tensor-entry or resistance derivatives, new card claims, uncertainty propagation, contact-geometry changes, or derivatives of constitutive knots. Declared closed enclosures retain the complete reflected-radiation state feedback, internal heat split and independently revalidated accepted physical target. Their absolute per-surface emissivity controls use the shared radiosity transpose with the same masked time-scaled thermal multiplier; view factors and geometry stay fixed. Declared ambient radiation uses its complete nonlinear area-mean state feedback in the same h/source/reference-density transpose; the report also differentiates independent absolute surface emissivities and reservoir temperatures held throughout the selected trajectory. Each surface retains its name, target, sourced nominal value, card and usage-receipt identities; sharing a card does not merge controls. Query temperature, selected source claim/support and time grid remain fixed. Emissivity is restricted to (0,1], with only nonpositive feasible increments at one, and reservoirs require positive absolute kelvin. These parameter derivatives are not uncertainty propagation or derivatives of immutable card content. An isothermal plateau has zero direct temperature sensitivity while h history carry remains energetic. Chart/domain endpoints and slope-changing branches refuse classical derivatives. Natural convection retains the complete signed wall and film-density derivative of the in-domain Churchill-Chu vertical-plate law. Quasi-steady air retains the complete upstream-to-downstream reference-temperature feedback of each independent branch at fixed flow and transport properties. Both compose with radiation, phase conductivity and energetic history in the same physical transpose; each coupled endpoint also passes its original forward residual target and actual-air energy gate. Natural-reservoir and independently prescribed air-inlet temperatures are absolute kelvin controls held throughout the selected trajectory. Each natural ambient control includes both its explicit Robin reference and its full film-density/coefficient partial. Independent fan-bank controls differentiate absolute speed ratios through the same retained hydraulic point, capacity rates, smooth in-domain correlation coefficients and downstream air transport; unsupported bank coordinates retain their identities and reasons instead of partial or zero derivatives. Air transport properties, pressure, the hydraulic density envelope, fixed loss geometry and fan-curve data remain fixed. At an initial sampled peak every boundary control has zero influence because no future endpoint contributes. No apparent heat capacity, moving geometry, density-driven expansion, continuous-time maximum, uncertainty or physical-validation certificate is supplied.";
+

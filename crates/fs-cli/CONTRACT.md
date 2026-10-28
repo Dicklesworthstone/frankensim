@@ -2625,15 +2625,48 @@ radiosity, irradiation, view-factor identity and signed heat closure. The
 trajectory retains original physical residual and joule-energy targets;
 pointwise radiation does not create a frozen-radiation history or a shifted
 convective reference. Pointwise fields and sampled peaks remain Estimated.
-Steady or volumetric-capacity pointwise selection, native adjoint requests and
-continuum mean bounds explicitly refuse until their corresponding pointwise
-owners exist; a patch-mean result or derivative is never substituted.
+Driver 90 connects native final-time and sampled-peak trajectory adjoints to
+the complete pointwise operator. Each selected fine endpoint is freshly audited
+against its original physical residual target and energy gate, with the same
+old enthalpy, phase charts, reference masses and original convection laws.
+The exact local face blocks and reflected patch response supply the true
+transpose, including prescribed rows and the full temperature-to-enthalpy
+chain. Natural and streamwise-air feedback attach to that same operator.
+No endpoint is re-solved to construct a derivative.
+
+Ambient absolute-emissivity and reservoir-temperature partials contract the
+same surface quadrature. Closed-enclosure emissivity partials include both
+spatially weighted local emission and the prepared reflected irradiation
+response; a derivative of the patch mean alone would be incomplete.
+The nodal load multiplier is masked on prescribed residual rows and scaled by
+the timestep once. Existing source, initial enthalpy, reference-density,
+conductivity, contact, prescribed-convection, natural-reservoir, air-inlet,
+fan and prescribed-temperature controls consume this complete dual. A selected
+initial peak retains zero future boundary controls; later peaks reverse only
+their selected prefix. The existing nominal-adjoint uncertainty calibration
+can consume its supported physical coordinates without changing raw samples.
+
+The reverse retains one active sparse face/patch operator with checked nodal,
+face, patch-matrix and checkpoint-report allowances. Pointwise parameter
+contractions reuse the prepared response and add no parameter Krylov or linear
+solve. The native work receipt distinguishes that direct contraction from the
+area-mean radiosity-transpose lane. Every radiating node must be strictly
+inside the retained emissivity claim's temperature support for a classical
+derivative; this is not a temperature-dependent emissivity model.
+
+Steady or volumetric-capacity pointwise selection and continuum mean bounds
+remain explicitly unsupported until their corresponding owners exist.
 
 Focused product regressions compare ambient heating and cooling with
 independent scalar roots, exact triangular fourth moments and reflected
 two-surface enclosure heat with a nonuniform native field, vacuum exchange
 with separately authored flux and reference storage, and simultaneous latent
-storage, natural reservoir heat and transported-air heating.
+storage, natural reservoir heat and transported-air heating. Derivative children
+add an independent seven-control scalar backward-Euler recurrence, signed
+surface/history perturbations, zero-convection reflected exchange, selected
+peak prefixes, mixed air/natural controls and unchanged native forward fields.
+The pointwise nominal-control regression also compares independently re-solved
+boundary perturbations and unchanged probability samples.
 
 ### Forward sampled thermal peak in native transient solves
 

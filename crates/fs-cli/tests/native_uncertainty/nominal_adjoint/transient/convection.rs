@@ -205,3 +205,52 @@ fn g5_enthalpy_convection_calibration_resumes_without_source_files_or_new_probes
     assert_eq!(actual, expected, "recovered coefficients and raw trajectories replay exactly");
 }
 
+
+#[test]
+fn g1_pointwise_enthalpy_uncertainty_reuses_one_complete_dual_and_original_probability_samples() {
+    let prepare = |controlled| {
+        let mut f = fixture(controlled);
+        let enclosure = f.project.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+            .enclosure_radiation.as_mut().unwrap();
+        enclosure.spatial_model = Some(fs_project::RadiationSpatialModel::Pointwise);
+        enclosure.max_iterations = 1;
+        write_project(&f);
+        f
+    };
+    let raw = prepare(false);
+    let raw_result = raw.study(None, fs_cli::exit::SUCCESS);
+    let (_, baseline) = raw.report(&raw_result);
+    let controlled = prepare(true);
+    let result = controlled.study(None, fs_cli::exit::SUCCESS);
+    let (_, report) = controlled.report(&result);
+    assert_eq!(rows(&report), rows(&baseline));
+    assert_eq!(report.get("statistics"), baseline.get("statistics"));
+    assert_eq!(report.path(&["mean_control", "probe_solves_completed"]).unwrap().as_f64(), Some(1.0));
+    let coefficients = gradient(&report);
+    assert_eq!(coefficients.len(), 2);
+    let receipt = calibration_receipt(&controlled, &report);
+    assert_eq!(receipt.get("radiation").unwrap().str_field("spatial_model"), Some("pointwise"));
+    let adjoint = receipt.get("transient").unwrap().get("adjoint").unwrap();
+    assert!(adjoint.get("radiation").unwrap().str_field("method").unwrap().contains("pointwise"));
+    let vertex = adjoint.f64_field("active_vertex").unwrap() as usize;
+    let mut nominal = controlled.project.clone();
+    set_boundary(&mut nominal, 14.0, 297.0);
+    let field = physical_field(&controlled, &nominal, 20);
+    let retained = json_artifact(&controlled.ledger, receipt.str_field("solution_artifact").unwrap());
+    assert_eq!(Some(&field), retained.get("temperature"));
+    for (coordinate, step) in [(0, 0.01), (1, 0.02)] {
+        let mut values = Vec::new();
+        for (side, sign) in [-1.0, 1.0].into_iter().enumerate() {
+            let mut changed = nominal.clone();
+            set_boundary(&mut changed,
+                14.0 + if coordinate == 0 { sign * step } else { 0.0 },
+                297.0 + if coordinate == 1 { sign * step } else { 0.0 });
+            let field = physical_field(&controlled, &changed, 21 + 2 * coordinate + side);
+            values.push(field.as_array().unwrap()[vertex].as_f64().unwrap());
+        }
+        let difference = (values[1] - values[0]) / (2.0 * step);
+        assert!((coefficients[coordinate] - difference).abs()
+            <= 3e-5 * difference.abs().max(0.02),
+            "pointwise coordinate {coordinate}: {} versus {difference}", coefficients[coordinate]);
+    }
+}

@@ -608,9 +608,9 @@ fn g1_pointwise_ambient_uses_one_newton_solve_and_matches_independent_heating_co
 }
 
 #[test]
-fn g0_pointwise_radiation_refuses_unsupported_storage_and_derivatives_before_publishing_a_field() {
+fn g0_pointwise_radiation_refuses_unsupported_storage_and_bounds_before_publishing_a_field() {
     let (cards, card) = radiation_product::emissivity_cards(&fixture_cards(), EMISSIVITY);
-    for variant in ["steady", "capacity", "adjoint"] {
+    for variant in ["steady", "capacity", "mean-bound"] {
         let mut spec = project(&card, 270.0);
         spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
             .radiation.as_mut().unwrap().spatial_model =
@@ -627,7 +627,7 @@ fn g0_pointwise_radiation_refuses_unsupported_storage_and_derivatives_before_pub
                 }];
             }
             _ => spec.outputs.as_mut().unwrap().push(OutputRequest {
-                name: "temperature-final-adjoint".into(), kind: "report".into(), region: None,
+                name: "temperature-volume-mean-bound".into(), kind: "report".into(), region: None,
             }),
         }
         let ledger = Ledger::open(":memory:").unwrap();
@@ -719,3 +719,6 @@ fn g0_native_enthalpy_radiation_refuses_work_and_source_domain_failures_without_
         );
     }
 }
+
+#[path = "transient_enthalpy_radiation/pointwise_adjoint.rs"]
+mod pointwise_adjoint;

@@ -128,7 +128,7 @@ pub(super) fn advance(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn evaluate(
+pub(in crate::solve::transient) fn evaluate(
     cx: &Cx<'_>, engine: &HeterogeneousEnthalpyBackwardEuler<'_, '_>,
     problem: ConductionProblem<'_>, interfaces: Option<&ThermalInterfaces>,
     old: &[f64], candidate: &[f64], dt_s: f64, config: EnthalpyStepConfig,

@@ -6,7 +6,7 @@ const FINAL: &str = "temperature-final-adjoint";
 const PEAK: &str = "temperature-sampled-peak-adjoint";
 const SECOND_EPSILON: f64 = 0.6;
 
-fn base() -> (ProjectSpec, CardPackSet) {
+pub(super) fn base() -> (ProjectSpec, CardPackSet) {
     let (cards, first) = radiation_product::emissivity_cards(&fixture_cards(), EPSILON);
     let (cards, second) = radiation_product::emissivity_cards(&cards, SECOND_EPSILON);
     let mut spec = project(&first);
@@ -16,7 +16,7 @@ fn base() -> (ProjectSpec, CardPackSet) {
     (spec, cards)
 }
 
-fn evaluate(spec: &ProjectSpec, cards: &CardPackSet, output: Option<&str>) -> (J, Vec<f64>) {
+pub(super) fn evaluate(spec: &ProjectSpec, cards: &CardPackSet, output: Option<&str>) -> (J, Vec<f64>) {
     let mut spec = spec.clone();
     if let Some(name) = output {
         spec.outputs.as_mut().unwrap().push(OutputRequest {
@@ -29,29 +29,29 @@ fn evaluate(spec: &ProjectSpec, cards: &CardPackSet, output: Option<&str>) -> (J
     (receipt, values(&field, "temperature"))
 }
 
-fn maximum(values: &[f64]) -> f64 {
+pub(super) fn maximum(values: &[f64]) -> f64 {
     values.iter().copied().fold(f64::NEG_INFINITY, f64::max)
 }
 
-fn gradient(receipt: &J) -> &J {
+pub(super) fn gradient(receipt: &J) -> &J {
     let row = receipt.get("transient").unwrap().get("adjoint").unwrap();
     assert_eq!(row.str_field("schema"), Some("fs-cli-native-enthalpy-adjoint-v1"));
     row
 }
 
-fn first<'a>(row: &'a J, key: &str) -> &'a J {
+pub(super) fn first<'a>(row: &'a J, key: &str) -> &'a J {
     &row.get(key).unwrap().as_array().unwrap()[0]
 }
 
-fn derivative_close(actual: f64, expected: f64) {
+pub(super) fn derivative_close(actual: f64, expected: f64) {
     close(actual, expected, 5e-6 + 3e-4 * expected.abs());
 }
 
-fn radiation_surface(row: &J, surface: usize) -> &J {
+pub(super) fn radiation_surface(row: &J, surface: usize) -> &J {
     &row.get("radiation").unwrap().get("surfaces").unwrap().as_array().unwrap()[surface]
 }
 
-fn emissivity_difference(
+pub(super) fn emissivity_difference(
     spec: &ProjectSpec, cards: &CardPackSet, surface: usize, value: f64,
 ) -> f64 {
     let step = 0.0005;

@@ -145,13 +145,13 @@ pub(super) fn admit(spec: &ProjectSpec) -> Result<(), SolveRefusal> {
                 "declare total-enthalpy storage and finite-time integration, or select patch-mean radiation",
             ));
         }
-        if spec.outputs.iter().flatten().any(|output| {
-            output.name.contains("adjoint") || output.name == "temperature-volume-mean-bound"
-        }) {
+        if spec.outputs.iter().flatten().any(|output|
+            output.name == "temperature-volume-mean-bound")
+        {
             return Err(conduction_error(
                 "cli-solve-conduction-pointwise-radiation",
-                "pointwise radiation does not yet expose the native trajectory adjoint or continuum mean bound",
-                "request the forward temperature field or sampled peak; no mean-patch derivative is substituted",
+                "pointwise radiation does not expose a continuum mean bound",
+                "use the finite-mesh field, sampled peak or declared trajectory adjoint; a discrete derivative is not a continuum error estimate",
             ));
         }
     }

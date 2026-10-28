@@ -254,7 +254,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// preserving external heat accounts and complete steady/trajectory derivatives.
 /// Version 89 selects local P1 radiation emission inside native enthalpy Newton
 /// solves, retaining the same physical owner in natural and transported-air audits.
-pub const SOLVE_DRIVER_VERSION: u32 = 89;
+/// Version 90 connects pointwise enthalpy radiation to complete trajectory
+/// adjoints, physical boundary controls and nominal-adjoint uncertainty studies.
+pub const SOLVE_DRIVER_VERSION: u32 = 90;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
