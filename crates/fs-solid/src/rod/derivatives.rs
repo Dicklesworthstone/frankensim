@@ -1,17 +1,26 @@
-//! Local energy differentiation for the common rod Newton owner.
+//! Native analytical assembly and the retained arbitrary-energy FD fallback.
 //!
-//! Each element is differenced BEFORE assembly, so energy in unrelated elements
-//! cannot erase a small force. The coupling graph is structural, not determined
-//! by the current stress: slack links must retain their possible tangent blocks.
-//! The body/right SO(3) residual Jacobian is not forcibly symmetrized.
+//! The body/right residual Jacobian is not forcibly symmetrized. Native owners
+//! assemble exact element derivatives; callback-only energies retain local
+//! probes and a complete dependency graph. No refusal falls back silently.
 
 use super::{Rod, SolidError};
 use fs_ga::{So3Tangent, Vec3};
+
+pub(super) mod analytic;
+use analytic::{Assembly, Kinematics, Linearization};
 
 /// Internal protocol shared by native and source-bound rod energies.
 /// Arbitrary callbacks retain the complete (dense) dependency graph.
 pub(super) trait RodEnergy<E> {
     fn value(&self, rod: &Rod) -> Result<f64, E>;
+
+    /// None selects the existing numerical fallback, not an approximation to a
+    /// failed analytical evaluation. Native errors always propagate unchanged.
+    fn linearize(&self, _rod: &Rod, _free: &[usize], _tangent: bool,
+        _checkpoint: &impl Fn() -> Result<(), E>) -> Result<Option<Linearization>, E> {
+        Ok(None)
+    }
 
     fn derivative(
         &self, base: &Rod, plus: &Rod, minus: &Rod,
@@ -38,6 +47,29 @@ fn segment_energy(rod: &Rod, segment: usize) -> Result<f64, SolidError> {
 impl RodEnergy<SolidError> for UniformEnergy {
     fn value(&self, rod: &Rod) -> Result<f64, SolidError> { rod.energy() }
 
+    fn linearize(&self, rod: &Rod, free: &[usize], tangent: bool,
+        checkpoint: &impl Fn() -> Result<(), SolidError>) -> Result<Option<Linearization>,SolidError> {
+        checkpoint()?;
+        if rod.positions.len()<2 || !rod.energy()?.is_finite() {
+            return Err(SolidError::InvalidInput { what: "finite rod energy and at least one segment required".into() });
+        }
+        let mut assembly=Assembly::new(rod.positions.len(),free,tangent)?;
+        let section=rod.section;
+        for segment in 0..rod.positions.len()-1 {
+            checkpoint()?;
+            let kinematics=Kinematics::new(rod,segment)?;
+            let (g,k)=kinematics.strains();
+            let response=kinematics.linearize(
+                Vec3::new(section.ea*g[0],section.ga*g[1],section.ga*g[2]),
+                Vec3::new(section.gj*k[0],section.ei*k[1],section.ei*k[2]),
+                [section.ea,section.ga,section.ga],[section.gj,section.ei,section.ei],tangent)?;
+            assembly.add_pair([segment,segment+1],&response);
+        }
+        checkpoint()?;
+        Ok(Some(assembly.finish()?))
+    }
+
+    // Retained as the independent local-stencil regression/fallback oracle.
     fn derivative(
         &self, base: &Rod, plus: &Rod, minus: &Rod,
         node: usize, _component: usize, step: f64,

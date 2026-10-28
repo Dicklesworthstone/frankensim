@@ -7,12 +7,12 @@
 //! exactly zero strain (the objectivity battery checks the energy is
 //! invariant, not just small).
 //!
-//! Statics: element-local finite-difference internal residual with exact dead
-//! tip loads (body/right rotational perturbations — `R <- R Exp(delta)`),
-//! and a residual Jacobian assembled over the actual interaction graph.
+//! Statics: analytical native internal forces and body/right residual tangents,
+//! assembled elementwise using the canonical SO(3) differentials. Arbitrary
+//! energy callbacks retain the element-local finite-difference fallback.
 //! Dense-LU Newton with load stepping remains fixture-scale by design
-//! (≤ a few hundred DOFs); analytic rod tangents and SE(3) dynamics remain
-//! successor scope. [`MaterialRod`] retains its source-resolved section.
+//! (≤ a few hundred DOFs). SE(3) dynamics remain successor scope.
+//! [`MaterialRod`] retains its source-resolved section.
 
 use crate::SolidError;
 use fs_ga::{GaError, So3, Vec3};
@@ -91,34 +91,12 @@ impl Rod {
         }
     }
 
-    /// Segment strains: (Γ − e₁-relative, κ), both in the segment
-    /// frame.
+    /// Segment strains in the existing geodesic-midpoint material frame.
+    /// Energy and analytical derivatives share this single kinematic owner.
     /// # Errors
-    /// Returns an internal-invariant refusal if a canonical group operation
-    /// detects accumulated non-unit drift.
+    /// Refuses invalid geometry or canonical frame-operation failures.
     pub fn strains(&self, seg: usize) -> Result<([f64; 3], [f64; 3]), SolidError> {
-        let (a, b) = (seg, seg + 1);
-        let relative = self.frames[b]
-            .body_minus(self.frames[a])
-            .map_err(group_error)?;
-        let midpoint = self.frames[a]
-            .body_plus(relative.scale(0.5))
-            .map_err(group_error)?;
-        let dr = Vec3::new(
-            (self.positions[b][0] - self.positions[a][0]) / self.l0,
-            (self.positions[b][1] - self.positions[a][1]) / self.l0,
-            (self.positions[b][2] - self.positions[a][2]) / self.l0,
-        );
-        // Γ = Rᵀ r′ − e₁ (rotate world tangent into the mid frame).
-        let local = midpoint.inverse().rotate(dr).map_err(group_error)?;
-        let gamma = [local.x - 1.0, local.y, local.z];
-        let angular = relative.angular;
-        let kappa = [
-            angular.x / self.l0,
-            angular.y / self.l0,
-            angular.z / self.l0,
-        ];
-        Ok((gamma, kappa))
+        Ok(derivatives::analytic::Kinematics::new(self, seg)?.strains())
     }
 
     /// Total internal strain energy.
@@ -160,9 +138,8 @@ impl Rod {
         Ok(())
     }
 
-    /// Body/right residual with exact tip-load subtraction. Known energy owners
-    /// differentiate incident terms before summation; arbitrary callbacks retain
-    /// full-energy differentiation and a complete dependency graph.
+    /// Body/right residual with exact tip-load subtraction. Native owners use
+    /// analytical assembly; arbitrary callbacks retain energy differentiation.
     fn residual<E: From<SolidError>>(
         &self, load: &TipLoad, factor: f64,
         energy: &impl RodEnergy<E>,
@@ -182,7 +159,26 @@ impl Rod {
         translation_scale_m: f64,
         coordinates: &[usize], column: Option<usize>,
     ) -> Result<Vec<f64>, E> {
+        checkpoint()?;
         let mut r = vec![0.0; self.ndof()];
+        if let Some(exact) = energy.linearize(self, &[], false, checkpoint)? {
+            for &k in coordinates {
+                checkpoint()?;
+                let (node, component) = (k / 6 + 1, k % 6);
+                if column.is_some_and(|c| !energy.coupled(node, c / 6 + 1)) { continue; }
+                let mut value = exact.gradient[node][component];
+                if node + 1 == self.positions.len() {
+                    value -= factor * if component < 3 { load.force[component] }
+                        else { load.moment[component - 3] };
+                }
+                if !value.is_finite() {
+                    return Err(SolidError::InvalidInput { what: "rod residual is not finite".into() }.into());
+                }
+                r[k] = value;
+            }
+            checkpoint()?;
+            return Ok(r);
+        }
         // Allocate two complete probe states once, then change/restore only the
         // active node. In particular, untouched frames keep their exact bits.
         let mut plus = self.clone();
@@ -291,35 +287,42 @@ impl Rod {
                     converged = true;
                     break;
                 }
-                // The Jacobian follows actual interactions, including nonlocal
-                // links. Its dense storage and original LU owner are unchanged.
-                let mut kmat = vec![0.0f64; n * n];
-                let mut probe = self.clone();
-                for col in 0..n {
-                    checkpoint()?;
-                    let coordinate = free[col];
-                    let (node, component) = (coordinate / 6 + 1, coordinate % 6);
-                    let eps = fd_step(coordinate, translation_scale_m, 3e-4)?;
-                    derivatives::perturb(&mut probe, node, component, eps)?;
-                    let rp = probe.residual_on(&TipLoad::default(), 0.0, energy, checkpoint,
-                        translation_scale_m, &free, Some(coordinate))?;
-                    probe.positions[node] = self.positions[node];
-                    probe.frames[node] = self.frames[node];
-                    derivatives::perturb(&mut probe, node, component, -eps)?;
-                    let rm = probe.residual_on(&TipLoad::default(), 0.0, energy, checkpoint,
-                        translation_scale_m, &free, Some(coordinate))?;
-                    probe.positions[node] = self.positions[node];
-                    probe.frames[node] = self.frames[node];
-                    for row in 0..n {
-                        let value = (rp[free[row]] - rm[free[row]]) / (2.0 * eps);
-                        if !value.is_finite() {
-                            return Err(SolidError::InvalidInput {
-                                what: "rod tangent derivative is not finite".into(),
-                            }.into());
+                // Exact element assembly where the energy owner supplies it.
+                // Arbitrary callbacks keep the original complete FD fallback.
+                let kmat = if let Some(exact) = energy.linearize(self, &free, true, checkpoint)? {
+                    exact.tangent.ok_or_else(|| SolidError::InternalInvariant {
+                        what: "rod analytical owner omitted a requested tangent".into(),
+                    })?
+                } else {
+                    let mut kmat = vec![0.0f64; n * n];
+                    let mut probe = self.clone();
+                    for col in 0..n {
+                        checkpoint()?;
+                        let coordinate = free[col];
+                        let (node, component) = (coordinate / 6 + 1, coordinate % 6);
+                        let eps = fd_step(coordinate, translation_scale_m, 3e-4)?;
+                        derivatives::perturb(&mut probe, node, component, eps)?;
+                        let rp = probe.residual_on(&TipLoad::default(), 0.0, energy, checkpoint,
+                            translation_scale_m, &free, Some(coordinate))?;
+                        probe.positions[node] = self.positions[node];
+                        probe.frames[node] = self.frames[node];
+                        derivatives::perturb(&mut probe, node, component, -eps)?;
+                        let rm = probe.residual_on(&TipLoad::default(), 0.0, energy, checkpoint,
+                            translation_scale_m, &free, Some(coordinate))?;
+                        probe.positions[node] = self.positions[node];
+                        probe.frames[node] = self.frames[node];
+                        for row in 0..n {
+                            let value = (rp[free[row]] - rm[free[row]]) / (2.0 * eps);
+                            if !value.is_finite() {
+                                return Err(SolidError::InvalidInput {
+                                    what: "rod tangent derivative is not finite".into(),
+                                }.into());
+                            }
+                            kmat[row * n + col] = value;
                         }
-                        kmat[row * n + col] = value;
                     }
-                }
+                    kmat
+                };
                 checkpoint()?;
                 let f = fs_la::factor::lu(&kmat, n).map_err(|_| SolidError::SolveFailed {
                     iters: 0,
@@ -414,7 +417,7 @@ impl RodSection {
     }
 }
 
-/// The retained dense/finite-difference rod solver is a fixture-scale solver.
+/// The retained dense rod solver is a fixture-scale solver.
 /// This material entry point admits at most 384 free degrees of freedom.
 pub const MAX_MATERIAL_ROD_SEGMENTS: usize = 64;
 

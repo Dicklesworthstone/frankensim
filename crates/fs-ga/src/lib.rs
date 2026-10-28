@@ -13,6 +13,7 @@
 pub mod cga;
 pub mod facade;
 pub mod lie;
+pub mod lie_differential;
 pub mod lie_opt;
 pub mod mv;
 pub mod pga;
