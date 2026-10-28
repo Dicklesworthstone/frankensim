@@ -78,6 +78,24 @@ distributed neck propagation, nonlinear flow, measured fit accuracy or realtime
 throughput. Tests compare independent duct Bessel impedance, a physical-flow
 RK4 reference, energy balance and exact timestep partition.
 
+`SharedCavity::with_baffled_exterior` derives the complete exterior reaction
+from supplied original signed normal-velocity traces and the actual circular
+neck opening in one infinite rigid baffle. The generated annular-sector area
+quadrature retains the original mouth radius and area; body traces must retain
+every original surface coordinate and reproduce its signed cavity volume
+projection. The existing power-consistent Rayleigh owner supplies all mutual
+surface/mouth loads, and the existing positive-residue fitter retains its
+unchanged training/held-out complex and resistance error gates. Fitting uses a
+common mechanical mass-normalized basis before the neck is converted to the
+physical pressure/volume-flow convention of the existing attaching method.
+Explicit cell, frequency, sweep and complete-pole budgets apply without field
+truncation. Preparation is cold; ordinary stepping keeps the existing loaded
+propagator and accepted-state accounting. A three-rung mouth quadrature checks
+the independent flanged inertance and compact radiation-power limits; signed
+mutual loads, energy and exact time partition are also tested. This is a
+sampled, spatially discretized infinite-baffle reference, not a curved/unbaffled
+body solution, quadrature-error certificate or out-of-band guarantee.
+
 ### Cylindrical cavity thermal compression
 
 `SharedCavity::new_with_cylindrical_thermal_wall` uses an explicit physical

@@ -12,6 +12,7 @@ use crate::render::schedule::force::coupled::{
 };
 use fs_exec::CancelGate;
 
+pub mod exterior;
 pub mod thermal;
 pub use thermal::{CylindricalCavityThermalOptions, CylindricalThermalCompression, ThermalCompressionArm};
 
