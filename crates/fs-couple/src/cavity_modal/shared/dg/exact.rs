@@ -3,18 +3,25 @@ use super::*;
 pub use crate::render::schedule::force::coupled::dg::ExactDgBudget;
 
 impl SharedCavity {
-    /// Prepare one continuous full modal/Maxwell/DG exponential. Every original
-    /// coordinate and distal closed/open/matched boundary is retained, including
-    /// optional viscothermal wall states. Rational terminals, branches, gaps,
-    /// driven mouths, direct neck radiation and constant-loss connections refuse.
+    /// Prepare one continuous full modal/Maxwell/DG exponential, including the
+    /// original rational terminal group and optional viscothermal wall states.
+    /// Every original coordinate and mutual terminal entry is retained. Ordinary
+    /// closed/open/matched distal boundaries remain supported. Rational terminals
+    /// require nonsingular, well-conditioned instantaneous D; a singular D needs
+    /// a descriptor treatment and is refused. Branches, gaps, driven mouths,
+    /// direct neck radiation and constant-loss connections remain unsupported.
     ///
     /// Original neck geometry and inlet gas/area/clock admissions remain binding.
     /// This path never prepares the mean-port mobility. The explicit cold budget
     /// covers the complete states + held generalized forces + one constant row,
     /// all cached quadratic work/loss integrals and the existing dense kernel.
     /// Warm work is O(d^2) per retained work/loss channel, with no exponential or
-    /// root solve. Original physical/energy ceilings remain binding; a passive
-    /// energy bound also limits DG inlet pressure over the complete interval.
+    /// root solve. Original physical and energy ceilings remain binding. Rational
+    /// terminal work is signed boundary exchange; its original reports provide
+    /// no generic storage law. The complete conditioned generator supplies a
+    /// conservative numerical interval envelope for pressure/reaction guards,
+    /// without assigning stored energy or an all-frequency passivity certificate
+    /// to terminal coordinates.
     ///
     /// Only authored forces are held. The internal pressure and flow evolve
     /// continuously together, and their true integral p(t)Q(t) is exchanged.

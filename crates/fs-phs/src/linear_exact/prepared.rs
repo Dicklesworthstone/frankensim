@@ -36,6 +36,9 @@ pub struct PreparedQuadraticFlow {
     inverse: Vec<f64>,
     transition: Vec<f64>,
     integrals: Vec<Vec<f64>>,
+    dt: f64,
+    growth_factor: f64,
+    balanced_input: Vec<f64>,
 }
 impl PreparedQuadraticFlow {
     /// Prepare the SAME energy-balanced exact-ZOH generator and stable Gramian
@@ -83,10 +86,67 @@ impl PreparedQuadraticFlow {
         quadratic_forms: &[Vec<f64>],
         linear_forms: &[Vec<f64>],
         budget: DenseExponentialBudget,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, PreparedStepError> {
+        Self::prepare(
+            sys,
+            split,
+            dt,
+            quadratic_forms,
+            linear_forms,
+            budget,
+            cancelled,
+            None,
+        )
+    }
+
+    /// Append original linear states with numerical coordinate scales, retaining
+    /// the base owner's energy transform and the SAME exponential/Gramian kernel.
+    /// `generator_per_s` is the complete original-state generator, including the
+    /// attachment reaction; inputs act through the unchanged base source ports.
+    /// Positive `extra_scales` condition the added coordinates only: they confer
+    /// no storage, passivity or dissipation meaning on an attached realization.
+    /// The caller must retain its external work and original admission reports.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_extended_controlled(
+        sys: &PortHamiltonian,
+        split: &LinearSplit,
+        generator_per_s: &[f64],
+        extra_scales: &[f64],
+        dt: f64,
+        quadratic_forms: &[Vec<f64>],
+        linear_forms: &[Vec<f64>],
+        budget: DenseExponentialBudget,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, PreparedStepError> {
+        Self::prepare(
+            sys,
+            split,
+            dt,
+            quadratic_forms,
+            linear_forms,
+            budget,
+            cancelled,
+            Some((generator_per_s, extra_scales)),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        sys: &PortHamiltonian,
+        split: &LinearSplit,
+        dt: f64,
+        quadratic_forms: &[Vec<f64>],
+        linear_forms: &[Vec<f64>],
+        budget: DenseExponentialBudget,
         mut cancelled: impl FnMut() -> bool,
+        extension: Option<(&[f64], &[f64])>,
     ) -> Result<Self, PreparedStepError> {
         check_cancel(&mut cancelled)?;
-        let (n, m) = (split.n, split.m);
+        let (base_n, m) = (split.n, split.m);
+        let n = base_n
+            .checked_add(extension.map_or(0, |(_, scales)| scales.len()))
+            .ok_or_else(|| refuse("prepared extended dimension overflow"))?;
         let d = n
             .checked_add(m)
             .and_then(|v| v.checked_add(1))
@@ -98,12 +158,25 @@ impl PreparedQuadraticFlow {
         let bytes = d
             .checked_mul(d)
             .and_then(|v| v.checked_mul(8))
-            .and_then(|v| v.checked_mul(count.checked_mul(2)?.checked_add(24)?))
+            .and_then(|v| {
+                v.checked_mul(count.checked_mul(2)?.checked_add(if extension.is_some() {
+                    36
+                } else {
+                    24
+                })?)
+            })
             .ok_or_else(|| refuse("prepared quadratic byte overflow"))?;
         let work = (d as u64)
             .checked_pow(3)
             .and_then(|v| v.checked_mul(224))
             .and_then(|v| v.checked_mul(count.max(1) as u64))
+            .and_then(|v| {
+                v.checked_add(
+                    (d as u64)
+                        .checked_pow(3)?
+                        .checked_mul(if extension.is_some() { 400 } else { 0 })?,
+                )
+            })
             .ok_or_else(|| refuse("prepared quadratic work overflow"))?;
         if d > MAX_LINEAR_EXPONENTIAL_BLOCK_DIM
             || d > budget.max_dimension
@@ -116,7 +189,7 @@ impl PreparedQuadraticFlow {
             .into());
         }
         if !split.quadratic.exact
-            || sys.n != n
+            || sys.n != base_n
             || sys.m != m
             || sys.j != split.j
             || sys.r != split.r
@@ -128,6 +201,9 @@ impl PreparedQuadraticFlow {
                 .iter()
                 .any(|c| c.len() != n * n || !finite(c))
             || linear_forms.iter().any(|c| c.len() != n || !finite(c))
+            || extension.is_some_and(|(a, scales)| {
+                a.len() != n * n || !finite(a) || scales.iter().any(|v| !v.is_finite() || *v <= 0.0)
+            })
         {
             return Err(refuse(
                 "prepared quadratic requires matching exact storage/structure and finite observations/clock",
@@ -135,39 +211,74 @@ impl PreparedQuadraticFlow {
         }
         let mut forward = vec![0.0; n * n];
         let mut inverse = vec![0.0; n * n];
-        for i in 0..n {
+        for i in 0..base_n {
             check_cancel(&mut cancelled)?;
             let weight = if split.values[i] > 0.0 {
                 det::sqrt(split.values[i])
             } else {
                 1.0
             };
-            for j in 0..n {
-                forward[i * n + j] = weight * split.basis[j * n + i];
-                inverse[j * n + i] = split.basis[j * n + i] / weight;
+            for j in 0..base_n {
+                forward[i * n + j] = weight * split.basis[j * base_n + i];
+                inverse[j * n + i] = split.basis[j * base_n + i] / weight;
             }
         }
-        let mut flow = vec![0.0; n * n];
-        for i in 0..n {
-            check_cancel(&mut cancelled)?;
-            for k in 0..n {
-                for j in 0..n {
-                    flow[i * n + j] +=
-                        (sys.j[i * n + k] - sys.r[i * n + k]) * split.quadratic.matrix[k * n + j];
+        let flow = if let Some((generator, scales)) = extension {
+            for (i, scale) in scales.iter().enumerate() {
+                let index = base_n + i;
+                forward[index * n + index] = *scale;
+                inverse[index * n + index] = 1.0 / scale;
+            }
+            generator.to_vec()
+        } else {
+            let mut flow = vec![0.0; n * n];
+            for i in 0..n {
+                check_cancel(&mut cancelled)?;
+                for k in 0..n {
+                    for j in 0..n {
+                        flow[i * n + j] += (sys.j[i * n + k] - sys.r[i * n + k])
+                            * split.quadratic.matrix[k * n + j];
+                    }
                 }
             }
-        }
+            flow
+        };
         check_cancel(&mut cancelled)?;
         let balanced = product(&product(&forward, &flow, n), &inverse, n);
         check_cancel(&mut cancelled)?;
+        // An extended external realization needs a sharp bound: Gershgorin
+        // alone can interpret cancellation in a negative rank-one port damper
+        // as enormous positive growth. Reuse the original bounded Jacobi owner.
+        let mut growth_rate = 0.0_f64;
+        if extension.is_some() {
+            growth_rate = extended_growth_rate(&balanced, n, &mut cancelled)?;
+        } else {
+            for i in 0..n {
+                let row = balanced[i * n + i]
+                    + (0..n)
+                        .filter(|j| *j != i)
+                        .map(|j| (0.5 * balanced[i * n + j] + 0.5 * balanced[j * n + i]).abs())
+                        .sum::<f64>();
+                growth_rate = growth_rate.max(row);
+            }
+        }
+        let growth_factor = det::exp(growth_rate * dt);
+        // The original constructor does not need this envelope: a semidefinite
+        // passive system may have finite polynomial flow but an overflowing
+        // Euclidean exponential bound. Keep its prior admission unchanged.
+        if !finite(&balanced) || (extension.is_some() && !growth_factor.is_finite()) {
+            return Err(refuse("extended coordinate growth bound is not finite").into());
+        }
         let mut generator = vec![0.0; d * d];
+        let mut balanced_input = vec![0.0; n * m];
         for i in 0..n {
             check_cancel(&mut cancelled)?;
             generator[i * d..i * d + n].copy_from_slice(&balanced[i * n..(i + 1) * n]);
             for p in 0..m {
-                for j in 0..n {
+                for j in 0..base_n {
                     generator[i * d + n + p] += forward[i * n + j] * sys.g[j * m + p];
                 }
+                balanced_input[i * m + p] = generator[i * d + n + p];
             }
         }
         let mut transpose = vec![0.0; n * n];
@@ -217,7 +328,43 @@ impl PreparedQuadraticFlow {
             inverse,
             transition,
             integrals,
+            dt,
+            growth_factor,
+            balanced_input,
         })
+    }
+
+    /// Bound the numerical coordinate norm throughout the complete interval:
+    /// exp(max(0,mu)*dt) * (||T x0|| + dt*||T G u||). The retained base storage
+    /// is at most half this norm squared, even when added states have NO known
+    /// physical storage. No terminal energy or all-frequency passivity follows.
+    pub fn interval_coordinate_norm_bound(
+        &self,
+        state: &[f64],
+        input: &[f64],
+    ) -> Result<f64, PhsError> {
+        if state.len() != self.n || input.len() != self.m || !finite(state) || !finite(input) {
+            return Err(refuse(
+                "coordinate interval bound state/input layout or finiteness",
+            ));
+        }
+        let mut initial = 0.0;
+        let mut drive = 0.0;
+        for i in 0..self.n {
+            let x: f64 = (0..self.n)
+                .map(|j| self.forward[i * self.n + j] * state[j])
+                .sum();
+            let f: f64 = (0..self.m)
+                .map(|j| self.balanced_input[i * self.m + j] * input[j])
+                .sum();
+            initial += x * x;
+            drive += f * f;
+        }
+        let bound = self.growth_factor * (det::sqrt(initial) + self.dt * det::sqrt(drive));
+        if !bound.is_finite() {
+            return Err(refuse("coordinate interval bound overflows"));
+        }
+        Ok(bound)
     }
 
     /// Evaluate one complete candidate; accepted physical state belongs to the
@@ -261,4 +408,73 @@ impl PreparedQuadraticFlow {
             integrals,
         })
     }
+}
+
+// A floating-point envelope of lambda_max(sym(A)), with recomputed reconstruction
+// and orthogonality allowances. This is numerical, not a storage certificate.
+fn extended_growth_rate(
+    a: &[f64],
+    n: usize,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<f64, PreparedStepError> {
+    if !finite(a) {
+        return Err(refuse("nonfinite extended generator").into());
+    }
+    admit_jacobi_eigh(n).map_err(|_| refuse("extended interval Jacobi admission"))?;
+    let mut symmetric = vec![0.0; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            symmetric[i * n + j] = 0.5 * a[i * n + j] + 0.5 * a[j * n + i];
+        }
+    }
+    check_cancel(cancelled)?;
+    let (values, vectors) = checked_eigh(&symmetric, n)?;
+    check_cancel(cancelled)?;
+    let mut scaled = vectors.clone();
+    let mut transpose = vec![0.0; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            scaled[i * n + j] *= values[j];
+            transpose[i * n + j] = vectors[j * n + i];
+        }
+    }
+    let reconstructed = product(&scaled, &transpose, n);
+    check_cancel(cancelled)?;
+    let gram = product(&transpose, &vectors, n);
+    let norm = |matrix: &[f64]| {
+        matrix
+            .chunks_exact(n)
+            .map(|row| row.iter().map(|v| v.abs()).sum::<f64>())
+            .fold(0.0_f64, f64::max)
+    };
+    let mut residual = 0.0_f64;
+    let mut defect = 0.0_f64;
+    for i in 0..n {
+        check_cancel(cancelled)?;
+        residual = residual.max(
+            (0..n)
+                .map(|j| (symmetric[i * n + j] - reconstructed[i * n + j]).abs())
+                .sum(),
+        );
+        defect = defect.max(
+            (0..n)
+                .map(|j| (gram[i * n + j] - if i == j { 1.0 } else { 0.0 }).abs())
+                .sum(),
+        );
+    }
+    // Accumulation-length and magnitude allowance for both dense products,
+    // subtraction and row norms; cancellation cannot erase their error scale.
+    let roundoff = 64.0 * n as f64 * f64::EPSILON;
+    let vector_product = norm(&vectors) * norm(&transpose);
+    let lambda_magnitude = values.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+    residual += roundoff * (norm(&symmetric) + vector_product * lambda_magnitude);
+    defect += roundoff * (1.0 + vector_product);
+    let positive = values.iter().copied().fold(0.0_f64, f64::max);
+    // S = V Lambda V^T + E. Its largest eigenvalue is bounded above by
+    // max(0,max Lambda)*||V||_2^2 + ||E||_2, with ||V||_2^2 <= 1+defect.
+    let bound = positive * (1.0 + defect) + residual;
+    if !finite(&reconstructed) || !finite(&gram) || !bound.is_finite() {
+        return Err(refuse("extended interval reconstruction bound is not finite").into());
+    }
+    Ok(bound)
 }

@@ -13,6 +13,7 @@ pub mod radiation;
 
 mod terminal;
 mod continuous;
+pub(crate) use continuous::DgTerminalTrajectory;
 use terminal::{TerminalCoupling, TerminalRelation};
 mod mouth;
 pub use mouth::DgDrivenMouthFrame;
@@ -39,20 +40,20 @@ fn invalid(what: &'static str) -> AcousticRealizeError {
     AcousticRealizeError::InvalidDescription { what }
 }
 
-/// Same-step exchange from the DG outlet into its original rational load.
+/// Accepted exchange from an original DG port into its rational load.
 /// Work is SIGNED exchange, not a dissipation or rational-storage certificate.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DgTerminalFrame {
     /// Stable external channel ID. For a finite side branch this denotes its
     /// actual outer outlet; its original bore-side ID is the internal junction.
     pub port: PortId,
-    /// Held volume flow out of the duct and into the terminal [m³/s].
+    /// Interval-mean outward flow [m³/s]; held only on the mean-port backend.
     pub outward_flow_m3_s: f64,
     /// Mean outlet pressure from the original DG step [Pa].
     pub mean_pressure_pa: f64,
-    /// Exact DG outlet impulse times outward flow [J].
+    /// Actual integral of DG pressure times outward flow [J].
     pub port_work_j: f64,
-    /// Original rational mean pressure times held flow and duration [J].
+    /// Actual integral of original rational pressure times its input flow [J].
     pub load_work_j: f64,
     /// Work into the optional original finite gap channel [J]. This contains
     /// kinetic storage and is not all heat. Zero on a direct or closed port.

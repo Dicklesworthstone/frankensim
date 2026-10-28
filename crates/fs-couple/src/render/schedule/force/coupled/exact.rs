@@ -843,9 +843,11 @@ fn stage_candidate(network: &mut CoupledModalSystem, external: &[f64], candidate
     }
     let mut spring_after = 0.0;
     network.forces.copy_from_slice(external);
-    // H_quadratic(t) <= (sqrt(H0)+dt*||u||/sqrt(2))^2 for PSD loss.
-    // Each individual spring obeys k*(b.q)^2 <= 2*H_quadratic.
-    // This bounds reaction magnitude throughout the step, not just endpoints.
+    // The passive base uses H_quadratic(t) <= (sqrt(H0)+dt*||u||/sqrt(2))^2.
+    // An externally accounted linear attachment may instead supply a conservative
+    // bound for the entire interval as h_x; the extra drive term only enlarges it.
+    // Each individual spring obeys k*(b.q)^2 <= 2*H_quadratic, so this bounds
+    // reaction throughout the step, not just at its endpoints.
     let root_twice_energy =
         finite(det::sqrt(2.0 * h_x) + network.dt * det::sqrt(u.iter().map(|f| f * f).sum()))?;
     for (index, (column, link)) in network.columns.iter().zip(&network.connections).enumerate() {

@@ -265,3 +265,5 @@ fn actual_thermal_wall_histories_independent_loss_and_atomic_refusal_survive_joi
     assert_eq!(limited.load().state(), &before);
     assert_eq!(limited.cavity().network().samples_rendered(), 0);
 }
+
+mod terminal;
