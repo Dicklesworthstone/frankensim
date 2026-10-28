@@ -291,3 +291,44 @@ verification passes all eight existing reactor regressions and four prepared
 workspace tests covering analytic independent parcels, retained buffer
 addresses, explicit-energy/source identity and recovery after refusals. This
 is not a full-workspace or DSR verdict.
+
+## Conservative transport of evolving ideal-gas species
+
+Behind `experimental-euler`, `multicomponent::MixtureGas` owns one complete
+original `IdealGasEquilibriumV1` species bank and an explicitly admitted
+positive-Cv caloric interval. Every cell evolves all species partial mass
+densities, axial momentum and total energy. Density is the compensated species
+sum; temperature, pressure, Cv and frozen sound speed use the current
+composition and original NASA-9 laws. Zero species stay admissible without
+clipping, seeding or normalization.
+
+The stored linear energy gauge is `rho E - sum(rho_i e_i(Tmin))`. Shared species
+fluxes carry their corresponding original energy references, preserving total
+physical energy while avoiding loss of sensible heat to large formation
+constants. A two-species regression confirms bit-identical numerical transport
+under independent formation-reference shifts of magnitude 1e18.
+
+`MixtureEuler1d` uses the stationary `Mesh1d` owner, including nonuniform spacing,
+face areas and integrated volumes. Its MUSCL/HLLC, bounded HLL fallback, SSP RK2,
+actual stage CFL, pressure-area force, periodic/transmissive/reflecting boundaries
+and transactional retries follow the existing engineering flow lane. Species,
+momentum and energy use common face wave speeds. `MixtureGas::hllc_flux` exposes
+the same source-bound Riemann closure with caller-supplied output storage.
+Contiguous state, stage, slope and face workspaces are allocated once; successful
+numerical steps allocate no workspace. Source or numerical refusal and
+cancellation publish neither a partial field nor a new clock.
+
+Six focused native regressions cover variable-Cp mixture thermodynamics and
+sound speed; stationary differing-caloric contacts on a tapered nonuniform mesh;
+smooth species-contact refinement; agreement with the frozen-source shock
+solver at uniform composition; formation-reference invariance; and rarefaction,
+structural zeros and late cancellation. Smooth contact L1 errors at 40/80/160
+cells are 5.266259985e-4 / 1.198517512e-4 / 2.972969663e-5. The complete focused
+pure-gas library passed 33 tests when this transport increment was admitted.
+
+This remains an Estimated inviscid engineering lane. Fully conservative moving
+material interfaces with differing caloric laws can exhibit pressure
+oscillations; exact moving-interface pressure-equilibrium preservation is not
+claimed. There is no fully discrete entropy-stability certificate, physical
+species diffusion, viscosity, moving mesh, arbitrary junction or multi-D flow
+claim.

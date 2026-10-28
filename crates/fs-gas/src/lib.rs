@@ -14,6 +14,10 @@ pub mod chemistry;
 #[cfg(feature = "experimental-euler")]
 pub mod dynamics;
 
+/// Conservative transport of evolving species with their original caloric laws.
+#[cfg(feature = "experimental-euler")]
+pub mod multicomponent;
+
 /// Finite-rate updates of the existing source-bearing material gas parcel.
 #[cfg(feature = "material")]
 pub mod material;
