@@ -34,7 +34,7 @@ fn controls() -> GasEquilibriumChamberSolve {
     }
 }
 
-fn fixture(
+pub(super) fn fixture(
     models: Vec<Nasa9StandardStateModelV1>,
     transport: Vec<SpeciesTransportMaterial>,
     elements: &[&str],
@@ -72,7 +72,7 @@ fn fixture(
     (bank, chemistry)
 }
 
-fn isomers() -> (ThermochemicalGasModel, IdealGasEquilibriumV1) {
+pub(super) fn isomers() -> (ThermochemicalGasModel, IdealGasEquilibriumV1) {
     fixture(
         vec![
             species("A", 0.01, 4.0, 0.0),

@@ -1,4 +1,4 @@
-//! Adiabatic constant-pressure equilibrium followed by an explicit chemistry freeze.
+//! Adiabatic gas equilibrium followed by an explicit chemistry freeze.
 //!
 //! The existing NASA-9 Gibbs-equilibrium owner supplies product composition and
 //! temperature. Its complete species models must exactly match this material
@@ -10,6 +10,9 @@
 //! storage, sound speed, heat capacity and downstream nozzle expansion. This
 //! does not supply equilibrium nozzle chemistry, reaction rates, condensed
 //! phases, ionization, a flame-stability verdict or a finite combustion chamber.
+
+/// Constant-volume, internal-energy-conserving chemistry and closed-parcel updates.
+pub mod volume;
 
 use super::parcel::ClosedGasParcel;
 use super::{GasEnergyError, IsochoricGasParcel, updated_point};
@@ -165,7 +168,7 @@ impl ThermochemicalGasModel {
         controls: GasEquilibriumChamberSolve,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<GasEquilibriumChamber, GasEquilibriumChamberError> {
-        self.admit_equilibrium_bank(chemistry, controls, &mut cancelled)?;
+        self.admit_equilibrium_bank(chemistry, controls.mass_tolerance_kg, &mut cancelled)?;
         let target = chemistry.feed_enthalpy(inlet_temperature, feed, &mut cancelled)?;
         self.equilibrium_chamber_hp_enthalpy(chemistry, context, feed, target, controls, cancelled)
     }
@@ -189,7 +192,7 @@ impl ThermochemicalGasModel {
         controls: GasEquilibriumChamberSolve,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<GasEquilibriumChamber, GasEquilibriumChamberError> {
-        self.admit_equilibrium_bank(chemistry, controls, &mut cancelled)?;
+        self.admit_equilibrium_bank(chemistry, controls.mass_tolerance_kg, &mut cancelled)?;
         let (_, pressure) = coordinates(context)?;
         let equilibrium = chemistry.equilibrate_hp_enthalpy(
             pressure,
@@ -200,47 +203,8 @@ impl ThermochemicalGasModel {
         )?;
         poll(&mut cancelled)?;
 
-        // Canonical source order makes this independent of caller feed ordering.
-        // Chemistry has admitted each amount and rejected duplicate identities.
-        let mut feed_mass = 0.0;
-        let mut rounding = 0.0;
-        for model in chemistry.models() {
-            if let Some((_, amount)) = feed.iter().find(|(id, _)| id == model.species()) {
-                let term = amount.value() * model.molar_mass().value();
-                let adjusted = term - rounding;
-                let next = feed_mass + adjusted;
-                rounding = (next - feed_mass) - adjusted;
-                feed_mass = next;
-            }
-        }
-        if !positive(feed_mass) {
-            return Err(GasEquilibriumChamberError::Invalid(
-                "unrepresentable feed mass",
-            ));
-        }
-
-        let mut fractions = Vec::with_capacity(equilibrium.species().len());
-        for product in equilibrium.species() {
-            if product.log_mole_fraction.is_some()
-                && (!positive(product.mole_fraction) || !positive(product.amount.value()))
-            {
-                return Err(GasEquilibriumChamberError::UnrepresentableTrace(
-                    product.species.clone(),
-                ));
-            }
-            fractions.push(product.mole_fraction);
-        }
-        close_generated_simplex(&mut fractions).map_err(|error| {
-            crate::thermochemical_gas::failure("equilibrium product simplex", error)
-        })?;
-        let correction = fractions
-            .iter()
-            .zip(equilibrium.species())
-            .map(|(&fraction, product)| (fraction - product.mole_fraction).abs())
-            .fold(0.0_f64, f64::max);
-        let composition = Composition::new(CompositionBasis::MoleFraction, fractions)
-            .map_err(|error| crate::thermochemical_gas::failure("equilibrium products", error))?;
-        let model = self.with_composition(composition)?;
+        let feed_mass = equilibrium_feed_mass(chemistry, feed)?;
+        let (model, correction) = self.freeze_equilibrium_composition(&equilibrium)?;
         let point = updated_point(
             context,
             equilibrium.temperature().value(),
@@ -293,11 +257,11 @@ impl ThermochemicalGasModel {
     fn admit_equilibrium_bank(
         &self,
         chemistry: &IdealGasEquilibriumV1,
-        controls: GasEquilibriumChamberSolve,
+        mass_tolerance_kg: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), GasEquilibriumChamberError> {
         poll(cancelled)?;
-        if !positive(controls.mass_tolerance_kg) {
+        if !positive(mass_tolerance_kg) {
             return Err(GasEquilibriumChamberError::Invalid(
                 "positive finite chamber mass tolerance required",
             ));
@@ -318,6 +282,60 @@ impl ThermochemicalGasModel {
         }
         Ok(())
     }
+
+    // HP and UV use the same source-preserving composition boundary. Only
+    // exact structural zeros may be removed; positive underflow is a refusal.
+    fn freeze_equilibrium_composition(
+        &self,
+        equilibrium: &IdealGasEquilibriumSolutionV1,
+    ) -> Result<(Self, f64), GasEquilibriumChamberError> {
+        let mut fractions = Vec::with_capacity(equilibrium.species().len());
+        for product in equilibrium.species() {
+            if product.log_mole_fraction.is_some()
+                && (!positive(product.mole_fraction) || !positive(product.amount.value()))
+            {
+                return Err(GasEquilibriumChamberError::UnrepresentableTrace(
+                    product.species.clone(),
+                ));
+            }
+            fractions.push(product.mole_fraction);
+        }
+        close_generated_simplex(&mut fractions).map_err(|error| {
+            crate::thermochemical_gas::failure("equilibrium product simplex", error)
+        })?;
+        let correction = fractions
+            .iter()
+            .zip(equilibrium.species())
+            .map(|(&fraction, product)| (fraction - product.mole_fraction).abs())
+            .fold(0.0_f64, f64::max);
+        let composition = Composition::new(CompositionBasis::MoleFraction, fractions)
+            .map_err(|error| crate::thermochemical_gas::failure("equilibrium products", error))?;
+        Ok((self.with_composition(composition)?, correction))
+    }
+}
+
+// Chemistry must first admit the feed, including duplicate/unknown identities.
+fn equilibrium_feed_mass(
+    chemistry: &IdealGasEquilibriumV1,
+    feed: &[(SpeciesId, Amount)],
+) -> Result<f64, GasEquilibriumChamberError> {
+    let mut mass = 0.0;
+    let mut rounding = 0.0;
+    for model in chemistry.models() {
+        if let Some((_, amount)) = feed.iter().find(|(id, _)| id == model.species()) {
+            let term = amount.value() * model.molar_mass().value();
+            let adjusted = term - rounding;
+            let next = mass + adjusted;
+            rounding = (next - mass) - adjusted;
+            mass = next;
+        }
+    }
+    if !positive(mass) {
+        return Err(GasEquilibriumChamberError::Invalid(
+            "unrepresentable feed mass",
+        ));
+    }
+    Ok(mass)
 }
 
 #[cfg(test)]

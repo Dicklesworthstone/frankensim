@@ -3642,6 +3642,42 @@ temperature with 3.47e-18 kg mass residual and 3.64e-12 J enthalpy residual.
 These values validate that authored integration fixture, not real propellant
 or engine performance. The full repository Cargo workspace was not run.
 
+### Sealed constant-volume equilibrium and conserved parcel chemistry
+
+`energy::equilibrium::volume` connects the original TV/UV chemistry owner to
+the same source-bearing gas material. `equilibrium_chamber_uv` takes a feed
+temperature; `equilibrium_chamber_uv_energy` takes explicit total internal
+energy. Both hold the declared volume and original feed mass, allowing molecular
+count, pressure and temperature to change. Original formation energy is included
+once; constant-pressure enthalpy and frozen heat-capacity formulas are not used
+to solve the reacting endpoint.
+
+The common product bank must contain exactly the chemistry's complete NASA-9
+models. The existing composition-freezing boundary retains active transport
+cards, source packs and external query axes, and refuses unrepresentable positive
+traces. Final material pressure is reclosed at the exact conserved mass/volume;
+the adjustment must fit the declared chemical volume/mass tolerances. Actual
+mass, density, target energy, freezing energy and pressure discrepancies remain
+in the result. Transport and acoustic properties are resolved at this final
+temperature/pressure/composition, with no stale feed coefficients.
+
+`ClosedGasParcel::equilibrate_adiabatic` performs the same operation atomically
+on an existing rigid parcel. Its mass and volume retain their exact original
+bits, and its actual stored internal energy supplies the target. The complete
+bank must retain the active feed's exact caloric/transport models and source-pack
+identities; it may supply initially absent products through the declared element
+constraints. Source refusal, failed balances or cancellation preserve the whole
+original parcel. The resulting storage and acoustic composition is frozen;
+the reacting equilibrium response is returned separately. This is a bounded
+thermodynamic relaxation endpoint, not a time integrator, ignition criterion,
+finite-rate combustor, detonation model or experimental validation.
+
+Focused G0/G1/G3 regressions cover an independent exothermic isomer UV root and
+pressure rise, transport/acoustic consistency, reacting versus frozen heat
+capacity, exact parcel mass/volume preservation, extensive scaling, source
+identity, impossible energy brackets and late cancellation.
+
+
 
 ### Stable simultaneous species and additional-energy exchange
 
