@@ -522,3 +522,6 @@ fn refuses_nonpositive_total_heat_capacity_and_nonoriginal_caloric_object() {
 
 #[path = "normal/material.rs"]
 mod material;
+
+#[path = "normal/dynamics.rs"]
+mod dynamics;

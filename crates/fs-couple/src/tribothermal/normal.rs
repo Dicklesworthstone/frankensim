@@ -917,3 +917,6 @@ fn model_error<E>(error: NormalThermalError) -> NormalThermalError<E> {
 
 /// Original material-card compliance and finite caloric-source binding.
 pub mod material;
+
+/// Two-body inertial normal motion with the same reciprocal finite thermal solve.
+pub mod dynamics;
