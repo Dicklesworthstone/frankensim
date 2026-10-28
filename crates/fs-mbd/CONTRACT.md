@@ -607,3 +607,30 @@ inject global energy. The latter refuses while its explicitly requested
 inelastic counterpart succeeds. Redundant directions remain a typed numerical
 refusal. No friction, collision-time search, position repair, continuous contact
 force or nonsmooth timestep claim is made.
+
+## Native rigid-body finite-patch tangential impulses
+
+`tangential_friction::apply_rigid_friction` binds supplied positive normal
+patches to original COM/principal-frame `RigidBodyState` and `MassProperties`
+values. It derives `B = J M^(-1/2)`, including translational mass,
+orientation-dependent rotational inertia, shear lever arms, torsional couples,
+and all shared-body coupling. No authored effective mass substitutes for body
+inertia. Relative point velocity, relative spin, and common spin come from native
+point kinematics; the existing unregularized tangential island determines the
+impulses.
+
+Actual native point-impulse updates and equal/opposite torsional couples are
+staged on copied bodies. Independent native endpoint-velocity, kinetic-energy,
+midpoint-work, total linear/angular momentum, and whole friction-energy checks
+gate one atomic body/history publication. Separated contact points refuse unless
+within the explicit geometry tolerance; any resulting angular-momentum defect
+still independently refuses. Changing-coefficient work remains an external signed
+port, while only physical microslip loss is friction heat.
+
+Poses stay fixed: this is an impulse phase requiring the surrounding integrator's
+geometry advance and normal law, not a complete contact time integrator,
+restitution solver, or Moreau–Jean stepper. The broad nonsmooth normal/impact
+deliverables remain open. Three physical regression groups cover rotated
+anisotropic off-center bodies with analytic shear/torsional recoil, multiple
+contacts sharing a body with exact input-order invariance, and late balance,
+cancellation, duplicate-work, and geometry refusal without body/history mutation.

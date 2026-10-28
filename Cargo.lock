@@ -2035,8 +2035,10 @@ name = "fs-mbd"
 version = "0.0.1"
 dependencies = [
  "fs-contact",
+ "fs-exec",
  "fs-ga",
  "fs-math",
+ "fs-tribo",
 ]
 
 [[package]]
