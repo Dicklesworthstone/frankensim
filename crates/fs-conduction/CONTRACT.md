@@ -132,6 +132,17 @@ table owner; an unrelated card refuses. Legacy hand-composed conductivity
 models remain independent because they carry claim receipts rather than card
 identity.
 
+`MaterialHeatCapacitySource` additionally binds exact catalog density/Cp keys
+and an explicitly named temperature axis, without aliases or re-entered
+coefficients. Caller-listed source selectors admit only typed dimensionless
+Boolean applicability flags constrained to matching singleton values; they
+cannot drive property values or replace physical field/rate coordinates.
+Their original values and quantity descriptors remain in every endpoint and
+the paired `isotropic_conductivity_with_property` source. Both caloric and
+conductivity sources must explicitly bound temperature; point-only or unknown
+temperature data cannot authorize a finite heating trajectory. Bounded frozen
+engineering references retain that model's domain and authority limitations.
+
 `BackwardEuler::uniform_material` and `material_assigned`, and the history
 runner's `MaterialUniform`/`MaterialById` capacity variants, retain these source
 bundles while using the original lumped P1 capacity matrix. Every initial,

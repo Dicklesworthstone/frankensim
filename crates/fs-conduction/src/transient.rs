@@ -67,7 +67,7 @@ pub mod enthalpy;
 pub mod deposition;
 
 mod capacity;
-pub use capacity::{HeatCapacity, MaterialHeatCapacity};
+pub use capacity::{HeatCapacity, MaterialHeatCapacity, MaterialHeatCapacitySource};
 
 use crate::assemble::{
     DofMap, assemble_operator, assemble_operator_with_element_materials, reduce_matrix_and_lift,

@@ -4,15 +4,15 @@
 //! validity-wide scalar laws. Temperature-varying data belong to the existing
 //! reference-mass enthalpy owner; they are never silently frozen here.
 
-use fs_matdb::{MaterialCard, PropertyKey, QueryPoint, SelectionPolicy};
+use fs_matdb::{EvaluationDecision, MaterialCard, PropertyKey, QueryPoint, SelectionPolicy};
 use fs_material::state_point::{
     DENSITY_PROPERTY, MaterialPropertySelection, ResolvedMaterialStatePoint,
-    SPECIFIC_HEAT_CAPACITY_DIMS, SPECIFIC_HEAT_CAPACITY_PROPERTY, ScalarAdmissibility,
-    ScalarPropertyRequirement, THERMAL_CONDUCTIVITY_DIMS, THERMAL_CONDUCTIVITY_PROPERTY,
-    resolve_material_state_point,
+    ResolvedScalarProperty, SPECIFIC_HEAT_CAPACITY_DIMS, SPECIFIC_HEAT_CAPACITY_PROPERTY,
+    ScalarAdmissibility, ScalarPropertyRequirement, THERMAL_CONDUCTIVITY_DIMS,
+    THERMAL_CONDUCTIVITY_PROPERTY, is_fixed_external_coordinate, resolve_material_state_point,
 };
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
-use fs_qty::{Density, QuantitySpec, Temperature};
+use fs_qty::{Density, Dims, QuantitySpec, Temperature};
 
 use super::VolumetricHeatCapacity;
 use super::backward_euler::BackwardEuler;
@@ -20,6 +20,24 @@ use crate::{ConductionError, ConductivityModel, ConductivityTable, material::Tem
 use crate::{ConductionMesh, ElementMaterials, MaterialId};
 use fs_exec::Cx;
 use std::collections::BTreeMap;
+
+/// Exact source roles for constant thermal storage. Names and typed conditions
+/// are retained in the original card and query receipts, never rewritten.
+#[derive(Debug, Clone, Copy)]
+pub struct MaterialHeatCapacitySource<'a> {
+    /// Bulk density key in kg/m³.
+    pub density: &'a PropertyKey,
+    /// Specific heat capacity key in J/(kg K).
+    pub specific_heat: &'a PropertyKey,
+    /// Original absolute-temperature coordinate, in kelvin.
+    pub temperature_axis: &'a str,
+    /// Explicit opt-in to fixed source applicability flags, for example a
+    /// bounded engineering-reference model. Each must be a typed dimensional
+    /// Boolean (exactly 0 or 1) constrained to that singleton by a selected
+    /// source. They cannot be response axes or stand in for temperature,
+    /// frequency, field, strain or rate dependence. No flag names are inferred.
+    pub fixed_source_selectors: &'a [&'a str],
+}
 
 /// Density and specific heat from one immutable material card, with an explicit
 /// temperature interval and unchanged external pressure/composition conditions.
@@ -32,6 +50,8 @@ pub struct MaterialHeatCapacity {
     endpoints: [ResolvedMaterialStatePoint; 2],
     capacity: VolumetricHeatCapacity,
     span: TemperatureSpan,
+    temperature_axis: String,
+    fixed_source_selectors: Vec<String>,
 }
 
 impl MaterialHeatCapacity {
@@ -51,6 +71,46 @@ impl MaterialHeatCapacity {
         high_k: f64,
         selection: MaterialPropertySelection,
     ) -> Result<Self, ConductionError> {
+        Self::from_card_at_query_points(
+            card,
+            MaterialHeatCapacitySource {
+                density: &PropertyKey::new(DENSITY_PROPERTY, Density::DIMS),
+                specific_heat: &PropertyKey::new(
+                    SPECIFIC_HEAT_CAPACITY_PROPERTY,
+                    SPECIFIC_HEAT_CAPACITY_DIMS,
+                ),
+                temperature_axis: "T",
+                fixed_source_selectors: &[],
+            },
+            point,
+            [low_k, high_k],
+            selection,
+        )
+    }
+
+    /// Resolve explicitly selected source keys without renaming the source
+    /// properties or its absolute-temperature coordinate. The reference point
+    /// retains every typed external condition; only `temperature_axis` changes
+    /// when the pinned claims are checked at the two interval endpoints.
+    ///
+    /// Density and specific heat must be positive, static scalar laws with
+    /// their respective SI dimensions. This does not freeze curves, reinterpret
+    /// an unknown test temperature as support, or select an alternative source
+    /// if the requested keys or conditions are missing.
+    pub fn from_card_at_query_points(
+        card: &MaterialCard,
+        source: MaterialHeatCapacitySource<'_>,
+        point: &QueryPoint,
+        temperature_span_k: [f64; 2],
+        selection: MaterialPropertySelection,
+    ) -> Result<Self, ConductionError> {
+        let MaterialHeatCapacitySource {
+            density,
+            specific_heat,
+            temperature_axis,
+            fixed_source_selectors,
+        } = source;
+        let [low_k, high_k] = temperature_span_k;
         if !low_k.is_finite() || !high_k.is_finite() || low_k <= 0.0 || low_k >= high_k {
             return Err(invalid(
                 "a finite positive temperature interval is required",
@@ -60,46 +120,92 @@ impl MaterialHeatCapacity {
             QuantityKind::AbsoluteTemperature,
             ValueForm::Static,
         ));
-        if point.axis_quantities().get("T").is_some_and(|quantity| {
-            *quantity != absolute && *quantity != QuantitySpec::dimensional(Temperature::DIMS)
-        }) || !point
-            .axes()
-            .get("T")
-            .is_some_and(|value| (low_k..=high_k).contains(value))
-            || point
-                .axis_quantities()
-                .iter()
-                .any(|(axis, quantity)| axis != "T" && quantity.dims() == Temperature::DIMS)
+        if point
+            .axis_quantities()
+            .get(temperature_axis)
+            .is_some_and(|quantity| {
+                *quantity != absolute && *quantity != QuantitySpec::dimensional(Temperature::DIMS)
+            })
+            || !point
+                .axes()
+                .get(temperature_axis)
+                .is_some_and(|value| (low_k..=high_k).contains(value))
+            || point.axis_quantities().iter().any(|(axis, quantity)| {
+                axis != temperature_axis && quantity.dims() == Temperature::DIMS
+            })
         {
             return Err(invalid(
-                "the reference requires one absolute-temperature coordinate T inside the interval",
+                "the reference requires one declared absolute-temperature coordinate inside the interval",
             ));
         }
-        let requirements = [
-            (DENSITY_PROPERTY, Density::DIMS),
-            (SPECIFIC_HEAT_CAPACITY_PROPERTY, SPECIFIC_HEAT_CAPACITY_DIMS),
-        ]
-        .into_iter()
-        .map(|(name, dims)| {
-            ScalarPropertyRequirement::try_new(name, dims, ScalarAdmissibility::StrictlyPositive)
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| invalid(&error.to_string()))?;
+        for (index, axis) in fixed_source_selectors.iter().enumerate() {
+            if *axis == temperature_axis
+                || fixed_source_selectors[..index].contains(axis)
+                || point.axis_quantities().get(*axis)
+                    != Some(&QuantitySpec::dimensional(Dims::NONE))
+                || !point
+                    .axes()
+                    .get(*axis)
+                    .is_some_and(|value| *value == 0.0 || *value == 1.0)
+            {
+                return Err(invalid(
+                    "fixed source selectors must be distinct typed dimensionless Boolean coordinates",
+                ));
+            }
+        }
+        for (key, dims) in [
+            (density, Density::DIMS),
+            (specific_heat, SPECIFIC_HEAT_CAPACITY_DIMS),
+        ] {
+            if key.quantity() != QuantitySpec::dimensional(dims) {
+                return Err(invalid(
+                    "source keys must declare bulk density and specific heat capacity, not another quantity kind",
+                ));
+            }
+        }
+        let requirements = [density, specific_heat]
+            .into_iter()
+            .map(|key| {
+                ScalarPropertyRequirement::try_with_key(key, ScalarAdmissibility::StrictlyPositive)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| invalid(&error.to_string()))?;
         let reference = resolve_material_state_point(card, point, &requirements, selection)
             .map_err(|error| invalid(&error.to_string()))?;
         for property in reference.properties() {
             if !property.source_axes().is_empty()
-                || !property.is_static_at_fixed_external_conditions()
+                || property.answer().receipt.decision != EvaluationDecision::ConstantWithinValidity
             {
                 return Err(invalid(
                     "constant storage requires static scalar density and specific heat; use source-bound enthalpy for varying laws",
+                ));
+            }
+            admit_thermal_source_context(
+                property,
+                temperature_axis,
+                point,
+                fixed_source_selectors,
+            )?;
+        }
+        for axis in fixed_source_selectors {
+            if !reference.properties().iter().any(|property| {
+                property
+                    .answer()
+                    .evidence
+                    .model
+                    .validity
+                    .bound(axis)
+                    .is_some()
+            }) {
+                return Err(invalid(
+                    "a fixed source selector must occur in a selected caloric source's applicability domain",
                 ));
             }
         }
         let resolve_endpoint = |temperature| {
             let query = point
                 .clone()
-                .with("T", temperature)
+                .with(temperature_axis, temperature)
                 .map_err(|error| invalid(&error.to_string()))?;
             reference
                 .at_query_point(card, &query)
@@ -107,11 +213,11 @@ impl MaterialHeatCapacity {
         };
         let endpoints = [resolve_endpoint(low_k)?, resolve_endpoint(high_k)?];
         let density = reference
-            .property(DENSITY_PROPERTY)
+            .property_by_key(density)
             .ok_or_else(|| invalid("density source is missing"))?
             .value_si();
         let specific_heat = reference
-            .property(SPECIFIC_HEAT_CAPACITY_PROPERTY)
+            .property_by_key(specific_heat)
             .ok_or_else(|| invalid("specific-heat source is missing"))?
             .value_si();
         let capacity = VolumetricHeatCapacity::declared(density * specific_heat)?;
@@ -123,6 +229,11 @@ impl MaterialHeatCapacity {
                 low: low_k,
                 high: high_k,
             },
+            temperature_axis: temperature_axis.to_owned(),
+            fixed_source_selectors: fixed_source_selectors
+                .iter()
+                .map(|axis| (*axis).to_owned())
+                .collect(),
         })
     }
 
@@ -160,11 +271,6 @@ impl MaterialHeatCapacity {
         card: &MaterialCard,
         selection: SelectionPolicy,
     ) -> Result<ConductivityModel, ConductionError> {
-        if card.content_hash() != self.reference.card_identity() {
-            return Err(invalid(
-                "paired conductivity requires the original heat-capacity material card",
-            ));
-        }
         let quantity = if card
             .claims()
             .registered_quantity(THERMAL_CONDUCTIVITY_PROPERTY)
@@ -178,17 +284,119 @@ impl MaterialHeatCapacity {
             QuantitySpec::dimensional(THERMAL_CONDUCTIVITY_DIMS)
         };
         let key = PropertyKey::with_quantity(THERMAL_CONDUCTIVITY_PROPERTY, quantity);
+        self.isotropic_conductivity_with_property(card, &key, selection)
+    }
+
+    /// Pair an explicitly selected thermal-conductivity key with this original
+    /// material's heat storage. The source key, typed external context and
+    /// temperature coordinate are preserved; no canonical-name alias or
+    /// fallback constant is inserted. Isotropy is the caller's model choice.
+    pub fn isotropic_conductivity_with_property(
+        &self,
+        card: &MaterialCard,
+        property: &PropertyKey,
+        selection: SelectionPolicy,
+    ) -> Result<ConductivityModel, ConductionError> {
+        if card.content_hash() != self.reference.card_identity() {
+            return Err(invalid(
+                "paired conductivity requires the original heat-capacity material card",
+            ));
+        }
         let points = [self.endpoints[0].query(), self.endpoints[1].query()];
+        let requirement = ScalarPropertyRequirement::try_with_key(
+            property,
+            ScalarAdmissibility::StrictlyPositive,
+        )
+        .map_err(|error| invalid(&error.to_string()))?;
+        let reference_point = self.reference.query();
+        let reference = resolve_material_state_point(
+            card,
+            &reference_point,
+            &[requirement],
+            match selection {
+                SelectionPolicy::SingleClaimOnly => MaterialPropertySelection::SingleClaimOnly,
+                SelectionPolicy::PreferObservationBacked => {
+                    MaterialPropertySelection::PreferObservationBacked
+                }
+            },
+        )
+        .map_err(|error| invalid(&error.to_string()))?;
+        let selectors: Vec<_> = self
+            .fixed_source_selectors
+            .iter()
+            .map(String::as_str)
+            .collect();
+        admit_thermal_source_context(
+            &reference.properties()[0],
+            &self.temperature_axis,
+            &reference_point,
+            &selectors,
+        )?;
         Ok(ConductivityModel::isotropic(
-            ConductivityTable::from_claims_at_query_points(
+            ConductivityTable::from_claims_pinned_at_query_points(
                 card.claims(),
-                &key,
-                "T",
+                property,
+                &self.temperature_axis,
                 &points,
-                selection,
+                reference.properties()[0].answer().receipt.selected,
             )?,
         ))
     }
+}
+
+fn admit_thermal_source_context(
+    property: &ResolvedScalarProperty,
+    temperature_axis: &str,
+    point: &QueryPoint,
+    selectors: &[&str],
+) -> Result<(), ConductionError> {
+    let validity = &property.answer().evidence.model.validity;
+    if validity.bound(temperature_axis).is_none() {
+        return Err(invalid(
+            "thermal transport requires explicit source temperature support; unknown source temperature does not admit a heating interval",
+        ));
+    }
+    for (axis, dims) in property.source_axes() {
+        if selectors.contains(&axis.as_str())
+            || (axis == temperature_axis && *dims != Temperature::DIMS)
+            || (axis != temperature_axis
+                && !is_fixed_external_coordinate(
+                    axis,
+                    point.axis_quantities().get(axis).copied(),
+                    point.axes().get(axis).copied(),
+                ))
+        {
+            return Err(invalid(
+                "a thermal source cannot vary with a source selector or an unowned physical coordinate",
+            ));
+        }
+    }
+    for (axis, &(low, high)) in validity.bounds() {
+        if axis == temperature_axis {
+            continue;
+        }
+        let quantity = point.axis_quantities().get(axis).copied();
+        let value = point.axes().get(axis).copied();
+        if selectors.contains(&axis.as_str()) {
+            if quantity != Some(QuantitySpec::dimensional(Dims::NONE))
+                || value != Some(low)
+                || low != high
+                || (low != 0.0 && low != 1.0)
+            {
+                return Err(invalid(
+                    "fixed source selectors require matching singleton Boolean source validity",
+                ));
+            }
+        } else if !is_fixed_external_coordinate(axis, quantity, value)
+            || quantity.is_some_and(|q| q.dims() == Temperature::DIMS)
+            || (axis == "T" && quantity.is_none())
+        {
+            return Err(invalid(
+                "thermal sources require fixed typed external conditions or explicitly selected source applicability flags",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn invalid(what: &str) -> ConductionError {

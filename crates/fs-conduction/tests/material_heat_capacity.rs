@@ -6,8 +6,8 @@ use fs_conduction::bc::history::march::{
     HeatSourceHistory, ThermalHistoryCapacity, ThermalHistoryMethod, ThermalHistoryProblem,
     ThermalHistoryRun,
 };
-use fs_conduction::transient::MaterialHeatCapacity;
 use fs_conduction::transient::backward_euler::{BackwardEuler, NonlinearStepConfig, StepConfig};
+use fs_conduction::transient::{MaterialHeatCapacity, MaterialHeatCapacitySource};
 use fs_conduction::{
     ConductionError, ConductionMesh, ConductionProblem, ConductivityModel, ElementMaterials,
     LinearConfig, MaterialId, MaterialTable, ScalarField, ThermalBc, ThermalBoundaryBuilder,
@@ -21,7 +21,8 @@ use fs_material::state_point::{
     DENSITY_PROPERTY, MaterialPropertySelection, SPECIFIC_HEAT_CAPACITY_DIMS,
     SPECIFIC_HEAT_CAPACITY_PROPERTY, THERMAL_CONDUCTIVITY_DIMS, THERMAL_CONDUCTIVITY_PROPERTY,
 };
-use fs_qty::{Density, Temperature};
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+use fs_qty::{Density, Dims, QuantitySpec, Temperature};
 use fs_rep_mesh::TetComplex;
 use fs_scenario::scenario::Environment;
 use support::{with_cancelled_cx, with_cx};
@@ -110,6 +111,299 @@ fn controls() -> StepConfig {
         },
         energy_tolerance_j: 1e-8,
     }
+}
+
+const CATALOG_SELECTORS: [&str; 2] = ["engineering-reference-model", "source-temperatures-matched"];
+
+fn catalog_keys() -> [PropertyKey; 3] {
+    [
+        PropertyKey::new("density", Density::DIMS),
+        PropertyKey::new("specific-heat-capacity", SPECIFIC_HEAT_CAPACITY_DIMS),
+        PropertyKey::with_quantity(
+            "thermal-conductivity",
+            QuantitySpec::semantic(SemanticType::new(
+                QuantityKind::ThermalConductivity,
+                ValueForm::Static,
+            )),
+        ),
+    ]
+}
+
+fn catalog_validity(temperature: Option<[f64; 2]>) -> ValidityDomain {
+    let mut domain = ValidityDomain::unconstrained();
+    for (axis, value) in CATALOG_SELECTORS.into_iter().zip([1.0, 0.0]) {
+        domain = domain.with_quantity(axis, QuantitySpec::dimensional(Dims::NONE), value, value);
+    }
+    if let Some([low, high]) = temperature {
+        domain = domain.with_quantity(
+            "temperature",
+            QuantitySpec::semantic(SemanticType::new(
+                QuantityKind::AbsoluteTemperature,
+                ValueForm::Static,
+            )),
+            low,
+            high,
+        );
+    }
+    domain
+}
+
+fn catalog_point() -> QueryPoint {
+    let mut point = QueryPoint::new()
+        .with_quantity(
+            "temperature",
+            QuantitySpec::semantic(SemanticType::new(
+                QuantityKind::AbsoluteTemperature,
+                ValueForm::Static,
+            )),
+            297.65,
+        )
+        .unwrap();
+    for (axis, value) in CATALOG_SELECTORS.into_iter().zip([1.0, 0.0]) {
+        point = point
+            .with_quantity(axis, QuantitySpec::dimensional(Dims::NONE), value)
+            .unwrap();
+    }
+    point
+}
+
+fn catalog_card(values: [f64; 3], validity: ValidityDomain) -> MaterialCard {
+    let mut claims = ClaimSet::new();
+    for (key, value) in catalog_keys().into_iter().zip(values) {
+        let dims = key.dims();
+        claims
+            .insert_claim(PropertyClaim {
+                key,
+                value: PropertyValue::Scalar { value, dims },
+                validity: validity.clone(),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::ConstantWithinValidity,
+                observations: Vec::new(),
+                provenance: Provenance {
+                    source: "manufactured coefficients with the catalog's exact source schema"
+                        .into(),
+                    license: "CC0-1.0".into(),
+                    artifact: None,
+                },
+            })
+            .unwrap();
+    }
+    MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: "synthetic catalog-schema thermal material".into(),
+            phase: "solid".into(),
+            process: "numerical regression; no measured-material claim".into(),
+            revision: 0,
+        },
+        claims,
+        Vec::new(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn g1_catalog_source_keys_and_explicit_selectors_drive_actual_transient_fem() {
+    let mesh = mesh(false);
+    let keys = catalog_keys();
+    let point = catalog_point();
+    let source = MaterialHeatCapacitySource {
+        density: &keys[0],
+        specific_heat: &keys[1],
+        temperature_axis: "temperature",
+        fixed_source_selectors: &CATALOG_SELECTORS,
+    };
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .adiabatic_remainder()
+        .finish()
+        .unwrap();
+    let heat = ScalarField::Uniform(1.5);
+    for [rho, cp, conductivity] in [[3.0, 5.0, 2.0], [5.0, 6.0, 1.5]] {
+        let card = catalog_card(
+            [rho, cp, conductivity],
+            catalog_validity(Some([297.15, 298.15])),
+        );
+        let storage = MaterialHeatCapacity::from_card_at_query_points(
+            &card,
+            source,
+            &point,
+            [297.15, 298.15],
+            MaterialPropertySelection::PreferObservationBacked,
+        )
+        .unwrap();
+        let k = storage
+            .isotropic_conductivity_with_property(
+                &card,
+                &keys[2],
+                SelectionPolicy::PreferObservationBacked,
+            )
+            .unwrap();
+        assert_eq!(storage.value_j_per_m3_k(), rho * cp);
+        assert!(
+            storage
+                .reference()
+                .property("specific_heat_capacity")
+                .is_none()
+        );
+        for state in [
+            storage.reference(),
+            &storage.endpoints()[0],
+            &storage.endpoints()[1],
+        ] {
+            assert_eq!(state.axis_quantities(), point.axis_quantities());
+            let query = state.query();
+            assert_eq!(query.axes().get("engineering-reference-model"), Some(&1.0));
+            assert_eq!(query.axes().get("source-temperatures-matched"), Some(&0.0));
+            assert!(!query.axes().contains_key("T"));
+            for property in state.properties() {
+                card.claims()
+                    .verify_receipt(&property.answer().receipt)
+                    .unwrap();
+            }
+        }
+        for receipt in k.receipts() {
+            card.claims().verify_receipt(receipt).unwrap();
+            assert_eq!(receipt.axis_quantities, *point.axis_quantities());
+        }
+        with_cx(|cx| {
+            let engine = BackwardEuler::uniform_material(cx, &mesh, &storage).unwrap();
+            let solved = engine
+                .advance(
+                    cx,
+                    ConductionProblem {
+                        mesh: &mesh,
+                        boundary: &boundary,
+                        material: &k,
+                        source: &heat,
+                        element_materials: None,
+                    },
+                    None,
+                    &[297.65, 297.85, 297.45, 297.65],
+                    0.5,
+                    controls(),
+                )
+                .unwrap();
+            // Independent P1 mode decay plus uniform caloric heating on V=1/6.
+            let amplitude = 0.2 / (1.0 + 4.0 * conductivity * 0.5 / (rho * cp));
+            let mean = 297.65 + 1.5 * 0.5 / (rho * cp);
+            for (&actual, expected) in
+                solved
+                    .temperature
+                    .iter()
+                    .zip([mean, mean + amplitude, mean - amplitude, mean])
+            {
+                assert!((actual - expected).abs() < 1e-9);
+            }
+            assert!((solved.stored_energy_change_j - 0.125).abs() < 1e-8);
+            assert_eq!(
+                engine.material_capacities()[0].reference().card_identity(),
+                card.content_hash()
+            );
+        });
+        let other = catalog_card(
+            [rho * 2.0, cp, conductivity],
+            catalog_validity(Some([297.15, 298.15])),
+        );
+        assert!(
+            storage
+                .isotropic_conductivity_with_property(
+                    &other,
+                    &keys[2],
+                    SelectionPolicy::SingleClaimOnly,
+                )
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn g0_catalog_source_admission_preserves_temperature_and_selector_limits() {
+    let keys = catalog_keys();
+    let point = catalog_point();
+    let source = MaterialHeatCapacitySource {
+        density: &keys[0],
+        specific_heat: &keys[1],
+        temperature_axis: "temperature",
+        fixed_source_selectors: &CATALOG_SELECTORS,
+    };
+    let normal = catalog_validity(Some([297.15, 298.15]));
+    let material = catalog_card([3.0, 5.0, 2.0], normal.clone());
+    let resolve = |card: &MaterialCard, source, point: &QueryPoint, span| {
+        MaterialHeatCapacity::from_card_at_query_points(
+            card,
+            source,
+            point,
+            span,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+    };
+    assert!(resolve(&material, source, &point, [297.15, 298.15]).is_ok());
+    for selectors in [
+        &[][..],
+        &CATALOG_SELECTORS[..1],
+        &[CATALOG_SELECTORS[0], CATALOG_SELECTORS[0]][..],
+    ] {
+        assert!(
+            resolve(
+                &material,
+                MaterialHeatCapacitySource {
+                    fixed_source_selectors: selectors,
+                    ..source
+                },
+                &point,
+                [297.15, 298.15]
+            )
+            .is_err()
+        );
+    }
+    for invalid_point in [
+        point
+            .clone()
+            .with("engineering-reference-model", 0.0)
+            .unwrap(),
+        point
+            .clone()
+            .with("source-temperatures-matched", 1.0)
+            .unwrap(),
+        point
+            .clone()
+            .with_quantity("temperature", QuantitySpec::dimensional(Dims::NONE), 297.65)
+            .unwrap(),
+    ] {
+        assert!(resolve(&material, source, &invalid_point, [297.15, 298.15]).is_err());
+    }
+    for validity in [
+        catalog_validity(None),
+        catalog_validity(Some([297.65, 297.65])),
+        normal.clone().with_quantity(
+            CATALOG_SELECTORS[0],
+            QuantitySpec::dimensional(Dims::NONE),
+            0.0,
+            1.0,
+        ),
+    ] {
+        let card = catalog_card([3.0, 5.0, 2.0], validity);
+        assert!(resolve(&card, source, &point, [297.15, 298.15]).is_err());
+    }
+    assert!(resolve(&material, source, &point, [297.15, 298.16]).is_err());
+    assert!(
+        resolve(
+            &material,
+            MaterialHeatCapacitySource {
+                specific_heat: &keys[2],
+                ..source
+            },
+            &point,
+            [297.15, 298.15]
+        )
+        .is_err()
+    );
+    let stress = QuantitySpec::semantic(SemanticType::new(QuantityKind::Stress, ValueForm::Static));
+    let stressed = catalog_card(
+        [3.0, 5.0, 2.0],
+        normal.with_quantity("stress", stress, 1.0, 1.0),
+    );
+    let point = point.with_quantity("stress", stress, 1.0).unwrap();
+    assert!(resolve(&stressed, source, &point, [297.15, 298.15]).is_err());
 }
 
 #[test]

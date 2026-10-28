@@ -1,5 +1,5 @@
-//! G0/G3 source-to-pack/query checks for the October 2026 material additions.
-//! These establish source transport and bounded evaluation, not experimental validation.
+//! G0/G1/G3 source-to-pack/query and reduced thermal-consumer checks.
+//! These establish source transport and bounded model evaluation, not experimental validation.
 #![deny(unsafe_code)]
 
 use std::path::{Path, PathBuf};
@@ -242,6 +242,7 @@ fn g0_g3_clear_wood_density_stiffness_and_moisture_are_preserved() {
 
 #[test]
 fn g0_g3_elements_minerals_and_alloys_keep_reference_model_guards() {
+    let mut cooling_times = Vec::new();
     for (slug, count, t, rho, cp, k) in [
         (
             "diamond-crystran-thermal-reference",
@@ -361,6 +362,7 @@ fn g0_g3_elements_minerals_and_alloys_keep_reference_model_guards() {
         sample(&pack, "density", RHO, &p, rho);
         sample(&pack, "specific-heat-capacity", CP, &p, cp);
         sample(&pack, "thermal-conductivity", K, &p, k);
+        cooling_times.push(catalog_slab_cooling(&pack, &p, t, rho, cp, k));
         for bad in [
             p.clone().with("engineering-reference-model", 0.0).unwrap(),
             p.clone().with("source-temperatures-matched", 1.0).unwrap(),
@@ -383,6 +385,122 @@ fn g0_g3_elements_minerals_and_alloys_keep_reference_model_guards() {
             );
         }
     }
+    // A real material change reaches the physical screening calculation.
+    // The thermal-reference source assumptions remain explicit for both.
+    assert!(cooling_times[2] > 1000.0 * cooling_times[0]); // fused silica / diamond
+}
+
+/// Compile-derived material data feed the production constant-capacity binding
+/// and the existing first-mode slab screen. The source bundles explicitly
+/// declare a frozen 1 K reference interval; this is not a broad heating law.
+fn catalog_slab_cooling(
+    pack: &NormalizedPack,
+    point: &QueryPoint,
+    low_k: f64,
+    rho: f64,
+    cp: f64,
+    k: f64,
+) -> f64 {
+    use fs_conduction::reduced_slab::{FirstModeSlabInput, step_first_mode_slab_cooling};
+    use fs_conduction::transient::{MaterialHeatCapacity, MaterialHeatCapacitySource};
+    use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack};
+    use fs_material::state_point::MaterialPropertySelection;
+
+    let normalized = NormalizedMaterialCardPack::new(
+        MaterialStateId {
+            chemistry: pack.pack_id().into(),
+            phase: "solid".into(),
+            process: "explicit frozen engineering reference; source temperatures unmatched".into(),
+            revision: 0,
+        },
+        pack.clone(),
+    )
+    .unwrap();
+    let card = normalized.card();
+    let rho_key = key("density", RHO);
+    let cp_key = key("specific-heat-capacity", CP);
+    let k_key = key("thermal-conductivity", K);
+    let source = MaterialHeatCapacitySource {
+        density: &rho_key,
+        specific_heat: &cp_key,
+        temperature_axis: "temperature",
+        fixed_source_selectors: &["engineering-reference-model", "source-temperatures-matched"],
+    };
+    let capacity = MaterialHeatCapacity::from_card_at_query_points(
+        card,
+        source,
+        point,
+        [low_k, low_k + 1.0],
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap_or_else(|error| panic!("{}: {error}", pack.pack_id()));
+    assert!((capacity.value_j_per_m3_k() / (rho * cp) - 1.0).abs() < 1e-12);
+    for state in [
+        capacity.reference(),
+        &capacity.endpoints()[0],
+        &capacity.endpoints()[1],
+    ] {
+        assert_eq!(state.card_identity(), card.content_hash());
+        for property in state.properties() {
+            card.claims()
+                .verify_receipt(&property.answer().receipt)
+                .unwrap();
+        }
+    }
+    let conductivity = capacity
+        .isotropic_conductivity_with_property(card, &k_key, SelectionPolicy::SingleClaimOnly)
+        .unwrap();
+    let input = FirstModeSlabInput {
+        thickness_m: 0.001,
+        thermal_diffusivity_m2_s: conductivity.tensor_at(low_k + 0.5).unwrap()[0][0]
+            / capacity.value_j_per_m3_k(),
+        initial_temperature_k: low_k + 0.75,
+        boundary_temperature_k: low_k + 0.25,
+        threshold_temperature_k: low_k + 0.5,
+    };
+    let result = step_first_mode_slab_cooling(input).unwrap();
+    let expected_tau = 1e-6 * rho * cp / (std::f64::consts::PI.powi(2) * k);
+    assert!((result.time_constant_s / expected_tau - 1.0).abs() < 1e-12);
+    assert!((result.time_to_threshold_s / (expected_tau * 2.0_f64.ln()) - 1.0).abs() < 1e-12);
+    let crossing = result
+        .temperature_at_s(input, result.time_to_threshold_s)
+        .unwrap();
+    assert!((crossing - input.threshold_temperature_k).abs() < 1e-10);
+    let thick = step_first_mode_slab_cooling(FirstModeSlabInput {
+        thickness_m: 0.002,
+        ..input
+    })
+    .unwrap();
+    assert!((thick.time_to_threshold_s / result.time_to_threshold_s - 4.0).abs() < 1e-12);
+    assert!(
+        MaterialHeatCapacity::from_card_at_query_points(
+            card,
+            source,
+            point,
+            [low_k, low_k + 1.001],
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .is_err()
+    );
+    assert!(
+        MaterialHeatCapacity::from_card_at_query_points(
+            card,
+            MaterialHeatCapacitySource {
+                fixed_source_selectors: &[],
+                ..source
+            },
+            point,
+            [low_k, low_k + 1.0],
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .is_err()
+    );
+    eprintln!(
+        "{}: first-mode 1 mm slab half-excess cooling = {:.9} s",
+        pack.pack_id(),
+        result.time_to_threshold_s
+    );
+    result.time_to_threshold_s
 }
 
 fn plastic_point(grade: &str) -> QueryPoint {
