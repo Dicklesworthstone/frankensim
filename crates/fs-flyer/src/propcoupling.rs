@@ -10,8 +10,9 @@
 //!   4. momentum-consistent slipstream w from each thrust,
 //!   5. deterministic VECTOR AITKEN relaxation on x = [w_L, w_R]
 //!      (CANDIDATE A: omega0 = 0.5, clamp [0.25, 0.80], cap 4),
-//!   6. accept on the joint residual; growth > 25% rejects the correction
-//!      and retries once at omega_min; second growth or cap exhaustion is
+//!   6. accept on the joint residual; growth > 25% against the correction's
+//!      accepted predecessor rejects the entire trial and retries once from
+//!      that predecessor at omega_min; second growth or cap exhaustion is
 //!      the typed `PropAirframeCouplingDidNotConverge` — NEVER a silent
 //!      one-way switch (plan law).
 //!
@@ -121,7 +122,7 @@ pub struct CoupledStep {
     /// Accepted local strip velocities including prop wash in distributed
     /// mode; force assembly must use these with `gamma`. Legacy mode is None.
     pub strip_velocity_mps: Option<Vec<[f64; 3]>>,
-    /// Aitken corrections used.
+    /// Correction attempts used, including a rejected trial and its retry.
     pub corrections: u32,
     /// Final relative residual: joint L2 in legacy mode; maximum per-disk
     /// relative residual in distributed mode (1e-6 m/s denominator safeguard).
@@ -312,13 +313,12 @@ fn coupled_step_impl(
     let wash = wash_map(strips, panels, disks, rotor.radius_m);
     let disk_area = core::f64::consts::PI * rotor.radius_m * rotor.radius_m;
     let mut x = warm.unwrap_or([0.5, 0.5]);
+    let mut x_prev = x;
     let mut corrections = 0u32;
-    let mut growth_strikes = 0u32;
+    let mut retry_used = false;
     let mut r_prev: Option<[f64; 2]> = None;
     let mut omega_prev = 1.0f64;
     let mut res_prev = f64::INFINITY;
-    let mut res_best = f64::INFINITY;
-    let mut omega_locked = false;
     let mut unrelaxed_done = false;
     // One evaluation of the fixed-point map G(x): wing under slipstream x,
     // disk inflows, BEMT, momentum slipstream.
@@ -460,39 +460,32 @@ fn coupled_step_impl(
                 ],
             });
         }
-        // Divergence guard: strikes are counted against the BEST residual
-        // achieved so far and reset whenever the iteration makes a new
-        // best. A truly divergent map never sets a new best and strikes
-        // out; a converging-but-oscillating map (measured near tol on
-        // lifecycle off-trim states) keeps resetting and is allowed its
-        // full correction cap.
-        if res < res_best {
-            res_best = res;
-            growth_strikes = 0;
-        }
-        if res > res_best * 1.25 {
-            growth_strikes += 1;
-            if growth_strikes >= 2 {
+        // Judge the correction against the iterate that produced it. An
+        // improving floor-relaxed iterate can remain above an earlier best;
+        // that is not a second growth event. The unrelaxed initialization
+        // precedes this correction schedule and keeps its existing budget.
+        if corrections > 0 && res > res_prev * 1.25 {
+            if retry_used {
                 return Err(Refusal {
                     code: "PropAirframeCouplingDidNotConverge",
                     message: format!("second residual growth at {res:e}"),
                     ranked_repairs: vec!["reject the correction; refuse, never jump".into()],
                 });
             }
-            // First strike: LOCK the relaxation at the clamp floor for
-            // the remainder of the schedule. An oscillating map (regime
-            // chatter across a separated-strip boundary under slipstream
-            // feedback) has a locally steep effective slope; a small
-            // fixed relaxation is contractive where the Aitken jump is
-            // not. Deterministic; the strike still counts.
-            omega_locked = true;
+            // Reject the entire trial: retry FROM its accepted predecessor
+            // with that predecessor's residual, never from the grown state.
+            // Keep the same predecessor/history until this retry is judged.
+            // Both the rejected proposal and the retry consume the existing
+            // cap. After the one retry, keep the declared relaxation floor;
+            // any subsequent growth still refuses instead of accepting a
+            // one-way or unconverged force state.
+            retry_used = true;
+            let rp = r_prev.expect("a correction has an evaluated predecessor");
             for k in 0..2 {
-                x[k] += spec.clamp.0 * r[k];
+                x[k] = x_prev[k] + spec.clamp.0 * rp[k];
             }
             omega_prev = spec.clamp.0;
             corrections += 1;
-            res_prev = res;
-            r_prev = Some(r);
             continue;
         }
         // Vector Aitken recurrence: omega_{k+1} =
@@ -500,7 +493,7 @@ fn coupled_step_impl(
         // linear map), clamped to the candidate window; a degenerate
         // denominator resets to omega0 (spec guard).
         let omega = match r_prev {
-            _ if omega_locked => spec.clamp.0,
+            _ if retry_used => spec.clamp.0,
             None => spec.omega0,
             Some(rp) => {
                 let dr = [r[0] - rp[0], r[1] - rp[1]];
@@ -513,6 +506,7 @@ fn coupled_step_impl(
                 }
             }
         };
+        x_prev = x;
         for k in 0..2 {
             x[k] += omega * r[k];
         }

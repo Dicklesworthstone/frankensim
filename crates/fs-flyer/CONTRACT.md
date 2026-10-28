@@ -131,7 +131,7 @@ The battery pins that outcome rather than fabricating lift or retuning gains.
 Airborne lifecycle tests explicitly add the existing registered catapult as a
 test fixture, distinct from historical Dec-17. With same-tick support release,
 member 3 flies 11.41 s with five undulations and 44.90 m of travel before the
-native outer coupling solver refuses midpoint residual growth at tick 1443.
+native outer coupling solver exhausts its midpoint correction budget at tick 1443.
 Fixed controls fly 5.02 s, reach 11.60 m forward and turn back to 4.09 m before
 the propeller station solver exhausts its 120-evaluation budget at tick 676.
 Stable station momentum arithmetic and local residual-certified finishing solve
@@ -185,6 +185,19 @@ strip solve, and its accepted local velocity drives Kutta-Joukowsky forces,
 profile drag and section pitching moments. Converged propeller wash is included
 in both circulation and force velocity. The separate disk-center axial inflows
 drive the two BEMT thrust/torque solves and the existing engine dynamics.
+
+Both native propeller/airframe paths judge residual growth against the evaluated
+predecessor of the current correction. A first growth above 25% rejects the
+entire trial and retries `x_previous + omega_min * residual_previous`; the
+rejected state never becomes the retry's origin or Aitken history. Subsequent
+corrections retain the relaxation floor, and a second genuine growth refuses.
+Both the rejected trial and retry count against the unchanged candidate cap;
+there are at most `cap + 2` native map evaluations including initialization.
+The same acceptance tolerance and spec digest remain in force. The actual
+member-3 stopping state still has an unresolved separated-strip branch cycle:
+correct rollback lowers its residual, but does not manufacture a converged load
+or a longer flight. The native regression checks the rollback residual at cap 6
+and exhaustion at the registered cap 12. No one-way fallback is introduced.
 
 `coupled_prop_airframe_step_with_incident` carries disk-induced velocity `vi`,
 with `T = 2 rho A vi (V_disk + vi)`, and applies `wash_factor * vi` at each

@@ -433,6 +433,54 @@ fn nonconvergence_is_typed_and_spec_identity_is_sensitive() {
 }
 
 #[test]
+fn grown_native_correction_rolls_back_and_keeps_the_existing_budget() {
+    // Actual member-3 midpoint at tick 1443, captured with the unchanged
+    // registered plant, signed annular momentum solve and candidate B.
+    // Its separated-strip map chatters between branches; a corrected retry
+    // must not relabel that unresolved physical solve as a converged one.
+    let mut design = fs_flyer::aircraft::wright_openloop_v1();
+    for (cap, expected_residual) in [
+        (6, 0.025_711_390_521_519_95),
+        (12, 0.025_495_204_911_592_344),
+    ] {
+        design.coupling = PropCouplingSolverSpec { cap, ..CANDIDATE_B };
+        let error = design
+            .force_buildup_warm(
+                12.109_920_004_298_539,
+                -0.527_706_488_358_26,
+                0.116_761_945_162_323_48,
+                49.437_682_658_920_99,
+                -2.9,
+                RHO,
+                Some([1.660_416_864_469_997_5, 1.660_416_865_101_871_6]),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "PropAirframeCouplingDidNotConverge");
+        let prefix = format!("cap {cap} exhausted: joint residual ");
+        let residual: f64 = error
+            .message
+            .strip_prefix(&prefix)
+            .expect("a recovering correction must not consume a false growth strike")
+            .parse()
+            .unwrap();
+        // Correction 5 grows from x=[2.170050503482444, 2.166792091293377].
+        // The retry belongs to that predecessor, giving
+        // x_retry=[2.1646859895132637, 2.1721562824711147]. Advancing from
+        // the rejected point instead leaves residual 0.0387415 at cap 6.
+        assert!((residual - expected_residual).abs() < 1.0e-8);
+        assert!(residual > CANDIDATE_B.tol, "unresolved loads stay refused");
+        assert!(error.ranked_repairs[0].contains("never switch"));
+        jlog(
+            "rollback-budget",
+            &format!(
+                "\"cap\":{cap},\"residual\":{residual},\"tol\":{}",
+                CANDIDATE_B.tol
+            ),
+        );
+    }
+}
+
+#[test]
 fn coupling_golden_digest() {
     let (p, strips) = wing_setup();
     let fs_v = freestream();
