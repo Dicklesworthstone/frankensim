@@ -51,7 +51,7 @@ use fs_material::MaterialError;
 use fs_material::thermochemical_gas::ThermochemicalGasModel;
 use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 use fs_material::thermochemical_gas::energy::{GasEnergyError, GasEnergySolve};
-use fs_qty::{Dimensionless, Temperature};
+use fs_qty::{Dimensionless, Pressure, Temperature};
 use fs_thermochem::equilibrium::{
     DeclaredStoichiometricMassActionEvaluationV1, DeclaredStoichiometricMassActionV1,
     IdealGasSpeciesActivityV1, StoichiometricMassActionErrorV1,
@@ -517,11 +517,32 @@ impl GasReaction {
                 }
             })
             .collect();
-        let energy = gas.mass_kg()
-            * (next.state().specific_internal_energy_j_kg()
-                - gas.state().specific_internal_energy_j_kg());
-        let entropy = gas.mass_kg()
-            * (next.state().specific_entropy_j_kg_k()? - gas.state().specific_entropy_j_kg_k()?);
+        let caloric = gas.model().thermodynamics();
+        let (energy, entropy) = if caloric == next.model().thermodynamics() {
+            // Preserve the original frozen-composition owner's reference-safe
+            // increments, including actual pressure entropy at moving boundaries.
+            // Equality includes every species source and the actual composition.
+            let before = gas.state().state();
+            let after = next.state().state();
+            let energy = caloric.specific_internal_energy_change(
+                Temperature::new(before.temperature), Temperature::new(after.temperature),
+            ).map_err(|error| MaterialError::Parameters {
+                what: format!("reaction frozen internal-energy increment: {error}"),
+            })?.value();
+            let entropy = caloric.specific_entropy_change(
+                Temperature::new(before.temperature), Pressure::new(before.pressure),
+                Temperature::new(after.temperature), Pressure::new(after.pressure),
+            ).map_err(|error| MaterialError::Parameters {
+                what: format!("reaction frozen entropy increment: {error}"),
+            })?.value();
+            (gas.mass_kg() * energy, gas.mass_kg() * entropy)
+        } else {
+            // Changed species amounts retain their original formation references.
+            (gas.mass_kg() * (next.state().specific_internal_energy_j_kg()
+                - gas.state().specific_internal_energy_j_kg()),
+             gas.mass_kg() * (next.state().specific_entropy_j_kg_k()?
+                - gas.state().specific_entropy_j_kg_k()?))
+        };
         let energy_residual = (energy + boundary.work_by_gas_j) - boundary.heat_j;
         // Backward Euler uses the actual endpoint temperature for heat entropy
         // transport. This residual includes its nonnegative time-discretization

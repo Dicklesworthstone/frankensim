@@ -220,3 +220,84 @@ fn temporal_and_work_limits_and_late_cancellation_never_publish_partial_state() 
         controls(), invalid, || false).is_err()); }
     assert_eq!(initial, original);
 }
+
+#[test]
+fn equilibrated_reaction_retains_original_heating_cooling_and_common_reference_cancellation() {
+    let mut reference = Vec::new();
+    for formation in [0.0, 1e12, -1e12] {
+        // Identical isomers at equilibrium: every rate/extent stays exactly zero.
+        // A common formation reference changes no physical energy difference.
+        let law = implicit(channels(&[("ab", [-1, 1, 0], 20.0)],
+            [1; 3], [formation; 3]).remove(0));
+        let initial = gas(&law, [0.5, 0.5, 0.0], 400.0);
+        let saved = initial.clone();
+        for (case, heat) in [-0.000123, 0.000123].into_iter().enumerate() {
+            let mut direct = initial.clone();
+            let original = direct.add_heat_at_constant_pressure(heat, controls().gas, || false).unwrap();
+            let endpoint = law.isobaric_implicit_candidate(&initial, 0.1, heat,
+                controls(), || false).unwrap();
+            assert_eq!(endpoint.gas(), &direct);
+            assert_eq!(endpoint.step().enthalpy_change_j, original.enthalpy_change_j);
+            assert_eq!(endpoint.step().boundary.reaction.stored_energy_change_j,
+                original.stored_energy_change_j);
+            assert_eq!(endpoint.step().boundary.reaction.entropy_change_j_k,
+                original.entropy_change_j_k);
+            assert_eq!(endpoint.step().boundary.reaction.extent_mol, 0.0);
+
+            let adaptive = law.isobaric_adaptive_candidate(&initial, 0.1, heat,
+                controls(), accuracy(), || false).unwrap();
+            let mut replay = initial.clone();
+            for interval in &adaptive.report().steps {
+                let q = interval.chemistry.boundary.boundary.heat_j;
+                let direct_step = replay.add_heat_at_constant_pressure(q, controls().gas, || false).unwrap();
+                assert_eq!(interval.chemistry.enthalpy_change_j, direct_step.enthalpy_change_j);
+                assert_eq!(interval.chemistry.boundary.reaction.stored_energy_change_j,
+                    direct_step.stored_energy_change_j);
+                assert_eq!(interval.chemistry.boundary.reaction.entropy_change_j_k,
+                    direct_step.entropy_change_j_k);
+                assert_eq!(interval.chemistry.boundary.reaction.extent_mol, 0.0);
+            }
+            assert_eq!(adaptive.gas(), &replay);
+            near(adaptive.report().enthalpy_change_j, heat,
+                initial.mass_kg() * controls().gas.energy_tolerance_j_kg);
+            let observed = [adaptive.gas().state().state().temperature,
+                adaptive.gas().volume_m3(), adaptive.report().enthalpy_change_j,
+                adaptive.report().stored_energy_change_j, adaptive.report().entropy_change_j_k];
+            if formation == 0.0 { reference.push(observed); }
+            else { assert_eq!(observed, reference[case]); }
+
+            // The shared admission also serves fixed-volume chemistry. Its
+            // pressure changes, so entropy must retain Cp ln(T1/T0)-R ln(p1/p0).
+            let mut fixed = initial.clone();
+            let fixed_heat = fixed.add_heat(heat, controls().gas, || false).unwrap();
+            let reaction = law.heated_implicit_candidate(&initial, 0.1, heat,
+                controls(), || false).unwrap();
+            assert_eq!(reaction.gas(), &fixed);
+            assert_eq!(reaction.step().reaction.stored_energy_change_j, fixed_heat.stored_energy_change_j);
+            let expected_entropy = (initial.mass_kg() / 0.028) * 2.5 * R
+                * (fixed.state().state().temperature / 400.0).ln();
+            near(reaction.step().reaction.entropy_change_j_k, expected_entropy, 1e-12);
+            assert_ne!(fixed.state().state().pressure, initial.state().state().pressure);
+            assert_eq!(initial, saved);
+        }
+    }
+}
+
+#[test]
+fn frozen_moving_boundary_uses_actual_pressure_entropy_and_refuses_free_compression() {
+    use fs_couple::cavity_phs::piston::reactive::boundary::GasReactionBoundary;
+    let law = implicit(channels(&[("ab", [-1, 1, 0], 20.0)],
+        [1; 3], [0.0; 3]).remove(0));
+    let initial = gas(&law, [0.5, 0.5, 0.0], 400.0);
+    let expanded = law.boundary_implicit_candidate(&initial, 0.1,
+        GasReactionBoundary { final_volume_m3: 2.0 * initial.volume_m3(),
+            heat_j: 0.0, work_by_gas_j: 0.0 }, controls(), || false).unwrap();
+    near(expanded.gas().state().state().temperature, 400.0, 1e-10);
+    near(expanded.gas().state().state().pressure, 50000.0, 1e-8);
+    near(expanded.step().reaction.entropy_change_j_k,
+        (initial.mass_kg() / 0.028) * R * 2.0_f64.ln(), 1e-12);
+    assert!(matches!(law.boundary_implicit_candidate(&initial, 0.1,
+        GasReactionBoundary { final_volume_m3: 0.5 * initial.volume_m3(),
+            heat_j: 0.0, work_by_gas_j: 0.0 }, controls(), || false),
+        Err(GasReactionError::EntropyDecrease { .. })));
+}

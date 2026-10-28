@@ -10278,3 +10278,21 @@ cover preserving a moving initial body, the nonlinear phase bound, invalid
 clock/observer admission, early and late cancellation, and retry after refusal.
 These checks exercise the production numerical owners through the focused
 native target; they do not assert full workspace qualification.
+
+### Frozen-composition caloric limit of reactive owners
+
+When the complete original thermodynamic models and active compositions are
+identical before and after a proposed reaction boundary step, the shared
+reaction admission uses the original source's specific internal-energy and
+entropy differences. The isobaric report likewise uses the source enthalpy
+difference. Actual initial/final pressures remain in the entropy integral.
+This preserves the material parcel's stable heating/cooling and expansion
+limits when a large common formation reference would erase an absolute-total
+subtraction. The strict model guard includes all retained species sources,
+conventions, molar masses, composition and caloric-continuity policy.
+
+Changed compositions continue to use their original formation-inclusive
+energy and entropy accounts. Tests retain identical physics under positive
+and negative common reference shifts, replay the original isobaric and
+fixed-volume heat owners, resolve free-expansion entropy, and refuse
+compression with no supplied heat or work.

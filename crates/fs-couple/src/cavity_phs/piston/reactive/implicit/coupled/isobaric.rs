@@ -179,8 +179,17 @@ impl GasReaction {
             controls, policy, cancelled, evaluations)?;
         let (next, reaction) = candidate.into_parts();
         let boundary = constraint.boundary(gas, &next)?;
-        let enthalpy = gas.mass_kg() * (next.state().specific_enthalpy_j_kg()
-            - gas.state().specific_enthalpy_j_kg());
+        let caloric = gas.model().thermodynamics();
+        let enthalpy = gas.mass_kg() * if caloric == next.model().thermodynamics() {
+            caloric.specific_enthalpy_change(
+                Temperature::new(gas.state().state().temperature),
+                Temperature::new(next.state().state().temperature),
+            ).map_err(|error| MaterialError::Parameters {
+                what: format!("reaction frozen enthalpy increment: {error}"),
+            })?.value()
+        } else {
+            next.state().specific_enthalpy_j_kg() - gas.state().specific_enthalpy_j_kg()
+        };
         let residual = enthalpy - heat_j;
         if !enthalpy.is_finite() || !residual.is_finite()
             || residual.abs() > gas.mass_kg() * controls.gas.energy_tolerance_j_kg
