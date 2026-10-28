@@ -8,8 +8,11 @@
 use super::*;
 use crate::conjugate::radiation::STEFAN_BOLTZMANN;
 use fs_matdb::{PropertyValue, QueryPoint};
+use fs_material::state_point::ResolvedScalarProperty;
 use fs_material::thermochemical_gas::energy::{GasEnergySolve, IsochoricGasParcel};
 use fs_material::thermochemical_gas::{ResolvedThermochemicalGasState, ThermochemicalGasModel};
+
+mod stress;
 
 /// Explicit geometry of one liquid/gas interface facing black surroundings.
 /// Both gas-film and liquid-centroid distances are positive physical inputs.
@@ -62,6 +65,9 @@ pub struct FreeSurfaceInterfaceSample {
     pub gas: ResolvedThermochemicalGasState,
     pub liquid_temperature_k: f64,
     pub surface_temperature_k: f64,
+    /// Original sigma source at the solved interface T when planar stress is
+    /// active. The bulk liquid bundle retains its actual bulk temperature.
+    pub surface_tension: Option<ResolvedScalarProperty>,
     pub gas_temperature_k: f64,
     pub liquid_conductance_w_k: f64,
     pub gas_conductance_w_k: f64,
@@ -91,6 +97,10 @@ pub struct FreeSurfaceInterfaceExchange {
     pub heat_from_radiation_j: f64,
     pub last_applied: Vec<FreeSurfaceInterfaceSample>,
     pub thermal_endpoint: Vec<FreeSurfaceInterfaceSample>,
+    /// Present for temperature-dependent planar stress: re-solved after native
+    /// advection using actual bulk state and the same finite gas endpoint.
+    /// These diagnostics update pressure/traction only and supply no heat.
+    pub native_endpoint: Vec<FreeSurfaceInterfaceSample>,
 }
 
 impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
@@ -113,18 +123,8 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         {
             return Err(Error::Invalid("invalid surface-temperature solve budget"));
         }
-        if !surfaces.is_empty()
-            && self.thermocapillary.is_some()
-            && self
-                .law
-                .reference_state()
-                .material()
-                .property(SURFACE_TENSION_PROPERTY)
-                .is_some_and(|sigma| !sigma.source_axes().is_empty())
-        {
-            return Err(Error::Invalid(
-                "solved surface temperature needs a shared thermocapillary surface field",
-            ));
+        if !surfaces.is_empty() && self.temperature_dependent_thermocapillarity() {
+            self.admit_surface_stress_geometry(surfaces, dx, gate)?;
         }
         let mut gas = Vec::with_capacity(surfaces.len());
         let mut radiation = Vec::with_capacity(surfaces.len());
@@ -158,9 +158,14 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
     /// pure-liquid caloric interval. Gas claims are pinned to the admitted bath
     /// sources; no source switch or extrapolation supplies an interface root.
     /// A safeguarded scalar iteration must meet BOTH declared tolerances.
-    /// Temperature-dependent thermocapillarity refuses: its current cell-T
-    /// stress owner does not consume this independently solved surface field.
-    /// Source-declared constant capillarity remains supported.
+    /// For temperature-dependent planar capillarity, supply exactly one full
+    /// outward patch per tank column. Its original sigma(Ts) source drives BOTH
+    /// Marangoni traction and native capillary pressure. The thermal endpoint
+    /// starts the flow split; actual advected bulk states re-solve the surface
+    /// before acceptance, without supplying extra heat. Film/centroid geometry
+    /// is held over this interval and must be supplied again on continuation.
+    /// Once active, steps omitting this complete boundary refuse transactionally.
+    /// Bulk viscosity, density and caloric storage retain their actual bulk state.
     ///
     /// The eliminated positive conductances share the original explicit CFL
     /// and timeline. Time/mesh refinement remains required for this first-order,
@@ -365,169 +370,187 @@ impl Conduction<'_, '_> {
             }
             let liquid = self.sample_liquid(id, thermal.cells()[&id].specific_h_j_kg, check)?;
             let tl = thermal.temperature_k(id)?;
-            let (model, context) = self
-                .finite_atmosphere
-                .as_ref()
-                .map_or((contact.model, contact.context), |gas| {
-                    (gas.parcel.model(), gas.parcel.point())
-                });
-            let bulk = if let Some(atmosphere) = &self.finite_atmosphere {
-                // The original parcel has already resolved this exact T/p;
-                // reuse its accepted source bundle for every exposed patch.
-                atmosphere.parcel.state().clone()
-            } else {
-                model.evaluate(context).map_err(MaterialLbmError::from)?
-            };
-            if self
-                .surface_reference
-                .get(index)
-                .is_some_and(|old| !environment::same_sources(&old.gas, &bulk))
-            {
-                return Err(Error::Invalid(
-                    "surface film left its original gas source claims",
-                ));
-            }
-            let tg = bulk.state().temperature;
-            let tr = surface.surroundings_k;
-            let [film_lo, film_hi] = film_interval(model, &bulk)?;
-            let [liquid_lo, liquid_hi] = containing_interval(
-                self.caloric
-                    .knots()
-                    .windows(2)
-                    .filter(|pair| {
-                        pair.iter().all(|k| {
-                            k.liquid_mass_fraction == 1.0
-                                && k.bulk_density_kg_m3.to_bits() == self.density.to_bits()
-                        })
-                    })
-                    .map(|pair| [pair[0].temperature_k, pair[1].temperature_k]),
-                tl,
-            )
-            .ok_or(Error::Invalid(
-                "surface temperature needs a supported pure-liquid caloric interval",
-            ))?;
-            let mut lo = tl.min(tg).min(tr).max(liquid_lo).max(2.0 * film_lo - tg);
-            let mut hi = tl.max(tg).max(tr).min(liquid_hi).min(2.0 * film_hi - tg);
-            if !lo.is_finite() || !hi.is_finite() || lo > hi {
-                return Err(Error::Invalid(
-                    "surface and film temperature domains do not intersect",
-                ));
-            }
-            let gl = environment::finite(
-                liquid.thermal_conductivity_w_m_k() * surface.face.area_m2
-                    / surface.face.distances_m[0],
-            )?;
-            let radiation = surface.emissivity * STEFAN_BOLTZMANN * surface.face.area_m2;
-            let mut ts = tl.clamp(lo, hi);
-            let mut supported = None;
-            let mut accepted = None;
-            for iteration in 1..=self.surface_solve.maximum_iterations {
-                check()?;
-                let point = context
-                    .clone()
-                    .with("temperature", 0.5 * ts + 0.5 * tg)
-                    .map_err(|_| Error::Invalid("invalid solved gas-film temperature"))?;
-                let gas = match model.evaluate(&point) {
-                    Ok(gas) if environment::same_sources(&bulk, &gas) => gas,
-                    _ => {
-                        // A triangulated claim can have less support than its
-                        // validity box. Backtrack a trial toward a supported
-                        // sample; rejected trials consume the SAME solve budget.
-                        // Bulk gas need not lie in the pure-liquid surface
-                        // interval. Move toward its admissible endpoint, not
-                        // an out-of-phase temperature that rejects a valid root.
-                        let anchor = supported.unwrap_or(tg.clamp(lo, hi));
-                        if anchor < lo || anchor > hi || anchor == ts {
-                            return Err(Error::Invalid(
-                                "surface solve has no supported gas-film trial",
-                            ));
-                        }
-                        if ts > anchor {
-                            hi = ts;
-                        } else {
-                            lo = ts;
-                        }
-                        ts = 0.5 * ts + 0.5 * anchor;
-                        continue;
-                    }
-                };
-                supported = Some(ts);
-                let gg = environment::finite(
-                    gas.state().thermal_conductivity * surface.face.area_m2
-                        / surface.face.distances_m[1],
-                )?;
-                let gr = if radiation == 0.0 {
-                    0.0
-                } else {
-                    environment::finite(radiation * (ts + tr) * (ts * ts + tr * tr))?
-                };
-                let total = environment::finite(gl + gg + gr)?;
-                let ql = environment::finite(gl * (tl - ts))?;
-                let qg = environment::finite(gg * (tg - ts))?;
-                let qr = environment::finite(gr * (tr - ts))?;
-                let residual = environment::finite(ql + qg + qr)?;
-                let correction = if total == 0.0 { 0.0 } else { residual / total };
-                let tolerance = environment::finite(
-                    self.surface_solve.absolute_heat_tolerance_w
-                        + self.surface_solve.relative_heat_tolerance
-                            * (ql.abs() + qg.abs() + qr.abs()),
-                )?;
-                if residual.abs() <= tolerance
-                    && correction.abs() <= self.surface_solve.temperature_tolerance_k
-                {
-                    // Schur elimination conserves every pair exactly even when
-                    // the scalar residual is finite. Its effect on interface T
-                    // and each original flux is bounded by the admitted solve.
-                    let (lg, lr, gr_pair) = if total == 0.0 {
-                        (0.0, 0.0, 0.0)
-                    } else {
-                        (gl * (gg / total), gl * (gr / total), gg * (gr / total))
-                    };
-                    let gas_heat = environment::finite(lg * (tg - tl) + gr_pair * (tg - tr))?;
-                    let radiant_heat = environment::finite(lr * (tr - tl) + gr_pair * (tr - tg))?;
-                    accepted = Some(FreeSurfaceInterfaceSample {
-                        surface,
-                        liquid,
-                        gas,
-                        liquid_temperature_k: tl,
-                        surface_temperature_k: ts,
-                        gas_temperature_k: tg,
-                        liquid_conductance_w_k: gl,
-                        gas_conductance_w_k: gg,
-                        radiation_conductance_w_k: gr,
-                        liquid_decay_conductance_w_k: environment::finite(lg + lr)?,
-                        gas_decay_conductance_w_k: environment::finite(lg + gr_pair)?,
-                        heat_into_liquid_w: environment::finite(gas_heat + radiant_heat)?,
-                        heat_from_gas_w: gas_heat,
-                        heat_from_radiation_w: radiant_heat,
-                        balance_residual_w: residual,
-                        iterations: iteration,
-                    });
-                    break;
-                }
-                if residual > 0.0 {
-                    lo = ts;
-                } else {
-                    hi = ts;
-                }
-                let slope = environment::finite(gl + gg + 4.0 * radiation * ts * ts * ts)?;
-                let newton = ts + residual / slope;
-                // Periodic bisection guarantees bounded bracket progress even
-                // when temperature-dependent gas k makes this slope inexact.
-                let next = if iteration % 4 != 0 && newton > lo && newton < hi {
-                    newton
-                } else {
-                    0.5 * lo + 0.5 * hi
-                };
-                if next == ts {
-                    break;
-                }
-                ts = next;
-            }
-            samples.push(accepted.ok_or(Error::Invalid(
-                "surface temperature exhausted its supported solve budget",
-            ))?);
+            samples.push(self.solve_surface(index, liquid, tl, check)?);
         }
         Ok(samples)
+    }
+    // The same scalar/source owner serves thermal substeps and native endpoint
+    // diagnostics. Endpoint calls do not integrate either side's energy.
+    fn solve_surface(
+        &self,
+        index: usize,
+        liquid: ResolvedLiquidState,
+        tl: f64,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<FreeSurfaceInterfaceSample, Error> {
+        let contact = &self.surfaces[index];
+        let surface = contact.surface;
+        let (model, context) = self
+            .finite_atmosphere
+            .as_ref()
+            .map_or((contact.model, contact.context), |gas| {
+                (gas.parcel.model(), gas.parcel.point())
+            });
+        let bulk = if let Some(atmosphere) = &self.finite_atmosphere {
+            // The original parcel has already resolved this exact T/p;
+            // reuse its accepted source bundle for every exposed patch.
+            atmosphere.parcel.state().clone()
+        } else {
+            model.evaluate(context).map_err(MaterialLbmError::from)?
+        };
+        if self
+            .surface_reference
+            .get(index)
+            .is_some_and(|old| !environment::same_sources(&old.gas, &bulk))
+        {
+            return Err(Error::Invalid(
+                "surface film left its original gas source claims",
+            ));
+        }
+        let tg = bulk.state().temperature;
+        let tr = surface.surroundings_k;
+        let [film_lo, film_hi] = film_interval(model, &bulk)?;
+        let [liquid_lo, liquid_hi] = containing_interval(
+            self.caloric
+                .knots()
+                .windows(2)
+                .filter(|pair| {
+                    pair.iter().all(|k| {
+                        k.liquid_mass_fraction == 1.0
+                            && k.bulk_density_kg_m3.to_bits() == self.density.to_bits()
+                    })
+                })
+                .map(|pair| [pair[0].temperature_k, pair[1].temperature_k]),
+            tl,
+        )
+        .ok_or(Error::Invalid(
+            "surface temperature needs a supported pure-liquid caloric interval",
+        ))?;
+        let mut lo = tl.min(tg).min(tr).max(liquid_lo).max(2.0 * film_lo - tg);
+        let mut hi = tl.max(tg).max(tr).min(liquid_hi).min(2.0 * film_hi - tg);
+        if !lo.is_finite() || !hi.is_finite() || lo > hi {
+            return Err(Error::Invalid(
+                "surface and film temperature domains do not intersect",
+            ));
+        }
+        let gl = environment::finite(
+            liquid.thermal_conductivity_w_m_k() * surface.face.area_m2
+                / surface.face.distances_m[0],
+        )?;
+        let radiation = surface.emissivity * STEFAN_BOLTZMANN * surface.face.area_m2;
+        let mut ts = tl.clamp(lo, hi);
+        let mut supported = None;
+        let mut accepted = None;
+        for iteration in 1..=self.surface_solve.maximum_iterations {
+            check()?;
+            let point = context
+                .clone()
+                .with("temperature", 0.5 * ts + 0.5 * tg)
+                .map_err(|_| Error::Invalid("invalid solved gas-film temperature"))?;
+            let gas = match model.evaluate(&point) {
+                Ok(gas) if environment::same_sources(&bulk, &gas) => gas,
+                _ => {
+                    // A triangulated claim can have less support than its
+                    // validity box. Backtrack a trial toward a supported
+                    // sample; rejected trials consume the SAME solve budget.
+                    // Bulk gas need not lie in the pure-liquid surface
+                    // interval. Move toward its admissible endpoint, not
+                    // an out-of-phase temperature that rejects a valid root.
+                    let anchor = supported.unwrap_or(tg.clamp(lo, hi));
+                    if anchor < lo || anchor > hi || anchor == ts {
+                        return Err(Error::Invalid(
+                            "surface solve has no supported gas-film trial",
+                        ));
+                    }
+                    if ts > anchor {
+                        hi = ts;
+                    } else {
+                        lo = ts;
+                    }
+                    ts = 0.5 * ts + 0.5 * anchor;
+                    continue;
+                }
+            };
+            supported = Some(ts);
+            let gg = environment::finite(
+                gas.state().thermal_conductivity * surface.face.area_m2
+                    / surface.face.distances_m[1],
+            )?;
+            let gr = if radiation == 0.0 {
+                0.0
+            } else {
+                environment::finite(radiation * (ts + tr) * (ts * ts + tr * tr))?
+            };
+            let total = environment::finite(gl + gg + gr)?;
+            let ql = environment::finite(gl * (tl - ts))?;
+            let qg = environment::finite(gg * (tg - ts))?;
+            let qr = environment::finite(gr * (tr - ts))?;
+            let residual = environment::finite(ql + qg + qr)?;
+            let correction = if total == 0.0 { 0.0 } else { residual / total };
+            let tolerance = environment::finite(
+                self.surface_solve.absolute_heat_tolerance_w
+                    + self.surface_solve.relative_heat_tolerance * (ql.abs() + qg.abs() + qr.abs()),
+            )?;
+            if residual.abs() <= tolerance
+                && correction.abs() <= self.surface_solve.temperature_tolerance_k
+            {
+                // Schur elimination conserves every pair exactly even when
+                // the scalar residual is finite. Its effect on interface T
+                // and each original flux is bounded by the admitted solve.
+                let (lg, lr, gr_pair) = if total == 0.0 {
+                    (0.0, 0.0, 0.0)
+                } else {
+                    (gl * (gg / total), gl * (gr / total), gg * (gr / total))
+                };
+                let gas_heat = environment::finite(lg * (tg - tl) + gr_pair * (tg - tr))?;
+                let radiant_heat = environment::finite(lr * (tr - tl) + gr_pair * (tr - tg))?;
+                let surface_tension = if self.surface_stress {
+                    Some(stress::resolve_surface_tension(self.law, &liquid, ts)?)
+                } else {
+                    None
+                };
+                accepted = Some(FreeSurfaceInterfaceSample {
+                    surface,
+                    liquid,
+                    gas,
+                    liquid_temperature_k: tl,
+                    surface_temperature_k: ts,
+                    surface_tension,
+                    gas_temperature_k: tg,
+                    liquid_conductance_w_k: gl,
+                    gas_conductance_w_k: gg,
+                    radiation_conductance_w_k: gr,
+                    liquid_decay_conductance_w_k: environment::finite(lg + lr)?,
+                    gas_decay_conductance_w_k: environment::finite(lg + gr_pair)?,
+                    heat_into_liquid_w: environment::finite(gas_heat + radiant_heat)?,
+                    heat_from_gas_w: gas_heat,
+                    heat_from_radiation_w: radiant_heat,
+                    balance_residual_w: residual,
+                    iterations: iteration,
+                });
+                break;
+            }
+            if residual > 0.0 {
+                lo = ts;
+            } else {
+                hi = ts;
+            }
+            let slope = environment::finite(gl + gg + 4.0 * radiation * ts * ts * ts)?;
+            let newton = ts + residual / slope;
+            // Periodic bisection guarantees bounded bracket progress even
+            // when temperature-dependent gas k makes this slope inexact.
+            let next = if iteration % 4 != 0 && newton > lo && newton < hi {
+                newton
+            } else {
+                0.5 * lo + 0.5 * hi
+            };
+            if next == ts {
+                break;
+            }
+            ts = next;
+        }
+        accepted.ok_or(Error::Invalid(
+            "surface temperature exhausted its supported solve budget",
+        ))
     }
 }

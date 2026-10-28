@@ -158,9 +158,11 @@ struct Conduction<'a, 'm> {
     radiation_absolute_heat_j: f64,
     surfaces: &'a [FreeSurfaceInterfaceContact<'a>],
     surface_solve: FreeSurfaceInterfaceSolve,
+    surface_stress: bool,
     surface_endpoints: Vec<CellId>,
     surface_last: Vec<FreeSurfaceInterfaceSample>,
     surface_endpoint: Vec<FreeSurfaceInterfaceSample>,
+    surface_native_endpoint: Vec<FreeSurfaceInterfaceSample>,
     surface_reference: Vec<FreeSurfaceInterfaceSample>,
     surface_gas_heat_j: f64,
     surface_radiant_heat_j: f64,
@@ -599,6 +601,12 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         gate: &CancelGate,
     ) -> Result<FreeSurfaceConductionReport, Error> {
         poll(gate)?;
+        let surface_stress = !surfaces.is_empty() && self.temperature_dependent_thermocapillarity();
+        if self.surface_temperature_forces && !surface_stress {
+            return Err(Error::Invalid(
+                "surface-temperature stress requires its complete solved heat boundary",
+            ));
+        }
         if controls.maximum_faces > self.controls.max_mass_routes
             || faces
                 .len()
@@ -923,9 +931,11 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             radiation_absolute_heat_j: 0.0,
             surfaces,
             surface_solve,
+            surface_stress,
             surface_endpoints,
             surface_last: Vec::new(),
             surface_endpoint: Vec::new(),
+            surface_native_endpoint: Vec::new(),
             surface_reference: Vec::new(),
             surface_gas_heat_j: 0.0,
             surface_radiant_heat_j: 0.0,
@@ -983,12 +993,42 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             return Err(Error::Invalid("finite solid endpoint enthalpy overflows"));
         }
         let body_heat = if bodies.is_empty() { 0.0 } else { -body_change };
-        let body_sources = observer.body_states_endpoint;
-        if body_sources.len() != bodies.len() {
+        if observer.body_states_endpoint.len() != bodies.len() {
             return Err(Error::Invalid(
                 "finite solid endpoint source state is incomplete",
             ));
         }
+        let absolute_exchange = absolute_heat
+            + body_heat.abs()
+            + observer.environment_absolute_heat_j
+            + observer.radiation_absolute_heat_j
+            + observer.surface_absolute_heat_j
+            + joule_heat;
+        let flow = if surface_stress {
+            let axis = self.thermocapillary.expect("admitted planar surface").normal_axis;
+            let scaling = self.flow.scaling;
+            let mut prepared = true;
+            let mut surface_field = |lattice: &FreeSurface3,
+                states: &BTreeMap<MassLocation3, ResolvedLiquidState>, gate: &CancelGate| {
+                let field = observer.surface_force_field(
+                    lattice, states, axis, scaling, prepared, gate,
+                )?;
+                prepared = false;
+                Ok(field)
+            };
+            self.advance_prepared_enthalpy_with_surface(
+                heated, external, viscous_heat, body_heat, absolute_exchange,
+                electrical_forces.as_ref(), Some(&mut surface_field), gate,
+            )?
+        } else {
+            self.advance_prepared_enthalpy(
+                heated, external, viscous_heat, body_heat, absolute_exchange,
+                electrical_forces.as_ref(), gate,
+            )?
+        };
+        // Every native surface/source/geometry gate has passed. Moving report
+        // fields now cannot leave a partial liquid/wall/gas publication.
+        let body_sources = observer.body_states_endpoint;
         let body_last = observer.body_last;
         let body_endpoint = observer.body_endpoint;
         let last_applied = observer.last;
@@ -1008,21 +1048,8 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             heat_from_radiation_j: observer.surface_radiant_heat_j,
             last_applied: observer.surface_last,
             thermal_endpoint: observer.surface_endpoint,
+            native_endpoint: observer.surface_native_endpoint,
         });
-        let flow = self.advance_prepared_enthalpy(
-            heated,
-            external,
-            viscous_heat,
-            body_heat,
-            absolute_heat
-                + body_heat.abs()
-                + observer.environment_absolute_heat_j
-                + observer.radiation_absolute_heat_j
-                + observer.surface_absolute_heat_j
-                + joule_heat,
-            electrical_forces.as_ref(),
-            gate,
-        )?;
         if let Some(report) = &mut finite_gas_report {
             // Native advection already checked its own extensive-enthalpy
             // defect. This is the combined actual liquid/wall/gas account;

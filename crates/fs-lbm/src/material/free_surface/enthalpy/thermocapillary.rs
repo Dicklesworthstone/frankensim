@@ -1,9 +1,10 @@
 //! Sourced sigma(T), planar tangential stress and the original thermal flow.
 //!
-//! Source temperature is the actual local caloric cell temperature, held over
-//! one native flow interval. No surface temperature, surfactant transport,
-//! surface entropy or capillary heat model is inferred. Normal pressure and
-//! tangential traction have distinct owners and neither is added twice.
+//! The ordinary path uses local caloric cell temperature. A complete solved
+//! heat boundary can instead supply source sigma at its interface temperature,
+//! extended normally within each admitted planar column. Bulk material states
+//! retain their actual caloric temperature. Normal pressure and tangential
+//! traction share that surface sigma; neither supplies inferred capillary heat.
 
 use super::*;
 use crate::d3q19::freesurface3::thermocapillary::PlanarSurface3;
@@ -120,37 +121,51 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         self.thermocapillary
     }
 
+    #[cfg(feature = "enthalpy-coupling")]
+    pub(super) fn temperature_dependent_thermocapillarity(&self) -> bool {
+        self.thermocapillary.is_some()
+            && self
+                .law
+                .reference_state()
+                .material()
+                .property(SURFACE_TENSION_PROPERTY)
+                .is_some_and(|sigma| !sigma.source_axes().is_empty())
+    }
+
     pub(super) fn resolve_thermocapillarity(
         &self,
         lattice: &FreeSurface3,
         states: &BTreeMap<MassLocation3, ResolvedLiquidState>,
         forces: &mut Option<BTreeMap<(u64, usize), [f64; 3]>>,
+        solved_tensions: Option<BTreeMap<(u64, usize), f64>>,
         gate: &CancelGate,
     ) -> Result<Option<BTreeMap<(u64, usize), f64>>, Error> {
         let Some(surface) = self.thermocapillary else {
             return Ok(None);
         };
         let scaling = &self.flow.scaling;
-        let mut tensions = BTreeMap::new();
-        for (&location, state) in states {
-            poll(gate)?;
-            let MassLocation3::Cell(key, lane) = location else {
-                continue;
+        let tensions =
+            if let Some(tensions) = solved_tensions {
+                tensions
+            } else {
+                let mut tensions = BTreeMap::new();
+                for (&location, state) in states {
+                    poll(gate)?;
+                    let MassLocation3::Cell(key, lane) = location else {
+                        continue;
+                    };
+                    let sigma = state.material().property(SURFACE_TENSION_PROPERTY).ok_or(
+                        Error::Invalid("evolving surface tension left the shared material bundle"),
+                    )?;
+                    let native = capillary_scaling(
+                        Some(sigma.value_si()),
+                        scaling.pressure_unit_pa,
+                        scaling.cell_size_m(),
+                    )?;
+                    tensions.insert((key, lane), native);
+                }
+                tensions
             };
-            let sigma =
-                state
-                    .material()
-                    .property(SURFACE_TENSION_PROPERTY)
-                    .ok_or(Error::Invalid(
-                        "evolving surface tension left the shared material bundle",
-                    ))?;
-            let native = capillary_scaling(
-                Some(sigma.value_si()),
-                scaling.pressure_unit_pa,
-                scaling.cell_size_m(),
-            )?;
-            tensions.insert((key, lane), native);
-        }
         let extra = lattice.planar_marangoni_forces(
             surface.native(scaling.cell_size_m())?,
             &tensions,

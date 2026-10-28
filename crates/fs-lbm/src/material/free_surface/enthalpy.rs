@@ -263,9 +263,18 @@ pub struct MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     rheology_samples: BTreeMap<MassLocation3, rheology::FreeSurfaceRheologySample>,
     wetting: Option<WettingBinding<'m>>,
     thermocapillary: Option<thermocapillary::PlanarThermocapillarity>,
+    // Once surface T drives stress, a later step must retain its full boundary.
+    // This flag publishes only with the complete native thermal transaction.
+    surface_temperature_forces: bool,
     #[cfg(feature = "enthalpy-coupling")]
     electrical: Option<conduction::electrical::ElectricalCore>,
 }
+
+type SurfaceTensionResolver<'a> = dyn FnMut(
+    &FreeSurface3,
+    &BTreeMap<MassLocation3, ResolvedLiquidState>,
+    &CancelGate,
+) -> Result<BTreeMap<(u64, usize), f64>, Error> + 'a;
 
 struct ResolvedFlowMaterials {
     states: BTreeMap<MassLocation3, ResolvedLiquidState>,
@@ -399,6 +408,7 @@ impl<'s> MaterialFreeSurface3<'s> {
             rheology_samples: BTreeMap::new(),
             wetting: None,
             thermocapillary,
+            surface_temperature_forces: false,
             #[cfg(feature = "enthalpy-coupling")]
             electrical: None,
         };
@@ -529,11 +539,37 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         additional_forces: Option<&BTreeMap<MassLocation3, [f64; 3]>>,
         gate: &CancelGate,
     ) -> Result<FreeSurfaceEnthalpyReport, Error> {
+        self.advance_prepared_enthalpy_with_surface(
+            heated, external, viscous, body_heat, absolute_heat,
+            additional_forces, None, gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_prepared_enthalpy_with_surface(
+        &mut self,
+        heated: BTreeMap<MassLocation3, f64>,
+        external: f64,
+        viscous: f64,
+        body_heat: f64,
+        absolute_heat: f64,
+        additional_forces: Option<&BTreeMap<MassLocation3, [f64; 3]>>,
+        mut surface: Option<&mut SurfaceTensionResolver<'_>>,
+        gate: &CancelGate,
+    ) -> Result<FreeSurfaceEnthalpyReport, Error> {
         poll(gate)?;
+        if self.surface_temperature_forces && surface.is_none() {
+            return Err(Error::Invalid(
+                "surface-temperature stress requires its complete solved heat boundary",
+            ));
+        }
+        let uses_surface_temperature = surface.is_some();
         let masses = self.flow.lattice.mass_snapshot();
         let mass_unit = self.flow.scaling.mass_unit_kg();
         let before = total(&masses, &self.h, mass_unit)?;
-        let mut resolved = self.resolve_states(&self.flow.lattice, &heated, &masses, gate)?;
+        let mut resolved = self.resolve_states_with_surface(
+            &self.flow.lattice, &heated, &masses, &mut surface, gate,
+        )?;
         if let Some(additional) = additional_forces {
             let reference = self.flow.lattice.reference_force();
             let forces = resolved.forces.get_or_insert_with(|| masses.keys().filter_map(|location| {
@@ -573,7 +609,9 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         let (mut h, outcome) = transport::advect(&trace, &heated, self.controls, gate)?;
         h.retain(|key, _| trace.after.contains_key(key));
         extend_empty_ghosts(&trace.after, &mut h, &heated)?;
-        let endpoint = self.resolve_states(&lattice, &h, &trace.after, gate)?;
+        let endpoint = self.resolve_states_with_surface(
+            &lattice, &h, &trace.after, &mut surface, gate,
+        )?;
         if let Some(surface_tensions) = endpoint.surface_tensions {
             lattice.rebind_surface_tensions(surface_tensions, gate)?;
         }
@@ -652,6 +690,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         self.states = endpoint.states;
         self.rheology_samples = endpoint.rheology;
         self.wetting = accepted_wetting;
+        self.surface_temperature_forces |= uses_surface_temperature;
         Ok(report)
     }
 
@@ -665,6 +704,17 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         lattice: &FreeSurface3,
         h: &BTreeMap<MassLocation3, f64>,
         masses: &BTreeMap<MassLocation3, f64>,
+        gate: &CancelGate,
+    ) -> Result<ResolvedFlowMaterials, Error> {
+        self.resolve_states_with_surface(lattice, h, masses, &mut None, gate)
+    }
+
+    fn resolve_states_with_surface(
+        &self,
+        lattice: &FreeSurface3,
+        h: &BTreeMap<MassLocation3, f64>,
+        masses: &BTreeMap<MassLocation3, f64>,
+        surface: &mut Option<&mut SurfaceTensionResolver<'_>>,
         gate: &CancelGate,
     ) -> Result<ResolvedFlowMaterials, Error> {
         let mut states = BTreeMap::new();
@@ -714,7 +764,13 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             }
             states.insert(location, state);
         }
-        let surface_tensions = self.resolve_thermocapillarity(lattice, &states, &mut forces, gate)?;
+        let solved_tensions = match surface.as_mut() {
+            Some(resolve) => Some(resolve(lattice, &states, gate)?),
+            None => None,
+        };
+        let surface_tensions = self.resolve_thermocapillarity(
+            lattice, &states, &mut forces, solved_tensions, gate,
+        )?;
         Ok(ResolvedFlowMaterials {
             states,
             tau,

@@ -3664,11 +3664,11 @@ It requires temporal and spatial refinement for accuracy. No evaporation,
 surface heat capacity, gas momentum/pressure work, participating-gas radiation,
 moving-solid handoff or liquid phase conversion is supplied. The existing
 resolved-cell radiation entrypoint retains its cell-temperature semantics.
-Combining this mode with temperature-dependent thermocapillarity refuses:
-the existing traction owner reads cell temperature and does not consume a
-complete solved interface-temperature field. Source-declared constant
-capillarity remains supported, including its planar limit. All original
-resolved-cell thermal/thermocapillary entrypoints retain their behavior.
+Temperature-dependent planar thermocapillarity can consume this surface field
+under the complete-column admission below. Source-declared constant capillarity
+remains supported, including its planar limit. Original resolved-cell
+thermal/thermocapillary entrypoints retain their behavior until a trajectory
+explicitly enters the solved-surface stress mode.
 
 Six focused regressions in `material_free_surface_enthalpy`'s
 `conduction::environment::surface` module cover independent nonlinear film
@@ -3679,8 +3679,60 @@ viscosity/population changes, and atomic liquid/wall/gas refusal/retry.
 Their source coefficients are authored synthetic data, not experimental
 validation. The broader MR19/MR20 multiphysics deliveries remain open.
 The existing planar capillarity regressions additionally check constant-source
-native parity and transactional refusal of a conflicting temperature-dependent
-surface-stress closure.
+native parity and refusal of incomplete solved-temperature stress fields.
+
+### Solved interface temperature drives planar capillary flow
+
+For temperature-dependent planar surface tension, the shared heat-boundary
+entrypoints require exactly one full outward normal patch per admitted tank
+column. Missing columns, partial patches, duplicate columns and side-facing
+patches refuse. The original sigma claim alone is queried at each solved
+interface temperature, with its original selection, complete source context
+and source-domain checks. Bulk material bundles keep their actual local
+caloric temperature, enthalpy, viscosity, rheological state and density.
+Neither thermal expansion nor a temperature substitution changes reference mass.
+The original complete bulk material bundle still admits its sigma claim at
+bulk temperature before the surface override; this conservative source-domain
+requirement remains. The interface query has its own retained Ts receipt and
+is the coefficient actually used for native pressure and traction.
+
+At the end of the original thermal stage, this same sigma(T_surface) field
+drives both the native tangential Marangoni traction and Laplace-pressure
+coefficient. Each physical column's surface value extends normally onto its
+native wet and zero-mass ghost lanes. This is the explicitly admitted planar
+surface extension, not an averaged temperature or a general curved-interface
+reconstruction. The original geometry, occupied-volume traction scaling,
+Guo force-frame conversion, buoyancy and optional Lorentz loading remain
+with their existing owners. No force contribution is added twice.
+
+After the native mass/enthalpy advection, the shared scalar surface closure
+resolves again against actual accepted-candidate liquid temperature/rheology
+and the finite gas's accepted thermal T/p. Original gas-source and sigma
+support still gate this diagnostic epoch. The resulting native endpoint
+updates pressure and traction without another heat interval, source debit or
+gas-energy change. Surface reports retain this native endpoint separately
+from the thermal endpoint that drove the step. Caller-declared film and
+centroid geometry is held over the interval; the original bounded planar
+height/layer admission gates both native configurations, and callers resupply
+current geometry on continuation. This remains a first-order split requiring
+time and interface-resolution refinement.
+
+Once this mode accepts a step, subsequent steps must provide its complete
+solved heat boundary; they cannot silently revert to bulk-temperature stress.
+The persistent mode flag, native populations/forces/sigma, enthalpy/source
+states and finite gas/walls publish together after all gates. Failed mode
+entry does not latch the requirement, and source, geometry, budget or
+cancellation refusal preserves the prior accepted state. Surface free energy,
+capillary-work heating, surface entropy and conservative total mechanical
+energy remain outside this model.
+
+Focused regressions in the thermocapillary test module independently compare
+nonuniform gas baths, series surface temperatures, original heat storage,
+sigma gradients, actual native traction and capillary pressure; preserve a
+uniform solved-surface/no-Marangoni control despite a bulk temperature
+gradient; and check surface-only source exits, incomplete fields and mode
+continuation/rollback with finite gas. Their synthetic source laws test
+implementation and physical coupling rather than experimental accuracy.
 
 ## Finite-mass planar D3Q19 wall coupling
 

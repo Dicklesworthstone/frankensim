@@ -6,6 +6,9 @@ use fs_lbm::material::free_surface::enthalpy::conduction::{
 };
 use fs_lbm::material::free_surface::enthalpy::thermocapillary::PlanarThermocapillarity;
 
+#[path = "surface_thermocapillary.rs"]
+mod surface_thermocapillary;
+
 const DX: f64 = 0.001;
 const DT: f64 = 0.001;
 const SURFACE: [usize; 3] = [3, 3, 3];
@@ -330,7 +333,7 @@ fn g4_late_source_geometry_and_work_refusals_keep_all_accepted_histories() {
             assert!(matches!(
                 error,
                 FreeSurfaceEnthalpyError::Invalid(
-                    "solved surface temperature needs a shared thermocapillary surface field"
+                    "surface-temperature stress needs one complete outward heat patch per tank column"
                 )
             ));
             assert_eq!(gas.state(), &gas_before);
