@@ -421,6 +421,20 @@ impl UniformHystereticCore {
         self.law.initial_state()
     }
 
+    /// Actual fixed magnetic volume [m3], also used by a finite core heat cell.
+    pub const fn volume_m3(&self) -> f64 {
+        self.volume_m3
+    }
+
+    /// Validate retained memory and recover its terminal linkage/current and
+    /// stored energy without advancing the magnetic history or generating heat.
+    pub fn hold_candidate(
+        &self,
+        state: &MagneticHysteresisState,
+    ) -> Result<HystereticCoreStep, FieldStorageError> {
+        self.finish(self.law.candidate_field(state, state.field_a_m())?)
+    }
+
     /// Current-driven uniform core, with explicit irreversible magnetic state.
     pub fn candidate_current(
         &self,

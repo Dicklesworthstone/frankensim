@@ -9101,3 +9101,37 @@ cancellation and other refused trials leave accepted contact/thermal histories
 unchanged. Scope remains a fixed normal patch/load, prescribed relative motion,
 matching finite-volume geometry, negligible interface resistance/storage and
 first-order endpoint coupling.
+
+### Voltage-driven hysteretic cores with distinct finite heating
+
+`material_circuit::hysteretic::HystereticCircuit` replaces one original
+inductor branch by `UniformHystereticCore` through a private native current port.
+The existing Newton solve closes linkage change against native terminal voltage
+using the exact work-conjugate mean current evaluated from frozen accepted
+magnetic memory. One original native DAE assembly serves all scalar magnetic
+trials. Ordinary L/C/source branches and material-derived graph resistance retain
+their original owners. Private-port magnetic work cancels exactly once; core
+pinning heat, sourced graph/copper heat and external work remain separate.
+No numerical residual or fitted core-loss map is deposited as physical heat.
+
+The `thermal::ThermalHystereticCircuit` child uses the prepared `MaterialNetwork`
+and existing `cell_driver_candidate`, with distinct whole-core and winding
+receivers, sourced R(T), fixed core geometry/density and an explicit admitted
+core temperature interval for the unchanged magnetic parameters. It checks
+source snapshots, volume, clocks, heat deposition and the combined energy
+account before returning both candidate histories. Refusal publishes neither.
+
+An increment assumes monotone linkage. Actual magnetic reversals and source
+jumps require interval cuts. Start/midpoint/endpoint native voltage probes
+refuse detectable turns; they do not certify unresolved interior oscillations.
+The linear limit matches native midpoint stepping; a smooth active branch has
+second-order time convergence. Pinning/saturation crossings require refinement,
+and the general coupled thermal scheme is first order. Current-only constraint
+topologies may refuse the admitted private-port native DAE. No vector hysteresis,
+eddy/excess loss, frequency-dependent fit or invented material-temperature
+coefficient is introduced.
+
+Six original-source physical tests pass: native linear RLC reduction, independent
+major-loop pinning area/remanence, analytic active-set RL refinement, reversal/
+source/budget/cancellation refusal, distinct finite copper/core heating with R(T)
+feedback and global closure, and thermal-domain rollback.
