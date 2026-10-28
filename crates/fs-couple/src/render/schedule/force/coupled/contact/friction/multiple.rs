@@ -206,6 +206,9 @@ impl MultiFrictionModalSystem {
         config: MultiFrictionConfig, gate: &CancelGate) -> Result<Self, ModalFrictionError>
     {
         poll(Some(gate))?;
+        if core.adhesive.is_some() {
+            return Err(invalid("simultaneous dry ports cannot discard a retained adhesive patch").into());
+        }
         let p = additional.len().checked_add(1).ok_or_else(|| invalid("friction port count overflow"))?;
         if !(1..=64).contains(&config.max_ports) || p > config.max_ports
             || !(1..=128).contains(&config.max_sweeps) {

@@ -418,6 +418,7 @@ impl FrictionModalSystem {
         // Bound potentials retain their exact original coordinate prefix and
         // any replaced linear stiffness. A larger network must not turn their
         // storage into a diagnostic-only source, or silently lose it entirely.
+        next.adhesive = self.adhesive;
         next.nonlinear = self.nonlinear;
         limit("complete initial material/nonlinear energy", next.total_energy_j()?,
             next.network.config.maximum_total_energy_j)?;

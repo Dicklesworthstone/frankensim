@@ -497,3 +497,28 @@ fn g3_cancellation_after_a_staged_trial_and_misaligned_clock_publish_nothing() {
     assert_eq!(mechanical.samples_rendered(), 1);
     assert_eq!(thermal.time_s(), 0.0);
 }
+
+#[test]
+fn adhesive_source_cannot_be_silently_replaced_by_dry_thermal_refresh() {
+    use fs_couple::render::schedule::force::coupled::contact::friction::adhesive::AdhesiveModalBinding;
+    use fs_tribo::adhesive::{AdhesiveContactState, AdhesiveFrictionLaw, AdhesiveTangentialContact};
+    let leaf = AdhesiveTangentialContact::new(
+        AdhesiveFrictionLaw::new(law(300.0), 1e6, 0.5e6).unwrap(),
+        AdhesiveContactState::new(1e-6, 0.0).unwrap(),
+    ).unwrap();
+    let mut mechanical = mechanics().with_adhesion(AdhesiveModalBinding::new(leaf).unwrap()).unwrap();
+    let mut thermal = thermal();
+    let route = FrictionHeatRoute::from_link(&thermal, 7, K).unwrap();
+    let before = states(&mechanical);
+    let old_thermal = thermal.clone();
+    let calls = Cell::new(0);
+    let result = mechanical.step_with_friction_heat(&mut thermal, &route, &[0.0, 0.0],
+        FrictionDrive { normal_force_n: 0.0, ..drive() }, controls(), &[0.0, 0.0], 300.0,
+        |state, temperature| { calls.set(calls.get()+1); source(state, temperature) }, &CancelGate::new());
+    assert!(matches!(result, Err(ModalFrictionHeatError::Invalid(_))));
+    assert_eq!(calls.get(),0);
+    assert_eq!(states(&mechanical),before);
+    assert_eq!(mechanical.samples_rendered(),0);
+    assert_eq!(thermal.time_s(),old_thermal.time_s());
+    for (id,cell) in thermal.cells() { assert_eq!(cell.specific_h_j_kg,old_thermal.cells()[id].specific_h_j_kg); }
+}

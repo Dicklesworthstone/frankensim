@@ -9263,3 +9263,27 @@ acceleration from rest at finite gap, contact onset, equal/opposite momentum,
 energy conservation, and coordinate translation. Native finite-difference
 probes include the current residual scale so internal force at a zero state
 remains numerically resolvable; solver tolerances and budgets are unchanged.
+
+## Adhesive junctions on the native modal network
+
+`friction::adhesive::AdhesiveModalBinding` attaches an explicit fixed real area,
+repulsive normal load and complete junction shear law to `FrictionModalSystem`.
+An optional `SourceAdhesiveTangential` retains the original normal and shear
+owners. The existing full finite-body compliance selects static reactions or
+compliant sliding; the existing native propagation, state publication, observer
+and energy transaction remain in charge. The actual applied force times solved
+slip supplies friction loss. Equal/opposite body reactions retain momentum,
+and zero repulsion with real contact area does not release the junction.
+
+The `FrictionDrive` normal input must equal the frozen repulsive force. It is
+not the signed net adhesive reaction. Coulomb and affine pressure contributions
+are supported. Nonlinear weakening refuses until its adhesive continuation
+history is supported. Normal-area evolution, mixed-mode peeling and tangential
+elastic storage are not inferred. Dry source replacement, simultaneous-port
+promotion, and all dry-law thermal refresh entry points refuse to discard or
+reinterpret an attached adhesive source. Friction loss remains available for
+explicit external heat routing; an evolving thermal adhesive model is not
+claimed by this fixed-query binding.
+
+Cold internal-coordinate extension preserves the same adhesive binding alongside
+existing source interfaces and nonlinear storage.

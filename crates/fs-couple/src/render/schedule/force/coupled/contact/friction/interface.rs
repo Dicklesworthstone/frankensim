@@ -110,7 +110,7 @@ impl FrictionModalSystem {
     /// replacing an active interface. The next positive-load step checks its
     /// initial, actual step-average and endpoint rates before state publication.
     pub fn with_interface(mut self, binding: DryFrictionBinding) -> Result<Self, ModalFrictionError> {
-        if self.interface.is_some() || self.port.law != *binding.card.friction_law() {
+        if self.interface.is_some() || self.adhesive.is_some() || self.port.law != *binding.card.friction_law() {
             return Err(invalid("dry-interface binding must match the unchanged law and cannot replace a retained source").into());
         }
         self.interface = Some(binding);

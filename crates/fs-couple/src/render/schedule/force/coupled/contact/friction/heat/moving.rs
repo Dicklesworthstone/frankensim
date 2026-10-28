@@ -70,6 +70,11 @@ impl FrictionModalSystem {
         ) -> Result<MovingModalHeatSource<P>, E>,
         gate: &CancelGate,
     ) -> Result<HeatedMovingModalFrictionFrame<P>, ModalFrictionHeatError<E>> {
+        if self.adhesive.is_some() {
+            return Err(ModalFrictionHeatError::Invalid(
+                "dry-law thermal refresh cannot replace a frozen adhesive normal/shear source",
+            ));
+        }
         let checkpoint = || {
             if gate.is_requested() {
                 Err(DepositionError::Cancelled)

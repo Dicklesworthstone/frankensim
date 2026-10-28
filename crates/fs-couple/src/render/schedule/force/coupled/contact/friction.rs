@@ -43,7 +43,8 @@ pub struct ModalFrictionPort {
 pub struct FrictionDrive {
     /// Signed prescribed relative surface speed [m/s]. Zero is an undriven brake.
     pub speed_m_s: f64,
-    /// Prescribed compressive load [N]. Zero releases friction, not vibration.
+    /// Prescribed compressive load [N]. For a bound adhesive patch this must
+    /// equal its frozen repulsive load; zero need not release junction shear.
     pub normal_force_n: f64,
 }
 
@@ -67,7 +68,7 @@ pub struct ModalFrictionConfig {
 /// Resolved discrete branch, never inferred from a small velocity threshold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModalFrictionRegime {
-    /// The normal load was explicitly zero; the network still evolves.
+    /// The dry normal load or adhesive real area was zero; the network still evolves.
     Released,
     /// The displacement constraint is satisfied within its declared tolerance.
     Sticking,
@@ -203,6 +204,7 @@ pub struct FrictionModalSystem {
     last: Option<FrictionModalFrame>,
     acceleration_pressure: Option<Vec<f64>>,
     interface: Option<interface::DryFrictionBinding>,
+    adhesive: Option<adhesive::AdhesiveModalBinding>,
     nonlinear: Option<nonlinear::NonlinearFrictionState>,
     // McIntyre-Schumacher-Woodhouse branch memory: committed, and staged by
     // the trial that may still be refused or repeated.
@@ -222,7 +224,7 @@ impl FrictionModalSystem {
         let compliance = effective_compliance(&network, &column, gate)?;
         poll(Some(gate))?;
         Ok(Self { forces: vec![0.0; network.mode_count()], network, port,
-            config, column, compliance, last: None, acceleration_pressure: None, interface: None, nonlinear: None,
+            config, column, compliance, last: None, acceleration_pressure: None, interface: None, adhesive: None, nonlinear: None,
             branch: ContactBranch::Fresh, staged_branch: ContactBranch::Fresh, load_line: None })
     }
 
@@ -376,7 +378,8 @@ impl FrictionModalSystem {
     /// Last fully accepted friction-inclusive frame.
     #[must_use]
     pub const fn last_frame(&self) -> Option<&FrictionModalFrame> { self.last.as_ref() }
-    /// Unmodified interface law and attachment data.
+    /// Original attachment and dry pressure-law component. When adhesion is
+    /// bound, `adhesive_binding` retains its additional junction law and sources.
     #[must_use]
     pub const fn port(&self) -> &ModalFrictionPort { &self.port }
 
@@ -443,9 +446,11 @@ impl FrictionModalSystem {
         }
         self.network.stage_inner(&self.forces, gate)?;
         let slip = finite(drive_distance-dot(&self.column, &self.network.free_delta)?)?;
-        let (loss, constitutive_residual_n) = scalar::check(
+        let (loss, constitutive_residual_n) = if let Some(binding) = &self.adhesive {
+            binding.check(self.config, self.network.dt, traction, slip, regime, iterations)?
+        } else { scalar::check(
             &self.port.law, self.config, self.network.dt, drive, traction, slip, regime, iterations,
-        )?;
+        )? };
         interface::check_average(self.interface.as_ref(), drive, slip, self.network.dt)?;
         interface::check_endpoint(self.interface.as_ref(), &self.column, &self.network.candidates, drive)?;
         let observer_pressure_pa = self.staged_observer_pressure(gate)?;
@@ -479,6 +484,12 @@ impl FrictionModalSystem {
     fn solve_contact(&mut self, free_slip: f64, normal: f64, gate: Option<&CancelGate>)
         -> Result<(f64, ModalFrictionRegime, usize, Option<FrictionRoots>), ModalFrictionError>
     {
+        if let Some(binding) = &self.adhesive {
+            let (traction, regime, iterations) = binding.solve(self.config, self.compliance,
+                self.network.dt, free_slip, normal, gate)?;
+            self.staged_branch = ContactBranch::Fresh;
+            return Ok((traction, regime, iterations, None));
+        }
         let continued = matches!(self.port.law, FrictionLaw::Stribeck { .. } | FrictionLaw::Hyperbolic { .. });
         if !continued || normal == 0.0 {
             self.staged_branch = ContactBranch::Fresh;
@@ -526,3 +537,6 @@ pub mod nonlinear;
 
 /// Same-step friction, common-interface temperature and finite-body thermal evolution.
 pub mod heat;
+
+/// Adhesive junction shear on frozen real contact geometry.
+pub mod adhesive;
