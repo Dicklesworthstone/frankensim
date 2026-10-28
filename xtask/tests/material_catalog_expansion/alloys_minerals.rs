@@ -14,7 +14,7 @@ fn alloy_point(kelvin: f64, extra: &[(&str, f64)]) -> QueryPoint {
 
 #[test]
 fn engineering_alloy_curves_interpolate_and_keep_process_and_temperature_bounds() {
-    let monel = compile("monel-400-special-metals-2005", 4);
+    let monel = compile("monel-400-special-metals-2005", 8);
     let point = alloy_point(423.15, &[("annealed-material", 1.0)]);
     sample(&monel, "thermal-conductivity", K, &point, 25.45);
     sample(&monel, "specific-heat-capacity", CP, &point, 452.0);
@@ -40,7 +40,7 @@ fn engineering_alloy_curves_interpolate_and_keep_process_and_temperature_bounds(
         &alloy_point(1073.15, &[]),
     );
 
-    let titanium = compile("timetal-6-4-timet-2000", 4);
+    let titanium = compile("timetal-6-4-timet-2000", 7);
     sample(
         &titanium,
         "thermal-conductivity",
@@ -76,7 +76,7 @@ fn engineering_alloy_curves_interpolate_and_keep_process_and_temperature_bounds(
         &alloy_point(1143.16, &[]),
     );
 
-    let inconel = compile("inconel-718-aged-special-metals-2007", 4);
+    let inconel = compile("inconel-718-aged-special-metals-2007", 6);
     let point = alloy_point(533.15, &[("annealed-1800f-aged", 1.0)]);
     // 500 F lies midway between the bulletin's 400 F and 600 F rows.
     sample(
@@ -116,7 +116,7 @@ fn engineering_alloy_curves_interpolate_and_keep_process_and_temperature_bounds(
 
 #[test]
 fn nilo_mean_expansion_requires_its_reference_and_is_not_instantaneous_alpha() {
-    let pack = compile("nilo-36-special-metals-2004", 4);
+    let pack = compile("nilo-36-special-metals-2004", 5);
     let reference = alloy_point(293.15, &[]);
     sample(&pack, "density", RHO, &reference, 8110.0);
     sample(&pack, "thermal-conductivity", K, &reference, 10.0);

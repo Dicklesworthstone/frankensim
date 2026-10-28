@@ -1,0 +1,74 @@
+frankensim.matdb-source.v1
+observation	guide	A36 hot-rolled carbon steel, UNS K02600	Supplier product-guide reference values	Requires engineering-reference-model=1 and source-specimens-matched=0. The source supplies grade-level physical values, not a matched coupon, mill test report, statistical distribution or ASTM design allowable. Specimen dimensions, orientation, heat treatment, test method, strain rate and numerical test temperature are unstated. Source-test-temperature-known=0 admits no temperature law or invented room-temperature measurement. Source-hot-rolled=1 retains the named product class without asserting a rolling schedule. Values cannot be transferred to cold-finished, welded, heat-treated or other steel grades.
+observation	conversion	A36 supplier-guide numerical facts	Explicit conversion of the printed imperial units	Density 0.282 lb/in3; elastic modulus 29000 ksi; shear modulus 11500 ksi; Poisson ratio 0.26; specific heat 0.11 BTU/(lb degF); conductivity 348 BTU in/(h ft2 degF). Conversions use pound 0.45359237 kg, inch 0.0254 m, foot 0.3048 m, standard gravity 9.80665 m/s2 and hour 3600 s. BTU is interpreted as International Table BTU, 1055.05585262 J, because the source does not specify a BTU convention; this is an explicit conversion assumption, not a precision claim. Temperature differences use 5/9 K per degF. Independently rounded E, G and nu remain separate and are not forced into an isotropic tensor.
+observation	strength	A36 supplier-guide strength and ductility	Unqualified product-guide scalar values	Printed tensile strength 58 ksi and yield strength 47.7 ksi are guide values, not the ASTM A36 minimum yield requirement, characteristic strengths, certified coupon results or safety allowables. Elongation 22 percent has no stated gauge length; area reduction is 50 percent. No stress-strain, failure, fatigue or plasticity law is inferred.
+scalar	density	guide,conversion	density	7805.73312827728	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_specimens_matched	0	0	1
+validity	density	source_test_temperature_known	0	0	1
+validity	density	source_test_method_known	0	0	1
+validity	density	source_hot_rolled	1	1	1
+scalar	young-modulus	guide,conversion	young_modulus	199947961501.88248	Pa	constant
+uncertainty	young-modulus	unstated	-	-	-	-
+validity	young-modulus	engineering_reference_model	1	1	1
+validity	young-modulus	source_specimens_matched	0	0	1
+validity	young-modulus	source_test_temperature_known	0	0	1
+validity	young-modulus	source_test_method_known	0	0	1
+validity	young-modulus	source_hot_rolled	1	1	1
+scalar	poisson-ratio	guide,conversion	poisson_ratio	0.26	1	constant
+uncertainty	poisson-ratio	unstated	-	-	-	-
+validity	poisson-ratio	engineering_reference_model	1	1	1
+validity	poisson-ratio	source_specimens_matched	0	0	1
+validity	poisson-ratio	source_test_temperature_known	0	0	1
+validity	poisson-ratio	source_test_method_known	0	0	1
+validity	poisson-ratio	source_hot_rolled	1	1	1
+scalar	shear-modulus	guide,conversion	shear_modulus	79289708871.43614	Pa	constant
+uncertainty	shear-modulus	unstated	-	-	-	-
+validity	shear-modulus	engineering_reference_model	1	1	1
+validity	shear-modulus	source_specimens_matched	0	0	1
+validity	shear-modulus	source_test_temperature_known	0	0	1
+validity	shear-modulus	source_test_method_known	0	0	1
+validity	shear-modulus	source_hot_rolled	1	1	1
+scalar	heat-capacity	guide,conversion	specific_heat_capacity	460.548	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	engineering_reference_model	1	1	1
+validity	heat-capacity	source_specimens_matched	0	0	1
+validity	heat-capacity	source_test_temperature_known	0	0	1
+validity	heat-capacity	source_test_method_known	0	0	1
+validity	heat-capacity	source_hot_rolled	1	1	1
+scalar	conductivity	guide,conversion	thermal_conductivity	50.191305324770326	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	engineering_reference_model	1	1	1
+validity	conductivity	source_specimens_matched	0	0	1
+validity	conductivity	source_test_temperature_known	0	0	1
+validity	conductivity	source_test_method_known	0	0	1
+validity	conductivity	source_hot_rolled	1	1	1
+scalar	tensile-strength	guide,strength	tensile_strength	399895923.0037649	Pa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	engineering_reference_model	1	1	1
+validity	tensile-strength	source_specimens_matched	0	0	1
+validity	tensile-strength	source_test_temperature_known	0	0	1
+validity	tensile-strength	source_test_method_known	0	0	1
+validity	tensile-strength	source_hot_rolled	1	1	1
+scalar	yield-strength	guide,strength	tensile_yield_strength	328879922.88413084	Pa	constant
+uncertainty	yield-strength	unstated	-	-	-	-
+validity	yield-strength	engineering_reference_model	1	1	1
+validity	yield-strength	source_specimens_matched	0	0	1
+validity	yield-strength	source_test_temperature_known	0	0	1
+validity	yield-strength	source_test_method_known	0	0	1
+validity	yield-strength	source_hot_rolled	1	1	1
+scalar	elongation	guide,strength	elongation_at_break	0.22	1	constant
+uncertainty	elongation	unstated	-	-	-	-
+validity	elongation	engineering_reference_model	1	1	1
+validity	elongation	source_specimens_matched	0	0	1
+validity	elongation	source_test_temperature_known	0	0	1
+validity	elongation	source_test_method_known	0	0	1
+validity	elongation	source_hot_rolled	1	1	1
+scalar	area-reduction	guide,strength	reduction_of_area	0.50	1	constant
+uncertainty	area-reduction	unstated	-	-	-	-
+validity	area-reduction	engineering_reference_model	1	1	1
+validity	area-reduction	source_specimens_matched	0	0	1
+validity	area-reduction	source_test_temperature_known	0	0	1
+validity	area-reduction	source_test_method_known	0	0	1
+validity	area-reduction	source_hot_rolled	1	1	1

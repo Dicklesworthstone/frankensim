@@ -1,0 +1,23 @@
+frankensim.matdb-source.v1
+observation	element	Elemental vanadium supplier general reference	ESPI Metals Vanadium general-properties table	The page lists several material purities and product forms but does not bind its general properties to a purity, process, specimen orientation or lot. Require source-process-known=0. Pressure and statistical uncertainty are unstated. No vanadium-alloy, strength, phase-transition or thermal-expansion law is inferred.
+observation	rho	Vanadium general reference	Supplier density	6.11 g/cm3 converts to 6110 kg/m3. The density temperature is not supplied; it requires an explicit source-density-temperature-known=0 selection.
+observation	k	Vanadium general reference	Supplier thermal conductivity at 298.2 K	0.307 W/(cm K) converts to 30.7 W/(m K). The 298.2 K source temperature is preserved separately from the 298.15 K heat-capacity point.
+observation	cp	Vanadium general reference	Supplier specific heat at 25 C	The printed 0.116 Cal/(g K) is explicitly interpreted using the thermochemical calorie, 4.184 J, giving 485.344 J/(kg K). The source does not name its calorie convention, so this conversion requires thermochemical-calorie-conversion=1.
+observation	rho-electric	Vanadium general reference	Supplier electrical resistivity at 20 C	25.4 micro-ohm cm converts to 2.54e-7 Ohm m at 293.15 K.
+scalar	density	element,rho	density	6110	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_process_known	0	0	1
+validity	density	source_density_temperature_known	0	0	1
+scalar	conductivity	element,k	thermal_conductivity	30.7	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	298.2	298.2	K
+validity	conductivity	source_process_known	0	0	1
+scalar	heat-capacity	element,cp	specific_heat_capacity	485.344	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	298.15	298.15	K
+validity	heat-capacity	source_process_known	0	0	1
+validity	heat-capacity	thermochemical_calorie	1	1	1
+scalar	resistivity	element,rho-electric	electrical_resistivity	2.54e-7	Ohm*m	constant
+uncertainty	resistivity	unstated	-	-	-	-
+validity	resistivity	temperature	293.15	293.15	K
+validity	resistivity	source_process_known	0	0	1

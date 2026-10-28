@@ -353,7 +353,7 @@ fn g0_g3_elements_minerals_and_alloys_keep_reference_model_guards() {
         ),
         (
             "halite-nacl-crystran-reference",
-            3,
+            4,
             273.0,
             2170.0,
             854.0,
@@ -361,7 +361,7 @@ fn g0_g3_elements_minerals_and_alloys_keep_reference_model_guards() {
         ),
         (
             "periclase-mgo-crystran-reference",
-            3,
+            4,
             273.0,
             3580.0,
             877.0,

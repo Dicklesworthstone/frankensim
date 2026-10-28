@@ -1,0 +1,21 @@
+frankensim.matdb-manifest.v3
+pack_id	steel-1018-onlinemetals-reference
+redistribution	permitted	Selected attributed numerical facts and original modeling notes only; no source document, prose or table layout is redistributed
+citation	OnlineMetals, 1018 Product Guide, Physical Properties 1018, accessed 2026-10-28; https://www.onlinemetals.com/en/product-guide/alloy/1018
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	supplier-guide	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	young_modulus	young_modulus	dimensional
+property	poisson_ratio	poisson_ratio	dimensional
+property	shear_modulus	shear-modulus	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	tensile_strength	tensile-strength	dimensional
+property	tensile_yield_strength	tensile-yield-strength	dimensional
+property	elongation_at_break	elongation-at-break	dimensional
+property	reduction_of_area	reduction-of-area	dimensional
+axis	engineering_reference_model	engineering-reference-model	dimensional
+axis	source_specimens_matched	source-specimens-matched	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_test_method_known	source-test-method-known	dimensional
+axis	source_cold_finished	source-cold-finished	dimensional

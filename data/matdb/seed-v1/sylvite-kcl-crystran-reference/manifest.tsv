@@ -1,0 +1,14 @@
+frankensim.matdb-manifest.v3
+pack_id	sylvite-kcl-crystran-reference
+redistribution	permitted	Selected attributed numerical facts and original normalization notes only; no source document, prose, images or table layout is redistributed
+citation	Crystran, Potassium Chloride KCl optical-material data, accessed 2026-10-28; https://www.crystran.com/optical-materials/potassium-chloride-kcl/
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	sylvite-reference	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	relative_permittivity	relative-permittivity	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	frequency	frequency	dimensional
+axis	source_optical_crystal	source-optical-crystal	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional

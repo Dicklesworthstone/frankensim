@@ -8,7 +8,13 @@ property	density	density	dimensional
 property	specific_heat_capacity	specific-heat-capacity	dimensional
 property	thermal_conductivity	thermal-conductivity	thermal-conductivity
 property	electrical_resistivity	electrical-resistivity	dimensional
+property	tensile_modulus	tensile-modulus	dimensional
+property	compression_modulus	compression-modulus	dimensional
+property	torsional_modulus	torsional-modulus	dimensional
+property	poisson_ratio	poisson-ratio	dimensional
 axis	temperature	temperature	absolute-temperature
 axis	engineering_reference_model	engineering-reference-model	dimensional
 axis	source_specimens_matched	source-specimens-matched	dimensional
 axis	annealed_material	annealed-material	dimensional
+axis	source_elastic_temperature_known	source-elastic-temperature-known	dimensional
+axis	source_elastic_method_known	source-elastic-method-known	dimensional

@@ -1,0 +1,47 @@
+frankensim.matdb-source.v1
+observation	grade	Hexoloy SA silicon carbide, pressureless-sintered grade	Saint-Gobain 2012 technical-data sheet	The named source edition describes pressureless sintering of fine SiC powder. Values are grade references, not lot certification or a universal SiC law. Later website tables differ in density and modulus; their values are not pooled with this 2012 profile. No corrosion, lifetime, temperature-independent strength or fracture-size law is inferred.
+observation	mechanical	Hexoloy SA grade reference	Room-temperature mechanical entries	The source gives E=430 GPa, four-point flexural strength=380 MPa, three-point flexural strength=550 MPa and compression=3900 MPa at room temperature without assigning a numerical temperature. The two flexural geometries remain separate properties and are not tensile yield strengths. Density 3.10 g/cm3 and Poisson ratio 0.14 have no explicit test temperature. Uncertainty, pressure and lot-specific surface preparation are unstated.
+observation	thermal-rt	Hexoloy SA grade reference at unspecified room temperature	Mean specific heat, thermal conductivity and mean expansion	Mean heat capacity 0.67 J/(g K) becomes 670 J/(kg K); conductivity is 125.6 W/(m K). Neither receives an invented 293.15 K temperature. Expansion 4.02e-6/K is a mean from the unspecified room-temperature reference to 700 C, not an instantaneous alpha(T) law. The source's broad dopant-dependent electrical-resistivity ranges are not replaced by point values.
+observation	thermal-hot	Hexoloy SA at 200 and 400 C	Two numerical-temperature conductivity entries	102.6 and 77.5 W/(m K) are the published 473.15 K and 673.15 K values. Linear interpolation between only these two knots is a declared engineering approximation, with interpolation error unstated. The unknown room-temperature point is excluded from this curve and cannot anchor an invented low-temperature segment.
+scalar	rho	grade,mechanical	density	3100	kg/m3	constant
+uncertainty	rho	unstated	-	-	-	-
+validity	rho	source_grade	1	1	1
+validity	rho	source_test_temperature_known	0	0	1
+scalar	E	grade,mechanical	young_modulus	430	GPa	constant
+uncertainty	E	unstated	-	-	-	-
+validity	E	source_grade	1	1	1
+validity	E	source_test_temperature_known	0	0	1
+scalar	nu	grade,mechanical	poisson_ratio	0.14	1	constant
+uncertainty	nu	unstated	-	-	-	-
+validity	nu	source_grade	1	1	1
+validity	nu	source_test_temperature_known	0	0	1
+scalar	flexure-4pt	grade,mechanical	flexural_strength_4pt	380	MPa	constant
+uncertainty	flexure-4pt	unstated	-	-	-	-
+validity	flexure-4pt	source_grade	1	1	1
+validity	flexure-4pt	source_test_temperature_known	0	0	1
+scalar	flexure-3pt	grade,mechanical	flexural_strength_3pt	550	MPa	constant
+uncertainty	flexure-3pt	unstated	-	-	-	-
+validity	flexure-3pt	source_grade	1	1	1
+validity	flexure-3pt	source_test_temperature_known	0	0	1
+scalar	compression	grade,mechanical	compressive_strength	3900	MPa	constant
+uncertainty	compression	unstated	-	-	-	-
+validity	compression	source_grade	1	1	1
+validity	compression	source_test_temperature_known	0	0	1
+scalar	cp	grade,thermal-rt	specific_heat_capacity	670	J/kg/K	constant
+uncertainty	cp	unstated	-	-	-	-
+validity	cp	source_grade	1	1	1
+validity	cp	source_test_temperature_known	0	0	1
+scalar	k-rt	grade,thermal-rt	thermal_conductivity	125.6	W/m/K	constant
+uncertainty	k-rt	unstated	-	-	-	-
+validity	k-rt	source_grade	1	1	1
+validity	k-rt	source_test_temperature_known	0	0	1
+curve	k-hot	grade,thermal-hot	thermal_conductivity	temperature	K	W/m/K	473.15:102.6,673.15:77.5	linear
+uncertainty	k-hot	unstated	-	-	-	-
+validity	k-hot	temperature	473.15	673.15	K
+validity	k-hot	source_grade	1	1	1
+validity	k-hot	source_test_temperature_known	1	1	1
+scalar	mean-alpha	grade,thermal-rt	mean_expansion	4.02e-6	K^-1	constant
+uncertainty	mean-alpha	unstated	-	-	-	-
+validity	mean-alpha	source_range_end_temperature	973.15	973.15	K
+validity	mean-alpha	source_grade	1	1	1
+validity	mean-alpha	source_test_temperature_known	0	0	1

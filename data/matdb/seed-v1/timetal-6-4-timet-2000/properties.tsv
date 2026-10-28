@@ -25,3 +25,25 @@ uncertainty	resistivity	unstated	-	-	-	-
 validity	resistivity	temperature	273.15	923.15	K
 validity	resistivity	engineering_reference_model	1	1	1
 validity	resistivity	source_specimens_matched	0	0	1
+observation	mean-expansion	TIMETAL 6-4 nominal alloy	TMC-0150 Table 2 mean coefficients of thermal expansion	The source reports interval means 9.0e-6/K over 0-100 C, 9.4e-6/K over 20-425 C and 9.7e-6/K over 20-650 C. Each coefficient relates only the two stated endpoint lengths. Celsius endpoints are retained as printed; the independently rounded Fahrenheit values are not substituted. Texture, specimen direction, heat treatment and statistical uncertainty are unspecified. Source-expansion-direction-known=0 acknowledges this; no longitudinal/transverse tensor or isotropic volumetric coefficient is inferred. These are not instantaneous alpha(T) values, a temperature-density law, or permission to stitch the different reference lengths into a continuous expansion curve.
+scalar	mean-expansion-0-100	mean-expansion,alloy-reference	mean_linear_thermal_expansion	9.0e-6	K^-1	constant
+uncertainty	mean-expansion-0-100	unstated	-	-	-	-
+validity	mean-expansion-0-100	source_reference_temperature	273.15	273.15	K
+validity	mean-expansion-0-100	source_range_end_temperature	373.15	373.15	K
+validity	mean-expansion-0-100	engineering_reference_model	1	1	1
+validity	mean-expansion-0-100	source_specimens_matched	0	0	1
+validity	mean-expansion-0-100	source_expansion_direction_known	0	0	1
+scalar	mean-expansion-20-425	mean-expansion,alloy-reference	mean_linear_thermal_expansion	9.4e-6	K^-1	constant
+uncertainty	mean-expansion-20-425	unstated	-	-	-	-
+validity	mean-expansion-20-425	source_reference_temperature	293.15	293.15	K
+validity	mean-expansion-20-425	source_range_end_temperature	698.15	698.15	K
+validity	mean-expansion-20-425	engineering_reference_model	1	1	1
+validity	mean-expansion-20-425	source_specimens_matched	0	0	1
+validity	mean-expansion-20-425	source_expansion_direction_known	0	0	1
+scalar	mean-expansion-20-650	mean-expansion,alloy-reference	mean_linear_thermal_expansion	9.7e-6	K^-1	constant
+uncertainty	mean-expansion-20-650	unstated	-	-	-	-
+validity	mean-expansion-20-650	source_reference_temperature	293.15	293.15	K
+validity	mean-expansion-20-650	source_range_end_temperature	923.15	923.15	K
+validity	mean-expansion-20-650	engineering_reference_model	1	1	1
+validity	mean-expansion-20-650	source_specimens_matched	0	0	1
+validity	mean-expansion-20-650	source_expansion_direction_known	0	0	1

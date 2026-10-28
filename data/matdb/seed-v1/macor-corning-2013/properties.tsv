@@ -1,0 +1,52 @@
+frankensim.matdb-source.v1
+observation	grade	Corning MACOR machinable mica glass ceramic	Manufacturer brochure, April 2013 file edition	General properties from Corning laboratory sample testing, with production-batch variation explicitly noted by the source. No specific batch, machining history, direction or pressure is selected. This is the named glass ceramic, not pure mica, borosilicate glass or every machinable ceramic. Numerical uncertainty is unstated.
+observation	mechanical	MACOR grade reference	Density and mechanical table	Density 2.52 g/cm3 and Poisson ratio 0.29 lack an explicit measurement temperature. Young modulus 66.9 GPa and shear modulus 25.5 GPa are at 25 C and remain separately reported constants. The 94 MPa flexural value is a minimum specified average, not a measured typical strength, per-part lower bound or tensile/yield strength. No failure law or derived elastic tensor is inferred.
+observation	thermal	MACOR grade reference	Heat capacity, conductivity and expansion intervals	Heat capacity 0.79 kJ/(kg C) converts to 790 J/(kg K), and conductivity 1.46 W/(m C) to 1.46 W/(m K), both at 25 C. The three positive-temperature expansion entries are means measured from 25 C to each endpoint. Discrete endpoint selection does not create an instantaneous alpha(T) or continuous thermal-strain law. This source edition gives 9.0e-6/K for 25 to 300 C; values from other editions are not pooled.
+observation	electrical	MACOR at 25 C	Dielectric table and DC volume resistivity	Permittivity and loss are reported at only 1 kHz and 8.5 GHz; the sparse frequencies remain discrete and are not interpolated. DC volume resistivity 1e17 ohm cm converts to 1e15 ohm m. No dielectric-breakdown rating, frequency extrapolation or high-temperature conduction law is inferred.
+scalar	rho	grade,mechanical	density	2520	kg/m3	constant
+uncertainty	rho	unstated	-	-	-	-
+validity	rho	source_grade	1	1	1
+validity	rho	source_test_temperature_known	0	0	1
+scalar	E	grade,mechanical	young_modulus	66.9	GPa	constant
+uncertainty	E	unstated	-	-	-	-
+validity	E	temperature	298.15	298.15	K
+validity	E	source_grade	1	1	1
+scalar	G	grade,mechanical	shear_modulus	25.5	GPa	constant
+uncertainty	G	unstated	-	-	-	-
+validity	G	temperature	298.15	298.15	K
+validity	G	source_grade	1	1	1
+scalar	nu	grade,mechanical	poisson_ratio	0.29	1	constant
+uncertainty	nu	unstated	-	-	-	-
+validity	nu	source_grade	1	1	1
+validity	nu	source_test_temperature_known	0	0	1
+scalar	flexure-min-average	grade,mechanical	flexural_min_average	94	MPa	constant
+uncertainty	flexure-min-average	unstated	-	-	-	-
+validity	flexure-min-average	temperature	298.15	298.15	K
+validity	flexure-min-average	source_grade	1	1	1
+scalar	k	grade,thermal	thermal_conductivity	1.46	W/m/K	constant
+uncertainty	k	unstated	-	-	-	-
+validity	k	temperature	298.15	298.15	K
+validity	k	source_grade	1	1	1
+scalar	cp	grade,thermal	specific_heat_capacity	790	J/kg/K	constant
+uncertainty	cp	unstated	-	-	-	-
+validity	cp	temperature	298.15	298.15	K
+validity	cp	source_grade	1	1	1
+curve	mean-alpha	grade,thermal	mean_expansion	source_range_end_temperature	K	K^-1	573.15:9e-6,873.15:11.2e-6,1073.15:12.3e-6	tabulated
+uncertainty	mean-alpha	unstated	-	-	-	-
+validity	mean-alpha	source_reference_temperature	298.15	298.15	K
+validity	mean-alpha	source_range_end_temperature	573.15	1073.15	K
+validity	mean-alpha	source_grade	1	1	1
+curve	eps	grade,electrical	relative_permittivity	frequency	Hz	1	1000:6.01,8.5e9:5.64	tabulated
+uncertainty	eps	unstated	-	-	-	-
+validity	eps	temperature	298.15	298.15	K
+validity	eps	frequency	1000	8.5e9	Hz
+validity	eps	source_grade	1	1	1
+curve	loss	grade,electrical	dielectric_loss_tangent	frequency	Hz	1	1000:0.0040,8.5e9:0.0025	tabulated
+uncertainty	loss	unstated	-	-	-	-
+validity	loss	temperature	298.15	298.15	K
+validity	loss	frequency	1000	8.5e9	Hz
+validity	loss	source_grade	1	1	1
+scalar	resistivity	grade,electrical	electrical_resistivity	1e15	Ohm*m	constant
+uncertainty	resistivity	unstated	-	-	-	-
+validity	resistivity	temperature	298.15	298.15	K
+validity	resistivity	source_grade	1	1	1

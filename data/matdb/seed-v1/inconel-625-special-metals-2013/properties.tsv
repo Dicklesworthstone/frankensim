@@ -1,5 +1,5 @@
 frankensim.matdb-source.v1
-observation	alloy-reference	INCONEL 625, UNS N06625	Special Metals nominal property reference	Require engineering-reference-model=1 and source-specimens-matched=0. Cp is explicitly calculated, density has no assigned specimen or temperature, and k/resistivity belong to material annealed at 2100 F for one hour. No common coupon or covariance is inferred. Temperature knots use the printed Celsius column plus 273.15 K, preserving source rounding. Linear interpolation is an engineering approximation, never extrapolation. Density is available at one author-selected 294.15 K reference only, not constant over the heating curve. No elasticity, yield, creep, phase change or qualification is claimed.
+observation	alloy-reference	INCONEL 625, UNS N06625	Special Metals nominal property reference	Require engineering-reference-model=1 and source-specimens-matched=0. Cp is explicitly calculated, density has no assigned specimen or temperature, and k/resistivity belong to material annealed at 2100 F for one hour. No common coupon or covariance is inferred. Temperature knots use the printed Celsius column plus 273.15 K, preserving source rounding. Linear interpolation is an engineering approximation, never extrapolation. Density is available at one author-selected 294.15 K reference only, not constant over the heating curve. Dynamic moduli retain their separate Table 4 specimen and treatment selectors; they do not supply static elasticity, yield, creep, phase change or qualification.
 observation	density	INCONEL 625 nominal alloy	Table 2 physical constant	8.44 g/cc converts to 8440 kg/m3. Source uncertainty and test temperature unspecified.
 observation	heat-capacity	INCONEL 625 nominal alloy	Table 2 calculated specific heat	Printed SI Cp values from 21 to 982 C. These are calculated values, not measured heat-capacity specimens.
 observation	transport	INCONEL 625 annealed at 2100 F for 1 hour	Table 3 and footnotes b/c	Conductivity measurements attributed to Battelle; resistivity values use the same stated anneal. SI k in W/(m K); micro-ohm cm is converted with factor 1e-8 to Ohm m. No source uncertainty supplied.
@@ -25,3 +25,59 @@ validity	resistivity	temperature	294.15	1255.15	K
 validity	resistivity	engineering_reference_model	1	1	1
 validity	resistivity	source_specimens_matched	0	0	1
 validity	resistivity	annealed_2100f_one_hour	1	1	1
+observation	dynamic-annealed	INCONEL 625 hot-rolled 0.75-inch rod, annealed	Table 4 dynamic tensile/shear moduli and Poisson ratio, annealed columns	Rod diameter is 0.01905 m. Annealing schedule and measurement frequencies are not supplied in Table 4; the Table 3 2100 F/1 h transport schedule must not be assigned to these samples. Source-solution-treated=0 selects the annealed columns. Moduli are dynamic, not static Young or shear moduli. Printed GPa values convert by 1e9; independently rounded E, G and nu are retained without forcing isotropic consistency or claiming independent observations. No shared coupon with density or thermal rows is established.
+observation	dynamic-solution-treated	INCONEL 625 hot-rolled 0.75-inch rod, solution treated	Table 4 dynamic tensile/shear moduli and Poisson ratio, solution-treated columns	Source-solution-treated=1 selects these columns; treatment schedule and frequencies are unstated. Temperature interpolation is an authored linear approximation, not a relaxation spectrum or permission to interpolate between heat treatments. Statistical uncertainty, texture, pressure and lot are not reported. Source-frequency-known=0 acknowledges missing frequency and never means a zero-frequency test.
+curve	dynamic-e-annealed	dynamic-annealed,alloy-reference	dynamic_young_modulus	temperature	K	GPa	294.15:207.5,366.15:204.1,477.15:197.9,589.15:191.7,700.15:185.5,811.15:178.6,922.15:170.3,1033.15:160.6,1144.15:147.5	linear
+uncertainty	dynamic-e-annealed	unstated	-	-	-	-
+validity	dynamic-e-annealed	temperature	294.15	1144.15	K
+validity	dynamic-e-annealed	engineering_reference_model	1	1	1
+validity	dynamic-e-annealed	source_specimens_matched	0	0	1
+validity	dynamic-e-annealed	source_solution_treated	0	0	1
+validity	dynamic-e-annealed	source_dynamic_method	1	1	1
+validity	dynamic-e-annealed	source_frequency_known	0	0	1
+validity	dynamic-e-annealed	source_rod_diameter	0.01905	0.01905	m
+curve	dynamic-e-solution	dynamic-solution-treated,alloy-reference	dynamic_young_modulus	temperature	K	GPa	294.15:204.8,366.15:200.6,477.15:193.7,589.15:187.5,700.15:180.6,811.15:173.1,922.15:165.5,1033.15:157.2,1144.15:148.2	linear
+uncertainty	dynamic-e-solution	unstated	-	-	-	-
+validity	dynamic-e-solution	temperature	294.15	1144.15	K
+validity	dynamic-e-solution	engineering_reference_model	1	1	1
+validity	dynamic-e-solution	source_specimens_matched	0	0	1
+validity	dynamic-e-solution	source_solution_treated	1	1	1
+validity	dynamic-e-solution	source_dynamic_method	1	1	1
+validity	dynamic-e-solution	source_frequency_known	0	0	1
+validity	dynamic-e-solution	source_rod_diameter	0.01905	0.01905	m
+curve	dynamic-g-annealed	dynamic-annealed,alloy-reference	dynamic_shear_modulus	temperature	K	GPa	294.15:81.4,366.15:80.0,477.15:76.5,589.15:74.5,700.15:71.7,811.15:68.3,922.15:64.8,1033.15:60.0,1144.15:55.2	linear
+uncertainty	dynamic-g-annealed	unstated	-	-	-	-
+validity	dynamic-g-annealed	temperature	294.15	1144.15	K
+validity	dynamic-g-annealed	engineering_reference_model	1	1	1
+validity	dynamic-g-annealed	source_specimens_matched	0	0	1
+validity	dynamic-g-annealed	source_solution_treated	0	0	1
+validity	dynamic-g-annealed	source_dynamic_method	1	1	1
+validity	dynamic-g-annealed	source_frequency_known	0	0	1
+validity	dynamic-g-annealed	source_rod_diameter	0.01905	0.01905	m
+curve	dynamic-g-solution	dynamic-solution-treated,alloy-reference	dynamic_shear_modulus	temperature	K	GPa	294.15:78.0,366.15:76.5,477.15:74.5,589.15:71.7,700.15:68.9,811.15:66.2,922.15:63.4,1033.15:60.7,1144.15:57.2	linear
+uncertainty	dynamic-g-solution	unstated	-	-	-	-
+validity	dynamic-g-solution	temperature	294.15	1144.15	K
+validity	dynamic-g-solution	engineering_reference_model	1	1	1
+validity	dynamic-g-solution	source_specimens_matched	0	0	1
+validity	dynamic-g-solution	source_solution_treated	1	1	1
+validity	dynamic-g-solution	source_dynamic_method	1	1	1
+validity	dynamic-g-solution	source_frequency_known	0	0	1
+validity	dynamic-g-solution	source_rod_diameter	0.01905	0.01905	m
+curve	dynamic-nu-annealed	dynamic-annealed,alloy-reference	dynamic_poisson_ratio	temperature	K	1	294.15:0.278,366.15:0.280,477.15:0.286,589.15:0.290,700.15:0.295,811.15:0.305,922.15:0.321,1033.15:0.340,1144.15:0.336	linear
+uncertainty	dynamic-nu-annealed	unstated	-	-	-	-
+validity	dynamic-nu-annealed	temperature	294.15	1144.15	K
+validity	dynamic-nu-annealed	engineering_reference_model	1	1	1
+validity	dynamic-nu-annealed	source_specimens_matched	0	0	1
+validity	dynamic-nu-annealed	source_solution_treated	0	0	1
+validity	dynamic-nu-annealed	source_dynamic_method	1	1	1
+validity	dynamic-nu-annealed	source_frequency_known	0	0	1
+validity	dynamic-nu-annealed	source_rod_diameter	0.01905	0.01905	m
+curve	dynamic-nu-solution	dynamic-solution-treated,alloy-reference	dynamic_poisson_ratio	temperature	K	1	294.15:0.312,366.15:0.311,477.15:0.303,589.15:0.300,700.15:0.302,811.15:0.312,922.15:0.314,1033.15:0.305,1144.15:0.289	linear
+uncertainty	dynamic-nu-solution	unstated	-	-	-	-
+validity	dynamic-nu-solution	temperature	294.15	1144.15	K
+validity	dynamic-nu-solution	engineering_reference_model	1	1	1
+validity	dynamic-nu-solution	source_specimens_matched	0	0	1
+validity	dynamic-nu-solution	source_solution_treated	1	1	1
+validity	dynamic-nu-solution	source_dynamic_method	1	1	1
+validity	dynamic-nu-solution	source_frequency_known	0	0	1
+validity	dynamic-nu-solution	source_rod_diameter	0.01905	0.01905	m

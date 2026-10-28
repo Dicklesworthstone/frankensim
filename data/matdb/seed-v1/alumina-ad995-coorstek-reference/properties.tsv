@@ -1,0 +1,63 @@
+frankensim.matdb-source.v1
+observation	grade	CoorsTek AD-995, nominal 99.5% alumina ceramic	Manufacturer general alumina property table	Typical grade-reference values from the current general alumina table; source does not select manufacturing route, geometry, lot, direction or pressure. This is not sapphire or a universal 99.5% alumina law. Values from other source editions or semiconductor-specific tables are not pooled with this profile.
+observation	mechanical	AD-995 at 20 C	Elastic modulus, Poisson ratio, four-point modulus of rupture and compressive strength	The current table's four-point flexural strength is 300 MPa, not the 379 MPa reported in some older material sheets. Flexural rupture is not tensile or yield strength; specimen dimensions, surface preparation and statistical basis are unstated. All four mechanical entries apply at 293.15 K only.
+observation	thermal	AD-995 grade reference	Density and thermal-property table	Density is 3.90 g/cm3 with temperature unstated. Thermal conductivity 30 W/(m K) applies at 20 C; the brochure supplies the Kelvin denominator omitted from the web header. Heat capacity 880 J/(kg K) applies at 100 C. Mean expansion 8.2e-6/K belongs to 25 to 1000 C, not every intermediate temperature. No compatible full transient thermal profile is asserted.
+observation	electrical	AD-995 grade reference	Dielectric and volume-resistivity table	Permittivity and loss apply at 25 C and 1 MHz. Resistivity converts ohm cm to ohm m by 0.01. Only the two finite high-temperature values are imported, as discrete knots; the greater-than bound at 25 C is omitted. No continuous electrical-conduction or breakdown law is inferred.
+scalar	rho	grade,thermal	density	3900	kg/m3	constant
+uncertainty	rho	unstated	-	-	-	-
+validity	rho	source_density_temperature_known	0	0	1
+validity	rho	source_grade	1	1	1
+validity	rho	source_process_known	0	0	1
+scalar	E	grade,mechanical	young_modulus	370	GPa	constant
+uncertainty	E	unstated	-	-	-	-
+validity	E	temperature	293.15	293.15	K
+validity	E	source_grade	1	1	1
+validity	E	source_process_known	0	0	1
+scalar	nu	grade,mechanical	poisson_ratio	0.22	1	constant
+uncertainty	nu	unstated	-	-	-	-
+validity	nu	temperature	293.15	293.15	K
+validity	nu	source_grade	1	1	1
+validity	nu	source_process_known	0	0	1
+scalar	flexure	grade,mechanical	flexural_strength	300	MPa	constant
+uncertainty	flexure	unstated	-	-	-	-
+validity	flexure	temperature	293.15	293.15	K
+validity	flexure	source_grade	1	1	1
+validity	flexure	source_process_known	0	0	1
+scalar	compression	grade,mechanical	compressive_strength	2600	MPa	constant
+uncertainty	compression	unstated	-	-	-	-
+validity	compression	temperature	293.15	293.15	K
+validity	compression	source_grade	1	1	1
+validity	compression	source_process_known	0	0	1
+scalar	k	grade,thermal	thermal_conductivity	30	W/m/K	constant
+uncertainty	k	unstated	-	-	-	-
+validity	k	temperature	293.15	293.15	K
+validity	k	source_grade	1	1	1
+validity	k	source_process_known	0	0	1
+scalar	cp	grade,thermal	specific_heat_capacity	880	J/kg/K	constant
+uncertainty	cp	unstated	-	-	-	-
+validity	cp	temperature	373.15	373.15	K
+validity	cp	source_grade	1	1	1
+validity	cp	source_process_known	0	0	1
+scalar	mean-alpha	grade,thermal	mean_expansion	8.2e-6	K^-1	constant
+uncertainty	mean-alpha	unstated	-	-	-	-
+validity	mean-alpha	source_reference_temperature	298.15	298.15	K
+validity	mean-alpha	source_range_end_temperature	1273.15	1273.15	K
+validity	mean-alpha	source_grade	1	1	1
+validity	mean-alpha	source_process_known	0	0	1
+scalar	eps	grade,electrical	relative_permittivity	9.7	1	constant
+uncertainty	eps	unstated	-	-	-	-
+validity	eps	temperature	298.15	298.15	K
+validity	eps	frequency	1e6	1e6	Hz
+validity	eps	source_grade	1	1	1
+validity	eps	source_process_known	0	0	1
+scalar	loss	grade,electrical	dielectric_loss_tangent	0.0001	1	constant
+uncertainty	loss	unstated	-	-	-	-
+validity	loss	temperature	298.15	298.15	K
+validity	loss	frequency	1e6	1e6	Hz
+validity	loss	source_grade	1	1	1
+validity	loss	source_process_known	0	0	1
+curve	resistivity	grade,electrical	electrical_resistivity	temperature	K	Ohm*m	773.15:2e8,1273.15:2e4	tabulated
+uncertainty	resistivity	unstated	-	-	-	-
+validity	resistivity	temperature	773.15	1273.15	K
+validity	resistivity	source_grade	1	1	1
+validity	resistivity	source_process_known	0	0	1

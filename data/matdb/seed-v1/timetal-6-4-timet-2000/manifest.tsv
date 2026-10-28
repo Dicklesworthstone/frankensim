@@ -8,7 +8,11 @@ property	density	density	dimensional
 property	specific_heat_capacity	specific-heat-capacity	dimensional
 property	thermal_conductivity	thermal-conductivity	thermal-conductivity
 property	electrical_resistivity	electrical-resistivity	dimensional
+property	mean_linear_thermal_expansion	mean-linear-thermal-expansion-coefficient	dimensional
 axis	temperature	temperature	absolute-temperature
 axis	engineering_reference_model	engineering-reference-model	dimensional
 axis	source_specimens_matched	source-specimens-matched	dimensional
 axis	mill_annealed	mill-annealed	dimensional
+axis	source_reference_temperature	source-reference-temperature	absolute-temperature
+axis	source_range_end_temperature	source-range-end-temperature	absolute-temperature
+axis	source_expansion_direction_known	source-expansion-direction-known	dimensional

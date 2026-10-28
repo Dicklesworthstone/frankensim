@@ -442,7 +442,7 @@ fn extrusion_strength_minima_preserve_temper_and_thickness_scope() {
 
 #[test]
 fn inconel_temperature_curves_preserve_anneal_and_single_point_density() {
-    let pack = compile("inconel-625-special-metals-2013", 4);
+    let pack = compile("inconel-625-special-metals-2013", 10);
     let query = |temperature, anneal, matched| {
         point(
             temperature,

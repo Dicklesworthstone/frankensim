@@ -1,8 +1,9 @@
 frankensim.matdb-source.v1
-observation	engineering-reference	Magnesium oxide optical-crystal engineering reference, periclase structure	Frozen coefficients from Crystran Product Data	The 273–274 K calculation interval is author-declared, not measured temperature coverage. Every claim requires engineering-reference-model=1 and source-temperatures-matched=0. No pressure law, hydration, refractory porosity, sintered ceramic, particular lot or qualified high-temperature response is represented. Cubic symmetry permits scalar thermal conductivity without implying isotropic elasticity.
+observation	engineering-reference	Magnesium oxide optical-crystal engineering reference, periclase structure	Frozen coefficients from Crystran Product Data	The 273–274 K calculation interval is author-declared, not measured temperature coverage. Each thermal claim requires engineering-reference-model=1 and source-temperatures-matched=0. No pressure law, hydration, refractory porosity, sintered ceramic, particular lot or qualified high-temperature response is represented. Cubic symmetry permits scalar thermal conductivity without implying isotropic elasticity.
 observation	density	Magnesium oxide optical reference	Crystran Product Data, density	Source value 3.58 g/cc converts to 3580 kg/m3; source temperature and pressure are unspecified.
 observation	heat-capacity	Magnesium oxide optical reference	Crystran Product Data, specific heat capacity	Source value 877 J/(kg K) has no stated test temperature or statistical uncertainty. Its use at this reference state is an explicit assumption.
 observation	conductivity	Magnesium oxide optical reference	Crystran Product Data, thermal conductivity	Source value 42 W/(m K) is explicitly at 273 K. It is frozen over the one-kelvin model interval; no thermal curve or uncertainty bound is inferred.
+observation	electrical	MgO optical crystal reference	Crystran Product Data, dielectric constant at 1 MHz	Relative permittivity is 9.65 at 1 MHz, with temperature and uncertainty unstated. This independent electrical entry does not inherit the thermal model's author-declared temperature interval. No dielectric loss, breakdown threshold, DC limit or frequency law is inferred.
 scalar	density	density,engineering-reference	density	3580	kg/m3	constant
 uncertainty	density	unstated	-	-	-	-
 validity	density	temperature	273	274	K
@@ -18,3 +19,8 @@ uncertainty	conductivity	unstated	-	-	-	-
 validity	conductivity	temperature	273	274	K
 validity	conductivity	engineering_reference_model	1	1	1
 validity	conductivity	source_temperatures_matched	0	0	1
+scalar	eps	electrical	relative_permittivity	9.65	1	constant
+uncertainty	eps	unstated	-	-	-	-
+validity	eps	frequency	1e6	1e6	Hz
+validity	eps	source_optical_crystal	1	1	1
+validity	eps	source_test_temperature_known	0	0	1

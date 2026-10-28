@@ -1,0 +1,42 @@
+frankensim.matdb-source.v1
+observation	grade	Ferritic stainless steel 430 / EN 1.4016, producer reference	thyssenkrupp Materials UK physical-property table	Reference values for the named grade, not a measured lot or annealed coupon. Product forms include sheet, plate, strip, rod, wire and sections; the physical table does not select a form, thickness, process, direction or heat treatment. The separate annealed strength table is not imported. Pressure and statistical uncertainty are unstated. No Poisson ratio, isotropic tensor, yielding, magnetic law or corrosion performance is inferred.
+observation	transport	EN 1.4016 grade reference at 20 C	Density, conductivity, heat capacity and electrical resistivity table	Source values are 7700 kg/m3, 25 W/(m K), 460 J/(kg K) and 0.60 Ohm mm2/m. The resistivity conversion is 0.60e-6 Ohm m. Each value is confined to 293.15 K; neighboring elasticity and expansion temperatures do not extend this support.
+observation	elasticity	EN 1.4016 grade reference	Modulus of elasticity at 20, 200 and 400 C	Source kN/mm2 equals GPa. Linear interpolation is a declared engineering approximation between the three source knots; no interpolation-error, dynamic/static protocol, tension/compression distinction or measured intermediate modulus is claimed. The blank 500 C entry is not a value.
+observation	expansion	EN 1.4016 grade reference	Mean linear expansion between 20 C and listed endpoints	Each coefficient belongs to the interval from 293.15 K to its named endpoint. TabulatedOnly selection keeps the five source endpoints discrete; these data are not instantaneous alpha(T), a continuous strain law or a density law.
+scalar	rho	grade,transport	density	7700	kg/m3	constant
+uncertainty	rho	unstated	-	-	-	-
+validity	rho	temperature	293.15	293.15	K
+validity	rho	source_grade	1	1	1
+validity	rho	source_heat_treatment_known	0	0	1
+validity	rho	source_pressure_known	0	0	1
+scalar	k	grade,transport	thermal_conductivity	25	W/m/K	constant
+uncertainty	k	unstated	-	-	-	-
+validity	k	temperature	293.15	293.15	K
+validity	k	source_grade	1	1	1
+validity	k	source_heat_treatment_known	0	0	1
+validity	k	source_pressure_known	0	0	1
+scalar	cp	grade,transport	specific_heat_capacity	460	J/kg/K	constant
+uncertainty	cp	unstated	-	-	-	-
+validity	cp	temperature	293.15	293.15	K
+validity	cp	source_grade	1	1	1
+validity	cp	source_heat_treatment_known	0	0	1
+validity	cp	source_pressure_known	0	0	1
+scalar	resistivity	grade,transport	electrical_resistivity	6e-7	Ohm*m	constant
+uncertainty	resistivity	unstated	-	-	-	-
+validity	resistivity	temperature	293.15	293.15	K
+validity	resistivity	source_grade	1	1	1
+validity	resistivity	source_heat_treatment_known	0	0	1
+validity	resistivity	source_pressure_known	0	0	1
+curve	E	grade,elasticity	young_modulus	temperature	K	GPa	293.15:220,473.15:210,673.15:195	linear
+uncertainty	E	unstated	-	-	-	-
+validity	E	temperature	293.15	673.15	K
+validity	E	source_grade	1	1	1
+validity	E	source_heat_treatment_known	0	0	1
+validity	E	source_pressure_known	0	0	1
+curve	mean-alpha	grade,expansion	mean_expansion	source_range_end_temperature	K	K^-1	373.15:10.5e-6,473.15:11e-6,573.15:11.5e-6,673.15:12e-6,773.15:12e-6	tabulated
+uncertainty	mean-alpha	unstated	-	-	-	-
+validity	mean-alpha	source_reference_temperature	293.15	293.15	K
+validity	mean-alpha	source_range_end_temperature	373.15	773.15	K
+validity	mean-alpha	source_grade	1	1	1
+validity	mean-alpha	source_heat_treatment_known	0	0	1
+validity	mean-alpha	source_pressure_known	0	0	1

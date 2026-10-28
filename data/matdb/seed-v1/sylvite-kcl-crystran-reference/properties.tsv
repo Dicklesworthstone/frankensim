@@ -1,0 +1,21 @@
+frankensim.matdb-source.v1
+observation	crystal	Potassium chloride KCl, sylvite crystal reference	Crystran optical-material table	Reference for grown optical crystal; source describes Kyropoulos-grown ingots. Do not substitute granular potassium salts, fertilizer, solution or mineral aggregates. No moisture, porosity or dissolved-ion transport law is included. Source crystal elasticity is not converted into isotropic elastic constants; lot, pressure and statistical uncertainty are unstated.
+observation	thermal	KCl crystal reference	Density, specific heat and thermal-conductivity entries	Density 1.99 g/cm3 converts to 1990 kg/m3. Density and heat capacity lack measurement temperature. Conductivity 6.53 W/(m K) is at 322 K and cannot be silently treated as a 300 K value. The page repeats its table; repeated entries are one observation, not independent evidence.
+observation	electrical	KCl crystal at 300 K	Dielectric constant at 1 MHz	Relative permittivity 4.64 has explicit support at 300 K and 1 MHz. This temperature does not extend the separate conductivity or heat-capacity claims. No dielectric loss, breakdown or frequency law is inferred.
+scalar	rho	crystal,thermal	density	1990	kg/m3	constant
+uncertainty	rho	unstated	-	-	-	-
+validity	rho	source_optical_crystal	1	1	1
+validity	rho	source_test_temperature_known	0	0	1
+scalar	cp	crystal,thermal	specific_heat_capacity	690	J/kg/K	constant
+uncertainty	cp	unstated	-	-	-	-
+validity	cp	source_optical_crystal	1	1	1
+validity	cp	source_test_temperature_known	0	0	1
+scalar	k	crystal,thermal	thermal_conductivity	6.53	W/m/K	constant
+uncertainty	k	unstated	-	-	-	-
+validity	k	temperature	322	322	K
+validity	k	source_optical_crystal	1	1	1
+scalar	eps	crystal,electrical	relative_permittivity	4.64	1	constant
+uncertainty	eps	unstated	-	-	-	-
+validity	eps	temperature	300	300	K
+validity	eps	frequency	1e6	1e6	Hz
+validity	eps	source_optical_crystal	1	1	1

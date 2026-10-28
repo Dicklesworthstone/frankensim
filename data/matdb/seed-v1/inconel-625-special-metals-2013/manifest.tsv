@@ -1,14 +1,21 @@
 frankensim.matdb-manifest.v3
 pack_id	inconel-625-special-metals-2013
 redistribution	permitted	Selected attributed numerical facts and original modeling notes only; no source document, prose or table layout is redistributed
-citation	Special Metals Corporation, INCONEL alloy 625, August 2013 technical bulletin, page 2 Tables 2-3 and footnotes; https://www.specialmetals.com/documents/technical-bulletins/inconel/inconel-alloy-625.pdf
+citation	Special Metals Corporation, INCONEL alloy 625, August 2013 technical bulletin, pages 2-3 Tables 2-4 and footnotes; https://www.specialmetals.com/documents/technical-bulletins/inconel/inconel-alloy-625.pdf
 license	Attributed-Numerical-Facts-Only-No-Source-Document-License
 source	special-metals-reference	properties.tsv	material-tsv-v1
 property	density	density	dimensional
 property	specific_heat_capacity	specific-heat-capacity	dimensional
 property	thermal_conductivity	thermal-conductivity	thermal-conductivity
 property	electrical_resistivity	electrical-resistivity	dimensional
+property	dynamic_young_modulus	dynamic-young-modulus	dimensional
+property	dynamic_shear_modulus	dynamic-shear-modulus	dimensional
+property	dynamic_poisson_ratio	dynamic-poisson-ratio	dimensional
 axis	temperature	temperature	absolute-temperature
 axis	engineering_reference_model	engineering-reference-model	dimensional
 axis	source_specimens_matched	source-specimens-matched	dimensional
 axis	annealed_2100f_one_hour	annealed-2100f-one-hour	dimensional
+axis	source_solution_treated	source-solution-treated	dimensional
+axis	source_dynamic_method	source-dynamic-method	dimensional
+axis	source_frequency_known	source-frequency-known	dimensional
+axis	source_rod_diameter	source-rod-diameter	dimensional

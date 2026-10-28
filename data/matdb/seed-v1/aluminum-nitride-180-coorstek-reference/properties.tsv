@@ -1,0 +1,47 @@
+frankensim.matdb-source.v1
+observation	grade	CoorsTek AlN 180 grade reference	Manufacturer current general aluminum-nitride table	Values belong only to the named AlN 180 column, not AlN-HP, AlN-HTC or a universal aluminum-nitride law. Process details, geometry, lot, pressure and statistical uncertainty are unstated. Historical brochures differ in some values and qualifiers; their properties are not pooled with this table.
+observation	mechanical	AlN 180 at 20 C	Young modulus, four-point modulus of rupture and compressive strength	The current table gives 310 GPa, 300 MPa and 2000 MPa at 293.15 K. Flexural rupture is not tensile or yield strength; test geometry and surface condition are unspecified. No missing Poisson ratio or elastic tensor is inferred.
+observation	thermal	AlN 180 grade reference	Density, conductivity, heat capacity and mean expansion	Density 3.30 g/cm3 has no stated temperature. Conductivity 180 W/(m K) is at 20 C; the Kelvin denominator omitted in the web table is explicit in the manufacturer's technical sheet. Heat capacity 738 J/(kg K) is at 100 C. Mean expansion 5.6e-6/K describes 25 to 1000 C only. No joint temperature support or measurement uncertainty is transferred from another source edition.
+observation	electrical	AlN 180 grade reference	Dielectric-constant table	Relative permittivity 8.6 is at 25 C and 1 MHz. The source resistivity is a greater-than bound and its loss-tangent entry is blank; neither becomes an equality or zero in this pack.
+scalar	rho	grade,thermal	density	3300	kg/m3	constant
+uncertainty	rho	unstated	-	-	-	-
+validity	rho	source_density_temperature_known	0	0	1
+validity	rho	source_grade	1	1	1
+validity	rho	source_process_known	0	0	1
+scalar	E	grade,mechanical	young_modulus	310	GPa	constant
+uncertainty	E	unstated	-	-	-	-
+validity	E	temperature	293.15	293.15	K
+validity	E	source_grade	1	1	1
+validity	E	source_process_known	0	0	1
+scalar	flexure	grade,mechanical	flexural_strength	300	MPa	constant
+uncertainty	flexure	unstated	-	-	-	-
+validity	flexure	temperature	293.15	293.15	K
+validity	flexure	source_grade	1	1	1
+validity	flexure	source_process_known	0	0	1
+scalar	compression	grade,mechanical	compressive_strength	2000	MPa	constant
+uncertainty	compression	unstated	-	-	-	-
+validity	compression	temperature	293.15	293.15	K
+validity	compression	source_grade	1	1	1
+validity	compression	source_process_known	0	0	1
+scalar	k	grade,thermal	thermal_conductivity	180	W/m/K	constant
+uncertainty	k	unstated	-	-	-	-
+validity	k	temperature	293.15	293.15	K
+validity	k	source_grade	1	1	1
+validity	k	source_process_known	0	0	1
+scalar	cp	grade,thermal	specific_heat_capacity	738	J/kg/K	constant
+uncertainty	cp	unstated	-	-	-	-
+validity	cp	temperature	373.15	373.15	K
+validity	cp	source_grade	1	1	1
+validity	cp	source_process_known	0	0	1
+scalar	mean-alpha	grade,thermal	mean_expansion	5.6e-6	K^-1	constant
+uncertainty	mean-alpha	unstated	-	-	-	-
+validity	mean-alpha	source_reference_temperature	298.15	298.15	K
+validity	mean-alpha	source_range_end_temperature	1273.15	1273.15	K
+validity	mean-alpha	source_grade	1	1	1
+validity	mean-alpha	source_process_known	0	0	1
+scalar	eps	grade,electrical	relative_permittivity	8.6	1	constant
+uncertainty	eps	unstated	-	-	-	-
+validity	eps	temperature	298.15	298.15	K
+validity	eps	frequency	1e6	1e6	Hz
+validity	eps	source_grade	1	1	1
+validity	eps	source_process_known	0	0	1

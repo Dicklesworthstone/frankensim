@@ -24,3 +24,32 @@ validity	resistivity	temperature	294.15	973.15	K
 validity	resistivity	engineering_reference_model	1	1	1
 validity	resistivity	source_specimens_matched	0	0	1
 validity	resistivity	annealed_material	1	1	1
+observation	elastic-reference	MONEL 400 nominal alloy	Table 2 nominal physical constants: tension, compression, torsion and Poisson ratio	Tension and compression are each 26 million psi; torsion is 9.5 million psi. Conversion uses 1 psi = 0.45359237*9.80665/(0.0254^2) Pa. The source does not report test temperature, method, frequency, strain rate or heat treatment for these constants; 294.15 K is the existing authored calculation reference, not a source-measured temperature. Source-elastic-temperature-known=0 and source-elastic-method-known=0 retain that limitation. The independently reported moduli and Poisson ratio do not exactly satisfy isotropic identities and must not be silently corrected, fused or treated as a measured stiffness tensor. No static/dynamic equivalence or temperature law is supplied.
+scalar	tensile-modulus	elastic-reference,alloy-reference	tensile_modulus	179263689622.3774	Pa	constant
+uncertainty	tensile-modulus	unstated	-	-	-	-
+validity	tensile-modulus	temperature	294.15	294.15	K
+validity	tensile-modulus	engineering_reference_model	1	1	1
+validity	tensile-modulus	source_specimens_matched	0	0	1
+validity	tensile-modulus	source_elastic_temperature_known	0	0	1
+validity	tensile-modulus	source_elastic_method_known	0	0	1
+scalar	compression-modulus	elastic-reference,alloy-reference	compression_modulus	179263689622.3774	Pa	constant
+uncertainty	compression-modulus	unstated	-	-	-	-
+validity	compression-modulus	temperature	294.15	294.15	K
+validity	compression-modulus	engineering_reference_model	1	1	1
+validity	compression-modulus	source_specimens_matched	0	0	1
+validity	compression-modulus	source_elastic_temperature_known	0	0	1
+validity	compression-modulus	source_elastic_method_known	0	0	1
+scalar	torsional-modulus	elastic-reference,alloy-reference	torsional_modulus	65500194285.09943	Pa	constant
+uncertainty	torsional-modulus	unstated	-	-	-	-
+validity	torsional-modulus	temperature	294.15	294.15	K
+validity	torsional-modulus	engineering_reference_model	1	1	1
+validity	torsional-modulus	source_specimens_matched	0	0	1
+validity	torsional-modulus	source_elastic_temperature_known	0	0	1
+validity	torsional-modulus	source_elastic_method_known	0	0	1
+scalar	poisson-ratio	elastic-reference,alloy-reference	poisson_ratio	0.32	1	constant
+uncertainty	poisson-ratio	unstated	-	-	-	-
+validity	poisson-ratio	temperature	294.15	294.15	K
+validity	poisson-ratio	engineering_reference_model	1	1	1
+validity	poisson-ratio	source_specimens_matched	0	0	1
+validity	poisson-ratio	source_elastic_temperature_known	0	0	1
+validity	poisson-ratio	source_elastic_method_known	0	0	1

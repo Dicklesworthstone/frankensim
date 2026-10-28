@@ -1,0 +1,23 @@
+frankensim.matdb-source.v1
+observation	element	Elemental bismuth supplier general reference	Fine Metals Corporation Bismuth Target Circular physical-property listing	The page offers targets across several purities and dimensions, but does not assign its general physical data to a specific purity, texture, processing route, lot or target thickness. Require source-process-known=0; pressure and statistical uncertainty are unstated. The selected facts do not define a molten, porous, anisotropic, semiconductor or mechanical material law.
+observation	rho	Bismuth general reference	Supplier density	9.747 g/cm3 converts to 9747 kg/m3. Source temperature is unstated and remains an explicit unknown rather than a 25 C measurement.
+observation	k	Bismuth general reference	Supplier thermal conductivity at 298.2 K	0.0792 W/(cm K) converts to 7.92 W/(m K). Keep 298.2 K exactly; do not round it into the separate heat-capacity temperature of 298.15 K.
+observation	cp	Bismuth general reference	Supplier specific heat at 25 C	The source prints 0.0296 Cal/(g K). This pack explicitly interprets the calorie as the thermochemical calorie, 4.184 J, giving 123.8464 J/(kg K); a thermochemical-calorie-conversion=1 acknowledgment is required. The source does not identify a calorie convention.
+observation	rho-electric	Bismuth general reference	Supplier electrical resistivity at 0 C	106.8 micro-ohm cm converts to 1.068e-6 Ohm m at 273.15 K. This is not room-temperature resistivity.
+scalar	density	element,rho	density	9747	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_process_known	0	0	1
+validity	density	source_density_temperature_known	0	0	1
+scalar	conductivity	element,k	thermal_conductivity	7.92	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	298.2	298.2	K
+validity	conductivity	source_process_known	0	0	1
+scalar	heat-capacity	element,cp	specific_heat_capacity	123.8464	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	298.15	298.15	K
+validity	heat-capacity	source_process_known	0	0	1
+validity	heat-capacity	thermochemical_calorie	1	1	1
+scalar	resistivity	element,rho-electric	electrical_resistivity	1.068e-6	Ohm*m	constant
+uncertainty	resistivity	unstated	-	-	-	-
+validity	resistivity	temperature	273.15	273.15	K
+validity	resistivity	source_process_known	0	0	1

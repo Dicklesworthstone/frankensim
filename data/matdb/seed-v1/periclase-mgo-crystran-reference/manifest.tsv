@@ -7,6 +7,10 @@ source	engineering-reference	properties.tsv	material-tsv-v1
 property	density	density	dimensional
 property	specific_heat_capacity	specific-heat-capacity	dimensional
 property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	relative_permittivity	relative-permittivity	dimensional
 axis	temperature	temperature	absolute-temperature
 axis	engineering_reference_model	engineering-reference-model	dimensional
 axis	source_temperatures_matched	source-temperatures-matched	dimensional
+axis	frequency	frequency	dimensional
+axis	source_optical_crystal	source-optical-crystal	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional

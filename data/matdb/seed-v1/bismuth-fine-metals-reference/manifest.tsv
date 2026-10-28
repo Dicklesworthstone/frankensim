@@ -1,0 +1,14 @@
+frankensim.matdb-manifest.v3
+pack_id	bismuth-fine-metals-reference
+redistribution	permitted	Selected attributed numerical facts and original normalization notes only; no source document, prose or table layout is redistributed
+citation	Fine Metals Corporation, Bismuth Target Circular, General Properties, accessed 2026-10-28; https://finemetalscorp.com/product/bismuth-target-circular/
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	elemental-reference	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	electrical_resistivity	electrical-resistivity	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	source_process_known	source-process-known	dimensional
+axis	source_density_temperature_known	source-density-temperature-known	dimensional
+axis	thermochemical_calorie	thermochemical-calorie-conversion	dimensional

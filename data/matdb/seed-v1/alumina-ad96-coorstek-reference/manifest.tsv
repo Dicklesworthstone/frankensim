@@ -1,0 +1,24 @@
+frankensim.matdb-manifest.v3
+pack_id	alumina-ad96-coorstek-reference
+redistribution	permitted	Selected attributed numerical facts and original normalization notes only; no source document, prose, figures or table layout is redistributed
+citation	CoorsTek, Alumina properties, AD-96 nominal 96% alumina column, accessed 2026-10-28; https://www.coorstek.com/en/materials/alumina/ ; thermal-conductivity unit corroborated by the manufacturer's Advanced Alumina brochure https://www2.coorstek.com/media/4235/advanced-alumina.pdf
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	ad96-reference	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	young_modulus	young-modulus	dimensional
+property	poisson_ratio	poisson-ratio	dimensional
+property	flexural_strength	four-point-flexural-strength	dimensional
+property	compressive_strength	compressive-strength	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	mean_expansion	mean-linear-expansion-coefficient-from-25c	dimensional
+property	relative_permittivity	relative-permittivity	dimensional
+property	dielectric_loss_tangent	dielectric-loss-tangent	dimensional
+property	electrical_resistivity	electrical-resistivity	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	frequency	frequency	dimensional
+axis	source_grade	source-grade-alumina-ad96	dimensional
+axis	source_process_known	source-process-known	dimensional
+axis	source_density_temperature_known	source-density-temperature-known	dimensional
+axis	source_reference_temperature	source-reference-temperature	absolute-temperature
+axis	source_range_end_temperature	source-range-end-temperature	absolute-temperature

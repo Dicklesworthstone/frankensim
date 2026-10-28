@@ -1,0 +1,23 @@
+frankensim.matdb-manifest.v3
+pack_id	macor-corning-2013
+redistribution	permitted	Selected attributed numerical facts and original normalization notes only; no source document, prose, figures or table layout is redistributed
+citation	Corning, MACOR Machinable Glass Ceramic for Industrial Applications, manufacturer brochure updated April 2013, pp. 4-5; manufacturer document hosted by distributor at https://www.macor.info/media/other/11763/macorupdatedapr2013_english_050313.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	macor-2013	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	young_modulus	young-modulus	dimensional
+property	shear_modulus	shear-modulus	dimensional
+property	poisson_ratio	poisson-ratio	dimensional
+property	flexural_min_average	flexural-strength-minimum-specified-average	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	mean_expansion	mean-linear-expansion-coefficient-from-25c	dimensional
+property	relative_permittivity	relative-permittivity	dimensional
+property	dielectric_loss_tangent	dielectric-loss-tangent	dimensional
+property	electrical_resistivity	electrical-resistivity	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	frequency	frequency	dimensional
+axis	source_grade	source-grade-macor	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_reference_temperature	source-reference-temperature	absolute-temperature
+axis	source_range_end_temperature	source-range-end-temperature	absolute-temperature
