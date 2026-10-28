@@ -7,16 +7,24 @@
 //! first-order splitting and the explicit molecular rates. Gross-inventory
 //! refusals require a shorter physical step, never independently clipped streams.
 //!
+//! Optional per-cell thermal accommodation reaches the SAME joint molecular
+//! endpoint. Both sticking and reflected streams use the preceding interval's
+//! exposure; neither can act before birth or use endpoint contact coverage
+//! retroactively. Coefficients are activated once per cell and reused thereafter.
+//!
 //! Gas temperature, species inventories and internal energy come from the
 //! original gas parcel. Solid datum offsets are fixed reference conversions,
 //! included in birth and storage accounts; latent energy is never added twice.
-//! Reference geometry is retained, with signed recession reported per surface.
+//! Reflected heat is included once in stream energy and separately reported as
+//! a subaccount. Reference geometry is retained, with recession per surface.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::accommodation::ThermalAccommodation;
 use super::chamber::{
-    GasChamberSolve, GasChamberStep, GasChamberSurface, advance_chamber_with_gas,
+    GasChamberSolve, GasChamberStep, GasChamberSurface, advance_chamber_with_accommodation,
+    advance_chamber_with_gas,
 };
 use super::{GasSurfaceBinding, GasSurfaceError};
 use crate::thermochemical_gas::{ThermochemicalGasModel, energy::parcel::ClosedGasParcel};
@@ -66,6 +74,8 @@ pub struct GasCellAudit {
     pub incoming_mass_kg: f64,
     pub transferred_mass_kg: f64,
     pub energy_into_gas_j: f64,
+    /// Reflected heat INCLUDED in energy_into_gas_j; zero on the specular path.
+    pub reflected_heat_into_gas_j: f64,
     pub recession_m: f64,
     pub phase_steps: usize,
 }
@@ -80,6 +90,8 @@ pub struct GasTimelineAudit {
     pub transferred_mass_kg: f64,
     /// Complete stream energy, already including the phase energy difference.
     pub energy_into_gas_j: f64,
+    /// Reflected heat INCLUDED in complete stream energy, not external heat.
+    pub reflected_heat_into_gas_j: f64,
     /// All solid storage changes, including births and the fixed datum offsets.
     pub solid_energy_change_j: f64,
     pub gas_energy_change_j: f64,
@@ -276,6 +288,55 @@ pub fn advance_deposition_with_gas<'thermal, 'catalog>(
     target_s: f64,
     thermal_config: StepConfig,
     phase_config: GasChamberSolve,
+    checkpoint: impl FnMut() -> Result<(), DepositionError>,
+) -> Result<GasTimelineCandidate<'thermal, 'catalog>, GasTimelineError> {
+    advance_deposition(thermal, surfaces, None, gas, catalog, target_s,
+        thermal_config, phase_config, checkpoint)
+}
+
+/// Original heat timeline with jointly evolving phase exchange and reflected heat.
+///
+/// The accommodation map must cover exactly ALL selected CellIds, including
+/// cells scheduled beyond the requested endpoint. Inactive cells contribute no
+/// flux. Each coefficient set is cloned once when its cell first becomes active;
+/// the active map is then reused, with no material/source-card cloning here.
+/// Contact coverage at the START of each interval applies to both mechanisms.
+///
+/// Reflection is an internal solid/gas energy transfer, not extra boundary heat.
+/// It reaches each original cell's mass/enthalpy endpoint together with phase
+/// exchange, before either owner is published. Per-cell and total reflected
+/// heat fields are subaccounts of complete stream energy, not additional heat.
+///
+/// This uses the existing event-clipped, first-order heat/phase splitting and
+/// fixed maximum physical timestep. Refine max_dt_s for both coupling and
+/// molecular accuracy; the standalone adaptive chamber does not estimate this
+/// timeline's splitting error. All original branch, work and rollback gates hold.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_deposition_with_accommodation<'thermal, 'catalog>(
+    thermal: &DepositionSimulation<'thermal>,
+    surfaces: &[GasTimelineSurface<'_>],
+    accommodation: &BTreeMap<CellId, ThermalAccommodation>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    target_s: f64,
+    thermal_config: StepConfig,
+    phase_config: GasChamberSolve,
+    checkpoint: impl FnMut() -> Result<(), DepositionError>,
+) -> Result<GasTimelineCandidate<'thermal, 'catalog>, GasTimelineError> {
+    advance_deposition(thermal, surfaces, Some(accommodation), gas, catalog, target_s,
+        thermal_config, phase_config, checkpoint)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_deposition<'thermal, 'catalog>(
+    thermal: &DepositionSimulation<'thermal>,
+    surfaces: &[GasTimelineSurface<'_>],
+    accommodation: Option<&BTreeMap<CellId, ThermalAccommodation>>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    target_s: f64,
+    thermal_config: StepConfig,
+    phase_config: GasChamberSolve,
     mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<GasTimelineCandidate<'thermal, 'catalog>, GasTimelineError> {
     checkpoint()?;
@@ -338,6 +399,17 @@ pub fn advance_deposition_with_gas<'thermal, 'catalog>(
         }
         offsets.insert(surface.cell_id, surface.binding.solid_enthalpy_offset_j_kg);
     }
+    if let Some(laws) = accommodation {
+        if laws.len() != ordered.len() {
+            return Err(DepositionError::InvalidInput("accommodation cell roster mismatch").into());
+        }
+        for surface in &ordered {
+            checkpoint()?;
+            if !laws.contains_key(&surface.cell_id) {
+                return Err(DepositionError::InvalidInput("missing selected cell accommodation").into());
+            }
+        }
+    }
     let guard = SolidBranchGuard { ranges };
     guard.check_all(thermal, &mut checkpoint)?;
     // Validate original gas/catalog/controls even for a zero-duration window or
@@ -371,10 +443,14 @@ pub fn advance_deposition_with_gas<'thermal, 'catalog>(
         .iter()
         .map(|surface| (surface.cell_id, GasCellAudit::default()))
         .collect();
+    // Cell extinction/removal is refused by the original whole-cell model.
+    // Each selected cell therefore enters this map at most once per advance.
+    let mut active_accommodation = BTreeMap::new();
     let mut outgoing = Sum::default();
     let mut incoming = Sum::default();
     let mut transferred = Sum::default();
     let mut stream_energy = Sum::default();
+    let mut reflected_energy = Sum::default();
     let mut phase_steps = 0usize;
     let mut gas_iterations = 0usize;
     let mut last_step = None;
@@ -388,6 +464,10 @@ pub fn advance_deposition_with_gas<'thermal, 'catalog>(
             }
             if next.cells().contains_key(&surface.cell_id) {
                 exposed.push((*surface, next.exposed_area_m2(surface.cell_id)?));
+                if let Some(laws) = accommodation {
+                    active_accommodation.entry(surface.cell_id.0)
+                        .or_insert_with(|| laws[&surface.cell_id].clone());
+                }
             }
         }
         // Empty pre-birth time carries no thermal or phase work. Jump to the
@@ -462,26 +542,29 @@ pub fn advance_deposition_with_gas<'thermal, 'catalog>(
             })
             .collect();
         let mut checkpoint_error = None;
-        let result = advance_chamber_with_gas(
-            &inputs,
-            &next_gas,
-            catalog,
-            stop_s - start_s,
-            phase_config,
-            || match checkpoint() {
+        let result = {
+            let mut cancelled = || match checkpoint() {
                 Ok(()) => false,
                 Err(error) => {
                     checkpoint_error = Some(error);
                     true
                 }
-            },
-        );
+            };
+            if accommodation.is_some() {
+                advance_chamber_with_accommodation(&inputs, &active_accommodation,
+                    &next_gas, catalog, stop_s - start_s, phase_config, &mut cancelled)
+            } else {
+                advance_chamber_with_gas(&inputs, &next_gas, catalog,
+                    stop_s - start_s, phase_config, &mut cancelled)
+                    .map(|candidate| (candidate, BTreeMap::new()))
+            }
+        };
         drop(inputs);
         drop(calorics);
         if let Some(error) = checkpoint_error {
             return Err(error.into());
         }
-        let candidate = match result {
+        let (candidate, reflection) = match result {
             Ok(value) => value,
             Err(error) => {
                 return Err(match chart_error.into_inner() {
@@ -535,6 +618,11 @@ pub fn advance_deposition_with_gas<'thermal, 'catalog>(
             account.transferred_mass_kg =
                 add(account.transferred_mass_kg, endpoint.transferred_mass_kg)?;
             account.energy_into_gas_j = add(account.energy_into_gas_j, endpoint.energy_into_gas_j)?;
+            if let Some(reflected) = reflection.get(&endpoint.id) {
+                account.reflected_heat_into_gas_j =
+                    add(account.reflected_heat_into_gas_j, reflected.heat_into_gas_j)?;
+                reflected_energy.add(reflected.heat_into_gas_j)?;
+            }
             account.recession_m = add(account.recession_m, endpoint.recession_m)?;
             account.phase_steps = account
                 .phase_steps
@@ -605,6 +693,7 @@ pub fn advance_deposition_with_gas<'thermal, 'catalog>(
         incoming_mass_kg: incoming.value()?,
         transferred_mass_kg: transferred.value()?,
         energy_into_gas_j: stream_energy.value()?,
+        reflected_heat_into_gas_j: reflected_energy.value()?,
         solid_energy_change_j: add(solid_energy_without_births.value()?, incoming_energy)?,
         gas_energy_change_j: gas_energy_change,
         incoming_energy_j: incoming_energy,
@@ -626,3 +715,7 @@ pub fn advance_deposition_with_gas<'thermal, 'catalog>(
 #[cfg(test)]
 #[path = "timeline/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "timeline/accommodation_tests.rs"]
+mod accommodation_tests;
