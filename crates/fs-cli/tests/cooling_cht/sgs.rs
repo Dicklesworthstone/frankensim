@@ -4,6 +4,7 @@
 use super::{DUCT, J, f, run, scratch};
 
 const EXAMPLE: &str = include_str!("../../../../examples/cooling-cht/sgs-heated-obstacle.json");
+const VREMAN: &str = include_str!("../../../../examples/cooling-cht/vreman-graded-obstacle.json");
 
 fn short_scene(name: &str, model: &str, coefficient: f64) -> String {
     EXAMPLE
@@ -18,7 +19,7 @@ fn short_scene(name: &str, model: &str, coefficient: f64) -> String {
 
 #[test]
 fn declared_models_run_coupled_cooling_and_export_the_final_closure() {
-    for (model, coefficient) in [("wale", 0.5), ("smagorinsky", 0.17)] {
+    for (model, coefficient) in [("wale", 0.5), ("smagorinsky", 0.17), ("vreman", 0.07)] {
         let name = format!("sgs-{model}");
         let scene = short_scene(&name, model, coefficient);
         let (code, result, error) = run(&scratch(&format!("{name}.json"), &scene));
@@ -63,6 +64,32 @@ fn declared_models_run_coupled_cooling_and_export_the_final_closure() {
             );
         }
     }
+}
+
+#[test]
+fn vreman_graded_scene_reports_actual_directional_filter_widths() {
+    let scene = VREMAN.replace("\"steps\": 40", "\"steps\": 2");
+    let (code, result, error) = run(&scratch("vreman-graded.json", &scene));
+    assert_eq!(code, 0, "{error}");
+    let sgs = result.path(&["flow", "sgs"]).unwrap();
+    assert_eq!(sgs.str_field("model"), Some("vreman"));
+    assert_eq!(sgs.str_field("filter_width_definition"), Some("directional-cell-widths"));
+    assert_eq!(f(sgs, &["coefficient"]), 0.07);
+    for (key, expected) in [
+        ("min_filter_width_by_axis_m", [0.002, 0.001, 0.002]),
+        ("max_filter_width_by_axis_m", [0.004, 0.003, 0.002]),
+    ] {
+        let axes = sgs.get(key).and_then(J::as_array).unwrap();
+        assert_eq!(axes.len(), 3);
+        for (value, width) in axes.iter().zip(expected) {
+            let actual = value.as_f64().unwrap();
+            assert!((actual - width).abs() < 1e-14, "{key}: {actual} != {width}");
+        }
+    }
+    assert!((f(sgs, &["min_filter_width_m"]) - 0.001).abs() < 1e-14);
+    assert!((f(sgs, &["max_filter_width_m"]) - 0.004).abs() < 1e-14);
+    assert!(f(sgs, &["final_max_eddy_viscosity_m2_s"]) > 0.0);
+    assert!(f(&result, &["transient", "worst_step_closure_j"]) < 1e-8);
 }
 
 #[test]
@@ -162,17 +189,20 @@ fn explicit_zero_coefficient_keeps_the_existing_cli_trajectory() {
     assert_ne!(base, disabled);
     let (code, laminar, error) = run(&scratch("sgs-zero-base.json", &base));
     assert_eq!(code, 0, "{error}");
-    let (code, zero, error) = run(&scratch("sgs-zero-control.json", &disabled));
-    assert_eq!(code, 0, "{error}");
-    assert_eq!(laminar.get("transient"), zero.get("transient"));
-    assert_eq!(laminar.get("sources"), zero.get("sources"));
-    for key in [
-        "final_kinetic_energy_j",
-        "final_mass_residual",
-        "final_momentum_residual",
-        "inflow_m3_s",
-    ] {
-        assert_eq!(laminar.path(&["flow", key]), zero.path(&["flow", key]));
+    for model in ["smagorinsky", "vreman"] {
+        let scene = disabled.replace("\"model\": \"smagorinsky\"", &format!("\"model\": \"{model}\""));
+        let (code, zero, error) = run(&scratch(&format!("sgs-zero-{model}.json"), &scene));
+        assert_eq!(code, 0, "{error}");
+        assert_eq!(laminar.get("transient"), zero.get("transient"));
+        assert_eq!(laminar.get("sources"), zero.get("sources"));
+        for key in [
+            "final_kinetic_energy_j",
+            "final_mass_residual",
+            "final_momentum_residual",
+            "inflow_m3_s",
+        ] {
+            assert_eq!(laminar.path(&["flow", key]), zero.path(&["flow", key]));
+        }
+        assert_eq!(f(&zero, &["flow", "max_eddy_viscosity_ratio"]), 0.0);
     }
-    assert_eq!(f(&zero, &["flow", "max_eddy_viscosity_ratio"]), 0.0);
 }

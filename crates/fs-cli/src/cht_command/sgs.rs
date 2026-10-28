@@ -8,7 +8,7 @@ use super::{
 };
 use std::fmt::Write as _;
 
-pub(super) const HELP: &str = "\nExploratory transient SGS: solver.sgs requires model (\"smagorinsky\" or\n\"wale\"), coefficient, filter_width_factor, maximum_eddy_to_molecular and\nusage: \"exploration\". It requires transient.flow: \"unsteady\" and marched\nenergy. Filter width is factor * cell_volume^(1/3); the ratio cap refuses\nrather than clips. Do not combine with solver.turbulence: \"lvel\",\nsteady-on-mean-flow energy or evolving fluid material properties. The same\nclosure drives momentum and heat (Pr_t=0.9). Results report the model,\nfilter range and final eddy-viscosity/conductivity diagnostics; no turbulent\nDNS or acceptance-render qualification is implied. Example:\n  frankensim --json cooling-cht examples/cooling-cht/sgs-heated-obstacle.json\n";
+pub(super) const HELP: &str = "\nExploratory transient SGS: solver.sgs requires model (\"smagorinsky\",\n\"wale\" or \"vreman\"), coefficient, filter_width_factor,\nmaximum_eddy_to_molecular and usage: \"exploration\". It requires\ntransient.flow: \"unsteady\" and marched energy. Smagorinsky/WALE use\nfactor * cell_volume^(1/3); Vreman uses factor * EACH directional cell\nwidth and its coefficient is linear (not squared). The ratio cap refuses\nrather than clips. Do not combine with solver.turbulence: \"lvel\",\nsteady-on-mean-flow energy or evolving fluid material properties. The same\nclosure drives momentum and heat (Pr_t=0.9). Results report the model,\nfilter range and final eddy-viscosity/conductivity diagnostics; no turbulent\nDNS or acceptance-render qualification is implied. Example:\n  frankensim --json cooling-cht examples/cooling-cht/sgs-heated-obstacle.json\n";
 
 pub(super) fn parse(
     value: Option<&J>,
@@ -39,7 +39,8 @@ pub(super) fn parse(
     let model = match value.str_field("model") {
         Some("smagorinsky") => SgsModel::Smagorinsky { cs: coefficient },
         Some("wale") => SgsModel::Wale { cw: coefficient },
-        _ => return Err(bad("solver.sgs.model must be \"smagorinsky\" or \"wale\"")),
+        Some("vreman") => SgsModel::Vreman { cv: coefficient },
+        _ => return Err(bad("solver.sgs.model must be \"smagorinsky\", \"wale\" or \"vreman\"")),
     };
     let usage = match value.str_field("usage") {
         Some("exploration") => SgsUse::Exploration,
@@ -84,6 +85,7 @@ fn model(config: FvSgsConfig) -> (&'static str, f64) {
     match config.model {
         SgsModel::Smagorinsky { cs } => ("smagorinsky", cs),
         SgsModel::Wale { cw } => ("wale", cw),
+        SgsModel::Vreman { cv } => ("vreman", cv),
     }
 }
 
@@ -92,6 +94,8 @@ pub(super) struct Summary {
     config: FvSgsConfig,
     min_filter_m: f64,
     max_filter_m: f64,
+    min_filter_by_axis_m: [f64; 3],
+    max_filter_by_axis_m: [f64; 3],
     max_eddy: f64,
     max_ratio: f64,
     mean_ratio: f64,
@@ -104,6 +108,8 @@ impl Summary {
         let (mut volume, mut weighted_eddy, mut max_eddy, mut max_heat_eddy) =
             (0.0, 0.0, 0.0_f64, 0.0_f64);
         let (mut min_filter_m, mut max_filter_m) = (f64::INFINITY, 0.0_f64);
+        let mut min_filter_by_axis_m = [f64::INFINITY; 3];
+        let mut max_filter_by_axis_m = [0.0_f64; 3];
         for c in 0..domain.cell_count() {
             if !domain.is_fluid(c) {
                 continue;
@@ -113,15 +119,27 @@ impl Summary {
             weighted_eddy += cell_volume * flow.eddy_viscosity_m2_s[c];
             max_eddy = max_eddy.max(flow.eddy_viscosity_m2_s[c]);
             max_heat_eddy = max_heat_eddy.max(flow.heat_eddy_viscosity_m2_s[c]);
-            let width = config.filter_width_factor * fs_math::det::pow(cell_volume, 1.0 / 3.0);
-            min_filter_m = min_filter_m.min(width);
-            max_filter_m = max_filter_m.max(width);
+            if matches!(config.model, SgsModel::Vreman { .. }) {
+                for (axis, width) in domain.widths(c).into_iter().enumerate() {
+                    let width = config.filter_width_factor * width;
+                    min_filter_by_axis_m[axis] = min_filter_by_axis_m[axis].min(width);
+                    max_filter_by_axis_m[axis] = max_filter_by_axis_m[axis].max(width);
+                    min_filter_m = min_filter_m.min(width);
+                    max_filter_m = max_filter_m.max(width);
+                }
+            } else {
+                let width = config.filter_width_factor * fs_math::det::pow(cell_volume, 1.0 / 3.0);
+                min_filter_m = min_filter_m.min(width);
+                max_filter_m = max_filter_m.max(width);
+            }
         }
         let nu = scene.fluid.kinematic_viscosity_m2_s;
         Some(Self {
             config,
             min_filter_m,
             max_filter_m,
+            min_filter_by_axis_m,
+            max_filter_by_axis_m,
             max_eddy,
             max_ratio: max_eddy / nu,
             mean_ratio: weighted_eddy / volume / nu,
@@ -130,12 +148,13 @@ impl Summary {
         })
     }
 
-    /// Append members inside the existing flow object.
+    /// Append members inside the existing flow object. Existing models retain
+    /// their original JSON; Vreman additionally reports the actual axis widths.
     pub(super) fn json(&self, out: &mut String) -> Result<()> {
         let (name, coefficient) = model(self.config);
         let _ = write!(
             out,
-            ",\"turbulence\":{},\"max_eddy_viscosity_ratio\":{},\"sgs\":{{\"model\":{},\"coefficient\":{},\"filter_width_factor\":{},\"maximum_eddy_to_molecular\":{},\"usage\":\"exploration\",\"thermal_prandtl\":{},\"min_filter_width_m\":{},\"max_filter_width_m\":{},\"final_max_eddy_viscosity_m2_s\":{},\"final_volume_mean_eddy_viscosity_ratio\":{},\"final_max_turbulent_conductivity_w_m_k\":{}}}",
+            ",\"turbulence\":{},\"max_eddy_viscosity_ratio\":{},\"sgs\":{{\"model\":{},\"coefficient\":{},\"filter_width_factor\":{},\"maximum_eddy_to_molecular\":{},\"usage\":\"exploration\",\"thermal_prandtl\":{},\"min_filter_width_m\":{},\"max_filter_width_m\":{},\"final_max_eddy_viscosity_m2_s\":{},\"final_volume_mean_eddy_viscosity_ratio\":{},\"final_max_turbulent_conductivity_w_m_k\":{}",
             quote(name),
             num(self.max_ratio)?,
             quote(name),
@@ -149,6 +168,14 @@ impl Summary {
             num(self.mean_ratio)?,
             num(self.max_conductivity)?
         );
+        if matches!(self.config.model, SgsModel::Vreman { .. }) {
+            let lo = self.min_filter_by_axis_m;
+            let hi = self.max_filter_by_axis_m;
+            let _ = write!(out,
+                ",\"filter_width_definition\":\"directional-cell-widths\",\"min_filter_width_by_axis_m\":[{},{},{}],\"max_filter_width_by_axis_m\":[{},{},{}]",
+                num(lo[0])?, num(lo[1])?, num(lo[2])?, num(hi[0])?, num(hi[1])?, num(hi[2])?);
+        }
+        out.push('}');
         Ok(())
     }
 
@@ -166,5 +193,10 @@ impl Summary {
             self.mean_ratio,
             self.max_conductivity
         );
+        if matches!(self.config.model, SgsModel::Vreman { .. }) {
+            let _ = writeln!(out,
+                "sgs_filter_width_definition=directional-cell-widths\nsgs_min_filter_width_by_axis_m={:?}\nsgs_max_filter_width_by_axis_m={:?}",
+                self.min_filter_by_axis_m, self.max_filter_by_axis_m);
+        }
     }
 }

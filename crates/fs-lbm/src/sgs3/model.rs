@@ -8,14 +8,24 @@ use fs_math::det;
 pub enum SgsModel {
     Smagorinsky { cs: f64 },
     Wale { cw: f64 },
+    /// Vreman's linear coefficient c, NOT its square root. Isotropic lattice
+    /// calls use equal widths; graded finite volumes retain each cell width.
+    Vreman { cv: f64 },
 }
 
 impl SgsModel {
-    pub fn validate(self) -> Result<(), SgsError> {
-        let coefficient = match self {
+    /// The authored coefficient, without squaring or model conversion.
+    #[must_use]
+    pub const fn coefficient(self) -> f64 {
+        match self {
             Self::Smagorinsky { cs } => cs,
             Self::Wale { cw } => cw,
-        };
+            Self::Vreman { cv } => cv,
+        }
+    }
+
+    pub fn validate(self) -> Result<(), SgsError> {
+        let coefficient = self.coefficient();
         if coefficient.is_finite() && coefficient >= 0.0 {
             Ok(())
         } else {
@@ -87,11 +97,19 @@ impl std::error::Error for SgsError {}
 /// m^2/s; lattice lengths and gradients return lattice kinematic viscosity.
 /// Fixed-size, allocation-free arithmetic with normalized invariants avoids
 /// overflow/underflow in WALE's fourth- and tenth-degree intermediate powers.
+/// Vreman uses equal widths here; use `vreman_eddy_viscosity` for anisotropy.
 pub fn eddy_viscosity(
     model: SgsModel,
     filter_width: f64,
     gradient: [[f64; 3]; 3],
 ) -> Result<f64, SgsError> {
+    let (coefficient, wale) = match model {
+        SgsModel::Smagorinsky { cs } => (cs, false),
+        SgsModel::Wale { cw } => (cw, true),
+        SgsModel::Vreman { cv } => {
+            return super::vreman_eddy_viscosity(cv, [filter_width; 3], gradient);
+        }
+    };
     model.validate()?;
     if !(filter_width.is_finite() && filter_width > 0.0) {
         return Err(SgsError::InvalidFilterWidth);
@@ -105,10 +123,6 @@ pub fn eddy_viscosity(
             scale = scale.max(value.abs());
         }
     }
-    let coefficient = match model {
-        SgsModel::Smagorinsky { cs } => cs,
-        SgsModel::Wale { cw } => cw,
-    };
     if scale == 0.0 || coefficient == 0.0 {
         return Ok(0.0);
     }
@@ -120,28 +134,27 @@ pub fn eddy_viscosity(
             strain2 += s * s;
         }
     }
-    let rate = match model {
-        SgsModel::Smagorinsky { .. } => det::sqrt(2.0 * strain2),
-        SgsModel::Wale { .. } => {
-            let square: [[f64; 3]; 3] = core::array::from_fn(|i| {
-                core::array::from_fn(|j| (0..3).map(|k| g[i][k] * g[k][j]).sum())
-            });
-            let trace_third = (square[0][0] + square[1][1] + square[2][2]) / 3.0;
-            let mut deviator2 = 0.0;
-            for i in 0..3 {
-                for j in 0..3 {
-                    let d = 0.5 * (square[i][j] + square[j][i])
-                        - if i == j { trace_third } else { 0.0 };
-                    deviator2 += d * d;
-                }
+    let rate = if !wale {
+        det::sqrt(2.0 * strain2)
+    } else {
+        let square: [[f64; 3]; 3] = core::array::from_fn(|i| {
+            core::array::from_fn(|j| (0..3).map(|k| g[i][k] * g[k][j]).sum())
+        });
+        let trace_third = (square[0][0] + square[1][1] + square[2][2]) / 3.0;
+        let mut deviator2 = 0.0;
+        for i in 0..3 {
+            for j in 0..3 {
+                let d = 0.5 * (square[i][j] + square[j][i])
+                    - if i == j { trace_third } else { 0.0 };
+                deviator2 += d * d;
             }
-            if deviator2 == 0.0 {
-                return Ok(0.0);
-            }
-            let root = det::sqrt(deviator2);
-            deviator2 * root
-                / (strain2 * strain2 * det::sqrt(strain2) + deviator2 * det::sqrt(root))
         }
+        if deviator2 == 0.0 {
+            return Ok(0.0);
+        }
+        let root = det::sqrt(deviator2);
+        deviator2 * root
+            / (strain2 * strain2 * det::sqrt(strain2) + deviator2 * det::sqrt(root))
     };
     let length = coefficient * filter_width;
     let viscosity = length * (length * (scale * rate));
@@ -200,6 +213,7 @@ mod tests {
         for model in [
             SgsModel::Smagorinsky { cs: 0.17 },
             SgsModel::Wale { cw: 0.5 },
+            SgsModel::Vreman { cv: 0.07 },
         ] {
             let reference = eddy_viscosity(model, 1.0, g).unwrap();
             assert!((eddy_viscosity(model, 1.0, rotated).unwrap() / reference - 1.0).abs() < 1e-14);
@@ -233,6 +247,7 @@ mod tests {
             for model in [
                 SgsModel::Smagorinsky { cs: coefficient },
                 SgsModel::Wale { cw: coefficient },
+                SgsModel::Vreman { cv: coefficient },
             ] {
                 assert_eq!(
                     eddy_viscosity(model, 1.0, [[0.0; 3]; 3]),

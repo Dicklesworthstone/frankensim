@@ -7,15 +7,16 @@
 
 use super::{FvBoundary, Solver, Turbulence};
 use crate::conjugate::{ChtError, poll};
-use crate::sgs3::{SgsConfig, SgsModel, SgsUse, eddy_viscosity};
+use crate::sgs3::{SgsConfig, SgsModel, SgsUse, eddy_viscosity, vreman_eddy_viscosity};
 use fs_exec::CancelGate;
 
 /// Explicit exploration controls for transient finite-volume flow.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FvSgsConfig {
-    /// Shared Smagorinsky or WALE model with its declared coefficient.
+    /// Shared Smagorinsky, WALE or Vreman model and its authored coefficient.
     pub model: SgsModel,
-    /// Filter width / cube root of cell volume; dimensionless and positive.
+    /// Positive dimensionless filter factor. Smagorinsky/WALE multiply the
+    /// cube root of volume; Vreman multiplies EACH directional cell width.
     pub filter_width_factor: f64,
     /// Refuse, rather than clip, a cell exceeding this nu_t/nu ratio.
     pub maximum_eddy_to_molecular: f64,
@@ -40,16 +41,15 @@ impl FvSgsConfig {
     }
 
     fn disabled(self) -> bool {
-        match self.model {
-            SgsModel::Smagorinsky { cs } => cs == 0.0,
-            SgsModel::Wale { cw } => cw == 0.0,
-        }
+        self.model.coefficient() == 0.0
     }
 }
 
 pub(super) struct State {
     config: FvSgsConfig,
     velocity: Vec<[f64; 3]>,
+    /// Scalar-filter cache for Smagorinsky/WALE. Vreman borrows directional
+    /// geometry instead, avoiding a redundant three-vector per cell.
     filter_width: Vec<f64>,
 }
 
@@ -122,19 +122,27 @@ impl Solver<'_> {
             self.eddy_viscosity.clear();
             return Ok(());
         }
-        let mut filter_width = Vec::with_capacity(self.domain.cell_count());
+        let directional = matches!(config.model, SgsModel::Vreman { .. });
+        let mut filter_width = Vec::with_capacity(if directional { 0 } else { self.domain.cell_count() });
         for cell in 0..self.domain.cell_count() {
             if cell % 64 == 0 {
                 poll(gate)?;
             }
-            let width =
-                config.filter_width_factor * fs_math::det::pow(self.domain.volume(cell), 1.0 / 3.0);
-            if !(width.is_finite() && width > 0.0) {
-                return Err(refuse(
-                    "filter width is not representable on this cell geometry",
-                ));
+            if directional {
+                for width in self.domain.widths(cell) {
+                    let width = config.filter_width_factor * width;
+                    if !(width.is_finite() && width > 0.0) {
+                        return Err(refuse("directional filter width is not representable on this cell geometry"));
+                    }
+                }
+            } else {
+                let width = config.filter_width_factor
+                    * fs_math::det::pow(self.domain.volume(cell), 1.0 / 3.0);
+                if !(width.is_finite() && width > 0.0) {
+                    return Err(refuse("filter width is not representable on this cell geometry"));
+                }
+                filter_width.push(width);
             }
-            filter_width.push(width);
         }
         self.eddy_viscosity = vec![0.0; self.domain.cell_count()];
         self.sgs = Some(State {
@@ -172,8 +180,15 @@ impl Solver<'_> {
                     continue;
                 }
                 let gradient = self.sgs_gradient(cell, &state.velocity);
-                let eddy = eddy_viscosity(state.config.model, state.filter_width[cell], gradient)
-                    .map_err(|error| refuse(format!("cell {cell}: {error}")))?;
+                let eddy = match state.config.model {
+                    SgsModel::Vreman { cv } => vreman_eddy_viscosity(
+                        cv,
+                        self.domain.widths(cell).map(|d| d * state.config.filter_width_factor),
+                        gradient,
+                    ),
+                    _ => eddy_viscosity(state.config.model, state.filter_width[cell], gradient),
+                }
+                .map_err(|error| refuse(format!("cell {cell}: {error}")))?;
                 let ratio = eddy / nu;
                 if !ratio.is_finite() || ratio > state.config.maximum_eddy_to_molecular {
                     return Err(refuse(format!(
@@ -240,3 +255,5 @@ impl Solver<'_> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod vreman_tests;

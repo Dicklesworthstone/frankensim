@@ -63,6 +63,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let coefficient = match config.closure.model {
             SgsModel::Smagorinsky { cs } => cs,
             SgsModel::Wale { cw } => cw,
+            SgsModel::Vreman { cv } => cv,
         };
         if coefficient == 0.0 {
             if self.sgs.is_some() {
@@ -254,3 +255,5 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod vreman_tests;
