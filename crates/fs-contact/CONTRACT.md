@@ -725,3 +725,11 @@ For admitted semidefinite mobility only, the owner caches a numerical pseudoinve
 The evaluation budget counts residual, Jacobian and right-preconditioner calls. Ordinary actions are quadratic; a new semidefinite Newton point may require one bounded cubic factorization, cached across its inner solve, with cancellation before and after. The 63-row cap remains in force.
 
 All twelve physical contact regressions pass against this implementation. Three additional native unit tests independently compare smooth-branch derivatives with central differences, check exact-boundary action linearity and unchanged iterate, and demonstrate that an unfittable right-hand-side component is not hidden by the range preconditioner. Native rigid sustained-support regression and timestep evidence are recorded by the `fs-mbd` consumer. Verification is bounded native source-selected execution, not a full workspace/DSR gate.
+
+## Accelerated relative sphere paths
+
+`swept_sphere::accelerated::sphere_path` admits original relative position, velocity, constant acceleration, radius sum and inclusive horizon. It returns first entering contact and minimum gap on the entire unimpeded quadratic path. The derivative of squared distance is cubic; its quadratic turning points separate every monotone interval. At most three interior extrema and one entering root use bounded bisection (128 iterations each), fixed storage and a nonpenetrating entry bracket. Distances determine gaps without subtracting large squared distances. Exactly zero relative acceleration retains the original straight-line fast path.
+
+Isolated tangent touches are not entering events. A touching stationary pair accelerating inward is reported for the response owner to resolve or refuse; no reaction is invented. Initial overlap, non-finite data and unresolvable numerical ranges refuse. Four G1/G3 groups cover hidden crossings between separated endpoints, accelerated departure/return, three distinct distance extrema, independently manufactured 3-D entry, grazing versus inward support and length/time scaling.
+
+This is floating analytic geometry, not an interval enclosure or arbitrary-shape CCD certificate. A negative minimum after entry describes the unimpeded path; mechanics must stop before entry and independently audit its actual complete segment and witnesses.

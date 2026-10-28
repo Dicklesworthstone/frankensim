@@ -11,6 +11,9 @@ use fs_mbd::{
 #[path = "sphere_contacts/gravity.rs"]
 mod gravity;
 
+#[path = "sphere_contacts/forces.rs"]
+mod forces;
+
 fn close(a: f64, b: f64) {
     assert!(
         (a - b).abs() < 3e-8 * a.abs().max(b.abs()).max(1.0),

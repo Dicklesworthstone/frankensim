@@ -1,9 +1,10 @@
-//! Automatic trajectories of finite native spheres under uniform gravity.
+//! Automatic trajectories of finite native spheres under constant centre loads.
 //!
-//! Common acceleration cancels from each complete relative centre path. The
-//! existing swept-sphere owner finds the first encounter; all touching pairs
-//! then enter one simultaneous normal/Coulomb event. Native accelerated drift,
-//! free rotation and point impulses keep their original inertia and audits.
+//! Common acceleration cancels from each relative centre path; body-specific
+//! forces give a quadratic relative curve. The existing contact owners find
+//! its first entry and all distance extrema. All touching pairs then enter one
+//! simultaneous normal/Coulomb event. Native accelerated drift, free rotation
+//! and point impulses keep their original inertia and audits.
 //! This floating analytic lane is not interval-certified general-shape CCD.
 
 use super::{
@@ -14,6 +15,7 @@ use crate::{
     DynamicsError, Gravity, MassProperties, RigidBodyIntegrator, RigidBodyState, Vec3, Wrench,
 };
 use fs_contact::frictional_multicontact::NormalVelocityLaw;
+use fs_contact::swept_sphere::accelerated::{AcceleratedSphereInput, sphere_path};
 use fs_contact::swept_sphere::{SweptSphereError, SweptSphereInput, first_sphere_contact};
 use fs_exec::CancelGate;
 
@@ -72,10 +74,16 @@ pub struct SphereContactReport {
     pub gravity_work_j: f64,
     pub gravity_impulse_ns: Vec3,
     /// Integrated gravitational torque about the world origin, evaluated from
-    /// the original total mass moment and momentum of this closed body system.
+    /// the original total mass moment, momentum and external centre forces.
     pub gravity_angular_impulse_nms: Vec3,
+    /// Signed work of the additional body-specific constant centre forces.
+    pub centre_force_work_j: f64,
+    pub centre_force_impulse_ns: Vec3,
+    /// Exact piecewise quadratic orbital torque integral of the centre forces.
+    /// Individual collision impulses change this integral between events.
+    pub centre_force_angular_impulse_nms: Vec3,
     pub unallocated_impact_loss_j: f64,
-    /// Measured native drift kinetic change minus its actual gravity work.
+    /// Measured native drift kinetic change minus all applied force work.
     pub drift_energy_defect_j: f64,
     pub total_energy_residual_j: f64,
     pub linear_momentum_residual_ns: Vec3,
@@ -169,9 +177,68 @@ pub fn advance_sphere_contacts(
     controls: SphereContactControls,
     gate: &CancelGate,
 ) -> Result<SphereContactReport, SphereContactError> {
+    if bodies.len() > controls.impact.maximum_bodies {
+        return Err(SphereContactError::Invalid("body work bound"));
+    }
+    advance_forced_sphere_contacts(
+        bodies,
+        properties,
+        spheres,
+        laws,
+        gravity,
+        &vec![Vec3::ZERO; bodies.len()],
+        duration_s,
+        controls,
+        gate,
+    )
+}
+
+/// Advance original native spheres under uniform gravity and an explicit
+/// constant world force at EACH original centre of mass, in body-slice order.
+///
+/// Unlike common gravity, different force/mass ratios curve the relative path.
+/// The original contact owner isolates all distance extrema on each quadratic
+/// path and brackets the first entering contact. Equal accelerations retain the
+/// cheaper straight relative-path query. No timesteps sample over collisions.
+/// All touching pairs still enter one original simultaneous Coulomb event.
+///
+/// Force work uses actual accepted centre displacements; orbital angular
+/// impulse integrates each accepted quadratic segment, including changes in
+/// velocity at collisions. No force acts at an invented arm and no spin torque
+/// is supplied. Persistent loaded contact, arbitrary shapes, force fields,
+/// time-varying forcing, rolling resistance and impact heat allocation remain
+/// outside this event-driven lane. An unresolved zero-speed loaded contact
+/// refuses instead of tunneling or manufacturing a support impulse.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub fn advance_forced_sphere_contacts(
+    bodies: &mut [RigidBodyState],
+    properties: &[MassProperties],
+    spheres: &[ContactSphere],
+    laws: &[SpherePairLaw],
+    gravity: Gravity,
+    centre_forces_world_n: &[Vec3],
+    duration_s: f64,
+    controls: SphereContactControls,
+    gate: &CancelGate,
+) -> Result<SphereContactReport, SphereContactError> {
     poll(gate)?;
     gravity.validate()?;
     let pairs = prepare(bodies, properties, spheres, laws, duration_s, controls)?;
+    if centre_forces_world_n.len() != bodies.len()
+        || centre_forces_world_n.iter().any(|f| !f.is_finite())
+    {
+        return Err(SphereContactError::Invalid(
+            "one finite centre force per original body required",
+        ));
+    }
+    let accelerations: Vec<_> = centre_forces_world_n
+        .iter()
+        .zip(properties)
+        .map(|(&force, p)| force.scale(p.mass().recip()))
+        .collect();
+    if accelerations.iter().any(|a| !a.is_finite()) {
+        return Err(SphereContactError::Invalid("unresolvable force/mass ratio"));
+    }
     let (before, linear_before, angular_before) = super::totals(bodies, properties, gate)?;
     let mut staged = bodies.to_vec();
     let mut elapsed = 0.0;
@@ -180,6 +247,7 @@ pub fn advance_sphere_contacts(
     let mut minimum_gap = gaps(&staged, &pairs, gate)?;
     let mut loss = 0.0;
     let mut drift_defect = 0.0;
+    let mut force_angular = Vec3::ZERO;
     loop {
         poll(gate)?;
         let remaining = duration_s - elapsed;
@@ -194,19 +262,51 @@ pub fn advance_sphere_contacts(
             queries = queries
                 .checked_add(1)
                 .ok_or(SphereContactError::EventBudget)?;
-            if let Some(time) = first_hit(&staged, &velocities, *pair, remaining)? {
+            if let Some(time) = first_hit(&staged, &velocities, &accelerations, *pair, remaining)? {
                 hit = Some(hit.map_or(time, |old| old.min(time)));
             }
         }
         let Some(mut h) = hit else {
             if remaining > 0.0 {
-                minimum_gap =
-                    minimum_gap.min(path_gap(&staged, &velocities, &pairs, remaining, gate)?);
-                let next = drift(&staged, properties, gravity, remaining, gate)?;
+                minimum_gap = minimum_gap.min(path_gap(
+                    &staged,
+                    &velocities,
+                    &accelerations,
+                    &pairs,
+                    remaining,
+                    gate,
+                )?);
+                let next = drift(
+                    &staged,
+                    properties,
+                    gravity,
+                    centre_forces_world_n,
+                    remaining,
+                    gate,
+                )?;
                 minimum_gap = minimum_gap.min(gaps(&next, &pairs, gate)?);
                 drift_defect += drift_audit(
-                    &staged, &next, properties, gravity, remaining, controls, gate,
+                    &staged,
+                    &next,
+                    properties,
+                    gravity,
+                    centre_forces_world_n,
+                    remaining,
+                    controls,
+                    gate,
                 )?;
+                force_angular = force_angular.add(
+                    centre_force_exchange(
+                        &staged,
+                        &next,
+                        properties,
+                        gravity,
+                        centre_forces_world_n,
+                        remaining,
+                        gate,
+                    )?
+                    .angular,
+                );
                 staged = next;
             }
             break;
@@ -225,11 +325,11 @@ pub fn advance_sphere_contacts(
             let next = if h == 0.0 {
                 staged.clone()
             } else {
-                drift(&staged, properties, gravity, h, gate)?
+                drift(&staged, properties, gravity, centre_forces_world_n, h, gate)?
             };
             if let (Ok(gap), Ok(path_minimum)) = (
                 gaps(&next, &pairs, gate),
-                path_gap(&staged, &velocities, &pairs, h, gate),
+                path_gap(&staged, &velocities, &accelerations, &pairs, h, gate),
             ) {
                 let (contacts, ids, maximum_gap, witnesses_nonnegative) =
                     contacts(&next, spheres, &pairs, controls, gate)?;
@@ -249,7 +349,28 @@ pub fn advance_sphere_contacts(
             ));
         };
         minimum_gap = minimum_gap.min(path_minimum).min(gap);
-        drift_defect += drift_audit(&staged, &next, properties, gravity, h, controls, gate)?;
+        drift_defect += drift_audit(
+            &staged,
+            &next,
+            properties,
+            gravity,
+            centre_forces_world_n,
+            h,
+            controls,
+            gate,
+        )?;
+        force_angular = force_angular.add(
+            centre_force_exchange(
+                &staged,
+                &next,
+                properties,
+                gravity,
+                centre_forces_world_n,
+                h,
+                gate,
+            )?
+            .angular,
+        );
         let impact = apply_rigid_frictional_impacts(
             &mut next,
             properties,
@@ -286,13 +407,41 @@ pub fn advance_sphere_contacts(
         }
     }
     let (after, linear_after, angular_after) = super::totals(&staged, properties, gate)?;
-    let supplied = gravity_exchange(bodies, &staged, properties, gravity, duration_s, gate)?;
-    let energy_residual = after - before - supplied.work + loss;
-    let linear = linear_after.sub(linear_before).sub(supplied.impulse);
-    let angular = angular_after.sub(angular_before).sub(supplied.angular);
+    let supplied = gravity_exchange(
+        bodies,
+        &staged,
+        properties,
+        gravity,
+        centre_forces_world_n,
+        duration_s,
+        gate,
+    )?;
+    let mut forced = centre_force_exchange(
+        bodies,
+        &staged,
+        properties,
+        gravity,
+        centre_forces_world_n,
+        duration_s,
+        gate,
+    )?;
+    // Work and linear impulse are independent of event timing, but a body's
+    // orbital force torque depends on its actual piecewise trajectory.
+    forced.angular = force_angular;
+    let energy_residual = after - before - supplied.work - forced.work + loss;
+    let linear = linear_after
+        .sub(linear_before)
+        .sub(supplied.impulse)
+        .sub(forced.impulse);
+    let angular = angular_after
+        .sub(angular_before)
+        .sub(supplied.angular)
+        .sub(forced.angular);
     if !energy_residual.is_finite()
         || !loss.is_finite()
         || !drift_defect.is_finite()
+        || !linear.is_finite()
+        || !angular.is_finite()
         || energy_residual.abs() > controls.total_energy_tolerance_j
         || super::magnitude(linear) > controls.linear_momentum_tolerance_ns
         || super::magnitude(angular) > controls.angular_momentum_tolerance_nms
@@ -313,6 +462,9 @@ pub fn advance_sphere_contacts(
         gravity_work_j: supplied.work,
         gravity_impulse_ns: supplied.impulse,
         gravity_angular_impulse_nms: supplied.angular,
+        centre_force_work_j: forced.work,
+        centre_force_impulse_ns: forced.impulse,
+        centre_force_angular_impulse_nms: forced.angular,
         unallocated_impact_loss_j: loss,
         drift_energy_defect_j: drift_defect,
         total_energy_residual_j: energy_residual,
@@ -444,18 +596,29 @@ fn gaps(
 fn first_hit(
     bodies: &[RigidBodyState],
     velocities: &[Vec3],
+    accelerations: &[Vec3],
     pair: Pair,
     horizon: f64,
 ) -> Result<Option<f64>, SphereContactError> {
     let r = relative(bodies, pair);
     checked_gap(r, pair)?;
     let v = velocities[pair.a].sub(velocities[pair.b]);
-    let result = first_sphere_contact(SweptSphereInput {
+    let motion = SweptSphereInput {
         relative_position_world: super::components(r),
         relative_velocity_world: super::components(v),
         radius_sum: pair.radius,
         duration_s: horizon,
-    })?;
+    };
+    let acceleration = accelerations[pair.a].sub(accelerations[pair.b]);
+    if acceleration != Vec3::ZERO {
+        return Ok(sphere_path(AcceleratedSphereInput {
+            motion,
+            relative_acceleration_world: super::components(acceleration),
+        })?
+        .first_entering_contact
+        .map(|c| c.time_s));
+    }
+    let result = first_sphere_contact(motion)?;
     match result {
         // A genuine tangent touch never enters the interior and has no impulse.
         Some(hit) if hit.relative_normal_speed < 0.0 => Ok(Some(hit.time_s)),
@@ -466,6 +629,7 @@ fn first_hit(
 fn path_gap(
     bodies: &[RigidBodyState],
     velocities: &[Vec3],
+    accelerations: &[Vec3],
     pairs: &[Pair],
     h: f64,
     gate: &CancelGate,
@@ -474,6 +638,28 @@ fn path_gap(
     for &p in pairs {
         poll(gate)?;
         let r = relative(bodies, p);
+        let acceleration = accelerations[p.a].sub(accelerations[p.b]);
+        if acceleration != Vec3::ZERO {
+            let path = sphere_path(AcceleratedSphereInput {
+                motion: SweptSphereInput {
+                    relative_position_world: super::components(r),
+                    relative_velocity_world: super::components(
+                        velocities[p.a].sub(velocities[p.b]),
+                    ),
+                    radius_sum: p.radius,
+                    duration_s: h,
+                },
+                relative_acceleration_world: super::components(acceleration),
+            })?;
+            if path.minimum_gap < 0.0 {
+                return Err(SphereContactError::Penetration {
+                    pair: p.ids,
+                    gap_m: path.minimum_gap,
+                });
+            }
+            minimum = minimum.min(path.minimum_gap);
+            continue;
+        }
         let d = velocities[p.a].sub(velocities[p.b]).scale(h);
         let scale = r
             .stable_norm("path separation")?
@@ -557,6 +743,7 @@ fn drift(
     bodies: &[RigidBodyState],
     properties: &[MassProperties],
     gravity: Gravity,
+    centre_forces: &[Vec3],
     h: f64,
     gate: &CancelGate,
 ) -> Result<Vec<RigidBodyState>, SphereContactError> {
@@ -564,9 +751,20 @@ fn drift(
     bodies
         .iter()
         .zip(properties)
-        .map(|(&b, &p)| {
+        .zip(centre_forces)
+        .map(|((&b, &p), &force)| {
             poll(gate)?;
-            Ok(integrator.step(b, p, Wrench::ZERO, h)?.state_after)
+            Ok(integrator
+                .step(
+                    b,
+                    p,
+                    Wrench {
+                        force_world: force,
+                        torque_body: Vec3::ZERO,
+                    },
+                    h,
+                )?
+                .state_after)
         })
         .collect()
 }
@@ -575,20 +773,40 @@ fn drift_audit(
     after: &[RigidBodyState],
     properties: &[MassProperties],
     gravity: Gravity,
+    centre_forces: &[Vec3],
     duration_s: f64,
     c: SphereContactControls,
     gate: &CancelGate,
 ) -> Result<f64, SphereContactError> {
     let a = super::totals(before, properties, gate)?;
     let b = super::totals(after, properties, gate)?;
-    let supplied = gravity_exchange(before, after, properties, gravity, duration_s, gate)?;
-    let energy = b.0 - a.0 - supplied.work;
+    let supplied = gravity_exchange(
+        before,
+        after,
+        properties,
+        gravity,
+        centre_forces,
+        duration_s,
+        gate,
+    )?;
+    let forced = centre_force_exchange(
+        before,
+        after,
+        properties,
+        gravity,
+        centre_forces,
+        duration_s,
+        gate,
+    )?;
+    let energy = b.0 - a.0 - supplied.work - forced.work;
     if !energy.is_finite()
         || energy.abs() > c.drift_energy_tolerance_j
-        || super::magnitude(b.1.sub(a.1).sub(supplied.impulse)) > c.linear_momentum_tolerance_ns
-        || super::magnitude(b.2.sub(a.2).sub(supplied.angular)) > c.angular_momentum_tolerance_nms
+        || super::magnitude(b.1.sub(a.1).sub(supplied.impulse).sub(forced.impulse))
+            > c.linear_momentum_tolerance_ns
+        || super::magnitude(b.2.sub(a.2).sub(supplied.angular).sub(forced.angular))
+            > c.angular_momentum_tolerance_nms
     {
-        return Err(SphereContactError::Audit("native gravity drift"));
+        return Err(SphereContactError::Audit("native constant-force drift"));
     }
     Ok(energy)
 }
@@ -604,6 +822,7 @@ fn gravity_exchange(
     after: &[RigidBodyState],
     properties: &[MassProperties],
     gravity: Gravity,
+    centre_forces: &[Vec3],
     duration_s: f64,
     gate: &CancelGate,
 ) -> Result<GravityExchange, SphereContactError> {
@@ -616,7 +835,9 @@ fn gravity_exchange(
     if g == Vec3::ZERO {
         return Ok(exchange);
     }
-    for ((start, end), property) in before.iter().zip(after).zip(properties) {
+    for (((start, end), property), &centre_force) in
+        before.iter().zip(after).zip(properties).zip(centre_forces)
+    {
         poll(gate)?;
         let force = g.scale(property.mass());
         let impulse = force.scale(duration_s);
@@ -638,12 +859,69 @@ fn gravity_exchange(
                     .linear_momentum_world()
                     .cross(g.scale(duration_s))
                     .scale(0.5 * duration_s),
-            );
+            )
+            // The original closed-system mass moment also accelerates under
+            // the constant sum of centre forces. Internal impulses cancel.
+            .add(centre_force.cross(g).scale((duration_s / 6.0) * duration_s * duration_s));
     }
     if !exchange.work.is_finite() || !exchange.impulse.is_finite() || !exchange.angular.is_finite()
     {
         return Err(SphereContactError::Audit(
             "gravitational work or impulse overflow",
+        ));
+    }
+    Ok(exchange)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn centre_force_exchange(
+    before: &[RigidBodyState],
+    after: &[RigidBodyState],
+    properties: &[MassProperties],
+    gravity: Gravity,
+    forces: &[Vec3],
+    h: f64,
+    gate: &CancelGate,
+) -> Result<GravityExchange, SphereContactError> {
+    let mut exchange = GravityExchange {
+        work: 0.0,
+        impulse: Vec3::ZERO,
+        angular: Vec3::ZERO,
+    };
+    for (((start, end), &p), &force) in before.iter().zip(after).zip(properties).zip(forces) {
+        poll(gate)?;
+        if force == Vec3::ZERO {
+            continue;
+        }
+        let impulse = force.scale(h);
+        exchange.work += force.dot(
+            end.pose()
+                .position_world()
+                .sub(start.pose().position_world()),
+        );
+        exchange.impulse = exchange.impulse.add(impulse);
+        // Integral x(t)×F dt = x0×F h + v0×F h²/2 + g×F h³/6.
+        // The body's own centre-force acceleration is parallel to F.
+        exchange.angular = exchange
+            .angular
+            .add(start.pose().position_world().cross(impulse))
+            .add(
+                start
+                    .center_of_mass_velocity_world(p)?
+                    .cross(impulse)
+                    .scale(0.5 * h),
+            )
+            .add(
+                gravity
+                    .acceleration_world()
+                    .cross(impulse)
+                    .scale((h / 6.0) * h),
+            );
+    }
+    if !exchange.work.is_finite() || !exchange.impulse.is_finite() || !exchange.angular.is_finite()
+    {
+        return Err(SphereContactError::Audit(
+            "centre force work or impulse overflow",
         ));
     }
     Ok(exchange)

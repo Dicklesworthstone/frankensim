@@ -9,6 +9,9 @@
 use core::fmt;
 use fs_math::det;
 
+/// Curved relative trajectories under different constant centre accelerations.
+pub mod accelerated;
+
 /// Relative straight-line trajectory in coherent length/time units.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SweptSphereInput {
