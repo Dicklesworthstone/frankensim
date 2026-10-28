@@ -15,6 +15,8 @@ pub mod rolling_loss;
 pub mod surface_excitation;
 /// Source-neutral elastic-viscoplastic shear of a retained third-body layer.
 pub mod layer_contact;
+/// Material-derived fixed-load Hertz--Cattaneo--Mindlin tangential hysteresis.
+pub mod mindlin;
 /// Stateful, work-conjugate tangential constitutive interface.
 pub mod tangential;
 pub use tangential::{

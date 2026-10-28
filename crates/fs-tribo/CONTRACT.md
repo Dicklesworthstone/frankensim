@@ -137,6 +137,49 @@ frame-free or aggregate-strain checkpoint is insufficient. Equality of those
 inputs is not external physical validation.
 Rolling-deformation loss remains a separate, zero channel in this rung.
 
+### Fixed-load Hertz--Cattaneo--Mindlin contact
+
+`mindlin::MindlinDeresiewiczPoint` implements `TangentialLaw` for a circular
+Hertz point patch at fixed positive normal load and one unchanged tangent
+direction. `MindlinPointParameters` supplies the patch radius, normal force,
+both bodies' shear moduli and Poisson ratios, local Coulomb coefficient and
+memory budget. Stiffness is derived as `k0 = 8 a / sum((2-nu_i)/G_i)`;
+no tangential spring or slip-onset fraction is authored independently.
+The virgin curve is `Q = mu P [1-(1-u/d)^(3/2)]`, where
+`d = 3 mu P/(2 k0)`. Gross slip recovers Coulomb and zero coefficient is
+exactly frictionless.
+
+The Hertz continuum of elastic Coulomb elements is integrated analytically,
+retaining piecewise affine strains over its yield thresholds. This reproduces
+proportional Mindlin/Masing reversal loops and return-point memory without a
+finite spring grid. Work separates reversible strain energy from physical
+microslip heat. The returned effort is the path-average force, and the caller
+body compliance is solved using that same effort. The endpoint force remains
+available on `MindlinState`; substituting it into a held-effort work audit
+would be incorrect. Root trials allocate nothing. Accepted state uses at most
+the caller's 1--4096 analytic intervals; nested reversals exceeding that cap
+refuse atomically, while erased history is coalesced.
+
+The model follows the decoupled Cattaneo--Mindlin approximation, not a full
+three-dimensional elastic-friction solution. Changing normal load/radius,
+foreign-law state, or second-axis motion refuse; line contact, nonproportional
+shear, torsion, normal/tangential elastic coupling, temperature-dependent
+coefficients and local traction/wear reconstruction remain outside this rung.
+No material authority is supplied by numerical parameters alone. References:
+Popov, Hess and Willert (2019), sections 4.4 and 4.6.3,
+<https://doi.org/10.1007/978-3-662-58709-6_4>; Lyashenko and Popov (2015),
+Methods, <https://doi.org/10.1038/srep08479>.
+
+`tests/mindlin.rs` supplies G1 virgin-force verification (relative `1e-10`),
+initial stiffness (`1e-12`), Masing reversals and closed-form cyclic heat at
+100/200/400 intervals per half-cycle (`2e-11`). The constitutive integrals are
+exact within floating-point arithmetic; an independent endpoint-work observer
+converges at second order. Tests also check the cubic small-amplitude loss,
+gross slip, retained preload, compliant work/release, G0 domain/budget/memory
+refusals, G3 step-subdivision invariance and G5 checkpoint replay. These are
+synthetic numerical verifications; they do not close the varying-normal-load
+or source/consumer requirements of `frankensim-irp-v5-instrument-realism-pexfp.147`.
+
 ### Rolling and contour-deformation loss rungs
 
 `rolling_loss` provides three immutable, separately sourced candidates:

@@ -22,7 +22,7 @@ fn finite(value: f64, field: &'static str) -> Result<f64, TriboError> {
 /// Explicit budgets for the deterministic stick test and sliding bisection.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TangentialSolveConfig {
-    /// At most 128 bisections; zero is refused.
+    /// At most 128 scalar root iterations; zero is refused.
     pub max_iterations: usize,
     /// Inclusive traction magnitude ceiling [N].
     pub maximum_force_n: f64,
@@ -139,7 +139,7 @@ pub struct TangentialStep<S> {
     pub closure_residual_j: f64,
     /// Kinematic equation residual [m], including static projection roundoff.
     pub compatibility_residual_m: [f64; 2],
-    /// Bisections used; zero for a static reaction, affine solution or endpoint root.
+    /// Scalar root iterations; zero for a static reaction, affine solution or endpoint root.
     pub iterations: usize,
 }
 
