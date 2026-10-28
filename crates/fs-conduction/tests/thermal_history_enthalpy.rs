@@ -217,3 +217,170 @@ fn g0_ambiguous_temperature_constraints_and_invalid_initial_enthalpy_are_refused
             &[80.;4],budget(&mesh,1)).is_err());
     });
 }
+
+#[test]
+fn g1_prescribed_history_preserves_initial_phase_and_charges_boundary_storage_once() {
+    let mesh = mesh(false);
+    let chart = curve(100., 46);
+    let table = [ReferenceEnthalpyMaterial {
+        curve: &chart, reference_density_kg_m3: 2.,
+    }];
+    let material = ConductivityModel::isotropic_declared(2.).unwrap();
+    with_cx(|cx| {
+        let boundary = ThermalBoundaryHistory::new(
+            cx,
+            ThermalBoundaryBuilder::new(&mesh)
+                .remainder("bath", ThermalBc::dirichlet(330.).unwrap()).unwrap(),
+            &Environment::earth_lab(), Vec::new(), 0.,
+        ).unwrap();
+        let initial_h = [150.; 4];
+        let mut run = EnthalpyHistoryRun::new(
+            cx,
+            problem(&boundary, &material,
+                HeatSourceHistory::Fixed(ScalarField::Uniform(30.))),
+            EnthalpyHistoryMaterials {
+                table: &table, of_element: &[0], phase_conductivity: None,
+            },
+            &initial_h, budget(&mesh, 2),
+        ).unwrap();
+        // Admission must preserve the latent initial state, even though the
+        // prescribed bath has a different, uniquely invertible temperature.
+        assert_eq!(run.specific_enthalpy_j_kg(), initial_h.as_slice());
+        assert_eq!(run.temperature(), &[310.; 4]);
+        assert_eq!(run.liquid_mass_fraction(), &[0.5; 4]);
+        assert_eq!(run.time_s(), 0.);
+        assert_eq!(run.accepted_steps(), 0);
+
+        // This reference tetrahedron has volume 1/6 and mass 2/6.
+        // The original chart gives h(330 K) = 400 J/kg. Generation is 30/6 W.
+        let expected_storage_j = (2. / 6.) * (400. - 150.);
+        let first = run.advance_to(cx, 0.25, config()).unwrap();
+        assert!(first.specific_enthalpy_j_kg.iter().all(|h| (h - 400.).abs() < 1e-9));
+        assert!(first.temperature.iter().all(|t| (t - 330.).abs() < 1e-10));
+        assert_eq!(first.liquid_mass_fraction, vec![1.; 4]);
+        assert!((first.source_w - 5.).abs() < 1e-12);
+        assert!((first.stored_energy_change_j - expected_storage_j).abs() < 1e-9);
+        assert!((first.dirichlet_in_w - (expected_storage_j / 0.25 - 5.)).abs() < 1e-9);
+        assert!(first.energy_residual_j.abs() <= config().energy_tolerance_j);
+        assert_eq!(run.specific_enthalpy_j_kg(), first.specific_enthalpy_j_kg.as_slice());
+        assert_eq!(run.temperature(), first.temperature.as_slice());
+        assert_eq!(run.liquid_mass_fraction(), first.liquid_mass_fraction.as_slice());
+
+        // A later, longer interval has no repeated storage jump. The bath
+        // removes all ongoing source heat while every constrained state stays put.
+        let second = run.advance_to(cx, 0.75, config()).unwrap();
+        assert_eq!(second.specific_enthalpy_j_kg, first.specific_enthalpy_j_kg);
+        assert_eq!(second.temperature, first.temperature);
+        assert_eq!(second.liquid_mass_fraction, first.liquid_mass_fraction);
+        assert!(second.stored_energy_change_j.abs() < 1e-12);
+        assert!((second.source_w - 5.).abs() < 1e-12);
+        assert!((second.dirichlet_in_w + 5.).abs() < 1e-9);
+        assert!(second.energy_residual_j.abs() <= config().energy_tolerance_j);
+        assert!((first.stored_energy_change_j + second.stored_energy_change_j
+            - expected_storage_j).abs() < 1e-9);
+        assert_eq!(run.time_s(), 0.75);
+        assert_eq!(run.accepted_steps(), 2);
+    });
+}
+
+#[test]
+fn g1_prescribed_history_held_events_use_material_charts_and_rollback_ambiguous_bath() {
+    let mesh = mesh(true);
+    let charts = [curve(100., 47), curve(400., 48)];
+    let table = [
+        ReferenceEnthalpyMaterial { curve: &charts[0], reference_density_kg_m3: 1. },
+        ReferenceEnthalpyMaterial { curve: &charts[1], reference_density_kg_m3: 2. },
+    ];
+    let material = ConductivityModel::isotropic_declared(2.).unwrap();
+    with_cx(|cx| {
+        let row = BoundaryCondition {
+            region: "bath".into(), physics: Physics::Thermal, kind: BcKind::Dirichlet,
+            value: Some(BcValue::Signal(TimeSignal::Table {
+                times: vec![0., 0.25, 0.5, 0.75],
+                values: vec![300., 340., 290., 310.],
+                dims: TEMPERATURE_DIMS, interp: Interp::Hold,
+            })),
+            compatibility: None, frame: 0,
+        };
+        let boundary = ThermalBoundaryHistory::new(
+            cx,
+            ThermalBoundaryBuilder::new(&mesh)
+                .remainder("bath", ThermalBc::dirichlet(300.).unwrap()).unwrap(),
+            &Environment::earth_lab(),
+            vec![ThermalRegionHistory { row, reference_temperature: None }], 0.,
+        ).unwrap();
+        let mut run = EnthalpyHistoryRun::new(
+            cx,
+            problem(&boundary, &material,
+                HeatSourceHistory::Fixed(ScalarField::Uniform(0.))),
+            EnthalpyHistoryMaterials {
+                table: &table, of_element: &[0, 1], phase_conductivity: None,
+            },
+            &[80.; 8], budget(&mesh, 4),
+        ).unwrap();
+        assert_eq!(run.specific_enthalpy_j_kg(), &[80.; 8]);
+        assert!(run.temperature().iter().all(|t| (t - 308.).abs() < 1e-10));
+        assert_eq!(run.liquid_mass_fraction(), &[0.; 8]);
+
+        let mut previous_time = 0.;
+        let mut previous_h = [80.; 2];
+        let mut stored_total_j = 0.;
+        let mut input_total_j = 0.;
+        // Every call requests time 1 with a cap larger than the entire window.
+        // Exact event endpoints still use the PRE-jump bath temperature.
+        for (ordinal, (end, expected_h, temperature, fraction)) in [
+            (0.25, [0., 0.], 300., 0.),
+            (0.5, [500., 800.], 340., 1.),
+            (0.75, [-100., -100.], 290., 0.),
+        ].into_iter().enumerate() {
+            let step = run.advance_event_step(cx, 1., 2., config()).unwrap();
+            assert_eq!(step.start_time_s, previous_time);
+            assert_eq!(step.end_time_s, end);
+            for body in 0..2 {
+                for vertex in body * 4..body * 4 + 4 {
+                    assert!((step.report.specific_enthalpy_j_kg[vertex] - expected_h[body]).abs() < 1e-9);
+                    assert!((step.report.temperature[vertex] - temperature).abs() < 1e-10);
+                    assert_eq!(step.report.liquid_mass_fraction[vertex], fraction);
+                }
+            }
+            // Each tetrahedron has volume 1/6; its own frozen density and
+            // original chart determine storage, including unequal latent heat.
+            let expected_storage_j = (expected_h[0] - previous_h[0]) / 6.
+                + (expected_h[1] - previous_h[1]) / 3.;
+            let dt = end - previous_time;
+            let net_w = step.report.source_w + step.report.dirichlet_in_w
+                - step.report.neumann_out_w - step.report.robin_out_w;
+            assert!(step.report.source_w.abs() < 1e-12);
+            assert!((step.report.stored_energy_change_j - expected_storage_j).abs() < 1e-9);
+            assert!((step.report.dirichlet_in_w - expected_storage_j / dt).abs() < 1e-8);
+            assert!((expected_storage_j - dt * net_w).abs() < 1e-8);
+            assert!(step.report.energy_residual_j.abs() <= config().energy_tolerance_j);
+            assert_eq!(run.specific_enthalpy_j_kg(), step.report.specific_enthalpy_j_kg.as_slice());
+            assert_eq!(run.time_s(), end);
+            assert_eq!(run.accepted_steps(), ordinal + 1);
+            stored_total_j += step.report.stored_energy_change_j;
+            input_total_j += dt * net_w;
+            previous_time = end;
+            previous_h = expected_h;
+        }
+        assert!((stored_total_j + 90.).abs() < 1e-8);
+        assert!((input_total_j + 90.).abs() < 1e-8);
+
+        // The 310 K plateau takes effect only AFTER the 0.75 event. It has
+        // multiple admissible h values, so the next endpoint must not publish.
+        let accepted_h = run.specific_enthalpy_j_kg().to_vec();
+        let accepted_t = run.temperature().to_vec();
+        let accepted_f = run.liquid_mass_fraction().to_vec();
+        assert!(matches!(
+            run.advance_event_step(cx, 1., 2., config()),
+            Err(HeterogeneousEnthalpyError::Enthalpy(
+                EnthalpyError::AmbiguousPrescribedTemperature { .. }
+            ))
+        ));
+        assert_eq!(run.specific_enthalpy_j_kg(), accepted_h.as_slice());
+        assert_eq!(run.temperature(), accepted_t.as_slice());
+        assert_eq!(run.liquid_mass_fraction(), accepted_f.as_slice());
+        assert_eq!(run.time_s(), 0.75);
+        assert_eq!(run.accepted_steps(), 3);
+    });
+}

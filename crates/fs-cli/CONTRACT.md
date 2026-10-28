@@ -1684,6 +1684,9 @@ when the whole body is prescribed. Step rows retain both the applied
 `dirichlet_in_w` and fresh `physical_dirichlet_in_w`; radiation, natural and
 airflow audits use the latter with physical reservoir fluxes and actual air
 heat gain. The final solver report counts only free degrees of freedom.
+Solve driver 80 binds these bath and constrained-row semantics into both solve
+and native uncertainty identities; earlier retained evidence cannot resume
+under the changed physical and derivative model.
 Native trajectory adjoints are admitted under the scope below. Expansion,
 motion and phase kinetics are not inferred.
 `data/reference-project/cooling-enthalpy.fsim` and `TRANSIENT.md` give a complete

@@ -232,7 +232,11 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// and independent fan-bank speed controls in capacity-storage trajectory adjoints.
 /// Version 79 admits mixed natural/forced-convection adaptive goals, with
 /// optional ambient radiation and complete physical boundary-law feedback.
-pub const SOLVE_DRIVER_VERSION: u32 = 79;
+/// Version 80 admits unique prescribed baths in native enthalpy trajectories
+/// and reports independent bath-temperature controls with complete fixed-row
+/// semantics. Previous trajectory receipts and uncertainty calibrations must
+/// not resume under these changed physical and derivative semantics.
+pub const SOLVE_DRIVER_VERSION: u32 = 80;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
