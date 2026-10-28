@@ -1,4 +1,7 @@
 //! Independent accuracy and virtual-work checks for the distributed functional.
+#[path = "eggshell/induction.rs"]
+mod induction;
+
 use super::*;
 use fs_em::spatial::vector_potential::{
     SpatialVectorMagnetostatics, VectorMagneticBoundary, VectorMagneticControls,

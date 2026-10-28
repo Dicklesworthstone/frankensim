@@ -18,6 +18,8 @@
 //! functional with independent coenergy and force/torque accuracy tests.
 
 pub mod eggshell;
+/// Maxwell loads recovered directly from retained three-dimensional induction.
+pub mod induction;
 
 use super::{
     Face, SpatialMagneticError, SpatialMagneticField, SpatialMagneticMaterial, cross, dot, finite,

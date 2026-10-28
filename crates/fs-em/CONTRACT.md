@@ -1167,3 +1167,33 @@ The endpoint field and source bundle are retained together; a static re-solve
 cannot discard induction memory. This lower owner does not choose temperature
 or deposit reversible heat: the finite-caloric consumer must account for
 magnetic entropy/internal energy and positive combined heat capacity.
+
+## Maxwell loads from retained three-dimensional induction
+
+`SpatialInduction` and `SpatialNonlinearInduction` now expose
+`maxwell_wrench` and `eggshell_wrench` through the same private load bridge.
+Original constitutive B/H is recovered directly from accepted A, with no
+static re-solve that could discard eddy-current memory after source removal.
+The existing closed-surface integration and prepared P1 virtual-displacement
+functional retain canonical SE(3), moment-origin, deterministic reduction and
+geometry-identity behavior. No duplicate magnetic stress or force model is added.
+
+Every surface neighbor or eggshell transition/fractional plateau must be one
+complete source-identical induced-linear exterior, without resolved conductivity
+or impressed current. A momentarily idle conductor is not accepted as insulating
+air. Conducting, recoil or saturating targets may lie on the enclosed weight-one
+plateau. Mesh budgets bound complete surface-field recovery; cancellation and
+refusal mutate no accepted electromagnetic state. Returned instantaneous
+wrenches do not advance mechanics or debit mechanical work, and overlapping
+Lorentz body loads must not be added again.
+
+Two substantive tests use an independently integrated compact P1 current loop.
+For manufactured m_z=0.125 and imposed B_x=0.4, raw initial torque_y is
+0.0499977666885 N m versus the independent 0.05 N m reference. Retained torque
+after impressed-current removal is 0.0383014007176 N m and decreases to
+0.0116541343558 N m over four subsequent steps; the fresh static source-off solve
+instead has zero torque. Both transient owners and both force functionals,
+analytically equivalent linear-limit endpoints, frames/origins, late cancellation
+and strict conductor/current/source collar refusals are exercised.
+This finite-mesh manufactured result is not a universal force-error bound or
+experimental device validation; field/collar refinement remains required.

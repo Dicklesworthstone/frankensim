@@ -435,7 +435,7 @@ impl super::super::vector_potential::nonlinear::SpatialNonlinearVectorField<'_> 
 }
 
 #[allow(clippy::too_many_arguments)]
-fn apply(
+pub(super) fn apply(
     shell: &PreparedSpatialEggshell<'_>,
     mesh: &TetComplex,
     positions_m: &[[f64; 3]],
