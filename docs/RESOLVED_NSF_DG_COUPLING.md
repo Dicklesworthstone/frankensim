@@ -80,6 +80,15 @@ characteristics on the other face, a maximum callback length and an
 The microphone consumes the actual accepted terminal flows and retains its
 physical/numerical delay.
 
+Call `with_observer_gas(&propagation)` before playback to use the same physical
+atmosphere law as native flute and reed observation. `GasPropagation` selects
+the shared law and finite path/filter budgets; the actual DG radiation source
+supplies the complete exterior gas, including viscosity, conductivity and heat
+capacities. Each original surface-to-microphone path retains its own absorption,
+dispersion and causal delay. `observer_gas()` exposes the original material and
+path-response report. The fluid and bore reactions are unchanged, and the source's
+existing cancellation gate also owns this cold preparation.
+
 The result implements the existing `PressureRenderer`, so the original pressure
 decimator, ensemble and PCM writers can consume it. Callback partitioning does
 not change either physical owner or source timing. A failed physical step rolls

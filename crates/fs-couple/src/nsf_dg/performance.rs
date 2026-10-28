@@ -8,6 +8,7 @@ use super::{NsfDg, NsfDgFrame, same_clock};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::performance::ApertureObservation;
 use crate::pcm_wav::baffled::BaffledPressure;
+use crate::pcm_wav::baffled::gas::{GasPropagation, GasPropagationReport};
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::RenderError;
 use fs_exec::CancelGate;
@@ -24,6 +25,7 @@ pub struct NsfDgPerformance<L: Lattice3<27>> {
     incoming: Vec<f64>,
     observation: ApertureObservation,
     receiver: Option<BaffledPressure>,
+    observer_gas: Option<GasPropagationReport>,
     terminal_flows: Vec<f64>,
     sample_rate_hz: u32,
     maximum_block: usize,
@@ -62,9 +64,36 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
         } else { Vec::new() };
         Ok(Self {
             system, incoming: incoming_characteristics_m_s, observation, receiver,
-            terminal_flows, sample_rate_hz, maximum_block, gate, last: None, poisoned: false,
+            observer_gas: None, terminal_flows, sample_rate_hz, maximum_block, gate,
+            last: None, poisoned: false,
         })
     }
+    /// Bind the shared physical atmosphere law to every original outlet-to-microphone
+    /// path before playback. The exterior gas comes from the actual DG radiation
+    /// source, including its transport and caloric properties. The original fluid,
+    /// bore, terminal reactions and held characteristic samples remain unchanged.
+    ///
+    /// Source absorption, dispersion and causal delay use the same Rayleigh owner
+    /// as native flute and reed playback. No second filter is applied after the
+    /// surface pressure is summed. The retained cancellation gate also owns this
+    /// bounded cold preparation; failed preparation publishes no receiver.
+    pub fn with_observer_gas(mut self, propagation: &GasPropagation) -> Result<Self, RenderError> {
+        if self.poisoned || self.system.accepted_steps() != 0 || self.observer_gas.is_some() {
+            return Err(sizing("resolved material gas observation requires one cold attachment"));
+        }
+        let ApertureObservation::TubeBaffled(location) = self.observation else {
+            return Err(sizing("resolved material gas propagation requires an exterior receiver"));
+        };
+        let (receiver, report) = self.system.load().baffled_receiver_with_gas(
+            self.sample_rate_hz, location, propagation, &self.gate,
+        ).map_err(RenderError::Voice)?;
+        self.receiver = Some(receiver);
+        self.observer_gas = Some(report);
+        Ok(self)
+    }
+    /// Original exterior material, selected physical law and individual path responses.
+    pub fn observer_gas(&self) -> Option<&GasPropagationReport> { self.observer_gas.as_ref() }
+
     /// Original resolved source, material state and acoustic load.
     pub const fn system(&self) -> &NsfDg<L> { &self.system }
     /// Supplied physical incoming characteristic on the noncoupled face [m/s].
