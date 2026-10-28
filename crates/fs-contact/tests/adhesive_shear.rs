@@ -253,7 +253,19 @@ fn sourced_jkr_area_drives_shear_at_zero_and_tensile_net_force_then_detaches() {
     common::close(zero_load.contact_radius_m, a0);
     let tensile = jkr.evaluate_attached(0.0).unwrap();
     assert!(tensile.normal_force_n < 0.0);
+    let mut evolving = shear.bind_jkr(&normal, &zero_load).unwrap();
+    let normal_address = evolving.normal_state() as *const _;
+    let receipts_address = evolving.shear_source().resolved().properties().as_ptr();
     for contact in [zero_load, tensile] {
+        let update = SourceAdhesiveContactUpdate::from_jkr(&contact).unwrap();
+        let prepared = evolving.tangential_for_update(update).unwrap();
+        assert_eq!(update.normal_state_identity(), normal.identity());
+        assert_eq!(prepared.contact(), contact.friction_contact_state().unwrap());
+        evolving.update_contact(update).unwrap();
+        assert_eq!(evolving.tangential(), &prepared);
+        assert_eq!(evolving.normal_state() as *const _, normal_address);
+        assert_eq!(evolving.shear_source().resolved().properties().as_ptr(), receipts_address);
+        assert_eq!(evolving.temperature_kelvin(), Some(293.15));
         let response = shear.evaluate_jkr(&normal, &contact, slip()).unwrap();
         common::close(response.static_capacity_n, 3e6 * contact.contact_area_m2);
         common::close(
@@ -334,6 +346,22 @@ fn sourced_jkr_area_drives_shear_at_zero_and_tensile_net_force_then_detaches() {
     assert_eq!(response.static_capacity_n, 0.0);
     assert_eq!(response.dissipated_power_w, 0.0);
     assert!(detached.irreversible_work_j > 0.0);
+    evolving.update_contact(SourceAdhesiveContactUpdate::from_jkr(&detached.response).unwrap()).unwrap();
+    assert_eq!(evolving.tangential().contact().area_m2(), 0.0);
+    evolving.update_contact(SourceAdhesiveContactUpdate::from_jkr(&zero_load).unwrap()).unwrap();
+    assert_eq!(evolving.tangential().contact(), zero_load.friction_contact_state().unwrap());
+    // New source claims or reversed ordered surfaces cannot relabel this junction.
+    for foreign in [
+        self::normal(Some((4e6, 2e6)), Pressure::DIMS, false, false),
+        self::normal(Some((3e6, 2e6)), Pressure::DIMS, false, true),
+    ] {
+        let foreign = SourceJkrSphereContact::new(foreign, radius, 1e-9, jkr.envelope()).unwrap();
+        let update = SourceAdhesiveContactUpdate::from_jkr(&foreign.evaluate_attached(0.0).unwrap()).unwrap();
+        let before = evolving.clone();
+        assert!(evolving.tangential_for_update(update).is_err());
+        assert!(evolving.update_contact(update).is_err());
+        assert_eq!(evolving, before);
+    }
 }
 
 #[test]
@@ -384,4 +412,32 @@ fn sourced_dmt_distinguishes_contact_friction_from_attraction_across_a_gap() {
     assert_eq!(friction.static_capacity_n, 0.0);
     assert_eq!(friction.dissipated_power_w, 0.0);
     assert!(shear.evaluate_dmt(&soft, &contact, slip()).is_err());
+    let mut evolving = shear.bind_dmt(&normal, &contact).unwrap();
+    let source_address = evolving.shear_source().resolved().properties().as_ptr();
+    let mut history = evolving.initial_state();
+    for response in [dmt.evaluate(0.9e-9).unwrap(), gap, contact] {
+        let update = SourceAdhesiveContactUpdate::from_dmt(&response).unwrap();
+        evolving.update_contact(update).unwrap();
+        let input = TangentialStepInput {
+            normal_n: response.repulsive_normal_force_n,
+            slip_increment_m: [3e-5, 0.0],
+            dt_s: 1e-3,
+            contact_temperature_k: Some(293.15),
+            nominal_pressure_pa: None,
+            compliance_m_per_n: 0.0,
+            solve: TangentialSolveConfig {
+                max_iterations: 80, maximum_force_n: 1.0,
+                force_absolute_tolerance_n: 1e-16, force_relative_tolerance: 1e-12,
+            },
+        };
+        let step = evolving.advance(&history, &input).unwrap();
+        common::close(step.traction_n[0], 2e6 * response.contact_area_m2);
+        common::close(step.dissipated_j, 2e6 * response.contact_area_m2 * 3e-5);
+        common::close(step.state.slip_m()[0], history.slip_m()[0] + 3e-5);
+        assert_eq!(evolving.shear_source().resolved().properties().as_ptr(), source_address);
+        assert!(evolving.advance(&history, &TangentialStepInput {
+            contact_temperature_k: Some(300.0), ..input
+        }).is_err());
+        history = step.state;
+    }
 }

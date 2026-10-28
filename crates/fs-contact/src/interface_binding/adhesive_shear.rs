@@ -201,4 +201,4 @@ impl SourceAdhesiveShear {
 }
 
 mod held;
-pub use held::SourceAdhesiveTangential;
+pub use held::{SourceAdhesiveContactUpdate, SourceAdhesiveTangential};

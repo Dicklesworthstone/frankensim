@@ -1,4 +1,4 @@
-//! Retain both original source owners around a frozen normal patch.
+//! Retain both original source owners while the normal owner supplies geometry.
 use super::*;
 use crate::normal_patch::maugis::MaugisResponse;
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
@@ -6,9 +6,52 @@ use fs_qty::{QuantitySpec, Temperature};
 use fs_tribo::adhesive::AdhesiveTangentialContact;
 use fs_tribo::{DryTangentialState, TangentialLaw, TangentialStep, TangentialStepInput};
 
-/// A frozen area/load with the original ordered normal and shear source states.
-/// The whole source query remains fixed. This does not infer a thermal refresh,
-/// normal evolution, shear-induced peeling or a new material calibration.
+/// A response-derived solid area/load with its original normal source identity.
+/// Only actual normal-owner responses can construct this allocation-free value.
+/// It carries neither new material parameters nor a claim to normal work.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SourceAdhesiveContactUpdate {
+    normal_identity: ContentHash,
+    contact: AdhesiveContactState,
+}
+impl SourceAdhesiveContactUpdate {
+    /// Actual JKR area, including an attached junction at tensile net load.
+    pub fn from_jkr(response: &JkrResponse) -> Result<Self, AdhesiveShearError> {
+        Ok(Self {
+            normal_identity: response.normal_state_identity(),
+            contact: response.friction_contact_state()?,
+        })
+    }
+    /// Actual DMT solid area; attraction across a gap carries no solid shear.
+    pub fn from_dmt(response: &DmtResponse) -> Result<Self, AdhesiveShearError> {
+        Ok(Self {
+            normal_identity: response.normal_state_identity(),
+            contact: response.friction_contact_state()?,
+        })
+    }
+    /// Actual Maugis solid area, excluding its noncontact cohesive annulus.
+    pub fn from_maugis(response: &MaugisResponse) -> Result<Self, AdhesiveShearError> {
+        Ok(Self {
+            normal_identity: response.normal_state_identity(),
+            contact: response.friction_contact_state()?,
+        })
+    }
+    /// Original ordered normal state that must match the retained binding.
+    #[must_use]
+    pub const fn normal_state_identity(self) -> ContentHash {
+        self.normal_identity
+    }
+    /// Real solid geometry and repulsive load, never the signed net load.
+    #[must_use]
+    pub const fn contact(self) -> AdhesiveContactState {
+        self.contact
+    }
+}
+
+/// Current area/load with the original ordered normal and shear source states.
+/// The whole source query remains fixed as response-derived geometry changes.
+/// This does not infer a thermal refresh, solve normal evolution, or introduce
+/// shear-induced peeling or a new material calibration.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SourceAdhesiveTangential {
     normal: BoundNormalInterfaceState,
@@ -107,6 +150,36 @@ impl SourceAdhesiveShear {
     }
 }
 impl SourceAdhesiveTangential {
+    /// Prepare a lightweight constitutive leaf at new normal-owner geometry.
+    /// Source identities, claims, query, strengths and temperature are retained;
+    /// none of their allocations are copied. The accepted binding is untouched.
+    pub fn tangential_for_update(
+        &self,
+        update: SourceAdhesiveContactUpdate,
+    ) -> Result<AdhesiveTangentialContact, AdhesiveShearError> {
+        if update.normal_identity != self.normal.identity()
+            || update.normal_identity != self.shear.normal_identity
+        {
+            return Err(AdhesiveShearError::Invalid {
+                reason: "adhesive geometry update belongs to a different original normal source state",
+            });
+        }
+        Ok(AdhesiveTangentialContact::new(
+            self.shear.law.clone(),
+            update.contact,
+        )?)
+    }
+    /// Accept already resolved geometry without replacing either source owner.
+    /// Refusal changes nothing. A coupled mechanical owner must stage its own
+    /// motion first and call this only when the entire step can publish.
+    pub fn update_contact(
+        &mut self,
+        update: SourceAdhesiveContactUpdate,
+    ) -> Result<(), AdhesiveShearError> {
+        let tangential = self.tangential_for_update(update)?;
+        self.tangential = tangential;
+        Ok(())
+    }
     /// Complete original normal source and its exact frozen external query.
     #[must_use]
     pub const fn normal_state(&self) -> &BoundNormalInterfaceState {

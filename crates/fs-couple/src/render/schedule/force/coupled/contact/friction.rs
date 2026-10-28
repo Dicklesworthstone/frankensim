@@ -44,7 +44,8 @@ pub struct FrictionDrive {
     /// Signed prescribed relative surface speed [m/s]. Zero is an undriven brake.
     pub speed_m_s: f64,
     /// Prescribed compressive load [N]. For a bound adhesive patch this must
-    /// equal its frozen repulsive load; zero need not release junction shear.
+    /// equal its current repulsive load held over this sample; zero need not
+    /// release junction shear.
     pub normal_force_n: f64,
 }
 
@@ -89,6 +90,8 @@ pub enum ModalFrictionError {
     Network(ModalCouplingError),
     /// The unchanged fs-tribo law refused its parameters or slip speed.
     Law(TriboError),
+    /// Original adhesive source identity or geometry admission refused.
+    AdhesiveSource(fs_contact::interface_binding::adhesive_shear::AdhesiveShearError),
     /// Actual endpoint displacements failed the sticking constraint.
     Sticking { /// Signed mismatch [m].
         residual_m: f64, /// Explicit tolerance [m].
@@ -124,11 +127,15 @@ impl From<ModalCouplingError> for ModalFrictionError {
 impl From<TriboError> for ModalFrictionError {
     fn from(value: TriboError) -> Self { Self::Law(value) }
 }
+impl From<fs_contact::interface_binding::adhesive_shear::AdhesiveShearError> for ModalFrictionError {
+    fn from(value: fs_contact::interface_binding::adhesive_shear::AdhesiveShearError) -> Self { Self::AdhesiveSource(value) }
+}
 impl core::fmt::Display for ModalFrictionError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Network(e) => write!(f, "friction network: {e}"),
             Self::Law(e) => write!(f, "friction law: {e}"),
+            Self::AdhesiveSource(e) => write!(f, "friction source: {e}"),
             Self::Sticking { residual_m, tolerance_m } => write!(f,
                 "sticking mismatch {residual_m:e} m exceeds {tolerance_m:e} m"),
             Self::ActiveSetExhausted { pivots, budget, last_active_set, worst_port, worst_condition, worst_size } => write!(f,
@@ -488,7 +495,7 @@ impl FrictionModalSystem {
         if let Some(binding) = &self.adhesive {
             let contact = binding.tangential().contact();
             if normal != contact.repulsive_normal_force_n() {
-                return Err(invalid("held adhesive input must retain the frozen repulsive normal load").into());
+                return Err(invalid("held adhesive input must match the current repulsive normal load").into());
             }
             if !continued || contact.area_m2() == 0.0 {
                 let (traction, regime, iterations) = binding.solve(self.config, self.compliance,
@@ -547,7 +554,7 @@ pub mod nonlinear;
 /// Same-step friction, common-interface temperature and finite-body thermal evolution.
 pub mod heat;
 
-/// Adhesive junction shear on frozen real contact geometry.
+/// Adhesive junction shear with normal-owner geometry held over each sample.
 pub mod adhesive;
 
 /// Stateful tangential laws with reversible contact storage on the same network.

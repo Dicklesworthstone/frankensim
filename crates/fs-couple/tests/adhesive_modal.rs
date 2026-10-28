@@ -1,8 +1,8 @@
-//! Frozen adhesive patches exchange physical work with the native finite bodies.
+//! Adhesive patches exchange physical work with the native finite bodies.
 use fs_couple::modal_acoustic_time::{ModalAcousticMode, ModalAcousticState, ModalAcousticTimeBudget, ModalAcousticTimeModel};
 use fs_couple::render::schedule::force::coupled::{CoupledModalSystem, ModalAttachment, ModalCouplingConfig};
 use fs_couple::render::schedule::force::coupled::contact::friction::{FrictionDrive,FrictionModalSystem,ModalFrictionConfig,ModalFrictionRegime};
-use fs_couple::render::schedule::force::coupled::contact::friction::adhesive::AdhesiveModalBinding;
+use fs_couple::render::schedule::force::coupled::contact::friction::adhesive::{AdhesiveModalBinding, AdhesiveModalContactUpdate};
 use fs_exec::CancelGate;
 use fs_math::c64::C64;
 use fs_tribo::{FrictionLaw};
@@ -14,6 +14,11 @@ fn mechanics(initial_speed:f64, area:f64)->FrictionModalSystem {
         FrictionLaw::Coulomb {static_mu:0.0,kinetic_mu:0.0})
 }
 fn mechanics_with_pressure(initial_speed:f64, area:f64, normal:f64, pressure:FrictionLaw)->FrictionModalSystem {
+    let law=AdhesiveFrictionLaw::new(pressure,1e6,0.5e6).unwrap();
+    let binding=AdhesiveModalBinding::new(AdhesiveTangentialContact::new(law,AdhesiveContactState::new(area,normal).unwrap()).unwrap()).unwrap();
+    mechanics_with_binding(initial_speed, binding)
+}
+fn mechanics_with_binding(initial_speed:f64, binding:AdhesiveModalBinding)->FrictionModalSystem {
     let models=MASS.iter().enumerate().map(|(i,m)| {
         let mut model=ModalAcousticTimeModel::try_new_with_free_coordinates(48000,
             vec![ModalAcousticMode {angular_frequency_rad_s:0.0,damping_ratio:0.0,pressure_per_modal_velocity:C64::ZERO}],
@@ -26,8 +31,6 @@ fn mechanics_with_pressure(initial_speed:f64, area:f64, normal:f64, pressure:Fri
         maximum_total_energy_j:1.0,maximum_abs_pressure_pa:1e6,maximum_abs_connection_force_n:100.0,
         solve_relative_tolerance:1e-11,energy_absolute_tolerance_j:1e-12,energy_relative_tolerance:1e-9},&CancelGate::new()).unwrap();
     let attachment=|i:usize|ModalAttachment { component:i,shapes:vec![1.0/MASS[i].sqrt()]};
-    let law=AdhesiveFrictionLaw::new(pressure,1e6,0.5e6).unwrap();
-    let binding=AdhesiveModalBinding::new(AdhesiveTangentialContact::new(law,AdhesiveContactState::new(area,normal).unwrap()).unwrap()).unwrap();
     FrictionModalSystem::new_with_adhesion(network,attachment(0),Some(attachment(1)),binding,
         ModalFrictionConfig {max_iterations:80,maximum_force_n:100.0,maximum_slip_speed_m_s:10.0,
             force_absolute_tolerance_n:1e-12,force_relative_tolerance:1e-11,sticking_tolerance_m:1e-12},&CancelGate::new()).unwrap()
@@ -121,3 +124,153 @@ fn nonzero_repulsive_load_uses_actual_adhesive_law_in_native_work_balance() {
         close(initial-system.total_energy_j().unwrap(),loss,1e-13);
     }
 }
+
+fn geometry(area: f64, normal: f64) -> AdhesiveModalContactUpdate {
+    AdhesiveModalContactUpdate::Declared(AdhesiveContactState::new(area, normal).unwrap())
+}
+fn relative_velocity(s: &FrictionModalSystem) -> f64 {
+    s.components()[0].states()[0].velocity_m_sqrt_kg_per_s / MASS[0].sqrt()
+        - s.components()[1].states()[0].velocity_m_sqrt_kg_per_s / MASS[1].sqrt()
+}
+
+#[test]
+fn changing_area_keeps_occupied_low_sliding_branch_inside_the_static_cone() {
+    for pressure in [
+        FrictionLaw::Stribeck {
+            static_mu: 1.2,
+            kinetic_mu: 0.35,
+            characteristic_speed: 0.05,
+            viscous_per_speed: 0.0,
+        },
+        FrictionLaw::Hyperbolic {
+            static_mu: 1.2,
+            kinetic_mu: 0.35,
+            characteristic_speed: 0.05,
+        },
+    ] {
+        let mut s = mechanics_with_pressure(0.018, 1e-6, 0.0, pressure);
+        for _ in 0..2 {
+            s.step(&[0.0, 0.0], drive()).unwrap();
+        }
+        let momentum_before = momentum(&s);
+        let frame = *s
+            .step_with_adhesive_contact(&[0.0, 0.0], drive(), geometry(1.1e-6, 0.0))
+            .unwrap();
+        assert_eq!(frame.regime, ModalFrictionRegime::Sliding);
+        assert_eq!(
+            (frame.roots.unwrap().found, frame.roots.unwrap().selected),
+            (2, 1)
+        );
+        close(frame.traction_n, -0.55, 1e-12);
+        close(momentum(&s), momentum_before, 1e-16);
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        assert_eq!(
+            s.adhesive_binding()
+                .unwrap()
+                .tangential()
+                .contact()
+                .area_m2(),
+            1.1e-6
+        );
+        // A real detached interval erases that occupied branch. Reattachment
+        // inside the new static cone must then capture, rather than keep sliding.
+        let u = relative_velocity(&s) - 0.004;
+        let detached = *s
+            .step_with_adhesive_contact(
+                &[0.0, 0.0],
+                FrictionDrive {
+                    speed_m_s: u,
+                    ..drive()
+                },
+                geometry(0.0, 0.0),
+            )
+            .unwrap();
+        assert_eq!(detached.regime, ModalFrictionRegime::Released);
+        let u = relative_velocity(&s) - 0.004;
+        let attached = *s
+            .step_with_adhesive_contact(
+                &[0.0, 0.0],
+                FrictionDrive {
+                    speed_m_s: u,
+                    ..drive()
+                },
+                geometry(1e-6, 0.0),
+            )
+            .unwrap();
+        assert_eq!(attached.regime, ModalFrictionRegime::Sticking);
+        assert_eq!(attached.roots.unwrap().selected, 0);
+    }
+}
+
+#[test]
+fn area_and_load_changes_retain_high_branch_and_late_refusal_is_exactly_replayable() {
+    let law = FrictionLaw::Stribeck {
+        static_mu: 1.2,
+        kinetic_mu: 0.35,
+        characteristic_speed: 0.05,
+        viscous_per_speed: 0.0,
+    };
+    let mut s = mechanics_with_pressure(0.0, 1e-6, 20.0, law.clone());
+    let mut replay = mechanics_with_pressure(0.0, 1e-6, 20.0, law);
+    let first = FrictionDrive {
+        speed_m_s: 0.18,
+        normal_force_n: 20.0,
+    };
+    s.step(&[0.0, 0.0], first).unwrap();
+    replay.step(&[0.0, 0.0], first).unwrap();
+    let before = states(&s);
+    let last = s.last_frame().copied();
+    let binding = s.adhesive_binding().unwrap().clone();
+    // This exceeds the slip-speed limit AFTER the new geometry/load line and
+    // mechanical candidate have been evaluated.
+    assert!(
+        s.step_with_adhesive_contact(
+            &[0.0, 0.0],
+            FrictionDrive {
+                speed_m_s: 20.0,
+                normal_force_n: 21.0
+            },
+            geometry(2e-6, 21.0)
+        )
+        .is_err()
+    );
+    assert_eq!(states(&s), before);
+    assert_eq!(s.last_frame().copied(), last);
+    assert_eq!(s.adhesive_binding().unwrap(), &binding);
+    let gate = CancelGate::new();
+    gate.request();
+    assert!(
+        s.step_with_adhesive_contact_under_gate(&[0.0, 0.0], first, geometry(0.0, 0.0), &gate)
+            .is_err()
+    );
+    assert_eq!(s.adhesive_binding().unwrap(), &binding);
+    let drive = FrictionDrive {
+        speed_m_s: relative_velocity(&s) + 0.14,
+        normal_force_n: 21.0,
+    };
+    let actual = *s
+        .step_with_adhesive_contact(&[0.0, 0.0], drive, geometry(1.1e-6, 21.0))
+        .unwrap();
+    let expected = *replay
+        .step_with_adhesive_contact(&[0.0, 0.0], drive, geometry(1.1e-6, 21.0))
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(states(&s), states(&replay));
+    assert_eq!(actual.regime, ModalFrictionRegime::Sliding);
+    assert_eq!(
+        (actual.roots.unwrap().found, actual.roots.unwrap().selected),
+        (3, 2)
+    );
+    let leaf = s.adhesive_binding().unwrap().tangential();
+    close(
+        actual.traction_n,
+        leaf.law()
+            .sliding_capacity_n(leaf.contact(), actual.slip_distance_m / DT)
+            .unwrap(),
+        1e-11,
+    );
+    assert!(actual.energy_residual_j.abs() <= actual.energy_tolerance_j);
+}
+
+#[path = "adhesive_modal/source.rs"]
+mod source;

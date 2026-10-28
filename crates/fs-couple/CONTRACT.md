@@ -9464,7 +9464,7 @@ remains numerically resolvable; solver tolerances and budgets are unchanged.
 
 ## Adhesive junctions on the native modal network
 
-`friction::adhesive::AdhesiveModalBinding` attaches an explicit fixed real area,
+`friction::adhesive::AdhesiveModalBinding` attaches an explicit real area,
 repulsive normal load and complete junction shear law to `FrictionModalSystem`.
 An optional `SourceAdhesiveTangential` retains the original normal and shear
 owners. The existing full finite-body compliance selects static reactions or
@@ -9473,7 +9473,8 @@ and energy transaction remain in charge. The actual applied force times solved
 slip supplies friction loss. Equal/opposite body reactions retain momentum,
 and zero repulsion with real contact area does not release the junction.
 
-The `FrictionDrive` normal input must equal the frozen repulsive force. It is
+The `FrictionDrive` normal input must equal the repulsive force held over the
+current tangential sample. It is
 not the signed net adhesive reaction. Coulomb and affine pressure contributions
 use the original held-effort solve. Stribeck and hyperbolic pressure contributions
 use the same cached `StribeckLoadLine` continuation as dry friction, with actual
@@ -9486,12 +9487,29 @@ root ends; a finite-slip fold jumps branches, whereas unloading to zero slip or
 reversal allows sticking. Only accepted native steps publish branch history.
 Binding adhesion invalidates a former dry load line without erasing body motion.
 
+`step_with_adhesive_contact` and its cancellation-aware variant accept updated
+area/load from the original normal owner in the SAME native transaction.
+`AdhesiveModalContactUpdate::Source` requires a response-derived
+`SourceAdhesiveContactUpdate` with the original normal identity; `Declared`
+geometry is accepted only for an originally unsourced binding. Original material
+claims, selected strengths, fixed query/temperature and source allocations are
+retained. Only the small constitutive leaf and load-line cache are staged.
+Changed area invalidates the cached junction offset even at unchanged load.
+An attached-to-attached update preserves the occupied low/high branch; an
+accepted zero-area detach or subsequent reattachment resets it. A caller must
+resolve and submit separation events rather than skip detached intervals.
+Actual current geometry enters both scalar solve and accepted-force check.
+Late source, constitutive, mechanical, energy or cancellation refusal restores
+the previous geometry, load-line cache and branch along with native mechanics.
+Normal evolution and work remain external; the held geometry update does not
+add a normal energy account, shear peeling, or a temporal accuracy claim.
+
 G1/G3 load-line tests compare all four intersections with an independent physical
 residual scan, test fold hysteresis and zero-repulsion sliding, and recover dry
 continuation exactly at zero junction strength. `tests/adhesive_modal.rs` exercises
 both weakening laws on two real finite bodies, including static-cone overlap,
 equal/opposite momentum, actual friction-work balance and failed-trial rollback.
-Normal-area evolution, mixed-mode peeling and tangential
+The external normal owner supplies area evolution; mixed-mode peeling and tangential
 elastic storage are not inferred. Dry source replacement, simultaneous-port
 promotion, and all dry-law thermal refresh entry points refuse to discard or
 reinterpret an attached adhesive source. Friction loss remains available for

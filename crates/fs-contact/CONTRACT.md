@@ -792,10 +792,22 @@ ordered normal state, original shear claims and receipts, and actual solid
 contact area in `SourceAdhesiveTangential`. Response/source identity mismatch
 refuses. The Maugis cohesive annulus and DMT noncontact attraction contribute
 no solid junction shear. The explicit source query remains frozen; the held
-input must preserve its common contact temperature and repulsive load. A
+input must preserve its common contact temperature and current repulsive load. A
 nominal-pressure source refresh is not inferred. Original synthetic/caller
 authority is preserved. The adapter implements the existing tangential trial
 trait and neither owns normal-area evolution nor claims mixed-mode peeling.
+
+`SourceAdhesiveContactUpdate::{from_jkr,from_dmt,from_maugis}` carries the actual
+normal response's solid area, repulsive force and original normal identity in a
+small allocation-free value. `tangential_for_update` prepares a trial leaf;
+`update_contact` publishes only its geometry after checking that exact identity.
+The ordered source owners, selected strengths, query and temperature stay fixed,
+and their allocations are neither replaced nor copied per update. Source drift
+refuses before mutation. This accepts geometry resolved by the external normal
+owner; its dynamics, normal work and any junction separation event remain that
+owner's responsibility. Source regressions exercise JKR tensile-area evolution,
+DMT contact/gap/reattachment, fixed source allocation/temperature, wrong-source
+rollback and exclusion of the Maugis cohesive annulus from solid shear.
 
 ## Conservative DMT work in native dynamics
 

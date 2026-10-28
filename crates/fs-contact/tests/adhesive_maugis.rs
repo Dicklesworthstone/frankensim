@@ -64,6 +64,11 @@ fn original_maugis_closure_load_and_indentation_equations() {
             close(s.repulsive_normal_force_n, p0 * a.powi(3), 3e-14);
             close(s.contact_area_m2, PI * s.contact_radius_m.powi(2), 2e-15);
             assert!(s.cohesive_radius_m > s.contact_radius_m);
+            let update = fs_contact::interface_binding::adhesive_shear::SourceAdhesiveContactUpdate::from_maugis(&s).unwrap();
+            assert_eq!(update.normal_state_identity(), law.normal_state().identity());
+            assert_eq!(update.contact().area_m2(), s.contact_area_m2);
+            assert_eq!(update.contact().repulsive_normal_force_n(), s.repulsive_normal_force_n);
+            assert!(update.contact().area_m2() < PI * s.cohesive_radius_m.powi(2));
         }
     }
 }
