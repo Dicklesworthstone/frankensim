@@ -107,6 +107,8 @@ pub mod shear_shell;
 pub mod tract;
 /// Source-bound dry sliding work and finite-body temperature feedback.
 pub mod tribothermal;
+/// Physical friction heat through a common interface in the existing enthalpy network.
+pub mod friction_heat;
 /// Data-driven glottal source plus tract area function, observed at a baffled microphone.
 pub mod voice_performance;
 // TOMBSTONE-3ez8g.13.5: dead module, deny new consumers (see its header).
