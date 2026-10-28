@@ -57,7 +57,8 @@
 //! plug into the same [`CavityModes`] carrier), and modal-density /
 //! statistical-energy regimes.
 
-use fs_la::eigen_complex::{eig, lu_complex};
+use fs_la::eigen_complex::lu_complex;
+use fs_la::factor::svd_jacobi;
 use fs_material::gas::{GasSpec, GasState};
 use fs_math::c64::C64;
 
@@ -587,13 +588,19 @@ impl VibroacousticModel {
                 what: "coupling entries must be finite",
             });
         }
+        let rho_c2 = cavity.rho0 * cavity.c0 * cavity.c0;
+        if !(cavity.rho0 > 0.0 && cavity.c0 > 0.0 && rho_c2 > 0.0 && rho_c2.is_finite()) {
+            return Err(VibroError::BadParameter {
+                what: "acoustic density, sound speed, and bulk modulus must be positive and finite",
+            });
+        }
         Ok(Self {
             omegas_s: structure.omegas.clone(),
             eta_s: structure.loss_factor,
             omegas_a: cavity.omegas.clone(),
             lambdas: cavity.lambdas.clone(),
             eta_a: cavity.loss_factor,
-            rho_c2: cavity.rho0 * cavity.c0 * cavity.c0,
+            rho_c2,
             coupling,
             z_modal,
         })
@@ -612,70 +619,85 @@ impl VibroacousticModel {
     }
 
     /// Undamped coupled natural frequencies [rad/s], ascending: the
-    /// roots of the coupled polynomial problem, obtained by the exact
-    /// linearization `A z = x B z` in `x = omega^2` with
-    /// `A = [[Omega_s^2, -C], [0, Omega_a^2]]`,
-    /// `B = [[I, 0], [-(rho0 c0^2 / Lambda) C^T, I]]` (`B` is unit
-    /// lower-triangular, so `B^{-1} A` is formed exactly) and a dense
-    /// eigensolve. Radiation and loss factors are ignored — this is
-    /// the conservative pencil the two-oscillator closed form pins.
+    /// roots of the conservative coupled polynomial problem. They are
+    /// the singular values of the energy factor
+    /// `H = [[Omega_s, -C sqrt(S)], [0, Omega_a]]`, where
+    /// `S = diag(rho0 c0^2 / Lambda_q)`. Factoring `H` directly avoids
+    /// squaring its condition number or balancing a nonnormal pressure /
+    /// displacement pencil. Rescaling a cavity eigenfunction and its norm
+    /// leaves the physical frequencies unchanged. Radiation and loss
+    /// factors are ignored; use the loaded FRF for dissipative resonances.
     ///
     /// # Errors
-    /// [`VibroError::EigenFailure`] if the dense eigensolve refuses.
+    /// [`VibroError::EigenFailure`] if the factor is not representable or
+    /// its Jacobi singular vectors have not converged. No negative or
+    /// complex eigenvalue is silently replaced by a zero-frequency mode.
     pub fn undamped_natural_frequencies(&self) -> Result<Vec<f64>, VibroError> {
         let n_s = self.omegas_s.len();
         let n_a = self.omegas_a.len();
         let n = n_s + n_a;
-        // From the undamped rows: omega_r^2 b - C a = x b and
-        // omega_q^2 a = x (a + s C^T b) with s = rho0 c0^2 / Lambda_q,
-        // i.e. A z = x B z with A = [[Omega_s^2, -C], [0, Omega_a^2]],
-        // B = [[I, 0], [s C^T, I]]. B is unit lower-triangular, so
-        // B^{-1} = [[I, 0], [-s C^T, I]] exactly and
-        // M = B^{-1} A has bottom rows -s C^T [Omega_s^2, -C]
-        // + [0, Omega_a^2]. Two-mode check: trace(M) =
-        // omega_s^2 + omega_a^2 + s C^2, det(M) = omega_s^2 omega_a^2
-        // — exactly the closed-form split polynomial.
-        let mut m = vec![C64::ZERO; n * n];
+        // For positive Omega_s, the change of coordinates
+        // diag(Omega_s, S^{-1/2}) makes B^{-1} A symmetric:
+        // [[Omega_s^2, -Omega_s C sqrt(S)],
+        //  [-sqrt(S) C^T Omega_s, Omega_a^2 + sqrt(S) C^T C sqrt(S)]].
+        // This is H^T H; the characteristic identity extends to zero
+        // frequencies by continuity. In particular, a sealed cavity's
+        // compliance mode remains a physical zero, not a clipped root.
+        let entries = n.checked_mul(n).ok_or(VibroError::EigenFailure)?;
+        let mut h = vec![0.0; entries];
+        let sqrt_bulk = self.rho_c2.sqrt();
         for r in 0..n_s {
-            m[r * n + r] = C64::from_re(self.omegas_s[r] * self.omegas_s[r]);
+            h[r * n + r] = self.omegas_s[r];
             for q in 0..n_a {
-                m[r * n + (n_s + q)] = C64::from_re(-self.coupling[r * n_a + q]);
+                // Divide out the arbitrary pressure-mode normalization
+                // before multiplying by the material scale. Forming S
+                // first can overflow despite a well-scaled physical H.
+                h[r * n + n_s + q] =
+                    -(self.coupling[r * n_a + q] / self.lambdas[q].sqrt()) * sqrt_bulk;
             }
         }
         for q in 0..n_a {
-            let scale = self.rho_c2 / self.lambdas[q];
-            for col_s in 0..n_s {
-                // (-s C^T Omega_s^2)_{q, col_s} = -s C_{col_s, q} omega_s^2.
-                m[(n_s + q) * n + col_s] = C64::from_re(
-                    -scale
-                        * self.coupling[col_s * n_a + q]
-                        * self.omegas_s[col_s]
-                        * self.omegas_s[col_s],
-                );
+            h[(n_s + q) * n + n_s + q] = self.omegas_a[q];
+        }
+        if h.iter().any(|x| !x.is_finite()) {
+            return Err(VibroError::EigenFailure);
+        }
+        let scale = h.iter().fold(0.0_f64, |s, x| s.max(x.abs()));
+        if scale == 0.0 {
+            return Ok(vec![0.0; n]);
+        }
+        for x in &mut h {
+            *x /= scale;
+        }
+        let svd = svd_jacobi(&h, n, n);
+        // The shared SVD has a bounded sweep count. Its normalized left
+        // columns must be orthonormal before their norms are accepted as
+        // resonances. This checks convergence without forming H^T H.
+        let tolerance = 128.0 * f64::EPSILON * n as f64;
+        for p in 0..n {
+            if svd.sigma[p] == 0.0 {
+                continue;
             }
-            for col_a in 0..n_a {
-                // +s (C^T C)_{q, col_a} from (-s C^T)(-C).
-                let mut acc = 0.0;
-                for r in 0..n_s {
-                    acc += self.coupling[r * n_a + q] * self.coupling[r * n_a + col_a];
+            for q in p..n {
+                if svd.sigma[q] == 0.0 {
+                    continue;
                 }
-                let mut entry = scale * acc;
-                if col_a == q {
-                    entry += self.omegas_a[q] * self.omegas_a[q];
+                let mut dot = 0.0;
+                for i in 0..n {
+                    dot = svd.u[i * n + p].mul_add(svd.u[i * n + q], dot);
                 }
-                m[(n_s + q) * n + (n_s + col_a)] = C64::from_re(entry);
+                let expected = if p == q { 1.0 } else { 0.0 };
+                if !dot.is_finite() || (dot - expected).abs() > tolerance {
+                    return Err(VibroError::EigenFailure);
+                }
             }
         }
-        let values = eig(&m, n).map_err(|_| VibroError::EigenFailure)?;
-        let mut roots: Vec<f64> = values
-            .iter()
-            .map(|x| {
-                // Physical coupled squares are real and non-negative;
-                // tiny imaginary parts are eigensolver roundoff.
-                x.re.max(0.0).sqrt()
-            })
-            .collect();
-        roots.sort_by(|p, q| p.partial_cmp(q).expect("finite frequencies"));
+        let roots: Vec<f64> = svd.sigma.iter().rev().map(|s| s * scale).collect();
+        if roots.iter().any(|w| !w.is_finite())
+            || (roots[0] == 0.0 && self.omegas_s.iter().chain(&self.omegas_a).all(|w| *w > 0.0))
+        {
+            return Err(VibroError::EigenFailure);
+        }
         Ok(roots)
     }
 
@@ -1430,6 +1452,145 @@ mod tests {
 mod review_regressions {
     use super::*;
     use fs_la::eigen_complex::det_complex;
+
+    fn conservative_model(ws: Vec<f64>, wa: Vec<f64>, coupling: Vec<f64>) -> VibroacousticModel {
+        VibroacousticModel {
+            lambdas: vec![1.0; wa.len()],
+            omegas_s: ws,
+            omegas_a: wa,
+            eta_s: 0.0,
+            eta_a: 0.0,
+            rho_c2: 1.0,
+            coupling,
+            z_modal: None,
+        }
+    }
+
+    #[test]
+    fn strong_loading_retains_the_small_positive_resonance() {
+        // G1: the root product is ws*wa. Recover the low root through
+        // that product, independently of the singular-value algorithm;
+        // subtracting the two squared roots loses it at large loading.
+        for coupling in [1e-8_f64, 1.0, 100.0, 1e6, 1e10] {
+            let model = conservative_model(vec![2.0], vec![3.0], vec![coupling]);
+            let frequencies = model.undamped_natural_frequencies().unwrap();
+            let trace = 13.0 + coupling * coupling;
+            let high = (0.5 * (trace + (trace * trace - 144.0).sqrt())).sqrt();
+            let low = 6.0 / high;
+            assert!((frequencies[0] / low - 1.0).abs() < 2e-13);
+            assert!((frequencies[1] / high - 1.0).abs() < 2e-13);
+            assert!((frequencies[0] * frequencies[1] / 6.0 - 1.0).abs() < 3e-13);
+        }
+    }
+
+    #[test]
+    fn cavity_basis_normalization_and_sign_do_not_change_resonances() {
+        // G3: psi_q -> a_q psi_q means C_rq -> a_q C_rq and
+        // Lambda_q -> a_q^2 Lambda_q. These are the SAME physical modes.
+        let model = conservative_model(
+            vec![90.0, 300.0],
+            vec![100.0, 350.0],
+            vec![30.0, -10.0, 7.0, 45.0],
+        );
+        let reference = model.undamped_natural_frequencies().unwrap();
+        for factors in [[1e-140, -1e140], [-1e140, 1e-140], [-3.0, 7.0]] {
+            let mut rescaled = model.clone();
+            for (q, factor) in factors.into_iter().enumerate() {
+                rescaled.lambdas[q] *= factor * factor;
+                for r in 0..2 {
+                    rescaled.coupling[r * 2 + q] *= factor;
+                }
+            }
+            for (actual, expected) in rescaled
+                .undamped_natural_frequencies()
+                .unwrap()
+                .iter()
+                .zip(&reference)
+            {
+                assert!((actual / expected - 1.0).abs() < 3e-13);
+            }
+        }
+    }
+
+    #[test]
+    fn frequency_scaling_never_forms_overflowing_or_underflowing_squares() {
+        // G3: all entries of the energy factor scale linearly with the
+        // frequency unit. Its singular values must do the same, even
+        // when the old squared-frequency pencil is unrepresentable.
+        let model = conservative_model(
+            vec![90.0, 300.0],
+            vec![100.0, 350.0],
+            vec![30.0, -10.0, 7.0, 45.0],
+        );
+        let reference = model.undamped_natural_frequencies().unwrap();
+        for factor in [1e-200, 1e200] {
+            let mut rescaled = model.clone();
+            for value in rescaled
+                .omegas_s
+                .iter_mut()
+                .chain(&mut rescaled.omegas_a)
+                .chain(&mut rescaled.coupling)
+            {
+                *value *= factor;
+            }
+            for (actual, expected) in rescaled
+                .undamped_natural_frequencies()
+                .unwrap()
+                .iter()
+                .zip(&reference)
+            {
+                assert!((actual / factor / expected - 1.0).abs() < 3e-13);
+            }
+        }
+    }
+
+    #[test]
+    fn sealed_cavity_and_free_modes_keep_their_actual_nullity() {
+        let repeated = conservative_model(vec![0.0, 200.0], vec![0.0, 200.0], vec![0.0; 4]);
+        assert_eq!(
+            repeated.undamped_natural_frequencies().unwrap(),
+            vec![0.0, 0.0, 200.0, 200.0]
+        );
+        let sealed = conservative_model(vec![200.0], vec![0.0], vec![10.0]);
+        let frequencies = sealed.undamped_natural_frequencies().unwrap();
+        assert_eq!(frequencies[0], 0.0);
+        assert!((frequencies[1] / 200.0_f64.hypot(10.0) - 1.0).abs() < 2e-14);
+        let stationary = conservative_model(vec![0.0], vec![0.0], vec![0.0]);
+        assert_eq!(
+            stationary.undamped_natural_frequencies().unwrap(),
+            vec![0.0; 2]
+        );
+    }
+
+    #[test]
+    fn invalid_acoustic_medium_is_refused_before_assembling_resonances() {
+        let structure = StructuralModes {
+            omegas: vec![100.0],
+            shapes: vec![vec![1.0]],
+            loss_factor: 0.0,
+        };
+        for (rho0, c0) in [
+            (0.0, 343.0),
+            (-1.0, 343.0),
+            (1.2, -343.0),
+            (f64::NAN, 343.0),
+            (1.2, f64::INFINITY),
+            (1e200, 1e200),
+        ] {
+            let cavity = CavityModes {
+                omegas: vec![120.0],
+                lambdas: vec![1.0],
+                interface: vec![vec![1.0]],
+                loss_factor: 0.0,
+                rho0,
+                c0,
+            };
+            assert!(matches!(
+                VibroacousticModel::try_new(&structure, &cavity, vec![0.1], None),
+                Err(VibroError::BadParameter { .. })
+            ));
+        }
+    }
 
     #[test]
     fn elongated_cavity_keeps_its_lowest_axial_modes() {
