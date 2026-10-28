@@ -5,10 +5,10 @@
 //! Leroy & Willert (2021), DOI 10.1002/zamm.201900313. This is an explicit
 //! finite traction sigma0=W/z0 model, not an interpolation between JKR and DMT.
 //!
-//! Only contacting equilibria and reversible work along their stable branch
-//! are owned here. Zero-area contact can still attract. Neither that endpoint
-//! nor a fold is a detached state: noncontact elastic deformation, nucleation,
-//! snap energy and a detached-reference potential require a separate owner.
+//! Contacting branch evaluation remains separate from branch selection.
+//! The continuation module adds deformed noncontact equilibria and an absolute
+//! elastic/surface energy reference. Zero-area contact and a contacting fold
+//! are not detached states; the original contacting APIs keep that distinction.
 use super::PointNormalPort;
 use crate::interface_binding::{ADHESION_ENERGY_PROPERTY, BoundNormalInterfaceState};
 use core::f64::consts::PI;
@@ -20,6 +20,9 @@ mod kernel;
 #[path = "maugis/work.rs"]
 mod work;
 pub use work::{MaugisWorkBudget, MaugisWorkEstimate};
+/// Absolute energy and finite-deformation noncontact continuation of the same law.
+#[path = "maugis/continuation.rs"]
+pub mod continuation;
 
 /// Explicit small-strain, smooth elastic half-space operating domain.
 #[derive(Clone, Copy, Debug, PartialEq)]
