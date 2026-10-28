@@ -20,6 +20,9 @@ use fs_qty::{Density, Dims};
 
 const VOLUME: f64 = 1e-10;
 const WIDTH: f64 = 1e-3;
+
+#[path = "capillary_bridge/load_line.rs"]
+mod load_line;
 fn claim(name: &str, value: f64, dims: Dims) -> PropertyClaim {
     PropertyClaim {
         key: PropertyKey::new(name, dims),

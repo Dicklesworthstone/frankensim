@@ -32,6 +32,9 @@ use fs_material::state_point::MaterialStatePointError;
 
 mod geometry;
 
+/// Work-conjugate scalar coupling to an original held-force mechanical response.
+pub mod load_line;
+
 /// Physical geometry, finite-work and quasistatic admission supplied by caller.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BridgeLimits {
@@ -189,6 +192,11 @@ pub struct BridgeStep {
     pub work_on_liquid_j: f64,
     /// Work-conjugate force over the entire gap increment: -work/Delta_gap.
     pub mean_normal_force_n: f64,
+    /// Derivative of the mean force with respect to the proposed endpoint gap,
+    /// at fixed previous state and dt. At a topology threshold this is the
+    /// one-sided derivative on the returned successor branch. It differs from
+    /// the endpoint-force derivative, even on a smooth finite path.
+    pub mean_force_gap_derivative_n_per_m: f64,
     /// Nonnegative unresolved free-energy release during the chosen relaxation.
     /// Its mechanical/thermal destination is external; it is NOT automatic heat.
     pub irreversible_release_j: f64,
@@ -444,6 +452,27 @@ impl SourcePlanarCapillaryBridge {
             self.limits.maximum_abs_force_n,
             "mean bridge force",
         )?;
+        // Differentiate the same factored path work, not the endpoint force.
+        // The coalescence expression is a sum of positive terms and stays
+        // conditioned when the connected portion is short. A touching pair
+        // with zero detached interval reduces to the ordinary attached path.
+        let mean_derivative = match event {
+            BridgeEvent::Ruptured => -mean_force / (gap_m - previous.gap_m),
+            BridgeEvent::Reformed if previous.gap_m > g.formation_gap => {
+                let detached_gap = previous.gap_m - g.formation_gap;
+                let total_gap = previous.gap_m - gap_m;
+                g.sigma_width
+                    * (2.0 * g.cosine * (g.area / previous.gap_m) / gap_m / gap_m
+                        + (detached_gap / total_gap) / total_gap
+                            * (g.energy_slope
+                                + 2.0 * g.cosine * (g.area / g.formation_gap) / previous.gap_m))
+            }
+            _ if attached => {
+                g.sigma_width * 2.0 * g.cosine * (g.area / previous.gap_m) / gap_m / gap_m
+            }
+            _ => 0.0,
+        };
+        finite(mean_derivative, "mean force endpoint derivative")?;
         let change = finite(
             profile.surface_free_energy_j - before.surface_free_energy_j,
             "surface energy change",
@@ -472,6 +501,7 @@ impl SourcePlanarCapillaryBridge {
             event,
             work_on_liquid_j: work,
             mean_normal_force_n: mean_force,
+            mean_force_gap_derivative_n_per_m: mean_derivative,
             irreversible_release_j: release,
             surface_energy_change_j: change,
             energy_balance_residual_j: residual,
