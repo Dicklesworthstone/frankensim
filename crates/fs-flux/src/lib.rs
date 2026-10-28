@@ -16,8 +16,8 @@
 pub mod ale;
 #[cfg(feature = "continuum")]
 pub mod bdm;
-/// Reduced circular-capillary flow screening with an explicit Newtonian,
-/// fully-developed applicability boundary.
+/// Newtonian circular-tube flow and horizontal capillary meniscus motion,
+/// each with an explicit quasisteady applicability boundary.
 pub mod capillary;
 #[cfg(feature = "continuum")]
 pub mod gas_film;
@@ -38,8 +38,9 @@ pub mod resistive_film;
 pub mod trimesh;
 
 pub use capillary::{
-    CircularCapillaryError, CircularCapillaryInput, CircularCapillaryStep,
-    step_newtonian_circular_capillary,
+    CircularCapillaryError, CircularCapillaryInput, CircularCapillaryStep, CircularMeniscusEnd,
+    CircularMeniscusInput, CircularMeniscusStep, step_newtonian_circular_capillary,
+    step_newtonian_circular_meniscus,
 };
 #[cfg(feature = "continuum")]
 pub use gas_film::{
@@ -54,11 +55,11 @@ pub use material::{
     MaterialFluxError, MaterialFluxNumerics, MaterialFluxSolution, MaterialFluxSystem,
 };
 #[cfg(feature = "continuum")]
-pub use ns::{FluxParams, FluxRheologyError, FluxRheologyStep, FluxSolution, FluxSystem};
-#[cfg(feature = "continuum")]
 pub use ns::boundary::{
     StokesAssembly, StokesBoundary, StokesBoundaryError, StokesPressureReference, StokesSolution,
 };
+#[cfg(feature = "continuum")]
+pub use ns::{FluxParams, FluxRheologyError, FluxRheologyStep, FluxSolution, FluxSystem};
 #[cfg(feature = "continuum")]
 pub use reduced_aero::{
     AlternativeWrenchSet, ApplicabilityEnvelope, BodyKinematics, CandidateWrench, ClosedRange,

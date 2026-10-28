@@ -433,3 +433,44 @@ nonlinear convection/backflow, open-boundary time integration, pure-traction
 rigid-mode quotients, disconnected domains, material-bound SI pressure
 conversion or continuum error bounds. Existing synchronous cancellation and
 dense/iterative solver limitations remain in force.
+
+## Horizontal capillary meniscus transport
+
+The existing fully filled Hagen–Poiseuille API remains a distinct model.
+`step_newtonian_circular_meniscus` advances a liquid column in a horizontal
+rigid circular tube with constant Newtonian viscosity, no slip, negligible
+inertia and a vented gas of prescribed pressure. Its SI input explicitly names
+radius, tube length, current wet length, surface tension, cosine of the
+through-liquid equilibrium angle, applied liquid-minus-gas pressure and time.
+The caller binds that angle to the actual solid/liquid/gas system; material
+names never select a coefficient.
+
+The meniscus pressure is \(p_g-p_l=2\sigma\cos\theta/R\).
+The exact constant-input advance satisfies
+\(d(x^2)/dt=R^2(\Delta p+2\sigma\cos\theta/R)/(4\mu)\).
+This handles wetting, nonwetting resistance, pressure-driven reversal and
+explicit zero surface tension without dividing by the initial wet length.
+An inlet/outlet event returns its actual elapsed time and endpoint; the
+caller must handle any remaining requested time with the next boundary model.
+There is no silent throughflow after the meniscus leaves this domain.
+
+The returned volume is signed into the tube. Imposed-pressure work, the
+Young wall-surface energy change and viscous loss close
+\(W_p-\Delta E_{wall}=D\geq0\). A translating meniscus has constant area in this
+model. Initial meniscus formation and final end-topology energies are excluded.
+All inputs and final transfers are checked before returning a state;
+nonfinite or out-of-domain values produce the named capillary error. The
+fixed-size scalar computation allocates nothing and adds no dependencies.
+It has no internal cancellation point or cross-ISA bit-equality claim.
+
+Seven focused tests in the existing capillary unit module exercise analytic
+penetration and wall energy, parameter scaling and timestep composition,
+nonwetting drainage/reversal, event timing, zero-motion work, the integrated
+Poiseuille limit and input refusal. The three existing fully filled tests
+remain. These are G0/G1/G3 checks of this reduced law, not experimental proof
+of dynamic contact-line or general free-surface behavior. Inertial startup,
+gravity, gas drag, entrance losses, hysteresis, evaporation and evolving
+material coefficients require other formulations.
+
+Reference: E. W. Washburn, Physical Review 17, 273 (1921),
+https://doi.org/10.1103/PhysRev.17.273.
