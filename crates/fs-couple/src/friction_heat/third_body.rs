@@ -16,7 +16,7 @@
 //! material changes still require their constitutive owner's thermoelastic
 //! accounting; this route never relabels reversible coefficient work as heat.
 
-use super::{finite, invalid};
+use super::{FrictionHeatEntropy, entropy::InterfaceEntropy, finite, invalid};
 use fs_math::det;
 use fs_thermal::enthalpy::backward_euler::{
     BackwardEulerStep, BackwardEulerTrial, StepCoefficients,
@@ -259,6 +259,9 @@ pub struct ThirdBodyHeatReport {
     pub thermal: EnergyAudit,
     /// Original total storage - outside heat - physical friction work.
     pub total_energy_residual_j: f64,
+    /// Optional exact caloric storage and endpoint-quadrature entropy account.
+    /// Includes the finite layer once; its contacts remain network conduction.
+    pub entropy: Option<FrictionHeatEntropy>,
 }
 
 struct Endpoint<P> {
@@ -311,12 +314,40 @@ impl<'s, 'm> ThirdBodyHeatStep<'s, 'm> {
         resolve: impl FnOnce(&DepositionSimulation<'m>, f64) -> Result<ThirdBodyHeatInput<P>, E>,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<ThirdBodyHeatTrial<'m, P>, E> {
+        self.evaluate_entropy_option(energy_increments_j, resolve, false, checkpoint)
+    }
+
+    /// Audit the SAME finite-layer candidate without another material callback.
+    /// Original caloric laws supply all storage, including layer latent heat.
+    /// The original thermal links own bulk/contact conductive entropy; adding
+    /// their body heat again as massless-interface production would double count.
+    /// Physical friction produces D/T_layer on the endpoint quadrature. Its
+    /// stored fraction need not leave the layer within this step. Independent
+    /// sources remain unclassified, and temporal/algebraic error stays numerical.
+    /// Every active law must provide its entropy integral. Use at a final trial
+    /// to avoid entropy work inside the caller's nonlinear iterations.
+    pub fn evaluate_with_entropy<P, E: From<DepositionError>>(
+        &self,
+        energy_increments_j: &[f64],
+        resolve: impl FnOnce(&DepositionSimulation<'m>, f64) -> Result<ThirdBodyHeatInput<P>, E>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<ThirdBodyHeatTrial<'m, P>, E> {
+        self.evaluate_entropy_option(energy_increments_j, resolve, true, checkpoint)
+    }
+
+    fn evaluate_entropy_option<P, E: From<DepositionError>>(
+        &self,
+        energy_increments_j: &[f64],
+        resolve: impl FnOnce(&DepositionSimulation<'m>, f64) -> Result<ThirdBodyHeatInput<P>, E>,
+        with_entropy: bool,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<ThirdBodyHeatTrial<'m, P>, E> {
         let checkpoint = RefCell::new(checkpoint);
         let check = || (*checkpoint.borrow_mut())();
         let dt = self.duration_s();
-        let trial = self.thermal.evaluate(
-            energy_increments_j,
-            |state| -> Result<StepCoefficients<Endpoint<P>>, E> {
+        let mut entropy = None;
+        let coefficients =
+            |state: &DepositionSimulation<'m>| -> Result<StepCoefficients<Endpoint<P>>, E> {
                 let layer_id = self.route.layer_cell();
                 let temperature = state.temperature_k(layer_id)?;
                 let input = resolve(state, temperature)?;
@@ -331,6 +362,9 @@ impl<'s, 'm> ThirdBodyHeatStep<'s, 'm> {
                     mut conductances_w_k,
                     payload,
                 } = input.transport;
+                if with_entropy {
+                    entropy = Some(InterfaceEntropy::new(state, &sources_w, dt, &check)?);
+                }
                 let conductances = self
                     .route
                     .conductances(input.conductivity_w_m_k, input.area_resistance_m2_k_w)?;
@@ -395,10 +429,22 @@ impl<'s, 'm> ThirdBodyHeatStep<'s, 'm> {
                         external,
                     },
                 })
-            },
-            &check,
-        )?;
+            };
+        let trial = if with_entropy {
+            self.thermal.evaluate_with_entropy(energy_increments_j, coefficients, &check)?
+        } else {
+            self.thermal.evaluate(energy_increments_j, coefficients, &check)?
+        };
         let endpoint = trial.payload();
+        let entropy = entropy.map(|other_sources| {
+            // This is a finite thermal CELL, not a massless interface. Its
+            // energy residual already belongs to the original cell audit.
+            FrictionHeatEntropy::from_trial(
+                trial.entropy_audit().ok_or(DepositionError::Arithmetic)?,
+                other_sources, endpoint.dissipated, endpoint.temperature, 0.0,
+            )
+        }).transpose()?;
+        check()?;
         let report = ThirdBodyHeatReport {
             layer_temperature_k: endpoint.temperature,
             conductances_w_k: endpoint.conductances,
@@ -416,6 +462,7 @@ impl<'s, 'm> ThirdBodyHeatStep<'s, 'm> {
             total_energy_residual_j: finite(
                 trial.audit().stored_energy_change_j - endpoint.external - endpoint.dissipated,
             )?,
+            entropy,
         };
         Ok(ThirdBodyHeatTrial { trial, report })
     }
