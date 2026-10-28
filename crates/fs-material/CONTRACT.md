@@ -3558,3 +3558,52 @@ entropy, independent internal shock areas, unchoking thresholds, pressure-thrust
 continuity, restricted caloric/transport domains, cancellation and actual finite
 blowdown through the shock regime. The lower standard atmosphere's three native
 tests also passed. This is a scoped native build, not a full workspace result.
+
+
+## Equilibrium chamber to source-preserving frozen products
+
+`ThermochemicalGasModel::equilibrium_chamber_hp` and
+`equilibrium_chamber_hp_enthalpy` bind the original neutral ideal-gas
+composition owner to the existing material parcel owner. The material bank
+must cover every chemistry species and retain exactly equal complete NASA-9
+models, including conventions, coefficient cards, provenance and caloric
+corrections. Feed amounts are independent of the bank's catalog fractions.
+Chamber pressure and all other material query axes come from the typed context.
+
+A common inlet temperature or an explicit sum of original stream enthalpies
+sets the HP target. Formation enthalpy enters once. The accepted composition
+uses the existing bounded generated-simplex closure, reports its maximum
+roundoff correction, and refuses eligible positive traces that cannot be
+represented by the frozen material owner. `with_composition` preserves active
+thermodynamic models, transport selections and source-pack identities.
+
+The final source-bearing material state is resolved once. Equilibrium mass
+and its actual density determine volume, and the original `ClosedGasParcel`
+is assembled without a duplicate transport evaluation. Publication checks
+actual parcel mass against both feed and equilibrium amounts and actual
+parcel enthalpy against both the requested target and the equilibrium result.
+Original chemistry receipts, mass/energy residuals and frozen parcel are
+retained together; source mismatch, transport-domain refusal, unrepresentable
+trace, failed balance or cancellation publishes nothing.
+
+The resulting storage, acoustic, caloric and nozzle composition is explicitly
+frozen. The HP closure is an initial thermodynamic chamber state, not a finite-
+rate combustor or a continuously fed engine. No reaction heat is added after
+freezing; equilibrium nozzle relaxation, kinetics, ions, condensed phases,
+real-gas behavior and flame stability remain separate physical models.
+
+Native actual-source verification passed all 152 material thermochemical-gas
+family tests, including eight new chamber/pack integration tests, the existing
+storage/mixing/transfer family and off-design nozzle tests. The new cases
+include an independent exothermic HP root followed by the actual nozzle,
+different inlet temperatures, complete/exact source-bank admission, structural
+absence versus trace underflow, original admitted-pack decode and receipt
+retention, final source refusal and cancellation. Independent equation/source
+review found no conservation, reference or trace-freezing blocker.
+
+`cargo run -p fs-material --example equilibrium_rocket -- 300 3000000 100000 2`
+runs a manufactured variable-cp A/B source example through the actual HP
+chamber and frozen nozzle. Its native execution produced 902.699280458 K chamber
+temperature with 3.47e-18 kg mass residual and 3.64e-12 J enthalpy residual.
+These values validate that authored integration fixture, not real propellant
+or engine performance. The full repository Cargo workspace was not run.

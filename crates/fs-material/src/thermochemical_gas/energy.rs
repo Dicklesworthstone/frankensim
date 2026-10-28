@@ -12,6 +12,8 @@
 pub mod enthalpy;
 /// Density/entropy closure for reversible adiabatic gas-state changes.
 pub mod entropy;
+/// Adiabatic neutral-gas equilibrium chambers with source-preserving frozen products.
+pub mod equilibrium;
 /// Reference-invariant temperature-anchored enthalpy/internal-energy increments.
 pub mod increment;
 /// Closed gas storage with heating and reversible adiabatic boundary work.
