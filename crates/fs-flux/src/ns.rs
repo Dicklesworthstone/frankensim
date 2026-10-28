@@ -18,6 +18,30 @@ use fs_solver::krylov::GmresState;
 use fs_solver::op::CsrOp;
 use fs_sparse::{Coo, Csr};
 
+fn positive_viscosity(nu: f64) -> f64 {
+    assert!(
+        nu.is_finite() && nu > 0.0,
+        "viscosity must be positive and finite"
+    );
+    nu
+}
+
+/// Unit-viscosity traction, retaining the original Laplacian path's order.
+fn viscous_normal(grad: [[f64; 2]; 2], n: [f64; 2], symmetric: bool) -> [f64; 2] {
+    if symmetric {
+        let shear = grad[0][1] + grad[1][0];
+        [
+            2.0 * grad[0][0] * n[0] + shear * n[1],
+            shear * n[0] + 2.0 * grad[1][1] * n[1],
+        ]
+    } else {
+        [
+            grad[0][0] * n[0] + grad[0][1] * n[1],
+            grad[1][0] * n[0] + grad[1][1] * n[1],
+        ]
+    }
+}
+
 /// Solver parameters.
 #[derive(Debug, Clone, Copy)]
 pub struct FluxParams {
@@ -116,8 +140,77 @@ impl<'m> FluxSystem<'m> {
         inv_dt: f64,
         uprev: Option<&[f64]>,
     ) -> (Csr, Vec<f64>) {
+        self.assemble_operator(params, None, f, g, advect, inv_dt, uprev)
+    }
+
+    /// Assemble `-div(2 nu D(u)) + grad(p) = f`, with
+    /// `D(u) = (grad(u) + grad(u)^T)/2`. The viscosity callback receives
+    /// the cell index and physical quadrature point, so jumps between
+    /// materials have unambiguous one-sided traces. It returns positive
+    /// finite kinematic viscosity [m²/s] for a constant reference density;
+    /// `params.nu` is unused. Temperature-dependent dynamic viscosity must
+    /// be divided by that same reference density, not a local density.
+    ///
+    /// Both volume stresses and face tractions use the symmetric gradient.
+    /// Weighted SIP uses harmonic viscosity/normal-cell-height penalties
+    /// across interfaces. Viscosity is evaluated once per quadrature point,
+    /// outside the basis-pair loops. The existing constant-viscosity
+    /// vector-Laplacian entry point remains available through `assemble`.
+    ///
+    /// # Panics
+    /// If viscosity or the SIP penalty is not positive and finite.
+    #[must_use]
+    pub fn assemble_variable_viscosity(
+        &self,
+        params: FluxParams,
+        viscosity: &dyn Fn(usize, [f64; 2]) -> f64,
+        f: &dyn Fn([f64; 2]) -> [f64; 2],
+        g: &dyn Fn([f64; 2]) -> [f64; 2],
+        advect: Option<&[f64]>,
+    ) -> (Csr, Vec<f64>) {
+        self.assemble_viscous_transient(params, viscosity, f, g, advect, 0.0, None)
+    }
+
+    /// Variable-viscosity symmetric-stress assembly with the same BDF1
+    /// mass term and previous-velocity load as `assemble_transient`.
+    /// The caller supplies the viscosity at the implicit time level (or a
+    /// declared lagged field), including any nonlinear constitutive update.
+    ///
+    /// # Panics
+    /// If viscosity or the SIP penalty is not positive and finite.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn assemble_viscous_transient(
+        &self,
+        params: FluxParams,
+        viscosity: &dyn Fn(usize, [f64; 2]) -> f64,
+        f: &dyn Fn([f64; 2]) -> [f64; 2],
+        g: &dyn Fn([f64; 2]) -> [f64; 2],
+        advect: Option<&[f64]>,
+        inv_dt: f64,
+        uprev: Option<&[f64]>,
+    ) -> (Csr, Vec<f64>) {
+        assert!(
+            params.sigma.is_finite() && params.sigma > 0.0,
+            "SIP penalty must be positive and finite"
+        );
+        self.assemble_operator(params, Some(viscosity), f, g, advect, inv_dt, uprev)
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn assemble_operator(
+        &self,
+        params: FluxParams,
+        viscosity: Option<&dyn Fn(usize, [f64; 2]) -> f64>,
+        f: &dyn Fn([f64; 2]) -> [f64; 2],
+        g: &dyn Fn([f64; 2]) -> [f64; 2],
+        advect: Option<&[f64]>,
+        inv_dt: f64,
+        uprev: Option<&[f64]>,
+    ) -> (Csr, Vec<f64>) {
         let mesh = self.mesh;
         let nu = params.nu;
+        let symmetric_stress = viscosity.is_some();
         let mut coo = Coo::new(self.n, self.n);
         let mut rhs = vec![0.0f64; self.n];
         // Constrained rows: boundary-edge normal moments are EXACTLY
@@ -151,11 +244,19 @@ impl<'m> FluxSystem<'m> {
             con[2 * e + 1] = Some(m1);
         }
         con[self.n_u] = Some(0.0);
-        // --- Cell terms: viscous grad:grad, div coupling, load.
+        // --- Cell terms: viscous stress, div coupling, load.
         for t in 0..mesh.tris.len() {
             let basis = &self.bases[t];
             let area = mesh.areas[t];
             let p: [[f64; 2]; 3] = core::array::from_fn(|k| mesh.verts[mesh.tris[t][k]]);
+            // BDM1 gradients are constant: integrate the constitutive
+            // coefficient only once, then reuse it for all 36 pairs.
+            let integrated_nu = viscosity.map_or(nu * area, |field| {
+                tri_quad(p, area)
+                    .into_iter()
+                    .map(|(q, w)| w * positive_viscosity(field(t, q)))
+                    .sum::<f64>()
+            });
             for i in 0..6 {
                 let gi = self.dof(t, i);
                 // Load.
@@ -173,9 +274,12 @@ impl<'m> FluxSystem<'m> {
                         for r in 0..2 {
                             for c in 0..2 {
                                 visc += basis.grad[i][r][c] * basis.grad[j][r][c];
+                                if symmetric_stress {
+                                    visc += basis.grad[i][r][c] * basis.grad[j][c][r];
+                                }
                             }
                         }
-                        coo.push(gi, gj, nu * area * visc);
+                        coo.push(gi, gj, integrated_nu * visc);
                     }
                 }
                 // Div coupling: b(u, q) = −∫ q div u; symmetric block.
@@ -215,34 +319,31 @@ impl<'m> FluxSystem<'m> {
                 // Boundary: weak Dirichlet (exterior value = g).
                 for (gx, w) in gauss {
                     let gval = g(gx);
+                    let local_nu = viscosity.map_or(nu, |field| positive_viscosity(field(t0, gx)));
+                    let normal_height = if symmetric_stress {
+                        2.0 * mesh.areas[t0] / h
+                    } else {
+                        h
+                    };
+                    let penalty = params.sigma * local_nu / normal_height;
                     for i in 0..6 {
                         let gi = self.dof(t0, i);
                         let vi = eval_basis(&self.bases[t0], i, gx);
-                        let gni: [f64; 2] = [
-                            self.bases[t0].grad[i][0][0] * n[0]
-                                + self.bases[t0].grad[i][0][1] * n[1],
-                            self.bases[t0].grad[i][1][0] * n[0]
-                                + self.bases[t0].grad[i][1][1] * n[1],
-                        ];
+                        let gni = viscous_normal(self.bases[t0].grad[i], n, symmetric_stress);
                         for j in 0..6 {
                             let gj = self.dof(t0, j);
                             let vj = eval_basis(&self.bases[t0], j, gx);
-                            let gnj: [f64; 2] = [
-                                self.bases[t0].grad[j][0][0] * n[0]
-                                    + self.bases[t0].grad[j][0][1] * n[1],
-                                self.bases[t0].grad[j][1][0] * n[0]
-                                    + self.bases[t0].grad[j][1][1] * n[1],
-                            ];
-                            let val = -nu * (gnj[0] * vi[0] + gnj[1] * vi[1])
-                                - nu * (gni[0] * vj[0] + gni[1] * vj[1])
-                                + params.sigma * nu / h * (vi[0] * vj[0] + vi[1] * vj[1]);
+                            let gnj = viscous_normal(self.bases[t0].grad[j], n, symmetric_stress);
+                            let val = -local_nu * (gnj[0] * vi[0] + gnj[1] * vi[1])
+                                - local_nu * (gni[0] * vj[0] + gni[1] * vj[1])
+                                + penalty * (vi[0] * vj[0] + vi[1] * vj[1]);
                             if con[gi].is_none() {
                                 coo.push(gi, gj, w * val);
                             }
                         }
                         // rhs consistency + penalty with g.
-                        let val = -nu * (gni[0] * gval[0] + gni[1] * gval[1])
-                            + params.sigma * nu / h * (vi[0] * gval[0] + vi[1] * gval[1]);
+                        let val = -local_nu * (gni[0] * gval[0] + gni[1] * gval[1])
+                            + penalty * (vi[0] * gval[0] + vi[1] * gval[1]);
                         rhs[gi] += w * val;
                     }
                 }
@@ -252,36 +353,46 @@ impl<'m> FluxSystem<'m> {
                 let cells = [t0, t1];
                 let side_sign = [1.0f64, -1.0f64];
                 for (gx, w) in gauss {
-                    // {∇u}n per basis function of each side.
+                    let (traction_scale, penalty) =
+                        viscosity.map_or(([0.5 * nu; 2], params.sigma * nu / h), |field| {
+                            let nus = cells.map(|t| positive_viscosity(field(t, gx)));
+                            let delta = core::array::from_fn::<_, 2, _>(|s| {
+                                nus[s] * h / (2.0 * mesh.areas[cells[s]])
+                            });
+                            // Opposite-side weights avoid locking the
+                            // less viscous material to its stiff neighbor.
+                            // Scale before adding to avoid delta0*delta1.
+                            let scale = delta[0].max(delta[1]);
+                            let d = delta.map(|value| value / scale);
+                            let weights = [d[1] / (d[0] + d[1]), d[0] / (d[0] + d[1])];
+                            let harmonic = 2.0 * delta[0].min(delta[1]) / (1.0 + d[0].min(d[1]));
+                            (
+                                [weights[0] * nus[0], weights[1] * nus[1]],
+                                params.sigma * harmonic,
+                            )
+                        });
+                    // Weighted one-sided viscous tractions.
                     for (sa, &ta) in cells.iter().enumerate() {
                         for i in 0..6 {
                             let gi = self.dof(ta, i);
                             let va_ = eval_basis(&self.bases[ta], i, gx);
-                            let ga_: [f64; 2] = [
-                                self.bases[ta].grad[i][0][0] * n[0]
-                                    + self.bases[ta].grad[i][0][1] * n[1],
-                                self.bases[ta].grad[i][1][0] * n[0]
-                                    + self.bases[ta].grad[i][1][1] * n[1],
-                            ];
+                            let ga_ = viscous_normal(self.bases[ta].grad[i], n, symmetric_stress);
                             for (sb, &tb) in cells.iter().enumerate() {
                                 for j in 0..6 {
                                     let gj = self.dof(tb, j);
                                     let vb_ = eval_basis(&self.bases[tb], j, gx);
-                                    let gb_: [f64; 2] = [
-                                        self.bases[tb].grad[j][0][0] * n[0]
-                                            + self.bases[tb].grad[j][0][1] * n[1],
-                                        self.bases[tb].grad[j][1][0] * n[0]
-                                            + self.bases[tb].grad[j][1][1] * n[1],
-                                    ];
-                                    // −ν{∇u·n}·[[v]] − ν{∇v·n}·[[u]] + σν/h [[u]]·[[v]]
+                                    let gb_ =
+                                        viscous_normal(self.bases[tb].grad[j], n, symmetric_stress);
+                                    // −{τ(u)n}·[[v]] − {τ(v)n}·[[u]] + penalty [[u]]·[[v]]
                                     let jump_v = side_sign[sa];
                                     let jump_u = side_sign[sb];
-                                    let val = -nu
-                                        * 0.5
+                                    let val = -traction_scale[sb]
                                         * (gb_[0] * va_[0] + gb_[1] * va_[1])
                                         * jump_v
-                                        - nu * 0.5 * (ga_[0] * vb_[0] + ga_[1] * vb_[1]) * jump_u
-                                        + params.sigma * nu / h
+                                        - traction_scale[sa]
+                                            * (ga_[0] * vb_[0] + ga_[1] * vb_[1])
+                                            * jump_u
+                                        + penalty
                                             * (va_[0] * vb_[0] + va_[1] * vb_[1])
                                             * jump_v
                                             * jump_u;
@@ -422,6 +533,20 @@ impl<'m> FluxSystem<'m> {
             let mut r2 = 0.0;
             let mut b2 = 0.0;
             let mut ax = vec![0.0f64; self.n];
+            // Viscosity contrasts badly scale the velocity block against
+            // the exact continuity rows. Reuse the LU for two residual
+            // corrections: O(n²) work after O(n³) factorization, no extra
+            // buffer, and no loosening of the divergence tolerance.
+            for _ in 0..2 {
+                a.spmv(&x, &mut ax);
+                for i in 0..self.n {
+                    ax[i] = rhs[i] - ax[i];
+                }
+                f.solve(&mut ax);
+                for i in 0..self.n {
+                    x[i] += ax[i];
+                }
+            }
             a.spmv(&x, &mut ax);
             for i in 0..self.n {
                 r2 += (ax[i] - rhs[i]).powi(2);
@@ -484,6 +609,100 @@ impl<'m> FluxSystem<'m> {
         let mut its = 0;
         for k in 0..max_picard {
             let (a, rhs) = self.assemble(params, f, g, Some(&sol.x[..self.n_u]));
+            let next = self.solve_linear(&a, &rhs, params);
+            let mut d2 = 0.0;
+            let mut n2 = 0.0;
+            for i in 0..self.n_u {
+                d2 += (next.x[i] - sol.x[i]).powi(2);
+                n2 += next.x[i].powi(2);
+            }
+            update = (d2 / n2.max(1e-300)).sqrt();
+            sol = next;
+            its = k + 1;
+            if update < picard_tol {
+                break;
+            }
+        }
+        (sol, its, update)
+    }
+
+    /// Objective strain-rate invariant `sqrt(2 D:D)` [1/s] in each cell.
+    /// BDM1 velocity is affine, so its gradient and rate are cellwise
+    /// constant. Rigid translation and rigid rotation contribute no rate.
+    ///
+    /// # Panics
+    /// If `velocity` is shorter than the velocity dof count.
+    #[must_use]
+    pub fn shear_rates(&self, velocity: &[f64]) -> Vec<f64> {
+        assert!(velocity.len() >= self.n_u, "velocity dof count mismatch");
+        self.bases
+            .iter()
+            .enumerate()
+            .map(|(t, basis)| {
+                let mut grad = [[0.0; 2]; 2];
+                for i in 0..6 {
+                    let u = velocity[self.dof(t, i)];
+                    for (r, row) in grad.iter_mut().enumerate() {
+                        for (c, value) in row.iter_mut().enumerate() {
+                            *value += u * basis.grad[i][r][c];
+                        }
+                    }
+                }
+                (core::f64::consts::SQRT_2 * grad[0][0])
+                    .hypot(core::f64::consts::SQRT_2 * grad[1][1])
+                    .hypot(grad[0][1] + grad[1][0])
+            })
+            .collect()
+    }
+
+    /// Steady generalized-Newtonian Navier–Stokes: update both apparent
+    /// viscosity and convection from the previous velocity until the
+    /// relative velocity update meets `picard_tol`.
+    ///
+    /// `law(cell, point, shear_rate)` returns kinematic viscosity. The
+    /// callback can capture a temperature/material field and evaluate a
+    /// Carreau or regularized power law without a solver-specific fit.
+    /// Its zero-shear value initializes the Stokes solve. Every iteration
+    /// uses the full symmetric-stress operator, including face tractions.
+    /// Returns the solution, iteration count, and measured last update;
+    /// exhausting the budget does not claim nonlinear convergence.
+    ///
+    /// # Panics
+    /// If constitutive values, penalty, or the convergence controls are invalid.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn picard_rheology(
+        &self,
+        params: FluxParams,
+        law: &dyn Fn(usize, [f64; 2], f64) -> f64,
+        f: &dyn Fn([f64; 2]) -> [f64; 2],
+        g: &dyn Fn([f64; 2]) -> [f64; 2],
+        max_picard: usize,
+        picard_tol: f64,
+    ) -> (FluxSolution, usize, f64) {
+        assert!(
+            max_picard > 0 && picard_tol.is_finite() && picard_tol > 0.0,
+            "positive Picard budget and finite positive tolerance required"
+        );
+        let (a, rhs) = self.assemble_variable_viscosity(
+            params,
+            &|cell, point| law(cell, point, 0.0),
+            f,
+            g,
+            None,
+        );
+        let mut sol = self.solve_linear(&a, &rhs, params);
+        let mut update = f64::INFINITY;
+        let mut its = 0;
+        for k in 0..max_picard {
+            let rates = self.shear_rates(&sol.x);
+            let (a, rhs) = self.assemble_variable_viscosity(
+                params,
+                &|cell, point| law(cell, point, rates[cell]),
+                f,
+                g,
+                Some(&sol.x[..self.n_u]),
+            );
             let next = self.solve_linear(&a, &rhs, params);
             let mut d2 = 0.0;
             let mut n2 = 0.0;

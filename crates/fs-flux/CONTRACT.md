@@ -66,7 +66,32 @@ adjoints.
   divergence form −∫(u⊗w):∇v. `picard` for steady NS, `bdf1_step`
   for IMEX transients (implicit Stokes, lagged convection),
   `solve_adjoint` for the transposed system. Dense LU under n ≤ 1500
-  (fixture path), GMRES restarts above.
+  (fixture path, with two residual-correction solves reusing the factors),
+  GMRES restarts above.
+- `FluxSystem::assemble_variable_viscosity` assembles the full Newtonian
+  stress `-div(2 nu D(u))`, where `D=(grad u + grad u^T)/2`. Its callback
+  receives the cell index and quadrature point and returns positive finite
+  kinematic viscosity. This admits spatial/temperature variation and
+  discontinuous one-sided viscosity traces. The volume term is `2 nu D(u):D(v)`;
+  boundary and interior consistency terms use the matching symmetric
+  traction. Interior weights use the opposite side's `nu/h_normal`, and the
+  penalty uses its harmonic mean, with `h_normal=2*cell_area/edge_length`.
+  Material queries occur once per quadrature point, outside basis-pair loops.
+  `assemble_viscous_transient` adds the existing BDF1 mass operator and load.
+  The legacy `assemble`/`assemble_transient` remain the homogeneous
+  vector-Laplacian discretization.
+- `FluxSystem::shear_rates` evaluates the objective `sqrt(2 D:D)` invariant
+  from each cell's affine BDM1 velocity. `picard_rheology` updates this rate,
+  apparent viscosity and upwind convection together. A callback of
+  `(cell, point, shear_rate)` can capture the temperature/material field and
+  supply a Carreau or regularized power law; its finite zero-shear value
+  initializes the solve. The returned iteration count and relative velocity
+  update disclose budget exhaustion rather than claiming convergence.
+  These APIs retain constant reference density and kinematic pressure; a
+  dynamic material viscosity is divided by that SAME density throughout.
+  They do not solve variable-density momentum, advect material interfaces,
+  supply a thermal field, or add viscoelastic memory. The nonlinear adjoint
+  of the constitutive update is not provided by the linear transpose solve.
 - `MaterialFluxSystem` (`material`) binds that same FEEC operator to the shared
   `fs-material::fluid_transport::FluidTransport` owner. Gas, mixture and liquid
   evaluations supply one frozen `FluidTransportState`; `nu=mu/rho`, force
@@ -181,6 +206,14 @@ relation without adding a device-specific coil model.
 Stokes MMS orders + exact divergence; flux-003 pressure-robustness
 identity; flux-004 cavity Picard + Ghia coarse band; flux-005
 Taylor–Green BDF1; flux-006 adjoint gradient + annihilation.
+The symmetric-stress lane adds flux-008 variable-viscosity rigid rotation
+(zero strain/stress), flux-009 exact nonuniform-viscosity shear with its
+reciprocal force and BDF1 fixed point, flux-010 layered Couette flow with
+continuous traction through viscosity contrasts up to 10,000:1, flux-011
+the objective constitutive-rate update, and flux-012 a nonuniform Carreau
+manufactured flow with near-second-order refinement and an independently
+reassembled nonlinear residual. These remain 2-D finite-element checks,
+not a high-Re, large-scale, or cross-ISA qualification.
 
 `tests/material_flow.rs` (G1/G3): hydrostatic pressure from physical force
 density at different material densities, inverse-dynamic-viscosity Stokes flow

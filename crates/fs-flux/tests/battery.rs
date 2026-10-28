@@ -68,6 +68,211 @@ fn interpolate(mesh: &TriMesh, n_total: usize, u: &dyn Fn([f64; 2]) -> [f64; 2])
     x
 }
 
+/// G0/G1: rigid rotation has no viscous strain even when viscosity varies.
+/// A vector-gradient diffusion operator spuriously resists this motion.
+#[test]
+fn flux_008_variable_viscosity_rigid_rotation_is_stress_free() {
+    let mesh = unit_mesh(4);
+    let sys = FluxSystem::new(&mesh);
+    let params = FluxParams::default();
+    let velocity = |x: [f64; 2]| [0.3 - x[1], x[0] - 0.2];
+    let nu = |_: usize, x: [f64; 2]| 0.2 + 3.0 * x[0] * x[0] + x[1];
+    let (a, rhs) = sys.assemble_variable_viscosity(params, &nu, &|_| [0.0; 2], &velocity, None);
+    let sol = sys.solve_linear(&a, &rhs, params);
+    let (error, div) = sys.velocity_error(&sol.x, &velocity);
+    assert!(
+        error < 2e-11 && div < 2e-11,
+        "rotation error={error}, div={div}"
+    );
+    assert!(sys.pressure(&sol.x).iter().all(|p| p.abs() < 2e-10));
+    assert!(sys.shear_rates(&sol.x).iter().all(|rate| *rate < 2e-10));
+}
+
+/// G1: u=(y,0), nu=1+x²+y/4 has -div(2 nu D(u))=(-1/4,-2x).
+/// The reciprocal transverse traction is essential: omitting it cannot
+/// be repaired by pressure because the missing force has nonzero curl.
+#[test]
+fn flux_009_variable_viscosity_uses_full_symmetric_stress() {
+    let mesh = unit_mesh(4);
+    let sys = FluxSystem::new(&mesh);
+    let params = FluxParams::default();
+    let velocity = |x: [f64; 2]| [x[1], 0.0];
+    let nu = |_: usize, x: [f64; 2]| 1.0 + x[0] * x[0] + 0.25 * x[1];
+    let force = |x: [f64; 2]| [-0.25, -2.0 * x[0]];
+    let (a, rhs) = sys.assemble_variable_viscosity(params, &nu, &force, &velocity, None);
+    let sol = sys.solve_linear(&a, &rhs, params);
+    let (error, div) = sys.velocity_error(&sol.x, &velocity);
+    assert!(
+        error < 2e-11 && div < 2e-11,
+        "stress error={error}, div={div}"
+    );
+    assert!(sys.pressure(&sol.x).iter().all(|p| p.abs() < 2e-10));
+    assert!(
+        sys.shear_rates(&sol.x)
+            .iter()
+            .all(|rate| (*rate - 1.0).abs() < 2e-10)
+    );
+
+    // The same steady solution is a fixed point of the transient operator.
+    let previous = interpolate(&mesh, sys.n, &velocity);
+    let (a, rhs) = sys.assemble_viscous_transient(
+        params,
+        &nu,
+        &force,
+        &velocity,
+        Some(&previous[..sys.n_u]),
+        25.0,
+        Some(&previous),
+    );
+    let stepped = sys.solve_linear(&a, &rhs, params);
+    assert!(sys.velocity_error(&stepped.x, &velocity).0 < 2e-11);
+}
+
+/// G1/G3: an aligned two-liquid Couette interface preserves velocity and
+/// tangential traction for a four-decade viscosity jump. Cell identity is
+/// needed at the interface, where the two viscosity traces are different.
+#[test]
+fn flux_010_layered_couette_preserves_interface_traction() {
+    let mesh = unit_mesh(4);
+    let sys = FluxSystem::new(&mesh);
+    let params = FluxParams::default();
+    for contrast in [1.0, 100.0, 10_000.0] {
+        let traction = 1.0 / (0.5 + 0.5 / contrast);
+        let velocity = |x: [f64; 2]| {
+            [
+                traction * (x[1].min(0.5) + (x[1] - 0.5).max(0.0) / contrast),
+                0.0,
+            ]
+        };
+        let nu = |cell: usize, _: [f64; 2]| {
+            if mesh.centroids[cell][1] < 0.5 {
+                1.0
+            } else {
+                contrast
+            }
+        };
+        let (a, rhs) = sys.assemble_variable_viscosity(params, &nu, &|_| [0.0; 2], &velocity, None);
+        let sol = sys.solve_linear(&a, &rhs, params);
+        let (error, div) = sys.velocity_error(&sol.x, &velocity);
+        assert!(
+            error < 2e-9 && div < 2e-9,
+            "contrast={contrast}: error={error}, div={div}"
+        );
+        assert!(sol.rel_residual < 1e-10);
+        let rates = sys.shear_rates(&sol.x);
+        for (cell, rate) in rates.iter().enumerate() {
+            assert!(
+                (nu(cell, [0.0; 2]) * rate - traction).abs() < 2e-7,
+                "contrast={contrast}, cell={cell}: incorrect transmitted traction"
+            );
+        }
+    }
+}
+
+/// G0/G1: the nonlinear loop actually passes the objective strain rate to
+/// the constitutive law; uniform shear reaches the Carreau plateau at the
+/// imposed rate and keeps the exact Couette solution.
+#[test]
+fn flux_011_generalized_newtonian_couette_uses_physical_rate() {
+    let mesh = unit_mesh(3);
+    let sys = FluxSystem::new(&mesh);
+    let params = FluxParams::default();
+    let max_rate = std::cell::Cell::new(0.0_f64);
+    let law = |_: usize, _: [f64; 2], rate: f64| {
+        max_rate.set(max_rate.get().max(rate));
+        // Carreau, n=0: finite zero-shear viscosity and an explicit plateau.
+        0.2 + 0.8 / (1.0 + 4.0 * rate * rate).sqrt()
+    };
+    let velocity = |x: [f64; 2]| [0.8 * x[1], 0.0];
+    let (sol, iterations, update) =
+        sys.picard_rheology(params, &law, &|_| [0.0; 2], &velocity, 10, 1e-10);
+    assert!(iterations > 0 && iterations < 10 && update < 1e-10);
+    assert!((max_rate.get() - 0.8).abs() < 2e-10);
+    assert!(sys.velocity_error(&sol.x, &velocity).0 < 2e-11);
+}
+
+/// G1: a nonuniform-shear channel with an independently differentiated
+/// Carreau stress. For u=(A y(1-y),0), gamma=|A(1-2y)| and convection
+/// vanishes. With nu=nu_inf+delta_nu/sqrt(1+(lambda gamma)^2),
+/// -div(2 nu D(u))_x=2 A (nu_inf+delta_nu/(1+(lambda gamma)^2)^(3/2)).
+/// Unlike Couette flow, this profile is not a solution with frozen viscosity.
+#[test]
+fn flux_012_generalized_newtonian_channel_mms_refines() {
+    let amplitude = 0.4;
+    let nu_inf = 0.2;
+    let delta_nu = 0.8;
+    let lambda = 3.0;
+    let law = |_: usize, _: [f64; 2], rate: f64| {
+        nu_inf + delta_nu / (1.0 + (lambda * rate).powi(2)).sqrt()
+    };
+    let velocity = |x: [f64; 2]| [amplitude * x[1] * (1.0 - x[1]), 0.0];
+    let force = |x: [f64; 2]| {
+        let shear = amplitude * (1.0 - 2.0 * x[1]);
+        let denominator = 1.0 + (lambda * shear).powi(2);
+        [
+            2.0 * amplitude * (nu_inf + delta_nu / (denominator * denominator.sqrt())),
+            0.0,
+        ]
+    };
+    let params = FluxParams::default();
+    let mut errors = Vec::new();
+    for n in [4, 8] {
+        let mesh = unit_mesh(n);
+        let sys = FluxSystem::new(&mesh);
+        let (sol, iterations, update) =
+            sys.picard_rheology(params, &law, &force, &velocity, 40, 1e-10);
+        let (error, div) = sys.velocity_error(&sol.x, &velocity);
+        assert!(iterations > 1 && iterations < 40 && update < 1e-10);
+        assert!(sol.rel_residual < 1e-10 && div < 1e-10);
+
+        // Reassemble at the returned velocity: the final nonlinear residual
+        // must close, not merely the previous frozen-coefficient linear solve.
+        let rates = sys.shear_rates(&sol.x);
+        let (a, rhs) = sys.assemble_variable_viscosity(
+            params,
+            &|cell, point| law(cell, point, rates[cell]),
+            &force,
+            &velocity,
+            Some(&sol.x[..sys.n_u]),
+        );
+        let mut ax = vec![0.0; sys.n];
+        a.spmv(&sol.x, &mut ax);
+        let r2: f64 = ax.iter().zip(&rhs).map(|(a, b)| (a - b).powi(2)).sum();
+        let b2: f64 = rhs.iter().map(|b| b * b).sum();
+        let residual = (r2 / b2).sqrt();
+        assert!(residual < 1e-9, "n={n}: nonlinear residual={residual}");
+        errors.push(error);
+        verdict(
+            &format!("flux-012-carreau-channel-n{n}"),
+            true,
+            &format!(
+                "L2={error:.6e}, div={div:.3e}, Picard={iterations}, update={update:.3e}, residual={residual:.3e}"
+            ),
+        );
+
+        if n == 8 {
+            let frozen = |_: usize, _: [f64; 2], _: f64| nu_inf + delta_nu;
+            let (constant, _, constant_update) =
+                sys.picard_rheology(params, &frozen, &force, &velocity, 20, 1e-10);
+            let frozen_error = sys.velocity_error(&constant.x, &velocity).0;
+            assert!(constant_update < 1e-10);
+            verdict(
+                "flux-012-rheology-changes-profile",
+                frozen_error > 2.0 * error,
+                &format!("local-viscosity L2={error:.6e}, frozen-viscosity L2={frozen_error:.6e}"),
+            );
+        }
+    }
+    let order = (errors[0] / errors[1]).log2();
+    verdict(
+        "flux-012-channel-refinement-order",
+        (1.8..2.2).contains(&order),
+        &format!("BDM1 velocity L2 order={order:.4}, errors={errors:?}"),
+    );
+    // Exact L2 velocity is A/sqrt(30); require less than 2% error on n=8.
+    assert!(errors[1] < 0.02 * amplitude / 30.0_f64.sqrt());
+}
+
 /// flux-001: the BDM1 basis reproduces its defining dofs (Kronecker
 /// identity), its divergence is the constant matching the net normal
 /// flux, and the normal trace is single-valued across interior edges
