@@ -17,8 +17,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use fs_blake3::ContentHash;
 use fs_exec::Cx;
 use fs_matdb::{
-    ClaimId, InterfaceSystemCard, MaterialCard, PropertyKey, PropertyUsageReceipt, QueryPoint,
-    SelectionPolicy, UncertaintyModel,
+    ClaimId, ClaimSelection, InterfaceSystemCard, MaterialCard, PropertyKey, PropertyLineSlice,
+    PropertyUsageReceipt, QueryPoint, SelectionPolicy, UncertaintyModel,
 };
 use fs_sparse::Coo;
 
@@ -374,6 +374,34 @@ pub enum ResistanceOrigin {
         /// Caller-supplied heat-flow cross-section [m²].
         area_m2: f64,
     },
+    /// Steady one-dimensional conduction over the retained face-temperature
+    /// interval, integrating the original piecewise-affine conductivity law.
+    BulkMaterialTemperatureSpan {
+        /// Exact immutable bulk material card.
+        card_identity: ContentHash,
+        /// Every crossed source breakpoint, including its original answer,
+        /// uncertainty and receipt. Endpoints are the admitted face temperatures.
+        conductivity: PropertyLineSlice,
+        /// Caller-supplied uniform slab thickness [m].
+        length_m: f64,
+        /// Caller-supplied heat-flow cross-section [m²].
+        area_m2: f64,
+    },
+}
+
+/// Exact conductivity source and complete, fixed-context face temperatures.
+#[derive(Debug, Clone, Copy)]
+pub struct SlabConductivityQuery<'a> {
+    /// Static conductivity along the one-dimensional heat-flow direction.
+    pub property: &'a PropertyKey,
+    /// Absolute-temperature coordinate in kelvin, using the source's own name.
+    pub temperature_axis: &'a str,
+    /// Colder face; every non-temperature source condition must be supplied.
+    pub lower: &'a QueryPoint,
+    /// Hotter face; only the temperature coordinate may change.
+    pub upper: &'a QueryPoint,
+    /// One source selection must support the entire temperature interval.
+    pub selection: SelectionPolicy,
 }
 
 /// One named K/W term in a series thermal-resistance network.
@@ -386,6 +414,173 @@ pub struct ThermalResistanceTerm {
 }
 
 impl ThermalResistanceTerm {
+    /// Integrate sourced k(T) for a uniform, steady one-dimensional slab with
+    /// fixed face temperatures and no internal generation or lateral losses.
+    /// Fourier's law gives `Q = A/L * integral(T_cold..T_hot) k(T) dT`, hence
+    /// `R = L/(A * mean_T(k))`. All crossed source knots are retained; a single
+    /// midpoint conductivity is not substituted. The integral is exact for the
+    /// admitted piecewise-affine source law up to floating-point rounding.
+    ///
+    /// The selected scalar is the conductivity component along heat flow, not
+    /// a declaration of isotropy. A temperature-labelled effective coefficient
+    /// is interpreted as a local law by this explicit engineering reduction.
+    /// Source/interpolation uncertainty and geometry uncertainty are not
+    /// propagated: resistance uncertainty stays unstated, while every original
+    /// conductivity uncertainty remains in the retained source answers.
+    ///
+    /// This term applies to its retained face temperatures. Changing a face
+    /// temperature requires resolving the term again. It can enter an existing
+    /// series budget only after the caller has established consistent interface
+    /// temperatures; summing such terms does not solve nonlinear interfaces.
+    ///
+    /// # Errors
+    /// Refuses non-positive geometry, wrong quantity kinds, non-increasing
+    /// absolute temperatures, unknown temperature support, changed conditions,
+    /// source holes/switching, discrete-only spans and non-positive conductivity.
+    pub fn slab_over_temperature_span_from_card(
+        name: impl Into<String>,
+        length_m: f64,
+        area_m2: f64,
+        card: &MaterialCard,
+        query: SlabConductivityQuery<'_>,
+    ) -> Result<Self, ConductionError> {
+        use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+        use fs_qty::{QuantitySpec, Temperature};
+
+        let name = name.into();
+        let invalid = |reason: &str| {
+            interface_error(
+                &name,
+                reason,
+                "supply positive SI geometry and one continuously supported conductivity source at fixed conditions",
+            )
+        };
+        if !length_m.is_finite() || length_m <= 0.0 || !area_m2.is_finite() || area_m2 <= 0.0 {
+            return Err(invalid("slab length and area must be finite and positive"));
+        }
+        let semantic = |kind| QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
+        if query.property.quantity() != semantic(QuantityKind::ThermalConductivity)
+            && query.property.quantity() != QuantitySpec::dimensional(crate::CONDUCTIVITY_DIMS)
+        {
+            return Err(invalid("slab property must be static thermal conductivity"));
+        }
+        let mut endpoints = [0.0; 2];
+        for (index, point) in [query.lower, query.upper].iter().enumerate() {
+            let Some(&temperature) = point.axes().get(query.temperature_axis) else {
+                return Err(invalid(
+                    "both slab faces need the declared temperature axis",
+                ));
+            };
+            if !temperature.is_finite()
+                || temperature <= 0.0
+                || point
+                    .axis_quantities()
+                    .get(query.temperature_axis)
+                    .is_some_and(|q| {
+                        *q != semantic(QuantityKind::AbsoluteTemperature)
+                            && *q != QuantitySpec::dimensional(Temperature::DIMS)
+                    })
+            {
+                return Err(invalid(
+                    "slab face temperatures must be positive absolute kelvin",
+                ));
+            }
+            endpoints[index] = temperature;
+        }
+        if endpoints[0] >= endpoints[1] {
+            return Err(invalid("slab source temperatures must strictly increase"));
+        }
+        let conductivity = card
+            .claims()
+            .query_line_typed(
+                query.property,
+                query.temperature_axis,
+                query.lower,
+                query.upper,
+                ClaimSelection::Policy(query.selection),
+            )
+            .map_err(|error| invalid(&format!("continuous slab conductivity refused: {error}")))?;
+        let selected = conductivity.knots[0].1.receipt.selected;
+        let claim = card
+            .claims()
+            .claim(selected)
+            .expect("canonical source line selected an immutable claim");
+        let mut has_temperature_axis = false;
+        for (axis, dims) in claim.value.axes() {
+            if axis == query.temperature_axis {
+                if dims != Temperature::DIMS {
+                    return Err(invalid(
+                        "source temperature axis has incompatible dimensions",
+                    ));
+                }
+                has_temperature_axis = true;
+            }
+        }
+        if !has_temperature_axis && !claim.validity.bounds().contains_key(query.temperature_axis) {
+            return Err(invalid(
+                "source does not declare temperature support for this slab",
+            ));
+        }
+        for (_, answer) in &conductivity.knots {
+            let k = answer.evidence.value.value;
+            if !k.is_finite() || k <= 0.0 {
+                return Err(invalid(
+                    "conductivity must be finite and positive over the whole slab",
+                ));
+            }
+        }
+        let width = endpoints[1] - endpoints[0];
+        // Normalize widths before summing, avoiding an unnecessary large
+        // integral when its temperature average is still representable.
+        let mean = conductivity.knots.windows(2).fold(0.0, |sum, pair| {
+            let average =
+                0.5 * pair[0].1.evidence.value.value + 0.5 * pair[1].1.evidence.value.value;
+            sum + average * ((pair[1].0 - pair[0].0) / width)
+        });
+        if !mean.is_finite() || mean <= 0.0 {
+            return Err(invalid(
+                "mean slab conductivity is not positive and representable",
+            ));
+        }
+        Self::new(
+            name,
+            length_m / mean / area_m2,
+            ResistanceUncertainty::Unstated,
+            ResistanceOrigin::BulkMaterialTemperatureSpan {
+                card_identity: card.content_hash(),
+                conductivity,
+                length_m,
+                area_m2,
+            },
+        )
+    }
+
+    /// Steady heat rate [W] from the retained hotter face to the colder face.
+    /// Uses only the source interval admitted by
+    /// [`Self::slab_over_temperature_span_from_card`], so new face temperatures
+    /// cannot silently reuse an old temperature-dependent resistance.
+    pub fn source_span_heat_rate_w(&self) -> Result<f64, ConductionError> {
+        let ResistanceOrigin::BulkMaterialTemperatureSpan { conductivity, .. } = &self.origin
+        else {
+            return Err(interface_error(
+                &self.name,
+                "this resistance has no admitted pair of face temperatures",
+                "resolve a slab over an explicit supported temperature span",
+            ));
+        };
+        let lower = conductivity.knots[0].0;
+        let upper = conductivity.knots[conductivity.knots.len() - 1].0;
+        let heat = (upper - lower) / self.value_k_per_w;
+        if !heat.is_finite() || heat <= 0.0 {
+            return Err(interface_error(
+                &self.name,
+                "slab heat rate is not positive and representable",
+                "rescale the supplied geometry or temperature span",
+            ));
+        }
+        Ok(heat)
+    }
+
     /// Resolve scalar conductivity at `point` and form the reference-state
     /// slab resistance `L/(k A)` [K/W]. The exact source receipt and caller
     /// geometry are retained. Only that reference state is admitted: this
