@@ -5,7 +5,7 @@
     "frankensim-irp-v5-instrument-realism-pexfp.219"
   ],
   "retrieved_utc": "2026-10-24T05:10:07.574401+00:00",
-  "storage": "Use fetch-references.sh --manifest references-supplemental.json with an existing FRANKENSIM_REFERENCE_DIR. Audio is not committed. Named archive members require separate extraction.",
+  "storage": "Use fetch-references.sh --manifest references-supplemental.json with an existing FRANKENSIM_REFERENCE_DIR. Audio is not committed. --members streams tar sources and extracts pinned members; ZIP sources are cached for random access and only selected members are extracted.",
   "purpose": "Real recordings for independent listening and validation of physics predictions; never synthesis inputs or parameter-fitting targets. All supplemental entries remain gradable=false pending appropriate specimen, pitch, articulation and recording-chain controls.",
   "baseline_manifest": "data/instruments/references.json",
   "baseline_ids": [
@@ -87,6 +87,20 @@
       "url": "https://archive.org/details/SalamanderDrumkit",
       "credit": "Alexander Holm, Salamander Drumkit",
       "notes": "This pin uses the archived release's stated license, not a later relicensed release. Garage room and overhead microphone response remain; source dynamic labels are not measured strike forces."
+    },
+    {
+      "id": "tu-note-cc-by-nd-4",
+      "name": "CC BY-ND 4.0",
+      "url": "https://depositonce.tu-berlin.de/items/f81ba73c-4d9b-48de-9fbc-31cb03d5b9bc/full",
+      "credit": "Henrik von Coler, Jonas Margraf and Paul Schuladen; violinist Michiko Feuerlein; recording engineer Philipp Pawlowski; TU Berlin Electronic Music Studio",
+      "notes": "Keep the distributed recordings and labels unchanged. Source record and package insert: DOI 10.14279/depositonce-6747. No recording bytes are redistributed in Git."
+    },
+    {
+      "id": "iwk-cello-spring-cc-by-4",
+      "name": "CC BY 4.0",
+      "url": "https://zenodo.org/records/10696680",
+      "credit": "Montserrat Pamies-Vila, Alexander Mayer, Ewa Matusiak and Vasileios Chatziioannou; Department of Music Acoustics, mdw Vienna",
+      "notes": "Zenodo API metadata.license.id = cc-by-4.0, checked at acquisition; synchronized motion and audio, February 2023 session."
     }
   ],
   "chains": [
@@ -126,6 +140,27 @@
       "format": "24-bit/44.1 kHz stereo",
       "room": "anechoic chamber, Wendell Johnson Speech and Hearing Center, University of Iowa",
       "notes": "Performed by Andrew Thierauf; recorded by Daniel Frantz and Will Huff on March 20, 2013. The page lists the cymbal model as N/A; these are not a characterized match to the simulation's eight-inch splash geometry."
+    },
+    {
+      "id": "tu-note-sim-2018",
+      "source_url": "https://doi.org/10.14279/depositonce-6747",
+      "mic": [
+        "DPA 4099 (DPA files)",
+        "Bruel & Kjaer 4006 omni, free-field equalization (BuK files)"
+      ],
+      "distance_m": null,
+      "format": "distributed selected files: 16-bit/96 kHz mono PCM WAV",
+      "room": "anechoic chamber, SIM Berlin",
+      "notes": "Package insert states 24-bit/96 kHz capture. All 20 selected distributed WAVs independently decode as pcm_s16le at 96 kHz. Two microphones observe the same performances. Exact distance and specimen geometry are not supplied by the insert; single-note table is referenced to A4 = 443 Hz. Original segmentation files are preserved."
+    },
+    {
+      "id": "iwk-cello-spring-2023",
+      "source_url": "https://zenodo.org/records/10696680/files/ReadMe_CelloSpringRecordings.txt",
+      "mic": "ROGA Instruments RG50",
+      "distance_m": 0.45,
+      "format": "16-bit/44.1 kHz mono PCM WAV",
+      "room": "Department of Music Acoustics, mdw Vienna; room response not characterized in the README",
+      "notes": "One professional player and two robot performances, synchronized with OptiTrack Prime 13 motion at 240 fps. Robot case A has t_z = 16 mm and case B t_z = 15 mm; the latter bow is closer to the instrument. No bow force or hair-contact signal is supplied."
     }
   ],
   "files": [
@@ -886,6 +921,459 @@
         "bits_per_sample": 24,
         "decode_check": "ffmpeg full decode succeeded"
       }
+    },
+    {
+      "id": "tu-note-violin-2018",
+      "instrument": "Violin",
+      "kind": "archive",
+      "archive_format": "zip",
+      "path": "TU-Note_Violin.zip",
+      "url": "https://api-depositonce.tu-berlin.de/server/api/core/bitstreams/69330aa6-e073-4923-90d2-fece37dccb9d/content",
+      "sha256": "12021c10fbe460cfdb0d87b3a39d3befe85d924d3c2d7cb583144f3e7db1cf72",
+      "bytes": 1605101158,
+      "licence": "tu-note-cc-by-nd-4",
+      "source_page": "https://doi.org/10.14279/depositonce-6747",
+      "chain": "tu-note-sim-2018",
+      "articulation": "open-string sustained tones, legato two-note transition, scales and solo phrase",
+      "range": "G3, D4, A4, E5 source labels; scale and phrase pitches vary",
+      "dynamic": "mf; A4 also pp and ff; two-note mp; solo dynamics not stated",
+      "gradable": false,
+      "notes": "Independent population reference. Table frequencies use A4 = 443 Hz; they are not calibration targets for a simulation. The source says capture was 24-bit/96 kHz, but all 20 selected delivered WAVs are PCM16/96 kHz mono. Recordings and labels are kept unchanged; no retuning, normalization or spectral fitting. Bow force, bow speed and specimen geometry are not characterized. One performance is recorded by two microphones, not two independent performances.",
+      "members": [
+        {
+          "archive_member": "WAV/SingleSounds/BuK/SampLib_BuK_03.wav",
+          "path": "TU-Note/WAV/SingleSounds/BuK/SampLib_BuK_03.wav",
+          "sha256": "229baa693531139a41d19893609360ff820fb32d9c10b712de8943a7ad641174",
+          "bytes": 2510894,
+          "note": "G3",
+          "string": "G",
+          "dynamic": "mf",
+          "microphone": "BuK",
+          "segmentation": "TU-Note/Segments/SingleSounds/SampLib_DPA_03.txt",
+          "duration_s": 13.07734375
+        },
+        {
+          "archive_member": "WAV/SingleSounds/DPA/SampLib_DPA_03.wav",
+          "path": "TU-Note/WAV/SingleSounds/DPA/SampLib_DPA_03.wav",
+          "sha256": "68b5edda4c385968326cfa691ba55cbe7b5d8d9123f75e78110650d4ee735825",
+          "bytes": 2510894,
+          "note": "G3",
+          "string": "G",
+          "dynamic": "mf",
+          "microphone": "DPA",
+          "segmentation": "TU-Note/Segments/SingleSounds/SampLib_DPA_03.txt",
+          "duration_s": 13.07734375
+        },
+        {
+          "archive_member": "Segments/SingleSounds/SampLib_DPA_03.txt",
+          "path": "TU-Note/Segments/SingleSounds/SampLib_DPA_03.txt",
+          "sha256": "24a2f8e15a72a480ac11378b3def9aca1a474d2cb61a736ee5cff0eb155e47e8",
+          "bytes": 45,
+          "kind": "attack-sustain-release-labels"
+        },
+        {
+          "archive_member": "WAV/SingleSounds/BuK/SampLib_BuK_75.wav",
+          "path": "TU-Note/WAV/SingleSounds/BuK/SampLib_BuK_75.wav",
+          "sha256": "1820a691ab3acc424adf2d292bd5ce9f1d410047ffce2bbd383dc15dab2fb624",
+          "bytes": 2014126,
+          "note": "D4",
+          "string": "D",
+          "dynamic": "mf",
+          "microphone": "BuK",
+          "segmentation": "TU-Note/Segments/SingleSounds/SampLib_DPA_75.txt",
+          "duration_s": 10.490010416666667
+        },
+        {
+          "archive_member": "WAV/SingleSounds/DPA/SampLib_DPA_75.wav",
+          "path": "TU-Note/WAV/SingleSounds/DPA/SampLib_DPA_75.wav",
+          "sha256": "4be9afae49d16cc94e8df620d96b66e2da634e41c7fdc7a845d02bb443c85347",
+          "bytes": 2014126,
+          "note": "D4",
+          "string": "D",
+          "dynamic": "mf",
+          "microphone": "DPA",
+          "segmentation": "TU-Note/Segments/SingleSounds/SampLib_DPA_75.txt",
+          "duration_s": 10.490010416666667
+        },
+        {
+          "archive_member": "Segments/SingleSounds/SampLib_DPA_75.txt",
+          "path": "TU-Note/Segments/SingleSounds/SampLib_DPA_75.txt",
+          "sha256": "2b5934e336e56c8f77d49f98ea11e82482d47e1da03968dbd554654fa0c7f3a3",
+          "bytes": 45,
+          "kind": "attack-sustain-release-labels"
+        },
+        {
+          "archive_member": "WAV/SingleSounds/BuK/SampLib_BuK_145.wav",
+          "path": "TU-Note/WAV/SingleSounds/BuK/SampLib_BuK_145.wav",
+          "sha256": "0806c92ef7e059ea50bb0f92f5c727e4b5de937b10f6d757ca78a65e18a4d804",
+          "bytes": 1339438,
+          "note": "A4",
+          "string": "A",
+          "dynamic": "pp",
+          "microphone": "BuK",
+          "segmentation": "TU-Note/Segments/SingleSounds/SampLib_DPA_145.txt",
+          "duration_s": 6.976010416666667
+        },
+        {
+          "archive_member": "WAV/SingleSounds/DPA/SampLib_DPA_145.wav",
+          "path": "TU-Note/WAV/SingleSounds/DPA/SampLib_DPA_145.wav",
+          "sha256": "d80f3a0f8ee234c5c9b422a2384b352563c9f718bb49246b68a69bc979537c1e",
+          "bytes": 1339438,
+          "note": "A4",
+          "string": "A",
+          "dynamic": "pp",
+          "microphone": "DPA",
+          "segmentation": "TU-Note/Segments/SingleSounds/SampLib_DPA_145.txt",
+          "duration_s": 6.976010416666667
+        },
+        {
+          "archive_member": "Segments/SingleSounds/SampLib_DPA_145.txt",
+          "path": "TU-Note/Segments/SingleSounds/SampLib_DPA_145.txt",
+          "sha256": "5a53f5b4a553177d3e4cda39204775536a97169691adb135ef621d8d299639ec",
+          "bytes": 44,
+          "kind": "attack-sustain-release-labels"
+        },
+        {
+          "archive_member": "WAV/SingleSounds/BuK/SampLib_BuK_147.wav",
+          "path": "TU-Note/WAV/SingleSounds/BuK/SampLib_BuK_147.wav",
+          "sha256": "0931565a5a29035736e80b6687fd68247e15faafd665d85c7273b24cf384cb89",
+          "bytes": 1515690,
+          "note": "A4",
+          "string": "A",
+          "dynamic": "mf",
+          "microphone": "BuK",
+          "segmentation": "TU-Note/Segments/SingleSounds/SampLib_DPA_147.txt",
+          "duration_s": 7.893989583333333
+        },
+        {
+          "archive_member": "WAV/SingleSounds/DPA/SampLib_DPA_147.wav",
+          "path": "TU-Note/WAV/SingleSounds/DPA/SampLib_DPA_147.wav",
+          "sha256": "b9d28e68e87c233756f3374eaf64811c3a3a5b8968222ae4ed75f711f8fd90eb",
+          "bytes": 1515690,
+          "note": "A4",
+          "string": "A",
+          "dynamic": "mf",
+          "microphone": "DPA",
+          "segmentation": "TU-Note/Segments/SingleSounds/SampLib_DPA_147.txt",
+          "duration_s": 7.893989583333333
+        },
+        {
+          "archive_member": "Segments/SingleSounds/SampLib_DPA_147.txt",
+          "path": "TU-Note/Segments/SingleSounds/SampLib_DPA_147.txt",
+          "sha256": "08796a53ea222ac783f36319ca49a67ee04618534eb84d829a97aef7a67d4a7c",
+          "bytes": 44,
+          "kind": "attack-sustain-release-labels"
+        },
+        {
+          "archive_member": "WAV/SingleSounds/BuK/SampLib_BuK_148.wav",
+          "path": "TU-Note/WAV/SingleSounds/BuK/SampLib_BuK_148.wav",
+          "sha256": "44567c52f0f78d57f0755f56e4681218d832e90e8d4a79f1791bfc12759770d7",
+          "bytes": 1393710,
+          "note": "A4",
+          "string": "A",
+          "dynamic": "ff",
+          "microphone": "BuK",
+          "segmentation": "TU-Note/Segments/SingleSounds/SampLib_DPA_148.txt",
+          "duration_s": 7.258677083333334
+        },
+        {
+          "archive_member": "WAV/SingleSounds/DPA/SampLib_DPA_148.wav",
+          "path": "TU-Note/WAV/SingleSounds/DPA/SampLib_DPA_148.wav",
+          "sha256": "f16effdf298b973c648b53d4516d6b4517fe09cfde05b3509dbc1b6ae1dcc091",
+          "bytes": 1393710,
+          "note": "A4",
+          "string": "A",
+          "dynamic": "ff",
+          "microphone": "DPA",
+          "segmentation": "TU-Note/Segments/SingleSounds/SampLib_DPA_148.txt",
+          "duration_s": 7.258677083333334
+        },
+        {
+          "archive_member": "Segments/SingleSounds/SampLib_DPA_148.txt",
+          "path": "TU-Note/Segments/SingleSounds/SampLib_DPA_148.txt",
+          "sha256": "25b10e68b3b3fdb285816281779690e58fa951ff6eadc7926f2b4fa94a042cf9",
+          "bytes": 44,
+          "kind": "attack-sustain-release-labels"
+        },
+        {
+          "archive_member": "WAV/SingleSounds/BuK/SampLib_BuK_219.wav",
+          "path": "TU-Note/WAV/SingleSounds/BuK/SampLib_BuK_219.wav",
+          "sha256": "31e2e9e4483af0ba6cfe2500bba2bcfddadd5f5ad2793d078c49c508a79a260e",
+          "bytes": 1367686,
+          "note": "E5",
+          "string": "E",
+          "dynamic": "mf",
+          "microphone": "BuK",
+          "segmentation": "TU-Note/Segments/SingleSounds/SampLib_DPA_219.txt",
+          "duration_s": 7.123135416666667
+        },
+        {
+          "archive_member": "WAV/SingleSounds/DPA/SampLib_DPA_219.wav",
+          "path": "TU-Note/WAV/SingleSounds/DPA/SampLib_DPA_219.wav",
+          "sha256": "9f9136acdd00525128df34d065d79a9b029da74e609231197cf0892fc9bc4598",
+          "bytes": 1367686,
+          "note": "E5",
+          "string": "E",
+          "dynamic": "mf",
+          "microphone": "DPA",
+          "segmentation": "TU-Note/Segments/SingleSounds/SampLib_DPA_219.txt",
+          "duration_s": 7.123135416666667
+        },
+        {
+          "archive_member": "Segments/SingleSounds/SampLib_DPA_219.txt",
+          "path": "TU-Note/Segments/SingleSounds/SampLib_DPA_219.txt",
+          "sha256": "6babb69695dde5b79d548167057b62c30ac0ca3f090f868c6f841e17e4b7a94c",
+          "bytes": 44,
+          "kind": "attack-sustain-release-labels"
+        },
+        {
+          "archive_member": "WAV/TwoNote/BuK/TwoNote_BuK_09.wav",
+          "path": "TU-Note/WAV/TwoNote/BuK/TwoNote_BuK_09.wav",
+          "sha256": "41b16833d3792ba49690fee8c4a9b0e35df52830ae68dabecc8317e41a66f1d2",
+          "bytes": 1318702,
+          "notes": [
+            "D4",
+            "A3"
+          ],
+          "string": "G",
+          "dynamic": "mp",
+          "articulation": "legato, no vibrato",
+          "microphone": "BuK",
+          "segmentation": "TU-Note/Segments/TwoNote/TwoNote_DPA_09.txt",
+          "duration_s": 6.8680104166666665
+        },
+        {
+          "archive_member": "WAV/TwoNote/DPA/TwoNote_DPA_09.wav",
+          "path": "TU-Note/WAV/TwoNote/DPA/TwoNote_DPA_09.wav",
+          "sha256": "e6894708589acdf9f9f08aa699a741a3abef8c325f8833dac1c8db91e873b9f6",
+          "bytes": 1318702,
+          "notes": [
+            "D4",
+            "A3"
+          ],
+          "string": "G",
+          "dynamic": "mp",
+          "articulation": "legato, no vibrato",
+          "microphone": "DPA",
+          "segmentation": "TU-Note/Segments/TwoNote/TwoNote_DPA_09.txt",
+          "duration_s": 6.8680104166666665
+        },
+        {
+          "archive_member": "Segments/TwoNote/TwoNote_DPA_09.txt",
+          "path": "TU-Note/Segments/TwoNote/TwoNote_DPA_09.txt",
+          "sha256": "cfec31a1ce76b7417ecf45e5b09216a981f3ad89a7963247d6d1a104ed935f63",
+          "bytes": 77,
+          "kind": "transition-labels"
+        },
+        {
+          "archive_member": "WAV/Solo/BuK/Solo_BuK_01.wav",
+          "path": "TU-Note/WAV/Solo/BuK/Solo_BuK_01.wav",
+          "sha256": "0058332993914d239eaf1612dee04939f08818dacc99d96b7ad3434d955ee811",
+          "bytes": 2358318,
+          "performance": "major ascending scale, plain",
+          "microphone": "BuK",
+          "segmentation": "TU-Note/Segments/Solo/Solo_DPA_01.txt",
+          "duration_s": 12.282677083333333
+        },
+        {
+          "archive_member": "WAV/Solo/DPA/Solo_DPA_01.wav",
+          "path": "TU-Note/WAV/Solo/DPA/Solo_DPA_01.wav",
+          "sha256": "5fff998fbf151f137ffd60b7b7a209c2f6e29903e606b7a25c9ec318b1bd0321",
+          "bytes": 2358318,
+          "performance": "major ascending scale, plain",
+          "microphone": "DPA",
+          "segmentation": "TU-Note/Segments/Solo/Solo_DPA_01.txt",
+          "duration_s": 12.282677083333333
+        },
+        {
+          "archive_member": "Segments/Solo/Solo_DPA_01.txt",
+          "path": "TU-Note/Segments/Solo/Solo_DPA_01.txt",
+          "sha256": "a072d45328355f61d89cdfa19535ef4f5f90ffd0588356bdfbd3b128aa51a630",
+          "bytes": 202,
+          "kind": "transition-labels"
+        },
+        {
+          "archive_member": "WAV/Solo/BuK/Solo_BuK_04.wav",
+          "path": "TU-Note/WAV/Solo/BuK/Solo_BuK_04.wav",
+          "sha256": "3d49e6950c5876afdb9d59bd9f5af1e49e39a5ad2f7c1a901b9a102b34cce6ec",
+          "bytes": 2743854,
+          "performance": "minor descending scale, plain",
+          "microphone": "BuK",
+          "segmentation": "TU-Note/Segments/Solo/Solo_DPA_04.txt",
+          "duration_s": 14.290677083333334
+        },
+        {
+          "archive_member": "WAV/Solo/DPA/Solo_DPA_04.wav",
+          "path": "TU-Note/WAV/Solo/DPA/Solo_DPA_04.wav",
+          "sha256": "2e11fa630d11671a52ae51d5a7f719d9276b2f264d8620b831372e247057fcec",
+          "bytes": 2743854,
+          "performance": "minor descending scale, plain",
+          "microphone": "DPA",
+          "segmentation": "TU-Note/Segments/Solo/Solo_DPA_04.txt",
+          "duration_s": 14.290677083333334
+        },
+        {
+          "archive_member": "Segments/Solo/Solo_DPA_04.txt",
+          "path": "TU-Note/Segments/Solo/Solo_DPA_04.txt",
+          "sha256": "06d9454f6025f27fc2fe6632ec3277e2a1e22bb1eb05548f8795bdcf6ef9fc5e",
+          "bytes": 202,
+          "kind": "transition-labels"
+        },
+        {
+          "archive_member": "WAV/Solo/BuK/Solo_BuK_09.wav",
+          "path": "TU-Note/WAV/Solo/BuK/Solo_BuK_09.wav",
+          "sha256": "c52fc72475651c3ae858a8e95d1b92ab588b290206558cfde21e72895c0a2e6f",
+          "bytes": 17325902,
+          "performance": "Meditation (Thais), Jules Massenet",
+          "microphone": "BuK",
+          "segmentation": "TU-Note/Segments/Solo/Solo_DPA_09.txt",
+          "duration_s": 90.23884375
+        },
+        {
+          "archive_member": "WAV/Solo/DPA/Solo_DPA_09.wav",
+          "path": "TU-Note/WAV/Solo/DPA/Solo_DPA_09.wav",
+          "sha256": "1c04f7be49364600d0eb1b5cc9a07618a0fbe8a4617abc1a953ce1a6091908d9",
+          "bytes": 17325902,
+          "performance": "Meditation (Thais), Jules Massenet",
+          "microphone": "DPA",
+          "segmentation": "TU-Note/Segments/Solo/Solo_DPA_09.txt",
+          "duration_s": 90.23884375
+        },
+        {
+          "archive_member": "Segments/Solo/Solo_DPA_09.txt",
+          "path": "TU-Note/Segments/Solo/Solo_DPA_09.txt",
+          "sha256": "3e5bffa9373338b9f7403c8735f44e8da21353949160f362533ead968d217236",
+          "bytes": 2142,
+          "kind": "transition-labels"
+        },
+        {
+          "archive_member": "File_Lists/list_Single.txt",
+          "path": "TU-Note/File_Lists/list_Single.txt",
+          "sha256": "d32e73d050b016d8031cb519d1e0fe0b1e4079b28509b7e0035b91309dbafbd8",
+          "bytes": 13439,
+          "kind": "original-performance-labels"
+        },
+        {
+          "archive_member": "File_Lists/list_TwoNote.txt",
+          "path": "TU-Note/File_Lists/list_TwoNote.txt",
+          "sha256": "d8d5494f5dca4ecae67896d201ab8bc52bddd5f56c1c25a5d18a8c91059a655c",
+          "bytes": 14340,
+          "kind": "original-performance-labels"
+        }
+      ]
+    },
+    {
+      "id": "iwk-cello-spring-robot-a",
+      "instrument": "Cello",
+      "kind": "performance",
+      "path": "CelloSpring/sound_caseA.wav",
+      "url": "https://zenodo.org/api/records/10696680/files/sound_caseA.wav/content",
+      "sha256": "4a1ee4fdeb45b65ef22c660291ea07936cd0da992f774bc49fc650633a47e24d",
+      "bytes": 5998382,
+      "source_checksum": "md5:b9e14a9e2ef2e5c0c3eb1747e6070cca",
+      "licence": "iwk-cello-spring-cc-by-4",
+      "source_page": "https://zenodo.org/records/10696680",
+      "chain": "iwk-cello-spring-2023",
+      "articulation": "robot case A, t_z = 16 mm",
+      "range": "open A3, D3, G2",
+      "dynamic": null,
+      "gradable": false,
+      "audio": {
+        "codec_name": "pcm_s16le",
+        "sample_rate_hz": 44100,
+        "channels": 1,
+        "bits_per_sample": 16,
+        "duration_s": 68.008367,
+        "decode_check": "ffmpeg full decode succeeded"
+      },
+      "notes": "Vivaldi Spring adaptation. Original synchronized phrase; no normalization, resampling or retuning. The existing player-kinematics table derives from this record, but contains neither force nor a hair-contact signal; the specimen materials and body geometry are not characterized."
+    },
+    {
+      "id": "iwk-cello-spring-human",
+      "instrument": "Cello",
+      "kind": "performance",
+      "path": "CelloSpring/sound_player.wav",
+      "url": "https://zenodo.org/api/records/10696680/files/sound_player.wav/content",
+      "sha256": "7148e1883105b782e3c311bd5c4987b4d46860df865645ba8fd966bf3a9e177a",
+      "bytes": 5998382,
+      "source_checksum": "md5:ccee5293141e0d2a41a9adcc1009fcfe",
+      "licence": "iwk-cello-spring-cc-by-4",
+      "source_page": "https://zenodo.org/records/10696680",
+      "chain": "iwk-cello-spring-2023",
+      "articulation": "professional player",
+      "range": "open A3, D3, G2",
+      "dynamic": null,
+      "gradable": false,
+      "audio": {
+        "codec_name": "pcm_s16le",
+        "sample_rate_hz": 44100,
+        "channels": 1,
+        "bits_per_sample": 16,
+        "duration_s": 68.008367,
+        "decode_check": "ffmpeg full decode succeeded"
+      },
+      "notes": "Vivaldi Spring adaptation. Original synchronized phrase; no normalization, resampling or retuning. The existing player-kinematics table derives from this record, but contains neither force nor a hair-contact signal; the specimen materials and body geometry are not characterized.",
+      "player_motion_table": "data/instruments/descriptions/players/cello-open-strings-bow-kinematics-pamies-vila-2024.tsv"
+    },
+    {
+      "id": "iwk-cello-spring-robot-b",
+      "instrument": "Cello",
+      "kind": "performance",
+      "path": "CelloSpring/sound_caseB.wav",
+      "url": "https://zenodo.org/api/records/10696680/files/sound_caseB.wav/content",
+      "sha256": "2c4060faabb501eb10d4a0a01c9aff8bfa8dbf4936ed33822f6f9ec904b74837",
+      "bytes": 5998382,
+      "source_checksum": "md5:2b0c5f8776d6d34f6e0a98eed75374f4",
+      "licence": "iwk-cello-spring-cc-by-4",
+      "source_page": "https://zenodo.org/records/10696680",
+      "chain": "iwk-cello-spring-2023",
+      "articulation": "robot case B, t_z = 15 mm",
+      "range": "open A3, D3, G2",
+      "dynamic": null,
+      "gradable": false,
+      "audio": {
+        "codec_name": "pcm_s16le",
+        "sample_rate_hz": 44100,
+        "channels": 1,
+        "bits_per_sample": 16,
+        "duration_s": 68.008367,
+        "decode_check": "ffmpeg full decode succeeded"
+      },
+      "notes": "Vivaldi Spring adaptation. Original synchronized phrase; no normalization, resampling or retuning. The existing player-kinematics table derives from this record, but contains neither force nor a hair-contact signal; the specimen materials and body geometry are not characterized."
+    },
+    {
+      "id": "iwk-cello-spring-score",
+      "instrument": "Cello",
+      "kind": "annotation",
+      "path": "CelloSpring/MusicScore_Spring_CelloOpenStrings.pdf",
+      "url": "https://zenodo.org/api/records/10696680/files/MusicScore_Spring_CelloOpenStrings.pdf/content",
+      "sha256": "282e25dace10ec129b1041aef961c104dd6086acb879a8256c4b0bacd8c6cef2",
+      "bytes": 31950,
+      "source_checksum": "md5:fbb1ed480d28a5135ce2ffa2a68124d3",
+      "licence": "iwk-cello-spring-cc-by-4",
+      "source_page": "https://zenodo.org/records/10696680",
+      "chain": "iwk-cello-spring-2023",
+      "articulation": "original open-string score",
+      "range": "open A3, D3, G2",
+      "dynamic": null,
+      "gradable": false
+    },
+    {
+      "id": "iwk-cello-spring-readme",
+      "instrument": "Cello",
+      "kind": "annotation",
+      "path": "CelloSpring/ReadMe_CelloSpringRecordings.txt",
+      "url": "https://zenodo.org/api/records/10696680/files/ReadMe_CelloSpringRecordings.txt/content",
+      "sha256": "bedc1e0cbcec4d7c7d1450e336b999e99fc03b793d2108f287445bcb4be427f0",
+      "bytes": 1862,
+      "source_checksum": "md5:e4371d57063bdd6e800759657f1a044d",
+      "licence": "iwk-cello-spring-cc-by-4",
+      "source_page": "https://zenodo.org/records/10696680",
+      "chain": "iwk-cello-spring-2023",
+      "articulation": "original recording and motion-capture documentation",
+      "range": "open A3, D3, G2",
+      "dynamic": null,
+      "gradable": false
     }
   ],
   "acquisition_check": {
@@ -907,6 +1395,16 @@
       "verification": "The complete 387611727-byte Salamander archive matched its existing SHA-256. All 27 named kit comparison members and three original Iowa splash AIFFs were independently hashed and passed full FFmpeg decode. The 18 additional kit members close the repeat-hit and second-dynamic inputs used by kitgrade.py.",
       "storage": "Audio was verified in memory because the current filesystem was full. Hashes, byte sizes and original download URLs are retained here; no local audio-cache availability is claimed.",
       "qualification": "Recording availability does not establish model fidelity, measured strike forces, material properties or specimen geometry."
+    },
+    {
+      "date": "2026-10-27",
+      "retrieved_utc": "2026-10-28T00:16:00.292726+00:00",
+      "new_recordings": 23,
+      "reverified_existing_recordings": 66,
+      "decoded_audio_files": 89,
+      "decoded_audio_duration_s": 2225.17089,
+      "verification": "All 66 existing selected recordings were retained, matched SHA-256 and byte count, and passed full FFmpeg decoding. The complete 1605101158-byte TU-Note ZIP was hashed; the production --members ZIP path extracted 20 original WAVs and 12 original annotation files, verifying each member. All 20 WAVs passed full FFmpeg decoding. Three synchronized cello WAVs matched the source-published MD5, received SHA-256 pins, and passed full FFmpeg decoding; their original README and score were also retained.",
+      "qualification": "These are independent experimental references, not calibration targets or synthesis inputs. The cello phrase is paired with existing measured bow kinematics, but normal force and specimen geometry remain unknown. TU-Note note labels use A4 = 443 Hz and delivered encoding is PCM16 despite a documented PCM24 capture chain; neither is silently changed."
     }
   ]
 }

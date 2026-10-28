@@ -7,8 +7,8 @@
 #   --id ID             select a recording (repeatable); combined selectors intersect.
 #   --list              print selected manifest entries without downloading or requiring a destination.
 #   --manifest PATH     use another reference manifest with the same file fields.
-#   --members           acquire only checksum-pinned audio members of tar archives, streaming the
-#                       complete archive for verification without retaining the source container.
+#   --members           acquire checksum-pinned archive members. Tar sources stream without being
+#                       retained; ZIP sources are cached for random access, without a full unzip.
 # Never overwrites and never deletes. Audio is never committed: FRANKENSIM_REFERENCE_DIR must be an
 # existing directory, and a directory on the Mac Data volume (/System/Volumes/Data) is refused.
 # One JSONL line per file on stdout: utc, event, id, url, sha256_expected, sha256_observed, bytes,
@@ -30,10 +30,12 @@ import hashlib
 import json
 import os
 import socket
+import stat
 import sys
 import tarfile
 import time
 import urllib.request
+import zipfile
 
 manifest, dest, mount = sys.argv[1:4]
 parser = argparse.ArgumentParser(description="Fetch checksum-pinned real instrument recordings; no selectors downloads the complete corpus.")
@@ -44,7 +46,7 @@ parser.add_argument("--instrument", action="append", default=[], help="exact ins
 parser.add_argument("--id", action="append", default=[], help="exact recording ID, repeatable")
 parser.add_argument("--list", action="store_true", help="list selected manifest entries without downloading")
 parser.add_argument("--manifest", default=manifest, help="reference manifest JSON")
-parser.add_argument("--members", action="store_true", help="stream tar archives and retain only their pinned audio members; other files are unchanged")
+parser.add_argument("--members", action="store_true", help="extract only pinned archive members; tar streams, ZIP caches the source for random access")
 args = parser.parse_args(sys.argv[4:])
 mode = "--pin" if args.pin else "--verify"
 USER_AGENT = "frankensim-agent (+https://github.com/Dicklesworthstone/frankensim)"
@@ -73,7 +75,7 @@ def digest_file(path):
 def download(url, part):
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     h, size = hashlib.sha256(), 0
-    with urllib.request.urlopen(request, timeout=120) as response, open(part, "wb") as out:
+    with urllib.request.urlopen(request, timeout=120) as response, open(part, "wb" if part == os.devnull else "xb") as out:
         for block in iter(lambda: response.read(1 << 20), b""):
             h.update(block)
             size += len(block)
@@ -129,44 +131,74 @@ def fetch_members(entry, start):
         return
 
     archive_path = storage_path(entry["path"])
-    request = urllib.request.Request(entry["url"], headers={"User-Agent": USER_AGENT})
-    source = open(archive_path, "rb") if os.path.exists(archive_path) else urllib.request.urlopen(request, timeout=120)
     staged, seen = [], set()
-    with source:
-        reader = HashedReader(source)
-        with tarfile.open(fileobj=reader, mode="r|*") as archive:
-            for item in archive:
-                if item.name not in pending:
-                    continue
-                member = pending[item.name]
-                if item.name in seen or not item.isfile():
-                    raise ValueError(f"duplicate or non-regular archive member: {item.name}")
-                seen.add(item.name)
-                if mode != "--pin" and item.size != member["bytes"]:
-                    raise ValueError(f"archive member length does not match its pin: {item.name}")
-                path = storage_path(member["path"])
-                part = path + ".part"
-                if mode != "--pin":
-                    os.makedirs(os.path.dirname(path), exist_ok=True)
-                digest, size = hashlib.sha256(), 0
-                # Exclusive creation preserves incomplete earlier acquisitions for inspection.
-                with archive.extractfile(item) as audio, open(os.devnull if mode == "--pin" else part, "wb" if mode == "--pin" else "xb") as out:
-                    for block in iter(lambda: audio.read(1 << 20), b""):
-                        digest.update(block)
-                        size += len(block)
-                        out.write(block)
-                observed = digest.hexdigest()
-                if mode != "--pin" and (observed != member["sha256"] or size != member["bytes"]):
-                    raise ValueError(f"archive member does not match its pin; bytes kept at {part}")
-                staged.append((member, path, part, observed, size))
-        while reader.read(1 << 20):
-            pass
+
+    def stage(name, member_size, regular, open_audio):
+        member = pending[name]
+        if name in seen or not regular:
+            raise ValueError(f"duplicate or non-regular archive member: {name}")
+        seen.add(name)
+        if mode != "--pin" and member_size != member["bytes"]:
+            raise ValueError(f"archive member length does not match its pin: {name}")
+        path = storage_path(member["path"])
+        part = path + ".part"
+        if mode != "--pin":
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+        digest, size = hashlib.sha256(), 0
+        # Exclusive creation preserves incomplete earlier acquisitions for inspection.
+        with open_audio() as audio, open(os.devnull if mode == "--pin" else part, "wb" if mode == "--pin" else "xb") as out:
+            for block in iter(lambda: audio.read(1 << 20), b""):
+                digest.update(block)
+                size += len(block)
+                out.write(block)
+        observed = digest.hexdigest()
+        if mode != "--pin" and (observed != member["sha256"] or size != member["bytes"]):
+            raise ValueError(f"archive member does not match its pin; bytes kept at {part}")
+        staged.append((member, path, part, observed, size))
+
+    archive_format = entry.get("archive_format", "tar")
+    if archive_format == "zip":
+        # ZIP's directory lives at the end. Keep the verified compressed source on the
+        # reference volume; never unpack its unselected files or buffer it all in RAM.
+        if os.path.exists(archive_path):
+            observed, source_size = digest_file(archive_path)
+        else:
+            if mode == "--pin":
+                raise ValueError("ZIP --pin --members requires a local source archive for random access")
+            os.makedirs(os.path.dirname(archive_path), exist_ok=True)
+            archive_part = archive_path + ".part"
+            observed, source_size = download(entry["url"], archive_part)
+            if observed != entry["sha256"] or source_size != entry["bytes"]:
+                raise ValueError(f"source archive does not match its pin; bytes kept at {archive_part}")
+            os.link(archive_part, archive_path)
+            os.unlink(archive_part)  # only the temporary name; verified source remains
+        if mode != "--pin" and (observed != entry["sha256"] or source_size != entry["bytes"]):
+            raise ValueError("source archive does not match its pin")
+        with zipfile.ZipFile(archive_path) as archive:
+            for item in archive.infolist():
+                if item.filename in pending:
+                    file_type = stat.S_IFMT(item.external_attr >> 16)
+                    regular = not item.is_dir() and file_type in (0, stat.S_IFREG)
+                    stage(item.filename, item.file_size, regular, lambda: archive.open(item))
+    elif archive_format == "tar":
+        request = urllib.request.Request(entry["url"], headers={"User-Agent": USER_AGENT})
+        source = open(archive_path, "rb") if os.path.exists(archive_path) else urllib.request.urlopen(request, timeout=120)
+        with source:
+            reader = HashedReader(source)
+            with tarfile.open(fileobj=reader, mode="r|*") as archive:
+                for item in archive:
+                    if item.name in pending:
+                        stage(item.name, item.size, item.isfile(), lambda: archive.extractfile(item))
+            while reader.read(1 << 20):
+                pass
+        observed, source_size = reader.digest.hexdigest(), reader.size
+    else:
+        raise ValueError(f"unsupported archive format: {archive_format}")
     if seen != set(pending):
         raise ValueError("archive is missing members: " + ", ".join(sorted(set(pending) - seen)))
-    observed = reader.digest.hexdigest()
-    if mode != "--pin" and (observed != entry["sha256"] or reader.size != entry["bytes"]):
+    if mode != "--pin" and (observed != entry["sha256"] or source_size != entry["bytes"]):
         raise ValueError("source archive does not match its pin; unverified members remain at .part")
-    emit("pinned" if mode == "--pin" else "archive-verified", entry, observed, reader.size, start)
+    emit("pinned" if mode == "--pin" else "archive-verified", entry, observed, source_size, start)
     # Nothing is published until BOTH the complete source and every selected member verify.
     for member, path, part, observed, size in staged:
         if mode != "--pin":
@@ -203,7 +235,7 @@ for entry in files:
     if args.members and entry.get("kind") == "archive":
         try:
             fetch_members(entry, start)
-        except (OSError, ValueError, tarfile.TarError) as error:
+        except (OSError, ValueError, tarfile.TarError, zipfile.BadZipFile, RuntimeError) as error:
             print(f"REFUSED archive {entry['id']}: {error}", file=sys.stderr)
             emit("refused", entry, None, None, start)
             refused += 1

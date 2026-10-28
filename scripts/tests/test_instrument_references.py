@@ -18,6 +18,7 @@ import tempfile
 import threading
 import time
 import unittest
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "data/instruments/references.json"
@@ -87,6 +88,19 @@ def archive_entry(directory, compression=""):
     return result, selected
 
 
+def zip_entry(directory):
+    source = Path(directory) / "source.zip"
+    payload = b"original violin recording"
+    with zipfile.ZipFile(source, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("notes/A4.wav", payload)
+        archive.writestr("unselected.wav", b"not requested")
+    result = dict(entry(source.read_bytes(), source.as_uri()), kind="archive",
+                  archive_format="zip", path="container.zip")
+    result["members"] = [{"archive_member": "notes/A4.wav", "path": "selected/A4.wav",
+                          "sha256": hashlib.sha256(payload).hexdigest(), "bytes": len(payload)}]
+    return result, payload
+
+
 class Quiet(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -97,6 +111,57 @@ def tree(directory):
 
 
 class ReferenceTests(unittest.TestCase):
+    def test_zip_caches_verified_source_and_extracts_only_selected_members(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive, payload = zip_entry(directory)
+            result, events = fetch(directory, [archive], selectors=("--members",))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual([e["event"] for e in events], ["archive-verified", "fetched"])
+            refs = Path(directory) / "refs"
+            self.assertEqual(tree(refs), [("container.zip", (Path(directory) / "source.zip").read_bytes()),
+                                          ("selected/A4.wav", payload)])
+            archive["url"] = "http://127.0.0.1:9/unreachable"
+            result, events = fetch(directory, [archive], selectors=("--members",))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual([e["event"] for e in events], ["verified"])
+
+    def test_zip_refuses_corrupt_source_or_member_before_publication(self):
+        for bad_target in ("archive", "member"):
+            with self.subTest(bad_target=bad_target), tempfile.TemporaryDirectory() as directory:
+                archive, _ = zip_entry(directory)
+                (archive if bad_target == "archive" else archive["members"][0])["sha256"] = "0" * 64
+                result, events = fetch(directory, [archive], selectors=("--members",))
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual([e["event"] for e in events], ["refused"])
+                self.assertFalse((Path(directory) / "refs/selected/A4.wav").exists())
+
+    def test_zip_pin_requires_cached_source_and_does_not_write_members(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive, _ = zip_entry(directory)
+            result, _ = fetch(directory, [archive], mode="--pin", selectors=("--members",))
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("requires a local source archive", result.stderr)
+            refs = Path(directory) / "refs"
+            self.assertEqual(tree(refs), [])
+            (refs / "container.zip").write_bytes((Path(directory) / "source.zip").read_bytes())
+            before = tree(refs)
+            result, events = fetch(directory, [archive], mode="--pin", selectors=("--members",))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual([e["event"] for e in events], ["pinned", "pinned"])
+            self.assertEqual(tree(refs), before)
+
+    def test_zip_preserves_existing_partial_download(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive, _ = zip_entry(directory)
+            refs = Path(directory) / "refs"
+            refs.mkdir()
+            (refs / "container.zip.part").write_bytes(b"earlier incomplete download")
+            before = tree(refs)
+            result, events = fetch(directory, [archive], selectors=("--members",))
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual([e["event"] for e in events], ["refused"])
+            self.assertEqual(tree(refs), before)
+
     def test_archive_members_stream_tar_xz_and_bzip_without_retaining_container(self):
         for compression in ("", ":xz", ":bz2"):
             with self.subTest(compression=compression), tempfile.TemporaryDirectory() as directory:
