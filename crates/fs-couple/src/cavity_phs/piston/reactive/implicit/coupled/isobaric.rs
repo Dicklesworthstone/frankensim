@@ -8,6 +8,8 @@
 
 /// Same-endpoint thermal contacts with bounded total chemical work.
 pub mod thermal;
+/// Error-controlled trajectories with prescribed heat and one pressure load.
+pub mod advance;
 
 use super::*;
 use boundary::{BoundaryGasReactionStep, GasReactionBoundary};
@@ -160,9 +162,21 @@ impl GasReaction {
         controls: GasReactionSolve, policy: &ImplicitMechanismSolve,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<IsobaricGasReactionCandidate, GasReactionError> {
+        self.isobaric_candidate_counted(gas, duration_s, heat_j, controls, policy,
+            cancelled, &Cell::new(0))
+    }
+
+    // Keep the original public and thermal endpoint APIs. Adaptive callers
+    // borrow only the numerical work counter, including failed attempts.
+    #[allow(clippy::too_many_arguments)]
+    fn isobaric_candidate_counted(
+        &self, gas: &ClosedGasParcel, duration_s: f64, heat_j: f64,
+        controls: GasReactionSolve, policy: &ImplicitMechanismSolve,
+        cancelled: &mut impl FnMut() -> bool, evaluations: &Cell<usize>,
+    ) -> Result<IsobaricGasReactionCandidate, GasReactionError> {
         let constraint = Constraint::Pressure { heat_j };
         let candidate = candidate_with_constraint(self, gas, duration_s, constraint, true,
-            controls, policy, cancelled)?;
+            controls, policy, cancelled, evaluations)?;
         let (next, reaction) = candidate.into_parts();
         let boundary = constraint.boundary(gas, &next)?;
         let enthalpy = gas.mass_kg() * (next.state().specific_enthalpy_j_kg()

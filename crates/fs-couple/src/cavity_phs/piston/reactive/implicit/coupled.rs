@@ -196,7 +196,9 @@ struct Problem<'a, C> {
     policy: &'a ImplicitMechanismSolve,
     cancelled: RefCell<&'a mut C>,
     failure: RefCell<Option<GasReactionError>>,
-    evaluations: Cell<usize>,
+    // Borrowed by trajectory owners so refused attempts also consume their
+    // shared work budget. Numerical residual/Jacobian behavior is unchanged.
+    evaluations: &'a Cell<usize>,
     jacobian: RefCell<Option<Jacobian>>,
 }
 
@@ -678,7 +680,8 @@ pub(in crate::cavity_phs::piston::reactive) fn candidate_at_boundary(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<GasReactionCandidate, GasReactionError> {
     candidate_with_constraint(law, gas, duration_s,
-        isobaric::Constraint::Boundary(boundary), admit_entropy, controls, policy, cancelled)
+        isobaric::Constraint::Boundary(boundary), admit_entropy, controls, policy, cancelled,
+        &Cell::new(0))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -691,6 +694,7 @@ fn candidate_with_constraint(
     controls: GasReactionSolve,
     policy: &ImplicitMechanismSolve,
     cancelled: &mut impl FnMut() -> bool,
+    evaluations: &Cell<usize>,
 ) -> Result<GasReactionCandidate, GasReactionError> {
     poll(cancelled)?;
     constraint.validate()?;
@@ -767,7 +771,7 @@ fn candidate_with_constraint(
         policy,
         cancelled: RefCell::new(cancelled),
         failure: RefCell::new(None),
-        evaluations: Cell::new(0),
+        evaluations,
         jacobian: RefCell::new(None),
     };
     let original = problem

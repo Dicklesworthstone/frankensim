@@ -4,6 +4,9 @@
 #[allow(dead_code)]
 mod source;
 
+#[path = "reactive_isobaric/adaptive.rs"]
+mod adaptive;
+
 use fs_couple::cavity_phs::piston::reactive::{GasReaction, GasReactionError, GasReactionSolve};
 use fs_couple::cavity_phs::piston::reactive::implicit::coupled::ImplicitMechanismSolve;
 use fs_material::thermochemical_gas::{ThermochemicalGasModel, energy::{GasEnergySolve, parcel::ClosedGasParcel}};

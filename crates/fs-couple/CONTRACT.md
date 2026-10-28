@@ -10164,3 +10164,32 @@ Prepared scratch and LU storage allocate only at construction. Each Jacobian per
 The prepared patch solve stages original native mechanics with the common held force field. It independently reevaluates every material point on actual body motion and gates each jump and force component, then the complete native-plus-bond energy window. Material calls reserve one final audit per site. Only after all checks and the final cancellation poll do all body states, irreversible histories and per-site observations publish together. Original fracture, surviving-bond viscosity, native losses, external work and prescribed jump work remain separate. Contact scratch allocates at construction; the original propagator retains its existing allocation rules.
 
 The native integration regressions cover quadrature-area partition, finite lever-arm force/torque and edge peeling, and multi-site refusal/replay. The same finite-body fixture passes the independently executable original-source core tests; the full native executable still requires the repository runtime build. Fixed frames, linearized geometry, declared spatial quadrature and straight local jump paths remain explicit; no finite-rotation contact search, remeshing/history transfer, spontaneous rebonding, thermal coefficient refresh or automatic fracture heat partition is inferred.
+
+## Adaptive constant-pressure reacting gas with prescribed heat
+
+`GasReaction::isobaric_adaptive_candidate` advances the original closed gas
+against its initial constant pressure. Signed external heat is constant power
+over the requested interval. Every accepted substep uses the existing coupled
+implicit mechanism, with composition-dependent source enthalpy, temperature
+and actual EOS volume solved together. Chemical formation energy stays in the
+original total enthalpy and is counted once.
+
+The bounded owner compares complete N and 2N backward-Euler trajectories using
+every species amount, every channel extent, temperature and actual volume.
+Only the finer physical trajectory can be accepted; there is no extrapolated
+composition or concentration floor. The reported discrepancy is an asymptotic
+first-order estimate, not a rigorous error guarantee for arbitrary stiffness.
+
+Whole-window gates retain actual mass, pressure and reconstructed species
+inventory; compensated accepted source increments; H-H0=Q and U-U0+p Delta V=Q;
+and accepted heat entropy sum(Q_k/T_k). Absolute conservation budgets are not
+multiplied by substep count. The history retains every accepted original
+endpoint report, while discarded paths contribute only to work accounting.
+All attempted endpoints and original residual/Jacobian evaluations, including
+refused roots, spend the caller's global budgets. Cancellation and refusal
+publish no partial state. Original public single-step APIs are unchanged.
+
+Independent tests cover reversible three-species exact kinetics, stiff and
+transient trajectories, exothermic heating/adiabatic/cooling histories against
+a scalar reference ODE, mole-changing volume-controlled refinement, exact
+failed-attempt work accounting, source limits and late cancellation.
