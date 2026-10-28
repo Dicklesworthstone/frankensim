@@ -1,0 +1,46 @@
+frankensim.matdb-source.v1
+observation	product	Superwool Plus fibre blanket, nominal 160 kg/m3	BL.01 18 April 2025, density grades	Printed density class; numerical temperature and loading condition are unstated. No density-temperature law or joint specimen statistics are supplied.
+observation	thermal-table	Superwool Plus fibre blanket, nominal 160 kg/m3	ASTM C201, printed SI conductivity table	C201 reports mean-temperature effective transport under a large steady gradient. The source does not specify test temperature difference, compressive load, specimen thickness or thermal direction. Standard edition and numerical uncertainty are unstated.
+observation	local-temperature-model	Superwool Plus fibre blanket, nominal 160 kg/m3	Explicit engineering approximation of the producer's mean-temperature data	Linear interpolation is mapped to local temperature only with mean-test-temperature-as-local-model=1. This is not a measured local k(T) law or an interpolation-error bound. Effective blanket transport is retained without a separate pore-radiation term. Heat capacity, thermal expansion, phase change and extrapolation are not supplied.
+observation	tension-table	Superwool Plus fibre blanket, nominal 160 kg/m3	EN 1094-1, reported average tensile strength	Test temperature, direction, rate and specimen geometry are unstated. This is a strength, not an elastic modulus or a constitutive law.
+scalar	density	product	density	160	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade_morgan_superwool_plus_160_2025	1	1	1
+validity	density	source_moisture_condition_known	0	0	1
+validity	density	source_gas_pressure_known	0	0	1
+validity	density	source_specimens_matched	0	0	1
+validity	density	source_density_temperature_known	0	0	1
+validity	density	source_density_load_condition_known	0	0	1
+curve	conductivity-source-points	thermal-table	apparent_thermal_conductivity	mean_test_temperature	degC	W/m/K	200:0.04,400:0.07,600:0.11,800:0.16,1000:0.23	tabulated
+uncertainty	conductivity-source-points	unstated	-	-	-	-
+validity	conductivity-source-points	mean_test_temperature	200	1000	degC
+validity	conductivity-source-points	source_grade_morgan_superwool_plus_160_2025	1	1	1
+validity	conductivity-source-points	source_moisture_condition_known	0	0	1
+validity	conductivity-source-points	source_gas_pressure_known	0	0	1
+validity	conductivity-source-points	source_specimens_matched	0	0	1
+validity	conductivity-source-points	source_thermal_direction_known	0	0	1
+validity	conductivity-source-points	source_test_temperature_difference_known	0	0	1
+validity	conductivity-source-points	source_test_thickness_known	0	0	1
+validity	conductivity-source-points	source_compressive_load_known	0	0	1
+curve	conductivity-local-model	thermal-table,local-temperature-model	thermal_conductivity	temperature	degC	W/m/K	200:0.04,400:0.07,600:0.11,800:0.16,1000:0.23	linear
+uncertainty	conductivity-local-model	unstated	-	-	-	-
+validity	conductivity-local-model	temperature	200	1000	degC
+validity	conductivity-local-model	source_grade_morgan_superwool_plus_160_2025	1	1	1
+validity	conductivity-local-model	source_moisture_condition_known	0	0	1
+validity	conductivity-local-model	source_gas_pressure_known	0	0	1
+validity	conductivity-local-model	source_specimens_matched	0	0	1
+validity	conductivity-local-model	source_thermal_direction_known	0	0	1
+validity	conductivity-local-model	source_test_temperature_difference_known	0	0	1
+validity	conductivity-local-model	source_test_thickness_known	0	0	1
+validity	conductivity-local-model	source_compressive_load_known	0	0	1
+validity	conductivity-local-model	engineering_reference_model	1	1	1
+validity	conductivity-local-model	mean_test_temperature_as_local_model	1	1	1
+scalar	tensile-strength-average	tension-table	tensile_strength	90	kPa	constant
+uncertainty	tensile-strength-average	unstated	-	-	-	-
+validity	tensile-strength-average	source_grade_morgan_superwool_plus_160_2025	1	1	1
+validity	tensile-strength-average	source_moisture_condition_known	0	0	1
+validity	tensile-strength-average	source_gas_pressure_known	0	0	1
+validity	tensile-strength-average	source_specimens_matched	0	0	1
+validity	tensile-strength-average	source_mechanical_temperature_known	0	0	1
+validity	tensile-strength-average	source_mechanical_direction_known	0	0	1
+validity	tensile-strength-average	source_test_rate_known	0	0	1

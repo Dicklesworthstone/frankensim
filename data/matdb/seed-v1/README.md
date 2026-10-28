@@ -4,6 +4,50 @@ This directory retains the human-reviewable source inputs compiled by
 `xtask matdb-pack`. Generated binary packs are deliberately not committed:
 the compiler must reproduce them from the pinned manifest and source record.
 
+## Aerogel and refractory-fibre insulation
+
+Four packs add Pyrogel XTE revision 4.2 and Superwool Plus blanket at nominal
+96, 128 and 160 kg/m³. Each holds density, a source conductivity table, one
+mechanical-strength observation and a separate authored conductivity model.
+
+| Pack | Source temperature range | Nominal density | Mechanical source value |
+| --- | --- | ---: | --- |
+| `aspen-pyrogel-xte-rev42` | Mean 0–600 °C | 200 kg/m³ | At least 3 psi compressive resistance at 10% deformation, with 2 psi preload |
+| `morgan-superwool-plus-96-2025` | Mean 200–1000 °C | 96 kg/m³ | Average tensile strength 50 kPa |
+| `morgan-superwool-plus-128-2025` | Mean 200–1000 °C | 128 kg/m³ | Average tensile strength 75 kPa |
+| `morgan-superwool-plus-160-2025` | Mean 200–1000 °C | 160 kg/m³ | Average tensile strength 90 kPa |
+
+The Pyrogel source is the
+[Aspen producer sheet, revision 4.2](https://www.aerogel.com/wp-content/uploads/2021/06/Pyrogel-XTE-Datasheet-English-v4.2.pdf).
+The Superwool source is
+[Morgan BL.01, 18 April 2025](https://www.morganthermalceramics.com/media/l52g3r3j/superwool-plus-blankets_eng.pdf).
+Both source tables describe effective blanket transport at mean test temperature.
+ASTM's [C201 method summary](https://store.astm.org/standards/c201) identifies the
+large-gradient, steady mean-temperature measurement used by Superwool.
+
+The measured table role is `apparent-thermal-conductivity`, with typed
+`mean-test-temperature` and tabulated-only evaluation. It refuses between-point
+queries. The separate `thermal-conductivity` curve uses linear interpolation
+and the local `temperature` coordinate only when
+`engineering-reference-model=1` and
+`mean-test-temperature-as-local-model=1` are supplied. This is an explicit
+engineering approximation, with no measured-local-law or interpolation-error
+claim. Its effective transport already aggregates the source's heat-transfer
+mechanisms; no separate pore-radiation contribution is inferred.
+
+All thermal queries retain the exact grade, unknown moisture and gas pressure,
+unknown shared-specimen history, direction, test temperature difference and
+specimen thickness. Superwool also retains unknown compressive test load.
+Pyrogel conductivity instead requires the source's **2 psi compressive stress**,
+stored as `test-compressive-stress=13789.514586336722 Pa`; this is distinct
+from ambient gas pressure and from the mechanical test's
+`test-preload-pressure`.
+
+No heat capacity is supplied, so these packs support bounded steady-transport
+calculations and do not complete a transient-heating profile. Nominal density
+does not supply a density-temperature law. Service-temperature or melting
+ratings are not promoted to conductivity-domain extensions or latent heat.
+
 ## Cured electronics-potting resins: MG Chemicals 2026
 
 Five producer grades add 34 claims for cured thermosets: 834HTC and 832TC thermally conductive epoxies, 832C translucent epoxy, 832FX flexible epoxy, and 8810 rigid polyurethane. Each pack contains cured density, thermal conductivity, specific heat capacity, independently reported thermal diffusivity, tensile strength, and electrical resistivity. Four also contain compressive strength; 832FX does not report it.

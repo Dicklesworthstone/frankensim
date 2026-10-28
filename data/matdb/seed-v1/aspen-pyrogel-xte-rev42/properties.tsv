@@ -1,0 +1,48 @@
+frankensim.matdb-source.v1
+observation	product	Pyrogel XTE aerogel blanket, revision 4.2	Revision 4.2, nominal physical properties	Printed metric nominal density 0.20 g/cc gives 200 kg/m3. Density temperature and loading condition are unstated; this is not density measured under the conductivity load.
+observation	thermal-table	Pyrogel XTE aerogel blanket, revision 4.2	ASTM C177, printed metric conductivity table	Printed mean-temperature values are measured under 2 psi compressive load. Test temperature difference, specimen thickness, thermal direction, moisture and ambient gas pressure are unstated. Numerical uncertainty is unstated.
+observation	local-temperature-model	Pyrogel XTE aerogel blanket, revision 4.2	Explicit engineering approximation of the producer's mean-temperature data	Linear interpolation is mapped to local temperature only with mean-test-temperature-as-local-model=1. This is not a measured local k(T) law or an interpolation-error bound. Effective blanket transport is retained without a separate pore-radiation term. Heat capacity, thermal expansion, phase change and extrapolation are not supplied.
+observation	compression-table	Pyrogel XTE aerogel blanket, revision 4.2	ASTM C165, minimum compressive resistance at 10 percent deformation	Source lower limit is 3 psi with a 2 psi preload. The load-offset convention, temperature, rate and direction are unstated; no modulus or complete compression response is inferred.
+scalar	density	product	density	200	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade_aspen_pyrogel_xte_rev42	1	1	1
+validity	density	source_moisture_condition_known	0	0	1
+validity	density	source_gas_pressure_known	0	0	1
+validity	density	source_specimens_matched	0	0	1
+validity	density	source_density_temperature_known	0	0	1
+validity	density	source_density_load_condition_known	0	0	1
+curve	conductivity-source-points	thermal-table	apparent_thermal_conductivity	mean_test_temperature	degC	W/m/K	0:0.02,100:0.023,200:0.028,300:0.035,400:0.046,500:0.064,600:0.089	tabulated
+uncertainty	conductivity-source-points	unstated	-	-	-	-
+validity	conductivity-source-points	mean_test_temperature	0	600	degC
+validity	conductivity-source-points	source_grade_aspen_pyrogel_xte_rev42	1	1	1
+validity	conductivity-source-points	source_moisture_condition_known	0	0	1
+validity	conductivity-source-points	source_gas_pressure_known	0	0	1
+validity	conductivity-source-points	source_specimens_matched	0	0	1
+validity	conductivity-source-points	source_thermal_direction_known	0	0	1
+validity	conductivity-source-points	source_test_temperature_difference_known	0	0	1
+validity	conductivity-source-points	source_test_thickness_known	0	0	1
+validity	conductivity-source-points	test_compressive_stress	13789.514586336722	13789.514586336722	Pa
+curve	conductivity-local-model	thermal-table,local-temperature-model	thermal_conductivity	temperature	degC	W/m/K	0:0.02,100:0.023,200:0.028,300:0.035,400:0.046,500:0.064,600:0.089	linear
+uncertainty	conductivity-local-model	unstated	-	-	-	-
+validity	conductivity-local-model	temperature	0	600	degC
+validity	conductivity-local-model	source_grade_aspen_pyrogel_xte_rev42	1	1	1
+validity	conductivity-local-model	source_moisture_condition_known	0	0	1
+validity	conductivity-local-model	source_gas_pressure_known	0	0	1
+validity	conductivity-local-model	source_specimens_matched	0	0	1
+validity	conductivity-local-model	source_thermal_direction_known	0	0	1
+validity	conductivity-local-model	source_test_temperature_difference_known	0	0	1
+validity	conductivity-local-model	source_test_thickness_known	0	0	1
+validity	conductivity-local-model	test_compressive_stress	13789.514586336722	13789.514586336722	Pa
+validity	conductivity-local-model	engineering_reference_model	1	1	1
+validity	conductivity-local-model	mean_test_temperature_as_local_model	1	1	1
+scalar	compression-resistance-minimum	compression-table	compression_resistance_minimum	20684.271879505086	Pa	constant
+uncertainty	compression-resistance-minimum	unstated	-	-	-	-
+validity	compression-resistance-minimum	source_grade_aspen_pyrogel_xte_rev42	1	1	1
+validity	compression-resistance-minimum	source_moisture_condition_known	0	0	1
+validity	compression-resistance-minimum	source_gas_pressure_known	0	0	1
+validity	compression-resistance-minimum	source_specimens_matched	0	0	1
+validity	compression-resistance-minimum	source_mechanical_temperature_known	0	0	1
+validity	compression-resistance-minimum	source_mechanical_direction_known	0	0	1
+validity	compression-resistance-minimum	source_test_rate_known	0	0	1
+validity	compression-resistance-minimum	compressive_strain	0.1	0.1	1
+validity	compression-resistance-minimum	test_preload_pressure	13789.514586336722	13789.514586336722	Pa

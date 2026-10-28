@@ -1,0 +1,29 @@
+frankensim.matdb-manifest.v3
+pack_id	aspen-pyrogel-xte-rev42
+redistribution	permitted	Selected attributed numerical facts and original modeling notes only; no source document or table layout is redistributed
+citation	Aspen Aerogels, Pyrogel XTE Product Data Sheet, revision 4.2, copyright 2023, pp. 1-2; https://www.aerogel.com/wp-content/uploads/2021/06/Pyrogel-XTE-Datasheet-English-v4.2.pdf; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	producer-table	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	apparent_thermal_conductivity	apparent-thermal-conductivity	thermal-conductivity
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	compression_resistance_minimum	compression-resistance-minimum	dimensional
+axis	source_grade_aspen_pyrogel_xte_rev42	source-grade-aspen-pyrogel-xte-rev42	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_gas_pressure_known	source-gas-pressure-known	dimensional
+axis	source_specimens_matched	source-specimens-matched	dimensional
+axis	source_density_temperature_known	source-density-temperature-known	dimensional
+axis	source_density_load_condition_known	source-density-load-condition-known	dimensional
+axis	mean_test_temperature	mean-test-temperature	absolute-temperature
+axis	source_thermal_direction_known	source-thermal-direction-known	dimensional
+axis	source_test_temperature_difference_known	source-test-temperature-difference-known	dimensional
+axis	source_test_thickness_known	source-test-thickness-known	dimensional
+axis	test_compressive_stress	test-compressive-stress	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	engineering_reference_model	engineering-reference-model	dimensional
+axis	mean_test_temperature_as_local_model	mean-test-temperature-as-local-model	dimensional
+axis	source_mechanical_temperature_known	source-mechanical-temperature-known	dimensional
+axis	source_mechanical_direction_known	source-mechanical-direction-known	dimensional
+axis	source_test_rate_known	source-test-rate-known	dimensional
+axis	compressive_strain	compressive-strain	dimensional
+axis	test_preload_pressure	test-preload-pressure	dimensional
