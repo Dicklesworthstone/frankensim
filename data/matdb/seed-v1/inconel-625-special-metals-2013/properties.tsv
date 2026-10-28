@@ -1,0 +1,27 @@
+frankensim.matdb-source.v1
+observation	alloy-reference	INCONEL 625, UNS N06625	Special Metals nominal property reference	Require engineering-reference-model=1 and source-specimens-matched=0. Cp is explicitly calculated, density has no assigned specimen or temperature, and k/resistivity belong to material annealed at 2100 F for one hour. No common coupon or covariance is inferred. Temperature knots use the printed Celsius column plus 273.15 K, preserving source rounding. Linear interpolation is an engineering approximation, never extrapolation. Density is available at one author-selected 294.15 K reference only, not constant over the heating curve. No elasticity, yield, creep, phase change or qualification is claimed.
+observation	density	INCONEL 625 nominal alloy	Table 2 physical constant	8.44 g/cc converts to 8440 kg/m3. Source uncertainty and test temperature unspecified.
+observation	heat-capacity	INCONEL 625 nominal alloy	Table 2 calculated specific heat	Printed SI Cp values from 21 to 982 C. These are calculated values, not measured heat-capacity specimens.
+observation	transport	INCONEL 625 annealed at 2100 F for 1 hour	Table 3 and footnotes b/c	Conductivity measurements attributed to Battelle; resistivity values use the same stated anneal. SI k in W/(m K); micro-ohm cm is converted with factor 1e-8 to Ohm m. No source uncertainty supplied.
+scalar	density	density,alloy-reference	density	8440	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	294.15	294.15	K
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_specimens_matched	0	0	1
+curve	heat-capacity	heat-capacity,alloy-reference	specific_heat_capacity	temperature	K	J/kg/K	294.15:410,366.15:427,477.15:456,589.15:481,700.15:511,811.15:536,922.15:565,1033.15:590,1144.15:620,1255.15:645	linear
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	294.15	1255.15	K
+validity	heat-capacity	engineering_reference_model	1	1	1
+validity	heat-capacity	source_specimens_matched	0	0	1
+curve	conductivity	transport,alloy-reference	thermal_conductivity	temperature	K	W/m/K	294.15:9.8,311.15:10.1,366.15:10.8,477.15:12.5,589.15:14.1,700.15:15.7,811.15:17.5,922.15:19.0,1033.15:20.8,1144.15:22.8,1255.15:25.2	linear
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	294.15	1255.15	K
+validity	conductivity	engineering_reference_model	1	1	1
+validity	conductivity	source_specimens_matched	0	0	1
+validity	conductivity	annealed_2100f_one_hour	1	1	1
+curve	resistivity	transport,alloy-reference	electrical_resistivity	temperature	K	Ohm*m	294.15:1.29e-6,311.15:1.30e-6,366.15:1.32e-6,477.15:1.34e-6,589.15:1.35e-6,700.15:1.36e-6,811.15:1.38e-6,922.15:1.38e-6,1033.15:1.37e-6,1144.15:1.36e-6,1255.15:1.35e-6	linear
+uncertainty	resistivity	unstated	-	-	-	-
+validity	resistivity	temperature	294.15	1255.15	K
+validity	resistivity	engineering_reference_model	1	1	1
+validity	resistivity	source_specimens_matched	0	0	1
+validity	resistivity	annealed_2100f_one_hour	1	1	1

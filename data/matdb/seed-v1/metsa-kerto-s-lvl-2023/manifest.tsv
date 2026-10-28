@@ -1,0 +1,16 @@
+frankensim.matdb-manifest.v3
+pack_id	metsa-kerto-s-lvl-2023
+redistribution	permitted	Selected attributed numerical facts and original notes only; source document and table layout are not redistributed
+citation	Metsa Wood, UK Declaration of Conformity MW/LVL/311-001/UKCA/UKDOC, Kerto LVL S-beam LVL 48 P, 10 July 2023, page 2; https://www.metsagroup.com/contentassets/e39dfa793cc343918376a4166feda0c4/uk_doc_kerto-s_2023_07_10.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	kerto-s	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	density_fifth_percentile	density-fifth-percentile	dimensional
+property	longitudinal_modulus_mean	longitudinal-modulus-mean	dimensional
+property	longitudinal_modulus_fifth_percentile	longitudinal-modulus-fifth-percentile	dimensional
+property	shear_edgewise_mean	shear-modulus-edgewise-mean	dimensional
+property	shear_flatwise_parallel_mean	shear-modulus-flatwise-parallel-mean	dimensional
+axis	source_product_kerto_s_2023	source-product-kerto-s-2023	dimensional
+axis	nominal_thickness	nominal-thickness	dimensional
+axis	source_temperature_known	source-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional

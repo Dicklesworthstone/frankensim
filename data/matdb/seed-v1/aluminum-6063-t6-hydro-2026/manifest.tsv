@@ -1,0 +1,15 @@
+frankensim.matdb-manifest.v3
+pack_id	aluminum-6063-t6-hydro-2026
+redistribution	permitted	Selected attributed numerical facts and original normalization notes only; no source document, prose or table layout is redistributed
+citation	Hydro Extrusion North America, Alloy 6063, revision 2026/01 (06/2026), pages 1-2, T6 extrusion wall thickness up to 3.20 mm; https://www.hydro.com/globalassets/01-products--services/extruded-profiles/americas/ena-resources/alloy-data-sheets/hydro_2026_data_sheet_6063-rev-062026.pdf
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	hydro-reference	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	minimum_proof_stress	minimum-specified-0p2-proof-stress	dimensional
+property	minimum_tensile_strength	minimum-specified-tensile-strength	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	nominal_thickness	nominal-thickness	dimensional
+axis	hydro_6063_t6_extrusion	hydro-6063-t6-extrusion	dimensional
+axis	engineering_reference_model	engineering-reference-model	dimensional
+axis	source_temperatures_matched	source-temperatures-matched	dimensional

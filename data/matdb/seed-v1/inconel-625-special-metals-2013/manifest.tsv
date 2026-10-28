@@ -1,0 +1,14 @@
+frankensim.matdb-manifest.v3
+pack_id	inconel-625-special-metals-2013
+redistribution	permitted	Selected attributed numerical facts and original modeling notes only; no source document, prose or table layout is redistributed
+citation	Special Metals Corporation, INCONEL alloy 625, August 2013 technical bulletin, page 2 Tables 2-3 and footnotes; https://www.specialmetals.com/documents/technical-bulletins/inconel/inconel-alloy-625.pdf
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	special-metals-reference	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	electrical_resistivity	electrical-resistivity	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	engineering_reference_model	engineering-reference-model	dimensional
+axis	source_specimens_matched	source-specimens-matched	dimensional
+axis	annealed_2100f_one_hour	annealed-2100f-one-hour	dimensional

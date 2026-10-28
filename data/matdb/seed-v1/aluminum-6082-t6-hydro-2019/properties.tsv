@@ -1,0 +1,33 @@
+frankensim.matdb-source.v1
+observation	product-reference	Hydro 6082-T6 extrusion, 5.00-20.00 mm wall	Hydro physical-property reference and specified mechanical minima	The source groups T6 and T6511; this pack selects T6 and does not assert the stretching treatment of T6511. Require hydro-6082-t6-extrusion=1, engineering-reference-model=1 and source-temperatures-matched=0. The 293.15-294.15 K interval is an authored frozen-coefficient model: k was reported at 25 C; density and strength temperatures are unstated. Density is alloy-level, not a matched coupon. Specification minima are separate quantities, never measured yield curves. No Cp, isotropic elasticity, weld-zone, fatigue or plastic hardening is supplied.
+observation	density	Hydro 6082 alloy reference	Page 1 density	0.098 lb/in3 converts to 2712.630661599906 kg/m3 using exactly 0.45359237 kg/lb and 0.0254 m/in.
+observation	conductivity	Hydro 6082-T6 extrusion	Page 2 typical thermal conductivity at 25 C	172 W/(m K).
+observation	strength-minima	Hydro 6082-T6 extrusion, 5.00-20.00 mm	Page 2 specified tensile-property minima	0.2-percent-offset proof stress minimum 260 MPa and ultimate tensile strength minimum 310 MPa. These are limits, not measured means or design allowables.
+scalar	density	density,product-reference	density	2712.630661599906	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	293.15	294.15	K
+validity	density	nominal_thickness	5	20	mm
+validity	density	hydro_6082_t6_extrusion	1	1	1
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_temperatures_matched	0	0	1
+scalar	conductivity	conductivity,product-reference	thermal_conductivity	172	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	293.15	294.15	K
+validity	conductivity	nominal_thickness	5	20	mm
+validity	conductivity	hydro_6082_t6_extrusion	1	1	1
+validity	conductivity	engineering_reference_model	1	1	1
+validity	conductivity	source_temperatures_matched	0	0	1
+scalar	minimum-proof-stress	strength-minima,product-reference	minimum_proof_stress	260	MPa	constant
+uncertainty	minimum-proof-stress	unstated	-	-	-	-
+validity	minimum-proof-stress	temperature	293.15	294.15	K
+validity	minimum-proof-stress	nominal_thickness	5	20	mm
+validity	minimum-proof-stress	hydro_6082_t6_extrusion	1	1	1
+validity	minimum-proof-stress	engineering_reference_model	1	1	1
+validity	minimum-proof-stress	source_temperatures_matched	0	0	1
+scalar	minimum-tensile-strength	strength-minima,product-reference	minimum_tensile_strength	310	MPa	constant
+uncertainty	minimum-tensile-strength	unstated	-	-	-	-
+validity	minimum-tensile-strength	temperature	293.15	294.15	K
+validity	minimum-tensile-strength	nominal_thickness	5	20	mm
+validity	minimum-tensile-strength	hydro_6082_t6_extrusion	1	1	1
+validity	minimum-tensile-strength	engineering_reference_model	1	1	1
+validity	minimum-tensile-strength	source_temperatures_matched	0	0	1

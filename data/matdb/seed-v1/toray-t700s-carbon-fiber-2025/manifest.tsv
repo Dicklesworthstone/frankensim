@@ -1,0 +1,17 @@
+frankensim.matdb-manifest.v3
+pack_id	toray-t700s-carbon-fiber-2025
+redistribution	permitted	Selected attributed numerical facts and original normalization notes only; no source document, prose or table layout is redistributed
+citation	Toray Composite Materials America, TORAYCA T700S Standard Modulus Carbon Fiber Data Sheet, revision 11/24/2025, page 1 fiber and functional properties; https://www.toraycma.com/wp-content/uploads/T700S-Data-Sheet.pdf
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	toray-fiber	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	fiber_tensile_modulus	fiber-tensile-modulus	dimensional
+property	fiber_tensile_strength	fiber-tensile-strength	dimensional
+property	filament_diameter	filament-diameter	dimensional
+property	thermal_conductivity_direction_unspecified	thermal-conductivity-direction-unspecified	thermal-conductivity
+property	electrical_resistivity_direction_unspecified	electrical-resistivity-direction-unspecified	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	material_form_fiber	material-form-fiber	dimensional
+axis	engineering_reference_model	engineering-reference-model	dimensional
+axis	source_temperatures_matched	source-temperatures-matched	dimensional

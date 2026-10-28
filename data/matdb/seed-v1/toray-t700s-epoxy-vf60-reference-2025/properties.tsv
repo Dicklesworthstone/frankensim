@@ -1,0 +1,28 @@
+frankensim.matdb-source.v1
+observation	composite-reference	T700S/epoxy composite cured at 130 C; values normalized to 60 percent fiber volume	Toray composite-property table, selected metric columns	Require cure-temperature=403.15 K, normalization-fiber-volume-fraction=0.60, engineering-reference-model=1, source-resin-formulation-known=0 and source-coupon-direction-known=0. The sheet does not name the epoxy formulation, cure duration, layup, coupon axis or measurement temperature for these entries. The 293.15-294.15 K interval is an authored frozen reference. The 60-percent coordinate describes normalization, not a measured actual fiber fraction. No density, full orthotropic tensor, Poisson ratio, shear stiffness or arbitrary-laminate constitutive law is inferred.
+observation	tension	T700S/epoxy normalized coupon reference	ASTM D3039	Metric table tensile modulus 134 GPa and tensile strength 2860 MPa. Source footnote normalizes these marked entries to 60 percent fiber volume; lot-average reference values, not specification limits.
+observation	flexure	T700S/epoxy normalized coupon reference	ASTM D790	Metric table flexural modulus 120 GPa, likewise normalized. Bending-test modulus is kept distinct from tension and is not an isotropic Young modulus.
+scalar	tensile-modulus	tension,composite-reference	composite_tensile_modulus	134	GPa	constant
+uncertainty	tensile-modulus	unstated	-	-	-	-
+validity	tensile-modulus	temperature	293.15	294.15	K
+validity	tensile-modulus	cure_temperature	403.15	403.15	K
+validity	tensile-modulus	normalization_fiber_volume_fraction	0.6	0.6	1
+validity	tensile-modulus	engineering_reference_model	1	1	1
+validity	tensile-modulus	source_resin_formulation_known	0	0	1
+validity	tensile-modulus	source_coupon_direction_known	0	0	1
+scalar	tensile-strength	tension,composite-reference	composite_tensile_strength	2860	MPa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	temperature	293.15	294.15	K
+validity	tensile-strength	cure_temperature	403.15	403.15	K
+validity	tensile-strength	normalization_fiber_volume_fraction	0.6	0.6	1
+validity	tensile-strength	engineering_reference_model	1	1	1
+validity	tensile-strength	source_resin_formulation_known	0	0	1
+validity	tensile-strength	source_coupon_direction_known	0	0	1
+scalar	flexural-modulus	flexure,composite-reference	composite_flexural_modulus	120	GPa	constant
+uncertainty	flexural-modulus	unstated	-	-	-	-
+validity	flexural-modulus	temperature	293.15	294.15	K
+validity	flexural-modulus	cure_temperature	403.15	403.15	K
+validity	flexural-modulus	normalization_fiber_volume_fraction	0.6	0.6	1
+validity	flexural-modulus	engineering_reference_model	1	1	1
+validity	flexural-modulus	source_resin_formulation_known	0	0	1
+validity	flexural-modulus	source_coupon_direction_known	0	0	1

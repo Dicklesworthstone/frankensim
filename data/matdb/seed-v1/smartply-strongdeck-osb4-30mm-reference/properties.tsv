@@ -1,0 +1,38 @@
+frankensim.matdb-source.v1
+observation	panel	SMARTPLY STRONGDECK 30 mm OSB/4, oriented wood strands with no-added-formaldehyde binder	Datasheet Table 1 EN 323 density, EN 13986 conductivity; Table 2 EN 789/EN 1058 structural means	Table 2 mean bending moduli 8100/3000 MPa and planar shear 40 MPa are distinct from Table 1 minimum EN 310 requirements 4800/1900 MPa. Major axis follows the panel marking; minor axis is perpendicular. Density tolerance +/-15 percent is retained separately, not a confidence interval. Ex-works moisture 2-12 percent and service class 1/2 are not test-conditioning values. Binder formulation, individual strand layers and Poisson cross terms are unknown; no isotropic or full laminate tensor is invented.
+scalar	density	panel	density	600	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_product_smartply_strongdeck	1	1	1
+validity	density	nominal_thickness	0.03	0.03	m
+validity	density	source_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+scalar	density-tolerance	panel	density_relative_tolerance	0.15	1	constant
+uncertainty	density-tolerance	unstated	-	-	-	-
+validity	density-tolerance	source_product_smartply_strongdeck	1	1	1
+validity	density-tolerance	nominal_thickness	0.03	0.03	m
+validity	density-tolerance	source_temperature_known	0	0	1
+validity	density-tolerance	source_moisture_condition_known	0	0	1
+scalar	conductivity	panel	thermal_conductivity	0.13	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	source_product_smartply_strongdeck	1	1	1
+validity	conductivity	nominal_thickness	0.03	0.03	m
+validity	conductivity	source_temperature_known	0	0	1
+validity	conductivity	source_moisture_condition_known	0	0	1
+scalar	major-moe	panel	bending_moe_major_mean	8100	MPa	constant
+uncertainty	major-moe	unstated	-	-	-	-
+validity	major-moe	source_product_smartply_strongdeck	1	1	1
+validity	major-moe	nominal_thickness	0.03	0.03	m
+validity	major-moe	source_temperature_known	0	0	1
+validity	major-moe	source_moisture_condition_known	0	0	1
+scalar	minor-moe	panel	bending_moe_minor_mean	3000	MPa	constant
+uncertainty	minor-moe	unstated	-	-	-	-
+validity	minor-moe	source_product_smartply_strongdeck	1	1	1
+validity	minor-moe	nominal_thickness	0.03	0.03	m
+validity	minor-moe	source_temperature_known	0	0	1
+validity	minor-moe	source_moisture_condition_known	0	0	1
+scalar	planar-shear	panel	planar_shear_modulus_mean	40	MPa	constant
+uncertainty	planar-shear	unstated	-	-	-	-
+validity	planar-shear	source_product_smartply_strongdeck	1	1	1
+validity	planar-shear	nominal_thickness	0.03	0.03	m
+validity	planar-shear	source_temperature_known	0	0	1
+validity	planar-shear	source_moisture_condition_known	0	0	1

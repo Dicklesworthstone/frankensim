@@ -1,0 +1,15 @@
+frankensim.matdb-manifest.v3
+pack_id	toray-t700s-epoxy-vf60-reference-2025
+redistribution	permitted	Selected attributed numerical facts and original modeling notes only; no source document, prose or table layout is redistributed
+citation	Toray Composite Materials America, TORAYCA T700S Standard Modulus Carbon Fiber Data Sheet, revision 11/24/2025, page 1 composite properties and normalization footnote; https://www.toraycma.com/wp-content/uploads/T700S-Data-Sheet.pdf
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	toray-composite	properties.tsv	material-tsv-v1
+property	composite_tensile_modulus	composite-tensile-modulus	dimensional
+property	composite_tensile_strength	composite-tensile-strength	dimensional
+property	composite_flexural_modulus	composite-flexural-modulus	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	cure_temperature	cure-temperature	absolute-temperature
+axis	normalization_fiber_volume_fraction	normalization-fiber-volume-fraction	dimensional
+axis	engineering_reference_model	engineering-reference-model	dimensional
+axis	source_resin_formulation_known	source-resin-formulation-known	dimensional
+axis	source_coupon_direction_known	source-coupon-direction-known	dimensional

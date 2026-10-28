@@ -347,3 +347,84 @@ fn g0_g3_aerated_concretes_preserve_formulation_and_dry_ten_degree_conductivity(
         );
     }
 }
+
+#[test]
+fn g0_g3_osb_and_lvl_preserve_direction_statistics_and_thickness() {
+    let osb = compile("smartply-strongdeck-osb4-30mm-reference", 6);
+    let p = quantity(
+        unknown("source-product-smartply-strongdeck"),
+        "nominal-thickness",
+        LENGTH,
+        0.030,
+    );
+    sample(&osb, "density", RHO, &p, 600.0);
+    sample(
+        &osb,
+        "density-relative-declared-tolerance",
+        Dims::NONE,
+        &p,
+        0.15,
+    );
+    sample(&osb, "thermal-conductivity", K, &p, 0.13);
+    sample(&osb, "bending-moe-major-mean", PA, &p, 8.1e9);
+    sample(&osb, "bending-moe-minor-mean", PA, &p, 3.0e9);
+    sample(&osb, "planar-shear-modulus-mean", PA, &p, 40e6);
+    refuses(&osb, "young-modulus", PA, &p);
+    refuses(
+        &osb,
+        "bending-moe-major-mean",
+        PA,
+        &p.clone().with("nominal-thickness", 0.029).unwrap(),
+    );
+    refuses(
+        &osb,
+        "thermal-conductivity",
+        K,
+        &p.with("source-moisture-condition-known", 1.0).unwrap(),
+    );
+
+    let lvl = compile("metsa-kerto-s-lvl-2023", 6);
+    let p = quantity(
+        unknown("source-product-kerto-s-2023"),
+        "nominal-thickness",
+        LENGTH,
+        0.045,
+    );
+    sample(&lvl, "density", RHO, &p, 510.0);
+    sample(&lvl, "density-fifth-percentile", RHO, &p, 480.0);
+    sample(&lvl, "longitudinal-modulus-mean", PA, &p, 13.8e9);
+    sample(
+        &lvl,
+        "longitudinal-modulus-fifth-percentile",
+        PA,
+        &p,
+        11.6e9,
+    );
+    sample(&lvl, "shear-modulus-edgewise-mean", PA, &p, 600e6);
+    sample(&lvl, "shear-modulus-flatwise-parallel-mean", PA, &p, 380e6);
+    refuses(&lvl, "young-modulus", PA, &p);
+    refuses(&lvl, "transverse-modulus-mean", PA, &p);
+    for thickness in [0.021, 0.090] {
+        sample(
+            &lvl,
+            "longitudinal-modulus-mean",
+            PA,
+            &p.clone().with("nominal-thickness", thickness).unwrap(),
+            13.8e9,
+        );
+    }
+    for thickness in [0.020, 0.091] {
+        refuses(
+            &lvl,
+            "longitudinal-modulus-mean",
+            PA,
+            &p.clone().with("nominal-thickness", thickness).unwrap(),
+        );
+    }
+    refuses(
+        &lvl,
+        "longitudinal-modulus-mean",
+        PA,
+        &p.with("source-product-kerto-s-2023", 0.0).unwrap(),
+    );
+}

@@ -1,0 +1,38 @@
+frankensim.matdb-source.v1
+observation	beam	Metsa Kerto LVL S-beam, LVL 48 P, parallel veneers only	UK declaration 10 July 2023; EN 14374 product, EN 1995 design basis	Source covers 21-90 mm thickness. E0,mean covers longitudinal tension/compression and parallel-grain edgewise/flatwise bending. Mean and fifth-percentile values are separate properties, not a confidence interval or guaranteed specimen bounds. Edgewise and flatwise shear moduli retain their directions. Transverse elastic constants marked NPD are omitted. No values are borrowed from cross-laminated Q-panels, and no Poisson ratios, full 3-D tensor, adhesive law or thermal data are inferred. Temperature and moisture of property tests are not stated in this declaration.
+scalar	density	beam	density	510	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_product_kerto_s_2023	1	1	1
+validity	density	nominal_thickness	0.021	0.09	m
+validity	density	source_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+scalar	density-fifth	beam	density_fifth_percentile	480	kg/m3	constant
+uncertainty	density-fifth	unstated	-	-	-	-
+validity	density-fifth	source_product_kerto_s_2023	1	1	1
+validity	density-fifth	nominal_thickness	0.021	0.09	m
+validity	density-fifth	source_temperature_known	0	0	1
+validity	density-fifth	source_moisture_condition_known	0	0	1
+scalar	longitudinal-mean	beam	longitudinal_modulus_mean	13800	MPa	constant
+uncertainty	longitudinal-mean	unstated	-	-	-	-
+validity	longitudinal-mean	source_product_kerto_s_2023	1	1	1
+validity	longitudinal-mean	nominal_thickness	0.021	0.09	m
+validity	longitudinal-mean	source_temperature_known	0	0	1
+validity	longitudinal-mean	source_moisture_condition_known	0	0	1
+scalar	longitudinal-fifth	beam	longitudinal_modulus_fifth_percentile	11600	MPa	constant
+uncertainty	longitudinal-fifth	unstated	-	-	-	-
+validity	longitudinal-fifth	source_product_kerto_s_2023	1	1	1
+validity	longitudinal-fifth	nominal_thickness	0.021	0.09	m
+validity	longitudinal-fifth	source_temperature_known	0	0	1
+validity	longitudinal-fifth	source_moisture_condition_known	0	0	1
+scalar	shear-edgewise	beam	shear_edgewise_mean	600	MPa	constant
+uncertainty	shear-edgewise	unstated	-	-	-	-
+validity	shear-edgewise	source_product_kerto_s_2023	1	1	1
+validity	shear-edgewise	nominal_thickness	0.021	0.09	m
+validity	shear-edgewise	source_temperature_known	0	0	1
+validity	shear-edgewise	source_moisture_condition_known	0	0	1
+scalar	shear-flatwise	beam	shear_flatwise_parallel_mean	380	MPa	constant
+uncertainty	shear-flatwise	unstated	-	-	-	-
+validity	shear-flatwise	source_product_kerto_s_2023	1	1	1
+validity	shear-flatwise	nominal_thickness	0.021	0.09	m
+validity	shear-flatwise	source_temperature_known	0	0	1
+validity	shear-flatwise	source_moisture_condition_known	0	0	1

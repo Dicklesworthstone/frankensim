@@ -1,0 +1,54 @@
+frankensim.matdb-source.v1
+observation	product-reference	Norplex NP510A brominated epoxy/woven glass FR-4 laminate	2022 technical bulletin typical coupon values	LW and CW are the bulletin's lengthwise and crosswise sheet directions. Require np510a-condition-a=1, engineering-reference-model=1 and source-test-temperature-known=0. The authored 293.15-294.15 K interval is a frozen reference, not published thermal coverage. Flexure uses 0.0625-inch specimens; tension uses 0.125-inch specimens. These distinct thicknesses must not be silently combined into one measured coupon. Flexural modulus remains a bending-test quantity, not isotropic Young modulus. No exact glass style, fiber fraction, cure schedule, full orthotropic tensor, Cp or conductivity is supplied. Typical values are not specification limits.
+observation	specific-gravity	NP510A, 0.0625-inch specimen	ASTM D792	Specific gravity 1.85 is retained dimensionlessly; no water-reference temperature is invented to convert it into an exact density.
+observation	flexure	NP510A, 0.0625-inch specimen, Condition A	ASTM D790, LW/CW	Selected printed SI values: flexural moduli 20.0/17.9 GPa and flexural strengths 448.2/358.5 MPa. SI figures are already rounded independently of the imperial columns; no extra precision or confidence is inferred.
+observation	tension	NP510A, 0.125-inch specimen, Condition A	ASTM D638, LW/CW	Selected printed SI tensile strengths 275.8/220.6 MPa; no tensile modulus or failure law follows from these peak stresses.
+scalar	specific-gravity	specific-gravity,product-reference	specific_gravity	1.85	1	constant
+uncertainty	specific-gravity	unstated	-	-	-	-
+validity	specific-gravity	temperature	293.15	294.15	K
+validity	specific-gravity	nominal_thickness	1.5875	1.5875	mm
+validity	specific-gravity	np510a_condition_a	1	1	1
+validity	specific-gravity	engineering_reference_model	1	1	1
+validity	specific-gravity	source_test_temperature_known	0	0	1
+scalar	flexural-modulus-lw	flexure,product-reference	flexural_modulus_longitudinal	20.0	GPa	constant
+uncertainty	flexural-modulus-lw	unstated	-	-	-	-
+validity	flexural-modulus-lw	temperature	293.15	294.15	K
+validity	flexural-modulus-lw	nominal_thickness	1.5875	1.5875	mm
+validity	flexural-modulus-lw	np510a_condition_a	1	1	1
+validity	flexural-modulus-lw	engineering_reference_model	1	1	1
+validity	flexural-modulus-lw	source_test_temperature_known	0	0	1
+scalar	flexural-modulus-cw	flexure,product-reference	flexural_modulus_transverse	17.9	GPa	constant
+uncertainty	flexural-modulus-cw	unstated	-	-	-	-
+validity	flexural-modulus-cw	temperature	293.15	294.15	K
+validity	flexural-modulus-cw	nominal_thickness	1.5875	1.5875	mm
+validity	flexural-modulus-cw	np510a_condition_a	1	1	1
+validity	flexural-modulus-cw	engineering_reference_model	1	1	1
+validity	flexural-modulus-cw	source_test_temperature_known	0	0	1
+scalar	flexural-strength-lw	flexure,product-reference	flexural_strength_longitudinal	448.2	MPa	constant
+uncertainty	flexural-strength-lw	unstated	-	-	-	-
+validity	flexural-strength-lw	temperature	293.15	294.15	K
+validity	flexural-strength-lw	nominal_thickness	1.5875	1.5875	mm
+validity	flexural-strength-lw	np510a_condition_a	1	1	1
+validity	flexural-strength-lw	engineering_reference_model	1	1	1
+validity	flexural-strength-lw	source_test_temperature_known	0	0	1
+scalar	flexural-strength-cw	flexure,product-reference	flexural_strength_transverse	358.5	MPa	constant
+uncertainty	flexural-strength-cw	unstated	-	-	-	-
+validity	flexural-strength-cw	temperature	293.15	294.15	K
+validity	flexural-strength-cw	nominal_thickness	1.5875	1.5875	mm
+validity	flexural-strength-cw	np510a_condition_a	1	1	1
+validity	flexural-strength-cw	engineering_reference_model	1	1	1
+validity	flexural-strength-cw	source_test_temperature_known	0	0	1
+scalar	tensile-strength-lw	tension,product-reference	tensile_strength_longitudinal	275.8	MPa	constant
+uncertainty	tensile-strength-lw	unstated	-	-	-	-
+validity	tensile-strength-lw	temperature	293.15	294.15	K
+validity	tensile-strength-lw	nominal_thickness	3.175	3.175	mm
+validity	tensile-strength-lw	np510a_condition_a	1	1	1
+validity	tensile-strength-lw	engineering_reference_model	1	1	1
+validity	tensile-strength-lw	source_test_temperature_known	0	0	1
+scalar	tensile-strength-cw	tension,product-reference	tensile_strength_transverse	220.6	MPa	constant
+uncertainty	tensile-strength-cw	unstated	-	-	-	-
+validity	tensile-strength-cw	temperature	293.15	294.15	K
+validity	tensile-strength-cw	nominal_thickness	3.175	3.175	mm
+validity	tensile-strength-cw	np510a_condition_a	1	1	1
+validity	tensile-strength-cw	engineering_reference_model	1	1	1
+validity	tensile-strength-cw	source_test_temperature_known	0	0	1

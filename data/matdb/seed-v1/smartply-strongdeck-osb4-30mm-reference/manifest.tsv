@@ -1,0 +1,16 @@
+frankensim.matdb-manifest.v3
+pack_id	smartply-strongdeck-osb4-30mm-reference
+redistribution	permitted	Selected attributed numerical facts and original notes only; source document and table layout are not redistributed
+citation	MEDITE SMARTPLY, SMARTPLY STRONGDECK datasheet str-ds-en-20, Table 1 physical properties and Table 2 structural properties, PDF pages 3-4; https://files.mutualcdn.com/medite-smartply/files/SMARTPLY-STRONGDECKDatasheet-str-ds-en-20.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	strongdeck	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	density_relative_tolerance	density-relative-declared-tolerance	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	bending_moe_major_mean	bending-moe-major-mean	dimensional
+property	bending_moe_minor_mean	bending-moe-minor-mean	dimensional
+property	planar_shear_modulus_mean	planar-shear-modulus-mean	dimensional
+axis	source_product_smartply_strongdeck	source-product-smartply-strongdeck	dimensional
+axis	nominal_thickness	nominal-thickness	dimensional
+axis	source_temperature_known	source-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
