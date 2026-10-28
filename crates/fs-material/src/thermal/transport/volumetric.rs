@@ -6,6 +6,13 @@
 //! thermodynamic constant-volume mass-specific heat Cv. The caller selects the
 //! source's caloric constraint and scalar conductivity direction explicitly.
 
+/// Continuously supported volumetric storage and transport paths.
+#[path = "volumetric/prepared.rs"]
+mod prepared;
+pub use prepared::{
+    PreparedVolumetricThermalTransport, VolumetricThermalPathQuery, VolumetricThermalSample,
+};
+
 use super::{ThermalTransportError, admit_temperature_point, source_line, transport_values};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{ClaimSelection, MaterialAnswer, MaterialCard, PropertyKey, QueryPoint};
@@ -51,24 +58,7 @@ impl ResolvedVolumetricThermalTransport {
         query: VolumetricThermalSourceQuery<'_>,
     ) -> Result<Self, ThermalTransportError> {
         let keys = [query.volumetric_heat_capacity, query.conductivity];
-        let thermal = QuantitySpec::semantic(SemanticType::new(
-            QuantityKind::ThermalConductivity,
-            ValueForm::Static,
-        ));
-        if keys[0].quantity() != QuantitySpec::dimensional(VOLUMETRIC_HEAT_CAPACITY_DIMS)
-            || (keys[1].quantity() != thermal
-                && keys[1].quantity() != QuantitySpec::dimensional(super::CONDUCTIVITY))
-            || keys.iter().any(|key| {
-                key.hardness_test().is_some()
-                    || key.elastic_component().is_some()
-                    || key.strain_component().is_some()
-                    || key.stress_component().is_some()
-            })
-        {
-            return Err(ThermalTransportError::Invalid(
-                "volumetric storage and scalar static conductivity require their exact quantity roles",
-            ));
-        }
+        admit_keys(keys)?;
         admit_temperature_point(query.point, query.temperature_axis)?;
         let resolve = |index| -> Result<MaterialAnswer, ThermalTransportError> {
             let mut line = source_line(
@@ -180,4 +170,26 @@ impl ResolvedVolumetricThermalTransport {
     pub const fn effusivity_j_m2_k_sqrt_s(&self) -> f64 {
         self.values[3]
     }
+}
+
+fn admit_keys(keys: [&PropertyKey; 2]) -> Result<(), ThermalTransportError> {
+    let thermal = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::ThermalConductivity,
+        ValueForm::Static,
+    ));
+    if keys[0].quantity() != QuantitySpec::dimensional(VOLUMETRIC_HEAT_CAPACITY_DIMS)
+        || (keys[1].quantity() != thermal
+            && keys[1].quantity() != QuantitySpec::dimensional(super::CONDUCTIVITY))
+        || keys.iter().any(|key| {
+            key.hardness_test().is_some()
+                || key.elastic_component().is_some()
+                || key.strain_component().is_some()
+                || key.stress_component().is_some()
+        })
+    {
+        return Err(ThermalTransportError::Invalid(
+            "volumetric storage and scalar static conductivity require their exact quantity roles",
+        ));
+    }
+    Ok(())
 }

@@ -431,13 +431,17 @@ fn source_line(
             "each thermal source must explicitly bound the temperature coordinate",
         ));
     }
+    let temperature_difference = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::TemperatureDifference,
+        ValueForm::Static,
+    ));
     if claim.validity.bounds().keys().any(|name| {
         name != axis
             && (name == "T"
                 || lower
                     .axis_quantities()
                     .get(name)
-                    .is_some_and(|q| q.dims() == TEMPERATURE))
+                    .is_some_and(|q| q.dims() == TEMPERATURE && *q != temperature_difference))
     }) {
         return Err(invalid(
             "a second source temperature requires an explicitly coupled thermal owner",
@@ -447,12 +451,9 @@ fn source_line(
         if name == axis {
             dims == TEMPERATURE
         } else {
-            dims != TEMPERATURE
-                && lower
-                    .axis_quantities()
-                    .get(name)
-                    .is_some_and(|q| q.dims() == dims)
-                && (dims != INVERSE_TIME || lower.axes().get(name) == Some(&0.0))
+            lower.axis_quantities().get(name).is_some_and(|q| {
+                q.dims() == dims && (dims != TEMPERATURE || *q == temperature_difference)
+            }) && (dims != INVERSE_TIME || lower.axes().get(name) == Some(&0.0))
         }
     }) {
         return Err(invalid(
