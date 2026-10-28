@@ -11,12 +11,17 @@
 //! Assumes equilibrium internal modes, energy/angle-independent equal sticking
 //! probabilities, specular reflection of nonsticking molecules, and a local
 //! free-molecular vapor. Carrier/nonsticking molecules supply no additional
-//! thermal accommodation. There is no gas film, Knudsen-layer flow, jet energy,
+//! thermal accommodation by default. The explicit `accommodation` extension
+//! adds their reflected heat to the SAME endpoint. There is no gas film,
+//! Knudsen-layer flow, jet energy,
 //! external heat, solid pressure work, or moving-mesh update in this operation.
 //!
 //! Rates are explicit, frozen at the initial temperatures. BOTH gross streams
 //! are inventory-bounded, including when their net mass is zero. Refine the
 //! physical timestep to resolve evolving temperatures and backpressure.
+
+/// Explicit reflected-molecule heat on the original caloric and gas owners.
+pub mod accommodation;
 
 /// Joint exchange of heterogeneous surfaces against one evolving gas snapshot.
 pub mod chamber;
@@ -117,6 +122,7 @@ pub struct GasSurfaceStep {
     /// None when no incoming molecules require this caloric query.
     pub incoming_specific_energy_j_kg: Option<f64>,
     /// Complete signed energy delivered to the gas; already includes phase energy.
+    /// The accommodation extension also includes its separately reported heat.
     pub energy_into_gas_j: f64,
     /// Actual solid energy change after applying the fixed datum offset.
     pub solid_energy_change_j: f64,
@@ -454,6 +460,30 @@ where
     L: SublimationLaw + ?Sized,
     F: Fn(f64) -> Result<f64, SublimationError> + ?Sized,
 {
+    prepare_surface_with_heat(
+        law, binding, snapshot, catalog, temperature_from_enthalpy, controls, 0.0,
+    )
+}
+
+// A reflected stream carries heat but no net species mass. Deposit its opposite
+// into the ORIGINAL solid caloric endpoint, not a later temperature-only patch.
+#[allow(clippy::too_many_arguments)]
+fn prepare_surface_with_heat<L, F>(
+    law: &L,
+    binding: &GasSurfaceBinding,
+    snapshot: SurfaceSnapshot,
+    catalog: &ThermochemicalGasModel,
+    temperature_from_enthalpy: &F,
+    controls: GasSurfaceSolve,
+    reflected_heat_into_gas_j: f64,
+) -> Result<PreparedSurface, GasSurfaceError>
+where
+    L: SublimationLaw + ?Sized,
+    F: Fn(f64) -> Result<f64, SublimationError> + ?Sized,
+{
+    if !reflected_heat_into_gas_j.is_finite() {
+        return Err(invalid("reflected molecular heat is unrepresentable"));
+    }
     let SurfaceSnapshot {
         solid,
         gas,
@@ -468,6 +498,11 @@ where
         incoming_specific_energy_j_kg.map_or(0.0, |energy| outgoing_specific_energy_j_kg - energy);
     let energy_into_gas_j =
         transferred_mass_kg * outgoing_specific_energy_j_kg + incoming_mass_kg * difference;
+    let energy_into_gas_j = if reflected_heat_into_gas_j == 0.0 {
+        energy_into_gas_j
+    } else {
+        energy_into_gas_j + reflected_heat_into_gas_j
+    };
     let next_mass = solid.mass_kg - transferred_mass_kg;
     if !energy_into_gas_j.is_finite()
         || !positive(next_mass)
@@ -478,10 +513,15 @@ where
         ));
     }
     let offset = binding.solid_enthalpy_offset_j_kg;
-    let specific_change = (transferred_mass_kg
+    let caloric_change = transferred_mass_kg
         * (solid.specific_enthalpy_j_kg + offset - outgoing_specific_energy_j_kg)
-        - incoming_mass_kg * difference)
-        / next_mass;
+        - incoming_mass_kg * difference;
+    // Retain the original operation tree exactly for the specular default.
+    let specific_change = if reflected_heat_into_gas_j == 0.0 {
+        caloric_change / next_mass
+    } else {
+        (caloric_change - reflected_heat_into_gas_j) / next_mass
+    };
     let next_enthalpy = solid.specific_enthalpy_j_kg + specific_change;
     if !specific_change.is_finite()
         || !next_enthalpy.is_finite()
@@ -542,6 +582,34 @@ where
     })
 }
 
+fn admit_surface_inventory(
+    snapshot: SurfaceSnapshot,
+    duration_s: f64,
+    controls: GasSurfaceSolve,
+) -> Result<(), GasSurfaceError> {
+    let limit = [
+        inventory_limit(
+            duration_s,
+            snapshot.outgoing_mass_kg,
+            snapshot.solid.mass_kg,
+            controls.maximum_gross_inventory_fraction,
+        ),
+        inventory_limit(
+            duration_s,
+            snapshot.incoming_mass_kg,
+            snapshot.gas.vapor_mass_kg,
+            controls.maximum_gross_inventory_fraction,
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .reduce(f64::min);
+    if let Some(maximum_duration_s) = limit {
+        return Err(GasSurfaceError::InventoryLimit { maximum_duration_s });
+    }
+    Ok(())
+}
+
 /// One explicit conservative molecular interval against an evolving original gas.
 ///
 /// The callback inverts the original solid specific-enthalpy chart. The binding
@@ -578,26 +646,7 @@ pub fn advance_surface_with_gas<'catalog, L: SublimationLaw + ?Sized>(
         duration_s,
         controls,
     )?;
-    let limit = [
-        inventory_limit(
-            duration_s,
-            snapshot.outgoing_mass_kg,
-            solid.mass_kg,
-            controls.maximum_gross_inventory_fraction,
-        ),
-        inventory_limit(
-            duration_s,
-            snapshot.incoming_mass_kg,
-            gas_snapshot.vapor_mass_kg,
-            controls.maximum_gross_inventory_fraction,
-        ),
-    ]
-    .into_iter()
-    .flatten()
-    .reduce(f64::min);
-    if let Some(maximum_duration_s) = limit {
-        return Err(GasSurfaceError::InventoryLimit { maximum_duration_s });
-    }
+    admit_surface_inventory(snapshot, duration_s, controls)?;
     poll(&mut cancelled)?;
     let prepared = prepare_surface(
         law,
@@ -614,6 +663,21 @@ pub fn advance_surface_with_gas<'catalog, L: SublimationLaw + ?Sized>(
         energy_into_gas_j: prepared.energy_into_gas_j,
     };
     let endpoint = gas.exchange_species_boundary(catalog, &[row], controls.gas, &mut cancelled)?;
+    finish_surface(binding, solid, gas, gas_snapshot, prepared, endpoint, controls, cancelled)
+}
+
+// Shared publication checks for the specular and accommodating scalar paths.
+#[allow(clippy::too_many_arguments)]
+fn finish_surface<'catalog>(
+    binding: &GasSurfaceBinding,
+    solid: SolidSurfaceState,
+    gas: &ClosedGasParcel,
+    gas_snapshot: GasSpeciesSnapshot,
+    prepared: PreparedSurface,
+    endpoint: GasSpeciesBoundaryCandidate<'catalog>,
+    controls: GasSurfaceSolve,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<GasSurfaceCandidate<'catalog>, GasSurfaceError> {
     let gas_change = endpoint.step().stored_energy_change_j;
     let residual = prepared.solid_energy_change_j + gas_change;
     if !residual.is_finite() || residual.abs() > controls.gas.energy_tolerance_j {
