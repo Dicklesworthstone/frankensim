@@ -1,5 +1,25 @@
 # fs-solid CONTRACT
 
+## Finite-deformation static follower pressure
+
+`hyper3::HyperTetProblem::solve_with_pressure` couples dead referential loads
+and prescribed displacement with uniform follower pressure on the exact matching
+complete closed boundary. The existing Newton owner evaluates current-area
+forces, the analytic pressure tangent and conservative pressure-volume work at
+every accepted or trial state. Force and volume share one geometry evaluation;
+Armijo compares energy/work increments. Pressure ramps with load factor, and
+support reactions include current pressure and applied dead loads. Positive
+pressure compresses; negative pressure denotes outward traction. Invalid trial
+geometry backtracks, cancellation aborts, and nonfinite reactions refuse.
+
+This does not add an equation of state, open-patch loading, nonuniform pressure,
+mixed incompressible elements or limit-point continuation. The focused static
+tests in `tests/hyper3_pressure.rs` compare finite hydrostatic compression and
+expansion, frame transformations, fixed-area traction differences, zero-pressure
+equivalence and finite-deformation support reactions with independent formulas.
+These synthetic regressions require native execution; they do not establish
+experimental material calibration or mesh convergence.
+
 ## Prepared finite-deformation reference geometry
 
 `hyper3::prepared::PreparedHyperTetProblem` retains admitted reference shape

@@ -16,12 +16,12 @@
 //! potential        Pi(u) = sum_e V W(F_e) - f_ext . u
 //! ```
 //!
-//! The static solve uses DEAD (referential) loads: nodal forces and a body force per
-//! reference volume, lumped equally to the four vertices. Prescribed
-//! displacements and loads ramp linearly over `load_steps`.
-//! The separate [`pressure`] kernel supplies uniform current-area force,
-//! analytic force tangent and endpoint-volume work on the complete closed
-//! boundary for consumers such as the native finite-solid dynamics adapter.
+//! The static solve accepts DEAD (referential) nodal/body forces and, through
+//! [`HyperTetProblem::solve_with_pressure`], uniform follower pressure on the
+//! complete closed current boundary. Prescribed displacements and all loads
+//! ramp linearly over `load_steps`. Pressure uses the original [`pressure`]
+//! owner for current-area force, its analytic tangent, and increments of the
+//! conservative potential `p (V_current - V_reference)`.
 //!
 //! # Newton globalization
 //!
@@ -48,8 +48,9 @@
 //!
 //! Static, isothermal, rate-independent hyperelasticity on conforming P1
 //! tetrahedra (constant strain: volumetric locking for nearly incompressible
-//! cards is NOT mitigated; no mixed/F-bar formulation). The static solve remains
-//! dead-load-only. No contact, no limit-point continuation (a solve that
+//! cards is NOT mitigated; no mixed/F-bar formulation). Pressure is uniform on
+//! the complete closed boundary; selected open patches and spatially varying
+//! pressure are not admitted. No contact, no limit-point continuation (a solve that
 //! passes a limit point refuses or must be driven by displacement), no
 //! mesh-convergence claim from a single run. Determinism: sequential
 //! assembly and solves in canonical order, bit-reproducible on one
@@ -718,12 +719,51 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
         }
     }
 
-    /// Solve by load stepping and globalized Newton.
+    /// Solve dead referential loads by load stepping and globalized Newton.
     ///
     /// # Errors
     /// See [`HyperTetError`].
-    #[allow(clippy::too_many_lines)] // one load-step / Newton / line-search loop
     pub fn solve(&self, cx: &Cx<'_>) -> Result<HyperTetSolution, HyperTetError> {
+        self.solve_loaded(None, cx)
+    }
+
+    /// Solve dead loads together with uniform current-area follower pressure.
+    ///
+    /// Positive differential pressure acts inward on the complete closed
+    /// boundary; negative pressure prescribes outward traction. Pressure ramps
+    /// with the dead loads and prescribed displacements. Every Newton and
+    /// backtracking state uses its actual surface normals/areas, the analytic
+    /// pressure tangent, and increments of the potential `p (V - V_reference)`.
+    /// Reactions include pressure forces on prescribed coordinates.
+    ///
+    /// The surface must bind this exact reference mesh. This method does not
+    /// infer a fluid equation of state, admit an open pressure patch, or follow
+    /// an equilibrium branch through a limit point.
+    ///
+    /// # Errors
+    /// Nonfinite pressure, a mismatched reference surface, or [`HyperTetError`].
+    pub fn solve_with_pressure(
+        &self,
+        surface: &pressure::ClosedTetPressureSurface,
+        pressure_pa: f64,
+        cx: &Cx<'_>,
+    ) -> Result<HyperTetSolution, HyperTetError> {
+        checkpoint(cx)?;
+        if !pressure_pa.is_finite() || !surface.matches_reference(self.nodes_m, self.tetrahedra) {
+            return Err(HyperTetError::InvalidInput {
+                what: "finite pressure and the exact reference pressure surface are required".into(),
+            });
+        }
+        self.solve_loaded((pressure_pa != 0.0).then_some((surface, pressure_pa)), cx)
+    }
+
+    #[allow(clippy::too_many_lines)] // one load-step / Newton / line-search owner
+    fn solve_loaded(
+        &self,
+        pressure: Option<(&pressure::ClosedTetPressureSurface, f64)>,
+        cx: &Cx<'_>,
+    ) -> Result<HyperTetSolution, HyperTetError> {
+        checkpoint(cx)?;
         let elements = self.validate()?;
         let n = self.nodes_m.len();
         let dofs = 3 * n;
@@ -741,9 +781,37 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
         let refused =
             |(element, what): (usize, String)| HyperTetError::MaterialRefused { element, what };
         let mut state = self.evaluate(&elements, &u, cx)?.map_err(refused)?;
+        if !state.energy.is_finite() || state.internal.iter().any(|value| !value.is_finite()) {
+            return Err(HyperTetError::InvalidInput {
+                what: "initial solid energy or internal force is not representable".into(),
+            });
+        }
         for step in 1..=self.settings.load_steps {
             let load = step as f64 / self.settings.load_steps as f64;
-            let f_ext = self.external(&elements, load);
+            let f_dead = self.external(&elements, load);
+            let applied_pressure = pressure.map(|(surface, value)| (surface, load * value));
+            // Accepted and trial states share one current-area load owner.
+            // Retain its volume for direct pressure-work increments without
+            // rebuilding the same current geometry for a separate volume call.
+            let loaded = |displacement: &[f64]| -> Result<(Vec<f64>, f64), HyperTetError> {
+                let mut force = f_dead.clone();
+                let mut volume = 0.0;
+                if let Some((surface, value)) = applied_pressure {
+                    let (current_force, current_volume) =
+                        surface.force_and_volume(displacement, value, cx)?;
+                    for (total, current) in force.iter_mut().zip(current_force) {
+                        *total += current;
+                    }
+                    volume = current_volume;
+                }
+                if !volume.is_finite() || force.iter().any(|value| !value.is_finite()) {
+                    return Err(HyperTetError::InvalidInput {
+                        what: "combined load or current pressure volume is not representable".into(),
+                    });
+                }
+                Ok((force, volume))
+            };
+            let (mut f_ext, mut current_volume) = loaded(&u)?;
             let target: Vec<(usize, f64)> = self
                 .prescribed_m
                 .iter()
@@ -766,11 +834,35 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
                     .map(|&(dof, value)| (dof, value - u[dof]))
                     .collect();
                 let pending_any = pending.iter().any(|&(_, dp)| dp != 0.0);
-                // Tangent first: its diagonal times the displacement
-                // magnitude is the force scale of the current deformation,
-                // which stays meaningful at stress-free states (a rigid
-                // motion) where the internal force itself vanishes.
-                let full = self.tangent(&elements, &u, cx)?.map_err(refused)?;
+                // The diagonal times displacement provides a force scale even
+                // at stress-free states where internal force vanishes.
+                let mut full = self.tangent(&elements, &u, cx)?.map_err(refused)?;
+                if let Some((surface, value)) = applied_pressure {
+                    let external_tangent = surface.force_tangent(&u, value, cx)?;
+                    let mut combined = Coo::new(dofs, dofs);
+                    for row in 0..dofs {
+                        if row % 4096 == 0 {
+                            checkpoint(cx)?;
+                        }
+                        for (matrix, sign) in [(&full, 1.0), (&external_tangent, -1.0)] {
+                            let (columns, values) = matrix.row(row);
+                            for (&column, &coefficient) in columns.iter().zip(values) {
+                                combined.push(row, column, sign * coefficient);
+                            }
+                        }
+                    }
+                    full = combined.assemble();
+                }
+                for row in 0..dofs {
+                    if row % 4096 == 0 {
+                        checkpoint(cx)?;
+                    }
+                    if full.row(row).1.iter().any(|value| !value.is_finite()) {
+                        return Err(HyperTetError::InvalidInput {
+                            what: "solid minus follower-pressure tangent is not representable".into(),
+                        });
+                    }
+                }
                 let stiffness = (0..dofs).map(|d| full.get(d, d).abs()).fold(0.0, f64::max);
                 // Common translation is not a deformation scale: it must not
                 // loosen the force-equilibrium gate.
@@ -829,32 +921,58 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
                     for &(dof, dp) in &pending {
                         trial[dof] = alpha.mul_add(dp, trial[dof]);
                     }
-                    if let Ok(evaluated) = self.evaluate(&elements, &trial, cx)? {
+                    if let Ok(evaluated) = self.evaluate(&elements, &trial, cx)?
+                        && evaluated.energy.is_finite()
+                        && evaluated.internal.iter().all(|value| value.is_finite())
+                    {
+                        let (trial_ext, trial_volume) = match loaded(&trial) {
+                            Ok(value) => value,
+                            Err(HyperTetError::Cancelled) => return Err(HyperTetError::Cancelled),
+                            Err(_) => {
+                                alpha *= 0.5;
+                                record.backtracks += 1;
+                                continue;
+                            }
+                        };
                         let acceptable = if pending_any {
                             true
                         } else if slope < 0.0 {
-                            let potential = |e: &Evaluated, x: &[f64]| e.energy - dot(&f_ext, x);
-                            let (before, after) =
-                                (potential(&state, &u), potential(&evaluated, &trial));
-                            after
-                                <= (1e-4 * alpha).mul_add(slope, before)
-                                    + 1e-12 * before.abs().max(after.abs())
+                            // Compare work increments rather than subtracting
+                            // large absolute potentials after rigid drift.
+                            let dead_work = f_dead
+                                .iter()
+                                .zip(trial.iter().zip(&u))
+                                .fold(0.0, |sum, (force, (after, before))| {
+                                    force.mul_add(after - before, sum)
+                                });
+                            let energy_change = evaluated.energy - state.energy;
+                            let pressure_change = applied_pressure
+                                .map_or(0.0, |(_, value)| value * (trial_volume - current_volume));
+                            let change = energy_change - dead_work + pressure_change;
+                            let roundoff = 1e-12
+                                * state
+                                    .energy
+                                    .abs()
+                                    .max(evaluated.energy.abs())
+                                    .max(dead_work.abs())
+                                    .max(pressure_change.abs());
+                            change.is_finite() && change <= 1e-4 * alpha * slope + roundoff
                         } else {
                             let trial_residual: Vec<f64> = free
                                 .iter()
-                                .map(|&d| evaluated.internal[d] - f_ext[d])
+                                .map(|&d| evaluated.internal[d] - trial_ext[d])
                                 .collect();
                             norm(&trial_residual) < residual_norm
                         };
                         if acceptable {
-                            accepted = Some((trial, evaluated));
+                            accepted = Some((trial, evaluated, trial_ext, trial_volume));
                             break;
                         }
                     }
                     alpha *= 0.5;
                     record.backtracks += 1;
                 }
-                let Some((trial, evaluated)) = accepted else {
+                let Some((trial, evaluated, trial_ext, trial_volume)) = accepted else {
                     return Err(HyperTetError::NewtonStalled {
                         load_factor: load,
                         history: record.residual_history,
@@ -862,6 +980,8 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
                 };
                 u = trial;
                 state = evaluated;
+                f_ext = trial_ext;
+                current_volume = trial_volume;
             }
             if !converged {
                 return Err(HyperTetError::NewtonStalled {
@@ -871,12 +991,22 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
             }
             steps.push(record);
         }
-        let f_ext = self.external(&elements, 1.0);
-        let reactions_n = self
+        let mut f_ext = self.external(&elements, 1.0);
+        if let Some((surface, value)) = pressure {
+            for (total, current) in f_ext.iter_mut().zip(surface.force_n(&u, value, cx)?) {
+                *total += current;
+            }
+        }
+        let reactions_n: Vec<(usize, f64)> = self
             .prescribed_m
             .iter()
             .map(|&(dof, _)| (dof, state.internal[dof] - f_ext[dof]))
             .collect();
+        if reactions_n.iter().any(|(_, force)| !force.is_finite()) {
+            return Err(HyperTetError::InvalidInput {
+                what: "support reaction is not representable".into(),
+            });
+        }
         Ok(HyperTetSolution {
             displacement_m: u.as_chunks::<3>().0.to_vec(),
             reactions_n,

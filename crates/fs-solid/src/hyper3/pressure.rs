@@ -153,8 +153,19 @@ impl ClosedTetPressureSurface {
         pressure_pa: f64,
         cx: &Cx<'_>,
     ) -> Result<Vec<f64>, HyperTetError> {
+        self.force_and_volume(displacement_m, pressure_pa, cx)
+            .map(|(force, _)| force)
+    }
+
+    /// Shared load evaluation retains the volume for conservative static work.
+    pub(super) fn force_and_volume(
+        &self,
+        displacement_m: &[f64],
+        pressure_pa: f64,
+        cx: &Cx<'_>,
+    ) -> Result<(Vec<f64>, f64), HyperTetError> {
         finite(pressure_pa)?;
-        let (positions, _) = self.positions_and_volume(displacement_m, cx)?;
+        let (positions, volume) = self.positions_and_volume(displacement_m, cx)?;
         let mut force = vec![0.0; displacement_m.len()];
         for face in &self.faces {
             checkpoint(cx)?;
@@ -168,7 +179,7 @@ impl ClosedTetPressureSurface {
             }
         }
         checkpoint(cx)?;
-        Ok(force)
+        Ok((force, volume))
     }
 
     /// Analytic derivative of the external pressure force with respect to u.

@@ -2,7 +2,11 @@
 //! derivatives, not the surface integration used by the production owner.
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_material::hyper::{Hyperelastic, HyperelasticModel};
 use fs_solid::hyper3::pressure::ClosedTetPressureSurface;
+use fs_solid::hyper3::{
+    HyperTetError, HyperTetProblem, HyperTetSettings, HyperelasticLawField,
+};
 use fs_solid::linear3::TetAssemblyBudget;
 
 const NODES: [[f64; 3]; 4] = [
@@ -287,5 +291,250 @@ fn g3_pressure_geometry_is_invariant_to_large_common_displacement() {
             assert_eq!(reference_tangent.row(row), translated_tangent.row(row));
         }
         assert_eq!(surface.work_j(&zero, &translated, pressure, cx).unwrap(), 0.0);
+    });
+}
+
+/// Independent closed-form Cauchy stress for an isotropic Neo-Hookean stretch.
+fn hydrostatic_pressure(stretch: f64, mu: f64, lambda: f64) -> f64 {
+    let jacobian = stretch.powi(3);
+    -(mu * (stretch * stretch - 1.0) + lambda * jacobian.ln()) / jacobian
+}
+
+#[test]
+fn g1_static_follower_pressure_reaches_exact_finite_hydrostatic_stretch() {
+    with_cx(|_, cx| {
+        let (mu, lambda) = (2.0, 3.0);
+        let material =
+            Hyperelastic::new(HyperelasticModel::NeoHookean { mu, lambda }, 4.0).unwrap();
+        // The same homogeneous physical solution on original and rotated,
+        // translated reference meshes. Constraints remove rigid motions while
+        // leaving all three independent axial stretches free.
+        for rotated in [false, true] {
+            let local = NODES.map(|point| {
+                if rotated {
+                    [-point[1], point[0], point[2]]
+                } else {
+                    point
+                }
+            });
+            let nodes = local.map(|point| {
+                if rotated {
+                    [point[0] + 4.0, point[1] - 2.0, point[2] + 8.0]
+                } else {
+                    point
+                }
+            });
+            let fixed: Vec<(usize, f64)> = local
+                .iter()
+                .enumerate()
+                .flat_map(|(node, point)| {
+                    (0..3).filter_map(move |axis| {
+                        (point[axis] == 0.0).then_some((3 * node + axis, 0.0))
+                    })
+                })
+                .collect();
+            let surface = ClosedTetPressureSurface::new(
+                &nodes,
+                &TETS,
+                TetAssemblyBudget::standard(),
+                4,
+                cx,
+            )
+            .unwrap();
+            let problem = HyperTetProblem {
+                nodes_m: &nodes,
+                tetrahedra: &TETS,
+                material: HyperelasticLawField::Uniform(&material),
+                prescribed_m: &fixed,
+                nodal_forces_n: &[],
+                body_force_n_m3: [0.0; 3],
+                budget: TetAssemblyBudget::standard(),
+                settings: HyperTetSettings {
+                    load_steps: 8,
+                    ..HyperTetSettings::default()
+                },
+            };
+            for stretch in [0.8_f64, 1.2] {
+                let pressure = hydrostatic_pressure(stretch, mu, lambda);
+                let solution = problem.solve_with_pressure(&surface, pressure, cx).unwrap();
+                for (actual, point) in solution.displacement_m.iter().zip(local) {
+                    for axis in 0..3 {
+                        near(actual[axis], (stretch - 1.0) * point[axis], 2.0e-8);
+                    }
+                }
+                near(solution.min_det_f, stretch.powi(3), 5.0e-8);
+                let log_j = 3.0 * stretch.ln();
+                let expected_energy = (0.5 * mu * (3.0 * stretch * stretch - 3.0)
+                    - mu * log_j
+                    + 0.5 * lambda * log_j * log_j)
+                    / 6.0;
+                near(solution.strain_energy_j, expected_energy, 5.0e-9);
+                for (_, reaction) in solution.reactions_n {
+                    near(reaction, 0.0, 2.0e-8);
+                }
+                assert!(solution.steps.iter().all(|step| {
+                    step.residual_history.last().unwrap() <= &problem.settings.relative_tolerance
+                }));
+            }
+        }
+    });
+}
+
+#[test]
+fn g3_follower_pressure_differs_from_frozen_traction_and_zero_pressure_is_exact() {
+    with_cx(|_, cx| {
+        let material = Hyperelastic::new(
+            HyperelasticModel::NeoHookean {
+                mu: 2.0,
+                lambda: 3.0,
+            },
+            4.0,
+        )
+        .unwrap();
+        let fixed = [
+            (0, 0.0),
+            (1, 0.0),
+            (2, 0.0),
+            (4, 0.0),
+            (5, 0.0),
+            (6, 0.0),
+            (8, 0.0),
+            (9, 0.0),
+            (10, 0.0),
+        ];
+        let surface =
+            ClosedTetPressureSurface::new(&NODES, &TETS, TetAssemblyBudget::standard(), 4, cx)
+                .unwrap();
+        let pressure = hydrostatic_pressure(1.2, 2.0, 3.0);
+        let frozen: Vec<(usize, f64)> = surface
+            .force_n(&[0.0; 12], pressure, cx)
+            .unwrap()
+            .into_iter()
+            .enumerate()
+            .collect();
+        let mut problem = HyperTetProblem {
+            nodes_m: &NODES,
+            tetrahedra: &TETS,
+            material: HyperelasticLawField::Uniform(&material),
+            prescribed_m: &fixed,
+            nodal_forces_n: &[],
+            body_force_n_m3: [0.0; 3],
+            budget: TetAssemblyBudget::standard(),
+            settings: HyperTetSettings {
+                load_steps: 8,
+                ..HyperTetSettings::default()
+            },
+        };
+        let follower = problem.solve_with_pressure(&surface, pressure, cx).unwrap();
+        problem.nodal_forces_n = &frozen;
+        let dead = problem.solve(cx).unwrap();
+        assert!((dead.displacement_m[1][0] - follower.displacement_m[1][0]).abs() > 0.01);
+        assert_eq!(dead, problem.solve_with_pressure(&surface, 0.0, cx).unwrap());
+        assert_eq!(dead, problem.solve_with_pressure(&surface, -0.0, cx).unwrap());
+    });
+}
+
+#[test]
+fn g1_static_pressure_reactions_include_current_area_and_supported_dead_loads() {
+    with_cx(|_, cx| {
+        let (mu, lambda, stretch, pressure) = (2.0, 3.0, 1.4_f64, 0.9);
+        let material =
+            Hyperelastic::new(HyperelasticModel::NeoHookean { mu, lambda }, 4.0).unwrap();
+        let prescribed: Vec<(usize, f64)> = NODES
+            .iter()
+            .flatten()
+            .enumerate()
+            .map(|(dof, value)| (dof, (stretch - 1.0) * value))
+            .collect();
+        let dead = [(0, 0.7), (3, -0.2)];
+        let surface =
+            ClosedTetPressureSurface::new(&NODES, &TETS, TetAssemblyBudget::standard(), 4, cx)
+                .unwrap();
+        let problem = HyperTetProblem {
+            nodes_m: &NODES,
+            tetrahedra: &TETS,
+            material: HyperelasticLawField::Uniform(&material),
+            prescribed_m: &prescribed,
+            nodal_forces_n: &dead,
+            body_force_n_m3: [0.0; 3],
+            budget: TetAssemblyBudget::standard(),
+            settings: HyperTetSettings {
+                load_steps: 4,
+                ..HyperTetSettings::default()
+            },
+        };
+        let solution = problem.solve_with_pressure(&surface, pressure, cx).unwrap();
+        let piola = mu * (stretch - 1.0 / stretch) + lambda * 3.0 * stretch.ln() / stretch;
+        let coefficient = (piola + pressure * stretch * stretch) / 6.0;
+        let gradients = [
+            [-1.0, -1.0, -1.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        for (dof, reaction) in solution.reactions_n {
+            let external = dead
+                .iter()
+                .find(|(d, _)| *d == dof)
+                .map_or(0.0, |(_, force)| *force);
+            near(
+                reaction,
+                coefficient * gradients[dof / 3][dof % 3] - external,
+                2.0e-12,
+            );
+        }
+    });
+}
+
+#[test]
+fn g4_static_pressure_rejects_mismatched_surface_nonfinite_load_and_cancellation() {
+    with_cx(|gate, cx| {
+        let material = Hyperelastic::new(
+            HyperelasticModel::NeoHookean {
+                mu: 2.0,
+                lambda: 3.0,
+            },
+            4.0,
+        )
+        .unwrap();
+        let fixed: Vec<(usize, f64)> = (0..12).map(|dof| (dof, 0.0)).collect();
+        let surface =
+            ClosedTetPressureSurface::new(&NODES, &TETS, TetAssemblyBudget::standard(), 4, cx)
+                .unwrap();
+        let mut changed = NODES;
+        changed[1][0] = 1.1;
+        let mismatched = ClosedTetPressureSurface::new(
+            &changed,
+            &TETS,
+            TetAssemblyBudget::standard(),
+            4,
+            cx,
+        )
+        .unwrap();
+        let problem = HyperTetProblem {
+            nodes_m: &NODES,
+            tetrahedra: &TETS,
+            material: HyperelasticLawField::Uniform(&material),
+            prescribed_m: &fixed,
+            nodal_forces_n: &[],
+            body_force_n_m3: [0.0; 3],
+            budget: TetAssemblyBudget::standard(),
+            settings: HyperTetSettings::default(),
+        };
+        assert!(matches!(
+            problem.solve_with_pressure(&mismatched, 1.0, cx),
+            Err(HyperTetError::InvalidInput { .. })
+        ));
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(matches!(
+                problem.solve_with_pressure(&surface, value, cx),
+                Err(HyperTetError::InvalidInput { .. })
+            ));
+        }
+        gate.request();
+        assert!(matches!(
+            problem.solve_with_pressure(&surface, 1.0, cx),
+            Err(HyperTetError::Cancelled)
+        ));
     });
 }
