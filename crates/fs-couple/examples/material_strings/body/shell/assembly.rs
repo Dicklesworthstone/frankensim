@@ -11,6 +11,7 @@ use fs_plate::shell::junction::{
 /// A shell-assembly table written as this v4 profile.
 #[path = "assembly_table.rs"]
 pub(crate) mod table;
+#[path = "assembly/glue.rs"]
 mod glue;
 
 // The il Cannone violin body at 6 mm

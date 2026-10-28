@@ -347,16 +347,17 @@ impl MultiBowStringBank {
         let (external, drives) = support.as_ref()
             .map_or((external, drives), |s| (s.forces.as_slice(), s.drives.as_slice()));
         let config = FrictionGeometryConfig { max_update_terms: limits.max_update_terms };
-        let frame = if let Some(endpoints) = &endpoints {
+        if let Some(endpoints) = &endpoints {
             self.system.step_with_friction_geometry_and_endpoints(external, drives, &geometry,
-                endpoints, normal_geometry, stop_offsets_m, config, gate)?
+                endpoints, normal_geometry, stop_offsets_m, config, gate)?;
         } else {
             self.system.step_with_friction_geometry(external, drives, &geometry,
-                normal_geometry, stop_offsets_m, config, gate)?
-        };
+                normal_geometry, stop_offsets_m, config, gate)?;
+        }
+        let frame = self.system.last_frame().expect("accepted friction geometry step");
         if let Some(support) = support {
             self.bow_stations.as_mut().expect("admitted bow motion")
-                .fiber_support.as_mut().expect("admitted fiber support").accept(support);
+                .fiber_support.as_mut().expect("admitted fiber support").accept(support, &self.system, frame);
         }
         if let Some(end) = stations {
             self.bow_stations

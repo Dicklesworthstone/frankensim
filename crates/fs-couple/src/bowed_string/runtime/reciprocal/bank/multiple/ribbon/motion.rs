@@ -8,9 +8,10 @@
 //!
 //! Straight parallel fibers and prescribed normal loads remain this rung's
 //! assumptions. Normal patches and rosin histories are not transported. The
-//! mechanical ledger is a SUPPORT-FRAME balance: external work includes the
-//! inertial load. It is not laboratory-frame anchor work, which also includes
-//! rigid translation and momentum cross terms. Refine time, span modes and width.
+//! native mechanical ledger is a SUPPORT-FRAME balance: external work includes
+//! the inertial load. `FiberSupportFrame` additionally accounts for rigid
+//! translation and momentum cross terms in laboratory energy and support work.
+//! Refine time, span modes and width.
 use super::super::stations::BowStationMotionLimits;
 use super::super::*;
 use crate::fiber_ribbon::FiberDirection;
@@ -54,11 +55,30 @@ pub struct FiberSupportKinematics {
     pub displacement_m: f64,
     pub station_fraction: f64,
 }
+/// Laboratory-frame balance of one accepted step of the original fiber owner.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FiberSupportFrame {
+    pub sample: u64,
+    pub velocity_m_s: f64,
+    pub translation_m: f64,
+    pub acceleration_m_s2: f64,
+    /// `-a sum Gamma_n delta_q_n`, already included in native external work [J].
+    pub inertial_coordinate_work_j: f64,
+    /// `V sum Gamma_n qdot_n + M V^2/2`, added to native storage [J].
+    pub laboratory_kinetic_correction_j: f64,
+    /// Native drive work + inertial work + change of kinetic correction [J].
+    /// Other applied forces and moving normal supports keep their own accounts.
+    pub support_work_j: f64,
+    /// Complete accepted mechanical storage plus the kinetic correction [J].
+    pub laboratory_mechanical_energy_j: f64,
+}
 pub(crate) struct FiberSupportState {
     limits: FiberSupportMotionLimits,
     accepted: FiberSupportKinematics,
     participation: Vec<f64>,
     force_start: usize,
+    mass_kg: f64,
+    last_frame: Option<FiberSupportFrame>,
 }
 pub(crate) struct FiberSupportStep {
     accepted: FiberSupportKinematics,
@@ -67,20 +87,36 @@ pub(crate) struct FiberSupportStep {
     start_shape: Vec<f64>,
     end_shape: Vec<f64>,
     start_speed_m_s: f64,
+    acceleration_m_s2: f64,
+    previous_displacement_moment: f64,
+    previous_kinetic_correction_j: f64,
     pub(crate) forces: Vec<f64>,
     pub(crate) drives: Vec<FrictionDrive>,
 }
 impl FiberSupportStep {
-    pub(crate) fn endpoint_geometry(&self, cell: usize, left_start: ModalAttachment,
-        left_end: ModalAttachment) -> FrictionEndpointGeometry {
+    pub(crate) fn endpoint_geometry(
+        &self,
+        cell: usize,
+        left_start: ModalAttachment,
+        left_end: ModalAttachment,
+    ) -> FrictionEndpointGeometry {
         FrictionEndpointGeometry {
-            start: FrictionGeometry { left: left_start, right: Some(ModalAttachment {
-                component: self.component_start + cell, shapes: self.start_shape.clone(),
-            }) },
-            end: FrictionGeometry { left: left_end, right: Some(ModalAttachment {
-                component: self.component_start + cell, shapes: self.end_shape.clone(),
-            }) },
-            start_speed_m_s: self.start_speed_m_s, end_speed_m_s: self.accepted.velocity_m_s,
+            start: FrictionGeometry {
+                left: left_start,
+                right: Some(ModalAttachment {
+                    component: self.component_start + cell,
+                    shapes: self.start_shape.clone(),
+                }),
+            },
+            end: FrictionGeometry {
+                left: left_end,
+                right: Some(ModalAttachment {
+                    component: self.component_start + cell,
+                    shapes: self.end_shape.clone(),
+                }),
+            },
+            start_speed_m_s: self.start_speed_m_s,
+            end_speed_m_s: self.accepted.velocity_m_s,
         }
     }
     pub(crate) fn receiver(&self, cell: usize) -> ModalAttachment {
@@ -105,11 +141,13 @@ fn admit_sources(
     // along accelerating hair still lacks that normal footprint's transport.
     // Keep this restriction local to fiber motion rather than the shared
     // bow-station admission, which also serves fixed material receivers.
-    if !source.bow_contact_loads().is_empty() || source.stops().iter().any(|stop| {
-        stop.body.as_ref().is_some_and(|body| {
-            (start..end).contains(&(source.bank().strings().len() + body.component))
+    if !source.bow_contact_loads().is_empty()
+        || source.stops().iter().any(|stop| {
+            stop.body.as_ref().is_some_and(|body| {
+                (start..end).contains(&(source.bank().strings().len() + body.component))
+            })
         })
-    }) {
+    {
         return Err(error(
             "fiber support motion requires transported normal hair contacts",
         ));
@@ -155,6 +193,65 @@ impl MultiBowStringBank {
         let fiber = admit_sources(&self.source).map_err(RenderError::Friction)?;
         let station_fraction = fiber.station_fraction();
         let participation = fiber.model().axial_translation_participation();
+        let mass_kg = fiber.model().mass_kg();
+        let component_start = fiber.component_start();
+        let component_end = component_start
+            .checked_add(fiber.model().resolution().cells)
+            .ok_or_else(|| RenderError::Friction(error("fiber component span overflow")))?;
+        let components = self
+            .system
+            .components()
+            .get(component_start..component_end)
+            .ok_or_else(|| RenderError::Friction(error("original fiber components are absent")))?;
+        // The retained cell layout contains axial THEN normal modes. Reuse that
+        // complete source projection; never infer offsets from axial count alone.
+        if participation.iter().any(|v| !v.is_finite())
+            || components
+                .iter()
+                .any(|c| c.modes().len() != participation.len())
+        {
+            return Err(RenderError::Friction(error(
+                "fiber participation does not match the retained components",
+            )));
+        }
+        // Every candidate enforces these original component state limits.
+        // Admit the whole frame conversion BEFORE any step, leaving generous
+        // floating-point headroom so accepted mechanics cannot fail afterward
+        // merely while publishing laboratory work/energy.
+        let mut displacement_bound = 0.0;
+        let mut momentum_bound = 0.0;
+        for component in components {
+            let budget = component.budget();
+            for gamma in &participation {
+                displacement_bound += gamma.abs() * budget.maximum_abs_displacement_m_sqrt_kg;
+                momentum_bound += gamma.abs() * budget.maximum_abs_velocity_m_sqrt_kg_per_s;
+            }
+        }
+        let correction_bound = limits.maximum_speed_m_s * momentum_bound
+            + 0.5 * mass_kg * limits.maximum_speed_m_s * limits.maximum_speed_m_s;
+        let inertial_work_bound = limits.maximum_acceleration_m_s2 * (2.0 * displacement_bound);
+        let drive_bound = self
+            .source
+            .bows()
+            .iter()
+            .map(|bow| {
+                bow.friction.maximum_force_n
+                    * limits.maximum_speed_m_s
+                    * self.system.sample_period_s()
+            })
+            .sum::<f64>();
+        // The joint owner bounds total storage, including admitted obstacles.
+        // Reserve each separately reported storage field too, independently
+        // of its partition into network, normal, residual and shear accounts.
+        let account_bound = 4.0 * self.source.bank().options().network.maximum_total_energy_j
+            + drive_bound
+            + inertial_work_bound
+            + 2.0 * correction_bound;
+        if !account_bound.is_finite() || account_bound > f64::MAX / 16.0 {
+            return Err(RenderError::Friction(error(
+                "fiber laboratory frame exceeds representable state/work bounds",
+            )));
+        }
         let force_start = self.system.components()[..fiber.component_start()]
             .iter()
             .map(|c| c.modes().len())
@@ -179,6 +276,8 @@ impl MultiBowStringBank {
             limits,
             participation,
             force_start,
+            mass_kg,
+            last_frame: None,
             accepted: FiberSupportKinematics {
                 velocity_m_s: initial_velocity_m_s,
                 displacement_m: 0.0,
@@ -196,8 +295,34 @@ impl MultiBowStringBank {
     pub fn fiber_support_motion_limits(&self) -> Option<FiberSupportMotionLimits> {
         Some(self.bow_stations.as_ref()?.fiber_support.as_ref()?.limits)
     }
+    /// Last jointly accepted support work and laboratory mechanical energy.
+    #[must_use]
+    pub fn fiber_support_frame(&self) -> Option<&FiberSupportFrame> {
+        self.bow_stations
+            .as_ref()?
+            .fiber_support
+            .as_ref()?
+            .last_frame
+            .as_ref()
+    }
 }
 impl FiberSupportState {
+    fn moments(
+        &self,
+        component_start: usize,
+        cells: usize,
+        system: &MultiFrictionModalSystem,
+    ) -> (f64, f64) {
+        system.components()[component_start..component_start + cells]
+            .iter()
+            .flat_map(|component| component.states().iter().zip(&self.participation))
+            .fold((0.0, 0.0), |(q, v), (state, gamma)| {
+                (
+                    q + gamma * state.displacement_m_sqrt_kg,
+                    v + gamma * state.velocity_m_sqrt_kg_per_s,
+                )
+            })
+    }
     pub(crate) fn prepare(
         &self,
         source: &MultiBowStringBankSource,
@@ -260,10 +385,13 @@ impl FiberSupportState {
             .model()
             .displacement_map(midpoint_station, FiberDirection::Axial)
             .map_err(|_| error("moving fiber projection is unrepresentable"))?;
-        let start_shape = fiber.model()
+        let start_shape = fiber
+            .model()
             .displacement_map(self.accepted.station_fraction, FiberDirection::Axial)
             .map_err(|_| error("initial fiber endpoint projection is unrepresentable"))?;
-        let end_shape = fiber.model().displacement_map(station, FiberDirection::Axial)
+        let end_shape = fiber
+            .model()
+            .displacement_map(station, FiberDirection::Axial)
             .map_err(|_| error("final fiber endpoint projection is unrepresentable"))?;
         let mut forces = external.to_vec();
         for cell in 0..cells {
@@ -288,6 +416,10 @@ impl FiberSupportState {
                 normal_force_n: drive.normal_force_n,
             })
             .collect();
+        let (previous_displacement_moment, momentum) =
+            self.moments(fiber.component_start(), cells, system);
+        let previous_kinetic_correction_j =
+            previous * momentum + 0.5 * self.mass_kg * previous * previous;
         Ok(FiberSupportStep {
             accepted: FiberSupportKinematics {
                 velocity_m_s: velocity,
@@ -299,11 +431,44 @@ impl FiberSupportState {
             start_shape,
             end_shape,
             start_speed_m_s: previous,
+            acceleration_m_s2: acceleration,
+            previous_displacement_moment,
+            previous_kinetic_correction_j,
             forces,
             drives,
         })
     }
-    pub(crate) fn accept(&mut self, step: FiberSupportStep) {
+    pub(crate) fn accept(
+        &mut self,
+        step: FiberSupportStep,
+        system: &MultiFrictionModalSystem,
+        frame: &MultiFrictionFrame,
+    ) {
+        let (displacement, momentum) =
+            self.moments(step.component_start, step.drives.len(), system);
+        let velocity = step.accepted.velocity_m_s;
+        let correction = velocity * momentum + 0.5 * self.mass_kg * velocity * velocity;
+        let inertial_work =
+            -step.acceleration_m_s2 * (displacement - step.previous_displacement_moment);
+        // Material-fiber banks have no lumped series-drive storage; retained
+        // fiber modes already represent that compliance. Moving shear/thermal
+        // patches remain inadmissible under this owner's transport restrictions.
+        let laboratory_energy = frame.network_energy_j
+            + frame.obstacle_energy_j
+            + frame.obstacle_residual_energy_j
+            + frame.shear_layer_energy_j
+            + correction;
+        self.last_frame = Some(FiberSupportFrame {
+            sample: frame.sample,
+            velocity_m_s: velocity,
+            translation_m: step.accepted.displacement_m,
+            acceleration_m_s2: step.acceleration_m_s2,
+            inertial_coordinate_work_j: inertial_work,
+            laboratory_kinetic_correction_j: correction,
+            support_work_j: frame.drive_work_j + inertial_work + correction
+                - step.previous_kinetic_correction_j,
+            laboratory_mechanical_energy_j: laboratory_energy,
+        });
         self.accepted = step.accepted;
     }
 }

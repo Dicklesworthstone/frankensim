@@ -252,7 +252,7 @@ impl TensionedFiberRibbon {
     /// Normal modes have zero axial participation; cell refinement partitions
     /// the original fiber mass instead of adding any support inertia.
     pub fn axial_translation_participation(&self) -> Vec<f64> {
-        let scale = (2.0 * self.cell_line_density_kg_m * self.geometry.length_m).sqrt();
+        let scale = 2.0 * (0.5 * self.cell_line_density_kg_m * self.geometry.length_m).sqrt();
         let mut participation = vec![0.0; self.cell.modes().len()];
         for mode in (1..=self.resolution.axial_modes).step_by(2) {
             participation[mode - 1] = 2.0 * scale / (mode as f64 * core::f64::consts::PI);

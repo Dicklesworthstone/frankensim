@@ -459,6 +459,9 @@ impl input::Spec {
             };
             performance=performance.with_fiber_support_motion(velocity_m_per_s,limits,gate)?;
         }
+        if let Some(program)=self.bow_fibers.as_ref().and_then(|fiber|fiber.support_program.as_ref()) {
+            performance=performance.with_fiber_support_program(program.clone(),gate)?;
+        }
         if let Some(observer)=&self.shell_observer {
             performance=performance.with_material_shell_observer_with_quadrature(
                 observer.clone(),self.shell_receiver_quadrature,gate)?;
@@ -702,6 +705,9 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
                 strain.limits(),strain.config());
         }
     }
+    if let Some(motion)=ready.performance.fiber_support_program() {
+        eprintln!("bow_fiber_support_motion={motion:?}; material-derived frame inertia and laboratory kinetic correction");
+    }
     if let Some(profile)=&ready.body_profile { eprintln!("body_profile={profile:?}"); }
     if let Some(report)=&ready.body_radiation { eprintln!("computed_body_radiation={report}"); }
     // A skin load's first-order receipt at each loaded coordinate's own frequency,
@@ -805,6 +811,9 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     };
     if let Some(trace)=trace.as_mut() { trace.flush()?; }
     let (_,summary)=written.map_err(|e|format!("WAV not completed; keep/discard its partial prefix explicitly: {e}"))?;
+    if let Some(frame)=ready.performance.fiber_support_frame() {
+        eprintln!("bow_fiber_support_frame={frame:?}");
+    }
     eprintln!("samples={}; rate_Hz={}; clips={}; full_scale_Pa={}",summary.samples,summary.sample_rate_hz,
         summary.clipped_samples,summary.full_scale_pa);
     // Steps whose stop missed its tolerance at the actual endpoint and passed it after a headroom re-solve.

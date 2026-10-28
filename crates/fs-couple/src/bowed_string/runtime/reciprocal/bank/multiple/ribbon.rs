@@ -161,6 +161,8 @@ impl ReciprocalStringBank {
     /// Nonuniform support acceleration and contact migration are not inferred.
     /// Explicit `with_fiber_support_motion` adds these from endpoint velocities
     /// and original material mass for the prescribed-load dry-friction rung.
+    /// A performance's `with_fiber_support_program` supplies continuous velocity
+    /// knots to that same owner; laboratory work includes its momentum correction.
     /// Normal load is still prescribed unless the returned normal receivers
     /// are explicitly composed with `with_string_stops` and
     /// `with_bow_contact_loads`. Dry friction is not a thermal rosin law.

@@ -154,7 +154,7 @@ impl MultiBowStringBank {
             base_sample, forces, drives: vec![FrictionDrive { speed_m_s: 0.0, normal_force_n: 0.0 };count],
             candidate: vec![FrictionDrive { speed_m_s: 0.0, normal_force_n: 0.0 };count], poisoned: false,
             string_forces: None, stop_motion: None, stop_station_motion: None, bow_station_motion: None,
-            shell_observer: None })
+            fiber_support: None, shell_observer: None })
     }
 }
 
@@ -200,6 +200,7 @@ pub struct MultiBowPerformance {
     stop_motion: Option<motion::BoundStopMotion>,
     stop_station_motion: Option<stations::BoundStopStations>,
     bow_station_motion: Option<bow_stations::BoundBowStations>,
+    fiber_support: Option<fiber_motion::BoundFiberSupport>,
     shell_observer: Option<observation::BoundShellObserver>,
 }
 impl MultiBowPerformance {
@@ -302,6 +303,13 @@ impl MultiBowPerformance {
                     &loads.candidate
                 } else { &self.forces }
             } else { &self.forces };
+            let drives = if let Some(support) = self.fiber_support.as_mut() {
+                if let Err(error) = support.prepare(sample+1, &self.candidate) {
+                    self.poisoned = true;
+                    return Err(error);
+                }
+                support.drives.as_slice()
+            } else { self.candidate.as_slice() };
             let next_motion = self.stop_motion.as_mut().map(|motion| motion.prepare(sample+1));
             let next_stations = self.stop_station_motion.as_mut().map(|motion| motion.prepare(sample+1));
             let next_bow_stations = self.bow_station_motion.as_mut().map(|motion| motion.prepare(sample+1));
@@ -318,9 +326,12 @@ impl MultiBowPerformance {
                 stop_stations: self.stop_station_motion.as_ref().map(|motion| motion.candidate.as_slice()),
                 stop_offsets_m: self.stop_motion.as_ref().map(|motion| motion.candidate.as_slice()),
             };
-            let result = step(&mut self.bank, forces, &self.candidate, motion);
+            let result = step(&mut self.bank, forces, drives, motion);
             match result {
                 Ok(compact_pressure) => {
+                    if let Some(support) = self.fiber_support.as_mut() {
+                        support.commit();
+                    }
                     *slot = if let Some(observer) = self.shell_observer.as_mut() {
                         match observer.pressure(&self.bank.system) {
                             Ok(pressure) => pressure,
@@ -353,6 +364,9 @@ pub mod stations;
 
 /// Prescribed bow-position trajectories on the same physical sample clock.
 pub mod bow_stations;
+
+/// Material-fiber support acceleration and laboratory energy conversion.
+pub mod fiber_motion;
 
 /// Source-bound finite-distance closed-shell pressure on the same accepted clock.
 pub mod observation;

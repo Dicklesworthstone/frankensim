@@ -48,6 +48,32 @@ without conversion or duplicate types. That lower boundary depends only on
 
 ## Public types and semantics
 
+### Accelerating material-fiber supports
+
+`MultiBowPerformance::with_fiber_support_program` supplies declared continuous
+piecewise-linear axial velocity to the existing `with_fiber_support_motion`
+owner. That owner projects `Gamma_n = integral(rho A phi_n dx)`, supplies
+`-Gamma_n a` to the original modal/contact/nonlinear solve, uses step-average
+support speed, and migrates the crossing along the original material hair.
+There is one inertia law and one accepted support state. The program rejects
+competing tangential gesture speeds or another support-motion control. Velocity,
+acceleration and complete translation extrema are bounded before playback;
+the original finite span independently bounds the moving crossing. Original
+materials, pressure, state and sample clock survive; callback partition cannot
+change the motion.
+
+The native mechanics stores fiber-relative kinetic energy. `FiberSupportFrame`
+adds `V Gamma.qdot + M V^2/2` to recover laboratory mechanical energy. Physical
+support work is native bow drive work plus inertial-coordinate work plus the
+change of that kinetic correction. Both direct and programmed support motion
+use this account. Component-state and work bounds admit representability before
+any physical step; publishing an accepted frame is infallible. Inertial work is
+never heat. Prescribed normal load and dry friction remain this moving-hair
+rung's assumptions; normal/rosin/thermal history transport and stick flexure
+are not supplied. Focused regressions compare free acceleration with the
+independent sine-wave solution, work closure, width refinement, material
+substitution, callback partitions and the original moving-contact owner.
+
 ### Coupled extension and normal deflection of material fibers
 
 `TensionedFiberRibbon::with_axial_transverse_strain` uses the original

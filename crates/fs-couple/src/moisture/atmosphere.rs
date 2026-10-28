@@ -30,7 +30,7 @@ use fs_thermochem::{Composition, CompositionBasis, UNIVERSAL_GAS_CONSTANT_J_PER_
 
 /// Source-backed equilibrium surface content on an explicit dry-mass basis.
 /// This is an isotherm, not instantaneous equilibration of the slab interior.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DryBasisSorption {
     card: MaterialCard,
     source: ResolvedMaterialStatePoint,

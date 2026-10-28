@@ -17,7 +17,7 @@ pub const SURFACE_EMISSION_DIMS: Dims = Dims([1, 0, -1, 0, 0, 0]);
 /// Pinned, nonnegative surface transfer source at fixed temperature and actual RH.
 /// A zero coefficient denotes an impermeable surface. Absence of this object
 /// on a sorption law retains the original instantaneous surface equilibrium.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DryBasisSurfaceTransfer {
     card: MaterialCard,
     source: ResolvedMaterialStatePoint,

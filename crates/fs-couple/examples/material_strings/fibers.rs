@@ -1,7 +1,10 @@
 //! Data-only fiber geometry and material selection for the existing renderer.
 use super::*;
-pub use fs_couple::fiber_ribbon::strain::FiberStrainLimits;
+pub use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::fiber_motion::{
+    FiberSupportKnot, FiberSupportProgram,
+};
 pub use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::ribbon::motion::FiberSupportMotionLimits;
+pub use fs_couple::fiber_ribbon::strain::FiberStrainLimits;
 use fs_couple::fiber_ribbon::{FiberRibbonGeometry, FiberRibbonResolution, TensionedFiberRibbon};
 use fs_material::section::{
     ConcentricElasticSection, ConcentricMaterialLayer, axial::YOUNG_VISCOSITY_PROPERTY,
@@ -19,6 +22,7 @@ pub struct Input {
     pub transverse_modes: usize,
     pub strain: Option<(FiberStrainLimits, NonlinearModalConfig)>,
     pub motion: Option<FiberSupportMotionLimits>,
+    pub support_program: Option<FiberSupportProgram>,
 }
 impl Input {
     pub fn mode_count(&self, spec: &input::Spec) -> Result<usize> {
@@ -63,10 +67,21 @@ impl Input {
                 return Err("fiber strain requires retained initial state; nonlinear static preload is not implemented".into());
             }
         }
+        if let Some(program) = &self.support_program {
+            program.validate(spec.samples, spec.rate, &CancelGate::new_clock_free())?;
+            if self.motion.is_some() {
+                return Err("fiber motion and fiber program are exclusive support controls".into());
+            }
+        }
         if let Some(limits) = self.motion {
             limits.validate()?;
+        }
+        if self.motion.is_some() || self.support_program.is_some() {
             if spec.contact_thermal || spec.friction.shear_layers().is_some() {
-                return Err("fiber support motion requires transported shear/thermal material patches".into());
+                return Err(
+                    "fiber support motion requires transported shear/thermal material patches"
+                        .into(),
+                );
             }
         }
         // An accelerating stroke must opt into source-derived inertia and
@@ -79,8 +94,12 @@ impl Input {
             else {
                 return Err("fiber ribbon needs a complete bow drive".into());
             };
+            if self.support_program.is_some() && initial != 0.0 {
+                return Err("fiber support program requires zero competing gesture speed".into());
+            }
             for event in &track.events {
-                if self.motion.is_none() && !matches!(event.value, GestureValue::Bow { velocity_m_per_s, .. }
+                if self.motion.is_none()
+                    && !matches!(event.value, GestureValue::Bow { velocity_m_per_s, .. }
                     if velocity_m_per_s.to_bits() == initial.to_bits())
                 {
                     return Err("frozen-station fiber ribbon requires constant support speed; load may vary".into());

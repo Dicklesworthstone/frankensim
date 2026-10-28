@@ -254,10 +254,42 @@ terms within the same explicit map-work budget.
 
 This motion rung presently accepts prescribed normal loads and dry friction.
 Normal contacts on hair, contact-loaded bows and retained rosin/thermal patches
-require spatial history transport and still refuse. Its energy ledger is in the
-accelerating support frame, with inertial-force work included in external work;
-it is not laboratory-frame anchor work. Omitting `bow_fiber_motion` retains the
-explicit constant-speed, frozen-station model used by the fixtures below.
+require spatial history transport and still refuse. The native mechanical ledger
+is in the accelerating support frame, with inertial-force work included in
+external work. `FiberSupportFrame` also reports laboratory mechanical energy
+and physical support work. It adds the rigid-translation kinetic energy and
+the cross term between support velocity and the original fibers' modal momentum;
+coordinate inertia work is never classified as frictional heat.
+
+For a continuous acceleration or reversal, use this alternative record followed
+by velocity endpoints on the original mechanical sample clock:
+
+```text
+bow_fiber_program INITIAL_SPEED_M_S MAX_SPEED_M_S MAX_ACCELERATION_M_S2 MAX_ABS_TRANSLATION_M MAX_UPDATE_TERMS KNOTS
+fiber_speed SAMPLE VELOCITY_M_S
+```
+
+For example, a 48 kHz performance of at least 384 samples can use:
+
+```text
+bow_fiber_program 0 0.1 20 0.01 1048576 3
+fiber_speed 128 0.02
+fiber_speed 256 -0.02
+fiber_speed 384 0
+```
+
+Velocity varies linearly between declared endpoints, and holds its final value
+after the last knot. Sample 1 is the end of the first physical interval. The
+original bow track must have zero tangential speeds and continues to prescribe
+normal load. The program supplies endpoint velocities to the **same** support
+inertia and moving-contact owner as `bow_fiber_motion`; choosing both refuses.
+Velocity, acceleration, translation at reversal extrema, and held final travel
+are checked before playback. The finite material hair span is also enforced by
+the original contact owner. Callback block size does not change this motion.
+
+Omitting both records retains the explicit constant-speed, frozen-station model
+used by the fixtures below. Neither selection establishes measured-instrument
+sound quality; the material, geometry and resolution still require validation.
 
 Each cell receives its quadrature share of the **original fiber count**, mass,
 axial stiffness, bending stiffness, tension and material losses. Independent
@@ -360,10 +392,10 @@ tension, unsupported resolution, incompatible solve settings, nonlinear static
 preload and a failed joint solve refuse. Viscosity remains the original
 small-strain operator; finite-slope viscous coupling is not supplied.
 
-Without `bow_fiber_motion`, changing support speed still refuses. The optional
-motion record supplies frame-acceleration forces and the moving material crossing
-described above. Neither path models a flexible bow stick, inter-hair rubbing or
-transported thermal rosin histories. Axial and normal mode
+Without `bow_fiber_motion` or `bow_fiber_program`, changing support speed still
+refuses. The optional motion controls supply frame-acceleration forces and the
+moving material crossing described above. Neither path models a flexible bow
+stick, inter-hair rubbing or transported thermal rosin histories. Axial and normal mode
 counts, ribbon cells and physical sample rate are
 independent refinement axes. A selected mode outside source validity or the
 clock's Nyquist guard is refused, never discarded.

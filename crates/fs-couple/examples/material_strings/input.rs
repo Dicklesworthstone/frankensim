@@ -775,7 +775,7 @@ impl Spec {
                 length_m: row.positive()?, fiber_count: row.count(1 << 24)?,
                 tension_n: row.positive()?, station_fraction: row.scalar()?,
                 axial_modes: row.count(MAX_MODES)?, transverse_modes: row.count(MAX_MODES)?,
-                strain: None, motion: None,
+                strain: None, motion: None, support_program: None,
             };
             row.end()?;
             if r.lines.clone().next()
@@ -803,6 +803,30 @@ impl Spec {
                 row.end()?;
                 limits.validate()?;
                 input.motion = Some(limits);
+            }
+            if r.lines.clone().next()
+                .and_then(|line| line.split_ascii_whitespace().next()) == Some("bow_fiber_program") {
+                let mut row = r.row("bow_fiber_program")?;
+                let initial_velocity_m_s = row.scalar()?;
+                let maximum_speed_m_s = row.positive()?;
+                let maximum_acceleration_m_s2 = row.positive()?;
+                let maximum_abs_translation_m = row.positive()?;
+                let max_update_terms = row.count(1_048_576)?;
+                let count = row.count(MAX_EVENTS)?;
+                row.end()?;
+                let mut knots = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let mut row = r.row("fiber_speed")?;
+                    let sample = row.word()?.parse::<u64>()?;
+                    let velocity_m_s = row.scalar()?;
+                    row.end()?;
+                    knots.push(fibers::FiberSupportKnot { sample, velocity_m_s });
+                }
+                input.support_program = Some(fibers::FiberSupportProgram {
+                    initial_velocity_m_s, knots, maximum_speed_m_s,
+                    maximum_acceleration_m_s2, maximum_abs_translation_m,
+                    max_knots: MAX_EVENTS, max_update_terms,
+                });
             }
             Some(input)
         } else { None };

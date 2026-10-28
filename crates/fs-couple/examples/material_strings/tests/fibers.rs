@@ -65,6 +65,57 @@ fn ready(cx: &Cx<'_>, gate: &CancelGate, density: f64) -> Ready {
         .unwrap()
 }
 
+fn accelerating_fiber_text() -> String {
+    include_str!("../fiber-ribbon.material-strings")
+        .replace("48000 4096", "48000 256")
+        .replace("initial\tbow\t1e-2\t", "initial\tbow\t0\t")
+        .replace("forces retain", concat!(
+            "bow_fiber_program 0 0.1 20 0.01 1048576 3\n",
+            "fiber_speed 64 0.01\nfiber_speed 128 -0.01\nfiber_speed 192 0\n",
+            "forces retain"))
+}
+
+#[test]
+fn source_declared_fiber_support_acceleration_reversal_and_material_reach_wav() {
+    scoped(|cx,gate| {
+        let make=|density| input::Spec::parse(accelerating_fiber_text().as_bytes()).unwrap()
+            .compile(cx,gate,|name| Ok(if name=="fiber.fsmatpk" {fiber_pack(density,false)}
+                else {pack(name,7800.0,200_000.0,None)})).unwrap();
+        let mut actual=make(1300.0);
+        let mut dense=make(5200.0);
+        assert_eq!(actual.performance.fiber_support_program().unwrap().knots.len(),3);
+        let expected=pressure(&mut actual,37);
+        let changed=pressure(&mut dense,128);
+        assert!(expected.iter().any(|v|v.abs()>1e-12));
+        assert!(expected.iter().zip(changed).any(|(a,b)|(a-b).abs()>1e-12));
+        let frame=actual.performance.fiber_support_frame().unwrap();
+        assert_eq!(frame.sample,256);
+        assert_eq!(frame.velocity_m_s,0.0);
+        assert!(frame.laboratory_mechanical_energy_j>0.0);
+        let (encoded,clips)=fs_couple::pcm_wav::encode_pcm16_wav(&expected,48000,0.01).unwrap();
+        let mut streamed=make(1300.0);
+        let (output,summary)=streamed.write(Cursor::new(Vec::<u8>::new()),gate).unwrap();
+        assert_eq!(output.into_inner(),encoded);
+        assert_eq!(summary.clipped_samples,clips as u64);
+        assert_eq!(actual.performance.fiber_support_frame(),streamed.performance.fiber_support_frame());
+    });
+}
+
+#[test]
+fn unsupported_support_motion_refuses_before_source_io() {
+    let text=accelerating_fiber_text();
+    for (from,to) in [
+        ("bow_fiber_program 0 0.1 20 0.01 1048576 3", "bow_fiber_program 0 0.1 1 0.01 1048576 3"),
+        ("fiber_speed 128 -0.01", "fiber_speed 64 -0.01"),
+        ("fiber_speed 192 0", "fiber_speed 257 0"),
+        ("initial\tbow\t0\t", "initial\tbow\t1e-2\t"),
+        ("bow_fiber_program 0", "bow_fiber_motion 1 1000 0.001 1048576\nbow_fiber_program 0"),
+        ("bow_fibers fiber.fsmatpk 0.00004 0.6 180 40 0.4 2 2\n", ""),
+    ] {
+        assert!(input::Spec::parse(text.replace(from,to).as_bytes()).is_err(),"{from}");
+    }
+}
+
 #[test]
 fn material_fiber_input_changes_the_actual_shared_pressure_and_wav() {
     scoped(|cx, gate| {

@@ -28,7 +28,7 @@ use super::super::{CoupledModalSystem, ModalAttachment, ModalCouplingError,
     dot, finite, invalid, limit, poll};
 
 /// Signed tangential attachment; a missing right side is a prescribed surface.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ModalFrictionPort {
     /// Positive side of x, receiving +B_left F.
     pub left: ModalAttachment,
