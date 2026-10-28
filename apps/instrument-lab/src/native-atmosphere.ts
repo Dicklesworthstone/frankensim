@@ -5,10 +5,13 @@ import { editNativeGasRegion, nativeGasRegions, type NativeGasRegion, type Nativ
 export function createNativeAtmosphereControls(readSource: () => string, writeSource: (source:string) => void,
   draftChanged: () => void) {
   const selection = el("select", {"aria-label":"Gas region in the native performance"});
-  const kind = el("select", {"aria-label":"Native gas model"},
-    el("option", {value:"moist-air"}, "Moist air — relative humidity"),
-    el("option", {value:"mixture"}, "Declared species mixture"),
-    el("option", {value:"thermochemical"}, "Attached thermochemical species"));
+  const kind = el("select", {"aria-label":"Native gas model"});
+  const kindLabels: Record<NativeGasValues["kind"], string> = {
+    "dry-air":"Dry air — evolving physical gas",
+    "moist-air":"Moist air — relative humidity",
+    mixture:"Declared species mixture",
+    thermochemical:"Attached thermochemical species",
+  };
   const field = (label:string) => el("input", {type:"text", inputmode:"decimal", spellcheck:"false", "aria-label":label});
   const temperature = field("Gas temperature in kelvin"), pressure = field("Absolute gas pressure in pascals");
   const humidity = field("Relative humidity as a fraction");
@@ -43,18 +46,21 @@ export function createNativeAtmosphereControls(readSource: () => string, writeSo
     selection.disabled = locked || dirty;
     const legacy = kind.value === "moist-air";
     humidityLabel.hidden = !legacy;
-    mixture.hidden = legacy;
+    mixture.hidden = kind.value !== "mixture" && kind.value !== "thermochemical";
     pressure.disabled = locked || (legacy && Boolean(selected?.inherited));
     common.disabled = locked || pressure.disabled;
     if (common.disabled) common.checked = false;
     add.disabled = locked || rows.length >= (kind.value === "mixture" ? 6 : 128);
     apply.disabled = locked || !dirty;
     cancel.disabled = locked || !dirty;
-    modelHelp.textContent = legacy
+    modelHelp.textContent = kind.value === "dry-air"
+      ? "The native dry-air law evolves the resolved gas fields. To select thermochemical species, first author energy_solve TOLERANCE_J_PER_KG MAX_ITERATIONS after fluid_limits in the performance editor. Switching back requires removing that record yourself."
+      : legacy
       ? `The native moist-air owner derives the gas state from temperature, pressure and relative humidity.${selected?.inherited ? " This segment inherits ambient pressure; select ambient to change it." : ""}`
       : kind.value === "mixture"
         ? "Use the native species IDs N2, O2, Ar, CO2, H2O or He. Fractions must sum to 1; they are never normalized or converted between mole and mass automatically. Native material domains still apply."
-        : "Use exact species IDs from the attached species packs. Keep their NASA-9 and transport associations below. Every selected species needs its original sources; the native model derives its state and rejects missing data.";
+        : "Use exact species IDs from the attached species packs. Keep their NASA-9 and transport associations below. Every selected species needs its original sources; the native model derives its state and rejects missing data."
+          + (selected?.supportedKinds.includes("dry-air") ? " Resolved flow also requires an explicitly authored energy_solve record after fluid_limits. Remove it in the performance editor before switching to dry air." : "");
   };
   const changed = (): void => {
     dirty = true; status.textContent = "Atmosphere changes are pending. Apply them to the performance or discard them.";
@@ -74,6 +80,7 @@ export function createNativeAtmosphereControls(readSource: () => string, writeSo
   const load = (): void => {
     selected = regions[Number(selection.value)];
     dirty = false; common.checked = false; rows = []; composition.replaceChildren();
+    kind.replaceChildren(...(selected?.supportedKinds ?? []).map(value => el("option", {value}, kindLabels[value])));
     if (selected) {
       const value = selected.values;
       kind.value = value.kind; temperature.value = value.temperature; pressure.value = value.pressure;
@@ -94,7 +101,7 @@ export function createNativeAtmosphereControls(readSource: () => string, writeSo
   };
   selection.addEventListener("change", load);
   kind.addEventListener("change", () => {
-    if (kind.value !== "moist-air" && !rows.length) addRow();
+    if ((kind.value === "mixture" || kind.value === "thermochemical") && !rows.length) addRow();
     changed();
   });
   for (const input of [temperature, pressure, humidity]) input.addEventListener("input", changed);
@@ -105,6 +112,8 @@ export function createNativeAtmosphereControls(readSource: () => string, writeSo
     if (!selected || locked) return;
     const values: NativeGasValues = kind.value === "moist-air"
       ? {kind:"moist-air", temperature:temperature.value.trim(), pressure:pressure.value.trim(), humidity:humidity.value.trim(), components:[]}
+      : kind.value === "dry-air"
+        ? {kind:"dry-air", temperature:temperature.value.trim(), pressure:pressure.value.trim(), components:[]}
       : {kind:kind.value as "mixture" | "thermochemical", temperature:temperature.value.trim(), pressure:pressure.value.trim(),
         basis:basis.value as "mole" | "mass", components:rows.map(row => ({species:row.species.value.trim(), fraction:row.fraction.value.trim()}))};
     try {

@@ -109,6 +109,8 @@ test('wind calibration comes from the native sidecar and strings from the output
     samples:4, full_scale_pa:200, clipped_samples:0};
   await writeFile(join(dir, 'result.provenance.json'), JSON.stringify(native));
   assert.deepEqual(await nativePressureReceipt('wind', output, {stderr:'irrelevant'}, bytes), receipt(bytes));
+  assert.deepEqual(await nativePressureReceipt('resolved', output, {stderr:'irrelevant'}, bytes),
+    receipt(bytes, {renderer:'resolved'}));
   assert.deepEqual(await nativePressureReceipt('strings', output,
     {stderr:'unrelated\nsamples=4; rate_Hz=48000; clips=0; full_scale_Pa=200\nobstacle_resolves=0\n'}, bytes),
     receipt(bytes, {renderer:'strings'}));
@@ -139,7 +141,7 @@ async function server(t) {
 // Explicit synthetic native-output fixture, not a physical simulation.
 import {readFileSync, writeFileSync} from 'node:fs';
 import {dirname, join} from 'node:path';
-const args = process.argv.slice(2), strings = args[0] !== 'wind', offset = strings ? 0 : 1;
+const args = process.argv.slice(2), strings = !['wind', 'resolved'].includes(args[0]), offset = strings ? 0 : 1;
 const text = readFileSync(args[offset], 'utf8'), output = args[offset + 1];
 writeFileSync(output, Buffer.from('${bytes.toString('base64')}', 'base64'));
 if (!text.includes('no-receipt')) {
@@ -171,9 +173,10 @@ if (!text.includes('no-receipt')) {
   return {request, status, bytes, ready};
 }
 
-for (const renderer of ['wind', 'strings']) {
+for (const renderer of ['wind', 'strings', 'resolved']) {
   test(`${renderer}: native service and client preserve WAV and expose matching pressure calibration`, {skip:process.platform === 'win32'}, async t => {
-    const app = await server(t), header = renderer === 'wind' ? 'frankensim-reed-performance-v1' : 'frankensim-material-strings-v3';
+    const app = await server(t), header = {wind:'frankensim-reed-performance-v1',
+      strings:'frankensim-material-strings-v3', resolved:'frankensim-resolved-dg-performance-v1'}[renderer];
     assert.equal(app.status.supportsPressureReceipts, true);
     const result = await renderNativePerformance(header + '\n', [], app.status, {renderer}, undefined, app.request);
     assert.deepEqual(Buffer.from(await result.wave.arrayBuffer()), app.bytes);

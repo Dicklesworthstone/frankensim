@@ -2,7 +2,7 @@
 import {inspectNativeWave, NATIVE_WAVE_LIMIT} from '../src/native-wave.mjs';
 import {NativeWindError} from '../src/native-experiment.mjs';
 export {MAX_SOURCE_BYTES, MAX_ATTACHMENTS, MAX_ATTACHMENT_FILE_BYTES, MAX_ATTACHMENT_BYTES,
-  MAX_REQUEST_BYTES, SUPPORTED_SCHEMAS, STRING_SCHEMAS, NativeWindError,
+  MAX_REQUEST_BYTES, SUPPORTED_SCHEMAS, STRING_SCHEMAS, RESOLVED_SCHEMAS, NativeWindError,
   validateSource, validateInput} from '../src/native-experiment.mjs';
 
 export const MAX_OUTPUT_BYTES = NATIVE_WAVE_LIMIT;

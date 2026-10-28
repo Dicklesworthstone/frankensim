@@ -4,10 +4,14 @@ const standalone = new Set(['gas', 'ambient', 'exterior', 'dg_exterior', 'dg_chi
 const segments = new Set(['cylinder', 'cone', 'hole', 'duct_section']);
 const numeric = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i;
 const finite = value => typeof value === 'string' && numeric.test(value) && Number.isFinite(Number(value));
+const sourceRows = source => source.replace(/^\ufeff/, '').split(/\r\n|\r|\n/)
+  .map(line => line.trim()).filter(line => line && !line.startsWith('#'));
+const resolvedSchema = 'frankensim-resolved-dg-performance-v1';
 
 /** Locate only supported primitive records; aliases, packs and unknown forms stay untouched. */
 export function nativeGasRegions(source) {
   const regions = [];
+  const resolved = sourceRows(source)[0] === resolvedSchema;
   let line = 0;
   for (const match of source.matchAll(/[^\r\n]+|\r\n|\r|\n/g)) {
     if (/^[\r\n]/.test(match[0])) { line++; continue; }
@@ -22,8 +26,15 @@ export function nativeGasRegions(source) {
     }
     if (first < 0 || first >= words.length) continue;
     const fields = words.slice(first);
+    const resolvedPrimary = resolved && key === 'gas';
+    const supportedKinds = resolvedPrimary ? ['dry-air', 'thermochemical'] : ['moist-air', 'mixture', 'thermochemical'];
     let kind = fields[0], count, consumed, values, pressureIndex;
-    if (kind === 'mixture' || kind === 'thermochemical') {
+    if (kind === 'dry-air') {
+      if (!resolvedPrimary || !finite(fields[1]) || !finite(fields[2])) continue;
+      consumed = 3;
+      values = {kind, temperature:fields[1], pressure:fields[2], components:[]};
+      pressureIndex = first + 2;
+    } else if (kind === 'mixture' || kind === 'thermochemical') {
       count = Number(fields[4]); consumed = 5 + 2 * count;
       if (!/^\d+$/.test(fields[4] ?? '') || count < 1 || count > (kind === 'mixture' ? 6 : 128)
           || consumed > fields.length || !['mole', 'mass'].includes(fields[3])
@@ -40,6 +51,7 @@ export function nativeGasRegions(source) {
         humidity:fields[inherited ? 1 : 2], components:[]};
       pressureIndex = inherited ? null : first + 1;
     }
+    if (!supportedKinds.includes(kind)) continue;
     // duct_section may continue with its original loss declaration. Other
     // recognised records consume the rest of the line in their native readers.
     if (key !== 'duct_section' && consumed !== fields.length) continue;
@@ -47,7 +59,7 @@ export function nativeGasRegions(source) {
     const last = tokens[first + consumed - 1];
     const end = match.index + last.index + last[0].length;
     const pressureToken = pressureIndex === null ? null : tokens[pressureIndex];
-    regions.push({source, start, end, line:line + 1, key, inherited,
+    regions.push({source, start, end, line:line + 1, key, inherited, supportedKinds,
       label:`${key}${inherited ? ' gas' : ''} · line ${line + 1}`, values,
       pressureSpan:pressureToken ? [match.index + pressureToken.index, match.index + pressureToken.index + pressureToken[0].length] : null});
   }
@@ -60,6 +72,9 @@ function gasText(values, inherited) {
     return value;
   };
   const temperature = positive(values.temperature, 'Temperature in kelvin');
+  if (values.kind === 'dry-air') {
+    return ['dry-air', temperature, positive(values.pressure, 'Absolute pressure in pascals')].join(' ');
+  }
   if (values.kind === 'moist-air') {
     if (!finite(values.humidity) || Number(values.humidity) < 0 || Number(values.humidity) > 1) {
       throw new Error('Relative humidity must be a fraction between 0 and 1.');
@@ -92,6 +107,19 @@ function gasText(values, inherited) {
 /** Replace the selected source record, optionally changing every editable explicit pressure. */
 export function editNativeGasRegion(source, region, values, commonPressure = false) {
   if (source !== region.source) throw new Error('The performance changed. Select the gas region again before applying.');
+  if (!region.supportedKinds.includes(values.kind)) {
+    throw new Error(`This native gas owner supports ${region.supportedKinds.join(' or ')}.`
+      + (region.supportedKinds.includes('dry-air') ? ' A resolved flow cannot evolve a mixture or moist-air snapshot.' : ''));
+  }
+  if (region.supportedKinds.includes('dry-air')) {
+    const hasEnergySolve = sourceRows(source).some(line => /^energy_solve(?:\s|$)/.test(line));
+    if (values.kind === 'thermochemical' && !hasEnergySolve) {
+      throw new Error('For resolved thermochemical gas, author an energy_solve TOLERANCE_J_PER_KG MAX_ITERATIONS record after fluid_limits in the performance editor. Its numerical limits are not inferred.');
+    }
+    if (values.kind === 'dry-air' && hasEnergySolve) {
+      throw new Error('For resolved dry-air gas, remove the thermochemical energy_solve record in the performance editor before applying. It is not removed automatically.');
+    }
+  }
   const next = gasText(values, region.inherited);
   const edits = [];
   if (JSON.stringify(values) !== JSON.stringify(region.values)) edits.push([region.start, region.end, next]);

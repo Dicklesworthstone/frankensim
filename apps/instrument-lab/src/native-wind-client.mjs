@@ -86,12 +86,15 @@ export async function renderNativePerformance(source, attachments, status, optio
 
 async function sendNativeWind(source, attachments, status, options, signal, request) {
   const renderer = options.renderer === undefined ? 'wind' : options.renderer;
-  if (!['wind', 'strings'].includes(renderer)) throw new Error("Choose the wind or material-string renderer.");
+  if (!['wind', 'strings', 'resolved'].includes(renderer)) throw new Error("Choose the wind, material-string or resolved-flow renderer.");
   if (renderer === 'strings' && status.renderers?.strings !== true) {
     throw new Error("The material-string renderer is unavailable. Configure material_strings on the local server.");
   }
   if (renderer === 'wind' && status.renderers?.wind === false) {
     throw new Error("The wind renderer is unavailable. Configure music_render on the local server.");
+  }
+  if (renderer === 'resolved' && status.renderers?.resolved !== true) {
+    throw new Error("The resolved-flow renderer is unavailable. Update music_render and the local server.");
   }
   if (options.stringProfiles !== undefined && (renderer !== 'strings' || !options.stringProfiles
       || typeof options.stringProfiles !== 'object' || Array.isArray(options.stringProfiles))) {
@@ -121,7 +124,7 @@ async function sendNativeWind(source, attachments, status, options, signal, requ
     throw new Error("The performance description exceeds the renderer's source limit.");
   }
   let body = bytes, contentType = "text/plain;charset=utf-8";
-  if (attachments.length || options.decimate || options.gasSources !== undefined || renderer === 'strings' || options.stringProfiles !== undefined) {
+  if (attachments.length || options.decimate || options.gasSources !== undefined || renderer !== 'wind' || options.stringProfiles !== undefined) {
     if (![status.maximumAttachments, status.maximumAttachmentFileBytes,
       status.maximumAttachmentBytes, status.maximumRequestBytes].every(positiveInteger)) {
       throw new Error("This local renderer does not support attached source files. Update the local server.");

@@ -1,4 +1,4 @@
-// Optional loopback companion for the existing wind and material-string native performers.
+// Optional loopback companion for the existing wind, resolved-flow and string performers.
 import http from 'node:http';
 import {access, lstat, mkdir, mkdtemp, open, realpath, rm, stat, writeFile} from 'node:fs/promises';
 import {constants, createReadStream} from 'node:fs';
@@ -9,7 +9,7 @@ import {dirname, extname, isAbsolute, join, relative, resolve, sep} from 'node:p
 import {fileURLToPath} from 'node:url';
 import {DEFAULT_TIMEOUT_MS, MAX_LOG_BYTES, MAX_OUTPUT_BYTES, MAX_SOURCE_BYTES,
   MAX_ATTACHMENTS, MAX_ATTACHMENT_FILE_BYTES, MAX_ATTACHMENT_BYTES, MAX_REQUEST_BYTES,
-  NativeWindError, SUPPORTED_SCHEMAS, STRING_SCHEMAS, validateInput, validateWave} from './native-wind-protocol.mjs';
+  NativeWindError, SUPPORTED_SCHEMAS, STRING_SCHEMAS, RESOLVED_SCHEMAS, validateInput, validateWave} from './native-wind-protocol.mjs';
 
 import {nativePressureReceipt} from './native-pressure-receipt.mjs';
 import {PRESSURE_RECEIPT_HEADER} from '../src/native-wave.mjs';
@@ -90,7 +90,8 @@ function runNative(engine, input, output, dir, signal, outputLimit, experiment) 
         ['--gas-component', component.speciesPath, component.nasa9Path, component.transportPath])] : [];
     const profileArgs = [['bodyPath', '--body-profile'], ['stopPath', '--stop-profile'], ['contactThermalPath', '--contact-thermal']]
       .flatMap(([key, flag]) => stringProfiles?.[key] ? [flag, stringProfiles[key]] : []);
-    const child = spawn(engine, [...(experiment.renderer === 'strings' ? [] : ['wind']), input, output,
+    const command = experiment.renderer === 'strings' ? [] : [experiment.renderer ?? 'wind'];
+    const child = spawn(engine, [...command, input, output,
       '--self-contained', ...(decimate ? ['--decimate'] : []), ...sourceArgs, ...gasArgs, ...profileArgs], {cwd:dir, shell:false,
       windowsHide:true, detached:process.platform !== 'win32', stdio:['ignore', 'pipe', 'pipe']});
     let reason, size = 0, forceKill, finished = false; const chunks = [], stdout = [], stderr = [];
@@ -171,9 +172,10 @@ export function createNativeWindServer({engine = process.env.FSIM_MUSIC_RENDER |
       if (req.method === 'GET' && pathname === '/api/native-wind/status') {
         const [wind, strings] = await Promise.all([available(engine), available(stringsEngine)]);
         return send(200,
-        {available:!closing && (wind || strings), renderers:{wind:!closing && wind, strings:!closing && strings}, busy:active !== null, token,
+        {available:!closing && (wind || strings),
+          renderers:{wind:!closing && wind, strings:!closing && strings, resolved:!closing && wind}, busy:active !== null, token,
           maximumSourceBytes:MAX_SOURCE_BYTES, maximumOutputBytes, timeoutMs,
-          supportedSchemas:[...(wind ? SUPPORTED_SCHEMAS : []), ...(strings ? STRING_SCHEMAS : [])],
+          supportedSchemas:[...(wind ? [...SUPPORTED_SCHEMAS, ...RESOLVED_SCHEMAS] : []), ...(strings ? STRING_SCHEMAS : [])],
           maximumAttachments:MAX_ATTACHMENTS, maximumAttachmentFileBytes:MAX_ATTACHMENT_FILE_BYTES,
           maximumAttachmentBytes:MAX_ATTACHMENT_BYTES, maximumRequestBytes:MAX_REQUEST_BYTES, supportsGasSources:true, supportsPressureReceipts:true});
       }
@@ -201,7 +203,7 @@ export function createNativeWindServer({engine = process.env.FSIM_MUSIC_RENDER |
         const selectedEngine = experiment.renderer === 'strings' ? stringsEngine : engine;
         if (!await available(selectedEngine)) throw new NativeWindError(503, experiment.renderer === 'strings'
           ? 'Native material-string executable is unavailable. Build material_strings and configure its absolute path.'
-          : 'Native wind executable is unavailable. Build music_render and configure its absolute path.');
+          : 'Native wind/resolved-flow executable is unavailable. Build music_render and configure its absolute path.');
         if (controller.signal.aborted) throw controller.signal.reason;
         dir = await mkdtemp(join(tempRoot, 'frankensim-native-wind-'));
         const input = join(dir, 'input.performance'), output = join(dir, 'output.wav');
@@ -239,19 +241,22 @@ export function createNativeWindServer({engine = process.env.FSIM_MUSIC_RENDER |
 
 async function cli() {
   let engine = process.env.FSIM_MUSIC_RENDER || null, dist = resolve(here, '../dist'), port = 8787;
+  let timeoutMs = DEFAULT_TIMEOUT_MS;
   let stringsEngine = process.env.FSIM_MATERIAL_STRINGS || null;
   const args = process.argv.slice(2);
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--help') {
-      console.log('node tools/serve-native-wind.mjs [--engine /absolute/path/music_render] [--strings-engine /absolute/path/material_strings] [--dist DIST] [--port 8787]\nFSIM_MUSIC_RENDER and FSIM_MATERIAL_STRINGS select the local executables. Build the app first with npm run build.'); return;
+      console.log('node tools/serve-native-wind.mjs [--engine /absolute/path/music_render] [--strings-engine /absolute/path/material_strings] [--dist DIST] [--port 8787] [--timeout-ms 60000]\nFSIM_MUSIC_RENDER and FSIM_MATERIAL_STRINGS select the local executables. --timeout-ms admits 1..600000 milliseconds per render. Build the app first with npm run build.'); return;
     }
-    if (!['--engine', '--strings-engine', '--dist', '--port'].includes(args[i]) || !args[i + 1]) throw new Error('Unknown or incomplete local-server option.');
+    if (!['--engine', '--strings-engine', '--dist', '--port', '--timeout-ms'].includes(args[i]) || !args[i + 1]) throw new Error('Unknown or incomplete local-server option.');
     const option = args[i], value = args[++i];
     if (option === '--engine') engine = value; else if (option === '--strings-engine') stringsEngine = value;
-    else if (option === '--dist') dist = resolve(value); else port = Number(value);
+    else if (option === '--dist') dist = resolve(value);
+    else if (option === '--timeout-ms') timeoutMs = Number(value);
+    else port = Number(value);
   }
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('Port must be 1024–65535.');
-  const app = createNativeWindServer({engine, stringsEngine, dist});
+  const app = createNativeWindServer({engine, stringsEngine, dist, timeoutMs});
   app.server.on('error', error => { console.error(error.message); process.exitCode = 1; });
   app.server.listen(port, '127.0.0.1', () => console.log(`Instrument Lab + native physics: http://127.0.0.1:${port}\nLocal only; Ctrl+C stops rendering and the server.`));
   process.once('SIGINT', () => void app.shutdown()); process.once('SIGTERM', () => void app.shutdown());

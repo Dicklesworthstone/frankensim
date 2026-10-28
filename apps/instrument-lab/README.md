@@ -61,9 +61,9 @@ changed gets a new URL, so no visitor pairs new code with an hour-old `strandbar
 
 ## Native wind and string renderer
 
-The instrument-family section can edit and render wind and string performances
-with their original material packs using the existing **native `music_render wind`
-and `material_strings` solvers**. Build the local executables and the app, then serve that app through the optional loopback
+The instrument-family section can edit and render wind, resolved-flow and string
+performances with their original material packs using the **native `music_render wind`,
+`music_render resolved` and `material_strings` solvers**. Build the local executables and the app, then serve that app through the optional loopback
 companion. From the repository root:
 
 ```sh
@@ -78,7 +78,11 @@ node apps/instrument-lab/tools/serve-native-wind.mjs \
 Open `http://127.0.0.1:8787`. `FSIM_MUSIC_RENDER` and `FSIM_MATERIAL_STRINGS` can
 supply the respective absolute executable paths; use the actual Cargo output
 paths if your target directory differs. `--dist` selects an existing app build
-and `--port` changes the loopback port. Either performer can be configured on its
+and `--port` changes the loopback port. `--timeout-ms` sets the execution allowance
+for each render, from 1 to 600000 milliseconds (default 60000). For a longer
+resolved-flow calculation, use an explicit allowance such as `--timeout-ms 300000`;
+the panel displays it and Cancel still terminates the native calculation.
+Either executable can be configured on its
 own. The panel reports availability for the selected performer and refuses if
 that executable is absent. Starting without executables leaves the viewer
 available. Static hosted builds do not acquire a native rendering service.
@@ -105,16 +109,53 @@ The panel retains selected bytes and shows their SHA-256 identities. Each WAV
 records the submitted file identities in its playback details; changing a
 source path, file, performer, profile or performance marks the existing WAV as an older result.
 Keep the declared pressure-to-PCM scale fixed when comparing material variants.
-For a DG wind or material-string performance whose source clock is above 48 kHz,
+For a DG wind, resolved-flow or material-string performance whose source clock is above 48 kHz,
 select **Use native decimation**.
-This passes the native `--decimate` option: mechanical integration retains the declared
-clock and the existing native downsampler produces the 48 kHz WAV. The adapter never
+This passes the native `--decimate` option: physical integration retains its original
+timestep and the existing native downsampler produces the 48 kHz WAV. The adapter never
 rewrites the source clock or chooses a lower-resolution physics model.
 The Nolle starter already declares separate mechanical and output clocks,
 which its native observer handles directly.
 Playback never peak-normalizes or retunes the native result. Original model
 limits and missing-source refusals still apply; attaching a pack does not
 qualify an instrument as measured or realistic.
+
+### Resolved gas fields coupled to a duct
+
+Select **Resolved flow — physical gas fields and spatial duct** and open a
+`frankensim-resolved-dg-performance-v1` performance. The local server invokes
+`music_render resolved` with the original source bytes. This lane evolves the
+declared compressible gas fields and their coupling to the spatial duct; it does
+not add a jet-transfer source to the same flow. The native source describes the
+grid, stationary solids, initial physical density/velocity/temperature, incoming
+characteristic history, duct/material walls and pressure observation.
+
+Change those records in the source editor, or replace the original wall and gas
+packs through the shared attachment controls. Thermochemical compositions use
+the same explicit species/NASA-9/transport associations as other native lanes.
+The native gas owner resolves the changing field states from those sources;
+the browser supplies no frozen replacement coefficients. `observation` selects
+inlet diagnostic pressure or the native baffled receiver, and `observer_gas`
+retains the declared propagation model. Keep the receiver and pressure scale
+fixed when comparing two material or atmosphere experiments.
+
+The canonical `resolved-dg.performance` starter is a small exploratory physical
+field fixture. It does not describe a complete flute or reed instrument.
+Native admission retains the stated grid spacing, substeps and physical clock;
+the Lab never coarsens them to fit the execution allowance. Complete experiments
+save and restore this performer, the unchanged source files and gas associations.
+Temperature and composition changes can alter the original material-derived
+physical timestep while the declared observation clock and source duration stay
+fixed. The native interval projection records its clock and bandwidth limits in
+the provenance; refine both clocks for the intended physical frequency range.
+The primary resolved gas offers dry-air and source-backed thermochemical models.
+For a model change, author the thermochemical `energy_solve` row in the source
+editor, or remove it when returning to dry air; the controls preserve those
+numerical choices instead of supplying implicit tolerances. Common-pressure
+edits include both the resolved primary gas and its exterior region.
+The existing native pressure receipt enables the same calibrated A/B comparison
+as the other performers, including refusal of comparisons with mismatched scales
+or clipped outputs.
 
 ### Open a complete material experiment
 

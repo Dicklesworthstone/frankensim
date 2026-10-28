@@ -2,7 +2,7 @@
 import type {NativePressureReceipt} from './native-wave.mjs';
 export interface NativeWindStatus {
   available: boolean;
-  renderers?: { wind: boolean; strings: boolean };
+  renderers?: { wind: boolean; strings: boolean; resolved?: boolean };
   busy: boolean;
   token?: string;
   maximumSourceBytes: number;
@@ -32,7 +32,7 @@ export interface NativeWindGasSources {
 }
 export interface NativeStringProfiles { bodyPath?: string; stopPath?: string; contactThermalPath?: string; }
 export interface NativeWindOptions {
-  renderer?: "wind" | "strings";
+  renderer?: "wind" | "strings" | "resolved";
   decimate?: boolean;
   gasSources?: NativeWindGasSources;
   stringProfiles?: NativeStringProfiles;

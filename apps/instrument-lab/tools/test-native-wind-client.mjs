@@ -274,7 +274,7 @@ test("a selected performer or string profile cannot fall back to another native 
     undefined, never), /wind renderer is unavailable/);
   for (const renderer of [null, "piano"]) {
     await assert.rejects(renderNativeWindBundle("source", [], connected, {renderer}, undefined, never),
-      /Choose the wind or material-string renderer/);
+      /Choose the wind, material-string or resolved-flow renderer/);
   }
   await assert.rejects(renderNativeWindBundle("source", [], connected,
     {stringProfiles:{bodyPath:"body.profile"}}, undefined, never), /material-string renderer/);
@@ -284,4 +284,28 @@ test("a selected performer or string profile cannot fall back to another native 
   }
   await assert.rejects(renderNativeWindBundle("source", [], connected,
     {renderer:"strings", decimate:1}, undefined, never), /decimation explicitly/);
+});
+
+test("resolved sources always select their command, including experiments without attachments", async () => {
+  const connected = {...status, renderers:{wind:true, strings:false, resolved:true},
+    maximumAttachments:32, maximumAttachmentFileBytes:8388608,
+    maximumAttachmentBytes:33554432, maximumRequestBytes:48000000};
+  const source = (await readFile(new URL("../../../crates/fs-couple/examples/resolved-dg.performance", import.meta.url))).toString("utf8");
+  for (const decimate of [false, true]) {
+    await renderNativeWindBundle(source, [], connected, {renderer:"resolved", decimate}, undefined,
+      async (_url, options) => {
+        assert.equal(options.headers["Content-Type"], "application/json;charset=utf-8");
+        const packet = validateInput(new TextEncoder().encode(options.body), true);
+        assert.equal(packet.renderer, "resolved");
+        assert.equal(packet.decimate, decimate);
+        assert.deepEqual(packet.attachments, []);
+        assert.deepEqual(packet.source, new TextEncoder().encode(source));
+        return audio();
+      });
+  }
+  const never = async () => assert.fail("a missing resolved route must not send a wind request");
+  for (const renderers of [undefined, {wind:true, strings:true}, {wind:true, strings:false, resolved:false}]) {
+    await assert.rejects(renderNativeWindBundle(source, [], {...connected, renderers},
+      {renderer:"resolved"}, undefined, never), /resolved-flow renderer is unavailable/);
+  }
 });

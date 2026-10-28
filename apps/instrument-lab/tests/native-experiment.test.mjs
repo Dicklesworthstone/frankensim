@@ -106,3 +106,19 @@ test('binary source packs and invalid edited text cannot enter the text editor',
   for (const text of ['', 'profile\u0000data']) assert.throws(() => editedAttachmentBytes(original, text), /nonempty|binary/);
   assert.equal(decode(original), 'frankensim-contact-thermal-v1\n');
 });
+
+test('resolved experiments retain their performer, original gas sources and physical field files', () => {
+  const source = 'frankensim-resolved-dg-performance-v1\r\n# original geometry and fields µ\r\n';
+  const gasSources = {components:[{speciesPath:'gas/species', nasa9Path:'gas/nasa9',
+    transportPath:'gas/transport'}], waterSpecies:null, phase:'frozen'};
+  const attachments = ['fields/initial.txt', 'wall.fsmatpk', ...Object.values(gasSources.components[0])]
+    .map((path, index) => ({path, bytes:new Uint8Array([0, 255, index, 13, 10])}));
+  const options = {renderer:'resolved', decimate:true, gasSources};
+  const restored = validateInput(encode(serializeNativeExperiment(source, attachments, options)), true);
+  assert.equal(restored.renderer, 'resolved');
+  assert.equal(decode(restored.source), source);
+  assert.deepEqual(restored.attachments, attachments);
+  assert.deepEqual(restored.gasSources, gasSources);
+  assert.equal(restored.decimate, true);
+  assert.deepEqual(validateInput(encode(serializeNativeExperiment(decode(restored.source), restored.attachments, restored)), true), restored);
+});

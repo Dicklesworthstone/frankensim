@@ -34,7 +34,7 @@ export function inspectNativeWave(bytes, limit = NATIVE_WAVE_LIMIT) {
 /** Calibration is emitted by the native writer, never guessed from input text. */
 export function validatePressureReceipt(value, info, renderer) {
   if (!value || value.format !== PRESSURE_RECEIPT_FORMAT
-      || !['wind', 'strings'].includes(value.renderer)
+      || !['wind', 'strings', 'resolved'].includes(value.renderer)
       || (renderer !== undefined && value.renderer !== renderer)
       || value.sampleRateHz !== info.sampleRateHz || value.samples !== info.samples
       || !Number.isFinite(value.fullScalePa) || value.fullScalePa <= 0

@@ -3,6 +3,7 @@ import "./native-wind.css";
 import reedExampleSource from "../../../crates/fs-couple/examples/reed-two-medium-tone-hole.performance?raw";
 import flueExampleSource from "../../../crates/fs-couple/examples/flue-nolle.performance?raw";
 import flueDgSource from "../../../crates/fs-couple/examples/flue-dg-baffled.performance?raw";
+import resolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg.performance?raw";
 import molecularFlueSource from "../../../crates/fs-couple/examples/flue-dg-molecular.performance?raw";
 import materialReedSource from "../../../crates/fs-couple/examples/material_modal_valve/paired-walls.performance?raw";
 import materialReedDgSource from "../../../crates/fs-couple/examples/material_modal_valve/paired-dg-chimney.performance?raw";
@@ -45,6 +46,15 @@ const EXAMPLES = [
     decimate: true,
     intro: "Starter: a flute jet drives a spatial duct with a radiating outlet and mouth. Change the bore and exterior gas compositions independently; the native pressure observer propagates each source through the declared exterior atmosphere.",
     help: "dg_exterior supplies density, sound speed, viscosity, conductivity and heat capacities to the shared Stokes–Kirchhoff propagation law. observer_gas selects that law and its numerical budgets; lossless is an explicit comparison. Native decimation observes the unchanged 96 kHz mechanics at 48 kHz. This short integration fixture uses an interim jet model and is not a measured flute.",
+  },
+  {
+    name: "resolved-dg.performance",
+    label: "Resolved gas — compressible fields and coupled duct",
+    renderer: "resolved",
+    source: resolvedDgSource,
+    decimate: true,
+    intro: "Starter: a small resolved gas field coupled to a spatial duct. Edit the original grid, stationary solids, physical initial states and incoming characteristic history, then render through the native flow solver.",
+    help: "This canonical source observes pressure at 96 kHz, with native decimation selected for 48 kHz playback. Changing the gas retains grid geometry and may change the physical flow/duct timestep; the observation clock stays fixed. Attached thermochemical sources and duct-wall materials use the same controls as other performers. This exploratory field fixture is not a complete flute or reed instrument.",
   },
   {
     name: "flue-dg-molecular.performance",
@@ -120,10 +130,15 @@ export function createNativeWindPanel(): HTMLElement {
   let selectedExample = EXAMPLES[0]!;
   const renderer = el("select", {id: "native-performance-renderer", class: "btn"},
     el("option", {value: "wind"}, "Wind — reeds, jets and material valves"),
+    el("option", {value: "resolved"}, "Resolved flow — physical gas fields and spatial duct"),
     el("option", {value: "strings"}, "Strings — materials, bow/contact and shared body"));
-  const selectedRenderer = (): "wind" | "strings" => renderer.value === "strings" ? "strings" : "wind";
-  const rendererAvailable = (next: NativeWindStatus | null): boolean => Boolean(next?.available
-    && (selectedRenderer() === "strings" ? next.renderers?.strings === true : next.renderers?.wind !== false));
+  const selectedRenderer = (): "wind" | "strings" | "resolved" =>
+    renderer.value === "strings" || renderer.value === "resolved" ? renderer.value : "wind";
+  const rendererAvailable = (next: NativeWindStatus | null): boolean => {
+    const selected = selectedRenderer();
+    return Boolean(next?.available && (selected === "wind"
+      ? next.renderers?.wind !== false : next.renderers?.[selected] === true));
+  };
   const starter = el("select", { id: "native-wind-starter", class: "btn" },
     ...EXAMPLES.map((example) => el("option", { value: example.name }, example.label)));
   const introduction = el("p", { class: "nw-intro" }, selectedExample.intro);
@@ -653,7 +668,7 @@ export function createNativeWindPanel(): HTMLElement {
       el("summary", {}, "About the source and local renderer"),
       sourceHelp,
       el("p", {}, "Wind and material-string descriptions use their original native loaders. Attach the exact material packs and artifacts named by the source, including subdirectory paths. Changing a pack changes its physical properties; missing data and unsupported states remain native refusals. Keep the same declared pressure scale when comparing renders."),
-      el("p", {}, "Rendering uses the local music_render or material_strings executable. The hosted review page can show and edit the source; audio is available when you open it through the local renderer server. String contact-thermal profiles retain their original mechanical clock when pressure is decimated to 48 kHz."),
+      el("p", {}, "Rendering uses the local music_render or material_strings executable. The resolved-flow performer evolves the original gas fields and coupled duct; it uses the same attachment, atmosphere and pressure-comparison controls. The hosted review page can show and edit the source; audio is available through the local renderer server. Native decimation keeps the original physics clocks while observing pressure at 48 kHz."),
       el("p", {}, "Open experiment loads a complete native source packet, including its original material files, gas associations and specimen profiles. Save experiment keeps the current configuration in that same format; neither action renders sound. The material-string launcher can prepare these packets directly from a physical assembly."),
       el("p", {}, canonical,
         " · ", el("a", {href: "https://github.com/Dicklesworthstone/frankensim/tree/main/crates/fs-couple/examples/material_strings", target: "_blank", rel: "noopener"}, "String source-pack instructions"),

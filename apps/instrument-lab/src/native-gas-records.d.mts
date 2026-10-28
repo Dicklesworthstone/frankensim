@@ -1,5 +1,5 @@
 export interface NativeGasValues {
-  kind: 'moist-air' | 'mixture' | 'thermochemical';
+  kind: 'dry-air' | 'moist-air' | 'mixture' | 'thermochemical';
   temperature: string;
   pressure: string;
   humidity?: string;
@@ -13,6 +13,7 @@ export interface NativeGasRegion {
   line: number;
   key: string;
   inherited: boolean;
+  supportedKinds: NativeGasValues['kind'][];
   label: string;
   values: NativeGasValues;
   pressureSpan: [number, number] | null;

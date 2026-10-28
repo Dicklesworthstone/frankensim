@@ -24,7 +24,7 @@ async function setup(options = {}) {
   const fixture = `#!${process.execPath}
 // Synthetic process fixture: never presented as native physics.
 import {readFileSync, writeFileSync, statSync} from 'node:fs';
-const args = process.argv.slice(2), offset = args[0] === 'wind' ? 1 : 0;
+const args = process.argv.slice(2), offset = ['wind', 'resolved'].includes(args[0]) ? 1 : 0;
 const inputPath = args[offset], outputPath = args[offset + 1], input = readFileSync(inputPath);
 const text = input.toString(), requested = /^# read-files (.+)$/m.exec(text);
 const files = requested ? JSON.parse(requested[1]).map(path => ({
@@ -60,7 +60,7 @@ const native = {skip:process.platform === 'win32'};
 test('material strings reuse the exact source packet, gas associations and explicit profile paths', native, async () => {
   const app = await setup({withStrings:true, engine:null});
   try {
-    assert.deepEqual(app.initial.renderers, {wind:false, strings:true});
+    assert.deepEqual(app.initial.renderers, {wind:false, strings:true, resolved:false});
     assert.equal(app.initial.available, true);
     assert.ok(app.initial.supportedSchemas.includes('frankensim-material-strings-v3'));
     const names = ['wire.pack', 'body.pack', 'shape.body', 'finger.stops', 'contact.thermal', 'gas/s', 'gas/n', 'gas/t'];
@@ -84,9 +84,34 @@ test('material strings reuse the exact source packet, gas associations and expli
   } finally { await app.cleanup(); }
 });
 
+test('resolved gas fields and material sources run through their own native command unchanged', native, async () => {
+  const app = await setup({timeoutMs:120000});
+  try {
+    assert.equal(app.initial.renderers.resolved, true);
+    assert.equal(app.initial.timeoutMs, 120000);
+    assert.ok(app.initial.supportedSchemas.includes('frankensim-resolved-dg-performance-v1'));
+    const names = ['fields/initial.txt', 'wall.fsmatpk', 'gas/species', 'gas/nasa9', 'gas/transport'];
+    const bytes = Buffer.from('frankensim-resolved-dg-performance-v1\r\n# read-files '
+      + JSON.stringify(names) + '\r\n# original physical states µ\r\n');
+    const files = names.map((name, i) => [name, Buffer.from([0, 255, i, 13, 10])]);
+    const packet = JSON.parse(bundle(bytes, files));
+    packet.renderer = 'resolved'; packet.decimate = true;
+    packet.gasSources = {components:[{speciesPath:'gas/species', nasa9Path:'gas/nasa9',
+      transportPath:'gas/transport'}], waterSpecies:null, phase:'frozen'};
+    const response = await app.runBundle(JSON.stringify(packet));
+    assert.equal(response.status, 200); assert.equal((await response.arrayBuffer()).byteLength, 48);
+    const record = JSON.parse(await readFile(app.receipt, 'utf8'));
+    assert.equal(record.bytes, bytes.toString('base64'));
+    assert.deepEqual(record.args, ['resolved', join(record.cwd, 'input.performance'), join(record.cwd, 'output.wav'),
+      '--self-contained', '--decimate', ...names.flatMap(name => ['--attached-source', name]),
+      '--gas-water', 'none', '--gas-phase', 'frozen', '--gas-component', 'gas/species', 'gas/nasa9', 'gas/transport']);
+    assert.deepEqual(record.files.map(file => [file.path, file.bytes]), files.map(([path, bytes]) => [path, bytes.toString('base64')]));
+  } finally { await app.cleanup(); }
+});
+
 test('renderer and profile declarations refuse mismatched schemas, unlisted paths and arbitrary flags', () => {
   const bytes = Buffer.from('frankensim-material-strings-v1\nopaque');
-  for (const renderer of ['strings', 'wind', 'shell', null]) {
+  for (const renderer of ['strings', 'wind', 'resolved', 'shell', null]) {
     const packet = {...JSON.parse(bundle(bytes, [['body.profile', Buffer.from('original')]])), renderer};
     if (renderer === 'strings') {
       assert.equal(validateInput(Buffer.from(JSON.stringify(packet)), true).renderer, 'strings');
@@ -96,6 +121,11 @@ test('renderer and profile declarations refuse mismatched schemas, unlisted path
   }
   const wind = {...JSON.parse(bundle(source(), [['body.profile', Buffer.from('original')]])), stringProfiles:{bodyPath:'body.profile'}};
   assert.throws(() => validateInput(Buffer.from(JSON.stringify(wind)), true), /String profiles/);
+  const resolved = {...JSON.parse(bundle(Buffer.from('frankensim-resolved-dg-performance-v1\n'))), renderer:'resolved'};
+  assert.equal(validateInput(Buffer.from(JSON.stringify(resolved)), true).renderer, 'resolved');
+  for (const renderer of ['wind', 'strings'])
+    assert.throws(() => validateInput(Buffer.from(JSON.stringify({...resolved, renderer})), true));
+  assert.throws(() => validateInput(Buffer.from(JSON.stringify({...resolved, stringProfiles:{}})), true), /String profiles/);
 });
 
 test('string source packets cannot fall back to the wind executable', native, async () => {

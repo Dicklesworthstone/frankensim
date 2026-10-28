@@ -11,6 +11,7 @@ test('one data editor reaches canonical flute, reed, chimney and string gases', 
   const cases = [
     ['flue-dg-baffled.performance', ['gas', 'dg_exterior']],
     ['flue-dg-molecular.performance', ['gas', 'dg_exterior']],
+    ['resolved-dg.performance', ['gas', 'dg_exterior']],
     ['reed-two-medium-tone-hole.performance', ['ambient', 'exterior', 'cylinder']],
     ['material_modal_valve/paired-dg-chimney.performance', ['ambient', 'dg_chimney_gas', 'dg_exterior']],
     ['material_strings/rayleigh-observed.material-strings', ['gas']],
@@ -101,4 +102,77 @@ test('invalid fractions are refused without normalization and changing the gas m
     assert.throws(() => editNativeGasRegion(source, region, {...mixture, pressure}), /pressure/);
   }
   assert.equal(source, 'gas 293.15 101325 0\n');
+});
+
+test('resolved dry-air temperature and common pressure reach the original primary and exterior records', async () => {
+  const source = await fixture('resolved-dg.performance');
+  const [primary, exterior] = nativeGasRegions(source);
+  assert.equal(primary.values.kind, 'dry-air');
+  assert.deepEqual(primary.supportedKinds, ['dry-air', 'thermochemical']);
+  assert.deepEqual(exterior.supportedKinds, ['moist-air', 'mixture', 'thermochemical']);
+  const changed = editNativeGasRegion(source, primary,
+    {...primary.values, temperature:'315', pressure:'90000'}, true);
+  assert.equal(changed, source.replace('gas dry-air 300 100000', 'gas dry-air 315 90000')
+    .replace('dg_exterior 300 100000 0', 'dg_exterior 300 90000 0'));
+  const exteriorChanged = editNativeGasRegion(source, exterior,
+    {...exterior.values, temperature:'305', pressure:'85000'}, true);
+  assert.equal(exteriorChanged, source.replace('gas dry-air 300 100000', 'gas dry-air 300 85000')
+    .replace('dg_exterior 300 100000 0', 'dg_exterior 305 85000 0'));
+});
+
+test('resolved primary gas refuses snapshot models while exterior models retain their original choices', async () => {
+  const source = await fixture('resolved-dg.performance');
+  const [primary, exterior] = nativeGasRegions(source);
+  for (const values of [
+    {kind:'moist-air', temperature:'300', pressure:'100000', humidity:'0', components:[]},
+    {kind:'mixture', temperature:'300', pressure:'100000', basis:'mole', components:[{species:'N2', fraction:'1'}]},
+  ]) {
+    assert.throws(() => editNativeGasRegion(source, primary, values), /supports dry-air or thermochemical/);
+    assert.notEqual(editNativeGasRegion(source, exterior, {...values, temperature:'310'}), source);
+  }
+  assert.throws(() => editNativeGasRegion(source, exterior, primary.values), /supports moist-air or mixture or thermochemical/);
+  const changed = editNativeGasRegion(source, exterior, {kind:'thermochemical', temperature:'300',
+    pressure:'100000', basis:'mass', components:[{species:'original-N2', fraction:'1'}]});
+  assert.equal(changed, source.replace('dg_exterior 300 100000 0',
+    'dg_exterior thermochemical 300 100000 mass 1 original-N2 1'));
+});
+
+test('resolved gas model changes require the user to author or remove energy-solve controls', async () => {
+  const source = (await fixture('resolved-dg.performance')).replaceAll('\n', '\r\n');
+  const primary = nativeGasRegions(source)[0];
+  assert.equal(editNativeGasRegion(source, primary, primary.values), source);
+  const thermochemical = {kind:'thermochemical', temperature:'300', pressure:'100000',
+    basis:'mass', components:[{species:'original-N2', fraction:'1'}]};
+  assert.throws(() => editNativeGasRegion(source, primary, thermochemical), /author an energy_solve.*performance editor/);
+  const authored = source.replace('bulk_viscosity', 'energy_solve 0.01 24\r\nbulk_viscosity');
+  const changed = editNativeGasRegion(authored, nativeGasRegions(authored)[0], thermochemical);
+  assert.equal(changed, authored.replace('gas dry-air 300 100000',
+    'gas thermochemical 300 100000 mass 1 original-N2 1'));
+  assert.throws(() => editNativeGasRegion(changed, nativeGasRegions(changed)[0], primary.values),
+    /remove the thermochemical energy_solve.*performance editor/);
+  const removed = changed.replace('energy_solve 0.01 24\r\n', '');
+  assert.equal(editNativeGasRegion(removed, nativeGasRegions(removed)[0], primary.values), source);
+});
+
+test('resolved composition edits retain original geometry, clocks, source attachments and solver controls', async () => {
+  const source = (await fixture('resolved-dg.performance'))
+    .replace('gas dry-air 300 100000', 'gas thermochemical 300 100000 mole 2 source-N2 0.8 source-O2 0.2')
+    .replace('bulk_viscosity', 'energy_solve 0.01 24\nbulk_viscosity');
+  const components = ['source-N2', 'source-O2', 'source-He'].map(id => ({
+    speciesPath:`gas/${id}.species`, nasa9Path:`gas/${id}.nasa9`, transportPath:`gas/${id}.transport`}));
+  const options = {renderer:'resolved', decimate:true, gasSources:{phase:'frozen', waterSpecies:null, components}};
+  const files = components.flatMap(component => Object.values(component)).map((path, i) =>
+    ({path, bytes:new Uint8Array([0, 255, i, 13, 10])}));
+  const primary = nativeGasRegions(source)[0];
+  const changed = editNativeGasRegion(source, primary, {...primary.values, temperature:'310',
+    components:[{species:'source-N2', fraction:'0.6'}, {species:'source-O2', fraction:'0.2'}, {species:'source-He', fraction:'0.2'}]});
+  const expected = source.replace('gas thermochemical 300 100000 mole 2 source-N2 0.8 source-O2 0.2',
+    'gas thermochemical 310 100000 mole 3 source-N2 0.6 source-O2 0.2 source-He 0.2');
+  assert.equal(changed, expected);
+  const packet = validateInput(new TextEncoder().encode(serializeNativeExperiment(changed, files, options)), true);
+  assert.equal(new TextDecoder().decode(packet.source), expected);
+  assert.deepEqual(packet.attachments, files);
+  assert.deepEqual(packet.gasSources, options.gasSources);
+  assert.equal(packet.renderer, 'resolved');
+  assert.equal(packet.decimate, true);
 });
