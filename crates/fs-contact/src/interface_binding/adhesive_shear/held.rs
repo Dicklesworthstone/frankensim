@@ -15,6 +15,18 @@ pub struct SourceAdhesiveContactUpdate {
     contact: AdhesiveContactState,
 }
 impl SourceAdhesiveContactUpdate {
+    /// Actual solid area after conservative full-stick mixed-mode peeling.
+    /// The normal owner must be solved with the actual tangential loading;
+    /// this token transfers geometry and does not solve a slip/peel transition.
+    pub fn from_mixed_mode(
+        response: &crate::normal_patch::adhesive::mixed_mode::JkrMixedModeResponse,
+    ) -> Result<Self, AdhesiveShearError> {
+        Ok(Self {
+            normal_identity: response.normal_state_identity(),
+            contact: response.friction_contact_state()?,
+        })
+    }
+
     /// Actual JKR area, including an attached junction at tensile net load.
     pub fn from_jkr(response: &JkrResponse) -> Result<Self, AdhesiveShearError> {
         Ok(Self {
@@ -50,8 +62,9 @@ impl SourceAdhesiveContactUpdate {
 
 /// Current area/load with the original ordered normal and shear source states.
 /// The whole source query remains fixed as response-derived geometry changes.
-/// This does not infer a thermal refresh, solve normal evolution, or introduce
-/// shear-induced peeling or a new material calibration.
+/// Normal evolution and any shear-induced peeling remain with the normal
+/// response owner. This binding does not infer thermal refresh, solve a coupled
+/// slip/peel transition, or introduce a new material calibration.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SourceAdhesiveTangential {
     normal: BoundNormalInterfaceState,
@@ -60,6 +73,22 @@ pub struct SourceAdhesiveTangential {
     temperature_kelvin: Option<f64>,
 }
 impl SourceAdhesiveShear {
+    /// Retain the actual reduced area and original sources of an ideally
+    /// brittle, full-stick mixed-mode patch. This supplies a shear-capacity
+    /// query; it does not add another elastic shear spring or prescribe how
+    /// sliding changes the Griffith solution. The caller owns that transition.
+    pub fn bind_mixed_mode(
+        &self,
+        normal: &BoundNormalInterfaceState,
+        response: &crate::normal_patch::adhesive::mixed_mode::JkrMixedModeResponse,
+    ) -> Result<SourceAdhesiveTangential, AdhesiveShearError> {
+        self.bind_patch(
+            normal,
+            response.normal_state_identity(),
+            response.friction_contact_state()?,
+        )
+    }
+
     /// Freeze actual JKR contact geometry, including finite tensile-load area.
     pub fn bind_jkr(
         &self,

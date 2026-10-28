@@ -18,6 +18,8 @@
 
 /// Stable applied-force and finite-loading-stiffness contact.
 pub mod fixture;
+/// Conservative full-stick Griffith coupling of normal adhesion and shear.
+pub mod mixed_mode;
 
 use core::f64::consts::PI;
 

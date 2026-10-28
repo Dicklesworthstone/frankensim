@@ -441,3 +441,84 @@ fn sourced_dmt_distinguishes_contact_friction_from_attraction_across_a_gap() {
         history = step.state;
     }
 }
+
+#[test]
+fn conservative_mixed_mode_peeling_reduces_the_original_sourced_junction_capacity() {
+    use fs_contact::normal_patch::adhesive::mixed_mode::{
+        JkrMixedModeEnvelope, SourceJkrMixedMode,
+    };
+    let original = normal(Some((3e6, 2e6)), Pressure::DIMS, false, false);
+    let shear = SourceAdhesiveShear::resolve(&original, MaterialPropertySelection::SingleClaimOnly)
+        .unwrap();
+    let envelope = JkrEnvelope {
+        maximum_indentation_m: 1e-5,
+        half_space_depth_m: 0.1,
+        layer_thickness_m: 0.1,
+        maximum_patch_to_radius: 0.1,
+        maximum_patch_to_depth: 0.1,
+        maximum_patch_to_layer: 0.1,
+        maximum_nominal_strain: 0.1,
+        maximum_repulsive_pressure_to_yield: 0.1,
+        maximum_process_zone_to_patch: 0.01,
+        minimum_tabor_parameter: 5.0,
+    };
+    let shear_envelope = JkrMixedModeEnvelope {
+        maximum_tangential_displacement_to_radius: 0.1,
+        maximum_mean_shear_stress_to_yield: 0.1,
+    };
+    let normal_owner = SourceJkrSphereContact::new(original.clone(), 0.01, 1e-9, envelope).unwrap();
+    let law = SourceJkrMixedMode::new(normal_owner, shear_envelope).unwrap();
+    let unloaded = law.evaluate_force_controlled(0.0, [0.0; 2]).unwrap();
+    let load = 0.9 * law.critical_tangential_force_n(0.0).unwrap();
+    let peeled = law.evaluate_force_controlled(0.0, [load, 0.0]).unwrap();
+    assert!(peeled.contact_area_m2 < unloaded.contact_area_m2);
+    let mut held = shear.bind_mixed_mode(&original, &unloaded).unwrap();
+    let first_capacity = held
+        .tangential()
+        .law()
+        .static_capacity_n(held.tangential().contact())
+        .unwrap();
+    let claims_address = held.shear_source().resolved().properties().as_ptr();
+    let update = SourceAdhesiveContactUpdate::from_mixed_mode(&peeled).unwrap();
+    assert_eq!(update.normal_state_identity(), original.identity());
+    held.update_contact(update).unwrap();
+    let capacity = held
+        .tangential()
+        .law()
+        .static_capacity_n(held.tangential().contact())
+        .unwrap();
+    common::close(capacity, 3e6 * peeled.contact_area_m2);
+    common::close(
+        capacity / first_capacity,
+        peeled.contact_area_m2 / unloaded.contact_area_m2,
+    );
+    assert!(capacity < first_capacity && capacity > load);
+    assert_eq!(held.normal_state(), &original);
+    assert_eq!(held.temperature_kelvin(), Some(293.15));
+    assert_eq!(
+        held.shear_source().resolved().properties().as_ptr(),
+        claims_address
+    );
+    // Geometry/capacity exchange does not add another shear storage owner.
+    assert_eq!(held.stored_energy_j(&held.initial_state()), 0.0);
+    assert!(peeled.tangential_elastic_energy_j > 0.0);
+    for foreign in [
+        normal(Some((4e6, 2e6)), Pressure::DIMS, false, false),
+        normal(Some((3e6, 2e6)), Pressure::DIMS, false, true),
+    ] {
+        let foreign_owner =
+            SourceJkrSphereContact::new(foreign.clone(), 0.01, 1e-9, envelope).unwrap();
+        let response = SourceJkrMixedMode::new(foreign_owner, shear_envelope)
+            .unwrap()
+            .evaluate_force_controlled(0.0, [0.0; 2])
+            .unwrap();
+        assert!(shear.bind_mixed_mode(&foreign, &response).is_err());
+        assert!(shear.bind_mixed_mode(&original, &response).is_err());
+        let before = held.clone();
+        assert!(
+            held.update_contact(SourceAdhesiveContactUpdate::from_mixed_mode(&response).unwrap())
+                .is_err()
+        );
+        assert_eq!(held, before);
+    }
+}

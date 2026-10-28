@@ -35,6 +35,37 @@ pub mod loading;
 /// Largest admitted number of retained analytic history intervals.
 pub const MAX_HISTORY_INTERVALS: usize = 4096;
 
+/// Elastic full-stick stiffness `8 a / sum((2-nu_i)/G_i)` [N/m] of a
+/// circular patch on the two ordered isotropic half-spaces. This is the same
+/// compliance used by [`MindlinDeresiewiczPoint`], without selecting a normal
+/// load, Coulomb coefficient, slip history or frictional dissipation. It is
+/// also the elastic storage coefficient for explicitly bonded full-stick laws.
+pub fn full_stick_stiffness_n_per_m(
+    contact_radius_m: f64,
+    shear_moduli_pa: [f64; 2],
+    poisson_ratios: [f64; 2],
+) -> Result<f64, TriboError> {
+    positive_finite(contact_radius_m, "mindlin_contact_radius_m")?;
+    let mut compliance = 0.0;
+    for (shear, poisson) in shear_moduli_pa.into_iter().zip(poisson_ratios) {
+        positive_finite(shear, "mindlin_shear_modulus_pa")?;
+        if !(poisson > -1.0 && poisson <= 0.5) {
+            return Err(TriboError::InvalidInput {
+                field: "mindlin_poisson_ratio",
+            });
+        }
+        compliance = checked_add(
+            compliance,
+            (2.0 - poisson) / shear,
+            "mindlin_elastic_compliance",
+        )?;
+    }
+    positive_finite(compliance, "mindlin_elastic_compliance")?;
+    let stiffness_n_per_m = 8.0 * contact_radius_m / compliance;
+    positive_finite(stiffness_n_per_m, "mindlin_initial_stiffness_n_per_m")?;
+    Ok(stiffness_n_per_m)
+}
+
 /// Source-neutral inputs. The caller binds the Hertz patch, two elastic bulk
 /// responses and a constant local friction coefficient; none is inferred.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -120,27 +151,11 @@ impl MindlinDeresiewiczPoint {
                 field: "mindlin_maximum_history_intervals",
             });
         }
-        let mut compliance = 0.0;
-        for (shear, poisson) in parameters
-            .shear_moduli_pa
-            .into_iter()
-            .zip(parameters.poisson_ratios)
-        {
-            positive_finite(shear, "mindlin_shear_modulus_pa")?;
-            if !(poisson > -1.0 && poisson <= 0.5) {
-                return Err(TriboError::InvalidInput {
-                    field: "mindlin_poisson_ratio",
-                });
-            }
-            compliance = checked_add(
-                compliance,
-                (2.0 - poisson) / shear,
-                "mindlin_elastic_compliance",
-            )?;
-        }
-        positive_finite(compliance, "mindlin_elastic_compliance")?;
-        let stiffness_n_per_m = 8.0 * parameters.contact_radius_m / compliance;
-        positive_finite(stiffness_n_per_m, "mindlin_initial_stiffness_n_per_m")?;
+        let stiffness_n_per_m = full_stick_stiffness_n_per_m(
+            parameters.contact_radius_m,
+            parameters.shear_moduli_pa,
+            parameters.poisson_ratios,
+        )?;
         let capacity_n = checked_mul(
             parameters.friction_coefficient,
             parameters.normal_force_n,
