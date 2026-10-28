@@ -4,7 +4,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use super::{WallHeatConfig, WallHeatFace, WallHeatFaceReport, WallHeatTransfer,
-    equilibrium_wall_heat_transfer, invalid, prepare_wall_heat};
+    equilibrium_wall_heat_transfer, invalid};
+use super::coupling::{WallHeatFlow, prepare_wall_heat_fields};
 use crate::conjugate::{CellSink, ChtError, EnergyConfig, EnergySolution, FluidProperties,
     FvBoundary, FvFlow, SolidMaterial, ThermalFace, ThermalSetup, VoxelDomain, poll,
     solve_energy};
@@ -148,6 +149,22 @@ pub fn prepare_wall_heat_boundaries(
     config: WallHeatConfig,
     gate: &CancelGate,
 ) -> Result<PreparedWallHeatBoundaries, ChtError> {
+    prepare_wall_heat_boundary_fields(domain, fluid, flow.into(), thermal,
+        mechanical_faces, internal_walls, boundary_walls, config, gate)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::conjugate) fn prepare_wall_heat_boundary_fields(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    flow: WallHeatFlow<'_>,
+    thermal: &ThermalSetup,
+    mechanical_faces: &[FvBoundary; 6],
+    internal_walls: &[WallHeatFace],
+    boundary_walls: &[BoundaryWallHeat],
+    config: WallHeatConfig,
+    gate: &CancelGate,
+) -> Result<PreparedWallHeatBoundaries, ChtError> {
     poll(gate)?;
     let count = domain.cell_count();
     if internal_walls.is_empty() && boundary_walls.is_empty() {
@@ -156,15 +173,15 @@ pub fn prepare_wall_heat_boundaries(
     if boundary_walls.len() > count.saturating_mul(6) {
         return Err(invalid("exterior wall count exceeds the Cartesian face budget"));
     }
-    // One shared bulk-transport owner. An empty internal selection prepares
-    // only the tangent conductivity; the exterior coefficients are added below.
-    let prepared = prepare_wall_heat(domain, fluid, flow, thermal, internal_walls, config, gate)?;
+    let prepared = prepare_wall_heat_fields(domain, fluid, flow, thermal, internal_walls, config, gate)?;
     let mut next = prepared.thermal;
     if !next.power_w.is_empty() && next.power_w.len() != count {
         return Err(invalid("original heat-source array has the wrong shape"));
     }
-    let mut evaluations = prepared.faces.iter()
-        .map(|face| face.transfer.quadrature_evaluations).sum::<usize>();
+    let mut evaluations = prepared.faces.iter().try_fold(0usize, |sum, face| {
+        sum.checked_add(face.transfer.quadrature_evaluations)
+            .ok_or_else(|| invalid("wall quadrature work count overflow"))
+    })?;
     let mut cache = BTreeMap::<(u64, u64), WallHeatTransfer>::new();
     let mut selected = BTreeSet::new();
     let mut reports = Vec::with_capacity(boundary_walls.len());
@@ -184,7 +201,7 @@ pub fn prepare_wall_heat_boundaries(
             _ => return Err(invalid("thermal wall law requires a mechanical no-slip Wall, not an opening or symmetry plane")),
         };
         if !wall_velocity.iter().all(|v| v.is_finite()) || wall_velocity[axis] != 0.0
-            || flow.field.outward(domain, cell, face) != 0.0
+            || flow.flux.outward(domain, cell, face) != 0.0
         {
             return Err(invalid("thermal wall must have finite tangential motion and zero normal through-flow"));
         }
@@ -206,7 +223,7 @@ pub fn prepare_wall_heat_boundaries(
         if reservoir.is_some_and(|t| !t.is_finite() || t <= 0.0) {
             return Err(invalid("wall reservoir temperature must be finite and positive"));
         }
-        let velocity = flow.velocity_m_s[cell];
+        let velocity = flow.velocity[cell];
         let a = (velocity[(axis + 1) % 3] - wall_velocity[(axis + 1) % 3]).abs();
         let b = (velocity[(axis + 2) % 3] - wall_velocity[(axis + 2) % 3]).abs();
         let scale = a.max(b);

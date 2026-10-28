@@ -22,6 +22,10 @@ pub use boundary::{
     PreparedWallHeatBoundaries, WallHeatBoundarySolution,
     prepare_wall_heat_boundaries, solve_energy_with_wall_heat_boundaries,
 };
+pub use crate::conjugate::unsteady::wall_heat::{
+    WallHeatMarchConfig, WallHeatStepRecord, WallHeatMarch,
+    march_conjugate_with_wall_heat,
+};
 
 /// Explicit quadrature and gradient-diffusion controls.
 #[derive(Clone, Copy, Debug, PartialEq)]

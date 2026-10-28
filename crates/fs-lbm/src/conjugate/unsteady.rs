@@ -35,10 +35,12 @@
 //! establish resolved turbulent spectra or thermal wall resolution. The
 //! energy coupling is first order in time and lags buoyancy by one step.
 //! Face fans and compact components are steady models and refuse here; use
-//! internal fans.
+//! internal fans. The opt-in thermal_wall::march_conjugate_with_wall_heat
+//! entry uses this same march with freshly prepared equilibrium wall transport.
 
 use fs_exec::CancelGate;
 
+pub(in crate::conjugate) mod wall_heat;
 #[cfg(feature = "enthalpy-coupling")]
 mod material;
 #[cfg(feature = "enthalpy-coupling")]
@@ -441,6 +443,7 @@ pub fn march_conjugate(
         config,
         unsteady,
         None,
+        None,
         buoyancy,
         initial_temperature,
         inlet_schedule,
@@ -489,6 +492,7 @@ pub fn march_conjugate_with_sgs(
         config,
         unsteady,
         Some(sgs),
+        None,
         buoyancy,
         initial_temperature,
         inlet_schedule,
@@ -499,7 +503,7 @@ pub fn march_conjugate_with_sgs(
     )
 }
 
-#[allow(clippy::too_many_arguments)] // one owner for both transient entry paths
+#[allow(clippy::too_many_arguments)] // one owner for all transient entry paths
 fn march_conjugate_inner(
     domain: &VoxelDomain,
     fluid: &FluidProperties,
@@ -508,6 +512,7 @@ fn march_conjugate_inner(
     config: &SimpleConfig,
     unsteady: &UnsteadyConfig,
     sgs: Option<FvSgsConfig>,
+    mut wall_heat: Option<&mut wall_heat::Coupling<'_>>,
     buoyancy: Option<&Boussinesq>,
     initial_temperature: &[f64],
     inlet_schedule: impl Fn(f64) -> f64,
@@ -605,7 +610,9 @@ fn march_conjugate_inner(
                 .cell_sinks
                 .extend(radiators.sinks(domain, &temperature));
         }
-        if config.turbulence != Turbulence::Laminar || marcher.solver.has_sgs() {
+        if wall_heat.is_none()
+            && (config.turbulence != Turbulence::Laminar || marcher.solver.has_sgs())
+        {
             stepped.eddy_conductivity_w_m_k = marcher
                 .solver
                 .heat_eddy_viscosity()
@@ -613,12 +620,20 @@ fn march_conjugate_inner(
                 .map(|nu_t| fluid.volumetric_heat_capacity() * nu_t / TURBULENT_PRANDTL)
                 .collect();
         }
+        // One projected flux image is shared with wall preparation and energy.
+        // `stepped` never receives generated wall corrections: it remains the
+        // authored setup plus this step's source/radiation schedule.
+        let field = marcher.solver.field();
+        let prepared_walls = wall_heat.as_deref_mut()
+            .map(|wall| wall.prepare(&marcher.solver, &field, &stepped, gate))
+            .transpose()?;
+        let thermal = prepared_walls.as_ref().map_or(&stepped, |walls| &walls.thermal);
         let (next, mut record) = energy_step(
             domain,
             fluid,
             solids,
-            &marcher.solver.field(),
-            &stepped,
+            &field,
+            thermal,
             energy,
             (&capacity, &storage),
             &temperature,
@@ -627,6 +642,9 @@ fn march_conjugate_inner(
         )?;
         if let Some(radiators) = &radiators {
             record.radiated_w = radiators.radiated(domain, &next);
+        }
+        if let (Some(wall), Some(prepared)) = (wall_heat.as_deref_mut(), prepared_walls) {
+            wall.record(prepared, &next, time_s, unsteady.time_step_s, gate)?;
         }
         energy_records.push(record);
         temperature = next;

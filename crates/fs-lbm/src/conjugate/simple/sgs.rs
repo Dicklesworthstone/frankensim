@@ -88,6 +88,13 @@ fn derivative(center: f64, minus: (f64, Sample), plus: (f64, Sample)) -> f64 {
 }
 
 impl Solver<'_> {
+    /// Borrow the accepted tangent closure, without LVEL's legacy thermal
+    /// secant substitution. Empty is the exact laminar representation. This
+    /// is read-only: a thermal coupler must not recompute or accumulate nu_t.
+    pub(in crate::conjugate) fn tangent_eddy_viscosity(&self) -> &[f64] {
+        &self.eddy_viscosity
+    }
+
     pub(in crate::conjugate) fn enable_sgs(
         &mut self,
         config: FvSgsConfig,
