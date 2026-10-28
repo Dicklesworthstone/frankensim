@@ -6,6 +6,8 @@ use fs_couple::circuit_enthalpy::{
 };
 use fs_phs::circuit::{Branch, CircuitGraph};
 
+mod storage;
+
 mod material_load {
     use super::*;
     use fs_couple::circuit_enthalpy::material::{CellResistor, MaterialNetwork};
@@ -281,7 +283,7 @@ mod material_load {
             .resolve(&thermal, || false)
             .unwrap()
             .resistors;
-            let circuit = ConductionCircuit::new_with_material_resistors(
+            let circuit = ConductionCircuit::new_with_material_storage(
                 problem(
                     &cards,
                     [ElectricalPropertyBasis::Resistivity; 2],
@@ -291,6 +293,7 @@ mod material_load {
                 graph(true),
                 terminal(),
                 sources,
+                vec![super::storage::capacitor(2, 0.125)],
                 0.0,
                 vec![],
                 vec![4.0],
@@ -318,6 +321,7 @@ mod material_load {
                     },
                 )
                 .unwrap();
+            assert_eq!(next.circuit().storage(), circuit.storage());
             // Exact midpoint RC relation and an independent scalar heat balance:
             // I=2*q0/(2*C*(Rfield+Rload(T))+dt), Cp*dT=dt*I²*Rload(T).
             let (mut lo, mut hi) = (0.0, 50.0);

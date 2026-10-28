@@ -72,7 +72,7 @@ fn invalid(message: &'static str) -> MaterialCircuitError {
     MaterialCircuitError::Invalid(message)
 }
 
-pub(super) fn lower(
+pub(crate) fn lower(
     graph: &CircuitGraph,
     sources: &mut [MaterialStorage],
 ) -> Result<CircuitGraph, MaterialCircuitError> {
@@ -127,6 +127,75 @@ pub(super) fn lower(
         };
     }
     Ok(result)
+}
+
+// Shared fixed-coordinate account for the native lumped and spatial-conductor
+// circuit paths. Both use the original material element's energy evaluator.
+pub(crate) fn parameter_work(
+    graph: &CircuitGraph,
+    original: &[MaterialStorage],
+    proposed: &[MaterialStorage],
+    fluxes_wb: &[f64],
+    charges_c: &[f64],
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<(Vec<StorageParameterWork>, f64), MaterialCircuitError> {
+    poll(&mut cancelled)?;
+    if original.len() != proposed.len() {
+        return Err(invalid(
+            "complete original and proposed field storage required",
+        ));
+    }
+    let mut charges = charges_c.iter();
+    let mut fluxes = fluxes_wb.iter();
+    let mut source = 0;
+    let mut work = Vec::with_capacity(original.len());
+    let mut total = 0.0;
+    for (index, &(_, _, branch)) in graph.branches.iter().enumerate() {
+        poll(&mut cancelled)?;
+        let coordinate = match branch {
+            Branch::Capacitor { .. } => *charges
+                .next()
+                .ok_or_else(|| invalid("missing capacitor charge"))?,
+            Branch::Inductor { .. } => *fluxes
+                .next()
+                .ok_or_else(|| invalid("missing inductor flux linkage"))?,
+            _ => continue,
+        };
+        let before = original
+            .get(source)
+            .ok_or_else(|| invalid("missing original field storage"))?;
+        let after = proposed
+            .get(source)
+            .ok_or_else(|| invalid("missing proposed field storage"))?;
+        if before.branch != index || after.branch != index {
+            return Err(invalid("field storage must retain original branch order"));
+        }
+        let evaluate = |element: &MaterialStorageElement| match element {
+            MaterialStorageElement::Capacitor(c) => c.stored_energy_j(coordinate),
+            MaterialStorageElement::Inductor(l) => l.stored_energy_j(coordinate),
+        };
+        let before = evaluate(&before.element)?;
+        let after = evaluate(&after.element)?;
+        let supplied = after - before;
+        total += supplied;
+        if !supplied.is_finite() || !total.is_finite() {
+            return Err(invalid(
+                "material storage parameter work is unrepresentable",
+            ));
+        }
+        work.push(StorageParameterWork {
+            branch: index,
+            stored_before_j: before,
+            stored_after_j: after,
+            supplied_work_j: supplied,
+        });
+        source += 1;
+    }
+    if source != original.len() || charges.next().is_some() || fluxes.next().is_some() {
+        return Err(invalid("field coordinates and source bindings disagree"));
+    }
+    poll(&mut cancelled)?;
+    Ok((work, total))
 }
 
 impl MaterialCircuit {
@@ -195,49 +264,22 @@ impl MaterialCircuit {
         let mut storage = storage;
         let graph = lower(&self.graph, &mut storage)?;
         let mut candidate = Self::new_with_contacts(
-            graph, self.resistors.clone(), self.contacts.clone(),
-            self.fluxes_wb.clone(), self.charges_c.clone(), inputs,
+            graph,
+            self.resistors.clone(),
+            self.contacts.clone(),
+            self.fluxes_wb.clone(),
+            self.charges_c.clone(),
+            inputs,
         )?;
         candidate.storage = storage;
-        poll(&mut cancelled)?;
-        let mut charges = self.charges_c.iter();
-        let mut fluxes = self.fluxes_wb.iter();
-        let mut source = 0;
-        let mut work = Vec::with_capacity(storage_count);
-        let mut total = 0.0;
-        for (index, &(_, _, branch)) in self.graph.branches.iter().enumerate() {
-            poll(&mut cancelled)?;
-            let coordinate = match branch {
-                Branch::Capacitor { .. } => *charges
-                    .next()
-                    .ok_or_else(|| invalid("missing capacitor charge"))?,
-                Branch::Inductor { .. } => *fluxes
-                    .next()
-                    .ok_or_else(|| invalid("missing inductor flux linkage"))?,
-                _ => continue,
-            };
-            let evaluate = |element: &MaterialStorageElement| match element {
-                MaterialStorageElement::Capacitor(c) => c.stored_energy_j(coordinate),
-                MaterialStorageElement::Inductor(l) => l.stored_energy_j(coordinate),
-            };
-            let before = evaluate(&self.storage[source].element)?;
-            let after = evaluate(&candidate.storage[source].element)?;
-            let supplied = after - before;
-            total += supplied;
-            if !supplied.is_finite() || !total.is_finite() {
-                return Err(invalid(
-                    "material storage parameter work is unrepresentable",
-                ));
-            }
-            work.push(StorageParameterWork {
-                branch: index,
-                stored_before_j: before,
-                stored_after_j: after,
-                supplied_work_j: supplied,
-            });
-            source += 1;
-        }
-        poll(&mut cancelled)?;
+        let (work, total) = parameter_work(
+            &self.graph,
+            &self.storage,
+            &candidate.storage,
+            &self.fluxes_wb,
+            &self.charges_c,
+            &mut cancelled,
+        )?;
         Ok(MaterialStorageCandidate {
             circuit: candidate,
             work,

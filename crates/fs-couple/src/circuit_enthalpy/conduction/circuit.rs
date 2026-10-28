@@ -9,8 +9,12 @@
 //! Scalar and oriented tensor materials use that same field extraction; both
 //! principal source properties and the fixed frame survive every thermal trial.
 
+/// Source-derived C/L and explicit fixed-coordinate reconfiguration work.
+pub mod storage;
+
 use super::*;
 use crate::circuit_enthalpy::{ResistorCell, material::CellResistor};
+use crate::material_circuit::storage::MaterialStorage;
 use crate::material_circuit::{
     MaterialCircuitError, MaterialCircuitSolve, MaterialResistor, admit_graph, extended,
 };
@@ -35,6 +39,8 @@ pub struct ConductionCircuitTerminal {
 /// quasistatic at the circuit's common midpoint. C/L remain fixed; the other
 /// resistors may be explicit ideal components or complete material conductors
 /// refreshed by the SAME finite-heat network as the spatial body.
+/// Source-bound C/L retain their original dielectric/core geometry and fixed
+/// material context; changing them requires explicit parameter-work accounting.
 pub struct ConductionCircuit<C = ResolvedConductorState> {
     problem: PlanarConduction<C>,
     graph: CircuitGraph,
@@ -43,6 +49,7 @@ pub struct ConductionCircuit<C = ResolvedConductorState> {
     charges_c: Vec<f64>,
     time_s: f64,
     material_resistors: Vec<MaterialResistor>,
+    storage: Vec<MaterialStorage>,
 }
 
 fn electrical(error: CircuitError) -> Error {
@@ -208,6 +215,7 @@ impl<C: PlanarConductorMaterial> ConductionCircuit<C> {
             charges_c,
             time_s,
             material_resistors: Vec::new(),
+            storage: Vec::new(),
         })
     }
 
@@ -827,6 +835,7 @@ impl<C: PlanarConductorMaterial> ConductionCircuit<C> {
             charges_c,
             time_s: target_s,
             material_resistors,
+            storage: self.storage.clone(),
         };
         let step = ConductionCircuitStep {
             native,

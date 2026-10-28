@@ -107,6 +107,7 @@ fn positive(value: f64) -> bool {
 /// Hodge. One complete material snapshot is retained per original triangle.
 /// The default scalar type preserves existing callers; oriented/mixed source
 /// states use this SAME field operator, boundary solve, current and heat owner.
+#[derive(Clone)]
 pub struct PlanarConduction<C = ResolvedConductorState> {
     mesh: TriComplex2,
     conductors: Vec<C>,
