@@ -751,3 +751,23 @@ clock ratios, physical heat/source separation, three-rung full-flow convergence,
 nonlinear subcycle convergence, multiple ports and numerical scaling, explicit
 clock limits, cancellation retry, stiff analytic heat/work and datum-invariant
 rejection of an inconsistent storage law.
+
+## Owned, reusable exact quadratic evolution
+
+`PreparedExactZoh::new_owned` moves the original immutable physical system and
+its fixed-clock cache together; `system()` exposes only read access. The
+existing borrowed constructor remains. `step_into` reuses complete augmented
+coordinates, endpoint, port-integral and energy scratch. No matrix exponential
+or owner allocation occurs on a successful warm call with allocation-free
+storage callbacks; both caller outputs remain unchanged on every refusal.
+The allocating API shares these contractions and the original independent
+heat, port-work and storage-change admission. No state or off-diagonal
+coupling is dropped. `LinearSplit::is_exact_quadratic` exposes the original
+storage classification for consumer dispatch.
+
+`prepared_exact_owned` checks 1,000 warm calls with zero allocations, complete
+coupled damping and Maxwell states, bitwise borrowed/owned work and motion,
+direct exact propagation, energy-datum invariance, capacity and atomic refusal.
+All nine existing multirate tests pass against the changed owner. These are
+native numerical and allocation checks, not measured wall-time acceleration or
+full workspace qualification.

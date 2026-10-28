@@ -13,6 +13,10 @@ fn check_cancel(cancelled: &mut impl FnMut() -> bool) -> Result<(), PreparedStep
 }
 
 impl LinearSplit {
+    /// Whether the original storage is exactly quadratic, including any
+    /// retained linear material-memory states.
+    pub fn is_exact_quadratic(&self) -> bool { self.quadratic.exact }
+
     /// Original declared storage matrix in the owner's unchanged state order.
     pub fn quadratic_matrix(&self) -> &[f64] {
         &self.quadratic.matrix
@@ -374,12 +378,27 @@ impl PreparedQuadraticFlow {
         state: &[f64],
         input: &[f64],
     ) -> Result<PreparedQuadraticStep, PhsError> {
-        if state.len() != self.n || input.len() != self.m || !finite(state) || !finite(input) {
-            return Err(refuse(
-                "prepared quadratic state/input layout or finiteness",
-            ));
-        }
         let mut z = vec![0.0; self.d];
+        let mut balanced = vec![0.0; self.n];
+        let mut endpoint = vec![0.0; self.n];
+        let mut integrals = vec![0.0; self.integrals.len()];
+        self.evaluate_into(state, input, &mut z, &mut balanced, &mut endpoint, &mut integrals)?;
+        Ok(PreparedQuadraticStep { state: endpoint, integrals })
+    }
+
+    // Shared contractions for allocating evaluation and a prepared exact owner.
+    // Output is numerical scratch; the public caller publishes only on success.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn evaluate_into(
+        &self, state: &[f64], input: &[f64], z: &mut [f64], balanced: &mut [f64],
+        endpoint: &mut [f64], integrals: &mut [f64],
+    ) -> Result<(), PhsError> {
+        if state.len() != self.n || input.len() != self.m || !finite(state) || !finite(input)
+            || z.len() != self.d || balanced.len() != self.n || endpoint.len() != self.n
+            || integrals.len() != self.integrals.len()
+        {
+            return Err(refuse("prepared quadratic state/input/scratch layout or finiteness"));
+        }
         for i in 0..self.n {
             z[i] = (0..self.n)
                 .map(|j| self.forward[i * self.n + j] * state[j])
@@ -387,27 +406,23 @@ impl PreparedQuadraticFlow {
         }
         z[self.n..self.n + self.m].copy_from_slice(input);
         z[self.d - 1] = 1.0;
-        let mut balanced = vec![0.0; self.n];
         for i in 0..self.n {
             balanced[i] = (0..self.d)
                 .map(|j| self.transition[i * self.d + j] * z[j])
                 .sum();
         }
-        let mut endpoint = vec![0.0; self.n];
         for i in 0..self.n {
             endpoint[i] = (0..self.n)
                 .map(|j| self.inverse[i * self.n + j] * balanced[j])
                 .sum();
         }
-        let integrals: Vec<_> = self.integrals.iter().map(|w| quadratic(w, &z)).collect();
-        if !finite(&endpoint) || !finite(&integrals) {
+        for (out, w) in integrals.iter_mut().zip(&self.integrals) { *out = quadratic(w, z); }
+        if !finite(endpoint) || !finite(integrals) {
             return Err(refuse("prepared quadratic candidate overflows"));
         }
-        Ok(PreparedQuadraticStep {
-            state: endpoint,
-            integrals,
-        })
+        Ok(())
     }
+
 }
 
 // A floating-point envelope of lambda_max(sym(A)), with recomputed reconstruction
