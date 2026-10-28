@@ -28,6 +28,21 @@ spectral-tensor fit; E3.3c the optional FetchAdjustedMassConsistent mode.
 - `Atmosphere::sample_air_state(x, y, h, tick)` → `AirState` whose
   `dynamic_pressure_pa()` and `reynolds(chord)` derive from the SAME
   provenance-bound state as the velocity.
+- `evolving::EvolvingTurbulenceField::at_anchor(basis, seed, times)` —
+  opt-in space–time field with one declared OU correlation time per spatial
+  mode. Two independent OU quadratures per mode multiply the vector potential
+  before its curl; both have stationary variance 1/2. This preserves the
+  basis realization's complete phase-averaged stress tensor and makes its
+  conditional one-point statistics horizontally homogeneous. Per-mode
+  covariance decays exponentially while its phase advects with the declared
+  mean speed. `sample` reads the current signed tick; `sample_batch` fills
+  caller-owned storage without allocations or random draws. `advance_to`
+  alone evolves the sequential state. A self-contained checkpoint retains
+  basis, times, and both OU paths; resume is bitwise.
+- `Atmosphere::into_evolving` / `evolving::EvolvingAtmosphere::sample_air_state`
+  — the same mean law and provenance-bound air properties with the evolved
+  vector velocity and analytic gradient, so dynamic pressure and Reynolds
+  use that same instantaneous field.
 
 ## Invariants
 
@@ -61,6 +76,10 @@ Typed `Refusal { code, message, ranked_repairs }`. Codes:
 OU layer: `ou-params-invalid`, `ou-advance-backwards`,
 `ou-advance-span-exceeded`, `ou-checkpoint-invalid`.
 Caps tested at cap AND cap+1.
+Evolving-field admission also reports `evolving-params-invalid`,
+`evolving-checkpoint-invalid`, and `sample-count-mismatch`. The two
+quadratures must share a clock and use distinct prescribed stream keys;
+invalid advance requests and invalid batches leave state/output unchanged.
 
 ## Determinism class
 
@@ -97,14 +116,26 @@ bitwise); checkpoint reconstruction equivalence (bitwise) + checkpoint
 refusals; the 39-minute (284k-tick) recurrence battery in checkpointed
 chunks; caps at cap AND cap+1; pinned OU golden.
 
+`evolving::tests` — G0/G3/G5: all nine stationary stress components against
+an independent curl calculation (2e-14 absolute tolerance), horizontal
+homogeneity, advected OU autocovariance and stationary variance over 4096
+independent paths (0.07 normalized tolerance), exact wall parity, analytic
+divergence below 1e-14 on the fixture, gradient finite-difference order
+2 ± 0.05, read-only query/batch equivalence, bitwise checkpoint/resume, and
+velocity/gradient/air-property consistency.
+
 ## No-claim boundaries
 
 - The modal amplitude decay is an ANALYTIC-CONSTRUCTION placeholder: no
   statistical claim of any kind (spectra, coherence, TI) — those are
   E3.3b's Mann-class fit under V-04b1/V-04b2 with its own artifacts.
-- Static per-realization amplitudes: the OU time evolution (and hence any
-  temporal-statistics claim) is E3.3b; the phase clock here is pure mean
-  advection.
+- `TurbulenceField` retains static per-realization amplitudes and pure mean
+  advection. `EvolvingTurbulenceField` supplies the declared finite-mode OU
+  temporal model; its correlation times are explicit model inputs. Its
+  conditional stationarity and covariance tests do not validate atmospheric
+  spectra, intermittency, nonlinear energy transfer, or the full Mann target.
+  The existing Flyer lifecycle's reduced gust forcing is not changed by
+  opting into the new fs-atmo API elsewhere.
 - Neutral stability only (declared, per air-state-v1); other classes are
   future additive modes.
 - No gust events, no thermals, no site heterogeneity (E3.3c territory).

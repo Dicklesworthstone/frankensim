@@ -32,6 +32,7 @@
 use fs_math::det;
 use fs_rand::StreamKey;
 
+pub mod evolving;
 pub mod fetch_mass_consistent;
 pub mod fit;
 pub mod mann;
@@ -187,6 +188,35 @@ pub(crate) struct Mode {
     pub(crate) phi: f64,
 }
 
+impl Mode {
+    /// Accumulate the curl and its derivatives for a phase quadrature.
+    /// `st` and `ct` obey d(st)/dθ = ct and d(ct)/dθ = -st; both may
+    /// therefore include spatially constant, time-dependent coefficients.
+    fn accumulate(&self, h_m: f64, st: f64, ct: f64, sample: &mut FlowSample) {
+        let m = self;
+        let (sh, ch) = (det::sin(m.kh * h_m), det::cos(m.kh * h_m));
+        let [ax, ay, az] = m.a;
+        let u = &mut sample.u;
+        let grad = &mut sample.grad;
+        let ux = -az * m.ky * ch * st - ay * m.kh * ch * ct;
+        let uy = ax * m.kh * ch * ct + az * m.kx * ch * st;
+        let uz = (ax * m.ky - ay * m.kx) * sh * st;
+        u[0] += ux;
+        u[1] += uy;
+        u[2] += uz;
+        grad[0][0] += -az * m.ky * m.kx * ch * ct + ay * m.kh * m.kx * ch * st;
+        grad[0][1] += -az * m.ky * m.ky * ch * ct + ay * m.kh * m.ky * ch * st;
+        grad[0][2] += az * m.ky * m.kh * sh * st + ay * m.kh * m.kh * sh * ct;
+        grad[1][0] += ax * m.kh * (-m.kx) * ch * st + az * m.kx * m.kx * ch * ct;
+        grad[1][1] += ax * m.kh * (-m.ky) * ch * st + az * m.kx * m.ky * ch * ct;
+        grad[1][2] += -ax * m.kh * m.kh * sh * ct - az * m.kx * m.kh * sh * st;
+        let c = ax * m.ky - ay * m.kx;
+        grad[2][0] += c * m.kx * sh * ct;
+        grad[2][1] += c * m.ky * sh * ct;
+        grad[2][2] += c * m.kh * ch * st;
+    }
+}
+
 /// The E3.3a turbulence field: a static per-realization modal draw with
 /// deterministic mean-advection phase (OU evolution is E3.3b).
 #[derive(Clone, Debug, PartialEq)]
@@ -207,6 +237,12 @@ pub struct FlowSample {
 }
 
 impl TurbulenceField {
+    /// Number of spatial modes, including modes with zero amplitude.
+    #[must_use]
+    pub fn mode_count(&self) -> usize {
+        self.modes.len()
+    }
+
     /// Build a field: `n_modes` philox-partitioned modes at `seed`, with
     /// declared analytic-construction amplitudes (rms `sigma_mps`, integral
     /// scale `length_m`) and the given advection speed.
@@ -285,33 +321,16 @@ impl TurbulenceField {
     #[must_use]
     pub fn sample(&self, x_m: f64, y_m: f64, h_m: f64, tick: u64) -> FlowSample {
         let t = tick as f64 / TICK_HZ;
-        let mut u = [0.0f64; 3];
-        let mut grad = [[0.0f64; 3]; 3];
+        let mut sample = FlowSample {
+            u: [0.0; 3],
+            grad: [[0.0; 3]; 3],
+        };
         for m in &self.modes {
             let theta = m.kx * (x_m - self.u_adv_mps * t) + m.ky * y_m + m.phi;
             let (st, ct) = (det::sin(theta), det::cos(theta));
-            let (sh, ch) = (det::sin(m.kh * h_m), det::cos(m.kh * h_m));
-            let [ax, ay, az] = m.a;
-            // u = ∇×ψ (derived term-wise; see the battery's FD cross-check).
-            let ux = -az * m.ky * ch * st - ay * m.kh * ch * ct;
-            let uy = ax * m.kh * ch * ct + az * m.kx * ch * st;
-            let uz = (ax * m.ky - ay * m.kx) * sh * st;
-            u[0] += ux;
-            u[1] += uy;
-            u[2] += uz;
-            // Analytic partials. d(st)/dx = kx·ct, d(ct)/dx = −kx·st, etc.
-            grad[0][0] += -az * m.ky * m.kx * ch * ct + ay * m.kh * m.kx * ch * st;
-            grad[0][1] += -az * m.ky * m.ky * ch * ct + ay * m.kh * m.ky * ch * st;
-            grad[0][2] += az * m.ky * m.kh * sh * st + ay * m.kh * m.kh * sh * ct;
-            grad[1][0] += ax * m.kh * (-m.kx) * ch * st + az * m.kx * m.kx * ch * ct;
-            grad[1][1] += ax * m.kh * (-m.ky) * ch * st + az * m.kx * m.ky * ch * ct;
-            grad[1][2] += -ax * m.kh * m.kh * sh * ct - az * m.kx * m.kh * sh * st;
-            let c = ax * m.ky - ay * m.kx;
-            grad[2][0] += c * m.kx * sh * ct;
-            grad[2][1] += c * m.ky * sh * ct;
-            grad[2][2] += c * m.kh * ch * st;
+            m.accumulate(h_m, st, ct, &mut sample);
         }
-        FlowSample { u, grad }
+        sample
     }
 }
 
