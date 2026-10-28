@@ -2564,7 +2564,24 @@ None.
   fourth-quarter tail energy is below `tail_tol` and its first three
   peaks move less than `peak_tol_cents`. It refuses with
   `LadderUnconverged` at the ceiling. The line is terminated into the
-  tabulated bell load. A spliced analytic fallback outside the
+  selected mouth load. `MmLineBank::new` and `MatrixFirLine::{new,with_ladder}`
+  accept the shared `fs_duct::MouthLoad`. Its `Tabulated` arm requires a
+  matching mouth plane/radius/gas and complete positive-frequency support
+  for the requested ladder, including its ceiling's lowest bin and Nyquist.
+  One bank uses one common table, so every combo must match its declared
+  inlet-relative axial position; differing path-length combos refuse.
+  Per-combo tables remain outside this interface.
+  Every retained positive bin comes from the table; the bank receipt reports
+  `table_bins == n_fft/2` and zero fallback bins. DC uses the table's declared
+  finite static impedance through the same multimodal bore at the existing
+  1e-3 rad/s quasi-static probe, with no table extrapolation, default -1, or
+  clipping. Strict-load errors propagate, and plane reflectance is checked
+  before FIR realization with the existing 1e-12 rounding allowance.
+  `MouthLoad::Matched` refuses explicitly on these staircase time-domain lines.
+  The existing FIR Nyquist rolloff and precursor folding remain in effect;
+  full-band source coverage is not a new high-band realization-error claim.
+  `MmLoad::TabulatedWithFallback` remains an explicit diagnostic policy.
+  A spliced analytic fallback outside the
   table's support is a spectral jump, so the ladder refuses it by
   name. Passivity (`|R| <= 1 + 1e-12` on the 4x-oversampled grid) is
   checked on the stored taps without clipping and refuses otherwise.

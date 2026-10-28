@@ -549,6 +549,7 @@ pub fn mm_input_impedance(
 enum MmLoad<'a> {
     Analytic(Termination),
     Tabulated(&'a crate::TabulatedLoad),
+    Impedance(C64),
 }
 
 /// Multimodal input impedance against a TABULATED plane-mode mouth load
@@ -574,6 +575,42 @@ pub fn mm_input_impedance_tabulated(
         omega,
         loss,
         MmLoad::Tabulated(table),
+        n_modes,
+        extra_slices,
+    )
+}
+
+/// Multimodal input impedance against an explicit plane-mode mouth impedance
+/// [Pa s/m³]. Higher modes retain the same matched-mouth closure as
+/// [`mm_input_impedance_tabulated`]. In particular, a time-domain consumer can
+/// evaluate the bore's quasi-static limit with a table's declared DC impedance
+/// without extrapolating the positive-frequency table.
+///
+/// This is one frequency evaluation, not a causality or physical-validity
+/// certificate for a supplied load law.
+///
+/// # Errors
+/// As [`mm_input_impedance`], or a nonfinite or negative-resistance load.
+pub fn mm_input_impedance_load(
+    duct: &Duct,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    impedance: C64,
+    n_modes: usize,
+    extra_slices: usize,
+) -> Result<ModalResponse, DuctError> {
+    if !impedance.re.is_finite() || !impedance.im.is_finite() || impedance.re < 0.0 {
+        return Err(DuctError::BadParameter {
+            what: "modal mouth impedance must be finite with nonnegative resistance",
+        });
+    }
+    mm_core(
+        duct,
+        state,
+        omega,
+        loss,
+        MmLoad::Impedance(impedance),
         n_modes,
         extra_slices,
     )
@@ -618,6 +655,7 @@ fn mm_core(
     let (zl_plane, mouth_ka) = match load {
         MmLoad::Analytic(termination) => termination_impedance(termination, state, mouth, omega)?,
         MmLoad::Tabulated(table) => (Some(table.z_at(omega)?), omega * mouth / state.sound_speed),
+        MmLoad::Impedance(value) => (Some(value), omega * mouth / state.sound_speed),
     };
     let mouth_wave = modal_wave(state, mouth, omega, loss, &gammas)?;
     let mut min_shear = mouth_wave.shear_number;

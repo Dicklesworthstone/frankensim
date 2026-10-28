@@ -1,9 +1,9 @@
 //! Multimodal characteristic-line runtime (music bead
 //! `frankensim-music-v8-root-3ez8g.4.2`): the PLAY image for brass —
 //! per-valve-combination exact-FIR reflectance lines realized from the
-//! fs-duct MULTIMODAL TMM authority, terminated into the tabulated
-//! bell load (bead zolja) with a disclosed analytic fallback outside
-//! the table's support, switched at block boundaries with a D17 state
+//! fs-duct MULTIMODAL TMM authority, terminated into an analytic or full-band
+//! tabulated mouth load. An explicitly requested diagnostic splice retains its
+//! disclosed analytic fallback. Lines switch at block boundaries with a D17 state
 //! lift that carries the in-flight outgoing-wave history.
 //!
 //! REALIZATION DOCTRINE (the §6.2 bake-off this module documents): at a
@@ -24,10 +24,10 @@
 //! gate (ml-006) is the executable witness.
 
 use fs_duct::modal::{
-    ModalResponse, mm_input_impedance, mm_input_impedance_tabulated,
+    ModalResponse, mm_input_impedance, mm_input_impedance_load, mm_input_impedance_tabulated,
     modal_reflection_from_impedance,
 };
-use fs_duct::{Duct, DuctError, LossModel, Segment, TabulatedLoad, Termination};
+use fs_duct::{Duct, DuctError, LossModel, MouthLoad, Segment, TabulatedLoad, Termination};
 use fs_fft::{C64 as FftC64, Fft};
 use fs_material::gas::GasState;
 use fs_math::c64::C64;
@@ -90,11 +90,17 @@ impl From<DiscretizeError> for MmLineError {
 }
 
 /// How the multimodal lines terminate at the mouth.
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub enum MmLoad<'a> {
     /// A closed analytic termination (its own validity refusals apply
     /// at every DFT bin).
     Analytic(Termination),
+    /// Strict full-band table with a matching mouth reference and explicit DC
+    /// limit. Every positive DFT bin comes from this table; no fallback exists.
+    Tabulated(&'a TabulatedLoad),
+    /// Common selector retained for an explicit refusal: staircase time-domain
+    /// lines currently require an analytic or referenced tabulated mouth.
+    Matched,
     /// The tabulated bell load INSIDE its support, an analytic fallback
     /// outside it — the splice bins are counted and disclosed in the
     /// realization receipt, never silent.
@@ -104,6 +110,28 @@ pub enum MmLoad<'a> {
         /// Fallback termination for DFT bins outside the support.
         fallback: Termination,
     },
+}
+
+impl<'a> From<MouthLoad<'a>> for MmLoad<'a> {
+    fn from(load: MouthLoad<'a>) -> Self {
+        match load {
+            MouthLoad::Analytic(termination) => Self::Analytic(termination),
+            MouthLoad::Tabulated(table) => Self::Tabulated(table),
+            MouthLoad::Matched => Self::Matched,
+        }
+    }
+}
+
+impl<'a> From<&MmLoad<'a>> for MmLoad<'a> {
+    fn from(load: &MmLoad<'a>) -> Self {
+        *load
+    }
+}
+
+impl MmLoad<'_> {
+    fn is_strict(self) -> bool {
+        matches!(self, Self::Tabulated(_))
+    }
 }
 
 /// Configuration for one bank realization.
@@ -130,7 +158,8 @@ pub struct MmComboReceipt {
     pub round_trip_samples: f64,
     /// DFT bins served by the tabulated load.
     pub table_bins: usize,
-    /// DFT bins served by the analytic fallback.
+    /// Positive DFT bins served analytically, including diagnostic fallback
+    /// bins. This is zero for a strict tabulated load.
     pub fallback_bins: usize,
     /// Peak `|R|` over the 4x-oversampled realization grid (must satisfy `<= 1 + 1e-12` without clipping).
     pub peak_reflectance: f64,
@@ -215,6 +244,21 @@ fn resolve_load(
 ) -> Result<(ModalResponse, bool), MmLineError> {
     match load {
         MmLoad::Analytic(t) => Ok((mm_impedance_at(duct, gas, omega, config, *t)?, false)),
+        MmLoad::Tabulated(table) => {
+            let response = |loss| {
+                mm_input_impedance_tabulated(
+                    duct,
+                    gas,
+                    omega,
+                    loss,
+                    table,
+                    config.n_modes,
+                    config.extra_slices,
+                )
+            };
+            Ok((with_bessel_fallback(config.loss, response)?, true))
+        }
+        MmLoad::Matched => Err(matched_refusal()),
         MmLoad::TabulatedWithFallback { table, fallback } => {
             let (lo, hi) = table.support();
             if omega >= lo && omega <= hi {
@@ -251,6 +295,87 @@ fn resolve_load(
     }
 }
 
+fn with_bessel_fallback(
+    loss: LossModel,
+    mut response: impl FnMut(LossModel) -> Result<ModalResponse, DuctError>,
+) -> Result<ModalResponse, MmLineError> {
+    match response(loss) {
+        Err(DuctError::TooNarrow { .. }) if matches!(loss, LossModel::WideTube) => {
+            Ok(response(LossModel::Bessel)?)
+        }
+        result => Ok(result?),
+    }
+}
+
+fn matched_refusal() -> MmLineError {
+    MmLineError::Invalid {
+        what: "matched continuation is not admitted by staircase lines; supply an analytic or referenced tabulated mouth",
+    }
+}
+
+/// Preflight the entire requested ladder: its ceiling has the lowest positive
+/// frequency. A later refinement must not change the source of a load bin.
+fn validate_mouth_load(
+    duct: &Duct,
+    gas: &GasState,
+    load: &MmLoad<'_>,
+    sample_rate_hz: u32,
+    max_taps: usize,
+) -> Result<(), MmLineError> {
+    if matches!(load, MmLoad::Matched) {
+        return Err(matched_refusal());
+    }
+    if let MmLoad::Tabulated(table) = load {
+        let radius = duct
+            .segments
+            .last()
+            .ok_or(DuctError::EmptyDuct)?
+            .outlet_radius();
+        table.validate_mouth(duct_axial_length(duct), radius, gas)?;
+        let dt = 1.0 / f64::from(sample_rate_hz);
+        for bin in [1, max_taps / 2] {
+            table.z_at(core::f64::consts::TAU * bin as f64 / (max_taps as f64 * dt))?;
+        }
+    }
+    Ok(())
+}
+
+fn dc_response(
+    duct: &Duct,
+    gas: &GasState,
+    config: &MmLineConfig,
+    load: &MmLoad<'_>,
+) -> Result<ModalResponse, MmLineError> {
+    if let MmLoad::Tabulated(table) = load {
+        let mouth = table.mouth().ok_or(MmLineError::Invalid {
+            what: "tabulated line requires a mouth reference and DC limit",
+        })?;
+        with_bessel_fallback(config.loss, |loss| {
+            mm_input_impedance_load(
+                duct,
+                gas,
+                1.0e-3,
+                loss,
+                C64::new(mouth.dc_impedance, 0.0),
+                config.n_modes,
+                config.extra_slices,
+            )
+        })
+    } else {
+        resolve_load(duct, gas, 1.0e-3, config, load).map(|(response, _)| response)
+    }
+}
+
+fn admit_plane_reflection(reflection: C64) -> Result<C64, MmLineError> {
+    if !reflection.re.is_finite() || !reflection.im.is_finite() || reflection.abs() > 1.0 + 1.0e-12
+    {
+        return Err(MmLineError::Invalid {
+            what: "strict multimodal mouth response is not finite and passive",
+        });
+    }
+    Ok(reflection)
+}
+
 fn duct_axial_length(duct: &Duct) -> f64 {
     duct.segments
         .iter()
@@ -276,18 +401,22 @@ impl MmLineBank {
     /// convergence ladder over every combo jointly. Passivity
     /// (`max |R(e^{iωΔt})| <= 1`) is verified on the 4x-oversampled grid
     /// without `1/peak` clipping.
+    /// [`MouthLoad::Tabulated`] requires a matching physical mouth reference and
+    /// covers the whole ladder's positive-frequency band. Its declared DC load
+    /// passes through the same multimodal bore; no analytic splice is inferred.
     ///
     /// # Errors
     /// [`MmLineError`] on refusal: geometry, authority, non-passivity, or
     /// [`MmLineError::LadderUnconverged`] at the ladder ceiling.
     #[allow(clippy::too_many_lines)] // one realization pipeline
-    pub fn new(
+    pub fn new<'a>(
         ducts: &[Duct],
         labels: &[&str],
         gas: &GasState,
-        load: &MmLoad<'_>,
+        load: impl Into<MmLoad<'a>>,
         config: &MmLineConfig,
     ) -> Result<MmLineBank, MmLineError> {
+        let load = load.into();
         if ducts.is_empty() || ducts.len() != labels.len() {
             return Err(MmLineError::Invalid {
                 what: "combos and labels must be non-empty and match",
@@ -330,6 +459,7 @@ impl MmLineBank {
             }
             max_geo_delay = max_geo_delay.max(geo_delay);
             delays.push(geo_delay);
+            validate_mouth_load(duct, gas, &load, config.sample_rate_hz, ladder.max_taps)?;
         }
 
         // DC: each combo's own plane-reflectance limit (DC flow resistance
@@ -338,7 +468,12 @@ impl MmLineBank {
         let r_dc: Vec<C64> = ducts
             .iter()
             .map(|duct| {
-                resolve_load(duct, gas, 1.0e-3, config, load)
+                if load.is_strict() {
+                    let response = dc_response(duct, gas, config, &load)?;
+                    let r = admit_plane_reflection(reflectance(response.plane_impedance, zc0))?;
+                    return Ok(C64::new(r.re, 0.0));
+                }
+                Ok(resolve_load(duct, gas, 1.0e-3, config, &load)
                     .ok()
                     .map(|(resp, _)| {
                         reflectance(
@@ -347,9 +482,11 @@ impl MmLineBank {
                         )
                     })
                     .filter(|r| r.re.is_finite())
-                    .map_or(C64::new(-1.0, 0.0), |r| C64::new(r.re.clamp(-1.0, 1.0), 0.0))
+                    .map_or(C64::new(-1.0, 0.0), |r| {
+                        C64::new(r.re.clamp(-1.0, 1.0), 0.0)
+                    }))
             })
-            .collect();
+            .collect::<Result<_, MmLineError>>()?;
 
         // Shared convergence ladder (DEF-02, bead .82). One FFT size for
         // every combo keeps the switch lift a plain history copy. Start at
@@ -403,12 +540,15 @@ impl MmLineBank {
                 };
                 for k in fresh {
                     let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
-                    let (response, table) = resolve_load(duct, gas, omega, config, load)?;
+                    let (response, table) = resolve_load(duct, gas, omega, config, &load)?;
                     from_table[k] = table;
                     r_pos[k] = reflectance(
                         C64::new(response.plane_impedance.re, response.plane_impedance.im),
                         zc0,
                     );
+                    if load.is_strict() {
+                        admit_plane_reflection(r_pos[k])?;
+                    }
                 }
                 let geo_delay = delays[combo];
                 let ir = crate::driving_point::realize_reflectance_ir_from_positive_spectrum(
@@ -729,10 +869,10 @@ impl MatrixFirLine {
     ///
     /// # Errors
     /// [`MmLineError`] on refusal.
-    pub fn new(
+    pub fn new<'a>(
         duct: &Duct,
         gas: &GasState,
-        load: &MmLoad<'_>,
+        load: impl Into<MmLoad<'a>>,
         config: &MmLineConfig,
     ) -> Result<MatrixFirLine, MmLineError> {
         Self::with_ladder(
@@ -754,13 +894,14 @@ impl MatrixFirLine {
     /// [`MmLineError`] on refusal, including
     /// [`MmLineError::LadderUnconverged`] at the ladder ceiling.
     #[allow(clippy::too_many_lines)] // one realization pipeline
-    pub fn with_ladder(
+    pub fn with_ladder<'a>(
         duct: &Duct,
         gas: &GasState,
-        load: &MmLoad<'_>,
+        load: impl Into<MmLoad<'a>>,
         config: &MmLineConfig,
         ladder: &crate::driving_point::LineLadder,
     ) -> Result<MatrixFirLine, MmLineError> {
+        let load = load.into();
         let n = config.n_modes;
         if n == 0 {
             return Err(MmLineError::Invalid {
@@ -803,20 +944,26 @@ impl MatrixFirLine {
         }
         let r_in = input_radius(duct)?;
         let zc0 = gas.density * gas.sound_speed / (core::f64::consts::PI * r_in * r_in);
+        validate_mouth_load(duct, gas, &load, config.sample_rate_hz, ladder.max_taps)?;
         // DC: the matrix's own low-frequency limit, kept real for a real IR.
         // The old fixed -1 (plane) / 0 (higher modes) disagreed with bin 1:
         // a spectral jump, which leaves an N-independent tail in the IR.
         let mut r_dc = Vec::with_capacity(n * n);
-        for (entry, r) in matrix_reflection_at(duct, gas, 1.0e-3, config, load, zc0)?
-            .into_iter()
-            .enumerate()
-        {
-            if !r.re.is_finite() {
+        let response = dc_response(duct, gas, config, &load)?;
+        let dc = modal_reflection_from_impedance(
+            &response.impedance_matrix,
+            &vec![C64::new(zc0, 0.0); n],
+            n,
+        )?;
+        for (entry, r) in dc.into_iter().enumerate() {
+            if !r.re.is_finite() || !r.im.is_finite() {
                 return Err(MmLineError::Invalid {
                     what: "matrix reflection has no finite low-frequency limit",
                 });
             }
-            let re = if entry == 0 {
+            let re = if entry == 0 && load.is_strict() {
+                admit_plane_reflection(r)?.re
+            } else if entry == 0 {
                 r.re.clamp(-1.0, 1.0)
             } else {
                 r.re
@@ -853,7 +1000,10 @@ impl MatrixFirLine {
             }
             for k in fresh {
                 let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
-                let r = matrix_reflection_at(duct, gas, omega, config, load, zc0)?;
+                let r = matrix_reflection_at(duct, gas, omega, config, &load, zc0)?;
+                if load.is_strict() {
+                    admit_plane_reflection(r[0])?;
+                }
                 for (r_pos, &v) in next.iter_mut().zip(&r) {
                     r_pos[k] = v;
                 }
@@ -1028,6 +1178,7 @@ pub fn cup_junction(
 #[cfg(test)]
 mod mm_line_tests {
     use super::*;
+    use fs_duct::TabulatedMouth;
     use fs_material::gas::GasSpec;
 
     fn air20() -> GasState {
@@ -1076,6 +1227,267 @@ mod mm_line_tests {
             n_modes: 3,
             extra_slices: 1,
             loss: LossModel::Bessel,
+        }
+    }
+
+    fn full_band_load(rate: u32) -> (Duct, GasState, TabulatedLoad, MmLineConfig) {
+        let gas = air20();
+        // An integer sixteen-sample round trip isolates loading from delay
+        // interpolation. The first higher-mode cutoff stays above Nyquist at
+        // both rates; cutoff refinement belongs to the modal authority's tests.
+        // The constant resistance has an analytic plane reflection.
+        let radius = 0.002_f64;
+        let length = 8.0 * gas.sound_speed / f64::from(rate);
+        let duct = Duct {
+            segments: vec![Segment::Cylinder { radius, length }],
+        };
+        let zc = gas.density * gas.sound_speed / (core::f64::consts::PI * radius * radius);
+        let dt = 1.0 / f64::from(rate);
+        let ceiling = crate::driving_point::LineLadder::default().max_taps;
+        let table = TabulatedLoad::try_new(
+            vec![
+                core::f64::consts::TAU / (ceiling as f64 * dt),
+                core::f64::consts::PI / dt,
+            ],
+            vec![C64::new(0.7 * zc, 0.0); 2],
+            "constant-resistance analytic control",
+            0.0,
+        )
+        .unwrap()
+        .with_mouth(TabulatedMouth {
+            axial_position_m: length,
+            radius_m: radius,
+            gas,
+            dc_impedance: 0.7 * zc,
+        })
+        .unwrap();
+        let config = MmLineConfig {
+            sample_rate_hz: rate,
+            n_modes: 2,
+            extra_slices: 1,
+            loss: LossModel::Lossless,
+        };
+        (duct, gas, table, config)
+    }
+
+    fn check_resistive_dc(taps: &[f64]) {
+        let reflection = (0.7 - 1.0) / (0.7 + 1.0);
+        let actual: f64 = taps.iter().sum();
+        assert!(
+            (actual - reflection).abs() < 2.0e-11,
+            "DC {actual} != {reflection}"
+        );
+        assert!(taps.iter().all(|x| x.is_finite()));
+    }
+
+    #[test]
+    fn full_band_tabulated_lines_match_analytic_reflection_and_keep_declared_dc() {
+        for rate in [48_000, 96_000] {
+            let (duct, gas, table, config) = full_band_load(rate);
+            assert!(
+                table.z_at(1.0e-3).is_err(),
+                "DC cannot be read from this table"
+            );
+            let bank = MmLineBank::new(
+                core::slice::from_ref(&duct),
+                &["resistive"],
+                &gas,
+                MouthLoad::Tabulated(&table),
+                &config,
+            )
+            .expect("strict multimodal bank");
+            let receipt = &bank.receipts()[0];
+            assert_eq!(receipt.table_bins, receipt.n_fft / 2);
+            assert_eq!(receipt.fallback_bins, 0);
+            assert!(receipt.peak_reflectance < 1.0);
+            check_resistive_dc(bank.combo_taps(0));
+            // The shared FIR owner intentionally applies a Nyquist rolloff and
+            // folds a precursor skirt. Check the original physical response
+            // before that treatment, including the floor and Nyquist bins.
+            for bin in [1, receipt.n_fft / 8, receipt.n_fft / 4, receipt.n_fft / 2] {
+                let omega =
+                    core::f64::consts::TAU * bin as f64 * f64::from(rate) / receipt.n_fft as f64;
+                let (response, from_table) =
+                    resolve_load(&duct, &gas, omega, &config, &MmLoad::Tabulated(&table)).unwrap();
+                assert!(from_table);
+                let phase = omega * 16.0 / f64::from(rate);
+                let expected = C64::new(phase.cos(), phase.sin()).scale((0.7 - 1.0) / (0.7 + 1.0));
+                let actual = reflectance(response.plane_impedance, bank.zc0());
+                assert!(
+                    (actual - expected).abs() < 2.0e-11,
+                    "rate {rate}, bin {bin}"
+                );
+            }
+
+            // The full matrix includes the same plane port and the original
+            // independently matched higher-mode ports. No scalar-only adapter.
+            let matrix = MatrixFirLine::new(&duct, &gas, MouthLoad::Tabulated(&table), &config)
+                .expect("strict matrix line");
+            assert_eq!(matrix.taps.len(), config.n_modes * config.n_modes);
+            check_resistive_dc(&matrix.taps[0]);
+        }
+    }
+
+    #[test]
+    fn full_band_load_refuses_missing_support_or_mouth_before_realization() {
+        let (duct, gas, table, config) = full_band_load(48_000);
+        let (lo, hi) = table.support();
+        let mouth = *table.mouth().unwrap();
+        let values = vec![C64::new(mouth.dc_impedance, 0.0); 2];
+        let missing_reference =
+            TabulatedLoad::try_new(vec![lo, hi], values.clone(), "missing mouth", 0.0).unwrap();
+        let low_gap = TabulatedLoad::try_new(
+            vec![2.0 * lo, hi],
+            values.clone(),
+            "missing ladder floor",
+            0.0,
+        )
+        .unwrap()
+        .with_mouth(mouth)
+        .unwrap();
+        let high_gap = TabulatedLoad::try_new(vec![lo, 0.99 * hi], values, "missing Nyquist", 0.0)
+            .unwrap()
+            .with_mouth(mouth)
+            .unwrap();
+        let wrong_plane = table
+            .clone()
+            .with_mouth(TabulatedMouth {
+                axial_position_m: mouth.axial_position_m + 1.0e-6,
+                ..mouth
+            })
+            .unwrap();
+        let wrong_radius = table
+            .clone()
+            .with_mouth(TabulatedMouth {
+                radius_m: mouth.radius_m + 1.0e-6,
+                ..mouth
+            })
+            .unwrap();
+        let wrong_gas = table
+            .clone()
+            .with_mouth(TabulatedMouth {
+                gas: GasState::try_new(&GasSpec::dry_air_ussa1976(), 303.15, 101_325.0).unwrap(),
+                ..mouth
+            })
+            .unwrap();
+        let active = TabulatedLoad::try_new(
+            vec![lo, hi],
+            vec![C64::new(-1.0, 1.0e3); 2],
+            "loose source import",
+            1.0,
+        )
+        .unwrap()
+        .with_mouth(mouth)
+        .unwrap();
+        for invalid in [
+            &missing_reference,
+            &low_gap,
+            &high_gap,
+            &wrong_plane,
+            &wrong_radius,
+            &wrong_gas,
+            &active,
+        ] {
+            let bank = MmLineBank::new(
+                core::slice::from_ref(&duct),
+                &["refused"],
+                &gas,
+                MouthLoad::Tabulated(invalid),
+                &config,
+            );
+            let matrix = MatrixFirLine::new(&duct, &gas, MouthLoad::Tabulated(invalid), &config);
+            assert!(
+                matches!(bank, Err(MmLineError::Duct(_))),
+                "invalid load was not refused at admission"
+            );
+            assert!(
+                matches!(matrix, Err(MmLineError::Duct(_))),
+                "invalid matrix load was not refused at admission"
+            );
+        }
+        for dc_impedance in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(
+                table
+                    .clone()
+                    .with_mouth(TabulatedMouth {
+                        dc_impedance,
+                        ..mouth
+                    })
+                    .is_err()
+            );
+        }
+        assert!(matches!(
+            MmLineBank::new(
+                core::slice::from_ref(&duct),
+                &["matched"],
+                &gas,
+                MouthLoad::Matched,
+                &config,
+            ),
+            Err(MmLineError::Invalid { .. })
+        ));
+        assert!(matches!(
+            MatrixFirLine::new(&duct, &gas, MouthLoad::Matched, &config,),
+            Err(MmLineError::Invalid { .. })
+        ));
+    }
+
+    #[test]
+    fn explicit_mouth_impedance_preserves_the_complete_multimodal_response() {
+        let gas = air20();
+        let duct = brass_combo(0.0);
+        let config = config();
+        let impedance = C64::new(4.0e5, -2.0e5);
+        let table = TabulatedLoad::try_new(
+            vec![1.0, 1.0e6],
+            vec![impedance; 2],
+            "explicit-load parity",
+            0.0,
+        )
+        .unwrap();
+        for frequency in [100.0, 1_000.0, 8_000.0] {
+            let omega = core::f64::consts::TAU * frequency;
+            let sampled = table.z_at(omega).unwrap();
+            let expected = mm_input_impedance_tabulated(
+                &duct,
+                &gas,
+                omega,
+                config.loss,
+                &table,
+                config.n_modes,
+                config.extra_slices,
+            )
+            .unwrap();
+            let actual = mm_input_impedance_load(
+                &duct,
+                &gas,
+                omega,
+                config.loss,
+                sampled,
+                config.n_modes,
+                config.extra_slices,
+            )
+            .unwrap();
+            assert_eq!(actual.impedance_matrix, expected.impedance_matrix);
+            assert_eq!(actual.plane_impedance, expected.plane_impedance);
+        }
+        for invalid in [
+            C64::new(f64::NAN, 0.0),
+            C64::new(1.0, f64::INFINITY),
+            C64::new(-1.0, 0.0),
+        ] {
+            assert!(matches!(
+                mm_input_impedance_load(
+                    &duct,
+                    &gas,
+                    100.0,
+                    config.loss,
+                    invalid,
+                    config.n_modes,
+                    config.extra_slices,
+                ),
+                Err(DuctError::BadParameter { .. })
+            ));
         }
     }
 

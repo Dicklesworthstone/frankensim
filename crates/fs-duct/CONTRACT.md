@@ -343,6 +343,12 @@ pipe `Z_in = +i Zc cot(kL)`.
   consumers (the fs-couple MM characteristic-line realizer), keeping
   the `Im k >= 0` branch rule and the `Zc_n = Zc_0 k_0/k_n`
   derivation single-sourced here.
+  `mm_input_impedance_load` supplies an explicit finite plane-mode impedance
+  with nonnegative resistance to that same recurrence. It retains every
+  interior modal coupling and the matched higher-mode mouth closure. Runtime
+  consumers use it for an independently declared DC limit without extending a
+  positive-frequency table. It establishes neither causality of an arbitrary
+  supplied impedance law nor experimental validity of a radiation bake.
 
 - `modal::mm_profile_impedance(profile, state, omega, loss, load, modes,
   steps) -> ModalResponse` (IRP M2.1-W3b): CONTINUOUS multimodal m = 0
