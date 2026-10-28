@@ -14,8 +14,7 @@ use fs_thermal::enthalpy::{DepositionError, ThermalLaw};
 
 impl ThermalLaw for EquilibriumEnthalpyPhaseCurve {
     fn temperature_k(&self, specific_h_j_kg: f64) -> Result<f64, DepositionError> {
-        self.state_at_specific_enthalpy(specific_h_j_kg)
-            .map(|state| state.temperature_k())
+        self.temperature_at_specific_enthalpy(specific_h_j_kg)
             .map_err(|_| DepositionError::MaterialDomain)
     }
 

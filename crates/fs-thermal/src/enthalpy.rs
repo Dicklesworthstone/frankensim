@@ -60,6 +60,8 @@ pub trait ThermalLaw {
     fn temperature_k(&self, specific_h_j_kg: f64) -> Result<f64, DepositionError>;
     /// Global upper bound on dT/dh [kg K/J] over the admitted enthalpy domain.
     /// Must be finite and nonnegative; an underestimated bound invalidates CFL.
+    /// Admitted once at timeline construction and reused across advances and
+    /// checkpoints; the bound must remain valid for the immutable law.
     fn maximum_temperature_slope(&self) -> f64;
     /// Exact relative thermal entropy integral `integral dh / T(h)` [J/(kg K)]
     /// on this same admitted caloric law, at its fixed pressure/composition.
@@ -323,6 +325,9 @@ pub struct DepositionSimulation<'a> {
     cursor: usize,
     schedule: Vec<TimedEvent>,
     materials: BTreeMap<MaterialId, &'a dyn ThermalLaw>,
+    // Immutable global CFL bounds, admitted once rather than rescanning a
+    // material chart for every active cell at every thermal substep.
+    material_temperature_slopes: BTreeMap<MaterialId, f64>,
     cells: BTreeMap<CellId, DepositedCell>,
     links: BTreeMap<u64, ThermalLink>,
     // Overrides only; symmetric links retain their existing area semantics.
@@ -366,18 +371,22 @@ impl<'a> DepositionSimulation<'a> {
             previous = event.time_s;
         }
         let mut laws = BTreeMap::new();
+        let mut material_temperature_slopes = BTreeMap::new();
         for &(id, law) in materials {
-            if !nonnegative(law.maximum_temperature_slope()) || laws.insert(id, law).is_some() {
+            let slope = law.maximum_temperature_slope();
+            if !nonnegative(slope) || laws.insert(id, law).is_some() {
                 return Err(DepositionError::InvalidInput(
                     "duplicate material or invalid temperature slope",
                 ));
             }
+            material_temperature_slopes.insert(id, slope);
         }
         Ok(Self {
             time_s: 0.0,
             cursor: 0,
             schedule,
             materials: laws,
+            material_temperature_slopes,
             cells: BTreeMap::new(),
             links: BTreeMap::new(),
             covered_areas: BTreeMap::new(),
@@ -579,7 +588,7 @@ impl<'a> DepositionSimulation<'a> {
             external_w = finite(external_w + external)?;
             let rate = rates.get_mut(&id).ok_or(DepositionError::Arithmetic)?;
             *rate = finite(*rate + external)?;
-            let slope = self.materials[&cell.material_id].maximum_temperature_slope();
+            let slope = self.material_temperature_slopes[&cell.material_id];
             let decay = finite(g * slope / cell.mass_kg)?;
             if decay > 0.0 {
                 dt = dt.min(0.8 / decay);
@@ -762,6 +771,57 @@ mod tests {
     }
     fn close(a: f64, b: f64, tol: f64) {
         assert!((a - b).abs() <= tol, "{a} != {b}");
+    }
+
+    #[test]
+    fn immutable_material_slopes_are_reused_across_cells_steps_and_checkpoints() {
+        struct CountedLaw(std::cell::Cell<usize>);
+        impl ThermalLaw for CountedLaw {
+            fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
+                LAW.temperature_k(h)
+            }
+            fn maximum_temperature_slope(&self) -> f64 {
+                self.0.set(self.0.get() + 1);
+                LAW.maximum_temperature_slope()
+            }
+        }
+        let laws = [
+            CountedLaw(std::cell::Cell::new(0)),
+            CountedLaw(std::cell::Cell::new(0)),
+        ];
+        let mut other = cell(2, 400_000.0);
+        other.material_id = MaterialId(8);
+        let schedule = vec![
+            birth(0.0, 1, 0.0),
+            event(0.0, Event::Birth(other)),
+            event(0.0, Event::Contact(link(1, 2))),
+            event(0.5, Event::Boundary(CellId(2), boundary(100.0))),
+        ];
+        let mut counted = DepositionSimulation::new(
+            schedule.clone(),
+            &[(MaterialId(7), &laws[0]), (MaterialId(8), &laws[1])],
+            budget(),
+        )
+        .unwrap();
+        let mut reference = DepositionSimulation::new(
+            schedule,
+            &[(MaterialId(7), &LAW), (MaterialId(8), &LAW)],
+            budget(),
+        )
+        .unwrap();
+        assert!(laws.iter().all(|law| law.0.get() == 1));
+        for target in [0.5, 1.0] {
+            let (next, audit) = counted.advance_to(target, config(0.01), || Ok(())).unwrap();
+            let (expected, expected_audit) =
+                reference.advance_to(target, config(0.01), || Ok(())).unwrap();
+            assert!(audit.substeps > 1);
+            assert_eq!(next.cells(), expected.cells());
+            assert_eq!(next.links(), expected.links());
+            assert_eq!(audit, expected_audit);
+            counted = next.clone();
+            reference = expected;
+        }
+        assert!(laws.iter().all(|law| law.0.get() == 1));
     }
 
     // G0: birth energy is exactly once, incoming reference mass never inferred

@@ -718,6 +718,23 @@ impl EquilibriumEnthalpyPhaseCurve {
         Ok((self.knots[upper_index - 1], self.knots[upper_index]))
     }
 
+    /// Resolve temperature in kelvin without constructing a phase-state identity.
+    ///
+    /// Uses the same chart evaluation and admission checks as
+    /// [`Self::state_at_specific_enthalpy`], including latent plateaus and
+    /// representability of interpolated density.
+    ///
+    /// # Errors
+    /// Refuses nonfinite or out-of-domain enthalpy and an interpolated density
+    /// whose specific-volume calculation is not finite and positive.
+    pub fn temperature_at_specific_enthalpy(
+        &self,
+        specific_enthalpy_j_kg: f64,
+    ) -> Result<f64, PhaseStateError> {
+        self.values_at_specific_enthalpy(specific_enthalpy_j_kg)
+            .map(|values| values.temperature_k)
+    }
+
     /// Resolve equilibrium temperature, density, and phase fractions from
     /// specific enthalpy without extrapolation.
     ///
@@ -728,6 +745,14 @@ impl EquilibriumEnthalpyPhaseCurve {
         &self,
         specific_enthalpy_j_kg: f64,
     ) -> Result<EquilibriumPhaseState, PhaseStateError> {
+        let values = self.values_at_specific_enthalpy(specific_enthalpy_j_kg)?;
+        Ok(self.state_from_values(specific_enthalpy_j_kg, values))
+    }
+
+    fn values_at_specific_enthalpy(
+        &self,
+        specific_enthalpy_j_kg: f64,
+    ) -> Result<EnthalpyPhaseKnot, PhaseStateError> {
         if !specific_enthalpy_j_kg.is_finite() {
             return Err(PhaseStateError::NonFiniteSpecificEnthalpy);
         }
@@ -745,7 +770,7 @@ impl EquilibriumEnthalpyPhaseCurve {
                 .partial_cmp(&specific_enthalpy_j_kg)
                 .expect("admitted enthalpy knots and query are finite")
         }) {
-            Ok(index) => Ok(self.state_from_values(specific_enthalpy_j_kg, self.knots[index])),
+            Ok(index) => Ok(self.knots[index]),
             Err(upper_index) => {
                 let lower_knot = self.knots[upper_index - 1];
                 let upper_knot = self.knots[upper_index];
@@ -787,7 +812,7 @@ impl EquilibriumEnthalpyPhaseCurve {
                         what: "interpolated bulk density is not finite and positive",
                     });
                 }
-                Ok(self.state_from_values(specific_enthalpy_j_kg, values))
+                Ok(values)
             }
         }
     }
@@ -1113,6 +1138,62 @@ mod tests {
     }
 
     #[test]
+    fn temperature_queries_match_phase_states_across_sensible_and_latent_charts() {
+        use fs_thermal::enthalpy::{DepositionError, ThermalLaw};
+
+        let [cold, warm] = heat_capacity_knots(1_000.0, 2_000.0);
+        let hot = HeatCapacityKnot {
+            temperature_k: 600.0,
+            specific_heat_capacity_j_kg_k: 500.0,
+            bulk_density_kg_m3: 800.0,
+        };
+        let sensible = EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity(
+            ContentHash([0x75; 32]),
+            SolidLiquidPhase::Solid,
+            0.0,
+            &[cold, warm, hot],
+            1.0,
+        )
+        .unwrap();
+        for curve in [plateau_curve(), sensible] {
+            let check = |h| {
+                let expected = curve.state_at_specific_enthalpy(h).unwrap().temperature_k();
+                assert_eq!(
+                    curve.temperature_at_specific_enthalpy(h).unwrap().to_bits(),
+                    expected.to_bits()
+                );
+                assert_eq!(
+                    ThermalLaw::temperature_k(&curve, h).unwrap().to_bits(),
+                    expected.to_bits()
+                );
+            };
+            for h in [-0.0, 0.0] {
+                check(h);
+            }
+            for pair in curve.knots().windows(2) {
+                for alpha in [0.0, 0.125, 0.5, 0.875, 1.0] {
+                    check(lerp(
+                        pair[0].specific_enthalpy_j_kg,
+                        pair[1].specific_enthalpy_j_kg,
+                        alpha,
+                    ));
+                }
+            }
+            let upper = curve.knots().last().unwrap().specific_enthalpy_j_kg;
+            for h in [f64::NAN, f64::NEG_INFINITY, f64::INFINITY, -1.0, upper + 1.0] {
+                assert_eq!(
+                    curve.temperature_at_specific_enthalpy(h),
+                    curve.state_at_specific_enthalpy(h).map(|state| state.temperature_k())
+                );
+                assert_eq!(
+                    ThermalLaw::temperature_k(&curve, h),
+                    Err(DepositionError::MaterialDomain)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn g0_enthalpy_crosses_an_isothermal_phase_plateau_without_name_switches() {
         let curve = plateau_curve();
         let solid = curve.state_at_specific_enthalpy(20_000.0).unwrap();
@@ -1214,12 +1295,26 @@ mod tests {
                     exact.bulk_density_kg_m3().to_bits(),
                     knot.bulk_density_kg_m3.to_bits()
                 );
+                assert_eq!(
+                    curve.temperature_at_specific_enthalpy(knot.specific_enthalpy_j_kg),
+                    Ok(knot.temperature_k)
+                );
             }
             assert_eq!(
                 curve.state_at_specific_enthalpy(midpoint),
                 Err(PhaseStateError::InvalidCurve {
                     what: "interpolated bulk density is not finite and positive",
                 })
+            );
+            assert_eq!(
+                curve.temperature_at_specific_enthalpy(midpoint),
+                Err(PhaseStateError::InvalidCurve {
+                    what: "interpolated bulk density is not finite and positive",
+                })
+            );
+            assert_eq!(
+                fs_thermal::enthalpy::ThermalLaw::temperature_k(&curve, midpoint),
+                Err(fs_thermal::enthalpy::DepositionError::MaterialDomain)
             );
         }
     }
