@@ -23,6 +23,9 @@ use fs_thermal::enthalpy::{
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Material-coordinate partial-slip history and its original moving heat network.
+pub mod partial_slip;
+
 /// One fixed plane and a unit tangent; normal points from body A to body B.
 #[derive(Clone, Copy, Debug)]
 pub struct StripFrame {
