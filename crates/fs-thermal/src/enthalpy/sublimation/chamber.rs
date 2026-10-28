@@ -148,6 +148,28 @@ impl DepositionSimulation<'_> {
         Ok(ordered)
     }
 
+    // Capture START exposure once for all active selected surfaces. Future
+    // births stay absent, and endpoint contact events cannot rewrite this batch.
+    fn chamber_exposure(
+        &self,
+        ordered: &[ChamberSurface],
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Vec<(ChamberSurface, f64)>, ThermalSublimationError> {
+        let mut selected = Vec::with_capacity(ordered.len());
+        for (index, surface) in ordered.iter().enumerate() {
+            if index % 256 == 0 { checkpoint()?; }
+            if self.cells.contains_key(&surface.cell_id) { selected.push(surface.cell_id); }
+        }
+        let areas = self.exposed_areas_m2(&selected, &mut *checkpoint)?;
+        let mut exposed = Vec::with_capacity(selected.len());
+        for (index, surface) in ordered.iter().enumerate() {
+            if index % 256 == 0 { checkpoint()?; }
+            if let Some(&area) = areas.get(&surface.cell_id) { exposed.push((*surface, area)); }
+        }
+        checkpoint()?;
+        Ok(exposed)
+    }
+
     /// Apply one simultaneous phase interval to actual active cells and ONE
     /// finite reservoir. Original caloric laws and current exposed areas are
     /// retained. Refusal leaves every cell and the reservoir unchanged.
@@ -169,13 +191,7 @@ impl DepositionSimulation<'_> {
         finite_vapor_mass(*reservoir)?;
         let ordered =
             self.chamber_selection(surfaces, config.max_surfaces, false, &mut checkpoint)?;
-        let mut exposed = Vec::with_capacity(ordered.len());
-        for (index, surface) in ordered.iter().enumerate() {
-            if index % 256 == 0 {
-                checkpoint()?;
-            }
-            exposed.push((*surface, self.exposed_area_m2(surface.cell_id)?));
-        }
+        let exposed = self.chamber_exposure(&ordered, &mut checkpoint)?;
         self.sublimate_chamber_over_areas(
             &exposed,
             law,
@@ -337,15 +353,7 @@ impl DepositionSimulation<'_> {
         while next.time_s < target_s {
             checkpoint()?;
             let start_s = next.time_s;
-            let mut exposed = Vec::with_capacity(ordered.len());
-            for (index, surface) in ordered.iter().enumerate() {
-                if index % 256 == 0 {
-                    checkpoint()?;
-                }
-                if next.cells.contains_key(&surface.cell_id) {
-                    exposed.push((*surface, next.exposed_area_m2(surface.cell_id)?));
-                }
-            }
+            let exposed = next.chamber_exposure(&ordered, &mut checkpoint)?;
             // No heat or phase work exists before the first active cell.
             // Jump to the next event/target instead of renewing empty intervals.
             let mut stop_s = if next.cells.is_empty() {

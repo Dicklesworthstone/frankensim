@@ -43,9 +43,69 @@ impl DepositionSimulation<'_> {
         self.covered_areas.get(&link.id).copied().unwrap_or([link.area_m2; 2])
     }
 
+    /// Current free areas for a bounded, unique selection of active cells.
+    ///
+    /// One ordered contact sweep replaces a full link scan per selected cell.
+    /// Each cell retains the exact scalar `exposed_area_m2` subtraction order:
+    /// reservoir first, then incident links in canonical link-ID order. Distinct
+    /// per-side coverage is authoritative even on zero-conductance contacts.
+    /// Input order cannot change output bits; returned keys are canonical.
+    ///
+    /// Uses O(S) additional storage for S selected cells and one contact sweep
+    /// with bounded tree-map lookups, rather than S full scans. Empty selection
+    /// skips the link sweep. Counts use the original cell budget. Cancellation
+    /// is checked every 256 selected cells/links and before publication.
+    pub fn exposed_areas_m2(
+        &self,
+        selected: &[CellId],
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, DepositionError> {
+        checkpoint()?;
+        if selected.len() > self.budget.max_cells {
+            return Err(DepositionError::Budget("exposed surface selection"));
+        }
+        let mut areas = BTreeMap::new();
+        for (index, &id) in selected.iter().enumerate() {
+            if index % 256 == 0 { checkpoint()?; }
+            let cell = self.cells.get(&id)
+                .ok_or(DepositionError::InvalidInput("inactive cell"))?;
+            let area = cell.geometry.surface_area_m2
+                - cell.boundary.reservoir.map_or(0.0, |r| r.area_m2);
+            if areas.insert(id, area).is_some() {
+                return Err(DepositionError::InvalidInput("duplicate exposed surface cell"));
+            }
+        }
+        if !areas.is_empty() {
+            for (index, link) in self.links.values().enumerate() {
+                if index % 256 == 0 { checkpoint()?; }
+                let covered = self.contact_areas(link);
+                for (id, cover) in [(link.a, covered[0]), (link.b, covered[1])] {
+                    if let Some(area) = areas.get_mut(&id) { *area -= cover; }
+                }
+            }
+        }
+        for (index, &area) in areas.values().enumerate() {
+            if index % 256 == 0 { checkpoint()?; }
+            if !nonnegative(area) {
+                return Err(DepositionError::InvalidInput("contacts exceed surface area"));
+            }
+        }
+        checkpoint()?;
+        Ok(areas)
+    }
+
     // Shared admission for scheduled symmetric links and explicit pair patches.
     // The caller owns a scratch candidate; a refusal never escapes as a state.
     pub(super) fn insert_contact_patch(&mut self, patch: ContactPatch) -> Result<(), DepositionError> {
+        self.insert_contact_patch_structure(patch)?;
+        self.exposed_area_m2(patch.link.a)?;
+        self.exposed_area_m2(patch.link.b)?;
+        Ok(())
+    }
+
+    // Batch repartition uses the SAME structural checks, then admits final
+    // coverage in one sweep before its private candidate can be published.
+    fn insert_contact_patch_structure(&mut self, patch: ContactPatch) -> Result<(), DepositionError> {
         let link = patch.link;
         if self.links.len() >= self.budget.max_links {
             return Err(DepositionError::Budget("active links"));
@@ -63,8 +123,6 @@ impl DepositionSimulation<'_> {
         if patch.covered_area_m2 != [link.area_m2; 2] {
             self.covered_areas.insert(link.id, patch.covered_area_m2);
         }
-        self.exposed_area_m2(link.a)?;
-        self.exposed_area_m2(link.b)?;
         Ok(())
     }
 
@@ -80,8 +138,10 @@ impl DepositionSimulation<'_> {
     /// scheduled separation also clears coverage; a later ordinary Contact event
     /// with the same ID creates a new symmetric patch, not stale retained area.
     ///
-    /// O(updates + active links) storage, O(updates * active links) area admission;
-    /// loops poll cancellation, allocation/clone sizes obey the existing budgets.
+    /// Coverage is checked once on the complete candidate over all touched cells,
+    /// not once per inserted patch. O(updates + active links + active cells)
+    /// storage including the original candidate clone; area admission uses one
+    /// ordered contact sweep. Loops poll cancellation and obey existing budgets.
     /// This is the explicit deposition lane, not the separate implicit parcel lane.
     pub fn replace_contact_patches(&self, updates: &[ContactPatchUpdate],
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>) -> Result<Self, DepositionError> {
@@ -93,6 +153,7 @@ impl DepositionSimulation<'_> {
             return Err(DepositionError::InvalidInput("process due scheduled events before contact updates"));
         }
         let mut ids = std::collections::BTreeSet::new();
+        let mut touched = std::collections::BTreeSet::new();
         for update in updates {
             checkpoint()?;
             if !ids.insert(update.id)
@@ -102,6 +163,12 @@ impl DepositionSimulation<'_> {
             }
             if self.contact_patch(update.id) != update.expected {
                 return Err(DepositionError::InvalidInput("stale thermal contact update"));
+            }
+            if update.expected != update.replacement {
+                for patch in [update.expected, update.replacement].into_iter().flatten() {
+                    touched.insert(patch.link.a);
+                    touched.insert(patch.link.b);
+                }
             }
         }
         let mut next = self.clone();
@@ -117,9 +184,11 @@ impl DepositionSimulation<'_> {
         for update in updates {
             checkpoint()?;
             if update.expected != update.replacement {
-                if let Some(patch) = update.replacement { next.insert_contact_patch(patch)?; }
+                if let Some(patch) = update.replacement { next.insert_contact_patch_structure(patch)?; }
             }
         }
+        let selected: Vec<_> = touched.into_iter().collect();
+        next.exposed_areas_m2(&selected, &mut checkpoint)?;
         checkpoint()?;
         Ok(next)
     }
