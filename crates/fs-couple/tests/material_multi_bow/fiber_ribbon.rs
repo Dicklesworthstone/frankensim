@@ -842,14 +842,20 @@ fn invalid_fiber_stroke_does_not_consume_geometry_clock_or_mechanical_history() 
         let drive0=vec![drive(0.01,0.002);3];
         actual.step(&zero,&drive0).unwrap();expected.step(&zero,&drive0).unwrap();
         let state=states(&actual);let support=actual.fiber_support_kinematics();
-        let maps:Vec<_>=(0..3).map(|i|actual.system().port(i).unwrap().clone()).collect();
+        let maps:Vec<_>=(0..3).map(|i| {
+            let port=actual.system().port(i).unwrap();
+            (port.left.clone(),port.right.clone(),port.law.clone())
+        }).collect();
         for drives in [vec![drive(0.2,0.002);3],vec![drive(f64::NAN,0.002);3],
             vec![drive(0.01,0.002),drive(0.02,0.002),drive(0.01,0.002)]] {
             assert!(actual.step(&zero,&drives).is_err());
             assert_eq!(states(&actual),state);
             assert_eq!(actual.fiber_support_kinematics(),support);
             assert_eq!(actual.system().samples_rendered(),1);
-            assert_eq!((0..3).map(|i|actual.system().port(i).unwrap().clone()).collect::<Vec<_>>(),maps);
+            assert_eq!((0..3).map(|i| {
+                let port=actual.system().port(i).unwrap();
+                (port.left.clone(),port.right.clone(),port.law.clone())
+            }).collect::<Vec<_>>(),maps);
         }
         let next=vec![drive(-0.01,0.002);3];
         assert_eq!(actual.step(&zero,&next).unwrap(),expected.step(&zero,&next).unwrap());
@@ -908,13 +914,19 @@ fn fiber_source_domain_uses_actual_start_and_final_speed_and_preserves_refused_h
                 for bind_first in [false,true] {
                     let mut actual=build(bind_first);let mut expected=build(bind_first);
                     let before=states(&actual);let support=actual.fiber_support_kinematics();
-                    let ports:Vec<_>=(0..cells).map(|i|actual.system().port(i).unwrap().clone()).collect();
+                    let ports:Vec<_>=(0..cells).map(|i| {
+                        let port=actual.system().port(i).unwrap();
+                        (port.left.clone(),port.right.clone(),port.law.clone())
+                    }).collect();
                     assert!(matches!(actual.step(&zero,&commands),Err(ModalFrictionError::Law(_))));
                     assert_eq!(states(&actual),before);
                     assert_eq!(actual.fiber_support_kinematics(),support);
                     assert_eq!(actual.system().samples_rendered(),0);
                     assert!(actual.system().last_frame().is_none());
-                    assert_eq!((0..cells).map(|i|actual.system().port(i).unwrap().clone()).collect::<Vec<_>>(),ports);
+                    assert_eq!((0..cells).map(|i| {
+                        let port=actual.system().port(i).unwrap();
+                        (port.left.clone(),port.right.clone(),port.law.clone())
+                    }).collect::<Vec<_>>(),ports);
                     // The initial out-of-domain state may only leave while
                     // released; a valid in-domain acceleration remains loaded.
                     let retry=vec![drive(if initial==0.0 {0.01}else{0.0},

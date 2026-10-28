@@ -212,10 +212,6 @@ impl input::Spec {
         }
         self.validate_shell_observer()?;
         let bow_station_program = self.bow_station_program(gate)?;
-        if bow_station_program.is_some()
-            && stop_profile.as_ref().is_some_and(|stops| !stops.bow_contacts().is_empty()) {
-            return Err("bow migration requires jointly moving normal contact patches; contact-loaded bows are not supported".into());
-        }
         if let Some(layers)=self.friction.shear_layers() { layers.preflight(&self)?; }
         if let Some(body)=&profile { body.preflight(&self)?; }
         if self.one_way_observer.is_some() && profile.is_none() {

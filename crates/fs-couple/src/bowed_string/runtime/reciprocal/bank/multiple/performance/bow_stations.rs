@@ -137,8 +137,12 @@ impl MultiBowPerformance {
     /// A finite ribbon's complete interval must stay inside its original string;
     /// every spatial cell translates by the same amount, to rounding precision.
     /// Hair contact coordinates, support frame and material free length remain
-    /// those in the original description. Contact-loaded normals and retained
-    /// shear/thermal layers need their own transported patches and refuse.
+    /// those in the original description. A contact-loaded normal follows its
+    /// bow automatically through the same product-rule contact-work owner.
+    /// Independently authored stop paths keep mapped normal entries at their
+    /// original stations; this program owns their actual shared trajectories.
+    /// Retained shear/thermal layers still require patch-history transport and
+    /// refuse migration.
     pub fn with_bow_station_motion(
         mut self,
         program: BowStationProgram,
@@ -177,6 +181,23 @@ impl MultiBowPerformance {
             self.bank.source.bank().options().sample_rate_hz,
             gate,
         )?;
+        // An independently admitted stop path may retain tighter normal-map
+        // limits. Validate the bow-owned subset against that same trajectory
+        // owner now, rather than discovering a conflict after audio begins.
+        let contacts = &self.bank.source.bow_contact_loads;
+        if let Some(limits) = self.bank.stop_station_motion_limits().filter(|_| !contacts.is_empty()) {
+            let normal_program = super::stations::StopStationProgram {
+                knots: program.knots.iter().map(|knot| super::stations::StopStationKnot {
+                    sample: knot.sample,
+                    station_fractions: contacts.iter().map(|binding| knot.station_fractions[binding.bow]).collect(),
+                }).collect(),
+                limits, max_knots: program.max_knots, max_coordinate_values: program.max_coordinate_values,
+            };
+            let initial: Vec<_> = contacts.iter().map(|binding| initial[binding.bow]).collect();
+            let lengths: Vec<_> = contacts.iter().map(|binding| lengths[binding.bow]).collect();
+            normal_program.validate(&initial, &lengths, self.config.samples,
+                self.bank.source.bank().options().sample_rate_hz, gate)?;
+        }
         if let Some(ribbon) = self.bank.source.ribbon() {
             for knot in &program.knots {
                 super::super::stations::validate_ribbon_stations(

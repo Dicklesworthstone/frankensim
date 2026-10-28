@@ -40,9 +40,9 @@ impl MultiBowStringBank {
     /// A receiver footprint and normal direction stay as authored. This is a
     /// prescribed moving compliant stop, not a solved finger or a pitch edit.
     ///
-    /// Stops supplying bow normal loads must stay at their bow stations until
-    /// the complete normal/tangential patch is transported. Other independent stops can
-    /// migrate in the same bank. Endpoint motion may refuse on the existing
+    /// Stops supplying bow normal loads move only with their matching tangent
+    /// through the bow-station entry point. Independent stops can migrate in
+    /// the same bank. Endpoint motion may refuse on the existing
     /// contact, energy, pressure, nonlinear-domain or compliance limits.
     pub fn with_stop_station_motion(mut self, limits: StopStationMotionLimits,
         gate: &CancelGate) -> Result<Self, RenderError>
@@ -103,6 +103,12 @@ impl MultiBowStringBank {
     pub(in super::super) fn prepare_stop_station_geometry(&self, stations: &[f64],
         gate: &CancelGate) -> Result<Vec<ObstacleGeometry>, RenderError>
     {
+        self.prepare_stop_station_geometry_with_bows(stations, None, gate)
+    }
+
+    pub(in super::super) fn prepare_stop_station_geometry_with_bows(&self, stations: &[f64],
+        bow_stations: Option<&[f64]>, gate: &CancelGate) -> Result<Vec<ObstacleGeometry>, RenderError>
+    {
         if gate.is_requested() { return Err(RenderError::Coupled(ModalCouplingError::Cancelled)); }
         let state = self.stop_stations.as_ref().ok_or_else(|| error("stop station motion has not been admitted"))?;
         if stations.len() != self.source.stops.len() {
@@ -118,8 +124,14 @@ impl MultiBowStringBank {
             }
             // Spatial identity matters even when a truncated modal map happens
             // to be equal at two distinct stations (e.g. a symmetric sine mode).
-            if end.to_bits() != start.to_bits() && self.source.bow_contact_loads.iter().any(|b| b.stop == i) {
-                return Err(error("a contact-loaded bow normal cannot migrate without its tangential contact"));
+            if let Some(binding) = self.source.bow_contact_loads.iter().find(|b| b.stop == i) {
+                match bow_stations {
+                    Some(bows) if bows.get(binding.bow).is_none_or(|bow| bow.to_bits() != end.to_bits()) =>
+                        return Err(error("moving normal and tangential contacts must occupy the same string station")),
+                    None if end.to_bits() != start.to_bits() =>
+                        return Err(error("a contact-loaded bow normal cannot migrate without its tangential contact")),
+                    _ => {},
+                }
             }
         }
         self.stop_geometry(&self.source.stops, Some(stations), state.limits.max_update_terms, gate)

@@ -397,7 +397,17 @@ impl MultiFrictionModalSystem {
         gate: Option<&CancelGate>)
         -> Result<&MultiFrictionFrame, ModalFrictionError>
     {
-        self.prepare_step(drives, obstacle_offsets, obstacle_geometry, gate)?;
+        self.step_with_patch_geometry_inner(external, drives, obstacle_offsets, obstacle_geometry, false, gate)
+    }
+
+    // Only the complete normal/tangent geometry entry point may transport a
+    // contact-loaded patch. Ordinary normal motion must not detach its tangent.
+    fn step_with_patch_geometry_inner(&mut self, external: &[f64], drives: &[FrictionDrive],
+        obstacle_offsets: Option<&[f64]>, obstacle_geometry: Option<&[obstacles::geometry::ObstacleGeometry]>,
+        contact_patch_motion: bool, gate: Option<&CancelGate>)
+        -> Result<&MultiFrictionFrame, ModalFrictionError>
+    {
+        self.prepare_step(drives, obstacle_offsets, obstacle_geometry, contact_patch_motion, gate)?;
         let p = self.points.len();
         if p == 1 && self.obstacles.is_none() && self.series_drives.iter().all(Option::is_none)
             && self.shear_layers.iter().all(Option::is_none) && self.endpoint_controls.is_none() {
@@ -441,7 +451,7 @@ impl MultiFrictionModalSystem {
     // Preparation changes only scratch, never accepted physical history.
     fn prepare_step(&mut self, drives: &[FrictionDrive],
         obstacle_offsets: Option<&[f64]>, obstacle_geometry: Option<&[obstacles::geometry::ObstacleGeometry]>,
-        gate: Option<&CancelGate>) -> Result<(), ModalFrictionError> {
+        contact_patch_motion: bool, gate: Option<&CancelGate>) -> Result<(), ModalFrictionError> {
         poll(gate)?;
         if let Some(offsets) = obstacle_offsets {
             let obstacles = self.obstacles.as_ref()
@@ -462,7 +472,7 @@ impl MultiFrictionModalSystem {
             // trial of THIS sample. Accepted columns remain unchanged until
             // the complete mechanical transaction publishes.
             obstacles.prepare_geometry(&self.core.network, &self.points,
-                &self.contact_loads, obstacle_geometry, gate)?;
+                &self.contact_loads, obstacle_geometry, contact_patch_motion, gate)?;
         }
         Ok(())
     }

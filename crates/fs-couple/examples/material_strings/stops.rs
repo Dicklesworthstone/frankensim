@@ -305,7 +305,7 @@ impl Profile {
             motion.validate(&initial, &lengths, spec.samples, spec.rate, gate)?;
             for binding in &self.bow_contacts {
                 if motion.knots.iter().any(|k| k.station_fractions[binding.stop].to_bits() != initial[binding.stop].to_bits()) {
-                    return Err("contact-loaded bow normals must retain their original stations".into());
+                    return Err("contact-loaded normals follow the bow program; independent stop paths retain their original station entries".into());
                 }
             }
         }

@@ -101,9 +101,11 @@ fn admit_sources(
         .ok_or_else(|| error("support motion requires material fibers"))?;
     let start = fiber.component_start();
     let end = start + fiber.model().resolution().cells;
-    // Independent normals on the moving hair also need their full footprint
-    // transported; leaving them frozen would misapply normal reactions.
-    if source.stops().iter().any(|stop| {
+    // Bow-position motion on the string may carry a normal patch, but travel
+    // along accelerating hair still lacks that normal footprint's transport.
+    // Keep this restriction local to fiber motion rather than the shared
+    // bow-station admission, which also serves fixed material receivers.
+    if !source.bow_contact_loads().is_empty() || source.stops().iter().any(|stop| {
         stop.body.as_ref().is_some_and(|body| {
             (start..end).contains(&(source.bank().strings().len() + body.component))
         })

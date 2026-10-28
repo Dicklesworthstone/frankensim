@@ -467,7 +467,7 @@ impl MultiFrictionModalSystem {
                 .map_err(ModalFrictionError::from)?;
             thermodynamics.push((slope, initial));
         }
-        self.prepare_step(drives, None, None, Some(gate))?;
+        self.prepare_step(drives, None, None, false, Some(gate))?;
         let step = BackwardEulerStep::new(thermal, target_s, checkpoint)?;
         let dt = step.duration_s();
         let trials = Cell::new(0usize);

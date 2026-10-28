@@ -4209,7 +4209,8 @@ Acceleration pressure uses endpoint maps and endpoint geometric force.
 Accepted stations, offsets, mechanics, reports and clock publish atomically;
 constant station paths retain fixed-position arithmetic. Receiver footprints
 and normals remain fixed. A stop supplying a fixed bow's normal load cannot
-migrate until its complete normal/tangential patch is transported. Nonpositive
+migrate independently; its bow-position path owns the joint normal/tangential
+endpoint described below. Nonpositive
 endpoint/mean-map compliance, trajectory limits and existing material, force,
 penetration, energy and pressure limits refuse. The native v1 stop profile
 carries bounded station trajectories on the original performance clock, with
@@ -4239,13 +4240,26 @@ width; the complete footprint must stay inside the original supported string
 span. Explicit speed, per-sample distance and complete response-rebuild budgets
 bound admission. Receiver footprints and contact material stations along any
 resolved fibers stay fixed, preserving their free length and mechanical state.
-Contact-loaded normals and retained shear/thermal layers refuse in either
-binding order until their complete patches and history can be transported.
+A contact-loaded normal follows its bow's string station through the original
+endpoint displacement-map product rule, including attachment work
+`R*delta_N^T*mean_q`. Its held reaction supplies that same port's tangential
+friction and pressure checks. The material bank checks exact physical
+co-location at each endpoint and retains normal direction, clearance, receiver
+and constitutive law. Independent stop programs retain original placeholders
+for these mapped contacts; the bow program owns their actual paths. Binding
+normal contacts precedes migration admission, and native loading preserves
+that order. A failed joint update restores both accepted maps and histories.
+Retained shear/thermal layers still refuse migration until their finite patch
+history transport is implemented; the generic joint entry point also refuses
+moving their normal alone even if the tangent map happens to be unchanged.
 Native material-string files expose bounded station knots before the original
 gesture schedule, and use the same renderer and callback-independent clock.
 Regression coverage includes independent midpoint sine maps and work/slip,
 fixed-position parity, material/fiber/gas state retention, combined independent
-stop work, refusal/replay, finite-width geometry and temporal refinement. This
+stop work, refusal/replay, finite-width geometry and temporal refinement.
+Joint-patch regressions additionally cover independent normal actuator work,
+material/interface substitution, resolved material fibers, explicit stop-path
+composition and native callback/PCM identity. This
 bounded prescribed longitudinal migration does not resolve motion along bow
 hair, changing supports, contact area, transported film, or measured instrument
 accuracy; spatial and temporal refinement remain separate qualifications.

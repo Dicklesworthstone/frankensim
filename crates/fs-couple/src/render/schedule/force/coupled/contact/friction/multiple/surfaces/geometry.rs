@@ -7,6 +7,7 @@
 //! Normal-contact geometry retains its separate product-rule work accounting.
 use super::*;
 use super::obstacles::geometry::ObstacleGeometry;
+use super::super::super::super::contact_attachment_column;
 
 /// One held tangential map in the original component bases. Only geometry may
 /// change: component identities, material/interface law and limits stay fixed.
@@ -144,9 +145,14 @@ impl MultiFrictionModalSystem {
     /// only scratch normal matrices; material memory and vibration are never
     /// reconstructed. An unchanged map takes the original path exactly.
     ///
-    /// A friction port whose load comes from a normal contact must stay fixed:
-    /// relocating the complete normal/tangent patch needs a joint spatial model.
-    /// Other bows may move alongside those fixed contacts and independent stops.
+    /// A friction port whose load comes from a normal contact may move only
+    /// with an explicit complete `normal_geometry` endpoint. Its normal uses
+    /// the existing product-rule work account and the same solved reaction
+    /// supplies tangential friction. The geometry producer remains responsible
+    /// for physical co-location and compatible normal/tangent directions, as
+    /// with the original `ContactNormalLoad` binding: modal maps alone cannot
+    /// prove these. Retained material shear layers still require transport of
+    /// their patch histories and refuse migration.
     /// Spatial/time refinement remains necessary; this is neither continuous
     /// contact kinematics nor an alias-free or allocation-free rendering claim.
     #[allow(clippy::too_many_arguments)]
@@ -168,16 +174,29 @@ impl MultiFrictionModalSystem {
                 return Err(invalid("moving friction must preserve both original component identities").into());
             }
             let moving = next.left != old.port.left || next.right != old.port.right;
-            if moving && self.contact_loads[i].is_some() {
+            if moving && self.contact_loads[i].is_some() && normal_geometry.is_none() {
                 return Err(invalid("contact-loaded friction cannot migrate without its normal patch").into());
             }
             if moving && self.shear_layers[i].is_some() {
                 return Err(invalid("material shear cannot migrate without layer-history transport").into());
             }
+            if self.shear_layers[i].is_some() {
+                if let (Some(contact), Some(endpoints)) = (self.contact_loads[i], normal_geometry) {
+                    let next = endpoints.get(contact).ok_or_else(||
+                        invalid("moving friction needs the complete normal geometry"))?;
+                    let column = contact_attachment_column(&self.core.network, &next.left, &next.right)?;
+                    let accepted = self.obstacle_normal_column(contact)
+                        .expect("bound normal belongs to the original obstacle set");
+                    if column.iter().zip(accepted).any(|(a, b)| a.to_bits() != b.to_bits()) {
+                        return Err(invalid("material shear cannot migrate without layer-history transport").into());
+                    }
+                }
+            }
             changed |= moving;
         }
         if !changed {
-            return self.step_inner(external, drives, normal_offsets_m, normal_geometry, Some(gate));
+            return self.step_with_patch_geometry_inner(external, drives, normal_offsets_m,
+                normal_geometry, normal_geometry.is_some(), Some(gate));
         }
         let mut ports = Vec::with_capacity(self.points.len());
         for (next, old) in geometry.iter().zip(&self.points) {
@@ -200,7 +219,8 @@ impl MultiFrictionModalSystem {
         let core_compliance = std::mem::replace(&mut self.core.compliance, compliance[0]);
         let points = std::mem::replace(&mut self.points, points);
         let compliance = std::mem::replace(&mut self.compliance, compliance);
-        let result = self.step_inner(external, drives, normal_offsets_m, normal_geometry, Some(gate))
+        let result = self.step_with_patch_geometry_inner(external, drives, normal_offsets_m,
+            normal_geometry, normal_geometry.is_some(), Some(gate))
             .map(|_| ());
         if let Err(error) = result {
             self.core.port = core_port;

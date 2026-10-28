@@ -287,6 +287,14 @@ impl MultiBowPerformance {
             let next_motion = self.stop_motion.as_mut().map(|motion| motion.prepare(sample+1));
             let next_stations = self.stop_station_motion.as_mut().map(|motion| motion.prepare(sample+1));
             let next_bow_stations = self.bow_station_motion.as_mut().map(|motion| motion.prepare(sample+1));
+            if let (Some(bows), Some(stops)) = (&self.bow_station_motion, &mut self.stop_station_motion) {
+                // A mapped normal and its tangent have one physical location.
+                // The independent stop program retains source placeholders at
+                // these indices; the bow program owns the complete patch path.
+                for binding in &self.bank.source.bow_contact_loads {
+                    stops.candidate[binding.stop] = bows.candidate[binding.bow];
+                }
+            }
             let result = if let Some(bows) = &self.bow_station_motion {
                 self.bank.step_with_bow_and_stop_stations_under_gate(forces, &self.candidate,
                     &bows.candidate, self.stop_station_motion.as_ref().map(|motion| motion.candidate.as_slice()),

@@ -92,8 +92,10 @@ impl MultiBowPerformance {
     /// renderer survive. No frequency retuning, state projection or audio-layer
     /// pitch shift is used. Callback partitioning does not alter the path.
     ///
-    /// A contact supplying a fixed bow's normal load must have a constant
-    /// station path; independent finger/fret stops may still move alongside it.
+    /// A contact supplying a bow's normal load keeps its ORIGINAL station in
+    /// this independent stop path. A separately bound bow-station program owns
+    /// that whole patch and supplies its actual normal/tangent endpoint together.
+    /// Independent finger/fret stops may move alongside it.
     pub fn with_stop_station_motion(mut self, program: StopStationProgram,
         gate: &CancelGate) -> Result<Self, RenderError>
     {
@@ -109,7 +111,7 @@ impl MultiBowPerformance {
             self.bank.source.bank().options().sample_rate_hz, gate)?;
         for binding in &self.bank.source.bow_contact_loads {
             if program.knots.iter().any(|k| k.station_fractions[binding.stop].to_bits() != initial[binding.stop].to_bits()) {
-                return Err(render_invalid("a contact-loaded bow station path must stay fixed until its tangent can migrate"));
+                return Err(render_invalid("a contact-loaded normal follows its bow program; independent stop paths must retain its original station"));
             }
         }
         self.bank = self.bank.with_stop_station_motion(program.limits, gate)?;

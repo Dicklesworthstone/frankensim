@@ -236,6 +236,70 @@ fn fiber_normal_contact_reaches_the_same_scheduled_pressure_and_pcm_history() {
 }
 
 #[test]
+fn moving_fiber_contact_patch_uses_source_materials_and_the_original_wav_path() {
+    scoped(|cx, gate| {
+        let text = include_str!("../fiber-contact.material-strings")
+            .replace("48000 4096", "48000 256")
+            .replace("forces retain 0 0", concat!(
+                "bow_station_motion 2 0.00003 1048576 2\n",
+                "bow_station_knot 64 0.202\n",
+                "bow_station_knot 128 0.201\n",
+                "forces retain 0 0"));
+        let profile = include_str!("../fiber-contact.stops");
+        let build = |density| input::Spec::parse(text.as_bytes()).unwrap().compile_with_profiles(
+            cx, gate, None, Some(crate::stops::Profile::parse(profile.as_bytes()).unwrap()),
+            |name| Ok(if name == "fiber.fsmatpk" { fiber_pack(density, false) }
+                else { pack(name, 7800.0, 200_000.0, None) }),
+        ).unwrap();
+        let mut moving = build(1300.0);
+        let first_fiber = moving.performance.bank().source().fiber_ribbon().unwrap().component_start();
+        let initial:Vec<_> = moving.performance.bank().source().bows().iter()
+            .map(|bow| bow.location.station_fraction).collect();
+        let mut output = Vec::new();
+        let (mut loaded, mut attachment_work) = (false, 0.0);
+        for _ in 0..256 {
+            let mut sample = [0.0];
+            moving.performance.block(&mut sample).unwrap();
+            output.push(sample[0]);
+            let bank = moving.performance.bank();
+            let bow_stations = bank.bow_station_fractions().unwrap();
+            let stop_stations = bank.stop_station_fractions().unwrap();
+            let system = bank.system();
+            let frame = system.last_frame().unwrap();
+            for binding in bank.source().bow_contact_loads() {
+                assert_eq!(bow_stations[binding.bow], stop_stations[binding.stop]);
+                let normal = system.last_obstacle_frames().unwrap()[binding.stop];
+                assert_eq!(frame.ports[binding.bow].normal_force_n, normal.normal_force_n);
+                attachment_work += normal.attachment_work_j.abs();
+                loaded |= normal.normal_force_n > 0.0;
+            }
+            assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        }
+        let bank = moving.performance.bank();
+        assert!(loaded && attachment_work > 0.0 && output.iter().any(|p| p.abs() > 1e-12));
+        for (&station, &original) in bank.bow_station_fractions().unwrap().iter().zip(&initial) {
+            assert!((station-original-0.001).abs() < 1e-15);
+        }
+        assert!(bank.system().components()[first_fiber..].iter().any(|fiber|
+            fiber.states().iter().any(|s| s.displacement_m_sqrt_kg != 0.0)));
+        // Changing only the fiber material reaches the same continuing coupled
+        // pressure path. The stationary and migrating contact are distinguishable.
+        let dense = pressure(&mut build(5200.0), 128);
+        let fixed = pressure(&mut contact_ready(cx, gate, 40.0, profile), 128);
+        assert!(output.iter().zip(dense).any(|(a,b)| (a-b).abs() > 1e-12));
+        assert!(output.iter().zip(fixed).any(|(a,b)| (a-b).abs() > 1e-12));
+        assert_eq!(output, pressure(&mut build(1300.0), 37));
+        let mut wav = build(1300.0);
+        let (bytes, summary) = wav.write(Cursor::new(Vec::<u8>::new()), gate).unwrap();
+        let (expected, clips) = fs_couple::pcm_wav::encode_pcm16_wav(
+            &output, wav.spec.rate, wav.spec.full_scale,
+        ).unwrap();
+        assert_eq!(bytes.into_inner(), expected);
+        assert_eq!(summary.clipped_samples, clips as u64);
+    });
+}
+
+#[test]
 fn fiber_tension_and_surface_clearance_change_load_and_sound_without_rewriting_physics() {
     scoped(|cx, gate| {
         let profile = include_str!("../fiber-contact.stops");
@@ -543,16 +607,26 @@ fn native_fiber_acceleration_and_reversal_reach_the_same_pressure_and_pcm_writer
 #[test]
 fn source_motion_does_not_admit_untransported_normal_or_thermal_hair_patches() {
     scoped(|cx,gate| {
-        let mut contact=contact_spec();
-        contact.bow_fibers.as_mut().unwrap().motion=moving_fiber_spec().bow_fibers.unwrap().motion;
-        let parsed=stops::Profile::parse(include_str!("../fiber-contact.stops").as_bytes());
-        // Compile using the actual source profile through the same helper as
-        // the existing normal-contact fixture, not a fabricated modal map.
-        assert!(parsed.is_ok());
-        let result=contact.compile_with_profiles(cx,gate,None,Some(parsed.unwrap()),|name|Ok(if name=="fiber.fsmatpk" {
-            fiber_pack(1300.0,false)
-        } else {pack(name,7800.0,200_000.0,None)}));
-        assert!(result.is_err());
+        for translating_on_string in [false,true] {
+            let mut contact=contact_spec();
+            if translating_on_string {
+                let text=include_str!("../fiber-contact.material-strings")
+                    .replace("48000 4096","48000 256")
+                    .replace("\nforces ",concat!("\nbow_station_motion 2 0.00003 1048576 2\n",
+                        "bow_station_knot 64 0.202\nbow_station_knot 128 0.201\nforces "));
+                contact=input::Spec::parse(text.as_bytes()).unwrap();
+            }
+            contact.bow_fibers.as_mut().unwrap().motion=moving_fiber_spec().bow_fibers.unwrap().motion;
+            let parsed=stops::Profile::parse(include_str!("../fiber-contact.stops").as_bytes());
+            // String-side patch travel is admissible, but does not transport a
+            // normal footprint along accelerating hair. Both orders retain the
+            // actual source profile instead of a fabricated modal map.
+            assert!(parsed.is_ok());
+            let result=contact.compile_with_profiles(cx,gate,None,Some(parsed.unwrap()),|name|Ok(if name=="fiber.fsmatpk" {
+                fiber_pack(1300.0,false)
+            } else {pack(name,7800.0,200_000.0,None)}));
+            assert!(result.is_err());
+        }
     });
     let text=include_str!("../fiber-ribbon.material-strings");
     for limits in ["1 0 0.001 1048576","1 1000 0.001 0","NaN 1000 0.001 1048576"] {

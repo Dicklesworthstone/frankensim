@@ -75,9 +75,15 @@ schedule; the position path does not retune or restart the string.
 
 The same force/velocity contact maps carry transverse and torsional motion,
 body response, material memory and microphone pressure. Independent moving
-finger stops may share the physical clock. Contact-loaded bow normal patches
-and retained shear/thermal films currently refuse because their moving
-material histories are not transported. This is a midpoint geometry
+finger stops may share the physical clock. A `bow-contact` normal follows its
+bow automatically, including material fiber receivers: the same solved normal
+reaction supplies friction while the normal patch's displacement-map motion
+contributes its physical actuator work to the shared energy balance. Bow
+speed remains the tangential surface speed; longitudinal station travel is a
+separate geometry control. The `bow_fiber_motion` control described below also
+moves the crossing along the hair and retains its separate normal-patch
+restriction. Retained shear/thermal films still refuse because
+their moving material histories are not transported. This is a midpoint geometry
 discretization: refine time, retained modes and ribbon cells before making
 accuracy claims. It does not establish measured instrument realism.
 
@@ -298,8 +304,14 @@ Changing the gap to a positive clearance leaves initially stationary separated
 surfaces unforced. Contact stiffness is authored **per cell**, so its physical
 quadrature must also be preserved when refining contact count.
 
-Both fixtures use fixed interior contact stations and rigid fiber endpoints
-in a uniformly translating tangential support frame. Normal offset trajectories
+Both fixtures begin with fixed interior contact stations and rigid fiber endpoints
+in a uniformly translating tangential support frame. Adding the optional
+`bow_station_motion` block above to `fiber-contact.material-strings` moves each
+string-side normal and tangential contact together at the original ribbon width;
+the same `fiber-contact.stops` profile and zero-load gesture schedule apply.
+The contact coordinate along each fiber and its endpoint frame remain fixed,
+so this is longitudinal travel on the string, not travel along the bow hair.
+Normal offset trajectories
 on fiber receivers refuse: moving the endpoints would also require their
 frame-acceleration forces, which this frozen model does not supply. Ordinary
 fixed/bridge stop motion remains available. The original `fiber-ribbon`
@@ -1494,9 +1506,13 @@ attachment map and endpoint geometric force. Reports expose attachment work
 separately from total geometry work; rejected motion changes neither accepted
 station, normal offset, modal state, contact report nor sample clock.
 
-A stop that supplies a bow's normal reaction must retain that bow's station;
-its tangential migration/slip is not part of this model. Other independent
-stops can migrate alongside it. Excessive speed or displacement, endpoints
+A stop that supplies a bow's normal reaction follows that bow's
+`bow_station_motion` trajectory. Keep its entries at their original source
+stations in the independent `station-motion` block; the bow program supplies
+the actual co-located normal and tangential endpoints on every sample. Bind
+independent stop programs before bow motion in the Rust API, as the native
+loader does. Other independent stops can migrate alongside it. Excessive speed
+or displacement, endpoints
 outside the span, nonpositive endpoint/mean-map contact compliance and existing
 material, force, penetration, energy or pressure limits refuse. Constant
 station paths preserve the original fixed-stop arithmetic. This is a bounded

@@ -53,9 +53,9 @@ impl MultiFrictionModalSystem {
     /// the same acceptance balance. Spatial and temporal refinement remain
     /// necessary; no rigid-impact or arbitrary moving-patch limit is promised.
     ///
-    /// A normal mapped to a fixed tangential friction port cannot move: its
-    /// tangential migration/slip has not been declared. Independent normals may
-    /// still move alongside those fixed contact-loaded friction ports.
+    /// A normal mapped to a tangential friction port moves only through
+    /// `step_with_friction_geometry`, which declares both parts of the patch.
+    /// Normal-only stepping still refuses to detach the two contact maps.
     pub fn with_obstacle_geometry_motion(mut self, config: ObstacleGeometryConfig,
         gate: &CancelGate) -> Result<Self, ModalFrictionError>
     {
@@ -133,7 +133,7 @@ impl MultiFrictionModalSystem {
 impl ObstacleSet {
     pub(in super::super) fn prepare_geometry(&mut self, network: &CoupledModalSystem,
         friction: &[Point], contact_loads: &[Option<usize>], endpoints: Option<&[ObstacleGeometry]>,
-        gate: Option<&CancelGate>) -> Result<(), ModalCouplingError>
+        contact_patch_motion: bool, gate: Option<&CancelGate>) -> Result<(), ModalCouplingError>
     {
         let Some(geometry) = &mut self.geometry else {
             return if endpoints.is_some() { Err(invalid("attachment motion has not been admitted")) }
@@ -155,7 +155,7 @@ impl ObstacleSet {
             } else { geometry.end_columns[i].copy_from_slice(&point.column); }
             geometry.moving[i] = geometry.end_columns[i].iter().zip(&point.column)
                 .any(|(end, start)| end.to_bits() != start.to_bits());
-            if geometry.moving[i] && contact_loads.contains(&Some(i)) {
+            if geometry.moving[i] && contact_loads.contains(&Some(i)) && !contact_patch_motion {
                 return Err(invalid("moving a contact-loaded normal requires its tangential migration and slip map"));
             }
             for j in 0..point.column.len() {

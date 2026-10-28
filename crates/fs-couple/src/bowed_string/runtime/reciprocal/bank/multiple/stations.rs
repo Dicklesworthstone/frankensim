@@ -72,10 +72,15 @@ impl MultiBowStringBank {
     /// A finite ribbon translates as a whole: width and cell order are retained.
     /// This models motion along the string, not travel along bow hair, support
     /// acceleration, a change of speaking length, or a frequency assignment.
+    /// Separate `with_fiber_support_motion` can add hair travel and inertia for
+    /// prescribed-load dry friction; it retains its normal-patch restrictions.
     ///
-    /// Bind once before playback. Contact-loaded normals and material shear
-    /// layers refuse: their complete moving patch/history is not transported.
-    /// Independent normal stops can move through their existing work account.
+    /// Bind once before playback, after any normal-load bindings. Each bound
+    /// normal follows its bow's SAME endpoint automatically. Its existing
+    /// contact law supplies the solved load and accounts for migration work;
+    /// there is no independently prescribed normal-force waveform. Other stops
+    /// hold or follow separately declared paths. Material shear layers still
+    /// refuse because this does not transport their finite patch histories.
     /// This is a midpoint held-map discretization; refine its step size and the
     /// original physical basis. It does not promise allocation-free playback.
     pub fn with_bow_station_motion(
@@ -99,6 +104,13 @@ impl MultiBowStringBank {
                 max_update_terms: limits.max_update_terms,
             })
             .map_err(RenderError::Friction)?;
+        if !self.source.bow_contact_loads.is_empty() && self.stop_stations.is_none() {
+            self = self.with_stop_station_motion(stops::stations::StopStationMotionLimits {
+                maximum_speed_m_s: limits.maximum_speed_m_s,
+                maximum_step_m: limits.maximum_step_m,
+                max_update_terms: limits.max_update_terms,
+            }, gate)?;
+        }
         self.bow_stations = Some(BowStationState {
             accepted: self
                 .source
@@ -114,11 +126,6 @@ impl MultiBowStringBank {
 
     pub(super) fn admit_bow_station_sources(&self) -> Result<(), ModalFrictionError> {
         for port in 0..self.source.bows.len() {
-            if self.system.contact_normal_load(port).is_some() {
-                return Err(error(
-                    "bow migration requires a jointly moving normal patch for contact-loaded bows",
-                ));
-            }
             if self.system.material_shear_layer(port).is_some() {
                 return Err(error(
                     "bow migration requires material shear-layer history transport",
@@ -174,10 +181,12 @@ impl MultiBowStringBank {
         self.step_with_bow_geometry(external, drives, Some(stations), None, stop_offsets_m, gate)
     }
 
-    /// Advance prescribed bow and independent stop locations on the SAME clock.
+    /// Advance prescribed bow and stop locations on the SAME clock.
     /// Stop locations are in original stop order and use their existing source
-    /// projection and actuator-work account. Omitted locations hold their last
-    /// accepted values; optional normal translations are absolute offsets.
+    /// projection and actuator-work account. Explicit endpoints of contact-load
+    /// normals must equal their associated bow endpoints. If stop locations are
+    /// omitted, those normals follow their bows automatically and independent
+    /// stops hold. Optional normal translations are absolute offsets.
     #[allow(clippy::too_many_arguments)]
     pub fn step_with_bow_and_stop_stations_under_gate(
         &mut self,
@@ -189,7 +198,7 @@ impl MultiBowStringBank {
         gate: &CancelGate,
     ) -> Result<&MultiFrictionFrame, RenderError> {
         let normal_geometry = stop_stations
-            .map(|stations| self.prepare_stop_station_geometry(stations, gate))
+            .map(|stations| self.prepare_stop_station_geometry_with_bows(stations, Some(bow_stations), gate))
             .transpose()?;
         self.step_with_bow_geometry(
             external,
@@ -257,6 +266,27 @@ impl MultiBowStringBank {
         if let Some(ribbon) = self.source.ribbon() {
             validate_ribbon_stations(ribbon, self.cards[ribbon.centre().string].length_m, end)?;
         }
+        // A mapped normal is the SAME spatial patch as its tangent. A bow-only
+        // command therefore moves that normal, retaining all independent stops
+        // and the original normal law, receiver, material state and clearance.
+        // Explicit stop endpoints have already been checked by the joint entry
+        // point. Keep automatically generated locations staged until acceptance.
+        let normal_stations = if normal_geometry.is_none() && !self.source.bow_contact_loads.is_empty() {
+            let mut stations = self.stop_station_fractions()
+                .ok_or_else(|| error("moving bow patch lost its admitted normal geometry"))?.to_vec();
+            for binding in &self.source.bow_contact_loads {
+                stations[binding.stop] = end[binding.bow];
+            }
+            Some(stations)
+        } else { None };
+        let automatic_normal_geometry = normal_stations.as_ref()
+            .map(|stations| self.prepare_stop_station_geometry_with_bows(stations, Some(end), gate))
+            .transpose().map_err(|failure| match failure {
+                RenderError::Coupled(error) => error.into(),
+                RenderError::Friction(error) => error,
+                _ => error("joint bow/normal station projection exceeds its source or motion limits"),
+            })?;
+        let normal_geometry = normal_geometry.or(automatic_normal_geometry.as_deref());
         // An unchanged interval uses the same source arithmetic as original
         // binding. After a move it also replaces the previous midpoint map by
         // the accepted endpoint, without altering vibration or material memory.
@@ -334,6 +364,10 @@ impl MultiBowStringBank {
                 .expect("admitted bow motion")
                 .accepted
                 .copy_from_slice(end);
+        }
+        if let Some(end) = normal_stations {
+            self.stop_stations.as_mut().expect("admitted normal patch motion")
+                .accepted.copy_from_slice(&end);
         }
         Ok(frame)
     }
