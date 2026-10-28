@@ -1,0 +1,221 @@
+//! Source-bound anisotropic Maxwell branches in the material's original axes.
+//!
+//! Equilibrium elasticity uses the canonical elastic properties. Each branch
+//! explicitly names all 21 entries of a symmetric Mandel matrix, including
+//! zeros; no direction, shear convention, rate or missing coefficient is
+//! inferred from a material name. Plane-stress elimination belongs to the
+//! consuming structural owner and must act on the complete hereditary law.
+
+use super::{TensorProny, TensorPronyBranch};
+use crate::state_point::{
+    MaterialStatePointError, ORTHOTROPIC_POISSON_RATIO_PROPERTIES,
+    ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES, ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES,
+    ResolvedMaterialStatePoint, ScalarAdmissibility as Admit,
+    ScalarPropertyRequirement as Requirement,
+};
+use crate::{IsotropicElastic, OrthotropicElastic};
+use fs_qty::{Dims, Pressure};
+
+/// Canonical equilibrium elastic data, before any spatial rotation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TensorElasticity {
+    /// `young_modulus` and `poisson_ratio`.
+    Isotropic,
+    /// The complete three Young moduli, three Poisson ratios and three shears.
+    Orthotropic,
+}
+
+/// One source branch in Mandel order (11,22,33,sqrt(2)12,sqrt(2)23,sqrt(2)31).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TensorBranchProperties {
+    /// Upper triangle in row order: C11,C12,...,C16,C22,...,C66, all in Pa.
+    pub stiffness_upper: [String; 21],
+    /// Original positive relaxation time in seconds.
+    pub relaxation_time: String,
+}
+
+/// Reusable selection of immutable source claims for one complete 3-D law.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TensorPronyProperties {
+    /// Equilibrium elastic property family, shared with the structural chart.
+    pub elasticity: TensorElasticity,
+    /// Positive dimensionless Frobenius small-strain limit from the source.
+    pub strain_limit: String,
+    /// Explicit branch matrices and times; at most 64 source branches.
+    pub branches: Vec<TensorBranchProperties>,
+}
+
+/// A missing, incompatible or inadmissible source cannot become a material law.
+#[derive(Debug)]
+pub enum TensorSourceError {
+    /// Original material requirement or validity refusal.
+    StatePoint(MaterialStatePointError),
+    /// Complete source/property or constitutive admission failure.
+    Invalid(String),
+}
+impl core::fmt::Display for TensorSourceError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::StatePoint(error) => write!(f, "tensor material source: {error}"),
+            Self::Invalid(reason) => write!(f, "tensor material source: {reason}"),
+        }
+    }
+}
+impl std::error::Error for TensorSourceError {}
+impl From<MaterialStatePointError> for TensorSourceError {
+    fn from(error: MaterialStatePointError) -> Self {
+        Self::StatePoint(error)
+    }
+}
+
+type Result<T> = core::result::Result<T, TensorSourceError>;
+
+impl TensorPronyProperties {
+    /// Requirements to add to the original card query. Repeated names resolve
+    /// once, while incompatible reuse (for example a modulus as a time) refuses.
+    pub fn requirements(&self) -> Result<Vec<Requirement>> {
+        if self.branches.len() > 64 {
+            return Err(TensorSourceError::Invalid(
+                "more than 64 source branches".into(),
+            ));
+        }
+        let mut requirements = Vec::<Requirement>::new();
+        let mut add = |name: &str, dims, admit| -> Result<()> {
+            if name.len() > 128 {
+                return Err(TensorSourceError::Invalid(
+                    "property name exceeds 128 bytes".into(),
+                ));
+            }
+            let requirement = Requirement::try_new(name, dims, admit)?;
+            if let Some(existing) = requirements.iter().find(|r| r.name() == name) {
+                if existing.quantity() != requirement.quantity() {
+                    return Err(TensorSourceError::Invalid(format!(
+                        "{name}: incompatible property roles"
+                    )));
+                }
+            } else {
+                requirements.push(requirement);
+            }
+            Ok(())
+        };
+        match self.elasticity {
+            TensorElasticity::Isotropic => {
+                add("young_modulus", Pressure::DIMS, Admit::StrictlyPositive)?;
+                add(
+                    "poisson_ratio",
+                    Dims::NONE,
+                    Admit::OpenInterval {
+                        lower: -1.0,
+                        upper: 0.5,
+                    },
+                )?;
+            }
+            TensorElasticity::Orthotropic => {
+                for key in ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES {
+                    add(key, Pressure::DIMS, Admit::StrictlyPositive)?;
+                }
+                for key in ORTHOTROPIC_POISSON_RATIO_PROPERTIES {
+                    add(key, Dims::NONE, Admit::Finite)?;
+                }
+                for key in ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES {
+                    add(key, Pressure::DIMS, Admit::StrictlyPositive)?;
+                }
+            }
+        }
+        add(&self.strain_limit, Dims::NONE, Admit::StrictlyPositive)?;
+        for branch in &self.branches {
+            add(
+                &branch.relaxation_time,
+                Dims([0, 0, 1, 0, 0, 0]),
+                Admit::StrictlyPositive,
+            )?;
+            for key in &branch.stiffness_upper {
+                add(key, Pressure::DIMS, Admit::Finite)?;
+            }
+        }
+        Ok(requirements)
+    }
+
+    /// Bind every selected coefficient at one original material state.
+    /// The admitted frequency band is the intersection of ALL selected source
+    /// domains, including equilibrium stiffness and the strain bound. Constant
+    /// coefficients at fixed temperature are required: a sampled modulus at one
+    /// frequency is not silently treated as an equilibrium spring.
+    pub fn bind(&self, state: &ResolvedMaterialStatePoint) -> Result<TensorProny> {
+        let requirements = self.requirements()?;
+        let mut band = (0.0_f64, f64::MAX);
+        for requirement in &requirements {
+            let name = requirement.name();
+            let property = state.property(name).ok_or_else(|| {
+                TensorSourceError::Invalid(format!("{name}: selected source property is missing"))
+            })?;
+            if property.requirement().quantity() != requirement.quantity()
+                || !property.value_si().is_finite()
+                || !property.is_constant_at_fixed_temperature()
+            {
+                return Err(TensorSourceError::Invalid(format!(
+                    "{name}: requires dimensioned finite coefficients constant at the original state"
+                )));
+            }
+            if let Some((low, high)) = property.angular_frequency_band_rad_s()? {
+                band.0 = band.0.max(low);
+                band.1 = band.1.min(high);
+            }
+        }
+        let value = |name: &str| -> f64 {
+            // All selected property names and dimensions were checked above.
+            state
+                .property(name)
+                .expect("checked tensor source property")
+                .value_si()
+        };
+        let strain_limit = value(&self.strain_limit);
+        if !strain_limit.is_finite() || strain_limit <= 0.0 {
+            return Err(TensorSourceError::Invalid(
+                "small-strain source bound must be positive".into(),
+            ));
+        }
+        let equilibrium = match self.elasticity {
+            TensorElasticity::Isotropic => {
+                IsotropicElastic::new(value("young_modulus"), value("poisson_ratio"), strain_limit)
+                    .map_err(|e| TensorSourceError::Invalid(e.to_string()))?
+                    .stiffness()
+            }
+            TensorElasticity::Orthotropic => OrthotropicElastic::new(
+                ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES.map(value),
+                ORTHOTROPIC_POISSON_RATIO_PROPERTIES.map(value),
+                ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES.map(value),
+                strain_limit,
+            )
+            .map_err(|e| TensorSourceError::Invalid(e.to_string()))?
+            .stiffness(),
+        };
+        let mut branches = Vec::with_capacity(self.branches.len());
+        for source in &self.branches {
+            let mut matrix = [[0.0; 6]; 6];
+            let mut entry = 0;
+            for row in 0..6 {
+                for column in row..6 {
+                    let coefficient = value(&source.stiffness_upper[entry]);
+                    matrix[row][column] = coefficient;
+                    matrix[column][row] = coefficient;
+                    entry += 1;
+                }
+            }
+            // The existing constitutive owner admits PSD branches, including
+            // rank-deficient ones, with its original roundoff policy. This
+            // binding adds no regularization or positive loss floor.
+            branches.push(
+                TensorPronyBranch::new(matrix, value(&source.relaxation_time))
+                    .map_err(|e| TensorSourceError::Invalid(e.to_string()))?,
+            );
+        }
+        TensorProny::from_tensor_shear(equilibrium, branches, strain_limit)
+            .map_err(|e| TensorSourceError::Invalid(e.to_string()))?
+            .with_band(band)
+            .map_err(|e| TensorSourceError::Invalid(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests;

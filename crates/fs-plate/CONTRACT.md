@@ -636,3 +636,17 @@ projects every cross term. Its conservative per-facet work expression is
 `1_000_000 + 324*n + 18*n*n`, plus input coverage; this is an operation-count
 improvement, not a measured runtime claim. Native affine membrane-energy
 checks verify active directions, null modes and complete modal congruence.
+
+## Shared DKT curvature quadrature
+
+`dkt_curvature_quadrature` exposes the same three mid-side curvature matrices
+used by `dkt_stiffness`, with their signed doubled area. Each matrix maps the
+original transverse displacement and slope DOFs to engineering bending strains;
+its integration weight is `twice_area/6`. Stiffness assembly retains its original
+arithmetic and ordering. Constitutive consumers can therefore retain actual
+material histories without reconstructing curvature from transverse nodal
+motion alone or introducing another plate basis. Physical material quadrature
+requires positively oriented triangles and retains the original geometry
+refusals. This is the existing flat DKT discretization, not a shell or nonlinear
+strain model. The coupled full-tensor reed tests exercise the shared curvature
+and energy path; native execution of the new tests remains unverified.

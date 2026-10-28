@@ -1014,37 +1014,10 @@ pub fn dkt_stiffness(
     d: &[f64; 9],
     element: usize,
 ) -> Result<([f64; 81], f64), PlateError> {
-    let x21 = x[1] - x[0];
-    let x31 = x[2] - x[0];
-    let y21 = y[1] - y[0];
-    let y31 = y[2] - y[0];
-    let twice_area = x21 * y31 - x31 * y21;
-    let scale = (x21 * x21 + y21 * y21).max(x31 * x31 + y31 * y31);
-    if !twice_area.is_finite() || twice_area.abs() <= 1e-14 * scale {
-        return Err(PlateError::DegenerateElement {
-            element,
-            twice_area,
-        });
-    }
-    let cf = edge_coeffs(x, y);
+    let (curvature, twice_area) = dkt_curvature_quadrature(x, y, element)?;
     let area = 0.5 * twice_area;
-    let gauss = [(0.5, 0.0), (0.5, 0.5), (0.0, 0.5)];
     let mut k = [0.0f64; 81];
-    for &(xi, eta) in &gauss {
-        let (dxi, deta) = quad_shape_derivs(xi, eta);
-        let (hx_xi, hy_xi) = h_vectors(&cf, &dxi);
-        let (hx_eta, hy_eta) = h_vectors(&cf, &deta);
-        // Cartesian curvature rows via the affine map inverse.
-        let mut b = [[0.0f64; 9]; 3];
-        for c in 0..9 {
-            let bx_x = (y31 * hx_xi[c] - y21 * hx_eta[c]) / twice_area;
-            let by_y = (-x31 * hy_xi[c] + x21 * hy_eta[c]) / twice_area;
-            let bx_y = (-x31 * hx_xi[c] + x21 * hx_eta[c]) / twice_area;
-            let by_x = (y31 * hy_xi[c] - y21 * hy_eta[c]) / twice_area;
-            b[0][c] = bx_x;
-            b[1][c] = by_y;
-            b[2][c] = bx_y + by_x;
-        }
+    for b in &curvature {
         let w = area / 3.0;
         for r in 0..9 {
             for c in 0..9 {
@@ -1059,6 +1032,53 @@ pub fn dkt_stiffness(
         }
     }
     Ok((k, twice_area))
+}
+
+/// The original three mid-side DKT curvature matrices and signed doubled area.
+/// Each 3-by-9 matrix maps `(w, wx, wy)` per node to the engineering bending
+/// strains used by [`dkt_stiffness`]. Its area weight is `twice_area / 6`.
+/// Constitutive histories must use these SAME rotations and quadrature points;
+/// transverse nodal displacement alone does not reconstruct plate curvature.
+///
+/// # Errors
+/// The identical geometry admission as [`dkt_stiffness`]. A physical material
+/// quadrature consumer additionally requires positively oriented elements.
+pub fn dkt_curvature_quadrature(
+    x: &[f64; 3], y: &[f64; 3], element: usize,
+) -> Result<([[[f64; 9]; 3]; 3], f64), PlateError> {
+    let x21 = x[1] - x[0];
+    let x31 = x[2] - x[0];
+    let y21 = y[1] - y[0];
+    let y31 = y[2] - y[0];
+    let twice_area = x21 * y31 - x31 * y21;
+    let scale = (x21 * x21 + y21 * y21).max(x31 * x31 + y31 * y31);
+    if !twice_area.is_finite() || twice_area.abs() <= 1e-14 * scale {
+        return Err(PlateError::DegenerateElement {
+            element,
+            twice_area,
+        });
+    }
+    let cf = edge_coeffs(x, y);
+    let gauss = [(0.5, 0.0), (0.5, 0.5), (0.0, 0.5)];
+    let mut curvature = [[[0.0; 9]; 3]; 3];
+    for (point, &(xi, eta)) in gauss.iter().enumerate() {
+        let (dxi, deta) = quad_shape_derivs(xi, eta);
+        let (hx_xi, hy_xi) = h_vectors(&cf, &dxi);
+        let (hx_eta, hy_eta) = h_vectors(&cf, &deta);
+        // Cartesian curvature rows via the affine map inverse.
+        let mut b = [[0.0f64; 9]; 3];
+        for c in 0..9 {
+            let bx_x = (y31 * hx_xi[c] - y21 * hx_eta[c]) / twice_area;
+            let by_y = (-x31 * hy_xi[c] + x21 * hy_eta[c]) / twice_area;
+            let bx_y = (-x31 * hx_xi[c] + x21 * hx_eta[c]) / twice_area;
+            let by_x = (y31 * hy_xi[c] - y21 * hy_eta[c]) / twice_area;
+            b[0][c] = bx_x;
+            b[1][c] = by_y;
+            b[2][c] = bx_y + by_x;
+        }
+        curvature[point] = b;
+    }
+    Ok((curvature, twice_area))
 }
 
 // ---------------------------------------------------------------------------

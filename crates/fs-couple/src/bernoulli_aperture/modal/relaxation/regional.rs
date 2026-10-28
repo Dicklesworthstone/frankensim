@@ -245,6 +245,7 @@ impl ModalAperture {
             arms: Vec::new(),
             states,
             coupled_arms: Some(arms),
+            tensor_points: Vec::new(),
         };
         let energy = self.energy(&self.state) + relaxation.energy(&self.state, &relaxation.states);
         if !energy.is_finite() || energy > self.spec.limits.maximum_energy_j {

@@ -530,11 +530,58 @@ pub(super) fn material_modal_dg_provenance(
             super::duct_metadata::gas_state(duct.outlet_gas()),
             mesh.elements, mesh.order, duct.total_dofs())
     });
-    let source_json = format!("\"material_modal_dg_valve_input\":{{\"schema\":\"frankensim-material-modal-dg-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"mechanics_rate_hz\":{},\"pressure_point\":\"{pressure_point}\",\"material_sources\":[{materials}],\"structural_propagator\":\"exact-zoh\",\"dg_operator_identity\":\"{}\",\"length_m\":{:e},\"inlet_gas\":{inlet},\"outlet_gas\":{outlet},\"model_scope\":\"original regional material plates, signed modal pressure/force projections and retained material memory coupled to the shared exact DG bore; flat DKT and finite-mode interface; nonlinear time and DG spatial convergence require separate refinement; no measured-instrument qualification\"{observation}{radiation}{gas_sources}{solid_wall}{upstream}}}",
+    let relaxation_json = match source.system().aperture() {
+        fs_couple::bernoulli_aperture::two_sided::LoadedAperture::Modal(valve) =>
+            modal_relaxation_provenance(valve),
+        _ => String::new(),
+    };
+    let source_json = format!("\"material_modal_dg_valve_input\":{{\"schema\":\"frankensim-material-modal-dg-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"mechanics_rate_hz\":{},\"pressure_point\":\"{pressure_point}\",\"material_sources\":[{materials}],\"structural_propagator\":\"exact-zoh\",\"dg_operator_identity\":\"{}\",\"length_m\":{:e},\"inlet_gas\":{inlet},\"outlet_gas\":{outlet},\"model_scope\":\"original regional material plates, signed modal pressure/force projections and retained material memory coupled to the shared exact DG bore; flat DKT and finite-mode interface; nonlinear time and DG spatial convergence require separate refinement; no measured-instrument qualification\"{observation}{radiation}{gas_sources}{solid_wall}{upstream}{relaxation_json}}}",
         i.input_hash.to_hex(), i.blades, i.modes, i.nodes, i.triangles,
         i.mechanics_rate_hz, load.duct().operator_identity().to_hex(),
         load.duct().total_length());
     source_json
+}
+
+fn modal_relaxation_provenance(
+    valve: &fs_couple::bernoulli_aperture::modal::ModalAperture,
+) -> String {
+    valve.material_relaxation().map_or_else(String::new, |memory| {
+        let initial = match memory.initial_memory() {
+            fs_couple::bernoulli_aperture::modal::relaxation::InitialModalMemory::Relaxed => "relaxed",
+            fs_couple::bernoulli_aperture::modal::relaxation::InitialModalMemory::Unrelaxed => "unrelaxed",
+        };
+        let arms: usize = memory.memory_sqrt_j().iter().map(Vec::len).sum();
+        let points = memory.tensor_material_points();
+        if !points.is_empty() {
+            let mut regions = std::collections::BTreeSet::new();
+            let matrix_json = |matrix: &[[f64; 6]; 6]| matrix.iter().map(|row|
+                format!("[{}]", row.iter().map(|v| format!("{v:e}"))
+                    .collect::<Vec<_>>().join(","))).collect::<Vec<_>>().join(",");
+            let laws = points.iter().filter_map(|point| {
+                if !regions.insert((point.blade(), point.region())) { return None; }
+                let law = point.image().point().material();
+                let equilibrium = matrix_json(law.equilibrium_mandel());
+                let branches = law.branches().iter().map(|branch| format!(
+                    "{{\"relaxation_time_s\":{:e},\"stiffness_mandel_pa\":[{}]}}",
+                    branch.relaxation_time_s(), matrix_json(branch.stiffness_mandel())))
+                    .collect::<Vec<_>>().join(",");
+                Some(format!("{{\"blade\":{},\"region\":{},\"band_rad_s\":[{:e},{:e}],\"equilibrium_mandel_pa\":[{equilibrium}],\"branches\":[{branches}]}}",
+                    point.blade(), point.region(), law.band_rad_s().0, law.band_rad_s().1))
+            }).collect::<Vec<_>>().join(",");
+            return format!(",\"tensor_material_relaxation\":{{\"initial_memory\":\"{initial}\",\"live_arms\":{arms},\"material_quadrature_points\":{},\"basis\":\"spatial Mandel xx yy zz sqrt2_xy sqrt2_yz sqrt2_zx\",\"regional_laws\":[{laws}],\"scope\":\"complete 3D plane-stress history constraint; all source coordinates retained by an invertible passive transform; original DKT strains and outer-face material limits; fixed-state homogeneous linear bending\"}}", points.len());
+        }
+        let spectra = memory.material_spectra().iter().enumerate().flat_map(|(blade, regions)| {
+            regions.iter().enumerate().map(move |(section, law)| {
+                let terms = law.terms.iter().map(|(modulus, time)| format!(
+                    "{{\"modulus_pa\":{modulus:e},\"relaxation_time_s\":{time:e}}}"))
+                    .collect::<Vec<_>>().join(",");
+                format!("{{\"blade\":{blade},\"section\":{section},\"equilibrium_young_modulus_pa\":{:e},\"terms\":[{terms}]}}", law.e_inf)
+            })
+        }).collect::<Vec<_>>().join(",");
+        let kind = if memory.is_regional() { "regional_material_relaxation" }
+            else { "proportional_material_relaxation" };
+        format!(",\"{kind}\":{{\"initial_memory\":\"{initial}\",\"live_arms\":{arms},\"regional_spectra\":[{spectra}]}}")
+    })
 }
 
 /// Original two-sided material source metadata shared by wind and ensemble.
@@ -601,30 +648,15 @@ pub(super) fn material_modal_provenance(
         fs_couple::bernoulli_aperture::paired::BladePropagator::Midpoint =>
             ("midpoint", "original material structure with loaded one-cent midpoint admission"),
         fs_couple::bernoulli_aperture::paired::BladePropagator::ExactZoh =>
-            ("exact-zoh", if valve.material_relaxation().is_some_and(|memory| memory.is_regional()) {
+            ("exact-zoh", if valve.material_relaxation().is_some_and(|memory| !memory.tensor_material_points().is_empty()) {
+                "original M/K and complete 3D plane-stress tensor histories on retained DKT strains; pressure and contact held per mechanical sample; integrated material dissipation; nonlinear time error requires refinement"
+            } else if valve.material_relaxation().is_some_and(|memory| memory.is_regional()) {
                 "original M/K and full cross-mode regional Maxwell internal strains; pressure and contact held per mechanical sample; integrated material dissipation; nonlinear time error requires refinement"
             } else {
                 "original M/K and selected full C or proportional Maxwell internal strains; pressure and contact held per mechanical sample; integrated material dissipation; nonlinear time error requires refinement"
             }),
     };
-    let relaxation_json = valve.material_relaxation().map_or_else(String::new, |memory| {
-        let initial = match memory.initial_memory() {
-            fs_couple::bernoulli_aperture::modal::relaxation::InitialModalMemory::Relaxed => "relaxed",
-            fs_couple::bernoulli_aperture::modal::relaxation::InitialModalMemory::Unrelaxed => "unrelaxed",
-        };
-        let spectra = memory.material_spectra().iter().enumerate().flat_map(|(blade, regions)| {
-            regions.iter().enumerate().map(move |(section, law)| {
-                let terms = law.terms.iter().map(|(modulus, time)| format!(
-                    "{{\"modulus_pa\":{modulus:e},\"relaxation_time_s\":{time:e}}}"))
-                    .collect::<Vec<_>>().join(",");
-                format!("{{\"blade\":{blade},\"section\":{section},\"equilibrium_young_modulus_pa\":{:e},\"terms\":[{terms}]}}", law.e_inf)
-            })
-        }).collect::<Vec<_>>().join(",");
-        let arms: usize = memory.memory_sqrt_j().iter().map(Vec::len).sum();
-        let kind = if memory.is_regional() { "regional_material_relaxation" }
-            else { "proportional_material_relaxation" };
-        format!(",\"{kind}\":{{\"initial_memory\":\"{initial}\",\"live_arms\":{arms},\"regional_spectra\":[{spectra}]}}")
-    });
+    let relaxation_json = modal_relaxation_provenance(valve);
     let (radiation_scope, mimo_json) = if p.mimo_radiation_records().is_empty()
         && p.computed_radiation_records().is_empty() {
         ("compact independent baffled reaction and shared exterior pressure", String::new())

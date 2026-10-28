@@ -458,3 +458,5 @@ mod spatial;
 mod pressure;
 #[path = "material/wetted.rs"]
 mod wetted;
+#[path = "material/tensor.rs"]
+mod tensor;

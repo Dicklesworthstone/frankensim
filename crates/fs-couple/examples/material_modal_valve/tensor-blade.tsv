@@ -1,0 +1,62 @@
+frankensim.matdb-source.v1
+observation	synthetic	Synthetic full-tensor valve wall	Manufactured isotropic equilibrium and nonproportional positive-definite 3D Mandel Maxwell branch	Not measurements; no wet-cane, clarinet, oboe or natural-material authority
+scalar	density	synthetic	density	900	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	T	280	320	K
+validity	density	omega	0	100000	rad/s
+scalar	young_modulus	synthetic	young_modulus	4000000000	Pa	constant
+uncertainty	young_modulus	unstated	-	-	-	-
+validity	young_modulus	T	280	320	K
+validity	young_modulus	omega	0	100000	rad/s
+scalar	poisson_ratio	synthetic	poisson_ratio	0.3	1	constant
+uncertainty	poisson_ratio	unstated	-	-	-	-
+validity	poisson_ratio	T	280	320	K
+validity	poisson_ratio	omega	0	100000	rad/s
+scalar	strain_limit	synthetic	strain_limit	0.02	1	constant
+uncertainty	strain_limit	unstated	-	-	-	-
+validity	strain_limit	T	280	320	K
+validity	strain_limit	omega	0	100000	rad/s
+scalar	relaxation_time	synthetic	relaxation_time	0.001	s	constant
+uncertainty	relaxation_time	unstated	-	-	-	-
+validity	relaxation_time	T	280	320	K
+validity	relaxation_time	omega	0	100000	rad/s
+scalar	branch_11	synthetic	branch_11	100000000	Pa	constant
+uncertainty	branch_11	unstated	-	-	-	-
+validity	branch_11	T	280	320	K
+validity	branch_11	omega	0	100000	rad/s
+scalar	branch_22	synthetic	branch_22	200000000	Pa	constant
+uncertainty	branch_22	unstated	-	-	-	-
+validity	branch_22	T	280	320	K
+validity	branch_22	omega	0	100000	rad/s
+scalar	branch_33	synthetic	branch_33	300000000	Pa	constant
+uncertainty	branch_33	unstated	-	-	-	-
+validity	branch_33	T	280	320	K
+validity	branch_33	omega	0	100000	rad/s
+scalar	branch_44	synthetic	branch_44	150000000	Pa	constant
+uncertainty	branch_44	unstated	-	-	-	-
+validity	branch_44	T	280	320	K
+validity	branch_44	omega	0	100000	rad/s
+scalar	branch_55	synthetic	branch_55	120000000	Pa	constant
+uncertainty	branch_55	unstated	-	-	-	-
+validity	branch_55	T	280	320	K
+validity	branch_55	omega	0	100000	rad/s
+scalar	branch_66	synthetic	branch_66	80000000	Pa	constant
+uncertainty	branch_66	unstated	-	-	-	-
+validity	branch_66	T	280	320	K
+validity	branch_66	omega	0	100000	rad/s
+scalar	branch_13	synthetic	branch_13	40000000	Pa	constant
+uncertainty	branch_13	unstated	-	-	-	-
+validity	branch_13	T	280	320	K
+validity	branch_13	omega	0	100000	rad/s
+scalar	branch_24	synthetic	branch_24	20000000	Pa	constant
+uncertainty	branch_24	unstated	-	-	-	-
+validity	branch_24	T	280	320	K
+validity	branch_24	omega	0	100000	rad/s
+scalar	branch_15	synthetic	branch_15	-10000000	Pa	constant
+uncertainty	branch_15	unstated	-	-	-	-
+validity	branch_15	T	280	320	K
+validity	branch_15	omega	0	100000	rad/s
+scalar	zero_modulus	synthetic	zero_modulus	0	Pa	constant
+uncertainty	zero_modulus	unstated	-	-	-	-
+validity	zero_modulus	T	280	320	K
+validity	zero_modulus	omega	0	100000	rad/s

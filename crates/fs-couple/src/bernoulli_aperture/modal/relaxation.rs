@@ -17,6 +17,8 @@ use fs_math::det;
 use fs_qty::{Density, Dims, Pressure, QuantitySpec};
 
 mod regional;
+mod tensor;
+pub use tensor::{TensorModalMaterialPoint, TensorModalRelaxationLimits};
 
 /// Initial internal strain of each physical Maxwell arm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,6 +36,7 @@ pub struct ModalRelaxation {
     pub(super) arms: Vec<Vec<ExactArm>>,
     pub(super) states: Vec<Vec<f64>>,
     pub(super) coupled_arms: Option<Vec<super::exact::CoupledArm>>,
+    tensor_points: Vec<TensorModalMaterialPoint>,
 }
 impl ModalRelaxation {
     /// Original reference Young moduli and branches, in plate/region order.
@@ -53,6 +56,17 @@ impl ModalRelaxation {
     }
     /// Whether separate original regions retain full cross-mode memory.
     pub fn is_regional(&self) -> bool { self.coupled_arms.is_some() }
+    /// Full 3D material points, present only for exact tensor selection.
+    /// Their source laws, normal constraints and histories remain observable.
+    pub fn tensor_material_points(&self) -> &[TensorModalMaterialPoint] { &self.tensor_points }
+    pub(super) fn validate_material_state(&self, modes: &[BladeState], states: &[Vec<f64>])
+        -> Result<(), AcousticRealizeError>
+    {
+        if self.tensor_points.is_empty() { return Ok(()); }
+        let memory = states.first().ok_or_else(|| invalid("tensor material memory is absent"))?;
+        for point in &self.tensor_points { point.surface_strain(modes,memory)?; }
+        Ok(())
+    }
     /// A regional channel's original physical-coordinate row c, in sqrt(N/m).
     /// Its positive energy is `(c^T q - z)^2/2`; exact-zero rows are absent.
     pub fn regional_coupling_row(&self, channel: usize) -> Option<&[f64]> {
@@ -299,6 +313,7 @@ impl ModalAperture {
             arms,
             states,
             coupled_arms: None,
+            tensor_points: Vec::new(),
         };
         let energy = self.energy(&self.state) + relaxation.energy(&self.state, &relaxation.states);
         if !energy.is_finite() || energy > self.spec.limits.maximum_energy_j {

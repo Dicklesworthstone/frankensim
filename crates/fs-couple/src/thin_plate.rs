@@ -41,6 +41,16 @@ pub(crate) struct RetainedPlateBasis {
     pub(crate) mass_normalized_modes: Vec<Vec<f64>>,
 }
 
+/// Original DKT in-plane bending strains at one area quadrature point.
+/// Homogeneous thickness is integrated analytically: strain is evaluated at
+/// z=h/sqrt(12), with the full volume weight. Surface strain is sqrt(3) times
+/// this strain. This identity is restricted to linear pure bending.
+pub(crate) struct RetainedPlateBendingPoint {
+    pub(crate) region: usize,
+    pub(crate) columns: Vec<[f64; 3]>,
+    pub(crate) volume_m3: f64,
+}
+
 /// One driven compact radiator harvested from a certified plate mode.
 #[derive(Debug, Clone)]
 pub struct CompactBody {

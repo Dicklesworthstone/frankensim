@@ -299,13 +299,7 @@ impl MaterialModalDgValvePerformance {
             prepared_plates, wetted_surfaces, rest_opening, inlet, impedance, dt,
             samples, limits, states, contact, propagator, gate,
         ).map_err(PlateValveInputError::Physics)?;
-        if let LossSelection::Maxwell { properties, initial, regional } = loss {
-            valve = if regional {
-                valve.with_regional_material_relaxation(&properties, initial, gate)
-            } else {
-                valve.with_material_relaxation(&properties, initial, gate)
-            }.map_err(PlateValveInputError::Physics)?;
-        }
+        valve = loss.attach(valve, gate)?;
         for pressure in pressure_shapes {
             valve = pressure.bind(valve, gate)?;
         }

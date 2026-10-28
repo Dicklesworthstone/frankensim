@@ -31,7 +31,7 @@ pub mod material;
 pub mod pressure;
 /// Original wetted face geometry in the coupled acoustic force/volume port.
 pub mod wetted;
-/// Source-bound proportional Maxwell memory in the original modal basis.
+/// Source-bound scalar, regional and full-tensor Maxwell material memory.
 pub mod relaxation;
 mod viscosity;
 /// Complete tetrahedral material images in the original coupled modal owner.
@@ -651,6 +651,9 @@ impl ModalAperture {
             next.copy_from_slice(&exact.state);
         }
         self.validate_state(&next)?;
+        if let (Some(relaxation), Some(endpoint)) = (&self.relaxation, &endpoint) {
+            relaxation.validate_material_state(&next, &endpoint.memory)?;
+        }
         let mut middle = [0.0; MAX_MODES];
         for i in 0..n {
             middle[i] = f64::midpoint(self.state[i].displacement_m, next[i].displacement_m);

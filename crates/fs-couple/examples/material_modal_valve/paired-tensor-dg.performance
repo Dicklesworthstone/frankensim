@@ -1,0 +1,60 @@
+frankensim-material-modal-dg-valve-v1
+audio 96000 96000 2048 1
+propagator exact-zoh
+ambient 293.15 101325 0
+dg_tube 0.05 0.001 baffled 1 2 8 50 2000 0.01 1e-11 256
+dg_radiation computed-baffled 20 65 4 8 12 20 0.1 67108864 2 100 1e-8 64 1048576 257
+dg_exterior mixture 293.15 101325 mole 2 N2 0.8 O2 0.2
+slit_length 0.001
+observation baffled-outlet 0 0 0.2 8 32 2000
+observer_gas stokes-kirchhoff 4096 1000000 50000000
+valve 0.0004
+limits 0.001 10 1 512 1e-14 1e-11
+contact 100000000 2 0.5
+loss tensor-maxwell relaxed strain_limit 1 12 72 16777216
+tensor_branch relaxation_time branch_11 zero_modulus branch_13 zero_modulus branch_15 zero_modulus branch_22 zero_modulus branch_24 zero_modulus zero_modulus branch_33 zero_modulus zero_modulus zero_modulus branch_44 zero_modulus zero_modulus branch_55 zero_modulus branch_66
+blades 2
+blade 2 0.2 15000 1 0.1 0.001 1000000
+support clamped 0
+sections 1
+section tensor-blade.matpack isotropic 293.15 100 0.0003 0
+nodes 4
+node 0 0 1 0
+node 0.025 0 0 1
+node 0 0.01 1 0
+node 0.025 0.01 0 0
+triangles 2
+triangle 0 1 3 0
+triangle 0 3 2 0
+slit_edges 1
+edge 1 3
+initial 2
+state 0 0
+state 0 0
+blade 2 0.2 15000 1 0.1 0.001 1000000
+support clamped 0
+sections 1
+section tensor-blade.matpack isotropic 293.15 100 0.00027 0
+nodes 4
+node 0 0 1 0
+node 0.025 0 0 1
+node 0 0.01 1 0
+node 0.025 0.01 0 0
+triangles 2
+triangle 0 1 3 0
+triangle 0 3 2 0
+slit_edges 1
+edge 1 3
+initial 2
+state 0 0
+state 0 0
+compile_limits 100000 8192
+schedule
+frankensim-gesture-schedule-v1
+control_rate_hz	48000
+tracks	1
+track	mouth	blowing-pressure
+initial	pressure-pa	0e0
+events	2
+event	0e0	1e-3	pressure-pa	5e0
+event	4e-3	1e-3	pressure-pa	0e0

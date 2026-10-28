@@ -5,6 +5,7 @@ use crate::bernoulli_aperture::modal::relaxation::InitialModalMemory;
 use fs_dcontact::Obstacle;
 
 mod regional;
+mod tensor;
 
 const TENSOR: &str = "loss tensor eta11 eta22 eta66 eta12 eta16 eta26 1 1000000";
 const MAXWELL: &str = "loss proportional-maxwell relaxed 1 boundary_modulus boundary_time";

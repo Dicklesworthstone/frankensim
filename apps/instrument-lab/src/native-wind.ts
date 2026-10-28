@@ -10,6 +10,7 @@ import conicalMolecularFlueSource from "../../../crates/fs-couple/examples/flue-
 import fieldMolecularFlueSource from "../../../crates/fs-couple/examples/flue-dg-field-molecular.performance?raw";
 import materialReedSource from "../../../crates/fs-couple/examples/material_modal_valve/paired-walls.performance?raw";
 import materialReedDgSource from "../../../crates/fs-couple/examples/material_modal_valve/paired-dg-chimney.performance?raw";
+import tensorReedDgSource from "../../../crates/fs-couple/examples/material_modal_valve/paired-tensor-dg.performance?raw";
 import stringExampleSource from "../../../crates/fs-couple/examples/material_strings/pluck-and-bow.material-strings?raw";
 import nonlinearPreloadStringSource from "../../../crates/fs-couple/examples/material_strings/nonlinear-preload.material-strings?raw";
 import stoppedNonlinearStringSource from "../../../crates/fs-couple/examples/material_strings/nonlinear-stopped-preload.material-strings?raw";
@@ -115,6 +116,15 @@ const EXAMPLES = [
     decimate: true,
     intro: "Starter: the same material-derived paired blades drive a spatially resolved duct with a side chimney. Attach blade.matpack. The bore, chimney and exterior have separately declared gas sources and feed the original radiating boundary.",
     help: "This canonical source runs at 96 kHz, with native decimation selected for 48 kHz playback. observer_gas propagates the outlet and chimney sound through dg_exterior using the shared Stokes–Kirchhoff law. Change the material pack or gas data in the source; the same native solver derives the pressure output.",
+  },
+  {
+    name: "material_modal_valve/paired-tensor-dg.performance",
+    label: "Material reeds — full directional relaxation",
+    renderer: "wind",
+    source: tensorReedDgSource,
+    decimate: true,
+    intro: "Starter: two material reeds carry a complete three-dimensional relaxation tensor through the original plate motion, spatial bore and exterior microphone. Build and attach tensor-blade.matpack using the canonical material-modal source recipe, then change its directional stiffness or relaxation-time data.",
+    help: "loss tensor-maxwell names the source strain limit and complete Mandel branch coefficients, including explicit zeros. The native solver retains coupled normal-strain histories and every declared material point. Equilibrium elasticity stays owned by the same card; material, state-count and clock limits may refuse an unsupported change. This coarse manufactured specimen does not establish measured cane or clarinet/oboe accuracy.",
   },
   {
     name: "material_strings/pluck-and-bow.material-strings",

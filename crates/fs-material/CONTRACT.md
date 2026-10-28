@@ -4016,6 +4016,7 @@ an extreme interior refusal publishes no sample and leaves the path unchanged.
 There is no inferred mass transfer, constrained strain, phase law, evolving frame,
 cross-source specimen match or propagated uncertainty.
 
+
 ## Saturated-water boiling and condensation
 
 `phase::vaporization::IsobaricWaterVaporization` binds the original
@@ -4062,6 +4063,7 @@ Tests include vapor creation from saturated 450 K liquid throttled to
 101325 Pa, a heating/flash/condensation chain, conservation and source-domain,
 accuracy and cancellation refusals.
 
+
 ## Original sources at native shear and electrical operating coordinates
 
 `phase::transport::resolve_phase_transport_state_with_shear_rate` extends the
@@ -4086,3 +4088,25 @@ hysteresis or field-storage claim. Ordinary phase metadata is retained; combined
 phase-fraction/E/J source admission is not established merely by that metadata.
 Actual field/current closure and finite-heat ownership belong to their original
 native consumers, not this material adapter.
+
+## Source-bound complete tensor relaxation
+
+`visco_tensor::source::TensorPronyProperties` binds the original resolved
+material state to a complete 3D Maxwell law. Equilibrium stiffness comes from
+the canonical isotropic or full orthotropic elastic properties. Each source
+branch names all 21 symmetric upper-triangle Mandel entries and its relaxation
+time; zero entries remain explicit data. A positive small-strain limit is also
+a selected source claim. Shared names resolve once, incompatible quantity roles
+refuse, and the original material state retains all selected usage receipts.
+
+Every coefficient must be finite and constant at the admitted external state.
+The law retains the intersection of all selected frequency domains, including
+equilibrium, strain, time and branch data. The original tensor constructor owns
+PSD admission and its roundoff policy. Missing data, frequency-sampled elastic
+coefficients offered as equilibrium springs, invalid complete elasticity,
+nonpositive times or strain limits, and more than 64 source branches refuse.
+This binding does not condense plane stress, invent a full tensor from in-plane
+coefficients, evolve temperature/moisture, or establish measured-material
+authority. Five focused source tests cover full coefficients, shear convention,
+orthotropy, shared names, source bands and refusals; native execution of these
+new tests remains unverified in the resource-constrained authoring environment.

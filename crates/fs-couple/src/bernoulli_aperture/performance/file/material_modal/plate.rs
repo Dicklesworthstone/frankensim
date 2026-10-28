@@ -1,7 +1,8 @@
 //! Original regional material sources and meshes for the common modal valve.
 use super::{PlateValveInputError, Reader, bad, checkpoint};
 use crate::bernoulli_aperture::modal::material::ModalPlateOptions;
-use crate::bernoulli_aperture::modal::relaxation::InitialModalMemory;
+use crate::bernoulli_aperture::modal::relaxation::{InitialModalMemory, TensorModalRelaxationLimits};
+use crate::bernoulli_aperture::modal::ModalAperture;
 use crate::bernoulli_aperture::paired::BladeState;
 use crate::thin_plate::{PlateChartRadiation, PlateMaterialModel, PlateRegionMaterial,
     PlateThicknessConstraint, ResolvedPlateChart, compile_plate_material_chart};
@@ -10,6 +11,7 @@ use fs_exec::CancelGate;
 use fs_matdb::{NormalizedMaterialCardPack, QueryPoint};
 use fs_material::state_point::{MaterialPropertySelection, ScalarAdmissibility as Admit,
     ScalarPropertyRequirement as Requirement, resolve_material_state_point};
+use fs_material::visco_tensor::source::{TensorBranchProperties, TensorElasticity, TensorPronyProperties};
 use fs_plate::{AssemblyOptions, EdgeSupport, PlateMesh, PlateRegion};
 use fs_qty::{Density, Dims, DynViscosity, Pressure};
 use std::{collections::BTreeMap, sync::Arc};
@@ -45,6 +47,8 @@ pub(super) enum LossSelection {
     Elastic,
     Tensor { properties: [String; 6], limits: PlateViscosityLimits },
     Maxwell { properties: Vec<(String, String)>, initial: InitialModalMemory, regional: bool },
+    TensorMaxwell { strain_limit: String, branches: Vec<TensorBranchProperties>,
+        initial: InitialModalMemory, limits: TensorModalRelaxationLimits },
 }
 impl LossSelection {
     pub fn read(rows: &mut Reader<'_>) -> Result<Self, PlateValveInputError> {
@@ -84,11 +88,84 @@ impl LossSelection {
                 }
                 Self::Maxwell { properties, initial, regional }
             }
-            _ => return Err(bad(row.line, "loss requires elastic, tensor properties/limits, or proportional-maxwell/regional-maxwell INITIAL COUNT MODULUS TIME ...")),
+            "tensor-maxwell" => {
+                let initial = match row.word()? {
+                    "relaxed" => InitialModalMemory::Relaxed,
+                    "unrelaxed" => InitialModalMemory::Unrelaxed,
+                    _ => return Err(bad(row.line, "tensor Maxwell initial memory must be relaxed or unrelaxed")),
+                };
+                let strain_limit = source_key(&mut row)?;
+                let count = row.count(8)?;
+                if count == 0 { return Err(bad(row.line, "tensor Maxwell requires 1..=8 complete source branches")); }
+                let limits = TensorModalRelaxationLimits {
+                    max_material_points: row.count(4096)?,
+                    max_memory_states: row.count(256)?,
+                    max_projection_terms: row.count(67_108_864)?,
+                };
+                row.finish()?;
+                let mut branches = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let mut row = rows.row("tensor_branch")?;
+                    let relaxation_time = source_key(&mut row)?;
+                    let mut stiffness_upper = core::array::from_fn(|_| String::new());
+                    for key in &mut stiffness_upper { *key = source_key(&mut row)?; }
+                    row.finish()?;
+                    branches.push(TensorBranchProperties { stiffness_upper, relaxation_time });
+                }
+                return Ok(Self::TensorMaxwell { strain_limit, branches, initial, limits });
+            }
+            _ => return Err(bad(row.line, "loss requires elastic, tensor viscosity, proportional-maxwell, regional-maxwell or tensor-maxwell source properties")),
         };
         row.finish()?;
         Ok(selected)
     }
+
+    fn tensor_properties(&self, model: PlateMaterialModel) -> Option<TensorPronyProperties> {
+        let Self::TensorMaxwell { strain_limit, branches, .. } = self else { return None; };
+        Some(TensorPronyProperties {
+            elasticity: match model {
+                PlateMaterialModel::Isotropic => TensorElasticity::Isotropic,
+                _ => TensorElasticity::Orthotropic,
+            },
+            strain_limit: strain_limit.clone(), branches: branches.clone(),
+        })
+    }
+
+    /// Both native duct routes attach the same material law to the same valve.
+    pub(super) fn attach(self, valve: ModalAperture, gate: &CancelGate)
+        -> Result<ModalAperture, PlateValveInputError>
+    {
+        match &self {
+            Self::Maxwell { properties, initial, regional } => {
+                if *regional { valve.with_regional_material_relaxation(properties, *initial, gate) }
+                else { valve.with_material_relaxation(properties, *initial, gate) }
+                    .map_err(PlateValveInputError::Physics)
+            }
+            Self::TensorMaxwell { initial, limits, .. } => {
+                let mut laws = Vec::with_capacity(valve.material_plates().len());
+                for plate in valve.material_plates() {
+                    let mut regional = Vec::with_capacity(plate.source().regions().len());
+                    for region in plate.source().regions() {
+                        checkpoint(gate)?;
+                        let properties = self.tensor_properties(region.input.model)
+                            .expect("tensor Maxwell selection");
+                        regional.push(properties.bind(&region.input.material).map_err(|error|
+                            PlateValveInputError::MaterialSource { line: 0, source: error.to_string() })?);
+                    }
+                    laws.push(regional);
+                }
+                valve.with_tensor_material_relaxation(laws, *initial, *limits, gate)
+                    .map_err(PlateValveInputError::Physics)
+            }
+            _ => Ok(valve),
+        }
+    }
+}
+
+fn source_key(row: &mut super::super::Row<'_>) -> Result<String, PlateValveInputError> {
+    let key = row.word()?;
+    if key.len() > 128 { return Err(bad(row.line, "tensor source property name exceeds 128 bytes")); }
+    Ok(key.to_string())
 }
 
 #[derive(Default)]
@@ -179,6 +256,10 @@ pub(super) fn read(
         let pack = cache.load(&path, line, loader, gate)?;
         let point = QueryPoint::new().with("T", temperature).and_then(|p| p.with("omega", omega))
             .map_err(|e| PlateValveInputError::MaterialSource { line, source: e.to_string() })?;
+        let tensor_requirements = loss.tensor_properties(model).map(|p| p.requirements())
+            .transpose().map_err(|error| PlateValveInputError::MaterialSource {
+                line, source: error.to_string(),
+            })?;
         let material = (|| {
             let mut required = vec![Requirement::try_new("density", Density::DIMS, Admit::StrictlyPositive)?];
             match model {
@@ -210,6 +291,17 @@ pub(super) fn read(
                     if !required.iter().any(|r| r.name() == time) {
                         required.push(Requirement::try_new(time, Dims([0, 0, 1, 0, 0, 0]), Admit::StrictlyPositive)?);
                     }
+                }
+            }
+            if let Some(requirements) = &tensor_requirements {
+                for requirement in requirements {
+                    if let Some(existing) = required.iter().find(|r| r.name() == requirement.name()) {
+                        if existing.quantity() != requirement.quantity() {
+                            return Err(fs_material::state_point::MaterialStatePointError::InvalidRequirement {
+                                property: requirement.name().into(), reason: "tensor source property dimensions conflict with the structural chart",
+                            });
+                        }
+                    } else { required.push(requirement.clone()); }
                 }
             }
             resolve_material_state_point(pack.card(), &point, &required, MaterialPropertySelection::SingleClaimOnly)

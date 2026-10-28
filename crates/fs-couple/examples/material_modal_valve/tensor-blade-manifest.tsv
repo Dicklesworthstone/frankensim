@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	synthetic-tensor-material-modal-valve
+redistribution	permitted	Manufactured full-tensor integration fixture; freely redistributable, not measured cane
+citation	Synthetic three-dimensional tensor-Maxwell valve fixture
+license	CC0-1.0
+source	fixture	tensor-blade.tsv	material-tsv-v1

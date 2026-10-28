@@ -12,6 +12,9 @@ use fs_material::visco_tensor::{TensorProny, TensorProjectionBudget};
 use fs_material::Voigt;
 use fs_math::det;
 
+mod relaxation;
+pub use relaxation::PlaneStressRelaxation;
+
 /// One homogeneous material quadrature contribution under local z-plane stress.
 /// In-plane columns are [epsilon_xx,epsilon_yy,gamma_xy] per displacement [1/m].
 /// Normal epsilon_zz,epsilon_yz,epsilon_zx are reconstructed at EVERY state.

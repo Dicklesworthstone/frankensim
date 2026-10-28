@@ -15,6 +15,60 @@ fn body_budget()->TensorMaterialBudget {TensorMaterialBudget{max_state_coordinat
 fn close(a:f64,b:f64,tol:f64) {assert!((a-b).abs()<=tol*(1.0+a.abs().max(b.abs())),"{a} != {b}");}
 
 #[test]
+fn exact_relaxation_image_matches_full_tensor_frequency_response_and_history_energy() {
+    let gate=CancelGate::new_clock_free();
+    let law=law();
+    let point=PlaneStressPoint::new(&law,&[[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]],
+        0.2,budget(),&gate).unwrap();
+    let image=point.clone().relaxation_image(2_000_000,&gate).unwrap();
+    assert_eq!(image.coupling_rows().len(),12,"rank-deficient source histories must not be removed");
+    for omega in [0.0,0.01,0.1,1.0,10.0,1000.0] {
+        let expected=law.plane_stress(omega).unwrap().engineering();
+        for i in 0..3 { for j in 0..3 {
+            let mut actual=C64::from_re(image.equilibrium_stiffness()[3*i+j]);
+            for (row,rate) in image.coupling_rows().iter().zip(image.relaxation_rates_per_s()) {
+                actual=actual+(C64::new(0.0,omega)/C64::new(*rate,omega)).scale(row[i]*row[j]);
+            }
+            close(actual.re,0.2*expected[i][j].re,2e-10);
+            close(actual.im,0.2*expected[i][j].im,2e-10);
+        }}
+    }
+    let q=[0.001,-0.002,0.003];
+    for relaxed in [false,true] {
+        let z:Vec<_>=image.coupling_rows().iter().map(|row| if relaxed {
+            row.iter().zip(q).map(|(c,q)|c*q).sum()
+        } else {0.0}).collect();
+        let a=image.original_memory(&z).unwrap();
+        let x:Vec<_>=q.into_iter().chain(a.iter().copied()).collect();
+        let energy:f64=(0..x.len()).map(|i|(0..x.len()).map(|j|
+            0.5*x[i]*point.energy_matrix()[i*x.len()+j]*x[j]).sum::<f64>()).sum();
+        let elastic:f64=(0..3).map(|i|(0..3).map(|j|
+            0.5*q[i]*image.equilibrium_stiffness()[3*i+j]*q[j]).sum::<f64>()).sum();
+        let memory:f64=image.coupling_rows().iter().zip(&z).map(|(row,z)|
+            0.5*(row.iter().zip(q).map(|(c,q)|c*q).sum::<f64>()-z).powi(2)).sum();
+        close(energy,elastic+memory,2e-12);
+        assert!(image.normal_stress_pa(&q,&z).unwrap().iter().all(|s|s.abs()<2e-11));
+        assert_eq!(image.strain(&q,&z).unwrap(),point.strain(&q,&a).unwrap());
+    }
+}
+
+#[test]
+fn relaxation_image_keeps_elastic_limit_and_refuses_work_and_strain_overruns() {
+    let gate=CancelGate::new_clock_free();
+    let law=TensorProny::from_tensor_shear(IsotropicElastic::new(100.0,0.27,0.1).unwrap().stiffness(),
+        Vec::new(),0.01).unwrap();
+    let point=PlaneStressPoint::new(&law,&[[1.0,0.0,0.0]],0.2,budget(),&gate).unwrap();
+    assert!(point.clone().relaxation_image(1,&gate).is_err());
+    let image=point.relaxation_image(1_000_000,&gate).unwrap();
+    assert!(image.coupling_rows().is_empty());
+    assert!(image.original_memory(&[]).unwrap().is_empty());
+    close(image.equilibrium_stiffness()[0],20.0/(1.0-0.27*0.27),1e-12);
+    assert!(image.strain(&[0.001],&[]).is_ok());
+    assert!(image.strain(&[0.1],&[]).is_err());
+    assert!(image.original_memory(&[0.0]).is_err());
+}
+
+#[test]
 fn retained_plane_stress_memory_matches_the_full_complex_schur_complement() {
     let gate=CancelGate::new_clock_free();let law=law();
     let point=PlaneStressPoint::new(&law,&[[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]],0.2,budget(),&gate).unwrap();

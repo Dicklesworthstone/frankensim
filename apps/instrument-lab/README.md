@@ -338,6 +338,18 @@ preserving the source bytes. The [material-modal source instructions](../../crat
 give the pack-building commands and physical declarations. These are
 manufactured integration specimens, not measured clarinet or oboe models.
 
+The **Material reeds — full directional relaxation** starter opens
+`paired-tensor-dg.performance`. Build `tensor-blade.matpack` from the supplied
+`tensor-blade.tsv` and manifest using the same material-modal instructions,
+then attach it. `loss tensor-maxwell` resolves the source strain bound and all
+21 entries of each symmetric Mandel branch, including explicit zero claims.
+The original material card also supplies equilibrium elasticity. Changes to
+out-of-plane stiffness and relaxation times reach the complete constrained
+material history, reed motion, returning bore pressure and microphone. The
+example retains 12 area points and 72 history coordinates; refinement must
+respect the exact owner's explicit capacity. Native decimation retains 96 kHz
+mechanics. These manufactured source coefficients are not wet-cane measurements.
+
 ### Material-string performances
 
 The **Strings — force-loaded contact and nonlinear material** starter opens

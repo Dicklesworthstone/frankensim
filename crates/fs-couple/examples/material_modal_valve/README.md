@@ -3,7 +3,8 @@
 This input path makes the existing multimode material-wall solver available to
 `music_render wind`. One or two independently declared plates load both a tract
 and a bore. Original regional material cards determine density, stiffness and
-the selected viscous tensor or proportional hereditary spectrum. Every requested signed mode, slit trace,
+the selected viscous tensor, regional hereditary spectrum or complete 3-D
+tensor-Maxwell law. Every requested signed mode, slit trace,
 pressure traction and swept-volume projection stays in the same coupled system.
 A shared exterior declaration drives both selected radiation reaction and the
 microphone; pressure is never replaced by an internal bore signal.
@@ -697,6 +698,62 @@ The shared limit is 32 total modes across one or two blades, with at most 512
 nodes and 2048 triangles per blade. Each normalized pack is capped at 8 MiB and
 the complete distinct-source set at 64 MiB. Mechanical/output ratio is an integer
 1–16. Whole-program work and control budgets are declared once.
+
+### Full 3-D tensor material memory
+
+Both native material-modal selectors accept the same source-bound law:
+
+```text
+loss tensor-maxwell relaxed|unrelaxed STRAIN_LIMIT_PROPERTY COUNT MAX_POINTS MAX_MEMORY_STATES MAX_PROJECTION_TERMS
+tensor_branch TIME_PROPERTY C11 C12 C13 C14 C15 C16 C22 C23 C24 C25 C26 C33 C34 C35 C36 C44 C45 C46 C55 C56 C66
+```
+
+One `tensor_branch` row follows for each branch. Every entry names a source
+property; the 21 stiffness entries are the symmetric upper triangle in Mandel
+order `(11,22,33,sqrt(2)12,sqrt(2)23,sqrt(2)31)` and have units Pa. Times are
+positive seconds. The strain limit is a positive dimensionless Frobenius bound.
+Zero couplings are explicit source claims and can reuse a declared zero property.
+The canonical equilibrium elastic properties remain the same ones used to build
+the plate: isotropic `young_modulus`/`poisson_ratio`, or the full three-dimensional
+orthotropic engineering properties. No second equilibrium stiffness is added.
+All claims retain their source temperature and intersected angular-frequency
+domains. Missing values, active tensors or unsupported states refuse.
+
+The original section orientation rotates the entire constitutive law. At every
+original DKT area point the shared plane-stress owner eliminates the complete
+normal traction constraint, including its coupled histories. An exact change
+of history coordinates feeds the existing structural propagator and pressure/
+contact solver; it does not fit scalar modal damping or condense each Maxwell
+branch separately. Original six-component strains are reconstructed at the
+physical outer faces before an accepted sample is published. Homogeneous linear
+bending integrates thickness analytically. Nonzero 3-D Kelvin normal-rate terms
+and evolving material temperature/moisture are outside this attachment.
+
+`paired-tensor-dg.performance` supplies a complete manufactured example with
+two two-triangle blades, two modes per blade, 12 material points and all 72
+material-history coordinates of one full tensor branch. Its computed baffled
+terminal and Stokes–Kirchhoff exterior paths produce physical microphone
+pressure on the original 96 kHz mechanical clock. The intentionally coarse
+geometry and authored tensor demonstrate integration; they are not measured
+cane or an accuracy-qualified instrument. Build the additional pack and render:
+
+```bash
+cargo run -p xtask -- matdb-pack \
+  --manifest "$modal_demo_dir/tensor-blade-manifest.tsv" \
+  --out "$modal_demo_dir/tensor-blade.matpack" \
+  --material-state synthetic solid manufactured 0
+cargo run --release -p fs-couple --bin music_render -- wind \
+  "$modal_demo_dir/paired-tensor-dg.performance" "$modal_demo_dir/paired-tensor-dg.wav" --block 37
+```
+
+The copy commands in the run recipe include these source files. Changing only
+`branch_33` or `relaxation_time` in `tensor-blade.tsv`, then rebuilding the pack,
+changes the normal-strain relaxation, actual reed motion, bore feedback and
+external pressure. Geometry and equilibrium elasticity remain declared
+independently. The original dense exact propagator still bounds the complete
+state: `3 * total_modes + material_histories <= 128`; each source branch retains
+six histories at each of the three area points per triangle. Exceeding a budget
+refuses the source rather than discarding material directions or blade modes.
 
 ## Physical scope and verification
 

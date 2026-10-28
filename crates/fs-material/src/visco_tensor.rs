@@ -23,6 +23,9 @@ pub use projection::{ProjectedPronyBranch, ProjectedTensorProny, TensorProjectio
 mod reduction;
 pub use reduction::{Complex3, HarmonicPlateSection, PlaneStressModulus};
 
+/// Bind complete hereditary tensors to original material-card state points.
+pub mod source;
+
 /// Maximum retained relaxation branches per material.
 pub const MAX_BRANCHES: usize = 256;
 const WEIGHTS: Voigt = [1.0, 1.0, 1.0, core::f64::consts::SQRT_2,

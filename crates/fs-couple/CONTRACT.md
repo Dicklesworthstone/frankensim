@@ -10247,6 +10247,7 @@ ladder. Existing membrane and distributed-loading tests also pass. This remains
 a linear-kinematics membrane with the original exact tensor-memory limitations;
 it does not add bending, prestress or finite deformation.
 
+
 ## Prepared complete plate vibration on a fixed clock
 
 `VkBody::into_prepared(dt_s)` consumes an accepted body and preserves every
@@ -10278,6 +10279,7 @@ cover preserving a moving initial body, the nonlinear phase bound, invalid
 clock/observer admission, early and late cancellation, and retry after refusal.
 These checks exercise the production numerical owners through the focused
 native target; they do not assert full workspace qualification.
+
 
 ### Frozen-composition caloric limit of reactive owners
 
@@ -10330,3 +10332,41 @@ and independently count refused heat-root work and final cancellation. This
 remains homogeneous ideal gas plus a uniform fixed-geometry solid/liquid body
 with negligible body pressure-volume work; water-boiling expansion is not
 folded into that body assumption.
+
+## Complete tensor relaxation in material-modal valves
+
+`PlaneStressPoint::relaxation_image` changes coordinates in the existing
+complete Maxwell plane-stress energy. For its retained block energy
+`H=[q,a]^T[A B;B^T D][q,a]/2`, the shared symmetric eigensolver diagonalizes
+`sqrt(R) D sqrt(R)` with `R=diag(1/tau_source)`. The resulting independent
+passive channels reproduce the complete energy and original dissipation;
+all six history coordinates per source branch survive, including zero or
+dependent source factors. The inverse map reconstructs the original strain
+and normal-traction constraint. No branchwise plane-stress approximation,
+fitted relaxation times or mode truncation is introduced. Orthogonality and
+energy reconstruction have explicit numerical gates, with cancellation around
+the bounded dense transform.
+
+`ModalAperture::with_tensor_material_relaxation` applies that image at the
+original three DKT area points per element, with original region, ordered
+material axes, angle, thickness and retained modal coordinates. The equilibrium
+section must reproduce the existing chart to `1e-9` relative diagonal scale;
+its stiffness is counted once. Exact channels enter the existing mechanical
+propagator, pressure/contact solve, swept volume and independent dissipation
+audit. The full 3D outer-face strain is checked before accepted state publication.
+Initial histories are explicitly relaxed or unrelaxed. Original source bands,
+instantaneous-frequency/relaxation clock limits and complete dense-state
+capacity remain mandatory; capacity refusal never drops a material history.
+
+Both native material-modal formats share `loss tensor-maxwell` and the generic
+`fs-material` source binding. Their data identify the small-strain claim and
+each complete Mandel branch, with material-point, memory and projection-work
+budgets. Source cards retain all coefficients and evidence; metadata identifies
+full tensor memory separately from proportional/regional scalar spectra. The
+canonical paired DG example is reachable from Instrument Lab with its original
+material pack. Scope remains fixed-state, homogeneous-through-thickness linear
+plate bending; nonzero 3D Kelvin normal-rate terms refuse. Measured wet-cane,
+nonlinear solid, resolved moving-flow and complete instrument accuracy are not
+established. The new complex-Schur, energy, source substitution and rollback
+regressions are accompanied by independent formulation checks; native Rust
+execution of these additions remains unverified under the shared resource limit.
