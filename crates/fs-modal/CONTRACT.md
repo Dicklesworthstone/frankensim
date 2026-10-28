@@ -81,6 +81,13 @@ uses a caller-supplied complex pressure-per-modal-velocity transfer at each
 natural frequency under `exp(-i omega t)`; no material names, digital gains,
 or mastering values occur in this layer. Energy/work diagnostics and
 transactional state/pressure budgets accompany every sample.
+The damped transition prepares its held-force convolution with a scaled entire
+series and transition doubling, then reuses scalar gains in the sample loop.
+It does not subtract a potentially huge static equilibrium, snap nearby damping
+ratios to critical damping, or subtract nearly equal overdamped poles. Separate
+increments and retentions preserve both small attacks and long decay tails.
+Focused G1 tests cover those regimes and a one-second, 440-cycle high-Q decay;
+cached full/half steps and direct steps share the same coefficient evaluator.
 `held_force_for_port_velocity` solves the exact-ZOH scalar endpoint constraint
 using free modal motion plus unit-port-force mobility, with conjugate force
 and velocity projections. It refuses invalid/nonpositive mobility and

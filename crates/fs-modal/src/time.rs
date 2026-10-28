@@ -335,19 +335,13 @@ enum ExactZohCoefficients {
         sine: f64,
         one_minus_cosine: f64,
     },
-    Matrix {
-        decay: f64,
-        q_q0: f64,
-        q_v0: f64,
-        v_q0: f64,
-        v_v0: f64,
-    },
-    Overdamped {
-        slow: f64,
-        fast: f64,
-        denominator: f64,
-        slow_e: f64,
-        fast_e: f64,
+    Damped {
+        position_retention: f64,
+        velocity_retention: f64,
+        velocity_gain: f64,
+        displacement_gain: f64,
+        position_decrement: f64,
+        velocity_decrement: f64,
     },
 }
 
@@ -1187,43 +1181,82 @@ fn exact_zoh_coefficients(mode: ModalAcousticMode, dt: f64) -> ExactZohCoefficie
             one_minus_cosine: 2.0 * half_sine * half_sine,
         };
     }
-    let critical_delta = zeta - 1.0;
-    if critical_delta.abs() <= 1.0e-8 {
-        let decay = det::exp(-omega * dt);
-        let omega_dt = omega * dt;
-        ExactZohCoefficients::Matrix {
-            decay,
-            q_q0: 1.0 + omega_dt,
-            q_v0: dt,
-            v_q0: -omega * omega * dt,
-            v_v0: 1.0 - omega_dt,
-        }
-    } else if zeta < 1.0 {
-        let root = det::sqrt(1.0 - zeta * zeta);
-        let damped_omega = omega * root;
-        let angle = damped_omega * dt;
-        let sine = det::sin(angle);
-        let cosine = det::cos(angle);
-        let decay = det::exp(-zeta * omega * dt);
-        let damping_over_damped = zeta / root;
-        ExactZohCoefficients::Matrix {
-            decay,
-            q_q0: cosine + damping_over_damped * sine,
-            q_v0: sine / damped_omega,
-            v_q0: -omega / root * sine,
-            v_v0: cosine - damping_over_damped * sine,
-        }
-    } else {
-        let root = det::sqrt(zeta * zeta - 1.0);
-        let slow = -omega * (zeta - root);
-        let fast = -omega * (zeta + root);
-        ExactZohCoefficients::Overdamped {
-            slow,
-            fast,
-            denominator: slow - fast,
-            slow_e: det::exp(slow * dt),
-            fast_e: det::exp(fast * dt),
-        }
+    // For q'' + c q' + omega^2 q = F, B is the velocity response to a
+    // held unit force and G is its displacement response. E11 = 1-omega^2 G,
+    // E12 = B, E21 = -omega^2 B, E22 = E11-c B. Compute the convolution
+    // itself: subtracting and restoring F/omega^2 loses the entire attack
+    // when the equilibrium is large compared with one sample's motion.
+    //
+    // A small-interval entire series followed by transition doubling covers
+    // under-, critical- and overdamping without root subtraction or a band
+    // snapped to critical damping. Only preparation pays this cost. B/h and
+    // G/h^2 stay scaled during doubling, including strongly overdamped modes.
+    let mut angle = omega * dt;
+    let mut drag = 2.0 * (zeta * angle);
+    if !angle.is_finite() || !drag.is_finite() {
+        return ExactZohCoefficients::Damped {
+            position_retention: f64::NAN,
+            velocity_retention: f64::NAN,
+            velocity_gain: f64::NAN,
+            displacement_gain: f64::NAN,
+            position_decrement: f64::NAN,
+            velocity_decrement: f64::NAN,
+        };
+    }
+    let mut doublings = 0;
+    while angle.abs().max(drag.abs()) > 0.25 {
+        angle *= 0.5;
+        drag *= 0.5;
+        doublings += 1;
+    }
+    let stiffness = angle * angle;
+    let mut previous = 0.0;
+    let mut power = 1.0;
+    let mut reciprocal_factorial = 1.0;
+    let mut b = 1.0;
+    let mut g = 0.5;
+    // p_j = -drag p_{j-1} - angle^2 p_{j-2};
+    // B/h = sum p_j/(j+1)!, G/h^2 = sum p_j/(j+2)!.
+    // At |angle|, |drag| <= 1/4 the omitted terms are below f64 rounding.
+    for j in 1..=18 {
+        let next = -drag * power - stiffness * previous;
+        previous = power;
+        power = next;
+        reciprocal_factorial /= f64::from(j + 1);
+        b += power * reciprocal_factorial;
+        g += power * reciprocal_factorial / f64::from(j + 2);
+    }
+    let mut position_decrement = stiffness * g;
+    let mut velocity_decrement = position_decrement + drag * b;
+    let mut position_retention = 1.0 - position_decrement;
+    let mut velocity_retention = 1.0 - velocity_decrement;
+    for _ in 0..doublings {
+        let cross = (angle * b) * (angle * b);
+        let next_position = position_retention * position_retention - cross;
+        let next_velocity = velocity_retention * velocity_retention - cross;
+        g = 0.25 * (g * (1.0 + position_retention) + b * b);
+        b *= 0.5 * (position_retention + velocity_retention);
+        angle *= 2.0;
+        drag *= 2.0;
+        position_decrement = (angle * angle) * g;
+        velocity_decrement = position_decrement + drag * b;
+        // Preserve both tiny increments near identity and exponentially small
+        // tails far from identity. Neither 1-E nor E can recover the other by
+        // subtraction at both ends of that range.
+        position_retention = if position_decrement.abs() < 0.5 {
+            1.0 - position_decrement
+        } else { next_position };
+        velocity_retention = if velocity_decrement.abs() < 0.5 {
+            1.0 - velocity_decrement
+        } else { next_velocity };
+    }
+    ExactZohCoefficients::Damped {
+        position_retention,
+        velocity_retention,
+        velocity_gain: dt * b,
+        displacement_gain: dt * (dt * g),
+        position_decrement,
+        velocity_decrement,
     }
 }
 
@@ -1240,10 +1273,7 @@ fn advance_exact_zoh_cached(
     coefficients: ExactZohCoefficients,
 ) -> ModalAcousticState {
     let omega = mode.angular_frequency_rad_s;
-    // Equilibrium is only used by the oscillator arms below. Never divide by
-    // zero for the explicitly admitted free-coordinate transition.
-    let equilibrium = if omega == 0.0 { 0.0 } else { force / (omega * omega) };
-    let q0 = state.displacement_m_sqrt_kg - equilibrium;
+    let q0 = state.displacement_m_sqrt_kg;
     let v0 = state.velocity_m_sqrt_kg_per_s;
     let (q, v) = match coefficients {
         ExactZohCoefficients::Free { duration_s } => {
@@ -1262,33 +1292,30 @@ fn advance_exact_zoh_cached(
         } => {
             return advance_undamped_zoh(mode, state, force, sine, one_minus_cosine);
         }
-        ExactZohCoefficients::Matrix {
-            decay,
-            q_q0,
-            q_v0,
-            v_q0,
-            v_v0,
-        } => (
-            decay * (q_q0 * q0 + q_v0 * v0),
-            decay * (v_q0 * q0 + v_v0 * v0),
-        ),
-        ExactZohCoefficients::Overdamped {
-            slow,
-            fast,
-            denominator,
-            slow_e,
-            fast_e,
+        ExactZohCoefficients::Damped {
+            position_retention,
+            velocity_retention,
+            velocity_gain,
+            displacement_gain,
+            position_decrement,
+            velocity_decrement,
         } => {
-            let slow_amplitude = (v0 - fast * q0) / denominator;
-            let fast_amplitude = (slow * q0 - v0) / denominator;
-            (
-                slow_amplitude * slow_e + fast_amplitude * fast_e,
-                slow * slow_amplitude * slow_e + fast * fast_amplitude * fast_e,
-            )
+            let restoring_force = force - omega * omega * q0;
+            let q = if position_decrement.abs() < 0.5 {
+                q0 + (velocity_gain * v0 + displacement_gain * restoring_force)
+            } else {
+                position_retention * q0 + velocity_gain * v0 + displacement_gain * force
+            };
+            let v = if velocity_decrement.abs() < 0.5 {
+                v0 + (velocity_gain * restoring_force - velocity_decrement * v0)
+            } else {
+                velocity_retention * v0 + velocity_gain * restoring_force
+            };
+            (q, v)
         }
     };
     ModalAcousticState {
-        displacement_m_sqrt_kg: q + equilibrium,
+        displacement_m_sqrt_kg: q,
         velocity_m_sqrt_kg_per_s: v,
     }
 }
@@ -1323,52 +1350,7 @@ pub fn advance_exact_zoh(
     force: f64,
     dt: f64,
 ) -> ModalAcousticState {
-    let omega = mode.angular_frequency_rad_s;
-    let zeta = mode.damping_ratio;
-    if zeta == 0.0 {
-        return advance_exact_zoh_cached(mode, state, force, exact_zoh_coefficients(mode, dt));
-    }
-    let equilibrium = force / (omega * omega);
-    let q0 = state.displacement_m_sqrt_kg - equilibrium;
-    let v0 = state.velocity_m_sqrt_kg_per_s;
-    let critical_delta = zeta - 1.0;
-    let (q, v) = if critical_delta.abs() <= 1.0e-8 {
-        let decay = det::exp(-omega * dt);
-        let omega_dt = omega * dt;
-        (
-            decay * ((1.0 + omega_dt) * q0 + dt * v0),
-            decay * (-omega * omega * dt * q0 + (1.0 - omega_dt) * v0),
-        )
-    } else if zeta < 1.0 {
-        let root = det::sqrt(1.0 - zeta * zeta);
-        let damped_omega = omega * root;
-        let angle = damped_omega * dt;
-        let sine = det::sin(angle);
-        let cosine = det::cos(angle);
-        let decay = det::exp(-zeta * omega * dt);
-        let damping_over_damped = zeta / root;
-        (
-            decay * ((cosine + damping_over_damped * sine) * q0 + sine / damped_omega * v0),
-            decay * (-omega / root * sine * q0 + (cosine - damping_over_damped * sine) * v0),
-        )
-    } else {
-        let root = det::sqrt(zeta * zeta - 1.0);
-        let slow = -omega * (zeta - root);
-        let fast = -omega * (zeta + root);
-        let denominator = slow - fast;
-        let slow_amplitude = (v0 - fast * q0) / denominator;
-        let fast_amplitude = (slow * q0 - v0) / denominator;
-        let slow_e = det::exp(slow * dt);
-        let fast_e = det::exp(fast * dt);
-        (
-            slow_amplitude * slow_e + fast_amplitude * fast_e,
-            slow * slow_amplitude * slow_e + fast * fast_amplitude * fast_e,
-        )
-    };
-    ModalAcousticState {
-        displacement_m_sqrt_kg: q + equilibrium,
-        velocity_m_sqrt_kg_per_s: v,
-    }
+    advance_exact_zoh_cached(mode, state, force, exact_zoh_coefficients(mode, dt))
 }
 
 #[cfg(test)]
@@ -1473,6 +1455,137 @@ mod tests {
         let work = force * (old.displacement_m_sqrt_kg - state.displacement_m_sqrt_kg);
         let allowance = 256.0 * f64::EPSILON * work.abs().max(before).max(after);
         assert!(work - (after - before) < -allowance);
+    }
+
+    #[test]
+    fn g1_damped_held_force_retains_motion_far_below_force_equilibrium() {
+        // F/omega^2 = 3e6, but the first displacement is only 1.5e-12.
+        // Subtracting/restoring equilibrium erased that physical attack.
+        let dt = 1.0e-6;
+        let force = 3.0;
+        for damping_ratio in [1.0e-9, 0.2, 1.0, 2.0] {
+            let mode = ModalAcousticMode {
+                angular_frequency_rad_s: 1.0e-3,
+                damping_ratio,
+                pressure_per_modal_velocity: C64::ZERO,
+            };
+            let next = advance_exact_zoh(mode, ModalAcousticState::default(), force, dt);
+            // Independent short-time expansion through the first drag term;
+            // the omitted relative term is O((c dt)^2 + (omega dt)^2).
+            let drag_dt = 2.0 * damping_ratio * mode.angular_frequency_rad_s * dt;
+            let expected_q = 0.5 * force * dt * dt * (1.0 - drag_dt / 3.0);
+            let expected_v = force * dt * (1.0 - 0.5 * drag_dt);
+            assert!((next.displacement_m_sqrt_kg / expected_q - 1.0).abs() < 2.0e-14,
+                "zeta={damping_ratio} q={} expected={expected_q}", next.displacement_m_sqrt_kg);
+            assert!((next.velocity_m_sqrt_kg_per_s / expected_v - 1.0).abs() < 2.0e-14);
+        }
+    }
+
+    #[test]
+    fn g1_near_critical_modes_keep_their_actual_decay_law() {
+        let omega = 7.0;
+        let dt = 0.8 / omega;
+        let initial = ModalAcousticState {
+            displacement_m_sqrt_kg: 1.0,
+            velocity_m_sqrt_kg_per_s: 0.0,
+        };
+        let mut positions = Vec::new();
+        for zeta in [1.0_f64 - 5.0e-9, 1.0, 1.0 + 5.0e-9] {
+            let mode = ModalAcousticMode {
+                angular_frequency_rad_s: omega,
+                damping_ratio: zeta,
+                pressure_per_modal_velocity: C64::ZERO,
+            };
+            let delta = zeta * omega * dt;
+            let angle = omega * dt * ((1.0 - zeta) * (1.0 + zeta)).abs().sqrt();
+            let (cosine, sinc) = if zeta < 1.0 {
+                (angle.cos(), angle.sin() / angle)
+            } else if zeta > 1.0 {
+                (angle.cosh(), angle.sinh() / angle)
+            } else { (1.0, 1.0) };
+            let expected_q = (-delta).exp() * (cosine + delta * sinc);
+            let expected_v = -omega * omega * dt * (-delta).exp() * sinc;
+            let next = advance_exact_zoh(mode, initial, 0.0, dt);
+            assert!((next.displacement_m_sqrt_kg - expected_q).abs() < 4.0e-14);
+            assert!((next.velocity_m_sqrt_kg_per_s - expected_v).abs() < 4.0e-14);
+            positions.push(next.displacement_m_sqrt_kg);
+        }
+        // These physically different damping ratios previously all used zeta=1.
+        assert!(positions[0] < positions[1] && positions[1] < positions[2]);
+    }
+
+    #[test]
+    fn g1_strongly_overdamped_mode_retains_its_slow_relaxation() {
+        let omega = 2.0;
+        let zeta = 1.0e10;
+        // Stable product-of-roots expression; zeta - sqrt(zeta^2-1) rounds
+        // to zero here even though the slow decay is physically nonzero.
+        let root = ((zeta - 1.0_f64) * (zeta + 1.0)).sqrt();
+        let slow = -omega / (zeta + root);
+        let mode = ModalAcousticMode {
+            angular_frequency_rad_s: omega,
+            damping_ratio: zeta,
+            pressure_per_modal_velocity: C64::ZERO,
+        };
+        let initial = ModalAcousticState {
+            displacement_m_sqrt_kg: 0.75,
+            velocity_m_sqrt_kg_per_s: 0.75 * slow,
+        };
+        let dt = -1.0 / slow;
+        let expected_q = 0.75 * (-1.0_f64).exp();
+        let expected_v = slow * expected_q;
+        let next = advance_exact_zoh(mode, initial, 0.0, dt);
+        assert!((next.displacement_m_sqrt_kg / expected_q - 1.0).abs() < 2.0e-12);
+        assert!((next.velocity_m_sqrt_kg_per_s / expected_v - 1.0).abs() < 2.0e-12);
+        let half = advance_exact_zoh(mode, initial, 0.0, 0.5 * dt);
+        let split = advance_exact_zoh(mode, half, 0.0, 0.5 * dt);
+        assert!((split.displacement_m_sqrt_kg / expected_q - 1.0).abs() < 2.0e-12);
+        assert!((split.velocity_m_sqrt_kg_per_s / expected_v - 1.0).abs() < 2.0e-12);
+    }
+
+    #[test]
+    fn g1_critical_ring_down_preserves_a_tail_smaller_than_machine_epsilon() {
+        let mode = ModalAcousticMode {
+            angular_frequency_rad_s: 1.0,
+            damping_ratio: 1.0,
+            pressure_per_modal_velocity: C64::ZERO,
+        };
+        let initial = ModalAcousticState {
+            displacement_m_sqrt_kg: 1.0,
+            velocity_m_sqrt_kg_per_s: 0.0,
+        };
+        let next = advance_exact_zoh(mode, initial, 0.0, 40.0);
+        assert!((next.displacement_m_sqrt_kg / (41.0 * (-40.0_f64).exp()) - 1.0).abs() < 2.0e-12);
+        assert!((next.velocity_m_sqrt_kg_per_s / (-40.0 * (-40.0_f64).exp()) - 1.0).abs() < 2.0e-12);
+    }
+
+    #[test]
+    fn g1_cached_high_q_ring_down_preserves_physical_phase_and_decay() {
+        let omega = core::f64::consts::TAU * 440.0;
+        let zeta = 1.0e-4;
+        let dt = 1.0 / 48_000.0;
+        let mode = ModalAcousticMode {
+            angular_frequency_rad_s: omega,
+            damping_ratio: zeta,
+            pressure_per_modal_velocity: C64::ZERO,
+        };
+        let coefficients = exact_zoh_coefficients(mode, dt);
+        let mut state = ModalAcousticState {
+            displacement_m_sqrt_kg: 1.0,
+            velocity_m_sqrt_kg_per_s: 0.0,
+        };
+        for _ in 0..48_000 {
+            state = advance_exact_zoh_cached(mode, state, 0.0, coefficients);
+        }
+        // One second / 440 cycles: independently evaluate the continuous
+        // free-decay solution, including the damping-induced frequency shift.
+        let root = (1.0 - zeta * zeta).sqrt();
+        let angle = omega * root;
+        let decay = (-zeta * omega).exp();
+        let expected_q = decay * (angle.cos() + zeta / root * angle.sin());
+        let expected_v = -decay * omega / root * angle.sin();
+        assert!((state.displacement_m_sqrt_kg - expected_q).abs() < 2.0e-10);
+        assert!((state.velocity_m_sqrt_kg_per_s - expected_v).abs() / omega < 2.0e-10);
     }
 
     #[test]
