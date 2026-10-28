@@ -1,5 +1,39 @@
 # Material data inventory
 
+## Continuous-range and construction/structural follow-through: 2026-10-28
+
+This continuation adds **15 source-specific profiles and 119 claims** beyond
+the earlier 31-profile increment below.
+
+| Group | Added profiles | Added claims |
+| --- | ---: | ---: |
+| Celcon AAC concrete blocks, with explicit exposure-dependent thermal declarations | 4 | 48 |
+| Cured silicones, extruded polypropylene and separate EPDM tube/sheet insulation | 5 | 37 |
+| Structural steel specifications, measured rate groups and Grade 60 rebar cohorts | 6 | 34 |
+| **Total** | **15** | **119** |
+
+The [source catalog section](../data/matdb/seed-v1/README.md#continuous-range-discovery-and-material-follow-through-october-2026)
+names every directory and condition boundary. Structural data retain 102
+numerical values, including source scatter and counts, across 22 discrete curves
+and 12 scalars. No interpolation between experimental target-rate groups or
+bar-size labels is inferred.
+
+The actual catalog command now accepts `--range AXIS=LOW:HIGH` alongside fixed
+`--at` coordinates. It delegates to the existing typed envelope evaluator,
+requiring one unchanged source claim per requested property throughout the
+inclusive coordinate box. This makes continuous source coverage discoverable
+without accepting gaps, interior ambiguity or source switching from successful
+endpoint queries. Output labels endpoint values as corners, not extrema.
+
+Verification: **12 focused integration tests passed**, three each in
+`material_catalog_ranges`, `concrete_materials_followthrough`,
+`polymer_materials_followthrough` and `structural_alloys_followthrough`.
+They exercise the actual compiler/CLI and production query/receipt owners with
+the pinned native toolchain. Full Cargo/DSR remains unverified under the
+incomplete sibling checkout and absent DSR/RCH tools. Complete concrete mix,
+nonlinear steel and cured-adhesive physical-consumer qualifications remain
+broader open work.
+
 ## Identified-family expansion: 2026-10-28
 
 The latest increment adds **31 source-specific profiles with 240 property

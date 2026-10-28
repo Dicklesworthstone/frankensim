@@ -4,6 +4,102 @@ This directory retains the human-reviewable source inputs compiled by
 `xtask matdb-pack`. Generated binary packs are deliberately not committed:
 the compiler must reproduce them from the pinned manifest and source record.
 
+## Continuous-range discovery and material follow-through: October 2026
+
+This follow-through adds **15 source-specific profiles with 119 claims**, in
+addition to the earlier 31-profile increment. It also makes the existing
+catalog's continuous-support evaluator available from the command line.
+
+### Select materials throughout a temperature or condition range
+
+Use `--range AXIS=LOW:HIGH` with one or more required properties. Coordinates
+use canonical SI; `--at` fixes all remaining source conditions. Several ranges
+request an inclusive coordinate box. The same selected claim must support each
+required property throughout that box, including its interior. Exact samples,
+gaps, conflicting interior observations, changing claim selection, unsupported
+surface coverage and undeclared coordinates refuse through the existing
+`ClaimSet::query_envelope_typed` owner.
+
+For example, both annealed Nickel 200 transport properties are supported over
+100–1000 °C under this explicit reference policy:
+
+```bash
+cargo run -p xtask -- matdb-catalog \
+  --pack nickel-200-annealed-special-metals-2006 \
+  --property thermal-conductivity \
+  --property electrical-resistivity \
+  --range temperature=373.15:1273.15 \
+  --at engineering-reference-model=1 \
+  --at source-specimens-matched=0 \
+  --at annealed-material=1
+```
+
+Omit `--pack` to discover all matching sources; combine `--search` terms to
+narrow the catalog. Exact-pack refusals exit unsuccessfully with empty standard
+output. Listings retain only candidates satisfying every required property.
+Range output includes both typed query corners, SI values, selected claim IDs
+and source uncertainty. The displayed corner values are **not property extrema
+or uncertainty bounds**: Nickel 200 conductivity, for example, is nonmonotone
+inside this range. Admitted source-model support is not experimental
+qualification, an automatic constitutive model or a prediction-error bound.
+An axis cannot be supplied as both `--at` and `--range`; no missing condition
+is filled automatically.
+
+### New source profiles
+
+| Source directory | Claims | Retained coverage |
+| --- | ---: | --- |
+| `hh-celcon-solar-bba-2026` | 12 | Solar AAC block, dry density and strength requirements; dry/protected/external/below-ground conductivity |
+| `hh-celcon-standard-bba-2026` | 12 | Standard AAC block with separate service-exposure thermal values |
+| `hh-celcon-high-strength-bba-2026` | 12 | High Strength AAC block; mean and individual-block requirements remain separate |
+| `hh-celcon-super-strength-bba-2026` | 12 | Super Strength AAC block with its own compression requirements |
+| `momentive-rtv615-100c-cure-2021` | 11 | Exact 10:1 matched kit, one-hour 100 °C cure; thermal, tensile, hardness, optical and dielectric observations |
+| `momentive-rtv655-100c-cure-2021` | 11 | Separately identified cured silicone formulation under the same specified cure |
+| `roechling-polystone-p-h-grey-extruded-2025` | 9 | Extruded PP-H heat capacity/conductivity and explicitly named guideline bounds |
+| `armacell-ht-armaflex-tube-reference-2026` | 3 | EPDM tube insulation declaration and explicitly opted-in local conductivity reference |
+| `armacell-ht-armaflex-sheet-reference-2026` | 3 | Separate sheet insulation conductivity and vapor-resistance limits |
+| `steel-a572-grade50-millplate-ssab-reference` | 4 | Product-window-specific strength and gauge-length-qualified elongation requirements |
+| `steel-a500-grade-c-hss-sti-2021` | 2 | Grade C strength minima under the explicitly selected 2021 specification revision |
+| `steel-a572-grade50-rate-murray2020` | 9 | Measured plate-cohort strength, scatter and counts at discrete target strain-rate groups |
+| `steel-a992-web-rate-murray2020` | 9 | Separately measured beam-web rate groups and static ductility observations |
+| `rebar-a615-grade60-zhao2016-m1` | 5 | Manufacturer 1 baseline Grade 60 rebar observations at three discrete bar sizes |
+| `rebar-a615-grade60-zhao2016-m4` | 5 | Manufacturer 4 baseline cohort, keeping yield, UTS and two elongation meanings distinct |
+
+Each manifest identifies the primary source and redistribution decision.
+Celcon values distinguish a dry 10 °C declaration from three service-design
+conductivities; neither supplies a local temperature law. The silicone source's
+uncured density is excluded, cure temperature is not test temperature, and
+calorie conversion requires an explicit policy. Polypropylene strict bounds
+are not nominal density or modulus. ArmaFlex's author-selected local reference
+requires explicit declaration-to-local-model opt-in and does not claim the
+manufacturer polynomial is a measured local law.
+
+The steel/rebar addition contains 102 numerical values across 22 discrete
+curves and 12 scalars. Specified minima are not coupon measurements. Target
+rate groups and bar sizes do not admit interpolation; upper/lower yield,
+sample scatter, uniform elongation and fracture elongation retain distinct
+property roles. No plastic hardening curve or common elastic/thermal profile
+is inferred.
+
+### Focused regression
+
+```bash
+cargo test -p xtask \
+  --test material_catalog_ranges \
+  --test concrete_materials_followthrough \
+  --test polymer_materials_followthrough \
+  --test structural_alloys_followthrough
+```
+
+All **12 focused integration tests passed** using the actual native `xtask`
+compiler/CLI and production query modules with the pinned Rust toolchain.
+The range cases include real nickel transport and independent nonmonotone,
+discrete, gapped and interior-conflicting source fixtures. Full Cargo/DSR
+verification remains unexecuted because workspace sibling resolution is
+incomplete and DSR/RCH are unavailable. These tests establish source transport,
+typed queries and CLI selection; they do not close the broader B08, M05 or A03
+physical-consumer qualification tasks.
+
 ## Identified material families: October 2026 extension
 
 This increment adds **31 source-specific profiles and 240 claims**. These are

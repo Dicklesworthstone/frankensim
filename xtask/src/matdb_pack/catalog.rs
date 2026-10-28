@@ -4,12 +4,14 @@
 use super::{
     CompiledPack, MAX_MANIFEST_BYTES, compile_manifest, parse_manifest, read_bounded_regular,
 };
-use fs_matdb::{ClaimSet, MaterialAnswer, PropertyValue, QueryPoint, SelectionPolicy};
+use fs_matdb::{
+    ClaimSelection, ClaimSet, MaterialAnswer, PropertyValue, QueryPoint, SelectionPolicy,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
-const USAGE: &str = "usage: cargo run -p xtask -- matdb-catalog [--search TEXT]... [--property NAME]... [--pack ID] [--at AXIS=VALUE]...\n\
+const USAGE: &str = "usage: cargo run -p xtask -- matdb-catalog [--search TEXT]... [--property NAME]... [--pack ID] [--at AXIS=VALUE]... [--range AXIS=LOW:HIGH]...\n\
 Search is case-insensitive across source/pack IDs, citations, specimens and properties.\n\
 All terms and required properties must match. --pack selects an exact source\n\
 directory name (internal pack IDs may repeat across sources) and prints source\n\
@@ -22,6 +24,11 @@ state, using canonical SI coordinates (temperature in kelvin) and each source's\
 declared axis quantities. Every supplied axis must be declared by every selected\n\
 claim; missing axes, unsupported states, incompatible schemas and ambiguous\n\
 claims refuse. No extrapolation or automatic source-condition defaults.\n\
+--range requires --property and admits every requested property throughout the\n\
+inclusive coordinate box, with --at fixing the remaining source conditions.\n\
+One unchanged claim must support each whole range; discrete samples, gaps,\n\
+interior ambiguity and source switching refuse. It never stitches sources.\n\
+Range output gives lower/upper corner values, not property extrema or error bounds.\n\
 State-filtered listings add evaluated-si and query-point columns. Values remain\n\
 Estimate-level source evaluations, not a qualified coupled material model.";
 
@@ -31,13 +38,23 @@ struct Options {
     properties: BTreeSet<String>,
     pack: Option<String>,
     at: BTreeMap<String, f64>,
+    ranges: BTreeMap<String, (f64, f64)>,
+}
+
+impl Options {
+    fn evaluates_state(&self) -> bool {
+        !self.at.is_empty() || !self.ranges.is_empty()
+    }
 }
 
 fn options(args: &[String]) -> Result<Options, String> {
     let mut result = Options::default();
     let mut args = args.iter();
     while let Some(flag) = args.next() {
-        if !matches!(flag.as_str(), "--search" | "--property" | "--pack" | "--at") {
+        if !matches!(
+            flag.as_str(),
+            "--search" | "--property" | "--pack" | "--at" | "--range"
+        ) {
             return Err(format!("unknown catalog option {flag:?}\n{USAGE}"));
         }
         let value = args
@@ -70,22 +87,60 @@ fn options(args: &[String]) -> Result<Options, String> {
                     return Err(format!("--at axis {axis:?} may be supplied only once"));
                 }
             }
+            "--range" => {
+                let (axis, endpoints) = value
+                    .split_once('=')
+                    .filter(|(axis, _)| {
+                        !axis.trim().is_empty() && !axis.contains(char::is_whitespace)
+                    })
+                    .ok_or_else(|| "--range requires AXIS=LOW:HIGH in canonical SI".to_owned())?;
+                let (low, high) = endpoints
+                    .split_once(':')
+                    .ok_or_else(|| "--range requires AXIS=LOW:HIGH in canonical SI".to_owned())?;
+                let number = |text: &str| {
+                    text.parse::<f64>()
+                        .ok()
+                        .filter(|value| value.is_finite())
+                        .ok_or_else(|| {
+                            format!("--range {axis}: endpoints must be finite SI numbers")
+                        })
+                };
+                let (low, high) = (number(low)?, number(high)?);
+                if low > high {
+                    return Err(format!("--range {axis}: LOW must not exceed HIGH"));
+                }
+                if result.ranges.insert(axis.to_owned(), (low, high)).is_some() {
+                    return Err(format!("--range axis {axis:?} may be supplied only once"));
+                }
+            }
             _ => unreachable!(),
         }
     }
-    if !result.at.is_empty() && result.properties.is_empty() {
-        return Err("--at requires at least one --property to evaluate".into());
+    if result.evaluates_state() && result.properties.is_empty() {
+        return Err("--at and --range require at least one --property to evaluate".into());
+    }
+    if let Some(axis) = result
+        .at
+        .keys()
+        .find(|axis| result.ranges.contains_key(*axis))
+    {
+        return Err(format!("axis {axis:?} cannot be both --at and --range"));
     }
     Ok(result)
+}
+
+#[derive(Debug)]
+struct StateEvaluation {
+    lower: QueryPoint,
+    upper: QueryPoint,
+    lower_answers: Vec<MaterialAnswer>,
+    upper_answers: Vec<MaterialAnswer>,
 }
 
 /// Evaluate complete property keys without inventing coordinates or choosing
 /// among conflicting observations. The extra-axis check is intentionally
 /// stricter than the generic evaluator, which permits irrelevant coordinates.
-fn evaluate_state(
-    set: &ClaimSet,
-    options: &Options,
-) -> Result<(QueryPoint, Vec<MaterialAnswer>), String> {
+fn evaluate_state(set: &ClaimSet, options: &Options) -> Result<StateEvaluation, String> {
     let mut keys = Vec::new();
     let mut axes = BTreeMap::new();
     for name in &options.properties {
@@ -112,28 +167,52 @@ fn evaluate_state(
             }
         }
     }
-    let mut point = QueryPoint::new();
-    for (axis, &coordinate) in &options.at {
-        point = match axes.get(axis) {
-            Some(Some(quantity)) => point.with_quantity(axis, *quantity, coordinate),
-            Some(None) => point.with(axis, coordinate),
+    let mut lower = QueryPoint::new();
+    let mut upper = QueryPoint::new();
+    let coordinates = options
+        .at
+        .iter()
+        .map(|(axis, value)| (axis, (*value, *value)))
+        .chain(options.ranges.iter().map(|(axis, range)| (axis, *range)));
+    for (axis, (lo, hi)) in coordinates {
+        let insert = |point: QueryPoint, coordinate| match axes.get(axis) {
+            Some(Some(quantity)) => point
+                .with_quantity(axis, *quantity, coordinate)
+                .map_err(|error| format!("axis {axis:?}: {error}")),
+            Some(None) => point
+                .with(axis, coordinate)
+                .map_err(|error| format!("axis {axis:?}: {error}")),
             None => {
                 return Err(format!(
                     "requested properties do not declare state axis {axis:?}"
                 ));
             }
-        }
-        .map_err(|error| format!("axis {axis:?}: {error}"))?;
+        };
+        lower = insert(lower, lo)?;
+        upper = insert(upper, hi)?;
     }
-    let mut answers = Vec::new();
+    let mut lower_answers = Vec::new();
+    let mut upper_answers = Vec::new();
     for key in keys {
-        let answer = set
-            .query_typed(&key, &point, SelectionPolicy::SingleClaimOnly)
-            .map_err(|error| format!("{}: {error}", key.name()))?;
+        let answer = if options.ranges.is_empty() {
+            set.query_typed(&key, &lower, SelectionPolicy::SingleClaimOnly)
+                .map_err(|error| format!("{}: {error}", key.name()))?
+        } else {
+            let envelope = set
+                .query_envelope_typed(
+                    &key,
+                    &lower,
+                    &upper,
+                    ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly),
+                )
+                .map_err(|error| format!("{}: {error}", key.name()))?;
+            upper_answers.push(envelope.upper);
+            envelope.lower
+        };
         let selected = set
             .claim(answer.receipt.selected)
             .expect("selected admitted claim");
-        for axis in options.at.keys() {
+        for axis in options.at.keys().chain(options.ranges.keys()) {
             if !selected.validity.bounds().contains_key(axis) {
                 return Err(format!(
                     "{}: selected claim does not declare state axis {axis:?}",
@@ -141,9 +220,14 @@ fn evaluate_state(
                 ));
             }
         }
-        answers.push(answer);
+        lower_answers.push(answer);
     }
-    Ok((point, answers))
+    Ok(StateEvaluation {
+        lower,
+        upper,
+        lower_answers,
+        upper_answers,
+    })
 }
 
 fn evaluated_cell(answers: &[MaterialAnswer]) -> String {
@@ -299,7 +383,9 @@ fn catalog(root: &Path, options: &Options) -> Result<(String, Vec<String>), Stri
         output.push_str(
             "source-id\tpack-id\tfamily\tclaims\tproperties\tmanifest\tstatus\tdiagnostic",
         );
-        if !options.at.is_empty() {
+        if !options.ranges.is_empty() {
+            output.push_str("\tlower-corner-si\tupper-corner-si\tquery-lower\tquery-upper");
+        } else if options.evaluates_state() {
             output.push_str("\tevaluated-si\tquery-point");
         }
         output.push('\n');
@@ -378,7 +464,7 @@ fn catalog(root: &Path, options: &Options) -> Result<(String, Vec<String>), Stri
         if !options.search.iter().all(|term| searchable.contains(term)) {
             continue;
         }
-        let evaluation = if options.at.is_empty() {
+        let evaluation = if !options.evaluates_state() {
             None
         } else {
             match claim_set
@@ -388,7 +474,7 @@ fn catalog(root: &Path, options: &Options) -> Result<(String, Vec<String>), Stri
                 Ok(evaluation) => Some(evaluation),
                 Err(error) if options.pack.is_some() => {
                     return Err(format!(
-                        "{source_id}: {error}; inspect --pack without --at for source conditions"
+                        "{source_id}: {error}; inspect --pack without --at or --range for source conditions"
                     ));
                 }
                 Err(_) => continue,
@@ -417,9 +503,47 @@ fn catalog(root: &Path, options: &Options) -> Result<(String, Vec<String>), Stri
                 output.push_str("inspection-scope\tmetadata-only; species/model parameters require their dedicated pack reader\n");
             }
             detail(&mut output, &compiled.pack);
-            if let Some((point, answers)) = &evaluation {
-                writeln!(output, "query-point\t{}", cell(&format!("{point:?}"))).unwrap();
-                writeln!(output, "evaluated-si\t{}", cell(&evaluated_cell(answers))).unwrap();
+            if let Some(evaluated) = &evaluation {
+                if options.ranges.is_empty() {
+                    writeln!(
+                        output,
+                        "query-point\t{}",
+                        cell(&format!("{:?}", evaluated.lower))
+                    )
+                    .unwrap();
+                    writeln!(
+                        output,
+                        "evaluated-si\t{}",
+                        cell(&evaluated_cell(&evaluated.lower_answers))
+                    )
+                    .unwrap();
+                } else {
+                    output.push_str("range-support\tone unchanged source claim per property throughout the requested box; corner values are not extrema or uncertainty bounds\n");
+                    writeln!(
+                        output,
+                        "query-lower\t{}",
+                        cell(&format!("{:?}", evaluated.lower))
+                    )
+                    .unwrap();
+                    writeln!(
+                        output,
+                        "query-upper\t{}",
+                        cell(&format!("{:?}", evaluated.upper))
+                    )
+                    .unwrap();
+                    writeln!(
+                        output,
+                        "lower-corner-si\t{}",
+                        cell(&evaluated_cell(&evaluated.lower_answers))
+                    )
+                    .unwrap();
+                    writeln!(
+                        output,
+                        "upper-corner-si\t{}",
+                        cell(&evaluated_cell(&evaluated.upper_answers))
+                    )
+                    .unwrap();
+                }
             }
         } else {
             write!(
@@ -433,14 +557,26 @@ fn catalog(root: &Path, options: &Options) -> Result<(String, Vec<String>), Stri
                 cell(&relative)
             )
             .unwrap();
-            if let Some((point, answers)) = &evaluation {
-                write!(
-                    output,
-                    "\t{}\t{}",
-                    cell(&evaluated_cell(answers)),
-                    cell(&format!("{point:?}"))
-                )
-                .unwrap();
+            if let Some(evaluated) = &evaluation {
+                if options.ranges.is_empty() {
+                    write!(
+                        output,
+                        "\t{}\t{}",
+                        cell(&evaluated_cell(&evaluated.lower_answers)),
+                        cell(&format!("{:?}", evaluated.lower))
+                    )
+                    .unwrap();
+                } else {
+                    write!(
+                        output,
+                        "\t{}\t{}\t{}\t{}",
+                        cell(&evaluated_cell(&evaluated.lower_answers)),
+                        cell(&evaluated_cell(&evaluated.upper_answers)),
+                        cell(&format!("{:?}", evaluated.lower)),
+                        cell(&format!("{:?}", evaluated.upper))
+                    )
+                    .unwrap();
+                }
             }
             output.push('\n');
         }
