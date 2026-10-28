@@ -28,6 +28,8 @@ use fs_query::{ConvexSeparation, ConvexSupportMap, QueryError, convex_separation
 
 /// Analytic constant-acceleration contact timing for scalar plane gaps.
 pub mod ballistic;
+/// Source-backed liquid bridge forces, surface work and explicit topology rules.
+pub mod capillary_bridge;
 /// Shared conservative spatial sweep with explicit work budgets.
 pub mod broad_phase;
 /// Solver-independent finite-patch normal laws and their generic port embedding.
