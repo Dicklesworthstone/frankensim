@@ -35,6 +35,9 @@ pub mod moving;
 /// Bounded pulse-history flash-temperature comparison against resolved conduction.
 pub mod flash;
 
+/// Native rigid momenta, retained partial slip and finite heat accept together.
+pub mod rigid;
+
 fn invalid(message: &'static str) -> DepositionError {
     DepositionError::InvalidInput(message)
 }

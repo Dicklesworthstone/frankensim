@@ -42,6 +42,7 @@ fs-iface = { path = "../fs-iface" }
 fs-la = { path = "../fs-la" }
 fs-lbm = { path = "../fs-lbm" }
 fs-material = { path = "../fs-material" }
+fs-mbd = { path = "../fs-mbd" }
 fs-mbd-material = { path = "../fs-mbd-material" }
 fs-matdb = { path = "../fs-matdb" }
 fs-math = { path = "../fs-math" }
@@ -67,7 +68,6 @@ fs-vfit = { path = "../fs-vfit" }
 fs-convection = { path = "../fs-convection" }
 fs-modalid = { path = "../fs-modalid" }
 fs-ladder = { path = "../fs-ladder" }
-fs-mbd = { path = "../fs-mbd" }
 fs-ga = { path = "../fs-ga" }
 fs-geom = { path = "../fs-geom" }
 fs-io = { path = "../fs-io" }

@@ -9010,3 +9010,29 @@ a fast decay far above the sample rate. Three mechanical rates recover the
 analytic coupled mass/radiator response and dissipated work at second order.
 The fixed fit dictionaries and their geometric/frequency qualification are
 unchanged; admitting a pole regime alone does not validate a fitted exterior.
+
+## Native rigid-body partial-slip friction with finite thermal feedback
+
+`friction_heat::rigid::apply_rigid_friction_heat` jointly accepts one supplied
+positive-load finite patch, native rigid momenta, retained regional shear/spin
+memory, and the original finite enthalpy network. Every Newton trial resolves
+the original same-source `PartialSlipLaw` at the common interface temperature
+and calls native `apply_rigid_friction` from accepted state. Real masses,
+inertias and contact arms determine mobility. Route A/B binds mechanical A/B,
+with checks on original ellipse area, shared world face centre and normal.
+
+Only original physical plastic heat enters the common thermal interface.
+Elastic storage and both numerical losses remain separate in an independently
+reconstructed combined energy balance. Static/kinetic coefficient continuation
+retains memory and requires unchanged stiffness, regional decomposition, model
+and source. Stiffness changes or any nonzero parameter work refuse because this
+consumer has no corresponding physical supply port. Final publication of bodies,
+contact history and thermal state follows every gate and cancellation check.
+
+Four native physical tests cover sticking with zero heat, partial slip with only
+yielded-region heat, gross 3D shear/spin versus an independent inertia/caloric
+reduction, retained temperature feedback, actual momentum/work, staged refusal
+and exact retry. The supported phase has one supplied loaded patch, frozen
+poses/geometry and a uniform common interface. Normal/impact admission, pose
+advance, moving footprints and variable-stiffness thermodynamics remain separate
+owners; no instantaneous impact loss is automatically reclassified as heat.
