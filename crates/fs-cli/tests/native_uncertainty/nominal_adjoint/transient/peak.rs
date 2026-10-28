@@ -42,6 +42,19 @@ fn peak_study(fixture: &Fixture, controlled: bool, qmc: bool) {
     std::fs::write(fixture.sources.join("study.fsim"), source).unwrap();
 }
 
+fn convection_peak_study(fixture: &Fixture, controlled: bool) {
+    peak_study(fixture, controlled, true);
+    let path = fixture.sources.join("study.fsim");
+    let source = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(source.matches(":parameters (").count(), 1);
+    // Keep the scheduled-power coordinate while independently exercising both
+    // prescribed convection controls in the same nominal reverse trajectory.
+    let source = source.replacen(":parameters (", r#":parameters (
+        (uniform :name "htc" :target convection-coefficient :entity "air"
+            :low 8W/m^2/K :high 12W/m^2/K)"#, 1);
+    std::fs::write(path, source).unwrap();
+}
+
 fn branch(report: &JsonValue) -> &JsonValue {
     report.get("mean_control").unwrap().get("sampled_peak_branch").unwrap()
 }
@@ -81,11 +94,11 @@ fn g1_g3_initial_tied_peak_retains_zero_future_controls_and_identical_raw_sample
 fn g1_g3_interior_peak_controls_match_fresh_native_peak_resolves_for_both_storage_laws() {
     for enthalpy in [false, true] {
         let raw = peak_fixture(enthalpy, false, true);
-        peak_study(&raw, false, true);
+        convection_peak_study(&raw, false);
         let raw_result = raw.study(None, fs_cli::exit::SUCCESS);
         let (_, raw_report) = raw.report(&raw_result);
         let controlled = peak_fixture(enthalpy, false, true);
-        peak_study(&controlled, true, true);
+        convection_peak_study(&controlled, true);
         let result = controlled.study(None, fs_cli::exit::SUCCESS);
         let (_, report) = controlled.report(&result);
         assert_eq!(rows(&report), rows(&raw_report));
@@ -97,25 +110,46 @@ fn g1_g3_interior_peak_controls_match_fresh_native_peak_resolves_for_both_storag
         assert_eq!(selected.f64_field("control_prefix_steps"), Some(2.0));
         assert_eq!(selected.f64_field("fine_steps"), Some(8.0));
         let coefficients = gradient(&report);
-        assert_eq!(coefficients[0], 0.0, "scheduled absolute watts override static power");
-        assert!(coefficients[1] > 0.0);
-        let epsilon = 0.01;
-        let mut values = Vec::new();
-        for (side, sign) in [-1.0, 1.0].into_iter().enumerate() {
-            let mut project = controlled.project.clone();
-            let fs_project::ThermalBoundaryCondition::Convection { reference_temperature, .. } =
-                &mut project.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        assert_eq!(coefficients.len(), 3);
+        assert!(coefficients[0] < 0.0, "stronger convection lowers the heated peak");
+        assert_eq!(coefficients[1], 0.0, "scheduled absolute watts override static power");
+        assert!(coefficients[2] > 0.0);
+        assert_eq!(report.get("mean_control").unwrap()
+            .f64_field("probe_solves_completed"), Some(1.0));
+        for (coordinate, epsilon) in [(0, 0.001), (2, 0.01)] {
+            let mut values = Vec::new();
+            let mut finals = Vec::new();
+            for (side, sign) in [-1.0, 1.0].into_iter().enumerate() {
+                let mut project = controlled.project.clone();
+                let fs_project::ThermalBoundaryCondition::Convection {
+                    coefficient, reference_temperature,
+                } = &mut project.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
                     .boundaries[0].condition
-            else { panic!("prescribed reference fixture"); };
-            reference_temperature.value = 297.0 + sign * epsilon;
-            let receipt = solve(&controlled, &project, 300 + side);
-            values.push(receipt.path(&["transient", "sampled_peak"]).unwrap()
-                .f64_field("value_k").unwrap());
+                else { panic!("prescribed reference fixture"); };
+                coefficient.value = 10.0;
+                reference_temperature.value = 297.0;
+                if coordinate == 0 { coefficient.value += sign * epsilon; }
+                else { reference_temperature.value += sign * epsilon; }
+                let receipt = solve(&controlled, &project, 300 + coordinate * 2 + side);
+                let peak = receipt.path(&["transient", "sampled_peak"]).unwrap();
+                let value = peak.f64_field("value_k").unwrap();
+                let final_k = receipt.get("temperature").unwrap().f64_field("max").unwrap();
+                assert_eq!(peak.f64_field("state"), Some(2.0));
+                assert!(value > final_k + 1e-3, "the fixture must retain an interior maximum");
+                values.push(value);
+                finals.push(final_k);
+            }
+            let difference = (values[1] - values[0]) / (2.0 * epsilon);
+            assert!((coefficients[coordinate] - difference).abs()
+                    <= 2e-5 * difference.abs().max(1.0),
+                "enthalpy={enthalpy}, coordinate={coordinate}: peak branch {} versus peak FD {difference}",
+                coefficients[coordinate]);
+            if coordinate == 2 {
+                let final_difference = (finals[1] - finals[0]) / (2.0 * epsilon);
+                assert!((coefficients[coordinate] - final_difference).abs() > 1e-3,
+                    "a final-state derivative cannot substitute for the interior peak derivative");
+            }
         }
-        let difference = (values[1] - values[0]) / (2.0 * epsilon);
-        assert!((coefficients[1] - difference).abs() <= 2e-5 * difference.abs().max(1.0),
-            "enthalpy={enthalpy}: peak branch {} versus independent peak FD {difference}",
-            coefficients[1]);
     }
 }
 

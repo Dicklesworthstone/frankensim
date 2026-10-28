@@ -45,11 +45,9 @@ pub(super) fn bind(
     let time = receipt.get("transient").ok_or("peak calibration has no trajectory")?;
     let goal = time.get("temporal_error").ok_or("peak calibration has no final observation")?;
     let final_k = number(goal, "fine_final_k")?;
-    let value_k = observation::temperature(receipt, run, region, final_k)?;
-    let peak = time.get("sampled_peak").ok_or("peak calibration has no forward peak")?;
+    let selected = observation::selection(receipt, run, region, final_k)?;
+    let (state, time_s, value_k) = (selected.state, selected.time_s, selected.value_k);
     let report = time.get("adjoint").ok_or("peak calibration has no native branch adjoint")?;
-    let state = count(peak, "state")?;
-    let time_s = number(peak, "time_s")?;
     let vertex = count(report, "active_vertex")?;
     let ties = count(report, "active_ties")?;
     let initial_key = if enthalpy {
@@ -59,9 +57,6 @@ pub(super) fn bind(
     };
     let initial = report.get(initial_key).and_then(J::as_array)
         .ok_or("peak branch has no native vertex layout")?;
-    let rows = time.get("fine").and_then(J::as_array)
-        .filter(|rows| rows.len() == fine_steps)
-        .ok_or("peak calibration does not retain its complete fine grid")?;
     if value_k.to_bits() != nominal.to_bits()
         || count(time, "fine_steps")? != fine_steps
         || count(report, "state_index")? != state
@@ -72,25 +67,6 @@ pub(super) fn bind(
         || report.get("unique_sampled_maximum") != Some(&J::Bool(ties == 1))
     {
         return Err("nominal branch differs from the selected forward peak or its vertex layout");
-    }
-    let mut previous = 0.0;
-    for (index, row) in rows.iter().enumerate() {
-        let at = number(row, "time_s")?;
-        let value = number(row, "final_region_max_k")?;
-        if count(row, "step")? != index + 1 || at <= previous || value > value_k
-            || (index + 1 < state && value == value_k)
-            || (index + 1 == state && (at.to_bits() != time_s.to_bits()
-                || value.to_bits() != value_k.to_bits()))
-        {
-            return Err("peak calibration selects another fine state or a later tied maximum");
-        }
-        previous = at;
-    }
-    if previous.to_bits() != number(time, "final_time_s")?.to_bits()
-        || rows.last().and_then(|row| row.f64_field("final_region_max_k"))
-            .map(f64::to_bits) != Some(final_k.to_bits())
-    {
-        return Err("peak calibration fine grid and final observation differ");
     }
     let revalidated = count(report, "revalidated_solid_endpoints")?;
     let reconstructed = if enthalpy { 0 } else { count(report, "reconstructed_solid_endpoints")? };
