@@ -8,7 +8,8 @@
 //! small iteration update in place of an actual local energy residual.
 //!
 //! Fixed topology/geometry, immutable caloric laws, endpoint-evaluated sources
-//! and conductances. No moving mass, kinetics, entropy or unconditional
+//! and conductances. Optional entropy accounting uses the original caloric laws.
+//! No moving mass, kinetics or unconditional
 //! nonlinear-convergence claim. Refine time steps independently of tolerances.
 
 use super::*;
@@ -113,6 +114,29 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
     pub fn evaluate<T, E: From<DepositionError>>(
         &self, energy_increments_j: &[f64],
         resolve: impl FnOnce(&DepositionSimulation<'m>) -> Result<StepCoefficients<T>, E>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BackwardEulerTrial<'m, T>, E> {
+        self.evaluate_entropy_option(energy_increments_j, resolve, false, checkpoint)
+    }
+
+    /// Evaluate the SAME endpoint residual with exact caloric entropy storage
+    /// and endpoint-quadrature conductive/boundary entropy. Every active law
+    /// must provide its entropy integral. Numerical entropy remains a separate
+    /// defect; applied sources remain unclassified until their owner supplies
+    /// the missing heat/work and boundary-entropy semantics.
+    /// Use this for a final candidate when iterative entropy queries are unwanted.
+    pub fn evaluate_with_entropy<T, E: From<DepositionError>>(
+        &self, energy_increments_j: &[f64],
+        resolve: impl FnOnce(&DepositionSimulation<'m>) -> Result<StepCoefficients<T>, E>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BackwardEulerTrial<'m, T>, E> {
+        self.evaluate_entropy_option(energy_increments_j, resolve, true, checkpoint)
+    }
+
+    fn evaluate_entropy_option<T, E: From<DepositionError>>(
+        &self, energy_increments_j: &[f64],
+        resolve: impl FnOnce(&DepositionSimulation<'m>) -> Result<StepCoefficients<T>, E>,
+        with_entropy: bool,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<BackwardEulerTrial<'m, T>, E> {
         checkpoint()?;
@@ -123,10 +147,14 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
         next.time_s = self.target_s;
         let mut storage = Vec::with_capacity(self.ids.len());
         let mut stored_change = 0.0;
+        let mut initial_h = with_entropy.then(BTreeMap::new);
         for (i, (&id, &joules)) in self.ids.iter().zip(energy_increments_j).enumerate() {
             if i % 256 == 0 { checkpoint()?; }
             finite(joules)?;
             let old = &self.initial.cells[&id];
+            if let Some(initial_h) = &mut initial_h {
+                initial_h.insert(id, old.specific_h_j_kg);
+            }
             let h = finite(old.specific_h_j_kg + finite(joules / old.mass_kg)?)?;
             // Refuse a source too small to change its actual stored coordinate.
             if joules != 0.0 && h == old.specific_h_j_kg {
@@ -144,6 +172,10 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
         let links = next.set_step_conductances(&conductances_w_k, &mut checkpoint)?;
         let sources = next.add_step_sources(&sources_w, &mut checkpoint)?;
         let rates = next.heat_rates(f64::MAX, &mut checkpoint)?;
+        let entropy = if let Some(initial_h) = initial_h {
+            Some(next.entropy_step_audit(&initial_h, &rates.temperatures,
+                self.duration_s, &mut checkpoint)?)
+        } else { None };
         // The endpoint carries authored topology/boundaries, never trial inputs.
         for (id, value) in links {
             next.links.get_mut(&id).expect("validated link").conductance_w_k = value;
@@ -163,7 +195,7 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
             residual_j: finite(stored_change - external_heat_j)?, substeps: 1, events: 0,
         };
         checkpoint()?;
-        Ok(BackwardEulerTrial { next, payload, residual, audit })
+        Ok(BackwardEulerTrial { next, payload, residual, audit, entropy })
     }
 }
 
@@ -174,6 +206,7 @@ pub struct BackwardEulerTrial<'m, T> {
     payload: T,
     residual: Vec<f64>,
     audit: EnergyAudit,
+    entropy: Option<super::entropy::EntropyAudit>,
 }
 impl<'m, T> BackwardEulerTrial<'m, T> {
     /// Per-cell energy-balance residual [J] in the step's CellId order.
@@ -186,6 +219,13 @@ impl<'m, T> BackwardEulerTrial<'m, T> {
     pub const fn payload(&self) -> &T { &self.payload }
     /// Total energy account from the actual material-backed storage differences.
     pub const fn audit(&self) -> &EnergyAudit { &self.audit }
+
+    /// Optional entropy account of this exact tentative endpoint and its
+    /// applied coefficients. It becomes an accepted account only if `accept`
+    /// succeeds. Ordinary `evaluate` performs no entropy integration.
+    pub const fn entropy_audit(&self) -> Option<&super::entropy::EntropyAudit> {
+        self.entropy.as_ref()
+    }
 
     /// Publish a candidate only after independent LOCAL and TOTAL joule gates.
     /// This is an algebraic acceptance gate, not a timestep-accuracy certificate.

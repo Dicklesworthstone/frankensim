@@ -328,6 +328,19 @@ impl ThermalLaw for GasEnthalpyLaw {
             .map(|solution| solution.temperature_k).map_err(|_| DepositionError::MaterialDomain)
     }
     fn maximum_temperature_slope(&self) -> f64 { self.maximum_slope }
+    fn specific_entropy_change_j_kg_k(
+        &self, initial_h_j_kg: f64, final_h_j_kg: f64,
+    ) -> Result<Option<f64>, DepositionError> {
+        let t0 = self.temperature_k(initial_h_j_kg)?;
+        let t1 = if initial_h_j_kg == final_h_j_kg { t0 }
+            else { self.temperature_k(final_h_j_kg)? };
+        let (_, pressure) = coordinates(&self.context)
+            .map_err(|_| DepositionError::MaterialDomain)?;
+        self.model.thermodynamics().specific_entropy_change(
+            Temperature::new(t0), pressure, Temperature::new(t1), pressure)
+            .map(|entropy| Some(entropy.value()))
+            .map_err(|_| DepositionError::MaterialDomain)
+    }
     fn advected_composition(&self) -> Option<CaloricComposition<'_>> {
         Some(CaloricComposition { species: &self.species, mass_fractions: &self.mass_fractions,
             enthalpy_reference: &self.enthalpy_reference })

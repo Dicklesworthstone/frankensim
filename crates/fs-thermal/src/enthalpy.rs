@@ -35,6 +35,10 @@ pub mod backward_euler;
 #[path = "enthalpy/advection.rs"]
 pub mod advection;
 
+/// Opt-in entropy accounting on the original enthalpy and heat-transfer laws.
+#[path = "enthalpy/entropy.rs"]
+pub mod entropy;
+
 /// Conservative sublimation and deposition on this same thermal timeline.
 #[path = "enthalpy/sublimation.rs"]
 pub mod sublimation;
@@ -57,6 +61,14 @@ pub trait ThermalLaw {
     /// Global upper bound on dT/dh [kg K/J] over the admitted enthalpy domain.
     /// Must be finite and nonnegative; an underestimated bound invalidates CFL.
     fn maximum_temperature_slope(&self) -> f64;
+    /// Exact relative thermal entropy integral `integral dh / T(h)` [J/(kg K)]
+    /// on this same admitted caloric law, at its fixed pressure/composition.
+    /// `None` explicitly means unavailable; the transport owner never invents
+    /// a heat capacity, entropy datum, mixing law or extrapolated chart.
+    /// Implementations must retain latent heat in this integral exactly once.
+    fn specific_entropy_change_j_kg_k(
+        &self, _initial_h_j_kg: f64, _final_h_j_kg: f64,
+    ) -> Result<Option<f64>, DepositionError> { Ok(None) }
     /// Optional frozen mixture/reference binding for stationary species advection.
     /// The original single-material path does not require or infer this data.
     fn advected_composition(&self) -> Option<advection::species::CaloricComposition<'_>> { None }

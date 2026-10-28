@@ -41,6 +41,23 @@ fn pressure_enthalpy_inverse_uses_nasa_curvature_and_returns_one_coherent_medium
 }
 
 #[test]
+fn thermal_entropy_adapter_integrates_original_variable_cp_at_fixed_pressure() {
+    let source = model(vec![0.75,0.25],0.001);
+    let law = GasEnthalpyLaw::from_mole(&source,mole(vec![0.75,0.25]),
+        point(300.0,140000.0),controls()).unwrap();
+    let h0 = law.enthalpy_at_temperature(300.0).unwrap();
+    let h1 = law.enthalpy_at_temperature(337.0).unwrap();
+    let entropy = law.specific_entropy_change_j_kg_k(h0,h1).unwrap().unwrap();
+    let molar_mass = 0.75*0.028 + 0.25*0.004;
+    let exact = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / molar_mass
+        * (3.25*(337.0_f64/300.0).ln() + 0.00075*37.0);
+    assert!((entropy-exact).abs() < 1e-9);
+    assert_eq!(law.specific_entropy_change_j_kg_k(h1,h0).unwrap().unwrap(),-entropy);
+    assert_eq!(law.specific_entropy_change_j_kg_k(h0,h0).unwrap(),Some(0.0));
+    assert!(law.specific_entropy_change_j_kg_k(h0-1e9,h1).is_err());
+}
+
+#[test]
 fn zero_species_and_shared_reference_survive_caloric_basis_conversion() {
     let source = model(vec![0.75, 0.25], 0.0);
     let a = GasEnthalpyLaw::from_mole(&source, mole(vec![1.0, 0.0]),

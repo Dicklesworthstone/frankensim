@@ -2983,3 +2983,15 @@ reference; latent heat alone does not determine NASA-9 vapor enthalpy. This
 primitive supplies neither an interface rate nor automatic thermal-reference
 alignment. Six focused native regressions passed for influx/deposition,
 depletion/reentry, reference shifts, counterflow, ordering and atomic refusal.
+
+### Thermal entropy adapters
+
+The shared ThermalLaw adapter for EquilibriumEnthalpyPhaseCurve delegates to
+the original exact piecewise dh/T integral, including latent plateaus once.
+GasEnthalpyLaw supplies the same optional entropy interface by reconstructing
+both enthalpy endpoints with its original NASA/EOS law and evaluating the
+cancellation-safe frozen-mixture entropy change at the retained pressure.
+Source domains, bounded inversion and frozen-composition restrictions remain
+in force. These adapters enable shared thermal entropy audits without a second
+caloric law. Independent sensible/latent and variable-cp gas regressions cover
+storage, endpoint reversal, no-ops and refused source-domain exits.

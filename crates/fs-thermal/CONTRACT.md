@@ -149,3 +149,20 @@ inventory, area partition/order, refusal and finite-capacity energy closure.
 The combined thermal/material suite passed 113 tests with one existing benchmark
 ignored. Thermally evolving gas, molecular heat accommodation, mixed phases and
 mesh/topology changes remain separate physical owners.
+
+### Relative entropy on the shared thermal timeline
+
+ThermalLaw may provide its exact relative integral of dh/T at the original
+fixed-pressure/composition convention. Missing entropy remains unavailable;
+no substitute heat capacity or entropy reference is invented. The opt-in
+advance_to_with_entropy and BackwardEulerStep::evaluate_with_entropy use the
+original accepted thermal states, actual interface coefficients and the same
+start/endpoint flux quadrature. EntropyAudit separates exact material storage,
+actual ambient/support reservoir entropy, conductive production, unclassified
+source energy divided by cell temperature, and the numerical balance defect.
+The source flag survives cancellation of signed sources. Birth entropy is
+excluded on both sides; subsequent storage starts from actual birth enthalpy.
+A trial audit is accepted only with its trial. Ordinary energy-only APIs do no
+entropy integration. G1/G3 tests cover isolated exchange, refinement, reservoirs,
+latent storage, equilibrium, deferred birth, resolved implicit sources, missing
+material entropy and cancellation without publication.
