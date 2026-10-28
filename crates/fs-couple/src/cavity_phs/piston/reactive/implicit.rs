@@ -79,8 +79,23 @@ impl GasReaction {
 
 struct Trial {
     gas: ClosedGasParcel,
-    progress: mechanism::Progress,
+    actual: Vec<f64>,
+    changes: Vec<f64>,
+    expected: Vec<f64>,
+    consumed: f64,
+    extent_mol: f64,
     report: ImplicitReactionReport,
+}
+
+fn equation_residual(
+    extent: f64, value: f64, volume_m3: f64, duration_s: f64,
+) -> Result<f64, GasReactionError> {
+    let predicted = (value * volume_m3) * duration_s;
+    let residual = extent - predicted;
+    if !predicted.is_finite() || (value != 0.0 && predicted == 0.0) || !residual.is_finite() {
+        return Err(invalid("implicit reaction endpoint equation is unrepresentable"));
+    }
+    Ok(residual)
 }
 
 pub(super) fn candidate(
@@ -143,26 +158,18 @@ pub(super) fn candidate(
         }
         let gas = law.reconstruct_inventory(initial_gas, &changes, &expected, controls, cancelled)?;
         let actual = law.inventory(&gas)?;
-        let (rate, rate_material) = law.evaluate_channel(&law.kinetics,
-            law.rate_material.as_ref(), &gas, &actual, cancelled)?;
-        let value = rate.net_progress_rate().ok_or_else(||
-            invalid("implicit reaction rate is log-only; no finite endpoint equation"))?.value();
-        let predicted = (value * gas.volume_m3()) * duration_s;
-        let residual = extent - predicted;
-        if !predicted.is_finite() || (value != 0.0 && predicted == 0.0) || !residual.is_finite() {
-            return Err(invalid("implicit reaction endpoint equation is unrepresentable"));
-        }
-        let progress = mechanism::Progress {
-            primary: mechanism::ReactionChannelStep {
-                reaction_id: equilibrium.reaction().clone(), rate, rate_material,
-                extent_mol: extent,
-            },
-            additional: Vec::new(), changes, expected, consumed,
-        };
+        let value = law.evaluate_channel_trial(&law.kinetics,
+            law.rate_material.as_ref(), &gas, &actual, cancelled)?
+            .ok_or_else(||
+                invalid("implicit reaction rate is log-only; no finite endpoint equation"))?
+            .value();
+        let residual = equation_residual(extent, value, gas.volume_m3(), duration_s)?;
         let report = ImplicitReactionReport {
             duration_s, admitted_bracket_mol: bracket, residual_mol: residual, trials,
         };
-        Ok((Trial { gas, progress, report }, residual))
+        Ok((Trial {
+            gas, actual, changes, expected, consumed, extent_mol: extent, report,
+        }, residual))
     }, cancelled).map_err(|error| match error {
         ScalarError::Evaluation(error) => error,
         ScalarError::Invalid(message) => invalid(message),
@@ -174,11 +181,35 @@ pub(super) fn candidate(
             iterations, residual_mol: residual,
         },
     })?;
+    // Build complete source evidence only at the accepted endpoint, using the
+    // same inventory and live source evaluation as the temporary trial.
+    let (rate, rate_material) = law.evaluate_channel(&law.kinetics,
+        law.rate_material.as_ref(), &trial.gas, &trial.actual, cancelled)?;
+    let value = rate.net_progress_rate().ok_or_else(||
+        invalid("implicit reaction rate is log-only; no finite endpoint equation"))?.value();
+    let residual = equation_residual(
+        trial.extent_mol, value, trial.gas.volume_m3(), duration_s,
+    )?;
+    if residual.abs() > policy.extent_tolerance_mol {
+        return Err(GasReactionError::ImplicitNotConverged {
+            iterations: trial.report.trials.saturating_sub(2), residual_mol: residual,
+        });
+    }
+    let progress = mechanism::Progress {
+        primary: mechanism::ReactionChannelStep {
+            reaction_id: equilibrium.reaction().clone(), rate, rate_material,
+            extent_mol: trial.extent_mol,
+        },
+        additional: Vec::new(), changes: trial.changes,
+        expected: trial.expected, consumed: trial.consumed,
+    };
     // Reuse the exact explicit-path admission, once for the accepted nonlinear
     // endpoint. Rejected/root-search trials never consume accepted inventory.
     let mut result = law.admit_progress(initial_gas, &initial, trial.gas,
-        trial.progress, controls, cancelled)?;
-    result.step.implicit = Some(trial.report);
+        progress, controls, cancelled)?;
+    result.step.implicit = Some(ImplicitReactionReport {
+        residual_mol: residual, ..trial.report
+    });
     poll(cancelled)?;
     Ok(result)
 }

@@ -144,6 +144,17 @@ struct Inventory {
     amounts: Vec<f64>,
     consumed: f64,
 }
+struct PreparedEvaluation {
+    extents: Vec<f64>,
+    inventory: Inventory,
+    gas: ClosedGasParcel,
+    energy_iterations: usize,
+    actual: Vec<f64>,
+}
+struct TrialEvaluation {
+    expected: Vec<f64>,
+    residual_mol: Vec<f64>,
+}
 struct Evaluation {
     gas: ClosedGasParcel,
     energy_iterations: usize,
@@ -279,7 +290,17 @@ impl<C: FnMut() -> bool> Problem<'_, C> {
             consumed,
         })
     }
-    fn evaluate(&self, x: &[f64]) -> Result<Evaluation, TrialError> {
+    fn equation_residual(
+        &self, extent: f64, value: f64, volume_m3: f64,
+    ) -> Result<f64, TrialError> {
+        let predicted = (value * volume_m3) * self.duration_s;
+        let residual = extent - predicted;
+        if !predicted.is_finite() || (value != 0.0 && predicted == 0.0) || !residual.is_finite() {
+            return Err(invalid("coupled reaction endpoint equation is unrepresentable").into());
+        }
+        Ok(residual)
+    }
+    fn prepare(&self, x: &[f64]) -> Result<PreparedEvaluation, TrialError> {
         self.poll()?;
         let spent = self.evaluations.get();
         if spent == self.policy.maximum_evaluations {
@@ -301,6 +322,12 @@ impl<C: FnMut() -> bool> Problem<'_, C> {
             &mut || self.stop(),
         )?;
         let actual = self.law.inventory(&gas)?;
+        Ok(PreparedEvaluation { extents, inventory, gas, energy_iterations, actual })
+    }
+    // Only accepted/original endpoints construct complete reaction reports.
+    fn evaluate(&self, x: &[f64]) -> Result<Evaluation, TrialError> {
+        let PreparedEvaluation { extents, inventory, gas, energy_iterations, actual } =
+            self.prepare(x)?;
         let mut reports = Vec::with_capacity(extents.len());
         let mut residual_mol = Vec::with_capacity(extents.len());
         for ((kinetics, source), &extent) in self.law.channels().zip(&extents) {
@@ -314,14 +341,7 @@ impl<C: FnMut() -> bool> Problem<'_, C> {
                     invalid("coupled implicit rate is log-only; no finite endpoint equation")
                 })?
                 .value();
-            let predicted = (value * gas.volume_m3()) * self.duration_s;
-            let residual = extent - predicted;
-            if !predicted.is_finite() || (value != 0.0 && predicted == 0.0) || !residual.is_finite()
-            {
-                return Err(
-                    invalid("coupled reaction endpoint equation is unrepresentable").into(),
-                );
-            }
+            let residual = self.equation_residual(extent, value, gas.volume_m3())?;
             reports.push(mechanism::ReactionChannelStep {
                 reaction_id: kinetics
                     .reverse_rate_closure()
@@ -348,11 +368,27 @@ impl<C: FnMut() -> bool> Problem<'_, C> {
             residual_mol,
         })
     }
-    fn normalized_residual(&self, value: &Evaluation) -> Result<Vec<f64>, GasReactionError> {
+    // Preserve the original gas/material source admission, but omit kinetic
+    // receipts and provisional channel reports at residual/Jacobian samples.
+    fn evaluate_trial(&self, x: &[f64]) -> Result<TrialEvaluation, TrialError> {
+        let PreparedEvaluation { extents, inventory, gas, actual, .. } = self.prepare(x)?;
+        let mut residual_mol = Vec::with_capacity(extents.len());
+        for ((kinetics, source), &extent) in self.law.channels().zip(&extents) {
+            self.poll()?;
+            let value = self.law.evaluate_channel_trial(
+                kinetics, source, &gas, &actual, &mut || self.stop(),
+            )?.ok_or_else(|| {
+                invalid("coupled implicit rate is log-only; no finite endpoint equation")
+            })?.value();
+            residual_mol.push(self.equation_residual(extent, value, gas.volume_m3())?);
+        }
+        Ok(TrialEvaluation { expected: inventory.amounts, residual_mol })
+    }
+    fn normalized_residual(&self, value: &[f64]) -> Result<Vec<f64>, GasReactionError> {
         let result: Vec<_> = self
             .active
             .iter()
-            .map(|&j| value.residual_mol[j] / self.scales[j])
+            .map(|&j| value[j] / self.scales[j])
             .collect();
         if result.iter().any(|x| !x.is_finite()) {
             return Err(invalid(
@@ -459,9 +495,9 @@ impl<C: FnMut() -> bool> Problem<'_, C> {
                 return Ok(cache.clone());
             }
         }
-        let base = self.evaluate(x)?;
-        let base_residual = self.normalized_residual(&base)?;
-        let amounts = &base.progress.expected;
+        let base = self.evaluate_trial(x)?;
+        let base_residual = self.normalized_residual(&base.residual_mol)?;
+        let amounts = &base.expected;
         let n = x.len();
         let mut entries = vec![0.0; n * n];
         for j in 0..n {
@@ -487,16 +523,16 @@ impl<C: FnMut() -> bool> Problem<'_, C> {
             if high[j] == x[j] {
                 return Err(invalid("reaction Jacobian increment rounded away").into());
             }
-            let high_value = self.evaluate(&high)?;
-            let high_residual = self.normalized_residual(&high_value)?;
+            let high_value = self.evaluate_trial(&high)?;
+            let high_residual = self.normalized_residual(&high_value.residual_mol)?;
             let (low, low_residual) = if centered {
                 let mut low = x.to_vec();
                 low[j] -= sign * h;
                 if low[j] == x[j] {
                     return Err(invalid("reaction Jacobian increment rounded away").into());
                 }
-                let value = self.evaluate(&low)?;
-                let residual = self.normalized_residual(&value)?;
+                let value = self.evaluate_trial(&low)?;
+                let residual = self.normalized_residual(&value.residual_mol)?;
                 (low[j], residual)
             } else {
                 (x[j], base_residual.clone())
@@ -531,8 +567,8 @@ impl<C: FnMut() -> bool> NonlinearProblem for Problem<'_, C> {
     fn residual(&self, x: &[f64], residual: &mut [f64]) {
         residual.fill(f64::NAN);
         match self
-            .evaluate(x)
-            .and_then(|value| self.normalized_residual(&value).map_err(Into::into))
+            .evaluate_trial(x)
+            .and_then(|value| self.normalized_residual(&value.residual_mol).map_err(Into::into))
         {
             Ok(value) => residual.copy_from_slice(&value),
             Err(error) => self.callback_failure(error),

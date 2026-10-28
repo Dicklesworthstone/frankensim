@@ -374,7 +374,8 @@ fn original_piston_uses_the_solved_secondary_reaction_without_an_extra_heat_cred
         ))
         .unwrap(),
     );
-    let dt = 0.001;
+    // Resolve the native piston/compressibility clock over the fixture bounds.
+    let dt = 0.0001;
     let piston = GasPiston::new(gas(&mechanism, [1.0, 0.0, 0.0], 400.0), 1.0, 0.01, 0.0).unwrap();
     let ch = source::chamber(10, &piston, dt);
     let reference = mechanism

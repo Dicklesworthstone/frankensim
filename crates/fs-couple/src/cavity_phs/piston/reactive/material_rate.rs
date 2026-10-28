@@ -22,7 +22,8 @@ use fs_material::state_point::{
 use fs_qty::{Dimensionless, Dims, Pressure};
 use fs_thermochem::equilibrium::{
     DeclaredStoichiometricMassActionEvaluationV1, DeclaredStoichiometricMassActionV1,
-    IdealGasSpeciesActivityV1, ReactionProgressRateQuantityV1, ReactionProgressRateScaleV1,
+    IdealGasSpeciesActivityV1, NetReactionProgressRateV1, ReactionProgressRateQuantityV1,
+    ReactionProgressRateScaleV1,
     ThermodynamicReverseRateClosureV1,
 };
 
@@ -211,24 +212,15 @@ impl GasReaction {
     }
 }
 
-/// Resolve one original channel at the actual gas state, once per chemical stage.
-pub(super) fn evaluate_rate_for(
+// Both complete and temporary kinetic evaluations use the same live material
+// query, Arrhenius conversion, collider factor and typed scale admission.
+fn resolve_scale_for(
     kinetics: &DeclaredStoichiometricMassActionV1,
-    source: Option<&MaterialRateScale>,
+    source: &MaterialRateScale,
     gas: &ClosedGasParcel,
-    activities: Vec<IdealGasSpeciesActivityV1>,
+    temperature: Temperature,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<
-    (
-        DeclaredStoichiometricMassActionEvaluationV1,
-        Option<ResolvedMaterialStatePoint>,
-    ),
-    GasReactionError,
-> {
-    let temperature = Temperature::new(gas.state().state().temperature);
-    let Some(source) = source else {
-        return Ok((kinetics.evaluate(temperature, activities)?, None));
-    };
+) -> Result<(ReactionProgressRateScaleV1, f64, ResolvedMaterialStatePoint), GasReactionError> {
     poll(cancelled)?;
     let mut required = source.base_requirements()?;
     if let Some(collider) = &source.collider {
@@ -261,6 +253,29 @@ pub(super) fn evaluate_rate_for(
         .map_err(|_| {
             invalid("resolved material scale is outside the original kinetic quantity domain")
         })?;
+    Ok((scale, multiplier, resolved))
+}
+
+/// Resolve one original channel at the actual gas state, once per chemical stage.
+pub(super) fn evaluate_rate_for(
+    kinetics: &DeclaredStoichiometricMassActionV1,
+    source: Option<&MaterialRateScale>,
+    gas: &ClosedGasParcel,
+    activities: Vec<IdealGasSpeciesActivityV1>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<
+    (
+        DeclaredStoichiometricMassActionEvaluationV1,
+        Option<ResolvedMaterialStatePoint>,
+    ),
+    GasReactionError,
+> {
+    let temperature = Temperature::new(gas.state().state().temperature);
+    let Some(source) = source else {
+        return Ok((kinetics.evaluate(temperature, activities)?, None));
+    };
+    let (scale, multiplier, resolved) =
+        resolve_scale_for(kinetics, source, gas, temperature, cancelled)?;
     // Reuse the certified equilibrium and declared activity orders. Reverse
     // rates remain thermodynamically tied to this very same forward scale.
     let kinetics = DeclaredStoichiometricMassActionV1::new(
@@ -276,4 +291,30 @@ pub(super) fn evaluate_rate_for(
     )?;
     poll(cancelled)?;
     Ok((evaluated, Some(resolved)))
+}
+
+/// Temporary residual/Jacobian rate: preserve all live source checks, but
+/// borrow the original equilibrium instead of cloning it to rebind a scale.
+pub(super) fn evaluate_rate_for_trial(
+    kinetics: &DeclaredStoichiometricMassActionV1,
+    source: Option<&MaterialRateScale>,
+    gas: &ClosedGasParcel,
+    activities: Vec<IdealGasSpeciesActivityV1>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Option<NetReactionProgressRateV1>, GasReactionError> {
+    let temperature = Temperature::new(gas.state().state().temperature);
+    let Some(source) = source else {
+        return Ok(kinetics.evaluate_net_progress_with_scale(
+            temperature, activities, kinetics.reverse_rate_closure().forward_progress_rate_scale(),
+            Dimensionless::new(1.0),
+        )?);
+    };
+    let (scale, multiplier, _resolved) =
+        resolve_scale_for(kinetics, source, gas, temperature, cancelled)?;
+    poll(cancelled)?;
+    let rate = kinetics.evaluate_net_progress_with_scale(
+        temperature, activities, scale, Dimensionless::new(multiplier),
+    )?;
+    poll(cancelled)?;
+    Ok(rate)
 }

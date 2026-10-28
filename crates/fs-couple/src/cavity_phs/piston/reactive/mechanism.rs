@@ -151,11 +151,11 @@ impl Sum {
 impl GasReaction {
     /// Shared canonical activities and material-rate query for explicit initial
     /// states and implicit endpoint trials. No caller supplies partial pressures.
-    pub(super) fn evaluate_channel(
+    fn channel_activities(
         &self, kinetics: &DeclaredStoichiometricMassActionV1,
-        source: Option<&MaterialRateScale>, gas: &ClosedGasParcel, amounts: &[f64],
+        gas: &ClosedGasParcel, amounts: &[f64],
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<(DeclaredStoichiometricMassActionEvaluationV1, Option<ResolvedMaterialStatePoint>), GasReactionError> {
+    ) -> Result<Vec<IdealGasSpeciesActivityV1>, GasReactionError> {
         let components = self.catalog.thermodynamics().components();
         let total: f64 = amounts.iter().sum();
         if !positive(total) { return Err(invalid("reaction total amount is unrepresentable")); }
@@ -173,7 +173,25 @@ impl GasReaction {
             activities.push(IdealGasSpeciesActivityV1::new(term.species().clone(), Dimensionless::new(value))?);
         }
         poll(cancelled)?;
+        Ok(activities)
+    }
+
+    pub(super) fn evaluate_channel(
+        &self, kinetics: &DeclaredStoichiometricMassActionV1,
+        source: Option<&MaterialRateScale>, gas: &ClosedGasParcel, amounts: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(DeclaredStoichiometricMassActionEvaluationV1, Option<ResolvedMaterialStatePoint>), GasReactionError> {
+        let activities = self.channel_activities(kinetics, gas, amounts, cancelled)?;
         material_rate::evaluate_rate_for(kinetics, source, gas, activities, cancelled)
+    }
+
+    pub(super) fn evaluate_channel_trial(
+        &self, kinetics: &DeclaredStoichiometricMassActionV1,
+        source: Option<&MaterialRateScale>, gas: &ClosedGasParcel, amounts: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Option<fs_thermochem::equilibrium::NetReactionProgressRateV1>, GasReactionError> {
+        let activities = self.channel_activities(kinetics, gas, amounts, cancelled)?;
+        material_rate::evaluate_rate_for_trial(kinetics, source, gas, activities, cancelled)
     }
 
     /// Shared single/multiple-channel rate and inventory operation. No gas

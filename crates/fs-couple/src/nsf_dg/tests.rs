@@ -12,7 +12,7 @@ use fs_lbm::nsf3::{
 };
 use fs_material::gas::GasSpec;
 use fs_material::thermochemical_gas::energy::GasEnergySolve;
-use fs_ports::PortId;
+use fs_duct::dg::PortId;
 use std::sync::Arc;
 #[path = "../../../fs-lbm/tests/nsf3_thermochemical/source.rs"]
 mod source;
