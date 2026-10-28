@@ -264,6 +264,65 @@ fn structural_error(h: f64, operator_path: bool) -> f64 {
 }
 
 #[test]
+fn structural_small_steps_preserve_resolved_velocity_and_acceleration() {
+    // At this step size cos(h) rounds to 1. Recovering acceleration by
+    // subtracting absolute displacements therefore cannot work: the velocity
+    // and force remain well resolved even though the displacement does not.
+    let h: f64 = 1e-8;
+    let mass = DenseOp::new(1, &[1.0]);
+    let damping = DenseOp::new(1, &[0.0]);
+    let stiffness = DenseOp::new(1, &[1.0]);
+    let problem = LinearSecondOrderSystem::new(&mass, &damping, &stiffness);
+    for rho in [0.0, 0.3, 0.5, 0.8, 1.0] {
+        let method = OperatorGeneralizedAlpha::new(1, h, rho, tight_newton());
+        let mut state = SecondOrderState::new(0.0, &[1.0], &[0.0], &[-1.0]);
+        method.step(&mut state, &problem, &[0.0]).unwrap();
+        assert!((state.q[0] - h.cos()).abs() <= 2.0 * f64::EPSILON);
+        assert!(
+            (state.v[0] + h.sin()).abs() <= 8.0 * f64::EPSILON * h,
+            "rho={rho}: resolved velocity was lost: {:?}",
+            state.v
+        );
+        assert!(
+            (state.a[0] + h.cos()).abs() <= 8.0 * f64::EPSILON,
+            "rho={rho}: resolved acceleration was lost: {:?}",
+            state.a
+        );
+    }
+}
+
+#[test]
+fn structural_rigid_acceleration_is_independent_of_coordinate_origin() {
+    let h: f64 = 1e-7;
+    let mass = DenseOp::new(1, &[2.0]);
+    let zero = DenseOp::new(1, &[0.0]);
+    let problem = LinearSecondOrderSystem::new(&mass, &zero, &zero);
+    for rho in [0.0, 0.5, 1.0] {
+        let method = OperatorGeneralizedAlpha::new(1, h, rho, tight_newton());
+        for origin in [0.0, 1.0, 1e6] {
+            let mut state = SecondOrderState::new(0.0, &[origin], &[0.25], &[2.0]);
+            for step in 1..=16 {
+                method.step(&mut state, &problem, &[4.0]).unwrap();
+                let time = step as f64 * h;
+                let expected_position = origin + 0.25 * time + time * time;
+                assert!(
+                    (state.q[0] - expected_position).abs()
+                        <= 32.0 * f64::EPSILON * expected_position.abs().max(1.0)
+                );
+                assert!(
+                    (state.v[0] - (0.25 + 2.0 * time)).abs() <= 16.0 * f64::EPSILON,
+                    "rho={rho}, origin={origin}: velocity depends on coordinate origin"
+                );
+                assert!(
+                    (state.a[0] - 2.0).abs() <= 8.0 * f64::EPSILON,
+                    "rho={rho}, origin={origin}: acceleration depends on coordinate origin"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn structural_generalized_alpha_is_second_order_on_both_paths() {
     for operator_path in [false, true] {
         let coarse = structural_error(0.1, operator_path);

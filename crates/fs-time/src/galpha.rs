@@ -645,15 +645,12 @@ impl OperatorGeneralizedAlpha {
             forcing,
             admission_error: std::cell::RefCell::new(None),
         };
-        let h2 = self.h * self.h;
-        let guess: Vec<f64> = (0..self.n)
-            .map(|i| {
-                self.h.mul_add(
-                    state.v[i],
-                    (h2 * (0.5 - self.beta)).mul_add(state.a[i], state.q[i]),
-                )
-            })
-            .collect();
+        // Solve the Newmark displacement correction beta*h^2*a_next,
+        // rather than absolute displacement. Recovering acceleration from
+        // q_next - q_old destroys resolved force/velocity increments when the
+        // displacement change is small relative to a prestressed equilibrium.
+        // The effective Jacobian and its preconditioner weights are unchanged.
+        let guess = vec![0.0; self.n];
         let setup = NewtonKrylovState::new(&residual, guess, self.solve.newton);
         structural_poll(cancelled)?;
         let mut newton = setup.map_err(|error| {
@@ -684,8 +681,16 @@ impl OperatorGeneralizedAlpha {
                 .take_admission_error()
                 .unwrap_or(TimeSolveError::NotConverged(report)));
         }
-        let q_new = newton.x;
-        let (v_new, a_new) = structural_kinematics(self, &state.q, &state.v, &state.a, &q_new);
+        let mut q_new = newton.x;
+        let mut v_new = vec![0.0; self.n];
+        let mut a_new = vec![0.0; self.n];
+        for i in 0..self.n {
+            let (dq, dv, acceleration) =
+                structural_increment(self, state.v[i], state.a[i], q_new[i]);
+            q_new[i] = state.q[i] + dq;
+            v_new[i] = state.v[i] + dv;
+            a_new[i] = acceleration;
+        }
         let admission = problem.validate_state(&q_new, &v_new);
         structural_poll(cancelled)?;
         structural_admit(admission, "accepted endpoint")?;
@@ -758,16 +763,17 @@ impl<P: SecondOrderProblem + ?Sized> NonlinearProblem for StructuralStepResidual
         self.method.n
     }
 
-    fn residual(&self, q_new: &[f64], output: &mut [f64]) {
+    fn residual(&self, correction: &[f64], output: &mut [f64]) {
         let method = self.method;
-        let (v_new, a_new) = structural_kinematics(method, self.q0, self.v0, self.a0, q_new);
         let mut q_eval = vec![0.0; method.n];
         let mut v_eval = vec![0.0; method.n];
         let mut a_eval = vec![0.0; method.n];
         for i in 0..method.n {
-            q_eval[i] = (1.0 - method.alpha_f).mul_add(q_new[i], method.alpha_f * self.q0[i]);
-            v_eval[i] = (1.0 - method.alpha_f).mul_add(v_new[i], method.alpha_f * self.v0[i]);
-            a_eval[i] = (1.0 - method.alpha_m).mul_add(a_new[i], method.alpha_m * self.a0[i]);
+            let (dq, dv, acceleration) =
+                structural_increment(method, self.v0[i], self.a0[i], correction[i]);
+            q_eval[i] = (1.0 - method.alpha_f).mul_add(dq, self.q0[i]);
+            v_eval[i] = (1.0 - method.alpha_f).mul_add(dv, self.v0[i]);
+            a_eval[i] = (1.0 - method.alpha_m).mul_add(acceleration, method.alpha_m * self.a0[i]);
         }
         let mut mass = vec![0.0; method.n];
         let mut resistance = vec![0.0; method.n];
@@ -781,20 +787,20 @@ impl<P: SecondOrderProblem + ?Sized> NonlinearProblem for StructuralStepResidual
         }
     }
 
-    fn jacobian_apply(&self, q_new: &[f64], direction: &[f64], output: &mut [f64]) {
+    fn jacobian_apply(&self, correction: &[f64], direction: &[f64], output: &mut [f64]) {
         let method = self.method;
         let mass_scale = (1.0 - method.alpha_m) / (method.beta * method.h * method.h);
         let damping_scale = (1.0 - method.alpha_f) * method.gamma / (method.beta * method.h);
         let mut mass = vec![0.0; method.n];
         let mut damping = vec![0.0; method.n];
         self.problem.mass_apply(direction, &mut mass);
-        let (v_new, _) = structural_kinematics(method, self.q0, self.v0, self.a0, q_new);
         let mut q_eval = vec![0.0; method.n];
         let mut v_eval = vec![0.0; method.n];
         let mut tangent_direction = vec![0.0; method.n];
         for i in 0..method.n {
-            q_eval[i] = (1.0 - method.alpha_f).mul_add(q_new[i], method.alpha_f * self.q0[i]);
-            v_eval[i] = (1.0 - method.alpha_f).mul_add(v_new[i], method.alpha_f * self.v0[i]);
+            let (dq, dv, _) = structural_increment(method, self.v0[i], self.a0[i], correction[i]);
+            q_eval[i] = (1.0 - method.alpha_f).mul_add(dq, self.q0[i]);
+            v_eval[i] = (1.0 - method.alpha_f).mul_add(dv, self.v0[i]);
             tangent_direction[i] = (1.0 - method.alpha_f) * direction[i];
         }
         if !self.admit_stage(&q_eval, &v_eval, output) {
@@ -816,17 +822,20 @@ impl<P: SecondOrderProblem + ?Sized> NonlinearProblem for StructuralStepResidual
 
     fn preconditioner_apply(
         &self,
-        q_new: &[f64],
+        correction: &[f64],
         outer_iteration: usize,
         inner_iteration: usize,
         residual: &[f64],
         output: &mut [f64],
     ) {
         let method = self.method;
-        let q_eval: Vec<f64> = q_new
+        let q_eval: Vec<f64> = correction
             .iter()
-            .zip(self.q0)
-            .map(|(&q_new, &q0)| (1.0 - method.alpha_f).mul_add(q_new, method.alpha_f * q0))
+            .enumerate()
+            .map(|(i, &correction)| {
+                let (dq, _, _) = structural_increment(method, self.v0[i], self.a0[i], correction);
+                (1.0 - method.alpha_f).mul_add(dq, self.q0[i])
+            })
             .collect();
         let weights = SecondOrderOperatorWeights {
             mass: (1.0 - method.alpha_m) / (method.beta * method.h * method.h),
@@ -844,23 +853,21 @@ impl<P: SecondOrderProblem + ?Sized> NonlinearProblem for StructuralStepResidual
     }
 }
 
-fn structural_kinematics(
+/// Newmark kinematics from the acceleration-bearing correction. None of these
+/// quantities subtracts two absolute positions or divides that difference by h².
+fn structural_increment(
     method: &OperatorGeneralizedAlpha,
-    q0: &[f64],
-    v0: &[f64],
-    a0: &[f64],
-    q_new: &[f64],
-) -> (Vec<f64>, Vec<f64>) {
-    let mut v_new = vec![0.0; method.n];
-    let mut a_new = vec![0.0; method.n];
-    for i in 0..method.n {
-        let dq = q_new[i] - q0[i];
-        a_new[i] = dq / (method.beta * method.h * method.h)
-            - v0[i] / (method.beta * method.h)
-            - (0.5 / method.beta - 1.0) * a0[i];
-        v_new[i] = v0[i] + method.h * ((1.0 - method.gamma) * a0[i] + method.gamma * a_new[i]);
-    }
-    (v_new, a_new)
+    v0: f64,
+    a0: f64,
+    correction: f64,
+) -> (f64, f64, f64) {
+    let a_new = correction / (method.beta * method.h * method.h);
+    let dq = method.h.mul_add(
+        v0,
+        (method.h * method.h * (0.5 - method.beta)).mul_add(a0, correction),
+    );
+    let dv = method.h * (method.gamma.mul_add(a_new, (1.0 - method.gamma) * a0));
+    (dq, dv, a_new)
 }
 
 /// Prefactored first-order generalized-alpha fast lane for

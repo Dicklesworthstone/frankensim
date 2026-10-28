@@ -45,7 +45,13 @@ where claimed below.
   `fs_solver::LinearOp` interface for M/C/K, while nonlinear problems provide
   matched internal-force and tangent actions. `OperatorGeneralizedAlpha`
   solves the same Chung–Hulbert residual through `NewtonKrylovState` and
-  commits a `SecondOrderState` only after convergence.
+  commits a `SecondOrderState` only after convergence. Its Newton unknown is
+  the Newmark correction `beta*h²*a_next`; stage and endpoint kinematics use
+  displacement/velocity increments, preserving resolved acceleration even
+  when an absolute displacement increment rounds away. This leaves the
+  physical residual, Jacobian and preconditioner weights unchanged and avoids
+  two temporary vectors per residual/Jacobian evaluation. Position remains an
+  ordinary `f64`, so sub-ULP position accumulation is not claimed.
 - `galpha::FirstOrderGeneralizedAlpha` + `first_order_galpha_step` are the
   prefactored small-system lane for `M udot + A u = f`.
   `OperatorFirstOrderGeneralizedAlpha` consumes `FirstOrderProblem` (or the
