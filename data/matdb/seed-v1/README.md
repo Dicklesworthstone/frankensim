@@ -4,6 +4,113 @@ This directory retains the human-reviewable source inputs compiled by
 `xtask matdb-pack`. Generated binary packs are deliberately not committed:
 the compiler must reproduce them from the pinned manifest and source record.
 
+
+## Compression observations and engineering ceramics
+
+This tranche adds **12 source packs, 100 property claims and 18 tabulated
+datasets containing 63 source points**. Source observations, specification
+limits and authored engineering approximations keep separate meanings.
+
+| New source family | Packs | Coverage |
+| --- | --- | --- |
+| Plastazote LD33/LD45 and Evazote EV30/EV50 | 4 | Density, discrete compression stresses, tension/tear properties and compression-set recovery; LD33/LD45 also carry conductivity at the stated mean temperature |
+| PORON 4701-30, 320 kg/m3; BISCO HT-800 | 2 | Named polyurethane and silicone foams; typical values and specification limits remain distinct |
+| ATI Zircadyne 702/705 | 2 | Temperature-dependent modulus and tensile/proof strength, with process and direction-average selectors |
+| Corning MACOR, Kyocera SN241O/SN240O, Morgan CVD SiC | 4 | Grade-specific thermal/mechanical properties, interval mean expansion and explicit frozen-reference assumptions |
+
+The Zotefoams June 2026 sheets supply compression stresses at 25% and 50%,
+plus compression-set observations after 30 minutes and 24 hours of recovery.
+The compression-set records retain the preceding compression, hold time and
+temperature. These are discrete observations, not a recovery differential
+equation or a calibrated hysteresis/relaxation law. Density is explicitly
+skin-to-skin. Unstated specimen geometry and loading rate remain unknown.
+
+PORON selects the 320 kg/m3 column and its reported commercial thickness band.
+Its 25% compression point preserves the source's 0.51 cm/min crosshead speed.
+BISCO's August 2026 sheet leaves numeric compression deflection unstated, so its
+pressure-valued `compression-force-deflection` is not relabeled as a 25% stress
+point. Its less-than-5% compression-set specification remains an exclusive
+limit. No conductivity is inferred for the Evazote grades and no foam receives
+an invented heat capacity.
+
+Zircadyne's numbered temperature rows are separate from its unspecified
+room-temperature observations; directional averages and cold-worked/annealed
+strength conditions do not become a universal isotropic law. The four ceramic
+thermal references require explicit `engineering-reference-model=1` and
+`source-temperatures-matched=0`. Their one-kelvin frozen intervals are authored
+approximations, not measured temperature dependence. Mean expansion retains
+both interval endpoints. Morgan's high-resistivity SiC is separate from its ELR
+grade, and its greater-than resistivity bound is not an exact resistivity.
+
+### Use compression observations in a bounded specimen calculation
+
+`fs-material::compression_reference` and the
+`material_compression_reference` example turn a selected nominal
+compression-stress table into force, shortening, segment stiffness and model
+loading work for explicit original geometry. Every original source knot and
+receipt survives. By default, the source must permit continuous interpolation.
+`--interpolate-observations` explicitly authors a piecewise-linear reference
+between discrete source points; ordinary material queries still reject
+unreported intermediate strains.
+
+A specimen begins at the **first source strain**, with zero subsequent loading
+work. No unloaded origin or missing loading segment is invented. Original
+density, length and area determine fixed reference mass. All loading must
+increase compression inside the original strain span; a known source crosshead
+speed must match each ramp. Unloading, holds, recovery, creep, failure, lateral
+contraction, dissipated heat and recoverable energy are outside this reference.
+The reported tangent is the right segment at an interior knot and the left
+segment at the final endpoint.
+
+For a 10 mm long specimen with 100 mm2 original area, the new foam references
+give the following independent expectations at 50% compression. Work is only
+the integral from the first supported 25% compression:
+
+| Grade | Reference mass (kg) | Force at 50% (N) | Model work from 25% to 50% (J) |
+| --- | ---: | ---: | ---: |
+| Plastazote LD33 | 0.000033 | 13.4 | 0.025 |
+| Plastazote LD45 | 0.000045 | 16.4 | 0.031875 |
+| Evazote EV30 | 0.000030 | 10.0 | 0.017375 |
+| Evazote EV50 | 0.000050 | 11.6 | 0.02075 |
+
+Compile and run LD33:
+
+```sh
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/zotefoams-plastazote-ld33-2026/manifest.tsv \
+  --out /tmp/ld33.fsmatpk
+cargo run -p fs-material --example material_compression_reference -- \
+  /tmp/ld33.fsmatpk density compressive-stress compressive-strain 0.01 0.0001 \
+  --axis source-grade-plastazote-ld33-2026 1 \
+  --axis density-includes-skins 1 \
+  --axis source-temperature-known 0 \
+  --axis source-moisture-condition-known 0 \
+  --axis source-pressure-known 0 \
+  --axis source-orientation-known 0 \
+  --axis source-test-rate-known 0 \
+  --axis source-specimen-geometry-known 0 \
+  --axis compressive-strain 0.25 \
+  --interpolate-observations \
+  --step 0.00375 1 --step 0.005 1
+```
+
+The one-second foam ramps are authored durations because the source rate is
+unknown. The existing `ensinger-tecapeek-gf30-natural` pack supplies three
+compression points at 1%, 2% and 5% and a known test speed. With the same original
+geometry, its 5% reference gives 12,000 N and 2.985 J of model loading work
+**since 1% compression**, with mass 0.00153 kg. Select
+`test-speed=0.00008333333333333333`, `--speed-axis test-speed`, the grade and
+unknown-condition selectors, and `compressive-strain=0.01`. The monotonic
+steps `--step 0.0002 1.2 --step 0.0005 3.6` reproduce the source speed.
+
+Focused regression targets are `cargo test -p fs-material --test
+compression_reference` and the existing `xtask`
+`material_catalog_expansion` target's `cushioning`, `thermal_engineering` and
+`compression_reference` modules. They cover original source values and
+conditions, independent piecewise work, exact source receipts, claim pins,
+step subdivision, deterministic replay and refusal before history mutation.
+
+
 ## Magnesium and added elastic data for nickel alloys
 
 This expansion adds five AZ31B claims and completes two existing nickel-alloy

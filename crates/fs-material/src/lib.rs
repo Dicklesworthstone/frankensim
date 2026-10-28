@@ -19,6 +19,8 @@
 pub mod active_tissue;
 /// Source-bound monotonic axial comparisons from reported tensile/compression moduli.
 pub mod axial_reference;
+/// Bounded compression references from original nominal stress/strain observations.
+pub mod compression_reference;
 pub mod calibrate;
 /// Irreversible mixed-mode cohesive interfaces with work and fracture accounting.
 pub mod cohesive;

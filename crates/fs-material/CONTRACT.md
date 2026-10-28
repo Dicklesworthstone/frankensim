@@ -53,6 +53,36 @@ It validates the entire requested path before emitting a successful response.
 The material seed README includes complete PEEK tension and ROHACELL compression
 recipes with independent force, mass and model-work expectations.
 
+
+## Source-bound compression observation references
+
+`compression_reference::ResolvedCompressionReference` binds a selected nominal
+engineering-compression stress curve and a strain-independent reference density
+from one immutable material card. Original typed queries, claim selections,
+uncertainties and exact knot receipts survive. Source interpolation is the
+default requirement. The explicit `PiecewiseLinearBetweenObservations` choice
+authors a bounded linear reference between discrete observations without
+changing their `TabulatedOnly` source policy or issuing an interpolated source
+receipt. All original knots must remain supported; no origin or missing segment
+is fabricated. Scalars, strengths, moduli, true-stress keys, sampled density and
+unowned rate dependence refuse.
+
+A uniform specimen supplies original length and area. It starts at the first
+source compression and keeps its original mass. Strictly increasing shortening
+produces nominal force, one-sided segment stiffness and piecewise-integrated
+loading work **relative to that first state**. Known crosshead speed is enforced;
+unknown rate leaves ramp duration authored. Rejected steps preserve history.
+No unloading, holds, creep, recovery, cyclic hysteresis, lateral contraction,
+failure, dissipated heat or recoverable-energy claim is made. The model does
+not identify a source test's geometry with the caller's geometry.
+
+`material_compression_reference` loads canonical packs and validates the entire
+requested path before printing successful output. Its explicit
+`--interpolate-observations` flag exposes the model-authoring choice.
+`tests/compression_reference.rs` checks the source and numerical boundaries;
+the catalog's compression-reference tests exercise four actual foam grades
+and reinforced PEEK through the production compiler and this owner.
+
 ## Purpose and layer
 
 Layer **L3** (FLUX support). Runtime deps: `std`, fs-ad (dual-number

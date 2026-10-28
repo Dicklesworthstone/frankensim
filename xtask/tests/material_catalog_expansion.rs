@@ -1543,3 +1543,6 @@ mod cushioning;
 
 #[path = "material_catalog_expansion/thermal_engineering.rs"]
 mod thermal_engineering;
+
+#[path = "material_catalog_expansion/compression_reference.rs"]
+mod compression_reference;
