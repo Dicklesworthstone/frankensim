@@ -1,4 +1,5 @@
 //! G1/G3/G4 native power sizing: actual projects, actual QoIs, retained recovery.
+mod cases;
 use super::*;
 use fs_project::{ConductionTransient, TransientInitialTemperature, TransientRegionCapacity, spec::dims};
 use fs_qty::QtyAny;

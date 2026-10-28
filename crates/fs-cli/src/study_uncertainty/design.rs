@@ -7,8 +7,12 @@ use super::*;
 use std::fmt::Write as _;
 use fs_project::uncertainty::{DesignControl, DesignPolicy, UniformParameter};
 
+mod cases;
+
 pub(super) const DRIVER: &str = "native-cooling-power-design-v1";
 pub(super) const FAN_DRIVER: &str = "native-cooling-fan-design-v1";
+const POWER_CASE_DRIVER: &str = "native-cooling-power-case-design-v1";
+const FAN_CASE_DRIVER: &str = "native-cooling-fan-case-design-v1";
 const OBSERVATIONS: &str = "native-power-design-observations";
 const FAN_OBSERVATIONS: &str = "native-fan-design-observations";
 const PROJECT: &str = "solve-project-source";
@@ -16,7 +20,7 @@ const SCOPE: &str = "Maximize one region's delivered watts over the declared int
 const FAN_SCOPE: &str = "Minimize one named fan bank's absolute speed ratio over its declared interval under the explicit nonincreasing-temperature-with-fan-speed assumption. Every candidate recomputes the native hydraulic operating point and conjugate cooling response with the original fan curves, other banks, power, materials and geometry. Every feasibility decision uses a completed native solve and the unchanged requirement limit minus margin. Transient decisions use the accepted fine-grid sampled peak including the original initial state; final native QoI is retained separately. The selected project is the lowest-speed observed feasible candidate. No global monotonicity proof, minimum electrical power or acoustic noise, continuous-time or continuum temperature bound, probability statement, physical validation or compliance signoff is supplied.";
 
 pub(super) fn is_driver(value: Option<&str>) -> bool {
-    matches!(value, Some(DRIVER | FAN_DRIVER))
+    matches!(value, Some(DRIVER | FAN_DRIVER | POWER_CASE_DRIVER | FAN_CASE_DRIVER))
 }
 
 fn fan(policy: DesignPolicy) -> bool {
@@ -27,8 +31,18 @@ fn driver(policy: DesignPolicy) -> &'static str {
     if fan(policy) { FAN_DRIVER } else { DRIVER }
 }
 
+fn study_driver(study: &fs_project::uncertainty::UncertaintyStudy, policy: DesignPolicy) -> &'static str {
+    if study.operating_cases().is_empty() { driver(policy) }
+    else if fan(policy) { FAN_CASE_DRIVER } else { POWER_CASE_DRIVER }
+}
+
 fn observations_kind(driver: &str) -> &'static str {
-    if driver == FAN_DRIVER { FAN_OBSERVATIONS } else { OBSERVATIONS }
+    match driver {
+        FAN_CASE_DRIVER => "native-fan-case-design-observations",
+        POWER_CASE_DRIVER => "native-power-case-design-observations",
+        FAN_DRIVER => FAN_OBSERVATIONS,
+        _ => OBSERVATIONS,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -66,7 +80,9 @@ fn transient(model: &Model) -> bool {
 /// The child run has already passed the native sealed-QoI/geometry checks.
 /// Bind the forward sampled peak to that SAME run and requirement region.
 fn observe(model: &Model, ledger: &Ledger, sample: Sample) -> Result<Trial> {
-    if sample.parameters.len() != 1 { return Err(invalid("design needs one physical coordinate")); }
+    if sample.parameters.len() != model.bound.study().parameters().len() {
+        return Err(invalid("design observation does not match its declared physical coordinates"));
+    }
     let sealed = crate::solve::load_completed_run(ledger, &sample.run)
         .map_err(|e| invalid(format!("{}: {}", e.code, e.what)))?;
     let conduction = sealed.stages.iter().find(|row| row.0 == "conduction")
@@ -177,34 +193,40 @@ fn persist(
     let study = model.bound.study();
     let policy = study.design().ok_or_else(|| invalid("missing deterministic design policy"))?;
     let fan = fan(policy);
-    let driver = driver(policy);
-    let scope = if fan { FAN_SCOPE } else { SCOPE };
+    let driver = study_driver(study, policy);
+    let scope = cases::scope(study, if fan { FAN_SCOPE } else { SCOPE });
     let observations_kind = observations_kind(driver);
     let control = &study.parameters()[0];
     let limit = model.bound.threshold_k();
-    let chosen = selected(rows, policy, limit);
+    let candidate_rows = cases::completed(rows, cases::count(study));
+    let chosen = selected(&candidate_rows, policy, limit);
     if status == "completed" && chosen.is_none() {
         return Err(invalid("a completed design must retain an evaluated feasible project"));
     }
     let id = model.identity();
     let n = rows.len();
-    let history = rows.iter().map(|row| row.json(policy)).collect::<Vec<_>>().join(",");
+    let history = candidate_rows.iter().map(|row| row.json(policy)).collect::<Vec<_>>().join(",");
     let chosen_json = chosen.map_or_else(|| "null".into(), |row| row.json(policy));
-    let width = bracket(rows, policy, limit).map(|(a, b)| (b.coordinate() - a.coordinate()).abs());
+    let width = bracket(&candidate_rows, policy, limit).map(|(a, b)| (b.coordinate() - a.coordinate()).abs());
+    let case_json = cases::json(study, rows, policy, chosen);
     let failure_json = failure.map_or_else(|| "null".into(), quoted);
     let observation = if transient(model) { "fine-grid-sampled-peak-including-initial" } else { "steady" };
     let region = &model.bound.base().requirements.as_ref().expect("bound requirement")[0].region;
-    let schema = if fan { "frankensim.cli.native-fan-design-result.v1" }
-        else { "frankensim.cli.native-power-design-result.v1" };
+    let schema = match (fan, study.operating_cases().is_empty()) {
+        (true, true) => "frankensim.cli.native-fan-design-result.v1",
+        (false, true) => "frankensim.cli.native-power-design-result.v1",
+        (true, false) => "frankensim.cli.native-fan-case-design-result.v1",
+        (false, false) => "frankensim.cli.native-power-case-design-result.v1",
+    };
     let objective = if fan { "minimize-fan-speed-ratio" } else { "maximize-delivered-regional-power" };
     let entity = if fan { "fan_bank" } else { "power_region" };
     let tolerance = if fan { "fan_speed_ratio_tolerance" } else { "power_tolerance_w" };
     let bracket_width = if fan { "bracket_width_ratio" } else { "bracket_width_w" };
     let summary = format!(
-        "{{\"schema\":{schema:?},\"driver\":{driver:?},\"study_id\":{},\"status\":{},\"termination\":{},\"objective\":{objective:?},{entity:?}:{},\"temperature_region\":{},\"temperature_observation\":{observation:?},\"temperature_limit_k\":{limit},{tolerance:?}:{},\"temperature_tolerance_k\":{},\"evaluations_completed\":{n},\"evaluations_planned\":{},\"selected\":{chosen_json},{bracket_width:?}:{},\"history\":[{history}],\"failure\":{failure_json},\"authority\":\"Estimated\",\"no_claim\":{}}}",
+        "{{\"schema\":{schema:?},\"driver\":{driver:?},\"study_id\":{},\"status\":{},\"termination\":{},\"objective\":{objective:?},{entity:?}:{},\"temperature_region\":{},\"temperature_observation\":{observation:?},\"temperature_limit_k\":{limit},{tolerance:?}:{},\"temperature_tolerance_k\":{},\"evaluations_completed\":{n},\"evaluations_planned\":{},\"selected\":{chosen_json},{bracket_width:?}:{},\"history\":[{history}],\"failure\":{failure_json}{case_json},\"authority\":\"Estimated\",\"no_claim\":{}}}",
         quoted(&id.to_hex()), quoted(status), quoted(termination), quoted(&control.entity),
         quoted(region), policy.control.tolerance(), policy.temperature_tolerance_k, study.samples(),
-        optional(width), quoted(scope)
+        optional(width), quoted(&scope)
     );
     let label = if fan { "fan speed ratio" } else { "delivered power" };
     let unit = if fan { " (absolute ratio)" } else { " W" };
@@ -214,11 +236,13 @@ fn persist(
         format!("Selected {label}: {}{unit}; evaluated temperature: {} K; final native QoI: {} K; child run: {}.",
             row.coordinate(), row.temperature_k, row.sample.value_k, row.sample.run));
     let mut table = String::new();
-    for row in rows {
+    for row in candidate_rows.iter() {
         let _ = write!(table, "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
             row.coordinate(), row.temperature_k, row.sample.value_k, row.sample.run);
     }
-    let html = format!("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>{title}</title><body><h1>{title}</h1><p>Status: {status}; termination: {termination}; {n} completed candidates.</p><p>{chosen_html}</p><p>Temperature limit after margin: {limit} K. Observation: {observation}.</p><table><tr><th>{column}</th><th>Decision K</th><th>Final QoI K</th><th>Native run</th></tr>{table}</table><p>{scope}</p></body></html>");
+    let candidate_count = candidate_rows.len();
+    let case_html = cases::html(study, rows);
+    let html = format!("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>{title}</title><body><h1>{title}</h1><p>Status: {status}; termination: {termination}; {candidate_count} completed candidates.</p><p>{chosen_html}</p><p>Temperature limit after margin: {limit} K. Observation: {observation}.</p><table><tr><th>{column}</th><th>Decision K</th><th>Final QoI K</th><th>Native run</th></tr>{table}</table><p>{scope}</p>{case_html}</body></html>");
     // A retained feasible numerical result is useful, but no certified optimum
     // or physical-temperature error bound has been established by this search.
     let package = EvidencePackage::new(Provenance::new(
@@ -226,7 +250,7 @@ fn persist(
         .to_json().map_err(|e| invalid(e.to_string()))?;
     let samples = rows_json(&rows.iter().map(|row| row.sample.clone()).collect::<Vec<_>>());
     let observations = format!("{{\"driver\":{driver:?},\"evaluations\":{samples}}}");
-    let project = chosen.map(|row| model.project(&[row.coordinate()])).transpose()?;
+    let project = chosen.map(|row| model.project(&row.sample.parameters)).transpose()?;
     if project.as_ref().zip(chosen).is_some_and(|(project, row)|
         project.hash().to_hex() != row.sample.project_hash) {
         return Err(invalid("selected export differs from the evaluated native project"));
@@ -331,7 +355,7 @@ pub(super) fn drive(
 ) -> Result<Outcome> {
     let study = model.bound.study();
     let policy = study.design().ok_or_else(|| invalid("missing deterministic design policy"))?;
-    let driver = driver(policy);
+    let driver = study_driver(study, policy);
     let observations = observations_kind(driver);
     let control = &study.parameters()[0];
     let limit = model.bound.threshold_k();
@@ -351,11 +375,18 @@ pub(super) fn drive(
             return Err(invalid("retained design evaluation count differs"));
         }
         for sample in samples {
-            let Next::Evaluate(expected) = next(control, policy, limit, &rows) else {
+            let decision = {
+                let candidates = cases::completed(&rows, cases::count(study));
+                next(control, policy, limit, &candidates)
+            };
+            let Next::Evaluate(expected) = decision else {
                 return Err(invalid("retained design continues beyond a terminal search"));
             };
-            if sample.parameters.len() != 1 || sample.parameters[0].to_bits() != expected.to_bits() {
-                return Err(invalid("retained design coordinate differs from the deterministic bracket"));
+            let expected = cases::point(study, expected, rows.len());
+            if sample.parameters.len() != expected.len()
+                || sample.parameters.iter().zip(&expected).any(|(a, b)| a.to_bits() != b.to_bits())
+            {
+                return Err(invalid("retained design coordinate or operating case differs from the deterministic search"));
             }
             model.verify_sample(ledger, &sample)?;
             rows.push(observe(model, ledger, sample)?);
@@ -369,7 +400,10 @@ pub(super) fn drive(
     let mut failure = None::<String>;
     loop {
         let used = used_before + started.elapsed().as_secs_f64();
-        let decision = next(control, policy, limit, &rows);
+        let decision = {
+            let candidates = cases::completed(&rows, cases::count(study));
+            next(control, policy, limit, &candidates)
+        };
         let (status, termination) = if failure.is_some() {
             ("refused", "child-refused")
         } else if let Next::Complete(reason) = decision {
@@ -392,7 +426,8 @@ pub(super) fn drive(
         predecessor = ContentHash::from_hex(out.pointer.trim_start_matches("study-"));
         let Next::Evaluate(coordinate) = decision else { return Err(invalid("missing next design coordinate")); };
         let remaining = (study.wall_seconds() - used_before - started.elapsed().as_secs_f64()).max(0.0);
-        match model.sample(ledger, gate, &[coordinate], remaining) {
+        let values = cases::point(study, coordinate, rows.len());
+        match model.sample(ledger, gate, &values, remaining) {
             Ok(Some(sample)) => match observe(model, ledger, sample) {
                 Ok(trial) => rows.push(trial),
                 Err(error) => failure = Some(error.to_string()),

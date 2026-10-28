@@ -1154,6 +1154,23 @@ original fan objective and reports `fan_speed_ratio`, `fan_bank` and
 `bracket_width_ratio`. No minimum electrical power/noise, global monotonicity,
 continuous-time temperature or physical-safety claim is inferred.
 
+### Native cooling design across finite operating cases
+
+An optional `:operating-cases` list applies the existing fan-speed or delivered-power
+search to a fixed set of authored conditions. Each candidate uses the ordinary
+native solver for every case; only a complete group contributes its maximum
+temperature to the existing monotone bracket and feasible-incumbent selection.
+Exact ties retain authored order. Evaluation budgets count declared case
+observations, with ordinary native-run cache reuse. A partial group is retained
+and resumes at its next missing case; it cannot establish feasibility.
+
+The `native-cooling-fan-case-design-v1` and
+`native-cooling-power-case-design-v1` drivers retain raw case observations,
+complete candidate maxima and governing-case identity. The selected project is
+the actually evaluated governing case at the chosen control. Claims cover only
+the authored finite cases, without probabilities, interval robustness or
+unlisted-condition guarantees.
+
 ### Native cooling probability study
 
 `:qoi "temperature-peak"` selects the requirement region's maximum over the

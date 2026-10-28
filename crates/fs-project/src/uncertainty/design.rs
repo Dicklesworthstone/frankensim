@@ -3,6 +3,9 @@
 
 use super::*;
 
+mod cases;
+pub use cases::DesignOperatingCase;
+
 /// The physical coordinate and direction of a native cooling design search.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DesignControl {
@@ -43,9 +46,9 @@ pub struct DesignPolicy {
 
 pub(super) fn parse(root: &Node) -> Result<UncertaintyStudy> {
     let nodes = list(root)?;
-    let f = fields(&nodes[1..], &["version", "project", "evaluations", "seed", "wall-time",
+    let f = fields_with_optional(&nodes[1..], &["version", "project", "evaluations", "seed", "wall-time",
         "qoi", "geometry", "materials", "interfaces", "control", "temperature-tolerance",
-        "assumption"])?;
+        "assumption"], &["operating-cases"])?;
     if integer(f["version"])? != 1 {
         return Err(error("native cooling design requires version 1"));
     }
@@ -110,15 +113,21 @@ pub(super) fn parse(root: &Node) -> Result<UncertaintyStudy> {
         }
         geometry.push(MeshSource { role, path: text(m["path"])?, unit: text(m["unit"])?, max_hole_edges });
     }
+    let coordinate = UniformParameter {
+        name: if target == Target::Power { "delivered-power" } else { "fan-speed" }.into(),
+        target, entity: text(c["entity"])?, low, high,
+    };
+    let (mut operating_parameters, operating_cases) = f.get("operating-cases")
+        .map(|node| cases::parse(node, &coordinate)).transpose()?.unwrap_or_default();
+    let mut parameters = vec![coordinate];
+    parameters.append(&mut operating_parameters);
     Ok(UncertaintyStudy {
         canonical: fs_ir::sexpr::print(root).map_err(|e| error(e.to_string()))?,
         project: text(f["project"])?, samples, seed: integer(f["seed"])?, wall_seconds, qoi,
         geometry, materials: paths(f["materials"])?, interfaces: paths(f["interfaces"])? ,
-        // The existing physical-coordinate binder owns field mutation. On this
-        // deterministic path these are search bounds, not a uniform input law.
-        parameters: vec![UniformParameter {
-            name: if target == Target::Power { "delivered-power" } else { "fan-speed" }.into(),
-            target, entity: text(c["entity"])?, low, high }],
+        // The existing physical-coordinate binder owns every mutation. Search
+        // bounds and finite cases never acquire a probability interpretation.
+        parameters, operating_cases,
         latent_correlation: None, compliance: None, qmc: None, lhs: None,
         sobol_sensitivity: false, mean_control: None,
         design: Some(DesignPolicy { control, temperature_tolerance_k }),
@@ -128,7 +137,6 @@ pub(super) fn parse(root: &Node) -> Result<UncertaintyStudy> {
 /// A schedule must never silently override the coordinate being optimized.
 pub(super) fn admit(study: &UncertaintyStudy, base: &ProjectSpec) -> Result<()> {
     let Some(policy) = study.design else { return Ok(()); };
-    let control = &study.parameters[0];
     let setup = base.cooling.as_ref().and_then(|c| c.conduction.as_ref())
         .ok_or_else(|| error("native cooling design requires declared conduction"))?;
     if matches!(policy.control, DesignControl::FanSpeedRatio { .. }) {
@@ -139,18 +147,22 @@ pub(super) fn admit(study: &UncertaintyStudy, base: &ProjectSpec) -> Result<()> 
             matches!(boundary.condition, ThermalBoundaryCondition::AirflowConvection { .. })) {
             return Err(error("fan-speed design requires an airflow-convection boundary so the native thermal solve recomputes fan-driven cooling"));
         }
-        return Ok(());
     }
-    if !setup.regions.iter().any(|region| region.region == control.entity) {
-        return Err(error("regional-power design must name a volumetric conduction region"));
-    }
-    let power: Vec<_> = base.power.iter().flatten().filter(|row| row.region == control.entity).collect();
-    if power.len() != 1 || !(power[0].duty.is_finite() && power[0].duty > 0.0) {
-        return Err(error("delivered-power design needs one matching power row with positive unchanged duty"));
-    }
-    if setup.transient.as_ref().is_some_and(|time|
-        time.power_schedules.iter().any(|schedule| schedule.region == control.entity)) {
-        return Err(error("a transient power schedule overrides this static regional-power control; select an unscheduled region"));
+    // Operating-case power is delivered watts too. A time schedule must not
+    // silently replace either the search control or an authored operating case.
+    for parameter in study.parameters.iter().filter(|p| p.target == Target::Power) {
+        if !setup.regions.iter().any(|region| region.region == parameter.entity) {
+            return Err(error("regional-power design must name a volumetric conduction region"));
+        }
+        let power: Vec<_> = base.power.iter().flatten()
+            .filter(|row| row.region == parameter.entity).collect();
+        if power.len() != 1 || !(power[0].duty.is_finite() && power[0].duty > 0.0) {
+            return Err(error("delivered-power design needs one matching power row with positive unchanged duty"));
+        }
+        if setup.transient.as_ref().is_some_and(|time|
+            time.power_schedules.iter().any(|schedule| schedule.region == parameter.entity)) {
+            return Err(error("a transient power schedule overrides this static regional-power control; select an unscheduled region"));
+        }
     }
     Ok(())
 }

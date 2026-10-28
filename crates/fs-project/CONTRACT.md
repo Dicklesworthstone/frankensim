@@ -574,6 +574,17 @@ is applied to fan coordinates. `DesignControl` distinguishes the two physical
 objectives and their tolerance units; the execution layer recomputes hydraulics
 and coupled thermal physics and minimizes observed feasible speed.
 
+## Finite operating cases for native design
+
+`:operating-cases` accepts 1–16 named conditions with the same 1–31 physical
+coordinates in each case; input order may differ. Cases cannot overwrite the
+searched control. The shared physical-coordinate binder validates every authored
+combination at both control endpoints and refuses unauthored combinations.
+Coordinate minima and maxima are bookkeeping, not probability laws or an
+uncertainty box. Case power denotes delivered watts with unchanged duty; a
+schedule that overrides static case power or the power control is refused.
+
+
 ## No-claim boundaries
 
 Native probability studies accept `:qoi "temperature-peak"` for a declared

@@ -91,6 +91,23 @@ still apply to every sample.
 
 ## Fan speed through the native coupled cooling model
 
+### Size a fan across authored operating conditions
+
+`fan-case-design.fsim` searches one fan speed against two inlet-temperature and
+delivered-power conditions:
+
+```sh
+cargo run -p fs-cli --bin frankensim -- --json study \
+  examples/native-uncertainty/fan-case-design.fsim fan-case-design.db
+```
+
+Add `:operating-cases` to a fan or regional-power design study to declare the
+conditions. The worst temperature across every case controls feasibility.
+Budgets count case observations; an unfinished group resumes at its next
+missing case and cannot establish a feasible design. The report names the
+governing case and exports its actually evaluated project. This covers the
+authored finite conditions only.
+
 ### Peak temperature during a transient
 
 Use `:qoi "temperature-peak"` to study overheating during a run. The

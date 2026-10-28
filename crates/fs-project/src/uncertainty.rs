@@ -28,7 +28,7 @@ use crate::{ConsequenceClass, DecisionGate, ProjectError, ProjectSpec,
 
 mod contact_inputs;
 mod design;
-pub use design::{DesignControl, DesignPolicy};
+pub use design::{DesignControl, DesignOperatingCase, DesignPolicy};
 mod lhs;
 pub use lhs::LhsLayout;
 pub mod mean_control;
@@ -196,6 +196,7 @@ pub struct UncertaintyStudy {
     sobol_sensitivity: bool,
     mean_control: Option<MeanControlPolicy>,
     design: Option<DesignPolicy>,
+    operating_cases: Vec<DesignOperatingCase>,
 }
 
 /// A study bound to one admitted base project. Samples are fresh copies, so
@@ -245,6 +246,27 @@ fn integer(node: &Node) -> Result<u64> {
     match node.kind {
         NodeKind::Int(value) if value >= 0 => u64::try_from(value).map_err(|_| error("integer overflow")),
         _ => Err(error("expected a nonnegative exact integer")),
+    }
+}
+fn parse_target(node: &Node) -> Result<Target> {
+    match &node.kind {
+        NodeKind::Symbol(name) => Ok(match name.as_str() {
+            "power" => Target::Power,
+            "convection-coefficient" => Target::ConvectionCoefficient,
+            "convection-temperature" => Target::ConvectionTemperature,
+            "air-inlet-temperature" => Target::AirInletTemperature,
+            "heat-flux" => Target::HeatFlux,
+            "fan-speed-ratio" => Target::FanSpeedRatio,
+            "natural-convection-ambient" => Target::NaturalConvectionAmbient,
+            "radiation-reservoir-temperature" => Target::RadiationReservoirTemperature,
+            "fixed-temperature" => Target::FixedTemperature,
+            "contact-pressure" => Target::ContactPressure,
+            "contact-thickness" => Target::ContactThickness,
+            "contact-gap" => Target::ContactGap,
+            "contact-torque" => Target::ContactTorque,
+            _ => return Err(error("unsupported random project field")),
+        }),
+        _ => Err(error("parameter target must be a symbol")),
     }
 }
 fn quantity(node: &Node, dims: Dims) -> Result<f64> {
@@ -401,25 +423,7 @@ impl UncertaintyStudy {
             let n = list(node)?;
             symbol(n.first().ok_or_else(|| error("empty probability law"))?, "uniform")?;
             let p = fields(&n[1..], &["name", "target", "entity", "low", "high"])?;
-            let target = match &p["target"].kind {
-                NodeKind::Symbol(s) => match s.as_str() {
-                    "power" => Target::Power,
-                    "convection-coefficient" => Target::ConvectionCoefficient,
-                    "convection-temperature" => Target::ConvectionTemperature,
-                    "air-inlet-temperature" => Target::AirInletTemperature,
-                    "heat-flux" => Target::HeatFlux,
-                    "fan-speed-ratio" => Target::FanSpeedRatio,
-                    "natural-convection-ambient" => Target::NaturalConvectionAmbient,
-                    "radiation-reservoir-temperature" => Target::RadiationReservoirTemperature,
-                    "fixed-temperature" => Target::FixedTemperature,
-                    "contact-pressure" => Target::ContactPressure,
-                    "contact-thickness" => Target::ContactThickness,
-                    "contact-gap" => Target::ContactGap,
-                    "contact-torque" => Target::ContactTorque,
-                    _ => return Err(error("unsupported random project field")),
-                },
-                _ => return Err(error("parameter target must be a symbol")),
-            };
+            let target = parse_target(p["target"])?;
             let name = text(p["name"])?;
             let entity = text(p["entity"])?;
             if !names.insert(name.clone()) || !targets.insert((target, entity.clone())) {
@@ -454,7 +458,8 @@ impl UncertaintyStudy {
         Ok(Self { canonical: fs_ir::sexpr::print(&root).map_err(|e| error(e.to_string()))?,
             project: text(f["project"])?, samples, seed: integer(f["seed"])?, wall_seconds, qoi,
             geometry, materials: paths(f["materials"])?, interfaces: paths(f["interfaces"])?, parameters,
-            latent_correlation, compliance, qmc, lhs, sobol_sensitivity, mean_control, design: None })
+            latent_correlation, compliance, qmc, lhs, sobol_sensitivity, mean_control,
+            design: None, operating_cases: Vec::new() })
     }
     /// Canonical source, including all explicit path and parameter declarations.
     #[must_use] pub fn canonical(&self) -> &str { &self.canonical }
@@ -495,6 +500,9 @@ impl UncertaintyStudy {
     /// Deterministic cooling design policy. Its coordinate bounds are
     /// search bounds, never a probability law; no statistical executor applies.
     #[must_use] pub const fn design(&self) -> Option<DesignPolicy> { self.design }
+    /// Authored finite operating cases, not draws from a probability law.
+    /// Values follow the physical coordinates after the design control.
+    #[must_use] pub fn operating_cases(&self) -> &[DesignOperatingCase] { &self.operating_cases }
     /// Geometry sources, matched by role, not by path order.
     #[must_use] pub fn geometry(&self) -> &[MeshSource] { &self.geometry }
     /// Material pack sources.
@@ -543,9 +551,23 @@ impl UncertaintyStudy {
             return Err(error("every native mesh artifact needs exactly one source; STEP is not admitted in this lane"));
         }
         let bound = BoundStudy { study: self, base: base.clone() };
-        for high in [false, true] {
-            let values = bound.study.parameters.iter().map(|p| if high { p.high } else { p.low }).collect::<Vec<_>>();
-            bound.sample_project(&values)?;
+        if bound.study.operating_cases.is_empty() {
+            for high in [false, true] {
+                let values = bound.study.parameters.iter().map(|p| if high { p.high } else { p.low }).collect::<Vec<_>>();
+                bound.sample_project(&values)?;
+            }
+        } else {
+            // Only authored combinations exist in a finite case set. Combining
+            // unrelated marginal extrema would introduce an unauthored case.
+            let control = &bound.study.parameters[0];
+            for case in &bound.study.operating_cases {
+                for coordinate in [control.low, control.high] {
+                    let mut values = Vec::with_capacity(bound.study.parameters.len());
+                    values.push(coordinate);
+                    values.extend_from_slice(&case.values);
+                    bound.sample_project(&values)?;
+                }
+            }
         }
         if let Some(policy) = bound.study.mean_control {
             for ordinal in 0..policy.probe_count(&bound.study.parameters) {
@@ -575,6 +597,12 @@ impl BoundStudy {
     /// fields and native project violations. No clipping or sample skipping.
     pub fn sample_project(&self, values: &[f64]) -> Result<ProjectSpec> {
         if values.len() != self.study.parameters.len() { return Err(error("sample arity differs")); }
+        if !self.study.operating_cases.is_empty()
+            && !self.study.operating_cases.iter().any(|case| case.values.iter()
+                .zip(&values[1..]).all(|(a, b)| a.to_bits() == b.to_bits()))
+        {
+            return Err(error("design inputs do not match an authored finite operating case"));
+        }
         let mut project = self.base.clone();
         for (parameter, &value) in self.study.parameters.iter().zip(values) {
             if !value.is_finite() || value < parameter.low || value > parameter.high { return Err(error("sample outside declared probability support")); }

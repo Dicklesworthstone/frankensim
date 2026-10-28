@@ -1,0 +1,27 @@
+; Size one fan bank against each explicitly authored operating condition.
+; Cases are deterministic declarations, not probabilities or an interval box.
+; Evaluations count declared case observations; partial groups resume exactly.
+(fsim-native-design-study
+  :version 1
+  :project "../heatsink-fan/heatsink-fan.fsim"
+  :evaluations 64
+  :seed 29
+  :wall-time 1200s
+  :qoi "temperature-max"
+  :geometry (
+    (mesh :role "heatsink"
+      :path "../heatsink-fan/heatsink.stl"
+      :unit "m" :max-hole-edges 0))
+  :materials ("../../data/reference-project/aa6061.fsmcdpk")
+  :interfaces ()
+  :control (fan-speed-ratio :entity "heatsink-bank"
+    :minimum 0.6 :maximum 0.8 :tolerance 0.001)
+  :temperature-tolerance 0.01K
+  :assumption nonincreasing-temperature-with-fan-speed
+  :operating-cases (
+    (case :name "cool-light-load" :inputs (
+      (air-inlet-temperature :entity "metal" :value 293.15K)
+      (regional-power :entity "metal" :value 2W)))
+    (case :name "warm-rated-load" :inputs (
+      (air-inlet-temperature :entity "metal" :value 303.15K)
+      (regional-power :entity "metal" :value 3W)))))
