@@ -66,6 +66,8 @@ pub use ns::linearization::{
     FluxLinearizationError, FluxRheologyLinearization, FluxViscosityTangent,
 };
 #[cfg(feature = "continuum")]
+pub use ns::newton::{FluxNewtonControls, FluxNewtonError, FluxNewtonStep};
+#[cfg(feature = "continuum")]
 pub use ns::{FluxParams, FluxRheologyError, FluxRheologyStep, FluxSolution, FluxSystem};
 #[cfg(feature = "continuum")]
 pub use reduced_aero::{

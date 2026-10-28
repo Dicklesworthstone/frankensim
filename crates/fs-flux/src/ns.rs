@@ -25,6 +25,8 @@ pub mod adjoint;
 pub mod boundary;
 /// Consistent constitutive and convecting-velocity residual derivatives.
 pub mod linearization;
+/// Bounded damped Newton integration of stiff generalized-Newtonian flow.
+pub mod newton;
 
 fn positive_viscosity(nu: f64) -> f64 {
     assert!(

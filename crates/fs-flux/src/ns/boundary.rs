@@ -344,7 +344,7 @@ impl<'m> FluxSystem<'m> {
         })
     }
 
-    fn admit_stokes_boundaries(
+    pub(super) fn admit_stokes_boundaries(
         &self,
         boundaries: &[StokesBoundary<'_>],
     ) -> Result<AdmittedBoundary, StokesBoundaryError> {

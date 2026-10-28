@@ -25,6 +25,10 @@ pub struct FluxRheologyLinearization {
     pub jacobian: Csr,
     /// `R(x) = A(x) x - b(x)`, including the endpoint constitutive field.
     pub residual: Vec<f64>,
+    /// Euclidean residual relative to the actual endpoint load.
+    pub relative_residual: f64,
+    /// Relative residual after equilibration by the frozen primal row maxima.
+    pub scaled_relative_residual: f64,
     /// Quadrature sites with zero advecting normal flux and unequal upwind
     /// traces. There the returned `>= 0` active-branch derivative is semismooth,
     /// not a unique classical derivative. A smooth adjoint claim must exclude
@@ -69,7 +73,7 @@ impl core::fmt::Display for FluxLinearizationError {
 }
 impl std::error::Error for FluxLinearizationError {}
 
-fn sample(
+pub(super) fn sample(
     law: &dyn Fn(usize, [f64; 2], f64) -> FluxViscosityTangent,
     cell: usize,
     point: [f64; 2],
@@ -198,7 +202,8 @@ impl FluxSystem<'_> {
             return Err(error);
         }
         let mut residual = vec![0.0; self.n];
-        frozen.spmv(state, &mut residual);
+        let (relative_residual, scaled_relative_residual) =
+            super::sparse::residuals(&frozen, &rhs, state, &mut residual);
         for (value, load) in residual.iter_mut().zip(rhs) {
             *value -= load;
         }
@@ -377,6 +382,8 @@ impl FluxSystem<'_> {
         Ok(FluxRheologyLinearization {
             jacobian,
             residual,
+            relative_residual,
+            scaled_relative_residual,
             nonsmooth_upwind_points,
         })
     }

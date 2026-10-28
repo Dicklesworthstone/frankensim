@@ -604,3 +604,37 @@ Newtonian operator bits, and exercise zero-strain, upwind-switch and refusal
 semantics. This supplies a fixed-mesh state derivative; mesh/shape derivatives,
 material-temperature evolution, mixed open-boundary Jacobians and time-history
 checkpointing require their own operators and evidence.
+
+## Damped Newton BDF1 for stiff rheology
+
+`FluxSystem::bdf1_rheology_newton_step` advances the same fully implicit
+constant-density generalized-Newtonian equations using `linearize_rheology` and
+the existing checked dense/sparse linear solver. The caller supplies the exact
+viscosity tangent, immutable previous velocity and endpoint loads/boundaries.
+It admits all-velocity boundary ownership and net flux through the existing
+mixed-boundary owner before the pressure pin can omit a continuity equation.
+
+`FluxNewtonControls` bounds Newton correction solves and halvings per line
+search (0 through 52), and supplies the nonlinear residual tolerance. The search
+holds Jacobian row scales fixed and requires Armijo decrease (coefficient 1e-4)
+of the actual weighted nonlinear residual, or an already converged endpoint.
+Trial assemblies build no Jacobian or factorization. Invalid trial constitutive
+states are rejected; neither the material law nor physical timestep is clipped,
+regularized or silently substepped. Upwind switches use the existing semismooth
+active derivative. This is conditional convergence, not a global Newton theorem.
+
+Both original and row-equilibrated residuals must converge at the returned
+endpoint. A small update alone is insufficient. Accepted fields retain these
+nonlinear residuals, actual Newton counts and rejected-trial counts. Invalid
+inputs, incompatible boundary flux, failed linear work, exhausted searches or
+unmet nonlinear budgets return typed errors without changing the input velocity
+or publishing a partial flow. The callback must remain pure during trial work.
+
+Three G1/G3 regressions in `tests/rheology_newton.rs` check stiff regularized
+shear thickening that exhausts the existing Picard budget, agreement with an
+independently iterated Carreau solution, separately assembled momentum residual
+and divergence, active backtracking, zero-state acceptance, incompatible flux
+and strict iteration/search budgets. The four constitutive-Jacobian regressions
+remain green. These establish the numerical fixed-mesh BDF1 capability, not
+experimental fluid calibration, mixed/open-boundary Newton flow, evolving
+thermal fields, variable density or a time-history adjoint.
