@@ -201,8 +201,11 @@ fn v02a_golden_digest() {
     // Golden bump 2026-08-21 (bead guzez.7.2.1): det::-routed acos/
     // tanh (lane unification) shifted the trim point by ulps; the
     // pole golden follows the trim it linearizes about.
+    // Golden bump 2026-10-28: stable station momentum arithmetic and
+    // residual-certified local finishing shift trim roundoff and hence
+    // the linearized poles; the physical doubling-time gates are unchanged.
     assert_eq!(
-        digest, "4b64c22c0da61e64056d6caca6ced4d390749331e7f00bdb4001fc02a53e9d35",
+        digest, "964df61f321abf1e57e67e26791612d41a5a06196a204eb6a5ad3885de2e164f",
         "V-02a pole golden moved — determinism regression or an \
          intentional model change requiring the golden-bump protocol"
     );

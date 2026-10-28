@@ -465,8 +465,12 @@ fn coupling_golden_digest() {
         "golden",
         &format!("\"digest\":\"{digest}\",\"thrust\":{}", r.thrust_n[0]),
     );
+    // Golden bump 2026-10-28: the native station solve now admits signed
+    // normal-throughflow induction in the braking inner annuli, with a
+    // certified momentum residual. The original 350 RPM geometry and all
+    // reciprocal-coupling, warm-start, and liveness gates are unchanged.
     assert_eq!(
-        digest, "72c7190ca739e2a3dcba8b161be989499791211ac30058a2821a9a0e8c214e77",
+        digest, "8130f7a1b19d877bb8638465d21d172ee19daaaf1b400a752e4280abc009ce31",
         "coupling golden moved — determinism regression or an intentional \
          scheme change requiring the golden-bump protocol"
     );

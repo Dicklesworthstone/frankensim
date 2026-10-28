@@ -222,8 +222,11 @@ fn golden_digest() {
     jlog("golden", &format!("\"digest\":\"{}\"", t0.digest));
     // Golden bump 2026-10-28: the converged passive hinge-friction solve
     // changes the mechanical settling history carried into tick zero.
+    // Golden bump 2026-10-28: stable propeller station momentum arithmetic
+    // and residual-certified local finishing move trim roundoff, which is
+    // carried into the deterministic equilibrium digest.
     assert_eq!(
-        t0.digest, "f302c2ec0c8912a625149d0a5c7187734625f98825e48dcdee32cc228f0dd39d",
+        t0.digest, "3f6616f83581020dc488c9f284d2bb8bb5af7ad36ad04cb86323c24ac670e004",
         "tick-0 golden moved — determinism regression or an intentional \
          closure change requiring the golden-bump protocol"
     );

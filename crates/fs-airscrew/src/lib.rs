@@ -9,7 +9,8 @@
 //!   effective angle via the small-swirl approximation — DISCLOSED),
 //!   φ = atan2(U_ax, U_tan), α = β − φ, (cl, cd) from the section closure,
 //!   blade-element dT vs momentum dT = 4π·r·ρ·U_ax·w·F  (Prandtl F),
-//!   fixed-point on w, warm-started from the previous station, bounded,
+//!   fixed-point on w, warm-started from the previous station, with a
+//!   bounded local bracket finish for slowly contracting iterations,
 //!   with a per-station convergence receipt — nonconvergence is a TYPED
 //!   refusal (plan law), never a clamped answer.
 //!
@@ -22,10 +23,16 @@ use fs_math::det;
 
 /// Station-count cap (refusals at cap AND cap+1).
 pub const MAX_STATIONS: usize = 64;
-/// Per-station iteration cap.
+/// Per-station force-evaluation cap, including any local bracket finish.
 pub const MAX_STATION_ITERS: u32 = 120;
 /// Relative tolerance on the induced-velocity fixed point.
 pub const W_TOL: f64 = 1.0e-10;
+/// Maximum admitted braking induction `a = -w/V` for `V > 0`.
+///
+/// Ordinary momentum theory requires a high-induction correction beyond
+/// about 0.4 (AeroDyn Theory Manual, NREL/TP-500-36881, pp. 6–7). This
+/// empirical limit is stricter than the real normal-root bound `w >= -V/2`.
+pub const MAX_BRAKING_INDUCTION: f64 = 0.4;
 
 /// A typed refusal (workspace law).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,7 +84,12 @@ impl Rotor {
     /// # Errors
     /// `rotor-invalid` (counts/caps at cap AND cap+1, ordering, ranges).
     pub fn admit(&self) -> Result<(), Refusal> {
-        if !(self.radius_m > 0.0) || self.n_blades == 0 || self.n_blades > 8 {
+        if !self.radius_m.is_finite()
+            || !(self.radius_m > 0.0)
+            || !self.camber_ratio.is_finite()
+            || self.n_blades == 0
+            || self.n_blades > 8
+        {
             return Err(refuse(
                 "rotor-invalid",
                 "radius/blades".into(),
@@ -98,6 +110,7 @@ impl Rotor {
         for s in &self.stations {
             let ok = s.r_over_r > prev
                 && s.r_over_r < 1.0
+                && s.chord_m.is_finite()
                 && s.chord_m > 0.0
                 && s.beta_rad.is_finite()
                 && s.beta_rad > 0.0
@@ -120,9 +133,9 @@ impl Rotor {
 pub struct StationReceipt {
     /// r/R.
     pub r_over_r: f64,
-    /// Converged induced axial velocity w [m/s].
+    /// Converged induced axial velocity w [m/s]; negative in braking annuli.
     pub w_mps: f64,
-    /// Iterations used.
+    /// Actual station force evaluations used, including local bracket probes.
     pub iterations: u32,
     /// Local effective angle of attack [rad].
     pub alpha_rad: f64,
@@ -181,7 +194,9 @@ fn section_cl_cd(alpha: f64, camber: f64) -> (f64, f64) {
 ///
 /// # Errors
 /// Rotor admission; `operating-point-invalid`;
-/// `station-did-not-converge` naming the station (typed, never clamped).
+/// `station-did-not-converge` naming the station (typed, never clamped);
+/// `station-wake-domain` for high induction or non-normal throughflow;
+/// `station-numerical-invalid` for unrepresentable derived arithmetic.
 pub fn bemt_solve(
     rotor: &Rotor,
     rho_kg_m3: f64,
@@ -189,7 +204,13 @@ pub fn bemt_solve(
     omega_rad_s: f64,
 ) -> Result<BemtSolution, Refusal> {
     rotor.admit()?;
-    if !(rho_kg_m3 > 0.0) || !v_axial_mps.is_finite() || v_axial_mps < 0.0 || !(omega_rad_s > 0.0) {
+    if !rho_kg_m3.is_finite()
+        || !(rho_kg_m3 > 0.0)
+        || !v_axial_mps.is_finite()
+        || v_axial_mps < 0.0
+        || !omega_rad_s.is_finite()
+        || !(omega_rad_s > 0.0)
+    {
         return Err(refuse(
             "operating-point-invalid",
             format!("rho {rho_kg_m3}, V {v_axial_mps}, omega {omega_rad_s}"),
@@ -197,7 +218,6 @@ pub fn bemt_solve(
         ));
     }
     let r_tip = rotor.radius_m;
-    let b = f64::from(rotor.n_blades);
     let r_root = rotor.stations[0].r_over_r * 0.8; // hub cutout fraction
     let mut thrust = 0.0;
     let mut torque = 0.0;
@@ -206,71 +226,17 @@ pub fn bemt_solve(
     for (si, st) in rotor.stations.iter().enumerate() {
         let r = st.r_over_r * r_tip;
         let u_tan = omega_rad_s * r;
-        let mut w = w_warm;
-        let mut converged = false;
-        let mut iters = 0;
-        let (mut alpha, mut f_prandtl) = (0.0, 1.0);
-        let (mut dt_be, mut dq_be) = (0.0, 0.0);
-        while iters < MAX_STATION_ITERS {
-            iters += 1;
-            let u_ax = v_axial_mps + w;
-            let phi = det::atan2(u_ax, u_tan);
-            alpha = st.beta_rad - phi;
-            let (cl, cd) = section_cl_cd(alpha, rotor.camber_ratio);
-            let ua2 = u_ax * u_ax;
-            let ut2 = u_tan * u_tan;
-            let u2 = ua2 + ut2;
-            let q = 0.5 * rho_kg_m3 * u2;
-            let (sin_phi, cos_phi) = (det::sin(phi), det::cos(phi));
-            let lift_ax = cl * cos_phi;
-            let drag_ax = cd * sin_phi;
-            dt_be = q * st.chord_m * (lift_ax - drag_ax) * b;
-            let lift_tan = cl * sin_phi;
-            let drag_tan = cd * cos_phi;
-            dq_be = q * st.chord_m * (lift_tan + drag_tan) * b * r;
-            // Prandtl tip + root factors.
-            // Prandtl: F = (2/pi)·acos(e^(−f)).
-            let f_tip = if sin_phi.abs() > 1e-9 {
-                let ft = b / 2.0 * (r_tip - r) / (r * sin_phi.abs());
-                2.0 / core::f64::consts::PI * det::acos(det::exp(-ft))
-            } else {
-                1.0
-            };
-            let f_root = if sin_phi.abs() > 1e-9 {
-                let fr = b / 2.0 * (r - r_root * r_tip) / (r * sin_phi.abs());
-                2.0 / core::f64::consts::PI * det::acos(det::exp(-fr))
-            } else {
-                1.0
-            };
-            f_prandtl = (f_tip * f_root).clamp(1.0e-3, 1.0);
-            // Momentum balance for THIS annulus width is applied by the
-            // caller-side integration; the fixed point equates the
-            // per-length loadings: dT_be = 4π r ρ (V + w) w F.
-            let denom = 4.0 * core::f64::consts::PI * r * rho_kg_m3 * f_prandtl;
-            let target_prod = dt_be / denom; // (V + w)·w target
-            // Solve (V + w_new)·w_new = target_prod for w_new >= 0.
-            let va2 = v_axial_mps * v_axial_mps;
-            let tp4 = 4.0 * target_prod.max(0.0);
-            let disc = va2 + tp4;
-            let w_new = 0.5 * (-v_axial_mps + det::sqrt(disc));
-            let step = w_new - w;
-            let half_step = 0.5 * step;
-            w += half_step;
-            if step.abs() <= W_TOL * (w.abs() + 1e-9) {
-                converged = true;
-                break;
-            }
-        }
-        if !converged {
-            return Err(refuse(
-                "station-did-not-converge",
-                format!(
-                    "station {si} (r/R {}) after {MAX_STATION_ITERS} iterations",
-                    st.r_over_r
-                ),
-                "high-loading/static closure limits; the operating point is outside the admitted domain",
-            ));
-        }
+        let problem = StationProblem {
+            rotor,
+            station: st,
+            index: si,
+            rho: rho_kg_m3,
+            axial: v_axial_mps,
+            tangential: u_tan,
+            radius: r,
+            root_radius: r_root * r_tip,
+        };
+        let (accepted, iters) = problem.solve(w_warm)?;
         // Annulus width from station midpoints.
         let r_lo = if si == 0 {
             rotor.stations[0].r_over_r * 0.8
@@ -283,29 +249,356 @@ pub fn bemt_solve(
             (st.r_over_r + rotor.stations[si + 1].r_over_r) / 2.0
         };
         let dr = (r_hi - r_lo) * r_tip;
-        let dthrust = dt_be * dr;
+        let dthrust = accepted.thrust * dr;
         thrust += dthrust;
-        let dtorque = dq_be * dr;
+        let dtorque = accepted.torque * dr;
         torque += dtorque;
         receipts.push(StationReceipt {
             r_over_r: st.r_over_r,
-            w_mps: w,
+            w_mps: accepted.w,
             iterations: iters,
-            alpha_rad: alpha,
-            prandtl_f: f_prandtl,
+            alpha_rad: accepted.alpha,
+            prandtl_f: accepted.prandtl,
         });
-        w_warm = w;
+        w_warm = accepted.w;
     }
     let n_rev = omega_rad_s / (2.0 * core::f64::consts::PI);
     let d = 2.0 * r_tip;
-    Ok(BemtSolution {
+    let solution = BemtSolution {
         thrust_n: thrust,
         torque_nm: torque,
         ct: thrust / (rho_kg_m3 * n_rev * n_rev * d.powi(4)),
         cq: torque / (rho_kg_m3 * n_rev * n_rev * d.powi(5)),
         j: v_axial_mps / (n_rev * d),
         stations: receipts,
-    })
+    };
+    if ![
+        solution.thrust_n,
+        solution.torque_nm,
+        solution.ct,
+        solution.cq,
+        solution.j,
+    ]
+    .into_iter()
+    .all(f64::is_finite)
+    {
+        return Err(refuse(
+            "operating-point-invalid",
+            "unrepresentable rotor loads or coefficients".into(),
+            "supply a finite operating point with representable dimensional and nondimensional loads",
+        ));
+    }
+    Ok(solution)
+}
+
+/// One original blade-element/momentum equation. The force law and Prandtl
+/// factors are identical for Picard, local probes and the accepted receipt.
+struct StationProblem<'a> {
+    rotor: &'a Rotor,
+    station: &'a BladeStation,
+    index: usize,
+    rho: f64,
+    axial: f64,
+    tangential: f64,
+    radius: f64,
+    root_radius: f64,
+}
+
+#[derive(Clone, Copy)]
+struct StationSample {
+    w: f64,
+    alpha: f64,
+    prandtl: f64,
+    thrust: f64,
+    torque: f64,
+    target_product: f64,
+    momentum_product: f64,
+    balance: f64,
+    defect: f64,
+    normal_target: bool,
+}
+
+impl StationSample {
+    fn tolerance(self) -> f64 {
+        W_TOL * (self.w.abs() + 1e-9)
+    }
+
+    fn admitted(self, axial: f64) -> bool {
+        let tolerance = self.tolerance();
+        self.normal_target
+            && self.w >= -0.5 * axial
+            && self.defect.abs() <= tolerance
+            && self.balance.abs() <= tolerance * (axial + 2.0 * self.w + tolerance)
+    }
+}
+
+impl StationProblem<'_> {
+    fn refusal(&self, code: &'static str, detail: &str, repair: &str) -> Refusal {
+        refuse(
+            code,
+            format!(
+                "station {} (r/R {}): {detail}",
+                self.index, self.station.r_over_r
+            ),
+            repair,
+        )
+    }
+
+    fn evaluate(&self, w: f64) -> Result<StationSample, Refusal> {
+        let u_ax = self.axial + w;
+        if !w.is_finite() || !u_ax.is_finite() || !self.tangential.is_finite() {
+            return Err(self.refusal(
+                "station-numerical-invalid",
+                "unrepresentable station velocity",
+                "supply a representable finite rotor operating point",
+            ));
+        }
+        if w < -0.5 * self.axial {
+            return Err(self.refusal("station-wake-domain", "trial induction reverses the normal far wake",
+                "supply a normal axial-throughflow state; reversed-flow wake closures are not implemented"));
+        }
+        let phi = det::atan2(u_ax, self.tangential);
+        let alpha = self.station.beta_rad - phi;
+        let (cl, cd) = section_cl_cd(alpha, self.rotor.camber_ratio);
+        let ua2 = u_ax * u_ax;
+        let ut2 = self.tangential * self.tangential;
+        let u2 = ua2 + ut2;
+        let q = 0.5 * self.rho * u2;
+        let (sin_phi, cos_phi) = (det::sin(phi), det::cos(phi));
+        let b = f64::from(self.rotor.n_blades);
+        let lift_ax = cl * cos_phi;
+        let drag_ax = cd * sin_phi;
+        let thrust = q * self.station.chord_m * (lift_ax - drag_ax) * b;
+        let lift_tan = cl * sin_phi;
+        let drag_tan = cd * cos_phi;
+        let torque = q * self.station.chord_m * (lift_tan + drag_tan) * b * self.radius;
+        let f_tip = if sin_phi.abs() > 1e-9 {
+            let ft = b / 2.0 * (self.rotor.radius_m - self.radius) / (self.radius * sin_phi.abs());
+            2.0 / core::f64::consts::PI * det::acos(det::exp(-ft))
+        } else {
+            1.0
+        };
+        let f_root = if sin_phi.abs() > 1e-9 {
+            let fr = b / 2.0 * (self.radius - self.root_radius) / (self.radius * sin_phi.abs());
+            2.0 / core::f64::consts::PI * det::acos(det::exp(-fr))
+        } else {
+            1.0
+        };
+        let prandtl = (f_tip * f_root).clamp(1.0e-3, 1.0);
+        let denominator = 4.0 * core::f64::consts::PI * self.radius * self.rho * prandtl;
+        let target_product = thrust / denominator;
+        let momentum_product = (self.axial + w) * w;
+        let balance = target_product - momentum_product;
+        // Signed upper quadratic root, continuous through zero loading.
+        // A non-real TRIAL target need not mean this section has no root:
+        // its loading changes with induction. Such a trial only proposes a
+        // half-retreat toward the normal-flow boundary in solve(); it cannot
+        // pass convergence or supply local contraction evidence.
+        let disc = self.axial * self.axial + 4.0 * target_product;
+        let normal_target = disc >= 0.0;
+        let target_w = if normal_target {
+            let root_denominator = self.axial + det::sqrt(disc);
+            if root_denominator == 0.0 {
+                0.0
+            } else {
+                2.0 * target_product / root_denominator
+            }
+        } else {
+            -0.5 * self.axial
+        };
+        let defect = target_w - w;
+        if ![
+            w,
+            alpha,
+            prandtl,
+            thrust,
+            torque,
+            denominator,
+            target_product,
+            momentum_product,
+            balance,
+            disc,
+            defect,
+        ]
+        .into_iter()
+        .all(f64::is_finite)
+            || denominator <= 0.0
+        {
+            return Err(self.refusal(
+                "station-numerical-invalid",
+                "nonfinite station arithmetic",
+                "supply a representable finite rotor operating point",
+            ));
+        }
+        Ok(StationSample {
+            w,
+            alpha,
+            prandtl,
+            thrust,
+            torque,
+            target_product,
+            momentum_product,
+            balance,
+            defect,
+            normal_target,
+        })
+    }
+
+    fn accept(
+        &self,
+        sample: StationSample,
+        evaluations: u32,
+    ) -> Result<(StationSample, u32), Refusal> {
+        // A real normal root is not sufficient empirical validity. Do not
+        // publish ordinary momentum theory in the high-induction regime.
+        if sample.w < -MAX_BRAKING_INDUCTION * self.axial {
+            return Err(self.refusal("station-wake-domain", "braking induction exceeds the ordinary-momentum limit a=0.4",
+                "supply an applicable high-induction wake closure; the real normal quadratic branch alone is insufficient"));
+        }
+        Ok((sample, evaluations))
+    }
+
+    fn solve(&self, warm: f64) -> Result<(StationSample, u32), Refusal> {
+        let mut w = warm;
+        let mut previous = None;
+        let mut older = None;
+        for evaluations in 1..=MAX_STATION_ITERS {
+            let sample = self.evaluate(w)?;
+            if sample.admitted(self.axial) {
+                return self.accept(sample, evaluations);
+            }
+            if !sample.normal_target && sample.defect.abs() <= sample.tolerance() {
+                return Err(self.refusal("station-did-not-converge", "non-real trial target remains unresolved at the normal-flow boundary",
+                    "resolve the station continuation or supply an applicable wake closure; this failed iterate does not establish absence of another physical root"));
+            }
+            // Preserve the ordinary warm-started path. Reserve the final 24
+            // evaluations only when recent contraction predicts it will miss
+            // the unchanged tolerance, and a small local bracket is justified.
+            if evaluations == MAX_STATION_ITERS - 24
+                && let (Some(a), Some(b)) = (older, previous)
+                && let Some((probe, slope)) = self.local_probe(a, b, sample, 24)
+            {
+                return self.finish_local(sample, probe, slope, evaluations);
+            }
+            older = previous;
+            previous = Some(sample);
+            w += 0.5 * sample.defect;
+        }
+        Err(self.refusal("station-did-not-converge", "120 station evaluations exhausted",
+            "the unchanged station equation remains unresolved; refine the operating-point continuation or section model"))
+    }
+
+    fn local_probe(
+        &self,
+        a: StationSample,
+        b: StationSample,
+        c: StationSample,
+        remaining: i32,
+    ) -> Option<(f64, f64)> {
+        let first_move = b.w - a.w;
+        let last_move = c.w - b.w;
+        let first_slope = (b.balance - a.balance) / first_move;
+        let last_slope = (c.balance - b.balance) / last_move;
+        let ratio = c.defect.abs() / b.defect.abs();
+        if !a.normal_target
+            || !b.normal_target
+            || !c.normal_target
+            || ![first_slope, last_slope, ratio]
+                .into_iter()
+                .all(f64::is_finite)
+            || first_slope >= 0.0
+            || last_slope >= 0.0
+            || !(0.5..=2.0).contains(&(last_slope / first_slope))
+            || !(0.0..0.98).contains(&ratio)
+            || c.defect.abs() * ratio.powi(remaining) <= c.tolerance()
+            || a.balance.signum() != b.balance.signum()
+            || b.balance.signum() != c.balance.signum()
+            || last_move.signum() != c.balance.signum()
+            || first_move.signum() != last_move.signum()
+            || !(a.balance.abs() > b.balance.abs() && b.balance.abs() > c.balance.abs())
+        {
+            return None;
+        }
+        // Overshoot the local secant root to obtain a sign bracket, never a
+        // global interval spanning other roots of the stalled section law.
+        let distance = -2.0 * c.balance / last_slope;
+        let probe = c.w + distance;
+        let local_scale = (c.w.abs() + self.axial + self.tangential).max(1.0);
+        if !probe.is_finite()
+            || probe < -0.5 * self.axial
+            || probe == c.w
+            || distance.abs() > 32.0 * last_move.abs()
+            || distance.abs() > 1e-3 * local_scale
+        {
+            return None;
+        }
+        Some((probe, last_slope))
+    }
+
+    fn finish_local(
+        &self,
+        start: StationSample,
+        probe: f64,
+        slope: f64,
+        mut evaluations: u32,
+    ) -> Result<(StationSample, u32), Refusal> {
+        let end = self.evaluate(probe)?;
+        evaluations += 1;
+        let measured_slope = (end.balance - start.balance) / (end.w - start.w);
+        if !measured_slope.is_finite()
+            || measured_slope >= 0.0
+            || !(0.5..=2.0).contains(&(measured_slope / slope))
+        {
+            return Err(self.refusal(
+                "station-did-not-converge",
+                "local branch slope changed during bracket probe",
+                "resolve the local stalled-section branch; a global root jump is not admitted",
+            ));
+        }
+        if end.admitted(self.axial) {
+            return self.accept(end, evaluations);
+        }
+        if start.balance.signum() == end.balance.signum() {
+            return Err(self.refusal(
+                "station-did-not-converge",
+                "local continuation did not bracket its root",
+                "resolve the warm-started station branch without selecting a distant root",
+            ));
+        }
+        let (mut left, mut right) = if start.w < end.w {
+            (start, end)
+        } else {
+            (end, start)
+        };
+        while evaluations < MAX_STATION_ITERS {
+            let sample = self.evaluate(left.w + 0.5 * (right.w - left.w))?;
+            evaluations += 1;
+            let roundoff = 64.0
+                * f64::EPSILON
+                * sample
+                    .target_product
+                    .abs()
+                    .max(sample.momentum_product.abs());
+            if sample.balance > left.balance + roundoff || sample.balance < right.balance - roundoff
+            {
+                return Err(self.refusal("station-did-not-converge", "nonmonotone local station bracket",
+                    "resolve the local stalled-section branch; multiple-root selection is not inferred"));
+            }
+            if sample.admitted(self.axial) {
+                return self.accept(sample, evaluations);
+            }
+            if sample.balance > 0.0 {
+                left = sample;
+            } else {
+                right = sample;
+            }
+        }
+        Err(self.refusal(
+            "station-did-not-converge",
+            "120 station evaluations exhausted in the local bracket",
+            "the local station balance remains unresolved at the declared tolerance",
+        ))
+    }
 }
 
 /// The declared engine torque curve at the PROP shaft (12 hp sustained at

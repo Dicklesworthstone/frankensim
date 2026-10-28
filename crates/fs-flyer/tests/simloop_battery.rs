@@ -81,11 +81,11 @@ fn run_assisted_lifecycle(mode: PilotMode) -> (SimLoop, u64, Phase, f64, f64) {
 fn fixed_control_assisted_lifecycle_preserves_its_numerical_refusal() {
     let (sim, tick, phase, x_end, max_forward_m) = run_assisted_lifecycle(PilotMode::FixedControls);
     // Same-tick release retains its free vertical/pitch impulse. The aircraft
-    // climbs and turns back before the unchanged native station solver reaches
-    // its iteration cap. This is a numerical refusal, not proof of a physical
+    // climbs and turns back before the native station solver reaches
+    // its evaluation budget. This is a numerical refusal, not proof of a physical
     // flight-envelope boundary. Keep its exact code/tick and real travel gate.
     assert_eq!(phase, Phase::Ended(TerminalEvent::EnvelopeExceeded));
-    assert_eq!(tick, 673);
+    assert_eq!(tick, 676);
     let r = sim
         .envelope_refusal()
         .expect("numerical terminal keeps its receipt");
@@ -433,9 +433,11 @@ fn original_dec17_reference_reports_the_corrected_rail_shortfall() {
         assert!((spec.rail_length_m..spec.rail_length_m + 0.04).contains(&end.x_m));
         assert!(sim.envelope_refusal().is_none());
         if mode == PilotMode::FixedControls {
+            // Stable station arithmetic changes settled-trim roundoff and the
+            // digest while preserving this same tick-975 rail shortfall.
             assert_eq!(
                 sim.digest_hex(),
-                "81fcae99804ee631945d8a9ef0bf722f9af8e7b3ed532a3cfb81191dadbe753b"
+                "923a28531de664fd615ea13cd22961f185da87150584608be68d9a4f12af0f76"
             );
         }
         jlog(
@@ -610,10 +612,14 @@ fn golden_digest() {
     // has its own exact digest in the preceding regression.
     // Golden bump 2026-10-28: already-unloaded rail states retain the full
     // same-tick free-flight impulse; positive midpoint stages decide contact
-    // from their accepted endpoint. The native station nonconvergence at tick
-    // 673 is retained as a numerical receipt, not recast as a physical limit.
+    // from their accepted endpoint. At that revision, station nonconvergence
+    // at 673 was retained as a numerical receipt, not a physical limit.
+    // Golden bump 2026-10-28: stable propeller station momentum arithmetic
+    // and residual-certified local finishing solve the former tick-673 case.
+    // The same evaluation budget still refuses an unresolved station at 676;
+    // the equation, controls and substantive flight gates are unchanged.
     assert_eq!(
-        digest, "f5ddb5ed4382cc8b2fe4c8b6e8d210d4d1fe934e68ac3ed020899cdbd96b38df",
+        digest, "e018b27796ee9cb18318baf9fd4668fb69d3cb9b082fc47ea45db878efe64988",
         "lifecycle golden moved — determinism regression or an \
          intentional physics change requiring the golden-bump protocol"
     );

@@ -239,11 +239,11 @@ fn bemt_golden_digest() {
             s.thrust_n, s.j
         ),
     );
-    // Golden bump 2026-08-21 (bead guzez.7.2.1): the Prandtl tip/root
-    // factors moved off platform `f64::acos` onto det::acos, closing
-    // the native-vs-wasm lane split at the cost of ~ulp shifts here.
+    // Golden bump 2026-10-28: the quadratic root is rationalized and
+    // loads, momentum admission and station receipts now share the exact
+    // accepted induction. The section law and Prandtl factors are unchanged.
     assert_eq!(
-        digest, "b372b20b76bfda8072bf537c7e2e994214a3389cfa295c7f46d469fe6de5d726",
+        digest, "8e5cc0361fd22d945c38b247b67ce89bd19db1c5b3cfc16ca3e8bec2ab3800e7",
         "BEMT golden moved — determinism regression or an intentional \
          kernel change requiring the golden-bump protocol"
     );

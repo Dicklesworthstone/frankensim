@@ -31,13 +31,47 @@ CoupledPropAirframeStep (Aitken candidate A).
   V = 0 (static bench states are first-class, not a special case).
 - Station marching warm-starts from the inboard neighbor; nonconvergence
   is a TYPED refusal, never a clamped answer.
+- The normal quadratic root is rationalized as `2t/(V + sqrt(V² + 4t))`,
+  with signed annular loading `t = dT/(4πrρF)`, to retain weak induction
+  continuously through zero. Negative inner-annulus loading is compatible
+  with positive total rotor thrust; no accepted thrust is clipped to zero.
+  Accepted thrust, torque, angle, Prandtl factor and induction are evaluated
+  at one identical station state. Both the original velocity tolerance and
+  the dimensional annular momentum equation must close at that state.
+- Algebraic normal throughflow requires `V >= 0` and `w >= -V/2`, giving
+  disk speed `V+w >= V/2` and nonnegative far-wake speed `V+2w`. Empirical
+  admission is stricter: accepted braking requires `a=-w/V <= 0.4` for
+  `V>0`, exposed as `MAX_BRAKING_INDUCTION`; static states retain `w>=0`.
+  The ordinary BEM/high-induction transition at about `a=0.4` is described
+  in Moriarty and Hansen, [AeroDyn Theory Manual, NREL/TP-500-36881](https://www.nlr.gov/docs/fy05osti/36881.pdf),
+  printed pp. 6–7. A real quadratic root alone does not qualify stronger
+  braking. This entry does not import an empirical high-induction correction.
+- The ordinary relaxed Picard path retains its warm-start branch. At
+  evaluation 96, three nearby, monotonically contracting samples may justify
+  a small local secant probe when their measured contraction predicts a
+  budget overrun. A sign bracket, compatible local slopes and monotone
+  bisection then finish within the SAME 120 force evaluations. The reported
+  iteration count includes probes and bisections. No global root search,
+  tolerance increase or arbitrary selection among stalled-section roots is
+  introduced; ambiguous or unresolved continuation refuses.
+- A non-real trial quadratic target is not proof that the nonlinear station
+  equation has no physical root: section loading changes with induction.
+  Such a trial only proposes a bounded half-retreat toward `w=-V/2`, sharing
+  the original evaluation budget. It cannot pass convergence or supply the
+  real-target contraction evidence required by the local finish. Unresolved
+  continuation refuses numerically; a converged root beyond the empirical
+  braking limit receives a distinct wake-domain refusal. No reversed-flow,
+  turbulent-wake, vortex-ring or universal turbine model is inferred.
 - Prandtl F ∈ (0, 1], falling toward the tip.
 
 ## Error model
 
 `rotor-invalid` (stations cap AND cap+1, ordering, ranges),
-`operating-point-invalid` (V < 0, ω ≤ 0), `station-did-not-converge`
-(names the station), `rotor-dynamics-invalid`.
+`operating-point-invalid` (nonfinite/unrepresentable state, V < 0, ω ≤ 0),
+`station-did-not-converge` (names the station and unresolved numerical branch),
+`station-wake-domain` (high induction or non-normal throughflow),
+`station-numerical-invalid` (unrepresentable station arithmetic),
+`rotor-dynamics-invalid`.
 
 ## Determinism class
 
@@ -64,6 +98,17 @@ CT strictly falling over J 0.1–0.9; η rising to a 0.5–0.95 peak in the
 Wright J-class then falling; Prandtl limits + tip bite; spin-up from rest
 to the 250–500 rpm equilibrium class against the declared engine curve;
 caps at cap AND cap+1; golden at the rail state (J ≈ 0.71).
+
+`tests/station_momentum.rs` independently reconstructs the blade-element
+loads and annular momentum from public accepted station states. It covers
+the actual flight query that formerly exhausted Picard at positive induction,
+retention of the lower branch where three positive roots exist, bounded force
+evaluations, and static/advancing states with positive, negative and mixed
+annular loading. A constructed `a=0.35` root is recovered despite a non-real
+first target; a real `a=0.41` root refuses the high-induction domain. Nonfinite
+and unresolved non-real static states refuse explicitly. This is numerical
+closure of the declared model, not new validation of the reconstructed rotor
+or a universal branch selector.
 
 ## No-claim boundaries
 

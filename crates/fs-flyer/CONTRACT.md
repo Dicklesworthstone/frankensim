@@ -132,8 +132,12 @@ Airborne lifecycle tests explicitly add the existing registered catapult as a
 test fixture, distinct from historical Dec-17. With same-tick support release,
 member 3 flies 11.41 s with five undulations and 44.90 m of travel before the
 native outer coupling solver refuses midpoint residual growth at tick 1443.
-Fixed controls fly 4.99 s, reach 11.60 m forward and turn back to 4.27 m before
-the propeller station solver reaches its iteration cap at tick 673. These are
+Fixed controls fly 5.02 s, reach 11.60 m forward and turn back to 4.09 m before
+the propeller station solver exhausts its 120-evaluation budget at tick 676.
+Stable station momentum arithmetic and local residual-certified finishing solve
+the earlier tick-673 slow-convergence failure; the later operating point remains
+unresolved within that bounded local solve. It is not a station wake-domain
+refusal, and no broader station-robustness claim is made. These are
 numerical nonconvergence receipts carried by EnvelopeExceeded, not established
 physical envelope boundaries. The substantive flight duration/undulation and
 travel gates remain, along with exact terminal code/tick and replay evidence.
