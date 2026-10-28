@@ -462,3 +462,55 @@ geometric contact or membership inside a region; the geometry owner supplies
 that physical correspondence. Focused tests in `heating_loads` exercise analytic
 off-centre work/momentum, continued heating, source-only density and expansion
 changes, and atomic refusal. Native execution is reported separately.
+
+## Source-bound creeping-flow motion of a sphere (MR57)
+
+`VolumeMoments::sphere` supplies analytic volume and centroidal moments to the
+existing material-to-inertia compiler. `creeping_flow::CreepingSphere` retains
+the original `FluidTransport` source, resolving its coherent density and
+dynamic viscosity once for a frozen isothermal reservoir. Its declared radius
+must agree with a single uniform spherical material region's volume and full
+inertia. This comparison rejects incompatible bodies but does not certify a
+shape from moments alone; the spherical boundary is explicit model data.
+
+The Stokes force is -6*pi*mu*a*(v-U), rotary torque is -8*pi*mu*a^3*omega,
+and fully immersed buoyancy is -rho_fluid*V*g. Body density therefore changes
+inertia and settling, fluid density changes buoyancy and regime admission,
+and viscosity changes both translational and rotational response. No material
+name, empirical drag multiplier, reference mass or independent damping setting
+selects those quantities.
+
+`step` closes the existing `RigidBodyIntegrator::step` midpoint force relation
+algebraically and passes the resulting wrench to that original owner. It never
+advances a second momentum, position or attitude state. Endpoint and midpoint
+loads are evaluated from the corresponding actual velocities. Viscous heat is
+dt*(6*pi*mu*a*|v-U|^2 + 8*pi*mu*a^3*|omega|^2) at the midpoint. Maintaining a
+nonzero uniform background velocity supplies dt*F_drag dot U. An independent
+balance checks kinetic, gravitational and buoyancy-potential change plus
+viscous heat minus background-flow work; numerical residual is neither
+physical heating nor source work.
+The fluid is an external reservoir, so these reported transfers must not be
+deposited a second time by a caller claiming the same accounting boundary.
+
+This bounded reduction admits translational and rotational Reynolds limits
+no greater than 0.1. The fluid diffusion time a^2/nu relative to the fastest
+body relaxation time must fit a separate caller-declared limit no greater
+than 0.1. The physical step is bounded by a declared fraction of that body
+relaxation time. These are explicit approximation/admission limits, not
+certified continuum errors. Time refinement is required even when energy
+closure is small. The conservative timescale gate excludes, in particular,
+many density-matched solid/liquid transients that need fluid inertia/history.
+
+The model is fully immersed, unbounded, no-slip, incompressible, Newtonian and
+quasi-steady. It supplies no Basset initial-layer/history force, added mass,
+walls, particle interactions, free-surface forces, rarefaction, turbulence,
+thermal evolution or other exterior/gap resistance. Continuum validity and
+actual spherical geometry remain caller obligations. Source/geometry/regime
+failure, work-budget failure or cancellation returns no proposed state.
+
+G1/G3/G4 synthetic tests in `tests/creeping_flow.rs` compare actual repeated
+native trajectories with independent settling and rotary-decay formulae,
+demonstrate source-only body/fluid substitution, check second-order time
+refinement, separate maintained-flow work from heat, and exercise geometry,
+regime and transactional refusals. This is a bounded MR57 capability; it does
+not close the broader exterior/gap-flow bead or claim empirical validation.

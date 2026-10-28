@@ -28,6 +28,19 @@ impl VolumeMoments {
     /// Centroidal volume-inertia tensor in the body frame [m5].
     pub const fn inertia_m5(self) -> Mat3 { self.inertia_m5 }
 
+    /// Centered solid sphere with explicit radius [m]. The volume and all three
+    /// centroidal moments come from this SAME geometry, before material density.
+    pub fn sphere(radius_m: f64) -> Result<Self, MaterialInertiaError> {
+        if !positive(radius_m) {
+            return Err(MaterialInertiaError::Invalid("sphere radius must be finite and positive"));
+        }
+        let volume = (4.0 * core::f64::consts::PI / 3.0) * radius_m * radius_m * radius_m;
+        let moment = (2.0 / 5.0) * volume * radius_m * radius_m;
+        Self::new(volume, Vec3::new(0.0, 0.0, 0.0), Mat3 { m: [
+            moment, 0.0, 0.0, 0.0, moment, 0.0, 0.0, 0.0, moment,
+        ] })
+    }
+
     /// Centered axis-aligned solid cuboid with explicit full side lengths [m].
     pub fn cuboid(sides_m: Vec3) -> Result<Self, MaterialInertiaError> {
         let [x, y, z] = [sides_m.x, sides_m.y, sides_m.z];

@@ -23,6 +23,8 @@ pub mod deformation;
 pub mod principal;
 /// Material-driven buoyancy, displacement and hydrostatic torque.
 pub mod hydrostatic;
+/// Source-bound creeping-flow resistance and buoyancy on native rigid motion.
+pub mod creeping_flow;
 
 /// Source-integrated free expansion with conserved reference material mass.
 pub mod thermal;
