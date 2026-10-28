@@ -72,6 +72,8 @@ pub mod material;
 pub mod mesh;
 pub mod power;
 pub mod radiation;
+/// Physical photon entropy, distinct from material heat-transfer entropy.
+pub mod radiation_entropy;
 /// Reduced one-dimensional slab cooling screen with an explicit fixed-boundary
 /// and first-mode applicability boundary.
 pub mod reduced_slab;
