@@ -38,8 +38,9 @@ impl SpatialMaterialRod {
     /// `linear_strain_limit` must lie in (0,1); every layer is checked even when
     /// opposing thermal stresses make the net section force small.
     ///
-    /// Finite-difference probes must also fit this domain. Too narrow a bound may
-    /// refuse a solve even when its desired equilibrium would have been admissible.
+    /// Native forces, tangents and support reactions are analytical at the
+    /// actual admitted strain; no finite-difference probe needs extra domain
+    /// margin. Every physical trial still obeys every original layer bound.
     ///
     /// # Errors
     /// Refuses count/source/state mismatches, invalid limits or strains, and

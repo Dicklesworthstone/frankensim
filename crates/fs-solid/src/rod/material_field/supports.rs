@@ -50,7 +50,7 @@ impl SpatialMaterialRod {
     /// The support list replaces the old list; newly freed coordinates retain
     /// their old pose as a numerical initial guess. It is not a time-dependent
     /// imposed motion, transported history, or work-conserving support change.
-    /// Constraints stay exact during every accepted trial and tangent probe.
+    /// Constraints stay exact during every accepted trial and tangent projection.
     ///
     /// # Errors
     /// Refuses invalid/duplicate/root node indices, empty supports, nonfinite
@@ -99,12 +99,12 @@ impl SpatialMaterialRod {
     #[must_use]
     pub fn supports(&self) -> &[RodSupport] { &self.supports }
 
-    /// Recover `dE/dq - applied_load` using the SAME element-local body/right
-    /// derivatives and analytical link/gravity loads as the Newton solve.
+    /// Recover `dE/dq - applied_load` using the SAME analytical element/link
+    /// assembly and body/right coordinates as the Newton solve.
     /// Pass the load used to solve this pose. The free residual prevents a
     /// reaction-only report from hiding an unequilibrated configuration.
-    /// Segment probes retain their source strain bounds; reactions are numerical
-    /// estimates, not forced whole-body balance closures.
+    /// Source bounds apply at the actual state without derivative probes.
+    /// Reactions are not forced whole-body balance closures.
     ///
     /// # Errors
     /// Refuses nonfinite loads/residuals, source/kinematic failures and cancellation.

@@ -4,7 +4,7 @@
 //! changes equilibrium everywhere through shared nodal compatibility, not through
 //! an average modulus or separately solved pieces. Reference segments have equal
 //! length; cross-section/material jumps are one-dimensional idealizations, not
-//! resolved joint/interface stresses. The original clamped-root, dense FD/Newton
+//! resolved joint/interface stresses. The original clamped-root, dense Newton
 //! statics and body-frame tip-moment convention remain in force.
 //! An explicitly supplied stress-free centerline and material frames retain
 //! intrinsic camber/twist through the SAME energy, loads and thermal refresh.
@@ -158,6 +158,13 @@ impl SpatialMaterialRod {
     /// These are section resultants, not three-dimensional interfacial stresses.
     pub fn segment_resultants(&self, segment: usize) -> Result<([f64; 3], [f64; 3]), SpatialRodError> {
         let (g, k) = self.segment_strains(segment)?;
+        self.resultants_from_strains(segment, g, k)
+    }
+
+    // The same constitutive response supplies observations and analytical
+    // assembly. No separately copied thermal-force or intrinsic-strain law.
+    fn resultants_from_strains(&self, segment: usize, g: [f64; 3], k: [f64; 3])
+        -> Result<([f64; 3], [f64; 3]), SpatialRodError> {
         let s = self.stiffness[segment];
         let axial = match &self.thermal {
             Some(field) => field.summary(segment, g[0])?.0,
@@ -176,9 +183,8 @@ impl SpatialMaterialRod {
         self.energy_for(&self.rod)
     }
 
-    // Thermal fields impose an explicit local strain domain. Scale their
-    // translation probes geometrically while retaining exact uniform/spatial
-    // parity for the original unheated elastic path.
+    // Retained scale for independent numerical oracles and callback fallbacks.
+    // Native analytical assembly does not perturb the material strain domain.
     fn probe_translation_scale_m(&self) -> f64 {
         if self.thermal.is_some() || self.reference_geometry.is_some() || !self.tension_links.is_empty() {
             self.rod.l0
@@ -187,7 +193,11 @@ impl SpatialMaterialRod {
 
     fn strains_for(&self, rod: &Rod, segment: usize)
         -> Result<([f64; 3], [f64; 3]), SpatialRodError> {
-        let (mut g, mut k) = rod.strains(segment)?;
+        self.reference_relative_strains(segment, rod.strains(segment)?)
+    }
+
+    fn reference_relative_strains(&self, segment: usize, (mut g, mut k): ([f64; 3], [f64; 3]))
+        -> Result<([f64; 3], [f64; 3]), SpatialRodError> {
         if let Some(reference) = &self.reference_geometry {
             let (g0, k0) = reference.strains[segment];
             for c in 0..3 {
@@ -234,13 +244,13 @@ impl SpatialMaterialRod {
     }
 
     /// Solve ONE compatible equilibrium using the original Newton/Lie-group path.
-    /// Derivatives are assembled from incident segment energies and the native
-    /// analytical link/gravity forces. The prepared dependency graph includes
-    /// every nonlocal link, including slack links. Full energy/domain admission
-    /// still runs before accepting a trial. The original dense linear solve is
-    /// retained; no sparse-solver or analytic-rod-tangent claim is made.
-    /// Cancellation is checked at load/Newton steps, every residual coordinate
-    /// and tangent column, and around the bounded dense solve.
+    /// Analytical segment, nonlocal tensile-link and rotating-gravity forces
+    /// and tangents share the canonical SO(3) differential and section owners.
+    /// Actual states still pass full energy/source-domain admission. Slack links
+    /// remain potential interactions; their taut/slack kink uses the explicitly
+    /// selected slack-sided derivative. The original dense linear solve remains.
+    /// Cancellation is checked at load/Newton steps, each element/link and
+    /// around the bounded dense solve. There is no sparse-solver or dynamics claim.
     /// Only a complete finite candidate replaces the previous geometry.
     ///
     /// `tolerance` retains the legacy norm mixing force and moment residuals;

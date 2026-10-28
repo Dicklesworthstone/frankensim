@@ -12,7 +12,7 @@ use fs_material::section::ConcentricShearSection;
 use super::{SpatialMaterialRod, SpatialRodError, checkpoint};
 use super::supports::RodSupportReaction;
 use crate::rod::Rod;
-use crate::rod::derivatives::{RodEnergy, perturb};
+use crate::rod::derivatives::RodEnergy;
 
 /// Immutable reference inventory shared by thermal snapshots of one specimen.
 /// Original sections retain the actual density receipts and reference geometry.
@@ -171,10 +171,10 @@ impl SpatialMaterialRod {
         Ok(value)
     }
 
-    /// Recover root-clamp force and body-frame moment through the SAME local
-    /// derivative owner as Newton and additional-support recovery. Only incident
-    /// segment energies are differenced; root link forces and gravitational
-    /// force/offset moments are included analytically, once each.
+    /// Recover root-clamp force and body-frame moment through the SAME
+    /// analytical assembly as Newton and additional-support recovery. Segment,
+    /// root-link and gravity contributions enter once each, without any strain
+    /// or coordinate perturbation outside the admitted physical state.
     /// Tip loads have zero root derivative. This is a numerical reaction, not a
     /// forced whole-body balance closure. The accepted pose is never modified.
     ///
@@ -185,21 +185,9 @@ impl SpatialMaterialRod {
     ) -> Result<RodSupportReaction, SpatialRodError> {
         checkpoint(gate)?;
         let energy = super::derivatives::SpatialEnergy::new(self);
-        energy.value(&self.rod)?;
-        let mut plus = self.rod.clone();
-        let mut minus = self.rod.clone();
-        let mut reaction = [0.0; 6];
-        for (coordinate, value) in reaction.iter_mut().enumerate() {
-            checkpoint(gate)?;
-            let eps = super::super::fd_step(coordinate, self.probe_translation_scale_m(), 3e-6)?;
-            perturb(&mut plus, 0, coordinate, eps)?;
-            perturb(&mut minus, 0, coordinate, -eps)?;
-            *value = energy.derivative(&self.rod, &plus, &minus, 0, coordinate, eps)?;
-            plus.positions[0] = self.rod.positions[0];
-            minus.positions[0] = self.rod.positions[0];
-            plus.frames[0] = self.rod.frames[0];
-            minus.frames[0] = self.rod.frames[0];
-        }
+        let assembled = energy.linearize(&self.rod, &[], false, &|| checkpoint(gate))?
+            .ok_or(SpatialRodError::Invalid("native rod omitted its analytical reaction assembly"))?;
+        let reaction = assembled.gradient[0];
         if !reaction.iter().all(|v| v.is_finite()) {
             return Err(SpatialRodError::Invalid("root reaction is unrepresentable"));
         }

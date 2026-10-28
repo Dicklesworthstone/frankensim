@@ -3,6 +3,9 @@ use super::{SpatialMaterialRod, SpatialRodError};
 use crate::rod::Rod;
 use crate::rod::derivatives::RodEnergy;
 use fs_ga::Vec3;
+use crate::rod::derivatives::analytic::Linearization;
+
+mod analytic;
 
 pub(super) struct SpatialEnergy<'a> {
     owner: &'a SpatialMaterialRod,
@@ -34,6 +37,14 @@ impl RodEnergy<SpatialRodError> for SpatialEnergy<'_> {
         self.owner.equilibrium_energy_for(rod)
     }
 
+    fn linearize(&self, rod: &Rod, free: &[usize], tangent: bool,
+        checkpoint: &impl Fn() -> Result<(), SpatialRodError>)
+        -> Result<Option<Linearization>, SpatialRodError> {
+        Ok(Some(self.assemble_analytic(rod, free, tangent, checkpoint)?))
+    }
+
+    // Retained only as an independent local-stencil oracle. Native equilibrium
+    // and support reactions use the complete analytical assembly above.
     fn derivative(
         &self, base: &Rod, plus: &Rod, minus: &Rod,
         node: usize, component: usize, step: f64,
@@ -93,11 +104,13 @@ mod tests {
         ScalarPropertyRequirement, resolve_material_state_point};
     use fs_qty::{Density, Pressure};
 
-    fn section() -> ConcentricShearSection {
+    fn section() -> ConcentricShearSection { section_scaled(1.0) }
+
+    fn section_scaled(scale: f64) -> ConcentricShearSection {
         let mut claims = ClaimSet::new();
         let mut requirements = Vec::new();
         for (name, value, dims) in [("density", 1000.0, Density::DIMS),
-            ("young_modulus", 1e6, Pressure::DIMS), ("shear_modulus", 4e5, Pressure::DIMS)] {
+            ("young_modulus", 1e6*scale, Pressure::DIMS), ("shear_modulus", 4e5*scale, Pressure::DIMS)] {
             claims.insert_claim(PropertyClaim {
                 key: PropertyKey::new(name, dims), value: PropertyValue::Scalar { value, dims },
                 validity: ValidityDomain::unconstrained(), uncertainty: UncertaintyModel::Unstated,
@@ -257,4 +270,109 @@ mod tests {
             (moved.endpoints_m[1][c] - moved.endpoints_m[0][c]).powi(2)).sum::<f64>().sqrt();
         assert!((rounded - reference.length_m).abs() > 1e-6);
     }
+
+    #[test]
+    fn g3_complete_spatial_tangent_covers_heterogeneity_nonlocal_links_and_rotating_weight() {
+        use fs_ga::So3Tangent;
+        let gate = CancelGate::new();
+        let sections = [0.3, 2.0, 0.7, 1.4].map(section_scaled).to_vec();
+        let link = MaterialTensionLink::try_new(section().elastic().clone(), [
+            TensionLinkAttachment { node: 1, offset_body_m: [0.01, 0.02, -0.01] },
+            TensionLinkAttachment { node: 4, offset_body_m: [-0.01, 0.03, 0.02] },
+        ], 0.68, 2, 0.2).unwrap();
+        let owner = SpatialMaterialRod::try_straight(1.0, sections).unwrap()
+            .with_tension_links(vec![link], &gate).unwrap()
+            .with_gravity([1.0, -9.0, 0.3], &gate).unwrap();
+        let mut base = owner.rod.clone();
+        for node in 1..=4 {
+            base.positions[node][1] += 0.001 * (node * node) as f64;
+            base.frames[node] = base.frames[node].body_plus(So3Tangent::new(
+                Vec3::new(0.02*node as f64,-0.01*node as f64,0.03*node as f64))).unwrap();
+        }
+        let model = SpatialEnergy::new(&owner);
+        let exact = model.linearize(&base, &owner.free_dofs, true, &|| Ok(())).unwrap().unwrap();
+        let matrix = exact.tangent.as_ref().unwrap();
+        for col in 0..24 {
+            let h = 2e-6;
+            let mut plus = base.clone(); let mut minus = base.clone();
+            perturb(&mut plus, col/6+1, col%6, h).unwrap();
+            perturb(&mut minus, col/6+1, col%6, -h).unwrap();
+            let ep = model.value(&plus).unwrap(); let em = model.value(&minus).unwrap();
+            let expected = exact.gradient[col/6+1][col%6];
+            assert!(((ep-em)/(2.0*h)-expected).abs() < 3e-6*expected.abs().max(1.0));
+            let upper = model.linearize(&plus, &[], false, &|| Ok(())).unwrap().unwrap();
+            let lower = model.linearize(&minus, &[], false, &|| Ok(())).unwrap().unwrap();
+            for row in 0..24 {
+                let probe = (upper.gradient[row/6+1][row%6]-lower.gradient[row/6+1][row%6])/(2.0*h);
+                let value = matrix[24*row+col];
+                assert!((probe-value).abs() < 3e-6*value.abs().max(1.0), "({row},{col}): {probe} != {value}");
+            }
+        }
+        let selected = [23,7,0,18];
+        let projected = model.linearize(&base,&selected,true,&|| Ok(())).unwrap().unwrap();
+        assert_eq!(projected.gradient, exact.gradient);
+        for (i,&row) in selected.iter().enumerate() {
+            for (j,&col) in selected.iter().enumerate() {
+                assert_eq!(projected.tangent.as_ref().unwrap()[4*i+j],matrix[24*row+col]);
+            }
+        }
+    }
+
+    #[test]
+    fn g3_intrinsic_reference_and_current_material_share_the_analytical_pullback() {
+        use super::super::reference::RodReferenceGeometry;
+        use fs_ga::So3Tangent;
+        let positions = vec![[0.0,0.0,0.0],[0.24,0.03,0.0],[0.46,0.12,0.0]];
+        let frames = [0.0,0.2,0.4].map(|a|
+            So3::exp(So3Tangent::new(Vec3::new(0.0,0.0,a))).unwrap()).to_vec();
+        let reference = RodReferenceGeometry::try_new(0.5,positions,frames).unwrap();
+        let owner = SpatialMaterialRod::try_from_reference(reference,
+            vec![section_scaled(0.5),section_scaled(2.0)]).unwrap();
+        let model = SpatialEnergy::new(&owner);
+        let rest = model.linearize(&owner.rod,&owner.free_dofs,true,&|| Ok(())).unwrap().unwrap();
+        assert!(rest.gradient.iter().flatten().all(|v| *v == 0.0));
+        let mut base = owner.rod.clone();
+        base.positions[2][2] += 0.01;
+        perturb(&mut base,2,3,0.03).unwrap();
+        let exact = model.linearize(&base,&owner.free_dofs,true,&|| Ok(())).unwrap().unwrap();
+        for col in 0..12 {
+            let h = 1e-6;
+            let mut plus=base.clone();let mut minus=base.clone();
+            perturb(&mut plus,col/6+1,col%6,h).unwrap();
+            perturb(&mut minus,col/6+1,col%6,-h).unwrap();
+            let gp=model.linearize(&plus,&[],false,&|| Ok(())).unwrap().unwrap();
+            let gm=model.linearize(&minus,&[],false,&|| Ok(())).unwrap().unwrap();
+            for row in 0..12 {
+                let probe=(gp.gradient[row/6+1][row%6]-gm.gradient[row/6+1][row%6])/(2.0*h);
+                let value=exact.tangent.as_ref().unwrap()[12*row+col];
+                assert!((probe-value).abs()<3e-6*value.abs().max(1.0));
+            }
+        }
+    }
+
+    #[test]
+    fn g0_taut_slack_selection_is_explicit_and_refusals_never_publish_partial_assembly() {
+        use std::cell::Cell;
+        let owner=linked([0.0;3],0.75);
+        let model=SpatialEnergy::new(&owner);
+        let at_kink=model.linearize(&owner.rod,&owner.free_dofs,true,&|| Ok(())).unwrap().unwrap();
+        // The two endpoints have no rod element in common. Exactly slack uses
+        // the zero one-sided link derivative, not a central half-stiffness.
+        assert_eq!(at_kink.tangent.as_ref().unwrap()[18],0.0);
+        let mut stretched=owner.rod.clone();stretched.positions[4][0]+=0.001;
+        let taut=model.linearize(&stretched,&owner.free_dofs,true,&|| Ok(())).unwrap().unwrap();
+        let expected=-owner.sections[0].elastic().axial_stiffness_n()/0.75;
+        assert!((taut.tangent.as_ref().unwrap()[18]-expected).abs()<1e-10);
+        let calls=Cell::new(0);
+        let cancel=|| {
+            calls.set(calls.get()+1);
+            if calls.get()>=3 {Err(SpatialRodError::Cancelled)} else {Ok(())}
+        };
+        assert!(matches!(model.linearize(&stretched,&owner.free_dofs,true,&cancel),Err(SpatialRodError::Cancelled)));
+        assert_eq!(owner.positions_m()[4],[1.0,0.0,0.0]);
+        stretched.positions[4][0]=2.0;
+        assert!(model.linearize(&stretched,&[],false,&|| Ok(())).is_err());
+        assert_eq!(owner.positions_m()[4],[1.0,0.0,0.0]);
+    }
+
 }
