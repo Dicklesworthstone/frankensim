@@ -1,0 +1,14 @@
+frankensim.matdb-manifest.v3
+pack_id	molybdenum-attl-reference
+redistribution	permitted	Selected attributed numerical facts and original normalization notes only; no source document, prose or table layout is redistributed
+citation	ATTL Advanced Materials Co. Ltd., Pure Molybdenum, Material Introduction, accessed 2026-10-28; https://www.atm-tungsten.com/material_details/15.html
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	engineering-reference	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	young_modulus	young-modulus	dimensional
+property	electrical_resistivity	electrical-resistivity	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	engineering_reference_model	engineering-reference-model	dimensional
+axis	source_temperatures_matched	source-temperatures-matched	dimensional

@@ -1,0 +1,20 @@
+frankensim.matdb-source.v1
+observation	engineering-reference	Calcium fluoride optical crystal, fluorite structure	Frozen coefficients from Crystran Product Data	The 293–294 K interval is author-declared for nominal thermal calculations, not source temperature coverage. Every claim requires engineering-reference-model=1 and source-temperatures-matched=0. The supplier does not state the temperature or uncertainty of these three entries. This is not a rock aggregate, porous ore, europium-doped scintillator, particular optical grade or qualified specimen. Cubic symmetry supports scalar thermal transport; no isotropic elasticity is inferred.
+observation	density	Calcium fluoride optical reference	Crystran Product Data, density	The source gives 3.18 g/cc, converted to 3180 kg/m3. No pressure, temperature or lot is identified.
+observation	heat-capacity	Calcium fluoride optical reference	Crystran Product Data, specific heat capacity	The source gives 854 J/(kg K), with no stated test temperature, interval or confidence.
+observation	conductivity	Calcium fluoride optical reference	Crystran Product Data, thermal conductivity	The source gives 9.71 W/(m K), with no stated temperature beside the entry. No temperature law or extrapolation is inferred.
+scalar	density	density,engineering-reference	density	3180	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	293	294	K
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_temperatures_matched	0	0	1
+scalar	heat-capacity	heat-capacity,engineering-reference	specific_heat_capacity	854	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	293	294	K
+validity	heat-capacity	engineering_reference_model	1	1	1
+validity	heat-capacity	source_temperatures_matched	0	0	1
+scalar	conductivity	conductivity,engineering-reference	thermal_conductivity	9.71	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	293	294	K
+validity	conductivity	engineering_reference_model	1	1	1
+validity	conductivity	source_temperatures_matched	0	0	1

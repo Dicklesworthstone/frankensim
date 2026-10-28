@@ -1,0 +1,38 @@
+frankensim.matdb-source.v1
+observation	engineering-reference	UNS C70600 wrought copper-nickel 10 percent alloy-family reference	Frozen coefficients from CDA Physical Properties	The 293.15–294.15 K calculation interval is author-declared, not continuous measured coverage. Density, Cp and conductivity are explicitly at 68 F=293.15 K; the elastic entries do not state their temperature individually. Every claim requires engineering-reference-model=1 and source-temperatures-matched=0. Temper, product thickness, texture, corrosion and service history are unspecified. The isotropic reference does not qualify an actual seawater tube or pressure component.
+observation	conversion	CDA imperial-unit conversion convention	Coherent-SI conversion of literal US-customary values	Use inch 0.0254 m, pound 0.45359237 kg, standard gravity 9.80665 m/s2 and international-table Btu 1055.05585262 J. CDA does not identify its Btu realization; IT is an explicit normalization assumption. Factors are 27679.90471020312 kg/m3 per lb/in3, 4186.8 J/(kg K) per Btu/(lb F), 1.730734666371391 W/(m K) per Btu/(h ft F), and 6894757.293168361 Pa per ksi. Conversion precision does not increase source precision.
+observation	density	C70600 reference	CDA density at 68 F	Literal 0.323 lb/in3 is used rather than rounded specific gravity 8.94.
+observation	heat-capacity	C70600 reference	CDA specific heat capacity at 68 F	Literal 0.09 Btu/(lb F); uncertainty and temperature slope are unspecified.
+observation	conductivity	C70600 reference	CDA thermal conductivity at 68 F	Literal 26 Btu/(h ft F), using the conventional conductivity interpretation of the printed label.
+observation	elastic	C70600 reference	CDA tension modulus and modulus of rigidity	Literal E=18000 ksi and G=6800 ksi; individual test temperature, loading rate and specimen direction are unspecified.
+observation	derived-poisson	C70600 isotropic engineering reference	Authored isotropic reduction of CDA E and G	Poisson ratio is E/(2G)-1=18000/(2*6800)-1=0.3235294117647059. It is a derived engineering-model input, not a separate measured property; it assumes effective isotropy and shares the source-modulus uncertainty limitations.
+scalar	density	density,conversion,engineering-reference	density	8940.609221395608	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	293.15	294.15	K
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_temperatures_matched	0	0	1
+scalar	heat-capacity	heat-capacity,conversion,engineering-reference	specific_heat_capacity	376.812	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	293.15	294.15	K
+validity	heat-capacity	engineering_reference_model	1	1	1
+validity	heat-capacity	source_temperatures_matched	0	0	1
+scalar	conductivity	conductivity,conversion,engineering-reference	thermal_conductivity	44.99910132565617	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	293.15	294.15	K
+validity	conductivity	engineering_reference_model	1	1	1
+validity	conductivity	source_temperatures_matched	0	0	1
+scalar	young-modulus	elastic,conversion,engineering-reference	young_modulus	124105631277.0305	Pa	constant
+uncertainty	young-modulus	unstated	-	-	-	-
+validity	young-modulus	temperature	293.15	294.15	K
+validity	young-modulus	engineering_reference_model	1	1	1
+validity	young-modulus	source_temperatures_matched	0	0	1
+scalar	shear-modulus	elastic,conversion,engineering-reference	shear_modulus	46884349593.54486	Pa	constant
+uncertainty	shear-modulus	unstated	-	-	-	-
+validity	shear-modulus	temperature	293.15	294.15	K
+validity	shear-modulus	engineering_reference_model	1	1	1
+validity	shear-modulus	source_temperatures_matched	0	0	1
+scalar	poisson-ratio	elastic,derived-poisson,engineering-reference	poisson_ratio	0.3235294117647059	1	constant
+uncertainty	poisson-ratio	unstated	-	-	-	-
+validity	poisson-ratio	temperature	293.15	294.15	K
+validity	poisson-ratio	engineering_reference_model	1	1	1
+validity	poisson-ratio	source_temperatures_matched	0	0	1

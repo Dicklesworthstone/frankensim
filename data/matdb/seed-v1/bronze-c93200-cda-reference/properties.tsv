@@ -1,0 +1,27 @@
+frankensim.matdb-source.v1
+observation	engineering-reference	UNS C93200 high-leaded tin bearing bronze, cast-alloy family reference	Frozen coefficients from CDA Physical Properties	The 293.15–294.15 K calculation interval is author-declared, not measured continuous coverage. Density, Cp and conductivity are explicitly at 68 F=293.15 K; E has no temperature printed beside its entry. Every claim requires engineering-reference-model=1 and source-temperatures-matched=0. Casting route, cooling history, porosity and specimen are unspecified. No Poisson ratio, plasticity, bearing friction, wear or product qualification is inferred.
+observation	conversion	CDA imperial-unit conversion convention	Coherent-SI conversion of literal US-customary values	Use international inch 0.0254 m, pound 0.45359237 kg, standard gravity 9.80665 m/s2 and international-table Btu 1055.05585262 J. The Btu convention is an explicit normalization assumption; CDA does not name its Btu realization. Factors are 27679.90471020312 kg/m3 per lb/in3, 4186.8 J/(kg K) per Btu/(lb F), 1.730734666371391 W/(m K) per Btu/(h ft F), and 6894757.293168361 Pa per ksi. Conversion digits do not increase source precision.
+observation	density	C93200 reference	CDA density at 68 F	Literal 0.322 lb/in3 is used rather than the separately rounded specific gravity 8.91.
+observation	heat-capacity	C93200 reference	CDA specific heat capacity at 68 F	Literal 0.09 Btu/(lb F); no confidence or temperature derivative supplied.
+observation	conductivity	C93200 reference	CDA thermal conductivity at 68 F	Literal 33.6 Btu/(h ft F); the table writes Btu per square foot per foot per hour per degree F, interpreted in the conventional conductivity sense.
+observation	young-modulus	C93200 reference	CDA modulus of elasticity in tension	Literal 14500 ksi; source temperature, loading rate and direction are unspecified. This supports an authored axial-elastic reference but does not complete general three-dimensional isotropic elasticity.
+scalar	density	density,conversion,engineering-reference	density	8912.929316685405	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	293.15	294.15	K
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_temperatures_matched	0	0	1
+scalar	heat-capacity	heat-capacity,conversion,engineering-reference	specific_heat_capacity	376.812	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	293.15	294.15	K
+validity	heat-capacity	engineering_reference_model	1	1	1
+validity	heat-capacity	source_temperatures_matched	0	0	1
+scalar	conductivity	conductivity,conversion,engineering-reference	thermal_conductivity	58.15268479007874	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	293.15	294.15	K
+validity	conductivity	engineering_reference_model	1	1	1
+validity	conductivity	source_temperatures_matched	0	0	1
+scalar	young-modulus	young-modulus,conversion,engineering-reference	young_modulus	99973980750.94124	Pa	constant
+uncertainty	young-modulus	unstated	-	-	-	-
+validity	young-modulus	temperature	293.15	294.15	K
+validity	young-modulus	engineering_reference_model	1	1	1
+validity	young-modulus	source_temperatures_matched	0	0	1

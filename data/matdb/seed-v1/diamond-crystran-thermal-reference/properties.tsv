@@ -1,0 +1,20 @@
+frankensim.matdb-source.v1
+observation	engineering-reference	Diamond optical-material engineering reference; no particular crystal or CVD batch	Frozen coefficients from Crystran Product Data	The 273–274 K calculation interval is author-declared, not measured temperature coverage. Every claim requires engineering-reference-model=1 and source-temperatures-matched=0. Cubic symmetry permits scalar thermal conductivity but does not make crystal elasticity isotropic. No elastic, phase-change, purity, defect, coating or experimental-validation claim is supplied.
+observation	density	Diamond reference	Crystran Product Data, density	Source value 3.51 g/cc is converted to 3510 kg/m3. Temperature, pressure, processing and statistical uncertainty are unspecified.
+observation	heat-capacity	Diamond reference	Crystran Product Data, specific heat capacity	Source value 502 J/(kg K) is stated at 273 K and cites Slack and Bartram (1975). It is frozen over the declared one-kelvin model interval; no source-backed derivative or uncertainty is inferred.
+observation	conductivity	Diamond reference	Crystran Product Data, thermal conductivity	Source value 2600 W/(m K) is stated at 273 K and cites Sussmann et al. (1994), Properties of Polycrystalline Diamond. The supplier combines reference data from different sources; this value is not a guarantee for arbitrary natural, synthetic or polycrystalline diamond.
+scalar	density	density,engineering-reference	density	3510	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	273	274	K
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_temperatures_matched	0	0	1
+scalar	heat-capacity	heat-capacity,engineering-reference	specific_heat_capacity	502	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	273	274	K
+validity	heat-capacity	engineering_reference_model	1	1	1
+validity	heat-capacity	source_temperatures_matched	0	0	1
+scalar	conductivity	conductivity,engineering-reference	thermal_conductivity	2600	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	273	274	K
+validity	conductivity	engineering_reference_model	1	1	1
+validity	conductivity	source_temperatures_matched	0	0	1

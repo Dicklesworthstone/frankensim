@@ -1,0 +1,43 @@
+frankensim.matdb-source.v1
+observation	engineering-reference	AA 5052 alloy-family reference; temper and product thickness unspecified for physical properties	Frozen reference from the supplier's physical-property section	The 293.15–294.15 K calculation interval is author-declared. Density, Cp, tensile and torsional moduli and resistivity are stated at 20 C; conductivity is stated at 25 C. Every claim requires engineering-reference-model=1 and source-temperatures-matched=0. This is a family-level isotropic approximation, not a qualified O/H32/H34 product, yield curve, design allowable or uncertainty-qualified temperature law. The mean expansion entry lacks interval endpoints and is omitted.
+observation	density	AA 5052 reference	Physical Properties, density at 20 C	Printed value 2680 kg/m3; no statistical uncertainty or matched specimen is supplied.
+observation	heat-capacity	AA 5052 reference	Physical Properties, specific heat at 20 C	Printed value 900 J/(kg C), equivalent to 900 J/(kg K) for a temperature increment.
+observation	conductivity	AA 5052 reference	Physical Properties, thermal conductivity at 25 C	Printed 138 W/(m C) is retained as 138 W/(m K). Its use at 20–21 C is an explicit frozen-coefficient approximation rather than measured coverage there.
+observation	elastic	AA 5052 reference	Physical Properties, tensile and torsional modulus at 20 C	Printed E=69.3 GPa and G=25.9 GPa. The separate compression modulus is not used. Pressure, loading rate and specimen direction are unreported.
+observation	derived-poisson	AA 5052 isotropic reference	Authored isotropic reduction of the supplier's E and G	Poisson ratio is derived as E/(2G)-1=69.3/(2*25.9)-1=0.3378378378378378. This is not a measured Poisson ratio. Effective isotropy is an explicit model assumption, not a statement about rolling texture.
+observation	resistivity	AA 5052 reference	Physical Properties, electrical resistivity at 20 C	Printed 0.050 micro-ohm m converts to 5.0e-8 Ohm m. No temperature coefficient or IACS normalization is inferred.
+scalar	density	density,engineering-reference	density	2680	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	293.15	294.15	K
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_temperatures_matched	0	0	1
+scalar	heat-capacity	heat-capacity,engineering-reference	specific_heat_capacity	900	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	293.15	294.15	K
+validity	heat-capacity	engineering_reference_model	1	1	1
+validity	heat-capacity	source_temperatures_matched	0	0	1
+scalar	conductivity	conductivity,engineering-reference	thermal_conductivity	138	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	293.15	294.15	K
+validity	conductivity	engineering_reference_model	1	1	1
+validity	conductivity	source_temperatures_matched	0	0	1
+scalar	young-modulus	elastic,engineering-reference	young_modulus	69.3	GPa	constant
+uncertainty	young-modulus	unstated	-	-	-	-
+validity	young-modulus	temperature	293.15	294.15	K
+validity	young-modulus	engineering_reference_model	1	1	1
+validity	young-modulus	source_temperatures_matched	0	0	1
+scalar	shear-modulus	elastic,engineering-reference	shear_modulus	25.9	GPa	constant
+uncertainty	shear-modulus	unstated	-	-	-	-
+validity	shear-modulus	temperature	293.15	294.15	K
+validity	shear-modulus	engineering_reference_model	1	1	1
+validity	shear-modulus	source_temperatures_matched	0	0	1
+scalar	poisson-ratio	elastic,derived-poisson,engineering-reference	poisson_ratio	0.3378378378378378	1	constant
+uncertainty	poisson-ratio	unstated	-	-	-	-
+validity	poisson-ratio	temperature	293.15	294.15	K
+validity	poisson-ratio	engineering_reference_model	1	1	1
+validity	poisson-ratio	source_temperatures_matched	0	0	1
+scalar	resistivity	resistivity,engineering-reference	electrical_resistivity	5.0e-8	Ohm*m	constant
+uncertainty	resistivity	unstated	-	-	-	-
+validity	resistivity	temperature	293.15	294.15	K
+validity	resistivity	engineering_reference_model	1	1	1
+validity	resistivity	source_temperatures_matched	0	0	1

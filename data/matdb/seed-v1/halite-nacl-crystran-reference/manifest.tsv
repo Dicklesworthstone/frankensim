@@ -1,0 +1,12 @@
+frankensim.matdb-manifest.v3
+pack_id	halite-nacl-crystran-reference
+redistribution	permitted	Selected attributed numerical facts and original annotations only; no source document, prose or table layout is redistributed
+citation	Crystran Ltd, Sodium Chloride NaCl, Product Data, accessed 2026-10-28; https://www.crystran.com/optical-materials/sodium-chloride-nacl/
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	engineering-reference	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+axis	temperature	temperature	absolute-temperature
+axis	engineering_reference_model	engineering-reference-model	dimensional
+axis	source_temperatures_matched	source-temperatures-matched	dimensional

@@ -1,0 +1,20 @@
+frankensim.matdb-source.v1
+observation	engineering-reference	Germanium optical-crystal engineering reference; no particular wafer or growth batch	Frozen coefficients from Crystran Product Data	The 293–294 K calculation interval is author-declared, not measured temperature coverage. Every claim requires engineering-reference-model=1 and source-temperatures-matched=0. No dopant concentration, pressure response, temperature derivative or experimental qualification is inferred. Cubic thermal conductivity does not qualify an isotropic elastic model.
+observation	density	Germanium reference	Crystran Product Data, density	Source value 5.33 g/cc is converted to 5330 kg/m3. Temperature, pressure, growth history and statistical uncertainty are unspecified.
+observation	heat-capacity	Germanium reference	Crystran Product Data, specific heat capacity	Source value 310 J/(kg K) cites Pearson and Brattain (1955). The supplier does not specify a temperature for this entry; its use at the declared reference state is an explicit engineering assumption.
+observation	conductivity	Germanium reference	Crystran Product Data, thermal conductivity	Source value 58.62 W/(m K) is stated at 293 K, citing Hawkins, Sherwood and Djotni (SPIE 2008). It is frozen over the one-kelvin model interval without an inferred derivative or uncertainty bound.
+scalar	density	density,engineering-reference	density	5330	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	293	294	K
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_temperatures_matched	0	0	1
+scalar	heat-capacity	heat-capacity,engineering-reference	specific_heat_capacity	310	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	293	294	K
+validity	heat-capacity	engineering_reference_model	1	1	1
+validity	heat-capacity	source_temperatures_matched	0	0	1
+scalar	conductivity	conductivity,engineering-reference	thermal_conductivity	58.62	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	293	294	K
+validity	conductivity	engineering_reference_model	1	1	1
+validity	conductivity	source_temperatures_matched	0	0	1

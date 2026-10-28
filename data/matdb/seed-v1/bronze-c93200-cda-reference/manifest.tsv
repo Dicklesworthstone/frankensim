@@ -1,0 +1,13 @@
+frankensim.matdb-manifest.v3
+pack_id	bronze-c93200-cda-reference
+redistribution	permitted	Selected attributed numerical facts and original SI-conversion notes only; no source document, prose or table layout is redistributed
+citation	Copper Development Association Inc., UNS C93200 high-leaded tin bronze, Physical Properties, accessed 2026-10-28; https://alloys.copper.org/alloy/C93200
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	engineering-reference	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	young_modulus	young-modulus	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	engineering_reference_model	engineering-reference-model	dimensional
+axis	source_temperatures_matched	source-temperatures-matched	dimensional

@@ -1,0 +1,26 @@
+frankensim.matdb-source.v1
+observation	engineering-reference	Tantalum supplier typical-physical-property reference	Frozen coefficients from EFINEA's physical-property table, attributed there to Plansee	The 293.15–294.15 K calculation interval is author-declared. Only Cp is explicitly at 20 C; temperature and specimen conditions for density, conductivity and resistivity are not stated. Every claim requires engineering-reference-model=1 and source-temperatures-matched=0. The source's separate annealed-rod mechanical condition is not silently assigned to physical data. The modulus entry has inconsistent imperial/metric labels and is omitted. No strength, exact lot, thermal derivative or experimental qualification is supplied.
+observation	density	Tantalum reference	EFINEA Typical Physical Properties, density	Printed 16.65 g/cm3 converts to 16650 kg/m3; temperature and uncertainty are unspecified.
+observation	heat-capacity	Tantalum reference	EFINEA Typical Physical Properties, specific heat at 20 C	Printed 0.14 J/(g K) converts to 140 J/(kg K). No interval or confidence is supplied.
+observation	conductivity	Tantalum reference	EFINEA Typical Physical Properties, thermal conductivity	Printed 57.5 is interpreted as W/(m K); the page formats the unit as W(mK). No test temperature or uncertainty is stated.
+observation	resistivity	Tantalum reference	EFINEA Typical Physical Properties, specific electrical resistance	Printed 0.125 Ohm mm2/m converts to 1.25e-7 Ohm m. This is consistent with the separate 8.0e6 S/m entry but is not an additional independent measurement.
+scalar	density	density,engineering-reference	density	16650	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	293.15	294.15	K
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_temperatures_matched	0	0	1
+scalar	heat-capacity	heat-capacity,engineering-reference	specific_heat_capacity	140	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	293.15	294.15	K
+validity	heat-capacity	engineering_reference_model	1	1	1
+validity	heat-capacity	source_temperatures_matched	0	0	1
+scalar	conductivity	conductivity,engineering-reference	thermal_conductivity	57.5	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	293.15	294.15	K
+validity	conductivity	engineering_reference_model	1	1	1
+validity	conductivity	source_temperatures_matched	0	0	1
+scalar	resistivity	resistivity,engineering-reference	electrical_resistivity	1.25e-7	Ohm*m	constant
+uncertainty	resistivity	unstated	-	-	-	-
+validity	resistivity	temperature	293.15	294.15	K
+validity	resistivity	engineering_reference_model	1	1	1
+validity	resistivity	source_temperatures_matched	0	0	1

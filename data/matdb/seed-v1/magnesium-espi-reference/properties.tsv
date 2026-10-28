@@ -1,0 +1,26 @@
+frankensim.matdb-source.v1
+observation	engineering-reference	Elemental magnesium supplier general-property reference	Frozen coefficients from ESPI Metals General Properties	The 298.15–299.15 K calculation interval is author-declared. Source temperatures are 298.2 K for conductivity, 25 C for Cp, 20 C for resistivity and unstated for density. Every claim requires engineering-reference-model=1 and source-temperatures-matched=0. The supplier lists multiple purities and product forms but does not bind the general-property values to one lot. Scalar thermal conductivity is used as a nominal bulk engineering approximation, not a direction-resolved hexagonal-crystal tensor. No alloy substitution, porosity, burning, phase change, mechanical response or product qualification is inferred.
+observation	density	Elemental magnesium reference	ESPI General Properties, density	Printed 1.738 g/cc converts to 1738 kg/m3; temperature, pressure and statistical uncertainty are unspecified.
+observation	heat-capacity	Elemental magnesium reference	ESPI General Properties, specific heat at 25 C	Printed 0.243 Cal/(g K) is interpreted as small thermochemical calories, using 4.184 J/cal, giving 1016.712 J/(kg K). The caloric realization is an explicit normalization assumption, not a claim of extra source precision; no temperature curve is inferred.
+observation	conductivity	Elemental magnesium reference	ESPI General Properties, thermal conductivity at 298.2 K	Printed 1.56 W/(cm K) converts to 156 W/(m K). No direction, texture or uncertainty is supplied.
+observation	resistivity	Elemental magnesium reference	ESPI General Properties, electrical resistivity at 20 C	Printed 4.45 micro-ohm cm converts to 4.45e-8 Ohm m. Using it near 25 C is explicitly a frozen-coefficient engineering assumption; no temperature coefficient is invented.
+scalar	density	density,engineering-reference	density	1738	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	298.15	299.15	K
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_temperatures_matched	0	0	1
+scalar	heat-capacity	heat-capacity,engineering-reference	specific_heat_capacity	1016.712	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	298.15	299.15	K
+validity	heat-capacity	engineering_reference_model	1	1	1
+validity	heat-capacity	source_temperatures_matched	0	0	1
+scalar	conductivity	conductivity,engineering-reference	thermal_conductivity	156	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	298.15	299.15	K
+validity	conductivity	engineering_reference_model	1	1	1
+validity	conductivity	source_temperatures_matched	0	0	1
+scalar	resistivity	resistivity,engineering-reference	electrical_resistivity	4.45e-8	Ohm*m	constant
+uncertainty	resistivity	unstated	-	-	-	-
+validity	resistivity	temperature	298.15	299.15	K
+validity	resistivity	engineering_reference_model	1	1	1
+validity	resistivity	source_temperatures_matched	0	0	1

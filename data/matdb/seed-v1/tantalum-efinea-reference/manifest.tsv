@@ -1,0 +1,13 @@
+frankensim.matdb-manifest.v3
+pack_id	tantalum-efinea-reference
+redistribution	permitted	Selected attributed numerical facts and original normalization notes only; no source document, prose or table layout is redistributed
+citation	EFINEA Inc., Tantalum Typical Physical Properties, supplier table attributing its physical data to Plansee, accessed 2026-10-28; https://www.efineametals.com/refractory-metal-supplier/tantalum-rod-sheet-foil-coil-strip/tantalum-properties/
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	engineering-reference	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	electrical_resistivity	electrical-resistivity	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	engineering_reference_model	engineering-reference-model	dimensional
+axis	source_temperatures_matched	source-temperatures-matched	dimensional

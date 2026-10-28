@@ -1,0 +1,32 @@
+frankensim.matdb-source.v1
+observation	engineering-reference	Pure molybdenum supplier engineering reference, no specified lot or product condition	Frozen coefficients from ATTL's material introduction	The 293.15–294.15 K calculation interval is author-declared. The source's general-property entries do not specify test temperature, pressure, direction, porosity or uncertainty. Every claim requires engineering-reference-model=1 and source-temperatures-matched=0. The separately listed 30 mm bar strength data are not attached to these general properties. No exact purity, matched specimen, isotropic Poisson ratio, elevated-temperature law or qualification is inferred.
+observation	density	Molybdenum reference	ATTL general-property table, density	Printed 10.22 g/cm3 converts to 10220 kg/m3. This is a nominal material value, not a guaranteed sintered-product density.
+observation	heat-capacity	Molybdenum reference	ATTL general-property table, specific heat	Printed 0.24 J/(g K) converts to 240 J/(kg K); test temperature is unspecified.
+observation	conductivity	Molybdenum reference	ATTL general-property table, thermal conductivity	Printed 140 W/(m K); test temperature is unspecified.
+observation	young-modulus	Molybdenum reference	ATTL general-property table, elastic modulus	Printed 310 GPa; no grain texture, loading direction or modulus-test temperature is specified. No missing Poisson ratio is filled.
+observation	resistivity	Molybdenum reference	ATTL general-property table, resistivity	Printed 0.053 Ohm mm2/m converts to 5.3e-8 Ohm m. No temperature coefficient is supplied.
+scalar	density	density,engineering-reference	density	10220	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	293.15	294.15	K
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_temperatures_matched	0	0	1
+scalar	heat-capacity	heat-capacity,engineering-reference	specific_heat_capacity	240	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	temperature	293.15	294.15	K
+validity	heat-capacity	engineering_reference_model	1	1	1
+validity	heat-capacity	source_temperatures_matched	0	0	1
+scalar	conductivity	conductivity,engineering-reference	thermal_conductivity	140	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	293.15	294.15	K
+validity	conductivity	engineering_reference_model	1	1	1
+validity	conductivity	source_temperatures_matched	0	0	1
+scalar	young-modulus	young-modulus,engineering-reference	young_modulus	310	GPa	constant
+uncertainty	young-modulus	unstated	-	-	-	-
+validity	young-modulus	temperature	293.15	294.15	K
+validity	young-modulus	engineering_reference_model	1	1	1
+validity	young-modulus	source_temperatures_matched	0	0	1
+scalar	resistivity	resistivity,engineering-reference	electrical_resistivity	5.3e-8	Ohm*m	constant
+uncertainty	resistivity	unstated	-	-	-	-
+validity	resistivity	temperature	293.15	294.15	K
+validity	resistivity	engineering_reference_model	1	1	1
+validity	resistivity	source_temperatures_matched	0	0	1
