@@ -211,3 +211,202 @@ fn unresolvable_rotation_refuses_without_committing_an_advance() {
     assert_eq!(result, Err(fs_mbd::DynamicsError::RotationalSolveFailed));
     assert_eq!(state, initial);
 }
+
+#[test]
+fn explicit_rotation_preserves_momentum_and_bounds_energy_in_both_lanes() {
+    let (properties, initial) = body();
+    let integrator = RigidBodyIntegrator::new(Gravity::ZERO);
+    let reference = integrator.diagnostics(initial, properties).unwrap();
+    for kick_drift in [false, true] {
+        let mut state = initial;
+        let mut energy_error = 0.0_f64;
+        let mut momentum_error = 0.0_f64;
+        for _ in 0..20_000 {
+            let step = if kick_drift {
+                integrator.step_kick_drift(state, properties, Wrench::ZERO, 0.05)
+            } else {
+                integrator.step_symplectic(state, properties, Wrench::ZERO, 0.05)
+            }
+            .unwrap();
+            state = step.state_after;
+            energy_error = energy_error.max(
+                (step.diagnostics_after.mechanical_energy - reference.mechanical_energy).abs(),
+            );
+            momentum_error = momentum_error.max(norm(
+                step.diagnostics_after
+                    .angular_momentum_world
+                    .sub(reference.angular_momentum_world),
+            ));
+        }
+        eprintln!(
+            "explicit kick_drift={kick_drift}: energy {energy_error:e}, momentum {momentum_error:e}"
+        );
+        assert!(
+            momentum_error < 1e-10,
+            "spatial momentum drift {momentum_error:e}"
+        );
+        assert!(
+            energy_error < 3e-6,
+            "energy left its envelope by {energy_error:e}"
+        );
+    }
+}
+
+#[test]
+fn explicit_symmetric_top_is_exact_for_every_symmetry_axis() {
+    let (_, initial) = body();
+    let momentum = initial.angular_momentum_body();
+    let duration = 2.3;
+    let integrator = RigidBodyIntegrator::new(Gravity::ZERO);
+    for axis_index in 0..3 {
+        let mut inertia = [2.0; 3];
+        inertia[axis_index] = 3.5;
+        let properties = MassProperties::new(
+            1.0,
+            Vec3::ZERO,
+            Vec3::new(inertia[0], inertia[1], inertia[2]),
+        )
+        .unwrap();
+        let mut axis = [0.0; 3];
+        axis[axis_index] = 1.0;
+        let axis = Vec3::new(axis[0], axis[1], axis[2]);
+        let axial = momentum.dot(axis);
+        let phase = duration * axial * (1.0 / 3.5 - 1.0 / 2.0);
+        // Independent symmetric-top formula: spatial precession then axial spin.
+        let exact_q = initial
+            .pose()
+            .orientation()
+            .right_exp(momentum.scale(duration / 2.0))
+            .unwrap()
+            .right_exp(axis.scale(phase))
+            .unwrap();
+        let parallel = axis.scale(axial);
+        let exact_l = parallel
+            .add(momentum.sub(parallel).scale(phase.cos()))
+            .sub(axis.cross(momentum).scale(phase.sin()));
+        let actual = integrator
+            .step_symplectic(initial, properties, Wrench::ZERO, duration)
+            .unwrap()
+            .state_after;
+        assert!(norm(actual.angular_momentum_body().sub(exact_l)) < 1e-12);
+        for probe in [
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+        ] {
+            assert!(
+                norm(
+                    actual
+                        .pose()
+                        .orientation()
+                        .rotate_body_to_world(probe)
+                        .sub(exact_q.rotate_body_to_world(probe))
+                ) < 1e-12
+            );
+        }
+    }
+}
+
+#[test]
+fn explicit_body_torque_obeys_world_angular_impulse_balance() {
+    let (properties, initial) = body();
+    let integrator = RigidBodyIntegrator::new(Gravity::ZERO);
+    let wrench = Wrench {
+        force_world: Vec3::ZERO,
+        torque_body: Vec3::new(0.6, -0.3, 0.8),
+    };
+    let h = 0.2;
+    for kick_drift in [false, true] {
+        let step = if kick_drift {
+            integrator.step_kick_drift(initial, properties, wrench, h)
+        } else {
+            integrator.step_symplectic(initial, properties, wrench, h)
+        }
+        .unwrap();
+        let torque_before = initial
+            .pose()
+            .orientation()
+            .rotate_body_to_world(wrench.torque_body);
+        let expected = if kick_drift {
+            torque_before.scale(h)
+        } else {
+            torque_before
+                .add(
+                    step.state_after
+                        .pose()
+                        .orientation()
+                        .rotate_body_to_world(wrench.torque_body),
+                )
+                .scale(0.5 * h)
+        };
+        let actual = step
+            .diagnostics_after
+            .angular_momentum_world
+            .sub(step.diagnostics_before.angular_momentum_world);
+        assert!(norm(actual.sub(expected)) < 1e-12);
+    }
+}
+
+#[test]
+fn explicit_asymmetric_rotation_is_reversible_and_second_order() {
+    let (properties, initial) = body();
+    let integrator = RigidBodyIntegrator::new(Gravity::ZERO);
+    let run = |mut state, count, h| {
+        for _ in 0..count {
+            state = integrator
+                .step_symplectic(state, properties, Wrench::ZERO, h)
+                .unwrap()
+                .state_after;
+        }
+        state
+    };
+    let forward = run(initial, 700, 0.03);
+    let reversed = RigidBodyState::new(
+        forward.pose(),
+        Vec3::ZERO,
+        forward.angular_momentum_body().scale(-1.0),
+    )
+    .unwrap();
+    let back = run(reversed, 700, 0.03);
+    assert!(
+        norm(
+            back.angular_momentum_body()
+                .add(initial.angular_momentum_body())
+        ) < 1e-11
+    );
+    let probe = Vec3::new(1.0, 0.0, 0.0);
+    assert!(
+        norm(
+            back.pose()
+                .orientation()
+                .rotate_body_to_world(probe)
+                .sub(initial.pose().orientation().rotate_body_to_world(probe))
+        ) < 1e-11
+    );
+
+    let reference = run(initial, 4096, 2.0 / 4096.0);
+    let errors: Vec<_> = [20, 40, 80]
+        .into_iter()
+        .map(|count| {
+            let actual = run(initial, count, 2.0 / f64::from(count));
+            norm(
+                actual
+                    .angular_momentum_body()
+                    .sub(reference.angular_momentum_body()),
+            ) + norm(
+                actual
+                    .pose()
+                    .orientation()
+                    .rotate_body_to_world(probe)
+                    .sub(reference.pose().orientation().rotate_body_to_world(probe)),
+            )
+        })
+        .collect();
+    for pair in errors.windows(2) {
+        let ratio = pair[0] / pair[1];
+        assert!(
+            (3.5..4.5).contains(&ratio),
+            "second-order ratio {ratio}, errors {errors:?}"
+        );
+    }
+}

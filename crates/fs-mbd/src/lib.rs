@@ -1317,6 +1317,76 @@ impl RigidBodyIntegrator {
         })
     }
 
+    /// Performs one explicit second-order symplectic free-rotation step.
+    ///
+    /// This alternative to [`Self::step`] avoids its nonlinear solve, preserves
+    /// angular momentum, and integrates symmetric tops exactly. Asymmetric-body
+    /// energy has a bounded second-order defect instead of exact preservation.
+    ///
+    /// Force and torque are constant over this step. No contact, constraint, or
+    /// collision query is performed. A failed validation leaves no mutable state
+    /// because this method returns a new state in its receipt.
+    ///
+    /// Translation is exact for the declared constant world force. Two body
+    /// torque half-kicks surround a symmetric, momentum-preserving free-rotation
+    /// map. The free map is exact for spherical and axisymmetric inertia;
+    /// asymmetric inertia uses a second-order Hamiltonian splitting with bounded
+    /// energy error at adequately resolved fixed steps, rather than secular
+    /// Runge--Kutta drift. No conservation claim is made for external torque.
+    pub fn step_symplectic(
+        self,
+        state: RigidBodyState,
+        properties: MassProperties,
+        wrench: Wrench,
+        duration_seconds: f64,
+    ) -> Result<StepReceipt, DynamicsError> {
+        if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
+            return Err(DynamicsError::InvalidStepDuration);
+        }
+        self.gravity.validate()?;
+        state.validate()?;
+        properties.validate()?;
+        wrench.validate()?;
+        let diagnostics_before = self.diagnostics(state, properties)?;
+        let total_force_world = wrench
+            .force_world
+            .add(self.gravity.acceleration_world().scale(properties.mass));
+        let linear_momentum_mid = state
+            .linear_momentum_world
+            .add(total_force_world.scale(0.5 * duration_seconds));
+        let position_after = state
+            .pose
+            .position_world
+            .add(linear_momentum_mid.scale(duration_seconds / properties.mass));
+        let linear_momentum_after = state
+            .linear_momentum_world
+            .add(total_force_world.scale(duration_seconds));
+
+        let half_torque_impulse = wrench.torque_body.scale(0.5 * duration_seconds);
+        let angular_momentum_kicked = state.angular_momentum_body.add(half_torque_impulse);
+        let (orientation_after, angular_momentum_drifted) = free_rotation_step(
+            state.pose.orientation,
+            angular_momentum_kicked,
+            properties,
+            duration_seconds,
+        )?;
+        let angular_momentum_after = angular_momentum_drifted.add(half_torque_impulse);
+
+        let state_after = RigidBodyState::new(
+            Pose::new(position_after, orientation_after)?,
+            linear_momentum_after,
+            angular_momentum_after,
+        )?;
+        let diagnostics_after = self.diagnostics(state_after, properties)?;
+        Ok(StepReceipt {
+            duration_seconds,
+            state_before: state,
+            state_after,
+            diagnostics_before,
+            diagnostics_after,
+        })
+    }
+
     /// Performs one deterministic kick-drift Lie-group step.
     ///
     /// The supplied wrench is evaluated before this method is called. Linear
@@ -1324,8 +1394,10 @@ impl RigidBodyIntegrator {
     /// attitude drift with the updated momenta. Consequently, when a caller
     /// re-evaluates a conservative position force after every accepted step,
     /// the translational map is the symplectic-Euler map rather than the
-    /// secularly unstable explicit Taylor map. The rotational update is a
-    /// first-order Lie-group kick-drift, not a variational rigid-body claim.
+    /// secularly unstable explicit Taylor map. Rotation receives a body torque
+    /// kick followed by the momentum-preserving free rotation of
+    /// [`Self::step_symplectic`]. The forced composition is first order;
+    /// torque-free rotation retains the symmetric second-order map.
     /// Contact active sets, force evaluation, convergence, and energy auditing
     /// remain responsibilities of the composing solver.
     pub fn step_kick_drift(
@@ -1354,16 +1426,15 @@ impl RigidBodyIntegrator {
             .position_world
             .add(linear_momentum_after.scale(duration_seconds / properties.mass));
 
-        let angular_rate_before =
-            angular_momentum_rate(state.angular_momentum_body, properties, wrench.torque_body);
-        let angular_momentum_after = state
+        let angular_momentum_kicked = state
             .angular_momentum_body
-            .add(angular_rate_before.scale(duration_seconds));
-        let angular_velocity_after = properties.angular_velocity_body(angular_momentum_after);
-        let orientation_after = state
-            .pose
-            .orientation
-            .right_exp(angular_velocity_after.scale(duration_seconds))?;
+            .add(wrench.torque_body.scale(duration_seconds));
+        let (orientation_after, angular_momentum_after) = free_rotation_step(
+            state.pose.orientation,
+            angular_momentum_kicked,
+            properties,
+            duration_seconds,
+        )?;
 
         let state_after = RigidBodyState::new(
             Pose::new(position_after, orientation_after)?,
@@ -1598,15 +1669,80 @@ fn solve_rotation_3(mut a: [[f64; 3]; 3], mut b: [f64; 3]) -> Result<[f64; 3], D
     Ok(x)
 }
 
-fn angular_momentum_rate(
-    angular_momentum_body: Vec3,
+fn free_rotation_step(
+    mut orientation: UnitQuaternion,
+    mut momentum: Vec3,
     properties: MassProperties,
-    torque_body: Vec3,
-) -> Vec3 {
-    // Euler equation in the rotating body frame: Ldot = L × omega + tau.
-    angular_momentum_body
-        .cross(properties.angular_velocity_body(angular_momentum_body))
-        .add(torque_body)
+    duration_seconds: f64,
+) -> Result<(UnitQuaternion, Vec3), DynamicsError> {
+    properties.angular_velocity_body_checked(momentum)?;
+    let inertia = [
+        properties.principal_inertia_body.x,
+        properties.principal_inertia_body.y,
+        properties.principal_inertia_body.z,
+    ];
+    let mut axes = [0, 1, 2];
+    axes.sort_by(|&first, &second| inertia[first].total_cmp(&inertia[second]));
+    let [first, reference, second] = axes;
+    let reference_inertia = inertia[reference];
+
+    // Split H = |L|²/(2 Iref) + (1/Ia - 1/Iref) La²/2
+    //                           + (1/Ib - 1/Iref) Lb²/2.
+    // The spherical term commutes with both axis terms. Choosing the median
+    // inertia minimizes the product of their coefficient magnitudes and makes
+    // one vanish for ANY axisymmetric body, giving its exact free solution.
+    // Each axis flow has constant La: R <- R exp(theta ea),
+    // L <- exp(-theta ea) L. Hence R L is unchanged by construction.
+    // Symmetric a(h/2), b(h), a(h/2) composition is second-order and symplectic.
+    // See Dullweber--Leimkuhler--McLachlan, J. Chem. Phys. 107 (1997), 5840.
+    for (axis, duration) in [
+        (first, 0.5 * duration_seconds),
+        (second, duration_seconds),
+        (first, 0.5 * duration_seconds),
+    ] {
+        if inertia[axis] == reference_inertia {
+            continue;
+        }
+        let components = [momentum.x, momentum.y, momentum.z];
+        let angle = finite_derived(
+            duration * (components[axis] / inertia[axis] - components[axis] / reference_inertia),
+            "free_rotation.angle",
+        )?;
+        if angle == 0.0 {
+            continue;
+        }
+        let (sine_half, cosine_half) = (0.5 * angle).sin_cos();
+        let mut vector_half = [0.0; 3];
+        vector_half[axis] = sine_half;
+        let increment =
+            UnitQuaternion::new(cosine_half, vector_half[0], vector_half[1], vector_half[2])?;
+        let product = orientation.multiply(increment);
+        orientation = UnitQuaternion::new(product.w, product.x, product.y, product.z)?;
+
+        // Only the perpendicular plane changes. Reuse the quaternion's half
+        // angle instead of evaluating a second sine/cosine pair, and leave the
+        // conserved axial component bit-identical.
+        let half = increment.components()[axis + 1];
+        let sine = 2.0 * increment.w * half;
+        let cosine = increment.w.mul_add(increment.w, -(half * half));
+        let next = (axis + 1) % 3;
+        let last = (axis + 2) % 3;
+        let mut rotated = components;
+        rotated[next] = cosine.mul_add(components[next], sine * components[last]);
+        rotated[last] = cosine.mul_add(components[last], -(sine * components[next]));
+        momentum = Vec3::new(rotated[0], rotated[1], rotated[2]);
+    }
+
+    // The commuting spherical flow changes attitude but not body momentum.
+    // Divide before multiplying by h to avoid forming an overflowing h/Iref.
+    let spherical_rotation = Vec3::new(
+        momentum.x / reference_inertia,
+        momentum.y / reference_inertia,
+        momentum.z / reference_inertia,
+    )
+    .scale(duration_seconds);
+    orientation = orientation.right_exp(spherical_rotation)?;
+    Ok((orientation, momentum))
 }
 
 #[cfg(test)]

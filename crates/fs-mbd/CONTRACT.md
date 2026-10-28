@@ -128,6 +128,18 @@ a dynamic, contact, grasp-stability, or force-closure result.
   `Result<DynamicsDiagnostics, DynamicsError>`. It revalidates its state,
   gravity, and mass properties and refuses non-finite derived energies or world
   angular momentum rather than publishing an `inf`/`NaN` ledger.
+- `RigidBodyIntegrator::step_symplectic` is an explicit second-order alternative
+  to the energy/momentum midpoint lane. Body-torque half-kicks surround a
+  symmetric Hamiltonian free-rotation split, preserving spatial angular momentum
+  to roundoff without a nonlinear solve. A commuting spherical term uses the
+  median principal inertia, giving exact spherical and axisymmetric free motion;
+  asymmetric bodies retain a bounded second-order energy defect at adequately
+  resolved fixed steps. It does not inherit `step`'s exact energy/work identity.
+- `RigidBodyIntegrator::step_kick_drift` applies the full declared torque kick,
+  then uses the same free-rotation map as `step_symplectic`. Its forced
+  composition remains first order; torque-free rotation is second order and
+  preserves spatial momentum. Each body torque kick contributes its world
+  impulse at that kick's actual attitude.
 - `RigidBodyIntegrator::advance` invokes its cancellation callback before each
   whole step. It returns `AdvanceOutcome::Cancelled` with the last fully
   committed state and diagnostics when cancellation is observed.
