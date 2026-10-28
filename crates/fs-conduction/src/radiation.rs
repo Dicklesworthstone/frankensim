@@ -38,6 +38,8 @@ use crate::solve::{
 };
 
 mod ambient;
+mod radiosity_adjoint;
+pub use radiosity_adjoint::{EnclosureRadiosityLinearization, EnclosureRadiosityPullback};
 mod balance;
 mod convection;
 mod prepared;

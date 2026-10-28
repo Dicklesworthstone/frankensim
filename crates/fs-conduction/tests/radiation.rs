@@ -1126,3 +1126,78 @@ mod material_assignment;
 
 #[path = "radiation/convection.rs"]
 mod convection;
+
+
+#[test]
+fn enclosure_radiosity_transpose_matches_independent_plate_derivatives() {
+    use fs_conduction::radiation::EnclosureRadiosityLinearization;
+    for (ea, eb) in [(0.8, 0.6), (1.0, 0.6), (1.0, 1.0)] {
+        let (_mesh, left, right) = opposite_surfaces_with_emissivities(
+            emissivity("left", ea, "adjoint-left"),
+            emissivity("right", eb, "adjoint-right"),
+        );
+        let factors = ViewFactorMatrix::infinite_parallel_plates(left.area_m2()).unwrap();
+        let enclosure = GrayDiffuseEnclosure::new(vec![left, right], factors).unwrap();
+        for hot in [400.0, f64::from_bits(300.0_f64.to_bits() + 1)] {
+            with_cx(|cx| {
+                let linearization = EnclosureRadiosityLinearization::new(
+                    cx, &enclosure, &[hot, 300.0], 1e-8,
+                ).unwrap();
+                let gradient = linearization.pullback(cx, &[0.7, -0.2], 1e-12, 32).unwrap();
+                // Independent series-resistance law with factored T^4
+                // difference retains a one-ulp temperature departure.
+                let resistance = 1.0 / ea + 1.0 / eb - 1.0;
+                let flux = STEFAN_BOLTZMANN_W_M2_K4 * (hot - 300.0)
+                    * (hot + 300.0) * (hot * hot + 90_000.0) / resistance;
+                let expected_t = [
+                    0.9 * 4.0 * STEFAN_BOLTZMANN_W_M2_K4 * hot.powi(3) / resistance,
+                    -0.9 * 4.0 * STEFAN_BOLTZMANN_W_M2_K4 * 300.0_f64.powi(3) / resistance,
+                ];
+                let expected_e = [0.9 * flux / (resistance * ea), 0.9 * flux / (resistance * eb)];
+                for (actual, expected) in gradient.temperatures.iter().zip(expected_t)
+                    .chain(gradient.log_emissivities.iter().zip(expected_e))
+                {
+                    assert!((*actual - expected).abs() <= 4e-12 * expected.abs(),
+                        "actual {actual:e}, expected {expected:e}, eps=({ea},{eb}), T={hot}");
+                }
+                assert!(gradient.relative_residual <= 1e-12);
+            });
+        }
+    }
+}
+
+#[test]
+fn enclosure_radiosity_transpose_preserves_small_controls_and_refuses_rounded_false_solves() {
+    use fs_conduction::radiation::EnclosureRadiosityLinearization;
+    let (_mesh, left, right) = opposite_surfaces();
+    let area = left.area_m2();
+    let factors = ViewFactorMatrix::infinite_parallel_plates(area).unwrap();
+    let enclosure = GrayDiffuseEnclosure::new(vec![left, right], factors).unwrap();
+    let linearization = with_cx(|cx| {
+        EnclosureRadiosityLinearization::new(cx, &enclosure, &[400.0, 300.0], 1e-8).unwrap()
+    });
+    with_cx(|cx| {
+        let ordinary = linearization.pullback(cx, &[1.0, 0.0], 1e-12, 32).unwrap();
+        let tiny = linearization.pullback(cx, &[1e-250, 0.0], 1e-12, 32).unwrap();
+        for (&actual, &expected) in tiny.temperatures.iter().zip(&ordinary.temperatures) {
+            assert!(actual != 0.0);
+            assert!((actual / 1e-250 - expected).abs() < 4e-12 * expected.abs());
+        }
+        // The unit-normalized equation is solvable, but its subnormal physical
+        // adjoint rounds to a different vector. It must fail the actual gate.
+        let refusal = linearization.pullback(cx, &[f64::from_bits(1), 0.0], 1e-12, 32);
+        assert!(matches!(refusal, Err(ConductionError::Radiation { what, .. })
+            if what.contains("physical rescaling")));
+        let closure = linearization.pullback(cx, &[area, area], 1e-12, 32).unwrap();
+        assert_eq!(closure.temperatures, vec![0.0, 0.0]);
+        assert_eq!(closure.log_emissivities, vec![0.0, 0.0]);
+        assert_eq!(closure.iterations, 0);
+        assert!(linearization.pullback(cx, &[1.0], 1e-12, 32).is_err());
+        assert!(linearization.pullback(cx, &[1.0, 0.0], 1e-12, 0).is_err());
+        assert!(linearization.pullback(cx, &[f64::NAN, 0.0], 1e-12, 32).is_err());
+    });
+    assert!(matches!(
+        with_cancelled_cx(|cx| linearization.pullback(cx, &[1.0, 0.0], 1e-12, 32)),
+        Err(ConductionError::Cancelled { .. })
+    ));
+}
