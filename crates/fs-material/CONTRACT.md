@@ -20,6 +20,16 @@ homogenization, the P2 milestone.
 
 ## Public types and semantics
 
+- `wood_moisture::ResolvedWoodMoisture` binds the original 12% dry-basis
+  density and independent green-to-ovendry radial, tangential and volumetric
+  shrinkages, plus the source-declared fiber-saturation approximation. Exact
+  keys, typed source queries, card identity and all five receipts survive.
+  Equation (4-9) gives dimension ratios relative to 12% moisture; independent
+  volume data and water mass then give density while conserving ovendry mass.
+  The admitted moisture interval intersects the coefficient domains with the
+  below-fiber-saturation range. No longitudinal dimension or deformation
+  tensor is inferred from independent population averages. Moisture is
+  prescribed; this does not solve drying, diffusion, hysteresis or stress.
 
 - `section_temperature::thermoelastic::ConcentricThermoelasticLaw` derives
   layer force, Helmholtz storage, entropy and thermal curvature from the same

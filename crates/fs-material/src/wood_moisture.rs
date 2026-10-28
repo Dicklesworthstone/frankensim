@@ -17,9 +17,15 @@
 //! [`WoodMoistureLaw::modulus_factor`] holds them at their 12 % values, an
 //! assumption it must state.
 use crate::MaterialError;
-use fs_matdb::{MaterialCard, QueryPoint, SelectionPolicy};
+use crate::state_point::{
+    MaterialPropertySelection, ResolvedMaterialStatePoint, ScalarAdmissibility,
+    ScalarPropertyRequirement, is_fixed_external_coordinate, resolve_material_state_point,
+};
+use fs_blake3::ContentHash;
+use fs_matdb::{EvaluationDecision, MaterialCard, PropertyKey, QueryPoint, SelectionPolicy};
 use fs_math::det;
-use fs_qty::Dims;
+use fs_qty::semantic::{MoistureBasis, QuantityKind, SemanticType, ValueForm};
+use fs_qty::{Density, Dims, QuantitySpec};
 
 /// The FPL tables' reference moisture content, 12 %.
 pub const REFERENCE_MOISTURE_CONTENT: f64 = 0.12;
@@ -200,11 +206,341 @@ impl WoodMoistureLaw {
     /// Equation (4-9) volume, V(M) = V_green (1 - S_0 (1 - M/MCfs)).
     #[must_use]
     pub fn density_factor(&self) -> f64 {
-        let volume = |m: f64| 1.0 - self.volumetric_shrinkage * (1.0 - m / self.fiber_saturation);
+        let volume = |m| remaining_fraction(self.volumetric_shrinkage, m, self.fiber_saturation);
         (1.0 + self.moisture_content) / (1.0 + REFERENCE_MOISTURE_CONTENT)
             * volume(REFERENCE_MOISTURE_CONTENT)
             / volume(self.moisture_content)
     }
+}
+
+fn remaining_fraction(shrinkage: f64, moisture: f64, fiber_saturation: f64) -> f64 {
+    1.0 - shrinkage * (1.0 - moisture / fiber_saturation)
+}
+
+/// Original source roles for the FPL Equation (4-9) dimensional model.
+/// All moisture values are water mass divided by ovendry wood mass. An
+/// unqualified dimensional coordinate is accepted only with this explicit
+/// dry-mass convention; wet-mass moisture and relative humidity are different.
+#[derive(Clone, Copy, Debug)]
+pub struct WoodMoistureSource<'a> {
+    /// Density at exactly 12% dry-basis moisture, in kg/m³.
+    pub density: &'a PropertyKey,
+    /// Radial green-to-ovendry shrinkage as a fraction of green length.
+    pub radial_shrinkage: &'a PropertyKey,
+    /// Tangential green-to-ovendry shrinkage as a fraction of green length.
+    pub tangential_shrinkage: &'a PropertyKey,
+    /// Independent volumetric green-to-ovendry shrinkage of green volume.
+    pub volumetric_shrinkage: &'a PropertyKey,
+    /// Source-declared fiber saturation; a handbook approximation remains one.
+    pub fiber_saturation: &'a PropertyKey,
+    /// Original source coordinate name, without aliasing or normalization.
+    pub moisture_axis: &'a str,
+    /// Complete original query for density at 12% moisture.
+    pub reference_point: &'a QueryPoint,
+    /// Complete original query for the four constant model parameters.
+    pub shrinkage_point: &'a QueryPoint,
+}
+
+/// Source-bound moisture dimensions and density relative to 12% moisture.
+/// The independent radial, tangential and volume averages do not define one
+/// deformation tensor. In particular, no longitudinal change is inferred.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedWoodMoisture {
+    density_source: ResolvedMaterialStatePoint,
+    shrinkage_source: ResolvedMaterialStatePoint,
+    reference_density: f64,
+    shrinkages: [f64; 3],
+    fiber_saturation: f64,
+    moisture_span: [f64; 2],
+}
+
+/// A prescribed-moisture state of the retained handbook model. Moisture
+/// exchange changes total mass; density times volume divided by `(1 + M)`
+/// preserves ovendry mass. This does not predict drying rate or moisture flow.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WoodMoistureState {
+    /// Immutable card providing density and all four model coefficients.
+    pub material_card_identity: ContentHash,
+    /// Prescribed water mass / ovendry wood mass.
+    pub moisture_content: f64,
+    /// Actual mass, including the prescribed water, per current volume [kg/m³].
+    pub density_kg_m3: f64,
+    /// Radial length at this moisture divided by radial length at 12%.
+    pub radial_length_factor: f64,
+    /// Tangential length at this moisture divided by tangential length at 12%.
+    pub tangential_length_factor: f64,
+    /// Volume at this moisture divided by volume at 12%, using its own source.
+    pub volume_factor: f64,
+}
+
+impl ResolvedWoodMoisture {
+    /// Bind exact source keys and contexts without freezing varying laws or
+    /// replacing missing coefficients. Source applicability bounds intersect
+    /// the below-fiber-saturation model domain; they are never widened.
+    #[allow(clippy::too_many_lines)]
+    pub fn from_card(
+        card: &MaterialCard,
+        source: WoodMoistureSource<'_>,
+        selection: MaterialPropertySelection,
+    ) -> Result<Self, MaterialError> {
+        let dry_mass = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::Moisture(MoistureBasis::DryMass),
+            ValueForm::Static,
+        ));
+        for point in [source.reference_point, source.shrinkage_point] {
+            if !point.axes().contains_key(source.moisture_axis)
+                || !point
+                    .axis_quantities()
+                    .get(source.moisture_axis)
+                    .is_some_and(|q| *q == QuantitySpec::dimensional(Dims::NONE) || *q == dry_mass)
+            {
+                return Err(wood_error(
+                    "a typed dry-basis moisture source coordinate is required",
+                ));
+            }
+        }
+        if source.reference_point.axes()[source.moisture_axis] != REFERENCE_MOISTURE_CONTENT {
+            return Err(wood_error(
+                "density must be queried at exactly 12% dry-basis moisture",
+            ));
+        }
+        for (axis, value) in source.reference_point.axes() {
+            if axis != source.moisture_axis
+                && let Some(other) = source.shrinkage_point.axes().get(axis)
+                && (value.to_bits() != other.to_bits()
+                    || source.reference_point.axis_quantities().get(axis)
+                        != source.shrinkage_point.axis_quantities().get(axis))
+            {
+                return Err(wood_error(
+                    "density and shrinkage sources must agree on shared non-moisture conditions",
+                ));
+            }
+        }
+        let requirement = |key: &PropertyKey, dims, admissibility| {
+            if key.quantity() != QuantitySpec::dimensional(dims) {
+                return Err(wood_error(
+                    "wood model keys must retain their original SI quantity dimensions",
+                ));
+            }
+            ScalarPropertyRequirement::try_with_key(key, admissibility)
+                .map_err(|error| wood_error(error.to_string()))
+        };
+        let (density_selection, shrinkage_selection) = match selection {
+            MaterialPropertySelection::PinnedByProperty(pins) => {
+                if pins.len() != 5 {
+                    return Err(wood_error(
+                        "the source plan must pin exactly five wood parameters",
+                    ));
+                }
+                let (density_pins, shrinkage_pins): (Vec<_>, Vec<_>) =
+                    pins.into_iter().partition(|(name, id)| {
+                        name == source.density.name()
+                            && card
+                                .claims()
+                                .claim(*id)
+                                .is_some_and(|claim| claim.key == *source.density)
+                    });
+                (
+                    MaterialPropertySelection::PinnedByProperty(density_pins),
+                    MaterialPropertySelection::PinnedByProperty(shrinkage_pins),
+                )
+            }
+            policy => (policy.clone(), policy),
+        };
+        let density_source = resolve_material_state_point(
+            card,
+            source.reference_point,
+            &[requirement(
+                source.density,
+                Density::DIMS,
+                ScalarAdmissibility::StrictlyPositive,
+            )?],
+            density_selection,
+        )
+        .map_err(|error| wood_error(error.to_string()))?;
+        let keys = [
+            source.radial_shrinkage,
+            source.tangential_shrinkage,
+            source.volumetric_shrinkage,
+            source.fiber_saturation,
+        ];
+        let requirements = keys
+            .iter()
+            .map(|key| requirement(key, Dims::NONE, ScalarAdmissibility::NonNegative))
+            .collect::<Result<Vec<_>, _>>()?;
+        let shrinkage_source = resolve_material_state_point(
+            card,
+            source.shrinkage_point,
+            &requirements,
+            shrinkage_selection,
+        )
+        .map_err(|error| wood_error(error.to_string()))?;
+        for (state, point) in [
+            (&density_source, source.reference_point),
+            (&shrinkage_source, source.shrinkage_point),
+        ] {
+            admit_wood_parameters(state, point, source.moisture_axis)?;
+        }
+        let density = &density_source.properties()[0];
+        if density
+            .answer()
+            .evidence
+            .model
+            .validity
+            .bound(source.moisture_axis)
+            != Some((REFERENCE_MOISTURE_CONTENT, REFERENCE_MOISTURE_CONTENT))
+        {
+            return Err(wood_error(
+                "the reference density source must be specific to 12% moisture",
+            ));
+        }
+        let values = keys.map(|key| {
+            shrinkage_source
+                .property_by_key(key)
+                .expect("the exact required key was resolved")
+                .value_si()
+        });
+        let [radial, tangential, volumetric, fiber_saturation] = values;
+        if [radial, tangential, volumetric]
+            .iter()
+            .any(|s| !(0.0..1.0).contains(s))
+            || !(REFERENCE_MOISTURE_CONTENT..=1.0).contains(&fiber_saturation)
+            || fiber_saturation == REFERENCE_MOISTURE_CONTENT
+        {
+            return Err(wood_error(
+                "shrinkages must be fractions below one and fiber saturation above 12%",
+            ));
+        }
+        let mut moisture_span = [0.0_f64, fiber_saturation];
+        for property in shrinkage_source.properties() {
+            let (low, high) = property
+                .answer()
+                .evidence
+                .model
+                .validity
+                .bound(source.moisture_axis)
+                .ok_or_else(|| {
+                    wood_error("model parameters require an explicit moisture applicability domain")
+                })?;
+            moisture_span[0] = moisture_span[0].max(low);
+            moisture_span[1] = moisture_span[1].min(high);
+        }
+        if !(moisture_span[0]..=moisture_span[1]).contains(&REFERENCE_MOISTURE_CONTENT) {
+            return Err(wood_error(
+                "model parameter domains must include the 12% reference",
+            ));
+        }
+        let reference_density = density.value_si();
+        Ok(Self {
+            density_source,
+            shrinkage_source,
+            reference_density,
+            shrinkages: [radial, tangential, volumetric],
+            fiber_saturation,
+            moisture_span,
+        })
+    }
+
+    /// Original reference-density query, card and selected-source receipt.
+    #[must_use]
+    pub const fn density_source(&self) -> &ResolvedMaterialStatePoint {
+        &self.density_source
+    }
+
+    /// Original R/T/V/FSP parameter query and all four selected-source receipts.
+    #[must_use]
+    pub const fn shrinkage_source(&self) -> &ResolvedMaterialStatePoint {
+        &self.shrinkage_source
+    }
+
+    /// Source-provided dry-basis fiber-saturation approximation.
+    #[must_use]
+    pub const fn fiber_saturation(&self) -> f64 {
+        self.fiber_saturation
+    }
+
+    /// Intersection of the parameter domains and `[0, fiber_saturation]`.
+    #[must_use]
+    pub const fn moisture_span(&self) -> [f64; 2] {
+        self.moisture_span
+    }
+
+    /// Evaluate Equation (4-9) at prescribed dry-basis moisture. Ratios of
+    /// remaining dimensions give factors relative to the 12% reference, not
+    /// subtraction of two shrinkage percentages. Volume uses its own data.
+    pub fn at_moisture_content(
+        &self,
+        moisture_content: f64,
+    ) -> Result<WoodMoistureState, MaterialError> {
+        if !moisture_content.is_finite()
+            || !(self.moisture_span[0]..=self.moisture_span[1]).contains(&moisture_content)
+        {
+            return Err(wood_error(
+                "moisture is outside the admitted below-fiber-saturation domain",
+            ));
+        }
+        let [
+            radial_length_factor,
+            tangential_length_factor,
+            volume_factor,
+        ] = self.shrinkages.map(|s| {
+            remaining_fraction(s, moisture_content, self.fiber_saturation)
+                / remaining_fraction(s, REFERENCE_MOISTURE_CONTENT, self.fiber_saturation)
+        });
+        let density_kg_m3 = self.reference_density
+            * ((1.0 + moisture_content) / (1.0 + REFERENCE_MOISTURE_CONTENT))
+            / volume_factor;
+        if !density_kg_m3.is_finite() || density_kg_m3 <= 0.0 {
+            return Err(wood_error(
+                "moisture-adjusted density is not finite and positive",
+            ));
+        }
+        Ok(WoodMoistureState {
+            material_card_identity: self.density_source.card_identity(),
+            moisture_content,
+            density_kg_m3,
+            radial_length_factor,
+            tangential_length_factor,
+            volume_factor,
+        })
+    }
+}
+
+fn wood_error(what: impl Into<String>) -> MaterialError {
+    MaterialError::Parameters { what: what.into() }
+}
+
+fn admit_wood_parameters(
+    state: &ResolvedMaterialStatePoint,
+    point: &QueryPoint,
+    moisture_axis: &str,
+) -> Result<(), MaterialError> {
+    for property in state.properties() {
+        if !property.source_axes().is_empty()
+            || property.answer().receipt.decision != EvaluationDecision::ConstantWithinValidity
+        {
+            return Err(wood_error(
+                "wood reference parameters must be static scalar source laws",
+            ));
+        }
+        for (axis, &(low, high)) in property.answer().evidence.model.validity.bounds() {
+            if axis == moisture_axis {
+                continue;
+            }
+            let quantity = point.axis_quantities().get(axis).copied();
+            let value = point.axes().get(axis).copied();
+            let flag = quantity == Some(QuantitySpec::dimensional(Dims::NONE))
+                && low == high
+                && (low == 0.0 || low == 1.0)
+                && value == Some(low);
+            if !flag && !is_fixed_external_coordinate(axis, quantity, value) {
+                return Err(wood_error(
+                    "wood parameters require fixed typed conditions and explicit source applicability flags",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Equation (5-3) on explicit values (moisture contents as fractions), for a
@@ -226,6 +562,248 @@ pub fn moisture_adjusted_property(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fs_evidence::ValidityDomain;
+    use fs_matdb::{
+        ClaimSet, InterpolationPolicy, MaterialStateId, PropertyClaim, PropertyValue, Provenance,
+        UncertaintyModel,
+    };
+
+    fn fixture(
+        axis: &str,
+        values: [f64; 5],
+        span: [f64; 2],
+    ) -> (MaterialCard, [PropertyKey; 5], QueryPoint) {
+        let keys = [
+            "rho-source",
+            "radial-source",
+            "tangential-source",
+            "volume-source",
+            "fsp-source",
+        ]
+        .map(|name| {
+            PropertyKey::new(
+                name,
+                if name == "rho-source" {
+                    Density::DIMS
+                } else {
+                    Dims::NONE
+                },
+            )
+        });
+        let point = QueryPoint::new()
+            .with_quantity(axis, QuantitySpec::dimensional(Dims::NONE), 0.12)
+            .unwrap()
+            .with_quantity(
+                "engineering-reference-model",
+                QuantitySpec::dimensional(Dims::NONE),
+                1.0,
+            )
+            .unwrap();
+        let mut claims = ClaimSet::new();
+        for (index, (key, value)) in keys.iter().zip(values).enumerate() {
+            let bounds = if index == 0 { [0.12, 0.12] } else { span };
+            claims
+                .insert_claim(PropertyClaim {
+                    key: key.clone(),
+                    value: PropertyValue::Scalar {
+                        value,
+                        dims: key.dims(),
+                    },
+                    validity: ValidityDomain::default()
+                        .with_quantity(
+                            axis,
+                            QuantitySpec::dimensional(Dims::NONE),
+                            bounds[0],
+                            bounds[1],
+                        )
+                        .with_quantity(
+                            "engineering-reference-model",
+                            QuantitySpec::dimensional(Dims::NONE),
+                            1.0,
+                            1.0,
+                        ),
+                    uncertainty: UncertaintyModel::Unstated,
+                    interpolation: InterpolationPolicy::ConstantWithinValidity,
+                    observations: Vec::new(),
+                    provenance: Provenance {
+                        source: "manufactured independent moisture geometry coefficients".into(),
+                        license: "CC0-1.0".into(),
+                        artifact: None,
+                    },
+                })
+                .unwrap();
+        }
+        let card = MaterialCard::assemble(
+            MaterialStateId {
+                chemistry: "manufactured moisture model".into(),
+                phase: "solid".into(),
+                process: "numerical regression only".into(),
+                revision: 0,
+            },
+            claims,
+            Vec::new(),
+        )
+        .unwrap();
+        (card, keys, point)
+    }
+
+    fn source<'a>(
+        keys: &'a [PropertyKey; 5],
+        point: &'a QueryPoint,
+        axis: &'a str,
+    ) -> WoodMoistureSource<'a> {
+        WoodMoistureSource {
+            density: &keys[0],
+            radial_shrinkage: &keys[1],
+            tangential_shrinkage: &keys[2],
+            volumetric_shrinkage: &keys[3],
+            fiber_saturation: &keys[4],
+            moisture_axis: axis,
+            reference_point: point,
+            shrinkage_point: point,
+        }
+    }
+
+    #[test]
+    fn sourced_moisture_geometry_preserves_dry_mass_and_independent_volume() {
+        for axis in ["moisture-content", "moisture_content"] {
+            let (card, keys, point) = fixture(axis, [560.0, 0.04, 0.08, 0.14, 0.30], [0.0, 0.30]);
+            let law = ResolvedWoodMoisture::from_card(
+                &card,
+                source(&keys, &point, axis),
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .unwrap();
+            let reference = law.at_moisture_content(0.12).unwrap();
+            assert_eq!(reference.density_kg_m3, 560.0);
+            assert_eq!(reference.radial_length_factor, 1.0);
+            assert_eq!(reference.tangential_length_factor, 1.0);
+            assert_eq!(reference.volume_factor, 1.0);
+            let dry = law.at_moisture_content(0.0).unwrap();
+            // Independent green dimensions: R12=.976, T12=.952, V12=.916.
+            assert!((dry.radial_length_factor - 0.96 / 0.976).abs() < 1e-14);
+            assert!((dry.tangential_length_factor - 0.92 / 0.952).abs() < 1e-14);
+            assert!((dry.volume_factor - 0.86 / 0.916).abs() < 1e-14);
+            assert!((dry.density_kg_m3 - 500.0 * 0.916 / 0.86).abs() < 1e-10);
+            assert!(
+                (dry.volume_factor - dry.radial_length_factor * dry.tangential_length_factor).abs()
+                    > 0.01
+            );
+            for moisture in [0.0, 0.08, 0.12, 0.20, 0.30] {
+                let state = law.at_moisture_content(moisture).unwrap();
+                assert!(
+                    (state.density_kg_m3 * state.volume_factor / (1.0 + moisture) - 500.0).abs()
+                        < 1e-10
+                );
+                assert_eq!(state.material_card_identity, card.content_hash());
+            }
+            for state in [law.density_source(), law.shrinkage_source()] {
+                assert_eq!(state.axis_quantities(), point.axis_quantities());
+                for property in state.properties() {
+                    card.claims()
+                        .verify_receipt(&property.answer().receipt)
+                        .unwrap();
+                }
+            }
+            let pins = [law.density_source(), law.shrinkage_source()]
+                .into_iter()
+                .flat_map(|state| state.properties())
+                .map(|property| {
+                    (
+                        property.requirement().name().to_owned(),
+                        property.answer().receipt.selected,
+                    )
+                })
+                .collect();
+            let pinned = ResolvedWoodMoisture::from_card(
+                &card,
+                source(&keys, &point, axis),
+                MaterialPropertySelection::PinnedByProperty(pins),
+            )
+            .unwrap();
+            assert_eq!(
+                pinned.at_moisture_content(0.20).unwrap(),
+                law.at_moisture_content(0.20).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn sourced_moisture_refuses_changed_basis_and_unsupported_domains() {
+        let axis = "moisture-content";
+        let (card, keys, point) = fixture(axis, [560.0, 0.04, 0.08, 0.14, 0.30], [0.05, 0.20]);
+        let law = ResolvedWoodMoisture::from_card(
+            &card,
+            source(&keys, &point, axis),
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        assert_eq!(law.moisture_span(), [0.05, 0.20]);
+        for moisture in [0.0, 0.049, 0.201, 0.30, f64::NAN, f64::INFINITY] {
+            assert!(law.at_moisture_content(moisture).is_err());
+        }
+        let wet_mass = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::Moisture(MoistureBasis::WetMass),
+            ValueForm::Static,
+        ));
+        for invalid in [
+            point.clone().with(axis, 0.08).unwrap(),
+            point.clone().with_quantity(axis, wet_mass, 0.12).unwrap(),
+            point
+                .clone()
+                .with("engineering-reference-model", 0.0)
+                .unwrap(),
+        ] {
+            assert!(
+                ResolvedWoodMoisture::from_card(
+                    &card,
+                    source(&keys, &invalid, axis),
+                    MaterialPropertySelection::SingleClaimOnly
+                )
+                .is_err()
+            );
+        }
+        let pressure =
+            QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static));
+        let reference = point
+            .clone()
+            .with_quantity("pressure", pressure, 100_000.0)
+            .unwrap();
+        for conflicting in [
+            reference.clone().with("pressure", 200_000.0).unwrap(),
+            reference
+                .clone()
+                .with_quantity("pressure", QuantitySpec::dimensional(PRESSURE), 100_000.0)
+                .unwrap(),
+        ] {
+            assert!(
+                ResolvedWoodMoisture::from_card(
+                    &card,
+                    WoodMoistureSource {
+                        reference_point: &reference,
+                        shrinkage_point: &conflicting,
+                        ..source(&keys, &point, axis)
+                    },
+                    MaterialPropertySelection::SingleClaimOnly
+                )
+                .is_err()
+            );
+        }
+        for values in [
+            [560.0, 0.04, 0.08, 1.0, 0.30],
+            [560.0, 0.04, 0.08, 0.14, 0.12],
+        ] {
+            let (bad, keys, point) = fixture(axis, values, [0.0, 0.30]);
+            assert!(
+                ResolvedWoodMoisture::from_card(
+                    &bad,
+                    source(&keys, &point, axis),
+                    MaterialPropertySelection::SingleClaimOnly
+                )
+                .is_err()
+            );
+        }
+    }
 
     /// FPL's own worked example under Equation (5-3): white ash modulus of
     /// rupture at 8 %, P12 = 103,000 kPa, Pg = 66,000 kPa, Mp = 24 %:
