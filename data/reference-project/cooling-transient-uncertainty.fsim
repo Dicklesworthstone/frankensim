@@ -1,0 +1,27 @@
+; Native final-time uncertainty with one accepted-trajectory adjoint calibration.
+; Run from the repository root with a new ledger path:
+; frankensim --json study data/reference-project/cooling-transient-uncertainty.fsim transient-uq.db
+;
+; The existing model retains its two-second horizon, synthetic storage law,
+; material card, geometry, initial temperature and ambient reservoir. Only the
+; declared power and prescribed convection coefficient vary. These laws are
+; numerical examples, not inferred material uncertainties or validation data.
+; Calibration reduces mean-estimation variance; raw temperatures and numerical
+; compliance still come from the unchanged native transient probability solves.
+(fsim-uncertainty-study
+  :version 3
+  :project "cooling-transient.fsim"
+  :samples 8
+  :seed 29
+  :wall-time 240s
+  :method monte-carlo
+  :mean-control (nominal-adjoint :max-solves 1)
+  :correlation independent
+  :qoi "temperature-max"
+  :geometry ((mesh :role "enclosure" :path "plate.stl" :unit "m" :max-hole-edges 0))
+  :materials ("aa6061.fsmcdpk")
+  :interfaces ()
+  :parameters (
+    (uniform :name "power" :target power :entity "solid" :low 4W :high 6W)
+    (uniform :name "convection" :target convection-coefficient
+      :entity "solid" :low 8W/m^2/K :high 12W/m^2/K)))

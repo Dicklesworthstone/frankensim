@@ -9,6 +9,8 @@ mod radiative_feedback;
 mod radiation_owner;
 #[path = "nominal_adjoint/fan_speed.rs"]
 mod fan_speed;
+#[path = "nominal_adjoint/transient.rs"]
+mod transient;
 
 fn request(project: &mut fs_project::ProjectSpec) {
     project.outputs.get_or_insert_with(Vec::new).push(fs_project::spec::OutputRequest {

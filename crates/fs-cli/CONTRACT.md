@@ -1163,6 +1163,26 @@ remain unchanged. `mean_control.estimate.statistical_unit` explicitly names
 errors acquire physical-QoI, confidence-sequence or compliance authority.
 See `docs/NATIVE_LATIN_HYPERCUBE.md` for the executable study declarations.
 
+For a native transient project, version-3 `nominal-adjoint` mean controls select
+the existing final-time accepted-trajectory adjoint. Calibration binds the sealed
+run's storage law, final temperature, horizon and fine-grid state count before
+using its accumulated derivatives. Power coordinates retain the authored duty;
+a workload schedule that replaces static power gives that static coordinate a
+zero derivative. Prescribed convection coefficients convert the sampled
+`dT/dlog(h)` to `dT/dh`. Natural reservoirs, air branches, fan banks and radiating
+surfaces retain their distinct physical identities. Constant-capacity storage
+also supplies prescribed Robin temperature/coefficient controls; the enthalpy
+producer does not, and varying unsupported coordinates refuse with a secant
+alternative. Sampled-peak and steady adjoint requests are never silently
+reinterpreted as the final-time objective.
+
+Raw probability trajectories, compliance and retained temperatures are unchanged.
+The frozen mean control and calibration receipt use the existing budget and
+source-independent recovery path. The derivative remains a selected numerical
+branch and does not certify smoothness at a tied maximum or physical accuracy.
+`data/reference-project/cooling-transient-uncertainty.fsim` is a runnable example
+with declared power and convection laws over the existing transient model.
+
 ### Normalized thermal study
 
 `study <study.fsim|study.json> <ledger.db> [--budget N]` executes the existing

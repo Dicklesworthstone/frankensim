@@ -8,6 +8,8 @@ use fs_project::uncertainty::{Target, UniformParameter};
 mod output;
 #[path = "adjoint/contact.rs"]
 mod contact;
+#[path = "adjoint/transient.rs"]
+mod transient;
 
 const OUTPUT: &str = "temperature-max-adjoint";
 
@@ -47,9 +49,16 @@ impl Model {
         if receipt.str_field("run") != Some(sample.run.as_str()) {
             return Err(invalid("nominal adjoint belongs to a different physical run"));
         }
+        let region = &self.bound.base().requirements.as_ref().expect("bound requirement")[0].region;
+        if transient::policy(&self.base.spec).is_some() {
+            // Chain logarithmic/delivered controls at the actual calibration
+            // point, whose marginal means can differ from the original model.
+            let project = self.project(&sample.parameters)?;
+            return transient::coefficients(&receipt, &project.spec,
+                self.bound.study().parameters(), sample.value_k, region);
+        }
         let report = receipt.get("nominal_adjoint")
             .ok_or_else(|| invalid("nominal calibration did not produce its requested adjoint"))?;
-        let region = &self.bound.base().requirements.as_ref().expect("bound requirement")[0].region;
         let mut gradient = coefficients(report, self.bound.study().parameters(), sample.value_k, region)?;
         contact::convert(self, sample, report, &mut gradient)?;
         Ok(gradient)

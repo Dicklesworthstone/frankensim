@@ -9,6 +9,9 @@ pub(super) const COMBINED: &str = "temperature-max-contact-boundary-adjoint";
 /// Called only on the calibration clone. Probability children and original
 /// output declarations remain unchanged. Repeating the choice is idempotent.
 pub(super) fn configure(spec: &mut ProjectSpec, parameters: &[UniformParameter]) -> Result<()> {
+    if super::transient::policy(spec).is_some() {
+        return super::transient::configure(spec, parameters);
+    }
     let boundary = parameters.iter().any(|p| p.target == Target::FixedTemperature && p.low != p.high);
     let contact = parameters.iter().any(|p| p.target.contact_axis().is_some() && p.low != p.high);
     let outputs = spec.outputs.get_or_insert_with(Vec::new);
