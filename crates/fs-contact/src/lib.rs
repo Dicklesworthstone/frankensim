@@ -30,6 +30,8 @@ use fs_query::{ConvexSeparation, ConvexSupportMap, QueryError, convex_separation
 pub mod normal_patch;
 /// Analytic constant-acceleration contact timing for scalar plane gaps.
 pub mod ballistic;
+/// Analytic continuous contact timing for linearly moving sphere centres.
+pub mod swept_sphere;
 
 /// Frictionless single-contact impulse laws with explicit admissibility and work.
 pub mod impact;

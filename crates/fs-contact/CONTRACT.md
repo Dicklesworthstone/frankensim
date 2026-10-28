@@ -629,3 +629,22 @@ adversarial global energy injection, independently derived multiple Coulomb
 roots, and numerical/geometry/cancellation refusal. The finite-difference inner
 forcing floor is 1e-6; the 1e-12 outer target and independent physical gates are
 unchanged.
+
+## Straight-line swept-sphere contact timing
+
+`swept_sphere::first_sphere_contact` finds the earliest entering or isolated
+grazing contact from actual relative centres and velocities, the sum of the
+radii, and a finite inclusive horizon. Common acceleration is admissible
+because it cancels from relative motion. Initially overlapping spheres refuse;
+touching departing or tangential pairs do not create a new entering event.
+
+The constant-work, allocation-free query uses dimensionless closest-approach
+and chord geometry with a rationalized entry root. It avoids squaring physical
+distances or speeds, retains a B-to-A normal and relative normal speed, and
+refuses unresolvable radius/separation or time ranges. Six G0/G1/G3 tests cover
+interior crossings, oblique entry, grazing, misses, initial-contact modes,
+near-touch cancellation, rotation, and large/small length scaling.
+
+This is analytic floating-point sphere geometry. It does not certify arbitrary
+shapes, accelerating relative trajectories, or general motion tubes; the
+mechanics owner still checks the actual event geometry and momentum response.
