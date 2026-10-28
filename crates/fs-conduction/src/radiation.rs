@@ -42,6 +42,12 @@ mod balance;
 mod convection;
 mod prepared;
 mod equilibrium;
+/// Spatially resolved nonlinear T^4 exchange and its exact local tangent.
+pub mod pointwise;
+pub use pointwise::{
+    PointwiseAmbientRadiation, PointwiseRadiationAssembly, PointwiseRadiationPatchReport,
+    PointwiseRadiationReport,
+};
 pub use prepared::PreparedRadiosity;
 pub use equilibrium::EnclosureEquilibriumReport;
 pub use convection::{ConvectiveEnclosureSolution, solve_with_convective_gray_diffuse_enclosure};

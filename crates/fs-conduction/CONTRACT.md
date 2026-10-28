@@ -57,6 +57,36 @@ move. This is a useful reduced R1 foundation, not completion of umbrella #1.
 
 ## Purpose and layer
 
+`radiation::PointwiseAmbientRadiation` supplies spatially resolved ambient
+radiation on named natural P1 traces. It integrates
+`epsilon sigma N_i (T_h(x)^4 - T_ambient^4)` and the exact temperature tangent
+`4 epsilon sigma N_i N_j T_h(x)^3` with a positive degree-five triangle rule.
+It retains the actual nodal temperature field; a hot spot is not replaced by
+the fourth power of a patch mean. Every surface node must lie in the retained
+emissivity claim's support. The immutable prepared mesh/partition is reused;
+3-by-3 face tangents apply directly with linear storage and no dense matrix.
+
+`EnthalpyBackwardEuler::advance_with_pointwise_ambient_radiation`, including
+the heterogeneous wrapper, incorporates this operator in the original
+enthalpy Newton residual, analytic tangent and Jacobi preconditioner.
+Reference masses, sharp latent plateaus, conductivity, contact, original
+convection and prescribed-temperature reactions remain in that single solve.
+The result's `pointwise_radiation` report is a separate outward heat account
+already included in `energy_residual_j`; only the original Robin heat goes
+to a convection/coolant consumer. Physical history remains immutable on
+refusal. Existing mean-patch APIs retain their explicitly reduced model.
+The old adjoint binder refuses these endpoints, including zero-net-radiation
+equilibrium, until its boundary ownership includes this operator.
+
+Focused G1/G3 tests independently expand barycentric simplex moments, check
+the analytic tangent and passive quadratic form, compare uniform cooling to
+a scalar implicit balance, preserve latent-plateau storage, and solve a
+nonuniform irradiated surface with prescribed reservoir reactions. This is
+fixed-emissivity, fixed-geometry exchange with a black ambient reservoir and
+view factor one; it does not model enclosure reflection, shadowing, participating
+media, a temperature-dependent emissivity derivative, or supply an error bound
+for the spatially discretized temperature field.
+
 `transient::MaterialHeatCapacity` resolves constant density and specific heat
 from one immutable material card at an explicit reference state, then pins both
 selected sources at the endpoints of a declared positive temperature interval.

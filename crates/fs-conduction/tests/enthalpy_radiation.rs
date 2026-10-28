@@ -4,6 +4,8 @@
 mod adjoint;
 #[path = "enthalpy_radiation/endpoint.rs"]
 mod endpoint;
+#[path = "enthalpy_radiation/pointwise.rs"]
+mod pointwise;
 mod support;
 
 use fs_blake3::ContentHash;

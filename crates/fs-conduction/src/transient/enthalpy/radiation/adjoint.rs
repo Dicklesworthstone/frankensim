@@ -171,6 +171,7 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             interfaces,
             old: old_h,
             dt: dt_s,
+            pointwise_radiation: None,
         };
         let temperature = context.temperatures(&accepted.specific_enthalpy_j_kg)?;
         let boundary = boundary_at_temperature(cx, problem, patches, &temperature)?;

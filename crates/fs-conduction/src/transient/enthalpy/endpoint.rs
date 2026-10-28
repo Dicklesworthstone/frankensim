@@ -95,6 +95,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
             interfaces,
             old: old_specific_h,
             dt: dt_s,
+            pointwise_radiation: None,
         };
         context.check_prescribed_values(candidate_specific_h)?;
         let temperature = context.temperatures(candidate_specific_h)?;

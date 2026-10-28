@@ -104,6 +104,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
             interfaces,
             old: old_h,
             dt: dt_s,
+            pointwise_radiation: None,
         };
         let old_temperature = context.temperatures(old_h)?;
         let patches = bind(cx, problem, enclosure, &old_temperature)?;
@@ -465,6 +466,7 @@ fn initial_target(
         interfaces: context.interfaces,
         old: context.old,
         dt: context.dt,
+        pointwise_radiation: None,
     };
     let stage = physical.stage(&initial_h)?;
     let initial = NewtonKrylovState::new(&stage, initial_h, config.newton)

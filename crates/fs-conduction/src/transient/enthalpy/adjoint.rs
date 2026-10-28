@@ -250,6 +250,11 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
         physical_target: Option<f64>,
     ) -> Result<EnthalpyStepLinearization<'m>, EnthalpyAdjointError> {
         poll(cx, 0)?;
+        if accepted.pointwise_radiation.is_some() {
+            return Err(EnthalpyAdjointError::InvalidInput(
+                "the base adjoint does not own the pointwise radiation boundary tangent",
+            ));
+        }
         let n = self.masses.len();
         if !std::ptr::eq(self.mesh, problem.mesh)
             || old_h.len() != n
@@ -278,6 +283,7 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             interfaces,
             old: old_h,
             dt: dt_s,
+            pointwise_radiation: None,
         };
         let stage = context.stage(&accepted.specific_enthalpy_j_kg)?;
         let initial = NewtonKrylovState::new(&stage, old_h.to_vec(), config.newton)

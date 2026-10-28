@@ -52,6 +52,7 @@ use fs_solver::{
     NonlinearProblem, SolverCallback, SolverRunProgress,
 };
 use fs_sparse::Csr;
+use crate::radiation::{PointwiseAmbientRadiation, PointwiseRadiationAssembly, PointwiseRadiationReport};
 
 use crate::{
     ConductionError, ConductionMesh, ConductionProblem, InterfaceFlux, RobinFlux,
@@ -225,6 +226,10 @@ pub struct EnthalpyStepSolution {
     pub neumann_out_w: f64,
     /// Endpoint outward Robin heat, W.
     pub robin_out_w: f64,
+    /// Spatially integrated nonlinear radiation, when explicitly requested.
+    /// Its heat is already included in the energy balance and is separate from
+    /// `robin_out_w`; it must not be handed to a convection/coolant heat port.
+    pub pointwise_radiation: Option<PointwiseRadiationReport>,
     /// Prescribed-temperature reservoir heat, W inward, including fixed-node
     /// storage changes. A first-step boundary jump is charged exactly once.
     pub dirichlet_in_w: f64,
@@ -425,6 +430,51 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
         dt_s: f64,
         config: EnthalpyStepConfig,
     ) -> Result<EnthalpyStepSolution, EnthalpyError> {
+        self.advance_radiative(cx, problem, interfaces, old_specific_h, dt_s, config, None)
+    }
+
+    /// Advance with the integral of local `epsilon sigma (T_h^4 - T_a^4)`
+    /// on each prepared surface triangle, including its exact Newton tangent.
+    ///
+    /// Conduction, physical source, contact, convection, fixed-node reaction
+    /// and latent storage are solved together in the original enthalpy system.
+    /// Radiation has its own power account; hot spots are never replaced by a
+    /// patch mean. The prepared trace must borrow this exact mesh and boundary.
+    /// The existing Newton work and joule gates apply; no outer radiation fixed
+    /// point, finite-difference Jacobian or artificial heat capacity is used.
+    /// This is first-order time integration with fixed emissivity and geometry,
+    /// not an emissivity-law derivative, enclosure or spatial-error certificate.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_pointwise_ambient_radiation(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_specific_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        radiation: &PointwiseAmbientRadiation<'_>,
+    ) -> Result<EnthalpyStepSolution, EnthalpyError> {
+        poll(cx, 0)?;
+        if !radiation.matches(problem.mesh, problem.boundary) {
+            return Err(EnthalpyError::InvalidInput(
+                "pointwise radiation must retain the exact transport mesh and boundary",
+            ));
+        }
+        self.advance_radiative(cx, problem, interfaces, old_specific_h, dt_s, config, Some(radiation))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_radiative(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_specific_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        pointwise_radiation: Option<&PointwiseAmbientRadiation<'_>>,
+    ) -> Result<EnthalpyStepSolution, EnthalpyError> {
         self.admit_step(cx, problem, old_specific_h, dt_s, config)?;
         let context = StepContext {
             storage: self,
@@ -433,6 +483,7 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
             interfaces,
             old: old_specific_h,
             dt: dt_s,
+            pointwise_radiation,
         };
         // Resolve history and the initial tangent before shared Newton admits it.
         // A chart/domain refusal here retains its original typed error.
@@ -564,6 +615,7 @@ struct StepContext<'a, 'm, 'c, 'cx> {
     interfaces: Option<&'a ThermalInterfaces>,
     old: &'a [f64],
     dt: f64,
+    pointwise_radiation: Option<&'a PointwiseAmbientRadiation<'a>>,
 }
 
 impl StepContext<'_, '_, '_, '_> {
@@ -612,6 +664,11 @@ impl StepContext<'_, '_, '_, '_> {
         temperature: &[f64],
         system: &AssembledSystem,
     ) -> Result<f64, EnthalpyError> {
+        let radiation = if self.problem.boundary.dirichlet().is_empty() {
+            None
+        } else {
+            self.pointwise_radiation.map(|radiation| radiation.load_and_report(self.cx, temperature)).transpose()?
+        };
         let mut heat = 0.0;
         for (index, &(vertex, _)) in self.problem.boundary.dirichlet().iter().enumerate() {
             if index % ASSEMBLY_TILE == 0 {
@@ -623,6 +680,10 @@ impl StepContext<'_, '_, '_, '_> {
                 .zip(entries)
                 .map(|(&column, &entry)| entry * temperature[column])
                 .sum();
+            let transport = match &radiation {
+                Some((load, _)) => finite(transport + load[vertex])?,
+                None => transport,
+            };
             heat = finite(
                 heat + finite(
                     self.storage.masses[vertex] * (h[vertex] - self.old[vertex]) / self.dt
@@ -760,6 +821,8 @@ impl StepContext<'_, '_, '_, '_> {
 
     fn stage(&self, h: &[f64]) -> Result<NewtonStage<'_, '_, '_, '_, '_>, EnthalpyError> {
         let temperature = self.temperatures(h)?;
+        let radiation = self.pointwise_radiation
+            .map(|radiation| radiation.assemble(self.cx, &temperature)).transpose()?;
         let phase_scales = self.phase_scales(h)?;
         let picard = self.assemble(&temperature, phase_scales.as_deref())?;
         let mut slope = Vec::with_capacity(h.len());
@@ -776,8 +839,12 @@ impl StepContext<'_, '_, '_, '_> {
             let diagonal = if self.is_prescribed(vertex) {
                 self.storage.masses[vertex]
             } else {
-                finite(self.storage.masses[vertex]
-                    + self.dt * picard.operator.get(vertex, vertex) * derivative)?
+                let transport_diagonal = match &radiation {
+                    Some(radiation) => finite(picard.operator.get(vertex, vertex)
+                        + radiation.temperature_diagonal_w_k[vertex])?,
+                    None => picard.operator.get(vertex, vertex),
+                };
+                finite(self.storage.masses[vertex] + self.dt * transport_diagonal * derivative)?
             };
             if diagonal <= 0.0 {
                 return Err(EnthalpyError::InvalidInput(
@@ -808,6 +875,7 @@ impl StepContext<'_, '_, '_, '_> {
             inverse,
             fatal: RefCell::new(None),
             trial_refusal: RefCell::new(None),
+            radiation,
         })
     }
 
@@ -825,6 +893,8 @@ impl StepContext<'_, '_, '_, '_> {
         system: &AssembledSystem,
         out: &mut [f64],
     ) -> Result<(), EnthalpyError> {
+        let radiation = self.pointwise_radiation
+            .map(|radiation| radiation.load_and_report(self.cx, temperature)).transpose()?;
         for (vertex, value) in out.iter_mut().enumerate() {
             if vertex % ASSEMBLY_TILE == 0 {
                 poll(self.cx, vertex)?;
@@ -835,6 +905,10 @@ impl StepContext<'_, '_, '_, '_> {
                 .zip(entries)
                 .map(|(&column, &entry)| entry * temperature[column])
                 .sum();
+            let transport = match &radiation {
+                Some((load, _)) => finite(transport + load[vertex])?,
+                None => transport,
+            };
             *value = finite(
                 self.storage.masses[vertex] * (h[vertex] - self.old[vertex])
                     + self.dt * (transport - system.load[vertex]),
@@ -890,8 +964,14 @@ impl StepContext<'_, '_, '_, '_> {
         );
         poll(self.cx, h.len())?;
         let dirichlet_in_w = self.prescribed_heat_input_w(&h, &temperature, &system)?;
+        let pointwise_radiation = self.pointwise_radiation
+            .map(|radiation| radiation.load_and_report(self.cx, &temperature).map(|(_, report)| report)).transpose()?;
         let net =
             finite(energy.source_w + dirichlet_in_w - energy.neumann_out_w - energy.robin_out_w)?;
+        let net = match &pointwise_radiation {
+            Some(radiation) => finite(net - radiation.outward_heat_w)?,
+            None => net,
+        };
         let energy_residual_j = finite(storage - self.dt * net)?;
         if energy_residual_j.abs() > tolerance_j {
             return Err(EnthalpyError::EnergyBalance {
@@ -911,6 +991,7 @@ impl StepContext<'_, '_, '_, '_> {
             source_w: energy.source_w,
             neumann_out_w: energy.neumann_out_w,
             robin_out_w: energy.robin_out_w,
+            pointwise_radiation,
             dirichlet_in_w,
             stored_energy_change_j: storage,
             energy_residual_j,
@@ -931,6 +1012,7 @@ struct NewtonStage<'s, 'a, 'm, 'c, 'cx> {
     inverse: Vec<f64>,
     fatal: RefCell<Option<EnthalpyError>>,
     trial_refusal: RefCell<Option<EnthalpyError>>,
+    radiation: Option<PointwiseRadiationAssembly>,
 }
 
 impl NewtonStage<'_, '_, '_, '_, '_> {
@@ -973,6 +1055,11 @@ impl NonlinearProblem for NewtonStage<'_, '_, '_, '_, '_> {
                         source: PhaseStateError::OutsideEnthalpyDomain { .. },
                         ..
                     } | EnthalpyError::Conduction(ConductionError::OutsideTemperatureSpan { .. })
+                ) || matches!(
+                    &error,
+                    EnthalpyError::Conduction(ConductionError::MaterialQuery { property, .. })
+                        if self.context.pointwise_radiation.is_some()
+                            && property == crate::SURFACE_EMISSIVITY_PROPERTY
                 );
                 if recoverable {
                     self.trial_refusal.replace(Some(error));
@@ -1001,6 +1088,15 @@ impl NonlinearProblem for NewtonStage<'_, '_, '_, '_, '_> {
                 .map(|(&column, &entry)| entry * direction[column])
                 .sum();
             *value = self.context.storage.masses[row] * direction[row] + self.context.dt * applied;
+        }
+        if let Some(radiation) = &self.radiation
+            && let Err(error) = radiation.add_scaled_tangent(
+                self.context.cx, direction, Some(&self.slope), self.context.dt,
+                |row| !self.context.is_prescribed(row), output,
+            )
+        {
+            self.fatal.replace(Some(error.into()));
+            output.fill(f64::NAN);
         }
     }
 

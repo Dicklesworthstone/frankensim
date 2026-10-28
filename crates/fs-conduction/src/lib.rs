@@ -115,6 +115,8 @@ pub use radiation::{
     ConvectiveEnclosureSolution, CoupledRadiationConfig, CoupledRadiationReport,
     CoupledRadiationSolution, EMISSIVITY_DIMS,
     GrayDiffuseEnclosure, LinearizedRadiationPoint, LinearizedSurfaceRadiation, RadiationSurface,
+    PointwiseAmbientRadiation, PointwiseRadiationAssembly, PointwiseRadiationPatchReport,
+    PointwiseRadiationReport,
     RadiosityReport, STEFAN_BOLTZMANN_W_M2_K4, SURFACE_EMISSIVITY_PROPERTY, SurfaceEmissivity,
     ViewFactorEvidence, ViewFactorMatrix, ViewFactorTolerance, solve_with_gray_diffuse_enclosure,
     solve_with_convective_gray_diffuse_enclosure,

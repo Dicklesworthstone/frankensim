@@ -118,6 +118,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
                     interfaces,
                     old: old_h,
                     dt: dt_s,
+                    pointwise_radiation: None,
                 };
                 let mut initial_residual = vec![0.0; old_h.len()];
                 context.residual(&context.initial_values()?, &mut initial_residual)?;
@@ -166,6 +167,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
                     interfaces,
                     old: old_h,
                     dt: dt_s,
+                    pointwise_radiation: None,
                 };
                 let mut residual = vec![0.0; old_h.len()];
                 physical.residual(&trial.0.specific_enthalpy_j_kg, &mut residual)?;
@@ -215,6 +217,7 @@ fn initial_residual_tolerance_j(
         interfaces,
         old: old_h,
         dt: dt_s,
+        pointwise_radiation: None,
     };
     let initial_h = context.initial_values()?;
     let old_temperature = context.temperatures(&initial_h)?;

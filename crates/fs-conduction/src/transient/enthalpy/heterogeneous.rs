@@ -335,6 +335,24 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
         )
     }
 
+    /// Integrate ambient radiation over the local P1 temperature field within
+    /// the enthalpy Newton solve, retaining heterogeneous phase charts and masses.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_pointwise_ambient_radiation(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_specific_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        radiation: &crate::PointwiseAmbientRadiation<'_>,
+    ) -> Result<EnthalpyStepSolution, EnthalpyError> {
+        self.inner.advance_with_pointwise_ambient_radiation(
+            cx, problem, interfaces, old_specific_h, dt_s, config, radiation,
+        )
+    }
+
     /// Add implicit ambient radiation while retaining each vertex's declared
     /// phase chart and immutable reference mass. The shared driver checks the
     /// complete endpoint residual and nonlinear radiative energy balance.
