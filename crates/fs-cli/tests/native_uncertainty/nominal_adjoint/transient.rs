@@ -256,8 +256,8 @@ fn enthalpy_fixture() -> Fixture {
 #[test]
 fn g1_enthalpy_power_mean_control_consumes_the_existing_enthalpy_adjoint() {
     let fixture = enthalpy_fixture();
-    // Prescribed Robin controls are intentionally not published by the
-    // enthalpy adjoint; a constant ambient needs no invented derivative.
+    // A constant reference is a zero centered input and needs no calibration
+    // coefficient even though the enthalpy producer supplies its derivative.
     let text = study_text(false, false, true).replace(":high 300K", ":high 294K");
     std::fs::write(fixture.sources.join("study.fsim"), text).unwrap();
     let result = fixture.study(None, fs_cli::exit::SUCCESS);
@@ -373,3 +373,7 @@ fn g1_g5_enthalpy_bath_mean_control_matches_physics_and_survives_resume() {
         "sealed bath calibration resumes to the uninterrupted native report"
     );
 }
+
+#[path = "transient/convection.rs"]
+mod convection;
+

@@ -242,8 +242,6 @@ fn g0_enthalpy_uses_its_own_producer_and_refuses_unprovided_coordinates() {
         [2.0]
     );
     for target in [
-        Target::ConvectionCoefficient,
-        Target::ConvectionTemperature,
         Target::HeatFlux,
         Target::ContactPressure,
         Target::ContactThickness,
@@ -315,3 +313,54 @@ fn g0_enthalpy_bath_coefficients_bind_temperature_ownership_and_entire_history()
     let constant = UniformParameter { high: parameter.low, ..parameter };
     assert_eq!(coefficients(&receipt(true, ""), &spec, &[constant], 301.0, "solid").unwrap(), [0.0]);
 }
+
+#[test]
+fn g0_enthalpy_convection_coefficients_bind_absolute_coordinates_and_complete_history() {
+    let mut spec = base();
+    let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+    setup.boundaries[0].condition = ThermalBoundaryCondition::Convection {
+        coefficient: QtyAny::new(12.0, dims::HEAT_TRANSFER_COEFFICIENT),
+        reference_temperature: QtyAny::new(310.0, dims::TEMPERATURE),
+    };
+    setup.transient.as_mut().unwrap().enthalpy = Some(TransientEnthalpy {
+        materials: Vec::new(), max_newton_iterations: 20, max_backtracks: 12,
+    });
+    let parameters = [
+        parameter(Target::ConvectionCoefficient, "solid"),
+        parameter(Target::ConvectionTemperature, "solid"),
+    ];
+    let original_physics = spec.cooling.clone();
+    configure(&mut spec, &parameters).unwrap();
+    assert_eq!(spec.cooling, original_physics);
+    let row = r#"{"target":"solid","coefficient_w_m2_k":12,"reference_temperature_k":310,"dtemperature_dreference_temperature_k_per_k":0.625,"dtemperature_dcoefficient_k_per_w_m2_k":-0.25,"dtemperature_dlog_coefficient_k":-3}"#;
+    let controls = format!(r#","prescribed_convection":{{"control_steps":8,"parameter_scope":"independent-original-reference-and-positive-coefficient-held-throughout-selected-trajectory","boundaries":[{row}]}}"#);
+    assert_eq!(coefficients(&receipt(true, &controls), &spec, &parameters, 301.0, "solid").unwrap(),
+        [-0.25, 0.625], "absolute coefficient partial is not divided by h a second time");
+    for changed in [
+        controls.replace("\"control_steps\":8", "\"control_steps\":7"),
+        controls.replace("held-throughout-selected-trajectory", "single-endpoint"),
+        controls.replace("\"target\":\"solid\"", "\"target\":\"other\""),
+        controls.replace("\"coefficient_w_m2_k\":12", "\"coefficient_w_m2_k\":13"),
+        controls.replace("\"reference_temperature_k\":310", "\"reference_temperature_k\":309"),
+        controls.replace("dtemperature_dcoefficient_k_per_w_m2_k", "unrelated_coefficient"),
+        controls.replace("dtemperature_dreference_temperature_k_per_k", "unrelated_temperature"),
+        controls.replace("-0.25", "null"),
+        controls.replace("0.625", "null"),
+        controls.replace(row, &format!("{row},{row}")),
+    ] {
+        assert!(coefficients(&receipt(true, &changed), &spec, &parameters, 301.0, "solid").is_err());
+    }
+    assert!(coefficients(&receipt(true, ""), &spec, &parameters, 301.0, "solid").is_err());
+    let constants = parameters.map(|p| UniformParameter { high: p.low, ..p });
+    assert_eq!(coefficients(&receipt(true, ""), &spec, &constants, 301.0, "solid").unwrap(), [0.0; 2]);
+    let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+    setup.boundaries[0].condition = ThermalBoundaryCondition::NaturalConvection {
+        characteristic_length: QtyAny::new(0.1, dims::LENGTH),
+        ambient_temperature: QtyAny::new(310.0, dims::TEMPERATURE),
+        correlation: "convection.churchill-chu-vertical-plate".into(),
+    };
+    assert!(coefficients(&receipt(true, &controls), &spec,
+        &[parameter(Target::ConvectionTemperature, "solid")], 301.0, "solid").is_err(),
+        "a dynamic natural reservoir is not an independently prescribed reference");
+}
+

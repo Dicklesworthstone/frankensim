@@ -248,7 +248,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// transported-air feedback, fan controls and the complete prescribed-value lift.
 /// Version 86 completes both declared enclosure storage coordinates, dynamic
 /// natural/air boundaries and final or sampled-peak trajectory sensitivities.
-pub const SOLVE_DRIVER_VERSION: u32 = 86;
+/// Version 87 connects original enthalpy convection controls to native
+/// final-time nominal-adjoint uncertainty calibration.
+pub const SOLVE_DRIVER_VERSION: u32 = 87;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

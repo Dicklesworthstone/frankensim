@@ -2588,3 +2588,24 @@ retained trajectories with this observation from older cached runs.
 Product regressions cover monotonic storage heating, equal-energy early/late
 pulses followed by cooling, an initially hot body cooling through contact and
 the distinct initial temperature of its initially cold neighbor.
+
+### Native enthalpy convection uncertainty controls
+
+Driver 87 connects declared enthalpy trajectories to native nominal-adjoint
+mean calibration for independent prescribed-convection coefficients and
+reference temperatures. The calibration consumes the existing complete
+accepted-trajectory dual, including declared enclosure exchange, smooth k(T)
+and dynamic boundary feedback. It checks the exact sampled original boundary
+values and the complete final-time control prefix before consuming absolute
+coefficient and reference derivatives. Capacity reports retain their existing
+log-coefficient conversion. No second solver, perturbed calibration solve,
+new uncertainty input or changed probability observation is introduced.
+
+G1/G3/G5 regressions in
+`tests/native_uncertainty/nominal_adjoint/transient/convection.rs` use a
+nonlinear conductivity curve, genuine enthalpy and a reflected enclosure.
+They compare both calibration coefficients with independent native physical
+re-solves, retain identical raw sample projects/statistics and primal fields,
+and resume calibration from retained inputs after source files are moved.
+These are local discrete mean controls; probability children and their
+anytime-valid statistical claims retain their existing owners.

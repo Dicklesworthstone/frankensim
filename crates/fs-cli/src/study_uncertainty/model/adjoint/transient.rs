@@ -30,9 +30,7 @@ fn admit_controls(spec: &ProjectSpec, parameters: &[UniformParameter]) -> Result
     for parameter in parameters.iter().filter(|p| p.low != p.high) {
         let supported = match parameter.target {
             Target::Power => setup.regions.iter().any(|r| r.region == parameter.entity),
-            Target::ConvectionCoefficient | Target::ConvectionTemperature => {
-                time.enthalpy.is_none()
-            }
+            Target::ConvectionCoefficient | Target::ConvectionTemperature => true,
             Target::AirInletTemperature
             | Target::FanSpeedRatio
             | Target::NaturalConvectionAmbient
@@ -128,6 +126,50 @@ fn family<'a>(report: &'a J, name: &str) -> Result<&'a J> {
         .ok_or_else(|| invalid(format!("transient nominal adjoint lacks {name} controls")))
 }
 
+/// Total-enthalpy controls are absolute original-boundary derivatives. Their
+/// physical point and selected prefix must agree with this calibration, rather
+/// than a frozen radiative Robin row or an unrelated same-unit temperature.
+fn enthalpy_convection(
+    report: &J,
+    spec: &ProjectSpec,
+    entity: &str,
+    target: Target,
+    fine_steps: usize,
+) -> Result<f64> {
+    let controls = family(report, "prescribed_convection")?;
+    if controls.f64_field("control_steps") != Some(fine_steps as f64)
+        || controls.str_field("parameter_scope")
+            != Some("independent-original-reference-and-positive-coefficient-held-throughout-selected-trajectory")
+    {
+        return Err(invalid("prescribed-convection controls do not span the final trajectory"));
+    }
+    let row = named(controls, "boundaries", "target", entity)?;
+    let setup = spec.cooling.as_ref().and_then(|cooling| cooling.conduction.as_ref())
+        .ok_or_else(|| invalid("missing sampled prescribed-convection setup"))?;
+    let mut laws = setup.boundaries.iter().filter_map(|boundary| {
+        match &boundary.condition {
+            ThermalBoundaryCondition::Convection { coefficient, reference_temperature }
+                if boundary.target == entity => Some((coefficient.value, reference_temperature.value)),
+            _ => None,
+        }
+    });
+    let (coefficient, reference) = laws.next()
+        .ok_or_else(|| invalid("transient calibration lost its prescribed-convection boundary"))?;
+    if laws.next().is_some()
+        || !(coefficient.is_finite() && coefficient > 0.0
+            && reference.is_finite() && reference > 0.0)
+        || number(row, "coefficient_w_m2_k")?.to_bits() != coefficient.to_bits()
+        || number(row, "reference_temperature_k")?.to_bits() != reference.to_bits()
+    {
+        return Err(invalid("prescribed-convection control differs from the sampled original boundary"));
+    }
+    number(row, match target {
+        Target::ConvectionCoefficient => "dtemperature_dcoefficient_k_per_w_m2_k",
+        Target::ConvectionTemperature => "dtemperature_dreference_temperature_k_per_k",
+        _ => return Err(invalid("requested coordinate is not prescribed convection")),
+    })
+}
+
 /// The caller first verifies the sealed run, its project and its selected QoI.
 /// These checks additionally bind the derivative to the same accepted final
 /// state, storage law and fine grid; a coincident sampled peak is insufficient.
@@ -200,6 +242,8 @@ pub(super) fn coefficients(
                         "dtemperature_duniform_added_watts_k_per_w")? * power.duty
                 }
             }
+            Target::ConvectionCoefficient | Target::ConvectionTemperature if enthalpy =>
+                enthalpy_convection(report, spec, entity, parameter.target, fine_steps)?,
             Target::ConvectionCoefficient | Target::ConvectionTemperature => {
                 let row = named(report, "robin", "region", entity)?;
                 if parameter.target == Target::ConvectionTemperature {
@@ -275,3 +319,4 @@ pub(super) fn coefficients(
 #[cfg(test)]
 #[path = "transient/tests.rs"]
 mod tests;
+
