@@ -1,7 +1,9 @@
 //! Event-resolved isotropic sphere motion against one prescribed plane.
 //!
-//! The plane normal and velocity are constant. External force is parallel to
-//! the normal; ideal Coulomb friction has equal static/kinetic coefficients.
+//! The plane normal, velocity and applied centre force are constant. Ideal
+//! Coulomb friction has equal static/kinetic coefficients. Persistent contact
+//! admits driven rolling and collinear sliding with exact slip-arrest events;
+//! noncollinear forced sliding refuses instead of approximating its curved path.
 //! Ballistic contact timing and both impulse laws remain in fs-contact.
 //! Centre trajectories and world momenta use analytic constant-force segments.
 //! Attitude is exact when spin and torque commute, including torque-free
@@ -32,7 +34,9 @@ pub struct SpherePlane {
     pub normal_world: Vec3,
     /// Constant prescribed material velocity of the plane, in m/s.
     pub velocity_world: Vec3,
-    /// Constant applied centre force, parallel to the normal, in newtons.
+    /// Constant applied centre force in newtons; arbitrary in free flight.
+    /// Supported frictional sliding requires its tangent component to be
+    /// collinear with the relative point slip. Rolling has no such restriction.
     pub force_world: Vec3,
     /// Newton normal restitution in [0,1].
     pub restitution: f64,
@@ -118,8 +122,11 @@ pub enum SpherePlaneEventKind {
     Impact,
     /// Entry into persistent normal support.
     Support,
-    /// Sliding has reached zero relative point slip.
+    /// Sliding has reached zero relative point slip; driving force may then
+    /// start opposite slip if the static traction limit is exceeded.
     Rolling,
+    /// Applied tangent force exceeds static traction and starts sliding.
+    Sliding,
     /// A supported sphere departs from the plane.
     LiftOff,
 }
@@ -187,6 +194,9 @@ pub enum SpherePlaneError {
     EventBudget,
     /// Attitude accuracy request exceeds its explicit work cap.
     AttitudeBudget,
+    /// Forced sliding would change slip direction continuously. This analytic
+    /// constant-force contact rung admits only collinear frictional sliding.
+    NonCollinearSliding,
     /// A positive event interval cannot advance the floating-point clock.
     NoProgress,
     /// Cancellation before publication.
@@ -241,6 +251,8 @@ struct Engine {
     inertia: f64,
     inverse_tangent_mass: f64,
     acceleration_normal: f64,
+    force_tangent_world: Vec3,
+    acceleration_tangent: [f64; 2],
     arm: Vec3,
     ledger: Ledger,
     events: Vec<SpherePlaneEvent>,
@@ -276,13 +288,8 @@ impl Engine {
             ));
         }
         let force_n = finite(scene.force_world.dot(n))?;
-        if norm(scene.force_world.sub(n.scale(force_n)))?
-            > 128.0 * f64::EPSILON * norm(scene.force_world)?
-        {
-            return Err(SpherePlaneError::Invalid(
-                "external force must be parallel to the plane normal",
-            ));
-        }
+        let force_tangent_world = scene.force_world.sub(n.scale(force_n));
+        vector(force_tangent_world)?;
         let axis = if n.x.abs() < 0.8 {
             Vec3::new(1.0, 0.0, 0.0)
         } else {
@@ -304,6 +311,11 @@ impl Engine {
             inertia: moments.x,
             inverse_tangent_mass,
             acceleration_normal: finite(force_n / mass)?,
+            force_tangent_world,
+            acceleration_tangent: [
+                finite(force_tangent_world.dot(t0) / mass)?,
+                finite(force_tangent_world.dot(t1) / mass)?,
+            ],
             arm: n.scale(-scene.radius),
             ledger: Ledger::default(),
             events: Vec::new(),
@@ -452,17 +464,13 @@ impl Engine {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<RigidBodyState, SpherePlaneError> {
         poll(cancelled)?;
-        // On this admitted normal-force rung the reaction exactly cancels
-        // the declared applied force, including its floating representation.
+        // Support cancels only the normal applied force. Tangential driving
+        // remains in both the analytic trajectory and the external-work ledger.
         let supported = normal_force > 0.0;
-        let reaction = if supported {
-            self.scene.force_world.scale(-1.0)
-        } else {
-            Vec3::ZERO
-        };
+        let reaction = self.n.scale(normal_force);
         let contact = reaction.add(tangent_force);
         let total = if supported {
-            tangent_force
+            self.force_tangent_world.add(tangent_force)
         } else {
             self.scene.force_world.add(contact)
         };
@@ -533,9 +541,14 @@ impl Engine {
 /// Rebound accumulation or an unresolvable event time refuses at the event/work
 /// boundary, rather than silently changing restitution to stick.
 ///
-/// Arbitrary spin and tangential velocity are admitted. Applied force must be
-/// normal, so supported slip keeps a constant direction and its stopping time
-/// is resolved exactly. Attitude is exact for commuting spin/torque; the general
+/// Arbitrary spin, tangential velocity and constant centre force are admitted
+/// in flight. Persistent contact admits arbitrary driven rolling, and sliding
+/// when the tangent applied force is collinear with slip (including opposing
+/// force and resolved reversal). Noncollinear forced frictional sliding refuses;
+/// frictionless support admits arbitrary tangent force. Static traction keeps
+/// zero slip when its required magnitude fits the Coulomb limit. Sliding arrest
+/// and force-driven slip onset are resolved explicitly, with continuous loss
+/// measured from midpoint slip work. Attitude is exact for commuting spin/torque; the general
 /// changing-axis case uses the declared second-order attitude substeps.
 /// Spin about the normal has no torsional/rolling friction.
 /// A constant-velocity plane supplies explicitly signed work. This is floating
@@ -610,48 +623,135 @@ pub fn advance_sphere_plane(
             let rolling = slip_speed == 0.0
                 || (mode == SpherePlaneMode::Rolling && slip_speed <= velocity_allowance);
             let friction_force = finite(scene.friction_coefficient * normal_force)?;
-            if rolling || friction_force == 0.0 {
-                mode = if rolling {
+            let acceleration = engine.acceleration_tangent;
+            let acceleration_speed = finite(acceleration[0].hypot(acceleration[1]))?;
+            if friction_force == 0.0 {
+                // No traction means no restriction on the direction of driving.
+                // Integrate the actual force, even when starting with zero slip.
+                if rolling && acceleration_speed > 0.0 {
+                    engine.event(time, SpherePlaneEventKind::Sliding, 0.0, Vec3::ZERO)?;
+                }
+                progress(time, remaining)?;
+                body = engine.segment(body, remaining, normal_force, Vec3::ZERO, &mut cancelled)?;
+                let (_, after_slip) = engine.kinematics(body)?;
+                mode = if after_slip[0] == 0.0 && after_slip[1] == 0.0
+                    || (rolling
+                        && acceleration_speed == 0.0
+                        && after_slip[0].hypot(after_slip[1])
+                            <= 8192.0 * f64::EPSILON * engine.velocity_scale)
+                {
                     SpherePlaneMode::Rolling
                 } else {
                     SpherePlaneMode::Sliding
                 };
-                progress(time, remaining)?;
-                body = engine.segment(body, remaining, normal_force, Vec3::ZERO, &mut cancelled)?;
                 elapsed = duration_s;
                 continue;
             }
-            mode = SpherePlaneMode::Sliding;
-            let stopping_time =
-                finite((slip_speed / engine.inverse_tangent_mass) / friction_force)?;
+            // Compare in acceleration units without overflowing a large finite
+            // traction capacity. Only the finite demand is used for rolling.
+            let holds_rolling = rolling
+                && (engine.inverse_tangent_mass > 1.0
+                    && friction_force > f64::MAX / engine.inverse_tangent_mass
+                    || acceleration_speed <= engine.inverse_tangent_mass * friction_force);
+            let mut stopping_time = f64::INFINITY;
+            let mut transverse_acceleration = 0.0;
+            if !holds_rolling {
+                let direction = if rolling {
+                    if acceleration_speed == 0.0 {
+                        return Err(SpherePlaneError::Unresolved("sliding onset direction"));
+                    }
+                    engine.event(time, SpherePlaneEventKind::Sliding, 0.0, Vec3::ZERO)?;
+                    [
+                        acceleration[0] / acceleration_speed,
+                        acceleration[1] / acceleration_speed,
+                    ]
+                } else {
+                    [slip[0] / slip_speed, slip[1] / slip_speed]
+                };
+                if acceleration_speed > 0.0 && !rolling {
+                    // Dimensionless collinearity admits rotation roundoff only;
+                    // a resolved changing slip direction requires another owner.
+                    let turn = direction[0].mul_add(
+                        acceleration[1] / acceleration_speed,
+                        -direction[1] * (acceleration[0] / acceleration_speed),
+                    );
+                    if turn.abs() > 256.0 * f64::EPSILON {
+                        transverse_acceleration = finite(turn.abs() * acceleration_speed)?;
+                    }
+                }
+                let along =
+                    finite(direction[0].mul_add(acceleration[0], direction[1] * acceleration[1]))?;
+                let slip_rate =
+                    finite((-engine.inverse_tangent_mass).mul_add(friction_force, along))?;
+                if rolling && slip_rate <= 0.0 {
+                    return Err(SpherePlaneError::Unresolved("sliding onset acceleration"));
+                }
+                if !rolling && slip_rate < 0.0 {
+                    // An infinite stop time is beyond every finite horizon.
+                    stopping_time = slip_speed / -slip_rate;
+                }
+                mode = SpherePlaneMode::Sliding;
+            } else {
+                mode = SpherePlaneMode::Rolling;
+            }
             let h = remaining.min(stopping_time);
             progress(elapsed, h)?;
             progress(time, h)?;
-            let friction = engine.friction(slip, finite(normal_force * h)?)?;
+            // A nominally normal force may leave an arbitrary tiny tangent
+            // direction after rotation. Admit it only below the velocity
+            // resolution of this segment, never as a resolved curved path.
+            if transverse_acceleration > (256.0 * f64::EPSILON * slip_speed) / h {
+                return Err(SpherePlaneError::NonCollinearSliding);
+            }
+            // The existing disk owner selects the integrated traction from
+            // the force-driven free slip. Event splitting ensures this impulse
+            // corresponds to one constant-direction continuous-force segment.
+            let admitted_slip = if rolling { [0.0; 2] } else { slip };
+            let free_slip = [
+                finite(acceleration[0].mul_add(h, admitted_slip[0]))?,
+                finite(acceleration[1].mul_add(h, admitted_slip[1]))?,
+            ];
+            let friction = engine.friction(free_slip, finite(normal_force * h)?)?;
             let tangent_force = engine
                 .tangent_vector(friction.tangent_impulse)
                 .scale(h.recip());
+            vector(tangent_force)?;
             body = engine.segment(body, h, normal_force, tangent_force, &mut cancelled)?;
-            engine.ledger.loss = finite(engine.ledger.loss + friction.dissipated_energy)?;
+            let (_, after_slip) = engine.kinematics(body)?;
+            if !holds_rolling {
+                // Impulse-law loss at free_slip includes fictitious splitting
+                // work. Physical continuous loss uses actual endpoint slip.
+                let impulse = tangent_force.scale(h);
+                let midpoint = [
+                    0.5 * slip[0] + 0.5 * after_slip[0],
+                    0.5 * slip[1] + 0.5 * after_slip[1],
+                ];
+                let loss = finite(-impulse.dot(engine.tangent_vector(midpoint)))?;
+                if loss < 0.0 {
+                    return Err(SpherePlaneError::Unresolved("continuous friction work"));
+                }
+                engine.ledger.loss = finite(engine.ledger.loss + loss)?;
+            }
             elapsed = if h == remaining {
                 duration_s
             } else {
                 elapsed + h
             };
-            if stopping_time <= remaining {
-                let (_, after_slip) = engine.kinematics(body)?;
+            if holds_rolling || stopping_time <= remaining {
                 if after_slip[0].hypot(after_slip[1])
                     > 8192.0 * f64::EPSILON * engine.velocity_scale
                 {
-                    return Err(SpherePlaneError::Unresolved("sliding stop velocity"));
+                    return Err(SpherePlaneError::Unresolved("supported rolling velocity"));
                 }
                 mode = SpherePlaneMode::Rolling;
-                engine.event(
-                    finite(state.time_s + elapsed)?,
-                    SpherePlaneEventKind::Rolling,
-                    0.0,
-                    Vec3::ZERO,
-                )?;
+                if !holds_rolling {
+                    engine.event(
+                        finite(state.time_s + elapsed)?,
+                        SpherePlaneEventKind::Rolling,
+                        0.0,
+                        Vec3::ZERO,
+                    )?;
+                }
             }
             continue;
         }

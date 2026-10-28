@@ -638,16 +638,26 @@ fn unsupported_physics_and_exhausted_event_budget_refuse_atomically() {
         advance_sphere_plane(&scene, initial, 0.3, SpherePlaneConfig::default(), || true),
         Err(SpherePlaneError::Cancelled)
     ));
-    let oblique = SpherePlane {
-        force_world: Vec3::new(0.01, -20.0, 0.0),
+    let noncollinear = SpherePlane {
+        force_world: Vec3::new(0.0, -20.0, 2.0),
         ..scene
     };
-    assert!(
-        advance_sphere_plane(&oblique, initial, 0.3, SpherePlaneConfig::default(), || {
-            false
-        })
-        .is_err()
+    let sliding = state(
+        Vec3::new(0.0, RADIUS, 0.0),
+        Vec3::new(1.4, 0.0, 0.0),
+        Vec3::ZERO,
+        UnitQuaternion::IDENTITY,
     );
+    assert!(matches!(
+        advance_sphere_plane(
+            &noncollinear,
+            sliding,
+            0.3,
+            SpherePlaneConfig::default(),
+            || false,
+        ),
+        Err(SpherePlaneError::NonCollinearSliding)
+    ));
     let anisotropic = SpherePlane {
         properties: MassProperties::new(MASS, Vec3::ZERO, Vec3::new(0.2, 0.21, 0.22)).unwrap(),
         ..scene
@@ -698,4 +708,221 @@ fn unsupported_physics_and_exhausted_event_budget_refuse_atomically() {
     let accepted =
         advance_sphere_plane(&scene, initial, 0.3, SpherePlaneConfig::default(), || false).unwrap();
     close(accepted.state_after.body().pose().position_world().y, 0.6);
+}
+
+#[test]
+fn incline_rolling_and_moving_plane_static_traction_obey_exact_work() {
+    // Resolve gravity along an incline into tangent and normal coordinates:
+    // g_t=6, g_n=-8. A homogeneous sphere accelerates by (5/7)g_t.
+    let incline = SpherePlane {
+        force_world: Vec3::new(12.0, -16.0, 0.0),
+        friction_coefficient: 0.3,
+        ..scene()
+    };
+    let initial = state(
+        Vec3::new(0.0, RADIUS, 0.0),
+        Vec3::ZERO,
+        Vec3::ZERO,
+        UnitQuaternion::IDENTITY,
+    );
+    let result = advance_sphere_plane(&incline, initial, 0.7, SpherePlaneConfig::default(), || {
+        false
+    })
+    .unwrap();
+    assert_eq!(result.state_after.mode(), SpherePlaneMode::Rolling);
+    close_vector(
+        result.state_after.body().pose().position_world(),
+        Vec3::new(1.05, RADIUS, 0.0),
+    );
+    close_vector(
+        velocity(result.state_after.body()),
+        Vec3::new(3.0, 0.0, 0.0),
+    );
+    close_vector(spin(result.state_after.body()), Vec3::new(0.0, 0.0, -6.0));
+    close_vector(result.contact_impulse_world, Vec3::new(-2.4, 11.2, 0.0));
+    close(kinetic(result.state_after.body()), 12.6);
+    close(result.external_force_work, 12.6);
+    close(result.plane_work, 0.0);
+    close(result.dissipated_energy, 0.0);
+    balances(&incline, initial, 0.7, &result);
+
+    // Static traction can transfer energy through a moving support despite
+    // zero slip and zero frictional dissipation.
+    let moving = SpherePlane {
+        velocity_world: Vec3::new(1.0, 0.0, 0.0),
+        force_world: Vec3::new(4.0, -20.0, 0.0),
+        ..scene()
+    };
+    let initial = state(
+        Vec3::new(0.0, RADIUS, 0.0),
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::ZERO,
+        UnitQuaternion::IDENTITY,
+    );
+    let result = advance_sphere_plane(&moving, initial, 0.7, SpherePlaneConfig::default(), || {
+        false
+    })
+    .unwrap();
+    assert_eq!(result.state_after.mode(), SpherePlaneMode::Rolling);
+    close_vector(
+        result.state_after.body().pose().position_world(),
+        Vec3::new(1.05, RADIUS, 0.0),
+    );
+    close_vector(
+        velocity(result.state_after.body()),
+        Vec3::new(2.0, 0.0, 0.0),
+    );
+    close_vector(spin(result.state_after.body()), Vec3::new(0.0, 0.0, -2.0));
+    close_vector(result.contact_impulse_world, Vec3::new(-0.8, 14.0, 0.0));
+    close(result.external_force_work, 4.2);
+    close(result.plane_work, -0.8);
+    close(result.dissipated_energy, 0.0);
+    close(kinetic(result.state_after.body()), 4.4);
+    balances(&moving, initial, 0.7, &result);
+}
+
+#[test]
+fn constant_force_sliding_arrests_or_reverses_at_analytic_times() {
+    let initial = state(
+        Vec3::new(0.0, RADIUS, 0.0),
+        Vec3::new(1.4, 0.0, 0.0),
+        Vec3::ZERO,
+        UnitQuaternion::IDENTITY,
+    );
+    let drive = SpherePlane {
+        force_world: Vec3::new(4.0, -20.0, 0.0),
+        ..scene()
+    };
+    let result =
+        advance_sphere_plane(&drive, initial, 0.5, SpherePlaneConfig::default(), || false).unwrap();
+    // While sliding: a_COM=0, alpha_z=-10, hence slip arrests at .28 s.
+    // Then a_COM=10/7 with static traction -8/7.
+    let rolling = result
+        .events
+        .iter()
+        .find(|event| event.kind == SpherePlaneEventKind::Rolling)
+        .unwrap();
+    close(rolling.time_s, 0.28);
+    assert_eq!(result.state_after.mode(), SpherePlaneMode::Rolling);
+    close(
+        result.state_after.body().pose().position_world().x,
+        0.7345714285714285,
+    );
+    close_vector(
+        velocity(result.state_after.body()),
+        Vec3::new(12.0 / 7.0, 0.0, 0.0),
+    );
+    close_vector(
+        spin(result.state_after.body()),
+        Vec3::new(0.0, 0.0, -24.0 / 7.0),
+    );
+    close(result.dissipated_energy, 0.784);
+    close(kinetic(result.state_after.body()), 144.0 / 35.0);
+    balances(&drive, initial, 0.5, &result);
+
+    let opposing = SpherePlane {
+        force_world: Vec3::new(-16.0, -20.0, 0.0),
+        ..scene()
+    };
+    let result = advance_sphere_plane(
+        &opposing,
+        initial,
+        0.2,
+        SpherePlaneConfig::default(),
+        || false,
+    )
+    .unwrap();
+    // Initial slip acceleration is -15. At 7/75 s it vanishes, but the
+    // static demand 32/7 exceeds the available traction 4. Slip reverses;
+    // friction changes sign and its new slip acceleration is -1.
+    let reversal = result
+        .events
+        .iter()
+        .find(|event| event.kind == SpherePlaneEventKind::Sliding && event.time_s > 0.0)
+        .unwrap();
+    close(reversal.time_s, 7.0 / 75.0);
+    assert_eq!(result.state_after.mode(), SpherePlaneMode::Sliding);
+    close(
+        result.state_after.body().pose().position_world().x,
+        578.0 / 5625.0,
+    );
+    close_vector(
+        velocity(result.state_after.body()),
+        Vec3::new(-13.0 / 75.0, 0.0, 0.0),
+    );
+    close_vector(
+        spin(result.state_after.body()),
+        Vec3::new(0.0, 0.0, 2.0 / 15.0),
+    );
+    close_vector(
+        result.contact_impulse_world,
+        Vec3::new(4.0 / 75.0, 4.0, 0.0),
+    );
+    close(result.dissipated_energy, 1598.0 / 5625.0);
+    close(kinetic(result.state_after.body()), 179.0 / 5625.0);
+    balances(&opposing, initial, 0.2, &result);
+}
+
+#[test]
+fn arbitrary_force_free_flight_and_zero_friction_support_are_admitted() {
+    let free = SpherePlane {
+        force_world: Vec3::new(4.0, -6.0, 2.0),
+        ..scene()
+    };
+    let initial = state(
+        Vec3::new(1.0, 3.0, -2.0),
+        Vec3::new(0.5, -0.2, 0.3),
+        Vec3::new(0.1, 0.2, 0.3),
+        UnitQuaternion::IDENTITY,
+    );
+    let result =
+        advance_sphere_plane(&free, initial, 0.2, SpherePlaneConfig::default(), || false).unwrap();
+    assert_eq!(result.state_after.mode(), SpherePlaneMode::Flight);
+    assert!(result.events.is_empty());
+    close_vector(
+        result.state_after.body().pose().position_world(),
+        Vec3::new(1.14, 2.9, -1.92),
+    );
+    close_vector(
+        velocity(result.state_after.body()),
+        Vec3::new(0.9, -0.8, 0.5),
+    );
+    close_vector(spin(result.state_after.body()), Vec3::new(0.1, 0.2, 0.3));
+    close_vector(result.contact_impulse_world, Vec3::ZERO);
+    close(result.external_force_work, 1.32);
+    close(result.dissipated_energy, 0.0);
+    balances(&free, initial, 0.2, &result);
+
+    let frictionless = SpherePlane {
+        force_world: Vec3::new(0.0, -20.0, 2.0),
+        friction_coefficient: 0.0,
+        ..scene()
+    };
+    let initial = state(
+        Vec3::new(0.0, RADIUS, 0.0),
+        Vec3::new(1.4, 0.0, 0.0),
+        Vec3::ZERO,
+        UnitQuaternion::IDENTITY,
+    );
+    let result = advance_sphere_plane(
+        &frictionless,
+        initial,
+        0.2,
+        SpherePlaneConfig::default(),
+        || false,
+    )
+    .unwrap();
+    close_vector(
+        result.state_after.body().pose().position_world(),
+        Vec3::new(0.28, RADIUS, 0.02),
+    );
+    close_vector(
+        velocity(result.state_after.body()),
+        Vec3::new(1.4, 0.0, 0.2),
+    );
+    close_vector(spin(result.state_after.body()), Vec3::ZERO);
+    close_vector(result.contact_impulse_world, Vec3::new(0.0, 4.0, 0.0));
+    close(result.external_force_work, 0.04);
+    close(result.dissipated_energy, 0.0);
+    balances(&frictionless, initial, 0.2, &result);
 }
