@@ -519,3 +519,6 @@ fn refuses_nonpositive_total_heat_capacity_and_nonoriginal_caloric_object() {
         .is_err()
     );
 }
+
+#[path = "normal/material.rs"]
+mod material;

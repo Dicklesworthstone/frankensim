@@ -914,3 +914,6 @@ fn model_error<E>(error: NormalThermalError) -> NormalThermalError<E> {
         NormalThermalError::Cancelled => NormalThermalError::Cancelled,
     }
 }
+
+/// Original material-card compliance and finite caloric-source binding.
+pub mod material;
