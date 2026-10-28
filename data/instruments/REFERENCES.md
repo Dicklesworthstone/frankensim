@@ -36,8 +36,7 @@ bash data/instruments/fetch-references.sh \
 `--instrument` is case-insensitive and exact; both selectors are repeatable.
 Combining `--instrument` and `--id` intersects them. Unknown selectors and empty
 intersections fail before downloading. No selector means the entire chosen
-manifest: about 2.2 GB for the supplement, including the 1.61 GB TU-Note violin
-ZIP and the 388 MB drum-kit archive.
+manifest: about 590 MB for the supplement, including the 388 MB drum-kit archive.
 
 Fetch the smaller Iowa selection without copying its IDs:
 
@@ -53,7 +52,7 @@ subprocess.run(args, check=True)
 PY
 ```
 
-The pan-flute, steel-string guitar and Salamander entries are tar archives. Each
+The pan-flute, steel-string guitar and Salamander entries are archives. Each
 lists the exact selected member names, output paths, SHA-256 and byte length.
 Use `--members` to stream these archives and retain only their selected audio:
 
@@ -140,61 +139,39 @@ These checks streamed the actual recordings through memory; they do not claim
 a persistent audio cache or improved simulation fidelity. The new `--members`
 path was also exercised against the real pan-pipe and steel-string archives.
 
-## Bowed notes, transitions and measured player motion
+## Synchronized cello motion and sound
 
-The supplement now also contains two independent bowed-string recording sets:
+The [mdw cello dataset](https://zenodo.org/records/10696680) pairs the professional
+player's recorded sound with the motion capture already used by
+`descriptions/players/derive_cello_bow_kinematics.py`. It also supplies two robot
+reproductions, with source position controls of 16 mm and 15 mm. All three
+original WAVs are 68.008367 seconds, mono, 16-bit, 44.1 kHz; their synchronized
+stick, nut and bridge markers were recorded at 240 frames per second.
 
-- [TU-Note Violin](https://doi.org/10.14279/depositonce-6747), by Henrik von
-  Coler, Jonas Margraf and Paul Schuladen, recorded with violinist Michiko
-  Feuerlein and engineer Philipp Pawlowski in the SIM Berlin anechoic chamber.
-  The selection contains **20 original WAVs**: open G3/D4/A4/E5 at mf, A4 at
-  pp/ff, a D4-to-A3 legato transition without vibrato, plain ascending/descending
-  scales, and a Massenet *Meditation* phrase, each in both original microphone
-  positions. The **12 original label files** retain attack, sustain, release
-  and transition boundaries and the source's note tables. The two microphones
-  observe the same performances; they are not independent takes. The source
-  uses A4 = 443 Hz. Its insert describes 24-bit/96 kHz capture, while all selected
-  distributed WAVs were measured as **16-bit/96 kHz mono**. The CC BY-ND 4.0
-  recordings and labels remain unchanged.
-- [Pàmies-Vilà and colleagues' cello player/robot recordings](https://zenodo.org/records/10696680)
-  provide **three synchronized 68-second phrases** on open A3/D3/G2, adapting
-  Vivaldi's *Spring*: one professional player and two robot performances. This
-  is the source of the already-ingested
-  `descriptions/players/cello-open-strings-bow-kinematics-pamies-vila-2024.tsv`.
-  The original README specifies a ROGA RG50 microphone 45 cm in front of the
-  cello and 240 fps motion capture; the delivered audio is PCM16/44.1 kHz mono.
-  The source's CC BY 4.0 license, README and score are retained. The kinematics
-  supply motion, **not normal force or a hair-contact measurement**; they do
-  not characterize the instrument's materials and geometry.
-
-Fetch the new selections with the existing command:
+The supplement's six entries link each audio recording to its original motion
+CSV by ID. The existing fetcher acquires both kinds of file and verifies their
+independent hashes:
 
 ```sh
-bash data/instruments/fetch-references.sh --members \
-  --manifest data/instruments/references-supplemental.json --instrument Violin
 bash data/instruments/fetch-references.sh \
   --manifest data/instruments/references-supplemental.json --instrument Cello
 ```
 
-ZIP needs random access to its directory, so `--members` retains the verified
-compressed ZIP at `TU-Note_Violin.zip` on the reference volume and extracts only
-the 32 pinned members under `TU-Note/`. It does not unpack the complete library
-or buffer the archive in memory. `--pin --members` for ZIP requires that local
-source archive; it then reports member digests without writing extracted files.
-Tar sources retain their existing streaming behavior. A partial earlier
-download is preserved and causes refusal instead of being overwritten.
+The common recording chain names the ROGA RG50 microphone 45 cm in front of the
+instrument. The source's CC BY 4.0 license, attribution, readme and byte hashes
+are pinned in the same manifest. These paired measurements can challenge
+predicted responses to real bow trajectories; they do not supply bow force,
+hair contact state, exact specimen geometry or material properties. The
+existing kinematic derivation uses stick markers, so its line separation is
+not a measured hair-string gap. The recordings remain ungraded, and no audio
+has been used to fit an excitation or alter a material constant.
 
-The 23 new recordings and all 66 previously selected recordings were retained,
-hash-verified and fully decoded in this session: **89 audio files, 348,320,151
-bytes and 2,225.17089 seconds**. The new violin archive's complete SHA-256 and
-each selected member's hash are in the supplement. The three cello recordings
-also matched the source-published MD5 checksums before SHA-256 pins were added.
-Annotations and compressed archives are excluded from the audio counts.
-
-These additions expose onset and transition errors and permit a comparison
-with a recorded player motion. They do not authorize changing physical
-parameters to fit the recordings, or establish same-specimen validation of the
-current simulated bodies.
+On 2026-10-28, all 66 previously selected audio files were reacquired, checked
+against their pins and fully decoded. The three new cello WAVs and their three
+motion CSVs were independently hashed on two downloads, and all three WAVs
+passed full FFmpeg decode. All **69 audio files (280,543,511 bytes)** and the
+motion sources were retained outside Git in the session reference directory;
+the manifest does not depend on that transient cache.
 
 ## Recording limits and attribution
 
