@@ -24,6 +24,9 @@ use fs_material::cohesive::source::ResolvedBilinearCohesive;
 use fs_material::cohesive::{BilinearCohesive, CohesiveError, CohesivePoint};
 use fs_material::state_point::MaterialStatePointError;
 
+/// A finite bonded interface with coupled opening, shear and progressive peeling.
+pub mod patch;
+
 /// Bounded constitutive solve plus the independent actual-body force gate.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CohesiveModalConfig {
