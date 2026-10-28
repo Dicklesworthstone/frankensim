@@ -1,0 +1,20 @@
+frankensim.matdb-manifest.v3
+pack_id	isola-fr408hr-core-dielectric-2026
+redistribution	permitted	Selected attributed numerical facts and original notes only; no source document or table layout is redistributed
+citation	Isola, FR408HR Dielectric Constant / Dissipation Factor Table, revision G, January 5, 2026, Core Data pp. 1-2, constructions 1x106/72%, 1x2116/50%, 1x2116/54% and 2x2116/54%; https://www.isola-group.com/wp-content/uploads/data-sheets/fr408hr-laminate-and-prepreg__Dk_Df_Tables.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	isola-fr408hr-core-data	properties.tsv	material-tsv-v1
+property	relative_permittivity	relative-permittivity	dimensional
+property	dielectric_loss_tangent	dielectric-loss-tangent	dimensional
+axis	frequency	frequency	dimensional
+axis	source_grade_fr408hr	source-grade-fr408hr	dimensional
+axis	source_core	source-core	dimensional
+axis	source_glass_style	source-glass-style	dimensional
+axis	source_core_ply_count	source-core-ply-count	dimensional
+axis	source_resin_content	source-resin-content	dimensional
+axis	source_core_thickness	source-core-thickness	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_test_direction_known	source-test-direction-known	dimensional
+axis	source_copper_condition_known	source-copper-condition-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_cure_history_known	source-cure-history-known	dimensional

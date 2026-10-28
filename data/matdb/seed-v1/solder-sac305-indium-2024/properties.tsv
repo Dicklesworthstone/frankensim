@@ -1,0 +1,75 @@
+frankensim.matdb-source.v1
+observation	reference	Indalloy 256 nominal 96.5Sn-3Ag-0.5Cu by mass, preform product sheet	Manufacturer reference values, Form 100346 R0	Engineering reference only; specimens are not matched. Test temperature, pressure, method, strain rate, geometry, aging and reflow history are unstated. No creep, fatigue, wetting, joint strength, plasticity or interface law is supplied. A named alloy cannot be replaced by pure tin or another solder composition.
+observation	phase	SAC305 nominal phase endpoints	Printed Celsius endpoints converted by adding 273.15	Solidus 217 degC and liquidus 220 degC do not specify latent heat, an enthalpy reference or a liquid-fraction law. These are supplier reference endpoints, not temperature validity for the other properties.
+observation	mechanical	SAC305 nominal mechanical scalars	Printed SI entries retained independently	Young modulus 6.9 GPa is retained as printed rather than silently replaced by a different source or by its separately rounded imperial equivalent. Elongation 49 percent has no stated gauge length. Strengths are reference scalars, not design allowables or stress-strain curves.
+observation	conversion	SAC305 transport reference values	Explicit unit conversion	Density 7.35 g/cc becomes 7350 kg/m3; electrical resistivity 13.2 microohm cm becomes 1.32e-7 ohm m. The sheet's CTE is omitted because its averaging interval is unstated.
+scalar	solidus	reference,phase	solidus_temperature	490.15	K	constant
+uncertainty	solidus	unstated	-	-	-	-
+validity	solidus	engineering_reference_model	1	1	1
+validity	solidus	source_specimens_matched	0	0	1
+validity	solidus	source_test_temperature_known	0	0	1
+validity	solidus	source_test_method_known	0	0	1
+validity	solidus	source_alloy_sac305	1	1	1
+scalar	liquidus	reference,phase	liquidus_temperature	493.15	K	constant
+uncertainty	liquidus	unstated	-	-	-	-
+validity	liquidus	engineering_reference_model	1	1	1
+validity	liquidus	source_specimens_matched	0	0	1
+validity	liquidus	source_test_temperature_known	0	0	1
+validity	liquidus	source_test_method_known	0	0	1
+validity	liquidus	source_alloy_sac305	1	1	1
+scalar	density	reference,conversion	density	7350	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_specimens_matched	0	0	1
+validity	density	source_test_temperature_known	0	0	1
+validity	density	source_test_method_known	0	0	1
+validity	density	source_alloy_sac305	1	1	1
+scalar	conductivity	reference,conversion	thermal_conductivity	61	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	engineering_reference_model	1	1	1
+validity	conductivity	source_specimens_matched	0	0	1
+validity	conductivity	source_test_temperature_known	0	0	1
+validity	conductivity	source_test_method_known	0	0	1
+validity	conductivity	source_alloy_sac305	1	1	1
+scalar	resistivity	reference,conversion	electrical_resistivity	1.32e-7	Ohm*m	constant
+uncertainty	resistivity	unstated	-	-	-	-
+validity	resistivity	engineering_reference_model	1	1	1
+validity	resistivity	source_specimens_matched	0	0	1
+validity	resistivity	source_test_temperature_known	0	0	1
+validity	resistivity	source_test_method_known	0	0	1
+validity	resistivity	source_alloy_sac305	1	1	1
+scalar	young-modulus	reference,mechanical	young_modulus	6.9	GPa	constant
+uncertainty	young-modulus	unstated	-	-	-	-
+validity	young-modulus	engineering_reference_model	1	1	1
+validity	young-modulus	source_specimens_matched	0	0	1
+validity	young-modulus	source_test_temperature_known	0	0	1
+validity	young-modulus	source_test_method_known	0	0	1
+validity	young-modulus	source_alloy_sac305	1	1	1
+scalar	poisson-ratio	reference,mechanical	poisson_ratio	0.35	1	constant
+uncertainty	poisson-ratio	unstated	-	-	-	-
+validity	poisson-ratio	engineering_reference_model	1	1	1
+validity	poisson-ratio	source_specimens_matched	0	0	1
+validity	poisson-ratio	source_test_temperature_known	0	0	1
+validity	poisson-ratio	source_test_method_known	0	0	1
+validity	poisson-ratio	source_alloy_sac305	1	1	1
+scalar	tensile-strength	reference,mechanical	tensile_strength	39.58	MPa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	engineering_reference_model	1	1	1
+validity	tensile-strength	source_specimens_matched	0	0	1
+validity	tensile-strength	source_test_temperature_known	0	0	1
+validity	tensile-strength	source_test_method_known	0	0	1
+validity	tensile-strength	source_alloy_sac305	1	1	1
+scalar	yield-strength	reference,mechanical	tensile_yield_strength	22	MPa	constant
+uncertainty	yield-strength	unstated	-	-	-	-
+validity	yield-strength	engineering_reference_model	1	1	1
+validity	yield-strength	source_specimens_matched	0	0	1
+validity	yield-strength	source_test_temperature_known	0	0	1
+validity	yield-strength	source_test_method_known	0	0	1
+validity	yield-strength	source_alloy_sac305	1	1	1
+scalar	elongation	reference,mechanical	elongation_at_break	0.49	1	constant
+uncertainty	elongation	unstated	-	-	-	-
+validity	elongation	engineering_reference_model	1	1	1
+validity	elongation	source_specimens_matched	0	0	1
+validity	elongation	source_test_temperature_known	0	0	1
+validity	elongation	source_test_method_known	0	0	1
+validity	elongation	source_alloy_sac305	1	1	1

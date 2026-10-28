@@ -1,0 +1,16 @@
+frankensim.matdb-manifest.v3
+pack_id	solder-sac305-fros-dsc-2022
+redistribution	permitted	Selected attributed numerical facts and original modeling notes only; no source article, prose, figures or table layout is redistributed
+citation	D. Fros, P. Vesely, J. Zemen and K. Dusek, Latent heat induced deformation of PCB substrate: Measurement and simulation, Case Studies in Thermal Engineering 36 (2022) 102173, Section 2 and Table 2; https://doi.org/10.1016/j.csite.2022.102173 ; original article copy https://smtnet.com/library/files/upload/1-s2.0-S2214157X22004191-main.pdf
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	fros-dsc	properties.tsv	material-tsv-v1
+property	latent_heat_fusion	latent-heat-fusion	dimensional
+property	latent_heat_solidification	latent-heat-solidification	dimensional
+axis	source_specimen_mass	source-specimen-mass	dimensional
+axis	temperature_ramp_rate	temperature-ramp-rate	dimensional
+axis	source_maximum_program_temperature	source-maximum-program-temperature	absolute-temperature
+axis	source_dsc_131	source-dsc-131	dimensional
+axis	source_nitrogen_atmosphere	source-nitrogen-atmosphere	dimensional
+axis	source_alloy_sac305	source-alloy-sac305	dimensional
+axis	source_aging_history_known	source-aging-history-known	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional

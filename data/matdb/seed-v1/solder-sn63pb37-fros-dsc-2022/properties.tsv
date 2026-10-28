@@ -1,0 +1,23 @@
+frankensim.matdb-source.v1
+observation	protocol	Sn63Pb37 DSC specimens	SETARAM DSC 131; nitrogen; heating to 250 degC and cooling at 3 degC/min	Supplier, lot, aging, pressure and statistical uncertainty are unstated. Lead-alloy DSC results are kept separate from SAC305 and from the paper's PCB/via model. The maximum programmed temperature is not a property-validity interval.
+observation	latent	Sn63Pb37 heating and cooling integrated DSC peaks at three masses	Original Table 2; J/g multiplied by 1000; mg multiplied by 1e-6	Heating absorption and cooling release are separate positive magnitudes at signed rates +0.05 and -0.05 K/s. Only the reported mass knots are admitted. No interpolation, reversible equilibrium latent heat, reference enthalpy, heat-capacity path, phase kinetics or creep law is inferred.
+curve	heating-latent	protocol,latent	latent_heat_fusion	source_specimen_mass	kg	J/kg	7e-6:44100,14e-6:42600,21e-6:42600	tabulated
+uncertainty	heating-latent	unstated	-	-	-	-
+validity	heating-latent	source_specimen_mass	7e-6	21e-6	kg
+validity	heating-latent	temperature_ramp_rate	0.05	0.05	K/s
+validity	heating-latent	source_maximum_program_temperature	523.15	523.15	K
+validity	heating-latent	source_dsc_131	1	1	1
+validity	heating-latent	source_nitrogen_atmosphere	1	1	1
+validity	heating-latent	source_alloy_sn63pb37	1	1	1
+validity	heating-latent	source_aging_history_known	0	0	1
+validity	heating-latent	source_pressure_known	0	0	1
+curve	cooling-latent	protocol,latent	latent_heat_solidification	source_specimen_mass	kg	J/kg	7e-6:39700,14e-6:37900,21e-6:38900	tabulated
+uncertainty	cooling-latent	unstated	-	-	-	-
+validity	cooling-latent	source_specimen_mass	7e-6	21e-6	kg
+validity	cooling-latent	temperature_ramp_rate	-0.05	-0.05	K/s
+validity	cooling-latent	source_maximum_program_temperature	523.15	523.15	K
+validity	cooling-latent	source_dsc_131	1	1	1
+validity	cooling-latent	source_nitrogen_atmosphere	1	1	1
+validity	cooling-latent	source_alloy_sn63pb37	1	1	1
+validity	cooling-latent	source_aging_history_known	0	0	1
+validity	cooling-latent	source_pressure_known	0	0	1

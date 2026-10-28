@@ -1,0 +1,58 @@
+frankensim.matdb-source.v1
+observation	cured-gray	3M Scotch-Weld 2216 B/A Gray two-part epoxy, B:A 2:3 volume or 5:7 mass	September 2024 TDS pp. 1 and 3, typical electrical and thermal properties; ASTM D150 dielectric data and ASTM D257 volume resistivity	Typical values with unstated uncertainty; no specification limits. Native printed SI conductivity 0.3943 W/(m K) is retained without reconverting the independently rounded imperial value. Conductivity test temperature and method, cure schedule, moisture and direction are unstated. Electrical rows explicitly give 23 C; dielectric rows also give 1 kHz. Volume resistivity converts 1.9e12 ohm cm to 1.9e10 ohm m. The 40-80 C expansion interval is retained as an interval coefficient rather than an instantaneous alpha(T) law. No uncured component density becomes cured density; no conductivity-temperature law, heat capacity, generic epoxy property or Translucent/Tan formulation is inferred.
+observation	aluminum-joint	3M 2216 B/A Gray with etched-aluminum substrates, source shear-modulus table	September 2024 TDS p. 2: header 66 C / 2 h, ASTM D1002 and ISO 4587, environmental condition +14 kPa; five separately listed test temperatures	The source calls the quantity shear modulus but explicitly attaches joint test methods and a substrate. It is retained as bondline-shear-modulus, never bulk shear modulus or Young modulus. Header temperature and duration remain source dwell context rather than substituting for the test temperature or asserting an independently specified cure schedule. Printed MPa values take precedence over independently rounded psi. Bondline thickness, shear strain fit, rate, substrate thickness and statistical uncertainty are unstated. No cohesive traction law, joint failure model, continuum tensor or temperature interpolation is supplied.
+scalar	thermal-conductivity	cured-gray	thermal_conductivity	0.3943	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	source_grade_2216_gray	1	1	1
+validity	thermal-conductivity	base_to_accelerator_volume_ratio	0.6666666666666666	0.6666666666666666	1
+validity	thermal-conductivity	source_test_temperature_known	0	0	1
+validity	thermal-conductivity	source_cure_history_known	0	0	1
+validity	thermal-conductivity	source_moisture_condition_known	0	0	1
+validity	thermal-conductivity	source_test_direction_known	0	0	1
+scalar	mean-expansion-40-80	cured-gray	mean_expansion	0.000134	K^-1	constant
+uncertainty	mean-expansion-40-80	unstated	-	-	-	-
+validity	mean-expansion-40-80	source_grade_2216_gray	1	1	1
+validity	mean-expansion-40-80	base_to_accelerator_volume_ratio	0.6666666666666666	0.6666666666666666	1
+validity	mean-expansion-40-80	source_reference_temperature	313.15	313.15	K
+validity	mean-expansion-40-80	source_range_end_temperature	353.15	353.15	K
+validity	mean-expansion-40-80	source_cure_history_known	0	0	1
+validity	mean-expansion-40-80	source_moisture_condition_known	0	0	1
+validity	mean-expansion-40-80	source_test_direction_known	0	0	1
+scalar	dielectric-constant	cured-gray	relative_permittivity	5.51	1	constant
+uncertainty	dielectric-constant	unstated	-	-	-	-
+validity	dielectric-constant	source_grade_2216_gray	1	1	1
+validity	dielectric-constant	base_to_accelerator_volume_ratio	0.6666666666666666	0.6666666666666666	1
+validity	dielectric-constant	temperature	296.15	296.15	K
+validity	dielectric-constant	frequency	1000	1000	Hz
+validity	dielectric-constant	source_cure_history_known	0	0	1
+validity	dielectric-constant	source_moisture_condition_known	0	0	1
+validity	dielectric-constant	source_test_direction_known	0	0	1
+scalar	dielectric-loss	cured-gray	dielectric_loss_tangent	0.112	1	constant
+uncertainty	dielectric-loss	unstated	-	-	-	-
+validity	dielectric-loss	source_grade_2216_gray	1	1	1
+validity	dielectric-loss	base_to_accelerator_volume_ratio	0.6666666666666666	0.6666666666666666	1
+validity	dielectric-loss	temperature	296.15	296.15	K
+validity	dielectric-loss	frequency	1000	1000	Hz
+validity	dielectric-loss	source_cure_history_known	0	0	1
+validity	dielectric-loss	source_moisture_condition_known	0	0	1
+validity	dielectric-loss	source_test_direction_known	0	0	1
+scalar	volume-resistivity	cured-gray	volume_resistivity	1.9e10	Ohm*m	constant
+uncertainty	volume-resistivity	unstated	-	-	-	-
+validity	volume-resistivity	source_grade_2216_gray	1	1	1
+validity	volume-resistivity	base_to_accelerator_volume_ratio	0.6666666666666666	0.6666666666666666	1
+validity	volume-resistivity	temperature	296.15	296.15	K
+validity	volume-resistivity	source_cure_history_known	0	0	1
+validity	volume-resistivity	source_moisture_condition_known	0	0	1
+validity	volume-resistivity	source_test_direction_known	0	0	1
+curve	joint-shear-modulus	aluminum-joint	bondline_shear_modulus	temperature	K	MPa	173.15:2745,213.15:2199,233.15:1947,273.15:1500,296.15:342	tabulated
+uncertainty	joint-shear-modulus	unstated	-	-	-	-
+validity	joint-shear-modulus	temperature	173.15	296.15	K
+validity	joint-shear-modulus	source_grade_2216_gray	1	1	1
+validity	joint-shear-modulus	base_to_accelerator_volume_ratio	0.6666666666666666	0.6666666666666666	1
+validity	joint-shear-modulus	source_dwell_temperature	339.15	339.15	K
+validity	joint-shear-modulus	source_dwell_duration	7200	7200	s
+validity	joint-shear-modulus	source_environmental_pressure	14000	14000	Pa
+validity	joint-shear-modulus	source_etched_aluminum_joint	1	1	1
+validity	joint-shear-modulus	source_bondline_thickness_known	0	0	1
+validity	joint-shear-modulus	source_cure_history_known	0	0	1
+validity	joint-shear-modulus	source_moisture_condition_known	0	0	1

@@ -1,0 +1,117 @@
+frankensim.matdb-source.v1
+observation	core-106-72	Isola FR408HR standard core, 1x106 glass construction, source resin content 72%, nominal thickness 0.0020 in / 0.051 mm	Revision G Core Data p. 1, six frequency-specific Dk and Df pairs	The printed millimetre thickness identifies this row; the rounded inch and millimetre columns are not independent exact measurements. Resin content is retained as the source fraction without assuming mass or volume basis. Test method, temperature, field direction, copper condition, moisture conditioning and cure history are unstated in this table. Numerical uncertainty is unstated. Core values are not prepreg values, a static permittivity, an isotropic dielectric tensor, or a continuous dispersion law. No generic FR408HR thermal/mechanical data are substituted for this construction.
+observation	core-2116-50	Isola FR408HR standard core, 1x2116 glass construction, source resin content 50%, nominal thickness 0.0045 in / 0.114 mm	Revision G Core Data p. 1, six frequency-specific Dk and Df pairs	Same source conventions and named absences as core-106-72. The 50% and 54% resin-content rows are distinct constructions and cannot be combined by material name alone.
+observation	core-2116-54	Isola FR408HR standard core, 1x2116 glass construction, source resin content 54%, nominal thickness 0.0050 in / 0.127 mm	Revision G Core Data p. 1, six frequency-specific Dk and Df pairs	Same source conventions and named absences as core-106-72. Only the six printed frequency knots are admissible; interpolation and extrapolation remain unavailable.
+observation	core-2x2116-54	Isola FR408HR standard core, 2x2116 glass construction, source resin content 54%, nominal thickness 0.0100 in / 0.254 mm	Revision G Core Data p. 2, six frequency-specific Dk and Df pairs	Same source conventions and named absences as core-106-72. The two-ply core remains a separate claim even where its printed electrical values coincide with the one-ply core; no thickness or construction substitution is inferred.
+curve	dk-106-72	core-106-72	relative_permittivity	frequency	Hz	1	100000000:3.37,500000000:3.36,1000000000:3.34,2000000000:3.32,5000000000:3.30,10000000000:3.30	tabulated
+uncertainty	dk-106-72	unstated	-	-	-	-
+validity	dk-106-72	frequency	100000000	10000000000	Hz
+validity	dk-106-72	source_grade_fr408hr	1	1	1
+validity	dk-106-72	source_core	1	1	1
+validity	dk-106-72	source_glass_style	106	106	1
+validity	dk-106-72	source_core_ply_count	1	1	1
+validity	dk-106-72	source_resin_content	0.72	0.72	1
+validity	dk-106-72	source_core_thickness	0.000051	0.000051	m
+validity	dk-106-72	source_test_temperature_known	0	0	1
+validity	dk-106-72	source_test_direction_known	0	0	1
+validity	dk-106-72	source_copper_condition_known	0	0	1
+validity	dk-106-72	source_moisture_condition_known	0	0	1
+validity	dk-106-72	source_cure_history_known	0	0	1
+curve	df-106-72	core-106-72	dielectric_loss_tangent	frequency	Hz	1	100000000:0.0075,500000000:0.0089,1000000000:0.0096,2000000000:0.0101,5000000000:0.0107,10000000000:0.0107	tabulated
+uncertainty	df-106-72	unstated	-	-	-	-
+validity	df-106-72	frequency	100000000	10000000000	Hz
+validity	df-106-72	source_grade_fr408hr	1	1	1
+validity	df-106-72	source_core	1	1	1
+validity	df-106-72	source_glass_style	106	106	1
+validity	df-106-72	source_core_ply_count	1	1	1
+validity	df-106-72	source_resin_content	0.72	0.72	1
+validity	df-106-72	source_core_thickness	0.000051	0.000051	m
+validity	df-106-72	source_test_temperature_known	0	0	1
+validity	df-106-72	source_test_direction_known	0	0	1
+validity	df-106-72	source_copper_condition_known	0	0	1
+validity	df-106-72	source_moisture_condition_known	0	0	1
+validity	df-106-72	source_cure_history_known	0	0	1
+curve	dk-2116-50	core-2116-50	relative_permittivity	frequency	Hz	1	100000000:3.82,500000000:3.81,1000000000:3.80,2000000000:3.79,5000000000:3.78,10000000000:3.76	tabulated
+uncertainty	dk-2116-50	unstated	-	-	-	-
+validity	dk-2116-50	frequency	100000000	10000000000	Hz
+validity	dk-2116-50	source_grade_fr408hr	1	1	1
+validity	dk-2116-50	source_core	1	1	1
+validity	dk-2116-50	source_glass_style	2116	2116	1
+validity	dk-2116-50	source_core_ply_count	1	1	1
+validity	dk-2116-50	source_resin_content	0.50	0.50	1
+validity	dk-2116-50	source_core_thickness	0.000114	0.000114	m
+validity	dk-2116-50	source_test_temperature_known	0	0	1
+validity	dk-2116-50	source_test_direction_known	0	0	1
+validity	dk-2116-50	source_copper_condition_known	0	0	1
+validity	dk-2116-50	source_moisture_condition_known	0	0	1
+validity	dk-2116-50	source_cure_history_known	0	0	1
+curve	df-2116-50	core-2116-50	dielectric_loss_tangent	frequency	Hz	1	100000000:0.0068,500000000:0.0075,1000000000:0.0083,2000000000:0.0086,5000000000:0.0091,10000000000:0.0089	tabulated
+uncertainty	df-2116-50	unstated	-	-	-	-
+validity	df-2116-50	frequency	100000000	10000000000	Hz
+validity	df-2116-50	source_grade_fr408hr	1	1	1
+validity	df-2116-50	source_core	1	1	1
+validity	df-2116-50	source_glass_style	2116	2116	1
+validity	df-2116-50	source_core_ply_count	1	1	1
+validity	df-2116-50	source_resin_content	0.50	0.50	1
+validity	df-2116-50	source_core_thickness	0.000114	0.000114	m
+validity	df-2116-50	source_test_temperature_known	0	0	1
+validity	df-2116-50	source_test_direction_known	0	0	1
+validity	df-2116-50	source_copper_condition_known	0	0	1
+validity	df-2116-50	source_moisture_condition_known	0	0	1
+validity	df-2116-50	source_cure_history_known	0	0	1
+curve	dk-2116-54	core-2116-54	relative_permittivity	frequency	Hz	1	100000000:3.72,500000000:3.71,1000000000:3.70,2000000000:3.69,5000000000:3.67,10000000000:3.67	tabulated
+uncertainty	dk-2116-54	unstated	-	-	-	-
+validity	dk-2116-54	frequency	100000000	10000000000	Hz
+validity	dk-2116-54	source_grade_fr408hr	1	1	1
+validity	dk-2116-54	source_core	1	1	1
+validity	dk-2116-54	source_glass_style	2116	2116	1
+validity	dk-2116-54	source_core_ply_count	1	1	1
+validity	dk-2116-54	source_resin_content	0.54	0.54	1
+validity	dk-2116-54	source_core_thickness	0.000127	0.000127	m
+validity	dk-2116-54	source_test_temperature_known	0	0	1
+validity	dk-2116-54	source_test_direction_known	0	0	1
+validity	dk-2116-54	source_copper_condition_known	0	0	1
+validity	dk-2116-54	source_moisture_condition_known	0	0	1
+validity	dk-2116-54	source_cure_history_known	0	0	1
+curve	df-2116-54	core-2116-54	dielectric_loss_tangent	frequency	Hz	1	100000000:0.0070,500000000:0.0077,1000000000:0.0086,2000000000:0.0089,5000000000:0.0095,10000000000:0.0093	tabulated
+uncertainty	df-2116-54	unstated	-	-	-	-
+validity	df-2116-54	frequency	100000000	10000000000	Hz
+validity	df-2116-54	source_grade_fr408hr	1	1	1
+validity	df-2116-54	source_core	1	1	1
+validity	df-2116-54	source_glass_style	2116	2116	1
+validity	df-2116-54	source_core_ply_count	1	1	1
+validity	df-2116-54	source_resin_content	0.54	0.54	1
+validity	df-2116-54	source_core_thickness	0.000127	0.000127	m
+validity	df-2116-54	source_test_temperature_known	0	0	1
+validity	df-2116-54	source_test_direction_known	0	0	1
+validity	df-2116-54	source_copper_condition_known	0	0	1
+validity	df-2116-54	source_moisture_condition_known	0	0	1
+validity	df-2116-54	source_cure_history_known	0	0	1
+curve	dk-2x2116-54	core-2x2116-54	relative_permittivity	frequency	Hz	1	100000000:3.72,500000000:3.71,1000000000:3.70,2000000000:3.69,5000000000:3.67,10000000000:3.67	tabulated
+uncertainty	dk-2x2116-54	unstated	-	-	-	-
+validity	dk-2x2116-54	frequency	100000000	10000000000	Hz
+validity	dk-2x2116-54	source_grade_fr408hr	1	1	1
+validity	dk-2x2116-54	source_core	1	1	1
+validity	dk-2x2116-54	source_glass_style	2116	2116	1
+validity	dk-2x2116-54	source_core_ply_count	2	2	1
+validity	dk-2x2116-54	source_resin_content	0.54	0.54	1
+validity	dk-2x2116-54	source_core_thickness	0.000254	0.000254	m
+validity	dk-2x2116-54	source_test_temperature_known	0	0	1
+validity	dk-2x2116-54	source_test_direction_known	0	0	1
+validity	dk-2x2116-54	source_copper_condition_known	0	0	1
+validity	dk-2x2116-54	source_moisture_condition_known	0	0	1
+validity	dk-2x2116-54	source_cure_history_known	0	0	1
+curve	df-2x2116-54	core-2x2116-54	dielectric_loss_tangent	frequency	Hz	1	100000000:0.0070,500000000:0.0077,1000000000:0.0086,2000000000:0.0089,5000000000:0.0095,10000000000:0.0093	tabulated
+uncertainty	df-2x2116-54	unstated	-	-	-	-
+validity	df-2x2116-54	frequency	100000000	10000000000	Hz
+validity	df-2x2116-54	source_grade_fr408hr	1	1	1
+validity	df-2x2116-54	source_core	1	1	1
+validity	df-2x2116-54	source_glass_style	2116	2116	1
+validity	df-2x2116-54	source_core_ply_count	2	2	1
+validity	df-2x2116-54	source_resin_content	0.54	0.54	1
+validity	df-2x2116-54	source_core_thickness	0.000254	0.000254	m
+validity	df-2x2116-54	source_test_temperature_known	0	0	1
+validity	df-2x2116-54	source_test_direction_known	0	0	1
+validity	df-2x2116-54	source_copper_condition_known	0	0	1
+validity	df-2x2116-54	source_moisture_condition_known	0	0	1
+validity	df-2x2116-54	source_cure_history_known	0	0	1

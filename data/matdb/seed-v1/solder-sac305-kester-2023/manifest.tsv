@@ -1,0 +1,18 @@
+frankensim.matdb-manifest.v3
+pack_id	solder-sac305-kester-2023
+redistribution	permitted	Selected attributed numerical facts and original modeling notes only; no source document, prose or table layout is redistributed
+citation	Kester, SAC305 High Silver Alloy for Wave and Selective Soldering, Technical Data Sheet, 23 June 2023, page 2 Physical Properties; https://www.kester.com/DesktopModules/Bring2mind/DMX/API/Entries/Download?Command=Core_Download&EntryId=61810&PortalId=0&TabId=96&language=en-US
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	kester-tds	properties.tsv	material-tsv-v1
+property	melting_range_lower_temperature	melting-range-lower-temperature	absolute-temperature
+property	melting_range_upper_temperature	melting-range-upper-temperature	absolute-temperature
+property	density	density	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	mean_linear_thermal_expansion_coefficient	mean-linear-thermal-expansion-coefficient	dimensional
+axis	engineering_reference_model	engineering-reference-model	dimensional
+axis	source_specimens_matched	source-specimens-matched	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_test_method_known	source-test-method-known	dimensional
+axis	source_alloy_sac305	source-alloy-sac305	dimensional
+axis	source_reference_temperature	source-reference-temperature	absolute-temperature
+axis	source_range_end_temperature	source-range-end-temperature	absolute-temperature

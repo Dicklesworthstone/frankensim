@@ -1,0 +1,27 @@
+frankensim.matdb-manifest.v3
+pack_id	3m-2216-gray-cured-2024
+redistribution	permitted	Selected attributed numerical facts and original notes only; no source document or table layout is redistributed
+citation	3M, Scotch-Weld Epoxy Adhesive 2216 B/A Gray, English-US Technical Data Sheet, September 2024 (supersedes July 2024), pp. 1-3; https://multimedia.3m.com/mws/media/2366022O/3M-Scotch-Weld-Epoxy-Adhesive-2216-B-A-Gray.pdf?pif=000157 ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	3m-2216-gray	properties.tsv	material-tsv-v1
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	mean_expansion	mean-linear-thermal-expansion-coefficient	dimensional
+property	relative_permittivity	relative-permittivity	dimensional
+property	dielectric_loss_tangent	dielectric-loss-tangent	dimensional
+property	volume_resistivity	electrical-resistivity	dimensional
+property	bondline_shear_modulus	bondline-shear-modulus	dimensional
+axis	source_grade_2216_gray	source-grade-2216-gray	dimensional
+axis	base_to_accelerator_volume_ratio	base-to-accelerator-volume-ratio	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	frequency	frequency	dimensional
+axis	source_reference_temperature	source-reference-temperature	absolute-temperature
+axis	source_range_end_temperature	source-range-end-temperature	absolute-temperature
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_cure_history_known	source-cure-history-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_test_direction_known	source-test-direction-known	dimensional
+axis	source_dwell_temperature	source-dwell-temperature	absolute-temperature
+axis	source_dwell_duration	source-dwell-duration	dimensional
+axis	source_environmental_pressure	source-environmental-pressure	pressure
+axis	source_etched_aluminum_joint	source-etched-aluminum-joint	dimensional
+axis	source_bondline_thickness_known	source-bondline-thickness-known	dimensional

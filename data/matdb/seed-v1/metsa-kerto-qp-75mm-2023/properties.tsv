@@ -1,0 +1,84 @@
+frankensim.matdb-source.v1
+observation	declared	Kerto Qp cross-veneered LVL, exact 75 mm construction	2023 UK declaration, EN 14374; selected from the 54-75 mm performance column	Twenty-five veneers: two longitudinal, one cross, nineteen longitudinal, one cross, two longitudinal; angles 0/90 degrees relative to the face grain. Twenty-three longitudinal and two cross veneers. These are declared structural reference statistics for EN 1995, not measured coupon data or design allowables after safety factors. Temperature, moisture and adhesive chemistry are unstated. Thickness is a singleton; no other layup or intermediate thickness is inferred.
+observation	axial	Kerto Qp 75 mm, E0,mean parallel to face grain	Declaration page 3, E0,mean and footnote 2	The source explicitly includes tensile, compressive and edgewise bending mean moduli under E0,mean. Its mapping to young-modulus is restricted to longitudinal loading. Flatwise bending has its own different modulus. No transverse modulus, Poisson ratio, isotropic elasticity, measured linear-strain range or failure model is supplied. Fifth percentiles are separate statistics, not uncertainties on means.
+scalar	rho-mean	declared	density_mean	510	kg/m3	constant
+uncertainty	rho-mean	unstated	-	-	-	-
+validity	rho-mean	source_product_kerto_qp_2023	1	1	1
+validity	rho-mean	nominal_thickness	0.075	0.075	m
+validity	rho-mean	source_longitudinal_veneers	23	23	1
+validity	rho-mean	source_cross_veneers	2	2	1
+validity	rho-mean	source_temperature_known	0	0	1
+validity	rho-mean	source_moisture_condition_known	0	0	1
+scalar	rho-fifth	declared	density_fifth_percentile	480	kg/m3	constant
+uncertainty	rho-fifth	unstated	-	-	-	-
+validity	rho-fifth	source_product_kerto_qp_2023	1	1	1
+validity	rho-fifth	nominal_thickness	0.075	0.075	m
+validity	rho-fifth	source_longitudinal_veneers	23	23	1
+validity	rho-fifth	source_cross_veneers	2	2	1
+validity	rho-fifth	source_temperature_known	0	0	1
+validity	rho-fifth	source_moisture_condition_known	0	0	1
+scalar	e0-mean	declared,axial	e0_mean	12300	MPa	constant
+uncertainty	e0-mean	unstated	-	-	-	-
+validity	e0-mean	source_product_kerto_qp_2023	1	1	1
+validity	e0-mean	nominal_thickness	0.075	0.075	m
+validity	e0-mean	source_longitudinal_veneers	23	23	1
+validity	e0-mean	source_cross_veneers	2	2	1
+validity	e0-mean	load_parallel_to_face_veneer	1	1	1
+validity	e0-mean	source_temperature_known	0	0	1
+validity	e0-mean	source_moisture_condition_known	0	0	1
+scalar	e0-fifth	declared	e0_fifth_percentile	10300	MPa	constant
+uncertainty	e0-fifth	unstated	-	-	-	-
+validity	e0-fifth	source_product_kerto_qp_2023	1	1	1
+validity	e0-fifth	nominal_thickness	0.075	0.075	m
+validity	e0-fifth	source_longitudinal_veneers	23	23	1
+validity	e0-fifth	source_cross_veneers	2	2	1
+validity	e0-fifth	source_temperature_known	0	0	1
+validity	e0-fifth	source_moisture_condition_known	0	0	1
+scalar	em-flat-mean	declared	flatwise_bending_mean	11400	MPa	constant
+uncertainty	em-flat-mean	unstated	-	-	-	-
+validity	em-flat-mean	source_product_kerto_qp_2023	1	1	1
+validity	em-flat-mean	nominal_thickness	0.075	0.075	m
+validity	em-flat-mean	source_longitudinal_veneers	23	23	1
+validity	em-flat-mean	source_cross_veneers	2	2	1
+validity	em-flat-mean	source_temperature_known	0	0	1
+validity	em-flat-mean	source_moisture_condition_known	0	0	1
+scalar	em-flat-fifth	declared	flatwise_bending_fifth_percentile	9600	MPa	constant
+uncertainty	em-flat-fifth	unstated	-	-	-	-
+validity	em-flat-fifth	source_product_kerto_qp_2023	1	1	1
+validity	em-flat-fifth	nominal_thickness	0.075	0.075	m
+validity	em-flat-fifth	source_longitudinal_veneers	23	23	1
+validity	em-flat-fifth	source_cross_veneers	2	2	1
+validity	em-flat-fifth	source_temperature_known	0	0	1
+validity	em-flat-fifth	source_moisture_condition_known	0	0	1
+scalar	g-edge-mean	declared	shear_edgewise_mean	600	MPa	constant
+uncertainty	g-edge-mean	unstated	-	-	-	-
+validity	g-edge-mean	source_product_kerto_qp_2023	1	1	1
+validity	g-edge-mean	nominal_thickness	0.075	0.075	m
+validity	g-edge-mean	source_longitudinal_veneers	23	23	1
+validity	g-edge-mean	source_cross_veneers	2	2	1
+validity	g-edge-mean	source_temperature_known	0	0	1
+validity	g-edge-mean	source_moisture_condition_known	0	0	1
+scalar	g-flat-mean	declared	shear_flatwise_mean	120	MPa	constant
+uncertainty	g-flat-mean	unstated	-	-	-	-
+validity	g-flat-mean	source_product_kerto_qp_2023	1	1	1
+validity	g-flat-mean	nominal_thickness	0.075	0.075	m
+validity	g-flat-mean	source_longitudinal_veneers	23	23	1
+validity	g-flat-mean	source_cross_veneers	2	2	1
+validity	g-flat-mean	source_temperature_known	0	0	1
+validity	g-flat-mean	source_moisture_condition_known	0	0	1
+scalar	g-edge-fifth	declared	shear_edgewise_fifth_percentile	400	MPa	constant
+uncertainty	g-edge-fifth	unstated	-	-	-	-
+validity	g-edge-fifth	source_product_kerto_qp_2023	1	1	1
+validity	g-edge-fifth	nominal_thickness	0.075	0.075	m
+validity	g-edge-fifth	source_longitudinal_veneers	23	23	1
+validity	g-edge-fifth	source_cross_veneers	2	2	1
+validity	g-edge-fifth	source_temperature_known	0	0	1
+validity	g-edge-fifth	source_moisture_condition_known	0	0	1
+scalar	g-flat-fifth	declared	shear_flatwise_fifth_percentile	100	MPa	constant
+uncertainty	g-flat-fifth	unstated	-	-	-	-
+validity	g-flat-fifth	source_product_kerto_qp_2023	1	1	1
+validity	g-flat-fifth	nominal_thickness	0.075	0.075	m
+validity	g-flat-fifth	source_longitudinal_veneers	23	23	1
+validity	g-flat-fifth	source_cross_veneers	2	2	1
+validity	g-flat-fifth	source_temperature_known	0	0	1
+validity	g-flat-fifth	source_moisture_condition_known	0	0	1

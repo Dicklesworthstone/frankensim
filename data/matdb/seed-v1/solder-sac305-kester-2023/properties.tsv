@@ -1,0 +1,40 @@
+frankensim.matdb-source.v1
+observation	reference	Kester SAC305 nominal Sn-3Ag-0.5Cu wave/selective solder alloy	Manufacturer TDS physical-property reference values	Engineering reference only; no matched specimen, test method, pressure, lot, aging or reflow history is supplied. Composition tolerances are product specifications, not validated material-property uncertainty. Keep this profile separate from other suppliers' SAC305 properties and phase endpoints.
+observation	physical	SAC305 density, heat capacity and melting interval	Selected page 2 numerical facts converted to SI	Density 7.37 g/cm3 and heat capacity 0.232 J/g/K become 7370 kg/m3 and 232 J/kg/K. Their test temperature is unstated. The printed melting interval 217 to 219 degC is retained without relabeling its ends as measured solidus/liquidus. Recommended solder-pot operating temperatures do not establish property validity.
+observation	expansion	SAC305 interval thermal expansion, 20 to 100 degC	Source interval coefficient represented as a mean coefficient	21.9 micrometre per metre per degC is an interval mean from 293.15 to 373.15 K. It can determine the endpoint strain relative to the 20 degC length. It is not an instantaneous alpha(T), a local derivative, or permission to choose another reference or endpoint.
+scalar	melting-lower	reference,physical	melting_range_lower_temperature	490.15	K	constant
+uncertainty	melting-lower	unstated	-	-	-	-
+validity	melting-lower	engineering_reference_model	1	1	1
+validity	melting-lower	source_specimens_matched	0	0	1
+validity	melting-lower	source_test_temperature_known	0	0	1
+validity	melting-lower	source_test_method_known	0	0	1
+validity	melting-lower	source_alloy_sac305	1	1	1
+scalar	melting-upper	reference,physical	melting_range_upper_temperature	492.15	K	constant
+uncertainty	melting-upper	unstated	-	-	-	-
+validity	melting-upper	engineering_reference_model	1	1	1
+validity	melting-upper	source_specimens_matched	0	0	1
+validity	melting-upper	source_test_temperature_known	0	0	1
+validity	melting-upper	source_test_method_known	0	0	1
+validity	melting-upper	source_alloy_sac305	1	1	1
+scalar	density	reference,physical	density	7370	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_specimens_matched	0	0	1
+validity	density	source_test_temperature_known	0	0	1
+validity	density	source_test_method_known	0	0	1
+validity	density	source_alloy_sac305	1	1	1
+scalar	heat-capacity	reference,physical	specific_heat_capacity	232	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	engineering_reference_model	1	1	1
+validity	heat-capacity	source_specimens_matched	0	0	1
+validity	heat-capacity	source_test_temperature_known	0	0	1
+validity	heat-capacity	source_test_method_known	0	0	1
+validity	heat-capacity	source_alloy_sac305	1	1	1
+scalar	mean-expansion	reference,expansion	mean_linear_thermal_expansion_coefficient	21.9e-6	K^-1	constant
+uncertainty	mean-expansion	unstated	-	-	-	-
+validity	mean-expansion	engineering_reference_model	1	1	1
+validity	mean-expansion	source_specimens_matched	0	0	1
+validity	mean-expansion	source_test_method_known	0	0	1
+validity	mean-expansion	source_alloy_sac305	1	1	1
+validity	mean-expansion	source_reference_temperature	293.15	293.15	K
+validity	mean-expansion	source_range_end_temperature	373.15	373.15	K

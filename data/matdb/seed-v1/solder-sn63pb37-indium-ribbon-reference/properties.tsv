@@ -1,0 +1,40 @@
+frankensim.matdb-source.v1
+observation	reference	Indalloy SN63, 63Sn-37Pb by mass, ribbon/foil alloy reference	Manufacturer alloy-table numerical facts	Engineering reference only; no matched specimen, test method, lot, pressure, temper, aging or strain rate is supplied. Do not transfer the data to paste, a reflowed solder joint, intermetallic layer or another tin-lead composition. Uncertainty is unstated.
+observation	phase	Sn63Pb37 nominal eutectic endpoints	Both printed endpoints are 183 degC	Equal solidus and liquidus are retained as 456.15 K. They provide neither latent heat nor a caloric reference, kinetic supercooling law or creep model.
+observation	physical	Sn63Pb37 density and tensile strength references	Explicit source-unit conversion	Density 8.39 g/cm3 becomes 8390 kg/m3. Tensile strength 8720 psi uses 1 psi = 0.45359237 times 9.80665 divided by 0.0254 squared Pa. Their test temperature is unknown. Unqualified electrical percent-Cu, CTE and bond-holding shear entries are not imported.
+observation	conductivity	Sn63Pb37 thermal conductivity at 85 degC	Source column W/cm/degC at 85 degC	0.48 W/cm/degC becomes 48 W/m/K at 358.15 K only. The separate 20 degC column is blank for this alloy. This point is not a conductivity curve or a qualified temperature trajectory.
+scalar	solidus	reference,phase	solidus_temperature	456.15	K	constant
+uncertainty	solidus	unstated	-	-	-	-
+validity	solidus	engineering_reference_model	1	1	1
+validity	solidus	source_specimens_matched	0	0	1
+validity	solidus	source_test_temperature_known	0	0	1
+validity	solidus	source_test_method_known	0	0	1
+validity	solidus	source_alloy_sn63pb37	1	1	1
+scalar	liquidus	reference,phase	liquidus_temperature	456.15	K	constant
+uncertainty	liquidus	unstated	-	-	-	-
+validity	liquidus	engineering_reference_model	1	1	1
+validity	liquidus	source_specimens_matched	0	0	1
+validity	liquidus	source_test_temperature_known	0	0	1
+validity	liquidus	source_test_method_known	0	0	1
+validity	liquidus	source_alloy_sn63pb37	1	1	1
+scalar	density	reference,physical	density	8390	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_specimens_matched	0	0	1
+validity	density	source_test_temperature_known	0	0	1
+validity	density	source_test_method_known	0	0	1
+validity	density	source_alloy_sn63pb37	1	1	1
+scalar	tensile-strength	reference,physical	tensile_strength	60122283.59642811	Pa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	engineering_reference_model	1	1	1
+validity	tensile-strength	source_specimens_matched	0	0	1
+validity	tensile-strength	source_test_temperature_known	0	0	1
+validity	tensile-strength	source_test_method_known	0	0	1
+validity	tensile-strength	source_alloy_sn63pb37	1	1	1
+scalar	conductivity-85c	reference,conductivity	thermal_conductivity	48	W/m/K	constant
+uncertainty	conductivity-85c	unstated	-	-	-	-
+validity	conductivity-85c	engineering_reference_model	1	1	1
+validity	conductivity-85c	source_specimens_matched	0	0	1
+validity	conductivity-85c	source_test_method_known	0	0	1
+validity	conductivity-85c	source_alloy_sn63pb37	1	1	1
+validity	conductivity-85c	temperature	358.15	358.15	K

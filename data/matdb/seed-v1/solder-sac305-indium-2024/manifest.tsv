@@ -1,0 +1,21 @@
+frankensim.matdb-manifest.v3
+pack_id	solder-sac305-indium-2024
+redistribution	permitted	Selected attributed numerical facts and original modeling notes only; no source document, prose or table layout is redistributed
+citation	Indium Corporation, Indalloy 256 (SAC305) for Preforms, Form No. 100346 R0, copyright 2024, Selected Properties; https://documents.indium.com/qdynamo/download.php?docid=5418
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	indium-pds	properties.tsv	material-tsv-v1
+property	solidus_temperature	solidus-temperature	absolute-temperature
+property	liquidus_temperature	liquidus-temperature	absolute-temperature
+property	density	density	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	electrical_resistivity	electrical-resistivity	dimensional
+property	young_modulus	young_modulus	dimensional
+property	poisson_ratio	poisson_ratio	dimensional
+property	tensile_strength	tensile-strength	dimensional
+property	tensile_yield_strength	tensile-yield-strength	dimensional
+property	elongation_at_break	elongation-at-break	dimensional
+axis	engineering_reference_model	engineering-reference-model	dimensional
+axis	source_specimens_matched	source-specimens-matched	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_test_method_known	source-test-method-known	dimensional
+axis	source_alloy_sac305	source-alloy-sac305	dimensional

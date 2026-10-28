@@ -1,0 +1,23 @@
+frankensim.matdb-manifest.v3
+pack_id	metsa-kerto-qp-75mm-2023
+redistribution	permitted	Selected attributed numerical facts and original notes only; source document and table layout are not redistributed
+citation	Metsa Wood, UK Declaration of Conformity MW/LVL/313-001/UKCA/UKDOC, Kerto LVL Qp-beam, 10 July 2023, pages 1 and 3; https://www.metsagroup.com/contentassets/e7696a5cf7194ada8645b6815fa8ca5f/uk_doc_kerto-qp_2023_07_10.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	kerto-qp-75	properties.tsv	material-tsv-v1
+property	density_mean	density	dimensional
+property	density_fifth_percentile	density-fifth-percentile	dimensional
+property	e0_mean	young-modulus	dimensional
+property	e0_fifth_percentile	longitudinal-modulus-fifth-percentile	dimensional
+property	flatwise_bending_mean	bending-modulus-flatwise-parallel-mean	dimensional
+property	flatwise_bending_fifth_percentile	bending-modulus-flatwise-parallel-fifth-percentile	dimensional
+property	shear_edgewise_mean	shear-modulus-edgewise-mean	dimensional
+property	shear_flatwise_mean	shear-modulus-flatwise-parallel-mean	dimensional
+property	shear_edgewise_fifth_percentile	shear-modulus-edgewise-fifth-percentile	dimensional
+property	shear_flatwise_fifth_percentile	shear-modulus-flatwise-parallel-fifth-percentile	dimensional
+axis	source_product_kerto_qp_2023	source-product-kerto-qp-2023	dimensional
+axis	nominal_thickness	nominal-thickness	dimensional
+axis	source_longitudinal_veneers	source-longitudinal-veneers	dimensional
+axis	source_cross_veneers	source-cross-veneers	dimensional
+axis	load_parallel_to_face_veneer	load-parallel-to-face-veneer	dimensional
+axis	source_temperature_known	source-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
