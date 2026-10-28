@@ -42,6 +42,8 @@ pub mod radiation;
 pub use radiation::adjoint::{EnthalpyRadiationStepGradient, EnthalpyRadiationStepLinearization};
 mod endpoint;
 pub use endpoint::EnthalpyEndpointEvaluation;
+mod pointwise;
+use pointwise::{PointwiseBoundary, PointwiseBoundaryAssembly};
 
 use std::{cell::RefCell, fmt};
 
@@ -52,7 +54,10 @@ use fs_solver::{
     NonlinearProblem, SolverCallback, SolverRunProgress,
 };
 use fs_sparse::Csr;
-use crate::radiation::{PointwiseAmbientRadiation, PointwiseRadiationAssembly, PointwiseRadiationReport};
+use crate::radiation::{
+    PointwiseAmbientRadiation, PointwiseRadiationReport,
+    PointwiseEnclosureRadiation, PointwiseEnclosureReport,
+};
 
 use crate::{
     ConductionError, ConductionMesh, ConductionProblem, InterfaceFlux, RobinFlux,
@@ -230,6 +235,10 @@ pub struct EnthalpyStepSolution {
     /// Its heat is already included in the energy balance and is separate from
     /// `robin_out_w`; it must not be handed to a convection/coolant heat port.
     pub pointwise_radiation: Option<PointwiseRadiationReport>,
+    /// Spatial local emission with reflected, patch-uniform irradiation.
+    /// Internal exchange is separate from authored Neumann and convective heat;
+    /// its actual closure defect is already included in the energy balance.
+    pub pointwise_enclosure_radiation: Option<PointwiseEnclosureReport>,
     /// Prescribed-temperature reservoir heat, W inward, including fixed-node
     /// storage changes. A first-step boundary jump is charged exactly once.
     pub dirichlet_in_w: f64,
@@ -461,7 +470,42 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
                 "pointwise radiation must retain the exact transport mesh and boundary",
             ));
         }
-        self.advance_radiative(cx, problem, interfaces, old_specific_h, dt_s, config, Some(radiation))
+        self.advance_radiative(
+            cx, problem, interfaces, old_specific_h, dt_s, config,
+            Some(PointwiseBoundary::Ambient(radiation)),
+        )
+    }
+
+    /// Advance local P1 emission and reflected enclosure exchange in the SAME
+    /// nonlinear enthalpy solve. The complete generally nonsymmetric radiation
+    /// tangent uses the existing Newton-FGMRES lane. No outer frozen-radiation
+    /// iteration or patch-mean temperature replaces a local hot spot.
+    ///
+    /// Original convection, prescribed flux, contact, nonlinear conductivity,
+    /// latent storage and prescribed-temperature reactions remain active.
+    /// Irradiation is uniform within each declared view-factor patch; this
+    /// does not infer spatial visibility, emissivity variation or moving geometry.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_pointwise_enclosure_radiation(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_specific_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        radiation: &PointwiseEnclosureRadiation<'_>,
+    ) -> Result<EnthalpyStepSolution, EnthalpyError> {
+        poll(cx, 0)?;
+        if !radiation.matches(problem.mesh, problem.boundary) {
+            return Err(EnthalpyError::InvalidInput(
+                "pointwise enclosure must retain the exact transport mesh and boundary",
+            ));
+        }
+        self.advance_radiative(
+            cx, problem, interfaces, old_specific_h, dt_s, config,
+            Some(PointwiseBoundary::Enclosure(radiation)),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -473,7 +517,7 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
         old_specific_h: &[f64],
         dt_s: f64,
         config: EnthalpyStepConfig,
-        pointwise_radiation: Option<&PointwiseAmbientRadiation<'_>>,
+        pointwise_radiation: Option<PointwiseBoundary<'_>>,
     ) -> Result<EnthalpyStepSolution, EnthalpyError> {
         self.admit_step(cx, problem, old_specific_h, dt_s, config)?;
         let context = StepContext {
@@ -615,7 +659,7 @@ struct StepContext<'a, 'm, 'c, 'cx> {
     interfaces: Option<&'a ThermalInterfaces>,
     old: &'a [f64],
     dt: f64,
-    pointwise_radiation: Option<&'a PointwiseAmbientRadiation<'a>>,
+    pointwise_radiation: Option<PointwiseBoundary<'a>>,
 }
 
 impl StepContext<'_, '_, '_, '_> {
@@ -841,7 +885,7 @@ impl StepContext<'_, '_, '_, '_> {
             } else {
                 let transport_diagonal = match &radiation {
                     Some(radiation) => finite(picard.operator.get(vertex, vertex)
-                        + radiation.temperature_diagonal_w_k[vertex])?,
+                        + radiation.preconditioner_diagonal(vertex))?,
                     None => picard.operator.get(vertex, vertex),
                 };
                 finite(self.storage.masses[vertex] + self.dt * transport_diagonal * derivative)?
@@ -969,7 +1013,7 @@ impl StepContext<'_, '_, '_, '_> {
         let net =
             finite(energy.source_w + dirichlet_in_w - energy.neumann_out_w - energy.robin_out_w)?;
         let net = match &pointwise_radiation {
-            Some(radiation) => finite(net - radiation.outward_heat_w)?,
+            Some(radiation) => finite(net - radiation.outward_heat_w())?,
             None => net,
         };
         let energy_residual_j = finite(storage - self.dt * net)?;
@@ -984,6 +1028,8 @@ impl StepContext<'_, '_, '_, '_> {
             None => Vec::new(),
         };
         poll(self.cx, h.len())?;
+        let (pointwise_radiation, pointwise_enclosure_radiation) = pointwise_radiation
+            .map_or((None, None), pointwise::PointwiseBoundaryReport::into_reports);
         Ok(EnthalpyStepSolution {
             specific_enthalpy_j_kg: h,
             temperature,
@@ -992,6 +1038,7 @@ impl StepContext<'_, '_, '_, '_> {
             neumann_out_w: energy.neumann_out_w,
             robin_out_w: energy.robin_out_w,
             pointwise_radiation,
+            pointwise_enclosure_radiation,
             dirichlet_in_w,
             stored_energy_change_j: storage,
             energy_residual_j,
@@ -1012,7 +1059,7 @@ struct NewtonStage<'s, 'a, 'm, 'c, 'cx> {
     inverse: Vec<f64>,
     fatal: RefCell<Option<EnthalpyError>>,
     trial_refusal: RefCell<Option<EnthalpyError>>,
-    radiation: Option<PointwiseRadiationAssembly>,
+    radiation: Option<PointwiseBoundaryAssembly>,
 }
 
 impl NewtonStage<'_, '_, '_, '_, '_> {

@@ -368,7 +368,7 @@ impl<'a> PointwiseAmbientRadiation<'a> {
 // their weights are (155 +/- sqrt(15))/1200. Positive interior samples keep
 // the passive tangent positive semidefinite. Polynomial exactness is checked
 // independently against barycentric simplex moments in the regression tests.
-const TRIANGLE_DEGREE_FIVE: [([f64; 3], f64); 7] = [
+pub(super) const TRIANGLE_DEGREE_FIVE: [([f64; 3], f64); 7] = [
     ([1.0 / 3.0; 3], 9.0 / 40.0),
     (
         [

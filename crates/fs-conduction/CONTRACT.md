@@ -121,6 +121,30 @@ view factor one; it does not model enclosure reflection, shadowing, participatin
 media, a temperature-dependent emissivity derivative, or supply an error bound
 for the spatially discretized temperature field.
 
+`PointwiseEnclosureRadiation` extends local P1 emission to closed diffuse-gray
+exchange: the radiosity source is the exact area mean of `sigma T_h^4`, while
+the nodal flux is the integral of `epsilon N_i (sigma T_h^4 - G_patch)`.
+Irradiation is uniform within each declared view-factor patch; local emission
+is resolved, with no inferred spatial visibility kernel or temperature-varying
+emissivity. Geometry, emissivity and the bounded patch factorization are
+prepared once. Sparse face/trace storage and a small patch response matrix
+apply the full reflected tangent without a dense nodal matrix.
+
+`advance_with_pointwise_enclosure_radiation` in both homogeneous and
+heterogeneous enthalpy owners solves these terms with conduction, original
+natural boundary heat, latent storage and prescribed-node reactions in one
+Newton-FGMRES system. The reflected tangent is generally nonsymmetric; the
+Picard preconditioner uses the positive local-emission diagonal, while the
+reported exact diagonal retains the reflected term even when it is negative.
+Each candidate independently gates the radiosity equations and closed heat
+sum in watts. The final `pointwise_enclosure_radiation` report participates
+exactly once in the joule balance; original Robin and Neumann accounts retain
+only their authored heat. The base adjoint refuses these endpoints until its
+owner includes the reflected spatial tangent. Tests in
+`tests/enthalpy_enclosure/pointwise.rs` compare independent simplex moments,
+reflected derivatives, nonuniform nodal balances, finite latent heat transfer,
+and a strong-self-view case with a negative exact diagonal.
+
 `transient::MaterialHeatCapacity` resolves constant density and specific heat
 from one immutable material card at an explicit reference state, then pins both
 selected sources at the endpoints of a declared positive temperature interval.
@@ -142,7 +166,6 @@ the paired `isotropic_conductivity_with_property` source. Both caloric and
 conductivity sources must explicitly bound temperature; point-only or unknown
 temperature data cannot authorize a finite heating trajectory. Bounded frozen
 engineering references retain that model's domain and authority limitations.
-
 `BackwardEuler::uniform_material` and `material_assigned`, and the history
 runner's `MaterialUniform`/`MaterialById` capacity variants, retain these source
 bundles while using the original lumped P1 capacity matrix. Every initial,

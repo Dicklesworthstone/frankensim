@@ -2,6 +2,8 @@
 mod support;
 #[path = "enthalpy_enclosure/vacuum.rs"]
 mod vacuum;
+#[path = "enthalpy_enclosure/pointwise.rs"]
+mod pointwise;
 
 use fs_blake3::ContentHash;
 use fs_conduction::radiation::{GrayDiffuseEnclosure, RadiationSurface, ViewFactorMatrix};
@@ -31,6 +33,10 @@ const DT: f64 = 0.05;
 const EPS: [f64; 2] = [0.7, 0.9];
 
 fn emissivity(name: &str, value: f64) -> SurfaceEmissivity {
+    emissivity_in(name, value, 240.0, 560.0)
+}
+
+fn emissivity_in(name: &str, value: f64, lower: f64, upper: f64) -> SurfaceEmissivity {
     let mut claims = ClaimSet::new();
     claims
         .insert_claim(PropertyClaim {
@@ -39,7 +45,7 @@ fn emissivity(name: &str, value: f64) -> SurfaceEmissivity {
                 value,
                 dims: EMISSIVITY_DIMS,
             },
-            validity: ValidityDomain::unconstrained().with("T", 240.0, 560.0),
+            validity: ValidityDomain::unconstrained().with("T", lower, upper),
             uncertainty: UncertaintyModel::Unstated,
             interpolation: InterpolationPolicy::ConstantWithinValidity,
             observations: Vec::new(),

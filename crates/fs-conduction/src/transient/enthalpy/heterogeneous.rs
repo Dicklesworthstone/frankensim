@@ -402,6 +402,24 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
         )
     }
 
+    /// Resolve local emission and reflected patch irradiation in the original
+    /// nonsymmetric enthalpy Newton solve, with each vertex's own phase chart.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_pointwise_enclosure_radiation(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_specific_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        radiation: &crate::PointwiseEnclosureRadiation<'_>,
+    ) -> Result<EnthalpyStepSolution, EnthalpyError> {
+        self.inner.advance_with_pointwise_enclosure_radiation(
+            cx, problem, interfaces, old_specific_h, dt_s, config, radiation,
+        )
+    }
+
     /// Add implicit ambient radiation while retaining each vertex's declared
     /// phase chart and immutable reference mass. The shared driver checks the
     /// complete endpoint residual and nonlinear radiative energy balance.

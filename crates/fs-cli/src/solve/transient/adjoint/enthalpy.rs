@@ -213,6 +213,7 @@ impl EnthalpyTape {
         }
         let copied = EnthalpyStepSolution {
             pointwise_radiation: endpoint.pointwise_radiation.clone(),
+            pointwise_enclosure_radiation: endpoint.pointwise_enclosure_radiation.clone(),
             specific_enthalpy_j_kg: clone_values(cx, &endpoint.specific_enthalpy_j_kg, deadline)?,
             temperature: clone_values(cx, &endpoint.temperature, deadline)?,
             liquid_mass_fraction: clone_values(cx, &endpoint.liquid_mass_fraction, deadline)?,

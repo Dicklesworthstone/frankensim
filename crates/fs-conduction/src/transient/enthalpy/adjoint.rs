@@ -257,7 +257,7 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
         physical_target: Option<f64>,
     ) -> Result<EnthalpyStepLinearization<'m>, EnthalpyAdjointError> {
         poll(cx, 0)?;
-        if accepted.pointwise_radiation.is_some() {
+        if accepted.pointwise_radiation.is_some() || accepted.pointwise_enclosure_radiation.is_some() {
             return Err(EnthalpyAdjointError::InvalidInput(
                 "the base adjoint does not own the pointwise radiation boundary tangent",
             ));
