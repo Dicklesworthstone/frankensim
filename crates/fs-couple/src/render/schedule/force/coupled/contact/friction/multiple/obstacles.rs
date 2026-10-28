@@ -13,6 +13,7 @@ use super::super::super::{
     ModalContact, ModalContactConfig, ZeroStorage, contact_column, extension,
     force_tolerance, law_force, solve_contact,
 };
+use fs_contact::normal_patch::source::SourcePointContact;
 use fs_dcontact::{ContactStorage, OpeningContactStep};
 use fs_phs::Storage;
 
@@ -101,6 +102,63 @@ impl MultiFrictionModalSystem {
         poll(Some(gate))?;
         self.obstacles = Some(set);
         Ok(self)
+    }
+
+    /// Retain source-bound normal laws and their full applicability envelopes.
+    ///
+    /// Bind selected obstacle indices before playback. The original obstacle must
+    /// be the same unit-point Hertz/Hunt--Crossley law as its source; coefficients
+    /// cannot override material resolution. The source's bulk/interface state and
+    /// local relative curvature remain frozen. Moving geometry changes the
+    /// contact coordinates and work, not that declared local contact model.
+    ///
+    /// Initial motion, both candidate indentations, the ACTUAL secant loss rate
+    /// and sample duration must be admitted. Mathematical root iterates do not
+    /// publish state; the completed mechanical candidate is checked before any
+    /// normal, friction, thermal, geometry or clock publication. Static preload
+    /// retains the existing penetration ceiling, bounded by the same envelope.
+    pub fn with_obstacle_sources(mut self, sources: Vec<(usize, SourcePointContact)>,
+        gate: &CancelGate) -> Result<Self, ModalFrictionError>
+    {
+        poll(Some(gate))?;
+        if sources.is_empty() { return Ok(self); }
+        if self.samples_rendered() != 0 {
+            return Err(invalid("normal material sources bind before the first physical sample").into());
+        }
+        let set = self.obstacles.as_ref()
+            .ok_or_else(|| invalid("normal material sources require bound obstacles"))?;
+        let velocities: Vec<_> = self.components().iter().flat_map(|m|
+            m.states().iter().map(|s| s.velocity_m_sqrt_kg_per_s)).collect();
+        for (entry, (index, source)) in sources.iter().enumerate() {
+            poll(Some(gate))?;
+            let point = set.points.get(*index)
+                .ok_or_else(|| invalid("normal material source names an absent obstacle"))?;
+            if point.source.is_some() || sources[..entry].iter().any(|(prior, _)| prior == index) {
+                return Err(invalid("each normal material source binds once").into());
+            }
+            let law = &point.contact.law;
+            if law.stiffness().to_bits() != source.stiffness_n_per_m_3_2().to_bits()
+                || law.alpha().to_bits() != 1.5_f64.to_bits()
+                || law.weights() != [1.0]
+                || law.internal_loss().to_bits() != source.dissipation_s_per_m().to_bits()
+                || point.config.maximum_penetration_m > source.envelope().maximum_indentation_m {
+                return Err(invalid("normal obstacle law and penetration ceiling must retain the material source").into());
+            }
+            let offset = set.motion.as_ref().map_or(0.0, |m| m.accepted[*index]);
+            let x = finite(extension(self.components(), &point.column, 0.0)? - offset)?;
+            source.validate_kinematics(point.penetration(x)?, dot(&point.column, &velocities)?,
+                self.sample_period_s()).map_err(ModalCouplingError::ContactMaterial)?;
+        }
+        poll(Some(gate))?;
+        let set = self.obstacles.as_mut().expect("validated obstacle set");
+        for (index, source) in sources { set.points[index].source = Some(source); }
+        Ok(self)
+    }
+
+    /// Complete immutable source receipts for a material-bound normal contact.
+    #[must_use]
+    pub fn obstacle_source(&self, index: usize) -> Option<&SourcePointContact> {
+        self.obstacles.as_ref()?.points.get(index)?.source.as_ref()
     }
 
     /// Bind the static compliance of modes the network does NOT retain, among the
@@ -205,6 +263,7 @@ impl MultiFrictionModalSystem {
 
 struct NormalPoint {
     contact: ModalContact,
+    source: Option<SourcePointContact>,
     config: ModalContactConfig,
     column: Vec<f64>,
     storage: ContactStorage,
@@ -223,6 +282,19 @@ impl NormalPoint {
         let penetration = finite(x-self.contact.law.gaps()[0])?.max(0.0);
         limit("friction obstacle penetration", penetration, self.config.maximum_penetration_m)?;
         Ok(penetration)
+    }
+    fn check_source(&self, x: f64, dt: f64) -> Result<(), ModalCouplingError> {
+        if let Some(source) = &self.source {
+            // Closure includes the source gap, support translation and moving
+            // participation map. This is exactly law_force's dissipative rate,
+            // including separated-to-contact and contact-to-separated steps.
+            let rate = finite(finite(x-self.old)?/dt)?;
+            for endpoint in [self.old, x] {
+                source.validate_kinematics(self.penetration(endpoint)?, rate, dt)
+                    .map_err(ModalCouplingError::ContactMaterial)?;
+            }
+        }
+        Ok(())
     }
     // `share` of the declared tolerance bounds the residual: all of it at the
     // actual endpoint, half of it on a prediction solved with headroom.
@@ -357,7 +429,7 @@ impl ObstacleSet {
             let law = OpeningContactStep::new(&contact.law, -old).map_err(ModalCouplingError::ContactLaw)?;
             let storage = ContactStorage::new(Box::new(ZeroStorage), 1, vec![contact.law.clone()])
                 .map_err(ModalCouplingError::ContactLaw)?;
-            let point = NormalPoint { contact, config, column, storage, law, old, free: old, iterations: 0 };
+            let point = NormalPoint { contact, source: None, config, column, storage, law, old, free: old, iterations: 0 };
             point.penetration(old)?; point.energy(old)?;
             points.push(point);
         }
@@ -599,6 +671,22 @@ impl ObstacleSet {
             sums = (finite(sums.0+frame.residual_energy_j)?, finite(sums.1+frame.residual_loss_j)?);
         }
         Ok(sums)
+    }
+    // Run only on the selected COMPLETE mechanical/thermal candidate, never
+    // inside the coordinate roots, outer strain iteration or thermal Jacobian.
+    pub(super) fn validate_sources(&self, models: &[ModalAcousticTimeModel], dt: f64,
+        gate: Option<&CancelGate>) -> Result<(), ModalCouplingError> {
+        for (i, point) in self.points.iter().enumerate() {
+            if point.source.is_none() { continue; }
+            poll(gate)?;
+            let column = self.geometry.as_ref().filter(|g| g.moving[i])
+                .map_or(&point.column, |g| &g.end_columns[i]);
+            let mut x = extension(models, column, 0.0)?;
+            if self.residual.is_some() { x = finite(x-self.lag(i, &self.reactions)?)?; }
+            if let Some(motion) = &self.motion { x = finite(x-motion.candidate[i])?; }
+            point.check_source(x, dt)?;
+        }
+        Ok(())
     }
     pub(super) fn publish(&mut self) {
         self.accepted.copy_from_slice(&self.staged);

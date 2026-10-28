@@ -121,6 +121,19 @@ impl MultiBowStringBank {
         Ok(self)
     }
 
+    /// Retain complete normal-contact material sources in original stop order.
+    /// Each source must match its already bound unit-point obstacle exactly.
+    /// The shared joint owner checks its real closure/rate envelope before every
+    /// accepted step, including prescribed support translation and migration.
+    pub fn with_string_stop_sources(mut self,
+        sources: Vec<(usize, fs_contact::normal_patch::source::SourcePointContact)>,
+        gate: &CancelGate) -> Result<Self, RenderError>
+    {
+        self.system = self.system.with_obstacle_sources(sources, gate)
+            .map_err(RenderError::Friction)?;
+        Ok(self)
+    }
+
     // With residual flexibility (pexfp.299): each fixed stop's closure gains its
     // bridge's cross term, minus k_eff G_sb times the bridge link's string and
     // body columns, and the stops share the condensed omitted-mode compliance

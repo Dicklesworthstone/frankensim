@@ -683,6 +683,7 @@ impl MultiFrictionModalSystem {
         }
         checkpoint()?;
         let system = mechanics.into_inner();
+        system.validate_obstacle_sources(Some(gate))?;
         // All admission is complete. Publish source+strain, original mechanical
         // state/observer, and the existing thermal candidate without fallible work.
         system.shear_layers = layers;

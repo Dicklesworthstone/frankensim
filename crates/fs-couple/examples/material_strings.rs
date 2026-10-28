@@ -285,9 +285,12 @@ impl input::Spec {
             settings.network.max_setup_terms = terms;
         }
         let bridge_interface_bytes = self.bridge_interfaces.pack_bytes()?;
+        let normal_source_bytes = stop_profile.as_ref().map(stops::Profile::source_pack_bytes)
+            .transpose()?.unwrap_or(0);
         let interface_bytes = profile.as_ref().map(body::Profile::interface_pack_bytes)
             .transpose()?.unwrap_or(0).checked_add(self.friction.pack_bytes()?)
             .and_then(|bytes| bytes.checked_add(bridge_interface_bytes))
+            .and_then(|bytes| bytes.checked_add(normal_source_bytes))
             .ok_or("combined interface pack byte count overflow")?;
         self.bridge_interfaces.apply(self.temperature, self.omega, &mut self.strings)?;
         let mut remaining = input::MAX_TOTAL_PACK_BYTES.checked_sub(interface_bytes)
@@ -436,7 +439,8 @@ impl input::Spec {
                 }
             }
         }
-        let bank=match &stop_profile { Some(stops)=>stops.bind(bank,gate)?, None=>bank };
+        let bank=match &stop_profile {
+            Some(stops)=>stops.bind(bank,&self,&mut catalog,&mut loader,gate)?, None=>bank };
         let bank=if let Some(layers)=self.friction.shear_layers() {
             layers.bind(&self,bank,&mut catalog,&mut loader,gate)?
         } else { bank };
@@ -629,7 +633,7 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     if let Some(dir)=store_dir {
         profile.as_mut().ok_or("--observer-store requires --body-profile")?.keep_observer_setups(dir)?;
     }
-    let stop_profile=stop_path.map(|p|stops::Profile::parse(&sources.read_option(p,stops::MAX_BYTES)?)).transpose()?;
+    let mut stop_profile=stop_path.map(|p|stops::Profile::parse(&sources.read_option(p,stops::MAX_BYTES)?)).transpose()?;
     let gas_sources=if sources.is_restricted() {
         gas_options.load_with(|p|sources.read_option(p,input::MAX_PACK_BYTES).map_err(|e|e.to_string()))?
     } else { gas_options.load()? };
@@ -658,6 +662,13 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
         remaining=remaining.checked_sub(bytes.len()).ok_or("combined source pack byte budget exceeded")?;
         Ok(NormalizedInterfacePack::from_bytes(&bytes)?)
     })?;
+    if let Some(stops) = &mut stop_profile {
+        stops.load_sources(&gate, |name| {
+            let bytes=sources.read_relative(name,input::MAX_PACK_BYTES.min(remaining))?;
+            remaining=remaining.checked_sub(bytes.len()).ok_or("combined source pack byte budget exceeded")?;
+            Ok(bytes)
+        })?;
+    }
     let mut ready=pool.scope(|arena| {
         let cx=Cx::new(&gate,arena,fs_exec::StreamKey {seed:0,kernel_id:0,tile:0,iteration:0},
             fs_exec::Budget::INFINITE,fs_exec::ExecMode::Deterministic);

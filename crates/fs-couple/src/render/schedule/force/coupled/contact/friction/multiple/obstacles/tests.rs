@@ -6,6 +6,9 @@ use fs_dcontact::Obstacle;
 use fs_math::c64::C64;
 use fs_tribo::FrictionLaw;
 
+#[path = "source_tests.rs"]
+mod source;
+
 #[path = "motion_tests.rs"]
 mod motion;
 

@@ -1,0 +1,159 @@
+//! Explicit source inputs for the original Hertz/Hunt--Crossley point owner.
+//! No contact constants, specimen properties or relative curvatures are inferred.
+use super::*;
+use fs_contact::interface_binding::NormalContactModelSelection;
+use fs_contact::normal_patch::InputUncertainty;
+use fs_contact::normal_patch::source::{PointContactEnvelope, PointContactGeometry, SourcePointContact};
+use fs_contact::normal_patch::source::state::PointContactMaterialCards;
+use fs_matdb::{InterfaceSystemCard, NormalizedModelPack};
+use fs_tribo::InputAuthority;
+
+#[derive(Clone, Debug)]
+pub(super) struct Declaration {
+    pub(super) gap_m: f64,
+    receiver: String,
+    interface: String,
+    model: String,
+    geometry: PointContactGeometry,
+    envelope: PointContactEnvelope,
+}
+impl Declaration {
+    pub(super) fn parse(values: &[&str], gap_m: f64, maximum_indentation_m: f64) -> Result<Self> {
+        let path = |word: &str| -> Result<String> {
+            if word.is_empty() || word.len() > 512 || !Path::new(word).components()
+                .all(|p| matches!(p, std::path::Component::Normal(_))) {
+                return Err("normal source pack paths must stay relative to the performance directory".into());
+            }
+            Ok(word.into())
+        };
+        let maximum_curvature_m_inverse = scalar(values[5])?;
+        let minimum_curvature_m_inverse = scalar(values[6])?;
+        let envelope = PointContactEnvelope {
+            maximum_indentation_m,
+            maximum_absolute_rate_m_per_s: scalar(values[7])?,
+            // Replaced by the actual mechanical clock before source admission.
+            maximum_step_s: 0.0,
+            half_space_depth_m: scalar(values[8])?,
+            layer_thickness_m: scalar(values[9])?,
+            uncertainty: InputUncertainty { radius_relative: scalar(values[10])?,
+                modulus_relative: scalar(values[11])?, load_relative: scalar(values[12])? },
+        };
+        if minimum_curvature_m_inverse <= 0.0
+            || maximum_curvature_m_inverse < minimum_curvature_m_inverse
+            || envelope.maximum_absolute_rate_m_per_s < 0.0
+            || envelope.half_space_depth_m <= 0.0 || envelope.layer_thickness_m <= 0.0
+            || [envelope.uncertainty.radius_relative, envelope.uncertainty.modulus_relative,
+                envelope.uncertainty.load_relative].iter().any(|u| *u < 0.0) {
+            return Err("material-stop requires positive relative curvatures/depths and nonnegative rate/uncertainties".into());
+        }
+        Ok(Self { gap_m, receiver: path(values[2])?, interface: path(values[3])?,
+            model: path(values[4])?,
+            geometry: PointContactGeometry::EllipticParaboloid {
+                maximum_curvature_m_inverse, minimum_curvature_m_inverse }, envelope })
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct Sources {
+    interfaces: BTreeMap<String, NormalizedInterfacePack>,
+    models: BTreeMap<String, NormalizedModelPack>,
+}
+impl Profile {
+    /// All-or-nothing cold decode through the same bounded attachment/file owner.
+    /// Each distinct interface/model path is read once and retained verbatim as a
+    /// canonical source pack. Bulk packs continue through the common catalog.
+    pub fn load_sources(&mut self, gate: &CancelGate,
+        mut loader: impl FnMut(&str) -> Result<Vec<u8>>) -> Result<()> {
+        let mut sources = Sources::default();
+        let mut remaining = input::MAX_TOTAL_PACK_BYTES;
+        let mut read = |path: &str| -> Result<Vec<u8>> {
+            poll(gate)?;
+            let bytes = loader(path)?;
+            if bytes.len() > input::MAX_PACK_BYTES || bytes.len() > remaining {
+                return Err("normal source packs exceed the shared material byte budget".into());
+            }
+            remaining -= bytes.len();
+            Ok(bytes)
+        };
+        for entry in &self.entries {
+            if let Law::Material(d) = &entry.law {
+                if !sources.interfaces.contains_key(&d.interface) {
+                    let pack = NormalizedInterfacePack::from_bytes(&read(&d.interface)?)?;
+                    sources.interfaces.insert(d.interface.clone(), pack);
+                }
+                if !sources.models.contains_key(&d.model) {
+                    let pack = NormalizedModelPack::from_bytes(&read(&d.model)?)?;
+                    sources.models.insert(d.model.clone(), pack);
+                }
+            }
+        }
+        poll(gate)?;
+        self.sources = sources;
+        Ok(())
+    }
+
+    pub fn source_pack_bytes(&self) -> Result<usize> {
+        for entry in &self.entries {
+            if let Law::Material(d) = &entry.law {
+                if !self.sources.interfaces.contains_key(&d.interface) || !self.sources.models.contains_key(&d.model) {
+                    return Err("load every material-stop interface and model pack before construction".into());
+                }
+            }
+        }
+        self.sources.interfaces.values().map(|p| p.to_bytes().len())
+            .chain(self.sources.models.values().map(|p| p.to_bytes().len()))
+            .try_fold(0usize, |n, size| n.checked_add(size).ok_or_else(|| "normal source pack byte count overflow".into()))
+    }
+}
+
+impl Sources {
+    pub(super) fn resolve(&self, entries: &[Entry], spec: &input::Spec, catalog: &mut Catalog,
+        loader: &mut impl FnMut(&str) -> Result<NormalizedPack>, gate: &CancelGate)
+        -> Result<Vec<(usize, SourcePointContact)>> {
+        let point = QueryPoint::new().with("T", spec.temperature)?.with("omega", spec.omega)?;
+        let mut sources = Vec::new();
+        for (index, entry) in entries.iter().enumerate() {
+            let Law::Material(d) = &entry.law else { continue; };
+            poll(gate)?;
+            let wire = spec.strings.get(entry.string).ok_or("material stop names an absent string")?;
+            // The contact sees the actual outer constituent, not a core material
+            // or a homogenized section modulus. The declared contact envelope
+            // cannot exceed that constituent's real radial depth.
+            let (outer, depth) = match &wire.section {
+                input::WireSection::Homogeneous => (&wire.pack, wire.radius),
+                input::WireSection::CloseWound { pack, wire_radius_m, .. } => (pack, *wire_radius_m),
+                input::WireSection::Bonded { core_radius_m, sleeves } => {
+                    let layer = sleeves.last().ok_or("material stop needs an actual outer layer")?;
+                    let inner = sleeves.iter().rev().nth(1).map_or(*core_radius_m, |s| s.outer_radius_m);
+                    (&layer.pack, layer.outer_radius_m-inner)
+                },
+            };
+            if d.envelope.layer_thickness_m > depth || d.envelope.half_space_depth_m > depth {
+                return Err("material-stop half-space/layer depth exceeds the string's actual outer constituent".into());
+            }
+            load_pack(&d.receiver, catalog, loader)?;
+            let a = &catalog.get(outer).ok_or("outer string material is absent from the catalog")?.card;
+            let b = &catalog[&d.receiver].card;
+            let interface = self.interfaces.get(&d.interface).ok_or("material stop interface pack is not loaded")?;
+            let models = self.models.get(&d.model).ok_or("material stop model pack is not loaded")?;
+            // This explicit record associates two existing normalized artifacts;
+            // the original interface/model cards still enforce ordered surfaces,
+            // property validity, exact supported law schema and source authority.
+            let card = InterfaceSystemCard::assemble(
+                interface.card().surface_a().clone(), interface.card().surface_b().clone(),
+                interface.card().context().clone(), interface.claims_pack().claims().clone(),
+                models.models().to_vec())?;
+            let source = PointContactMaterialCards {
+                surface_a: a, surface_b: b, interface: &card,
+                bulk_selection: [Pick::SingleClaimOnly, Pick::SingleClaimOnly],
+                interface_selection: Pick::SingleClaimOnly,
+                model_selection: NormalContactModelSelection::SingleSupported,
+                authority: InputAuthority::CallerDeclared,
+            }.resolve(&point, d.geometry, PointContactEnvelope {
+                maximum_step_s: 1.0/f64::from(spec.rate), ..d.envelope })?;
+            sources.push((index, source));
+        }
+        poll(gate)?;
+        Ok(sources)
+    }
+}

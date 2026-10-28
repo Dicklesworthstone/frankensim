@@ -1,9 +1,11 @@
 //! File-driven compliant stops and normal trajectories in the original material/bow/contact performer.
-//! This profile describes authored contact laws, never inferred tissue or fret
-//! properties. Existing source-derived centreline and receiver shapes own force
+//! This profile selects authored laws or explicit bulk/interface/model sources;
+//! no tissue or fret properties are inferred. Existing source-derived centreline and receiver shapes own force
 //! projection; the common contact, preload and time solvers own all mechanics.
 
 use super::*;
+#[path = "stops/material.rs"]
+mod material;
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::{
     MultiBowStringBank, stops::{MaterialStringStop, StringStopSide},
     surfaces::BowBodySurface,
@@ -39,13 +41,18 @@ enum Receiver {
     Fiber(usize),
 }
 #[derive(Clone, Debug)]
+enum Law {
+    Authored(Obstacle),
+    Material(material::Declaration),
+}
+#[derive(Clone, Debug)]
 struct Entry {
     name: String,
     string: usize,
     station: Station,
     side: StringStopSide,
     receiver: Receiver,
-    law: Obstacle,
+    law: Law,
     limits: ModalContactConfig,
 }
 impl Entry {
@@ -76,6 +83,7 @@ pub struct Profile {
     station_motion: Option<StopStationProgram>,
     bow_contacts: Vec<BowContactLoad>,
     bow_surfaces: Vec<BowSurface>,
+    sources: material::Sources,
 }
 
 fn scalar(word: &str) -> Result<f64> {
@@ -144,9 +152,11 @@ impl Profile {
                 continue;
             }
             if entries.len() == MAX_STOPS { return Err("stop profile exceeds 32 contacts".into()); }
-            if fields.len() < 5 || fields[0] != "stop" {
-                return Err("expected stop ID STRING STATION SIDE RECEIVER GAP K ALPHA LOSS MAX_FORCE MAX_PENETRATION".into());
+            if fields.len() < 5 || !matches!(fields[0], "stop" | "material-stop") {
+                return Err("expected a complete stop or material-stop declaration".into());
             }
+            let material = fields[0] == "material-stop";
+            let width = if material { 20 } else { 12 };
             let name = fields[1];
             if name.len() > 64 || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
                 || entries.iter().any(|e| e.name == name) {
@@ -159,9 +169,9 @@ impl Profile {
                 Station::Fraction(scalar(fields[3])?)
             };
             let (side, values) = match fields[4] {
-                "positive" if fields.len() == 12 => (StringStopSide::Positive, &fields[5..]),
-                "negative" if fields.len() == 12 => (StringStopSide::Negative, &fields[5..]),
-                "normal" if fields.len() == 14 => (StringStopSide::Along(
+                "positive" if fields.len() == width => (StringStopSide::Positive, &fields[5..]),
+                "negative" if fields.len() == width => (StringStopSide::Negative, &fields[5..]),
+                "normal" if fields.len() == width + 2 => (StringStopSide::Along(
                     TransverseDirection::try_new([scalar(fields[5])?, scalar(fields[6])?])?), &fields[7..]),
                 _ => return Err("stop side must be positive, negative or normal NX NY with a complete record".into()),
             };
@@ -174,22 +184,31 @@ impl Profile {
                     return Err("receiver must be fixed, bridge:STRING or fiber:CELL".into());
                 };
             let gap = scalar(values[1])?;
-            let stiffness = scalar(values[2])?;
-            let alpha = scalar(values[3])?;
-            let loss = scalar(values[4])?;
-            let max_force = scalar(values[5])?;
-            let max_penetration = scalar(values[6])?;
+            let max_force = scalar(values[values.len()-2])?;
+            let max_penetration = scalar(values[values.len()-1])?;
             if matches!(station, Station::Fraction(value) if !(0.0 < value && value < 1.0))
                 || matches!(station, Station::RibbonCell(cell) if cell >= 63)
                 || matches!(receiver, Receiver::Fiber(cell) if cell >= 63)
-                || stiffness <= 0.0 || alpha < 1.0 || loss < 0.0 || max_force <= 0.0 || max_penetration <= 0.0 {
-                return Err("stop geometry, law and physical limits are invalid".into());
+                || max_force <= 0.0 || max_penetration <= 0.0 {
+                return Err("stop geometry and physical limits are invalid".into());
             }
-            // Keep the original point law's units: k is N/m^alpha; unit weight
-            // adds no fictitious patch area. Gap is unloaded surface clearance.
-            let law = Obstacle::new(vec![-1.0], 1, 1, vec![gap], vec![1.0], stiffness, alpha,
-                format!("authored string-stop profile v1: {name}; not measured contact data"))?
-                .with_internal_loss(loss)?;
+            let law = if material {
+                if !matches!(receiver, Receiver::Fixed) {
+                    return Err("material-stop currently requires an explicit fixed prescribed receiver".into());
+                }
+                Law::Material(material::Declaration::parse(values, gap, max_penetration)?)
+            } else {
+                let stiffness = scalar(values[2])?;
+                let alpha = scalar(values[3])?;
+                let loss = scalar(values[4])?;
+                if stiffness <= 0.0 || alpha < 1.0 || loss < 0.0 {
+                    return Err("authored stop law is invalid".into());
+                }
+                // Unit weight adds no fictitious area; gap is surface clearance.
+                Law::Authored(Obstacle::new(vec![-1.0], 1, 1, vec![gap], vec![1.0], stiffness, alpha,
+                    format!("authored string-stop profile v1: {name}; not measured contact data"))?
+                    .with_internal_loss(loss)?)
+            };
             entries.push(Entry { name: name.into(), string, station, side, receiver, law,
                 limits: ModalContactConfig { max_iterations: 96, maximum_force_n: max_force,
                     maximum_penetration_m: max_penetration, force_absolute_tolerance_n: 1e-11,
@@ -198,7 +217,8 @@ impl Profile {
         if entries.is_empty() && bow_surfaces.is_empty() {
             return Err("stop profile must declare at least one contact or bow surface".into());
         }
-        Ok(Self { bytes: bytes.to_vec(), entries, motion, station_motion, bow_contacts, bow_surfaces })
+        Ok(Self { bytes: bytes.to_vec(), entries, motion, station_motion, bow_contacts, bow_surfaces,
+            sources: material::Sources::default() })
     }
 
     // Reject unknown member IDs before loading material packs or reducing bodies.
@@ -328,8 +348,12 @@ impl Profile {
         })
     }
 
-    pub fn bind(&self, bank: MultiBowStringBank, gate: &CancelGate) -> Result<MultiBowStringBank> {
+    pub fn bind(&self, bank: MultiBowStringBank, spec: &input::Spec, catalog: &mut Catalog,
+        loader: &mut impl FnMut(&str) -> Result<NormalizedPack>, gate: &CancelGate) -> Result<MultiBowStringBank> {
         poll(gate)?;
+        // Resolve all card/model/geometry associations before binding any runtime
+        // contact. A sourced record has no independently authored K/alpha/loss.
+        let sources = self.sources.resolve(&self.entries, spec, catalog, loader, gate)?;
         let strings = bank.source().bank().strings();
         self.validate_members(strings.len())?;
         if bank.source().ribbon().is_some() && !self.bow_surfaces.is_empty() {
@@ -358,7 +382,7 @@ impl Profile {
             surfaces.push(BowBodySurface { bow: surface.bow, body });
         }
         let mut stops = Vec::with_capacity(self.entries.len());
-        for entry in &self.entries {
+        for (index, entry) in self.entries.iter().enumerate() {
             poll(gate)?;
             let body = match entry.receiver {
                 Receiver::Fixed => None,
@@ -397,15 +421,24 @@ impl Profile {
                         .ok_or("fiber receiver names an absent normal map")?.clone())
                 },
             };
+            let law = match &entry.law {
+                Law::Authored(law) => law.clone(),
+                Law::Material(declaration) => {
+                    let source = &sources.iter().find(|(i, _)| *i == index)
+                        .ok_or("material stop source was not resolved")?.1;
+                    fs_couple::unilateral_contact::binding::bound_point_obstacle(
+                        source, vec![-1.0], declaration.gap_m, &entry.name)?
+                },
+            };
             stops.push(MaterialStringStop { location: entry.location(bank.source().ribbon())?, side: entry.side, body,
-                law: entry.law.clone(), limits: entry.limits });
+                law, limits: entry.limits });
         }
         // This admission precedes scheduled preload; the stops cannot disappear
         // from equilibrium and reappear only after a pluck has been initialized.
         let bank = bank.with_bow_body_surfaces(surfaces, gate)?;
         let bank = bank.with_string_stops(stops, FrictionObstacleConfig {
             max_contacts: MAX_STOPS, max_setup_terms: 1_048_576,
-        }, gate)?;
+        }, gate)?.with_string_stop_sources(sources, gate)?;
         // Actual material geometry owns co-location, perpendicular directions and
         // torsional handedness; this adapter never reconstructs its modal maps.
         Ok(bank.with_bow_contact_loads(self.bow_contacts.clone(), gate)?)

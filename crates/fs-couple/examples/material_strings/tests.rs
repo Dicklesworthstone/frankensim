@@ -5,6 +5,9 @@ use fs_evidence::ValidityDomain;
 use fs_matdb::{ClaimSet,ObservationDataset,PropertyClaim,PropertyKey,PropertyValue,Provenance,InterpolationPolicy,UncertaintyModel};
 use fs_scenario::gesture::{GestureTrack,GestureEvent};
 
+#[path = "tests/normal_sources.rs"]
+mod normal_sources;
+
 #[path = "tests/fibers.rs"]
 mod fibers;
 

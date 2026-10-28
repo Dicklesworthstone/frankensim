@@ -918,6 +918,56 @@ loads may ramp or reverse; zero normal load lifts that bow without silencing the
 instrument. Commands outside the observed control window and station changes
 refuse rather than disappearing or silently rebuilding geometry.
 
+### Material-derived normal finger/support contacts
+
+The same `--stop-profile` also accepts `material-stop` records. These resolve the
+actual outer string material and an explicitly named receiver material through
+the existing Hertz/Hunt--Crossley point-contact owner. Changing either bulk pack
+changes its reduced modulus and normal reaction in the original coupled solve.
+There are no independent stiffness, exponent or contact-loss overrides:
+
+```text
+material-stop ID STRING STATION SIDE fixed GAP_M RECEIVER_BULK_PACK INTERFACE_PACK MODEL_PACK KAPPA_MAX_PER_M KAPPA_MIN_PER_M MAX_RATE_M_S HALFSPACE_DEPTH_M LAYER_THICKNESS_M RADIUS_REL_UNCERT MODULUS_REL_UNCERT LOAD_REL_UNCERT MAX_FORCE_N MAX_INDENT_M
+```
+
+The record belongs under the existing `frankensim-string-stops-v1` header.
+`SIDE` is `positive`, `negative`, or `normal NX NY`; station and optional
+normal/station-motion programs use the existing physical controls. `GAP_M`
+is signed unloaded surface clearance, so negative values explicitly preload
+the contact. The first native source path supports a prescribed fixed receiver.
+
+`INTERFACE_PACK` is an existing `NormalizedInterfacePack`, ordered string
+surface A then receiver surface B. `MODEL_PACK` is an existing
+`NormalizedModelPack` with its complete normalization receipts and exactly
+one supported normal-law selection. The record explicitly associates these
+artifacts; the interface, model and source domains must agree. The common
+material state uses the performance's temperature and angular frequency.
+The original point owner requires density, Young's modulus, Poisson ratio and
+yield stress from both bulk cards, explicit adhesion data from the dry
+interface, and the selected model's applicability parameters. Missing data,
+unsupported laws, incompatible ordered materials and adhesive domains refuse.
+
+Both positive principal curvatures describe the **relative local gap**; they
+are geometry data, with the larger first. Equal values describe a circular
+patch; a zero curvature/line-contact geometry is unsupported by this input.
+Depth, layer thickness, uncertainty and rate bounds must be explicitly supplied.
+The declared depth and layer thickness cannot exceed the actual contacting
+string constituent: radius for a homogeneous string, winding-wire radius for
+a close-wound string, or outer-sleeve thickness for a bonded string. The
+original finite-patch owner additionally checks patch size, strain, pressure,
+yield and rate applicability. This does not infer a tissue model, treat a whole
+winding as homogeneous bulk, or certify a measured instrument.
+
+Complete bulk/interface/model receipts and the admitted operating box stay
+attached to the runtime normal contact. Each completed mechanical/thermal
+candidate checks both contact indentations, the actual discrete closure rate
+(including changing station maps and support offsets), and the mechanical
+sample duration before any state, work report or clock is published. Solver
+scratch iterates remain unpublished. The source state and relative curvature
+are frozen during playback; changing material temperature/history or contact
+curvature requires a newly admitted source, not a hidden coefficient update.
+All source paths use the existing bounded native attachment/file loader.
+
 ### Tangential contact with an existing material body
 
 A stop profile can return a bow contact's tangential reaction to a physical

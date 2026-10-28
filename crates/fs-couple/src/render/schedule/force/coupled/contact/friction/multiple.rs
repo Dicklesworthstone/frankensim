@@ -429,6 +429,7 @@ impl MultiFrictionModalSystem {
             return Ok(&self.frame);
         }
         let accepted = self.stage_constitutive(external, drives, obstacle_offsets, gate)?;
+        self.validate_obstacle_sources(gate)?;
         poll(gate)?;
         Ok(self.publish_step(accepted))
     }
@@ -473,6 +474,15 @@ impl MultiFrictionModalSystem {
             // the complete mechanical transaction publishes.
             obstacles.prepare_geometry(&self.core.network, &self.points,
                 &self.contact_loads, obstacle_geometry, contact_patch_motion, gate)?;
+        }
+        Ok(())
+    }
+
+    // Source admission follows all numerical trials, before any publication.
+    // The thermal transaction calls this only at its final accepted endpoint.
+    fn validate_obstacle_sources(&self, gate: Option<&CancelGate>) -> Result<(), ModalFrictionError> {
+        if let Some(obstacles) = &self.obstacles {
+            obstacles.validate_sources(&self.core.network.candidates, self.sample_period_s(), gate)?;
         }
         Ok(())
     }

@@ -135,6 +135,8 @@ pub enum ModalCouplingError {
     Factor(fs_la::factor::FactorError),
     /// The existing unilateral-contact law refused a trial.
     ContactLaw(fs_dcontact::DContactError),
+    /// A retained material normal-contact source refused the candidate kinematics.
+    ContactMaterial(fs_contact::normal_patch::NormalPatchError),
     /// A contact root or its final constitutive check exhausted the declared tolerance.
     ContactSolve { residual_n: f64, tolerance_n: f64, iterations: usize },
     /// Recomputed connection residual exceeds the caller's tolerance.
@@ -153,6 +155,7 @@ impl core::fmt::Display for ModalCouplingError {
             Self::Cancelled => write!(f, "modal coupling cancelled before publication"),
             Self::Component { component, source } => write!(f, "modal component {component}: {source}"),
             Self::ContactLaw(error) => write!(f, "modal contact law: {error}"),
+            Self::ContactMaterial(error) => write!(f, "modal contact material: {error}"),
             Self::ContactSolve { residual_n, tolerance_n, iterations } => write!(f,
                 "modal contact residual {residual_n:e} N exceeds {tolerance_n:e} N after {iterations} iterations"),
             Self::Factor(error) => write!(f, "modal connection factor: {error}"),
@@ -162,7 +165,11 @@ impl core::fmt::Display for ModalCouplingError {
         }
     }
 }
-impl std::error::Error for ModalCouplingError {}
+impl std::error::Error for ModalCouplingError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self { Self::ContactMaterial(error) => Some(error), _ => None }
+    }
+}
 
 /// Diagnostics for the last accepted sample, never a partially staged trial.
 #[derive(Clone, Debug, PartialEq)]
