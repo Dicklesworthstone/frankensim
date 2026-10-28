@@ -59,6 +59,15 @@ pub enum StokesBoundaryError {
     NonFiniteBoundary { edge: usize },
     /// The body-force callback returned a non-finite value.
     NonFiniteForce,
+    /// Viscosity was not positive and finite at an actual assembly sample.
+    InvalidViscosity {
+        /// Cell owning this one-sided constitutive sample.
+        cell: usize,
+        /// Physical sample position [m].
+        point: [f64; 2],
+        /// Refused kinematic viscosity [m²/s].
+        value: f64,
+    },
     /// Prescribed velocities violate the all-Dirichlet net-flux compatibility.
     IncompatibleFlux {
         /// Signed outward integral of prescribed velocity.
@@ -223,9 +232,43 @@ impl<'m> FluxSystem<'m> {
         force: &dyn Fn([f64; 2]) -> [f64; 2],
         boundaries: &[StokesBoundary<'_>],
     ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError> {
-        if !(params.nu.is_finite()
-            && params.nu > 0.0
-            && params.sigma.is_finite()
+        if !params.nu.is_finite() || params.nu <= 0.0 {
+            return Err(StokesBoundaryError::InvalidInput(
+                "invalid Stokes parameters",
+            ));
+        }
+        self.assemble_stokes_mixed_variable_viscosity(params, &|_, _| params.nu, force, boundaries)
+    }
+
+    /// Assemble steady variable-viscosity `-div(2 nu D(u)) + grad(p) = f`
+    /// with individually owned velocity and total-traction boundaries.
+    ///
+    /// `viscosity(cell, point)` returns positive finite kinematic viscosity
+    /// [m²/s]. It must be pure and use the supplied cell for one-sided values
+    /// at material interfaces; `params.nu` is unused. Dynamic viscosity must
+    /// be divided by one constant reference density, as must supplied physical
+    /// body force and traction. The traction callback supplies the TOTAL
+    /// `(2 nu D(u) - p I)n`; it is not multiplied by viscosity again.
+    ///
+    /// This uses the same symmetric cell stresses, one-sided face traces and
+    /// harmonic viscosity/normal-height SIP weighting as
+    /// [`Self::assemble_variable_viscosity`]. Natural boundaries preserve
+    /// their pressure datum and every continuity equation. There is no
+    /// convection, transient or implicit rheological update in this entry.
+    ///
+    /// # Errors
+    /// Refuses the same ownership, flux, geometry and solver failures as
+    /// [`Self::assemble_stokes_mixed`]. The first invalid viscosity sample is
+    /// retained with its cell and position, further viscosity queries stop,
+    /// and no assembled operator or candidate flow is returned.
+    pub fn assemble_stokes_mixed_variable_viscosity<'a>(
+        &'a self,
+        params: FluxParams,
+        viscosity: &dyn Fn(usize, [f64; 2]) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[StokesBoundary<'_>],
+    ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError> {
+        if !(params.sigma.is_finite()
             && params.sigma > 0.0
             && params.tol.is_finite()
             && params.tol > 0.0)
@@ -239,6 +282,21 @@ impl<'m> FluxSystem<'m> {
             return Err(StokesBoundaryError::InvalidInput("empty fluid mesh"));
         }
         let admitted = self.admit_stokes_boundaries(boundaries)?;
+        let bad_viscosity = Cell::new(None);
+        let checked_viscosity = |cell, point| {
+            if bad_viscosity.get().is_some() {
+                return 1.0;
+            }
+            let value = viscosity(cell, point);
+            if value.is_finite() && value > 0.0 {
+                value
+            } else {
+                bad_viscosity.set(Some((cell, point, value)));
+                // Only finish the private assembly. The refused coefficient
+                // never becomes a published matrix or a linear solve.
+                1.0
+            }
+        };
         let bad_force = Cell::new(false);
         let checked_force = |point| {
             let value = force(point);
@@ -249,10 +307,9 @@ impl<'m> FluxSystem<'m> {
                 [0.0; 2]
             }
         };
-        let viscosity = |_: usize, _: [f64; 2]| params.nu;
         let (matrix, rhs) = self.assemble_operator(
             params,
-            Some(&viscosity),
+            Some(&checked_viscosity),
             &checked_force,
             &|_| [0.0; 2],
             None,
@@ -260,6 +317,9 @@ impl<'m> FluxSystem<'m> {
             None,
             Some(&admitted),
         );
+        if let Some((cell, point, value)) = bad_viscosity.get() {
+            return Err(StokesBoundaryError::InvalidViscosity { cell, point, value });
+        }
         if bad_force.get() {
             return Err(StokesBoundaryError::NonFiniteForce);
         }

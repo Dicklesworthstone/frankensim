@@ -466,12 +466,19 @@ fs-couple port-schema prerequisites remain required for those claims.
 ## Mixed steady-Stokes velocity and total-traction boundaries
 
 With the continuum feature, FluxSystem::assemble_stokes_mixed accepts exactly
-one StokesBoundary owner for every mesh boundary edge. It uses the existing
-BDM1/P0 symmetric-stress discretization with constant kinematic viscosity:
+one StokesBoundary owner for every mesh boundary edge. Its constant-viscosity
+entry delegates to assemble_stokes_mixed_variable_viscosity, which admits a
+pure (cell, point) -> nu field at constant reference density. Both use the
+existing BDM1/P0 symmetric-stress discretization:
 -div(2 nu D(u)) + grad(p) = f and div(u) = 0. Velocity edges constrain normal
 moments strongly and receive tangential SIP terms. Natural edges receive
 t = (2 nu D(u) - p I)n and retain unknown normal velocity moments. They have
-no velocity penalty or extra pressure-boundary matrix term.
+no velocity penalty or extra pressure-boundary matrix term. The variable field
+uses the same one-sided face traces and harmonic viscosity/normal-height SIP
+weights as the closed-boundary operator. The caller supplies total traction
+with its physical viscosity already included; the assembler does not multiply
+that boundary stress by viscosity again. The field entry ignores params.nu,
+while the legacy constant entry preserves its positive finite nu admission.
 
 One connected fluid domain and at least one velocity edge are required.
 Duplicate, missing, interior and out-of-range ownership is refused before
@@ -479,7 +486,10 @@ callbacks run. Boundary quadrature samples are retained once for consistent
 strong moments and SIP. Non-finite loads and assembly, incompatible net flux
 for all-prescribed velocity, singular factorization and failed explicit
 original or row-equilibrated residual admission return StokesBoundaryError
-without a solution. No hidden grounding is added for pure-traction rigid modes.
+without a solution. An invalid viscosity sample retains the offending cell,
+point and value in InvalidViscosity, stops subsequent viscosity queries and
+discards the private assembly before any solve or publication. No hidden
+grounding is added for pure-traction rigid modes.
 
 All-velocity problems retain the original pressure pin and report MeanZero
 pressure. With any total-traction edge, all continuity equations are retained,
@@ -498,11 +508,16 @@ read-only matrix is available to the existing discrete transpose solver.
 tests/stokes_boundary.rs supplies the pressure-driven channel analytic
 refinement/flux oracle, exact affine shear and pressure-datum shift patch,
 all-velocity operator/solution bit comparison, and boundary-admission cases.
+The spatial-viscosity cases independently check a two-layer pressure-driven
+channel's velocity, continuous shear stress, pressure datum, flux and mesh
+refinement; an exact heterogeneous affine patch; constant-law operator bit
+identity; and checked coefficient refusal without publishing a fallback.
 examples/pressure_channel.rs is runnable with
 cargo run -p fs-flux --example pressure_channel.
 
-This extension covers steady linear, constant-density, constant-viscosity
-Stokes on the existing straight-sided 2D triangulation. It does not add
+This extension covers steady linear, constant-density Stokes with frozen
+positive spatially varying Newtonian viscosity on the existing straight-sided
+2D triangulation. It does not add
 nonlinear convection/backflow, open-boundary time integration, pure-traction
 rigid-mode quotients, disconnected domains, material-bound SI pressure
 conversion or continuum error bounds. Existing synchronous cancellation and
