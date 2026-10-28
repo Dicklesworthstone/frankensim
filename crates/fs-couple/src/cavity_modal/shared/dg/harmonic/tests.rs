@@ -362,3 +362,137 @@ fn shared_cavity_retains_a_strictly_proper_terminal_with_zero_instantaneous_feed
     assert_eq!(coupled.load().state(), &state);
     assert_eq!(coupled.last_frame(), Some(&frame));
 }
+
+#[test]
+fn shared_cavity_reports_complete_finite_branch_power_and_keeps_accepted_state() {
+    use crate::dg_port::DgBranch;
+    use fs_duct::dg::{DgBoundary, DgDuct, DgMesh, DgSidePort, MAX_DG_PROPAGATOR_DOFS};
+    use fs_duct::{Duct, Segment};
+    use fs_vfit::mimo::{
+        MimoModel,
+        load::{MimoLoadLimits, PreparedMimoLoad},
+    };
+    let cavity = cavity(48000, true, 1e6);
+    let gas = *cavity.source().gas();
+    let bore = DgDuct::new(
+        &Duct {
+            segments: vec![Segment::Cylinder {
+                radius: 0.001,
+                length: 0.05,
+            }],
+        },
+        &gas,
+        DgMesh {
+            elements: 2,
+            order: 2,
+        },
+        DgBoundary::Port(PortId(7)),
+        DgBoundary::Port(PortId(8)),
+    )
+    .unwrap()
+    .with_side_ports(&[DgSidePort {
+        id: PortId(19),
+        downstream_element: 1,
+    }])
+    .unwrap();
+    let branch = DgDuct::new(
+        &Duct {
+            segments: vec![Segment::Cylinder {
+                radius: 0.001,
+                length: 0.03,
+            }],
+        },
+        &gas,
+        DgMesh {
+            elements: 1,
+            order: 2,
+        },
+        DgBoundary::Port(PortId(1)),
+        DgBoundary::Port(PortId(2)),
+    )
+    .unwrap()
+    .with_viscothermal(8, [50.0, 2000.0], 0.01)
+    .unwrap();
+    let model = MimoModel {
+        ports: 2,
+        poles: vec![],
+        residues: vec![],
+        d: vec![1e7, 2e6, 2e6, 1.4e7],
+        e: vec![0.0; 4],
+        reciprocal: true,
+    };
+    let dt = 1.0 / 48000.0;
+    let terminal = PreparedMimoLoad::new(
+        &model,
+        dt,
+        MimoLoadLimits {
+            band_rad_s: [100.0, core::f64::consts::PI / dt],
+            sampled_passivity_points: 33,
+            max_states: 8,
+            max_memory_bytes: 1 << 20,
+        },
+    )
+    .unwrap();
+    let load = DgPortLoad::new_with_terminal_branches(
+        bore,
+        dt,
+        1e-11,
+        MAX_DG_PROPAGATOR_DOFS,
+        vec![PortId(19), PortId(8)],
+        terminal,
+        vec![DgBranch {
+            port: PortId(19),
+            duct: branch,
+        }],
+    )
+    .unwrap();
+    let gate = CancelGate::new_clock_free();
+    let mut coupled = cavity.with_downstream_duct(load, &gate).unwrap();
+    let force = C64::new(0.001, -0.0003);
+    let incident = C64::new(0.02, 0.01);
+    let response = coupled
+        .harmonic_response(1400.0, &[force], incident, 100_000_000, &gate)
+        .unwrap();
+    assert_eq!(response.branches.len(), 1);
+    let branch = &response.branches[0];
+    assert_eq!(branch.port, PortId(19));
+    assert!(branch.duct.mean_wall_energy_j > 0.0 && branch.duct.wall_dissipation_w > 0.0);
+    complex_close(branch.bore_pressure_pa, branch.inlet_pressure_pa);
+    complex_close(
+        response.duct_inlet_flow_m3_s,
+        response.cavity.neck_outflow_m3_s,
+    );
+    close(
+        response.mean_stored_energy_j,
+        response.cavity.network.mean_stored_energy_j
+            + response.duct.mean_stored_energy_j
+            + branch.duct.mean_stored_energy_j,
+    );
+    close(
+        response.total_dissipation_w(),
+        response.cavity.network.total_dissipation_w()
+            + response.duct.wall_dissipation_w
+            + branch.duct.wall_dissipation_w,
+    );
+    close(
+        response.authored_external_power_w,
+        response.total_dissipation_w() + response.terminal_power_w,
+    );
+    assert!(
+        response.interface_power_residual_w.abs()
+            < 2e-9 * response.authored_external_power_w.abs() + 1e-25
+    );
+    coupled.step(&[0.001], 0.01, &gate).unwrap();
+    let state = coupled.load().branches()[0].state().clone();
+    let frame = coupled.last_frame().unwrap().clone();
+    let junctions = coupled.load().last_branch_frames().to_vec();
+    assert_eq!(
+        response,
+        coupled
+            .harmonic_response(1400.0, &[force], incident, 100_000_000, &gate)
+            .unwrap()
+    );
+    assert_eq!(coupled.load().branches()[0].state(), &state);
+    assert_eq!(coupled.load().last_branch_frames(), junctions);
+    assert_eq!(coupled.last_frame(), Some(&frame));
+}

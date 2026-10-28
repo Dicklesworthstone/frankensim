@@ -113,6 +113,28 @@ physical pressure/flow condensation, pressure-diffusion availability, separate
 loss channels, signed basis invariance and unchanged accepted histories are
 tested alongside analytic loaded resonances.
 
+### Continuous finite side-branch resonance
+
+`CoupledModalSystem::harmonic_response_with_load` and the shared-cavity wrapper
+retain the main DG bore, every original finite `DgBranchLoad`, and the complete
+original MIMO terminal in one continuous frequency solve. Each junction adds an
+explicit flow unknown with equal original pressure traces and opposite inflows.
+No isolated duct impedance is inverted, including at a bare branch pole.
+Terminal channel IDs retain their authored order; a branch channel observes its
+actual distal outlet. Original wall memories, material bands, mutual terminal
+entries and strictly proper terminal states are preserved. The complete state
+and junction count consumes the existing dense work allowance.
+
+Returned branch responses carry original fields, storage, wall losses and both
+junction powers. Whole-network accounting sums every owner once. Independent
+original pressure-trace checks accompany the complete-equation residual; queries
+never advance accepted histories. Analytic cylinder-network peak and linewidth
+refinement, a bare branch pole, mutual/strictly proper terminals, branch and
+channel permutations, viscothermal bands and shared-cavity accounting are covered
+by the native focused tests. These are zero-volume point junctions joining finite
+plane-wave ducts, not a resolved three-dimensional entrance-flow model. Finite
+gap channels and driven exterior mouths remain explicit refusals.
+
 ### Continuous finite side-branch evolution
 
 The explicit exact downstream backend also retains every original branch state

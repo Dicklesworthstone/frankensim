@@ -2,7 +2,9 @@
 
 use super::*;
 use crate::cavity_modal::shared::harmonic::SharedCavityHarmonicResponse;
-pub use crate::render::schedule::force::coupled::harmonic::dg::DgHarmonicTerminalResponse;
+pub use crate::render::schedule::force::coupled::harmonic::dg::{
+    DgHarmonicBranchResponse, DgHarmonicTerminalResponse,
+};
 use fs_duct::dg::DgHarmonicResponse;
 
 /// Peak exp(-i omega t) response of the complete cavity and downstream duct.
@@ -13,6 +15,8 @@ pub struct SharedCavityDgHarmonicResponse {
     pub cavity: SharedCavityHarmonicResponse,
     /// Original DG energy coordinates, physical pressure/flow fields and losses.
     pub duct: DgHarmonicResponse,
+    /// Complete finite side branches and their original junction exchanges.
+    pub branches: Vec<DgHarmonicBranchResponse>,
     /// Original terminal/radiation state phasors and channel exchanges.
     pub terminal: Option<DgHarmonicTerminalResponse>,
     /// Signed mean power into the original terminal, outside known storage [W].
@@ -38,6 +42,9 @@ impl SharedCavityDgHarmonicResponse {
         self.cavity.network.total_dissipation_w()
             + self.duct.wall_dissipation_w
             + self.duct.matched_absorption_w
+            + self.branches.iter().fold(0.0, |sum, branch| {
+                sum + branch.duct.wall_dissipation_w + branch.duct.matched_absorption_w
+            })
     }
 }
 
@@ -51,11 +58,12 @@ impl SharedCavityDg {
     /// The result is independent of accepted transients and of the time backend's
     /// coupling clock. It is not the finite-step transfer of the mean-port path.
     ///
-    /// One DG duct with its original closed/open/matched distal boundary or its
-    /// complete rational terminal/radiation matrix is supported. All original
-    /// pole states, mutual channels and frequency limits are retained. Singular
+    /// The original DG bore with its closed/open/matched distal boundary or its
+    /// complete rational terminal/radiation matrix is supported, including every
+    /// finite side duct and its zero-storage pressure-continuous junction. All
+    /// original pole states, mutual channels and frequency limits are retained. Singular
     /// terminal feedthrough remains a valid retained-state frequency problem.
-    /// Branches, finite gap channels and driven mouths refuse until their states
+    /// Finite gap channels and driven mouths refuse until their states
     /// are retained too. The complete dense work limit applies. Nothing advances.
     pub fn harmonic_response(
         &self,
@@ -94,6 +102,7 @@ impl SharedCavityDg {
         Ok(SharedCavityDgHarmonicResponse {
             cavity,
             duct: loaded.duct,
+            branches: loaded.branches,
             terminal: loaded.terminal,
             terminal_power_w: loaded.terminal_power_w,
             duct_inlet_pressure_pa: loaded.inlet_pressure_pa,
