@@ -8,11 +8,20 @@ use fs_material::thermochemical_gas::{
     energy::{GasEnergySolve, IsochoricGasParcel},
 };
 
+#[path = "finite_gas/entropy.rs"]
+mod entropy;
+
 fn gas(temperature_k: f64, volume_m3: f64) -> IsochoricGasParcel {
     gas_with_conductivity(temperature_k, volume_m3, 0.025)
 }
 
 fn gas_with_conductivity(temperature_k: f64, volume_m3: f64, conductivity: f64) -> IsochoricGasParcel {
+    gas_with_entropy_reference(temperature_k, volume_m3, conductivity, 0.0)
+}
+
+fn gas_with_entropy_reference(
+    temperature_k: f64, volume_m3: f64, conductivity: f64, entropy_reference: f64,
+) -> IsochoricGasParcel {
     use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter};
     use fs_qty::{DynViscosity, MolarMass};
     use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
@@ -30,7 +39,7 @@ fn gas_with_conductivity(temperature_k: f64, volume_m3: f64, conductivity: f64) 
     };
     let mut parameters = std::collections::BTreeMap::new();
     for ((key, dims), value) in required_nasa9_parameter_dims()
-        .into_iter().take(9).zip([0.0, 0.0, 3.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        .into_iter().take(9).zip([0.0, 0.0, 3.5, 0.0, 0.0, 0.0, 0.0, 0.0, entropy_reference])
     {
         parameters.insert(key.to_owned(), LawParameter { value, dims });
     }
@@ -65,7 +74,7 @@ fn gas_with_conductivity(temperature_k: f64, volume_m3: f64, conductivity: f64) 
                 .with_quantity("temperature", typed(QuantityKind::AbsoluteTemperature), 200.0, 900.0)
                 .with_quantity("pressure", typed(QuantityKind::Pressure), 1000.0, 1e7),
             uncertainty: UncertaintyModel::Unstated,
-            interpolation: InterpolationPolicy::LinearInside,
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
             observations: vec![], provenance: provenance.clone(),
         }).unwrap();
     }

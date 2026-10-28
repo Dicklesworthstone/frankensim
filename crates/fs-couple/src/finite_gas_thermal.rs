@@ -7,6 +7,9 @@
 //! Maxwell, plasticity and other callers may repeat this entire proposal during
 //! their own thermal feedback. Neither accepted body nor gas changes here.
 
+mod entropy;
+pub use entropy::FiniteGasEntropyReport;
+
 mod wall;
 pub use wall::{WallConvectionError, WallConvectionSample, WallConvectionSolve};
 
@@ -86,6 +89,9 @@ pub struct FiniteGasThermalReport<S = ()> {
     pub gas: GasHeatStep,
     /// Original body trajectory, including actual endpoint boundary powers.
     pub body: LumpedEnthalpyMarch,
+    /// Exact thermal storage, transfer and numerical entropy account for this
+    /// accepted proposal. No additional body/gas feedback solve is performed.
+    pub entropy: FiniteGasEntropyReport,
     /// Coefficient actually used at the accepted gas endpoint and its sources.
     pub convection: ConvectionCoefficient<S>,
     /// One signed interface transfer, removed from body and added to gas [J].
@@ -326,6 +332,16 @@ impl FiniteGasThermalEnvironment<'_> {
             ).into());
         }
         cx.checkpoint().map_err(|_| Error::Cancelled)?;
+        let entropy = entropy::evaluate(
+            self,
+            input,
+            &next_gas,
+            body.state,
+            [body_storage, gas_storage],
+            [q, radiation_heat_j],
+            [source_residual_j, solid_energy_residual_j],
+        )?;
+        cx.checkpoint().map_err(|_| Error::Cancelled)?;
         Ok(UniformEnthalpyStep {
             state: body.state,
             external_heat_j,
@@ -334,6 +350,7 @@ impl FiniteGasThermalEnvironment<'_> {
                 next_gas,
                 gas,
                 body: body.report,
+                entropy,
                 convection,
                 solid_to_gas_heat_j: q,
                 external_gas_heat_j: self.gas_heat_j,
