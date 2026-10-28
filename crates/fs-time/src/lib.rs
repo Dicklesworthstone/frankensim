@@ -42,7 +42,8 @@ pub use galpha::{
     SecondOrderState, TimeSolveError, first_order_galpha_step, galpha_step,
 };
 pub use lie::{
-    LieStepError, rigid_body_momentum_step, rigid_body_step, so3_body_exp_step, so3_space_exp_step,
+    LieStepError, rigid_body_momentum_step, rigid_body_spatial_torque_step, rigid_body_step,
+    rigid_body_torque_step, so3_body_exp_step, so3_space_exp_step,
 };
 pub use se3::{
     BalanceReceipt, DepSolveParams, DepStepReceipt, RattleProjection, RenormPolicy, RenormReceipt,

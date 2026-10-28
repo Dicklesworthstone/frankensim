@@ -9,7 +9,10 @@ use fs_time::se3::{
     DepSolveParams, RenormPolicy, Se3ClaimClass, Se3Error, dep_free_step, dep_momentum_adjoint,
     run_dep_free, se3_exp_step, se3_exp_step_renorm, se3_rigid_body_step, se3_space_exp_step,
 };
-use fs_time::{rigid_body_momentum_step, rigid_body_step, so3_body_exp_step, so3_space_exp_step};
+use fs_time::{
+    rigid_body_momentum_step, rigid_body_spatial_torque_step, rigid_body_step,
+    rigid_body_torque_step, so3_body_exp_step, so3_space_exp_step,
+};
 
 const INERTIA: Vec3 = Vec3 {
     x: 1.0,
@@ -348,6 +351,146 @@ fn g3_split_rotation_is_reversible_and_second_order() {
     }
     assert!(rotation.log().angular.norm() < 2e-12);
     assert!((momentum - initial_momentum).norm() < 2e-12);
+}
+
+#[test]
+fn g1_held_torque_matches_constant_angular_acceleration_about_each_principal_axis() {
+    let initial = So3::exp(So3Tangent::new(Vec3::new(-0.2, 0.5, 0.3))).unwrap();
+    let inertia = Vec3::new(1.0, 1.5, 2.0);
+    let h = 0.13;
+    let steps = 50;
+    let duration = h * f64::from(steps);
+    for axis in 0..3 {
+        let mut omega = [0.0; 3];
+        let mut torque = [0.0; 3];
+        omega[axis] = -0.7;
+        torque[axis] = 0.6;
+        let w0 = Vec3::new(omega[0], omega[1], omega[2]);
+        let torque_body = Vec3::new(torque[0], torque[1], torque[2]);
+        let torque_space = initial.rotate(torque_body).unwrap();
+        let acceleration = 0.6 / [inertia.x, inertia.y, inertia.z][axis];
+        let mut angle = [0.0; 3];
+        angle[axis] = -0.7 * duration + 0.5 * acceleration * duration * duration;
+        let exact = initial
+            .body_plus(So3Tangent::new(Vec3::new(angle[0], angle[1], angle[2])))
+            .unwrap();
+        omega[axis] += acceleration * duration;
+        let exact_w = Vec3::new(omega[0], omega[1], omega[2]);
+        for spatial in [false, true] {
+            let (mut rotation, mut angular) = (initial, w0);
+            for _ in 0..steps {
+                (rotation, angular) = if spatial {
+                    rigid_body_spatial_torque_step(rotation, angular, inertia, torque_space, h)
+                } else {
+                    rigid_body_torque_step(rotation, angular, inertia, torque_body, h)
+                }
+                .unwrap();
+            }
+            assert!(rotation.body_minus(exact).unwrap().angular.norm() < 5e-12);
+            assert!((angular - exact_w).norm() < 5e-12);
+        }
+    }
+}
+
+#[test]
+fn g0_spatial_torque_delivers_the_applied_angular_impulse() {
+    let inertia = Vec3::new(1.0, 1.5, 2.0);
+    let mut rotation = So3::exp(So3Tangent::new(Vec3::new(0.3, -0.6, 0.2))).unwrap();
+    let mut angular = Vec3::new(0.4, -0.7, 1.1);
+    let initial = rotation
+        .rotate(Vec3::new(
+            inertia.x * angular.x,
+            inertia.y * angular.y,
+            inertia.z * angular.z,
+        ))
+        .unwrap();
+    let torque = Vec3::new(0.13, -0.27, 0.21);
+    let h = 0.02;
+    let mut max_error = 0.0_f64;
+    for step in 1..=2_000 {
+        (rotation, angular) =
+            rigid_body_spatial_torque_step(rotation, angular, inertia, torque, h).unwrap();
+        let momentum = rotation
+            .rotate(Vec3::new(
+                inertia.x * angular.x,
+                inertia.y * angular.y,
+                inertia.z * angular.z,
+            ))
+            .unwrap();
+        let exact = initial + torque.scale(h * f64::from(step));
+        max_error = max_error.max((momentum - exact).norm());
+    }
+    println!("held spatial torque: maximum angular impulse defect {max_error:e}");
+    assert!(max_error < 2e-10, "angular impulse defect {max_error:e}");
+}
+
+#[test]
+fn g3_held_torque_splittings_are_second_order_and_reversible() {
+    let inertia = Vec3::new(1.0, 1.5, 2.0);
+    let initial_rotation = So3::exp(So3Tangent::new(Vec3::new(0.2, -0.3, 0.4))).unwrap();
+    let initial_angular = Vec3::new(0.4, 0.7, 1.1);
+    let torque = Vec3::new(0.3, -0.2, 0.5);
+    for spatial in [false, true] {
+        let advance = |rotation, angular, h| {
+            if spatial {
+                rigid_body_spatial_torque_step(rotation, angular, inertia, torque, h)
+            } else {
+                rigid_body_torque_step(rotation, angular, inertia, torque, h)
+            }
+            .unwrap()
+        };
+        let integrate = |steps: usize| {
+            let (mut rotation, mut angular) = (initial_rotation, initial_angular);
+            for _ in 0..steps {
+                (rotation, angular) = advance(rotation, angular, 2.0 / steps as f64);
+            }
+            (rotation, angular)
+        };
+        let coarse = integrate(40);
+        let medium = integrate(80);
+        let fine = integrate(160);
+        let distance = |a: (So3, Vec3), b: (So3, Vec3)| {
+            a.0.body_minus(b.0).unwrap().angular.norm() + (a.1 - b.1).norm()
+        };
+        let ratio = distance(coarse, medium) / distance(medium, fine);
+        println!("held torque spatial={spatial}: refinement ratio {ratio:e}");
+        assert!((3.6..4.4).contains(&ratio), "second-order ratio {ratio}");
+        let (mut rotation, mut angular) = fine;
+        for _ in 0..160 {
+            (rotation, angular) = advance(rotation, angular, -2.0 / 160.0);
+        }
+        assert!(
+            rotation
+                .body_minus(initial_rotation)
+                .unwrap()
+                .angular
+                .norm()
+                < 3e-12
+        );
+        assert!((angular - initial_angular).norm() < 3e-12);
+    }
+}
+
+#[test]
+fn g0_held_torque_zero_load_agrees_with_free_drift_and_invalid_loads_refuse() {
+    let rotation = So3::exp(So3Tangent::new(Vec3::new(0.2, -0.3, 0.4))).unwrap();
+    let angular = Vec3::new(0.4, 0.7, 1.1);
+    let zero = Vec3::new(0.0, 0.0, 0.0);
+    let free = rigid_body_step(rotation, angular, INERTIA, 0.03).unwrap();
+    let body = rigid_body_torque_step(rotation, angular, INERTIA, zero, 0.03).unwrap();
+    let space = rigid_body_spatial_torque_step(rotation, angular, INERTIA, zero, 0.03).unwrap();
+    assert_eq!(free, body);
+    assert_eq!(free, space);
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let torque = Vec3::new(0.2, bad, 0.7);
+        assert!(rigid_body_torque_step(rotation, angular, INERTIA, torque, 0.03).is_err());
+        assert!(rigid_body_spatial_torque_step(rotation, angular, INERTIA, torque, 0.03).is_err());
+    }
+    let torque = Vec3::new(0.2, -0.1, 0.7);
+    for h in [0.0, f64::NAN, f64::INFINITY] {
+        assert!(rigid_body_torque_step(rotation, angular, INERTIA, torque, h).is_err());
+        assert!(rigid_body_spatial_torque_step(rotation, angular, INERTIA, torque, h).is_err());
+    }
 }
 
 #[test]

@@ -43,6 +43,18 @@ where claimed below.
   reversible symplectic evolution with a tested bounded energy envelope.
   Both APIs allocate nothing, iterate no nonlinear solve, and do not
   renormalize the stored attitude; invalid/non-finite states refuse.
+- `lie::rigid_body_torque_step(R, omega_body, I, torque_body, h)` and
+  `lie::rigid_body_spatial_torque_step(R, omega_body, I, torque_space, h)`
+  apply held center-of-mass torques through symmetric momentum half-kicks
+  around the same Hamiltonian free drift. Both are second order and time
+  reversible for the declared held load, with no allocation or nonlinear
+  solve. The spatial version rotates the torque at **both** endpoints and
+  satisfies `R_next I omega_next - R I omega = h torque_space` to roundoff.
+  The body version represents a body-attached load; its spatial impulse is
+  the trapezoidal sum of the two rotated endpoint torques. These helpers do
+  not claim an adjoint or second-order coupled accuracy when a changing
+  torque is frozen once per step. Such consumers must evaluate their force
+  law at the required stages.
 - `galpha::GeneralizedAlpha::new(m, c, k, n, h, rho_inf)` +
   `galpha_step(ga, q, v, a, f_next)` — Chung–Hulbert: αm = (2ρ−1)/(ρ+1),
   αf = ρ/(ρ+1), γ = ½ − αm + αf, β = ¼(1 − αm + αf)²; one prefactored
@@ -505,6 +517,10 @@ bypass the step loop (se3-010). G0/G1/G3 splitting regressions cover a
 axisymmetric precession for each principal axis, second-order refinement and
 time reversal, and a translating/rotating body's linear momentum, total
 angular momentum, and analytic center-of-mass trajectory.
+Held-torque G0/G1/G3 regressions additionally cover exact constant angular
+acceleration about each principal axis, the accumulated spatial angular
+impulse over 2,000 steps, second-order refinement and time reversal for
+both torque conventions, zero-load parity, and non-finite-load refusals.
 `tests/hybrid.rs` (RE.Z1; G0/G3/G4/G5): relay-chatter and positive-dwell
 microcases; mode/event input-order and schema replay; model-version identity
 sensitivity; event-cap and numerical-trace theorem falsifiers; finite

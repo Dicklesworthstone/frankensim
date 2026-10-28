@@ -84,6 +84,15 @@ pub fn rigid_body_step(
     inertia: Vec3,
     h: f64,
 ) -> Result<(So3, Vec3), LieStepError> {
+    let momentum = momentum_from_velocity(omega_body, inertia)?;
+    let (next_rotation, next_momentum) = rigid_body_momentum_step(rotation, momentum, inertia, h)?;
+    Ok((
+        next_rotation,
+        velocity_from_momentum(next_momentum, inertia)?,
+    ))
+}
+
+fn momentum_from_velocity(omega_body: Vec3, inertia: Vec3) -> Result<Vec3, LieStepError> {
     if ![omega_body.x, omega_body.y, omega_body.z]
         .iter()
         .all(|value| value.is_finite())
@@ -92,16 +101,18 @@ pub fn rigid_body_step(
             context: "rigid-body angular velocity",
         });
     }
-    let momentum = Vec3::new(
+    Ok(Vec3::new(
         inertia.x * omega_body.x,
         inertia.y * omega_body.y,
         inertia.z * omega_body.z,
-    );
-    let (next_rotation, next_momentum) = rigid_body_momentum_step(rotation, momentum, inertia, h)?;
+    ))
+}
+
+fn velocity_from_momentum(momentum: Vec3, inertia: Vec3) -> Result<Vec3, LieStepError> {
     let next_omega = Vec3::new(
-        next_momentum.x / inertia.x,
-        next_momentum.y / inertia.y,
-        next_momentum.z / inertia.z,
+        momentum.x / inertia.x,
+        momentum.y / inertia.y,
+        momentum.z / inertia.z,
     );
     if ![next_omega.x, next_omega.y, next_omega.z]
         .iter()
@@ -111,7 +122,94 @@ pub fn rigid_body_step(
             context: "rigid-body angular velocity",
         });
     }
-    Ok((next_rotation, next_omega))
+    Ok(next_omega)
+}
+
+fn torque_kick(momentum: Vec3, torque: Vec3, h: f64) -> Result<Vec3, LieStepError> {
+    if ![torque.x, torque.y, torque.z]
+        .iter()
+        .all(|value| value.is_finite())
+    {
+        return Err(LieStepError::InvalidParameter {
+            context: "rigid-body torque",
+        });
+    }
+    Ok(Vec3::new(
+        h.mul_add(torque.x, momentum.x),
+        h.mul_add(torque.y, momentum.y),
+        h.mul_add(torque.z, momentum.z),
+    ))
+}
+
+/// Second-order rotation under torque held constant in the body frame.
+///
+/// Both `omega_body` and `torque_body` use the principal-axis frame, and the
+/// torque is about the center of mass. Symmetric momentum half-kicks enclose
+/// the free Hamiltonian drift in [`rigid_body_momentum_step`]. The second
+/// kick acts in the accepted body's frame, not its initial spatial frame.
+/// The map is time reversible for this held load. No nonlinear solve or
+/// allocation is needed; input state is never mutated on refusal.
+///
+/// This is a held-load integrator: sampling a state-dependent torque once
+/// per step does not preserve second-order accuracy of that coupled model.
+/// A constant *spatial* torque instead requires
+/// [`rigid_body_spatial_torque_step`].
+///
+/// # Errors
+/// Refuses the same invalid states/steps as [`rigid_body_step`], non-finite
+/// torque, and non-representable kicked momentum or angular velocity.
+pub fn rigid_body_torque_step(
+    rotation: So3,
+    omega_body: Vec3,
+    inertia: Vec3,
+    torque_body: Vec3,
+    h: f64,
+) -> Result<(So3, Vec3), LieStepError> {
+    let momentum = momentum_from_velocity(omega_body, inertia)?;
+    let half = 0.5 * h;
+    let kicked = torque_kick(momentum, torque_body, half)?;
+    let (next_rotation, drifted) = rigid_body_momentum_step(rotation, kicked, inertia, h)?;
+    let next_momentum = torque_kick(drifted, torque_body, half)?;
+    Ok((
+        next_rotation,
+        velocity_from_momentum(next_momentum, inertia)?,
+    ))
+}
+
+/// Second-order rotation under torque held constant in the spatial frame.
+///
+/// `torque_space` is about the center of mass; `omega_body` and `inertia`
+/// use the body's principal axes. Each momentum half-kick rotates this
+/// torque into the body frame at that endpoint. Together with the matched
+/// free drift, this gives `R_next I omega_next - R I omega = h torque_space`
+/// to roundoff for any admitted step. Reusing the initial body-frame torque
+/// at both endpoints would instead apply a rotating, body-attached load.
+///
+/// This symmetric, allocation-free held-load map is time reversible. It
+/// makes no second-order claim when a time- or state-dependent torque is
+/// frozen once per step.
+///
+/// # Errors
+/// Refuses the same invalid states/steps as [`rigid_body_step`], non-finite
+/// torque, and non-representable kicked momentum or angular velocity.
+pub fn rigid_body_spatial_torque_step(
+    rotation: So3,
+    omega_body: Vec3,
+    inertia: Vec3,
+    torque_space: Vec3,
+    h: f64,
+) -> Result<(So3, Vec3), LieStepError> {
+    let momentum = momentum_from_velocity(omega_body, inertia)?;
+    let half = 0.5 * h;
+    let torque_start = rotation.inverse().rotate(torque_space)?;
+    let kicked = torque_kick(momentum, torque_start, half)?;
+    let (next_rotation, drifted) = rigid_body_momentum_step(rotation, kicked, inertia, h)?;
+    let torque_end = next_rotation.inverse().rotate(torque_space)?;
+    let next_momentum = torque_kick(drifted, torque_end, half)?;
+    Ok((
+        next_rotation,
+        velocity_from_momentum(next_momentum, inertia)?,
+    ))
 }
 
 /// Momentum-state version of [`rigid_body_step`].
