@@ -1,5 +1,5 @@
-//! G1/G3: actual two-body motion and a finite thermal network accept together.
-//! Caloric/conductivity coefficients are analytical fixtures, not material data.
+// G1/G3: actual two-body motion and a finite thermal network accept together.
+// Caloric/conductivity coefficients are analytical fixtures, not material data.
 use fs_couple::friction_heat::{FrictionHeatRoute, FrictionHeatTolerances};
 use fs_couple::modal_acoustic_time::{
     ModalAcousticMode, ModalAcousticState, ModalAcousticTimeBudget, ModalAcousticTimeModel,

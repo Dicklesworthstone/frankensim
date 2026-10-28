@@ -29,6 +29,9 @@ use std::cell::RefCell;
 /// Physical finite-layer storage and source-derived conduction into both bodies.
 pub mod third_body;
 
+/// Conservative moving contact patches with locally resolved temperatures.
+pub mod moving;
+
 /// Bounded pulse-history flash-temperature comparison against resolved conduction.
 pub mod flash;
 

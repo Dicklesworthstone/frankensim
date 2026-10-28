@@ -23,6 +23,9 @@ use std::cell::{Cell, RefCell};
 /// Same-step modal friction with an existing finite thermal layer.
 pub mod third_body;
 
+/// Common-slip Coulomb composition with local moving-contact temperatures.
+pub mod moving;
+
 /// Endpoint constitutive and transport data, all evaluated at the same trial.
 pub struct ModalHeatSource<P> {
     /// Original source's dry-friction law at the common interface temperature.
@@ -46,6 +49,10 @@ pub struct ModalFrictionHeatSolve {
     pub temperature_scale_j_per_k: f64,
     pub heat: FrictionHeatTolerances,
     pub combined_energy_tolerance_j: f64,
+    /// The inner forcing floor must respect finite-difference accuracy; an
+    /// analytic-Jacobian forcing floor can stall below the directional-probe
+    /// precision. Outer convergence and every independent energy gate still
+    /// apply. The resolved moving-contact fixture uses a 1e-6 forcing floor.
     pub newton: NewtonKrylovConfig,
 }
 

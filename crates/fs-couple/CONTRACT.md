@@ -8893,3 +8893,43 @@ Fixtures are authored, not measured-material validation. Endpoint coupling
 generally has first-order path error and needs time refinement; no exact entropy
 conservation, finite-strain/phase dynamics, moving supports, downstream contact
 recoupling or arbitrary initial free-body state is claimed.
+
+## Moving finite-network friction heat and local modal feedback
+
+`friction_heat::moving` binds original orthogonal prismatic strip faces and a
+fixed footprint width and length. Linear material/footprint paths are integrated
+at every cell-edge crossing, with one solved interface temperature for each
+overlapping cell pair. Original cells retain the thermal wake, longitudinal and
+depth conduction, and all storage. Ambient loss excludes the mean covered area
+without persisting fictitious contacts. A sweep broadphase and one-pass exposed
+area gathering avoid a quadratic traversal of the original thermal links.
+
+Full footprint coverage over the entire interval, unchanged original geometry,
+material and mass, explicit overlap budgets, and absence of competing cross-body
+links are required. Heat flows are derived from local conductivities, actual
+half-cell distances and common interface temperatures. There are no prescribed
+body heat fractions or extra thermal stores. Endpoint temperature and flux data
+use backward Euler; exact geometric overlap does not remove the need for
+independent time refinement.
+
+`FrictionModalSystem::step_with_moving_friction_heat` resolves each local
+Coulomb law at its own interface temperature with a supplied mean normal force.
+Normal loads must sum to the original drive load. Static and kinetic capacities
+sum in the existing common-slip mechanical solve; local heat is local traction
+times the same actual solved slip. Every nonlinear trial starts from accepted
+mechanical/thermal state, and whole-system energy admission precedes one atomic
+publication. A retained single-interface source card and non-Coulomb scalar
+composition refuse. The geometry path remains an explicit input from the motion
+owner; it is not inferred from a provisional friction iterate. Curvature,
+changing width, transverse gradients and finite-patch partial slip are outside
+this common-slip strip rung.
+
+Three native thermal regression groups check multi-cell crossing conservation,
+path reversal, refusal/rollback, thermal wake, stationary-limit recovery and a
+Jaeger moving-band comparison at Peclet numbers 0.1, 1 and 10. Across three joint
+meshes every local temperature-field error decreases; finest relative field
+errors are 0.949%, 1.641% and 1.353%, with mean-temperature errors below 0.26%.
+Independent depth and time ladders show observed orders 1.945 and 0.978; axial
+refinement also reduces the temperature increment. Two native modal regression
+groups check local temperature-dependent friction and heat, original mechanical
+energy, and bitwise-identical retry after a staged refusal.
