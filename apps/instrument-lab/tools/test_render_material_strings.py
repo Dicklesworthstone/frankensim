@@ -3,6 +3,7 @@
 python3 -m unittest discover -s apps/instrument-lab/tools -p test_render_material_strings.py
 """
 import json
+import base64
 import os
 import tempfile
 import unittest
@@ -92,6 +93,82 @@ class MaterialPreparation(unittest.TestCase):
         self.assertEqual(source.read_text(), original)
         with self.assertRaises(FileExistsError):
             R.main(args)
+
+    def test_prepare_only_exports_complete_profiles_and_original_gas_sources_without_an_engine(self):
+        root = Path(tempfile.mkdtemp())
+        original = (EXAMPLES / "pluck.material-strings").read_text()
+        source = root / "source.material-strings"
+        source.write_text(original)
+        packs = {"wire.fsmatpk": b"original-wire\x00\xff", "body.fsmatpk": b"original-body",
+                 "contact.fsmatpk": b"original contact material"}
+        for name, data in packs.items():
+            (root / name).write_bytes(data)
+        body, stop, thermal = (root / name for name in ("body.source", "stop.source", "heat.source"))
+        body.write_bytes(b"original body geometry\r\n# \xc2\xb5\r\n")
+        stop.write_bytes(b"original moving bow profile contact.fsmatpk\r\n")
+        thermal.write_bytes(b"original contact thermal history\r\n")
+        gas_files = []
+        for i in range(6):
+            path = root / f"gas-source-{i}"
+            path.write_bytes(bytes([0, 255, i, 13, 10]))
+            gas_files.append(path)
+        gas = "thermochemical 307 82000 mole 2 oxygen-source 0.3 inert-source 0.7"
+        output = root / "prepared"
+        args = ["--prepare-only", "--performance", str(source), "--out", str(output),
+                "--body-profile", str(body), "--stop-profile", str(stop), "--contact-thermal", str(thermal),
+                "--gas-record", gas, "--gas-component", *map(str, gas_files[:3]),
+                "--gas-component", *map(str, gas_files[3:]), "--gas-water", "none", "--gas-phase", "frozen"]
+        with mock.patch.object(R.subprocess, "run", side_effect=AssertionError("preparation must not render audio")):
+            self.assertEqual(R.main(args), 0)
+        packet = json.loads((output / "experiment.native.json").read_text())
+        self.assertEqual(packet["format"], "frankensim-native-wind-input-v1")
+        self.assertEqual(packet["renderer"], "strings")
+        self.assertFalse(packet["decimate"])
+        prepared = base64.b64decode(packet["source"])
+        self.assertEqual(prepared, (output / "performance.material-strings").read_bytes())
+        self.assertIn("gas " + gas, prepared.decode())
+        self.assertEqual(R.row(prepared.decode().splitlines(), "string"), R.row(original.splitlines(), "string"))
+        files = {file["path"]: base64.b64decode(file["bytes"]) for file in packet["attachments"]}
+        self.assertEqual(packet["stringProfiles"], {"bodyPath": "body.profile", "stopPath": "stops.profile",
+                                                  "contactThermalPath": "contact-thermal.profile"})
+        for name, data in packs.items():
+            self.assertEqual(files[name], data)
+        for name, path in (("body.profile", body), ("stops.profile", stop), ("contact-thermal.profile", thermal)):
+            self.assertEqual(files[name], path.read_bytes())
+        self.assertEqual(packet["gasSources"]["phase"], "frozen")
+        self.assertIsNone(packet["gasSources"]["waterSpecies"])
+        actual_gases = [files[name] for component in packet["gasSources"]["components"] for name in component.values()]
+        self.assertEqual(actual_gases, [path.read_bytes() for path in gas_files])
+        self.assertFalse((output / "render.wav").exists())
+        self.assertEqual(source.read_text(), original)
+
+    def test_violin_material_bank_export_keeps_original_sections_and_explicit_decimation(self):
+        root = Path(tempfile.mkdtemp())
+        source = EXAMPLES / "cannone-dominant-g3.material-strings"
+        output = root / "violin"
+        self.assertEqual(R.main(["--prepare-only", "--performance", str(source), "--out", str(output),
+                                 "--pack-root", str(EXAMPLES / "packs"), "--decimate"]), 0)
+        packet = json.loads((output / "experiment.native.json").read_text())
+        self.assertTrue(packet["decimate"])
+        # This tests the committed four-string materials, not full specimen geometry.
+        self.assertEqual(base64.b64decode(packet["source"]), source.read_bytes())
+        for file in packet["attachments"]:
+            self.assertEqual(base64.b64decode(file["bytes"]), (EXAMPLES / "packs" / file["path"]).read_bytes())
+        self.assertGreaterEqual(len(packet["attachments"]), 5)
+
+    def test_lab_export_requires_explicit_source_policies_and_never_overwrites_an_experiment(self):
+        root = Path(tempfile.mkdtemp())
+        source = root / "performance.material-strings"
+        source.write_bytes(b"frankensim-material-strings-v3\r\n# \xc2\xb5\r\n")
+        path = R.write_lab_experiment(source, root, [], {}, None, True)
+        self.assertEqual(base64.b64decode(json.loads(path.read_text())["source"]), source.read_bytes())
+        with self.assertRaises(FileExistsError):
+            R.write_lab_experiment(source, root, [], {}, None, False)
+        for policy in (["--gas-component", "species", "model", "transport"],
+                       ["--gas-water", "none", "--gas-phase", "frozen"]):
+            with self.assertRaises(SystemExit):
+                R.main(["--prepare-only", "--performance", str(source), "--out", str(root / "refused"), *policy])
+        self.assertFalse((root / "refused").exists())
 
     def test_fiber_contact_and_native_decimation_keep_the_original_mechanical_clock(self):
         root = Path(tempfile.mkdtemp())

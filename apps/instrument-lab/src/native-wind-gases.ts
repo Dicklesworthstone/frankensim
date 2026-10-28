@@ -5,6 +5,7 @@ interface GasControls {
   element: HTMLElement;
   read(): NativeWindGasSources | undefined;
   identity(): string;
+  load(sources?: NativeWindGasSources): void;
   setAttachments(paths: readonly string[]): void;
   setDisabled(disabled: boolean): void;
   reset(): void;
@@ -58,13 +59,14 @@ export function createNativeGasControls(changed: () => void): GasControls {
     nasa9Path: row.inputs.nasa9Path.value,
     transportPath: row.inputs.transportPath.value,
   }));
-  const addRow = (): void => {
+  const addRow = (value?: NativeWindGasComponent): void => {
     if (rows.length >= 128) return;
     const inputs = { speciesPath: el("select"), nasa9Path: el("select"), transportPath: el("select") };
     const remove = el("button", { type: "button", class: "btn" }, "Remove component");
     const row: Row = { inputs, element: el("div", { class: "nw-gas-component" }) };
     keys.forEach((key, index) => {
       choices(inputs[key]);
+      if (value) inputs[key].value = value[key];
       inputs[key].addEventListener("change", changed);
       row.element.append(el("label", {}, labels[index]!, inputs[key]));
     });
@@ -103,6 +105,15 @@ export function createNativeGasControls(changed: () => void): GasControls {
     },
     identity: () => enabled.checked
       ? JSON.stringify({components:components(), phase:phase.value, water:water.value}) : "",
+    load(sources) {
+      rows = []; list.replaceChildren();
+      enabled.checked = sources !== undefined;
+      phase.value = sources?.phase ?? "";
+      water.value = sources ? sources.waterSpecies ?? "none" : "";
+      if (sources) sources.components.forEach(component => addRow(component));
+      else addRow();
+      controls();
+    },
     setAttachments(next) {
       paths = [...new Set(next)];
       for (const row of rows) for (const key of keys) choices(row.inputs[key]);

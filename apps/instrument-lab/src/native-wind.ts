@@ -12,6 +12,7 @@ import { el } from "./util";
 import { createNativeGasControls } from "./native-wind-gases";
 import { createNativeStringProfiles } from "./native-string-profiles";
 import { createNativeComparisonPanel } from "./native-comparison";
+import { MAX_REQUEST_BYTES, serializeNativeExperiment, validateInput } from "./native-experiment.mjs";
 
 const EXAMPLES = [
   {
@@ -112,6 +113,11 @@ export function createNativeWindPanel(): HTMLElement {
   const cancel = el("button", { type: "button", class: "btn" }, "Cancel render");
   const check = el("button", { type: "button", class: "btn" }, "Check renderer");
   const open = el("button", { type: "button", class: "btn" }, "Open performance…");
+  const openExperiment = el("button", {type:"button", class:"btn"}, "Open experiment…");
+  const saveExperiment = el("button", {type:"button", class:"btn"}, "Save experiment");
+  const experimentFile = el("input", {type:"file", accept:".json,application/json",
+    "aria-label":"Open a complete native experiment with its material sources"});
+  experimentFile.hidden = true;
   const reset = el("button", { type: "button", class: "btn" }, "Reset example");
   const attach = el("button", { type: "button", class: "btn" }, "Attach source files…");
   const attachmentFile = el("input", { type: "file", multiple: "",
@@ -164,6 +170,8 @@ export function createNativeWindPanel(): HTMLElement {
     cancel.hidden = !active;
     check.disabled = active || checking !== null;
     open.disabled = active || loadingFile;
+    openExperiment.disabled = active || loadingFile;
+    saveExperiment.disabled = active || loadingFile || !source.value.trim();
     reset.disabled = active || loadingFile;
     starter.disabled = active || loadingFile;
     renderer.disabled = active || loadingFile;
@@ -328,6 +336,7 @@ export function createNativeWindPanel(): HTMLElement {
     introduction.textContent = selectedExample.intro;
     sourceHelp.textContent = selectedExample.help;
     canonical.href = exampleUrl(selectedExample.name);
+    canonical.hidden = false;
     attachments = [];
     decimate.checked = selectedExample.decimate;
     gas.reset();
@@ -378,6 +387,61 @@ export function createNativeWindPanel(): HTMLElement {
   };
   decimate.addEventListener("change", edited);
   attach.addEventListener("click", () => attachmentFile.click());
+  openExperiment.addEventListener("click", () => experimentFile.click());
+  saveExperiment.addEventListener("click", () => {
+    if (rendering || loadingFile) return;
+    try {
+      const packet = serializeNativeExperiment(currentSource(), attachments, {
+        renderer:selectedRenderer(), decimate:decimate.checked, gasSources:gas.read(),
+        stringProfiles:selectedRenderer() === "strings" ? profiles.read() : undefined,
+      });
+      // Use the service's same envelope checks before saving an unusable packet.
+      // Native physics admission remains at render time.
+      validateInput(new TextEncoder().encode(packet), true);
+      const url = URL.createObjectURL(new Blob([packet], {type:"application/json"}));
+      const link = el("a", {href:url, download:sourceName.replace(/(?:\.native)?\.json$|\.(?:performance|material-strings)$/, "") + ".native.json"});
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      showResult("Experiment saved with the original performance, source files, profiles and gas associations. Open it to continue this material comparison.");
+    } catch (error) { showResult(message(error), true); }
+  });
+  experimentFile.addEventListener("change", () => {
+    const selected = experimentFile.files?.[0];
+    experimentFile.value = "";
+    if (!selected || rendering || loadingFile) return;
+    if (selected.size > MAX_REQUEST_BYTES) {
+      showResult(`Choose an experiment no larger than ${MAX_REQUEST_BYTES.toLocaleString()} bytes.`, true);
+      return;
+    }
+    loadingFile = true; controls();
+    void selected.arrayBuffer().then(async buffer => {
+      const experiment = validateInput(new Uint8Array(buffer), true);
+      const text = new TextDecoder("utf-8", {fatal:true, ignoreBOM:true}).decode(experiment.source);
+      const nextAttachments = await Promise.all(experiment.attachments.map(async attached => {
+        const digest = await crypto.subtle.digest("SHA-256", new Uint8Array(attached.bytes));
+        const sha256 = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+        return {...attached, sha256};
+      }));
+      // Commit the complete imported experiment only after every byte and
+      // association was admitted. A bad file leaves the current model intact.
+      attachments = nextAttachments;
+      source.value = text; loadedSource = text; loadedEditorValue = source.value;
+      sourceName = selected.name;
+      renderer.value = experiment.renderer ?? "wind";
+      decimate.checked = experiment.decimate;
+      drawAttachments();
+      gas.load(experiment.gasSources);
+      profiles.load(experiment.stringProfiles);
+      starter.value = ""; canonical.hidden = true;
+      introduction.textContent = `Loaded ${selected.name}: the complete performance and ${attachments.length} original source files.`;
+      sourceHelp.textContent = "This experiment keeps its original performer, mechanical clock, pressure scale, material paths, specimen profiles and gas-source associations. Replace an attached source or edit the performance to run another physical configuration.";
+      edited();
+      await checkConnection();
+      showResult("Experiment loaded. Render to hear it; earlier comparison audio is unchanged.");
+    }).catch(error => {
+      showResult(`Experiment was not loaded: ${message(error)} Your current sources are unchanged.`, true);
+    }).finally(() => { loadingFile = false; controls(); });
+  });
   attachmentFile.addEventListener("change", () => {
     const selected = Array.from(attachmentFile.files ?? []);
     attachmentFile.value = "";
@@ -448,6 +512,8 @@ export function createNativeWindPanel(): HTMLElement {
       loadedSource = text;
       loadedEditorValue = source.value;
       sourceName = selected.name;
+      starter.value = ""; canonical.hidden = true;
+      introduction.textContent = `Loaded performance: ${selected.name}. Existing source attachments and profile choices are retained.`;
       showResult("Performance loaded. Edit the source or render it.");
       edited();
     }).catch(() => {
@@ -480,13 +546,15 @@ export function createNativeWindPanel(): HTMLElement {
       sourceHelp,
       el("p", {}, "Wind and material-string descriptions use their original native loaders. Attach the exact material packs and artifacts named by the source, including subdirectory paths. Changing a pack changes its physical properties; missing data and unsupported states remain native refusals. Keep the same declared pressure scale when comparing renders."),
       el("p", {}, "Rendering uses the local music_render or material_strings executable. The hosted review page can show and edit the source; audio is available when you open it through the local renderer server. String contact-thermal profiles retain their original mechanical clock when pressure is decimated to 48 kHz."),
+      el("p", {}, "Open experiment loads a complete native source packet, including its original material files, gas associations and specimen profiles. Save experiment keeps the current configuration in that same format; neither action renders sound. The material-string launcher can prepare these packets directly from a physical assembly."),
       el("p", {}, canonical,
         " · ", el("a", {href: "https://github.com/Dicklesworthstone/frankensim/tree/main/crates/fs-couple/examples/material_strings", target: "_blank", rel: "noopener"}, "String source-pack instructions"),
         " · ", el("a", { href: "https://github.com/Dicklesworthstone/frankensim/tree/main/apps/instrument-lab#native-wind-and-string-renderer", target: "_blank", rel: "noopener" }, "Local renderer setup"))),
     el("div", { class: "nw-source-head" }, el("label", { for: "native-wind-source" }, "Performance source"),
       sourceInfo),
     source, attachmentPanel, profiles.element, gas.element, decimation,
-    el("div", { class: "btn-row nw-actions" }, render, cancel, open, attach, reset, check, file, attachmentFile, replacementFile),
+    el("div", { class: "btn-row nw-actions" }, render, cancel, openExperiment, saveExperiment, open, attach, reset, check,
+      file, experimentFile, attachmentFile, replacementFile),
     result, playback, comparison.element);
   drawAttachments();
   edited();

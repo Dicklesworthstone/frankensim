@@ -116,6 +116,53 @@ Playback never peak-normalizes or retunes the native result. Original model
 limits and missing-source refusals still apply; attaching a pack does not
 qualify an instrument as measured or realistic.
 
+### Open a complete material experiment
+
+**Open experiment…** restores a performance together with its original binary
+material sources, nested source paths, body/contact/thermal profiles, gas source
+associations and native-decimation choice. **Save experiment** writes that
+complete editable configuration as `*.native.json`. This is the existing
+`frankensim-native-wind-input-v1` request packet used by the local renderer;
+the browser and service share its reader. No material property or physical
+record is translated into a browser-specific model.
+
+The material-string launcher can prepare this packet from the same source
+assembly used for native research renders. For the committed four-string
+il Cannone assembly, from the repository root:
+
+```sh
+NOTES=G3 data/instruments/descriptions/violin/render.sh \
+  target/release/material_strings /path/to/new-violin-input \
+  --prepare-only --decimate
+```
+
+Open `/path/to/new-violin-input/G3/experiment.native.json` in the panel. The
+native shell converter still prepares the body from its source geometry;
+`--prepare-only` skips audio rendering. The packet carries the resulting body
+profile and all original material packs, so the browser needs no manual
+reattachment of those files. Render it, keep the result as A, replace a material
+pack at its existing path or edit the gas record, and render B. Save each variant
+to reopen the same complete configuration later. The declared pressure scale,
+tensions, mechanical clock and source bytes remain part of the experiment.
+
+For other supplied string assemblies, use
+`tools/render_material_strings.py --performance ... --out ... --prepare-only`
+with the appropriate `--pack-root`, `--body-profile`, `--stop-profile` and
+`--contact-thermal` inputs. A prepared body profile needs no executable during
+this staging step; generating a shell profile still requires `--renderer`.
+`--stop-profile` includes the original finger, fret and material bow-contact
+data, including moving contacts. Source-backed gases retain every original
+`--gas-component SPECIES NASA9 TRANSPORT` triple and require explicit
+`--gas-water none|ID` and `--gas-phase frozen|liquid-water` choices for export.
+`--lab-experiment` saves the packet alongside a normal native audio render.
+
+Choose `--decimate` explicitly when the performance's mechanical clock is above
+48 kHz. This reaches the existing native downsampler and leaves the mechanical
+integration unchanged. Experiment files contain input data; native coefficient
+admission, convergence limits and specimen qualifications still apply when
+rendering. Opening or saving works on the hosted viewer too; rendering requires
+the local companion described above.
+
 ### Material reeds and compliant walls
 
 The **Material reeds** starters open the original paired-blade descriptions.

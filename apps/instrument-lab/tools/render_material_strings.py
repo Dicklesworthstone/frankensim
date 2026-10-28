@@ -12,6 +12,8 @@ rendering; --analysis additionally uses the existing instrgrade dependencies.
 from __future__ import annotations
 
 import argparse
+import base64
+import json
 import math
 import shutil
 import subprocess
@@ -103,7 +105,7 @@ def assembly_geometry(text: str, report: str) -> str:
     return "\n".join(lines) + "\nschedule\n" + schedule
 
 
-def stage_packs(texts: list[str], root: Path, replacements: list[str], output: Path) -> None:
+def stage_packs(texts: list[str], root: Path, replacements: list[str], output: Path) -> list[str]:
     # These are the existing binary pack formats, copied byte for byte.
     # Rust remains the material decoder and property/domain authority.
     available = {str(p.relative_to(root)): p for suffix in ("*.fsmatpk", "*.fsintpk") for p in root.rglob(suffix)}
@@ -126,19 +128,41 @@ def stage_packs(texts: list[str], root: Path, replacements: list[str], output: P
         destination.parent.mkdir(parents=True, exist_ok=True)
         with destination.open("xb") as stream, available[name].open("rb") as source:
             shutil.copyfileobj(source, stream)
+    return sorted(required)
+
+
+def write_lab_experiment(source: Path, output: Path, attachments: list[str], profiles: dict,
+                         gas_sources: dict | None, decimate: bool) -> Path:
+    """Export the existing native HTTP packet; material/physics decoding stays in Rust.
+
+    The lab's shared packet reader checks its transport bounds when opening this
+    file. Prepared source bytes and all referenced source paths remain intact.
+    """
+    encoded = lambda data: base64.b64encode(data).decode("ascii")
+    packet = {"format": "frankensim-native-wind-input-v1", "renderer": "strings",
+              "source": encoded(source.read_bytes()), "decimate": decimate,
+              "attachments": [{"path": name, "bytes": encoded((output / name).read_bytes())}
+                              for name in attachments]}
+    if profiles:
+        packet["stringProfiles"] = profiles
+    if gas_sources is not None:
+        packet["gasSources"] = gas_sources
+    path = output / "experiment.native.json"
+    with path.open("x", encoding="utf-8") as stream:
+        json.dump(packet, stream, separators=(",", ":"), ensure_ascii=False)
+    return path
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--renderer", required=True, help="path to the native material_strings executable")
+    parser.add_argument("--renderer", help="path to material_strings; required for audio rendering or shell assembly")
     parser.add_argument("--performance", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True, help="new directory for the staged sources, WAV and native log")
     parser.add_argument("--pack-root", type=Path)
     parser.add_argument("--pack", action="append", default=[], metavar="REFERENCED_PATH=SOURCE_PACK")
     parser.add_argument("--body-profile", type=Path)
-    parser.add_argument("--stop-profile", type=Path, help="original finger/fret or contact-loaded bow profile; native code solves its reactions")
+    parser.add_argument("--stop-profile", type=Path, help="original finger/fret/bow-surface contact profile")
     parser.add_argument("--contact-thermal", type=Path, help="original finite contact-heat profile; thermal properties come from the same assembly packs")
-    parser.add_argument("--decimate", action="store_true", help="use the native anti-alias pressure observer to emit 48 kHz audio from higher-rate mechanics")
     parser.add_argument("--shell-table", type=Path)
     parser.add_argument("--assembly-options", type=Path)
     parser.add_argument("--gas-record", help="exact shared gas record after 'gas', e.g. 'mixture 293.15 101325 mole 2 N2 0.8 O2 0.2'")
@@ -149,6 +173,9 @@ def main(argv=None) -> int:
     parser.add_argument("--bow-card", type=Path, help="reuse only this legacy card's canonical bow commands and duration")
     parser.add_argument("--string-index", type=int)
     parser.add_argument("--bow-distance-from-bridge", type=float)
+    parser.add_argument("--decimate", action="store_true", help="use the native 48 kHz output decimator without changing the mechanical clock")
+    parser.add_argument("--lab-experiment", action="store_true", help="also save experiment.native.json for Open experiment in Instrument Lab")
+    parser.add_argument("--prepare-only", action="store_true", help="stage sources and save the lab experiment without rendering audio")
     parser.add_argument("--analysis", type=Path, help="also write standard calibrated listening pairs for build_instruments.py")
     parser.add_argument("--family")
     parser.add_argument("--note")
@@ -157,10 +184,16 @@ def main(argv=None) -> int:
     parser.add_argument("--observer", help="actual receiver description, required when exporting to the lab")
     parser.add_argument("--recipe", default=str(Path(__file__).resolve()))
     args = parser.parse_args(argv)
-    renderer = shutil.which(args.renderer)
-    if renderer is None:
+    renderer = shutil.which(args.renderer) if args.renderer else None
+    if (args.renderer and renderer is None) or (renderer is None and (not args.prepare_only or args.shell_table)):
         parser.error("--renderer must name an available material_strings executable")
-    renderer = str(Path(renderer).resolve())
+    renderer = str(Path(renderer).resolve()) if renderer else None
+    export_experiment = args.lab_experiment or args.prepare_only
+    if args.prepare_only and args.analysis:
+        parser.error("--prepare-only cannot export listening analysis without an audio render")
+    if export_experiment and (args.gas_component or args.gas_water or args.gas_phase):
+        if not (args.gas_component and args.gas_water and args.gas_phase):
+            parser.error("a lab experiment with gas sources needs --gas-component, --gas-water and --gas-phase")
     if bool(args.shell_table) != bool(args.assembly_options) or (args.shell_table and args.body_profile):
         parser.error("supply --body-profile or both --shell-table and --assembly-options")
     if args.bow_card and (args.string_index is None or args.bow_distance_from_bridge is None):
@@ -186,30 +219,60 @@ def main(argv=None) -> int:
         audio[3] = repr(args.full_scale_pa)
         lines[i] = " ".join(audio)
     text = "\n".join(lines) + "\nschedule\n" + schedule
-    stop_profile = args.stop_profile.read_bytes() if args.stop_profile else None
     thermal_profile = args.contact_thermal.read_bytes() if args.contact_thermal else None
+    stop_profile = args.stop_profile.read_bytes() if args.stop_profile else None
     output = args.out.expanduser().resolve()
     output.mkdir(parents=True, exist_ok=False)
-    profile = args.body_profile.read_text() if args.body_profile else ""
+    profile_bytes = args.body_profile.read_bytes() if args.body_profile else b""
+    profile = profile_bytes.decode("utf-8")
+    profiles = {}
+    attachments = []
     if args.shell_table:
         result = subprocess.run([renderer, "assemble-shell", str(args.shell_table.resolve()),
                                  str(args.assembly_options.resolve()), str(output / "body.profile")],
                                 check=True, capture_output=True, text=True)
         (output / "assembly.log").write_text(result.stdout + result.stderr)
-        profile = (output / "body.profile").read_text()
+        profile = (output / "body.profile").read_bytes().decode("utf-8")
         text = assembly_geometry(text, result.stdout)
     elif profile:
-        (output / "body.profile").write_text(profile)
+        (output / "body.profile").write_bytes(profile_bytes)
+    if profile:
+        profiles["bodyPath"] = "body.profile"
+        attachments.append("body.profile")
     if stop_profile is not None:
         (output / "stops.profile").write_bytes(stop_profile)
+        profiles["stopPath"] = "stops.profile"
+        attachments.append("stops.profile")
     if thermal_profile is not None:
         (output / "contact-thermal.profile").write_bytes(thermal_profile)
+        profiles["contactThermalPath"] = "contact-thermal.profile"
+        attachments.append("contact-thermal.profile")
     # Thermal cells refer to the SAME assembly packs. Do not introduce an
     # independent thermal pack loader or bypass the native card-identity check.
-    stage_packs([text, profile, stop_profile.decode("utf-8") if stop_profile is not None else ""],
-                args.pack_root or args.performance.parent, args.pack, output)
+    attachments += stage_packs([text, profile, (stop_profile or b"").decode("utf-8")],
+                              args.pack_root or args.performance.parent, args.pack, output)
     source = output / "performance.material-strings"
     source.write_text(text)
+    gas_components = []
+    for index, paths in enumerate(args.gas_component):
+        component = {}
+        for key, filename, path in zip(("speciesPath", "nasa9Path", "transportPath"),
+                                       ("species.pack", "nasa9.pack", "transport.pack"), paths):
+            name = f"gas/{index}/{filename}"
+            destination = output / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with destination.open("xb") as stream, Path(path).expanduser().open("rb") as original:
+                shutil.copyfileobj(original, stream)
+            component[key] = name
+            attachments.append(name)
+        gas_components.append(component)
+    if export_experiment:
+        gas_sources = {"components": gas_components, "waterSpecies": None if args.gas_water == "none" else args.gas_water,
+                       "phase": args.gas_phase} if gas_components else None
+        packet = write_lab_experiment(source, output, attachments, profiles, gas_sources, args.decimate)
+        print(packet)
+    if args.prepare_only:
+        return 0
     wav = output / "render.wav"
     command = [renderer, str(source), str(wav)]
     if profile:
@@ -219,9 +282,9 @@ def main(argv=None) -> int:
     if thermal_profile is not None:
         command += ["--contact-thermal", str(output / "contact-thermal.profile")]
     if args.decimate:
-        command.append("--decimate")
-    for paths in args.gas_component:
-        command += ["--gas-component", *(str(Path(p).expanduser().resolve()) for p in paths)]
+        command += ["--decimate"]
+    for component in gas_components:
+        command += ["--gas-component", *(str(output / name) for name in component.values())]
     for key in ("water", "phase"):
         if value := getattr(args, "gas_" + key):
             command += ["--gas-" + key, value]

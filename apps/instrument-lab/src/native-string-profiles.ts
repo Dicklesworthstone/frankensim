@@ -35,6 +35,9 @@ export function createNativeStringProfiles(changed: () => void) {
       return Object.keys(selected).length ? selected : undefined;
     },
     identity: (): string => JSON.stringify(values()),
+    load(profiles?: NativeStringProfiles): void {
+      inputs.forEach(({key, input}) => { input.value = profiles?.[key] ?? ""; });
+    },
     setAttachments(next: readonly string[]): void { paths = next; refresh(); },
     setDisabled(disabled: boolean): void { element.disabled = disabled; },
     reset(): void { inputs.forEach(({input}) => { input.value = ""; }); },

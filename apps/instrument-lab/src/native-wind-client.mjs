@@ -1,5 +1,6 @@
 // Transport only. Source parsing, material laws and synthesis belong to the selected native performer.
 import {PRESSURE_RECEIPT_HEADER, verifyPressureReceipt} from './native-wave.mjs';
+import {serializeNativeExperiment} from './native-experiment.mjs';
 
 const STATUS_URL = "/api/native-wind/status";
 const RENDER_URL = "/api/native-wind/render";
@@ -127,19 +128,15 @@ async function sendNativeWind(source, attachments, status, options, signal, requ
     }
     if (attachments.length > status.maximumAttachments) throw new Error("Too many source attachments.");
     let total = 0;
-    const files = attachments.map(file => {
+    for (const file of attachments) {
       if (typeof file.path !== "string" || !(file.bytes instanceof Uint8Array) || !file.bytes.byteLength
         || file.bytes.byteLength > status.maximumAttachmentFileBytes) {
         throw new Error("Each attachment needs its source path and nonempty bytes within the per-file limit.");
       }
       total += file.bytes.byteLength;
       if (total > status.maximumAttachmentBytes) throw new Error("Source attachments exceed the combined byte limit.");
-      return {path:file.path, bytes:base64(file.bytes)};
-    });
-    body = JSON.stringify({format:"frankensim-native-wind-input-v1", source:base64(bytes), attachments:files, decimate:options.decimate ?? false,
-      ...(options.gasSources !== undefined ? {gasSources:options.gasSources} : {}),
-      ...(renderer === 'strings' ? {renderer} : {}),
-      ...(options.stringProfiles !== undefined ? {stringProfiles:options.stringProfiles} : {})});
+    }
+    body = serializeNativeExperiment(source, attachments, options);
     contentType = "application/json;charset=utf-8";
     if (new TextEncoder().encode(body).byteLength > status.maximumRequestBytes) {
       throw new Error("The complete experiment exceeds the renderer's request limit.");
@@ -168,13 +165,4 @@ async function sendNativeWind(source, attachments, status, options, signal, requ
     receipt = await verifyPressureReceipt(value, new Uint8Array(await wave.arrayBuffer()), renderer);
   }
   return {wave, receipt};
-}
-
-// Keep encoding bounded without spreading a large binary array on the call stack.
-function base64(bytes) {
-  let binary = "";
-  for (let start = 0; start < bytes.length; start += 32768) {
-    binary += String.fromCharCode(...bytes.subarray(start, start + 32768));
-  }
-  return btoa(binary);
 }
