@@ -332,3 +332,63 @@ oscillations; exact moving-interface pressure-equilibrium preservation is not
 claimed. There is no fully discrete entropy-stability certificate, physical
 species diffusion, viscosity, moving mesh, arbitrary junction or multi-D flow
 claim.
+
+## Coupled finite-rate multicomponent flow
+
+`multicomponent::reactive::ReactingEuler1d` binds one conservative mixture field
+to an identical original species bank in `IdealGasKineticsV1`. It composes an
+isochoric chemistry half step, a complete conservative transport step, and a
+second chemistry half step. If heat release changes acoustic speed enough for
+transport to shorten the trial duration, the complete composition restarts
+from the original field using the actual shorter duration. Failed chemistry,
+source reconstruction, work budgets and cancellation publish no cell or clock.
+
+Each chemistry solve uses the actual physical cell volume and total internal
+energy after removing kinetic energy. Momentum and physical total energy are
+held fixed. The stored energy changes only by the negative species-reference
+change: `Delta Eg = -sum(e_i(Tmin) Delta rho_i)`. Original formation energy is
+therefore accounted for once; no additional heat-release term is added.
+The accepted reactor temperature is independently checked against the original
+species sensible-energy functions at the reconstructed cell composition. Lost
+absolute-energy precision, molecular-mass inconsistency that changes kinetic
+energy, or an endpoint outside the source/energy budget is refused.
+
+Two complete preallocated flow instances provide accepted and candidate state;
+one prepared reactor and dense amount buffer are reused across cells. Source
+identity/path admission and numerical workspace allocation occur at
+construction. Chemistry tolerances are per physical cell; callers must choose
+absolute amount and energy tolerances appropriate to the actual mesh volumes.
+`ReactiveStepReport` retains transport boundary changes, area-wall impulse,
+actual chemistry species/gauge-energy changes, chemistry entropy production,
+solver work and mass/chemical-total-energy residuals. Chemistry entropy alone
+is not a total transport/source/boundary entropy certificate.
+
+Four coupled regressions cover a moving exothermic periodic field against the
+homogeneous reactor at the actual accepted duration (including forced acoustic
+restarts), independent sinusoidal advection/reaction decay and refinement,
+late cancellation followed by reuse, and source-identity/chemical-energy
+precision refusal. Reactive-contact L1 errors at 40 and 80 cells are
+2.3273859838e-4 and 5.1358044353e-5. The complete current pure-gas native library
+passes 38 tests. The five existing material-adapter regressions also pass using
+actual fs-gas source with the selected original fs-material source bodies;
+this is not a full-workspace or DSR verdict.
+
+The runnable `reacting_oxygen` example uses the O/O2 high-temperature NASA7
+coefficients and isolated `2 O + M <=> O2 + M` reaction from GRI-Mech 3.0 as
+distributed in Cantera v3.2.0 `data/gri30.yaml`. NASA7 embeds exactly in NASA9
+with zero inverse-temperature Cp terms. It retains the original 1000..3500 K
+region, 1 atm standard-state pressure, explicit SI rate conversion and unit
+O/O2 collider efficiencies. This isolated oxygen subsystem is not a complete
+air or fuel-combustion mechanism and carries no experimental-validation claim.
+A 40-cell periodic run reaches 1 ms in 113 accepted steps, with reported mass
+residual 0 kg and chemical-total-energy residual -1.718625e-13 J; atomic oxygen
+falls from 4.237578e-5 to 3.380236e-5 kg. Local temperatures reach
+1831.691..1912.266 K from an initially uniform 1800 K.
+
+Run with `cargo run -p fs-gas --features experimental-euler --example
+reacting_oxygen -- 80`. The example emits coherent-SI CSV and a balance summary.
+The symmetric composition does not upgrade the underlying adaptive
+implicit-Euler chemistry to a certified second-order time method. Local
+chemistry error estimates are not global coupled error bounds. Physical
+species diffusion, heat conduction, viscosity, flames, sprays, real-gas phases,
+moving meshes and arbitrary reacting junction networks remain separate work.

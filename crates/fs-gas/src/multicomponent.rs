@@ -11,6 +11,9 @@ mod eos;
 mod evolve;
 mod flux;
 
+/// Atomic finite-rate chemistry coupled to conservative species transport.
+pub mod reactive;
+
 pub use crate::dynamics::{
     Boundaries, Boundary, CaloricDomain, Mesh1d, Primitive, Reconstruction, StepControl,
 };

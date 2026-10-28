@@ -2,9 +2,10 @@
 
 //! L3 evolving gas systems over the original L1 thermochemical source owners.
 //!
-//! The `experimental-euler` feature admits the estimated, inviscid one-dimensional
-//! frozen-composition Euler lane. It is a conservative shock-capturing solver,
-//! not an entropy/invariant-domain certificate or a complete reactive network.
+//! The `experimental-euler` feature admits estimated, inviscid one-dimensional
+//! frozen and multicomponent Euler flow, including finite-rate reaction coupling.
+//! These are conservative shock-capturing engineering solvers, not fully discrete
+//! entropy/invariant-domain certificates or complete reactive networks.
 
 /// Crate version retained by callers in their simulation records.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

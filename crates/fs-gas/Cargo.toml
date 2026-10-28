@@ -29,5 +29,9 @@ fs-evidence = { path = "../fs-evidence" }
 name = "shock_tube"
 required-features = ["experimental-euler"]
 
+[[example]]
+name = "reacting_oxygen"
+required-features = ["experimental-euler"]
+
 [lints]
 workspace = true
