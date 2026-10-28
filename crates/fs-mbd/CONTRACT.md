@@ -755,3 +755,21 @@ This is a caller-admitted first-order composition within the contact owner's
 SPD/determinacy domain. Automatic manifold/center-of-pressure discovery,
 arbitrary CCD/Painleve resolution and a complete Moreau–Jean integrator remain
 separate work. Geometry and time refinement remain explicit requirements.
+
+### Variable-mass rocket translation
+
+`rocket::RocketState::advance` integrates a point vehicle with explicit dry
+and propellant masses, engine mass flow, world effective-exhaust vector,
+gravity acceleration and other external force. The effective exhaust vector
+includes nozzle pressure thrust once. Piecewise-constant forcing uses the
+Tsiolkovsky logarithm and its separate analytic position integral; external
+force is integrated against the changing mass, rather than divided by an
+average mass. A bounded polynomial series preserves tiny burned fractions.
+Propellant exhaustion splits a step into powered motion and coast at dry
+mass, with zero engine thrust afterward. The operation is deterministic and
+allocation-free, validates representability and polls cancellation before
+publication. G1/G3 tests cover independent analytic velocity/position,
+constant-force integration, burnout, split steps, tiny burns, frame changes
+and Galilean invariance. The module supplies no attitude, atmosphere,
+aerodynamic coefficients, staging or accuracy guarantee for forcing that
+changes within a step.
