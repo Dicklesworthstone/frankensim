@@ -17,6 +17,8 @@
 
 /// Prescribed active fibre stress on top of the passive hyperelastic laws (M0.3-W3).
 pub mod active_tissue;
+/// Source-bound monotonic axial comparisons from reported tensile/compression moduli.
+pub mod axial_reference;
 pub mod calibrate;
 /// Irreversible mixed-mode cohesive interfaces with work and fracture accounting.
 pub mod cohesive;

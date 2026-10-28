@@ -9,6 +9,41 @@ Ambition tags: elastic/hyperelastic/J2/RC-fiber laws + calibration [S];
 multi-case identifiability authority schema [F]. Ogden and tension-only
 HGO/GOH are [S] constitutive laws; specimen/tissue calibration is separate.
 
+## Source-bound axial modulus references
+
+`axial_reference::ResolvedAxialModulusReference` resolves density and an
+explicitly named tensile or compression modulus from one immutable material
+card and one complete typed source point. It retains both original usage
+receipts and uncertainties. Tension and compression are separate modes;
+flexural modulus, strength and pointwise stress cannot substitute for an axial
+modulus. No Poisson ratio or three-dimensional isotropy is inferred.
+
+This is an authored, zero-origin **linear modulus reference**. A reported
+compression modulus fitted over a finite strain interval is not reclassified
+as a measured initial tangent. The caller declares a strain ceiling, original
+length and area. The existing generalized-Maxwell equilibrium-spring limit
+supplies nominal stress and ramp work; the coupon returns `E*A/L`, mass,
+force, displacement and **model loading work**.
+
+Loading must increase monotonically in the selected direction. Holds,
+unloading, reversal, excess strain and nonrepresentable values refuse before
+history changes. When the selected claim declares a crosshead-speed axis, the
+caller must identify it and the displacement/time ramp must match. When source
+speed is unstated, ramp duration remains an authored model choice. A query's
+unconstrained extra axis cannot acquire source-rate authority.
+
+The model does not predict relaxation, creep, cyclic hysteresis, heat generation,
+recoverable material energy, lateral contraction or failure. Sampled strain,
+rate and history laws cannot be silently frozen into this reference.
+
+Focused checks cover independent axial stiffness/force/mass/work references,
+separate loading modes, source/protocol refusals and unchanged state after
+rejected steps:
+
+```sh
+cargo test -p fs-material axial_reference
+```
+
 ## Purpose and layer
 
 Layer **L3** (FLUX support). Runtime deps: `std`, fs-ad (dual-number
