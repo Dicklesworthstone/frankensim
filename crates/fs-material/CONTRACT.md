@@ -3384,3 +3384,26 @@ mass, capillary pressure, mechanical work and hysteresis are not inferred.
 Nine focused native tests passed with the original MaterialError and fs_math,
 including independent analytic limits, exact cube-root diffusion fixtures,
 geometry scaling, monotonicity, source-domain admission and numerical limits.
+
+
+## Lower standard atmosphere for flight consumers
+
+`gas::atmosphere::StandardAtmosphere1976` derives the seven hydrostatic layer
+bases from the U.S. Standard Atmosphere 1976 surface state and table 4 lapse
+rates. Geometric and geopotential altitude have separate query methods; the
+source's effective-radius mapping and gravity agree with the pressure
+integration. Each accepted sample uses the original `GasState` dry-air owner
+for density, sound speed and transport. Layer-base pressure is derived once
+instead of using independently rounded values. Successful construction and
+queries use fixed arrays without heap allocation. Near layer boundaries,
+`ln_1p` retains small increments. Repeatability is same-platform/toolchain;
+no cross-ISA bit-equality claim is made for the host logarithm.
+
+The admitted branch is 0..80000 m geometric altitude, where the source retains
+constant molecular mass. Above that boundary, USSA table 8 requires additional
+composition variation; this implementation refuses extrapolation. The profile
+is a dry standard reference, not measured weather, wind, humidity, terrain or
+a rotating/inertial Earth model. Its effective hydrostatic gravity must not be
+silently substituted for a different flight-frame gravity law. Focused tests
+cover source layer values, the common gas state, layer continuity, the altitude
+crosswalk, hydrostatic balance and upper-domain refusal.

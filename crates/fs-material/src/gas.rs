@@ -90,6 +90,9 @@
 //! non-IEEE transcendentals. Ice pressure follows the shared sublimation law's
 //! same-ISA/toolchain repeatability; neither path asserts cross-ISA equality.
 
+/// Hydrostatic standard-atmosphere profiles using this same gas-property owner.
+pub mod atmosphere;
+
 use fs_math::det;
 
 use crate::MaterialError;
