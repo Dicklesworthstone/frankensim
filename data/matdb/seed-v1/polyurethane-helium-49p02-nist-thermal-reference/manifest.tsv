@@ -1,0 +1,21 @@
+frankensim.matdb-manifest.v3
+pack_id	polyurethane-helium-49p02-nist-thermal-reference
+redistribution	permitted	Numerical fits from unmarked NIST public-information pages, with attribution and original sampled evaluations; reuse policy https://www.nist.gov/copyrights-disclaimers
+citation	National Institute of Standards and Technology, Cryogenic Material Properties: Polyurethane, helium-filled, source density label 49.02 kg/m3; https://trc.nist.gov/cryogenics/materials/Polyurethane/polyurethanerev.html; accessed 2026-10-28. NIST index identifies PET as Mylar: https://trc.nist.gov/cryogenics/materials/materialproperties.htm
+license	NIST-Public-Information-Attribution-Requested
+source	nist-thermal-reference	properties.tsv	material-tsv-v1
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	nominal_density	nominal-source-density	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	reference	engineering-reference-model	dimensional
+axis	family	source-family-nist-polyurethane-helium	dimensional
+axis	grade_known	source-grade-known	dimensional
+axis	process_known	source-processing-known	dimensional
+axis	moisture_known	source-moisture-condition-known	dimensional
+axis	pressure_known	source-pressure-known	dimensional
+axis	matched	source-specimens-matched	dimensional
+axis	orientation_known	source-orientation-known	dimensional
+axis	reference_density	source-reference-density	dimensional
+axis	cell_gas_helium	source-cell-gas-helium	dimensional
+axis	density_temperature_known	source-density-temperature-known	dimensional

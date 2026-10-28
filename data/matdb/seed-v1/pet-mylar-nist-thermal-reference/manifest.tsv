@@ -1,0 +1,16 @@
+frankensim.matdb-manifest.v3
+pack_id	pet-mylar-nist-thermal-reference
+redistribution	permitted	Numerical fits from unmarked NIST public-information pages, with attribution and original sampled evaluations; reuse policy https://www.nist.gov/copyrights-disclaimers
+citation	National Institute of Standards and Technology, Cryogenic Material Properties: Polyethylene Terephthalate (Mylar in the NIST index); https://trc.nist.gov/cryogenics/materials/PET/PET_rev.htm; accessed 2026-10-28. NIST index identifies PET as Mylar: https://trc.nist.gov/cryogenics/materials/materialproperties.htm
+license	NIST-Public-Information-Attribution-Requested
+source	nist-thermal-reference	properties.tsv	material-tsv-v1
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+axis	temperature	temperature	absolute-temperature
+axis	reference	engineering-reference-model	dimensional
+axis	family	source-family-nist-pet-mylar	dimensional
+axis	grade_known	source-grade-known	dimensional
+axis	process_known	source-processing-known	dimensional
+axis	moisture_known	source-moisture-condition-known	dimensional
+axis	pressure_known	source-pressure-known	dimensional
+axis	matched	source-specimens-matched	dimensional
+axis	orientation_known	source-orientation-known	dimensional
