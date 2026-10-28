@@ -914,11 +914,9 @@ Pa s/m³ under exp(-i omega t). The port list follows caller node-array order.
 Stable node/edge IDs are required. Assembly and LU use canonical integer indices
 sorted by those identities, not a hash-map traversal; reindexing nodes changes
 only the returned port permutation. Each edge consumes the existing chain owner
-at two independent algebraic boundary columns (+/- a local rho*c/S reference).
-This recovers its ABCD block without duplicating propagation/loss physics or
-altering any old chain/default/golden. Negative reference columns are algebraic
-probes, not active boundary loads in the solved network. The reciprocal
-Wronskian det(M)=1 is checked, then used to stamp equal off-diagonals.
+through its stable local-wave scattering composition and physical admittance
+stamp. No opposite signed load probes or global growing ABCD product are needed
+by the nodal solver. Propagation, loss and local chimney physics have one owner.
 
 `JunctionCorrections::ChainLocal` retains existing compact-hole corrections.
 `Disabled` retains each complete chimney and mouth, but removes its compact
@@ -947,10 +945,50 @@ consumed through its existing owner and explicit quadrature; legacy fits keep
 their own refusals. `NetworkResponse::drive` / `driving_point` require exactly
 one assignment for EVERY other external port, and the same `GasState` as the
 network solve. They return pressures and currents as well as input impedance;
-there is no omitted-port load, medium, wall or clock fallback. Uniform gas is
-explicit per solve; axial-field edges and time-domain characteristic networks
-are not claimed. Calls are synchronous and bounded; frequency sweeps can be
+there is no omitted-port load, medium, wall or clock fallback. The uniform API
+keeps its single explicit gas; the regional API below binds each edge separately.
+Continuous axial fields within an edge and time-domain characteristic networks
+are not claimed here. Calls are synchronous and bounded; frequency sweeps can be
 caller-chunked, with the same existing no-Cx boundary.
+
+### Regional material and exterior binding
+
+`NetworkMedia` binds a complete original `GasRecord` to every exact edge id,
+plus one independently specified homogeneous exterior. Mixture composition,
+NASA-9 query states and source-pack receipts remain in those records and in
+the resulting `NetworkResponse::media()`. Immutable shared ownership avoids
+copying all source records for each frequency. Duplicate, omitted and unknown
+edge ids, incoherent media or unequal static pressures refuse before assembly.
+No temperature, composition or transport coefficient is inferred or averaged.
+
+`network_port_impedance_regional` uses the same nodal assembly and dense solve
+as `network_port_impedance`. Each edge's own rho, c, gamma, viscosity and thermal
+transport feed the existing wave/viscothermal owner. Embedded chimneys retain
+their edge's interior gas while their exposed mouths receive the declared
+exterior. All graph radiation and porous loads use that same exterior. A flanged
+mouth also retains its actual incident interior gas in the original higher-mode
+Schur load. Multiple unlike incident gases at one mouth do not define one modal
+port plane and refuse that load; an explicit finite/coupled boundary remains
+available. Exact thin-wall Levine–Schwinger radiation retains its single-fluid
+domain and refuses an interior/exterior contrast rather than reinterpreting it.
+`drive_bound` and `drive_coupled_bound` retain it for deferred labelled-port
+loads. Pressure and volume flow are continuous at the original graph junctions;
+there is no added reflection law or material-dependent output gain.
+
+This is a stationary, pressure-matched gas field. Mixing, diffusion, mean flow,
+moving interfaces and heat/species evolution are absent. Each edge is spatially
+uniform; callers may explicitly subdivide geometry into edges. Cross-edge
+exterior interaction still requires the existing full `CoupledTermination`
+matrix from its physical producer; a regional binding does not supply one.
+Existing chain-local compact-hole and radiation validity limits remain in force.
+
+`tests/network_media.rs` defines seven focused regressions: uniform bit parity
+and original-record retention; independent serial/parallel branch solutions
+with N2/O2, He and CO2; separate interior/exterior and deferred load equivalence;
+embedded chimney equivalence; reciprocity, incoming power and lossless pressure
+scaling; ambiguous or unsupported modal mouth media; and invalid
+identity/pressure/coherence refusal. These definitions and
+source checks are not native numerical or experimental validation.
 
 `NetworkLoad::PorousRigid` uses the existing `PorousGasLaw` and JCA(L)
 material owner in both graph-boundary assembly and labelled-port termination.

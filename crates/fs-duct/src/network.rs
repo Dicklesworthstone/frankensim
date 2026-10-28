@@ -11,6 +11,9 @@ use std::collections::BTreeMap;
 
 use crate::{Duct, DuctError, HoleState, LossModel, Segment, TabulatedLoad, Termination};
 
+mod media;
+pub use media::NetworkMedia;
+
 #[cfg(test)]
 mod tests;
 
@@ -239,6 +242,8 @@ pub struct NetworkTwoPort {
 #[derive(Debug, Clone)]
 pub struct NetworkResponse {
     gas: GasState,
+    media: Option<NetworkMedia>,
+    port_gases: Vec<Option<GasState>>,
     /// Frequency [rad/s].
     pub omega: f64,
     /// Port labels in the caller's node-array order.
@@ -269,7 +274,8 @@ pub struct NetworkDriveResponse {
 pub struct PortTermination {
     /// Label in NetworkResponse::ports.
     pub label: String,
-    /// Boundary physics, resolved using the same gas and frequency as the graph.
+    /// Boundary physics, resolved at the graph frequency in its bound exterior.
+    /// On the uniform API this is the graph's original gas.
     pub load: NetworkLoad,
 }
 
@@ -356,7 +362,8 @@ fn finite_impedance(z: C64) -> Result<C64, DuctError> {
 
 fn load_impedance(
     load: &NetworkLoad,
-    gas: &GasState,
+    interior: Option<&GasState>,
+    exterior: &GasState,
     omega: f64,
 ) -> Result<Option<C64>, DuctError> {
     match load {
@@ -370,26 +377,54 @@ fn load_impedance(
             if !radius.is_finite() || *radius <= 0.0 {
                 return Err(bad("network mouth radius must be positive and finite"));
             }
-            Ok(Some(finite_impedance(crate::compact_radiation_impedance(
+            if matches!(termination, Termination::Closed | Termination::IdealOpen) {
+                return Err(bad("network radiation load needs a radiating termination"));
+            }
+            let gas = match interior {
+                Some(gas) => gas,
+                None if matches!(
+                    termination,
+                    Termination::FlangedOpen | Termination::UnflangedThinWall { .. }
+                ) =>
+                {
+                    return Err(bad(
+                        "network radiation mouth needs one unambiguous incident gas at its reference plane",
+                    ));
+                }
+                None => exterior,
+            };
+            if matches!(termination, Termination::UnflangedThinWall { .. }) && gas != exterior {
+                return Err(bad(
+                    "exact thin-wall radiation requires the same gas inside and outside the mouth",
+                ));
+            }
+            let (z, _) = crate::exterior::termination_impedance(
                 *termination,
                 gas,
+                exterior,
                 *radius,
                 omega,
-            )?)?))
+            )?;
+            Ok(Some(finite_impedance(z.ok_or_else(|| {
+                bad("network radiation load has no impedance")
+            })?)?))
         }
         NetworkLoad::Tabulated(table) => Ok(Some(finite_impedance(table.z_at(omega)?)?)),
-        NetworkLoad::PorousRigid { material, thickness_m, area_m2 } => {
+        NetworkLoad::PorousRigid {
+            material,
+            thickness_m,
+            area_m2,
+        } => {
             if !area_m2.is_finite() || *area_m2 <= 0.0 {
                 return Err(bad("porous boundary area must be positive and finite"));
             }
-            let surface = material.surface_impedance_rigid(gas, omega, *thickness_m)
+            let surface = material
+                .surface_impedance_rigid(exterior, omega, *thickness_m)
                 .map_err(|_| bad("porous boundary gas, geometry or material support refused"))?;
             // The material owner uses exp(+i wt); the network uses exp(-i wt).
             // U = A v, so the pressure/volume-flow load is conj(Z_surface)/A.
             let load = C64::new(surface.re / *area_m2, -surface.im / *area_m2);
-            if (surface.re != 0.0 && load.re == 0.0)
-                || (surface.im != 0.0 && load.im == 0.0)
-            {
+            if (surface.re != 0.0 && load.re == 0.0) || (surface.im != 0.0 && load.im == 0.0) {
                 return Err(bad("porous boundary impedance conversion underflows"));
             }
             Ok(Some(finite_impedance(load)?))
@@ -462,7 +497,23 @@ pub fn network_chain_admittance(
     loss: LossModel,
     corrections: JunctionCorrections,
 ) -> Result<([C64; 4], f64, f64), DuctError> {
+    network_chain_admittance_in_exterior(duct, gas, gas, omega, loss, corrections)
+}
+
+/// The original stable chain stamp with independent exterior gas at embedded
+/// open chimneys. Propagation and closed chimneys retain the interior gas.
+/// The two media must have the same static pressure; neither is averaged.
+pub fn network_chain_admittance_in_exterior(
+    duct: &Duct,
+    interior: &GasState,
+    exterior: &GasState,
+    omega: f64,
+    loss: LossModel,
+    corrections: JunctionCorrections,
+) -> Result<([C64; 4], f64, f64), DuctError> {
+    let gas = interior;
     validate_medium(gas, omega)?;
+    crate::exterior::admit(interior, exterior)?;
     if duct.segments.len() > MAX_NETWORK_SEGMENTS {
         return Err(bad("network segment cap exceeded"));
     }
@@ -470,12 +521,13 @@ pub fn network_chain_admittance(
         maximum_condition: MAX_NETWORK_CONDITION,
         ..crate::compose::ComposeOptions::default()
     };
-    let chain = crate::compose::duct_chain(
+    let (chain, _) = crate::compose::duct_chain_in_exterior(
         duct,
         gas,
+        exterior,
         omega,
         loss,
-        None,
+        crate::WallModel::Rigid,
         options,
         corrections == JunctionCorrections::ChainLocal,
         || false,
@@ -723,15 +775,63 @@ pub fn network_port_impedance(
     omega: f64,
     loss: LossModel,
 ) -> Result<NetworkResponse, DuctError> {
+    network_port_impedance_bound(net, gas, None, omega, loss)
+}
+
+/// Solve the same graph with an exact edge-id gas binding and an independent
+/// homogeneous exterior. All branch propagation, viscothermal loss, embedded
+/// chimneys and boundary loads consume their actual media in the original
+/// nodal solve. Junction pressure/volume flow remain continuous.
+///
+/// Coupling between external mouths on different edges still needs an explicit
+/// [`CoupledTermination`]; a gas binding does not invent a radiation matrix.
+pub fn network_port_impedance_regional(
+    net: &DuctNetwork,
+    media: &NetworkMedia,
+    omega: f64,
+    loss: LossModel,
+) -> Result<NetworkResponse, DuctError> {
+    media.validate_for(net)?;
+    network_port_impedance_bound(net, media.exterior_gas(), Some(media), omega, loss)
+}
+
+fn network_port_impedance_bound(
+    net: &DuctNetwork,
+    exterior: &GasState,
+    media: Option<&NetworkMedia>,
+    omega: f64,
+    loss: LossModel,
+) -> Result<NetworkResponse, DuctError> {
     net.validate()?;
-    validate_medium(gas, omega)?;
+    validate_medium(exterior, omega)?;
+    // A pressure node may join unlike gases, but that does not define the
+    // single interior modal basis required by a flanged mouth's Schur load.
+    // Retain absence explicitly; finite/coupled loads remain admissible there.
+    let local_gas = |node: usize| -> Option<GasState> {
+        let Some(media) = media else {
+            return Some(*exterior);
+        };
+        let mut gas = None;
+        for edge in &net.edges {
+            if edge.from == node || edge.to == node {
+                let current = *media
+                    .edge_gas(&edge.id)
+                    .expect("complete edge identities admitted");
+                if gas.is_some_and(|previous| previous != current) {
+                    return None;
+                }
+                gas = Some(current);
+            }
+        }
+        gas
+    };
     let mut order: Vec<usize> = (0..net.nodes.len()).collect();
     order.sort_unstable_by(|&a, &b| net.nodes[a].id.cmp(&net.nodes[b].id));
     let mut ground = vec![false; net.nodes.len()];
     let mut loads = vec![None; net.nodes.len()];
     for &node in &order {
         if let NodeBoundary::Termination(load) = &net.nodes[node].boundary {
-            loads[node] = load_impedance(load, gas, omega)?;
+            loads[node] = load_impedance(load, local_gas(node).as_ref(), exterior, omega)?;
             ground[node] = loads[node].is_some_and(|z| z == C64::ZERO);
         }
     }
@@ -777,8 +877,19 @@ pub fn network_port_impedance(
     let mut edge_conditions = Vec::with_capacity(edges.len());
     let mut shear = f64::INFINITY;
     for e in edges {
-        let (stamp, condition, edge_shear) =
-            network_chain_admittance(&e.duct, gas, omega, loss, e.corrections)?;
+        let interior = media.map_or(exterior, |bound| {
+            bound
+                .edge_gas(&e.id)
+                .expect("complete edge identities admitted")
+        });
+        let (stamp, condition, edge_shear) = network_chain_admittance_in_exterior(
+            &e.duct,
+            interior,
+            exterior,
+            omega,
+            loss,
+            e.corrections,
+        )?;
         let endpoint = |node: usize, end: EdgeEnd| {
             if matches!(net.nodes[node].boundary, NodeBoundary::JunctionMultiport(_)) {
                 terminal_slots
@@ -822,7 +933,9 @@ pub fn network_port_impedance(
         }
     }
     Ok(NetworkResponse {
-        gas: *gas,
+        gas: *exterior,
+        media: media.cloned(),
+        port_gases: port_nodes.iter().map(|&node| local_gas(node)).collect(),
         omega,
         ports,
         z,
@@ -833,6 +946,36 @@ pub fn network_port_impedance(
 }
 
 impl NetworkResponse {
+    /// Complete original regional records, retained with the solved operator.
+    /// The uniform API returns `None` and retains its original numerical gas.
+    #[must_use]
+    pub const fn media(&self) -> Option<&NetworkMedia> {
+        self.media.as_ref()
+    }
+
+    /// Terminate the response in its already-bound exterior. Gas-dependent
+    /// radiation and porous loads cannot acquire a different atmosphere after
+    /// the interior and embedded chimneys have been assembled.
+    pub fn drive_bound(
+        &self,
+        active: &str,
+        loads: &[PortTermination],
+    ) -> Result<NetworkDriveResponse, DuctError> {
+        self.drive_with(active, loads, None, &self.gas)
+    }
+
+    /// [`Self::drive_bound`] with a supplied full exterior impedance matrix.
+    /// The matrix producer remains responsible for its source medium and
+    /// geometry; the original passivity/frequency/port checks remain mandatory.
+    pub fn drive_coupled_bound(
+        &self,
+        active: &str,
+        loads: &[PortTermination],
+        coupled: &CoupledTermination,
+    ) -> Result<NetworkDriveResponse, DuctError> {
+        self.drive_with(active, loads, Some(coupled), &self.gas)
+    }
+
     /// Terminate EVERY other labelled port explicitly, then return the driving
     /// point p/U at `active`. Missing/duplicate/unknown terminations refuse.
     pub fn driving_point(
@@ -886,6 +1029,7 @@ impl NetworkResponse {
             .position(|s| s == active)
             .ok_or(bad("unknown network port label"))?;
         if self.z.len() != n * n
+            || self.port_gases.len() != n
             || n == 0
             || n > MAX_NETWORK_PORTS
             || self.z.iter().any(|&z| !finite(z))
@@ -928,7 +1072,8 @@ impl NetworkResponse {
                 return Err(bad("duplicate or active-port termination"));
             }
             seen[index] = true;
-            resolved[index] = load_impedance(&load.load, gas, self.omega)?;
+            resolved[index] =
+                load_impedance(&load.load, self.port_gases[index].as_ref(), gas, self.omega)?;
         }
         if seen.iter().any(|&v| !v) {
             return Err(bad("network port termination omitted"));
