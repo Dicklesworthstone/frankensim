@@ -20,6 +20,9 @@ use fs_qty::QtyAny;
 use fs_scenario::Violation;
 
 use crate::FSIM_VERSION;
+
+#[path = "wire/enclosure.rs"]
+mod enclosure;
 use crate::spec::{
     AirflowLeakage, Budgets, ConductionRadiation, ConductionRegion, ConductionSetup,
     ConductionTransient, ConsequenceClass, Cooling, DecisionGate, DefaultReceipt, EntityDecl,
@@ -702,6 +705,10 @@ fn lower_conduction(setup: &ConductionSetup) -> Result<Node, ProjectError> {
     if let Some(radiation) = &setup.radiation {
         declaration.push(kw("radiation"));
         declaration.push(lower_radiation(radiation)?);
+    }
+    if let Some(radiation) = &setup.enclosure_radiation {
+        declaration.push(kw("enclosure-radiation"));
+        declaration.push(enclosure::lower(radiation)?);
     }
     if let Some(transient) = &setup.transient {
         let mut capacities = vec![sym("capacities")];
@@ -2592,7 +2599,7 @@ fn read_conduction(body: &[Node], out: &mut Vec<Violation>) -> Option<Conduction
     let pairs = read_pairs(
         body,
         "conduction",
-        &["adiabatic-remainder", "regions", "boundaries", "radiation", "transient"],
+        &["adiabatic-remainder", "regions", "boundaries", "radiation", "enclosure-radiation", "transient"],
         out,
     );
     let adiabatic_remainder = expect_boolean(
@@ -2835,6 +2842,8 @@ fn read_conduction(body: &[Node], out: &mut Vec<Violation>) -> Option<Conduction
         boundaries,
         adiabatic_remainder,
         radiation: field(&pairs, "radiation").and_then(|node| read_radiation(node, out)),
+        enclosure_radiation: field(&pairs, "enclosure-radiation")
+            .and_then(|node| enclosure::read(node, out)),
         transient: field(&pairs, "transient").and_then(|node| read_transient(node, out)),
     })
 }

@@ -67,6 +67,7 @@ pub(super) fn requested(spec: &ProjectSpec) -> Result<bool, SolveRefusal> {
         .ok_or_else(|| bad("the volume-mean bound requires a conduction model"))?;
     if setup.transient.is_some()
         || setup.radiation.is_some()
+        || setup.enclosure_radiation.is_some()
         || setup.boundaries.iter().any(|b| {
             matches!(
                 b.condition,

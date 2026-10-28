@@ -59,7 +59,9 @@ pub const STUDY_FSIM_VERSION: u32 = 1;
 /// Version 15 adds explicit regional initialization from each declared
 /// enthalpy state. Existing temperature quantities remain uniform assertions;
 /// migration never creates temperature differences between regions.
-pub const FSIM_VERSION: u32 = 15;
+/// Version 16 adds explicit closed-enclosure gray-diffuse radiation. Older
+/// projects migrate with no enclosure, preserving every ambient reservoir.
+pub const FSIM_VERSION: u32 = 16;
 
 pub use assignment::{
     ConductionInterfaceLimits, ConductionInterfaceResolution, ConductionSourceFace,
@@ -86,6 +88,7 @@ pub use migration::{
     parse_sexpr_migrating,
 };
 pub use spec::{
+    ConductionEnclosure, EnclosureRadiatingSurface, EnclosureViewFactorEvidence,
     AirflowLeakage, Budgets, ConductionRadiation, ConductionRegion, ConductionSetup,
     ConductionTransient, ConsequenceClass, Cooling, DecisionGate, DefaultReceipt, EntityDecl,
     Envelope, Fan, FanCurveDecl, FanCurvePoint, FanToleranceBasis, GeometryArtifact,

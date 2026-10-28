@@ -327,6 +327,7 @@ fn stage_summary(stage: SolveStage, receipt: &JsonValue) -> Vec<(String, String)
                     &["adaptive", "last_estimated_change_k"][..],
                 ),
                 ("adaptive_scope", &["adaptive", "no_claim"][..]),
+                ("radiation_model", &["radiation", "model"][..]),
                 ("radiative_out_w", &["radiation", "radiative_out_w"][..]),
                 ("convective_out_w", &["radiation", "convective_out_w"][..]),
                 ("radiative_magnitude_share", &["radiation", "radiative_magnitude_share"][..]),

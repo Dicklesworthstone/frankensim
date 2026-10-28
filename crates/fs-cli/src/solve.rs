@@ -238,7 +238,10 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// not resume under these changed physical and derivative semantics.
 /// Version 81 admits native transient spatial ladders with one shared forward
 /// time-step allowance and explicit combined spatial/temporal error evidence.
-pub const SOLVE_DRIVER_VERSION: u32 = 81;
+/// Version 82 connects native closed gray-diffuse enclosure radiation to the
+/// shared coupled solver, original convective air exchange and retained reports.
+/// Frozen-enclosure derivative and algebraic-bound claims remain refused.
+pub const SOLVE_DRIVER_VERSION: u32 = 82;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -6684,6 +6687,7 @@ fn conduction_solve_receipt(
         // The published solve bounds its maximum's roundoff; the propagation's
         // perturbed re-solves (which arrive with a flow override) do not.
         let roundoff_wanted = !transient_requested
+            && setup.enclosure_radiation.is_none()
             && flow_override.is_none() && temperature_maximum_region(spec).is_some();
         // One solid solve on one rung of the h-ladder. Everything below the
         // volumetric audit depends on the rung's complex (element materials,

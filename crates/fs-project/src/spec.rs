@@ -16,6 +16,10 @@ use fs_io::MeshSelector;
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::{EntityDeclaration, EntityId, EntityKind, InterfacePair, Violation};
 
+#[path = "spec/enclosure.rs"]
+mod enclosure;
+pub use enclosure::{ConductionEnclosure, EnclosureRadiatingSurface, EnclosureViewFactorEvidence};
+
 /// SI dimension vectors this schema checks against.
 pub mod dims {
     use fs_qty::Dims;
@@ -906,6 +910,9 @@ pub struct ConductionSetup {
     /// Absence preserves the non-radiating model; no emissivity or ambient
     /// reservoir is inferred from a bulk conductivity card or the envelope.
     pub radiation: Option<ConductionRadiation>,
+    /// Optional closed surface-to-surface irradiation (schema v16), distinct
+    /// from external reservoirs. It does not anchor absolute temperature.
+    pub enclosure_radiation: Option<ConductionEnclosure>,
     /// Optional finite-time solve. Absence retains the steady model.
     pub transient: Option<ConductionTransient>,
 }
@@ -2111,6 +2118,9 @@ impl ProjectSpec {
                 }
                 if let Some(radiation) = &conduction.radiation {
                     Self::check_radiation(conduction, radiation, out);
+                }
+                if let Some(enclosure) = &conduction.enclosure_radiation {
+                    enclosure::validate(conduction, enclosure, out);
                 }
                 if let Some(transient) = &conduction.transient {
                     Self::check_transient(conduction, transient, out);

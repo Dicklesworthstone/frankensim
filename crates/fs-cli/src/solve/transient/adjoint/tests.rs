@@ -26,8 +26,8 @@ impl Default for Inputs {
 }
 
 fn project(input: Inputs, output: Option<&str>) -> ProjectSpec {
-    let mut spec = fs_project::parse_sexpr(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
-        "/../../data/reference-project/cooling-transient.fsim"))).unwrap().spec;
+    let mut spec = fs_project::parse_sexpr_migrating(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+        "/../../data/reference-project/cooling-transient.fsim"))).unwrap().decoded.spec;
     spec.power.as_mut().unwrap()[0].watts.value = input.power;
     spec.power.as_mut().unwrap()[0].duty = 1.0;
     let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();

@@ -295,6 +295,7 @@ fn reference_project() -> ProjectSpec {
                 ],
                 adiabatic_remainder: false,
                 radiation: None,
+                enclosure_radiation: None,
                 transient: None,
             }),
             fan_efficiency: None,
@@ -3243,3 +3244,6 @@ fn g0_v14_migration_preserves_uniform_initial_state_and_refuses_regional_payload
     let hidden = down(&print_sexpr(&regional_initial_project()).unwrap());
     assert_eq!(parse_sexpr_migrating(&hidden).unwrap_err().code, "fsim-migration-payload");
 }
+
+#[path = "project/enclosure.rs"]
+mod enclosure;

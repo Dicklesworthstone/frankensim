@@ -3,11 +3,12 @@ use fs_project::{TransientEnthalpy, TransientPowerStep, TransientRegionPower, sp
 use fs_qty::QtyAny;
 
 fn base() -> ProjectSpec {
-    fs_project::parse_sexpr(include_str!(concat!(
+    fs_project::parse_sexpr_migrating(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../data/reference-project/cooling-transient.fsim"
     )))
     .unwrap()
+    .decoded
     .spec
 }
 

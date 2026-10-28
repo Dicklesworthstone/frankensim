@@ -18,11 +18,13 @@ use crate::cards::CardPackSet;
 use crate::import::json_string;
 
 pub(super) mod adaptive;
+mod enclosure;
 
 pub(super) struct LoweredRadiation {
     pub(super) patches: Vec<AmbientRadiationPatch>,
     pub(super) config: AmbientRadiationConfig,
     surfaces: Vec<SurfaceSource>,
+    enclosure: Option<enclosure::LoweredEnclosure>,
 }
 
 struct SurfaceSource {
@@ -34,25 +36,28 @@ struct SurfaceSource {
 impl LoweredRadiation {
     /// Immutable user-facing identities in the same order as the bound patches.
     pub(super) fn surface_labels(&self) -> impl ExactSizeIterator<Item = (&str, &str)> {
-        self.surfaces.iter().map(|source| (source.name.as_str(), source.target.as_str()))
+        self.surfaces
+            .iter()
+            .map(|source| (source.name.as_str(), source.target.as_str()))
     }
 }
 
 pub(super) fn lower(
-    _spec: &ProjectSpec,
+    spec: &ProjectSpec,
     setup: &ConductionSetup,
     cards: &CardPackSet,
 ) -> Result<Option<LoweredRadiation>, SolveRefusal> {
+    if setup.enclosure_radiation.is_some() {
+        return enclosure::lower(spec, setup, cards).map(Some);
+    }
     let Some(declaration) = setup.radiation.as_ref() else {
         return Ok(None);
     };
-    let library = cards.library();
     let mut patches = Vec::with_capacity(declaration.surfaces.len());
     let mut surfaces = Vec::with_capacity(declaration.surfaces.len());
     for surface in &declaration.surfaces {
         if !setup.boundaries.iter().any(|boundary| {
-            boundary.target == surface.target
-                && boundary.condition.supports_ambient_radiation()
+            boundary.target == surface.target && boundary.condition.supports_ambient_radiation()
         }) {
             return Err(conduction_error(
                 "cli-solve-conduction-radiation-boundary",
@@ -63,29 +68,13 @@ pub(super) fn lower(
                 "declare convection or exactly zero outward heat flux on this exterior target; no fictitious convection is needed for radiation-only exchange",
             ));
         }
-        let card = library.material(&surface.card).ok_or_else(|| {
-            conduction_error(
-                "cli-solve-conduction-radiation-card",
-                format!(
-                    "surface `{}` references absent emissivity card {}",
-                    surface.name, surface.card
-                ),
-                "supply the exact immutable material pack containing the surface emissivity claim",
-            )
-        })?;
-        let emissivity = match surface.claim.as_deref() {
-            Some(pin) => SurfaceEmissivity::from_card_pinned(
-                &surface.name, card, surface.query_temperature.value,
-                parse_claim_id(pin, &format!("radiating surface `{}`", surface.name))?,
-            ),
-            None => SurfaceEmissivity::from_card(
-                &surface.name, card, surface.query_temperature.value, SelectionPolicy::SingleClaimOnly,
-            ),
-        }.map_err(|error| conduction_error(
-            "cli-solve-conduction-radiation-card",
-            format!("surface `{}` emissivity query refused: {error}", surface.name),
-            "provide an in-domain dimensionless hemispherical-total-emissivity claim in (0, 1], with an exact claim pin when selection is ambiguous",
-        ))?;
+        let emissivity = resolve_emissivity(
+            &surface.name,
+            &surface.card,
+            surface.claim.as_deref(),
+            surface.query_temperature.value,
+            cards,
+        )?;
         patches.push(
             AmbientRadiationPatch::new(
                 &surface.target,
@@ -119,7 +108,39 @@ pub(super) fn lower(
             relaxation: declaration.relaxation,
         },
         surfaces,
+        enclosure: None,
     }))
+}
+
+/// Both native radiation models resolve the same immutable emissivity claim.
+fn resolve_emissivity(
+    name: &str,
+    identity: &str,
+    claim: Option<&str>,
+    temperature_k: f64,
+    cards: &CardPackSet,
+) -> Result<SurfaceEmissivity, SolveRefusal> {
+    let library = cards.library();
+    let card = library.material(identity).ok_or_else(|| {
+        conduction_error(
+            "cli-solve-conduction-radiation-card",
+            format!("surface {name} references absent emissivity card {identity}"),
+            "supply the exact immutable material pack containing the surface emissivity claim",
+        )
+    })?;
+    match claim {
+        Some(pin) => SurfaceEmissivity::from_card_pinned(
+            name, card, temperature_k,
+            parse_claim_id(pin, &format!("radiating surface {name}"))?,
+        ),
+        None => SurfaceEmissivity::from_card(
+            name, card, temperature_k, SelectionPolicy::SingleClaimOnly,
+        ),
+    }.map_err(|error| conduction_error(
+        "cli-solve-conduction-radiation-card",
+        format!("surface {name} emissivity query refused: {error}"),
+        "provide an in-domain dimensionless hemispherical-total-emissivity claim in (0, 1], with an exact claim pin when selection is ambiguous",
+    ))
 }
 
 pub(super) struct SolidSolution {
@@ -127,6 +148,7 @@ pub(super) struct SolidSolution {
     convective_fluxes: Option<Vec<RobinFlux>>,
     convective_out: Option<f64>,
     radiation: Option<AmbientRadiationReport>,
+    enclosure: Option<enclosure::EnclosureResult>,
     /// The exact combined convective + radiative Robin partition behind a
     /// radiating field; the roundoff bound must see this operator.
     pub(super) combined_boundary: Option<fs_conduction::ThermalBoundary>,
@@ -140,6 +162,7 @@ impl SolidSolution {
             convective_fluxes: None,
             convective_out: None,
             radiation: None,
+            enclosure: None,
             combined_boundary: None,
         }
     }
@@ -159,6 +182,7 @@ impl SolidSolution {
             convective_fluxes: Some(convective_robin_fluxes),
             convective_out: Some(convective_out_w),
             radiation: Some(radiation),
+            enclosure: None,
             combined_boundary: Some(combined_boundary),
         }
     }
@@ -166,8 +190,9 @@ impl SolidSolution {
     /// Retain the producer's immutable laws, never infer emissivity from a
     /// rounded receipt or a difference of combined coefficients.
     pub(super) fn radiation_patches(&self) -> Vec<AmbientRadiationPatch> {
-        self.radiation.as_ref().map_or_else(Vec::new, |report|
-            report.patches.iter().map(|row| row.patch.clone()).collect())
+        self.radiation.as_ref().map_or_else(Vec::new, |report| {
+            report.patches.iter().map(|row| row.patch.clone()).collect()
+        })
     }
 
     pub(super) fn convective_robin_fluxes(&self) -> &[RobinFlux] {
@@ -185,6 +210,14 @@ impl SolidSolution {
         &self,
         lowering: Option<&LoweredRadiation>,
     ) -> Result<Option<String>, SolveRefusal> {
+        if let Some(report) = &self.enclosure {
+            return report
+                .receipt(
+                    lowering.expect("enclosure solution retains its declaration"),
+                    self.convective_out_w(),
+                )
+                .map(Some);
+        }
         let Some(report) = &self.radiation else {
             return Ok(None);
         };
@@ -299,12 +332,15 @@ pub(super) fn measure_sensitivity(
     else {
         return Ok(None);
     };
-    if setup.radiation.is_none() {
+    if setup.radiation.is_none() && setup.enclosure_radiation.is_none() {
         return Ok(None);
     }
     if setup.transient.is_none()
         && setup.boundaries.iter().all(|boundary| {
-            matches!(boundary.condition, ThermalBoundaryCondition::HeatFlux { .. })
+            matches!(
+                boundary.condition,
+                ThermalBoundaryCondition::HeatFlux { .. }
+            )
         })
     {
         // Removing the only temperature anchor has no uniquely defined
@@ -346,6 +382,13 @@ pub(super) fn measure_sensitivity(
         .as_mut()
         .unwrap()
         .radiation = None;
+    base.cooling
+        .as_mut()
+        .unwrap()
+        .conduction
+        .as_mut()
+        .unwrap()
+        .enclosure_radiation = None;
     let comparison = match solve(&base) {
         Ok(Some(off_k)) => match on {
             Some(on_k) => RadiationSensitivity::Measured { on_k, off_k },
@@ -382,6 +425,9 @@ pub(super) fn solve(
     radiation: Option<&LoweredRadiation>,
 ) -> Result<SolidSolution, ConductionError> {
     if let Some(radiation) = radiation {
+        if radiation.enclosure.is_some() {
+            return enclosure::solve(cx, problem, interfaces, config, radiation);
+        }
         let solved = fs_conduction::solve_with_ambient_radiation(
             cx,
             problem,
@@ -409,6 +455,7 @@ pub(super) fn solve(
             convective_fluxes: None,
             convective_out: None,
             radiation: None,
+            enclosure: None,
             combined_boundary: None,
         })
     }

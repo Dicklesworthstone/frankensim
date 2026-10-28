@@ -2441,3 +2441,47 @@ publication.
   proven claim, and the driver's own kill -9 drill (resume to identical
   content root after a mid-transaction kill) is owed with the first
   physics-bearing stage.
+
+### Native closed gray-diffuse enclosure radiation
+
+Schema 16 adds optional `:enclosure-radiation (enclosure-radiation ...)` to
+the existing conduction declaration. Ordered, named surfaces each select an
+existing positive convective boundary and an immutable hemispherical-total
+emissivity claim. An explicit square view-factor matrix carries declared
+analytic or external-QMC provenance. Native binding uses the actual areas of
+the exact selected mesh faces to check row closure and reciprocity on every
+uniform mesh rung. Declared provenance is retained; these checks do not
+reconstruct visibility or validate that the matrix describes the geometry.
+
+Base and uniform-ladder steady solves call the shared
+`fs-conduction::radiation::solve_with_convective_gray_diffuse_enclosure`
+owner, retaining heterogeneous `k(T)`, thermal interfaces, prescribed or
+card-derived convection, and the existing natural/airflow coupling loops.
+Only original convective fluxes enter air transport. Mutual radiative exchange
+is retained separately, including applied and freshly evaluated patch heat,
+radiosity, closed-enclosure heat balance, source card identities, and the full
+nonlinear free residual. The declared heat allowance additionally gates patch
+mismatch, radiosity residual and the convection/radiation decomposition.
+
+The native report exposes the radiation model, and QoI propagation retains
+the existing radiation-on/off model sensitivity without turning that
+comparison into an omitted-physics bound. Temperature-dependent emissivity,
+transient enclosure trajectories, enclosure adjoints and adaptive goals, and
+continuum mean bounds remain unsupported. Those requests refuse explicitly;
+the driver never performs a frozen-enclosure algebraic goal correction or
+presents its fixed-load linear roundoff calculation as an enclosure bound.
+All numerical results remain Estimated.
+
+G1/G3/G5 regressions in `tests/solve/radiation_product/enclosure_product.rs`
+use an independent two-gray-surface exchange formula, original convection
+and source-power balance, actual spatial refinement, deterministic retained
+fields/reports, and unequal-area reciprocity refusal. The manufactured
+two-patch matrix exercises algebraic enclosure exchange and does not claim
+finite-geometry view-factor validation.
+
+The runnable native declaration is
+`data/reference-project/cooling-enclosure.fsim`. It uses `plate.stl` and the
+existing `aa6061.fsmcdpk` and `gray-surface.fsmcdpk` packs through the ordinary
+validate/import/solve commands. Its two equal-area patches use a deliberately
+manufactured matrix; this example demonstrates the native coupling and does
+not supply measured geometry or material validation.

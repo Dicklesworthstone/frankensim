@@ -599,6 +599,7 @@ fn conduction_fixture_project(seed_root: u64, bytes: &[u8]) -> ProjectSpec {
         }],
         adiabatic_remainder: false,
         radiation: None,
+        enclosure_radiation: None,
         transient: None,
     });
     spec
@@ -680,6 +681,7 @@ fn multi_region_contact_project() -> ProjectSpec {
         // adiabatic remainder until ThermalInterfaces binds them.
         adiabatic_remainder: true,
         radiation: None,
+        enclosure_radiation: None,
         transient: None,
     });
     spec
@@ -1134,7 +1136,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 81,
+        SOLVE_DRIVER_VERSION, 82,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 

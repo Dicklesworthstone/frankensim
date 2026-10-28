@@ -84,6 +84,9 @@ pub enum MigrationRule {
     /// Version 14 gains explicitly regional initial temperatures derived from
     /// authored enthalpy states. Historical uniform quantities stay uniform.
     TransientRegionalInitialTemperatureV15,
+    /// Version 15 gains explicit closed-enclosure surface exchange. Historical
+    /// radiation remains attached to its original external reservoirs.
+    ConductionEnclosureRadiationV16,
 }
 
 impl MigrationRule {
@@ -112,6 +115,7 @@ impl MigrationRule {
             MigrationRule::TransientEnthalpyV13 => "transient-enthalpy-v13",
             MigrationRule::TransientPhaseConductivityV14 => "transient-phase-conductivity-v14",
             MigrationRule::TransientRegionalInitialTemperatureV15 => "transient-regional-initial-temperature-v15",
+            MigrationRule::ConductionEnclosureRadiationV16 => "conduction-enclosure-radiation-v16",
         }
     }
 
@@ -134,6 +138,7 @@ impl MigrationRule {
             MigrationRule::TransientEnthalpyV13 => 12,
             MigrationRule::TransientPhaseConductivityV14 => 13,
             MigrationRule::TransientRegionalInitialTemperatureV15 => 14,
+            MigrationRule::ConductionEnclosureRadiationV16 => 15,
         }
     }
 }
@@ -248,6 +253,7 @@ pub fn migrate_envelope(
         12 => MigrationRule::TransientEnthalpyV13,
         13 => MigrationRule::TransientPhaseConductivityV14,
         14 => MigrationRule::TransientRegionalInitialTemperatureV15,
+        15 => MigrationRule::ConductionEnclosureRadiationV16,
         v if v == FSIM_VERSION => {
             return Err(ProjectError {
                 code: "fsim-migration-not-needed",
@@ -292,7 +298,8 @@ pub fn migrate_envelope(
         | MigrationRule::TransientPowerSchedulesV12
         | MigrationRule::TransientEnthalpyV13
         | MigrationRule::TransientPhaseConductivityV14
-        | MigrationRule::TransientRegionalInitialTemperatureV15 => {
+        | MigrationRule::TransientRegionalInitialTemperatureV15
+        | MigrationRule::ConductionEnclosureRadiationV16 => {
             // The document's internal `versions.schema` field must move with
             // the envelope: the validator admits only the current schema.
             // The rewrite is exactly these two byte strings, never a
@@ -313,6 +320,16 @@ pub fn migrate_envelope(
         }
     };
     let decoded = parse_sexpr(&migrated)?;
+    if declared_version > 0 && declared_version < 16
+        && decoded.spec.cooling.as_ref().and_then(|cooling| cooling.conduction.as_ref())
+            .is_some_and(|setup| setup.enclosure_radiation.is_some())
+    {
+        return Err(ProjectError {
+            code: "fsim-migration-payload",
+            detail: format!("schema version {declared_version} predates closed-enclosure radiation but its payload declares it"),
+            hint: "declare enclosure exchange in a current-version project; migration preserves every historical radiation reservoir".into(),
+        });
+    }
     if declared_version > 0
         && declared_version < 7
         && decoded
