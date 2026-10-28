@@ -180,6 +180,43 @@ refusals, G3 step-subdivision invariance and G5 checkpoint replay. These are
 synthetic numerical verifications; they do not close the varying-normal-load
 or source/consumer requirements of `frankensim-irp-v5-instrument-realism-pexfp.147`.
 
+### Hertz--Mindlin normal loading, unloading and recontact
+
+`mindlin::loading::HertzMindlinContact` supplies the next explicit load-path
+rung. Immutable curvature, both elastic bodies and a local Coulomb coefficient
+determine the Hertz radius/indentation and the original fixed-load shear law.
+`normal_step` represents one monotonic normal segment at fixed macroscopic
+shear displacement. `TangentialLaw::advance` subsequently advances scalar shear
+at the retained normal load; it refuses implicit normal-load changes. Callers
+therefore retain responsibility for ordering/refining simultaneous motion.
+
+The evolving patch retains the original analytic spring-history intervals.
+Normal growth preserves the existing strain and adds stress-free material at
+the edge. Unloading clips only strains that exceed the decreased local Coulomb
+bound; newly detached material releases its entire remaining shear storage.
+Positive analytic energy-product integrals resolve this microslip heat without
+subtracting large nearly equal stored-energy values. Opening empties the history
+only after accounting for its energy, and recontact begins stress-free even if
+the bodies moved tangentially while apart. No normal dashpot or restitution loss
+is inferred. Normal Hertz work/storage and tangential storage/heat are distinct
+receipt fields, and the shared tangential work port excludes normal energy.
+
+This is the classical decoupled Hertz/MDR approximation on one fixed tangent.
+The positive-half-line stiffness density is `2 G_MDR`, with
+`G_MDR = 4 / sum((2-nu_i)/G_i)`, so its fixed-load limit has exactly the existing
+`8 a / sum((2-nu_i)/G_i)` stiffness. The original fixed-load shear integrator,
+body-compliance root, heat calculation and memory cap are reused. Normal-path
+transfer is linear in bounded retained history; it introduces no spring grid.
+Foreign owners, invalid loads or exhausted memory refuse without modifying the
+accepted state. Variable material coefficients, rolling, spin, nonproportional
+shear and a simultaneous normal/tangential trajectory solver remain outside it.
+
+`tests/mindlin_loading.rs` checks Hertz work, exact fixed-load delegation,
+stress-free normal growth, the independent saturated-patch `a^5` unloading
+energy, a small normal decrement, separation/recontact, normal subdivision,
+load/shear path dependence, atomic memory refusal and spatial refinement of an
+independent fixed-coordinate MDR spring quadrature under mixed loading/reversal.
+
 ### Rolling and contour-deformation loss rungs
 
 `rolling_loss` provides three immutable, separately sourced candidates:

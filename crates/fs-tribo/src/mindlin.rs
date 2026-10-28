@@ -29,6 +29,9 @@ use crate::{
     checked_mul, finite, nonnegative_finite, positive_finite,
 };
 
+/// Explicit normal loading, unloading and recontact with retained shear memory.
+pub mod loading;
+
 /// Largest admitted number of retained analytic history intervals.
 pub const MAX_HISTORY_INTERVALS: usize = 4096;
 
