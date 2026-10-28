@@ -1,8 +1,10 @@
-//! Closed gray-diffuse exchange on the existing convective enthalpy boundary.
+//! Closed gray-diffuse exchange on existing natural enthalpy boundaries.
 //!
 //! Each patch emits at its P1 area mean and applies a uniform outward flux.
 //! The shifted Robin reference `T_air-q_rad/htc` is algebraic, never an air
-//! temperature. Every trial solves the same immutable specific-enthalpy
+//! temperature. On a prescribed-flux or insulated trace, radiation adds to the
+//! original Neumann load without introducing convection. Every trial solves
+//! the same immutable specific-enthalpy
 //! history. Acceptance checks the complete nonlinear residual in joules and
 //! the independent energy balance; a closed enclosure transfers heat internally.
 
@@ -43,7 +45,8 @@ pub struct EnthalpyEnclosureReport {
 /// One accepted physical step with separately identified convection and exchange.
 #[derive(Debug, Clone)]
 pub struct EnthalpyEnclosureStepSolution {
-    /// Accepted h/phase state; Robin rows include the applied enclosure flux.
+    /// Accepted h/phase state; radiating Robin and Neumann rows include the
+    /// applied enclosure flux. Use the separated accounts below externally.
     pub conduction: EnthalpyStepSolution,
     /// Exact shifted boundary used by the accepted inner solve.
     pub combined_boundary: ThermalBoundary,
@@ -51,6 +54,9 @@ pub struct EnthalpyEnclosureStepSolution {
     pub convective_robin_fluxes: Vec<RobinFlux>,
     /// Original convection heat, W outward; this alone is passed to air.
     pub convective_out_w: f64,
+    /// Original prescribed outward flux integrated over all Neumann faces, W.
+    /// Excludes internal enclosure exchange, including on vacuum boundaries.
+    pub prescribed_neumann_out_w: f64,
     /// Reflected radiation and all actual inner work.
     pub radiation: EnthalpyEnclosureReport,
     /// Complete nonlinear residual at the accepted h field, J.
@@ -66,13 +72,19 @@ pub struct EnthalpyEnclosureStepSolution {
 
 struct Patch {
     region: usize,
-    htc: f64,
-    reference: f64,
+    law: PatchLaw,
+}
+
+enum PatchLaw {
+    Convection { htc: f64, reference: f64 },
+    PrescribedFlux { outward_flux: f64 },
 }
 
 impl EnthalpyBackwardEuler<'_, '_> {
-    /// Advance coincident convection and closed enclosure exchange. Each named
-    /// radiation surface must exactly match one positive uniform Robin region.
+    /// Advance closed enclosure exchange on existing natural boundary traces.
+    /// Each named radiation surface must exactly match one positive uniform
+    /// Robin or uniform Neumann region. Zero Neumann flux declares vacuum;
+    /// nonzero authored flux remains additive and is never replaced by exchange.
     /// The existing mesh, source, contact, phase and nonlinear conductivity
     /// owners remain authoritative. At most 64 patches are admitted.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -108,6 +120,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
         };
         let old_temperature = context.temperatures(old_h)?;
         let patches = bind(cx, problem, enclosure, &old_temperature)?;
+        let prescribed_neumann_out_w = prescribed_neumann_heat(cx, problem)?;
         let target = initial_target(&context, step_config, enclosure, &patches, radiation_config)?;
         let mut driving = means(cx, problem, enclosure, &old_temperature)?;
         let mut solid_iterations = 0_usize;
@@ -159,18 +172,30 @@ impl EnthalpyBackwardEuler<'_, '_> {
             last_mismatch = 0.0;
             for (index, patch) in patches.iter().enumerate() {
                 poll(cx, index)?;
-                let name = &problem.boundary.region_names()[patch.region];
-                let full = solid
-                    .robin_fluxes
-                    .iter()
-                    .find(|row| row.region == *name)
-                    .ok_or(EnthalpyError::InvalidInput(
-                        "enclosure inner solve omitted a patch",
-                    ))?;
-                let air = convection.iter().find(|row| row.region == *name).ok_or(
-                    EnthalpyError::InvalidInput("enclosure convection omitted a patch"),
-                )?;
-                let actual_applied = finite(full.heat_rate_w - air.heat_rate_w)?;
+                let actual_applied = match patch.law {
+                    PatchLaw::Convection { .. } => {
+                        let name = &problem.boundary.region_names()[patch.region];
+                        let full = solid.robin_fluxes.iter().find(|row| row.region == *name)
+                            .ok_or(EnthalpyError::InvalidInput(
+                                "enclosure inner solve omitted a convective patch",
+                            ))?;
+                        let air = convection.iter().find(|row| row.region == *name)
+                            .ok_or(EnthalpyError::InvalidInput(
+                                "enclosure convection omitted a patch",
+                            ))?;
+                        finite(full.heat_rate_w - air.heat_rate_w)?
+                    }
+                    PatchLaw::PrescribedFlux { outward_flux } => {
+                        let ThermalBc::Neumann { outward_flux: ScalarField::Uniform(combined) }
+                            = boundary.conditions()[patch.region]
+                        else {
+                            return Err(EnthalpyError::InvalidInput(
+                                "enclosure changed prescribed-flux boundary ownership",
+                            ));
+                        };
+                        finite((combined - outward_flux) * enclosure.surfaces()[index].area_m2())?
+                    }
+                };
                 if finite(actual_applied - applied.net_outward_heat_w[index])?.abs()
                     > heat_tolerance(
                         radiation_config,
@@ -179,7 +204,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
                     )?
                 {
                     return Err(EnthalpyError::InvalidInput(
-                        "enclosure Robin flux does not separate into convection and radiation",
+                        "enclosure boundary heat does not separate into authored load and radiation",
                     ));
                 }
                 let mismatch = finite(actual_applied - fresh.net_outward_heat_w[index])?.abs();
@@ -213,7 +238,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
             let energy = finite(
                 solid.stored_energy_change_j
                     + dt_s
-                        * (solid.neumann_out_w + convective_out + fresh.enclosure_energy_closure_w
+                        * (prescribed_neumann_out_w + convective_out + fresh.enclosure_energy_closure_w
                             - solid.source_w - physical_dirichlet_in_w),
             )?;
             if heat_ok
@@ -227,6 +252,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
                     combined_boundary: boundary,
                     convective_robin_fluxes: convection,
                     convective_out_w: convective_out,
+                    prescribed_neumann_out_w,
                     radiation: EnthalpyEnclosureReport {
                         radiosity: fresh,
                         applied_heat_w: applied.net_outward_heat_w,
@@ -277,20 +303,20 @@ fn bind(
             .ok_or(EnthalpyError::InvalidInput(
                 "unknown enthalpy enclosure region",
             ))?;
-        let ThermalBc::Robin {
-            htc: ScalarField::Uniform(htc),
-            t_ref: ScalarField::Uniform(reference),
-        } = problem.boundary.conditions()[region]
-        else {
-            return Err(EnthalpyError::InvalidInput(
-                "enclosure requires uniform Robin patches",
-            ));
+        let law = match problem.boundary.conditions()[region] {
+            ThermalBc::Robin {
+                htc: ScalarField::Uniform(htc),
+                t_ref: ScalarField::Uniform(reference),
+            } if htc > 0.0 => PatchLaw::Convection { htc, reference },
+            ThermalBc::Neumann { outward_flux: ScalarField::Uniform(outward_flux) } => {
+                PatchLaw::PrescribedFlux { outward_flux }
+            }
+            _ => {
+                return Err(EnthalpyError::InvalidInput(
+                    "enclosure requires uniform Robin or Neumann patches",
+                ));
+            }
         };
-        if htc <= 0.0 {
-            return Err(EnthalpyError::InvalidInput(
-                "positive enclosure convection coefficient required",
-            ));
-        }
         let mut count = 0_usize;
         for slot in 0..problem.mesh.boundary().len() {
             if slot % ASSEMBLY_TILE == 0 {
@@ -307,14 +333,10 @@ fn bind(
                 .any(|&slot| problem.boundary.region_for(slot) != Some(region))
         {
             return Err(EnthalpyError::InvalidInput(
-                "enclosure patch must exactly cover its named Robin region",
+                "enclosure patch must exactly cover its named natural region",
             ));
         }
-        patches.push(Patch {
-            region,
-            htc,
-            reference,
-        });
+        patches.push(Patch { region, law });
     }
     Ok(patches)
 }
@@ -387,18 +409,37 @@ fn shifted_boundary(
     patches: &[Patch],
     radiosity: &RadiosityReport,
 ) -> Result<ThermalBoundary, EnthalpyError> {
-    let rows = patches
-        .iter()
-        .zip(&radiosity.net_outward_flux_w_m2)
-        .map(|(patch, &flux)| {
-            Ok((
-                patch.region,
-                patch.htc,
-                finite(patch.reference - flux / patch.htc)?,
-            ))
-        })
-        .collect::<Result<Vec<_>, EnthalpyError>>()?;
-    Ok(problem.boundary.with_uniform_robin_replacements(&rows)?)
+    let mut robin = Vec::new();
+    let mut neumann = Vec::new();
+    for (patch, &flux) in patches.iter().zip(&radiosity.net_outward_flux_w_m2) {
+        match patch.law {
+            PatchLaw::Convection { htc, reference } => {
+                robin.push((patch.region, htc, finite(reference - flux / htc)?));
+            }
+            PatchLaw::PrescribedFlux { .. } => neumann.push((patch.region, flux)),
+        }
+    }
+    Ok(problem.boundary.with_uniform_robin_replacements(&robin)?
+        .with_uniform_neumann_additions(&neumann)?)
+}
+
+// Integrate the authored boundary independently. A mixed Robin/Neumann
+// enclosure generally transfers nonzero net radiative heat through either
+// subset, so the inner solve's Neumann watts cannot be treated as external.
+fn prescribed_neumann_heat(
+    cx: &Cx<'_>,
+    problem: ConductionProblem<'_>,
+) -> Result<f64, EnthalpyError> {
+    let mut heat = 0.0;
+    for (slot, face) in problem.mesh.boundary().iter().enumerate() {
+        if slot % ASSEMBLY_TILE == 0 { poll(cx, slot)?; }
+        if let Some(ThermalBc::Neumann { outward_flux }) = problem.boundary.condition_for(slot) {
+            let mean = face.vertices.iter().map(|&v| outward_flux.at(v as usize)).sum::<f64>() / 3.0;
+            heat = finite(heat + face.area * mean)?;
+        }
+    }
+    poll(cx, problem.mesh.boundary().len())?;
+    Ok(heat)
 }
 
 fn convection(

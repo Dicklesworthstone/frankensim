@@ -400,6 +400,32 @@ impl ThermalBoundary {
         Ok(out)
     }
 
+    /// Compose one frozen enclosure flux with each original uniform Neumann
+    /// row. The authored flux stays present, including on an insulated trace;
+    /// no Robin coefficient or reservoir temperature is manufactured.
+    pub(crate) fn with_uniform_neumann_additions(
+        &self,
+        rows: &[(usize, f64)],
+    ) -> Result<ThermalBoundary, ConductionError> {
+        let mut out = self.clone();
+        let mut seen = std::collections::BTreeSet::new();
+        for &(region, addition) in rows {
+            let original = match self.conditions.get(region) {
+                Some(ThermalBc::Neumann { outward_flux: ScalarField::Uniform(flux) })
+                    if seen.insert(region) => *flux,
+                _ => {
+                    return Err(ConductionError::Radiation {
+                        surface: self.names.get(region).cloned().unwrap_or_else(|| "<unknown>".into()),
+                        what: "enclosure flux requires a unique existing uniform Neumann region".into(),
+                        fix: "bind each radiating trace to its original prescribed-flux boundary".into(),
+                    });
+                }
+            };
+            out.conditions[region] = ThermalBc::neumann(original + addition)?;
+        }
+        Ok(out)
+    }
+
     /// Clone this partition and replace selected faces from its explicit
     /// adiabatic remainder with uniform outward-flux rows.  Radiation uses
     /// this as one frozen outer-fixed-point iterate. Existing physical rows

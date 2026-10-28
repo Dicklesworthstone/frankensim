@@ -1,5 +1,7 @@
 //! Real spatial enthalpy solves against independent closed-enclosure balances.
 mod support;
+#[path = "enthalpy_enclosure/vacuum.rs"]
+mod vacuum;
 
 use fs_blake3::ContentHash;
 use fs_conduction::radiation::{GrayDiffuseEnclosure, RadiationSurface, ViewFactorMatrix};

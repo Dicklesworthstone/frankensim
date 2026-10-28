@@ -1268,9 +1268,16 @@ authority.
 - `EnthalpyBackwardEuler::advance_with_enclosure_radiation` and its heterogeneous
   facade couple the same immutable h history to the existing gray-diffuse
   radiosity owner. One to 64 nonoverlapping radiative patches must exactly match
-  positive uniform Robin regions. Each patch emits at its P1 area mean and
-  applies a uniform outward flux using the algebraic reference shift
-  `T_air - q_rad/htc`; original convection alone is exposed to an air consumer.
+  positive uniform Robin or uniform Neumann regions. Each patch emits at its P1
+  area mean and applies a uniform outward flux. On convective traces this uses
+  the algebraic reference shift `T_air - q_rad/htc`; on Neumann traces exchange
+  adds to the original authored flux. An insulated trace needs no artificial
+  convection, allowing finite bodies to exchange reflected radiation in vacuum
+  while their independent sensible and latent enthalpies evolve. Original
+  convection alone is exposed to an air consumer. `prescribed_neumann_out_w`
+  independently integrates the original Neumann loads, excluding exchange;
+  this distinction is essential for mixed Robin/Neumann enclosures, whose
+  internal radiative heat generally does not cancel within either subset.
   Supplied view factors retain their existing closure/reciprocity admission.
   Every accepted endpoint passes fresh radiosity equations, applied patch heat,
   the complete nonlinear h residual and the original joule energy gate. The
@@ -1285,11 +1292,16 @@ authority.
   and the preconditioner. Latent zero temperature slopes remain zero, while
   direct h history, nonlinear/phase conductivity and contact remain active.
   Original convection ports are retained for inlet and HTC derivatives.
+  Source/history derivatives also retain reflected exchange on vacuum traces;
+  requesting a convective control port on a Neumann region refuses.
   Emissivities, view factors and geometry are fixed; emissivity validity
   endpoints refuse classical derivatives. `tests/enthalpy_enclosure.rs` adds
   independent reflected-heat/energy references, mixed latent transfer,
   source/history finite differences, transpose pairing, deterministic replay
-  and admission/cancellation checks. This is the existing patch-mean radiation
+  and admission/cancellation checks. Its vacuum tests independently solve
+  finite-body equilibration, latent transfer and mixed prescribed-flux balances,
+  check relabeling and source derivatives, and retain failed-step history.
+  This is the existing patch-mean radiation
   discretization, without inferred geometric visibility or pointwise T^4 flux.
 - `transient::enthalpy::adjoint` supplies discrete endpoint derivatives for
   this same spatial enthalpy balance. `linearize_step` solves a real endpoint;

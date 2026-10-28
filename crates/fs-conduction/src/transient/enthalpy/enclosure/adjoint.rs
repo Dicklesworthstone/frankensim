@@ -7,7 +7,9 @@
 
 use fs_exec::Cx;
 
-use super::{bind, convection, initial_target, means, radiosity, shifted_boundary};
+use super::{
+    bind, convection, initial_target, means, prescribed_neumann_heat, radiosity, shifted_boundary,
+};
 use crate::{
     AmbientRadiationConfig, ConductionProblem, ThermalInterfaces,
     assemble::ASSEMBLY_TILE,
@@ -23,7 +25,9 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
     /// Recheck an accepted enclosure endpoint and bind its complete h tangent.
     /// The supplied h field is authoritative; temperatures, source/boundary
     /// accounting and residual telemetry are independently reconstructed.
-    /// `problem.boundary` is ORIGINAL convection, not shifted radiation rows.
+    /// `problem.boundary` contains the ORIGINAL convection and prescribed flux,
+    /// not shifted radiation rows. Vacuum traces retain the same reflected
+    /// radiation tangent; they do not create a convective control port.
     ///
     /// Geometry, view factors, emissivities, phase charts and reference masses
     /// are fixed. Source/history/convection derivatives retain all reflected
@@ -125,11 +129,12 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             transport.add_radiation_feedback(cx, left, right)?;
         }
         let (_, convective_out) = convection(cx, problem, transport.primal())?;
+        let prescribed_neumann_out = prescribed_neumann_heat(cx, problem)?;
         let primal = transport.primal();
         let energy = checked(
             primal.stored_energy_change_j
                 + dt_s
-                    * (primal.neumann_out_w + convective_out + fresh.enclosure_energy_closure_w
+                    * (prescribed_neumann_out + convective_out + fresh.enclosure_energy_closure_w
                         - primal.source_w - primal.dirichlet_in_w),
         )?;
         if energy.abs() > step_config.energy_tolerance_j {
