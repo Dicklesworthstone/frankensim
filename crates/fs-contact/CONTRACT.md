@@ -534,3 +534,38 @@ returns no accepted partial event. The existing one-contact law is unchanged.
 This is a bounded frictionless instantaneous response, not CCD, a Moreau–Jean
 time stepper, persistent contact, a Coulomb-cone solve, or a general
 Painleve/nonuniqueness classifier. The nonsmooth-contact bead remains open.
+
+### JKR applied load and compliant fixtures
+
+`SourceJkrSphereContact::evaluate_force_controlled` evaluates the stable applied-load
+branch from the closed-form JKR radius, including its marginal pull-off point.
+It retains the original contact response and rejects loads below pull-off or
+outside the original indentation envelope; it does not advance servo/history
+state or invent a finite compliance at the force-controlled fold.
+
+`normal_patch::adhesive::fixture::JkrSpringFixture` adds an explicit linear loading
+spring between the contact and a prescribed stage. It solves `F = K(D - delta)`
+and admits only the branch stable under both contact-radius and fixture
+perturbations. The fixture fold satisfies `dF/d(delta) = -K`, interpolating
+between force- and displacement-controlled pull-off. Total storage includes
+contact plus spring energy; its derivative with respect to stage displacement
+is the stage force. The stage port exposes the statically condensed tangent,
+with the fold marked nonsmooth.
+
+Immutable source/stiffness-bound history localizes attachment at zero stage
+approach and separation at the fixture fold. Each event reports the finite tip
+motion and the released total energy. A monotone segment satisfies
+`stage work = delta(contact + spring storage) + jump release`; replaying an
+accepted detached state cannot release the same energy again. Evaluation is
+allocation-free with bounded scalar solves. The original material, geometry
+and JKR applicability limits remain in force. The fixture is massless,
+quasistatic and linear: frame inertia, nonlinear compliance, servo dynamics
+and a dynamic jump solution are not inferred. Unresolvable finite-stiffness
+folds refuse rather than silently becoming rigid control. The formulation
+follows Deng and Kesari (2019), <https://doi.org/10.1016/j.jmps.2019.07.009>.
+
+`tests/adhesive_fixture.rs` compares the dimensional force/radius equation,
+independent full-energy stability Hessian, energy gradients and condensed
+tangents, stiffness limits, next-representable values near the two folds,
+ports and refusal/history behavior. A complete cycle is compared against an
+independent radius-coordinate work integral, including both jump energies.

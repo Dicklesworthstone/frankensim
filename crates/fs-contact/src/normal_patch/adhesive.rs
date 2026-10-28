@@ -11,9 +11,13 @@
 //! Johnson, Kendall and Roberts (1971), DOI: 10.1098/rspa.1971.0141. It is an
 //! explicitly selected model estimate, not a material admission. Roughness,
 //! viscoelasticity, finite-range attraction before touch, rate-dependent work
-//! of adhesion, mixed-mode peeling and finite-machine-stiffness stability are
-//! outside this law. The local stable branch is DISPLACEMENT controlled; its
+//! of adhesion and mixed-mode peeling are outside this law. A separate
+//! [`fixture`] owner adds loading-machine stiffness without changing this law.
+//! The local stable branch is DISPLACEMENT controlled; its
 //! final separation point differs from the familiar force-controlled pull-off.
+
+/// Stable applied-force and finite-loading-stiffness contact.
+pub mod fixture;
 
 use core::f64::consts::PI;
 
@@ -479,7 +483,12 @@ impl SourceJkrSphereContact {
                 field: "dimensionless approach",
             });
         }
-        let t = root_offset(q);
+        self.response_at_offset(root_offset(q), indentation_m)
+    }
+
+    // Shared radius-coordinate evaluation for displacement, force and fixture
+    // control. Callers admit the corresponding indentation before entering.
+    fn response_at_offset(&self, t: f64, indentation_m: f64) -> Result<JkrResponse, JkrError> {
         let x = 1.0 + t;
         let x2 = x * x;
         let x3 = x2 * x;
