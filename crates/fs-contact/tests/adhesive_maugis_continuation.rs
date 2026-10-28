@@ -151,3 +151,140 @@ fn branches_refuse_wrong_domains_without_inventing_contact_or_adhesion() {
     assert_eq!(detached.phase(), MaugisPhase::Detached);
     assert_eq!(detached.friction_contact_state().unwrap().area_m2(), 0.0);
 }
+
+fn continuation_budget(law: &SourceMaugisSphereContact) -> MaugisContinuationBudget {
+    let (_, d0, p0) = scales(law);
+    MaugisContinuationBudget {
+        work: MaugisWorkBudget { absolute_tolerance_j: 1e-11*p0*d0,
+            relative_tolerance: 1e-10, maximum_evaluations: 10000 },
+        energy_absolute_tolerance_j: 2e-9*p0*d0, energy_relative_tolerance: 1e-10,
+    }
+}
+
+#[test]
+fn history_localizes_both_snaps_and_cycle_work_matches_original_force_integration() {
+    for lambda in [0.02, 0.2, 0.6, 0.8, 1.0, 5.0, 1000.0] {
+        let law = model(lambda);
+        let (_, d0, p0) = scales(&law);
+        let controls = continuation_budget(&law);
+        let owner = MaugisDisplacementContinuation::new(law.clone()).unwrap();
+        let far = owner.separation().indentation_m()-law.interaction_range_m()-d0;
+        let initial = owner.initialize(MaugisPhase::Detached, far).unwrap();
+        let up = owner.advance(&initial, 3.0*d0, controls).unwrap();
+        assert_eq!(up.snap.unwrap().kind(), MaugisSnapKind::AttractionOnset);
+        assert_eq!(up.snap.unwrap().indentation_m(), -law.interaction_range_m());
+        assert_eq!(up.next.equilibrium().phase(), MaugisPhase::Contact);
+        assert!(up.next.equilibrium().friction_contact_state().unwrap().area_m2() > 0.0);
+        let down = owner.advance(&up.next, far, controls).unwrap();
+        assert_eq!(down.snap.unwrap().kind(), MaugisSnapKind::Separation);
+        assert_eq!(down.next, initial);
+        let release = up.released_energy_j+down.released_energy_j;
+        assert!(up.released_energy_j > 0.0 && down.released_energy_j > 0.0);
+        close(up.work.work_j+down.work.work_j, release, p0*d0, 4e-9);
+        // Independent original-force quadrature. Squared displacement resolves
+        // the square-root branch near a fold, without using either energy API.
+        let on = owner.onset().indentation_m();
+        let off = owner.separation().indentation_m();
+        let mut independent = 0.0;
+        let mut contact_from = off;
+        if let Some(limits) = law.noncontact_limits().unwrap() {
+            let end = on.min(limits.first_contact_indentation_m);
+            let width = end-off;
+            independent += integral(|s| {
+                let d = if s == 0.0 { off } else if s == 1.0 { end } else { off+width*s*s };
+                -law.evaluate_noncontact(d).unwrap().normal_force_n()*2.0*width*s
+            }, 0.0, 1.0);
+            contact_from = end;
+        }
+        if contact_from < on {
+            let width = on-contact_from;
+            independent += integral(|s| {
+                let d = if s == 0.0 { contact_from } else if s == 1.0 { on } else { contact_from+width*s*s };
+                -law.evaluate_attached(d).unwrap().normal_force_n*2.0*width*s
+            }, 0.0, 1.0);
+        }
+        close(release, independent, release, 2e-5);
+        let again = owner.advance(&down.next, far-d0, controls).unwrap();
+        assert!(again.snap.is_none());
+        assert_eq!(again.released_energy_j, 0.0);
+        assert_eq!(again.work.work_j, 0.0);
+    }
+}
+
+#[test]
+fn low_tabor_disk_snaps_match_analytic_release_and_touch_is_continuous() {
+    for lambda in [0.02, 0.2, 0.6] {
+        let law = model(lambda);
+        let (_, d0, p0) = scales(&law);
+        let controls = continuation_budget(&law);
+        let owner = MaugisDisplacementContinuation::new(law.clone()).unwrap();
+        let fold = 8.0*lambda/(3.0*PI);
+        let factor = PI*lambda*fold.powi(4)*p0*d0;
+        close(owner.onset().released_energy_j(), (2.0/3.0)*factor, factor, 1e-9);
+        close(owner.separation().released_energy_j(), factor/24.0, factor, 1e-10);
+        let initial = owner.initialize(MaugisPhase::Detached, -2.0*law.interaction_range_m()).unwrap();
+        let on = owner.advance(&initial, owner.onset().indentation_m(), controls).unwrap();
+        assert_eq!(on.next.equilibrium().phase(), MaugisPhase::Noncontact);
+        assert_eq!(on.work.work_j, 0.0);
+        let stationary = owner.advance(&on.next, on.next.indentation_m(), controls).unwrap();
+        assert!(stationary.snap.is_none());
+        assert_eq!(stationary.released_energy_j, 0.0);
+        let touch = law.noncontact_limits().unwrap().unwrap().first_contact_indentation_m;
+        let at_touch = owner.advance(&on.next, touch, controls).unwrap();
+        assert!(at_touch.snap.is_none());
+        assert_eq!(at_touch.next.equilibrium().phase(), MaugisPhase::Contact);
+        assert_eq!(at_touch.next.equilibrium().friction_contact_state().unwrap().area_m2(), 0.0);
+        let above = owner.advance(&at_touch.next, 0.0, controls).unwrap();
+        let below = owner.advance(&above.next, on.next.indentation_m(), controls).unwrap();
+        assert!(above.snap.is_none() && below.snap.is_none());
+        close(at_touch.work.work_j+above.work.work_j+below.work.work_j, 0.0, p0*d0, 4e-9);
+    }
+}
+
+#[test]
+fn continuation_preserves_metastability_reversal_and_segment_partitioning() {
+    for lambda in [0.2, 0.8, 1.0, 5.0] {
+        let law = model(lambda);
+        let (_, d0, p0) = scales(&law);
+        let controls = continuation_budget(&law);
+        let owner = MaugisDisplacementContinuation::new(law.clone()).unwrap();
+        let far = owner.separation().indentation_m()-law.interaction_range_m()-d0;
+        let midpoint = 0.5*owner.onset().indentation_m()+0.5*owner.separation().indentation_m();
+        let initial = owner.initialize(MaugisPhase::Detached, far).unwrap();
+        let unloaded = owner.advance(&initial, midpoint, controls).unwrap();
+        assert_eq!(unloaded.next.equilibrium().phase(), MaugisPhase::Detached);
+        assert!(unloaded.snap.is_none());
+        let all = owner.advance(&initial, 2.0*d0, controls).unwrap();
+        let loaded = owner.advance(&all.next, midpoint, controls).unwrap();
+        assert_ne!(loaded.next.equilibrium().phase(), MaugisPhase::Detached);
+        assert!(loaded.snap.is_none());
+        let fraction = 0.1*(owner.onset().indentation_m()-owner.separation().indentation_m());
+        let reverse = owner.advance(&loaded.next, midpoint+fraction, controls).unwrap();
+        assert!(reverse.snap.is_none());
+        let at_on = owner.advance(&initial, owner.onset().indentation_m(), controls).unwrap();
+        let rest = owner.advance(&at_on.next, 2.0*d0, controls).unwrap();
+        assert!(rest.snap.is_none());
+        assert_eq!(rest.next, all.next);
+        close(at_on.work.work_j+rest.work.work_j, all.work.work_j, p0*d0, 1e-9);
+        assert_eq!(at_on.released_energy_j, all.released_energy_j);
+    }
+}
+
+#[test]
+fn history_refusal_does_not_advance_and_retry_is_identical() {
+    let law = model(1.0);
+    let (_, d0, _) = scales(&law);
+    let controls = continuation_budget(&law);
+    let owner = MaugisDisplacementContinuation::new(law.clone()).unwrap();
+    let old = owner.initialize(MaugisPhase::Contact, 0.0).unwrap();
+    let saved = old;
+    assert!(owner.advance(&old, f64::NAN, controls).is_err());
+    assert!(owner.advance(&old, 2.0*law.envelope().maximum_indentation_m, controls).is_err());
+    let mut small = controls;
+    small.work.maximum_evaluations = 1;
+    assert!(owner.advance(&old, d0, small).is_err());
+    let other = MaugisDisplacementContinuation::new(model(2.0)).unwrap();
+    assert!(matches!(other.advance(&old, d0, controls), Err(MaugisContinuationError::HistoryMismatch)));
+    assert_eq!(old, saved);
+    assert_eq!(owner.advance(&old, d0, controls).unwrap(), owner.advance(&saved, d0, controls).unwrap());
+}
