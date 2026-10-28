@@ -67,6 +67,8 @@ pub(super) struct InterfaceEntropy {
     conduction: Sum,
     other_source_j_k: f64,
     has_other_source: bool,
+    reservoir_correction: Sum,
+    conduction_correction: Sum,
 }
 impl InterfaceEntropy {
     // Read other sources BEFORE adding friction. Subtracting a large friction
@@ -84,14 +86,36 @@ impl InterfaceEntropy {
                 checkpoint()?;
             }
             let watts = finite(cell.boundary.source_w + sources.get(&id).copied().unwrap_or(0.0))?;
-            has_other_source |= watts != 0.0;
-            other.add(finite(dt * watts)? / state.temperature_k(id)?)?;
+            if watts != 0.0 {
+                has_other_source = true;
+                other.add(finite(dt * watts)? / state.temperature_k(id)?)?;
+            }
         }
         Ok(Self {
             conduction: Sum::default(),
             other_source_j_k: other.total()?,
             has_other_source,
+            reservoir_correction: Sum::default(),
+            conduction_correction: Sum::default(),
         })
+    }
+    // A moving footprint cancels the covered part of an existing Robin flux
+    // through an equal-and-opposite source. That cancellation belongs to the
+    // ORIGINAL reservoir, not to the unclassified source or friction accounts.
+    pub(super) fn correct_reservoir_transfer(
+        &mut self,
+        correction_heat_j: f64,
+        body_temperature_k: f64,
+        reservoir_temperature_k: f64,
+    ) -> Result<(), DepositionError> {
+        if !body_temperature_k.is_finite() || body_temperature_k <= 0.0
+            || !reservoir_temperature_k.is_finite() || reservoir_temperature_k <= 0.0
+        {
+            return Err(invalid("reservoir entropy needs positive finite temperatures"));
+        }
+        self.reservoir_correction.add(correction_heat_j / reservoir_temperature_k)?;
+        self.conduction_correction.add((correction_heat_j / body_temperature_k)
+            * ((reservoir_temperature_k - body_temperature_k) / reservoir_temperature_k))
     }
     pub(super) fn add_transfer(
         &mut self,
@@ -147,11 +171,17 @@ impl FrictionHeatEntropy {
         let friction = friction.total()?;
         let conduction = interface.conduction.total()?;
         let interface_residual = residual.total()?;
+        let mut reservoir = interface.reservoir_correction;
+        reservoir.add(thermal.reservoir_entropy_input_j_k)?;
+        let reservoir = reservoir.total()?;
+        let mut network = interface.conduction_correction;
+        network.add(thermal.conduction_generation_j_k)?;
+        let network = network.total()?;
         let mut defect = Sum::default();
         for value in [
             thermal.thermal_storage_change_j_k,
-            -thermal.reservoir_entropy_input_j_k,
-            -thermal.conduction_generation_j_k,
+            -reservoir,
+            -network,
             -conduction,
             -friction,
             -interface.other_source_j_k,
@@ -161,8 +191,8 @@ impl FrictionHeatEntropy {
         }
         Ok(Self {
             thermal_storage_change_j_k: thermal.thermal_storage_change_j_k,
-            reservoir_entropy_input_j_k: thermal.reservoir_entropy_input_j_k,
-            network_conduction_generation_j_k: thermal.conduction_generation_j_k,
+            reservoir_entropy_input_j_k: reservoir,
+            network_conduction_generation_j_k: network,
             interface_conduction_generation_j_k: conduction,
             friction_generation_j_k: friction,
             unclassified_source_at_cell_j_k: interface.other_source_j_k,

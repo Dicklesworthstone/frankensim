@@ -13,7 +13,7 @@
 //! not inferred from contact coefficients. Curved surfaces, changing width,
 //! large rotations and nonuniform transverse temperature require a spatially
 //! resolved surface owner; this strip model does not silently approximate them.
-use super::{FrictionHeatTolerances, finite, invalid};
+use super::{FrictionHeatEntropy, FrictionHeatTolerances, entropy::InterfaceEntropy, finite, invalid};
 use fs_thermal::enthalpy::backward_euler::{
     BackwardEulerStep, BackwardEulerTrial, StepCoefficients,
 };
@@ -375,13 +375,17 @@ pub struct MovingFrictionHeatReport {
     pub total_energy_residual_j: f64,
     /// Candidate placement; retain only after accepting the complete transaction.
     pub position: MovingContactPosition,
+    /// Optional entropy of this same trial, accepted only with all energy gates.
+    /// Moving coverage removes the original ambient entropy exchange as well as
+    /// its heat. Shared cells contribute storage once, not once per patch.
+    pub entropy: Option<FrictionHeatEntropy>,
 }
 pub struct MovingFrictionHeatStep<'s, 'm> {
     thermal: BackwardEulerStep<'s, 'm>,
     patches: Vec<SweptContactPatch>,
     area: f64,
     end: MovingContactPosition,
-    exposed: BTreeMap<CellId, f64>,
+    covered: BTreeMap<CellId, f64>,
 }
 impl<'s, 'm> MovingFrictionHeatStep<'s, 'm> {
     pub fn new(
@@ -504,12 +508,28 @@ impl<'s, 'm> MovingFrictionHeatStep<'s, 'm> {
                 "swept contact area failed full-footprint conservation",
             ));
         }
+        // Geometry is fixed for this residual. Prepare coverage once instead
+        // of rebuilding it at every nonlinear source evaluation.
+        let mut covered = BTreeMap::<CellId, f64>::new();
+        for patch in &patches {
+            checkpoint()?;
+            for id in patch.cells {
+                let value = covered.entry(id).or_default();
+                *value = finite(*value + patch.mean_area_m2)?;
+            }
+        }
+        for (&id, &covered_area) in &covered {
+            checkpoint()?;
+            if covered_area > exposed[&id] * (1.0 + 1024.0 * f64::EPSILON) {
+                return Err(invalid("moving contact overlaps an already covered surface"));
+            }
+        }
         Ok(Self {
             thermal: BackwardEulerStep::new(thermal, target_s, checkpoint)?,
             patches,
             area,
             end: path.end,
-            exposed,
+            covered,
         })
     }
     pub fn patches(&self) -> &[SweptContactPatch] {
@@ -559,6 +579,42 @@ impl<'s, 'm> MovingFrictionHeatStep<'s, 'm> {
         ) -> Result<MovingFrictionInput<P>, E>,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<MovingFrictionHeatTrial<'m, P>, E> {
+        self.evaluate_entropy_option(energy_j, temperatures_k, resolve, false, checkpoint)
+    }
+
+    /// Evaluate the original moving-contact candidate with caloric entropy.
+    /// Every swept patch uses its own solved interface temperature. The original
+    /// source callback runs once, and coverage cancels ambient heat and entropy
+    /// together. No extra solve, interface heat store or body heat split is used.
+    /// Every active thermal law must provide its exact entropy integral. Other
+    /// physical sources remain unclassified; numerical defects are not heating.
+    /// Use on a final candidate to keep entropy work outside nonlinear iterations.
+    pub fn evaluate_with_entropy<P, E: From<DepositionError>>(
+        &self,
+        energy_j: &[f64],
+        temperatures_k: &[f64],
+        resolve: impl FnOnce(
+            &DepositionSimulation<'m>,
+            &[SweptContactPatch],
+            &[f64],
+        ) -> Result<MovingFrictionInput<P>, E>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<MovingFrictionHeatTrial<'m, P>, E> {
+        self.evaluate_entropy_option(energy_j, temperatures_k, resolve, true, checkpoint)
+    }
+
+    fn evaluate_entropy_option<P, E: From<DepositionError>>(
+        &self,
+        energy_j: &[f64],
+        temperatures_k: &[f64],
+        resolve: impl FnOnce(
+            &DepositionSimulation<'m>,
+            &[SweptContactPatch],
+            &[f64],
+        ) -> Result<MovingFrictionInput<P>, E>,
+        with_entropy: bool,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<MovingFrictionHeatTrial<'m, P>, E> {
         if temperatures_k.len() != self.patches.len()
             || temperatures_k.iter().any(|t| !t.is_finite() || *t <= 0.0)
         {
@@ -570,7 +626,8 @@ impl<'s, 'm> MovingFrictionHeatStep<'s, 'm> {
         let checkpoint = RefCell::new(checkpoint);
         let check = || (*checkpoint.borrow_mut())();
         let dt = self.duration_s();
-        let trial=self.thermal.evaluate(energy_j,|state|->Result<StepCoefficients<(P,MovingFrictionHeatReport)>,E> {
+        let mut entropy = None;
+        let coefficients=|state: &DepositionSimulation<'m>|->Result<StepCoefficients<(P,MovingFrictionHeatReport)>,E> {
             let MovingFrictionInput { dissipated_j,conductivity_w_m_k,transport }=
                 resolve(state,&self.patches,temperatures_k)?;
             if dissipated_j.len()!=self.patches.len()
@@ -582,21 +639,21 @@ impl<'s, 'm> MovingFrictionHeatStep<'s, 'm> {
                 }
             }
             let StepCoefficients { mut sources_w,conductances_w_k,payload }=transport;
+            let mut interface_entropy = if with_entropy {
+                Some(InterfaceEntropy::new(state, &sources_w, dt, &check)?)
+            } else { None };
             // The footprint removes its mean covered area from the ORIGINAL
             // ambient boundary, without persisting a fictitious fixed contact.
-            let mut covered=BTreeMap::<CellId,f64>::new();
-            for patch in &self.patches { for id in patch.cells {
-                let a=covered.entry(id).or_default();
-                *a=finite(*a+patch.mean_area_m2)?;
-            }}
-            for (&id,&area) in &covered {
+            for (&id,&area) in &self.covered {
                 check()?;
-                if area>self.exposed[&id]*(1.0+1024.0*f64::EPSILON) {
-                    return Err(invalid("moving contact overlaps an already covered surface").into());
-                }
                 let cell=&state.cells()[&id];
+                let body_temperature_k = state.temperature_k(id)?;
                 let correction=finite(area*cell.boundary.htc_w_m2_k
-                    *(state.temperature_k(id)?-cell.boundary.ambient_k))?;
+                    *(body_temperature_k-cell.boundary.ambient_k))?;
+                if let Some(entropy) = &mut interface_entropy {
+                    entropy.correct_reservoir_transfer(finite(dt * correction)?,
+                        body_temperature_k, cell.boundary.ambient_k)?;
+                }
                 let source=sources_w.entry(id).or_default();
                 *source=finite(*source+correction)?;
             }
@@ -605,7 +662,7 @@ impl<'s, 'm> MovingFrictionHeatStep<'s, 'm> {
                 body_heat_j:[0.0;2],dissipated_j:0.0,external_heat_j,
                 thermal:EnergyAudit { incoming_mass_kg:0.0,incoming_energy_j:0.0,
                     external_heat_j:0.0,stored_energy_change_j:0.0,residual_j:0.0,substeps:0,events:0 },
-                total_energy_residual_j:0.0,position:self.end };
+                total_energy_residual_j:0.0,position:self.end,entropy:None };
             for ((patch,&temperature),&work) in self.patches.iter().zip(temperatures_k).zip(&dissipated_j) {
                 check()?;
                 let mut g=[0.0;2];
@@ -615,8 +672,12 @@ impl<'s, 'm> MovingFrictionHeatStep<'s, 'm> {
                     let k=*conductivity_w_m_k.get(&id).ok_or(invalid("missing moving surface conductivity"))?;
                     g[side]=finite(patch.mean_area_m2*k/patch.distances_m[side])?;
                     if k>0.0 && g[side]==0.0 { return Err(DepositionError::Arithmetic.into()); }
-                    let power=finite(g[side]*(temperature-state.temperature_k(id)?))?;
+                    let body_temperature_k = state.temperature_k(id)?;
+                    let power=finite(g[side]*(temperature-body_temperature_k))?;
                     heat[side]=finite(dt*power)?;
+                    if let Some(entropy) = &mut interface_entropy {
+                        entropy.add_transfer(heat[side], body_temperature_k, temperature)?;
+                    }
                     let source=sources_w.entry(id).or_default();
                     *source=finite(*source+power)?;
                     report.body_heat_j[side]=finite(report.body_heat_j[side]+heat[side])?;
@@ -629,9 +690,25 @@ impl<'s, 'm> MovingFrictionHeatStep<'s, 'm> {
                     interface_temperature_k:temperature,conductances_w_k:g,body_heat_j:heat,
                     dissipated_j:work,interface_residual_j:finite(heat[0]+heat[1]-work)? });
             }
+            entropy = interface_entropy;
             Ok(StepCoefficients { sources_w,conductances_w_k,payload:(payload,report) })
-        },&check)?;
+        };
+        let trial = if with_entropy {
+            self.thermal.evaluate_with_entropy(energy_j, coefficients, &check)?
+        } else {
+            self.thermal.evaluate(energy_j, coefficients, &check)?
+        };
         let mut report = trial.payload().1.clone();
+        if let Some(interface) = entropy {
+            report.entropy = Some(FrictionHeatEntropy::from_interfaces(
+                trial.entropy_audit().ok_or(DepositionError::Arithmetic)?,
+                interface,
+                report.patches.iter().map(|patch| (patch.dissipated_j,
+                    patch.interface_temperature_k, patch.interface_residual_j)),
+                &check,
+            )?);
+            check()?;
+        }
         report.thermal = *trial.audit();
         report.total_energy_residual_j = finite(
             report.thermal.stored_energy_change_j - report.external_heat_j - report.dissipated_j,
