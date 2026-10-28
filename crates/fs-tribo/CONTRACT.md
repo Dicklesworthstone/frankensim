@@ -92,6 +92,41 @@ reactions, and residual embedding.
   normalized to an explicit RMS height. Its seed selects spatial phase only;
   it creates no temporal/audio spectrum or apparatus-specific frequency.
 
+### Exact Hertz sliding and spin wrench
+
+`sliding_patch::HertzSlidingPatch` evaluates the actual surface integral of
+local kinetic Coulomb traction over a circular Hertz pressure distribution.
+The supplied two-axis centre slip and normal-axis spin share that one local
+velocity field, so the resulting force and spin moment are coupled. Pure
+translation recovers `mu P`; pure spin recovers `3 pi mu P a / 16`, using the
+pressure first-moment radius instead of the RMS radius used by the separate
+lumped partial-slip rung. Arbitrary changes in sliding direction, frame rotation
+and spin sign require no authored friction ellipse or direction interpolation.
+
+The exact piecewise Hertz integrals follow Antali (2024), *Nonlinear Dynamics*
+112, 6785--6811, DOI `10.1007/s11071-024-09462-6`, equations 62--63. A convergent
+32-term small-spin expansion evaluates the same function without the severe
+cancellation of its large slip/spin ratio formula. Coefficients are computed
+at compile time and evaluated with bounded Horner work; there is no allocation,
+quadrature grid, mutable state or velocity regularizer in production. Physical
+power is the integral of local friction times local slip speed and equals the
+negative resultant wrench/velocity pairing. It is not yet allocated to bodies.
+
+The original normal and interface owners must supply load, radius and the
+uniform kinetic coefficient. This source-neutral response does not upgrade
+their authority. Complete rest returns zero wrench as one admissible selection,
+not a solved sticking reaction. It adds no elastic shear memory, nonproportional
+Mindlin partial slip, adhesion, rolling-deformation loss, contact discovery,
+normal evolution, mechanical stepper or thermal partition. Consumers must not
+discard an existing elastic contact's storage when switching to this rung.
+
+Seven native regression groups compare the exact force, spin moment and heat
+against independent two-dimensional Hertz-pressure quadrature, with a live
+three-rung radial and angular refinement. They also check analytic pure-motion
+limits, coupled capacity reduction, arbitrary tangent rotation/reflection,
+positive velocity scaling down to tiny speeds, small-spin asymptotics, branch
+continuity, deterministic replay, rest/frictionless selections and refusals.
+
 ### Partial-slip return-map rung
 
 `partial_slip` is a solver-independent, two-region Jenkins/Iwan

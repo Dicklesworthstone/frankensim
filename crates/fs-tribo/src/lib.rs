@@ -17,6 +17,8 @@ pub mod surface_excitation;
 pub mod layer_contact;
 /// Material-derived fixed-load Hertz--Cattaneo--Mindlin tangential hysteresis.
 pub mod mindlin;
+/// Exact coupled sliding force and spin moment over a circular Hertz pressure field.
+pub mod sliding_patch;
 /// Stateful, work-conjugate tangential constitutive interface.
 pub mod tangential;
 pub use tangential::{
