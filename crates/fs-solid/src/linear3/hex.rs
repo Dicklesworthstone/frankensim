@@ -350,6 +350,71 @@ impl HexElasticProblem<'_> {
         }
         Ok(())
     }
+    /// Interpolate both nodal temperature fields with this family's native
+    /// shapes, then integrate each pinned expansion source at its stiffness
+    /// points. The returned borrow feeds existing thermal load, equilibrium and
+    /// tangent methods directly. No mass or elastic-tensor refresh is inferred.
+    pub fn resolve_nodal_thermal_strains(
+        &self,
+        temperatures: super::source::NodalThermalTemperatures<'_>,
+        sources: super::source::QuadraticThermalSources<'_>,
+        mesh_frame: fs_blake3::ContentHash,
+        strain_limit: f64,
+        cx: &Cx<'_>,
+    ) -> Result<super::source::ResolvedQuadraticThermalStrains, super::source::SolidMaterialError>
+    {
+        match self.elements {
+            HexConnectivity::Hex20(elements) => {
+                self.validate(elements, false, cx)?;
+                super::source::quadratic_thermal::resolve(
+                    self.nodes_m,
+                    elements,
+                    self.materials,
+                    temperatures,
+                    sources,
+                    &self.quadrature.points()?,
+                    mesh_frame,
+                    strain_limit,
+                    |nodes, coordinate, element, index| {
+                        hex20_point(
+                            nodes,
+                            coordinate,
+                            self.budget.minimum_scaled_jacobian,
+                            element,
+                            index,
+                        )
+                        .map(|point| point.shapes)
+                    },
+                    cx,
+                )
+            }
+            HexConnectivity::Hex27(elements) => {
+                self.validate(elements, false, cx)?;
+                super::source::quadratic_thermal::resolve(
+                    self.nodes_m,
+                    elements,
+                    self.materials,
+                    temperatures,
+                    sources,
+                    &self.quadrature.points()?,
+                    mesh_frame,
+                    strain_limit,
+                    |nodes, coordinate, element, index| {
+                        hex27_point(
+                            nodes,
+                            coordinate,
+                            self.budget.minimum_scaled_jacobian,
+                            element,
+                            index,
+                        )
+                        .map(|point| point.shapes)
+                    },
+                    cx,
+                )
+            }
+        }
+    }
+
     pub fn assemble(&self, cx: &Cx<'_>) -> Result<TetElasticAssembly, TetElasticError> {
         match self.elements {
             HexConnectivity::Hex20(elements) => {

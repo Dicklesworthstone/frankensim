@@ -262,6 +262,44 @@ impl QuadraticTetProblem<'_> {
         Ok(())
     }
 
+    /// Interpolate the original reference and current nodal temperatures at
+    /// this problem's native stiffness points, then integrate each pinned
+    /// source expansion law there. The returned borrow feeds the existing
+    /// thermal load, response and tangent methods directly. Elastic tensors and
+    /// reference mass remain those explicitly supplied in this problem.
+    pub fn resolve_nodal_thermal_strains(
+        &self,
+        temperatures: super::source::NodalThermalTemperatures<'_>,
+        sources: super::source::QuadraticThermalSources<'_>,
+        mesh_frame: fs_blake3::ContentHash,
+        strain_limit: f64,
+        cx: &Cx<'_>,
+    ) -> Result<super::source::ResolvedQuadraticThermalStrains, super::source::SolidMaterialError>
+    {
+        self.validate(false, cx)?;
+        super::source::quadratic_thermal::resolve(
+            self.nodes_m,
+            self.elements,
+            self.materials,
+            temperatures,
+            sources,
+            &duffy_quadrature(self.quadrature.stiffness_points_per_dir),
+            mesh_frame,
+            strain_limit,
+            |nodes, lambda, element, index| {
+                tet10_point(
+                    nodes,
+                    lambda,
+                    self.budget.minimum_scaled_jacobian,
+                    element,
+                    index,
+                )
+                .map(|point| point.shapes)
+            },
+            cx,
+        )
+    }
+
     /// Assemble into the same `(K,M)` type as P1. Each element and each
     /// quadrature point is a cancellation boundary. No partial result escapes.
     pub fn assemble(&self, cx: &Cx<'_>) -> Result<TetElasticAssembly, TetElasticError> {

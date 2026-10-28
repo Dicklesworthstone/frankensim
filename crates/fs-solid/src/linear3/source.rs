@@ -6,9 +6,14 @@
 //! Closed-matter inertia is always supplied from the original reference mass.
 
 mod expansion;
+pub(super) mod quadratic_thermal;
 mod stiffness;
 
 pub use expansion::{ThermalExpansionModel, ThermalExpansionSource};
+pub use quadratic_thermal::{
+    NodalThermalTemperatures, QuadraticThermalSource, QuadraticThermalSources,
+    ResolvedQuadraticThermalStrains,
+};
 pub use stiffness::{SolidStiffnessModel, ThermalStiffnessModel};
 
 use super::TetElasticError;
@@ -48,4 +53,3 @@ impl From<TetElasticError> for SolidMaterialError {
         Self::Solid(error)
     }
 }
-

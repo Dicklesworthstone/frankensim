@@ -86,6 +86,29 @@ bending on TET10/HEX20/HEX27, the analytic restrained energy of a zero-mean
 through-thickness gradient, and its signed geometric-stiffness quadratic form.
 Count/rule and late source mismatches refuse without publishing a partial load.
 
+`resolve_nodal_thermal_strains` connects actual nodal reference/current absolute
+temperatures to those same TET10/HEX20/HEX27 mechanics. It uses each family's
+native geometry/shapes and stiffness quadrature, interpolates temperature first,
+then calls the existing source-integrated isotropic or oriented orthotropic
+expansion owner. Nonconstant alpha is integrated over each local temperature
+path; nodal eigenstrains or endpoint alpha times temperature change are not
+substitutes. The original resolved expansion reference pins the card, selected
+claims, nonthermal coordinates and quantity conventions. A source selection is
+prepared once per element, and uniform nodal fields resolve their integral once
+per element. Returned original source receipts and accepted strains remain in
+native element/quadrature order and borrow directly into load/response/tangent
+methods. There is no second thermal law, shape kernel, reference-mass update or
+implicit elastic-tensor refresh. Invalid counts, source mismatch, unsupported
+temperature paths, nonpositive/nonfinite temperatures and higher-order
+interpolation overshoot outside source support refuse the whole result; no
+clamping hides those exits. Cancellation is checked per element and point.
+Temperature transfer from a different thermal mesh/space remains explicit,
+and this prescribed-temperature bridge does not claim caloric or reciprocal
+energy closure. `tests/quadratic_temperature_source.rs` checks nonconstant-alpha
+integration with a nonuniform stress-free reference, real gradient bending and
+joint geometry/material-frame rotation, exact constant-field load equivalence,
+source/count/domain refusal and positive-nodal temperature overshoot.
+
 The same TET10/HEX20/HEX27 problems expose `solve_thermal_response` for source-bound
 thermal equilibrium on a frozen reference mesh. The existing `fs-solver::CgState`
 and Jacobi preconditioner solve the assembled stiffness with bounded
