@@ -52,7 +52,8 @@ pub use gas_film::{
 };
 #[cfg(feature = "continuum")]
 pub use material::{
-    MaterialFluxError, MaterialFluxNumerics, MaterialFluxSolution, MaterialFluxSystem,
+    MaterialFluxError, MaterialFluxNumerics, MaterialFluxRheologyPoint, MaterialFluxRheologySample,
+    MaterialFluxRheologyStep, MaterialFluxSolution, MaterialFluxSystem,
 };
 #[cfg(feature = "continuum")]
 pub use ns::boundary::{

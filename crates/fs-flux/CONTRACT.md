@@ -141,6 +141,24 @@ adjoints.
   receipts remain available through `material()`. Invalid inputs, nonfinite
   outputs and failed convergence return `MaterialFluxError` without publishing
   a physical solution. The primitive singular-mesh panic contract still applies.
+- `MaterialFluxSystem::bdf1_rheology_step` resolves a retained `FluidTransport`
+  owner per triangle at the current objective shear rate. The caller receives
+  a `MaterialFluxRheologyPoint` containing the cell, centroid in metres, and
+  shear rate in inverse seconds, plus the reference transport. Its resolver
+  can capture prescribed endpoint temperature, composition and material fields;
+  those fields are fixed during the implicit solve. Viscosity is piecewise
+  constant per cell and the same evaluated `mu/rho` supplies the symmetric
+  volume stress and one-sided interface traction. One response is cached per
+  cell and exact rate, so repeated quadrature queries reuse the material owner.
+  The final residual assembly refreshes that cache at the accepted velocity.
+  `MaterialFluxRheologyStep` returns the physical solution, convergence
+  diagnostics and `MaterialFluxRheologySample` owners from that exact endpoint,
+  without a misleading homogeneous-viscosity accessor. All samples must retain
+  the reference density used for force, inertia, pressure and kinetic energy.
+  A changed density or original material-source refusal stops before another
+  linear solve; failure leaves the caller's previous state unchanged and
+  publishes no fallback solution. This method supplies no temperature evolution,
+  interface transport or viscoelastic memory.
 
 ## Invariants
 
@@ -275,6 +293,12 @@ density at different material densities, inverse-dynamic-viscosity Stokes flow
 under material swaps, density-weighted kinetic energy, shared-gas pressure
 changes in a manufactured accelerating BDF1 flow, the Picard creeping-flow
 limit, and invalid/stale material state, boundary/load and timestep refusal.
+The generalized-Newtonian adapter adds a two-temperature, two-material shear
+flow with an independently solved continuous physical traction, pressure and
+energy checks at two densities, endpoint rate/source ownership, cached query
+counts, and a frozen-reference-viscosity control. Immediate and later material
+source errors, density changes and nonlinear-budget exhaustion all refuse
+publication without changing the previous velocity.
 
 `tests/ale_gcl.rs`: flux-007 fixed mesh, rigid translation, affine
 expansion/shear, two-cell interior cancellation, replay, translation
@@ -291,14 +315,18 @@ power, and receipt-identity refusal.
 
 ## No-claim boundaries
 
-`MaterialFluxSystem` is a homogeneous, single-state, Newtonian incompressible
-material binding. It does not implement spatially varying density/viscosity,
-compressible gas dynamics, thermal evolution, or phase change. Gas thermodynamic
-pressure selects material properties; the flow pressure is a mean-zero gauge
-and must not be used as an EOS absolute pressure. Both BDF1 time levels use the
-same density; a density change during evolution needs an explicit conservative
-state transfer. The binding neither adds material source authority to raw
-transport tuples nor turns numerical convergence into physical validation.
+The base `MaterialFluxSystem` Stokes/Picard/IMEX methods bind one homogeneous
+Newtonian state; its generalized-Newtonian BDF1 method admits cellwise
+material/temperature/shear-dependent viscosity at constant reference density.
+Neither path implements spatially varying density, compressible gas dynamics,
+thermal evolution, phase change or material-interface advection. Gas
+thermodynamic pressure selects material properties; the flow pressure is a
+mean-zero gauge and must not be used as an EOS absolute pressure. Both BDF1
+time levels use the same density; a density change during evolution needs an
+explicit conservative state transfer. The binding neither adds material source
+authority to raw transport tuples nor turns numerical convergence into physical
+validation. Difficult constitutive laws may exhaust the Picard budget and
+return a typed refusal.
 
 The `lc` quarter-wave result is not an absolute-voltage, current, energy,
 coupling, quality-factor, loss, load, air-breakdown, corona, or streamer-length

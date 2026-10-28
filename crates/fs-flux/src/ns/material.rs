@@ -1,22 +1,26 @@
 //! Shared-material entry to the existing BDM1 incompressible solver.
 //!
-//! The primitive solver advances `du/dt + u.grad(u) - nu*lap(u) + grad(pi)
-//! = a`, where `nu = mu/rho`, `pi = p/rho`, and `a = force_density/rho`.
+//! The homogeneous entry advances `du/dt + u.grad(u) - nu*lap(u) + grad(pi)
+//! = a`. The rheological entry uses `-div(2 nu D(u))`, including one-sided
+//! viscous tractions at material interfaces. Both use `nu = mu/rho`,
+//! `pi = p/rho`, and `a = force_density/rho` with the SAME constant density.
 //! This binding owns those conversions together. It retains the original
 //! gas/liquid evaluation (and hence its source receipts) and a single immutable
 //! transport snapshot. A material swap never requires a solver-specific fit.
 //!
 //! Geometry is in metres, velocity in m/s, force density in N/m³, and time
-//! in seconds. This is a homogeneous Newtonian incompressible snapshot; it
-//! does not infer gas compressibility, phase validity, or thermal evolution.
+//! in seconds. The base binding is a homogeneous Newtonian incompressible
+//! snapshot. Its rheological BDF1 entry resolves cellwise endpoint material
+//! responses at the evolving strain, retaining their exact source owners.
+//! Neither entry infers gas compressibility, phase validity or thermal evolution.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use fs_sparse::Csr;
 
-use crate::ns::{FluxParams, FluxSolution, FluxSystem};
+use crate::ns::{FluxParams, FluxRheologyError, FluxSolution, FluxSystem};
 
 /// Numerical choices, separate from the material's physical viscosity.
 #[derive(Clone, Copy, Debug)]
@@ -61,6 +65,8 @@ pub enum MaterialFluxError {
         /// Last relative velocity update.
         update: f64,
     },
+    /// The fully implicit constitutive/momentum step refused its candidate.
+    Rheology(FluxRheologyError),
 }
 
 impl core::fmt::Display for MaterialFluxError {
@@ -79,6 +85,7 @@ impl core::fmt::Display for MaterialFluxError {
                 f,
                 "material flow: Picard did not converge in {iterations} iterations (update {update})"
             ),
+            Self::Rheology(error) => write!(f, "material flow: {error}"),
         }
     }
 }
@@ -107,6 +114,84 @@ pub struct MaterialFluxSolution {
     transport: FluidTransportState,
     pressure_pa: Vec<f64>,
     kinetic_energy_j_per_m: f64,
+}
+
+/// Physical coordinates for a cellwise generalized-Newtonian material query.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaterialFluxRheologyPoint {
+    /// Triangle index in the bound mesh.
+    pub cell: usize,
+    /// Cell centroid [m]. The endpoint material field is piecewise constant.
+    pub position_m: [f64; 2],
+    /// Objective strain invariant `sqrt(2 D:D)` [1/s] at this iterate.
+    pub shear_rate_per_s: f64,
+}
+
+/// Exact retained material response used at the accepted endpoint strain.
+pub struct MaterialFluxRheologySample<F> {
+    point: MaterialFluxRheologyPoint,
+    material: F,
+    transport: FluidTransportState,
+}
+
+impl<F> MaterialFluxRheologySample<F> {
+    /// Actual material query, including the endpoint shear rate.
+    #[must_use]
+    pub const fn point(&self) -> MaterialFluxRheologyPoint {
+        self.point
+    }
+    /// Original material owner and its source/property receipts.
+    #[must_use]
+    pub const fn material(&self) -> &F {
+        &self.material
+    }
+    /// Validated transport response read once from this owner.
+    #[must_use]
+    pub const fn transport(&self) -> &FluidTransportState {
+        &self.transport
+    }
+}
+
+/// Accepted fully implicit flow and the exact endpoint material field.
+/// Pressure and energy use the immutable reference density; viscosity comes
+/// from `samples()`, with one retained owner per triangle in mesh order.
+pub struct MaterialFluxRheologyStep<F> {
+    flow: MaterialFluxSolution,
+    samples: Vec<MaterialFluxRheologySample<F>>,
+    /// Coupled constitutive/convection iterations.
+    pub iterations: usize,
+    /// Last relative velocity update.
+    pub relative_update: f64,
+    /// Residual reassembled at the accepted velocity and material field.
+    pub nonlinear_residual: f64,
+}
+
+impl<F> MaterialFluxRheologyStep<F> {
+    /// Primitive discrete result, including its linear residual.
+    #[must_use]
+    pub const fn discrete(&self) -> &FluxSolution {
+        self.flow.discrete()
+    }
+    /// BDM1 velocity moments [m/s] for the next physical timestep.
+    #[must_use]
+    pub fn velocity_dofs(&self) -> &[f64] {
+        self.flow.velocity_dofs()
+    }
+    /// Mean-zero cell pressure differences [Pa].
+    #[must_use]
+    pub fn pressure_pa(&self) -> &[f64] {
+        self.flow.pressure_pa()
+    }
+    /// Kinetic energy per out-of-plane depth [J/m].
+    #[must_use]
+    pub const fn kinetic_energy_j_per_m(&self) -> f64 {
+        self.flow.kinetic_energy_j_per_m()
+    }
+    /// Endpoint material responses, indexed by triangle.
+    #[must_use]
+    pub fn samples(&self) -> &[MaterialFluxRheologySample<F>] {
+        &self.samples
+    }
 }
 
 impl MaterialFluxSolution {
@@ -297,6 +382,134 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> MaterialFluxSystem<'s, 'm, 'a, F> {
             },
         )?;
         self.physical_solution(solution)
+    }
+
+    /// Fully implicit BDF1 with source-backed generalized-Newtonian viscosity.
+    /// Loads are N/m³, velocity moments m/s, and the timestep seconds.
+    ///
+    /// `resolve` owns the endpoint temperature, composition and other material
+    /// context. Those fields must remain fixed during this solve. It receives
+    /// each triangle's centroid and current strain rate, and the immutable
+    /// reference transport snapshot. The returned viscosity is cellwise
+    /// constant; volume and both one-sided face traces use that SAME response.
+    /// Responses at unchanged cell/rate coordinates are reused, avoiding source
+    /// queries inside quadrature loops. No constitutive fit or floor is added.
+    ///
+    /// Every response must retain the reference density, since momentum,
+    /// pressure, energy and both time levels share one incompressible inertia.
+    /// A changed density requires a separate conservative state-transfer model.
+    /// Material owners at the accepted endpoint are retained without requery.
+    /// This method does not evolve temperature or add viscoelastic memory.
+    ///
+    /// # Errors
+    /// Refuses material/source errors, changed density, invalid inputs and
+    /// unconverged implicit steps. A source refusal stops before the next linear
+    /// solve; no fallback transport or partial solution is published. The
+    /// caller's previous velocity is never mutated.
+    /// # Panics
+    /// Inherits the primitive solver's singular-mesh/factorization contract.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bdf1_rheology_step<G: FluidTransport>(
+        &self,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundary_velocity: &dyn Fn([f64; 2]) -> [f64; 2],
+        previous_velocity: &[f64],
+        timestep_s: f64,
+        maximum_iterations: usize,
+        relative_tolerance: f64,
+        resolve: impl FnMut(MaterialFluxRheologyPoint, &FluidTransportState) -> Result<G, MaterialError>,
+    ) -> Result<MaterialFluxRheologyStep<G>, MaterialFluxError> {
+        let samples: RefCell<Vec<Option<MaterialFluxRheologySample<G>>>> =
+            RefCell::new((0..self.system.mesh.tris.len()).map(|_| None).collect());
+        let source_error = RefCell::new(None);
+        let resolve = RefCell::new(resolve);
+        let result = {
+            let law = |cell: usize, _: [f64; 2], rate: f64| {
+                if source_error.borrow().is_some() {
+                    // Complete only the in-progress assembly with finite
+                    // coefficients. The checked step stops before solving it.
+                    return self.params.nu;
+                }
+                let mut samples = samples.borrow_mut();
+                if let Some(sample) = &samples[cell]
+                    && sample.point.shear_rate_per_s.to_bits() == rate.to_bits()
+                {
+                    return sample.transport.kinematic_viscosity_m2_s();
+                }
+                let response = (|| {
+                    if !rate.is_finite() || rate < 0.0 {
+                        return Err(MaterialFluxError::Invalid(
+                            "physical shear rate must be finite and nonnegative",
+                        ));
+                    }
+                    let point = MaterialFluxRheologyPoint {
+                        cell,
+                        position_m: self.system.mesh.centroids[cell],
+                        shear_rate_per_s: rate,
+                    };
+                    let material = resolve.borrow_mut()(point, &self.transport)?;
+                    let transport = material.transport_state()?;
+                    if transport.density_kg_m3() != self.transport.density_kg_m3() {
+                        return Err(MaterialFluxError::Invalid(
+                            "rheological flow must retain its constant reference density",
+                        ));
+                    }
+                    Ok(MaterialFluxRheologySample {
+                        point,
+                        material,
+                        transport,
+                    })
+                })();
+                match response {
+                    Ok(sample) => {
+                        let nu = sample.transport.kinematic_viscosity_m2_s();
+                        samples[cell] = Some(sample);
+                        nu
+                    }
+                    Err(error) => {
+                        *source_error.borrow_mut() = Some(error);
+                        self.params.nu
+                    }
+                }
+            };
+            self.with_inputs(
+                force_density,
+                boundary_velocity,
+                |acceleration, velocity| {
+                    self.system.bdf1_rheology_step_checked(
+                        self.params,
+                        &law,
+                        acceleration,
+                        velocity,
+                        previous_velocity,
+                        timestep_s,
+                        maximum_iterations,
+                        relative_tolerance,
+                        &|| source_error.borrow().is_none(),
+                    )
+                },
+            )
+        };
+        if let Some(error) = source_error.into_inner() {
+            return Err(error);
+        }
+        let step = result?.map_err(MaterialFluxError::Rheology)?;
+        let samples = samples
+            .into_inner()
+            .into_iter()
+            .map(|sample| {
+                sample.ok_or(MaterialFluxError::Invalid(
+                    "accepted flow is missing a cell material response",
+                ))
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(MaterialFluxRheologyStep {
+            flow: self.physical_solution(step.solution)?,
+            samples,
+            iterations: step.iterations,
+            relative_update: step.relative_update,
+            nonlinear_residual: step.nonlinear_residual,
+        })
     }
 
     fn with_inputs<T>(
