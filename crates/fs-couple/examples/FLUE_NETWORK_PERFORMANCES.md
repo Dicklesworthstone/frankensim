@@ -440,9 +440,17 @@ response clock without consuming history capacity.
 This is an explicit **fixed-Reynolds response approximation**,
 `dz/dt = (U0(t)/b) A z + B v`, using the already integrated operator. It does not
 resolve changing Reynolds number, molecular decay at rest, jet spreading or the
-labium's hydrodynamic reaction. The minimum positive speed, finite response
-window and existing history budget remain binding; no register or acceptance
-gate is relaxed.
+labium's hydrodynamic reaction. The finite response window and existing history
+budget remain binding; no register or acceptance gate is relaxed.
+
+`MIN_SPEED` in `jet_limits` (this file and the network files) is the jet's declared
+validity edge U_min, not a stability limit (ruling 8132, bead pexfp.135.2). It sizes
+the retained convection history, so a smooth gesture may pass below it, at any control
+rate. In the onset, a lookup older than the first motion reads the rest state, which is
+exactly zero. Any other lookup below U_min that leaves the history (a release, or a dip)
+gives no jet deflection, and the windway's steady flow splits at zero deflection. The
+forced response takes the same state, its clock frozen as at rest, once its retained
+intervals no longer reach its window. The receipt names the edge.
 
 The bore declaration is shared with plate valves; see
 [PLATE_VALVE_PERFORMANCES.md](PLATE_VALVE_PERFORMANCES.md) for its numerical

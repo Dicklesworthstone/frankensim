@@ -50,7 +50,7 @@ fn g0_uniform_speed_keeps_original_hat_arithmetic_at_three_clocks() {
             for (k, g) in weights.iter().enumerate().skip(1) {
                 known += g * ring[(head + ring.len() - k) % ring.len()];
             }
-            let prepared = actual.prepare(12.0).unwrap();
+            let prepared = actual.prepare(12.0).unwrap().unwrap();
             assert_eq!(prepared.0.to_bits(), known.to_bits());
             assert_eq!(prepared.1.to_bits(), weights[0].to_bits());
             let velocity = input(sample);
@@ -67,8 +67,8 @@ fn g1_convective_intervals_reduce_to_the_uniform_response() {
     let mut interval = uniform.clone();
     interval.nonuniform_history = true;
     for sample in 0..(uniform.ring.len() + 17) {
-        let a = uniform.prepare(12.0).unwrap();
-        let b = interval.prepare(12.0).unwrap();
+        let a = uniform.prepare(12.0).unwrap().unwrap();
+        let b = interval.prepare(12.0).unwrap().unwrap();
         close(b.0, a.0);
         close(b.1, a.1);
         let velocity = input(sample);
@@ -93,7 +93,7 @@ fn g1_changing_speed_integrates_accepted_intervals_without_retiming_them() {
         intervals.push(JetInterval {
             start_velocity_m_s: previous, end_velocity_m_s: velocity, advance,
         });
-        let (known, current) = actual.prepare(bulk).unwrap();
+        let (known, current) = actual.prepare(bulk).unwrap().unwrap();
         let displacement = known + current * velocity;
         close(displacement, integral_oracle(&actual, &intervals));
 
@@ -124,7 +124,10 @@ fn g0_trials_refusals_and_rest_do_not_advance_accepted_convection() {
     let mut trial = original.clone();
     trial.prepare(24.0).unwrap();
     trial.prepare(0.0).unwrap();
-    for invalid in [f64::NAN, f64::INFINITY, -1.0, 0.5] {
+    // Below the declared minimum speed the retained intervals still reach the rest state
+    // (ruling 8132), so the trial is admitted.
+    assert!(trial.prepare(0.5).unwrap().is_some());
+    for invalid in [f64::NAN, f64::INFINITY, -1.0] {
         assert!(trial.prepare(invalid).is_err());
     }
     assert_eq!(trial.ring, original.ring);
@@ -137,7 +140,7 @@ fn g0_trials_refusals_and_rest_do_not_advance_accepted_convection() {
     one_rest.prepare(0.0).unwrap();
     one_rest.push(17.0); // A stopped jet admits no transverse forcing.
     for _ in 0..(2 * many_rest.ring.len()) {
-        assert_eq!(many_rest.prepare(0.0).unwrap(), (0.0, 0.0));
+        assert_eq!(many_rest.prepare(0.0).unwrap(), Some((0.0, 0.0)));
         many_rest.push(-19.0);
     }
     assert_eq!(many_rest.ring, original.ring);
@@ -145,4 +148,34 @@ fn g0_trials_refusals_and_rest_do_not_advance_accepted_convection() {
     assert_eq!(many_rest.used, original.used);
     assert_eq!(many_rest.last_velocity_m_s, 0.0);
     assert_eq!(many_rest.prepare(6.0).unwrap(), one_rest.prepare(6.0).unwrap());
+}
+
+#[test]
+fn g1_a_jet_below_the_minimum_reads_rest_until_its_ring_ends_then_freezes() {
+    // Ruling 8132. Held at half the declared 1 m/s minimum from rest, the response needs more
+    // intervals than the ring keeps. Until the ring fills, older input is the rest state, so a
+    // kernel whose ring covers the whole response (minimum 0.25 m/s) agrees bit for bit.
+    let mut short = kernel(48_000);
+    let mut long = ForcedJetKernel::new(
+        ForcedJetSpec { spacing: 0.5, window: 8.0 },
+        false, 0.001, 0.00225, 1.5e-5, 12.0, 0.25, 4096, 1.0 / 48_000.0,
+    ).unwrap();
+    let n = short.ring.len();
+    assert!(long.ring.len() > 2 * n);
+    for sample in 0..n {
+        let a = short.prepare(0.5).unwrap().expect("the ring still reaches the rest state");
+        let b = long.prepare(0.5).unwrap().unwrap();
+        assert_eq!((a.0.to_bits(), a.1.to_bits()), (b.0.to_bits(), b.1.to_bits()));
+        short.push(input(sample));
+        long.push(input(sample));
+    }
+    // The ring is full and its intervals fall short of the window: nothing is prepared and the
+    // clock freezes as at rest, so no later push enters the history.
+    let (ring, head) = (short.ring.clone(), short.head);
+    for sample in n..(n + 40) {
+        assert_eq!(short.prepare(0.5).unwrap(), None);
+        assert_eq!(short.current(), (0.0, 0.0));
+        short.push(input(sample));
+    }
+    assert_eq!((short.ring == ring, short.head, short.used), (true, head, n));
 }

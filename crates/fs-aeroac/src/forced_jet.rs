@@ -794,6 +794,20 @@ impl JetStepResponse {
         half_width_m: f64,
         sample_period_s: f64,
     ) -> Result<Vec<f64>, AeroacError> {
+        self.leading_hat_weights(centre_speed_m_s, half_width_m, sample_period_s, usize::MAX)
+            .map(|(_, weights)| weights)
+    }
+
+    /// The number of [`Self::hat_weights`] and the first `count` of them (all when there are
+    /// fewer), bit for bit. A caller that reads only the leading lags of a slow jet's long
+    /// response need not compute the rest.
+    pub fn leading_hat_weights(
+        &self,
+        centre_speed_m_s: f64,
+        half_width_m: f64,
+        sample_period_s: f64,
+        count: usize,
+    ) -> Result<(usize, Vec<f64>), AeroacError> {
         if !(centre_speed_m_s > 0.0 && half_width_m > 0.0 && sample_period_s > 0.0)
             || !(centre_speed_m_s * half_width_m * sample_period_s).is_finite()
         {
@@ -803,7 +817,8 @@ impl JetStepResponse {
         }
         let c = half_width_m / centre_speed_m_s;
         let d = sample_period_s / c;
-        let taps = (self.window() / d).ceil() as usize + 2;
+        let all = ((self.window() / d).ceil() as usize).saturating_add(2);
+        let taps = all.min(count);
         let mut out = Vec::with_capacity(taps);
         for k in 0..taps {
             let kf = k as f64;
@@ -816,6 +831,6 @@ impl JetStepResponse {
                 what: "forced jet weights",
             });
         }
-        Ok(out)
+        Ok((all, out))
     }
 }

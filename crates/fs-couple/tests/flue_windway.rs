@@ -107,15 +107,18 @@ fn pressure_controls_and_schedule_admission_use_the_actual_viscous_speed() {
     assert!(FlueOutletPerformance::new(voice(g, 0.05).with_viscous_windway(LENGTH).unwrap(),
         schedule(200.0), config()).is_ok());
     // Conversely, an ideal 1 Pa jet fits the old history while viscosity
-    // makes its real transit too long. Do not silently clamp that delay.
+    // makes its real transit too long. Do not silently clamp that delay: the
+    // jet keeps its real transit, below the declared 1 m/s minimum speed, where
+    // the voice reads its onset's rest state or takes the declared state (ruling 8132).
     assert!(voice(g, 0.3).validate_blowing_pressure(1.0).is_ok());
-    let old_speed = viscous.jet_speed_m_s();
-    assert!(viscous.apply(FlueControl::SetBlowingPressure(1.0)).is_err());
-    assert_eq!(viscous.jet_speed_m_s(), old_speed);
+    viscous.apply(FlueControl::SetBlowingPressure(1.0)).unwrap();
+    let speed = viscous.jet_speed_m_s();
+    assert!(speed < viscous.minimum_jet_speed_m_s());
+    assert!((viscous.transit_s() * speed * viscous.island().convection_ratio - 0.004).abs() < 1e-15);
     assert_eq!(viscous.samples_rendered(), 0);
     assert_eq!(viscous.network().unwrap().stored_energy_j(), 0.0);
     assert!(FlueOutletPerformance::new(voice(g, 0.3).with_viscous_windway(LENGTH).unwrap(),
-        schedule(1.0), config()).is_err());
+        schedule(1.0), config()).is_ok());
     viscous.apply(FlueControl::SetBlowingPressure(0.0)).unwrap();
     assert_eq!(viscous.jet_speed_m_s(), 0.0);
     assert!(viscous.transit_s().is_infinite());
@@ -148,9 +151,12 @@ fn cold_attachment_validates_length_and_already_held_pressure() {
     let mut late = voice(gas(1.0), 0.3);
     late.step_block(&mut [0.0]).unwrap();
     assert!(late.with_viscous_windway(LENGTH).is_err());
-    let mut too_slow = voice(gas(1.0), 0.3);
-    too_slow.apply(FlueControl::SetBlowingPressure(1.0)).unwrap();
-    assert!(too_slow.with_viscous_windway(LENGTH).is_err());
+    // A held pressure whose viscous jet is below the declared minimum speed attaches: that
+    // speed is a validity edge, not a refusal (ruling 8132).
+    let mut slow = voice(gas(1.0), 0.3);
+    slow.apply(FlueControl::SetBlowingPressure(1.0)).unwrap();
+    let slow = slow.with_viscous_windway(LENGTH).unwrap();
+    assert!(slow.jet_speed_m_s() > 0.0 && slow.jet_speed_m_s() < slow.minimum_jet_speed_m_s());
 }
 
 #[test]

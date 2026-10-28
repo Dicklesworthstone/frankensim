@@ -310,6 +310,12 @@ fn hat_weights_are_causal_and_close_on_the_held_gain() {
         g.last().expect("taps").abs() < 1e-12 * sum.abs(),
         "weights must end after the window"
     );
+    // A caller that reads only the leading lags gets the same count and the same bits.
+    let (all, leading) = s
+        .leading_hat_weights(speed, width, period, 7)
+        .expect("leading weights");
+    assert_eq!(all, g.len());
+    assert_eq!(leading[..], g[..7]);
     // Nothing precedes the current sample by construction. SnowySummit's
     // admission check (ruling 7376) asks the same of the transfer: sampled on
     // [0, 10] b/U0 and inverted, band truncation rings before time zero for

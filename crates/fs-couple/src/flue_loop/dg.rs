@@ -43,8 +43,10 @@ fn poll(gate: &CancelGate) -> Result<(), FlueError> {
 pub struct FlueDgSpec {
     /// The original bounded cold bore and exact propagator, prepared once.
     pub load: DgPortLoad,
-    /// Positive jet speed floor for the declared time-history extent [m/s].
-    /// Zero blowing and the existing unsteady windway's release remain allowed.
+    /// Declared minimum jet speed U_min [m/s]; it sizes the retained time history. Below it, a
+    /// jet whose lookup would read motion older than that history carries no deflection, and the
+    /// windway's steady flow splits at zero deflection (ruling 8132). A validity edge, not a
+    /// stability limit. Zero blowing and the unsteady windway's release keep their own paths.
     pub minimum_jet_speed_m_s: f64,
     /// Incompressible source Mach ceiling, in (0, 0.3].
     pub maximum_jet_mach: f64,
@@ -82,7 +84,6 @@ pub struct FlueDgFrame {
 pub struct FlueDg {
     load: DgPortLoad,
     characteristic_impedance_pa_s_m3: f64,
-    minimum_jet_speed_m_s: f64,
     maximum_jet_mach: f64,
     last: Option<FlueDgFrame>,
 }
@@ -203,12 +204,12 @@ impl FlueDg {
         Ok(incoming_pressure_pa)
     }
 
-    pub(super) fn validate_jet_speed(&self, speed: f64, blowing: bool) -> Result<(), FlueError> {
+    // The voice owns the declared minimum speed and its state below it (ruling 8132).
+    pub(super) fn validate_jet_speed(&self, speed: f64) -> Result<(), FlueError> {
         if !speed.is_finite()
-            || (blowing && speed < self.minimum_jet_speed_m_s)
             || speed > self.maximum_jet_mach * self.load.duct().inlet_gas().sound_speed
         {
-            return Err(invalid("DG flue exceeds its declared low-Mach or convection-history domain"));
+            return Err(invalid("DG flue exceeds its declared low-Mach jet domain"));
         }
         Ok(())
     }
@@ -282,7 +283,6 @@ impl FlueVoice {
                 Ok(FlueResonator::Dg(Box::new(FlueDg {
                     load,
                     characteristic_impedance_pa_s_m3: zc,
-                    minimum_jet_speed_m_s: minimum,
                     maximum_jet_mach,
                     last: None,
                 })))

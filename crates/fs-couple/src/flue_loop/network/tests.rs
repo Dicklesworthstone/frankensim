@@ -142,8 +142,12 @@ fn network_preserves_block_partition_and_rejects_stale_geometry_or_jet_limits() 
     assert_eq!(one.network().unwrap().last_frame(), many.network().unwrap().last_frame());
     let old = one.jet_speed_m_s();
     assert!(one.apply(FlueControl::SetBlowingPressure(1.0e9)).is_err());
-    assert!(one.apply(FlueControl::SetBlowingPressure(1.0e-10)).is_err());
     assert_eq!(one.jet_speed_m_s(), old);
+    // Ruling 8132: a jet below the declared minimum speed is admitted. Past the onset, its
+    // lookup beyond the retained history takes the declared state instead of refusing.
+    one.apply(FlueControl::SetBlowingPressure(1.0e-10)).unwrap();
+    one.step_block(&mut a[..1]).unwrap();
+    assert_eq!(one.diagnostics().last().unwrap().below_speed_edge_samples, 1);
     one.apply(FlueControl::SetBlowingPressure(0.0)).unwrap();
     one.step_block(&mut a[..1]).unwrap();
     assert!(one.network().unwrap().stored_energy_j() > 0.0);

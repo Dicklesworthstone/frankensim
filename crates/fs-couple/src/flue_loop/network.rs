@@ -41,8 +41,10 @@ pub struct FlueNetworkSpec {
     /// Selected distributed viscous/thermal wall laws; empty means no such loss.
     /// Existing wide-tube applicability and sampled-error gates are unchanged.
     pub viscothermal: Vec<ViscothermalSectionSpec>,
-    /// Lowest strictly positive jet speed [m/s] admitted during performance.
-    /// Zero blowing is independently admitted and preserves stored vibration.
+    /// Declared minimum jet speed U_min [m/s]; it sizes the retained convection history. Below
+    /// it, a jet whose lookup would read motion older than that history carries no deflection,
+    /// and the windway's steady flow splits at zero deflection (ruling 8132). A validity edge,
+    /// not a stability limit. Zero blowing keeps its own path and preserves stored vibration.
     pub minimum_jet_speed_m_s: f64,
     /// Explicit incompressible-jet Mach ceiling, in (0, 0.3].
     pub maximum_jet_mach: f64,
@@ -293,14 +295,16 @@ impl FlueResonator {
             Self::Network(_) | Self::Dg(_) => Err(invalid("a physical flue bore has no TMM fingering bank")),
         }
     }
-    pub(super) fn validate_jet_speed(&self, speed: f64, blowing: bool) -> Result<(), FlueError> {
-        if let Self::Dg(duct) = self { return duct.validate_jet_speed(speed, blowing); }
+    // A positive jet below the declared minimum speed is admitted: the voice reads the rest state
+    // or takes the declared state there (ruling 8132).
+    pub(super) fn validate_jet_speed(&self, speed: f64) -> Result<(), FlueError> {
+        if let Self::Dg(duct) = self { return duct.validate_jet_speed(speed); }
         if let Self::Network(n) = self {
             let source = &n.source;
             let inlet = source.graph.inlet_section_index().map_err(physical)?;
-            if !speed.is_finite() || (blowing && speed < source.minimum_jet_speed_m_s)
+            if !speed.is_finite()
                 || speed > source.maximum_jet_mach * source.gases[inlet].sound_speed {
-                return Err(invalid("blowing pressure exceeds the declared convection-history or low-Mach jet domain"));
+                return Err(invalid("blowing pressure exceeds the declared low-Mach jet domain"));
             }
         }
         Ok(())
@@ -575,9 +579,7 @@ impl FlueVoice {
             return Err(invalid("blowing pressure must be finite and non-negative"));
         }
         let speed = self.speed_at_pressure(pressure_pa)?;
-        // The unsteady source transports feedback on a spatial mesh, so cold
-        // targets and transient release may be below the old time-history floor.
-        self.line.validate_jet_speed(speed, pressure_pa > 0.0 && self.unsteady_windway.is_none())?;
+        self.line.validate_jet_speed(speed)?;
         Ok(speed)
     }
 }

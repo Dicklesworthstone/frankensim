@@ -137,6 +137,12 @@ fn radiation_provenance(radiation: Option<BaffledRadiationLoad>) -> String {
     } else {String::new()}
 }
 
+// The flue jet's declared speed edge (ruling 8132): `jet_limits` MIN_SPEED and its state below.
+fn jet_speed_edge_provenance(voice: &fs_couple::flue_loop::FlueVoice) -> String {
+    format!(",\"jet_speed_edge\":{{\"minimum_jet_speed_m_s\":{:e},\"scope\":\"declared validity edge, not a stability limit; below it the onset reads the rest state before the first motion, and a lookup beyond the retained history carries no jet deflection, so the windway flow splits at zero deflection\"}}",
+        voice.minimum_jet_speed_m_s())
+}
+
 fn flue_wall_provenance(p: &FlueFilePerformance) -> String {
     use fs_couple::bernoulli_aperture::wall::material::AxialConstraint;
     let walls = p.renderer().voice().network().expect("file admits graph").material_walls();
@@ -734,7 +740,8 @@ pub(super) fn flue_dg_provenance(
     let pressure_observation = format!("{pressure_observation},\"observer_gas\":{},\"mouth_observer_gas\":{}",
         super::duct_metadata::observer_gas_provenance(p.renderer().observer_gas()),
         super::duct_metadata::observer_gas_provenance(p.renderer().mouth_observer_gas()));
-    let source_json = format!("\"flue_dg_input\":{{\"schema\":\"frankensim-flue-dg-performance-v1\",\"blake3\":\"{}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_authority\":\"{}\",\"compiled_controls\":{},\"propagator\":\"original-exact-dg\",\"operator_identity\":\"{}\",\"total_dofs\":{},\"length_m\":{:e},\"inlet_area_m2\":{:e},\"outlet_area_m2\":{:e},\"inlet_gas\":{inlet_gas},\"outlet_gas\":{outlet_gas},\"wall_band_rad_s\":{band},\"wall_owner\":{wall},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"pressure_point\":\"{pressure_point}\",\"model_scope\":\"original estimated jet and causal material-gas DG bore; solid wall image explicitly recorded; taper uses local-cylinder Webster approximation; source, spatial and nonlinear time convergence remain separate; no resolved turbulence or measured flute qualification\"{pressure_observation}{radiation}{field}{gas_sources}{solid_wall}}}",
+    let edge_json = jet_speed_edge_provenance(voice);
+    let source_json = format!("\"flue_dg_input\":{{\"schema\":\"frankensim-flue-dg-performance-v1\",\"blake3\":\"{}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_authority\":\"{}\",\"compiled_controls\":{},\"propagator\":\"original-exact-dg\",\"operator_identity\":\"{}\",\"total_dofs\":{},\"length_m\":{:e},\"inlet_area_m2\":{:e},\"outlet_area_m2\":{:e},\"inlet_gas\":{inlet_gas},\"outlet_gas\":{outlet_gas},\"wall_band_rad_s\":{band},\"wall_owner\":{wall},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"pressure_point\":\"{pressure_point}\",\"model_scope\":\"original estimated jet and causal material-gas DG bore; solid wall image explicitly recorded; taper uses local-cylinder Webster approximation; source, spatial and nonlinear time convergence remain separate; no resolved turbulence or measured flute qualification\"{pressure_observation}{radiation}{field}{gas_sources}{solid_wall}{edge_json}}}",
         i.input_hash.to_hex(), i.jet_card_source, i.jet_card_hash, p.card().authority.label(),
         i.compiled_controls, duct.operator_identity().to_hex(), duct.total_dofs(),
         duct.total_length(), duct.inlet_area_m2(), duct.outlet_area_m2(),
@@ -751,11 +758,11 @@ pub(super) fn flue_provenance(p: &FlueFilePerformance) -> String {
     let exterior = renderer.radiation_input().expect("file binds exterior explicitly").exterior;
     let geometry = p.geometry();
     let island = renderer.voice().island();
-    // Named only when the opt-in forced jet replaces the authored-gain chain, so every other
-    // receipt keeps its bytes.
+    // Named only when the opt-in forced jet replaces the authored-gain chain.
     let jet_json = renderer.voice().forced_jet().map_or_else(String::new, |jet| format!(
         ",\"jet_response\":{{\"kind\":\"forced-bickley\",\"spacing_b\":{:e},\"window_b_over_u0\":{:e},\"half_width_m\":{:e},\"centre_over_bulk\":{:e},\"reynolds\":{:e}}}",
         jet.spec().spacing, jet.spec().window, jet.half_width_m(), jet.centre_over_bulk(), jet.reynolds()));
+    let edge_json = jet_speed_edge_provenance(renderer.voice());
     let windway_json = if let Some(flow) = renderer.voice().unsteady_windway() {
         let channel = flow.channel();
         let spec = channel.spec();
@@ -873,7 +880,7 @@ pub(super) fn flue_provenance(p: &FlueFilePerformance) -> String {
     } else if window_radiation.is_some() {
         "same-sample window radiation from the head's rigid outer cylinder; optional rectangular mouth is observation only"
     } else { "optional rectangular mouth is observation only" };
-    let source_json = format!("\"flue_input\":{{\"schema\":\"{FLUE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_claim\":\"{}\",\"jet_card_authority\":\"{}\",\"composition_authority\":\"EstimateOnly\",\"compiled_controls\":{},\"represented_length_m\":{actual_length:e},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"labium_offset_m\":{:e},\"jet_angle_rad\":{:e},\"mouth_loss_rel\":{:e},\"authored_displacement_gain\":{:e}{jet_json},\"authored_seed_amplitude_rel\":{:e},\"gas_temperature_k\":{:e},\"gas_pressure_pa\":{:e},\"gas_density_kg_m3\":{:e},\"gas_sound_speed_m_s\":{:e},\"gas_dynamic_viscosity_pa_s\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e},\"viscothermal_sections\":{},\"phase_band_hz\":{:e},\"summed_phase_error_bound_rad\":{phase_error:e},\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"radiation_feedback_added\":{reaction},\"radiation_bindings\":[{radiation_json}],\"model_scope\":\"estimated tonal jet and supplied cylindrical graph; {observation_scope}; {mouth_scope}; wall image separately declared; no full shell dynamics, mouth-to-terminal mutual reaction, {radiation_exclusion}, resolved turbulence or measured flute/SPL claim\"{gas_sources}{windway_json}{mouth_loss_json}{mouth_radiation_json}{mouth_reaction_json}{window_json}{window_radiation_json}{duct_json}{wall_json}{boundary_json}{mimo_json}{opening_loss_json}}}",
+    let source_json = format!("\"flue_input\":{{\"schema\":\"{FLUE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_claim\":\"{}\",\"jet_card_authority\":\"{}\",\"composition_authority\":\"EstimateOnly\",\"compiled_controls\":{},\"represented_length_m\":{actual_length:e},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"labium_offset_m\":{:e},\"jet_angle_rad\":{:e},\"mouth_loss_rel\":{:e},\"authored_displacement_gain\":{:e}{jet_json}{edge_json},\"authored_seed_amplitude_rel\":{:e},\"gas_temperature_k\":{:e},\"gas_pressure_pa\":{:e},\"gas_density_kg_m3\":{:e},\"gas_sound_speed_m_s\":{:e},\"gas_dynamic_viscosity_pa_s\":{:e},\"exterior_density_kg_m3\":{:e},\"exterior_sound_speed_m_s\":{:e},\"viscothermal_sections\":{},\"phase_band_hz\":{:e},\"summed_phase_error_bound_rad\":{phase_error:e},\"receiver_position_m\":[{:e},{:e},{:e}],\"receiver_band_hz\":{:e},\"radiation_feedback_added\":{reaction},\"radiation_bindings\":[{radiation_json}],\"model_scope\":\"estimated tonal jet and supplied cylindrical graph; {observation_scope}; {mouth_scope}; wall image separately declared; no full shell dynamics, mouth-to-terminal mutual reaction, {radiation_exclusion}, resolved turbulence or measured flute/SPL claim\"{gas_sources}{windway_json}{mouth_loss_json}{mouth_radiation_json}{mouth_reaction_json}{window_json}{window_radiation_json}{duct_json}{wall_json}{boundary_json}{mimo_json}{opening_loss_json}}}",
         i.jet_card_source,i.jet_card_hash,p.card().claim.kind(),p.card().authority.label(),i.compiled_controls,
         geometry.flue_width_m,geometry.flue_height_m,geometry.cut_up_m,geometry.labium_offset_m,
         geometry.jet_angle_rad,geometry.mouth_loss_rel,island.displacement_gain,island.seed_amplitude_rel,

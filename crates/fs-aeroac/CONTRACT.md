@@ -138,6 +138,9 @@ scope law, pinned as data and by test).
   the audio-rate convolution weights in seconds for a mouth velocity
   linear between samples (`g_0` multiplies the current sample, the
   weights end one sample after the window and sum to the held gain).
+  `leading_hat_weights` returns their count and only the first `count`
+  of them, bit for bit, for a slow jet whose caller reads only its
+  leading lags.
   `interval_hat_weights` integrates this SAME interpolant's derivative
   against both physical-time endpoint hats on a supplied convective interval.
   It returns newer/older weights in seconds, leaves the held tail inactive,

@@ -2742,8 +2742,9 @@ None.
   sample; at 48 kHz over flue 0.1-1 mm, cut-up 0.06-0.8 mm and
   100-4000 Pa, only the 5.3 b and 10.7 b stations at 4 kPa reach it); a
   cut-up shorter than one grid cell of the response refuses at attach; a
-  retained history at the slowest admitted jet beyond the declared budget
-  refuses; so do a non-positive reference pressure, the unsteady windway
+  retained history at the declared minimum speed beyond the declared budget
+  refuses; so do a non-positive reference pressure or one whose jet is below
+  that minimum, the unsteady windway
   (its jet starts from rest, where this frozen-time response needs
   unbounded history), a windway attached after it, and the Nolle/Price
   transfer beside it.
@@ -2756,6 +2757,29 @@ None.
   (`fj_001_forced_jet_*`, `fg_003_forced_jet_*`,
   `gas_direction_amount_forced_jet.rs`) carry the measured registers. The
   default switches only when all four pass with their assertions unchanged.
+
+  JET SPEED EDGE (ruling 8132, bead pexfp.135.2): the declared minimum jet
+  speed U_min (`jet_limits`, or 1 m/s on the legacy TMM image) sizes the
+  retained history, so every lookup at or above it is retained. A slower
+  positive jet is admitted and its delay is never clamped. In the onset,
+  before the jet first reaches U_min, a lookup beyond the history that
+  precedes the voice's first motion reads the rest state. That is exactly
+  zero at any delay: unbounded history at zero memory, bit for bit. The
+  forced jet's response reads input older than its first accepted interval
+  the same way. Its intervals keep their own advances, so a release usually
+  still reaches the window; once a jet below U_min fills the ring with
+  intervals that do not, the forced clock freezes as at rest and the voice
+  takes the declared state. Any other lookup beyond the history below
+  U_min (a release, a dip mid-note, an onset slower than its own transit)
+  takes the declared state: no deflection, so the windway's steady flow
+  splits at zero deflection, `Q = q_max/2 (1 + tanh(-y0/b))`, and its ramp
+  source stays.
+  `FlueBlockDiag::below_speed_edge_samples` counts those samples. U_min is
+  a declared validity edge, not a stability limit: below it the jet carries
+  at most U_min/U of the held flow, and the parallel Bickley jet stays
+  unstable down to Re ~ 4 (Tatsumi & Kakutani 1958). Zero blowing keeps its
+  own path; the Nolle/Price transfer and the unsteady windway keep their
+  own histories.
 
   Quasi-steady convection reads mouth velocity at the actual retarded time
   `t_n - tau`: the newest committed history entry is `t_(n-1)`, not `t_n`.

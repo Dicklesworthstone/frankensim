@@ -23,6 +23,9 @@
 //! At zero speed the jet output/forcing is disabled and this response's clock freezes;
 //! molecular decay of a stopped jet is outside this fixed-Re image. A trajectory with
 //! constant positive speed from rest retains the original cached hat arithmetic exactly.
+//! Any positive speed is admitted (ruling 8132, bead pexfp.135.2): input older than the first
+//! accepted interval is the rest state, and a jet whose retained intervals cannot reach the
+//! window freezes this clock as at rest while its voice takes the declared state.
 //!
 //! Not claimed:
 //! - The base jet's own spreading over the cut-up.
@@ -110,7 +113,6 @@ pub struct ForcedJetKernel {
     centre_over_bulk: f64,
     reynolds: f64,
     dt: f64,
-    minimum_bulk_m_s: f64,
     ring: Vec<JetInterval>,
     head: usize,
     used: usize,
@@ -120,6 +122,9 @@ pub struct ForcedJetKernel {
     nonuniform_history: bool,
     prepared_bulk_bits: u64,
     prepared_advance: f64,
+    // The response's weight count at the cached speed; `weights` holds at most the ring's
+    // length of its leading weights.
+    weight_count: usize,
     weights: Vec<f64>,
     weights_bulk_bits: u64,
     current: (f64, f64),
@@ -213,7 +218,6 @@ impl ForcedJetKernel {
             centre_over_bulk,
             reynolds,
             dt: sample_period_s,
-            minimum_bulk_m_s,
             ring: vec![JetInterval::default(); slowest],
             head: 0,
             used: 0,
@@ -223,6 +227,7 @@ impl ForcedJetKernel {
             nonuniform_history: false,
             prepared_bulk_bits: 0,
             prepared_advance: 0.0,
+            weight_count: 0,
             weights: Vec::new(),
             weights_bulk_bits: 0,
             current: (0.0, 0.0),
@@ -271,26 +276,34 @@ impl ForcedJetKernel {
     ///
     /// A still jet emits no displacement and does not advance this fixed-Re clock.
     ///
+    /// Any positive speed is admitted (ruling 8132). Intervals older than every accepted one
+    /// precede the jet's first motion and read the rest state, exactly zero, so the response is
+    /// exact whenever the retained intervals reach either its window or past every accepted
+    /// interval: unbounded history at zero memory. Otherwise (a jet slower than the declared
+    /// minimum for longer than the ring retains, or one too slow to advance this clock) this
+    /// returns `None`, prepares no displacement and freezes the clock as at rest; the voice then
+    /// takes its declared state below its minimum speed, or refuses.
+    ///
     /// # Errors
-    /// Nonfinite/negative speed, a positive speed below the declared minimum,
-    /// or nonfinite response. A refusal leaves the accepted history unchanged.
-    pub fn prepare(&mut self, bulk_m_s: f64) -> Result<(f64, f64), &'static str> {
+    /// Nonfinite/negative speed or nonfinite response. A refusal leaves the accepted history
+    /// unchanged.
+    pub fn prepare(&mut self, bulk_m_s: f64) -> Result<Option<(f64, f64)>, &'static str> {
         if !bulk_m_s.is_finite() || bulk_m_s < 0.0 {
             return Err("forced jet speed must be finite and nonnegative");
         }
+        self.prepared_bulk_bits = 0;
+        self.prepared_advance = 0.0;
+        self.current = (0.0, 0.0);
         if bulk_m_s == 0.0 {
-            self.prepared_bulk_bits = 0;
-            self.prepared_advance = 0.0;
-            self.current = (0.0, 0.0);
-            return Ok(self.current);
-        }
-        if bulk_m_s < self.minimum_bulk_m_s {
-            return Err("jet is slower than its retained forced-jet history");
+            return Ok(Some(self.current));
         }
         let bits = bulk_m_s.to_bits();
         let advance = self.centre_over_bulk * bulk_m_s * self.dt / self.half_width_m;
-        if !advance.is_finite() || advance <= 0.0 {
+        if !advance.is_finite() {
             return Err("forced jet convective advance must be finite and positive");
+        }
+        if advance <= 0.0 {
+            return Ok(None);
         }
         let n = self.ring.len();
         let current = if !self.nonuniform_history
@@ -298,16 +311,22 @@ impl ForcedJetKernel {
         {
             // Keep the original summation and interpolation for a uniformly moving jet.
             if bits != self.weights_bulk_bits || self.weights.is_empty() {
-                self.weights = self.step
-                    .hat_weights(self.centre_over_bulk * bulk_m_s, self.half_width_m, self.dt)
+                // No read reaches past the ring, so at most its length is weighted.
+                (self.weight_count, self.weights) = self.step
+                    .leading_hat_weights(self.centre_over_bulk * bulk_m_s, self.half_width_m,
+                        self.dt, n)
                     .map_err(refusal)?;
                 self.weights_bulk_bits = bits;
             }
-            if self.weights.len() > n {
-                return Err("jet is slower than its retained forced-jet history");
-            }
+            let taps = if self.weight_count <= n {
+                self.weight_count
+            } else if self.used < n {
+                self.weight_count.min(self.used + 1)
+            } else {
+                return Ok(None);
+            };
             let mut known = 0.0;
-            for (k, g) in self.weights.iter().enumerate().skip(1) {
+            for (k, g) in self.weights.iter().enumerate().take(taps).skip(1) {
                 known += g * self.ring[(self.head + n - k) % n].end_velocity_m_s;
             }
             (known, self.weights[0])
@@ -324,6 +343,9 @@ impl ForcedJetKernel {
                 known += newer * interval.end_velocity_m_s + older * interval.start_velocity_m_s;
                 age += interval.advance;
             }
+            if age < self.step.window() && self.used == n {
+                return Ok(None);
+            }
             (known, current_weight)
         };
         if !current.0.is_finite() || !current.1.is_finite() {
@@ -332,7 +354,7 @@ impl ForcedJetKernel {
         self.prepared_bulk_bits = bits;
         self.prepared_advance = advance;
         self.current = current;
-        Ok(current)
+        Ok(Some(current))
     }
 
     /// The prepared sample's known displacement [m] and current-velocity weight [s]:
@@ -343,8 +365,9 @@ impl ForcedJetKernel {
     }
 
     /// Commit the prepared interval and its accepted exit velocity [m/s].
-    /// The coupled voice validates velocity before this publication. At rest,
-    /// no velocity is injected; old intervals retain their convective ages.
+    /// The coupled voice validates velocity before this publication. At rest, or after a
+    /// [`Self::prepare`] that returned `None`, no velocity is injected; old intervals retain
+    /// their convective ages.
     pub fn push(&mut self, velocity_m_s: f64) {
         if self.prepared_advance == 0.0 {
             self.nonuniform_history |= self.used != 0;

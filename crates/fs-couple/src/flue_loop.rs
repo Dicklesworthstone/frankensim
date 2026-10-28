@@ -242,6 +242,13 @@ fn retarded_velocity(history: &[f64], head: usize, delay_samples: f64)
     Ok(value)
 }
 
+// Whether both points of a retarded lookup `delay_samples` (at least one step) back lie before the
+// first nonzero history entry, `moving` entries back. A cold voice's entries before its first
+// motion are exactly zero, so such a lookup reads the rest state at any delay (ruling 8132).
+fn precedes_motion(delay_samples: f64, moving: u64) -> bool {
+    delay_samples >= 1.0 && (delay_samples-1.0).floor() >= moving as f64
+}
+
 #[derive(Clone, Copy)]
 struct JetStepCoefficients {
     q_max: f64,
@@ -512,6 +519,9 @@ pub struct FlueBlockDiag {
     pub reynolds_range: (f64, f64),
     /// Whether this block ran inside the card's Reynolds band.
     pub inside_card_validity: bool,
+    /// Samples of this block in the declared state below the minimum jet speed (ruling 8132):
+    /// no deflection, and the windway's steady flow split at zero deflection.
+    pub below_speed_edge_samples: usize,
     /// Jet transit delay [s].
     pub transit_s: f64,
     /// Zero-crossing lock estimate of the wave launched into the pipe [Hz].
@@ -582,6 +592,11 @@ pub struct FlueVoice {
     // Mouth transverse velocity history (ring, oldest overwritten).
     history: Vec<f64>,
     head: usize,
+    // History entries since the first nonzero one; every older entry is exactly zero.
+    history_moving: u64,
+    // Whether an accepted sample's jet has reached the declared minimum speed; before that the
+    // voice is in its onset.
+    reached_minimum_speed: bool,
     q_prev: f64,
     flow_prev: f64,
     // Jet amplification band: two cascaded first-order sections at the
@@ -602,7 +617,8 @@ pub struct FlueVoice {
     // Opt-in forced-jet kernel (see `forced_jet`): the labium displacement from the retained exit
     // velocities. None = the island's own chain.
     forced: Option<forced_jet::ForcedJetKernel>,
-    // Slowest positive bulk jet and most retained jet-response input samples this voice admits.
+    // Declared minimum bulk jet speed, which sizes the retained history, and most retained
+    // jet-response input samples.
     minimum_jet_speed_m_s: f64,
     max_jet_history_samples: usize,
     // Mouth loop coefficients.
@@ -678,7 +694,8 @@ impl FlueVoice {
         let resistance = geometry.mouth_loss_rel * rho * c / s_m;
         let dt = 1.0 / f64::from(sample_rate_hz);
         // Retain the legacy 1 m/s history for TMM; the graph supplies its
-        // explicit minimum and refuses slower positive jets instead of clamping.
+        // explicit minimum. A slower positive jet never clamps its delay: see
+        // `advance_block` for the rest state and the declared state below it.
         let max_delay = geometry.cut_up_m / (island.convection_ratio * minimum_jet_speed);
         let history_samples = (max_delay / dt).ceil().max(2.0);
         if !history_samples.is_finite() || history_samples > max_history.saturating_sub(2) as f64
@@ -715,6 +732,8 @@ impl FlueVoice {
             jet_speed_m_s: 0.0,
             history: vec![0.0; history_len],
             head: 0,
+            history_moving: 0,
+            reached_minimum_speed: false,
             q_prev: 0.0,
             flow_prev: 0.0,
             band_state: [0.0; 2],
@@ -822,6 +841,13 @@ impl FlueVoice {
         self.jet_speed_m_s
     }
 
+    /// Declared minimum bulk jet speed U_min [m/s] (ruling 8132). It sizes the retained history.
+    /// Below it, a jet whose lookup would read motion older than that history carries no
+    /// deflection, and the windway's steady flow splits at zero deflection. It is a validity
+    /// edge, not a stability limit.
+    #[must_use]
+    pub const fn minimum_jet_speed_m_s(&self) -> f64 { self.minimum_jet_speed_m_s }
+
     /// Attach a finite, uniform rectangular windway before any accepted sample.
     /// Its actual exit width/height and retained inlet gas determine
     /// `p = 12 mu L v/h^2 + rho v^2/2`; the shared slit owner solves for bulk
@@ -838,7 +864,7 @@ impl FlueVoice {
     ///
     /// # Errors
     /// Invalid/unrepresentable geometry, repeated/late attachment, a poisoned
-    /// voice, or a held pressure outside the ACTUAL jet-speed/history domain.
+    /// voice, or a held pressure outside the ACTUAL finite low-Mach jet-speed domain.
     pub fn with_viscous_windway(mut self, length_m: f64) -> Result<Self, FlueError> {
         if self.poisoned || self.samples != 0 || self.viscous_windway.is_some()
             || self.unsteady_windway.is_some() {
@@ -989,8 +1015,9 @@ impl FlueVoice {
     ///
     /// # Errors
     /// Late or repeated attachment, a poisoned voice, an attached Nolle/Price transfer or
-    /// unsteady windway, a non-positive reference pressure, a history longer than the budget at
-    /// the slowest admitted jet, or the integrator's own refusal.
+    /// unsteady windway, a non-positive reference pressure or one whose jet is below the declared
+    /// minimum speed, a history longer than the budget at that minimum, or the integrator's own
+    /// refusal.
     pub fn with_forced_jet(mut self, spec: forced_jet::ForcedJetSpec, reference_pressure_pa: f64)
         -> Result<Self, FlueError>
     {
@@ -1004,6 +1031,9 @@ impl FlueVoice {
             return Err(FlueError::Invalid { what: "forced jet reference pressure must be positive" });
         }
         let reference_bulk = self.validated_jet_speed(reference_pressure_pa)?;
+        if reference_bulk < self.minimum_jet_speed_m_s {
+            return Err(FlueError::Invalid { what: "forced jet reference pressure gives a jet below the declared minimum speed" });
+        }
         let kernel = forced_jet::ForcedJetKernel::new(spec, self.viscous_windway.is_some(),
             self.geometry.flue_height_m, self.geometry.cut_up_m, self.nu, reference_bulk,
             self.minimum_jet_speed_m_s, self.max_jet_history_samples, self.dt)
@@ -1038,10 +1068,10 @@ impl FlueVoice {
                 let flow = law.evaluate(self.geometry.flue_width_m, self.geometry.flue_height_m,
                     self.rho, pressure_pa).map_err(FlueError::Physics)?;
                 let speed = flow.flow_m3_s / (self.geometry.flue_width_m * self.geometry.flue_height_m);
-                let delay = self.geometry.cut_up_m / (self.island.convection_ratio * speed);
-                if !speed.is_finite() || (pressure_pa > 0.0
-                    && delay > (self.history.len() - 2) as f64 * self.dt) {
-                    return Err(FlueError::Invalid { what: "viscous windway jet exceeds finite speed or convection history" });
+                // A jet whose transit outruns the retained history is admitted: `advance_block`
+                // reads the rest state or takes the declared state below the minimum speed.
+                if !speed.is_finite() {
+                    return Err(FlueError::Invalid { what: "viscous windway jet speed is not finite" });
                 }
                 Ok(speed)
             }
@@ -1383,6 +1413,7 @@ impl FlueVoice {
         let mut stored_delta = 0.0;
         let mut numerical = 0.0;
         let mut pipe_side = 0usize;
+        let mut below_edge_samples = 0usize;
         let mut eta_sq = 0.0;
         let mut reynolds_min = f64::INFINITY;
         let mut reynolds_max = 0.0f64;
@@ -1399,7 +1430,7 @@ impl FlueVoice {
                 let frame = windway.frame();
                 // Spatial transport admits arbitrarily slow transient motion;
                 // the actual source Mach cap remains enforced every sample.
-                self.line.validate_jet_speed(frame.bulk_speed_m_s, false)?;
+                self.line.validate_jet_speed(frame.bulk_speed_m_s)?;
                 windway_work += frame.pressure_work_j;
                 windway_stored_delta += frame.stored_delta_j;
                 windway_viscous += frame.viscous_dissipation_j;
@@ -1442,13 +1473,24 @@ impl FlueVoice {
                 } else {
                     transit_samples
                 }
-            } else { 0.0 };
+            } else if u > 0.0 { f64::INFINITY } else { 0.0 };
             // The unsteady channel supplies its affine spatial trace. The
             // quasi-steady history is sampled at THIS time minus the physical
             // transit, including a current-mouth term when transit < dt.
+            // Ruling 8132. The retained history covers every lookup at or above the declared
+            // minimum speed U_min. In the onset, before the jet first reaches U_min, a lookup
+            // beyond it that precedes the voice's first motion reads the rest state, exactly zero
+            // at any delay: unbounded history at zero memory. Any other lookup beyond it below
+            // U_min (a release, or a dip mid-note) takes the declared state: no deflection, so
+            // the windway's steady flow splits at zero deflection. U_min is a declared validity
+            // edge, not a stability limit.
+            let below_edge = u > 0.0 && u < self.minimum_jet_speed_m_s;
+            let onset = !self.reached_minimum_speed;
+            let mut declared = false;
+            let rest = RetardedVelocity { past_m_s: 0.0, current_weight: 0.0 };
             let delayed = if self.nolle.is_some() {
                 // The published transfer owns the jet response; the island chain idles at zero.
-                RetardedVelocity { past_m_s: 0.0, current_weight: 0.0 }
+                rest
             } else if self.forced.is_some() {
                 // The forced jet's own history is the delay: the trial velocity is this sample's
                 // exit velocity, the seed (added below) plus the unknown mouth velocity.
@@ -1456,6 +1498,12 @@ impl FlueVoice {
             } else {
                 match &windway_trial {
                     Some(windway) => windway.mouth_response(),
+                    None if delay_samples > (self.history.len() - 1) as f64 && onset
+                        && precedes_motion(delay_samples, self.history_moving) => rest,
+                    None if delay_samples > (self.history.len() - 1) as f64 && below_edge => {
+                        declared = true;
+                        rest
+                    }
                     None => retarded_velocity(&self.history, self.head, delay_samples)?,
                 }
             };
@@ -1472,16 +1520,27 @@ impl FlueVoice {
                     .map_err(|what| FlueError::Invalid { what })).transpose()?;
             let chain_seed = if nolle_step.is_some() { 0.0 } else { seed };
             // The forced jet takes the seed as exit velocity, like the mouth's, and prepares this
-            // sample's known displacement from its retained velocities.
+            // sample's known displacement from its retained intervals: exact when they reach its
+            // window or the rest state before its first motion, otherwise the declared state
+            // below the minimum speed.
             let (delayed, chain_seed) = match &mut self.forced {
                 Some(kernel) => {
-                    kernel.prepare(u).map_err(|what| FlueError::Invalid { what })?;
-                    (RetardedVelocity { past_m_s: chain_seed, ..delayed }, 0.0)
+                    if kernel.prepare(u).map_err(|what| FlueError::Invalid { what })?.is_some() {
+                        (RetardedVelocity { past_m_s: chain_seed, ..delayed }, 0.0)
+                    } else if below_edge {
+                        declared = true;
+                        (rest, 0.0)
+                    } else {
+                        return Err(FlueError::Invalid { what: "jet is slower than its retained forced-jet history" });
+                    }
                 }
+                None if declared => (delayed, 0.0),
                 None => (delayed, chain_seed),
             };
             let coefficients = JetStepCoefficients { q_max, half_width_m: b,
-                offset_m: y0, band_alpha, hp_alpha, leak_rate, eta_override: None };
+                offset_m: y0, band_alpha, hp_alpha, leak_rate,
+                eta_override: declared.then_some(0.0) };
+            below_edge_samples += usize::from(declared);
             let boundary = self.line.mouth_boundary()?;
             let (mouth, trial, separation_power) =
                 self.solve_jet_mouth(boundary, delayed, chain_seed, coefficients, nolle_step)?;
@@ -1556,6 +1615,10 @@ impl FlueVoice {
             // Mouth transverse velocity into the history ring.
             self.history[self.head] = q / s_m;
             self.head = (self.head + 1) % self.history.len();
+            if self.history_moving > 0 || q / s_m != 0.0 {
+                self.history_moving = self.history_moving.saturating_add(1);
+            }
+            self.reached_minimum_speed |= u >= self.minimum_jet_speed_m_s;
             // The accepted exit velocity into the forced jet's retained history.
             if let Some(kernel) = &mut self.forced {
                 kernel.push(delayed.past_m_s + q / s_m);
@@ -1597,6 +1660,7 @@ impl FlueVoice {
             reynolds,
             reynolds_range: (reynolds_min, reynolds_max),
             inside_card_validity: reynolds_min >= lo && reynolds_max <= hi,
+            below_speed_edge_samples: below_edge_samples,
             transit_s: self.transit_s(),
             lock_hz: crossings as f64 / (n * dt),
             p_rms_pa: (sq / n).sqrt(),
@@ -2205,6 +2269,120 @@ mod forced_jet_tests {
         assert!(v.network().unwrap().last_frame().is_none());
         assert_eq!(v.mouth_flow_m3_s(), 0.0);
         assert!(v.claim_check().is_err());
+    }
+}
+
+#[cfg(test)]
+mod speed_edge_tests {
+    use super::*;
+    use crate::bernoulli_aperture::network::{NetworkNode, TubeNetworkSpec, TubeSection};
+    use fs_exec::CancelGate;
+    use fs_material::gas::GasSpec;
+
+    // Ruling 8132 on a 48 kHz control clock: the onset's rest state and the declared state below
+    // the minimum jet speed. Plumbing fixtures, not instrument specimens.
+    const RATE: u32 = 48_000;
+    const HOLD_PA: f64 = 300.0;
+
+    fn voice(minimum_speed: f64, history: usize, forced: bool) -> FlueVoice {
+        let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap();
+        let geometry = FlueGeometry { flue_width_m: 0.010, flue_height_m: 0.001, cut_up_m: 0.004,
+            labium_offset_m: 0.0, jet_angle_rad: 0.0,
+            bore_area_m2: core::f64::consts::PI*0.006*0.006, mouth_loss_rel: 0.02 };
+        let source = network::FlueNetworkSpec {
+            graph: TubeNetworkSpec {
+                nodes: vec![NetworkNode::Inlet, NetworkNode::Termination { reflection: -0.7 }],
+                sections: vec![TubeSection { nodes: [0,1], length_m: 0.3, radius_m: 0.006,
+                    max_length_error_m: 0.005 }],
+                sound_speed_m_s: gas.sound_speed, max_wave_memory_bytes: 1_000_000,
+            },
+            gases: vec![gas], viscothermal: vec![], minimum_jet_speed_m_s: minimum_speed,
+            maximum_jet_mach: 0.3, max_jet_history_samples: history,
+        };
+        let v = FlueVoice::from_network(Some(&fs_aeroac::jetcard::mint_tonal_interim_card().unwrap()),
+            90.0, 1e-6, geometry, source, RATE, 3, 0, &CancelGate::new_clock_free()).unwrap();
+        if forced { v.with_forced_jet(forced_jet::COARSE_SPEC, HOLD_PA).unwrap() } else { v }
+    }
+    // One control and one sample at a time, so every sample carries its own pressure.
+    fn play(v: &mut FlueVoice, pressures: impl Iterator<Item = f64>) -> Vec<f64> {
+        pressures.map(|pressure| {
+            v.apply(FlueControl::SetBlowingPressure(pressure)).unwrap();
+            let mut out = [0.0];
+            v.step_block(&mut out).unwrap();
+            out[0]
+        }).collect()
+    }
+
+    #[test]
+    fn g1_onset_rest_state_is_unbounded_history_bit_for_bit() {
+        // U_min 1 m/s retains a 10 ms transit; U_min 0.01 m/s retains 1 s, more than the 0.1 s
+        // render, and its ramp never goes below it. On a smooth 1 s ramp from rest the first 96
+        // samples run below 1 m/s, where the short voice's lookups leave its history; they precede
+        // the first motion, so both voices give the same bits.
+        let ramp = || (0..4800).map(|n| HOLD_PA*f64::from(n)/f64::from(RATE));
+        for forced in [false, true] {
+            let mut short = voice(1.0, 4096, forced);
+            let mut long = voice(0.01, 262_144, forced);
+            assert!(short.history.len() < 4800 && long.history.len() > 4800);
+            let a = play(&mut short, ramp());
+            let b = play(&mut long, ramp());
+            assert_eq!(a, b, "forced {forced}");
+            assert!(a.iter().any(|p| *p != 0.0));
+            for v in [&short, &long] {
+                assert!(v.diagnostics().iter().all(|d| d.below_speed_edge_samples == 0));
+            }
+        }
+    }
+
+    // Plays one sample per pressure and counts the declared samples, checking each: no deflection,
+    // and the windway's flow split at zero deflection.
+    fn declared_samples(v: &mut FlueVoice, pressures: impl Iterator<Item = f64>) -> usize {
+        let half_width = 0.5*v.geometry.flue_height_m;
+        let offset = v.geometry.effective_offset_m();
+        let mut declared = 0;
+        for pressure in pressures {
+            play(v, core::iter::once(pressure));
+            let d = v.diagnostics().last().unwrap();
+            if d.below_speed_edge_samples == 1 {
+                declared += 1;
+                let u = v.jet_speed_m_s();
+                assert!(u > 0.0 && u < v.minimum_jet_speed_m_s());
+                assert_eq!(d.eta_rms_over_b, 0.0);
+                let q_max = u*v.geometry.flue_height_m*v.geometry.flue_width_m;
+                assert_eq!(v.flow_prev, 0.5*q_max*(1.0+((0.0-offset)/half_width).tanh()));
+            }
+        }
+        declared
+    }
+
+    #[test]
+    fn g1_release_below_the_minimum_speed_takes_the_declared_state() {
+        // 10 ms up, 20 ms held, a smooth 100 ms release to rest.
+        let pressures = || (0..480).map(|n| HOLD_PA*f64::from(n)/480.0)
+            .chain(core::iter::repeat_n(HOLD_PA, 960))
+            .chain((0..=4800).rev().map(|n| HOLD_PA*f64::from(n)/4800.0));
+        // The default chain's last samples run below U_min 1 m/s with lookups beyond its history.
+        // The jet is below 1 m/s only for P under 0.6 Pa: the last 9 nonzero samples, each under
+        // 4.5 % of the held 22 m/s.
+        let mut v = voice(1.0, 4096, false);
+        assert_eq!(v.minimum_jet_speed_m_s(), 1.0);
+        let declared = declared_samples(&mut v, pressures());
+        assert!((1..=9).contains(&declared), "{declared}");
+        assert_eq!(v.jet_speed_m_s(), 0.0);
+        // The forced jet's retained intervals (a 30 ms window at 1 m/s) still reach its window all
+        // the way to rest, so its release declares nothing and stays exact: bit for bit the voice
+        // that retains 3 s.
+        let mut short = voice(1.0, 4096, true);
+        let mut long = voice(0.01, 262_144, true);
+        assert_eq!(play(&mut short, pressures()), play(&mut long, pressures()));
+        assert!(short.diagnostics().iter().all(|d| d.below_speed_edge_samples == 0));
+        assert_eq!(short.jet_speed_m_s(), 0.0);
+        // Held at 0.3 Pa (0.71 m/s) for 150 ms, longer than its ring of 1 m/s intervals reaches
+        // the window at that speed, it takes the declared state once they fall short.
+        let mut slow = voice(1.0, 4096, true);
+        let held = (0..480).map(|n| HOLD_PA*f64::from(n)/480.0)
+            .chain(core::iter::repeat_n(0.3, 7200));
+        assert!(declared_samples(&mut slow, held) > 0);
     }
 }
 
