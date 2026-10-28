@@ -7,6 +7,9 @@
 //! Every returned point passes a freshly reconstructed KKT residual. All
 //! iterates are scratch: cancellation or nonconvergence returns no solution.
 
+/// Positive-definite active-set candidate with explicit curvature admission.
+pub mod active_set;
+
 /// Explicit allocation/work and gradient-residual limits.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GramOrthantConfig {

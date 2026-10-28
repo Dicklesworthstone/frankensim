@@ -437,3 +437,31 @@ through staging rollback in both public predicate-driven entry points.
 - The p-MG is specialized to the unit-cube tensor Poisson fixtures;
   general-operator p-MG arrives with the fs-opdsl matrix-free atom
   integration.
+
+## Positive-definite nonnegative quadratic candidate
+
+`orthant::active_set::solve_spd_orthant` minimizes a supplied dense quadratic
+over nonnegative coordinates with a deterministic primal active-set method.
+It reuses `fs-la::factor::cholesky`, equilibrates by the positive diagonal,
+and bounds the event to at most 64 variables and 4096 principal subproblem
+solves. The most negative scaled inactive gradient enters, with input-index
+ties; a bound-crossing principal solution takes a feasible step and releases
+its blocking coordinate. It does not silently clip an unconstrained answer
+into a purported constrained solution.
+
+Full normalized Cholesky admission and the declared pivot floor reject
+singular, indefinite, and insufficiently resolved Hessians. These refusals do
+not establish constrained infeasibility or choose an arbitrary null-space
+solution. The existing Gram/coordinate PSD baseline remains a separate route.
+Small admitted asymmetry is averaged for factorization; acceptance still uses
+a freshly reconstructed gradient and KKT residual from the original matrix.
+The result reports primal, dual, complementarity and stationarity residuals,
+objective, principal-solve count and minimum normalized pivot. Diagonal scaling
+changes variables without regularizing the supplied objective.
+
+Cancellation polls bracket each bounded factorization/solve and row operation,
+including final publication; failure returns no accepted partial solution.
+The candidate provides no adjoint, interval enclosure, general cone solve, or
+PSD nonuniqueness classification. Its principal consumer here is the active
+normal-contact Delassus problem, while contact geometry, restitution and global
+energy admission remain owned by `fs-contact` and `fs-mbd`.
