@@ -9,10 +9,13 @@
 
 /// Reciprocal thermoelectric, field-motion and finite-thermal evolution.
 pub mod motion;
+/// Exact caloric and reversible Kelvin entropy on the same accepted interval.
+pub mod entropy;
 
 use super::{CircuitEnthalpyError, CircuitEnthalpyInput,
     CircuitEnthalpyReport, CircuitEnthalpySolve, CircuitThermalCoefficients,
-    DrivenCoefficients, ThermalDriver, coupled_driver_candidate};
+    DrivenCoefficients, ThermalDriver, coupled_driver_candidate_entropy_option};
+use super::entropy::CircuitEntropyAudit;
 use super::material::{MaterialNetwork, MaterialNetworkError, MaterialNetworkSample};
 use crate::material_circuit::{MaterialCircuit, MaterialCircuitCandidate,
     MaterialCircuitError, MaterialResistor};
@@ -255,6 +258,14 @@ pub fn step_candidate<'m>(
         circuit, ports, legs, electrical_bases, controls, guess_j,
         |sources, inputs, dt, cancelled| circuit.step_candidate(sources, inputs, dt,
             controls.circuit, cancelled), &mut cancelled)?;
+    finish_candidate(thermal, circuit, coupled, controls, cancelled)
+}
+
+fn finish_candidate<'m>(
+    thermal: DepositionSimulation<'m>, circuit: MaterialCircuit,
+    coupled: CircuitEnthalpyReport<ThermoelectricSample>, controls: CircuitEnthalpySolve,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<ThermoelectricCandidate<'m>, Error> {
     let external_electrical_work_j = finite(coupled.electrical.native.supplied
         - coupled.source.reversible_electrical_work_j)?;
     let external_heat_j = finite(coupled.non_electrical_heat_j - coupled.source.reversible_heat_j)?;
@@ -290,6 +301,23 @@ fn coupled_candidate<'m, D: ThermoelectricDriver>(
     cancelled: impl FnMut() -> bool,
 ) -> Result<(DepositionSimulation<'m>, D::Model,
     CircuitEnthalpyReport<ThermoelectricSample, D::Step>), Error> {
+    coupled_candidate_entropy_option(material, thermal, target_s, circuit, ports,
+        legs, electrical_bases, controls, guess_j, advance, false, cancelled)
+        .map(|(thermal, model, report, _)| (thermal, model, report))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn coupled_candidate_entropy_option<'m, D: ThermoelectricDriver>(
+    material: &MaterialNetwork<'_>, thermal: &DepositionSimulation<'m>, target_s: f64,
+    circuit: &MaterialCircuit, ports: &[f64], legs: &[ThermoelectricLeg],
+    electrical_bases: &[(usize, ElectricalPropertyBasis)], controls: CircuitEnthalpySolve,
+    guess_j: &[f64],
+    advance: impl Fn(Vec<MaterialResistor>, &[f64], f64, &mut dyn FnMut() -> bool)
+        -> Result<D, MaterialCircuitError>,
+    with_entropy: bool,
+    cancelled: impl FnMut() -> bool,
+) -> Result<(DepositionSimulation<'m>, D::Model,
+    CircuitEnthalpyReport<ThermoelectricSample, D::Step>, Option<CircuitEntropyAudit>), Error> {
     let cancel = RefCell::new(cancelled);
     let check = || -> Result<(), Error> {
         if (*cancel.borrow_mut())() { Err(CircuitEnthalpyError::Cancelled) } else { Ok(()) }
@@ -310,10 +338,16 @@ fn coupled_candidate<'m, D: ThermoelectricDriver>(
     }
     let dt = target_s - thermal.time_s();
     let destinations = material.resistors.iter().map(|r| r.destination).collect::<Vec<_>>();
-    coupled_driver_candidate(
+    coupled_driver_candidate_entropy_option(
         thermal, target_s, CircuitEnthalpyInput { circuit, ports, destinations: &destinations },
         &[], controls, guess_j, |state, _remaining| {
             let mut coefficients = prepared.resolve(state, || (*cancel.borrow_mut())()).map_err(network)?;
+            // This material owner supplies only transport; authored independent
+            // powers remain on original cell boundaries. Future source additions
+            // must provide their classification rather than silently disappear.
+            if with_entropy && !coefficients.sources_w.is_empty() {
+                return Err(invalid("thermoelectric entropy requires explicit independent source semantics"));
+            }
             let mut inputs = ports.to_vec();
             let mut spans = Vec::with_capacity(legs.len());
             for ((leg, &(port, cell_index)), pin) in legs.iter().zip(&routing).zip(&pins) {
@@ -353,5 +387,5 @@ fn coupled_candidate<'m, D: ThermoelectricDriver>(
                 conductances_w_k: coefficients.conductances_w_k, circuit_trials: 1,
                 source: ThermoelectricSample { network: coefficients.source, legs: samples,
                     reversible_electrical_work_j: electrical_work_j, reversible_heat_j: heat_j } })
-        }, || (*cancel.borrow_mut())())
+        }, with_entropy, || (*cancel.borrow_mut())())
 }

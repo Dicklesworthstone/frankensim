@@ -18,7 +18,8 @@ use std::collections::BTreeMap;
 /// Thermal entropy over one accepted electrical/thermal interval, in J/K.
 ///
 /// The sum of reservoir input, conduction, thermalized electrical loss, other
-/// source-at-cell contribution and the three numerical terms equals storage.
+/// source-at-cell contribution, known reversible transfer and the three
+/// numerical terms equals storage.
 /// This is an accounting identity, not a timestep-accuracy certificate. A
 /// receiving cell must represent the physical thermalization temperature;
 /// unresolved contact/junction temperatures are not inferred from a heat split.
@@ -37,6 +38,11 @@ pub struct CircuitEntropyAudit {
     /// Independent authored/callback energy divided by receiving-cell Kelvin.
     /// This is not an assigned reservoir entropy or irreversible production.
     pub unclassified_source_at_cell_j_k: f64,
+    /// Signed sum of Q/T from a specifically resolved reversible source owner.
+    /// Zero for the ordinary resistor path. For a Kelvin thermoelectric leg the
+    /// complete junction/bulk sum is zero in exact arithmetic; its signed
+    /// floating-point residue remains visible, never irreversible production.
+    pub reversible_transfer_entropy_j_k: f64,
     /// Any independent authored or callback source was nonzero, even if signed
     /// sources cancel in one cell or in the total account.
     pub has_unclassified_sources: bool,
@@ -91,9 +97,9 @@ pub fn step_candidate<'m, S, E>(
 }
 
 #[derive(Default)]
-struct Sum { value: f64, correction: f64 }
+pub(super) struct Sum { value: f64, correction: f64 }
 impl Sum {
-    fn add(&mut self, term: f64) -> Result<(), DepositionError> {
+    pub(super) fn add(&mut self, term: f64) -> Result<(), DepositionError> {
         let term = finite(term)?;
         let next = finite(self.value + term)?;
         let lost = if self.value.abs() >= term.abs() {
@@ -103,9 +109,9 @@ impl Sum {
         self.value = next;
         Ok(())
     }
-    fn total(self) -> Result<f64, DepositionError> { finite(self.value + self.correction) }
+    pub(super) fn total(self) -> Result<f64, DepositionError> { finite(self.value + self.correction) }
 }
-fn power_entropy(power: f64, dt: f64, temperature: f64) -> Result<f64, DepositionError> {
+pub(super) fn power_entropy(power: f64, dt: f64, temperature: f64) -> Result<f64, DepositionError> {
     let heat = finite(dt * finite(power)?)?;
     let entropy = finite(heat / temperature)?;
     if power != 0.0 && (heat == 0.0 || entropy == 0.0) {
@@ -195,22 +201,42 @@ impl SourceSample {
         }
         let algebraic = algebraic.total()?;
         let temporal = finite(thermal.thermal_storage_change_j_k - self.energy_at_endpoint_temperature_j_k)?;
-        let mut accounting = Sum::default();
-        for value in [thermal.thermal_storage_change_j_k,
-            -thermal.reservoir_entropy_input_j_k, -thermal.conduction_generation_j_k,
-            -self.electrical_loss_j_k, -self.other_source_j_k, -temporal, -algebraic] {
-            accounting.add(value)?;
-        }
         checkpoint()?;
-        Ok(CircuitEntropyAudit {
+        let mut audit = CircuitEntropyAudit {
             thermal_storage_change_j_k: thermal.thermal_storage_change_j_k,
             reservoir_entropy_input_j_k: thermal.reservoir_entropy_input_j_k,
             conduction_generation_j_k: thermal.conduction_generation_j_k,
             electrical_loss_generation_j_k: self.electrical_loss_j_k,
             unclassified_source_at_cell_j_k: self.other_source_j_k,
             has_unclassified_sources: self.has_other_sources,
+            reversible_transfer_entropy_j_k: 0.0,
             temporal_defect_j_k: temporal, algebraic_residual_j_k: algebraic,
-            accounting_residual_j_k: accounting.total()?,
-        })
+            accounting_residual_j_k: 0.0,
+        };
+        audit.classify_sources(self.other_source_j_k, self.has_other_sources, 0.0)?;
+        Ok(audit)
+    }
+}
+
+impl CircuitEntropyAudit {
+    // A specific physical owner may identify previously unclassified sources.
+    // Rebuild the account from directly accumulated original terms, never by
+    // subtracting large known transfer from a small unknown source remainder.
+    pub(super) fn classify_sources(
+        &mut self, independent_j_k: f64, has_independent: bool, reversible_j_k: f64,
+    ) -> Result<(), DepositionError> {
+        self.unclassified_source_at_cell_j_k = finite(independent_j_k)?;
+        self.has_unclassified_sources = has_independent;
+        self.reversible_transfer_entropy_j_k = finite(reversible_j_k)?;
+        let mut accounting = Sum::default();
+        for value in [self.thermal_storage_change_j_k,
+            -self.reservoir_entropy_input_j_k, -self.conduction_generation_j_k,
+            -self.electrical_loss_generation_j_k, -self.unclassified_source_at_cell_j_k,
+            -self.reversible_transfer_entropy_j_k,
+            -self.temporal_defect_j_k, -self.algebraic_residual_j_k] {
+            accounting.add(value)?;
+        }
+        self.accounting_residual_j_k = accounting.total()?;
+        Ok(())
     }
 }
