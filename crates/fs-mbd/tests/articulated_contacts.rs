@@ -11,6 +11,9 @@ use fs_mbd::articulated_contacts::{
     ContactCounterpart, LinkContactPoint, resolve_articulated_contacts,
 };
 
+#[path = "articulated_contacts/friction.rs"]
+mod friction;
+
 fn close(actual: f64, expected: f64) {
     assert!(
         (actual - expected).abs() < 2e-10,

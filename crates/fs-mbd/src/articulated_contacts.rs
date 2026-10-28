@@ -1,11 +1,16 @@
-//! Simultaneous frictionless point impacts over free articulated systems.
+//! Simultaneous point impacts over free articulated systems.
 //!
 //! One contact-space inverse mass is assembled from the existing ABA owner.
 //! All impulses are solved together and accumulated before any physical state
 //! is evaluated. The caller supplies the event configuration and contact set;
 //! this is not collision detection, position repair, or a contact time stepper.
+//! The normal-only entry point and [`friction`] share the same native mechanics.
+
+/// Coupled normal and circular Coulomb friction on original articulated states.
+pub mod friction;
 
 use core::fmt;
+use fs_contact::frictional_multicontact::FrictionalContactError;
 use fs_contact::multicontact::{
     MultiImpactConfig, MultiImpactError, MultiImpactResult, NormalContactImpact,
     solve_normal_impacts,
@@ -42,7 +47,7 @@ pub struct LinkContactPoint {
     pub point_body: Vec3,
 }
 
-/// Opposite side of a normal contact.
+/// Opposite side of a point contact.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ContactCounterpart {
     /// Dynamic point receiving the opposite impulse, including within a tree.
@@ -112,6 +117,11 @@ pub enum ArticulatedContactError {
     Geometry(GaError),
     /// Shared simultaneous-contact law or generic solver refused.
     ContactLaw(MultiImpactError),
+    /// Shared coupled normal/Coulomb law refused.
+    FrictionLaw(FrictionalContactError),
+    /// Redundant impulses do not determine work between independently moving
+    /// supports. A common support translation has determined total work.
+    UnresolvedSupportWork,
     /// Dynamic witnesses do not share a normal line of action.
     NonCollinearContact {
         /// Contact whose paired forces would create an artificial couple.
@@ -133,6 +143,10 @@ impl fmt::Display for ArticulatedContactError {
             } => write!(f, "impact system {system_index}: {error}"),
             Self::Geometry(error) => write!(f, "impact geometry: {error}"),
             Self::ContactLaw(error) => write!(f, "simultaneous contact: {error}"),
+            Self::FrictionLaw(error) => write!(f, "simultaneous frictional contact: {error}"),
+            Self::UnresolvedSupportWork => {
+                f.write_str("redundant impulses do not determine moving-support work")
+            }
             Self::NonCollinearContact { index } => {
                 write!(f, "contact {index} has no common normal line of action")
             }
@@ -155,6 +169,15 @@ impl From<MultiImpactError> for ArticulatedContactError {
         }
     }
 }
+impl From<FrictionalContactError> for ArticulatedContactError {
+    fn from(error: FrictionalContactError) -> Self {
+        if matches!(error, FrictionalContactError::Cancelled) {
+            Self::Cancelled
+        } else {
+            Self::FrictionLaw(error)
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 struct Term {
@@ -164,9 +187,11 @@ struct Term {
 struct Prepared {
     first: Term,
     second: Option<Term>,
-    normal: Vec3,
+    axis_world: Vec3,
     world_point: Vec3,
     plane_speed: f64,
+    /// Only active normal rows carry a nonpenetration speed bound.
+    minimum_speed: Option<f64>,
 }
 impl Prepared {
     fn terms(&self) -> impl Iterator<Item = Term> + '_ {
@@ -206,36 +231,16 @@ pub fn resolve_articulated_contacts(
             "articulated contact event exceeds its size cap",
         ));
     }
-    let mut before = Vec::with_capacity(systems.len());
-    let mut loads = Vec::with_capacity(systems.len());
-    let mut joint_impulses = Vec::with_capacity(systems.len());
-    for (index, system) in systems.iter().enumerate() {
-        poll(&mut cancelled)?;
-        before.push(dynamics(
-            index,
-            forward_kinematics(
-                system.model,
-                BaseState::prescribed(
-                    system.base.world_from_base,
-                    system.base.twist_body,
-                    Twist::zero(),
-                ),
-                system.joint_position,
-                system.joint_velocity,
-            ),
-        )?);
-        loads.push(vec![Wrench::default(); system.model.link_count()]);
-        joint_impulses.push(vec![0.0; system.model.dof_count()]);
-    }
+    let mut workspace = EventWorkspace::new(systems, &mut cancelled)?;
     let mut prepared = Vec::with_capacity(contacts.len());
     let mut laws = Vec::with_capacity(contacts.len());
     for (index, contact) in contacts.iter().enumerate() {
         poll(&mut cancelled)?;
         let normal = unit_normal(contact.normal_world)?;
-        let (first, world_point) = prepare_point(contact.point, normal, &before)?;
+        let (first, world_point) = prepare_point(contact.point, normal, &workspace.before)?;
         let (second, other_point, plane_speed) = match contact.other {
             ContactCounterpart::Body(point) => {
-                let (term, position) = prepare_point(point, normal.scale(-1.0), &before)?;
+                let (term, position) = prepare_point(point, normal.scale(-1.0), &workspace.before)?;
                 (Some(term), position, 0.0)
             }
             ContactCounterpart::PrescribedPlane {
@@ -261,212 +266,317 @@ pub fn resolve_articulated_contacts(
         let item = Prepared {
             first,
             second,
-            normal,
+            axis_world: normal,
             world_point,
             plane_speed,
+            minimum_speed: (gap <= contact.activation_tolerance).then_some(0.0),
         };
         laws.push(NormalContactImpact {
             gap,
             activation_tolerance: contact.activation_tolerance,
-            relative_normal_speed: finite(item.velocity(&before))?,
+            relative_normal_speed: finite(item.velocity(&workspace.before))?,
             restitution: contact.restitution,
         });
         prepared.push(item);
     }
-    let count = prepared.len();
-    let mut delassus = vec![0.0; count * count];
-    for (column, contact) in prepared.iter().enumerate() {
-        for (side, term) in contact.terms().enumerate() {
-            let system_index = term.point.system_index;
-            if side == 1 && system_index == contact.first.point.system_index {
-                continue;
-            }
-            poll(&mut cancelled)?;
-            for term in contact
-                .terms()
-                .filter(|term| term.point.system_index == system_index)
-            {
-                add_load(
-                    &mut loads[system_index][term.point.link_index],
-                    term.direction,
-                    1.0,
-                )?;
-            }
-            let system = &systems[system_index];
-            let delta = dynamics(
-                system_index,
-                free_floating_impulse_delta(
-                    system.model,
-                    system.joint_position,
-                    &joint_impulses[system_index],
-                    &loads[system_index],
-                ),
-            )?;
-            for (row, other) in prepared.iter().enumerate() {
-                for term in other
-                    .terms()
-                    .filter(|term| term.point.system_index == system_index)
-                {
-                    delassus[row * count + column] = finite(
-                        delassus[row * count + column]
-                            + term.direction.pairing(delta.body[term.point.link_index]),
-                    )?;
-                }
-            }
-            for term in contact
-                .terms()
-                .filter(|term| term.point.system_index == system_index)
-            {
-                loads[system_index][term.point.link_index] = Wrench::default();
-            }
-        }
-    }
+    let delassus = workspace.delassus(systems, &prepared, &mut cancelled)?;
     let velocity_tolerance = config.solver.gradient_tolerance;
     let energy_tolerance = config.energy_tolerance;
     let law = solve_normal_impacts(&laws, &delassus, config, &mut cancelled)?;
-    let mut plane_work = 0.0;
-    let mut external_linear = Vec3::default();
-    let mut external_angular = Vec3::default();
-    let mut linear_impulse_scale = 0.0;
-    let mut angular_impulse_scale = 0.0;
-    for (contact, &impulse) in prepared.iter().zip(&law.normal_impulses) {
-        for term in contact.terms() {
-            add_load(
-                &mut loads[term.point.system_index][term.point.link_index],
-                term.direction,
-                impulse,
-            )?;
-            // Retain the magnitudes before cancellation: equal/opposite
-            // contacts and spin/orbital terms can sum to exactly zero.
-            let pose = before[term.point.system_index].world_from_link[term.point.link_index];
-            let force = pose.rotation().rotate(term.direction.force)?.scale(impulse);
-            let spin = pose
-                .rotation()
-                .rotate(term.direction.torque)?
-                .scale(impulse);
-            let orbital = pose.translation().cross(force);
-            linear_impulse_scale = finite(linear_impulse_scale + magnitude(force))?;
-            angular_impulse_scale =
-                finite(angular_impulse_scale + magnitude(spin) + magnitude(orbital))?;
-        }
-        if contact.second.is_none() {
-            let linear = contact.normal.scale(impulse);
-            external_linear = external_linear + linear;
-            external_angular = external_angular + contact.world_point.cross(linear);
-            plane_work = finite(plane_work + impulse * contact.plane_speed)?;
-        }
-    }
-    vector(external_linear)?;
-    vector(external_angular)?;
-    let mut responses = Vec::with_capacity(systems.len());
-    let mut after = Vec::with_capacity(systems.len());
-    let mut energy_change = 0.0;
-    let mut energy_scale = plane_work.abs() + law.dissipated_energy.abs();
-    let mut linear_change = Vec3::default();
-    let mut angular_change = Vec3::default();
-    let mut linear_scale = linear_impulse_scale + magnitude(external_linear);
-    let mut angular_scale = angular_impulse_scale + magnitude(external_angular);
-    for (index, system) in systems.iter().enumerate() {
-        poll(&mut cancelled)?;
-        let response = dynamics(
-            index,
-            apply_free_floating_impulses(
-                system.model,
-                system.base,
-                system.joint_position,
-                system.joint_velocity,
-                &joint_impulses[index],
-                &loads[index],
-            ),
-        )?;
-        after.push(dynamics(
-            index,
-            forward_kinematics(
-                system.model,
-                BaseState::prescribed(
-                    response.base_after.world_from_base,
-                    response.base_after.twist_body,
-                    Twist::zero(),
-                ),
-                system.joint_position,
-                &response.joint_velocity_after,
-            ),
-        )?);
-        let initial = response.momentum_before;
-        let final_state = response.momentum_after;
-        energy_change =
-            finite(energy_change + (final_state.kinetic_energy - initial.kinetic_energy))?;
-        energy_scale =
-            finite(energy_scale + initial.kinetic_energy.abs() + final_state.kinetic_energy.abs())?;
-        linear_change =
-            linear_change + (final_state.linear_momentum_world - initial.linear_momentum_world);
-        angular_change =
-            angular_change + (final_state.angular_momentum_world - initial.angular_momentum_world);
-        linear_scale = finite(
-            linear_scale
-                + magnitude(initial.linear_momentum_world)
-                + magnitude(final_state.linear_momentum_world),
-        )?;
-        angular_scale = finite(
-            angular_scale
-                + magnitude(initial.angular_momentum_world)
-                + magnitude(final_state.angular_momentum_world),
-        )?;
-        responses.push(response);
-    }
-    let roundoff = 4096.0 * f64::EPSILON;
-    let mut speeds_after = Vec::with_capacity(count);
-    for (index, contact) in prepared.iter().enumerate() {
-        let actual = finite(contact.velocity(&after))?;
-        let predicted = law.relative_normal_speeds_after[index];
-        let allowance = velocity_tolerance
-            + roundoff
-                * laws[index]
-                    .relative_normal_speed
-                    .abs()
-                    .max(predicted.abs())
-                    .max(actual.abs());
-        if (actual - predicted).abs() > allowance
-            || (laws[index].gap <= laws[index].activation_tolerance && actual < -allowance)
-        {
-            return Err(ArticulatedContactError::Unresolved(
-                "actual contact velocity failed admission",
-            ));
-        }
-        speeds_after.push(actual);
-    }
-    let relative_work = finite(energy_change - plane_work)?;
-    let energy_balance_residual = finite(relative_work + law.dissipated_energy)?;
-    let energy_allowance = finite(energy_tolerance + roundoff * energy_scale)?;
-    if relative_work > energy_allowance || energy_balance_residual.abs() > energy_allowance {
-        return Err(ArticulatedContactError::Unresolved(
-            "actual global impact energy failed admission",
-        ));
-    }
-    let linear_momentum_residual = linear_change - external_linear;
-    let angular_momentum_residual = angular_change - external_angular;
-    vector(linear_momentum_residual)?;
-    vector(angular_momentum_residual)?;
-    if magnitude(linear_momentum_residual) > roundoff * linear_scale
-        || magnitude(angular_momentum_residual) > roundoff * angular_scale
-    {
-        return Err(ArticulatedContactError::Unresolved(
-            "actual global impact momentum failed admission",
-        ));
-    }
-    poll(&mut cancelled)?;
+    let mechanics = workspace.apply(
+        systems,
+        &prepared,
+        EventResponse {
+            impulses: &law.normal_impulses,
+            predicted_speeds: &law.relative_normal_speeds_after,
+            dissipated_energy: law.dissipated_energy,
+            velocity_tolerance,
+            energy_tolerance,
+        },
+        &mut cancelled,
+    )?;
     Ok(ArticulatedContactResult {
-        responses,
+        responses: mechanics.responses,
         normal_impulses: law.normal_impulses.clone(),
-        relative_normal_speeds_after: speeds_after,
+        relative_normal_speeds_after: mechanics.speeds_after,
         delassus,
-        plane_work,
+        plane_work: mechanics.plane_work,
         dissipated_energy: law.dissipated_energy,
         normal_law: law,
-        energy_balance_residual,
-        linear_momentum_residual,
-        angular_momentum_residual,
+        energy_balance_residual: mechanics.energy_balance_residual,
+        linear_momentum_residual: mechanics.linear_momentum_residual,
+        angular_momentum_residual: mechanics.angular_momentum_residual,
     })
+}
+
+// The normal and frictional laws share one original articulated inverse-mass
+// action and one independent physical endpoint audit. A row can be normal or
+// tangent; no surrogate link mass or separate friction impulse update exists.
+struct EventWorkspace {
+    before: Vec<Kinematics>,
+    loads: Vec<Vec<Wrench>>,
+    joint_impulses: Vec<Vec<f64>>,
+}
+struct EventResponse<'a> {
+    impulses: &'a [f64],
+    predicted_speeds: &'a [f64],
+    dissipated_energy: f64,
+    velocity_tolerance: f64,
+    energy_tolerance: f64,
+}
+struct EventResult {
+    responses: Vec<FreeFloatingImpulseResponse>,
+    speeds_after: Vec<f64>,
+    plane_work: f64,
+    energy_balance_residual: f64,
+    linear_momentum_residual: Vec3,
+    angular_momentum_residual: Vec3,
+    endpoint_velocity_residual: f64,
+}
+impl EventWorkspace {
+    fn new(
+        systems: &[ArticulatedContactSystem<'_>],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ArticulatedContactError> {
+        let mut before = Vec::with_capacity(systems.len());
+        let mut loads = Vec::with_capacity(systems.len());
+        let mut joint_impulses = Vec::with_capacity(systems.len());
+        for (index, system) in systems.iter().enumerate() {
+            poll(cancelled)?;
+            before.push(dynamics(
+                index,
+                forward_kinematics(
+                    system.model,
+                    BaseState::prescribed(
+                        system.base.world_from_base,
+                        system.base.twist_body,
+                        Twist::zero(),
+                    ),
+                    system.joint_position,
+                    system.joint_velocity,
+                ),
+            )?);
+            loads.push(vec![Wrench::default(); system.model.link_count()]);
+            joint_impulses.push(vec![0.0; system.model.dof_count()]);
+        }
+        Ok(Self {
+            before,
+            loads,
+            joint_impulses,
+        })
+    }
+
+    fn delassus(
+        &mut self,
+        systems: &[ArticulatedContactSystem<'_>],
+        prepared: &[Prepared],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<f64>, ArticulatedContactError> {
+        let count = prepared.len();
+        let mut delassus = vec![0.0; count * count];
+        for (column, contact) in prepared.iter().enumerate() {
+            for (side, term) in contact.terms().enumerate() {
+                let system_index = term.point.system_index;
+                if side == 1 && system_index == contact.first.point.system_index {
+                    continue;
+                }
+                poll(cancelled)?;
+                for term in contact
+                    .terms()
+                    .filter(|term| term.point.system_index == system_index)
+                {
+                    add_load(
+                        &mut self.loads[system_index][term.point.link_index],
+                        term.direction,
+                        1.0,
+                    )?;
+                }
+                let system = &systems[system_index];
+                let delta = dynamics(
+                    system_index,
+                    free_floating_impulse_delta(
+                        system.model,
+                        system.joint_position,
+                        &self.joint_impulses[system_index],
+                        &self.loads[system_index],
+                    ),
+                )?;
+                for (row, other) in prepared.iter().enumerate() {
+                    for term in other
+                        .terms()
+                        .filter(|term| term.point.system_index == system_index)
+                    {
+                        delassus[row * count + column] = finite(
+                            delassus[row * count + column]
+                                + term.direction.pairing(delta.body[term.point.link_index]),
+                        )?;
+                    }
+                }
+                for term in contact
+                    .terms()
+                    .filter(|term| term.point.system_index == system_index)
+                {
+                    self.loads[system_index][term.point.link_index] = Wrench::default();
+                }
+            }
+        }
+        Ok(delassus)
+    }
+
+    fn apply(
+        mut self,
+        systems: &[ArticulatedContactSystem<'_>],
+        prepared: &[Prepared],
+        law: EventResponse<'_>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<EventResult, ArticulatedContactError> {
+        let mut plane_work = 0.0;
+        let mut external_linear = Vec3::default();
+        let mut external_angular = Vec3::default();
+        let mut linear_impulse_scale = 0.0;
+        let mut angular_impulse_scale = 0.0;
+        for (contact, &impulse) in prepared.iter().zip(law.impulses) {
+            for term in contact.terms() {
+                add_load(
+                    &mut self.loads[term.point.system_index][term.point.link_index],
+                    term.direction,
+                    impulse,
+                )?;
+                // Retain the magnitudes before cancellation: equal/opposite
+                // contacts and spin/orbital terms can sum to exactly zero.
+                let pose =
+                    self.before[term.point.system_index].world_from_link[term.point.link_index];
+                let force = pose.rotation().rotate(term.direction.force)?.scale(impulse);
+                let spin = pose
+                    .rotation()
+                    .rotate(term.direction.torque)?
+                    .scale(impulse);
+                let orbital = pose.translation().cross(force);
+                linear_impulse_scale = finite(linear_impulse_scale + magnitude(force))?;
+                angular_impulse_scale =
+                    finite(angular_impulse_scale + magnitude(spin) + magnitude(orbital))?;
+            }
+            if contact.second.is_none() {
+                let linear = contact.axis_world.scale(impulse);
+                external_linear = external_linear + linear;
+                external_angular = external_angular + contact.world_point.cross(linear);
+                plane_work = finite(plane_work + impulse * contact.plane_speed)?;
+            }
+        }
+        vector(external_linear)?;
+        vector(external_angular)?;
+        let mut responses = Vec::with_capacity(systems.len());
+        let mut after = Vec::with_capacity(systems.len());
+        let mut energy_change = 0.0;
+        let mut energy_scale = plane_work.abs() + law.dissipated_energy.abs();
+        let mut linear_change = Vec3::default();
+        let mut angular_change = Vec3::default();
+        let mut linear_scale = linear_impulse_scale + magnitude(external_linear);
+        let mut angular_scale = angular_impulse_scale + magnitude(external_angular);
+        for (index, system) in systems.iter().enumerate() {
+            poll(cancelled)?;
+            let response = dynamics(
+                index,
+                apply_free_floating_impulses(
+                    system.model,
+                    system.base,
+                    system.joint_position,
+                    system.joint_velocity,
+                    &self.joint_impulses[index],
+                    &self.loads[index],
+                ),
+            )?;
+            after.push(dynamics(
+                index,
+                forward_kinematics(
+                    system.model,
+                    BaseState::prescribed(
+                        response.base_after.world_from_base,
+                        response.base_after.twist_body,
+                        Twist::zero(),
+                    ),
+                    system.joint_position,
+                    &response.joint_velocity_after,
+                ),
+            )?);
+            let initial = response.momentum_before;
+            let final_state = response.momentum_after;
+            energy_change =
+                finite(energy_change + (final_state.kinetic_energy - initial.kinetic_energy))?;
+            energy_scale = finite(
+                energy_scale + initial.kinetic_energy.abs() + final_state.kinetic_energy.abs(),
+            )?;
+            linear_change =
+                linear_change + (final_state.linear_momentum_world - initial.linear_momentum_world);
+            angular_change = angular_change
+                + (final_state.angular_momentum_world - initial.angular_momentum_world);
+            linear_scale = finite(
+                linear_scale
+                    + magnitude(initial.linear_momentum_world)
+                    + magnitude(final_state.linear_momentum_world),
+            )?;
+            angular_scale = finite(
+                angular_scale
+                    + magnitude(initial.angular_momentum_world)
+                    + magnitude(final_state.angular_momentum_world),
+            )?;
+            responses.push(response);
+        }
+        let roundoff = 4096.0 * f64::EPSILON;
+        let mut speeds_after = Vec::with_capacity(prepared.len());
+        let mut endpoint_velocity_residual = 0.0_f64;
+        for (index, contact) in prepared.iter().enumerate() {
+            let actual = finite(contact.velocity(&after))?;
+            let predicted = law.predicted_speeds[index];
+            let allowance = law.velocity_tolerance
+                + roundoff
+                    * contact
+                        .velocity(&self.before)
+                        .abs()
+                        .max(predicted.abs())
+                        .max(actual.abs());
+            if (actual - predicted).abs() > allowance
+                || contact
+                    .minimum_speed
+                    .is_some_and(|minimum| actual < minimum - allowance)
+            {
+                return Err(ArticulatedContactError::Unresolved(
+                    "actual contact velocity failed admission",
+                ));
+            }
+            endpoint_velocity_residual = endpoint_velocity_residual.max((actual - predicted).abs());
+            speeds_after.push(actual);
+        }
+        let relative_work = finite(energy_change - plane_work)?;
+        let energy_balance_residual = finite(relative_work + law.dissipated_energy)?;
+        let energy_allowance = finite(law.energy_tolerance + roundoff * energy_scale)?;
+        if relative_work > energy_allowance || energy_balance_residual.abs() > energy_allowance {
+            return Err(ArticulatedContactError::Unresolved(
+                "actual global impact energy failed admission",
+            ));
+        }
+        let linear_momentum_residual = linear_change - external_linear;
+        let angular_momentum_residual = angular_change - external_angular;
+        vector(linear_momentum_residual)?;
+        vector(angular_momentum_residual)?;
+        if magnitude(linear_momentum_residual) > roundoff * linear_scale
+            || magnitude(angular_momentum_residual) > roundoff * angular_scale
+        {
+            return Err(ArticulatedContactError::Unresolved(
+                "actual global impact momentum failed admission",
+            ));
+        }
+        poll(cancelled)?;
+        Ok(EventResult {
+            responses,
+            speeds_after,
+            plane_work,
+            energy_balance_residual,
+            linear_momentum_residual,
+            angular_momentum_residual,
+            endpoint_velocity_residual,
+        })
+    }
 }
 
 fn prepare_point(

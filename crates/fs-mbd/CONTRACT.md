@@ -630,6 +630,45 @@ inelastic counterpart succeeds. Redundant directions remain a typed numerical
 refusal. No friction, collision-time search, position repair, continuous contact
 force or nonsmooth timestep claim is made.
 
+### Coupled articulated Coulomb contact
+
+`articulated_contacts::friction::resolve_articulated_frictional_contacts`
+extends the same native mechanics to simultaneous normal and two-tangent
+impulses. It consumes the original `ArticulatedContactSystem`,
+`LinkContactPoint` and `ContactCounterpart` types. Stable distinct contact IDs
+canonicalize the full contact matrix, solver input and accumulated link loads.
+The normal-only API and friction API share their actual link Jacobians,
+zero-bias ABA inverse-mass actions, physical impulse application and independent
+endpoint energy/momentum audit. Joint/base recoil, rotated inertia and all
+normal/tangent and cross-contact couplings remain in `J M^-1 J^T`; no lumped
+link mass or sequential friction clipping replaces them.
+
+The adapter calls the existing `fs-contact::frictional_multicontact` owner
+without changing its non-associated Coulomb law, restitution/target semantics,
+cone and complementarity gates, or determinacy evidence. Returned velocities
+are measured again from the actual articulated endpoints. All systems are
+updated privately and published together only after physical momentum, signed
+support work and total kinetic loss close. Unit probes do not consume joint
+speed limits; the actual endpoint retains that admission. Dynamic witnesses
+are never moved to create a common point, so an activated finite-gap friction
+couple can still fail the angular-momentum gate.
+
+There are at most 21 contacts and 128 systems. Each contact row probes only its
+one or two involved trees with linear-time ABA; the bounded contact matrix is
+dense, but the generalized articulated mass matrix is never assembled.
+Velocity-only determinacy retains individual impulses as an admissible
+representative. Its support work requires a common translation among active
+prescribed supports; independently moving supports refuse without an additional
+work-determinacy witness. No local heat or pressure authority is inferred.
+
+G1/G3/G4 regressions in `tests/articulated_contacts/friction.rs` cover the
+zero-friction normal-owner limit, analytically coupled off-centre stick/slide,
+prismatic and revolute recoil, a shared-body conveyor under contact permutation
+and tangent-frame rotation, two dynamic counterparts, and late cancellation
+with deterministic retry. This is a frozen-configuration point impulse with one
+common static/kinetic coefficient. It adds no contact discovery, time stepper,
+velocity-dependent friction, finite-patch spin loss, or heat allocation.
+
 ## Native rigid-body finite-patch tangential impulses
 
 `tangential_friction::apply_rigid_friction` binds supplied positive normal
