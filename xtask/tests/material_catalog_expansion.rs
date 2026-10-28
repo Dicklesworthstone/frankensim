@@ -1546,3 +1546,12 @@ mod thermal_engineering;
 
 #[path = "material_catalog_expansion/compression_reference.rs"]
 mod compression_reference;
+
+#[path = "material_catalog_expansion/alloy_completion.rs"]
+mod alloy_completion;
+
+#[path = "material_catalog_expansion/printed_elastomers.rs"]
+mod printed_elastomers;
+
+#[path = "material_catalog_expansion/ceramics_elements.rs"]
+mod ceramics_elements;

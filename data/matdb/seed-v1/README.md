@@ -4,6 +4,73 @@ This directory retains the human-reviewable source inputs compiled by
 `xtask matdb-pack`. Generated binary packs are deliberately not committed:
 the compiler must reproduce them from the pinned manifest and source record.
 
+## Printed polymers, compliant materials, ordinary steels and ceramics
+
+This expansion adds **23 source packs and 193 property claims**, including
+additive improvements to five existing alloy/mineral profiles. New data are
+automatically searchable and inspectable through `matdb-catalog`.
+
+| Family | New packs | Added claims | Coverage |
+| --- | ---: | ---: | --- |
+| Printed plastics | 3 | 32 | Prusament PLA/PETG MK3 profiles; Ultrafuse TPU 95A, with orientation, print settings and conditioning |
+| Named rubbers and casting resins | 5 | 24 | Parker E3609 EPDM and N0674 NBR; Ecoflex 00-30, Dragon Skin 20 and VytaFlex 40 |
+| Flexible polyurethane foam | 3 | 27 | PORON 4701-40 at nominal 240, 320 and 480 kg/m³ |
+| Ordinary steels | 2 | 20 | A36 hot-rolled and 1018 cold-finished supplier references with density, stiffness, heat capacity, conductivity, strength and ductility |
+| Stainless steels and elements | 4 | 20 | 430/1.4016 and 316L/1.4404; bismuth and vanadium |
+| Ceramics and mineral crystals | 6 | 57 | AD-96/AD-995 alumina, AlN 180, Hexoloy SA SiC, MACOR's 2013 source, sylvite; frequency-qualified permittivity added to existing halite and periclase |
+| Existing alloy completion | 0 | 13 | INCONEL 625 dynamic elastic curves; MONEL 400 nominal moduli; TIMETAL 6-4 endpoint-mean expansion |
+
+The printed profiles distinguish orientation and actual test protocol. The TPU
+sheet's filament density remains separate from printed bulk density. A rubber
+value labeled “100% modulus” is retained as **tensile stress at strain 1**;
+it does not supply a small-strain elastic or hyperelastic law. Silicone and
+urethane castings retain seven-day cure and mixing conditions. Tear strengths
+keep the original Die B/Die C geometry. Compression-set observations keep the
+temperature, dwell and imposed deformation distinct from a recoverable strain.
+
+PORON retains its 25% compression point and reported crosshead speed. Typical
+values, minimum/maximum limits and nominal density remain separate claims.
+No foam receives an invented heat capacity, crushing curve or hysteresis law.
+
+A36 and 1018 are explicitly acknowledged supplier-guide engineering references.
+The source supplies no numeric test temperature, matched coupon or statistical
+uncertainty. This supports a declared axial or conductive-slab reference, but
+does not admit a temperature-span heat-storage law or structural design
+allowable. Imperial units are converted explicitly; the unspecified Btu
+convention is recorded as an International Table conversion assumption.
+Independently reported E, G and Poisson ratio are not forced into consistency.
+
+For example, resolve the A36 reference's available mechanical and thermal
+properties together, retaining all unknown-condition acknowledgements:
+
+```sh
+cargo run -p xtask -- matdb-catalog --pack steel-a36-onlinemetals-reference \
+  --property density --property young_modulus --property poisson_ratio \
+  --property specific-heat-capacity --property thermal-conductivity \
+  --at engineering-reference-model=1 --at source-specimens-matched=0 \
+  --at source-test-temperature-known=0 --at source-test-method-known=0 \
+  --at source-hot-rolled=1
+```
+
+The ceramic and elemental packs preserve differences between heat-capacity,
+conductivity and mechanical test temperatures. Unspecified “room temperature”
+does not acquire an invented Kelvin value. Dielectric observations retain their
+frequencies, sparse frequency/temperature samples remain discrete where the
+source supplies no interpolation law, and mean expansion retains both interval
+endpoints. The existing halite and periclase thermal claims remain intact.
+
+INCONEL 625 provides separate annealed and solution-treated dynamic E/G/nu
+curves from 294.15 to 1144.15 K, preserving the 0.75-inch rod and unknown
+frequency. MONEL tension, compression, torsion and Poisson data remain
+independent nominal constants with an explicitly authored calculation reference.
+TIMETAL adds three interval means; no instantaneous expansion curve is inferred.
+
+Focused source/query and physical-consumer regressions live in the
+`material_catalog_expansion` target's `printed_elastomers`, `ceramics_elements`
+and `alloy_completion` modules. They exercise source values, canonical hashes,
+receipt replay, rejected conditions, axial force/mass/work, slab resistance and
+endpoint expansion using the production material owners.
+
 
 ## Compression observations and engineering ceramics
 
