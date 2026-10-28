@@ -13,7 +13,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use super::{
     GrayDiffuseEnclosure, PreparedRadiosity, STEFAN_BOLTZMANN_W_M2_K4 as SIGMA,
     SURFACE_EMISSIVITY_PROPERTY, SurfaceEmissivity, balance, pointwise::TRIANGLE_DEGREE_FIVE,
-    radiation_error,
+    radiation_error, pointwise::PointwiseRadiationParameterGradient,
 };
 use crate::{ConductionError, ConductionMesh, ThermalBc, ThermalBoundary, assemble::ASSEMBLY_TILE};
 
@@ -90,7 +90,9 @@ struct Geometry {
 #[derive(Debug, Clone)]
 struct FaceTangent {
     vertices: [usize; 3],
+    patch: usize,
     matrix: [[f64; 3]; 3],
+    emission_delta_load: [f64; 3],
 }
 
 /// Local blocks plus reflected patch feedback. This tangent is generally
@@ -106,6 +108,8 @@ pub struct PointwiseEnclosureAssembly {
     local: Vec<FaceTangent>,
     emission_slopes: Vec<Vec<f64>>,
     emission_diagonal: Vec<f64>,
+    irradiation_corrections: Vec<f64>,
+    emission_minus_irradiation: Vec<f64>,
 }
 
 impl PointwiseEnclosureAssembly {
@@ -193,6 +197,181 @@ impl PointwiseEnclosureAssembly {
             }
         }
         poll(cx, self.local.len())
+    }
+
+    /// Apply the genuine transpose, including nonlocal reflected irradiation.
+    pub fn tangent_apply_transpose(
+        &self,
+        cx: &Cx<'_>,
+        direction: &[f64],
+        output: &mut [f64],
+    ) -> Result<(), ConductionError> {
+        self.check_fields(direction.len(), output.len())?;
+        output.fill(0.0);
+        self.add_scaled_tangent_transpose(cx, direction, None, 1.0, |_| true, output)
+    }
+
+    // Transpose of scale * P * (D - W diag(epsilon) B S) * diag(dT/dh).
+    // The prescribed-row mask acts on input, never on the resulting columns.
+    pub(crate) fn add_scaled_tangent_transpose(
+        &self,
+        cx: &Cx<'_>,
+        direction: &[f64],
+        column_scale: Option<&[f64]>,
+        scale: f64,
+        include_row: impl Fn(usize) -> bool,
+        output: &mut [f64],
+    ) -> Result<(), ConductionError> {
+        poll(cx, 0)?;
+        self.check_fields(direction.len(), output.len())?;
+        if column_scale.is_some_and(|s| s.len() != direction.len()) {
+            return Err(invalid("enclosure transpose scaling has the wrong length"));
+        }
+        let value = |vertex| {
+            if include_row(vertex) { finite(direction[vertex]) } else { Ok(0.0) }
+        };
+        for (slot, face) in self.local.iter().enumerate() {
+            if slot % ASSEMBLY_TILE == 0 { poll(cx, slot)?; }
+            let local = [
+                value(face.vertices[0])?,
+                value(face.vertices[1])?,
+                value(face.vertices[2])?,
+            ];
+            for (j, &vertex) in face.vertices.iter().enumerate() {
+                let applied = finite(face.matrix[0][j].mul_add(
+                    local[0],
+                    face.matrix[1][j].mul_add(local[1], face.matrix[2][j] * local[2]),
+                ))?;
+                let coefficient = finite(scale * column_scale.map_or(1.0, |s| s[vertex]))?;
+                output[vertex] = finite(coefficient.mul_add(applied, output[vertex]))?;
+            }
+        }
+        let p = self.geometry.patches.len();
+        let mut irradiation_bar = vec![0.0; p];
+        for (patch, geometry) in self.geometry.patches.iter().enumerate() {
+            poll(cx, patch)?;
+            let mut integral = 0.0;
+            for (slot, (&vertex, &weight)) in
+                geometry.vertices.iter().zip(&geometry.weights).enumerate()
+            {
+                if slot % ASSEMBLY_TILE == 0 { poll(cx, slot)?; }
+                integral = finite(weight.mul_add(value(vertex)?, integral))?;
+            }
+            irradiation_bar[patch] = finite(geometry.emissivity * integral)?;
+        }
+        for (column, (geometry, slopes)) in self.geometry.patches.iter()
+            .zip(&self.emission_slopes).enumerate()
+        {
+            poll(cx, column)?;
+            let mut emission_bar = 0.0;
+            for (row, &bar) in irradiation_bar.iter().enumerate() {
+                emission_bar = finite(
+                    self.geometry.irradiation_response[row][column]
+                        .mul_add(bar, emission_bar),
+                )?;
+            }
+            for (slot, (&vertex, &slope)) in geometry.vertices.iter().zip(slopes).enumerate() {
+                if slot % ASSEMBLY_TILE == 0 { poll(cx, slot)?; }
+                let coefficient = finite(
+                    -scale * column_scale.map_or(1.0, |s| s[vertex]) * emission_bar,
+                )?;
+                output[vertex] = finite(coefficient.mul_add(slope, output[vertex]))?;
+            }
+        }
+        poll(cx, self.local.len())
+    }
+
+    /// Contract absolute emissivity derivatives of the actual spatial load.
+    /// The prepared irradiation response includes every reflected path, so
+    /// this contraction needs no additional radiosity or thermal solve.
+    pub fn parameter_pullback(
+        &self,
+        cx: &Cx<'_>,
+        outward_load_weights: &[f64],
+    ) -> Result<PointwiseRadiationParameterGradient, ConductionError> {
+        self.check_fields(outward_load_weights.len(), outward_load_weights.len())?;
+        self.admit_adjoint(cx)?;
+        for (vertex, &weight) in outward_load_weights.iter().enumerate() {
+            if vertex % ASSEMBLY_TILE == 0 { poll(cx, vertex)?; }
+            finite(weight)?;
+        }
+        let p = self.geometry.patches.len();
+        let mut area_weights = vec![0.0; p];
+        let mut emissivities = vec![0.0; p];
+        for (patch, geometry) in self.geometry.patches.iter().enumerate() {
+            poll(cx, patch)?;
+            for (slot, (&vertex, &area)) in
+                geometry.vertices.iter().zip(&geometry.weights).enumerate()
+            {
+                if slot % ASSEMBLY_TILE == 0 { poll(cx, slot)?; }
+                area_weights[patch] = finite(
+                    area.mul_add(outward_load_weights[vertex], area_weights[patch]),
+                )?;
+            }
+            emissivities[patch] = finite(
+                -self.irradiation_corrections[patch] * area_weights[patch],
+            )?;
+        }
+        // Retain the spatial integral of v_h sigma(T_h^4-reference^4).
+        // A patch mean heat multiplied by a mean cotangent loses this term.
+        for (slot, face) in self.local.iter().enumerate() {
+            if slot % ASSEMBLY_TILE == 0 { poll(cx, slot)?; }
+            for (i, &vertex) in face.vertices.iter().enumerate() {
+                emissivities[face.patch] = finite(
+                    face.emission_delta_load[i]
+                        .mul_add(outward_load_weights[vertex], emissivities[face.patch]),
+                )?;
+            }
+        }
+        for (column, derivative) in emissivities.iter_mut().enumerate() {
+            poll(cx, column)?;
+            let epsilon = self.geometry.patches[column].emissivity;
+            let mut irradiation_bar = 0.0;
+            for (row, &area_weight) in area_weights.iter().enumerate() {
+                // B = F A^-1 diag(epsilon); divide its column before the
+                // contraction to avoid forming (E-G)/epsilon at small epsilon.
+                let response = finite(
+                    self.geometry.irradiation_response[row][column] / epsilon,
+                )?;
+                irradiation_bar = finite(
+                    response.mul_add(
+                        finite(self.geometry.patches[row].emissivity * area_weight)?,
+                        irradiation_bar,
+                    ),
+                )?;
+            }
+            *derivative = finite(
+                (-self.emission_minus_irradiation[column])
+                    .mul_add(irradiation_bar, *derivative),
+            )?;
+        }
+        poll(cx, p)?;
+        Ok(PointwiseRadiationParameterGradient {
+            radiation_regions: self.report.patches.iter().map(|p| p.name.clone()).collect(),
+            emissivities,
+            reservoir_temperatures: Vec::new(),
+        })
+    }
+
+    pub(crate) fn admit_adjoint(&self, cx: &Cx<'_>) -> Result<(), ConductionError> {
+        for (patch, report) in self.report.patches.iter().enumerate() {
+            poll(cx, patch)?;
+            if let Some((low, high)) = report.emissivity.temperature_validity_k() {
+                for value in [report.minimum_temperature_k, report.maximum_temperature_k] {
+                    if value <= low || value >= high {
+                        return Err(ConductionError::MaterialQuery {
+                            property: SURFACE_EMISSIVITY_PROPERTY.into(),
+                            temperature: value,
+                            upstream: format!(
+                                "surface {:?} adjoint needs every node strictly inside retained emissivity support ({low}, {high}) K",
+                                report.name,
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn check_fields(&self, direction: usize, output: usize) -> Result<(), ConductionError> {
@@ -349,6 +528,8 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
         })
     }
 
+    pub(crate) fn patch_count(&self) -> usize { self.geometry.patches.len() }
+
     pub(crate) fn matches(&self, mesh: &ConductionMesh, boundary: &ThermalBoundary) -> bool {
         std::ptr::eq(self.mesh, mesh) && std::ptr::eq(self.boundary, boundary)
     }
@@ -439,6 +620,7 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
             let t = face.vertices.map(|vertex| temperature[vertex]);
             let epsilon = self.geometry.patches[face.patch].emissivity;
             let mut matrix = [[0.0; 3]; 3];
+            let mut emission_delta_load = [0.0; 3];
             for (bary, weight) in TRIANGLE_DEGREE_FIVE {
                 let tq = finite(t[0] + (t[1] - t[0]).mul_add(bary[1], (t[2] - t[0]) * bary[2]))?;
                 let area_weight = finite(face.area * weight)?;
@@ -452,6 +634,9 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
                 if TANGENT {
                     let derivative = finite(area_weight * 4.0 * SIGMA * tq * tq * tq)?;
                     for i in 0..3 {
+                        emission_delta_load[i] = finite(
+                            bary[i].mul_add(emission, emission_delta_load[i]),
+                        )?;
                         let value = &mut slopes[face.patch][face.local[i]];
                         *value = finite(*value + derivative * bary[i])?;
                         for j in 0..=i {
@@ -470,7 +655,9 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
                 }
                 local.push(FaceTangent {
                     vertices: face.vertices,
+                    patch: face.patch,
                     matrix,
+                    emission_delta_load,
                 });
             }
         }
@@ -497,6 +684,8 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
         }
         let radiosity_delta = self.factors.solve_rhs(cx, &rhs)?;
         let mut reports = Vec::with_capacity(p);
+        let mut irradiation_corrections = Vec::with_capacity(if TANGENT { p } else { 0 });
+        let mut emission_minus_irradiation = Vec::with_capacity(if TANGENT { p } else { 0 });
         let mut total = 0.0;
         let mut absolute = 0.0;
         let mut residual_max = 0.0_f64;
@@ -513,6 +702,10 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
             residual_max = residual_max.max(residual.abs());
             max_area = max_area.max(surface.area_m2());
             let correction = finite(background.mul_add(row_sums[patch] - 1.0, irradiation_delta))?;
+            if TANGENT {
+                irradiation_corrections.push(correction);
+                emission_minus_irradiation.push(finite(emission_delta[patch] - correction)?);
+            }
             let mut mean_delta = 0.0;
             for (slot, (&vertex, &weight)) in
                 geometry.vertices.iter().zip(&geometry.weights).enumerate()
@@ -600,6 +793,8 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
             local,
             emission_slopes: slopes,
             emission_diagonal,
+            irradiation_corrections,
+            emission_minus_irradiation,
         })
     }
 }

@@ -57,7 +57,8 @@ pub use pointwise_enclosure::{
     PointwiseEnclosureReport, PointwiseEnclosureTolerance,
 };
 pub use pointwise::{
-    PointwiseAmbientRadiation, PointwiseRadiationAssembly, PointwiseRadiationPatchReport,
+    PointwiseAmbientRadiation, PointwiseRadiationAssembly, PointwiseRadiationParameterGradient,
+    PointwiseRadiationPatchReport,
     PointwiseRadiationReport,
 };
 pub use prepared::PreparedRadiosity;

@@ -47,10 +47,26 @@ pub struct PointwiseRadiationReport {
     pub outward_heat_w: f64,
 }
 
+/// Cotangents of the frozen radiation declarations in patch order.
+/// These contract outward nodal loads; an implicit residual adjoint supplies
+/// the signed load weights (for backward Euler, `-dt * lambda` on free rows).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PointwiseRadiationParameterGradient {
+    /// Exact supplied trace names.
+    pub radiation_regions: Vec<String>,
+    /// Derivative with respect to absolute emissivity, not its logarithm.
+    pub emissivities: Vec<f64>,
+    /// Ambient reservoir-temperature derivatives, K. Empty for an enclosure.
+    pub reservoir_temperatures: Vec<f64>,
+}
+
 #[derive(Debug, Clone)]
 struct FaceTangent {
     vertices: [usize; 3],
+    patch: usize,
     matrix: [[f64; 3]; 3],
+    emissivity_load: [f64; 3],
+    reservoir_load: [f64; 3],
 }
 
 /// Exact discrete radiation load and its local analytic temperature tangent.
@@ -116,6 +132,112 @@ impl PointwiseRadiationAssembly {
             }
         }
         poll(cx, self.tangent.len())
+    }
+
+    /// Apply the transpose of the complete temperature tangent.
+    pub fn tangent_apply_transpose(
+        &self,
+        cx: &Cx<'_>,
+        direction: &[f64],
+        output: &mut [f64],
+    ) -> Result<(), ConductionError> {
+        self.check_fields(direction.len(), output.len())?;
+        output.fill(0.0);
+        self.add_scaled_tangent_transpose(cx, direction, None, 1.0, |_| true, output)
+    }
+
+    // Transpose of scale * P * J_T * diag(column_scale): mask the input
+    // rows, then scale the output columns. Fixed columns must remain present.
+    pub(crate) fn add_scaled_tangent_transpose(
+        &self,
+        cx: &Cx<'_>,
+        direction: &[f64],
+        column_scale: Option<&[f64]>,
+        scale: f64,
+        include_row: impl Fn(usize) -> bool,
+        output: &mut [f64],
+    ) -> Result<(), ConductionError> {
+        poll(cx, 0)?;
+        self.check_fields(direction.len(), output.len())?;
+        if column_scale.is_some_and(|values| values.len() != direction.len()) {
+            return Err(invalid("radiation transpose scaling has the wrong field length"));
+        }
+        for (slot, face) in self.tangent.iter().enumerate() {
+            if slot % ASSEMBLY_TILE == 0 { poll(cx, slot)?; }
+            let mut local = [0.0; 3];
+            for (i, &vertex) in face.vertices.iter().enumerate() {
+                if include_row(vertex) { local[i] = finite(direction[vertex])?; }
+            }
+            for (j, &vertex) in face.vertices.iter().enumerate() {
+                let applied = finite(face.matrix[0][j].mul_add(
+                    local[0],
+                    face.matrix[1][j].mul_add(local[1], face.matrix[2][j] * local[2]),
+                ))?;
+                let coefficient = finite(scale * column_scale.map_or(1.0, |s| s[vertex]))?;
+                output[vertex] = finite(coefficient.mul_add(applied, output[vertex]))?;
+            }
+        }
+        poll(cx, self.tangent.len())
+    }
+
+    /// Contract the exact spatial load derivatives without a linear solve.
+    /// The temperature field and geometry remain fixed; emissivity is the
+    /// retained scalar declaration, not a temperature-dependent material law.
+    pub fn parameter_pullback(
+        &self,
+        cx: &Cx<'_>,
+        outward_load_weights: &[f64],
+    ) -> Result<PointwiseRadiationParameterGradient, ConductionError> {
+        self.check_fields(outward_load_weights.len(), outward_load_weights.len())?;
+        self.admit_adjoint(cx)?;
+        for (vertex, &weight) in outward_load_weights.iter().enumerate() {
+            if vertex % ASSEMBLY_TILE == 0 { poll(cx, vertex)?; }
+            finite(weight)?;
+        }
+        let mut result = PointwiseRadiationParameterGradient {
+            radiation_regions: self.report.patches.iter()
+                .map(|report| report.patch.region().to_owned()).collect(),
+            emissivities: vec![0.0; self.report.patches.len()],
+            reservoir_temperatures: vec![0.0; self.report.patches.len()],
+        };
+        for (slot, face) in self.tangent.iter().enumerate() {
+            if slot % ASSEMBLY_TILE == 0 { poll(cx, slot)?; }
+            for (i, &vertex) in face.vertices.iter().enumerate() {
+                let weight = outward_load_weights[vertex];
+                result.emissivities[face.patch] = finite(
+                    face.emissivity_load[i].mul_add(weight, result.emissivities[face.patch]),
+                )?;
+                result.reservoir_temperatures[face.patch] = finite(
+                    face.reservoir_load[i].mul_add(weight, result.reservoir_temperatures[face.patch]),
+                )?;
+            }
+        }
+        poll(cx, self.tangent.len())?;
+        Ok(result)
+    }
+
+    pub(crate) fn admit_adjoint(&self, cx: &Cx<'_>) -> Result<(), ConductionError> {
+        for (patch, report) in self.report.patches.iter().enumerate() {
+            poll(cx, patch)?;
+            if let Some((low, high)) = report.patch.emissivity().temperature_validity_k() {
+                for value in [
+                    report.minimum_surface_temperature_k,
+                    report.maximum_surface_temperature_k,
+                ] {
+                    if value <= low || value >= high {
+                        return Err(ConductionError::MaterialQuery {
+                            property: SURFACE_EMISSIVITY_PROPERTY.into(),
+                            temperature: value,
+                            upstream: format!(
+                                "surface {:?} adjoint needs every node strictly inside retained emissivity support ({low}, {high}) K",
+                                report.patch.region(),
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn check_fields(&self, direction: usize, output: usize) -> Result<(), ConductionError> {
@@ -206,6 +328,8 @@ impl<'a> PointwiseAmbientRadiation<'a> {
             areas,
         })
     }
+
+    pub(crate) fn patch_count(&self) -> usize { self.patches.len() }
 
     pub(crate) fn matches(&self, mesh: &ConductionMesh, boundary: &ThermalBoundary) -> bool {
         std::ptr::eq(self.mesh, mesh) && std::ptr::eq(self.boundary, boundary)
@@ -306,6 +430,8 @@ impl<'a> PointwiseAmbientRadiation<'a> {
             let ambient = patch.ambient_temperature_k();
             let coefficient = patch.emissivity().value() * STEFAN_BOLTZMANN_W_M2_K4;
             let mut matrix = [[0.0; 3]; 3];
+            let mut emissivity_load = [0.0; 3];
+            let mut reservoir_load = [0.0; 3];
             for (bary, weight) in TRIANGLE_DEGREE_FIVE {
                 // Affine evaluation preserves an exactly uniform field.
                 let local_t =
@@ -325,6 +451,22 @@ impl<'a> PointwiseAmbientRadiation<'a> {
                     load[vertices[i]] = finite(load[vertices[i]] + bary[i] * heat)?;
                 }
                 if WITH_TANGENT {
+                    let emissivity_derivative = finite(
+                        area_weight * STEFAN_BOLTZMANN_W_M2_K4
+                            * (local_t - ambient) * (local_t + ambient)
+                            * local_t.mul_add(local_t, ambient * ambient),
+                    )?;
+                    let reservoir_derivative = finite(
+                        -area_weight * 4.0 * coefficient * ambient * ambient * ambient,
+                    )?;
+                    for i in 0..3 {
+                        emissivity_load[i] = finite(
+                            bary[i].mul_add(emissivity_derivative, emissivity_load[i]),
+                        )?;
+                        reservoir_load[i] = finite(
+                            bary[i].mul_add(reservoir_derivative, reservoir_load[i]),
+                        )?;
+                    }
                     let derivative =
                         finite(area_weight * (4.0 * coefficient * local_t * local_t * local_t))?;
                     for i in 0..3 {
@@ -341,7 +483,9 @@ impl<'a> PointwiseAmbientRadiation<'a> {
                         matrix[j][i] = matrix[i][j];
                     }
                 }
-                tangent.push(FaceTangent { vertices, matrix });
+                tangent.push(FaceTangent {
+                    vertices, patch: patch_index, matrix, emissivity_load, reservoir_load,
+                });
             }
         }
         let mut outward_heat_w = 0.0;
