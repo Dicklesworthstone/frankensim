@@ -1,14 +1,15 @@
-//! Physical state transfer between modes on one fixed reference mass space.
+//! Physical state transfer between modes on one reference coordinate space.
 //!
 //! Shapes, not sorted mode numbers, carry displacement and conjugate momentum.
 //! The target basis may permute, change sign, or rotate a degenerate subspace.
-//! A changed support/mesh/mass requires a different transfer owner. All storage
+//! Changed inertia preserves canonical momentum, not velocity. A changed
+//! support/mesh/coordinate map requires a different transfer owner. All storage
 //! here is incremental modal storage about the supplied equilibria; it is not
 //! the complete prestressed body's thermodynamic energy or a heat debit.
 
 use crate::{ModePair, time::ModalAcousticState};
 use fs_exec::Cx;
-use fs_sparse::{Csr, DirectOrdering, LdltError, LdltOptions, SymbolicLdlt};
+use fs_sparse::{Csr, DirectOrdering, LdltError, LdltFactor, LdltOptions, SymbolicLdlt};
 
 /// Explicit accuracy, state-loss, work and allocation limits for one transfer.
 #[derive(Clone, Copy, Debug)]
@@ -35,6 +36,26 @@ pub struct ModalTransferControls {
     pub energy_tolerance_j: f64,
 }
 
+/// Limits for a change of inertia on the same physical coordinate space.
+#[derive(Clone, Copy, Debug)]
+pub struct ModalMassTransferControls {
+    /// State projection, parameter work, and sparse factorization limits.
+    pub transfer: ModalTransferControls,
+    /// Maximum relative residual of `M_new v_new = M_old v_old` before
+    /// projection: `||M_new v_new - p||_2 / (||M_new v_new||_2 + ||p||_2)`.
+    /// Exact zero momentum has zero residual.
+    pub maximum_relative_momentum_residual: f64,
+}
+
+/// A transfer under changed inertia, including the independent mass-solve check.
+#[derive(Clone, Debug)]
+pub struct ModalMassTransfer {
+    /// Projected motion and the complete incremental storage/work accounting.
+    pub transfer: ModalTransfer,
+    /// Relative momentum residual before any declared modal truncation.
+    pub relative_momentum_residual: f64,
+}
+
 /// An immutable proposal. Projection residuals are discarded represented state,
 /// never physical damping, heat, or a permission to normalize the waveform.
 #[derive(Clone, Debug)]
@@ -52,7 +73,7 @@ pub struct ModalTransfer {
     pub parameter_work_j: f64,
     /// Mass norm of the discarded displacement field [m sqrt(kg)].
     pub displacement_residual_m_sqrt_kg: f64,
-    /// Actual discarded velocity energy under the original mass operator [J].
+    /// Actual discarded velocity energy under the target mass operator [J].
     pub kinetic_residual_j: f64,
     /// Actual discarded displacement energy under the target stiffness [J].
     pub elastic_residual_j: f64,
@@ -126,31 +147,38 @@ fn energy(a: &Csr, x: &[f64], cx: &Cx<'_>) -> Result<f64, ModalTransferError> {
     if value >= 0.0 { Ok(value) }
     else { Err(ModalTransferError::Invalid("negative quadratic storage")) }
 }
-fn admit_spd(a: &Csr, controls: ModalTransferControls, cx: &Cx<'_>)
-    -> Result<(), ModalTransferError>
-{
+fn admit_spd(
+    a: &Csr,
+    controls: ModalTransferControls,
+    cx: &Cx<'_>,
+) -> Result<LdltFactor, ModalTransferError> {
     for row in 0..a.nrows() {
         poll(cx)?;
         let (columns, values) = a.row(row);
         for (&column, &value) in columns.iter().zip(values) {
             if !value.is_finite() || value != a.get(column, row) {
                 return Err(ModalTransferError::Invalid(
-                    "finite exactly symmetric mass and target stiffness required"));
+                    "finite exactly symmetric mass and target stiffness required",
+                ));
             }
         }
     }
     let symbolic = SymbolicLdlt::analyze(a, DirectOrdering::Amd)?;
     poll(cx)?;
-    let factor = symbolic.factor(a, &LdltOptions {
-        max_factor_bytes: Some(controls.maximum_factor_bytes),
-        ..LdltOptions::default()
-    })?;
+    let factor = symbolic.factor(
+        a,
+        &LdltOptions {
+            max_factor_bytes: Some(controls.maximum_factor_bytes),
+            ..LdltOptions::default()
+        },
+    )?;
     poll(cx)?;
     if factor.inertia().positive != a.nrows() {
         return Err(ModalTransferError::Invalid(
-            "positive definite reference mass and stable target stiffness required"));
+            "positive definite reference mass and stable target stiffness required",
+        ));
     }
-    Ok(())
+    Ok(factor)
 }
 
 fn admit_basis(
@@ -229,7 +257,87 @@ pub fn transfer_modal_state(
     controls: ModalTransferControls,
     cx: &Cx<'_>,
 ) -> Result<ModalTransfer, ModalTransferError> {
+    transfer_modal_state_impl(
+        mass,
+        None,
+        target_stiffness,
+        previous_modes,
+        target_modes,
+        previous_states,
+        equilibrium_offset_m,
+        controls,
+        cx,
+    )
+    .map(|result| result.transfer)
+}
+
+/// Transfer vibration when an explicitly parameterized inertia changes.
+///
+/// Both SPD masses use the same physical DOFs and inertial frame. In the
+/// absence of an external impulse, displacement and canonical momentum are
+/// continuous: `u_new = u_old`, `p_new = M_old v_old`, and
+/// `v_new = M_new^-1 p_new`. Target modal velocity is therefore
+/// `Phi_new^T p_new`, while displacement uses the target mass inner product.
+/// This matters even for one mode: retaining velocity under changed inertia
+/// would create or destroy momentum.
+///
+/// The target mass is factored once for both SPD admission and its solve. The
+/// proposal separately checks the solve residual and the state lost by modal
+/// truncation. Parameter work includes the signed kinetic-storage change from
+/// the inertia update and the elastic-storage change; the parameter owner
+/// must supply or absorb it. No amplitude normalization or heat is inferred.
+///
+/// This describes a Hamiltonian parameter update, not accreted/ejected mass,
+/// fluid added-mass dynamics, moving coordinates, remeshing or new constraints.
+/// Those require their own momentum flux, impulse, or coordinate transfer.
+/// Like [`transfer_modal_state`], this function does not advance time or
+/// mutate an accepted state, and refuses unstable/zero-frequency pencils.
+#[allow(clippy::too_many_arguments)]
+pub fn transfer_modal_state_with_mass_change(
+    previous_mass: &Csr,
+    target_mass: &Csr,
+    target_stiffness: &Csr,
+    previous_modes: &[ModePair],
+    target_modes: &[ModePair],
+    previous_states: &[ModalAcousticState],
+    equilibrium_offset_m: &[f64],
+    controls: ModalMassTransferControls,
+    cx: &Cx<'_>,
+) -> Result<ModalMassTransfer, ModalTransferError> {
+    transfer_modal_state_impl(
+        previous_mass,
+        Some((target_mass, controls.maximum_relative_momentum_residual)),
+        target_stiffness,
+        previous_modes,
+        target_modes,
+        previous_states,
+        equilibrium_offset_m,
+        controls.transfer,
+        cx,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn transfer_modal_state_impl(
+    previous_mass: &Csr,
+    changed_mass: Option<(&Csr, f64)>,
+    target_stiffness: &Csr,
+    previous_modes: &[ModePair],
+    target_modes: &[ModePair],
+    previous_states: &[ModalAcousticState],
+    equilibrium_offset_m: &[f64],
+    controls: ModalTransferControls,
+    cx: &Cx<'_>,
+) -> Result<ModalMassTransfer, ModalTransferError> {
     poll(cx)?;
+    let mass = changed_mass.map_or(previous_mass, |(target, _)| target);
+    if let Some((_, tolerance)) = changed_mass {
+        if !tolerance.is_finite() || !(0.0..1.0).contains(&tolerance) {
+            return Err(ModalTransferError::Invalid(
+                "finite momentum residual tolerance in [0, 1) required",
+            ));
+        }
+    }
     let tolerances = [controls.maximum_mass_orthogonality_error,
         controls.maximum_relative_eigen_residual,
         controls.maximum_displacement_residual_m_sqrt_kg,
@@ -243,12 +351,22 @@ pub fn transfer_modal_state(
         return Err(ModalTransferError::Invalid("finite nonnegative transfer limits and nonzero count/allocation budgets required"));
     }
     let n = mass.nrows();
-    if n == 0 || mass.ncols() != n || target_stiffness.nrows() != n
-        || target_stiffness.ncols() != n || equilibrium_offset_m.len() != n
-        || previous_modes.is_empty() || target_modes.is_empty()
+    if n == 0
+        || mass.ncols() != n
+        || previous_mass.nrows() != n
+        || previous_mass.ncols() != n
+        || target_stiffness.nrows() != n
+        || target_stiffness.ncols() != n
+        || equilibrium_offset_m.len() != n
+        || previous_modes.is_empty()
+        || target_modes.is_empty()
         || previous_modes.len() != previous_states.len()
-        || previous_modes.len() > n || target_modes.len() > n {
-        return Err(ModalTransferError::Invalid("matching nonempty reference space, bases, states and equilibrium offset required"));
+        || previous_modes.len() > n
+        || target_modes.len() > n
+    {
+        return Err(ModalTransferError::Invalid(
+            "matching nonempty reference space, bases, states and equilibrium offset required",
+        ));
     }
     for (quantity, requested, cap) in [
         ("reference DOFs", n, controls.maximum_dofs),
@@ -262,9 +380,15 @@ pub fn transfer_modal_state(
             || !state.velocity_m_sqrt_kg_per_s.is_finite()) {
         return Err(ModalTransferError::Invalid("finite previous motion and equilibrium offset required"));
     }
-    admit_spd(mass, controls, cx)?;
+    let mass_factor = if changed_mass.is_some() {
+        admit_spd(previous_mass, controls, cx)?;
+        Some(admit_spd(mass, controls, cx)?)
+    } else {
+        admit_spd(mass, controls, cx)?;
+        None
+    };
     admit_spd(target_stiffness, controls, cx)?;
-    admit_basis(mass, None, previous_modes, controls, cx)?;
+    admit_basis(previous_mass, None, previous_modes, controls, cx)?;
     admit_basis(mass, Some(target_stiffness), target_modes, controls, cx)?;
 
     let previous_modal_energy_j = modal_energy(previous_modes, previous_states, cx)?;
@@ -280,7 +404,29 @@ pub fn transfer_modal_state(
         }
     }
     let m_u = apply(mass, &u, cx)?;
-    let m_v = apply(mass, &v, cx)?;
+    let m_v = apply(previous_mass, &v, cx)?;
+    let mut relative_momentum_residual = 0.0;
+    if let (Some(factor), Some((_, tolerance))) = (mass_factor, changed_mass) {
+        poll(cx)?;
+        v = factor.solve(&m_v);
+        poll(cx)?;
+        let solved_momentum = apply(mass, &v, cx)?;
+        let residual: Vec<_> = solved_momentum
+            .iter()
+            .zip(&m_v)
+            .map(|(actual, expected)| actual - expected)
+            .collect();
+        let scale = finite(
+            dot(&solved_momentum, &solved_momentum, cx)?.sqrt() + dot(&m_v, &m_v, cx)?.sqrt(),
+        )?;
+        let norm = dot(&residual, &residual, cx)?.sqrt();
+        relative_momentum_residual = if scale == 0.0 { 0.0 } else { norm / scale };
+        limit(
+            "momentum solve residual",
+            relative_momentum_residual,
+            tolerance,
+        )?;
+    }
     let target_full_energy_j = finite(energy(mass, &v, cx)? + energy(target_stiffness, &u, cx)?)?;
     let parameter_work_j = finite(target_full_energy_j - previous_modal_energy_j)?;
     limit("absolute parameter work", parameter_work_j.abs(), controls.maximum_abs_parameter_work_j)?;
@@ -315,7 +461,18 @@ pub fn transfer_modal_state(
     limit("elastic projection residual", elastic_residual_j, controls.maximum_elastic_residual_j)?;
     limit("projection energy residual", projection_energy_residual_j.abs(), controls.energy_tolerance_j)?;
     poll(cx)?;
-    Ok(ModalTransfer { states, previous_modal_energy_j, target_full_energy_j,
-        retained_modal_energy_j, parameter_work_j, displacement_residual_m_sqrt_kg,
-        kinetic_residual_j, elastic_residual_j, projection_energy_residual_j })
+    Ok(ModalMassTransfer {
+        transfer: ModalTransfer {
+            states,
+            previous_modal_energy_j,
+            target_full_energy_j,
+            retained_modal_energy_j,
+            parameter_work_j,
+            displacement_residual_m_sqrt_kg,
+            kinetic_residual_j,
+            elastic_residual_j,
+            projection_energy_residual_j,
+        },
+        relative_momentum_residual,
+    })
 }

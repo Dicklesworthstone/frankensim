@@ -355,8 +355,27 @@ state-loss and allocation limits gate publication; inputs are never mutated.
 Parameter work is the signed change of represented incremental storage before
 projection. It is not the complete prestressed body's thermodynamic energy.
 Discarded state is neither heat nor physical damping. This stable,
-positive-frequency slice requires the same mass/coordinate space and exactly
-symmetric numeric operators; changed mesh/support/mass, rigid modes and
-constitutive memory require their own transfer. Five focused tests cover
-nonidentity mass, mode signs/order, degenerate rotation, equilibrium shifts,
-independent energy accounts, explicit truncation and refused/cancelled inputs.
+positive-frequency slice requires the same coordinate space and exactly
+symmetric numeric operators; changed mesh/support, rigid modes and
+constitutive memory require their own transfer.
+
+`transfer::transfer_modal_state_with_mass_change` additionally admits distinct
+SPD source/target masses on that same physical space. It preserves displacement
+and canonical momentum before truncation: `p = M_old v_old`,
+`v_new = M_new^-1 p`. Source shapes are checked in the old mass inner product;
+target shapes and displacement projection use the new mass. The target mass
+factorization is reused for its solve, whose independent relative residual has
+an explicit caller-supplied limit. Target kinetic storage and discarded velocity
+energy use the new mass. The signed kinetic-storage change is parameter work,
+as is the stiffness/equilibrium contribution. Holding velocity or renormalizing
+the sound amplitude would violate this contract.
+
+This is an instantaneous Hamiltonian parameter update. It does not model mass
+accretion/ejection, momentum flux, a moving coordinate system, added-fluid
+coupling or new constraints; those need their own source/transfer laws. No live
+material consumer is inferred from this generic transfer capability. Existing
+fixed-mass tests cover nonidentity mass, mode signs/order, degenerate rotation,
+equilibrium shifts, independent energy accounts, explicit truncation and
+refused/cancelled inputs. Four additional G1/G3 tests cover analytic scalar
+inertia changes in both directions, a dense changed mass with rotated degenerate
+modes, target-mass truncation energy, and malformed/cancelled updates.

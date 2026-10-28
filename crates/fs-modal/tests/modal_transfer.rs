@@ -3,7 +3,10 @@ use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_modal::ModePair;
 use fs_modal::time::ModalAcousticState;
-use fs_modal::transfer::{ModalTransferControls, ModalTransferError, transfer_modal_state};
+use fs_modal::transfer::{
+    ModalMassTransferControls, ModalTransferControls, ModalTransferError,
+    transfer_modal_state, transfer_modal_state_with_mass_change,
+};
 use fs_sparse::{Coo, Csr};
 
 fn with_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
@@ -203,4 +206,282 @@ fn malformed_basis_state_operator_budgets_and_cancellation_refuse() {
             &states, &[0.0; 2], controls(), cx), Err(ModalTransferError::Cancelled)));
     });
     assert_eq!(states, [state(0.5, 3.0), state(2.0, -4.0)]);
+}
+
+fn mass_controls() -> ModalMassTransferControls {
+    ModalMassTransferControls {
+        transfer: controls(),
+        maximum_relative_momentum_residual: 1e-12,
+    }
+}
+
+#[test]
+fn changed_scalar_inertia_preserves_displacement_and_momentum_with_signed_work() {
+    let previous_mass = diagonal(&[4.0]);
+    let stiffness = diagonal(&[16.0]);
+    let old = [mode(4.0, &[0.5])];
+    let states = [state(2.0, 6.0)];
+    // Independently: u=1 m, p=12 kg m/s, E_old=26 J. The same
+    // stiffness under a new inertia has E_new=p²/(2m)+ku²/2.
+    with_cx(&CancelGate::new(), |cx| {
+        for target_m in [1.0_f64, 4.0, 9.0] {
+            let target_mass = diagonal(&[target_m]);
+            let new = [mode(16.0 / target_m, &[1.0 / target_m.sqrt()])];
+            let result = transfer_modal_state_with_mass_change(
+                &previous_mass,
+                &target_mass,
+                &stiffness,
+                &old,
+                &new,
+                &states,
+                &[0.0],
+                mass_controls(),
+                cx,
+            )
+            .unwrap();
+            let transfer = result.transfer;
+            close(
+                transfer.states[0].displacement_m_sqrt_kg / target_m.sqrt(),
+                1.0,
+            );
+            close(
+                transfer.states[0].velocity_m_sqrt_kg_per_s * target_m.sqrt(),
+                12.0,
+            );
+            close(transfer.previous_modal_energy_j, 26.0);
+            close(transfer.target_full_energy_j, 72.0 / target_m + 8.0);
+            close(transfer.retained_modal_energy_j, 72.0 / target_m + 8.0);
+            close(transfer.parameter_work_j, 72.0 / target_m - 18.0);
+            assert!(result.relative_momentum_residual <= 1e-12);
+            assert!(transfer.kinetic_residual_j < 1e-20);
+        }
+        let mut limited = mass_controls();
+        limited.transfer.maximum_abs_parameter_work_j = 9.0;
+        assert!(matches!(
+            transfer_modal_state_with_mass_change(
+                &previous_mass,
+                &diagonal(&[9.0]),
+                &stiffness,
+                &old,
+                &[mode(16.0 / 9.0, &[1.0 / 3.0])],
+                &states,
+                &[0.0],
+                limited,
+                cx
+            ),
+            Err(ModalTransferError::Limit {
+                quantity: "absolute parameter work",
+                ..
+            })
+        ));
+    });
+    assert_eq!(states, [state(2.0, 6.0)]);
+}
+
+#[test]
+fn dense_changed_mass_and_rotated_degenerate_modes_preserve_physical_state() {
+    let previous_mass = diagonal(&[1.0, 1.0]);
+    let old = [mode(9.0, &[1.0, 0.0]), mode(16.0, &[0.0, 1.0])];
+    let states = [state(0.4, 2.0), state(-0.3, -1.0)];
+    let mut mass = Coo::new(2, 2);
+    let mut stiffness = Coo::new(2, 2);
+    for (i, j, value) in [(0, 0, 2.0), (0, 1, 1.0), (1, 0, 1.0), (1, 1, 2.0)] {
+        mass.push(i, j, value);
+        stiffness.push(i, j, 25.0 * value);
+    }
+    let a = 1.0 / 6.0_f64.sqrt();
+    let b = 1.0 / 2.0_f64.sqrt();
+    // Rotate the entire mass-orthonormal repeated-eigenvalue subspace;
+    // neither mode indices nor coordinate-wise mass scaling can do this.
+    let new = [
+        mode(25.0, &[0.6 * a + 0.8 * b, 0.6 * a - 0.8 * b]),
+        mode(25.0, &[-0.8 * a + 0.6 * b, -0.8 * a - 0.6 * b]),
+    ];
+    with_cx(&CancelGate::new(), |cx| {
+        let mass = mass.assemble();
+        let stiffness = stiffness.assemble();
+        let result = transfer_modal_state_with_mass_change(
+            &previous_mass,
+            &mass,
+            &stiffness,
+            &old,
+            &new,
+            &states,
+            &[0.0; 2],
+            mass_controls(),
+            cx,
+        )
+        .unwrap();
+        let transfer = &result.transfer;
+        let mut u = [0.0; 2];
+        let mut v = [0.0; 2];
+        for (mode, state) in new.iter().zip(&transfer.states) {
+            for i in 0..2 {
+                u[i] += mode.phi[i] * state.displacement_m_sqrt_kg;
+                v[i] += mode.phi[i] * state.velocity_m_sqrt_kg_per_s;
+            }
+        }
+        close(u[0], 0.4);
+        close(u[1], -0.3);
+        close(v[0], 5.0 / 3.0);
+        close(v[1], -4.0 / 3.0);
+        close(2.0 * v[0] + v[1], 2.0);
+        close(v[0] + 2.0 * v[1], -1.0);
+        close(transfer.previous_modal_energy_j, 3.94);
+        close(transfer.target_full_energy_j, 67.0 / 12.0);
+        close(transfer.retained_modal_energy_j, 67.0 / 12.0);
+        close(transfer.parameter_work_j, 67.0 / 12.0 - 3.94);
+        assert!(result.relative_momentum_residual < 1e-12);
+        let replay = transfer_modal_state_with_mass_change(
+            &previous_mass,
+            &mass,
+            &stiffness,
+            &old,
+            &new,
+            &states,
+            &[0.0; 2],
+            mass_controls(),
+            cx,
+        )
+        .unwrap();
+        assert_eq!(transfer.states, replay.transfer.states);
+        assert_eq!(
+            result.relative_momentum_residual.to_bits(),
+            replay.relative_momentum_residual.to_bits()
+        );
+    });
+}
+
+#[test]
+fn changed_mass_truncation_accounts_for_target_velocity_energy() {
+    let previous_mass = diagonal(&[4.0, 9.0]);
+    let mass = diagonal(&[1.0, 4.0]);
+    let stiffness = diagonal(&[4.0, 36.0]);
+    let old = [mode(4.0, &[0.5, 0.0]), mode(9.0, &[0.0, 1.0 / 3.0])];
+    let new = [mode(4.0, &[1.0, 0.0])];
+    let states = [state(2.0, 4.0), state(3.0, 6.0)];
+    with_cx(&CancelGate::new(), |cx| {
+        assert!(matches!(
+            transfer_modal_state_with_mass_change(
+                &previous_mass,
+                &mass,
+                &stiffness,
+                &old,
+                &new,
+                &states,
+                &[0.0; 2],
+                mass_controls(),
+                cx
+            ),
+            Err(ModalTransferError::Limit { .. })
+        ));
+        let mut permitted = mass_controls();
+        permitted.transfer.maximum_displacement_residual_m_sqrt_kg = 2.0;
+        permitted.transfer.maximum_kinetic_residual_j = 40.5;
+        permitted.transfer.maximum_elastic_residual_j = 18.0;
+        let transfer = transfer_modal_state_with_mass_change(
+            &previous_mass,
+            &mass,
+            &stiffness,
+            &old,
+            &new,
+            &states,
+            &[0.0; 2],
+            permitted,
+            cx,
+        )
+        .unwrap()
+        .transfer;
+        assert_eq!(transfer.states, vec![state(1.0, 8.0)]);
+        close(transfer.previous_modal_energy_j, 74.5);
+        close(transfer.target_full_energy_j, 92.5);
+        close(transfer.retained_modal_energy_j, 34.0);
+        close(transfer.parameter_work_j, 18.0);
+        close(transfer.displacement_residual_m_sqrt_kg, 2.0);
+        close(transfer.kinetic_residual_j, 40.5);
+        close(transfer.elastic_residual_j, 18.0);
+        close(transfer.projection_energy_residual_j, 0.0);
+    });
+}
+
+#[test]
+fn changed_mass_refuses_bad_mass_space_source_normalization_and_solve_budget() {
+    let mass = diagonal(&[4.0]);
+    let stiffness = diagonal(&[16.0]);
+    let old = [mode(4.0, &[0.5])];
+    let new = [mode(16.0 / 9.0, &[1.0 / 3.0])];
+    let states = [state(2.0, 6.0)];
+    with_cx(&CancelGate::new(), |cx| {
+        for target in [diagonal(&[-9.0]), diagonal(&[0.0]), diagonal(&[9.0, 9.0])] {
+            assert!(
+                transfer_modal_state_with_mass_change(
+                    &mass,
+                    &target,
+                    &stiffness,
+                    &old,
+                    &new,
+                    &states,
+                    &[0.0],
+                    mass_controls(),
+                    cx
+                )
+                .is_err()
+            );
+        }
+        // Source normalization belongs to the OLD mass, never the target mass.
+        assert!(matches!(
+            transfer_modal_state_with_mass_change(
+                &mass,
+                &diagonal(&[9.0]),
+                &stiffness,
+                &[mode(4.0, &[1.0 / 3.0])],
+                &new,
+                &states,
+                &[0.0],
+                mass_controls(),
+                cx
+            ),
+            Err(ModalTransferError::Limit {
+                quantity: "mass orthogonality",
+                ..
+            })
+        ));
+        for tolerance in [-1.0, 1.0, f64::NAN, f64::INFINITY] {
+            let mut invalid = mass_controls();
+            invalid.maximum_relative_momentum_residual = tolerance;
+            assert!(matches!(
+                transfer_modal_state_with_mass_change(
+                    &mass,
+                    &diagonal(&[9.0]),
+                    &stiffness,
+                    &old,
+                    &new,
+                    &states,
+                    &[0.0],
+                    invalid,
+                    cx
+                ),
+                Err(ModalTransferError::Invalid(_))
+            ));
+        }
+    });
+    let cancelled = CancelGate::new();
+    cancelled.request();
+    with_cx(&cancelled, |cx| {
+        assert!(matches!(
+            transfer_modal_state_with_mass_change(
+                &mass,
+                &diagonal(&[9.0]),
+                &stiffness,
+                &old,
+                &new,
+                &states,
+                &[0.0],
+                mass_controls(),
+                cx
+            ),
+            Err(ModalTransferError::Cancelled)
+        ));
+    });
+    assert_eq!(states, [state(2.0, 6.0)]);
 }
