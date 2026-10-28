@@ -92,6 +92,7 @@ fn query(version: u64, interval: &str, creepage: [f64; 2], spin: f64) -> SmoothT
             creepage,
             rolling_speed_mps: 10.0,
             torsional_spin_rad_per_s: spin,
+            contact_spin_rad_per_s: 0.0,
             dt_s: 0.001,
         },
         work_ownership: GeneralizedWorkOwnership::new("patch-a", interval, "qx", "qy", "qspin")
@@ -141,6 +142,83 @@ fn elastic_work_exposes_numerical_damping_without_physical_heat() {
     close(
         receipt.residual.endpoint_relative_power_w,
         receipt.residual.reconstructed_body_power_w,
+    );
+}
+
+#[test]
+fn warm_history_gauge_and_common_spin_survive_checkpoint_and_rollback() {
+    let adapter = adapter(1.0e-4);
+    let law = law();
+    let patch = patch(NormalPatchAuthority::SyntheticFixture);
+    let interface = interface(NormalPatchAuthority::SyntheticFixture);
+    let initial = state(&adapter);
+    let loaded = adapter
+        .prepare(
+            &law,
+            &patch,
+            &interface,
+            &initial,
+            &query(0, "load", [0.6, 0.2], 0.1),
+        )
+        .unwrap();
+    let committed = adapter.commit(&initial, &loaded).unwrap();
+    let restored = adapter
+        .restore_checkpoint(&law, &patch, &interface, committed.checkpoint())
+        .unwrap();
+    let mut held_query = query(1, "hold", [0.0; 2], 0.0);
+    held_query.frame = frame().rotated(core::f64::consts::FRAC_PI_2).unwrap();
+    // Below the slip regularization scale: physical common spin must still
+    // transport the existing preload rather than enter the relative-slip deadzone.
+    held_query.kinematics.contact_spin_rad_per_s = 5.0e-5;
+    let held = adapter
+        .prepare(&law, &patch, &interface, &restored, &held_query)
+        .unwrap();
+    let angle = held_query.kinematics.contact_spin_rad_per_s * held_query.kinematics.dt_s;
+    let cosine = angle.cos(); // det-ok: independent rigid-rotation oracle.
+    let sine = angle.sin(); // det-ok: independent rigid-rotation oracle.
+    let force = loaded.action_reaction.action_on_declared_body.force_n;
+    close_vec(
+        held.action_reaction.action_on_declared_body.force_n,
+        [
+            cosine * force[0] - sine * force[1],
+            sine * force[0] + cosine * force[1],
+            force[2],
+        ],
+    );
+    close_vec(
+        held.action_reaction.action_on_declared_body.torque_nm,
+        loaded.action_reaction.action_on_declared_body.torque_nm,
+    );
+    close(
+        held.partial_slip_step.stored_energy_j,
+        loaded.partial_slip_step.stored_energy_j,
+    );
+    close(held.partial_slip_step.dissipation.heat_j, 0.0);
+    close(held.residual.numerical_dissipation_j, 0.0);
+    close(held.residual.energy_closure_residual_j, 0.0);
+    assert_eq!(adapter.rollback(&held).unwrap(), committed);
+
+    let mut retry = held_query.clone();
+    retry.frame = frame();
+    let retried = adapter
+        .prepare(&law, &patch, &interface, &restored, &retry)
+        .unwrap();
+    close_vec(
+        retried.action_reaction.action_on_declared_body.force_n,
+        held.action_reaction.action_on_declared_body.force_n,
+    );
+    let next = adapter.commit(&restored, &held).unwrap();
+    let resumed = adapter
+        .restore_checkpoint(&law, &patch, &interface, next.checkpoint())
+        .unwrap();
+    let continuation = query(2, "continue", [0.1, -0.2], 0.0);
+    assert_eq!(
+        adapter
+            .prepare(&law, &patch, &interface, &next, &continuation)
+            .unwrap(),
+        adapter
+            .prepare(&law, &patch, &interface, &resumed, &continuation)
+            .unwrap(),
     );
 }
 

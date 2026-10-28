@@ -268,6 +268,22 @@ impl EulerTangentialContactAdapter {
             creepage: [longitudinal, lateral],
             rolling_speed_mps: reference_rolling_speed_m_per_s,
             torsional_spin_rad_per_s: request.patch_kinematics.normal_spin_rad_per_s,
+            // Pair-frame rotation is distinct from relative torsional slip and
+            // from the arbitrary tangent gauge. Both point velocities are
+            // supplied by the generic rigid-body kinematics owner.
+            contact_spin_rad_per_s: request
+                .patch_kinematics
+                .disc_point
+                .angular_velocity_world
+                .scale(0.5)
+                .add(
+                    request
+                        .patch_kinematics
+                        .base_point
+                        .angular_velocity_world
+                        .scale(0.5),
+                )
+                .dot(request.patch_kinematics.tangent_basis.normal_world),
             dt_s: request.dt_s,
         };
         let (step, candidate) = match (&self.lane, &prior_state) {

@@ -415,6 +415,69 @@ fn tangent_basis_rotation_and_surface_reversal_preserve_disc_wrench() {
 }
 
 #[test]
+fn committed_preload_ignores_gauge_but_follows_common_material_spin() {
+    for (adapter, order) in [
+        (direct_adapter(), SurfaceOrder::DiscThenBase),
+        (smooth_adapter(), SurfaceOrder::DiscThenBase),
+        (direct_adapter(), SurfaceOrder::BaseThenDisc),
+        (smooth_adapter(), SurfaceOrder::BaseThenDisc),
+    ] {
+        let initial = adapter
+            .initial_state(&normal_patch(), &interface(), 8)
+            .unwrap();
+        let loaded = adapter
+            .prepare(&initial, &request("loaded-frame", 0, order, 0.6, 0.2, 0.0))
+            .unwrap();
+        let committed = adapter.commit(&initial, &loaded).unwrap();
+        let regauged = adapter
+            .prepare(
+                &committed,
+                &request(
+                    "held-gauge",
+                    1,
+                    order,
+                    0.0,
+                    0.0,
+                    core::f64::consts::FRAC_PI_2,
+                ),
+            )
+            .unwrap();
+        assert_vec_close(regauged.force_on_disc_world_n, loaded.force_on_disc_world_n);
+        assert_vec_close(
+            regauged.free_torsional_torque_on_disc_world_nm,
+            loaded.free_torsional_torque_on_disc_world_nm,
+        );
+        close(regauged.signed_storage_change_j, 0.0);
+        close(regauged.heat_j, 0.0);
+        close(regauged.numerical_dissipation_j, 0.0);
+
+        let mut spinning = request("common-spin", 1, order, 0.0, 0.0, 0.0);
+        let angular = Vec3::new(0.0, 0.0, core::f64::consts::FRAC_PI_2 / spinning.dt_s);
+        // Both material points have zero arm here. Equal angular velocities
+        // preserve their existing point velocities and zero relative spin.
+        spinning.patch_kinematics.disc_point.angular_velocity_world = angular;
+        spinning.patch_kinematics.disc_point.angular_velocity_body = angular;
+        spinning.patch_kinematics.base_point.angular_velocity_world = angular;
+        spinning.patch_kinematics.base_point.angular_velocity_body = angular;
+        let rotated = adapter.prepare(&committed, &spinning).unwrap();
+        let force = loaded.force_on_disc_world_n;
+        assert_vec_close(
+            rotated.force_on_disc_world_n,
+            Vec3::new(-force.y, force.x, force.z),
+        );
+        assert_vec_close(
+            rotated.free_torsional_torque_on_disc_world_nm,
+            loaded.free_torsional_torque_on_disc_world_nm,
+        );
+        close(rotated.signed_storage_change_j, 0.0);
+        close(rotated.heat_j, 0.0);
+        close(rotated.numerical_dissipation_j, 0.0);
+        close(rotated.exact_relative_body_work_j, 0.0);
+        close(rotated.energy_closure_residual_j, 0.0);
+    }
+}
+
+#[test]
 fn smooth_lane_preserves_checkpoint_recontact_and_exact_work_identity() {
     let adapter = smooth_adapter();
     let initial = adapter

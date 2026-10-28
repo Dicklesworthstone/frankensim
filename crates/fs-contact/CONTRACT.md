@@ -157,6 +157,11 @@ The endpoint wrench and its work remain unchanged by energy bookkeeping:
 `SmoothResidual` forwards the law's independent work-closure residual and
 nonnegative backward-Euler numerical loss. This loss is separate from the
 physical microslip heat, including on purely elastic intervals.
+The retained constitutive checkpoint includes the accepted tangent frame.
+Changing the query gauge re-expresses the preloaded state without changing
+its physical wrench. Common material-frame spin passes through unchanged;
+the relative-slip regularization must not damp this rigid transport. Prepare,
+rollback and restart preserve the same frame/history transaction.
 
 ## Invariants
 

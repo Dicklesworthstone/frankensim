@@ -1019,6 +1019,13 @@ keeps backward-Euler numerical dissipation separate from physical microslip
 loss and heat, with `work = Delta storage + physical loss + numerical loss`;
 the residual remains explicit rather than silently assigning numerical damping
 to a thermal source.
+The adapter supplies the constitutive contact-frame spin from the mean of the
+disc and base material angular velocities projected on the ordered normal.
+This physical common spin is distinct from relative torsional spin and the
+chosen tangent gauge. Retained shear follows the law's minimum normal rotation
+and common-spin transport, so changing gauge after preload changes neither
+the world wrench nor stored energy; shared rigid spin rotates the preload
+without generating torsional strain or heat.
 Product drivers may also initialize rolling motion from explicitly declared
 precession and spin rates through the same resolved profile. That generic
 initializer derives mass, principal inertia, ground support, linear momentum,

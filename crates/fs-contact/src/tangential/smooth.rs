@@ -234,7 +234,8 @@ impl SmoothTangentialAdapter {
         })
     }
 
-    /// Returns a central finite-difference tangent only within one law branch.
+    /// Returns a central finite-difference tangent only within one law branch,
+    /// holding the contact frame and physical common spin fixed.
     ///
     /// This deliberately refuses if the base or either probe has a different
     /// [`PartialSlipStateKind`].  It is a local numerical derivative, not a
@@ -474,6 +475,8 @@ impl SmoothTangentialAdapter {
             kinematics.torsional_spin_rad_per_s,
             self.regularization.torsional_spin_scale_rad_per_s,
         )?;
+        // Common material spin transports existing history. It is not relative
+        // slip and must pass unchanged even below the regularization scale.
         Ok(kinematics)
     }
 

@@ -95,7 +95,7 @@ reactions, and residual embedding.
 ### Partial-slip return-map rung
 
 `partial_slip` is a solver-independent, two-region Jenkins/Iwan
-*return-map* rung (`two-region-iwan-return-map-v2`). `NormalPatchView`, `PartialSlipInterface`, and
+*return-map* rung (`two-region-iwan-frame-transport-v3`). `NormalPatchView`, `PartialSlipInterface`, and
 `GeneralizedWorkOwnership` retain the caller's named normal-patch, ordered
 interface/history, and work-owner inputs; their authority remains explicitly
 caller-declared. `PartialSlipLaw::advance` has no `fs-contact` dependency and
@@ -119,9 +119,22 @@ The endpoint wrench is unchanged by energy bookkeeping. The work is a discrete
 endpoint contraction, not an exact continuous-time integral or midpoint work.
 Purely elastic closed cycles generate no physical heat, while their numerical
 loss decreases at first order as the interval is refined.
-Checkpoints contain both regional strains and kinetic branches, plus all law,
-patch and interface identities. A single aggregate-strain checkpoint is
-insufficient. Equality of those inputs is not external physical validation.
+Retained shear is transported before applying the next relative displacement.
+The declared geometric convention is the minimum rotation between successive
+contact normals, followed by the supplied common material spin about the new
+normal. The final tangent-gauge change only re-expresses coordinates. A single
+normalized plane rotation acts on both regions, preserving spring lengths;
+normal transport therefore introduces neither projection damping nor heat.
+Relative spin alone changes stored twist. Common spin is a distinct mandatory
+kinematic input, `(omega_a + omega_b) dot normal / 2` for two rigid surfaces;
+it cannot be inferred from an arbitrary tangent gauge. Normal tilt and spin
+are composed as an interval rotation, with the same time-resolution limitation
+as the surrounding constitutive step. Nearly antipodal normal jumps refuse
+because the minimum-rotation path is unresolved; supply intermediate geometry.
+Checkpoints contain both regional strains, kinetic branches, and the last
+accepted frame, plus all law, patch and interface identities. A nonempty
+frame-free or aggregate-strain checkpoint is insufficient. Equality of those
+inputs is not external physical validation.
 Rolling-deformation loss remains a separate, zero channel in this rung.
 
 ### Rolling and contour-deformation loss rungs

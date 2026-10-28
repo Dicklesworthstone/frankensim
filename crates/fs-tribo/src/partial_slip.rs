@@ -11,6 +11,8 @@
 //! it is **not** a resolved slipping-area fraction. Backward-Euler work uses
 //! the actual endpoint wrench. Its numerical dissipation is reported separately
 //! from friction heat. Rolling-deformation loss belongs to another law.
+//! Retained shear follows the contact normal's minimum rotation and the supplied
+//! common material spin; tangent-gauge changes only re-express its coordinates.
 
 use core::fmt;
 
@@ -19,7 +21,7 @@ use fs_math::det;
 const EPSILON: f64 = 128.0 * f64::EPSILON;
 
 /// Stable identity for this bounded constitutive rung.
-pub const PARTIAL_SLIP_MODEL_ID: &str = "fs-tribo/two-region-iwan-return-map-v2";
+pub const PARTIAL_SLIP_MODEL_ID: &str = "fs-tribo/two-region-iwan-frame-transport-v3";
 
 /// Caller-declared ceiling on a normal-patch receipt.
 ///
@@ -270,9 +272,75 @@ impl TangentFrame {
             "tangent_world",
         )
     }
+
+    // SO(2) coordinates of the old frame after the minimum normal rotation,
+    // followed by the caller's physical common spin about the current normal.
+    // Gauge rotation is not material rotation. Construct one isometry for both
+    // regions; projecting each shear separately would shorten stored springs.
+    fn history_rotation_from(
+        self,
+        previous: Self,
+        common_spin_angle_rad: f64,
+    ) -> Result<[f64; 2], PartialSlipError> {
+        if self == previous && common_spin_angle_rad == 0.0 {
+            return Ok([1.0, 0.0]);
+        }
+        let mut rotation = if self == previous {
+            [1.0, 0.0]
+        } else {
+            let normal_cosine =
+                dot(previous.normal, self.normal, "contact_normal_rotation")?.clamp(-1.0, 1.0);
+            let denominator = 1.0 + normal_cosine;
+            if denominator <= EPSILON {
+                // Antipodal normals do not determine a unique shortest rotation.
+                // Require resolved intermediate geometry instead of selecting an
+                // arbitrary physical direction from the caller's tangent gauge.
+                return Err(PartialSlipError::InvalidInput {
+                    field: "antipodal contact-normal transport",
+                });
+            }
+            let projection = dot(
+                previous.longitudinal,
+                self.normal,
+                "transported_longitudinal_projection",
+            )? / denominator;
+            let transported_longitudinal = sub(
+                previous.longitudinal,
+                scale3(
+                    add(previous.normal, self.normal, "contact_normal_sum")?,
+                    projection,
+                    "transported_longitudinal",
+                )?,
+                "transported_longitudinal",
+            )?;
+            [
+                dot(
+                    self.longitudinal,
+                    transported_longitudinal,
+                    "history_rotation_cosine",
+                )?,
+                dot(
+                    self.lateral,
+                    transported_longitudinal,
+                    "history_rotation_sine",
+                )?,
+            ]
+        };
+        if common_spin_angle_rad != 0.0 {
+            let cosine = det::cos(common_spin_angle_rad);
+            let sine = det::sin(common_spin_angle_rad);
+            rotation = [
+                cosine * rotation[0] - sine * rotation[1],
+                sine * rotation[0] + cosine * rotation[1],
+            ];
+        }
+        let magnitude = norm2(rotation, "history_rotation_norm")?;
+        positive(magnitude, "history_rotation_norm")?;
+        scale2(rotation, 1.0 / magnitude, "history_rotation")
+    }
 }
 
-/// Declared longitudinal/lateral creepage and torsional spin for one interval.
+/// Declared relative motion and physical contact-frame spin for one interval.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PartialSlipKinematics {
     /// Dimensionless longitudinal/lateral creepage in the supplied tangent frame.
@@ -281,6 +349,11 @@ pub struct PartialSlipKinematics {
     pub rolling_speed_mps: f64,
     /// Relative spin about the contact normal in rad/s.
     pub torsional_spin_rad_per_s: f64,
+    /// Common material-frame spin about the current normal in rad/s.
+    /// For two rigid surfaces this is `(omega_a + omega_b) dot normal / 2`.
+    /// It rotates retained shear without adding slip, twist, work, or heat.
+    /// Supply it separately from the arbitrary tangent gauge and relative spin.
+    pub contact_spin_rad_per_s: f64,
     /// Positive interval duration in s.
     pub dt_s: f64,
 }
@@ -290,6 +363,7 @@ impl PartialSlipKinematics {
         finite_vec2(self.creepage, "creepage")?;
         nonnegative(self.rolling_speed_mps, "rolling_speed_mps")?;
         finite(self.torsional_spin_rad_per_s, "torsional_spin_rad_per_s")?;
+        finite(self.contact_spin_rad_per_s, "contact_spin_rad_per_s")?;
         positive(self.dt_s, "dt_s")?;
         if self.rolling_speed_mps == 0.0 && (self.creepage[0] != 0.0 || self.creepage[1] != 0.0) {
             return Err(PartialSlipError::InvalidInput {
@@ -438,6 +512,15 @@ impl PartialSlipLaw {
             kinematics.dt_s,
             "torsional_displacement",
         )?;
+        let common_spin_angle = checked_mul(
+            kinematics.contact_spin_rad_per_s,
+            kinematics.dt_s,
+            "contact_spin_angle",
+        )?;
+        let history_rotation = match state.reference_frame {
+            Some(previous) => frame.history_rotation_from(previous, common_spin_angle)?,
+            None => [1.0, 0.0],
+        };
         let capacity = CoulombCapacity::from_patch(patch, self.parameters)?;
         let hard = self.parameters.partial_slip_hardening_fraction;
         let weights = [1.0 - hard, hard];
@@ -447,6 +530,7 @@ impl PartialSlipLaw {
         let capacity_fractions = [weak_capacity, 1.0 - weak_capacity];
         let increment = [delta_displacement[0], delta_displacement[1], delta_twist];
         let mut next_state = state.clone();
+        next_state.reference_frame = Some(frame);
         let mut force_tangent = [0.0; 2];
         let mut torsional_moment_nm = 0.0;
         let mut old_storage = 0.0;
@@ -456,10 +540,15 @@ impl PartialSlipLaw {
         let mut slip_fraction = 0.0;
         let mut yielding_regions = 0;
         for region in 0..2 {
-            let old = [
+            let stored_old = [
                 state.region_elastic_displacement_m[region][0],
                 state.region_elastic_displacement_m[region][1],
                 state.region_elastic_twist_rad[region],
+            ];
+            let old = [
+                history_rotation[0] * stored_old[0] - history_rotation[1] * stored_old[1],
+                history_rotation[1] * stored_old[0] + history_rotation[0] * stored_old[1],
+                stored_old[2],
             ];
             let stiffness = [
                 self.parameters.tangential_stiffness_n_per_m * weights[region],
@@ -493,7 +582,11 @@ impl PartialSlipLaw {
                 let delta_elastic = result.elastic[i] - old[i];
                 old_storage = checked_add(
                     old_storage,
-                    checked_mul(0.5 * stiffness[i] * old[i], old[i], "old_storage")?,
+                    checked_mul(
+                        0.5 * stiffness[i] * stored_old[i],
+                        stored_old[i],
+                        "old_storage",
+                    )?,
                     "old_storage",
                 )?;
                 new_storage = checked_add(
@@ -725,6 +818,7 @@ pub struct PartialSlipState {
     region_elastic_displacement_m: [[f64; 2]; 2],
     region_elastic_twist_rad: [f64; 2],
     sliding_regions: [bool; 2],
+    reference_frame: Option<TangentFrame>,
     accepted_steps: u64,
 }
 
@@ -736,22 +830,26 @@ impl PartialSlipState {
             region_elastic_displacement_m: [[0.0; 2]; 2],
             region_elastic_twist_rad: [0.0; 2],
             sliding_regions: [false; 2],
+            reference_frame: None,
             accepted_steps: 0,
         }
     }
 
     /// Reconstructs both regions' complete history, ordered weaker then harder.
     /// A single aggregate displacement cannot reconstruct partial-slip memory.
+    /// The accepted reference frame is required for every nonempty history.
     pub fn from_region_checkpoint(
         region_elastic_displacement_m: [[f64; 2]; 2],
         region_elastic_twist_rad: [f64; 2],
         sliding_regions: [bool; 2],
+        reference_frame: Option<TangentFrame>,
         accepted_steps: u64,
     ) -> Result<Self, PartialSlipError> {
         let value = Self {
             region_elastic_displacement_m,
             region_elastic_twist_rad,
             sliding_regions,
+            reference_frame,
             accepted_steps,
         };
         value.validate()?;
@@ -789,6 +887,13 @@ impl PartialSlipState {
         self.sliding_regions
     }
 
+    /// Last accepted frame in which both regional shear coordinates are stored.
+    /// Only an empty, never-advanced state may omit this frame.
+    #[must_use]
+    pub const fn reference_frame(&self) -> Option<TangentFrame> {
+        self.reference_frame
+    }
+
     /// Number of accepted interval updates.
     #[must_use]
     pub const fn accepted_steps(&self) -> u64 {
@@ -802,6 +907,23 @@ impl PartialSlipState {
                 "elastic_displacement_m",
             )?;
             finite(self.region_elastic_twist_rad[region], "elastic_twist_rad")?;
+        }
+        if self.reference_frame.is_none()
+            && (self.accepted_steps != 0
+                || self.sliding_regions.iter().any(|&sliding| sliding)
+                || self
+                    .region_elastic_twist_rad
+                    .iter()
+                    .any(|&twist| twist != 0.0)
+                || self
+                    .region_elastic_displacement_m
+                    .iter()
+                    .flatten()
+                    .any(|&shear| shear != 0.0))
+        {
+            return Err(PartialSlipError::InvalidInput {
+                field: "missing reference frame for retained history",
+            });
         }
         Ok(())
     }
@@ -1554,6 +1676,7 @@ mod tests {
             creepage,
             rolling_speed_mps: 1.0,
             torsional_spin_rad_per_s: spin,
+            contact_spin_rad_per_s: 0.0,
             dt_s: 0.001,
         }
     }
@@ -1742,6 +1865,7 @@ mod tests {
                                 creepage: [direction, 0.0],
                                 rolling_speed_mps: 1.0,
                                 torsional_spin_rad_per_s: 0.0,
+                                contact_spin_rad_per_s: 0.0,
                                 dt_s: dt,
                             },
                             &ownership(),
@@ -1921,6 +2045,7 @@ mod tests {
                             creepage: [0.02, 0.0],
                             rolling_speed_mps: 1.0,
                             torsional_spin_rad_per_s: 0.0,
+                            contact_spin_rad_per_s: 0.0,
                             dt_s: 1.0 / f64::from(steps),
                         },
                         &ownership(),
@@ -1949,12 +2074,14 @@ mod tests {
     /// G5: both regional strains and kinetic branches survive serialization.
     #[test]
     fn regional_checkpoint_preserves_partial_slip_memory() {
-        let first = step(frame(), &PartialSlipState::zero(), [6.0, 0.0], 0.0);
+        let initial_frame = frame().rotated(0.7).unwrap();
+        let first = step(initial_frame, &PartialSlipState::zero(), [6.0, 0.0], 0.0);
         let state = &first.next_state;
         let restored = PartialSlipState::from_region_checkpoint(
             state.region_elastic_displacement_m(),
             state.region_elastic_twist_rad(),
             state.sliding_regions(),
+            state.reference_frame(),
             state.accepted_steps(),
         )
         .unwrap();
@@ -1963,6 +2090,242 @@ mod tests {
             step(frame(), &restored, [0.1, 0.2], 0.1),
             step(frame(), state, [0.1, 0.2], 0.1)
         );
+    }
+
+    /// Warm-state gauge changes cannot rotate physical preload or change work.
+    #[test]
+    fn changing_tangent_gauge_preserves_loaded_history_and_following_work() {
+        let first = step(frame(), &PartialSlipState::zero(), [6.0, 2.0], 1.5);
+        let mut fixed_state = first.next_state.clone();
+        let mut changing_state = first.next_state;
+        for (creepage, spin, angle) in [
+            ([0.0, 0.0], 0.0, core::f64::consts::FRAC_PI_2),
+            ([0.5, -0.2], 0.1, 0.37),
+            ([-8.0, 1.0], -0.4, -0.81),
+            ([20.0, 4.0], 1.2, 1.14),
+        ] {
+            let rotated_frame = frame().rotated(angle).unwrap();
+            let cosine = angle.cos(); // det-ok: independent coordinate oracle.
+            let sine = angle.sin(); // det-ok: independent coordinate oracle.
+            let rotated_creepage = [
+                cosine * creepage[0] + sine * creepage[1],
+                -sine * creepage[0] + cosine * creepage[1],
+            ];
+            let fixed = step(frame(), &fixed_state, creepage, spin);
+            let changing = step(rotated_frame, &changing_state, rotated_creepage, spin);
+            close_vec(changing.wrench.force_n, fixed.wrench.force_n);
+            close_vec(changing.wrench.torque_nm, fixed.wrench.torque_nm);
+            close(changing.stored_energy_j, fixed.stored_energy_j);
+            close(changing.storage_change_j, fixed.storage_change_j);
+            close(changing.dissipation.heat_j, fixed.dissipation.heat_j);
+            close(
+                changing.generalized_work.numerical_dissipation_j,
+                fixed.generalized_work.numerical_dissipation_j,
+            );
+            close(
+                changing.generalized_work.work_into_interface_j,
+                fixed.generalized_work.work_into_interface_j,
+            );
+            close(changing.generalized_work.closure_residual_j, 0.0);
+            fixed_state = fixed.next_state;
+            changing_state = changing.next_state;
+        }
+    }
+
+    /// Normal tilt transports shear isometrically, without projection damping.
+    #[test]
+    fn changing_normal_transports_preload_without_heat_or_storage_loss() {
+        let first = step(frame(), &PartialSlipState::zero(), [6.0, 2.0], 1.5);
+        let tilted = TangentFrame::new([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]).unwrap();
+        let held = step(tilted, &first.next_state, [0.0; 2], 0.0);
+        // Minimum rotation from +z to +x is a right-angle rotation about +y.
+        close_vec(
+            held.wrench.force_n,
+            [0.0, first.wrench.force_n[1], -first.wrench.force_n[0]],
+        );
+        close_vec(held.wrench.torque_nm, [first.torsional_moment_nm, 0.0, 0.0]);
+        close(held.stored_energy_j, first.stored_energy_j);
+        close(held.storage_change_j, 0.0);
+        close(held.dissipation.heat_j, 0.0);
+        close(held.generalized_work.numerical_dissipation_j, 0.0);
+        close(held.generalized_work.work_into_interface_j, 0.0);
+        let returned = step(frame(), &held.next_state, [0.0; 2], 0.0);
+        close_vec(returned.wrench.force_n, first.wrench.force_n);
+        close_vec(returned.wrench.torque_nm, first.wrench.torque_nm);
+        close(returned.stored_energy_j, first.stored_energy_j);
+    }
+
+    /// Common material spin rotates shear; only relative spin loads torsion.
+    #[test]
+    fn common_contact_spin_rotates_preload_without_loading_torsion() {
+        let first = step(frame(), &PartialSlipState::zero(), [6.0, 2.0], 1.5);
+        let held = law()
+            .advance(
+                &patch(),
+                &interface(),
+                frame(),
+                PartialSlipKinematics {
+                    contact_spin_rad_per_s: core::f64::consts::FRAC_PI_2 / 0.001,
+                    ..kinematics([0.0; 2], 0.0)
+                },
+                &ownership(),
+                &first.next_state,
+            )
+            .unwrap();
+        close_vec(
+            held.wrench.force_n,
+            [-first.wrench.force_n[1], first.wrench.force_n[0], 0.0],
+        );
+        close_vec(held.wrench.torque_nm, first.wrench.torque_nm);
+        close(held.stored_energy_j, first.stored_energy_j);
+        close(held.storage_change_j, 0.0);
+        close(held.dissipation.heat_j, 0.0);
+        close(held.generalized_work.numerical_dissipation_j, 0.0);
+        close(held.generalized_work.work_into_interface_j, 0.0);
+    }
+
+    /// Transport commutes with a rigid rotation of the complete physical setup.
+    #[test]
+    fn warm_history_transport_is_covariant_under_three_dimensional_rotation() {
+        let rotate = |value: [f64; 3]| [value[2], value[0], value[1]];
+        let rotate_frame = |value: TangentFrame| {
+            TangentFrame::new(rotate(value.normal()), rotate(value.longitudinal())).unwrap()
+        };
+        let first = step(frame(), &PartialSlipState::zero(), [6.0, 2.0], 1.5);
+        let first_rotated = step(
+            rotate_frame(frame()),
+            &PartialSlipState::zero(),
+            [6.0, 2.0],
+            1.5,
+        );
+        let tilted = TangentFrame::new([0.3, 0.4, 0.5], [0.6, -0.2, 0.1]).unwrap();
+        let input = PartialSlipKinematics {
+            contact_spin_rad_per_s: 30.0,
+            ..kinematics([0.2, -0.1], -0.2)
+        };
+        let next = law()
+            .advance(
+                &patch(),
+                &interface(),
+                tilted,
+                input,
+                &ownership(),
+                &first.next_state,
+            )
+            .unwrap();
+        let rotated = law()
+            .advance(
+                &patch(),
+                &interface(),
+                rotate_frame(tilted),
+                input,
+                &ownership(),
+                &first_rotated.next_state,
+            )
+            .unwrap();
+        close_vec(rotated.wrench.force_n, rotate(next.wrench.force_n));
+        close_vec(rotated.wrench.torque_nm, rotate(next.wrench.torque_nm));
+        close(rotated.stored_energy_j, next.stored_energy_j);
+        close(rotated.dissipation.heat_j, next.dissipation.heat_j);
+        close(
+            rotated.generalized_work.work_into_interface_j,
+            next.generalized_work.work_into_interface_j,
+        );
+    }
+
+    #[test]
+    fn surface_order_reversal_preserves_transported_physical_wrench() {
+        let reverse_frame = |value: TangentFrame| {
+            TangentFrame::new(
+                value.normal().map(|component| -component),
+                value.longitudinal(),
+            )
+            .unwrap()
+        };
+        let first = step(frame(), &PartialSlipState::zero(), [6.0, 2.0], 1.5);
+        let first_reversed = step(
+            reverse_frame(frame()),
+            &PartialSlipState::zero(),
+            [-6.0, 2.0],
+            1.5,
+        );
+        let tilted = TangentFrame::new([0.3, 0.4, 0.5], [0.6, -0.2, 0.1]).unwrap();
+        let input = PartialSlipKinematics {
+            contact_spin_rad_per_s: 30.0,
+            ..kinematics([0.2, -0.1], -0.2)
+        };
+        let next = law()
+            .advance(
+                &patch(),
+                &interface(),
+                tilted,
+                input,
+                &ownership(),
+                &first.next_state,
+            )
+            .unwrap();
+        // Reversing surfaces negates both the normal and the relative world
+        // velocity. The common-spin scalar negates; relative normal spin does not.
+        let reversed_input = PartialSlipKinematics {
+            creepage: [-input.creepage[0], input.creepage[1]],
+            contact_spin_rad_per_s: -input.contact_spin_rad_per_s,
+            ..input
+        };
+        let reversed = law()
+            .advance(
+                &patch(),
+                &interface(),
+                reverse_frame(tilted),
+                reversed_input,
+                &ownership(),
+                &first_reversed.next_state,
+            )
+            .unwrap();
+        close_vec(
+            reversed.wrench.force_n,
+            next.wrench.force_n.map(|value| -value),
+        );
+        close_vec(
+            reversed.wrench.torque_nm,
+            next.wrench.torque_nm.map(|value| -value),
+        );
+        close(reversed.stored_energy_j, next.stored_energy_j);
+        close(reversed.dissipation.heat_j, next.dissipation.heat_j);
+        close(
+            reversed.generalized_work.work_into_interface_j,
+            next.generalized_work.work_into_interface_j,
+        );
+    }
+
+    #[test]
+    fn nonempty_checkpoint_requires_frame_and_antipodal_transport_refuses() {
+        let first = step(frame(), &PartialSlipState::zero(), [6.0, 2.0], 1.5);
+        let state = &first.next_state;
+        assert!(
+            PartialSlipState::from_region_checkpoint(
+                state.region_elastic_displacement_m(),
+                state.region_elastic_twist_rad(),
+                state.sliding_regions(),
+                None,
+                state.accepted_steps(),
+            )
+            .is_err()
+        );
+        let reversed_normal = TangentFrame::new([0.0, 0.0, -1.0], [1.0, 0.0, 0.0]).unwrap();
+        assert_eq!(
+            law().advance(
+                &patch(),
+                &interface(),
+                reversed_normal,
+                kinematics([0.0; 2], 0.0),
+                &ownership(),
+                state,
+            ),
+            Err(PartialSlipError::InvalidInput {
+                field: "antipodal contact-normal transport",
+            }),
+        );
+        assert_eq!(state.reference_frame(), Some(frame()));
     }
 
     /// G3 reversal is deterministic and changes the gross-slide force direction.
@@ -2288,6 +2651,7 @@ mod tests {
             creepage: [1.0, 0.0],
             rolling_speed_mps: 0.0,
             torsional_spin_rad_per_s: 0.0,
+            contact_spin_rad_per_s: 0.0,
             dt_s: 0.001,
         };
         assert!(
@@ -2314,9 +2678,14 @@ mod tests {
             ),
             Err(PartialSlipError::WorkOwnershipMismatch)
         );
-        let exhausted =
-            PartialSlipState::from_region_checkpoint([[0.0; 2]; 2], [0.0; 2], [false; 2], u64::MAX)
-                .expect("state");
+        let exhausted = PartialSlipState::from_region_checkpoint(
+            [[0.0; 2]; 2],
+            [0.0; 2],
+            [false; 2],
+            Some(frame()),
+            u64::MAX,
+        )
+        .expect("state");
         assert_eq!(
             law().advance(
                 &patch(),
