@@ -4,6 +4,8 @@
 mod input;
 #[path = "material_strings/construction.rs"]
 mod construction;
+#[path = "material_strings/material_inputs.rs"]
+mod material_inputs;
 #[path = "material_strings/body.rs"]
 mod body;
 #[path = "material_strings/stops.rs"]
@@ -72,6 +74,7 @@ use fs_material::state_point::{ResolvedMaterialStatePoint,ScalarPropertyRequirem
 use fs_qty::{Density,Pressure,DynViscosity,Dims};
 use fs_scenario::{PrestressedString,ThinPlate,HelmholtzCavity,gesture::{GestureSchedule,GestureTarget,GestureValue}};
 use fs_tribo::FrictionLaw;
+use material_inputs::MaterialPack;
 
 type Result<T> = std::result::Result<T,Box<dyn Error>>;
 const SHEAR: &str = "shear_modulus";
@@ -105,9 +108,9 @@ fn template(w:&input::Wire) -> PrestressedString {
 }
 // The retained pack includes normalization/uncertainty/rights metadata. Its ID
 // labels source identity, not a new assertion about chemistry or measured quality.
-struct CatalogEntry { pack: NormalizedPack, card: MaterialCard }
+struct CatalogEntry { pack: MaterialPack, card: MaterialCard }
 type Catalog = BTreeMap<String,CatalogEntry>;
-fn resolve(name:&str, catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result<NormalizedPack>,
+fn resolve(name:&str, catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result<MaterialPack>,
     spec:&input::Spec, body:bool, twist:bool, loss:&input::BendingLoss) -> Result<ResolvedMaterialStatePoint>
 {
     let mut requirements=vec![Requirement::try_new("density",Density::DIMS,Admit::StrictlyPositive)?,
@@ -156,25 +159,20 @@ fn resolve(name:&str, catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result
     }
     resolve_properties(name,catalog,loader,spec,&requirements)
 }
-fn load_pack(name:&str, catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result<NormalizedPack>) -> Result<()> {
+fn load_pack(name:&str, catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result<MaterialPack>) -> Result<()> {
     if !catalog.contains_key(name) {
         let pack=loader(name)?;
-        let card=MaterialCard::assemble(MaterialStateId { chemistry:format!("source-pack:{}",pack.pack_id()),
-            phase:"declared solid model".into(),process:"frozen source-pack realization".into(),revision:0 },
-            pack.claims().clone(),vec![])?;
+        let card=pack.card()?;
         catalog.insert(name.into(),CatalogEntry { pack,card });
     }
     Ok(())
 }
 fn resolve_properties(name:&str, catalog:&mut Catalog,
-    loader:&mut impl FnMut(&str)->Result<NormalizedPack>, spec:&input::Spec,
+    loader:&mut impl FnMut(&str)->Result<MaterialPack>, spec:&input::Spec,
     requirements:&[Requirement]) -> Result<ResolvedMaterialStatePoint>
 {
     load_pack(name,catalog,loader)?;
-    // This compact input profile explicitly declares bare SI T and omega axes.
-    // Incompatible typed/context axes refuse in the original resolver; they are
-    // never removed, guessed, coerced or supplied from an unrelated source.
-    let query=QueryPoint::new().with("T",spec.temperature)?.with("omega",spec.omega)?;
+    let query=material_inputs::query(&catalog[name].card,spec.temperature,spec.omega)?;
     Ok(resolve_material_state_point(&catalog[name].card,&query,requirements,Pick::SingleClaimOnly)?)
 }
 #[derive(Debug)]
@@ -194,16 +192,16 @@ struct Ready { spec: input::Spec, catalog: Catalog, performance: MultiBowPerform
     body_profile: Option<body::Profile>, rotational_bridge_baselines_m: Vec<f64>,
     stop_profile: Option<stops::Profile>, body_radiation: Option<BodyRadiationReport> }
 impl input::Spec {
-    fn compile(self,cx:&Cx<'_>,gate:&CancelGate,loader:impl FnMut(&str)->Result<NormalizedPack>)->Result<Ready> {
+    fn compile<P: Into<MaterialPack>>(self,cx:&Cx<'_>,gate:&CancelGate,loader:impl FnMut(&str)->Result<P>)->Result<Ready> {
         self.compile_with_body(cx,gate,None,loader)
     }
-    fn compile_with_body(self,cx:&Cx<'_>,gate:&CancelGate,profile:Option<body::Profile>,
-        loader:impl FnMut(&str)->Result<NormalizedPack>)->Result<Ready> {
+    fn compile_with_body<P: Into<MaterialPack>>(self,cx:&Cx<'_>,gate:&CancelGate,profile:Option<body::Profile>,
+        loader:impl FnMut(&str)->Result<P>)->Result<Ready> {
         self.compile_with_profiles(cx,gate,profile,None,loader)
     }
-    fn compile_with_profiles(mut self,cx:&Cx<'_>,gate:&CancelGate,profile:Option<body::Profile>,
+    fn compile_with_profiles<P: Into<MaterialPack>>(mut self,cx:&Cx<'_>,gate:&CancelGate,profile:Option<body::Profile>,
         stop_profile:Option<stops::Profile>,
-        mut loader:impl FnMut(&str)->Result<NormalizedPack>)->Result<Ready> {
+        mut loader:impl FnMut(&str)->Result<P>)->Result<Ready> {
         poll(gate)?;
         if self.longitudinal_waves.is_none()
             && !matches!(&self.longitudinal_loss, LongitudinalMaterialLoss::Elastic) {
@@ -300,11 +298,12 @@ impl input::Spec {
         self.bridge_interfaces.apply(self.temperature, self.omega, &mut self.strings)?;
         let mut remaining = input::MAX_TOTAL_PACK_BYTES.checked_sub(interface_bytes)
             .ok_or("combined material and interface pack byte budget exceeded")?;
-        // Keep the legacy bulk callback, with one combined cold source budget.
-        // Catalog caching invokes it once per original bulk path.
-        let mut loader = |name: &str| -> Result<NormalizedPack> {
+        // Every original artifact counts in the same cold source budget,
+        // including a canonical card's complete associated model pack.
+        // Catalog caching invokes the loader once per original bulk path.
+        let mut loader = |name: &str| -> Result<MaterialPack> {
             poll(gate)?;
-            let pack = loader(name)?;
+            let pack: MaterialPack = loader(name)?.into();
             poll(gate)?;
             let size = pack.to_bytes().len();
             if size > input::MAX_PACK_BYTES || size > remaining {
@@ -685,7 +684,7 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
         spec.compile_with_profiles(&cx,&gate,profile,stop_profile,|name| {
             let bytes=sources.read_relative(name,input::MAX_PACK_BYTES.min(remaining))?;
             remaining=remaining.checked_sub(bytes.len()).ok_or("material pack byte budget exceeded")?;
-            Ok(NormalizedPack::from_bytes(&bytes)?)
+            MaterialPack::from_bytes(&bytes)
         })
     })?;
     let contact_heat=thermal_profile.as_ref().map(|profile|profile.prepare(&ready,&gate)).transpose()?;

@@ -75,7 +75,7 @@ impl Inputs {
         spec: &input::Spec,
         bank: MultiBowStringBank,
         catalog: &mut Catalog,
-        loader: &mut impl FnMut(&str) -> Result<NormalizedPack>,
+        loader: &mut impl FnMut(&str) -> Result<MaterialPack>,
         gate: &CancelGate,
     ) -> Result<MultiBowStringBank> {
         poll(gate)?;

@@ -88,7 +88,7 @@ fn opening_inertia_and_internal_loss_reserve_the_complete_network_before_pack_io
         narrow.shell_observer = None;
         for source in [absent,narrow] {
             let mut reads = 0;
-            assert!(source.compile_with_body(cx,gate,Some(profile.clone()),|_| {
+            assert!(source.compile_with_body::<NormalizedPack>(cx,gate,Some(profile.clone()),|_| {
                 reads += 1;
                 Err("material source must not be read before opening/exterior admission".into())
             }).is_err());

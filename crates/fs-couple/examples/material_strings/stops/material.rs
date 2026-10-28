@@ -108,9 +108,8 @@ impl Profile {
 
 impl Sources {
     pub(super) fn resolve(&self, entries: &[Entry], spec: &input::Spec, catalog: &mut Catalog,
-        loader: &mut impl FnMut(&str) -> Result<NormalizedPack>, gate: &CancelGate)
+        loader: &mut impl FnMut(&str) -> Result<MaterialPack>, gate: &CancelGate)
         -> Result<Vec<(usize, SourcePointContact)>> {
-        let point = QueryPoint::new().with("T", spec.temperature)?.with("omega", spec.omega)?;
         let mut sources = Vec::new();
         for (index, entry) in entries.iter().enumerate() {
             let Law::Material(d) = &entry.law else { continue; };
@@ -134,6 +133,7 @@ impl Sources {
             load_pack(&d.receiver, catalog, loader)?;
             let a = &catalog.get(outer).ok_or("outer string material is absent from the catalog")?.card;
             let b = &catalog[&d.receiver].card;
+            let point = material_inputs::query(a, spec.temperature, spec.omega)?;
             let interface = self.interfaces.get(&d.interface).ok_or("material stop interface pack is not loaded")?;
             let models = self.models.get(&d.model).ok_or("material stop model pack is not loaded")?;
             // This explicit record associates two existing normalized artifacts;

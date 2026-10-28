@@ -118,6 +118,67 @@ fn receiver_material_swap_changes_reaction_and_pressure_on_the_same_physical_ban
 }
 
 #[test]
+fn canonical_material_stop_sources_preserve_ordered_identity_and_physics() {
+    scoped(|cx, gate| {
+        let card = |name: &str, young| fs_matdb::NormalizedMaterialCardPack::new(
+            MaterialStateId { chemistry: format!("manufactured {name}"), phase: "solid".into(),
+                process: "canonical point-contact specimen".into(), revision: 0 },
+            bulk(name, young)).unwrap();
+        let original = interface("wire.fsmatpk", "receiver.fsmatpk");
+        let mut a = original.card().surface_a().clone();
+        a.material = card("wire.fsmatpk", 2e7).card().id().clone();
+        let mut b = original.card().surface_b().clone();
+        b.material = card("receiver.fsmatpk", 2e7).card().id().clone();
+        let ordered = NormalizedInterfacePack::new(a, b, original.card().context().clone(),
+            original.claims_pack().clone()).unwrap();
+        let mut sourced = profile(gate, "wire.fsmatpk", "receiver.fsmatpk");
+        sourced.load_sources(gate, |path| Ok(match path {
+            "normal.fsintpk" => ordered.to_bytes(),
+            "normal.fsmodelpk" => models().to_bytes(),
+            _ => panic!("unexpected source {path}"),
+        })).unwrap();
+        let mut legacy = resting_spec().compile_with_profiles(cx, gate, None,
+            Some(profile(gate, "wire.fsmatpk", "receiver.fsmatpk")),
+            |name| Ok(bulk(name, 2e7))).unwrap();
+        let mut canonical = resting_spec().compile_with_profiles(cx, gate, None,
+            Some(sourced.clone()), |name| Ok(card(name, 2e7))).unwrap();
+        let mut replacement = resting_spec().compile_with_profiles(cx, gate, None,
+            Some(sourced.clone()), |name| Ok(card(name, 4e7))).unwrap();
+        for name in ["wire.fsmatpk", "receiver.fsmatpk"] {
+            assert_eq!(canonical.catalog[name].card, *card(name, 2e7).card());
+        }
+        let before = canonical.performance.bank().system().obstacle_source(0).unwrap();
+        let after = replacement.performance.bank().system().obstacle_source(0).unwrap();
+        assert!(after.stiffness_n_per_m_3_2() > before.stiffness_n_per_m_3_2());
+        let expected = pressure(&mut canonical, 37);
+        assert_eq!(expected, pressure(&mut legacy, 128));
+        assert_ne!(expected, pressure(&mut replacement, 128));
+
+        // The original contact owner requires matching bulk/interface schemas.
+        // A canonical envelope must not erase or retag its receiver's axes.
+        use fs_qty::{QuantitySpec, semantic::{FrequencyConvention, QuantityKind, SemanticType, ValueForm}};
+        let mut claims = ClaimSet::new();
+        for (_, original) in bulk("receiver.fsmatpk", 2e7).claims().claims_ordered() {
+            let mut claim = original.clone();
+            claim.validity = ValidityDomain::unconstrained()
+                .with_quantity("T", QuantitySpec::semantic(SemanticType::new(
+                    QuantityKind::AbsoluteTemperature, ValueForm::Static)), 280.0, 320.0)
+                .with_quantity("omega", QuantitySpec::semantic(SemanticType::new(
+                    QuantityKind::Frequency(FrequencyConvention::Angular), ValueForm::Static)), 0.0, 200_000.0);
+            claims.insert_claim(claim).unwrap();
+        }
+        let receiver = fs_matdb::NormalizedMaterialCardPack::new(
+            card("receiver.fsmatpk", 2e7).card().id().clone(),
+            pack_claims("typed-receiver", claims)).unwrap();
+        let error = resting_spec().compile_with_profiles(cx, gate, None,
+            Some(sourced), |name| Ok(if name == "receiver.fsmatpk" {
+                receiver.clone()
+            } else { card(name, 2e7) })).err().unwrap();
+        assert!(error.to_string().contains("AxisQuantityMismatch"), "{error}");
+    });
+}
+
+#[test]
 fn ordered_outer_material_and_source_domains_are_mandatory_before_runtime_binding() {
     scoped(|cx, gate| {
         let missing = stops::Profile::parse(PROFILE.as_bytes()).unwrap();

@@ -349,7 +349,7 @@ impl Profile {
     }
 
     pub fn bind(&self, bank: MultiBowStringBank, spec: &input::Spec, catalog: &mut Catalog,
-        loader: &mut impl FnMut(&str) -> Result<NormalizedPack>, gate: &CancelGate) -> Result<MultiBowStringBank> {
+        loader: &mut impl FnMut(&str) -> Result<MaterialPack>, gate: &CancelGate) -> Result<MultiBowStringBank> {
         poll(gate)?;
         // Resolve all card/model/geometry associations before binding any runtime
         // contact. A sourced record has no independently authored K/alpha/loss.

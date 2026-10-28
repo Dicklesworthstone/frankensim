@@ -10,6 +10,36 @@ The supplied coefficients are **synthetic integration fixtures**, not measured
 steel, gold, silver, wood, rosin or instrument data. The output is a reduced
 physical-model demonstration, not a validated violin/cello/bass recording.
 
+### Shared material cards
+
+Every bulk material path accepts the canonical **material-card pack**
+(`FSMCDPK`) used by material reeds, duct walls and other material consumers.
+Its original chemistry, phase, process, claim evidence and associated model pack
+remain intact throughout string, body, region, fiber, shear-layer, normal-stop and
+thermal construction. Ordered bow, bridge, holding and normal-stop interfaces therefore name those
+same original material identities. Replacing a material file re-resolves the
+original structural laws and their coupled pressure response; it does not
+select a different instrument solver.
+
+Legacy claim packs (`FSMATPK`) retain their historical synthetic
+`source-pack:<pack_id>` association and exact numerical behavior. The binary
+header chooses the decoder, independently of the filename suffix. A malformed
+canonical card refuses rather than being reinterpreted as legacy data. The
+complete artifact, including any associated models, counts against the existing
+source-byte limits.
+
+The `state` row still declares absolute temperature in kelvin and angular
+frequency in radians per second. Compatible typed axes retain their quantity
+metadata; temperature-difference and cyclic-frequency axes refuse instead of
+silently changing those conventions. Missing state coordinates and material
+properties still refuse. Associated models are retained as source evidence;
+this ingress does not make arbitrary constitutive laws executable or extend
+the existing solver's physical domain.
+The existing source-derived normal-contact owner also requires matching axis
+schemas across both bulk materials and the interface: mixing a bare legacy
+axis with a typed axis refuses. Canonical loading preserves that distinction;
+it does not rewrite source cards to make their schemas appear equal.
+
 ## Run without editing Rust
 
 `material_strings` is also an installable executable. Its binary target and the

@@ -97,6 +97,32 @@ fn sourced(cx: &Cx<'_>, gate: &CancelGate, mut spec: input::Spec, mu: f64, surfa
     compile(cx, gate, spec, 7800.0)
 }
 
+#[test]
+fn canonical_material_card_binds_the_same_named_surface_to_the_bow() {
+    scoped(|cx, gate| {
+        let wire = super::material_cards::canonical("wire.fsmatpk", 7800.0);
+        let legacy = interface(0.4, "wire.fsmatpk", 0.1);
+        let mut surface = legacy.card().surface_a().clone();
+        surface.material = wire.card().id().clone();
+        let source = NormalizedInterfacePack::new(surface,
+            legacy.card().surface_b().clone(), legacy.card().context().clone(),
+            legacy.claims_pack().clone()).unwrap();
+        let mut input = source_spec();
+        input.friction.load(gate, |_| Ok(source.clone())).unwrap();
+        let mut ready = input.compile(cx, gate, |name| Ok(if name == "wire.fsmatpk" {
+            wire.clone()
+        } else { super::material_cards::canonical(name, 7800.0) })).unwrap();
+        assert_eq!(ready.catalog["wire.fsmatpk"].card.id(), wire.card().id());
+        assert!(ready.performance.bank().bow_interface(0).is_some());
+        assert!(pressure(&mut ready, 37).iter().any(|p| p.abs() > 1e-10));
+        let mut mismatched = source_spec();
+        mismatched.friction.load(gate, |_| Ok(legacy.clone())).unwrap();
+        let error = mismatched.compile(cx, gate, |name|
+            Ok(super::material_cards::canonical(name, 7800.0))).err().unwrap();
+        assert!(error.to_string().contains("does not match"), "{error}");
+    });
+}
+
 fn ribbon_spec(spec: input::Spec, record: &str) -> Result<input::Spec> {
     let text = String::from_utf8(spec.bytes)?.replace(
         "\nforces ", &format!("\nbow_ribbon {record}\nforces "));

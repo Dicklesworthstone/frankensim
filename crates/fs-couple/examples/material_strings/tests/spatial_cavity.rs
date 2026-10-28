@@ -187,7 +187,7 @@ fn strict_volume_and_whole_network_admission_precede_material_reads() {
         let duplicate = source(&PERFORMANCE.replace("cavity none","cavity neck 0.003 0.01 0.02 100 1"));
         for spec in [budget,duplicate] {
             let mut reads = 0;
-            assert!(spec.compile_with_body(cx,gate,Some(body::Profile::parse(BODY.as_bytes()).unwrap()),
+            assert!(spec.compile_with_body::<NormalizedPack>(cx,gate,Some(body::Profile::parse(BODY.as_bytes()).unwrap()),
                 |_| { reads += 1; Err("material read after inadmissible source".into()) }).is_err());
             assert_eq!(reads,0);
         }

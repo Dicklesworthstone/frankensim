@@ -312,7 +312,7 @@ impl Spec {
         spec: &input::Spec,
         sources: Vec<MaterialStringSource>,
         catalog: &mut Catalog,
-        loader: &mut impl FnMut(&str) -> Result<NormalizedPack>,
+        loader: &mut impl FnMut(&str) -> Result<MaterialPack>,
         settings: StringBankOptions,
         cx: &Cx<'_>,
         gate: &CancelGate,

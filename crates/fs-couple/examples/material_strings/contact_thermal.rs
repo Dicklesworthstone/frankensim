@@ -279,11 +279,7 @@ impl Profile {
             poll(gate)?;
             let card = ready.catalog.get(&cell.pack)
                 .ok_or("contact-thermal cell must reference a material pack already used by this assembly")?.card.clone();
-            let point = |t| {
-                QueryPoint::new()
-                    .with("T", t)?
-                    .with("omega", ready.spec.omega)
-            };
+            let point = |t| material_inputs::query(&card, t, ready.spec.omega);
             let [low, initial, high] = cell.temperatures;
             let requirement = [
                 Requirement::try_new("density", Density::DIMS, Admit::StrictlyPositive)?,

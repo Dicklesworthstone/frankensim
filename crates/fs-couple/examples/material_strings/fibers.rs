@@ -116,7 +116,7 @@ impl Input {
         &self,
         spec: &input::Spec,
         catalog: &mut Catalog,
-        loader: &mut impl FnMut(&str) -> Result<NormalizedPack>,
+        loader: &mut impl FnMut(&str) -> Result<MaterialPack>,
         gate: &CancelGate,
     ) -> Result<TensionedFiberRibbon> {
         self.mode_count(spec)?;

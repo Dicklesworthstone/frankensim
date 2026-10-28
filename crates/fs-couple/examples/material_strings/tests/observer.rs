@@ -144,7 +144,7 @@ fn listener_source_refuses_unmatched_bands_cavities_and_unbounded_fft_before_mat
         let mut source = observed_source();
         source.body_radiation = None;
         let mut reads = 0;
-        assert!(source.compile(cx, gate, |_| {
+        assert!(source.compile::<NormalizedPack>(cx, gate, |_| {
             reads += 1;
             Err("material reads are forbidden on unmatched observer input".into())
         }).is_err());

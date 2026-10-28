@@ -214,7 +214,7 @@ fn one_way_source_refuses_loaded_listeners_unmatched_skins_and_bad_records_befor
             assert!(
                 input::Spec::parse(text.as_bytes())
                     .unwrap()
-                    .compile_with_body(cx, gate, body, |_| {
+                    .compile_with_body::<NormalizedPack>(cx, gate, body, |_| {
                         reads += 1;
                         Err("material reads are forbidden on an unmatched one-way skin".into())
                     })
@@ -487,7 +487,7 @@ fn a_prepared_skin_load_charges_its_poles_to_the_prepared_budget_not_the_exact_s
             let mut reads = 0;
             let result = input::Spec::parse(source(&owner).as_bytes())
                 .unwrap()
-                .compile_with_body(cx, gate, Some(profile(&own_skin())), |_| {
+                .compile_with_body::<NormalizedPack>(cx, gate, Some(profile(&own_skin())), |_| {
                     reads += 1;
                     Err("the first material read ends this check".into())
                 });
@@ -545,7 +545,7 @@ fn a_skin_load_refuses_a_compact_mouth_a_missing_skin_and_bad_records_before_mat
             assert!(
                 input::Spec::parse(text.as_bytes())
                     .unwrap()
-                    .compile_with_body(cx, gate, Some(body), |_| {
+                    .compile_with_body::<NormalizedPack>(cx, gate, Some(body), |_| {
                         reads += 1;
                         Err("material reads are forbidden on a refused skin load".into())
                     })

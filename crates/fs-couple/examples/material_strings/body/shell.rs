@@ -255,7 +255,7 @@ impl Spec {
     }
 
     pub(super) fn compile(&self, spec: &input::Spec, sources: Vec<MaterialStringSource>,
-        catalog: &mut Catalog, loader: &mut impl FnMut(&str) -> Result<NormalizedPack>,
+        catalog: &mut Catalog, loader: &mut impl FnMut(&str) -> Result<MaterialPack>,
         settings: StringBankOptions, cx: &Cx<'_>, gate: &CancelGate) -> Result<ReciprocalStringBank>
     {
         poll(gate)?;
@@ -284,7 +284,7 @@ impl Spec {
     }
 
     fn resolve_component(&self, name: &str, spec: &input::Spec,
-        catalog: &mut Catalog, loader: &mut impl FnMut(&str) -> Result<NormalizedPack>,
+        catalog: &mut Catalog, loader: &mut impl FnMut(&str) -> Result<MaterialPack>,
         gate: &CancelGate) -> Result<fs_couple::shear_shell::assembly::MaterialShellComponent>
     {
         poll(gate)?;

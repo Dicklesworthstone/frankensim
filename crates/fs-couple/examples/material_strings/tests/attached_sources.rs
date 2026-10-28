@@ -50,6 +50,31 @@ fn g3_attached_material_sources_match_ordinary_pcm_and_preserve_data_only_swaps(
 }
 
 #[test]
+fn g3_attached_canonical_material_cards_reach_the_original_native_solver() {
+    let dir = directory(); fixture(&dir);
+    let names = ["wire.fsmatpk", "body.fsmatpk"];
+    run(&args(&dir, "legacy.wav", Some(&names))).unwrap();
+    for name in names {
+        let source = super::material_cards::canonical(name, 7800.0);
+        // The wire header, not a filename suffix, chooses canonical ingestion.
+        std::fs::write(dir.join(name), source.to_bytes()).unwrap();
+    }
+    run(&args(&dir, "canonical.wav", Some(&names))).unwrap();
+    run(&args(&dir, "ordinary.wav", None)).unwrap();
+    let canonical = std::fs::read(dir.join("canonical.wav")).unwrap();
+    assert_eq!(canonical, std::fs::read(dir.join("legacy.wav")).unwrap());
+    assert_eq!(canonical, std::fs::read(dir.join("ordinary.wav")).unwrap());
+    let source = super::material_cards::canonical("wire.fsmatpk", 15600.0);
+    std::fs::write(dir.join("wire.fsmatpk"), source.to_bytes()).unwrap();
+    run(&args(&dir, "substitution.wav", Some(&names))).unwrap();
+    assert_ne!(canonical[44..], std::fs::read(dir.join("substitution.wav")).unwrap()[44..]);
+    let bytes = source.to_bytes();
+    std::fs::write(dir.join("wire.fsmatpk"), &bytes[..bytes.len()-1]).unwrap();
+    assert!(run(&args(&dir, "damaged.wav", Some(&names))).is_err());
+    assert!(!dir.join("damaged.wav").exists(), "source admission precedes output creation");
+}
+
+#[test]
 fn g3_attached_gas_sources_share_the_same_string_and_cavity_state() {
     let dir = directory(); fixture(&dir);
     let source = std::fs::read_to_string(dir.join("input.performance")).unwrap().replace(

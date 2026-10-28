@@ -27,7 +27,7 @@ fn expansion(name: &str, material: &ResolvedMaterialStatePoint, catalog: &Catalo
 
 impl input::Wire {
     pub(super) fn resolve_source(&self, catalog: &mut Catalog,
-        loader: &mut impl FnMut(&str) -> Result<NormalizedPack>, spec: &input::Spec,
+        loader: &mut impl FnMut(&str) -> Result<MaterialPack>, spec: &input::Spec,
         gate: &CancelGate) -> Result<MaterialStringSource>
     {
         poll(gate)?;

@@ -169,7 +169,7 @@ impl Profile {
         }
     }
     pub fn compile(&self, spec:&input::Spec, sources:Vec<MaterialStringSource>,
-        catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result<NormalizedPack>,
+        catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result<MaterialPack>,
         settings:StringBankOptions, cx:&Cx<'_>, gate:&CancelGate) -> Result<ReciprocalStringBank>
     {
         let bank = match &self.model {
@@ -299,7 +299,7 @@ impl PlateProfile {
     /// Tensor viscosity is projected here; selected material memory is attached
     /// after the complete mechanical coordinates are fixed. No scalar loss is added.
     pub fn compile(&self, spec:&input::Spec, sources:Vec<MaterialStringSource>,
-        catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result<NormalizedPack>,
+        catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result<MaterialPack>,
         settings:StringBankOptions, cx:&Cx<'_>, gate:&CancelGate) -> Result<ReciprocalStringBank>
     {
         poll(gate)?;

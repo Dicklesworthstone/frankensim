@@ -20,7 +20,7 @@ fn closed_shell_source_retains_geometry_and_refuses_a_planar_substitute_before_p
             let mut reads = 0;
             assert!(
                 spec.clone()
-                    .compile_with_body(cx, gate, profile, |_| {
+                    .compile_with_body::<NormalizedPack>(cx, gate, profile, |_| {
                         reads += 1;
                         Err("unexpected material read".into())
                     })

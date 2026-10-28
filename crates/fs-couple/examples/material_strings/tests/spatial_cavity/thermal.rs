@@ -41,7 +41,7 @@ fn thermal_source_refuses_a_backend_without_memory_before_material_reads() {
             max_multiply_terms: 200_000_000_000,
         });
         let mut reads = 0;
-        let result = spec.compile_with_body(cx, gate,
+        let result = spec.compile_with_body::<NormalizedPack>(cx, gate,
             Some(body::Profile::parse(profile().as_bytes()).unwrap()), |_| {
                 reads += 1;
                 Err("material I/O after unsupported thermal propagation".into())

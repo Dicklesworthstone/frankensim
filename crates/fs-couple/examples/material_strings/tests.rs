@@ -8,6 +8,9 @@ use fs_scenario::gesture::{GestureTrack,GestureEvent};
 #[path = "tests/normal_sources.rs"]
 mod normal_sources;
 
+#[path = "tests/material_cards.rs"]
+mod material_cards;
+
 #[path = "tests/fibers.rs"]
 mod fibers;
 
