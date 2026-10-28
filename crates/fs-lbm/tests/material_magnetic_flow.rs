@@ -38,6 +38,26 @@ fn input(setup: &ElectricSetup) -> ElectricHeatInput<'_> { ElectricHeatInput { s
 fn near(a: f64, b: f64) { assert!((a-b).abs() < 1e-10, "{a} versus {b}"); }
 
 #[test]
+fn g1_lorentz_load_delivers_one_physical_impulse_in_two_and_three_dimensions() {
+    // The four bulk cells between the ideal electrodes have total conducting
+    // length 4*DX. Thus J=V/(rho_e*4*DX), F=J cross B, and at an initially
+    // uniform interior rho_m*delta_u=F*DT. No wall or contact crosses the
+    // sampled cells' one-step lattice domain of dependence.
+    let expected_speed = 2.0 / (4.0 * DX) * 2.0 * DT / material(1000.0).density_kg_m3();
+    let mut two = slab2();
+    let mut three = slab3(1000.0);
+    let setup2 = electrodes(1, 2.0);
+    let setup3 = electrodes(2, 2.0);
+    let gate = CancelGate::new();
+    two.step_magnetothermal(input(&setup2), &[[0.0, 0.0, 2.0]; 16], &[[0.0; 2]; 16],
+        DX, &gate, |_, _, _| Ok(Some(1.0))).unwrap();
+    three.step_magnetothermal(input(&setup3), &[[0.0, 2.0, 0.0]; 16], &[[0.0; 3]; 16],
+        &gate, |_, _, _| Ok(Some(1.0))).unwrap();
+    near(two.lattice.grid.moments(8).u[0] * DX / DT, expected_speed);
+    near(three.lattice.grid.moments3(8).1[0] * DX / DT, -expected_speed);
+}
+
+#[test]
 fn magnetic_reaction_and_contact_heat_reach_the_actual_flow_and_thermal_kernels() {
     let setup = electrodes(2, 2.0);
     let contacts = [

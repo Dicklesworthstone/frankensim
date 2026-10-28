@@ -380,6 +380,19 @@ rollback. Their addition does not establish executed native validation.
 - `thermal::ThermalLbm` and `thermal::gbeta_for_rayleigh` — D2Q9 flow plus
   D2Q5 temperature populations for Rayleigh-Bénard-style onset fixtures with
   fixed-temperature wall rows.
+  D2Q9/D3Q19 slab forces are held over each flow interval. Before replacing
+  buoyancy plus an external (including Lorentz) load, the existing populations
+  are rebound by half the difference of the raw Guo sources, at the accepted
+  physical velocity. Mass, physical momentum and the force-corrected stress
+  stay unchanged by this coordinate change; only the ensuing native collision
+  supplies the physical impulse. Unchanged force leaves population bits alone.
+  This prevents a spurious extra half impulse when a magnetic field is enabled,
+  reversed or switched off, including material/midpoint/local-transport paths.
+  The operation adds no heat, work, solver or physical state. G0 tests preserve
+  all stress components through arbitrary source changes; G1 tests check
+  `rho*delta_u=F*dt` through switch-on/off/reversal and independent SI Lorentz
+  acceleration in both dimensions. These checks do not supply a total-energy,
+  unconditional-stability or temporal-order certificate for the split solver.
 - `MaterialSlab::step_with_material_rheology` (2-D and 3-D) resolves shared
   material transport at actual temperature and local physical shear rate.
   The existing non-equilibrium stress estimators include the Guo half-force

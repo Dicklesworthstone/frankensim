@@ -11,6 +11,50 @@ fn heat(cells: usize, plane: usize, q: f64) -> Vec<f64> {
 fn mass<const Q: usize>(f: &[[f64; Q]]) -> f64 { f.iter().flatten().sum() }
 
 #[test]
+fn g1_switching_held_forces_delivers_exactly_one_impulse_per_step() {
+    let density = 1.7;
+    let mut two = ThermalLbm::slab(3, 32, 0.9, 0.8, 0.0);
+    let mut three = ThermalLbm3::slab(3, 2, 32, 0.9, 0.9, 0.0);
+    let mut velocity2 = [0.01, -0.02];
+    let mut velocity3 = [0.01, -0.02, 0.015];
+    two.grid.f.fill(fs_lbm::equilibrium(density, velocity2[0], velocity2[1]));
+    three.grid.f.fill(fs_lbm::equilibrium3(density, velocity3));
+    // Central cells remain outside the walls' finite lattice domain of
+    // dependence. Uniform force has no pressure or viscous momentum exchange:
+    // rho * delta u = F * delta t, with delta t=1 in lattice units.
+    for amplitude in [1e-4, 1e-4, 0.0, -2e-4, 1.5e-4] {
+        let force2 = [amplitude, -0.5 * amplitude];
+        let force3 = [amplitude, -0.5 * amplitude, 0.25 * amplitude];
+        let force2 = vec![force2; two.gpop.len()];
+        let force3 = vec![force3; three.gpop.len()];
+        two.step_with_sources(&vec![0.0; force2.len()], &force2, limits()).unwrap();
+        three.step_with_external_forces(&force3).unwrap();
+        let actual2 = two.grid.moments(two.grid.idx(1, 16));
+        let actual3 = three.grid.moments3(three.grid.idx(1, 1, 16));
+        assert!((actual2.rho - density).abs() < 2e-14);
+        assert!((actual3.0 - density).abs() < 2e-14);
+        for a in 0..2 {
+            velocity2[a] += force2[0][a] / density;
+            assert!((actual2.u[a] - velocity2[a]).abs() < 2e-14);
+        }
+        for a in 0..3 {
+            velocity3[a] += force3[0][a] / density;
+            assert!((actual3.1[a] - velocity3[a]).abs() < 2e-14);
+        }
+    }
+    // Returning to the ordinary zero-buoyancy step must also remove the last
+    // force's coordinate frame without a physical kick.
+    two.step();
+    three.step();
+    for (actual, expected) in two.grid.moments(two.grid.idx(1, 16)).u.iter().zip(velocity2) {
+        assert!((actual - expected).abs() < 2e-14);
+    }
+    for (actual, expected) in three.grid.moments3(three.grid.idx(1, 1, 16)).1.iter().zip(velocity3) {
+        assert!((actual - expected).abs() < 2e-14);
+    }
+}
+
+#[test]
 fn zero_heat_preserves_the_existing_forced_step_in_both_dimensions() {
     let mut a = ThermalLbm::slab(3, 8, 0.9, 0.8, 1e-5);
     let mut b = ThermalLbm::slab(3, 8, 0.9, 0.8, 1e-5);

@@ -135,6 +135,9 @@ impl ThermalLbm {
     /// These forces are added to buoyancy, not overwritten by it. Supply one
     /// vector per cell including walls; wall loads are ignored. The field is
     /// borrowed for this step only, so forces cannot accumulate across steps.
+    /// Each total force is held over this interval. Changing it first rebinds
+    /// the Guo half-source frame at fixed physical velocity and stress; switching
+    /// on, reversing or removing a magnetic load supplies no extra half impulse.
     /// Invalid fields or nonfinite sums with buoyancy are refused before any
     /// mutation; ordinary solver-state and stability requirements still apply.
     pub fn step_with_external_forces(&mut self, forces: &[[f64; 2]]) -> Result<(), ThermalForcingError> {
@@ -161,11 +164,17 @@ impl ThermalLbm {
             for x in 0..nx {
                 let i = self.grid.idx(x, y);
                 let t: f64 = self.gpop[i].iter().sum();
-                self.grid.fext[i] = [0.0, self.gbeta * (t - self.t_ref)];
+                let mut total = [0.0, self.gbeta * (t - self.t_ref)];
                 if let Some(forces) = external {
-                    for (total, &load) in self.grid.fext[i].iter_mut().zip(&forces[i]) {
+                    for (total, &load) in total.iter_mut().zip(&forces[i]) {
                         *total += load;
                     }
+                }
+                let previous = self.grid.fext[i];
+                if previous != total {
+                    let velocity = self.grid.moments(i).u;
+                    forcing::reframe2(&mut self.grid.f[i], velocity, previous, total);
+                    self.grid.fext[i] = total;
                 }
             }
         }

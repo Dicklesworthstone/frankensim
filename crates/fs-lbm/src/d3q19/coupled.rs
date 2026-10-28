@@ -476,6 +476,9 @@ impl ThermalLbm3 {
     /// planes, whose loads are ignored. It contains EXTERNAL forces only, not
     /// the previous step's total `fext`. Admission failures leave state intact;
     /// ordinary solver-state and stability requirements still apply.
+    /// Total forces are held over this interval. Source-frame changes preserve
+    /// physical velocity and force-corrected stress before the actual step, so
+    /// changing a magnetic load cannot add a second half-force impulse.
     pub fn step_with_external_forces(
         &mut self,
         forces: &[[f64; 3]],
@@ -517,11 +520,17 @@ impl ThermalLbm3 {
                 for x in 0..nx {
                     let i = self.grid.idx(x, y, z);
                     let t: f64 = self.gpop[i].iter().sum();
-                    self.grid.fext[i] = [0.0, 0.0, self.gbeta * (t - self.t_ref)];
+                    let mut total = [0.0, 0.0, self.gbeta * (t - self.t_ref)];
                     if let Some(forces) = external {
-                        for (total, &load) in self.grid.fext[i].iter_mut().zip(&forces[i]) {
+                        for (total, &load) in total.iter_mut().zip(&forces[i]) {
                             *total += load;
                         }
+                    }
+                    let previous = self.grid.fext[i];
+                    if previous != total {
+                        let velocity = self.grid.moments3(i).1;
+                        crate::thermal::forcing::reframe3(&mut self.grid.f[i], velocity, previous, total);
+                        self.grid.fext[i] = total;
                     }
                 }
             }
