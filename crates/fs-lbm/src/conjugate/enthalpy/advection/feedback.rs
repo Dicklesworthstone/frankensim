@@ -50,6 +50,9 @@ use phase_conduction::PhaseConduction;
 mod unsteady;
 use crate::conjugate::unsteady::MaterialMomentum;
 
+/// Opt-in inelastic freezing into an explicitly stationary support.
+pub mod locking;
+
 /// Exact stationary solid constraints on the same material/enthalpy owner.
 pub mod phase;
 pub use phase::{FlowTransportSnapshot, PhaseFlowTransport};
@@ -183,6 +186,8 @@ pub struct MaterialFlowFeedback<'a, F, R, O, T = FluidTransportState> {
     density_kg_m3: f64,
     snapshot: fn(&F, Option<PhaseMobility>) -> Result<T, MaterialError>,
     exact_phase: bool,
+    // Private endpoint-only deferral; never survives a published candidate.
+    support_capture_endpoint_s: Option<f64>,
     buoyancy: Option<([f64; 3], fn(&F) -> f64)>,
     external_force_n_m3: Option<Vec<[f64; 3]>>,
     mushy: Option<&'a MushyPhaseLaw<'a>>,
@@ -252,6 +257,7 @@ where
             density_kg_m3: reference.density_kg_m3(),
             snapshot: fluid_snapshot::<F>,
             exact_phase: false,
+            support_capture_endpoint_s: None,
             buoyancy: None,
             external_force_n_m3: None,
             mushy: None,
@@ -1071,7 +1077,9 @@ where
                 // endpoint velocities, never against a cell-centre average
                 // or flux rounded to zero. Melting adds zero-speed faces;
                 // freezing must remove only zero-energy momentum entries.
-                owner.accept_phase_domain(domain.as_ref().unwrap_or(self.domain), self.gate)?;
+                if self.support_capture_endpoint_s != Some(thermal.time_s()) {
+                    owner.accept_phase_domain(domain.as_ref().unwrap_or(self.domain), self.gate)?;
+                }
             }
         }
         if self.rheology.is_some() {

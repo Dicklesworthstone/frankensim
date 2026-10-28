@@ -10,6 +10,9 @@ mod unsteady;
 #[path = "occupancy/environment.rs"]
 mod environment;
 
+#[path = "occupancy/locking.rs"]
+mod locking;
+
 fn geometry<'a>(
     domain: &VoxelDomain,
     curve: &'a EquilibriumEnthalpyPhaseCurve,

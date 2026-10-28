@@ -205,6 +205,7 @@ where
             density_kg_m3,
             snapshot: phase_snapshot::<F>,
             exact_phase: true,
+            support_capture_endpoint_s: None,
             buoyancy: None,
             external_force_n_m3: None,
             mushy: Some(law),

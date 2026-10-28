@@ -58,6 +58,9 @@ pub struct UnsteadyHeatingAudit {
     pub generated_heat_j: f64,
     pub molecular_heat_j: f64,
     pub darcy_heat_j: f64,
+    /// Inelastic kinetic capture by an explicitly stationary phase support.
+    /// Separate from molecular/Darcy viscosity and numerical time loss.
+    pub support_capture_heat_j: f64,
     pub backward_euler_loss_j: f64,
     /// Bounded pressure-constraint defect; never heat.
     pub pressure_constraint_work_j: f64,
@@ -136,11 +139,44 @@ impl UnsteadyHeatingAudit {
         )?;
         if next.residual_j.abs() > allowance
             || next.pressure_constraint_work_j.abs() > allowance
-            || (next.generated_heat_j - next.molecular_heat_j - next.darcy_heat_j).abs() > allowance
+            || (next.generated_heat_j - next.molecular_heat_j - next.darcy_heat_j
+                - next.support_capture_heat_j).abs() > allowance
         {
             return Err(invalid_power(
                 "integrated transient mechanical and physical heat accounts do not close",
             ));
+        }
+        *self = next;
+        Ok(())
+    }
+
+    #[cfg(feature = "enthalpy-coupling")]
+    pub(in crate::conjugate) fn accept_support_capture(
+        &mut self,
+        before_j: f64,
+        after_j: f64,
+        heat_j: f64,
+        controls: ViscousHeatControls,
+    ) -> Result<(), ChtError> {
+        if before_j.to_bits() != self.final_kinetic_energy_j.to_bits()
+            || !after_j.is_finite() || after_j < 0.0 || !heat_j.is_finite() || heat_j < 0.0
+        {
+            return Err(invalid_power("phase capture must retain the actual native kinetic history"));
+        }
+        let mut next = *self;
+        next.final_kinetic_energy_j = after_j;
+        next.generated_heat_j = finite_value("capture.heat", next.generated_heat_j + heat_j)?;
+        next.support_capture_heat_j = finite_value("capture.heat", next.support_capture_heat_j + heat_j)?;
+        next.residual_j = finite_value("capture.residual",
+            next.supplied_wall_work_j + next.supplied_body_work_j + next.pressure_constraint_work_j
+                - next.generated_heat_j
+                - (next.final_kinetic_energy_j - next.initial_kinetic_energy_j)
+                - next.backward_euler_loss_j)?;
+        let allowance = finite_value("capture.allowance", controls.power_tolerance_w * next.duration_s)?;
+        if (before_j - after_j - heat_j).abs() > allowance
+            || next.residual_j.abs() > allowance
+        {
+            return Err(invalid_power("supported capture does not close native kinetic and heat storage"));
         }
         *self = next;
         Ok(())
@@ -196,13 +232,8 @@ impl Solver<'_> {
         for a in 0..3 {
             for &index in &self.comps[a].unknowns {
                 poll(gate)?;
-                let plus = self.comps[a].coords(index);
-                let mut minus = plus;
-                minus[a] -= 1;
                 // Exactly rho*face_area*length from the native inertia row.
-                let mass = self.rho
-                    * self.comp_face_area(a, index)
-                    * (0.5 * (self.domain.width(a, minus[a]) + self.domain.width(a, plus[a])));
+                let mass = self.interior_face_mass_kg(a, index);
                 let old = time.previous[a][index];
                 let new = self.vel[a][index];
                 initial = finite_value(

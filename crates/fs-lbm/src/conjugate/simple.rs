@@ -85,6 +85,8 @@ use crate::d3q19::Face3;
 
 pub mod sgs;
 pub mod viscous_heat;
+#[cfg(feature = "enthalpy-coupling")]
+pub(in crate::conjugate) mod phase_capture;
 
 /// Flow rule on one domain face.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1374,6 +1376,19 @@ impl<'a> Solver<'a> {
         let f = self.comps[a].coords(index);
         let (u, w) = ((a + 1) % 3, (a + 2) % 3);
         self.domain.width(u, f[u]) * self.domain.width(w, f[w])
+    }
+
+    /// Native inertia of an interior staggered face, shared by kinetic storage
+    /// and the explicit stationary-support capture law. Both adjacent cells
+    /// must belong to the original mobile domain.
+    #[cfg(feature = "enthalpy-coupling")]
+    fn interior_face_mass_kg(&self, axis: usize, index: usize) -> f64 {
+        let plus = self.comps[axis].coords(index);
+        self.rho
+            * self.comp_face_area(axis, index)
+            * (0.5
+                * (self.domain.width(axis, plus[axis] - 1)
+                    + self.domain.width(axis, plus[axis])))
     }
 
     fn weight(&self, peclet: f64) -> f64 {

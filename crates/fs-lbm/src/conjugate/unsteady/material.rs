@@ -4,6 +4,7 @@
 
 use super::{FlowStepRecord, UnsteadyConfig, admit_unsteady, converge_step};
 use crate::conjugate::simple::{MomentumState, Solver, material_solver};
+use crate::conjugate::simple::phase_capture::NativePhaseCapture;
 use crate::conjugate::{
     ChtError, FluidProperties, FvBoundary, FvFlow, SimpleConfig, TimeScheme, Turbulence,
     UnsteadyHeatingAudit, UnsteadyMechanicalStep, ViscousHeatControls, ViscousPower, VoxelDomain,
@@ -168,6 +169,59 @@ impl MaterialMomentum {
         self.heating.is_some()
     }
 
+    /// Capture only an explicitly supported endpoint. This updates the actual
+    /// native history and its separate heat account; the enclosing thermal
+    /// candidate must still receive that heat and pass phase/source admission.
+    #[allow(clippy::too_many_arguments)]
+    pub fn capture_supported_phase(
+        &mut self,
+        source: &VoxelDomain,
+        target: &VoxelDomain,
+        fluid: Option<&FluidProperties>,
+        config: &SimpleConfig,
+        viscosity_pa_s: &[f64],
+        supported: &[bool],
+        gate: &CancelGate,
+    ) -> Result<NativePhaseCapture, ChtError> {
+        poll(gate)?;
+        let heating = self.heating.as_ref()
+            .ok_or_else(|| invalid("supported capture requires native kinetic and physical heat accounting"))?;
+        if heating.pending {
+            return Err(invalid("capture must follow the accepted native mechanical interval"));
+        }
+        let Some(state) = &self.state else {
+            self.accept_phase_domain(target, gate)?;
+            return Ok(NativePhaseCapture::stationary(target.cell_count()));
+        };
+        let fluid = fluid.ok_or_else(|| invalid("moving capture requires its original material reference"))?;
+        let mut original = material_solver(source, fluid, viscosity_pa_s, None, None, config, gate)?;
+        original.restore_momentum(state)?;
+        let (state, report) = original.supported_phase_capture(target, supported, gate)?;
+        let mut audit = heating.audit;
+        audit.accept_support_capture(report.initial_kinetic_energy_j,
+            report.final_kinetic_energy_j, report.heat_j, heating.controls)?;
+        if report.captured_faces == 0 {
+            // Retain the original material-resolved field and report exactly
+            // when only the already-supported zero-speed constraints change.
+            self.accept_phase_domain(target, gate)?;
+            self.heating.as_mut().expect("admitted kinetic accounting").audit = audit;
+            return Ok(report);
+        }
+        let flow = if target.fluid_count() == 0 {
+            FvFlow::stationary(target)
+        } else {
+            let mut remaining = material_solver(target, fluid, viscosity_pa_s, None, None, config, gate)?;
+            remaining.restore_momentum(&state)?;
+            remaining.finish_projected(fluid, self.flow.report.iterations,
+                (self.flow.report.mass_residual, self.flow.report.momentum_residual))
+        };
+        poll(gate)?;
+        self.state = Some(state);
+        self.flow = flow;
+        self.heating.as_mut().expect("admitted kinetic accounting").audit = audit;
+        Ok(report)
+    }
+
     pub fn heating_audit(&self) -> Option<UnsteadyHeatingAudit> {
         self.heating.as_ref().map(|heating| heating.audit)
     }
@@ -200,10 +254,9 @@ impl MaterialMomentum {
             if heating.pending {
                 return Err(invalid("unfinished transient heat interval"));
             }
-            let kinetic = self
-                .mechanical_step
-                .as_ref()
-                .map_or(0.0, |step| step.final_kinetic_energy_j);
+            // The complete accepted endpoint may also include a separately
+            // accounted stationary-support capture after the momentum solve.
+            let kinetic = heating.audit.final_kinetic_energy_j;
             heating.audit = UnsteadyHeatingAudit::from_kinetic_energy(kinetic);
         }
         Ok(())
