@@ -11,9 +11,11 @@
 //! dedicated lanes.
 //!
 //! The fixed-step integrator uses a deterministic midpoint update: translation
-//! under a piecewise-constant world force and a Lie-group attitude update at
-//! midpoint body angular momentum. It is a production foundation for smooth
-//! rigid bodies, not a claim of variational, contact, or constraint preservation.
+//! under a piecewise-constant world force, an implicit body-momentum midpoint,
+//! and a matching Cayley attitude update. Torque-free asymmetric rotation keeps
+//! kinetic energy and world angular momentum to solve tolerance and roundoff.
+//! Constant-axis spin retains the exact exponential. This is not a claim of
+//! variational, contact, or constraint preservation.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
@@ -155,6 +157,8 @@ pub enum DynamicsError {
     UnsupportedReferenceOffset,
     /// A step duration must be finite and strictly positive.
     InvalidStepDuration,
+    /// The bounded implicit rotational solve did not converge; reduce the step.
+    RotationalSolveFailed,
 }
 
 impl fmt::Display for DynamicsError {
@@ -182,6 +186,9 @@ impl fmt::Display for DynamicsError {
             Self::InvalidStepDuration => {
                 formatter.write_str("step duration must be finite and positive")
             }
+            Self::RotationalSolveFailed => formatter.write_str(
+                "implicit rotational midpoint did not converge; reduce the step duration",
+            ),
         }
     }
 }
@@ -1247,11 +1254,17 @@ impl RigidBodyIntegrator {
         })
     }
 
-    /// Performs one deterministic midpoint Lie-group step.
+    /// Performs one deterministic, second-order energy/momentum midpoint step.
     ///
-    /// Force and torque are constant over this step. No contact, constraint, or
-    /// collision query is performed. A failed validation leaves no mutable state
-    /// because this method returns a new state in its receipt.
+    /// Force and body-frame torque are constant over this step. The implicit
+    /// Euler-top solve satisfies `delta K_rot = dt * tau.dot(omega_mid)`; its
+    /// Cayley attitude update preserves world angular momentum when torque is
+    /// zero, to nonlinear-solve tolerance and roundoff. Spherical bodies and
+    /// single-principal-axis rotations retain the exact exponential update.
+    /// No contact, constraint, or collision query is performed. A failed or
+    /// unconverged candidate leaves no mutable state because this method returns
+    /// a new state only in a successful receipt. Energy preservation does not
+    /// remove the need for timestep refinement of phase and orientation.
     pub fn step(
         self,
         state: RigidBodyState,
@@ -1281,21 +1294,13 @@ impl RigidBodyIntegrator {
             .linear_momentum_world
             .add(total_force_world.scale(duration_seconds));
 
-        let angular_rate_before =
-            angular_momentum_rate(state.angular_momentum_body, properties, wrench.torque_body);
-        let angular_momentum_mid = state
-            .angular_momentum_body
-            .add(angular_rate_before.scale(0.5 * duration_seconds));
-        let angular_rate_mid =
-            angular_momentum_rate(angular_momentum_mid, properties, wrench.torque_body);
-        let angular_momentum_after = state
-            .angular_momentum_body
-            .add(angular_rate_mid.scale(duration_seconds));
-        let angular_velocity_mid = properties.angular_velocity_body(angular_momentum_mid);
-        let orientation_after = state
-            .pose
-            .orientation
-            .right_exp(angular_velocity_mid.scale(duration_seconds))?;
+        let (angular_momentum_after, orientation_after) = implicit_rotation_step(
+            state.angular_momentum_body,
+            state.pose.orientation,
+            properties,
+            wrench.torque_body,
+            duration_seconds,
+        )?;
 
         let state_after = RigidBodyState::new(
             Pose::new(position_after, orientation_after)?,
@@ -1438,6 +1443,159 @@ fn unit_direction(direction_world: Vec3) -> Result<Vec3, DynamicsError> {
         return Err(DynamicsError::InvalidDirection);
     }
     Ok(scaled.scale(norm.recip()))
+}
+
+// Implicit midpoint preserves both quadratic Euler-top invariants. The SAME
+// midpoint must update attitude with Cayley, not exp: writing W = dt/2 [omega]x,
+// (I + W)L1 = (I - W)L0 for zero torque, so Cayley(dt omega) L1 = L0.
+// For applied body torque, dotting the midpoint equation with omega gives
+// K1 - K0 = dt tau.omega. No projection/rescaling injects or removes energy.
+fn implicit_rotation_step(
+    before: Vec3,
+    orientation: UnitQuaternion,
+    properties: MassProperties,
+    torque: Vec3,
+    h: f64,
+) -> Result<(Vec3, UnitQuaternion), DynamicsError> {
+    let impulse = torque.scale(h);
+    if !impulse.is_finite() {
+        return Err(DynamicsError::NonFinite("rotational.torque_impulse"));
+    }
+    let inertia = properties.principal_inertia_body;
+    let spherical = inertia.x == inertia.y && inertia.y == inertia.z;
+    let single_axis = [
+        (before.x, torque.x),
+        (before.y, torque.y),
+        (before.z, torque.z),
+    ]
+    .into_iter()
+    .filter(|&(l, t)| l != 0.0 || t != 0.0)
+    .count()
+        <= 1;
+    if spherical || single_axis {
+        // No gyroscopic term. Preserve exact finite-angle constant-axis spin,
+        // including consumers that request a whole elapsed display interval.
+        let after = before.add(impulse);
+        let mid = before.scale(0.5).add(after.scale(0.5));
+        let rotation = properties.angular_velocity_body_checked(mid)?.scale(h);
+        return Ok((after, orientation.right_exp(rotation)?));
+    }
+
+    let magnitude = |v: Vec3| v.x.abs().max(v.y.abs()).max(v.z.abs());
+    let scale = magnitude(before).max(magnitude(impulse));
+    let old = [before.x / scale, before.y / scale, before.z / scale];
+    let rhs = [
+        old[0] + 0.5 * (impulse.x / scale),
+        old[1] + 0.5 * (impulse.y / scale),
+        old[2] + 0.5 * (impulse.z / scale),
+    ];
+    let rates = [scale / inertia.x, scale / inertia.y, scale / inertia.z];
+    let c = [
+        0.5 * h * (rates[2] - rates[1]),
+        0.5 * h * (rates[0] - rates[2]),
+        0.5 * h * (rates[1] - rates[0]),
+    ];
+    if c.iter().any(|v| !v.is_finite()) {
+        return Err(DynamicsError::NonFinite("rotational.midpoint_coefficients"));
+    }
+    let residual = |y: [f64; 3]| -> [f64; 3] {
+        [
+            (-c[0] * y[1]).mul_add(y[2], y[0] - rhs[0]),
+            (-c[1] * y[2]).mul_add(y[0], y[1] - rhs[1]),
+            (-c[2] * y[0]).mul_add(y[1], y[2] - rhs[2]),
+        ]
+    };
+    let norm = |v: [f64; 3]| v[0].abs().max(v[1].abs()).max(v[2].abs());
+    let mut mid = rhs;
+    for _ in 0..16 {
+        let r = residual(mid);
+        let error = norm(r);
+        if r.iter().any(|v| !v.is_finite()) {
+            return Err(DynamicsError::RotationalSolveFailed);
+        }
+        if error <= 4.0 * f64::EPSILON * (norm(mid) + norm(rhs)) {
+            let after = Vec3::new(
+                (2.0 * mid[0] - old[0]) * scale,
+                (2.0 * mid[1] - old[1]) * scale,
+                (2.0 * mid[2] - old[2]) * scale,
+            );
+            // Use the actual returned endpoints for the conjugate midpoint.
+            let actual_mid = before.scale(0.5).add(after.scale(0.5));
+            let omega = properties.angular_velocity_body_checked(actual_mid)?;
+            let half_rotation = omega.scale(0.5 * h);
+            let increment =
+                UnitQuaternion::new(1.0, half_rotation.x, half_rotation.y, half_rotation.z)?;
+            let product = orientation.multiply(increment);
+            let next = UnitQuaternion::new(product.w, product.x, product.y, product.z)?;
+            return Ok((after, next));
+        }
+        let jacobian = [
+            [1.0, -c[0] * mid[2], -c[0] * mid[1]],
+            [-c[1] * mid[2], 1.0, -c[1] * mid[0]],
+            [-c[2] * mid[1], -c[2] * mid[0], 1.0],
+        ];
+        let delta = solve_rotation_3(jacobian, r.map(|v| -v))?;
+        let mut fraction: f64 = 1.0;
+        let mut accepted = false;
+        for _ in 0..8 {
+            let trial = [
+                fraction.mul_add(delta[0], mid[0]),
+                fraction.mul_add(delta[1], mid[1]),
+                fraction.mul_add(delta[2], mid[2]),
+            ];
+            let trial_residual = residual(trial);
+            if trial_residual.iter().all(|v| v.is_finite()) && norm(trial_residual) < error {
+                mid = trial;
+                accepted = true;
+                break;
+            }
+            fraction *= 0.5;
+        }
+        if !accepted {
+            return Err(DynamicsError::RotationalSolveFailed);
+        }
+    }
+    Err(DynamicsError::RotationalSolveFailed)
+}
+
+// Private fixed-size Newton solve, stack-only and deterministically pivoted.
+fn solve_rotation_3(mut a: [[f64; 3]; 3], mut b: [f64; 3]) -> Result<[f64; 3], DynamicsError> {
+    let scale = a.iter().flatten().fold(0.0_f64, |s, v| s.max(v.abs()));
+    if !scale.is_finite() {
+        return Err(DynamicsError::RotationalSolveFailed);
+    }
+    for k in 0..3 {
+        let mut pivot = k;
+        for i in k + 1..3 {
+            if a[i][k].abs() > a[pivot][k].abs() {
+                pivot = i;
+            }
+        }
+        if !a[pivot][k].is_finite() || a[pivot][k].abs() <= 32.0 * f64::EPSILON * scale {
+            return Err(DynamicsError::RotationalSolveFailed);
+        }
+        a.swap(k, pivot);
+        b.swap(k, pivot);
+        for i in k + 1..3 {
+            let factor = a[i][k] / a[k][k];
+            for j in k + 1..3 {
+                a[i][j] = (-factor).mul_add(a[k][j], a[i][j]);
+            }
+            b[i] = (-factor).mul_add(b[k], b[i]);
+        }
+    }
+    let mut x = [0.0; 3];
+    for i in (0..3).rev() {
+        let mut value = b[i];
+        for j in i + 1..3 {
+            value = (-a[i][j]).mul_add(x[j], value);
+        }
+        x[i] = value / a[i][i];
+        if !x[i].is_finite() {
+            return Err(DynamicsError::RotationalSolveFailed);
+        }
+    }
+    Ok(x)
 }
 
 fn angular_momentum_rate(
@@ -1746,7 +1904,7 @@ mod tests {
     }
 
     #[test]
-    fn torque_free_refinement_reduces_energy_defect_for_an_asymmetric_body() {
+    fn torque_free_energy_defect_is_roundoff_limited_for_an_asymmetric_body() {
         let properties = MassProperties::new(1.0, Vec3::ZERO, Vec3::new(1.0, 1.5, 2.0)).unwrap();
         let initial =
             RigidBodyState::new(Pose::identity(), Vec3::ZERO, Vec3::new(0.4, 0.7, 1.1)).unwrap();
@@ -1782,8 +1940,8 @@ mod tests {
             - initial_energy)
             .abs();
         assert!(
-            fine_defect < coarse_defect,
-            "fine {fine_defect:e} must improve coarse {coarse_defect:e}"
+            fine_defect < 2e-13 && coarse_defect < 2e-13,
+            "energy defects must remain at roundoff: coarse {coarse_defect:e}, fine {fine_defect:e}"
         );
     }
 

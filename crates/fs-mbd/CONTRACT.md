@@ -115,9 +115,15 @@ a dynamic, contact, grasp-stability, or force-closure result.
   a private field and `acceleration_world()` getter.
 - `RigidBodyIntegrator::step` returns a `StepReceipt` with the before/after
   states and diagnostics. Translation uses the midpoint linear momentum under
-  the constant total force. Body angular momentum uses midpoint RK2 for
-  `Ldot = L × I⁻¹L + tau`; attitude uses the body midpoint angular velocity in
-  a right-composed quaternion exponential update.
+  the constant total force. Body angular momentum solves implicit midpoint for
+  `Ldot = L × I⁻¹L + tau`, with the actual endpoint mean as its conjugate
+  momentum. A matching right-composed Cayley attitude update preserves world
+  angular momentum in torque-free asymmetric rotation. The quadratic kinetic
+  energy balance is `K1 - K0 = dt * tau dot I^-1((L0 + L1)/2)`, up to the
+  nonlinear-solve tolerance and floating-point roundoff. Spherical bodies and
+  single-principal-axis rotations use the direct momentum update and quaternion
+  exponential; constant-axis spin therefore remains exact at finite elapsed
+  time rather than acquiring a Cayley phase error.
 - `RigidBodyIntegrator::diagnostics` returns
   `Result<DynamicsDiagnostics, DynamicsError>`. It revalidates its state,
   gravity, and mass properties and refuses non-finite derived energies or world
@@ -290,7 +296,12 @@ a dynamic, contact, grasp-stability, or force-closure result.
 unrepresentable finite magnitude, invalid mass, invalid or physically
 inconsistent principal inertia, invalid orientation, invalid directional
 effective mass, unsupported non-centre-of-mass reference point, and invalid
-duration. There are no panics in production paths for those invalid inputs.
+duration. `RotationalSolveFailed` reports a singular or unconverged implicit
+rotational candidate and requests a smaller timestep. The fixed-size solve
+normalizes momentum, uses an analytic 3x3 Jacobian with deterministic partial
+pivoting, and permits at most 16 Newton iterations with at most eight trial
+fractions each. It allocates no heap storage and never publishes an unconverged
+state. There are no panics in production paths for those invalid inputs.
 Arithmetic overflow or a non-finite attitude update, kinematic transform,
 effective-mass query, or impulse-work result is returned through the checked
 boundary; already completed earlier steps of `advance` remain committed.
@@ -353,7 +364,7 @@ The inline test module in `src/lib.rs` contains nineteen focused checks:
 7. torque-free spherical-body energy and world angular-momentum conservation;
 8. axisymmetric Euler-top phase sign and refinement toward its analytic body
    angular-velocity solution;
-9. refinement reducing the measured energy defect for an asymmetric free body;
+9. roundoff-limited energy defect for an asymmetric free body at two timesteps;
 10. cancellation before a whole step, preserving the last completed state;
 11. refusal of overflowing diagnostics, including an already-cancelled advance,
     without a false successful diagnostic receipt.
@@ -368,6 +379,13 @@ The inline test module in `src/lib.rs` contains nineteen focused checks:
 18. bit-exact canonical-quaternion replay without renormalization drift;
 19. bounded-energy symplectic kick-drift stepping under a recomputed
     harmonic force.
+
+`tests/energy.rs` checks asymmetric torque-free energy and world angular
+momentum over 50,000 steps, work balance under changing prescribed body torque
+and world force, second-order attitude and momentum convergence against the
+closed-form symmetric Euler top, time reversal, and exact large-angle
+single-axis spin. These test the actual rigid-body owner and its real math and
+geometric-algebra dependencies.
 
 The `articulated` module additionally checks spatial-inertia matrix/direct
 momentum agreement, physical-inertia and derived-overflow refusal, two-link
@@ -410,7 +428,7 @@ fault injection, or G5 cross-ISA evidence.
 - No contacts, impacts, friction, complementarity, penetration handling, or
   static-friction capacity are represented.
 - No holonomic loop constraints, nonholonomic rolling constraints, RATTLE
-  projection, generalized-alpha lane, Newton/Krylov solve, or constraint
+  projection, generalized-alpha lane, general Newton/Krylov API, or constraint
   impulse/defect receipt is present. The articulated tree supports only fixed
   and scalar revolute/prismatic/helical joints.
 - The articulated lane provides a full 6x6 spatial inertia and an articulated
@@ -446,9 +464,13 @@ fault injection, or G5 cross-ISA evidence.
   aerodynamic, or controller force implicitly. A gravity-only robot therefore
   falls freely; it does not stand, balance, or behave as a ground-supported
   pendulum without explicit external/contact forces from another owner.
-- The midpoint update is not claimed symplectic, variational, energy exactly
-  conserving, momentum exactly conserving for arbitrary inertia, adaptive,
-  adjoint-capable, or physically validated.
+- The midpoint update is not claimed symplectic, variational, adaptive,
+  adjoint-capable, or physically validated. Its torque-free energy and spatial
+  momentum invariants hold to solve tolerance and roundoff for diagonal
+  principal inertia; prescribed torque obeys the stated midpoint work balance.
+  Energy conservation alone does not bound phase/orientation error: timestep
+  refinement remains necessary. The separate kick-drift lane retains its own
+  first-order rotational approximation and does not inherit these invariants.
 - Diagnostics describe the simulated smooth state; they do not mint a
   certificate, authority, or release-level conservation claim.
 - The source-bounded Goddard apparatus lane claims no absolute patent
