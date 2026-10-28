@@ -158,4 +158,103 @@ fn closed_path_and_identical_compositions_are_bitwise_noops() {
     assert_eq!(trial.entropy_change_j_k(), 0.0);
 }
 
+fn entropy_gas(x: f64, offsets: [f64; 2]) -> ClosedGasParcel {
+    use fs_thermochem::{Nasa9RegionV1, Nasa9StandardStateModelV1};
+    let fractions = [x, 1.0 - x];
+    let sources = [species("A", 0.028, 3.5, 0.001), species("B", 0.004, 2.5, 0.0)];
+    let mut components = Vec::new();
+    let mut active = Vec::new();
+    let mut transport_sources = Vec::new();
+    for (index, source) in sources.into_iter().enumerate() {
+        if fractions[index] == 0.0 { continue; }
+        let regions = source.regions().iter().map(|region| {
+            let mut source_card = region.card().clone();
+            source_card.parameters.get_mut("a8").unwrap().value += offsets[index];
+            Nasa9RegionV1::from_card(source_card).unwrap()
+        }).collect();
+        components.push(Nasa9StandardStateModelV1::new(source.species().clone(),
+            source.molar_mass(), source.convention().clone(), regions).unwrap());
+        active.push(fractions[index]);
+        transport_sources.push(if index == 0 { transport("A", 1.7e-5, 0.025) }
+            else { transport("B", 2e-5, 0.15) });
+    }
+    let mixture = FrozenIdealGasMixtureModelV1::new(components,
+        Composition::new(CompositionBasis::MoleFraction, active).unwrap()).unwrap();
+    let model = ThermochemicalGasModel::new(mixture, transport_sources, None).unwrap();
+    ClosedGasParcel::new(model, point(400.0, 100000.0), 0.001).unwrap()
+}
+
+#[test]
+fn pair_mixing_entropy_is_independent_of_each_species_entropy_datum() {
+    let d = card(2e-5); let p = point(400.0, 100000.0);
+    let pairs = [pair("A", "B", &d, &p)];
+    let ordinary = entropy_gas(0.75, [0.0; 2]).diffuse_with(
+        &entropy_gas(0.25, [0.0; 2]), geometry(), 0.1, &pairs, controls(), || false).unwrap();
+    let shifted = entropy_gas(0.75, [1e24, -3e24]).diffuse_with(
+        &entropy_gas(0.25, [1e24, -3e24]), geometry(), 0.1, &pairs, controls(), || false).unwrap();
+    assert!(ordinary.entropy_change_j_k() > 0.0);
+    assert_eq!(ordinary.entropy_change_j_k().to_bits(), shifted.entropy_change_j_k().to_bits());
+    for (a, b) in [(ordinary.exchange().left(), shifted.exchange().left()),
+        (ordinary.exchange().right(), shifted.exchange().right())] {
+        assert_eq!(a.state().state(), b.state().state());
+        assert_eq!(a.mass_kg().to_bits(), b.mass_kg().to_bits());
+        assert_eq!(a.model().thermodynamics().mole_composition(), b.model().thermodynamics().mole_composition());
+    }
+}
+
+#[test]
+fn initially_absent_species_follow_the_exact_ideal_mixing_entropy_limit() {
+    let d = card(2e-5); let p = point(400.0, 100000.0);
+    let left = entropy_gas(1.0, [1e24, -3e24]);
+    let right = entropy_gas(0.0, [1e24, -3e24]);
+    let trial = left.diffuse_with(&right, geometry(), 0.1,
+        &[pair("A", "B", &d, &p)], controls(), || false).unwrap();
+    // Each volume retains N total moles: equal and opposite MOLAR fluxes.
+    let n = 100000.0 * 0.001 / (UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * 400.0);
+    let f = 2e-5 * geometry().area_m2 * 0.1 / (geometry().distance_m * 0.001);
+    let expected = -2.0 * UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * n
+        * ((1.0 - f) * (-f).ln_1p() + f * f.ln());
+    near(trial.entropy_change_j_k(), expected, 1e-10);
+    assert!(trial.entropy_change_j_k() > 0.0);
+    for parcel in [trial.exchange().left(), trial.exchange().right()] {
+        assert_eq!(parcel.model().thermodynamics().components().len(), 2);
+        near(parcel.state().state().temperature, 400.0, 1e-7);
+        near(parcel.state().state().pressure, 100000.0, 1e-5);
+    }
+}
+
+#[test]
+fn closed_entropy_keeps_caloric_and_partial_pressure_terms_and_signed_changes() {
+    use super::super::entropy::closed_entropy_change;
+    let at = |t, p| ClosedGasParcel::new(model(vec![0.75, 0.25], 0.001),
+        point(t, p), 0.001).unwrap();
+    let old = [at(500.0, 125000.0), at(300.0, 75000.0)];
+    let next = [at(450.0, 112500.0), at(350.0, 87500.0)];
+    // N*R = p*V/T = 0.25 J/K in EACH volume; cv/R = 2.25 + 0.00075*T.
+    // Opposite 50 K changes cancel the linear-T contribution exactly.
+    let expected = 0.25 * 2.25 * 1.05_f64.ln();
+    let change = closed_entropy_change([(0, &old[0], &next[0]), (1, &old[1], &next[1])],
+        controls().exchange.mass_tolerance_kg, || false).unwrap();
+    let reverse = closed_entropy_change([(0, &next[0], &old[0]), (1, &next[1], &old[1])],
+        controls().exchange.mass_tolerance_kg, || false).unwrap();
+    near(change, expected, 2e-13);
+    near(reverse, -expected, 2e-13);
+    assert!(reverse < 0.0);
+}
+
+#[test]
+fn closed_entropy_refuses_inventory_volume_or_source_drift() {
+    use super::super::entropy::{closed_entropy_change, Error};
+    let a = gas(0.75);
+    let heavier = ClosedGasParcel::new(a.model().clone(), point(400.0, 101000.0), 0.001).unwrap();
+    let expanded = ClosedGasParcel::new(a.model().clone(), point(400.0, 100000.0), 0.002).unwrap();
+    let other_source = entropy_gas(0.75, [1.0, 2.0]);
+    for next in [&heavier, &expanded, &other_source] {
+        assert!(closed_entropy_change([(0, &a, next)], controls().exchange.mass_tolerance_kg,
+            || false).is_err());
+    }
+    assert!(matches!(closed_entropy_change([(0, &a, &a)],
+        controls().exchange.mass_tolerance_kg, || true), Err(Error::Cancelled)));
+}
+
 mod network;

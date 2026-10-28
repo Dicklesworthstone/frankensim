@@ -104,7 +104,8 @@ pub struct GasTransportStep {
     pub membranes: Vec<MembraneNetworkLinkStep>,
     /// Partial enthalpies, including formation references, are transported once.
     pub exchange: SpeciesNetworkStep,
-    /// Actual extensive entropy change, not a stability/accuracy certificate.
+    /// Conserved-species entropy change; species-mass residuals stay separate.
+    /// This is not a stability/accuracy certificate.
     pub entropy_change_j_k: f64,
 }
 
@@ -255,7 +256,7 @@ pub fn step_candidate_with_paths(
     porous::admit_pressures(proposal.parcels(), &porous_reports, &mut cancelled)?;
     membrane::admit_partial_pressures(proposal.parcels(), &membrane_reports, &mut cancelled)?;
     let entropy_change_j_k = molecular::admit_entropy(parcels, proposal.parcels(),
-        controls.entropy_tolerance_j_k, &mut cancelled)?;
+        controls.entropy_tolerance_j_k, controls.exchange.mass_tolerance_kg, &mut cancelled)?;
     check(&mut cancelled)?;
     let (parcels, exchange) = proposal.into_parts();
     Ok(GasTransportCandidate { parcels, step: GasTransportStep { duration_s,

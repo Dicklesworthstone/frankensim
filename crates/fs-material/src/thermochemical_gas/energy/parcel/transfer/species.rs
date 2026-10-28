@@ -12,6 +12,7 @@ pub mod boundary;
 pub mod diffusion;
 /// Shared-snapshot selective transport on branching and cyclic volume networks.
 pub mod network;
+mod entropy;
 
 use super::{ClosedGasParcel, Composition, CompositionBasis, GasEnergyError, GasEnergySolve,
     GasMassTransferSolve, SpeciesId, ThermochemicalGasModel, MAX_FROZEN_IDEAL_GAS_COMPONENTS_V1,

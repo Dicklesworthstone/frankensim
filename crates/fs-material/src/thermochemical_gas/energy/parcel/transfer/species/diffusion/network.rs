@@ -2,7 +2,7 @@
 //! Reuse the original Maxwell-Stefan face solver and selective inventory owner.
 use std::collections::BTreeMap;
 use super::{BinaryDiffusionMaterial, ClosedGasParcel, GasDiffusionFlux, GasDiffusionGeometry,
-    GasDiffusionSolve, GasEnergyError, GasSpeciesExchangeSolve, Sum, positive};
+    GasDiffusionSolve, GasEnergyError, GasSpeciesExchangeSolve, positive};
 use super::super::network::{self, SpeciesNetworkError, SpeciesNetworkSolve,
     SpeciesNetworkStep, SpeciesNetworkTransfer};
 use super::super::super::snapshot::{MAX_SNAPSHOT_PARCELS, MAX_SNAPSHOT_TRANSFERS};
@@ -57,6 +57,8 @@ pub struct DiffusionNetworkStep {
     pub duration_s: f64,
     pub links: Vec<DiffusionNetworkLinkStep>,
     pub exchange: SpeciesNetworkStep,
+    /// Conserved-species entropy change; numerical species-mass residuals
+    /// remain in the separate exchange account.
     pub entropy_change_j_k: f64,
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -98,7 +100,8 @@ pub fn step_candidate(
     let (transfers, reports) = sample_transfers(parcels, links, duration_s, endpoints, controls, &mut cancelled)?;
     let candidate=network::exchange_candidate(parcels,&transfers,endpoints,controls.exchange,&mut cancelled)
         .map_err(|error|if error==SpeciesNetworkError::Cancelled {Error::Cancelled} else {Error::Exchange(error)})?;
-    let entropy_change_j_k = admit_entropy(parcels, candidate.parcels(), controls.entropy_tolerance_j_k, &mut cancelled)?;
+    let entropy_change_j_k = admit_entropy(parcels, candidate.parcels(),
+        controls.entropy_tolerance_j_k, controls.exchange.mass_tolerance_kg, &mut cancelled)?;
     check(&mut cancelled)?;
     let (parcels,exchange)=candidate.into_parts();
     Ok(DiffusionNetworkCandidate {parcels,step:DiffusionNetworkStep {duration_s,links:reports,
@@ -162,22 +165,26 @@ pub(crate) fn sample_transfers(
     Ok((transfers, reports))
 }
 
-// Evaluate actual extensive endpoint entropy, including changes in total mass.
+// Cancel conserved species reference datums before rounding. Ideal mixing,
+// source caloric entropy and finite-volume mass redistribution all remain.
 pub(crate) fn admit_entropy(
     parcels: &BTreeMap<u64, ClosedGasParcel>, next_parcels: &BTreeMap<u64, ClosedGasParcel>,
-    tolerance_j_k: f64, mut cancelled: impl FnMut() -> bool,
+    tolerance_j_k: f64, mass_tolerance_kg: f64, mut cancelled: impl FnMut() -> bool,
 ) -> Result<f64, Error> {
-    let mut entropy=Sum::default();
-    for (&id,old) in parcels {
-        check(&mut cancelled)?;
-        let map=|error|Error::Parcel {id,error};
-        let next=&next_parcels[&id];
-        let before=old.state().specific_entropy_j_kg_k().map_err(GasEnergyError::from).map_err(map)?;
-        let after=next.state().specific_entropy_j_kg_k().map_err(GasEnergyError::from).map_err(map)?;
-        entropy.add(next.mass_kg()*(after-before)+(next.mass_kg()-old.mass_kg())*before).map_err(map)?;
+    use super::super::entropy;
+    if !parcels.keys().eq(next_parcels.keys()) {
+        return Err(Error::Invalid("closed entropy audit requires the original parcel identities"));
     }
-    if entropy.value < -tolerance_j_k {
+    let change = entropy::closed_entropy_change(
+        parcels.iter().map(|(&id, old)| (id, old, &next_parcels[&id])),
+        mass_tolerance_kg, &mut cancelled,
+    ).map_err(|error| match error {
+        entropy::Error::Invalid(reason) => Error::Invalid(reason),
+        entropy::Error::Parcel { id, error } => Error::Parcel { id, error },
+        entropy::Error::Cancelled => Error::Cancelled,
+    })?;
+    if change < -tolerance_j_k {
         return Err(Error::Invalid("diffusion network entropy decreased; refine the physical interval"));
     }
-    Ok(entropy.value)
+    Ok(change)
 }

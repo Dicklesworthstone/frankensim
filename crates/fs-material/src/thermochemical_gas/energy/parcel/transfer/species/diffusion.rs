@@ -244,8 +244,10 @@ impl ClosedGasParcel {
     /// Explicit first-order diffusion from one original pair snapshot. Partial
     /// species enthalpy crosses once; no mixture-enthalpy surrogate or extra heat.
     /// Returns no endpoint on source/budget/consumption/energy/entropy refusal.
-    /// The whole-pair entropy check is measured, not an unconditional stability
-    /// theorem. Shorten the physical interval rather than clipping trace species.
+    /// The whole-pair entropy check cancels conserved species reference datums;
+    /// numerical species-mass residuals remain in the separate mass accounts.
+    /// This is not an unconditional stability theorem. Shorten the physical
+    /// interval rather than clipping trace species.
     pub fn diffuse_with(
         &self, right: &Self, geometry: GasDiffusionGeometry, duration_s: f64,
         pairs: &[BinaryDiffusionMaterial<'_>], controls: GasDiffusionSolve,
@@ -262,17 +264,19 @@ impl ClosedGasParcel {
             rows.push(SpeciesMassTransfer { species: species.species.clone(), mass_left_to_right_kg: mass });
         }
         let exchange = self.exchange_species_with(right, &rows, controls.exchange, &mut cancelled)?;
-        let mut entropy = Sum::default();
-        for (old, next) in [(self, exchange.left()), (right, exchange.right())] {
-            let s0 = old.state().specific_entropy_j_kg_k()?;
-            let s1 = next.state().specific_entropy_j_kg_k()?;
-            entropy.add(next.mass_kg()*(s1-s0)+(next.mass_kg()-old.mass_kg())*s0)?;
-        }
-        if entropy.value < -controls.entropy_tolerance_j_k {
+        let entropy = super::entropy::closed_entropy_change(
+            [(0, self, exchange.left()), (1, right, exchange.right())],
+            controls.exchange.mass_tolerance_kg, &mut cancelled,
+        ).map_err(|error| match error {
+            super::entropy::Error::Invalid(reason) => invalid(reason),
+            super::entropy::Error::Parcel { error, .. } => error,
+            super::entropy::Error::Cancelled => GasEnergyError::Cancelled,
+        })?;
+        if entropy < -controls.entropy_tolerance_j_k {
             return Err(invalid("finite diffusion step decreases pair entropy; reduce the interval"));
         }
         poll(&mut cancelled)?;
-        Ok(GasDiffusionCandidate { exchange, flux, entropy_change_j_k: entropy.value })
+        Ok(GasDiffusionCandidate { exchange, flux, entropy_change_j_k: entropy })
     }
 }
 

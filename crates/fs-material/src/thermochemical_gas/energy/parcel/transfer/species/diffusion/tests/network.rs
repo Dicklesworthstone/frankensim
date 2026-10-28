@@ -1,4 +1,50 @@
 //! Multiple material diffusion faces on one unchanged physical snapshot.
+
+#[test]
+fn graph_and_combined_transport_cancel_arbitrary_species_entropy_datums() {
+    use crate::thermochemical_gas::energy::parcel::transfer::species::network::transport::{self, GasTransportSolve};
+    let d = card(2e-5); let p = point(400.0, 100000.0);
+    let pairs = [pair("A", "B", &d, &p)];
+    let links = [link(1, [0, 1], &pairs), link(2, [1, 2], &pairs)];
+    let gases = |offsets| BTreeMap::from([(0, entropy_gas(0.75, offsets)),
+        (1, entropy_gas(0.5, offsets)), (2, entropy_gas(0.25, offsets))]);
+    let ordinary = gases([0.0; 2]);
+    let shifted = gases([1e24, -3e24]);
+    let expected = network::step_candidate(&ordinary, &links, 0.1,
+        &endpoints(&ordinary), solve(), || false).unwrap();
+    let actual = network::step_candidate(&shifted, &links, 0.1,
+        &endpoints(&shifted), solve(), || false).unwrap();
+    let combined = transport::step_candidate(&shifted, &[], &links, 0.1,
+        &endpoints(&shifted), GasTransportSolve { exchange: solve().exchange,
+            entropy_tolerance_j_k: solve().entropy_tolerance_j_k }, || false).unwrap();
+    assert!(expected.step().entropy_change_j_k > 0.0);
+    assert_eq!(actual.step().entropy_change_j_k.to_bits(), expected.step().entropy_change_j_k.to_bits());
+    assert_eq!(combined.step().entropy_change_j_k.to_bits(), expected.step().entropy_change_j_k.to_bits());
+    assert_eq!(combined.parcels(), actual.parcels());
+    for id in ordinary.keys() {
+        assert_eq!(expected.parcels()[id].state().state(), actual.parcels()[id].state().state());
+        assert_eq!(expected.parcels()[id].mass_kg().to_bits(), actual.parcels()[id].mass_kg().to_bits());
+    }
+}
+
+#[test]
+fn disconnected_gas_systems_keep_distinct_source_models_for_the_same_species_name() {
+    let d = card(2e-5); let p = point(400.0, 100000.0);
+    let pairs = [pair("A", "B", &d, &p)];
+    let first = BTreeMap::from([(0, entropy_gas(0.75, [0.0; 2])),
+        (1, entropy_gas(0.25, [0.0; 2]))]);
+    let expected = network::step_candidate(&first, &[link(1, [0, 1], &pairs)], 0.1,
+        &endpoints(&first), solve(), || false).unwrap();
+    let mut both = first;
+    both.insert(2, entropy_gas(0.75, [1e24, -3e24]));
+    both.insert(3, entropy_gas(0.25, [1e24, -3e24]));
+    let actual = network::step_candidate(&both,
+        &[link(1, [0, 1], &pairs), link(2, [2, 3], &pairs)], 0.1,
+        &endpoints(&both), solve(), || false).unwrap();
+    near(actual.step().entropy_change_j_k, 2.0 * expected.step().entropy_change_j_k, 1e-13);
+    assert!(actual.step().exchange.maximum_species_mass_residual_kg <= solve().exchange.mass_tolerance_kg);
+}
+
 use super::*;
 use super::super::network::{self,DiffusionFaceSolve,DiffusionNetworkLink,DiffusionNetworkSolve,DiffusionNetworkError};
 use crate::thermochemical_gas::energy::parcel::transfer::species::network::{SpeciesNetworkSolve,SpeciesNetworkError};
