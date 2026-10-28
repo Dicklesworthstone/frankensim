@@ -1,0 +1,134 @@
+frankensim.matdb-source.v1
+observation	panel-context	WISA structural birch plywood UPM007CPR, 18 mm, 13 crosswise plies	Producer Declaration of Performance effective 2026-01-01	Specific construction column, not solid birch wood or arbitrary plywood. Declared values retain source-is-declared-value=1; test temperature, pressure and numeric moisture conditioning are unstated in this declaration. Nominal thickness is not actual measured thickness. Coating/edge sealing and service classes do not define a material temperature or moisture law.
+observation	density-reference	UPM007CPR structural birch plywood	Page 2 declared mean density	680 kg/m3 is the source mean density. The separate 650 kg/m3 characteristic density is declared for EN 1995-1-1 racking calculations and is not silently selected as the mass density.
+observation	thermal-reference	UPM007CPR structural birch plywood	Page 2 declared thermal conductivity	Source lambda is 0.17 W/(m K). Numeric test temperature, specimen moisture and conduction direction are not specified. The declared scalar does not establish an isotropic conductivity tensor, continuous thermal trajectory or a heat-capacity value.
+observation	bending-reference	UPM007CPR 18 mm 13-ply panel	Page 3 mean bending MOE and characteristic bending strength	Direction is relative to the face-veneer grain; load-parallel-to-face-grain=1 selects parallel and 0 selects perpendicular. Bending modulus is distinct from axial modulus. Strength values are characteristic declared values, not observed maxima, mean strengths or factored design allowables.
+observation	axial-reference	UPM007CPR 18 mm 13-ply panel	Page 3 mean compression/tension MOE and characteristic strengths	The source gives a shared mean axial MOE for compression and tension, plus separate characteristic strengths. Direction selectors retain panel anisotropy. No Poisson ratios, through-thickness elastic constants, complete orthotropic tensor, plastic law or creep law are synthesized.
+scalar	mean-density	panel-context,density-reference	density	680	kg/m^3	constant
+uncertainty	mean-density	unstated	-	-	-	-
+validity	mean-density	source_grade_wisa_upm007_2026	1	1	1
+validity	mean-density	nominal_thickness	0.018	0.018	m
+validity	mean-density	ply_count	13	13	1
+validity	mean-density	source_temperature_known	0	0	1
+validity	mean-density	source_moisture_condition_known	0	0	1
+validity	mean-density	source_pressure_known	0	0	1
+validity	mean-density	source_is_declared_value	1	1	1
+scalar	racking-density	panel-context,density-reference	characteristic_density_for_racking	650	kg/m^3	constant
+uncertainty	racking-density	unstated	-	-	-	-
+validity	racking-density	source_grade_wisa_upm007_2026	1	1	1
+validity	racking-density	nominal_thickness	0.018	0.018	m
+validity	racking-density	ply_count	13	13	1
+validity	racking-density	source_temperature_known	0	0	1
+validity	racking-density	source_moisture_condition_known	0	0	1
+validity	racking-density	source_pressure_known	0	0	1
+validity	racking-density	source_is_declared_value	1	1	1
+scalar	declared-conductivity	panel-context,thermal-reference	thermal_conductivity	0.17	W/m/K	constant
+uncertainty	declared-conductivity	unstated	-	-	-	-
+validity	declared-conductivity	source_grade_wisa_upm007_2026	1	1	1
+validity	declared-conductivity	nominal_thickness	0.018	0.018	m
+validity	declared-conductivity	ply_count	13	13	1
+validity	declared-conductivity	source_temperature_known	0	0	1
+validity	declared-conductivity	source_moisture_condition_known	0	0	1
+validity	declared-conductivity	source_pressure_known	0	0	1
+validity	declared-conductivity	source_is_declared_value	1	1	1
+validity	declared-conductivity	source_conductivity_direction_known	0	0	1
+scalar	bending-modulus-parallel	panel-context,bending-reference	bending_modulus	10048	MPa	constant
+uncertainty	bending-modulus-parallel	unstated	-	-	-	-
+validity	bending-modulus-parallel	source_grade_wisa_upm007_2026	1	1	1
+validity	bending-modulus-parallel	nominal_thickness	0.018	0.018	m
+validity	bending-modulus-parallel	ply_count	13	13	1
+validity	bending-modulus-parallel	source_temperature_known	0	0	1
+validity	bending-modulus-parallel	source_moisture_condition_known	0	0	1
+validity	bending-modulus-parallel	source_pressure_known	0	0	1
+validity	bending-modulus-parallel	source_is_declared_value	1	1	1
+validity	bending-modulus-parallel	load_parallel_to_face_grain	1	1	1
+scalar	axial-modulus-parallel	panel-context,axial-reference	axial_modulus	9148	MPa	constant
+uncertainty	axial-modulus-parallel	unstated	-	-	-	-
+validity	axial-modulus-parallel	source_grade_wisa_upm007_2026	1	1	1
+validity	axial-modulus-parallel	nominal_thickness	0.018	0.018	m
+validity	axial-modulus-parallel	ply_count	13	13	1
+validity	axial-modulus-parallel	source_temperature_known	0	0	1
+validity	axial-modulus-parallel	source_moisture_condition_known	0	0	1
+validity	axial-modulus-parallel	source_pressure_known	0	0	1
+validity	axial-modulus-parallel	source_is_declared_value	1	1	1
+validity	axial-modulus-parallel	load_parallel_to_face_grain	1	1	1
+scalar	characteristic-bending-strength-parallel	panel-context,bending-reference	characteristic_bending_strength	40.2	MPa	constant
+uncertainty	characteristic-bending-strength-parallel	unstated	-	-	-	-
+validity	characteristic-bending-strength-parallel	source_grade_wisa_upm007_2026	1	1	1
+validity	characteristic-bending-strength-parallel	nominal_thickness	0.018	0.018	m
+validity	characteristic-bending-strength-parallel	ply_count	13	13	1
+validity	characteristic-bending-strength-parallel	source_temperature_known	0	0	1
+validity	characteristic-bending-strength-parallel	source_moisture_condition_known	0	0	1
+validity	characteristic-bending-strength-parallel	source_pressure_known	0	0	1
+validity	characteristic-bending-strength-parallel	source_is_declared_value	1	1	1
+validity	characteristic-bending-strength-parallel	load_parallel_to_face_grain	1	1	1
+scalar	characteristic-compression-strength-parallel	panel-context,axial-reference	characteristic_compression_strength	27.2	MPa	constant
+uncertainty	characteristic-compression-strength-parallel	unstated	-	-	-	-
+validity	characteristic-compression-strength-parallel	source_grade_wisa_upm007_2026	1	1	1
+validity	characteristic-compression-strength-parallel	nominal_thickness	0.018	0.018	m
+validity	characteristic-compression-strength-parallel	ply_count	13	13	1
+validity	characteristic-compression-strength-parallel	source_temperature_known	0	0	1
+validity	characteristic-compression-strength-parallel	source_moisture_condition_known	0	0	1
+validity	characteristic-compression-strength-parallel	source_pressure_known	0	0	1
+validity	characteristic-compression-strength-parallel	source_is_declared_value	1	1	1
+validity	characteristic-compression-strength-parallel	load_parallel_to_face_grain	1	1	1
+scalar	characteristic-tensile-strength-parallel	panel-context,axial-reference	characteristic_tensile_strength	39.2	MPa	constant
+uncertainty	characteristic-tensile-strength-parallel	unstated	-	-	-	-
+validity	characteristic-tensile-strength-parallel	source_grade_wisa_upm007_2026	1	1	1
+validity	characteristic-tensile-strength-parallel	nominal_thickness	0.018	0.018	m
+validity	characteristic-tensile-strength-parallel	ply_count	13	13	1
+validity	characteristic-tensile-strength-parallel	source_temperature_known	0	0	1
+validity	characteristic-tensile-strength-parallel	source_moisture_condition_known	0	0	1
+validity	characteristic-tensile-strength-parallel	source_pressure_known	0	0	1
+validity	characteristic-tensile-strength-parallel	source_is_declared_value	1	1	1
+validity	characteristic-tensile-strength-parallel	load_parallel_to_face_grain	1	1	1
+scalar	bending-modulus-perpendicular	panel-context,bending-reference	bending_modulus	7452	MPa	constant
+uncertainty	bending-modulus-perpendicular	unstated	-	-	-	-
+validity	bending-modulus-perpendicular	source_grade_wisa_upm007_2026	1	1	1
+validity	bending-modulus-perpendicular	nominal_thickness	0.018	0.018	m
+validity	bending-modulus-perpendicular	ply_count	13	13	1
+validity	bending-modulus-perpendicular	source_temperature_known	0	0	1
+validity	bending-modulus-perpendicular	source_moisture_condition_known	0	0	1
+validity	bending-modulus-perpendicular	source_pressure_known	0	0	1
+validity	bending-modulus-perpendicular	source_is_declared_value	1	1	1
+validity	bending-modulus-perpendicular	load_parallel_to_face_grain	0	0	1
+scalar	axial-modulus-perpendicular	panel-context,axial-reference	axial_modulus	8352	MPa	constant
+uncertainty	axial-modulus-perpendicular	unstated	-	-	-	-
+validity	axial-modulus-perpendicular	source_grade_wisa_upm007_2026	1	1	1
+validity	axial-modulus-perpendicular	nominal_thickness	0.018	0.018	m
+validity	axial-modulus-perpendicular	ply_count	13	13	1
+validity	axial-modulus-perpendicular	source_temperature_known	0	0	1
+validity	axial-modulus-perpendicular	source_moisture_condition_known	0	0	1
+validity	axial-modulus-perpendicular	source_pressure_known	0	0	1
+validity	axial-modulus-perpendicular	source_is_declared_value	1	1	1
+validity	axial-modulus-perpendicular	load_parallel_to_face_grain	0	0	1
+scalar	characteristic-bending-strength-perpendicular	panel-context,bending-reference	characteristic_bending_strength	34.1	MPa	constant
+uncertainty	characteristic-bending-strength-perpendicular	unstated	-	-	-	-
+validity	characteristic-bending-strength-perpendicular	source_grade_wisa_upm007_2026	1	1	1
+validity	characteristic-bending-strength-perpendicular	nominal_thickness	0.018	0.018	m
+validity	characteristic-bending-strength-perpendicular	ply_count	13	13	1
+validity	characteristic-bending-strength-perpendicular	source_temperature_known	0	0	1
+validity	characteristic-bending-strength-perpendicular	source_moisture_condition_known	0	0	1
+validity	characteristic-bending-strength-perpendicular	source_pressure_known	0	0	1
+validity	characteristic-bending-strength-perpendicular	source_is_declared_value	1	1	1
+validity	characteristic-bending-strength-perpendicular	load_parallel_to_face_grain	0	0	1
+scalar	characteristic-compression-strength-perpendicular	panel-context,axial-reference	characteristic_compression_strength	24.8	MPa	constant
+uncertainty	characteristic-compression-strength-perpendicular	unstated	-	-	-	-
+validity	characteristic-compression-strength-perpendicular	source_grade_wisa_upm007_2026	1	1	1
+validity	characteristic-compression-strength-perpendicular	nominal_thickness	0.018	0.018	m
+validity	characteristic-compression-strength-perpendicular	ply_count	13	13	1
+validity	characteristic-compression-strength-perpendicular	source_temperature_known	0	0	1
+validity	characteristic-compression-strength-perpendicular	source_moisture_condition_known	0	0	1
+validity	characteristic-compression-strength-perpendicular	source_pressure_known	0	0	1
+validity	characteristic-compression-strength-perpendicular	source_is_declared_value	1	1	1
+validity	characteristic-compression-strength-perpendicular	load_parallel_to_face_grain	0	0	1
+scalar	characteristic-tensile-strength-perpendicular	panel-context,axial-reference	characteristic_tensile_strength	35.8	MPa	constant
+uncertainty	characteristic-tensile-strength-perpendicular	unstated	-	-	-	-
+validity	characteristic-tensile-strength-perpendicular	source_grade_wisa_upm007_2026	1	1	1
+validity	characteristic-tensile-strength-perpendicular	nominal_thickness	0.018	0.018	m
+validity	characteristic-tensile-strength-perpendicular	ply_count	13	13	1
+validity	characteristic-tensile-strength-perpendicular	source_temperature_known	0	0	1
+validity	characteristic-tensile-strength-perpendicular	source_moisture_condition_known	0	0	1
+validity	characteristic-tensile-strength-perpendicular	source_pressure_known	0	0	1
+validity	characteristic-tensile-strength-perpendicular	source_is_declared_value	1	1	1
+validity	characteristic-tensile-strength-perpendicular	load_parallel_to_face_grain	0	0	1

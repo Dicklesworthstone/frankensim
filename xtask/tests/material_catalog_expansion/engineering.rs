@@ -373,3 +373,125 @@ fn g0_g3_repair_cement_preserves_age_origins_flow_and_test_mode() {
         }
     }
 }
+
+#[test]
+fn g0_g3_mdf_specification_limits_keep_the_wet_cycle_state() {
+    let pack = compile("medite-mr-mdf-18mm-mr-ds-en13", 8);
+    let at = flags(&[
+        ("source-grade-medite-mr-en13", 1.0),
+        ("source-temperature-known", 0.0),
+        ("source-moisture-condition-known", 0.0),
+        ("source-pressure-known", 0.0),
+        ("after-en321-wet-cycle", 0.0),
+    ])
+    .with_quantity(
+        "nominal-thickness",
+        QuantitySpec::dimensional(Dims([1, 0, 0, 0, 0, 0])),
+        0.018,
+    )
+    .unwrap();
+    sample(&pack, "internal-bond-strength-minimum", PA, &at, 0.75e6);
+    sample(&pack, "bending-modulus-minimum", PA, &at, 2.4e9);
+    sample(&pack, "bending-strength-minimum", PA, &at, 24e6);
+    let wet = at.clone().with("after-en321-wet-cycle", 1.0).unwrap();
+    sample(&pack, "internal-bond-strength-minimum", PA, &wet, 0.20e6);
+    sample(&pack, "thickness-swelling-maximum", Dims::NONE, &wet, 0.15);
+    refuses(&pack, "bending-modulus-minimum", PA, &wet);
+    let soaked = at
+        .clone()
+        .with_quantity(
+            "immersion-duration",
+            QuantitySpec::dimensional(Dims([0, 0, 1, 0, 0, 0])),
+            86400.0,
+        )
+        .unwrap();
+    sample(
+        &pack,
+        "thickness-swelling-limit-exclusive",
+        Dims::NONE,
+        &soaked,
+        0.08,
+    );
+    refuses(
+        &pack,
+        "thickness-swelling-limit-exclusive",
+        Dims::NONE,
+        &soaked.with("immersion-duration", 43200.0).unwrap(),
+    );
+    refuses(&pack, "bending-modulus", PA, &at); // no mean/nominal value from a lower limit
+    refuses(&pack, "density", RHO, &at);
+    refuses(
+        &pack,
+        "bending-modulus-minimum",
+        PA,
+        &at.with("nominal-thickness", 0.019).unwrap(),
+    );
+}
+
+#[test]
+fn g0_g3_crosswise_plywood_keeps_axial_bending_and_characteristic_values_distinct() {
+    let pack = compile("wisa-birch-plywood-18mm-upm007-2026", 13);
+    let at = flags(&[
+        ("source-grade-wisa-upm007-2026", 1.0),
+        ("ply-count", 13.0),
+        ("source-temperature-known", 0.0),
+        ("source-moisture-condition-known", 0.0),
+        ("source-pressure-known", 0.0),
+        ("source-is-declared-value", 1.0),
+    ])
+    .with_quantity(
+        "nominal-thickness",
+        QuantitySpec::dimensional(Dims([1, 0, 0, 0, 0, 0])),
+        0.018,
+    )
+    .unwrap();
+    sample(&pack, "density", RHO, &at, 680.0);
+    sample(&pack, "characteristic-density-for-racking", RHO, &at, 650.0);
+    for (direction, bending, axial, strength) in [
+        (1.0, 10048e6, 9148e6, 40.2e6),
+        (0.0, 7452e6, 8352e6, 34.1e6),
+    ] {
+        let oriented = at
+            .clone()
+            .with_quantity(
+                "load-parallel-to-face-grain",
+                QuantitySpec::dimensional(Dims::NONE),
+                direction,
+            )
+            .unwrap();
+        sample(&pack, "bending-modulus", PA, &oriented, bending);
+        sample(&pack, "axial-modulus", PA, &oriented, axial);
+        sample(
+            &pack,
+            "characteristic-bending-strength",
+            PA,
+            &oriented,
+            strength,
+        );
+        refuses(&pack, "young-modulus", PA, &oriented);
+        for bad in [
+            oriented.clone().with("nominal-thickness", 0.021).unwrap(),
+            oriented.clone().with("ply-count", 15.0).unwrap(),
+            oriented
+                .clone()
+                .with("source-is-declared-value", 0.0)
+                .unwrap(),
+            oriented
+                .clone()
+                .with("load-parallel-to-face-grain", 0.5)
+                .unwrap(),
+        ] {
+            refuses(&pack, "axial-modulus", PA, &bad);
+        }
+    }
+    refuses(&pack, "axial-modulus", PA, &at);
+    let thermal = at
+        .with_quantity(
+            "source-conductivity-direction-known",
+            QuantitySpec::dimensional(Dims::NONE),
+            0.0,
+        )
+        .unwrap();
+    sample(&pack, "thermal-conductivity", K, &thermal, 0.17);
+    refuses(&pack, "specific-heat-capacity", CP, &thermal);
+}

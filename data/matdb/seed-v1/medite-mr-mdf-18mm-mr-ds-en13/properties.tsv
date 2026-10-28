@@ -1,0 +1,72 @@
+frankensim.matdb-source.v1
+observation	grade-context	MEDITE MR moisture-resistant MDF, nominal 18 mm	Manufacturer specification mr-ds-en-13, >12 to 19 mm column	Interior humid-service MDF-H option 1. This pack selects the advertised 18 mm product only. Stated production moisture 5-9 percent is not assigned as test conditioning. Test temperature, pressure and numeric specimen moisture are unstated. No density, Poisson ratio, tensor, acoustic absorption, waterproofness or isotropic Young modulus is inferred.
+observation	initial-bond	MEDITE MR 18 mm before specified wet-cycle exposure	EN 319 internal bond, specification lower bound	The table gives internal bond at least 0.75 MPa. This is a declared lower limit, not a measured mean or an adhesive-interface traction law.
+observation	bending	MEDITE MR 18 mm before specified wet-cycle exposure	EN 310 modulus of elasticity and rupture, specification lower bounds	Bending modulus and bending strength limits remain separate from axial modulus and generic tensile strength. Nominal or mean stiffness is not supplied.
+observation	screws	MEDITE MR 18 mm before specified wet-cycle exposure	EN 320 face/edge screw holding	Forces are test-specific results for face and edge insertion. Screw geometry, embedment, loading rate and exact temperature are not supplied. These are not stresses, joint design capacities or bulk strength.
+observation	immersion	MEDITE MR 18 mm	EN 317 thickness swelling after 24 hours	The specified fractional thickness increase is strictly less than 0.08. The exclusive upper-limit property retains the less-than relation. No time interpolation, diffusion coefficient or equilibrium hygroscopic law is inferred.
+observation	wet-cycle	MEDITE MR 18 mm after EN 321 wet cycle	EN 321 exposure with EN 317 swelling and EN 319 internal bond	After the prescribed wet cycle, thickness swelling is at most 0.15 and internal bond at least 0.20 MPa. These endpoints do not define a continuous damage/recovery law and cannot be substituted for the initial condition.
+scalar	bond-initial	grade-context,initial-bond	internal_bond_strength_minimum	0.75	MPa	constant
+uncertainty	bond-initial	unstated	-	-	-	-
+validity	bond-initial	source_grade_medite_mr_en13	1	1	1
+validity	bond-initial	nominal_thickness	0.018	0.018	m
+validity	bond-initial	source_temperature_known	0	0	1
+validity	bond-initial	source_moisture_condition_known	0	0	1
+validity	bond-initial	source_pressure_known	0	0	1
+validity	bond-initial	after_en321_wet_cycle	0	0	1
+scalar	bending-modulus-limit	grade-context,bending	bending_modulus_minimum	2400	MPa	constant
+uncertainty	bending-modulus-limit	unstated	-	-	-	-
+validity	bending-modulus-limit	source_grade_medite_mr_en13	1	1	1
+validity	bending-modulus-limit	nominal_thickness	0.018	0.018	m
+validity	bending-modulus-limit	source_temperature_known	0	0	1
+validity	bending-modulus-limit	source_moisture_condition_known	0	0	1
+validity	bending-modulus-limit	source_pressure_known	0	0	1
+validity	bending-modulus-limit	after_en321_wet_cycle	0	0	1
+scalar	bending-strength-limit	grade-context,bending	bending_strength_minimum	24	MPa	constant
+uncertainty	bending-strength-limit	unstated	-	-	-	-
+validity	bending-strength-limit	source_grade_medite_mr_en13	1	1	1
+validity	bending-strength-limit	nominal_thickness	0.018	0.018	m
+validity	bending-strength-limit	source_temperature_known	0	0	1
+validity	bending-strength-limit	source_moisture_condition_known	0	0	1
+validity	bending-strength-limit	source_pressure_known	0	0	1
+validity	bending-strength-limit	after_en321_wet_cycle	0	0	1
+scalar	screw-face	grade-context,screws	screw_holding_force_face	1200	N	constant
+uncertainty	screw-face	unstated	-	-	-	-
+validity	screw-face	source_grade_medite_mr_en13	1	1	1
+validity	screw-face	nominal_thickness	0.018	0.018	m
+validity	screw-face	source_temperature_known	0	0	1
+validity	screw-face	source_moisture_condition_known	0	0	1
+validity	screw-face	source_pressure_known	0	0	1
+validity	screw-face	after_en321_wet_cycle	0	0	1
+scalar	screw-edge	grade-context,screws	screw_holding_force_edge	900	N	constant
+uncertainty	screw-edge	unstated	-	-	-	-
+validity	screw-edge	source_grade_medite_mr_en13	1	1	1
+validity	screw-edge	nominal_thickness	0.018	0.018	m
+validity	screw-edge	source_temperature_known	0	0	1
+validity	screw-edge	source_moisture_condition_known	0	0	1
+validity	screw-edge	source_pressure_known	0	0	1
+validity	screw-edge	after_en321_wet_cycle	0	0	1
+scalar	swelling-24h-limit	grade-context,immersion	thickness_swelling_limit_exclusive	0.08	1	constant
+uncertainty	swelling-24h-limit	unstated	-	-	-	-
+validity	swelling-24h-limit	source_grade_medite_mr_en13	1	1	1
+validity	swelling-24h-limit	nominal_thickness	0.018	0.018	m
+validity	swelling-24h-limit	source_temperature_known	0	0	1
+validity	swelling-24h-limit	source_moisture_condition_known	0	0	1
+validity	swelling-24h-limit	source_pressure_known	0	0	1
+validity	swelling-24h-limit	after_en321_wet_cycle	0	0	1
+validity	swelling-24h-limit	immersion_duration	86400	86400	s
+scalar	bond-after-cycle	grade-context,wet-cycle	internal_bond_strength_minimum	0.2	MPa	constant
+uncertainty	bond-after-cycle	unstated	-	-	-	-
+validity	bond-after-cycle	source_grade_medite_mr_en13	1	1	1
+validity	bond-after-cycle	nominal_thickness	0.018	0.018	m
+validity	bond-after-cycle	source_temperature_known	0	0	1
+validity	bond-after-cycle	source_moisture_condition_known	0	0	1
+validity	bond-after-cycle	source_pressure_known	0	0	1
+validity	bond-after-cycle	after_en321_wet_cycle	1	1	1
+scalar	swelling-after-cycle	grade-context,wet-cycle	thickness_swelling_maximum	0.15	1	constant
+uncertainty	swelling-after-cycle	unstated	-	-	-	-
+validity	swelling-after-cycle	source_grade_medite_mr_en13	1	1	1
+validity	swelling-after-cycle	nominal_thickness	0.018	0.018	m
+validity	swelling-after-cycle	source_temperature_known	0	0	1
+validity	swelling-after-cycle	source_moisture_condition_known	0	0	1
+validity	swelling-after-cycle	source_pressure_known	0	0	1
+validity	swelling-after-cycle	after_en321_wet_cycle	1	1	1

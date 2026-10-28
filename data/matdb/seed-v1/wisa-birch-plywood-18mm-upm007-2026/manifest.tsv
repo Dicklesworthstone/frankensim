@@ -1,0 +1,23 @@
+frankensim.matdb-manifest.v3
+pack_id	wisa-birch-plywood-18mm-upm007-2026
+redistribution	permitted	Selected attributed numerical facts and original condition notes only; source prose and table layout are not redistributed
+citation	UPM Plywood, WISA structural crosswise birch plywood Declaration of Performance UPM007CPR effective 2026-01-01, pages 2-3, nominal 18 mm 13-ply column, accessed 2026-10-28; https://www.wisaplywood.com/siteassets/documents/dop/upm007cpr-2026-01-01-en.pdf
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	wisa-upm007-18mm	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	characteristic_density_for_racking	characteristic-density-for-racking	dimensional
+property	axial_modulus	axial-modulus	dimensional
+property	bending_modulus	bending-modulus	dimensional
+property	characteristic_bending_strength	characteristic-bending-strength	dimensional
+property	characteristic_compression_strength	characteristic-compression-strength	dimensional
+property	characteristic_tensile_strength	characteristic-tensile-strength	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+axis	source_grade_wisa_upm007_2026	source-grade-wisa-upm007-2026	dimensional
+axis	nominal_thickness	nominal-thickness	dimensional
+axis	ply_count	ply-count	dimensional
+axis	source_temperature_known	source-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	source_is_declared_value	source-is-declared-value	dimensional
+axis	load_parallel_to_face_grain	load-parallel-to-face-grain	dimensional
+axis	source_conductivity_direction_known	source-conductivity-direction-known	dimensional
