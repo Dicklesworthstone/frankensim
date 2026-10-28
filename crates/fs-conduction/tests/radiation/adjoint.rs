@@ -284,3 +284,6 @@ fn enclosure_prescribed_lift_includes_fixed_wall_means_and_direct_goal_terms() {
         assert!(actual > 0.7, "the direct fixed-node objective term must be retained");
     });
 }
+
+#[path = "adjoint/vacuum.rs"]
+mod vacuum;

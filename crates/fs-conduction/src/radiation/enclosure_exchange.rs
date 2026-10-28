@@ -44,14 +44,29 @@ pub(crate) fn bind(
     enclosure: &GrayDiffuseEnclosure,
     temperature: &[f64],
 ) -> Result<Vec<Patch>, ConductionError> {
+    let patches = bind_traces(cx, problem, enclosure)?;
+    for (index, surface) in enclosure.surfaces().iter().enumerate() {
+        poll(cx, index)?;
+        surface.mean_temperature(problem.mesh, temperature)?;
+    }
+    Ok(patches)
+}
+
+/// Bind the exact boundary partition without inventing a temperature seed.
+/// Steady coupling owns its physical initialization; storage owners separately
+/// validate their supplied candidate through bind and means.
+pub(crate) fn bind_traces(
+    cx: &Cx<'_>,
+    problem: ConductionProblem<'_>,
+    enclosure: &GrayDiffuseEnclosure,
+) -> Result<Vec<Patch>, ConductionError> {
+    enclosure.validate_for(problem.mesh)?;
     if enclosure.surfaces().is_empty() || enclosure.surfaces().len() > 64 {
         return Err(invalid("closed enclosure requires 1..=64 patches"));
     }
     let mut patches = Vec::with_capacity(enclosure.surfaces().len());
     for surface in enclosure.surfaces() {
         poll(cx, patches.len())?;
-        // Public trace query checks the exact mesh identity before slot access.
-        surface.mean_temperature(problem.mesh, temperature)?;
         let region = problem
             .boundary
             .region_names()
@@ -62,9 +77,12 @@ pub(crate) fn bind(
             ThermalBc::Robin {
                 htc: ScalarField::Uniform(htc),
                 t_ref: ScalarField::Uniform(reference),
-            } if htc > 0.0 => PatchLaw::Convection { htc, reference },
+            } if htc.is_finite() && htc > 0.0 => {
+                super::require_temperature(surface.name(), "original convective reference", reference)?;
+                PatchLaw::Convection { htc, reference }
+            },
             ThermalBc::Neumann { outward_flux: ScalarField::Uniform(outward_flux) } => {
-                PatchLaw::PrescribedFlux { outward_flux }
+                PatchLaw::PrescribedFlux { outward_flux: finite(outward_flux)? }
             }
             _ => {
                 return Err(invalid("enclosure requires uniform Robin or Neumann patches"));
@@ -85,7 +103,7 @@ pub(crate) fn bind(
                 .iter()
                 .any(|&slot| problem.boundary.region_for(slot) != Some(region))
         {
-            return Err(invalid("enclosure patch must exactly cover its named natural region"));
+            return Err(invalid("enclosure patch must exactly cover its named boundary region"));
         }
         patches.push(Patch { region, law });
     }

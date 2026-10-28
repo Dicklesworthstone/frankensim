@@ -1,9 +1,9 @@
 //! Complete steady FEM transpose for reflected gray-diffuse enclosure exchange.
 //!
-//! The original convection and uniform enclosure flux share one trace:
-//! h(T - T_c) + q = h(T - (T_c - q/h)). This algebraic reference is rebuilt
-//! at the unchanged accepted field. Its complete cross-patch derivative is
-//! composed with the production material/contact Jacobian, not frozen.
+//! Original Robin and Neumann patches retain their physical laws. Convection
+//! uses h(T - T_c) + q = h(T - (T_c - q/h)); prescribed-flux patches add q
+//! directly. The complete cross-patch derivative is composed with the same
+//! material/contact Jacobian at the unchanged accepted field.
 
 use std::collections::BTreeSet;
 
@@ -16,7 +16,7 @@ use super::{
 use crate::{
     ConductionError, ConductionProblem, LinearConfig, ScalarField, ThermalBc, ThermalBoundary,
     ThermalInterfaces,
-    adjoint::{RobinGradient, RobinResponse},
+    adjoint::{MeanFluxFeedback, RobinGradient, RobinResponse},
 };
 
 /// Discrete local derivatives through the complete reflected-radiation law.
@@ -44,7 +44,7 @@ fn invalid(what: impl Into<String>) -> ConductionError {
     radiation_error(
         "steady-enclosure-adjoint",
         what,
-        "retain the exact enclosure, original uniform positive convection, unchanged field, and explicit derivative budgets",
+        "retain the exact enclosure, original uniform convection or prescribed-flux laws, unchanged field, and explicit derivative budgets",
     )
 }
 
@@ -66,7 +66,8 @@ fn checked(value: f64) -> Result<f64, ConductionError> {
 /// Differentiate a retained steady field with state-independent convection.
 ///
 /// Every enclosure surface must exactly cover its same-named original
-/// uniform positive Robin region, and be included in regions. Other selected
+/// uniform Robin or Neumann region. Radiating Robin regions must be included
+/// in regions; Neumann patches are independent of those controls. Other selected
 /// regions provide independent convection controls. Unselected convection is
 /// fixed. The full smooth heterogeneous material and matching-contact tangent
 /// is retained; emissivity and view factors do not depend on temperature.
@@ -74,7 +75,9 @@ fn checked(value: f64) -> Result<f64, ConductionError> {
 /// Fresh radiosity must pass heat_tolerance_w and the unchanged field must
 /// pass the original linear residual tolerance. No replacement primal solve
 /// or derivative of the outer iteration is performed. Four nodal vectors per
-/// selected region must fit max_feedback_entries; at most 64 are admitted.
+/// selected Robin region must fit max_feedback_entries; a mixed-flux enclosure
+/// additionally needs two nodal factors per radiation patch. Each order admits
+/// at most 64 entries, including zero selected Robin controls.
 /// The result is a discrete local derivative, not an inverse certificate,
 /// continuum error bound, geometric derivative or uncertainty bound.
 #[allow(clippy::too_many_arguments)]
@@ -100,7 +103,7 @@ pub fn pullback_gray_diffuse_enclosure(
     )
 }
 
-/// Complete unchanged-field Robin representation of enclosure exchange.
+/// Complete unchanged-field boundary representation of enclosure exchange.
 ///
 /// This binding exposes the same physical Jacobian used by the full enclosure
 /// dual, so prescribed-temperature lifts and other operator consumers cannot
@@ -115,7 +118,8 @@ pub struct EnclosureRadiationLinearization {
     local_reference_slopes: Vec<f64>,
     feedback: Vec<f64>,
     physical: Vec<(f64, f64)>,
-    ports: Vec<usize>,
+    ports: Vec<Option<usize>>,
+    flux_feedback: Option<MeanFluxFeedback>,
     outward_flux: Vec<f64>,
     radiosity: EnclosureRadiosityLinearization,
     radiosity_iterations: usize,
@@ -125,7 +129,7 @@ pub struct EnclosureRadiationLinearization {
 }
 
 impl EnclosureRadiationLinearization {
-    /// Fresh combined numerical boundary: original h and T_c - q/h.
+    /// Fresh combined boundary: shifted Robin references or additive Neumann flux.
     pub fn boundary(&self) -> &ThermalBoundary { &self.boundary }
 
     /// Selected original Robin regions, in caller order.
@@ -138,10 +142,15 @@ impl EnclosureRadiationLinearization {
     /// Add this diagonal to reference_feedback, exactly as RobinResponse does.
     pub fn local_reference_slopes(&self) -> &[f64] { &self.local_reference_slopes }
 
-    /// Complete row-major dT_c_i/dmean_j - (dq_i/dmean_j)/h_i.
-    /// It includes the incoming air-reference diagonal and all reflected
-    /// cross-patch derivatives; local_reference_slopes supplies the h term.
+    /// Row-major dT_c_i/dmean_j - (dq_i/dmean_j)/h_i between Robin controls.
+    /// Incoming air-reference diagonals remain included. Reflected terms
+    /// involving a Neumann patch are supplied by flux_feedback; the local
+    /// reference slopes supply the h-dependent correction.
     pub fn reference_feedback(&self) -> &[f64] { &self.feedback }
+
+    /// Additional reflected-flux tangent involving prescribed-flux patches.
+    /// These factors are independent of actual convective control ports.
+    pub fn flux_feedback(&self) -> Option<&MeanFluxFeedback> { self.flux_feedback.as_ref() }
 
     /// Total Krylov iterations for all patch-flux transpose rows in this binding.
     pub fn radiosity_iterations(&self) -> usize { self.radiosity_iterations }
@@ -172,7 +181,7 @@ impl EnclosureRadiationLinearization {
         let n = problem.mesh.vertex_count();
         let m = regions.len();
         let p = enclosure.surfaces().len();
-        if !(2..=64).contains(&p) || m > 64 || p > m
+        if !(2..=64).contains(&p) || m > 64
             || n.checked_mul(4).and_then(|v| v.checked_mul(m))
                 .is_none_or(|v| v > max_feedback_entries)
         {
@@ -229,17 +238,28 @@ impl EnclosureRadiationLinearization {
             if surface.mesh_identity != mesh_identity {
                 return Err(invalid("enclosure surface belongs to a different exact mesh"));
             }
-            let port = regions.iter().position(|&name| name == surface.name())
-                .ok_or_else(|| invalid("every enclosure patch needs one selected same-named convection region"))?;
-            let region = selected[port];
+            let region = problem.boundary.region_names().iter()
+                .position(|name| name == surface.name())
+                .ok_or_else(|| invalid("enclosure patch has no same-named original boundary"))?;
+            let port = match problem.boundary.conditions()[region] {
+                ThermalBc::Robin {
+                    htc: ScalarField::Uniform(_), t_ref: ScalarField::Uniform(_),
+                } => Some(regions.iter().position(|&name| name == surface.name())
+                    .ok_or_else(|| invalid("each radiating Robin patch needs its original selected control"))?),
+                ThermalBc::Neumann { outward_flux: ScalarField::Uniform(flux) } => {
+                    checked(flux)?;
+                    None
+                }
+                _ => return Err(invalid("enclosure derivatives require uniform Robin or prescribed-flux patches")),
+            };
             if counts[region] != surface.face_slots().len() {
-                return Err(invalid("enclosure surface must exactly cover its convection region"));
+                return Err(invalid("enclosure surface must exactly cover its original boundary region"));
             }
             let mut integral = 0.0;
             for (i, &slot) in surface.face_slots().iter().enumerate() {
                 if i % 256 == 0 { poll(cx, i)?; }
                 if problem.boundary.region_for(slot) != Some(region) {
-                    return Err(invalid("enclosure surface must exactly cover its convection region"));
+                    return Err(invalid("enclosure surface must exactly cover its original boundary region"));
                 }
                 let face = &problem.mesh.boundary()[slot];
                 let mut sum = 0.0;
@@ -265,15 +285,24 @@ impl EnclosureRadiationLinearization {
         let mut feedback = reference_feedback.to_vec();
         let mut local_reference_slopes = vec![0.0; m];
         let mut replacements = Vec::with_capacity(p);
+        let mut neumann_additions = Vec::with_capacity(p);
+        let mut flux_derivatives = vec![0.0; p * p];
         let mut radiosity_iterations = 0usize;
         let mut radiosity_relative_residual = 0.0_f64;
         for (i, &port) in ports.iter().enumerate() {
             poll(cx, i)?;
-            let (h, reference) = physical[port];
             let flux = checked(fresh.net_outward_flux_w_m2[i])?;
-            replacements.push((selected[port], h, checked(reference - flux / h)?));
-            local_reference_slopes[port] =
-                checked((flux / h) * (convective_mean_slopes_w_m2_k2[port] / h))?;
+            if let Some(port) = port {
+                let (h, reference) = physical[port];
+                replacements.push((selected[port], h, checked(reference - flux / h)?));
+                local_reference_slopes[port] =
+                    checked((flux / h) * (convective_mean_slopes_w_m2_k2[port] / h))?;
+            } else {
+                let region = problem.boundary.region_names().iter()
+                    .position(|name| name == enclosure.surfaces()[i].name())
+                    .ok_or_else(|| invalid("enclosure prescribed-flux region disappeared"))?;
+                neumann_additions.push((region, flux));
+            }
 
             // A flux-basis pullback supplies row i of the full nonlocal
             // patch Jacobian through the shared radiosity transpose owner.
@@ -285,11 +314,29 @@ impl EnclosureRadiationLinearization {
             radiosity_relative_residual =
                 radiosity_relative_residual.max(checked(partials.relative_residual)?);
             for (j, &other) in ports.iter().enumerate() {
-                feedback[port * m + other] =
-                    checked(feedback[port * m + other] - partials.temperatures[j] / h)?;
+                if let (Some(port), Some(other)) = (port, other) {
+                    feedback[port * m + other] = checked(
+                        feedback[port * m + other] - partials.temperatures[j] / physical[port].0,
+                    )?;
+                } else {
+                    // No physical convection coefficient exists on a flux
+                    // patch. Compose its remaining G*dq/dmean*W directly.
+                    flux_derivatives[i * p + j] = checked(partials.temperatures[j])?;
+                }
             }
         }
-        let boundary = problem.boundary.with_uniform_robin_replacements(&replacements)?;
+        let boundary = problem.boundary.with_uniform_robin_replacements(&replacements)?
+            .with_uniform_neumann_additions(&neumann_additions)?;
+        let flux_feedback = if ports.iter().any(Option::is_none) {
+            let robin_entries = n.checked_mul(m).and_then(|v| v.checked_mul(4))
+                .ok_or_else(|| invalid("enclosure Robin factor allowance overflow"))?;
+            let remaining = max_feedback_entries.checked_sub(robin_entries)
+                .ok_or_else(|| invalid("enclosure Robin factors exhaust the feedback allowance"))?;
+            let names: Vec<_> = enclosure.surfaces().iter().map(|surface| surface.name()).collect();
+            Some(MeanFluxFeedback::new(
+                cx, problem.mesh, problem.boundary, &names, &flux_derivatives, remaining,
+            )?)
+        } else { None };
         poll(cx, 0)?;
         Ok(Self {
             vertex_count: n,
@@ -300,6 +347,7 @@ impl EnclosureRadiationLinearization {
             feedback,
             physical,
             ports,
+            flux_feedback,
             outward_flux: fresh.net_outward_flux_w_m2,
             radiosity,
             radiosity_iterations,
@@ -341,14 +389,21 @@ impl EnclosureRadiationLinearization {
         }
         // Restore physical convection controls before returning. The mean
         // feedback is already in the dual and must not be applied a second time.
+        let direct_flux = self.flux_feedback.as_ref()
+            .map(|feedback| feedback.flux_pullback(cx, &convection.nodal_load)).transpose()?;
         let mut flux_weights = vec![0.0; self.ports.len()];
         for (i, &port) in self.ports.iter().enumerate() {
             poll(cx, i)?;
-            let h = self.physical[port].0;
-            let flux = self.outward_flux[i];
-            flux_weights[i] = checked(-convection.references[port] / h)?;
-            convection.log_htc[port] =
-                checked(convection.log_htc[port] + convection.references[port] * (flux / h))?;
+            if let Some(port) = port {
+                let h = self.physical[port].0;
+                let flux = self.outward_flux[i];
+                flux_weights[i] = checked(-convection.references[port] / h)?;
+                convection.log_htc[port] =
+                    checked(convection.log_htc[port] + convection.references[port] * (flux / h))?;
+            } else {
+                flux_weights[i] = checked(-direct_flux.as_ref()
+                    .ok_or_else(|| invalid("prescribed-flux control lost its trace factors"))?[i])?;
+            }
         }
         let radiation = self.radiosity.pullback(
             cx, &flux_weights, linear.tolerance, linear.max_iterations,
@@ -407,10 +462,10 @@ impl EnclosureRadiationGradient {
             reference_feedback, enclosure, heat_tolerance_w, max_feedback_entries,
         )?;
         let combined_problem = ConductionProblem { boundary: bound.boundary(), ..problem };
-        let convection = RobinResponse::pullback_mean_robin_with_reference_feedback(
+        let convection = RobinResponse::pullback_mean_robin_with_reference_and_flux_feedback(
             cx, combined_problem, interfaces, linear, temperature, regions,
             bound.convective_mean_slopes(), bound.local_reference_slopes(),
-            bound.reference_feedback(), nodal_weights, max_feedback_entries,
+            bound.reference_feedback(), bound.flux_feedback(), nodal_weights, max_feedback_entries,
         )?;
 
         bound.remap_gradient(cx, convection, linear)
