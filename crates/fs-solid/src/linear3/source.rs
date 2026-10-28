@@ -12,7 +12,7 @@ mod stiffness;
 pub use expansion::{ThermalExpansionModel, ThermalExpansionSource};
 pub use quadratic_thermal::{
     NodalThermalTemperatures, QuadraticThermalSource, QuadraticThermalSources,
-    ResolvedQuadraticThermalStrains,
+    QuadraticThermoelasticSource, QuadraticThermoelasticSources, ResolvedQuadraticThermalStrains,
 };
 pub use stiffness::{SolidStiffnessModel, ThermalStiffnessModel};
 

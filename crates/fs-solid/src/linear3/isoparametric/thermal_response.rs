@@ -211,6 +211,7 @@ pub(in crate::linear3) fn solve<const N: usize, const D: usize, R: Copy>(
             nodes_m,
             elements,
             materials,
+            Some(thermal),
             fixed_dofs,
             budget,
             stiffness_rule,
@@ -284,6 +285,7 @@ pub(in crate::linear3) fn solve<const N: usize, const D: usize, R: Copy>(
         for (point, &(reference, weight)) in stiffness_rule.iter().enumerate() {
             cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
             let p = evaluate(nodes, reference, element, point)?;
+            let material = thermal.material_at(material, element, point)?;
             let b = mandel_b::<N, D>(p.gradients);
             let (elastic, stress) = elastic_response_at(
                 &b,

@@ -22,6 +22,7 @@ pub(super) fn assemble<const N: usize, const D: usize, R: Copy>(
     nodes_m: &[[f64; 3]],
     elements: &[[usize; N]],
     materials: TetMaterialField<'_>,
+    material_samples: Option<QuadraticThermalStrainField<'_>>,
     fixed_dofs: &[usize],
     budget: TetAssemblyBudget,
     stiffness_rule: &[(R, f64)],
@@ -31,6 +32,9 @@ pub(super) fn assemble<const N: usize, const D: usize, R: Copy>(
 ) -> Result<TetElasticAssembly, TetElasticError> {
     debug_assert_eq!(D, 3 * N);
     cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+    if let Some(field) = material_samples {
+        field.validate(elements.len(), stiffness_rule.len())?;
+    }
     let (free_dofs, reduced) = free_dof_map(nodes_m.len(), fixed_dofs, budget.maximum_free_dofs)?;
     let n = free_dofs.len();
     let mut stiffness = Coo::new(n, n);
@@ -49,12 +53,16 @@ pub(super) fn assemble<const N: usize, const D: usize, R: Copy>(
             cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
             let p = evaluate(nodes, reference, element, point)?;
             minimum_scaled_jacobian = minimum_scaled_jacobian.min(p.scaled_jacobian);
+            let stiffness_material = match &material_samples {
+                Some(field) => field.material_at(material, element, point)?,
+                None => material,
+            };
             let b = mandel_b::<N, D>(p.gradients);
             let mut cb = [[0.0; D]; 6];
             for i in 0..6 {
                 for j in 0..D {
                     for k in 0..6 {
-                        cb[i][j] += material.stiffness_mandel_pa[i][k] * b[k][j];
+                        cb[i][j] += stiffness_material.stiffness_mandel_pa[i][k] * b[k][j];
                     }
                 }
             }
@@ -161,8 +169,8 @@ pub(super) fn mandel_b<const N: usize, const D: usize>(gradients: [[f64; 3]; N])
 
 /// The same reference geometry and Mandel weak form as elastic assembly:
 /// `f_th = integral B^T C epsilon_free dV`, hence `K u = f_ext + f_th`.
-/// Material is constant per element; integrated eigenstrain can vary over the
-/// stiffness quadrature. Full rows
+/// The reference mass is constant per element. Local stiffness and integrated
+/// eigenstrain may both vary over the SAME stiffness quadrature. Full rows
 /// include constrained DOFs so downstream support reactions are not discarded.
 pub(super) fn thermal_load<const N: usize, const D: usize, R: Copy>(
     nodes_m: &[[f64; 3]],
@@ -212,7 +220,8 @@ pub(super) fn thermal_load<const N: usize, const D: usize, R: Copy>(
     }
     for (element, connectivity) in elements.iter().enumerate() {
         cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
-        let material = materials.at(element);
+        let reference_material = materials.at(element);
+        let material = thermal_strains.material_at(reference_material, element, 0)?;
         let thermal = thermal_strains.at(element, 0);
         if thermal.elastic_material_state_identity != material.material_state_identity {
             return Err(TetElasticError::ThermalElasticStateMismatch { element });
@@ -249,10 +258,18 @@ pub(super) fn thermal_load<const N: usize, const D: usize, R: Copy>(
             cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
             if !thermal_strains.is_elementwise() {
                 let sample = thermal_strains.at(element, point);
+                let material = thermal_strains.material_at(reference_material, element, point)?;
                 if sample.elastic_material_state_identity != material.material_state_identity {
                     return Err(TetElasticError::ThermalElasticStateMismatch { element });
                 }
                 identity.update(sample.identity.as_bytes());
+                if thermal_strains.has_local_materials() {
+                    identity.update(b"quadrature-thermomechanical-material-v1");
+                    identity.update(&material.material_state_identity);
+                    for coefficient in material.stiffness_mandel_pa.iter().flatten() {
+                        identity.update(&coefficient.to_bits().to_le_bytes());
+                    }
+                }
                 free_stress.fill(0.0);
                 for (row, stress) in free_stress.iter_mut().enumerate() {
                     for column in 0..6 {

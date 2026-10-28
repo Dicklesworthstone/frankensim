@@ -4,14 +4,19 @@
 //! each native stiffness point. Interpolating nodal eigenstrains instead gives
 //! a different constitutive model whenever alpha depends on temperature.
 
-use super::{SolidMaterialError, ThermalExpansionModel, ThermalExpansionSource};
+use super::{
+    SolidMaterialError, ThermalExpansionModel, ThermalExpansionSource, ThermalStiffnessModel,
+};
 use crate::linear3::{
-    QuadraticThermalStrainField, TetElasticError, TetMaterialField, TetThermalStrainState,
+    QuadraticThermalStrainField, TetElasticError, TetElasticMaterial, TetMaterialField,
+    TetThermalStrainState,
 };
 use fs_blake3::ContentHash;
 use fs_exec::Cx;
 use fs_matdb::{MaterialCard, QueryPoint};
-use fs_material::state_point::{MaterialPropertySelection, ResolvedMaterialStatePoint};
+use fs_material::state_point::{
+    DENSITY_PROPERTY, MaterialPropertySelection, ResolvedMaterialStatePoint,
+};
 
 /// Absolute nodal temperatures [K], in the structural mesh's node order.
 ///
@@ -55,17 +60,93 @@ impl QuadraticThermalSources<'_> {
     }
 }
 
+/// Local elastic and expansion sources for one original reference element.
+/// Both resolved references must belong to the same card and physical context.
+/// Current density is deliberately not queried: the original problem owns mass.
+#[derive(Clone, Copy, Debug)]
+pub struct QuadraticThermoelasticSource<'a> {
+    pub expansion: QuadraticThermalSource<'a>,
+    pub reference_elastic: &'a ResolvedMaterialStatePoint,
+    pub stiffness_model: ThermalStiffnessModel,
+}
+
+/// Source-backed elasticity and expansion assignments in element order.
+#[derive(Clone, Copy, Debug)]
+pub enum QuadraticThermoelasticSources<'a> {
+    Uniform(&'a QuadraticThermoelasticSource<'a>),
+    PerElement(&'a [QuadraticThermoelasticSource<'a>]),
+}
+
+impl QuadraticThermoelasticSources<'_> {
+    fn at(&self, element: usize) -> &QuadraticThermoelasticSource<'_> {
+        match self {
+            Self::Uniform(source) => source,
+            Self::PerElement(sources) => &sources[element],
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum SourceFields<'a> {
+    Expansion(QuadraticThermalSources<'a>),
+    Thermoelastic(QuadraticThermoelasticSources<'a>),
+}
+impl<'a> From<QuadraticThermalSources<'a>> for SourceFields<'a> {
+    fn from(sources: QuadraticThermalSources<'a>) -> Self {
+        Self::Expansion(sources)
+    }
+}
+impl<'a> From<QuadraticThermoelasticSources<'a>> for SourceFields<'a> {
+    fn from(sources: QuadraticThermoelasticSources<'a>) -> Self {
+        Self::Thermoelastic(sources)
+    }
+}
+impl SourceFields<'_> {
+    fn thermal(&self, element: usize) -> &QuadraticThermalSource<'_> {
+        match self {
+            Self::Expansion(sources) => sources.at(element),
+            Self::Thermoelastic(sources) => &sources.at(element).expansion,
+        }
+    }
+    fn elasticity(&self, element: usize) -> Option<&QuadraticThermoelasticSource<'_>> {
+        match self {
+            Self::Expansion(_) => None,
+            Self::Thermoelastic(sources) => Some(sources.at(element)),
+        }
+    }
+    fn has_elasticity(&self) -> bool {
+        matches!(self, Self::Thermoelastic(_))
+    }
+    fn validate(&self, elements: usize) -> Result<(), SolidMaterialError> {
+        let count = match self {
+            Self::Expansion(QuadraticThermalSources::PerElement(sources)) => Some(sources.len()),
+            Self::Thermoelastic(QuadraticThermoelasticSources::PerElement(sources)) => {
+                Some(sources.len())
+            }
+            _ => None,
+        };
+        if count.is_some_and(|count| count != elements) {
+            return Err(invalid("one constitutive source per element required"));
+        }
+        Ok(())
+    }
+}
+
 /// Owned source receipts and native eigenstrains in stiffness-quadrature order.
 ///
 /// A borrow converts directly into the existing load, equilibrium and vibration
 /// tangent APIs. Re-resolve after changing temperature, quadrature, element
 /// order, geometry, material identity or material axes. Reference mass and the
-/// supplied elastic tensors are untouched. This is prescribed-temperature
-/// loading, not heat transport or reciprocal thermoelastic heat feedback.
+/// supplied elastic tensors are untouched by the expansion-only path. The
+/// opt-in thermoelastic path carries its actual local C(T) alongside eigenstrain.
+/// Both are prescribed-temperature loading, not heat transport, a coupled dC/dT
+/// tangent, or reciprocal thermoelastic heat feedback.
 #[derive(Clone, Debug)]
 pub struct ResolvedQuadraticThermalStrains {
     sources: Vec<ThermalExpansionSource>,
     strains: Vec<TetThermalStrainState>,
+    elastic_materials: Option<Vec<TetElasticMaterial>>,
+    elastic_sources: Option<Vec<ResolvedMaterialStatePoint>>,
     points_per_element: usize,
 }
 
@@ -81,6 +162,18 @@ impl ResolvedQuadraticThermalStrains {
         &self.strains
     }
 
+    /// Local C(T) with conserved reference density, present only for opt-in coupling.
+    #[must_use]
+    pub fn elastic_materials(&self) -> Option<&[TetElasticMaterial]> {
+        self.elastic_materials.as_deref()
+    }
+
+    /// Original pinned current stiffness receipts, in the same point order.
+    #[must_use]
+    pub fn elastic_sources(&self) -> Option<&[ResolvedMaterialStatePoint]> {
+        self.elastic_sources.as_deref()
+    }
+
     #[must_use]
     pub const fn points_per_element(&self) -> usize {
         self.points_per_element
@@ -88,9 +181,16 @@ impl ResolvedQuadraticThermalStrains {
 
     #[must_use]
     pub fn field(&self) -> QuadraticThermalStrainField<'_> {
-        QuadraticThermalStrainField::AtQuadrature {
-            states: &self.strains,
-            points_per_element: self.points_per_element,
+        match &self.elastic_materials {
+            Some(materials) => QuadraticThermalStrainField::ThermomechanicalAtQuadrature {
+                states: &self.strains,
+                materials,
+                points_per_element: self.points_per_element,
+            },
+            None => QuadraticThermalStrainField::AtQuadrature {
+                states: &self.strains,
+                points_per_element: self.points_per_element,
+            },
         }
     }
 }
@@ -134,7 +234,7 @@ pub(crate) fn resolve<const N: usize, const D: usize>(
     elements: &[[usize; N]],
     materials: TetMaterialField<'_>,
     temperatures: NodalThermalTemperatures<'_>,
-    bindings: QuadraticThermalSources<'_>,
+    bindings: SourceFields<'_>,
     quadrature: &[([f64; D], f64)],
     mesh_frame: ContentHash,
     strain_limit: f64,
@@ -149,11 +249,7 @@ pub(crate) fn resolve<const N: usize, const D: usize>(
             "one reference and current temperature per structural node required",
         ));
     }
-    if let QuadraticThermalSources::PerElement(sources) = bindings
-        && sources.len() != elements.len()
-    {
-        return Err(invalid("one expansion source per element required"));
-    }
+    bindings.validate(elements.len())?;
     if mesh_frame == ContentHash([0; 32])
         || !strain_limit.is_finite()
         || strain_limit <= 0.0
@@ -184,9 +280,13 @@ pub(crate) fn resolve<const N: usize, const D: usize>(
         .ok_or(TetElasticError::SizeOverflow)?;
     let mut sources: Vec<ThermalExpansionSource> = Vec::with_capacity(count);
     let mut strains = Vec::with_capacity(count);
+    let mut elastic_materials: Option<Vec<TetElasticMaterial>> =
+        bindings.has_elasticity().then(|| Vec::with_capacity(count));
+    let mut elastic_sources: Option<Vec<ResolvedMaterialStatePoint>> =
+        bindings.has_elasticity().then(|| Vec::with_capacity(count));
     for (element, connectivity) in elements.iter().enumerate() {
         checkpoint(cx)?;
-        let binding = bindings.at(element);
+        let binding = bindings.thermal(element);
         if binding.reference_expansion.card_identity() != binding.card.content_hash() {
             return Err(invalid(
                 "expansion reference must belong to the original material card",
@@ -208,6 +308,32 @@ pub(crate) fn resolve<const N: usize, const D: usize>(
                 .collect(),
         );
         let template = binding.reference_expansion.query();
+        let elastic_binding = if let Some(source) = bindings.elasticity(element) {
+            if source.reference_elastic.card_identity() != binding.card.content_hash()
+                || source.reference_elastic.query() != template
+            {
+                return Err(invalid(
+                    "elastic and expansion references must share the original card and physical context",
+                ));
+            }
+            let selection = MaterialPropertySelection::PinnedByProperty(
+                source
+                    .reference_elastic
+                    .properties()
+                    .iter()
+                    .filter(|property| property.requirement().name() != DENSITY_PROPERTY)
+                    .map(|property| {
+                        (
+                            property.requirement().name().to_owned(),
+                            property.answer().receipt.selected,
+                        )
+                    })
+                    .collect(),
+            );
+            Some((source, selection))
+        } else {
+            None
+        };
         let reference_anchor = temperatures.reference_k[connectivity[0]];
         let current_anchor = temperatures.current_k[connectivity[0]];
         let uniform = connectivity.iter().all(|&node| {
@@ -219,9 +345,15 @@ pub(crate) fn resolve<const N: usize, const D: usize>(
         for (index, &(coordinate, _)) in quadrature.iter().enumerate() {
             checkpoint(cx)?;
             let shapes = point(nodes, coordinate, element, index)?;
-            let source = if uniform && index != 0 {
-                // The common constant-field path resolves its law only once.
-                sources[start].clone()
+            let (source, current_material, current_elastic) = if uniform && index != 0 {
+                // The common constant-field path resolves each law only once.
+                (
+                    sources[start].clone(),
+                    elastic_materials
+                        .as_ref()
+                        .map(|values| values[start].clone()),
+                    elastic_sources.as_ref().map(|values| values[start].clone()),
+                )
             } else {
                 // Anchoring removes a rounded partition-of-unity residual
                 // times the absolute temperature and preserves uniform bits.
@@ -237,24 +369,52 @@ pub(crate) fn resolve<const N: usize, const D: usize>(
                 // nonphysical/source-domain overshoot; never clamp or average it.
                 let reference = temperature_point(&template, reference_k)?;
                 let current = temperature_point(&template, current_k)?;
-                binding.model.resolve(
+                let (current_material, current_elastic) =
+                    if let Some((source, selection)) = &elastic_binding {
+                        let elastic = source.stiffness_model.resolve(
+                            binding.card,
+                            &current,
+                            selection.clone(),
+                        )?;
+                        let material = source.stiffness_model.material(
+                            &elastic,
+                            materials.at(element).density_kg_m3,
+                            elastic.identity(),
+                            strain_limit,
+                        )?;
+                        (Some(material), Some(elastic))
+                    } else {
+                        (None, None)
+                    };
+                let source = binding.model.resolve(
                     binding.card,
                     &reference,
                     &current,
                     selection.clone(),
-                    materials.at(element),
+                    current_material
+                        .as_ref()
+                        .unwrap_or_else(|| materials.at(element)),
                     mesh_frame,
                     strain_limit,
-                )?
+                )?;
+                (source, current_material, current_elastic)
             };
             strains.push(*source.thermal_strain());
             sources.push(source);
+            if let (Some(output), Some(material)) = (&mut elastic_materials, current_material) {
+                output.push(material);
+            }
+            if let (Some(output), Some(elastic)) = (&mut elastic_sources, current_elastic) {
+                output.push(elastic);
+            }
         }
     }
     checkpoint(cx)?;
     Ok(ResolvedQuadraticThermalStrains {
         sources,
         strains,
+        elastic_materials,
+        elastic_sources,
         points_per_element: quadrature.len(),
     })
 }

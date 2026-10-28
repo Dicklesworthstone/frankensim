@@ -107,6 +107,7 @@ pub(in crate::linear3) fn assemble<const N: usize, const D: usize, R: Copy>(
         for (point, &(reference, weight)) in stiffness_rule.iter().enumerate() {
             checkpoint(cx)?;
             let p = evaluate(nodes, reference, element, point)?;
+            let material = thermal.material_at(material, element, point)?;
             let b = mandel_b::<N, D>(p.gradients);
             let (_, stress) = elastic_response_at(
                 &b,

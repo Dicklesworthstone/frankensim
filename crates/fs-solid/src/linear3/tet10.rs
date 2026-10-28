@@ -276,6 +276,35 @@ impl QuadraticTetProblem<'_> {
         cx: &Cx<'_>,
     ) -> Result<super::source::ResolvedQuadraticThermalStrains, super::source::SolidMaterialError>
     {
+        self.resolve_nodal_constitutive(temperatures, sources.into(), mesh_frame, strain_limit, cx)
+    }
+
+    /// Resolve actual local source-backed C(T) and integrated thermal expansion
+    /// together at the native stiffness points. The original reference density
+    /// stays fixed; current density is never queried. The returned coupled field
+    /// drives the same stiffness, load, stress and prestress owners without
+    /// material queries inside their numerical integration loops.
+    pub fn resolve_nodal_thermoelasticity(
+        &self,
+        temperatures: super::source::NodalThermalTemperatures<'_>,
+        sources: super::source::QuadraticThermoelasticSources<'_>,
+        mesh_frame: fs_blake3::ContentHash,
+        strain_limit: f64,
+        cx: &Cx<'_>,
+    ) -> Result<super::source::ResolvedQuadraticThermalStrains, super::source::SolidMaterialError>
+    {
+        self.resolve_nodal_constitutive(temperatures, sources.into(), mesh_frame, strain_limit, cx)
+    }
+
+    fn resolve_nodal_constitutive(
+        &self,
+        temperatures: super::source::NodalThermalTemperatures<'_>,
+        sources: super::source::quadratic_thermal::SourceFields<'_>,
+        mesh_frame: fs_blake3::ContentHash,
+        strain_limit: f64,
+        cx: &Cx<'_>,
+    ) -> Result<super::source::ResolvedQuadraticThermalStrains, super::source::SolidMaterialError>
+    {
         self.validate(false, cx)?;
         super::source::quadratic_thermal::resolve(
             self.nodes_m,
@@ -303,6 +332,25 @@ impl QuadraticTetProblem<'_> {
     /// Assemble into the same `(K,M)` type as P1. Each element and each
     /// quadrature point is a cancellation boundary. No partial result escapes.
     pub fn assemble(&self, cx: &Cx<'_>) -> Result<TetElasticAssembly, TetElasticError> {
+        self.assemble_with_thermal_materials(None, cx)
+    }
+
+    /// Assemble the actual temperature-frozen stiffness and ORIGINAL reference
+    /// mass for a coupled quadrature field. This is the same operator used by
+    /// thermal equilibrium and the elastic part of the prestressed pencil.
+    pub fn assemble_thermoelastic<'t>(
+        &self,
+        field: impl Into<QuadraticThermalStrainField<'t>>,
+        cx: &Cx<'_>,
+    ) -> Result<TetElasticAssembly, TetElasticError> {
+        self.assemble_with_thermal_materials(Some(field.into()), cx)
+    }
+
+    fn assemble_with_thermal_materials(
+        &self,
+        material_samples: Option<QuadraticThermalStrainField<'_>>,
+        cx: &Cx<'_>,
+    ) -> Result<TetElasticAssembly, TetElasticError> {
         self.validate(true, cx)?;
         let kq = duffy_quadrature(self.quadrature.stiffness_points_per_dir);
         let mq = duffy_quadrature(self.quadrature.mass_points_per_dir);
@@ -310,6 +358,7 @@ impl QuadraticTetProblem<'_> {
             self.nodes_m,
             self.elements,
             self.materials,
+            material_samples,
             self.fixed_dofs,
             self.budget,
             &kq,
@@ -523,7 +572,7 @@ impl QuadraticTetProblem<'_> {
             maximum_absolute_mandel_strain,
             cx,
         )?;
-        let pencil = self.assemble(cx)?;
+        let pencil = self.assemble_with_thermal_materials(Some(thermal_strains), cx)?;
         super::isoparametric::thermal_response::prestress::assemble::<10, 30, _>(
             self.nodes_m,
             self.elements,

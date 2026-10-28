@@ -150,6 +150,31 @@ integration with a nonuniform stress-free reference, real gradient bending and
 joint geometry/material-frame rotation, exact constant-field load equivalence,
 source/count/domain refusal and positive-nodal temperature overshoot.
 
+`resolve_nodal_thermoelasticity` explicitly couples source-resolved local
+elasticity to the same nodal-temperature bridge. `QuadraticThermoelasticSource`
+binds the original elastic and expansion references to one card and physical
+context, with independent declared tensor symmetries and orientations. Pinned
+current elastic properties are resolved before assembly; current density is
+never queried. Uniform element temperatures resolve each source law once.
+`ThermomechanicalAtQuadrature` carries matching local materials and integrated
+eigenstrains at the native stiffness points. The exact local C(T) enters the
+actual displacement stiffness, thermal load, recovered stress/energy and signed
+initial-stress stiffness. `assemble_thermoelastic` exposes that same stiffness
+and original consistent mass. Every local density must equal the original
+element density; heating cannot redefine the reference inventory. Local sample
+counts, material/strain identity and source support are checked, and the existing
+load identity includes every local tensor's identity and coefficient bits.
+Legacy elementwise and strain-only field paths retain their previous behavior.
+
+This is the mechanical tangent at prescribed, frozen temperature, not a
+coupled temperature derivative, transient thermoelastic feedback or a caloric
+energy closure. Source and quadrature validity remain explicit: variable C(T)
+and prestress can require a higher integration rule. The independent polynomial
+oracles in `tests/quadratic_thermoelastic_material.rs` check stiffness, thermal
+work, stored energy, signed prestress, compatible thermal bending and unchanged
+mass on all three quadratic families. They also check a stiffness-domain exit
+despite admitted expansion data and late local material/count/density refusals.
+
 The same TET10/HEX20/HEX27 problems expose `solve_thermal_response` for source-bound
 thermal equilibrium on a frozen reference mesh. The existing `fs-solver::CgState`
 and Jacobi preconditioner solve the assembled stiffness with bounded
