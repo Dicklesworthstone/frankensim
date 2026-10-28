@@ -3833,3 +3833,32 @@ model-versus-measured cycle-work discrepancy remain explicit in the seed catalog
 Focused G0/G1/G3 tests cover analytic creep/recovery, independent work/heat
 quadrature, subdivision, source transport, mixed controls, identity and atomic
 refusals; the existing strain-ramp energy regressions remain applicable.
+
+## Prepared thermal transport over source temperature paths
+
+`thermal::transport::PreparedThermalTransport` binds density, caller-selected
+specific heat and directional scalar conductivity from one immutable material
+card to a positive, explicitly typed absolute-temperature interval. Independent
+claim selections and every fixed non-temperature condition remain explicit.
+Canonical `ClaimSet::query_line_typed` supplies complete support and original
+source knots/receipts; the prepared union grid never smooths across a breakpoint
+or silently changes the source model. The union is bounded by three canonical
+line budgets. Every selected source explicitly bounds temperature; value-axis
+dimensions must match the typed temperature or typed fixed static coordinates.
+Second source temperatures and nonzero frequency/rate coordinates refuse.
+
+Runtime evaluation uses one binary search, no allocation, no hashing and no
+database query. It interpolates rho, c and k separately before computing rho*c,
+k/(rho*c) and sqrt(k)*sqrt(rho*c). The latter avoids unnecessary intermediate
+product overflow. Preparation validates source support and knot values;
+unrepresentable interior results still refuse without publishing a sample or
+mutating the model. Splitting source segments on the union grid can change
+roundoff relative to a direct query, not the underlying piecewise-affine law.
+
+The identity binds the original card and ordered source receipts, including fixed
+conditions and selection. Original uncertainty remains on the retained answers;
+derived values do not acquire an invented measured claim or uncertainty bound.
+No isotropy, Cp/Cv conversion, caloric integration, phase change, evolving
+moisture, covariance or coupled mechanics is inferred. Re-prepare after changing
+the card, fixed conditions or selected claims. Focused integration tests cover
+numerical evaluation, source selection, typed refusal and the real NASA 316 pack.

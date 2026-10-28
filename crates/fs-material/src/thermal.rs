@@ -8,6 +8,8 @@
 pub mod source;
 /// Ordered two-surface thermal conditions shared by interface physics.
 pub mod interface;
+/// Prepared source-bound density, heat capacity and directional heat transport.
+pub mod transport;
 /// Original caloric charts restricted to their actual all-solid phase interval.
 pub mod solid;
 pub use solid::PureSolidThermalLaw;

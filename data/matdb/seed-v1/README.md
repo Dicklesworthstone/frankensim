@@ -3665,3 +3665,60 @@ automatically all dissipative heat. The source measurements remain discrete
 authored limits, per-step work/storage/dissipation and deterministic identities.
 It admits at most 64 axes and 256 steps and validates the complete history before
 printing a successful result; a late failure emits no partial history.
+
+## Temperature response, engineered panels and solder extension (2026-10-28)
+
+This extension adds 13 source profiles with 119 claims: 77 panel declarations,
+31 solder observations/reference values, nine polymer thermal curves and two
+nominal-source-density metadata labels. It uses the existing compiler, claim
+selection, typed quantities and continuous-support evaluator.
+
+| Profile | Added usable response |
+| --- | --- |
+| [WISA spruce plywood, 18 mm / 7 plies](wisa-spruce-plywood-18mm-upm001-2026/manifest.tsv) | Directional bending and axial stiffness/strength, density, conductivity and vapor resistance |
+| [STEICO LVL R, 39 mm / 13 plies](steico-lvl-r-39mm-design-guide-2026/manifest.tsv) | Longitudinal veneer construction, distinct edgewise/flatwise mechanics and directional moisture response |
+| [STEICO LVL X, 39 mm / 13 plies](steico-lvl-x-39mm-design-guide-2026/manifest.tsv) | Three cross layers, both face-grain directions, bending/shear response and dimensional change |
+| [SAC305 tensile creep](solder-sac305-tensile-creep-hsu2013/manifest.tsv), [shear creep](solder-sac305-shear-creep-hsu2013/manifest.tsv) | Sixteen exact specimen/stress/load/temperature observations, kept discrete |
+| [Au80Sn20](solder-au80sn20-indium-ribbon-r9/manifest.tsv), [Au88Ge12](solder-au88ge12-indium-ribbon-r9/manifest.tsv), [In97Ag3](solder-in97ag3-indium-ribbon-r9/manifest.tsv) | Revision R9 solidus/liquidus, density, strength and conductivity at 358.15 K |
+| [Nylon](polyamide-nylon-nist-thermal-reference/manifest.tsv), [Kapton](polyimide-kapton-nist-thermal-reference/manifest.tsv) | NIST conductivity and specific-heat reference curves, 4–300 K |
+| [PET/Mylar reference](pet-mylar-nist-thermal-reference/manifest.tsv) | NIST conductivity, 2–80 K; no heat capacity or room-temperature extrapolation |
+| [Helium-filled polyurethane](polyurethane-helium-49p02-nist-thermal-reference/manifest.tsv) | Conductivity 30–300 K and specific heat 23–300 K; nominal source density 49.02 kg/m³ |
+| [Polystyrene foam](polystyrene-99p96-nist-thermal-reference/manifest.tsv) | Conductivity 4–300 K and specific heat 100–300 K; nominal source density 99.96 kg/m³ |
+
+The nine polymer curves contain 801 knots evaluated from the published decimal
+NIST coefficients. Their piecewise-linear interpolation is an authored
+approximation: quarter-, midpoint- and three-quarter checks observe less than
+0.25% relative difference, separately from NIST's fit errors and unknown
+measurement uncertainty. This sampled check is not a global error certificate.
+Independent polynomial quadrature and the canonical heat-capacity line integrals
+agree within 0.01% for the four 100–300 K comparisons.
+
+Reference acceptance and exact conditions remain explicit. The foam density
+labels use `nominal-source-density`; they cannot satisfy a physical `density`
+request or establish density(T). STEICO design conductivity remains distinct from
+measured conductivity. The two SAC305 tables' 405 K versus prose 408 K discrepancy
+is recorded without silently changing the literal tabulated coordinates.
+
+### Repeated thermal-property evaluation
+
+`fs_material::thermal::transport::PreparedThermalTransport` prepares a single
+card's density, selected specific heat and directional scalar conductivity over
+an explicitly typed absolute-temperature interval with all other conditions
+fixed. Supply the three exact `PropertyKey` values, endpoint `QueryPoint` values
+and independent `ClaimSelection` values through `ThermalTransportSourceQuery`.
+
+Construction reuses `ClaimSet::query_line_typed`, preserves the union of source
+breakpoints and retains every original answer/receipt. `at_temperature(T)`
+performs one binary search and no allocation, hashing or database query. It
+interpolates rho, c and k separately, then computes volumetric heat capacity
+rho*c, diffusivity k/(rho*c), and effusivity sqrt(k*rho*c). Interpolating those
+derived products or ratios directly would give a different material model.
+
+Unsupported spans, unknown temperature support, changing source selection,
+nonzero frequency/rate coordinates and incompatible quantity roles refuse.
+Source support does not guarantee representability of every derived product:
+extreme interior overflow/underflow is refused at evaluation without mutation.
+Scalar conductivity does not establish isotropy, specific heat is not converted
+between caloric constraints, and this API does not replace enthalpy or phase-change
+owners. The NASA 316 source-pack regression demonstrates the complete compiler,
+material-card and prepared-evaluation path.
