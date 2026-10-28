@@ -101,15 +101,7 @@ impl CohesiveLoadLine {
             || area_m2 <= 0.0
             || compliance_m_n.iter().flatten().any(|v| !v.is_finite())
             || (0..3).any(|i| compliance_m_n[i][i] < 0.0)
-            || !(1..=128).contains(&config.max_iterations)
-            || !(1..=32).contains(&config.max_backtracks)
-            || config.max_material_evaluations == 0
-            || !positive(config.jump_absolute_tolerance_m)
-            || !positive(config.jump_relative_tolerance)
-            || config.jump_relative_tolerance >= 1.0
-            || !positive(config.maximum_jump_increment_m)
-            || !positive(config.maximum_force_n)
-            || !positive(config.material_energy_tolerance_j_m2)
+            || !valid_config(config)
         {
             return Err(CohesiveContactError::Invalid(
                 "finite physical area/compliance and explicit positive solve budgets required",
@@ -359,6 +351,18 @@ fn outside_trial_domain(error: &CohesiveContactError) -> bool {
 fn positive(value: f64) -> bool {
     value.is_finite() && value > 0.0
 }
+
+fn valid_config(config: CohesiveContactConfig) -> bool {
+    (1..=128).contains(&config.max_iterations)
+        && (1..=32).contains(&config.max_backtracks)
+        && config.max_material_evaluations > 0
+        && positive(config.jump_absolute_tolerance_m)
+        && positive(config.jump_relative_tolerance)
+        && config.jump_relative_tolerance < 1.0
+        && positive(config.maximum_jump_increment_m)
+        && positive(config.maximum_force_n)
+        && positive(config.material_energy_tolerance_j_m2)
+}
 fn checked(value: f64) -> Result<f64, CohesiveContactError> {
     if value.is_finite() {
         Ok(value)
@@ -374,3 +378,6 @@ fn norm_inf(v: [f64; 3]) -> f64 {
 
 #[cfg(test)]
 mod tests;
+
+/// Finite bonded patches with complete cross-site mechanical compliance.
+pub mod patch;

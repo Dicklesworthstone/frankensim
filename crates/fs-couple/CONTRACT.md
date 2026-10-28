@@ -10100,3 +10100,9 @@ both subsequent motion and heat partition; ordinary/prepared continuation;
 independent Maxwell/acoustic physical ODEs; coefficient/refusal/cancellation
 atomicity and deterministic retry. These are native test targets; source review
 or formatting checks alone are not evidence of numerical execution.
+
+## Finite cohesive patch load line
+
+`cohesive_contact::patch::CohesivePatchLoadLine` solves all opening and two shear coordinates of up to 64 original bonded quadrature sites together. It consumes the full caller mechanical cross-compliance, heterogeneous original `CohesivePoint` histories and reference areas. The original analytic mean traction supplies physical work. Finite lever arms transmit moments; local failure redistributes force through the retained off-diagonal response. No average damage or independent-site solution replaces the patch.
+
+Prepared scratch and LU storage allocate only at construction. Each Jacobian perturbation evaluates only its local point law, giving linear constitutive-evaluation work per Jacobian while retaining the bounded dense solve. Explicit total point-law evaluation, iteration, backtracking, per-site force/jump and compatibility budgets apply. Refusal/cancellation mutates scratch only; callers must independently audit actual mechanical motion before publishing all histories. Softening continuation does not certify root uniqueness, spatial resolution, finite-rotation objectivity or timestep accuracy. Tests cover heterogeneous full cross-compliance, force redistribution after local failure, exact finite-body force/torque/work balance with progressive edge peeling, the one-site limit, and atomic refusal.
