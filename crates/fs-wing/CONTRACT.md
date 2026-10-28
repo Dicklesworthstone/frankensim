@@ -32,6 +32,22 @@ safeguarded iteration, branch identity).
   section closure vs TRAILING-SHEET induced alpha, warm-started
   safeguarded relaxation, branch identity, enforced operator-reuse rule.
 
+### Spatially varying strip inflow
+
+`nonlinear::solve_nonlinear_with_incident` accepts one body-frame incident
+relative-air velocity per strip. Axial wash adds to the local x component before
+incidence and chord-plane speed are computed; the same resulting local velocity
+enters circulation and Kutta–Joukowsky lift. Spanwise flow does not increase the
+2-D section speed. Nonfinite or nonpositive chordwise flow and incomplete strip
+ownership refuse. The reference freestream still defines common straight
+trailing legs and linear chordwise row ratios: this is quasi-steady strip gust
+loading, without chord-resolved unsteady gust memory.
+
+Both nonlinear entry points cache immutable strip/panel Biot–Savart coefficients
+once per solve and reuse iteration scratch, retaining the original product/sum
+order. `nonlinear_battery` adds uniform exact-equivalence, mirrored nonuniform
+loading/local lift, and wash-vector/refusal tests. Existing goldens are unchanged.
+
 ## Invariants
 
 - No scalar biplane factor anywhere: interference EMERGES from the

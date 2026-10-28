@@ -6,7 +6,9 @@
 //! the operator-reuse rule enforced, golden.
 //! Repro: cargo test -p fs-wing --test nonlinear_battery
 
-use fs_wing::nonlinear::{InfluenceOperator, StripRegime, StripSpec, solve_nonlinear};
+use fs_wing::nonlinear::{
+    InfluenceOperator, StripRegime, StripSpec, solve_nonlinear, solve_nonlinear_with_incident,
+};
 use fs_wing::{Panel, SurfaceId, flat_surface};
 
 fn jlog(case: &str, payload: &str) {
@@ -59,6 +61,169 @@ fn camber_closure(_s: usize, alpha: f64) -> (f64, StripRegime) {
 /// A zero-camber linear closure (matches the linear solve's physics).
 fn flat_closure(_s: usize, alpha: f64) -> (f64, StripRegime) {
     (2.0 * std::f64::consts::PI * alpha, StripRegime::Attached)
+}
+
+#[test]
+fn uniform_incident_field_matches_the_legacy_solve_exactly() {
+    let (panels, strips) = biplane();
+    let velocity = freestream(0.05);
+    let op = InfluenceOperator::build(&panels, velocity, RHO).unwrap();
+    let legacy = solve_nonlinear(
+        &op,
+        &panels,
+        &strips,
+        velocity,
+        RHO,
+        &camber_closure,
+        None,
+        None,
+    )
+    .unwrap();
+    let uniform = solve_nonlinear_with_incident(
+        &op,
+        &panels,
+        &strips,
+        velocity,
+        RHO,
+        &camber_closure,
+        &vec![velocity; strips.len()],
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(uniform, legacy);
+}
+
+#[test]
+fn nonuniform_vertical_incident_flow_changes_real_strip_loading_and_mirrors() {
+    let (panels, strips) = biplane();
+    let velocity = freestream(0.05);
+    let op = InfluenceOperator::build(&panels, velocity, RHO).unwrap();
+    let mut incident = vec![velocity; strips.len()];
+    for (s, flow) in incident.iter_mut().enumerate() {
+        flow[2] += if s % 8 < 4 { 0.35 } else { -0.35 };
+    }
+    let solve = |flow: &[[f64; 3]]| {
+        solve_nonlinear_with_incident(
+            &op,
+            &panels,
+            &strips,
+            velocity,
+            RHO,
+            &camber_closure,
+            flow,
+            None,
+            None,
+        )
+        .unwrap()
+    };
+    let gust = solve(&incident);
+    assert!(
+        gust.gamma[2] < gust.gamma[5],
+        "upward gust must increase lift-up circulation"
+    );
+    incident[..8].reverse();
+    incident[8..].reverse();
+    let mirrored = solve(&incident);
+    for plane in 0..2 {
+        for chord_row in 0..2 {
+            for span in 0..8 {
+                let a = gust.gamma[plane * 16 + chord_row * 8 + span];
+                let b = mirrored.gamma[plane * 16 + chord_row * 8 + 7 - span];
+                assert!(
+                    (a - b).abs() < 1.0e-9,
+                    "mirrored panel {plane}/{chord_row}/{span}: {a} {b}"
+                );
+            }
+        }
+    }
+    let mut lift = 0.0;
+    for (s, strip) in strips.iter().enumerate() {
+        let flow = incident[s];
+        for &j in &strip.panel_indices {
+            let panel = panels[j];
+            let cross_z = flow[0] * (panel.b[1] - panel.a[1]) - flow[1] * (panel.b[0] - panel.a[0]);
+            lift += -RHO * mirrored.gamma[j] * cross_z;
+        }
+    }
+    assert!((mirrored.total_lift_n - lift).abs() < 1.0e-9);
+}
+
+#[test]
+fn axial_wash_changes_local_incidence_and_reversed_flow_refuses() {
+    let (panels, strips) = biplane();
+    let velocity = freestream(0.08);
+    let op = InfluenceOperator::build(&panels, velocity, RHO).unwrap();
+    let incident = vec![velocity; strips.len()];
+    let du = vec![3.0; strips.len()];
+    let washed = solve_nonlinear_with_incident(
+        &op,
+        &panels,
+        &strips,
+        velocity,
+        RHO,
+        &camber_closure,
+        &incident,
+        Some(&du),
+        None,
+    )
+    .unwrap();
+    let combined = vec![[velocity[0] + 3.0, velocity[1], velocity[2]]; strips.len()];
+    let direct = solve_nonlinear_with_incident(
+        &op,
+        &panels,
+        &strips,
+        velocity,
+        RHO,
+        &camber_closure,
+        &combined,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        washed, direct,
+        "wash is a vector addition before section incidence/speed"
+    );
+    for bad in [
+        vec![],
+        vec![[0.0; 3]; strips.len()],
+        vec![[f64::NAN, 0.0, 0.0]; strips.len()],
+    ] {
+        assert_eq!(
+            solve_nonlinear_with_incident(
+                &op,
+                &panels,
+                &strips,
+                velocity,
+                RHO,
+                &camber_closure,
+                &bad,
+                None,
+                None,
+            )
+            .unwrap_err()
+            .code,
+            "incident-flow-invalid"
+        );
+    }
+    let reverse = vec![-2.0 * velocity[0]; strips.len()];
+    assert_eq!(
+        solve_nonlinear_with_incident(
+            &op,
+            &panels,
+            &strips,
+            velocity,
+            RHO,
+            &camber_closure,
+            &incident,
+            Some(&reverse),
+            None,
+        )
+        .unwrap_err()
+        .code,
+        "incident-flow-invalid"
+    );
 }
 
 #[test]

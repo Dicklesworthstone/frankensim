@@ -137,17 +137,6 @@ impl InfluenceOperator {
     }
 }
 
-/// Induced z-velocity at a point from all horseshoes with strengths Γ.
-fn induced_w(p: [f64; 3], panels: &[Panel], gamma: &[f64], stream_unit: [f64; 3]) -> f64 {
-    let mut w = 0.0;
-    for (j, panel) in panels.iter().enumerate() {
-        let v = crate::trailing_velocity_pub(p, panel.a, panel.b, stream_unit);
-        let term = gamma[j] * v[2];
-        w += term;
-    }
-    w
-}
-
 /// The warm-started safeguarded nonlinear solve.
 ///
 /// # Errors
@@ -164,6 +153,67 @@ pub fn solve_nonlinear(
     freestream: [f64; 3],
     rho: f64,
     closure: SectionClosure<'_>,
+    strip_du_axial: Option<&[f64]>,
+    warm_start: Option<&[f64]>,
+) -> Result<NonlinearReport, Refusal> {
+    solve_nonlinear_impl(
+        op,
+        panels,
+        strips,
+        freestream,
+        rho,
+        closure,
+        None,
+        strip_du_axial,
+        warm_start,
+    )
+}
+
+/// Nonlinear closure with one incident body-frame relative-air velocity per
+/// strip. Axial prop wash adds to the local x component BEFORE computing its
+/// angle of attack and chord-plane speed; both the circulation and returned
+/// Kutta–Joukowsky lift use that same local velocity. Spanwise velocity does not
+/// artificially increase the 2-D section speed. The common `freestream` still
+/// defines the frozen straight trailing-leg geometry and linear row ratios.
+/// This is a quasi-steady strip model, not chord-resolved unsteady gust memory.
+///
+/// # Errors
+/// As [`solve_nonlinear`]; `incident-flow-invalid` for a count mismatch,
+/// non-finite local velocity, or non-positive local chordwise flow after wash.
+#[allow(clippy::too_many_arguments)]
+pub fn solve_nonlinear_with_incident(
+    op: &InfluenceOperator,
+    panels: &[Panel],
+    strips: &[StripSpec],
+    freestream: [f64; 3],
+    rho: f64,
+    closure: SectionClosure<'_>,
+    strip_incident_mps: &[[f64; 3]],
+    strip_du_axial: Option<&[f64]>,
+    warm_start: Option<&[f64]>,
+) -> Result<NonlinearReport, Refusal> {
+    solve_nonlinear_impl(
+        op,
+        panels,
+        strips,
+        freestream,
+        rho,
+        closure,
+        Some(strip_incident_mps),
+        strip_du_axial,
+        warm_start,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn solve_nonlinear_impl(
+    op: &InfluenceOperator,
+    panels: &[Panel],
+    strips: &[StripSpec],
+    freestream: [f64; 3],
+    rho: f64,
+    closure: SectionClosure<'_>,
+    strip_incident_mps: Option<&[[f64; 3]]>,
     strip_du_axial: Option<&[f64]>,
     warm_start: Option<&[f64]>,
 ) -> Result<NonlinearReport, Refusal> {
@@ -217,6 +267,70 @@ pub fn solve_nonlinear(
             "one finite axial increment per strip (prop slipstream)",
         ));
     }
+    let local_velocity = if let Some(incident) = strip_incident_mps {
+        if incident.len() != strips.len() || strips.is_empty() || owned.iter().any(|v| !v) {
+            return Err(refuse(
+                "incident-flow-invalid",
+                "one incident velocity per strip and complete panel ownership are required".into(),
+                "sample every owning strip at the same physical tick",
+            ));
+        }
+        let mut local = Vec::with_capacity(strips.len());
+        for (s, velocity) in incident.iter().enumerate() {
+            let mut velocity = *velocity;
+            velocity[0] += strip_du_axial.map_or(0.0, |du| du[s]);
+            let speed = (velocity[0] * velocity[0] + velocity[2] * velocity[2]).sqrt();
+            if !velocity.iter().all(|v| v.is_finite())
+                || velocity[0] <= 0.0
+                || !(speed > 0.0 && speed.is_finite())
+            {
+                return Err(refuse(
+                    "incident-flow-invalid",
+                    format!("strip {s} has invalid/reversed chordwise flow {velocity:?}"),
+                    "this section model requires finite positive chordwise relative flow",
+                ));
+            }
+            local.push(velocity);
+        }
+        Some(local)
+    } else {
+        None
+    };
+    // All incident values and vortex geometry are fixed during this solve.
+    // Cache the expensive Biot–Savart coefficients once; the Picard loop
+    // retains the original gamma[j] * coefficient[j] accumulation order.
+    let mut downwash = Vec::with_capacity(strips.len());
+    let mut section_flow = Vec::with_capacity(strips.len());
+    let mut panel_strip = vec![0; n];
+    for (s, strip) in strips.iter().enumerate() {
+        let front = &panels[strip.panel_indices[0]];
+        let mid = [
+            (front.a[0] + front.b[0]) / 2.0,
+            (front.a[1] + front.b[1]) / 2.0,
+            (front.a[2] + front.b[2]) / 2.0,
+        ];
+        downwash.push(
+            panels
+                .iter()
+                .map(|p| crate::trailing_velocity_pub(mid, p.a, p.b, stream)[2])
+                .collect::<Vec<_>>(),
+        );
+        for &panel in &strip.panel_indices {
+            panel_strip[panel] = s;
+        }
+        section_flow.push(match &local_velocity {
+            Some(local) => {
+                let v = local[s];
+                let speed = (v[0] * v[0] + v[2] * v[2]).sqrt();
+                (det::atan2(v[2], v[0]), speed, speed)
+            }
+            None => (
+                alpha_free,
+                vmag,
+                vmag + strip_du_axial.map_or(0.0, |du| du[s]),
+            ),
+        });
+    }
     // Row-split ratios from the linear solution; strip totals start from
     // the warm start (or the linear totals).
     let lin = &op.linear.gamma;
@@ -249,19 +363,16 @@ pub fn solve_nonlinear(
     let mut residual = f64::INFINITY;
     let mut regimes = vec![StripRegime::Attached; strips.len()];
     let mut iterations = 0u32;
+    let mut next = vec![0.0; strips.len()];
     while iterations < MAX_ITERATIONS {
         iterations += 1;
         let mut worst = 0.0f64;
-        let mut next = strip_gamma.clone();
         for (s, spec) in strips.iter().enumerate() {
-            // Reference point: front-row bound-vortex midpoint.
-            let front = &panels[spec.panel_indices[0]];
-            let mid = [
-                (front.a[0] + front.b[0]) / 2.0,
-                (front.a[1] + front.b[1]) / 2.0,
-                (front.a[2] + front.b[2]) / 2.0,
-            ];
-            let w = induced_w(mid, panels, &gamma, stream);
+            let mut w = 0.0;
+            for (j, coefficient) in downwash[s].iter().enumerate() {
+                let term = gamma[j] * coefficient;
+                w += term;
+            }
             // Sign chain (settled EMPIRICALLY by the battery's physical
             // fixtures): in this basis the lift-up circulation sign is
             // negative and the trailing kernel returns w < 0 for the
@@ -269,7 +380,8 @@ pub fn solve_nonlinear(
             // PLUS — the attached fixture (tracks the exact linear
             // solve) and the weight-class camber fixture jointly pin the
             // composite sign; a wrong sign fails both.
-            let alpha_eff = alpha_free + spec.twist_rad + (w / vmag);
+            let (alpha_incident, speed_induction, speed_circulation) = section_flow[s];
+            let alpha_eff = alpha_incident + spec.twist_rad + (w / speed_induction);
             let (cl, regime) = closure(s, alpha_eff);
             if !cl.is_finite() {
                 return Err(refuse(
@@ -281,7 +393,7 @@ pub fn solve_nonlinear(
             regimes[s] = regime;
             // Prop slipstream: the washed strip sees a higher local speed
             // (axial increment du) — the REAL prop->wing coupling arm.
-            let v_local = vmag + strip_du_axial.map_or(0.0, |du| du[s]);
+            let v_local = speed_circulation;
             // The solver's Γ sign convention (BC with −z normals, a→b
             // along +y) is NEGATIVE for lift-up — the first battery run
             // converged to −5420 N because the closure assumed the
@@ -324,7 +436,7 @@ pub fn solve_nonlinear(
         } else {
             growth_streak = 0;
         }
-        strip_gamma = next;
+        core::mem::swap(&mut strip_gamma, &mut next);
         scatter(&strip_gamma, &mut gamma);
         residual = worst;
         if residual < GAMMA_TOL {
@@ -351,6 +463,9 @@ pub fn solve_nonlinear(
     // Kutta–Joukowsky total lift.
     let mut total = 0.0;
     for (j, p) in panels.iter().enumerate() {
+        let freestream = local_velocity
+            .as_ref()
+            .map_or(freestream, |local| local[panel_strip[j]]);
         let seg = [p.b[0] - p.a[0], p.b[1] - p.a[1], p.b[2] - p.a[2]];
         // Statement-split (guzez.7.2.1): no within-expression
         // mul-sub/mul-add for LLVM to contract into FMA.
