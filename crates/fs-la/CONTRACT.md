@@ -752,3 +752,31 @@ diagonal) fixtures; 128-byte plane alignment; cross-ISA golden hash.
   not proofs. Componentwise (per-entry) backward targets, Krylov
   inner/outer precision splits, and ledger event emission are recorded
   follow-up scope (fs-obs schema wiring + consumers do not exist yet).
+
+### Direct complex singular vectors and cancellable general QR
+
+`eigen_complex::svd_complex_with_cancel` computes a thin complex Jacobi SVD
+`A = U diag(sigma) V^H` for explicitly admitted `0 <= n <= m <= 1024`.
+It orthogonalizes the original working columns directly; it does not form
+normal equations or square their condition number. One global component scale
+and separately normalized column correlations preserve weak representable
+directions. Singular values are returned in deterministic descending order;
+no numerical rank cutoff or small-mode truncation is applied by this owner.
+Exact zero singular values receive a deterministic orthonormal completion.
+Unrepresentable scaling, rotations or singular values refuse explicitly.
+
+The caller supplies the orthogonality tolerance and sweep cap. Exhaustion
+returns a typed error, never a partial decomposition. Two dense arrays of
+`m*n+n*n` complex entries plus linear scratch suffice beyond the borrowed
+input. Cancellation is polled at row, pair and column boundaries. The eight
+native regressions in `eigen_complex/svd/tests.rs` check complex rectangular
+reconstruction and known singular values, both vector bases, exact nullspaces,
+repeated and zero singular values, extreme uniform scales, weak correlated
+columns, nonconvergence, cancellation/replay and numerical admission.
+
+`eigen_complex::eig_with_cancel` exposes the same existing Hessenberg/Givens
+QR owner with an explicit per-window sweep cap and cooperative cancellation.
+The original `eig` delegates with its existing 120-sweep cap. No second QR
+algorithm or eigenvector approximation is introduced. This supplies a bounded
+small general-spectrum solve for contour methods; it does not add balancing,
+large-scale sparse eigensolving or a forward eigenvalue-error certificate.

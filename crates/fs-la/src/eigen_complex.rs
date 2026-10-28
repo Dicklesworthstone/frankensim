@@ -17,6 +17,32 @@ use fs_math::c64::C64;
 mod cancellable;
 pub use cancellable::{LuComplexError, lu_complex_blocked_with_cancel, lu_complex_with_cancel};
 
+mod svd;
+pub use svd::{ComplexSvd, ComplexSvdError, svd_complex_with_cancel};
+
+/// Refusal of the explicitly bounded, cancellable general QR owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EigError {
+    Invalid { what: &'static str },
+    NotConverged(EigFailure),
+    Cancelled,
+}
+
+impl core::fmt::Display for EigError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "complex eigensolve refused: {self:?}")
+    }
+}
+impl std::error::Error for EigError {}
+
+fn poll_eig(cancelled: &mut impl FnMut() -> bool) -> Result<(), EigError> {
+    if cancelled() {
+        Err(EigError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
 /// Typed convergence failure: which eigenvalue window stalled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EigFailure {
@@ -77,9 +103,14 @@ fn rot_cols(m: &mut [C64], n: usize, i: usize, j: usize, c: f64, s: C64, row_hi:
 
 /// Reduce to upper Hessenberg by Givens similarity transforms
 /// (deterministic column-by-column, bottom-up zeroing).
-fn hessenberg(m: &mut [C64], n: usize) {
+fn hessenberg(
+    m: &mut [C64],
+    n: usize,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), EigError> {
     for k in 0..n.saturating_sub(2) {
         for i in ((k + 2)..n).rev() {
+            poll_eig(cancelled)?;
             let a = m[(i - 1) * n + k];
             let b = m[i * n + k];
             if b.abs() == 0.0 {
@@ -90,6 +121,7 @@ fn hessenberg(m: &mut [C64], n: usize) {
             rot_cols(m, n, i - 1, i, c, s, n);
         }
     }
+    Ok(())
 }
 
 /// Eigenvalues of the trailing 2×2 [[a,b],[c,d]] via the complex
@@ -108,15 +140,43 @@ fn eig2(a: C64, b: C64, c: C64, d: C64) -> (C64, C64) {
 /// exceptional shifts are applied before giving up).
 pub fn eig(a: &[C64], n: usize) -> Result<Vec<C64>, EigFailure> {
     assert_eq!(a.len(), n * n, "a must be n*n = {}", n * n);
+    eig_with_cancel(a, n, 120, || false).map_err(|error| match error {
+        EigError::NotConverged(failure) => failure,
+        EigError::Invalid { .. } => EigFailure {
+            window_hi: n.saturating_sub(1),
+        },
+        EigError::Cancelled => unreachable!("cancellation is disabled"),
+    })
+}
+
+/// Same Hessenberg/QR owner as [`eig`], with an explicit per-window sweep cap
+/// and cancellation at elimination/rotation boundaries. No partial spectrum
+/// is returned. Callers admitting large matrices must also budget dense work.
+pub fn eig_with_cancel(
+    a: &[C64],
+    n: usize,
+    max_sweeps_per_window: usize,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<Vec<C64>, EigError> {
+    poll_eig(&mut cancelled)?;
+    if n.checked_mul(n) != Some(a.len())
+        || max_sweeps_per_window == 0
+        || a.iter().any(|z| !z.re.is_finite() || !z.im.is_finite())
+    {
+        return Err(EigError::Invalid {
+            what: "finite square matrix and positive sweep budget required",
+        });
+    }
     if n == 0 {
         return Ok(Vec::new());
     }
     let mut h = a.to_vec();
-    hessenberg(&mut h, n);
+    hessenberg(&mut h, n, &mut cancelled)?;
     let mut eigs: Vec<C64> = Vec::with_capacity(n);
     let mut hi = n - 1; // active window is rows/cols [0, hi]
     let mut iters_here = 0usize;
     loop {
+        poll_eig(&mut cancelled)?;
         // Deflate any negligible subdiagonals inside [0, hi].
         let mut k = hi;
         while k > 0 {
@@ -163,8 +223,8 @@ pub fn eig(a: &[C64], n: usize) -> Result<Vec<C64>, EigFailure> {
         // Shift: Wilkinson (trailing 2×2 eigenvalue nearest h[hi][hi]);
         // every 12th iteration an exceptional shift breaks cycles.
         iters_here += 1;
-        if iters_here > 120 {
-            return Err(EigFailure { window_hi: hi });
+        if iters_here > max_sweeps_per_window {
+            return Err(EigError::NotConverged(EigFailure { window_hi: hi }));
         }
         let hnn = h[hi * n + hi];
         let mu = if iters_here.is_multiple_of(12) {
@@ -196,6 +256,7 @@ pub fn eig(a: &[C64], n: usize) -> Result<Vec<C64>, EigFailure> {
         }
         let mut rots: Vec<(usize, f64, C64)> = Vec::with_capacity(hi);
         for k in 0..hi {
+            poll_eig(&mut cancelled)?;
             let aa = h[k * n + k];
             let bb = h[(k + 1) * n + k];
             let (c, s) = givens(aa, bb);
@@ -203,10 +264,16 @@ pub fn eig(a: &[C64], n: usize) -> Result<Vec<C64>, EigFailure> {
             rots.push((k, c, s));
         }
         for &(k, c, s) in &rots {
+            poll_eig(&mut cancelled)?;
             rot_cols(&mut h, n, k, k + 1, c, s, (k + 2).min(hi + 1));
         }
         for d in 0..=hi {
             h[d * n + d] = h[d * n + d] + mu;
+        }
+        if h.iter().any(|z| !z.re.is_finite() || !z.im.is_finite()) {
+            return Err(EigError::Invalid {
+                what: "QR arithmetic is not representable",
+            });
         }
     }
 }
@@ -256,7 +323,8 @@ pub fn lu_complex(a: &[C64], n: usize) -> Result<LuComplex, EigFailure> {
 impl LuComplex {
     /// Solve A·x = b in place.
     pub fn solve(&self, b: &mut [C64]) {
-        self.solve_with_cancel(b, || false).expect("cancellation is disabled");
+        self.solve_with_cancel(b, || false)
+            .expect("cancellation is disabled");
     }
 }
 
