@@ -3889,3 +3889,36 @@ query stays outside the fixture's explicitly declared low-rate regularization.
 Pooled wrappers reuse the same preparation and existing pool owner, but pooled
 execution was not included in this qualification; no cross-ISA or throughput
 claim is added.
+
+### Finite-slope thermocapillary height graphs
+
+`free_surface3_from_cells_with_height_graph_thermocapillarity` binds the original
+material sigma(T), caloric state and native VOF/Guo trajectory to a complete,
+single-valued tank interface. `HeightGraphThermocapillarity` declares its column
+axis, liquid side, maximum slope (at most one) and minimum occupied interface
+volume. A graph may cross lattice layers and have multiple partial cells per
+column. Both orientations and all three Cartesian column axes are supported.
+
+Each monotone liquid-to-gas column supplies a liquid-volume height and
+interface-band-weighted sigma. Centered interior and second-order edge
+differences reconstruct both height and sigma derivatives. The full graph
+metric projects the gradient tangentially, including its axial component;
+actual patch area sqrt(1+|grad h|²) and occupied interface volume set force
+density. This avoids a small-slope approximation and does not double-count
+normal capillary pressure. The same column sigma extends onto interface
+pressure cells, including empty ghosts; bulk caloric temperatures remain
+unchanged. A dense column buffer and two bounded cell passes avoid a global
+surface solve or per-cell allocation.
+
+Source/geometry/slope/carry/cancellation refusal discards the entire candidate.
+This remains a resolved height-graph reduction with held-force time splitting;
+it does not admit overhangs, detached drops, internal solid walls, dynamic
+contact lines, surfactants, a conservative surface-energy closure or a curved
+solved-interface-temperature heat boundary. The existing solved-temperature
+stress adapter explicitly retains its planar admission.
+
+Native manufactured tests independently check graph-metric projection, area
+and volume scaling, quadratic mixed slopes, constant sigma, all orientations,
+pressure/traction consistency and geometry refusal. Material regressions check
+SI traction, conservative mass/enthalpy evolution, exact uniform-sigma baseline
+population bits, source-validity refusal and cancellation rollback.

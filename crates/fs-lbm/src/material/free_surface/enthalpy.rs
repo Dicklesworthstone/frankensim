@@ -10,7 +10,7 @@
 //! validity-wide constant surface tension retains the native capillary mechanics.
 //! Capillary work and surface-energy accuracy remain the native model's scope;
 //! no surface heat or total-energy closure is invented here. Optional
-//! `thermocapillary` admits source-varying sigma on a checked planar tank surface.
+//! `thermocapillary` admits source-varying sigma on checked planar or height-graph tank surfaces.
 //! Optional `wetting` evolves the original planar contact law using
 //! local liquid temperature. Phase mobility and pressure work are not supplied. Optional `viscous`
 //! converts the molecular stress power into heat on the same VOF mass routes.
@@ -262,7 +262,7 @@ pub struct MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     rheology: Option<rheology::RheologyBinding>,
     rheology_samples: BTreeMap<MassLocation3, rheology::FreeSurfaceRheologySample>,
     wetting: Option<WettingBinding<'m>>,
-    thermocapillary: Option<thermocapillary::PlanarThermocapillarity>,
+    thermocapillary: Option<thermocapillary::ThermocapillarySurface>,
     // Once surface T drives stress, a later step must retain its full boundary.
     // This flag publishes only with the complete native thermal transaction.
     surface_temperature_forces: bool,
@@ -316,7 +316,7 @@ impl<'s> MaterialFreeSurface3<'s> {
         initial_h: impl Fn([usize; 3]) -> f64,
         buoyancy: Option<crate::material::transport::boussinesq::BoussinesqConfig<3>>,
         rheology: Option<rheology::RheologyBinding>,
-        thermocapillary: Option<thermocapillary::PlanarThermocapillarity>,
+        thermocapillary: Option<thermocapillary::ThermocapillarySurface>,
         gate: &CancelGate,
     ) -> Result<MaterialFreeSurfaceEnthalpy3<'s, 'm>, Error> {
         poll(gate)?;
@@ -811,7 +811,7 @@ fn admit_capillary_source(
             || property.value_si() <= 0.0
         {
             return Err(Error::Invalid(
-                "thermal sigma requires a source-declared constant or explicit planar temperature evolution",
+                "thermal sigma requires a source-declared constant or explicit surface temperature evolution",
             ));
         }
     }

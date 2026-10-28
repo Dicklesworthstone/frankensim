@@ -1,11 +1,11 @@
-//! Checked flat-surface traction on the original VOF/Guo owner.
+//! Checked planar and finite-slope graph traction on the original VOF/Guo owner.
 //!
-//! The interface is a single-valued, nearly planar tank surface, perpendicular
-//! to one Cartesian axis. Each surface column has area one and occupied volume
-//! `fill` in lattice units, so its force density is `grad_t(sigma)/fill`.
-//! This is a declared flat-interface stress approximation, not a diffuse delta
-//! function or a reconstructed arbitrary curved surface. The normal Laplace
-//! load remains exclusively in the original pressure boundary.
+//! The planar reduction keeps one Cartesian normal and projected area. The
+//! height-graph reduction reconstructs both tangent directions and actual
+//! surface area from complete VOF columns, including multi-cell cut bands.
+//! Both use the existing Guo force owner; the normal Laplace load remains
+//! exclusively in the original pressure boundary. Neither reduction models
+//! arbitrary overhangs, surfactant transport or surface-energy conversion.
 
 use super::*;
 
@@ -254,6 +254,244 @@ impl FreeSurface3 {
     }
 }
 
+/// Resolved single-valued tank interface, with no small-slope approximation.
+/// The maximum slope bounds |grad h|, not the departure from one lattice layer.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HeightGraphSurface3 {
+    pub axis: usize,
+    pub outward_sign: i8,
+    pub maximum_slope: f64,
+    pub minimum_fill: f64,
+}
+
+#[derive(Clone, Copy)]
+struct SurfaceColumn {
+    height: f64,
+    volume: f64,
+    sigma: f64,
+    force: [f64; 3],
+}
+
+// Centered differences inside the tank and second-order one-sided differences
+// at its edges. Difference first, so a large common datum cancels exactly.
+fn graph_derivative(
+    p: [usize; 2],
+    axis: usize,
+    size: [usize; 2],
+    sample: impl Fn([usize; 2]) -> f64,
+) -> f64 {
+    let at = |offset: isize| {
+        let mut q = p;
+        q[axis] = (q[axis] as isize + offset) as usize;
+        sample(q)
+    };
+    if p[axis] == 0 {
+        2.0 * (at(1) - at(0)) - 0.5 * (at(2) - at(0))
+    } else if p[axis] + 1 == size[axis] {
+        2.0 * (at(0) - at(-1)) - 0.5 * (at(0) - at(-2))
+    } else {
+        0.5 * (at(1) - at(-1))
+    }
+}
+
+impl FreeSurface3 {
+    /// Height-column Marangoni traction on a resolved graph q=h(u,v).
+    ///
+    /// Column sigma is the liquid-volume-weighted value in its interface band
+    /// (Seric, Afkhami & Kondic, JCP 352 (2018), sec. 3.1,
+    /// https://doi.org/10.1016/j.jcp.2017.10.008). With a=(h_u,h_v),
+    /// b=(sigma_u,sigma_v), the graph metric gives
+    /// grad_s sigma = (b-a*(a.b)/(1+a.a), (a.b)/(1+a.a)).
+    /// Its traction is integrated over area sqrt(1+a.a), then distributed over
+    /// the band's occupied volume. Thus sum(fill*force) is the patch traction
+    /// and force.normal=0, without duplicating the Laplace pressure load.
+    ///
+    /// The derived column sigma also replaces the interface pressure
+    /// coefficient, including zero-mass ghosts. Interior material temperatures
+    /// are unchanged. The caller owns this temporary field and publishes it
+    /// only with the complete thermal/momentum candidate.
+    pub(crate) fn height_graph_marangoni_forces(
+        &self,
+        graph: HeightGraphSurface3,
+        sigma: &mut BTreeMap<(u64, usize), f64>,
+        gate: &CancelGate,
+    ) -> Result<BTreeMap<(u64, usize), [f64; 3]>, FreeSurfaceError3> {
+        self.admit_surface_tensions(sigma, gate)?;
+        if graph.axis >= 3
+            || ![-1, 1].contains(&graph.outward_sign)
+            || !graph.maximum_slope.is_finite()
+            || !(0.0..=1.0).contains(&graph.maximum_slope)
+            || !graph.minimum_fill.is_finite()
+            || graph.minimum_fill <= 0.0
+            || graph.minimum_fill > 1.0
+            || !self.solid.is_empty()
+            || self.planar_contact.is_some()
+            || self.planar_contact_field.is_some()
+            || self.contact != ContactModel3::Neutral
+            || self.carry != 0.0
+        {
+            return Err(invalid(
+                "height-graph traction needs resolved Cartesian columns, neutral walls and bounded slopes",
+            ));
+        }
+        let (nx, ny, nz) = self.grid.tile_dims();
+        let size = [nx * TILE, ny * TILE, nz * TILE];
+        let tangent = match graph.axis {
+            0 => [1, 2],
+            1 => [0, 2],
+            _ => [0, 1],
+        };
+        let shape = [size[tangent[0]], size[tangent[1]]];
+        let count = shape[0]
+            .checked_mul(shape[1])
+            .ok_or(invalid("height-graph column count overflows"))?;
+        if shape.iter().any(|&n| n < 3) || count > self.tiles.len().saturating_mul(TILE_CELLS) {
+            return Err(invalid("height graph has unresolved tank columns"));
+        }
+        const TOLERANCE: f64 = 64.0 * f64::EPSILON;
+        let mut columns = Vec::with_capacity(count);
+        for b in 0..shape[1] {
+            for a in 0..shape[0] {
+                check_cancel(gate)?;
+                let mut height = 0.0;
+                let mut previous = 1.0;
+                let mut volume = 0.0;
+                let mut reference = None;
+                let mut sigma_difference = 0.0;
+                for depth in 0..size[graph.axis] {
+                    if depth % TILE == 0 {
+                        check_cancel(gate)?;
+                    }
+                    let mut p = [0; 3];
+                    p[tangent[0]] = a;
+                    p[tangent[1]] = b;
+                    p[graph.axis] = if graph.outward_sign > 0 {
+                        depth
+                    } else {
+                        size[graph.axis] - 1 - depth
+                    };
+                    let location = self
+                        .grid
+                        .resolve_source(p[0] as i64, p[1] as i64, p[2] as i64);
+                    let (fill, interface) = match location {
+                        Some((slot, lane)) => {
+                            let key = self.grid.active_keys()[slot];
+                            match self.tiles[&key].cells[lane] {
+                                Cell3::Gas => (0.0, None),
+                                Cell3::Fluid => (1.0, None),
+                                Cell3::Interface => {
+                                    let rho = self.grid.populations(slot, lane).iter().sum::<f64>();
+                                    if !rho.is_finite() || rho <= 0.0 {
+                                        return Err(invalid("invalid density in height graph"));
+                                    }
+                                    (self.tiles[&key].mass[lane] / rho, Some((key, lane)))
+                                }
+                            }
+                        }
+                        None => (0.0, None),
+                    };
+                    // A full-to-empty monotone column is essential. It rules
+                    // out unresolved folds, disconnected drops and overfill.
+                    if !fill.is_finite()
+                        || fill < 0.0
+                        || fill > 1.0 + TOLERANCE
+                        || fill > previous + TOLERANCE
+                        || (depth == 0 && fill < 1.0 - TOLERANCE)
+                        || (depth + 1 == size[graph.axis] && fill > 0.0)
+                    {
+                        return Err(invalid(
+                            "height graph requires complete monotone liquid-to-gas columns",
+                        ));
+                    }
+                    let fill = fill.min(1.0);
+                    height += fill;
+                    previous = fill;
+                    if let Some(location) = interface.filter(|_| fill > 0.0) {
+                        let value = sigma[&location];
+                        let first = *reference.get_or_insert(value);
+                        sigma_difference += fill * (value - first);
+                        volume += fill;
+                    }
+                }
+                if height <= 1.0
+                    || height >= (size[graph.axis] - 1) as f64
+                    || volume < graph.minimum_fill
+                {
+                    return Err(invalid(
+                        "height graph needs liquid depth, gas clearance and a resolved interface volume",
+                    ));
+                }
+                let value = reference.ok_or(invalid("height graph has no liquid interface"))?
+                    + sigma_difference / volume;
+                if !value.is_finite() {
+                    return Err(invalid("height-graph surface tension is not representable"));
+                }
+                columns.push(SurfaceColumn {
+                    height: if graph.outward_sign > 0 {
+                        height
+                    } else {
+                        size[graph.axis] as f64 - height
+                    },
+                    volume,
+                    sigma: value,
+                    force: [0.0; 3],
+                });
+            }
+        }
+        for b in 0..shape[1] {
+            for a in 0..shape[0] {
+                check_cancel(gate)?;
+                let p = [a, b];
+                let h = |q: [usize; 2]| columns[q[0] + shape[0] * q[1]].height;
+                let s = |q: [usize; 2]| columns[q[0] + shape[0] * q[1]].sigma;
+                let slope = [
+                    graph_derivative(p, 0, shape, h),
+                    graph_derivative(p, 1, shape, h),
+                ];
+                let gradient = [
+                    graph_derivative(p, 0, shape, s),
+                    graph_derivative(p, 1, shape, s),
+                ];
+                let square = slope[0] * slope[0] + slope[1] * slope[1];
+                if !square.is_finite() || square.sqrt() > graph.maximum_slope + TOLERANCE {
+                    return Err(invalid(
+                        "free surface exceeded its height-graph slope envelope",
+                    ));
+                }
+                let metric = 1.0 + square;
+                let normal_component = (slope[0] * gradient[0] + slope[1] * gradient[1]) / metric;
+                let column = &mut columns[a + shape[0] * b];
+                let scale = metric.sqrt() / column.volume;
+                let mut force = [0.0; 3];
+                force[tangent[0]] = (gradient[0] - slope[0] * normal_component) * scale;
+                force[tangent[1]] = (gradient[1] - slope[1] * normal_component) * scale;
+                force[graph.axis] = normal_component * scale;
+                if force.iter().any(|f| !f.is_finite()) {
+                    return Err(invalid("height-graph traction is not representable"));
+                }
+                column.force = force;
+            }
+        }
+        let mut forces = BTreeMap::new();
+        for (&key, tile) in &self.tiles {
+            check_cancel(gate)?;
+            for (lane, &cell) in tile.cells.iter().enumerate() {
+                if cell != Cell3::Interface {
+                    continue;
+                }
+                let p = Self::transport_coordinates(MassLocation3::Cell(key, lane))
+                    .ok_or(invalid("unlocated height-graph interface"))?;
+                let column = columns[p[tangent[0]] + shape[0] * p[tangent[1]]];
+                sigma.insert((key, lane), column.sigma);
+                if tile.mass[lane] > 0.0 && column.force != [0.0; 3] {
+                    forces.insert((key, lane), column.force);
+                }
+            }
+        }
+        Ok(forces)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,5 +665,268 @@ mod tests {
         assert!(candidate.rebind_surface_tensions(missing, &gate).is_err());
         assert!(candidate.local_sigma.is_none());
         assert_eq!(before, candidate.grid().state_bits());
+    }
+
+    fn graph_surface(axis: usize, sign: i8, height: impl Fn(f64, f64) -> f64) -> FreeSurface3 {
+        let mut surface = FreeSurface3::new(
+            8,
+            8,
+            8,
+            0.8,
+            [0.0; 3],
+            0.01,
+            ContactModel3::Neutral,
+            |_, _, z| z < 4,
+        )
+        .unwrap();
+        let tangent = match axis {
+            0 => [1, 2],
+            1 => [0, 2],
+            _ => [0, 1],
+        };
+        // Independent subcell volume integration. Summing a complete column
+        // recovers the mean graph height, even across several partial cells.
+        let fill = |p: [usize; 3]| {
+            let mut sum = 0.0;
+            for a in 0..8 {
+                for b in 0..8 {
+                    let u = p[tangent[0]] as f64 + (a as f64 + 0.5) / 8.0;
+                    let v = p[tangent[1]] as f64 + (b as f64 + 0.5) / 8.0;
+                    let below = (height(u, v) - p[axis] as f64).clamp(0.0, 1.0);
+                    sum += if sign > 0 { below } else { 1.0 - below };
+                }
+            }
+            sum / 64.0
+        };
+        for (&key, tile) in &mut surface.tiles {
+            for lane in 0..TILE_CELLS {
+                let p =
+                    FreeSurface3::transport_coordinates(MassLocation3::Cell(key, lane)).unwrap();
+                let f = fill(p);
+                let mut next = p;
+                let next_fill = if sign > 0 && p[axis] + 1 < 8 {
+                    next[axis] += 1;
+                    fill(next)
+                } else if sign < 0 && p[axis] > 0 {
+                    next[axis] -= 1;
+                    fill(next)
+                } else {
+                    0.0
+                };
+                tile.mass[lane] = f;
+                tile.cells[lane] = if f == 0.0 {
+                    Cell3::Gas
+                } else if f < 1.0 || next_fill == 0.0 {
+                    Cell3::Interface
+                } else {
+                    Cell3::Fluid
+                };
+            }
+        }
+        surface
+    }
+
+    fn column_impulses(
+        surface: &FreeSurface3,
+        axis: usize,
+        forces: &BTreeMap<(u64, usize), [f64; 3]>,
+    ) -> BTreeMap<[usize; 2], [f64; 3]> {
+        let tangent = match axis {
+            0 => [1, 2],
+            1 => [0, 2],
+            _ => [0, 1],
+        };
+        let mut columns = BTreeMap::new();
+        for (&(key, lane), force) in forces {
+            let p = FreeSurface3::transport_coordinates(MassLocation3::Cell(key, lane)).unwrap();
+            let total = columns
+                .entry([p[tangent[0]], p[tangent[1]]])
+                .or_insert([0.0; 3]);
+            for d in 0..3 {
+                total[d] += surface.fill(key, lane) * force[d];
+            }
+        }
+        columns
+    }
+
+    #[test]
+    fn g1_height_graph_traction_is_tangent_with_correct_area_in_every_orientation() {
+        let gate = CancelGate::new_clock_free();
+        for axis in 0..3 {
+            let tangent = match axis {
+                0 => [1, 2],
+                1 => [0, 2],
+                _ => [0, 1],
+            };
+            for sign in [-1, 1] {
+                for (hu, hv) in [(0.0, 0.0), (0.2, -0.3), (-0.4, 0.1)] {
+                    let surface =
+                        graph_surface(axis, sign, |u, v| 3.7 + hu * (u - 4.0) + hv * (v - 4.0));
+                    let mut sigma = field(&surface, |p| {
+                        0.01 + 0.0002 * (p[tangent[0]] as f64 + 0.5)
+                            - 0.0001 * (p[tangent[1]] as f64 + 0.5)
+                    });
+                    let forces = surface
+                        .height_graph_marangoni_forces(
+                            HeightGraphSurface3 {
+                                axis,
+                                outward_sign: sign,
+                                maximum_slope: 0.6,
+                                minimum_fill: 0.01,
+                            },
+                            &mut sigma,
+                            &gate,
+                        )
+                        .unwrap();
+                    // Independent projection of the ambient gradient onto
+                    // the exact plane, then multiply by actual surface area.
+                    let n = [-hu, -hv, 1.0];
+                    let norm2 = n.iter().map(|x| x * x).sum::<f64>();
+                    let dot = -hu * 0.0002 + hv * 0.0001;
+                    let ambient = [0.0002, -0.0001, 0.0];
+                    let expected: [f64; 3] =
+                        core::array::from_fn(|d| (ambient[d] - dot * n[d] / norm2) * norm2.sqrt());
+                    let totals = column_impulses(&surface, axis, &forces);
+                    assert_eq!(totals.len(), 64);
+                    for total in totals.values() {
+                        assert!((total[tangent[0]] - expected[0]).abs() < 3e-15);
+                        assert!((total[tangent[1]] - expected[1]).abs() < 3e-15);
+                        assert!((total[axis] - expected[2]).abs() < 3e-15);
+                        assert!(
+                            (total[axis] - hu * total[tangent[0]] - hv * total[tangent[1]]).abs()
+                                < 3e-15
+                        );
+                    }
+                    assert!(forces.keys().all(|&(key,lane)| surface.tiles[&key].cells[lane] == Cell3::Interface));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g1_height_graph_curved_mixed_metric_matches_manufactured_surface_gradient() {
+        let gate = CancelGate::new_clock_free();
+        let surface = graph_surface(2, 1, |u, v| {
+            let (u, v) = (u - 4.0, v - 4.0);
+            3.5 + 0.03 * u * u - 0.02 * v * v + 0.01 * u * v
+        });
+        let mut sigma = field(&surface, |p| {
+            let (u, v) = (p[0] as f64 - 3.5, p[1] as f64 - 3.5);
+            0.01 + 0.00002 * u * u + 0.00001 * v
+        });
+        let forces = surface
+            .height_graph_marangoni_forces(
+                HeightGraphSurface3 {
+                    axis: 2,
+                    outward_sign: 1,
+                    maximum_slope: 0.5,
+                    minimum_fill: 0.01,
+                },
+                &mut sigma,
+                &gate,
+            )
+            .unwrap();
+        let totals = column_impulses(&surface, 2, &forces);
+        assert_eq!(totals.len(), 64);
+        for (p, total) in totals {
+            let (u, v) = (p[0] as f64 - 3.5, p[1] as f64 - 3.5);
+            let (hu, hv) = (0.06 * u + 0.01 * v, -0.04 * v + 0.01 * u);
+            let normal = [-hu, -hv, 1.0];
+            let square = normal.iter().map(|x| x * x).sum::<f64>();
+            let ambient = [0.00004 * u, 0.00001, 0.0];
+            let dot = ambient.iter().zip(normal).map(|(a, n)| a * n).sum::<f64>();
+            for d in 0..3 {
+                let expected = (ambient[d] - normal[d] * dot / square) * square.sqrt();
+                assert!((total[d] - expected).abs() < 5e-15, "{p:?}: {total:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn g0_height_graph_constant_sigma_and_invalid_geometry_do_not_invent_stress() {
+        let gate = CancelGate::new_clock_free();
+        let surface = graph_surface(2, 1, |u, v| 3.7 + 0.2 * (u - 4.0) - 0.3 * (v - 4.0));
+        let before = surface.grid().state_bits();
+        let mut sigma = field(&surface, |_| 0.01);
+        let original = sigma.clone();
+        let graph = HeightGraphSurface3 {
+            axis: 2,
+            outward_sign: 1,
+            maximum_slope: 0.6,
+            minimum_fill: 0.01,
+        };
+        assert!(
+            surface
+                .height_graph_marangoni_forces(graph, &mut sigma, &gate)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(sigma, original);
+        assert!(
+            surface
+                .height_graph_marangoni_forces(
+                    HeightGraphSurface3 {
+                        maximum_slope: 0.1,
+                        ..graph
+                    },
+                    &mut sigma,
+                    &gate,
+                )
+                .is_err()
+        );
+        assert_eq!(sigma, original);
+        assert_eq!(before, surface.grid().state_bits());
+        let mut broken = surface.clone();
+        let (slot, lane) = broken.grid.resolve_source(3, 3, 1).unwrap();
+        let key = broken.grid.active_keys()[slot];
+        broken.tiles.get_mut(&key).unwrap().cells[lane] = Cell3::Gas;
+        broken.tiles.get_mut(&key).unwrap().mass[lane] = 0.0;
+        let mut broken_sigma = field(&broken, |_| 0.01);
+        assert!(
+            broken
+                .height_graph_marangoni_forces(graph, &mut broken_sigma, &gate)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn g1_height_graph_pressure_and_traction_share_volume_weighted_interface_sigma() {
+        let gate = CancelGate::new_clock_free();
+        let surface = graph_surface(2, 1, |u, v| 3.7 + 0.2 * (u - 4.0) - 0.3 * (v - 4.0));
+        let mut sigma = field(&surface, |p| 0.01 + 0.0002 * p[2] as f64);
+        let original = sigma.clone();
+        let mut expected = BTreeMap::new();
+        for (&(key, lane), &value) in &original {
+            if surface.tiles[&key].cells[lane] != Cell3::Interface {
+                continue;
+            }
+            let p = FreeSurface3::transport_coordinates(MassLocation3::Cell(key, lane)).unwrap();
+            let entry = expected.entry([p[0], p[1]]).or_insert([0.0; 2]);
+            let fill = surface.fill(key, lane);
+            entry[0] += fill * value;
+            entry[1] += fill;
+        }
+        surface
+            .height_graph_marangoni_forces(
+                HeightGraphSurface3 {
+                    axis: 2,
+                    outward_sign: 1,
+                    maximum_slope: 0.6,
+                    minimum_fill: 0.01,
+                },
+                &mut sigma,
+                &gate,
+            )
+            .unwrap();
+        for (&(key, lane), &value) in &sigma {
+            if surface.tiles[&key].cells[lane] == Cell3::Interface {
+                let p =
+                    FreeSurface3::transport_coordinates(MassLocation3::Cell(key, lane)).unwrap();
+                let [weighted, volume] = expected[&[p[0], p[1]]];
+                assert!((value - weighted / volume).abs() < 1e-17);
+            } else {
+                assert_eq!(value, original[&(key, lane)]);
+            }
+        }
     }
 }

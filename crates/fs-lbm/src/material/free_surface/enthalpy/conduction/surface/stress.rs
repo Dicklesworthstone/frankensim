@@ -65,7 +65,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         dx: f64,
         gate: &CancelGate,
     ) -> Result<(), Error> {
-        let plane = self.thermocapillary.ok_or(Error::Invalid(
+        let plane = self.thermocapillary_surface().ok_or(Error::Invalid(
             "solved surface stress requires the original planar geometry",
         ))?;
         let axis = plane.normal_axis;

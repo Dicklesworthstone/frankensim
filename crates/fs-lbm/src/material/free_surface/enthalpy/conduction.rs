@@ -1089,7 +1089,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             + observer.surface_absolute_heat_j
             + joule_heat;
         let flow = if surface_stress {
-            let axis = self.thermocapillary.expect("admitted planar surface").normal_axis;
+            let axis = self.thermocapillary_surface().expect("admitted planar surface").normal_axis;
             let scaling = self.flow.scaling;
             let mut prepared = true;
             let mut surface_field = |lattice: &FreeSurface3,
