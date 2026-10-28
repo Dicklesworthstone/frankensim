@@ -190,3 +190,108 @@ fn g3_common_support_work_is_determined_but_independent_support_work_refuses() {
     assert_eq!(bodies, initial);
 }
 
+#[test]
+fn g1_sustained_tripod_support_resolves_load_transfer_without_a_supplied_pressure_centre() {
+    use fs_mbd::frictional_impact::step::{
+        RigidContactStepControls, step_rigid_frictional_contacts,
+    };
+    use fs_mbd::{Gravity, Wrench};
+
+    let properties = [property(3.0, Vec3::new(1.0, 1.0, 1.0))];
+    let mut contacts = tripod();
+    for c in &mut contacts {
+        c.activation_tolerance_m = 1e-7;
+    }
+    let config = RigidContactStepControls {
+        impact: controls(),
+        drift_energy_tolerance_j: 1e-10,
+        drift_angular_momentum_tolerance_nms: 1e-10,
+        work_energy_tolerance_j: 3e-8,
+        linear_momentum_tolerance_ns: 1e-9,
+        angular_momentum_tolerance_nms: 1e-9,
+    };
+    let mut sliding_errors = [0.0; 3];
+    for (rung, count) in [8_usize, 16, 32].into_iter().enumerate() {
+        let dt = 1.0 / count as f64;
+        for horizontal_acceleration in [0.05_f64, 0.1, 0.2] {
+            let mut bodies = [body(
+                Vec3::new(0.0, 0.0, 0.25 + 1e-8),
+                UnitQuaternion::IDENTITY,
+                Vec3::ZERO,
+            )];
+            for step_index in 0..count {
+                let report = step_rigid_frictional_contacts(
+                    &mut bodies,
+                    &properties,
+                    &[Wrench::ZERO],
+                    Gravity::new(Vec3::new(horizontal_acceleration, 0.0, -1.0)).unwrap(),
+                    &contacts,
+                    dt,
+                    config,
+                    |path| -> Result<(), &'static str> {
+                        // Complete fixture geometry lies in this asymmetric
+                        // triangular prism. Its height admits the declared mass
+                        // distribution with the original COM at zero and I = 1.
+                        // For every time, native COM height is affine and rotation
+                        // moves each vertex by no more than R*|omega|*dt. This bound
+                        // admits the whole path, rather than sampled endpoints.
+                        let q = path.post_contact[0].pose().orientation();
+                        let mut lowest = f64::INFINITY;
+                        for (x, y) in [(-1.0, -1.0), (1.0, -1.0), (0.0, 1.0)] {
+                            for z in [-0.25, 0.75] {
+                                lowest = lowest.min(q.rotate_body_to_world(Vec3::new(x, y, z)).z);
+                            }
+                        }
+                        let start_z = path.post_contact[0].pose().position_world().z;
+                        let end_z = path.endpoint[0].pose().position_world().z;
+                        // Original principal inertia is the identity, so body
+                        // angular momentum equals angular speed throughout drift.
+                        let omega = path.post_contact[0]
+                            .angular_momentum_body()
+                            .norm_squared()
+                            .sqrt();
+                        let lower = start_z.min(end_z) + lowest
+                            - 2.5625_f64.sqrt() * omega * path.duration_s;
+                        if lower < 0.0 {
+                            return Err("whole prism path crosses its plane");
+                        }
+                        Ok(())
+                    },
+                    &CancelGate::new(),
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "count={count} gx={horizontal_acceleration} step={step_index}: {error:?}"
+                    )
+                });
+                assert!(matches!(
+                    report.impact.contact.determinacy,
+                    FrictionalContactDeterminacy::UniqueVelocity(_)
+                ));
+                close(report.total_energy_residual_j, 0.0);
+                close(
+                    report.impact.contact.impulses.iter().map(|p| p[0]).sum(),
+                    3.0 * dt,
+                );
+            }
+            let acceleration = (horizontal_acceleration - 0.1).max(0.0);
+            close_vector(
+                bodies[0].linear_momentum_world(),
+                Vec3::new(3.0 * acceleration, 0.0, 0.0),
+            );
+            close_vector(bodies[0].angular_momentum_body(), Vec3::ZERO);
+            close(
+                bodies[0].pose().position_world().x,
+                0.5 * acceleration * (1.0 + dt),
+            );
+            close(bodies[0].pose().position_world().z, 0.25 + 1e-8);
+            if acceleration > 0.0 {
+                sliding_errors[rung] = bodies[0].pose().position_world().x - 0.5 * acceleration;
+                close(sliding_errors[rung], 0.5 * acceleration * dt);
+            }
+        }
+    }
+    for errors in sliding_errors.windows(2) {
+        close(errors[0], 2.0 * errors[1]);
+    }
+}

@@ -4,7 +4,8 @@
 //! maximize dissipation in the disk `|p_t| <= mu*p_n` at the FINAL velocity.
 //! This is the non-associated Coulomb law, not an associated cone quadratic
 //! (which would introduce normal dilation), nor successive normal/friction clips.
-//! All rows participate in one Newton--Krylov natural-map solve. Existing
+//! All rows participate in one semismooth Newton--Krylov natural-map solve,
+//! using exact branch Jacobian actions and cached local linearizations. Existing
 //! numerical owners provide matrix admission and nonlinear globalization.
 //!
 //! Independent contact rows use a weighted contraction witness for impulse
@@ -18,13 +19,13 @@
 //! Total midpoint loss is an impact dissipation receipt, NOT a friction-heat
 //! allocation: prescribed motion and material energy partition belong downstream.
 
-use fs_solver::finite_difference::{FallibleFiniteDifference, FiniteDifferenceError};
 use fs_solver::orthant::active_set::{SpdOrthantConfig, SpdOrthantError, solve_spd_orthant};
 use fs_solver::{
     NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonReport, SolverRunProgress,
 };
 use std::cell::{Cell, RefCell};
 
+mod natural;
 mod range;
 
 /// What the numerical witness establishes about this accepted response.
@@ -90,10 +91,12 @@ pub struct FrictionalContact {
 pub struct FrictionalContactConfig {
     /// At most 21 contacts (63 scalar rows), bounding both numerical owners.
     pub maximum_contacts: usize,
+    /// Maximum residual, analytic Jacobian and right-preconditioner calls,
+    /// shared across all branch probes. Actions use quadratic work; the PSD
+    /// lane caches one at-most-63-row dense SVD per Newton point for its
+    /// numerical right inverse, with cancellation before/after factorization.
     pub maximum_evaluations: usize,
     pub maximum_newton_iterations: usize,
-    /// Absolute directional-difference perturbation of impulse [N s].
-    pub difference_step_impulse: f64,
     pub velocity_tolerance: f64,
     pub impulse_tolerance: f64,
     /// Normal complementarity and tangential duality-gap tolerance [J].
@@ -108,7 +111,6 @@ impl Default for FrictionalContactConfig {
             maximum_contacts: 21,
             maximum_evaluations: 32768,
             maximum_newton_iterations: 96,
-            difference_step_impulse: 1e-6,
             velocity_tolerance: 1e-9,
             impulse_tolerance: 1e-9,
             complementarity_tolerance: 1e-9,
@@ -116,10 +118,9 @@ impl Default for FrictionalContactConfig {
             matrix: SpdOrthantConfig::default(),
             newton: NewtonKrylovConfig {
                 relative_tolerance: 1e-12,
-                // Directional differences have roundoff/truncation error;
-                // oversolving their inner Krylov action can falsely stall an
-                // otherwise convergent outer contact solve. Physical gates and
-                // the outer 1e-12 absolute target remain independent.
+                // Avoid oversolving early/degenerate linearizations. The
+                // analytic action has no difference-scale noise; physical
+                // gates and the outer absolute target remain independent.
                 forcing_minimum: 1e-6,
                 ..Default::default()
             },
@@ -320,60 +321,30 @@ pub fn solve_frictional_contacts(
     };
     let evaluations = Cell::new(0);
     let cancel = RefCell::new(&mut cancelled);
+    let active_targets: Vec<_> = active.iter().map(|&i| targets[i]).collect();
+    let range_preconditioner = range_witness.is_some();
     let solve = |seed: Vec<f64>| -> Result<(Vec<f64>, NewtonReport), E> {
-        let problem =
-            FallibleFiniteDifference::new(d, config.difference_step_impulse, |p: &[f64]| {
-                poll(&mut **cancel.borrow_mut())?;
-                if evaluations.get() == config.maximum_evaluations {
-                    return Err(E::EvaluationBudget);
-                }
-                evaluations.set(evaluations.get() + 1);
-                let mut residual = vec![0.0; d];
-                for k in 0..active.len() {
-                    poll(&mut **cancel.borrow_mut())?;
-                    let a = 3 * k;
-                    let mut v = [0.0; 3];
-                    for b in 0..3 {
-                        v[b] =
-                            free[a + b] + fs_solver::dot(&matrix[(a + b) * d..(a + b + 1) * d], p);
-                    }
-                    residual[a] = p[a] - (p[a] - steps[a] * (v[0] - targets[active[k]])).max(0.0);
-                    let trial = [
-                        p[a + 1] - steps[a + 1] * v[1],
-                        p[a + 2] - steps[a + 2] * v[2],
-                    ];
-                    let radius = mu[k] * p[a].max(0.0);
-                    let length = trial[0].hypot(trial[1]);
-                    if v.iter().chain(&trial).any(|x| !x.is_finite())
-                        || !radius.is_finite()
-                        || !length.is_finite()
-                    {
-                        return Err(E::NonFinite);
-                    }
-                    let fraction = if length > radius {
-                        radius / length
-                    } else {
-                        1.0
-                    };
-                    residual[a + 1] = p[a + 1] - fraction * trial[0];
-                    residual[a + 2] = p[a + 2] - fraction * trial[1];
-                }
-                if residual.iter().any(|v| !v.is_finite()) {
-                    return Err(E::NonFinite);
-                }
-                Ok(residual)
-            })
-            .map_err(fd_error)?;
+        let problem = natural::NaturalMap::new(
+            &matrix,
+            &free,
+            &active_targets,
+            &steps,
+            &mu,
+            &evaluations,
+            config.maximum_evaluations,
+            range_preconditioner,
+            || (**cancel.borrow_mut())(),
+        );
         let construction = NewtonKrylovState::new(&problem, seed, config.newton);
         if let Some(e) = problem.take_failure() {
-            return Err(fd_error(e));
+            return Err(e);
         }
         let mut state = construction.map_err(E::Newton)?;
         let report = state.run_controlled(&problem, config.maximum_newton_iterations, &mut || {
             problem.has_failed() || (**cancel.borrow_mut())()
         });
         if let Some(e) = problem.take_failure() {
-            return Err(fd_error(e));
+            return Err(e);
         }
         if report.progress == SolverRunProgress::Paused {
             return Err(E::Cancelled);
@@ -658,7 +629,6 @@ fn validate_config(c: FrictionalContactConfig) -> Result<(), FrictionalContactEr
         || !(1..=1_000_000).contains(&c.maximum_evaluations)
         || !(1..=256).contains(&c.maximum_newton_iterations)
         || [
-            c.difference_step_impulse,
             c.velocity_tolerance,
             c.impulse_tolerance,
             c.complementarity_tolerance,
@@ -673,12 +643,6 @@ fn validate_config(c: FrictionalContactConfig) -> Result<(), FrictionalContactEr
         return Err(FrictionalContactError::Invalid("configuration"));
     }
     c.newton.validate().map_err(FrictionalContactError::Newton)
-}
-fn fd_error(e: FiniteDifferenceError<FrictionalContactError>) -> FrictionalContactError {
-    match e {
-        FiniteDifferenceError::Source(e) => e,
-        FiniteDifferenceError::Invalid(s) => FrictionalContactError::Invalid(s),
-    }
 }
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), FrictionalContactError> {
     if cancelled() {

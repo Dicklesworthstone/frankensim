@@ -613,12 +613,13 @@ work then gates global passivity; a locally valid restitution candidate that
 creates assembled energy is refused. All impact loss remains unallocated
 mechanical loss, not an automatic thermal or friction-heat source.
 
-This bounded owner admits numerically SPD active rows (at most 21 contacts).
-A positive weighted contraction witness for the exact normal/disk map is
-required for determined numerical authority. Distinct independently checked
-passive roots return `Nonunique`; a checked root without the sufficient
-witness returns `UnresolvedDeterminacy`. Rank-deficient manifolds and a complete
-Painleve existence classifier remain outside this scope. Configuration
+This bounded owner retains a cap of 21 active contacts. Numerically SPD rows
+use a positive weighted contraction witness for unique impulses; admitted
+semidefinite rows use the separate velocity-image witness described below.
+Distinct independently checked passive roots return `Nonunique`; a checked
+root without a sufficient witness returns `UnresolvedDeterminacy`. General
+unresolved rank-deficient manifolds and a complete Painleve existence
+classifier remain outside this scope. Configuration
 stepping, CCD, contact manifold discovery and a complete Moreau–Jean integrator
 are separate owners.
 
@@ -626,9 +627,9 @@ Seven native physical test groups cover analytic oblique coupling, 3D sticking,
 explicit target/restitution semantics, shared-body simultaneous response and
 permutation/tangent-frame invariance, the existing frictionless oracle,
 adversarial global energy injection, independently derived multiple Coulomb
-roots, and numerical/geometry/cancellation refusal. The finite-difference inner
-forcing floor is 1e-6; the 1e-12 outer target and independent physical gates are
-unchanged.
+roots, and numerical/geometry/cancellation refusal. The exact semismooth action
+and redundant-contact right preconditioner below supersede directional finite
+differences. The 1e-12 outer target and independent physical gates are unchanged.
 
 ## Straight-line swept-sphere contact timing
 
@@ -710,3 +711,14 @@ without subtracting nearly equal endpoint energies. The allocation-free scalar
 midpoint numerator uses a centered Hertz series and exact quadratic-hinge
 remainders for the same potential. No new damping, heat, snap hysteresis,
 Maugis detached reference, or changing-source energy law is inferred.
+
+
+### Exact semismooth action and redundant-contact Newton corrections
+
+The coupled normal/Coulomb natural map now supplies an analytic semismooth Jacobian action through the existing `fs-solver` nonlinear interface. Normal positive-part and circular tangential-projection branches are fixed at each exact Newton iterate. Cached local blocks leave one original mobility-vector product per Krylov action; they do not perturb accepted contact state or turn a mode boundary into a classical adjoint. The unused `difference_step_impulse` configuration field is removed.
+
+For admitted semidefinite mobility only, the owner caches a numerical pseudoinverse of the current Newton Jacobian as a right preconditioner using the existing `fs-la::factor::svd_jacobi`. Its cutoff is proportional to machine precision and matrix dimension. This preconditions the numerical correction only: the original contact mobility, Jacobian action, nonlinear residual, strict outer convergence target and independent physical gates remain unchanged. An unrepresentable right-hand-side component remains visible to the original Krylov residual. No artificial compliance, physical impulse clipping, or acceptance of a stalled solve is introduced.
+
+The evaluation budget counts residual, Jacobian and right-preconditioner calls. Ordinary actions are quadratic; a new semidefinite Newton point may require one bounded cubic factorization, cached across its inner solve, with cancellation before and after. The 63-row cap remains in force.
+
+All twelve physical contact regressions pass against this implementation. Three additional native unit tests independently compare smooth-branch derivatives with central differences, check exact-boundary action linearity and unchanged iterate, and demonstrate that an unfittable right-hand-side component is not hidden by the range preconditioner. Native rigid sustained-support regression and timestep evidence are recorded by the `fs-mbd` consumer. Verification is bounded native source-selected execution, not a full workspace/DSR gate.
