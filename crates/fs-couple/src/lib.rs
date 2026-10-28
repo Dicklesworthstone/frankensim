@@ -37,6 +37,8 @@ pub mod bakeoff;
 pub mod bernoulli_aperture;
 pub mod bowed_string;
 pub mod brass_loop;
+/// Sample-indexed pressure, pre-stress and valve controls on the original voice.
+pub mod brass_sequence;
 pub mod broadband_radiation;
 pub mod cavity_phs;
 /// Shared Helmholtz storage and neck flow in the reciprocal modal network.
