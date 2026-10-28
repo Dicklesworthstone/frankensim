@@ -5,6 +5,9 @@
 //! supplied by the collision owner; this frozen-configuration event does not
 //! advance poses, find collisions or replace a contact time integrator.
 
+/// Configuration-admitted force/contact/drift on the original rigid bodies.
+pub mod step;
+
 use crate::{DynamicsError, MassProperties, RigidBodyState, Vec3};
 use fs_contact::frictional_multicontact::{
     FrictionalContact, FrictionalContactConfig, FrictionalContactError, FrictionalContactResult,

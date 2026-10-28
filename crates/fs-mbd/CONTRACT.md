@@ -699,3 +699,37 @@ The contact core's SPD and determined-response scope remains in force.
 This point-impact phase holds poses fixed, requires supplied geometry and
 coefficients, and makes no automatic finite-patch preload, torsional-friction,
 collision-discovery or impact-to-heat allocation claim.
+
+## Configuration-admitted native rigid contact steps
+
+`frictional_impact::step::step_rigid_frictional_contacts` advances actual
+native momenta and poses through a first-order constant-wrench/gravity kick,
+simultaneous admitted normal/Coulomb impulses, and the original zero-force
+energy/world-momentum midpoint drift. The step independently measures initial
+and endpoint signed gaps, advances translating support planes, and refuses
+every negative supplied gap without projection.
+
+A mandatory geometry-owner callback must admit the complete proposed native
+path and feature coverage. Its native partial-drift sampler is a tool, not a
+CCD certificate; initial/endpoint checks or finitely many samples alone do not
+establish continuous nonintersection. Callback refusal, unresolved contact,
+drift/work failure and cancellation leave every body unchanged.
+
+Receipts separate actual kick work, constant-force displacement work, their
+signed first-order splitting difference, moving-support work, unallocated
+impact loss, drift defects, and independent whole-step energy/momentum balances.
+Neither event loss nor integration loss is relabeled as physical friction heat.
+
+Four native trajectory tests cover a finite-height block with a supplied
+admissible center of pressure at incline stick/threshold/slip conditions,
+sustained nonpenetrating support, three-rung first-order trajectory/work/loss
+refinement, original asymmetric free drift, moving supports and late atomic
+refusal. The independent sliding fixture gives `x(1)=1+dt`, kick work
+`6+44dt`, and event loss `4+44dt` for `dt=1/8,1/16,1/32`.
+The geometry callback bounds the entire cuboid path rather than checking only
+the supplied point.
+
+This is a caller-admitted first-order composition within the contact owner's
+SPD/determinacy domain. Automatic manifold/center-of-pressure discovery,
+arbitrary CCD/Painleve resolution and a complete Moreau–Jean integrator remain
+separate work. Geometry and time refinement remain explicit requirements.
