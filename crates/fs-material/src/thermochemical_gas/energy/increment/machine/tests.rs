@@ -5,11 +5,11 @@ use crate::thermochemical_gas::energy::GasEnergySolve;
 use fs_thermochem::{Composition, CompositionBasis};
 use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
 
-fn controls() -> GasEnergySolve {
+pub(super) fn controls() -> GasEnergySolve {
     GasEnergySolve { minimum_temperature_k: 200.0, maximum_temperature_k: 1800.0,
         energy_tolerance_j_kg: 1e-7, maximum_iterations: 128 }
 }
-fn shifted(reference: f64) -> ThermochemicalGasModel {
+pub(super) fn shifted(reference: f64) -> ThermochemicalGasModel {
     ThermochemicalGasModel::new(FrozenIdealGasMixtureModelV1::new(
         vec![species_with_energy_reference("A", 0.028, 3.5, 0.002, reference),
             species_with_energy_reference("B", 0.004, 2.5, 0.0, -reference)],

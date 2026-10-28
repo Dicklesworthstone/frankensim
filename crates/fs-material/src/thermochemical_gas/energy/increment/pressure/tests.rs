@@ -56,3 +56,23 @@ fn pressure_entropy_keeps_typed_refusals_and_every_cancel_boundary() {
     assert_eq!(expected, branch.reconstruct_pressure_entropy_change(&context, Pressure::new(400000.0),
         0.0, 1e-8, || false).unwrap());
 }
+
+#[test]
+fn tiny_pressure_change_uses_source_bounds_instead_of_a_full_temperature_search() {
+    let source = model(vec![0.75, 0.25], 0.0);
+    let branch = source.prepare_caloric_branch(controls(), || false).unwrap();
+    let context = point(400.0, 100000.0);
+    // Nonzero entropy at the reference is smaller than the authored tolerance.
+    // It must not be accepted as an unchanged temperature merely for that reason.
+    let pressure = 100000.0 * (1.0 + 1e-9);
+    let result = branch.reconstruct_pressure_entropy_change(&context, Pressure::new(pressure),
+        0.0, 1e-4, || false).unwrap();
+    assert!(result.state().state().temperature > 400.0);
+    assert!(result.iterations() < 16);
+    let gas = source.evaluate(&context).unwrap();
+    let expected = 400.0 * (pressure / 100000.0).powf(
+        (gas.state().gamma - 1.0) / gas.state().gamma);
+    // Physical tolerance is loose; the derived solver target resolves direction,
+    // not an unrequested high-relative-accuracy heat/entropy certificate.
+    assert!((result.state().state().temperature - expected).abs() < 2e-7);
+}

@@ -92,16 +92,30 @@ impl GasCaloricBranch<'_> {
                 tangent: properties.mass_specific_cp().value() / t,
                 pressure_pa: outlet_pressure.value() })
         };
-        if outlet_pressure == p0 && change == 0.0 {
-            let sample = evaluate(t0.value())?;
-            if !super::positive(sample.tangent) || !sample.residual.is_finite() {
-                return Err(GasEntropyError::Invalid("isentropic reference is unrepresentable"));
-            }
-            super::poll(cancelled).map_err(map_context)?;
-            return Ok(root::Solution { temperature_k: t0.value(), sample, iterations: 0 });
+        // The immutable branch supplies a global lower bound on ds/dT.
+        // Use the initial entropy residual to narrow the solve without fitting
+        // a constant gamma or admitting only the endpoints of the source path.
+        let reference = evaluate(t0.value())?;
+        if !super::positive(reference.tangent) || !reference.residual.is_finite() {
+            return Err(GasEntropyError::Invalid("pressure/entropy reference is unrepresentable"));
         }
-        root::solve(self.controls.minimum_temperature_k, self.controls.maximum_temperature_k,
-            tolerance, self.controls.maximum_iterations, evaluate, cancelled).map_err(map_root)
+        if reference.residual == 0.0 {
+            super::poll(cancelled).map_err(map_context)?;
+            return Ok(root::Solution { temperature_k: t0.value(), sample: reference, iterations: 0 });
+        }
+        let lower_slope = (self.minimum_cp / self.controls.maximum_temperature_k).next_down();
+        let solve_tolerance = tolerance.min(0.5 * reference.residual.abs());
+        if !super::positive(lower_slope) || !super::positive(solve_tolerance) {
+            return Err(GasEntropyError::Invalid("pressure/entropy displacement is below represented resolution"));
+        }
+        let span = (reference.residual.abs() / lower_slope).next_up();
+        let (lo, hi) = if reference.residual < 0.0 {
+            (t0.value(), self.controls.maximum_temperature_k.min((t0.value() + span).next_up()))
+        } else {
+            (self.controls.minimum_temperature_k.max((t0.value() - span).next_down()), t0.value())
+        };
+        root::solve(lo, hi, solve_tolerance, self.controls.maximum_iterations,
+            evaluate, cancelled).map_err(map_root)
     }
 }
 
