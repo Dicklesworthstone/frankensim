@@ -12,6 +12,9 @@ pub mod friction;
 /// Stateful, work-conjugate tangential contact on original articulated states.
 pub mod tangential;
 
+/// Continuous free trajectories joined by caller-located simultaneous impacts.
+pub mod trajectory;
+
 use core::fmt;
 use fs_contact::frictional_multicontact::FrictionalContactError;
 use fs_contact::multicontact::{
@@ -553,6 +556,32 @@ impl EventWorkspace {
                     + magnitude(initial.angular_momentum_world)
                     + magnitude(final_state.angular_momentum_world),
             )?;
+            // A free tree may have zero total momentum while individual links
+            // carry large opposite linear/spin momenta. Their cancellation is
+            // not a zero roundoff scale. Retain the original link contributions
+            // at both endpoints, including the separate COM and world arms.
+            for kinematics in [&self.before[index], &after[index]] {
+                for (link_index, link) in system.model.links().iter().enumerate() {
+                    if link_index % 64 == 0 {
+                        poll(cancelled)?;
+                    }
+                    let pose = kinematics.world_from_link[link_index];
+                    let velocity = kinematics.body_twist[link_index];
+                    let body_momentum = dynamics(index, link.inertia().momentum(velocity))?;
+                    let linear = pose.rotation().rotate(body_momentum.force)?;
+                    let spin = pose
+                        .rotation()
+                        .rotate(link.inertia().inertia_com().apply(velocity.angular))?;
+                    let com_arm = pose
+                        .rotation()
+                        .rotate(link.inertia().center_of_mass().cross(body_momentum.force))?;
+                    let world_arm = pose.translation().cross(linear);
+                    linear_scale = finite(linear_scale + magnitude(linear))?;
+                    angular_scale = finite(
+                        angular_scale + magnitude(spin) + magnitude(com_arm) + magnitude(world_arm),
+                    )?;
+                }
+            }
             responses.push(response);
         }
         let roundoff = 4096.0 * f64::EPSILON;

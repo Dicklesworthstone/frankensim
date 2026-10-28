@@ -1067,3 +1067,46 @@ the original native dynamics, contact, Newton/Krylov, geometry and math owners;
 the seven shared broad-phase groups pass separately. This selected-source
 native verification uses the pinned nightly. It does not establish a full
 Cargo/DSR workspace gate; the required sibling constellation was unavailable.
+
+## Event-aware articulated trajectories
+
+`articulated_contacts::trajectory::advance_articulated_events` composes the
+original free-floating Lie-midpoint motion owner with the original simultaneous
+Coulomb contact owner. All free bases and scalar joints advance under declared
+held loads to each supplied event time, receive one simultaneous impulse solve
+at fixed poses, and continue with the accepted native velocities. Equal-time
+sets must be combined into one event; sequential resolution of simultaneous
+contacts is refused. Event-free intervals are uniformly subdivided under an
+explicit maximum smooth duration and interval budget. An event at the start or
+end is admitted. A zero-event, single-interval call reproduces the original
+smooth endpoint exactly.
+
+The returned states can begin the next window. Aggregate physical momentum is
+recomputed from actual link states about a caller-chosen fixed world origin;
+angular accounting includes spin and the moving COM's orbital contribution.
+Native external impulse, actuator work, gravity/body-wrench work, prescribed
+support work, total impact loss and smooth numerical work defects remain
+separate. Dynamic contact pairs cancel globally. Native event receipts retain
+contact determinacy and passivity evidence without inventing a heat partition.
+The shared contact admission uses uncancelled original link linear, spin and
+orbital contributions at both endpoints for its existing roundoff multiplier:
+a reaction wheel's opposite base/rotor momenta must not collapse that scale to
+zero and reject a physically valid centered impact.
+
+The window admits at most 128 systems, 4096 total links, 64 events and 4096
+common smooth intervals; each event retains the native 21-contact bound. No
+generalized dense mass matrix is assembled. Caller state is immutable, and all
+stages and native event results remain private until the final cancellation
+poll succeeds. A late invalid event, physical admission failure or cancellation
+returns no partially advanced state. G1/G3/G4 tests in
+`tests/articulated_trajectory.rs` cover analytic gravity rebound, oblique
+friction/spin, two-tree recoil, an actuated reaction wheel, moving-support work,
+multiple-event continuation/replay, and late refusal/cancellation.
+
+This owner consumes caller-located times and geometric witnesses; it does not
+establish no missed collisions, exact event times, persistent contact, a
+nonpenetrating between-event path, or full constrained-integrator accuracy.
+Moving-plane positions are supplied at each event and are not advanced twice.
+Smooth step size still requires refinement. Native world-origin angular
+impulses are translated to the selected origin, so distant-origin floating
+cancellation remains a numerical limitation rather than a hidden projection.
