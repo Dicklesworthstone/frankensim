@@ -31,8 +31,9 @@ those consume adapters; reusable contact protocols live here.
   over the WHOLE window — an enclosure for every `t`, so a
   non-overlapping pair provably cannot touch inside the window (no
   sampled instants, no tunneling between samples). Deterministic
-  sweep-and-prune on world `x` (`total_cmp`, index tie-breaks); output
-  pairs sorted; report carries checked/pruned counts and the worst
+  sweep-and-prune on the axis with the fewest closed-interval overlaps
+  (x/y/z ties, then stable body indices); output pairs sorted; report
+  carries checked/pruned counts and the worst
   motion versor-defect bound, which consumers must carry forward.
 - `NarrowRoute` / `narrow_phase(pair, route_a, route_b, iters, cx)` →
   `NarrowVerdict`: capability routing. Stage 1 routes Convex×Convex
@@ -733,3 +734,39 @@ All twelve physical contact regressions pass against this implementation. Three 
 Isolated tangent touches are not entering events. A touching stationary pair accelerating inward is reported for the response owner to resolve or refuse; no reaction is invented. Initial overlap, non-finite data and unresolvable numerical ranges refuse. Four G1/G3 groups cover hidden crossings between separated endpoints, accelerated departure/return, three distinct distance extrema, independently manufactured 3-D entry, grazing versus inward support and length/time scaling.
 
 This is floating analytic geometry, not an interval enclosure or arbitrary-shape CCD certificate. A negative minimum after entry describes the unimpeded path; mechanics must stop before entry and independently audit its actual complete segment and witnesses.
+
+## Shared bounded spatial broad phase
+
+`broad_phase` owns one deterministic closed-AABB sweep shared by certified
+motion and numerical trajectory consumers. Inputs carry unique stable IDs;
+results retain original input indices and sort canonical ID pairs. Touching
+boxes overlap. Invalid or nonfinite bounds and duplicate IDs refuse before
+enumeration. The input cap is 65,536 boxes.
+
+The sweep counts exact one-dimensional interval overlaps on each coordinate
+axis and selects the least populated axis, breaking ties x/y/z. The count
+preflights the explicit comparison budget before pair enumeration. Candidate
+storage has a separate budget: exhaustion returns a typed error with a bounded
+prefix, never a successful incomplete pair set. Cancellation is checked during
+validation, counting and enumeration and around bounded sorts. Setup is
+O(n log n); enumeration is O(n + k) for the selected axis, followed by sorting
+the retained pairs. These are operation-count bounds, not hardware timing
+claims. The certified wrapper keeps its complete unresolved-pair error list.
+
+`swept_sphere_aabb` encloses a straight centre segment with an explicit sphere
+radius and nonnegative padding, rounding finite bounds outward. It rejects
+nonrepresentable enclosures. The caller owns the assertion that its motion and
+shape lie inside the supplied boxes; a spatial overlap result alone does not
+certify a curved trajectory, collision time, contact manifold or response.
+The original certified wrapper still obtains each box and defect from its
+`CertifiedMotorTube`; extraction of the shared sweep does not change that
+authority boundary.
+
+Seven focused native G0/G3/G4 groups cover 240 independent all-pairs scene
+comparisons, permutation/replay, closed touching and signed zero, work/output
+budget refusal, outward sphere bounds, malformed inputs/body ceilings, and
+cancellation. A 4,096-body vertical fixture performs zero selected-axis pair
+comparisons instead of the 8,386,560 required by a fixed x sweep. This is
+operation-count evidence. The focused run compiles the production module with
+the original geometry owners; it does not establish a full runtime-dependent
+certified-wrapper or Cargo/DSR workspace gate.

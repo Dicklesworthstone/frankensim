@@ -26,20 +26,22 @@ use fs_ivl::Interval;
 use fs_motion::{CertifiedMotorTube, MotionError};
 use fs_query::{ConvexSeparation, ConvexSupportMap, QueryError, convex_separation};
 
-/// Solver-independent finite-patch normal laws and their generic port embedding.
-pub mod normal_patch;
 /// Analytic constant-acceleration contact timing for scalar plane gaps.
 pub mod ballistic;
+/// Shared conservative spatial sweep with explicit work budgets.
+pub mod broad_phase;
+/// Solver-independent finite-patch normal laws and their generic port embedding.
+pub mod normal_patch;
 /// Analytic continuous contact timing for linearly moving sphere centres.
 pub mod swept_sphere;
 
 /// Frictionless single-contact impulse laws with explicit admissibility and work.
 pub mod impact;
 
-/// Simultaneous frictionless normal impacts with assembled passivity admission.
-pub mod multicontact;
 /// Simultaneous normal/Coulomb events with complete contact-space coupling.
 pub mod frictional_multicontact;
+/// Simultaneous frictionless normal impacts with assembled passivity admission.
+pub mod multicontact;
 
 /// Ordered fs-matdb interface-card binding for generic contact consumers.
 pub mod interface_binding;
@@ -47,7 +49,7 @@ pub mod interface_binding;
 pub mod tangential;
 
 /// Hard bound on bodies per broad-phase call.
-pub const MAX_CONTACT_BODIES: usize = 1 << 16;
+pub const MAX_CONTACT_BODIES: usize = broad_phase::MAX_SWEEP_ITEMS;
 
 /// Teaching errors (P10): every refusal names the violated assumption.
 #[derive(Debug)]
@@ -56,6 +58,8 @@ pub enum ContactError {
     Motion(MotionError),
     /// A geometry query refused (capability, evidence, budget…).
     Query(QueryError),
+    /// Shared spatial broad-phase admission or range refusal.
+    BroadPhase(broad_phase::SweepError),
     /// Too many bodies for the deterministic broad phase.
     TooManyBodies {
         /// Bodies supplied.
@@ -119,6 +123,7 @@ impl core::fmt::Display for ContactError {
         match self {
             ContactError::Motion(e) => write!(f, "contact motion enclosure refused: {e}"),
             ContactError::Query(e) => write!(f, "contact geometry query refused: {e}"),
+            ContactError::BroadPhase(e) => write!(f, "contact spatial broad phase refused: {e}"),
             ContactError::TooManyBodies { bodies, max } => write!(
                 f,
                 "{bodies} bodies exceed the deterministic {max}-body broad-phase ceiling"
@@ -248,8 +253,9 @@ pub struct BroadPhaseReport {
 /// [`CertifiedMotorTube::box_action_over`] — an enclosure of the
 /// body's image for EVERY `t` in the window, so a pair whose boxes do
 /// not overlap provably cannot touch inside the window (no sampling,
-/// no tunneling). Sweep axis: world `x`, sorted by `total_cmp` with
-/// index tie-breaks — output is a pure function of the inputs.
+/// no tunneling). The shared spatial sweep chooses the axis with the
+/// fewest closed-interval overlaps, breaking ties x/y/z and retaining
+/// stable body indices — output is a pure function of the inputs.
 ///
 /// # Errors
 /// Window/support/body-count refusals; motion enclosure refusals;
@@ -285,58 +291,48 @@ pub fn spacetime_candidates(
         max_defect = max_defect.max(enclosure.defect);
         boxes.push(enclosure.bounds);
     }
-    // Sweep and prune on x: sort by min.x, scan forward while the
-    // next candidate's min.x is at most the current box's max.x.
-    let mut order: Vec<usize> = (0..boxes.len()).collect();
-    order.sort_unstable_by(|&a, &b| {
-        boxes[a]
-            .min
-            .x
-            .total_cmp(&boxes[b].min.x)
-            .then_with(|| a.cmp(&b))
-    });
+    let items: Vec<_> = boxes
+        .into_iter()
+        .enumerate()
+        .map(|(index, bounds)| broad_phase::SweepItem {
+            id: index as u64,
+            bounds,
+        })
+        .collect();
     let mut pairs = Vec::new();
     let mut unresolved = Vec::new();
-    let mut checked_pairs = 0usize;
-    let mut pruned_pairs = 0usize;
-    for (rank, &i) in order.iter().enumerate() {
+    let mut cancelled = || cx.checkpoint().is_err();
+    let scan = broad_phase::visit_sweep(&items, usize::MAX, &mut cancelled, |candidate| {
+        let pair = (candidate.index_a, candidate.index_b);
+        if pairs.len() < max_pairs {
+            pairs.push(pair);
+        } else {
+            unresolved.push(pair);
+        }
+        true
+    })
+    .map_err(|error| match error {
+        broad_phase::SweepError::Cancelled => ContactError::Cancelled,
+        other => ContactError::BroadPhase(other),
+    })?;
+    if !unresolved.is_empty() {
+        unresolved.sort_unstable();
         if cx.checkpoint().is_err() {
             return Err(ContactError::Cancelled);
         }
-        for (row_checked, &j) in order.iter().skip(rank + 1).enumerate() {
-            if boxes[j].min.x > boxes[i].max.x {
-                // Sorted by min.x: every later body starts even
-                // further right; the rest of this row is pruned.
-                pruned_pairs += order.len() - rank - 1 - row_checked;
-                break;
-            }
-            checked_pairs += 1;
-            let overlap_yz = boxes[i].min.y <= boxes[j].max.y
-                && boxes[j].min.y <= boxes[i].max.y
-                && boxes[i].min.z <= boxes[j].max.z
-                && boxes[j].min.z <= boxes[i].max.z;
-            if overlap_yz {
-                let pair = (i.min(j), i.max(j));
-                if pairs.len() < max_pairs {
-                    pairs.push(pair);
-                } else {
-                    unresolved.push(pair);
-                }
-            }
-        }
-    }
-    if !unresolved.is_empty() {
-        unresolved.sort_unstable();
         return Err(ContactError::CandidateBudgetExhausted {
             max_pairs,
             unresolved,
         });
     }
     pairs.sort_unstable();
+    if cx.checkpoint().is_err() {
+        return Err(ContactError::Cancelled);
+    }
     Ok(BroadPhaseReport {
         pairs,
-        checked_pairs,
-        pruned_pairs,
+        checked_pairs: scan.checked_pairs,
+        pruned_pairs: scan.pruned_pairs,
         max_defect,
     })
 }
