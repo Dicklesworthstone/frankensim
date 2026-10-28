@@ -1,0 +1,38 @@
+frankensim.matdb-source.v1
+observation	table-context	QUIKRETE 5000 product 1007 packaged concrete mix	Producer typical-property reference	Reference facts for this commercial mix; mixture recipe, batch, air content and actual test temperature/pressure are unstated. Installation and curing guidance is not a numeric test-temperature validity interval. Published SI values are retained without reconciling rounded imperial alternatives; no uncertainty or structural design allowable is supplied.
+observation	fresh-unit-weight	Freshly mixed QUIKRETE 5000	ASTM C138, Table 1	The stated approximate unit weight is a fresh concrete measurement. It is not the density of cured, oven-dry or saturated concrete. Bag mass divided by yield is not used as a density measurement.
+observation	cylinder-strength	Hardened QUIKRETE 5000 specimens	ASTM C39, Table 1	Source reports typical cylinder compressive strengths at four discrete ages. Exact water/cement ratio, curing history, loading rate and specimen dimensions are unstated. Source ages are retained as labelled; no strength-age interpolation, maturity law, elastic modulus, creep or thermal property is inferred.
+scalar	fresh-density	table-context,fresh-unit-weight	density	2242.5	kg/m^3	constant
+uncertainty	fresh-density	unstated	-	-	-	-
+validity	fresh-density	source_product_quikrete_5000_1007	1	1	1
+validity	fresh-density	source_temperature_known	0	0	1
+validity	fresh-density	source_pressure_known	0	0	1
+validity	fresh-density	fresh_mixture	1	1	1
+scalar	compression-1d	table-context,cylinder-strength	compression_strength	10.3	MPa	constant
+uncertainty	compression-1d	unstated	-	-	-	-
+validity	compression-1d	source_product_quikrete_5000_1007	1	1	1
+validity	compression-1d	source_temperature_known	0	0	1
+validity	compression-1d	source_pressure_known	0	0	1
+validity	compression-1d	fresh_mixture	0	0	1
+validity	compression-1d	reported_age	86400	86400	s
+scalar	compression-3d	table-context,cylinder-strength	compression_strength	17.2	MPa	constant
+uncertainty	compression-3d	unstated	-	-	-	-
+validity	compression-3d	source_product_quikrete_5000_1007	1	1	1
+validity	compression-3d	source_temperature_known	0	0	1
+validity	compression-3d	source_pressure_known	0	0	1
+validity	compression-3d	fresh_mixture	0	0	1
+validity	compression-3d	reported_age	259200	259200	s
+scalar	compression-7d	table-context,cylinder-strength	compression_strength	24.1	MPa	constant
+uncertainty	compression-7d	unstated	-	-	-	-
+validity	compression-7d	source_product_quikrete_5000_1007	1	1	1
+validity	compression-7d	source_temperature_known	0	0	1
+validity	compression-7d	source_pressure_known	0	0	1
+validity	compression-7d	fresh_mixture	0	0	1
+validity	compression-7d	reported_age	604800	604800	s
+scalar	compression-28d	table-context,cylinder-strength	compression_strength	34.4	MPa	constant
+uncertainty	compression-28d	unstated	-	-	-	-
+validity	compression-28d	source_product_quikrete_5000_1007	1	1	1
+validity	compression-28d	source_temperature_known	0	0	1
+validity	compression-28d	source_pressure_known	0	0	1
+validity	compression-28d	fresh_mixture	0	0	1
+validity	compression-28d	reported_age	2419200	2419200	s

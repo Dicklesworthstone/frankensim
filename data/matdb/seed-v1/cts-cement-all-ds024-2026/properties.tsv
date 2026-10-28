@@ -1,0 +1,90 @@
+frankensim.matdb-source.v1
+observation	product-context	Rapid Set CEMENT ALL repair mortar and non-shrink grout	CTS datasheet DS_024_EN_050526K	Blend of hydraulic cement and fine aggregates; not neat cement paste. Typical laboratory values at the source SI reference 21 C (also rounded as 70 F), with flow consistency 102 under ASTM C1437. Exact mixture water content, specimen moisture history and pressure are not supplied. The service/application temperature limits are not property validity ranges; no continuous cure, hydration, modulus or damage law is inferred.
+observation	compression-test	CEMENT ALL compressive specimens	ASTM C109 modified, pinned PDF typical physical data	Five discrete compressive-strength observations; the one-hour value explicitly means one hour after final set. Later ages have no explicit zero-time definition in the source and require source-age-origin-known=0. The early observation instead requires source-age-origin-known=1 and age-after-final-set. No interpolation across age origins is allowed.
+observation	flexural-test	CEMENT ALL flexural specimens	ASTM C348, pinned PDF DS_024_EN_050526K	Two discrete flexural strengths. This pinned PDF names C348; the live HTML page names C78, so this pack follows the PDF and does not silently combine the two methods. Flexural strength is not a tensile modulus or direct tensile strength.
+observation	splitting-test	CEMENT ALL splitting specimens	ASTM C496, pinned PDF typical physical data	Splitting tensile strengths are kept distinct from uniaxial tensile strength. No specimen dimensions or test rate are inferred from the standard name.
+observation	setting-test	CEMENT ALL setting specimens	ASTM C191 modified, pinned PDF typical physical data	Initial and final setting times are test results at one specified source condition. They are not an executable degree-of-cure law or bounds for arbitrary temperatures and water ratios.
+scalar	compression-1h-after-final-set	product-context,compression-test	compression_strength	20.7	MPa	constant
+uncertainty	compression-1h-after-final-set	unstated	-	-	-	-
+validity	compression-1h-after-final-set	source_product_cement_all_ds024_2026	1	1	1
+validity	compression-1h-after-final-set	temperature	294.15	294.15	K
+validity	compression-1h-after-final-set	flow_consistency	102	102	1
+validity	compression-1h-after-final-set	source_pressure_known	0	0	1
+validity	compression-1h-after-final-set	source_age_origin_known	1	1	1
+validity	compression-1h-after-final-set	age_after_final_set	3600	3600	s
+scalar	compression-3h	product-context,compression-test	compression_strength	34.5	MPa	constant
+uncertainty	compression-3h	unstated	-	-	-	-
+validity	compression-3h	source_product_cement_all_ds024_2026	1	1	1
+validity	compression-3h	temperature	294.15	294.15	K
+validity	compression-3h	flow_consistency	102	102	1
+validity	compression-3h	source_pressure_known	0	0	1
+validity	compression-3h	source_age_origin_known	0	0	1
+validity	compression-3h	reported_age	10800	10800	s
+scalar	compression-24h	product-context,compression-test	compression_strength	41.4	MPa	constant
+uncertainty	compression-24h	unstated	-	-	-	-
+validity	compression-24h	source_product_cement_all_ds024_2026	1	1	1
+validity	compression-24h	temperature	294.15	294.15	K
+validity	compression-24h	flow_consistency	102	102	1
+validity	compression-24h	source_pressure_known	0	0	1
+validity	compression-24h	source_age_origin_known	0	0	1
+validity	compression-24h	reported_age	86400	86400	s
+scalar	compression-7d	product-context,compression-test	compression_strength	48.3	MPa	constant
+uncertainty	compression-7d	unstated	-	-	-	-
+validity	compression-7d	source_product_cement_all_ds024_2026	1	1	1
+validity	compression-7d	temperature	294.15	294.15	K
+validity	compression-7d	flow_consistency	102	102	1
+validity	compression-7d	source_pressure_known	0	0	1
+validity	compression-7d	source_age_origin_known	0	0	1
+validity	compression-7d	reported_age	604800	604800	s
+scalar	compression-28d	product-context,compression-test	compression_strength	62.1	MPa	constant
+uncertainty	compression-28d	unstated	-	-	-	-
+validity	compression-28d	source_product_cement_all_ds024_2026	1	1	1
+validity	compression-28d	temperature	294.15	294.15	K
+validity	compression-28d	flow_consistency	102	102	1
+validity	compression-28d	source_pressure_known	0	0	1
+validity	compression-28d	source_age_origin_known	0	0	1
+validity	compression-28d	reported_age	2419200	2419200	s
+scalar	flexural-strength-7d	product-context,flexural-test	flexural_strength	4.14	MPa	constant
+uncertainty	flexural-strength-7d	unstated	-	-	-	-
+validity	flexural-strength-7d	source_product_cement_all_ds024_2026	1	1	1
+validity	flexural-strength-7d	temperature	294.15	294.15	K
+validity	flexural-strength-7d	flow_consistency	102	102	1
+validity	flexural-strength-7d	source_pressure_known	0	0	1
+validity	flexural-strength-7d	source_age_origin_known	0	0	1
+validity	flexural-strength-7d	reported_age	604800	604800	s
+scalar	splitting-tensile-strength-7d	product-context,splitting-test	splitting_tensile_strength	4.82	MPa	constant
+uncertainty	splitting-tensile-strength-7d	unstated	-	-	-	-
+validity	splitting-tensile-strength-7d	source_product_cement_all_ds024_2026	1	1	1
+validity	splitting-tensile-strength-7d	temperature	294.15	294.15	K
+validity	splitting-tensile-strength-7d	flow_consistency	102	102	1
+validity	splitting-tensile-strength-7d	source_pressure_known	0	0	1
+validity	splitting-tensile-strength-7d	source_age_origin_known	0	0	1
+validity	splitting-tensile-strength-7d	reported_age	604800	604800	s
+scalar	flexural-strength-28d	product-context,flexural-test	flexural_strength	5.51	MPa	constant
+uncertainty	flexural-strength-28d	unstated	-	-	-	-
+validity	flexural-strength-28d	source_product_cement_all_ds024_2026	1	1	1
+validity	flexural-strength-28d	temperature	294.15	294.15	K
+validity	flexural-strength-28d	flow_consistency	102	102	1
+validity	flexural-strength-28d	source_pressure_known	0	0	1
+validity	flexural-strength-28d	source_age_origin_known	0	0	1
+validity	flexural-strength-28d	reported_age	2419200	2419200	s
+scalar	splitting-tensile-strength-28d	product-context,splitting-test	splitting_tensile_strength	6.06	MPa	constant
+uncertainty	splitting-tensile-strength-28d	unstated	-	-	-	-
+validity	splitting-tensile-strength-28d	source_product_cement_all_ds024_2026	1	1	1
+validity	splitting-tensile-strength-28d	temperature	294.15	294.15	K
+validity	splitting-tensile-strength-28d	flow_consistency	102	102	1
+validity	splitting-tensile-strength-28d	source_pressure_known	0	0	1
+validity	splitting-tensile-strength-28d	source_age_origin_known	0	0	1
+validity	splitting-tensile-strength-28d	reported_age	2419200	2419200	s
+scalar	initial-set	product-context,setting-test	initial_setting_time	900	s	constant
+uncertainty	initial-set	unstated	-	-	-	-
+validity	initial-set	source_product_cement_all_ds024_2026	1	1	1
+validity	initial-set	temperature	294.15	294.15	K
+validity	initial-set	flow_consistency	102	102	1
+validity	initial-set	source_pressure_known	0	0	1
+scalar	final-set	product-context,setting-test	final_setting_time	2100	s	constant
+uncertainty	final-set	unstated	-	-	-	-
+validity	final-set	source_product_cement_all_ds024_2026	1	1	1
+validity	final-set	temperature	294.15	294.15	K
+validity	final-set	flow_consistency	102	102	1
+validity	final-set	source_pressure_known	0	0	1

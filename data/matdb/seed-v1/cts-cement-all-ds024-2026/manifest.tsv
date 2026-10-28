@@ -1,0 +1,18 @@
+frankensim.matdb-manifest.v3
+pack_id	cts-cement-all-ds024-2026
+redistribution	permitted	Selected attributed numerical facts and original condition notes only; source prose and table layout are not redistributed
+citation	CTS Cement, Rapid Set CEMENT ALL, product datasheet DS_024_EN_050526K, typical physical data, accessed 2026-10-28; https://cdn.mediavalet.com/usca/ctscement/G4_x-FtPFkmiw_hs5Yeo-Q/_L9RLZZOYEeRb3CqpVGn3g/Original/CEMENT_ALL_Datasheet_DS_024_EN.pdf ; manufacturer landing page https://www.ctscement.com/datasheet/CEMENT_ALL_Datasheet_DS_024_EN
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	cement-all	properties.tsv	material-tsv-v1
+property	compression_strength	compression-strength	dimensional
+property	flexural_strength	flexural-strength	dimensional
+property	splitting_tensile_strength	splitting-tensile-strength	dimensional
+property	initial_setting_time	initial-setting-time	dimensional
+property	final_setting_time	final-setting-time	dimensional
+axis	source_product_cement_all_ds024_2026	source-product-cement-all-ds024-2026	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	flow_consistency	flow-consistency	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	reported_age	reported-age	dimensional
+axis	source_age_origin_known	source-age-origin-known	dimensional
+axis	age_after_final_set	age-after-final-set	dimensional
