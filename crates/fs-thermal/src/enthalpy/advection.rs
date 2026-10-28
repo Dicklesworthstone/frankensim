@@ -15,6 +15,10 @@
 #[path = "advection/species.rs"]
 pub mod species;
 
+/// Opt-in entropy transport on the same accepted upwind trajectory.
+#[path = "advection/entropy.rs"]
+pub mod entropy;
+
 use std::collections::{BTreeMap, BTreeSet};
 use super::{CellId, DepositionError, DepositionObserver, DepositionSimulation, Event, HeatTransfer, MaterialId};
 
@@ -136,6 +140,7 @@ pub struct Advected<O> {
     boundary_pending: Option<BoundaryPending>,
     pending: Option<Pending>,
     audit: AdvectionAudit,
+    entropy: Option<entropy::EntropyState>,
 }
 
 fn finite(x: f64) -> Result<f64, DepositionError> {
@@ -157,7 +162,7 @@ impl<O> Advected<O> {
         }
         flows.sort_by_key(|f| f.id);
         Ok(Self { inner, flows, boundaries: Vec::new(), stationary_species: None, boundary_pending: None,
-            pending: None, audit: AdvectionAudit::default() })
+            pending: None, audit: AdvectionAudit::default(), entropy: None })
     }
     /// Replace the complete inlet/outlet data at an accepted endpoint. The
     /// declared ceiling covers interior AND boundary connections. Cell-level
@@ -214,12 +219,19 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
         self.pending = None;
         self.boundary_pending = None;
         self.audit = AdvectionAudit::default();
+        if let Some(entropy) = &mut self.entropy { entropy.reset(); }
         Ok(())
     }
     fn sources(&mut self, thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> Result<(), DepositionError>)
         -> Result<BTreeMap<CellId, f64>, Self::Error> {
         check()?;
+        if self.entropy.is_some() && self.stationary_species.is_some() {
+            return Err(invalid("thermal advection entropy does not cover stationary species mixing").into());
+        }
+        if let Some(entropy) = &mut self.entropy {
+            entropy.capture(thermal, check)?;
+        }
         if let Some(species) = &self.stationary_species {
             species.validate_laws(thermal, &self.boundaries)?;
         }
@@ -362,6 +374,9 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
         self.audit.external_enthalpy_j = finite(self.audit.external_enthalpy_j + finite(dt*pending.external_power_w)?)?;
         self.audit.maximum_courant = self.audit.maximum_courant.max(finite(dt*pending.decay_per_s)?);
         self.audit.substeps = self.audit.substeps.checked_add(1).ok_or(DepositionError::Arithmetic)?;
+        if let Some(entropy) = &mut self.entropy {
+            entropy.record(thermal, &self.flows, &self.boundaries, old, dt, check)?;
+        }
         self.inner.step(start_s, dt, old, thermal, check)
     }
 }
