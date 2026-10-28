@@ -87,6 +87,27 @@ pub fn close_generated_simplex(fractions: &mut [f64]) -> Result<(), DepositionEr
             return Err(invalid("generated species closure left the simplex"));
         }
     }
+    // Adding a rounded total residual to the largest entry can alternate
+    // between sums immediately below and above one. Close a component against
+    // its actual prefix instead. A suffix is retained for a tiny final species
+    // that cannot absorb a unit-scale rounding correction without distortion.
+    // Only relative roundoff changes are allowed, and the actual ordered sum
+    // remains the admission gate; no positive trace or exact zero is erased.
+    let tolerance = 32.0 * f64::EPSILON * fractions.len() as f64;
+    for index in (0..fractions.len()).rev() {
+        let old = fractions[index];
+        if old == 0.0 { continue; }
+        let prefix: f64 = fractions[..index].iter().sum();
+        let suffix: f64 = fractions[index + 1..].iter().sum();
+        let closed = (1.0 - suffix) - prefix;
+        if closed.is_finite() && closed > 0.0 && closed <= 1.0
+            && (closed - old).abs() <= tolerance * old
+        {
+            fractions[index] = closed;
+            if fractions.iter().sum::<f64>() == 1.0 { return Ok(()); }
+            fractions[index] = old;
+        }
+    }
     Err(invalid("generated species simplex cannot represent unit sum"))
 }
 

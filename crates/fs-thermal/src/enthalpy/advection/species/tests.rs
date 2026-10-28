@@ -5,6 +5,35 @@ use crate::enthalpy::{
     StepConfig, ThermalLaw, TimedEvent,
 };
 
+#[test]
+fn generated_simplex_closes_roundoff_oscillation_without_distorting_trace_species() {
+    // Actual generated reactor states: correcting only the largest entry
+    // alternates between adjacent sums on either side of one.
+    for original in [
+        [0.6237127367872349, 0.126287263212765, 0.24999999999999992],
+        [0.8623144793038832, 0.12469282590474756, 0.012992694791369117],
+    ] {
+        for trace in [0.0, 1e-30] {
+            let mut fractions = original.to_vec();
+            fractions.extend([trace, 0.0]);
+            let before = fractions.clone();
+            close_generated_simplex(&mut fractions).unwrap();
+            assert_eq!(fractions.iter().sum::<f64>(), 1.0);
+            assert_eq!(fractions[3].to_bits(), trace.to_bits());
+            assert_eq!(fractions[4], 0.0);
+            let tolerance = 32.0 * f64::EPSILON * fractions.len() as f64;
+            for (&old, &new) in before.iter().zip(&fractions) {
+                assert!((new - old).abs() <= tolerance * old);
+                assert_eq!(new > 0.0, old > 0.0);
+            }
+            let closed = fractions.clone();
+            close_generated_simplex(&mut fractions).unwrap();
+            assert_eq!(fractions, closed);
+        }
+    }
+    assert!(close_generated_simplex(&mut [0.2, 0.2, 0.2]).is_err());
+}
+
 struct MixtureLaw {
     names: Vec<String>,
     fractions: Vec<f64>,
