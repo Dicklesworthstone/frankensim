@@ -1,0 +1,22 @@
+frankensim.matdb-manifest.v3
+pack_id	egger-p5-particleboard-22mm-2026
+redistribution	permitted	Selected attributed numerical facts and original notes only; source document and table layout are not redistributed
+citation	EGGER, Raw Particleboards E1 P5 CE EAC, Technical Data Sheet Rec.225, approval stamp 08/04/2026, pages 1-2, greater-than-20-to-25 mm band selected at nominal 22 mm; https://binary.egger.link/pis/f648a113-b6ca-47c5-b6f4-3dd1841ae078/Technical_datasheet_E1_P5_CE_TD-225_English ; manufacturer product https://www.egger.com/en/building/range/products/eggerp5?country=GB ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	egger-p5-22	properties.tsv	material-tsv-v1
+property	bending_modulus	bending-modulus-declared-board-mean	dimensional
+property	bending_strength	bending-strength-declared-board-mean	dimensional
+property	internal_bond	internal-bond-strength-declared-board-mean	dimensional
+property	surface_soundness	surface-soundness-declared-board-mean	dimensional
+property	thickness_swelling	thickness-swelling-24h-declared-board-mean	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	vapour_resistance	water-vapour-diffusion-resistance-factor	dimensional
+axis	source_product_egger_p5_rec225_2026	source-product-egger-p5-rec225-2026	dimensional
+axis	nominal_thickness	nominal-thickness	dimensional
+axis	source_temperature_known	source-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	after_en1087_1_boil	after-en1087-1-boil	dimensional
+axis	en317_immersion	en317-immersion	dimensional
+axis	immersion_duration	immersion-duration	dimensional
+axis	source_bulk_density_reference	source-bulk-density-reference	dimensional
+axis	source_vapour_condition_wet	source-vapour-condition-wet	dimensional

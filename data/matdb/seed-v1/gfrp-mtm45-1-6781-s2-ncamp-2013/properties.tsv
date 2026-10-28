@@ -1,0 +1,239 @@
+frankensim.matdb-source.v1
+observation	construction	ACG MTM45-1 epoxy / style 6781 S2 glass fabric, nominal 35% resin by weight prepreg, NCAMP NMS 451/12	CAM-RP-2009-001 Rev C, baseline MH cycle under NPS 81451; panels per ACGP 1001 Rev B; nominal fiber areal weight 300 g/m2	The measured means are retained, not the separate values normalized to 0.0101 in cured ply thickness. Fiber volume and density are test-group summaries, not a single common specimen. Warp, fill and shear coupon groups remain separate. SI stress conversions use 1 psi = 6894.757293168 Pa. No E3, G13, G23, tensile Poisson ratios, orthotropic tensor, damage law or design allowables are inferred. Reported specimen scatter is retained in observation notes; runtime uncertainty remains unstated because confidence semantics are not supplied for these means.
+observation	conditioning	MH-cured laminate CTD and RTD dry conditions; ETW and ETW2 equilibrated wet conditions	Section 1.5.5 p. 24 and individual summary nominal test temperatures -65, 75, 200 and 250 F	Dry specimens were conditioned at 160 +/- 5 F for 120-130 h, then stored sealed warm or with desiccant. Wet specimens were equilibrated at 160 +/- 5 F and 85 +/- 5% RH under ASTM D5229 Procedure C. Stored source-conditioning-temperature is the nominal 160 F, not the mechanical test temperature. Published test tolerance is +/- 5 F; only the nominal tabulated points are exposed, not an interpolation or tolerance-wide constant constitutive law. No dry moisture mass fraction, final wet water content or wet/dry conversion law is inferred.
+observation	warp	Coupon family 1: [0]6S, twelve-ply warp-tension laminates; fiber volume 47.42%, resin volume 52.58%, cured ply thickness 0.0102-0.0107 in	Section 2.3.1 p. 31, ASTM D3039-00; modulus fit 1000-3000 microstrain; measured means from three prepreg lots	At -65/75/200/250 F respectively: E1t 4.21/4.14/3.80/3.68 Msi (n=19 each; CV 1.46/1.35/1.83/1.60%); tensile strength 90.05/79.92/56.11/56.18 ksi (n=19 each; CV 3.48/3.16/2.45/4.21%). First two conditions are dry and last two wet. Group density 1.79 g/cc is from separate physical tests; its test temperature and conditioning are unstated, so source-group-density is not a density(T,moisture) law.
+observation	fill	Coupon family 2: [90]6S, twelve-ply fill-tension laminates; fiber volume 46.28%, resin volume 53.72%, cured ply thickness 0.0100-0.0105 in	Section 2.3.2 p. 32, ASTM D3039-00; modulus fit 1000-3000 microstrain; measured means from three prepreg lots	At -65/75/200/250 F respectively: E2t 4.06/3.99/3.69/3.53 Msi (n=19/19/19/24; CV 2.05/2.01/2.26/2.78%); tensile strength 88.17/78.92/56.07/54.10 ksi (n=19/19/19/22; CV 2.87/5.00/4.43/3.18%). First two conditions dry, last two wet. Group density 1.79 g/cc has independently unstated physical-test temperature and conditioning.
+observation	shear	Coupon family 3: [+/-45]2S, eight-ply shear laminates; fiber volume 46.15%, resin volume 53.85%, cured ply thickness 0.0100-0.0107 in	Section 2.3.5 p. 35, ASTM D3518-94; shear-modulus fit 1000-6000 microstrain; measured means from three prepreg lots, n=19 per condition	At -65/75/200/250 F respectively: G12 0.71/0.55/0.34/0.27 Msi (CV 2.26/1.07/1.50/3.68%); 5% strain shear stress 12.29/9.16/5.64/4.57 ksi (CV 1.58/1.44/2.18/3.97%); 0.2% offset shear stress 7.25/5.45/3.38/2.66 ksi (CV 1.27/0.97/1.49/3.36%). Strain-limited and offset values are not ultimate shear failure strengths or points on a common specimen stress-strain curve. Group density 1.79 g/cc has independently unstated physical-test temperature and conditioning.
+curve	warp-modulus-dry	construction,conditioning,warp	tensile_modulus_warp	temperature	K	GPa	219.2611111111111:29.026928204237283,297.0388888888889:28.54429519371552	tabulated
+uncertainty	warp-modulus-dry	unstated	-	-	-	-
+validity	warp-modulus-dry	temperature	219.2611111111111	297.0388888888889	K
+validity	warp-modulus-dry	source_mtm45_1_6781_35rc	1	1	1
+validity	warp-modulus-dry	source_cure_cycle_mh	1	1	1
+validity	warp-modulus-dry	source_measured_not_normalized	1	1	1
+validity	warp-modulus-dry	source_coupon_family	1	1	1
+validity	warp-modulus-dry	source_ply_count	12	12	1
+validity	warp-modulus-dry	source_fiber_volume	0.4742	0.4742	1
+validity	warp-modulus-dry	source_cured_ply_thickness_min	0.00025908	0.00025908	m
+validity	warp-modulus-dry	source_cured_ply_thickness_max	0.00027178	0.00027178	m
+validity	warp-modulus-dry	source_dry_condition	1	1	1
+validity	warp-modulus-dry	source_wet_equilibrium	0	0	1
+validity	warp-modulus-dry	source_conditioning_temperature	344.26111111111106	344.26111111111106	K
+curve	warp-modulus-wet	construction,conditioning,warp	tensile_modulus_warp	temperature	K	GPa	366.4833333333333:26.2000777140384,394.26111111111106:25.372706838858242	tabulated
+uncertainty	warp-modulus-wet	unstated	-	-	-	-
+validity	warp-modulus-wet	temperature	366.4833333333333	394.26111111111106	K
+validity	warp-modulus-wet	source_mtm45_1_6781_35rc	1	1	1
+validity	warp-modulus-wet	source_cure_cycle_mh	1	1	1
+validity	warp-modulus-wet	source_measured_not_normalized	1	1	1
+validity	warp-modulus-wet	source_coupon_family	1	1	1
+validity	warp-modulus-wet	source_ply_count	12	12	1
+validity	warp-modulus-wet	source_fiber_volume	0.4742	0.4742	1
+validity	warp-modulus-wet	source_cured_ply_thickness_min	0.00025908	0.00025908	m
+validity	warp-modulus-wet	source_cured_ply_thickness_max	0.00027178	0.00027178	m
+validity	warp-modulus-wet	source_dry_condition	0	0	1
+validity	warp-modulus-wet	source_wet_equilibrium	1	1	1
+validity	warp-modulus-wet	source_conditioning_temperature	344.26111111111106	344.26111111111106	K
+validity	warp-modulus-wet	source_conditioning_relative_humidity	0.85	0.85	1
+curve	warp-strength-dry	construction,conditioning,warp	tensile_strength_warp	temperature	K	MPa	219.2611111111111:620.8728942497784,297.0388888888889:551.0290028699866	tabulated
+uncertainty	warp-strength-dry	unstated	-	-	-	-
+validity	warp-strength-dry	temperature	219.2611111111111	297.0388888888889	K
+validity	warp-strength-dry	source_mtm45_1_6781_35rc	1	1	1
+validity	warp-strength-dry	source_cure_cycle_mh	1	1	1
+validity	warp-strength-dry	source_measured_not_normalized	1	1	1
+validity	warp-strength-dry	source_coupon_family	1	1	1
+validity	warp-strength-dry	source_ply_count	12	12	1
+validity	warp-strength-dry	source_fiber_volume	0.4742	0.4742	1
+validity	warp-strength-dry	source_cured_ply_thickness_min	0.00025908	0.00025908	m
+validity	warp-strength-dry	source_cured_ply_thickness_max	0.00027178	0.00027178	m
+validity	warp-strength-dry	source_dry_condition	1	1	1
+validity	warp-strength-dry	source_wet_equilibrium	0	0	1
+validity	warp-strength-dry	source_conditioning_temperature	344.26111111111106	344.26111111111106	K
+curve	warp-strength-wet	construction,conditioning,warp	tensile_strength_warp	temperature	K	MPa	366.4833333333333:386.8648317196565,394.26111111111106:387.3474647301783	tabulated
+uncertainty	warp-strength-wet	unstated	-	-	-	-
+validity	warp-strength-wet	temperature	366.4833333333333	394.26111111111106	K
+validity	warp-strength-wet	source_mtm45_1_6781_35rc	1	1	1
+validity	warp-strength-wet	source_cure_cycle_mh	1	1	1
+validity	warp-strength-wet	source_measured_not_normalized	1	1	1
+validity	warp-strength-wet	source_coupon_family	1	1	1
+validity	warp-strength-wet	source_ply_count	12	12	1
+validity	warp-strength-wet	source_fiber_volume	0.4742	0.4742	1
+validity	warp-strength-wet	source_cured_ply_thickness_min	0.00025908	0.00025908	m
+validity	warp-strength-wet	source_cured_ply_thickness_max	0.00027178	0.00027178	m
+validity	warp-strength-wet	source_dry_condition	0	0	1
+validity	warp-strength-wet	source_wet_equilibrium	1	1	1
+validity	warp-strength-wet	source_conditioning_temperature	344.26111111111106	344.26111111111106	K
+validity	warp-strength-wet	source_conditioning_relative_humidity	0.85	0.85	1
+curve	fill-modulus-dry	construction,conditioning,fill	tensile_modulus_fill	temperature	K	GPa	219.2611111111111:27.99271461026208,297.0388888888889:27.510081599740325	tabulated
+uncertainty	fill-modulus-dry	unstated	-	-	-	-
+validity	fill-modulus-dry	temperature	219.2611111111111	297.0388888888889	K
+validity	fill-modulus-dry	source_mtm45_1_6781_35rc	1	1	1
+validity	fill-modulus-dry	source_cure_cycle_mh	1	1	1
+validity	fill-modulus-dry	source_measured_not_normalized	1	1	1
+validity	fill-modulus-dry	source_coupon_family	2	2	1
+validity	fill-modulus-dry	source_ply_count	12	12	1
+validity	fill-modulus-dry	source_fiber_volume	0.4628	0.4628	1
+validity	fill-modulus-dry	source_cured_ply_thickness_min	0.000254	0.000254	m
+validity	fill-modulus-dry	source_cured_ply_thickness_max	0.0002667	0.0002667	m
+validity	fill-modulus-dry	source_dry_condition	1	1	1
+validity	fill-modulus-dry	source_wet_equilibrium	0	0	1
+validity	fill-modulus-dry	source_conditioning_temperature	344.26111111111106	344.26111111111106	K
+curve	fill-modulus-wet	construction,conditioning,fill	tensile_modulus_fill	temperature	K	GPa	366.4833333333333:25.44165441178992,394.26111111111106:24.33849324488304	tabulated
+uncertainty	fill-modulus-wet	unstated	-	-	-	-
+validity	fill-modulus-wet	temperature	366.4833333333333	394.26111111111106	K
+validity	fill-modulus-wet	source_mtm45_1_6781_35rc	1	1	1
+validity	fill-modulus-wet	source_cure_cycle_mh	1	1	1
+validity	fill-modulus-wet	source_measured_not_normalized	1	1	1
+validity	fill-modulus-wet	source_coupon_family	2	2	1
+validity	fill-modulus-wet	source_ply_count	12	12	1
+validity	fill-modulus-wet	source_fiber_volume	0.4628	0.4628	1
+validity	fill-modulus-wet	source_cured_ply_thickness_min	0.000254	0.000254	m
+validity	fill-modulus-wet	source_cured_ply_thickness_max	0.0002667	0.0002667	m
+validity	fill-modulus-wet	source_dry_condition	0	0	1
+validity	fill-modulus-wet	source_wet_equilibrium	1	1	1
+validity	fill-modulus-wet	source_conditioning_temperature	344.26111111111106	344.26111111111106	K
+validity	fill-modulus-wet	source_conditioning_relative_humidity	0.85	0.85	1
+curve	fill-strength-dry	construction,conditioning,fill	tensile_strength_fill	temperature	K	MPa	219.2611111111111:607.9107505386226,297.0388888888889:544.1342455768186	tabulated
+uncertainty	fill-strength-dry	unstated	-	-	-	-
+validity	fill-strength-dry	temperature	219.2611111111111	297.0388888888889	K
+validity	fill-strength-dry	source_mtm45_1_6781_35rc	1	1	1
+validity	fill-strength-dry	source_cure_cycle_mh	1	1	1
+validity	fill-strength-dry	source_measured_not_normalized	1	1	1
+validity	fill-strength-dry	source_coupon_family	2	2	1
+validity	fill-strength-dry	source_ply_count	12	12	1
+validity	fill-strength-dry	source_fiber_volume	0.4628	0.4628	1
+validity	fill-strength-dry	source_cured_ply_thickness_min	0.000254	0.000254	m
+validity	fill-strength-dry	source_cured_ply_thickness_max	0.0002667	0.0002667	m
+validity	fill-strength-dry	source_dry_condition	1	1	1
+validity	fill-strength-dry	source_wet_equilibrium	0	0	1
+validity	fill-strength-dry	source_conditioning_temperature	344.26111111111106	344.26111111111106	K
+curve	fill-strength-wet	construction,conditioning,fill	tensile_strength_fill	temperature	K	MPa	366.4833333333333:386.58904142792977,394.26111111111106:373.0063695603888	tabulated
+uncertainty	fill-strength-wet	unstated	-	-	-	-
+validity	fill-strength-wet	temperature	366.4833333333333	394.26111111111106	K
+validity	fill-strength-wet	source_mtm45_1_6781_35rc	1	1	1
+validity	fill-strength-wet	source_cure_cycle_mh	1	1	1
+validity	fill-strength-wet	source_measured_not_normalized	1	1	1
+validity	fill-strength-wet	source_coupon_family	2	2	1
+validity	fill-strength-wet	source_ply_count	12	12	1
+validity	fill-strength-wet	source_fiber_volume	0.4628	0.4628	1
+validity	fill-strength-wet	source_cured_ply_thickness_min	0.000254	0.000254	m
+validity	fill-strength-wet	source_cured_ply_thickness_max	0.0002667	0.0002667	m
+validity	fill-strength-wet	source_dry_condition	0	0	1
+validity	fill-strength-wet	source_wet_equilibrium	1	1	1
+validity	fill-strength-wet	source_conditioning_temperature	344.26111111111106	344.26111111111106	K
+validity	fill-strength-wet	source_conditioning_relative_humidity	0.85	0.85	1
+curve	shear-modulus-dry	construction,conditioning,shear	shear_modulus_in_plane	temperature	K	GPa	219.2611111111111:4.89527767814928,297.0388888888889:3.7921165112424005	tabulated
+uncertainty	shear-modulus-dry	unstated	-	-	-	-
+validity	shear-modulus-dry	temperature	219.2611111111111	297.0388888888889	K
+validity	shear-modulus-dry	source_mtm45_1_6781_35rc	1	1	1
+validity	shear-modulus-dry	source_cure_cycle_mh	1	1	1
+validity	shear-modulus-dry	source_measured_not_normalized	1	1	1
+validity	shear-modulus-dry	source_coupon_family	3	3	1
+validity	shear-modulus-dry	source_ply_count	8	8	1
+validity	shear-modulus-dry	source_fiber_volume	0.4615	0.4615	1
+validity	shear-modulus-dry	source_cured_ply_thickness_min	0.000254	0.000254	m
+validity	shear-modulus-dry	source_cured_ply_thickness_max	0.00027178	0.00027178	m
+validity	shear-modulus-dry	source_dry_condition	1	1	1
+validity	shear-modulus-dry	source_wet_equilibrium	0	0	1
+validity	shear-modulus-dry	source_conditioning_temperature	344.26111111111106	344.26111111111106	K
+curve	shear-modulus-wet	construction,conditioning,shear	shear_modulus_in_plane	temperature	K	GPa	366.4833333333333:2.3442174796771202,394.26111111111106:1.8615844691553602	tabulated
+uncertainty	shear-modulus-wet	unstated	-	-	-	-
+validity	shear-modulus-wet	temperature	366.4833333333333	394.26111111111106	K
+validity	shear-modulus-wet	source_mtm45_1_6781_35rc	1	1	1
+validity	shear-modulus-wet	source_cure_cycle_mh	1	1	1
+validity	shear-modulus-wet	source_measured_not_normalized	1	1	1
+validity	shear-modulus-wet	source_coupon_family	3	3	1
+validity	shear-modulus-wet	source_ply_count	8	8	1
+validity	shear-modulus-wet	source_fiber_volume	0.4615	0.4615	1
+validity	shear-modulus-wet	source_cured_ply_thickness_min	0.000254	0.000254	m
+validity	shear-modulus-wet	source_cured_ply_thickness_max	0.00027178	0.00027178	m
+validity	shear-modulus-wet	source_dry_condition	0	0	1
+validity	shear-modulus-wet	source_wet_equilibrium	1	1	1
+validity	shear-modulus-wet	source_conditioning_temperature	344.26111111111106	344.26111111111106	K
+validity	shear-modulus-wet	source_conditioning_relative_humidity	0.85	0.85	1
+curve	shear-five-percent-dry	construction,conditioning,shear	shear_stress_5_percent	temperature	K	MPa	219.2611111111111:84.73656713303473,297.0388888888889:63.15597680541888	tabulated
+uncertainty	shear-five-percent-dry	unstated	-	-	-	-
+validity	shear-five-percent-dry	temperature	219.2611111111111	297.0388888888889	K
+validity	shear-five-percent-dry	source_mtm45_1_6781_35rc	1	1	1
+validity	shear-five-percent-dry	source_cure_cycle_mh	1	1	1
+validity	shear-five-percent-dry	source_measured_not_normalized	1	1	1
+validity	shear-five-percent-dry	source_coupon_family	3	3	1
+validity	shear-five-percent-dry	source_ply_count	8	8	1
+validity	shear-five-percent-dry	source_fiber_volume	0.4615	0.4615	1
+validity	shear-five-percent-dry	source_cured_ply_thickness_min	0.000254	0.000254	m
+validity	shear-five-percent-dry	source_cured_ply_thickness_max	0.00027178	0.00027178	m
+validity	shear-five-percent-dry	source_dry_condition	1	1	1
+validity	shear-five-percent-dry	source_wet_equilibrium	0	0	1
+validity	shear-five-percent-dry	source_conditioning_temperature	344.26111111111106	344.26111111111106	K
+curve	shear-five-percent-wet	construction,conditioning,shear	shear_stress_5_percent	temperature	K	MPa	366.4833333333333:38.88643113346752,394.26111111111106:31.509040829777764	tabulated
+uncertainty	shear-five-percent-wet	unstated	-	-	-	-
+validity	shear-five-percent-wet	temperature	366.4833333333333	394.26111111111106	K
+validity	shear-five-percent-wet	source_mtm45_1_6781_35rc	1	1	1
+validity	shear-five-percent-wet	source_cure_cycle_mh	1	1	1
+validity	shear-five-percent-wet	source_measured_not_normalized	1	1	1
+validity	shear-five-percent-wet	source_coupon_family	3	3	1
+validity	shear-five-percent-wet	source_ply_count	8	8	1
+validity	shear-five-percent-wet	source_fiber_volume	0.4615	0.4615	1
+validity	shear-five-percent-wet	source_cured_ply_thickness_min	0.000254	0.000254	m
+validity	shear-five-percent-wet	source_cured_ply_thickness_max	0.00027178	0.00027178	m
+validity	shear-five-percent-wet	source_dry_condition	0	0	1
+validity	shear-five-percent-wet	source_wet_equilibrium	1	1	1
+validity	shear-five-percent-wet	source_conditioning_temperature	344.26111111111106	344.26111111111106	K
+validity	shear-five-percent-wet	source_conditioning_relative_humidity	0.85	0.85	1
+curve	shear-offset-dry	construction,conditioning,shear	shear_offset_02_percent	temperature	K	MPa	219.2611111111111:49.986990375468004,297.0388888888889:37.5764272477656	tabulated
+uncertainty	shear-offset-dry	unstated	-	-	-	-
+validity	shear-offset-dry	temperature	219.2611111111111	297.0388888888889	K
+validity	shear-offset-dry	source_mtm45_1_6781_35rc	1	1	1
+validity	shear-offset-dry	source_cure_cycle_mh	1	1	1
+validity	shear-offset-dry	source_measured_not_normalized	1	1	1
+validity	shear-offset-dry	source_coupon_family	3	3	1
+validity	shear-offset-dry	source_ply_count	8	8	1
+validity	shear-offset-dry	source_fiber_volume	0.4615	0.4615	1
+validity	shear-offset-dry	source_cured_ply_thickness_min	0.000254	0.000254	m
+validity	shear-offset-dry	source_cured_ply_thickness_max	0.00027178	0.00027178	m
+validity	shear-offset-dry	source_dry_condition	1	1	1
+validity	shear-offset-dry	source_wet_equilibrium	0	0	1
+validity	shear-offset-dry	source_conditioning_temperature	344.26111111111106	344.26111111111106	K
+curve	shear-offset-wet	construction,conditioning,shear	shear_offset_02_percent	temperature	K	MPa	366.4833333333333:23.30427965090784,394.26111111111106:18.340054399826883	tabulated
+uncertainty	shear-offset-wet	unstated	-	-	-	-
+validity	shear-offset-wet	temperature	366.4833333333333	394.26111111111106	K
+validity	shear-offset-wet	source_mtm45_1_6781_35rc	1	1	1
+validity	shear-offset-wet	source_cure_cycle_mh	1	1	1
+validity	shear-offset-wet	source_measured_not_normalized	1	1	1
+validity	shear-offset-wet	source_coupon_family	3	3	1
+validity	shear-offset-wet	source_ply_count	8	8	1
+validity	shear-offset-wet	source_fiber_volume	0.4615	0.4615	1
+validity	shear-offset-wet	source_cured_ply_thickness_min	0.000254	0.000254	m
+validity	shear-offset-wet	source_cured_ply_thickness_max	0.00027178	0.00027178	m
+validity	shear-offset-wet	source_dry_condition	0	0	1
+validity	shear-offset-wet	source_wet_equilibrium	1	1	1
+validity	shear-offset-wet	source_conditioning_temperature	344.26111111111106	344.26111111111106	K
+validity	shear-offset-wet	source_conditioning_relative_humidity	0.85	0.85	1
+scalar	warp-group-density	construction,warp	source_group_density	1790	kg/m3	constant
+uncertainty	warp-group-density	unstated	-	-	-	-
+validity	warp-group-density	source_mtm45_1_6781_35rc	1	1	1
+validity	warp-group-density	source_cure_cycle_mh	1	1	1
+validity	warp-group-density	source_coupon_family	1	1	1
+validity	warp-group-density	source_ply_count	12	12	1
+validity	warp-group-density	source_fiber_volume	0.4742	0.4742	1
+validity	warp-group-density	source_cured_ply_thickness_min	0.00025908	0.00025908	m
+validity	warp-group-density	source_cured_ply_thickness_max	0.00027178	0.00027178	m
+validity	warp-group-density	source_density_test_temperature_known	0	0	1
+scalar	fill-group-density	construction,fill	source_group_density	1790	kg/m3	constant
+uncertainty	fill-group-density	unstated	-	-	-	-
+validity	fill-group-density	source_mtm45_1_6781_35rc	1	1	1
+validity	fill-group-density	source_cure_cycle_mh	1	1	1
+validity	fill-group-density	source_coupon_family	2	2	1
+validity	fill-group-density	source_ply_count	12	12	1
+validity	fill-group-density	source_fiber_volume	0.4628	0.4628	1
+validity	fill-group-density	source_cured_ply_thickness_min	0.000254	0.000254	m
+validity	fill-group-density	source_cured_ply_thickness_max	0.0002667	0.0002667	m
+validity	fill-group-density	source_density_test_temperature_known	0	0	1
+scalar	shear-group-density	construction,shear	source_group_density	1790	kg/m3	constant
+uncertainty	shear-group-density	unstated	-	-	-	-
+validity	shear-group-density	source_mtm45_1_6781_35rc	1	1	1
+validity	shear-group-density	source_cure_cycle_mh	1	1	1
+validity	shear-group-density	source_coupon_family	3	3	1
+validity	shear-group-density	source_ply_count	8	8	1
+validity	shear-group-density	source_fiber_volume	0.4615	0.4615	1
+validity	shear-group-density	source_cured_ply_thickness_min	0.000254	0.000254	m
+validity	shear-group-density	source_cured_ply_thickness_max	0.00027178	0.00027178	m
+validity	shear-group-density	source_density_test_temperature_known	0	0	1

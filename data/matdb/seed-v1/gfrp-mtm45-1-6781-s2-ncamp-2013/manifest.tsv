@@ -1,0 +1,28 @@
+frankensim.matdb-manifest.v3
+pack_id	gfrp-mtm45-1-6781-s2-ncamp-2013
+redistribution	permitted	Selected attributed scientific numerical facts and original notes only; no source report, figure or table layout is redistributed
+citation	NIAR / NCAMP, ACG MTM45-1 6781 S-2 glass 35% RC Qualification Material Property Data Report, CAM-RP-2009-001 Rev C, May 1, 2013, sections 1.5.4-1.5.7 pp. 23-26 and 2.3.1, 2.3.2, 2.3.5 pp. 31, 32, 35; https://www.wichita.edu/industry_and_defense/NIAR/Research/cytec-mtm45-1/Style-6781-S2-Glass-2.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	niar-mtm45-1-6781	properties.tsv	material-tsv-v1
+property	tensile_modulus_warp	tensile-modulus-warp	dimensional
+property	tensile_strength_warp	tensile-strength-warp	dimensional
+property	tensile_modulus_fill	tensile-modulus-fill	dimensional
+property	tensile_strength_fill	tensile-strength-fill	dimensional
+property	shear_modulus_in_plane	shear-modulus-in-plane	dimensional
+property	shear_stress_5_percent	shear-stress-at-5-percent-strain	dimensional
+property	shear_offset_02_percent	shear-stress-at-0.2-percent-offset	dimensional
+property	source_group_density	source-group-density	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	source_mtm45_1_6781_35rc	source-mtm45-1-6781-35rc	dimensional
+axis	source_cure_cycle_mh	source-cure-cycle-mh	dimensional
+axis	source_measured_not_normalized	source-measured-not-normalized	dimensional
+axis	source_coupon_family	source-coupon-family	dimensional
+axis	source_ply_count	source-ply-count	dimensional
+axis	source_fiber_volume	source-fiber-volume	dimensional
+axis	source_cured_ply_thickness_min	source-cured-ply-thickness-min	dimensional
+axis	source_cured_ply_thickness_max	source-cured-ply-thickness-max	dimensional
+axis	source_dry_condition	source-dry-condition	dimensional
+axis	source_wet_equilibrium	source-wet-equilibrium	dimensional
+axis	source_conditioning_temperature	source-conditioning-temperature	absolute-temperature
+axis	source_conditioning_relative_humidity	source-conditioning-relative-humidity	dimensional
+axis	source_density_test_temperature_known	source-density-test-temperature-known	dimensional

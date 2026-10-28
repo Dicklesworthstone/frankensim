@@ -1,0 +1,70 @@
+frankensim.matdb-source.v1
+observation	mechanical	EGGER uncoated P5 particleboard, exact nominal 18 mm	Rec.225 page 1; manufacturer heading mechanical properties board mean values	Declared board-mean reference values for EN 312 P5, not a measured batch, isotropic Young modulus, design resistance or laminated/decorative product. Bending uses EN 310, internal bond EN 319 and surface soundness EN 311. Numerical test temperature and moisture are unstated. Delivery moisture 4-13 percent does not define a tested response interval. Plant-specific density and adhesive composition are not supplied.
+observation	wet	EGGER P5 18 mm, separate prescribed wet tests	Rec.225 page 1; EN 317 thickness swelling and EN 1087-1 boil-conditioned bond	The 24-hour immersion swelling and post-boil internal bond are separate tests. Neither is a reversible hygroscopic strain coefficient, moisture isotherm or wet bending modulus. The exact method selector is mandatory; post-boil bond must not replace unconditioned bond.
+observation	thermal	EGGER P5 building-physics reference at 600 kg/m3 mean bulk density	Rec.225 page 2; EN 12664 conductivity and EN 12524 wet/dry vapour factors	The density is an explicit basis for these building-physics values, not a measured or guaranteed density of this plant-specific product. Conductivity supports only a frozen scalar reference, not a temperature, moisture or directional law. Wet and dry vapour factors require separate condition selection. No heat capacity is supplied.
+scalar	bending-e	mechanical	bending_modulus	2400	MPa	constant
+uncertainty	bending-e	unstated	-	-	-	-
+validity	bending-e	source_product_egger_p5_rec225_2026	1	1	1
+validity	bending-e	nominal_thickness	0.018	0.018	m
+validity	bending-e	source_temperature_known	0	0	1
+validity	bending-e	source_moisture_condition_known	0	0	1
+validity	bending-e	after_en1087_1_boil	0	0	1
+scalar	bending-strength	mechanical	bending_strength	16	MPa	constant
+uncertainty	bending-strength	unstated	-	-	-	-
+validity	bending-strength	source_product_egger_p5_rec225_2026	1	1	1
+validity	bending-strength	nominal_thickness	0.018	0.018	m
+validity	bending-strength	source_temperature_known	0	0	1
+validity	bending-strength	source_moisture_condition_known	0	0	1
+validity	bending-strength	after_en1087_1_boil	0	0	1
+scalar	bond-unconditioned	mechanical	internal_bond	0.45	MPa	constant
+uncertainty	bond-unconditioned	unstated	-	-	-	-
+validity	bond-unconditioned	source_product_egger_p5_rec225_2026	1	1	1
+validity	bond-unconditioned	nominal_thickness	0.018	0.018	m
+validity	bond-unconditioned	source_temperature_known	0	0	1
+validity	bond-unconditioned	source_moisture_condition_known	0	0	1
+validity	bond-unconditioned	after_en1087_1_boil	0	0	1
+scalar	surface-soundness	mechanical	surface_soundness	0.95	MPa	constant
+uncertainty	surface-soundness	unstated	-	-	-	-
+validity	surface-soundness	source_product_egger_p5_rec225_2026	1	1	1
+validity	surface-soundness	nominal_thickness	0.018	0.018	m
+validity	surface-soundness	source_temperature_known	0	0	1
+validity	surface-soundness	source_moisture_condition_known	0	0	1
+validity	surface-soundness	after_en1087_1_boil	0	0	1
+scalar	swelling-24h	wet	thickness_swelling	0.10	1	constant
+uncertainty	swelling-24h	unstated	-	-	-	-
+validity	swelling-24h	source_product_egger_p5_rec225_2026	1	1	1
+validity	swelling-24h	nominal_thickness	0.018	0.018	m
+validity	swelling-24h	source_temperature_known	0	0	1
+validity	swelling-24h	source_moisture_condition_known	0	0	1
+validity	swelling-24h	en317_immersion	1	1	1
+validity	swelling-24h	immersion_duration	86400	86400	s
+scalar	bond-after-boil	wet	internal_bond	0.14	MPa	constant
+uncertainty	bond-after-boil	unstated	-	-	-	-
+validity	bond-after-boil	source_product_egger_p5_rec225_2026	1	1	1
+validity	bond-after-boil	nominal_thickness	0.018	0.018	m
+validity	bond-after-boil	source_temperature_known	0	0	1
+validity	bond-after-boil	source_moisture_condition_known	0	0	1
+validity	bond-after-boil	after_en1087_1_boil	1	1	1
+scalar	conductivity	thermal	thermal_conductivity	0.12	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	source_product_egger_p5_rec225_2026	1	1	1
+validity	conductivity	nominal_thickness	0.018	0.018	m
+validity	conductivity	source_temperature_known	0	0	1
+validity	conductivity	source_moisture_condition_known	0	0	1
+validity	conductivity	source_bulk_density_reference	600	600	kg/m3
+scalar	vapour-wet	thermal	vapour_resistance	15	1	constant
+uncertainty	vapour-wet	unstated	-	-	-	-
+validity	vapour-wet	source_product_egger_p5_rec225_2026	1	1	1
+validity	vapour-wet	nominal_thickness	0.018	0.018	m
+validity	vapour-wet	source_temperature_known	0	0	1
+validity	vapour-wet	source_moisture_condition_known	0	0	1
+validity	vapour-wet	source_bulk_density_reference	600	600	kg/m3
+validity	vapour-wet	source_vapour_condition_wet	1	1	1
+scalar	vapour-dry	thermal	vapour_resistance	50	1	constant
+uncertainty	vapour-dry	unstated	-	-	-	-
+validity	vapour-dry	source_product_egger_p5_rec225_2026	1	1	1
+validity	vapour-dry	nominal_thickness	0.018	0.018	m
+validity	vapour-dry	source_temperature_known	0	0	1
+validity	vapour-dry	source_moisture_condition_known	0	0	1
+validity	vapour-dry	source_bulk_density_reference	600	600	kg/m3
+validity	vapour-dry	source_vapour_condition_wet	0	0	1

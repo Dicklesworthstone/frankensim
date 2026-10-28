@@ -1,0 +1,33 @@
+frankensim.matdb-source.v1
+observation	product	MM-HBE spruce GL24h homogeneous glulam, standard 100 mm wall element	Manufacturer 2024 brochure, EN 14080:2013, printed pages 6 and 8	Picea abies with parallel laminations and type-1 EN 301 MUF adhesive. Nominal production moisture is approximately 12 percent with a 2-percentage-point tolerance; this is not the test condition for density or conductivity and not a validated moisture response interval. Density is an approximate product mean. This is neither CLT nor a clear-wood specimen; grade stiffness, Poisson ratios and heat capacity are not inferred.
+observation	conductivity	MM-HBE conductivity parallel to bonded joints	Manufacturer technical data, printed page 6	The orientation is relative to the bonded joints, not a claim of equivalence to along-grain or across-grain heat flow. Numerical test temperature and moisture are unstated. This value supports an explicitly oriented frozen-conductivity slab reference, not a temperature-dependent, moisture-dependent or complete wall-assembly model.
+observation	movement	MM-HBE average moisture movement, length and width/height	Manufacturer shrinkage and swelling guidance, printed page 6	The published fractional dimensional changes are 0.24 percent across width/height and 0.01 percent along length per one percentage-point change in wood moisture. Dividing fraction by fraction gives dimensionless ratios 0.24 and 0.01. A tested moisture interval, stress-free length datum, hysteresis and diffusion law are not supplied; these average ratios are not promoted to the integrated hygroscopic-expansion operator's derivative contract.
+scalar	rho-mean	product	density_mean	430	kg/m3	constant
+uncertainty	rho-mean	unstated	-	-	-	-
+validity	rho-mean	source_product_mm_hbe_gl24h_2024	1	1	1
+validity	rho-mean	nominal_thickness	0.1	0.1	m
+validity	rho-mean	source_adhesive_muf	1	1	1
+validity	rho-mean	source_temperature_known	0	0	1
+validity	rho-mean	source_moisture_test_condition_known	0	0	1
+scalar	conductivity	product,conductivity	conductivity_parallel_joint	0.13	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	source_product_mm_hbe_gl24h_2024	1	1	1
+validity	conductivity	nominal_thickness	0.1	0.1	m
+validity	conductivity	source_adhesive_muf	1	1	1
+validity	conductivity	heat_flow_parallel_to_bonded_joints	1	1	1
+validity	conductivity	source_temperature_known	0	0	1
+validity	conductivity	source_moisture_test_condition_known	0	0	1
+scalar	movement-transverse	product,movement	moisture_movement_transverse	0.24	1	constant
+uncertainty	movement-transverse	unstated	-	-	-	-
+validity	movement-transverse	source_product_mm_hbe_gl24h_2024	1	1	1
+validity	movement-transverse	nominal_thickness	0.1	0.1	m
+validity	movement-transverse	source_adhesive_muf	1	1	1
+validity	movement-transverse	source_temperature_known	0	0	1
+validity	movement-transverse	source_moisture_test_condition_known	0	0	1
+scalar	movement-longitudinal	product,movement	moisture_movement_longitudinal	0.01	1	constant
+uncertainty	movement-longitudinal	unstated	-	-	-	-
+validity	movement-longitudinal	source_product_mm_hbe_gl24h_2024	1	1	1
+validity	movement-longitudinal	nominal_thickness	0.1	0.1	m
+validity	movement-longitudinal	source_adhesive_muf	1	1	1
+validity	movement-longitudinal	source_temperature_known	0	0	1
+validity	movement-longitudinal	source_moisture_test_condition_known	0	0	1

@@ -1,0 +1,86 @@
+frankensim.matdb-source.v1
+observation	product	H+H Celcon Standard Grade aircrete, 440 by 215 by 100 mm block	January 2026 BBA certificate, nominal characteristics and dimensions	Autoclaved aerated concrete made with cement, lime, sand and pulverised fuel ash; aluminium powder forms the pores. Mix proportions, pore fraction and curing schedule are unstated. The 600 kg/m3 value and 550-650 kg/m3 range are nominal gross DRY density; neither the range nor the approximate 7 kg laying weight defines a statistical density distribution. No wet density is inferred.
+observation	strength	Celcon Standard Grade compression assessment	Certificate Table 3, BS EN 771-4:2011; loading orientation restriction in section 9.1.4	The certificate reports a pass against mean-strength and minimum-individual-block requirements, not measured strengths or a constitutive compression curve. Requirements are retained under separate keys and require the intended loading orientation. Temperature and numerical test moisture are not provided. No Young modulus, safety-factor-adjusted capacity or wall/mortar strength is inferred.
+observation	thermal	Celcon Standard Grade condition-specific conductivity	Certificate Table 6; BS EN 12664 testing and EN 1745 / EN ISO 10456 calculations	Condition code 0 is the dry declared lambda10,dry value at 10 Celsius with the source's 50-percent declaration basis. Codes 1, 2 and 3 are protected blockwork, exposed external blockwork and below-ground reference conditions respectively; their numerical reference temperatures and moisture contents are unstated. These discrete design-condition values are not points on an interpolated moisture curve. Mortar joints, finishes and surface resistances are excluded from the material-only slab reference.
+observation	moisture	Celcon Standard Grade moisture-related declarations	Certificate Table 5 and section 3.3	Vapour factor 5 applies to diffusion into the block and 10 to diffusion out. These are declared EN 1745 values, not a moisture diffusivity or complete sorption law. The 0.4 mm/m maximum moisture movement is converted to a dimensionless 0.0004; no initial/final moisture states or derivative coefficient are inferred.
+scalar	rho-dry	product	dry_density_nominal	600	kg/m3	constant
+uncertainty	rho-dry	unstated	-	-	-	-
+validity	rho-dry	source_grade_celcon_standard_bba2026	1	1	1
+validity	rho-dry	nominal_thickness	0.1	0.1	m
+validity	rho-dry	source_dry_reference	1	1	1
+validity	rho-dry	source_density_temperature_known	0	0	1
+scalar	rho-dry-lower	product	dry_density_lower	550	kg/m3	constant
+uncertainty	rho-dry-lower	unstated	-	-	-	-
+validity	rho-dry-lower	source_grade_celcon_standard_bba2026	1	1	1
+validity	rho-dry-lower	nominal_thickness	0.1	0.1	m
+validity	rho-dry-lower	source_dry_reference	1	1	1
+validity	rho-dry-lower	source_density_temperature_known	0	0	1
+scalar	rho-dry-upper	product	dry_density_upper	650	kg/m3	constant
+uncertainty	rho-dry-upper	unstated	-	-	-	-
+validity	rho-dry-upper	source_grade_celcon_standard_bba2026	1	1	1
+validity	rho-dry-upper	nominal_thickness	0.1	0.1	m
+validity	rho-dry-upper	source_dry_reference	1	1	1
+validity	rho-dry-upper	source_density_temperature_known	0	0	1
+scalar	compression-mean-requirement	strength	compression_mean_requirement	3.6	MPa	constant
+uncertainty	compression-mean-requirement	unstated	-	-	-	-
+validity	compression-mean-requirement	source_grade_celcon_standard_bba2026	1	1	1
+validity	compression-mean-requirement	nominal_thickness	0.1	0.1	m
+validity	compression-mean-requirement	source_test_temperature_known	0	0	1
+validity	compression-mean-requirement	source_test_moisture_known	0	0	1
+validity	compression-mean-requirement	source_intended_loading_orientation	1	1	1
+scalar	compression-individual-requirement	strength	compression_individual_requirement	2.9	MPa	constant
+uncertainty	compression-individual-requirement	unstated	-	-	-	-
+validity	compression-individual-requirement	source_grade_celcon_standard_bba2026	1	1	1
+validity	compression-individual-requirement	nominal_thickness	0.1	0.1	m
+validity	compression-individual-requirement	source_test_temperature_known	0	0	1
+validity	compression-individual-requirement	source_test_moisture_known	0	0	1
+validity	compression-individual-requirement	source_intended_loading_orientation	1	1	1
+scalar	k-dry-10c	thermal	conductivity	0.13	W/m/K	constant
+uncertainty	k-dry-10c	unstated	-	-	-	-
+validity	k-dry-10c	source_grade_celcon_standard_bba2026	1	1	1
+validity	k-dry-10c	nominal_thickness	0.1	0.1	m
+validity	k-dry-10c	source_dry_reference	1	1	1
+validity	k-dry-10c	source_thermal_condition	0	0	1
+validity	k-dry-10c	source_conductivity_temperature_known	1	1	1
+validity	k-dry-10c	temperature	283.15	283.15	K
+scalar	k-protected	thermal	conductivity	0.15	W/m/K	constant
+uncertainty	k-protected	unstated	-	-	-	-
+validity	k-protected	source_grade_celcon_standard_bba2026	1	1	1
+validity	k-protected	nominal_thickness	0.1	0.1	m
+validity	k-protected	source_dry_reference	0	0	1
+validity	k-protected	source_thermal_condition	1	1	1
+validity	k-protected	source_conductivity_temperature_known	0	0	1
+scalar	k-external	thermal	conductivity	0.16	W/m/K	constant
+uncertainty	k-external	unstated	-	-	-	-
+validity	k-external	source_grade_celcon_standard_bba2026	1	1	1
+validity	k-external	nominal_thickness	0.1	0.1	m
+validity	k-external	source_dry_reference	0	0	1
+validity	k-external	source_thermal_condition	2	2	1
+validity	k-external	source_conductivity_temperature_known	0	0	1
+scalar	k-below-ground	thermal	conductivity	0.24	W/m/K	constant
+uncertainty	k-below-ground	unstated	-	-	-	-
+validity	k-below-ground	source_grade_celcon_standard_bba2026	1	1	1
+validity	k-below-ground	nominal_thickness	0.1	0.1	m
+validity	k-below-ground	source_dry_reference	0	0	1
+validity	k-below-ground	source_thermal_condition	3	3	1
+validity	k-below-ground	source_conductivity_temperature_known	0	0	1
+scalar	vapour-into	moisture	vapour_resistance	5	1	constant
+uncertainty	vapour-into	unstated	-	-	-	-
+validity	vapour-into	source_grade_celcon_standard_bba2026	1	1	1
+validity	vapour-into	nominal_thickness	0.1	0.1	m
+validity	vapour-into	source_test_temperature_known	0	0	1
+validity	vapour-into	source_test_moisture_known	0	0	1
+validity	vapour-into	vapour_diffusion_into_block	1	1	1
+scalar	vapour-out	moisture	vapour_resistance	10	1	constant
+uncertainty	vapour-out	unstated	-	-	-	-
+validity	vapour-out	source_grade_celcon_standard_bba2026	1	1	1
+validity	vapour-out	nominal_thickness	0.1	0.1	m
+validity	vapour-out	source_test_temperature_known	0	0	1
+validity	vapour-out	source_test_moisture_known	0	0	1
+validity	vapour-out	vapour_diffusion_into_block	0	0	1
+scalar	moisture-movement	moisture	moisture_movement_maximum	0.0004	1	constant
+uncertainty	moisture-movement	unstated	-	-	-	-
+validity	moisture-movement	source_grade_celcon_standard_bba2026	1	1	1
+validity	moisture-movement	nominal_thickness	0.1	0.1	m
+validity	moisture-movement	source_test_temperature_known	0	0	1
+validity	moisture-movement	source_test_moisture_known	0	0	1

@@ -1,0 +1,39 @@
+frankensim.matdb-source.v1
+observation	reference	Indalloy 281, 58Bi-42Sn by mass, ribbon/foil alloy reference	Manufacturer alloy-table numerical facts	Engineering reference only; no matched specimen, test method, lot, pressure, temper, aging or strain rate is supplied. Density and tensile test temperatures are unstated. The exact composition is not interchangeable with tin-lead, indium-tin or tin-silver solders. No creep, plasticity, joint or interface law is supplied.
+observation	conversion	Sn42Bi58 selected physical facts	Explicit source-unit conversion	Density 8.56 g/cm3 becomes 8560 kg/m3; tensile strength 11700 psi uses pound 0.45359237 kg, standard gravity 9.80665 m/s2 and inch 0.0254 m. Equal phase endpoints 138 degC become 411.15 K; neither an enthalpy reference nor latent heat is supplied.
+observation	conductivity	Sn42Bi58 conductivity at 20 degC	Source column W/cm/degC at 20 degC	0.16 W/cm/degC becomes 16 W/m/K at 293.15 K only. The 85 degC column is blank for this alloy. No temperature interpolation or extrapolation is admitted. Electrical percent-Cu, unqualified CTE and bond-holding shear are omitted.
+scalar	solidus	reference,conversion	solidus_temperature	411.15	K	constant
+uncertainty	solidus	unstated	-	-	-	-
+validity	solidus	engineering_reference_model	1	1	1
+validity	solidus	source_specimens_matched	0	0	1
+validity	solidus	source_test_temperature_known	0	0	1
+validity	solidus	source_test_method_known	0	0	1
+validity	solidus	source_alloy_sn42bi58	1	1	1
+scalar	liquidus	reference,conversion	liquidus_temperature	411.15	K	constant
+uncertainty	liquidus	unstated	-	-	-	-
+validity	liquidus	engineering_reference_model	1	1	1
+validity	liquidus	source_specimens_matched	0	0	1
+validity	liquidus	source_test_temperature_known	0	0	1
+validity	liquidus	source_test_method_known	0	0	1
+validity	liquidus	source_alloy_sn42bi58	1	1	1
+scalar	density	reference,conversion	density	8560	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_specimens_matched	0	0	1
+validity	density	source_test_temperature_known	0	0	1
+validity	density	source_test_method_known	0	0	1
+validity	density	source_alloy_sn42bi58	1	1	1
+scalar	tensile-strength	reference,conversion	tensile_strength	80668660.330069825	Pa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	engineering_reference_model	1	1	1
+validity	tensile-strength	source_specimens_matched	0	0	1
+validity	tensile-strength	source_test_temperature_known	0	0	1
+validity	tensile-strength	source_test_method_known	0	0	1
+validity	tensile-strength	source_alloy_sn42bi58	1	1	1
+scalar	conductivity-20c	reference,conductivity	thermal_conductivity	16	W/m/K	constant
+uncertainty	conductivity-20c	unstated	-	-	-	-
+validity	conductivity-20c	engineering_reference_model	1	1	1
+validity	conductivity-20c	source_specimens_matched	0	0	1
+validity	conductivity-20c	source_test_method_known	0	0	1
+validity	conductivity-20c	source_alloy_sn42bi58	1	1	1
+validity	conductivity-20c	temperature	293.15	293.15	K

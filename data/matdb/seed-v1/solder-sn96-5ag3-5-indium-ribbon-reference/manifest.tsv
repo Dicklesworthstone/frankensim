@@ -1,0 +1,17 @@
+frankensim.matdb-manifest.v3
+pack_id	solder-sn96-5ag3-5-indium-ribbon-reference
+redistribution	permitted	Selected attributed numerical facts and original modeling notes only; no source document, prose or table layout is redistributed
+citation	Indium Corporation, Solder Ribbon and Foil, alloy table row Indalloy 121, 96.5Sn/3.5Ag, accessed 2026-10-28; https://www.indium.com/products/solder-ribbon-and-foil/
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	indium-ribbon	properties.tsv	material-tsv-v1
+property	solidus_temperature	solidus-temperature	absolute-temperature
+property	liquidus_temperature	liquidus-temperature	absolute-temperature
+property	density	density	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	tensile_strength	tensile-strength	dimensional
+axis	engineering_reference_model	engineering-reference-model	dimensional
+axis	source_specimens_matched	source-specimens-matched	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_test_method_known	source-test-method-known	dimensional
+axis	source_alloy_sn96_5ag3_5	source-alloy-sn96-5ag3-5	dimensional
+axis	temperature	temperature	absolute-temperature

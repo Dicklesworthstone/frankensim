@@ -1,0 +1,25 @@
+frankensim.matdb-manifest.v3
+pack_id	hh-celcon-standard-100mm-bba2026
+redistribution	permitted	Selected attributed numerical facts and original notes only; certificate text, illustrations and table layout are not redistributed
+citation	H+H UK, Standard Grade autoclaved aerated concrete blocks, BBA Agrement Certificate 01/3816 Product Sheet 1 Issue 4, 15 January 2026, printed pages 5-8, Tables 1-3 and 5-6 and section 3.3; https://www.hplush.com/fileadmin/UK/Certificates/BBA/BBA_Cert_01_3816_Sheet_1_Standard__Jan_2026_.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	hh-celcon-standard	properties.tsv	material-tsv-v1
+property	dry_density_nominal	density	dimensional
+property	dry_density_lower	dry-density-range-lower-bound	dimensional
+property	dry_density_upper	dry-density-range-upper-bound	dimensional
+property	compression_mean_requirement	compressive-strength-mean-requirement	dimensional
+property	compression_individual_requirement	compressive-strength-individual-minimum-requirement	dimensional
+property	conductivity	thermal-conductivity	thermal-conductivity
+property	vapour_resistance	water-vapour-diffusion-resistance-factor	dimensional
+property	moisture_movement_maximum	moisture-movement-maximum	dimensional
+axis	source_grade_celcon_standard_bba2026	source-grade-celcon-standard-bba2026	dimensional
+axis	nominal_thickness	nominal-thickness	dimensional
+axis	source_dry_reference	source-dry-reference	dimensional
+axis	source_density_temperature_known	source-density-temperature-known	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_test_moisture_known	source-test-moisture-known	dimensional
+axis	source_intended_loading_orientation	source-intended-loading-orientation	dimensional
+axis	source_thermal_condition	source-thermal-condition	dimensional
+axis	source_conductivity_temperature_known	source-conductivity-temperature-known	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	vapour_diffusion_into_block	vapour-diffusion-into-block	dimensional
