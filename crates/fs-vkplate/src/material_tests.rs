@@ -934,15 +934,20 @@ fn g1_the_sourced_head_film_card_supplies_density_and_modulus_and_claims_no_loss
 /// The stick card compiled from data/matdb/seed-v1/stick-hickory-shagbark-fpl-gtr282.
 const HICKORY: &[u8] = include_bytes!("../packs/stick-hickory-shagbark-fpl-gtr282.fsmatpk");
 
+fn hickory_point(temperature_k: f64) -> Result<fs_matdb::QueryPoint, String> {
+    crate::materials::temperature_point("T", temperature_k)?
+        .with_quantity("moisture_content", QuantitySpec::dimensional(Dims::NONE), 0.12)
+        .map_err(|error| error.to_string())
+}
+
 #[test]
 fn g1_the_hickory_stick_card_sets_the_striker_mass_and_its_hertz_pair_with_the_film() {
     let at = |primary: &[u8], temperature| {
-        KitMaterials::from_packs_at_temperature(
+        KitMaterials::from_card_packs(
             primary,
             &[],
             HICKORY,
-            "T",
-            temperature,
+            &hickory_point(temperature)?,
             9e-6,
             0.005,
             0.05,
@@ -1067,12 +1072,11 @@ fn g1_a_striker_tip_takes_all_four_anisotropy_claims_or_none() {
 /// `drum_with_materials` strikes with the card's hickory sphere.
 #[test]
 fn g1_the_card_built_kick_keeps_its_preset_beater_and_says_so() {
-    let cards = KitMaterials::from_packs_at_temperature(
+    let cards = KitMaterials::from_card_packs(
         HEAD_FILM,
         &[],
         HICKORY,
-        "T",
-        293.15,
+        &hickory_point(293.15).unwrap(),
         9e-6,
         0.005,
         0.05,
@@ -1142,12 +1146,11 @@ fn g1_the_card_built_kick_keeps_its_preset_beater_and_says_so() {
 /// mass-only effect (1.34), and asserts the direction: thicker rings longer.
 #[test]
 fn g1_a_thicker_film_lengthens_the_radiation_decay_inside_its_predicted_band() {
-    let materials = KitMaterials::from_packs_at_temperature(
+    let materials = KitMaterials::from_card_packs(
         HEAD_FILM,
         &[],
         HICKORY,
-        "T",
-        293.15,
+        &hickory_point(293.15).unwrap(),
         9e-6,
         0.005,
         0.05,
@@ -1455,8 +1458,8 @@ fn receipt_number(line: &str, before: &str, after: &str) -> f64 {
 #[test]
 fn g1_the_film_card_curve_gives_each_head_mode_the_loss_tangent_at_its_own_frequency() {
     let cards = || {
-        KitMaterials::from_packs_at_temperature(
-            HEAD_FILM, &[], HICKORY, "T", 293.15, 9e-6, 0.005, 0.05,
+        KitMaterials::from_card_packs(
+            HEAD_FILM, &[], HICKORY, &hickory_point(293.15).unwrap(), 9e-6, 0.005, 0.05,
         )
     };
     let film = cards()
@@ -1479,7 +1482,7 @@ fn g1_the_film_card_curve_gives_each_head_mode_the_loss_tangent_at_its_own_frequ
     let declared = cards().and_then(KitMaterials::with_stated_unknown_film_loss).unwrap();
     assert!(declared.clone().with_film_loss_curve("T", "frequency", 293.15).is_err());
     let plain = pack("declared film", 1390.0, 4e9, Some(0.38)).to_bytes();
-    let refused = KitMaterials::from_packs_at_temperature(&plain, &[], HICKORY, "T", 293.15, 9e-6, 0.005, 0.05)
+    let refused = KitMaterials::from_card_packs(&plain, &[], HICKORY, &hickory_point(293.15).unwrap(), 9e-6, 0.005, 0.05)
         .and_then(|m| m.with_film_loss_curve("T", "frequency", 293.15))
         .err()
         .unwrap();
@@ -1541,7 +1544,7 @@ fn g1_the_crash_shaft_is_the_hickory_card_across_its_grain_on_bronze() {
         ShaftStrike, Z5A_GRIP_M, Z5A_PROFILE, across_grain_compliances, effective_volume_m3,
         profile_radius_m,
     };
-    let point = crate::materials::temperature_point("T", 293.15).unwrap();
+    let point = hickory_point(293.15).unwrap();
     let bronze = (kit::BRONZE.0, kit::BRONZE.1);
     let shaft =
         ShaftStrike::from_card(HICKORY, &point, SHOULDER_STATION_M, 0.475e-3, bronze).unwrap();

@@ -13,6 +13,7 @@ use fs_matdb::{
 };
 use fs_material::state_point::MaterialPropertySelection;
 use fs_material::wood_moisture::{ResolvedWoodMoisture, WoodMoistureSource};
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Dims, QuantitySpec};
 
 const RHO: Dims = Dims([-3, 1, 0, 0, 0, 0]);
@@ -24,62 +25,93 @@ struct Species {
     shrinkage_percent: [f64; 3],
 }
 
-const SPECIES: [Species; 9] = [
+const fn species(
+    slug: &'static str,
+    claims: usize,
+    specific_gravity: f64,
+    shrinkage_percent: [f64; 3],
+) -> Species {
     Species {
-        slug: "pine-loblolly",
-        claims: 25,
-        specific_gravity: 0.51,
-        shrinkage_percent: [4.8, 7.4, 12.3],
-    },
-    Species {
-        slug: "pine-longleaf",
-        claims: 25,
-        specific_gravity: 0.59,
-        shrinkage_percent: [5.1, 7.5, 12.2],
-    },
-    Species {
-        slug: "pine-slash",
-        claims: 23,
-        specific_gravity: 0.59,
-        shrinkage_percent: [5.4, 7.6, 12.1],
-    },
-    Species {
-        slug: "pine-ponderosa",
-        claims: 25,
-        specific_gravity: 0.40,
-        shrinkage_percent: [3.9, 6.2, 9.7],
-    },
-    Species {
-        slug: "oak-northern-red",
-        claims: 16,
-        specific_gravity: 0.63,
-        shrinkage_percent: [4.0, 8.6, 13.7],
-    },
-    Species {
-        slug: "oak-white",
-        claims: 16,
-        specific_gravity: 0.68,
-        shrinkage_percent: [5.6, 10.5, 16.3],
-    },
-    Species {
-        slug: "cedar-northern-white",
-        claims: 25,
-        specific_gravity: 0.31,
-        shrinkage_percent: [2.2, 4.9, 7.2],
-    },
-    Species {
-        slug: "fir-subalpine",
-        claims: 24,
-        specific_gravity: 0.32,
-        shrinkage_percent: [2.6, 7.4, 9.4],
-    },
-    Species {
-        slug: "douglas-fir-coast",
-        claims: 21,
-        specific_gravity: 0.48,
-        shrinkage_percent: [4.8, 7.6, 12.4],
-    },
+        slug,
+        claims,
+        specific_gravity,
+        shrinkage_percent,
+    }
+}
+
+const SPECIES: [Species; 33] = [
+    species("pine-loblolly", 25, 0.51, [4.8, 7.4, 12.3]),
+    species("pine-longleaf", 25, 0.59, [5.1, 7.5, 12.2]),
+    species("pine-slash", 23, 0.59, [5.4, 7.6, 12.1]),
+    species("pine-ponderosa", 25, 0.40, [3.9, 6.2, 9.7]),
+    species("oak-northern-red", 16, 0.63, [4.0, 8.6, 13.7]),
+    species("oak-white", 16, 0.68, [5.6, 10.5, 16.3]),
+    species("cedar-northern-white", 25, 0.31, [2.2, 4.9, 7.2]),
+    species("fir-subalpine", 24, 0.32, [2.6, 7.4, 9.4]),
+    species("douglas-fir-coast", 21, 0.48, [4.8, 7.6, 12.4]),
+    species("ash-white", 20, 0.60, [4.9, 7.8, 13.3]),
+    species("baldcypress", 19, 0.46, [3.8, 6.2, 10.5]),
+    species("basswood-american", 20, 0.37, [6.6, 9.3, 15.8]),
+    species("birch-yellow", 21, 0.62, [7.3, 9.5, 16.8]),
+    species("cedar-western-red", 19, 0.32, [2.4, 5.0, 6.8]),
+    species("cherry-black", 20, 0.50, [3.7, 7.1, 11.5]),
+    species("cottonwood-eastern", 20, 0.40, [3.9, 9.2, 13.9]),
+    species("hemlock-western", 19, 0.45, [4.2, 7.8, 12.4]),
+    species("larch-western", 19, 0.52, [4.5, 9.1, 14.0]),
+    species("maple-red", 20, 0.54, [4.0, 8.2, 12.6]),
+    species("maple-sugar", 22, 0.63, [4.8, 9.9, 14.7]),
+    species("pine-sugar", 21, 0.36, [2.9, 5.6, 7.9]),
+    species("redwood-old-growth", 19, 0.40, [2.6, 4.4, 6.8]),
+    species("spruce-engelmann", 23, 0.35, [3.8, 7.1, 11.0]),
+    species("spruce-sitka", 23, 0.40, [4.3, 7.5, 11.5]),
+    species("stick-hickory-shagbark", 24, 0.72, [7.0, 10.5, 16.7]),
+    species("sweetgum", 21, 0.52, [5.3, 10.2, 15.8]),
+    species("walnut-black", 21, 0.55, [5.5, 7.8, 12.8]),
+    species("yellow-poplar", 21, 0.42, [4.6, 8.2, 12.7]),
+    // These five specific gravities use GREEN volume. Their source packs
+    // explicitly derive the 12%-moisture density with the volumetric model.
+    species("balsa", 20, 0.16, [3.0, 7.6, 10.8]),
+    species("mahogany-african", 20, 0.42, [2.5, 4.5, 8.8]),
+    species("mahogany-honduras", 20, 0.45, [3.0, 4.1, 7.8]),
+    species("rosewood-brazilian", 9, 0.80, [2.9, 4.6, 8.5]),
+    species("rosewood-indian", 9, 0.75, [2.7, 5.8, 8.5]),
 ];
+
+impl Species {
+    fn moisture_axis(&self) -> &'static str {
+        if matches!(
+            self.slug,
+            "pine-loblolly"
+                | "pine-longleaf"
+                | "pine-slash"
+                | "pine-ponderosa"
+                | "oak-northern-red"
+                | "oak-white"
+                | "cedar-northern-white"
+                | "fir-subalpine"
+        ) {
+            "moisture-content"
+        } else {
+            "moisture_content"
+        }
+    }
+
+    fn reference_density(&self) -> f64 {
+        let reference_volume_over_sg_volume = if matches!(
+            self.slug,
+            "balsa"
+                | "mahogany-african"
+                | "mahogany-honduras"
+                | "rosewood-brazilian"
+                | "rosewood-indian"
+        ) {
+            1.0 - self.shrinkage_percent[2] / 100.0 * (1.0 - 0.12 / 0.30)
+        } else {
+            1.0
+        };
+        self.specific_gravity * 1120.0 / reference_volume_over_sg_volume
+    }
+}
 
 fn workspace() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -113,7 +145,8 @@ fn compile(species: &Species) -> NormalizedMaterialCardPack {
         .expect("run the actual source compiler");
     assert!(
         run.status.success(),
-        "{slug}: {}",
+        "{slug}: compiler status {}; {}",
+        run.status,
         String::from_utf8_lossy(&run.stderr)
     );
     let bytes = std::fs::read(output).unwrap();
@@ -206,17 +239,25 @@ fn close(actual: f64, expected: f64) {
 }
 
 #[test]
-fn g0_g1_nine_source_species_drive_anisotropic_geometry_and_conserve_dry_mass() {
+fn g0_g1_all_33_source_species_drive_anisotropic_geometry_and_conserve_dry_mass() {
     let keys = keys();
     for species in &SPECIES {
         let normalized = compile(species);
         let card = normalized.card();
-        let axis = if species.slug == "douglas-fir-coast" {
-            "moisture_content"
-        } else {
-            "moisture-content"
-        };
-        let reference = point(axis, 0.12);
+        let axis = species.moisture_axis();
+        let mut reference = point(axis, 0.12);
+        if species.slug == "stick-hickory-shagbark" {
+            reference = reference
+                .with_quantity(
+                    "T",
+                    QuantitySpec::semantic(SemanticType::new(
+                        QuantityKind::AbsoluteTemperature,
+                        ValueForm::Static,
+                    )),
+                    293.15,
+                )
+                .unwrap();
+        }
         let law = ResolvedWoodMoisture::from_card(
             card,
             source(&keys, axis, &reference, &reference),
@@ -224,8 +265,9 @@ fn g0_g1_nine_source_species_drive_anisotropic_geometry_and_conserve_dry_mass() 
         )
         .unwrap_or_else(|e| panic!("{}: {e:?}", species.slug));
         close(law.fiber_saturation(), 0.30);
+        assert_eq!(law.moisture_span(), [0.0, 0.30]);
         let expected_source = [
-            species.specific_gravity * 1120.0,
+            species.reference_density(),
             species.shrinkage_percent[0] / 100.0,
             species.shrinkage_percent[1] / 100.0,
             species.shrinkage_percent[2] / 100.0,
@@ -255,7 +297,7 @@ fn g0_g1_nine_source_species_drive_anisotropic_geometry_and_conserve_dry_mass() 
         assert_eq!(at_reference.radial_length_factor, 1.0);
         assert_eq!(at_reference.tangential_length_factor, 1.0);
         assert_eq!(at_reference.volume_factor, 1.0);
-        let dry_mass_kg = species.specific_gravity * 1000.0 * 0.002;
+        let dry_mass_kg = expected_source[0] / 1.12 * 0.002;
         for m in [0.0, 0.08, 0.20, 0.30] {
             let state = law.at_moisture_content(m).unwrap();
             assert_eq!(state.material_card_identity, card.content_hash());
@@ -271,7 +313,7 @@ fn g0_g1_nine_source_species_drive_anisotropic_geometry_and_conserve_dry_mass() 
             close(state.volume_factor, factors[2]);
             close(
                 state.density_kg_m3,
-                species.specific_gravity * 1000.0 * (1.0 + m) / factors[2],
+                expected_source[0] / 1.12 * (1.0 + m) / factors[2],
             );
             let volume_m3 = 0.002 * state.volume_factor;
             let mass_kg = state.density_kg_m3 * volume_m3;
@@ -293,7 +335,7 @@ fn g0_g1_nine_source_species_drive_anisotropic_geometry_and_conserve_dry_mass() 
         assert!(dry.density_kg_m3 < at_reference.density_kg_m3);
         assert!(wet.density_kg_m3 > at_reference.density_kg_m3);
         eprintln!(
-            "{}: rho8={:.6},rho12={:.6},rho20={:.6} kg/m3; R20={:.9},T20={:.9},V20={:.9}",
+            "{}: rho8={:.6}, rho12={:.6}, rho20={:.6} kg/m3; R20={:.9}, T20={:.9}, V20={:.9}",
             species.slug,
             dry.density_kg_m3,
             at_reference.density_kg_m3,
@@ -306,7 +348,7 @@ fn g0_g1_nine_source_species_drive_anisotropic_geometry_and_conserve_dry_mass() 
         for invalid_moisture in [-0.001, 0.300001, f64::NAN, f64::INFINITY] {
             assert!(law.at_moisture_content(invalid_moisture).is_err());
         }
-        let wrong_reference = point(axis, 0.08);
+        let wrong_reference = reference.clone().with(axis, 0.08).unwrap();
         assert!(
             ResolvedWoodMoisture::from_card(
                 card,

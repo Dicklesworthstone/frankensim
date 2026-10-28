@@ -5,3 +5,9 @@ citation	Forest Products Laboratory (2021), Wood Handbook - Wood as an Engineeri
 license	Work-of-the-US-Government-Public-Use-Permitted
 source	primary	properties.tsv	material-tsv-v1
 axis	temperature	temperature	absolute-temperature
+property	radial_shrinkage_green_to_ovendry	radial_shrinkage_green_to_ovendry	dimensional
+property	tangential_shrinkage_green_to_ovendry	tangential_shrinkage_green_to_ovendry	dimensional
+axis	moisture_content	moisture_content	dimensional
+axis	clear_specimen	clear_specimen	dimensional
+axis	engineering_reference_model	engineering_reference_model	dimensional
+axis	source_test_temperature_known	source_test_temperature_known	dimensional

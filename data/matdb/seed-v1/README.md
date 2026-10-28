@@ -2416,3 +2416,22 @@ nor a temperature-dependent conductivity law. The reported possible 20%
 conductivity variation is retained as a model caveat, not fabricated confidence
 metadata. These additions do not extend the original mechanical data's unknown
 test temperatures, supply a thermal-density law, or qualify graded lumber.
+
+## Clear-wood moisture response
+
+All 33 existing FPL clear-wood bundles carry radial, tangential and independent
+volumetric green-to-ovendry shrinkage, plus the explicit 30% fiber-saturation
+approximation from [FPL-GTR-282, Chapter 4, Tables 4-3/4-4 and Equation (4-9)](https://research.fs.usda.gov/download/treesearch/62243.pdf).
+Baldcypress shrinkage instead comes from [FPL-GTR-102, p. 115](https://research.fs.usda.gov/download/treesearch/5648.pdf);
+imported-wood records retain the source's warning that literature values may not
+represent true species averages. `fs_material::wood_moisture::ResolvedWoodMoisture`
+consumes the exact source claims and 12% density reference to calculate radial
+and tangential dimension ratios, volume ratios and density at prescribed uniform
+dry-basis moisture within the retained model domain. The five imported woods
+use explicitly derived reference densities: `rho12 = 1120*Ggreen/(1-0.6*Sv)`,
+where `Sv` is fractional volumetric shrinkage, following Equations (4-9), (4-11)
+and (4-14). These references combine green-volume gravity with the separate
+volume model; they are not new density measurements. The consumer preserves
+source receipts and ovendry mass while accounting for the prescribed water mass.
+Independent shrinkage averages do not supply longitudinal strain, drying rates
+or a temperature-dependent density law.

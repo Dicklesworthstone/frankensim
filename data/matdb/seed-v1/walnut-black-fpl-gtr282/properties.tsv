@@ -1,4 +1,30 @@
 frankensim.matdb-source.v1
+observation	wood-shrinkage	Black walnut clear wood, green-to-ovendry dimensional change	FPL-GTR-282 Chapter 4, Table 4-3, Walnut, black, p. 4-8; https://research.fs.usda.gov/download/treesearch/62243.pdf	Independent radial, tangential and volumetric species averages, expressed as percentages of green dimensions or volume. These are total green-to-ovendry parameters; their 0-30 percent moisture applicability is for Equation (4-9), not measurements at every moisture. The source's general shrinkage coefficient of variation of about 15 percent is not per-value uncertainty. No longitudinal shrinkage, same-specimen covariance, graded-lumber qualification or temperature dependence is supplied.
+observation	wood-moisture-model	Black walnut clear wood at prescribed uniform dry-basis moisture	FPL-GTR-282 Chapter 4, Equation (4-9), p. 4-10; https://research.fs.usda.gov/download/treesearch/62243.pdf	Fiber saturation of 30 percent is the source-authorized approximation when unknown, not a species measurement. S(M)=S0*(1-M/0.30) uses fractional moisture and shrinkage below fiber saturation for a sufficiently small piece without significant moisture gradients. Density changes require the independent volume shrinkage and water-mass factor, retaining the original 12-percent density reference. No drying rate, moisture transport or thermal-density law is supplied.
+scalar	shrinkage-radial	wood-shrinkage	radial_shrinkage_green_to_ovendry	5.5	%	constant
+uncertainty	shrinkage-radial	unstated	-	-	-	-
+validity	shrinkage-radial	moisture_content	0	30	%
+validity	shrinkage-radial	clear_specimen	1	1	1
+validity	shrinkage-radial	engineering_reference_model	1	1	1
+validity	shrinkage-radial	source_test_temperature_known	0	0	1
+scalar	shrinkage-tangential	wood-shrinkage	tangential_shrinkage_green_to_ovendry	7.8	%	constant
+uncertainty	shrinkage-tangential	unstated	-	-	-	-
+validity	shrinkage-tangential	moisture_content	0	30	%
+validity	shrinkage-tangential	clear_specimen	1	1	1
+validity	shrinkage-tangential	engineering_reference_model	1	1	1
+validity	shrinkage-tangential	source_test_temperature_known	0	0	1
+scalar	shrinkage-volumetric	wood-shrinkage	volumetric_shrinkage_green_to_ovendry	12.8	%	constant
+uncertainty	shrinkage-volumetric	unstated	-	-	-	-
+validity	shrinkage-volumetric	moisture_content	0	30	%
+validity	shrinkage-volumetric	clear_specimen	1	1	1
+validity	shrinkage-volumetric	engineering_reference_model	1	1	1
+validity	shrinkage-volumetric	source_test_temperature_known	0	0	1
+scalar	fiber-saturation	wood-moisture-model	fiber_saturation_moisture_content	30	%	constant
+uncertainty	fiber-saturation	unstated	-	-	-	-
+validity	fiber-saturation	moisture_content	0	30	%
+validity	fiber-saturation	clear_specimen	1	1	1
+validity	fiber-saturation	engineering_reference_model	1	1	1
+validity	fiber-saturation	source_test_temperature_known	0	0	1
 observation	wh-clear-wood	Black walnut (Juglans nigra) clear straight-grained specimens	FPL-GTR-282 chapter 5 tabulated averages (static bending MOE; compression-derived elastic ratios; experimentally determined Poisson ratios)	Average clear straight-grained small-specimen values at approximately 12 percent moisture content; the elastic-ratio and Poisson tables derive from samples of a few species and the source warns values vary within and between species; the source reports representative coefficients of variation separately in its Table 5-6 without per-value confidence metadata, so runtime uncertainty stays Unstated; bending MOE is printed with span-to-depth 14 shear deflection included and the chapter states it may be increased by 10 percent to remove that effect, which is how the derived young_modulus_longitudinal row is computed; axis convention: L longitudinal (grain), R radial, T tangential, matching the instrument-axis-convention file in this directory; Table 5-3a specific gravity is ovendry-weight over volume-at-12-percent basis, so density = 1000 * SG * 1.12 kg/m3 at 12 percent moisture content
 scalar	et-over-el	wh-clear-wood	et_over_el	0.056	1	constant
 uncertainty	et-over-el	unstated	-	-	-	-

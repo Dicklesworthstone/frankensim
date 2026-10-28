@@ -1,7 +1,16 @@
 frankensim.matdb-manifest.v3
 pack_id	balsa-fpl-gtr282
 redistribution	permitted	United States Government work (USDA Forest Service Forest Products Laboratory); public domain in the United States; retain the report number, chapter, table numbers, and URL
-citation	Forest Products Laboratory (2021), Wood Handbook - Wood as an Engineering Material, General Technical Report FPL-GTR-282, U.S. Department of Agriculture Forest Service, Chapter 5 Mechanical Properties of Wood (C.A. Senalik and B. Kretschmann), Tables 5-1, 5-2, and 5-5a; https://www.fpl.fs.usda.gov/documnts/fplgtr/fplgtr282/chapter_05_fpl_gtr282.pdf
+citation	Forest Products Laboratory (2021), Wood Handbook - Wood as an Engineering Material, General Technical Report FPL-GTR-282, U.S. Department of Agriculture Forest Service, Chapter 5 Mechanical Properties of Wood (C.A. Senalik and B. Kretschmann), Tables 5-1, 5-2, and 5-5a; https://www.fpl.fs.usda.gov/documnts/fplgtr/fplgtr282/chapter_05_fpl_gtr282.pdf ; Chapter 4 (S.V. Glass and S.L. Zelinka), Table 4-4 and Equations (4-9), (4-11), (4-14), pp. 4-9 to 4-12; https://research.fs.usda.gov/download/treesearch/62243.pdf
 license	Work-of-the-US-Government-Public-Use-Permitted
 source	primary	properties.tsv	material-tsv-v1
 axis	temperature	temperature	absolute-temperature
+property	density	density	dimensional
+property	radial_shrinkage_green_to_ovendry	radial_shrinkage_green_to_ovendry	dimensional
+property	tangential_shrinkage_green_to_ovendry	tangential_shrinkage_green_to_ovendry	dimensional
+property	volumetric_shrinkage_green_to_ovendry	volumetric_shrinkage_green_to_ovendry	dimensional
+property	fiber_saturation_moisture_content	fiber_saturation_moisture_content	dimensional
+axis	moisture_content	moisture_content	dimensional
+axis	clear_specimen	clear_specimen	dimensional
+axis	engineering_reference_model	engineering_reference_model	dimensional
+axis	source_test_temperature_known	source_test_temperature_known	dimensional

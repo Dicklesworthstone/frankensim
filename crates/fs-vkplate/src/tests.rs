@@ -1044,12 +1044,14 @@ fn g0_head_viscous_layer_increases_modal_damping() {
 #[test]
 fn g0_floor_tom_viscous_layer_refines_its_clock() {
     let gas = standard_gas();
-    let cards = materials::KitMaterials::from_packs_at_temperature(
+    let point = materials::temperature_point("T", gas.temperature).unwrap()
+        .with_quantity("moisture_content", fs_qty::QuantitySpec::dimensional(fs_qty::Dims::NONE), 0.12)
+        .unwrap();
+    let cards = materials::KitMaterials::from_card_packs(
         include_bytes!("../packs/head-film-pet-mylar-dupont-matsuzawa1959.fsmatpk"),
         &[],
         include_bytes!("../packs/stick-hickory-shagbark-fpl-gtr282.fsmatpk"),
-        "T",
-        gas.temperature,
+        &point,
         0.00730108512,
         0.005,
         0.05,

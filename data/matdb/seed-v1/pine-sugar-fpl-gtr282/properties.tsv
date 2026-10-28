@@ -1,4 +1,17 @@
 frankensim.matdb-source.v1
+observation	wood-shrinkage	Sugar pine clear wood, green-to-ovendry directional change	FPL-GTR-282 Chapter 4, Table 4-3, Pine/Sugar, p. 4-8, and Equation (4-9), p. 4-10; https://research.fs.usda.gov/download/treesearch/62243.pdf	Radial and tangential species averages are percentages of the green dimension, independent of the existing volumetric shrinkage. Their 0-30 percent moisture applicability is for the uniform-moisture approximation S(M)=S0*(1-M/0.30), not measurements at every moisture. The existing fiber-saturation parameter of 30 percent is an explicit source-authorized approximation, not a species measurement. The model assumes a sufficiently small piece without significant moisture gradients. The source's general shrinkage coefficient of variation of about 15 percent is not per-value uncertainty. No longitudinal strain is inferred from the independent directional and volumetric averages; no drying rate, graded-lumber qualification or temperature dependence is supplied.
+scalar	shrinkage-radial	wood-shrinkage	radial_shrinkage_green_to_ovendry	2.9	%	constant
+uncertainty	shrinkage-radial	unstated	-	-	-	-
+validity	shrinkage-radial	moisture_content	0	30	%
+validity	shrinkage-radial	clear_specimen	1	1	1
+validity	shrinkage-radial	engineering_reference_model	1	1	1
+validity	shrinkage-radial	source_test_temperature_known	0	0	1
+scalar	shrinkage-tangential	wood-shrinkage	tangential_shrinkage_green_to_ovendry	5.6	%	constant
+uncertainty	shrinkage-tangential	unstated	-	-	-	-
+validity	shrinkage-tangential	moisture_content	0	30	%
+validity	shrinkage-tangential	clear_specimen	1	1	1
+validity	shrinkage-tangential	engineering_reference_model	1	1	1
+validity	shrinkage-tangential	source_test_temperature_known	0	0	1
 observation	wh-clear-wood	Sugar pine (Pinus lambertiana) clear straight-grained specimens	FPL-GTR-282 chapter 5 tabulated averages (static bending MOE; compression-derived elastic ratios; experimentally determined Poisson ratios)	Average clear straight-grained small-specimen values at approximately 12 percent moisture content; the elastic-ratio and Poisson tables derive from samples of a few species; Table 5-2 gives no nu_RL or nu_TL for sugar pine, so none is stated here; moisture-content adjustment parameters: green bending MOE 7100 MPa (Table 5-3a, green row), the Pg of Equation (5-3), valid below Mp; Mp = 25 percent (not in Table 5-13; the chapter text: "for other species, Mp = 25 may be assumed"); volumetric shrinkage green to ovendry 7.9 percent (Table 4-3) and fiber saturation point 30 percent ("If MCfs is not known, 30% MC can be used as an approximation", Equation (4-9) text), valid below it
 scalar	et-over-el	wh-clear-wood	et_over_el	0.087	1	constant
 uncertainty	et-over-el	unstated	-	-	-	-

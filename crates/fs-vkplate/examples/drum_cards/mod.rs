@@ -9,6 +9,7 @@
 //! 7476).
 
 use fs_matdb::QueryPoint;
+use fs_qty::{Dims, QuantitySpec};
 use fs_vkplate::kit::{self, CymbalSpec, DrumSpec, Piece};
 use fs_vkplate::materials::{KitMaterials, temperature_frequency_point, temperature_point};
 use fs_vkplate::shaft::{SHOULDER_STATION_M, ShaftStrike};
@@ -18,6 +19,12 @@ use fs_vkplate::shaft::{SHOULDER_STATION_M, ShaftStrike};
 const HEAD_FILM: &[u8] =
     include_bytes!("../../packs/head-film-pet-mylar-dupont-matsuzawa1959.fsmatpk");
 const HICKORY: &[u8] = include_bytes!("../../packs/stick-hickory-shagbark-fpl-gtr282.fsmatpk");
+
+fn hickory_point(temperature_k: f64) -> Result<QueryPoint, String> {
+    temperature_point("T", temperature_k)?
+        .with_quantity("moisture_content", QuantitySpec::dimensional(Dims::NONE), 0.12)
+        .map_err(|error| error.to_string())
+}
 
 /// The snare wires' steel: the music-wire string card (Heptonstall, Waller and
 /// Robertson, LIGO P1400229) and, for its shear modulus, the music-wire spring
@@ -85,12 +92,12 @@ pub fn drum(
     }
     let spec = &kit::retune(kit::card_drum(spec)?, tune);
     let gas = fs_vkplate::standard_gas();
-    let cards = KitMaterials::from_packs_at_temperature(
+    let point = hickory_point(gas.temperature)?;
+    let cards = KitMaterials::from_card_packs(
         HEAD_FILM,
         &[],
         HICKORY,
-        "T",
-        gas.temperature,
+        &point,
         kit::STICK_TIP_KG / Z5A_DENSITY_ESTIMATE_KG_M3,
         TIP_RADIUS_M,
         TIP_LOSS_S_M,
@@ -177,7 +184,7 @@ pub fn shaft_cymbal(spec: &kit::CymbalSpec, speed: Option<f64>) -> Result<Piece,
     let gas = fs_vkplate::standard_gas();
     let shaft = ShaftStrike::from_card(
         HICKORY,
-        &temperature_point("T", gas.temperature)?,
+        &hickory_point(gas.temperature)?,
         SHOULDER_STATION_M,
         0.5 * kit::edge_thickness(spec),
         (kit::BRONZE.0, kit::BRONZE.1),
