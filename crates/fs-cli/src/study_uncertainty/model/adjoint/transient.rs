@@ -36,11 +36,12 @@ fn admit_controls(spec: &ProjectSpec, parameters: &[UniformParameter]) -> Result
             | Target::NaturalConvectionAmbient
             | Target::RadiationReservoirTemperature => true,
             Target::FixedTemperature => time.enthalpy.is_some(),
-            Target::HeatFlux
-            | Target::ContactPressure
+            Target::ContactPressure
             | Target::ContactThickness
             | Target::ContactGap
-            | Target::ContactTorque => false,
+            | Target::ContactTorque => spec.interface_cards.as_deref().unwrap_or(&[])
+                .iter().any(|binding| binding.interface == parameter.entity),
+            Target::HeatFlux => false,
         };
         if !supported {
             return Err(invalid(format!(
@@ -56,6 +57,8 @@ fn admit_controls(spec: &ProjectSpec, parameters: &[UniformParameter]) -> Result
 /// with a different objective or add a conflicting second adjoint.
 pub(super) fn configure(spec: &mut ProjectSpec, parameters: &[UniformParameter]) -> Result<()> {
     admit_controls(spec, parameters)?;
+    let needs_contacts = parameters.iter()
+        .any(|parameter| parameter.target.contact_axis().is_some() && parameter.low != parameter.high);
     let outputs = spec.outputs.as_deref().unwrap_or(&[]);
     let requests: Vec<_> = outputs
         .iter()
@@ -89,10 +92,16 @@ pub(super) fn configure(spec: &mut ProjectSpec, parameters: &[UniformParameter])
         spec.outputs
             .get_or_insert_with(Vec::new)
             .push(OutputRequest {
-                name: FINAL.into(),
+                name: if needs_contacts { FINAL_MATERIAL } else { FINAL }.into(),
                 kind: "report".into(),
                 region: None,
             });
+    } else if needs_contacts {
+        // This report-only calibration view keeps the same final functional,
+        // while explicitly admitting the material contractions and their work.
+        for output in spec.outputs.iter_mut().flatten() {
+            if output.name == FINAL { output.name = FINAL_MATERIAL.into(); }
+        }
     }
     Ok(())
 }
@@ -307,6 +316,8 @@ pub(super) fn coefficients(
             }
             Target::RadiationReservoirTemperature => number(named(family(report, "radiation")?,
                 "surfaces", "name", entity)?, "dtemperature_dreservoir_temperature_k_per_k")?,
+            Target::ContactPressure | Target::ContactThickness | Target::ContactGap
+            | Target::ContactTorque => super::contact::transient_coefficient(report, entity)?,
             _ => return Err(invalid(format!("unsupported transient calibration coordinate {}", parameter.name))),
         };
         if !derivative.is_finite() {

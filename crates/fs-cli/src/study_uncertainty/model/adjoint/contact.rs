@@ -4,12 +4,71 @@
 use super::*;
 use fs_matdb::{ClaimId, ClaimSelection, SelectionPolicy};
 
+/// Both steady and transient producers differentiate a unit multiplier on
+/// the original contact resistance. Their report layouts differ; the source
+/// chain rule below is the same and must use the sampled physical state.
+fn control_row<'a>(report: &'a J, entity: &str) -> Result<&'a J> {
+    let (rows, identity) = match report.str_field("schema") {
+        Some("frankensim.cli.nominal-adjoint.v1") => {
+            if !matches!(report.str_field("output"), Some(output::CONTACT | output::COMBINED)) {
+                return Err(invalid("joint-state calibration requires the complete contact adjoint report"));
+            }
+            (array(report, "parameters", 256)?, "entity")
+        }
+        Some("fs-cli-native-transient-adjoint-v1" | "fs-cli-native-enthalpy-adjoint-v1") => {
+            if report.str_field("output") != Some("temperature-final-material-adjoint") {
+                return Err(invalid("joint-state trajectory calibration requires the final material adjoint"));
+            }
+            let controls = report.get("material_controls")
+                .ok_or_else(|| invalid("transient contact calibration has no material controls"))?;
+            let steps = report.f64_field("state_index")
+                .filter(|value| value.is_finite() && *value > 0.0 && value.fract() == 0.0)
+                .ok_or_else(|| invalid("transient contact calibration has no final state index"))?;
+            if controls.f64_field("control_steps") != Some(steps)
+                || controls.str_field("parameter_scope") != Some(
+                    "constant-through-selected-trajectory-independent-regional-effective-conductivity-and-named-matching-resistance-multipliers")
+                || controls.str_field("units") != Some("K")
+            {
+                return Err(invalid("contact controls do not span the same final trajectory in kelvin"));
+            }
+            (array(controls, "contact_interfaces", 64)?, "interface")
+        }
+        _ => return Err(invalid("unsupported normalized contact adjoint producer")),
+    };
+    let mut matches = rows.iter().filter(|row| {
+        row.str_field(identity) == Some(entity)
+            && (identity == "interface"
+                || row.str_field("target") == Some("contact-resistance-multiplier"))
+    });
+    let row = matches.next()
+        .ok_or_else(|| invalid("missing normalized contact-resistance derivative"))?;
+    if matches.next().is_some() {
+        return Err(invalid("ambiguous normalized contact-resistance derivative"));
+    }
+    if row.f64_field("reference_value") != Some(1.0)
+        || row.get("mapped") != Some(&J::Bool(false))
+        || (identity == "interface" && (row.f64_field("log_reference_value") != Some(0.0)
+            || row.f64_field("face_pairs").is_none_or(|value|
+                !value.is_finite() || value <= 0.0 || value.fract() != 0.0)))
+    {
+        return Err(invalid("joint-state calibration needs an unmapped card-backed unit resistance control"));
+    }
+    Ok(row)
+}
+
+/// The caller has already bound the full receipt to the final physical state.
+/// Return the normalized derivative; `convert` applies dR/dx at that state.
+pub(super) fn transient_coefficient(report: &J, entity: &str) -> Result<f64> {
+    control_row(report, entity)?.f64_field("dtemperature_dresistance_multiplier_k")
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| invalid("transient contact control has no finite resistance derivative"))
+}
+
 pub(super) fn convert(model: &Model, sample: &Sample, report: &J, coefficients: &mut [f64]) -> Result<()> {
     let parameters = model.bound.study().parameters();
     if !parameters.iter().any(|p| p.target.contact_axis().is_some() && p.low != p.high) { return Ok(()); }
-    if coefficients.len() != parameters.len()
-        || !matches!(report.str_field("output"), Some(output::CONTACT | output::COMBINED)) {
-        return Err(invalid("joint-state calibration requires the complete contact adjoint report"));
+    if coefficients.len() != parameters.len() {
+        return Err(invalid("joint-state calibration coefficient layout differs"));
     }
     // The marginal means generally differ from the base project. Reconstruct
     // exactly the calibration point, never query a card at the old base state.
@@ -18,7 +77,6 @@ pub(super) fn convert(model: &Model, sample: &Sample, report: &J, coefficients: 
     let requirements = fs_project::BindingRequirements::thermal_steady_v1();
     let resolution = fs_project::resolve_bindings(&project.spec, &library, &requirements);
     if !resolution.admissible() { return Err(invalid("joint-state calibration cannot reproduce its card bindings")); }
-    let rows = array(report,"parameters",256)?;
     for (i, parameter) in parameters.iter().enumerate() {
         let Some(axis) = parameter.target.contact_axis() else { continue; };
         if parameter.low == parameter.high { continue; }
@@ -43,13 +101,10 @@ pub(super) fn convert(model: &Model, sample: &Sample, report: &J, coefficients: 
             || response.resistance.to_bits() != property.value_lo.to_bits()
             || property.value_lo.to_bits() != property.value_hi.to_bits()
         { return Err(invalid("joint-state derivative does not reproduce its nominal resistance and source")); }
-        let row = rows.iter().find(|r|r.str_field("target")==Some("contact-resistance-multiplier")
-            && r.str_field("entity")==Some(parameter.entity.as_str()))
-            .ok_or_else(|| invalid("missing normalized contact-resistance derivative"))?;
-        if row.str_field("interface_card") != Some(binding.card.as_str())
-            || row.f64_field("reference_value") != Some(1.0)
-            || row.get("mapped") != Some(&J::Bool(false))
-        { return Err(invalid("joint-state calibration needs an unmapped card-backed normalized contact control")); }
+        let row = control_row(report, &parameter.entity)?;
+        if row.str_field("interface_card") != Some(binding.card.as_str()) {
+            return Err(invalid("joint-state calibration contact card differs from its sampled source"));
+        }
         // dT/dx = dT/ds|_{R -> sR,s=1} * (dR/dx)/R.
         coefficients[i] *= response.derivative / response.resistance;
         if !coefficients[i].is_finite() { return Err(invalid("joint-state thermal derivative is nonfinite")); }

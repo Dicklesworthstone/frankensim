@@ -1218,6 +1218,15 @@ raw sample statistics and source-independent resume of the frozen calibration.
 Sampled-peak and steady adjoint requests are never silently reinterpreted as the
 final-time objective.
 
+Manufactured contact pressure, thickness, gap and torque also use this native
+calibration path for both capacity and enthalpy storage. The calibration view
+requests `temperature-final-material-adjoint`, then converts each named
+resistance-scale trajectory derivative through the same selected-source chain
+rule as steady contact calibration, evaluated at the sampled marginal mean.
+The complete final prefix, unit scale, interface identity, unmapped trace and
+source claim must agree. Source endpoints, unequal-slope knots and missing
+derivatives still refuse; raw physical samples do not acquire an adjoint request.
+
 Raw probability trajectories, compliance and retained temperatures are unchanged.
 The frozen mean control and calibration receipt use the existing budget and
 source-independent recovery path. The derivative remains a selected numerical

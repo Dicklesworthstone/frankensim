@@ -158,3 +158,6 @@ mod mixed;
 
 #[path = "bands.rs"]
 mod bands;
+
+#[path = "transient.rs"]
+mod transient;
