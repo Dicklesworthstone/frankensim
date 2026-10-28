@@ -152,6 +152,10 @@ impl FrictionHeatRoute {
     pub const fn cells(&self) -> [CellId; 2] {
         [self.patch.link.a, self.patch.link.b]
     }
+    /// Physical area of the original admitted contact face [m²].
+    pub const fn contact_area_m2(&self) -> f64 {
+        self.patch.link.area_m2
+    }
     /// Actual per-side centre-to-interface distances [m].
     pub const fn distances_m(&self) -> [f64; 2] {
         self.distances_m

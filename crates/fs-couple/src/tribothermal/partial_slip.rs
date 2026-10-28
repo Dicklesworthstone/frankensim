@@ -40,6 +40,8 @@ use super::{
 /// A common thermal interface partitions physical loss through the original
 /// body network while retaining each body's own reversible entropy exchange.
 pub mod resolved;
+/// Native rigid shear/spin inertia and the original resolved caloric contact.
+pub mod rigid;
 
 #[derive(Clone)]
 enum CaloricHeatRouting {
