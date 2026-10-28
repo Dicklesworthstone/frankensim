@@ -1,0 +1,52 @@
+{
+  "schema": "frankensim.discovery.v1",
+  "target": "properties",
+  "properties": [
+    {
+      "name": "density",
+      "unit": "kg/m3",
+      "kind": "dimensional"
+    },
+    {
+      "name": "specific-heat-capacity",
+      "unit": "J/kg/K",
+      "kind": "dimensional"
+    },
+    {
+      "name": "thermal-conductivity",
+      "unit": "W/m/K",
+      "kind": "thermal-conductivity"
+    }
+  ],
+  "models": [],
+  "domain": {
+    "mode": "envelope",
+    "axes": [
+      {
+        "name": "temperature",
+        "kind": "absolute-temperature",
+        "lower": "300 K",
+        "upper": "525 K"
+      },
+      {
+        "name": "source-pressure-atmospheric",
+        "kind": "dimensional",
+        "lower": "1",
+        "upper": "1"
+      },
+      {
+        "name": "source-constant-density-model",
+        "kind": "dimensional",
+        "lower": "1",
+        "upper": "1"
+      },
+      {
+        "name": "source-test-temperature-known",
+        "kind": "dimensional",
+        "lower": "0",
+        "upper": "0"
+      }
+    ]
+  },
+  "selection": "single-claim-only"
+}

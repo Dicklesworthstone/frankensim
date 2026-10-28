@@ -4,6 +4,43 @@ This directory retains the human-reviewable source inputs compiled by
 `xtask matdb-pack`. Generated binary packs are deliberately not committed:
 the compiler must reproduce them from the pinned manifest and source record.
 
+## Continuous NASA PEEK thermal-model curves
+
+`peek-nasa-thermic-plate-linearized-model/` makes the published NASA THERMIC
+plate correlations usable across **300–525 K**. It is a separately selected
+model pack; the original `peek-nasa-thermic-plate/` exact-point observations
+remain unchanged. The NASA plate's grade, supplier and processing history are
+unspecified, so it is distinct from the Ensinger PEEK stock-shape pack.
+
+Two curves retain 46 exact-decimal evaluations apiece, spaced every 5 K, of
+the conductivity and Cp cubics in NASA/TM-20210014330. Linear interpolation
+introduces at most 0.000010446578125 W/(m K) in k and 0.06480046875 J/(kg K)
+in Cp relative to those cubics, in real arithmetic. These bounds exclude
+floating-point roundoff and any subsequent enthalpy-chart interpolation.
+The integrated Cp approximation over the whole interval is
+319647.6954140625 J/kg; the polynomial integral is 319641.29033203125 J/kg.
+This numerical difference is not experimental uncertainty, which stays unstated.
+
+The density claim retains the paper's **1264 kg/m³ constant-density model
+input** over the same interval. It does not assert measured density throughout
+that interval. Queries must explicitly supply `source-constant-density-model=1`
+and `source-pressure-atmospheric=1`; density also requires
+`source-test-temperature-known=0`. Temperature uses the absolute-temperature
+quantity kind. Outside-range and missing-model-condition requests refuse.
+
+```sh
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/peek-nasa-thermic-plate-linearized-model/manifest.tsv \
+  --out /tmp/peek-nasa-thermic-plate-linearized-model.fsmatpk
+cargo test -p xtask --test material_catalog_expansion g0_g3_peek_model_curves
+frankensim discover examples/material-discovery/peek-nasa-thermal-model.json \
+  /tmp/peek-nasa-thermic-plate-linearized-model.fsmatpk
+```
+
+The source report and original fit limitations are linked in the manifest and
+observations. The two numerical curves are three model claims together with
+density, not 92 independent property measurements.
+
 ## Engineering polymers with separate loading modes
 
 Four producer-grade stock-shape packs add **32 claims**. Each retains density,

@@ -616,6 +616,10 @@ fn g0_g3_plastics_keep_grade_test_speed_and_discrete_compression() {
         ("tecamid-6-natural", 1140.0, 1600.0, 0.37, 3.3e9),
         ("tecapet-white", 1360.0, 1200.0, 0.31, 3.1e9),
         ("tecaflon-pvdf-natural", 1780.0, 1300.0, 0.25, 2.2e9),
+        ("tecapeek-natural", 1310.0, 1100.0, 0.27, 4.2e9),
+        ("tecapei-natural", 1280.0, 1200.0, 0.21, 3.2e9),
+        ("tecason-s-natural", 1240.0, 1200.0, 0.21, 2.7e9),
+        ("tecamid-66-natural", 1150.0, 1500.0, 0.36, 3.5e9),
     ] {
         let pack = compile(&format!("ensinger-{grade}"), 8);
         let grade_axis = format!("source-grade-{grade}");
@@ -911,5 +915,115 @@ fn g0_g3_xps_keeps_declared_conductivity_thickness_gaps_and_grade_limits() {
                 .unwrap(),
         );
         refuses(&pack, "density", RHO, &p.with(&grade_axis, 0.0).unwrap());
+    }
+}
+
+#[test]
+fn g0_g3_peek_model_curves_preserve_cubic_accuracy_and_explicit_model_domain() {
+    let pack = compile("peek-nasa-thermic-plate-linearized-model", 3);
+    let at = |kelvin| {
+        temperature(
+            flags(&[
+                ("source-pressure-atmospheric", 1.0),
+                ("source-constant-density-model", 1.0),
+                ("source-test-temperature-known", 0.0),
+            ]),
+            "temperature",
+            kelvin,
+        )
+    };
+    let lower = at(300.0);
+    let upper = at(525.0);
+    let conductivity = key("thermal-conductivity", K);
+    let heat_capacity = key("specific-heat-capacity", CP);
+    let selection = fs_matdb::ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly);
+    let k_line = pack
+        .claims()
+        .query_line_typed(&conductivity, "temperature", &lower, &upper, selection)
+        .unwrap();
+    let cp_line = pack
+        .claims()
+        .query_line_typed(&heat_capacity, "temperature", &lower, &upper, selection)
+        .unwrap();
+    assert_eq!(k_line.knots.len(), 46);
+    assert_eq!(cp_line.knots.len(), 46);
+    let cubic_k =
+        |t: f64| -0.040607 + 0.0018749 * t - 0.0000044753 * t * t + 0.0000000039027 * t * t * t;
+    let cubic_cp = |t: f64| 336.06 + 3.3066 * t - 0.0061332 * t * t + 0.000010477 * t * t * t;
+    for index in 0..46 {
+        let t = 300.0 + 5.0 * index as f64;
+        assert_eq!(k_line.knots[index].0, t);
+        assert_eq!(cp_line.knots[index].0, t);
+        sample(&pack, "thermal-conductivity", K, &at(t), cubic_k(t));
+        sample(&pack, "specific-heat-capacity", CP, &at(t), cubic_cp(t));
+        sample(&pack, "density", RHO, &at(t), 1264.0);
+        if index < 45 {
+            let midpoint = t + 2.5;
+            for (name, dims, polynomial, bound) in [
+                (
+                    "thermal-conductivity",
+                    K,
+                    cubic_k(midpoint),
+                    0.000010446578125,
+                ),
+                (
+                    "specific-heat-capacity",
+                    CP,
+                    cubic_cp(midpoint),
+                    0.06480046875,
+                ),
+            ] {
+                let answer = pack
+                    .claims()
+                    .query_typed(
+                        &key(name, dims),
+                        &at(midpoint),
+                        SelectionPolicy::SingleClaimOnly,
+                    )
+                    .unwrap();
+                assert!((answer.evidence.value.value - polynomial).abs() <= bound);
+                assert!(matches!(
+                    answer.evidence.value.uncertainty,
+                    UncertaintyModel::Unstated,
+                ));
+                pack.claims().verify_receipt(&answer.receipt).unwrap();
+            }
+        }
+    }
+    let integrated_cp: f64 = cp_line
+        .knots
+        .windows(2)
+        .map(|pair| {
+            (pair[1].0 - pair[0].0)
+                * 0.5
+                * (pair[0].1.evidence.value.value + pair[1].1.evidence.value.value)
+        })
+        .sum();
+    // Independent analytic integral of the reported cubic from 300 to 525 K.
+    let cubic_integral = 319_641.290_332_031_25;
+    assert!((integrated_cp - cubic_integral).abs() <= 14.580_105_468_75);
+    assert!((integrated_cp - 319_647.695_414_062_5).abs() < 1e-7);
+    for (name, dims) in [
+        ("thermal-conductivity", K),
+        ("specific-heat-capacity", CP),
+        ("density", RHO),
+    ] {
+        refuses(&pack, name, dims, &at(299.99));
+        refuses(&pack, name, dims, &at(525.01));
+        refuses(
+            &pack,
+            name,
+            dims,
+            &lower
+                .clone()
+                .with("source-constant-density-model", 0.0)
+                .unwrap(),
+        );
+        refuses(
+            &pack,
+            name,
+            dims,
+            &temperature(QueryPoint::new(), "temperature", 400.0),
+        );
     }
 }
