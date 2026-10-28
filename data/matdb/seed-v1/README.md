@@ -37,6 +37,64 @@ Compile any of these manifests through the same `matdb-pack` command used below.
 All three were admitted by the actual compiler, including its repeat-compilation
 and hash-pinned decode checks.
 
+## Run a sourced mechanical coupon
+
+`fs-solid` now includes `material_coupon`: a source-pack-driven static tensile
+or compressive coupon with explicit geometry, load, supports and constitutive
+assumptions. Material values come from the compiled pack. Isotropic modes admit
+E/nu, E/G or K/G; the full FPL reference-ratio mode retains orthotropy and an
+explicit L/R/T orientation. No source temperature is invented for wood.
+
+```bash
+coupon_dir="$(mktemp -d /tmp/frankensim-coupon.XXXXXX)"
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/phosphor-bronze-c52100-cda-reference/manifest.tsv \
+  --out "$coupon_dir/bronze.fsmatpk"
+cargo run -p fs-solid --example material_coupon -- \
+  --template phosphor-bronze-c52100 > "$coupon_dir/bronze.tsv"
+cargo run -p fs-solid --example material_coupon -- \
+  "$coupon_dir/bronze.fsmatpk" "$coupon_dir/bronze.tsv"
+```
+
+Templates also exist for `aluminum-5005` and `loblolly-pine`; compile their
+`aluminum-5005-austral-wright-reference` and `pine-loblolly-fpl-gtr282` manifests
+respectively. The TSV declares exact property-role mappings and every source
+coordinate. Values are coherent SI, so 12% dry-mass moisture is `0.12`.
+Axis quantity types are read from the actual selected source declarations.
+Conflicting claims, incomplete source coordinates, missing 3-D wood data,
+unsupported response axes and excessive recovered strain refuse.
+
+The default coupon is 100 x 20 x 20 mm with four axial cells and 1 MPa traction
+(400 N). Left-face normal rollers and minimal transverse pins allow Poisson
+contraction. Native runs of the actual source compiler and physical consumer gave:
+
+| Source and orientation | Mass, kg | Mean axial displacement, micrometres |
+|---|---:|---:|
+| Aluminum 5005 | 0.108 | 1.466275660 |
+| C52100 phosphor bronze | 0.352088388 | 0.906485861 |
+| Loblolly pine, longitudinal | 0.022848 | 7.390983001 |
+| Loblolly pine, radial | 0.022848 | 65.406929210 |
+
+For the radial case, replace the wood template's orientation row with
+`orientation<TAB>0<TAB>1<TAB>0<TAB>-1<TAB>0<TAB>0<TAB>0<TAB>0<TAB>1` using actual
+tab separators. The radial/longitudinal displacement ratio agrees with the
+retained source's `1 / er_over_el` (8.849557522), with unchanged mass and load.
+These are nominal fixed-state, small-strain model results; general rotated
+anisotropy remains a coarse finite-element calculation, and no strength
+allowable, loading-history, fracture or mesh-error claim is added.
+
+Output includes applied force, support reactions, displacement, mass, stored
+elastic energy, strain and force residuals, alongside the selected source
+coordinates, claims and physical identities. `load-displacement-product-j` is
+the final F dot u pairing, twice stored elastic energy in this zero-initial-strain
+linear case; it is not work integrated over a loading history.
+
+```bash
+cargo test -p fs-material state_point::isotropic_parameters
+cargo test -p fs-solid --lib nodal_force_tests
+cargo test -p fs-solid --example material_coupon
+```
+
 ## Run a sourced layered heat calculation
 
 The steady planar wall consumer is in

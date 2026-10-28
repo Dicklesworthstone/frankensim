@@ -1,5 +1,34 @@
 # fs-solid CONTRACT
 
+## Source-pack mechanical coupons and nonthermal dead loads
+
+`linear3::eigenstrain` admits explicit sorted unique dead nodal forces in
+assembly, equilibrium solve and input-bound stress recovery. It shares the
+existing force validator and physical solver, while retaining generic initial
+strain and requiring no fictitious temperature. Fixed-DOF loads remain in the
+full force vector for support reactions. An empty force list preserves the
+original eigenstrain-only identity and response exactly; changed loads refuse
+recovery against an older solution.
+
+`examples/material_coupon.rs` reads a normalized material pack and an explicit
+bounded TSV scenario, then runs native tetrahedral face-load integration,
+equilibrium and stress recovery. It resolves independent isotropic parameter
+pairs or complete source-bound FPL orthotropy with explicit L/R/T orientation.
+Source property roles, quantity-typed coordinates, source/derivation/orientation
+identities and strain ceilings remain explicit. Templates exercise aluminum
+5005, C52100 bronze and loblolly pine without inline material presets.
+
+The aligned uniform traction fixture allows Poisson contraction and has an
+independent axial compliance reference. Output reports source-bound mass,
+displacement, applied/support forces, strain energy and residuals. Its
+load-displacement product is F dot u, not a loading-history work integral.
+Rotated general anisotropy is a coarse FE result. Neither a source data lookup
+nor this linear model supplies strength, creep, fracture or mesh-error bounds.
+
+G0/G1 regressions cover combined initial strain and dead force, exact affine
+displacement/stress/energy, fixed-support reactions, empty-load equivalence,
+malformed forces, stale-load refusal, signed coupon loads and strain admission.
+
 ## Momentum-stable shell integration
 
 `shell_time::step_newmark` solves the effective mass equation for acceleration,

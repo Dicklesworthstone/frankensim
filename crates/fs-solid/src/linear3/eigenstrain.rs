@@ -235,4 +235,245 @@ impl TetLinearElasticProblem<'_> {
             cx,
         )
     }
+
+    /// Assemble generic initial strain and explicit dead nodal forces together.
+    ///
+    /// Forces are newtons paired with full node-major xyz DOFs, strictly
+    /// increasing and unique. Fixed-DOF forces remain in the full load for
+    /// support reactions. All finite/range/ordering checks and load identities
+    /// are shared with the original solid force owner. An empty force list
+    /// preserves the original eigenstrain-only load identity exactly.
+    pub fn assemble_eigenstrain_load_with_nodal_forces(
+        &self,
+        strains: TetEigenstrainField<'_>,
+        nodal_forces_n: &[(usize, f64)],
+        cx: &Cx<'_>,
+    ) -> Result<TetEigenstrainLoad, TetElasticError> {
+        let load = self.assemble_eigenstrain_load(strains, cx)?;
+        if nodal_forces_n.is_empty() {
+            return Ok(load);
+        }
+        add_nodal_forces_to_thermal_load(load, self.nodes_m.len(), nodal_forces_n, cx)
+    }
+
+    /// Solve mechanical equilibrium with generic initial strain and dead load.
+    ///
+    /// This uses the same stiffness, force signs, checked linear solve and
+    /// input binding as thermal loading, without creating a temperature.
+    pub fn solve_eigenstrain_displacement_with_nodal_forces(
+        &self,
+        strains: TetEigenstrainField<'_>,
+        nodal_forces_n: &[(usize, f64)],
+        config: TetStaticSolveConfig,
+        cx: &Cx<'_>,
+    ) -> Result<TetEigenstrainDisplacementSolution, TetElasticError> {
+        let load = self.assemble_eigenstrain_load_with_nodal_forces(strains, nodal_forces_n, cx)?;
+        self.solve_thermal_displacement_from_load(load, config, cx)
+    }
+
+    /// Recover stress and internal forces from the same initial-strain/load solve.
+    ///
+    /// Changed force bits, source strain, material, mesh or supports refuse
+    /// through the existing physical input identity check. Actual reactions
+    /// are internal minus external force at constrained DOFs.
+    pub fn recover_eigenstrain_stress_with_nodal_forces(
+        &self,
+        solution: &TetEigenstrainDisplacementSolution,
+        strains: TetEigenstrainField<'_>,
+        nodal_forces_n: &[(usize, f64)],
+        mesh_frame: ContentHash,
+        maximum_absolute_mandel_strain: f64,
+        cx: &Cx<'_>,
+    ) -> Result<TetEigenstrainStressReport, TetElasticError> {
+        let load = self.assemble_eigenstrain_load_with_nodal_forces(strains, nodal_forces_n, cx)?;
+        self.recover_thermal_stress_from_load(
+            solution,
+            EigenstrainFieldView::Generic(strains),
+            load,
+            mesh_frame,
+            maximum_absolute_mandel_strain,
+            cx,
+        )
+    }
+}
+
+#[cfg(test)]
+mod nodal_force_tests {
+    use super::*;
+    use fs_alloc::{ArenaConfig, ArenaPool};
+    use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
+
+    fn with_cx(f: impl FnOnce(&Cx<'_>)) {
+        let gate = CancelGate::new_clock_free();
+        ArenaPool::new(ArenaConfig::default()).scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 812,
+                    kernel_id: 812,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            f(&cx);
+        });
+    }
+
+    #[test]
+    fn g1_initial_strain_plus_dead_load_has_exact_affine_response() {
+        with_cx(|cx| {
+            // Numerical patch fixture: 1/6 m^3 tetrahedron, E=120 GPa,
+            // nu=1/4, uniform initial strain 1e-4, sigma_xx=120 MPa.
+            // The only nonzero free nodal force is sigma_xx*V=20 MN.
+            let nodes = [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ];
+            let tets = [[0, 1, 2, 3]];
+            let material = TetElasticMaterial::try_new(2700.0, 120.0e9, 0.25, [21; 32]).unwrap();
+            let initial = TetEigenstrainState::try_new(
+                [1.0e-4, 1.0e-4, 1.0e-4, 0.0, 0.0, 0.0],
+                [21; 32],
+                ContentHash([22; 32]),
+                0.01,
+            )
+            .unwrap();
+            let field = TetEigenstrainField::Uniform(&initial);
+            let problem = TetLinearElasticProblem {
+                nodes_m: &nodes,
+                tetrahedra: &tets,
+                materials: TetMaterialField::Uniform(&material),
+                fixed_dofs: &[0, 1, 2, 4, 5, 8],
+                budget: TetAssemblyBudget::standard(),
+            };
+            let forces = [(0, 7.0), (3, 20.0e6)];
+            let solution = problem
+                .solve_eigenstrain_displacement_with_nodal_forces(
+                    field,
+                    &forces,
+                    TetStaticSolveConfig::default(),
+                    cx,
+                )
+                .unwrap();
+            let u = solution.displacement_m();
+            assert!((u[1][0] - 0.0011).abs() < 2.0e-15);
+            assert!((u[2][1] + 0.00015).abs() < 2.0e-15);
+            assert!((u[3][2] + 0.00015).abs() < 2.0e-15);
+            let report = problem
+                .recover_eigenstrain_stress_with_nodal_forces(
+                    &solution,
+                    field,
+                    &forces,
+                    ContentHash([23; 32]),
+                    0.01,
+                    cx,
+                )
+                .unwrap();
+            let stress = report.elements()[0].stress_mandel_pa();
+            assert!((stress[0] / 120.0e6 - 1.0).abs() < 2.0e-12);
+            assert!(stress[1..].iter().all(|x| x.abs() < 1.0e-5));
+            // 1/2 * V * sigma_xx * elastic_epsilon_xx = 10 kJ.
+            assert!((report.elastic_energy_j() / 10_000.0 - 1.0).abs() < 2.0e-12);
+            let support_x = report.nodal_internal_force_n()[0][0] - forces[0].1;
+            assert!((support_x + 20.0e6 + 7.0).abs() < 1.0e-5);
+
+            let without_support_load = problem
+                .solve_eigenstrain_displacement_with_nodal_forces(
+                    field,
+                    &[(3, 20.0e6)],
+                    TetStaticSolveConfig::default(),
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(
+                solution.displacement_m(),
+                without_support_load.displacement_m()
+            );
+            assert_ne!(solution.identity(), without_support_load.identity());
+            assert!(
+                problem
+                    .recover_eigenstrain_stress_with_nodal_forces(
+                        &solution,
+                        field,
+                        &[(0, 7.0), (3, 19.0e6)],
+                        ContentHash([23; 32]),
+                        0.01,
+                        cx,
+                    )
+                    .is_err()
+            );
+        });
+    }
+
+    #[test]
+    fn g0_empty_forces_preserve_state_and_malformed_forces_refuse() {
+        with_cx(|cx| {
+            let nodes = [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ];
+            let tets = [[0, 1, 2, 3]];
+            let material = TetElasticMaterial::try_new(1000.0, 1.0e9, 0.25, [31; 32]).unwrap();
+            let initial = TetEigenstrainState::try_new(
+                [1.0e-4, 0.0, 0.0, 0.0, 0.0, 0.0],
+                [31; 32],
+                ContentHash([32; 32]),
+                0.01,
+            )
+            .unwrap();
+            let field = TetEigenstrainField::Uniform(&initial);
+            let problem = TetLinearElasticProblem {
+                nodes_m: &nodes,
+                tetrahedra: &tets,
+                materials: TetMaterialField::Uniform(&material),
+                fixed_dofs: &[0, 1, 2, 4, 5, 8],
+                budget: TetAssemblyBudget::standard(),
+            };
+            let original = problem
+                .solve_eigenstrain_displacement(field, TetStaticSolveConfig::default(), cx)
+                .unwrap();
+            let empty = problem
+                .solve_eigenstrain_displacement_with_nodal_forces(
+                    field,
+                    &[],
+                    TetStaticSolveConfig::default(),
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(original, empty);
+            let original_stress = problem
+                .recover_eigenstrain_stress(&original, field, ContentHash([33; 32]), 0.01, cx)
+                .unwrap();
+            let empty_stress = problem
+                .recover_eigenstrain_stress_with_nodal_forces(
+                    &empty,
+                    field,
+                    &[],
+                    ContentHash([33; 32]),
+                    0.01,
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(original_stress, empty_stress);
+            for bad in [
+                vec![(3, f64::NAN)],
+                vec![(3, f64::INFINITY)],
+                vec![(12, 1.0)],
+                vec![(3, 1.0), (3, 2.0)],
+                vec![(3, 1.0), (0, 1.0)],
+            ] {
+                assert!(matches!(
+                    problem.assemble_eigenstrain_load_with_nodal_forces(field, &bad, cx),
+                    Err(TetElasticError::InvalidNodalForce { .. })
+                ));
+            }
+        });
+    }
 }
