@@ -13,6 +13,8 @@ use fs_mbd::articulated_contacts::{
 
 #[path = "articulated_contacts/friction.rs"]
 mod friction;
+#[path = "articulated_contacts/momentum.rs"]
+mod momentum;
 
 fn close(actual: f64, expected: f64) {
     assert!(
