@@ -66,6 +66,37 @@ with `mech-step-non-finite` and `mech-step-unresolved`, respectively.
   (documented in-source): positions place the gross CG at the dossier's
   29.7% chord; gyrations land the inertias inside the published ±15% band.
 
+## Spatial wind in the flight lifecycle
+
+`SimLoop::init_with_spatial_wind(scenario, SpatialWindSpec)` opts into the
+wall-compatible evolving `fs-atmo` field. The specification declares the mean
+log law, spatial strength and length, advection speed, and every modal OU
+correlation time; the scenario supplies the seed and load density. Its mean
+reference speed must match the scenario headwind. This finite-mode spectrum
+is synthetic and is not a validated reconstruction of historical weather.
+
+The longitudinal force and propeller solves consume CG-sampled body air-relative
+velocity. Ground velocity is separate inertial state: temporal OU changes and
+spatial wind gradients change relative airspeed without fabricating an aircraft
+impulse. Forces use the accepted tick-n field; the returned tick-n+1 state and
+read-only `sample_spatial_wind` queries share the advanced field. The old scalar
+OU angle increment is disabled in this mode. Gravity acts vertically in world
+coordinates at the actual pitch attitude. The sampler exposes the full velocity
+and analytic gradient in flight-line-forward/right/up coordinates, but the
+current longitudinal force interface consumes only forward and vertical inflow;
+distributed span/disk gust loads and crosswind/sideslip dynamics are not claimed.
+Mechanical initialization retains the baseline steady trim, not gust-equilibrated
+prelaunch dynamics.
+
+Spatial runs save V3 checkpoints containing the entire wind specification,
+both actual OU quadratures, ground velocity, and run identity. The existing
+`restore_checkpoint` resumes this state exactly and checks the relative-air
+velocity against the restored ground/wind state. Legacy initialization and V2
+checkpoint bytes retain their existing behavior. Focused tests live in
+`simloop/spatial_wind/tests.rs`: actual load/propeller response, zero-amplitude
+gust exclusion, observer independence, rail/airborne replay, and gravity-frame
+consistency. Run with `cargo test -p fs-flyer --lib simloop::spatial_wind`.
+
 ## Error model
 
 Typed `Refusal { code, message, ranked_repairs }`. Codes:

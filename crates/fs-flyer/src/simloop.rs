@@ -19,6 +19,10 @@
 //! gust enters as an angle-of-attack increment (reduced coupling,
 //! declared), and roll/yaw use the Estimated ReducedAeroelasticWarp +
 //! ReducedLateralBuildUp tier (not a structural-margin claim).
+//! `init_with_spatial_wind` explicitly replaces that scalar gust with the
+//! wall-compatible evolving field sampled at the CG, inertial longitudinal
+//! ground kinematics, and a complete V3 wind checkpoint. Distributed wing
+//! gust loads and crosswind/sideslip dynamics remain outside that mode.
 
 use crate::Refusal;
 use crate::aerowarp::ReducedAeroelasticWarp;
@@ -33,6 +37,10 @@ use crate::pilot::{PilotState, PilotWrightModel, pack_cues};
 use fs_atmo::ou::{OuMode, STATIONARY_ANCHOR_TICK, StationaryOuPath};
 use fs_blake3::hash_domain;
 use fs_math::det;
+
+mod spatial_wind;
+pub use spatial_wind::SpatialWindSpec;
+use spatial_wind::SpatialWindState;
 
 /// Tick cap (absurd-input guard; 10 minutes at 120 Hz).
 pub const MAX_TICKS: u64 = 72_000;
@@ -255,6 +263,7 @@ pub struct SimLoop {
     lateral_model: LateralModel,
     lateral_state: LateralState,
     ou: StationaryOuPath,
+    spatial_wind: Option<SpatialWindState>,
     tick0: Tick0State,
     /// Minted AFTER the tick-0 digest (plan law).
     pub run_intent_id: String,
@@ -394,6 +403,7 @@ impl SimLoop {
             lateral_model,
             lateral_state: LateralState::default(),
             ou,
+            spatial_wind: None,
             mech: tick0.mech,
             omega: tick0.trim.omega_prop_rad_s,
             tick0,
@@ -448,8 +458,10 @@ impl SimLoop {
 
     /// Serialize the FULL dynamic state as CheckpointStateV2 bytes
     /// (bead guzez.7.1.1, E6.1-i): bit-exact capture with an embedded
-    /// blake3 integrity digest. The OU path is counter-addressed and
-    /// reconstructs from the tick alone (philox doctrine).
+    /// blake3 integrity digest. The opt-in spatial-wind path emits V3,
+    /// including its explicit model, both sequential OU quadratures, and
+    /// inertial ground velocity. Legacy V2 reconstructs its OU state by
+    /// replaying the canonical prehistory through the saved tick.
     ///
     /// # Errors
     /// `checkpoint-after-terminal` (a finished run has its replay
@@ -463,7 +475,8 @@ impl SimLoop {
             });
         }
         let mut b = Vec::new();
-        b.extend_from_slice(&2u32.to_le_bytes()); // version
+        let version = if self.spatial_wind.is_some() { 3u32 } else { 2 };
+        b.extend_from_slice(&version.to_le_bytes());
         b.extend_from_slice(&self.tick.to_le_bytes());
         b.push(match self.phase {
             Phase::OnRail => 0,
@@ -513,7 +526,15 @@ impl SimLoop {
             }
             None => b.push(0),
         }
-        let digest = hash_domain("org.frankensim.wf.checkpoint-state.v2", &b);
+        if let Some(wind) = &self.spatial_wind {
+            wind.encode(&self.run_intent_id, &mut b);
+        }
+        let domain = if version == 3 {
+            "org.frankensim.wf.checkpoint-state.v3"
+        } else {
+            "org.frankensim.wf.checkpoint-state.v2"
+        };
+        let digest = hash_domain(domain, &b);
         b.extend_from_slice(digest.as_bytes());
         Ok(b)
     }
@@ -548,9 +569,11 @@ impl SimLoop {
         let (body, tail) = bytes.split_at(bytes.len() - 32);
         let digest_v1 = hash_domain("org.frankensim.wf.checkpoint-state.v1", body);
         let digest_v2 = hash_domain("org.frankensim.wf.checkpoint-state.v2", body);
+        let digest_v3 = hash_domain("org.frankensim.wf.checkpoint-state.v3", body);
         let matches_v1 = digest_v1.as_bytes() == tail;
         let matches_v2 = digest_v2.as_bytes() == tail;
-        if !matches_v1 && !matches_v2 {
+        let matches_v3 = digest_v3.as_bytes() == tail;
+        if !matches_v1 && !matches_v2 && !matches_v3 {
             return Err(Refusal {
                 code: "checkpoint-tampered",
                 message: "embedded digest mismatch".into(),
@@ -562,9 +585,9 @@ impl SimLoop {
             .and_then(|v| <[u8; 4]>::try_from(v).ok())
             .map(u32::from_le_bytes)
             .ok_or_else(|| bad("missing version"))?;
-        match (version, matches_v1, matches_v2) {
-            (2, _, true) => {}
-            (1, true, _) => {
+        match (version, matches_v1, matches_v2, matches_v3) {
+            (2, _, true, _) | (3, _, _, true) => {}
+            (1, true, _, _) => {
                 return Err(Refusal {
                     code: "checkpoint-version-unsupported",
                     message: "CheckpointStateV1 lacks lateral state and cannot exact-resume v2"
@@ -619,7 +642,23 @@ impl SimLoop {
         } else {
             None
         };
-        let mut sim = SimLoop::init(spec)?;
+        let restored_wind = if version == 3 {
+            if tick > spec.max_ticks || !f.iter().all(|v| v.is_finite()) || f[1] < 0.0 {
+                return Err(bad("invalid spatial lifecycle state"));
+            }
+            Some(SpatialWindState::decode(&body[pos..], spec.seed, tick)?)
+        } else {
+            None
+        };
+        let mut sim = if let Some((wind, intent)) = &restored_wind {
+            let sim = SimLoop::init_with_spatial_wind(spec, wind.spec.clone())?;
+            if &sim.run_intent_id != intent {
+                return Err(bad("spatial checkpoint belongs to a different scenario"));
+            }
+            sim
+        } else {
+            SimLoop::init(spec)?
+        };
         if pilot_state.is_some() != sim.pilot.is_some() {
             return Err(bad("pilot presence disagrees with the scenario"));
         }
@@ -653,10 +692,19 @@ impl SimLoop {
         if let (Some(st), Some((_, slot))) = (pilot_state, sim.pilot.as_mut()) {
             *slot = st;
         }
-        // The OU path is counter-addressed: advance to the checkpoint
-        // tick (the next step advances to tick+1 exactly as the
-        // uninterrupted run would).
-        sim.ou.advance_to(tick as i64).map_err(map_atmo)?;
+        if let Some((wind, _)) = restored_wind {
+            sim.spatial_wind = Some(wind);
+            sim.sync_spatial_air_velocity()?;
+            if sim.u.to_bits() != f[2].to_bits() || sim.w.to_bits() != f[3].to_bits() {
+                return Err(bad(
+                    "air-relative velocity disagrees with ground/wind state",
+                ));
+            }
+        } else {
+            // Replay the sequential legacy path; innovations alone are
+            // counter-addressed, not the OU amplitude at an arbitrary tick.
+            sim.ou.advance_to(tick as i64).map_err(map_atmo)?;
+        }
         Ok(sim)
     }
 
@@ -710,16 +758,21 @@ impl SimLoop {
         };
         let dt = 1.0 / PERCEPTION_HZ;
         self.tick += 1;
-        self.ou.advance_to(self.tick as i64).map_err(map_atmo)?;
-        // Reduced gust coupling (declared): vertical gust = weighted OU
-        // amplitude sum; enters as an angle-of-attack increment.
-        let gust_w: f64 = self
-            .ou
-            .amplitudes()
-            .iter()
-            .enumerate()
-            .map(|(i, a)| a * 0.12 / (1.0 + i as f64))
-            .sum();
+        let mut gust_w = if self.spatial_wind.is_some() {
+            // Explicit n→n+1 force update uses the accepted position and
+            // atmosphere at n. Advance the wind only after integration;
+            // every published endpoint then has state and wind at n+1.
+            self.sync_spatial_air_velocity()?
+        } else {
+            self.ou.advance_to(self.tick as i64).map_err(map_atmo)?;
+            // Legacy reduced vertical-gust / alpha-increment coupling.
+            self.ou
+                .amplitudes()
+                .iter()
+                .enumerate()
+                .map(|(i, a)| a * 0.12 / (1.0 + i as f64))
+                .sum()
+        };
         // Statement-split (guzez.7.2.1): no fused mul-add.
         let u2 = self.u * self.u;
         let w2 = self.w * self.w;
@@ -780,7 +833,12 @@ impl SimLoop {
             assist_dc = out.dc_assist_rad;
         }
         // Aerodynamics at the CURRENT state (+ gust alpha increment).
-        let alpha = det::atan2(self.w, self.u) + gust_w / v_air;
+        let alpha = det::atan2(self.w, self.u)
+            + if self.spatial_wind.is_some() {
+                0.0
+            } else {
+                gust_w / v_air
+            };
         let alpha_clamped = alpha.clamp(-0.55, 0.55);
         let b = match self.design.force_buildup_warm(
             v_air,
@@ -800,6 +858,9 @@ impl SimLoop {
                 // to the UI, never a silent fallback model.
                 self.phase = Phase::Ended(TerminalEvent::EnvelopeExceeded);
                 self.envelope_refusal = Some(refusal);
+                if let Some(spatial_gust) = self.finish_spatial_tick()? {
+                    gust_w = spatial_gust;
+                }
                 let out = self.state_out(gust_w, assist_active, assist_dc);
                 let mut bytes = self.digest_acc.to_vec();
                 for v in self.snapshot_payload(&out) {
@@ -814,57 +875,66 @@ impl SimLoop {
         let m = self.design.gross_mass_kg;
         match self.phase {
             Phase::OnRail => {
-                // Constrained: normal force carries weight minus lift;
-                // accelerate along the rail under thrust − drag −
-                // rolling friction. Gravity is inside force_n already —
-                // remove its x-component and use the rail-plane balance.
-                let lift = b.lift_n;
-                let weight = m * 9.80665;
-                let normal = (weight - lift).max(0.0);
-                let thrust = b.thrust_n[0] + b.thrust_n[1];
-                // Catapult tow: constant force while the pull lasts
-                // (x_m measures rail distance; the drop exhausts at
-                // pull_length — constant-force tier, declared).
-                let tow = match &self.spec.catapult {
-                    Some(c) if self.x_m < c.pull_length_m => c.pull_force_n,
-                    _ => 0.0,
-                };
-                let du_ground = (thrust + tow - b.drag_n - RAIL_MU * normal) / m;
-                let inc_u = dt * du_ground;
-                self.u += inc_u;
-                let inc_x = dt * (self.u - self.spec.headwind_mps).max(0.0);
-                self.x_m += inc_x;
-                let inc_om = dt * b.torque_imbalance_nm / 1.6;
-                self.omega += inc_om;
-                if lift >= weight {
-                    self.phase = Phase::Airborne;
-                } else if self.x_m > self.spec.rail_length_m {
-                    self.phase = Phase::Ended(TerminalEvent::RailEndWithoutLift);
+                if self.spatial_wind.is_some() {
+                    self.advance_spatial_motion(&b, alpha_clamped, dt);
+                } else {
+                    // Constrained: normal force carries weight minus lift;
+                    // accelerate along the rail under thrust − drag −
+                    // rolling friction. Gravity is inside force_n already —
+                    // remove its x-component and use the rail-plane balance.
+                    let lift = b.lift_n;
+                    let weight = m * 9.80665;
+                    let normal = (weight - lift).max(0.0);
+                    let thrust = b.thrust_n[0] + b.thrust_n[1];
+                    // Catapult tow: constant force while the pull lasts
+                    // (x_m measures rail distance; the drop exhausts at
+                    // pull_length — constant-force tier, declared).
+                    let tow = match &self.spec.catapult {
+                        Some(c) if self.x_m < c.pull_length_m => c.pull_force_n,
+                        _ => 0.0,
+                    };
+                    let du_ground = (thrust + tow - b.drag_n - RAIL_MU * normal) / m;
+                    let inc_u = dt * du_ground;
+                    self.u += inc_u;
+                    let inc_x = dt * (self.u - self.spec.headwind_mps).max(0.0);
+                    self.x_m += inc_x;
+                    let inc_om = dt * b.torque_imbalance_nm / 1.6;
+                    self.omega += inc_om;
+                    if lift >= weight {
+                        self.phase = Phase::Airborne;
+                    } else if self.x_m > self.spec.rail_length_m {
+                        self.phase = Phase::Ended(TerminalEvent::RailEndWithoutLift);
+                    }
                 }
             }
             Phase::Airborne => {
-                // FRD longitudinal kinematics.
-                let du = b.force_n[0] / m - self.q * self.w;
-                let dw = b.force_n[2] / m + self.q * self.u;
-                let dq = b.moment_y_nm / IYY_KG_M2;
-                let inc_u = dt * du;
-                self.u += inc_u;
-                let inc_w = dt * dw;
-                self.w += inc_w;
-                let inc_q = dt * dq;
-                self.q += inc_q;
-                let inc_th = dt * self.q;
-                self.theta += inc_th;
-                let inc_om = dt * b.torque_imbalance_nm / 1.6;
-                self.omega += inc_om;
-                let climb = self.u * det::sin(self.theta) - self.w * det::cos(self.theta);
-                let inc_h = dt * climb;
-                self.h_m += inc_h;
-                let ground_speed = (self.u * det::cos(self.theta) + self.w * det::sin(self.theta)
-                    - self.spec.headwind_mps)
-                    .max(0.0);
-                let inc_x = dt * ground_speed;
-                self.x_m += inc_x;
+                if self.spatial_wind.is_some() {
+                    self.advance_spatial_motion(&b, alpha_clamped, dt);
+                } else {
+                    // FRD longitudinal kinematics.
+                    let du = b.force_n[0] / m - self.q * self.w;
+                    let dw = b.force_n[2] / m + self.q * self.u;
+                    let dq = b.moment_y_nm / IYY_KG_M2;
+                    let inc_u = dt * du;
+                    self.u += inc_u;
+                    let inc_w = dt * dw;
+                    self.w += inc_w;
+                    let inc_q = dt * dq;
+                    self.q += inc_q;
+                    let inc_th = dt * self.q;
+                    self.theta += inc_th;
+                    let inc_om = dt * b.torque_imbalance_nm / 1.6;
+                    self.omega += inc_om;
+                    let climb = self.u * det::sin(self.theta) - self.w * det::cos(self.theta);
+                    let inc_h = dt * climb;
+                    self.h_m += inc_h;
+                    let ground_speed = (self.u * det::cos(self.theta)
+                        + self.w * det::sin(self.theta)
+                        - self.spec.headwind_mps)
+                        .max(0.0);
+                    let inc_x = dt * ground_speed;
+                    self.x_m += inc_x;
+                }
                 // Project the achieved antisymmetric strip twists back
                 // onto the registered warp basis. Common trim washout
                 // is symmetric and therefore contributes no lateral
@@ -906,6 +976,9 @@ impl SimLoop {
         }
         if self.tick >= self.spec.max_ticks && !matches!(self.phase, Phase::Ended(_)) {
             self.phase = Phase::Ended(TerminalEvent::MaxTicks);
+        }
+        if let Some(spatial_gust) = self.finish_spatial_tick()? {
+            gust_w = spatial_gust;
         }
         // Chain the digest.
         let out = self.state_out(gust_w, assist_active, assist_dc);
