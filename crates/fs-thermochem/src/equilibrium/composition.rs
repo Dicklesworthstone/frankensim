@@ -20,6 +20,10 @@ use core::fmt;
 use fs_qty::{Amount, Energy, Mass, Pressure, Temperature};
 
 mod solve;
+pub use solve::expansion::{
+    EquilibriumEntropySolveV1, EquilibriumExpansionErrorV1,
+    EquilibriumThermodynamicResponseV1, EquilibriumThermodynamicStateV1,
+};
 /// Maximum retained gas species, including reactants and inerts.
 pub const MAX_EQUILIBRIUM_SPECIES_V1: usize = 128;
 /// Maximum elemental rows; dependent rows remain checked at publication.
