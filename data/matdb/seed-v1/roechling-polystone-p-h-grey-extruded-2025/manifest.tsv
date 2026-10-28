@@ -1,0 +1,21 @@
+frankensim.matdb-manifest.v3
+pack_id	roechling-polystone-p-h-grey-extruded-2025
+redistribution	permitted	Selected attributed numerical facts and original annotations only; no source document, prose, table layout or source-document license is redistributed
+citation	Röchling Industrial, Polystone P homopolymer grey extruded PP-H, PIM-ID 590977, release 2025-12-08 version 5.0, printed 2026-10-28, pp. 1-2; https://www.roechling.com/fileadmin/assets/77/09/Polystone%C2%AE%20P%20homopolymer%20grey%20extruded%20%E2%80%93%20Technical%20Data%20Sheet%20%28EN%29%20%5B590977%5D.pdf ; product https://www.roechling.com/industrial/materials/thermoplastics/industrial-plastics/pp-h/polystone-p-homopolymer-grey-718434
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	roechling-pp-h	properties.tsv	material-tsv-v1
+property	density_strict_lower_guideline_bound	density-strict-lower-guideline-bound	dimensional
+property	tensile_modulus_strict_lower_guideline_bound	tensile-modulus-strict-lower-guideline-bound	dimensional
+property	tensile_yield_strength_strict_lower_guideline_bound	tensile-yield-strength-strict-lower-guideline-bound	dimensional
+property	tensile_elongation_strict_lower_guideline_bound	tensile-elongation-strict-lower-guideline-bound	dimensional
+property	notched_charpy_impact_strict_lower_guideline_bound	notched-charpy-impact-strict-lower-guideline-bound	dimensional
+property	water_absorption_strict_upper_guideline_bound	water-absorption-strict-upper-guideline-bound	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	dielectric_loss_tangent	dielectric-loss-tangent	dimensional
+axis	grade	source-grade-polystone-p-h-grey-extruded-2025	dimensional
+axis	temperature_known	source-test-temperature-known	dimensional
+axis	moisture_known	source-moisture-condition-known	dimensional
+axis	rate_known	source-test-rate-known	dimensional
+axis	frequency	frequency	dimensional
+axis	extruded	source-extruded-product	dimensional

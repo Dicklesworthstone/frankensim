@@ -1,0 +1,18 @@
+frankensim.matdb-manifest.v3
+pack_id	armacell-ht-armaflex-tube-reference-2026
+redistribution	permitted	Selected attributed numerical facts and original annotations only; no source document, prose, table layout or source-document license is redistributed
+citation	Armacell, HT/ArmaFlex technical specifications, UK product, tube form, declared thermal conductivity and water-vapour diffusion rows; https://www.armacell.com/en-GB/product/technical-specs/htarmaflex ; accessed 2026-10-28; webpage revision unstated
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	armacell-ht-armaflex	properties.tsv	material-tsv-v1
+property	declared_thermal_conductivity_upper_limit	declared-thermal-conductivity-upper-limit	thermal-conductivity
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	vapour_diffusion_resistance_factor_lower_limit	vapour-diffusion-resistance-factor-lower-limit	dimensional
+axis	grade	source-grade-ht-armaflex-tube	dimensional
+axis	moisture_known	source-moisture-condition-known	dimensional
+axis	pressure_known	source-gas-pressure-known	dimensional
+axis	test_delta_known	source-test-temperature-difference-known	dimensional
+axis	mean_test_temperature	mean-test-temperature	absolute-temperature
+axis	temperature	temperature	absolute-temperature
+axis	temperature_known	source-test-temperature-known	dimensional
+axis	engineering_reference	engineering-reference-model	dimensional
+axis	limit_as_local	declared-conductivity-limit-as-local-model	dimensional

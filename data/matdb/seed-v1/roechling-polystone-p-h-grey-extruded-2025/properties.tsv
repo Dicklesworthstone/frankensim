@@ -1,0 +1,63 @@
+frankensim.matdb-source.v1
+observation	thermal	Polystone P homopolymer grey extruded PP-H	Röchling PIM-ID 590977, version 5.0, p. 1; DIN 52612 and DIN 52612-1	The named extruded homopolymer supplies specific heat 1.70 kJ/(kg K) and conductivity 0.20 W/(m K). Test temperature, pressure, moisture conditioning and specimen dimensions are unstated; these are producer guideline values, not a temperature law. The source gives only a strict lower bound on density, so this pack cannot supply a complete volumetric thermal profile. Service temperatures, melting range and the 120-190 ppm/K expansion interval do not establish property coverage or instantaneous expansion. No pressed product, copolymer or other PP grade is substituted.
+observation	bounds	Polystone P homopolymer grey extruded PP-H	Röchling PIM-ID 590977, version 5.0, p. 1; ISO 1183-1, ISO 527, ISO 179 and ISO 62	The printed greater-than and less-than signs are retained in separate bound-valued property names. Density is greater than 0.90 g/cm3, tensile modulus greater than 1500 MPa, yield stress greater than 30 MPa, elongation at break greater than 50 percent, and notched Charpy impact greater than 6 kJ/m2. Water absorption is less than 0.1 percent with no stated exposure duration; it is not equilibrium moisture content. These are guideline thresholds, not point measurements, statistical bounds, characteristic design values, hardening curves or allowable loads. Test rate, temperature and moisture conditioning are unstated.
+observation	electrical	Polystone P homopolymer grey extruded PP-H	Röchling PIM-ID 590977, version 5.0, p. 2; IEC 60250	The dielectric dissipation factor is 0.00019 at 1 MHz. No interpolation to another frequency, temperature dependence or paired frequency-qualified permittivity is supplied. The same sheet's permittivity has no printed frequency, so it is not paired with the loss to create a complex constitutive law.
+scalar	density-bound	bounds	density_strict_lower_guideline_bound	900	kg/m3	constant
+uncertainty	density-bound	unstated	-	-	-	-
+validity	density-bound	grade	1	1	1
+validity	density-bound	extruded	1	1	1
+validity	density-bound	temperature_known	0	0	1
+validity	density-bound	moisture_known	0	0	1
+scalar	modulus-bound	bounds	tensile_modulus_strict_lower_guideline_bound	1500	MPa	constant
+uncertainty	modulus-bound	unstated	-	-	-	-
+validity	modulus-bound	grade	1	1	1
+validity	modulus-bound	extruded	1	1	1
+validity	modulus-bound	temperature_known	0	0	1
+validity	modulus-bound	moisture_known	0	0	1
+validity	modulus-bound	rate_known	0	0	1
+scalar	yield-bound	bounds	tensile_yield_strength_strict_lower_guideline_bound	30	MPa	constant
+uncertainty	yield-bound	unstated	-	-	-	-
+validity	yield-bound	grade	1	1	1
+validity	yield-bound	extruded	1	1	1
+validity	yield-bound	temperature_known	0	0	1
+validity	yield-bound	moisture_known	0	0	1
+validity	yield-bound	rate_known	0	0	1
+scalar	elongation-bound	bounds	tensile_elongation_strict_lower_guideline_bound	0.5	1	constant
+uncertainty	elongation-bound	unstated	-	-	-	-
+validity	elongation-bound	grade	1	1	1
+validity	elongation-bound	extruded	1	1	1
+validity	elongation-bound	temperature_known	0	0	1
+validity	elongation-bound	moisture_known	0	0	1
+validity	elongation-bound	rate_known	0	0	1
+scalar	impact-bound	bounds	notched_charpy_impact_strict_lower_guideline_bound	6000	J/m2	constant
+uncertainty	impact-bound	unstated	-	-	-	-
+validity	impact-bound	grade	1	1	1
+validity	impact-bound	extruded	1	1	1
+validity	impact-bound	temperature_known	0	0	1
+validity	impact-bound	moisture_known	0	0	1
+validity	impact-bound	rate_known	0	0	1
+scalar	water-absorption-bound	bounds	water_absorption_strict_upper_guideline_bound	0.001	1	constant
+uncertainty	water-absorption-bound	unstated	-	-	-	-
+validity	water-absorption-bound	grade	1	1	1
+validity	water-absorption-bound	extruded	1	1	1
+validity	water-absorption-bound	temperature_known	0	0	1
+validity	water-absorption-bound	moisture_known	0	0	1
+scalar	heat-capacity	thermal	specific_heat_capacity	1700	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	grade	1	1	1
+validity	heat-capacity	extruded	1	1	1
+validity	heat-capacity	temperature_known	0	0	1
+validity	heat-capacity	moisture_known	0	0	1
+scalar	conductivity	thermal	thermal_conductivity	0.20	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	grade	1	1	1
+validity	conductivity	extruded	1	1	1
+validity	conductivity	temperature_known	0	0	1
+validity	conductivity	moisture_known	0	0	1
+scalar	dielectric-loss	electrical	dielectric_loss_tangent	0.00019	1	constant
+uncertainty	dielectric-loss	unstated	-	-	-	-
+validity	dielectric-loss	grade	1	1	1
+validity	dielectric-loss	extruded	1	1	1
+validity	dielectric-loss	temperature_known	0	0	1
+validity	dielectric-loss	moisture_known	0	0	1
+validity	dielectric-loss	frequency	1000000	1000000	Hz

@@ -1,0 +1,113 @@
+frankensim.matdb-source.v1
+observation	mechanical	INVISISIL RTV615 clear two-part silicone, matched A/B kit at 10:1 by mass	Momentive HCD-RTV655 p. 3, cured-property table; p. 5 mixing instructions	The reported cure is one hour at 100 C. Cure temperature is not test temperature. Test temperature, moisture conditioning, loading rate and methods are unstated. Tensile strength uses the primary 65 kgf/cm2 entry, converted with 1 kgf=9.80665 N to 6374322.5 Pa; the rounded parenthetical 920 psi is not pooled with it. Elongation 120 percent becomes 1.2. Shore A is a hardness reading, not an elastic modulus. The 0.2 percent shrinkage has an unstated linear/volume convention and remains a separate reported shrinkage. Neither uncured component specific gravity nor liquid viscosity is imported as a cured property.
+observation	electrical	INVISISIL RTV615, one-hour 100 C cured specimen	Momentive HCD-RTV655 p. 3 electrical rows	Relative permittivity and loss are at 1000 Hz only. Dielectric strength is reported for a 1.9 mm specimen and is not a permissible operating field. Volume resistivity converts ohm cm to ohm m. Other test conditions and uncertainty are unstated. The table does not establish broadband dielectric response, a joint law or environmental qualification.
+observation	thermal	INVISISIL RTV615, one-hour 100 C cured specimen	Momentive HCD-RTV655 p. 3 thermal rows	Conductivity is 0.00045 cal/(s cm K), and specific heat is 0.3 cal/(g K). This pack explicitly opts into the thermochemical calorie convention 1 cal=4.184 J because the source does not identify its calorie convention; resulting values are 0.18828 W/(m K) and 1255.2 J/(kg K). The convention is a conversion assumption, not source uncertainty. Test temperature is unstated; the useful-temperature range is not a property-validity interval. Source expansion lacks its temperature interval and convention and is not an instantaneous expansion law. Cured density, Poisson ratio and elastic/viscoelastic response remain absent.
+observation	optical	INVISISIL RTV615, one-hour 100 C cured specimen	Momentive HCD-RTV655 p. 3 refractive index	This isolated index has no stated wavelength, test temperature or dispersion law. It cannot identify a spectral refractive-index model. All retained values are typical comparison facts with unstated statistical uncertainty.
+scalar	tensile-strength	mechanical	tensile_strength	6374322.5	Pa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	grade	1	1	1
+validity	tensile-strength	cure_time	3600	3600	s
+validity	tensile-strength	cure_temperature	373.15	373.15	K
+validity	tensile-strength	mix_mass_ratio	10	10	1
+validity	tensile-strength	matched_kit	1	1	1
+validity	tensile-strength	temperature_known	0	0	1
+validity	tensile-strength	moisture_known	0	0	1
+validity	tensile-strength	rate_known	0	0	1
+scalar	tensile-elongation	mechanical	tensile_elongation	1.2	1	constant
+uncertainty	tensile-elongation	unstated	-	-	-	-
+validity	tensile-elongation	grade	1	1	1
+validity	tensile-elongation	cure_time	3600	3600	s
+validity	tensile-elongation	cure_temperature	373.15	373.15	K
+validity	tensile-elongation	mix_mass_ratio	10	10	1
+validity	tensile-elongation	matched_kit	1	1	1
+validity	tensile-elongation	temperature_known	0	0	1
+validity	tensile-elongation	moisture_known	0	0	1
+validity	tensile-elongation	rate_known	0	0	1
+scalar	hardness-shore-a	mechanical	shore_a	44	1	constant
+uncertainty	hardness-shore-a	unstated	-	-	-	-
+validity	hardness-shore-a	grade	1	1	1
+validity	hardness-shore-a	cure_time	3600	3600	s
+validity	hardness-shore-a	cure_temperature	373.15	373.15	K
+validity	hardness-shore-a	mix_mass_ratio	10	10	1
+validity	hardness-shore-a	matched_kit	1	1	1
+validity	hardness-shore-a	temperature_known	0	0	1
+validity	hardness-shore-a	moisture_known	0	0	1
+validity	hardness-shore-a	rate_known	0	0	1
+scalar	reported-cure-shrinkage	mechanical	reported_cure_shrinkage	0.002	1	constant
+uncertainty	reported-cure-shrinkage	unstated	-	-	-	-
+validity	reported-cure-shrinkage	grade	1	1	1
+validity	reported-cure-shrinkage	cure_time	3600	3600	s
+validity	reported-cure-shrinkage	cure_temperature	373.15	373.15	K
+validity	reported-cure-shrinkage	mix_mass_ratio	10	10	1
+validity	reported-cure-shrinkage	matched_kit	1	1	1
+validity	reported-cure-shrinkage	temperature_known	0	0	1
+validity	reported-cure-shrinkage	moisture_known	0	0	1
+scalar	refractive-index	optical	refractive_index	1.406	1	constant
+uncertainty	refractive-index	unstated	-	-	-	-
+validity	refractive-index	grade	1	1	1
+validity	refractive-index	cure_time	3600	3600	s
+validity	refractive-index	cure_temperature	373.15	373.15	K
+validity	refractive-index	mix_mass_ratio	10	10	1
+validity	refractive-index	matched_kit	1	1	1
+validity	refractive-index	temperature_known	0	0	1
+validity	refractive-index	moisture_known	0	0	1
+validity	refractive-index	wavelength_known	0	0	1
+scalar	dielectric-strength	electrical	dielectric_strength	19700000.0	V/m	constant
+uncertainty	dielectric-strength	unstated	-	-	-	-
+validity	dielectric-strength	grade	1	1	1
+validity	dielectric-strength	cure_time	3600	3600	s
+validity	dielectric-strength	cure_temperature	373.15	373.15	K
+validity	dielectric-strength	mix_mass_ratio	10	10	1
+validity	dielectric-strength	matched_kit	1	1	1
+validity	dielectric-strength	temperature_known	0	0	1
+validity	dielectric-strength	moisture_known	0	0	1
+validity	dielectric-strength	test_thickness	0.0019	0.0019	m
+scalar	relative-permittivity	electrical	relative_permittivity	2.7	1	constant
+uncertainty	relative-permittivity	unstated	-	-	-	-
+validity	relative-permittivity	grade	1	1	1
+validity	relative-permittivity	cure_time	3600	3600	s
+validity	relative-permittivity	cure_temperature	373.15	373.15	K
+validity	relative-permittivity	mix_mass_ratio	10	10	1
+validity	relative-permittivity	matched_kit	1	1	1
+validity	relative-permittivity	temperature_known	0	0	1
+validity	relative-permittivity	moisture_known	0	0	1
+validity	relative-permittivity	frequency	1000	1000	Hz
+scalar	dielectric-loss-tangent	electrical	dielectric_loss_tangent	0.0006	1	constant
+uncertainty	dielectric-loss-tangent	unstated	-	-	-	-
+validity	dielectric-loss-tangent	grade	1	1	1
+validity	dielectric-loss-tangent	cure_time	3600	3600	s
+validity	dielectric-loss-tangent	cure_temperature	373.15	373.15	K
+validity	dielectric-loss-tangent	mix_mass_ratio	10	10	1
+validity	dielectric-loss-tangent	matched_kit	1	1	1
+validity	dielectric-loss-tangent	temperature_known	0	0	1
+validity	dielectric-loss-tangent	moisture_known	0	0	1
+validity	dielectric-loss-tangent	frequency	1000	1000	Hz
+scalar	electrical-resistivity	electrical	electrical_resistivity	18000000000000.0	Ohm*m	constant
+uncertainty	electrical-resistivity	unstated	-	-	-	-
+validity	electrical-resistivity	grade	1	1	1
+validity	electrical-resistivity	cure_time	3600	3600	s
+validity	electrical-resistivity	cure_temperature	373.15	373.15	K
+validity	electrical-resistivity	mix_mass_ratio	10	10	1
+validity	electrical-resistivity	matched_kit	1	1	1
+validity	electrical-resistivity	temperature_known	0	0	1
+validity	electrical-resistivity	moisture_known	0	0	1
+scalar	thermal-conductivity	thermal	thermal_conductivity	0.18828	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	grade	1	1	1
+validity	thermal-conductivity	cure_time	3600	3600	s
+validity	thermal-conductivity	cure_temperature	373.15	373.15	K
+validity	thermal-conductivity	mix_mass_ratio	10	10	1
+validity	thermal-conductivity	matched_kit	1	1	1
+validity	thermal-conductivity	temperature_known	0	0	1
+validity	thermal-conductivity	moisture_known	0	0	1
+validity	thermal-conductivity	calorie_conversion	1	1	1
+scalar	specific-heat-capacity	thermal	specific_heat_capacity	1255.2	J/kg/K	constant
+uncertainty	specific-heat-capacity	unstated	-	-	-	-
+validity	specific-heat-capacity	grade	1	1	1
+validity	specific-heat-capacity	cure_time	3600	3600	s
+validity	specific-heat-capacity	cure_temperature	373.15	373.15	K
+validity	specific-heat-capacity	mix_mass_ratio	10	10	1
+validity	specific-heat-capacity	matched_kit	1	1	1
+validity	specific-heat-capacity	temperature_known	0	0	1
+validity	specific-heat-capacity	moisture_known	0	0	1
+validity	specific-heat-capacity	calorie_conversion	1	1	1

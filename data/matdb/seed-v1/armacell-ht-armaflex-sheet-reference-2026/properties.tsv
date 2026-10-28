@@ -1,0 +1,26 @@
+frankensim.matdb-source.v1
+observation	declaration	HT/ArmaFlex factory-made closed-cell EPDM foam, sheet product	Armacell UK thermal-conductivity declaration; EN ISO 13787, EN 12667, EN ISO 8497	At mean temperature 40 C the declared conductivity is at most 0.045 W/(m K). This is a declaration limit, not a measured central value or certified uncertainty interval. The page also gives lambda=[39.92+0.125*theta_m+0.0008*(theta_m-30)^2]/1000 with theta_m in C. Moisture conditioning, gas pressure and temperature difference are unstated. Tube and sheet values are different; neither is generic dense EPDM.
+observation	local-model	HT/ArmaFlex sheet engineering reference	Original piecewise-linear evaluation of the producer declared-conductivity polynomial	Six polynomial evaluations at 0, 20, 40, 60, 80 and 100 C are linearly interpolated in this explicit reference only. The 0-100 C calculation band is author-selected; it is not asserted to be a manufacturer-stated property validity range. Admitting declared-conductivity-limit-as-local-model=1 maps insulation mean temperature to local temperature and uses a declared limit as a constitutive reference value. This is not a measured local k(T), not the exact quadratic between knots, and not an accuracy guarantee. The interpolation lies above the printed convex polynomial by at most 0.00008 W/(m K) on each 20 K interval; that arithmetic difference does not bound source error. No density, heat capacity, viscoelasticity, moisture transport law or independent pore-radiation contribution is invented.
+observation	vapour	HT/ArmaFlex closed-cell EPDM foam, sheet product	Armacell UK water-vapour diffusion resistance; EN 12086 and EN 13469	The dimensionless resistance factor is reported at least 3000; test temperature and moisture conditions are unstated. This threshold is not a measured permeance, water absorption, humidity capacity or complete diffusion coefficient. Statistical uncertainty is unstated.
+scalar	declared-limit	declaration	declared_thermal_conductivity_upper_limit	0.045	W/m/K	constant
+uncertainty	declared-limit	unstated	-	-	-	-
+validity	declared-limit	grade	1	1	1
+validity	declared-limit	moisture_known	0	0	1
+validity	declared-limit	pressure_known	0	0	1
+validity	declared-limit	mean_test_temperature	313.15	313.15	K
+validity	declared-limit	test_delta_known	0	0	1
+curve	local-model	declaration,local-model	thermal_conductivity	temperature	degC	W/m/K	0:0.04064000,20:0.04250000,40:0.04500000,60:0.04814000,80:0.05192000,100:0.05634000	linear
+uncertainty	local-model	unstated	-	-	-	-
+validity	local-model	grade	1	1	1
+validity	local-model	moisture_known	0	0	1
+validity	local-model	pressure_known	0	0	1
+validity	local-model	temperature	273.15	373.15	K
+validity	local-model	test_delta_known	0	0	1
+validity	local-model	engineering_reference	1	1	1
+validity	local-model	limit_as_local	1	1	1
+scalar	vapour-limit	vapour	vapour_diffusion_resistance_factor_lower_limit	3000	1	constant
+uncertainty	vapour-limit	unstated	-	-	-	-
+validity	vapour-limit	grade	1	1	1
+validity	vapour-limit	moisture_known	0	0	1
+validity	vapour-limit	pressure_known	0	0	1
+validity	vapour-limit	temperature_known	0	0	1
