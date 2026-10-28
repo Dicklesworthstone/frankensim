@@ -1003,7 +1003,17 @@ atomic failure, cancellation/retry, clone identity and fully prescribed limits.
   adjoint probe. The solver requires a finite, intersection-free
   initial state; bad parameters, non-finite SDF values/gradients,
   invalid pins, and unsupported contact-adjoint inputs return
-  `SolidError::InvalidInput`.
+  `SolidError::InvalidInput`. `solve_from` holds the previous physical
+  displacement fixed as the slip reference; `solve` uses the zero state.
+  Numerical lag rounds refresh normal loads and tangent frames only,
+  and success requires the refreshed friction residual to meet tolerance.
+  The frozen-frame Huber energy, gradient, and Hessian agree in both
+  sticking and sliding branches. `eps_v` is a displacement smoothing
+  width; this regularized law permits small creep and does not claim exact
+  set-valued static friction. Solutions expose separate normal and
+  tangential reactions plus nonnegative endpoint incremental friction work.
+  The latter is not trajectory-integrated heat; thermal deposition and
+  rigorous continuous-trajectory CCD remain separate capabilities.
 - `accept_scenario_bc`: fs-scenario integration — `Dirichlet` and
   `Traction` under `Physics::Elasticity` accepted; dimensioned-value
   resolution stays with the scenario consumer.

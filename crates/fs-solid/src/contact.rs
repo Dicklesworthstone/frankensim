@@ -16,8 +16,9 @@
 //! SDFs, continuous paths between iterates, and reusable contact-candidate
 //! certification are recorded successor scope. Every accepted iterate keeps
 //! the minimum sampled nodal gap seen as part of the solution record. Friction is
-//! the lagged smoothed Coulomb of IPC: normal forces from the previous
-//! outer round, a Huber-smoothed tangential potential — stick/slip is
+//! the lagged smoothed Coulomb of IPC: normal forces and tangent frames from
+//! the previous outer round, a fixed physical displacement reference, and a
+//! Huber-smoothed tangential potential — stick/slip is
 //! gated by the battery, not asserted here. The barrier Hessian keeps
 //! the b''·∇φ∇φᵀ term and drops the b'·∇²φ curvature term (standard
 //! IPC PSD practice; exact for planar obstacles).
@@ -109,9 +110,11 @@ impl Barrier {
 pub struct Friction {
     /// Coulomb coefficient μ.
     pub mu: f64,
-    /// Huber smoothing half-width (slip below this is quadratic).
+    /// Huber smoothing half-width in displacement units. Slip below this
+    /// is quadratic; a velocity threshold must be multiplied by the step time.
     pub eps_v: f64,
-    /// Outer lag rounds.
+    /// Maximum outer lag rounds; the refreshed friction residual must
+    /// satisfy the problem tolerance before a solution is accepted.
     pub rounds: u32,
 }
 
@@ -175,8 +178,13 @@ pub struct ContactSolution {
     pub min_gap_ever: f64,
     /// Barrier energy at the solution (the ledger row).
     pub barrier_energy: f64,
-    /// Per-node contact reactions −∇b (zero outside the active set).
+    /// Per-node normal barrier reactions −∇b (zero outside the active set).
     pub reactions: Vec<[f64; 2]>,
+    /// Per-node tangential reactions opposing the incremental slip.
+    pub friction_reactions: Vec<[f64; 2]>,
+    /// Nonnegative endpoint friction work, −Σ f_t·(u−reference_u).
+    /// This incremental diagnostic is not trajectory-integrated heat.
+    pub friction_work: f64,
     /// Final residual max-norm.
     pub residual: f64,
 }
@@ -286,7 +294,7 @@ impl ContactProblem<'_> {
         Ok(min_gap)
     }
 
-    /// Barrier energy at state u (plus friction if anchors given).
+    /// Barrier energy at state u, excluding friction.
     fn barrier_energy(&self, u: &[f64]) -> Result<f64, SolidError> {
         self.validate_state_len(u)?;
         let mut total = 0.0;
@@ -312,7 +320,7 @@ impl ContactProblem<'_> {
             })?;
         let mut total = e + self.barrier_energy(u)?;
         if let Some(lag) = lag {
-            total += lag.energy(self, u)?;
+            total += lag.energy(u);
         }
         if total.is_finite() {
             Ok(total)
@@ -346,7 +354,7 @@ impl ContactProblem<'_> {
             }
         }
         if let Some(lag) = lag {
-            lag.add_residual(self, u, &mut r)?;
+            lag.add_residual(u, &mut r);
         }
         for &(d, target) in &self.pins {
             r[d] = u[d] - load * target;
@@ -376,12 +384,28 @@ impl ContactProblem<'_> {
     /// reach tolerance; [`SolidError::SolveFailed`] on a singular
     /// system; [`SolidError::InvalidInput`] for infeasible or
     /// non-finite contact data; material refusals propagate.
-    #[allow(clippy::too_many_lines)] // contact Newton + audited line search is one proof path
     pub fn solve(&self, load: f64) -> Result<ContactSolution, SolidError> {
+        self.solve_from(load, &vec![0.0; self.ndof()])
+    }
+
+    /// Solve an incremental equilibrium from a previous displacement.
+    /// The previous state is both the initial iterate and the physical
+    /// friction reference, held fixed throughout every Newton/lag round.
+    ///
+    /// # Errors
+    /// The same refusals as [`Self::solve`], including invalid, non-finite,
+    /// or intersecting reference states and unconverged friction lags.
+    #[allow(clippy::too_many_lines)] // contact Newton + audited line search is one proof path
+    pub fn solve_from(
+        &self,
+        load: f64,
+        reference_u: &[f64],
+    ) -> Result<ContactSolution, SolidError> {
         self.validate_inputs(load)?;
+        self.validate_state_len(reference_u)?;
         let n = self.node_count();
         let ndof = self.ndof();
-        let mut u = vec![0.0f64; ndof];
+        let mut u = reference_u.to_vec();
         let initial_gap = self.min_gap(&u)?;
         if initial_gap <= 0.0 {
             return Err(SolidError::InvalidInput {
@@ -398,10 +422,11 @@ impl ContactProblem<'_> {
         // grounds tangential rigid modes from the first round (a
         // frictionless first round with no pins was measured singular).
         let mut lag: Option<FrictionLag> = match self.friction {
-            Some(fr) => Some(FrictionLag::capture(self, &u, fr)?),
+            Some(fr) => Some(FrictionLag::capture(self, reference_u, &u, fr)?),
             None => None,
         };
         let mut residual = f64::INFINITY;
+        let mut lag_history = Vec::new();
         for _round in 0..rounds {
             let mut stalled = true;
             let mut history = Vec::new();
@@ -426,7 +451,7 @@ impl ContactProblem<'_> {
                     }
                 }
                 if let Some(l) = &lag {
-                    l.add_terms(self, &u, &mut r, &mut h)?;
+                    l.add_terms(&u, &mut r, &mut h);
                 }
                 // Pins: identity rows driving u[d] to load·target.
                 for &(d, target) in &self.pins {
@@ -497,8 +522,8 @@ impl ContactProblem<'_> {
                 }
                 if !accepted {
                     // The contact Hessian is intentionally a PSD
-                    // approximation (curvature terms and friction
-                    // nonsmoothness are lagged/dropped). If that
+                    // approximation (the SDF curvature term is
+                    // dropped). If that
                     // Newton direction is not an energy descent, fall
                     // back to the true residual-gradient direction.
                     let du_sd: Vec<f64> = r.iter().map(|v| -v).collect();
@@ -550,12 +575,23 @@ impl ContactProblem<'_> {
             if stalled {
                 return Err(SolidError::NewtonStalled { history });
             }
-            // Refresh the friction lag from the converged normal set.
+            // Refresh only the normal load and tangent frame. Numerical
+            // iterations must never advance the physical slip reference.
             if let Some(fr) = self.friction {
-                lag = Some(FrictionLag::capture(self, &u, fr)?);
+                lag = Some(FrictionLag::capture(self, reference_u, &u, fr)?);
+                residual = self.residual_norm_at(&u, load, lag.as_ref())?;
+                lag_history.push(residual);
+                if residual < self.tol {
+                    break;
+                }
             } else {
                 break;
             }
+        }
+        if residual >= self.tol {
+            return Err(SolidError::NewtonStalled {
+                history: lag_history,
+            });
         }
         let mut reactions = vec![[0.0f64; 2]; n];
         for (i, reaction) in reactions.iter_mut().enumerate() {
@@ -567,11 +603,29 @@ impl ContactProblem<'_> {
                 *reaction = [-b1 * gphi[0], -b1 * gphi[1]];
             }
         }
+        let mut friction_residual = vec![0.0; ndof];
+        let friction_work = if let Some(lag) = &lag {
+            lag.add_residual(&u, &mut friction_residual);
+            lag.work(&u)
+        } else {
+            0.0
+        };
+        if !friction_work.is_finite() {
+            return Err(SolidError::InvalidInput {
+                what: "contact friction work is not finite".to_string(),
+            });
+        }
+        let friction_reactions = friction_residual
+            .chunks_exact(2)
+            .map(|r| [-r[0], -r[1]])
+            .collect();
         Ok(ContactSolution {
             min_gap: self.min_gap(&u)?,
             min_gap_ever,
             barrier_energy: self.barrier_energy(&u)?,
             reactions,
+            friction_reactions,
+            friction_work,
             iterations,
             residual,
             u,
@@ -678,56 +732,66 @@ impl ContactProblem<'_> {
     }
 }
 
-/// The lagged friction state: anchors and normal forces captured at
-/// the last converged round.
-struct FrictionLag {
+/// Normal force and tangent frame lagged at the previous outer iterate.
+/// The physical displacement reference is fixed for the entire solve.
+struct FrictionLag<'a> {
     settings: Friction,
-    /// Per node: (anchor position, lagged normal force magnitude).
-    anchors: Vec<([f64; 2], f64)>,
+    reference_u: &'a [f64],
+    /// Per node: (unit tangent, lagged normal force magnitude).
+    frames: Vec<([f64; 2], f64)>,
 }
 
-impl FrictionLag {
+impl<'a> FrictionLag<'a> {
     fn capture(
         cp: &ContactProblem<'_>,
+        reference_u: &'a [f64],
         u: &[f64],
         settings: Friction,
-    ) -> Result<FrictionLag, SolidError> {
-        let n = cp.node_count();
-        let mut anchors = Vec::with_capacity(n);
-        for i in 0..n {
-            let x = cp.deformed(u, i);
+    ) -> Result<Self, SolidError> {
+        let mut frames = Vec::with_capacity(cp.node_count());
+        for i in 0..cp.node_count() {
             let d = cp.sdf_value(u, i)?;
-            let lambda = if d < cp.barrier.dhat {
-                -cp.barrier.d1(d)
-            } else {
-                0.0
-            };
-            anchors.push((x, lambda.max(0.0)));
+            if d >= cp.barrier.dhat {
+                frames.push(([0.0; 2], 0.0));
+                continue;
+            }
+            let g = cp.sdf_gradient(cp.deformed(u, i))?;
+            let gn = g[0].hypot(g[1]);
+            if !gn.is_finite() || gn <= 0.0 {
+                return Err(SolidError::InvalidInput {
+                    what: format!("active contact normal at node {i} has invalid norm {gn}"),
+                });
+            }
+            // CutSdf permits level sets with non-unit gradients: the
+            // physical barrier force magnitude includes the gradient norm.
+            let lambda = -cp.barrier.d1(d) * gn;
+            if !lambda.is_finite() || lambda < 0.0 {
+                return Err(SolidError::InvalidInput {
+                    what: format!("contact normal force at node {i} is invalid ({lambda})"),
+                });
+            }
+            frames.push(([-g[1] / gn, g[0] / gn], lambda));
         }
-        Ok(FrictionLag { settings, anchors })
+        Ok(Self {
+            settings,
+            reference_u,
+            frames,
+        })
     }
 
-    /// Tangential slip of node i relative to its anchor.
-    fn slip(
-        &self,
-        cp: &ContactProblem<'_>,
-        u: &[f64],
-        i: usize,
-    ) -> Result<([f64; 2], f64), SolidError> {
-        let x = cp.deformed(u, i);
-        let (anchor, _) = self.anchors[i];
-        let dx = [x[0] - anchor[0], x[1] - anchor[1]];
-        let gphi = cp.sdf_gradient(x)?;
-        let gn = gphi[0].hypot(gphi[1]).max(1e-30);
-        let nrm = [gphi[0] / gn, gphi[1] / gn];
-        let dn = dx[0].mul_add(nrm[0], dx[1] * nrm[1]);
-        let t = [dx[0] - dn * nrm[0], dx[1] - dn * nrm[1]];
-        Ok((t, t[0].hypot(t[1])))
+    /// Signed scalar slip in the frozen 2D tangent frame.
+    fn slip(&self, u: &[f64], i: usize) -> f64 {
+        let t = self.frames[i].0;
+        t[0].mul_add(
+            u[2 * i] - self.reference_u[2 * i],
+            t[1] * (u[2 * i + 1] - self.reference_u[2 * i + 1]),
+        )
     }
 
     /// Huber value: quadratic below eps_v, linear above (C¹, convex).
     fn huber(&self, s: f64) -> f64 {
         let e = self.settings.eps_v;
+        let s = s.abs();
         if s <= e {
             s * s / (2.0 * e)
         } else {
@@ -736,93 +800,150 @@ impl FrictionLag {
     }
 
     fn huber_d1(&self, s: f64) -> f64 {
-        let e = self.settings.eps_v;
-        if s <= e { s / e } else { 1.0 }
+        (s / self.settings.eps_v).clamp(-1.0, 1.0)
     }
 
-    fn energy(&self, cp: &ContactProblem<'_>, u: &[f64]) -> Result<f64, SolidError> {
-        let mut total = 0.0;
-        for i in 0..cp.node_count() {
-            let (_, s) = self.slip(cp, u, i)?;
-            total += self.settings.mu * self.anchors[i].1 * self.huber(s);
-        }
-        Ok(total)
+    fn energy(&self, u: &[f64]) -> f64 {
+        self.frames
+            .iter()
+            .enumerate()
+            .map(|(i, (_, lambda))| self.settings.mu * lambda * self.huber(self.slip(u, i)))
+            .sum()
     }
 
-    fn add_residual(
-        &self,
-        cp: &ContactProblem<'_>,
-        u: &[f64],
-        r: &mut [f64],
-    ) -> Result<(), SolidError> {
-        for i in 0..cp.node_count() {
-            let lam = self.anchors[i].1;
-            if lam <= 0.0 {
-                continue;
-            }
-            let (t, s) = self.slip(cp, u, i)?;
-            if s < 1e-30 {
-                continue;
-            }
-            let coef = self.settings.mu * lam;
-            let dir = [t[0] / s, t[1] / s];
-            let g1 = coef * self.huber_d1(s);
+    fn add_residual(&self, u: &[f64], r: &mut [f64]) {
+        for (i, &(t, lambda)) in self.frames.iter().enumerate() {
+            let g = self.settings.mu * lambda * self.huber_d1(self.slip(u, i));
             for a in 0..2 {
-                r[2 * i + a] += g1 * dir[a];
+                r[2 * i + a] += g * t[a];
             }
         }
-        Ok(())
     }
 
-    /// Add friction gradient and a convex (Gauss–Newton) Hessian.
-    fn add_terms(
-        &self,
-        cp: &ContactProblem<'_>,
-        u: &[f64],
-        r: &mut [f64],
-        h: &mut [f64],
-    ) -> Result<(), SolidError> {
+    /// Exact gradient and Hessian of the frozen-frame Huber potential.
+    /// In 2D its sliding branch is linear and has zero curvature.
+    fn add_terms(&self, u: &[f64], r: &mut [f64], h: &mut [f64]) {
         let ndof = r.len();
-        for i in 0..cp.node_count() {
-            let lam = self.anchors[i].1;
-            if lam <= 0.0 {
-                continue;
-            }
-            let (t, s) = self.slip(cp, u, i)?;
-            let coef = self.settings.mu * lam;
-            let k_iso = coef / self.settings.eps_v.max(1e-12);
-            if s < 1e-30 {
-                // Zero slip: the Huber quadratic branch's Hessian is
-                // the ISOTROPIC tangential projector k·(I − nnᵀ) —
-                // well-defined with no slip direction, and exactly what
-                // grounds tangential rigid modes at the first iterate
-                // (skipping it was measured singular).
-                let x = cp.deformed(u, i);
-                let gphi = cp.sdf_gradient(x)?;
-                let gn = gphi[0].hypot(gphi[1]).max(1e-30);
-                let nrm = [gphi[0] / gn, gphi[1] / gn];
-                for a in 0..2 {
-                    for b in 0..2 {
-                        let proj = f64::from(u8::from(a == b)) - nrm[a] * nrm[b];
-                        h[(2 * i + a) * ndof + (2 * i + b)] += k_iso * proj;
-                    }
-                }
-                continue;
-            }
-            let dir = [t[0] / s, t[1] / s];
-            let g1 = coef * self.huber_d1(s);
+        for (i, &(t, lambda)) in self.frames.iter().enumerate() {
+            let slip = self.slip(u, i);
+            let coef = self.settings.mu * lambda;
+            let g = coef * self.huber_d1(slip);
+            let k = if slip.abs() < self.settings.eps_v {
+                coef / self.settings.eps_v
+            } else {
+                0.0
+            };
             for a in 0..2 {
-                r[2 * i + a] += g1 * dir[a];
-            }
-            // Convex surrogate Hessian: (coef/eps_v)·P_t (the quadratic
-            // branch's exact Hessian; kept PSD in the linear branch).
-            let k = coef / self.settings.eps_v.max(1e-12);
-            for a in 0..2 {
+                r[2 * i + a] += g * t[a];
                 for b in 0..2 {
-                    h[(2 * i + a) * ndof + (2 * i + b)] += k * dir[a] * dir[b];
+                    h[(2 * i + a) * ndof + 2 * i + b] += k * t[a] * t[b];
                 }
             }
         }
-        Ok(())
+    }
+
+    fn work(&self, u: &[f64]) -> f64 {
+        self.frames
+            .iter()
+            .enumerate()
+            .map(|(i, (_, lambda))| {
+                let slip = self.slip(u, i);
+                self.settings.mu * lambda * self.huber_d1(slip) * slip
+            })
+            .sum()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hyper2d::NewtonSettings;
+    use crate::mesh2::Mesh2;
+    use fs_cutfem::sdf::Circle;
+    use fs_material::hyper::{Hyperelastic, HyperelasticModel};
+
+    #[test]
+    fn friction_curved_frame_derivatives() {
+        let mesh = Mesh2::quads(1.0, 1.0, 1, 1);
+        let material = Hyperelastic::new(
+            HyperelasticModel::NeoHookean {
+                mu: 1.0,
+                lambda: 3.0,
+            },
+            3.0,
+        )
+        .expect("material");
+        let hyper = HyperProblem {
+            mesh: &mesh,
+            material: &material,
+            dirichlet: vec![],
+            traction: vec![],
+            settings: NewtonSettings::default(),
+        };
+        let circle = Circle {
+            center: [-1.0, -1.0],
+            radius: 0.5,
+        };
+        let cp = ContactProblem {
+            hyper: &hyper,
+            sdf: &circle,
+            barrier: Barrier {
+                kappa: 1.0,
+                dhat: 3.0,
+            },
+            friction: None,
+            pins: vec![],
+            max_newton: 30,
+            tol: 1e-9,
+        };
+        let reference = vec![0.0; cp.ndof()];
+        let lag = FrictionLag::capture(
+            &cp,
+            &reference,
+            &reference,
+            Friction {
+                mu: 0.5,
+                eps_v: 0.01,
+                rounds: 1,
+            },
+        )
+        .expect("lag");
+        for slip in [0.0, 0.001, 0.04, -0.04] {
+            let mut u = reference.clone();
+            for (i, &(t, _)) in lag.frames.iter().enumerate() {
+                u[2 * i] = slip * t[0];
+                u[2 * i + 1] = slip * t[1];
+            }
+            let n = u.len();
+            let mut r = vec![0.0; n];
+            let mut h = vec![0.0; n * n];
+            lag.add_terms(&u, &mut r, &mut h);
+            let delta = 1e-7;
+            for j in 0..n {
+                let mut plus = u.clone();
+                let mut minus = u.clone();
+                plus[j] += delta;
+                minus[j] -= delta;
+                let gradient = (lag.energy(&plus) - lag.energy(&minus)) / (2.0 * delta);
+                assert!(
+                    (gradient - r[j]).abs() < 1e-7 * r[j].abs().max(1.0),
+                    "slip={slip}, dof={j}: energy derivative {gradient} != {}",
+                    r[j]
+                );
+                let mut rp = vec![0.0; n];
+                let mut rm = vec![0.0; n];
+                lag.add_residual(&plus, &mut rp);
+                lag.add_residual(&minus, &mut rm);
+                for i in 0..n {
+                    let derivative = (rp[i] - rm[i]) / (2.0 * delta);
+                    let hij = h[i * n + j];
+                    assert!(
+                        (derivative - hij).abs() < 1e-7 * hij.abs().max(1.0),
+                        "slip={slip}, ({i},{j}): residual derivative {derivative} != {hij}"
+                    );
+                }
+            }
+            assert!(lag.work(&u) >= 0.0);
+        }
     }
 }

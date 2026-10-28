@@ -26,6 +26,89 @@ fn card() -> Hyperelastic {
     .expect("card")
 }
 
+/// Friction balances an unpinned block at the current normal load, with
+/// physical slip independent of the allowed numerical lag-round budget.
+#[test]
+fn cnt_008_friction_balance_and_fixed_reference() {
+    let mesh = Mesh2::quads(1.0, 1.0, 2, 2);
+    let material = card();
+    let pull = |_: f64, _: f64| [0.02, -0.2];
+    let hyper = HyperProblem {
+        mesh: &mesh,
+        material: &material,
+        dirichlet: vec![],
+        traction: vec![(Patch::Top, &pull)],
+        settings: NewtonSettings::default(),
+    };
+    let floor = HalfPlane {
+        normal: [0.0, 1.0],
+        offset: -0.02,
+    };
+    let mut problem = ContactProblem {
+        hyper: &hyper,
+        sdf: &floor,
+        barrier: Barrier {
+            kappa: 10.0,
+            dhat: 0.05,
+        },
+        friction: Some(Friction {
+            mu: 0.6,
+            eps_v: 0.001,
+            rounds: 20,
+        }),
+        pins: vec![],
+        max_newton: 100,
+        tol: 1e-9,
+    };
+    let sol = problem.solve(1.0).expect("unpinned friction equilibrium");
+    let normal: f64 = sol.reactions.iter().map(|r| r[1]).sum();
+    let tangent: f64 = sol.friction_reactions.iter().map(|r| r[0]).sum();
+    assert!((normal - 0.2).abs() < 1e-8, "normal force={normal}");
+    assert!((tangent + 0.02).abs() < 1e-8, "tangent force={tangent}");
+    assert!(sol.residual < problem.tol);
+    assert!(sol.friction_work > 0.0);
+    let work: f64 = sol
+        .friction_reactions
+        .iter()
+        .enumerate()
+        .map(|(i, r)| -r[0] * sol.u[2 * i] - r[1] * sol.u[2 * i + 1])
+        .sum();
+    assert!((sol.friction_work - work).abs() < 1e-15);
+    for (t, n) in sol.friction_reactions.iter().zip(&sol.reactions) {
+        assert!(t[0].hypot(t[1]) <= 0.6 * n[0].hypot(n[1]) + 1e-14);
+    }
+
+    // Initial barrier loads exceed the converged normal load. A single
+    // lag cannot honestly report equilibrium with the refreshed friction.
+    problem.friction.as_mut().expect("friction").rounds = 1;
+    assert!(matches!(
+        problem.solve(1.0),
+        Err(SolidError::NewtonStalled { .. })
+    ));
+    problem.friction.as_mut().expect("friction").rounds = 40;
+    let more = problem.solve(1.0).expect("larger lag budget");
+    assert_eq!(sol.u, more.u);
+    assert_eq!(sol.friction_work, more.friction_work);
+
+    // A rigid translation of the previous physical state must translate
+    // the result without creating extra slip or changing dissipated work.
+    let mut reference = vec![0.0; sol.u.len()];
+    for i in 0..mesh.nodes.len() {
+        reference[2 * i] = 0.25;
+    }
+    let shifted = problem
+        .solve_from(1.0, &reference)
+        .expect("translated reference");
+    for ((&u, &v), &r) in sol.u.iter().zip(&shifted.u).zip(&reference) {
+        assert!((u - (v - r)).abs() < 1e-10);
+    }
+    assert!((shifted.friction_work - sol.friction_work).abs() < 1e-12);
+    assert!(matches!(
+        problem.solve_from(1.0, &[]),
+        Err(SolidError::InvalidInput { .. })
+    ));
+}
+
 /// Bottom-middle x-pins so a frictionless floor cannot let the block
 /// float sideways (the elastic probe is unconstrained).
 fn x_pins(mesh: &Mesh2) -> Vec<(usize, f64)> {
