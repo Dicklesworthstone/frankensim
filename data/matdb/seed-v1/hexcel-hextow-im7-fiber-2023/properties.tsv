@@ -1,0 +1,112 @@
+frankensim.matdb-source.v1
+observation	fiber	HexTow IM7 PAN carbon fiber constituent	CTA 351 AG23; typical fiber values	These are fiber constituent properties, not the separate HexPly 8552 composite table on the same sheet. No resin system, fiber volume fraction, cured ply, sizing, tow count, matched specimens or exact test temperature is selected by these values. Explicit engineering-reference-model=1 and material-form-fiber=1 are required. No temperature validity interval, isotropy or transverse elastic constants are inferred.
+observation	tension	HexTow IM7 fiber tensile response	Producer SI column, tensile chord modulus 6000-1000	The printed SI-column strength and modulus are retained. Tensile failure strain is not a complete stress-strain curve, and strength does not create a failure law. Source strain-rate and test temperature are unstated. Fiber tensile properties cannot fill a generic isotropic Young modulus request.
+observation	functional	HexTow IM7 yarn/tow thermal and electrical reference	Producer metric column; direction and temperature unspecified	Thermal conductivity, electrical resistivity and expansion are explicitly direction-unspecified properties. A longitudinal or transverse value is not inferred from the fiber shape. The expansion coefficient has no stated averaging interval or instantaneous convention and is stored only as a reported coefficient. Electrical resistivity converts ohm cm to ohm m by 0.01.
+observation	calorie	HexTow IM7 source heat-capacity unit	Explicit thermochemical calorie conversion	The producer metric entry is 0.21 cal/(g C); the authored conversion uses 1 cal = 4.184 J and 1 g = .001 kg. The source does not identify a calorie convention. Thermochemical-calorie-conversion=1 records this interpretation; the paired rounded Btu column is not averaged into the metric value.
+scalar	density	fiber	density	1780	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade_hextow_im7	1	1	1
+validity	density	material_form_fiber	1	1	1
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_test_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+validity	density	source_pressure_known	0	0	1
+validity	density	source_sizing_known	0	0	1
+validity	density	source_tow_count_known	0	0	1
+validity	density	source_specimens_matched	0	0	1
+scalar	specific-heat-capacity	fiber,calorie	specific_heat_capacity	878.64	J/kg/K	constant
+uncertainty	specific-heat-capacity	unstated	-	-	-	-
+validity	specific-heat-capacity	source_grade_hextow_im7	1	1	1
+validity	specific-heat-capacity	material_form_fiber	1	1	1
+validity	specific-heat-capacity	engineering_reference_model	1	1	1
+validity	specific-heat-capacity	source_test_temperature_known	0	0	1
+validity	specific-heat-capacity	source_moisture_condition_known	0	0	1
+validity	specific-heat-capacity	source_pressure_known	0	0	1
+validity	specific-heat-capacity	source_sizing_known	0	0	1
+validity	specific-heat-capacity	source_tow_count_known	0	0	1
+validity	specific-heat-capacity	source_specimens_matched	0	0	1
+validity	specific-heat-capacity	thermochemical_calorie_conversion	1	1	1
+scalar	fiber-tensile-modulus	fiber,tension	fiber_tensile_modulus	276	GPa	constant
+uncertainty	fiber-tensile-modulus	unstated	-	-	-	-
+validity	fiber-tensile-modulus	source_grade_hextow_im7	1	1	1
+validity	fiber-tensile-modulus	material_form_fiber	1	1	1
+validity	fiber-tensile-modulus	engineering_reference_model	1	1	1
+validity	fiber-tensile-modulus	source_test_temperature_known	0	0	1
+validity	fiber-tensile-modulus	source_moisture_condition_known	0	0	1
+validity	fiber-tensile-modulus	source_pressure_known	0	0	1
+validity	fiber-tensile-modulus	source_sizing_known	0	0	1
+validity	fiber-tensile-modulus	source_tow_count_known	0	0	1
+validity	fiber-tensile-modulus	source_specimens_matched	0	0	1
+validity	fiber-tensile-modulus	source_test_rate_known	0	0	1
+scalar	fiber-tensile-strength	fiber,tension	fiber_tensile_strength	5670	MPa	constant
+uncertainty	fiber-tensile-strength	unstated	-	-	-	-
+validity	fiber-tensile-strength	source_grade_hextow_im7	1	1	1
+validity	fiber-tensile-strength	material_form_fiber	1	1	1
+validity	fiber-tensile-strength	engineering_reference_model	1	1	1
+validity	fiber-tensile-strength	source_test_temperature_known	0	0	1
+validity	fiber-tensile-strength	source_moisture_condition_known	0	0	1
+validity	fiber-tensile-strength	source_pressure_known	0	0	1
+validity	fiber-tensile-strength	source_sizing_known	0	0	1
+validity	fiber-tensile-strength	source_tow_count_known	0	0	1
+validity	fiber-tensile-strength	source_specimens_matched	0	0	1
+validity	fiber-tensile-strength	source_test_rate_known	0	0	1
+scalar	fiber-tensile-elongation	fiber,tension	fiber_tensile_elongation	0.018	1	constant
+uncertainty	fiber-tensile-elongation	unstated	-	-	-	-
+validity	fiber-tensile-elongation	source_grade_hextow_im7	1	1	1
+validity	fiber-tensile-elongation	material_form_fiber	1	1	1
+validity	fiber-tensile-elongation	engineering_reference_model	1	1	1
+validity	fiber-tensile-elongation	source_test_temperature_known	0	0	1
+validity	fiber-tensile-elongation	source_moisture_condition_known	0	0	1
+validity	fiber-tensile-elongation	source_pressure_known	0	0	1
+validity	fiber-tensile-elongation	source_sizing_known	0	0	1
+validity	fiber-tensile-elongation	source_tow_count_known	0	0	1
+validity	fiber-tensile-elongation	source_specimens_matched	0	0	1
+validity	fiber-tensile-elongation	source_test_rate_known	0	0	1
+scalar	filament-diameter	fiber	filament_diameter	5.2e-06	m	constant
+uncertainty	filament-diameter	unstated	-	-	-	-
+validity	filament-diameter	source_grade_hextow_im7	1	1	1
+validity	filament-diameter	material_form_fiber	1	1	1
+validity	filament-diameter	engineering_reference_model	1	1	1
+validity	filament-diameter	source_test_temperature_known	0	0	1
+validity	filament-diameter	source_moisture_condition_known	0	0	1
+validity	filament-diameter	source_pressure_known	0	0	1
+validity	filament-diameter	source_sizing_known	0	0	1
+validity	filament-diameter	source_tow_count_known	0	0	1
+validity	filament-diameter	source_specimens_matched	0	0	1
+scalar	thermal-conductivity-direction-unspecified	fiber,functional	thermal_conductivity_direction_unspecified	5.4	W/m/K	constant
+uncertainty	thermal-conductivity-direction-unspecified	unstated	-	-	-	-
+validity	thermal-conductivity-direction-unspecified	source_grade_hextow_im7	1	1	1
+validity	thermal-conductivity-direction-unspecified	material_form_fiber	1	1	1
+validity	thermal-conductivity-direction-unspecified	engineering_reference_model	1	1	1
+validity	thermal-conductivity-direction-unspecified	source_test_temperature_known	0	0	1
+validity	thermal-conductivity-direction-unspecified	source_moisture_condition_known	0	0	1
+validity	thermal-conductivity-direction-unspecified	source_pressure_known	0	0	1
+validity	thermal-conductivity-direction-unspecified	source_sizing_known	0	0	1
+validity	thermal-conductivity-direction-unspecified	source_tow_count_known	0	0	1
+validity	thermal-conductivity-direction-unspecified	source_specimens_matched	0	0	1
+validity	thermal-conductivity-direction-unspecified	source_measurement_direction_known	0	0	1
+scalar	electrical-resistivity-direction-unspecified	fiber,functional	electrical_resistivity_direction_unspecified	1.5e-05	Ohm*m	constant
+uncertainty	electrical-resistivity-direction-unspecified	unstated	-	-	-	-
+validity	electrical-resistivity-direction-unspecified	source_grade_hextow_im7	1	1	1
+validity	electrical-resistivity-direction-unspecified	material_form_fiber	1	1	1
+validity	electrical-resistivity-direction-unspecified	engineering_reference_model	1	1	1
+validity	electrical-resistivity-direction-unspecified	source_test_temperature_known	0	0	1
+validity	electrical-resistivity-direction-unspecified	source_moisture_condition_known	0	0	1
+validity	electrical-resistivity-direction-unspecified	source_pressure_known	0	0	1
+validity	electrical-resistivity-direction-unspecified	source_sizing_known	0	0	1
+validity	electrical-resistivity-direction-unspecified	source_tow_count_known	0	0	1
+validity	electrical-resistivity-direction-unspecified	source_specimens_matched	0	0	1
+validity	electrical-resistivity-direction-unspecified	source_measurement_direction_known	0	0	1
+scalar	reported-linear-expansion-coefficient-direction-unspecified	fiber,functional	reported_linear_expansion_coefficient_direction_unspecified	-6.4e-07	K^-1	constant
+uncertainty	reported-linear-expansion-coefficient-direction-unspecified	unstated	-	-	-	-
+validity	reported-linear-expansion-coefficient-direction-unspecified	source_grade_hextow_im7	1	1	1
+validity	reported-linear-expansion-coefficient-direction-unspecified	material_form_fiber	1	1	1
+validity	reported-linear-expansion-coefficient-direction-unspecified	engineering_reference_model	1	1	1
+validity	reported-linear-expansion-coefficient-direction-unspecified	source_test_temperature_known	0	0	1
+validity	reported-linear-expansion-coefficient-direction-unspecified	source_moisture_condition_known	0	0	1
+validity	reported-linear-expansion-coefficient-direction-unspecified	source_pressure_known	0	0	1
+validity	reported-linear-expansion-coefficient-direction-unspecified	source_sizing_known	0	0	1
+validity	reported-linear-expansion-coefficient-direction-unspecified	source_tow_count_known	0	0	1
+validity	reported-linear-expansion-coefficient-direction-unspecified	source_specimens_matched	0	0	1
+validity	reported-linear-expansion-coefficient-direction-unspecified	source_measurement_direction_known	0	0	1
+validity	reported-linear-expansion-coefficient-direction-unspecified	source_expansion_interval_known	0	0	1

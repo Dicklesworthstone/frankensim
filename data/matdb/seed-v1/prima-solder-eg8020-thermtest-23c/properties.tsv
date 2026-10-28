@@ -1,0 +1,55 @@
+frankensim.matdb-source.v1
+observation	measurement	prima-solder-eg8020; reported cured specimen	Thermtest MP-1 symmetric TPS, 2117-1 sensor, 23 C, n=5	Three reported thermal outputs share the same transient measurement and instrument reduction. The source does not establish independent calorimetry or statistical independence; covariance and measurement uncertainty remain unstated. Conductivity and diffusivity are reported with volumetric heat capacity, not mass-specific Cp. Preserve all printed outputs and their rounding rather than replacing an output by algebraic closure.
+observation	conditioning	prima-solder-eg8020; 24 h room-temperature cure	Original preparation and test context	Numerical cure temperature, mixing ratio, moisture, pressure, specimen dimensions and exact formulation/lot are unstated. Room-temperature cure is not automatically 23 C; 23 C is the measurement temperature. The isotropic TPS reduction yields a bulk reference, not a general tensor or interface law. No density, mass-specific heat capacity, conductivity curve, adhesion law or electrical conductivity is inferred.
+observation	identity	PRIMA-SOLDER EG8020 silver-filled epoxy; source label retained	Thermtest article and Table 1	The article identifies the measured specimen as PRIMA-SOLDER EG8020. The results prose gives a 2 s measurement at 200 mW while the table caption gives 5 s at 200 mW. Both statements are retained as an unresolved source discrepancy; source-test-duration-known=0 does not assert either duration. No filler fraction or alternative product-label equivalence is inferred.
+scalar	thermal-conductivity	measurement,conditioning,identity	thermal_conductivity	1.905	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	source_grade_prima_solder_eg8020	1	1	1
+validity	thermal-conductivity	source_cured_material	1	1	1
+validity	thermal-conductivity	source_room_temperature_cure	1	1	1
+validity	thermal-conductivity	source_cure_temperature_known	0	0	1
+validity	thermal-conductivity	source_mix_ratio_known	0	0	1
+validity	thermal-conductivity	source_moisture_condition_known	0	0	1
+validity	thermal-conductivity	source_pressure_known	0	0	1
+validity	thermal-conductivity	source_tps_isotropic_reduction	1	1	1
+validity	thermal-conductivity	source_independent_thermal_measurements_known	0	0	1
+validity	thermal-conductivity	source_repeat_count	5	5	1
+validity	thermal-conductivity	cure_time	86400	86400	s
+validity	thermal-conductivity	temperature	296.15	296.15	K
+validity	thermal-conductivity	source_sensor_radius	0.0032	0.0032	m
+validity	thermal-conductivity	source_test_power	0.2	0.2	W
+validity	thermal-conductivity	source_test_duration_known	0	0	1
+scalar	volumetric-heat-capacity	measurement,conditioning,identity	volumetric_heat_capacity	1030000.0	J/m3/K	constant
+uncertainty	volumetric-heat-capacity	unstated	-	-	-	-
+validity	volumetric-heat-capacity	source_grade_prima_solder_eg8020	1	1	1
+validity	volumetric-heat-capacity	source_cured_material	1	1	1
+validity	volumetric-heat-capacity	source_room_temperature_cure	1	1	1
+validity	volumetric-heat-capacity	source_cure_temperature_known	0	0	1
+validity	volumetric-heat-capacity	source_mix_ratio_known	0	0	1
+validity	volumetric-heat-capacity	source_moisture_condition_known	0	0	1
+validity	volumetric-heat-capacity	source_pressure_known	0	0	1
+validity	volumetric-heat-capacity	source_tps_isotropic_reduction	1	1	1
+validity	volumetric-heat-capacity	source_independent_thermal_measurements_known	0	0	1
+validity	volumetric-heat-capacity	source_repeat_count	5	5	1
+validity	volumetric-heat-capacity	cure_time	86400	86400	s
+validity	volumetric-heat-capacity	temperature	296.15	296.15	K
+validity	volumetric-heat-capacity	source_sensor_radius	0.0032	0.0032	m
+validity	volumetric-heat-capacity	source_test_power	0.2	0.2	W
+validity	volumetric-heat-capacity	source_test_duration_known	0	0	1
+scalar	thermal-diffusivity	measurement,conditioning,identity	thermal_diffusivity	1.849e-06	m2/s	constant
+uncertainty	thermal-diffusivity	unstated	-	-	-	-
+validity	thermal-diffusivity	source_grade_prima_solder_eg8020	1	1	1
+validity	thermal-diffusivity	source_cured_material	1	1	1
+validity	thermal-diffusivity	source_room_temperature_cure	1	1	1
+validity	thermal-diffusivity	source_cure_temperature_known	0	0	1
+validity	thermal-diffusivity	source_mix_ratio_known	0	0	1
+validity	thermal-diffusivity	source_moisture_condition_known	0	0	1
+validity	thermal-diffusivity	source_pressure_known	0	0	1
+validity	thermal-diffusivity	source_tps_isotropic_reduction	1	1	1
+validity	thermal-diffusivity	source_independent_thermal_measurements_known	0	0	1
+validity	thermal-diffusivity	source_repeat_count	5	5	1
+validity	thermal-diffusivity	cure_time	86400	86400	s
+validity	thermal-diffusivity	temperature	296.15	296.15	K
+validity	thermal-diffusivity	source_sensor_radius	0.0032	0.0032	m
+validity	thermal-diffusivity	source_test_power	0.2	0.2	W
+validity	thermal-diffusivity	source_test_duration_known	0	0	1

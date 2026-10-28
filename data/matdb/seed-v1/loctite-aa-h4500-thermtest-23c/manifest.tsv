@@ -1,0 +1,25 @@
+frankensim.matdb-manifest.v3
+pack_id	loctite-aa-h4500-thermtest-23c
+redistribution	permitted	Selected attributed numerical facts and original condition notes only; no source prose, document or table layout is redistributed
+citation	Thermtest, Measuring the Thermal Conductivity of Epoxy, Table 1 and equipment/results sections, accessed 2026-10-28; https://thermtest.com/application/thermal-conductivity-of-epoxy ; method relationship: https://thermtest.com/mp-1 ; chemistry identity only: Henkel LOCTITE AA H4500 product page, https://next.henkel-adhesives.com/us/en/products/industrial-adhesives/central-pdp.html/loctite-aa-h4500/BP000000164766.html
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	producer-or-measurement-reference	properties.tsv	material-tsv-v1
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	volumetric_heat_capacity	volumetric-heat-capacity	dimensional
+property	thermal_diffusivity	thermal-diffusivity	dimensional
+axis	source_grade_loctite_aa_h4500	source-grade-loctite-aa-h4500	dimensional
+axis	source_cured_material	source-cured-material	dimensional
+axis	source_room_temperature_cure	source-room-temperature-cure	dimensional
+axis	source_cure_temperature_known	source-cure-temperature-known	dimensional
+axis	source_mix_ratio_known	source-mix-ratio-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	source_tps_isotropic_reduction	source-tps-isotropic-reduction	dimensional
+axis	source_independent_thermal_measurements_known	source-independent-thermal-measurements-known	dimensional
+axis	source_repeat_count	source-repeat-count	dimensional
+axis	cure_time	cure-time	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	source_sensor_radius	source-sensor-radius	dimensional
+axis	source_test_power	source-test-power	dimensional
+axis	source_test_duration_known	source-test-duration-known	dimensional
+axis	source_test_duration	source-test-duration	dimensional

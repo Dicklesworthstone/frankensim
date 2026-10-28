@@ -1,0 +1,28 @@
+frankensim.matdb-manifest.v3
+pack_id	hexcel-hextow-as4-fiber-2023
+redistribution	permitted	Selected attributed numerical facts and original condition notes only; no source prose, document or table layout is redistributed
+citation	Hexcel, HexTow AS4 Carbon Fiber Product Data Sheet, copyright 2023, CTA 311 AG23, pages 1-2 fiber and yarn/tow tables; https://www.hexcel.com/wp-content/uploads/2026/01/AS4_HexTow_DataSheet.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	producer-or-measurement-reference	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	fiber_tensile_modulus	fiber-tensile-modulus	dimensional
+property	fiber_tensile_strength	fiber-tensile-strength	dimensional
+property	fiber_tensile_elongation	fiber-tensile-elongation	dimensional
+property	filament_diameter	filament-diameter	dimensional
+property	thermal_conductivity_direction_unspecified	thermal-conductivity-direction-unspecified	thermal-conductivity
+property	electrical_resistivity_direction_unspecified	electrical-resistivity-direction-unspecified	dimensional
+property	reported_linear_expansion_coefficient_direction_unspecified	reported-linear-expansion-coefficient-direction-unspecified	dimensional
+axis	source_grade_hextow_as4	source-grade-hextow-as4	dimensional
+axis	material_form_fiber	material-form-fiber	dimensional
+axis	engineering_reference_model	engineering-reference-model	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	source_sizing_known	source-sizing-known	dimensional
+axis	source_tow_count_known	source-tow-count-known	dimensional
+axis	source_specimens_matched	source-specimens-matched	dimensional
+axis	thermochemical_calorie_conversion	thermochemical-calorie-conversion	dimensional
+axis	source_measurement_direction_known	source-measurement-direction-known	dimensional
+axis	source_expansion_interval_known	source-expansion-interval-known	dimensional
+axis	source_test_rate_known	source-test-rate-known	dimensional
