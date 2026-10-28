@@ -85,12 +85,51 @@ An authored damping ratio refuses, because it has no source: a decay fitted to
 a recording would otherwise enter as a material property. The batter and
 resonant head can have different thicknesses, materials, tensions and losses.
 
+### Material-card heads
+
+A head can obtain its density, Young modulus and Poisson ratio from a compiled
+material-card pack instead of the numeric `head` row:
+
+```text
+head_material,batter,0.000254,3000,stated-unknown,film.fsmatpk installed-film T=293.15
+head_material,resonant,0.0000762,1500,stated-unknown,film.fsmatpk installed-film T=293.15
+```
+
+The six comma-separated fields are `head_material`, side, **thickness [m]**,
+**installed tension [N/m]**, loss token, and the shared material record
+`PACK STATE [AXIS=VALUE ...]`. The last field uses spaces between its tokens.
+`STATE` must match the card's explicitly compiled process/state. Query axes use
+the pack's declared normalized quantity schema. Pack paths stay relative to
+the drum file; the shared native loader admits at most 8 MiB per pack. Each
+distinct path is loaded once for the two heads, so both queries use the same
+immutable source. A numeric `head` and a `head_material` row cannot both declare
+the same side.
+
+The existing material resolver must supply an unambiguous isotropic
+`density`, `young_modulus` and `poisson_ratio` at that query. Those exact values
+enter the original head mass and bending matrices, geometric stretching,
+contact/cavity coupling and sound-rendering path. The complete original pack,
+resolved state and source record stay with the executing drum. Its receipt
+names the pack identity and state point. Missing properties, wrong state,
+out-of-domain queries and later numeric overwrites of resolved coefficients
+refuse. No value is inferred from a material name.
+
+This is a frozen material state for each run. Temperature or moisture may
+select different source properties, but the declared dimensions and installed
+tension remain explicit specimen data; there is no inferred thermal expansion,
+retensioning or ongoing heat/moisture evolution. Frequency-, stress-, strain-
+or rate-dependent properties require an appropriate constitutive owner and
+refuse on this static elastic route. Source-backed elastic coefficients do not
+identify damping: `stated-unknown` still supplies zero modal drag. `relaxation`
+still requires the existing `--head-relaxation` law with matching equilibrium
+Young modulus and a covering frequency band, without adding a second loss term.
+
 `mesh` gives shared radial intervals and azimuthal divisions. `band_hz` gives
 the explicit retained eigenfrequency window. `ambient` gives the air inside and
 around the drum as one shared gas declaration: the enclosed volume spring (rho
 c^2), the distributed cavities, the neck admissions and the exterior radiation
 all use it. The six base records are mandatory;
-each head appears exactly once. Record order is free, and `#` starts a comment.
+each head appears exactly once, using either head record form. Record order is free, and `#` starts a comment.
 Unknown records, duplicates, missing values, nonfinite parameters and invalid
 material domains refuse. Input reads are bounded to 64 KiB. Constitutive
 validation remains with the existing section owner.

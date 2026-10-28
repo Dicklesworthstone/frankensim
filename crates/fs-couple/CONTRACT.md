@@ -1584,6 +1584,24 @@ replay, and source species mass in compressed real-skin gas pockets. This
 extends M0.1-W1 input-to-consumer coverage; it does not qualify a full-band
 percussion instrument or add evolving gas temperature/composition.
 
+The same native percussion route accepts `head_material` in a drum specification:
+side, thickness, installed tension, explicit loss token and the shared
+`MaterialRecord` (`PACK STATE [AXIS=VALUE ...]`). The existing native 8 MiB card
+loader is shared with plate inputs; each named pack is loaded once per drum.
+`material_source::plate_section` resolves isotropic E, nu and density at the
+same physical query before the original `TensionedDisk` assembly. The full pack,
+source record and resolved state remain with the executing drum. Numerical
+coefficient overwrites and missing, ambiguous, foreign-state or out-of-domain
+properties refuse. Only static properties at fixed external conditions are
+admitted; a frequency/strain/rate sample cannot masquerade as an elastic law.
+Geometry and installed tension remain explicit, with no inferred thermal
+expansion or retuning. Existing head relaxation may compose only through its
+unchanged equilibrium-modulus and loss-ownership checks. Focused regressions
+cover exact numeric-source parity, independent mass/bending scaling, actual
+contact/nonlinear-head/cavity response and measured-pack file loading. This
+extends M0.5-W1 without claiming measured drum-film damping or instrument
+qualification.
+
 `realize_assembly` turns an `fs_scenario::AcousticAssembly` into observer
 pressure by composing nameless primitives: a prestressed Euler–Bernoulli
 waveguide (`fs-nlmodal::prestressed_beam_omega` / Kirchhoff–Carrier), a

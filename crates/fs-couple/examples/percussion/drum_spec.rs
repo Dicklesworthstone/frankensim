@@ -5,6 +5,13 @@ use fs_plate::shell::head::TensionVariation;
 use super::{Error, ModePair, TensionedDisk, TensionedDiskSpec, mesh_budget};
 use super::ambient::Ambient;
 use fs_material::gas_species::input::ThermochemicalSources;
+use fs_matdb::NormalizedMaterialCardPack;
+use fs_couple::material_source::MaterialRecord;
+use std::{collections::BTreeMap, path::Path, sync::Arc};
+
+#[path="drum_material.rs"]
+pub mod material;
+pub use material::HeadMaterial;
 
 pub const HEADER: &str = "frankensim-drum-spec-v1";
 const MAX_BYTES: usize = 65_536;
@@ -53,6 +60,8 @@ pub struct Spec {
     pub outer_radius_m: f64,
     /// Batter then resonant head; both use the same geometric mesh.
     pub heads: [Head; 2],
+    /// Original source for each head, retained beside its actual coefficients.
+    pub head_materials: [Option<HeadMaterial>; 2],
     /// Where each head's loss comes from; only a Fixture carries a nonzero ratio.
     pub head_loss: [HeadLoss; 2],
     /// Equilibrated installed tensor variations; zero preserves uniform heads.
@@ -71,6 +80,7 @@ impl Spec {
             density_kg_m3: 1390.0, tension_n_m: 3000.0, damping_ratio: 0.001 };
         Self { radius_m: 0.1778-0.0075, depth_m: 0.1651, outer_radius_m: 0.1778,
             heads: [batter, Head { thickness_m: 0.0000762, tension_n_m: 1500.0, ..batter }],
+            head_materials: [None, None],
             head_loss: [HeadLoss::Fixture; 2],
             tension_variation: [TensionVariation::default(); 2],
             radial_intervals: 5, azimuths: 32, band_hz: [80.0, 500.0],
@@ -88,6 +98,9 @@ impl Spec {
             return Err("drum needs 1..32 radial intervals, 8..128 azimuths and a finite increasing nonnegative frequency window".into());
         }
         for field in self.tension_variation { field.validate()?; }
+        for (head, source) in self.heads.iter().zip(&self.head_materials) {
+            if let Some(source) = source { source.validate(head)?; }
+        }
         for (head,loss) in self.heads.iter().zip(self.head_loss) {
             if loss!=HeadLoss::Fixture && head.damping_ratio!=0.0 {
                 return Err("a stated-unknown or relaxation head has zero modal drag".into());
@@ -149,6 +162,9 @@ impl Spec {
         let pi = std::f64::consts::PI;
         for i in 0..2 {
             let film = self.head(i)?;
+            if let Some(source) = &self.head_materials[i] {
+                eprintln!("head {} material: {}", ["batter", "resonant"][i], source.receipt());
+            }
             if !self.tension_variation[i].is_zero() {
                 eprintln!("head {i}: base tension {} N/m, equilibrated tensor variation {:?}; fixed rim, no inferred lug forces or measured-map claim",
                     self.heads[i].tension_n_m,self.tension_variation[i]);
@@ -170,7 +186,8 @@ impl Spec {
     pub fn load_with_gas_sources(path: &str,sources: Option<&ThermochemicalSources<'_>>) -> Result<Self, Error> {
         let mut text = String::new();
         std::fs::File::open(path)?.take((MAX_BYTES+1) as u64).read_to_string(&mut text)?;
-        Self::read_with_gas_sources(&text,sources)
+        let parent = Path::new(path).parent().unwrap_or_else(|| Path::new("."));
+        Self::read_with_all_sources(&text,sources,super::material_packs::section_pack_loader(parent))
     }
     /// Geometry, both heads, mesh, band and the `ambient,<gas record>` row are
     /// mandatory: an imported drum declares its own air. Optional per-head
@@ -181,9 +198,18 @@ impl Spec {
         Self::read_with_gas_sources(text,None)
     }
     pub fn read_with_gas_sources(text: &str,sources: Option<&ThermochemicalSources<'_>>) -> Result<Self, Error> {
+        Self::read_with_all_sources(text,sources,|name| Err(format!("head_material {name} requires an explicit material-card loader")))
+    }
+    /// Resolve all source records from already-loaded data. Only the native
+    /// file loader opens paths; malformed or duplicate declarations still refuse.
+    pub fn read_with_all_sources(text: &str,sources: Option<&ThermochemicalSources<'_>>,
+        mut load: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>) -> Result<Self, Error>
+    {
         if text.len()>MAX_BYTES { return Err("drum specification exceeds 64 KiB".into()); }
         let (mut header,mut geometry,mut mesh,mut band,mut ambient) = (false,None,None,None,None);
         let mut heads = [None,None];
+        let mut head_materials = [None,None];
+        let mut packs: BTreeMap<String, Arc<NormalizedMaterialCardPack>> = BTreeMap::new();
         let mut head_loss = [HeadLoss::StatedUnknown; 2];
         let mut variations = [None,None];
         let mut variation_seen = [false; 2];
@@ -197,7 +223,7 @@ impl Spec {
                 header=true; continue;
             }
             let fields: Vec<_> = row.split(',').map(str::trim).collect();
-            let count = match fields[0] { "geometry"=>4, "head"=>8, "mesh"|"band_hz"=>3, "tension_variation"=>9, "tension_harmonic"=>5,
+            let count = match fields[0] { "geometry"=>4, "head"=>8, "head_material"=>6, "mesh"|"band_hz"=>3, "tension_variation"=>9, "tension_harmonic"=>5,
                 "ambient"=>2,
                 _=>return Err(error("unknown record")) };
             if fields.len()!=count { return Err(error("wrong number of fields")); }
@@ -210,17 +236,34 @@ impl Spec {
                     if geometry.is_some() { return Err(error("duplicate geometry")); }
                     geometry=Some([value(1)?,value(2)?,value(3)?]);
                 }
-                "head" => {
+                "head"|"head_material" => {
                     let i=match fields[1] {"batter"=>0,"resonant"=>1,_=>return Err(error("unknown head"))};
                     if heads[i].is_some() { return Err(error("duplicate head")); }
-                    head_loss[i]=match fields[7] {
+                    let source_backed = fields[0] == "head_material";
+                    head_loss[i]=match fields[if source_backed {4} else {7}] {
                         STATED_UNKNOWN_HEAD_LOSS=>HeadLoss::StatedUnknown,
                         RELAXATION_HEAD_LOSS=>HeadLoss::Relaxation,
                         other if other.parse::<f64>().is_ok() => return Err(error(UNSOURCED_HEAD_DAMPING)),
                         _=>return Err(error("unknown head loss; declare stated-unknown or relaxation")),
                     };
-                    heads[i]=Some(Head {thickness_m:value(2)?,young_pa:value(3)?,poisson:value(4)?,
-                        density_kg_m3:value(5)?,tension_n_m:value(6)?,damping_ratio:0.0});
+                    if source_backed {
+                        let record = MaterialRecord::parse(&fields[5].split_ascii_whitespace().collect::<Vec<_>>())
+                            .map_err(|e| error(&e.to_string()))?;
+                        let pack = match packs.get(&record.pack) {
+                            Some(pack) => pack.clone(),
+                            None => {
+                                let pack = Arc::new(load(&record.pack).map_err(|e| error(&e))?);
+                                packs.insert(record.pack.clone(), pack.clone());
+                                pack
+                            }
+                        };
+                        let (head, source) = HeadMaterial::resolve(record, pack, value(2)?, value(3)?)
+                            .map_err(|e| error(&e.to_string()))?;
+                        heads[i] = Some(head); head_materials[i] = Some(source);
+                    } else {
+                        heads[i]=Some(Head {thickness_m:value(2)?,young_pa:value(3)?,poisson:value(4)?,
+                            density_kg_m3:value(5)?,tension_n_m:value(6)?,damping_ratio:0.0});
+                    }
                 }
                 "tension_variation" => {
                     let i=match fields[1] {"batter"=>0,"resonant"=>1,_=>return Err(error("unknown tension-variation head"))};
@@ -267,7 +310,7 @@ impl Spec {
             band_hz:band.ok_or("missing head frequency window")?,
             tension_variation:variations.map(Option::unwrap_or_default),
             heads:[heads[0].ok_or("missing batter head")?,heads[1].ok_or("missing resonant head")?],
-            head_loss,
+            head_loss,head_materials,
             ambient:ambient.ok_or("missing drum ambient row: an imported drum must declare its air")?};
         result.validate()?; Ok(result)
     }
@@ -293,6 +336,10 @@ pub fn admit_command(path: Option<&str>, command: &str) -> Result<(),Error> {
 #[cfg(test)]
 #[path = "drum_spec_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path="drum_material_tests.rs"]
+mod material_tests;
 
 #[cfg(test)]
 #[path="tension_render_tests.rs"]

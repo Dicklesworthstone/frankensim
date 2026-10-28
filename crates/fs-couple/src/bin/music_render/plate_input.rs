@@ -9,23 +9,12 @@ use fs_couple::render::plate::file::{
 };
 use super::{RATE, create_outputs, json_string, stream_output};
 
-/// Upper bound on one material-card pack a performance section names.
-const MAX_SECTION_PACK_BYTES: usize = 8 * 1024 * 1024;
-
-/// Read each material-card pack a `section material` record names, relative
-/// to the directory of the input that names it (pexfp.32).
-pub(super) fn section_pack_loader(parent: &Path) -> impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String> + '_ {
-    move |name| {
-        let file = std::fs::File::open(parent.join(name))
-            .map_err(|e| format!("material-card pack {name:?} open failed: {e}"))?;
-        let mut bytes = Vec::new();
-        file.take((MAX_SECTION_PACK_BYTES + 1) as u64).read_to_end(&mut bytes)
-            .map_err(|e| format!("material-card pack {name:?} read failed: {e}"))?;
-        if bytes.len() > MAX_SECTION_PACK_BYTES {
-            return Err("material-card pack exceeds 8 MiB".into());
-        }
-        NormalizedMaterialCardPack::from_bytes(&bytes).map_err(|e| format!("material-card pack {name:?}: {e}"))
-    }
+#[path = "material_packs.rs"]
+mod material_packs;
+pub(super) fn section_pack_loader(parent: &Path)
+    -> impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String> + '_
+{
+    material_packs::section_pack_loader(parent)
 }
 
 /// `,"section_sources":[...]`: each section's pack, hash, state and point, or its fixture label.

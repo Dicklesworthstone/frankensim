@@ -91,7 +91,7 @@ fn file_selected_near_microphones_render_real_bem_fields_with_one_mechanical_clo
             crate::config((frames*SUBSTEPS) as u64,MECHANICAL_DT)).unwrap();
         Experiment{flexible_sticks:[None,None],mute:None,system:Mechanics::Reference(system),
             force:vec![0.0],stick_weight:1.0,second_stick:None,observer_a:vec![100.0],observer_b:vec![0.0],
-            pressure:None,acoustics:Some(boundary),air:None,ambient:crate::ambient::Ambient::reference()}
+            pressure:None,acoustics:Some(boundary),air:None,ambient:crate::ambient::Ambient::reference(),head_materials:[None,None]}
     };
     let spec=Spec::parse("frankensim-microphones-v1\nnear_field,0.001,0.000001,14,2000000\nreceiver,0,0,0.025\nreceiver,0.05,0,0.04\npattern,0,0.5,0,0,-1\npattern,1,0,-1,0,0").unwrap();
     let receivers=spec.into_receivers();

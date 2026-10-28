@@ -45,6 +45,8 @@ mod ambient;
 // All native audio entry points use the same bounded source-pack loader.
 #[path="../../src/bin/music_render/thermochemical.rs"]
 mod thermochemical;
+#[path="../../src/bin/music_render/material_packs.rs"]
+mod material_packs;
 #[path="../../src/bin/music_render/json.rs"]
 mod json;
 use json::json_string;
@@ -86,7 +88,9 @@ fn elastic_contact(weights:Vec<f64>)->Result<Obstacle,Error> {
 }
 struct Experiment {flexible_sticks:[Option<fs_couple::render::plate::impact::striker::flexible::StrikerPorts>;2],mute:Option<compliant_mute::Attachment>,system:Mechanics,force:Vec<f64>,stick_weight:f64,second_stick:Option<sticks::Port>,observer_a:Vec<f64>,observer_b:Vec<f64>,pressure:Option<VolumeSpring>,acoustics:Option<acoustics::Boundary>,air:Option<cavity::InteriorPressure>,
     /// The gas the instrument compresses and radiates into; see `ambient`.
-    ambient:ambient::Ambient}
+    ambient:ambient::Ambient,
+    /// Complete immutable head sources survive preparation and rendering.
+    head_materials:[Option<drum_spec::HeadMaterial>;2]}
 fn splash(steps:u64,dt_s:f64,audio:bool)->Result<Experiment,Error> {
     splash_with_stroke(steps,dt_s,audio,Stroke::default())
 }
@@ -252,7 +256,7 @@ fn splash_with_mount(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Option
     let system=ImpactSystem::new_with_dampers(bodies,contacts,pads,vec![],dampers,config(steps,dt_s))?;
     let system=match material {Some(material)=>material.attach(system)?,None=>system};
     let mut a=vec![0.0];a.extend(port);a.resize(total,0.0);let mut b=shaft.tip_row(0,stick_weight)?;b.resize(total,0.0);
-    Ok(Experiment{flexible_sticks:shaft.ports,mute,system:Mechanics::Reference(system),force:vec![0.0;total],stick_weight,second_stick,observer_a:a,observer_b:b,pressure:None,acoustics,air:None,ambient})
+    Ok(Experiment{flexible_sticks:shaft.ports,mute,system:Mechanics::Reference(system),force:vec![0.0;total],stick_weight,second_stick,observer_a:a,observer_b:b,pressure:None,acoustics,air:None,ambient,head_materials:[None,None]})
 }
 fn drum(steps:u64,dt_s:f64,audio:bool,prepared:bool)->Result<Experiment,Error> {
     drum_with_wires(steps,dt_s,audio,prepared,None)
@@ -538,7 +542,7 @@ fn drum_with_chamber(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<s
         Some(acoustics.ok_or("missing exterior boundary")?.with_sidewall_aperture(
             port,neck.azimuth_rad,neck.axial_position_m,depth,ambient.medium())?)
     } else {acoustics};
-    Ok(Experiment{flexible_sticks:shaft.ports,mute,system,force:vec![0.0;count],stick_weight,second_stick,observer_a:top,observer_b:bottom,pressure:Some(volume),acoustics,air,ambient})
+    Ok(Experiment{flexible_sticks:shaft.ports,mute,system,force:vec![0.0;count],stick_weight,second_stick,observer_a:top,observer_b:bottom,pressure:Some(volume),acoustics,air,ambient,head_materials:spec.head_materials})
 }
 // The stored drum areas encode compression, so positive contraction means
 // positive internal pressure. The volume-spring Hamiltonian is unchanged.

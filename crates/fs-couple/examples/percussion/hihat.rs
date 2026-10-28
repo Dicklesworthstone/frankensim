@@ -309,7 +309,7 @@ fn build_with_rocking(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Spec
     };
     let system=match material {Some(material)=>material.attach(system)?,None=>system};
     Ok(Pair{experiment:Experiment{flexible_sticks:flexible_sticks.clone(),mute,system:Mechanics::Reference(system),force:vec![0.;total],
-        stick_weight,second_stick,observer_a:a,observer_b:b,pressure:None,acoustics,air:None,ambient},
+        stick_weight,second_stick,observer_a:a,observer_b:b,pressure:None,acoustics,air:None,ambient,head_materials:[None,None]},
         pedal,collision:inter,upper_modes:hi,lower_modes:lo,flexible_sticks,targets})
 }
 

@@ -17,7 +17,7 @@ fn experiment(frames:u64)->Experiment {
     let s=ImpactSystem::new(vec![body],vec![],vec![],vec![],crate::config(frames*SUBSTEPS as u64,MECHANICAL_DT)).unwrap();
     Experiment{flexible_sticks:[None,None],mute:None,system:Mechanics::Reference(s),force:vec![0.],stick_weight:1.,second_stick:None,
         observer_a:vec![100.],observer_b:vec![0.],pressure:None,acoustics:Some(boundary()),air:None,
-        ambient:crate::ambient::Ambient::reference()}
+        ambient:crate::ambient::Ambient::reference(),head_materials:[None,None]}
 }
 fn energy(s:&Mechanics)->f64 {
     match s{Mechanics::Reference(s)=>s.stored_energy_j(),Mechanics::Nonlinear(s)=>s.stored_energy_j(),
