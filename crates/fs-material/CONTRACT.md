@@ -3276,3 +3276,31 @@ with gas temperature 255.821736 K; tighter results were 26.564590/23.878148
 micrograms and 255.821858 K. Both runs assert whole-history original-datum mass
 and energy conservation and report gross counterflux, adaptive work and residuals.
 Run with argument `0.1` to tighten local temporal error targets tenfold.
+
+
+### Evolving gas on the original multi-cell heat timeline
+
+`sublimation::gas::timeline::advance_deposition_with_gas` composes original
+thermal transport with simultaneous molecular exchange against one evolving
+gas. Every surface retains its original cell identity, phase/caloric source,
+species binding and fixed datum offset. Original heat observers check each
+selected pure-solid enthalpy branch after EVERY accepted thermal substep and
+birth. One joint phase interval then updates the actual masses and enthalpies
+through the thermal owner's transactional boundary.
+
+Start-of-interval exposure and exact birth/contact times remain authoritative.
+The original thermal work ceiling applies to the whole requested advance.
+Empty pre-birth periods jump to their next event without renewing empty work.
+Actual combined gas/solid storage is compared with incoming births and external
+heat, using stable initial/birth-relative energy changes and explicit datum
+conversions. Late source/domain/balance failure or cancellation discards the
+complete candidate, including elapsed time and consumed events.
+
+This fixed-area heat/phase composition is first order; refine the thermal
+max_dt_s to resolve splitting and explicit molecular exchange. The standalone
+adaptive chamber driver does not certify this operator-splitting error. The
+caller still owns pure-solid admission, supported source domains and topology;
+melting, extinction, moving geometry and gas flow are not inferred. Ten new
+actual-source native integration tests passed for physical heat/gas feedback,
+order, births/datum shifts, exposure events, work limits, solid-branch refusal,
+conservation and rollback.

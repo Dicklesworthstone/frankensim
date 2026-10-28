@@ -205,3 +205,25 @@ reference. The material gas adapter owns that caloric evaluation and both
 endpoint energy accounts. This interface assumes energy/angle-independent
 equal sticking and specular nonsticking reflection; it supplies no gas-film,
 diffuse thermal accommodation, Knudsen-layer or moving-geometry model.
+
+
+## Original thermal storage for external solid/gas coupling
+
+`enthalpy::sublimation::external` exposes the original pending events, work
+budget and cell caloric evaluation, and transactionally applies prepared solid
+mass/enthalpy endpoints to the existing thermal storage. Every full expected
+cell, positive remaining inventory, caller-admitted pure-solid h interval,
+original caloric endpoint and original-geometry exposure is checked before a
+single write. Endpoint contact events may change current exposure; they cannot
+retroactively alter the preceding interval's declared area. A surrounding
+coupled owner mutates its private trial without another graph clone per phase
+step. Joint gas/solid conservation and physical phase admission remain with
+that owner; this boundary does not invent calorimetry or geometry evolution.
+
+The material gas timeline now composes this boundary with the actual original
+heat operator and one jointly evolving gas. Four native owner tests cover
+state preservation, stale/bad batches, endpoint covering and late cancellation.
+Both existing isothermal sublimation timelines also jump directly to the next
+event/target while the WHOLE graph is empty, avoiding unbounded tiny pre-birth
+intervals. Two regressions prove a long pre-birth gap with zero thermal work
+allowance. The native sublimation suite passed all 51 selected tests.

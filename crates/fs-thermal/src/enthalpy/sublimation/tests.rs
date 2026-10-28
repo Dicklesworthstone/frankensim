@@ -448,3 +448,36 @@ fn out_of_domain_trial_does_not_reject_a_converged_physical_endpoint() {
     assert!(step.transferred_mass_kg > 0.0);
     close(thermal.energy_j() + step.vapor_energy_j, 0.0, 1e-7);
 }
+
+#[test]
+fn empty_prebirth_time_jumps_with_zero_thermal_work_allowance() {
+    let thermal = scheduled(vec![birth(1000.0, cell(1, 0.0, 0.0))], 0);
+    let original_vapor = vacuum();
+    let mut calls = 0;
+    let (next, vapor, audit) = thermal
+        .advance_sublimating_to(
+            CellId(1),
+            &Ice,
+            kinetics(),
+            original_vapor,
+            1000.0,
+            config(1e-12),
+            phase(),
+            || {
+                calls += 1;
+                if calls > 200 {
+                    Err(DepositionError::Budget("unbounded prebirth interval loop"))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap();
+    assert_eq!(next.time_s(), 1000.0);
+    assert_eq!(next.cells()[&CellId(1)].mass_kg, 0.02);
+    assert_eq!(vapor, original_vapor);
+    assert_eq!(audit.thermal.substeps, 0);
+    assert_eq!(audit.thermal.events, 1);
+    assert_eq!(audit.phase_steps, 0);
+    assert_eq!(audit.transferred_mass_kg, 0.0);
+}

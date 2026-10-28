@@ -22,6 +22,10 @@
 #[path = "sublimation/chamber.rs"]
 pub mod chamber;
 
+/// Original thermal-owner admission for externally solved solid/gas exchange.
+#[path = "sublimation/external.rs"]
+pub mod external;
+
 use super::{CellId, DepositionError, DepositionSimulation, EnergyAudit, Event, StepConfig};
 use crate::sublimation::{
     SolidSurfaceState, SolverConfig, SublimationError, SublimationLaw, SurfaceKinetics,
@@ -299,7 +303,13 @@ impl DepositionSimulation<'_> {
             } else {
                 None
             };
-            let mut stop_s = (start_s + thermal_config.max_dt_s).min(target_s);
+            // No heat or phase work exists before the first active cell.
+            // Jump to the next event/target instead of renewing empty intervals.
+            let mut stop_s = if next.cells.is_empty() {
+                target_s
+            } else {
+                (start_s + thermal_config.max_dt_s).min(target_s)
+            };
             if let Some(event) = next.schedule.get(next.cursor) {
                 stop_s = stop_s.min(event.time_s);
             }

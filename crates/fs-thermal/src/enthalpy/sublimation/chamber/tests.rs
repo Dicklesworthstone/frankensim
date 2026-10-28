@@ -512,3 +512,42 @@ fn complete_advance_preserves_the_original_global_work_ceiling() {
     assert_eq!(thermal.cells(), &before);
     assert_eq!(thermal.time_s(), 0.0);
 }
+
+#[test]
+fn empty_chamber_timeline_jumps_to_births_without_phase_or_thermal_work() {
+    let thermal = scheduled(
+        vec![
+            birth(1000.0, cell(1, 0.0, 0.0)),
+            birth(1000.0, cell(2, 0.0, 0.0)),
+        ],
+        0,
+    );
+    let original_chamber = bath(0.0, 0.001);
+    let mut calls = 0;
+    let (next, chamber, audit) = thermal
+        .advance_chamber_sublimating_to(
+            &selection(),
+            &Ice,
+            original_chamber,
+            1000.0,
+            thermal_config(1e-12),
+            phase_config(),
+            || {
+                calls += 1;
+                if calls > 200 {
+                    Err(DepositionError::Budget("unbounded prebirth interval loop"))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap();
+    assert_eq!(next.time_s(), 1000.0);
+    assert_eq!(next.mass_kg(), 0.04);
+    assert_eq!(chamber, original_chamber);
+    assert_eq!(audit.thermal.substeps, 0);
+    assert_eq!(audit.thermal.events, 2);
+    assert_eq!(audit.phase_steps, 0);
+    assert_eq!(audit.cells[&CellId(1)], CellPhaseAudit::default());
+    assert_eq!(audit.cells[&CellId(2)], CellPhaseAudit::default());
+}

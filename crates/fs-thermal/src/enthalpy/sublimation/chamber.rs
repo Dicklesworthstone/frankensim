@@ -346,7 +346,13 @@ impl DepositionSimulation<'_> {
                     exposed.push((*surface, next.exposed_area_m2(surface.cell_id)?));
                 }
             }
-            let mut stop_s = (start_s + thermal_config.max_dt_s).min(target_s);
+            // No heat or phase work exists before the first active cell.
+            // Jump to the next event/target instead of renewing empty intervals.
+            let mut stop_s = if next.cells.is_empty() {
+                target_s
+            } else {
+                (start_s + thermal_config.max_dt_s).min(target_s)
+            };
             if let Some(event) = next.schedule.get(next.cursor) {
                 stop_s = stop_s.min(event.time_s);
             }

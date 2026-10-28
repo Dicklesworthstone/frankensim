@@ -20,6 +20,9 @@
 
 /// Joint exchange of heterogeneous surfaces against one evolving gas snapshot.
 pub mod chamber;
+/// Coupled original heat histories and one evolving thermochemical gas.
+#[path = "gas/timeline.rs"]
+pub mod timeline;
 
 use crate::thermochemical_gas::{
     ThermochemicalGasModel,
