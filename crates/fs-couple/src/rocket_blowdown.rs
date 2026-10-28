@@ -10,11 +10,17 @@
 //! smooth propulsion quadrature is second order in time. The dynamics step
 //! integrates its piecewise-constant effective rate, exhaust vector, gravity
 //! and external force analytically. Refine changing
-//! inputs. This adapter has no attitude, rotating-frame transformation, slosh,
-//! combustion, wall heating, or full exhaust/world-frame energy audit.
+//! inputs. This point-vehicle adapter has no attitude or rotating-frame
+//! transformation. The separate `rigid` module connects the same source owner
+//! to native attitude and exhaust spin. Neither adapter supplies slosh,
+//! combustion, wall heating, or a full exhaust/world-frame energy audit.
 
 /// Frame-checked atmosphere, relative-flow loads and central gravity.
 pub mod environment;
+
+/// Source-bearing gas coupled to native attitude and explicit closed-valve coast.
+#[path = "rocket_blowdown/rigid.rs"]
+pub mod rigid;
 
 use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::blowdown::{

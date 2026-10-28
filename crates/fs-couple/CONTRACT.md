@@ -9360,3 +9360,37 @@ Frame mismatches, invalid data and unrepresentable loads refuse. Focused
 regressions cover co-motion, a common velocity boost, rotational drag work,
 inverse-square gravity and the potential gradient. These are instantaneous
 loads; trajectory accuracy remains the time integrator's responsibility.
+
+
+## Finite source gas coupled to native rigid rocket flight
+
+`rocket_blowdown::rigid::GasRigidRocketState` binds one immutable source-bearing
+`ClosedGasParcel` to the original `fs_mbd::rocket::rigid` vehicle. All propellant
+mass is derived from the actual tank; callers cannot author a second inventory.
+A powered interval advances the original gas owner once, derives `mdot` and
+effective body exhaust velocity from accepted expelled mass and scalar axial
+impulse, and drives the original native dynamics with those quantities.
+
+The adapter checks actual remaining and consumed mass and native bookkeeping
+against the gas owner's explicit mass tolerance. Scalar axial mechanical impulse
+is checked against nozzle impulse independently of directed world impulse,
+whose norm can be smaller as thrust rotates. Pressure thrust contributes once
+to total force and its application-arm torque. Original source/nozzle reports,
+angular-momentum accounting and actual cross-owner residuals are retained;
+cancellation or either owner's refusal publishes neither endpoint.
+
+`coast` explicitly closes the valve. It preserves the exact tank/source state,
+uses zero engine mass flow/thrust/exhaust spin, and advances native mechanics
+under gravity and other supplied forces/torques. A failed gas/nozzle solve never
+implicitly selects coast. Both powered and coast operations retain the native
+fixed-COM/shared-principal-axis mass model and separately declared diagonal
+rotational exhaust flux; no slosh, general outlet tensor, internal-flow momentum
+or complete world exhaust-energy audit is inferred.
+
+Native actual-source verification passed seven rigid-coupling tests: rotating
+and off-axis thrust, scalar/world impulse distinction, pressure torque once,
+second-order coupled position/velocity/attitude refinement, cross-owner mass,
+late cancellation, source/mechanical budgets and exact-gas closed-valve coast.
+The existing point-gas coupling and frame-correct environment suite also passed
+all nine tests, including wind-relative drag, rotational application-point
+power and central-gravity potential. Full workspace validation remains separate.
