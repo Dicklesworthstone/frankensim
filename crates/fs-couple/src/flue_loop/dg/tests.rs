@@ -125,3 +125,28 @@ fn g0_mismatched_clock_area_and_nonphysical_jet_controls_refuse_before_running()
         ).is_err());
     }
 }
+
+#[test]
+fn g0_port_work_audit_keeps_the_pressure_scale_where_the_inlet_pressure_crosses_zero() {
+    // music_render_wind refused here at 96 kHz: H = -1.39493 Pa and Z Q = +1.39493 Pa
+    // left -2.1e-6 Pa, and the DG mean pressure matched it to 4.75e-16 Pa, the
+    // rounding of H and Z Q, which is 2.3e-10 of the cancelled work.
+    let spec = source(gas(101325.0));
+    let inlet = *spec.load.duct().inlet_gas();
+    let zc = inlet.density * inlet.sound_speed / spec.load.duct().inlet_area_m2();
+    let mut dg = FlueDg { load: spec.load, characteristic_impedance_pa_s_m3: zc,
+        maximum_jet_mach: spec.maximum_jet_mach, last: None };
+    for _ in 0..64 { dg.load.preview_step(2e-6).unwrap().accept(); }
+    let relation = dg.load.port_response().unwrap();
+    let (h, z) = (relation.history_pressure_pa, relation.impedance_pa_s_m3);
+    assert!(h.abs() > 1e-3, "the bore carries a history pressure to cancel");
+    let flow = -h / z * (1.0 + 1e-9);
+    let pressure = h + z * flow;
+    assert!(pressure != 0.0 && pressure.abs() < 1e-8 * h.abs());
+    dg.push(MouthStep { flow_m3_s: flow, outgoing_pa: 0.5 * (pressure + zc * flow),
+        incoming_pa: 0.5 * (pressure - zc * flow), pressure_pa: pressure }).unwrap();
+    let frame = dg.last_frame().unwrap();
+    let scale = (h.abs() + (z * flow).abs() + pressure.abs()) * (flow / 96000.0).abs();
+    assert!(frame.port_work_residual_j.abs() <= 1e-10 * scale);
+    assert_eq!(dg.load.state().step_count(), 65);
+}

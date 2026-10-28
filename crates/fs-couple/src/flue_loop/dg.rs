@@ -160,7 +160,12 @@ impl FlueDg {
             + inlet_pressure_pa.abs() + mouth_pressure.abs();
         let work = inlet_pressure_pa * (inlet_flow_m3_s * dt);
         let port_work_residual_j = trial.source_work_j() - work;
-        let work_scale = trial.source_work_j().abs() + work.abs()
+        // The work residual is Q dt times the pressure residual, so it takes the
+        // pressure audit's scale, as the DG terminal audit does. Where H + Z Q
+        // cancels (a zero crossing of the inlet pressure) the net works alone
+        // would turn the rounding of H and Z Q into a refusal.
+        let work_scale = pressure_scale * (inlet_flow_m3_s * dt).abs()
+            + trial.source_work_j().abs() + work.abs()
             + driven_mouth.as_ref().map_or(0.0, |frame| frame.load_work_j.abs());
         if (expected_pressure - inlet_pressure_pa).abs()
             > 1e-10 * pressure_scale.max(1e-300)
