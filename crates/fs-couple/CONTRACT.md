@@ -21,6 +21,24 @@ lossless interface relation, explicit storage/dissipation/source primitives,
 a complete stream-flux bundle, and evidence-bound closed-window physical
 accounting without false passivity.
 
+## Assembled shell adhesive dissipation
+
+`shear_shell::assembly::MaterialShellAssembly::reduce` projects the original
+mortar glue damping through the same assembled mass-normalized modes as
+stiffness, component viscosity, bridge forces and pressure surfaces. It sums
+the complete modal tensor before the existing positive-semidefinite damping
+owner realizes passive channels, preserving cross-mode terms and undamped
+subspaces. With fixed stiffness and geometry, changing glue viscosity changes
+neither the elastic basis nor the radiation map. Zero supplied viscosity adds
+no channel; no loss is inferred from a material name.
+
+`has_viscous_glue` reports supplied positive edge or face viscosity. Projection
+and connection budgets include this work. Only rigid mortar ties eliminate
+slave coordinates; supports on compliant slaves remain active. Original tie
+owners still validate coefficients and geometry. Source adapters own the
+validity of a constant-coefficient glue law across the retained state and
+frequency range.
+
 ## Purpose and layer
 
 Layer L3 (multiphysics coupling). Domain assembly depends on physical

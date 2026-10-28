@@ -19,7 +19,7 @@ use fs_exec::CancelGate;
 use fs_material::state_point::ResolvedMaterialStatePoint;
 use fs_plate::shell::{
     junction::{
-        EdgeTie, FaceTie, RotationCoupling, ShellComponent, TieBudget, TieReceipt,
+        EdgeTie, FaceTie, RotationCoupling, ShellComponent, TieBudget, TieKind, TieReceipt,
         tie_shells_with_faces,
     },
     mitc::{
@@ -166,6 +166,19 @@ impl MaterialShellAssemblyImage {
 }
 
 impl MaterialShellAssembly {
+    /// Whether a compliant junction supplies positive viscous loss. No
+    /// coefficient is inferred from glue stiffness or a material name.
+    pub fn has_viscous_glue(&self) -> bool {
+        self.edge_ties
+            .iter()
+            .map(|tie| tie.kind)
+            .chain(self.face_ties.iter().map(|tie| tie.kind))
+            .any(|kind| {
+                matches!(kind, TieKind::Compliant(glue)
+                if glue.viscosity_n_s_m3.is_some_and(|eta| eta.iter().any(|v| *v > 0.0)))
+            })
+    }
+
     /// Replace a complete regional material source while keeping all geometry,
     /// force/fluid roles and junction ownership. Actual thickness is re-derived
     /// from the source policy during reduction, including fixed-mass changes.
@@ -297,6 +310,17 @@ impl MaterialShellAssembly {
                 .checked_mul(n.checked_add(force_ports.len())?)?
                 .checked_add(w)
         });
+        // Project the original glue C in the same basis. Bound n sparse
+        // products densely and include all n^2 modal inner products.
+        if self.has_viscous_glue() {
+            work = work.and_then(|w| {
+                let dofs = total_nodes.checked_mul(6)?;
+                dofs.checked_mul(dofs)?
+                    .checked_mul(n)?
+                    .checked_add(dofs.checked_mul(n)?.checked_mul(n)?)?
+                    .checked_add(w)
+            });
+        }
         if work.is_none_or(|w| w > budget.max_projection_terms) {
             return Err(invalid(
                 "complete assembly projection exceeds its declared allowance",
@@ -443,6 +467,14 @@ impl MaterialShellAssembly {
         let mut volume_shapes = vec![0.0; n];
         let mut cavity_volume_shapes = vec![0.0; n];
         let mut matrix = vec![0.0; n * n];
+        if self.has_viscous_glue() {
+            poll(gate)?;
+            let basis: Vec<_> = modes.iter().map(|mode| mode.phi.clone()).collect();
+            add(
+                &mut matrix,
+                &tied.project_glue_damping(&basis).map_err(owner)?,
+            )?;
+        }
         let spectrum = super::constant_loss::ConstantLossSpectrum::fit();
         let mut interface_columns = Vec::with_capacity(self.components.len());
         let mut exterior_area = 0.0;
@@ -497,8 +529,18 @@ impl MaterialShellAssembly {
                     .map_err(owner)?,
             );
         }
-        let damping =
-            ModalPlateViscosity::factor(matrix, n, budget.reference_resistance_n_s_m, gate)?;
+        // Localized adhesive loss can have an undamped subspace. Reuse the
+        // existing PSD channel owner without adding artificial diagonal loss.
+        let damping = if self.has_viscous_glue() {
+            ModalPlateViscosity::from_psd_modal_matrix(
+                matrix,
+                n,
+                budget.reference_resistance_n_s_m,
+                gate,
+            )?
+        } else {
+            ModalPlateViscosity::factor(matrix, n, budget.reference_resistance_n_s_m, gate)?
+        };
         let radiators = omega
             .iter()
             .enumerate()
@@ -552,11 +594,17 @@ impl MaterialShellAssembly {
             Ok(())
         };
         for tie in &self.edge_ties {
+            if !matches!(tie.kind, TieKind::Rigid) {
+                continue;
+            }
             for &node in &tie.b.nodes {
                 check(tie.b.component, node, tie.rotations)?;
             }
         }
         for tie in &self.face_ties {
+            if !matches!(tie.kind, TieKind::Rigid) {
+                continue;
+            }
             let part = self
                 .components
                 .get(tie.slave_component)

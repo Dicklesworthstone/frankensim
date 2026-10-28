@@ -105,7 +105,7 @@ impl ReciprocalStringBank {
         if body.force_ports.len() != sources.len() {
             return Err(invalid("material shell assembly needs one original force footprint per string"));
         }
-        let has_loss = body.specimen.components.iter().any(|part|
+        let has_loss = body.specimen.has_viscous_glue() || body.specimen.components.iter().any(|part|
             part.specimen.regions().iter().any(|r| !r.viscosity().is_zero()));
         let interfaces = body.specimen.components.iter().map(|part|
             part.specimen.interfaces().iter().filter(|i| i.law().damping_n_s_m != 0.0).count())

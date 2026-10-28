@@ -556,3 +556,5 @@ fn g0_assembly_refuses_ambiguous_frames_slave_supports_budgets_and_missing_fluid
         );
     });
 }
+
+mod glue;
