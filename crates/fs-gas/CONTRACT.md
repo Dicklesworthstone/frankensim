@@ -266,3 +266,28 @@ The Euler field remains frozen-composition. The zero-dimensional reactor does
 not add species advection or chemistry/flow splitting to that field. Neither
 path supplies diffusion flames, generic third-body/falloff mechanisms, spray,
 knock, real-gas phases, moving volumes or a validated ignition model.
+
+## Reusable finite-rate reactor for cell-wise chemistry
+
+`chemistry::IsochoricReactor` owns one original immutable kinetic mechanism and
+one declared set of numerical controls. Construction admits the complete
+caloric source interval and allocates the original source, stoichiometric,
+Newton, adaptive-stage, concentration and endpoint workspace once. Subsequent
+`advance_adiabatic` and `advance_adiabatic_energy` calls take dense `Amount`
+values in canonical source order and reuse that storage without successful-path
+allocation. This removes repeated identity lookup, source-path admission and
+workspace construction when processing a finite-volume field.
+
+The returned `IsochoricKineticsView` borrows the accepted endpoint and its
+source owner. Explicit `to_owned(cancelled)` alone constructs the independent
+result and original NASA-9 evaluation receipts. The existing allocating free
+functions delegate to the same evolution algorithm. Each new solve resets
+extents, extensive inputs and statistics; cancellation, an unsupported energy
+target or a work-limit refusal cannot contaminate the next cell.
+
+The previously declared implicit-Euler/step-doubling accuracy, positivity,
+energy, element, mass and entropy boundaries remain in force. Focused native
+verification passes all eight existing reactor regressions and four prepared
+workspace tests covering analytic independent parcels, retained buffer
+addresses, explicit-energy/source identity and recovery after refusals. This
+is not a full-workspace or DSR verdict.

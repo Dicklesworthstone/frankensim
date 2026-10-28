@@ -14,6 +14,9 @@ use fs_thermochem::{
 };
 use std::collections::BTreeMap;
 
+#[path = "tests/prepared.rs"]
+mod prepared;
+
 fn id(name: &str) -> SpeciesId {
     SpeciesId::new(name).unwrap()
 }

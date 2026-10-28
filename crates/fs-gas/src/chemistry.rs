@@ -18,7 +18,10 @@ use fs_thermochem::kinetics::{
 };
 use fs_thermochem::{Nasa9EvaluationReceiptV1, SpeciesId};
 
+mod prepared;
 mod solve;
+
+pub use prepared::{IsochoricKineticsView, IsochoricReactor};
 
 /// Explicit physical tolerances and bounded adaptive integration work.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -301,7 +304,32 @@ fn advance(
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<IsochoricKineticsResult, IsochoricKineticsError> {
     poll(&mut cancelled)?;
-    controls.validate()?;
+    let amounts = feed_amounts(mechanism, feed)?;
+    let mut prepared = IsochoricReactor::new(mechanism.clone(), controls, &mut cancelled)?;
+    advance_prepared(
+        &mut prepared,
+        &amounts,
+        target,
+        volume,
+        initial_temperature,
+        duration,
+        &mut cancelled,
+    )?
+    .to_owned(cancelled)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_prepared<'a>(
+    prepared: &'a mut IsochoricReactor,
+    feed: &[Amount],
+    target: Option<Energy>,
+    volume: Volume,
+    initial_temperature: Temperature,
+    duration: Time,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<IsochoricKineticsView<'a>, IsochoricKineticsError> {
+    poll(&mut cancelled)?;
+    let controls = prepared.controls();
     if !positive(volume.value())
         || !duration.value().is_finite()
         || duration.value() < 0.0
@@ -314,50 +342,23 @@ fn advance(
             "invalid reactor volume, energy, temperature or duration",
         ));
     }
-    mechanism.admit_temperature_interval(
-        Temperature::new(controls.minimum_temperature_k),
-        Temperature::new(controls.maximum_temperature_k),
-        &mut cancelled,
-    )?;
-    let initial_concentrations = feed_concentrations(mechanism, feed, volume)?;
-    let mut kinetic_work = KineticWorkspaceV1::new(mechanism)?;
-    let initial = mechanism.evaluate_thermodynamics(
-        initial_temperature,
-        &initial_concentrations,
-        &mut kinetic_work,
-        &mut cancelled,
-    )?;
-    if !positive(initial.mass_density_kg_m3 * volume.value()) {
-        return Err(IsochoricKineticsError::Invalid(
-            "unrepresentable original parcel mass",
-        ));
-    }
-    let target = target
-        .unwrap_or_else(|| Energy::new(initial.internal_energy_density_j_m3 * volume.value()));
-    if !target.value().is_finite()
-        || !positive(controls.energy_tolerance_j / volume.value())
-        || !positive(controls.absolute_amount_tolerance_mol / volume.value())
-    {
-        return Err(IsochoricKineticsError::Invalid(
-            "unrepresentable reactor energy or concentration tolerance",
-        ));
-    }
-    let nr = mechanism.reactions().len();
-    let mut current = zeros(nr)?;
-    let mut full = zeros(nr)?;
-    let mut half = zeros(nr)?;
-    let mut fine = zeros(nr)?;
-    let mut current_concentrations = initial_concentrations.clone();
-    let mut full_concentrations = zeros(initial_concentrations.len())?;
-    let mut reactor = solve::Reactor::new(
-        mechanism,
-        controls,
-        volume,
-        target,
-        initial_concentrations,
-        kinetic_work,
-    )?;
-    let initial = reactor.resolve(&current, initial_temperature.value(), &mut cancelled)?;
+    let IsochoricReactor {
+        reactor,
+        current,
+        full,
+        half,
+        fine,
+        current_concentrations,
+        full_concentrations,
+        amounts,
+    } = prepared;
+    let target = reactor.initialize(feed, volume, initial_temperature, target, &mut cancelled)?;
+    current.fill(0.0);
+    full.fill(0.0);
+    half.fill(0.0);
+    fine.fill(0.0);
+    current_concentrations.copy_from_slice(&reactor.initial);
+    let initial = reactor.resolve(current, initial_temperature.value(), &mut cancelled)?;
     let mut accepted = initial;
     let mut elapsed = 0.0;
     let mut step = controls.initial_step_s.min(duration.value());
@@ -382,24 +383,24 @@ fn advance(
         }
         let attempt = (|| {
             let full_state = reactor.implicit_step(
-                &current,
+                current,
                 step,
-                &mut full,
+                full,
                 accepted.temperature.value(),
                 &mut cancelled,
             )?;
             full_concentrations.copy_from_slice(reactor.concentrations());
             let half_state = reactor.implicit_step(
-                &current,
+                current,
                 step * 0.5,
-                &mut half,
+                half,
                 accepted.temperature.value(),
                 &mut cancelled,
             )?;
             let fine_state = reactor.implicit_step(
-                &half,
+                half,
                 step * 0.5,
-                &mut fine,
+                fine,
                 half_state.temperature.value(),
                 &mut cancelled,
             )?;
@@ -435,7 +436,7 @@ fn advance(
                 return Err(IsochoricKineticsError::Cancelled);
             }
             Ok((state, error, entropy_change)) if error <= 1.0 => {
-                current.copy_from_slice(&fine);
+                current.copy_from_slice(fine);
                 current_concentrations.copy_from_slice(reactor.concentrations());
                 accepted = state;
                 elapsed = if step == remaining {
@@ -478,12 +479,10 @@ fn advance(
     }
     // Reconstruct from original feed plus accumulated reaction extents before
     // publication; no sum of independently clamped species updates is retained.
-    accepted = reactor.resolve(&current, accepted.temperature.value(), &mut cancelled)?;
-    let amounts: Vec<_> = reactor
-        .concentrations()
-        .iter()
-        .map(|c| Amount::new(*c * volume.value()))
-        .collect();
+    accepted = reactor.resolve(current, accepted.temperature.value(), &mut cancelled)?;
+    for (amount, concentration) in amounts.iter_mut().zip(reactor.concentrations()) {
+        *amount = Amount::new(*concentration * volume.value());
+    }
     balance.mass_residual_kg =
         (accepted.mass_density_kg_m3 - initial.mass_density_kg_m3) * volume.value();
     balance.energy_residual_j =
@@ -492,8 +491,11 @@ fn advance(
         (accepted.entropy_density_j_m3_k - initial.entropy_density_j_m3_k) * volume.value();
     balance.nonlinear_iterations = reactor.stats.nonlinear_iterations;
     balance.temperature_evaluations = reactor.stats.temperature_evaluations;
-    balance.maximum_relative_element_residual =
-        element_residual(mechanism, &reactor.initial, reactor.concentrations());
+    balance.maximum_relative_element_residual = element_residual(
+        &reactor.mechanism,
+        &reactor.initial,
+        reactor.concentrations(),
+    );
     let final_mass = accepted.mass_density_kg_m3 * volume.value();
     let final_energy = accepted.internal_energy_density_j_m3 * volume.value();
     if !positive(final_mass)
@@ -515,22 +517,8 @@ fn advance(
     {
         return Err(IsochoricKineticsError::Balance(balance));
     }
-    let mut sources = Vec::new();
-    sources
-        .try_reserve_exact(amounts.len())
-        .map_err(|_| IsochoricKineticsError::AllocationRefused)?;
-    for model in mechanism.thermodynamics().models() {
-        poll(&mut cancelled)?;
-        let source = model.evaluate(accepted.temperature).map_err(|source| {
-            KineticsErrorV1::SpeciesEvaluation {
-                species: model.species().clone(),
-                source,
-            }
-        })?;
-        sources.push(source.receipt().clone());
-    }
-    let result = IsochoricKineticsResult {
-        mechanism: mechanism.clone(),
+    let result = IsochoricKineticsView {
+        mechanism: &reactor.mechanism,
         amounts,
         temperature: accepted.temperature,
         pressure: accepted.pressure,
@@ -540,22 +528,24 @@ fn advance(
         volume,
         elapsed_time: duration,
         balance,
-        sources,
     };
     poll(&mut cancelled)?;
     Ok(result)
 }
 
-fn feed_concentrations(
+fn feed_amounts(
     mechanism: &IdealGasKineticsV1,
     feed: &[(SpeciesId, Amount)],
-    volume: Volume,
-) -> Result<Vec<f64>, IsochoricKineticsError> {
+) -> Result<Vec<Amount>, IsochoricKineticsError> {
     let species = mechanism.stoichiometry().species();
     if feed.is_empty() || feed.len() > species.len() {
         return Err(IsochoricKineticsError::Invalid("invalid kinetic feed size"));
     }
-    let mut c = zeros(species.len())?;
+    let mut amounts = Vec::new();
+    amounts
+        .try_reserve_exact(species.len())
+        .map_err(|_| IsochoricKineticsError::AllocationRefused)?;
+    amounts.resize(species.len(), Amount::new(0.0));
     let mut present = vec![false; species.len()];
     for (id, amount) in feed {
         let i = species
@@ -567,14 +557,9 @@ fn feed_concentrations(
             ));
         }
         present[i] = true;
-        c[i] = amount.value() / volume.value();
-        if !c[i].is_finite() || (amount.value() > 0.0 && c[i] == 0.0) {
-            return Err(IsochoricKineticsError::Invalid(
-                "feed concentration is not representable",
-            ));
-        }
+        amounts[i] = *amount;
     }
-    Ok(c)
+    Ok(amounts)
 }
 fn element_residual(mechanism: &IdealGasKineticsV1, before: &[f64], after: &[f64]) -> f64 {
     let matrix = mechanism.thermodynamics().elemental_matrix();

@@ -13,9 +13,9 @@ struct StateWorkspace {
 
 /// One allocation per bounded vector/matrix at reactor construction. Stages,
 /// rejected trials, temperature roots and Newton iterations reuse that storage.
-pub(super) struct Reactor<'a> {
-    mechanism: &'a IdealGasKineticsV1,
-    controls: IsochoricKineticsSolve,
+pub(super) struct Reactor {
+    pub mechanism: IdealGasKineticsV1,
+    pub controls: IsochoricKineticsSolve,
     volume: f64,
     target_density: f64,
     pub initial: Vec<f64>,
@@ -29,17 +29,14 @@ pub(super) struct Reactor<'a> {
     temperature_extent_derivatives: Vec<f64>,
     pub stats: Statistics,
 }
-impl<'a> Reactor<'a> {
+impl Reactor {
     pub fn new(
-        mechanism: &'a IdealGasKineticsV1,
+        mechanism: IdealGasKineticsV1,
         controls: IsochoricKineticsSolve,
-        volume: Volume,
-        target: Energy,
-        initial: Vec<f64>,
-        kinetics: KineticWorkspaceV1,
     ) -> Result<Self, IsochoricKineticsError> {
-        let ns = initial.len();
+        let ns = mechanism.thermodynamics().models().len();
         let nr = mechanism.reactions().len();
+        let kinetics = KineticWorkspaceV1::new(&mechanism)?;
         let mut nu = zeros(ns * nr)?;
         for i in 0..ns {
             for j in 0..nr {
@@ -49,18 +46,12 @@ impl<'a> Reactor<'a> {
                     .expect("admitted stoichiometry") as f64;
             }
         }
-        let target_density = target.value() / volume.value();
-        if !target_density.is_finite() {
-            return Err(IsochoricKineticsError::Invalid(
-                "unrepresentable internal-energy density",
-            ));
-        }
         Ok(Self {
             mechanism,
             controls,
-            volume: volume.value(),
-            target_density,
-            initial,
+            volume: 1.0,
+            target_density: 0.0,
+            initial: zeros(ns)?,
             nu,
             state: StateWorkspace {
                 concentrations: zeros(ns)?,
@@ -75,6 +66,59 @@ impl<'a> Reactor<'a> {
             stats: Statistics::default(),
         })
     }
+    /// Replace every cell-dependent input without reallocating admitted storage.
+    pub fn initialize(
+        &mut self,
+        amounts: &[Amount],
+        volume: Volume,
+        temperature: Temperature,
+        target: Option<Energy>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Energy, IsochoricKineticsError> {
+        if amounts.len() != self.initial.len() {
+            return Err(IsochoricKineticsError::Invalid(
+                "dense feed does not match canonical mechanism species",
+            ));
+        }
+        for (concentration, amount) in self.initial.iter_mut().zip(amounts) {
+            if !amount.value().is_finite() || amount.value() < 0.0 {
+                return Err(IsochoricKineticsError::Invalid("invalid dense feed amount"));
+            }
+            *concentration = amount.value() / volume.value();
+            if !concentration.is_finite() || (amount.value() > 0.0 && *concentration == 0.0) {
+                return Err(IsochoricKineticsError::Invalid(
+                    "feed concentration is not representable",
+                ));
+            }
+        }
+        let initial = self.mechanism.evaluate_thermodynamics(
+            temperature,
+            &self.initial,
+            &mut self.state.kinetics,
+            cancelled,
+        )?;
+        if !positive(initial.mass_density_kg_m3 * volume.value()) {
+            return Err(IsochoricKineticsError::Invalid(
+                "unrepresentable original parcel mass",
+            ));
+        }
+        let target = target
+            .unwrap_or_else(|| Energy::new(initial.internal_energy_density_j_m3 * volume.value()));
+        let target_density = target.value() / volume.value();
+        if !target.value().is_finite()
+            || !target_density.is_finite()
+            || !positive(self.controls.energy_tolerance_j / volume.value())
+            || !positive(self.controls.absolute_amount_tolerance_mol / volume.value())
+        {
+            return Err(IsochoricKineticsError::Invalid(
+                "unrepresentable reactor energy or concentration tolerance",
+            ));
+        }
+        self.volume = volume.value();
+        self.target_density = target_density;
+        self.stats = Statistics::default();
+        Ok(target)
+    }
     pub fn concentrations(&self) -> &[f64] {
         &self.state.concentrations
     }
@@ -85,7 +129,7 @@ impl<'a> Reactor<'a> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<KineticThermodynamicsV1, IsochoricKineticsError> {
         resolve(
-            self.mechanism,
+            &self.mechanism,
             self.controls,
             self.volume,
             self.target_density,
@@ -181,7 +225,7 @@ impl<'a> Reactor<'a> {
                     self.trial[j] = out[j] + fraction * self.delta[j];
                 }
                 let candidate = resolve(
-                    self.mechanism,
+                    &self.mechanism,
                     self.controls,
                     self.volume,
                     self.target_density,
