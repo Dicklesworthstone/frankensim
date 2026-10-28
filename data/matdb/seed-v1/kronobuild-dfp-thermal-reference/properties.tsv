@@ -1,0 +1,45 @@
+frankensim.matdb-source.v1
+observation	identity	Kronobuild DFP MDF.RWH diffusion-open fibreboard, thermal-reference row	Product identity and source scope	DFP is the named single-layer, diffusion-open wood-fibre board with moisture-resistant formaldehyde-free glue, classified MDF.RWH under EN 622-5 for rigid roof and wall underlays. Exact adhesive chemistry and density through the thickness are not supplied. Thermal density 550 kg/m3 comes exclusively from the thermal-reference row; the separate 555 kg/m3 production-specification entry is not substituted or averaged into this thermal set.
+observation	thermal	Kronobuild DFP MDF.RWH diffusion-open fibreboard, thermal-reference row thermal values	Compatible numbers from one producer thermal table	The same producer thermal-reference row gives density 550 kg/m3, conductivity 0.10 W/m/K and specific heat 1600 J/kg/K for DFP. These are tabulated building-physics references, not the separately identified dried OSB measurements. Numerical temperature and moisture for this thermal row are unstated. The table provides a usable constant reference set without establishing a measured k(T,moisture) or Cp(T,moisture) law. Every claim requires explicit source-reference-state=1. No default temperature, independent joint confidence interval or complete structural material law is invented; statistical uncertainty is Unstated.
+scalar	density	identity,thermal	density	550	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	product	1	1	1
+validity	density	reference	1	1	1
+validity	density	matched	0	0	1
+validity	density	temperature_known	0	0	1
+validity	density	moisture_known	0	0	1
+scalar	heat-capacity	identity,thermal	specific_heat_capacity	1600	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	product	1	1	1
+validity	heat-capacity	reference	1	1	1
+validity	heat-capacity	matched	0	0	1
+validity	heat-capacity	temperature_known	0	0	1
+validity	heat-capacity	moisture_known	0	0	1
+scalar	conductivity	identity,thermal	reference_thermal_conductivity	0.10	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	product	1	1	1
+validity	conductivity	reference	1	1	1
+validity	conductivity	matched	0	0	1
+validity	conductivity	temperature_known	0	0	1
+validity	conductivity	moisture_known	0	0	1
+validity	conductivity	direction_known	0	0	1
+validity	conductivity	test_thickness_known	0	0	1
+observation	vapour	Kronobuild DFP MDF.RWH diffusion-open fibreboard, thermal-reference row vapour-resistance references	Printed p.66 table with explicit temperature and relative humidity	The source defines dry conditions as 25 percent RH at 23 deg C and wet conditions as 72 percent RH at 23 deg C. The named reference row gives 10 and 8 respectively, retaining the source dry-maximum and wet-minimum reference roles; these are not statistical uncertainty bounds. These dimensionless diffusion-resistance factors compare the board with an equally thick still-air layer; they are not liquid permeability, equilibrium water mass fraction, thermal conductivity, or an airtightness guarantee. The first reference table is retained separately from the later OSB-specific measured-verification table. Values may vary between production plants. Two discrete states are encoded; no interpolation or extrapolation is supplied.
+scalar	vapour-dry	identity,vapour	water_vapor_diffusion_resistance_factor	10	1	constant
+uncertainty	vapour-dry	unstated	-	-	-	-
+validity	vapour-dry	product	1	1	1
+validity	vapour-dry	reference	1	1	1
+validity	vapour-dry	matched	0	0	1
+validity	vapour-dry	temperature_known	1	1	1
+validity	vapour-dry	moisture_known	1	1	1
+validity	vapour-dry	temperature	296.15	296.15	K
+validity	vapour-dry	relative_humidity	25	25	%
+scalar	vapour-wet	identity,vapour	water_vapor_diffusion_resistance_factor	8	1	constant
+uncertainty	vapour-wet	unstated	-	-	-	-
+validity	vapour-wet	product	1	1	1
+validity	vapour-wet	reference	1	1	1
+validity	vapour-wet	matched	0	0	1
+validity	vapour-wet	temperature_known	1	1	1
+validity	vapour-wet	moisture_known	1	1	1
+validity	vapour-wet	temperature	296.15	296.15	K
+validity	vapour-wet	relative_humidity	72	72	%

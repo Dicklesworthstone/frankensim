@@ -1,0 +1,91 @@
+frankensim.matdb-source.v1
+observation	identity	STEICOtherm dry rigid wood-fibre insulation, GBR/IRL version 2	Product identity and source scope	STEICOtherm dry is rigid wood-fibre insulation made by a dry process with polyurethane resin for panel bonding and paraffin wax. It is distinct from flexible STEICOflex 036, STEICOtherm SD, and other product versions. Approximate density is 110 kg/m3. The word dry is part of the product/manufacturing designation, not evidence of a numerical oven-dry moisture condition for the tabulated properties.
+observation	thermal	STEICOtherm dry rigid wood-fibre insulation, GBR/IRL version 2 thermal values	Compatible numbers from one producer thermal table	The same version-2 sheet gives specific heat 2100 J/kg/K, declared conductivity lambda-D 0.037 W/m/K and vapour resistance factor 3. Individual test temperature, moisture and specimen matching remain unstated. The <=100 deg C permanent-temperature statement is a service limit, not permission to freeze these values across a measured temperature interval. Nominal-thickness thermal resistance is separately declared and rounded in the source. Every claim requires explicit source-reference-state=1. No default temperature, independent joint confidence interval or complete structural material law is invented; statistical uncertainty is Unstated.
+scalar	density	identity,thermal	density	110	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	product	1	1	1
+validity	density	reference	1	1	1
+validity	density	matched	0	0	1
+validity	density	temperature_known	0	0	1
+validity	density	moisture_known	0	0	1
+scalar	heat-capacity	identity,thermal	specific_heat_capacity	2100	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	product	1	1	1
+validity	heat-capacity	reference	1	1	1
+validity	heat-capacity	matched	0	0	1
+validity	heat-capacity	temperature_known	0	0	1
+validity	heat-capacity	moisture_known	0	0	1
+scalar	conductivity	identity,thermal	declared_thermal_conductivity	0.037	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	product	1	1	1
+validity	conductivity	reference	1	1	1
+validity	conductivity	matched	0	0	1
+validity	conductivity	temperature_known	0	0	1
+validity	conductivity	moisture_known	0	0	1
+validity	conductivity	direction_known	0	0	1
+validity	conductivity	test_thickness_known	0	0	1
+validity	conductivity	declared	1	1	1
+scalar	vapour-reference	identity,thermal	water_vapor_diffusion_resistance_factor	3	1	constant
+uncertainty	vapour-reference	unstated	-	-	-	-
+validity	vapour-reference	product	1	1	1
+validity	vapour-reference	reference	1	1	1
+validity	vapour-reference	matched	0	0	1
+validity	vapour-reference	temperature_known	0	0	1
+validity	vapour-reference	moisture_known	0	0	1
+observation	mechanical	STEICOtherm dry rigid wood-fibre insulation, GBR/IRL version 2 mechanical references	Version-2 technical table	The producer reports compressive stress at 10 percent compression of 0.05 N/mm2 and approximate tensile strength perpendicular to the face of 10 kPa. Neither value supplies a small-strain elastic modulus or a continuous stress-strain response. Loading rate and individual specimen data are unstated.
+scalar	compression-reference	identity,mechanical	compression_stress_10_percent	0.05	MPa	constant
+uncertainty	compression-reference	unstated	-	-	-	-
+validity	compression-reference	product	1	1	1
+validity	compression-reference	reference	1	1	1
+validity	compression-reference	matched	0	0	1
+validity	compression-reference	temperature_known	0	0	1
+validity	compression-reference	moisture_known	0	0	1
+validity	compression-reference	normal_loading	1	1	1
+validity	compression-reference	rate_known	0	0	1
+validity	compression-reference	compression_strain	0.10	0.10	1
+scalar	tension-reference	identity,mechanical	tensile_strength_perpendicular_reference	10	kPa	constant
+uncertainty	tension-reference	unstated	-	-	-	-
+validity	tension-reference	product	1	1	1
+validity	tension-reference	reference	1	1	1
+validity	tension-reference	matched	0	0	1
+validity	tension-reference	temperature_known	0	0	1
+validity	tension-reference	moisture_known	0	0	1
+validity	tension-reference	normal_loading	1	1	1
+validity	tension-reference	rate_known	0	0	1
+observation	layer-resistance	STEICOtherm dry rigid wood-fibre insulation, GBR/IRL version 2 nominal-thickness declarations	Product-sheet declared thermal resistance	These are the producer-declared layer resistances at the listed nominal board thicknesses. They do not include internal/external surface films, fasteners, joints, framing, coatings or other wall layers, and are not whole-wall U-values. Values retain source rounding. Only the printed thicknesses are supported; no continuous thickness interval or temperature dependence is manufactured.
+scalar	resistance-40mm	identity,thermal,layer-resistance	declared_layer_thermal_resistance	1.05	m2*K/W	constant
+uncertainty	resistance-40mm	unstated	-	-	-	-
+validity	resistance-40mm	product	1	1	1
+validity	resistance-40mm	reference	1	1	1
+validity	resistance-40mm	matched	0	0	1
+validity	resistance-40mm	temperature_known	0	0	1
+validity	resistance-40mm	moisture_known	0	0	1
+validity	resistance-40mm	declared	1	1	1
+validity	resistance-40mm	nominal_thickness	40	40	mm
+scalar	resistance-60mm	identity,thermal,layer-resistance	declared_layer_thermal_resistance	1.60	m2*K/W	constant
+uncertainty	resistance-60mm	unstated	-	-	-	-
+validity	resistance-60mm	product	1	1	1
+validity	resistance-60mm	reference	1	1	1
+validity	resistance-60mm	matched	0	0	1
+validity	resistance-60mm	temperature_known	0	0	1
+validity	resistance-60mm	moisture_known	0	0	1
+validity	resistance-60mm	declared	1	1	1
+validity	resistance-60mm	nominal_thickness	60	60	mm
+scalar	resistance-80mm	identity,thermal,layer-resistance	declared_layer_thermal_resistance	2.15	m2*K/W	constant
+uncertainty	resistance-80mm	unstated	-	-	-	-
+validity	resistance-80mm	product	1	1	1
+validity	resistance-80mm	reference	1	1	1
+validity	resistance-80mm	matched	0	0	1
+validity	resistance-80mm	temperature_known	0	0	1
+validity	resistance-80mm	moisture_known	0	0	1
+validity	resistance-80mm	declared	1	1	1
+validity	resistance-80mm	nominal_thickness	80	80	mm
+scalar	resistance-100mm	identity,thermal,layer-resistance	declared_layer_thermal_resistance	2.70	m2*K/W	constant
+uncertainty	resistance-100mm	unstated	-	-	-	-
+validity	resistance-100mm	product	1	1	1
+validity	resistance-100mm	reference	1	1	1
+validity	resistance-100mm	matched	0	0	1
+validity	resistance-100mm	temperature_known	0	0	1
+validity	resistance-100mm	moisture_known	0	0	1
+validity	resistance-100mm	declared	1	1	1
+validity	resistance-100mm	nominal_thickness	100	100	mm

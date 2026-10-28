@@ -1,0 +1,39 @@
+frankensim.matdb-source.v1
+observation	identity	Kronobuild OSB Superfinish ECO, dried verification-table population	Product identity and source scope	Oriented-strand board OSB Superfinish ECO. The printed thermal row does not select an OSB/2, OSB/3 or OSB/4 grade, manufacturing plant, thickness, individual specimen or directional layup. Retain that source population without assigning a grade-specific structural stiffness or diffusion value. The manual describes the second thermal table as verification by measurements according to EN 12664 since 2012 and explicitly restricts it to dried boards. This does not establish a separate calorimetric measurement or shared specimen for every column.
+observation	thermal	Kronobuild OSB Superfinish ECO, dried verification-table population thermal values	Compatible numbers from one producer thermal table	The same printed row supplies dry-matter density 550 kg/m3, conductivity 0.098 W/m/K, specific heat 1221 J/kg/K and diffusivity 1.46e-7 m2/s. The latter is tabulated beside the source equation alpha=k/(rho*c); retain its published rounding rather than treating it as an independent measurement. Drying schedule and numerical measurement temperature are not specified in the row. No continuous temperature/moisture support is inferred. Every claim requires explicit source-reference-state=1. No default temperature, independent joint confidence interval or complete structural material law is invented; statistical uncertainty is Unstated.
+scalar	density	identity,thermal	density	550	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	product	1	1	1
+validity	density	reference	1	1	1
+validity	density	matched	0	0	1
+validity	density	temperature_known	0	0	1
+validity	density	moisture_known	1	1	1
+validity	density	dried	1	1	1
+scalar	heat-capacity	identity,thermal	specific_heat_capacity	1221	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	product	1	1	1
+validity	heat-capacity	reference	1	1	1
+validity	heat-capacity	matched	0	0	1
+validity	heat-capacity	temperature_known	0	0	1
+validity	heat-capacity	moisture_known	1	1	1
+validity	heat-capacity	dried	1	1	1
+scalar	conductivity	identity,thermal	thermal_conductivity	0.098	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	product	1	1	1
+validity	conductivity	reference	1	1	1
+validity	conductivity	matched	0	0	1
+validity	conductivity	temperature_known	0	0	1
+validity	conductivity	moisture_known	1	1	1
+validity	conductivity	dried	1	1	1
+validity	conductivity	direction_known	0	0	1
+validity	conductivity	test_thickness_known	0	0	1
+scalar	diffusivity	identity,thermal	source_tabulated_thermal_diffusivity	1.46e-7	m2/s	constant
+uncertainty	diffusivity	unstated	-	-	-	-
+validity	diffusivity	product	1	1	1
+validity	diffusivity	reference	1	1	1
+validity	diffusivity	matched	0	0	1
+validity	diffusivity	temperature_known	0	0	1
+validity	diffusivity	moisture_known	1	1	1
+validity	diffusivity	dried	1	1	1
+validity	diffusivity	direction_known	0	0	1
+validity	diffusivity	test_thickness_known	0	0	1

@@ -1,0 +1,111 @@
+frankensim.matdb-source.v1
+observation	identity	Gutex Thermowall rigid wood-fibre render board	Product identity and source scope	Thermowall rigid wood-fibre render board, EN 13171. The product sheet lists untreated fir/spruce wood, 4.0 percent polyurethane resin and 1.5 percent paraffin. Nominal density is approximately 160 kg/m3. Keep this product distinct from Thermowall-gf, Thermowall-L and other Gutex boards. Values belong to the retrieved PDF; differing airflow declarations on the web product page are not pooled into this profile.
+observation	thermal	Gutex Thermowall rigid wood-fibre render board thermal values	Compatible numbers from one producer thermal table	The same PDF gives specific heat 2100 J/kg/K, declared conductivity lambda-D 0.040 W/m/K, design conductivity lambda-B 0.042 W/m/K and vapour resistance factor 4. Density and Cp are product references with unstated specimen matching, measurement temperature and moisture. The stated maximum use temperature 110 deg C is a service limit, not a measured property-validity interval. Declared and design conductivity retain distinct property roles. Every claim requires explicit source-reference-state=1. No default temperature, independent joint confidence interval or complete structural material law is invented; statistical uncertainty is Unstated.
+scalar	density	identity,thermal	density	160	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	product	1	1	1
+validity	density	reference	1	1	1
+validity	density	matched	0	0	1
+validity	density	temperature_known	0	0	1
+validity	density	moisture_known	0	0	1
+scalar	heat-capacity	identity,thermal	specific_heat_capacity	2100	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	product	1	1	1
+validity	heat-capacity	reference	1	1	1
+validity	heat-capacity	matched	0	0	1
+validity	heat-capacity	temperature_known	0	0	1
+validity	heat-capacity	moisture_known	0	0	1
+scalar	conductivity	identity,thermal	declared_thermal_conductivity	0.040	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	product	1	1	1
+validity	conductivity	reference	1	1	1
+validity	conductivity	matched	0	0	1
+validity	conductivity	temperature_known	0	0	1
+validity	conductivity	moisture_known	0	0	1
+validity	conductivity	direction_known	0	0	1
+validity	conductivity	test_thickness_known	0	0	1
+validity	conductivity	declared	1	1	1
+scalar	vapour-reference	identity,thermal	water_vapor_diffusion_resistance_factor	4	1	constant
+uncertainty	vapour-reference	unstated	-	-	-	-
+validity	vapour-reference	product	1	1	1
+validity	vapour-reference	reference	1	1	1
+validity	vapour-reference	matched	0	0	1
+validity	vapour-reference	temperature_known	0	0	1
+validity	vapour-reference	moisture_known	0	0	1
+scalar	design-conductivity	identity,thermal	design_thermal_conductivity	0.042	W/m/K	constant
+uncertainty	design-conductivity	unstated	-	-	-	-
+validity	design-conductivity	product	1	1	1
+validity	design-conductivity	reference	1	1	1
+validity	design-conductivity	matched	0	0	1
+validity	design-conductivity	temperature_known	0	0	1
+validity	design-conductivity	moisture_known	0	0	1
+validity	design-conductivity	direction_known	0	0	1
+validity	design-conductivity	test_thickness_known	0	0	1
+validity	design-conductivity	design	1	1	1
+observation	mechanical	Gutex Thermowall rigid wood-fibre render board declared mechanical limits	CS(10/Y)100 and TR10 source requirements	The producer declares compressive stress/strength at least 100 kPa under its CS(10/Y)100 designation and tensile strength perpendicular to the board at least 10 kPa. The compression designation allows the 10 percent deformation or yield criterion; no exact strain at yield is supplied. These are declaration limits, not measured mean stress-strain data, density uncertainty or structural elastic moduli. Loading rate remains unstated.
+scalar	compression-limit	identity,mechanical	compressive_stress_or_strength_lower_limit	100	kPa	constant
+uncertainty	compression-limit	unstated	-	-	-	-
+validity	compression-limit	product	1	1	1
+validity	compression-limit	reference	1	1	1
+validity	compression-limit	matched	0	0	1
+validity	compression-limit	temperature_known	0	0	1
+validity	compression-limit	moisture_known	0	0	1
+validity	compression-limit	normal_loading	1	1	1
+validity	compression-limit	rate_known	0	0	1
+validity	compression-limit	declared	1	1	1
+scalar	tension-limit	identity,mechanical	tensile_strength_perpendicular_lower_limit	10	kPa	constant
+uncertainty	tension-limit	unstated	-	-	-	-
+validity	tension-limit	product	1	1	1
+validity	tension-limit	reference	1	1	1
+validity	tension-limit	matched	0	0	1
+validity	tension-limit	temperature_known	0	0	1
+validity	tension-limit	moisture_known	0	0	1
+validity	tension-limit	normal_loading	1	1	1
+validity	tension-limit	rate_known	0	0	1
+validity	tension-limit	declared	1	1	1
+observation	layer-resistance	Gutex Thermowall rigid wood-fibre render board nominal-thickness declarations	Product-sheet declared thermal resistance	These are the producer-declared layer resistances from the tongue-and-groove board table at its listed 80-160 mm nominal thicknesses. They do not include internal/external surface films, fasteners, joints, framing, coatings or other wall layers, and are not whole-wall U-values. Values retain source rounding. Only the printed thicknesses are supported; no continuous thickness interval or temperature dependence is manufactured.
+scalar	resistance-80mm	identity,thermal,layer-resistance	declared_layer_thermal_resistance	2.00	m2*K/W	constant
+uncertainty	resistance-80mm	unstated	-	-	-	-
+validity	resistance-80mm	product	1	1	1
+validity	resistance-80mm	reference	1	1	1
+validity	resistance-80mm	matched	0	0	1
+validity	resistance-80mm	temperature_known	0	0	1
+validity	resistance-80mm	moisture_known	0	0	1
+validity	resistance-80mm	declared	1	1	1
+validity	resistance-80mm	nominal_thickness	80	80	mm
+scalar	resistance-100mm	identity,thermal,layer-resistance	declared_layer_thermal_resistance	2.50	m2*K/W	constant
+uncertainty	resistance-100mm	unstated	-	-	-	-
+validity	resistance-100mm	product	1	1	1
+validity	resistance-100mm	reference	1	1	1
+validity	resistance-100mm	matched	0	0	1
+validity	resistance-100mm	temperature_known	0	0	1
+validity	resistance-100mm	moisture_known	0	0	1
+validity	resistance-100mm	declared	1	1	1
+validity	resistance-100mm	nominal_thickness	100	100	mm
+scalar	resistance-120mm	identity,thermal,layer-resistance	declared_layer_thermal_resistance	3.00	m2*K/W	constant
+uncertainty	resistance-120mm	unstated	-	-	-	-
+validity	resistance-120mm	product	1	1	1
+validity	resistance-120mm	reference	1	1	1
+validity	resistance-120mm	matched	0	0	1
+validity	resistance-120mm	temperature_known	0	0	1
+validity	resistance-120mm	moisture_known	0	0	1
+validity	resistance-120mm	declared	1	1	1
+validity	resistance-120mm	nominal_thickness	120	120	mm
+scalar	resistance-140mm	identity,thermal,layer-resistance	declared_layer_thermal_resistance	3.50	m2*K/W	constant
+uncertainty	resistance-140mm	unstated	-	-	-	-
+validity	resistance-140mm	product	1	1	1
+validity	resistance-140mm	reference	1	1	1
+validity	resistance-140mm	matched	0	0	1
+validity	resistance-140mm	temperature_known	0	0	1
+validity	resistance-140mm	moisture_known	0	0	1
+validity	resistance-140mm	declared	1	1	1
+validity	resistance-140mm	nominal_thickness	140	140	mm
+scalar	resistance-160mm	identity,thermal,layer-resistance	declared_layer_thermal_resistance	4.00	m2*K/W	constant
+uncertainty	resistance-160mm	unstated	-	-	-	-
+validity	resistance-160mm	product	1	1	1
+validity	resistance-160mm	reference	1	1	1
+validity	resistance-160mm	matched	0	0	1
+validity	resistance-160mm	temperature_known	0	0	1
+validity	resistance-160mm	moisture_known	0	0	1
+validity	resistance-160mm	declared	1	1	1
+validity	resistance-160mm	nominal_thickness	160	160	mm

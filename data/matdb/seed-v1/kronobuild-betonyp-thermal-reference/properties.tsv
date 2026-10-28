@@ -1,0 +1,45 @@
+frankensim.matdb-source.v1
+observation	identity	Kronobuild Betonyp cement-bonded pine particleboard, thermal-reference row	Product identity and source scope	Betonyp is the named single-layer particleboard made from pine chips and Portland-cement binder and pressed at high pressure, manufactured under EN 634-2. Composition proportions, cure history, test thickness and through-thickness density profile are not provided by the thermal row. The production-specification density tolerance and moisture interval are not measurement uncertainty or the conditioning of the thermal row.
+observation	thermal	Kronobuild Betonyp cement-bonded pine particleboard, thermal-reference row thermal values	Compatible numbers from one producer thermal table	The same producer thermal-reference row gives density 1350 kg/m3, conductivity 0.26 W/m/K and specific heat 1600 J/kg/K. These are tabulated building-physics references for Betonyp, not generic cement or solid pine values. Numerical temperature and moisture for this thermal row are unstated. No concrete strength, hydration/dehydration evolution or heat-property service interval is inferred. Every claim requires explicit source-reference-state=1. No default temperature, independent joint confidence interval or complete structural material law is invented; statistical uncertainty is Unstated.
+scalar	density	identity,thermal	density	1350	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	product	1	1	1
+validity	density	reference	1	1	1
+validity	density	matched	0	0	1
+validity	density	temperature_known	0	0	1
+validity	density	moisture_known	0	0	1
+scalar	heat-capacity	identity,thermal	specific_heat_capacity	1600	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	product	1	1	1
+validity	heat-capacity	reference	1	1	1
+validity	heat-capacity	matched	0	0	1
+validity	heat-capacity	temperature_known	0	0	1
+validity	heat-capacity	moisture_known	0	0	1
+scalar	conductivity	identity,thermal	reference_thermal_conductivity	0.26	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	product	1	1	1
+validity	conductivity	reference	1	1	1
+validity	conductivity	matched	0	0	1
+validity	conductivity	temperature_known	0	0	1
+validity	conductivity	moisture_known	0	0	1
+validity	conductivity	direction_known	0	0	1
+validity	conductivity	test_thickness_known	0	0	1
+observation	vapour	Kronobuild Betonyp cement-bonded pine particleboard, thermal-reference row vapour-resistance references	Printed p.66 table with explicit temperature and relative humidity	The source defines dry conditions as 25 percent RH at 23 deg C and wet conditions as 72 percent RH at 23 deg C. The named reference row gives 50 and 20 respectively, retaining the source dry-maximum and wet-minimum reference roles; these are not statistical uncertainty bounds. These dimensionless diffusion-resistance factors compare the board with an equally thick still-air layer; they are not liquid permeability, equilibrium water mass fraction, thermal conductivity, or an airtightness guarantee. The first reference table is retained separately from the later OSB-specific measured-verification table. Values may vary between production plants. Two discrete states are encoded; no interpolation or extrapolation is supplied.
+scalar	vapour-dry	identity,vapour	water_vapor_diffusion_resistance_factor	50	1	constant
+uncertainty	vapour-dry	unstated	-	-	-	-
+validity	vapour-dry	product	1	1	1
+validity	vapour-dry	reference	1	1	1
+validity	vapour-dry	matched	0	0	1
+validity	vapour-dry	temperature_known	1	1	1
+validity	vapour-dry	moisture_known	1	1	1
+validity	vapour-dry	temperature	296.15	296.15	K
+validity	vapour-dry	relative_humidity	25	25	%
+scalar	vapour-wet	identity,vapour	water_vapor_diffusion_resistance_factor	20	1	constant
+uncertainty	vapour-wet	unstated	-	-	-	-
+validity	vapour-wet	product	1	1	1
+validity	vapour-wet	reference	1	1	1
+validity	vapour-wet	matched	0	0	1
+validity	vapour-wet	temperature_known	1	1	1
+validity	vapour-wet	moisture_known	1	1	1
+validity	vapour-wet	temperature	296.15	296.15	K
+validity	vapour-wet	relative_humidity	72	72	%
