@@ -1,6 +1,9 @@
 //! Complete component data -> common material mechanics -> microphone/PCM.
 use super::*;
 
+#[path = "assembly_glue_tests.rs"]
+mod material_glue;
+
 const ASSEMBLED: &str = include_str!("../../assembled.body");
 
 fn ready(cx: &Cx<'_>, gate: &CancelGate, text: &str, right_loss: f64) -> Ready {

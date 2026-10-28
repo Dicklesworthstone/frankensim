@@ -150,7 +150,7 @@ impl Profile {
         match &mut self.model {
             BodyModel::Plate(_) => {},
             BodyModel::Shell(shell) => shell.load_interfaces(gate, &mut loader)?,
-            BodyModel::Assembly(assembly) => assembly.load_interfaces(gate, &mut loader)?,
+            BodyModel::Assembly(assembly) => assembly.load_interfaces(spec, gate, &mut loader)?,
         }
         Ok(())
     }

@@ -625,10 +625,12 @@ edge-ties COUNT
 edge-tie MASTER_COMPONENT SLAVE_COMPONENT OFFSET ROTATIONS N_MASTER N_SLAVE
 master-node NODE
 slave-node NODE
+glue PACK MASTER_REGION SLAVE_REGION WIDTH_M
 face-ties COUNT
 face-tie MASTER_COMPONENT SLAVE_COMPONENT OFFSET ROTATIONS N_MASTER N_SLAVE
 master-triangle TRIANGLE
 slave-triangle TRIANGLE
+glue PACK MASTER_REGION SLAVE_REGION WIDTH_M
 bridges COUNT
 bridge COMPONENT NODE DIRECTION_X DIRECTION_Y DIRECTION_Z
 ```
@@ -650,10 +652,52 @@ nodes. A face tie similarly supplies all master triangles followed by all slave
 triangles. Indices are local to their named components. `OFFSET` is
 `midsurface`, `positive-skin` or `negative-skin`; skin attachment arms come from
 the master's actual resolved thickness. `ROTATIONS` is `full` or
-`translations`. These records select the original rigid mortar law. Nonmatching
-seams and overlapping patches remain subject to that owner's geometric and
-work limits. Prescribed slave coordinates that the tie would eliminate refuse;
-the profile cannot silently discard a support.
+`translations`. Without a `glue` record the tie uses the original rigid mortar
+law. The optional record follows the complete node or triangle lists for that
+one tie and selects the original compliant mortar. Nonmatching seams and
+overlapping patches remain subject to that owner's geometric and work limits.
+Prescribed slave coordinates that a rigid tie would eliminate refuse; compliant
+ties retain both sides' supports.
+
+### Material adhesive data
+
+`glue PACK MASTER_REGION SLAVE_REGION WIDTH_M` reads an original normalized
+interface pack relative to the performance directory. The named material
+regions must own every edge segment or face triangle on their respective sides.
+The card's ordered surface A/B material identities must match the actual
+resolved master/slave regions, and the card must name its adhesive third body
+and history. A bulk material swap therefore also needs a valid interface card
+for the new pair. For an edge tie `WIDTH_M` supplies its actual bonded area
+`width × seam length`; face ties use their actual overlapping facet area. The
+shared glue law requires a positive width for either record.
+
+All six area-specific source properties are required:
+
+| Property | SI unit |
+| --- | --- |
+| `glue-normal-stiffness` | N/m³ |
+| `glue-shear-stiffness-1` | N/m³ |
+| `glue-shear-stiffness-2` | N/m³ |
+| `glue-normal-viscosity` | N·s/m³ |
+| `glue-shear-viscosity-1` | N·s/m³ |
+| `glue-shear-viscosity-2` | N·s/m³ |
+
+Stiffnesses must be positive. Each viscosity must be nonnegative; zero loss
+must be explicitly sourced. Coefficients resolve at the performance's solid
+`state T OMEGA`, and every selected claim must state its frequency applicability.
+The complete retained eigenvalue intervals must fit the intersection of those
+bands before the performer is published. Fixed-temperature source curves are
+admitted; frequency-dependent coefficients and constant-loss anchors require a
+different constitutive realization and refuse. Changing the declared solid
+state requires reloading the original interface sources.
+
+The profile retains original packs, ordered surface descriptions, adhesive and
+history, claim receipts and uncertainties through `ResolvedGlueLine`. The joint
+stiffness participates in the common body eigensolve, and its complete projected
+viscosity tensor joins regional material loss on that same basis. No modal loss
+or timbre coefficient is inferred from an adhesive name. These are fixed-state,
+linear Kelvin–Voigt bonds; creep memory, debonding, slip and evolving cure or
+temperature are outside this profile.
 
 Each final `bridge` is one physical nodal force footprint, in actual string
 order, on any component. Rotational bridges can use footprints on different
@@ -668,8 +712,8 @@ channel remain under the existing complete-performance budgets. At least one
 region across the assembly must retain `@body`; other regions can select
 different source packs. Repeated bulk paths share the original material cache.
 
-This is unloaded linear component mechanics with rigid ties. It does not add
-prestressed assembly equilibrium, compliant glue between components, solid
+This is unloaded linear component mechanics with rigid or source-bound compliant
+ties. It does not add prestressed assembly equilibrium, adhesive failure, solid
 soundpost contact, a certified closed cavity skin, or resolved interior and
 exterior acoustic fields. The inherited compact observer and Helmholtz cavity
 remain explicit approximations. The new native regression sources check tied

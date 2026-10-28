@@ -11,6 +11,7 @@ use fs_plate::shell::junction::{
 /// A shell-assembly table written as this v4 profile.
 #[path = "assembly_table.rs"]
 pub(crate) mod table;
+mod glue;
 
 // The il Cannone violin body at 6 mm
 // (data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h6.tsv) has 64 components and
@@ -38,6 +39,7 @@ pub(crate) struct Spec {
     components: Vec<Component>,
     edges: Vec<EdgeTie>,
     faces: Vec<FaceTie>,
+    glue: glue::Inputs,
     ties: TieBudget,
     bridges: Vec<AssemblyBridge>,
     window: (f64, f64),
@@ -96,6 +98,7 @@ impl Spec {
         {
             return Err("tie tolerances need nonnegative gap and angle in [0,pi]".into());
         }
+        let mut glue = glue::Inputs::default();
         let n = count(r.row("edge-ties", 1)?[0], 0, MAX_TIES)?;
         let mut edges = Vec::with_capacity(n);
         for _ in 0..n {
@@ -124,6 +127,7 @@ impl Spec {
                 rotations,
                 kind: TieKind::Rigid,
             });
+            glue.read_edge(&mut r, &components, &edges, edges.len() - 1)?;
         }
         let n = count(r.row("face-ties", 1)?[0], 0, MAX_TIES - edges.len())?;
         let mut faces = Vec::with_capacity(n);
@@ -159,6 +163,7 @@ impl Spec {
                 rotations,
                 kind: TieKind::Rigid,
             });
+            glue.read_face(&mut r, &components, &faces, faces.len() - 1)?;
         }
         let n = count(r.row("bridges", 1)?[0], 1, 8)?;
         let mut bridges = Vec::with_capacity(n);
@@ -188,6 +193,7 @@ impl Spec {
             components,
             edges,
             faces,
+            glue,
             ties,
             bridges,
             window,
@@ -222,6 +228,7 @@ impl Spec {
 
     pub(crate) fn load_interfaces(
         &mut self,
+        spec: &input::Spec,
         gate: &CancelGate,
         loader: &mut impl FnMut(&str) -> Result<fs_matdb::NormalizedInterfacePack>,
     ) -> Result<()> {
@@ -229,6 +236,7 @@ impl Spec {
         // Cache caller reads across all components; each part retains its own
         // exact ordered interface identity and application geometry.
         let mut candidate = self.components.clone();
+        let mut glue = self.glue.clone();
         let mut packs = BTreeMap::<String, fs_matdb::NormalizedInterfacePack>::new();
         let mut cached = |name: &str| {
             if let Some(pack) = packs.get(name) {
@@ -250,12 +258,20 @@ impl Spec {
                 );
             }
         }
+        glue.load(spec.temperature, spec.omega, gate, &mut cached)?;
+        bytes = bytes.checked_add(glue.loaded_pack_bytes()?)
+            .ok_or("assembly interface source bytes overflow")?;
+        if bytes > input::MAX_TOTAL_PACK_BYTES {
+            return Err("assembled interface packs exceed the original total source byte budget".into());
+        }
+        poll(gate)?;
         self.components = candidate;
+        self.glue = glue;
         Ok(())
     }
 
     pub(crate) fn interface_pack_bytes(&self) -> Result<usize> {
-        self.components.iter().try_fold(0usize, |n, c| {
+        self.components.iter().try_fold(self.glue.loaded_pack_bytes()?, |n, c| {
             n.checked_add(c.shell.interface_pack_bytes()?)
                 .ok_or_else(|| "assembly interface source bytes overflow".into())
         })
@@ -310,6 +326,9 @@ impl Spec {
                     .resolve_component(&c.name, spec, catalog, loader, gate)
             })
             .collect::<Result<Vec<_>>>()?;
+        let mut edges = self.edges.clone();
+        let mut faces = self.faces.clone();
+        self.glue.bind(spec, &components, &mut edges, &mut faces, gate)?;
         let force_ports = self
             .bridges
             .iter()
@@ -327,8 +346,8 @@ impl Spec {
         let body = SharedMaterialShellAssemblyBody {
             specimen: MaterialShellAssembly {
                 components,
-                edge_ties: self.edges.clone(),
-                face_ties: self.faces.clone(),
+                edge_ties: edges,
+                face_ties: faces,
                 tie_budget: self.ties,
             },
             reduction: ShellAssemblyReductionOptions {
@@ -347,7 +366,7 @@ impl Spec {
             modal_budget: modal_budget(),
             listener_m: spec.body.listener,
         };
-        Ok(ReciprocalStringBank::from_material_shell_assembly_prepared(
+        let bank = ReciprocalStringBank::from_material_shell_assembly_prepared(
             cx,
             sources,
             spec.gas,
@@ -357,7 +376,11 @@ impl Spec {
             spec.bow_law(0)?.clone(),
             settings,
             gate,
-        )?)
+        )?;
+        let image = bank.source().material_shell_assembly_image()
+            .ok_or("assembled body lost its original modal image")?;
+        self.glue.require_modes(image.eigenvalue_intervals(), gate)?;
+        Ok(bank)
     }
 }
 
