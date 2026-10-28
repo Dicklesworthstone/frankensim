@@ -1891,3 +1891,34 @@ chemical evolution, adaptive fracture topology and complete structural/thermal
 energy accounting are not introduced. The `cohesive_source` integration tests
 check an independently solved compliant pull, material substitution, exact P1
 area/fracture accounting, surface-order refusal and atomic cancellation.
+
+### Nonmatching bonded P1 surfaces
+
+`cohesive::p1::nonmatching` binds independently triangulated planar surfaces
+through their triangle intersections. Each intersection is triangulated and
+integrated with positive degree-two quadrature. Distinct barycentric weights
+on the two sides build one shared jump map; the existing cohesive operator uses
+its transpose for forces and its consistent tangent for Newton iterations.
+Undamaged linear traction is integrated exactly to floating-point precision,
+and nonlinear damage retains discrete virtual work and force balance. Moment
+and rigid-motion consistency hold on the common plane; any admitted off-plane
+projection contributes error bounded by the supplied geometric tolerance.
+The source-bound constructor retains the original ordered interface source at
+every full and reduced quadrature point.
+
+Construction checks exterior-face incidence, disjoint side DOFs, opposite-side
+bodies, face quality, planarity, within-side overlap and full area coverage on
+both sides. Work and storage limits bound face count, pair checks and quadrature
+points, with cancellation throughout. A deterministic bounding-box sweep skips
+disjoint pairs before they consume the pair budget. Worst-case preprocessing
+remains quadratic for heavily overlapping boxes. Runtime
+solves reuse the fixed sparse maps and original constitutive/solver path.
+
+This is an explicit initially bonded, fixed small-strain reference interface.
+The caller admits the relative common-plane projection/coverage tolerance.
+Curved interfaces require separate locally planar regions; large sliding,
+dynamic rebonding and adaptive fracture topology are not inferred. Nonlinear
+softening still requires independent surface and load-path refinement. Tests
+cover crossed-diagonal area and analytic linear energy, virtual work and rigid
+motion, matching-mesh stiffness recovery, force-controlled softening/fracture/compressive
+reclosure, source retention, malformed coverage and construction budgets.

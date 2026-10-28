@@ -8,6 +8,7 @@ use fs_matdb::{
 use fs_material::cohesive::source::*;
 use fs_material::state_point::{MaterialPropertySelection, interface_stiffness_per_area_dims};
 use fs_qty::Pressure;
+use fs_solid::cohesive::p1::nonmatching::{MaterialNonmatchingSurface, NonmatchingBudget};
 use fs_solid::cohesive::p1::{MaterialFacePair, P1Interfaces, TraceBudget};
 use fs_solid::cohesive::{Budget, CohesivePatch, CohesiveSystem, Config, Error, JumpTerm};
 use fs_solver::{LinearOp, NewtonKrylovConfig};
@@ -295,5 +296,80 @@ fn material_faces_use_native_quadrature_and_preserve_source_order() {
             &mut || true
         ),
         Err(Error::Cancelled)
+    ));
+}
+
+#[test]
+fn nonmatching_overlap_points_retain_original_source_and_require_surface_order() {
+    let source = source(1e6, 2000.0);
+    let nodes = [
+        [0., 0., 0.],
+        [1., 0., 0.],
+        [1., 1., 0.],
+        [0., 1., 0.],
+        [0.5, 0.5, -1.],
+        [0., 0., 0.],
+        [1., 0., 0.],
+        [1., 1., 0.],
+        [0., 1., 0.],
+        [0.5, 0.5, 1.],
+    ];
+    let tetrahedra = [[0, 1, 2, 4], [0, 2, 3, 4], [5, 6, 8, 9], [6, 7, 8, 9]];
+    let side_a = [[0, 1, 2], [0, 2, 3]];
+    let side_b = [[5, 6, 8], [6, 7, 8]];
+    let surface = MaterialNonmatchingSurface {
+        id: 41,
+        side_a: &side_a,
+        side_b: &side_b,
+        source: &source,
+        surface_materials: [
+            &source.surfaces()[0].material,
+            &source.surfaces()[1].material,
+        ],
+    };
+    let controls = NonmatchingBudget {
+        mesh: TraceBudget {
+            maximum_nodes: 10,
+            maximum_tetrahedra: 4,
+            maximum_interfaces: 1,
+            minimum_face_quality: 1e-10,
+        },
+        maximum_surface_faces: 4,
+        maximum_pair_checks: 6,
+        maximum_quadrature_points: 12,
+        relative_geometry_tolerance: 1e-11,
+    };
+    let faces = P1Interfaces::from_nonmatching_interfaces_controlled(
+        &nodes,
+        &tetrahedra,
+        &[],
+        &[surface],
+        controls,
+        &mut || false,
+    )
+    .unwrap();
+    assert_eq!(faces.points().len(), 12);
+    for patch in faces.patches() {
+        assert!(core::ptr::eq(patch.source().unwrap(), &source));
+    }
+    close(
+        faces.points().iter().map(|p| p.area_weight_m2).sum(),
+        1.0,
+        1e-15,
+    );
+    let reversed = MaterialNonmatchingSurface {
+        surface_materials: [surface.surface_materials[1], surface.surface_materials[0]],
+        ..surface
+    };
+    assert!(matches!(
+        P1Interfaces::from_nonmatching_interfaces_controlled(
+            &nodes,
+            &tetrahedra,
+            &[],
+            &[reversed],
+            controls,
+            &mut || false
+        ),
+        Err(Error::Source { .. })
     ));
 }

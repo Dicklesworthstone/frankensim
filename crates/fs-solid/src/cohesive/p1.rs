@@ -11,6 +11,9 @@ use super::{BilinearCohesive, CohesivePatch, Cx, Error, JumpTerm, dot, finite};
 use fs_material::cohesive::source::ResolvedBilinearCohesive;
 use fs_matdb::MaterialStateId;
 
+/// Work-conserving overlap quadrature for explicitly bonded nonmatching traces.
+pub mod nonmatching;
+
 /// Explicitly bonded exterior faces. Node order is arbitrary on either side.
 /// The two traces must use distinct DOFs even though their coordinates coincide.
 #[derive(Debug, Clone, Copy)]
@@ -46,6 +49,8 @@ pub struct TraceBudget {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SurfacePoint {
     pub interface_id: u64,
+    /// Quadrature index within the face, or within the bonded region for
+    /// nonmatching traces with overlap subdivision.
     pub point_in_face: usize,
     pub location_m: [f64; 3],
     pub area_weight_m2: f64,
@@ -53,7 +58,10 @@ pub struct SurfacePoint {
     /// Positive normal jump is separation of B from A, not penetration.
     pub axes: [[f64; 3]; 3],
     pub shape_values: [f64; 3],
-    /// B's nodes have been permuted to the exact positional order of A.
+    /// Shape values on B; equal to `shape_values` for matching traces.
+    pub side_b_shape_values: [f64; 3],
+    /// Nodes on A and B in their respective shape-value order. For matching
+    /// traces, B is permuted to the exact positional order of A.
     pub paired_nodes: [[usize; 3]; 2],
 }
 
@@ -214,7 +222,8 @@ impl<'a> P1Interfaces<'a> {
                 let mut location_m = [0.0; 3];
                 for c in 0..3 { for i in 0..3 { location_m[c] = finite(location_m[c]+shape[i]*nodes_m[a[i]][c])?; } }
                 points.push(SurfacePoint { interface_id: pair.id, point_in_face: q, location_m,
-                    area_weight_m2, axes, shape_values: shape, paired_nodes: [a, b] });
+                    area_weight_m2, axes, shape_values: shape, side_b_shape_values: shape,
+                    paired_nodes: [a, b] });
             }
         }
         poll(cancelled)?;
