@@ -1079,9 +1079,17 @@ generating-function recurrence retain all fourth/fifth/sixth couplings. This
 is not D3Q19's ReducedCumulant projection. All ten publication-order relaxation
 rates are explicit, including separate bulk/shear groups and the diagonal
 cubic-alias corrections (58--63). The central-moment operator uses Gaussian
-central targets; cumulant equilibria above degree2 are zero. Midpoint forcing
-changes the first cumulants/central moments as in85--87; finite-force flow
-accuracy remains a downstream qualification, separate from conservation.
+central targets; cumulant equilibria above degree2 are zero. Cumulant midpoint
+forcing changes the first cumulants as in85--87. Central-moment forcing uses
+the Gaussian source moments and grouped trapezoidal factors of Fei, Luo & Li
+(2018), doi:10.1103/PhysRevE.97.053309, equations5,18: the six mixed third
+moments receive `(1-omega3/2) cs^2 F/rho`, and the three fifth moments receive
+`(1-omega9/2) cs^4 F/rho`. The third-order pair differences have zero source;
+their separate omega4 does not set the source factor. Bit semantics v2 corrects
+these previously omitted force terms. An explicit zero-force branch preserves
+all unforced arithmetic; BGK and cumulant collision arithmetic are unchanged.
+Finite-force flow accuracy remains a downstream qualification, separate from
+conservation and these local constitutive moment balances.
 
 CollisionConfig27 requires model/rates or BGK tau and a Mach cap in (0,0.3].
 Tau must exceed0.5 and each rate must be strictly in (0,2). Nonfinite state,
@@ -1108,8 +1116,15 @@ excessive-Mach and unrepresentable scalings refuse.
 `tests/d3q27_battery.rs` specifies exact rational G0 lattice laws, equilibrium
 and10000-state conservation at1e-14, independent set-partition cumulant
 oracles through degree6, refusal boundaries, G4 cancellation and G5 actual
-workers1/2/7. Its new product-state collision hash has an independent dyadic
-oracle; native reproduction is pending. G1 requires >=1.8 shear-decay error
+workers1/2/7. G0/G3 force regressions independently differentiate a product
+equilibrium and check all27 central moments across force signs/axes, moving
+frames, densities and unequal grouped rates. A separately prescribed Hermite
+stress checks that forced shear and bulk relaxation retain their independent
+rates, alongside the third/fifth source balances. The product-state collision
+hash is unchanged by v2 because its fixture is unforced cumulant collision.
+An independent dyadic oracle and focused exact-source x86_64 debug/release
+replay reproduce `b256c77f0c5c1bf7`; no cross-ISA qualification is added.
+G1 requires >=1.8 shear-decay error
 order on200/100/50micrometre acoustic rungs and live, shrinking higher-rate
 spread. G2 uses four Gaussian axial-jet cross-section rungs (n = 16 to 128;
 the central-moment operator converges slowest at tau - 1/2 = 0.003) and Fourier

@@ -101,7 +101,7 @@ fn conserved(f: &[f64; Q27]) -> [f64; 4] {
 
 #[test]
 fn d3q27_lattice_invariants_hold_exactly() {
-    assert_eq!(D3Q27_BIT_SEMANTICS_VERSION, 1);
+    assert_eq!(D3Q27_BIT_SEMANTICS_VERSION, 2);
     assert_eq!(W216.iter().sum::<i64>(), 216);
     for q in 0..Q27 {
         assert_eq!(W27[q].to_bits(), (W216[q] as f64 / 216.0).to_bits());
@@ -201,6 +201,193 @@ fn cumulant_collision_conserves_mass_momentum() {
         "{\"states\":10000,\"tolerance\":1e-14}",
         start,
     );
+}
+
+// Independent product probabilities and their analytic velocity derivative.
+// These do not call the production equilibrium, moment transform or recurrence.
+fn factorized_force_oracle(rho: f64, u: [f64; 3], force: [f64; 3]) -> ([f64; Q27], [f64; Q27]) {
+    let factors: [[(f64, f64); 3]; Q27] = core::array::from_fn(|q| {
+        core::array::from_fn(|a| {
+            let c = f64::from(E27[q][a]);
+            if c == 0.0 {
+                (2.0 / 3.0 - u[a] * u[a], -2.0 * u[a])
+            } else {
+                (0.5 * (1.0 / 3.0 + u[a] * u[a] + c * u[a]), u[a] + 0.5 * c)
+            }
+        })
+    });
+    let eq = core::array::from_fn(|q| rho * factors[q].iter().map(|v| v.0).product::<f64>());
+    let source = core::array::from_fn(|q| {
+        (0..3)
+            .map(|a| {
+                force[a] * factors[q][a].1 * factors[q][(a + 1) % 3].0 * factors[q][(a + 2) % 3].0
+            })
+            .sum()
+    });
+    (eq, source)
+}
+
+fn moment_about(f: &[f64; Q27], u: [f64; 3], powers: [usize; 3]) -> f64 {
+    (0..Q27)
+        .map(|q| {
+            f[q] * (0..3)
+                .map(|a| {
+                    let c = f64::from(E27[q][a]) - u[a];
+                    match powers[a] {
+                        0 => 1.0,
+                        1 => c,
+                        2 => c * c,
+                        _ => unreachable!(),
+                    }
+                })
+                .product::<f64>()
+        })
+        .sum()
+}
+
+#[test]
+fn central_moment_force_matches_factorized_equilibrium_derivative() {
+    // G0/G3: the transformed population is f = feq - S/2. For an equilibrium
+    // physical population, collision must give feq + S/2 for ANY grouped rates.
+    // S=(F/rho).d_u feq has the Gaussian central moments in Fei et al. (2018),
+    // equations5,18: cs²F at third order and cs⁴F at fifth, with zero stress.
+    for rho in [0.8, 1.4] {
+        for u in [[0.0; 3], [0.065, -0.04, 0.025]] {
+            for omega in [
+                [0.65, 1.7, 0.4, 1.5, 0.7, 0.9, 1.3, 1.1, 0.25, 1.6],
+                [1.85, 0.6, 1.8, 0.3, 1.2, 1.4, 0.8, 1.7, 1.75, 0.5],
+            ] {
+                for direction in [
+                    [8e-4, 0.0, 0.0],
+                    [0.0, -5e-4, 0.0],
+                    [0.0, 0.0, 3e-4],
+                    [7e-4, -4e-4, 2e-4],
+                ] {
+                    for sign in [-1.0, 1.0] {
+                        let force = direction.map(|v| sign * v);
+                        let (eq, source) = factorized_force_oracle(rho, u, force);
+                        let before = core::array::from_fn(|q| eq[q] - 0.5 * source[q]);
+                        let post = collide_cell27(
+                            before,
+                            config(CollisionModel27::CentralMoment {
+                                rates: Rates27 { omega },
+                            }),
+                            force,
+                        )
+                        .unwrap();
+                        for q in 0..Q27 {
+                            let expected = eq[q] + 0.5 * source[q];
+                            assert!(
+                                (post[q] - expected).abs() < 3e-14 * rho,
+                                "population {q}: got {}, expected {expected}; force={force:?}, rates={omega:?}",
+                                post[q]
+                            );
+                        }
+                        // All independent moments include mass, impulse, each
+                        // shear/normal stress, and all third/fifth force terms.
+                        for z in 0..=2 {
+                            for y in 0..=2 {
+                                for x in 0..=2 {
+                                    let powers = [x, y, z];
+                                    let odd = powers.iter().filter(|&&p| p == 1).count();
+                                    let gaussian = powers
+                                        .iter()
+                                        .filter(|&&p| p == 2)
+                                        .fold(1.0, |v, _| v * CS2_27);
+                                    let expected = match odd {
+                                        0 => rho * gaussian,
+                                        1 => {
+                                            0.5 * force
+                                                [powers.iter().position(|&p| p == 1).unwrap()]
+                                                * gaussian
+                                        }
+                                        _ => 0.0,
+                                    };
+                                    let observed = moment_about(&post, u, powers);
+                                    assert!(
+                                        (observed - expected).abs() < 5e-14 * rho,
+                                        "central moment {powers:?}: got {observed}, expected {expected}; force={force:?}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn central_moment_force_preserves_independent_shear_and_bulk_relaxation() {
+    // A Hermite stress perturbation has independently prescribed normal/shear
+    // stresses and no mass, momentum or odd moments. The force may not change
+    // their viscous rates or create an additional third/fifth nonequilibrium.
+    let rho = 1.2;
+    let stress = [
+        [5e-4, 2e-4, -1e-4],
+        [2e-4, -1e-4, 1.5e-4],
+        [-1e-4, 1.5e-4, 3e-4],
+    ];
+    let trace = stress[0][0] + stress[1][1] + stress[2][2];
+    for omega in [
+        [1.7, 0.9, 0.6, 0.8, 0.7, 1.2, 1.1, 0.65, 0.75, 0.85],
+        [0.7, 1.6, 1.4, 0.5, 1.1, 0.8, 1.2, 1.5, 1.8, 0.4],
+    ] {
+        for sign in [-1.0, 1.0] {
+            let force = [1e-3, -5e-4, 2.5e-4].map(|v| sign * v);
+            let (eq, source) = factorized_force_oracle(rho, [0.0; 3], force);
+            let before = core::array::from_fn(|q| {
+                let e = E27[q].map(f64::from);
+                let mut perturbation = 0.0;
+                for a in 0..3 {
+                    for b in 0..3 {
+                        perturbation +=
+                            (e[a] * e[b] - if a == b { CS2_27 } else { 0.0 }) * stress[a][b];
+                    }
+                }
+                eq[q] + W27[q] * perturbation / (2.0 * CS2_27 * CS2_27) - 0.5 * source[q]
+            });
+            let post = collide_cell27(
+                before,
+                config(CollisionModel27::CentralMoment {
+                    rates: Rates27 { omega },
+                }),
+                force,
+            )
+            .unwrap();
+            for a in 0..3 {
+                for b in a..3 {
+                    let mut powers = [0; 3];
+                    powers[a] += 1;
+                    powers[b] += 1;
+                    let isotropic = if a == b { trace / 3.0 } else { 0.0 };
+                    let expected = if a == b { rho * CS2_27 } else { 0.0 }
+                        + (1.0 - omega[0]) * (stress[a][b] - isotropic)
+                        + (1.0 - omega[1]) * isotropic;
+                    assert!((moment_about(&post, [0.0; 3], powers) - expected).abs() < 5e-14 * rho);
+                }
+            }
+            for (axis, powers) in [
+                (0, [1, 2, 0]),
+                (0, [1, 0, 2]),
+                (1, [2, 1, 0]),
+                (1, [0, 1, 2]),
+                (2, [2, 0, 1]),
+                (2, [0, 2, 1]),
+                (0, [1, 2, 2]),
+                (1, [2, 1, 2]),
+                (2, [2, 2, 1]),
+            ] {
+                let gaussian = powers
+                    .iter()
+                    .filter(|&&p| p == 2)
+                    .fold(1.0, |v, _| v * CS2_27);
+                let expected = 0.5 * force[axis] * gaussian;
+                assert!((moment_about(&post, [0.0; 3], powers) - expected).abs() < 5e-14 * rho);
+            }
+        }
+    }
 }
 
 fn central(f: &[f64; Q27], powers: [usize; 3]) -> f64 {

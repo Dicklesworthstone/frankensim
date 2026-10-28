@@ -15,7 +15,8 @@
 use core::fmt;
 
 /// Version of tables, transforms, relaxation grouping and arithmetic order.
-pub const D3Q27_BIT_SEMANTICS_VERSION: u32 = 1;
+/// V2 supplies the third/fifth central force moments; unforced bits are unchanged.
+pub const D3Q27_BIT_SEMANTICS_VERSION: u32 = 2;
 /// Population count.
 pub const Q27: usize = 27;
 /// Lattice sound speed squared.
@@ -395,7 +396,10 @@ fn relax(mut v: [f64; Q27], eq: [f64; Q27], u: [f64; 3], rates: Rates27) -> [f64
 
 /// Collision with explicit force density in lattice units. Cumulant forcing
 /// changes the first cumulants from -F/(2rho) to +F/(2rho) in the midpoint
-/// frame (Geier85--87). No positivity limiter or automatic rate selection.
+/// frame (Geier85--87). Central-moment forcing also supplies the third/fifth
+/// Gaussian source moments with their own grouped trapezoidal prefactors
+/// (Fei, Luo & Li2018, PRE97:053309, equations5,18).
+/// No positivity limiter or automatic rate selection.
 /// Finite-force Navier--Stokes accuracy requires its own downstream ladder.
 pub fn collide_cell27(
     pop: [f64; Q27],
@@ -448,7 +452,32 @@ pub fn collide_cell27(
                     }
                     moments(k)
                 }
-                _ => relax(mu, gaussian, u, rates),
+                _ => {
+                    let mut central = relax(mu, gaussian, u, rates);
+                    if force.iter().any(|&f| f != 0.0) {
+                        // The Gaussian source has C120=C102=cs² Fx/rho,
+                        // its axis permutations, and C122=cs⁴ Fx/rho etc.
+                        // Third-order pair differences have zero source, so
+                        // omega3 (the sum rate), not omega4, sets the prefactor.
+                        // Retain the untouched path for exactly zero force.
+                        let third = (1.0 - 0.5 * rates.omega[2]) * CS2_27;
+                        let fifth = (1.0 - 0.5 * rates.omega[8]) * CS2_27 * CS2_27;
+                        for (axis, (a, b, c)) in [
+                            (at(1, 2, 0), at(1, 0, 2), at(1, 2, 2)),
+                            (at(2, 1, 0), at(0, 1, 2), at(2, 1, 2)),
+                            (at(2, 0, 1), at(0, 2, 1), at(2, 2, 1)),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
+                            let acceleration = force[axis] / rho;
+                            central[a] += third * acceleration;
+                            central[b] += third * acceleration;
+                            central[c] += fifth * acceleration;
+                        }
+                    }
+                    central
+                }
             };
             updated[0] = 1.0;
             for (a, index) in [at(1, 0, 0), at(0, 1, 0), at(0, 0, 1)]
