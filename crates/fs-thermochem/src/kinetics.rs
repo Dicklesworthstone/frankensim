@@ -1,10 +1,11 @@
 //! Source-consistent elementary ideal-gas kinetics, without time integration.
 //!
 //! Each caller-authored reversible reaction uses integer elementary orders and
-//! one modified Arrhenius forward law. Reverse rates follow the original NASA-9
-//! Gibbs energies, including the pressure-to-concentration standard-state
-//! conversion. No empirical mechanism, ignition criterion or falloff law is
-//! inferred. L3 consumers own state evolution and numerical step acceptance.
+//! an explicitly declared Arrhenius, third-body or falloff forward law. Reverse
+//! rates follow the original NASA-9 Gibbs energies, including the
+//! pressure-to-concentration standard-state conversion. No empirical mechanism,
+//! ignition criterion or falloff law is inferred. L3 consumers own state
+//! evolution and numerical step acceptance.
 //!
 //! Concentrations are mol/m3. The rate scale is mol/(m3 s) at the reference
 //! temperature and at each participating concentration c*=1 mol/m3:
@@ -26,13 +27,17 @@ use fs_qty::{Pressure, Temperature};
 
 mod caloric;
 pub use caloric::admit_caloric_interval;
+mod pressure;
+pub use pressure::{
+    FalloffBroadeningV1, PressureDependenceV1, ThirdBodyEfficienciesV1, TroeFalloffV1,
+};
 
 /// Maximum admitted reversible elementary reactions in one mechanism.
 pub const MAX_KINETIC_REACTIONS_V1: usize = 128;
 /// Maximum sum of elementary exponents on either side of one reaction.
 pub const MAX_ELEMENTARY_ORDER_V1: u32 = 32;
 /// Fixed operation-tree version of the concentration-based kinetic closure.
-pub const IDEAL_GAS_KINETICS_VERSION_V1: u32 = 1;
+pub const IDEAL_GAS_KINETICS_VERSION_V1: u32 = 2;
 
 /// Invalid source declaration, input domain, arithmetic range or cancellation.
 #[derive(Clone, Debug, PartialEq)]
@@ -144,14 +149,16 @@ impl ArrheniusRateV1 {
 /// Original caller-declared reversible elementary reaction.
 ///
 /// Separate reactant/product sides retain explicit catalysts appearing on both
-/// sides. Fractional/global empirical orders, generic third bodies, falloff,
-/// ions and irreversible reactions are outside this thermodynamic closure.
+/// sides. An optional authored pressure dependence multiplies both directions.
+/// Fractional/global empirical orders, ions and irreversible reactions are
+/// outside this thermodynamic closure.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ElementaryReactionV1 {
     reaction: ReactionId,
     reactants: Vec<(SpeciesId, u32)>,
     products: Vec<(SpeciesId, u32)>,
     forward_rate: ArrheniusRateV1,
+    pressure_dependence: PressureDependenceV1,
 }
 impl ElementaryReactionV1 {
     /// Canonicalize both sides and admit positive bounded integer orders.
@@ -188,7 +195,15 @@ impl ElementaryReactionV1 {
             reactants,
             products,
             forward_rate,
+            pressure_dependence: PressureDependenceV1::Independent,
         })
+    }
+    /// Attach an explicit collider/falloff law. For falloff, `forward_rate` is
+    /// the high-pressure law and the attached law supplies the low-pressure
+    /// scale. No collider is inferred from either stoichiometric side.
+    pub fn with_pressure_dependence(mut self, pressure_dependence: PressureDependenceV1) -> Self {
+        self.pressure_dependence = pressure_dependence;
+        self
     }
     /// Original reaction identity.
     pub const fn reaction(&self) -> &ReactionId {
@@ -206,6 +221,10 @@ impl ElementaryReactionV1 {
     pub const fn forward_rate(&self) -> ArrheniusRateV1 {
         self.forward_rate
     }
+    /// Exact caller-authored pressure law, including collider efficiencies.
+    pub const fn pressure_dependence(&self) -> &PressureDependenceV1 {
+        &self.pressure_dependence
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -214,6 +233,9 @@ struct BoundReaction {
     products: Vec<(usize, u32)>,
     net: Vec<(usize, f64)>,
     delta_molecules: f64,
+    /// Canonical ln(epsilon_i); -infinity means an exactly inactive collider.
+    /// Empty for pressure-independent rates.
+    collider_logs: Vec<f64>,
 }
 
 /// Immutable neutral ideal-gas mechanism sharing one original NASA-9 bank.
@@ -310,6 +332,7 @@ impl IdealGasKineticsV1 {
                 products,
                 net,
                 delta_molecules,
+                collider_logs: reaction.pressure_dependence.bind(species)?,
             });
         }
         let stoichiometry = StoichiometricMatrix::new(
@@ -499,7 +522,9 @@ impl IdealGasKineticsV1 {
             }
             let log_kc = -dg.value() / (R * t) + reaction.delta_molecules * standard_c_log;
             let dlog_kc = (du.value() / (R * t)) / t;
-            let (log_forward_scale, dlog_forward_scale) = source.forward_rate.log_rate(t)?;
+            let scale = pressure::effective_rate(source, reaction, t, &work.log_c)?;
+            let log_forward_scale = scale.log_forward;
+            let dlog_forward_scale = scale.dlog_temperature;
             if !log_kc.is_finite() || !dlog_kc.is_finite() {
                 return Err(KineticsErrorV1::Arithmetic(
                     "concentration equilibrium constant",
@@ -508,7 +533,7 @@ impl IdealGasKineticsV1 {
             work.log_equilibrium_constants[j] = log_kc;
             let force = reaction_affinity(reaction, &work.log_c, log_kc)?;
             work.affinities[j] = force;
-            if log_forward_scale == f64::NEG_INFINITY {
+            if scale.inactive() {
                 work.reaction_rates[j] = 0.0;
                 work.temperature_derivatives[j] = 0.0;
                 continue;
@@ -522,6 +547,7 @@ impl IdealGasKineticsV1 {
             // progress. No physical affinity is manufactured for that state.
             let affinity = force.unwrap_or(0.0);
             let rate = net_rate(forward, reverse, affinity)?;
+            let collider_response = scale.collider_response(lf, lr, log_kc, affinity)?;
             let dt = rate * dlog_forward_scale + reverse * dlog_kc;
             if !dt.is_finite() {
                 return Err(KineticsErrorV1::Arithmetic(
@@ -533,10 +559,9 @@ impl IdealGasKineticsV1 {
             for i in 0..ns {
                 let alpha = order(&reaction.reactants, i);
                 let beta = order(&reaction.products, i);
-                if alpha == 0 && beta == 0 {
-                    continue;
-                }
-                let derivative = if concentrations[i] > 0.0 {
+                let mut derivative = if alpha == 0 && beta == 0 {
+                    0.0
+                } else if concentrations[i] > 0.0 {
                     let common = alpha.min(beta) as f64;
                     let extra = if alpha > beta {
                         forward * f64::from(alpha - beta)
@@ -568,6 +593,9 @@ impl IdealGasKineticsV1 {
                         df - dr
                     }
                 };
+                if let Some(&log_efficiency) = reaction.collider_logs.get(i) {
+                    derivative += collider_response.scaled(log_efficiency)?;
+                }
                 if !derivative.is_finite() {
                     return Err(KineticsErrorV1::Arithmetic(
                         "kinetic concentration derivative",

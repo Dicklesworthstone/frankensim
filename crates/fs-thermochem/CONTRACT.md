@@ -912,3 +912,48 @@ The subdivision uses a fixed-size stack with at most 4095 work items per region.
 The native regression includes positive endpoint heat capacities with a
 negative interior Cv. This addition brings the full-source native library
 suite to 111 passing tests. Time integration remains in L3.
+
+## Pressure-dependent detailed-balance reaction rates
+
+Kinetic operation-tree version 2 adds explicitly authored
+`ThirdBodyEfficienciesV1`, `PressureDependenceV1`, `FalloffBroadeningV1` and
+`TroeFalloffV1`. Elementary reactions remain pressure independent unless the
+caller attaches a pressure law. Species-specific collider efficiencies are
+canonical, finite, nonnegative and bound to the exact original species bank;
+unknown or duplicate species are refused. Their explicit default applies to
+unlisted species.
+
+The effective collider concentration is `M = sum(epsilon_i c_i)`. Third-body
+rates multiply the elementary coefficient by `M/c*`, with `c*=1 mol/m3`.
+Normal falloff uses `k = kinf Pr/(1+Pr) F`, `Pr=k0(M/c*)/kinf`, with Lindemann
+or three-/four-parameter Troe broadening. The original forward Arrhenius law is
+the high-pressure law and the additional low-pressure law includes one extra
+reference concentration. Coherent-SI conversion remains the mechanism author's
+responsibility.
+
+Both directions use the same effective coefficient, preserving the original
+NASA-9 equilibrium constant, affinity and exact element/charge accounting.
+Analytic concentration and temperature Jacobians include collider dependence,
+both Arrhenius limits and Troe derivatives; existing stiff reactors consume
+these derivatives directly. Logarithmic evaluation avoids artificial overflow
+in `k0*M` and underflow in reduced pressure. Exact zero collider density has its
+correct inward derivative, including Troe's actual limiting broadening. The
+scaled Troe rational form remains finite at the conventional apparent pole.
+Zero authored rate scales or all-zero efficiencies bypass irrelevant rate
+arithmetic and retain exact kinetic shutdown. Successful evaluations allocate
+nothing; collider bindings are prepared once.
+
+Seven added algebra regressions cover rates and all Jacobian columns, pressure
+limits and extreme intermediate values, Troe values/derivatives, exact zero
+colliders, the apparent pole, near-equilibrium entropy, declaration refusals and
+shutdown. The complete native thermochemistry library passed 118 tests; the
+expanded shutdown regression passed again after its final guard correction.
+An additional prepared-reactor regression matches the analytic density-dependent
+third-body isomerization relaxation at two physical volumes.
+
+This admits constant collider efficiencies and normal Lindemann/Troe falloff.
+Chemically activated reactions, SRI, P-log, temperature-dependent efficiencies
+and mechanism calibration remain outside this closure. Troe alpha is admitted
+in [0,1] with positive finite characteristic temperatures. References:
+<https://cantera.org/3.2/reference/kinetics/reaction-rates.html> and
+<https://cantera.org/3.2/reference/kinetics/rate-constants.html>.

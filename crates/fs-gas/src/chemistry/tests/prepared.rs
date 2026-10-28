@@ -1,6 +1,51 @@
 use super::*;
 
 #[test]
+fn prepared_third_body_isomerization_matches_density_dependent_relaxation() {
+    use fs_thermochem::kinetics::{PressureDependenceV1, ThirdBodyEfficienciesV1};
+
+    let reference_rate = 0.2;
+    let reaction = reaction("A-B-M", &[("A", 1)], &[("B", 1)], reference_rate)
+        .with_pressure_dependence(PressureDependenceV1::ThirdBody(
+            ThirdBodyEfficienciesV1::default(),
+        ));
+    let mechanism = mechanism(
+        vec![
+            source("A", 0.01, 4.0, 0.0, 0.0),
+            source("B", 0.01, 4.0, 0.0, 0.0),
+        ],
+        vec![1, 1],
+        vec![reaction],
+    );
+    let mut prepared = IsochoricReactor::new(mechanism, controls(1e-5), || false).unwrap();
+    let duration = 0.05;
+    let mut previous_product = 0.0;
+    for volume in [0.02, 0.005] {
+        // A <-> B conserves molecular count and has identical source calorics.
+        // Unit efficiencies therefore give a constant collider concentration
+        // of 1 mol / V, making the full pressure-dependent ODE analytic.
+        let effective_rate = reference_rate / volume;
+        let expected_product = 0.5 * (1.0 - (-2.0 * effective_rate * duration).exp());
+        let endpoint = prepared
+            .advance_adiabatic(
+                &[Amount::new(1.0), Amount::new(0.0)],
+                Volume::new(volume),
+                Temperature::new(500.0),
+                Time::new(duration),
+                || false,
+            )
+            .unwrap();
+        let actual_product = endpoint.amounts()[1].value();
+        assert!((actual_product - expected_product).abs() < 4e-4);
+        assert!(actual_product > previous_product);
+        assert!((endpoint.temperature().value() - 500.0).abs() < 1e-8);
+        assert!(endpoint.balance().energy_residual_j.abs() <= controls(1e-5).energy_tolerance_j);
+        assert!(endpoint.balance().entropy_change_j_k > 0.0);
+        previous_product = actual_product;
+    }
+}
+
+#[test]
 fn prepared_reactor_reuses_storage_for_independent_dense_cells() {
     let mechanism = isomers(0.0, 3.0);
     let solve = controls(1e-5);

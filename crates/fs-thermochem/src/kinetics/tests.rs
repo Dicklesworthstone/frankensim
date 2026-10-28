@@ -10,6 +10,9 @@ use fs_matdb::{ConstitutiveModelCard, LawId, LawParameter, Provenance};
 use fs_qty::{Amount, MolarMass, Volume};
 use std::collections::BTreeMap;
 
+#[path = "pressure/tests.rs"]
+mod pressure_rates;
+
 fn id(name: &str) -> SpeciesId {
     SpeciesId::new(name).unwrap()
 }
