@@ -1712,12 +1712,12 @@ fn series_phis(
         let inv_k1 = 1.0 / ((k + 1) as f64);
         let inv_k2 = 1.0 / (((k + 1) * (k + 2)) as f64);
         for i in 0..(n * n) {
-            phi0[i] += term[i] * inv_k;
+            // Multiplication above produced A^k/(k-1)!. All three phi
+            // series require A^k/k!, including their held-input integrals.
+            term[i] *= inv_k;
+            phi0[i] += term[i];
             phi1[i] += term[i] * inv_k1;
             phi2[i] += term[i] * inv_k2;
-        }
-        for v in &mut term {
-            *v *= inv_k;
         }
         // ‖Σ_{j>k} A^j/j!‖ ≤ ‖A‖^{k+1}/(k+1)! · 1/(1 − ‖A‖/(k+2)).
         power *= a_norm;

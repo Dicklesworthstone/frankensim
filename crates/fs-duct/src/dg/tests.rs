@@ -8,6 +8,52 @@ use fs_mms::{LadderSide, OrderGate, RefinementLadder};
 use std::sync::Arc;
 use std::time::Instant;
 
+/// A scalar decay has independent closed forms for the homogeneous advance,
+/// held-input response and integrated response. The latter two must retain
+/// every Taylor factorial before the exact scaling/doubling recurrences.
+#[test]
+fn dg_dense_phi_functions_match_scalar_decay_and_held_input_integrals() {
+    for z in [-0.25_f64, -0.5, -4.0, -32.0] {
+        let exp = det::exp(z);
+        let expected = [exp, (exp - 1.0) / z, (exp - 1.0 - z) / (z * z)];
+        for extra_halving in [0, 1] {
+            let shift = series_shift(&[z], 1, 1.0) + extra_halving;
+            let (phi0, phi1, phi2, _) = series_phis(&[z], 1, 1.0, shift).unwrap();
+            for (order, (actual, reference)) in [phi0[0], phi1[0], phi2[0]]
+                .into_iter().zip(expected).enumerate()
+            {
+                assert!((actual - reference).abs() <= 2e-13 * reference.abs() + 1e-30,
+                    "phi_{order}({z}), shift={shift}: {actual:e} != {reference:e}");
+            }
+        }
+    }
+}
+
+/// The same three functions on a damped rotation exercise oscillatory forcing
+/// and off-diagonal coupling against the independent scalar complex solution.
+#[test]
+fn dg_dense_phi_functions_match_damped_rotation() {
+    for z in [C64::new(-0.25, 0.5), C64::new(-4.0, 3.0), C64::new(-32.0, 12.0)] {
+        let exp = C64::new(det::cos(z.im), det::sin(z.im)).scale(det::exp(z.re));
+        let expected = [exp, (exp - C64::ONE) / z, (exp - C64::ONE - z) / (z * z)];
+        let matrix = [z.re, -z.im, z.im, z.re];
+        for extra_halving in [0, 1] {
+            let shift = series_shift(&matrix, 2, 1.0) + extra_halving;
+            let (phi0, phi1, phi2, _) = series_phis(&matrix, 2, 1.0, shift).unwrap();
+            for (order, (actual, reference)) in [phi0, phi1, phi2]
+                .into_iter().zip(expected).enumerate()
+            {
+                for (value, exact) in actual.into_iter()
+                    .zip([reference.re, -reference.im, reference.im, reference.re])
+                {
+                    assert!((value - exact).abs() <= 2e-13 * exact.abs() + 1e-30,
+                        "rotation phi_{order}({z:?}), shift={shift}: {value:e} != {exact:e}");
+                }
+            }
+        }
+    }
+}
+
 fn dry_air() -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).expect("dry air at 293.15 K")
 }
