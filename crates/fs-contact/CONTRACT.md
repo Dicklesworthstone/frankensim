@@ -449,3 +449,30 @@ contact, friction, a Moreau–Jean stepper, gap stabilization, or partition of l
 into heat/damage. Six focused unit regressions cover the independent energy
 and restitution identities, activation/refusal, scaling and extreme finite
 responses. The broad nonsmooth-contact bead remains open.
+
+## Coupled nonsmooth finite-patch tangential contact
+
+`tangential::nonsmooth` solves supplied positive-load finite patches together
+using the original unregularized `fs-tribo` regional return maps and the existing
+Newton–Krylov owner. The caller supplies B = J M^(-1/2), so mobility B B^T is
+passive by construction and may be rank deficient for shared-body contacts.
+Slip/spin coordinates have an explicit torsional length and conjugate forces.
+Canonical patch ordering makes simultaneous transitions invariant to input
+permutation. No branch smoothing is introduced.
+
+Acceptance independently checks endpoint velocity balance, each regional
+Coulomb cone and associated-flow complementarity, and mechanical work plus
+stored-energy change, physical heat, distinct elastic/mechanical backward-Euler
+losses, and signed coefficient work. Coefficient continuation preserves loaded
+regional history; parameter work is not thermalized. Prepare/retry leave
+accepted history unchanged. Commit consumes all contact work once. Release
+requires explicit export of retained elastic storage; recontact starts unloaded.
+
+Seven native physical regression groups cover analytic stick/partial/gross
+slide, shared-body recoil and permutation, mixed slip/spin and frame covariance,
+checkpoint/release/recontact, cancellation/nonconvergence, timestep refinement,
+and changing coefficients. Normal-load/geometry admission, normal complementarity,
+impact timing/restitution, Painleve classification, global uniqueness and
+classical adjoints remain outside this tangential solver. Regional plastic
+increments in `PartialSlipStep` expose the original constitutive flow for the
+independent check without changing the return map.

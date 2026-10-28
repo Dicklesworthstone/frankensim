@@ -1,3 +1,5 @@
 //! Solver-facing tangential contact adapters.
 
 pub mod smooth;
+/// Coupled, unregularized partial-slip islands with independent physical gates.
+pub mod nonsmooth;

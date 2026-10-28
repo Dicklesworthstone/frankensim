@@ -1269,6 +1269,7 @@ dependencies = [
  "fs-phs",
  "fs-qty",
  "fs-query",
+ "fs-solver",
  "fs-tribo",
 ]
 

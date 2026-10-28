@@ -542,6 +542,7 @@ impl PartialSlipLaw {
         let mut numerical_dissipation_j = 0.0;
         let mut slip_fraction = 0.0;
         let mut yielding_regions = 0;
+        let mut region_plastic_increment = [[0.0; 3]; 2];
         for region in 0..2 {
             let stored_old = [
                 state.region_elastic_displacement_m[region][0],
@@ -575,6 +576,7 @@ impl PartialSlipLaw {
                 [result.elastic[0], result.elastic[1]];
             next_state.region_elastic_twist_rad[region] = result.elastic[2];
             next_state.sliding_regions[region] = result.kinetic_branch;
+            region_plastic_increment[region] = result.plastic;
             for i in 0..2 {
                 force_tangent[i] =
                     checked_add(force_tangent[i], -result.effort[i], "tangential_force")?;
@@ -711,6 +713,7 @@ impl PartialSlipLaw {
                 closure_residual_j,
             },
             next_state,
+            region_plastic_increment,
             checkpoint,
             applicability: PartialSlipApplicability::TwoRegionIwanReturnMap,
             normal_patch_authority: patch.authority,
@@ -1283,6 +1286,10 @@ pub struct PartialSlipStep {
     pub generalized_work: GeneralizedWork,
     /// Candidate internal state; the caller commits it only after solver acceptance.
     pub next_state: PartialSlipState,
+    /// Actual regional plastic increments [longitudinal m, lateral m, twist rad].
+    /// Weaker region first. These expose the existing return map's flow for
+    /// independent solver cone/complementarity checks; they add no new state.
+    pub region_plastic_increment: [[f64; 3]; 2],
     /// Identity-bound restart candidate.
     pub checkpoint: PartialSlipCheckpoint,
     /// Model scope retained with the response.

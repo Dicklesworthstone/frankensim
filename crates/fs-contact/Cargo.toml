@@ -22,6 +22,7 @@ fs-matdb = { path = "../fs-matdb" }
 fs-motion = { path = "../fs-motion" }
 fs-qty = { path = "../fs-qty" }
 fs-query = { path = "../fs-query" }
+fs-solver = { path = "../fs-solver" }
 fs-tribo = { path = "../fs-tribo" }
 
 [dev-dependencies]
