@@ -640,6 +640,39 @@ nonwetting downhill entry thresholds, the gravity-only and horizontal limits,
 time composition, end events, signed energy closure and input refusal.
 Reference: Fries & Dreyer (2008), doi:10.1016/j.jcis.2008.01.009.
 
+## Conservative triangular capillary surface forces
+
+`capillary::surface` supplies allocation-free triangle force kernels and a
+linear-time patch assembler over existing coordinate/index slices. Constant
+or prescribed per-face tension multiplies geometric area. The instantaneous
+force is the negative area-energy gradient; open patches retain their boundary
+line forces. Shared vertices assemble the actual surface-stress resultant.
+
+`triangle_surface_tension_step` uses endpoint Gram invariants and midpoint
+edges to construct an area discrete gradient. Its forces have zero resultant
+and zero torque about midpoint coordinates, and their displacement work equals
+minus the geometric surface-energy change. Compensated product differences
+avoid false area for collinear edges. A symmetric invariant correction restores
+small work differences lost to floating cancellation on skinny faces without
+adding a rotational force. The response retains both endpoint areas/energies,
+the energy change, actual force work and prescribed-coefficient free-energy
+supply. For changing tension, `W + delta E = A_mean * delta sigma` per face.
+That supply is explicitly external free energy, not inferred thermal heat.
+
+Patch assembly publishes only complete results and uses compensated scalar
+reductions in fixed face order. Invalid coordinates, zero-area faces,
+negative/nonfinite tension, inconsistent field sizes, invalid connectivity
+indices and unrepresentable outputs refuse. No intermediate deformation path,
+manifoldness, topology change, surfactant transport, thermal surface entropy,
+fluid advection or time integration is claimed. Triangle operations are bounded;
+patch callers own their tiling/cancellation boundary.
+
+Eight G0/G1/G3 tests check analytic triangle line forces, independent energy
+gradients, finite-deformation work and midpoint torque, rigid-motion objectivity,
+unit scaling, coefficient supply, variable-tension patch scatter, skinny-face
+work and invalid geometry/data. The discrete-gradient principle follows
+Gonzalez (1996), doi:10.1007/BF02440162; the Gram formulas are derived locally.
+
 
 ## Damped Newton BDF1 for stiff rheology
 

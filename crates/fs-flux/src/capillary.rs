@@ -10,6 +10,9 @@
 
 use core::f64::consts::PI;
 
+/// Conservative triangle-surface forces with exact endpoint area work.
+pub mod surface;
+
 /// SI inputs admitted by the circular-capillary screening law.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CircularCapillaryInput {
