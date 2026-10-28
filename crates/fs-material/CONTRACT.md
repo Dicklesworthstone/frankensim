@@ -2961,3 +2961,25 @@ substitution, slip calibration, selective flux and reversal, common species
 withdrawal, mass/enthalpy conservation, equilibrium overshoot and cancellation.
 These are constitutive and numerical checks, not validation for an unnamed
 porous solid or polymer. The existing measured acoustic fixtures remain active.
+
+
+## External species streams through the original gas energy owner
+
+`thermochemical_gas::energy::parcel::transfer::species::boundary` accepts
+integrated species mass and complete stream energy on the original gas
+thermochemical reference. `ClosedGasParcel::exchange_species_boundary` reuses
+the existing species-inventory, composition, EOS, transport and relative-energy
+inversion paths to return one immutable endpoint with extensive balances.
+Carrier inventories, volume and external query coordinates remain intact.
+Exact individual-species depletion and reentry use a retained complete source
+catalog; no trace gas or replacement caloric law is inserted. Active caloric,
+transport, source-pack and water-identity substitutions refuse. Candidates
+borrow the immutable catalog to avoid copying source cards on each trial.
+
+Original-owner queries expose species mass, partial pressure and partial
+specific enthalpy. Opposing streams may carry energy with zero net species
+mass. The external phase must debit the same signed energy on a compatible
+reference; latent heat alone does not determine NASA-9 vapor enthalpy. This
+primitive supplies neither an interface rate nor automatic thermal-reference
+alignment. Six focused native regressions passed for influx/deposition,
+depletion/reentry, reference shifts, counterflow, ordering and atomic refusal.

@@ -6,6 +6,8 @@
 //! No rate law, membrane work, diffusion model or entropy guarantee is implied by
 //! prescribed fluxes. The physical transport owner must provide those separately.
 
+/// Conservative prescribed streams between the original gas and an external phase.
+pub mod boundary;
 /// Source-backed multicomponent molecular mixing and conservative pair advancement.
 pub mod diffusion;
 /// Shared-snapshot selective transport on branching and cyclic volume networks.
