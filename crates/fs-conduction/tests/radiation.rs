@@ -578,6 +578,85 @@ fn opposite_surfaces_with_emissivities(
 }
 
 #[test]
+fn enclosure_retains_heat_near_equilibrium_and_for_reflective_surfaces() {
+    for (ea, eb, rtol) in [(0.8, 0.6, 2e-13), (1e-8, 2e-8, 2e-7)] {
+        let surface = |name, value| {
+            emissivity_with_temperature_domain(
+                name,
+                value,
+                UncertaintyModel::Unstated,
+                "numerical-gray-plate",
+                300.0,
+                250.0,
+                500.0,
+            )
+        };
+        let (_mesh, left, right) =
+            opposite_surfaces_with_emissivities(surface("left", ea), surface("right", eb));
+        let area = left.area_m2();
+        let factors = ViewFactorMatrix::infinite_parallel_plates(area).unwrap();
+        let enclosure = GrayDiffuseEnclosure::new(vec![left, right], factors).unwrap();
+        with_cx(|cx| {
+            let prepared = enclosure.prepare_radiosity(cx).unwrap();
+            for hot in [300.0, f64::from_bits(300.0_f64.to_bits() + 1), 300.000001, 400.0] {
+                let report = enclosure.solve(cx, &[hot, 300.0]).unwrap();
+                assert_eq!(report, prepared.solve(cx, &[hot, 300.0]).unwrap());
+                if hot == 300.0 {
+                    assert_eq!(report.net_outward_heat_w, [0.0, 0.0]);
+                    assert_eq!(report.linear_residual_max_w_m2, 0.0);
+                    continue;
+                }
+                let dt = hot - 300.0;
+                // Independent binomial expansion and series radiative resistance.
+                let exact = area * STEFAN_BOLTZMANN_W_M2_K4 * dt
+                    * (108_000_000.0 + dt * (540_000.0 + dt * (1200.0 + dt)))
+                    / (1.0 / ea + 1.0 / eb - 1.0);
+                assert!(
+                    (report.net_outward_heat_w[0] - exact).abs() < rtol * exact,
+                    "hot {}, expected {exact:e}", report.net_outward_heat_w[0]
+                );
+                assert!(
+                    (report.net_outward_heat_w[1] + exact).abs() < rtol * exact,
+                    "cold {}, expected {:e}", report.net_outward_heat_w[1], -exact
+                );
+                assert!(report.relative_energy_closure() < rtol);
+            }
+        });
+    }
+}
+
+#[test]
+fn shifted_radiosity_does_not_erase_admitted_view_factor_leakage() {
+    let (_mesh, left, right) = opposite_surfaces_with_emissivities(
+        emissivity("left", 0.8, "same-finish"),
+        emissivity("right", 0.8, "same-finish"),
+    );
+    let area = left.area_m2();
+    let fraction = 1.0 - 1e-10;
+    let factors = ViewFactorMatrix::admit(
+        vec![area, area],
+        vec![vec![0.0, fraction], vec![fraction, 0.0]],
+        ViewFactorEvidence::Analytic {
+            geometry: "deliberately-imperfect-row".to_string(),
+        },
+        ViewFactorTolerance { row_sum_abs: 2e-10, reciprocity_rel: 1e-12 },
+    ).unwrap();
+    let enclosure = GrayDiffuseEnclosure::new(vec![left, right], factors).unwrap();
+    let report = with_cx(|cx| enclosure.solve(cx, &[300.0, 300.0]).unwrap());
+    let missing = 1.0 - fraction;
+    let exact = area * 0.8 * STEFAN_BOLTZMANN_W_M2_K4 * fourth_power(300.0)
+        * missing / (0.8 + 0.2 * missing);
+    assert!(exact > 0.0);
+    for heat in report.net_outward_heat_w {
+        assert!((heat - exact).abs() < 1e-13 * exact);
+    }
+    assert!(
+        report.enclosure_energy_closure_w > 0.0,
+        "a coordinate shift must not turn imperfect geometry into closed energy"
+    );
+}
+
+#[test]
 fn enclosure_binding_refuses_view_factor_area_mismatch() {
     let (_mesh, left, right) = opposite_surfaces();
     let matrix = ViewFactorMatrix::infinite_parallel_plates(1.01 * left.area_m2()).expect("matrix");

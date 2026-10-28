@@ -132,6 +132,20 @@ own evidence. These radiation rungs
 retain and enforce the selected emissivity claim's temperature-validity
 interval.
 
+Gray-diffuse radiosity solves use departures from one surface's blackbody
+emission. Factored fourth-power differences retain small thermal contrasts;
+the net heat uses the original emissive balance `epsilon * (sigma T^4 - G)`
+in those same coordinates. This avoids erasing near-equilibrium exchange by
+subtracting two large absolute radiosities, especially on reflective surfaces.
+Absolute J/G remain diagnostic outputs and can round to the same value while
+their physical exchange remains representable. View-factor row defects remain
+in the shifted load and heat law; neither geometry nor enclosure heat is
+normalized. The original matrix, pivot checks, material domains and prepared
+factorization remain unchanged. Analytic plate tests cover adjacent floating
+temperatures, reflective surfaces, exact isothermal equilibrium, and retained
+imperfect-row leakage. This numerical correction adds no view-factor accuracy,
+material calibration or continuum radiation claim.
+
 `solve_with_convective_gray_diffuse_enclosure` explicitly composes that same
 closed-enclosure exchange with original convection on each exact same-named
 uniform Robin trace. A frozen radiative flux is represented by the algebraic

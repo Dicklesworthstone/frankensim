@@ -38,6 +38,7 @@ use crate::solve::{
 };
 
 mod ambient;
+mod balance;
 mod convection;
 mod prepared;
 mod equilibrium;
@@ -397,7 +398,7 @@ impl LinearizedSurfaceRadiation {
         let linearized = h_rad * (surface_temperature_k - self.ambient_temperature_k);
         let nonlinear = self.emissivity.value
             * STEFAN_BOLTZMANN_W_M2_K4
-            * (fourth_power(surface_temperature_k) - fourth_power(self.ambient_temperature_k));
+            * balance::emission_difference(1.0, surface_temperature_k, self.ambient_temperature_k);
         let (h_rad_half_width_w_m2k, uncertainty_confidence) =
             self.emissivity
                 .half_width()
@@ -1084,6 +1085,18 @@ impl GrayDiffuseEnclosure {
                 "supply temperatures in view-factor row order",
             ));
         }
+        // The large common blackbody background carries no exchange in a
+        // closed enclosure. Solve only its departures, preserving even heat
+        // driven by adjacent representable temperatures. Row-sum defects stay
+        // in both the load and heat law; shifting does not normalize geometry.
+        // The coldest surface also avoids reconstructing a small positive
+        // radiosity by cancellation against a much hotter reference emission.
+        let reference_temperature = surface_temperatures_k
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        let reference_emission = STEFAN_BOLTZMANN_W_M2_K4 * fourth_power(reference_temperature);
+        let mut emission_delta = vec![0.0; n];
         let mut matrix = vec![vec![0.0; n]; n];
         let mut rhs = vec![0.0; n];
         for i in 0..n {
@@ -1101,13 +1114,26 @@ impl GrayDiffuseEnclosure {
                 matrix[i][j] = if i == j { 1.0 } else { 0.0 }
                     - (1.0 - emissivity) * self.view_factors.factors[i][j];
             }
-            rhs[i] =
-                emissivity * STEFAN_BOLTZMANN_W_M2_K4 * fourth_power(surface_temperatures_k[i]);
+            emission_delta[i] = balance::emission_difference(
+                STEFAN_BOLTZMANN_W_M2_K4,
+                surface_temperatures_k[i],
+                reference_temperature,
+            );
+            rhs[i] = balance::shifted_load(
+                emissivity,
+                emission_delta[i],
+                reference_emission,
+                self.view_factors.row_sums[i],
+            );
         }
-        let radiosity_w_m2 = match factors {
+        let radiosity_delta = match factors {
             Some(factors) => factors.solve(cx, &rhs)?,
             None => solve_dense(cx, &matrix, &rhs)?,
         };
+        let radiosity_w_m2 = radiosity_delta
+            .iter()
+            .map(|&value| reference_emission + value)
+            .collect();
         let mut irradiation_w_m2 = vec![0.0; n];
         let mut net_outward_flux_w_m2 = vec![0.0; n];
         let mut net_outward_heat_w = vec![0.0; n];
@@ -1119,11 +1145,18 @@ impl GrayDiffuseEnclosure {
             let mut lhs = 0.0;
             for j in 0..n {
                 irradiation =
-                    self.view_factors.factors[i][j].mul_add(radiosity_w_m2[j], irradiation);
-                lhs = matrix[i][j].mul_add(radiosity_w_m2[j], lhs);
+                    self.view_factors.factors[i][j].mul_add(radiosity_delta[j], irradiation);
+                lhs = matrix[i][j].mul_add(radiosity_delta[j], lhs);
             }
-            irradiation_w_m2[i] = irradiation;
-            net_outward_flux_w_m2[i] = radiosity_w_m2[i] - irradiation;
+            irradiation_w_m2[i] =
+                reference_emission.mul_add(self.view_factors.row_sums[i], irradiation);
+            net_outward_flux_w_m2[i] = balance::outward_flux(
+                self.surfaces[i].emissivity.value,
+                emission_delta[i],
+                irradiation,
+                reference_emission,
+                self.view_factors.row_sums[i],
+            );
             net_outward_heat_w[i] = self.surfaces[i].area_m2 * net_outward_flux_w_m2[i];
             heat_sum += net_outward_heat_w[i];
             heat_scale += net_outward_heat_w[i].abs();
@@ -1175,7 +1208,10 @@ pub struct RadiosityReport {
     pub radiosity_w_m2: Vec<f64>,
     /// Surface irradiations `G_i = sum_j F_ij J_j`, W/m².
     pub irradiation_w_m2: Vec<f64>,
-    /// `J_i - G_i`, W/m², positive leaving solid `i`.
+    /// Net outward flux `epsilon_i (sigma T_i^4 - G_i) = J_i - G_i`, W/m².
+    /// Evaluated in reference-shifted coordinates so close temperatures and
+    /// reflective surfaces do not lose heat to background subtraction. Subtracting
+    /// the rounded absolute J/G diagnostics need not reproduce this small flux.
     pub net_outward_flux_w_m2: Vec<f64>,
     /// `A_i (J_i - G_i)`, W.
     pub net_outward_heat_w: Vec<f64>,
@@ -1184,7 +1220,8 @@ pub struct RadiosityReport {
     pub enclosure_energy_closure_w: f64,
     /// Sum of absolute enclosure heat rates, W.
     pub enclosure_energy_scale_w: f64,
-    /// Largest absolute residual of the dense radiosity system, W/m².
+    /// Largest absolute residual of the original radiosity system, W/m²,
+    /// evaluated in equivalent shifted coordinates to retain small balances.
     pub linear_residual_max_w_m2: f64,
     /// Identity of the exact admitted view-factor matrix.
     pub view_factor_identity: ContentHash,
