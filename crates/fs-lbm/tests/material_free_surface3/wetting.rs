@@ -414,6 +414,65 @@ fn g1_g3_cox_wetting_drives_native_flow_from_static_source_endpoints() {
 }
 
 #[test]
+fn g3_outer_viscous_wedge_changes_native_wetting_without_changing_sources() {
+    use fs_lbm::material::free_surface::wetting::CoxVoinovLaw;
+    let bulk = liquid(0, 300.0, Some(0.05));
+    let angle = 1.2;
+    let card = static_card(&bulk, angle);
+    let gate = CancelGate::new_clock_free();
+    let build = |ratio| {
+        slow_static_flow(&bulk, &card)
+            .with_cox_voinov(
+                CoxVoinovLaw::try_new_with_viscosity_ratio(cox_controls(0.01), ratio, &gate)
+                    .unwrap(),
+                &gate,
+            )
+            .unwrap()
+    };
+    let mut inviscid = build(0.0);
+    let mut viscous = build(1.0);
+    let mass = viscous.flow().ledger_mass_kg().unwrap();
+    inviscid.step_with_gate(&gate).unwrap();
+    viscous.step_with_gate(&gate).unwrap();
+    // Equal static boundaries produce equal first steps; different wedge
+    // impedances then change the next apparent-angle field and actual flow.
+    assert_eq!(
+        inviscid.flow().lattice().grid().state_bits(),
+        viscous.flow().lattice().grid().state_bits()
+    );
+    let mut changed = false;
+    for (position, sample) in viscous.samples() {
+        assert_eq!(
+            sample.hydrodynamic.unwrap().outer_to_liquid_viscosity_ratio,
+            1.0
+        );
+        assert_eq!(sample.material, inviscid.samples()[position].material);
+        if sample.regime != ContactLineRegime2::Pinned {
+            let old = inviscid.samples()[position].applied_angle_radians;
+            assert!((sample.applied_angle_radians - angle).abs() >= (old - angle).abs());
+            changed |= sample.applied_angle_radians != old;
+        }
+    }
+    assert!(changed);
+    inviscid.step_with_gate(&gate).unwrap();
+    viscous.step_with_gate(&gate).unwrap();
+    assert_ne!(
+        inviscid.flow().lattice().grid().state_bits(),
+        viscous.flow().lattice().grid().state_bits()
+    );
+    assert!((viscous.flow().ledger_mass_kg().unwrap() - mass).abs() < mass * 1e-10);
+
+    // A strongly viscous outer wedge can violate creeping-flow applicability
+    // even when the original liquid-only capillary-number check would pass.
+    let mut blocked = build(1e8);
+    let bits = blocked.flow().lattice().grid().state_bits();
+    let samples = blocked.samples().clone();
+    assert!(blocked.step_with_gate(&gate).is_err());
+    assert_eq!(blocked.flow().lattice().grid().state_bits(), bits);
+    assert_eq!(blocked.samples(), &samples);
+}
+
+#[test]
 fn g0_g4_cox_refuses_double_rate_counting_and_preserves_state_on_model_exit() {
     use fs_lbm::material::free_surface::wetting::CoxVoinovLaw;
     let bulk = liquid(0, 300.0, Some(0.05));

@@ -3725,8 +3725,29 @@ the native constant. Non-Newtonian rheology, missing tension, high capillary
 number and absent solutions within the declared angular domain refuse before
 publishing candidate flow or heat. No angle is clipped to conceal a film
 transition. The existing pinning deadband and first-cell speed estimate retain
-their prior limitations. Gas viscosity, resolved slip, entrainment, contact-line
+their prior limitations. Resolved gas motion, slip, entrainment, contact-line
 calibration and conservative surface-energy accounting are not added.
+
+`CoxVoinovLaw::try_new_with_viscosity_ratio` additionally admits a caller-declared
+fixed ratio `M = mu_outer/mu_liquid`, using the full two-viscous-wedge angular
+function in Chan et al. (2020), equation (2.13), with
+`g'(theta,M) = -sin(theta)^2/(3 F(theta,M))`. The original constructor retains
+the inviscid outer phase. Both liquid and outer-phase capillary numbers obey
+the declared low-Ca bound. The table clusters nodes at both angular endpoints
+to resolve narrow wedges and viscosity contrast, and large-ratio evaluation
+uses reciprocal scaling. Runtime predictions still require no quadrature,
+allocation or transcendental evaluations.
+
+The ratio is explicit model data in every `CoxVoinovSample`, separate from the
+original interface claims and liquid viscosity receipts. The same boundary
+feeds native isothermal and thermal flow. In thermal use a fixed ratio means
+the modeled outer viscosity varies proportionally with the local liquid
+viscosity; independent gas temperature/viscosity evolution is not inferred.
+This is an outer-wedge contact-angle closure, not a second-fluid momentum
+solver. G1/G3 checks cover independent two-phase quadrature, the analytic
+right-angle relation, phase exchange, small-angle resolution, native flow
+changes and thermal coefficient use. G0/G4 tests retain transactional refusal
+when either phase leaves the capillary-number envelope.
 
 G1/G3 tests compare full-angle predictions against independent Simpson
 quadrature, recover the cubic small-angle limit, check length-scale similarity,

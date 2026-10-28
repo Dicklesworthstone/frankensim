@@ -341,6 +341,15 @@ fn g4_late_temperature_and_endpoint_speed_refusals_preserve_every_participant() 
 
 #[test]
 fn g1_cox_contact_angle_uses_local_heated_viscosity_without_inventing_heat() {
+    check_heated_cox_viscosity(0.0);
+}
+
+#[test]
+fn g1_two_viscous_wedges_retain_explicit_ratio_along_local_thermal_motion() {
+    check_heated_cox_viscosity(1.0);
+}
+
+fn check_heated_cox_viscosity(outer_to_liquid_ratio: f64) {
     use fs_lbm::material::free_surface::wetting::{CoxVoinovControls, CoxVoinovLaw};
     let base = source_card(0.004, false, 500.0);
     let mut claims = ClaimSet::new();
@@ -400,7 +409,7 @@ fn g1_cox_contact_angle_uses_local_heated_viscosity_without_inventing_heat() {
             )
             .unwrap()
             .with_cox_voinov_wetting(
-                CoxVoinovLaw::try_new(
+                CoxVoinovLaw::try_new_with_viscosity_ratio(
                     CoxVoinovControls {
                         microscopic_cutoff_m: 1e-9,
                         observation_length_m: 0.001,
@@ -408,6 +417,7 @@ fn g1_cox_contact_angle_uses_local_heated_viscosity_without_inventing_heat() {
                         minimum_angle_radians: 0.01,
                         maximum_angle_radians: 3.0,
                     },
+                    outer_to_liquid_ratio,
                     &gate,
                 )
                 .unwrap(),
@@ -430,6 +440,10 @@ fn g1_cox_contact_angle_uses_local_heated_viscosity_without_inventing_heat() {
         let mut heated_moving_samples = 0;
         for (&position, sample) in thermal.wetting_samples().unwrap() {
             let prediction = sample.hydrodynamic.unwrap();
+            assert_eq!(
+                prediction.outer_to_liquid_viscosity_ratio,
+                outer_to_liquid_ratio
+            );
             assert_eq!(
                 sample.material.state_coordinate(DYNAMIC_WETTING_SPEED_AXIS),
                 Some(0.0)

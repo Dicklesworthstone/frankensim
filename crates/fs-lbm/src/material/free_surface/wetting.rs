@@ -235,6 +235,8 @@ impl<'m> WettingBinding<'m> {
 
 impl MaterialFreeSurfaceWetting3<'_, '_> {
     /// Add the full-angle Cox law to STATIC advancing/receding endpoints.
+    /// Any finite outer/liquid viscosity ratio is an explicit fixed model input;
+    /// this boundary does not evolve a second-fluid momentum field.
     /// Source curves with a contact-speed axis are refused to avoid counting
     /// measured rate dependence twice. Source receipts remain at speed zero;
     /// actual speed, viscosity and model-predicted angle are separate samples.
@@ -487,6 +489,7 @@ impl WettingBinding<'_> {
                 signed_capillary_number: capillary,
                 dynamic_viscosity_pa_s: viscosity,
                 surface_tension_n_m: binding.surface_tension_n_m,
+                outer_to_liquid_viscosity_ratio: binding.law.outer_to_liquid_viscosity_ratio(),
             })
         } else {
             None

@@ -62,7 +62,10 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     /// Add a hydrodynamic Cox law to an existing STATIC hysteresis binding.
     /// The actual local source viscosity follows the enthalpy trajectory; sigma
     /// remains the native constant. Shear-dependent liquids and already dynamic
-    /// angle curves refuse because this is a Newtonian single-liquid closure.
+    /// angle curves refuse because the Cox wedges require Newtonian fluids.
+    /// A caller-declared finite outer/liquid viscosity ratio remains fixed as
+    /// the liquid heats: that explicitly models proportional outer viscosity,
+    /// not a resolved or independently sourced gas-temperature trajectory.
     /// Apparent angles alter momentum, without manufacturing capillary heat.
     pub fn with_cox_voinov_wetting(
         mut self,
