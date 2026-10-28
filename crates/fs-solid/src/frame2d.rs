@@ -410,7 +410,7 @@ pub struct DynamicHistory {
     pub u: Vec<Vec<f64>>,
     /// Base shear (sum of horizontal reactions) per step.
     pub base_shear: Vec<f64>,
-    /// Cumulative input energy (relative formulation).
+    /// Cumulative external work (relative formulation), including any sustained load.
     pub input_energy: Vec<f64>,
     /// Kinetic energy.
     pub kinetic_energy: Vec<f64>,
@@ -423,10 +423,11 @@ pub struct DynamicHistory {
 }
 
 impl DynamicHistory {
-    /// Largest relative energy-balance error `|E_in − E_k − E_d − E_int|`
+    /// Largest relative energy-balance error `|E_in − (E_k − E_k0) − E_d − E_int|`
     /// over the record, normalized by the peak input energy.
     #[must_use]
     pub fn energy_balance_error(&self) -> f64 {
+        let initial_kinetic = self.kinetic_energy.first().copied().unwrap_or(0.0);
         let peak = self
             .input_energy
             .iter()
@@ -435,7 +436,7 @@ impl DynamicHistory {
         (0..self.t.len())
             .map(|k| {
                 (self.input_energy[k]
-                    - self.kinetic_energy[k]
+                    - (self.kinetic_energy[k] - initial_kinetic)
                     - self.damping_energy[k]
                     - self.internal_work[k])
                     .abs()
@@ -1023,10 +1024,11 @@ impl Frame2d {
     /// uniform base acceleration record `ground` (sampled every `dt`) acting
     /// along the global direction `(dir_x, dir_y)`, with Rayleigh damping on
     /// the initial stiffness. Displacements are RELATIVE to the base.
+    /// No sustained nodal load is applied: use [`Self::newmark_with_load`] to
+    /// retain gravity or another static preload during the record.
     ///
     /// # Errors
     /// [`SolidError::NewtonStalled`] if a step fails (reduce `dt`).
-    #[allow(clippy::too_many_lines)]
     pub fn newmark(
         &mut self,
         ground: &[f64],
@@ -1034,10 +1036,39 @@ impl Frame2d {
         dir: (f64, f64),
         damping: Rayleigh,
     ) -> Result<DynamicHistory, SolidError> {
+        self.newmark_with_load(ground, dt, dir, damping, &vec![0.0; self.ndof()])
+    }
+
+    /// Advance a base-acceleration record while retaining the supplied constant
+    /// nodal load (one entry per DOF), such as the gravity load passed to
+    /// [`Self::static_load`]. The relative-motion equation is
+    /// `M a + C v + f_int(u) = sustained_load − M r a_ground`.
+    /// The supplied load enters the initial acceleration, every nonlinear step,
+    /// and the external-work ledger. It is never inferred from the current
+    /// displacement or material state. Existing displacement and material history
+    /// are retained; static equilibrium is not recomputed by this method.
+    ///
+    /// # Errors
+    /// [`SolidError::InvalidInput`] for a wrong-length or non-finite sustained
+    /// load, or an invalid time step; [`SolidError::NewtonStalled`] if a step fails.
+    #[allow(clippy::too_many_lines)]
+    pub fn newmark_with_load(
+        &mut self,
+        ground: &[f64],
+        dt: f64,
+        dir: (f64, f64),
+        damping: Rayleigh,
+        sustained_load: &[f64],
+    ) -> Result<DynamicHistory, SolidError> {
         let n = self.ndof();
         if !(dt.is_finite() && dt > 0.0) {
             return Err(SolidError::InvalidInput {
                 what: "time step must be finite and positive".into(),
+            });
+        }
+        if sustained_load.len() != n || sustained_load.iter().any(|v| !v.is_finite()) {
+            return Err(SolidError::InvalidInput {
+                what: "sustained load must have one finite entry per DOF".into(),
             });
         }
         let (gamma, beta) = (0.5, 0.25);
@@ -1061,11 +1092,16 @@ impl Frame2d {
                 .map(|i| (0..n).map(|j| cmat[i * n + j] * v[j]).sum())
                 .collect()
         };
-        let pext = |ag: f64| -> Vec<f64> { (0..n).map(|d| -m[d] * infl[d] * ag).collect() };
+        let pext = |ag: f64| -> Vec<f64> {
+            (0..n)
+                .map(|d| sustained_load[d] - m[d] * infl[d] * ag)
+                .collect()
+        };
         let fref = (0..n)
             .map(|d| (m[d] * infl[d]).abs())
             .fold(0.0f64, f64::max)
             * ground.iter().fold(0.0f64, |a, g| a.max(g.abs()))
+            + sustained_load.iter().fold(0.0f64, |a, p| a.max(p.abs()))
             + 1.0;
         let mut hist = DynamicHistory {
             t: vec![0.0],

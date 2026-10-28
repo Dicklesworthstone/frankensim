@@ -10,7 +10,8 @@
 //! kinematics). The building is preloaded by its own floor weight, its modes
 //! are extracted from the gravity-loaded tangent, Rayleigh damping is fitted
 //! to the first and last retained lateral modes, and the base record drives
-//! an implicit Newmark history with an energy ledger.
+//! an implicit Newmark history with the floor weight still applied and an
+//! energy ledger that includes its work.
 //!
 //! [`building_fragility`] reruns the stage-4 anytime-valid study at this tier:
 //! an e-stopped confidence sequence on the exceedance indicator of the PEAK
@@ -107,6 +108,7 @@ pub struct BuildingFrame {
     floors: Vec<Vec<usize>>,
     periods: Vec<f64>,
     damping: Rayleigh,
+    gravity: Vec<f64>,
 }
 
 /// One building time-history record.
@@ -215,6 +217,7 @@ impl BuildingFrame {
             floors,
             periods,
             damping,
+            gravity,
         })
     }
 
@@ -237,13 +240,16 @@ impl BuildingFrame {
     }
 
     /// Run a horizontal base-acceleration record `ag` sampled every `dt`.
-    /// Consumes the gravity-loaded state; clone the frame to rerun.
+    /// Retains the floor weight throughout the history. Consumes the
+    /// gravity-loaded state; clone the frame to rerun.
     ///
     /// # Errors
     /// Solver errors if a step fails to converge (reduce `dt`).
     pub fn run(&mut self, ag: &[f64], dt: f64) -> Result<BuildingResponse, SolidError> {
         let u_grav = self.frame.displacements().to_vec();
-        let hist = self.frame.newmark(ag, dt, (1.0, 0.0), self.damping)?;
+        let hist = self
+            .frame
+            .newmark_with_load(ag, dt, (1.0, 0.0), self.damping, &self.gravity)?;
         let floor_ux = |u: &[f64], level: usize| -> f64 {
             let row = &self.floors[level];
             row.iter().map(|&n| u[3 * n] - u_grav[3 * n]).sum::<f64>() / row.len() as f64

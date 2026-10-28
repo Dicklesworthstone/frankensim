@@ -1000,7 +1000,14 @@ atomic failure, cancellation/retry, clone identity and fully prescribed limits.
   condensed), `newmark` (average acceleration, uniform base motion,
   Rayleigh damping on the initial stiffness via `Rayleigh::from_modes`) with
   a `DynamicHistory` energy ledger (input, kinetic, damping, internal work)
-  and base shear. The `static_load` and `newmark` Newton steps backtrack
+  and base shear. `newmark_with_load` retains an explicit constant nodal load
+  throughout the base-motion record: `M a + C v + f_int = load - M r a_ground`.
+  It includes that load in the initial acceleration and external-work ledger,
+  so gravity-preloaded columns keep their compression and P–Δ response.
+  `newmark` continues to mean zero sustained load; a preload is never inferred
+  from internal forces. The energy audit uses the change in kinetic energy
+  from the supplied initial state, alongside incremental internal work.
+  The `static_load` and `newmark` Newton steps backtrack
   (step 1, ½, … down to 2⁻⁹) on the free residual norm, because fiber laws
   are non-smooth: Mander concrete has zero tangent at exactly zero strain, so
   the first tangent of an unstressed RC section is steel-only and full steps
@@ -1525,7 +1532,11 @@ moment `πEI/L` rolls into the exact half circle (tip within 0.5% L, rotation
 `ω²/ω₀² ≈ 1 − P/P_cr` at half the Euler load; RC pushover with exact
 `Mᵢ = H·L` equilibrium bounded by an independent section moment envelope and
 base-concentrated curvature; cyclic pushover dissipates energy over closed
-cycles; elastic SDOF Newmark against the exact Duhamel response (< 0.1% of
+cycles; sustained-gravity equilibrium for linear and corotational members,
+loaded/unloaded linear superposition with the exact sustained-load work,
+continued-state kinetic-energy accounting, and compressed-column vibration
+against the gravity-loaded tangent oscillator; elastic SDOF Newmark against
+the exact Duhamel response (< 0.1% of
 peak) with energy balance < 1e-6; a 3-story 2-bay RC fiber frame with gravity
 preload, modal Rayleigh damping and an 8 s synthetic record (energy balance <
 2%); bit-identical replay; malformed-input refusals.

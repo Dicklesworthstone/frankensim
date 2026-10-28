@@ -380,7 +380,9 @@ fn frame_g2_multistory_rc_frame_time_history_with_energy_ledger() {
     let damping = Rayleigh::from_modes(0.05, w[0], w[2]);
     let dt = 0.01;
     let ground = ground_motion(dt, 8.0);
-    let hist = f.newmark(&ground, dt, (1.0, 0.0), damping).unwrap();
+    let hist = f
+        .newmark_with_load(&ground, dt, (1.0, 0.0), damping, &gravity)
+        .unwrap();
     let roof = *left.last().unwrap();
     let peak_roof = hist.u.iter().fold(0.0f64, |m, u| m.max(u[3 * roof].abs()));
     let peak_shear = hist.base_shear.iter().fold(0.0f64, |m, v| m.max(v.abs()));
@@ -434,4 +436,145 @@ fn frame_falsifier_bad_inputs_are_refused() {
         "unknown node"
     );
     assert!(f.static_load(&[1.0], 1).is_err(), "wrong load length");
+}
+
+#[test]
+fn frame_sustained_gravity_preserves_static_equilibrium() {
+    let (l, m, g) = (3.0, 2000.0, 9.806_65);
+    for geometry in [Geometry::Linear, Geometry::Corotational] {
+        let mut frame = Frame2d::new(geometry);
+        let base = frame.add_node(0.0, 0.0);
+        let top = frame.add_node(0.0, l);
+        frame.fix(base, [true; 3]);
+        frame.fix(top, [true, false, true]);
+        frame.add_element(base, top, 5, 0.0, &elastic).unwrap();
+        frame.add_mass(top, m);
+        let mut gravity = vec![0.0; frame.ndof()];
+        gravity[3 * top + 1] = -m * g;
+        frame.static_load(&gravity, 1).unwrap();
+        let equilibrium = frame.displacements().to_vec();
+        let settlement = m * g * l / (E * A);
+        assert!((equilibrium[3 * top + 1] + settlement).abs() < 1e-12);
+        let history = frame
+            .newmark_with_load(
+                &[0.0; 201],
+                1e-4,
+                (1.0, 0.0),
+                Rayleigh { a0: 0.2, a1: 1e-5 },
+                &gravity,
+            )
+            .unwrap();
+        for u in &history.u {
+            assert!(
+                (u[3 * top + 1] - equilibrium[3 * top + 1]).abs() < 1e-8 * settlement,
+                "gravity equilibrium changed: {} -> {}",
+                equilibrium[3 * top + 1],
+                u[3 * top + 1]
+            );
+        }
+        assert!((frame.element_forces(0)[0] + m * g).abs() < 1e-8 * m * g);
+        assert!(history.kinetic_energy.iter().all(|e| *e < 1e-16));
+    }
+}
+
+#[test]
+fn frame_sustained_load_response_superposes_and_accounts_for_work() {
+    let (l, m) = (3.0, 2000.0);
+    let mut frame = Frame2d::new(Geometry::Linear);
+    let base = frame.add_node(0.0, 0.0);
+    let top = frame.add_node(0.0, l);
+    frame.fix(base, [true; 3]);
+    frame.fix(top, [false, true, false]);
+    frame.add_element(base, top, 5, 0.0, &elastic).unwrap();
+    frame.add_mass(top, m);
+    let mut loaded = frame.clone();
+    let mut preload = vec![0.0; frame.ndof()];
+    preload[3 * top] = 2e4;
+    loaded.static_load(&preload, 1).unwrap();
+    let u0 = loaded.displacements()[3 * top];
+    let omega = (3.0 * E * I / (m * l.powi(3))).sqrt();
+    let dt = 2.0 * std::f64::consts::PI / (200.0 * omega);
+    let ground: Vec<f64> = (0..=375)
+        .map(|i| 2.0 * (omega * i as f64 * dt).sin())
+        .collect();
+    let damping = Rayleigh { a0: 0.4, a1: 0.0 };
+    let unloaded = frame.newmark(&ground, dt, (1.0, 0.0), damping).unwrap();
+    let held = loaded
+        .newmark_with_load(&ground, dt, (1.0, 0.0), damping, &preload)
+        .unwrap();
+    for k in 0..ground.len() {
+        let displacement = held.u[k][3 * top] - u0;
+        assert!((displacement - unloaded.u[k][3 * top]).abs() < 1e-10);
+        let preload_work = preload[3 * top] * displacement;
+        assert!((held.input_energy[k] - unloaded.input_energy[k] - preload_work).abs() < 1e-6);
+        assert!((held.internal_work[k] - unloaded.internal_work[k] - preload_work).abs() < 1e-6);
+    }
+    assert!(held.energy_balance_error() < 1e-8);
+
+    // Continuing a moving state must account for its initial kinetic energy.
+    let continuation = loaded
+        .newmark_with_load(&[0.0; 201], dt, (1.0, 0.0), damping, &preload)
+        .unwrap();
+    assert!(continuation.kinetic_energy[0] > 1.0);
+    assert!(continuation.energy_balance_error() < 1e-8);
+}
+
+#[test]
+fn frame_sustained_compression_retains_the_softened_vibration_frequency() {
+    let (l, m) = (3.0, 2000.0);
+    let (mut frame, tip) = cantilever(Geometry::Corotational, l, 1);
+    frame.add_mass(tip, m);
+    let omega_unloaded = frame.natural_frequencies().unwrap()[0];
+    let p_euler = std::f64::consts::PI.powi(2) * E * I / (4.0 * l * l);
+    let mut compression = vec![0.0; frame.ndof()];
+    compression[3 * tip] = -0.2 * p_euler;
+    frame.static_load(&compression, 2).unwrap();
+    let omega = frame.natural_frequencies().unwrap()[0];
+    assert!(omega < 0.95 * omega_unloaded);
+    let period = 2.0 * std::f64::consts::PI / omega;
+    let dt = period / 400.0;
+    let amplitude = 0.01;
+    let ground: Vec<f64> = (0..=800)
+        .map(|i| {
+            if i <= 200 {
+                amplitude * (omega * i as f64 * dt).sin()
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    let history = frame
+        .newmark_with_load(
+            &ground,
+            dt,
+            (0.0, 1.0),
+            Rayleigh { a0: 0.0, a1: 0.0 },
+            &compression,
+        )
+        .unwrap();
+    // The small transverse motion obeys the gravity-loaded tangent oscillator.
+    // After the resonant half-sine ends, its exact response is a free cosine.
+    let peak = amplitude * std::f64::consts::PI / (2.0 * omega * omega);
+    for i in (200..=800).step_by(25) {
+        let exact = -peak * (omega * (i as f64 * dt - 0.5 * period)).cos();
+        assert!(
+            (history.u[i][3 * tip + 1] - exact).abs() < 3e-3 * peak,
+            "step {i}: {} vs {exact} at compressed frequency {omega}",
+            history.u[i][3 * tip + 1]
+        );
+    }
+}
+
+#[test]
+fn frame_sustained_load_admission_preserves_the_committed_state() {
+    let (mut frame, _) = cantilever(Geometry::Linear, 3.0, 1);
+    let initial = frame.displacements().to_vec();
+    let damping = Rayleigh { a0: 0.0, a1: 0.0 };
+    for load in [vec![0.0; 1], vec![f64::NAN; frame.ndof()]] {
+        let error = frame
+            .newmark_with_load(&[0.0, 0.0], 0.01, (1.0, 0.0), damping, &load)
+            .unwrap_err();
+        assert!(matches!(error, fs_solid::SolidError::InvalidInput { .. }));
+        assert_eq!(frame.displacements(), initial);
+    }
 }

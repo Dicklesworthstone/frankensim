@@ -75,12 +75,15 @@ their own battery: fs-truss (layout LP + sizing), fs-solid/fs-material
   bays` RC moment frame on fs-solid `Frame2d` (corotational), every column
   and beam one force-based element of Gauss–Lobatto fiber sections. Floor
   mass is lumped equally at the floor's nodes and applied as a gravity
-  preload; periods come from the gravity-loaded tangent, and Rayleigh
+  preload and as a sustained external load during every time-history step;
+  periods come from the gravity-loaded tangent, and Rayleigh
   damping is fitted to modes 1 and `stories`. A degenerate spec is
   `SolidError::InvalidInput`; preload or modal failure propagates.
   `run(ag, dt)` returns the per-story peak inter-story drift ratios, the
   roof history, the peak base shear, the internal work and the Newmark
-  energy-balance error.
+  energy-balance error. External work includes the retained floor weight;
+  an unexcited gravity-loaded building remains at its loaded equilibrium
+  (`tests/building_gravity.rs`), preserving its compressive geometric stiffness.
 - `building::building_fragility(ensemble, spec, story, limit, alpha,
   margin)`: e-stopped confidence sequence on `P(peak inter-story drift
   ratio > limit)` (stop once the radius is `≤ margin`, after ≥ 8 members),
