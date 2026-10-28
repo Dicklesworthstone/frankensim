@@ -788,6 +788,36 @@ motion and unchanged retry after late refusal/cancellation.
 All eight and the nineteen prior contact groups pass in the focused native
 original-source build; this does not establish a full Cargo/DSR gate.
 
+### Simultaneous retained shear at multiple articulated contacts
+
+`articulated_contacts::tangential::planar::multiple::advance_articulated_tangential_contacts`
+advances an explicitly bounded list of original contact/law/history pairs in
+one common physical interval. The native ABA assembles every entry of the full
+`2N`-row `J M^-1 J^T`; cross-contact blocks remain in `C = dt^2 W / 2`.
+The shared prepared tribology owner resolves all retained constitutive histories
+against that operator. Only then are all impulses accumulated into one native
+update per articulated system. Contact count and `(2N)^2` storage are admitted
+before probing or allocating the contact matrices; no generalized mass matrix
+or independent-contact approximation is introduced.
+
+Each actual endpoint supplies its own midpoint slip and storage/work/heat check.
+The total physical heat and storage change enter the original global kinetic,
+support-work and world momentum audit exactly once. Every candidate history and
+all body responses return together, in the caller's original order. One source,
+geometry, history, solve, actual-work or cancellation failure publishes none.
+The original per-site normal load, temperature and pressure remain explicit;
+different durations refuse. Normal response, pose and physical frame transport,
+interface ownership, discovery, rolling/spin and thermal allocation remain with
+their existing owners. Dry sticking remains a midpoint-slip condition.
+
+Six G1/G3/G4 groups in `tests/articulated_contacts/planar/multiple.rs` cover
+opposing and three orthogonal shared-body interfaces against an independent
+dense elastic solution, contact permutation, dynamic-counterpart momentum,
+retained nonproportional plastic histories, manufactured simultaneous stick/slide
+and unchanged whole-system retry after late refusal or cancellation.
+All six and the twenty-seven prior contact groups pass in the focused native
+original-source build; this does not establish a full Cargo/DSR workspace gate.
+
 ## Native rigid-body finite-patch tangential impulses
 
 `tangential_friction::apply_rigid_friction` binds supplied positive normal

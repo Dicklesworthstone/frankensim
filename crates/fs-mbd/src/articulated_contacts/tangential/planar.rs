@@ -12,6 +12,10 @@
 //! inferred. In particular, a scalar Hertz--Mindlin law keeps its own refusal
 //! of transverse motion. A two-axis layer or dry law supplies its own physics.
 
+/// Simultaneous retained shear at multiple coupled material points.
+#[path = "planar/multiple.rs"]
+pub mod multiple;
+
 use super::{ArticulatedTangentialConfig, ArticulatedTangentialDrive, admit};
 use crate::articulated::FreeFloatingImpulseResponse;
 use crate::articulated_contacts::{

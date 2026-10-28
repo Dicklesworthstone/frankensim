@@ -1,5 +1,8 @@
 //! G1/G3/G4: actual two-axis recoil, anisotropic mobility and retained shear.
 
+#[path = "planar/multiple.rs"]
+mod multiple;
+
 use super::*;
 use fs_mbd::articulated_contacts::tangential::planar::{
     ArticulatedPlanarTangentialConfig, ArticulatedPlanarTangentialContact,
