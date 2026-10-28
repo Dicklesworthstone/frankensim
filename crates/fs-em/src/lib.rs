@@ -28,6 +28,9 @@
 //! the nonlinear backward-Euler owner includes fixed oriented recoil sources.
 //! `planar::eddy::moving` adds prescribed Eulerian conductor velocity, spatial
 //! induction feedback and consistent Joule/Lorentz work on the same fixed mesh.
+//! `planar::eddy::nonlinear::moving` extends that motion to source-bound H(B)
+//! and fixed-recoil bias, with nonsymmetric Newton/FGMRES and separate positive
+//! backward-Euler numerical loss. It retains fixed material occupancy and axes.
 //! There is no hysteresis, irreversible demagnetization, moving-geometry
 //! induction or distributed magnetostriction claim.
 //! `planar::nonlinear` combines source-bound reversible H(B), linear media and

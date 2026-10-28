@@ -841,3 +841,31 @@ Focused coupled regressions cover scalar and oriented source laws, both slope
 signs and zero slope, continued charge/heat, electrode work and the isolated-charge
 limit. Changed native source passed Rust syntax and bounded independent
 accounting/source review; native compilation/test execution was unavailable.
+
+### Saturating and fixed-recoil moving induction
+
+`PlanarNonlinearEddy::step_with_eulerian_velocity_candidate` advances
+source-bound reversible H(B) and stationary recoil bias with prescribed P1
+conductor velocity. Backward Euler uses the original analytic FEEC tangent plus
+the nonsymmetric motion derivative, bounded Newton/FGMRES and residual
+backtracking. The linear and nonlinear paths share their matrix-free motion
+action/transpose, floating-conductor projection and exact P1 current/heat/work
+recovery; Arnoldi actions reuse full-mesh scratch.
+
+One projected endpoint current supplies conductor-frame Joule heat and signed
+Lorentz work, closing delta psi + Q + W_mechanical + D_BE = W_impressed. The
+original convex Bregman D_BE remains numerical loss, never a thermal credit.
+Complete-source slope bounds govern the caller-admitted magnetic Peclet limit.
+Recoil cells require zero velocity, whether conducting or insulating. Stationary
+magnets may bias adjacent moving metal, but permanent magnetization is not
+transported. Geometry, material sources, remanence axes and electrical regions
+remain fixed; every failed candidate preserves accepted history.
+
+The scheme is first order in time. The centered P1 Peclet allowance is a
+formulation admission, not an error certificate. Moving interfaces, thermal
+parameter evolution within the operation, hysteresis, irreversible
+demagnetization and terminal-circuit motion coupling require separate owners.
+Five physical regressions cover an independently assembled nonlinear P1
+residual and heat/work quadrature, an analytic stationary-magnet/moving-metal
+transient with time refinement, stationary continuation, saturated uniform-field
+charge cancellation and source/domain/work/cancellation refusals.

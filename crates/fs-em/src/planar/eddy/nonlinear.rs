@@ -38,6 +38,9 @@ use fs_material::{
 use fs_rep_mesh::TriComplex2;
 use std::{ops::Deref, sync::Arc};
 
+/// Saturating and fixed-remanence induction with prescribed Eulerian motion.
+pub mod moving;
+
 /// Physical accounting allowances and the shared bounded nonlinear solve.
 #[derive(Clone, Copy, Debug)]
 pub struct NonlinearEddyControls {
@@ -264,6 +267,28 @@ fn admit_controls(value: NonlinearEddyControls) -> Result<(), EddyError> {
         ));
     }
     Ok(())
+}
+
+fn numerical_loss_density(
+    material: &IsotropicMagneticMaterial,
+    before: [f64; 2],
+    after: [f64; 2],
+) -> Result<f64, NonlinearEddyError> {
+    let mu = match material {
+        IsotropicMagneticMaterial::Linear(material) => {
+            linear_magnetic_permeability(material).map_err(EddyError::from)?
+        }
+        IsotropicMagneticMaterial::Recoil(law) => law.material().permeability_h_m(),
+        IsotropicMagneticMaterial::Reversible(law) => {
+            return Ok(law
+                .bregman_density_j_m3(before, after)
+                .map_err(EddyError::from)?);
+        }
+    };
+    // Fixed Br cancels from the convex increment. Do not subtract large bias
+    // energies, or turn this time-discretization loss into constitutive heat.
+    let difference = (after[0] - before[0]).hypot(after[1] - before[1]);
+    Ok(finite((0.5 * difference) * (difference / mu))?)
 }
 
 impl<'m> PlanarNonlinearEddy<'m> {
@@ -527,24 +552,7 @@ impl<'m> PlanarNonlinearEddy<'m> {
                 .mesh()
                 .face_measure(triangle)
                 .ok_or(EddyError::Invalid("missing magnetic volume"))?;
-            let density = match material {
-                IsotropicMagneticMaterial::Linear(material) => {
-                    let mu = linear_magnetic_permeability(material).map_err(EddyError::from)?;
-                    let difference = (b1[0] - b0[0]).hypot(b1[1] - b0[1]);
-                    finite((0.5 * difference) * (difference / mu))?
-                }
-                IsotropicMagneticMaterial::Reversible(law) => {
-                    law.bregman_density_j_m3(b0, b1).map_err(EddyError::from)?
-                }
-                IsotropicMagneticMaterial::Recoil(law) => {
-                    // Fixed Br cancels from the convex increment. Evaluate the
-                    // positive quadratic directly, without subtracting stored
-                    // bias energies or labeling numerical loss as Joule heat.
-                    let mu = law.material().permeability_h_m();
-                    let difference = (b1[0] - b0[0]).hypot(b1[1] - b0[1]);
-                    finite((0.5 * difference) * (difference / mu))?
-                }
-            };
+            let density = numerical_loss_density(material, b0, b1)?;
             let numerical = finite(volume_m3 * density)?;
             if numerical < 0.0 {
                 return Err(EddyError::Balance(

@@ -18,13 +18,15 @@
 //! https://doc.comsol.com/6.4/doc/com.comsol.help.acdc/acdc_ug_magnetic_fields.08.040.html.
 
 use super::{
-    Conduction, EddyCellHeat, EddyError, PlanarEddy, admit_algebraic, bind, finite, load,
-    magnetic_load, poll, positive,
+    Conduction, EddyCellHeat, EddyConductor, EddyError, PlanarEddy, admit_algebraic, bind, finite,
+    load, magnetic_load, poll, positive,
 };
-use crate::planar::{MagneticError, PlanarMagnetostatics, gradients};
+use crate::planar::{MagneticError, gradients};
+use fs_rep_mesh::TriComplex2;
 use fs_solver::{
     FgmresState, FlexiblePreconditioner, LinearOp, ResidualClaim, SolveReport, SolverRunProgress,
 };
+use fs_sparse::Csr;
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
@@ -49,6 +51,55 @@ pub struct MovingEddyControls {
     pub max_cell_magnetic_peclet: f64,
     pub energy_tolerance_j: f64,
     pub current_balance_tolerance_a: f64,
+}
+
+pub(super) fn admit_controls(
+    limits: MovingEddyControls,
+    free_count: usize,
+    dt: f64,
+) -> Result<usize, EddyError> {
+    if !positive(dt)
+        || !positive(limits.relative_tolerance)
+        || limits.relative_tolerance >= 1.0
+        || !positive(limits.absolute_residual_a_m)
+        || limits.restart == 0
+        || limits.max_cycles == 0
+        || !positive(limits.max_cell_magnetic_peclet)
+        || !positive(limits.energy_tolerance_j)
+        || !positive(limits.current_balance_tolerance_a)
+    {
+        return Err(EddyError::Invalid(
+            "positive finite moving-induction interval and controls required",
+        ));
+    }
+    let restart = limits.restart.min(free_count.max(1));
+    // Includes staged checkpoints, Arnoldi work vectors, rotations, history,
+    // and triangular-solve coefficients, for the existing FGMRES owner.
+    let scalars = restart
+        .checked_mul(2)
+        .and_then(|v| v.checked_add(12))
+        .and_then(|v| v.checked_mul(free_count))
+        .and_then(|v| {
+            restart
+                .checked_add(8)
+                .and_then(|m| m.checked_mul(restart))
+                .and_then(|h| v.checked_add(h))
+        })
+        .and_then(|v| {
+            limits
+                .max_cycles
+                .checked_mul(4)
+                .and_then(|history| v.checked_add(history))
+        });
+    let scalars = if free_count == 0 { Some(0) } else { scalars };
+    if scalars.is_none_or(|n| n > limits.max_krylov_scalars)
+        || restart.checked_mul(limits.max_cycles).is_none()
+    {
+        return Err(EddyError::Invalid(
+            "moving-induction Krylov storage budget exceeded",
+        ));
+    }
+    Ok(restart)
 }
 
 /// Stage fields and exact P1 mechanical-power quadrature on one original cell.
@@ -96,24 +147,27 @@ impl<'m> MovingEddyCandidate<'m> {
     }
 }
 
-struct MotionCell {
+pub(super) struct MotionCell {
     gradients: [[f64; 2]; 3],
     velocity: [[f64; 2]; 3],
 }
-struct Motion {
+pub(super) struct Motion {
     cells: Vec<MotionCell>,
-    max_peclet: f64,
+    pub(super) max_peclet: f64,
 }
 impl Motion {
-    fn new(
-        state: &PlanarEddy<'_>,
+    pub(super) fn new(
+        mesh: &TriComplex2,
         conduction: &Conduction,
         velocity: &[[f64; 2]],
+        maximum_permeability_h_m: &[f64],
         limit: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, EddyError> {
-        if velocity.len() != state.problem.mesh.vertices().len()
+        if velocity.len() != mesh.vertices().len()
             || velocity.iter().flatten().any(|v| !v.is_finite())
+            || maximum_permeability_h_m.len() != conduction.cells.len()
+            || maximum_permeability_h_m.iter().any(|v| !positive(*v))
         {
             return Err(EddyError::Invalid(
                 "finite planar velocity is required at every original mesh vertex",
@@ -121,9 +175,9 @@ impl Motion {
         }
         let mut cells = Vec::with_capacity(conduction.cells.len());
         let mut max_peclet: f64 = 0.0;
-        for (source, cell) in state.conductors.iter().zip(&conduction.cells) {
+        for (&permeability, cell) in maximum_permeability_h_m.iter().zip(&conduction.cells) {
             poll(cancelled)?;
-            let points = cell.vertices.map(|v| state.problem.mesh.vertices()[v]);
+            let points = cell.vertices.map(|v| mesh.vertices()[v]);
             let velocity = cell.vertices.map(|v| velocity[v]);
             let speed = velocity
                 .iter()
@@ -136,12 +190,7 @@ impl Motion {
                     (a[0] - b[0]).hypot(a[1] - b[1])
                 })
                 .fold(0.0, f64::max);
-            let peclet = finite(
-                state.problem.permeability_h_m[source.triangle]
-                    * cell.conductivity_s_m
-                    * speed
-                    * (0.5 * diameter),
-            )?;
+            let peclet = finite(permeability * cell.conductivity_s_m * speed * (0.5 * diameter))?;
             if peclet > limit {
                 return Err(EddyError::Invalid(
                     "moving conductor exceeds the declared cell magnetic Peclet limit",
@@ -156,7 +205,7 @@ impl Motion {
         Ok(Self { cells, max_peclet })
     }
 
-    fn offsets(
+    pub(super) fn offsets(
         &self,
         conduction: &Conduction,
         potential: &[f64],
@@ -184,34 +233,37 @@ impl Motion {
     }
 }
 
-struct Scratch {
-    full: Vec<f64>,
-    rate: Vec<f64>,
-    conduction: Vec<f64>,
-    offsets: Vec<[f64; 3]>,
+pub(super) struct Scratch {
+    pub(super) full: Vec<f64>,
+    pub(super) rate: Vec<f64>,
+    pub(super) conduction: Vec<f64>,
+    pub(super) offsets: Vec<[f64; 3]>,
 }
-struct MovingIncrement<'a> {
-    problem: &'a PlanarMagnetostatics,
-    free: &'a [usize],
-    conduction: &'a Conduction,
-    motion: &'a Motion,
-    dt: f64,
-    check: &'a dyn Fn() -> bool,
-    scratch: RefCell<Scratch>,
+pub(super) struct MovingIncrement<'a> {
+    pub(super) magnetic: &'a Csr,
+    pub(super) stage_factor: f64,
+    pub(super) free: &'a [usize],
+    pub(super) conduction: &'a Conduction,
+    pub(super) motion: &'a Motion,
+    pub(super) dt: f64,
+    pub(super) check: &'a dyn Fn() -> bool,
+    pub(super) scratch: RefCell<Scratch>,
 }
 
 // Positive diffusion/storage diagonal, leaving the nonsymmetric velocity term
 // to FGMRES. Regional subtraction is the exact floating-mass diagonal; omitting
 // it would precondition the wrong electrical constraint.
-struct MovingJacobi(Vec<f64>);
+pub(super) struct MovingJacobi(Vec<f64>);
 impl MovingJacobi {
-    fn new(
-        state: &PlanarEddy<'_>,
+    pub(super) fn new(
+        magnetic: &Csr,
+        free: &[usize],
         conduction: &Conduction,
         dt: f64,
+        stage_factor: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, EddyError> {
-        let mut diagonal = vec![0.0; state.potential_wb_m.len()];
+        let mut diagonal = vec![0.0; magnetic.nrows()];
         let mut moments = BTreeMap::<(usize, usize), f64>::new();
         for cell in &conduction.cells {
             poll(cancelled)?;
@@ -224,15 +276,15 @@ impl MovingJacobi {
             poll(cancelled)?;
             diagonal[v] -= moment * (moment / conduction.weights[group]);
         }
-        let mut inverse = Vec::with_capacity(state.free.len());
-        for &v in &state.free {
+        let mut inverse = Vec::with_capacity(free.len());
+        for &v in free {
             poll(cancelled)?;
-            let (cols, vals) = state.problem.stiffness.row(v);
+            let (cols, vals) = magnetic.row(v);
             let stiffness = cols
                 .iter()
                 .position(|&col| col == v)
                 .map_or(0.0, |i| vals[i]);
-            let value = 0.5 * stiffness + diagonal[v] / dt;
+            let value = stage_factor * stiffness + diagonal[v] / dt;
             if !positive(value) || !positive(value.recip()) {
                 return Err(EddyError::Invalid(
                     "moving-induction diffusion/storage diagonal is not representably positive",
@@ -271,12 +323,15 @@ impl LinearOp for MovingIncrement<'_> {
             full[v] = value;
             rate[v] = value / self.dt;
         }
-        if !self
-            .motion
-            .offsets(self.conduction, full, 0.5, offsets, self.check)
-            || !self
-                .conduction
-                .apply_with_offsets(rate, offsets, conduction, self.check)
+        if !self.motion.offsets(
+            self.conduction,
+            full,
+            self.stage_factor,
+            offsets,
+            self.check,
+        ) || !self
+            .conduction
+            .apply_with_offsets(rate, offsets, conduction, self.check)
         {
             y.fill(f64::NAN);
             return;
@@ -286,13 +341,13 @@ impl LinearOp for MovingIncrement<'_> {
                 y.fill(f64::NAN);
                 return;
             }
-            let (cols, vals) = self.problem.stiffness.row(v);
+            let (cols, vals) = self.magnetic.row(v);
             let stiffness = cols
                 .iter()
                 .zip(vals)
                 .map(|(&j, &a)| a * full[j])
                 .sum::<f64>();
-            y[row] = 0.5 * stiffness + conduction[v];
+            y[row] = self.stage_factor * stiffness + conduction[v];
         }
     }
 
@@ -345,15 +400,107 @@ impl LinearOp for MovingIncrement<'_> {
                 y.fill(f64::NAN);
                 return;
             }
-            let (cols, vals) = self.problem.stiffness.row(v);
+            let (cols, vals) = self.magnetic.row(v);
             let stiffness = cols
                 .iter()
                 .zip(vals)
                 .map(|(&j, &a)| a * full[j])
                 .sum::<f64>();
-            y[row] = 0.5 * (stiffness + rate[v]) + conduction[v] / self.dt;
+            y[row] = self.stage_factor * (stiffness + rate[v]) + conduction[v] / self.dt;
         }
     }
+}
+
+pub(super) struct MotionHeat {
+    pub(super) cells: Vec<MovingEddyCell>,
+    pub(super) heat_j: f64,
+    pub(super) mechanical_work_j: f64,
+    pub(super) region_currents_a: Vec<(u32, f64)>,
+}
+
+// One constitutive current and one exact P1 product quadrature serve midpoint
+// linear induction and endpoint nonlinear induction. Only the magnetic stage
+// and its own stored-energy/time-discretization account differ.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn recover_motion(
+    conduction: &Conduction,
+    conductors: &[EddyConductor],
+    motion: &Motion,
+    stage_flux_density_t: &[[f64; 2]],
+    rate: &[f64],
+    dt: f64,
+    thickness_m: f64,
+    current_balance_tolerance_a: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<MotionHeat, EddyError> {
+    let mut offsets = vec![[0.0; 3]; conduction.cells.len()];
+    for ((offset, motion), source) in offsets.iter_mut().zip(&motion.cells).zip(conductors) {
+        poll(cancelled)?;
+        let b = stage_flux_density_t[source.triangle];
+        let grad = [-b[1], b[0]];
+        for (value, velocity) in offset.iter_mut().zip(&motion.velocity) {
+            *value = finite(velocity[0].mul_add(grad[0], velocity[1] * grad[1]))?;
+        }
+    }
+    let heat = {
+        let cancel = RefCell::new(&mut *cancelled);
+        conduction.heat_with_offsets(
+            rate,
+            &offsets,
+            dt,
+            thickness_m,
+            current_balance_tolerance_a,
+            &|| (*cancel.borrow_mut())(),
+        )?
+    };
+    let mut mechanical_work_j = 0.0;
+    let mut cells = Vec::with_capacity(heat.cells.len());
+    for ((source, heat), offsets) in conductors.iter().zip(heat.cells).zip(&offsets) {
+        poll(cancelled)?;
+        let b = stage_flux_density_t[source.triangle];
+        let grad = [-b[1], b[0]];
+        let j = heat.current_density_a_m2;
+        // Exact integral J*(v.grad A) = (J cross B).v, including the floating
+        // conductor's potential gradient already present in this SAME current.
+        let work = finite(
+            dt * heat.volume_m3 / 12.0
+                * (j.iter().sum::<f64>() * offsets.iter().sum::<f64>()
+                    + j.iter().zip(offsets).map(|(a, b)| a * b).sum::<f64>()),
+        )?;
+        mechanical_work_j = finite(mechanical_work_j + work)?;
+        let laboratory_electric_field_v_m =
+            std::array::from_fn(|i| heat.electric_field_v_m[i] + offsets[i]);
+        let lorentz_force_density_n_m3 = j.map(|j| grad.map(|g| j * g));
+        if laboratory_electric_field_v_m
+            .iter()
+            .chain(lorentz_force_density_n_m3.iter().flatten())
+            .any(|v| !v.is_finite())
+        {
+            return Err(EddyError::Invalid(
+                "unrepresentable moving-conductor field or force",
+            ));
+        }
+        cells.push(MovingEddyCell {
+            joule: EddyCellHeat {
+                source: source.clone(),
+                electric_field_v_m: heat.electric_field_v_m,
+                current_density_a_m2: j,
+                volume_m3: heat.volume_m3,
+                power_w: heat.power_w,
+                heat_j: heat.heat_j,
+            },
+            laboratory_electric_field_v_m,
+            motional_electric_field_v_m: offsets.map(|v| -v),
+            lorentz_force_density_n_m3,
+            mechanical_work_j: work,
+        });
+    }
+    Ok(MotionHeat {
+        cells,
+        heat_j: heat.heat_j,
+        mechanical_work_j,
+        region_currents_a: heat.region_currents_a,
+    })
 }
 
 impl<'m> PlanarEddy<'m> {
@@ -377,52 +524,12 @@ impl<'m> PlanarEddy<'m> {
     ) -> Result<MovingEddyCandidate<'m>, EddyError> {
         poll(cancelled)?;
         let dt = target_s - self.time_s;
-        if !target_s.is_finite()
-            || !positive(dt)
-            || !positive(limits.relative_tolerance)
-            || limits.relative_tolerance >= 1.0
-            || !positive(limits.absolute_residual_a_m)
-            || limits.restart == 0
-            || limits.max_cycles == 0
-            || !positive(limits.max_cell_magnetic_peclet)
-            || !positive(limits.energy_tolerance_j)
-            || !positive(limits.current_balance_tolerance_a)
-        {
+        if !target_s.is_finite() {
             return Err(EddyError::Invalid(
                 "positive finite moving-induction interval and controls required",
             ));
         }
-        let restart = limits.restart.min(self.free.len().max(1));
-        // Conservative bound also covers staged checkpoints, Arnoldi work
-        // vectors, rotations and the triangular solve's coefficients.
-        let scalars = restart
-            .checked_mul(2)
-            .and_then(|v| v.checked_add(12))
-            .and_then(|v| v.checked_mul(self.free.len()))
-            .and_then(|v| {
-                restart
-                    .checked_add(8)
-                    .and_then(|m| m.checked_mul(restart))
-                    .and_then(|h| v.checked_add(h))
-            })
-            .and_then(|v| {
-                limits
-                    .max_cycles
-                    .checked_mul(4)
-                    .and_then(|history| v.checked_add(history))
-            });
-        let scalars = if self.free.is_empty() {
-            Some(0)
-        } else {
-            scalars
-        };
-        if scalars.is_none_or(|n| n > limits.max_krylov_scalars)
-            || restart.checked_mul(limits.max_cycles).is_none()
-        {
-            return Err(EddyError::Invalid(
-                "moving-induction Krylov storage budget exceeded",
-            ));
-        }
+        let restart = admit_controls(limits, self.free.len(), dt)?;
         let (_, conduction) = bind(
             &*self.problem,
             self.conductors.clone(),
@@ -430,13 +537,25 @@ impl<'m> PlanarEddy<'m> {
             cancelled,
         )?;
         let motion = Motion::new(
-            self,
+            &self.problem.mesh,
             &conduction,
             velocity_at_vertices_m_s,
+            &self
+                .conductors
+                .iter()
+                .map(|c| self.problem.permeability_h_m[c.triangle])
+                .collect::<Vec<_>>(),
             limits.max_cell_magnetic_peclet,
             cancelled,
         )?;
-        let preconditioner = MovingJacobi::new(self, &conduction, dt, cancelled)?;
+        let preconditioner = MovingJacobi::new(
+            &self.problem.stiffness,
+            &self.free,
+            &conduction,
+            dt,
+            0.5,
+            cancelled,
+        )?;
         let endpoint_load = load(
             &*self.problem,
             impressed_jz_a_m2,
@@ -501,7 +620,8 @@ impl<'m> PlanarEddy<'m> {
                 report = None;
             } else {
                 let op = MovingIncrement {
-                    problem: &self.problem,
+                    magnetic: &self.problem.stiffness,
+                    stage_factor: 0.5,
                     free: &self.free,
                     conduction: &conduction,
                     motion: &motion,
@@ -610,79 +730,27 @@ impl<'m> PlanarEddy<'m> {
             .iter()
             .map(|a| finite(a / dt))
             .collect::<Result<_, _>>()?;
-        // Form stage motion from endpoint gradients, avoiding addition of large
-        // common gauge offsets to construct an intermediate nodal potential.
-        for (((offset, cell), motion), source) in offsets
-            .iter_mut()
-            .zip(&conduction.cells)
-            .zip(&motion.cells)
-            .zip(&self.conductors)
-        {
-            poll(cancelled)?;
-            let a = old_field.magnetic_flux_density_t()[source.triangle];
-            let b = field.magnetic_flux_density_t()[source.triangle];
-            let grad = [-f64::midpoint(a[1], b[1]), f64::midpoint(a[0], b[0])];
-            for (value, velocity) in offset.iter_mut().zip(&motion.velocity) {
-                *value = finite(velocity[0].mul_add(grad[0], velocity[1] * grad[1]))?;
-            }
-            debug_assert!(cell.volume_m3 > 0.0);
-        }
-        let heat = {
-            let cancel = RefCell::new(&mut *cancelled);
-            conduction.heat_with_offsets(
-                &rate,
-                &offsets,
-                dt,
-                self.problem.thickness_m,
-                limits.current_balance_tolerance_a,
-                &|| (*cancel.borrow_mut())(),
-            )?
-        };
-        let mut mechanical_work_j = 0.0;
-        let mut cells = Vec::with_capacity(heat.cells.len());
-        for ((source, heat), offsets) in self.conductors.iter().zip(heat.cells).zip(&offsets) {
-            poll(cancelled)?;
-            let a = old_field.magnetic_flux_density_t()[source.triangle];
-            let b = field.magnetic_flux_density_t()[source.triangle];
-            let grad = [-f64::midpoint(a[1], b[1]), f64::midpoint(a[0], b[0])];
-            let j = heat.current_density_a_m2;
-            // Exact product of two P1 functions: integral J*(v.grad A).
-            let work = finite(
-                dt * heat.volume_m3 / 12.0
-                    * (j.iter().sum::<f64>() * offsets.iter().sum::<f64>()
-                        + j.iter().zip(offsets).map(|(a, b)| a * b).sum::<f64>()),
-            )?;
-            mechanical_work_j = finite(mechanical_work_j + work)?;
-            let laboratory_electric_field_v_m =
-                std::array::from_fn(|i| heat.electric_field_v_m[i] + offsets[i]);
-            let lorentz_force_density_n_m3 = j.map(|j| grad.map(|g| j * g));
-            if laboratory_electric_field_v_m
-                .iter()
-                .chain(lorentz_force_density_n_m3.iter().flatten())
-                .any(|v| !v.is_finite())
-            {
-                return Err(EddyError::Invalid(
-                    "unrepresentable moving-conductor field or force",
-                ));
-            }
-            cells.push(MovingEddyCell {
-                joule: EddyCellHeat {
-                    source: source.clone(),
-                    electric_field_v_m: heat.electric_field_v_m,
-                    current_density_a_m2: j,
-                    volume_m3: heat.volume_m3,
-                    power_w: heat.power_w,
-                    heat_j: heat.heat_j,
-                },
-                laboratory_electric_field_v_m,
-                motional_electric_field_v_m: offsets.map(|v| -v),
-                lorentz_force_density_n_m3,
-                mechanical_work_j: work,
-            });
-        }
+        // Average endpoint B, avoiding addition of large common gauge offsets.
+        let stage_b: Vec<_> = old_field
+            .magnetic_flux_density_t()
+            .iter()
+            .zip(field.magnetic_flux_density_t())
+            .map(|(a, b)| [f64::midpoint(a[0], b[0]), f64::midpoint(a[1], b[1])])
+            .collect();
+        let heat = recover_motion(
+            &conduction,
+            &self.conductors,
+            &motion,
+            &stage_b,
+            &rate,
+            dt,
+            self.problem.thickness_m,
+            limits.current_balance_tolerance_a,
+            cancelled,
+        )?;
         let supplied_work_j = finite(loads.iter().zip(&increments).map(|(f, d)| f * d).sum())?;
         let energy_residual_j = finite(
-            field.energy_j - self.energy_j + heat.heat_j + mechanical_work_j - supplied_work_j,
+            field.energy_j - self.energy_j + heat.heat_j + heat.mechanical_work_j - supplied_work_j,
         )?;
         if energy_residual_j.abs() > limits.energy_tolerance_j {
             return Err(EddyError::Balance(
@@ -691,11 +759,11 @@ impl<'m> PlanarEddy<'m> {
         }
         let energy_j = field.energy_j;
         let step = MovingEddyStep {
-            cells,
+            cells: heat.cells,
             stored_before_j: self.energy_j,
             stored_after_j: energy_j,
             heat_j: heat.heat_j,
-            mechanical_work_j,
+            mechanical_work_j: heat.mechanical_work_j,
             supplied_work_j,
             energy_residual_j,
             region_currents_a: heat.region_currents_a,
@@ -715,6 +783,7 @@ impl<'m> PlanarEddy<'m> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::planar::PlanarMagnetostatics;
     use crate::planar::eddy::conduction::ConductionCell;
     use fs_rep_mesh::{Metric2, TriComplex2};
     use fs_sparse::Coo;
@@ -775,7 +844,8 @@ mod tests {
         };
         let check = || false;
         let op = MovingIncrement {
-            problem: &problem,
+            magnetic: &problem.stiffness,
+            stage_factor: 0.5,
             free: &[0, 1, 2, 3, 4],
             conduction: &conduction,
             motion: &motion,

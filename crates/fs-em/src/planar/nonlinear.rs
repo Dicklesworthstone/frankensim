@@ -102,7 +102,7 @@ pub struct NonlinearMagneticControls {
 pub struct NonlinearMagneticReport {
     /// Accepted nonlinear updates.
     pub newton_iterations: usize,
-    /// Total checked CG iterations across all Newton directions.
+    /// Total Krylov iterations across all Newton directions.
     pub linear_iterations: usize,
     /// Total step halvings, including those in a failed line search.
     pub backtracks: usize,
@@ -451,6 +451,37 @@ impl PlanarNonlinearMagnetostatics {
             .residual)
     }
 
+    fn assemble_tangent(
+        &self,
+        weights: &[CellWeight2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Csr, NonlinearMagneticError> {
+        let mass = weighted_mass_matrix_2d(
+            &self.mesh,
+            1,
+            weights,
+            Dims([-1, -1, 2, 0, 2, 0]),
+            self.limits,
+            cancelled,
+        )
+        .map_err(weighted_error)?;
+        Ok(stiffness(&self.incidence, mass.matrix()))
+    }
+
+    // The moving-conductor Newton solve adds a genuinely nonsymmetric
+    // transport derivative. Its magnetic residual and constitutive Hessian
+    // remain exactly this owner's source-admitted FEEC formulation.
+    pub(crate) fn magnetic_linearization(
+        &self,
+        potential: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Vec<f64>, Csr), NonlinearMagneticError> {
+        let evaluation =
+            self.evaluate(potential, &vec![0.0; potential.len()], 0.0, None, cancelled)?;
+        let tangent = self.assemble_tangent(&evaluation.tangent_weights, cancelled)?;
+        Ok((evaluation.residual, tangent))
+    }
+
     pub(crate) fn recover(
         &self,
         potential: Vec<f64>,
@@ -611,16 +642,7 @@ impl PlanarNonlinearMagnetostatics {
             if report.newton_iterations == controls.max_newton_iterations {
                 return Err(NonlinearMagneticError::Nonconvergence(report));
             }
-            let mass = weighted_mass_matrix_2d(
-                &self.mesh,
-                1,
-                &evaluation.tangent_weights,
-                Dims([-1, -1, 2, 0, 2, 0]),
-                self.limits,
-                cancelled,
-            )
-            .map_err(weighted_error)?;
-            let tangent = stiffness(&self.incidence, mass.matrix());
+            let tangent = self.assemble_tangent(&evaluation.tangent_weights, cancelled)?;
             let mut row_ptr = vec![0];
             let mut columns = Vec::new();
             let mut values = Vec::new();
