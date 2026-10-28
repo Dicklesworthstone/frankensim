@@ -10370,3 +10370,58 @@ nonlinear solid, resolved moving-flow and complete instrument accuracy are not
 established. The new complex-Schur, energy, source substitution and rollback
 regressions are accompanied by independent formulation checks; native Rust
 execution of these additions remains unverified under the shared resource limit.
+
+## Live material elasticity, expansion and finite heat in the original frame
+
+The original coupled mechanical owner now accepts one atomic batch of
+`ConnectionCoefficients`: stiffness, rest extension and damping. It rebuilds
+its existing ordinary or prepared propagator, complete frequency bound and
+endpoint reactions without resetting q/v, Maxwell memory, radiation history,
+ports or sample time. At unchanged coordinates it reports each connection's
+before/after free energy and parameter work; this work is neither a heat pulse
+nor a mechanical impulse. The damping-only API delegates to the same update.
+
+`FrameVibrationComponent::into_thermoelastic_system` binds the complete original
+material frame to its same whole-layer caloric cells. The original complete
+mass-normalized basis is a fixed coordinate chart, with native free-coordinate
+kinetics and three positive physical springs per source layer. Each axial
+spring has that layer's integrated thermal rest extension; the two bending
+factors preserve the original full stiffness projection. Separate layer springs
+retain mismatch energy for unequal temperatures/expansion coefficients.
+Off-diagonal K(T) is retained, not replaced by scalar modal frequency retuning.
+
+Each accepted-temperature interval uses the SAME native coupled propagator.
+Original spring-port work is checked against the source potential, and original
+material viscosity-port losses are partitioned by their actual layer
+rigidities. Each layer retains the original thermoelastic Helmholtz law:
+S = -dPsi/dT and U = Psi + T*S. The finite thermal residual receives separate
+viscous heat and signed reversible exchange
+Q_rev = -delta(Psi_at_fixed_endpoint) - delta(T*S).
+That expression is independently checked against stress work minus delta(U);
+native spring-work roundoff is not deposited as heat. Individual native
+coefficient rows must reproduce each layer's complete before/after storage and
+parameter work, followed by the combined mechanical/caloric energy account.
+
+Thermal trials query the same pinned sources for E(T), alpha and eta(T). Their
+jointly accepted endpoint prepares stiffness/rest/damping together before any
+history publishes. Source, thermal, strain, native budget or cancellation
+refusals retain motion, coefficients, finite heat and the shared clock for
+deterministic retry. Reports retain original caloric entropy and mechanical
+source entropy, with thermal and thermoelastic temporal defects distinguished
+from physical material-loss entropy.
+
+This first-order freeze-then-refresh rung requires complete source-bound
+members, all original free modes, fixed reference mass/geometry, no massless
+condensation or frozen preload, no additional authored modal damping, scalar
+expansion and scalar or globally affine E(T). All layers remain solid with
+positive combined caloric/thermoelastic capacity and source support through the
+sampled frequency band. Fibre-strain gates apply to accepted/proposed endpoints;
+there is no continuous intersample strain certificate. Radial constraints,
+buckling/geometric stiffness, changing mass and melting/topology need their
+corresponding physical owners and are not inferred.
+
+Manufactured regressions use independent axial/bending oscillator solutions
+and a heterogeneous two-DOF consistent-mass physical reference, with four
+unequal-temperature/alpha layers and simultaneous E(T)/eta(T). Both native
+backends, actual continued motion, off-diagonal stiffness, layer U/S, caloric
+closure, and nonzero-prefix refusal/retry are covered.

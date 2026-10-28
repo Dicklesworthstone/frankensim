@@ -13,7 +13,10 @@
 //! rebuild the SAME mechanical propagator for the next interval. This is a
 //! first-order thermal/coefficient split; refine the shared clock for accuracy.
 //! A dashpot stores no energy, so changing eta adds no parameter-work impulse.
-//! Elastic thermal feedback, expansion and melting require their own owners.
+//! Elastic thermal feedback and expansion use [`thermoelastic`]. Melting needs
+//! a different material/geometry owner.
+
+pub mod thermoelastic;
 
 use super::{FrameVibrationBasis, FrameVibrationComponent, FrameVibrationError};
 use crate::circuit_enthalpy::{
@@ -263,134 +266,8 @@ impl FrameVibrationComponent {
         prepared: Option<PreparedModalBudget>,
         gate: &CancelGate,
     ) -> Result<FrameThermalSystem<'n, 'a>> {
-        check(gate)?;
-        if !source.resistors.is_empty() {
-            return Err(invalid("frame heat needs a thermal-only material network"));
-        }
-        let binding = source
-            .prepare(thermal, || gate.is_requested())
-            .map_err(network)?;
-        let operator = self
-            .basis
-            .material_damping()
-            .ok_or_else(|| invalid("frame heat requires its original material viscosity"))?;
-        let count: usize = operator
-            .sections()
-            .iter()
-            .map(|(_, s)| s.elastic().layers().len())
-            .sum();
-        if destinations.len() != count {
-            return Err(invalid(
-                "exactly one destination for every original member layer required",
-            ));
-        }
-        let routes: BTreeMap<_, _> = destinations
-            .iter()
-            .map(|d| ((d.element, d.layer), d.cell))
-            .collect();
-        if routes.len() != count {
-            return Err(invalid(
-                "exactly one destination for every original member layer required",
-            ));
-        }
-        let mut used = BTreeSet::new();
-        let mut regions = Vec::with_capacity(operator.sections().len());
-        for (index, (element, section)) in operator.sections().iter().enumerate() {
-            check(gate)?;
-            // The native operator's documented symmetric-bending factor has
-            // rotational weights L: use that SAME reference geometry, not an
-            // independently authored heat length or a modal wavelength.
-            let length = operator.ports()[3 * index + 1].displacement_weights[2];
-            let mut cards = Vec::new();
-            let mut axes = Vec::new();
-            let mut receivers = Vec::new();
-            for (layer, (solid, geometry)) in section
-                .elastic()
-                .layers()
-                .iter()
-                .zip(section.elastic().layer_integrals())
-                .enumerate()
-            {
-                check(gate)?;
-                let cell = *routes
-                    .get(&(*element, layer))
-                    .ok_or_else(|| invalid("foreign or missing frame-layer heat destination"))?;
-                if !used.insert(cell) {
-                    return Err(invalid(
-                        "distinct physical layers require distinct whole-cell inventories",
-                    ));
-                }
-                let caloric = source
-                    .cells
-                    .iter()
-                    .find(|b| b.cell == cell)
-                    .ok_or_else(|| {
-                        invalid("frame layer lacks its original caloric material binding")
-                    })?;
-                let original = thermal
-                    .cells()
-                    .get(&cell)
-                    .ok_or_else(|| invalid("inactive frame heat destination"))?;
-                let density = geometry.line_density_kg_m() / geometry.area_m2();
-                if !same_positive(original.geometry.volume_m3, geometry.area_m2() * length)
-                    || !same_positive(original.mass_kg, geometry.line_density_kg_m() * length)
-                    || caloric.curve.knots().iter().any(|k| {
-                        k.liquid_mass_fraction != 0.0
-                            || !same_positive(k.bulk_density_kg_m3, density)
-                    })
-                    || solid.material.query() != *caloric.point.context
-                    || thermal.temperature_k(cell)?.to_bits()
-                        != caloric.point.context.axes()[caloric.point.temperature_axis].to_bits()
-                {
-                    return Err(invalid(
-                        "frame layer must retain its whole fixed-solid mass, volume and original physical source context",
-                    ));
-                }
-                for key in [DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY] {
-                    let coefficient = solid
-                        .material
-                        .property(key)
-                        .ok_or_else(|| invalid("frame heat lost an original mechanical source"))?;
-                    if !coefficient.source_axes().is_empty()
-                        || coefficient.answer().receipt.decision
-                            != EvaluationDecision::ConstantWithinValidity
-                    {
-                        return Err(invalid(
-                            "frame self-heating requires source-declared temperature-independent density and elasticity",
-                        ));
-                    }
-                }
-                receivers.push(Receiver {
-                    binding: FrameLayerCell {
-                        element: *element,
-                        layer,
-                        cell,
-                    },
-                    original: original.clone(),
-                    temperature_axis: caloric.point.temperature_axis.to_owned(),
-                    axial_share: share(
-                        section.axial().layer_viscous_rigidity_n_s()[layer],
-                        section.axial().viscous_rigidity_n_s(),
-                    )?,
-                    bending_share: share(
-                        section.bending().layer_viscous_stiffness_n_m2_s()[layer],
-                        section.bending().viscous_stiffness_n_m2_s(),
-                    )?,
-                });
-                cards.push(caloric.point.material);
-                axes.push(caloric.point.temperature_axis);
-            }
-            let law =
-                ConcentricSectionTemperatureLaw::try_new(section.elastic().clone(), &cards, &axes)
-                    .map_err(material)?;
-            regions.push(Region {
-                element: *element,
-                length_m: length,
-                law,
-                receivers,
-            });
-        }
-        let viscosity = operator.sections().to_vec();
+        let (binding, regions, viscosity) =
+            bind_regions(&self.basis, thermal, source, destinations, true, gate)?;
         let (basis, mechanical) =
             self.into_system(config, prepared, gate)
                 .map_err(|e| match e {
@@ -407,6 +284,153 @@ impl FrameVibrationComponent {
             origin_s: thermal.time_s(),
         })
     }
+}
+
+// Share the original source/card/caloric/inventory admission across the two
+// physical thermal consumers. The thermoelastic child supplies the original
+// Helmholtz law instead of the frozen-E restriction.
+fn bind_regions<'n, 'a>(
+    basis: &FrameVibrationBasis,
+    thermal: &DepositionSimulation<'_>,
+    source: &'n MaterialNetwork<'a>,
+    destinations: &[FrameLayerCell],
+    frozen_elasticity: bool,
+    gate: &CancelGate,
+) -> Result<(
+    PreparedMaterialNetwork<'n, 'a>,
+    Vec<Region<'a>>,
+    Vec<(usize, FrameViscousSection)>,
+)> {
+    check(gate)?;
+    if !source.resistors.is_empty() {
+        return Err(invalid("frame heat needs a thermal-only material network"));
+    }
+    let binding = source
+        .prepare(thermal, || gate.is_requested())
+        .map_err(network)?;
+    let operator = basis
+        .material_damping()
+        .ok_or_else(|| invalid("frame heat requires its original material viscosity"))?;
+    let count: usize = operator
+        .sections()
+        .iter()
+        .map(|(_, s)| s.elastic().layers().len())
+        .sum();
+    if destinations.len() != count {
+        return Err(invalid(
+            "exactly one destination for every original member layer required",
+        ));
+    }
+    let routes: BTreeMap<_, _> = destinations
+        .iter()
+        .map(|d| ((d.element, d.layer), d.cell))
+        .collect();
+    if routes.len() != count {
+        return Err(invalid(
+            "exactly one destination for every original member layer required",
+        ));
+    }
+    let mut used = BTreeSet::new();
+    let mut regions = Vec::with_capacity(operator.sections().len());
+    for (index, (element, section)) in operator.sections().iter().enumerate() {
+        check(gate)?;
+        // The native operator's documented symmetric-bending factor has
+        // rotational weights L: use that SAME reference geometry, not an
+        // independently authored heat length or a modal wavelength.
+        let length = operator.ports()[3 * index + 1].displacement_weights[2];
+        let mut cards = Vec::new();
+        let mut axes = Vec::new();
+        let mut receivers = Vec::new();
+        for (layer, (solid, geometry)) in section
+            .elastic()
+            .layers()
+            .iter()
+            .zip(section.elastic().layer_integrals())
+            .enumerate()
+        {
+            check(gate)?;
+            let cell = *routes
+                .get(&(*element, layer))
+                .ok_or_else(|| invalid("foreign or missing frame-layer heat destination"))?;
+            if !used.insert(cell) {
+                return Err(invalid(
+                    "distinct physical layers require distinct whole-cell inventories",
+                ));
+            }
+            let caloric = source
+                .cells
+                .iter()
+                .find(|b| b.cell == cell)
+                .ok_or_else(|| {
+                    invalid("frame layer lacks its original caloric material binding")
+                })?;
+            let original = thermal
+                .cells()
+                .get(&cell)
+                .ok_or_else(|| invalid("inactive frame heat destination"))?;
+            let density = geometry.line_density_kg_m() / geometry.area_m2();
+            if !same_positive(original.geometry.volume_m3, geometry.area_m2() * length)
+                || !same_positive(original.mass_kg, geometry.line_density_kg_m() * length)
+                || caloric.curve.knots().iter().any(|k| {
+                    k.liquid_mass_fraction != 0.0 || !same_positive(k.bulk_density_kg_m3, density)
+                })
+                || solid.material.query() != *caloric.point.context
+                || thermal.temperature_k(cell)?.to_bits()
+                    != caloric.point.context.axes()[caloric.point.temperature_axis].to_bits()
+            {
+                return Err(invalid(
+                    "frame layer must retain its whole fixed-solid mass, volume and original physical source context",
+                ));
+            }
+            for key in [DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY]
+                .into_iter()
+                .filter(|key| frozen_elasticity || *key == DENSITY_PROPERTY)
+            {
+                let coefficient = solid
+                    .material
+                    .property(key)
+                    .ok_or_else(|| invalid("frame heat lost an original mechanical source"))?;
+                if !coefficient.source_axes().is_empty()
+                    || coefficient.answer().receipt.decision
+                        != EvaluationDecision::ConstantWithinValidity
+                {
+                    return Err(invalid(
+                        "frame self-heating requires source-declared temperature-independent density and elasticity",
+                    ));
+                }
+            }
+            receivers.push(Receiver {
+                binding: FrameLayerCell {
+                    element: *element,
+                    layer,
+                    cell,
+                },
+                original: original.clone(),
+                temperature_axis: caloric.point.temperature_axis.to_owned(),
+                axial_share: share(
+                    section.axial().layer_viscous_rigidity_n_s()[layer],
+                    section.axial().viscous_rigidity_n_s(),
+                )?,
+                bending_share: share(
+                    section.bending().layer_viscous_stiffness_n_m2_s()[layer],
+                    section.bending().viscous_stiffness_n_m2_s(),
+                )?,
+            });
+            cards.push(caloric.point.material);
+            axes.push(caloric.point.temperature_axis);
+        }
+        let law =
+            ConcentricSectionTemperatureLaw::try_new(section.elastic().clone(), &cards, &axes)
+                .map_err(material)?;
+        regions.push(Region {
+            element: *element,
+            length_m: length,
+            law,
+            receivers,
+        });
+    }
+    let viscosity = operator.sections().to_vec();
+    Ok((binding, regions, viscosity))
 }
 
 impl FrameThermalSystem<'_, '_> {

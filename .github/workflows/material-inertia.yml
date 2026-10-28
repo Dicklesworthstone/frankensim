@@ -15,6 +15,7 @@ on:
       - 'crates/fs-couple/src/frame_vibration*'
       - 'crates/fs-couple/src/frame_vibration/**'
       - 'crates/fs-couple/tests/frame_vibration*'
+      - 'crates/fs-couple/tests/frame_vibration_thermal/**'
       - 'crates/fs-couple/src/render/schedule/force/coupled.rs'
       - 'crates/fs-couple/src/render/schedule/force/coupled/damping.rs'
       - 'crates/fs-couple/tests/coupled_damping_update.rs'

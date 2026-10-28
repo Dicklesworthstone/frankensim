@@ -2,6 +2,9 @@
 //! References use physical consistent inertia, section integrals, continuous
 //! damped motion and independently solved finite-cell heat equations.
 
+#[path = "frame_vibration_thermal/thermoelastic.rs"]
+mod thermoelastic;
+
 use fs_couple::circuit_enthalpy::{
     CircuitEnthalpyError,
     material::{ConductionLink, MaterialCell, MaterialNetwork},
@@ -58,6 +61,8 @@ struct Spec {
     mechanical_upper: f64,
     curved_eta: bool,
     curved_elastic: bool,
+    modulus_slope: f64,
+    alpha: f64,
 }
 fn specimens() -> [Spec; 2] {
     [
@@ -68,6 +73,8 @@ fn specimens() -> [Spec; 2] {
             mechanical_upper: 600.0,
             curved_eta: false,
             curved_elastic: false,
+            modulus_slope: 0.0,
+            alpha: 0.0,
         },
         Spec {
             axial: 8.0,
@@ -76,6 +83,8 @@ fn specimens() -> [Spec; 2] {
             mechanical_upper: 600.0,
             curved_eta: false,
             curved_elastic: false,
+            modulus_slope: 0.0,
+            alpha: 0.0,
         },
     ]
 }
@@ -99,6 +108,11 @@ fn material(index: usize, spec: Spec) -> (MaterialCard, ResolvedHeatCapacityCurv
     for (name, value, dims) in [
         ("density", RHO, Density::DIMS),
         ("young_modulus", YOUNG, Pressure::DIMS),
+        (
+            fs_material::state_point::LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
+            spec.alpha,
+            fs_material::state_point::INVERSE_TEMPERATURE_DIMS,
+        ),
         ("axial_eta", spec.axial, DynViscosity::DIMS),
         ("bending_eta", spec.bending, DynViscosity::DIMS),
         (
@@ -126,8 +140,8 @@ fn material(index: usize, spec: Spec) -> (MaterialCard, ResolvedHeatCapacityCurv
         if viscosity {
             validity = validity.with("omega", 0.0, 4096.0);
         }
-        let curved =
-            (viscosity && spec.curved_eta) || (name == "young_modulus" && spec.curved_elastic);
+        let curved = (viscosity && spec.curved_eta)
+            || (name == "young_modulus" && (spec.curved_elastic || spec.modulus_slope != 0.0));
         claims
             .insert_claim(PropertyClaim {
                 key: PropertyKey::new(name, dims),
@@ -135,7 +149,14 @@ fn material(index: usize, spec: Spec) -> (MaterialCard, ResolvedHeatCapacityCurv
                     PropertyValue::Curve {
                         abscissa: "T".into(),
                         abscissa_dims: Temperature::DIMS,
-                        knots: vec![(200.0, 0.5 * value), (600.0, 2.5 * value)],
+                        knots: if name == "young_modulus" && spec.modulus_slope != 0.0 {
+                            vec![
+                                (200.0, value - 100.0 * spec.modulus_slope),
+                                (600.0, value + 300.0 * spec.modulus_slope),
+                            ]
+                        } else {
+                            vec![(200.0, 0.5 * value), (600.0, 2.5 * value)]
+                        },
                         dims,
                     }
                 } else {
@@ -237,6 +258,10 @@ fn fixture<R>(
     let requirement = [
         ("density", Density::DIMS),
         ("young_modulus", Pressure::DIMS),
+        (
+            fs_material::state_point::LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
+            fs_material::state_point::INVERSE_TEMPERATURE_DIMS,
+        ),
         ("axial_eta", DynViscosity::DIMS),
         ("bending_eta", DynViscosity::DIMS),
     ]

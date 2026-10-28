@@ -18,6 +18,7 @@ pub use runtime::{FrameResponseLimits, FrameVibrationResponse, FrameVibrationRun
 mod material;
 pub use material::FrameVibrationComponent;
 pub use material::thermal;
+pub use material::thermal::thermoelastic;
 
 use fs_math::c64::C64;
 use fs_solid::frame2d::{Frame2d, FrameMaterialDamping, FrameMode, FrameModeStatus};

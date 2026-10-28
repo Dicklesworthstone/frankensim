@@ -2194,3 +2194,13 @@ remain frozen. It adds no hereditary loss, thermal deposition or acoustic
 radiation. `tests/frame2d_viscosity.rs` supplies continuous oscillator and
 heterogeneous two-coordinate references, physical-port work equivalence,
 continuation, and source/admission regressions.
+
+## Complete frame material inventory for live thermoelastic consumers
+
+`FrameMaterialDamping::covers_all_members` records whether every original frame
+member has its material-bound elastic and viscous section, including members
+fixed at both ends. A complete material thermal consumer must account for those
+members' stored energy and physical layer inventories even when they do not
+appear in a free modal coordinate. This flag adds no mass, stiffness or damping
+law. The original operator still rejects massless free-coordinate condensation
+and retains its complete reference geometry, source sections and native ports.

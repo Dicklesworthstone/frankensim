@@ -46,6 +46,7 @@ pub struct FrameMaterialDamping {
     sections: Vec<(usize, FrameViscousSection)>,
     band: (f64, f64),
     maximum_omega_rad_s: f64,
+    covers_all_members: bool,
 }
 
 impl FrameMaterialDamping {
@@ -71,6 +72,12 @@ impl FrameMaterialDamping {
     /// Original member index and both original layered source bindings.
     pub fn sections(&self) -> &[(usize, FrameViscousSection)] {
         &self.sections
+    }
+    /// Every original member, including members fixed at both ends, has its
+    /// source-bound elastic and viscous section here. Thermal elastic owners
+    /// need complete inventory, not only members visible in the free pencil.
+    pub const fn covers_all_members(&self) -> bool {
+        self.covers_all_members
     }
     /// Intersection of all participating viscosity/elastic/inertial source bands.
     pub const fn omega_band_rad_s(&self) -> (f64, f64) {
@@ -320,6 +327,7 @@ impl Frame2d {
             sections,
             band,
             maximum_omega_rad_s,
+            covers_all_members: self.elements.iter().all(|e| e.viscous_section.is_some()),
         }))
     }
 }
