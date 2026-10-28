@@ -93,6 +93,9 @@ impl DgDuct {
     ) -> Result<DgGasMaterialUpdate, DuctError> {
         poll(cancelled)?;
         crate::validate_gas(&gas)?;
+        if self.molecular.is_some() {
+            return Err(invalid("live gas updates require a molecular history-transfer law"));
+        }
         let Some(ViscothermalMemory::Uniform(previous)) = &self.viscothermal else {
             return Err(invalid(
                 "live diffusion transfer requires the native uniform circular Bessel owner",

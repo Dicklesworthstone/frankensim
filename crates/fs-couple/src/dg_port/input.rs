@@ -120,6 +120,8 @@ pub struct DgSourceInput {
     exponential_tolerance: f64,
     maximum_dofs: usize,
     wall_quadrature: Option<usize>,
+    molecular: Option<fs_material::relaxation::RelaxationState>,
+    molecular_law: Option<fs_material::relaxation::RelaxationAbsorption>,
     line: usize,
 }
 
@@ -278,7 +280,8 @@ impl DgSourceInput {
             geometry: Duct { segments }, field: None, outlet, radiation: None,
             side_openings: Vec::new(), chimneys: Vec::new(), mesh, poles, band_hz,
             terminal_channels: Vec::new(), maximum_terminal_transverse_cells: 0,
-            maximum_relative_error, exponential_tolerance, maximum_dofs, wall_quadrature, line,
+            maximum_relative_error, exponential_tolerance, maximum_dofs, wall_quadrature,
+            molecular: None, molecular_law: None, line,
         };
         // Admission before collecting/evaluating a potentially large field.
         source.check_state_budget(ambient)?;
@@ -472,10 +475,59 @@ impl DgSourceInput {
         };
         let branch_dofs: usize = self.chimneys.iter()
             .map(|chimney| chimney.state_dofs(self.poles)).sum();
-        if 2 * nodes + memory + branch_dofs > self.maximum_dofs {
+        let active = |state: &fs_material::relaxation::RelaxationState|
+            state.processes().iter().filter(|p| p.heat_capacity_j_kg_k > 0.0).count();
+        let mut molecular_dofs = self.molecular.as_ref()
+            .map_or(0, |state| nodes * self.poles * active(state));
+        if let Some(law) = &self.molecular_law {
+            for chimney in &self.chimneys {
+                let medium = fs_material::relaxation::input::medium_from_record(&chimney.gas)
+                    .map_err(|source| DgSourceError::Gas { line: self.line, source })?;
+                let state = law.evaluate(&medium)
+                    .map_err(|source| DgSourceError::Gas { line: self.line, source })?;
+                molecular_dofs += chimney.mesh.elements * (chimney.mesh.order + 1)
+                    * self.poles * active(&state);
+            }
+        }
+        if 2 * nodes + memory + branch_dofs + molecular_dofs > self.maximum_dofs {
             return Err(bad(self.line, "complete DG bore and chimney state exceeds the declared DOF allowance"));
         }
         Ok(())
+    }
+
+    /// Attach the shared species law to the original internal gas. The same
+    /// declaration is evaluated independently for every finite chimney; no
+    /// atmosphere, species composition or material coefficient is copied from
+    /// another region. This rung requires uniform cylindrical wall diffusion.
+    pub fn with_molecular_relaxation(
+        mut self,
+        law: fs_material::relaxation::RelaxationAbsorption,
+        ambient: &GasRecord,
+    ) -> Result<Self, DgSourceError> {
+        if self.field.is_some() || self.wall_quadrature.is_some() || self.molecular.is_some() {
+            return Err(bad(self.line,
+                "DG molecular relaxation currently requires one uniform dg_tube declaration"));
+        }
+        let medium = fs_material::relaxation::input::medium_from_record(ambient)
+            .map_err(|source| DgSourceError::Gas { line: self.line, source })?;
+        self.molecular = Some(law.evaluate(&medium)
+            .map_err(|source| DgSourceError::Gas { line: self.line, source })?);
+        // Validate every region now. A missing partner or unsupported local
+        // temperature must refuse before a propagator or radiation bake starts.
+        for chimney in &self.chimneys {
+            let medium = fs_material::relaxation::input::medium_from_record(&chimney.gas)
+                .map_err(|source| DgSourceError::Gas { line: self.line, source })?;
+            law.evaluate(&medium)
+                .map_err(|source| DgSourceError::Gas { line: self.line, source })?;
+        }
+        self.molecular_law = Some(law);
+        self.check_state_budget(ambient.state())?;
+        Ok(self)
+    }
+
+    /// Original exterior source, required by composition-sensitive observers.
+    pub fn exterior_gas_record(&self) -> Option<&GasRecord> {
+        self.radiation.as_ref().map(|(_, record)| record)
     }
 
     fn prepare_chimneys(&self, gate: &CancelGate) -> Result<Vec<DgBranch>, DgSourceError> {
@@ -490,6 +542,14 @@ impl DgSourceInput {
             ).and_then(|duct| duct.with_viscothermal(
                 self.poles, self.band_hz, self.maximum_relative_error,
             )).map_err(|error| DgSourceError::Physics(AcousticRealizeError::Duct(error)))?;
+            let duct = if let Some(law) = &self.molecular_law {
+                let medium = fs_material::relaxation::input::medium_from_record(&chimney.gas)
+                    .map_err(|source| DgSourceError::Gas { line: self.line, source })?;
+                let state = law.evaluate(&medium)
+                    .map_err(|source| DgSourceError::Gas { line: self.line, source })?;
+                duct.with_molecular_relaxation(state)
+                    .map_err(|error| DgSourceError::Physics(AcousticRealizeError::Duct(error)))?
+            } else { duct };
             Ok(DgBranch { port: chimney.port, duct })
         }).collect()
     }
@@ -570,6 +630,10 @@ impl DgSourceInput {
                 .map_err(|error| DgSourceError::Physics(AcousticRealizeError::Duct(error)))?
         };
         checkpoint(gate, self.line)?;
+        let owner = if let Some(molecular) = &self.molecular {
+            owner.with_molecular_relaxation(molecular.clone())
+                .map_err(|error| DgSourceError::Physics(AcousticRealizeError::Duct(error)))?
+        } else { owner };
         let owner = bind_wall(owner)?;
         checkpoint(gate, self.line)?;
         let branches = bind_branches(self.prepare_chimneys(gate)?)?;
@@ -600,4 +664,3 @@ impl DgSourceInput {
 
 #[cfg(test)]
 mod tests;
-

@@ -131,6 +131,7 @@ pub(super) fn aperture_exterior_gas(
 pub(super) fn dg_radiation_provenance(load: &fs_couple::dg_port::DgPortLoad) -> String {
     let mut output = load.radiation_record().map_or_else(String::new, |record|
         format!(",\"computed_radiation\":{}", computed_baffled_provenance(record)));
+    output.push_str(&dg_molecular_provenance(load.duct()));
     if !load.terminal_channels().is_empty() {
         use fs_couple::dg_port::DgTerminalChannelKind;
         let channels = load.terminal_channels().iter().map(|bound| {
@@ -163,7 +164,8 @@ pub(super) fn dg_radiation_provenance(load: &fs_couple::dg_port::DgPortLoad) -> 
             let mesh = duct.mesh();
             let band = duct.viscothermal_band_rad_s().map_or_else(|| "null".into(), |band|
                 format!("[{:e},{:e}]", band[0], band[1]));
-            format!("{{\"port\":{},\"operator_identity\":\"{}\",\"length_m\":{:e},\"inlet_area_m2\":{:e},\"outlet_area_m2\":{:e},\"inlet_gas\":{},\"outlet_gas\":{},\"elements\":{},\"order\":{},\"total_dofs\":{},\"wall_band_rad_s\":{band}}}",
+            let molecular = dg_molecular_provenance(duct);
+            format!("{{\"port\":{},\"operator_identity\":\"{}\",\"length_m\":{:e},\"inlet_area_m2\":{:e},\"outlet_area_m2\":{:e},\"inlet_gas\":{},\"outlet_gas\":{},\"elements\":{},\"order\":{},\"total_dofs\":{},\"wall_band_rad_s\":{band}{molecular}}}",
                 branch.port().0, duct.operator_identity().to_hex(), duct.total_length(),
                 duct.inlet_area_m2(), duct.outlet_area_m2(), gas_state(duct.inlet_gas()),
                 gas_state(duct.outlet_gas()), mesh.elements, mesh.order, duct.total_dofs())
@@ -171,6 +173,17 @@ pub(super) fn dg_radiation_provenance(load: &fs_couple::dg_port::DgPortLoad) -> 
         output.push_str(&format!(",\"terminal_port_order\":[{ports}],\"side_ports\":[{sides}],\"finite_chimneys\":[{chimneys}],\"side_opening_scope\":\"original DG face junctions and explicitly declared finite DG chimneys; branch outlets own exterior geometry and accepted radiated flow; complete mutual terminal radiation; no moving pad or three-dimensional junction correction\""));
     }
     output
+}
+
+fn dg_molecular_provenance(duct: &fs_duct::dg::DgDuct) -> String {
+    let Some(state) = duct.molecular_relaxation() else { return String::new(); };
+    let reservoirs = state.processes().iter().map(|process| format!(
+        "{{\"species\":{},\"reservoir\":{},\"heat_capacity_j_kg_k\":{:e},\"relaxation_time_s\":{:e}}}",
+        super::json_string(process.species.as_str()), process.index,
+        process.heat_capacity_j_kg_k, process.relaxation_time_s,
+    )).collect::<Vec<_>>().join(",");
+    format!(",\"molecular_gas\":{{\"model\":\"shared-heat-capacity-reservoirs-v1\",\"frozen_cv_j_kg_k\":{:e},\"frozen_sound_speed_m_s\":{:e},\"reservoirs\":[{reservoirs}],\"scope\":\"same DG exponential and original equilibrium gas; coupled molecular and uniform radial thermal states; original Bessel error is not a combined-law certificate; no axial conduction, additional bulk SK term or live chemistry\"}}",
+        state.frozen_cv_j_kg_k(), state.frozen_sound_speed_m_s())
 }
 
 // Both existing wind owners observe this same accepted DG terminal and record.

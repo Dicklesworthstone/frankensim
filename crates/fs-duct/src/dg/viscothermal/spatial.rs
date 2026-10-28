@@ -98,7 +98,7 @@ impl DgDuct {
         mut self,
         resolution: DgWallResolution,
     ) -> Result<Self, GasFieldDuctError> {
-        if self.compliant_wall.is_some() {
+        if self.compliant_wall.is_some() || self.molecular.is_some() {
             return Err(invalid("attach DG viscothermal memory before compliant wall mechanics").into());
         }
         if self.viscothermal.is_some() {
@@ -361,7 +361,8 @@ impl DgDuct {
                     .series_terms()
                     .iter()
                     .map(|t| (m, t))
-                    .chain(model.shunt_terms().iter().map(|t| (0, t)))
+                    .chain(model.shunt_terms().iter().filter(|_| !self.molecular_replaces_thermal())
+                        .map(|t| (0, t)))
                     .enumerate()
                 {
                     for i in 0..m {
@@ -373,6 +374,7 @@ impl DgDuct {
             }
             None => {}
         }
+        power += self.molecular_thermal_loss(state);
         if !power.is_finite() {
             return Err(invalid("DG wall loss is unrepresentable"));
         }
@@ -381,7 +383,8 @@ impl DgDuct {
 }
 
 impl DgState {
-    /// Retained viscothermal and compliant-wall energy [J], excluding gas p/q.
+    /// Retained auxiliary energy [J], excluding the primary gas p/q fields.
+    /// This legacy-named getter includes attached molecular/thermal gas memory.
     #[must_use]
     pub fn wall_stored_energy_j(&self) -> f64 {
         0.5 * self.tilde[2 * self.p.len()..]

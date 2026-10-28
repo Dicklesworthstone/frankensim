@@ -43,14 +43,17 @@ pub struct DgHarmonicResponse {
     pub ports: Vec<DgHarmonicPort>,
     /// Mean AC storage, including gas and all wall coordinates [J].
     pub mean_stored_energy_j: f64,
-    /// Included part of mean_stored_energy_j in retained wall coordinates [J].
+    /// Included auxiliary storage [J], also containing molecular gas memory
+    /// when attached. The legacy field name predates internal gas reservoirs.
     pub mean_wall_energy_j: f64,
     /// Original positive drag/relaxation squares, including compliant walls [W].
     pub wall_dissipation_w: f64,
+    /// Internal molecular energy exchange, distinct from thermal wall loss [W].
+    pub molecular_dissipation_w: f64,
     /// Original matched characteristic boundaries' mean absorption [W].
     pub matched_absorption_w: f64,
     pub input_power_w: f64,
-    /// Independent wall plus boundary loss minus input power [W], diagnostic.
+    /// Independent wall, molecular and boundary loss minus input power [W].
     pub power_residual_w: f64,
     /// Infinity-norm backward residual of (-i omega I - L)x = BU.
     /// This is not a forward-error or conditioning certificate near a pole.
@@ -302,12 +305,15 @@ impl DgContinuous<'_> {
         }
         let (real_p, real_q) = self.duct.from_energy_coords(&native.tilde);
         let real_loss = self.duct.wall_dissipated_power_w(&native)?;
+        let real_molecular = self.duct.molecular_dissipated_power_w(&native)?;
         poll(cancelled)?;
         for (x, z) in native.tilde.iter_mut().zip(energy_coordinates) {
             *x = z.im;
         }
         let (imag_p, imag_q) = self.duct.from_energy_coords(&native.tilde);
         let wall_dissipation_w = 0.5 * (real_loss + self.duct.wall_dissipated_power_w(&native)?);
+        let molecular_dissipation_w = 0.5 * (real_molecular
+            + self.duct.molecular_dissipated_power_w(&native)?);
         let pressure_pa: Vec<_> = real_p
             .into_iter()
             .zip(imag_p)
@@ -362,7 +368,8 @@ impl DgContinuous<'_> {
                 .iter()
                 .map(|x| x.norm_sq())
                 .sum::<f64>();
-        let power_residual_w = wall_dissipation_w + matched_absorption_w - input_power_w;
+        let power_residual_w = wall_dissipation_w + molecular_dissipation_w
+            + matched_absorption_w - input_power_w;
         if pressure_pa
             .iter()
             .chain(&volume_flow_m3_s)
@@ -374,6 +381,7 @@ impl DgContinuous<'_> {
                 storage,
                 wall_storage,
                 wall_dissipation_w,
+                molecular_dissipation_w,
                 matched_absorption_w,
                 input_power_w,
                 power_residual_w,
@@ -395,6 +403,7 @@ impl DgContinuous<'_> {
             mean_stored_energy_j: storage,
             mean_wall_energy_j: wall_storage,
             wall_dissipation_w,
+            molecular_dissipation_w,
             matched_absorption_w,
             input_power_w,
             power_residual_w,

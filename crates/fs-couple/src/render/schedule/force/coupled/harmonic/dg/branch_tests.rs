@@ -675,3 +675,61 @@ fn complete_two_branch_network_retains_local_walls_bands_and_both_orderings() {
         }
     }
 }
+
+#[test]
+fn molecular_bore_and_chimney_retain_separate_losses_in_the_joint_power_balance() {
+    use fs_material::relaxation::{
+        InternalReservoir, RelaxationAbsorption, RelaxationProcess, RelaxationRateLaw,
+        RelaxingMedium, SpeciesRelaxation, VibrationalMode,
+    };
+    // Synthetic constitutive data exercise composition, not measured air rates.
+    let id = fs_thermochem::SpeciesId::new("synthetic").unwrap();
+    let law = RelaxationAbsorption::new(vec![SpeciesRelaxation {
+        species: id.clone(),
+        processes: vec![RelaxationProcess {
+            reservoir: InternalReservoir::Vibrational(vec![VibrationalMode {
+                theta_k: 1300.0, degeneracy: 1,
+            }]),
+            rate: RelaxationRateLaw::PartnerIndependent {
+                p_tau_ref_pa_s: gas().pressure * 3e-4,
+                t_ref_k: 293.15, exponent: 0.0, t_min_k: 250.0, t_max_k: 350.0,
+            },
+        }],
+    }]).unwrap();
+    let material = law.evaluate(
+        &RelaxingMedium::new(gas(), vec![(id, 1.0)]).unwrap()).unwrap();
+    let prepare = |length, elements| cylinder(0.001, length, elements, 1)
+        .with_viscothermal(8, [50.0, 2000.0], 0.02).unwrap()
+        .with_molecular_relaxation(material.clone()).unwrap();
+    // Attaching the junction after the gas must use its frozen pressure map.
+    let main = prepare(0.10, 2).with_side_ports(&[DgSidePort {
+        id: SIDE, downstream_element: 1,
+    }]).unwrap();
+    let branch = prepare(0.05, 1);
+    let load = DgPortLoad::new_with_terminal_branches(
+        main, DT, 1e-11, MAX_DG_PROPAGATOR_DOFS, vec![SIDE, OUTLET],
+        terminal(&source(true, false)), vec![DgBranch { port: SIDE, duct: branch }],
+    ).unwrap();
+    let system = oscillator();
+    let response = system.harmonic_response_with_load(
+        1200.0, &[C64::new(1e-5, -4e-6)], &load, &[column()], WORK,
+        &CancelGate::new_clock_free(),
+    ).unwrap();
+    assert!(response.duct.molecular_dissipation_w > 0.0);
+    assert!(response.duct.wall_dissipation_w > 0.0);
+    assert_eq!(response.branches.len(), 1);
+    let chimney = &response.branches[0].duct;
+    assert!(chimney.molecular_dissipation_w > 0.0);
+    assert!(chimney.wall_dissipation_w > 0.0);
+    check_power(&response);
+    assert!(response.duct.power_residual_w.abs() < 1e-8 * response.duct.input_power_w.abs());
+    assert!(chimney.power_residual_w.abs() < 1e-8 * chimney.input_power_w.abs());
+    let molecular = response.duct.molecular_dissipation_w + chimney.molecular_dissipation_w;
+    let other = response.modal.total_dissipation_w()
+        + response.duct.wall_dissipation_w + response.duct.matched_absorption_w
+        + chimney.wall_dissipation_w + chimney.matched_absorption_w;
+    assert!((response.total_dissipation_w() - other - molecular).abs()
+        < 1e-13 * response.total_dissipation_w());
+    assert_eq!(load.state().step_count(), 0);
+    assert_eq!(load.branches()[0].state().step_count(), 0);
+}

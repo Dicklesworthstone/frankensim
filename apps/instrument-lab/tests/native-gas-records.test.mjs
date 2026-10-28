@@ -10,6 +10,7 @@ const fixture = name => readFile(new URL(`../../../crates/fs-couple/examples/${n
 test('one data editor reaches canonical flute, reed, chimney and string gases', async () => {
   const cases = [
     ['flue-dg-baffled.performance', ['gas', 'dg_exterior']],
+    ['flue-dg-molecular.performance', ['gas', 'dg_exterior']],
     ['reed-two-medium-tone-hole.performance', ['ambient', 'exterior', 'cylinder']],
     ['material_modal_valve/paired-dg-chimney.performance', ['ambient', 'dg_chimney_gas', 'dg_exterior']],
     ['material_strings/rayleigh-observed.material-strings', ['gas']],

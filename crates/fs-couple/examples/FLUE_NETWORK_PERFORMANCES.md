@@ -18,6 +18,71 @@ exterior microphone pressure.
 
 ## Geometry and material gas
 
+### Molecular gas response inside DG bores and along exterior paths
+
+`flue-dg-molecular.performance` uses the existing DG flue renderer with explicit
+terrestrial-air species. The same shared material relaxation law acts inside
+the cylindrical bore and on every surface-to-microphone path. Its jet and short
+tube remain exploration fixtures, not a characterized flute.
+
+```sh
+cargo run --release -p fs-couple --bin music_render -- wind \
+  crates/fs-couple/examples/flue-dg-molecular.performance molecular.wav --decimate
+```
+
+After the complete `dg_tube` block (including its radiation and exterior rows),
+before any `dg_wall`, select:
+
+```text
+dg_molecular iso9613-terrestrial-air
+```
+
+The material-modal DG reed path accepts the same row for its bore and optional
+upstream tract. Every finite side chimney evaluates the law against its own gas
+record. The complete state allowance includes all thermal/molecular states
+before propagator or radiation preparation. Spatial gas fields and spatial
+wall quadrature are not supported by this molecular attachment; they refuse.
+
+The exterior choice stays independent:
+
+```text
+observer_gas molecular 4096 1000000 50000000 iso9613-terrestrial-air
+```
+
+The three integers bound distinct paths, retained source-filter taps and kernel
+work. The exterior law binds the original exterior composition. Native plate
+observers accept this same declaration against the string performance's gas.
+ISO rates require admitted terrestrial-air composition; adding helium or
+enriching oxygen/CO2 does not silently reuse those rates. Legacy pseudocomponent
+air has no explicit molecular species and must be replaced by a `mixture` or
+source-bound `thermochemical` record for this option.
+
+For other gases, replace `iso9613-terrestrial-air` by `declared N`, followed on
+the same line by exactly N species records `ID RESERVOIRS`. Each reservoir has
+one of the following definitions and one rate definition:
+
+| Definition | Fields |
+| --- | --- |
+| Vibrational reservoir | `vibration MODES THETA_K DEGENERACY ...` |
+| Rotational reservoir | `rotation DOF` (2 or 3) |
+| Partner-independent rate | `power P_TAU_REF_PA_S T_REF_K EXPONENT T_MIN_K T_MAX_K` |
+| Collision-partner rates | `partners COUNT ID LOG_P_TAU_PA_S SLOPE_K_1_3 T_MIN_K T_MAX_K ...` |
+
+These are the original `fs-material::relaxation` parameters, not an instrument
+loss table. Every present species and required collision partner must have data;
+`ID 0` explicitly declares no reservoirs. Supplied coefficients remain authored
+constitutive data and gain no measured-source authority from parsing. Missing
+data, excess counts, invalid temperatures and nonphysical heat capacities refuse.
+
+Inside the bore, molecular and radial thermal states share one thermodynamic
+pressure equation and the original DG exponential. They are not independent
+loss filters: that would count low-frequency compressibility twice. Shear and
+compliant solid-wall mechanics retain their existing owners. The equilibrium
+Bessel error admission is not a new accuracy certificate for the combined law.
+No extra bulk Stokes–Kirchhoff term, axial heat conduction, finite wall thermal
+feedback, evolving chemistry or live reservoir-transfer rule is added. Exterior
+propagation keeps its original shared causal material filter and travel phase.
+
 Replace the original `tube LENGTH RADIUS LENGTH_ERROR REFLECTION` row with:
 
 ```text

@@ -225,6 +225,17 @@ exterior propagation; it does not add molecular-relaxation dynamics inside the
 bore or qualify the interim jet model as a measured flute. The browser sends the
 original records unchanged and adds no equalization or normalization.
 
+The **Flue tube — molecular gas relaxation (exploration)** starter opens
+`flue-dg-molecular.performance`. Its `dg_molecular iso9613-terrestrial-air`
+declaration supplies the bore relaxation model; its `observer_gas molecular`
+record explicitly selects the same physical law for exterior propagation.
+Atmosphere edits retain those declarations. The ISO terrestrial-air law has a
+bounded composition domain, so enriched oxygen or additional gases may require
+an explicitly supplied compatible molecular law before the native solver can
+admit the change. The browser neither substitutes a different law nor invents
+relaxation coefficients. This is a generic flue-tube integration fixture with an
+interim jet closure, not a measured flute or an instrument-fidelity claim.
+
 ### Material reeds and compliant walls
 
 The **Material reeds** starters open the original paired-blade descriptions.

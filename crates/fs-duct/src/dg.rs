@@ -93,6 +93,7 @@ mod side_ports;
 pub use side_ports::{DgSidePort, DgSidePortSource, MAX_DG_SIDE_PORTS};
 mod gas_update;
 pub use gas_update::DgGasMaterialUpdate;
+mod molecular;
 
 /// Maximum admitted nodal polynomial order $p$ per element.
 pub const MAX_DG_ORDER: usize = 8;
@@ -528,6 +529,7 @@ pub struct DgDuct {
     geometry: Duct,
     uniform_radius_m: Option<f64>,
     viscothermal: Option<viscothermal::ViscothermalMemory>,
+    molecular: Option<molecular::MolecularMemory>,
     compliant_wall: Option<compliant_wall::CompliantWall>,
     memory_dofs: usize,
     inlet: DgBoundary,
@@ -1027,6 +1029,7 @@ impl DgDuct {
             geometry: duct.clone(),
             uniform_radius_m: viscothermal::uniform_radius(duct),
             viscothermal: None,
+            molecular: None,
             compliant_wall: None,
             memory_dofs: 0,
             inlet,

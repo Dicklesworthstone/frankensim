@@ -32,7 +32,7 @@ use crate::pcm_wav::baffled::CircularOutletReceiver;
 use fs_aeroac::jetcard::{JetCard, mint_tonal_interim_card};
 use fs_blake3::hash_domain;
 use fs_exec::CancelGate;
-use fs_material::gas_species::input::{GasRecord, ThermochemicalSources};
+use fs_material::gas_species::input::{GasInputError, GasRecord, ThermochemicalSources};
 use fs_matdb::NormalizedMaterialCardPack;
 use fs_scenario::gesture::GestureSchedule;
 use std::sync::Arc;
@@ -205,6 +205,14 @@ impl FlueDgFilePerformance {
             &gas, sources, &mut gas_records, gate,
         )?;
         row.end()?;
+        let source = if rows.next_is("dg_molecular") {
+            let mut row = rows.row("dg_molecular")?;
+            let law = fs_material::relaxation::input::read_relaxation(&mut row.fields)
+                .map_err(|source| FlueInputError::Gas { line: row.line,
+                    source: GasInputError::Material(source) })?;
+            row.end()?;
+            source.with_molecular_relaxation(law, &gas_records[0])?
+        } else { source };
         let wall = if rows.next_is("dg_wall") {
             let mut row = rows.row("dg_wall")?;
             let declaration = DgMaterialWallLayoutInput::read(
@@ -273,8 +281,11 @@ impl FlueDgFilePerformance {
         let observation = read_observation(&mut rows)?;
         let observer_gas = if rows.next_is("observer_gas") {
             let mut row = rows.row("observer_gas")?;
-            Some(GasPropagation::read_record(&mut row.fields)
-                .map_err(|what| bad(row.line, what))?)
+            let exterior = source.exterior_gas_record()
+                .ok_or_else(|| bad(row.line, "observer_gas requires an original DG exterior gas record"))?;
+            Some(GasPropagation::read_record_for_gas(&mut row.fields, exterior)
+                .map_err(|source| FlueInputError::Gas { line: row.line,
+                    source: GasInputError::Material(source) })?)
         } else { None };
         let (mouth_radiation, mouth_reaction) = read_mouth(&mut rows, observation.is_some())?;
         if rows.lines.next().is_some() {

@@ -4,6 +4,7 @@ use fs_exec::CancelGate;
 
 mod mouth;
 mod channels;
+mod molecular;
 
 fn input() -> String {
     let example = include_str!("../../../../examples/flue-dg.performance");

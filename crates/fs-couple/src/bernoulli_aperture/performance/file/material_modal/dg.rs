@@ -120,6 +120,15 @@ impl MaterialModalDgValvePerformance {
             &ambient, gas_sources, &mut gases, gate,
         )?;
         row.finish()?;
+        let duct = if rows.lines.clone().next().and_then(|line|
+            line.split_ascii_whitespace().next()) == Some("dg_molecular")
+        {
+            let mut row = rows.row("dg_molecular")?;
+            let law = fs_material::relaxation::input::read_relaxation(&mut row.fields)
+                .map_err(|source| PlateValveInputError::Gas { line: row.line, source })?;
+            row.finish()?;
+            duct.with_molecular_relaxation(law, &gases[0])?
+        } else { duct };
         let mut cache = MaterialCache::default();
         let wall = if rows.lines.clone().next().and_then(|line|
             line.split_ascii_whitespace().next()) == Some("dg_wall")
@@ -158,6 +167,15 @@ impl MaterialModalDgValvePerformance {
                 &ambient, gas_sources, &mut gases, gate,
             )?;
             row.finish()?;
+            let source = if rows.lines.clone().next().and_then(|line|
+                line.split_ascii_whitespace().next()) == Some("dg_molecular")
+            {
+                let mut row = rows.row("dg_molecular")?;
+                let law = fs_material::relaxation::input::read_relaxation(&mut row.fields)
+                    .map_err(|source| PlateValveInputError::Gas { line: row.line, source })?;
+                row.finish()?;
+                source.with_molecular_relaxation(law, &gases[0])?
+            } else { source };
             let walls = if rows.lines.clone().next().and_then(|line|
                 line.split_ascii_whitespace().next()) == Some("dg_wall")
             {
@@ -189,8 +207,10 @@ impl MaterialModalDgValvePerformance {
             line.split_ascii_whitespace().next()) == Some("observer_gas")
         {
             let mut row = rows.row("observer_gas")?;
-            Some(GasPropagation::read_record(&mut row.fields)
-                .map_err(|what| bad(row.line, what))?)
+            let exterior = duct.exterior_gas_record()
+                .ok_or_else(|| bad(row.line, "observer_gas requires an original DG exterior gas record"))?;
+            Some(GasPropagation::read_record_for_gas(&mut row.fields, exterior)
+                .map_err(|source| PlateValveInputError::Gas { line: row.line, source })?)
         } else { None };
         let mut row = rows.row("valve")?;
         let rest_opening = row.scalar()?;

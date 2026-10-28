@@ -135,7 +135,7 @@ impl DgDuct {
             None
         } else {
             let radius = self.uniform_radius_m.expect("wall requires a cylinder");
-            let bulk = self.gas.density * self.gas.sound_speed * self.gas.sound_speed;
+            let bulk = self.pressure_bulk_modulus();
             Some(2.0 * bulk / radius)
         };
         let mut branches = Vec::new();

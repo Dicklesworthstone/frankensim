@@ -3,6 +3,7 @@ import "./native-wind.css";
 import reedExampleSource from "../../../crates/fs-couple/examples/reed-two-medium-tone-hole.performance?raw";
 import flueExampleSource from "../../../crates/fs-couple/examples/flue-nolle.performance?raw";
 import flueDgSource from "../../../crates/fs-couple/examples/flue-dg-baffled.performance?raw";
+import molecularFlueSource from "../../../crates/fs-couple/examples/flue-dg-molecular.performance?raw";
 import materialReedSource from "../../../crates/fs-couple/examples/material_modal_valve/paired-walls.performance?raw";
 import materialReedDgSource from "../../../crates/fs-couple/examples/material_modal_valve/paired-dg-chimney.performance?raw";
 import stringExampleSource from "../../../crates/fs-couple/examples/material_strings/pluck-and-bow.material-strings?raw";
@@ -44,6 +45,15 @@ const EXAMPLES = [
     decimate: true,
     intro: "Starter: a flute jet drives a spatial duct with a radiating outlet and mouth. Change the bore and exterior gas compositions independently; the native pressure observer propagates each source through the declared exterior atmosphere.",
     help: "dg_exterior supplies density, sound speed, viscosity, conductivity and heat capacities to the shared Stokes–Kirchhoff propagation law. observer_gas selects that law and its numerical budgets; lossless is an explicit comparison. Native decimation observes the unchanged 96 kHz mechanics at 48 kHz. This short integration fixture uses an interim jet model and is not a measured flute.",
+  },
+  {
+    name: "flue-dg-molecular.performance",
+    label: "Flue tube — molecular gas relaxation (exploration)",
+    renderer: "wind",
+    source: molecularFlueSource,
+    decimate: true,
+    intro: "Starter: a generic flue-driven tube uses one explicitly declared terrestrial-air relaxation law in its spatial bore and exterior microphone paths. Native decimation retains the 96 kHz mechanics. This numerical fixture uses an interim jet model; it is not a measured flute.",
+    help: "dg_molecular and observer_gas molecular select the shared native relaxation law. The ISO terrestrial-air declaration has a limited composition domain: enriching oxygen or adding other gases may be refused until a compatible molecular-law declaration is supplied. The atmosphere editor changes the original gas records and preserves the selected law; it never substitutes an air law or invents molecular coefficients.",
   },
   {
     name: "material_modal_valve/paired-walls.performance",

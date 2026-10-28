@@ -215,7 +215,7 @@ impl DgDuct {
             )
         } else {
             // Preserve the original uniform-gas route and its operation order.
-            let bulk = self.gas.density * self.gas.sound_speed * self.gas.sound_speed;
+            let bulk = self.pressure_bulk_modulus();
             let beta = 2.0 * bulk / radius;
             let coupling = det::sqrt(beta / pin.surface_density);
             if [bulk, beta, coupling]

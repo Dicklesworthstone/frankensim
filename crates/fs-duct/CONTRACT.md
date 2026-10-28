@@ -471,6 +471,30 @@ pipe `Z_in = +i Zc cot(kL)`.
     integrating it. Uniform exact-mass and spatial routes are compared against
     each other, exact-Bessel cylinder impedance, Poiseuille drag and the closed
     volume isothermal limit. Native execution of the new spatial tests is pending.
+  - `DgDuct::with_molecular_relaxation(RelaxationState)` consumes the shared
+    material's evaluated internal heat capacities and relaxation times. It
+    couples molecular and circular thermal diffusion in one pressure law,
+    `kappa(s)=1/(rho R T) [1-R sum_n w_n s/(s cp(s)+d_n)]`, where
+    `cp(s)=cp_inf+sum_j C_j/(1+s tau_j)` and the original positive Bessel
+    measure supplies `w_n,d_n`. It REPLACES the old thermal block and retains
+    the old shear block; adding independent thermal and molecular shunts would
+    count compressibility twice. Frozen pressure mass and positive thermal/
+    molecular loss squares advance in the same augmented exponential.
+    Original equilibrium gas/source metadata and physical p/q observations
+    survive. Empty/zero-capacity reservoirs preserve the old operator bitwise.
+    The attachment accepts uniform gas with uniform cylindrical wall memory,
+    or a bare variable-area adiabatic duct. Spatial gas/wall quadrature and
+    live gas changes refuse; finite reservoir history transfer is not guessed.
+    Compliant and Maxwell material walls can subsequently use the frozen
+    pressure map. Independent molecular loss is separate from wall loss in
+    harmonic responses and their coupled power accounts. The existing dense
+    cap includes every new radial/reservoir coordinate.
+    The original equilibrium Bessel band/error is retained; it is NOT a new
+    accuracy certificate for the combined constitutive approximation. No bulk
+    SK term, axial heat conduction, evolving chemistry or finite wall thermal
+    feedback is implied. Four focused regressions cover shared adiabatic
+    compliance, combined isothermal storage, physical loss, time/spatial
+    refinement and rate-data pressure changes; native execution is pending.
   - States carry a reproducible identity of the assembled operator, geometry,
     mass-coordinate transforms, boundaries and typed ports. `step`, fallible
     `sync_nodal`, and fallible `l2_pressure_error` refuse incompatible states

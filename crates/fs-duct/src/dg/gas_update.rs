@@ -139,7 +139,7 @@ impl DgDuct {
         crate::validate_gas(&gas)?;
         let m = self.field_dofs;
         let n = self.total_dofs();
-        if self.viscothermal.is_some()
+        if self.molecular.is_some() || self.viscothermal.is_some()
             || self
                 .gas_field
                 .as_ref()

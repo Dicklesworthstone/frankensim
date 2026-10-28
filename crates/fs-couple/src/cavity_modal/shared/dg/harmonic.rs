@@ -41,9 +41,11 @@ impl SharedCavityDgHarmonicResponse {
     pub fn total_dissipation_w(&self) -> f64 {
         self.cavity.network.total_dissipation_w()
             + self.duct.wall_dissipation_w
+            + self.duct.molecular_dissipation_w
             + self.duct.matched_absorption_w
             + self.branches.iter().fold(0.0, |sum, branch| {
-                sum + branch.duct.wall_dissipation_w + branch.duct.matched_absorption_w
+                sum + branch.duct.wall_dissipation_w + branch.duct.molecular_dissipation_w
+                    + branch.duct.matched_absorption_w
             })
     }
 }
