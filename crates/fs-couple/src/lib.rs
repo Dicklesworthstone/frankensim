@@ -55,6 +55,8 @@ pub mod fiber_ribbon;
 /// Finite source gas on the shared uniform-body thermal callback.
 pub mod finite_gas_thermal;
 pub mod finite_solid;
+/// Original signed frame modes and power-conjugate physical vibration ports.
+pub mod frame_vibration;
 pub mod flue_loop;
 pub mod gesture_path;
 pub mod glottis;
