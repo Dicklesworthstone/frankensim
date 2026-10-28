@@ -10,6 +10,10 @@ use super::{MimoModel, MimoPassivityReport, MimoZoh, check_mimo_passivity};
 use crate::model::PoleTerm;
 use fs_math::c64::C64;
 
+/// Source-bound continuous access to the original admitted pole realization.
+pub mod continuous;
+pub use continuous::MimoContinuous;
+
 /// Cold resource and frequency limits for one proper rational load.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MimoLoadLimits {

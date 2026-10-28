@@ -270,6 +270,35 @@ rational integrator. Tests cover original-runtime parity, resource/shape/
 passivity refusals, finite-effort state overflow, refusal/retry and abandoned
 candidate history preservation.
 
+## Continuous access to an admitted MIMO load
+
+`PreparedMimoLoad::continuous_operator()` borrows the original admitted source.
+Its dimension and port count preserve the complete real pole realization;
+`state_space(maximum_dense_bytes, cancelled)` calls the existing
+`MimoModel::state_space` without balancing, reduction, refitting or timestep
+conversion. The explicit matrix payload cap is
+`8*(n*n + 2*n*ports + 2*ports*ports)` bytes, checked before allocation under
+the original 256-state/128-port bounds. Cancellation brackets this bounded
+cold construction, and nonfinite realized coefficients refuse. The instantaneous
+`D` is distinct from the original runtime's interval-mean direct matrix. Static
+and singular-`D` sources remain representable; each downstream interconnection
+owns its algebraic-solvability requirements.
+
+A real pole contributes one coordinate per input port. A conjugate pair
+contributes all `Re(z)` followed by all `-Im(z)` in original input-port order,
+matching the original real block `[[Re(p),Im(p)],[-Im(p),Re(p)]]`.
+`real_coordinates` reads this chart; `candidate_from_coordinates` returns a
+candidate of the same original owner with finite, complete endpoint coordinates
+and endpoint input. Publication belongs to the enclosing work-checked
+transaction. The source, physical clock, limits and both reports are retained.
+The next original ZOH step continues the adopted history without resetting poles.
+
+Continuous frequency queries must remain inside the source's declared band.
+The view does not change the original source, accepted pole history or reports.
+In particular, GridOnly admission is not promoted to a physical storage or
+dissipation certificate; terminal work remains an explicit boundary exchange
+unless a separate physical storage owner is supplied.
+
 `delayed_mimo_vector_fit` fits the entries after removing caller-declared
 delays (`Z_ab = exp(-s tau_ab) Zhat_ab`).
 - A delayed entry never carries the improper `s E` term: under a delay that
