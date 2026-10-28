@@ -1,0 +1,53 @@
+frankensim.matdb-source.v1
+observation	identity	LDPE 2420E02	Named source material and preparation	Commercial pellets supplied by Shamsjavid Co., Iran. Table 1 identifies the exact grade. Film specimens were hot pressed for 180 s at 10 MPa, at 180 C for polyethylene or 195 C for polypropylene, then cut to 25 x 25 mm. Density, DSC and TLS need distinct specimens; common coupons, moisture conditioning and ambient test pressure are not established. This pack does not qualify another grade or arbitrary stock.
+observation	density	LDPE 2420E02	Table 2 density; section 2.3.3 Archimedes method	Density of 10-20 g specimens was measured in air and butyl acetate at 23 C. Values are converted from g/cm3 to kg/m3. This is a single-temperature observation, not density(T).
+observation	cp	LDPE 2420E02	Table 2 footnote 1; section 2.3.4 DSC heat capacity	Cp is reported at 25 C, measured relative to sapphire with blank subtraction. The specific Cp protocol ramps 10-40 C at 20 C/min. Only the printed 25 C value is retained; the scan interval is not a populated temperature curve.
+observation	diffusivity	LDPE 2420E02	Table 2; sections 2.2 and 3.1 thermal lens spectrometry	Thermal diffusivity is a fitted TLS estimate from hot-pressed film. The paper describes three measurements and an overall 4 percent uncertainty but supplies no corresponding confidence level here; uncertainty remains unstated. The absolute TLS test temperature and directional anisotropy are not established. Laser modulation is a measurement protocol, not a frequency-dependent material law.
+observation	derived-conductivity	LDPE 2420E02	Table 2 and Equation 4, k = rho Cp D	The source derives conductivity from density, Cp and TLS diffusivity; it is not an independent conductivity measurement. Density is measured at 23 C, Cp at 25 C, and the TLS temperature is unstated. The printed rounded conductivity is retained, requiring explicit engineering-reference acceptance and both parent reference temperatures. No same-temperature law, covariance or independent uncertainty is synthesized.
+scalar	density	identity,density	density	921	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	grade	1	1	1
+validity	density	moisture_known	0	0	1
+validity	density	pressure_known	0	0	1
+validity	density	specimens_matched	0	0	1
+validity	density	source_shared_temperature	0	0	1
+validity	density	temperature_known	1	1	1
+validity	density	temperature	296.15	296.15	K
+scalar	specific-heat-capacity	identity,cp	specific_heat_capacity	2090	J/kg/K	constant
+uncertainty	specific-heat-capacity	unstated	-	-	-	-
+validity	specific-heat-capacity	grade	1	1	1
+validity	specific-heat-capacity	moisture_known	0	0	1
+validity	specific-heat-capacity	pressure_known	0	0	1
+validity	specific-heat-capacity	specimens_matched	0	0	1
+validity	specific-heat-capacity	source_shared_temperature	0	0	1
+validity	specific-heat-capacity	temperature_known	1	1	1
+validity	specific-heat-capacity	temperature	298.15	298.15	K
+validity	specific-heat-capacity	cp_heating_rate	0.3333333333333333	0.3333333333333333	K/s
+scalar	thermal-diffusivity	identity,diffusivity	thermal_diffusivity	1.92e-7	m2/s	constant
+uncertainty	thermal-diffusivity	unstated	-	-	-	-
+validity	thermal-diffusivity	grade	1	1	1
+validity	thermal-diffusivity	moisture_known	0	0	1
+validity	thermal-diffusivity	pressure_known	0	0	1
+validity	thermal-diffusivity	specimens_matched	0	0	1
+validity	thermal-diffusivity	source_shared_temperature	0	0	1
+validity	thermal-diffusivity	temperature_known	0	0	1
+validity	thermal-diffusivity	hotpressed_film	1	1	1
+validity	thermal-diffusivity	hotpress_temperature	453.15	453.15	K
+validity	thermal-diffusivity	hotpress_pressure	10000000	10000000	Pa
+validity	thermal-diffusivity	hotpress_duration	180	180	s
+scalar	source-derived-conductivity	identity,density,cp,diffusivity,derived-conductivity	derived_conductivity	0.37	W/m/K	constant
+uncertainty	source-derived-conductivity	unstated	-	-	-	-
+validity	source-derived-conductivity	grade	1	1	1
+validity	source-derived-conductivity	moisture_known	0	0	1
+validity	source-derived-conductivity	pressure_known	0	0	1
+validity	source-derived-conductivity	specimens_matched	0	0	1
+validity	source-derived-conductivity	source_shared_temperature	0	0	1
+validity	source-derived-conductivity	temperature_known	0	0	1
+validity	source-derived-conductivity	reference_acceptance	1	1	1
+validity	source-derived-conductivity	conductivity_independently_measured	0	0	1
+validity	source-derived-conductivity	density_reference_temperature	296.15	296.15	K
+validity	source-derived-conductivity	cp_reference_temperature	298.15	298.15	K
+validity	source-derived-conductivity	hotpressed_film	1	1	1
+validity	source-derived-conductivity	hotpress_temperature	453.15	453.15	K
+validity	source-derived-conductivity	hotpress_pressure	10000000	10000000	Pa
+validity	source-derived-conductivity	hotpress_duration	180	180	s

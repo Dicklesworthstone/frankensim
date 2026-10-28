@@ -1,0 +1,26 @@
+frankensim.matdb-manifest.v3
+pack_id	lldpe-22b02-abbasgholi2022
+redistribution	permitted	CC BY 4.0 research article; attributed numerical facts with original condition and derivation notes
+citation	Abbasgholi-NA B. et al., Thermal Diffusivity and Conductivity of Polyolefins by Thermal Lens Technique, Polymers 14(13), 2707 (2022), sections 2.1, 2.2, 2.3.3, 2.3.4 and 3.2, Tables 1-2 and Equation 4; https://doi.org/10.3390/polym14132707 ; https://www.mdpi.com/2073-4360/14/13/2707 ; accessed 2026-10-28
+license	CC-BY-4.0
+source	polyolefin-thermal-lens-2022	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	thermal_diffusivity	thermal-diffusivity	dimensional
+property	derived_conductivity	source-derived-thermal-conductivity	thermal-conductivity
+axis	grade	source-grade-lldpe-22b02-abbasgholi2022	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	temperature_known	source-test-temperature-known	dimensional
+axis	moisture_known	source-moisture-condition-known	dimensional
+axis	pressure_known	source-pressure-known	dimensional
+axis	specimens_matched	source-specimens-matched	dimensional
+axis	source_shared_temperature	source-properties-share-temperature	dimensional
+axis	hotpress_temperature	source-film-hotpress-temperature	absolute-temperature
+axis	hotpress_pressure	source-film-hotpress-pressure	dimensional
+axis	hotpress_duration	source-film-hotpress-duration	dimensional
+axis	hotpressed_film	source-is-hotpressed-film	dimensional
+axis	cp_heating_rate	source-cp-heating-rate	dimensional
+axis	reference_acceptance	engineering-reference-model	dimensional
+axis	conductivity_independently_measured	source-conductivity-independently-measured	dimensional
+axis	density_reference_temperature	density-reference-temperature	absolute-temperature
+axis	cp_reference_temperature	specific-heat-reference-temperature	absolute-temperature

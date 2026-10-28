@@ -1,0 +1,27 @@
+frankensim.matdb-manifest.v5
+pack_id	polypropylene-mtps-thermtest-26c-reference
+redistribution	permitted	Selected attributed numerical facts and original scope notes only; source prose, images and table layout are not redistributed
+citation	Thermtest, Discovering the Thermal Conductivity of Polypropylene, Table 1 and measurement conditions, accessed 2026-10-28; https://thermtest.com/application/thermal-conductivity-of-polypropylene
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	thermtest-pp-mtps	properties.tsv	material-tsv-v1
+property	conductivity	thermal-conductivity	thermal-conductivity
+property	diffusivity	thermal-diffusivity	dimensional
+property	volumetric_capacity	volumetric-heat-capacity	dimensional
+property	conductivity_sd	thermal-conductivity-reported-standard-deviation	dimensional
+property	diffusivity_sd	thermal-diffusivity-reported-standard-deviation	dimensional
+property	volumetric_capacity_sd	volumetric-heat-capacity-reported-standard-deviation	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	reference_acceptance	engineering-reference-model	dimensional
+axis	sample_identity	source-sample-thermtest-pp	dimensional
+axis	grade_known	source-grade-known	dimensional
+axis	process_known	source-processing-history-known	dimensional
+axis	moisture_known	source-moisture-condition-known	dimensional
+axis	pressure_known	source-pressure-known	dimensional
+axis	direction_known	source-anisotropy-direction-known	dimensional
+axis	same_sample	source-same-specimen	dimensional
+axis	mtps	source-method-mtps-asymmetric	dimensional
+axis	duration	source-test-duration	dimensional
+axis	sensor_radius	source-sensor-radius	dimensional
+axis	sensor_power	source-sensor-power	dimensional
+axis	mean_statistic	source-statistic-is-mean	dimensional
+axis	repeat	source-repeat-number	dimensional
