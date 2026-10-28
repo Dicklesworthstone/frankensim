@@ -383,10 +383,21 @@ rollback. Their addition does not establish executed native validation.
 - `MaterialSlab::step_with_material_rheology` (2-D and 3-D) resolves shared
   material transport at actual temperature and local physical shear rate.
   The existing non-equilibrium stress estimators include the Guo half-force
-  second-moment correction; a bounded damped local solve closes
-  `tau=1/2+3*nu(T,rate)*dt/dx^2` with `rate=numerator/(tau*dt)`. The retained
-  background relaxation field is only an initial iterate, never an assumed
-  viscosity for the evolving material. Both initial and candidate endpoint
+  second-moment correction; a bounded local root solve closes
+  `tau=1/2+3*nu(T,rate)*dt/dx^2` with `rate=numerator/(tau*dt)`.
+  `RheologySolve::relaxation` controls the original damped search until two
+  consecutive material evaluations give opposite tau-residual signs. A
+  residual-scaled secant then stays strictly inside that sampled tau bracket;
+  bisection takes over if the interval has not halved since the preceding
+  trial or rounding prevents an interior secant. No global tau endpoints are
+  probed, and each query retains the original source-domain admission.
+  `maximum_iterations` counts every material evaluation, with cancellation
+  checked before each. Acceptance requires the actual returned material
+  query's tau defect to meet the original absolute/relative tolerances;
+  bracket width alone cannot accept a discontinuous response. Exhausting the
+  query budget or the representable bracket interior refuses convergence.
+  The retained background relaxation field is only an initial iterate, never
+  an assumed viscosity for the evolving material. Both initial and candidate endpoint
   source evaluations must converge before the existing thermal/flow step is
   published. Original source payloads, physical queries, iteration counts and
   residuals remain on `transport::rheology::RheologyMaterial`. Source failures,
@@ -2994,9 +3005,10 @@ multidimensional qualification remain necessary before stronger claims.
 
 The explicit `free_surface3_from_cells_with_rheology` ingress carries shared
 temperature/shear-rate liquid sources into the actual native VOF collision.
-It reuses the fixed-domain local constitutive solver and force-corrected
-molecular stress. The resulting viscosity supplies collision tau, molecular
-viscous heating and temperature-dependent liquid, finite-wall and gas-film
+It reuses the fixed-domain constitutive solver with bracketed safeguards and
+force-corrected molecular stress, including the same material query budget,
+cancellation and actual-query residual acceptance. The resulting viscosity
+supplies collision tau, molecular viscous heating and temperature-dependent liquid, finite-wall and gas-film
 thermal transport. Accepted endpoint material/rate observations use the new
 native populations; ordinary frozen constructors refuse evolving-rate bundles.
 `rheology_at` exposes the physical rate, collision coefficient and local
@@ -3161,9 +3173,10 @@ unowned dynamic axes; density and surface tension must be shear-independent.
 All runtime queries retain the original selected claims and full context.
 
 `MaterialFreeSurfaceRheology3` uses the existing physical-unit and cell-state
-ingress, molecular force-corrected stress and shared bounded `solve_local` owner.
-Each wet collision lane, including zero-mass interface ghosts, closes rate
-against `tau = 1/2 + 3 nu dt/dx^2`. Those exact material coefficients drive the
+ingress, molecular force-corrected stress and shared bounded `solve_local`
+owner. Its sampled-bracket safeguards preserve source admission, evaluation
+counts and acceptance from the actual residual. Each wet collision lane,
+including zero-mass interface ghosts, closes rate against `tau = 1/2 + 3 nu dt/dx^2`. Those exact material coefficients drive the
 existing native collision, streaming, VOF mass exchange and conversion. The
 native capillary reconstruction retains the sourced uniform sigma; frozen and
 evolving-viscosity paths share the same dimensional and positive-boundary-density

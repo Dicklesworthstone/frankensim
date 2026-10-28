@@ -633,6 +633,79 @@ fn g1_g3_card_curve_changes_flow_and_solves_the_constitutive_quadratic() {
 }
 
 #[test]
+fn g1_g3_strong_source_thickening_matches_constitutive_root_and_collision() {
+    let source = card_curve(
+        "shear_rate",
+        Frequency::DIMS,
+        vec![(0.0, 1.0), (1.2, 1.0), (1.4, 3.0), (100.0, 3.0)],
+        1.0,
+    );
+    let reference = resolve_liquid_state(
+        &source,
+        &query(305.0, 0.0),
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    let mut slab = slab3();
+    let mut prescribed = slab3();
+    set_shear3(&mut slab, 0.02, [0.0; 3]);
+    set_shear3(&mut prescribed, 0.02, [0.0; 3]);
+
+    // The independently imposed stress has gamma*tau=1.6 /s. In the
+    // source transition mu=10*gamma-11 Pa s, so tau^2+2.8*tau-4.8=0.
+    // The unique positive root is tau=1.2, gamma=4/3 /s and mu=7/3 Pa s.
+    // The former damped fixed point has slope -2 at this admissible root.
+    prescribed
+        .step_with_material_transport(
+            &[0.0; 16],
+            &[[0.0; 3]; 16],
+            limits(),
+            &CancelGate::new(),
+            |cell, _, _| Ok(fluid(if cell == 6 { 7.0 / 3.0 } else { 1.0 })),
+        )
+        .unwrap();
+    let step = slab
+        .step_with_material_rheology(
+            &[0.0; 16],
+            &[[0.0; 3]; 16],
+            limits(),
+            controls(),
+            &CancelGate::new(),
+            |point, _| resolve(&source, &reference, point),
+        )
+        .unwrap();
+    let sample = step.applied.iter().find(|sample| sample.cell == 6).unwrap();
+    near(sample.momentum_relaxation, 1.2, 2e-12);
+    near(sample.material.point().shear_rate_per_s, 4.0 / 3.0, 2e-12);
+    near(sample.transport.dynamic_viscosity_pa_s(), 7.0 / 3.0, 2e-11);
+    assert!(sample.material.iterations() <= 20);
+    for sample in step.applied.iter().chain(&step.endpoint) {
+        assert_eq!(
+            sample.material.source().material().card_identity(),
+            source.content_hash()
+        );
+        assert_eq!(
+            sample.material.source().material().query(),
+            query(
+                sample.temperature_k,
+                sample.material.point().shear_rate_per_s
+            )
+        );
+        assert!(sample.material.relaxation_defect() <= 2e-12);
+    }
+    for (actual, expected) in slab.lattice.grid.f.iter().zip(&prescribed.lattice.grid.f) {
+        for (&actual, &expected) in actual.iter().zip(expected) {
+            near(actual, expected, 2e-13);
+        }
+    }
+    for (actual, expected) in slab.lattice.gpop.iter().zip(&prescribed.lattice.gpop) {
+        for (&actual, &expected) in actual.iter().zip(expected) {
+            near(actual, expected, 2e-13);
+        }
+    }
+}
+
+#[test]
 fn nonconvergence_source_refusal_and_cancelled_local_solve_are_atomic() {
     let mut slab = slab3();
     set_shear3(&mut slab, 0.02, [0.0; 3]);

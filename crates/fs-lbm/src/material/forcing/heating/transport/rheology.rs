@@ -38,12 +38,13 @@ pub struct RheologyPoint {
     pub shear_rate_per_s: f64,
 }
 
-/// Bounded damped fixed-point controls for each local constitutive query.
+/// Bounded constitutive solve with a damped search and bracketed safeguards.
 #[derive(Debug, Clone, Copy)]
 pub struct RheologySolve {
     /// Maximum material evaluations per fluid cell and time level.
     pub maximum_iterations: usize,
-    /// Fraction of the proposed tau update, in `(0, 1]`.
+    /// Fraction of an unbracketed tau update, in `(0, 1]`. Once evaluated
+    /// residuals bracket a root, safeguarded secant/bisection takes over.
     pub relaxation: f64,
     /// Absolute residual tolerance for dimensionless lattice relaxation time.
     pub absolute_relaxation_tolerance: f64,
@@ -90,6 +91,10 @@ pub(crate) enum LocalRheologyError<E> {
 
 /// Resolve the force-corrected stress numerator against the material's physical
 /// BGK relaxation. Callers admit controls and units and retain source authority.
+/// A bracket is learned only from the existing damped search: no global tau
+/// endpoints or extra source-domain assumptions are introduced. Subsequent tau
+/// candidates remain strictly between sampled values; the source owner still
+/// admits every resulting physical rate.
 pub(crate) fn solve_local<F, E>(
     numerator: f64,
     timestep_s: f64,
@@ -100,6 +105,9 @@ pub(crate) fn solve_local<F, E>(
 ) -> Result<LocalRheology<F>, LocalRheologyError<E>> {
     let mut tau = initial_tau;
     let mut relaxation_defect = f64::INFINITY;
+    let mut previous: Option<(f64, f64)> = None;
+    let mut bracket: Option<[(f64, f64); 2]> = None;
+    let mut previous_width = f64::INFINITY;
     for iterations in 1..=solve.maximum_iterations {
         check().map_err(LocalRheologyError::Evaluation)?;
         let rate = (numerator / tau) / timestep_s;
@@ -109,7 +117,8 @@ pub(crate) fn solve_local<F, E>(
             ));
         }
         let (value, next) = evaluate(rate).map_err(LocalRheologyError::Evaluation)?;
-        relaxation_defect = (next - tau).abs();
+        let residual = tau - next;
+        relaxation_defect = residual.abs();
         let tolerance = solve.absolute_relaxation_tolerance
             + solve.relative_relaxation_tolerance * next.max(tau);
         if !tolerance.is_finite() {
@@ -125,7 +134,50 @@ pub(crate) fn solve_local<F, E>(
                 relaxation_defect,
             });
         }
-        tau += solve.relaxation * (next - tau);
+        if let Some(ends) = &mut bracket {
+            // The candidate lies inside the sampled interval. Replace the
+            // endpoint with the same residual sign, retaining opposite signs
+            // without assuming a particular constitutive slope or continuity.
+            let same_as_lower = (residual > 0.0) == (ends[0].1 > 0.0);
+            ends[usize::from(!same_as_lower)] = (tau, residual);
+        } else if let Some(old) = previous
+            && (residual > 0.0) != (old.1 > 0.0)
+        {
+            bracket = Some(if old.0 < tau {
+                [old, (tau, residual)]
+            } else {
+                [(tau, residual), old]
+            });
+        }
+        previous = Some((tau, residual));
+        if let Some([(lower, f_lower), (upper, f_upper)]) = bracket {
+            let width = upper - lower;
+            // Scale first to avoid overflowing the residual sum. The secant
+            // point is a convex combination of evaluated, admissible taus.
+            let scale = f_lower.abs().max(f_upper.abs());
+            let a = (f_lower / scale).abs();
+            let b = (f_upper / scale).abs();
+            let secant = lower + (a / (a + b)) * width;
+            let candidate = if width <= 0.5 * previous_width && secant > lower && secant < upper {
+                secant
+            } else {
+                // Do not let regula falsi stagnate at a steep curve or kink:
+                // the interval must halve at least every two evaluations.
+                lower + 0.5 * width
+            };
+            if candidate <= lower || candidate >= upper {
+                // A tiny interval is not evidence of a small constitutive
+                // residual (e.g. for a discontinuous source response).
+                return Err(LocalRheologyError::Convergence {
+                    iterations,
+                    relaxation_defect,
+                });
+            }
+            previous_width = width;
+            tau = candidate;
+        } else {
+            tau += solve.relaxation * (next - tau);
+        }
     }
     Err(LocalRheologyError::Convergence {
         iterations: solve.maximum_iterations,
@@ -376,5 +428,162 @@ impl MaterialSlab<ThermalLbm3> {
             gate,
             resolve,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LocalRheologyError, RheologySolve, solve_local};
+    use std::cell::Cell;
+
+    fn controls(relaxation: f64) -> RheologySolve {
+        RheologySolve {
+            maximum_iterations: 100,
+            relaxation,
+            absolute_relaxation_tolerance: 1e-13,
+            relative_relaxation_tolerance: 1e-12,
+        }
+    }
+
+    // Continuous positive viscosity [Pa s], with a threefold thickening
+    // transition. At rho=1000 kg/m^3 and dx=dt=0.01 SI, tau=0.5+0.3*mu.
+    fn thickening_tau(rate: f64) -> f64 {
+        let mu = (1.0 + 10.0 * (rate - 1.2)).clamp(1.0, 3.0);
+        0.5 + 0.3 * mu
+    }
+
+    #[test]
+    fn strong_material_thickening_converges_inside_sampled_source_support() {
+        for (relaxation, initial_tau) in [(0.5, 0.8), (0.75, 0.8), (1.0, 0.8), (0.75, 1.2)] {
+            let polls = Cell::new(0usize);
+            let mut calls = 0;
+            let mut queried_rates = Vec::new();
+            let result = solve_local(
+                0.016,
+                0.01,
+                initial_tau,
+                controls(relaxation),
+                || {
+                    polls.set(polls.get() + 1);
+                    Ok(())
+                },
+                |rate| {
+                    // Blind probes at a numerical tau floor would leave this
+                    // source's physical support despite its admissible root.
+                    if !(1.1..=2.0).contains(&rate) {
+                        return Err("outside material support");
+                    }
+                    calls += 1;
+                    queried_rates.push(rate);
+                    Ok(((calls, rate), thickening_tau(rate)))
+                },
+            );
+            let root = match result {
+                Ok(root) => root,
+                Err(LocalRheologyError::Convergence {
+                    iterations,
+                    relaxation_defect,
+                }) => panic!("{iterations} queries, tau defect {relaxation_defect}"),
+                Err(_) => panic!("an admissible material query was refused"),
+            };
+            // gamma*tau=1.6/s, mu=10*gamma-11 in the transition:
+            // tau^2+2.8*tau-4.8=0, so tau=1.2 and gamma=4/3 /s.
+            assert!((root.shear_rate_per_s - 4.0 / 3.0).abs() < 2e-12);
+            assert!((thickening_tau(root.shear_rate_per_s) - 1.2).abs() < 2e-12);
+            assert!(root.relaxation_defect < 2e-12);
+            assert_eq!(root.iterations, calls);
+            assert_eq!(polls.get(), calls);
+            assert_eq!(root.value, (calls, *queried_rates.last().unwrap()));
+            assert_eq!(root.value.1, root.shear_rate_per_s);
+            assert!(calls <= 20, "{calls} material queries");
+            if initial_tau == 1.2 {
+                assert_eq!(calls, 1, "an already consistent material needs one query");
+            }
+        }
+    }
+
+    #[test]
+    fn bracketed_material_solve_retains_budget_refusal_and_cancellation() {
+        let mut calls = 0;
+        let result = solve_local(
+            0.016,
+            0.01,
+            0.8,
+            RheologySolve {
+                maximum_iterations: 2,
+                ..controls(0.75)
+            },
+            || Ok::<_, &'static str>(()),
+            |rate| {
+                calls += 1;
+                Ok(((), thickening_tau(rate)))
+            },
+        );
+        assert_eq!(calls, 2);
+        assert!(matches!(
+            result,
+            Err(LocalRheologyError::Convergence { iterations: 2, .. })
+        ));
+
+        for cancelled in [false, true] {
+            let polls = Cell::new(0usize);
+            let mut calls = 0;
+            let result = solve_local(
+                0.016,
+                0.01,
+                0.8,
+                controls(0.75),
+                || {
+                    polls.set(polls.get() + 1);
+                    if cancelled && polls.get() == 3 {
+                        Err("cancelled")
+                    } else {
+                        Ok(())
+                    }
+                },
+                |rate| {
+                    calls += 1;
+                    if calls == 3 {
+                        Err("source refused interior query")
+                    } else {
+                        Ok(((), thickening_tau(rate)))
+                    }
+                },
+            );
+            let expected = if cancelled {
+                "cancelled"
+            } else {
+                "source refused interior query"
+            };
+            assert!(matches!(result, Err(LocalRheologyError::Evaluation(e)) if e == expected));
+            assert_eq!(polls.get(), 3);
+            assert_eq!(calls, if cancelled { 2 } else { 3 });
+        }
+    }
+
+    #[test]
+    fn narrow_material_bracket_cannot_hide_a_finite_constitutive_defect() {
+        let mut calls = 0;
+        let result = solve_local(
+            0.016,
+            0.01,
+            0.8,
+            controls(0.75),
+            || Ok::<_, ()>(()),
+            |rate| {
+                calls += 1;
+                // Positive viscosities, but a jump across the requested
+                // stress: there is no self-consistent constitutive root.
+                Ok(((), if rate > 4.0 / 3.0 { 1.4 } else { 0.8 }))
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(LocalRheologyError::Convergence {
+                iterations,
+                relaxation_defect,
+            }) if iterations == calls && relaxation_defect > 0.19
+        ));
+        assert!(calls <= controls(0.75).maximum_iterations);
     }
 }
