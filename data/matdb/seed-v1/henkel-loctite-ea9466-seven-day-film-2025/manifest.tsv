@@ -1,0 +1,20 @@
+frankensim.matdb-manifest.v3
+pack_id	henkel-loctite-ea9466-seven-day-film-2025
+redistribution	permitted	Selected attributed numerical facts and original notes only; no source document or table layout is redistributed
+citation	Henkel, LOCTITE EA 9466 Technical Data Sheet, March 2025, p. 1 cured-material section; https://datasheets.tdx.henkel.com/LOCTITE-EA-9466-en_GL.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	henkel-loctite-ea9466-seven-day-film-2025	properties.tsv	material-tsv-v1
+property	tensile_modulus	tensile-modulus	dimensional
+property	tensile_strength	tensile-strength	dimensional
+property	tensile_elongation	tensile-elongation	dimensional
+property	glass_transition_temperature	glass-transition-temperature	absolute-temperature
+property	dielectric_breakdown_strength	dielectric-breakdown-strength	dimensional
+axis	source_grade_ea9466	source-grade-ea9466	dimensional
+axis	resin_to_hardener_mass_ratio	resin-to-hardener-mass-ratio	dimensional
+axis	cure_age	cure-age	dimensional
+axis	cure_temperature	cure-temperature	absolute-temperature
+axis	film_thickness	film-thickness	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_test_rate_known	source-test-rate-known	dimensional
+axis	source_thermal_scan_conditions_known	source-thermal-scan-conditions-known	dimensional

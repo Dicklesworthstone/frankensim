@@ -1,0 +1,35 @@
+frankensim.matdb-source.v1
+observation	zircon-adhesive	Cotronics Resbond 940 standard two-component zircon ceramic adhesive	Manufacturer catalog reference values; test methods and specimen geometry unstated	This is standard 940, not 940HT, 940LE, 940HE or 940SS. The table gives 4000 psi compression strength, 1800 psi flexural strength, expansion 4.50e-6 per degF, conductivity 8 Btu in/(h ft2 degF), and dielectric strength 125 V/mil. Stress uses 6894.757293168 Pa/psi; expansion multiplies by 1.8; mil is 25.4 micrometres. Conductivity conversion explicitly assumes the International Table Btu (1055.05585262 J); the source does not identify its Btu convention. Test temperature, expansion interval, cure history, moisture and uncertainty are unstated. Cure recommendations and maximum-use ratings do not define measurement conditions or an admitted temperature range. No density, heat capacity, elastic modulus, bond strength or continuous law is inferred.
+scalar	compressive-strength	zircon-adhesive	compressive_strength	27579029.172672	Pa	constant
+uncertainty	compressive-strength	unstated	-	-	-	-
+validity	compressive-strength	source_grade_resbond940	1	1	1
+validity	compressive-strength	source_test_conditions_known	0	0	1
+validity	compressive-strength	source_cure_history_known	0	0	1
+validity	compressive-strength	source_moisture_condition_known	0	0	1
+scalar	flexural-strength	zircon-adhesive	flexural_strength	12410563.1277024	Pa	constant
+uncertainty	flexural-strength	unstated	-	-	-	-
+validity	flexural-strength	source_grade_resbond940	1	1	1
+validity	flexural-strength	source_test_conditions_known	0	0	1
+validity	flexural-strength	source_cure_history_known	0	0	1
+validity	flexural-strength	source_moisture_condition_known	0	0	1
+scalar	thermal-expansion	zircon-adhesive	thermal_expansion_coefficient	0.0000081	K^-1	constant
+uncertainty	thermal-expansion	unstated	-	-	-	-
+validity	thermal-expansion	source_grade_resbond940	1	1	1
+validity	thermal-expansion	source_test_conditions_known	0	0	1
+validity	thermal-expansion	source_cure_history_known	0	0	1
+validity	thermal-expansion	source_moisture_condition_known	0	0	1
+validity	thermal-expansion	source_expansion_interval_known	0	0	1
+scalar	thermal-conductivity	zircon-adhesive	thermal_conductivity	1.1538231109142605	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	source_grade_resbond940	1	1	1
+validity	thermal-conductivity	source_test_conditions_known	0	0	1
+validity	thermal-conductivity	source_cure_history_known	0	0	1
+validity	thermal-conductivity	source_moisture_condition_known	0	0	1
+validity	thermal-conductivity	btu_it_conversion	1	1	1
+validity	thermal-conductivity	source_btu_convention_known	0	0	1
+scalar	dielectric-breakdown	zircon-adhesive	dielectric_breakdown_strength	4921259.842519685	V/m	constant
+uncertainty	dielectric-breakdown	unstated	-	-	-	-
+validity	dielectric-breakdown	source_grade_resbond940	1	1	1
+validity	dielectric-breakdown	source_test_conditions_known	0	0	1
+validity	dielectric-breakdown	source_cure_history_known	0	0	1
+validity	dielectric-breakdown	source_moisture_condition_known	0	0	1

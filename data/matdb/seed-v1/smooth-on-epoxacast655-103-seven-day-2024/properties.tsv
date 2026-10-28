@@ -1,0 +1,91 @@
+frankensim.matdb-source.v1
+observation	seven-day-composite	Smooth-On EpoxAcast 655 aluminum-filled casting epoxy with 103 SLOW hardener	ASTM D638 tension; ASTM D790 flexure; ASTM D695 compression; ASTM D2566 molding shrinkage; thermal method unstated	The source groups 101/102/103 hardeners; this record selects 103 at 100:12 base:hardener by mass. Values were measured after seven days at 23 C. Detailed processing/post-cure history, loading rates, moisture and uncertainty are unspecified. Tensile strength/modulus are 4810/2040000 psi; flexural strength/modulus 7660/1403000 psi; compressive strength/modulus 12500/125500 psi. Conversion uses 6894.757293168 Pa/psi. Elongation 0.54% becomes 0.0054. These distinct test moduli do not supply isotropic elasticity. Molding shrinkage is not thermal expansion. Mixed-liquid specific gravity is deliberately excluded; no cured density or heat capacity is supplied.
+scalar	tensile-strength	seven-day-composite	tensile_strength	33163782.58013808	Pa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	source_grade_epoxacast655	1	1	1
+validity	tensile-strength	hardener_103	1	1	1
+validity	tensile-strength	hardener_parts_per_100_resin_mass	12	12	1
+validity	tensile-strength	cure_age	604800	604800	s
+validity	tensile-strength	temperature	296.15	296.15	K
+validity	tensile-strength	source_processing_history_known	0	0	1
+validity	tensile-strength	source_moisture_condition_known	0	0	1
+validity	tensile-strength	source_test_rate_known	0	0	1
+scalar	tensile-modulus	seven-day-composite	tensile_modulus	14065304878.06272	Pa	constant
+uncertainty	tensile-modulus	unstated	-	-	-	-
+validity	tensile-modulus	source_grade_epoxacast655	1	1	1
+validity	tensile-modulus	hardener_103	1	1	1
+validity	tensile-modulus	hardener_parts_per_100_resin_mass	12	12	1
+validity	tensile-modulus	cure_age	604800	604800	s
+validity	tensile-modulus	temperature	296.15	296.15	K
+validity	tensile-modulus	source_processing_history_known	0	0	1
+validity	tensile-modulus	source_moisture_condition_known	0	0	1
+validity	tensile-modulus	source_test_rate_known	0	0	1
+scalar	tensile-elongation	seven-day-composite	tensile_elongation	0.0054	1	constant
+uncertainty	tensile-elongation	unstated	-	-	-	-
+validity	tensile-elongation	source_grade_epoxacast655	1	1	1
+validity	tensile-elongation	hardener_103	1	1	1
+validity	tensile-elongation	hardener_parts_per_100_resin_mass	12	12	1
+validity	tensile-elongation	cure_age	604800	604800	s
+validity	tensile-elongation	temperature	296.15	296.15	K
+validity	tensile-elongation	source_processing_history_known	0	0	1
+validity	tensile-elongation	source_moisture_condition_known	0	0	1
+validity	tensile-elongation	source_test_rate_known	0	0	1
+scalar	flexural-strength	seven-day-composite	flexural_strength	52813840.86566688	Pa	constant
+uncertainty	flexural-strength	unstated	-	-	-	-
+validity	flexural-strength	source_grade_epoxacast655	1	1	1
+validity	flexural-strength	hardener_103	1	1	1
+validity	flexural-strength	hardener_parts_per_100_resin_mass	12	12	1
+validity	flexural-strength	cure_age	604800	604800	s
+validity	flexural-strength	temperature	296.15	296.15	K
+validity	flexural-strength	source_processing_history_known	0	0	1
+validity	flexural-strength	source_moisture_condition_known	0	0	1
+validity	flexural-strength	source_test_rate_known	0	0	1
+scalar	flexural-modulus	seven-day-composite	flexural_modulus	9673344482.314703	Pa	constant
+uncertainty	flexural-modulus	unstated	-	-	-	-
+validity	flexural-modulus	source_grade_epoxacast655	1	1	1
+validity	flexural-modulus	hardener_103	1	1	1
+validity	flexural-modulus	hardener_parts_per_100_resin_mass	12	12	1
+validity	flexural-modulus	cure_age	604800	604800	s
+validity	flexural-modulus	temperature	296.15	296.15	K
+validity	flexural-modulus	source_processing_history_known	0	0	1
+validity	flexural-modulus	source_moisture_condition_known	0	0	1
+validity	flexural-modulus	source_test_rate_known	0	0	1
+scalar	compressive-strength	seven-day-composite	compressive_strength	86184466.1646	Pa	constant
+uncertainty	compressive-strength	unstated	-	-	-	-
+validity	compressive-strength	source_grade_epoxacast655	1	1	1
+validity	compressive-strength	hardener_103	1	1	1
+validity	compressive-strength	hardener_parts_per_100_resin_mass	12	12	1
+validity	compressive-strength	cure_age	604800	604800	s
+validity	compressive-strength	temperature	296.15	296.15	K
+validity	compressive-strength	source_processing_history_known	0	0	1
+validity	compressive-strength	source_moisture_condition_known	0	0	1
+validity	compressive-strength	source_test_rate_known	0	0	1
+scalar	compression-modulus	seven-day-composite	compression_modulus	865292040.292584	Pa	constant
+uncertainty	compression-modulus	unstated	-	-	-	-
+validity	compression-modulus	source_grade_epoxacast655	1	1	1
+validity	compression-modulus	hardener_103	1	1	1
+validity	compression-modulus	hardener_parts_per_100_resin_mass	12	12	1
+validity	compression-modulus	cure_age	604800	604800	s
+validity	compression-modulus	temperature	296.15	296.15	K
+validity	compression-modulus	source_processing_history_known	0	0	1
+validity	compression-modulus	source_moisture_condition_known	0	0	1
+validity	compression-modulus	source_test_rate_known	0	0	1
+scalar	molding-shrinkage	seven-day-composite	linear_molding_shrinkage	0.0006	1	constant
+uncertainty	molding-shrinkage	unstated	-	-	-	-
+validity	molding-shrinkage	source_grade_epoxacast655	1	1	1
+validity	molding-shrinkage	hardener_103	1	1	1
+validity	molding-shrinkage	hardener_parts_per_100_resin_mass	12	12	1
+validity	molding-shrinkage	cure_age	604800	604800	s
+validity	molding-shrinkage	temperature	296.15	296.15	K
+validity	molding-shrinkage	source_processing_history_known	0	0	1
+validity	molding-shrinkage	source_moisture_condition_known	0	0	1
+scalar	thermal-conductivity	seven-day-composite	thermal_conductivity	0.675	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	source_grade_epoxacast655	1	1	1
+validity	thermal-conductivity	hardener_103	1	1	1
+validity	thermal-conductivity	hardener_parts_per_100_resin_mass	12	12	1
+validity	thermal-conductivity	cure_age	604800	604800	s
+validity	thermal-conductivity	temperature	296.15	296.15	K
+validity	thermal-conductivity	source_processing_history_known	0	0	1
+validity	thermal-conductivity	source_moisture_condition_known	0	0	1
+validity	thermal-conductivity	source_thermal_test_method_known	0	0	1

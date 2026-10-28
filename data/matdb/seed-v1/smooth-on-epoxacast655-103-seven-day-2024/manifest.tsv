@@ -1,0 +1,24 @@
+frankensim.matdb-manifest.v3
+pack_id	smooth-on-epoxacast655-103-seven-day-2024
+redistribution	permitted	Selected attributed numerical facts and original notes only; no source document or table layout is redistributed
+citation	Smooth-On, EpoxAcast 655 Technical Bulletin 011624DH, p. 1, 101/102/103-hardener property column and measurement footnote; https://www.smooth-on.com/tb/files/EPOXACAST_655_TB.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	smooth-on-epoxacast655-103-seven-day-2024	properties.tsv	material-tsv-v1
+property	tensile_strength	tensile-strength	dimensional
+property	tensile_modulus	tensile-modulus	dimensional
+property	tensile_elongation	tensile-elongation	dimensional
+property	flexural_strength	flexural-strength	dimensional
+property	flexural_modulus	flexural-modulus	dimensional
+property	compressive_strength	compressive-strength	dimensional
+property	compression_modulus	compression-modulus	dimensional
+property	linear_molding_shrinkage	linear-molding-shrinkage	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+axis	source_grade_epoxacast655	source-grade-epoxacast655	dimensional
+axis	hardener_103	hardener-103	dimensional
+axis	hardener_parts_per_100_resin_mass	hardener-parts-per-100-resin-mass	dimensional
+axis	cure_age	cure-age	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	source_processing_history_known	source-processing-history-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_test_rate_known	source-test-rate-known	dimensional
+axis	source_thermal_test_method_known	source-thermal-test-method-known	dimensional

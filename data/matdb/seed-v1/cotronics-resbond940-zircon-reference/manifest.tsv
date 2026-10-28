@@ -1,0 +1,18 @@
+frankensim.matdb-manifest.v3
+pack_id	cotronics-resbond940-zircon-reference
+redistribution	permitted	Selected attributed numerical facts and original notes only; no source document or table layout is redistributed
+citation	Cotronics, Resbond 940 Series manufacturer catalog, p. 31, standard 940 column; https://www.cotronics.com/vo/cotr/pdf/940.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	cotronics-resbond940-zircon-reference	properties.tsv	material-tsv-v1
+property	compressive_strength	compressive-strength	dimensional
+property	flexural_strength	flexural-strength	dimensional
+property	thermal_expansion_coefficient	thermal-expansion-coefficient	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	dielectric_breakdown_strength	dielectric-breakdown-strength	dimensional
+axis	source_grade_resbond940	source-grade-resbond940	dimensional
+axis	source_test_conditions_known	source-test-conditions-known	dimensional
+axis	source_cure_history_known	source-cure-history-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_expansion_interval_known	source-expansion-interval-known	dimensional
+axis	btu_it_conversion	btu-it-conversion	dimensional
+axis	source_btu_convention_known	source-btu-convention-known	dimensional

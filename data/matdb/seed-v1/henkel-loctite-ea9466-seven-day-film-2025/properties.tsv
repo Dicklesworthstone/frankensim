@@ -1,0 +1,50 @@
+frankensim.matdb-source.v1
+observation	cured-film	LOCTITE EA 9466 epoxy adhesive, 1.2 mm cured film	March 2025 TDS: ISO 527-3 tension, ASTM D882 strength, ASTM E1640 glass transition, IEC 60243-1 dielectric breakdown	Resin:hardener is 100:50 by mass (also 2:1 by volume). The specimen cured for seven days at 22 C; this does not state the tensile or dielectric test temperature. Tensile rate, moisture, thermal-scan conditions and statistical uncertainty are unspecified. Glass transition is a measured characteristic, not a permitted service temperature. Bulk film properties do not define substrate-specific lap-shear strength, peel resistance, joint stiffness, a cohesive law or an isotropic elastic tensor. No cured density is inferred from the uncured components.
+scalar	tensile-modulus	cured-film	tensile_modulus	1718	MPa	constant
+uncertainty	tensile-modulus	unstated	-	-	-	-
+validity	tensile-modulus	source_grade_ea9466	1	1	1
+validity	tensile-modulus	resin_to_hardener_mass_ratio	2	2	1
+validity	tensile-modulus	cure_age	604800	604800	s
+validity	tensile-modulus	cure_temperature	295.15	295.15	K
+validity	tensile-modulus	film_thickness	1.2	1.2	mm
+validity	tensile-modulus	source_moisture_condition_known	0	0	1
+validity	tensile-modulus	source_test_temperature_known	0	0	1
+validity	tensile-modulus	source_test_rate_known	0	0	1
+scalar	tensile-strength	cured-film	tensile_strength	32	MPa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	source_grade_ea9466	1	1	1
+validity	tensile-strength	resin_to_hardener_mass_ratio	2	2	1
+validity	tensile-strength	cure_age	604800	604800	s
+validity	tensile-strength	cure_temperature	295.15	295.15	K
+validity	tensile-strength	film_thickness	1.2	1.2	mm
+validity	tensile-strength	source_moisture_condition_known	0	0	1
+validity	tensile-strength	source_test_temperature_known	0	0	1
+validity	tensile-strength	source_test_rate_known	0	0	1
+scalar	tensile-elongation	cured-film	tensile_elongation	0.03	1	constant
+uncertainty	tensile-elongation	unstated	-	-	-	-
+validity	tensile-elongation	source_grade_ea9466	1	1	1
+validity	tensile-elongation	resin_to_hardener_mass_ratio	2	2	1
+validity	tensile-elongation	cure_age	604800	604800	s
+validity	tensile-elongation	cure_temperature	295.15	295.15	K
+validity	tensile-elongation	film_thickness	1.2	1.2	mm
+validity	tensile-elongation	source_moisture_condition_known	0	0	1
+validity	tensile-elongation	source_test_temperature_known	0	0	1
+validity	tensile-elongation	source_test_rate_known	0	0	1
+scalar	glass-transition	cured-film	glass_transition_temperature	335.15	K	constant
+uncertainty	glass-transition	unstated	-	-	-	-
+validity	glass-transition	source_grade_ea9466	1	1	1
+validity	glass-transition	resin_to_hardener_mass_ratio	2	2	1
+validity	glass-transition	cure_age	604800	604800	s
+validity	glass-transition	cure_temperature	295.15	295.15	K
+validity	glass-transition	film_thickness	1.2	1.2	mm
+validity	glass-transition	source_moisture_condition_known	0	0	1
+validity	glass-transition	source_thermal_scan_conditions_known	0	0	1
+scalar	dielectric-breakdown	cured-film	dielectric_breakdown_strength	30	kV/mm	constant
+uncertainty	dielectric-breakdown	unstated	-	-	-	-
+validity	dielectric-breakdown	source_grade_ea9466	1	1	1
+validity	dielectric-breakdown	resin_to_hardener_mass_ratio	2	2	1
+validity	dielectric-breakdown	cure_age	604800	604800	s
+validity	dielectric-breakdown	cure_temperature	295.15	295.15	K
+validity	dielectric-breakdown	film_thickness	1.2	1.2	mm
+validity	dielectric-breakdown	source_moisture_condition_known	0	0	1
+validity	dielectric-breakdown	source_test_temperature_known	0	0	1

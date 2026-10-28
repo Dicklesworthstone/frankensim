@@ -1,0 +1,76 @@
+frankensim.matdb-source.v1
+observation	product-reference	Norplex NP509 woven-glass/melamine laminate, G-5/G-9	2022 technical bulletin; typical values rather than specification limits	LW/CW denote sheet lengthwise/crosswise directions. Different tests use different coupon thicknesses and must not be treated as one measured specimen. Exact layup, glass fraction, cure, temperature and statistical uncertainty are unspecified. No isotropic Young modulus, Poisson ratio, full elastic tensor, heat capacity or conductivity is supplied. Specific gravity remains dimensionless because water-reference temperature is unstated.
+observation	gravity	NP509, 0.500-inch coupon	ASTM D792	Specific gravity 1.90; this is not a cured-density measurement in SI units.
+observation	flexure	NP509, 0.0625-inch coupon, Condition A	ASTM D790, LW/CW	Printed SI moduli 13.8/11.7 GPa and strengths 486.1/435.7 MPa are retained without increasing their source precision.
+observation	tension	NP509, 0.125-inch coupon, Condition A	ASTM D638, LW/CW	Printed SI strengths 344.7/241.3 MPa do not supply tensile moduli.
+observation	compression	NP509, 0.500-inch coupon, Condition A	ASTM D695, flatwise	Compression strength is not compression modulus.
+observation	shear	NP509, 0.0625-inch coupon, Condition A	ASTM D732, perpendicular	Shear strength is not a shear modulus.
+observation	expansion	NP509, 0.125-inch coupon	IPC-TM 650-2.4.24, source X/Y axes	Expansion reference values lack a temperature interval and a source mapping from X/Y to LW/CW; neither is inferred.
+scalar	specific-gravity	gravity,product-reference	specific_gravity	1.9	1	constant
+uncertainty	specific-gravity	unstated	-	-	-	-
+validity	specific-gravity	source_grade_np509	1	1	1
+validity	specific-gravity	source_test_temperature_known	0	0	1
+validity	specific-gravity	nominal_thickness	12.7	12.7	mm
+validity	specific-gravity	source_water_reference_temperature_known	0	0	1
+scalar	flexural-modulus-lw	flexure,product-reference	flexural_modulus_longitudinal	13.8	GPa	constant
+uncertainty	flexural-modulus-lw	unstated	-	-	-	-
+validity	flexural-modulus-lw	source_grade_np509	1	1	1
+validity	flexural-modulus-lw	source_test_temperature_known	0	0	1
+validity	flexural-modulus-lw	np509_condition_a	1	1	1
+validity	flexural-modulus-lw	nominal_thickness	1.5875	1.5875	mm
+scalar	flexural-modulus-cw	flexure,product-reference	flexural_modulus_transverse	11.7	GPa	constant
+uncertainty	flexural-modulus-cw	unstated	-	-	-	-
+validity	flexural-modulus-cw	source_grade_np509	1	1	1
+validity	flexural-modulus-cw	source_test_temperature_known	0	0	1
+validity	flexural-modulus-cw	np509_condition_a	1	1	1
+validity	flexural-modulus-cw	nominal_thickness	1.5875	1.5875	mm
+scalar	flexural-strength-lw	flexure,product-reference	flexural_strength_longitudinal	486.1	MPa	constant
+uncertainty	flexural-strength-lw	unstated	-	-	-	-
+validity	flexural-strength-lw	source_grade_np509	1	1	1
+validity	flexural-strength-lw	source_test_temperature_known	0	0	1
+validity	flexural-strength-lw	np509_condition_a	1	1	1
+validity	flexural-strength-lw	nominal_thickness	1.5875	1.5875	mm
+scalar	flexural-strength-cw	flexure,product-reference	flexural_strength_transverse	435.7	MPa	constant
+uncertainty	flexural-strength-cw	unstated	-	-	-	-
+validity	flexural-strength-cw	source_grade_np509	1	1	1
+validity	flexural-strength-cw	source_test_temperature_known	0	0	1
+validity	flexural-strength-cw	np509_condition_a	1	1	1
+validity	flexural-strength-cw	nominal_thickness	1.5875	1.5875	mm
+scalar	tensile-strength-lw	tension,product-reference	tensile_strength_longitudinal	344.7	MPa	constant
+uncertainty	tensile-strength-lw	unstated	-	-	-	-
+validity	tensile-strength-lw	source_grade_np509	1	1	1
+validity	tensile-strength-lw	source_test_temperature_known	0	0	1
+validity	tensile-strength-lw	np509_condition_a	1	1	1
+validity	tensile-strength-lw	nominal_thickness	3.175	3.175	mm
+scalar	tensile-strength-cw	tension,product-reference	tensile_strength_transverse	241.3	MPa	constant
+uncertainty	tensile-strength-cw	unstated	-	-	-	-
+validity	tensile-strength-cw	source_grade_np509	1	1	1
+validity	tensile-strength-cw	source_test_temperature_known	0	0	1
+validity	tensile-strength-cw	np509_condition_a	1	1	1
+validity	tensile-strength-cw	nominal_thickness	3.175	3.175	mm
+scalar	compressive-strength-flatwise	compression,product-reference	compressive_strength_flatwise	586.1	MPa	constant
+uncertainty	compressive-strength-flatwise	unstated	-	-	-	-
+validity	compressive-strength-flatwise	source_grade_np509	1	1	1
+validity	compressive-strength-flatwise	source_test_temperature_known	0	0	1
+validity	compressive-strength-flatwise	np509_condition_a	1	1	1
+validity	compressive-strength-flatwise	nominal_thickness	12.7	12.7	mm
+scalar	shear-strength-perpendicular	shear,product-reference	shear_strength_perpendicular	124.1	MPa	constant
+uncertainty	shear-strength-perpendicular	unstated	-	-	-	-
+validity	shear-strength-perpendicular	source_grade_np509	1	1	1
+validity	shear-strength-perpendicular	source_test_temperature_known	0	0	1
+validity	shear-strength-perpendicular	np509_condition_a	1	1	1
+validity	shear-strength-perpendicular	nominal_thickness	1.5875	1.5875	mm
+scalar	thermal-expansion-x	expansion,product-reference	thermal_expansion_coefficient_x	0.000015	K^-1	constant
+uncertainty	thermal-expansion-x	unstated	-	-	-	-
+validity	thermal-expansion-x	source_grade_np509	1	1	1
+validity	thermal-expansion-x	source_test_temperature_known	0	0	1
+validity	thermal-expansion-x	nominal_thickness	3.175	3.175	mm
+validity	thermal-expansion-x	source_expansion_interval_known	0	0	1
+validity	thermal-expansion-x	source_expansion_condition_known	0	0	1
+scalar	thermal-expansion-y	expansion,product-reference	thermal_expansion_coefficient_y	0.000018	K^-1	constant
+uncertainty	thermal-expansion-y	unstated	-	-	-	-
+validity	thermal-expansion-y	source_grade_np509	1	1	1
+validity	thermal-expansion-y	source_test_temperature_known	0	0	1
+validity	thermal-expansion-y	nominal_thickness	3.175	3.175	mm
+validity	thermal-expansion-y	source_expansion_interval_known	0	0	1
+validity	thermal-expansion-y	source_expansion_condition_known	0	0	1

@@ -1,0 +1,24 @@
+frankensim.matdb-manifest.v3
+pack_id	norplex-np509-melamine-glass-coupons-2022
+redistribution	permitted	Selected attributed numerical facts and original notes only; no source document or table layout is redistributed
+citation	Norplex-Micarta, NP509 Technical Data Bulletin, 14 July 2022, pp. 1-2 typical-property and tested-thickness columns; https://www.norplex-micarta.com/wp-content/uploads/2017/07/TDB_NP509.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	norplex-np509-melamine-glass-coupons-2022	properties.tsv	material-tsv-v1
+property	specific_gravity	specific-gravity	dimensional
+property	flexural_modulus_longitudinal	flexural-modulus-longitudinal	dimensional
+property	flexural_modulus_transverse	flexural-modulus-transverse	dimensional
+property	flexural_strength_longitudinal	flexural-strength-longitudinal	dimensional
+property	flexural_strength_transverse	flexural-strength-transverse	dimensional
+property	tensile_strength_longitudinal	tensile-strength-longitudinal	dimensional
+property	tensile_strength_transverse	tensile-strength-transverse	dimensional
+property	compressive_strength_flatwise	compressive-strength-flatwise	dimensional
+property	shear_strength_perpendicular	shear-strength-perpendicular	dimensional
+property	thermal_expansion_coefficient_x	thermal-expansion-coefficient-source-x	dimensional
+property	thermal_expansion_coefficient_y	thermal-expansion-coefficient-source-y	dimensional
+axis	source_grade_np509	source-grade-np509	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	np509_condition_a	np509-condition-a	dimensional
+axis	nominal_thickness	nominal-thickness	dimensional
+axis	source_water_reference_temperature_known	source-water-reference-temperature-known	dimensional
+axis	source_expansion_interval_known	source-expansion-interval-known	dimensional
+axis	source_expansion_condition_known	source-expansion-condition-known	dimensional
