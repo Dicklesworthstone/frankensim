@@ -23,6 +23,9 @@ mod occupancy;
 #[path = "mushy/release.rs"]
 mod release;
 
+#[path = "mushy/rheology.rs"]
+mod rheology;
+
 #[path = "mushy/unsteady.rs"]
 mod unsteady;
 

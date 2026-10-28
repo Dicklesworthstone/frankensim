@@ -447,3 +447,197 @@ fn source_identity_density_coordinate_and_domain_errors_refuse() {
     );
     assert_eq!(Temperature::DIMS, Dims([0, 0, 0, 1, 0, 0]));
 }
+
+fn shear_card(storage_axis: Option<&str>) -> MaterialCard {
+    let original = card(1000.0, true, LiquidViscosityBasis::Dynamic);
+    let mut claims = ClaimSet::new();
+    for (_, claim) in original.claims().claims_ordered() {
+        let mut claim = claim.clone();
+        let name = claim.key.name();
+        if name == DYNAMIC_VISCOSITY_PROPERTY || Some(name) == storage_axis {
+            let (base, slope) = match name {
+                DENSITY_PROPERTY => (1000.0, 0.0),
+                SPECIFIC_HEAT_CAPACITY_PROPERTY => (3000.0, 0.0),
+                _ => (0.02, 0.005),
+            };
+            claim.value = PropertyValue::Curve {
+                abscissa: "rate".into(),
+                abscissa_dims: Frequency::DIMS,
+                knots: vec![(0.0, base), (4.0, base + 4.0 * slope)],
+                dims: claim.key.dims(),
+            };
+            claim.interpolation = InterpolationPolicy::LinearInside;
+        } else if name == THERMAL_CONDUCTIVITY_PROPERTY {
+            claim.value = PropertyValue::Surface2D {
+                axes: ["liquid".into(), "rate".into()],
+                axis_dims: [Dims([0; 6]), Frequency::DIMS],
+                samples: vec![
+                    ([0.0, 0.0], 10.0),
+                    ([1.0, 0.0], 2.0),
+                    ([0.0, 4.0], 12.0),
+                    ([1.0, 4.0], 4.0),
+                ],
+                triangles: vec![[0, 1, 2], [1, 3, 2]],
+                dims: claim.key.dims(),
+            };
+        }
+        claim.validity = claim.validity.with_quantity(
+            "rate",
+            QuantitySpec::dimensional(Frequency::DIMS),
+            0.0,
+            4.0,
+        );
+        claims.insert_claim(claim).unwrap();
+    }
+    MaterialCard::assemble(original.id().clone(), claims, vec![]).unwrap()
+}
+
+#[test]
+fn physical_shear_and_original_latent_fraction_share_one_pinned_source_query() {
+    let card = shear_card(None);
+    let curve = curve(&card, 1000.0);
+    let law = MushyPhaseLaw::try_new_with_immobile_solid(&curve, 1000.0, 1000.0, 1e-8).unwrap();
+    let context = point()
+        .with_quantity("rate", QuantitySpec::dimensional(Frequency::DIMS), 3.0)
+        .unwrap();
+    let query = PhaseTransportSourceQuery {
+        source: ThermalMaterialPoint {
+            material: &card,
+            context: &context,
+            temperature_axis: "T",
+            liquid_fraction_axis: Some("liquid"),
+        },
+        viscosity_basis: LiquidViscosityBasis::Dynamic,
+        extra_requirements: &[],
+        selection: MaterialPropertySelection::SingleClaimOnly,
+    };
+    // The ordinary static resolver cannot silently freeze this same rate law.
+    assert!(resolve_phase_transport_state(&law, 25.0, query.clone()).is_err());
+    let first =
+        resolve_phase_transport_state_with_shear_rate(&law, 25.0, query.clone(), "rate", 2.0)
+            .unwrap();
+    assert_eq!(first.phase_state().temperature_k(), 500.0);
+    assert_eq!(first.phase_state().liquid_mass_fraction(), 0.25);
+    assert!((first.transport_state().unwrap().dynamic_viscosity_pa_s() - 0.03).abs() < 1e-15);
+    assert_eq!(first.thermal_conductivity_w_m_k().unwrap(), 9.0);
+    let pins = first
+        .material()
+        .properties()
+        .iter()
+        .map(|property| {
+            (
+                property.requirement().name().to_owned(),
+                property.answer().receipt.selected,
+            )
+        })
+        .collect();
+    let next = resolve_phase_transport_state_with_shear_rate(
+        &law,
+        75.0,
+        PhaseTransportSourceQuery {
+            selection: MaterialPropertySelection::PinnedByProperty(pins),
+            ..query.clone()
+        },
+        "rate",
+        4.0,
+    )
+    .unwrap();
+    assert_eq!(next.thermal_conductivity_w_m_k().unwrap(), 6.0);
+    assert_eq!(
+        next.transport_state().unwrap().dynamic_viscosity_pa_s(),
+        0.04
+    );
+    for property in next.material().properties() {
+        let receipt = &property.answer().receipt;
+        assert!(receipt.query_point.contains(&("rate".into(), 4.0)));
+        assert!(receipt.query_point.contains(&("T".into(), 500.0)));
+        assert!(receipt.query_point.contains(&("liquid".into(), 0.75)));
+        assert!(receipt.query_point.contains(&("pressure".into(), 100000.0)));
+        assert_eq!(
+            receipt.selected,
+            first
+                .material()
+                .property(property.requirement().name())
+                .unwrap()
+                .answer()
+                .receipt
+                .selected
+        );
+    }
+    let solid =
+        resolve_phase_transport_state_with_shear_rate(&law, 0.0, query.clone(), "rate", 0.0)
+            .unwrap();
+    assert!(solid.mobile_transport().is_none());
+    assert!(
+        solid
+            .material()
+            .property(DYNAMIC_VISCOSITY_PROPERTY)
+            .is_none()
+    );
+    assert!(
+        solid
+            .material()
+            .property(SPECIFIC_HEAT_CAPACITY_PROPERTY)
+            .is_none()
+    );
+    assert_eq!(solid.thermal_conductivity_w_m_k().unwrap(), 10.0);
+    assert!(
+        resolve_phase_transport_state_with_shear_rate(&law, 0.0, query.clone(), "rate", 0.01)
+            .is_err()
+    );
+    for rate in [-1.0, 4.1, f64::NAN, f64::INFINITY] {
+        assert!(
+            resolve_phase_transport_state_with_shear_rate(&law, 25.0, query.clone(), "rate", rate)
+                .is_err()
+        );
+    }
+    let untyped = point().with("rate", 0.0).unwrap();
+    assert!(
+        resolve_phase_transport_state_with_shear_rate(
+            &law,
+            25.0,
+            PhaseTransportSourceQuery {
+                source: ThermalMaterialPoint {
+                    context: &untyped,
+                    ..query.source
+                },
+                ..query
+            },
+            "rate",
+            0.0
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn shear_dependent_storage_refuses_even_at_an_identical_sampled_value() {
+    for name in [DENSITY_PROPERTY, SPECIFIC_HEAT_CAPACITY_PROPERTY] {
+        let card = shear_card(Some(name));
+        let curve = curve(&card, 1000.0);
+        let law = MushyPhaseLaw::try_new_with_immobile_solid(&curve, 1000.0, 1000.0, 1e-8).unwrap();
+        let context = point()
+            .with_quantity("rate", QuantitySpec::dimensional(Frequency::DIMS), 0.0)
+            .unwrap();
+        assert!(
+            resolve_phase_transport_state_with_shear_rate(
+                &law,
+                25.0,
+                PhaseTransportSourceQuery {
+                    source: ThermalMaterialPoint {
+                        material: &card,
+                        context: &context,
+                        temperature_axis: "T",
+                        liquid_fraction_axis: Some("liquid")
+                    },
+                    viscosity_basis: LiquidViscosityBasis::Dynamic,
+                    extra_requirements: &[],
+                    selection: MaterialPropertySelection::SingleClaimOnly,
+                },
+                "rate",
+                0.0
+            )
+            .is_err()
+        );
+    }
+}

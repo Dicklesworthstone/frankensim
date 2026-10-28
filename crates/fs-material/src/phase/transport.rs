@@ -7,7 +7,8 @@
 //! Cp are absent, not extrapolated, zeroed or replaced by arbitrary constants.
 //!
 //! The existing ThermalMaterialPoint updates T and an optional liquid MASS
-//! fraction coordinate from that same chart. Other context remains fixed.
+//! fraction coordinate from that same chart. The explicit shear entry also
+//! consumes the native physical rate; other context remains fixed.
 //! This is a constant equal-phase-density reduction, not a volume-change law,
 //! equilibrium solver, moving solid skeleton or free-surface model.
 
@@ -26,7 +27,7 @@ use crate::state_point::{
 };
 use crate::thermal::source::ThermalMaterialPoint;
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
-use fs_qty::{Density, QuantitySpec};
+use fs_qty::{Density, Frequency, QuantitySpec};
 
 use super::EquilibriumPhaseState;
 use super::mushy::{MushyPhaseLaw, PhaseMobility};
@@ -40,8 +41,9 @@ pub trait PhaseTransport: FluidTransport {
 }
 
 /// One source binding shared by thermal, electrical and momentum responses.
-/// Only the declared temperature/fraction axes evolve. Source pressure and
-/// composition must describe the same fixed context as the enthalpy chart.
+/// The ordinary entry evolves only temperature/fraction; the explicit shear
+/// entry also owns its declared rate. Source pressure and composition must
+/// describe the same fixed context as the enthalpy chart.
 #[derive(Clone, Debug)]
 pub struct PhaseTransportSourceQuery<'a> {
     pub source: ThermalMaterialPoint<'a>,
@@ -118,13 +120,67 @@ pub fn resolve_phase_transport_state(
     specific_enthalpy_j_kg: f64,
     query: PhaseTransportSourceQuery<'_>,
 ) -> Result<ResolvedPhaseTransportState, MaterialError> {
+    resolve_phase_transport_state_inner(law, specific_enthalpy_j_kg, query, None)
+}
+
+/// Resolve the SAME phase/material bundle at an owned physical shear rate.
+///
+/// The native momentum owner must supply `sqrt(2 D:D)` in 1/s, not a lattice
+/// relaxation parameter, cell speed or cyclic frequency. Only this explicitly
+/// typed existing coordinate and the original h-derived T/fraction may evolve;
+/// the supplied selection policy, card, pressure and composition stay intact.
+/// Source viscosity and conductivity can depend on that rate, so the same
+/// snapshot drives momentum, molecular heat, Darcy response and conduction.
+///
+/// Exact solids still resolve before liquid properties are requested and must
+/// receive zero rate. Rate-dependent density or Cp requires a different
+/// thermodynamic storage model and refuses, even if its current value happens
+/// to match the fixed caloric chart. This adds no constitutive solver, elastic
+/// memory, yield history or independent temperature/phase state.
+pub fn resolve_phase_transport_state_with_shear_rate(
+    law: &MushyPhaseLaw<'_>,
+    specific_enthalpy_j_kg: f64,
+    query: PhaseTransportSourceQuery<'_>,
+    shear_rate_axis: &str,
+    shear_rate_per_s: f64,
+) -> Result<ResolvedPhaseTransportState, MaterialError> {
+    resolve_phase_transport_state_inner(
+        law,
+        specific_enthalpy_j_kg,
+        query,
+        Some((shear_rate_axis, shear_rate_per_s)),
+    )
+}
+
+fn resolve_phase_transport_state_inner(
+    law: &MushyPhaseLaw<'_>,
+    specific_enthalpy_j_kg: f64,
+    query: PhaseTransportSourceQuery<'_>,
+    shear: Option<(&str, f64)>,
+) -> Result<ResolvedPhaseTransportState, MaterialError> {
     let density = law.fixed_density_kg_m3().ok_or_else(|| {
         invalid("phase transport requires exactly equal constant phase and chart densities")
     })?;
     // This must precede even the liquid-property requirement list.
     let mobility = law.classify_at_specific_enthalpy(specific_enthalpy_j_kg)?;
-    let point = query.source.at(mobility.phase()).map_err(source_error)?;
+    let mut point = query.source.at(mobility.phase()).map_err(source_error)?;
     let mobile = mobility.mobile().is_some();
+    if let Some((axis, rate)) = shear {
+        if axis == query.source.temperature_axis
+            || Some(axis) == query.source.liquid_fraction_axis
+            || query.source.context.axis_quantities().get(axis)
+                != Some(&QuantitySpec::dimensional(Frequency::DIMS))
+            || !query.source.context.axes().contains_key(axis)
+            || !rate.is_finite()
+            || rate < 0.0
+            || !mobile && rate != 0.0
+        {
+            return Err(invalid(
+                "phase rheology needs an existing typed physical rate, finite nonnegative in liquid and zero in exact solid",
+            ));
+        }
+        point = point.with(axis, rate).map_err(source_error)?;
+    }
     let required_count = if mobile { 4 } else { 2 };
     if query.extra_requirements.len() > MAX_MATERIAL_STATE_PROPERTIES - required_count {
         return Err(invalid(
@@ -194,7 +250,25 @@ pub fn resolve_phase_transport_state(
     )
     .map_err(source_error)?;
     for property in material.properties() {
-        query.source.admit_static(property).map_err(source_error)?;
+        if let Some((axis, _)) = shear {
+            if [DENSITY_PROPERTY, SPECIFIC_HEAT_CAPACITY_PROPERTY]
+                .contains(&property.requirement().name())
+                && property.source_axes().iter().any(|(name, _)| name == axis)
+            {
+                return Err(invalid(
+                    "shear-dependent density or heat capacity needs another thermodynamic storage owner",
+                ));
+            }
+            query
+                .source
+                .admit_static_with_axes(
+                    property,
+                    &[(axis, QuantitySpec::dimensional(Frequency::DIMS))],
+                )
+                .map_err(source_error)?;
+        } else {
+            query.source.admit_static(property).map_err(source_error)?;
+        }
     }
     let value = |name| {
         material
