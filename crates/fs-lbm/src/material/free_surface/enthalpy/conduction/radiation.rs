@@ -7,7 +7,7 @@
 //! must resolve the liquid thermal boundary layer or justify this lumped value.
 
 use super::*;
-use crate::conjugate::radiation::STEFAN_BOLTZMANN;
+use crate::conjugate::STEFAN_BOLTZMANN;
 
 /// One exposed patch facing a black isothermal surrounding hemisphere.
 ///

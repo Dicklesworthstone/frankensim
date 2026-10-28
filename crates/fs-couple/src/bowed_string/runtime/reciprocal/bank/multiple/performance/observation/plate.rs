@@ -8,9 +8,9 @@ use super::{
     BoundReceiver, BoundReport, BoundShellObserver, MultiBowPerformance, ShellObserverError,
     invalid, poll,
 };
-use crate::baffled_pressure::gas::{GasPropagation, GasPropagationLimits, GasPropagationReport};
-use crate::baffled_pressure::{BaffledPressure, SurfaceSample};
 use crate::bowed_string::runtime::reciprocal::bank::radiation::rayleigh::surface_samples;
+use crate::pcm_wav::baffled::gas::{GasPropagation, GasPropagationLimits, GasPropagationReport};
+use crate::pcm_wav::baffled::{BaffledPressure, SurfaceSample};
 use fs_blake3::ContentHash;
 use fs_exec::CancelGate;
 

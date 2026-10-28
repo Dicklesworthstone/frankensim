@@ -6,7 +6,7 @@
 //! existing thermal owner can conserve heat and bound BOTH finite capacities.
 
 use super::*;
-use crate::conjugate::radiation::STEFAN_BOLTZMANN;
+use crate::conjugate::STEFAN_BOLTZMANN;
 use fs_matdb::{PropertyValue, QueryPoint};
 use fs_material::state_point::ResolvedScalarProperty;
 use fs_material::thermochemical_gas::energy::{GasEnergySolve, IsochoricGasParcel};

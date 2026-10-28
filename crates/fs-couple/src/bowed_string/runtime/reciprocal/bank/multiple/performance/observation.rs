@@ -147,7 +147,7 @@ enum BoundReport {
 
 enum BoundReceiver {
     Shell(ObservationFir),
-    Plate(crate::baffled_pressure::BaffledPressure),
+    Plate(crate::pcm_wav::baffled::BaffledPressure),
 }
 
 pub(super) struct BoundShellObserver {
