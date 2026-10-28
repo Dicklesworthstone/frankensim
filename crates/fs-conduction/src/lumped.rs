@@ -773,6 +773,37 @@ pub struct LumpedContactStepConfig {
     pub energy_tolerance_j: f64,
 }
 
+/// Entropy balance of one accepted finite-body contact step, in J/K.
+///
+/// The original caloric charts own storage, including latent heat. Their fixed
+/// pressure/composition and negligible body pV-work assumptions still apply.
+/// Summed storage change equals contact generation, supplied heat divided by
+/// each receiving body's endpoint temperature, the temporal defect, and the
+/// energy-residual contribution (up to floating-point summation).
+///
+/// Supplied heat carries no source temperature or source entropy. Consequently
+/// this is NOT a total entropy-generation claim for an externally heated pair.
+/// A coupled owner must add the actual source/boundary entropy separately.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LumpedContactEntropy {
+    /// Exact chart integrals `m_i integral(dh/T)` for A and B.
+    pub storage_change_j_k: [f64; 2],
+    /// Passive contact quadrature `Q (1/T_B,new - 1/T_A,new)`.
+    /// This is physical production at the accepted backward-Euler endpoints,
+    /// not the exact time integral over an unresolved trajectory.
+    pub contact_generation_j_k: f64,
+    /// Supplied heat divided by the receiving body's endpoint temperature.
+    /// This is neither external source entropy nor a claim of entropy-free work.
+    pub supplied_heat_at_body_temperature_j_k: [f64; 2],
+    /// `m_i [integral(dh/T) - delta_h/T_i,new]`: backward-Euler temporal
+    /// entropy, separate from material dissipation. Nonnegative in exact
+    /// arithmetic for the admitted nondecreasing T(h); roundoff is not clamped.
+    pub temporal_defect_j_k: [f64; 2],
+    /// Each body's accepted energy residual divided by its endpoint temperature.
+    /// Kept separate so solver tolerance cannot masquerade as physical entropy.
+    pub energy_residual_entropy_j_k: [f64; 2],
+}
+
 /// Both candidate states from one conservative contact transfer.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LumpedContactStep {
@@ -788,6 +819,8 @@ pub struct LumpedContactStep {
     pub energy_residual_j: f64,
     /// Larger of the two contact Biot bounds.
     pub maximum_biot: f64,
+    /// Physical, storage, source and numerical entropy from these same states.
+    pub entropy: LumpedContactEntropy,
 }
 
 /// Propose a backward-Euler heat/contact step between two finite bodies.
@@ -850,7 +883,16 @@ pub fn solve_lumped_contact_step(
         }
         maximum_biot = maximum_biot.max(biot);
     }
-    let evaluate = |q: f64| -> Result<LumpedContactStep, ConductionError> {
+    // Root trials evaluate only the original heat law. Exact entropy integrals
+    // are evaluated once, after acceptance, never in the bisection hot path.
+    struct Trial {
+        state_a: EquilibriumPhaseState,
+        state_b: EquilibriumPhaseState,
+        heat_a_to_b_j: f64,
+        contact_residual_j: f64,
+        energy_residual_j: f64,
+    }
+    let evaluate = |q: f64| -> Result<Trial, ConductionError> {
         let resolve = |body: &LumpedEnthalpyBody<'_>, initial: f64, source: f64, transfer: f64| {
             let delta = (source + transfer) / body.mass_kg;
             let value = initial + delta;
@@ -888,16 +930,15 @@ pub fn solve_lumped_contact_step(
         if !contact_residual_j.is_finite() || !energy_residual_j.is_finite() {
             return Err(fail("contact energy arithmetic is not representable"));
         }
-        Ok(LumpedContactStep {
+        Ok(Trial {
             state_a,
             state_b,
             heat_a_to_b_j: q,
             contact_residual_j,
             energy_residual_j,
-            maximum_biot,
         })
     };
-    let accept = |step: LumpedContactStep| {
+    let accept = |step: Trial| {
         let residual_a = a.mass_kg * (step.state_a.specific_enthalpy_j_kg() - ha) - source_a
             + step.heat_a_to_b_j;
         let residual_b = b.mass_kg * (step.state_b.specific_enthalpy_j_kg() - hb)
@@ -913,7 +954,63 @@ pub fn solve_lumped_contact_step(
                 "stored-state roundoff exceeds the contact energy budget",
             ));
         }
-        Ok(step)
+        let states = [step.state_a, step.state_b];
+        let initial = [ha, hb];
+        let sources = [source_a, source_b];
+        let residuals = [residual_a, residual_b];
+        let mut storage_change_j_k = [0.0; 2];
+        let mut supplied_heat_at_body_temperature_j_k = [0.0; 2];
+        let mut temporal_defect_j_k = [0.0; 2];
+        let mut energy_residual_entropy_j_k = [0.0; 2];
+        for (side, body) in [a, b].into_iter().enumerate() {
+            let final_h = states[side].specific_enthalpy_j_kg();
+            let temperature = states[side].temperature_k();
+            let delta_s = body.phase_curve
+                .specific_entropy_change_j_kg_k(initial[side], final_h)
+                .map_err(|error| fail(&error.to_string()))?;
+            storage_change_j_k[side] = body.mass_kg * delta_s;
+            supplied_heat_at_body_temperature_j_k[side] = sources[side] / temperature;
+            temporal_defect_j_k[side] = body.mass_kg
+                * (delta_s - (final_h - initial[side]) / temperature);
+            energy_residual_entropy_j_k[side] = residuals[side] / temperature;
+        }
+        let ta = step.state_a.temperature_k();
+        let tb = step.state_b.temperature_k();
+        // Relative temperature difference avoids subtracting nearly equal
+        // reciprocals and avoids an overflowing T_A*T_B intermediate.
+        let contact_generation_j_k = if ta >= tb {
+            (step.heat_a_to_b_j / tb) * ((ta - tb) / ta)
+        } else {
+            (-step.heat_a_to_b_j / ta) * ((tb - ta) / tb)
+        };
+        if !contact_generation_j_k.is_finite() || contact_generation_j_k < 0.0
+            || storage_change_j_k.into_iter()
+                .chain(supplied_heat_at_body_temperature_j_k)
+                .chain(temporal_defect_j_k)
+                .chain(energy_residual_entropy_j_k)
+                .any(|value| !value.is_finite())
+        {
+            return Err(fail("contact entropy arithmetic is not finite or passive"));
+        }
+        cx.checkpoint().map_err(|_| ConductionError::Cancelled {
+            stage: "lumped-contact-entropy",
+            at: 0,
+        })?;
+        Ok(LumpedContactStep {
+            state_a: step.state_a,
+            state_b: step.state_b,
+            heat_a_to_b_j: step.heat_a_to_b_j,
+            contact_residual_j: step.contact_residual_j,
+            energy_residual_j: step.energy_residual_j,
+            maximum_biot,
+            entropy: LumpedContactEntropy {
+                storage_change_j_k,
+                contact_generation_j_k,
+                supplied_heat_at_body_temperature_j_k,
+                temporal_defect_j_k,
+                energy_residual_entropy_j_k,
+            },
+        })
     };
     // Bound Q by both finite source charts, never by an extrapolated state.
     let mut lo = (a.mass_kg * (ha - a.phase_curve.knots().last().unwrap().specific_enthalpy_j_kg)

@@ -1992,3 +1992,17 @@ convergence guarantee. The reduced Biot check does not qualify local spreading,
 flash temperatures, evolving pressure/composition or ambient/radiative exchange.
 The coupled impact regression uses the actual mechanical contact area and
 publishes both reservoir proposals through the existing coupled thermal owner.
+
+### Finite-body contact entropy
+
+Every accepted LumpedContactStep now carries LumpedContactEntropy from the
+same two material charts and conservative heat transfer. Storage is the exact
+relative integral of m*dh/T, including latent plateaus once. Contact production
+uses Q*(1/T_B - 1/T_A) at the accepted backward-Euler endpoints, evaluated
+without subtracting nearly equal reciprocals. It is a flux quadrature, not an
+exact unresolved time integral. Supplied heat divided by each receiving body's
+temperature, the temporal entropy defect, and energy-residual/T terms remain
+separate. External source entropy cannot be inferred from supplied joules.
+Entropy is evaluated only after acceptance, outside contact bisection. G1/G3
+checks cover analytic storage, isolated balance, timestep refinement, latent
+transfer, side reversal, supplied heat, equilibrium and zero duration.

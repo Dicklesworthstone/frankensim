@@ -52,6 +52,92 @@ fn contact_resistance() -> fs_conduction::interface::SeriesThermalResistance {
 }
 
 #[test]
+fn g1_contact_entropy_closes_exact_storage_and_separates_numerical_entropy() {
+    use fs_conduction::lumped::{LumpedContactStepConfig, solve_lumped_contact_step};
+    let curve = phase_curve();
+    let body = enthalpy_body(&curve);
+    let resistance = contact_resistance();
+    let config = LumpedContactStepConfig {
+        specific_enthalpy_a_j_kg: 20_000.0,
+        specific_enthalpy_b_j_kg: 10_000.0,
+        supplied_heat_a_j: 0.0,
+        supplied_heat_b_j: 0.0,
+        duration_s: 100.0,
+        energy_tolerance_j: 1e-8,
+    };
+    with_cx(|cx| {
+        let step = solve_lumped_contact_step(cx, &body, &body, &resistance, config).unwrap();
+        // Two 200 J/K bodies: backward Euler moves 5000 J, to 475 K and 425 K.
+        assert!((step.heat_a_to_b_j - 5000.0).abs() < 1e-8);
+        let entropy = step.entropy;
+        let exact = [200.0 * (-0.05_f64).ln_1p(), 200.0 * 0.0625_f64.ln_1p()];
+        for side in 0..2 {
+            assert!((entropy.storage_change_j_k[side] - exact[side]).abs() < 1e-10);
+            assert!(entropy.temporal_defect_j_k[side] > 0.0);
+        }
+        let physical = 5000.0 * 50.0 / (475.0 * 425.0);
+        assert!((entropy.contact_generation_j_k - physical).abs() < 1e-10);
+        let stored: f64 = entropy.storage_change_j_k.into_iter().sum();
+        let temporal: f64 = entropy.temporal_defect_j_k.into_iter().sum();
+        let algebraic: f64 = entropy.energy_residual_entropy_j_k.into_iter().sum();
+        assert!(stored > entropy.contact_generation_j_k);
+        assert!((stored - entropy.contact_generation_j_k - temporal - algebraic).abs() < 1e-12);
+        assert_eq!(entropy.supplied_heat_at_body_temperature_j_k, [0.0; 2]);
+        for stationary in [
+            LumpedContactStepConfig { duration_s: 0.0, ..config },
+            LumpedContactStepConfig { specific_enthalpy_b_j_kg: 20_000.0, ..config },
+        ] {
+            let stopped = solve_lumped_contact_step(cx, &body, &body, &resistance, stationary).unwrap();
+            assert_eq!(stopped.entropy.storage_change_j_k, [0.0; 2]);
+            assert_eq!(stopped.entropy.temporal_defect_j_k, [0.0; 2]);
+            assert_eq!(stopped.entropy.energy_residual_entropy_j_k, [0.0; 2]);
+            assert_eq!(stopped.entropy.contact_generation_j_k, 0.0);
+        }
+    });
+}
+
+#[test]
+fn g3_contact_temporal_entropy_converges_under_timestep_refinement() {
+    use fs_conduction::lumped::{LumpedContactStepConfig, solve_lumped_contact_step};
+    let curve = phase_curve();
+    let body = enthalpy_body(&curve);
+    let resistance = contact_resistance();
+    let defects: Vec<f64> = [20, 40, 80].into_iter().map(|steps| {
+        with_cx(|cx| {
+            let mut ha = 20_000.0;
+            let mut hb = 10_000.0;
+            let mut temporal = 0.0;
+            let mut stored = 0.0;
+            for _ in 0..steps {
+                let step = solve_lumped_contact_step(cx, &body, &body, &resistance,
+                    LumpedContactStepConfig {
+                        specific_enthalpy_a_j_kg: ha,
+                        specific_enthalpy_b_j_kg: hb,
+                        supplied_heat_a_j: 0.0,
+                        supplied_heat_b_j: 0.0,
+                        duration_s: 100.0 / f64::from(steps),
+                        energy_tolerance_j: 1e-8,
+                    }).unwrap();
+                assert!(step.entropy.contact_generation_j_k > 0.0);
+                assert!(step.entropy.temporal_defect_j_k.iter().all(|v| *v >= -1e-12));
+                temporal += step.entropy.temporal_defect_j_k.into_iter().sum::<f64>();
+                stored += step.entropy.storage_change_j_k.into_iter().sum::<f64>();
+                ha = step.state_a.specific_enthalpy_j_kg();
+                hb = step.state_b.specific_enthalpy_j_kg();
+            }
+            let ta = curve.state_at_specific_enthalpy(ha).unwrap().temperature_k();
+            let tb = curve.state_at_specific_enthalpy(hb).unwrap().temperature_k();
+            let exact_storage = 200.0 * (ta / 500.0).ln() + 200.0 * (tb / 400.0).ln();
+            assert!((stored - exact_storage).abs() < 1e-10);
+            temporal
+        })
+    }).collect();
+    for pair in defects.windows(2) {
+        assert!((0.45..0.55).contains(&(pair[1] / pair[0])), "{defects:?}");
+    }
+}
+
+#[test]
 fn g1_finite_contact_adapter_counts_internal_heat_once() {
     use fs_conduction::lumped::LumpedFiniteThermalContact;
     let curve = phase_curve();
@@ -154,6 +240,14 @@ fn g1_g3_finite_contact_balances_sources_on_both_bodies() {
             let step = solve_lumped_contact_step(cx, &body, &body, &resistance, config).unwrap();
             let exact_q = (100.0 + (100.0 - heat_b) / 200.0) / 1.01;
             assert!((step.heat_a_to_b_j - exact_q).abs() < 1e-8);
+            let entropy = step.entropy;
+            assert_eq!(entropy.supplied_heat_at_body_temperature_j_k,
+                [100.0 / step.state_a.temperature_k(), heat_b / step.state_b.temperature_k()]);
+            let accounted = entropy.contact_generation_j_k
+                + entropy.supplied_heat_at_body_temperature_j_k.into_iter().sum::<f64>()
+                + entropy.temporal_defect_j_k.into_iter().sum::<f64>()
+                + entropy.energy_residual_entropy_j_k.into_iter().sum::<f64>();
+            assert!((entropy.storage_change_j_k.into_iter().sum::<f64>() - accounted).abs() < 1e-12);
             assert!(
                 (2.0 * (step.state_a.specific_enthalpy_j_kg() - 20_000.0) + step.heat_a_to_b_j
                     - 100.0)
@@ -267,6 +361,9 @@ fn g3_finite_contact_transfers_latent_heat_and_relabels_sides() {
         assert_eq!(step.state_b.temperature_k(), 600.0);
         assert!(step.state_b.liquid_mass_fraction() > 0.0);
         assert!(step.state_b.liquid_mass_fraction() < 1.0);
+        assert!((step.entropy.storage_change_j_k[1] - step.heat_a_to_b_j / 600.0).abs() < 1e-10);
+        assert_eq!(step.entropy.temporal_defect_j_k[1], 0.0);
+        assert!(step.entropy.contact_generation_j_k > 0.0);
         assert!(
             (step.heat_a_to_b_j - 2.0 * 25_000.0 * step.state_b.liquid_mass_fraction()).abs()
                 < 1e-7
@@ -286,6 +383,11 @@ fn g3_finite_contact_transfers_latent_heat_and_relabels_sides() {
         assert_eq!(step.state_a, reverse.state_b);
         assert_eq!(step.state_b, reverse.state_a);
         assert_eq!(step.heat_a_to_b_j, -reverse.heat_a_to_b_j);
+        assert_eq!(step.entropy.storage_change_j_k,
+            [reverse.entropy.storage_change_j_k[1], reverse.entropy.storage_change_j_k[0]]);
+        assert_eq!(step.entropy.contact_generation_j_k, reverse.entropy.contact_generation_j_k);
+        assert_eq!(step.entropy.temporal_defect_j_k,
+            [reverse.entropy.temporal_defect_j_k[1], reverse.entropy.temporal_defect_j_k[0]]);
         let loose = solve_lumped_contact_step(
             cx,
             &body,
