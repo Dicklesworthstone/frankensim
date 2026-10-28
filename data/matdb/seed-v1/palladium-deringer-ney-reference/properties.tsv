@@ -1,0 +1,51 @@
+frankensim.matdb-source.v1
+observation	bulk	Deringer-Ney palladium reference	Producer temper-independent physical properties, metric column	The product page identifies refined palladium and separately offers annealed fine wire. Its bulk values omit exact temperature, pressure, purity, test method and uncertainty. Density 12.02 g/cm3, Cp 0.25 J/(g K), and resistivity 10.8 microOhm cm are normalized to SI. The listed shear modulus is not imposed alongside E and nu: independently rounded supplier values are not an exactly consistent elasticity tensor. No temperature law or hydrogen-loaded state is inferred.
+observation	annealed	Deringer-Ney annealed palladium fine wire	Producer annealed-temper tensile values	The 0.2 percent offset yield value is 270 MPa, ultimate tensile strength 280 MPa and elongation 25 percent. Annealing schedule, diameter, gauge length, strain rate and test temperature are absent. These are reference values, not minimum design allowables or a plasticity law; explicit annealed-fine-wire selection is required.
+scalar	density	bulk	density	12020	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_product_ney_palladium	1	1	1
+validity	density	source_temperature_known	0	0	1
+validity	density	source_pressure_known	0	0	1
+scalar	heat-capacity	bulk	specific_heat_capacity	250	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	source_product_ney_palladium	1	1	1
+validity	heat-capacity	source_temperature_known	0	0	1
+validity	heat-capacity	source_pressure_known	0	0	1
+scalar	conductivity	bulk	thermal_conductivity	70	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	source_product_ney_palladium	1	1	1
+validity	conductivity	source_temperature_known	0	0	1
+validity	conductivity	source_pressure_known	0	0	1
+scalar	resistivity	bulk	electrical_resistivity	1.08e-7	Ohm*m	constant
+uncertainty	resistivity	unstated	-	-	-	-
+validity	resistivity	source_product_ney_palladium	1	1	1
+validity	resistivity	source_temperature_known	0	0	1
+validity	resistivity	source_pressure_known	0	0	1
+scalar	young-modulus	bulk	young_modulus	117	GPa	constant
+uncertainty	young-modulus	unstated	-	-	-	-
+validity	young-modulus	source_product_ney_palladium	1	1	1
+validity	young-modulus	source_temperature_known	0	0	1
+validity	young-modulus	source_pressure_known	0	0	1
+scalar	poisson-ratio	bulk	poisson_ratio	0.39	1	constant
+uncertainty	poisson-ratio	unstated	-	-	-	-
+validity	poisson-ratio	source_product_ney_palladium	1	1	1
+validity	poisson-ratio	source_temperature_known	0	0	1
+validity	poisson-ratio	source_pressure_known	0	0	1
+scalar	yield-strength	annealed	yield_strength	270	MPa	constant
+uncertainty	yield-strength	unstated	-	-	-	-
+validity	yield-strength	source_product_ney_palladium	1	1	1
+validity	yield-strength	source_temperature_known	0	0	1
+validity	yield-strength	source_pressure_known	0	0	1
+validity	yield-strength	annealed_fine_wire	1	1	1
+scalar	tensile-strength	annealed	ultimate_tensile_strength	280	MPa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	source_product_ney_palladium	1	1	1
+validity	tensile-strength	source_temperature_known	0	0	1
+validity	tensile-strength	source_pressure_known	0	0	1
+validity	tensile-strength	annealed_fine_wire	1	1	1
+scalar	elongation	annealed	elongation_at_break	0.25	1	constant
+uncertainty	elongation	unstated	-	-	-	-
+validity	elongation	source_product_ney_palladium	1	1	1
+validity	elongation	source_temperature_known	0	0	1
+validity	elongation	source_pressure_known	0	0	1
+validity	elongation	annealed_fine_wire	1	1	1

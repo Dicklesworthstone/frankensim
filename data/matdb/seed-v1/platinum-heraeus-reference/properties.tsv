@@ -1,0 +1,65 @@
+frankensim.matdb-source.v1
+observation	bulk	Heraeus platinum product reference	Producer material-database physical properties	Product forms include wire, sheet and tube; these reference numbers are not tied to a lot or assay. Conductivity is labelled room temperature without a numeric temperature; density, Cp, E and nu also lack exact test temperatures. Unknown-temperature and pressure flags are mandatory. Cp 0.133 J/(g K) is 133 J/(kg K). No numeric room-temperature interval is invented. The independently tabulated shear modulus is excluded from an exact E/nu tensor claim.
+observation	annealed	Heraeus platinum, annealed reference state	Producer annealed tensile properties	Annealing schedule, test temperature, rate and specimen geometry are unstated. The strength values are producer references, not design minima. Elongation 40 percent is 0.40. Requires work-hardened=0; no interpolation to partly worked states is admitted.
+observation	worked	Heraeus platinum, work-hardened reference state	Producer work-hardened tensile properties	Amount and route of cold work, test temperature, rate and specimen geometry are unstated. Elongation 3 percent is 0.03. Requires work-hardened=1; the endpoints do not define a hardening curve or interchangeable material conditions.
+scalar	density	bulk	density	21450	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_product_heraeus_platinum	1	1	1
+validity	density	source_temperature_known	0	0	1
+validity	density	source_pressure_known	0	0	1
+scalar	heat-capacity	bulk	specific_heat_capacity	133	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	source_product_heraeus_platinum	1	1	1
+validity	heat-capacity	source_temperature_known	0	0	1
+validity	heat-capacity	source_pressure_known	0	0	1
+scalar	conductivity	bulk	thermal_conductivity	74	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	source_product_heraeus_platinum	1	1	1
+validity	conductivity	source_temperature_known	0	0	1
+validity	conductivity	source_pressure_known	0	0	1
+scalar	young-modulus	bulk	young_modulus	170	GPa	constant
+uncertainty	young-modulus	unstated	-	-	-	-
+validity	young-modulus	source_product_heraeus_platinum	1	1	1
+validity	young-modulus	source_temperature_known	0	0	1
+validity	young-modulus	source_pressure_known	0	0	1
+scalar	poisson-ratio	bulk	poisson_ratio	0.39	1	constant
+uncertainty	poisson-ratio	unstated	-	-	-	-
+validity	poisson-ratio	source_product_heraeus_platinum	1	1	1
+validity	poisson-ratio	source_temperature_known	0	0	1
+validity	poisson-ratio	source_pressure_known	0	0	1
+scalar	annealed-yield	annealed	yield_strength	70	MPa	constant
+uncertainty	annealed-yield	unstated	-	-	-	-
+validity	annealed-yield	source_product_heraeus_platinum	1	1	1
+validity	annealed-yield	source_temperature_known	0	0	1
+validity	annealed-yield	source_pressure_known	0	0	1
+validity	annealed-yield	work_hardened	0	0	1
+scalar	worked-yield	worked	yield_strength	290	MPa	constant
+uncertainty	worked-yield	unstated	-	-	-	-
+validity	worked-yield	source_product_heraeus_platinum	1	1	1
+validity	worked-yield	source_temperature_known	0	0	1
+validity	worked-yield	source_pressure_known	0	0	1
+validity	worked-yield	work_hardened	1	1	1
+scalar	annealed-tensile	annealed	ultimate_tensile_strength	150	MPa	constant
+uncertainty	annealed-tensile	unstated	-	-	-	-
+validity	annealed-tensile	source_product_heraeus_platinum	1	1	1
+validity	annealed-tensile	source_temperature_known	0	0	1
+validity	annealed-tensile	source_pressure_known	0	0	1
+validity	annealed-tensile	work_hardened	0	0	1
+scalar	worked-tensile	worked	ultimate_tensile_strength	330	MPa	constant
+uncertainty	worked-tensile	unstated	-	-	-	-
+validity	worked-tensile	source_product_heraeus_platinum	1	1	1
+validity	worked-tensile	source_temperature_known	0	0	1
+validity	worked-tensile	source_pressure_known	0	0	1
+validity	worked-tensile	work_hardened	1	1	1
+scalar	annealed-elongation	annealed	elongation_at_break	0.40	1	constant
+uncertainty	annealed-elongation	unstated	-	-	-	-
+validity	annealed-elongation	source_product_heraeus_platinum	1	1	1
+validity	annealed-elongation	source_temperature_known	0	0	1
+validity	annealed-elongation	source_pressure_known	0	0	1
+validity	annealed-elongation	work_hardened	0	0	1
+scalar	worked-elongation	worked	elongation_at_break	0.03	1	constant
+uncertainty	worked-elongation	unstated	-	-	-	-
+validity	worked-elongation	source_product_heraeus_platinum	1	1	1
+validity	worked-elongation	source_temperature_known	0	0	1
+validity	worked-elongation	source_pressure_known	0	0	1
+validity	worked-elongation	work_hardened	1	1	1

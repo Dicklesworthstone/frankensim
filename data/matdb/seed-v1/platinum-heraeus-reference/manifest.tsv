@@ -1,0 +1,18 @@
+frankensim.matdb-manifest.v3
+pack_id	platinum-heraeus-reference
+redistribution	permitted	Selected attributed numerical facts and original condition notes only; source prose and table layout are not redistributed
+citation	Heraeus Precious Metals, Platinum / Pt material database, mechanical and thermal sections, accessed 2026-10-28; https://www.heraeus-precious-metals.com/en/products-solutions/metal/material-database/md-ps-detail/Platinum/
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	platinum	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	young_modulus	young-modulus	dimensional
+property	poisson_ratio	poisson-ratio	dimensional
+property	yield_strength	yield-strength	dimensional
+property	ultimate_tensile_strength	ultimate-tensile-strength	dimensional
+property	elongation_at_break	elongation-at-break	dimensional
+axis	source_product_heraeus_platinum	source-product-heraeus-platinum	dimensional
+axis	source_temperature_known	source-temperature-known	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	work_hardened	work-hardened	dimensional

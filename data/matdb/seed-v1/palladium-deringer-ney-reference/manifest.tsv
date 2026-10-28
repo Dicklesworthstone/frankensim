@@ -1,0 +1,19 @@
+frankensim.matdb-manifest.v3
+pack_id	palladium-deringer-ney-reference
+redistribution	permitted	Selected attributed numerical facts and original condition notes only; source prose and table layout are not redistributed
+citation	Deringer-Ney, Palladium product data, temper-independent properties and annealed fine wire, accessed 2026-10-28; https://deringerney.com/products/precious-metal-alloys/palladium/
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	palladium	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	electrical_resistivity	electrical-resistivity	dimensional
+property	young_modulus	young-modulus	dimensional
+property	poisson_ratio	poisson-ratio	dimensional
+property	yield_strength	yield-strength	dimensional
+property	ultimate_tensile_strength	ultimate-tensile-strength	dimensional
+property	elongation_at_break	elongation-at-break	dimensional
+axis	source_product_ney_palladium	source-product-ney-palladium	dimensional
+axis	source_temperature_known	source-temperature-known	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	annealed_fine_wire	annealed-fine-wire	dimensional

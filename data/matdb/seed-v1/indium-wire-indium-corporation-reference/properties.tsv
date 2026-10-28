@@ -1,0 +1,32 @@
+frankensim.matdb-source.v1
+observation	wire	Indium Corporation 99.99 percent indium wire reference	Producer product-page physical-property values	The producer identifies 4N indium wire but does not give a lot, wire diameter, test method, test temperature, pressure, strain rate or uncertainty for these values. The advertised -200 to 200 C temperature range crosses melting and is not a validity interval for solid properties. Require the named product and explicit unknown-temperature/pressure flags; no continuous thermal law, sealed-joint response or purity transfer is supplied.
+observation	conversions	Same 4N indium wire reference	Exact unit normalization of the selected producer numbers	Density 7.31 g/cm3 is 7310 kg/m3; heat capacity 0.233 J/(g K) is 233 J/(kg K); elongation 67 percent is 0.67. The listed melting point 156.6 C is 429.75 K. Thermal conductivity remains 86 W/(m K); tensile strength remains 1.14 MPa. Melting temperature alone does not provide latent heat or a phase-change model.
+scalar	density	wire,conversions	density	7310	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_product_indium_wire_4n	1	1	1
+validity	density	source_temperature_known	0	0	1
+validity	density	source_pressure_known	0	0	1
+scalar	heat-capacity	wire,conversions	specific_heat_capacity	233	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	source_product_indium_wire_4n	1	1	1
+validity	heat-capacity	source_temperature_known	0	0	1
+validity	heat-capacity	source_pressure_known	0	0	1
+scalar	conductivity	wire,conversions	thermal_conductivity	86	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	source_product_indium_wire_4n	1	1	1
+validity	conductivity	source_temperature_known	0	0	1
+validity	conductivity	source_pressure_known	0	0	1
+scalar	tensile-strength	wire,conversions	ultimate_tensile_strength	1.14	MPa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	source_product_indium_wire_4n	1	1	1
+validity	tensile-strength	source_temperature_known	0	0	1
+validity	tensile-strength	source_pressure_known	0	0	1
+scalar	elongation	wire,conversions	elongation_at_break	0.67	1	constant
+uncertainty	elongation	unstated	-	-	-	-
+validity	elongation	source_product_indium_wire_4n	1	1	1
+validity	elongation	source_temperature_known	0	0	1
+validity	elongation	source_pressure_known	0	0	1
+scalar	melting	wire,conversions	melting_temperature	429.75	K	constant
+uncertainty	melting	unstated	-	-	-	-
+validity	melting	source_product_indium_wire_4n	1	1	1
+validity	melting	source_pressure_known	0	0	1

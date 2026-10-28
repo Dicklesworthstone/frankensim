@@ -1,0 +1,37 @@
+frankensim.matdb-source.v1
+observation	bulk	ESPI elemental iridium reference	Producer general physical-property data	Purity, lot, process, texture and statistical uncertainty are not assigned to these general values. The separately described 1500 C annealed tensile specimens are not used to infer a process for this profile. Density and expansion refer only to 20 C; Cp has no temperature. Conductivity is printed as one value over 0 to 100 C, without a measured temperature law. Unknown source pressure remains explicit.
+observation	conversions	Same ESPI iridium reference	Exact unit normalization of producer data	22.65 g/cm3 is 22650 kg/m3; 0.130 kJ/(kg K) is 130 J/(kg K); 6.8 micrometre/(metre K) is 6.8e-6 per K. The resistivity values 47.1 and 53 nanoOhm m remain distinct exact-temperature observations at 273.15 and 293.15 K. No interpolation or resistivity temperature-coefficient law is inferred from them. The printed coefficient has ambiguous dimensions and is excluded. Melting 2447 C is 2720.15 K, without latent heat or phase-change authority.
+scalar	density	bulk,conversions	density	22650	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature	293.15	293.15	K
+validity	density	source_reference_espi_iridium	1	1	1
+validity	density	source_pressure_known	0	0	1
+scalar	heat-capacity	bulk,conversions	specific_heat_capacity	130	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	source_reference_espi_iridium	1	1	1
+validity	heat-capacity	source_temperature_known	0	0	1
+validity	heat-capacity	source_pressure_known	0	0	1
+scalar	conductivity	bulk,conversions	thermal_conductivity	147	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	temperature	273.15	373.15	K
+validity	conductivity	source_reference_espi_iridium	1	1	1
+validity	conductivity	source_pressure_known	0	0	1
+scalar	expansion	bulk,conversions	linear_thermal_expansion_coefficient	6.8e-6	K^-1	constant
+uncertainty	expansion	unstated	-	-	-	-
+validity	expansion	temperature	293.15	293.15	K
+validity	expansion	source_reference_espi_iridium	1	1	1
+validity	expansion	source_pressure_known	0	0	1
+scalar	resistivity-0c	bulk,conversions	electrical_resistivity	4.71e-8	Ohm*m	constant
+uncertainty	resistivity-0c	unstated	-	-	-	-
+validity	resistivity-0c	temperature	273.15	273.15	K
+validity	resistivity-0c	source_reference_espi_iridium	1	1	1
+validity	resistivity-0c	source_pressure_known	0	0	1
+scalar	resistivity-20c	bulk,conversions	electrical_resistivity	5.3e-8	Ohm*m	constant
+uncertainty	resistivity-20c	unstated	-	-	-	-
+validity	resistivity-20c	temperature	293.15	293.15	K
+validity	resistivity-20c	source_reference_espi_iridium	1	1	1
+validity	resistivity-20c	source_pressure_known	0	0	1
+scalar	melting	bulk,conversions	melting_temperature	2720.15	K	constant
+uncertainty	melting	unstated	-	-	-	-
+validity	melting	source_reference_espi_iridium	1	1	1
+validity	melting	source_pressure_known	0	0	1
