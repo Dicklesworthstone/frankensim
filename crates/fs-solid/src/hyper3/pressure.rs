@@ -246,13 +246,25 @@ impl ClosedTetPressureSurface {
                 "pressure displacement dimension does not match the reference mesh",
             ));
         }
+        // Pressure geometry depends only on relative positions. Remove the
+        // common motion before adding it to reference coordinates, otherwise
+        // a large rigid translation can round a small face or tet to zero.
+        let reference_origin = self.nodes_m[0];
+        let displacement_origin = [
+            finite(displacement_m[0])?,
+            finite(displacement_m[1])?,
+            finite(displacement_m[2])?,
+        ];
         let mut positions = Vec::with_capacity(self.nodes_m.len());
         for (node, reference) in self.nodes_m.iter().enumerate() {
             checkpoint(cx)?;
             let mut position = [0.0; 3];
             for axis in 0..3 {
-                position[axis] =
-                    finite(reference[axis] + finite(displacement_m[3 * node + axis])?)?;
+                let reference_offset = finite(reference[axis] - reference_origin[axis])?;
+                let displacement_offset = finite(
+                    finite(displacement_m[3 * node + axis])? - displacement_origin[axis],
+                )?;
+                position[axis] = finite(reference_offset + displacement_offset)?;
             }
             positions.push(position);
         }

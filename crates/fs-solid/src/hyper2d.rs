@@ -220,10 +220,13 @@ impl HyperProblem<'_> {
     /// F₃₃ = 1 for plane strain).
     fn def_grad(grads: &[[f64; 2]], conn: &[usize], u: &[f64]) -> [f64; 9] {
         let mut h = [[0.0f64; 2]; 2];
-        for (a, &node) in conn.iter().enumerate() {
+        // Partition of unity removes the common displacement. Form relative
+        // motion first so a large rigid translation cannot create strain.
+        for (a, &node) in conn.iter().enumerate().skip(1) {
             for i in 0..2 {
-                h[i][0] += u[2 * node + i] * grads[a][0];
-                h[i][1] += u[2 * node + i] * grads[a][1];
+                let ui = u[2 * node + i] - u[2 * conn[0] + i];
+                h[i][0] += ui * grads[a][0];
+                h[i][1] += ui * grads[a][1];
             }
         }
         [
@@ -487,4 +490,79 @@ mod tests {
             }
         }
     }
+
+    /// G3: rigid translations leave every public constitutive probe unchanged.
+    #[test]
+    fn skew_elements_preserve_force_energy_and_tangent_under_large_translation() {
+        let material = Hyperelastic::new(
+            HyperelasticModel::NeoHookean {
+                mu: 2.0,
+                lambda: 5.0,
+            },
+            3.0,
+        )
+        .unwrap();
+
+        for mut mesh in [
+            Mesh2::quads(1.0, 1.0, 1, 1),
+            Mesh2::triangles(1.0, 1.0, 1, 1),
+        ] {
+            // Dyadic geometry and motion survive the translation exactly, while
+            // the inverse element Jacobian has non-dyadic shape gradients.
+            for x in &mut mesh.nodes {
+                *x = [
+                    1.125 * x[0] + 0.375 * x[1],
+                    0.25 * x[0] + 0.875 * x[1],
+                ];
+            }
+            let problem = HyperProblem {
+                mesh: &mesh,
+                material: &material,
+                dirichlet: vec![],
+                traction: vec![],
+                settings: NewtonSettings::default(),
+            };
+
+            for scale in [0.0, 1.0] {
+                let u: Vec<f64> = mesh
+                    .nodes
+                    .iter()
+                    .flat_map(|&[x, y]| {
+                        [
+                            scale * (0.125 * x + 0.25 * y),
+                            scale * (-0.25 * x + 0.125 * y),
+                        ]
+                    })
+                    .collect();
+                let translation = [1_099_511_627_776.0, -2_199_023_255_552.0];
+                let translated: Vec<f64> = u
+                    .iter()
+                    .enumerate()
+                    .map(|(i, value)| value + translation[i % 2])
+                    .collect();
+
+                let (force, tangent) = problem.residual_and_tangent(&u, 0.0).unwrap();
+                let (shifted_force, shifted_tangent) =
+                    problem.residual_and_tangent(&translated, 0.0).unwrap();
+                assert_eq!(force, shifted_force);
+                assert_eq!(
+                    problem.unconstrained_residual(&translated, 0.0).unwrap(),
+                    force
+                );
+                assert_eq!(
+                    problem.potential_energy(&u, 0.0).unwrap().to_bits(),
+                    problem.potential_energy(&translated, 0.0).unwrap().to_bits()
+                );
+                for i in 0..u.len() {
+                    for j in 0..u.len() {
+                        assert_eq!(
+                            tangent.get(i, j).to_bits(),
+                            shifted_tangent.get(i, j).to_bits()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
 }

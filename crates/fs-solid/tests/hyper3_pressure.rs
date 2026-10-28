@@ -259,3 +259,33 @@ fn g4_invalid_geometry_budget_and_cancel_refuse_before_a_load_is_returned() {
         );
     });
 }
+
+#[test]
+fn g3_pressure_geometry_is_invariant_to_large_common_displacement() {
+    with_cx(|_, cx| {
+        // The reference edges are smaller than one ULP of the translation.
+        // They remain known exactly through X and the common nodal motion.
+        let scale = 2.0_f64.powi(-20);
+        let nodes = NODES.map(|point| point.map(|value| scale * value));
+        let surface =
+            ClosedTetPressureSurface::new(&nodes, &TETS, TetAssemblyBudget::standard(), 4, cx)
+                .unwrap();
+        let zero = [0.0; 12];
+        let translation = [2.0_f64.powi(40), -2.0_f64.powi(39), 2.0_f64.powi(38)];
+        let translated: Vec<f64> = (0..4).flat_map(|_| translation).collect();
+        let pressure = 3.7;
+        let volume = surface.volume_m3(&zero, cx).unwrap();
+        assert!(volume > 0.0);
+        assert_eq!(surface.volume_m3(&translated, cx).unwrap(), volume);
+        assert_eq!(
+            surface.force_n(&translated, pressure, cx).unwrap(),
+            surface.force_n(&zero, pressure, cx).unwrap(),
+        );
+        let reference_tangent = surface.force_tangent(&zero, pressure, cx).unwrap();
+        let translated_tangent = surface.force_tangent(&translated, pressure, cx).unwrap();
+        for row in 0..12 {
+            assert_eq!(reference_tangent.row(row), translated_tangent.row(row));
+        }
+        assert_eq!(surface.work_j(&zero, &translated, pressure, cx).unwrap(), 0.0);
+    });
+}

@@ -34,7 +34,7 @@
 //! fully applied an Armijo condition on the potential is enforced (or, on a
 //! non-descent direction near a limit point, a decrease of the residual
 //! norm). Convergence: `||r_f|| <= relative_tolerance * max(||f_int||,
-//! ||f_ext||, max|K_dd| max|u|)` with the full internal-force vector
+//! ||f_ext||, max|K_dd| max|u_node - u_0|)` with the full internal-force vector
 //! (reactions included) and no pending boundary increment; the stiffness
 //! term keeps the gate meaningful at stress-free states such as a rigid
 //! rotation, where every force vanishes.
@@ -435,9 +435,11 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
 
     fn deformation_gradient(element: &Element, u: &[f64]) -> [f64; 9] {
         let mut f = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
-        for (a, &node) in element.nodes.iter().enumerate() {
+        // Partition of unity removes the common displacement. Form relative
+        // motion first so a large rigid translation cannot create strain.
+        for (a, &node) in element.nodes.iter().enumerate().skip(1) {
             for i in 0..3 {
-                let ui = u[3 * node + i];
+                let ui = u[3 * node + i] - u[3 * element.nodes[0] + i];
                 for j in 0..3 {
                     f[3 * i + j] = ui.mul_add(element.gradients[a][j], f[3 * i + j]);
                 }
@@ -770,7 +772,19 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
                 // motion) where the internal force itself vanishes.
                 let full = self.tangent(&elements, &u, cx)?.map_err(refused)?;
                 let stiffness = (0..dofs).map(|d| full.get(d, d).abs()).fold(0.0, f64::max);
-                let reach = u.iter().map(|v| v.abs()).fold(0.0, f64::max);
+                // Common translation is not a deformation scale: it must not
+                // loosen the force-equilibrium gate.
+                let origin = [u[0], u[1], u[2]];
+                let reach = u
+                    .chunks_exact(3)
+                    .flat_map(|node| {
+                        [
+                            (node[0] - origin[0]).abs(),
+                            (node[1] - origin[1]).abs(),
+                            (node[2] - origin[2]).abs(),
+                        ]
+                    })
+                    .fold(0.0, f64::max);
                 let scale = norm(&state.internal)
                     .max(norm(&f_ext))
                     .max(stiffness * reach)

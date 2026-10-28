@@ -891,3 +891,62 @@ fn source_context_requires_supported_fixed_conditions_inside_the_exact_domain() 
     );
     assert!(ResolvedHyperelastic::try_from_model_card_at(&card, &frozen).is_err());
 }
+
+/// G3: translation cannot change finite-strain energy, force, or tangent.
+/// The dyadic motion remains exactly representable at the large offset.
+#[test]
+fn skew_tet_preserves_force_energy_and_tangent_under_large_translation() {
+    let nodes = [
+        [0.0, 0.0, 0.0],
+        [1.75, 0.25, 0.5],
+        [0.5, 1.5, 0.25],
+        [0.25, 0.75, 1.25],
+    ];
+    let tets = [[0, 1, 2, 3]];
+    let material = neo_hookean(2.0, 5.0);
+    let p = problem(&nodes, &tets, &material, &[], &[], 1);
+    let translation = [
+        1_099_511_627_776.0,
+        -549_755_813_888.0,
+        274_877_906_944.0,
+    ];
+
+    for scale in [0.0, 1.0] {
+        let u: Vec<f64> = nodes
+            .iter()
+            .flat_map(|&[x, y, z]| {
+                [
+                    scale * (0.25 * x + 0.125 * y),
+                    scale * (-0.25 * y + 0.125 * z),
+                    scale * (0.125 * x + 0.5 * z),
+                ]
+            })
+            .collect();
+        let translated: Vec<f64> = u
+            .iter()
+            .enumerate()
+            .map(|(i, value)| value + translation[i % 3])
+            .collect();
+
+        with_cx(|cx| {
+            assert_eq!(
+                p.internal_force(&u, cx).unwrap(),
+                p.internal_force(&translated, cx).unwrap()
+            );
+            assert_eq!(
+                p.stored_energy_j(&u, cx).unwrap().to_bits(),
+                p.stored_energy_j(&translated, cx).unwrap().to_bits()
+            );
+            let tangent = p.tangent_matrix(&u, cx).unwrap();
+            let shifted_tangent = p.tangent_matrix(&translated, cx).unwrap();
+            for i in 0..u.len() {
+                for j in 0..u.len() {
+                    assert_eq!(
+                        tangent.get(i, j).to_bits(),
+                        shifted_tangent.get(i, j).to_bits()
+                    );
+                }
+            }
+        });
+    }
+}
