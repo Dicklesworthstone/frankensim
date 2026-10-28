@@ -3362,3 +3362,25 @@ into the curve identity. The declared sensible interpolation allowance is not a
 source-uncertainty claim. This admission does not infer a phase diagram, nucleation,
 kinetics, supercooling, hysteresis, moving geometry or a fixed-volume transport
 closure.
+
+
+### Prescribed wet-pore gas response
+
+`porous::wet` supplies explicitly calibrated gas relative permeability and pore
+diffusivity at a prescribed liquid saturation, total porosity and gas-pore radius.
+The nonwetting van Genuchten--Mualem relation uses supplied residual liquid/gas
+saturations and shape parameter. Diffusion independently selects either the
+Millington--Quirk 1961 relation or an explicit transport tortuosity. These are
+separate mobilities: residual Darcy immobility does not invent a diffusion
+connectivity threshold. Full liquid saturation returns exact zeros and no
+fabricated finite gas tortuosity.
+
+Immutable samples retain the complete calibration through shared storage.
+Sampling uses bounded deterministic scalar work with no sample allocation,
+retains positive transport near closure, and refuses unrepresentable positive
+coefficients. Domain bounds apply before the declared endpoint extensions.
+Porosity and radius evolution are prescribed; intrinsic permeability, liquid
+mass, capillary pressure, mechanical work and hysteresis are not inferred.
+Nine focused native tests passed with the original MaterialError and fs_math,
+including independent analytic limits, exact cube-root diffusion fixtures,
+geometry scaling, monotonicity, source-domain admission and numerical limits.

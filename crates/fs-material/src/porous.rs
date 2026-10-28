@@ -55,6 +55,8 @@ use crate::MaterialError;
 pub mod gas;
 /// Typed intrinsic permeability and conservative, compressible Darcy barriers.
 pub mod permeability;
+/// Explicit saturation-dependent gas mobility and pore diffusivity.
+pub mod wet;
 
 /// Ambient gas seen by the equivalent fluid (SI).
 #[derive(Debug, Clone, Copy, PartialEq)]
