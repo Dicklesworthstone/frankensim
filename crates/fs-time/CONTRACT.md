@@ -55,6 +55,25 @@ where claimed below.
   not claim an adjoint or second-order coupled accuracy when a changing
   torque is frozen once per step. Such consumers must evaluate their force
   law at the required stages.
+- `lie::gyrostat::{momentum_step, driven_step, HeldTorque}` advances a
+  carrier with internal rotor momentum `h`, using total body momentum
+  `L = I omega + h`. `I` is the reduced principal inertia (rotor transverse
+  inertia retained, axial spin inertia excluded); rotor momenta are absolute
+  axial momenta, including the carrier's axial angular velocity. A symmetric
+  composition of exact axis Hamiltonian flows preserves `R L` to roundoff
+  and is second order and reversible for fixed `h`. Zero `h` delegates
+  exactly to the rigid-body drift; a stationary carrier remains stationary
+  for any stored rotor momentum. There are at most five elementary rotations,
+  no allocation and no nonlinear iteration. `driven_step` composes internal
+  rotor transfers with the drift and endpoint external torque half-kicks;
+  motor reaction changes carrier momentum without creating external impulse.
+  Body-held versus spatially held torques are explicit. This map is second
+  order for linear rotor momentum change and the declared held torque;
+  changing load laws need a coupled stage. `tests/gyrostat.rs` checks analytic
+  precession/refinement, rotor spin-up recoil, spatial impulse, frame
+  covariance, reversibility, replay, rest, rigid reduction and admission.
+  No exact-energy, arbitrary-step accuracy, gimbaled-rotor, rotor-flexibility,
+  changing-inertia, or discrete-adjoint claim is made for this extension.
 - `galpha::GeneralizedAlpha::new(m, c, k, n, h, rho_inf)` +
   `galpha_step(ga, q, v, a, f_next)` — Chung–Hulbert: αm = (2ρ−1)/(ρ+1),
   αf = ρ/(ρ+1), γ = ½ − αm + αf, β = ¼(1 − αm + αf)²; one prefactored

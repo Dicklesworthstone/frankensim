@@ -8,6 +8,9 @@
 
 use fs_ga::{GaError, So3, So3Tangent, Vec3};
 
+#[path = "lie/gyrostat.rs"]
+pub mod gyrostat;
+
 /// Typed failures for `SO(3)` integration steps.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LieStepError {
