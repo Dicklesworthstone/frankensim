@@ -1556,5 +1556,14 @@ mod printed_elastomers;
 #[path = "material_catalog_expansion/ceramics_elements.rs"]
 mod ceramics_elements;
 
+#[path = "material_catalog_expansion/solders_minerals.rs"]
+mod solders_minerals;
+
+#[path = "material_catalog_expansion/engineered_wood_building.rs"]
+mod engineered_wood_building;
+
+#[path = "material_catalog_expansion/composites_bonding.rs"]
+mod composites_bonding;
+
 #[path = "material_catalog_expansion/viscoelastic_sources.rs"]
 mod viscoelastic_sources;

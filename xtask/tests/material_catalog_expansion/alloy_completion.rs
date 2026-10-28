@@ -1,6 +1,12 @@
 //! Source-specific alloy stiffness and expansion reach their matching consumers.
 use super::*;
 
+fn replace_flag(point: QueryPoint, axis: &str, value: f64) -> QueryPoint {
+    let quantity = QuantitySpec::dimensional(Dims::NONE);
+    assert_eq!(point.axis_quantities().get(axis), Some(&quantity));
+    point.with_quantity(axis, quantity, value).unwrap()
+}
+
 fn reference() -> QueryPoint {
     flags(&[
         ("engineering-reference-model", 1.0),
@@ -90,13 +96,11 @@ fn a36_and_1018_references_drive_axial_and_slab_models_without_invented_temperat
             );
             for bad in [
                 QueryPoint::new(),
-                at.clone().with("engineering-reference-model", 0.0).unwrap(),
-                at.clone().with("source-specimens-matched", 1.0).unwrap(),
-                at.clone()
-                    .with("source-test-temperature-known", 1.0)
-                    .unwrap(),
-                at.clone().with("source-test-method-known", 1.0).unwrap(),
-                at.clone().with(process_axis, 0.0).unwrap(),
+                replace_flag(at.clone(), "engineering-reference-model", 0.0),
+                replace_flag(at.clone(), "source-specimens-matched", 1.0),
+                replace_flag(at.clone(), "source-test-temperature-known", 1.0),
+                replace_flag(at.clone(), "source-test-method-known", 1.0),
+                replace_flag(at.clone(), process_axis, 0.0),
             ] {
                 refuses(&pack, name, dims, &bad);
             }
@@ -214,9 +218,15 @@ fn inconel_625_dynamic_curves_keep_heat_treatments_and_method_separate() {
             ("dynamic-poisson-ratio", Dims::NONE, nu),
         ] {
             let answer = sample(&pack, name, dims, &at, value);
+            // Linear evaluation of a source curve does not manufacture an
+            // uncertainty interval or a numerical accuracy certificate.
+            assert_eq!(
+                answer.evidence.value.uncertainty,
+                UncertaintyModel::Unstated
+            );
             assert_eq!(
                 answer.evidence.numerical.kind,
-                fs_evidence::NumericalKind::Estimate
+                fs_evidence::NumericalKind::NoClaim
             );
         }
         // A dynamic measurement must not silently become a static law.
@@ -229,10 +239,16 @@ fn inconel_625_dynamic_curves_keep_heat_treatments_and_method_separate() {
         condition(294.14, 0.0),
         condition(1144.16, 0.0),
         condition(330.15, 0.5),
-        base.clone().with("source-dynamic-method", 0.0).unwrap(),
-        base.clone().with("source-frequency-known", 1.0).unwrap(),
-        base.clone().with("source-rod-diameter", 0.02).unwrap(),
-        base.clone().with("source-specimens-matched", 1.0).unwrap(),
+        replace_flag(base.clone(), "source-dynamic-method", 0.0),
+        replace_flag(base.clone(), "source-frequency-known", 1.0),
+        base.clone()
+            .with_quantity(
+                "source-rod-diameter",
+                QuantitySpec::dimensional(Dims([1, 0, 0, 0, 0, 0])),
+                0.02,
+            )
+            .unwrap(),
+        replace_flag(base.clone(), "source-specimens-matched", 1.0),
     ] {
         refuses(&pack, "dynamic-young-modulus", PA, &bad);
     }
@@ -311,11 +327,9 @@ fn monel_reference_drives_axial_force_mass_and_work_without_isotropic_fusion() {
     }
     for bad in [
         temperature(reference(), "temperature", 294.15),
-        at.clone().with("temperature", 300.0).unwrap(),
-        at.clone()
-            .with("source-elastic-temperature-known", 1.0)
-            .unwrap(),
-        at.clone().with("source-elastic-method-known", 1.0).unwrap(),
+        temperature(at.clone(), "temperature", 300.0),
+        replace_flag(at.clone(), "source-elastic-temperature-known", 1.0),
+        replace_flag(at.clone(), "source-elastic-method-known", 1.0),
     ] {
         refuses(&pack, "tensile-modulus", PA, &bad);
     }
@@ -384,9 +398,11 @@ fn timetal_interval_means_drive_endpoint_expansion_with_distinct_reference_lengt
         interval(273.15, 698.15),
         interval(293.15, 800.0),
         interval(293.15, 923.16),
-        interval(293.15, 923.15)
-            .with("source-expansion-direction-known", 1.0)
-            .unwrap(),
+        replace_flag(
+            interval(293.15, 923.15),
+            "source-expansion-direction-known",
+            1.0,
+        ),
     ] {
         refuses(&pack, coefficient.name(), coefficient.dims(), &bad);
     }

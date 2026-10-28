@@ -1,0 +1,28 @@
+frankensim.matdb-manifest.v3
+pack_id	foamglas-t4-plus-100mm-2025
+redistribution	permitted	Selected attributed numerical facts and original notes only; manufacturer document and table layout are not redistributed
+citation	Owens Corning Insulation UK, FOAMGLAS T4+ Product Data Sheet, version 02.04.2025 replacing 10.02.2025, pages 1-2; https://www.foamglas.com/-/media/project/foamglas/public/shared/files/foamglas-b/foamglas-t4-plus/pds/pds-foamglas-t4plus-uk.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	foamglas-t4-plus	properties.tsv	material-tsv-v1
+property	density_nominal	density	dimensional
+property	density_relative_tolerance	density-declared-relative-tolerance	dimensional
+property	thickness_tolerance	nominal-thickness-declared-tolerance	dimensional
+property	conductivity_upper_bound	thermal-conductivity-declared-upper-bound	thermal-conductivity
+property	thermal_resistance_declared	thermal-resistance-area-specific-declared	dimensional
+property	compression_minimum	compressive-strength-declared-minimum	dimensional
+property	compression_characteristic	compressive-stress-characteristic	dimensional
+property	compression_sample_mean	compressive-stress-sample-mean	dimensional
+property	compression_sample_standard_deviation	compressive-stress-sample-standard-deviation	dimensional
+property	bending_minimum	bending-strength-declared-minimum	dimensional
+property	tension_minimum	tensile-strength-declared-minimum	dimensional
+property	specific_heat	specific-heat-capacity	dimensional
+property	expansion_reference	thermal-expansion-coefficient-reference	dimensional
+axis	source_product_foamglas_t4_plus_2025	source-product-foamglas-t4-plus-2025	dimensional
+axis	nominal_thickness	nominal-thickness	dimensional
+axis	source_temperature_known	source-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_sample_size	source-sample-size	dimensional
+axis	source_characteristic_fractile	source-characteristic-fractile	dimensional
+axis	source_one_sided_confidence	source-one-sided-confidence	dimensional
+axis	source_expansion_reference_temperature_known	source-expansion-reference-temperature-known	dimensional
+axis	source_expansion_interval_known	source-expansion-interval-known	dimensional

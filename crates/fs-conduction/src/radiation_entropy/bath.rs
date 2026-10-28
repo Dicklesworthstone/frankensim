@@ -128,7 +128,7 @@ impl GrayBlackBathExchange {
             else { det::exp(log_x_cold) };
         if x_hot.is_infinite() { return Ok(ModeExchange::zero()); }
         if !x_hot.is_finite() || !x_cold.is_finite() { return Err(RadiationEntropyError::Unrepresentable); }
-        let occupation = |x, lx| if x == 0.0 { -lx } else { log_occupation(x, 0.0) };
+        let occupation = |x: f64, lx: f64| if x == 0.0 { -lx } else { log_occupation(x, 0.0) };
         let lh = occupation(x_hot, log_x_hot);
         let lc = occupation(x_cold, log_x_cold);
         let (ns, nb, xb) = if ts >= tb { (lh,lc,x_cold) } else { (lc,lh,x_hot) };

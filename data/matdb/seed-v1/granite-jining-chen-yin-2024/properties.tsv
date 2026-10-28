@@ -1,0 +1,48 @@
+frankensim.matdb-source.v1
+observation	baseline	Fine-grained biotite granite from Jining, North China; source Table 1 baseline	Original study's selected physical and mechanical parameters	Source identifies 40 percent potassium feldspar, 35 quartz, 20 plagioclase, 4 biotite and 1 minor minerals; fraction basis is unspecified. Table 1 does not establish matched specimens, test temperature, moisture, loading rate, confinement or measurement methods. Reference scope is before the study's thermal-disturbance program, not generic granite or heated rock.
+observation	interpretation	Table 1 property meanings	Preserve reported quantities without constitutive completion	Density 2.6 g/cm3 becomes 2600 kg/m3; P-wave speed is 3054.85 m/s. Elastic modulus 21.73 GPa and Poisson ratio 0.24 do not establish static or dynamic elasticity. Compressive strength 156.27 MPa does not establish a uniaxial test protocol. Wave frequency and direction are unspecified. No inferred shear modulus, bulk modulus, tensile strength, damage law or temperature trajectory is supplied.
+scalar	density	baseline,interpretation	density	2600	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_granite_jining	1	1	1
+validity	density	source_before_thermal_disturbance	1	1	1
+validity	density	source_specimens_matched	0	0	1
+validity	density	source_test_temperature_known	0	0	1
+validity	density	source_test_method_known	0	0	1
+validity	density	source_moisture_content_known	0	0	1
+scalar	p-wave-speed	baseline,interpretation	p_wave_speed	3054.85	m/s	constant
+uncertainty	p-wave-speed	unstated	-	-	-	-
+validity	p-wave-speed	engineering_reference_model	1	1	1
+validity	p-wave-speed	source_granite_jining	1	1	1
+validity	p-wave-speed	source_before_thermal_disturbance	1	1	1
+validity	p-wave-speed	source_specimens_matched	0	0	1
+validity	p-wave-speed	source_test_temperature_known	0	0	1
+validity	p-wave-speed	source_test_method_known	0	0	1
+validity	p-wave-speed	source_moisture_content_known	0	0	1
+scalar	elastic-modulus	baseline,interpretation	elastic_modulus_method_unspecified	21730000000	Pa	constant
+uncertainty	elastic-modulus	unstated	-	-	-	-
+validity	elastic-modulus	engineering_reference_model	1	1	1
+validity	elastic-modulus	source_granite_jining	1	1	1
+validity	elastic-modulus	source_before_thermal_disturbance	1	1	1
+validity	elastic-modulus	source_specimens_matched	0	0	1
+validity	elastic-modulus	source_test_temperature_known	0	0	1
+validity	elastic-modulus	source_test_method_known	0	0	1
+validity	elastic-modulus	source_moisture_content_known	0	0	1
+scalar	poisson-ratio	baseline,interpretation	poisson_ratio_method_unspecified	0.24	1	constant
+uncertainty	poisson-ratio	unstated	-	-	-	-
+validity	poisson-ratio	engineering_reference_model	1	1	1
+validity	poisson-ratio	source_granite_jining	1	1	1
+validity	poisson-ratio	source_before_thermal_disturbance	1	1	1
+validity	poisson-ratio	source_specimens_matched	0	0	1
+validity	poisson-ratio	source_test_temperature_known	0	0	1
+validity	poisson-ratio	source_test_method_known	0	0	1
+validity	poisson-ratio	source_moisture_content_known	0	0	1
+scalar	compressive-strength	baseline,interpretation	compressive_strength_method_unspecified	156270000	Pa	constant
+uncertainty	compressive-strength	unstated	-	-	-	-
+validity	compressive-strength	engineering_reference_model	1	1	1
+validity	compressive-strength	source_granite_jining	1	1	1
+validity	compressive-strength	source_before_thermal_disturbance	1	1	1
+validity	compressive-strength	source_specimens_matched	0	0	1
+validity	compressive-strength	source_test_temperature_known	0	0	1
+validity	compressive-strength	source_test_method_known	0	0	1
+validity	compressive-strength	source_moisture_content_known	0	0	1

@@ -1,0 +1,18 @@
+frankensim.matdb-manifest.v3
+pack_id	granite-jining-chen-yin-2024
+redistribution	permitted	Selected attributed numerical facts and original modeling notes only; no source document, prose or table layout is redistributed
+citation	Yongjun Chen and Tubing Yin, Digital Fracture Surface Morphology and Statistical Characteristics of Granite Brazilian Tests after Non-Steady-State Thermal Disturbance, Mathematics 12(5), 670 (2024), section 2.1 and Table 1; https://doi.org/10.3390/math12050670 ; https://www.mdpi.com/2227-7390/12/5/670
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	chen-yin-table1	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	p_wave_speed	p-wave-speed	dimensional
+property	elastic_modulus_method_unspecified	elastic-modulus-method-unspecified	dimensional
+property	poisson_ratio_method_unspecified	poisson-ratio-method-unspecified	dimensional
+property	compressive_strength_method_unspecified	compressive-strength-method-unspecified	dimensional
+axis	engineering_reference_model	engineering-reference-model	dimensional
+axis	source_granite_jining	source-granite-jining	dimensional
+axis	source_before_thermal_disturbance	source-before-thermal-disturbance	dimensional
+axis	source_specimens_matched	source-specimens-matched	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_test_method_known	source-test-method-known	dimensional
+axis	source_moisture_content_known	source-moisture-content-known	dimensional

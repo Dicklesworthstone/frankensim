@@ -1,0 +1,90 @@
+frankensim.matdb-source.v1
+observation	product	FOAMGLAS T4+ closed-cell glass insulation, nominal 100 mm UK slab	2025 product data sheet; EN 13167 and ETA-17/0903 product characteristics	The selected marketed slab is 600 by 450 by 100 mm. Density 110 kg/m3 is nominal with a separately declared 15-percent tolerance under EN 1602; thickness tolerance is 2 mm under EN 823. These tolerances are not sample standard deviations or confidence intervals. Numerical test temperature, moisture, glass composition and test-coupon geometry are not supplied. No solid-glass density, Young modulus or compression modulus is inferred.
+observation	declared	FOAMGLAS T4+ conductivity and strength declarations	PDS page 2; EN ISO 10456, EN 826 Annex A, EN 12089 and EN 1607	Conductivity is an upper bound, while compression, bending and tension strengths are lower bounds. They are not measured nominal response properties. The separately printed 100 mm declared thermal resistance is 2.40 m2 K/W. A resistance bound derived from conductivity must retain its assumed geometry and bound direction; neither nominal thickness nor declared resistance is a measured specimen value.
+observation	compression_statistics	FOAMGLAS T4+ reported compression sample and characteristic stress	PDS page 2 and footnote 1; ISO 12491:1997	The sample has 50 results, mean 750 kPa and sample standard deviation 55 kPa. The characteristic value 633 kPa is a 5-percent fractile at one-sided confidence 75 percent. Sample spread is retained as a separate property, not uncertainty of the mean or a normal-distribution assumption. The characteristic stress is not an elastic modulus, observed minimum or safety-factor-adjusted load capacity.
+observation	general	FOAMGLAS general thermal reference properties printed for T4+	PDS page 2; specific heat EN ISO 10456 and expansion EN 13471	Heat capacity and expansion are general FOAMGLAS reference values. Their numerical test temperatures and moisture are unstated; expansion has no stated reference temperature or interval. No temperature-span law or thermal-strain integral is inferred. Qualitative vapour tightness is not encoded as an invented finite diffusion factor.
+scalar	rho-nominal	product	density_nominal	110	kg/m3	constant
+uncertainty	rho-nominal	unstated	-	-	-	-
+validity	rho-nominal	source_product_foamglas_t4_plus_2025	1	1	1
+validity	rho-nominal	nominal_thickness	0.1	0.1	m
+validity	rho-nominal	source_temperature_known	0	0	1
+validity	rho-nominal	source_moisture_condition_known	0	0	1
+scalar	rho-tolerance	product	density_relative_tolerance	0.15	1	constant
+uncertainty	rho-tolerance	unstated	-	-	-	-
+validity	rho-tolerance	source_product_foamglas_t4_plus_2025	1	1	1
+validity	rho-tolerance	nominal_thickness	0.1	0.1	m
+validity	rho-tolerance	source_temperature_known	0	0	1
+validity	rho-tolerance	source_moisture_condition_known	0	0	1
+scalar	thickness-tolerance	product	thickness_tolerance	0.002	m	constant
+uncertainty	thickness-tolerance	unstated	-	-	-	-
+validity	thickness-tolerance	source_product_foamglas_t4_plus_2025	1	1	1
+validity	thickness-tolerance	nominal_thickness	0.1	0.1	m
+validity	thickness-tolerance	source_temperature_known	0	0	1
+validity	thickness-tolerance	source_moisture_condition_known	0	0	1
+scalar	k-upper-bound	declared	conductivity_upper_bound	0.041	W/m/K	constant
+uncertainty	k-upper-bound	unstated	-	-	-	-
+validity	k-upper-bound	source_product_foamglas_t4_plus_2025	1	1	1
+validity	k-upper-bound	nominal_thickness	0.1	0.1	m
+validity	k-upper-bound	source_temperature_known	0	0	1
+validity	k-upper-bound	source_moisture_condition_known	0	0	1
+scalar	r-declared	declared	thermal_resistance_declared	2.40	m^2*K/W	constant
+uncertainty	r-declared	unstated	-	-	-	-
+validity	r-declared	source_product_foamglas_t4_plus_2025	1	1	1
+validity	r-declared	nominal_thickness	0.1	0.1	m
+validity	r-declared	source_temperature_known	0	0	1
+validity	r-declared	source_moisture_condition_known	0	0	1
+scalar	compression-minimum	declared	compression_minimum	600	kPa	constant
+uncertainty	compression-minimum	unstated	-	-	-	-
+validity	compression-minimum	source_product_foamglas_t4_plus_2025	1	1	1
+validity	compression-minimum	nominal_thickness	0.1	0.1	m
+validity	compression-minimum	source_temperature_known	0	0	1
+validity	compression-minimum	source_moisture_condition_known	0	0	1
+scalar	compression-characteristic	compression_statistics	compression_characteristic	633	kPa	constant
+uncertainty	compression-characteristic	unstated	-	-	-	-
+validity	compression-characteristic	source_product_foamglas_t4_plus_2025	1	1	1
+validity	compression-characteristic	nominal_thickness	0.1	0.1	m
+validity	compression-characteristic	source_temperature_known	0	0	1
+validity	compression-characteristic	source_moisture_condition_known	0	0	1
+validity	compression-characteristic	source_sample_size	50	50	1
+validity	compression-characteristic	source_characteristic_fractile	0.05	0.05	1
+validity	compression-characteristic	source_one_sided_confidence	0.75	0.75	1
+scalar	compression-mean	compression_statistics	compression_sample_mean	750	kPa	constant
+uncertainty	compression-mean	unstated	-	-	-	-
+validity	compression-mean	source_product_foamglas_t4_plus_2025	1	1	1
+validity	compression-mean	nominal_thickness	0.1	0.1	m
+validity	compression-mean	source_temperature_known	0	0	1
+validity	compression-mean	source_moisture_condition_known	0	0	1
+validity	compression-mean	source_sample_size	50	50	1
+scalar	compression-sample-sd	compression_statistics	compression_sample_standard_deviation	55	kPa	constant
+uncertainty	compression-sample-sd	unstated	-	-	-	-
+validity	compression-sample-sd	source_product_foamglas_t4_plus_2025	1	1	1
+validity	compression-sample-sd	nominal_thickness	0.1	0.1	m
+validity	compression-sample-sd	source_temperature_known	0	0	1
+validity	compression-sample-sd	source_moisture_condition_known	0	0	1
+validity	compression-sample-sd	source_sample_size	50	50	1
+scalar	bending-minimum	declared	bending_minimum	450	kPa	constant
+uncertainty	bending-minimum	unstated	-	-	-	-
+validity	bending-minimum	source_product_foamglas_t4_plus_2025	1	1	1
+validity	bending-minimum	nominal_thickness	0.1	0.1	m
+validity	bending-minimum	source_temperature_known	0	0	1
+validity	bending-minimum	source_moisture_condition_known	0	0	1
+scalar	tension-minimum	declared	tension_minimum	150	kPa	constant
+uncertainty	tension-minimum	unstated	-	-	-	-
+validity	tension-minimum	source_product_foamglas_t4_plus_2025	1	1	1
+validity	tension-minimum	nominal_thickness	0.1	0.1	m
+validity	tension-minimum	source_temperature_known	0	0	1
+validity	tension-minimum	source_moisture_condition_known	0	0	1
+scalar	heat-capacity	general	specific_heat	1000	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	source_product_foamglas_t4_plus_2025	1	1	1
+validity	heat-capacity	nominal_thickness	0.1	0.1	m
+validity	heat-capacity	source_temperature_known	0	0	1
+validity	heat-capacity	source_moisture_condition_known	0	0	1
+scalar	expansion-reference	general	expansion_reference	0.000009	K^-1	constant
+uncertainty	expansion-reference	unstated	-	-	-	-
+validity	expansion-reference	source_product_foamglas_t4_plus_2025	1	1	1
+validity	expansion-reference	nominal_thickness	0.1	0.1	m
+validity	expansion-reference	source_temperature_known	0	0	1
+validity	expansion-reference	source_moisture_condition_known	0	0	1
+validity	expansion-reference	source_expansion_reference_temperature_known	0	0	1
+validity	expansion-reference	source_expansion_interval_known	0	0	1

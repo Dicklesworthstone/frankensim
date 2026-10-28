@@ -14,6 +14,12 @@ fn frequency(point: QueryPoint, hz: f64) -> QueryPoint {
         .unwrap()
 }
 
+fn selector(point: QueryPoint, name: &str, value: f64) -> QueryPoint {
+    point
+        .with_quantity(name, QuantitySpec::dimensional(Dims::NONE), value)
+        .unwrap()
+}
+
 fn reference_card(pack: &NormalizedPack) -> fs_matdb::NormalizedMaterialCardPack {
     fs_matdb::NormalizedMaterialCardPack::new(
         fs_matdb::MaterialStateId {
@@ -143,19 +149,14 @@ fn g0_g3_elemental_bismuth_and_vanadium_preserve_units_and_distinct_temperatures
     ] {
         let pack = compile(slug, 4);
         let base = flags(&[("source-process-known", 0.0)]);
-        let unknown_density = base
-            .clone()
-            .with("source-density-temperature-known", 0.0)
-            .unwrap();
+        let unknown_density = selector(base.clone(), "source-density-temperature-known", 0.0);
         sample(&pack, "density", RHO, &unknown_density, rho);
         refuses(&pack, "density", RHO, &base);
         let conductivity = temperature(base.clone(), "temperature", 298.2);
         sample(&pack, "thermal-conductivity", K, &conductivity, k);
         slab_reference(&pack, &conductivity, k);
         let heat_capacity = temperature(
-            base.clone()
-                .with("thermochemical-calorie-conversion", 1.0)
-                .unwrap(),
+            selector(base.clone(), "thermochemical-calorie-conversion", 1.0),
             "temperature",
             298.15,
         );
@@ -173,9 +174,7 @@ fn g0_g3_elemental_bismuth_and_vanadium_preserve_units_and_distinct_temperatures
             &pack,
             "specific-heat-capacity",
             CP,
-            &heat_capacity
-                .with("thermochemical-calorie-conversion", 0.0)
-                .unwrap(),
+            &selector(heat_capacity, "thermochemical-calorie-conversion", 0.0),
         );
         refuses(&pack, "young-modulus", PA, &base);
     }
@@ -222,7 +221,7 @@ fn g0_g3_430_and_316l_keep_grade_and_interval_conditions_in_physical_use() {
             ("young-modulus", PA, e),
         ] {
             sample(&pack, name, dims, &at, value);
-            refuses(&pack, name, dims, &at.clone().with(grade, 0.0).unwrap());
+            refuses(&pack, name, dims, &selector(at.clone(), grade, 0.0));
         }
         axial_reference(&pack, &at, rho, e);
         slab_reference(&pack, &at, k);
@@ -230,14 +229,15 @@ fn g0_g3_430_and_316l_keep_grade_and_interval_conditions_in_physical_use() {
             &pack,
             "young-modulus",
             PA,
-            &temperature(base.clone(), "temperature", 393.15),
+            // The midpoint of the 20 and 200 degC source knots is 110 degC.
+            &temperature(base.clone(), "temperature", 383.15),
             e_mid,
         );
         refuses(
             &pack,
             "density",
             RHO,
-            &temperature(base.clone(), "temperature", 393.15),
+            &temperature(base.clone(), "temperature", 383.15),
         );
         refuses(
             &pack,
@@ -257,16 +257,13 @@ fn g0_g3_430_and_316l_keep_grade_and_interval_conditions_in_physical_use() {
             &pack,
             name,
             INVERSE_TEMPERATURE,
-            &mean
-                .clone()
-                .with("source-range-end-temperature", 423.15)
-                .unwrap(),
+            &temperature(mean.clone(), "source-range-end-temperature", 423.15),
         );
         refuses(
             &pack,
             name,
             INVERSE_TEMPERATURE,
-            &mean.with("source-reference-temperature", 298.15).unwrap(),
+            &temperature(mean, "source-reference-temperature", 298.15),
         );
         refuses(&pack, "tensile-strength", PA, &at);
     }
@@ -314,10 +311,7 @@ fn g0_g3_alumina_grades_keep_20c_mechanics_100c_heat_capacity_and_dielectric_fre
         ] {
             sample(&pack, name, dims, &at, value);
         }
-        let density_at = at
-            .clone()
-            .with("source-density-temperature-known", 0.0)
-            .unwrap();
+        let density_at = selector(at.clone(), "source-density-temperature-known", 0.0);
         sample(&pack, "density", RHO, &density_at, rho);
         axial_reference(&pack, &density_at, rho, e);
         slab_reference(&pack, &at, k);
@@ -374,7 +368,7 @@ fn g0_g3_alumina_grades_keep_20c_mechanics_100c_heat_capacity_and_dielectric_fre
             &pack,
             name,
             INVERSE_TEMPERATURE,
-            &mean.with("source-range-end-temperature", 873.15).unwrap(),
+            &temperature(mean, "source-range-end-temperature", 873.15),
         );
         refuses(&pack, "tensile-strength", PA, &at);
     }
@@ -396,10 +390,7 @@ fn g0_g3_aluminum_nitride_exposes_high_conductivity_without_inventing_joint_ther
     ] {
         sample(&pack, name, dims, &at, value);
     }
-    let density_at = at
-        .clone()
-        .with("source-density-temperature-known", 0.0)
-        .unwrap();
+    let density_at = selector(at.clone(), "source-density-temperature-known", 0.0);
     sample(&pack, "density", RHO, &density_at, 3300.0);
     axial_reference(&pack, &density_at, 3300.0, 310e9);
     slab_reference(&pack, &at, 180.0);
@@ -480,10 +471,7 @@ fn g0_g3_mineral_crystals_separate_electrical_source_facts_from_thermal_models()
     ] {
         let pack = compile(slug, 4);
         let base = flags(&[("source-optical-crystal", 1.0)]);
-        let unknown = base
-            .clone()
-            .with("source-test-temperature-known", 0.0)
-            .unwrap();
+        let unknown = selector(base.clone(), "source-test-temperature-known", 0.0);
         let conductivity = if slug == "sylvite-kcl-crystran-reference" {
             sample(&pack, "density", RHO, &unknown, rho);
             sample(&pack, "specific-heat-capacity", CP, &unknown, cp);
@@ -499,7 +487,7 @@ fn g0_g3_mineral_crystals_separate_electrical_source_facts_from_thermal_models()
                 &pack,
                 "thermal-conductivity",
                 K,
-                &at.clone().with("source-optical-crystal", 0.0).unwrap(),
+                &selector(at.clone(), "source-optical-crystal", 0.0),
             );
             at
         } else {
@@ -622,10 +610,7 @@ fn g0_g3_macor_preserves_interval_means_frequency_knots_and_minimum_average_stre
             &temperature(base.clone(), "temperature", 293.15),
         );
     }
-    let unknown = at
-        .clone()
-        .with("source-test-temperature-known", 0.0)
-        .unwrap();
+    let unknown = selector(at.clone(), "source-test-temperature-known", 0.0);
     sample(&pack, "density", RHO, &unknown, 2520.0);
     sample(&pack, "poisson-ratio", Dims::NONE, &unknown, 0.29);
     axial_reference(&pack, &unknown, 2520.0, 66.9e9);
@@ -663,9 +648,7 @@ fn g0_g3_macor_preserves_interval_means_frequency_knots_and_minimum_average_stre
             &pack,
             name,
             INVERSE_TEMPERATURE,
-            &mean
-                .with("source-range-end-temperature", end - 1.0)
-                .unwrap(),
+            &temperature(mean, "source-range-end-temperature", end - 1.0),
         );
     }
 }

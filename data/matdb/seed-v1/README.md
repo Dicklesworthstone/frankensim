@@ -289,6 +289,79 @@ The three thermal properties have point validity at **298.15 K**. Cured density 
 
 The source diffusivity remains an independent observation. Rounded source conductivity, density, and heat capacity do not exactly reproduce it, particularly for 832C and 8810. Consumers must identify a diffusivity computed from `k/(rho*Cp)` as a derived value and preserve its source dependencies; it must not overwrite the reported claim or imply matched specimens. These packs provide measured strength roles without inventing elastic moduli, Poisson ratios, viscoelasticity, curing kinetics, or properties over an operating-temperature window.
 
+## Solder alloys, building materials, electrical composites and rock
+
+This expansion adds **19 source packs and 142 claims**. Every pack is available
+through the existing compiler and `matdb-catalog`; source citations and exact
+condition selectors are embedded in its manifest and observations.
+
+| Family | Packs | Claims | Available properties |
+| --- | ---: | ---: | --- |
+| Solder and fusible alloys | 8 | 39 | Independent SAC305 supplier references; Sn63Pb37, Sn42Bi58, In52Sn48 and Sn96.5Ag3.5; separate heating/cooling DSC measurements for SAC305 and Sn63Pb37 |
+| Engineered wood and building materials | 6 | 54 | Kerto Qp cross-veneer LVL at 39/75 mm; EGGER P5 structural particleboard at 18/22 mm; MM-HBE spruce glulam at 100 mm; Celcon Standard aircrete at 100 mm |
+| PCB laminates, adhesive and glass composite | 3 | 31 | Four exact FR408HR core constructions; cured 3M 2216 Gray; measured MTM45-1/6781 S2-glass coupon properties |
+| Cellular-glass foam | 1 | 13 | FOAMGLAS T4+ at 100 mm: thermal declarations, tolerances, strength minima and separately identified compression statistics |
+| Rock | 1 | 5 | Jining fine-grained biotite granite: baseline density, P-wave speed and method-unspecified mechanical references |
+
+The solder supplier profiles preserve independent density, melting and transport
+values. Solidus and liquidus use absolute-temperature quantity types; Kester's
+less specific melting interval has separate property names. Conductivity retains
+the source's exact 20 or 85 degC point when reported. The DSC packs retain three
+specimen masses, signed heating/cooling rates, atmosphere and programmed maximum
+temperature. Those discrete latent-energy observations do not supply an
+equilibrium liquid-fraction law, a complete enthalpy reference, or a qualified
+creep or solder-joint model. Kester's 20–100 degC expansion mean supports an
+endpoint strain calculation, not an instantaneous expansion curve.
+
+For example, evaluate the SAC305 supplier reference with all its required
+acknowledgements of missing test conditions:
+
+```sh
+cargo run -p xtask -- matdb-catalog --pack solder-sac305-indium-2024 \
+  --property density --property young_modulus --property thermal-conductivity \
+  --at engineering-reference-model=1 --at source-alloy-sac305=1 \
+  --at source-specimens-matched=0 --at source-test-method-known=0 \
+  --at source-test-temperature-known=0
+```
+
+This returns the source's 7350 kg/m3, 6.9 GPa and 61 W/(m K) as estimates with
+verified claim receipts. The unusual printed modulus remains attributable to
+this source; it is not silently replaced by another supplier's typical value.
+
+Kerto Qp preserves construction, loading direction and mean versus fifth
+percentile. Its longitudinal tensile modulus can drive an axial reference
+coupon. EGGER's 600 kg/m3 is a thermal/vapour calculation basis, not measured
+product density; boil-conditioned bond and ordinary bond remain separate.
+MM-HBE conductivity requires heat flow parallel to the bonded joints. Celcon's
+four conductivity values explicitly distinguish dry, protected, exposed and
+below-ground conditions; nominal dry density is not reused as an in-service
+density. Compression requirements remain bounds rather than measured curves.
+
+FOAMGLAS T4+ preserves its conductivity upper limit separately from an actual
+conductivity measurement. The existing slab owner can evaluate an authored
+resistance lower bound from the declared minimum thickness and maximum
+conductivity; the source's rounded declared resistance remains independent.
+Compression sample mean, sample standard deviation and characteristic stress
+retain separate names, sample size and the stated fractile/confidence. The
+granite profile preserves the original Jining specimen population and baseline
+thermal history; its unspecified elastic-modulus method does not become a
+static Young modulus or dynamic elastic calibration.
+
+FR408HR contains 48 frequency-specific Dk/Df samples across four exact core
+constructions, retaining glass style, ply count, resin content and printed
+thickness. It does not interpolate missing frequencies or substitute prepreg.
+The 3M sheet's joint-specific modulus is named `bondline-shear-modulus`, not bulk
+shear modulus. MTM45-1 retains 28 measured warp/fill/shear samples with exact
+layup, MH cure, fiber volume and dry/wet conditioning. Coupon-group density and
+measured versus thickness-normalized results keep distinct meanings; the pack
+does not invent a complete three-dimensional elasticity tensor.
+
+The `material_catalog_expansion` modules `solders_minerals`,
+`engineered_wood_building` and `composites_bonding` check these source values,
+canonical pack round trips, receipts and condition refusals. Their physical
+consumer cases use the existing axial-reference, conductive-slab and
+endpoint-expansion owners.
+
 ## Printed polymers, compliant materials, ordinary steels and ceramics
 
 This expansion adds **23 source packs and 193 property claims**, including
