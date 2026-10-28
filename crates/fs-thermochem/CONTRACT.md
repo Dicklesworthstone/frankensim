@@ -778,3 +778,11 @@ or falloff models. The material gas coupling supplies those laws using its
 existing gas inventory and source resolver. Focused native regressions check
 unit-factor identity, common forward/reverse scaling, real zero with retained
 activities, range loss and invalid-factor/source refusal.
+
+### Explicit continuous caloric references
+
+`Nasa9StandardStateModelV1::with_caloric_continuity` is an explicit model adjustment for contiguous NASA-9 regions. Raw construction never applies it automatically. Original source cards, card identities, coefficients, and Cp curves remain unchanged. The caller declares an anchor temperature and maximum absolute enthalpy and entropy corrections in molar units. The selected anchor region retains its original h/s reference throughout that region. For formation-reference preservation, choose a region containing the source's formation/reference temperature. Choosing a different region can change low-temperature formation values within the declared correction bounds.
+
+Construction walks outward from the anchor and admits constant h/s offsets only when every cumulative per-region correction fits its declared bound and adjacent endpoint evaluations agree. Source gaps, nonfinite corrections, exceeded bounds, and unrepresentable endpoint agreement refuse. These bounds describe the permitted reference adjustment; they are not estimates of source-data uncertainty. Cp may retain a source-fit jump at a region boundary. Continuity admission does not establish positive Cp or Cv.
+
+Corrected evaluation derives u = h − RT and g = h − Ts from the same h/s owner. Corrected relative enthalpy and entropy integrate the retained Cp and Cp/T curves over each crossed region, avoiding subtraction of large absolute references or independently rounded seam corrections. Absolute and relative evaluations agree within floating-point rounding. Raw models retain their original region references, source jumps, and evaluator version 1. Explicitly corrected models use evaluator version 2 and bind the anchor, bounds, original card identities, and exact offset bits in immutable policy metadata shared by the model and accepted receipts. Construction and cross-region changes are bounded by the existing 16-region admission limit; successful property-only evaluation adds no allocation.

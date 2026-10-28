@@ -14,6 +14,7 @@
 //! composition-equilibrium solve, mechanism evolution, kinetics integrator,
 //! or L3 protocol.
 
+mod caloric;
 mod enthalpy;
 mod entropy;
 pub mod eos;
@@ -24,6 +25,9 @@ pub mod transport;
 use core::fmt;
 use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, MatDbError};
 use fs_qty::{Dims, MolarMass, Pressure, Qty, Temperature};
+
+pub use caloric::{Nasa9CaloricReferenceV1, Nasa9CaloricRegionCorrectionV1,
+    NASA9_CONTINUOUS_CALORIC_EVALUATOR_VERSION_V1};
 
 pub use fs_qty::chemistry::{
     ChargeVector, ChemistryError, ConservationCertificate, ElementId, ElementalMatrix,
@@ -378,6 +382,13 @@ pub enum ThermochemErrorV1 {
         /// Exact requested IEEE bits.
         bits: u64,
     },
+    /// Explicit cross-region caloric reconciliation failed its declared gates.
+    CaloricReferenceRefused {
+        /// First source region whose reconciliation failed.
+        region: usize,
+        /// Stable physical or numerical refusal reason.
+        reason: &'static str,
+    },
     /// Fixed-order arithmetic produced a non-finite output.
     NonFiniteEvaluation {
         /// First derived property that failed.
@@ -460,6 +471,9 @@ impl fmt::Display for ThermochemErrorV1 {
             Self::TemperatureOutOfRange { bits } => write!(
                 f,
                 "temperature bits {bits:#018x} are outside every NASA-9 region"
+            ),
+            Self::CaloricReferenceRefused { region, reason } => write!(
+                f, "NASA-9 caloric reference refused at region {region}: {reason}"
             ),
             Self::NonFiniteEvaluation { property, bits } => write!(
                 f,
@@ -672,6 +686,7 @@ pub struct Nasa9StandardStateModelV1 {
     molar_mass: MolarMass,
     convention: StandardStateConventionV1,
     regions: Vec<Nasa9RegionV1>,
+    caloric_reference: Option<std::sync::Arc<Nasa9CaloricReferenceV1>>,
 }
 
 impl Nasa9StandardStateModelV1 {
@@ -736,6 +751,7 @@ impl Nasa9StandardStateModelV1 {
             molar_mass,
             convention,
             regions,
+            caloric_reference: None,
         })
     }
 
@@ -798,9 +814,19 @@ impl Nasa9StandardStateModelV1 {
         if !t.is_finite() || t <= 0.0 {
             return Err(ThermochemErrorV1::InvalidEvaluationTemperature { bits: t.to_bits() });
         }
-        let (region_index, region) = self
+        let (region_index, _) = self
             .region_for_temperature(t)
             .ok_or(ThermochemErrorV1::TemperatureOutOfRange { bits: t.to_bits() })?;
+        let properties = self.evaluate_source_region(region_index, t)?;
+        Ok((region_index, self.apply_caloric_reference(region_index, t, properties)?))
+    }
+
+    // Raw source operation tree, also used at either one-sided seam endpoint.
+    // Callers supply an admitted source index and a temperature in that card.
+    fn evaluate_source_region(
+        &self, region_index: usize, t: f64,
+    ) -> Result<StandardStateMolarPropertiesV1, ThermochemErrorV1> {
+        let region = &self.regions[region_index];
         let [a0, a1, a2, a3, a4, a5, a6, a7, a8] = region.coefficients;
         let inverse_t = 1.0 / t;
         let inverse_t2 = inverse_t * inverse_t;
@@ -856,7 +882,7 @@ impl Nasa9StandardStateModelV1 {
             u: MolarInternalEnergyV1::new(u),
             g: MolarGibbsEnergyV1::new(g),
         };
-        Ok((region_index, properties))
+        Ok(properties)
     }
 
     /// Evaluate standard-state molar properties with the complete source receipt.
@@ -873,7 +899,9 @@ impl Nasa9StandardStateModelV1 {
         let t = temperature.value();
         let region = &self.regions[region_index];
         let receipt = Nasa9EvaluationReceiptV1 {
-            evaluator_version: NASA9_EVALUATOR_VERSION_V1,
+            evaluator_version: self.caloric_reference().map_or(
+                NASA9_EVALUATOR_VERSION_V1, Nasa9CaloricReferenceV1::evaluator_version,
+            ),
             fs_math_version: fs_math::VERSION,
             gas_constant_bits: UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K.to_bits(),
             species: self.species.clone(),
@@ -888,6 +916,7 @@ impl Nasa9StandardStateModelV1 {
             region_max_bits: region.temperature_max().value().to_bits(),
             coefficient_bits: region.coefficients.map(f64::to_bits),
             card_identity: region.card_identity,
+            caloric_reference: self.caloric_reference.clone(),
         };
         Ok(Nasa9EvaluationV1 {
             temperature,
@@ -978,9 +1007,15 @@ pub struct Nasa9EvaluationReceiptV1 {
     region_max_bits: u64,
     coefficient_bits: [u64; 9],
     card_identity: [u8; 32],
+    caloric_reference: Option<std::sync::Arc<Nasa9CaloricReferenceV1>>,
 }
 
 impl Nasa9EvaluationReceiptV1 {
+    /// Complete explicit correction policy and all original source identities.
+    #[must_use]
+    pub fn caloric_reference(&self) -> Option<&Nasa9CaloricReferenceV1> {
+        self.caloric_reference.as_deref()
+    }
     /// Evaluator/operation-tree version.
     #[must_use]
     pub const fn evaluator_version(&self) -> u32 {
@@ -1102,6 +1137,7 @@ impl Nasa9EvaluationV1 {
 
 #[cfg(test)]
 mod tests {
+    mod caloric;
     mod enthalpy;
     mod entropy;
     use super::*;

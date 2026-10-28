@@ -43,16 +43,12 @@ pub(crate) fn accumulate(sum: &mut f64, correction: &mut f64, value: f64) {
 impl Nasa9StandardStateModelV1 {
     /// Molar standard-state entropy change between two source-supported endpoints.
     ///
-    /// This is the difference of the same NASA-9 laws as `evaluate`, with
-    /// polynomial differences factored and the logarithmic ratio evaluated
-    /// directly. A common reference entropy cancels before floating-point
-    /// addition, including for very small temperature changes.
+    /// Raw models retain original region selection and reference jumps.
+    /// Explicitly reconciled models integrate Cp/T across each crossed region,
+    /// retaining small changes through a continuous caloric seam. A common
+    /// entropy reference cancels before floating-point addition.
     ///
-    /// Each endpoint uses the original region selection, including the upper
-    /// region at shared boundaries. Distinct region coefficients and entropy
-    /// reference offsets are retained. Endpoint support does not establish
-    /// continuity or support of the intervening temperature path.
-    ///
+    /// Raw endpoint support does not prove continuous source-path coverage.
     /// Fixed operation order, no allocation on success. Units: J/(mol K).
     pub fn molar_entropy_change(
         &self,
@@ -72,75 +68,19 @@ impl Nasa9StandardStateModelV1 {
         if t0 == t1 {
             return Ok(MolarEntropyV1::new(0.0));
         }
-        // One canonical direction fixes cancellation and bit-exact reversal.
         let (lo, hi, sign) = if t1 > t0 {
             (t0, t1, 1.0)
         } else {
             (t1, t0, -1.0)
         };
-        let lower = self
-            .region_for_temperature(lo)
-            .expect("validated lower endpoint")
-            .1
-            .coefficients;
-        let upper = self
-            .region_for_temperature(hi)
-            .expect("validated upper endpoint")
-            .1
-            .coefficients;
-        let weights = |a: [f64; 9]| {
-            [
-                -0.5 * a[0],
-                -a[1],
-                a[2],
-                a[3],
-                a[4] / 2.0,
-                a[5] / 3.0,
-                a[6] / 4.0,
-                a[8],
-            ]
+        let (first, lower) = self.region_for_temperature(lo).expect("validated lower endpoint");
+        let (last, upper) = self.region_for_temperature(hi).expect("validated upper endpoint");
+        let value = sign * if self.caloric_reference().is_some() && first != last {
+            self.integrate_caloric_regions(first, last, lo, hi,
+                |coefficients, start, end| entropy_difference(coefficients, coefficients, start, end))
+        } else {
+            entropy_difference(lower.coefficients, upper.coefficients, lo, hi)
         };
-        let lower = weights(lower);
-        let upper = weights(upper);
-        let inverse_lo = 1.0 / lo;
-        let inverse_hi = 1.0 / hi;
-        let lo2 = lo * lo;
-        let hi2 = hi * hi;
-        let delta = hi - lo;
-        let inverse_delta = -(delta / hi) / lo;
-        let basis = [
-            inverse_lo * inverse_lo,
-            inverse_lo,
-            fs_math::det::ln(lo),
-            lo,
-            lo2,
-            lo2 * lo,
-            lo2 * lo2,
-            1.0,
-        ];
-        let differences = [
-            inverse_delta * (inverse_lo + inverse_hi),
-            inverse_delta,
-            log_ratio(hi, lo),
-            delta,
-            delta * (lo + hi),
-            delta * (lo2 + lo * hi + hi2),
-            (delta * (lo + hi)) * (lo2 + hi2),
-            0.0,
-        ];
-        let mut sum = 0.0;
-        let mut correction = 0.0;
-        for i in 0..8 {
-            // s1-s0 = (a1-a0)*basis(T0) + a1*(basis(T1)-basis(T0)).
-            // Skip exact zeros, so an inactive high power cannot manufacture NaN.
-            if upper[i] != lower[i] {
-                accumulate(&mut sum, &mut correction, (upper[i] - lower[i]) * basis[i]);
-            }
-            if upper[i] != 0.0 && differences[i] != 0.0 {
-                accumulate(&mut sum, &mut correction, upper[i] * differences[i]);
-            }
-        }
-        let value = sign * UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * sum;
         if !value.is_finite() {
             return Err(ThermochemErrorV1::NonFiniteEvaluation {
                 property: Nasa9PropertyV1::Entropy,
@@ -149,6 +89,47 @@ impl Nasa9StandardStateModelV1 {
         }
         Ok(MolarEntropyV1::new(value))
     }
+}
+
+// Original polynomial-difference arithmetic, shared by raw endpoint differences
+// and the source Cp/T integral on each reconciled temperature segment.
+fn entropy_difference(lower: [f64; 9], upper: [f64; 9], lo: f64, hi: f64) -> f64 {
+    let weights = |a: [f64; 9]| {
+        [-0.5 * a[0], -a[1], a[2], a[3], a[4] / 2.0, a[5] / 3.0, a[6] / 4.0, a[8]]
+    };
+    let lower = weights(lower);
+    let upper = weights(upper);
+    let inverse_lo = 1.0 / lo;
+    let inverse_hi = 1.0 / hi;
+    let lo2 = lo * lo;
+    let hi2 = hi * hi;
+    let delta = hi - lo;
+    let inverse_delta = -(delta / hi) / lo;
+    let basis = [
+        inverse_lo * inverse_lo, inverse_lo, fs_math::det::ln(lo),
+        lo, lo2, lo2 * lo, lo2 * lo2, 1.0,
+    ];
+    let differences = [
+        inverse_delta * (inverse_lo + inverse_hi),
+        inverse_delta,
+        log_ratio(hi, lo),
+        delta,
+        delta * (lo + hi),
+        delta * (lo2 + lo * hi + hi2),
+        (delta * (lo + hi)) * (lo2 + hi2),
+        0.0,
+    ];
+    let mut sum = 0.0;
+    let mut correction = 0.0;
+    for i in 0..8 {
+        if upper[i] != lower[i] {
+            accumulate(&mut sum, &mut correction, (upper[i] - lower[i]) * basis[i]);
+        }
+        if upper[i] != 0.0 && differences[i] != 0.0 {
+            accumulate(&mut sum, &mut correction, upper[i] * differences[i]);
+        }
+    }
+    UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * sum
 }
 
 impl FrozenIdealGasMixtureModelV1 {
