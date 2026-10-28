@@ -9,6 +9,8 @@ use fs_conduction::{
     ThermalInterfaces,
 };
 use fs_exec::Cx;
+use fs_conduction::radiation::GrayDiffuseEnclosure;
+use fs_conduction::transient::enthalpy::enclosure::EnthalpyEnclosureReport;
 use fs_matdb::SelectionPolicy;
 use fs_project::ProjectSpec;
 use fs_project::spec::{ConductionSetup, ThermalBoundaryCondition};
@@ -34,6 +36,25 @@ struct SurfaceSource {
 }
 
 impl LoweredRadiation {
+    pub(super) fn is_enclosure(&self) -> bool {
+        self.enclosure.is_some()
+    }
+
+    pub(super) fn surface_count(&self) -> usize {
+        self.surfaces.len()
+    }
+
+    /// Reuse the steady producer's exact face partition and area admission.
+    pub(super) fn bind_enclosure(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+    ) -> Result<Option<GrayDiffuseEnclosure>, ConductionError> {
+        self.enclosure.as_ref()
+            .map(|_| enclosure::bind(cx, problem, self))
+            .transpose()
+    }
+
     /// Immutable user-facing identities in the same order as the bound patches.
     pub(super) fn surface_labels(&self) -> impl ExactSizeIterator<Item = (&str, &str)> {
         self.surfaces
@@ -143,6 +164,20 @@ fn resolve_emissivity(
     ))
 }
 
+/// Last accepted total-enthalpy enclosure endpoint. The model is bound once
+/// per spatial rung; only endpoint evidence is retained between time steps.
+pub(super) struct EnclosureEndpoint {
+    pub(super) combined_boundary: fs_conduction::ThermalBoundary,
+    pub(super) convective_robin_fluxes: Vec<RobinFlux>,
+    pub(super) convective_out_w: f64,
+    pub(super) report: EnthalpyEnclosureReport,
+    pub(super) dt_s: f64,
+    pub(super) physical_residual_norm_j: f64,
+    pub(super) physical_residual_tolerance_j: f64,
+    pub(super) physical_energy_residual_j: f64,
+    pub(super) decomposition_residual_w: f64,
+}
+
 pub(super) struct SolidSolution {
     pub(super) conduction: ConductionSolution,
     convective_fluxes: Option<Vec<RobinFlux>>,
@@ -185,6 +220,26 @@ impl SolidSolution {
             enclosure: None,
             combined_boundary: Some(combined_boundary),
         }
+    }
+
+    pub(super) fn from_enclosure_endpoint(
+        conduction: ConductionSolution,
+        model: GrayDiffuseEnclosure,
+        endpoint: EnclosureEndpoint,
+    ) -> Self {
+        let enclosure = enclosure::EnclosureResult::from_enthalpy(model, &endpoint);
+        Self {
+            conduction,
+            convective_fluxes: Some(endpoint.convective_robin_fluxes),
+            convective_out: Some(endpoint.convective_out_w),
+            radiation: None,
+            enclosure: Some(enclosure),
+            combined_boundary: Some(endpoint.combined_boundary),
+        }
+    }
+
+    pub(super) fn enclosure_model(&self) -> Option<&GrayDiffuseEnclosure> {
+        self.enclosure.as_ref().map(enclosure::EnclosureResult::model)
     }
 
     /// Retain the producer's immutable laws, never infer emissivity from a

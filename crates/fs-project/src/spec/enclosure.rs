@@ -78,12 +78,25 @@ pub(super) fn validate(
             "select one radiation model; no reservoir declaration may be silently ignored",
         ));
     }
-    if setup.transient.is_some() {
-        out.push(violation(
-            "project-enclosure-radiation-transient",
-            "closed-enclosure radiation is currently a steady native model",
-            "use the steady enclosure path; transient enclosure storage and adjoints need their own admitted coupling",
-        ));
+    if let Some(time) = &setup.transient {
+        if time.enthalpy.is_none() {
+            out.push(violation(
+                "project-enclosure-radiation-transient",
+                "transient enclosure exchange has no total-enthalpy storage declaration",
+                "declare total-enthalpy storage with explicit reference density and phase charts; capacity-only enclosure storage is not connected",
+            ));
+        }
+        if setup.boundaries.iter().any(|boundary| matches!(
+            boundary.condition,
+            ThermalBoundaryCondition::NaturalConvection { .. }
+                | ThermalBoundaryCondition::AirflowConvection { .. }
+        )) {
+            out.push(violation(
+                "project-enclosure-radiation-transient-boundary",
+                "transient enclosure exchange contains natural or transported-air convection",
+                "use prescribed positive convection until the complete transient enclosure/boundary feedback is connected",
+            ));
+        }
     }
     let n = enclosure.surfaces.len();
     if !(2..=64).contains(&n) {

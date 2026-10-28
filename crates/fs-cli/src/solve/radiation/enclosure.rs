@@ -11,6 +11,7 @@ use fs_conduction::radiation::{
 };
 use fs_conduction::{ConductionError, ConductionProblem, SolveConfig, ThermalInterfaces};
 use fs_exec::Cx;
+use fs_conduction::transient::enthalpy::enclosure::EnthalpyEnclosureReport;
 use fs_project::spec::{ConductionSetup, ThermalBoundaryCondition};
 use fs_project::{ConductionEnclosure, EnclosureViewFactorEvidence, ProjectSpec};
 
@@ -25,15 +26,26 @@ pub(super) struct LoweredEnclosure {
 
 pub(super) struct EnclosureResult {
     model: GrayDiffuseEnclosure,
-    report: CoupledRadiationReport,
+    report: EnclosureReport,
     decomposition_residual_w: f64,
+}
+
+enum EnclosureReport {
+    Steady(CoupledRadiationReport),
+    Enthalpy {
+        radiation: EnthalpyEnclosureReport,
+        dt_s: f64,
+        residual_j: f64,
+        threshold_j: f64,
+        energy_residual_j: f64,
+    },
 }
 
 fn bad(what: impl Into<String>) -> SolveRefusal {
     conduction_error(
         "cli-solve-conduction-enclosure",
         what,
-        "declare a steady closed enclosure with sourced emissivities, explicit ordered view factors, and positive convective traces; inspect its coupling and heat tolerances",
+        "declare a closed enclosure with sourced emissivities, explicit ordered view factors, and positive convective traces; transient storage requires the total-enthalpy model and prescribed convection",
     )
 }
 
@@ -67,22 +79,47 @@ pub(super) fn lower(
             "ambient-reservoir and closed-enclosure radiation cannot own the same native model",
         ));
     }
-    if setup.transient.is_some() {
-        return Err(bad(
-            "the native enclosure path requires steady storage; transient enclosure trajectories are not yet connected",
-        ));
+    if let Some(time) = &setup.transient {
+        if time.enthalpy.is_none() {
+            return Err(bad(
+                "native transient enclosure exchange requires declared total-enthalpy storage; capacity-only storage is not connected",
+            ));
+        }
+        if setup.boundaries.iter().any(|boundary| matches!(
+            boundary.condition,
+            ThermalBoundaryCondition::NaturalConvection { .. }
+                | ThermalBoundaryCondition::AirflowConvection { .. }
+        )) || spec.outputs.iter().flatten().any(|output| output.name.contains("adjoint")) {
+            return Err(bad(
+                "transient enclosure exchange currently requires prescribed convection and forward outputs; natural/airflow coupling and history adjoints need the complete enclosure feedback",
+            ));
+        }
     }
     if spec
         .solver
         .as_ref()
         .is_some_and(|solver| solver.fidelity == "adaptive")
         || spec.outputs.iter().flatten().any(|output| {
-            output.name.contains("adjoint") || output.name == "temperature-volume-mean-bound"
+            output.name == "temperature-volume-mean-bound"
         })
     {
         return Err(bad(
-            "enclosure adaptive goals, adjoints and continuum mean bounds require the complete enclosure tangent; a frozen radiative load is not that model",
+            "enclosure adaptive goals and continuum mean bounds require their own complete enclosure error estimator; a frozen radiative load is not that model",
         ));
+    }
+    let mut adjoint = false;
+    for output in spec.outputs.iter().flatten().filter(|output| output.name.contains("adjoint")) {
+        if !matches!(output.name.as_str(),
+            "temperature-max-adjoint" | "temperature-max-contact-adjoint"
+                | "temperature-max-boundary-adjoint" | "temperature-max-contact-boundary-adjoint"
+                | "temperature-volume-mean-adjoint")
+        {
+            return Err(bad("the requested enclosure adjoint is not a supported native steady objective"));
+        }
+        adjoint = true;
+    }
+    if adjoint {
+        super::super::nominal_adjoint::requested(spec)?;
     }
     if !(2..=64).contains(&declaration.surfaces.len()) {
         return Err(bad("a native enclosure needs 2..=64 ordered surfaces"));
@@ -161,7 +198,7 @@ fn evidence(declaration: &ConductionEnclosure) -> ViewFactorEvidence {
 
 /// Bind by the existing boundary's exact topological faces, never by a second
 /// geometric selector or a user-supplied area. Rebinding happens on every mesh.
-fn bind(
+pub(super) fn bind(
     cx: &Cx<'_>,
     problem: ConductionProblem<'_>,
     lowering: &LoweredRadiation,
@@ -286,13 +323,34 @@ pub(super) fn solve(
         combined_boundary: Some(solved.combined_boundary),
         enclosure: Some(EnclosureResult {
             model,
-            report: solved.radiation,
+            report: EnclosureReport::Steady(solved.radiation),
             decomposition_residual_w: decomposition,
         }),
     })
 }
 
 impl EnclosureResult {
+    pub(super) fn model(&self) -> &GrayDiffuseEnclosure {
+        &self.model
+    }
+
+    pub(super) fn from_enthalpy(
+        model: GrayDiffuseEnclosure,
+        endpoint: &super::EnclosureEndpoint,
+    ) -> Self {
+        Self {
+            model,
+            report: EnclosureReport::Enthalpy {
+                radiation: endpoint.report.clone(),
+                dt_s: endpoint.dt_s,
+                residual_j: endpoint.physical_residual_norm_j,
+                threshold_j: endpoint.physical_residual_tolerance_j,
+                energy_residual_j: endpoint.physical_energy_residual_j,
+            },
+            decomposition_residual_w: endpoint.decomposition_residual_w,
+        }
+    }
+
     pub(super) fn receipt(
         &self,
         lowering: &LoweredRadiation,
@@ -303,8 +361,36 @@ impl EnclosureResult {
             .as_ref()
             .ok_or_else(|| bad("enclosure receipt lost its declaration"))?
             .declaration;
-        let applied = &self.report.radiosity;
-        let actual = &self.report.equilibrium.nonlinear_radiosity;
+        let (actual, applied_heat, applied_closure, detail) = match &self.report {
+            EnclosureReport::Steady(report) => (
+                &report.equilibrium.nonlinear_radiosity,
+                report.radiosity.net_outward_heat_w.as_slice(),
+                report.radiosity.enclosure_energy_closure_w,
+                format!(
+                    "\"solid_solves\":{},\"surface_iterations\":{},\"equilibrium_checks\":{},\"max_temperature_change_k\":{},\"max_heat_mismatch_w\":{},\"nonlinear_residual_w\":{},\"nonlinear_residual_threshold_w\":{}",
+                    report.iterations + 1, report.iterations, report.equilibrium_checks,
+                    num(report.surface_update_history_k.last().copied().unwrap_or(0.0))?,
+                    num(report.equilibrium.max_patch_heat_mismatch_w)?,
+                    num(report.equilibrium.residual_w)?,
+                    num(report.equilibrium.residual_threshold_w)?,
+                ),
+            ),
+            EnclosureReport::Enthalpy {
+                radiation, dt_s, residual_j, threshold_j, energy_residual_j,
+            } => (
+                &radiation.radiosity,
+                radiation.applied_heat_w.as_slice(),
+                radiation.applied_heat_w.iter().sum(),
+                format!(
+                    "\"time_integration\":\"backward-euler-total-enthalpy\",\"time_step_s\":{},\"solid_solves\":{},\"solid_iterations\":{},\"krylov_iterations\":{},\"max_heat_mismatch_w\":{},\"nonlinear_residual_j\":{},\"nonlinear_residual_threshold_j\":{},\"nonlinear_residual_w\":{},\"nonlinear_residual_threshold_w\":{},\"physical_energy_residual_j\":{}",
+                    num(*dt_s)?, radiation.iterations, radiation.solid_iterations,
+                    radiation.krylov_iterations, num(radiation.max_heat_mismatch_w)?,
+                    num(*residual_j)?, num(*threshold_j)?,
+                    num(*residual_j / *dt_s)?, num(*threshold_j / *dt_s)?,
+                    num(*energy_residual_j)?,
+                ),
+            ),
+        };
         let mut rows = Vec::with_capacity(self.model.surfaces().len());
         for (i, (surface, source)) in self
             .model
@@ -321,7 +407,7 @@ impl EnclosureResult {
                 json_string(&source.emissivity.receipt().content_hash().to_hex()),
                 num(source.emissivity.value())?, num(source.emissivity.temperature_k())?,
                 num(surface.area_m2())?, num(actual.surface_temperatures_k[i])?,
-                num(applied.net_outward_heat_w[i])?, num(actual.net_outward_heat_w[i])?,
+                num(applied_heat[i])?, num(actual.net_outward_heat_w[i])?,
                 num(actual.radiosity_w_m2[i])?, num(actual.irradiation_w_m2[i])?,
             ));
         }
@@ -352,27 +438,15 @@ impl EnclosureResult {
             ),
         };
         Ok(format!(
-            "{{\"model\":\"closed-gray-diffuse-enclosure\",\"surfaces\":[{}],\"view_factors\":[{}],\"view_factor_identity\":{},\"view_factor_evidence\":{},\"max_reciprocity_residual\":{},\"solid_solves\":{},\"surface_iterations\":{},\"equilibrium_checks\":{},\"max_temperature_change_k\":{},\"max_heat_mismatch_w\":{},\"nonlinear_residual_w\":{},\"nonlinear_residual_threshold_w\":{},\"radiosity_residual_w_m2\":{},\"convective_out_w\":{},\"radiative_out_w\":{},\"nonlinear_radiative_out_w\":{},\"decomposition_residual_w\":{},\"controls\":{{\"max_iterations\":{},\"temperature_tolerance_k\":{},\"heat_tolerance_w\":{},\"relaxation\":{},\"closure_tolerance\":{},\"reciprocity_relative_tolerance\":{}}},\"authority\":\"Estimated\",\"no_claim\":{}}}",
+            "{{\"model\":\"closed-gray-diffuse-enclosure\",\"surfaces\":[{}],\"view_factors\":[{}],\"view_factor_identity\":{},\"view_factor_evidence\":{},\"max_reciprocity_residual\":{},{detail},\"radiosity_residual_w_m2\":{},\"convective_out_w\":{},\"radiative_out_w\":{},\"nonlinear_radiative_out_w\":{},\"decomposition_residual_w\":{},\"controls\":{{\"max_iterations\":{},\"temperature_tolerance_k\":{},\"heat_tolerance_w\":{},\"relaxation\":{},\"closure_tolerance\":{},\"reciprocity_relative_tolerance\":{}}},\"authority\":\"Estimated\",\"no_claim\":{}}}",
             rows.join(","),
             factors.join(","),
             json_string(&self.model.view_factors().identity().to_hex()),
             evidence,
             num(self.model.view_factors().max_reciprocity_residual())?,
-            self.report.iterations + 1,
-            self.report.iterations,
-            self.report.equilibrium_checks,
-            num(self
-                .report
-                .surface_update_history_k
-                .last()
-                .copied()
-                .unwrap_or(0.0))?,
-            num(self.report.equilibrium.max_patch_heat_mismatch_w)?,
-            num(self.report.equilibrium.residual_w)?,
-            num(self.report.equilibrium.residual_threshold_w)?,
             num(actual.linear_residual_max_w_m2)?,
             num(convective_out_w)?,
-            num(applied.enclosure_energy_closure_w)?,
+            num(applied_closure)?,
             num(actual.enclosure_energy_closure_w)?,
             num(self.decomposition_residual_w)?,
             declaration.max_iterations,
@@ -386,4 +460,4 @@ impl EnclosureResult {
     }
 }
 
-const SCOPE: &str = "Steady card-backed opaque gray-diffuse closed-enclosure exchange between exact native P1 boundary traces. User-declared view factors are checked for row closure and actual-area reciprocity on every mesh, not generated or geometrically validated. The shared radiosity/conduction owner checks the full fresh nonlinear free residual; original convection alone heats air, while mutual radiation is internal exchange. Emissivity is frozen at its selected material-card query and retains its source validity. Surface names and matrix order are explicit. No transient enclosure trajectory, enclosure adjoint, continuum error bound, shadowing reconstruction, participating medium, temperature-dependent emissivity or experimental validation is claimed. Solid-solves counts the initial field and outer responses of this retained enclosure solve; nested natural/air iteration counts remain in their own receipts.";
+const SCOPE: &str = "Card-backed opaque gray-diffuse closed-enclosure exchange between exact native P1 boundary traces. User-declared view factors are checked for row closure and actual-area reciprocity on every mesh, not generated or geometrically validated. The shared owner checks the full fresh nonlinear residual; original convection alone exchanges heat with reservoirs or air, while mutual radiation is internal. Emissivity is frozen at its selected material-card query and retains its source validity. Surface names and matrix order are explicit. Total-enthalpy endpoints keep the same old physical enthalpy in every trial and report complete storage/heat residuals in joules; their separate trajectory receipt retains both time grids and all trial work. This receipt describes the accepted primal endpoint; requested steady derivatives have their own complete-transpose receipt. No continuum error bound, shadowing reconstruction, participating medium, temperature-dependent emissivity or experimental validation is claimed. Solid-solves counts work in this retained enclosure endpoint; nested natural/air iteration counts remain in their own receipts.";

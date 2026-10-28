@@ -11,6 +11,8 @@ mod radiation_owner;
 mod fan_speed;
 #[path = "nominal_adjoint/transient.rs"]
 mod transient;
+#[path = "nominal_adjoint/enclosure.rs"]
+mod enclosure;
 
 fn request(project: &mut fs_project::ProjectSpec) {
     project.outputs.get_or_insert_with(Vec::new).push(fs_project::spec::OutputRequest {

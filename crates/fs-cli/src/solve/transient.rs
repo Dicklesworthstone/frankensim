@@ -637,7 +637,7 @@ pub(super) fn solve(
             .cooling
             .as_ref()
             .and_then(|cooling| cooling.conduction.as_ref())
-            .is_some_and(|setup| setup.radiation.is_some())
+            .is_some_and(|setup| setup.radiation.is_some() || setup.enclosure_radiation.is_some())
     {
         return Err(bad(
             "the transient radiation declaration has no matching material-card lowering",

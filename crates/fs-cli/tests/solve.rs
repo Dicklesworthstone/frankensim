@@ -43,6 +43,8 @@ mod transient_product;
 
 #[path = "solve/transient_enthalpy.rs"]
 mod transient_enthalpy;
+#[path = "solve/transient_enclosure.rs"]
+mod transient_enclosure;
 #[path = "solve/transient_enthalpy_radiation.rs"]
 mod transient_enthalpy_radiation;
 #[path = "solve/transient_enthalpy_natural.rs"]
@@ -1136,7 +1138,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 83,
+        SOLVE_DRIVER_VERSION, 84,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 

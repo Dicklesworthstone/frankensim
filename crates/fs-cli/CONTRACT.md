@@ -2465,19 +2465,53 @@ mismatch, radiosity residual and the convection/radiation decomposition.
 
 The native report exposes the radiation model, and QoI propagation retains
 the existing radiation-on/off model sensitivity without turning that
-comparison into an omitted-physics bound. Temperature-dependent emissivity,
-transient enclosure trajectories, enclosure adjoints and adaptive goals, and
-continuum mean bounds remain unsupported. Those requests refuse explicitly;
-the driver never performs a frozen-enclosure algebraic goal correction or
-presents its fixed-load linear roundoff calculation as an enclosure bound.
-All numerical results remain Estimated.
+comparison into an omitted-physics bound. Driver 84 also connects native
+total-enthalpy trajectories and complete steady enclosure derivatives.
+
+With declared total-enthalpy storage and prescribed positive convection,
+the native driver binds the same exact enclosure on every spatial rung and
+uses `HeterogeneousEnthalpyBackwardEuler::advance_with_enclosure_radiation`.
+The same accepted old enthalpy is supplied to every trial. Both independent
+time grids include authored workload events, preserve heterogeneous
+conductivity, phase multipliers and finite-resistance contact, and count all
+radiation/Newton/Krylov work. History advances only after the complete fresh
+residual and storage/heat balance pass. Original convection and prescribed
+Neumann heat remain external; mutual exchange remains internal. The final
+enclosure receipt retains patch heat, reflected radiosity, exact view-factor
+identity and physical residuals in joules and watts. The existing spatial
+ladder shares one forward-step allowance across all complete trajectories.
+
+Steady `temperature-max-adjoint`, contact variants and the volume-mean
+objective use the shared `pullback_gray_diffuse_enclosure` owner. The lab
+and native paths share one reflected-radiosity transpose, which feeds the
+complete cross-patch tangent into the production material/contact Jacobian.
+Original convection controls are restored after the shifted-reference
+composition; emissivity partials include reflection. Existing power,
+convection, material and contact rows use the same complete dual, and the
+existing nominal-adjoint UQ mean control can consume its supported physical
+coordinates without changing probability children.
+
+Capacity-only enclosure trajectories, transient enclosure adjoints,
+transient natural/airflow coupling, steady enclosure derivatives through
+natural/airflow feedback or independently varied prescribed temperatures,
+temperature-dependent emissivity, adaptive enclosure goals and continuum
+mean bounds retain explicit refusals. The driver never performs a
+frozen-enclosure algebraic goal correction or presents its fixed-load linear
+roundoff calculation as an enclosure bound. Results remain Estimated.
 
 G1/G3/G5 regressions in `tests/solve/radiation_product/enclosure_product.rs`
 use an independent two-gray-surface exchange formula, original convection
 and source-power balance, actual spatial refinement, deterministic retained
 fields/reports, and unequal-area reciprocity refusal. The manufactured
 two-patch matrix exercises algebraic enclosure exchange and does not claim
-finite-geometry view-factor validation.
+finite-geometry view-factor validation. Additional regressions in
+`tests/solve/transient_enclosure.rs` cover original-convection/storage
+balance, an independent latent-plateau energy oracle, event-aligned workloads,
+cached deterministic replay and shared spatial/time work limits.
+`tests/native_uncertainty/nominal_adjoint/enclosure.rs` exercises native
+max/mean physical perturbations and reuse by nominal-control probability
+studies. Shared numerical regressions check both emissivities, nonuniform
+source directions, signed goals and the full nonsymmetric transpose.
 
 The runnable native declaration is
 `data/reference-project/cooling-enclosure.fsim`. It uses `plate.stl` and the

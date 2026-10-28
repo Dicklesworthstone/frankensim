@@ -32,6 +32,7 @@ mod air_inlet;
 mod contractions;
 mod contact_controls;
 mod coupled_thermal;
+mod enclosure_feedback;
 pub(in crate::solve) mod fan_speed;
 mod material_controls;
 mod mixed_feedback;
@@ -78,6 +79,7 @@ fn zeros(n: usize) -> Result<Vec<f64>, SolveRefusal> {
 /// An unsupported state law invalidates ALL contractions, not only its own
 /// parameter row. Never fall back to a frozen Robin power derivative.
 fn admit_state_laws(spec: &ProjectSpec) -> Result<(), SolveRefusal> {
+    enclosure_feedback::admit(spec)?;
     let Some(setup) = spec.cooling.as_ref().and_then(|c| c.conduction.as_ref()) else { return Ok(()); };
     for row in &setup.boundaries {
         match &row.condition {
@@ -149,7 +151,9 @@ pub(super) fn extract(
     let data = solved.adjoint_data.as_ref().ok_or_else(|| bad("final operator was not retained"))?;
     let setup = spec.cooling.as_ref().and_then(|c| c.conduction.as_ref())
         .ok_or_else(|| bad("missing conduction setup"))?;
-    if data.radiating_boundary.is_some() != setup.radiation.is_some() {
+    if data.radiating_boundary.is_some() != (setup.radiation.is_some() || setup.enclosure_radiation.is_some())
+        || data.enclosure.is_some() != setup.enclosure_radiation.is_some()
+    {
         return Err(bad("radiation intent differs from the retained native operator"));
     }
     let n = solved.mesh.vertex_count();
@@ -157,7 +161,8 @@ pub(super) fn extract(
     let count = |divisor| usize::try_from(memory / divisor).unwrap_or(usize::MAX);
     let fan_count = spec.cooling.as_ref().and_then(|c| c.fan_system.as_ref())
         .map_or(0, |system| system.banks.len());
-    let radiation_count = setup.radiation.as_ref().map_or(0, |r| r.surfaces.len());
+    let radiation_count = setup.radiation.as_ref().map_or(0, |r| r.surfaces.len())
+        + setup.enclosure_radiation.as_ref().map_or(0, |r| r.surfaces.len());
     let material_count = spec.materials.as_deref().unwrap_or(&[]).len();
     let contact_count = if contact_requested { spec.interface_cards.as_deref().unwrap_or(&[]).len() } else { 0 };
     let parameter_count = spec.power.as_deref().unwrap_or(&[]).len()
@@ -223,7 +228,12 @@ pub(super) fn extract(
     let mut radiation_rows = Vec::new();
     let mut inlet_rows = Vec::new();
     let (lambda, residual, dual_iterations, stability_iterations, response_iterations, mode) =
-    if !data.air_paths.is_empty()
+    if setup.enclosure_radiation.is_some() {
+        let result = enclosure_feedback::pullback(cx, spec, solved, &weights)?;
+        radiation_rows = result.radiation_rows;
+        (result.gradient.nodal_load, result.gradient.relative_residual, result.gradient.iterations,
+            None, None, "enclosure-full-radiosity-feedback")
+    } else if !data.air_paths.is_empty()
         && (has_natural || setup.radiation.is_some() || nonlinear_solid::needed(cx, problem)?) {
         let result = coupled_thermal::pullback(cx, spec, solved, &weights)?;
         inlet_rows = result.air_rows;
@@ -358,6 +368,9 @@ pub(super) fn extract(
         else if boundary_requested { format!("{} {}",
             SCOPE.replace(" and Dirichlet-temperature derivatives", ""), prescribed_controls::SCOPE) }
         else { SCOPE.to_string() };
+    let scope = if setup.enclosure_radiation.is_some() {
+        format!("{scope} {}", enclosure_feedback::SCOPE)
+    } else { scope };
     poll(cx)?;
     Ok(format!(concat!("{{\"schema\":\"frankensim.cli.nominal-adjoint.v1\",\"output\":{},",
         "{}\"mode\":{},",

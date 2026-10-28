@@ -241,7 +241,10 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// Version 82 connects native closed gray-diffuse enclosure radiation to the
 /// shared coupled solver, original convective air exchange and retained reports.
 /// Frozen-enclosure derivative and algebraic-bound claims remain refused.
-pub const SOLVE_DRIVER_VERSION: u32 = 83;
+/// Version 83 retains the forward sampled thermal peak on native trajectories.
+/// Version 84 connects reflected-enclosure exchange to native total-enthalpy
+/// trajectories and full steady max/mean adjoints consumed by nominal-control UQ.
+pub const SOLVE_DRIVER_VERSION: u32 = 84;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -1473,6 +1476,8 @@ struct RungAdjointData {
     radiating_boundary: Option<fs_conduction::ThermalBoundary>,
     /// Exact card-backed constitutive laws from the accepted radiation producer.
     radiation_patches: Vec<fs_conduction::AmbientRadiationPatch>,
+    /// Exact reflected-exchange model bound to this final mesh and card sources.
+    enclosure: Option<fs_conduction::radiation::GrayDiffuseEnclosure>,
     /// Original natural laws, pressure and feedback budget on this mesh.
     natural_goal: Option<natural::adaptive::NaturalGoal>,
 }
@@ -7072,6 +7077,7 @@ fn conduction_solve_receipt(
         };
         let radiation_fragment = solid.radiation_receipt(radiation.as_ref())?;
         let radiation_patches = solid.radiation_patches();
+        let enclosure = solid.enclosure_model().cloned();
         let radiating_boundary = solid.combined_boundary;
         let solution = solid.conduction;
         let interface_evidence = (!interface_resolution.pairs.is_empty())
@@ -7142,7 +7148,7 @@ fn conduction_solve_receipt(
                 interface_surfaces,
                 source,
                 materials: element_materials, fallback, linear, air_paths,
-                radiating_boundary, radiation_patches,
+                radiating_boundary, radiation_patches, enclosure,
                 natural_goal: if adaptive_requested && !natural_laws.is_empty() {
                     Some(natural::adaptive::NaturalGoal::new(natural_laws,
                         spec.envelope.as_ref().map_or(101_325.0, |e| e.pressure.value),

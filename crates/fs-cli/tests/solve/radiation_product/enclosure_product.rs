@@ -158,13 +158,13 @@ fn g3_g5_native_enclosure_rebinds_refined_traces_and_replays_exact_fields() {
 }
 
 #[test]
-fn g0_native_enclosure_refuses_frozen_adjoint_and_bad_mesh_reciprocity() {
+fn g0_native_enclosure_refuses_unsupported_bounds_and_bad_mesh_reciprocity() {
     let (cards, card) = emissivity_cards(&fixture_cards(), 0.85);
-    for kind in ["adjoint", "adaptive", "unequal-area"] {
+    for kind in ["mean-bound", "adaptive", "unequal-area"] {
         let mut spec = enclosure_project(&card);
         match kind {
-            "adjoint" => spec.outputs.as_mut().unwrap().push(OutputRequest {
-                name: "temperature-max-adjoint".into(),
+            "mean-bound" => spec.outputs.as_mut().unwrap().push(OutputRequest {
+                name: "temperature-volume-mean-bound".into(),
                 kind: "report".into(),
                 region: None,
             }),

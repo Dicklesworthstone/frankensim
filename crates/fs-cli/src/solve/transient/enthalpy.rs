@@ -16,9 +16,10 @@ use super::*;
 
 mod conductivity;
 mod conjugate;
+mod enclosure;
 mod natural;
 
-const NO_CLAIM: &str = "Estimated stationary P1 total-enthalpy transport with frozen reference mass and caller-declared equilibrium phase charts. Latent heat is stored only in specific enthalpy; no apparent heat capacity or additional latent account is used. Existing sourced conductivity, finite-resistance contact and prescribed temperature, Neumann and Robin boundaries remain active. A prescribed temperature requires a unique enthalpy on every incident phase chart; a latent plateau cannot silently select a phase fraction. The initial physical enthalpy remains unchanged, and prescribed-temperature reactions include its complete storage jump and all physical boundary heat exactly once. Declared regional conductivity multipliers use each element's mean nodal liquid mass fraction and the shared exact enthalpy tangent, including phase feedback on latent plateaus. The base tensor retains its temperature dependence and source support; multipliers are declared phenomenological data, not a volume-fraction mixture or validated material claim. Declared ambient radiation uses sourced area-mean gray patches; every trial retains the same old enthalpy and the accepted endpoint passes independent physical residual and nonlinear-heat energy checks. Declared natural convection evaluates the existing card at each candidate wall temperature and requires the complete physical residual and energy balance to close; exact equilibrium and out-of-domain Rayleigh states retain their refusals. Declared quasi-steady airflow uses the existing branch heat-exchange owner and checks the complete endpoint at updated air references, with actual air enthalpy gain, off-path convection and nonlinear radiation counted separately. Natural reservoirs on distinct boundary targets compose with forced-air transport: every air trial encloses the existing natural/radiation endpoint solve while retaining the same accepted old enthalpy. The final physical audit evaluates updated natural coefficients and air references at the counted state; natural-reservoir and radiation heat stay separate from the forced-convective flux sent to air. Every workload switch is represented on both independent time grids. The final field comes only from the completed fine grid. Its forward sampled peak includes the original regional initial enthalpy temperature and every accepted fine endpoint in the same requirement region, retaining the earliest exact tie. This observation needs no adjoint and does not bound temperatures between samples. The temperature difference is an assumed-first-order temporal estimate, not a spatial or continuous-time maximum bound; agreement on a latent plateau does not prove convergence of enthalpy or phase fraction. Supplied material-card identities and source text are attribution, not verification of the declared curves. Requested final or sampled-peak history derivatives revalidate the accepted fine endpoints and carry the shared exact specific-enthalpy transpose through prescribed convection, contact, complete declared ambient-radiation feedback, and the full natural-convection and streamwise-air boundary derivatives. Reported controls are initial enthalpy, delivered regional power, fixed reference density, independently declared prescribed-bath temperatures, per-surface absolute emissivity and radiation reservoir temperature, natural-reservoir and air-inlet temperatures, and independently controlled absolute fan-bank speed ratios. Fan controls include the retained hydraulic, convection-card and downstream-air parameter chain; unsupported coordinates keep explicit reasons. Independently varied prescribed boundaries sharing vertices are unsupported; a peak selected at the initial state has zero future bath sensitivity. Constitutive calibration and time-grid derivatives are fixed. Radiative controls hold query temperature and selected claim support fixed, retain source identities and restrict emissivity increments to feasible directions. Geometry, reference density and energetic internal variables are fixed during each forward trajectory. No material motion, density-driven expansion, phase kinetics, enclosure radiation, pointwise T^4 quadrature, airflow storage, time-varying fan dynamics is inferred.";
+const NO_CLAIM: &str = "Estimated stationary P1 total-enthalpy transport with frozen reference mass and caller-declared equilibrium phase charts. Latent heat is stored only in specific enthalpy; no apparent heat capacity or additional latent account is used. Existing sourced conductivity, finite-resistance contact and prescribed temperature, Neumann and Robin boundaries remain active. A prescribed temperature requires a unique enthalpy on every incident phase chart; a latent plateau cannot silently select a phase fraction. The initial physical enthalpy remains unchanged, and prescribed-temperature reactions include its complete storage jump and all physical boundary heat exactly once. Declared regional conductivity multipliers use each element's mean nodal liquid mass fraction and the shared exact enthalpy tangent, including phase feedback on latent plateaus. The base tensor retains its temperature dependence and source support; multipliers are declared phenomenological data, not a volume-fraction mixture or validated material claim. Declared ambient radiation uses sourced area-mean gray patches; every trial retains the same old enthalpy and the accepted endpoint passes independent physical residual and nonlinear-heat energy checks. Declared natural convection evaluates the existing card at each candidate wall temperature and requires the complete physical residual and energy balance to close; exact equilibrium and out-of-domain Rayleigh states retain their refusals. Declared quasi-steady airflow uses the existing branch heat-exchange owner and checks the complete endpoint at updated air references, with actual air enthalpy gain, off-path convection and nonlinear radiation counted separately. Natural reservoirs on distinct boundary targets compose with forced-air transport: every air trial encloses the existing natural/radiation endpoint solve while retaining the same accepted old enthalpy. The final physical audit evaluates updated natural coefficients and air references at the counted state; natural-reservoir and radiation heat stay separate from the forced-convective flux sent to air. Every workload switch is represented on both independent time grids. The final field comes only from the completed fine grid. Its forward sampled peak includes the original regional initial enthalpy temperature and every accepted fine endpoint in the same requirement region, retaining the earliest exact tie. This observation needs no adjoint and does not bound temperatures between samples. The temperature difference is an assumed-first-order temporal estimate, not a spatial or continuous-time maximum bound; agreement on a latent plateau does not prove convergence of enthalpy or phase fraction. Supplied material-card identities and source text are attribution, not verification of the declared curves. Requested final or sampled-peak history derivatives revalidate the accepted fine endpoints and carry the shared exact specific-enthalpy transpose through prescribed convection, contact, complete declared ambient-radiation feedback, and the full natural-convection and streamwise-air boundary derivatives. Reported controls are initial enthalpy, delivered regional power, fixed reference density, independently declared prescribed-bath temperatures, per-surface absolute emissivity and radiation reservoir temperature, natural-reservoir and air-inlet temperatures, and independently controlled absolute fan-bank speed ratios. Fan controls include the retained hydraulic, convection-card and downstream-air parameter chain; unsupported coordinates keep explicit reasons. Independently varied prescribed boundaries sharing vertices are unsupported; a peak selected at the initial state has zero future bath sensitivity. Constitutive calibration and time-grid derivatives are fixed. Radiative controls hold query temperature and selected claim support fixed, retain source identities and restrict emissivity increments to feasible directions. Geometry, reference density and energetic internal variables are fixed during each forward trajectory. Declared closed gray-diffuse enclosures compose with total-enthalpy storage and prescribed convection through the shared reflected-radiation owner; every spatial rung binds actual mesh areas and both time grids retain immutable old enthalpy across all trials. Fresh patch exchange is internal, and the complete physical residual and storage/heat balance must pass before history advances. Native enclosure trajectories do not supply natural/airflow feedback or history adjoints. No material motion, density-driven expansion, phase kinetics, pointwise T^4 quadrature, airflow storage, time-varying fan dynamics is inferred.";
 
 /// Storage-specific scope carried by the outer conduction report.
 pub(super) fn no_claim() -> &'static str {
@@ -87,6 +88,7 @@ struct GridResult {
     net_input_j: f64,
     maximum_energy_residual_j: f64,
     radiation: Option<RadiativeEndpoint>,
+    enclosure: Option<radiation::EnclosureEndpoint>,
     radiation_trials: usize,
     radiation_updates: usize,
     radiation_krylov_iterations: usize,
@@ -230,6 +232,7 @@ fn march(
     workload: Option<&Workload<'_>>,
     config: EnthalpyStepConfig,
     radiation: Option<&radiation::LoweredRadiation>,
+    enclosure: Option<&fs_conduction::radiation::GrayDiffuseEnclosure>,
     airflow: Option<&airflow::ConjugatePath>,
     natural: &[buoyancy::NaturalLaw],
     pressure_pa: f64,
@@ -254,6 +257,7 @@ fn march(
     let mut net_input_j = 0.0;
     let mut maximum_energy_residual_j = 0.0_f64;
     let mut last_radiation = None;
+    let mut last_enclosure = None;
     let mut radiation_trials = 0;
     let mut radiation_updates = 0;
     let mut radiation_krylov_iterations = 0;
@@ -391,6 +395,27 @@ fn march(
                 boundary: solved.applied_boundary,
             });
             solved.endpoint
+        } else if let Some(model) = enclosure {
+            let lowering = radiation.ok_or_else(|| bad("enclosure endpoint lost its radiation controls"))?;
+            let solved = enclosure::advance(
+                cx, engine, step_problem, interfaces, &old, dt, config,
+                model, lowering.config, deadline,
+            )?;
+            physical = Some((
+                solved.net_input_w,
+                solved.endpoint.physical_residual_norm_j,
+                solved.endpoint.physical_residual_tolerance_j,
+                solved.endpoint.physical_energy_residual_j,
+            ));
+            physical_dirichlet_in_w = Some(solved.physical_dirichlet_in_w);
+            radiation_fragment = format!(",\"radiation\":{}", solved.row);
+            radiation_trials += solved.endpoint.report.iterations;
+            radiation_updates += solved.endpoint.report.solid_iterations;
+            radiation_krylov_iterations += solved.endpoint.report.krylov_iterations;
+            maximum_radiation_energy_residual_j = maximum_radiation_energy_residual_j
+                .max(solved.endpoint.physical_energy_residual_j.abs());
+            last_enclosure = Some(solved.endpoint);
+            solved.conduction
         } else if let Some(lowering) = radiation {
             let solved = engine
                 .advance_with_ambient_radiation(
@@ -567,6 +592,7 @@ fn march(
         net_input_j,
         maximum_energy_residual_j,
         radiation: last_radiation,
+        enclosure: last_enclosure,
         radiation_trials,
         radiation_updates,
         radiation_krylov_iterations,
@@ -723,11 +749,15 @@ pub(super) fn solve(
             .and_then(|v| elements.checked_mul(2048).and_then(|e| v.checked_add(e)))
             .and_then(|v| {
                 lowering
-                    .patches
-                    .len()
+                    .surface_count()
                     .checked_mul(total_steps)
                     .and_then(|p| p.checked_mul(1024))
                     .and_then(|p| v.checked_add(p))
+            })
+            .and_then(|v| {
+                lowering.surface_count().checked_mul(lowering.surface_count())
+                    .and_then(|entries| entries.checked_mul(128))
+                    .and_then(|matrix| v.checked_add(matrix))
             })
             .ok_or_else(|| bad("enthalpy radiation boundary/receipt allowance overflows"))?
     } else {
@@ -896,6 +926,14 @@ pub(super) fn solve(
         }
         initial.push(storage.materials[id].initial_specific_enthalpy.value);
     }
+    let enclosure = radiation
+        .map(|lowering| lowering.bind_enclosure(cx, problem))
+        .transpose()
+        .map_err(lower)?
+        .flatten();
+    if enclosure.is_some() && (airflow.is_some() || !natural.is_empty() || objective.is_some()) {
+        return Err(bad("native transient enclosure requires prescribed convection and forward outputs"));
+    }
     let goal_region = ladder_target_region(spec, region_ids);
     if goal_region.is_none() {
         return Err(bad(
@@ -924,6 +962,7 @@ pub(super) fn solve(
         workload.as_ref(),
         config,
         radiation,
+        enclosure.as_ref(),
         airflow,
         natural,
         pressure_pa,
@@ -957,6 +996,7 @@ pub(super) fn solve(
         workload.as_ref(),
         config,
         radiation,
+        enclosure.as_ref(),
         airflow,
         natural,
         pressure_pa,
@@ -1035,8 +1075,13 @@ pub(super) fn solve(
         ""
     };
     let radiation_receipt = if let Some(lowering) = radiation {
+        let method = if lowering.is_enclosure() {
+            "implicit-closed-gray-diffuse-enclosure"
+        } else {
+            "implicit-area-mean-gray-radiation"
+        };
         format!(
-            ",\"radiation\":{{\"method\":\"implicit-area-mean-gray-radiation\",\"max_trials_per_step\":{max_solid_solves_per_step},\"max_trials_per_natural_iteration\":{},\"max_trials_per_boundary_iteration\":{},\"max_newton_updates_per_trial\":{},\"max_newton_updates_per_step\":{max_newton_updates_per_step},\"max_krylov_iterations_per_newton_update\":{},\"max_krylov_iterations_per_step\":{max_krylov_iterations_per_step},\"total_trial_limit\":{total_trial_limit},\"total_backtrack_evaluation_limit\":{total_backtrack_evaluation_limit},\"coarse_trials\":{},\"fine_trials\":{},\"total_trials\":{},\"coarse_newton_updates\":{},\"fine_newton_updates\":{},\"total_newton_updates\":{},\"coarse_krylov_iterations\":{},\"fine_krylov_iterations\":{},\"total_krylov_iterations\":{},\"maximum_physical_energy_residual_j\":{},\"history\":\"unchanged-physical-old-specific-enthalpy-in-every-trial\",\"nonlinear_detail\":\"step iteration fields, linear evidence and residual histories retain only the final inner solve; radiation counters include every trial across airflow and natural-convection iterations; step and final residuals and energy use the complete physical endpoint\"}}",
+            ",\"radiation\":{{\"method\":\"{method}\",\"max_trials_per_step\":{max_solid_solves_per_step},\"max_trials_per_natural_iteration\":{},\"max_trials_per_boundary_iteration\":{},\"max_newton_updates_per_trial\":{},\"max_newton_updates_per_step\":{max_newton_updates_per_step},\"max_krylov_iterations_per_newton_update\":{},\"max_krylov_iterations_per_step\":{max_krylov_iterations_per_step},\"total_trial_limit\":{total_trial_limit},\"total_backtrack_evaluation_limit\":{total_backtrack_evaluation_limit},\"coarse_trials\":{},\"fine_trials\":{},\"total_trials\":{},\"coarse_newton_updates\":{},\"fine_newton_updates\":{},\"total_newton_updates\":{},\"coarse_krylov_iterations\":{},\"fine_krylov_iterations\":{},\"total_krylov_iterations\":{},\"maximum_physical_energy_residual_j\":{},\"history\":\"unchanged-physical-old-specific-enthalpy-in-every-trial\",\"nonlinear_detail\":\"step iteration fields, linear evidence and residual histories retain only the final inner solve; radiation counters include every trial across airflow and natural-convection iterations; step and final residuals and energy use the complete physical endpoint\"}}",
             lowering.config.max_iterations,
             lowering.config.max_iterations,
             config.max_newton_iterations,
@@ -1243,15 +1288,19 @@ pub(super) fn solve(
         temperature: endpoint.temperature,
         report,
     };
-    let solution = match fine.radiation {
-        Some(endpoint) => radiation::SolidSolution::from_radiative_endpoint(
+    let solution = match (enclosure, fine.enclosure, fine.radiation) {
+        (Some(model), Some(endpoint), None) => {
+            radiation::SolidSolution::from_enclosure_endpoint(conduction, model, endpoint)
+        }
+        (None, None, Some(endpoint)) => radiation::SolidSolution::from_radiative_endpoint(
             conduction,
             endpoint.combined_boundary,
             endpoint.convective_robin_fluxes,
             endpoint.convective_out_w,
             endpoint.report,
         ),
-        None => radiation::SolidSolution::from_conduction(conduction),
+        (None, None, None) => radiation::SolidSolution::from_conduction(conduction),
+        _ => return Err(bad("the final enthalpy endpoint has inconsistent radiation evidence")),
     };
     Ok(NativeTransientResult {
         solution,
