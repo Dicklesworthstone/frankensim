@@ -68,6 +68,70 @@ fn galpha_reaches_the_static_response_under_a_constant_load() {
 }
 
 #[test]
+fn dense_galpha_retains_vibration_below_position_resolution() {
+    // G0: cos(h) rounds to one, while sin(h) and acceleration are resolved.
+    // Recovering a_next from q_next-q_old either loses the vibration or
+    // amplifies position roundoff by 1/h². The tiny-step case also exercises
+    // the acceleration matrix without an overflowing reciprocal h².
+    for h in [1e-8_f64, 1e-160] {
+        for rho in [0.0, 0.3, 0.5, 0.8, 1.0] {
+            let method = GeneralizedAlpha::new(&[1.0], &[0.0], &[1.0], 1, h, rho);
+            let (mut q, mut v, mut a) = ([1.0], [0.0], [-1.0]);
+            galpha_step(&method, &mut q, &mut v, &mut a, &[0.0]);
+            assert_eq!(q[0], 1.0, "rho={rho}, h={h}: unresolved position moved");
+            assert!(
+                (v[0] + h.sin()).abs() <= 8.0 * f64::EPSILON * h,
+                "rho={rho}, h={h}: lost resolved velocity {}",
+                v[0]
+            );
+            assert!(
+                (a[0] + h.cos()).abs() <= 8.0 * f64::EPSILON,
+                "rho={rho}, h={h}: lost resolved acceleration {}",
+                a[0]
+            );
+        }
+    }
+}
+
+#[test]
+fn dense_galpha_rigid_acceleration_is_independent_of_coordinate_origin() {
+    // G0/G3: a coupled mass matrix under a constant load has exactly constant
+    // acceleration. Translating the coordinates cannot change velocity or
+    // acceleration, even when q+h*v rounds at a very different scale.
+    let mass = [2.0, 0.25, 0.25, 3.0];
+    let h = 1e-7;
+    let acceleration = [2.0, -0.5];
+    let force = [3.875, -1.0];
+    for rho in [0.0, 0.3, 0.5, 0.8, 1.0] {
+        let method = GeneralizedAlpha::new(&mass, &[0.0; 4], &[0.0; 4], 2, h, rho);
+        let mut reference: Option<([f64; 2], [f64; 2])> = None;
+        for origin in [0.0, 1.0, 1e6] {
+            let (mut q, mut v, mut a) = ([origin; 2], [0.25, -0.125], acceleration);
+            for step in 1..=16 {
+                galpha_step(&method, &mut q, &mut v, &mut a, &force);
+                let t = step as f64 * h;
+                for axis in 0..2 {
+                    let initial_velocity = [0.25, -0.125][axis];
+                    let exact_q = origin + initial_velocity * t + 0.5 * acceleration[axis] * t * t;
+                    let exact_v = initial_velocity + acceleration[axis] * t;
+                    assert!(
+                        (q[axis] - exact_q).abs() <= 32.0 * f64::EPSILON * exact_q.abs().max(1.0)
+                    );
+                    assert!((v[axis] - exact_v).abs() <= 16.0 * f64::EPSILON);
+                    assert!((a[axis] - acceleration[axis]).abs() <= 8.0 * f64::EPSILON);
+                }
+            }
+            if let Some((expected_v, expected_a)) = reference {
+                assert_eq!(v.map(f64::to_bits), expected_v.map(f64::to_bits));
+                assert_eq!(a.map(f64::to_bits), expected_a.map(f64::to_bits));
+            } else {
+                reference = Some((v, a));
+            }
+        }
+    }
+}
+
+#[test]
 fn dense_galpha_rejects_malformed_systems_before_assembly() {
     let rejects = [
         std::panic::catch_unwind(|| GeneralizedAlpha::new(&[1.0], &[0.0], &[1.0], 0, 0.1, 0.8))

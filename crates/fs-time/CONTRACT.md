@@ -59,7 +59,16 @@ where claimed below.
   `galpha_step(ga, q, v, a, f_next)` — Chung–Hulbert: αm = (2ρ−1)/(ρ+1),
   αf = ρ/(ρ+1), γ = ½ − αm + αf, β = ¼(1 − αm + αf)²; one prefactored
   LU of the effective matrix per (M, C, K, h); `f_next` is the load at
-  t + (1−αf)h. Newmark correctors update (q, v, a) in place.
+  t + (1−αf)h. The dense lane solves for endpoint acceleration with
+  `(1−αm)M + (1−αf)γh C + (1−αf)βh² K` and updates position/velocity
+  by Newmark increments, retaining resolved vibration below absolute-position
+  resolution without dividing position differences by h². Fixed velocity and
+  acceleration history operators are preassembled; history assembly uses one
+  scratch n-vector and one fused traversal, plus the LU permutation scratch.
+  `tests/galpha_probe.rs` checks
+  tiny-step vibration and origin-independent rigid acceleration with a coupled
+  mass matrix, alongside order and forced static response. Position itself is
+  still ordinary `f64`; sub-ULP position accumulation is not claimed.
 - `galpha::{SecondOrderProblem, LinearSecondOrderSystem}` describe
   `M a + C v + r(q) = f`; the linear adapter binds the exact shared
   `fs_solver::LinearOp` interface for M/C/K, while nonlinear problems provide

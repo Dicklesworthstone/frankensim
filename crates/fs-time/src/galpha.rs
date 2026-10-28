@@ -22,13 +22,11 @@ pub mod second_order_adjoint;
 pub struct GeneralizedAlpha {
     n: usize,
     h: f64,
-    alpha_m: f64,
-    alpha_f: f64,
     beta: f64,
     gamma: f64,
-    m_mat: Vec<f64>,
-    c_mat: Vec<f64>,
     k_mat: Vec<f64>,
+    velocity_history: Vec<f64>,
+    acceleration_history: Vec<f64>,
     eff: Lu,
 }
 
@@ -64,25 +62,34 @@ impl GeneralizedAlpha {
         let alpha_f = rho_inf / (rho_inf + 1.0);
         let gamma = 0.5 - alpha_m + alpha_f;
         let beta = 0.25 * (1.0 - alpha_m + alpha_f) * (1.0 - alpha_m + alpha_f);
-        // Effective matrix: (1−αm)/(βh²)·M + (1−αf)γ/(βh)·C + (1−αf)·K.
-        let cm = (1.0 - alpha_m) / (beta * h * h);
-        let cc = (1.0 - alpha_f) * gamma / (beta * h);
-        let ck = 1.0 - alpha_f;
+        // Solve directly for endpoint acceleration. The displacement form
+        // magnifies roundoff by 1/h² when recovering acceleration from two
+        // absolute positions; its M*q/h² history also overwhelms small forces.
+        // A_eff = (1−αm)M + (1−αf)γh C + (1−αf)βh² K.
+        let cm = 1.0 - alpha_m;
+        let cc = (1.0 - alpha_f) * gamma * h;
+        let ck = (1.0 - alpha_f) * beta * h * h;
+        let kv = (1.0 - alpha_f) * h;
+        let ca = (1.0 - alpha_f) * (1.0 - gamma) * h;
+        let ka = (1.0 - alpha_f) * (0.5 - beta) * h * h;
         let mut eff = vec![0.0f64; matrix_len];
+        let mut velocity_history = vec![0.0; matrix_len];
+        let mut acceleration_history = vec![0.0; matrix_len];
         for i in 0..matrix_len {
             eff[i] = cm.mul_add(m_mat[i], cc.mul_add(c_mat[i], ck * k_mat[i]));
+            velocity_history[i] = kv.mul_add(k_mat[i], c_mat[i]);
+            acceleration_history[i] =
+                alpha_m.mul_add(m_mat[i], ca.mul_add(c_mat[i], ka * k_mat[i]));
         }
         let eff = lu(&eff, n).expect("generalized-alpha effective matrix must be nonsingular");
         GeneralizedAlpha {
             n,
             h,
-            alpha_m,
-            alpha_f,
             beta,
             gamma,
-            m_mat: m_mat.to_vec(),
-            c_mat: c_mat.to_vec(),
             k_mat: k_mat.to_vec(),
+            velocity_history,
+            acceleration_history,
             eff,
         }
     }
@@ -119,45 +126,31 @@ pub fn galpha_step(
     assert_eq!(v.len(), n, "generalized-alpha velocity state dimension");
     assert_eq!(a.len(), n, "generalized-alpha acceleration state dimension");
     assert_eq!(f_next.len(), n, "generalized-alpha forcing dimension");
-    let (h, am, af, beta, gamma) = (ga.h, ga.alpha_m, ga.alpha_f, ga.beta, ga.gamma);
-    // Predictors (Newmark form).
-    let cm = (1.0 - am) / (beta * h * h);
-    let cc = (1.0 - af) * gamma / (beta * h);
-    // RHS: the equilibrium load `F_{n+1−αf}` (= `f_next`, already the load at the
-    // intermediate time t+(1−αf)h per the API) enters with COEFFICIENT 1, plus
-    // the M/C history and the −αf·K·q stiffness history:
-    // r = f_next + M·[cm·q + (1−am)/(βh)·v + ((1−am)/(2β) − 1)·a]
-    //   + C·[cc·q + ((1−αf)γ/β − 1)·v + (1−αf)h·(γ/(2β) − 1)·a]
-    //   − αf·K·q.
-    let mv_c1 = (1.0 - am) / (beta * h);
-    let mv_c2 = (1.0 - am) / (2.0 * beta) - 1.0;
-    let cv_c1 = (1.0 - af) * gamma / beta - 1.0;
-    let cv_c2 = (1.0 - af) * h * (gamma / (2.0 * beta) - 1.0);
-    let mut tm = vec![0.0f64; n];
-    let mut tc = vec![0.0f64; n];
-    let mut tk = vec![0.0f64; n];
-    let mvec: Vec<f64> = (0..n)
-        .map(|i| cm.mul_add(q[i], mv_c1.mul_add(v[i], mv_c2 * a[i])))
-        .collect();
-    let cvec: Vec<f64> = (0..n)
-        .map(|i| cc.mul_add(q[i], cv_c1.mul_add(v[i], cv_c2 * a[i])))
-        .collect();
-    matvec(&ga.m_mat, n, &mvec, &mut tm);
-    matvec(&ga.c_mat, n, &cvec, &mut tc);
-    matvec(&ga.k_mat, n, q, &mut tk);
-    let mut rhs = vec![0.0f64; n];
+    let (h, beta, gamma) = (ga.h, ga.beta, ga.gamma);
+    // Eliminating the Newmark predictors gives
+    // r = f_next - K*q - [C + (1−αf)h K]*v
+    //     - [αm M + (1−αf)(1−γ)h C + (1−αf)(½−β)h² K]*a.
+    // The two history operators are assembled once with the factorization.
+    // History assembly uses one n-vector instead of six; the unchanged LU
+    // solve additionally allocates its permutation scratch.
+    let mut rhs = f_next.to_vec();
     for i in 0..n {
-        rhs[i] = f_next[i] + tm[i] + tc[i] - af * tk[i];
+        for j in 0..n {
+            let entry = i * n + j;
+            rhs[i] = (-ga.k_mat[entry]).mul_add(q[j], rhs[i]);
+            rhs[i] = (-ga.velocity_history[entry]).mul_add(v[j], rhs[i]);
+            rhs[i] = (-ga.acceleration_history[entry]).mul_add(a[j], rhs[i]);
+        }
     }
-    ga.eff.solve(&mut rhs); // rhs now holds q_{n+1}
-    // Newmark corrector for a_{n+1}, v_{n+1}.
+    ga.eff.solve(&mut rhs); // rhs now holds a_{n+1}
+    // Newmark increments retain velocity and acceleration even when the
+    // position increment rounds away relative to a prestressed equilibrium.
     for i in 0..n {
-        let dq = rhs[i] - q[i];
-        let a_new = (dq / (beta * h * h)) - v[i] / (beta * h) - (0.5 / beta - 1.0) * a[i];
-        let v_new = v[i] + h * ((1.0 - gamma) * a[i] + gamma * a_new);
-        q[i] = rhs[i];
-        v[i] = v_new;
-        a[i] = a_new;
+        let dq = h.mul_add(v[i], (h * h) * beta.mul_add(rhs[i], (0.5 - beta) * a[i]));
+        let dv = h * gamma.mul_add(rhs[i], (1.0 - gamma) * a[i]);
+        q[i] += dq;
+        v[i] += dv;
+        a[i] = rhs[i];
     }
 }
 
