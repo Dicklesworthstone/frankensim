@@ -9,11 +9,12 @@
 //! duplicated here.
 //!
 //! This bounded path has fixed supports, held referential nodal/body loads,
+//! optional uniform pressure on the complete closed current boundary,
 //! compressible isothermal hyperelasticity and conforming P1 tetrahedra.
 //! Nonlinear midpoint has a signed energy defect: it is reported and gated,
 //! never converted into physical heat. The optional mean-expansion source path
 //! prepares an isotropic thermal reference at a held temperature per element.
-//! No evolving heat equation, plasticity, contact, moving supports, follower
+//! No evolving heat equation, plasticity, contact, moving supports, open-patch
 //! pressure, mixed incompressible formulation or continuous-in-time
 //! nonintersection claim is made.
 
@@ -32,6 +33,7 @@ use fs_material::state_point::{
     ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point,
 };
 use fs_qty::Density;
+use fs_solid::hyper3::pressure::ClosedTetPressureSurface;
 use fs_solid::hyper3::{HyperTetError, HyperTetProblem, HyperelasticLawField};
 use fs_solver::{FlexiblePreconditioner, SolveReport};
 use fs_sparse::{Coo, Csr};
@@ -228,8 +230,11 @@ pub struct FiniteSolidStep {
     pub kinetic_after_j: f64,
     pub strain_before_j: f64,
     pub strain_after_j: f64,
-    /// Held referential load dotted with actual nodal displacement increment.
+    /// Held referential load work plus exact held-pressure volume work.
     pub source_work_j: f64,
+    /// -p (V_after - V_before) on the complete closed boundary, or zero for
+    /// the dead-load path. Midpoint force work is not substituted for this.
+    pub pressure_work_j: f64,
     /// Delta kinetic + delta strain - source work. Signed numerical defect;
     /// it is never exported as thermal energy.
     pub integration_defect_j: f64,
@@ -246,6 +251,7 @@ pub struct FiniteSolidBody<'a> {
     free_mass: Arc<Csr>,
     free: Arc<[usize]>,
     fixed: Arc<[f64]>,
+    pressure_surface: Option<Arc<ClosedTetPressureSurface>>,
     reference_mass_kg: f64,
     initialization: SolveReport,
     state: SecondOrderState,
@@ -266,7 +272,52 @@ impl<'a> FiniteSolidBody<'a> {
         controls: FiniteSolidInitialization,
         cx: &Cx<'_>,
     ) -> Result<Self, FiniteSolidError> {
+        Self::initialize(problem, None, 0.0, displacement_m, velocity_m_s, time_s, controls, cx)
+    }
+
+    /// Bind a prepared complete exterior and include pressure in the native
+    /// initial mass solve. Positive pressure is inward on the CURRENT area.
+    ///
+    /// The surface must match the original coordinates and connectivity
+    /// exactly. Every later interval must explicitly supply its held pressure
+    /// through `step_candidate_with_pressure`; it cannot silently disappear.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_pressure(
+        problem: HyperTetProblem<'a, FiniteSolidMaterial>,
+        surface: Arc<ClosedTetPressureSurface>,
+        pressure_pa: f64,
+        displacement_m: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        time_s: f64,
+        controls: FiniteSolidInitialization,
+        cx: &Cx<'_>,
+    ) -> Result<Self, FiniteSolidError> {
+        Self::initialize(
+            problem, Some(surface), pressure_pa, displacement_m, velocity_m_s,
+            time_s, controls, cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn initialize(
+        problem: HyperTetProblem<'a, FiniteSolidMaterial>,
+        pressure_surface: Option<Arc<ClosedTetPressureSurface>>,
+        pressure_pa: f64,
+        displacement_m: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        time_s: f64,
+        controls: FiniteSolidInitialization,
+        cx: &Cx<'_>,
+    ) -> Result<Self, FiniteSolidError> {
         checkpoint(cx)?;
+        if !pressure_pa.is_finite() {
+            return Err(FiniteSolidError::Invalid("finite held pressure required"));
+        }
+        if pressure_surface.as_ref().is_some_and(|surface|
+            !surface.matches_reference(problem.nodes_m, problem.tetrahedra)
+        ) {
+            return Err(FiniteSolidError::Invalid("pressure surface does not match the reference mesh"));
+        }
         if !time_s.is_finite()
             || displacement_m.len() != problem.nodes_m.len()
             || velocity_m_s.len() != problem.nodes_m.len()
@@ -322,6 +373,7 @@ impl<'a> FiniteSolidBody<'a> {
             return Err(FiniteSolidError::Invalid("total reference mass is not representable"));
         }
         problem.stored_energy_j(&u, cx)?;
+        if let Some(surface) = &pressure_surface { surface.volume_m3(&u, cx)?; }
         let force = problem.external_force_n(cx)?;
         let q_free: Vec<f64> = free.iter().map(|&dof| u[dof]).collect();
         let v_free: Vec<f64> = free.iter().map(|&dof| v[dof]).collect();
@@ -329,7 +381,11 @@ impl<'a> FiniteSolidBody<'a> {
         let fixed: Arc<[f64]> = Arc::from(fixed);
         let free: Arc<[usize]> = Arc::from(free);
         let free_mass = Arc::new(free_mass);
-        let operator = DynamicOperator::new(&problem, &free_mass, &free, &fixed, cx);
+        // Skipping zero-pressure arithmetic preserves the original native
+        // state and replay exactly, including the consistent initialization.
+        let pressure = pressure_surface.as_deref().filter(|_| pressure_pa != 0.0)
+            .map(|surface| (surface, pressure_pa));
+        let operator = DynamicOperator::new(&problem, &free_mass, &free, &fixed, pressure, cx);
         let preconditioner = MassDiagonal { mass: &free_mass };
         let result = second_order_acceleration(
             &operator, &q_free, &v_free, &forcing, &preconditioner, controls.solve,
@@ -341,7 +397,7 @@ impl<'a> FiniteSolidBody<'a> {
         let state = SecondOrderState::new(time_s, &q_free, &v_free, &initial.value);
         let body = Self {
             problem, mass: Arc::new(mass), free_mass, free, fixed,
-            reference_mass_kg, initialization: initial.report, state,
+            pressure_surface, reference_mass_kg, initialization: initial.report, state,
         };
         body.kinetic_energy_j()?;
         checkpoint(cx)?;
@@ -393,6 +449,52 @@ impl<'a> FiniteSolidBody<'a> {
         cx: &Cx<'_>,
     ) -> Result<(Self, FiniteSolidStep), FiniteSolidError> {
         checkpoint(cx)?;
+        if self.pressure_surface.is_some() {
+            return Err(FiniteSolidError::Invalid(
+                "pressure-bound body requires an explicit pressure for each interval",
+            ));
+        }
+        self.step_with_loads(duration_s, nodal_forces_n, body_force_n_m3, None, controls, cx)
+    }
+
+    /// Advance with a finite signed uniform pressure held over this interval.
+    ///
+    /// Pressure follows the current closed boundary in both the residual and
+    /// its analytic tangent. The receipt includes exact endpoint-volume work;
+    /// the difference from midpoint work remains a signed integration defect.
+    /// Reference mass, stationary supports and the native integrator are unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_candidate_with_pressure(
+        &self,
+        duration_s: f64,
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        pressure_pa: f64,
+        controls: FiniteSolidControls,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, FiniteSolidStep), FiniteSolidError> {
+        checkpoint(cx)?;
+        let surface = self.pressure_surface.as_deref().ok_or(FiniteSolidError::Invalid(
+            "pressure must be bound during initial acceleration preparation",
+        ))?;
+        if !pressure_pa.is_finite() {
+            return Err(FiniteSolidError::Invalid("finite held pressure required"));
+        }
+        let pressure = (pressure_pa != 0.0).then_some((surface, pressure_pa));
+        self.step_with_loads(duration_s, nodal_forces_n, body_force_n_m3, pressure, controls, cx)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_with_loads(
+        &self,
+        duration_s: f64,
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        pressure: Option<(&ClosedTetPressureSurface, f64)>,
+        controls: FiniteSolidControls,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, FiniteSolidStep), FiniteSolidError> {
+        checkpoint(cx)?;
         if !duration_s.is_finite() || duration_s <= 0.0
             || !controls.energy_tolerance_j.is_finite() || controls.energy_tolerance_j <= 0.0
             || controls.solve.max_newton_iterations == 0
@@ -418,7 +520,7 @@ impl<'a> FiniteSolidBody<'a> {
         let strain_before_j = self.problem.stored_energy_j(&before_u, cx)?;
         let kinetic_before_j = self.kinetic_energy_j()?;
         let operator = DynamicOperator::new(
-            &self.problem, &self.free_mass, &self.free, &self.fixed, cx,
+            &self.problem, &self.free_mass, &self.free, &self.fixed, pressure, cx,
         );
         let integrator = OperatorGeneralizedAlpha::new(
             self.free.len(), duration_s, 1.0, controls.solve,
@@ -440,6 +542,14 @@ impl<'a> FiniteSolidBody<'a> {
             if dof % 4096 == 0 { checkpoint(cx)?; }
             source_work_j = load.mul_add(after - before, source_work_j);
         }
+        let pressure_work_j = match pressure {
+            Some((surface, pressure_pa)) => {
+                let work = surface.work_j(&before_u, &after_u, pressure_pa, cx)?;
+                source_work_j += work;
+                work
+            }
+            None => 0.0,
+        };
         let integration_defect_j =
             (kinetic_after_j - kinetic_before_j) + (strain_after_j - strain_before_j)
             - source_work_j;
@@ -454,7 +564,8 @@ impl<'a> FiniteSolidBody<'a> {
         }
         let midpoint: Vec<f64> = before_u.iter().zip(&after_u)
             .map(|(before, after)| 0.5 * before + 0.5 * after).collect();
-        let internal = self.problem.internal_force(&midpoint, cx)?;
+        let mut internal = self.problem.internal_force(&midpoint, cx)?;
+        subtract_pressure_force(&mut internal, &midpoint, pressure, cx)?;
         let mut acceleration = vec![0.0; before_u.len()];
         for ((&dof, before), after) in
             self.free.iter().zip(&self.state.v).zip(&candidate.state.v)
@@ -474,7 +585,7 @@ impl<'a> FiniteSolidBody<'a> {
         checkpoint(cx)?;
         Ok((candidate, FiniteSolidStep {
             time, kinetic_before_j, kinetic_after_j, strain_before_j, strain_after_j,
-            source_work_j, integration_defect_j, support_reactions_n,
+            source_work_j, pressure_work_j, integration_defect_j, support_reactions_n,
         }))
     }
 }
@@ -491,6 +602,29 @@ fn inflate(reduced: &[f64], free: &[usize], fixed: &[f64]) -> Vec<f64> {
     let mut full = fixed.to_vec();
     for (&dof, &value) in free.iter().zip(reduced) { full[dof] = value; }
     full
+}
+
+/// The existing time owner accepts a fixed right-hand side, so a follower
+/// load enters its displacement-dependent internal residual with a minus sign.
+fn subtract_pressure_force(
+    internal: &mut [f64],
+    displacement: &[f64],
+    pressure: Option<(&ClosedTetPressureSurface, f64)>,
+    cx: &Cx<'_>,
+) -> Result<(), HyperTetError> {
+    if let Some((surface, pressure_pa)) = pressure {
+        let force = surface.force_n(displacement, pressure_pa, cx)?;
+        for (dof, (value, load)) in internal.iter_mut().zip(force).enumerate() {
+            if dof % 4096 == 0 { checkpoint(cx)?; }
+            *value -= load;
+            if !value.is_finite() {
+                return Err(HyperTetError::InvalidInput {
+                    what: "native solid minus pressure force is not representable".into(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Extract the original native matrix's free/free submatrix in canonical order.
@@ -529,6 +663,7 @@ struct DynamicOperator<'a, 'b, 'cx> {
     mass: &'b Csr,
     free: &'b [usize],
     fixed: &'b [f64],
+    pressure: Option<(&'b ClosedTetPressureSurface, f64)>,
     cx: &'b Cx<'cx>,
     tangent: RefCell<Option<(Vec<f64>, Csr)>>,
     // Void native operator callbacks communicate a persistent error here.
@@ -542,10 +677,11 @@ impl<'a, 'b, 'cx> DynamicOperator<'a, 'b, 'cx> {
         mass: &'b Csr,
         free: &'b [usize],
         fixed: &'b [f64],
+        pressure: Option<(&'b ClosedTetPressureSurface, f64)>,
         cx: &'b Cx<'cx>,
     ) -> Self {
         Self {
-            problem, mass, free, fixed, cx,
+            problem, mass, free, fixed, pressure, cx,
             tangent: RefCell::new(None), error: RefCell::new(None),
         }
     }
@@ -571,7 +707,30 @@ impl<'a, 'b, 'cx> DynamicOperator<'a, 'b, 'cx> {
         let rebuild = self.tangent.borrow().as_ref()
             .is_none_or(|(at, _)| at.as_slice() != q);
         if rebuild {
-            let full = self.problem.tangent_matrix(&inflate(q, self.free, self.fixed), self.cx)?;
+            let displacement = inflate(q, self.free, self.fixed);
+            let mut full = self.problem.tangent_matrix(&displacement, self.cx)?;
+            if let Some((surface, pressure_pa)) = self.pressure {
+                let external = surface.force_tangent(&displacement, pressure_pa, self.cx)?;
+                let mut combined = Coo::new(full.nrows(), full.nrows());
+                for row in 0..full.nrows() {
+                    checkpoint(self.cx)?;
+                    for (matrix, scale) in [(&full, 1.0), (&external, -1.0)] {
+                        let (columns, values) = matrix.row(row);
+                        for (&column, &value) in columns.iter().zip(values) {
+                            combined.push(row, column, scale * value);
+                        }
+                    }
+                }
+                full = combined.assemble();
+                for row in 0..full.nrows() {
+                    checkpoint(self.cx)?;
+                    if full.row(row).1.iter().any(|value| !value.is_finite()) {
+                        return Err(HyperTetError::InvalidInput {
+                            what: "native solid minus pressure tangent is not representable".into(),
+                        });
+                    }
+                }
+            }
             let reduced = reduce_matrix(&full, self.free, self.cx)?;
             self.tangent.replace(Some((q.to_vec(), reduced)));
         }
@@ -598,8 +757,13 @@ impl SecondOrderProblem for DynamicOperator<'_, '_, '_> {
         {
             return Err("finite dimension-matched displacement/velocity required".into());
         }
-        self.problem.stored_energy_j(&inflate(q, self.free, self.fixed), self.cx)
-            .map(|_| ()).map_err(|error| error.to_string())
+        let displacement = inflate(q, self.free, self.fixed);
+        self.problem.stored_energy_j(&displacement, self.cx)
+            .map_err(|error| error.to_string())?;
+        if let Some((surface, _)) = self.pressure {
+            surface.volume_m3(&displacement, self.cx).map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     fn mass_apply(&self, input: &[f64], output: &mut [f64]) {
@@ -615,7 +779,12 @@ impl SecondOrderProblem for DynamicOperator<'_, '_, '_> {
 
     fn internal_force(&self, q: &[f64], output: &mut [f64]) {
         if !self.callback_ready(output) { return; }
-        match self.problem.internal_force(&inflate(q, self.free, self.fixed), self.cx) {
+        let displacement = inflate(q, self.free, self.fixed);
+        let result = self.problem.internal_force(&displacement, self.cx).and_then(|mut full| {
+            subtract_pressure_force(&mut full, &displacement, self.pressure, self.cx)?;
+            Ok(full)
+        });
+        match result {
             Ok(full) => {
                 for (value, &dof) in output.iter_mut().zip(self.free) { *value = full[dof]; }
                 self.finite_output(output);

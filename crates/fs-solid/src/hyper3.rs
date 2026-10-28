@@ -16,9 +16,12 @@
 //! potential        Pi(u) = sum_e V W(F_e) - f_ext . u
 //! ```
 //!
-//! External loads are DEAD (referential): nodal forces and a body force per
+//! The static solve uses DEAD (referential) loads: nodal forces and a body force per
 //! reference volume, lumped equally to the four vertices. Prescribed
 //! displacements and loads ramp linearly over `load_steps`.
+//! The separate [`pressure`] kernel supplies uniform current-area force,
+//! analytic force tangent and endpoint-volume work on the complete closed
+//! boundary for consumers such as the native finite-solid dynamics adapter.
 //!
 //! # Newton globalization
 //!
@@ -45,8 +48,8 @@
 //!
 //! Static, isothermal, rate-independent hyperelasticity on conforming P1
 //! tetrahedra (constant strain: volumetric locking for nearly incompressible
-//! cards is NOT mitigated; no mixed/F-bar formulation). Dead loads only (no
-//! follower pressure). No contact, no limit-point continuation (a solve that
+//! cards is NOT mitigated; no mixed/F-bar formulation). The static solve remains
+//! dead-load-only. No contact, no limit-point continuation (a solve that
 //! passes a limit point refuses or must be driven by displacement), no
 //! mesh-convergence claim from a single run. Determinism: sequential
 //! assembly and solves in canonical order, bit-reproducible on one
@@ -61,6 +64,9 @@ use fs_sparse::precond::{Precond, ilu0, pcg};
 use fs_sparse::{Coo, Csr};
 
 use crate::linear3::TetAssemblyBudget;
+
+/// Closed-boundary uniform follower pressure for the native finite-strain geometry.
+pub mod pressure;
 
 /// Newton / load-stepping controls.
 #[derive(Debug, Clone, Copy, PartialEq)]

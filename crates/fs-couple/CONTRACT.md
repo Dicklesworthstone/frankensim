@@ -7626,21 +7626,51 @@ shared between candidates; the accepted-step budget bounds retained history.
 Native geometry and solver errors retain their original owners; material
 binding preserves the original source refusal text.
 
+`FiniteSolidBody::new_with_pressure` additionally binds an immutable
+`hyper3::pressure::ClosedTetPressureSurface` to exactly the original coordinates
+and tetrahedra. Its entire exterior must be closed and consistently oriented.
+Positive signed pressure acts inward on the current triangle areas. The existing
+initial-acceleration solve includes this load, and each
+`step_candidate_with_pressure` explicitly supplies the uniform pressure held
+over that interval. The original dead-load step refuses a pressure-bound body;
+a body initialized without pressure cannot acquire a binding after its initial
+acceleration was prepared. Zero pressure skips the follower arithmetic and
+recovers the original native state and replay exactly.
+
+The adapter subtracts the native pressure force and analytic force Jacobian
+from the material residual and tangent. Reference mass and the native midpoint
+integrator remain unchanged. Pressure work is the endpoint expression
+`pressure_work_j = -p (V_after - V_before)` and is included in `source_work_j`.
+It is not replaced by midpoint force dotted with displacement: P1 volume is
+cubic in position, so their difference belongs to the signed integration
+defect. Stationary support reactions include the same current-area pressure.
+Surface identity, finite pressure, current element orientation, source-domain,
+solver, energy and cancellation refusals leave the accepted state unchanged.
+
 The focused `finite_solid` integration tests specify an independent scalar
 finite-stretch oscillator and its physical work/storage, density and
 stiffness substitutions, rigid rotation with translating acceleration,
 heterogeneous reference masses, source-axis refusal, inversion/stretch
 limits, massless free-node refusal and late energy/cancellation rollback.
-They are numerical fixtures, not experimental validation or measured
-material calibration. The reconstructed Rust sources have received source
-and API review; native parsing, compilation and test execution remain pending
-because the available executor could not start.
+`tests/finite_solid/pressure.rs` adds a three-axis breathing fixture whose
+independent scalar midpoint equation includes the analytic volumetric material
+force and current pressure area. It checks initialized acceleration, changing
+held pressures, actual motion, exact volume work, support inertia/reactions,
+fixed mass, zero-pressure parity, deterministic replay and atomic refusal.
+`examples/pressurized_material_solid.rs` exposes the same bounded motion using an
+explicit normalized material card/model/temperature, or a labelled synthetic
+`--demo`, and reports the computed volume, motion, storage and pressure work.
+These are numerical fixtures, not experimental validation or measured material
+calibration. The pressure production sources passed native parsing; full native
+compilation and test execution remain pending because the shared executor
+killed the real `asupersync` prerequisite even during a metadata-only check.
 
 MR58 remains open. This increment is compressible, isothermal,
 rate-independent hyperelasticity on conforming P1 tetrahedra. Evolving thermal
 reference state, finite-strain inelastic evolution, moving supports,
-contact, follower pressure and a mixed/stabilized nearly-incompressible
-formulation remain outside this path. No continuous-time inversion or
+contact, selected open pressure patches, nonuniform pressure fields, a coupled
+fluid equation of state and a mixed/stabilized nearly-incompressible formulation
+remain outside this path. No continuous-time inversion or
 self-intersection guarantee, mesh-convergence certificate, or new adjoint
 claim is made.
 

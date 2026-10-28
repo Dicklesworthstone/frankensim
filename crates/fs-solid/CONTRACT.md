@@ -1132,11 +1132,52 @@ state it equals the independently written `linear3` stiffness to 4e-16; a
 rigid rotation of the boundary stores 1e-17 J with reactions below 1e-15 N;
 inverted elements, repeated prescribed DOFs and cancellation refuse.
 
-No-claims (`hyper3`): static, isothermal, rate-independent; constant-strain
+No-claims (`HyperTetProblem::solve`): static, isothermal, rate-independent; constant-strain
 tetrahedra (volumetric locking of nearly incompressible cards is not
 mitigated; no mixed or F-bar formulation); dead loads only (no follower
 pressure); no contact; no limit-point continuation (drive by displacement
 or refuse); no mesh-convergence claim from one run.
+
+#### Complete-boundary current-area pressure (`hyper3::pressure`)
+
+`ClosedTetPressureSurface::new` derives the entire exterior of the original
+tetrahedral mesh through `TetLoadGeometry3`'s incidence, connectivity and quality
+admission. It orients each exterior triangle outward and requires every
+boundary edge to have exactly two oppositely directed incidences. Interior
+faces receive no load. Duplicate/same-side tetrahedra, nonmanifold faces or
+edges, open/inconsistent boundaries, unused vertices and work-budget overflow
+refuse. The prepared owner retains exact reference-coordinate bits and ordered
+connectivity for binding to a consumer's original geometry. Either reference
+tet winding is admitted; every current tet must preserve its original sign.
+
+For each outward triangle `(a,b,c)`, `force_n` places
+`-p/6 * ((x_b-x_a) cross (x_c-x_a))` on each of its three nodes. Positive signed
+pressure acts inward on the current area. The analytic `force_tangent` is the
+external force Jacobian: perturbing a face vertex by `h` varies the cross
+product by `h cross (x_b-x_c)`, `h cross (x_c-x_a)` or
+`h cross (x_a-x_b)`. A consumer subtracts this Jacobian from its internal
+residual tangent. On the complete closed boundary these assembled loads equal
+`-p grad(V)` and the tangent equals `-p Hessian(V)`.
+
+`volume_m3` sums current oriented tetrahedron volumes with finite arithmetic
+and inversion/collapse refusal. `work_j` returns `-p (V_after - V_before)` for
+pressure held between the two endpoints. This exact discrete volume difference
+is not replaced by midpoint traction work; P1 volume is cubic in position.
+Finite signed pressure, geometry and all returned arithmetic are admitted,
+work is bounded by the reference node/tet/face limits, and cancellation is
+checked during geometry and load operations. The owner changes no material,
+reference mass or accepted trajectory and introduces no time solver.
+
+`tests/hyper3_pressure.rs` specifies independent scalar-triple-product force
+and volume oracles, finite-difference tangent and symmetry, rotated and
+translated force/resultant/moment checks, a two-tet union with its interior
+face removed, signed work, invalid/budget and cancellation refusal. Native
+parsing passed. Full compilation and execution remain pending because the
+shared executor killed the real `asupersync` prerequisite even during a
+metadata-only check. No selected open patch, spatially varying pressure,
+fluid equation of state, global injectivity certificate or continuous-time
+inversion guarantee is claimed. Static `HyperTetProblem::solve` remains the
+dead-load owner; finite-solid dynamics consumes this separate pressure kernel.
 
 ### Incremental small-strain inelasticity (`plastic3`)
 

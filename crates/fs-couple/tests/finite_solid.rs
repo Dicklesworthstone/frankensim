@@ -2,6 +2,8 @@
 //! These are authored numerical fixtures, not measured material validation.
 #[path = "finite_solid/thermal.rs"]
 mod thermal;
+#[path = "finite_solid/pressure.rs"]
+mod pressure;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_couple::finite_solid::*;
 use fs_evidence::ValidityDomain;
