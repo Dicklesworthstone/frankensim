@@ -56,6 +56,10 @@ pub use material::{
 #[cfg(feature = "continuum")]
 pub use ns::{FluxParams, FluxRheologyError, FluxRheologyStep, FluxSolution, FluxSystem};
 #[cfg(feature = "continuum")]
+pub use ns::boundary::{
+    StokesAssembly, StokesBoundary, StokesBoundaryError, StokesPressureReference, StokesSolution,
+};
+#[cfg(feature = "continuum")]
 pub use reduced_aero::{
     AlternativeWrenchSet, ApplicabilityEnvelope, BodyKinematics, CandidateWrench, ClosedRange,
     ComponentWrenches, ContributionFamily, CorrelationIdentity, CorrelationUncertainty,

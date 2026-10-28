@@ -297,8 +297,8 @@ geometry and must never be labelled as volts or discharge reach.
 - Preconditioned iterative saddle solvers at scale (the dense-LU
   fixture path is the shipped truth; block preconditioners are
   successor work).
-- Outflow/do-nothing and traction boundary conditions (Dirichlet
-  ships).
+- Nonlinear/backflow and transient open-boundary conditions. Steady linear
+  Stokes velocity/total-traction boundaries are provided by the API below.
 - The affine-triangle GCL receipt does not remap fields, assemble or
   advance ALE Navier–Stokes, generate mesh motion, support curved faces
   or 3-D cells, couple FSI, or certify the continuum solver. It carries
@@ -388,3 +388,48 @@ gates, liquid/mixed/EHL/cavitation behavior, moving-domain topology changes,
 2-D/axisymmetric geometry, energy/entropy closure, coupled contact, or any
 device outcome.  The blocked fs-matdb, fs-thermochem, fs-tribo lubrication, and
 fs-couple port-schema prerequisites remain required for those claims.
+
+## Mixed steady-Stokes velocity and total-traction boundaries
+
+With the continuum feature, FluxSystem::assemble_stokes_mixed accepts exactly
+one StokesBoundary owner for every mesh boundary edge. It uses the existing
+BDM1/P0 symmetric-stress discretization with constant kinematic viscosity:
+-div(2 nu D(u)) + grad(p) = f and div(u) = 0. Velocity edges constrain normal
+moments strongly and receive tangential SIP terms. Natural edges receive
+t = (2 nu D(u) - p I)n and retain unknown normal velocity moments. They have
+no velocity penalty or extra pressure-boundary matrix term.
+
+One connected fluid domain and at least one velocity edge are required.
+Duplicate, missing, interior and out-of-range ownership is refused before
+callbacks run. Boundary quadrature samples are retained once for consistent
+strong moments and SIP. Non-finite loads and assembly, incompatible net flux
+for all-prescribed velocity, singular factorization and failed explicit
+Euclidean residual admission return StokesBoundaryError without a solution.
+No hidden grounding is added for pure-traction rigid modes.
+
+All-velocity problems retain the original pressure pin and report MeanZero
+pressure. With any total-traction edge, all continuity equations are retained,
+no pressure pin is added and StokesSolution::pressure reports TractionDatum
+without subtracting its mean. The pressure and traction are kinematic
+(stress divided by one constant reference density); TractionDatum does not
+mean thermodynamic/EOS absolute pressure. A pressure shift dp requires changing
+the prescribed total traction by -dp*n. A pressure-only load is -p*n, but a
+fully developed channel's end traction also contains tangential viscous stress.
+
+The legacy assembly/solve entry points keep their existing numerical path.
+The new checked solve shares the same LU/GMRES kernels and additionally
+recomputes b-Ax before publishing a result. Its read-only matrix is available
+to the existing discrete transpose solver.
+
+tests/stokes_boundary.rs supplies the pressure-driven channel analytic
+refinement/flux oracle, exact affine shear and pressure-datum shift patch,
+all-velocity operator/solution bit comparison, and boundary-admission cases.
+examples/pressure_channel.rs is runnable with
+cargo run -p fs-flux --example pressure_channel.
+
+This extension covers steady linear, constant-density, constant-viscosity
+Stokes on the existing straight-sided 2D triangulation. It does not add
+nonlinear convection/backflow, open-boundary time integration, pure-traction
+rigid-mode quotients, disconnected domains, material-bound SI pressure
+conversion or continuum error bounds. Existing synchronous cancellation and
+dense/iterative solver limitations remain in force.

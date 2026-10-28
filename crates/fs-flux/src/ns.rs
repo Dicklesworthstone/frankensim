@@ -19,6 +19,9 @@ use fs_solver::krylov::GmresState;
 use fs_solver::op::CsrOp;
 use fs_sparse::{Coo, Csr};
 
+/// Checked steady velocity/total-traction boundary partition.
+pub mod boundary;
+
 fn positive_viscosity(nu: f64) -> f64 {
     assert!(
         nu.is_finite() && nu > 0.0,
@@ -216,7 +219,7 @@ impl<'m> FluxSystem<'m> {
         inv_dt: f64,
         uprev: Option<&[f64]>,
     ) -> (Csr, Vec<f64>) {
-        self.assemble_operator(params, None, f, g, advect, inv_dt, uprev)
+        self.assemble_operator(params, None, f, g, advect, inv_dt, uprev, None)
     }
 
     /// Assemble `-div(2 nu D(u)) + grad(p) = f`, with
@@ -270,7 +273,7 @@ impl<'m> FluxSystem<'m> {
             params.sigma.is_finite() && params.sigma > 0.0,
             "SIP penalty must be positive and finite"
         );
-        self.assemble_operator(params, Some(viscosity), f, g, advect, inv_dt, uprev)
+        self.assemble_operator(params, Some(viscosity), f, g, advect, inv_dt, uprev, None)
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -283,32 +286,30 @@ impl<'m> FluxSystem<'m> {
         advect: Option<&[f64]>,
         inv_dt: f64,
         uprev: Option<&[f64]>,
+        boundary: Option<&boundary::AdmittedBoundary>,
     ) -> (Csr, Vec<f64>) {
         let mesh = self.mesh;
         let nu = params.nu;
         let symmetric_stress = viscosity.is_some();
         let mut coo = Coo::new(self.n, self.n);
         let mut rhs = vec![0.0f64; self.n];
-        // Constrained rows: boundary-edge normal moments are EXACTLY
-        // the BDM dofs, so u·n = g·n is enforced strongly as identity
-        // rows (every remaining basis function then has v·n ≡ 0 on the
-        // whole boundary by dof duality — the ∮p(v·n) consistency term
-        // vanishes identically). The pressure constant is back in the
-        // null space, so cell 0's continuity row is REPLACED by the
-        // pin p_0 = 0: its div-freeness is implied by the other cells
-        // plus the prescribed net flux, not corrupted by an additive
-        // penalty.
+        // Velocity-edge normal moments are the BDM dofs, so u·n = g·n
+        // is strong. Natural total-traction edges retain their normal dofs:
+        // the boundary stress is supplied on the RHS, including pressure.
+        // With velocity everywhere, cell 0's redundant continuity row is
+        // replaced by p_0 = 0. With traction, keep every continuity row
+        // because the boundary data already determines the pressure datum.
         let mut con: Vec<Option<f64>> = vec![None; self.n];
         for (e, edge) in mesh.edges.iter().enumerate() {
-            if edge.tris.1 != usize::MAX {
+            if edge.tris.1 != usize::MAX || boundary.is_some_and(|data| data.is_traction(e)) {
                 continue;
             }
             let (va, vb) = (mesh.verts[edge.verts.0], mesh.verts[edge.verts.1]);
             let nrm = edge.normal;
             let mut m0 = 0.0;
             let mut m1 = 0.0;
-            for (gx, w) in crate::bdm::edge_gauss_pub(va, vb) {
-                let gv = g(gx);
+            for (q, (gx, w)) in crate::bdm::edge_gauss_pub(va, vb).into_iter().enumerate() {
+                let gv = boundary.map_or_else(|| g(gx), |data| data.velocity(e, q));
                 let gn = gv[0] * nrm[0] + gv[1] * nrm[1];
                 let sl = ((gx[0] - va[0]) * (vb[0] - va[0]) + (gx[1] - va[1]) * (vb[1] - va[1]))
                     / (edge.len * edge.len)
@@ -319,7 +320,9 @@ impl<'m> FluxSystem<'m> {
             con[2 * e] = Some(m0);
             con[2 * e + 1] = Some(m1);
         }
-        con[self.n_u] = Some(0.0);
+        if boundary.is_none_or(|data| !data.has_traction) {
+            con[self.n_u] = Some(0.0);
+        }
         // --- Cell terms: viscous stress, div coupling, load.
         for t in 0..mesh.tris.len() {
             let basis = &self.bases[t];
@@ -385,16 +388,31 @@ impl<'m> FluxSystem<'m> {
             }
         }
         // --- Face terms.
-        for edge in &mesh.edges {
+        for (e, edge) in mesh.edges.iter().enumerate() {
             let (t0, t1) = edge.tris;
             let h = edge.len;
             let n = edge.normal;
             let (va, vb) = (mesh.verts[edge.verts.0], mesh.verts[edge.verts.1]);
             let gauss = crate::bdm::edge_gauss_pub(va, vb);
             if t1 == usize::MAX {
-                // Boundary: weak Dirichlet (exterior value = g).
-                for (gx, w) in gauss {
-                    let gval = g(gx);
+                if let Some(data) = boundary.filter(|data| data.is_traction(e)) {
+                    // Natural total stress t = (2 nu D(u) - p I)n.
+                    // No SIP or pressure-boundary matrix term remains here.
+                    for (q, (gx, w)) in gauss.into_iter().enumerate() {
+                        let traction = data.traction(e, q);
+                        for i in 0..6 {
+                            let gi = self.dof(t0, i);
+                            if con[gi].is_none() {
+                                let vi = eval_basis(&self.bases[t0], i, gx);
+                                rhs[gi] += w * (traction[0] * vi[0] + traction[1] * vi[1]);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                // Velocity boundary: weak tangential data (normal is strong).
+                for (q, (gx, w)) in gauss.into_iter().enumerate() {
+                    let gval = boundary.map_or_else(|| g(gx), |data| data.velocity(e, q));
                     let local_nu = viscosity.map_or(nu, |field| positive_viscosity(field(t0, gx)));
                     let normal_height = if symmetric_stress {
                         2.0 * mesh.areas[t0] / h
@@ -601,9 +619,20 @@ impl<'m> FluxSystem<'m> {
     /// If the dense factorization hits a zero pivot (singular system).
     #[must_use]
     pub fn solve_linear(&self, a: &Csr, rhs: &[f64], params: FluxParams) -> FluxSolution {
+        self.solve_linear_result(a, rhs, params)
+            .expect("saddle system nonsingular")
+    }
+
+    fn solve_linear_result(
+        &self,
+        a: &Csr,
+        rhs: &[f64],
+        params: FluxParams,
+    ) -> Result<FluxSolution, boundary::StokesBoundaryError> {
         if self.n <= 1500 {
             let flat = a.to_dense();
-            let f = lu(&flat, self.n).expect("saddle system nonsingular");
+            let f = lu(&flat, self.n)
+                .map_err(|_| boundary::StokesBoundaryError::SingularSystem)?;
             let mut x = rhs.to_vec();
             f.solve(&mut x);
             let mut r2 = 0.0;
@@ -628,23 +657,23 @@ impl<'m> FluxSystem<'m> {
                 r2 += (ax[i] - rhs[i]).powi(2);
                 b2 += rhs[i].powi(2);
             }
-            return FluxSolution {
+            return Ok(FluxSolution {
                 x,
                 n_u: self.n_u,
                 iters: 0,
                 rel_residual: (r2 / b2.max(1e-300)).sqrt(),
-            };
+            });
         }
         let op = CsrOp::general(a.clone());
         let mut st = GmresState::new(rhs, 100);
         let cycles = params.max_iters / 100;
         let _ = st.run(&op, rhs, params.tol, cycles.max(1), false);
-        FluxSolution {
+        Ok(FluxSolution {
             x: st.x.clone(),
             n_u: self.n_u,
             iters: st.iters,
             rel_residual: st.rel_residual(),
-        }
+        })
     }
 
     /// Solve the TRANSPOSED system (discrete adjoint), dense path.
