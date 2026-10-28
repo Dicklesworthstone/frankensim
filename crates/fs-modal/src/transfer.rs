@@ -9,7 +9,7 @@
 
 use crate::{ModePair, time::ModalAcousticState};
 use fs_exec::Cx;
-use fs_sparse::{Csr, DirectOrdering, LdltError, LdltFactor, LdltOptions, SymbolicLdlt};
+use fs_sparse::{Coo, Csr, DirectOrdering, LdltError, LdltFactor, LdltOptions, SymbolicLdlt};
 
 /// Explicit accuracy, state-loss, work and allocation limits for one transfer.
 #[derive(Clone, Copy, Debug)]
@@ -45,6 +45,19 @@ pub struct ModalMassTransferControls {
     /// projection: `||M_new v_new - p||_2 / (||M_new v_new||_2 + ||p||_2)`.
     /// Exact zero momentum has zero residual.
     pub maximum_relative_momentum_residual: f64,
+}
+
+/// Explicit admission of a target's complete rigid-motion nullspace.
+#[derive(Clone, Copy, Debug)]
+pub struct ModalRigidTransferControls {
+    /// Original projection, work, inertia-solve and factorization budgets.
+    pub transfer: ModalMassTransferControls,
+    /// Maximum staged entries of the bordered stiffness qualification matrix.
+    /// Its conservative count is nnz(K) + 2 * dofs * rigid_modes.
+    pub maximum_border_entries: usize,
+    /// Relative null residual ||K z||_2 / (||K||_F ||z||_2). A zero K has
+    /// exactly zero residual. This does not turn a nonzero eigenvalue into zero.
+    pub maximum_relative_rigid_residual: f64,
 }
 
 /// A transfer under changed inertia, including the independent mass-solve check.
@@ -183,14 +196,18 @@ fn admit_spd(
 
 fn admit_basis(
     mass: &Csr, stiffness: Option<&Csr>, modes: &[ModePair],
-    controls: ModalTransferControls, cx: &Cx<'_>,
+    controls: ModalTransferControls, allow_rigid: bool, cx: &Cx<'_>,
 ) -> Result<(), ModalTransferError> {
     for (i, mode) in modes.iter().enumerate() {
         poll(cx)?;
-        if mode.phi.len() != mass.nrows() || !mode.lambda.is_finite() || mode.lambda <= 0.0
+        if mode.phi.len() != mass.nrows() || !mode.lambda.is_finite() || mode.lambda < 0.0
+            || !allow_rigid && mode.lambda == 0.0
             || !mode.phi.iter().all(|x| x.is_finite()) {
-            return Err(ModalTransferError::Invalid(
-                "finite positive-frequency shapes on the complete reference DOF space required"));
+            return Err(ModalTransferError::Invalid(if allow_rigid {
+                "finite nonnegative-frequency shapes on the complete reference DOF space required"
+            } else {
+                "finite positive-frequency shapes on the complete reference DOF space required"
+            }));
         }
         let m_phi = apply(mass, &mode.phi, cx)?;
         for (j, other) in modes[..=i].iter().enumerate() {
@@ -198,7 +215,7 @@ fn admit_basis(
                 (dot(&other.phi, &m_phi, cx)? - if i == j { 1.0 } else { 0.0 }).abs(),
                 controls.maximum_mass_orthogonality_error)?;
         }
-        if let Some(stiffness) = stiffness {
+        if let Some(stiffness) = stiffness.filter(|_| mode.lambda != 0.0) {
             let k_phi = apply(stiffness, &mode.phi, cx)?;
             let residual: Vec<_> = k_phi.iter().zip(&m_phi)
                 .map(|(k, m)| k - mode.lambda * m).collect();
@@ -210,6 +227,89 @@ fn admit_basis(
             limit("target eigen residual", dot(&residual, &residual, cx)?.sqrt() / scale,
                 controls.maximum_relative_eigen_residual)?;
         }
+    }
+    Ok(())
+}
+
+// K is positive definite on the M-orthogonal complement of Z iff this
+// bordered matrix has inertia (n positive, r negative). The explicit KZ test
+// admits the alleged rigid space; no diagonal shift or artificial spring is
+// applied to physical dynamics, residual energies or returned eigenvalues.
+fn admit_rigid_stiffness(
+    mass: &Csr, stiffness: &Csr, modes: &[ModePair],
+    controls: ModalRigidTransferControls, cx: &Cx<'_>,
+) -> Result<(), ModalTransferError> {
+    let rigid: Vec<_> = modes.iter().filter(|m| m.lambda == 0.0).collect();
+    if rigid.is_empty() {
+        admit_spd(stiffness, controls.transfer.transfer, cx)?;
+        return Ok(());
+    }
+    let n = mass.nrows();
+    let count = rigid.len();
+    let entries = n.checked_mul(count).and_then(|v| v.checked_mul(2))
+        .and_then(|v| v.checked_add(stiffness.nnz()))
+        .ok_or(ModalTransferError::Invalid("rigid border extent overflow"))?;
+    if entries > controls.maximum_border_entries {
+        return Err(ModalTransferError::Budget { quantity: "rigid border entries",
+            requested: entries, cap: controls.maximum_border_entries });
+    }
+    let dim = n.checked_add(count)
+        .ok_or(ModalTransferError::Invalid("rigid border dimension overflow"))?;
+    let mut norm_k = 0.0_f64;
+    let mut scale_k = 0.0_f64;
+    for row in 0..n {
+        poll(cx)?;
+        let (columns, values) = stiffness.row(row);
+        for (&col, &value) in columns.iter().zip(values) {
+            if !value.is_finite() || value != stiffness.get(col,row) {
+                return Err(ModalTransferError::Invalid("rigid stiffness must be finite and exactly symmetric"));
+            }
+            norm_k = norm_k.hypot(value);
+            scale_k = scale_k.max(value.abs());
+        }
+    }
+    finite(norm_k)?;
+    // Congruence scaling is confined to the qualification factorization.
+    // It prevents the units/magnitude of K and MZ from setting a false pivot
+    // floor; the original physical K is used by every transfer energy check.
+    if scale_k == 0.0 { scale_k = 1.0; }
+    let mut border = Coo::new(dim,dim);
+    for row in 0..n {
+        poll(cx)?;
+        let (columns, values) = stiffness.row(row);
+        for (&col, &value) in columns.iter().zip(values) {
+            border.push(row,col,value/scale_k);
+        }
+    }
+    for (column,mode) in rigid.iter().enumerate() {
+        poll(cx)?;
+        let kz = apply(stiffness,&mode.phi,cx)?;
+        let norm_z = mode.phi.iter().fold(0.0_f64,|norm,v| norm.hypot(*v));
+        let norm_kz = kz.iter().fold(0.0_f64,|norm,v| norm.hypot(*v));
+        let relative = if norm_k == 0.0 { 0.0 } else { (norm_kz/norm_k)/norm_z };
+        limit("target rigid residual",relative,controls.maximum_relative_rigid_residual)?;
+        let mz = apply(mass,&mode.phi,cx)?;
+        let scale = mz.iter().fold(0.0_f64,|scale,v| scale.max(v.abs()));
+        if scale <= 0.0 || !scale.is_finite() {
+            return Err(ModalTransferError::Invalid("rigid constraint has no representable mass image"));
+        }
+        for (row,value) in mz.iter().enumerate() {
+            if row%256 == 0 { poll(cx)?; }
+            border.push(row,n+column,value/scale);
+            border.push(n+column,row,value/scale);
+        }
+    }
+    poll(cx)?;
+    let border = border.assemble();
+    let symbolic = SymbolicLdlt::analyze(&border,DirectOrdering::Amd)?;
+    poll(cx)?;
+    let factor = symbolic.factor(&border,&LdltOptions {
+        max_factor_bytes: Some(controls.transfer.transfer.maximum_factor_bytes),
+        ..LdltOptions::default()
+    })?;
+    poll(cx)?;
+    if factor.inertia().positive != n || factor.inertia().negative != count {
+        return Err(ModalTransferError::Invalid("target stiffness is not stable outside its complete rigid subspace"));
     }
     Ok(())
 }
@@ -266,6 +366,7 @@ pub fn transfer_modal_state(
         previous_states,
         equilibrium_offset_m,
         controls,
+        None,
         cx,
     )
     .map(|result| result.transfer)
@@ -313,8 +414,50 @@ pub fn transfer_modal_state_with_mass_change(
         previous_states,
         equilibrium_offset_m,
         controls.transfer,
+        None,
         cx,
     )
+}
+
+/// Transfer vibration and rigid motion on the same physical coordinate space.
+///
+/// This explicitly extends [`transfer_modal_state_with_mass_change`] to
+/// zero-frequency modes. Supply EVERY target rigid direction as an exactly
+/// zero `ModePair::lambda`, together with the target oscillatory modes. Shapes
+/// must be M-orthonormal; their K-null residual has its own explicit tolerance.
+/// The original sparse LDLT owner qualifies K on their complement using
+/// `[K, M Z; Z^T M, 0]`. Missing rigid directions, false null modes and unstable
+/// elastic directions refuse. No spring floor, eigenvalue clipping, waveform
+/// rescaling or coordinate-based mode matching is introduced.
+///
+/// Displacement and canonical momentum transfer, changed-inertia work and all
+/// truncation limits are the same as the original owner. Pass the same matrix
+/// for both masses when inertia is unchanged. A rigid coordinate contributes
+/// kinetic storage and zero elastic storage; all motion participates
+/// in the original displacement and kinetic residual allowances.
+/// This is an instantaneous fixed-frame parameter change, not remeshing,
+/// support impulses, finite rotations or a constitutive-memory transfer.
+#[allow(clippy::too_many_arguments)]
+pub fn transfer_modal_state_with_rigid_modes(
+    previous_mass: &Csr,
+    target_mass: &Csr,
+    target_stiffness: &Csr,
+    previous_modes: &[ModePair],
+    target_modes: &[ModePair],
+    previous_states: &[ModalAcousticState],
+    equilibrium_offset_m: &[f64],
+    controls: ModalRigidTransferControls,
+    cx: &Cx<'_>,
+) -> Result<ModalMassTransfer, ModalTransferError> {
+    if controls.maximum_border_entries == 0
+        || !controls.maximum_relative_rigid_residual.is_finite()
+        || !(0.0..1.0).contains(&controls.maximum_relative_rigid_residual) {
+        return Err(ModalTransferError::Invalid("positive border capacity and finite rigid residual tolerance in [0,1) required"));
+    }
+    transfer_modal_state_impl(previous_mass,
+        Some((target_mass,controls.transfer.maximum_relative_momentum_residual)),
+        target_stiffness,previous_modes,target_modes,previous_states,
+        equilibrium_offset_m,controls.transfer.transfer,Some(controls),cx)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -327,6 +470,7 @@ fn transfer_modal_state_impl(
     previous_states: &[ModalAcousticState],
     equilibrium_offset_m: &[f64],
     controls: ModalTransferControls,
+    rigid: Option<ModalRigidTransferControls>,
     cx: &Cx<'_>,
 ) -> Result<ModalMassTransfer, ModalTransferError> {
     poll(cx)?;
@@ -387,9 +531,12 @@ fn transfer_modal_state_impl(
         admit_spd(mass, controls, cx)?;
         None
     };
-    admit_spd(target_stiffness, controls, cx)?;
-    admit_basis(previous_mass, None, previous_modes, controls, cx)?;
-    admit_basis(mass, Some(target_stiffness), target_modes, controls, cx)?;
+    if rigid.is_none() { admit_spd(target_stiffness, controls, cx)?; }
+    admit_basis(previous_mass, None, previous_modes, controls, rigid.is_some(), cx)?;
+    admit_basis(mass, Some(target_stiffness), target_modes, controls, rigid.is_some(), cx)?;
+    if let Some(rigid) = rigid {
+        admit_rigid_stiffness(mass,target_stiffness,target_modes,rigid,cx)?;
+    }
 
     let previous_modal_energy_j = modal_energy(previous_modes, previous_states, cx)?;
     let mut u = equilibrium_offset_m.to_vec();

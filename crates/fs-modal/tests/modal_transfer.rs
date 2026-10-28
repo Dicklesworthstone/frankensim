@@ -485,3 +485,141 @@ fn changed_mass_refuses_bad_mass_space_source_normalization_and_solve_budget() {
     });
     assert_eq!(states, [state(2.0, 6.0)]);
 }
+
+fn rigid_controls() -> fs_modal::transfer::ModalRigidTransferControls {
+    fs_modal::transfer::ModalRigidTransferControls {
+        transfer: ModalMassTransferControls {
+            transfer: controls(), maximum_relative_momentum_residual: 1e-12,
+        },
+        maximum_border_entries: 1024,
+        maximum_relative_rigid_residual: 1e-12,
+    }
+}
+fn dense3(values: [f64;9]) -> Csr {
+    let mut matrix=Coo::new(3,3);
+    for i in 0..3 {for j in 0..3 {matrix.push(i,j,values[3*i+j]);}}
+    matrix.assemble()
+}
+fn free_body() -> (Csr,Csr,Vec<ModePair>) {
+    let mass=dense3([2.0,1.0,0.0,1.0,2.0,0.0,0.0,0.0,4.0]);
+    let k=dense3([9.0,-9.0,0.0,-9.0,9.0,0.0,0.0,0.0,0.0]);
+    let a=1.0/6.0_f64.sqrt(); let b=1.0/2.0_f64.sqrt();
+    let modes=vec![mode(0.0,&[a,a,0.0]),mode(0.0,&[0.0,0.0,0.5]),
+        mode(18.0,&[b,-b,0.0])];
+    (mass,k,modes)
+}
+fn reconstruct(modes:&[ModePair],states:&[ModalAcousticState]) -> ([f64;3],[f64;3]) {
+    let u=std::array::from_fn(|i| modes.iter().zip(states)
+        .map(|(m,s)|m.phi[i]*s.displacement_m_sqrt_kg).sum());
+    let v=std::array::from_fn(|i| modes.iter().zip(states)
+        .map(|(m,s)|m.phi[i]*s.velocity_m_sqrt_kg_per_s).sum());
+    (u,v)
+}
+
+#[test]
+fn rigid_translation_rotation_and_free_flight_keep_physical_motion_without_springs() {
+    use fs_modal::transfer::transfer_modal_state_with_rigid_modes;
+    let (mass,k,old)=free_body();
+    let new=vec![mode(18.0,&old[2].phi.iter().map(|v|-v).collect::<Vec<_>>()),
+        mode(0.0,&(0..3).map(|i|0.6*old[0].phi[i]+0.8*old[1].phi[i]).collect::<Vec<_>>()),
+        mode(0.0,&(0..3).map(|i|-0.8*old[0].phi[i]+0.6*old[1].phi[i]).collect::<Vec<_>>())];
+    let states=[state(2.0,0.3),state(-1.0,0.4),state(0.5,-0.2)];
+    with_cx(&CancelGate::new(),|cx| {
+        // The original strictly positive-frequency API retains its admission.
+        assert!(transfer_modal_state(&mass,&k,&old,&new,&states,&[0.0;3],controls(),cx).is_err());
+        let result=transfer_modal_state_with_rigid_modes(&mass,&mass,&k,&old,&new,
+            &states,&[0.0;3],rigid_controls(),cx).unwrap();
+        let transfer=&result.transfer;
+        let (u0,v0)=reconstruct(&old,&states);let (u1,v1)=reconstruct(&new,&transfer.states);
+        for i in 0..3 {close(u0[i],u1[i]);close(v0[i],v1[i]);}
+        for (actual,expected) in transfer.states.iter().zip([
+            state(-0.5,0.2),state(0.4,0.5),state(-2.2,0.0)]) {
+            close(actual.displacement_m_sqrt_kg,expected.displacement_m_sqrt_kg);
+            close(actual.velocity_m_sqrt_kg_per_s,expected.velocity_m_sqrt_kg_per_s);
+        }
+        close(transfer.previous_modal_energy_j,2.395);
+        close(transfer.retained_modal_energy_j,2.395);
+        close(transfer.parameter_work_j,0.0);
+        assert!(result.relative_momentum_residual<1e-12);
+        // Removing the real elastic spring leaves three exact free coordinates.
+        let fully_free=old.iter().map(|m| mode(0.0,&m.phi)).collect::<Vec<_>>();
+        let release=transfer_modal_state_with_rigid_modes(&mass,&mass,&dense3([0.0;9]),
+            &old,&fully_free,&states,&[0.0;3],rigid_controls(),cx).unwrap();
+        close(release.transfer.target_full_energy_j,0.145);
+        close(release.transfer.parameter_work_j,-2.25);
+        for (actual,expected) in release.transfer.states.iter().zip(states) {
+            close(actual.displacement_m_sqrt_kg,expected.displacement_m_sqrt_kg);
+            close(actual.velocity_m_sqrt_kg_per_s,expected.velocity_m_sqrt_kg_per_s);
+        }
+    });
+}
+
+#[test]
+fn changing_consistent_inertia_preserves_rigid_and_elastic_momentum_and_reversible_work() {
+    use fs_modal::transfer::transfer_modal_state_with_rigid_modes;
+    let (mass,k,old)=free_body();
+    let target=dense3([5.0,1.0,0.0,1.0,5.0,0.0,0.0,0.0,9.0]);
+    let a=1.0/12.0_f64.sqrt(); let b=1.0/8.0_f64.sqrt();
+    let new=[mode(0.0,&[a,a,0.0]),mode(0.0,&[0.0,0.0,1.0/3.0]),mode(4.5,&[b,-b,0.0])];
+    let states=[state(2.0,0.3),state(-1.0,0.4),state(0.5,-0.2)];
+    with_cx(&CancelGate::new(),|cx| {
+        let result=transfer_modal_state_with_rigid_modes(&mass,&target,&k,&old,&new,
+            &states,&[0.0;3],rigid_controls(),cx).unwrap();
+        let (u0,v0)=reconstruct(&old,&states);let (u1,v1)=reconstruct(&new,&result.transfer.states);
+        let (mut p0,mut p1)=([0.0;3],[0.0;3]);mass.spmv(&v0,&mut p0);target.spmv(&v1,&mut p1);
+        for i in 0..3 {close(u0[i],u1[i]);close(p0[i],p1[i]);}
+        for ((actual,previous),ratio) in result.transfer.states.iter().zip(states).zip([2.0_f64.sqrt(),1.5,2.0]) {
+            close(actual.displacement_m_sqrt_kg,ratio*previous.displacement_m_sqrt_kg);
+            close(actual.velocity_m_sqrt_kg_per_s,previous.velocity_m_sqrt_kg_per_s/ratio);
+        }
+        let kinetic=0.5*(0.3_f64.powi(2)/2.0+0.4_f64.powi(2)/2.25+0.2_f64.powi(2)/4.0);
+        close(result.transfer.target_full_energy_j,kinetic+2.25);
+        close(result.transfer.parameter_work_j,kinetic-0.145);
+        let back=transfer_modal_state_with_rigid_modes(&target,&mass,&k,&new,&old,
+            &result.transfer.states,&[0.0;3],rigid_controls(),cx).unwrap();
+        close(result.transfer.parameter_work_j+back.transfer.parameter_work_j,0.0);
+        for (actual,expected) in back.transfer.states.iter().zip(states) {
+            close(actual.displacement_m_sqrt_kg,expected.displacement_m_sqrt_kg);
+            close(actual.velocity_m_sqrt_kg_per_s,expected.velocity_m_sqrt_kg_per_s);
+        }
+    });
+}
+
+#[test]
+fn rigid_admission_detects_missing_nullspace_instability_and_bounded_truncation() {
+    use fs_modal::transfer::transfer_modal_state_with_rigid_modes as transfer;
+    let (mass,k,modes)=free_body();
+    let states=[state(2.0,0.3),state(-1.0,0.4),state(0.5,-0.2)];
+    with_cx(&CancelGate::new(),|cx| {
+        let run=|target_k:&Csr,target_modes:&[ModePair],control|transfer(&mass,&mass,target_k,
+            &modes,target_modes,&states,&[0.0;3],control,cx);
+        assert!(run(&k,&modes[1..],rigid_controls()).is_err());
+        let false_null=[modes[0].clone(),modes[1].clone(),mode(0.0,&modes[2].phi)];
+        assert!(matches!(run(&k,&false_null,rigid_controls()),Err(ModalTransferError::Limit {
+            quantity:"target rigid residual",..
+        })));
+        let unstable=dense3([-9.0,9.0,0.0,9.0,-9.0,0.0,0.0,0.0,0.0]);
+        assert!(matches!(run(&unstable,&modes[..2],rigid_controls()),Err(ModalTransferError::Invalid(_))));
+        let mut capacity=rigid_controls();capacity.maximum_border_entries=20;
+        assert!(matches!(run(&k,&modes,capacity),Err(ModalTransferError::Budget {
+            quantity:"rigid border entries",..
+        })));
+        let mut capacity=rigid_controls();capacity.transfer.transfer.maximum_factor_bytes=1;
+        assert!(matches!(run(&k,&modes,capacity),Err(ModalTransferError::Factor(_))));
+        assert!(run(&k,&modes[..2],rigid_controls()).is_err());
+        let mut allowed=rigid_controls();
+        allowed.transfer.transfer.maximum_displacement_residual_m_sqrt_kg=0.500001;
+        allowed.transfer.transfer.maximum_kinetic_residual_j=0.020001;
+        allowed.transfer.transfer.maximum_elastic_residual_j=2.250001;
+        let reduced=run(&k,&modes[..2],allowed).unwrap();
+        close(reduced.transfer.displacement_residual_m_sqrt_kg,0.5);
+        close(reduced.transfer.kinetic_residual_j,0.02);
+        close(reduced.transfer.elastic_residual_j,2.25);
+        close(reduced.transfer.retained_modal_energy_j,0.125);
+        close(reduced.transfer.parameter_work_j,0.0);
+    });
+    let gate=CancelGate::new();gate.request();
+    with_cx(&gate,|cx|assert!(matches!(transfer(&mass,&mass,&k,&modes,&modes,&states,
+        &[0.0;3],rigid_controls(),cx),Err(ModalTransferError::Cancelled))));
+    assert_eq!(states,[state(2.0,0.3),state(-1.0,0.4),state(0.5,-0.2)]);
+}

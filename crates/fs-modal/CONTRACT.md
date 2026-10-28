@@ -396,3 +396,27 @@ equilibrium shifts, independent energy accounts, explicit truncation and
 refused/cancelled inputs. Four additional G1/G3 tests cover analytic scalar
 inertia changes in both directions, a dense changed mass with rotated degenerate
 modes, target-mass truncation energy, and malformed/cancelled updates.
+
+## Rigid and free-motion state transfer
+
+`transfer::transfer_modal_state_with_rigid_modes` explicitly admits zero-frequency
+motion alongside oscillatory modes on the same physical coordinate space. The
+complete target rigid subspace must be supplied with exactly zero eigenvalues,
+M-orthonormal shapes and a declared relative K-null residual bound. The existing
+sparse LDLT owner qualifies the original stiffness on its complement through
+`[K, M Z; Z^T M, 0]`, requiring n positive and r negative pivots in the bordered
+inertia. Congruence scaling applies only to this qualification matrix; physical
+stiffness, mode eigenvalues and storage are never shifted or regularized. Missing
+null directions, false rigid modes outside their residual bound, and unstable
+elastic complements refuse. Border entries and original numeric factor payloads
+have explicit independent budgets.
+
+The original full-mass canonical-momentum transfer and projection energy/work
+accounts are reused. Rigid coordinates contribute kinetic but zero elastic
+storage. The existing positive-frequency APIs retain their admission. Three
+additional native regressions cover translation/rotation and degenerate rigid
+mixing, a fully free target, changed consistent inertia and reversible work,
+independent physical momentum, explicit elastic truncation, instability,
+incomplete nullspaces, factor/border budgets and cancellation. This remains an
+instantaneous fixed-frame update; it does not infer support impulses, finite
+rotations, remeshing or constitutive-history transfer.
