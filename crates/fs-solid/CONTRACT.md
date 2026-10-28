@@ -1,5 +1,19 @@
 # fs-solid CONTRACT
 
+## Momentum-stable shell integration
+
+`shell_time::step_newmark` solves the effective mass equation for acceleration,
+then adds complete displacement and velocity increments. Absolute positions are
+never differenced to reconstruct acceleration; large rigid drift and short time
+steps therefore do not inject artificial momentum. The original `fs-la`
+partial-pivot LU owns the solve, without a dimensional absolute pivot cutoff.
+For average-acceleration parameters and initially equilibrated acceleration,
+the full consistent mass carries the trapezoidal force impulse and the discrete
+force-work balance includes internal viscous dissipation. Other Newmark
+parameters do not inherit those conservation or unconditional stability claims.
+The G0/G3 `shell_time` tests cover free drift, applied impulses, off-diagonal
+mass, internal spring/damper reactions, work and physical coefficient scaling.
+
 ## Purpose and layer
 
 Layer: L3 (FLUX). The elasticity core (plan §8.2, bead tfz.13):

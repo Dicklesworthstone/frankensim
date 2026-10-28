@@ -1,15 +1,17 @@
 //! Passive transient shell time integration and exact checkpointing (bead `frankensim-b8bxd.9.2`).
 //!
-//! Solves $M \ddot{u} + C \dot{u} + K u = f(t)$ using the unconditionally stable,
-//! second-order accurate Newmark-beta average acceleration method ($\beta = 0.25, \gamma = 0.5$).
+//! Solves $M \ddot{u} + C \dot{u} + K u = f(t)$ using Newmark-beta.
+//! The default average acceleration parameters ($\beta = 0.25, \gamma = 0.5$)
+//! are second-order and unconditionally stable for passive linear systems.
 //!
-//! Invariants:
+//! Invariants for those default parameters and initially equilibrated acceleration:
 //! - Passive damping dissipation: for $f = 0$ and $C \succeq 0$, $E(t_{n+1}) \le E(t_n)$ (monotonically non-increasing energy).
 //! - Conservation of energy for undamped free vibration ($C = 0, f = 0$).
 //! - Exact checkpoint / resume equivalence: resuming from a checkpoint produces bit-identical trajectories.
 //! - Bounded step budgets and cancellation checking.
 
 use fs_blake3::{ContentHash, hash_domain};
+use fs_la::{LuWorkspace, LuWorkspaceError};
 use std::fmt;
 
 /// Schema identifier for shell transient time integration receipts.
@@ -45,6 +47,16 @@ pub enum ShellTimeError {
         /// Field containing non-finite value.
         field: &'static str,
     },
+    /// A Newmark parameter is nonfinite or outside its mathematical domain.
+    InvalidParameter {
+        /// Parameter that must be corrected.
+        parameter: &'static str,
+    },
+    /// The original dense linear algebra owner refused the effective mass solve.
+    LinearSolve {
+        /// Original factorization or substitution error.
+        source: LuWorkspaceError,
+    },
     /// Checkpoint hash or schema mismatch on resume.
     CorruptCheckpoint {
         /// Detail of checkpoint corruption.
@@ -64,6 +76,12 @@ impl fmt::Display for ShellTimeError {
             }
             Self::Cancelled { step } => write!(f, "computation cancelled at step {step}"),
             Self::NonFiniteValue { field } => write!(f, "non-finite value in field {field}"),
+            Self::InvalidParameter { parameter } => {
+                write!(f, "invalid Newmark parameter {parameter}")
+            }
+            Self::LinearSolve { source } => {
+                write!(f, "shell effective mass solve failed: {source}")
+            }
             Self::CorruptCheckpoint { detail } => write!(f, "corrupt checkpoint: {detail}"),
         }
     }
@@ -216,67 +234,23 @@ fn mat_vec(n: usize, a: &[f64], x: &[f64]) -> Vec<f64> {
     y
 }
 
-/// Solve $A x = b$ using Gaussian elimination with partial pivoting.
-fn solve_dense(n: usize, a: &[f64], b: &[f64]) -> Result<Vec<f64>, ShellTimeError> {
-    let mut mat = a.to_vec();
-    let mut rhs = b.to_vec();
-
-    for k in 0..n {
-        // Pivot selection
-        let mut max_val = mat[k * n + k].abs();
-        let mut pivot_row = k;
-        for i in (k + 1)..n {
-            let val = mat[i * n + k].abs();
-            if val > max_val {
-                max_val = val;
-                pivot_row = i;
-            }
-        }
-
-        if max_val < 1.0e-14 {
-            return Err(ShellTimeError::NonFiniteValue {
-                field: "dense_system_singular",
-            });
-        }
-
-        if pivot_row != k {
-            for j in 0..n {
-                mat.swap(k * n + j, pivot_row * n + j);
-            }
-            rhs.swap(k, pivot_row);
-        }
-
-        // Elimination
-        let diag = mat[k * n + k];
-        for i in (k + 1)..n {
-            let factor = mat[i * n + k] / diag;
-            mat[i * n + k] = 0.0;
-            for j in (k + 1)..n {
-                mat[i * n + j] -= factor * mat[k * n + j];
-            }
-            rhs[i] -= factor * rhs[k];
-        }
-    }
-
-    // Back substitution
-    let mut x = vec![0.0; n];
-    for i in (0..n).rev() {
-        let mut sum = rhs[i];
-        for j in (i + 1)..n {
-            sum -= mat[i * n + j] * x[j];
-        }
-        x[i] = sum / mat[i * n + i];
-    }
-
-    Ok(x)
-}
-
 /// Step the dynamic system forward by one timestep using Newmark-beta.
 ///
 /// System: $M \ddot{u}_{n+1} + C \dot{u}_{n+1} + K u_{n+1} = f_{n+1}$
 ///
+/// The effective MASS is solved for acceleration directly. Recovering
+/// acceleration from the difference of absolute displacements loses momentum
+/// when rigid drift or the coordinate datum is large compared with dt*v.
+/// The acceleration form also avoids scaling the matrix by 1/dt².
+///
+/// With beta=1/4, gamma=1/2, and an initially equilibrated acceleration,
+/// the update integrates endpoint force impulses by the trapezoid rule and
+/// obeys the corresponding discrete force-work/energy identity. Other admitted
+/// Newmark parameters do not inherit these conservation or stability claims.
+///
 /// # Errors
-/// Returns [`ShellTimeError`] on dimension mismatch, singular matrix, or non-finite arithmetic.
+/// Returns [`ShellTimeError`] on dimension mismatch, invalid parameters,
+/// singular effective mass, or non-finite input or output.
 pub fn step_newmark(
     n: usize,
     mass: &[f64],
@@ -287,7 +261,8 @@ pub fn step_newmark(
     config: &ShellTimeConfig,
 ) -> Result<DynamicState, ShellTimeError> {
     let dt = config.dt_s;
-    if !dt.is_finite() || dt <= 0.0 {
+    let next_time = current.time_s + dt;
+    if !dt.is_finite() || dt <= 0.0 || !next_time.is_finite() || next_time <= current.time_s {
         return Err(ShellTimeError::InvalidTimeStep {
             dt: format!("{dt}"),
         });
@@ -295,71 +270,100 @@ pub fn step_newmark(
 
     let beta = config.beta;
     let gamma = config.gamma;
-
-    // Effective stiffness: K_eff = K + (gamma / (beta * dt)) * C + (1 / (beta * dt^2)) * M
-    let a0 = 1.0 / (beta * dt * dt);
-    let a1 = gamma / (beta * dt);
-    let a2 = 1.0 / (beta * dt);
-    let a3 = 1.0 / (2.0 * beta) - 1.0;
-    let a4 = gamma / beta - 1.0;
-    let a5 = (dt / 2.0) * (gamma / beta - 2.0);
-
-    let mut k_eff = stiffness.to_vec();
-    for i in 0..(n * n) {
-        k_eff[i] += a0 * mass[i];
+    if !beta.is_finite() || beta <= 0.0 {
+        return Err(ShellTimeError::InvalidParameter { parameter: "beta" });
     }
-    if let Some(c) = damping {
-        for i in 0..(n * n) {
-            k_eff[i] += a1 * c[i];
+    if !gamma.is_finite() || gamma < 0.0 {
+        return Err(ShellTimeError::InvalidParameter { parameter: "gamma" });
+    }
+    let entries = n.checked_mul(n).ok_or(ShellTimeError::InvalidParameter {
+        parameter: "matrix dimension",
+    })?;
+    for matrix in [Some(mass), damping, Some(stiffness)].into_iter().flatten() {
+        if matrix.len() != entries {
+            return Err(ShellTimeError::DimensionMismatch {
+                expected: entries,
+                found: matrix.len(),
+            });
+        }
+        if matrix.iter().any(|v| !v.is_finite()) {
+            return Err(ShellTimeError::NonFiniteValue { field: "operator" });
         }
     }
-
-    // Effective force: R_eff = f_{n+1} + M * (a0*u_n + a2*v_n + a3*a_n) + C * (a1*u_n + a4*v_n + a5*a_n)
-    let mut m_term = vec![0.0; n];
-    for (i, term) in m_term.iter_mut().enumerate() {
-        *term =
-            a0 * current.displacement[i] + a2 * current.velocity[i] + a3 * current.acceleration[i];
+    for values in [
+        &current.displacement[..],
+        &current.velocity,
+        &current.acceleration,
+        f_next,
+    ] {
+        if values.len() != n {
+            return Err(ShellTimeError::DimensionMismatch {
+                expected: n,
+                found: values.len(),
+            });
+        }
+        if values.iter().any(|v| !v.is_finite()) {
+            return Err(ShellTimeError::NonFiniteValue {
+                field: "state_or_force",
+            });
+        }
     }
-    let m_force = mat_vec(n, mass, &m_term);
+    let next_step = current
+        .step
+        .checked_add(1)
+        .ok_or(ShellTimeError::InvalidParameter {
+            parameter: "step index",
+        })?;
 
-    let mut r_eff = vec![0.0; n];
+    // The predictors exclude the unknown acceleration. Off-diagonal inertia,
+    // viscous coupling and elastic forces remain in the original operators.
+    let mut u_predict = vec![0.0; n];
+    let mut v_predict = vec![0.0; n];
     for i in 0..n {
-        r_eff[i] = f_next[i] + m_force[i];
+        u_predict[i] = current.displacement[i]
+            + dt * (current.velocity[i] + dt * (0.5 - beta) * current.acceleration[i]);
+        v_predict[i] = current.velocity[i] + dt * (1.0 - gamma) * current.acceleration[i];
     }
-
+    let displacement_scale = beta * dt * dt;
+    let velocity_scale = gamma * dt;
+    let mut effective_mass = mass.to_vec();
+    for i in 0..entries {
+        effective_mass[i] += displacement_scale * stiffness[i];
+        if let Some(c) = damping {
+            effective_mass[i] += velocity_scale * c[i];
+        }
+    }
+    let mut rhs = mat_vec(n, stiffness, &u_predict);
+    for i in 0..n {
+        rhs[i] = f_next[i] - rhs[i];
+    }
     if let Some(c) = damping {
-        let mut c_term = vec![0.0; n];
-        for (i, term) in c_term.iter_mut().enumerate() {
-            *term = a1 * current.displacement[i]
-                + a4 * current.velocity[i]
-                + a5 * current.acceleration[i];
-        }
-        let c_force = mat_vec(n, c, &c_term);
+        let viscous = mat_vec(n, c, &v_predict);
         for i in 0..n {
-            r_eff[i] += c_force[i];
+            rhs[i] -= viscous[i];
         }
     }
-
-    // Solve for u_{n+1}
-    let u_next = solve_dense(n, &k_eff, &r_eff)?;
-
-    // Calculate a_{n+1} and v_{n+1}
+    let mut solver =
+        LuWorkspace::new(n).map_err(|source| ShellTimeError::LinearSolve { source })?;
     let mut a_next = vec![0.0; n];
+    solver
+        .solve_into(&effective_mass, &rhs, &mut a_next)
+        .map_err(|source| ShellTimeError::LinearSolve { source })?;
+
+    let mut u_next = vec![0.0; n];
     let mut v_next = vec![0.0; n];
     for i in 0..n {
-        a_next[i] = a0 * (u_next[i] - current.displacement[i])
-            - a2 * current.velocity[i]
-            - a3 * current.acceleration[i];
+        // Add each complete increment once. Rounded absolute positions never
+        // enter the velocity or acceleration update.
+        u_next[i] = current.displacement[i]
+            + dt * (current.velocity[i]
+                + dt * ((0.5 - beta) * current.acceleration[i] + beta * a_next[i]));
         v_next[i] = current.velocity[i]
             + dt * ((1.0 - gamma) * current.acceleration[i] + gamma * a_next[i]);
     }
-
-    // Check finite
-    for &val in &u_next {
-        if !val.is_finite() {
-            return Err(ShellTimeError::NonFiniteValue {
-                field: "displacement",
-            });
+    for (field, values) in [("displacement", &u_next), ("velocity", &v_next)] {
+        if values.iter().any(|v| !v.is_finite()) {
+            return Err(ShellTimeError::NonFiniteValue { field });
         }
     }
 
@@ -377,10 +381,16 @@ pub fn step_newmark(
     }
 
     let total_energy = kinetic_energy + strain_energy;
+    if ![kinetic_energy, strain_energy, total_energy]
+        .iter()
+        .all(|v| v.is_finite())
+    {
+        return Err(ShellTimeError::NonFiniteValue { field: "energy" });
+    }
 
     Ok(DynamicState {
-        time_s: current.time_s + dt,
-        step: current.step + 1,
+        time_s: next_time,
+        step: next_step,
         displacement: u_next,
         velocity: v_next,
         acceleration: a_next,
