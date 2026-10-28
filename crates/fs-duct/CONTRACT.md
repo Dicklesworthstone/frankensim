@@ -898,7 +898,8 @@ divergence-theorem closure/orientation pin on the lathe).
 - Tone holes are the compact T-junction (Nederveen series + Dalmont
   inner + chimney wall law + `Y = σ Y_open + (1−σ) Y_closed` vent
   mix + mutual series `t_m ∝ e^{−s/a}` from neighboring open
-  holes). The Ernoult dataset is the regression floor.
+  holes). That mutual series term is a bore-junction correction, not an
+  exterior radiation matrix. The Ernoult dataset is the regression floor.
 - The gas state inherits `fs_material::gas` boundaries (ideal gas,
   phase validity unchecked, calorically perfect gamma).
 
@@ -1014,6 +1015,22 @@ refuses non-finite or non-square matrices, a frequency mismatch, and a
 Hermitian part with an eigenvalue below `-1e-12 max|Z|`. Reciprocity is not
 required: a collocation radiation matrix is reciprocal only to its
 discretization error. `drive` is the no-coupled case with unchanged arithmetic.
+
+Compact chains retain independent exterior self loads for embedded tone-hole
+mouths. The automatic six-iteration scalar correction has been removed: it
+assumed a flanged downstream bell before the actual terminal was supplied and
+clipped signed mutual work/reactance. It did not solve the declared coupled
+boundary problem. Existing compact bore-junction corrections remain intact;
+axial hole spacing alone does not declare three-dimensional mouth geometry.
+
+Exterior interaction requires explicit mouth ports and a complete
+`CoupledTermination` from the physical radiation owner, such as the shared
+fs-bem aperture matrix consumed by fs-couple. Passivity constrains the whole
+Hermitian matrix; a particular opening's mutual work may be negative. The
+standalone `tests/compact_boundaries.rs` regressions check local linear stamps
+under different actual terminals and an analytic passive matrix with negative
+mutual resistance and opposite-signed even-mode reactance. They are numerical
+test definitions, not experimental validation of an instrument or aperture.
 
 Unit tests in `src/network/tests.rs`: G2 T-branch parallel admittance, lossless
 and Bessel (1e-12); G2 200-frequency Herschel–Quincke TL (1e-10 dB), independently
