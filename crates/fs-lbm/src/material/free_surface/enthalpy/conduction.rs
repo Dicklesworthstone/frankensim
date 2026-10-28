@@ -33,8 +33,8 @@ pub use radiation::{
 /// Solved liquid/gas/radiation interface temperatures with finite gas feedback.
 pub mod surface;
 pub use surface::{
-    FreeSurfaceInterfaceContact, FreeSurfaceInterfaceExchange, FreeSurfaceInterfaceFace,
-    FreeSurfaceInterfaceSample, FreeSurfaceInterfaceSolve,
+    FreeSurfaceHeightGraphPatch, FreeSurfaceInterfaceContact, FreeSurfaceInterfaceExchange,
+    FreeSurfaceInterfaceFace, FreeSurfaceInterfaceSample, FreeSurfaceInterfaceSolve,
 };
 /// Finite atmospheric storage on the same thermal and native VOF interval.
 pub mod atmosphere;
@@ -704,6 +704,11 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         let duration = self.flow.scaling.timestep_s();
         let rho = self.flow.scaling.material().density_kg_m3();
         let mass_unit = self.flow.scaling.mass_unit_kg();
+        let graph_area_corrections = if surfaces.is_empty() {
+            BTreeMap::new()
+        } else {
+            self.height_graph_area_corrections(gate)?
+        };
         let masses = self.flow.lattice.mass_snapshot();
         admit_masses(&masses, self.controls.max_cells)?;
         let mut ids = BTreeMap::new();
@@ -741,7 +746,8 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                         start_m: start,
                         end_m: end,
                         volume_m3: mass / rho,
-                        surface_area_m2: surface,
+                        surface_area_m2: surface
+                            + graph_area_corrections.get(&p).copied().unwrap_or(0.0),
                     },
                     boundary: Boundary {
                         ambient_k: temperature,
@@ -1089,13 +1095,13 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             + observer.surface_absolute_heat_j
             + joule_heat;
         let flow = if surface_stress {
-            let axis = self.thermocapillary_surface().expect("admitted planar surface").normal_axis;
+            let surface = self.thermocapillary.expect("admitted surface-stress geometry");
             let scaling = self.flow.scaling;
             let mut prepared = true;
             let mut surface_field = |lattice: &FreeSurface3,
                 states: &BTreeMap<MassLocation3, ResolvedLiquidState>, gate: &CancelGate| {
                 let field = observer.surface_force_field(
-                    lattice, states, axis, scaling, prepared, gate,
+                    lattice, states, surface, scaling, prepared, gate,
                 )?;
                 prepared = false;
                 Ok(field)

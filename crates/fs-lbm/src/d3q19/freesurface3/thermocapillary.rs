@@ -1,11 +1,13 @@
-//! Checked planar and finite-slope graph traction on the original VOF/Guo owner.
+//! Resolved surface traction on the original VOF/Guo owner.
 //!
 //! The planar reduction keeps one Cartesian normal and projected area. The
 //! height-graph reduction reconstructs both tangent directions and actual
 //! surface area from complete VOF columns, including multi-cell cut bands.
-//! Both use the existing Guo force owner; the normal Laplace load remains
-//! exclusively in the original pressure boundary. Neither reduction models
-//! arbitrary overhangs, surfactant transport or surface-energy conversion.
+//! Local detached interfaces use complete height stencils, volume-matching cut
+//! planes and connected wet-source gradients. All paths use the existing Guo
+//! force owner; the normal Laplace load remains exclusively in the original
+//! pressure boundary. Surfactant transport and surface-energy conversion are
+//! outside these geometric stress reconstructions.
 
 use super::*;
 

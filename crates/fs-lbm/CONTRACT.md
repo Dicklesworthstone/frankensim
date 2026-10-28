@@ -3701,8 +3701,8 @@ It requires temporal and spatial refinement for accuracy. No evaporation,
 surface heat capacity, gas momentum/pressure work, participating-gas radiation,
 moving-solid handoff or liquid phase conversion is supplied. The existing
 resolved-cell radiation entrypoint retains its cell-temperature semantics.
-Temperature-dependent planar thermocapillarity can consume this surface field
-under the complete-column admission below. Source-declared constant capillarity
+Temperature-dependent planar and height-graph thermocapillarity can consume
+this surface field under the complete-column admission below. Source-declared constant capillarity
 remains supported, including its planar limit. Original resolved-cell
 thermal/thermocapillary entrypoints retain their behavior until a trajectory
 explicitly enters the solved-surface stress mode.
@@ -3718,10 +3718,10 @@ validation. The broader MR19/MR20 multiphysics deliveries remain open.
 The existing planar capillarity regressions additionally check constant-source
 native parity and refusal of incomplete solved-temperature stress fields.
 
-### Solved interface temperature drives planar capillary flow
+### Solved interface temperature drives capillary flow
 
-For temperature-dependent planar surface tension, the shared heat-boundary
-entrypoints require exactly one full outward normal patch per admitted tank
+For temperature-dependent planar or height-graph surface tension, the shared
+heat-boundary entrypoints require exactly one full outward patch per admitted tank
 column. Missing columns, partial patches, duplicate columns and side-facing
 patches refuse. The original sigma claim alone is queried at each solved
 interface temperature, with its original selection, complete source context
@@ -3736,9 +3736,9 @@ is the coefficient actually used for native pressure and traction.
 At the end of the original thermal stage, this same sigma(T_surface) field
 drives both the native tangential Marangoni traction and Laplace-pressure
 coefficient. Each physical column's surface value extends normally onto its
-native wet and zero-mass ghost lanes. This is the explicitly admitted planar
-surface extension, not an averaged temperature or a general curved-interface
-reconstruction. The original geometry, occupied-volume traction scaling,
+native wet and zero-mass ghost lanes within the admitted planar or height-graph
+columns. The local detached-interface reconstruction has no column extension.
+The original geometry, occupied-volume traction scaling,
 Guo force-frame conversion, buoyancy and optional Lorentz loading remain
 with their existing owners. No force contribution is added twice.
 
@@ -3748,10 +3748,11 @@ and the finite gas's accepted thermal T/p. Original gas-source and sigma
 support still gate this diagnostic epoch. The resulting native endpoint
 updates pressure and traction without another heat interval, source debit or
 gas-energy change. Surface reports retain this native endpoint separately
-from the thermal endpoint that drove the step. Caller-declared film and
-centroid geometry is held over the interval; the original bounded planar
-height/layer admission gates both native configurations, and callers resupply
-current geometry on continuation. This remains a first-order split requiring
+from the thermal endpoint that drove the step. Caller-declared normal conduction
+distances are held over the interval. Graph patch owners, normals and areas
+are reconstructed after motion; planar height/layer admission and the graph's
+strict fill/slope envelope gate their respective native configurations.
+Callers resupply current patches on continuation. This remains a first-order split requiring
 time and interface-resolution refinement.
 
 Once this mode accepts a step, subsequent steps must provide its complete
@@ -3948,9 +3949,8 @@ conversion hysteresis may retain over/underfilled cells; these candidates
 refuse the graph reduction even when the native VOF solver could retain them.
 This remains a resolved height-graph reduction with held-force time splitting;
 it does not admit overhangs, detached drops, internal solid walls, dynamic
-contact lines, surfactants, a conservative surface-energy closure or a curved
-solved-interface-temperature heat boundary. The existing solved-temperature
-stress adapter explicitly retains its planar admission.
+contact lines, surfactants or a conservative surface-energy closure. The curved
+solved-temperature heat boundary uses the same admitted graph geometry.
 
 Native manufactured tests independently check graph-metric projection, area
 and volume scaling, quadratic mixed slopes, constant sigma, all orientations,
@@ -3985,3 +3985,35 @@ unresolved interfaces are not admitted. Sigma is reconstructed from sourced
 bulk cell values, not evaluated at an independently solved surface temperature;
 the approximation requires spatial refinement. This extension does not add
 surfactant transport, capillary heating or a conservative surface-energy step.
+
+### Curved solved-interface heat exchange
+
+With `enthalpy-coupling`, `height_graph_interface_patches` returns the current
+physical centroid, outward normal, actual area and liquid/gas owner of every
+admitted graph column. These patches use the same volume-height reconstruction
+as native traction. `FreeSurfaceHeightGraphPatch::with_exchange` attaches
+explicit positive liquid-normal and gas-film distances, emissivity and the
+radiative surroundings. The surface quadrature point is not presented as an
+occupied-liquid centroid; a column spanning multiple cut cells declares its
+outermost positive cell as the thermal storage owner.
+
+Surface exchange admits exactly one current patch per column, with unique
+owners and the reconstructed area, including for constant-sigma source claims.
+The thermal area budget replaces the projected outer face with its actual
+curved area while preserving the independent Cartesian contact-face limits.
+The existing bounded zero-storage surface solve supplies liquid, gas and
+radiative heat transfer. Original sigma(T_surface) drives both native pressure
+and tangential stress; bulk material temperatures remain their caloric values.
+
+After native advection, the adapter reconstructs live graph geometry and
+re-solves interface temperatures using the advected liquid states and retained
+gas boundary. This endpoint refresh supplies no second thermal interval and no
+extra heat. It retains the graph's strict raw-fill and slope envelope, explicit
+normal distances and held-force time split. Detached local interfaces have no
+column-based solved heat closure and refuse this entry.
+
+Focused tests check all six orientations, a curved cap crossing lattice layers,
+the corrected exposed-area budget with five internal contacts, shared source
+sigma/pressure/traction, mass and heat conservation, and transactional malformed
+patch refusal for both variable and constant sigma. Existing planar solved-T
+and finite-gas atomicity regressions remain unchanged and pass.

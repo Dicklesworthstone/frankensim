@@ -9,6 +9,9 @@ use fs_lbm::material::free_surface::enthalpy::thermocapillary::PlanarThermocapil
 #[path = "surface_thermocapillary.rs"]
 mod surface_thermocapillary;
 
+#[path = "surface_height_graph.rs"]
+mod surface_height_graph;
+
 const DX: f64 = 0.001;
 const DT: f64 = 0.001;
 const SURFACE: [usize; 3] = [3, 3, 3];

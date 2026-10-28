@@ -534,7 +534,7 @@ impl SparseGrid3 {
     }
 
     /// Domain extent in tiles.
-    pub(super) fn tile_dims(&self) -> (usize, usize, usize) {
+    pub(crate) fn tile_dims(&self) -> (usize, usize, usize) {
         (self.ntx, self.nty, self.ntz)
     }
 

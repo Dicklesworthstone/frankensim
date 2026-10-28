@@ -201,7 +201,7 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
     /// Actual source temperature is cell-centered, not an independently solved
     /// interface temperature. A first-order held-force split and planar geometry
     /// approximation require refinement. Normal capillary mechanics retain the
-    /// native smoothed-fill accuracy. No surface-energy, total-mechanical-energy,
+    /// native curvature reconstruction. No surface-energy, total-mechanical-energy,
     /// entropy or thermocapillary heat claim is added. Geometry, source, budget
     /// and cancellation refusal publish none of the candidate states.
     #[allow(clippy::too_many_arguments)]
@@ -244,10 +244,12 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
     ///
     /// The source, caloric, rheology, buoyancy, time-split and no-energy-claim
     /// obligations of the planar constructor apply. Surface sigma is averaged
-    /// over the actual liquid interface band in each column. Curved interface
-    /// heat-transfer patches are not supplied by this constructor; the existing
-    /// solved-interface-temperature stress adapter remains planar and refuses
-    /// this geometry before publishing a step.
+    /// over the actual liquid interface band in each column. With the
+    /// `enthalpy-coupling` feature, `height_graph_interface_patches` exposes the
+    /// same normals, centroids and actual areas for solved surface exchange.
+    /// That boundary supplies the original sigma at its solved surface
+    /// temperature to both traction and pressure; normal conduction distances
+    /// remain explicit physical inputs.
     #[allow(clippy::too_many_arguments)]
     pub fn free_surface3_from_cells_with_height_graph_thermocapillarity<'m>(
         self,

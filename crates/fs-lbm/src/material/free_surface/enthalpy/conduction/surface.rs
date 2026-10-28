@@ -26,6 +26,45 @@ pub struct FreeSurfaceInterfaceFace {
     pub surroundings_k: f64,
 }
 
+/// One physical patch of the same height graph used by native surface stress.
+///
+/// The centroid and normal belong to the reconstructed graph, not to a
+/// Cartesian voxel face. The positive liquid cell owns this patch's thermal
+/// storage; its occupied-liquid centroid is NOT inferred from a fill fraction.
+/// Supply its normal conduction distance explicitly when attaching exchange.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FreeSurfaceHeightGraphPatch {
+    pub liquid: [usize; 3],
+    pub gas: [usize; 3],
+    pub centroid_m: [f64; 3],
+    pub outward_normal: [f64; 3],
+    pub area_m2: f64,
+}
+
+impl FreeSurfaceHeightGraphPatch {
+    /// Attach the original positive liquid-normal and gas-film distances [m].
+    /// Emissivity, temperatures, distances and live geometry are admitted by
+    /// the transactional surface-exchange step before any heat is published.
+    #[must_use]
+    pub fn with_exchange(
+        self,
+        distances_m: [f64; 2],
+        emissivity: f64,
+        surroundings_k: f64,
+    ) -> FreeSurfaceInterfaceFace {
+        FreeSurfaceInterfaceFace {
+            face: FreeSurfaceGasFace {
+                liquid: self.liquid,
+                gas: self.gas,
+                area_m2: self.area_m2,
+                distances_m,
+            },
+            emissivity,
+            surroundings_k,
+        }
+    }
+}
+
 /// Prescribed gas reservoir on a surface with a solved interface temperature.
 #[derive(Clone, Copy, Debug)]
 pub struct FreeSurfaceInterfaceContact<'a> {
@@ -65,7 +104,7 @@ pub struct FreeSurfaceInterfaceSample {
     pub gas: ResolvedThermochemicalGasState,
     pub liquid_temperature_k: f64,
     pub surface_temperature_k: f64,
-    /// Original sigma source at the solved interface T when planar stress is
+    /// Original sigma source at the solved interface T when surface stress is
     /// active. The bulk liquid bundle retains its actual bulk temperature.
     pub surface_tension: Option<ResolvedScalarProperty>,
     pub gas_temperature_k: f64,
@@ -97,13 +136,82 @@ pub struct FreeSurfaceInterfaceExchange {
     pub heat_from_radiation_j: f64,
     pub last_applied: Vec<FreeSurfaceInterfaceSample>,
     pub thermal_endpoint: Vec<FreeSurfaceInterfaceSample>,
-    /// Present for temperature-dependent planar stress: re-solved after native
+    /// Present for temperature-dependent surface stress: re-solved after native
     /// advection using actual bulk state and the same finite gas endpoint.
     /// These diagnostics update pressure/traction only and supply no heat.
     pub native_endpoint: Vec<FreeSurfaceInterfaceSample>,
 }
 
 impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
+    /// Current complete curved patches from the native height reconstruction.
+    ///
+    /// Call again after an accepted flow interval. Normals, centroids and areas
+    /// use exactly the geometry that supplies Marangoni traction, including
+    /// both slope components and either liquid orientation. A patch may span
+    /// several cut cells vertically; heat is attached to its outermost positive
+    /// liquid cell as a declared column-patch finite-volume reduction. Its
+    /// liquid-normal distance remains a physical input, not a guessed half dx.
+    /// Native conversion hysteresis can temporarily admit over/underfilled
+    /// cells that this monotone graph cannot represent. Such a candidate
+    /// refuses transactionally; its mass or geometry is never clipped here.
+    pub fn height_graph_interface_patches(
+        &self,
+        gate: &CancelGate,
+    ) -> Result<Vec<FreeSurfaceHeightGraphPatch>, Error> {
+        let graph = self
+            .height_graph_thermocapillary_surface()
+            .ok_or(Error::Invalid(
+                "curved heat patches require the original height-graph surface",
+            ))?;
+        let dx = self.flow.scaling.cell_size_m();
+        self.flow
+            .lattice
+            .height_graph_geometry(graph.native(), gate)?
+            .into_iter()
+            .map(|patch| {
+                poll(gate)?;
+                let area_m2 = environment::finite(patch.area * dx * dx)?;
+                let centroid_m = patch.centroid.map(|coordinate| coordinate * dx);
+                if area_m2 <= 0.0 || centroid_m.iter().any(|coordinate| !coordinate.is_finite()) {
+                    return Err(Error::Invalid(
+                        "height-graph heat geometry overflows physical units",
+                    ));
+                }
+                Ok(FreeSurfaceHeightGraphPatch {
+                    liquid: patch.liquid,
+                    gas: patch.gas,
+                    centroid_m,
+                    outward_normal: patch.outward_normal,
+                    area_m2,
+                })
+            })
+            .collect()
+    }
+
+    /// Replace the projected outer Cartesian face by its actual graph area in
+    /// the original thermal owner's exposed-area budget. Values are in m².
+    pub(super) fn height_graph_area_corrections(
+        &self,
+        gate: &CancelGate,
+    ) -> Result<BTreeMap<[usize; 3], f64>, Error> {
+        if self.height_graph_thermocapillary_surface().is_none() {
+            return Ok(BTreeMap::new());
+        }
+        let dx = self.flow.scaling.cell_size_m();
+        self.height_graph_interface_patches(gate)?
+            .into_iter()
+            .map(|patch| {
+                let extra = environment::finite(patch.area_m2 - dx * dx)?;
+                if extra < 0.0 {
+                    return Err(Error::Invalid(
+                        "graph area is smaller than its projected area",
+                    ));
+                }
+                Ok((patch.liquid, extra))
+            })
+            .collect()
+    }
+
     pub(super) fn admit_surfaces(
         &self,
         surfaces: &[FreeSurfaceInterfaceContact<'_>],
@@ -123,8 +231,41 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         {
             return Err(Error::Invalid("invalid surface-temperature solve budget"));
         }
-        if !surfaces.is_empty() && self.temperature_dependent_thermocapillarity() {
+        if !surfaces.is_empty()
+            && (self.height_graph_thermocapillary_surface().is_some()
+                || self.temperature_dependent_thermocapillarity())
+        {
             self.admit_surface_stress_geometry(surfaces, dx, gate)?;
+        }
+        if !surfaces.is_empty() && self.height_graph_thermocapillary_surface().is_some() {
+            // The shared graph reconstruction has already checked each live
+            // liquid/gas owner, unique column and actual curved patch area.
+            // Cartesian face-area limits remain on the separate voxel APIs.
+            let mut endpoints = Vec::with_capacity(surfaces.len());
+            for contact in surfaces {
+                poll(gate)?;
+                let surface = contact.surface;
+                if surface
+                    .face
+                    .distances_m
+                    .iter()
+                    .any(|d| !d.is_finite() || *d <= 0.0)
+                    || !surface.emissivity.is_finite()
+                    || !(0.0..=1.0).contains(&surface.emissivity)
+                    || !surface.surroundings_k.is_finite()
+                    || surface.surroundings_k <= 0.0
+                {
+                    return Err(Error::Invalid(
+                        "curved surface exchange needs positive normal distances and kelvin surroundings with supported emissivity",
+                    ));
+                }
+                contact
+                    .model
+                    .evaluate(contact.context)
+                    .map_err(MaterialLbmError::from)?;
+                endpoints.push(cell_id(surface.face.liquid)?);
+            }
+            return Ok(endpoints);
         }
         let mut gas = Vec::with_capacity(surfaces.len());
         let mut radiation = Vec::with_capacity(surfaces.len());
@@ -158,12 +299,16 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
     /// pure-liquid caloric interval. Gas claims are pinned to the admitted bath
     /// sources; no source switch or extrapolation supplies an interface root.
     /// A safeguarded scalar iteration must meet BOTH declared tolerances.
-    /// For temperature-dependent planar capillarity, supply exactly one full
-    /// outward patch per tank column. Its original sigma(Ts) source drives BOTH
+    /// For temperature-dependent planar or height-graph capillarity, supply
+    /// exactly one full outward patch per tank column. Curved patch owners and
+    /// actual areas come from [`Self::height_graph_interface_patches`]; the
+    /// liquid-normal conduction distance remains explicit. Its original sigma(Ts) source drives BOTH
     /// Marangoni traction and native capillary pressure. The thermal endpoint
     /// starts the flow split; actual advected bulk states re-solve the surface
-    /// before acceptance, without supplying extra heat. Film/centroid geometry
-    /// is held over this interval and must be supplied again on continuation.
+    /// before acceptance, without supplying extra heat. Graph owners, positions,
+    /// normals and areas are reconstructed at that native endpoint. Positive
+    /// film/centroid normal distances are held over this interval and must be
+    /// supplied again on continuation with current complete geometry.
     /// Once active, steps omitting this complete boundary refuse transactionally.
     /// Bulk viscosity, density and caloric storage retain their actual bulk state.
     ///
@@ -365,7 +510,11 @@ impl Conduction<'_, '_> {
             let surface = contact.surface;
             let area = covered.entry(id).or_insert(0.0);
             *area = environment::finite(*area + surface.face.area_m2)?;
-            if *area > thermal.exposed_area_m2(id)? {
+            // Curved area replaces a projected outer face in the cell budget.
+            // Subtracting internal faces can lose a few ulps; permit only that
+            // bounded arithmetic error, never additional physical coverage.
+            let available = thermal.exposed_area_m2(id)?;
+            if *area - available > 64.0 * f64::EPSILON * area.abs().max(available.abs()) {
                 return Err(Error::Invalid("solved surfaces exceed exposed liquid area"));
             }
             let liquid = self.sample_liquid(id, thermal.cells()[&id].specific_h_j_kg, check)?;
@@ -383,8 +532,21 @@ impl Conduction<'_, '_> {
         tl: f64,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<FreeSurfaceInterfaceSample, Error> {
+        self.solve_surface_on(index, self.surfaces[index].surface, liquid, tl, check)
+    }
+
+    // Native graph motion can change the exposed cell and area. Reuse exactly
+    // the original scalar/source solve on that live patch, with the declared
+    // normal distances held for this split. This diagnostic supplies no heat.
+    fn solve_surface_on(
+        &self,
+        index: usize,
+        surface: FreeSurfaceInterfaceFace,
+        liquid: ResolvedLiquidState,
+        tl: f64,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<FreeSurfaceInterfaceSample, Error> {
         let contact = &self.surfaces[index];
-        let surface = contact.surface;
         let (model, context) = self
             .finite_atmosphere
             .as_ref()
