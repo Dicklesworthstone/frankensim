@@ -1,7 +1,7 @@
 frankensim.matdb-manifest.v3
 pack_id	inconel-718-aged-special-metals-2007
 redistribution	permitted	Selected attributed numerical facts and original modeling notes only; no source document, prose or table layout is redistributed
-citation	Special Metals Corporation, INCONEL alloy 718, SMC-045, September 2007, Tables 2 and 5 with footnote a, pages 1-2; https://www.specialmetals.com/documents/technical-bulletins/inconel/inconel-alloy-718.pdf
+citation	Special Metals Corporation, INCONEL alloy 718, SMC-045, September 2007, Tables 2, 4 and 5 with their footnotes; https://www.specialmetals.com/documents/technical-bulletins/inconel/inconel-alloy-718.pdf
 license	Attributed-Numerical-Facts-Only-No-Source-Document-License
 source	supplier-reference	properties.tsv	material-tsv-v1
 property	density	density	dimensional
@@ -12,3 +12,10 @@ axis	temperature	temperature	absolute-temperature
 axis	engineering_reference_model	engineering-reference-model	dimensional
 axis	source_specimens_matched	source-specimens-matched	dimensional
 axis	annealed_1800f_aged	annealed-1800f-aged	dimensional
+property	dynamic_young_modulus	dynamic-young-modulus	dimensional
+property	dynamic_torsional_modulus	dynamic-torsional-modulus	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	source_hot_rolled_annealed_aged_moduli	source-hot-rolled-annealed-aged-moduli	dimensional
+axis	source_dynamic_method	source-dynamic-method	dimensional
+axis	source_row_frequency_known	source-row-frequency-known	dimensional
+axis	source_grade_inconel_718_aged_special_metals_2007	source-grade-inconel-718-aged-special-metals-2007	dimensional

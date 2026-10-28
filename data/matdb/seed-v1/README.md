@@ -4,6 +4,64 @@ This directory retains the human-reviewable source inputs compiled by
 `xtask matdb-pack`. Generated binary packs are deliberately not committed:
 the compiler must reproduce them from the pinned manifest and source record.
 
+## Magnesium and added elastic data for nickel alloys
+
+This expansion adds five AZ31B claims and completes two existing nickel-alloy
+packs with three independently reported moduli. Their existing thermal,
+electrical and expansion records remain intact.
+
+| Pack | Addition | Source scope |
+| --- | --- | --- |
+| `magnesium-az31b-luxfer-2018` | Density, Young modulus, Poisson ratio, heat capacity, conductivity | AZ31B rolled sheet/plate/coil; physical-table temper, temperature, method and direction unstated |
+| `inconel-718-aged-special-metals-2007` | Dynamic Young and torsional moduli | SMC-045 Table 4; hot-rolled-flat specimens and their own test/treatment context |
+| `nilo-36-special-metals-2004` | Young modulus | SMC-031 Table 16; temperature, method, direction and temper unstated |
+
+AZ31B retains the printed SI modulus of 44 GPa and records the inconsistent
+6500-ksi companion without silently substituting it. The inconsistent expansion
+entry is omitted. Conditions from the separate strength table are not imported.
+
+INCONEL 718 uses `dynamic-young-modulus` and `dynamic-torsional-modulus`.
+They remain dynamic bending/torsion results at the native 70 °F point, with
+individual test frequencies unknown. They do not become static axial inputs
+or an independent three-constant elastic calibration. The printed derived
+Poisson ratio is not added as a new measurement. The existing
+`engineering-reference-model=1` and `source-specimens-matched=0` requirements
+also apply to the new moduli, preserving the distinction between the elastic
+and transport specimens.
+
+NILO 36 gains only its source-reported 140 GPa Young modulus. Its existing
+mean-expansion curve still uses endpoint temperature relative to the required
+20 °C reference; it is not an instantaneous expansion law. No independent shear
+modulus or Poisson ratio is supplied.
+
+The axial reference accepts `young-modulus` or `young_modulus` for **tension**,
+so an E-only metal can supply an authored one-dimensional reference without
+inventing a shear modulus or Poisson ratio. The original key, source receipt
+and unknown protocol/direction remain intact. Compression still requires an
+independently named compression modulus; dynamic, flexural, strength and
+point-stress substitutions refuse.
+
+For example, use NILO 36 with authored 50 mm / 100 mm² geometry:
+
+```sh
+cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/nilo-36-special-metals-2004/manifest.tsv --out /tmp/nilo-36.fsmatpk
+cargo run -p fs-material --example material_axial_reference -- \
+  /tmp/nilo-36.fsmatpk tension density young-modulus 0.05 0.0001 0.001 \
+  --axis engineering-reference-model 1 --axis source-specimens-matched 0 \
+  --axis temperature 293.15 --axis source-grade-nilo-36-special-metals-2004 1 \
+  --axis source-pressure-known 0 --axis source-elastic-temperature-known 0 \
+  --axis source-elastic-method-known 0 --axis source-elastic-direction-known 0 \
+  --axis source-elastic-temper-known 0 --step 0.00005 1
+```
+
+The analytic reference is 14,000 N, 0.04055 kg and 0.35 J of model loading work
+for E = 140 GPa and density = 8110 kg/m³. These follow from the authored linear
+reference, not measured coupon results. The density's 293.15 K reference,
+duration and strain ceiling are scenario choices; the modulus's test
+temperature remains unknown. No tensile-test protocol, matched-specimen
+calibration, yield margin, unloading response or three-dimensional isotropy is
+established.
+
 ## Engineering grades, adhesives and building materials
 
 This expansion adds **26 source packs and 210 property claims**, including

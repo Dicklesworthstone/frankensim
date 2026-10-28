@@ -12,11 +12,13 @@ HGO/GOH are [S] constitutive laws; specimen/tissue calibration is separate.
 ## Source-bound axial modulus references
 
 `axial_reference::ResolvedAxialModulusReference` resolves density and an
-explicitly named tensile or compression modulus from one immutable material
+explicitly named tensile/Young modulus for tension or compression modulus for
+compression from one immutable material
 card and one complete typed source point. It retains both original usage
 receipts and uncertainties. Tension and compression are separate modes;
-flexural modulus, strength and pointwise stress cannot substitute for an axial
-modulus. No Poisson ratio or three-dimensional isotropy is inferred.
+dynamic or flexural modulus, strength and pointwise stress cannot substitute
+for an axial modulus. A source-reported Young modulus does not establish a
+tensile-test protocol, directional equivalence or a measured linear range. No Poisson ratio or three-dimensional isotropy is inferred.
 
 This is an authored, zero-origin **linear modulus reference**. A reported
 compression modulus fitted over a finite strain interval is not reclassified

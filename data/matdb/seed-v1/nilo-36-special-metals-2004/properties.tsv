@@ -4,6 +4,7 @@ observation	density	NILO alloy 36 nominal alloy	Table 2 density	8.11 g/cm3 conve
 observation	conductivity	NILO alloy 36 nominal alloy	Table 4 conductivity at 20 C	10.0 W/(m K) is retained only at 293.15 K; no temperature law is inferred.
 observation	resistivity	NILO alloy 36 nominal alloy	Table 6 electrical resistivity	Micro-ohm cm values are multiplied by 1e-8. The supplied temperature sequence is retained from 20 to 600 C; no heat treatment is assigned.
 observation	mean-expansion	NILO alloy 36 nominal alloy	Table 7 interval-mean linear expansion from 20 C	The endpoint temperature is the curve coordinate; every value averages expansion from reference-temperature=293.15 K to that endpoint. This property is deliberately distinct from instantaneous linear-thermal-expansion-coefficient and must not be integrated as instantaneous alpha. The source does not identify the processing state for these values.
+observation	young-modulus-table16	NILO alloy 36, UNS K93600/K93601, W.Nr.1.3912	SMC-031 September 2004, Table 16, Young modulus	The producer reports 140 GPa without numerical temperature, method, direction or temper. No test rate, independent shear modulus or Poisson ratio is supplied. The hot-rolled/annealed condition in separate strength data is not transferred. This is a separate table entry with unknown joint specimen history; the existing engineering-reference-model=1 and source-specimens-matched=0 conditions remain required.
 scalar	density	density,alloy-reference	density	8110	kg/m3	constant
 uncertainty	density	unstated	-	-	-	-
 validity	density	temperature	293.15	293.15	K
@@ -25,3 +26,13 @@ validity	mean-expansion	temperature	373.15	773.15	K
 validity	mean-expansion	reference_temperature	293.15	293.15	K
 validity	mean-expansion	engineering_reference_model	1	1	1
 validity	mean-expansion	source_specimens_matched	0	0	1
+scalar	young-modulus	alloy-reference,young-modulus-table16	young_modulus	140	GPa	constant
+uncertainty	young-modulus	unstated	-	-	-	-
+validity	young-modulus	source_grade_nilo_36_special_metals_2004	1	1	1
+validity	young-modulus	source_pressure_known	0	0	1
+validity	young-modulus	source_elastic_temperature_known	0	0	1
+validity	young-modulus	source_elastic_method_known	0	0	1
+validity	young-modulus	source_elastic_direction_known	0	0	1
+validity	young-modulus	source_elastic_temper_known	0	0	1
+validity	young-modulus	engineering_reference_model	1	1	1
+validity	young-modulus	source_specimens_matched	0	0	1

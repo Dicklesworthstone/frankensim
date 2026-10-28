@@ -1,7 +1,7 @@
 frankensim.matdb-manifest.v3
 pack_id	nilo-36-special-metals-2004
 redistribution	permitted	Selected attributed numerical facts and original modeling notes only; no source document, prose or table layout is redistributed
-citation	Special Metals Corporation, NILO/NILOMAG alloys, SMC-031, September 2004, Tables 2, 4, 6 and 7, pages 1-2; https://www.specialmetals.com/documents/technical-bulletins/nilo-alloys.pdf
+citation	Special Metals Corporation, NILO/NILOMAG alloys, SMC-031, September 2004, Tables 2, 4, 6, 7 and 16; https://www.specialmetals.com/documents/technical-bulletins/nilo-alloys.pdf
 license	Attributed-Numerical-Facts-Only-No-Source-Document-License
 source	supplier-reference	properties.tsv	material-tsv-v1
 property	density	density	dimensional
@@ -12,3 +12,10 @@ axis	temperature	temperature	absolute-temperature
 axis	engineering_reference_model	engineering-reference-model	dimensional
 axis	source_specimens_matched	source-specimens-matched	dimensional
 axis	reference_temperature	reference-temperature	absolute-temperature
+property	young_modulus	young-modulus	dimensional
+axis	source_grade_nilo_36_special_metals_2004	source-grade-nilo-36-special-metals-2004	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	source_elastic_temperature_known	source-elastic-temperature-known	dimensional
+axis	source_elastic_method_known	source-elastic-method-known	dimensional
+axis	source_elastic_direction_known	source-elastic-direction-known	dimensional
+axis	source_elastic_temper_known	source-elastic-temper-known	dimensional

@@ -1,4 +1,8 @@
-//! Source-bound axial comparisons from reported tensile or compression moduli.
+//! Source-bound axial comparisons from reported tensile, Young or compression moduli.
+//!
+//! A source-reported static Young modulus can define the tension reference
+//! without a shear modulus or Poisson ratio. Its name does not establish a
+//! tensile-test protocol, directional equivalence or a measured linear range.
 //!
 //! This is an explicitly authored, zero-origin linear MODULUS REFERENCE.
 //! A reported compression modulus may be fitted over a finite strain interval;
@@ -23,7 +27,7 @@ use fs_qty::{Density, Dims, Pressure, QuantitySpec};
 
 const SPEED: Dims = Dims([1, 0, -1, 0, 0, 0]);
 
-/// One reported axial test mode; tension and compression are not interchangeable.
+/// One authored axial loading mode; tension and compression are not interchangeable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AxialLoadingMode {
     Tension,
@@ -40,7 +44,10 @@ impl AxialLoadingMode {
         // Explicit property-vocabulary admission, not material-name inference.
         // Unknown aliases require a deliberate source-manifest role mapping.
         match self {
-            Self::Tension => matches!(name, "tensile-modulus" | "tensile_modulus"),
+            Self::Tension => matches!(
+                name,
+                "tensile-modulus" | "tensile_modulus" | "young-modulus" | "young_modulus"
+            ),
             Self::Compression => matches!(
                 name,
                 "compression-modulus"
@@ -118,9 +125,11 @@ pub struct ResolvedAxialModulusReference {
     identity: ContentHash,
 }
 impl ResolvedAxialModulusReference {
-    /// Resolve density and the explicitly named tensile/compression modulus at
-    /// one complete source point. Selection remains the original matdb policy.
-    /// Flexural/strength/secant-point stress keys and wrong loading modes refuse.
+    /// Resolve density and a named tensile/Young modulus for tension, or a
+    /// compression modulus for compression, at one complete source point.
+    /// Selection remains the original matdb policy. Original property names and
+    /// source conditions are retained, including unknown test protocol/orientation.
+    /// Dynamic/flexural/strength/secant-point stress keys and wrong modes refuse.
     pub fn resolve(
         card: &MaterialCard,
         point: &QueryPoint,
@@ -134,7 +143,7 @@ impl ResolvedAxialModulusReference {
         )?;
         require(
             request.mode.accepts_name(request.modulus.name()),
-            "select the matching reported tensile/compression modulus; no flexural, strength or point-stress substitution",
+            "select a reported tensile/Young modulus for tension or compression modulus for compression; no dynamic, flexural, strength or point-stress substitution",
         )?;
         require(
             request.maximum_absolute_strain.is_finite()
@@ -435,8 +444,12 @@ mod tests {
         for (name, value, dims) in [
             ("density", 1000.0, Density::DIMS),
             ("tensile-modulus", 2.0e9, Pressure::DIMS),
+            ("young-modulus", 2.0e9, Pressure::DIMS),
+            ("young_modulus", 2.0e9, Pressure::DIMS),
             ("compression-modulus", 1.0e9, Pressure::DIMS),
             ("flexural-modulus", 3.0e9, Pressure::DIMS),
+            ("dynamic-young-modulus", 4.0e9, Pressure::DIMS),
+            ("tensile-strength", 30.0e6, Pressure::DIMS),
             ("compressive-stress", 20.0e6, Pressure::DIMS),
         ] {
             let mut validity = ValidityDomain::unconstrained().with_quantity(
@@ -445,7 +458,7 @@ mod tests {
                 1.0,
                 1.0,
             );
-            if name != "density" {
+            if !matches!(name, "density" | "young-modulus" | "young_modulus") {
                 validity = validity.with_quantity(
                     "test-speed",
                     QuantitySpec::dimensional(SPEED),
@@ -593,6 +606,58 @@ mod tests {
     }
 
     #[test]
+    fn g1_static_young_names_resolve_tension_without_inventing_a_test_protocol() {
+        let card = fixture(false);
+        let p = QueryPoint::new()
+            .with_quantity("source-grade", QuantitySpec::dimensional(Dims::NONE), 1.0)
+            .unwrap();
+        let mut identities = Vec::new();
+        for name in ["young-modulus", "young_modulus"] {
+            let mut req = request(AxialLoadingMode::Tension);
+            req.modulus = ScalarPropertyRequirement::try_new(
+                name,
+                Pressure::DIMS,
+                ScalarAdmissibility::StrictlyPositive,
+            )
+            .unwrap();
+            // These source claims supply neither a crosshead speed nor a G/nu pair.
+            req.crosshead_speed_axis = None;
+            let material = ResolvedAxialModulusReference::resolve(
+                &card,
+                &p,
+                &req,
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .unwrap();
+            assert!(material.source().property(name).is_some());
+            assert!(material.source().property("tensile-modulus").is_none());
+            assert_eq!(material.source().properties().len(), 2);
+            identities.push(material.identity());
+
+            let mut coupon = material.coupon(0.1, 1.0e-4).unwrap();
+            assert_eq!(coupon.stiffness_n_m(), 2.0e6);
+            // Authored duration does not claim a source-validated test rate.
+            let response = coupon.advance_displacement(0.0001, 0.7).unwrap();
+            assert!((response.reference_force_n / 200.0 - 1.0).abs() < 1.0e-14);
+            assert!((response.mass_kg / 0.01 - 1.0).abs() < 1.0e-14);
+            assert!((response.model_loading_work_j / 0.01 - 1.0).abs() < 1.0e-14);
+
+            req.mode = AxialLoadingMode::Compression;
+            assert!(matches!(
+                ResolvedAxialModulusReference::resolve(
+                    &card,
+                    &p,
+                    &req,
+                    MaterialPropertySelection::SingleClaimOnly,
+                ),
+                Err(AxialReferenceError::Invalid(_))
+            ));
+        }
+        // Equal numeric moduli do not erase the two original source-property keys.
+        assert_ne!(identities[0], identities[1]);
+    }
+
+    #[test]
     fn g0_source_roles_rate_and_nonlinear_tables_refuse() {
         let card = fixture(false);
         let mut req = request(AxialLoadingMode::Tension);
@@ -627,6 +692,8 @@ mod tests {
         for name in [
             "compression-modulus",
             "flexural-modulus",
+            "dynamic-young-modulus",
+            "tensile-strength",
             "compressive-stress",
         ] {
             let mut req = request(AxialLoadingMode::Tension);
@@ -636,15 +703,15 @@ mod tests {
                 ScalarAdmissibility::StrictlyPositive,
             )
             .unwrap();
-            assert!(
+            assert!(matches!(
                 ResolvedAxialModulusReference::resolve(
                     &card,
                     &point(0.001),
                     &req,
                     MaterialPropertySelection::SingleClaimOnly
-                )
-                .is_err()
-            );
+                ),
+                Err(AxialReferenceError::Invalid(_))
+            ));
         }
         let p = point(0.001)
             .with_quantity("strain", QuantitySpec::dimensional(Dims::NONE), 0.001)

@@ -3,6 +3,7 @@ observation	alloy-reference	INCONEL 718, UNS N07718, annealed-and-aged engineeri
 observation	density	INCONEL 718 annealed and aged	Table 2 density	Source 0.297 lb/in3 is converted using exact international pound and inch definitions. Test temperature is unstated; the value is frozen only at the author-selected 70 F reference.
 observation	heat-capacity	INCONEL 718 nominal alloy	Table 2 specific heat at 70 F	Retains the printed SI value 435 J/(kg K). The original 0.104 Btu/(lb F) and 21 C equivalents are rounded; no false extra significant figures or particular heat treatment is inferred.
 observation	aged-transport	INCONEL 718 annealed 1800 F for 1 h, then aged	Table 5 annealed-plus-aged columns and footnote a	Aging is 1325 F for 8 h, furnace cooling at 20 F/h to 1150 F, then holding to total aging time 18 h. Conductivity was calculated from resistivity, so these are not independent measurements. k conversion uses Btu_IT=1055.05585262 J and exact inch, foot, hour and temperature-difference definitions; resistivity converts ohm circular mil/ft using area pi*(25.4e-6 m)^2/4 divided by 0.3048 m. No joint covariance is supplied.
+observation	dynamic-elastic	INCONEL alloy 718, UNS N07718	Table 4, hot-rolled flat, dynamic bending and torsion at 70 F	Native E=29.0 million psi and torsional modulus=11.2 million psi are converted to SI. Across the table bending frequency spans 813-571 Hz and torsion 3110-2097 Hz; row frequencies are not given. These are distinct dynamic properties, not static elastic constants. Printed Poisson ratio is calculated from E/G, so no independent nu claim is added. Treatment: 1800 F 1 h, air cool; 1325 F 8 h, furnace cool 20 F/h to 1150 F, hold to 18 h total aging. Added SI digits are conversion digits, not measurement precision. Joint specimen history with the other physical and transport tables is unknown.
 scalar	density	density,alloy-reference	density	8220.93169893033	kg/m3	constant
 uncertainty	density	unstated	-	-	-	-
 validity	density	temperature	294.2611111111111	294.2611111111111	K
@@ -25,3 +26,25 @@ validity	resistivity	temperature	294.2611111111111	1366.483333333333	K
 validity	resistivity	engineering_reference_model	1	1	1
 validity	resistivity	source_specimens_matched	0	0	1
 validity	resistivity	annealed_1800f_aged	1	1	1
+scalar	dynamic-young-modulus	alloy-reference,dynamic-elastic	dynamic_young_modulus	199947961501.88248	Pa	constant
+uncertainty	dynamic-young-modulus	unstated	-	-	-	-
+validity	dynamic-young-modulus	source_pressure_known	0	0	1
+validity	dynamic-young-modulus	temperature	294.2611111111111	294.2611111111111	K
+validity	dynamic-young-modulus	source_hot_rolled_annealed_aged_moduli	1	1	1
+validity	dynamic-young-modulus	source_dynamic_method	1	1	1
+validity	dynamic-young-modulus	source_row_frequency_known	0	0	1
+validity	dynamic-young-modulus	source_grade_inconel_718_aged_special_metals_2007	1	1	1
+validity	dynamic-young-modulus	engineering_reference_model	1	1	1
+validity	dynamic-young-modulus	source_specimens_matched	0	0	1
+validity	dynamic-young-modulus	annealed_1800f_aged	1	1	1
+scalar	dynamic-torsional-modulus	alloy-reference,dynamic-elastic	dynamic_torsional_modulus	77221281683.48564	Pa	constant
+uncertainty	dynamic-torsional-modulus	unstated	-	-	-	-
+validity	dynamic-torsional-modulus	source_pressure_known	0	0	1
+validity	dynamic-torsional-modulus	temperature	294.2611111111111	294.2611111111111	K
+validity	dynamic-torsional-modulus	source_hot_rolled_annealed_aged_moduli	1	1	1
+validity	dynamic-torsional-modulus	source_dynamic_method	1	1	1
+validity	dynamic-torsional-modulus	source_row_frequency_known	0	0	1
+validity	dynamic-torsional-modulus	source_grade_inconel_718_aged_special_metals_2007	1	1	1
+validity	dynamic-torsional-modulus	engineering_reference_model	1	1	1
+validity	dynamic-torsional-modulus	source_specimens_matched	0	0	1
+validity	dynamic-torsional-modulus	annealed_1800f_aged	1	1	1

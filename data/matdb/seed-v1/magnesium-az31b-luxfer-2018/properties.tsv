@@ -1,0 +1,42 @@
+frankensim.matdb-source.v1
+observation	producer-table	Elektron Spec Grade AZ31B rolled sheet, plate and coil	PDF p. 2, physical properties; printed SI column	Physical constants apply to rolled AZ31B sheet/plate/coil without a stated temper or numerical test temperature. The separately listed O/H24 strength conditions are not transferred here. The printed 44 GPa modulus is retained; its parallel 6500 ksi value differs on conversion. The inconsistent expansion entry is omitted. Method, direction and statistical uncertainty are unspecified. No general isotropy or source calibration interval is established.
+scalar	density	producer-table	density	1780	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade_magnesium_az31b_luxfer_2018	1	1	1
+validity	density	source_pressure_known	0	0	1
+validity	density	source_temperature_known	0	0	1
+validity	density	source_temper_known	0	0	1
+validity	density	source_elastic_method_known	0	0	1
+validity	density	source_measurement_direction_known	0	0	1
+scalar	young-modulus	producer-table	young_modulus	44	GPa	constant
+uncertainty	young-modulus	unstated	-	-	-	-
+validity	young-modulus	source_grade_magnesium_az31b_luxfer_2018	1	1	1
+validity	young-modulus	source_pressure_known	0	0	1
+validity	young-modulus	source_temperature_known	0	0	1
+validity	young-modulus	source_temper_known	0	0	1
+validity	young-modulus	source_elastic_method_known	0	0	1
+validity	young-modulus	source_measurement_direction_known	0	0	1
+scalar	poisson-ratio	producer-table	poisson_ratio	0.35	1	constant
+uncertainty	poisson-ratio	unstated	-	-	-	-
+validity	poisson-ratio	source_grade_magnesium_az31b_luxfer_2018	1	1	1
+validity	poisson-ratio	source_pressure_known	0	0	1
+validity	poisson-ratio	source_temperature_known	0	0	1
+validity	poisson-ratio	source_temper_known	0	0	1
+validity	poisson-ratio	source_elastic_method_known	0	0	1
+validity	poisson-ratio	source_measurement_direction_known	0	0	1
+scalar	specific-heat-capacity	producer-table	specific_heat_capacity	1040	J/kg/K	constant
+uncertainty	specific-heat-capacity	unstated	-	-	-	-
+validity	specific-heat-capacity	source_grade_magnesium_az31b_luxfer_2018	1	1	1
+validity	specific-heat-capacity	source_pressure_known	0	0	1
+validity	specific-heat-capacity	source_temperature_known	0	0	1
+validity	specific-heat-capacity	source_temper_known	0	0	1
+validity	specific-heat-capacity	source_elastic_method_known	0	0	1
+validity	specific-heat-capacity	source_measurement_direction_known	0	0	1
+scalar	thermal-conductivity	producer-table	thermal_conductivity	76.9	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	source_grade_magnesium_az31b_luxfer_2018	1	1	1
+validity	thermal-conductivity	source_pressure_known	0	0	1
+validity	thermal-conductivity	source_temperature_known	0	0	1
+validity	thermal-conductivity	source_temper_known	0	0	1
+validity	thermal-conductivity	source_elastic_method_known	0	0	1
+validity	thermal-conductivity	source_measurement_direction_known	0	0	1
