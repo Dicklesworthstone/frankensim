@@ -12,6 +12,7 @@ description = "Deterministic safe-Rust rigid-body and articulated dynamics"
 layer = "L3"
 
 [dependencies]
+fs-contact = { path = "../fs-contact" }
 fs-ga = { path = "../fs-ga" }
 fs-math = { path = "../fs-math" }
 

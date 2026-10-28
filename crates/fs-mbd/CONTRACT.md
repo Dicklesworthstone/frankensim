@@ -541,3 +541,33 @@ restitution, friction, CCD, and time integration remain separate responsibilitie
 G0/G1/G3 `tests/articulated_mass.rs` checks the independent offset-COM body
 solution, full three-inertia coupled response, internal reaction momentum,
 world-frame covariance, impulse-work closure, and atomic admission.
+
+## Articulated point/plane impact response
+
+`articulated_impact::resolve_articulated_plane_impact` resolves one declared
+link-fixed point against one prescribed plane at a supplied configuration. It
+normalizes the finite nonzero outward world normal, computes point velocity
+and the full coupled normal effective mass, and consumes the single-contact
+Newton law owned by `fs-contact::impact`. The inverse-mass operation reuses the
+existing zero-bias free-base ABA path; no dense generalized mass matrix is
+assembled. A unit-response probe is not a physical impact and is not compared
+with endpoint joint-speed or actuator-force limits. The final physical impulse
+still passes the existing atomic impulse owner's endpoint admission.
+
+The borrowed input state and all positions remain unchanged. A strictly
+negative gap refuses; a gap above the declared activation tolerance or a
+nonapproaching contact receives zero impulse. Returned state includes base and
+joint recoil, actual endpoint relative normal speed, world linear/angular
+impulse, and before/after kinetic energy. The prescribed plane supplies work
+`W_plane = p*n.dot(v_plane)`; the receipt exposes `Delta K - W_plane + D`, where
+`D` is the contact law's nonnegative dissipation. This accounts for an actively
+moving plane without misclassifying its work as spurious energy creation.
+
+This is one frictionless impact event, not collision-time detection, position
+repair, a persistent-contact force, a simultaneous-impact solver, or a
+Moreau–Jean time stepper. Six independent impact regressions exercise offset
+COM/effective inertia, rotated frames, articulated recoil, elastic/inelastic
+and intermediate restitution, moving-plane work, activation/penetration, and
+actual endpoint limits. Existing articulated impulse and multibody unit tests
+also cover the shared inverse-mass extraction. The broad contact and multibody
+beads remain open for their remaining dynamics and constraint deliverables.

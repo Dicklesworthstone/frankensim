@@ -29,6 +29,9 @@ use fs_query::{ConvexSeparation, ConvexSupportMap, QueryError, convex_separation
 /// Solver-independent finite-patch normal laws and their generic port embedding.
 pub mod normal_patch;
 
+/// Frictionless single-contact impulse laws with explicit admissibility and work.
+pub mod impact;
+
 /// Ordered fs-matdb interface-card binding for generic contact consumers.
 pub mod interface_binding;
 /// Solver-facing tangential contact adapters.

@@ -2033,6 +2033,7 @@ dependencies = [
 name = "fs-mbd"
 version = "0.0.1"
 dependencies = [
+ "fs-contact",
  "fs-ga",
  "fs-math",
 ]

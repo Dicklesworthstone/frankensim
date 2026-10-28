@@ -423,3 +423,29 @@ through-shot's sphere-entry window survives as Retained).
 ## Evolving partial-slip coefficients
 
 `SmoothTangentialAdapter::prepare_with_coefficients` consumes the original partial-slip changing-coefficient continuation without resetting regional history. Actual force, slip, heat, and the successor law use the new coefficients; signed `generalized_work.coefficient_work_j` remains an independent parameter-work port. The coupled caller must balance that port and publish its coefficient driver together with the contact candidate. It is not caloric heat. Existing commit, rollback, restart and work-key deduplication remain active, and ordinary prepare/restore remain coefficient-exact. The smooth-contact regression checks changed reaction, rollback/retry, new-law restart, and duplicate-work refusal through the real adapter.
+
+## Single-contact normal impulse law
+
+`impact::solve_normal_impact` is an allocation-free frictionless Newton law for
+one scalar normal contact. Inputs are finite nonnegative gap and activation
+tolerance, finite relative normal speed (negative means approach), positive
+inverse effective mass `w = J M^-1 J^T`, and restitution `e` in `[0,1]`. Every
+negative gap refuses; the activation tolerance never authorizes penetration
+repair. Inactive or nonapproaching contacts receive zero impulse.
+
+For an active approaching contact the response is `p = -(1+e)*v/w`, with target
+speed `-e*v` and nonnegative loss `(1-e)*(-v)*p/2`. The result includes activation
+and impact flags and an independently reconstructed fused impulse/velocity
+residual. Arithmetic avoids intermediate overflow when the final response is
+representable; nonfinite outputs, unrepresentable positive impulse, and a
+restitution-velocity residual above `64*EPSILON` relative to approach speed
+refuse. Consistent SI inputs yield N s, m/s, and J. The Newton law and midpoint
+impulse work follow [Acary (2014), equations 5 and 21–22](https://arxiv.org/html/1410.2499v1).
+
+The caller owns geometry, contact selection, Jacobian/inertia assembly, actual
+state update and global momentum/work checks. This owner neither certifies a
+sequence of pairwise impacts as globally admissible nor implements simultaneous
+contact, friction, a Moreau–Jean stepper, gap stabilization, or partition of loss
+into heat/damage. Six focused unit regressions cover the independent energy
+and restitution identities, activation/refusal, scaling and extreme finite
+responses. The broad nonsmooth-contact bead remains open.

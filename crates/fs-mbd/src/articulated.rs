@@ -1442,34 +1442,12 @@ pub fn apply_free_floating_impulses(
         joint_position,
         joint_velocity,
     )?;
-    let zero = vec![0.0; model.dof_count()];
-    let pass = articulated_body_pass(
-        model,
-        Twist::zero(),
-        joint_position,
-        &zero,
-        joint_impulses,
-        body_impulses,
-        None,
-        true,
-        FREE_FLOATING_ABA_FIELDS,
-    )?;
-    let base_delta = solve_floating_base_system(
-        &pass.base_articulated_inertia,
-        wrench_from_array(scale6(pass.base_articulated_bias.to_array(), -1.0)),
-    )?;
-    let (joint_delta, _) = propagate_aba_accelerations(
-        model,
-        &pass,
-        base_delta,
-        "impulse.joint_velocity_change",
-        "impulse.body_velocity_change",
-    )?;
+    let delta = free_floating_impulse_delta(model, joint_position, joint_impulses, body_impulses)?;
     let base_after =
-        FreeFloatingBaseState::new(base.world_from_base, base.twist_body.plus(base_delta));
+        FreeFloatingBaseState::new(base.world_from_base, base.twist_body.plus(delta.base));
     let joint_velocity_after: Vec<_> = joint_velocity
         .iter()
-        .zip(&joint_delta)
+        .zip(&delta.joint)
         .map(|(velocity, delta)| velocity + delta)
         .collect();
     // Evaluate actual returned endpoint velocities, retaining the same joint
@@ -1517,6 +1495,55 @@ pub fn apply_free_floating_impulses(
         impulse_work,
         kinetic_work_residual,
     })
+}
+
+/// Internal inverse-mass action, before any physical endpoint speed checks.
+/// Effective-mass probes must not be mistaken for an applied unit impulse.
+pub(super) struct ImpulseVelocityChange {
+    pub(super) base: Twist,
+    pub(super) joint: Vec<f64>,
+    pub(super) body: Vec<Twist>,
+}
+
+pub(super) fn free_floating_impulse_delta(
+    model: &ArticulatedModel,
+    joint_position: &[f64],
+    joint_impulses: &[f64],
+    body_impulses: &[Wrench],
+) -> Result<ImpulseVelocityChange, ArticulatedError> {
+    if model.links[0].joint.kind() != JointKind::Fixed {
+        return Err(ArticulatedError::FloatingBaseRootJointNotFixed);
+    }
+    model.validate_configuration(joint_position)?;
+    model.validate_generalized("joint_impulses", joint_impulses)?;
+    require_len("body_impulses", body_impulses.len(), model.link_count())?;
+    for impulse in body_impulses {
+        validate_wrench(*impulse, "body_impulses")?;
+    }
+    let zero = vec![0.0; model.dof_count()];
+    let pass = articulated_body_pass(
+        model,
+        Twist::zero(),
+        joint_position,
+        &zero,
+        joint_impulses,
+        body_impulses,
+        None,
+        true,
+        FREE_FLOATING_ABA_FIELDS,
+    )?;
+    let base = solve_floating_base_system(
+        &pass.base_articulated_inertia,
+        wrench_from_array(scale6(pass.base_articulated_bias.to_array(), -1.0)),
+    )?;
+    let (joint, body) = propagate_aba_accelerations(
+        model,
+        &pass,
+        base,
+        "impulse.joint_velocity_change",
+        "impulse.body_velocity_change",
+    )?;
+    Ok(ImpulseVelocityChange { base, joint, body })
 }
 
 struct ArticulatedBodyPass {
