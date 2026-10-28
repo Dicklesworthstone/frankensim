@@ -2742,3 +2742,42 @@ fixed-volume spherical-cap energy minimization, area scaling and domain
 refusals. Native source/wall tests exercise distinct adhesion-driven capillary
 responses, mass conservation, exact paired-source refresh, substitution refusal
 and the unchanged directly sourced angle path.
+
+## Mode-dependent cohesive fracture
+
+`BilinearCohesive::new_mixed_mode` selects separate opening/shear stiffnesses,
+peak strengths and fracture energies. Quadratic nominal-traction interaction
+localizes the first damage-initiation point on each straight jump segment. The
+undamaged shear-energy fraction at that point selects the Benzeggagh--Kenane
+toughness. This implementation explicitly freezes that onset mix and envelope
+for the point's subsequent history. A shared maximum energy norm then drives
+irreversible scalar degradation, with undamaged compression after failure.
+Pure-mode and proportional mixed-mode work equal their selected fracture energy;
+nonproportional post-initiation paths retain exact analytic work/storage/loss
+accounting and cannot reselect toughness or heal. The onset-mix freeze is a
+declared model extension, not experimental qualification of arbitrary histories.
+
+The consistent algorithmic tangent includes the sensitivity of the initiation
+crossing and selected toughness when a trial first initiates damage. It can be
+nonsymmetric; the existing Newton/FGMRES owner consumes it without an SPD
+assumption. Evaluation allocates nothing; first initiation has a bounded scalar
+solve and retained-envelope steps use closed-form arithmetic. Equal mode
+parameters recover the original common-mode response. The scalar law getters
+continue to describe pure opening; each point exposes its selected mixed envelope.
+
+`resolve_mixed_mode_bilinear_cohesive` requires eight explicit ordered-interface
+claims: normal/shear stiffness [Pa/m], normal/shear strength [Pa], mode-I/mode-II
+fracture energy [J/m2], dimensionless BK exponent, and compression stiffness. No
+missing mode is inferred. The existing `ResolvedBilinearCohesive` source bundle
+and solid/P1/thermal point paths remain the owners; fixed external source
+conditions and all original source-role refusals apply. The existing thermal
+joint is normal-only and therefore consumes the pure-opening envelope through
+the same exact point work/storage interface.
+
+Quadratic initiation and BK interaction reference Camanho and Davila (2002),
+NASA/TM-2002-211737, <https://ntrs.nasa.gov/citations/20020053651>. Tests check
+pure-mode and proportional mixed fracture work, equal-mode recovery,
+initiation-sensitive and retained-history tangents, nonproportional work,
+straight-path subdivision, compression/shear, source-unit/domain refusals and
+actual native-equilibrium load histories. Temperature/rate-dependent toughness,
+fatigue, evolving mode-mix calibration and fracture heat partition remain separate.

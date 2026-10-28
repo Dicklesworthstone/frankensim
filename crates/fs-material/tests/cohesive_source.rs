@@ -290,3 +290,102 @@ fn evolving_gap_and_rate_applicability_cannot_be_frozen_into_damage_law() {
         .is_err()
     );
 }
+
+fn mixed_mode_claims() -> Vec<PropertyClaim> {
+    let stiffness = interface_stiffness_per_area_dims();
+    [
+        (COHESIVE_NORMAL_STIFFNESS_PROPERTY, stiffness, 1e9),
+        (COHESIVE_TANGENTIAL_STIFFNESS_PROPERTY, stiffness, 4e8),
+        (COHESIVE_NORMAL_STRENGTH_PROPERTY, Pressure::DIMS, 2e5),
+        (COHESIVE_TANGENTIAL_STRENGTH_PROPERTY, Pressure::DIMS, 1.6e5),
+        (
+            COHESIVE_MODE_I_FRACTURE_ENERGY_PROPERTY,
+            FRACTURE_ENERGY_PER_AREA_DIMS,
+            100.0,
+        ),
+        (
+            COHESIVE_MODE_II_FRACTURE_ENERGY_PROPERTY,
+            FRACTURE_ENERGY_PER_AREA_DIMS,
+            400.0,
+        ),
+        (COHESIVE_BK_EXPONENT_PROPERTY, Dims::NONE, 2.0),
+        (COHESIVE_COMPRESSION_STIFFNESS_PROPERTY, stiffness, 2e9),
+    ]
+    .into_iter()
+    .map(|(name, dims, value)| claim(name, dims, value))
+    .collect()
+}
+
+#[test]
+fn source_mode_specific_strengths_and_toughness_reach_original_cohesive_point() {
+    let card = card(mixed_mode_claims(), "synthetic mixed-mode initial bond");
+    let source = resolve_mixed_mode_bilinear_cohesive(
+        &card,
+        &QueryPoint::new().with("T", 300.0).unwrap(),
+        MaterialPropertySelection::SingleClaimOnly,
+        0.02,
+    )
+    .unwrap();
+    assert_eq!(source.resolved().card_identity(), card.content_hash());
+    assert_eq!(source.resolved().properties().len(), 8);
+    assert!(source.law().mixed_mode_parameters().is_some());
+    let opening = source
+        .law()
+        .bonded_point()
+        .trial([0.002, 0.0, 0.0], 1e-8)
+        .unwrap();
+    let shear = source
+        .law()
+        .bonded_point()
+        .trial([0.0, 0.006, 0.0], 1e-8)
+        .unwrap();
+    assert!(opening.point.failed() && shear.point.failed());
+    assert!((opening.energy.dissipated - 100.0).abs() < 1e-10);
+    assert!((shear.energy.dissipated - 400.0).abs() < 1e-10);
+    assert!(
+        source
+            .require_surface_materials(
+                &source.surfaces()[1].material,
+                &source.surfaces()[0].material
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn mixed_source_does_not_infer_missing_modes_or_freeze_rate_conditions() {
+    let common = card(properties(), "old common mode");
+    let point = QueryPoint::new().with("T", 300.0).unwrap();
+    assert!(
+        resolve_mixed_mode_bilinear_cohesive(
+            &common,
+            &point,
+            MaterialPropertySelection::SingleClaimOnly,
+            0.02
+        )
+        .is_err()
+    );
+    let mut claims = mixed_mode_claims();
+    claims[6] = claim(COHESIVE_BK_EXPONENT_PROPERTY, Pressure::DIMS, 2.0);
+    assert!(
+        resolve_mixed_mode_bilinear_cohesive(
+            &card(claims, "wrong exponent units"),
+            &point,
+            MaterialPropertySelection::SingleClaimOnly,
+            0.02
+        )
+        .is_err()
+    );
+    let mut claims = mixed_mode_claims();
+    claims[5].validity = claims[5].validity.clone().with("rate", 0.0, 1.0);
+    let point = point.with("rate", 0.0).unwrap();
+    assert!(
+        resolve_mixed_mode_bilinear_cohesive(
+            &card(claims, "unowned rate"),
+            &point,
+            MaterialPropertySelection::SingleClaimOnly,
+            0.02
+        )
+        .is_err()
+    );
+}

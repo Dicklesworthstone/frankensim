@@ -5,6 +5,10 @@
 //! a coefficient after damage requires a separate thermodynamic history
 //! transfer; this adapter deliberately exposes no history-refresh operation.
 
+/// Explicit normal/shear source data for the frozen-onset BK extension.
+pub mod mixed_mode;
+pub use mixed_mode::*;
+
 use super::BilinearCohesive;
 use crate::state_point::{
     MaterialPropertySelection, MaterialStatePointError, ResolvedInterfaceStatePoint,
@@ -27,7 +31,8 @@ pub const FRACTURE_ENERGY_PER_AREA_DIMS: Dims = Dims([0, 1, -2, 0, 0, 0]);
 
 /// A bilinear cohesive law tied to the complete original ordered interface.
 ///
-/// All modes share one strength and fracture energy, as in `BilinearCohesive`.
+/// The standard constructor selects common-mode data; the explicitly named
+/// mixed-mode constructor selects independent normal/shear data and BK exponent.
 /// This does not infer mixed-mode calibration, adhesion from bulk chemistry,
 /// physical bonding from geometric contact, or fracture heat partition.
 #[derive(Debug, Clone, PartialEq)]

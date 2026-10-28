@@ -2,9 +2,10 @@
 //!
 //! The jump is [normal opening, shear 1, shear 2] in metres. Positive normal
 //! opening and both shear components drive a common irreversible damage variable.
-//! All three cohesive modes share the declared stiffness, peak traction and
-//! fracture energy. This is the mode-independent specialization of the standard
-//! effective-separation law, NOT a fitted mixed-mode failure criterion.
+//! By default all three modes share the declared stiffness, peak traction and
+//! fracture energy. `new_mixed_mode` explicitly selects separate opening/shear
+//! data, quadratic initiation and frozen-onset BK toughness through `mixed_mode`.
+//! Both paths retain the same immutable point, work and structural solver APIs.
 //!
 //! Unloading/reloading is elastic at the retained damaged stiffness. Compression
 //! has a separate, undamaged penalty; after complete failure only that normal
@@ -20,6 +21,9 @@ use fs_math::det;
 
 /// Ordered interface data bound to the existing cohesive constitutive law.
 pub mod source;
+
+/// Anisotropic initiation and source-defined mode-dependent fracture energy.
+pub mod mixed_mode;
 
 /// A refusal never mutates an accepted point.
 #[derive(Debug, Clone, PartialEq)]
@@ -48,6 +52,7 @@ pub struct BilinearCohesive {
     maximum_separation: f64,
     onset: f64,
     failure: f64,
+    mixed_mode: Option<mixed_mode::MixedModeParameters>,
 }
 impl BilinearCohesive {
     /// Coherent SI inputs: Pa/m, Pa, J/m2, Pa/m and m, respectively.
@@ -70,7 +75,7 @@ impl BilinearCohesive {
         positive(strength_pa / (failure - onset))?;
         Ok(Self { stiffness: stiffness_pa_m, strength: strength_pa,
             fracture_energy: fracture_energy_j_m2, compression_stiffness: compression_stiffness_pa_m,
-            maximum_separation: maximum_separation_m, onset, failure })
+            maximum_separation: maximum_separation_m, onset, failure, mixed_mode: None })
     }
 
     #[must_use]
@@ -83,7 +88,8 @@ impl BilinearCohesive {
     pub fn strength_pa(&self) -> f64 { self.strength }
     #[must_use]
     pub fn fracture_energy_j_m2(&self) -> f64 { self.fracture_energy }
-    /// Magnitude of the negative radial softening tangent, Pa/m.
+    /// Magnitude of the pure-opening negative softening tangent, Pa/m.
+    /// For a mixed-mode law this is not a bound on every coupled tangent.
     #[must_use]
     pub fn softening_stiffness_pa_m(&self) -> f64 { self.strength / (self.failure-self.onset) }
 
@@ -92,7 +98,7 @@ impl BilinearCohesive {
     /// an actual interface is bonded and which physical area it represents.
     #[must_use]
     pub fn bonded_point(&self) -> CohesivePoint<'_> {
-        CohesivePoint { law: self, jump: [0.0; 3], maximum: 0.0 }
+        CohesivePoint { law: self, jump: [0.0; 3], maximum: 0.0, mixed_history: None }
     }
 
     fn intact(&self, maximum: f64) -> f64 {
@@ -124,6 +130,7 @@ pub struct CohesivePoint<'a> {
     law: &'a BilinearCohesive,
     jump: [f64; 3],
     maximum: f64,
+    mixed_history: Option<mixed_mode::MixedModeHistory>,
 }
 
 /// Incremental energy per original bonded area, J/m2.
@@ -162,13 +169,27 @@ impl<'a> CohesivePoint<'a> {
     #[must_use]
     pub fn jump_m(&self) -> [f64; 3] { self.jump }
     #[must_use]
-    pub fn damage(&self) -> f64 { 1.0-self.law.intact(self.maximum) }
+    pub fn damage(&self) -> f64 {
+        if self.law.mixed_mode.is_some() { return 1.0-self.mixed_integrity(); }
+        1.0-self.law.intact(self.maximum)
+    }
     #[must_use]
-    pub fn failed(&self) -> bool { self.maximum >= self.law.failure }
+    pub fn failed(&self) -> bool {
+        if self.law.mixed_mode.is_some() {
+            return self.mixed_history.is_some_and(|h| self.maximum >= h.failure_sqrt_energy);
+        }
+        self.maximum >= self.law.failure
+    }
     #[must_use]
-    pub fn dissipated_j_m2(&self) -> f64 { self.law.fracture(self.maximum) }
+    pub fn dissipated_j_m2(&self) -> f64 {
+        if self.law.mixed_mode.is_some() {
+            return self.mixed_history.map_or(0.0, |h| h.fracture(self.maximum));
+        }
+        self.law.fracture(self.maximum)
+    }
     #[must_use]
     pub fn stored_energy_j_m2(&self) -> f64 {
+        if self.law.mixed_mode.is_some() { return self.mixed_stored_energy(); }
         let active = active(self.jump);
         let stiffness = self.law.stiffness*self.law.intact(self.maximum);
         let cohesive = active.iter().map(|&x| (0.5*stiffness*x)*x).sum::<f64>();
@@ -177,6 +198,7 @@ impl<'a> CohesivePoint<'a> {
     }
     #[must_use]
     pub fn traction_pa(&self) -> [f64; 3] {
+        if self.law.mixed_mode.is_some() { return self.mixed_traction(); }
         let stiffness = self.law.stiffness*self.law.intact(self.maximum);
         [if self.jump[0] < 0.0 { self.law.compression_stiffness*self.jump[0] }
             else { stiffness*self.jump[0] }, stiffness*self.jump[1], stiffness*self.jump[2]]
@@ -191,10 +213,11 @@ impl<'a> CohesivePoint<'a> {
         -> Result<CohesiveStep<'a>, CohesiveError> {
         positive(energy_tolerance_j_m2)?;
         if norm(jump_m)? > self.law.maximum_separation { return Err(CohesiveError::SeparationLimit); }
+        if self.law.mixed_mode.is_some() { return self.trial_mixed(jump_m, energy_tolerance_j_m2); }
         let radius = norm(active(jump_m))?;
         let old_radius = norm(active(self.jump))?;
         let maximum = self.maximum.max(radius).min(self.law.failure);
-        let point = Self { law: self.law, jump: jump_m, maximum };
+        let point = Self { law: self.law, jump: jump_m, maximum, mixed_history: None };
         let stiffness_old = self.law.stiffness*self.law.intact(self.maximum);
         // The effective radius is convex on a straight jump segment, so it
         // cannot exceed both endpoints. Below the old maximum, constant-damage

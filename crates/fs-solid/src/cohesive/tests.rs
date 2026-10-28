@@ -186,3 +186,79 @@ fn series_planes_distinguish_interface_from_declared_feature_failure() {
         close(work,0.01,1e-9);
     }
 }
+
+
+#[test]
+fn anisotropic_mixed_mode_law_uses_native_equilibrium_and_retains_onset_history() {
+    use fs_material::cohesive::mixed_mode::MixedModeParameters;
+    let law = BilinearCohesive::new_mixed_mode(
+        MixedModeParameters {
+            normal_stiffness_pa_m: 1e9,
+            tangential_stiffness_pa_m: 4e8,
+            normal_strength_pa: 2e5,
+            tangential_strength_pa: 1.6e5,
+            mode_i_fracture_energy_j_m2: 100.0,
+            mode_ii_fracture_energy_j_m2: 400.0,
+            bk_exponent: 2.0,
+        },
+        2e9,
+        0.02,
+    )
+    .unwrap();
+    let elastic = Diagonal(vec![2e9, 2e9]);
+    let patch = CohesivePatch::new(
+        90,
+        1.0,
+        &law,
+        vec![
+            JumpTerm {
+                dof: 0,
+                local: [1.0, 0.0, 0.0],
+            },
+            JumpTerm {
+                dof: 1,
+                local: [0.0, 1.0, 0.0],
+            },
+        ],
+    )
+    .unwrap();
+    let system = CohesiveSystem::new(&elastic, vec![patch], budget()).unwrap();
+    let mut state = system.bonded_state();
+    let mut expected = law.bonded_point();
+    for target in [
+        [0.00005, 0.00003, 0.0],
+        [0.0004, 0.0007, 0.0],
+        [-0.0002, 0.0015, 0.0],
+        [0.0001, 0.0002, 0.0],
+        [0.0, 0.012, 0.0],
+        [-0.001, 0.001, 0.0],
+    ] {
+        let prediction = expected.trial(target, 1e-7).unwrap();
+        let force = [
+            2e9 * target[0] + prediction.traction_pa[0],
+            2e9 * target[1] + prediction.traction_pa[1],
+        ];
+        let mut controls = config();
+        controls.total_cohesive_energy_tolerance_j = 1e-7;
+        let next = state
+            .solve_controlled(&force, &[[0.0; 3]], controls, &mut || false)
+            .unwrap();
+        for (actual, wanted) in next.state.displacements_m().iter().zip(target) {
+            close(*actual, wanted, 2e-12);
+        }
+        close(
+            next.cohesive_energy_j.dissipated,
+            prediction.energy.dissipated,
+            1e-6,
+        );
+        if let Some(old) = state.points()[0].mixed_mode_history() {
+            assert_eq!(next.state.points()[0].mixed_mode_history(), Some(old));
+        }
+        assert!(next.state.points()[0].damage() >= state.points()[0].damage());
+        expected = prediction.point;
+        state = next.state;
+    }
+    assert!(state.points()[0].failed());
+    close(state.points()[0].traction_pa()[0], -2e6, 1e-4);
+    assert_eq!(state.points()[0].traction_pa()[1], 0.0);
+}
