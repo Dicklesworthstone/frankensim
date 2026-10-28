@@ -1,0 +1,13 @@
+frankensim.matdb-manifest.v9
+pack_id	eps-nist-srm1453-2013
+redistribution	permitted	Work of the United States Government; numerical relation from NIST SP 260-175 and the 2013 SRM 1453 certificate, with attribution retained
+citation	Zarr, R. R. and Pintar, A. L., NIST SP 260-175 (2012), sections 6.2 and 7.2, equations 16–17; https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.260-175.pdf ; NIST SRM 1453 certificate issued 2013-02-26, pp. 1–2, https://tsapps.nist.gov/srmext/certificates/archives/1453.pdf
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	nist-srm1453-conductivity	properties.tsv	material-tsv-v1
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+axis	mean_temperature	mean-temperature	absolute-temperature
+axis	bulk_density	bulk-density	dimensional
+axis	temperature_difference	temperature-difference	dimensional
+axis	source_lot_srm1453	source-lot-srm1453	dimensional
+axis	source_conditioning_protocol_satisfied	source-conditioning-protocol-satisfied	dimensional
+axis	unstacked_unsliced_uncontaminated_board	unstacked-unsliced-uncontaminated-board	dimensional

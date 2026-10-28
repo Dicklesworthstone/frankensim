@@ -1,0 +1,56 @@
+frankensim.matdb-source.v1
+observation	stock-shapes	TECAPET white PET stock shapes	Ensinger 2023-07-19 AE, density and thermal/mechanical tables	Producer comparison guidelines for extruded/machined reference specimens, not PET film, PETG or printed parts. Tensile type 1b; flexure span 64 mm; compression modulus on 10x10x50 mm over 0.5–1%; compression stresses on 10 mm cubes at 1/2/5%. Methods: tensile ISO 527-2, flexure ISO 178, compression ISO 604, thermal ISO 22007-4:2008. Density 1.36 g/cm3 and Cp 1.2 J/(g K) are converted to SI. Temperature, moisture, pressure, orientation and uncertainty are unstated. Test speeds denote crosshead travel. Compression points remain discrete; no fitted nonlinear law or isotropic Young modulus is supplied. Service temperatures and melting data do not qualify the constants over a temperature interval.
+scalar	density	stock-shapes	density	1360	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade_tecapet_white	1	1	1
+validity	density	source_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+validity	density	source_pressure_known	0	0	1
+scalar	thermal-conductivity	stock-shapes	thermal_conductivity	0.31	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	source_grade_tecapet_white	1	1	1
+validity	thermal-conductivity	source_temperature_known	0	0	1
+validity	thermal-conductivity	source_moisture_condition_known	0	0	1
+validity	thermal-conductivity	source_pressure_known	0	0	1
+scalar	specific-heat-capacity	stock-shapes	specific_heat_capacity	1200	J/kg/K	constant
+uncertainty	specific-heat-capacity	unstated	-	-	-	-
+validity	specific-heat-capacity	source_grade_tecapet_white	1	1	1
+validity	specific-heat-capacity	source_temperature_known	0	0	1
+validity	specific-heat-capacity	source_moisture_condition_known	0	0	1
+validity	specific-heat-capacity	source_pressure_known	0	0	1
+scalar	tensile-modulus	stock-shapes	tensile_modulus	3100	MPa	constant
+uncertainty	tensile-modulus	unstated	-	-	-	-
+validity	tensile-modulus	source_grade_tecapet_white	1	1	1
+validity	tensile-modulus	source_temperature_known	0	0	1
+validity	tensile-modulus	source_moisture_condition_known	0	0	1
+validity	tensile-modulus	source_pressure_known	0	0	1
+validity	tensile-modulus	test_speed	1.6666666666666667e-5	1.6666666666666667e-5	m/s
+scalar	tensile-strength	stock-shapes	tensile_strength	79	MPa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	source_grade_tecapet_white	1	1	1
+validity	tensile-strength	source_temperature_known	0	0	1
+validity	tensile-strength	source_moisture_condition_known	0	0	1
+validity	tensile-strength	source_pressure_known	0	0	1
+validity	tensile-strength	test_speed	8.333333333333334e-4	8.333333333333334e-4	m/s
+scalar	flexural-modulus	stock-shapes	flexural_modulus	3200	MPa	constant
+uncertainty	flexural-modulus	unstated	-	-	-	-
+validity	flexural-modulus	source_grade_tecapet_white	1	1	1
+validity	flexural-modulus	source_temperature_known	0	0	1
+validity	flexural-modulus	source_moisture_condition_known	0	0	1
+validity	flexural-modulus	source_pressure_known	0	0	1
+validity	flexural-modulus	test_speed	3.3333333333333335e-5	3.3333333333333335e-5	m/s
+scalar	compression-modulus	stock-shapes	compression_modulus	2700	MPa	constant
+uncertainty	compression-modulus	unstated	-	-	-	-
+validity	compression-modulus	source_grade_tecapet_white	1	1	1
+validity	compression-modulus	source_temperature_known	0	0	1
+validity	compression-modulus	source_moisture_condition_known	0	0	1
+validity	compression-modulus	source_pressure_known	0	0	1
+validity	compression-modulus	test_speed	8.333333333333333e-5	8.333333333333333e-5	m/s
+curve	compression-points	stock-shapes	compressive_stress	compressive_strain	1	MPa	0.01:19,0.02:35,0.05:83	tabulated
+uncertainty	compression-points	unstated	-	-	-	-
+validity	compression-points	compressive_strain	0.01	0.05	1
+validity	compression-points	source_grade_tecapet_white	1	1	1
+validity	compression-points	source_temperature_known	0	0	1
+validity	compression-points	source_moisture_condition_known	0	0	1
+validity	compression-points	source_pressure_known	0	0	1
+validity	compression-points	test_speed	8.333333333333333e-5	8.333333333333333e-5	m/s

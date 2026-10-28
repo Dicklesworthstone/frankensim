@@ -1,0 +1,10 @@
+frankensim.matdb-source.v3
+observation	nist-fit	NIST SRM 1453 expanded-polystyrene board lot supplied by Polyfoam Inc.	NIST 1016 mm guarded-hot-plate measurements, ASTM C177; SP 260-175 equations 16–17 and Annex 4	Conductivity lambda=0.00111-0.0000424*rho+0.000115*Tm in SI, valid for density 37–46 kg/m3 and mean specimen temperature 281–313 K; measured temperature difference 20 K. The four surface vertices are exact evaluations of this affine fit, not independent measurements; two triangles reproduce it without interpolation-model error. The 1.5% relative half-width retains the report's at-least-95% posterior predictive coverage for a hypothetical new NIST measurement; it is neither a universal EPS manufacturing tolerance nor a deterministic bound. Certified lot only, not SRM1453a or arbitrary insulation. Condition until stable mass at 20–25 C and 40–65% RH; preserve original thickness, no stacked units, damage or contamination. The certificate allows lateral cuts only with density rechecked and limits applied compression to 304 kPa. Typed protocol flags require the caller to establish these conditions; they do not measure them. No heat capacity or compressive constitutive model is supplied.
+surface2d	conductivity-fit	nist-fit	thermal_conductivity	mean_temperature	K	bulk_density	kg/m3	W/m/K	281:37:0.0318562,313:37:0.0355362,281:46:0.0314746,313:46:0.0351546	0:1:2,1:3:2	linear
+uncertainty	conductivity-fit	relative	0.015	1	0.95	1
+validity	conductivity-fit	mean_temperature	281	313	K
+validity	conductivity-fit	bulk_density	37	46	kg/m3
+validity	conductivity-fit	temperature_difference	20	20	K
+validity	conductivity-fit	source_lot_srm1453	1	1	1
+validity	conductivity-fit	source_conditioning_protocol_satisfied	1	1	1
+validity	conductivity-fit	unstacked_unsliced_uncontaminated_board	1	1	1

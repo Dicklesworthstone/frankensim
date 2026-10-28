@@ -1,0 +1,20 @@
+frankensim.matdb-manifest.v3
+pack_id	ensinger-tecaflon-pvdf-natural
+redistribution	permitted	Selected attributed numerical facts and original notes only; neither the producer document nor its table layout is redistributed
+citation	Ensinger GmbH, TECAFLON PVDF natural stock shapes, 2024-06-24 version AF, p. 1; https://www.ensinger-online.com/modules/public/sheet/createsheet.php?FILENAME=TECAFLON_PVDF_natural_0.PDF&FL=0&SID=1343&ZOOM=1.2 ; product page https://www.ensingerplastics.com/en/shapes/tecaflon-pvdf-natural , accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	ensinger-tecaflon-pvdf-natural	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	tensile_modulus	tensile-modulus	dimensional
+property	tensile_strength	tensile-strength	dimensional
+property	flexural_modulus	flexural-modulus	dimensional
+property	compression_modulus	compression-modulus	dimensional
+property	compressive_stress	compressive-stress	dimensional
+axis	source_grade_tecaflon_pvdf_natural	source-grade-tecaflon-pvdf-natural	dimensional
+axis	source_temperature_known	source-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	test_speed	test-speed	dimensional
+axis	compressive_strain	compressive-strain	dimensional

@@ -1,0 +1,19 @@
+frankensim.matdb-manifest.v3
+pack_id	west-system-105-205-neat-cured
+redistribution	permitted	Selected attributed numerical facts and original notes only; neither the producer page nor its table layout is redistributed
+citation	Gougeon Brothers, WEST SYSTEM Compare Epoxy Physical Properties, ASTM Testing and 105 Resin/205 Fast Hardener column; https://www.westsystem.com/compare-epoxy-physical-properties/ , accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	west-105-205	properties.tsv	material-tsv-v1
+property	specific_gravity	specific-gravity	dimensional
+property	compression_yield_strength	compression-yield-strength	dimensional
+property	tensile_strength	tensile-strength	dimensional
+property	tensile_elongation	tensile-elongation	dimensional
+property	tensile_modulus	tensile-modulus	dimensional
+property	flexural_strength	flexural-strength	dimensional
+property	flexural_modulus	flexural-modulus	dimensional
+axis	source_grade_west_105_205	source-grade-west-105-205	dimensional
+axis	cure_age	cure-age	dimensional
+axis	room_temperature_cure	room-temperature-cure	dimensional
+axis	neat_unreinforced_resin	neat-unreinforced-resin	dimensional
+axis	source_temperature_known	source-temperature-known	dimensional
+axis	source_test_rate_known	source-test-rate-known	dimensional

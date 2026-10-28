@@ -1,0 +1,21 @@
+frankensim.matdb-source.v1
+observation	product	ProRox SL 960 stone-wool slab, European 2020 edition	ROCKWOOL PEN-00-1-003 ENG; density EN 1602, conductivity EN 12667, vapor resistance EN 14303	Nominal density 100 kg/m3; eleven conductivity values from 50 to 660 C. This exact European edition is kept separate from regional SL960NA/SA products and later revisions. Conductivity is effective slab heat transport, not intrinsic fiber conductivity. The table does not specify moisture, pressure, aging, orientation, porosity or binder content. Density and vapor-factor test temperatures are unstated. Optional aluminum facing is not represented. Linear interpolation between printed conductivity points is an explicit database approximation without an error bound. No heat capacity, porous-acoustic absorption, maximum-temperature structural law or guaranteed confidence interval is supplied.
+scalar	density	product	density	100	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade_prorox_sl960_en_2020	1	1	1
+validity	density	source_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+validity	density	source_pressure_known	0	0	1
+curve	thermal-conductivity	product	thermal_conductivity	temperature	degC	W/m/K	50:0.040,100:0.045,150:0.052,200:0.060,250:0.071,300:0.081,350:0.094,400:0.107,500:0.140,600:0.175,660:0.200	linear
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	temperature	50	660	degC
+validity	thermal-conductivity	source_grade_prorox_sl960_en_2020	1	1	1
+validity	thermal-conductivity	source_temperature_known	1	1	1
+validity	thermal-conductivity	source_moisture_condition_known	0	0	1
+validity	thermal-conductivity	source_pressure_known	0	0	1
+scalar	vapor-factor	product	water_vapor_diffusion_resistance_factor	1	1	constant
+uncertainty	vapor-factor	unstated	-	-	-	-
+validity	vapor-factor	source_grade_prorox_sl960_en_2020	1	1	1
+validity	vapor-factor	source_temperature_known	0	0	1
+validity	vapor-factor	source_moisture_condition_known	0	0	1
+validity	vapor-factor	source_pressure_known	0	0	1

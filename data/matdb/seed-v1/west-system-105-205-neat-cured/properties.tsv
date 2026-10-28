@@ -1,0 +1,57 @@
+frankensim.matdb-source.v1
+observation	cured-resin	WEST SYSTEM 105 epoxy resin with 205 Fast Hardener	Producer ASTM comparison table, unfilled/unreinforced specimens cured two weeks at room temperature	Typical cured-resin comparison values, not bondline, laminate or design-allowable data. Original values: specific gravity 1.18; compression yield 11418 psi; tensile strength 7846 psi; tensile elongation 3.4%; tensile modulus 408000 psi; flexural strength 14112 psi; flexural modulus 461000 psi. Stress values use 1 psi=6894.757293168 Pa. Specific gravity stays dimensionless because the reference-water temperature is unstated. Cure age is 14 days; numerical cure/test temperature, humidity, pressure, rates, specimen dimensions and uncertainty are unspecified. Room-temperature wording does not license a fabricated 23 C point. Tensile, flexural and compression quantities retain their meanings; no Poisson ratio, heat capacity, creep, fracture or interfacial adhesion law is supplied.
+scalar	specific-gravity	cured-resin	specific_gravity	1.18	1	constant
+uncertainty	specific-gravity	unstated	-	-	-	-
+validity	specific-gravity	source_grade_west_105_205	1	1	1
+validity	specific-gravity	cure_age	1209600	1209600	s
+validity	specific-gravity	room_temperature_cure	1	1	1
+validity	specific-gravity	neat_unreinforced_resin	1	1	1
+validity	specific-gravity	source_temperature_known	0	0	1
+scalar	compression-yield	cured-resin	compression_yield_strength	78724338.773392224	Pa	constant
+uncertainty	compression-yield	unstated	-	-	-	-
+validity	compression-yield	source_grade_west_105_205	1	1	1
+validity	compression-yield	cure_age	1209600	1209600	s
+validity	compression-yield	room_temperature_cure	1	1	1
+validity	compression-yield	neat_unreinforced_resin	1	1	1
+validity	compression-yield	source_temperature_known	0	0	1
+validity	compression-yield	source_test_rate_known	0	0	1
+scalar	tensile-strength	cured-resin	tensile_strength	54096265.722196128	Pa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	source_grade_west_105_205	1	1	1
+validity	tensile-strength	cure_age	1209600	1209600	s
+validity	tensile-strength	room_temperature_cure	1	1	1
+validity	tensile-strength	neat_unreinforced_resin	1	1	1
+validity	tensile-strength	source_temperature_known	0	0	1
+validity	tensile-strength	source_test_rate_known	0	0	1
+scalar	tensile-elongation	cured-resin	tensile_elongation	0.034	1	constant
+uncertainty	tensile-elongation	unstated	-	-	-	-
+validity	tensile-elongation	source_grade_west_105_205	1	1	1
+validity	tensile-elongation	cure_age	1209600	1209600	s
+validity	tensile-elongation	room_temperature_cure	1	1	1
+validity	tensile-elongation	neat_unreinforced_resin	1	1	1
+validity	tensile-elongation	source_temperature_known	0	0	1
+validity	tensile-elongation	source_test_rate_known	0	0	1
+scalar	tensile-modulus	cured-resin	tensile_modulus	2813060975.612544	Pa	constant
+uncertainty	tensile-modulus	unstated	-	-	-	-
+validity	tensile-modulus	source_grade_west_105_205	1	1	1
+validity	tensile-modulus	cure_age	1209600	1209600	s
+validity	tensile-modulus	room_temperature_cure	1	1	1
+validity	tensile-modulus	neat_unreinforced_resin	1	1	1
+validity	tensile-modulus	source_temperature_known	0	0	1
+validity	tensile-modulus	source_test_rate_known	0	0	1
+scalar	flexural-strength	cured-resin	flexural_strength	97298814.921186816	Pa	constant
+uncertainty	flexural-strength	unstated	-	-	-	-
+validity	flexural-strength	source_grade_west_105_205	1	1	1
+validity	flexural-strength	cure_age	1209600	1209600	s
+validity	flexural-strength	room_temperature_cure	1	1	1
+validity	flexural-strength	neat_unreinforced_resin	1	1	1
+validity	flexural-strength	source_temperature_known	0	0	1
+validity	flexural-strength	source_test_rate_known	0	0	1
+scalar	flexural-modulus	cured-resin	flexural_modulus	3178483112.150448	Pa	constant
+uncertainty	flexural-modulus	unstated	-	-	-	-
+validity	flexural-modulus	source_grade_west_105_205	1	1	1
+validity	flexural-modulus	cure_age	1209600	1209600	s
+validity	flexural-modulus	room_temperature_cure	1	1	1
+validity	flexural-modulus	neat_unreinforced_resin	1	1	1
+validity	flexural-modulus	source_temperature_known	0	0	1
+validity	flexural-modulus	source_test_rate_known	0	0	1
