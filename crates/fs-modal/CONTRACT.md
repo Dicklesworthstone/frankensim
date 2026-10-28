@@ -63,7 +63,10 @@ mass-normalized damped modes (`time`, moved from fs-couple under owner decision 
   leaves the window, the linear residual is kept.
 - `quadratic_eigenvalues(m, c, k, n) -> Vec<C64>` — all 2n eigenvalues of
   `(λ²M + λC + K)φ = 0` via companion linearization `[[0, I], [−M⁻¹K,
-  −M⁻¹C]]` and the fs-la dense complex QR path. Values only.
+  −M⁻¹C]]` and the fs-la dense complex QR path. A single coordinate instead
+  uses a scaled analytic quadratic with product-of-roots recovery, retaining
+  the slow overdamped pole, complex conjugates, free roots and unstable poles
+  from negative stiffness or active damping. Values only.
 - `ModalError` — typed refusals with stable `FS-MODAL-*` display codes:
   dimension mismatch, mass-not-SPD, factorization refusal (wrapping the
   fs-sparse `FS-SPARSE-DIRECT-*` code and the shift), invalid window,
@@ -331,10 +334,12 @@ agreement gate).
   interval; it does not by itself prove interval-eigenvalue pairing when
   intervals overlap, and it says nothing about eigenVECTOR accuracy
   (Davis–Kahan-style shape bounds are not claimed).
-- `quadratic_eigenvalues` returns values only (the fs-la complex path has
-  no eigenvectors), uses dense linearization only, and makes no claim of
+- `quadratic_eigenvalues` returns values only (no eigenvectors). For multiple
+  coordinates it uses dense linearization and makes no claim of
   structure-preserving scaling for badly conditioned (M, C, K) — the
-  viscoelastic bead's light-damping regime is the tested envelope.
+  viscoelastic bead's light-damping regime is the tested matrix envelope.
+  The analytic scalar path additionally covers strong overdamping and large
+  coefficient scales; non-finite or unrepresentable poles refuse.
 - No LOBPCG/AMG tier for problems too large to factor: `slice_window`
   requires the sparse LDLᵀ to fit. That tier joins a follow-up bead when a
   consumer presents a pencil the direct factorization cannot hold; the

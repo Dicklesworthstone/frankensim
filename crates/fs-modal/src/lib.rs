@@ -1139,12 +1139,16 @@ pub fn eigh_gen_dense(k: &[f64], m: &[f64], n: usize) -> Result<Vec<ModePair>, M
 /// All 2n eigenvalues of the quadratic pencil `(λ²M + λC + K)·φ = 0` (dense
 /// row-major inputs, SPD M) via the companion linearization
 /// `[[0, I], [−M⁻¹K, −M⁻¹C]]` and the fs-la dense complex eigensolver.
+/// A single coordinate uses a scaled analytic quadratic and a product-of-roots
+/// recovery, so strong overdamping does not erase the slow relaxation pole.
+/// Negative stiffness and active damping retain their unstable poles.
 /// Returns eigenvalues sorted canonically by (re, im); eigenvectors are not
 /// computed (the fs-la complex path is values-only — recorded boundary).
 ///
 /// # Errors
 /// [`ModalError::MassNotSpd`] if M fails Cholesky; [`ModalError::QuadraticEig`]
-/// if the complex QR iteration fails to converge.
+/// if the complex QR iteration fails to converge or the scalar coefficients
+/// or resulting poles are not finite and representable.
 ///
 /// # Panics
 /// On shape mismatches (programmer error).
@@ -1159,6 +1163,9 @@ pub fn quadratic_eigenvalues(
     assert_eq!(k.len(), n * n, "k must be n*n");
     if n == 0 {
         return Ok(Vec::new());
+    }
+    if n == 1 {
+        return quadratic_scalar_eigenvalues(m[0], c[0], k[0]);
     }
     let chol = cholesky(m, n).map_err(|_| ModalError::MassNotSpd { negative: 0 })?;
     let minv_times = |b: &[f64]| -> Vec<f64> {
@@ -1193,6 +1200,81 @@ pub fn quadratic_eigenvalues(
     complex_eig(&a, dim).map_err(|e| ModalError::QuadraticEig {
         detail: format!("{e:?}"),
     })
+}
+
+// Solve m lambda^2 + c lambda + k = 0 without squaring an unscaled rate or
+// subtracting the nearly equal roots of a strongly overdamped oscillator.
+fn quadratic_scalar_eigenvalues(m: f64, c: f64, k: f64) -> Result<Vec<C64>, ModalError> {
+    if !m.is_finite() || m <= 0.0 {
+        return Err(ModalError::MassNotSpd { negative: 0 });
+    }
+    let invalid = || ModalError::QuadraticEig {
+        detail: "scalar pencil requires finite coefficients and representable poles".into(),
+    };
+    if !c.is_finite() || !k.is_finite() { return Err(invalid()); }
+    let damping = c / m;
+    if k == 0.0 && c != 0.0 && damping == 0.0 { return Err(invalid()); }
+    let mut poles = if k == 0.0 {
+        vec![C64::from_re(-damping), C64::ZERO]
+    } else {
+        // sqrt(|k|)/sqrt(m) can be finite even when k/m over/underflows.
+        let omega = k.abs().sqrt() / m.sqrt();
+        let decay = if damping.is_finite() { 0.5 * damping } else { (0.5 * c) / m };
+        if !omega.is_finite() || !decay.is_finite() { return Err(invalid()); }
+        let scale = decay.abs().max(omega);
+        let d = decay / scale;
+        let w = omega / scale;
+        let discriminant = if k > 0.0 {
+            quadratic_scalar_discriminant(m, c, k)
+        } else {
+            d * d + w * w
+        };
+        if discriminant < 0.0 {
+            let imaginary = scale * (-discriminant).sqrt();
+            vec![C64::new(-decay, -imaginary), C64::new(-decay, imaginary)]
+        } else if discriminant == 0.0 {
+            vec![C64::from_re(-decay); 2]
+        } else {
+            let far = -scale * (d + discriminant.sqrt().copysign(d));
+            // far has magnitude >= sqrt(|k|/m). Form the product quotient
+            // in two factors, avoiding both k/m and omega^2 overflow.
+            let near = k.signum() * omega * (omega / far);
+            vec![C64::from_re(far), C64::from_re(near)]
+        }
+    };
+    if poles.iter().any(|pole| !pole.re.is_finite() || !pole.im.is_finite()
+        || (k != 0.0 && pole.re == 0.0 && pole.im == 0.0)) {
+        return Err(invalid());
+    }
+    poles.sort_by(|a, b| a.re.total_cmp(&b.re).then_with(|| a.im.total_cmp(&b.im)));
+    Ok(poles)
+}
+
+// (c^2 - 4 m k) / max(c^2, 4 m k), with positive m,k. Normalize the
+// ORIGINAL coefficients by powers of two, then compensate the difference of
+// products. Comparing independently rounded sqrt(k)/sqrt(m) and c/(2m)
+// instead would spuriously split exactly critical roots (e.g. 175,770,847).
+fn quadratic_scalar_discriminant(m: f64, c: f64, k: f64) -> f64 {
+    if c == 0.0 { return -1.0; }
+    fn fraction(value: f64) -> (f64, i32) {
+        let shift = if value.abs() < f64::MIN_POSITIVE { 52 } else { 0 };
+        let bits = (value.abs() * if shift == 0 { 1.0 } else { 4_503_599_627_370_496.0 }).to_bits();
+        let exponent = ((bits >> 52) & 0x7ff) as i32 - 1023 - shift;
+        let mantissa = f64::from_bits((bits & 0x000f_ffff_ffff_ffff) | (1023_u64 << 52));
+        (mantissa, exponent)
+    }
+    let (mm, me) = fraction(m);
+    let (cm, ce) = fraction(c);
+    let (km, ke) = fraction(k);
+    let c_exponent = 2 * ce;
+    let mk_exponent = me + ke + 2;
+    let exponent = c_exponent.max(mk_exponent);
+    let scaled_c = cm * 2.0_f64.powi(c_exponent - exponent);
+    let scaled_m = mm * 2.0_f64.powi(mk_exponent - exponent);
+    let product = scaled_m * km;
+    let product_error = (-scaled_m).mul_add(km, product);
+    let difference = scaled_c.mul_add(cm, -product) + product_error;
+    difference / (scaled_c * cm).max(product)
 }
 
 /// Largest M-Gram defect `max |φ_iᵀMφ_j − δ_ij|` a cluster may carry and
@@ -1847,6 +1929,81 @@ mod tests {
                 pair.0
             );
         }
+    }
+
+    #[test]
+    fn quadratic_scalar_strong_damping_preserves_slow_and_unstable_poles() {
+        // The unbalanced 2x2 companion previously returned a zero slow pole:
+        // sqrt((2e10)^2 - 4) rounds to 2e10. Both signs of C and K matter.
+        for scale in [1.0e-250, 1.0, 1.0e250] {
+            for (c, k, expected) in [
+                (4.0e10, 4.0, [-4.0e10, -1.0e-10]),
+                (-4.0e10, 4.0, [1.0e-10, 4.0e10]),
+                (4.0e10, -4.0, [-4.0e10, 1.0e-10]),
+                (-4.0e10, -4.0, [-1.0e-10, 4.0e10]),
+            ] {
+                let poles = quadratic_scalar_eigenvalues(scale, scale * c, scale * k).unwrap();
+                for (pole, expected) in poles.iter().zip(expected) {
+                    assert_eq!(pole.im, 0.0);
+                    assert!((pole.re / expected - 1.0).abs() < 2.0e-14,
+                        "m={scale} c={c} k={k}: {pole:?} expected {expected}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn quadratic_scalar_preserves_oscillatory_critical_free_and_buckling_roots() {
+        for (m, c, k, expected) in [
+            (2.0, 4.0, 10.0, [(-1.0, -2.0), (-1.0, 2.0)]),
+            (2.0, -4.0, 10.0, [(1.0, -2.0), (1.0, 2.0)]),
+            (4.0, 8.0, 4.0, [(-1.0, 0.0), (-1.0, 0.0)]),
+            (175.0, 770.0, 847.0, [(-2.2, 0.0), (-2.2, 0.0)]),
+            (1.0, 0.0, -9.0, [(-3.0, 0.0), (3.0, 0.0)]),
+            (2.0, 4.0, 0.0, [(-2.0, 0.0), (0.0, 0.0)]),
+            (2.0, -4.0, 0.0, [(0.0, 0.0), (2.0, 0.0)]),
+            (2.0, 0.0, 0.0, [(0.0, 0.0), (0.0, 0.0)]),
+        ] {
+            let poles = quadratic_scalar_eigenvalues(m, c, k).unwrap();
+            for (pole, (re, im)) in poles.iter().zip(expected) {
+                assert!((pole.re - re).abs() < 2.0e-14 && (pole.im - im).abs() < 2.0e-14,
+                    "m={m} c={c} k={k}: {pole:?} expected ({re},{im})");
+            }
+        }
+        // One representable step on either side must retain its actual regime;
+        // there is no tolerance band snapped to critical damping.
+        let below = f64::from_bits(770.0_f64.to_bits() - 1);
+        let above = f64::from_bits(770.0_f64.to_bits() + 1);
+        let underdamped = quadratic_scalar_eigenvalues(175.0, below, 847.0).unwrap();
+        let overdamped = quadratic_scalar_eigenvalues(175.0, above, 847.0).unwrap();
+        assert!(underdamped[0].im < 0.0 && underdamped[1].im > 0.0);
+        assert!(overdamped.iter().all(|pole| pole.im == 0.0));
+        assert!(overdamped[0].re < overdamped[1].re);
+        for (m, k, frequency) in [(1.0e-200, 1.0e200, 1.0e200),
+            (1.0e200, 1.0e-200, 1.0e-200)] {
+            let poles = quadratic_scalar_eigenvalues(m, 0.0, k).unwrap();
+            assert_eq!(poles[0].re, 0.0);
+            assert_eq!(poles[1].re, 0.0);
+            assert!((poles[0].im / -frequency - 1.0).abs() < 2.0e-14);
+            assert!((poles[1].im / frequency - 1.0).abs() < 2.0e-14);
+        }
+    }
+
+    #[test]
+    fn quadratic_scalar_refuses_invalid_or_unrepresentable_poles() {
+        for mass in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(matches!(quadratic_scalar_eigenvalues(mass, 1.0, 1.0),
+                Err(ModalError::MassNotSpd { .. })));
+        }
+        for (m, c, k) in [(1.0, f64::NAN, 1.0), (1.0, 1.0, f64::INFINITY),
+            (1.0e-300, 1.0e300, 0.0), (1.0, 1.0e308, 1.0e-308),
+            (1.0e308, 1.0e-308, 0.0)] {
+            assert!(matches!(quadratic_scalar_eigenvalues(m, c, k),
+                Err(ModalError::QuadraticEig { .. })));
+        }
+        // The public entry point dispatches to the same scalar implementation.
+        assert_eq!(quadratic_eigenvalues(&[1.0], &[4.0e10], &[4.0], 1).unwrap(),
+            quadratic_scalar_eigenvalues(1.0, 4.0e10, 4.0).unwrap());
     }
 
     #[test]
