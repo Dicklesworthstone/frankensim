@@ -15,6 +15,8 @@ use crate::render::schedule::force::coupled::{
 };
 use fs_exec::CancelGate;
 
+pub mod thermal;
+
 /// One complete frame component: its unchanged modal basis, original sources,
 /// oscillator state, and EVERY projected material loss port travel together.
 /// Additional authored per-mode damping remains a distinct loss mechanism.

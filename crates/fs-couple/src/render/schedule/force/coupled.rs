@@ -581,6 +581,25 @@ impl CoupledModalSystem {
         self.step_inner(external, Some(gate))
     }
 
+    // Finite receiving owners must admit the ORIGINAL integrated port work
+    // before mechanics publishes. Ordinary read-only observations keep their
+    // existing behavior; this explicit composition requires their success.
+    pub(crate) fn step_with_admission<R, E>(
+        &mut self, external: &[f64], gate: &CancelGate,
+        admit: impl FnOnce(&CoupledModalSystem, &CoupledModalFrame, &[fs_ports::IntegratedWindowTransfer]) -> Result<R, E>,
+    ) -> Result<R, E>
+    where E: From<ModalCouplingError> + From<fs_ports::CoupleError> {
+        self.stage_inner(external, Some(gate)).map_err(E::from)?;
+        let transfers = self.staged_ports.transfers().ok_or_else(|| {
+            self.staged_ports.transfer_error().cloned().map(E::from)
+                .unwrap_or_else(|| E::from(invalid("staged modal port work is unavailable")))
+        })?;
+        let result = admit(self, &self.staged_frame, transfers)?;
+        poll(Some(gate)).map_err(E::from)?;
+        self.publish_staged();
+        Ok(result)
+    }
+
     fn step_inner(&mut self, external: &[f64], gate: Option<&CancelGate>)
         -> Result<&CoupledModalFrame, ModalCouplingError>
     {
