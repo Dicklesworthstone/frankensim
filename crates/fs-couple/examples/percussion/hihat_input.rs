@@ -3,6 +3,7 @@ use super::*;
 use std::path::{Path,PathBuf};
 use std::io::Read;
 use std::fmt::Write as _;
+use fs_material::gas_species::input::ThermochemicalSources;
 const MAX_BYTES:usize=16384;
 
 pub(super) struct Mount {
@@ -19,17 +20,26 @@ pub(super) struct Spec {
 }
 impl Spec {
     pub fn load(path:&Path)->Result<Self,Error> {
+        Self::load_with_gas_sources(path,None)
+    }
+    pub fn load_with_gas_sources(path:&Path,sources:Option<&ThermochemicalSources<'_>>)->Result<Self,Error> {
         let mut s=String::new();std::fs::File::open(path)?.take((MAX_BYTES+1) as u64).read_to_string(&mut s)?;
-        let mut out=Self::parse(&s)?;
+        let mut out=Self::parse_with_gas_sources(&s,sources)?;
         let base=path.parent().unwrap_or_else(||Path::new("."));
         for source in &mut out.sources {source.path=base.join(&source.path);}
         Ok(out)
     }
     pub fn shells(&self)->Result<[specimen::Specimen;2],Error> {
-        let load=|s:&Source|if s.mesh {specimen::load_selection(None,Some(&s.path))?.ok_or_else(||"missing explicit hi-hat mesh".into())}else{specimen::Specimen::load(&s.path)};
+        self.shells_with_gas_sources(None)
+    }
+    pub fn shells_with_gas_sources(&self,sources:Option<&ThermochemicalSources<'_>>)->Result<[specimen::Specimen;2],Error> {
+        let load=|s:&Source|if s.mesh {specimen::load_selection_with_gas_sources(None,Some(&s.path),sources)?.ok_or_else(||"missing explicit hi-hat mesh".into())}else{specimen::Specimen::load_with_gas_sources(&s.path,sources)};
         Ok([load(&self.sources[0])?,load(&self.sources[1])?])
     }
     pub fn parse(text:&str)->Result<Self,Error> {
+        Self::parse_with_gas_sources(text,None)
+    }
+    pub fn parse_with_gas_sources(text:&str,gas_sources:Option<&ThermochemicalSources<'_>>)->Result<Self,Error> {
         if text.len()>MAX_BYTES {return Err("hi-hat input exceeds 16 KiB".into());}
         let mut header=false;let mut sources:[Option<Source>;2]=[None,None];
         let mut mounts:[Option<Mount>;2]=[None,None];
@@ -54,7 +64,7 @@ impl Spec {
                 "damping_ratio" if f.len()==3 && damping.is_none()=>damping=Some([number(1)?,number(2)?]),
                 "contact" if f.len()==4 && law.is_none()=>law=Some([number(1)?,number(2)?,number(3)?]),
                 "strike_m" if f.len()==3 && strike.is_none()=>strike=Some([number(1)?,number(2)?]),
-                "ambient" if f.len()==2 && ambient.is_none()=>ambient=Some(super::super::ambient::Ambient::described(f[1])
+                "ambient" if f.len()==2 && ambient.is_none()=>ambient=Some(super::super::ambient::Ambient::described_with_gas_sources(f[1],gas_sources)
                     .map_err(|e|format!("hi-hat line {}: {e}",line+1))?),
                 "site" if f.len()==4 && sites.len()<64=>sites.push((number(1)?,number(2)?,number(3)?)),
                 "pedal" if f.len()==3=>{writeln!(pedal,"{},{}",number(1)?,number(2)?)?;}

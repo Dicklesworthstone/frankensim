@@ -2,10 +2,11 @@
 use super::*;
 use std::path::Path;
 use acoustics::stereo::radiation_spec;
+use fs_material::gas_species::input::ThermochemicalSources;
 
 pub fn is_command(command:Option<&str>)->bool {matches!(command,Some("hihat"|"hihat-wav"|"hihat-mic"))}
 
-pub fn run(mut args:Vec<String>)->Result<(),Error> {
+pub fn run(mut args:Vec<String>,gas_sources:Option<&ThermochemicalSources<'_>>)->Result<(),Error> {
     let analytic=mechanics::analytic_option(&mut args)?;
     let substeps=mechanics::substeps_option(&mut args)?;
     let prepared=mechanics::prepared_option(&mut args)?||analytic||substeps.is_some();
@@ -18,7 +19,7 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     let rocking=rocking::option(&mut args)?;
     let first_force=mechanics::drive::option(&mut args)?;
     let second_force=mechanics::drive::second_option(&mut args)?;
-    let squeeze=squeeze::option(&mut args)?;
+    let squeeze=squeeze::option_with_gas_sources(&mut args,gas_sources)?;
     let mallet_paths=mallets::options(&mut args)?;
     let material_path=shell_relaxation::option(&mut args)?;
     let mute=compliant_mute::option(&mut args)?;
@@ -47,7 +48,8 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     mallets.admit(command.unwrap(),stroke,second)?;
     if let Some(mute)=&mute {mute.admit_command(command.unwrap())?;}
     let material=material_path.as_deref().map(|path|shell_relaxation::Spec::load(path,true)).transpose()?;
-    let spec=Spec::load(Path::new(&args[1]))?;let [upper,lower]=spec.shells()?;
+    let spec=Spec::load_with_gas_sources(Path::new(&args[1]),gas_sources)?;
+    let [upper,lower]=spec.shells_with_gas_sources(gas_sources)?;
     let pair=build_with_rocking(&spec,&upper,&lower,stroke,second,steps,dt,audio,squeeze.as_ref(),
         &shafts,&mallets,material.as_ref(),mute.as_ref(),targets,rocking)?;
     let receivers=match microphone_spec {

@@ -17,12 +17,12 @@ fn the_drum_compresses_exactly_its_declared_air() {
     assert_eq!(reference.ambient, Ambient::reference());
     for record in [AIR, THIN, CO2, HELIOX] {
         let declared = described(record);
-        let spec = drum_spec::Spec {ambient: declared, ..drum_spec::Spec::reference()};
+        let spec = drum_spec::Spec {ambient: declared.clone(), ..drum_spec::Spec::reference()};
         let e = drum_with_spec(4,2e-6,false,false,None,false,Stroke::default(),false,None,Some(spec)).unwrap();
         assert_eq!(e.ambient, declared);
         // The enclosed volume spring is the adiabatic gamma p of the declared gas.
         let bulk = e.pressure.as_ref().unwrap().bulk_modulus_pa;
-        assert!((bulk / (declared.gas.gamma * declared.gas.pressure) - 1.0).abs() < 1e-12, "{record}: {bulk}");
+        assert!((bulk / (declared.gas().gamma * declared.gas().pressure) - 1.0).abs() < 1e-12, "{record}: {bulk}");
     }
     let thin = described(THIN).bulk_modulus_pa() / described(AIR).bulk_modulus_pa();
     assert!((thin - 0.7).abs() < 1e-12, "{thin}");
@@ -35,7 +35,7 @@ fn splash_pcm(record: &str, frames: usize) -> Vec<i16> {
     let steps = (frames * acoustics::SUBSTEPS) as u64;
     let mut e = splash_with_mount(steps,acoustics::MECHANICAL_DT,true,Stroke::default(),Some(shell),&[],None,
         None,&mallets::Selection::default(),&shaft_playing::Selection::default(),None,None,None).unwrap();
-    assert_eq!(e.ambient.gas, described(record).gas);
+    assert_eq!(e.ambient.gas(), described(record).gas());
     let wav = acoustics::render(&mut e,frames,2.0,acoustics::Receiver::FarField([1.5,0.7,1.5])).unwrap();
     wav[44..].chunks_exact(2).map(|b| i16::from_le_bytes([b[0],b[1]])).collect()
 }
@@ -51,7 +51,7 @@ fn the_cymbal_radiates_with_its_declared_density_and_sound_speed() {
     let heliox = splash_pcm(HELIOX, frames);
     let peak = air.iter().map(|s| s.unsigned_abs()).max().unwrap();
     assert!(peak > 100 && peak < i16::MAX.unsigned_abs(), "unclipped audible reference peak {peak} LSB");
-    let ratio = described(THIN).gas.density / described(AIR).gas.density;
+    let ratio = described(THIN).gas().density / described(AIR).gas().density;
     for (n, (a, t)) in air.iter().zip(&thin).enumerate() {
         assert!((f64::from(*t) - ratio * f64::from(*a)).abs() <= 1.0, "sample {n}: {a} {t}");
     }
@@ -59,7 +59,7 @@ fn the_cymbal_radiates_with_its_declared_density_and_sound_speed() {
     // pure delay covers (range - R) for the enclosing radius R = 0.1016 m; the
     // fitted near-source transfer adds between 0 and 2R of path. Measure the lag
     // by cross-correlation, which a density change cannot bias.
-    let (c_air, c_co2) = (described(AIR).gas.sound_speed, described(CO2).gas.sound_speed);
+    let (c_air, c_co2) = (described(AIR).gas().sound_speed, described(CO2).gas().sound_speed);
     let per_metre = (1.0 / c_co2 - 1.0 / c_air) * f64::from(acoustics::OUTPUT_RATE);
     let (range, radius) = ((1.5_f64 * 1.5 + 0.7 * 0.7 + 1.5 * 1.5).sqrt(), 0.1016);
     let correlation = |lag: usize| air.iter().zip(&co2[lag..])
@@ -68,7 +68,7 @@ fn the_cymbal_radiates_with_its_declared_density_and_sound_speed() {
     let (low, high) = ((range - radius) * per_metre, (range + radius) * per_metre);
     assert!(low > 50.0 && lag >= low - 2.0 && lag <= high + 2.0, "lag {lag} outside [{low}, {high}]");
     // 80/20 He-O2 is faster: air now lags the heliox wavefront.
-    let c_heliox = described(HELIOX).gas.sound_speed;
+    let c_heliox = described(HELIOX).gas().sound_speed;
     let ahead = (1.0 / c_air - 1.0 / c_heliox) * f64::from(acoustics::OUTPUT_RATE);
     let correlation = |lag: usize| heliox.iter().zip(&air[lag..])
         .map(|(h, a)| f64::from(*h) * f64::from(*a)).sum::<f64>();
@@ -88,7 +88,7 @@ fn imported_descriptions_must_declare_air_and_bad_records_refuse() {
         assert!(drum_spec::Spec::read(&text.replace("ambient,293.15 101325 0.65", bad)).is_err(), "{bad}");
     }
     let mut shell = specimen::Specimen::parse(include_str!("estimated-splash.profile")).unwrap();
-    assert_eq!(shell.ambient.unwrap().gas, described(HUMID).gas);
+    assert_eq!(shell.ambient.as_ref().unwrap().gas(), described(HUMID).gas());
     shell.ambient = None;
     let refused = splash_with_mount(4,2e-6,false,Stroke::default(),Some(shell),&[],None,None,
         &mallets::Selection::default(),&shaft_playing::Selection::default(),None,None,None);

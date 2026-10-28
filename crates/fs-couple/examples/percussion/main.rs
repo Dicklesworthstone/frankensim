@@ -42,6 +42,12 @@ mod sticks;
 mod muffling;
 mod compliant_mute;
 mod ambient;
+// All native audio entry points use the same bounded source-pack loader.
+#[path="../../src/bin/music_render/thermochemical.rs"]
+mod thermochemical;
+#[path="../../src/bin/music_render/json.rs"]
+mod json;
+use json::json_string;
 use playing::Stroke;
 use mechanics::Mechanics;
 
@@ -123,7 +129,7 @@ fn splash_with_mount(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Option
     muffling::admit_command(mufflers,"splash")?;
     if let Some(spec)=mute {spec.admit_command("splash")?;}
     let imported=supplied.is_some();let specimen=supplied.unwrap_or_else(specimen::Specimen::reference);
-    let ambient=ambient::effective(specimen.ambient
+    let ambient=ambient::effective(specimen.ambient.as_ref()
         .ok_or("an imported shell description must declare its ambient row")?);
     eprintln!("{}",ambient.receipt());
     if let Some(material)=material {material.admit_windows(&[specimen.band_hz])?;}
@@ -345,7 +351,7 @@ fn drum_with_chamber(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<s
     // One declaration supplies BOTH head pencils, the air volume and the
     // closed exterior. No independently retuned oscillator or stock drum mesh.
     let imported=supplied.is_some();let spec=supplied.unwrap_or_else(drum_spec::Spec::reference);
-    let ambient=ambient::effective(spec.ambient);
+    let ambient=ambient::effective(&spec.ambient);
     eprintln!("{}",ambient.receipt());
     spec.admit_clock(dt_s,audio)?;
     if let Some(chamber)=chamber {
@@ -543,11 +549,18 @@ fn cavity_pressure(volume:&VolumeSpring,state:&[f64])->f64 {
 fn run()->Result<(),Error> {
     run_args(std::env::args().skip(1).collect())
 }
-fn run_args(mut raw_args:Vec<String>)->Result<(),Error> {
-    // One override for the whole run, declared before any instrument is built.
-    if let Some(cli)=ambient::option(&mut raw_args)? {ambient::set_command_line(cli)?;}
-    if hihat::is_command(raw_args.first().map(String::as_str)) {return hihat::run(raw_args);}
-    if specimen::export_command(&raw_args)? {return Ok(());}
+fn run_args(raw_args:Vec<String>)->Result<(),Error> {
+    let (mut raw_args,gas_options)=thermochemical::Options::extract(&raw_args)?;
+    let loaded_gases=gas_options.load()?;
+    let gas_bindings=loaded_gases.bindings();
+    let gas_sources=loaded_gases.registry(&gas_bindings);
+    // One override for the whole run, resolved from the SAME explicit sources
+    // as imported drum/shell/pair descriptions and material squeeze films.
+    if let Some(cli)=ambient::load_override(gas_options.record.as_deref(),gas_sources.as_ref())? {
+        ambient::set_command_line(cli)?;
+    }
+    if hihat::is_command(raw_args.first().map(String::as_str)) {return hihat::run(raw_args,gas_sources.as_ref());}
+    if specimen::export_command_with_gas_sources(&raw_args,gas_sources.as_ref())? {return Ok(());}
     let head_stretching=nonlinear_snare::option(&mut raw_args)?;
     let mallet_paths=mallets::options(&mut raw_args)?;
     let head_relaxation_path=head_relaxation::option(&mut raw_args)?;
@@ -641,8 +654,9 @@ fn run_args(mut raw_args:Vec<String>)->Result<(),Error> {
     }else{acoustics::Receiver::FarField([1.5,0.7,1.5])};
     let steps=if audio {count.checked_mul(acoustics::SUBSTEPS as u64).ok_or("sample budget overflow")?}else{count};
     let dt_s=if audio {acoustics::MECHANICAL_DT}else{2e-6};
-    let supplied_shell=specimen::load_selection(shell_path.as_deref(),shell_mesh_path.as_deref())?;
-    let supplied_drum=drum_path.as_deref().map(drum_spec::Spec::load).transpose()?;
+    let supplied_shell=specimen::load_selection_with_gas_sources(
+        shell_path.as_deref(),shell_mesh_path.as_deref(),gas_sources.as_ref())?;
+    let supplied_drum=drum_path.as_deref().map(|p|drum_spec::Spec::load_with_gas_sources(p,gas_sources.as_ref())).transpose()?;
     // A render names the instrument it plays: the program assumes no built-in shell, head geometry, tension or loss.
     // The shipped estimates are files like any other (estimated-splash.profile, estimated_drum.fsd).
     let undescribed=match args[0].as_str() {

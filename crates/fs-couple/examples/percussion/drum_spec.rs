@@ -4,6 +4,7 @@ use std::io::Read;
 use fs_plate::shell::head::TensionVariation;
 use super::{Error, ModePair, TensionedDisk, TensionedDiskSpec, mesh_budget};
 use super::ambient::Ambient;
+use fs_material::gas_species::input::ThermochemicalSources;
 
 pub const HEADER: &str = "frankensim-drum-spec-v1";
 const MAX_BYTES: usize = 65_536;
@@ -45,7 +46,7 @@ pub struct Head {
     /// Viscous modal ratio: q'' + 2*zeta*omega*q' + omega^2*q = force.
     pub damping_ratio: f64,
 }
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Spec {
     pub radius_m: f64,
     pub depth_m: f64,
@@ -75,7 +76,7 @@ impl Spec {
             radial_intervals: 5, azimuths: 32, band_hz: [80.0, 500.0],
             ambient: Ambient::reference() }
     }
-    pub fn validate(self) -> Result<(), Error> {
+    pub fn validate(&self) -> Result<(), Error> {
         if [self.radius_m, self.depth_m, self.outer_radius_m].iter().any(|v| !v.is_finite() || *v<=0.0)
             || self.outer_radius_m<=self.radius_m || !self.volume_m3().is_finite() || self.volume_m3()<=0.0 {
             return Err("drum geometry needs positive finite clear radius/depth and an outer radius beyond the head".into());
@@ -111,10 +112,10 @@ impl Spec {
         }
         Ok(())
     }
-    pub fn volume_m3(self) -> f64 {
+    pub fn volume_m3(&self) -> f64 {
         std::f64::consts::PI*self.radius_m*self.radius_m*self.depth_m
     }
-    pub fn admit_clock(self, dt_s: f64, audio: bool) -> Result<(), Error> {
+    pub fn admit_clock(&self, dt_s: f64, audio: bool) -> Result<(), Error> {
         self.validate()?;
         if !dt_s.is_finite() || dt_s<=0.0 || self.band_hz[1]*dt_s>=0.45 {
             return Err("declared head window crosses the mechanical Nyquist guard".into());
@@ -126,14 +127,14 @@ impl Spec {
         }
         Ok(())
     }
-    pub fn admit_snare(self, wires: super::snare::SnareSet) -> Result<(), Error> {
+    pub fn admit_snare(&self, wires: super::snare::SnareSet) -> Result<(), Error> {
         wires.mode_count()?;
         if (0.5*wires.length_m).hypot(0.5*wires.width_m)>=self.radius_m {
             return Err("the unchanged snare span does not fit the supplied head; wires are not automatically shortened or retensioned".into());
         }
         Ok(())
     }
-    pub fn head(self, index: usize) -> Result<TensionedDisk, Error> {
+    pub fn head(&self, index: usize) -> Result<TensionedDisk, Error> {
         self.validate()?;
         let h = self.heads.get(index).ok_or("head index must be batter or resonant")?;
         Ok(TensionedDisk::new_with_tension_variation(TensionedDiskSpec { radius_m: self.radius_m,
@@ -141,7 +142,7 @@ impl Spec {
             density_kg_m3: h.density_kg_m3, tension_n_m: h.tension_n_m,
             radial_intervals: self.radial_intervals, azimuths: self.azimuths },self.tension_variation[index],mesh_budget())?)
     }
-    pub fn prepare(self, dt_s: f64, audio: bool) -> Result<(Vec<TensionedDisk>,Vec<Vec<ModePair>>),Error> {
+    pub fn prepare(&self, dt_s: f64, audio: bool) -> Result<(Vec<TensionedDisk>,Vec<Vec<ModePair>>),Error> {
         self.admit_clock(dt_s,audio)?;
         let mut films = Vec::with_capacity(2);
         let mut modes = Vec::with_capacity(2);
@@ -164,9 +165,12 @@ impl Spec {
         Ok((films,modes))
     }
     pub fn load(path: &str) -> Result<Self, Error> {
+        Self::load_with_gas_sources(path,None)
+    }
+    pub fn load_with_gas_sources(path: &str,sources: Option<&ThermochemicalSources<'_>>) -> Result<Self, Error> {
         let mut text = String::new();
         std::fs::File::open(path)?.take((MAX_BYTES+1) as u64).read_to_string(&mut text)?;
-        Self::read(&text)
+        Self::read_with_gas_sources(&text,sources)
     }
     /// Geometry, both heads, mesh, band and the `ambient,<gas record>` row are
     /// mandatory: an imported drum declares its own air. Optional per-head
@@ -174,6 +178,9 @@ impl Spec {
     /// Each head states its loss as stated-unknown or relaxation; an authored damping ratio refuses.
     /// Order is free and comments start with #.
     pub fn read(text: &str) -> Result<Self, Error> {
+        Self::read_with_gas_sources(text,None)
+    }
+    pub fn read_with_gas_sources(text: &str,sources: Option<&ThermochemicalSources<'_>>) -> Result<Self, Error> {
         if text.len()>MAX_BYTES { return Err("drum specification exceeds 64 KiB".into()); }
         let (mut header,mut geometry,mut mesh,mut band,mut ambient) = (false,None,None,None,None);
         let mut heads = [None,None];
@@ -248,7 +255,7 @@ impl Spec {
                 }
                 "ambient" => {
                     if ambient.is_some() { return Err(error("duplicate ambient")); }
-                    ambient=Some(Ambient::described(fields[1]).map_err(|e| error(&e.to_string()))?);
+                    ambient=Some(Ambient::described_with_gas_sources(fields[1],sources).map_err(|e| error(&e.to_string()))?);
                 }
                 _ => unreachable!(),
             }

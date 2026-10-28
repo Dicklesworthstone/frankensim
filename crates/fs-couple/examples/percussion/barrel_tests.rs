@@ -218,7 +218,7 @@ fn full_wire_bank_and_flexible_shaft_keep_their_physical_addresses_around_barrel
     let stroke = Stroke {speed_m_s:0.0,position_m:Some([0.06,0.01])};
     let second = Some(Stroke {speed_m_s:0.0,position_m:Some([-0.05,0.01])});
     let make = |material| crate::drum_with_barrel(1,DT,false,false,Some(crate::snare::SnareSet::reference(false)),
-        false,stroke,true,None,Some(drum),second,&[],0.0,None,false,None,&mallets::Selection::default(),&shafts,material,None).unwrap();
+        false,stroke,true,None,Some(drum.clone()),second,&[],0.0,None,false,None,&mallets::Selection::default(),&shafts,material,None).unwrap();
     let rigid = make(None); let elastic = make(Some(&material));
     let old_shaft = rigid.flexible_sticks[0].as_ref().unwrap(); let shaft = elastic.flexible_sticks[0].as_ref().unwrap();
     assert_eq!(elastic.second_stick.unwrap().coordinate,rigid.second_stick.unwrap().coordinate);
@@ -234,7 +234,7 @@ fn full_wire_bank_and_flexible_shaft_keep_their_physical_addresses_around_barrel
     assert!(elastic.observer_a[old_shaft.elastic_start()..].iter().all(|v|*v==0.0));
     assert!(elastic.observer_b[old_shaft.elastic_start()..].iter().all(|v|*v==0.0));
     let side = crate::drum_with_barrel(1,DT,false,false,Some(crate::snare::SnareSet::reference(false)),
-        false,Stroke {position_m:None,..stroke},true,None,Some(drum),second,&[],0.0,None,false,None,
+        false,Stroke {position_m:None,..stroke},true,None,Some(drum.clone()),second,&[],0.0,None,false,None,
         &mallets::Selection::default(),&shafts,Some(&material),Some(crate::barrel_strike::Spec {
             azimuth_rad:0.3,height_below_batter_m:0.4*drum.depth_m })).unwrap();
     assert_eq!(side.second_stick.unwrap().coordinate,elastic.second_stick.unwrap().coordinate);

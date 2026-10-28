@@ -4,6 +4,7 @@ use super::Error;
 use super::super::ambient::Ambient;
 use fs_plate::shell::ShellMesh;
 use fs_plate::shell::survey::{IsotropicMaterial, SurveyMaterial, MeshShell};
+use fs_material::gas_species::input::ThermochemicalSources;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_BYTES: usize = 8_388_608;
@@ -12,6 +13,11 @@ pub const HEADER: &str = "frankensim-shell-mesh-v1";
 /// The optional `ambient,<gas record>` row is the shell's declared air; a shell
 /// used on its own must declare it (see `ambient`).
 pub fn parse(text: &str) -> Result<(MeshShell, [f64;2], [f64;2], Option<Ambient>), Error> {
+    parse_with_gas_sources(text,None)
+}
+pub fn parse_with_gas_sources(text: &str,sources: Option<&ThermochemicalSources<'_>>)
+    -> Result<(MeshShell, [f64;2], [f64;2], Option<Ambient>), Error>
+{
     if text.len() > MAX_BYTES { return Err("shell mesh exceeds the 8 MiB input limit".into()); }
     let budget = super::super::mesh_budget();
     let mut nodes = BTreeMap::new(); let mut faces = BTreeMap::new();
@@ -42,7 +48,7 @@ pub fn parse(text: &str) -> Result<(MeshShell, [f64;2], [f64;2], Option<Ambient>
             }
             "strike" if f.len() == 3 && strike.is_none() => { strike = Some([number(1)?,number(2)?]); }
             "ambient" if f.len() == 2 && ambient.is_none() => {
-                ambient = Some(Ambient::described(f[1]).map_err(|e| format!("shell mesh line {}: {e}",line+1))?);
+                ambient = Some(Ambient::described_with_gas_sources(f[1],sources).map_err(|e| format!("shell mesh line {}: {e}",line+1))?);
             }
             "material" if f.len() == 5 && materials.len() < budget.max_triangles => {
                 let key = id(1)?;

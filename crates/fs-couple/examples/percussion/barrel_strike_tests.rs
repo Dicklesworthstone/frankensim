@@ -37,7 +37,7 @@ fn sidewall_selection_requires_one_finite_station_on_an_admitted_drum() {
     }
     let material=material(); let empty=mallets::Selection::default(); let shafts=shaft_playing::Selection::default();
     let build=|barrel,position,mallets:&mallets::Selection| crate::drum_with_barrel(1,1e-6,false,false,
-        None,false,Stroke {speed_m_s:0.0,position_m:position},false,None,Some(d),None,&[],0.0,None,false,None,
+        None,false,Stroke {speed_m_s:0.0,position_m:position},false,None,Some(d.clone()),None,&[],0.0,None,false,None,
         mallets,&shafts,barrel,Some(selected));
     assert!(build(None,None,&empty).is_err(),"a rigid sidewall has no moving contact port");
     assert!(build(Some(&material),Some([0.06,0.0]),&empty).is_err(),"one hand cannot silently choose between two targets");
@@ -96,7 +96,7 @@ fn an_exterior_strike_drives_wall_pressure_and_head_motion_on_the_shared_clock()
                 pivot_m:0.1,contact_m:0.39,hand_m:0.16,subdivisions:8,maximum_hz:3000.0,maximum_modes:17},0.001).unwrap());
         }
         let mut e = crate::drum_with_barrel(steps,dt,false,false,None,false,
-            Stroke {speed_m_s:2.0,position_m:None},distributed,None,Some(d),None,&[],0.0,None,false,None,
+            Stroke {speed_m_s:2.0,position_m:None},distributed,None,Some(d.clone()),None,&[],0.0,None,false,None,
             &mallets::Selection::default(),&shafts,Some(&material),Some(selected)).unwrap();
         let initial = match &e.system { Mechanics::Reference(s)=>s.stored_energy_j(), _=>panic!("joint contact owner") };
         let (q,v) = shaft_playing::tip_motion(&e,0).unwrap();

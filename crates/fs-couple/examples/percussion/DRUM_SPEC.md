@@ -147,3 +147,12 @@ declares its own `ambient,<gas record>` row, and `--gas-record FILE` overrides
 either. The record is the shared declaration (`T_K P_PA RH`, `mixture ...`, or
 `thermochemical ...`). A record that does not resolve refuses; there is no air
 default. Each run prints which declaration supplied the air.
+
+For `thermochemical` records, supply each normalized species/NASA-9/transport
+triple with `--gas-component SPECIES.pack NASA9.pack TRANSPORT.pack` and declare
+`--gas-water none|SPECIES_ID --gas-phase frozen|liquid-water` explicitly.
+The resolved source record stays with the actual drum; its density and sound
+speed supply cavity acoustics and its `rho*c^2` supplies adiabatic bulk
+stiffness. Changing a NASA-9 source therefore changes head/air feedback without
+retuning either head. Missing or invalid sources refuse. See [AUDIO.md](AUDIO.md#air)
+for the shared options and source admission rules.

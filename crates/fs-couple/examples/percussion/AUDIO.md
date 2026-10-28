@@ -271,3 +271,31 @@ declares its own `ambient,<gas record>` row, and `--gas-record FILE` overrides
 either. The record is the shared declaration (`T_K P_PA RH`, `mixture ...`, or
 `thermochemical ...`). A record that does not resolve refuses; there is no air
 default. Each run prints which declaration supplied the air.
+
+Thermochemical records use explicit normalized species, NASA-9 and transport
+source packs, loaded once by the shared native gas loader:
+
+```sh
+cargo run --release -p fs-couple --example percussion -- \
+  drum-mic 12000 --drum-spec path/to/drum.fsd \
+  --gas-component path/to/species.pack path/to/nasa9.pack path/to/transport.pack \
+  --gas-water none --gas-phase frozen
+```
+
+The description can contain, for example,
+`ambient,thermochemical 293.15 101325 mole 1 supplied-species-id 1`; the identifier
+must match the supplied species pack. Repeat `--gas-component` for mixtures.
+`--gas-water SPECIES_ID` explicitly identifies water when present;
+`--gas-phase liquid-water` requests the material owner's liquid-water saturation
+admission. Neither water identity nor phase policy is inferred.
+
+The same source registry resolves drum descriptions, cymbal profiles and
+explicit meshes, a hi-hat pair and both of its referenced shell files, and
+`--gas-record` overrides. The admitted state supplies drum compressibility,
+distributed cavity acoustics and exterior radiation. Original composition,
+phase admission and species/model/transport identities stay attached to the
+run and appear in its ambient receipt. Missing, ambiguous or out-of-domain
+sources refuse before construction; legacy moist-air and built-in mixture
+records retain their existing numerical behavior. Source packs do not retune
+the solid or add a damping term. A hi-hat squeeze film declares its gas
+separately and uses these same source options; see [SQUEEZE_FILM.md](SQUEEZE_FILM.md).

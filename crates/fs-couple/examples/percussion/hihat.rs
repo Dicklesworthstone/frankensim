@@ -155,10 +155,10 @@ fn build_with_rocking(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Spec
     mute:Option<&compliant_mute::Spec>,targets:targets::Selection,rocking:Option<f64>)->Result<Pair,Error> {
     targets.admit(second)?;
     // The hi-hat's own row owns the air; a shell that declares one must agree.
-    if [upper,lower].iter().any(|s|s.ambient.is_some_and(|a|a.gas!=spec.ambient.gas)) {
+    if [upper,lower].iter().any(|s|s.ambient.as_ref().is_some_and(|a|a.gas()!=spec.ambient.gas())) {
         return Err("hi-hat shells and the hi-hat description declare different ambient gases".into());
     }
-    let ambient=super::ambient::effective(spec.ambient);
+    let ambient=super::ambient::effective(&spec.ambient);
     eprintln!("{}",ambient.receipt());
     mallets.admit("hihat",stroke,second)?;
     if let Some(mute)=mute {mute.admit_command("hihat")?;}
@@ -324,6 +324,10 @@ mod flexible_tests;
 #[cfg(test)]
 #[path="hihat_gas_tests.rs"]
 mod gas_tests;
+
+#[cfg(test)]
+#[path="hihat_thermochemical_tests.rs"]
+mod thermochemical_tests;
 
 #[cfg(test)]
 #[path="hihat_mallet_tests.rs"]

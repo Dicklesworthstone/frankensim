@@ -34,10 +34,10 @@ fn complete_materials_and_mesh_round_trip_without_defaults() {
     let mut spec=small();
     spec.heads[0].tension_n_m=2456.7;spec.heads[1].young_pa=3.2e9;
     spec.heads[1].damping_ratio=0.0;spec.depth_m=0.20;
-    let file=text(spec);
-    assert_eq!(Spec::read(&file).unwrap(),declared(spec));
+    let file=text(spec.clone());
+    assert_eq!(Spec::read(&file).unwrap(),declared(spec.clone()));
     let mut records:Vec<_>=file.lines().skip(1).collect();records.reverse();
-    assert_eq!(Spec::read(&format!("# inputs, not certified measurements\n{HEADER}\n{}\n",records.join("\n"))).unwrap(),declared(spec));
+    assert_eq!(Spec::read(&format!("# inputs, not certified measurements\n{HEADER}\n{}\n",records.join("\n"))).unwrap(),declared(spec.clone()));
     let film=spec.head(1).unwrap();
     assert_eq!(film.spec.young_pa,spec.heads[1].young_pa);
     assert_eq!(film.spec.thickness_m,spec.heads[1].thickness_m);
@@ -140,7 +140,7 @@ fn option_composes_with_playing_and_existing_physical_images() {
 fn clocks_acoustic_band_and_fixed_snare_geometry_are_not_silently_changed() {
     let spec=small();
     for dt in [0.0,-1.0,f64::NAN,0.001] {assert!(spec.admit_clock(dt,false).is_err());}
-    let wide=Spec {band_hz:[20.0,2000.0],..spec};
+    let wide=Spec {band_hz:[20.0,2000.0],..spec.clone()};
     assert!(wide.admit_clock(2e-6,false).is_ok());
     assert!(wide.admit_clock(crate::acoustics::MECHANICAL_DT,true).is_err());
     let wires=crate::snare::SnareSet::reference(false);
@@ -173,7 +173,7 @@ fn supplied_reference_keeps_the_original_contact_air_and_accepted_trajectory() {
 
 #[test]
 fn tension_and_elasticity_change_the_actual_pencil_and_resonances() {
-    let a=small();let mut b=a;
+    let a=small();let mut b=a.clone();
     for h in &mut b.heads {h.young_pa*=4.0;h.tension_n_m*=4.0;}
     b.band_hz=a.band_hz.map(|f|2.0*f);
     let (fa,ma)=a.prepare(2e-6,false).unwrap();
@@ -200,7 +200,7 @@ fn tension_and_elasticity_change_the_actual_pencil_and_resonances() {
 
 #[test]
 fn depth_changes_real_air_feedback_without_retuning_the_heads() {
-    let a=small();let b=Spec {depth_m:1.5*a.depth_m,..a};
+    let a=small();let b=Spec {depth_m:1.5*a.depth_m,..a.clone()};
     let build=|s|drum_with_spec(128,2e-6,false,false,None,false,stroke(),false,None,Some(s)).unwrap();
     let mut shallow=build(a);let mut deep=build(b);
     assert_eq!(shallow.observer_a,deep.observer_a);
@@ -223,7 +223,7 @@ fn depth_changes_real_air_feedback_without_retuning_the_heads() {
 fn larger_supplied_heads_reach_their_matching_exterior_not_the_stock_shell() {
     let s=Spec {radius_m:0.20,outer_radius_m:0.21,depth_m:0.14,..small()};
     let e=drum_with_spec(2,crate::acoustics::MECHANICAL_DT,true,false,None,false,
-        stroke(),false,None,Some(s)).unwrap();
+        stroke(),false,None,Some(s.clone())).unwrap();
     assert!(e.acoustics.is_some());
     assert_eq!(e.pressure.as_ref().unwrap().volume_m3,s.volume_m3());
     // The old 0.1778m outer surface cannot enclose these 0.20m heads.
@@ -252,7 +252,7 @@ fn supplied_drum_retains_stretching_distributed_air_and_prepared_nonlinearity() 
 #[test]
 fn multi_lug_harmonics_parse_into_equilibrated_prestress_and_change_modes_not_mass() {
     let base=small();
-    let declared=format!("{}tension_harmonic,batter,8,120,-35\ntension_harmonic,resonant,10,60,20\n",text(base));
+    let declared=format!("{}tension_harmonic,batter,8,120,-35\ntension_harmonic,resonant,10,60,20\n",text(base.clone()));
     let tuned=Spec::read(&declared).unwrap();
     assert_eq!(tuned.tension_variation[0].harmonics_n_m[6],[120.0,-35.0]);
     assert_eq!(tuned.tension_variation[1].harmonics_n_m[8],[60.0,20.0]);
@@ -293,7 +293,7 @@ fn affine_and_harmonic_records_compose_in_either_order() {
          tension_harmonic,batter,8,120,-35\n\
          tension_variation,batter,120,70,10,1,-2,3,4\n\
          tension_harmonic,resonant,12,10,-4\n",
-        text(base)
+        text(base.clone())
     );
     let parsed = Spec::read(&file).unwrap();
     let mut records: Vec<_> = file.lines().skip(1).collect();

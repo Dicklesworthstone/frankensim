@@ -117,7 +117,7 @@ impl Spec {
     pub(super) fn admit_necks(self, experiment: &Experiment) -> Result<(), Error> {
         self.validate()?;
         if let Some(air)=&experiment.air {
-            let k=core::f64::consts::TAU*self.band_hz[1]/experiment.ambient.gas.sound_speed;
+            let k=core::f64::consts::TAU*self.band_hz[1]/experiment.ambient.gas().sound_speed;
             for i in 0..air.coupling.neck_count() {
                 let port=air.coupling.neck_radiation_port(i)?;
                 let radius=(port.area_m2/core::f64::consts::PI).sqrt();

@@ -46,10 +46,20 @@ isothermal pocket at fixed pressure has the same pressure-volume response
 across gas species; this model does not invent a density-dependent inertia.
 Source gas records are retained by the mechanical runtime. Additional viscosity
 or `isothermal` records in either order refuse, including matching duplicates.
-The native file route accepts the shared built-in gas declarations; external
-thermochemical source registries are available through the library's
-`with_material_compressible_squeeze_film` API with an already resolved
-`GasRecord`. The exterior acoustic region remains separately specified.
+The native file route also accepts
+`gas,thermochemical 293.15 100000 mole 1 supplied-species-id 1`. Supply the
+species/NASA-9/transport source triple with
+`--gas-component SPECIES.pack NASA9.pack TRANSPORT.pack`, plus explicit
+`--gas-water none|SPECIES_ID --gas-phase frozen|liquid-water` options as described
+in [AUDIO.md](AUDIO.md#air). The same loaded registry resolves the pair and both
+shell descriptions, while the film's original `GasRecord` reaches the existing
+material gas-film owner. Missing models, missing transport, duplicate species
+or state points outside source validity refuse. Viscosity comes from the
+source transport pack; `p`, `T` and `R` come from the same admitted state.
+The film retains its existing isothermal law: source heat capacity does not
+silently select adiabatic storage or add a second pressure force. The exterior
+acoustic region remains separately specified; `--gas-record` overrides that
+region, while the film uses its own explicit `gas` row.
 
 These are **synthetic test inputs**, not measured specimen data or a guarantee
 that the included hi-hat fits this gap domain. Choose compatible geometry,

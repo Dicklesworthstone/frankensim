@@ -5,6 +5,7 @@ use super::Error;
 use fs_plate::shell::profile::{AnnularRelief, ProfileStation,
     SurfaceIndentation, revolve};
 use fs_plate::shell::survey::MeshShell;
+use fs_material::gas_species::input::ThermochemicalSources;
 use std::io::{Read, Write as _};
 use std::fmt::Write as _;
 
@@ -49,16 +50,22 @@ impl Specimen {
     }
 
     pub fn load(path: &Path) -> Result<Self, Error> {
+        Self::load_with_gas_sources(path,None)
+    }
+    pub fn load_with_gas_sources(path: &Path,sources: Option<&ThermochemicalSources<'_>>) -> Result<Self, Error> {
         // A changing file or a pipe cannot exceed the same in-memory input limit.
         let mut text = String::new();
         std::fs::File::open(path)?.take((MAX_BYTES+1) as u64).read_to_string(&mut text)?;
-        Self::parse(&text)
+        Self::parse_with_gas_sources(&text,sources)
     }
 
     /// Strict, line-oriented numeric records with SI units and no hidden material
     /// defaults. Comments begin with '#'. Unknown fields and duplicate singleton
     /// records refuse, so a misspelled thickness/material cannot go unused.
     pub fn parse(text: &str) -> Result<Self, Error> {
+        Self::parse_with_gas_sources(text,None)
+    }
+    pub fn parse_with_gas_sources(text: &str,sources: Option<&ThermochemicalSources<'_>>) -> Result<Self, Error> {
         if text.len()>MAX_BYTES { return Err("shell profile exceeds the 1 MiB input limit".into()); }
         let mut material=None; let mut azimuths=None; let mut band=None; let mut ambient=None;
         let mut stations=Vec::new(); let mut rings=Vec::new(); let mut dents=Vec::new();
@@ -92,7 +99,7 @@ impl Specimen {
                     band=Some([v[0],v[1]]);
                 }
                 "ambient" if ambient.is_none() && fields.len()==2=>{
-                    ambient=Some(super::ambient::Ambient::described(fields[1])
+                    ambient=Some(super::ambient::Ambient::described_with_gas_sources(fields[1],sources)
                         .map_err(|e|format!("shell profile line {}: {e}",line+1))?);
                 }
                 "station" if stations.len()<1024=>{let v=numbers(3)?;
@@ -135,7 +142,10 @@ impl Specimen {
     /// Full supplied 3D geometry with explicit per-node thickness and materials.
     /// No meridian, alloy-name lookup or reference profile is substituted.
     pub fn parse_mesh(text: &str) -> Result<Self, Error> {
-        let (shell,band_hz,strike,ambient) = mesh_input::parse(text)?;
+        Self::parse_mesh_with_gas_sources(text,None)
+    }
+    pub fn parse_mesh_with_gas_sources(text: &str,sources: Option<&ThermochemicalSources<'_>>) -> Result<Self, Error> {
+        let (shell,band_hz,strike,ambient) = mesh_input::parse_with_gas_sources(text,sources)?;
         Ok(Self { stations:vec![],rings:vec![],dents:vec![],azimuths:0,
             young_pa:0.,poisson:0.,density_kg_m3:0.,band_hz,ambient,
             sampled:Some(shell),default_strike:Some(strike) })
@@ -205,22 +215,30 @@ pub fn admit_selection(profile: Option<&Path>, mesh: Option<&Path>, command: &st
 }
 
 pub fn load_selection(profile: Option<&Path>, mesh: Option<&Path>) -> Result<Option<Specimen>,Error> {
+    load_selection_with_gas_sources(profile,mesh,None)
+}
+pub fn load_selection_with_gas_sources(profile: Option<&Path>, mesh: Option<&Path>,
+    sources: Option<&ThermochemicalSources<'_>>) -> Result<Option<Specimen>,Error>
+{
     if profile.is_some() && mesh.is_some() { return Err("choose one explicit shell geometry input".into()); }
     if let Some(path) = mesh {
         let mut text = String::new();
         std::fs::File::open(path)?.take((mesh_input::MAX_BYTES+1) as u64).read_to_string(&mut text)?;
-        return Specimen::parse_mesh(&text).map(Some);
+        return Specimen::parse_mesh_with_gas_sources(&text,sources).map(Some);
     }
-    profile.map(Specimen::load).transpose()
+    profile.map(|path|Specimen::load_with_gas_sources(path,sources)).transpose()
 }
 
 /// Cold, no-clobber export front door. It performs no eigensolve or playback.
 pub fn export_command(args: &[String]) -> Result<bool,Error> {
+    export_command_with_gas_sources(args,None)
+}
+pub fn export_command_with_gas_sources(args: &[String],sources: Option<&ThermochemicalSources<'_>>) -> Result<bool,Error> {
     if args.first().map(String::as_str) != Some("export-shell-mesh") { return Ok(false); }
     if !(2..=3).contains(&args.len()) {
         return Err("usage: percussion export-shell-mesh OUTPUT.fss [INPUT.profile]".into());
     }
-    let input = if args.len() == 3 { Specimen::load(Path::new(&args[2]))? } else { Specimen::reference() };
+    let input = if args.len() == 3 { Specimen::load_with_gas_sources(Path::new(&args[2]),sources)? } else { Specimen::reference() };
     let text = input.mesh_text()?;
     let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&args[1])?;
     file.write_all(text.as_bytes())?; file.flush()?;

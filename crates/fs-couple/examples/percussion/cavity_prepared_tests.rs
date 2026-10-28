@@ -95,7 +95,7 @@ fn supplied_snare_off_audio_construction_preserves_head_projections_and_appends_
     let stroke = Stroke { speed_m_s: 1.6, position_m: Some([0.06, 0.01]) };
     let dt = crate::acoustics::MECHANICAL_DT;
     let compact = crate::drum_with_spec(32, dt, true, true, Some(wires), false,
-        stroke, false, None, Some(spec)).unwrap();
+        stroke, false, None, Some(spec.clone())).unwrap();
     let mut distributed = crate::drum_with_spec(32, dt, true, true, Some(wires), false,
         stroke, true, None, Some(spec)).unwrap();
     assert!(compact.acoustics.is_some() && distributed.acoustics.is_some());

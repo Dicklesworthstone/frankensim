@@ -1566,6 +1566,24 @@ No thermochemical route falls back to a preset. Source-aware sidecars retain
 composition, temperature, pressure and all three pack identities per species.
 Omitting the new options preserves legacy numerical and sidecar paths.
 
+The native `percussion` example uses this same bounded source loader for
+drum, cymbal-profile, explicit shell-mesh and paired hi-hat `ambient` rows,
+including both shell files referenced by a pair and `--gas-record` overrides.
+The selected `Ambient` owns the original `GasRecord`; its exact admitted
+density and sound speed supply exterior radiation and distributed cavities,
+and `rho*c^2` supplies the existing drum volume spring. Composition, phase
+admission and species/NASA-9/transport identities remain with the run and its
+ambient receipt. The same registry resolves a hi-hat squeeze film's separate
+`gas` row; source viscosity and p/T/R enter the original compressible film
+owner, which retains the complete record and its existing isothermal storage.
+No new pressure force, damping term, time loop or solid retuning is added.
+Missing, ambiguous and out-of-domain sources refuse, while legacy declarations
+preserve their numerical state. Focused native tests cover actual source bytes
+and nested file routes, NASA-9-dependent drum pressure feedback with exact
+replay, and source species mass in compressed real-skin gas pockets. This
+extends M0.1-W1 input-to-consumer coverage; it does not qualify a full-band
+percussion instrument or add evolving gas temperature/composition.
+
 `realize_assembly` turns an `fs_scenario::AcousticAssembly` into observer
 pressure by composing nameless primitives: a prestressed Euler–Bernoulli
 waveguide (`fs-nlmodal::prestressed_beam_omega` / Kirchhoff–Carrier), a

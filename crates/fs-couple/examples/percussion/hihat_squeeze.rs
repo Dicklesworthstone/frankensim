@@ -6,7 +6,7 @@ use fs_couple::render::plate::impact::squeeze::{
     FilmCell, FilmChannel, FilmLimits, GapPort, ResistiveFilm,
 };
 use fs_couple::render::plate::impact::gas_film::AmbientGas;
-use fs_material::gas_species::input::{GasRecord,read_gas_record};
+use fs_material::gas_species::input::{GasRecord,ThermochemicalSources,read_gas_record};
 use std::io::Read;
 use std::path::Path;
 
@@ -26,6 +26,9 @@ pub(super) struct Config {
 }
 
 pub(super) fn option(args: &mut Vec<String>) -> Result<Option<Config>, Error> {
+    option_with_gas_sources(args,None)
+}
+pub(super) fn option_with_gas_sources(args: &mut Vec<String>,sources:Option<&ThermochemicalSources<'_>>) -> Result<Option<Config>, Error> {
     let positions: Vec<_> = args.iter().enumerate()
         .filter_map(|(i, s)| (s == "--squeeze-film").then_some(i)).collect();
     if positions.len() > 1 { return Err("--squeeze-film may be supplied only once".into()); }
@@ -34,13 +37,16 @@ pub(super) fn option(args: &mut Vec<String>) -> Result<Option<Config>, Error> {
         .ok_or("--squeeze-film requires an input file; see SQUEEZE_FILM.md")?;
     let mut text = String::new();
     std::fs::File::open(Path::new(path))?.take((MAX_BYTES + 1) as u64).read_to_string(&mut text)?;
-    let config = Config::parse(&text)?;
+    let config = Config::parse_with_gas_sources(&text,sources)?;
     args.drain(i..i + 2);
     Ok(Some(config))
 }
 
 impl Config {
     pub(super) fn parse(text: &str) -> Result<Self, Error> {
+        Self::parse_with_gas_sources(text,None)
+    }
+    pub(super) fn parse_with_gas_sources(text: &str,sources:Option<&ThermochemicalSources<'_>>) -> Result<Self, Error> {
         if text.len() > MAX_BYTES { return Err("squeeze-film input exceeds 8 KiB".into()); }
         let (mut header, mut annulus, mut viscosity, mut limits, mut boundary) =
             (false, None, None, None, None);
@@ -76,7 +82,7 @@ impl Config {
                 }),
                 "gas" if f.len() == 2 && gas.is_none() && viscosity.is_none() => {
                     let mut fields=f[1].split_ascii_whitespace();
-                    let source=read_gas_record(&mut fields,None,None)?;
+                    let source=read_gas_record(&mut fields,None,sources)?;
                     if fields.next().is_some() { return Err(bad()); }
                     let state=source.state();
                     viscosity=Some(state.dynamic_viscosity);
