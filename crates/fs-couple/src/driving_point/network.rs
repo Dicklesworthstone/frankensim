@@ -9,8 +9,10 @@ use super::{
 };
 use fs_duct::network::{
     CoupledTermination, DuctNetwork, NetworkDriveResponse, NodeBoundary, PortTermination,
-    network_port_impedance,
+    network_drive, network_drive_coupled,
 };
+#[cfg(test)]
+use fs_duct::network::network_port_impedance;
 use fs_duct::{DuctError, LossModel, Segment, Termination};
 use fs_material::gas::GasState;
 use fs_math::c64::C64;
@@ -124,10 +126,8 @@ impl NetworkDrivingPoint {
                 what: "network driving point with coupled ports needs their coupled termination",
             });
         }
-        network_port_impedance(&self.network, gas, omega, loss)?.drive(
-            &self.active_port,
-            &self.terminations,
-            gas,
+        network_drive(
+            &self.network, gas, omega, loss, &self.active_port, &self.terminations,
         )
     }
 
@@ -141,11 +141,8 @@ impl NetworkDrivingPoint {
         coupled: &CoupledTermination,
     ) -> Result<NetworkDriveResponse, DuctError> {
         self.admit_coupled_labels(coupled)?;
-        network_port_impedance(&self.network, gas, omega, loss)?.drive_coupled(
-            &self.active_port,
-            &self.terminations,
-            coupled,
-            gas,
+        network_drive_coupled(
+            &self.network, gas, omega, loss, &self.active_port, &self.terminations, coupled,
         )
     }
 

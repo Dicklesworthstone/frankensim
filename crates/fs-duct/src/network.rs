@@ -13,6 +13,10 @@ use crate::{Duct, DuctError, HoleState, LossModel, Segment, TabulatedLoad, Termi
 
 mod media;
 pub use media::NetworkMedia;
+mod loaded;
+pub use loaded::{
+    network_drive, network_drive_coupled, network_drive_coupled_regional, network_drive_regional,
+};
 
 #[cfg(test)]
 mod tests;
@@ -29,6 +33,8 @@ pub const MAX_NETWORK_SEGMENTS: usize = 4096;
 pub const MAX_NETWORK_UNKNOWNS: usize = 256;
 /// Pressure unknowns plus two inward-flow unknowns per retained scattering edge.
 pub const MAX_NETWORK_WAVE_UNKNOWNS: usize = MAX_NETWORK_UNKNOWNS + 2 * MAX_NETWORK_EDGES;
+/// Retained wave equations plus one current for every non-active external port.
+pub const MAX_NETWORK_LOADED_UNKNOWNS: usize = MAX_NETWORK_WAVE_UNKNOWNS + MAX_NETWORK_PORTS - 1;
 /// Maximum infinity-norm condition number for normalized edge and graph solves.
 pub const MAX_NETWORK_CONDITION: f64 = 1.0e10;
 
@@ -570,14 +576,17 @@ struct WaveEdge {
 // (I-S)p - (I+S)R*U = 0. KCL closes the graph, including pressure-release ends.
 // Each current unknown is R_edge*U; multiplying KCL by one graph reference
 // puts every unknown/equation in pressure units before row equilibration.
-fn wave_pressure_inverse(
+fn wave_equations(
     boundary_y: &[C64],
     pressures: usize,
     edges: &[WaveEdge],
-) -> Result<(Vec<C64>, f64), DuctError> {
-    let n = pressures + 2 * edges.len();
-    if n > MAX_NETWORK_WAVE_UNKNOWNS {
-        return Err(bad("network scattering-constraint cap exceeded (768)"));
+    external_currents: usize,
+) -> Result<(Vec<C64>, usize, f64), DuctError> {
+    let n = pressures + 2 * edges.len() + external_currents;
+    if external_currents >= MAX_NETWORK_PORTS || n > MAX_NETWORK_LOADED_UNKNOWNS {
+        return Err(bad(
+            "network loaded scattering-constraint cap exceeded (799)",
+        ));
     }
     let reference = edges
         .first()
@@ -608,6 +617,15 @@ fn wave_pressure_inverse(
             }
         }
     }
+    Ok((a, n, reference))
+}
+
+fn wave_pressure_inverse(
+    boundary_y: &[C64],
+    pressures: usize,
+    edges: &[WaveEdge],
+) -> Result<(Vec<C64>, f64), DuctError> {
+    let (mut a, n, reference) = wave_equations(boundary_y, pressures, edges, 0)?;
     let mut source_scale = vec![0.0; pressures];
     for (row, values) in a.chunks_exact_mut(n).enumerate() {
         let scale = values.iter().map(|z| z.abs()).fold(0.0, f64::max);
@@ -892,6 +910,30 @@ pub fn network_port_impedance_regional(
     network_port_impedance_bound(net, media.exterior_gas(), Some(media), omega, loss)
 }
 
+fn node_gas(
+    net: &DuctNetwork,
+    exterior: &GasState,
+    media: Option<&NetworkMedia>,
+    node: usize,
+) -> Option<GasState> {
+    let Some(media) = media else {
+        return Some(*exterior);
+    };
+    let mut gas = None;
+    for edge in &net.edges {
+        if edge.from == node || edge.to == node {
+            let current = *media
+                .edge_gas(&edge.id)
+                .expect("complete edge identities admitted");
+            if gas.is_some_and(|previous| previous != current) {
+                return None;
+            }
+            gas = Some(current);
+        }
+    }
+    gas
+}
+
 fn network_port_impedance_bound(
     net: &DuctNetwork,
     exterior: &GasState,
@@ -904,24 +946,7 @@ fn network_port_impedance_bound(
     // A pressure node may join unlike gases, but that does not define the
     // single interior modal basis required by a flanged mouth's Schur load.
     // Retain absence explicitly; finite/coupled loads remain admissible there.
-    let local_gas = |node: usize| -> Option<GasState> {
-        let Some(media) = media else {
-            return Some(*exterior);
-        };
-        let mut gas = None;
-        for edge in &net.edges {
-            if edge.from == node || edge.to == node {
-                let current = *media
-                    .edge_gas(&edge.id)
-                    .expect("complete edge identities admitted");
-                if gas.is_some_and(|previous| previous != current) {
-                    return None;
-                }
-                gas = Some(current);
-            }
-        }
-        gas
-    };
+    let local_gas = |node| node_gas(net, exterior, media, node);
     let mut order: Vec<usize> = (0..net.nodes.len()).collect();
     order.sort_unstable_by(|&a, &b| net.nodes[a].id.cmp(&net.nodes[b].id));
     let mut ground = vec![false; net.nodes.len()];

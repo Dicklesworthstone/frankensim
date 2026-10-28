@@ -1018,6 +1018,34 @@ Continuous axial fields within an edge and time-domain characteristic networks
 are not claimed here. Calls are synchronous and bounded; frequency sweeps can be
 caller-chunked, with the same existing no-Cx boundary.
 
+### Directly loaded driving-point response
+
+`network_drive`, `network_drive_coupled` and their `_regional` variants impose
+unit flow at one active port and an explicit scalar or coupled load at every
+other port. They preserve the existing open-circuit query followed by `drive`
+operation order whenever that solve succeeds. Only `Singular` selects the
+complete loaded scattering system; invalid inputs retain their original refusals.
+
+The loaded KCL rows retain external currents, while boundary rows impose
+`p + Z U = 0`, with `U` into the graph. Closed ports impose `U=0`. The load matrix
+is never inverted, so pressure-release boundaries and singular passive mutual
+loads remain valid. At most 31 external currents add to the retained edge
+currents, capped at 799 total unknowns before the dense allocation. The same
+row equilibration and full infinity-norm condition ceiling of 1e10 apply; a
+true pole of the fully loaded network still refuses. Labels, active-port
+partition, frequency, passivity, edge gas records and exterior admission remain
+mandatory. This solves the supplied load problem without requiring its
+open-circuit N-port impedance to exist.
+
+All four `fs-couple::NetworkDrivingPoint` response methods use these entry
+points, including their causal line, tract and radiation consumers. The original
+N-port query continues to require finite open-circuit `Z`.
+`network/tests/loaded.rs` defines regressions for half-wave scalar and mutual
+loads, pressure release, a rank-one passive load with a pressure-release
+combination, mean power balance, regional gas binding, bit parity with the
+original admitted route, and invalid load refusals. The driving-point adapter
+has a matching half-wave regression.
+
 ### Regional material and exterior binding
 
 `NetworkMedia` binds a complete original `GasRecord` to every exact edge id,

@@ -1,7 +1,7 @@
 //! Source-retaining media on the original network and characteristic-line owner.
 
 use super::*;
-use fs_duct::network::{NetworkMedia, network_port_impedance_regional};
+use fs_duct::network::{NetworkMedia, network_drive_coupled_regional, network_drive_regional};
 
 impl NetworkDrivingPoint {
     /// Full gas source record at the active edge end. The same unique plane
@@ -31,8 +31,9 @@ impl NetworkDrivingPoint {
                 what: "network driving point with coupled ports needs their coupled termination",
             });
         }
-        network_port_impedance_regional(&self.network, media, omega, loss)?
-            .drive_bound(&self.active_port, &self.terminations)
+        network_drive_regional(
+            &self.network, media, omega, loss, &self.active_port, &self.terminations,
+        )
     }
 
     /// The same regional propagation closed by one full, ordered multiport
@@ -47,8 +48,9 @@ impl NetworkDrivingPoint {
         coupled: &CoupledTermination,
     ) -> Result<NetworkDriveResponse, DuctError> {
         self.admit_coupled_labels(coupled)?;
-        network_port_impedance_regional(&self.network, media, omega, loss)?
-            .drive_coupled_bound(&self.active_port, &self.terminations, coupled)
+        network_drive_coupled_regional(
+            &self.network, media, omega, loss, &self.active_port, &self.terminations, coupled,
+        )
     }
 
     /// Realize a static, regionally filled graph through the original causal

@@ -82,3 +82,33 @@ fn mixed_scalar_and_coupled_boundaries_keep_original_units_and_signs() {
     assert_eq!(a.impedance,b.impedance); assert_eq!(a.port_inflows,b.port_inflows);
     assert!((a.port_pressures[1]+z*a.port_inflows[1]).abs()<1e-8*a.impedance.abs());
 }
+
+
+// G1: the source and load close the bore before requiring an open-circuit
+// N-port impedance. The characteristic-line and tract adapters share this path.
+#[test]
+fn loaded_half_wave_response_does_not_require_open_port_impedance() {
+    let gas = gas();
+    let radius = 0.006;
+    let length = 0.2;
+    let omega = core::f64::consts::PI * gas.sound_speed / length;
+    let zc = gas.density * gas.sound_speed / (core::f64::consts::PI * radius * radius);
+    let net = DuctNetwork {
+        nodes: ["input", "end"].map(|id| NetworkNode {
+            id: id.into(),
+            boundary: NodeBoundary::Port { label: id.into() },
+        }).to_vec(),
+        edges: vec![NetworkEdge {
+            id: "bore".into(), from: 0, to: 1,
+            duct: Duct { segments: vec![Segment::Cylinder { radius, length }] },
+            corrections: JunctionCorrections::Disabled,
+        }],
+    };
+    assert!(network_port_impedance(&net, &gas, omega, LossModel::Lossless).is_err());
+    let model = NetworkDrivingPoint::new(net, "input".into(), vec![PortTermination {
+        label: "end".into(), load: NetworkLoad::Impedance(C64::from_re(zc)),
+    }], schema()).unwrap();
+    let response = model.response(&gas, omega, LossModel::Lossless).unwrap();
+    assert!((response.impedance - C64::from_re(zc)).abs() / zc < 2.0e-12);
+    assert!((response.port_inflows[1] - C64::ONE).abs() < 2.0e-12);
+}
