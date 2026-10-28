@@ -30,7 +30,7 @@ cargo run --release -p fs-couple --bin music_render -- wind \
   crates/fs-couple/examples/flue-dg-molecular.performance molecular.wav --decimate
 ```
 
-After the complete `dg_tube` block (including its radiation and exterior rows),
+After the complete `dg_tube` or `dg_bore` block (including its radiation and exterior rows),
 before any `dg_wall`, select:
 
 ```text
@@ -40,8 +40,27 @@ dg_molecular iso9613-terrestrial-air
 The material-modal DG reed path accepts the same row for its bore and optional
 upstream tract. Every finite side chimney evaluates the law against its own gas
 record. The complete state allowance includes all thermal/molecular states
-before propagator or radiation preparation. Spatial gas fields and spatial
-wall quadrature are not supported by this molecular attachment; they refuse.
+before propagator or radiation preparation. `dg_bore` retains the original
+spatial wall quadrature for cones, flares and other admitted geometry with a
+uniform gas. Each axial sample uses the local radius and its own radial thermal
+diffusion rates. Axial gas fields still refuse: substituting their mean or inlet
+state would discard the prescribed temperature/composition field.
+
+`flue-dg-conical-molecular.performance` exercises this path with a declared
+1-to-2 mm radius cone, twelve radial poles and four axial quadrature points.
+It retains the same independent internal and exterior gas declarations:
+
+```sh
+cargo run --release -p fs-couple --bin music_render -- wind \
+  crates/fs-couple/examples/flue-dg-conical-molecular.performance conical.wav --decimate
+```
+
+This is an exploration of the shared local-cylinder Webster model, not a
+measured flute or oboe. Axial quadrature, radial-pole and acoustic-mesh errors
+remain separate convergence axes; low-frequency storage is exact only to the
+admitted spatial quadrature's accuracy. Molecular state counts follow the
+actual thermal coordinates: `elements * quadrature_points * poles * reservoirs`
+for `dg_bore`, rather than the nodal count used by `dg_tube`.
 
 The exterior choice stays independent:
 

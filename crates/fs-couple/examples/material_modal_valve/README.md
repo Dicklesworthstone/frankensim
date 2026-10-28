@@ -12,13 +12,15 @@ The supplied geometry and material values are **manufactured integration data**.
 They are not wet-cane measurements or a qualified clarinet/oboe specimen.
 
 The DG variant also accepts `dg_molecular LAW` immediately after each complete
-`dg_tube` block and before its optional `dg_wall`, independently for the bore and
+`dg_tube` or `dg_bore` block and before its optional `dg_wall`, independently for the bore and
 upstream tract. It uses the same evaluated species/reservoir law as the flute,
 finite side chimneys and exterior observers. `observer_gas molecular MAX_PATHS
 MAX_FILTER_TAPS MAX_KERNEL_TERMS LAW` binds the exterior's own composition.
 See [the shared gas declaration and its physical limits](../FLUE_NETWORK_PERFORMANCES.md#molecular-gas-response-inside-dg-bores-and-along-exterior-paths).
-The native allowance includes every molecular state. Unsupported spatial gas or
-wall quadrature, absent species data and ineligible ISO mixtures refuse; the
+The native allowance includes every molecular state at the actual nodal or
+spatial wall quadrature coordinates. Tapered geometry with uniform gas uses
+its original local-cylinder thermal diffusion owner. Spatial gas fields,
+absent species data and ineligible ISO mixtures refuse; the
 source never substitutes a generic air-loss coefficient.
 
 ## Run

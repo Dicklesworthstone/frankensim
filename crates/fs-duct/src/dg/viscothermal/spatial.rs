@@ -61,10 +61,47 @@ struct WallChannel {
     memory_start: usize,
 }
 
+/// A retained positive quadrature functional of the physical pressure field.
+/// Molecular relaxation consumes this original thermal spectral measure; it
+/// does not resample geometry or replace the local radius by an average.
+#[derive(Debug)]
+pub(in crate::dg) struct ThermalQuadrature {
+    pub(in crate::dg) field_start: usize,
+    pub(in crate::dg) projection: Vec<f64>,
+    pub(in crate::dg) terms: Vec<ZkDiffusiveTerm>,
+}
+
 #[derive(Debug, Clone)]
 pub(in crate::dg) struct SpatialViscothermal {
     pub(super) admission: DgWallAdmission,
     channels: Vec<WallChannel>,
+}
+
+impl SpatialViscothermal {
+    /// Reindex only the surviving viscous coordinates. Thermal coordinates are
+    /// replaced by the joint heat/molecular law after the returned prefix.
+    /// Original thermal channels remain available as constitutive metadata.
+    pub(in crate::dg) fn split_for_molecular(
+        &mut self,
+        field_dofs: usize,
+    ) -> (Vec<usize>, Vec<ThermalQuadrature>) {
+        let mut kept: Vec<_> = (0..2 * field_dofs).collect();
+        let mut thermal = Vec::new();
+        for channel in &mut self.channels {
+            if channel.field_start < field_dofs {
+                thermal.push(ThermalQuadrature {
+                    field_start: channel.field_start,
+                    projection: channel.projection.clone(),
+                    terms: channel.terms.clone(),
+                });
+            } else {
+                let original = channel.memory_start;
+                channel.memory_start = kept.len();
+                kept.extend(original..original + channel.terms.len());
+            }
+        }
+        (kept, thermal)
+    }
 }
 
 fn invalid(what: &'static str) -> DuctError {
@@ -86,7 +123,9 @@ impl DgDuct {
     /// rigid and isothermal. rebind_spatial_viscothermal_gas_field continues
     /// these native histories at a new admitted background state. The local
     /// cylindrical ZK law does not provide mean flow, finite wall temperature,
-    /// spherical-cone corrections, molecular relaxation or a 3-D solution.
+    /// spherical-cone corrections or a 3-D solution. For uniform material gas,
+    /// with_molecular_relaxation can subsequently couple internal molecular
+    /// reservoirs to these original thermal quadrature channels.
     /// All memories start at zero when an acoustic initial state is projected.
     /// The original ledger retains total energy and still infers cumulative
     /// loss; wall_dissipated_power_w supplies an independent instantaneous rate.
@@ -339,6 +378,9 @@ impl DgDuct {
         match &self.viscothermal {
             Some(ViscothermalMemory::Spatial(wall)) => {
                 for channel in &wall.channels {
+                    if self.molecular_replaces_thermal() && channel.field_start < self.field_dofs {
+                        continue;
+                    }
                     let value: f64 = channel
                         .projection
                         .iter()

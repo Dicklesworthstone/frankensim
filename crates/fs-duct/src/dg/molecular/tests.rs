@@ -9,6 +9,8 @@ use fs_material::relaxation::{
 use fs_math::c64::C64;
 use fs_thermochem::SpeciesId;
 
+mod spatial;
+
 fn gas() -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101325.0).unwrap()
 }

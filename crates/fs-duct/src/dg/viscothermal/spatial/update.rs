@@ -73,6 +73,9 @@ impl DgDuct {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<DgGasMaterialUpdate, GasFieldDuctError> {
         poll(cancelled)?;
+        if self.molecular.is_some() {
+            return Err(invalid("live gas updates require a molecular history-transfer law").into());
+        }
         let Some(ViscothermalMemory::Spatial(old_memory)) = &self.viscothermal else {
             return Err(invalid("spatial gas refresh requires its native spatial diffusion owner").into());
         };

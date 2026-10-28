@@ -482,19 +482,39 @@ pipe `Z_in = +i Zc cot(kL)`.
     molecular loss squares advance in the same augmented exponential.
     Original equilibrium gas/source metadata and physical p/q observations
     survive. Empty/zero-capacity reservoirs preserve the old operator bitwise.
-    The attachment accepts uniform gas with uniform cylindrical wall memory,
-    or a bare variable-area adiabatic duct. Spatial gas/wall quadrature and
-    live gas changes refuse; finite reservoir history transfer is not guessed.
+    The attachment accepts uniform gas with either uniform cylindrical wall
+    memory or the original spatial wall quadrature on cones and radius
+    profiles, or a bare variable-area adiabatic duct. Each spatial point keeps
+    its original local Bessel measure and normalized pressure projection;
+    surviving viscous coordinates are explicitly reindexed before the joint
+    thermal/molecular coordinates are appended. No radius average is used.
+    A spatial attachment adds `elements * quadrature_points * poles * J`
+    states for J active molecular reservoirs. Nonuniform gas fields and live
+    gas changes refuse; finite reservoir history transfer is not guessed.
     Compliant and Maxwell material walls can subsequently use the frozen
     pressure map. Independent molecular loss is separate from wall loss in
     harmonic responses and their coupled power accounts. The existing dense
     cap includes every new radial/reservoir coordinate.
+    The frozen mass rescaling preserves the original pressure mass, not a
+    quadrature-lumped replacement. At finite axial quadrature, the effective
+    pressure operator is `s [I + sum_q (B_inf*kappa_q(s)-1) v_q v_q^T]`.
+    The quadrature projectors sum to identity only when that rule resolves
+    the original area-weighted mass. Consequently the exact isothermal or
+    equilibrium storage limit is not claimed at unconverged quadrature on a
+    tapered or curved profile. Axial quadrature, mesh and radial pole counts
+    remain independent refinement axes. This is the local-cylinder Webster
+    wall model; spherical-cone and three-dimensional corrections are absent.
     The original equilibrium Bessel band/error is retained; it is NOT a new
     accuracy certificate for the combined constitutive approximation. No bulk
     SK term, axial heat conduction, evolving chemistry or finite wall thermal
     feedback is implied. Four focused regressions cover shared adiabatic
     compliance, combined isothermal storage, physical loss, time/spatial
-    refinement and rate-data pressure changes; native execution is pending.
+    refinement and rate-data pressure changes. Spatial regressions additionally
+    compare the actual augmented Schur complement with the independently
+    integrated local heat equation, refine a curved-profile quadrature, compare
+    the uniform and spatial coupled pressure/loss observations, and check
+    remapped shear loss, side ports and exact-time halving. Native execution
+    of these new molecular tests is pending.
   - States carry a reproducible identity of the assembled operator, geometry,
     mass-coordinate transforms, boundaries and typed ports. `step`, fallible
     `sync_nodal`, and fallible `l2_pressure_error` refuse incompatible states

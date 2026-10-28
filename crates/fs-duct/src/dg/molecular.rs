@@ -20,6 +20,17 @@
 //! Axial conduction, finite wall heat capacity, mean flow and evolving species
 //! are absent. The existing Bessel band admission concerns its equilibrium
 //! spectral measure; it is not a new error certificate for the coupled law.
+//!
+//! A spatial wall uses the SAME positive axial quadrature functional in place
+//! of x_p. Its radius-dependent Bessel modes therefore couple to molecular
+//! reservoirs at their original physical point. Uniform gas makes the frozen
+//! pressure mass map a scalar rescaling, so the normalized functional is
+//! unchanged: sqrt(w*C_inf) M_inf^(-1/2) = sqrt(w*C_eq) M_eq^(-1/2).
+//! The axial projectors sum to identity only to the selected quadrature's
+//! area-weighted mass accuracy. Isothermal/equilibrium storage on a curved
+//! bore therefore needs axial refinement; the original mass is never lumped.
+//! This is a convergent local-cylinder Webster wall discretization on tapered
+//! geometry. It does not introduce spherical-cone or three-dimensional physics.
 
 use super::viscothermal::ViscothermalMemory;
 use super::*;
@@ -39,6 +50,46 @@ struct ThermalMode {
     start: usize,
     pressure_scale: f64,
     heat_rate: f64,
+    projection: PressureProjection,
+}
+
+#[derive(Clone, Debug)]
+enum PressureProjection {
+    /// One identical local material law for each exact-mass coordinate.
+    Uniform,
+    /// One original positive spatial quadrature point in an element.
+    Quadrature { first: usize, weights: Vec<f64> },
+}
+
+impl PressureProjection {
+    fn width(&self, field_dofs: usize) -> usize {
+        match self {
+            Self::Uniform => field_dofs,
+            Self::Quadrature { .. } => 1,
+        }
+    }
+
+    fn value(&self, field: &[f64], i: usize) -> f64 {
+        match self {
+            Self::Uniform => field[i],
+            Self::Quadrature { first, weights } => weights
+                .iter()
+                .enumerate()
+                .map(|(j, weight)| weight * field[*first + j])
+                .sum(),
+        }
+    }
+
+    fn entries(&self, i: usize, scale: f64) -> Vec<(usize, f64)> {
+        match self {
+            Self::Uniform => vec![(i, scale)],
+            Self::Quadrature { first, weights } => weights
+                .iter()
+                .enumerate()
+                .map(|(j, weight)| (*first + j, scale * weight))
+                .collect(),
+        }
+    }
 }
 
 fn invalid(what: &'static str) -> DuctError {
@@ -62,11 +113,13 @@ fn stamp_square(operator: &mut [f64], n: usize, terms: &[(usize, f64)], rate: f6
 
 impl DgDuct {
     /// Couple the exact evaluated molecular reservoirs to the original pressure
-    /// and (when attached) uniform circular thermal diffusion histories.
+    /// and the original circular thermal diffusion histories.
     ///
-    /// Attach AFTER uniform viscothermal memory and BEFORE compliant walls.
-    /// Bare variable-area ducts support the adiabatic molecular law. A spatial
-    /// gas or spatial wall quadrature refuses instead of using a mean state.
+    /// Attach AFTER viscothermal memory and BEFORE compliant walls. Uniform
+    /// exact-mass and spatial wall quadrature are both supported: tapered and
+    /// profiled bores retain their original local radius and wall measure.
+    /// Bare variable-area ducts support the adiabatic molecular law. A
+    /// nonuniform gas field refuses instead of using a mean material state.
     /// The original equilibrium GasState and source field remain unchanged;
     /// only the internal pressure energy map uses frozen compressibility.
     /// Matched boundaries retain their original equilibrium resistance, which
@@ -99,11 +152,6 @@ impl DgDuct {
         {
             return Err(invalid(
                 "molecular gas must exactly match the complete uniform DG material",
-            ));
-        }
-        if matches!(self.viscothermal, Some(ViscothermalMemory::Spatial(_))) {
-            return Err(invalid(
-                "molecular gas currently requires the uniform thermal diffusion owner",
             ));
         }
         let equilibrium_bulk = self.gas.density * self.gas.sound_speed * self.gas.sound_speed;
@@ -149,47 +197,86 @@ impl DgDuct {
         }
         let m = self.field_dofs;
         let old_total = self.total_dofs();
-        let (prefix, radial): (usize, Vec<(f64, f64)>) = match &self.viscothermal {
-            Some(ViscothermalMemory::Uniform(model)) => {
-                let radial = model
-                    .shunt_terms()
-                    .iter()
-                    .map(|t| {
-                        (
-                            t.gain_per_s / (t.rate_per_s * (self.gas.gamma - 1.0)),
-                            t.rate_per_s * self.gas.specific_heat_cp / cp,
-                        )
-                    })
-                    .collect();
-                (2 * m + model.series_terms().len() * m, radial)
-            }
-            None => (2 * m, vec![(1.0, 0.0)]),
-            Some(ViscothermalMemory::Spatial(_)) => unreachable!("refused above"),
-        };
-        let weight_sum: f64 = radial.iter().map(|r| r.0).sum();
-        if radial.is_empty()
-            || (weight_sum - 1.0).abs() > 4e-12
-            || radial
+        let gas = self.gas;
+        let mut modes = Vec::new();
+        let mut append_modes =
+            |terms: &[(f64, f64)], projection: PressureProjection| -> Result<(), DuctError> {
+                let weight_sum: f64 = terms.iter().map(|r| r.0).sum();
+                if terms.is_empty()
+                    || (weight_sum - 1.0).abs() > 4e-12
+                    || terms
+                        .iter()
+                        .any(|(w, r)| !w.is_finite() || *w <= 0.0 || !r.is_finite() || *r < 0.0)
+                {
+                    return Err(invalid(
+                        "original thermal measure lost its positive storage moment",
+                    ));
+                }
+                for &(weight, heat_rate) in terms {
+                    modes.push(ThermalMode {
+                        start: 0,
+                        pressure_scale: det::sqrt(weight * gas.specific_gas_constant / cv),
+                        heat_rate,
+                        projection: projection.clone(),
+                    });
+                }
+                Ok(())
+            };
+        let radial_terms = |terms: &[fs_phs::ZkDiffusiveTerm]| -> Vec<(f64, f64)> {
+            terms
                 .iter()
-                .any(|(w, r)| !w.is_finite() || *w <= 0.0 || !r.is_finite() || *r < 0.0)
-        {
-            return Err(invalid(
-                "original thermal measure lost its positive storage moment",
-            ));
+                .map(|t| {
+                    (
+                        t.gain_per_s / (t.rate_per_s * (gas.gamma - 1.0)),
+                        t.rate_per_s * gas.specific_heat_cp / cp,
+                    )
+                })
+                .collect()
+        };
+        let kept: Vec<usize> = match &mut self.viscothermal {
+            Some(ViscothermalMemory::Uniform(model)) => {
+                append_modes(
+                    &radial_terms(model.shunt_terms()),
+                    PressureProjection::Uniform,
+                )?;
+                (0..2 * m + model.series_terms().len() * m).collect()
+            }
+            None => {
+                append_modes(&[(1.0, 0.0)], PressureProjection::Uniform)?;
+                (0..2 * m).collect()
+            }
+            Some(ViscothermalMemory::Spatial(wall)) => {
+                let (kept, channels) = wall.split_for_molecular(m);
+                for channel in channels {
+                    poll(cancelled)?;
+                    append_modes(
+                        &radial_terms(&channel.terms),
+                        PressureProjection::Quadrature {
+                            first: channel.field_start,
+                            weights: channel.projection,
+                        },
+                    )?;
+                }
+                kept
+            }
+        };
+        let prefix = kept.len();
+        let mut total = prefix;
+        for mode in &mut modes {
+            mode.start = total;
+            total = mode
+                .projection
+                .width(m)
+                .checked_mul(molecular + 1)
+                .and_then(|extra| total.checked_add(extra))
+                .filter(|v| *v <= MAX_DG_PROPAGATOR_DOFS)
+                .ok_or_else(|| invalid("molecular plus thermal gas exceeds the DG state budget"))?;
         }
-        let extra = radial
-            .len()
-            .checked_mul(molecular + 1)
-            .and_then(|v| v.checked_mul(m));
-        let total = extra
-            .and_then(|v| prefix.checked_add(v))
-            .filter(|v| *v <= MAX_DG_PROPAGATOR_DOFS)
-            .ok_or_else(|| invalid("molecular plus thermal gas exceeds the DG state budget"))?;
         let mut operator = vec![0.0; total * total];
         for i in 0..prefix {
             poll(cancelled)?;
             for j in 0..prefix {
-                operator[i * total + j] = self.l_tilde[i * old_total + j];
+                operator[i * total + j] = self.l_tilde[kept[i] * old_total + kept[j]];
             }
         }
         // The original pressure-pressure block is only matched-boundary loss
@@ -237,29 +324,24 @@ impl DgDuct {
                 }
             }
         }
-        let mut modes = Vec::with_capacity(radial.len());
-        for (n, (weight, heat_rate)) in radial.into_iter().enumerate() {
+        for mode in &modes {
             poll(cancelled)?;
-            let start = prefix + n * (molecular + 1) * m;
-            let a = det::sqrt(weight * self.gas.specific_gas_constant / cv);
-            for i in 0..m {
-                if heat_rate != 0.0 {
-                    stamp_square(&mut operator, total, &[(i, a), (start + i, 1.0)], heat_rate);
+            let width = mode.projection.width(m);
+            for i in 0..width {
+                let mut temperature = mode.projection.entries(i, mode.pressure_scale);
+                temperature.push((mode.start + i, 1.0));
+                if mode.heat_rate != 0.0 {
+                    stamp_square(&mut operator, total, &temperature, mode.heat_rate);
                 }
                 for (j, (&b, &rate)) in reservoir_scales.iter().zip(&rates).enumerate() {
-                    stamp_square(
-                        &mut operator,
-                        total,
-                        &[(i, -a * b), (start + i, -b), (start + (j + 1) * m + i, 1.0)],
-                        rate,
-                    );
+                    let mut slip: Vec<_> = temperature
+                        .iter()
+                        .map(|&(index, value)| (index, -b * value))
+                        .collect();
+                    slip.push((mode.start + (j + 1) * width + i, 1.0));
+                    stamp_square(&mut operator, total, &slip, rate);
                 }
             }
-            modes.push(ThermalMode {
-                start,
-                pressure_scale: a,
-                heat_rate,
-            });
         }
         if operator.iter().any(|v| !v.is_finite()) {
             return Err(invalid("coupled molecular/thermal operator is not finite"));
@@ -321,9 +403,9 @@ impl DgDuct {
         };
         let mut power = 0.0;
         for mode in &memory.modes {
-            for i in 0..self.field_dofs {
-                let temperature =
-                    state.tilde[mode.start + i] + mode.pressure_scale * state.tilde[i];
+            for i in 0..mode.projection.width(self.field_dofs) {
+                let temperature = state.tilde[mode.start + i]
+                    + mode.pressure_scale * mode.projection.value(&state.tilde, i);
                 power += mode.heat_rate * temperature * temperature;
             }
         }
@@ -347,16 +429,17 @@ impl DgDuct {
         let mut power = 0.0;
         let m = self.field_dofs;
         for mode in &memory.modes {
-            for i in 0..m {
-                let temperature =
-                    state.tilde[mode.start + i] + mode.pressure_scale * state.tilde[i];
+            let width = mode.projection.width(m);
+            for i in 0..width {
+                let temperature = state.tilde[mode.start + i]
+                    + mode.pressure_scale * mode.projection.value(&state.tilde, i);
                 for (j, (&b, &rate)) in memory
                     .reservoir_scales
                     .iter()
                     .zip(&memory.rates)
                     .enumerate()
                 {
-                    let slip = state.tilde[mode.start + (j + 1) * m + i] - b * temperature;
+                    let slip = state.tilde[mode.start + (j + 1) * width + i] - b * temperature;
                     power += rate * slip * slip;
                 }
             }

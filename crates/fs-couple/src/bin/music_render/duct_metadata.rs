@@ -182,7 +182,7 @@ fn dg_molecular_provenance(duct: &fs_duct::dg::DgDuct) -> String {
         super::json_string(process.species.as_str()), process.index,
         process.heat_capacity_j_kg_k, process.relaxation_time_s,
     )).collect::<Vec<_>>().join(",");
-    format!(",\"molecular_gas\":{{\"model\":\"shared-heat-capacity-reservoirs-v1\",\"frozen_cv_j_kg_k\":{:e},\"frozen_sound_speed_m_s\":{:e},\"reservoirs\":[{reservoirs}],\"scope\":\"same DG exponential and original equilibrium gas; coupled molecular and uniform radial thermal states; original Bessel error is not a combined-law certificate; no axial conduction, additional bulk SK term or live chemistry\"}}",
+    format!(",\"molecular_gas\":{{\"model\":\"shared-heat-capacity-reservoirs-v1\",\"frozen_cv_j_kg_k\":{:e},\"frozen_sound_speed_m_s\":{:e},\"reservoirs\":[{reservoirs}],\"scope\":\"same DG exponential and original uniform equilibrium gas; coupled molecular and local radial thermal states at original nodal or spatial quadrature coordinates; original Bessel error is not a combined-law certificate; no axial conduction, additional bulk SK term or live chemistry\"}}",
         state.frozen_cv_j_kg_k(), state.frozen_sound_speed_m_s())
 }
 

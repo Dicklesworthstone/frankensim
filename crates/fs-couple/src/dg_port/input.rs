@@ -477,8 +477,12 @@ impl DgSourceInput {
             .map(|chimney| chimney.state_dofs(self.poles)).sum();
         let active = |state: &fs_material::relaxation::RelaxationState|
             state.processes().iter().filter(|p| p.heat_capacity_j_kg_k > 0.0).count();
+        // Molecular reservoirs live at the original thermal coordinates:
+        // exact-mass nodal arms for dg_tube, axial quadrature arms for dg_bore.
+        let thermal_points = self.wall_quadrature
+            .map_or(nodes, |points| self.mesh.elements * points);
         let mut molecular_dofs = self.molecular.as_ref()
-            .map_or(0, |state| nodes * self.poles * active(state));
+            .map_or(0, |state| thermal_points * self.poles * active(state));
         if let Some(law) = &self.molecular_law {
             for chimney in &self.chimneys {
                 let medium = fs_material::relaxation::input::medium_from_record(&chimney.gas)
@@ -498,15 +502,16 @@ impl DgSourceInput {
     /// Attach the shared species law to the original internal gas. The same
     /// declaration is evaluated independently for every finite chimney; no
     /// atmosphere, species composition or material coefficient is copied from
-    /// another region. This rung requires uniform cylindrical wall diffusion.
+    /// another region. Arbitrary admitted bore geometry uses its original
+    /// local-cylinder spatial wall quadrature; the bore gas must be uniform.
     pub fn with_molecular_relaxation(
         mut self,
         law: fs_material::relaxation::RelaxationAbsorption,
         ambient: &GasRecord,
     ) -> Result<Self, DgSourceError> {
-        if self.field.is_some() || self.wall_quadrature.is_some() || self.molecular.is_some() {
+        if self.field.is_some() || self.molecular.is_some() {
             return Err(bad(self.line,
-                "DG molecular relaxation currently requires one uniform dg_tube declaration"));
+                "DG molecular relaxation requires one uniform gas declaration and cannot bind an axial gas field"));
         }
         let medium = fs_material::relaxation::input::medium_from_record(ambient)
             .map_err(|source| DgSourceError::Gas { line: self.line, source })?;
@@ -547,7 +552,7 @@ impl DgSourceInput {
                     .map_err(|source| DgSourceError::Gas { line: self.line, source })?;
                 let state = law.evaluate(&medium)
                     .map_err(|source| DgSourceError::Gas { line: self.line, source })?;
-                duct.with_molecular_relaxation(state)
+                duct.with_molecular_relaxation_controlled(state, &mut || gate.is_requested())
                     .map_err(|error| DgSourceError::Physics(AcousticRealizeError::Duct(error)))?
             } else { duct };
             Ok(DgBranch { port: chimney.port, duct })
@@ -631,7 +636,7 @@ impl DgSourceInput {
         };
         checkpoint(gate, self.line)?;
         let owner = if let Some(molecular) = &self.molecular {
-            owner.with_molecular_relaxation(molecular.clone())
+            owner.with_molecular_relaxation_controlled(molecular.clone(), &mut || gate.is_requested())
                 .map_err(|error| DgSourceError::Physics(AcousticRealizeError::Duct(error)))?
         } else { owner };
         let owner = bind_wall(owner)?;

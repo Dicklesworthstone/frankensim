@@ -105,6 +105,56 @@ fn remote_tract_composition_and_temperature_reach_the_same_material_reed() {
     let mismatched = text.replace("gas_station 0 293.15", "gas_station 0 303.15");
     assert!(build_gas(&mismatched).is_err(),
         "one small-signal through-flow requires matching complete inlet gases");
+    let unsupported = text.replace("slit_length", concat!(
+        "dg_molecular declared 2 tracta 0 tractb 0\nslit_length",
+    ));
+    assert!(build_gas(&unsupported).is_err(),
+        "a molecular law must not silently replace an authored axial gas field by its inlet");
+}
+
+#[test]
+fn conical_bore_and_tract_molecular_states_reach_both_material_blades() {
+    // Synthetic constitutive data exercise the full declared material/source
+    // connection; they do not represent measured cane or gas relaxation rates.
+    let law = "dg_molecular declared 2 N2 1 vibration 1 1000 1 power 10 293.15 0 273.15 323.15 O2 0\n";
+    let bore = format!(concat!(
+        "dg_bore 1 open 1 2 12 50 2000 0.01 1e-11 256 4\n",
+        "dg_segment cone 0.001 0.002 0.05\n{}"), law);
+    let tract = format!(concat!(
+        "upstream_tract\n",
+        "dg_bore 1 closed 1 2 12 50 2000 0.01 1e-11 256 4\n",
+        "dg_segment cone 0.001 0.0015 0.04\n{}"), law);
+    let text = input().replace("ambient 293.15 101325 0",
+        "ambient mixture 293.15 101325 mole 2 N2 0.8 O2 0.2")
+        .replace("dg_tube 0.05 0.001 open 1 2 8 50 2000 0.01 1e-11 256\n", &bore)
+        .replace("slit_length", &format!("{tract}slit_length"));
+    let source = build(&text, 37);
+    assert_eq!(source.info().blades, 2);
+    let main = source.renderer().system().load().duct();
+    let upstream = source.renderer().system().upstream_load().unwrap().duct();
+    for duct in [main, upstream] {
+        assert!(duct.spatial_viscothermal_admission().is_some());
+        assert_eq!(duct.molecular_relaxation().unwrap().gas(), duct.inlet_gas());
+        assert_eq!(duct.total_dofs(), 150);
+    }
+    let (reference, accepted) = render(source);
+    let (partitioned, other) = render(build(&text, 512));
+    assert_eq!(reference, partitioned);
+    assert_eq!(states(&accepted), states(&other));
+    assert_eq!(accepted.system().load().state(), other.system().load().state());
+    assert_eq!(accepted.system().upstream_load().unwrap().state(),
+        other.system().upstream_load().unwrap().state());
+    for without in [
+        text.replacen(law, "", 1),
+        text.replace(&format!("{law}slit_length"), "slit_length"),
+    ] {
+        let (changed, state) = render(build(&without, 37));
+        assert_ne!(reference, changed,
+            "each region's molecular histories must change the accepted bore pressure");
+        assert_ne!(states(&accepted), states(&state));
+    }
+    assert_eq!(accepted.system().load().state().step_count(), 512);
+    assert_eq!(accepted.system().upstream_load().unwrap().state().step_count(), 512);
 }
 
 #[test]
