@@ -18,6 +18,7 @@ use fs_tribo::{FrictionLaw, TangentialSlip, TriboError};
 
 use super::BoundNormalInterfaceState;
 use crate::normal_patch::adhesive::JkrResponse;
+use crate::normal_patch::dmt::DmtResponse;
 
 /// Interface property for the static junction shear strength, Pa.
 pub const STATIC_JUNCTION_SHEAR_PROPERTY: &str = "adhesive_static_shear_strength";
@@ -177,6 +178,22 @@ impl SourceAdhesiveShear {
         if response.normal_state_identity() != self.normal_identity {
             return Err(AdhesiveShearError::Invalid {
                 reason: "JKR response belongs to a different normal source state",
+            });
+        }
+        self.evaluate(normal, response.friction_contact_state()?, slip)
+    }
+
+    /// Use the actual DMT solid contact area. Finite-gap attraction contributes
+    /// no junction shear or frictional heat because the surfaces are separated.
+    pub fn evaluate_dmt<'a>(
+        &self,
+        normal: &'a BoundNormalInterfaceState,
+        response: &DmtResponse,
+        slip: TangentialSlip,
+    ) -> Result<AdhesiveFrictionResponse<'a>, AdhesiveShearError> {
+        if response.normal_state_identity() != self.normal_identity {
+            return Err(AdhesiveShearError::Invalid {
+                reason: "DMT response belongs to a different normal source state",
             });
         }
         self.evaluate(normal, response.friction_contact_state()?, slip)

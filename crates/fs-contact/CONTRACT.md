@@ -476,3 +476,30 @@ impact timing/restitution, Painleve classification, global uniqueness and
 classical adjoints remain outside this tangential solver. Regional plastic
 increments in `PartialSlipStep` expose the original constitutive flow for the
 independent check without changing the return map.
+
+### Low-Tabor adhesion with finite-range attraction
+
+`normal_patch::dmt::SourceDmtSphereContact` supplies an explicitly low-Tabor
+sphere/plane model. The contacting DMT-M branch retains Hertz geometry and
+subtracts `2*pi*R*W`; an explicitly selected constant-traction Dugdale/Derjaguin
+tail supplies finite-gap attraction up to the declared range. Potential and
+force are continuous across touch and cutoff. One-sided tangents remain
+explicit, and smooth point ports refuse those corners. Negative tail stiffness
+remains visible to the enclosing mechanical solver.
+
+Actual contact area excludes the attractive footprint. The source-bound shear
+bridge's `evaluate_dmt` therefore produces no junction friction or frictional
+heat across a gap, while finite attached area supports shear at zero/tensile
+net load. Original source identities and synthetic authority remain intact.
+Contact-load inversion includes zero and tensile load. Runtime evaluation is
+allocation-free O(1), and conservative endpoint work invents no intrinsic
+hysteresis or jump loss.
+
+Tabor <= 0.1 and explicit range/curvature/elastic/stress limits are model-selection
+screens, not an accuracy certificate. This is not the intermediate Maugis
+crossover, rough contact, a fluid bridge or viscoelastic adhesion. Primary
+references: <https://doi.org/10.1016/0021-9797(75)90018-1> and
+<https://doi.org/10.1016/0021-9797(92)90285-T>. Seven `adhesive_dmt` regressions
+cover original equations, derivative/energy consistency, corners, work cycles,
+contact/noncontact friction, scaling and applicability; `adhesive_shear` adds
+the original-source DMT-to-shear integration case.

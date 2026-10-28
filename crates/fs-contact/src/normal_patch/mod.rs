@@ -2,6 +2,8 @@
 
 /// Source-bound, displacement-controlled JKR adhesion with explicit jump events.
 pub mod adhesive;
+/// Source-bound low-Tabor DMT contact with a conservative finite-range tail.
+pub mod dmt;
 mod binding;
 mod embed;
 mod finite_gap;

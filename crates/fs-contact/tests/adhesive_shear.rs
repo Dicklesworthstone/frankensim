@@ -5,6 +5,7 @@ mod common;
 use fs_contact::interface_binding::adhesive_shear::*;
 use fs_contact::interface_binding::*;
 use fs_contact::normal_patch::adhesive::{JkrEnvelope, SourceJkrSphereContact};
+use fs_contact::normal_patch::dmt::{DmtEnvelope, SourceDmtSphereContact};
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ClaimSet, InterfaceSystemCard, InterpolationPolicy, PropertyClaim, PropertyKey, PropertyValue,
@@ -275,4 +276,54 @@ fn sourced_jkr_area_drives_shear_at_zero_and_tensile_net_force_then_detaches() {
     assert_eq!(response.static_capacity_n, 0.0);
     assert_eq!(response.dissipated_power_w, 0.0);
     assert!(detached.irreversible_work_j > 0.0);
+}
+
+#[test]
+fn sourced_dmt_distinguishes_contact_friction_from_attraction_across_a_gap() {
+    let soft = normal(Some((3e6, 2e6)), Pressure::DIMS, false, false);
+    let point = soft.interface_state().query();
+    let a = common::solid("junction-A", 1000.0, 1e11);
+    let b = common::solid("junction-B", 2000.0, 2e11);
+    let sa =
+        resolve_isotropic_solid_state_point(&a, &point, MaterialPropertySelection::SingleClaimOnly)
+            .unwrap();
+    let sb =
+        resolve_isotropic_solid_state_point(&b, &point, MaterialPropertySelection::SingleClaimOnly)
+            .unwrap();
+    let elastic = bind_isotropic_elastic_interface(soft.elastic().interface(), &sa, &sb).unwrap();
+    let normal = bind_normal_interface_state(&elastic, soft.interface_state()).unwrap();
+    let shear =
+        SourceAdhesiveShear::resolve(&normal, MaterialPropertySelection::SingleClaimOnly).unwrap();
+    let dmt = SourceDmtSphereContact::new(
+        normal.clone(),
+        1e-6,
+        1e-9,
+        DmtEnvelope {
+            maximum_indentation_m: 1e-9,
+            half_space_depth_m: 1e-3,
+            layer_thickness_m: 1e-3,
+            maximum_interaction_radius_to_radius: 0.1,
+            maximum_interaction_radius_to_depth: 0.1,
+            maximum_interaction_radius_to_layer: 0.1,
+            maximum_nominal_strain: 0.1,
+            maximum_repulsive_pressure_to_yield: 0.3,
+            maximum_adhesive_stress_to_yield: 0.1,
+            maximum_interaction_range_to_radius: 0.01,
+            maximum_tabor_parameter: 0.1,
+        },
+    )
+    .unwrap();
+    let contact = dmt.evaluate_contact_load(0.0).unwrap();
+    let friction = shear.evaluate_dmt(&normal, &contact, slip()).unwrap();
+    assert!(friction.dissipated_power_w > 0.0);
+    common::close(
+        friction.sliding_capacity_n.unwrap(),
+        2e6 * contact.contact_area_m2,
+    );
+    let gap = dmt.evaluate(-0.5e-9).unwrap();
+    assert!(gap.normal_force_n < 0.0);
+    let friction = shear.evaluate_dmt(&normal, &gap, slip()).unwrap();
+    assert_eq!(friction.static_capacity_n, 0.0);
+    assert_eq!(friction.dissipated_power_w, 0.0);
+    assert!(shear.evaluate_dmt(&soft, &contact, slip()).is_err());
 }
