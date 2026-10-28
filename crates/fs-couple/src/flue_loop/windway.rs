@@ -9,6 +9,8 @@
 //! Source momentum and transport publish only after that solve is accepted. Zero speed
 //! preserves the field; startup has zero initial history, and a pressure release
 //! does not erase the moving gas or clamp an ever-growing time delay.
+//! The labium feedback is read at a supplied fraction of the cut-up (the jet
+//! card's band-lag compensation), linearly between the bracketing nodes.
 //!
 //! This does not turn the surrounding jet-drive card into resolved mouth flow.
 //! Its prescribed profile, amplification and receptivity keep their old scope.
@@ -28,6 +30,8 @@ pub struct UnsteadyWindway {
     channel: SlitChannel,
     convection: ConvectedVelocity,
     convection_ratio: f64,
+    // Fraction of the cut-up at which the last accepted sample read the feedback.
+    tap_fraction: f64,
 }
 
 impl UnsteadyWindway {
@@ -44,7 +48,14 @@ impl UnsteadyWindway {
         if !convection_ratio.is_finite() || convection_ratio <= 0.0 {
             return Err(FlueError::Invalid { what: "unsteady windway requires positive card convection speed ratio" });
         }
-        Ok(Self { channel, convection, convection_ratio })
+        Ok(Self { channel, convection, convection_ratio, tap_fraction: 1.0 })
+    }
+
+    /// Distance from the flue exit at which the last accepted sample read the
+    /// labium feedback [m]; the cut-up before any sample.
+    #[must_use]
+    pub fn feedback_tap_m(&self) -> f64 {
+        self.tap_fraction * self.convection.dx_m * self.convection.field.len() as f64
     }
 
     /// Source gas, physical geometry, transverse velocity field and energy balance.
@@ -80,7 +91,8 @@ impl UnsteadyWindway {
         }
         let convection = self.convection.prepare(frame.bulk_speed_m_s * self.convection_ratio,
             self.channel.spec().sample_period_s)?;
-        Ok(WindwayTrial { channel, convection, convection_ratio: self.convection_ratio })
+        Ok(WindwayTrial { channel, convection, convection_ratio: self.convection_ratio,
+            tap_fraction: self.tap_fraction })
     }
 }
 
@@ -90,16 +102,43 @@ pub(super) struct WindwayTrial {
     channel: SlitChannel,
     convection: ConvectionTrial,
     convection_ratio: f64,
+    tap_fraction: f64,
 }
 impl WindwayTrial {
     pub(super) fn frame(&self) -> SlitChannelStep { self.channel.last_step() }
-    pub(super) fn mouth_response(&self) -> RetardedVelocity {
-        self.convection.values[self.convection.values.len() - 1]
+    /// The feedback at `tap_fraction` of the cut-up (0 is the flue exit, 1 the
+    /// labium). The transport step's own linear interpolant between the
+    /// bracketing nodes; below the first node the other end is the current mouth
+    /// velocity. Every node is affine in that velocity, so the read is too.
+    pub(super) fn mouth_response(&mut self, tap_fraction: f64)
+        -> Result<RetardedVelocity, FlueError>
+    {
+        if !(0.0..=1.0).contains(&tap_fraction) {
+            return Err(FlueError::Invalid { what: "jet feedback tap must lie on the cut-up" });
+        }
+        let values = &self.convection.values;
+        let position = tap_fraction * values.len() as f64;
+        let lower = position.floor() as usize;
+        let fraction = position - lower as f64;
+        let node = |n: usize| if n == 0 {
+            RetardedVelocity { past_m_s: 0.0, current_weight: 1.0 }
+        } else { values[n - 1] };
+        let left = node(lower);
+        let value = if fraction == 0.0 { left } else {
+            let right = node(lower + 1);
+            RetardedVelocity {
+                past_m_s: (1.0 - fraction) * left.past_m_s + fraction * right.past_m_s,
+                current_weight: (1.0 - fraction) * left.current_weight
+                    + fraction * right.current_weight,
+            }
+        };
+        self.tap_fraction = tap_fraction;
+        Ok(value)
     }
     pub(super) fn finish(self, boundary_m_s: f64) -> Result<UnsteadyWindway, FlueError> {
         Ok(UnsteadyWindway { channel: self.channel,
             convection: self.convection.finish(boundary_m_s)?,
-            convection_ratio: self.convection_ratio })
+            convection_ratio: self.convection_ratio, tap_fraction: self.tap_fraction })
     }
 }
 
@@ -283,5 +322,53 @@ mod tests {
         let accepted = original.prepare(300.0).unwrap().finish(0.3).unwrap();
         assert!(accepted.channel().last_step().kinetic_energy_j > 0.0);
         assert_eq!(accepted.boundary_velocity_m_s(), 0.3);
+    }
+
+    #[test]
+    fn feedback_tap_reads_the_affine_field_anywhere_on_the_cut_up() {
+        // The frozen path's band-lag read is exact on an affine signal (flue_loop's
+        // g1_retarded_affine_signal_has_no_extra_sample_at_any_ring_position, 64 epsilon).
+        // Exact v(x,t) = 3 + 2*(t-x/c): a tap at x must return 3 + 2*(dt-x/c) at the exit,
+        // below the first node, at and between nodes and at the labium, with the current
+        // mouth coefficient the characteristic geometry gives.
+        use super::UnsteadyWindway;
+        use crate::flue_loop::FlueGeometry;
+        use fs_material::gas::{GasSpec, GasState};
+        let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap();
+        let geometry = FlueGeometry { flue_width_m: 0.01, flue_height_m: 0.001,
+            cut_up_m: 0.004, labium_offset_m: 0.0, jet_angle_rad: 0.0,
+            bore_area_m2: 1e-4, mouth_loss_rel: 0.02 };
+        let mut windway = UnsteadyWindway::new(&gas, &geometry, 0.015, 16, 16,
+            1.0/48_000.0, 0.4).unwrap();
+        assert_eq!(windway.feedback_tap_m(), windway.convection.dx_m * 16.0);
+        // dx = 0.25 mm. At 40 m/s and 48 kHz a characteristic crosses 3.3 cells per step,
+        // so the exit and the first three nodes carry a current-mouth coefficient.
+        let (speed, dt) = (40.0, 1.0/48_000.0);
+        windway.convection.boundary_m_s = 3.0;
+        let dx = windway.convection.dx_m;
+        for (i, value) in windway.convection.field.iter_mut().enumerate() {
+            *value = 3.0 - 2.0*(i+1) as f64*dx/speed;
+        }
+        let current = 3.0 + 2.0*dt;
+        for fraction in [0.0, 0.03125, 0.0625, 0.125, 0.15, 0.775, 0.765, 1.0] {
+            let mut trial = super::WindwayTrial { channel: windway.channel.clone(),
+                convection: windway.convection.prepare(speed, dt).unwrap(),
+                convection_ratio: 0.4, tap_fraction: 1.0 };
+            let read = trial.mouth_response(fraction).unwrap();
+            let x = fraction * geometry.cut_up_m;
+            let exact = 3.0 + 2.0*(dt - x/speed);
+            assert!((read.past_m_s + read.current_weight*current - exact).abs()
+                < 64.0*f64::EPSILON*exact.abs().max(1.0), "fraction {fraction}");
+            assert!((read.current_weight - (1.0 - x/(speed*dt)).max(0.0)).abs() < 1e-14,
+                "fraction {fraction}: {}", read.current_weight);
+            let accepted = trial.finish(current).unwrap();
+            assert!((accepted.feedback_tap_m() - x).abs() < 1e-18);
+        }
+        let mut trial = super::WindwayTrial { channel: windway.channel.clone(),
+            convection: windway.convection.prepare(speed, dt).unwrap(),
+            convection_ratio: 0.4, tap_fraction: 1.0 };
+        for fraction in [-1e-12, 1.0 + 1e-12, f64::NAN] {
+            assert!(trial.mouth_response(fraction).is_err(), "fraction {fraction}");
+        }
     }
 }

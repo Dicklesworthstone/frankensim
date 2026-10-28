@@ -805,8 +805,17 @@ source volume, Reynolds coverage and the original card's growth law. Pressure
 controls accelerate the fluid and release retains its momentum. A separate
 2..=4096 cell semi-Lagrangian convection field transports the existing feedback
 across the actual mouth cut-up at the evolving speed, including stop and
-startup, without a minimum-speed history clamp. The voice's original failure
-poisoning applies to the combined sample. Channel and acoustic mouth work
+startup, without a minimum-speed history clamp. The labium feedback is read
+at the frozen path's own delay (pexfp.320, 1718d79fb): the transit less the
+band filters' low-frequency lag `2/omega_c + 1/omega_h = 16 theta / U`, with
+its one-sample floor and sub-sample rule, as the distance `c_p tau` along the
+field, so `16 theta c_p / U` upstream of the cut-up, independent of `U`. The
+read interpolates linearly between the bracketing nodes (between the current
+mouth velocity and the first node below it), the transport step's own
+interpolant. A sub-sample transit and a jet at rest read at the labium. Before
+this the transported loop was longer by `16 theta / U`, which is 88 to 114
+degrees of jet phase at f0 on recorder a1/f1 and whistle D5. The voice's
+original failure poisoning applies to the combined sample. Channel and acoustic mouth work
 ledgers retain their distinct ports; numerical damping is not material heat.
 Characteristics entering during a sample interpolate the accepted old boundary
 velocity and the current solved mouth velocity at their physical entry time.

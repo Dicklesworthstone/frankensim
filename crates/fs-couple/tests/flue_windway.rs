@@ -292,6 +292,39 @@ fn transported_feedback_uses_the_solved_current_mouth_at_physical_entry_time() {
 }
 
 #[test]
+fn transported_feedback_is_read_at_the_frozen_band_lag_delay() {
+    // 1718d79fb reads the frozen history early by the band filters' low-frequency lag,
+    // 2/omega_c + 1/omega_h = 16 theta/U, so the loop delay is the convective transit. The
+    // transported field is read at the same delay. Through the attack, with the speed new every
+    // sample, tap delay plus band lag is W / c_p to the frozen read's 64 epsilon (flue_loop's
+    // g1_retarded_affine_signal_has_no_extra_sample_at_any_ring_position), and the tap stays
+    // 16 theta c_p/U upstream of the labium.
+    let cut_up = 0.004;
+    let mut v = voice(gas(1.0), 0.3).with_unsteady_windway(LENGTH, 32, 64).unwrap();
+    assert_eq!(v.unsteady_windway().unwrap().feedback_tap_m(), cut_up);
+    let theta = v.island().theta_over_b * 0.5 * HEIGHT;
+    let ratio = v.island().convection_ratio;
+    v.apply(FlueControl::SetBlowingPressure(300.0)).unwrap();
+    let mut speeds = Vec::new();
+    for _ in 0..512 {
+        v.step_block(&mut [0.0]).unwrap();
+        let windway = v.unsteady_windway().unwrap();
+        let u = windway.channel().last_step().bulk_speed_m_s;
+        let c = ratio * u;
+        let omega_c = u / (4.0 * theta);
+        let band_lag = 2.0 / omega_c + 1.0 / (0.5 * omega_c);
+        let transit = cut_up / c;
+        let tap = windway.feedback_tap_m();
+        assert!((tap / c + band_lag - transit).abs() < 64.0 * f64::EPSILON * transit,
+            "{u} m/s: tap {tap} m, band lag {band_lag} s, transit {transit} s");
+        assert!((cut_up - tap - 16.0 * theta * ratio).abs() < 64.0 * f64::EPSILON * cut_up,
+            "{u} m/s: tap {tap} m");
+        speeds.push(u);
+    }
+    assert!(speeds[0] > 0.0 && speeds[0] < 0.5 * speeds[511], "{} {}", speeds[0], speeds[511]);
+}
+
+#[test]
 fn rejected_mouth_solve_keeps_the_accepted_source_momentum_and_feedback() {
     let mut v = voice(gas(1.0), 0.3).with_unsteady_windway(LENGTH, 32, 64).unwrap()
         .with_mouth_contraction(ContractionSpec { area_ratio: 0.6,

@@ -935,6 +935,12 @@ impl FlueVoice {
     /// The windway starts at rest even when a pressure is already held. A pressure
     /// release leaves the fluid moving; wall friction and the explicit exit remove
     /// its kinetic energy. Zero-speed transport retains the physical field.
+    /// The labium feedback is read at the frozen path's own delay, the transit less
+    /// the band filters' low-frequency lag `2/omega_c + 1/omega_h = 16 theta / U`
+    /// (with its one-sample floor and sub-sample rule), as a distance along the
+    /// field at this sample's speed: `16 theta c_p / U` upstream of the cut-up,
+    /// independent of `U`. On both paths the low-frequency loop delay is then the
+    /// convective transit `W / c_p`.
     /// This resolves fully developed transverse laminar flow only, with an ideal
     /// uniform kinetic-head terminal. The surrounding jet card, geometry and
     /// observer keep their existing scope; no resolved jet or flute claim follows.
@@ -1424,7 +1430,7 @@ impl FlueVoice {
         let mut windway_numerical = 0.0;
         let mut windway_defect = 0.0;
         for slot in out.iter_mut() {
-            let windway_trial = self.unsteady_windway.as_ref()
+            let mut windway_trial = self.unsteady_windway.as_ref()
                 .map(|windway| windway.prepare(self.blow_pa)).transpose()?;
             let u = if let Some(windway) = &windway_trial {
                 let frame = windway.frame();
@@ -1474,9 +1480,9 @@ impl FlueVoice {
                     transit_samples
                 }
             } else if u > 0.0 { f64::INFINITY } else { 0.0 };
-            // The unsteady channel supplies its affine spatial trace. The
-            // quasi-steady history is sampled at THIS time minus the physical
-            // transit, including a current-mouth term when transit < dt.
+            // The unsteady channel supplies its affine spatial trace, read at the
+            // same delay. The quasi-steady history is sampled at THIS time minus the
+            // physical transit, including a current-mouth term when transit < dt.
             // Ruling 8132. The retained history covers every lookup at or above the declared
             // minimum speed U_min. In the onset, before the jet first reaches U_min, a lookup
             // beyond it that precedes the voice's first motion reads the rest state, exactly zero
@@ -1496,8 +1502,14 @@ impl FlueVoice {
                 // exit velocity, the seed (added below) plus the unknown mouth velocity.
                 RetardedVelocity { past_m_s: 0.0, current_weight: 1.0 }
             } else {
-                match &windway_trial {
-                    Some(windway) => windway.mouth_response(),
+                match &mut windway_trial {
+                    // At this sample's speed a characteristic covers delay/transit of the
+                    // cut-up: W - 16 theta c_p/U in the ordinary case. A sub-sample transit,
+                    // and a jet at rest, read at the labium as before.
+                    Some(windway) => windway.mouth_response(
+                        if transit.is_finite() && transit / dt >= 1.0 {
+                            (delay_samples * dt / transit).min(1.0)
+                        } else { 1.0 })?,
                     None if delay_samples > (self.history.len() - 1) as f64 && onset
                         && precedes_motion(delay_samples, self.history_moving) => rest,
                     None if delay_samples > (self.history.len() - 1) as f64 && below_edge => {
