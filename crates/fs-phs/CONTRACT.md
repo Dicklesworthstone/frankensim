@@ -54,6 +54,46 @@ mutual-winding resonance splitting in both polarities; pure algebraic
 transformer power; and coordinate scales `1e-120..1e120`. True lossless poles,
 capacity limits, unsupported storage and cancelled reusable solves are tested.
 
+### Finite resonance poles of the complete continuous model
+
+`HarmonicModel::resonance_pole` refines one caller-seeded finite free mode of
+the original `s diag(I_diff,0) - (J-R) diag(Q_diff,I_alg)` pencil through the
+single residual-gated, cancellable bordered-Newton owner in fs-la. All mutual
+storage, Maxwell memory states, algebraic efforts and original port directions
+remain present. The singular descriptor matrix is never inverted. Fixed row
+conditioning uses the declared spectral scale and retains the analytic
+derivative and original state coordinates; an accepted result must also meet
+the model's existing componentwise residual tolerance in the ORIGINAL split
+pencil.
+
+`HarmonicPole` returns the Laplace pole `s`, `omega=i*s` under the existing
+`exp(-i omega t)` convention, original state and effort vectors, and original
+`G^T effort` observations. Negative `Re(s)` describes decay; growth is never
+clamped. The vector has unit numerical 2-norm, not unit physical energy.
+Reported `H = x* Q x / 2` and `D = Re(e* R e)` share that amplitude, and
+`2 Re(s) H + D` is evaluated independently from the physical storage and
+resistance rather than set to zero. Algebraic efforts store no energy.
+
+Separate `PoleOptions` admit dimension, dense numerical payload and total
+iteration work before the lazy pencil callback allocates. Cancellation reaches
+assembly, bordered LU, iteration and physical observations. Refusal leaves the
+prepared model and existing reusable AC factors immutable. The budget excludes
+the already prepared source model, allocator overhead and process RSS.
+
+This is local isolated-pole refinement, not a complete spectrum search, contour
+mode count, nonlinear limit cycle or global convergence certificate. Infinite,
+repeated, defective or unresolved poles can refuse. A finite internal mode may
+be unobservable at the selected ports; it is not automatically a transfer
+function pole. Physical validity remains that of the supplied linear laws.
+
+The four native regressions in `tests/harmonic_poles.rs` compare mechanical
+frequency, damping, original coordinates and port output with the closed form;
+a singular-descriptor RLC pole with its Kirchhoff constraints; a hereditary
+mode with independently eliminated Maxwell dispersion, memory and loss; and
+cancelled/budget-refused solves with deterministic retry and an unchanged
+reusable harmonic response. The eight existing harmonic-response regressions
+also pass with this owner.
+
 ### Stable constitutive energy changes
 
 Quadratic storage evaluates its midpoint remainder analytically, retaining

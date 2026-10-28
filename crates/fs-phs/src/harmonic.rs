@@ -15,6 +15,9 @@ use crate::{DescriptorPortHamiltonian, PortHamiltonian, Storage};
 use fs_la::eigen_complex::{LuComplex, LuComplexError, lu_complex_with_cancel};
 use fs_math::c64::C64;
 
+mod poles;
+pub use poles::{HarmonicPole, HarmonicPoleError, PoleOptions};
+
 /// Hard ceiling of this explicitly dense frequency-domain path.
 pub const MAX_HARMONIC_DIMENSION: usize = 1024;
 
