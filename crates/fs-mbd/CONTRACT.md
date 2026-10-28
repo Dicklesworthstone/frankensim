@@ -522,3 +522,22 @@ is source-heated articulated dynamics in fs-mbd-material, where thermal inertia
 updates preserve joint momentum and account parameter work explicitly.
 `cargo test -p fs-mbd --test articulated_mass` uses an independently known
 two-joint inertia matrix and checks the momentum/force-limit distinction.
+
+## Free-floating articulated impulse response
+
+`articulated::free_floating_momentum` sums every link's kinetic energy and
+world-frame linear plus spin/orbital angular momentum using full offset spatial
+inertia. `apply_free_floating_impulses` solves the coupled six-base-plus-joint
+inverse-mass action through the existing O(n) articulated-body algorithm with
+velocity and gravity bias zero. Per-link body impulses act about link origins;
+internal generalized joint impulses recoil the free base without creating net
+world momentum. Poses and configuration remain unchanged. Actual output speed
+limits are checked without clipping, and impulse values are never compared to
+actuator-force limits. The atomic result reports both endpoint momenta and
+energies, total external world impulse, midpoint impulse work, and kinetic-work
+residual. This owner supplies inertial impulse response; contact selection,
+restitution, friction, CCD, and time integration remain separate responsibilities.
+
+G0/G1/G3 `tests/articulated_mass.rs` checks the independent offset-COM body
+solution, full three-inertia coupled response, internal reaction momentum,
+world-frame covariance, impulse-work closure, and atomic admission.

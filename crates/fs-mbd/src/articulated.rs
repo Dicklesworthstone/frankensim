@@ -940,6 +940,42 @@ pub struct FreeFloatingForwardDynamics {
     pub body_spatial_acceleration: Vec<Twist>,
 }
 
+/// Momentum and kinetic energy of all links, including the freely moving base.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ArticulatedMomentum {
+    /// Sum of link linear momenta in world coordinates, in kg m/s.
+    pub linear_momentum_world: Vec3,
+    /// Sum of spin and orbital momenta about the world origin, in kg m²/s.
+    pub angular_momentum_world: Vec3,
+    /// Total link kinetic energy, in joules.
+    pub kinetic_energy: f64,
+}
+
+/// Atomic velocity change under specified external and internal impulses.
+///
+/// Positions and poses are unchanged. This is the inertial response to an
+/// admitted impulse, not a contact, restitution, or friction law.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FreeFloatingImpulseResponse {
+    /// Unchanged base pose with its updated body-coordinate twist.
+    pub base_after: FreeFloatingBaseState,
+    /// Updated joint velocities in compact scalar-joint order.
+    pub joint_velocity_after: Vec<f64>,
+    /// Physical momentum and kinetic energy before the event.
+    pub momentum_before: ArticulatedMomentum,
+    /// Physical momentum and kinetic energy after the event.
+    pub momentum_after: ArticulatedMomentum,
+    /// Sum of external linear impulses, in world coordinates, in N s.
+    pub external_linear_impulse_world: Vec3,
+    /// Sum of external angular impulses about the world origin, in N m s.
+    pub external_angular_impulse_world: Vec3,
+    /// External spatial and internal joint impulses paired with midpoint
+    /// velocities, in joules. Internal actuation can supply positive work.
+    pub impulse_work: f64,
+    /// Actual kinetic-energy change minus impulse work, in joules.
+    pub kinetic_work_residual: f64,
+}
+
 /// Convert a body-coordinate Featherstone spatial acceleration into the
 /// ordinary Cartesian acceleration of that frame's origin, expressed in the
 /// same body coordinates.
@@ -1188,9 +1224,15 @@ pub fn stationary_base_joint_momentum(
     let zero = vec![0.0; model.dof_count()];
     let external = vec![Wrench::default(); model.link_count()];
     Ok(inverse_dynamics(
-        model, BaseState::stationary(Se3::identity()), joint_position, &zero,
-        joint_velocity, Vec3::default(), &external,
-    )?.generalized_force)
+        model,
+        BaseState::stationary(Se3::identity()),
+        joint_position,
+        &zero,
+        joint_velocity,
+        Vec3::default(),
+        &external,
+    )?
+    .generalized_force)
 }
 
 /// Recover `qdot = M(q)^-1 p` through the existing linear-storage ABA recursion.
@@ -1210,11 +1252,21 @@ pub fn stationary_base_joint_velocity(
     let zero = vec![0.0; model.dof_count()];
     let external = vec![Wrench::default(); model.link_count()];
     let pass = articulated_body_pass(
-        model, Twist::zero(), joint_position, &zero, joint_momentum, &external,
-        None, false, PRESCRIBED_ABA_FIELDS,
+        model,
+        Twist::zero(),
+        joint_position,
+        &zero,
+        joint_momentum,
+        &external,
+        None,
+        false,
+        PRESCRIBED_ABA_FIELDS,
     )?;
     let (velocity, _) = propagate_aba_accelerations(
-        model, &pass, Twist::zero(), "joint_velocity_from_momentum",
+        model,
+        &pass,
+        Twist::zero(),
+        "joint_velocity_from_momentum",
         "body_velocity_from_momentum",
     )?;
     model.validate_velocity(&velocity)?;
@@ -1295,6 +1347,175 @@ pub fn free_floating_forward_dynamics(
         base_spatial_acceleration_body,
         generalized_acceleration,
         body_spatial_acceleration,
+    })
+}
+
+/// Total physical momentum and energy of a free-floating articulated tree.
+///
+/// Angular momentum includes each link's spin, centre-of-mass offset, and
+/// orbital momentum about the world origin. Internal joint motion is included;
+/// summing only base inertia and twist would omit the links' reaction momentum.
+pub fn free_floating_momentum(
+    model: &ArticulatedModel,
+    base: FreeFloatingBaseState,
+    joint_position: &[f64],
+    joint_velocity: &[f64],
+) -> Result<ArticulatedMomentum, ArticulatedError> {
+    if model.links[0].joint.kind() != JointKind::Fixed {
+        return Err(ArticulatedError::FloatingBaseRootJointNotFixed);
+    }
+    let kinematics = forward_kinematics(
+        model,
+        BaseState::prescribed(base.world_from_base, base.twist_body, Twist::zero()),
+        joint_position,
+        joint_velocity,
+    )?;
+    momentum_from_kinematics(model, &kinematics)
+}
+
+fn momentum_from_kinematics(
+    model: &ArticulatedModel,
+    kinematics: &Kinematics,
+) -> Result<ArticulatedMomentum, ArticulatedError> {
+    let mut momentum_world = Wrench::default();
+    let mut kinetic_energy = 0.0;
+    for (index, link) in model.links.iter().enumerate() {
+        let velocity = kinematics.body_twist[index];
+        let momentum = link.inertia.momentum(velocity)?;
+        momentum_world = wrench_plus(
+            momentum_world,
+            momentum.transform_by(&kinematics.world_from_link[index]),
+        );
+        validate_wrench(momentum_world, "free_floating_momentum.world")?;
+        kinetic_energy += 0.5 * momentum.pairing(velocity);
+        ensure_finite_scalar(
+            kinetic_energy,
+            "free_floating_momentum.kinetic_energy",
+            index,
+        )?;
+    }
+    Ok(ArticulatedMomentum {
+        linear_momentum_world: momentum_world.force,
+        angular_momentum_world: momentum_world.torque,
+        kinetic_energy,
+    })
+}
+
+/// Apply specified impulses to a freely moving articulated tree in O(n) work.
+///
+/// `body_impulses` contains spatial impulses about each link's origin, in that
+/// link's coordinates: torque entries have units N m s and force entries N s.
+/// An impulse J at a local point r is therefore `Wrench::new(r.cross(J), J)`.
+/// `joint_impulses` are internal actuator impulses, in N m s for revolute and
+/// N s for prismatic coordinates. Their opposite reactions reach the base;
+/// they do not create net world momentum. Impulses are never tested against
+/// force/torque limits, which have different physical dimensions.
+///
+/// The existing ABA factor/back-substitution solves M(q) delta-v = impulse
+/// with exactly zero velocity/gravity bias. It forms no dense generalized mass
+/// matrix. The six base velocities and all joint velocities respond together.
+/// Kinetic work uses average pre/post event velocities, so it includes the
+/// quadratic impulse energy rather than only J dot v_before.
+///
+/// All state is borrowed or copied; invalid configuration, speed limits,
+/// nonfinite arithmetic, or a failed inertia solve returns no partial update.
+/// This does not choose an impulse, advance time, or enforce a contact law.
+pub fn apply_free_floating_impulses(
+    model: &ArticulatedModel,
+    base: FreeFloatingBaseState,
+    joint_position: &[f64],
+    joint_velocity: &[f64],
+    joint_impulses: &[f64],
+    body_impulses: &[Wrench],
+) -> Result<FreeFloatingImpulseResponse, ArticulatedError> {
+    if model.links[0].joint.kind() != JointKind::Fixed {
+        return Err(ArticulatedError::FloatingBaseRootJointNotFixed);
+    }
+    model.validate_generalized("joint_impulses", joint_impulses)?;
+    require_len("body_impulses", body_impulses.len(), model.link_count())?;
+    for impulse in body_impulses {
+        validate_wrench(*impulse, "body_impulses")?;
+    }
+    let before = forward_kinematics(
+        model,
+        BaseState::prescribed(base.world_from_base, base.twist_body, Twist::zero()),
+        joint_position,
+        joint_velocity,
+    )?;
+    let zero = vec![0.0; model.dof_count()];
+    let pass = articulated_body_pass(
+        model,
+        Twist::zero(),
+        joint_position,
+        &zero,
+        joint_impulses,
+        body_impulses,
+        None,
+        true,
+        FREE_FLOATING_ABA_FIELDS,
+    )?;
+    let base_delta = solve_floating_base_system(
+        &pass.base_articulated_inertia,
+        wrench_from_array(scale6(pass.base_articulated_bias.to_array(), -1.0)),
+    )?;
+    let (joint_delta, _) = propagate_aba_accelerations(
+        model,
+        &pass,
+        base_delta,
+        "impulse.joint_velocity_change",
+        "impulse.body_velocity_change",
+    )?;
+    let base_after =
+        FreeFloatingBaseState::new(base.world_from_base, base.twist_body.plus(base_delta));
+    let joint_velocity_after: Vec<_> = joint_velocity
+        .iter()
+        .zip(&joint_delta)
+        .map(|(velocity, delta)| velocity + delta)
+        .collect();
+    // Evaluate actual returned endpoint velocities, retaining the same joint
+    // speed limits as the dynamics owner. No saturated/clipped momentum.
+    let after = forward_kinematics(
+        model,
+        BaseState::prescribed(
+            base_after.world_from_base,
+            base_after.twist_body,
+            Twist::zero(),
+        ),
+        joint_position,
+        &joint_velocity_after,
+    )?;
+    let momentum_before = momentum_from_kinematics(model, &before)?;
+    let momentum_after = momentum_from_kinematics(model, &after)?;
+    let mut impulse_world = Wrench::default();
+    let mut impulse_work = 0.0;
+    for (index, impulse) in body_impulses.iter().enumerate() {
+        impulse_world = wrench_plus(
+            impulse_world,
+            impulse.transform_by(&before.world_from_link[index]),
+        );
+        validate_wrench(impulse_world, "impulse.external_world")?;
+        let midpoint = before.body_twist[index]
+            .scale(0.5)
+            .plus(after.body_twist[index].scale(0.5));
+        impulse_work += impulse.pairing(midpoint);
+        ensure_finite_scalar(impulse_work, "impulse.work", index)?;
+    }
+    for (index, impulse) in joint_impulses.iter().enumerate() {
+        impulse_work += impulse * (0.5 * joint_velocity[index] + 0.5 * joint_velocity_after[index]);
+        ensure_finite_scalar(impulse_work, "impulse.work", index)?;
+    }
+    let kinetic_work_residual =
+        momentum_after.kinetic_energy - momentum_before.kinetic_energy - impulse_work;
+    ensure_finite_scalar(kinetic_work_residual, "impulse.kinetic_work_residual", 0)?;
+    Ok(FreeFloatingImpulseResponse {
+        base_after,
+        joint_velocity_after,
+        momentum_before,
+        momentum_after,
+        external_linear_impulse_world: impulse_world.force,
+        external_angular_impulse_world: impulse_world.torque,
+        impulse_work,
+        kinetic_work_residual,
     })
 }
 
