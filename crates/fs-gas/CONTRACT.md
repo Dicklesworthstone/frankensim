@@ -155,3 +155,27 @@ falls from 1.66346e-4 at 40 cells to 3.67860e-5 at 80 cells (4.52-fold).
 This is a manufactured convergence result, not a throughput benchmark.
 Source geometry/quadrature accuracy and the quasi-one-dimensional smooth-area
 model remain explicit assumptions; abrupt junction losses are not supplied.
+
+## Physical reflecting-wall Riemann boundary
+
+Reflecting ends now solve a one-sided thermally perfect Riemann problem
+directly. Incoming gas connects to a stopped wall state by the source-owned
+shock Hugoniot; the velocity jump is factored from the root equation so weak
+shocks do not converge to an unchanged spurious root. Retreating gas connects
+to the wall by an isentropic rarefaction, integrating Cp(T)/c(T) in sqrt(T)
+coordinates and recovering pressure from the source entropy increment.
+Quadrature is bounded, cancellable, and split at original caloric seams.
+
+The wall imposes exactly zero mass and energy transfer and positive normal
+pressure. It does not reuse an HLL ghost-state momentum flux that can become
+artificially tensile during expansion. Unsupported hot or cold wall states
+refuse; the source is not extended to an unadmitted vacuum. The actual wall
+wave and acoustic speeds enter the same stage CFL calculation.
+
+Twenty-one focused native gas tests pass. Six added checks compare weak and
+strong constant-Cp shock/rarefaction pressures with analytic relations, check
+variable-Cp Hugoniot and entropy balance, compare expansion with an independent
+2,000-panel quadrature, exercise orientation/formation-reference invariance,
+and verify source-window refusal and cancellation. These qualify the
+one-dimensional inviscid boundary implementation, not viscous wall layers,
+heat transfer, physical shock thickness or a fully discrete entropy theorem.

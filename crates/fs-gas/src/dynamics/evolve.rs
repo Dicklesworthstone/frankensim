@@ -540,11 +540,16 @@ fn operator(
         } else {
             (reconstruct(face - 1, 0.5)?, reconstruct(face, -0.5)?, false)
         };
-        let mut flux = gas.interface(left.0, left.1, right.0, right.1, cancelled)?;
-        if wall {
-            flux.mass = 0.0;
-            flux.energy = 0.0;
-        }
+        let flux = if wall {
+            let (inside, normal) = if face == 0 {
+                (right, -1.0)
+            } else {
+                (left, 1.0)
+            };
+            gas.wall_flux(inside.0, inside.1, normal, cancelled)?
+        } else {
+            gas.interface(left.0, left.1, right.0, right.1, cancelled)?
+        };
         fallbacks += usize::from(flux.used_hll_fallback);
         faces[face] = flux;
     }

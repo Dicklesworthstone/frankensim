@@ -12,6 +12,7 @@ mod eos;
 mod evolve;
 mod flux;
 mod geometry;
+mod wall;
 
 pub use eos::{CaloricDomain, FrozenGas};
 pub use evolve::{Boundaries, Boundary, Euler1d, Reconstruction, StepControl, StepReport, Totals};
