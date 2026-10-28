@@ -396,6 +396,10 @@ fn endpoint_penetration_unresolved_contact_and_whole_path_refusals_are_atomic() 
     let c = plane(6.0);
     let mut redundant = c;
     redundant.id = 2;
+    // Identical redundant laws can now have determined motion. Different
+    // friction coefficients at an unresolved shared normal reaction can give
+    // different native motions, so this remains a genuine determinacy refusal.
+    redundant.friction_coefficient = 0.1;
     let failure = step_rigid_frictional_contacts(
         &mut bodies,
         &properties,

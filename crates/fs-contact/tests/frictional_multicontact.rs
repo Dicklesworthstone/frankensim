@@ -3,6 +3,8 @@ use fs_contact::frictional_multicontact::{
     solve_frictional_contacts,
 };
 
+#[path = "frictional_multicontact/normal_gauge.rs"]
+mod normal_gauge;
 #[path = "frictional_multicontact/range.rs"]
 mod range;
 
@@ -281,9 +283,11 @@ fn two_passive_coulomb_roots_are_reported_instead_of_arbitrary_selection() {
 fn degeneracy_penetration_and_work_exhaustion_never_become_physical_authority() {
     let c = contact(1, [-1.0, 2.0, 0.0], 0.3);
     let singular = [1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    // Its separated PSD range is admitted, but neither global sufficient
+    // Coulomb criterion resolves this normal/tangent null direction.
     assert!(matches!(
         solve_frictional_contacts(&[c], &singular, Default::default(), || false),
-        Err(FrictionalContactError::MobilityNotAdmitted(_))
+        Err(FrictionalContactError::UnresolvedDeterminacy { .. })
     ));
     let mut penetrating = c;
     penetrating.gap = -1e-15;

@@ -17,17 +17,29 @@
 //! supplied original W. No eigenvalue shift, compliance, or truncated matrix
 //! enters the physical solve. The small matrix cap bounds each unpolled call.
 
-use super::{FrictionalContactError, PsdVelocityWitness, poll};
+use super::{FrictionalContactError, PsdVelocityCriterion, PsdVelocityWitness, poll};
 use fs_solver::orthant::active_set::SpdOrthantConfig;
 
-pub(super) fn velocity_witness(
+/// Numerical PSD admission is separate from Coulomb determinacy. A separated
+/// mobility range alone says nothing about whether its law determines motion.
+pub(super) struct RangeAdmission {
+    pub dimension: usize,
+    pub normalized: Vec<f64>,
+    pub eigenvalues: Vec<f64>,
+    pub vectors: Vec<f64>,
+    pub retained: Vec<usize>,
+    pub null: Vec<usize>,
+    pub zero_band: f64,
+    spectral_residual: f64,
+    orthogonality_residual: f64,
+}
+
+pub(super) fn admit(
     original: &[f64],
-    mu: &[f64],
+    d: usize,
     config: SpdOrthantConfig,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<Option<PsdVelocityWitness>, FrictionalContactError> {
-    let n = mu.len();
-    let d = 3 * n;
+) -> Result<Option<RangeAdmission>, FrictionalContactError> {
     poll(cancelled)?;
     if d == 0 || d > config.max_variables || d > 63 {
         return Ok(None);
@@ -108,61 +120,117 @@ pub(super) fn velocity_witness(
     if retained.is_empty() || null.is_empty() {
         return Ok(None);
     }
-    let mut null_residual = 0.0_f64;
-    for i in 0..n {
-        poll(cancelled)?;
-        if mu[i] == 0.0 {
-            continue;
-        }
-        let row_sum = null.iter().map(|&k| q[3 * i * d + k].abs()).sum::<f64>();
-        // Any nonzero friction coefficient requires the corresponding normal
-        // impulse to be range-observable. A tiny mu is not permission to treat
-        // an unbounded normal null direction as a finite perturbation.
-        if row_sum > zero_band {
-            return Ok(None);
-        }
-        null_residual = null_residual.max(mu[i] * row_sum);
-    }
-    let mut normal_inverse_bound = 0.0_f64;
-    for i in 0..n {
-        poll(cancelled)?;
-        let mut row_sum = 0.0;
-        for j in 0..n {
-            let mut value = 0.0;
-            for &k in &retained {
-                value += q[3 * i * d + k] * q[3 * j * d + k] / eigenvalues[k];
-            }
-            row_sum += (mu[i] * value * mu[j]).abs();
-        }
-        normal_inverse_bound = normal_inverse_bound.max(row_sum);
-    }
-    let mut tangent_bound = 0.0_f64;
-    for i in (0..d).filter(|i| i % 3 != 0) {
-        poll(cancelled)?;
-        let row_sum = (0..d)
-            .filter(|j| j % 3 != 0)
-            .map(|j| w[i * d + j].abs())
-            .sum::<f64>();
-        tangent_bound = tangent_bound.max(row_sum);
-    }
-    // The common normalization of W cancels between the inverse and mobility.
-    let bound =
-        (normal_inverse_bound * tangent_bound).sqrt() * (1.0 + 512.0 * f64::EPSILON * d as f64);
-    if !bound.is_finite() || bound >= 1.0 - 1e-8 || !null_residual.is_finite() {
-        return Ok(None);
-    }
-    poll(cancelled)?;
-    Ok(Some(PsdVelocityWitness {
+    Ok(Some(RangeAdmission {
         dimension: d,
-        rank: retained.len(),
-        friction_feedback_bound: bound,
-        weighted_normal_nullspace_residual: null_residual,
+        normalized: w,
+        eigenvalues,
+        vectors: q,
+        retained,
+        null,
+        zero_band,
         spectral_residual,
         orthogonality_residual,
-        minimum_retained_eigenvalue: eigenvalues[retained[0]],
-        maximum_null_eigenvalue_magnitude: null
-            .iter()
-            .map(|&k| eigenvalues[k].abs())
-            .fold(0.0, f64::max),
     }))
+}
+
+impl RangeAdmission {
+    pub fn normal_nullspace_residual(&self, mu: &[f64]) -> f64 {
+        mu.iter()
+            .enumerate()
+            .map(|(i, &coefficient)| {
+                coefficient
+                    * self
+                        .null
+                        .iter()
+                        .map(|&k| self.vectors[3 * i * self.dimension + k].abs())
+                        .sum::<f64>()
+            })
+            .fold(0.0, f64::max)
+    }
+
+    pub fn witness(
+        &self,
+        mu: &[f64],
+        bound: f64,
+        criterion: PsdVelocityCriterion,
+    ) -> PsdVelocityWitness {
+        PsdVelocityWitness {
+            dimension: self.dimension,
+            rank: self.retained.len(),
+            criterion,
+            friction_feedback_bound: bound,
+            weighted_normal_nullspace_residual: self.normal_nullspace_residual(mu),
+            spectral_residual: self.spectral_residual,
+            orthogonality_residual: self.orthogonality_residual,
+            minimum_retained_eigenvalue: self.eigenvalues[self.retained[0]],
+            maximum_null_eigenvalue_magnitude: self
+                .null
+                .iter()
+                .map(|&k| self.eigenvalues[k].abs())
+                .fold(0.0, f64::max),
+        }
+    }
+
+    pub fn normal_observable_witness(
+        &self,
+        mu: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Option<PsdVelocityWitness>, FrictionalContactError> {
+        let n = mu.len();
+        let d = self.dimension;
+        let q = &self.vectors;
+        let w = &self.normalized;
+        let eigenvalues = &self.eigenvalues;
+        let retained = &self.retained;
+        let null = &self.null;
+        let mut null_residual = 0.0_f64;
+        for i in 0..n {
+            poll(cancelled)?;
+            if mu[i] == 0.0 {
+                continue;
+            }
+            let row_sum = null.iter().map(|&k| q[3 * i * d + k].abs()).sum::<f64>();
+            // Any nonzero friction coefficient requires the corresponding normal
+            // impulse to be range-observable. A tiny mu is not permission to treat
+            // an unbounded normal null direction as a finite perturbation.
+            if row_sum > self.zero_band {
+                return Ok(None);
+            }
+            null_residual = null_residual.max(mu[i] * row_sum);
+        }
+        let mut normal_inverse_bound = 0.0_f64;
+        for i in 0..n {
+            poll(cancelled)?;
+            let mut row_sum = 0.0;
+            for j in 0..n {
+                let mut value = 0.0;
+                for &k in retained {
+                    value += q[3 * i * d + k] * q[3 * j * d + k] / eigenvalues[k];
+                }
+                row_sum += (mu[i] * value * mu[j]).abs();
+            }
+            normal_inverse_bound = normal_inverse_bound.max(row_sum);
+        }
+        let mut tangent_bound = 0.0_f64;
+        for i in (0..d).filter(|i| i % 3 != 0) {
+            poll(cancelled)?;
+            let row_sum = (0..d)
+                .filter(|j| j % 3 != 0)
+                .map(|j| w[i * d + j].abs())
+                .sum::<f64>();
+            tangent_bound = tangent_bound.max(row_sum);
+        }
+        // The common normalization of W cancels between the inverse and mobility.
+        let bound =
+            (normal_inverse_bound * tangent_bound).sqrt() * (1.0 + 512.0 * f64::EPSILON * d as f64);
+        if !bound.is_finite() || bound >= 1.0 - 1e-8 || !null_residual.is_finite() {
+            return Ok(None);
+        }
+        poll(cancelled)?;
+        Ok(Some(self.witness(
+            mu,
+            bound,
+            PsdVelocityCriterion::NormalRangeObservable,
+        )))
+    }
 }

@@ -7,6 +7,9 @@ use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 #[path = "frictional_impact/redundant.rs"]
 mod redundant;
 
+#[path = "frictional_impact/normal_gauge.rs"]
+mod normal_gauge;
+
 fn close(a: f64, b: f64) {
     assert!(
         (a - b).abs() <= 2e-8 * a.abs().max(b.abs()).max(1.0),

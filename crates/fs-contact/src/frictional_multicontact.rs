@@ -26,6 +26,7 @@ use fs_solver::{
 use std::cell::{Cell, RefCell};
 
 mod natural;
+mod normal_gauge;
 mod range;
 
 /// What the numerical witness establishes about this accepted response.
@@ -43,15 +44,54 @@ pub enum FrictionalContactDeterminacy {
     UniqueVelocity(PsdVelocityWitness),
 }
 
+/// Which global sufficient argument establishes the mobility image. Neither
+/// criterion assigns physical authority to an individual redundant load.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PsdVelocityCriterion {
+    /// Friction-weighted normal impulses are observable from the mobility
+    /// range; their worst-case feedback through tangential velocity is < 1.
+    NormalRangeObservable,
+    /// A checked solution supplies norm subgradients. Their bilinear normal /
+    /// tangential feedback annihilates the mobility nullspace, and the total
+    /// energy form is positive on its range. This compares the candidate to
+    /// EVERY law-satisfying root, not just its local Newton linearization.
+    CandidateFrictionDirection {
+        /// `mu_i * s_i`, where `s_i` is a subgradient of tangential speed at the
+        /// accepted candidate. In canonical active contact order.
+        weighted_directions: Vec<[f64; 2]>,
+        /// Maximum entry of `Q_null^T N^T C T Q_range`, normalized by the
+        /// largest weighted-direction norm (zero when all directions vanish).
+        nullspace_coupling_residual: f64,
+        /// Positive lower numerical margin of `I + sym(A)`, with
+        /// `A = Lambda^-1/2 Q^T N^T C T Q Lambda^1/2` on the positive range.
+        energy_coercivity_lower_bound: f64,
+        energy_spectral_residual: f64,
+        energy_orthogonality_residual: f64,
+        /// Original impulse mismatch `max |p_t + p_n*mu*s|` [N s].
+        traction_residual: f64,
+        /// `max |mu*|v_t| - (mu*s) dot v_t|` [m/s]. Near-zero velocity uses
+        /// the same declared numerical sticking tolerance as the contact law;
+        /// at each contact it is bounded by `2*mu*velocity_tolerance` plus
+        /// roundoff. Sliding direction is checked relative to mu, even if tiny.
+        subgradient_velocity_residual: f64,
+    },
+}
+
 /// Sufficient numerical determinacy witness on a semidefinite mobility range.
 /// The admission is floating point, not an interval rank/uniqueness proof.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PsdVelocityWitness {
     pub dimension: usize,
     pub rank: usize,
-    /// Upper bound on the Coulomb normal-load feedback, strictly below one.
+    pub criterion: PsdVelocityCriterion,
+    /// Upper bound kappa in `E <= kappa*E` for two law-satisfying roots,
+    /// strictly below one. NormalRangeObservable uses a product of operator
+    /// norm bounds; CandidateFrictionDirection uses the negative part of the
+    /// minimum symmetric feedback eigenvalue, including numerical margins.
     pub friction_feedback_bound: f64,
-    /// Maximum row sum of `diag(mu) * N * Q_null` in the admitted basis.
+    /// Maximum row sum of `diag(mu) * N * Q_null` in the admitted basis. It
+    /// must vanish only for NormalRangeObservable; the direction criterion
+    /// can prove unique motion while individual normal loads remain free.
     pub weighted_normal_nullspace_residual: f64,
     /// Maximum entry of `W/scale * Q - Q*Lambda`.
     pub spectral_residual: f64,
@@ -95,6 +135,9 @@ pub struct FrictionalContactConfig {
     /// shared across all branch probes. Actions use quadratic work; the PSD
     /// lane caches one at-most-63-row dense SVD per Newton point for its
     /// numerical right inverse, with cancellation before/after factorization.
+    /// PSD determinacy additionally uses at most two bounded range-energy
+    /// eigendecompositions and one 63-by-21 representative SVD per solve;
+    /// these fixed-size admission calls are outside the Newton callback count.
     pub maximum_evaluations: usize,
     pub maximum_newton_iterations: usize,
     pub velocity_tolerance: f64,
@@ -176,8 +219,9 @@ pub enum FrictionalContactError {
         gap: f64,
     },
     /// Indefinite, rank-ambiguous, or unsupported semidefinite mobility retains
-    /// the original SPD refusal when the additional range witness cannot
-    /// establish velocity determinacy. This is not physical nonexistence.
+    /// the original SPD refusal. A numerical PSD range without a Coulomb
+    /// determinacy witness instead reaches UnresolvedDeterminacy or Nonunique.
+    /// None of these outcomes asserts physical nonexistence.
     MobilityNotAdmitted(SpdOrthantError),
     Newton(NewtonError),
     NotConverged(NewtonReport),
@@ -190,8 +234,10 @@ pub enum FrictionalContactError {
         work: f64,
         allowed: f64,
     },
-    /// Both witnesses satisfy the physical law and passivity gates. Values are
-    /// in original input order; no arbitrary branch is selected.
+    /// Both witnesses satisfy the physical law and passivity gates and have
+    /// distinct mobility images, hence different contact velocities. A change
+    /// only in redundant impulse allocation does not trigger this refusal.
+    /// Values are in original input order; no arbitrary branch is selected.
     Nonunique {
         first: Vec<[f64; 3]>,
         second: Vec<[f64; 3]>,
@@ -287,7 +333,7 @@ pub fn solve_frictional_contacts(
             }
         }
     }
-    let (minimum_pivot, range_witness) =
+    let (minimum_pivot, range_admission) =
         match solve_spd_orthant(&matrix, &vec![0.0; d], config.matrix, &mut cancelled) {
             Ok(admission) => (admission.min_normalized_pivot, None),
             Err(SpdOrthantError::Cancelled) => return Err(E::Cancelled),
@@ -295,9 +341,9 @@ pub fn solve_frictional_contacts(
                 error @ (SpdOrthantError::NotPositiveDefinite { .. }
                 | SpdOrthantError::Degenerate { .. }),
             ) => {
-                let witness = range::velocity_witness(&matrix, &mu, config.matrix, &mut cancelled)?;
-                match witness {
-                    Some(witness) => (0.0, Some(witness)),
+                let admission = range::admit(&matrix, d, config.matrix, &mut cancelled)?;
+                match admission {
+                    Some(admission) => (0.0, Some(admission)),
                     None => return Err(E::MobilityNotAdmitted(error)),
                 }
             }
@@ -314,7 +360,11 @@ pub fn solve_frictional_contacts(
         }
         steps.extend_from_slice(&[rn, rt, rt]);
     }
-    let witness = if range_witness.is_some() {
+    let mut range_witness = match &range_admission {
+        Some(admission) => admission.normal_observable_witness(&mu, &mut cancelled)?,
+        None => None,
+    };
+    let witness = if range_admission.is_some() {
         None
     } else {
         contraction_witness(&matrix, &steps, &mu, &mut cancelled)?
@@ -322,7 +372,7 @@ pub fn solve_frictional_contacts(
     let evaluations = Cell::new(0);
     let cancel = RefCell::new(&mut cancelled);
     let active_targets: Vec<_> = active.iter().map(|&i| targets[i]).collect();
-    let range_preconditioner = range_witness.is_some();
+    let range_preconditioner = range_admission.is_some();
     let solve = |seed: Vec<f64>| -> Result<(Vec<f64>, NewtonReport), E> {
         let problem = natural::NaturalMap::new(
             &matrix,
@@ -373,6 +423,69 @@ pub fn solve_frictional_contacts(
         config,
         &mut **cancel.borrow_mut(),
     )?;
+    if range_witness.is_none() {
+        if let Some(admission) = &range_admission {
+            let velocity: Vec<_> = active
+                .iter()
+                .flat_map(|&i| result.relative_velocities_after[i])
+                .collect();
+            range_witness = normal_gauge::direction_witness(
+                admission,
+                &mu,
+                &point,
+                &velocity,
+                None,
+                config,
+                &mut **cancel.borrow_mut(),
+            )?;
+            if range_witness.is_none() {
+                let proposed = normal_gauge::coherent_representative(
+                    admission,
+                    &matrix,
+                    &point,
+                    &free,
+                    config,
+                    &mut **cancel.borrow_mut(),
+                )?;
+                if let Some((candidate, directions)) = proposed {
+                    // A numerical gauge proposal never bypasses the original
+                    // full matrix, unilateral law, circular cone or work gate.
+                    let checked = audit(
+                        contacts,
+                        delassus,
+                        &order,
+                        &active,
+                        &targets,
+                        &candidate,
+                        config,
+                        &mut **cancel.borrow_mut(),
+                    );
+                    match checked {
+                        Ok(representative) => {
+                            let velocity: Vec<_> = active
+                                .iter()
+                                .flat_map(|&i| representative.relative_velocities_after[i])
+                                .collect();
+                            range_witness = normal_gauge::direction_witness(
+                                admission,
+                                &mu,
+                                &candidate,
+                                &velocity,
+                                Some(&directions),
+                                config,
+                                &mut **cancel.borrow_mut(),
+                            )?;
+                            if range_witness.is_some() {
+                                result = representative;
+                            }
+                        }
+                        Err(E::Cancelled) => return Err(E::Cancelled),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
     if let Some(witness) = range_witness {
         result.determinacy = FrictionalContactDeterminacy::UniqueVelocity(witness);
     } else if let Some((bound, weights)) = witness {
@@ -408,10 +521,14 @@ pub fn solve_frictional_contacts(
                     &mut **cancel.borrow_mut(),
                 ) {
                     Ok(second)
-                        if point
-                            .iter()
-                            .zip(&other)
-                            .any(|(a, b)| (a - b).abs() > 16.0 * config.impulse_tolerance) =>
+                        if active.iter().any(|&i| {
+                            (0..3).any(|a| {
+                                (result.relative_velocities_after[i][a]
+                                    - second.relative_velocities_after[i][a])
+                                    .abs()
+                                    > 16.0 * config.velocity_tolerance
+                            })
+                        }) =>
                     {
                         return Err(E::Nonunique {
                             first: result.impulses,

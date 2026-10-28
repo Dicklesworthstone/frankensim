@@ -195,16 +195,20 @@ fn redundant_frictionless_normal_support_has_unique_motion_without_unique_loads(
     for c in &mut frictionful {
         c.friction_coefficient = 0.01;
     }
-    // An arbitrarily small nonzero mu does not bound unobservable changes in
-    // the four normal loads. No arbitrary pressure split becomes authoritative.
+    // The normal-observable proof cannot admit nonzero friction here. The
+    // candidate-direction energy proof can, without choosing physical pressure.
+    let frictionful = solve(&frictionful, &w);
+    let FrictionalContactDeterminacy::UniqueVelocity(witness) = frictionful.determinacy else {
+        panic!("normal loads remain indeterminate");
+    };
     assert!(matches!(
-        solve_frictional_contacts(&frictionful, &w, Default::default(), || false),
-        Err(FrictionalContactError::MobilityNotAdmitted(_))
+        witness.criterion,
+        fs_contact::frictional_multicontact::PsdVelocityCriterion::CandidateFrictionDirection { .. }
     ));
 }
 
 #[test]
-fn indefinite_rank_ambiguous_or_unproven_feedback_mobility_is_not_regularized() {
+fn mobility_admission_distinguishes_bad_rank_from_a_large_friction_coefficient() {
     let mut contacts = [1, 2, 3].map(|id| contact(id, [-1.0, 0.1, 0.0], 0.2));
     let w = gram(&triangle());
     for eigenvalue in [-1e-5, 1e-11] {
@@ -223,10 +227,21 @@ fn indefinite_rank_ambiguous_or_unproven_feedback_mobility_is_not_regularized() 
     for c in &mut contacts {
         c.friction_coefficient = 1.0;
     }
+    // A large available friction coefficient can defeat the worst-case norm
+    // bound while the actual sticking traction has a positive global margin.
+    let result = solve(&contacts, &w);
+    let FrictionalContactDeterminacy::UniqueVelocity(witness) = result.determinacy else {
+        panic!("redundant shear loads remain indeterminate");
+    };
     assert!(matches!(
-        solve_frictional_contacts(&contacts, &w, Default::default(), || false),
-        Err(FrictionalContactError::MobilityNotAdmitted(_))
+        witness.criterion,
+        fs_contact::frictional_multicontact::PsdVelocityCriterion::CandidateFrictionDirection { .. }
     ));
+    for velocity in result.relative_velocities_after {
+        for value in velocity {
+            close(value, 0.0);
+        }
+    }
 }
 
 #[test]
