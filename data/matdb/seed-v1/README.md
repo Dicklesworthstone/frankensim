@@ -4,6 +4,36 @@ This directory retains the human-reviewable source inputs compiled by
 `xtask matdb-pack`. Generated binary packs are deliberately not committed:
 the compiler must reproduce them from the pinned manifest and source record.
 
+## Engineering polymers with separate loading modes
+
+Four producer-grade stock-shape packs add **32 claims**. Each retains density,
+heat capacity, conductivity, tensile modulus and strength, flexural modulus,
+compression modulus, and a discrete compression-stress table.
+
+| Directory | Polymer | Density (kg/m³) | Cp (J/kg/K) | k (W/m/K) | Tensile / flexural / compression modulus (MPa) |
+| --- | --- | ---: | ---: | ---: | --- |
+| `ensinger-tecapeek-natural` | PEEK | 1310 | 1100 | 0.27 | 4200 / 4200 / 3400 |
+| `ensinger-tecapei-natural` | PEI | 1280 | 1200 | 0.21 | 3200 / 3300 / 2800 |
+| `ensinger-tecason-s-natural` | PSU | 1240 | 1200 | 0.21 | 2700 / 2600 / 2300 |
+| `ensinger-tecamid-66-natural` | PA66 | 1150 | 1500 | 0.36 | 3500 / 3100 / 2700 |
+
+These are producer comparison data with unstated statistical uncertainty.
+Numerical test temperature and moisture conditioning remain unknown; PA66
+retains the producer's immediately-after-machining condition. Each modulus
+keeps its test method, specimen and crosshead-speed context. A tensile modulus
+is not a flexural or compression modulus, and none supplies a Poisson ratio.
+Compression stresses at 1%, 2% and 5% strain are tabulated-only claims: they
+do not establish an interpolated stress-strain or unloading law. Temperature
+service limits do not establish a thermal-property trajectory.
+
+Compile any pack with the existing compiler:
+
+```sh
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/ensinger-tecapeek-natural/manifest.tsv \
+  --out /tmp/ensinger-tecapeek-natural.fsmatpk
+```
+
 ## Engineering alloys with independent elastic parameters
 
 Three added copper-alloy packs contain density, Young's modulus, shear modulus,
