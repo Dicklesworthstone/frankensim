@@ -52,8 +52,9 @@
 //!
 //! **Mouth.** The plane mode takes the scalar termination, a tabulated bake,
 //! or its own `Zc` ([`MouthLoad::Matched`], Pagneux's infinite-pipe end).
-//! Higher modes always terminate matched, the staircase's disclosed closure;
-//! the radiation matrix is M2.1-W6's scope.
+//! Those legacy selectors retain matched higher modes. The explicit
+//! `mm_profile_*_flanged` APIs instead impose the complete original Zorumski
+//! radiation matrix, retaining signed mutual loads and the exterior gas.
 //!
 //! **Field.** [`mm_profile_field`] keeps the scaled impedance at every step
 //! station and each step's inverse flow map, then carries a prescribed
@@ -140,6 +141,18 @@ pub enum MouthLoad<'a> {
     /// Every mode into its own characteristic impedance: the semi-infinite
     /// continuation of the mouth cross-section (Pagneux's infinite-pipe end).
     Matched,
+}
+
+#[derive(Clone, Copy)]
+enum ProfileLoad<'a> {
+    Scalar(MouthLoad<'a>),
+    Flanged(&'a GasState),
+}
+
+impl<'a> From<MouthLoad<'a>> for ProfileLoad<'a> {
+    fn from(load: MouthLoad<'a>) -> Self {
+        Self::Scalar(load)
+    }
 }
 
 /// Row-major complex `n x n` product with fixed summation order.
@@ -330,16 +343,17 @@ struct Propagated {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn propagate(
+fn propagate<'a>(
     profile: &RadiusProfile,
     state: &GasState,
     omega: f64,
     loss: LossModel,
-    load: MouthLoad<'_>,
+    load: impl Into<ProfileLoad<'a>>,
     n: usize,
     steps: RiccatiSteps,
     track_flow: bool,
 ) -> Result<Propagated, DuctError> {
+    let load = load.into();
     steps.validate()?;
     if !(omega.is_finite() && omega > 0.0) {
         return Err(bad("omega must be finite and positive"));
@@ -358,35 +372,54 @@ fn propagate(
     }
     let length = profile.length();
     let r_mouth = profile.radius(length)?;
-    let mouth = modal_wave(state, r_mouth, omega, loss, &basis.gammas[1..])?;
-    let (plane, mouth_ka) = match load {
-        MouthLoad::Analytic(t) => termination_impedance(t, state, r_mouth, omega)?,
-        MouthLoad::Tabulated(table) => (
-            Some(table.z_at(omega)?),
-            omega * r_mouth / state.sound_speed,
-        ),
-        MouthLoad::Matched => (Some(mouth.zc[0]), omega * r_mouth / state.sound_speed),
-    };
-    if track_flow && plane.is_none() {
-        return Err(bad(
-            "flow tracking needs a finite plane-mode mouth impedance",
-        ));
-    }
-    // Columns of [X; Y] span the admissible mouth states: P = X c, u = Y c.
+    // Columns of [X; Y] span admissible mouth states: P/Zref = X c, U = Y c.
     let mut x_blk = vec![C64::ZERO; n * n];
     let mut y_blk = vec![C64::ZERO; n * n];
-    for k in 0..n {
-        let (xk, yk) = match (k, plane) {
-            (0, Some(z)) => (z.scale(1.0 / zref), C64::ONE),
-            (0, None) => (C64::ONE, C64::ZERO),
-            _ => (mouth.zc[k].scale(1.0 / zref), C64::ONE),
-        };
-        if !finite(xk) {
-            return Err(DuctError::Singular);
+    let mouth_ka = match load {
+        ProfileLoad::Scalar(load) => {
+            let mouth = modal_wave(state, r_mouth, omega, loss, &basis.gammas[1..])?;
+            let (plane, ka) = match load {
+                MouthLoad::Analytic(t) => termination_impedance(t, state, r_mouth, omega)?,
+                MouthLoad::Tabulated(table) => (
+                    Some(table.z_at(omega)?),
+                    omega * r_mouth / state.sound_speed,
+                ),
+                MouthLoad::Matched => (Some(mouth.zc[0]), omega * r_mouth / state.sound_speed),
+            };
+            if track_flow && plane.is_none() {
+                return Err(bad("flow tracking needs a finite plane-mode mouth impedance"));
+            }
+            for k in 0..n {
+                let (xk, yk) = match (k, plane) {
+                    (0, Some(z)) => (z.scale(1.0 / zref), C64::ONE),
+                    (0, None) => (C64::ONE, C64::ZERO),
+                    _ => (mouth.zc[k].scale(1.0 / zref), C64::ONE),
+                };
+                if !finite(xk) {
+                    return Err(DuctError::Singular);
+                }
+                x_blk[k * n + k] = xk;
+                y_blk[k * n + k] = yk;
+            }
+            ka
         }
-        x_blk[k * n + k] = xk;
-        y_blk[k * n + k] = yk;
-    }
+        ProfileLoad::Flanged(exterior) => {
+            crate::exterior::admit(state, exterior)?;
+            let matrix = crate::flanged::flanged_modal_impedance(exterior, r_mouth, omega, n)?;
+            for (x, z) in x_blk.iter_mut().zip(matrix) {
+                *x = z.scale(1.0 / zref);
+                if !finite(*x) {
+                    return Err(DuctError::Singular);
+                }
+            }
+            for k in 0..n {
+                y_blk[k * n + k] = C64::ONE;
+            }
+            // No Zc_n is formed here: the finite aperture matrix and the
+            // original generator stay regular at a bare modal cutoff.
+            omega * r_mouth / exterior.sound_speed
+        }
+    };
     let mut flow = track_flow.then(|| {
         let mut g = vec![C64::ZERO; n * n];
         for k in 0..n {
@@ -489,6 +522,42 @@ pub fn mm_profile_impedance(
     modes: ModeCount,
     steps: RiccatiSteps,
 ) -> Result<ModalResponse, DuctError> {
+    profile_impedance_with_load(profile, state, omega, loss, ProfileLoad::Scalar(load), modes, steps)
+}
+
+/// Continuous multimodal response with complete flanged-mouth radiation.
+///
+/// The exterior impedance matrix is rebuilt for each retained-mode rung,
+/// including the half-order comparison used by `tail_bound_estimate`. Every
+/// original signed cross-mode entry loads the continuous propagation. The bore
+/// retains `state`; radiation uses `exterior`, with a common static pressure.
+/// The two mode/step axes and the existing evanescent-step bound are unchanged.
+///
+/// # Errors
+/// As [`mm_profile_impedance`] and
+/// [`crate::flanged::flanged_modal_impedance`], or incompatible static pressure.
+#[allow(clippy::too_many_arguments)]
+pub fn mm_profile_impedance_flanged(
+    profile: &RadiusProfile,
+    state: &GasState,
+    exterior: &GasState,
+    omega: f64,
+    loss: LossModel,
+    modes: ModeCount,
+    steps: RiccatiSteps,
+) -> Result<ModalResponse, DuctError> {
+    profile_impedance_with_load(profile, state, omega, loss, ProfileLoad::Flanged(exterior), modes, steps)
+}
+
+fn profile_impedance_with_load(
+    profile: &RadiusProfile,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    load: ProfileLoad<'_>,
+    modes: ModeCount,
+    steps: RiccatiSteps,
+) -> Result<ModalResponse, DuctError> {
     modes.validate()?;
     let n = modes.0;
     let full = propagate(profile, state, omega, loss, load, n, steps, false)?;
@@ -555,6 +624,42 @@ pub fn mm_profile_field(
     omega: f64,
     loss: LossModel,
     load: MouthLoad<'_>,
+    modes: ModeCount,
+    steps: RiccatiSteps,
+    inlet_flow: &[C64],
+) -> Result<ModalField, DuctError> {
+    profile_field_with_load(profile, state, omega, loss, ProfileLoad::Scalar(load), modes, steps, inlet_flow)
+}
+
+/// Continuous modal pressure/flow field with complete flanged-mouth radiation.
+///
+/// `inlet_flow` and all returned fields retain the original signed modal basis.
+/// At the mouth `P = Z_rad U`; radiated power is `Re(U^H P)/2`, and every
+/// higher-mode flow remains available to physical observers.
+///
+/// # Errors
+/// As [`mm_profile_field`] and [`mm_profile_impedance_flanged`].
+#[allow(clippy::too_many_arguments)]
+pub fn mm_profile_field_flanged(
+    profile: &RadiusProfile,
+    state: &GasState,
+    exterior: &GasState,
+    omega: f64,
+    loss: LossModel,
+    modes: ModeCount,
+    steps: RiccatiSteps,
+    inlet_flow: &[C64],
+) -> Result<ModalField, DuctError> {
+    profile_field_with_load(profile, state, omega, loss, ProfileLoad::Flanged(exterior), modes, steps, inlet_flow)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn profile_field_with_load(
+    profile: &RadiusProfile,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    load: ProfileLoad<'_>,
     modes: ModeCount,
     steps: RiccatiSteps,
     inlet_flow: &[C64],

@@ -62,7 +62,7 @@ pub const MAX_MODES: usize = 8;
 mod riccati;
 pub use riccati::{
     BESSEL_CERTIFIED_X, MAX_EVANESCENT_STEP, ModalField, ModeCount, MouthLoad, certified_mode_cap,
-    mm_profile_field, mm_profile_impedance,
+    mm_profile_field, mm_profile_field_flanged, mm_profile_impedance, mm_profile_impedance_flanged,
 };
 
 /// `J0(x)` by the staircase's legacy power series, kept bit-identical
@@ -546,10 +546,12 @@ pub fn mm_input_impedance(
 }
 
 /// Plane-mode mouth load selector for the modal image.
+#[derive(Clone, Copy)]
 enum MmLoad<'a> {
     Analytic(Termination),
     Tabulated(&'a crate::TabulatedLoad),
     Impedance(C64),
+    Flanged(&'a GasState),
 }
 
 /// Multimodal input impedance against a TABULATED plane-mode mouth load
@@ -616,6 +618,30 @@ pub fn mm_input_impedance_load(
     )
 }
 
+/// Multimodal input impedance with the complete flanged-mouth radiation matrix.
+///
+/// Every retained radial mode participates in the exterior load. The existing
+/// reflection recursion keeps all cross-mode reflection and propagation.
+/// `state` owns the bore, `exterior` owns radiation, and both must have the
+/// same static pressure. This is opt-in: the scalar-termination APIs retain
+/// their original matched higher-mode mouth closure.
+///
+/// # Errors
+/// As [`mm_input_impedance`], plus the common-static-pressure admission and
+/// [`crate::flanged::flanged_modal_impedance`]'s exterior validity bounds.
+#[allow(clippy::too_many_arguments)]
+pub fn mm_input_impedance_flanged(
+    duct: &Duct,
+    state: &GasState,
+    exterior: &GasState,
+    omega: f64,
+    loss: LossModel,
+    n_modes: usize,
+    extra_slices: usize,
+) -> Result<ModalResponse, DuctError> {
+    mm_core(duct, state, omega, loss, MmLoad::Flanged(exterior), n_modes, extra_slices)
+}
+
 #[allow(clippy::too_many_lines)] // one recursion, kept whole on purpose
 #[allow(clippy::needless_pass_by_value)] // small load spec by value keeps call sites clean
 fn mm_core(
@@ -656,12 +682,19 @@ fn mm_core(
         MmLoad::Analytic(termination) => termination_impedance(termination, state, mouth, omega)?,
         MmLoad::Tabulated(table) => (Some(table.z_at(omega)?), omega * mouth / state.sound_speed),
         MmLoad::Impedance(value) => (Some(value), omega * mouth / state.sound_speed),
+        MmLoad::Flanged(exterior) => {
+            crate::exterior::admit(state, exterior)?;
+            (None, omega * mouth / exterior.sound_speed)
+        }
     };
     let mouth_wave = modal_wave(state, mouth, omega, loss, &gammas)?;
     let mut min_shear = mouth_wave.shear_number;
     // Modal load: plane mode gets Z_L (or a hard wall for Closed);
     // higher modes get their own Zc (matched; disclosed).
-    let r_load: Vec<C64> = {
+    let r_load: Vec<C64> = if let MmLoad::Flanged(exterior) = load {
+        let matrix = crate::flanged::flanged_modal_impedance(exterior, mouth, omega, n)?;
+        reflection_from_impedance(&matrix, &mouth_wave.zc, n)?
+    } else {
         let mut r = vec![C64::ZERO; n * n];
         match zl_plane {
             Some(zl) => {
@@ -1325,3 +1358,6 @@ mod modal_flare_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod flanged_tests;

@@ -293,6 +293,83 @@ fn packed(i: usize, j: usize, modes: usize) -> usize {
     m * modes - m * (m + 1) / 2 + n
 }
 
+/// Complete flanged-aperture radiation impedance in the duct modal basis.
+///
+/// Returns the row-major `modes x modes` matrix `P = Z U` [Pa s/m³],
+/// where `psi_n(r) = J0(alpha_n r/radius)/|J0(alpha_n)|`,
+/// `P_n = area^-1 integral p psi_n dA`, and
+/// `U_n = integral v_out psi_n dA`. Thus the peak-phasor radiated power is
+/// `Re(sum_n conj(U_n) P_n)/2`. All mutual and higher-mode entries are retained;
+/// no outgoing pipe modes are eliminated as in [`flanged_pipe_impedance`].
+///
+/// The existing spectral quadrature uses wall-positive modes `J0/J0(alpha_n)`.
+/// Its signed congruence `diag(sign J0) Z diag(sign J0)` and the single
+/// division by aperture area preserve both pressure/flow pairing and power.
+/// Mode zero is the closed-form baffled piston. The exterior gas alone owns
+/// this operator; a connected bore must separately admit a common static
+/// pressure and propagate with its own gas. Recompute at every retained-mode
+/// rung rather than reusing a condensed scalar termination.
+///
+/// # Errors
+/// Invalid gas, nonpositive or nonfinite radius/frequency, a mode count outside
+/// `1..=FLANGED_MAX_MODES`, exterior `ka > FLANGED_MAX_KA`, or an
+/// unrepresentable impedance. This finite-basis infinite-baffle operator does
+/// not establish arbitrary-geometry or out-of-band radiation accuracy.
+pub fn flanged_modal_impedance(
+    exterior: &GasState,
+    radius: f64,
+    omega: f64,
+    modes: usize,
+) -> Result<Vec<C64>, DuctError> {
+    crate::validate_gas(exterior)?;
+    if !(radius > 0.0 && radius.is_finite() && omega > 0.0 && omega.is_finite()) {
+        return Err(DuctError::BadParameter {
+            what: "flanged modal radiation needs positive finite radius and frequency",
+        });
+    }
+    if !(1..=FLANGED_MAX_MODES).contains(&modes) {
+        return Err(DuctError::BadParameter {
+            what: "flanged radiation mode count outside 1..=FLANGED_MAX_MODES",
+        });
+    }
+    let ka = omega / exterior.sound_speed * radius;
+    if !(ka <= FLANGED_MAX_KA) {
+        return Err(DuctError::RadiationKaTooLarge { ka });
+    }
+    let z0 = exterior.density * exterior.sound_speed
+        / (core::f64::consts::PI * radius * radius);
+    if !(z0.is_finite() && z0 > 0.0) {
+        return Err(DuctError::Singular);
+    }
+    let (r00, x00) =
+        fs_phs::baffled_piston_impedance(exterior.density, exterior.sound_speed, radius, omega)
+            .map_err(|_| DuctError::BadParameter {
+                what: "flanged radiation piston term",
+            })?;
+    let mut matrix = vec![C64::new(r00, x00); modes * modes];
+    if modes > 1 {
+        let packed_matrix = radiation_matrix(ka, modes)?;
+        let rules = RULES.as_ref().map_err(Clone::clone)?;
+        let sign = |n: usize| {
+            if n == 0 || rules.roots[n - 1].1 > 0.0 { 1.0 } else { -1.0 }
+        };
+        for m in 0..modes {
+            for n in m..modes {
+                if m == 0 && n == 0 {
+                    continue;
+                }
+                let value = packed_matrix[packed(m, n, modes)].scale(z0 * sign(m) * sign(n));
+                matrix[m * modes + n] = value;
+                matrix[n * modes + m] = value;
+            }
+        }
+    }
+    if matrix.iter().any(|z| !z.re.is_finite() || !z.im.is_finite()) {
+        return Err(DuctError::Singular);
+    }
+    Ok(matrix)
+}
+
 /// Plane-mode flanged-pipe load `Z_L = p/U` [Pa s/m³] at the mouth of a
 /// circular pipe of `radius` in an infinite rigid baffle, from `modes`
 /// aperture modes. One analytic model for every admitted `ka`.

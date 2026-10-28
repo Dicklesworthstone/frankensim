@@ -24,7 +24,8 @@
 //! gate (ml-006) is the executable witness.
 
 use fs_duct::modal::{
-    ModalResponse, mm_input_impedance, mm_input_impedance_load, mm_input_impedance_tabulated,
+    ModalResponse, mm_input_impedance, mm_input_impedance_flanged, mm_input_impedance_load,
+    mm_input_impedance_tabulated,
     modal_reflection_from_impedance,
 };
 use fs_duct::{Duct, DuctError, LossModel, MouthLoad, Segment, TabulatedLoad, Termination};
@@ -95,6 +96,13 @@ pub enum MmLoad<'a> {
     /// A closed analytic termination (its own validity refusals apply
     /// at every DFT bin).
     Analytic(Termination),
+    /// Complete flanged-aperture radiation matrix in the retained radial basis.
+    /// The supplied exterior gas owns every mutual/higher-mode load; the bore
+    /// keeps its own gas, with equal static pressure required. Every DFT bin and
+    /// the near-DC limit use this physical matrix without a scalar fallback.
+    /// The existing mode count, axial and FIR ladders retain their original
+    /// meaning; the exterior ka ceiling must cover the complete Nyquist band.
+    FlangedModal(&'a GasState),
     /// Strict full-band table with a matching mouth reference and explicit DC
     /// limit. Every positive DFT bin comes from this table; no fallback exists.
     Tabulated(&'a TabulatedLoad),
@@ -130,7 +138,7 @@ impl<'a> From<&MmLoad<'a>> for MmLoad<'a> {
 
 impl MmLoad<'_> {
     fn is_strict(self) -> bool {
-        matches!(self, Self::Tabulated(_))
+        matches!(self, Self::Tabulated(_) | Self::FlangedModal(_))
     }
 }
 
@@ -283,6 +291,12 @@ fn resolve_load(
 ) -> Result<(ModalResponse, bool), MmLineError> {
     match load {
         MmLoad::Analytic(t) => Ok((mm_impedance_at(duct, gas, omega, config, *t)?, false)),
+        MmLoad::FlangedModal(exterior) => {
+            let response = |loss| mm_input_impedance_flanged(
+                duct, gas, exterior, omega, loss, config.n_modes, config.extra_slices,
+            );
+            Ok((with_bessel_fallback(config.loss, response)?, false))
+        }
         MmLoad::Tabulated(table) => {
             let response = |loss| {
                 mm_input_impedance_tabulated(
@@ -363,6 +377,19 @@ fn validate_mouth_load(
 ) -> Result<(), MmLineError> {
     if matches!(load, MmLoad::Matched) {
         return Err(matched_refusal());
+    }
+    if let MmLoad::FlangedModal(exterior) = load {
+        if gas.pressure != exterior.pressure {
+            return Err(DuctError::BadParameter {
+                what: "duct and exterior need a common static pressure; mean flow is not modeled",
+            }.into());
+        }
+        let radius = duct.segments.last().ok_or(DuctError::EmptyDuct)?.outlet_radius();
+        // The physical radiation quadrature must cover every later DFT rung.
+        // One mode suffices to admit gas, geometry and the shared ka ceiling.
+        fs_duct::flanged::flanged_modal_impedance(
+            exterior, radius, core::f64::consts::PI * f64::from(sample_rate_hz), 1,
+        )?;
     }
     if let MmLoad::Tabulated(table) = load {
         let radius = duct
@@ -2127,3 +2154,6 @@ mod mm_line_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod flanged_tests;

@@ -1631,3 +1631,29 @@ in 89 and 435 accepted steps respectively. Both stayed within the declared
 physical total-energy balance residual was -1.421085e-14 J. These checks used
 the complete wall-enabled gas source and exact production duct geometry;
 they are execution/conservation evidence, not a spatial-convergence study.
+
+## Full multimodal flanged-mouth radiation
+
+`flanged::flanged_modal_impedance` exposes the existing finite-basis Zorumski
+aperture matrix as row-major `P=ZU` in the signed `J0/|J0|` radial basis,
+with impedance in Pa s/m³. Signed congruence and one aperture-area conversion
+retain mutual work; peak-phasor mean radiation power is `Re(U^H P)/2`.
+`modal::{mm_input_impedance_flanged,mm_profile_impedance_flanged,
+mm_profile_field_flanged}` load every retained radial mode through the
+original staircase and continuous propagators. The continuous boundary does
+not require infinite characteristic impedance at a transverse cutoff.
+
+Interior propagation and exterior radiation retain separate coherent gases
+at equal static pressure. The exterior ka ceiling, flanged mode ceiling and
+original axial-step/refinement limits remain mandatory. The continuous
+half-order indicator rebuilds the radiation matrix at that smaller order.
+One retained mode is the baffled piston; the legacy scalar `FlangedOpen`
+continues to use its condensed higher-mode correction. This finite-mode,
+infinite-baffle axisymmetric operator does not add independent higher-mode
+wall-loss physics or establish arbitrary-geometry radiation accuracy.
+
+`modal/flanged_tests.rs` checks signed mutual power against an independent
+Rayleigh far-field integral, physical cylinder transfer through both original
+propagators, full field work conservation, cutoff continuity and a 1/2/4-mode
+resonance-frequency/linewidth ladder. Mode and axial refinement remain
+separate convergence axes; a single retained order is not continuum truth.

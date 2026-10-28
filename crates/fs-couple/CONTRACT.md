@@ -10193,3 +10193,19 @@ Independent tests cover reversible three-species exact kinetics, stiff and
 transient trajectories, exothermic heating/adiabatic/cooling histories against
 a scalar reference ODE, mole-changing volume-controlled refinement, exact
 failed-attempt work accounting, source limits and late cancellation.
+
+## Complete multimodal flanged loads in the existing acoustic lines
+
+`mm_line::MmLoad::FlangedModal(&exterior)` selects the complete physical
+flanged-aperture matrix for both `MmLineBank` and `MatrixFirLine`. The same
+signed mutual/higher-mode load is used at every positive-frequency bin and
+at the existing near-DC probe. Exterior gas and full Nyquist-band coverage
+are admitted before the FIR sweep, with common interior/exterior static
+pressure. This strict selector does not substitute a scalar termination,
+clip reflectance or default the DC response. Existing causal, tail, peak,
+passivity and modal/axial refinement gates remain unchanged. The original
+scalar selectors and shared `MouthLoad` API retain their existing behavior.
+
+The new `mm_line/flanged_tests.rs` reconstructs physical mouth pressure and
+volume flow from the complete reflected modal waves and checks their full
+matrix boundary and work, plus exterior-pressure and Nyquist admission.
