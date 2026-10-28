@@ -3885,3 +3885,35 @@ masses are independently checked. Per-parcel energy reports accumulate the
 same accepted storage increments. The global residual is not reconstructed by
 subtracting large rounded formation-energy reports. This is a balance of the
 chosen first-order split trajectory, not an entropy or temporal-error bound.
+
+## Source-relative external gas and adsorption energy
+
+`ClosedGasParcel::exchange_species_boundary_relative` accepts each species'
+complete integrated energy as `dm_i*h_i(T_original) + Q_relative_i`. The external
+owner supplies `Q_relative_i` directly from its original law; it is never
+recovered by subtracting rounded absolute stream totals. The fixed-volume gas
+endpoint solves the original final-mixture caloric increment against
+`sum(dm_i*R_i*T_original + Q_relative_i)`. Pressure-flow work is included once,
+without freezing heat capacity or discarding reaction energy. This API covers
+nonreacting species exchange with explicitly compatible source conventions.
+
+The complete retained catalog supports exact individual-species depletion and
+reentry. Total vacuum, unavailable or mismatched sources, unrepresentable mass
+changes and unsupported caloric states refuse atomically. Actual total mass,
+actual species changes versus requested transfers, and reconstructed inventory
+versus intended inventory are separately bounded. Zero-net-mass thermal
+exchange is permitted. Absolute reporting fields retain the original energy
+datum; their rounded subtraction is not the authoritative thermal residual.
+The legacy absolute-energy API remains available and cannot recover precision
+already lost when a caller constructed its inputs. The partial-enthalpy-change
+query evaluates the original NASA-9 source; it does not certify source-region
+continuity or invent a phase/latent reference convention.
+
+Single-site and competitive adsorption pass their original-law desorption
+enthalpy correction through this relative boundary. Finite solid caloric
+storage, binding heat, gross site/species inventories, equilibrium-crossing
+checks and combined entropy remain under their existing owners. The combined
+energy audit sums the gas and solid thermal residuals before large formation
+constants enter display reports. Source alignment and independently admitted
+binding enthalpy remain required; a reference shift cannot manufacture source
+precision or validate an empirical adsorption model.

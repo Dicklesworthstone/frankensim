@@ -383,11 +383,19 @@ fn prepare_adsorption(solid: &CompetitiveSolid, gas: &ClosedGasParcel,
 pub fn advance_candidate<'catalog>(solid: &CompetitiveSolid, gas: &ClosedGasParcel,
     catalog: &'catalog ThermochemicalGasModel, duration_s: f64, controls: CompetitiveSolve,
     mut cancelled: impl FnMut()->bool) -> Result<CompetitiveCandidate<'catalog>> {
-    let PreparedAdsorption { next,sites,before,transfers,sensible,heat,binding,iterations,.. } =
+    use crate::thermochemical_gas::energy::parcel::transfer::species::boundary::SpeciesBoundaryRelativeTransfer;
+    let PreparedAdsorption { next,sites,before,transfers,boundary,sensible,heat,binding,iterations } =
         prepare_adsorption(solid,gas,catalog,duration_s,controls,&mut cancelled)?;
     let (ts,tg)=(solid.temperature_k,gas.state().state().temperature);
     let temperature=next.temperature_k;
-    let candidate=gas.exchange_species_boundary(catalog,&transfers,GasSpeciesBoundarySolve {
+    // The source already separates each stream's old-gas partial enthalpy from
+    // its desorption-temperature correction. Preserve that small physical heat
+    // instead of recovering it from the rounded absolute-energy report rows.
+    let relative:Vec<_>=boundary.into_iter().map(|row|SpeciesBoundaryRelativeTransfer {
+        species:row.species,mass_into_gas_kg:row.net_mass_into_gas_kg,
+        relative_energy_into_gas_j:row.relative_energy_into_gas_j,
+    }).collect();
+    let candidate=gas.exchange_species_boundary_relative(catalog,&relative,GasSpeciesBoundarySolve {
         energy_tolerance_j:0.5*controls.gas.energy_tolerance_j,..controls.gas },&mut cancelled)?;
     let gas_next=candidate.gas(); let tg_next=gas_next.state().state().temperature;
     if (tg_next-tg).abs()>controls.maximum_temperature_change_k

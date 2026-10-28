@@ -1,7 +1,7 @@
 //! Manufactured references; no empirical adsorbent validation is asserted.
 use super::*;
 use crate::phase::{HeatCapacitySourceQuery, SolidLiquidPhase};
-use crate::thermochemical_gas::{energy::GasEnergySolve,tests::{model,point}};
+use crate::thermochemical_gas::{energy::GasEnergySolve,tests::{model,point,species_with_energy_reference}};
 use fs_evidence::ValidityDomain;
 use fs_matdb::{ClaimSet,InterpolationPolicy,MaterialStateId,PropertyClaim,PropertyKey,
     PropertyValue,Provenance,SelectionPolicy,UncertaintyModel};
@@ -26,7 +26,16 @@ fn chart(name:&str,cp:f64)->ResolvedHeatCapacityCurve {
     },SolidLiquidPhase::Solid,0.0,1e-6).unwrap()
 }
 pub(super) fn fixture(loadings:[f64;2])->(CompetitiveSolid,ClosedGasParcel,ThermochemicalGasModel) {
-    let catalog=model(vec![0.5,0.5],0.0); let dry=chart("shared dry skeleton",500.0);
+    fixture_with_reference(loadings,[0.0,0.0])
+}
+fn fixture_with_reference(loadings:[f64;2],reference:[f64;2])->(CompetitiveSolid,ClosedGasParcel,ThermochemicalGasModel) {
+    use fs_thermochem::{Composition,CompositionBasis,mixture::FrozenIdealGasMixtureModelV1};
+    let transport=model(vec![0.5,0.5],0.0).transport_materials().to_vec();
+    let catalog=ThermochemicalGasModel::new(FrozenIdealGasMixtureModelV1::new(vec![
+        species_with_energy_reference("A",0.028,3.5,0.0,reference[0]),
+        species_with_energy_reference("B",0.004,2.5,0.0,reference[1]),
+    ],Composition::new(CompositionBasis::MoleFraction,vec![0.5,0.5]).unwrap()).unwrap(),transport,None).unwrap();
+    let dry=chart("shared dry skeleton",500.0);
     let mut laws=Vec::new();
     for (name,mass,cp,affinity,heat) in [("A",0.028,3.5,2e-5,6000.0),("B",0.004,2.5,8e-5,9000.0)] {
         let species=SpeciesId::new(name).unwrap(); let bound=chart(name,cp*R/mass);
@@ -125,4 +134,43 @@ fn zero_duration_is_exact_and_advancing_temperature_is_checked() {
     assert_eq!(result.step().entropy_change_j_k,0.0);
     let mut c=controls(); c.maximum_temperature_change_k=0.0;
     assert!(advance_candidate(&solid,&gas,&catalog,0.001,c,||false).is_err());
+}
+
+#[test]
+fn coupled_uptake_preserves_pressure_work_and_small_desorption_heat_at_large_datums() {
+    // Both the gas and the bound-phase datum are rebuilt through their original
+    // source constructors. The finite binding heat must itself stay representable;
+    // no private source heat or retained catalog is overwritten to fake a shift.
+    let mut physical=None;
+    for reference in [[0.0,0.0],[1e14,-2e14]] {
+        let (solid,_,catalog)=fixture_with_reference([0.004,0.001],reference);
+        let gas=ClosedGasParcel::new(catalog.clone(),point(300.5,1e5),0.001).unwrap();
+        let saved=(solid.clone(),gas.clone());
+        let result=advance_candidate(&solid,&gas,&catalog,0.001,controls(),||false).unwrap();
+        let mut remaining_capacity=0.0; let mut pressure_work=0.0; let mut desorption_heat=0.0;
+        for (i,cp_r) in [3.5,2.5].into_iter().enumerate() {
+            let law=&solid.model.channels[i];
+            let dn=result.solid().moles[i]-solid.moles[i];
+            let remaining=gas.species_mass_kg(&law.species).unwrap()/law.molar_mass()-dn;
+            remaining_capacity+=remaining*(cp_r-1.0)*R;
+            pressure_work-=dn*R*300.5;
+            desorption_heat+=result.step().sites.gross_desorption_mol[i]*cp_r*R*(300.0-300.5);
+            near(result.gas().species_mass_kg(&law.species).unwrap(),remaining*law.molar_mass(),1e-13);
+        }
+        assert!(desorption_heat.abs()>1e-5 && desorption_heat.abs()<1e-3);
+        let expected=300.5+(pressure_work+desorption_heat)/remaining_capacity;
+        near(result.gas().state().state().temperature,expected,2e-10);
+        assert!(result.step().energy_residual_j.abs()<=controls().gas.energy_tolerance_j);
+        assert!(result.step().maximum_species_mass_residual_kg<=controls().gas.mass_tolerance_kg);
+        assert!(result.step().entropy_change_j_k>=-controls().entropy_tolerance_j_k);
+        let state=(result.step().sites.clone(),result.gas().state().state().temperature,result.solid().temperature_k());
+        if let Some((sites,temperature,solid_temperature))=&physical {
+            assert_eq!(&state.0,sites);
+            near(state.1,*temperature,2e-10);
+            // The admitted binding heat is a difference of source datums; allow
+            // its own finite f64 precision when checking the solid temperature.
+            near(state.2,*solid_temperature,2e-9);
+        } else { physical=Some(state); }
+        assert_eq!((solid,gas),saved);
+    }
 }

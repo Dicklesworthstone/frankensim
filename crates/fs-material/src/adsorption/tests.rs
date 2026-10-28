@@ -382,6 +382,57 @@ fn bound_caloric_datum_shift_is_canceled_by_the_explicit_alignment() {
 }
 
 #[test]
+fn finite_gas_uptake_retains_small_desorption_heat_under_species_reference_shifts() {
+    let mut physical = None;
+    for reference in [[0.0, 0.0], [1e14, -2e14]] {
+        let catalog = ThermochemicalGasModel::new(
+            FrozenIdealGasMixtureModelV1::new(
+                vec![
+                    species_with_energy_reference("A", MASS, 3.5, 0.0, reference[0]),
+                    species_with_energy_reference("B", 0.004, 2.5, 0.0, reference[1]),
+                ],
+                Composition::new(CompositionBasis::MoleFraction, vec![0.5, 0.5]).unwrap(),
+            ).unwrap(),
+            vec![transport("A", 1.7e-5, 0.025), transport("B", 2e-5, 0.15)],
+            None,
+        ).unwrap();
+        // Rebuild the binding from the shifted gas and the original material
+        // source; retain its representable binding heat and source identity.
+        let solid = AdsorptionSolid::try_new(adsorbent(&catalog, 2e-5, 0.4), 0.1, 0.005, T0).unwrap();
+        let gas = ClosedGasParcel::new(catalog.clone(), point(300.5, PRESSURE), 0.001).unwrap();
+        let saved = (solid.clone(), gas.clone());
+        let dt = 0.001;
+        let result = advance_candidate(&solid, &gas, &catalog, dt, controls(), || false).unwrap();
+        let report = result.step();
+        // Exact frozen Langmuir solution at b*p_A=1 and desorption rate 0.4/s.
+        let expected_sites = 0.025 + (0.005 - 0.025) * (-0.8_f64 * dt).exp();
+        near(report.adsorbed_moles[1], expected_sites, 2e-17);
+        let dn = report.adsorbed_moles[1] - report.adsorbed_moles[0];
+        let a = SpeciesId::new("A").unwrap();
+        let b = SpeciesId::new("B").unwrap();
+        let na = gas.species_mass_kg(&a).unwrap() / MASS - dn;
+        let nb = gas.species_mass_kg(&b).unwrap() / 0.004;
+        let desorption_heat = report.gross_desorption_mol * 3.5 * R * (T0 - 300.5);
+        assert!(desorption_heat.abs() > 1e-5 && desorption_heat.abs() < 1e-3);
+        let expected_gas = 300.5 + (-dn * R * 300.5 + desorption_heat) / (R * (2.5 * na + 1.5 * nb));
+        near(result.gas().state().state().temperature, expected_gas, 2e-10);
+        near(result.gas().species_mass_kg(&a).unwrap(), na * MASS, 1e-13);
+        near(result.gas().species_mass_kg(&b).unwrap(), gas.species_mass_kg(&b).unwrap(), 1e-13);
+        assert!(report.energy_residual_j.abs() <= controls().gas.energy_tolerance_j);
+        assert!(report.mass_residual_kg.abs() <= controls().gas.mass_tolerance_kg);
+        assert!(report.entropy_change_j_k >= -controls().entropy_tolerance_j_k);
+        let state = (report.adsorbed_moles, report.gross_adsorption_mol, report.gross_desorption_mol,
+            report.gas_temperature_k[1], report.solid_temperature_k[1]);
+        if let Some((moles, adsorption, desorption, gas_temperature, solid_temperature)) = physical {
+            assert_eq!((state.0, state.1, state.2), (moles, adsorption, desorption));
+            near(state.3, gas_temperature, 2e-10);
+            near(state.4, solid_temperature, 2e-9);
+        } else { physical = Some(state); }
+        assert_eq!((solid, gas), saved);
+    }
+}
+
+#[test]
 fn finite_bath_inventory_thermal_support_and_changed_sources_refuse_without_partial_updates() {
     let catalog = model(vec![0.5, 0.5], 0.0);
     let original_gas = gas(&catalog);

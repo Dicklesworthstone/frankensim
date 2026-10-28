@@ -38,7 +38,8 @@ use crate::thermochemical_gas::{
         parcel::{
             ClosedGasParcel,
             transfer::species::boundary::{
-                GasSpeciesBoundaryCandidate, GasSpeciesBoundarySolve, SpeciesBoundaryTransfer,
+                GasSpeciesBoundaryCandidate, GasSpeciesBoundarySolve, SpeciesBoundaryRelativeTransfer,
+                SpeciesBoundaryTransfer,
             },
         },
     },
@@ -1018,10 +1019,10 @@ pub fn advance_candidate<'catalog>(
     let incoming_h = catalog.species_specific_enthalpy_j_kg(&law.species, tg)? * mass;
     let outgoing_h = catalog.species_specific_enthalpy_j_kg(&law.species, ts)? * mass;
     let stream_difference = -law.gas_dh(ts, tg)?;
-    let gas_energy = finite(-dn * incoming_h + site.desorption * stream_difference)?;
+    let relative_energy = finite(site.desorption * stream_difference)?;
+    let gas_energy = finite(-dn * incoming_h + relative_energy)?;
     let thermal_heat = finite(
-        dn * (before.adsorption_heat_j_mol + law.gas_dh(ts, tg)?)
-            - site.desorption * stream_difference,
+        dn * (before.adsorption_heat_j_mol - stream_difference) - relative_energy,
     )?;
     let (temperature, sensible_changes, iterations) = thermal_endpoint(
         solid,
@@ -1042,10 +1043,12 @@ pub fn advance_candidate<'catalog>(
         temperature,
     )?;
     poll(&mut cancelled)?;
-    let transfer = SpeciesBoundaryTransfer {
+    // Keep the source's small nonisothermal desorption heat separate from the
+    // original gas partial-enthalpy datum throughout the finite gas inversion.
+    let transfer = SpeciesBoundaryRelativeTransfer {
         species: law.species.clone(),
         mass_into_gas_kg: -delta_mass,
-        energy_into_gas_j: gas_energy,
+        relative_energy_into_gas_j: relative_energy,
     };
     // Reserve half of the common balance budget for each finite energy owner.
     let gas_controls = GasSpeciesBoundarySolve {
@@ -1053,7 +1056,7 @@ pub fn advance_candidate<'catalog>(
         ..controls.gas
     };
     let candidate =
-        gas.exchange_species_boundary(catalog, &[transfer], gas_controls, &mut cancelled)?;
+        gas.exchange_species_boundary_relative(catalog, &[transfer], gas_controls, &mut cancelled)?;
     let gas_next = candidate.gas();
     let tg_next = gas_next.state().state().temperature;
     if (tg_next - tg).abs() > controls.maximum_temperature_change_k

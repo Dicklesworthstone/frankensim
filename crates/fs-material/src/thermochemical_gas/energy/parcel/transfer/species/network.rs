@@ -155,7 +155,7 @@ struct Budget {
 
 // The original incremental caloric owner cancels NASA formation constants
 // BEFORE evaluating changes. Rebuild the same gas parcel exactly once.
-fn relative_endpoint(
+pub(super) fn relative_endpoint(
     old: &ClosedGasParcel,
     model: ThermochemicalGasModel,
     mass: f64,
