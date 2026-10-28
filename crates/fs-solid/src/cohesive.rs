@@ -17,13 +17,14 @@
 //! reversals. Kinematics and bond topology stay fixed; no thermal contact,
 //! healing, friction, automatic bond creation, or calibrated print prediction
 //! is inferred. Reported energy is COHESIVE-ONLY straight-path work/storage/
-//! fracture, not a complete structural, actuator, thermal or entropy balance.
+//! fracture plus separately reported physical bond viscosity, not a complete
+//! structural, actuator, thermal or entropy balance.
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 
 use fs_exec::Cx;
-use fs_material::cohesive::{BilinearCohesive, CohesiveEnergy, CohesiveError, CohesivePoint, CohesiveStep};
+use fs_material::cohesive::{BilinearCohesive, CohesiveEnergy, CohesiveError, CohesivePoint, CohesiveRateStep};
 use fs_material::cohesive::source::ResolvedBilinearCohesive;
 use fs_material::state_point::MaterialStatePointError;
 use fs_matdb::MaterialStateId;
@@ -202,6 +203,9 @@ pub struct EquilibriumStep<'m, 'a> {
     pub operator_evaluations: usize,
     /// Area-integrated material energy, in joules (not the full solid balance).
     pub cohesive_energy_j: CohesiveEnergy,
+    /// Physical bond-viscosity loss, J, distinct from intrinsic fracture and
+    /// solver damping. Total cohesive path work is energy.work plus this loss.
+    pub viscous_dissipated_j: f64,
 }
 
 impl<'m, 'a> CohesiveState<'m, 'a> {
@@ -225,6 +229,29 @@ impl<'m, 'a> CohesiveState<'m, 'a> {
     /// whole load increment, leaving accepted physical history unchanged.
     pub fn solve_controlled<C: FnMut() -> bool>(&self, force_n: &[f64], prescribed_jumps_m: &[[f64; 3]],
         config: Config, cancelled: &mut C) -> Result<EquilibriumStep<'m, 'a>, Error> {
+        self.solve_interval(force_n, prescribed_jumps_m, None, config, cancelled)
+    }
+
+    /// Native implicit equilibrium with physical bond rates over an explicit dt.
+    /// Traction and tangent use the same accepted history and endpoint interval.
+    /// The jump path is straight at constant rate; subdivide actual reversals.
+    pub fn solve_over_time(&self, force_n: &[f64], prescribed_jumps_m: &[[f64; 3]],
+        dt_s: f64, config: Config, cx: &Cx<'_>) -> Result<EquilibriumStep<'m, 'a>, Error> {
+        self.solve_over_time_controlled(force_n, prescribed_jumps_m, dt_s, config,
+            &mut || cx.checkpoint().is_err())
+    }
+
+    /// Predicate form with the same atomicity and native cancellation points.
+    pub fn solve_over_time_controlled<C: FnMut() -> bool>(&self, force_n: &[f64],
+        prescribed_jumps_m: &[[f64; 3]], dt_s: f64, config: Config,
+        cancelled: &mut C) -> Result<EquilibriumStep<'m, 'a>, Error> {
+        positive(dt_s)?;
+        self.solve_interval(force_n, prescribed_jumps_m, Some(dt_s), config, cancelled)
+    }
+
+    fn solve_interval<C: FnMut() -> bool>(&self, force_n: &[f64],
+        prescribed_jumps_m: &[[f64; 3]], dt_s: Option<f64>, config: Config,
+        cancelled: &mut C) -> Result<EquilibriumStep<'m, 'a>, Error> {
         if cancelled() { return Err(Error::Cancelled); }
         let system = self.system;
         config.newton.validate().map_err(|e| Error::Solver(e.to_string()))?;
@@ -248,7 +275,7 @@ impl<'m, 'a> CohesiveState<'m, 'a> {
             if cancelled() { return Err(Error::Cancelled); }
             for &value in offset { finite(value)?; }
         }
-        let problem = Equilibrium { state: self, force: force_n, offsets: prescribed_jumps_m, config,
+        let problem = Equilibrium { state: self, force: force_n, offsets: prescribed_jumps_m, dt_s, config,
             cancelled: RefCell::new(cancelled), fault: RefCell::new(None), evaluations: Cell::new(0) };
         let solver = NewtonKrylovState::new(&problem, self.displacements.clone(), config.newton);
         problem.poll()?;
@@ -263,20 +290,23 @@ impl<'m, 'a> CohesiveState<'m, 'a> {
         if maximum_force_residual_n > config.force_tolerance_n { return Err(Error::ForceResidual(maximum_force_residual_n)); }
         let mut points = Vec::with_capacity(system.patches.len());
         let mut energy = CohesiveEnergy { work: 0.0, stored_change: 0.0, dissipated: 0.0, defect: 0.0 };
+        let mut viscous_dissipated_j = 0.0;
         for (index, patch) in system.patches.iter().enumerate() {
             problem.poll()?;
             let step = problem.patch_trial(index, &solver.x)?;
-            energy.work = finite(energy.work+patch.area_m2*step.energy.work)?;
-            energy.stored_change = finite(energy.stored_change+patch.area_m2*step.energy.stored_change)?;
-            energy.dissipated = finite(energy.dissipated+patch.area_m2*step.energy.dissipated)?;
-            points.push(step.point);
+            energy.work = finite(energy.work+patch.area_m2*step.equilibrium.energy.work)?;
+            energy.stored_change = finite(energy.stored_change+patch.area_m2*step.equilibrium.energy.stored_change)?;
+            energy.dissipated = finite(energy.dissipated+patch.area_m2*step.equilibrium.energy.dissipated)?;
+            viscous_dissipated_j = finite(viscous_dissipated_j+patch.area_m2*step.viscous_dissipated_j_m2)?;
+            points.push(step.equilibrium.point);
         }
+        finite(energy.work+viscous_dissipated_j)?;
         energy.defect = finite(energy.work-energy.stored_change-energy.dissipated)?;
         if energy.defect.abs() > config.total_cohesive_energy_tolerance_j { return Err(Error::CohesiveEnergyDefect(energy.defect)); }
         problem.poll()?;
         Ok(EquilibriumStep {
             state: Self { system, displacements: solver.x, points }, nonlinear: run.report,
-            maximum_force_residual_n, operator_evaluations: problem.evaluations.get(), cohesive_energy_j: energy,
+            maximum_force_residual_n, operator_evaluations: problem.evaluations.get(), cohesive_energy_j: energy, viscous_dissipated_j,
         })
     }
 }
@@ -285,6 +315,7 @@ struct Equilibrium<'p, 'm, 'a> {
     state: &'p CohesiveState<'m, 'a>,
     force: &'p [f64],
     offsets: &'p [[f64; 3]],
+    dt_s: Option<f64>,
     config: Config,
     cancelled: RefCell<&'p mut dyn FnMut() -> bool>,
     fault: RefCell<Option<Error>>,
@@ -302,11 +333,13 @@ impl<'p, 'm, 'a> Equilibrium<'p, 'm, 'a> {
         }
         Ok(())
     }
-    fn patch_trial(&self, index: usize, x: &[f64]) -> Result<CohesiveStep<'a>, Error> {
+    fn patch_trial(&self, index: usize, x: &[f64]) -> Result<CohesiveRateStep<'a>, Error> {
         let patch = &self.state.system.patches[index];
         let jump = patch.jump(x, self.offsets[index])?;
-        self.state.points[index].trial(jump, self.config.local_energy_tolerance_j_m2)
-            .map_err(|error| Error::Material { patch: patch.id, error })
+        match self.dt_s {
+            Some(dt) => self.state.points[index].trial_over_time(jump, dt, self.config.local_energy_tolerance_j_m2),
+            None => self.state.points[index].trial(jump, self.config.local_energy_tolerance_j_m2).map(Into::into),
+        }.map_err(|error| Error::Material { patch: patch.id, error })
     }
     fn action(&self, x: &[f64], direction: Option<&[f64]>, output: &mut [f64]) -> Result<(), Error> {
         self.poll()?;

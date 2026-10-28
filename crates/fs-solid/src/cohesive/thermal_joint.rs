@@ -105,6 +105,9 @@ pub struct Report {
     /// Constitutive densities integrated over each original member volume.
     pub bulk_energy_j: Energy,
     pub cohesive_energy_j: CohesiveEnergy,
+    /// Physical viscosity of the surviving bond, separate from intrinsic fracture
+    /// and bulk Maxwell loss. No heat partition or deposition is inferred.
+    pub bond_viscous_dissipated_j: f64,
     /// Endpoint-force quadrature F_new*(D_new-D_old), not exact actuator work.
     pub endpoint_work_j: f64,
     /// F_new*(g_new-g_old) minus exactly integrated cohesive path work. Signed
@@ -188,12 +191,12 @@ impl<'a> Joint<'a> {
         // This private adapter cannot replace laws, damage or geometric maps.
         let old=CohesiveState { system: &system,displacements: vec![self.bond.jump_m()[0]],
             points: vec![self.bond] };
-        let solved=old.solve_controlled(&[drive],&[[0.0;3]],config.equilibrium,cancelled)?;
+        let solved=old.solve_over_time_controlled(&[drive],&[[0.0;3]],dt,config.equilibrium,cancelled)?;
         let gap=solved.state.displacements_m()[0];
         // Preserve the original law lifetime; no second equilibrium is solved.
-        let bond=self.bond.trial([gap,0.0,0.0],config.equilibrium.local_energy_tolerance_j_m2)
+        let bond=self.bond.trial_over_time([gap,0.0,0.0],dt,config.equilibrium.local_energy_tolerance_j_m2)
             .map_err(|error| super::Error::Material { patch: self.interface,error })?;
-        if bond.point!=solved.state.points()[0] { return Err(Error::Invalid("inconsistent native cohesive endpoint")); }
+        if bond.equilibrium.point!=solved.state.points()[0] { return Err(Error::Invalid("inconsistent native cohesive endpoint")); }
         let force=finite(self.area_m2*bond.traction_pa[0])?;
         let mut next=self.clone();
         let mut energy=Energy::default();
@@ -218,21 +221,23 @@ impl<'a> Joint<'a> {
         }
         let extension_residual=finite(actual_extension-extension_m)?;
         if extension_residual.abs()>config.extension_tolerance_m { return Err(Error::Compatibility(extension_residual)); }
-        next.time_s=target_s; next.extension_m=extension_m; next.bond=bond.point;
+        next.time_s=target_s; next.extension_m=extension_m; next.bond=bond.equilibrium.point;
         let cohesive=solved.cohesive_energy_j;
+        let viscous=solved.viscous_dissipated_j;
+        let cohesive_work=finite(cohesive.work+viscous)?;
         let work=finite(force*(extension_m-self.extension_m))?;
-        let correction=finite(force*(gap-self.bond.jump_m()[0])-cohesive.work)?;
+        let correction=finite(force*(gap-self.bond.jump_m()[0])-cohesive_work)?;
         let storage=finite(next.stored_energy_j()-self.stored_energy_j())?;
         let residual=finite(storage+energy.dissipated+energy.numerical_dissipation
-            +cohesive.dissipated+correction-work-energy.thermal_strain_work-energy.modulus_work)?;
-        let conjugacy=finite(work-correction-energy.mechanical_work-cohesive.work)?;
+            +cohesive.dissipated+viscous+correction-work-energy.thermal_strain_work-energy.modulus_work)?;
+        let conjugacy=finite(work-correction-energy.mechanical_work-cohesive_work)?;
         let storage_check=finite(storage-energy.stored_change-cohesive.stored_change)?;
         for defect in [residual,conjugacy,storage_check] {
             if defect.abs()>config.energy_tolerance_j { return Err(Error::Energy(defect)); }
         }
         poll(cancelled)?;
         Ok((next,Report { force_n: force,opening_m: gap,extension_residual_m: extension_residual,
-            maximum_force_residual_n,bulk_energy_j: energy,cohesive_energy_j: cohesive,
+            maximum_force_residual_n,bulk_energy_j: energy,cohesive_energy_j: cohesive,bond_viscous_dissipated_j: viscous,
             endpoint_work_j: work,cohesive_work_correction_j: correction,energy_residual_j: residual,
             nonlinear: solved.nonlinear,operator_evaluations: solved.operator_evaluations,
             material_point_updates: self.members.len() }))

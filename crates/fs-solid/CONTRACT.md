@@ -2064,3 +2064,20 @@ Repeated eigenvalues define a mass-orthonormal subspace, not unique vectors.
 `tests/frame2d_modes.rs` covers exact massless beam-shape restoration and
 participation, full-mass orthogonality and reconstruction, free rigid motion,
 and an axially compressed column crossing its Euler instability.
+
+### Physical bond rates in native cohesive equilibrium
+
+`CohesiveState::solve_over_time[_controlled]` uses the same accepted history,
+Newton/FGMRES owner, work-conjugate jump/scatter map, force gate and atomic
+publication as the original equilibrium path. Explicit dt gives the physical
+constant jump rate; source-selected bond viscosity contributes to total endpoint
+traction and its complete consistent tangent. Untimed solves refuse viscous
+bonds. Intrinsic cohesive work/storage/fracture and physical viscous loss are
+reported separately; no structural stability or unique-root claim is added.
+
+The existing restrained thermal joint passes its actual interval to both bulk
+Maxwell and cohesive owners. Its total bond path work includes analytically
+integrated viscous loss; endpoint-force quadrature corrections and the combined
+energy audit use that same work. Bulk loss, intrinsic fracture and bond viscosity
+stay distinct. Loss is not silently deposited as heat, and source coefficients
+are not refreshed across a damaged bond history.

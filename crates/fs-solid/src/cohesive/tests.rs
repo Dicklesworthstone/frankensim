@@ -109,7 +109,7 @@ fn sparse_jump_scatter_is_work_conjugate_and_structural_tangent_is_consistent() 
     let system = CohesiveSystem::new(&elastic,vec![patch],budget()).unwrap();
     let state = system.bonded_state();
     let mut cancel = || false;
-    let problem = Equilibrium { state: &state, force: &[0.0;6], offsets: &[[0.0;3]], config: config(),
+    let problem = Equilibrium { state: &state, force: &[0.0;6], offsets: &[[0.0;3]], dt_s: None, config: config(),
         cancelled: RefCell::new(&mut cancel), fault: RefCell::new(None), evaluations: Cell::new(0) };
     let x = [0.0,0.0,0.0,0.002,0.001,0.0004];
     let mut jac = [0.0;6]; problem.action(&x,Some(&direction),&mut jac).unwrap();
@@ -261,4 +261,49 @@ fn anisotropic_mixed_mode_law_uses_native_equilibrium_and_retains_onset_history(
     assert!(state.points()[0].failed());
     close(state.points()[0].traction_pa()[0], -2e6, 1e-4);
     assert_eq!(state.points()[0].traction_pa()[1], 0.0);
+}
+
+#[test]
+fn timed_native_equilibrium_matches_kelvin_voigt_series_compliance() {
+    use fs_material::cohesive::CohesiveViscosity;
+    let law=law().with_viscosity(CohesiveViscosity::new(2e8,3e8,0.1).unwrap());
+    let area=1e-4;let stiffness=5e6;let elastic=Diagonal(vec![stiffness]);
+    let system=CohesiveSystem::new(&elastic,vec![patch(1,area,&law)],budget()).unwrap();
+    let initial=system.bonded_state();
+    for dt in [0.02,0.2,2.0] {
+        let force=1000.0;
+        let solved=initial.solve_over_time_controlled(&[force],&[[0.0;3]],dt,config(),&mut || false).unwrap();
+        let gap=force/(stiffness+area*(1e9+2e8/dt));
+        close(solved.state.displacements_m()[0],gap,1e-13);
+        close(solved.viscous_dissipated_j,area*2e8*gap*gap/dt,1e-12);
+        close(solved.cohesive_energy_j.dissipated,0.0,1e-14);
+        close(solved.cohesive_energy_j.work,0.5*area*1e9*gap*gap,1e-12);
+    }
+    assert!(matches!(initial.solve_controlled(&[1000.0],&[[0.0;3]],config(),&mut || false),Err(Error::Material { .. })));
+    assert!(initial.solve_over_time_controlled(&[1000.0],&[[0.0;3]],0.0,config(),&mut || false).is_err());
+    assert!(matches!(initial.solve_over_time_controlled(&[1000.0],&[[0.0;3]],0.2,config(),&mut || true),Err(Error::Cancelled)));
+    assert_eq!(initial.displacements_m(),&[0.0]);assert_eq!(initial.points()[0].damage(),0.0);
+}
+
+#[test]
+fn native_mixed_mode_viscous_endpoint_uses_full_coupled_tangent() {
+    use fs_material::cohesive::{CohesiveViscosity,mixed_mode::MixedModeParameters};
+    let law=BilinearCohesive::new_mixed_mode(MixedModeParameters {
+        normal_stiffness_pa_m:1e9,tangential_stiffness_pa_m:2e9,
+        normal_strength_pa:1e6,tangential_strength_pa:1.6e6,
+        mode_i_fracture_energy_j_m2:2000.0,mode_ii_fracture_energy_j_m2:4500.0,bk_exponent:1.5 },2e9,0.02).unwrap()
+        .with_viscosity(CohesiveViscosity::new(2e8,3e8,0.1).unwrap());
+    let area=1e-4;let stiffness=5e6;let elastic=Diagonal(vec![stiffness;3]);
+    let patch=CohesivePatch::new(1,area,&law,(0..3).map(|i|JumpTerm {
+        dof:i,local:core::array::from_fn(|j|if i==j { 1.0 } else { 0.0 }) }).collect()).unwrap();
+    let system=CohesiveSystem::new(&elastic,vec![patch],budget()).unwrap();
+    let target=[0.0016,0.0008,0.0004];let dt=0.3;
+    let reference=law.bonded_point().trial_over_time(target,dt,1e-7).unwrap();
+    let force=core::array::from_fn::<_,3,_>(|i|stiffness*target[i]+area*reference.traction_pa[i]);
+    let mut cfg=config();cfg.newton.absolute_tolerance=1e-11;cfg.newton.relative_tolerance=1e-15;
+    let solved=system.bonded_state().solve_over_time_controlled(&force,&[[0.0;3]],dt,cfg,&mut ||false).unwrap();
+    for i in 0..3 { close(solved.state.displacements_m()[i],target[i],1e-12); }
+    close(solved.viscous_dissipated_j,area*reference.viscous_dissipated_j_m2,1e-10);
+    assert!(solved.state.points()[0].damage()>0.0);
+    assert!(solved.maximum_force_residual_n<cfg.force_tolerance_n);
 }

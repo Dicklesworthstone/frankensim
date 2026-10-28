@@ -117,3 +117,34 @@ fn checkpoint_replay_and_nonuniform_member_temperatures_preserve_compatibility()
     near(extension,0.0,config().extension_tolerance_m);
     for member in a.members().values() { near(member.reference_area_m2()*member.point().stress_pa(),ar.force_n,1e-7); }
 }
+
+#[test]
+fn thermal_joint_uses_real_interval_for_bond_viscosity_and_energy() {
+    use fs_material::cohesive::CohesiveViscosity;
+    let material=material(vec![]);let law=bond().with_viscosity(CohesiveViscosity::new(1e9,1e9,0.1).unwrap());
+    let initial=joint(&material,&law);let temperatures=BTreeMap::from([(1,480.0)]);
+    for dt in [0.1,1.0,10.0] {
+        let (next,r)=initial.advance_controlled(dt,0.0,&temperatures,config(),&mut ||false).unwrap();
+        let expected_gap=2e-5*1e7/(1e7+1e-4*(1e10+1e9/dt));
+        near(r.opening_m,expected_gap,1e-13);
+        near(r.force_n,1e-4*(1e10+1e9/dt)*expected_gap,1e-7);
+        near(r.bond_viscous_dissipated_j,1e-4*1e9*expected_gap*expected_gap/dt,1e-12);
+        near(r.cohesive_energy_j.dissipated,0.0,1e-14);
+        assert_eq!(next.bond().damage(),0.0);
+        assert!(r.energy_residual_j.abs()<config().energy_tolerance_j);
+    }
+}
+
+#[test]
+fn thermal_joint_fracture_accounts_viscous_path_loss_before_failure() {
+    use fs_material::cohesive::CohesiveViscosity;
+    let material=material(vec![(2e8,0.4)]);let law=bond().with_viscosity(CohesiveViscosity::new(1e8,1e8,0.1).unwrap());
+    let initial=joint(&material,&law);
+    let (failed,r)=initial.advance_controlled(1.0,0.0,&BTreeMap::from([(1,300.0)]),config(),&mut ||false).unwrap();
+    assert!(failed.bond().failed());assert!(r.bond_viscous_dissipated_j>0.0);
+    near(r.force_n,0.0,1e-7);near(r.cohesive_energy_j.dissipated,0.001,1e-10);
+    assert!(r.energy_residual_j.abs()<config().energy_tolerance_j);
+    let (reclosed,r)=failed.advance_controlled(2.0,-1e-5,&BTreeMap::from([(1,500.0)]),config(),&mut ||false).unwrap();
+    assert!(reclosed.bond().failed());assert_eq!(r.bond_viscous_dissipated_j,0.0);
+    assert_eq!(r.cohesive_energy_j.dissipated,0.0);
+}
