@@ -9,6 +9,13 @@
 //! representation with counter-based phases (caller-seeded frequency-line identities,
 //! logical identity — no thread dependence).
 
+/// Recorded acceleration histories and physically normalized motion suites.
+pub mod recorded;
+pub use recorded::{
+    AccelerationUnit, BilinearIdaModel, GroundMotionRecord, GroundMotionRecordError, IdaIntensity,
+    RecordedIda, ida_fragility_from_records,
+};
+
 /// The Kanai–Tajimi power spectral density: filtered white noise
 /// through the soil layer (`wg`, `zg`) at intensity `s0`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -452,7 +459,7 @@ pub fn bilinear_peak_ductility(
 /// intensity level over a motion suite.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FragilityPoint {
-    /// Intensity measure (record scale factor).
+    /// Intensity ordinate; a record scale factor for the synthetic-suite APIs.
     pub im: f64,
     /// Empirical exceedance probability.
     pub p: f64,

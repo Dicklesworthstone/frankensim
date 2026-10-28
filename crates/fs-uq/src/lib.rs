@@ -97,7 +97,9 @@ pub use kl::{CovarianceKind, KlExpansion};
 pub use mlmc::{MlmcReport, mlmc_estimate};
 pub use pce::{PceModel, fit_pce};
 pub use seismic::{
-    FragilityPoint, GroundMotionSampling, KanaiTajimi, bilinear_peak_ductility, cqc, ida_fragility,
+    AccelerationUnit, BilinearIdaModel, FragilityPoint, GroundMotionRecord,
+    GroundMotionRecordError, GroundMotionSampling, IdaIntensity, KanaiTajimi, RecordedIda,
+    bilinear_peak_ductility, cqc, ida_fragility, ida_fragility_from_records,
     ida_fragility_with_sampling, sdof_peak, srss,
 };
 

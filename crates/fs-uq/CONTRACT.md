@@ -397,8 +397,10 @@ record refinement, physical unit/intensity scaling, and the actual IDA route.
 - The IDA workhorse is a bilinear SDOF: the fiber-frame nonlinear
   time-history path arrives with fs-solid-advanced (tfz.14, in
   flight) — the fragility MACHINERY is what this slice ships.
-- Ground motions are Kanai–Tajimi synthetic; recorded-suite ingestion
-  rides fs-scenario.
+- Recorded-motion ingestion preserves supplied acceleration and its clock;
+  it does not perform instrument/baseline correction, filtering, resampling,
+  multi-component rotation, or automatic free-decay extension. Recorded and
+  synthetic responses share the same temporal-resolution limits.
 - The CS applies to BOUNDED [0,1] outcomes via Hoeffding
   sub-Gaussianity; release and debug builds both refuse non-finite or
   out-of-range samples before updating the process. The target half-width must
@@ -422,3 +424,38 @@ record refinement, physical unit/intensity scaling, and the actual IDA route.
   machinery is thin or staged for those complete routes; neither one simulated
   trajectory nor an empirical estimator alone validates the model, regime,
   population transfer, or rare-event tail.
+
+## Recorded earthquake suites and physical IDA ordinates
+
+`GroundMotionRecord` admits uniformly sampled acceleration with explicit
+SI, centimetre/second-squared, or standard-gravity units. Samples are converted
+to SI once; signs, the native time step, and N-1 integration intervals remain.
+`from_peer_at2` reads supplied PEER/Pacific Engineering four-header-line
+acceleration text in g, retaining the event/station/component description.
+It accepts labelled NPTS/DT in seconds and E/D exponents, checks the declared
+sample budget before allocating, and refuses unsupported units, nonfinite
+samples, and count mismatches. Format reference:
+<https://opensees.berkeley.edu/OpenSees/manuals/usermanual/761.htm>.
+
+`ida_fragility_from_records` routes each record through the original implicit
+bilinear SDOF at that record's own clock. `BilinearIdaModel` supplies the
+initial frequency/damping, yield displacement, hardening ratio and strict
+ductility-exceedance threshold. `IdaIntensity` selects a dimensionless
+multiplier, target PGA, or target pseudo-spectral acceleration (PSA).
+PGA/PSA targets are in m/s²; PSA is omega² times peak relative displacement
+at the explicitly declared reference period/damping, not peak absolute
+oscillator acceleration. Each original intensity is prepared once, and each
+physical target scales its record by target/original intensity without
+allocating a scaled history. Zero-intensity records refuse normalization.
+
+`RecordedIda` retains the original intensities, intensity-by-record scales
+and nonlinear demands, and empirical exceedance fractions. Caller ordering
+is preserved; no monotonic response is imposed. The result does not establish
+a population sampling law, a confidence sequence, or fiber-frame fragility.
+Response starts at rest and covers the supplied duration; a desired decay
+tail must be supplied explicitly, and clock refinement remains necessary.
+
+`tests/recorded_seismic.rs` checks format/unit admission, distinct clocks
+against independent one-interval equilibria, nonlinear PGA/polarity
+equivalence, physical PSA-normalized elastic demands, exact compatibility
+with supplied synthetic suites, and an AT2-to-yielded-response SI calculation.
