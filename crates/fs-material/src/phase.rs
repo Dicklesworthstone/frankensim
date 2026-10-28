@@ -18,6 +18,424 @@ pub mod conductivity;
 pub mod transport;
 /// Source-backed solid/liquid Cp branches joined by one sharp fusion plateau.
 pub mod melting;
+/// Fixed-mass calorimetry with explicit constant-pressure boundary work.
+pub mod isobaric {
+    //! Fixed-mass calorimetry at a caller-declared constant absolute pressure.
+    //!
+    //! This is a quasistatic, spatially uniform reference with pressure-volume work
+    //! as its only mechanical work. It uses the original equilibrium phase chart;
+    //! it does not supply heat transfer, pressure evolution or moving geometry.
+
+    use super::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState, PhaseStateError};
+
+    /// One proposed isobaric heat step; the caller decides whether to accept it.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct IsobaricHeatStep {
+        /// Original accepted state, including material and curve identities.
+        pub initial: EquilibriumPhaseState,
+        /// Proposed state on the same chart; no accepted state is mutated.
+        pub state: EquilibriumPhaseState,
+        /// Invariant specimen mass [kg].
+        pub mass_kg: f64,
+        /// Declared constant absolute pressure [Pa].
+        pub pressure_pa: f64,
+        /// Signed requested heat into the specimen [J].
+        pub supplied_heat_j: f64,
+        /// Initial volume from the fixed mass and original state density [m3].
+        pub initial_volume_m3: f64,
+        /// Final volume from that same mass and proposed state density [m3].
+        pub final_volume_m3: f64,
+        /// Signed volume change [m3], evaluated using relative density change to
+        /// retain small expansion/contraction instead of subtracting large volumes.
+        pub volume_change_m3: f64,
+        /// Represented enthalpy change m*(h_final-h_initial) [J]. Sensible and
+        /// latent energy already belong to this single caloric account.
+        pub enthalpy_change_j: f64,
+        /// Work delivered by the specimen to its surroundings, p*delta_V [J].
+        /// Expansion is positive; contraction returns work to the specimen.
+        pub boundary_work_j: f64,
+        /// Internal-energy change delta_H - p*delta_V [J]. No absolute enthalpy
+        /// datum or separate latent-energy term is added to this difference.
+        pub internal_energy_change_j: f64,
+        /// Requested heat minus the represented enthalpy change [J]. This exposes
+        /// floating-point step quantization, not source or integration uncertainty.
+        /// A caller must check it against the caller's energy-accuracy requirement.
+        pub heat_residual_j: f64,
+    }
+
+    impl EquilibriumEnthalpyPhaseCurve {
+        /// Advance a fixed mass by signed heat at a declared constant pressure.
+        ///
+        /// For this closed, quasistatic reference, heat equals the change of
+        /// enthalpy. The original chart supplies phase and density, including its
+        /// additive-specific-volume rule through coexistence. Pressure-volume work
+        /// is positive outwards, so delta_U = delta_H - p*delta_V. Cooling follows
+        /// the same admitted equilibrium chart; this does not add hysteresis,
+        /// nucleation, stress locking or a resolidification mechanics law.
+        ///
+        /// The caller must supply the absolute pressure at which BOTH caloric and
+        /// density data apply. The generic chart does not discover or verify that
+        /// pressure from material names, query axes or unknown-condition flags.
+        /// Source-backed callers retain and check their original source receipts.
+        /// No kinetic, potential, elastic, chemical or other work account is added.
+        ///
+        /// Arithmetic uses enthalpy differences before multiplying by mass, avoiding
+        /// cancellation or overflow from large arbitrary enthalpy datums. Relative
+        /// density differences preserve small pressure work. The reported volumes
+        /// are separately rounded; their direct subtraction can lose that change.
+        /// A nonzero heat step completely lost at the chosen enthalpy datum refuses.
+        /// Other representational heat residuals are returned explicitly for the
+        /// caller's accuracy decision. This method neither chooses a time step nor
+        /// claims a heat-transfer or material-uncertainty bound.
+        ///
+        /// No extrapolation, state mutation or allocation is performed. Invalid
+        /// mass/pressure/heat, unrepresentable required products and nonfinite
+        /// energy differences refuse before a complete proposal is returned.
+        pub fn advance_isobaric_heat(
+            &self,
+            current: EquilibriumPhaseState,
+            mass_kg: f64,
+            pressure_pa: f64,
+            supplied_heat_j: f64,
+        ) -> Result<IsobaricHeatStep, PhaseStateError> {
+            let invalid = |what| PhaseStateError::InvalidIsobaricHeatStep { what };
+            if !mass_kg.is_finite() || mass_kg <= 0.0 {
+                return Err(invalid("mass must be finite and positive"));
+            }
+            if !pressure_pa.is_finite() || pressure_pa < 0.0 {
+                return Err(invalid("absolute pressure must be finite and nonnegative"));
+            }
+            if !supplied_heat_j.is_finite() {
+                return Err(invalid("supplied heat must be finite"));
+            }
+            let dh_requested = supplied_heat_j / mass_kg;
+            if !dh_requested.is_finite() || (supplied_heat_j != 0.0 && dh_requested == 0.0) {
+                return Err(invalid("specific heat increment is not representable"));
+            }
+            let state = self.advance_specific_energy(current, dh_requested)?;
+            let dh = state.specific_enthalpy_j_kg() - current.specific_enthalpy_j_kg();
+            if !dh.is_finite() || (supplied_heat_j != 0.0 && dh == 0.0) {
+                return Err(invalid(
+                    "heat increment is lost at the chosen enthalpy datum",
+                ));
+            }
+            let enthalpy_change_j = mass_kg * dh;
+            if !enthalpy_change_j.is_finite() || (dh != 0.0 && enthalpy_change_j == 0.0) {
+                return Err(invalid("represented enthalpy change is not representable"));
+            }
+            let initial_density = current.bulk_density_kg_m3();
+            let final_density = state.bulk_density_kg_m3();
+            let initial_volume_m3 = mass_kg / initial_density;
+            let final_volume_m3 = mass_kg / final_density;
+            if !initial_volume_m3.is_finite()
+                || initial_volume_m3 <= 0.0
+                || !final_volume_m3.is_finite()
+                || final_volume_m3 <= 0.0
+            {
+                return Err(invalid("fixed-mass volumes must be finite and positive"));
+            }
+            // Delta V = max(V0,V1)*(rho0-rho1)/max(rho0,rho1). The relative
+            // factor is bounded by one and avoids subtracting nearly equal volumes.
+            let density_change = initial_density - final_density;
+            let relative_change = density_change / initial_density.max(final_density);
+            let volume_change_m3 = initial_volume_m3.max(final_volume_m3) * relative_change;
+            if !volume_change_m3.is_finite() || (density_change != 0.0 && volume_change_m3 == 0.0) {
+                return Err(invalid("volume change is not representable"));
+            }
+            let boundary_work_j = pressure_pa * volume_change_m3;
+            if !boundary_work_j.is_finite()
+                || (pressure_pa != 0.0 && volume_change_m3 != 0.0 && boundary_work_j == 0.0)
+            {
+                return Err(invalid("pressure-volume work is not representable"));
+            }
+            let internal_energy_change_j = enthalpy_change_j - boundary_work_j;
+            let heat_residual_j = supplied_heat_j - enthalpy_change_j;
+            if !internal_energy_change_j.is_finite() || !heat_residual_j.is_finite() {
+                return Err(invalid("energy differences are not representable"));
+            }
+            Ok(IsobaricHeatStep {
+                initial: current,
+                state,
+                mass_kg,
+                pressure_pa,
+                supplied_heat_j,
+                initial_volume_m3,
+                final_volume_m3,
+                volume_change_m3,
+                enthalpy_change_j,
+                boundary_work_j,
+                internal_energy_change_j,
+                heat_residual_j,
+            })
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::phase::{EnthalpyPhaseKnot, SolidLiquidPhase};
+        use fs_blake3::ContentHash;
+
+        fn near(actual: f64, expected: f64) {
+            assert!(
+                (actual - expected).abs() <= 2e-14 * expected.abs().max(1.0),
+                "{actual} != {expected}"
+            );
+        }
+
+        fn curve(datum: f64) -> EquilibriumEnthalpyPhaseCurve {
+            EquilibriumEnthalpyPhaseCurve::try_new(
+                ContentHash([0x61; 32]),
+                [
+                    (0.0, 300.0, 0.0, 1000.0),
+                    (131_072.0, 400.0, 0.0, 950.0),
+                    (393_216.0, 400.0, 1.0, 800.0),
+                    (655_360.0, 500.0, 1.0, 750.0),
+                ]
+                .map(
+                    |(h, temperature_k, liquid_mass_fraction, bulk_density_kg_m3)| EnthalpyPhaseKnot {
+                        specific_enthalpy_j_kg: h + datum,
+                        temperature_k,
+                        liquid_mass_fraction,
+                        bulk_density_kg_m3,
+                    },
+                )
+                .to_vec(),
+            )
+            .unwrap()
+        }
+
+        fn single(h: [f64; 2], rho: [f64; 2]) -> EquilibriumEnthalpyPhaseCurve {
+            EquilibriumEnthalpyPhaseCurve::try_single_phase(
+                ContentHash([0x62; 32]),
+                SolidLiquidPhase::Solid,
+                vec![
+                    EnthalpyPhaseKnot {
+                        specific_enthalpy_j_kg: h[0],
+                        temperature_k: 300.0,
+                        liquid_mass_fraction: 0.0,
+                        bulk_density_kg_m3: rho[0],
+                    },
+                    EnthalpyPhaseKnot {
+                        specific_enthalpy_j_kg: h[1],
+                        temperature_k: 400.0,
+                        liquid_mass_fraction: 0.0,
+                        bulk_density_kg_m3: rho[1],
+                    },
+                ],
+            )
+            .unwrap()
+        }
+
+        #[test]
+        fn g1_latent_heat_and_specific_volume_drive_one_isobaric_energy_account() {
+            let chart = curve(0.0);
+            let solid = chart.state_at_specific_enthalpy(131_072.0).unwrap();
+            let half = chart
+                .advance_isobaric_heat(solid, 2.0, 200_000.0, 262_144.0)
+                .unwrap();
+            assert_eq!(half.state.temperature_k(), 400.0);
+            assert_eq!(half.state.liquid_mass_fraction(), 0.5);
+            near(half.initial_volume_m3, 2.0 / 950.0);
+            near(half.final_volume_m3, 1.0 / 950.0 + 1.0 / 800.0);
+            near(half.volume_change_m3, 1.0 / 800.0 - 1.0 / 950.0);
+            near(
+                half.boundary_work_j,
+                200_000.0 * (1.0 / 800.0 - 1.0 / 950.0),
+            );
+            near(half.enthalpy_change_j, 262_144.0);
+            near(
+                half.internal_energy_change_j + half.boundary_work_j,
+                half.enthalpy_change_j,
+            );
+            assert_eq!(half.heat_residual_j, 0.0);
+            assert_eq!(
+                half.state.phase_curve_identity(),
+                solid.phase_curve_identity()
+            );
+            assert_eq!(
+                half.state.material_card_identity(),
+                solid.material_card_identity()
+            );
+        }
+
+        #[test]
+        fn g3_melt_cool_cycle_preserves_mass_and_reverses_work_and_energy() {
+            let chart = curve(0.0);
+            let initial = chart.state_at_specific_enthalpy(0.0).unwrap();
+            let hot = chart
+                .advance_isobaric_heat(initial, 2.0, 100_000.0, 1_310_720.0)
+                .unwrap();
+            assert_eq!(hot.state.phase(), SolidLiquidPhase::Liquid);
+            near(hot.final_volume_m3, 2.0 / 750.0);
+            let cold = chart
+                .advance_isobaric_heat(hot.state, 2.0, 100_000.0, -1_310_720.0)
+                .unwrap();
+            assert_eq!(cold.state, initial);
+            assert_eq!(cold.enthalpy_change_j, -hot.enthalpy_change_j);
+            assert_eq!(cold.volume_change_m3, -hot.volume_change_m3);
+            assert_eq!(cold.boundary_work_j, -hot.boundary_work_j);
+            assert_eq!(cold.internal_energy_change_j, -hot.internal_energy_change_j);
+            let unchanged = chart
+                .advance_isobaric_heat(initial, 2.0, 100_000.0, 0.0)
+                .unwrap();
+            assert_eq!(unchanged.state, initial);
+            assert_eq!(unchanged.boundary_work_j, 0.0);
+            assert_eq!(unchanged.internal_energy_change_j, 0.0);
+            let vacuum = chart
+                .advance_isobaric_heat(initial, 2.0, 0.0, 262_144.0)
+                .unwrap();
+            assert_eq!(vacuum.boundary_work_j, 0.0);
+            assert_eq!(vacuum.internal_energy_change_j, vacuum.enthalpy_change_j);
+        }
+
+        #[test]
+        fn g3_enthalpy_datum_shifts_do_not_change_heat_volume_or_pressure_work() {
+            let ordinary = curve(0.0);
+            let datum = 2.0_f64.powi(60);
+            let shifted = curve(datum);
+            let a = ordinary
+                .advance_isobaric_heat(
+                    ordinary.state_at_specific_enthalpy(0.0).unwrap(),
+                    2.0,
+                    1e5,
+                    524_288.0,
+                )
+                .unwrap();
+            let b = shifted
+                .advance_isobaric_heat(
+                    shifted.state_at_specific_enthalpy(datum).unwrap(),
+                    2.0,
+                    1e5,
+                    524_288.0,
+                )
+                .unwrap();
+            assert_eq!(a.state.temperature_k(), b.state.temperature_k());
+            assert_eq!(
+                a.state.liquid_mass_fraction(),
+                b.state.liquid_mass_fraction()
+            );
+            assert_eq!(a.enthalpy_change_j, b.enthalpy_change_j);
+            assert_eq!(a.boundary_work_j, b.boundary_work_j);
+            assert_eq!(a.internal_energy_change_j, b.internal_energy_change_j);
+            let h0 = 1e308;
+            let h1 = h0 + 4e292;
+            let chart = single([h0, h1], [1000.0; 2]);
+            let heat = 2.0 * (h1 - h0);
+            assert!(!(2.0 * h0).is_finite());
+            let result = chart
+                .advance_isobaric_heat(
+                    chart.state_at_specific_enthalpy(h0).unwrap(),
+                    2.0,
+                    1e5,
+                    heat,
+                )
+                .unwrap();
+            assert_eq!(result.enthalpy_change_j, heat);
+            assert_eq!(result.internal_energy_change_j, heat);
+        }
+
+        #[test]
+        fn g1_small_density_changes_retain_pressure_work_beyond_rounded_volume_subtraction() {
+            let epsilon = f64::EPSILON;
+            let chart = single([0.0, 1.0], [1.0, 1.0 + epsilon]);
+            let result = chart
+                .advance_isobaric_heat(
+                    chart.state_at_specific_enthalpy(0.0).unwrap(),
+                    1e20,
+                    1e5,
+                    1e20,
+                )
+                .unwrap();
+            let expected_delta_v = -1e20 * (epsilon / (1.0 + epsilon));
+            near(result.volume_change_m3, expected_delta_v);
+            near(result.boundary_work_j, 1e5 * expected_delta_v);
+            assert!(
+                (result.volume_change_m3 - (result.final_volume_m3 - result.initial_volume_m3)).abs()
+                    > 5000.0
+            );
+            assert!(result.boundary_work_j < 0.0);
+            assert!(result.internal_energy_change_j > result.enthalpy_change_j);
+        }
+
+        #[test]
+        fn g0_heat_rounding_is_visible_and_fully_lost_steps_refuse() {
+            let datum = 2.0_f64.powi(60);
+            let chart = single([datum, datum + 4096.0], [1000.0; 2]);
+            let initial = chart.state_at_specific_enthalpy(datum).unwrap();
+            let result = chart
+                .advance_isobaric_heat(initial, 1.0, 1e5, 300.0)
+                .unwrap();
+            assert_eq!(result.enthalpy_change_j, 256.0);
+            assert_eq!(result.heat_residual_j, 44.0);
+            assert_eq!(result.internal_energy_change_j, 256.0);
+            assert!(chart.advance_isobaric_heat(initial, 1.0, 1e5, 1.0).is_err());
+            assert!(
+                chart
+                    .advance_isobaric_heat(initial, f64::MAX, 1e5, f64::from_bits(1))
+                    .is_err()
+            );
+        }
+
+        #[test]
+        fn g0_invalid_inputs_wrong_curve_and_outside_domain_refuse_transactionally() {
+            let chart = curve(0.0);
+            let initial = chart.state_at_specific_enthalpy(0.0).unwrap();
+            for mass in [0.0, -1.0, f64::INFINITY, f64::NAN] {
+                assert!(
+                    chart
+                        .advance_isobaric_heat(initial, mass, 1e5, 1.0)
+                        .is_err()
+                );
+            }
+            for pressure in [-1.0, f64::INFINITY, f64::NAN] {
+                assert!(
+                    chart
+                        .advance_isobaric_heat(initial, 1.0, pressure, 1.0)
+                        .is_err()
+                );
+            }
+            for heat in [f64::INFINITY, f64::NAN, -1.0, 700_000.0] {
+                assert!(
+                    chart
+                        .advance_isobaric_heat(initial, 1.0, 1e5, heat)
+                        .is_err()
+                );
+            }
+            assert_eq!(
+                curve(1.0).advance_isobaric_heat(initial, 1.0, 1e5, 1.0),
+                Err(PhaseStateError::StateCurveMismatch)
+            );
+            assert_eq!(initial, chart.state_at_specific_enthalpy(0.0).unwrap());
+        }
+
+        #[test]
+        fn g0_unrepresentable_volumes_work_and_internal_energy_refuse() {
+            let chart = single([0.0, 1.0], [f64::MIN_POSITIVE; 2]);
+            let state = chart.state_at_specific_enthalpy(0.0).unwrap();
+            assert!(
+                chart
+                    .advance_isobaric_heat(state, f64::MAX, 1.0, 0.0)
+                    .is_err()
+            );
+            let chart = single([0.0, 1e-300], [1.0, 0.5]);
+            let state = chart.state_at_specific_enthalpy(0.0).unwrap();
+            assert!(
+                chart
+                    .advance_isobaric_heat(state, 1e300, 1e100, 1.0)
+                    .is_err()
+            );
+            let energy = 0.75 * f64::MAX;
+            let chart = single([0.0, energy], [0.5, 1.0]);
+            let state = chart.state_at_specific_enthalpy(0.0).unwrap();
+            assert!(
+                chart
+                    .advance_isobaric_heat(state, 1.0, energy, energy)
+                    .is_err()
+            );
+        }
+    }
+}
 
 // Relative equilibrium entropy uses this same admitted h -> T chart.
 mod entropy;
@@ -1063,6 +1481,11 @@ pub enum PhaseStateError {
         lower_j_kg: f64,
         /// Admitted upper endpoint [J/kg].
         upper_j_kg: f64,
+    },
+    /// A proposed constant-pressure heat step violates its physical or numerical domain.
+    InvalidIsobaricHeatStep {
+        /// Failed step invariant.
+        what: &'static str,
     },
     /// A state from a different phase curve was supplied to an update.
     StateCurveMismatch,
