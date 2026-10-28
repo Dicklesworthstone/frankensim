@@ -32,6 +32,9 @@
 //! physical models. Each file keeps its mechanics clock and complete duration;
 //! explicit decimation and pure pressure delays align them at one output clock.
 //! See `examples/ENSEMBLE_PERFORMANCES.md` for timing and observer assumptions.
+//! Repeated `--lip FILE` and `--voice FILE` also compose the standalone lip and
+//! glottal pressure producers, including their original gas-source bindings,
+//! mechanics substeps and microphone delays, into that same ensemble.
 //!
 //! `music_render wind INPUT.performance OUT.wav [--block N] [--decimate] [--self-contained]`
 //! renders authored reed primitives, segmented ducts and pressure phrases.

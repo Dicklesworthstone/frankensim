@@ -103,6 +103,8 @@ pub struct PanelMode {
 /// Typed refusals.
 #[derive(Debug)]
 pub enum SpeakerError {
+    /// The shared material owner rejected an inconsistent gas snapshot.
+    Gas(fs_material::MaterialError),
     /// Bad card/box parameter, by name.
     Invalid {
         /// What.
@@ -176,7 +178,10 @@ impl TsDriver {
     /// room dry-air state.
     ///
     /// # Errors
-    /// The same card/box/panel and pHS refusals as [`Self::new`].
+    /// The same card/box/panel and pHS refusals as [`Self::new`], plus the
+    /// shared gas-state coherence check. Changing a public pressure,
+    /// temperature or composition-derived coefficient requires reevaluating
+    /// the material law before constructing the driver.
     pub fn new_with_gas(
         card: TsCard,
         box_volume_m3: Option<f64>,
@@ -184,6 +189,7 @@ impl TsDriver {
         gas: GasState,
     ) -> Result<Self, SpeakerError> {
         card.validate()?;
+        gas.validate_coherence().map_err(SpeakerError::Gas)?;
         if let Some(v) = box_volume_m3
             && !(v.is_finite() && v > 0.0)
         {
@@ -654,5 +660,33 @@ mod speaker_tests {
             assert!((supplied_full - supplied_half).abs() <= 1e-12 * supplied_full.abs());
             assert!((loss_full - loss_half).abs() <= 1e-12 * loss_full.abs());
         }
+    }
+
+    #[test]
+    fn gas_changes_must_reach_the_same_electrical_mechanical_acoustic_state() {
+        // G0: stale pressure or transport must not silently coexist with the
+        // old density/sound speed in cabinet storage and radiated pressure.
+        let original = declared_air();
+        let corruptions: [fn(&mut GasState); 5] = [
+            |gas| gas.pressure *= 2.0,
+            |gas| gas.temperature *= 1.1,
+            |gas| gas.density *= 2.0,
+            |gas| gas.sound_speed *= 1.1,
+            |gas| gas.dynamic_viscosity *= 2.0,
+        ];
+        for corrupt in corruptions {
+            let mut stale = original;
+            corrupt(&mut stale);
+            assert!(matches!(
+                TsDriver::new_with_gas(card(), Some(0.02), None, stale),
+                Err(SpeakerError::Gas(_))
+            ));
+        }
+
+        let changed = GasState::try_new(
+            &GasSpec::dry_air_ussa1976(), original.temperature, 2.0 * original.pressure,
+        ).unwrap();
+        let driver = TsDriver::new_with_gas(card(), Some(0.02), None, changed).unwrap();
+        assert_eq!(driver.rho, 2.0 * original.density);
     }
 }

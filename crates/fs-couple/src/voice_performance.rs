@@ -543,6 +543,13 @@ impl VoicePerformance {
         &self.info
     }
 
+    /// Existing microphone filter latency, in output samples. Physical
+    /// source-to-listener travel remains in the pressure and is not included.
+    #[must_use]
+    pub fn filter_delay_samples(&self) -> f64 {
+        self.receiver.filter_delay_samples()
+    }
+
     /// Source-side summaries so far.
     #[must_use]
     pub fn stats(&self) -> VoiceStats {

@@ -18,14 +18,29 @@ The contact object, its contact law, and the plate's mesh, sections, supports,
 force footprint and modal reduction all come from the existing source loaders.
 No new oscillator, collision law, integrator or material-name preset is added.
 
-Repeat `--modal FILE`, `--plate FILE` and `--bow FILE` in the desired summation order. Every
+Repeat `--modal FILE`, `--plate FILE`, `--bow FILE`, `--reed FILE`,
+`--valve FILE`, `--lip FILE` and `--voice FILE` in the desired summation order. Every
 supported modal performance version retains its existing bilateral, normal
 contact, friction, force-port and preload semantics. Sources are independent:
 this is acoustic superposition, **not mechanical coupling between files**.
 Put components that exchange forces in one existing coupled/contact input.
 `--bow FILE` loads an authored string, friction/body parameters and one canonical
-bow trajectory; see `BOWED_PERFORMANCES.md`. A reed assembly-file parser remains
-absent; programmatic pressure producers can use the same library composition API.
+bow trajectory; see `BOWED_PERFORMANCES.md`. `--lip FILE` and `--voice FILE`
+use the same source files and physical pressure producers as the standalone
+`music_render lip` and `music_render voice` commands. The voice's internal
+mechanical substeps and both sources' mouth-flow and microphone histories stay
+inside their original owners. They contribute exterior pressure, not bore or
+subglottal pressure. Programmatic pressure producers use the same library
+composition API.
+
+All these source loaders receive the shared `--gas-component SPECIES.pack
+NASA9.pack TRANSPORT.pack` registry, with explicit `--gas-water none|ID` and
+`--gas-phase frozen|liquid-water` declarations. Each performance keeps its own
+`ambient` record. Changing its pressure or composition, or changing only the
+source pack data, therefore reaches its flow, duct losses and emitted pressure
+before mixing. Every part with an exterior medium must agree on the listener's
+complete gas state; incompatible pressure or mixture declarations refuse before
+output creation. No ensemble option substitutes air for an unresolved source.
 
 ## Clocks, latency and duration
 
@@ -37,10 +52,13 @@ on an entirely 48 kHz ensemble refuse. No source clock is changed.
 
 Only pressure is filtered. The original causal Blackman–Harris decimator
 keeps its filter history and disclosed passband. A pure integer output delay
-aligns each path to the largest decimator group delay in the ensemble. For
+aligns each path to the largest combined source-microphone and decimator group
+delay in the ensemble. Existing differentiating-microphone latency is read
+from the original receiver, not recomputed or counted twice. For
 192 kHz plus 48 kHz, the common delay is **44 output samples**: the decimated
 path already has that delay; the 48 kHz path receives 44 samples of pure delay.
-For exclusively 48 kHz inputs the common delay is zero and no filter is used.
+For exclusively 48 kHz inputs there is no additional sample-rate filter;
+their original microphone filters may still require alignment delays.
 
 The latency remains in the WAV. Pre-window pressure history is explicitly zero;
 there is no lookahead, latency removal, tail flush or fictitious force history.
@@ -72,11 +90,15 @@ and provenance files are never overwritten.
 
 The command admits at most 16 files of 4 MiB each, 128 source components,
 8192 retained modes, 262144 compiled outer controls and 600 output seconds.
-Every individual loader's own stricter budget remains enforced (bow files are
-limited to 1 MiB). Bow controls are counted inside their hosted scheduler, not
+Every individual loader's own stricter budget remains enforced (bow, lip and
+voice files are limited to 1 MiB). Bow controls are counted inside their hosted scheduler, not
 misreported as an empty outer schedule. Reduction and
 source-state memory are unchanged; pressure/PCM staging is callback-sized.
 These are workload bounds, not a real-time throughput claim.
+Lip and voice pressure histories execute inside their source owners; the
+ensemble counts their retained initial values/events or pressure breakpoints
+against the aggregate control budget without creating a new outer schedule.
+Their mechanical and pressure clocks and sample counts are reported separately.
 
 ## Library and checks
 
@@ -99,5 +121,6 @@ cargo test --release -p fs-couple --bin music_render --test music_render_ensembl
 
 These tests compare real physical trajectories, source-clock controls, separate
 filtering and indexed latency alignment against the mixed path, including actual
-contact-plus-mesh WAV output and a material-change comparison. Native execution
+contact-plus-mesh WAV output, lip/voice microphone-delay alignment, arbitrary
+source-backed gas changes, and incompatible listener-medium refusals. Native execution
 is still required; source review is not compilation or physical validation.

@@ -6,6 +6,14 @@ use fs_couple::pcm_wav::{decimate::Decimator, encode_pcm16_wav};
 use fs_couple::render::plate::file::PlatePerformance;
 use fs_couple::render::schedule::force::file::ModalPerformance;
 use fs_material::gas::GasState;
+use fs_couple::brass_loop::performance::LipDescription;
+use fs_couple::voice_performance::VoiceDescription;
+use fs_couple::pcm_wav::observation::PressureRenderer;
+use fs_material::gas_species::input::ThermochemicalSources;
+
+#[path = "../src/render/schedule/reed/field_input/tests/support.rs"]
+#[allow(dead_code)]
+mod gas_sources;
 
 const STRIKER: &str = include_str!("../examples/free-striker-192k.performance");
 const PLATE: &str = include_str!("../examples/plate-mesh.performance");
@@ -187,4 +195,135 @@ fn the_receipt_names_the_one_listener_gas_and_each_unconstrained_part() {
     succeeded(run(&none, &[("--modal", &a), ("--modal", &a)], 37, false));
     assert!(receipt(&none).contains(&format!("\"listener_medium\":{{\"declared\":\"none\",\"unconstrained_parts\":[{modal_part},{}]}}",
         modal_part.replace("\"part\":0", "\"part\":1"))), "{}", receipt(&none));
+}
+
+// Synthetic geometry/excitation fixtures: the two existing source owners
+// determine all flow, mechanics, propagation and pressure, with no timbre preset.
+fn lip_source(gas: &str) -> String {
+    format!("frankensim-lip-performance-v1\n\
+        audio 48000 1200\nfull_scale_pa 30000\nambient {gas}\n\
+        lip_response 200 7 0.1 0.012 0.0005 0.0001\n\
+        lip_source test fixture, not a measurement\n\
+        bore_source test fixture, not a measurement\n\
+        cup_volume_m3 1.5e-6\ntermination flanged\nmodes 3 1\n\
+        cylinder 0.006 0.30\ncone 0.006 0.012 0.25\n\
+        microphone 0 0 0.3 4 16 3000\nschedule\n\
+        frankensim-gesture-schedule-v1\ncontrol_rate_hz\t700\ntracks\t1\n\
+        track\tblow\tblowing-pressure\ninitial\tpressure-pa\t0e0\nevents\t1\n\
+        event\t0e0\t1e-2\tpressure-pa\t2.8e3\n")
+}
+
+fn voice_source(gas: &str) -> String {
+    let mut text = format!("frankensim-voice-performance-v1\n\
+        audio 48000 1200 2\nfull_scale_pa 2\nambient {gas}\n\
+        fold two_mass 1.25e-4 2.5e-5 128 12.8 40 0.1 3.57e-4 1.4e-2 2.5e-3\n\
+        termination flanged\ntract_source test-fixture\ntract_licence test fixture, not data\n\
+        microphone 0 0 0.3 4 16 4000\nsubglottal 0 0\nsubglottal 0.02 900\n");
+    for area in [0.5e-4, 0.6e-4, 1.5e-4, 2.5e-4, 3.0e-4, 3.0e-4, 2.5e-4, 2.0e-4] {
+        text.push_str(&format!("section {area:e} 0.02\n"));
+    }
+    text
+}
+
+fn lip_voice_reference(
+    lip: &str,
+    voice: &str,
+    sources: Option<&ThermochemicalSources<'_>>,
+) -> (Vec<f64>, f64) {
+    let mut lip = LipDescription::from_bytes_with_gas_sources(lip.as_bytes(), sources).unwrap().build().unwrap();
+    let mut voice = VoiceDescription::from_bytes_with_gas_sources(voice.as_bytes(), sources).unwrap().build().unwrap();
+    let delays = [lip.filter_delay_samples(), voice.filter_delay_samples()];
+    let common = delays[0].max(delays[1]);
+    let mut a = vec![0.0; 1200]; let mut b = a.clone();
+    for block in a.chunks_mut(37) { lip.block(block).unwrap(); }
+    for block in b.chunks_mut(37) { voice.block(block).unwrap(); }
+    assert!(a.iter().any(|p| p.abs() > 1e-12));
+    assert!(b.iter().any(|p| p.abs() > 1e-12));
+    let mut pressure = vec![0.0; a.len()];
+    for (source, delay) in [a, b].iter().zip(delays) {
+        let extra = common - delay;
+        assert_eq!(extra.fract(), 0.0);
+        for (p, q) in pressure.iter_mut().skip(extra as usize).zip(source) { *p += q; }
+    }
+    (pressure, common)
+}
+
+#[test]
+fn lip_and_voice_keep_their_material_medium_substeps_and_original_microphone_latency() {
+    let dir = directory(); let lip = dir.join("lip.performance"); let voice = dir.join("voice.performance");
+    let dry = dir.join("modal.performance");
+    let gas = "mixture 300 100000 mole 2 N2 0.8 O2 0.2";
+    let a = lip_source(gas); let b = voice_source(gas);
+    std::fs::write(&lip, &a).unwrap(); std::fs::write(&voice, &b).unwrap();
+    let (mut pressure, delay) = lip_voice_reference(&a, &b, None);
+    assert!(delay > 0.0, "the differentiating microphones already contribute latency");
+    // This third physical source has no microphone filter. Its pressure must
+    // receive the other owners' existing latency exactly once before summing.
+    let dry_text = modal(48_000, 1200, 1.0);
+    std::fs::write(&dry, &dry_text).unwrap();
+    let mut renderer = ModalPerformance::from_bytes(dry_text.as_bytes(), 37).unwrap().into_renderer();
+    let mut dry_pressure = vec![0.0; 1200];
+    for block in dry_pressure.chunks_mut(37) { renderer.block(block).unwrap(); }
+    for (p, q) in pressure.iter_mut().skip(delay as usize).zip(dry_pressure) { *p += q; }
+    let expected = encode_pcm16_wav(&pressure, 48_000, 1.0).unwrap().0;
+    for block in [37, 113] {
+        let out = dir.join(format!("lip-voice-{block}.wav"));
+        succeeded(run(&out, &[("--lip", &lip), ("--voice", &voice), ("--modal", &dry)], block, false));
+        assert_eq!(std::fs::read(&out).unwrap(), expected);
+        let receipt = std::fs::read_to_string(out.with_extension("provenance.json")).unwrap();
+        for field in ["\"kind\":\"lip\"", "\"kind\":\"voice\"", "\"mechanics_sample_rate_hz\":96000",
+            "\"mechanics_samples\":2400", "\"pressure_samples\":1200", "\"part\":2,\"kind\":\"modal\"",
+            "\"modes\":4,\"compiled_controls\":2", "\"modes\":2,\"compiled_controls\":2",
+            "original multirate baffled exterior receiver"] {
+            assert!(receipt.contains(field), "{field}: {receipt}");
+        }
+        assert!(receipt.contains(&format!("\"common_delay_output_samples\":{delay}")));
+    }
+    // A common listener cannot inhabit two pressure/composition states. Refuse
+    // both conflicts before publishing a WAV or success receipt.
+    for (i, other) in ["mixture 300 50000 mole 2 N2 0.8 O2 0.2",
+        "mixture 300 100000 mole 2 N2 0.6 CO2 0.4"].into_iter().enumerate() {
+        std::fs::write(&voice, voice_source(other)).unwrap();
+        let out = dir.join(format!("lip-voice-conflict-{i}.wav"));
+        let result = run(&out, &[("--lip", &lip), ("--voice", &voice)], 37, false);
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stdout).contains("one ensemble has one listener gas"));
+        assert!(!out.exists() && !out.with_extension("provenance.json").exists());
+    }
+}
+
+#[test]
+fn arbitrary_source_pack_changes_reach_lip_and_voice_ensemble_pressure() {
+    use fs_material::gas_species::input::ThermochemicalPhase;
+    let dir = directory(); let lip = dir.join("lip.performance"); let voice = dir.join("voice.performance");
+    let gas = "thermochemical 300 100000 mole 1 ensemble-source-gas 1";
+    let a = lip_source(gas); let b = voice_source(gas);
+    std::fs::write(&lip, &a).unwrap(); std::fs::write(&voice, &b).unwrap();
+    let mut pressures = Vec::new();
+    for (index, molar_mass) in [0.028, 0.042].into_iter().enumerate() {
+        let packs = gas_sources::packs("ensemble-source-gas", molar_mass, 3.5, 200.0);
+        let bindings = [packs.binding()];
+        let registry = ThermochemicalSources { species: &bindings, water_species: None, phase: ThermochemicalPhase::FrozenGas };
+        let (pressure, _) = lip_voice_reference(&a, &b, Some(&registry));
+        let paths = [dir.join(format!("species-{index}.pack")), dir.join(format!("nasa9-{index}.pack")),
+            dir.join(format!("transport-{index}.pack"))];
+        for (path, bytes) in paths.iter().zip([packs.species.to_bytes(), packs.nasa9.to_bytes(), packs.transport.to_bytes()]) {
+            std::fs::write(path, bytes).unwrap();
+        }
+        let out = dir.join(format!("sourced-lip-voice-{index}.wav"));
+        let result = Command::new(env!("CARGO_BIN_EXE_music_render"))
+            .arg("ensemble").arg(&out).args(["--full-scale-pa", "1000", "--block", "37"])
+            .arg("--lip").arg(&lip).arg("--voice").arg(&voice)
+            .arg("--gas-component").args(&paths).args(["--gas-water", "none", "--gas-phase", "frozen"])
+            .output().unwrap();
+        succeeded(result);
+        assert_eq!(std::fs::read(&out).unwrap(), encode_pcm16_wav(&pressure, 48_000, 1000.0).unwrap().0);
+        let receipt = std::fs::read_to_string(out.with_extension("provenance.json")).unwrap();
+        assert!(receipt.contains("ensemble-source-gas"));
+        pressures.push(pressure);
+    }
+    let energy: f64 = pressures[0].iter().map(|p| p*p).sum();
+    let difference: f64 = pressures[0].iter().zip(&pressures[1]).map(|(a,b)| (a-b).powi(2)).sum();
+    assert!(energy > 0.0 && difference > 1e-8 * energy,
+        "changing only source material data must alter the mixed physical pressure");
 }

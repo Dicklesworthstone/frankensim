@@ -15,6 +15,8 @@ use fs_couple::bernoulli_aperture::performance::file::material_modal::dg::{
 use fs_couple::bernoulli_aperture::radiation::environment::multiport::input::MAX_MIMO_RADIATION_BYTES;
 use fs_couple::bernoulli_aperture::two_sided::ValveSide;
 use fs_couple::bowed_string::runtime::schedule::file::{BowedPerformance, BOWED_PERFORMANCE_SCHEMA, MAX_BOWED_PERFORMANCE_BYTES};
+use fs_couple::brass_loop::performance::{LipDescription, LIP_PERFORMANCE_SCHEMA, MAX_LIP_PERFORMANCE_BYTES};
+use fs_couple::voice_performance::{VoiceDescription, VOICE_PERFORMANCE_SCHEMA, MAX_VOICE_PERFORMANCE_BYTES};
 use fs_couple::pcm_wav::observation::{DecimatedRenderer, PressureRenderer};
 use fs_couple::pcm_wav::observation::ensemble::{PressureEnsemble, PressureEnsembleConfig};
 use fs_couple::render::plate::file::{PlatePerformance, PLATE_PERFORMANCE_SCHEMA};
@@ -31,10 +33,10 @@ const MAX_CONTROLS: usize = 262_144;
 const MAX_SAMPLES: u64 = 600 * RATE as u64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kind { Modal, Plate, Bow, Reed, Valve }
+enum Kind { Modal, Plate, Bow, Reed, Valve, Lip, Voice }
 impl Kind {
     fn label(self) -> &'static str {
-        match self { Self::Modal => "modal", Self::Plate => "plate", Self::Bow => "bow", Self::Reed => "reed", Self::Valve => "valve" }
+        match self { Self::Modal => "modal", Self::Plate => "plate", Self::Bow => "bow", Self::Reed => "reed", Self::Valve => "valve", Self::Lip => "lip", Self::Voice => "voice" }
     }
 }
 struct Input { kind: Kind, path: PathBuf }
@@ -54,11 +56,11 @@ fn options(args: &[String]) -> Result<Options, String> {
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
-            "--modal" | "--plate" | "--bow" | "--reed" | "--valve" => {
+            "--modal" | "--plate" | "--bow" | "--reed" | "--valve" | "--lip" | "--voice" => {
                 if inputs.len() == MAX_PARTS { return Err("ensemble exceeds the 16-part budget".into()); }
                 let path = iter.next().filter(|s| !s.starts_with("--"))
                     .ok_or_else(|| format!("{arg} requires a source performance path"))?;
-                inputs.push(Input { kind: match arg.as_str() { "--modal" => Kind::Modal, "--plate" => Kind::Plate, "--bow" => Kind::Bow, "--reed" => Kind::Reed, _ => Kind::Valve },
+                inputs.push(Input { kind: match arg.as_str() { "--modal" => Kind::Modal, "--plate" => Kind::Plate, "--bow" => Kind::Bow, "--reed" => Kind::Reed, "--valve" => Kind::Valve, "--lip" => Kind::Lip, _ => Kind::Voice },
                     path: PathBuf::from(path) });
             }
             "--block" => {
@@ -79,7 +81,7 @@ fn options(args: &[String]) -> Result<Options, String> {
             }
             value if value.starts_with('-') => return Err(format!("unsupported ensemble option {value:?}")),
             value => {
-                if output.is_some() { return Err("ensemble accepts exactly one output path; inputs require --modal/--plate/--bow/--reed/--valve".into()); }
+                if output.is_some() { return Err("ensemble accepts exactly one output path; inputs require --modal/--plate/--bow/--reed/--valve/--lip/--voice".into()); }
                 output = Some(PathBuf::from(value));
             }
         }
@@ -167,6 +169,7 @@ fn load_with_gas_sources(
     let file = std::fs::File::open(&input.path).map_err(|e| format!("input {}: {e}", input.path.display()))?;
     let max_bytes = match input.kind {
         Kind::Bow => MAX_BOWED_PERFORMANCE_BYTES, Kind::Reed => MAX_REED_PERFORMANCE_BYTES,
+        Kind::Lip => MAX_LIP_PERFORMANCE_BYTES, Kind::Voice => MAX_VOICE_PERFORMANCE_BYTES,
         _ => MAX_PART_BYTES,
     };
     let mut bytes = Vec::new();
@@ -176,6 +179,43 @@ fn load_with_gas_sources(
     // A part's material-card packs are named relative to that part's own file.
     let parent = input.path.parent().unwrap_or(std::path::Path::new("."));
     let result = match input.kind {
+        Kind::Lip => {
+            let description = LipDescription::from_bytes_with_gas_sources(&bytes, sources)?;
+            let p = description.build()?;
+            let i = p.info();
+            let listener = Listener::Gas(ListenerMedium::of(description.ambient_gas()));
+            let exterior_json = format!("{},\"observation_scope\":\"lip-driven bore mouth flow through its original baffled exterior receiver\",\"control_item_kind\":\"source pressure/tension initial values and events\",\"mode_count_kind\":\"retained transverse bore order plus one lip coordinate\"",
+                super::thermochemical::provenance(std::slice::from_ref(description.gas_record())));
+            let info = SourceInfo {
+                kind: input.kind, schema: LIP_PERFORMANCE_SCHEMA, hash: i.input_hash,
+                rate: i.sample_rate_hz, samples: i.samples, source_full_scale_pa: i.full_scale_pa,
+                mechanics_rate: i.sample_rate_hz, mechanics_samples: i.samples,
+                source_filter_delay_samples: p.filter_delay_samples(),
+                components: 1, modes: description.transverse_mode_count() + 1,
+                controls: description.control_event_count(), exterior_json, listener,
+            };
+            (Box::new(p) as Box<dyn PressureRenderer>, info)
+        }
+        Kind::Voice => {
+            let description = VoiceDescription::from_bytes_with_gas_sources(&bytes, sources)?;
+            let p = description.build()?;
+            let i = p.info();
+            let listener = Listener::Gas(ListenerMedium::of(description.ambient_gas()));
+            let exterior_json = format!("{},\"observation_scope\":\"glottal-driven tract mouth flow through its original multirate baffled exterior receiver\",\"control_item_kind\":\"source subglottal pressure breakpoints\",\"mode_count_kind\":\"one or two glottal fold coordinates\"",
+                super::thermochemical::provenance(std::slice::from_ref(description.gas_record())));
+            let mechanics_samples = i.samples.checked_mul(u64::from(description.mechanics_per_output))
+                .ok_or("voice mechanical window overflow")?;
+            let info = SourceInfo {
+                kind: input.kind, schema: VOICE_PERFORMANCE_SCHEMA,
+                hash: fs_blake3::hash_domain("org.frankensim.fs-couple.voice-performance.v1", &bytes),
+                rate: i.output_rate_hz, samples: i.samples, source_full_scale_pa: i.full_scale_pa,
+                mechanics_rate: i.mechanics_rate_hz, mechanics_samples,
+                source_filter_delay_samples: p.filter_delay_samples(),
+                components: 1, modes: if i.two_mass { 2 } else { 1 },
+                controls: description.subglottal.len(), exterior_json, listener,
+            };
+            (Box::new(p) as Box<dyn PressureRenderer>, info)
+        }
         Kind::Modal => {
             let p = ModalPerformance::from_bytes_with_gas_sources(&bytes, block, sources).map_err(|e| e.to_string())?;
             let i = p.info();

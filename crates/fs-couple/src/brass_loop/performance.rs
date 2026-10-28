@@ -577,6 +577,19 @@ impl LipDescription {
         &self.gas
     }
 
+    /// Retained transverse modes in each section of the bore's acoustic image.
+    #[must_use]
+    pub const fn transverse_mode_count(&self) -> usize {
+        self.modes
+    }
+
+    /// Retained source control items, including each track's initial value.
+    /// Ramps remain owned and evaluated by this source on its control clock.
+    #[must_use]
+    pub fn control_event_count(&self) -> usize {
+        self.schedule.tracks().iter().map(|track| 1 + track.events.len()).sum()
+    }
+
     /// The passive bore (no lip, no cup shunt, no radiation observer) scanned at `frequencies_hz`: the multimodal and the
     /// plane-wave input impedance and the mouth-to-input flow ratio, from the same duct, gas and termination the render uses.
     ///
@@ -898,6 +911,13 @@ impl LipPerformance {
     #[must_use]
     pub const fn info(&self) -> &LipInfo {
         &self.info
+    }
+
+    /// Existing microphone filter latency, in output samples. Physical
+    /// source-to-listener travel remains in the pressure and is not included.
+    #[must_use]
+    pub fn filter_delay_samples(&self) -> f64 {
+        self.receiver.filter_delay_samples()
     }
 
     /// The loop's per-chunk diagnostics (lock estimate, gap and power ledger).
