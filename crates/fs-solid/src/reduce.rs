@@ -410,7 +410,7 @@ pub fn reduce_valve(request: &ValveCardRequest<'_>, cx: &Cx<'_>) -> Result<Valve
     reduce_valve_impl(
         request,
         Some(TetMaterialField::Uniform(&material)),
-        request.material.resolved().identity(),
+        request.material.identity(),
         cx,
         None,
         None,
@@ -438,7 +438,7 @@ pub fn reduce_pressure_loaded_valve(
     reduce_pressure_loaded_valve_impl(
         request,
         TetMaterialField::Uniform(&material),
-        request.material.resolved().identity(),
+        request.material.identity(),
         nodal_load_per_pa_m2,
         cx,
         None,

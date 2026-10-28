@@ -23,6 +23,9 @@ use crate::elastic::OrthotropicElastic;
 mod reference_ratios;
 pub use reference_ratios::*;
 
+mod isotropic_parameters;
+pub use isotropic_parameters::*;
+
 mod linear_interface;
 pub use linear_interface::*;
 
@@ -1209,6 +1212,7 @@ pub struct IsotropicElasticStatePoint {
     density_kg_m3: f64,
     young_modulus_pa: f64,
     poisson_ratio: f64,
+    derivation: Option<IsotropicElasticDerivation>,
 }
 
 /// Evidence-bearing instantaneous isotropic thermal-expansion coefficient.
@@ -1998,6 +2002,7 @@ pub fn resolve_isotropic_elastic_state_point(
         young_modulus_pa: value(YOUNG_MODULUS_PROPERTY),
         poisson_ratio: value(POISSON_RATIO_PROPERTY),
         resolved,
+        derivation: None,
     })
 }
 

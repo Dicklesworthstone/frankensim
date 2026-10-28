@@ -376,7 +376,7 @@ impl TetElasticMaterial {
             state.density_kg_m3(),
             state.young_modulus_pa(),
             state.poisson_ratio(),
-            *state.resolved().identity().as_bytes(),
+            *state.identity().as_bytes(),
         )
         .expect("an admitted isotropic-elastic state satisfies tet invariants")
     }
@@ -1020,7 +1020,7 @@ impl TetThermalStrainState {
             temperature_k,
             reference_temperature_k,
             [strain, strain, strain, 0.0, 0.0, 0.0],
-            *elastic.resolved().identity().as_bytes(),
+            *elastic.identity().as_bytes(),
             expansion.identity(),
             maximum_absolute_mandel_strain,
         )
@@ -3249,6 +3249,111 @@ mod tests {
             fixed_dofs: fixed,
             budget: TetAssemblyBudget::standard(),
         }
+    }
+
+    #[test]
+    fn g1_independent_material_parameters_drive_tet_energy_and_thermal_identity() {
+        use fs_evidence::ValidityDomain;
+        use fs_matdb::{
+            ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim,
+            PropertyKey, PropertyValue, Provenance, QueryPoint, UncertaintyModel,
+        };
+        use fs_material::state_point::{
+            INVERSE_TEMPERATURE_DIMS, IsotropicElasticParameters,
+            LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY, MaterialPropertySelection,
+            ScalarAdmissibility, ScalarPropertyRequirement, integrate_isotropic_thermal_expansion,
+            resolve_isotropic_elastic_state_point_from_parameters,
+        };
+        use fs_qty::{Density, Pressure};
+
+        let mut claims = ClaimSet::new();
+        for (name, dims, value) in [
+            ("source-rho", Density::DIMS, 2500.0),
+            ("source-K", Pressure::DIMS, 40e9),
+            ("source-G", Pressure::DIMS, 24e9),
+            (
+                LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
+                INVERSE_TEMPERATURE_DIMS,
+                1e-5,
+            ),
+        ] {
+            claims
+                .insert_claim(PropertyClaim {
+                    key: PropertyKey::new(name, dims),
+                    value: PropertyValue::Scalar { value, dims },
+                    validity: ValidityDomain::unconstrained().with("T", 273.15, 323.15),
+                    uncertainty: UncertaintyModel::Unstated,
+                    interpolation: InterpolationPolicy::ConstantWithinValidity,
+                    observations: Vec::new(),
+                    provenance: Provenance {
+                        source: "synthetic independent elastic parameter fixture".into(),
+                        license: "CC0-1.0".into(),
+                        artifact: None,
+                    },
+                })
+                .unwrap();
+        }
+        let card = MaterialCard::assemble(
+            MaterialStateId {
+                chemistry: "synthetic".into(),
+                phase: "solid".into(),
+                process: "numerical reference".into(),
+                revision: 0,
+            },
+            claims,
+            Vec::new(),
+        )
+        .unwrap();
+        let requirement = |name, dims| {
+            ScalarPropertyRequirement::try_new(name, dims, ScalarAdmissibility::StrictlyPositive)
+                .unwrap()
+        };
+        let current = QueryPoint::new().with("T", 303.15).unwrap();
+        let state = resolve_isotropic_elastic_state_point_from_parameters(
+            &card,
+            &current,
+            &requirement("source-rho", Density::DIMS),
+            &IsotropicElasticParameters::BulkShear {
+                bulk_modulus: requirement("source-K", Pressure::DIMS),
+                shear_modulus: requirement("source-G", Pressure::DIMS),
+            },
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let material = TetElasticMaterial::from_resolved_elastic_state(&state);
+        assert_eq!(
+            material.material_state_identity,
+            *state.identity().as_bytes()
+        );
+        assert_ne!(state.identity(), state.resolved().identity());
+        let nodes = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let tets = [[0, 1, 2, 3]];
+        let assembly =
+            with_cx(|cx| reference_problem(&nodes, &tets, &material, &[]).assemble(cx)).unwrap();
+        assert!((assembly.total_mass_kg - 2500.0 / 6.0).abs() < 1e-12);
+        // u_x = 1e-4*x: W = volume*(K/2 + 2G/3)*epsilon_xx^2 = 60 J.
+        let energy = 0.5 * assembly.stiffness.to_dense()[3 * 12 + 3] * 1e-8;
+        assert!((energy - 60.0).abs() < 1e-12);
+        let reference = QueryPoint::new().with("T", 293.15).unwrap();
+        let expansion = integrate_isotropic_thermal_expansion(
+            &card,
+            &reference,
+            &current,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let thermal =
+            TetThermalStrainState::try_from_isotropic_expansion(&state, &expansion, 1e-3).unwrap();
+        assert_eq!(
+            thermal.elastic_material_state_identity(),
+            material.material_state_identity
+        );
+        assert!((thermal.free_strain_mandel()[0] - 1e-4).abs() < 1e-16);
     }
 
     #[test]
@@ -5990,4 +6095,3 @@ mod tests {
             + columns[2][0] * (columns[0][1] * columns[1][2] - columns[0][2] * columns[1][1])
     }
 }
-

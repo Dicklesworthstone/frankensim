@@ -2673,3 +2673,26 @@ This is not a calibrated mixed-mode adhesion model. The focused
 `cohesive_source` regressions cover shared electrical/mechanical source bundles,
 fixed-temperature substitution, independent fracture work and source/unit/domain
 refusals; structural source-to-force tests live in `fs-solid`.
+
+## Explicit independent isotropic elastic parameters
+
+`state_point::resolve_isotropic_elastic_state_point_from_parameters` admits a
+caller-selected Young/Poisson, Young/shear, or bulk/shear pair with density.
+Arbitrary source property names and complete typed query conditions are retained.
+The scalar role requirements reject stress, pressure, hardness and tensor-component
+aliases; this adapter does not infer isotropy from a material name or directional
+measurements. Positive, finite and numerically representable isotropic stiffness
+is required before publishing the existing `IsotropicElasticStatePoint`.
+
+The original `resolved()` bundle contains only the selected source properties.
+`derivation()` retains their roles and nominal algebraic consequences separately;
+no derived constant is inserted as a measured claim. `identity()` binds the
+derivation and is used by the solid element, thermal-strain and reduction ingress.
+Canonical Young/Poisson states retain their previous identities. Source marginal
+uncertainty remains attached; joint covariance is not assumed and uncertainty is
+not propagated. Additional unselected measurements are not reconciled automatically.
+
+Focused regressions cover independent constitutive stress, source conditions,
+invalid pairs, conflicting claim pins, unit rescaling, and the actual tetrahedral
+mass/strain-energy and thermal-expansion identity path. This is a bounded MR11
+parameter-conversion slice, not complete derived-property or material validation.
