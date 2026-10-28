@@ -142,7 +142,7 @@ fn harmonic_maxwell_response_is_the_refined_limit_of_the_original_time_owner() {
 }
 
 #[test]
-fn harmonic_refuses_singular_unbounded_and_unsupported_queries_without_mutation() {
+fn harmonic_refuses_singular_and_unbounded_queries_without_mutation() {
     let gate=CancelGate::new_clock_free();let system=material_and_air(0.1);
     let before=system.material_memory().to_vec();
     assert!(system.harmonic_response(550.0,&[C64::from_re(1.0)],0,&gate).is_err());
@@ -156,11 +156,216 @@ fn harmonic_refuses_singular_unbounded_and_unsupported_queries_without_mutation(
     let zero=system.harmonic_response(550.0,&[C64::ZERO],1000,&gate).unwrap();
     assert_eq!(zero.mean_stored_energy_j,0.0);assert_eq!(zero.total_dissipation_w(),0.0);
     assert_eq!(system.material_memory(),before);assert_eq!(system.samples_rendered(),0);
-    let constant=CoupledModalSystem::new_prepared_with_constant_loss(vec![mode(500.0,0.02)],
-        vec![ModalConnection {left:ModalAttachment {component:0,shapes:vec![1.0]},
-            right:ModalAttachment {component:0,shapes:vec![0.0]},stiffness_n_m:1e4,
-            damping_n_s_m:1.0,rest_extension_m:0.0}],
-        &[ConstantLossConnection {connection:0,reference_omega_rad_s:500.0}],config(),
-        PreparedModalBudget {max_modes:1,max_dense_bytes:2_000_000,max_multiply_terms:100_000_000},&gate).unwrap();
-    assert!(constant.harmonic_response(550.0,&[C64::from_re(1.0)],1000,&gate).is_err());
+}
+
+fn prepared_budget(modes: usize) -> PreparedModalBudget {
+    PreparedModalBudget {
+        max_modes: modes,
+        max_dense_bytes: 2_000_000,
+        max_multiply_terms: 100_000_000,
+    }
+}
+
+#[test]
+fn harmonic_constant_loss_resonance_uses_the_coupled_mode_loss_factor() {
+    // G1: one joint carries fraction s of the coupled mode's strain energy.
+    // Its admitted damping is c_eff = eta*s*omega*G(omega), independent of
+    // the old anchoring frequency. Keeping the original dashpot instead would
+    // multiply that loss by omega/omega_ref and change the resonance height.
+    let gate = CancelGate::new_clock_free();
+    let (share, shape, eta, reference) = (0.6, 0.8, 0.04, 900.0);
+    let force = C64::new(0.3, -0.1);
+    for omega in [300.0, 1700.0, 6000.0] {
+        let stiffness = share * omega * omega / (shape * shape);
+        let damping = eta * stiffness / reference;
+        let system = CoupledModalSystem::new_prepared_with_constant_loss(
+            vec![mode(omega * (1.0_f64 - share).sqrt(), 0.0)],
+            vec![ModalConnection {
+                left: ModalAttachment {
+                    component: 0,
+                    shapes: vec![shape],
+                },
+                right: ModalAttachment {
+                    component: 0,
+                    shapes: vec![0.0],
+                },
+                stiffness_n_m: stiffness,
+                damping_n_s_m: damping,
+                rest_extension_m: 0.0,
+            }],
+            &[ConstantLossConnection {
+                connection: 0,
+                reference_omega_rad_s: reference,
+            }],
+            config(),
+            prepared_budget(1),
+            &gate,
+        )
+        .unwrap();
+        let response = system
+            .harmonic_response(omega, &[force], 1000, &gate)
+            .unwrap();
+        let spectrum = crate::shear_shell::constant_loss::ConstantLossSpectrum::fit().shape(omega);
+        let effective_damping = eta * share * omega * spectrum;
+        let expected = force / C64::new(0.0, -omega * effective_damping);
+        close(response.displacement_m_sqrt_kg[0], expected);
+        close(
+            response.generalized_connection_forces_n_per_sqrt_kg[0],
+            expected.scale(-share * omega * omega)
+                - response.velocity_m_sqrt_kg_per_s[0].scale(effective_damping),
+        );
+        assert!(
+            (response.external_power_w / (0.5 * force.norm_sq() / effective_damping) - 1.0).abs()
+                < 1e-11
+        );
+        let old_dashpot_response = force / C64::new(0.0, -omega * damping * shape * shape);
+        assert!(
+            (response.displacement_m_sqrt_kg[0] - old_dashpot_response).abs()
+                > 0.1 * expected.abs()
+        );
+        power_closes(&response);
+        assert_eq!(system.samples_rendered(), 0);
+        assert_eq!(
+            system.components()[0].states()[0],
+            ModalAcousticState::default()
+        );
+        // One additional rank is charged for the separate damping direction.
+        assert!(system.harmonic_response(omega, &[force], 5, &gate).is_err());
+        assert!(system.harmonic_response(omega, &[force], 6, &gate).is_ok());
+    }
+}
+
+fn anchored_pair(rate: u32, initial: Option<&[ModalAcousticState]>) -> CoupledModalSystem {
+    let gate = CancelGate::new_clock_free();
+    let mut model = ModalAcousticTimeModel::try_new(
+        rate,
+        [(2000.0, 0.006), (9000.0, 0.009)]
+            .iter()
+            .map(|&(omega, zeta)| ModalAcousticMode {
+                angular_frequency_rad_s: omega,
+                damping_ratio: zeta,
+                pressure_per_modal_velocity: C64::ZERO,
+            })
+            .collect(),
+        ModalAcousticTimeBudget::audible_reference(),
+    )
+    .unwrap();
+    if let Some(states) = initial {
+        model.restore_states(states).unwrap();
+    }
+    CoupledModalSystem::new_prepared_with_constant_loss(
+        vec![model],
+        vec![ModalConnection {
+            left: ModalAttachment {
+                component: 0,
+                shapes: vec![1.0, -0.7],
+            },
+            right: ModalAttachment {
+                component: 0,
+                shapes: vec![0.0, 0.0],
+            },
+            stiffness_n_m: 4e6,
+            damping_n_s_m: 0.04 * 4e6 / 1200.0,
+            rest_extension_m: 0.0,
+        }],
+        &[ConstantLossConnection {
+            connection: 0,
+            reference_omega_rad_s: 1200.0,
+        }],
+        config(),
+        prepared_budget(2),
+        &gate,
+    )
+    .unwrap()
+}
+
+#[test]
+fn harmonic_constant_loss_matches_original_time_owner_with_distinct_reaction_directions() {
+    // G1/G3: a nonproportional two-mode joint has d=g(K)b NOT parallel to b.
+    // Initialize on the continuous periodic orbit, then advance the original
+    // prepared time owner under midpoint-held sine forces. Both the endpoint
+    // and integrated physical dissipation converge at second order. This
+    // catches a harmonic-only copy of the wrong collocated damping law.
+    let gate = CancelGate::new_clock_free();
+    let reference = anchored_pair(48_000, None);
+    let omega = core::f64::consts::TAU * 1000.0;
+    let force = [C64::new(0.3, 0.1), C64::new(-0.2, 0.05)];
+    let response = reference
+        .harmonic_response(omega, &force, 1000, &gate)
+        .unwrap();
+    let b = [1.0, -0.7];
+    let damping_reaction: Vec<_> = b.iter().enumerate().map(|(i, &b)|
+        response.generalized_connection_forces_n_per_sqrt_kg[i]
+            - response.connection_spring_forces_n[0].scale(b)).collect();
+    assert!((damping_reaction[1].scale(b[0]) - damping_reaction[0].scale(b[1])).abs()
+        > 0.05 * damping_reaction.iter().map(|f| f.abs()).fold(0.0, f64::max));
+    let mut reaction_power = 0.0;
+    for (i, (w, zeta)) in [(2000.0, 0.006), (9000.0, 0.009)].into_iter().enumerate() {
+        // Original component equation, independently of either connection
+        // column: D_i q_i = external_i + complete connection reaction_i.
+        close(
+            C64::new(w*w - omega*omega, -2.0*omega*zeta*w) * response.displacement_m_sqrt_kg[i],
+            force[i] + response.generalized_connection_forces_n_per_sqrt_kg[i],
+        );
+        reaction_power += 0.5
+            * (response.generalized_connection_forces_n_per_sqrt_kg[i]
+                * response.velocity_m_sqrt_kg_per_s[i].conj())
+            .re;
+    }
+    assert!(
+        (reaction_power + response.connection_dissipation_w).abs()
+            < 1e-11 * response.connection_dissipation_w
+    );
+    power_closes(&response);
+    let initial: Vec<_> = response
+        .displacement_m_sqrt_kg
+        .iter()
+        .zip(&response.velocity_m_sqrt_kg_per_s)
+        .map(|(q, v)| ModalAcousticState {
+            displacement_m_sqrt_kg: q.re,
+            velocity_m_sqrt_kg_per_s: v.re,
+        })
+        .collect();
+    let norm = response
+        .displacement_m_sqrt_kg
+        .iter()
+        .zip(&response.velocity_m_sqrt_kg_per_s)
+        .zip([2000.0, 9000.0])
+        .map(|((q, v), w)| q.scale(w).norm_sq() + v.norm_sq())
+        .sum::<f64>()
+        .sqrt();
+    let mut state_errors = Vec::new();
+    let mut loss_errors = Vec::new();
+    for rate in [24_000, 48_000, 96_000] {
+        let mut system = anchored_pair(rate, Some(&initial));
+        let mut dissipation = 0.0;
+        let steps = 8 * (rate / 1000);
+        for tick in 0..steps {
+            let (sin, cos) = det::sin_cos(omega * (f64::from(tick) + 0.5) / f64::from(rate));
+            let held = force.map(|f| f.re * cos + f.im * sin);
+            dissipation += system.step(&held).unwrap().total_dissipation_j();
+        }
+        let error = system.components()[0]
+            .states()
+            .iter()
+            .zip(&initial)
+            .zip([2000.0, 9000.0])
+            .map(|((actual, expected), w)| {
+                let q = w * (actual.displacement_m_sqrt_kg - expected.displacement_m_sqrt_kg);
+                let v = actual.velocity_m_sqrt_kg_per_s - expected.velocity_m_sqrt_kg_per_s;
+                q * q + v * v
+            })
+            .sum::<f64>()
+            .sqrt()
+            / norm;
+        state_errors.push(error);
+        loss_errors.push((dissipation / (0.008 * response.total_dissipation_w()) - 1.0).abs());
+    }
+    assert!(state_errors[2] < 0.002, "{state_errors:?}");
+    assert!(loss_errors[2] < 0.002, "{loss_errors:?}");
+    for errors in [&state_errors, &loss_errors] {
+        for pair in errors.windows(2) {
+            assert!((3.2..4.8).contains(&(pair[0] / pair[1])), "{errors:?}");
+        }
+    }
 }

@@ -20,8 +20,19 @@ pub struct ModalHarmonicResponse {
     pub material_memory: Vec<C64>,
     /// Acoustic displacement/momentum pairs, in original radiation-pole order.
     pub radiation_state: Vec<C64>,
-    /// AC force on each connection's positive side, in connection order [N].
+    /// Sum of each connection's signed spring and damping efforts [N].
+    /// For an ordinary link both act along its original column. A prepared
+    /// constant-loss link has DISTINCT spring and damping columns; this sum
+    /// is then only a channel diagnostic, not a force along either column.
     pub connection_forces_n: Vec<C64>,
+    /// Spring effort `-k b^T q`, in original connection order [N].
+    pub connection_spring_forces_n: Vec<C64>,
+    /// Dissipative effort `-c d^T v`, in original connection order [N].
+    /// `d = b` for Kelvin-Voigt; constant-loss links use their prepared `g(K)b`.
+    pub connection_damping_forces_n: Vec<C64>,
+    /// Sum of `b * spring_effort + d * damping_effort` on each ORIGINAL
+    /// mass-normalized mode [N/sqrt(kg)], retaining both reaction directions.
+    pub generalized_connection_forces_n_per_sqrt_kg: Vec<C64>,
     /// Mean quadratic storage of the AC solution only [J].
     pub mean_stored_energy_j: f64,
     /// Mean work rate of the supplied peak-force phasors [W].
@@ -165,11 +176,13 @@ impl CoupledModalSystem {
     /// a bare lossless air pole can produce its physical antiresonance rather
     /// than a spurious refusal from dividing by an isolated-pole impedance.
     ///
-    /// `maximum_work` bounds d^3+d^2*(connections+material_arms+3), with
+    /// `maximum_work` bounds d^3+d^2*(connections+constant_loss_links+material_arms+3), with
     /// d=mechanical_modes+acoustic_poles, before allocation; d is also capped at
     /// MAX_HARMONIC_UNKNOWNS. The existing solve-relative tolerance gates the
-    /// original equations. Constant-loss prepared connections require their own
-    /// basis law and explicitly refuse; they are never treated as dashpots here.
+    /// original equations. Constant-loss connections reuse the prepared owner's
+    /// SAME coupled-basis damping columns; the spring retains its original column.
+    /// This is the continuous response of that fixed finite-dimensional image,
+    /// not a new frequency-dependent loss law evaluated at the drive frequency.
     /// No accepted state, material history, sample clock or ledger is changed.
     pub fn harmonic_response(
         &self,
@@ -211,6 +224,14 @@ impl CoupledModalSystem {
             .ok_or_else(|| invalid("harmonic matrix overflow"))?;
         let work = dimension
             .checked_add(self.connections.len())
+            .and_then(|v| {
+                v.checked_add(
+                    self.connections
+                        .iter()
+                        .filter(|c| c.constant_loss_reference_omega_rad_s.is_some())
+                        .count(),
+                )
+            })
             .and_then(|v| v.checked_add(self.relaxation_branches.len()))
             .and_then(|v| v.checked_add(if additional == 0 { 3 } else { 5 }))
             .and_then(|v| square.checked_mul(v))
@@ -232,15 +253,6 @@ impl CoupledModalSystem {
                 "harmonic response requires positive representable frequency and one finite force per mode",
             ));
         }
-        if self
-            .connections
-            .iter()
-            .any(|c| c.constant_loss_reference_omega_rad_s.is_some())
-        {
-            return Err(invalid(
-                "harmonic constant-loss prepared connections are not Kelvin-Voigt",
-            ));
-        }
         let s = C64::new(0.0, -omega_rad_s);
         let modes: Vec<_> = self.models.iter().flat_map(|m| m.modes()).collect();
         let mut matrix = vec![C64::ZERO; square];
@@ -252,14 +264,33 @@ impl CoupledModalSystem {
                 -omega_rad_s * (2.0 * mode.damping_ratio * w),
             );
         }
-        for (column, law) in self.columns.iter().zip(&self.connections) {
-            add_rank(
-                &mut matrix,
-                dimension,
-                column,
-                C64::new(law.stiffness_n_m, -omega_rad_s * law.damping_n_s_m),
-                gate,
-            )?;
+        for (index, (column, law)) in self.columns.iter().zip(&self.connections).enumerate() {
+            if law.constant_loss_reference_omega_rad_s.is_some() {
+                let damping = self.harmonic_damping_column(index)?;
+                add_rank(
+                    &mut matrix,
+                    dimension,
+                    column,
+                    C64::from_re(law.stiffness_n_m),
+                    gate,
+                )?;
+                add_rank(
+                    &mut matrix,
+                    dimension,
+                    damping,
+                    C64::new(0.0, -omega_rad_s * law.damping_n_s_m),
+                    gate,
+                )?;
+            } else {
+                // Keep the original single-rank arithmetic for ordinary links.
+                add_rank(
+                    &mut matrix,
+                    dimension,
+                    column,
+                    C64::new(law.stiffness_n_m, -omega_rad_s * law.damping_n_s_m),
+                    gate,
+                )?;
+            }
         }
         let mut column = vec![0.0; n];
         for arm in &self.relaxation_branches {
@@ -291,6 +322,22 @@ impl CoupledModalSystem {
         })
     }
 
+    fn harmonic_damping_column(&self, index: usize) -> Result<&[f64], ModalCouplingError> {
+        if self.connections[index]
+            .constant_loss_reference_omega_rad_s
+            .is_some()
+        {
+            self.exact
+                .as_ref()
+                .and_then(|exact| exact.damping_column(index))
+                .ok_or_else(|| {
+                    invalid("constant-loss harmonic response requires its prepared damping column")
+                })
+        } else {
+            Ok(&self.columns[index])
+        }
+    }
+
     fn observe_harmonic_state(
         &self,
         omega_rad_s: f64,
@@ -311,6 +358,9 @@ impl CoupledModalSystem {
             material_memory: Vec::with_capacity(self.relaxation_branches.len()),
             radiation_state: Vec::with_capacity(2 * poles),
             connection_forces_n: Vec::with_capacity(self.connections.len()),
+            connection_spring_forces_n: Vec::with_capacity(self.connections.len()),
+            connection_damping_forces_n: Vec::with_capacity(self.connections.len()),
+            generalized_connection_forces_n_per_sqrt_kg: vec![C64::ZERO; n],
             mean_stored_energy_j: 0.0,
             external_power_w: 0.0,
             component_dissipation_w: 0.0,
@@ -328,13 +378,30 @@ impl CoupledModalSystem {
             result.component_dissipation_w += mode.damping_ratio * w * v.norm_sq();
             result.external_power_w += 0.5 * (force[i] * v.conj()).re;
         }
-        for (column, law) in self.columns.iter().zip(&self.connections) {
+        for (index, (column, law)) in self.columns.iter().zip(&self.connections).enumerate() {
             poll(Some(gate))?;
+            let damping_column = self.harmonic_damping_column(index)?;
             let extension = projection(column, &state[..n]);
-            let velocity = s * extension;
+            let velocity = if law.constant_loss_reference_omega_rad_s.is_some() {
+                s * projection(damping_column, &state[..n])
+            } else {
+                s * extension
+            };
+            let spring = -extension.scale(law.stiffness_n_m);
+            let damping = -velocity.scale(law.damping_n_s_m);
             result
                 .connection_forces_n
                 .push(-(extension.scale(law.stiffness_n_m) + velocity.scale(law.damping_n_s_m)));
+            result.connection_spring_forces_n.push(spring);
+            result.connection_damping_forces_n.push(damping);
+            for ((force, &b), &d) in result
+                .generalized_connection_forces_n_per_sqrt_kg
+                .iter_mut()
+                .zip(column)
+                .zip(damping_column)
+            {
+                *force = *force + spring.scale(b) + damping.scale(d);
+            }
             result.mean_stored_energy_j += 0.25 * law.stiffness_n_m * extension.norm_sq();
             result.connection_dissipation_w += 0.5 * law.damping_n_s_m * velocity.norm_sq();
         }
@@ -370,6 +437,9 @@ impl CoupledModalSystem {
             .chain(&result.material_memory)
             .chain(&result.radiation_state)
             .chain(&result.connection_forces_n)
+            .chain(&result.connection_spring_forces_n)
+            .chain(&result.connection_damping_forces_n)
+            .chain(&result.generalized_connection_forces_n_per_sqrt_kg)
             .any(|&z| !complex_finite(z))
             || [
                 result.mean_stored_energy_j,
