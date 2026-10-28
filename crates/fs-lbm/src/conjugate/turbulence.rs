@@ -45,6 +45,9 @@
 
 use super::domain::VoxelDomain;
 
+/// Prandtl-aware equilibrium thermal wall resistance and coupling.
+pub mod thermal_wall;
+
 /// von Karman constant of the LVEL profile.
 pub const KAPPA: f64 = 0.41;
 /// Log-law constant `E` of Spalding's profile.
