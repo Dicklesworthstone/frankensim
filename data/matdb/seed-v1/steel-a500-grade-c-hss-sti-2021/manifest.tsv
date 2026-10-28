@@ -1,0 +1,13 @@
+frankensim.matdb-manifest.v3
+pack_id	steel-a500-grade-c-hss-sti-2021
+redistribution	permitted	Selected attributed numerical facts and original modeling notes only; no source document, prose or table layout is redistributed
+citation	Steel Tube Institute, ASTM A500, description explicitly reflecting the 2021 revision, accessed 2026-10-28; https://steeltubeinstitute.org/resources/astm-a500/
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	sti	properties.tsv	material-tsv-v1
+property	yield_minimum	tensile-yield-strength-specified-minimum	dimensional
+property	ultimate_minimum	tensile-strength-specified-minimum	dimensional
+axis	specification_minimum	source-specification-minimum	dimensional
+axis	grade_c	source-a500-grade-c	dimensional
+axis	cold_formed_hss	source-cold-formed-hss	dimensional
+axis	revision	source-astm-revision-year	dimensional
+axis	temperature_known	source-test-temperature-known	dimensional

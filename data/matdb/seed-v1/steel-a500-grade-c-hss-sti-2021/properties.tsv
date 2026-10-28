@@ -1,0 +1,16 @@
+frankensim.matdb-source.v1
+observation	sti-2021	ASTM A500 Grade C cold-formed hollow structural sections, round, square and rectangular	Steel Tube Institute description of ASTM A500's 2021 revision	Specified minimum yield 50 ksi and tensile strength 62 ksi apply to all HSS shapes, including round, in the described 2021 revision. Earlier round Grade C requirements were different and cannot be silently selected by this pack. These are specification-level requirements, not measured stress-strain points, characteristic values, member design strengths or a manufacturer's mill certificate. Exact test temperature and rate, actual forming/weld residual stresses and heat treatment are unknown. Density, modulus, thermal data, elongation and a plastic hardening law are not supplied. Source geometry maxima and design-thickness factors are not material properties and must be handled by the geometry/design owner. PSI conversion uses pound 0.45359237 kg, standard gravity 9.80665 m/s2 and inch 0.0254 m.
+scalar	yield-minimum	sti-2021	yield_minimum	344.737864658418	MPa	constant
+uncertainty	yield-minimum	unstated	-	-	-	-
+validity	yield-minimum	specification_minimum	1	1	1
+validity	yield-minimum	grade_c	1	1	1
+validity	yield-minimum	cold_formed_hss	1	1	1
+validity	yield-minimum	revision	2021	2021	1
+validity	yield-minimum	temperature_known	0	0	1
+scalar	ultimate-minimum	sti-2021	ultimate_minimum	427.4749521764383	MPa	constant
+uncertainty	ultimate-minimum	unstated	-	-	-	-
+validity	ultimate-minimum	specification_minimum	1	1	1
+validity	ultimate-minimum	grade_c	1	1	1
+validity	ultimate-minimum	cold_formed_hss	1	1	1
+validity	ultimate-minimum	revision	2021	2021	1
+validity	ultimate-minimum	temperature_known	0	0	1

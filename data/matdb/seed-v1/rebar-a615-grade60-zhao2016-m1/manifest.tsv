@@ -1,0 +1,19 @@
+frankensim.matdb-manifest.v3
+pack_id	rebar-a615-grade60-zhao2016-m1
+redistribution	permitted	Selected attributed numerical facts and original modeling notes only; no source document, prose, figures or table layout is redistributed
+citation	Stephen D. Zhao and Wassim M. Ghannoum, Setting Bar-Bending Requirements for High-Strength Steel Bars, CPF Research Grant 01-15, June 30 2016, sections 3.1.3 and 4.1 and Table 3 p. 21, Manufacturer 1 ASTM A615 Grade 60 rows; https://www.acifoundation.org/Portals/12/Files/PDFs/CRC-91-BarBending-Final-Report.pdf
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	zhao2016	properties.tsv	material-tsv-v1
+property	yield_mean	tensile-yield-strength-mean	dimensional
+property	ultimate_mean	tensile-strength-mean	dimensional
+property	uniform_mean	uniform-elongation-mean	dimensional
+property	fracture_mean	elongation-at-fracture-mean	dimensional
+property	ratio	reported-tensile-to-yield-strength-ratio	dimensional
+axis	bar_number	source-us-bar-number	dimensional
+axis	manufacturer	source-manufacturer-code	dimensional
+axis	cohort	source-zhao2016-a615-grade60-cohort	dimensional
+axis	straight	source-straight-unbent-bar	dimensional
+axis	strain_aged	source-experimental-strain-aging	dimensional
+axis	temperature_known	source-test-temperature-known	dimensional
+axis	rate_known	source-test-rate-known	dimensional
+axis	gauge	gauge-length	dimensional

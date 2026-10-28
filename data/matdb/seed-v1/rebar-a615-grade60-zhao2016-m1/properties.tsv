@@ -1,0 +1,53 @@
+frankensim.matdb-source.v1
+observation	cohort	ASTM A615 Grade 60 reinforcing bars #5, #8 and #11 from report Manufacturer 1, straight baseline coupons	Zhao and Ghannoum 2016 sections 3.1.3 and 4.1, Table 3 p. 21	At least three coupons per bar type were tested monotonically using ASTM A370-15 with an 8 in gauge length. Manufacturer numbers are anonymized report identities and are not mapped to any named donor. Bar number is a discrete product label, not diameter in meters; no interpolation across bar sizes or manufacturers is allowed. These are reported sample means, not specification minima, characteristic strengths, a design allowance or a product-family distribution. Exact numerical test temperature and strain rate are not stated for these table rows; the warm-temperature statement for the separate bend tests is not silently transferred here. No artificial prestrain-and-aging test is represented by the baseline rows.
+observation	measurements	Manufacturer 1 Grade 60 A615 monotonic baseline groups	Original Table 3 numerical columns only	For bars #5/#8/#11, reported yield is 63.0/63.7/63.2 ksi and UTS is 97.9/101.3/104.0 ksi. Uniform elongation follows ASTM E8/E8M-15a and is 11.2/10.7/11.2 percent; fracture elongation is 16.5/16.2/17.9 percent. The separately rounded T/Y entries are 1.55/1.59/1.64. PSI conversion uses pound 0.45359237 kg, standard gravity 9.80665 m/s2 and inch 0.0254 m. Printed ratios are retained independently rather than recomputed. Uniform and fracture elongation are distinct and cannot define a complete stress-strain, cyclic, damage or hardening law. No modulus, density, thermal data, bonded concrete response or gauge-independent fracture threshold is inferred. Source standard deviations are unstated.
+curve	yield-mean	cohort,measurements	yield_mean	bar_number	1	MPa	5:434.3697094696067,8:439.1960395748246,11:435.7486609282404	tabulated
+uncertainty	yield-mean	unstated	-	-	-	-
+validity	yield-mean	bar_number	5	11	1
+validity	yield-mean	manufacturer	1	1	1
+validity	yield-mean	cohort	1	1	1
+validity	yield-mean	straight	1	1	1
+validity	yield-mean	strain_aged	0	0	1
+validity	yield-mean	temperature_known	0	0	1
+validity	yield-mean	rate_known	0	0	1
+validity	yield-mean	gauge	0.2032	0.2032	m
+curve	ultimate-mean	cohort,measurements	ultimate_mean	bar_number	1	MPa	5:674.9967390011825,8:698.4389137979549,11:717.0547584895095	tabulated
+uncertainty	ultimate-mean	unstated	-	-	-	-
+validity	ultimate-mean	bar_number	5	11	1
+validity	ultimate-mean	manufacturer	1	1	1
+validity	ultimate-mean	cohort	1	1	1
+validity	ultimate-mean	straight	1	1	1
+validity	ultimate-mean	strain_aged	0	0	1
+validity	ultimate-mean	temperature_known	0	0	1
+validity	ultimate-mean	rate_known	0	0	1
+validity	ultimate-mean	gauge	0.2032	0.2032	m
+curve	uniform-elongation	cohort,measurements	uniform_mean	bar_number	1	1	5:0.112,8:0.107,11:0.112	tabulated
+uncertainty	uniform-elongation	unstated	-	-	-	-
+validity	uniform-elongation	bar_number	5	11	1
+validity	uniform-elongation	manufacturer	1	1	1
+validity	uniform-elongation	cohort	1	1	1
+validity	uniform-elongation	straight	1	1	1
+validity	uniform-elongation	strain_aged	0	0	1
+validity	uniform-elongation	temperature_known	0	0	1
+validity	uniform-elongation	rate_known	0	0	1
+validity	uniform-elongation	gauge	0.2032	0.2032	m
+curve	fracture-elongation	cohort,measurements	fracture_mean	bar_number	1	1	5:0.165,8:0.162,11:0.179	tabulated
+uncertainty	fracture-elongation	unstated	-	-	-	-
+validity	fracture-elongation	bar_number	5	11	1
+validity	fracture-elongation	manufacturer	1	1	1
+validity	fracture-elongation	cohort	1	1	1
+validity	fracture-elongation	straight	1	1	1
+validity	fracture-elongation	strain_aged	0	0	1
+validity	fracture-elongation	temperature_known	0	0	1
+validity	fracture-elongation	rate_known	0	0	1
+validity	fracture-elongation	gauge	0.2032	0.2032	m
+curve	reported-ratio	cohort,measurements	ratio	bar_number	1	1	5:1.55,8:1.59,11:1.64	tabulated
+uncertainty	reported-ratio	unstated	-	-	-	-
+validity	reported-ratio	bar_number	5	11	1
+validity	reported-ratio	manufacturer	1	1	1
+validity	reported-ratio	cohort	1	1	1
+validity	reported-ratio	straight	1	1	1
+validity	reported-ratio	strain_aged	0	0	1
+validity	reported-ratio	temperature_known	0	0	1
+validity	reported-ratio	rate_known	0	0	1
+validity	reported-ratio	gauge	0.2032	0.2032	m

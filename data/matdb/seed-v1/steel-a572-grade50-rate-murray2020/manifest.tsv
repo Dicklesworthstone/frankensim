@@ -1,0 +1,19 @@
+frankensim.matdb-manifest.v3
+pack_id	steel-a572-grade50-rate-murray2020
+redistribution	permitted	Selected attributed numerical facts and original modeling notes only; no source document, prose, figures or table layout is redistributed
+citation	Matthew P. Murray, Dynamic strength properties of structural steel at elevated rates of strain, Mississippi State University thesis, May 2020, sections 4.1-4.4 and Tables 5.1, 5.2 and C.1, pp. 28-44 and 106; https://scholarsjunction.msstate.edu/td/1592/ ; https://scholarsjunction.msstate.edu/cgi/viewcontent.cgi?article=2591&context=td
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	murray2020	properties.tsv	material-tsv-v1
+property	upper_yield_mean	tensile-upper-yield-strength-mean	dimensional
+property	ultimate_mean	tensile-strength-mean	dimensional
+property	upper_yield_sd	tensile-upper-yield-strength-reported-standard-deviation	dimensional
+property	ultimate_sd	tensile-strength-reported-standard-deviation	dimensional
+property	rate_sd	strain-rate-reported-standard-deviation	dimensional
+property	count	source-test-count	dimensional
+property	lower_yield_mean	tensile-lower-yield-strength-mean	dimensional
+property	elongation_mean	elongation-after-fracture-mean	dimensional
+property	area_reduction_mean	reduction-of-area-mean	dimensional
+axis	target_rate	source-target-strain-rate	dimensional
+axis	cohort	source-murray2020-a572-cohort	dimensional
+axis	temperature_known	source-test-temperature-known	dimensional
+axis	room_temperature	source-room-temperature	dimensional

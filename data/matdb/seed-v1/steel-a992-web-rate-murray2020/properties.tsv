@@ -1,0 +1,58 @@
+frankensim.matdb-source.v1
+observation	cohort	ASTM A992 S12x31.8 beam web, three 20 ft beams from one heat, nominal parent web thickness 0.35 in	Murray 2020 sections 4.1-4.4, room-temperature monotonic tension	The source's mill report also lists A6, A709-50, A572-50 and A36; this does not make results interchangeable with the separately tested A572 plate. Waterjet-cut web coupons, not flange coupons, use ASTM E8 sheet geometry for static tests and the documented pin-type dynamic geometry. Engineering stress uses original cross-section and inertia-corrected force. Upper yield is the maximum at onset of discontinuous yielding, distinct from lower yield or offset proof stress. Parent material is full thickness except approximately 0.006 in removed in strain-gauge regions of highest-rate specimens. Room temperature is stated but no numerical test temperature is given.
+observation	rate-groups	A992 web target-rate groups SR, DR1, DR2, DR3 and DR4	Murray 2020 Tables 5.1 and 5.3, pp. 42 and 45	The coordinate is TARGET strain rate, not the actual rate of every coupon. Each rate was measured in the elastic region. Discrete groups have 14, 5, 7, 5 and 10 tests; no interpolation is admitted. Means and reported specimen standard deviations remain separate properties without invented confidence bounds. In particular A992 rate scatter is transcribed from the PRIMARY thesis Table 5.3: 5.3e-6, 1.9e-4, 3.9e-3, 1.6e-2 and 3.1e-1 s^-1, not the A572 scatter repeated by an abbreviated web presentation. Strength conversion uses 1 ksi = 6.89475729316836 MPa. Gauge-mark fractures remain in strength statistics according to the source; no dynamic ductility average is inferred.
+observation	static-ductility	A992 web static group of fourteen coupons	Murray 2020 Table C.1 average row, p. 106	The printed averages are lower yield 51.0 ksi, post-fracture elongation 32.0 percent and area reduction 69.1 percent. The target rate is 0.00002 s^-1; the printed average actual rate is 2.42e-5 s^-1. The table's printed 32.0 percent average is retained without silently recomputing it from independently rounded individual entries. This is not uniform elongation, a local fracture criterion, modulus or a full stress-strain law. No density, thermal, cyclic or plastic hardening profile is supplied.
+curve	upper-yield-mean	cohort,rate-groups	upper_yield_mean	target_rate	s^-1	MPa	0.00002:372.3168938310914,0.002:415.7538647780521,0.05:443.3328939507255,0.2:466.0855930181811,2:538.4805445964489	tabulated
+uncertainty	upper-yield-mean	unstated	-	-	-	-
+validity	upper-yield-mean	target_rate	0.00002	2	s^-1
+validity	upper-yield-mean	cohort	1	1	1
+validity	upper-yield-mean	temperature_known	0	0	1
+validity	upper-yield-mean	room_temperature	1	1	1
+curve	ultimate-mean	cohort,rate-groups	ultimate_mean	target_rate	s^-1	MPa	0.00002:475.0487774993001,0.002:493.6646221908545,0.05:509.5225639651418,0.2:525.3805057394291,2:575.0227582502413	tabulated
+uncertainty	ultimate-mean	unstated	-	-	-	-
+validity	ultimate-mean	target_rate	0.00002	2	s^-1
+validity	ultimate-mean	cohort	1	1	1
+validity	ultimate-mean	temperature_known	0	0	1
+validity	ultimate-mean	room_temperature	1	1	1
+curve	upper-yield-sd	cohort,rate-groups	upper_yield_sd	target_rate	s^-1	MPa	0.00002:9.514765064572336,0.002:7.791075741280246,0.05:8.273708751802031,0.2:4.826330105217852,2:6.89475729316836	tabulated
+uncertainty	upper-yield-sd	unstated	-	-	-	-
+validity	upper-yield-sd	target_rate	0.00002	2	s^-1
+validity	upper-yield-sd	cohort	1	1	1
+validity	upper-yield-sd	temperature_known	0	0	1
+validity	upper-yield-sd	room_temperature	1	1	1
+curve	ultimate-sd	cohort,rate-groups	ultimate_sd	target_rate	s^-1	MPa	0.00002:3.309483500720813,0.002:3.654221365379231,0.05:1.861584469155457,0.2:1.241056312770305,2:2.68895534433566	tabulated
+uncertainty	ultimate-sd	unstated	-	-	-	-
+validity	ultimate-sd	target_rate	0.00002	2	s^-1
+validity	ultimate-sd	cohort	1	1	1
+validity	ultimate-sd	temperature_known	0	0	1
+validity	ultimate-sd	room_temperature	1	1	1
+curve	rate-sd	cohort,rate-groups	rate_sd	target_rate	s^-1	s^-1	0.00002:5.3e-6,0.002:1.9e-4,0.05:3.9e-3,0.2:1.6e-2,2:3.1e-1	tabulated
+uncertainty	rate-sd	unstated	-	-	-	-
+validity	rate-sd	target_rate	0.00002	2	s^-1
+validity	rate-sd	cohort	1	1	1
+validity	rate-sd	temperature_known	0	0	1
+validity	rate-sd	room_temperature	1	1	1
+curve	test-count	cohort,rate-groups	count	target_rate	s^-1	1	0.00002:14,0.002:5,0.05:7,0.2:5,2:10	tabulated
+uncertainty	test-count	unstated	-	-	-	-
+validity	test-count	target_rate	0.00002	2	s^-1
+validity	test-count	cohort	1	1	1
+validity	test-count	temperature_known	0	0	1
+validity	test-count	room_temperature	1	1	1
+scalar	lower-yield-static	cohort,static-ductility	lower_yield_mean	351.6326219515864	MPa	constant
+uncertainty	lower-yield-static	unstated	-	-	-	-
+validity	lower-yield-static	cohort	1	1	1
+validity	lower-yield-static	temperature_known	0	0	1
+validity	lower-yield-static	room_temperature	1	1	1
+validity	lower-yield-static	target_rate	0.00002	0.00002	s^-1
+scalar	elongation-static	cohort,static-ductility	elongation_mean	0.320	1	constant
+uncertainty	elongation-static	unstated	-	-	-	-
+validity	elongation-static	cohort	1	1	1
+validity	elongation-static	temperature_known	0	0	1
+validity	elongation-static	room_temperature	1	1	1
+validity	elongation-static	target_rate	0.00002	0.00002	s^-1
+scalar	area-reduction-static	cohort,static-ductility	area_reduction_mean	0.691	1	constant
+uncertainty	area-reduction-static	unstated	-	-	-	-
+validity	area-reduction-static	cohort	1	1	1
+validity	area-reduction-static	temperature_known	0	0	1
+validity	area-reduction-static	room_temperature	1	1	1
+validity	area-reduction-static	target_rate	0.00002	0.00002	s^-1

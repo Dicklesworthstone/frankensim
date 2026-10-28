@@ -1,0 +1,39 @@
+frankensim.matdb-source.v1
+observation	ssab-mill	SSAB ASTM A572 Grade 50 mill plate, product range 0.188-4.00 in thick and 60-131.9 in wide	Producer tensile requirements, transverse ASTM A6 testing	Specified minimum yield 50 ksi and tensile strength 65 ksi are product requirements, not measured coupons, statistical means, constitutive yield points or design allowables. Exact numerical test temperature, strain rate, residual stress and detailed rolling/heat-treatment schedule are unstated. This pack excludes temper-leveled plate, unfinished coil, other grades and other product forms. Conversion uses 1 in=0.0254 m and 1 psi=0.45359237*9.80665/0.0254^2 Pa; printed imperial dimensions are authoritative here rather than their independently rounded metric equivalents.
+observation	elongation	The same mill-plate product window, which is entirely wider than 24 in	SSAB mechanical-property table and footnote 1	The table prints minimum elongation 21 percent over 2 in and 18 percent over 8 in. Footnote 1 reduces each by two percentage points for plates wider than 24 in, yielding 19 and 16 percent for this mill-plate window. Additional ASTM A6 adjustments may apply; source-additional-elongation-adjustments=0 explicitly selects the unadjusted remainder of the producer rule, and a caller requiring another adjustment must not use these values. Gauge-length-specific fracture elongation is not uniform elongation, local failure strain or a strain-hardening law.
+scalar	yield-minimum	ssab-mill	yield_minimum	344.737864658418	MPa	constant
+uncertainty	yield-minimum	unstated	-	-	-	-
+validity	yield-minimum	specification_minimum	1	1	1
+validity	yield-minimum	mill_plate	1	1	1
+validity	yield-minimum	transverse	1	1	1
+validity	yield-minimum	temperature_known	0	0	1
+validity	yield-minimum	thickness	0.0047752	0.1016	m
+validity	yield-minimum	width	1.524	3.35026	m
+scalar	ultimate-minimum	ssab-mill	ultimate_minimum	448.1592240559434	MPa	constant
+uncertainty	ultimate-minimum	unstated	-	-	-	-
+validity	ultimate-minimum	specification_minimum	1	1	1
+validity	ultimate-minimum	mill_plate	1	1	1
+validity	ultimate-minimum	transverse	1	1	1
+validity	ultimate-minimum	temperature_known	0	0	1
+validity	ultimate-minimum	thickness	0.0047752	0.1016	m
+validity	ultimate-minimum	width	1.524	3.35026	m
+scalar	elongation-2in	ssab-mill,elongation	elongation_minimum	0.19	1	constant
+uncertainty	elongation-2in	unstated	-	-	-	-
+validity	elongation-2in	specification_minimum	1	1	1
+validity	elongation-2in	mill_plate	1	1	1
+validity	elongation-2in	transverse	1	1	1
+validity	elongation-2in	temperature_known	0	0	1
+validity	elongation-2in	thickness	0.0047752	0.1016	m
+validity	elongation-2in	width	1.524	3.35026	m
+validity	elongation-2in	gauge	0.0508	0.0508	m
+validity	elongation-2in	other_adjustments	0	0	1
+scalar	elongation-8in	ssab-mill,elongation	elongation_minimum	0.16	1	constant
+uncertainty	elongation-8in	unstated	-	-	-	-
+validity	elongation-8in	specification_minimum	1	1	1
+validity	elongation-8in	mill_plate	1	1	1
+validity	elongation-8in	transverse	1	1	1
+validity	elongation-8in	temperature_known	0	0	1
+validity	elongation-8in	thickness	0.0047752	0.1016	m
+validity	elongation-8in	width	1.524	3.35026	m
+validity	elongation-8in	gauge	0.2032	0.2032	m
+validity	elongation-8in	other_adjustments	0	0	1
