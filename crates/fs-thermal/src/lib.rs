@@ -12,6 +12,8 @@
 
 pub mod enthalpy;
 pub mod observers;
+/// Mass-owned layer/cylinder/sphere fronts and thermostatted extinction.
+pub mod phase_geometry;
 /// Conservative solid/vapor exchange and implicit latent-energy feedback.
 pub mod sublimation;
 
