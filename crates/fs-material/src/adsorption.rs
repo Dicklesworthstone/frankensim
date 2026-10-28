@@ -23,6 +23,9 @@
 //! https://doi.org/10.5194/acp-21-15725-2021 . Source applicability is required
 //! independently for the actual adsorbent, gas and caloric charts.
 
+/// Shared-site multicomponent uptake with the original source and caloric owners.
+pub mod competitive;
+
 use crate::phase::{PhaseStateError, ResolvedHeatCapacityCurve};
 use crate::state_point::{
     MaterialPropertySelection, MaterialStatePointError, ResolvedMaterialStatePoint,
