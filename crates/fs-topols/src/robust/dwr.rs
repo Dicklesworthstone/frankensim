@@ -105,6 +105,8 @@ pub fn assess_weighted_compliance_dwr_controlled<B>(
         }
         let support = EdgeBand::new(case.edge, case.start, case.end)
             .map_err(|error| invalid(format!("DWR load segment refused: {error}")))?;
+        crate::optimize::require_traction_support(phi, support)
+            .map_err(|error| invalid(format!("DWR load case {index}: {error}")))?;
         let traction = |_: f64, _: f64| case.traction;
         let estimate = fs_dwr::estimate_elasticity_compliance_with_boundary_traction(
             &problem, &|_, _| [0.0, 0.0], &|_, _| [0.0, 0.0],

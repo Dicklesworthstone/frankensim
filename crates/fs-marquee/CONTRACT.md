@@ -50,6 +50,10 @@ in-process CutFEM solves and does not mutate ledgers or the filesystem.
    radii, finite area target in `(0, 1)`, nonnegative finite step size, and
    finite positive radius bounds.
 4. The exposed runner is deterministic for a fixed source tree and machine.
+5. Elasticity study imports and resumed checkpoints use `fs-topols`' shared
+   complete-traction-support admission. Projected compliance and stress paths
+   refuse an absent, cut or uncertain loaded trace before publishing a study;
+   holding boundary nodes fixed cannot legitimize an initially missing load.
 
 ## Error model
 

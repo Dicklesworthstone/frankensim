@@ -1,6 +1,5 @@
 //! Optimizer load declarations must not shrink with the active PDE domain.
 use super::*;
-use fs_cutfem::CutSdf;
 
 // CutFEM deliberately assembles traction only on active material boundaries.
 // A fixed-load optimization problem has a stronger contract: the COMPLETE
@@ -8,24 +7,8 @@ use fs_cutfem::CutSdf;
 // zero. Otherwise deleting a loaded component can look like perfect compliance.
 // Kernel admission has already checked that every level-set node is finite.
 pub(super) fn require(phi: &GridSdf, support: EdgeBand, case: usize) -> Result<(), CutFemError> {
-    let (a, b) = (support.start(), support.end());
-    let (lo, hi) = match support.edge() {
-        DesignBoxEdge::Bottom => ([a, 0.0], [b, 0.0]),
-        DesignBoxEdge::Top => ([a, 1.0], [b, 1.0]),
-        DesignBoxEdge::Left => ([0.0, a], [0.0, b]),
-        DesignBoxEdge::Right => ([1.0, a], [1.0, b]),
-    };
-    // The existing bilinear enclosure visits ALL crossed grid intervals, not
-    // just the band's endpoints or a few samples. Uncertain/cut support refuses
-    // under the same strict-negative convention as canonical traction assembly.
-    let enclosure = phi.enclose(lo, hi);
-    if !(enclosure.lo().is_finite() && enclosure.hi().is_finite() && enclosure.hi() < 0.0) {
-        return Err(invalid(format!(
-            "multi-load case {case} requires its complete {:?} traction band {a}..={b} inside material; absent, cut or uncertain load support cannot be discarded",
-            support.edge(),
-        )));
-    }
-    Ok(())
+    crate::optimize::require_traction_support(phi, support)
+        .map_err(|error| invalid(format!("multi-load case {case}: {error}")))
 }
 
 #[cfg(test)]

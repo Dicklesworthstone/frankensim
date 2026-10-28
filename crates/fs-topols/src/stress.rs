@@ -14,7 +14,7 @@ use crate::{
 use fs_cutfem::quad::cut_cell_rules;
 use fs_cutfem::{
     BoundaryTraction, CutElasticity, CutFemError, CutSdf,
-    CutStabilizationScaling, DesignBoxEdge, EdgeBand, MAX_PLANE_STRAIN_STIFFNESS_RATIO,
+    CutStabilizationScaling, EdgeBand, MAX_PLANE_STRAIN_STIFFNESS_RATIO,
     Quadtree,
 };
 use fs_material::IsotropicElastic;
@@ -158,17 +158,7 @@ fn validate(
             phi.n(), settings.level
         )));
     }
-    if phi.nodes().iter().any(|value| !value.is_finite()) {
-        return Err(invalid("stress evaluation requires finite level-set nodes"));
-    }
-    if !(fixture.load.is_finite() && fixture.load > 0.0) {
-        return Err(invalid("stress-evaluation cantilever load must be finite and positive"));
-    }
-    let support = EdgeBand::new(
-        DesignBoxEdge::Right,
-        0.5 - fixture.band,
-        0.5 + fixture.band,
-    ).map_err(|error| invalid(format!("stress-evaluation load band refused: {error}")))?;
+    let support = crate::optimize::require_cantilever_support(phi, fixture)?;
     if !(settings.youngs.is_finite() && settings.youngs > 0.0) {
         return Err(invalid("stress evaluation requires finite positive Young's modulus"));
     }

@@ -392,6 +392,22 @@ mod tests {
     }
 
     #[test]
+    fn imported_partial_load_support_refuses_before_output_publication() {
+        let root = std::env::temp_dir().join(format!("frankensim-projected-load-support-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let input = root.join("input.csv");
+        let output = root.join("run");
+        // Half the prescribed right-edge band is absent. Fixed boundary nodes
+        // alone preserve this defect; admission must use the physics owner.
+        field(&input, &GridSdf::from_fn(8, &|_, y| y - 0.5)).unwrap();
+        let arguments = vec![output.to_string_lossy().into_owned(), "3".into(), "1".into(),
+            "0.5".into(), "1".into(), "--initial-field".into(), input.to_string_lossy().into_owned()];
+        let error = run(&arguments).unwrap_err();
+        assert!(error.to_string().contains("load support"), "{error}");
+        assert!(!output.exists(), "a refused physical problem must not publish a study");
+    }
+
+    #[test]
     fn resume_rejects_problem_overrides_but_allows_a_segment_limit() {
         let options = Options::parse(&args(&["out", "--resume", "state.bin", "--max-updates", "0"])).unwrap();
         assert_eq!(options.resume, Some(PathBuf::from("state.bin")));

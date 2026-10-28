@@ -83,6 +83,7 @@ impl ComplianceKernel {
         let support = cantilever_support(fixture)?;
         let (material, lambda, mu) = validated_plane_strain_material(settings)?;
         validate_evolution(phi, settings)?;
+        crate::optimize::require_traction_support(phi, support)?;
         let grid = Quadtree::uniform(settings.level);
         let (mass, stiffness) = mass_stiffness(phi.n());
         Ok(Self { grid, material, lambda, mu, support, fixture, settings, mass, stiffness })
@@ -98,9 +99,7 @@ impl ComplianceKernel {
         if let ControlFlow::Break(reason) = control(stage(0)) {
             return Ok(ControlFlow::Break(reason));
         }
-        if phi.nodes().iter().any(|v| !v.is_finite()) {
-            return Err(invalid_input("evolution produced a non-finite level set"));
-        }
+        crate::optimize::require_traction_support(&phi, self.support)?;
         let clamp = |x: f64, _y: f64| x < 1e-9;
         let traction = |_: f64, _: f64| [0.0, -self.fixture.load];
         let solver = CutElasticity {
@@ -346,6 +345,7 @@ pub(super) fn optimize_compliance_segment_controlled<B>(
     cantilever_support(fixture)?;
     validated_plane_strain_material(settings)?;
     validate_evolution(phi, settings)?;
+    crate::optimize::require_cantilever_support(phi, fixture)?;
     if !(start_ell.is_finite() && start_ell >= 0.0) {
         return Err(invalid_input("checkpoint multiplier must be finite and nonnegative"));
     }

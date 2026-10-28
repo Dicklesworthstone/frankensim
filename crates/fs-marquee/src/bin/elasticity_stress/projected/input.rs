@@ -1,6 +1,5 @@
 //! Authored geometry and mechanics for a new stress-constrained study.
 use super::*;
-use fs_cutfem::CutSdf;
 use fs_marquee::level_set_csv::read_field;
 use std::path::PathBuf;
 
@@ -76,13 +75,7 @@ impl Input {
 /// The two boundary traces are frozen after this check. The bilinear enclosure
 /// covers the whole band, including gaps missed by endpoint/midpoint probes.
 pub(super) fn require_load_support(geometry: &GridSdf, fixture: Cantilever) -> Result<(), Box<dyn Error>> {
-    if !(fixture.band.is_finite() && fixture.band > 0.0 && fixture.band <= 0.5) {
-        return Err("load band half-width must be in (0,0.5]".into());
-    }
-    let enclosure = geometry.enclose([1.0, 0.5 - fixture.band], [1.0, 0.5 + fixture.band]);
-    if !(enclosure.lo().is_finite() && enclosure.hi().is_finite() && enclosure.hi() < 0.0) {
-        return Err("the complete declared load band must lie inside material; absent, cut or uncertain load support cannot be discarded".into());
-    }
+    fs_topols::optimize::require_cantilever_support(geometry, fixture)?;
     Ok(())
 }
 

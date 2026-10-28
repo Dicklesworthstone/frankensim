@@ -10,7 +10,7 @@
 use crate::GridSdf;
 use crate::optimize::{Cantilever, OptimizeReport, OptimizeSettings, material_volume, optimize_compliance};
 use fs_cutfem::{
-    BoundaryTraction, CutElasticity, CutFemError, DesignBoxEdge, EdgeBand,
+    BoundaryTraction, CutElasticity, CutFemError, EdgeBand,
     MAX_PLANE_STRAIN_STIFFNESS_RATIO, Quadtree,
 };
 use fs_material::IsotropicElastic;
@@ -86,18 +86,7 @@ fn validate_inputs(
             phi.n(), settings.level
         )));
     }
-    if phi.nodes().iter().any(|value| !value.is_finite()) {
-        return Err(invalid_input("optimizer level set must contain only finite nodal values"));
-    }
-    if !(fixture.load.is_finite() && fixture.load > 0.0) {
-        return Err(invalid_input("cantilever load must be finite and strictly positive"));
-    }
-    let support = EdgeBand::new(
-        DesignBoxEdge::Right,
-        0.5 - fixture.band,
-        0.5 + fixture.band,
-    )
-    .map_err(|error| invalid_input(format!("invalid cantilever load band: {error}")))?;
+    let support = crate::optimize::require_cantilever_support(phi, fixture)?;
     if !(settings.youngs.is_finite() && settings.youngs > 0.0) {
         return Err(invalid_input("Young's modulus must be finite and strictly positive"));
     }
@@ -257,5 +246,116 @@ mod tests {
             settings,
         ).is_err());
         assert_eq!(phi.nodes(), before.as_slice());
+    }
+
+    // G3: every consumer must solve the same prescribed-load problem. CutFEM's
+    // active-edge clipping cannot silently change a study's external load.
+    #[test]
+    fn missing_load_support_refuses_across_evaluation_stress_and_error_estimation() {
+        use crate::{RobustAggregate, RobustLoadCase};
+        use fs_cutfem::DesignBoxEdge;
+        use std::ops::ControlFlow;
+
+        let settings = OptimizeSettings { level: 3, ..OptimizeSettings::default() };
+        let fixture = Cantilever { load: 1.0, band: 0.375 };
+        let cases = [RobustLoadCase::new(DesignBoxEdge::Right,
+            0.125, 0.875, [0.0, -1.0], 1.0).unwrap()];
+        let mut gap = GridSdf::from_fn(8, &|_, _| -1.0);
+        *gap.node_mut(8, 2) = 1.0;
+        for y in [0.125, 0.5, 0.875] { assert!(gap.value_at([1.0, y]) < 0.0); }
+        for phi in [GridSdf::from_fn(8, &|x, _| x - 0.8),
+            GridSdf::from_fn(8, &|_, y| y - 0.5), gap]
+        {
+            let mut stages = Vec::new();
+            let errors = [
+                evaluate_compliance_design(&phi, fixture, settings).err(),
+                evaluate_compliance_design_controlled(&phi, fixture, settings, 1, |stage| {
+                    stages.push(stage);
+                    ControlFlow::<()>::Continue(())
+                }).err(),
+                crate::evaluate_sampled_stress(&phi, fixture, settings).err(),
+                crate::stress::evaluate_sampled_stress_controlled(&phi, fixture, settings, 1,
+                    |_| ControlFlow::<()>::Continue(())).err(),
+                assess_compliance_dwr(&phi, fixture, settings).err(),
+                crate::evaluate_robust_design(&phi, &cases, settings,
+                    RobustAggregate::WeightedSum).err(),
+                crate::evaluate_robust_sampled_stress(&phi, &cases, settings,
+                    RobustAggregate::WeightedSum).err(),
+                crate::assess_weighted_compliance_dwr(&phi, &cases, settings).err(),
+            ];
+            for error in errors {
+                assert!(matches!(error, Some(CutFemError::InvalidElasticityInput { ref what })
+                    if what.contains("load support")), "{error:?}");
+            }
+            assert_eq!(stages, [DesignEvaluationStage::Prepare],
+                "unsupported load must refuse before assembly or CG work");
+        }
+    }
+
+    #[test]
+    fn zero_objective_weight_does_not_erase_a_declared_physical_load() {
+        use crate::{RobustAggregate, RobustLoadCase};
+        use fs_cutfem::DesignBoxEdge;
+
+        let phi = beam(3);
+        let settings = OptimizeSettings { level: 3, ..OptimizeSettings::default() };
+        let cases = [
+            RobustLoadCase::new(DesignBoxEdge::Right, 0.375, 0.625, [0.0, -1.0], 1.0).unwrap(),
+            RobustLoadCase::new(DesignBoxEdge::Top, 0.375, 0.625, [1.0, 0.0], 0.0).unwrap(),
+        ];
+        for error in [
+            crate::evaluate_robust_design(&phi, &cases, settings,
+                RobustAggregate::WeightedSum).err(),
+            crate::evaluate_robust_sampled_stress(&phi, &cases, settings,
+                RobustAggregate::WeightedSum).err(),
+            crate::assess_weighted_compliance_dwr(&phi, &cases, settings).err(),
+        ] {
+            assert!(matches!(error, Some(CutFemError::InvalidElasticityInput { ref what })
+                if what.contains("case 1") && what.contains("load support")), "{error:?}");
+        }
+    }
+
+    // G4: admission refuses before mutating geometry or accepting saved state.
+    #[test]
+    fn missing_load_support_cannot_be_repaired_by_optimization_or_checkpoint_replay() {
+        use crate::checkpoint::OptimizeCheckpoint;
+
+        let settings = OptimizeSettings { level: 3, iterations: 1, ..OptimizeSettings::default() };
+        let fixture = Cantilever { load: 1.0, band: 0.125 };
+        let mut phi = GridSdf::from_fn(8, &|_, y| y - 0.5);
+        let before = phi.nodes().to_vec();
+        assert!(matches!(optimize_compliance(&mut phi, fixture, settings),
+            Err(CutFemError::InvalidElasticityInput { ref what }) if what.contains("load support")));
+        assert_eq!(phi.nodes(), before);
+        for result in [
+            OptimizeCheckpoint::new(phi.clone(), fixture, settings),
+            OptimizeCheckpoint::restore(phi.clone(), fixture, settings, 1, settings.ell0),
+        ] {
+            assert!(matches!(result, Err(CutFemError::InvalidElasticityInput { ref what })
+                if what.contains("load support")));
+        }
+        assert_eq!(phi.nodes(), before);
+    }
+
+    #[test]
+    fn supported_single_and_multiple_load_owners_retain_the_same_physics() {
+        use crate::{RobustAggregate, RobustLoadCase};
+        use fs_cutfem::DesignBoxEdge;
+
+        let phi = beam(3);
+        let settings = OptimizeSettings { level: 3, ..OptimizeSettings::default() };
+        let fixture = Cantilever { load: 1.0, band: 0.125 };
+        let one = evaluate_compliance_design(&phi, fixture, settings).unwrap();
+        let cases = [RobustLoadCase::new(DesignBoxEdge::Right,
+            0.375, 0.625, [0.0, -1.0], 1.0).unwrap()];
+        let many = crate::evaluate_robust_design(&phi, &cases, settings,
+            RobustAggregate::WeightedSum).unwrap();
+        assert_eq!(one.compliance.to_bits(), many.objective.to_bits());
+        assert_eq!(one.volume.to_bits(), many.volume.to_bits());
+        assert_eq!(one.snapshot, many.snapshot);
+        let doubled = evaluate_compliance_design(&phi, Cantilever { load: 2.0, ..fixture },
+            settings).unwrap();
+        assert!((doubled.compliance / one.compliance - 4.0).abs() < 1e-8,
+            "linear elasticity compliance must scale with traction squared");
     }
 }

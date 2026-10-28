@@ -199,9 +199,11 @@ pub fn evaluate_robust_design(
     let mut case_compliances = Vec::with_capacity(load_cases.len());
     let mut weighted_sum = 0.0;
     let mut worst = 0.0_f64;
-    for case in load_cases {
+    for (index, case) in load_cases.iter().enumerate() {
         let support = EdgeBand::new(case.edge, case.start, case.end)
             .map_err(|error| invalid(format!("robust load segment refused: {error}")))?;
+        crate::optimize::require_traction_support(phi, support)
+            .map_err(|error| invalid(format!("robust load case {index}: {error}")))?;
         let traction_value = case.traction;
         let traction = move |_: f64, _: f64| traction_value;
         let solution = solver.solve_with_boundary_traction(

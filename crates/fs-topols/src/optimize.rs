@@ -23,8 +23,8 @@ use fs_material::IsotropicElastic;
 use std::fmt::Write as _;
 
 const MATERIAL_STRAIN_LIMIT: f64 = 1.0;
-const SOLVER_TOL: f64 = 1e-12;
-const SOLVER_MAX_ITERS: usize = 60_000;
+pub(crate) const SOLVER_TOL: f64 = 1e-12;
+pub(crate) const SOLVER_MAX_ITERS: usize = 60_000;
 
 /// Optimizer controls.
 #[derive(Debug, Clone, Copy)]
@@ -97,7 +97,7 @@ pub struct OptimizeReport {
     pub rows: Vec<String>,
 }
 
-fn fnv(phi: &GridSdf) -> u64 {
+pub(crate) fn fnv(phi: &GridSdf) -> u64 {
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     for v in phi.nodes() {
         for b in v.to_bits().to_le_bytes() {
@@ -138,11 +138,11 @@ pub struct Cantilever {
     pub band: f64,
 }
 
-fn invalid_input(what: impl Into<String>) -> CutFemError {
+pub(crate) fn invalid_input(what: impl Into<String>) -> CutFemError {
     CutFemError::InvalidElasticityInput { what: what.into() }
 }
 
-fn cantilever_support(fixture: Cantilever) -> Result<EdgeBand, CutFemError> {
+pub(crate) fn cantilever_support(fixture: Cantilever) -> Result<EdgeBand, CutFemError> {
     if !(fixture.load.is_finite() && fixture.load > 0.0) {
         return Err(invalid_input(format!(
             "cantilever load magnitude {} must be finite and strictly positive",
@@ -157,6 +157,52 @@ fn cantilever_support(fixture: Cantilever) -> Result<EdgeBand, CutFemError> {
     })
 }
 
+/// Admit a fixed traction band against the complete declared material trace.
+///
+/// CutFEM may integrate traction on only the active part of a box edge. A
+/// design study must retain the whole prescribed load: deleting its support
+/// must not count as reducing compliance. The bilinear enclosure visits every
+/// crossed lattice interval, including gaps between endpoint/midpoint probes.
+/// This is a geometry/load check, not a solve or a structural-stability claim.
+///
+/// # Errors
+/// Refuses nonfinite geometry and absent, cut or uncertain load support.
+pub fn require_traction_support(phi: &GridSdf, support: EdgeBand) -> Result<(), CutFemError> {
+    if phi.nodes().iter().any(|value| !value.is_finite()) {
+        return Err(invalid_input("load support requires finite level-set nodes"));
+    }
+    let (a, b) = (support.start(), support.end());
+    let (lo, hi) = match support.edge() {
+        DesignBoxEdge::Bottom => ([a, 0.0], [b, 0.0]),
+        DesignBoxEdge::Top => ([a, 1.0], [b, 1.0]),
+        DesignBoxEdge::Left => ([0.0, a], [0.0, b]),
+        DesignBoxEdge::Right => ([1.0, a], [1.0, b]),
+    };
+    let enclosure = phi.enclose(lo, hi);
+    if !(enclosure.lo().is_finite() && enclosure.hi().is_finite() && enclosure.hi() < 0.0) {
+        return Err(invalid_input(format!(
+            "the complete {:?} traction band {a}..={b} must lie inside material; absent, cut or uncertain load support cannot be discarded",
+            support.edge(),
+        )));
+    }
+    Ok(())
+}
+
+/// Admit the cantilever declaration and its complete loaded material trace.
+///
+/// Returns the same checked band consumed by the canonical elasticity solver.
+///
+/// # Errors
+/// Refuses an invalid load/band or [`require_traction_support`] failure.
+pub fn require_cantilever_support(
+    phi: &GridSdf,
+    fixture: Cantilever,
+) -> Result<EdgeBand, CutFemError> {
+    let support = cantilever_support(fixture)?;
+    require_traction_support(phi, support)?;
+    Ok(support)
+}
+
 /// Retain a two-cell-deep non-design material pad around the checked load.
 ///
 /// The pad extends one cell past each support endpoint and one cell beyond the
@@ -165,7 +211,7 @@ fn cantilever_support(fixture: Cantilever) -> Result<EdgeBand, CutFemError> {
 /// columns can change. The caller still receives a fail-closed refusal when its
 /// initial geometry cuts the support; this policy repairs only geometry changes
 /// made by the optimizer after a successful canonical solve.
-fn retain_cantilever_load_pad(phi: &mut GridSdf, support: EdgeBand) -> usize {
+pub(crate) fn retain_cantilever_load_pad(phi: &mut GridSdf, support: EdgeBand) -> usize {
     let n = phi.n();
     let h = phi.h();
     let x_min = 1.0 - 2.0 * h;
@@ -186,7 +232,7 @@ fn retain_cantilever_load_pad(phi: &mut GridSdf, support: EdgeBand) -> usize {
     changed
 }
 
-fn validated_plane_strain_material(
+pub(crate) fn validated_plane_strain_material(
     settings: OptimizeSettings,
 ) -> Result<(IsotropicElastic, f64, f64), CutFemError> {
     if !(settings.youngs.is_finite() && settings.youngs > 0.0) {
@@ -226,7 +272,7 @@ fn validated_plane_strain_material(
 }
 
 /// Uniform Q1 mass/stiffness on the full node lattice (Sobolev step).
-fn mass_stiffness(n: usize) -> (fs_sparse::Csr, fs_sparse::Csr) {
+pub(crate) fn mass_stiffness(n: usize) -> (fs_sparse::Csr, fs_sparse::Csr) {
     #[allow(clippy::cast_precision_loss)]
     let h = 1.0 / n as f64;
     let stride = n + 1;

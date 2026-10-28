@@ -11,6 +11,19 @@ with zero meshing anywhere in the loop.
 
 ## Public types and semantics
 
+- `optimize::{require_traction_support, require_cantilever_support}`: shared
+  fixed-load admission for single-load and multi-load compliance, sampled
+  stress, DWR assessment, optimization and checkpoint recovery. Every declared
+  traction band must remain strictly inside material over its entire bilinear
+  trace, including zero-objective-weight scenarios. Nonfinite geometry, gaps,
+  absent material and uncertain/cut support refuse. CutFEM's active-boundary
+  traction integration is unchanged; topology optimization cannot reduce its
+  declared load by removing the material beneath it. G3 consumer tests check
+  interior gaps and consistent single/multi-load values; G4 refusal tests
+  preserve caller geometry and prevent admitting an invalid checkpoint.
+  The fixed-run and checkpoint engines also share the material-law admission,
+  load-pad retention, Q1 Sobolev matrices, snapshot hashing and solver controls;
+  resume does not maintain a second copy of those numerical primitives.
 - `GridSdf`: nodal φ on a uniform `[0,1]²` lattice, bilinear between
   nodes, implementing fs-cutfem's `CutSdf`. The enclosure is EXACT up
   to an outward roundoff pad — a bilinear attains its extrema at the

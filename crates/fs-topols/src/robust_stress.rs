@@ -142,10 +142,13 @@ fn validate_geometry(
     if load_cases.is_empty() || !load_cases.iter().any(|case| case.weight() > 0.0) {
         return Err(invalid("robust stress evaluation requires a load set with a positive objective weight"));
     }
-    load_cases.iter().map(|case| {
+    load_cases.iter().enumerate().map(|(index, case)| {
         let [start, end] = case.interval();
         RobustLoadCase::new(case.edge(), start, end, case.traction(), case.weight())?;
-        EdgeBand::new(case.edge(), start, end)
+        let support = EdgeBand::new(case.edge(), start, end)?;
+        crate::optimize::require_traction_support(phi, support)
+            .map_err(|error| invalid(format!("robust stress load case {index}: {error}")))?;
+        Ok(support)
     }).collect()
 }
 

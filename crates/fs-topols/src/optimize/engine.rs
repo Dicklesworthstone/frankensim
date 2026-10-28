@@ -81,15 +81,14 @@ impl ComplianceKernel {
         let support = cantilever_support(fixture)?;
         let (material, lambda, mu) = validated_plane_strain_material(settings)?;
         validate_evolution(phi, settings)?;
+        require_traction_support(phi, support)?;
         let grid = Quadtree::uniform(settings.level);
         let (mass, stiffness) = mass_stiffness(phi.n());
         Ok(Self { grid, material, lambda, mu, support, fixture, settings, mass, stiffness })
     }
 
     fn evaluate(&self, phi: GridSdf) -> Result<EvaluatedDesign, CutFemError> {
-        if phi.nodes().iter().any(|v| !v.is_finite()) {
-            return Err(invalid_input("evolution produced a non-finite level set"));
-        }
+        require_traction_support(&phi, self.support)?;
         let clamp = |x: f64, _y: f64| x < 1e-9;
         let traction = |_: f64, _: f64| [0.0, -self.fixture.load];
         let solver = CutElasticity {
@@ -320,6 +319,7 @@ pub fn optimize_compliance(
     cantilever_support(fixture)?;
     validated_plane_strain_material(settings)?;
     validate_evolution(phi, settings)?;
+    require_cantilever_support(phi, fixture)?;
     let mut report = OptimizeReport::default();
     if settings.iterations == 0 {
         return Ok(report);
