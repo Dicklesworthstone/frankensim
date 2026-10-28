@@ -1,0 +1,57 @@
+frankensim.matdb-source.v1
+observation	stock-shapes	TECAFLON PTFE natural unfilled polytetrafluoroethylene stock shapes	Ensinger AD; ASTM D4894 tension, D695 compression, C177 conductivity, D257 resistivity, D149 breakdown	Producer comparison data, not bounds. Tensile specimens are extruded and machined. Numerical test temperature, pressure, moisture and loading rate are unstated. Compression is stress at 1% strain, not ultimate strength. Dielectric breakdown uses a 0.125 mm film in air. CLTE is a longitudinal interval mean. Specific heat, tensile modulus, Poisson ratio and a temperature law are absent; service limits do not extend these claims. Electrical resistivity converts ohm cm to ohm m by 0.01.
+scalar	density	stock-shapes	density	2150	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade	1	1	1
+validity	density	source_test_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+validity	density	source_pressure_known	0	0	1
+scalar	thermal-conductivity	stock-shapes	thermal_conductivity	0.20	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	source_grade	1	1	1
+validity	thermal-conductivity	source_test_temperature_known	0	0	1
+validity	thermal-conductivity	source_moisture_condition_known	0	0	1
+validity	thermal-conductivity	source_pressure_known	0	0	1
+scalar	tensile-strength	stock-shapes	tensile_strength	22	MPa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	source_grade	1	1	1
+validity	tensile-strength	source_test_temperature_known	0	0	1
+validity	tensile-strength	source_moisture_condition_known	0	0	1
+validity	tensile-strength	source_pressure_known	0	0	1
+validity	tensile-strength	source_test_rate_known	0	0	1
+scalar	tensile-elongation	stock-shapes	tensile_elongation	220	%	constant
+uncertainty	tensile-elongation	unstated	-	-	-	-
+validity	tensile-elongation	source_grade	1	1	1
+validity	tensile-elongation	source_test_temperature_known	0	0	1
+validity	tensile-elongation	source_moisture_condition_known	0	0	1
+validity	tensile-elongation	source_pressure_known	0	0	1
+validity	tensile-elongation	source_test_rate_known	0	0	1
+scalar	compression-one-percent	stock-shapes	compressive_stress	5	MPa	constant
+uncertainty	compression-one-percent	unstated	-	-	-	-
+validity	compression-one-percent	source_grade	1	1	1
+validity	compression-one-percent	source_test_temperature_known	0	0	1
+validity	compression-one-percent	source_moisture_condition_known	0	0	1
+validity	compression-one-percent	source_pressure_known	0	0	1
+validity	compression-one-percent	source_test_rate_known	0	0	1
+validity	compression-one-percent	compressive_strain	0.01	0.01	1
+scalar	mean-longitudinal-100c	stock-shapes	mean_longitudinal_clte	13e-5	K^-1	constant
+uncertainty	mean-longitudinal-100c	unstated	-	-	-	-
+validity	mean-longitudinal-100c	source_grade	1	1	1
+validity	mean-longitudinal-100c	source_reference_temperature	296.15	296.15	K
+validity	mean-longitudinal-100c	source_range_end_temperature	373.15	373.15	K
+validity	mean-longitudinal-100c	source_moisture_condition_known	0	0	1
+validity	mean-longitudinal-100c	source_pressure_known	0	0	1
+scalar	electrical-resistivity	stock-shapes	electrical_resistivity	1e15	Ohm*m	constant
+uncertainty	electrical-resistivity	unstated	-	-	-	-
+validity	electrical-resistivity	source_grade	1	1	1
+validity	electrical-resistivity	source_test_temperature_known	0	0	1
+validity	electrical-resistivity	source_moisture_condition_known	0	0	1
+validity	electrical-resistivity	source_pressure_known	0	0	1
+scalar	dielectric-breakdown-strength	stock-shapes	dielectric_breakdown_strength	80000000	V/m	constant
+uncertainty	dielectric-breakdown-strength	unstated	-	-	-	-
+validity	dielectric-breakdown-strength	source_grade	1	1	1
+validity	dielectric-breakdown-strength	source_test_temperature_known	0	0	1
+validity	dielectric-breakdown-strength	source_moisture_condition_known	0	0	1
+validity	dielectric-breakdown-strength	source_pressure_known	0	0	1
+validity	dielectric-breakdown-strength	film_thickness	0.000125	0.000125	m
+validity	dielectric-breakdown-strength	test_medium_air	1	1	1

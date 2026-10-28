@@ -1,0 +1,43 @@
+frankensim.matdb-source.v1
+observation	stock-shapes	TECAFINE PE1000 natural unfilled UHMW polyethylene stock shapes	Ensinger AA; ISO 527-1 tension, ISO 2039-1 indentation, ISO 60243-1 dielectric breakdown	Typical comparison data; temperature, moisture, pressure, loading rate and dielectric specimen thickness are unstated. No thermal conductivity or heat capacity is supplied. The source CLTE lacks a temperature interval/convention and is not promoted into a thermal law. Service-temperature limits do not establish property validity. Ball indentation is retained as its own pressure-valued method, not converted to Shore hardness or strength.
+scalar	density	stock-shapes	density	930	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade	1	1	1
+validity	density	source_test_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+validity	density	source_pressure_known	0	0	1
+scalar	tensile-modulus	stock-shapes	tensile_modulus	700	MPa	constant
+uncertainty	tensile-modulus	unstated	-	-	-	-
+validity	tensile-modulus	source_grade	1	1	1
+validity	tensile-modulus	source_test_temperature_known	0	0	1
+validity	tensile-modulus	source_moisture_condition_known	0	0	1
+validity	tensile-modulus	source_pressure_known	0	0	1
+validity	tensile-modulus	source_test_rate_known	0	0	1
+scalar	tensile-yield-strength	stock-shapes	tensile_yield_strength	19	MPa	constant
+uncertainty	tensile-yield-strength	unstated	-	-	-	-
+validity	tensile-yield-strength	source_grade	1	1	1
+validity	tensile-yield-strength	source_test_temperature_known	0	0	1
+validity	tensile-yield-strength	source_moisture_condition_known	0	0	1
+validity	tensile-yield-strength	source_pressure_known	0	0	1
+validity	tensile-yield-strength	source_test_rate_known	0	0	1
+scalar	tensile-yield-strain	stock-shapes	tensile_yield_strain	11	%	constant
+uncertainty	tensile-yield-strain	unstated	-	-	-	-
+validity	tensile-yield-strain	source_grade	1	1	1
+validity	tensile-yield-strain	source_test_temperature_known	0	0	1
+validity	tensile-yield-strain	source_moisture_condition_known	0	0	1
+validity	tensile-yield-strain	source_pressure_known	0	0	1
+validity	tensile-yield-strain	source_test_rate_known	0	0	1
+scalar	ball-indentation-hardness	stock-shapes	ball_indentation_hardness	30	MPa	constant
+uncertainty	ball-indentation-hardness	unstated	-	-	-	-
+validity	ball-indentation-hardness	source_grade	1	1	1
+validity	ball-indentation-hardness	source_test_temperature_known	0	0	1
+validity	ball-indentation-hardness	source_moisture_condition_known	0	0	1
+validity	ball-indentation-hardness	source_pressure_known	0	0	1
+validity	ball-indentation-hardness	source_test_rate_known	0	0	1
+scalar	dielectric-breakdown-strength	stock-shapes	dielectric_breakdown_strength	44000000	V/m	constant
+uncertainty	dielectric-breakdown-strength	unstated	-	-	-	-
+validity	dielectric-breakdown-strength	source_grade	1	1	1
+validity	dielectric-breakdown-strength	source_test_temperature_known	0	0	1
+validity	dielectric-breakdown-strength	source_moisture_condition_known	0	0	1
+validity	dielectric-breakdown-strength	source_pressure_known	0	0	1
+validity	dielectric-breakdown-strength	source_test_thickness_known	0	0	1

@@ -1,0 +1,18 @@
+frankensim.matdb-manifest.v3
+pack_id	ensinger-tecafine-pe1000-natural-2017
+redistribution	permitted	Selected attributed numerical facts and original notes only; no source document or table layout is redistributed
+citation	Ensinger, TECAFINE PE1000 natural stock shapes, 2017-11-23 version AA, p. 1; https://www.ensinger-online.com/modules/public/sheet/createsheet.php?FILENAME=TECAFINE_PE1000_natural_7.PDF&FL=7&SID=2313&ZOOM=1.0 ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	ensinger-tecafine-pe1000-natural-2017	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	tensile_modulus	tensile-modulus	dimensional
+property	tensile_yield_strength	tensile-yield-strength	dimensional
+property	tensile_yield_strain	tensile-yield-strain	dimensional
+property	ball_indentation_hardness	ball-indentation-hardness	dimensional
+property	dielectric_breakdown_strength	dielectric-breakdown-strength	dimensional
+axis	source_grade	source-grade-tecafine-pe1000-natural	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	source_test_rate_known	source-test-rate-known	dimensional
+axis	source_test_thickness_known	source-test-thickness-known	dimensional

@@ -1,0 +1,26 @@
+frankensim.matdb-manifest.v3
+pack_id	henkel-loctite-aa326-seven-day-cure-2020
+redistribution	permitted	Selected attributed numerical facts and original notes only; no source document or table layout is redistributed
+citation	Henkel, LOCTITE AA 326 Technical Data Sheet, August 2020, pp. 1-2 cured physical/electrical properties; https://datasheets.tdx.henkel.com/LOCTITE-AA-326-en_GL.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	henkel-loctite-aa326-seven-day-cure-2020	properties.tsv	material-tsv-v1
+property	tensile_modulus	tensile-modulus	dimensional
+property	tensile_strength	tensile-strength	dimensional
+property	tensile_elongation	tensile-elongation	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	electrical_resistivity	electrical-resistivity	dimensional
+property	dielectric_breakdown_strength	dielectric-breakdown-strength	dimensional
+property	relative_permittivity	relative-permittivity	dimensional
+property	dielectric_dissipation_factor	dielectric-dissipation-factor	dimensional
+axis	source_grade	source-grade-loctite-aa326-2020	dimensional
+axis	cured_material	cured-material	dimensional
+axis	cure_age	cure-age	dimensional
+axis	cure_temperature	cure-temperature	absolute-temperature
+axis	source_cure_activation_known	source-cure-activation-known	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	source_test_rate_known	source-test-rate-known	dimensional
+axis	source_test_thickness_known	source-test-thickness-known	dimensional
+axis	frequency	frequency	dimensional

@@ -1,0 +1,98 @@
+frankensim.matdb-source.v1
+observation	cured-acrylic	LOCTITE AA 326 cured polyurethane-methacrylate acrylic adhesive	Henkel 2020 cured-property table; ISO 527-2 tension, ISO 527-3 elongation, ISO 8302 conductivity, IEC 60093 resistivity, IEC 60243-1 breakdown, IEC 60250 dielectric	Seven-day cure at 23 C is explicit; activation protocol, humidity and numerical property-test temperature are not. Specific heat 0.3 kJ/(kg K) becomes 300 J/(kg K), and volume resistivity 2e13 ohm cm becomes 2e11 ohm m. The separate liquid specific gravity is excluded. Frequency pairs remain tabulated observations. Bulk tensile properties are not bond strengths; separate activated lap joints have different cure histories. No cured density, Poisson ratio, continuous frequency law, or CLTE temperature interval is supplied.
+scalar	tensile-modulus	cured-acrylic	tensile_modulus	300	MPa	constant
+uncertainty	tensile-modulus	unstated	-	-	-	-
+validity	tensile-modulus	source_grade	1	1	1
+validity	tensile-modulus	cured_material	1	1	1
+validity	tensile-modulus	cure_age	604800	604800	s
+validity	tensile-modulus	cure_temperature	296.15	296.15	K
+validity	tensile-modulus	source_cure_activation_known	0	0	1
+validity	tensile-modulus	source_test_temperature_known	0	0	1
+validity	tensile-modulus	source_moisture_condition_known	0	0	1
+validity	tensile-modulus	source_pressure_known	0	0	1
+validity	tensile-modulus	source_test_rate_known	0	0	1
+scalar	tensile-strength	cured-acrylic	tensile_strength	34	MPa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	source_grade	1	1	1
+validity	tensile-strength	cured_material	1	1	1
+validity	tensile-strength	cure_age	604800	604800	s
+validity	tensile-strength	cure_temperature	296.15	296.15	K
+validity	tensile-strength	source_cure_activation_known	0	0	1
+validity	tensile-strength	source_test_temperature_known	0	0	1
+validity	tensile-strength	source_moisture_condition_known	0	0	1
+validity	tensile-strength	source_pressure_known	0	0	1
+validity	tensile-strength	source_test_rate_known	0	0	1
+scalar	tensile-elongation	cured-acrylic	tensile_elongation	135	%	constant
+uncertainty	tensile-elongation	unstated	-	-	-	-
+validity	tensile-elongation	source_grade	1	1	1
+validity	tensile-elongation	cured_material	1	1	1
+validity	tensile-elongation	cure_age	604800	604800	s
+validity	tensile-elongation	cure_temperature	296.15	296.15	K
+validity	tensile-elongation	source_cure_activation_known	0	0	1
+validity	tensile-elongation	source_test_temperature_known	0	0	1
+validity	tensile-elongation	source_moisture_condition_known	0	0	1
+validity	tensile-elongation	source_pressure_known	0	0	1
+validity	tensile-elongation	source_test_rate_known	0	0	1
+scalar	thermal-conductivity	cured-acrylic	thermal_conductivity	0.1	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	source_grade	1	1	1
+validity	thermal-conductivity	cured_material	1	1	1
+validity	thermal-conductivity	cure_age	604800	604800	s
+validity	thermal-conductivity	cure_temperature	296.15	296.15	K
+validity	thermal-conductivity	source_cure_activation_known	0	0	1
+validity	thermal-conductivity	source_test_temperature_known	0	0	1
+validity	thermal-conductivity	source_moisture_condition_known	0	0	1
+validity	thermal-conductivity	source_pressure_known	0	0	1
+scalar	specific-heat-capacity	cured-acrylic	specific_heat_capacity	300	J/kg/K	constant
+uncertainty	specific-heat-capacity	unstated	-	-	-	-
+validity	specific-heat-capacity	source_grade	1	1	1
+validity	specific-heat-capacity	cured_material	1	1	1
+validity	specific-heat-capacity	cure_age	604800	604800	s
+validity	specific-heat-capacity	cure_temperature	296.15	296.15	K
+validity	specific-heat-capacity	source_cure_activation_known	0	0	1
+validity	specific-heat-capacity	source_test_temperature_known	0	0	1
+validity	specific-heat-capacity	source_moisture_condition_known	0	0	1
+validity	specific-heat-capacity	source_pressure_known	0	0	1
+scalar	electrical-resistivity	cured-acrylic	electrical_resistivity	2e11	Ohm*m	constant
+uncertainty	electrical-resistivity	unstated	-	-	-	-
+validity	electrical-resistivity	source_grade	1	1	1
+validity	electrical-resistivity	cured_material	1	1	1
+validity	electrical-resistivity	cure_age	604800	604800	s
+validity	electrical-resistivity	cure_temperature	296.15	296.15	K
+validity	electrical-resistivity	source_cure_activation_known	0	0	1
+validity	electrical-resistivity	source_test_temperature_known	0	0	1
+validity	electrical-resistivity	source_moisture_condition_known	0	0	1
+validity	electrical-resistivity	source_pressure_known	0	0	1
+scalar	dielectric-breakdown-strength	cured-acrylic	dielectric_breakdown_strength	30000000	V/m	constant
+uncertainty	dielectric-breakdown-strength	unstated	-	-	-	-
+validity	dielectric-breakdown-strength	source_grade	1	1	1
+validity	dielectric-breakdown-strength	cured_material	1	1	1
+validity	dielectric-breakdown-strength	cure_age	604800	604800	s
+validity	dielectric-breakdown-strength	cure_temperature	296.15	296.15	K
+validity	dielectric-breakdown-strength	source_cure_activation_known	0	0	1
+validity	dielectric-breakdown-strength	source_test_temperature_known	0	0	1
+validity	dielectric-breakdown-strength	source_moisture_condition_known	0	0	1
+validity	dielectric-breakdown-strength	source_pressure_known	0	0	1
+validity	dielectric-breakdown-strength	source_test_thickness_known	0	0	1
+curve	relative-permittivity	cured-acrylic	relative_permittivity	frequency	Hz	1	100:5.6,1000:5.3,1000000:4.6	tabulated
+uncertainty	relative-permittivity	unstated	-	-	-	-
+validity	relative-permittivity	source_grade	1	1	1
+validity	relative-permittivity	cured_material	1	1	1
+validity	relative-permittivity	cure_age	604800	604800	s
+validity	relative-permittivity	cure_temperature	296.15	296.15	K
+validity	relative-permittivity	source_cure_activation_known	0	0	1
+validity	relative-permittivity	source_test_temperature_known	0	0	1
+validity	relative-permittivity	source_moisture_condition_known	0	0	1
+validity	relative-permittivity	source_pressure_known	0	0	1
+validity	relative-permittivity	frequency	100	1000000	Hz
+curve	dielectric-dissipation-factor	cured-acrylic	dielectric_dissipation_factor	frequency	Hz	1	100:0.03,1000:0.03,1000000:0.04	tabulated
+uncertainty	dielectric-dissipation-factor	unstated	-	-	-	-
+validity	dielectric-dissipation-factor	source_grade	1	1	1
+validity	dielectric-dissipation-factor	cured_material	1	1	1
+validity	dielectric-dissipation-factor	cure_age	604800	604800	s
+validity	dielectric-dissipation-factor	cure_temperature	296.15	296.15	K
+validity	dielectric-dissipation-factor	source_cure_activation_known	0	0	1
+validity	dielectric-dissipation-factor	source_test_temperature_known	0	0	1
+validity	dielectric-dissipation-factor	source_moisture_condition_known	0	0	1
+validity	dielectric-dissipation-factor	source_pressure_known	0	0	1
+validity	dielectric-dissipation-factor	frequency	100	1000000	Hz

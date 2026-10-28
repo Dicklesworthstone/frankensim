@@ -1,0 +1,27 @@
+frankensim.matdb-manifest.v3
+pack_id	ensinger-tecamid-12-natural
+redistribution	permitted	Selected attributed numerical facts and original notes only; no source document or table layout is redistributed
+citation	Ensinger, TECAMID 12 natural stock shapes, 2023-07-19 version AD, p. 1; https://www.ensinger-online.com/modules/public/sheet/createsheet.php?FILENAME=TECAMID_12_natural_0.PDF&FL=0&SID=661&ZOOM=1.2 ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	ensinger-tecamid-12-natural	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	tensile_modulus	tensile-modulus	dimensional
+property	tensile_strength	tensile-strength	dimensional
+property	tensile_elongation	tensile-elongation	dimensional
+property	tensile_yield_strain	tensile-yield-strain	dimensional
+property	flexural_modulus	flexural-modulus	dimensional
+property	flexural_strength	flexural-strength	dimensional
+property	compression_modulus	compression-modulus	dimensional
+property	compressive_stress	compressive-stress	dimensional
+property	mean_longitudinal_clte	mean-longitudinal-thermal-expansion-coefficient-from-23c	dimensional
+axis	source_grade	source-grade-tecamid-12-natural	dimensional
+axis	immediately_after_machining	immediately-after-machining	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	test_speed	test-speed	dimensional
+axis	compressive_strain	compressive-strain	dimensional
+axis	source_reference_temperature	source-reference-temperature	absolute-temperature
+axis	source_range_end_temperature	source-range-end-temperature	absolute-temperature

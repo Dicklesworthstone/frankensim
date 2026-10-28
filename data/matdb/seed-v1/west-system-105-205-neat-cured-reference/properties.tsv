@@ -1,0 +1,93 @@
+frankensim.matdb-source.v1
+observation	neat-cured	WEST SYSTEM 105 resin and 205 Fast Hardener, neat cured epoxy	Producer comparison table; D638 tension, D695 compression, D790 bending	Two weeks at unspecified room temperature; no added fillers or fibers. Comparison values, not guarantees or joint properties. Specific gravity retains its unspecified water-reference temperature; no density conversion. Source psi: compression yield 11418, tensile strength 7846, tensile modulus 408000, flexural strength 14112, flexural modulus 461000; multiply by 6894.757293168361 for Pa. Recipe is 5.19:1 mass. No thermal law or viscoelasticity is supplied.
+scalar	specific-gravity	neat-cured	specific_gravity	1.18	1	constant
+uncertainty	specific-gravity	unstated	-	-	-	-
+validity	specific-gravity	source_grade	1	1	1
+validity	specific-gravity	cured_material	1	1	1
+validity	specific-gravity	cure_age	1209600	1209600	s
+validity	specific-gravity	specified_resin_hardener_mass_ratio	5.19	5.19	1
+validity	specific-gravity	added_fillers	0	0	1
+validity	specific-gravity	added_fiber_reinforcement	0	0	1
+validity	specific-gravity	source_cure_temperature_known	0	0	1
+validity	specific-gravity	source_test_temperature_known	0	0	1
+validity	specific-gravity	source_moisture_condition_known	0	0	1
+validity	specific-gravity	source_pressure_known	0	0	1
+validity	specific-gravity	specific_gravity_reference_temperature_known	0	0	1
+scalar	compressive-yield-strength	neat-cured	compressive_yield_strength	78724338.773396343	Pa	constant
+uncertainty	compressive-yield-strength	unstated	-	-	-	-
+validity	compressive-yield-strength	source_grade	1	1	1
+validity	compressive-yield-strength	cured_material	1	1	1
+validity	compressive-yield-strength	cure_age	1209600	1209600	s
+validity	compressive-yield-strength	specified_resin_hardener_mass_ratio	5.19	5.19	1
+validity	compressive-yield-strength	added_fillers	0	0	1
+validity	compressive-yield-strength	added_fiber_reinforcement	0	0	1
+validity	compressive-yield-strength	source_cure_temperature_known	0	0	1
+validity	compressive-yield-strength	source_test_temperature_known	0	0	1
+validity	compressive-yield-strength	source_moisture_condition_known	0	0	1
+validity	compressive-yield-strength	source_pressure_known	0	0	1
+validity	compressive-yield-strength	source_test_rate_known	0	0	1
+scalar	tensile-strength	neat-cured	tensile_strength	54096265.722198956	Pa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	source_grade	1	1	1
+validity	tensile-strength	cured_material	1	1	1
+validity	tensile-strength	cure_age	1209600	1209600	s
+validity	tensile-strength	specified_resin_hardener_mass_ratio	5.19	5.19	1
+validity	tensile-strength	added_fillers	0	0	1
+validity	tensile-strength	added_fiber_reinforcement	0	0	1
+validity	tensile-strength	source_cure_temperature_known	0	0	1
+validity	tensile-strength	source_test_temperature_known	0	0	1
+validity	tensile-strength	source_moisture_condition_known	0	0	1
+validity	tensile-strength	source_pressure_known	0	0	1
+validity	tensile-strength	source_test_rate_known	0	0	1
+scalar	tensile-elongation	neat-cured	tensile_elongation	3.4	%	constant
+uncertainty	tensile-elongation	unstated	-	-	-	-
+validity	tensile-elongation	source_grade	1	1	1
+validity	tensile-elongation	cured_material	1	1	1
+validity	tensile-elongation	cure_age	1209600	1209600	s
+validity	tensile-elongation	specified_resin_hardener_mass_ratio	5.19	5.19	1
+validity	tensile-elongation	added_fillers	0	0	1
+validity	tensile-elongation	added_fiber_reinforcement	0	0	1
+validity	tensile-elongation	source_cure_temperature_known	0	0	1
+validity	tensile-elongation	source_test_temperature_known	0	0	1
+validity	tensile-elongation	source_moisture_condition_known	0	0	1
+validity	tensile-elongation	source_pressure_known	0	0	1
+validity	tensile-elongation	source_test_rate_known	0	0	1
+scalar	tensile-modulus	neat-cured	tensile_modulus	2813060975.6126914	Pa	constant
+uncertainty	tensile-modulus	unstated	-	-	-	-
+validity	tensile-modulus	source_grade	1	1	1
+validity	tensile-modulus	cured_material	1	1	1
+validity	tensile-modulus	cure_age	1209600	1209600	s
+validity	tensile-modulus	specified_resin_hardener_mass_ratio	5.19	5.19	1
+validity	tensile-modulus	added_fillers	0	0	1
+validity	tensile-modulus	added_fiber_reinforcement	0	0	1
+validity	tensile-modulus	source_cure_temperature_known	0	0	1
+validity	tensile-modulus	source_test_temperature_known	0	0	1
+validity	tensile-modulus	source_moisture_condition_known	0	0	1
+validity	tensile-modulus	source_pressure_known	0	0	1
+validity	tensile-modulus	source_test_rate_known	0	0	1
+scalar	flexural-strength	neat-cured	flexural_strength	97298814.921191901	Pa	constant
+uncertainty	flexural-strength	unstated	-	-	-	-
+validity	flexural-strength	source_grade	1	1	1
+validity	flexural-strength	cured_material	1	1	1
+validity	flexural-strength	cure_age	1209600	1209600	s
+validity	flexural-strength	specified_resin_hardener_mass_ratio	5.19	5.19	1
+validity	flexural-strength	added_fillers	0	0	1
+validity	flexural-strength	added_fiber_reinforcement	0	0	1
+validity	flexural-strength	source_cure_temperature_known	0	0	1
+validity	flexural-strength	source_test_temperature_known	0	0	1
+validity	flexural-strength	source_moisture_condition_known	0	0	1
+validity	flexural-strength	source_pressure_known	0	0	1
+validity	flexural-strength	source_test_rate_known	0	0	1
+scalar	flexural-modulus	neat-cured	flexural_modulus	3178483112.1506143	Pa	constant
+uncertainty	flexural-modulus	unstated	-	-	-	-
+validity	flexural-modulus	source_grade	1	1	1
+validity	flexural-modulus	cured_material	1	1	1
+validity	flexural-modulus	cure_age	1209600	1209600	s
+validity	flexural-modulus	specified_resin_hardener_mass_ratio	5.19	5.19	1
+validity	flexural-modulus	added_fillers	0	0	1
+validity	flexural-modulus	added_fiber_reinforcement	0	0	1
+validity	flexural-modulus	source_cure_temperature_known	0	0	1
+validity	flexural-modulus	source_test_temperature_known	0	0	1
+validity	flexural-modulus	source_moisture_condition_known	0	0	1
+validity	flexural-modulus	source_pressure_known	0	0	1
+validity	flexural-modulus	source_test_rate_known	0	0	1

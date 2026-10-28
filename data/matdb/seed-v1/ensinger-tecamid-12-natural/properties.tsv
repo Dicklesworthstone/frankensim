@@ -1,0 +1,104 @@
+frankensim.matdb-source.v1
+observation	stock-shapes	TECAMID 12 natural PA12 machined stock shapes	Ensinger AD; ISO 527-2 tension, ISO 178 bending, ISO 604 compression, ISO 22007-4 thermal	Comparison values immediately after machining; numerical climate and moisture conditioning are unstated. Tensile specimen 1b; bending span 64 mm; compression cubes 10 mm and modulus specimens 10x10x50 mm over 0.5-1% strain. Speeds are crosshead speeds. Discrete compression points do not define interpolation or a constitutive law. Thermal values have no declared test temperature. CLTE values are separate longitudinal interval means, not instantaneous coefficients. No service-temperature extrapolation, wet-nylon law, isotropic modulus or guaranteed bound is inferred.
+scalar	density	stock-shapes	density	1020	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade	1	1	1
+validity	density	immediately_after_machining	1	1	1
+validity	density	source_test_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+validity	density	source_pressure_known	0	0	1
+scalar	thermal-conductivity	stock-shapes	thermal_conductivity	0.30	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	source_grade	1	1	1
+validity	thermal-conductivity	immediately_after_machining	1	1	1
+validity	thermal-conductivity	source_test_temperature_known	0	0	1
+validity	thermal-conductivity	source_moisture_condition_known	0	0	1
+validity	thermal-conductivity	source_pressure_known	0	0	1
+scalar	specific-heat-capacity	stock-shapes	specific_heat_capacity	1800	J/kg/K	constant
+uncertainty	specific-heat-capacity	unstated	-	-	-	-
+validity	specific-heat-capacity	source_grade	1	1	1
+validity	specific-heat-capacity	immediately_after_machining	1	1	1
+validity	specific-heat-capacity	source_test_temperature_known	0	0	1
+validity	specific-heat-capacity	source_moisture_condition_known	0	0	1
+validity	specific-heat-capacity	source_pressure_known	0	0	1
+scalar	tensile-modulus	stock-shapes	tensile_modulus	1800	MPa	constant
+uncertainty	tensile-modulus	unstated	-	-	-	-
+validity	tensile-modulus	source_grade	1	1	1
+validity	tensile-modulus	immediately_after_machining	1	1	1
+validity	tensile-modulus	source_test_temperature_known	0	0	1
+validity	tensile-modulus	source_moisture_condition_known	0	0	1
+validity	tensile-modulus	source_pressure_known	0	0	1
+validity	tensile-modulus	test_speed	1.6666666666666667e-5	1.6666666666666667e-5	m/s
+scalar	tensile-strength	stock-shapes	tensile_strength	53	MPa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	source_grade	1	1	1
+validity	tensile-strength	immediately_after_machining	1	1	1
+validity	tensile-strength	source_test_temperature_known	0	0	1
+validity	tensile-strength	source_moisture_condition_known	0	0	1
+validity	tensile-strength	source_pressure_known	0	0	1
+validity	tensile-strength	test_speed	8.333333333333334e-4	8.333333333333334e-4	m/s
+scalar	tensile-elongation	stock-shapes	tensile_elongation	200	%	constant
+uncertainty	tensile-elongation	unstated	-	-	-	-
+validity	tensile-elongation	source_grade	1	1	1
+validity	tensile-elongation	immediately_after_machining	1	1	1
+validity	tensile-elongation	source_test_temperature_known	0	0	1
+validity	tensile-elongation	source_moisture_condition_known	0	0	1
+validity	tensile-elongation	source_pressure_known	0	0	1
+validity	tensile-elongation	test_speed	8.333333333333334e-4	8.333333333333334e-4	m/s
+scalar	tensile-yield-strain	stock-shapes	tensile_yield_strain	9	%	constant
+uncertainty	tensile-yield-strain	unstated	-	-	-	-
+validity	tensile-yield-strain	source_grade	1	1	1
+validity	tensile-yield-strain	immediately_after_machining	1	1	1
+validity	tensile-yield-strain	source_test_temperature_known	0	0	1
+validity	tensile-yield-strain	source_moisture_condition_known	0	0	1
+validity	tensile-yield-strain	source_pressure_known	0	0	1
+validity	tensile-yield-strain	test_speed	8.333333333333334e-4	8.333333333333334e-4	m/s
+scalar	flexural-modulus	stock-shapes	flexural_modulus	1700	MPa	constant
+uncertainty	flexural-modulus	unstated	-	-	-	-
+validity	flexural-modulus	source_grade	1	1	1
+validity	flexural-modulus	immediately_after_machining	1	1	1
+validity	flexural-modulus	source_test_temperature_known	0	0	1
+validity	flexural-modulus	source_moisture_condition_known	0	0	1
+validity	flexural-modulus	source_pressure_known	0	0	1
+validity	flexural-modulus	test_speed	3.3333333333333335e-5	3.3333333333333335e-5	m/s
+scalar	flexural-strength	stock-shapes	flexural_strength	68	MPa	constant
+uncertainty	flexural-strength	unstated	-	-	-	-
+validity	flexural-strength	source_grade	1	1	1
+validity	flexural-strength	immediately_after_machining	1	1	1
+validity	flexural-strength	source_test_temperature_known	0	0	1
+validity	flexural-strength	source_moisture_condition_known	0	0	1
+validity	flexural-strength	source_pressure_known	0	0	1
+validity	flexural-strength	test_speed	3.3333333333333335e-5	3.3333333333333335e-5	m/s
+scalar	compression-modulus	stock-shapes	compression_modulus	1600	MPa	constant
+uncertainty	compression-modulus	unstated	-	-	-	-
+validity	compression-modulus	source_grade	1	1	1
+validity	compression-modulus	immediately_after_machining	1	1	1
+validity	compression-modulus	source_test_temperature_known	0	0	1
+validity	compression-modulus	source_moisture_condition_known	0	0	1
+validity	compression-modulus	source_pressure_known	0	0	1
+validity	compression-modulus	test_speed	8.333333333333333e-5	8.333333333333333e-5	m/s
+curve	compression-points	stock-shapes	compressive_stress	compressive_strain	1	MPa	0.01:13,0.02:24,0.05:55	tabulated
+uncertainty	compression-points	unstated	-	-	-	-
+validity	compression-points	compressive_strain	0.01	0.05	1
+validity	compression-points	source_grade	1	1	1
+validity	compression-points	immediately_after_machining	1	1	1
+validity	compression-points	source_test_temperature_known	0	0	1
+validity	compression-points	source_moisture_condition_known	0	0	1
+validity	compression-points	source_pressure_known	0	0	1
+validity	compression-points	test_speed	8.333333333333333e-5	8.333333333333333e-5	m/s
+scalar	mean-longitudinal-60c	stock-shapes	mean_longitudinal_clte	15e-5	K^-1	constant
+uncertainty	mean-longitudinal-60c	unstated	-	-	-	-
+validity	mean-longitudinal-60c	source_grade	1	1	1
+validity	mean-longitudinal-60c	immediately_after_machining	1	1	1
+validity	mean-longitudinal-60c	source_reference_temperature	296.15	296.15	K
+validity	mean-longitudinal-60c	source_range_end_temperature	333.15	333.15	K
+validity	mean-longitudinal-60c	source_moisture_condition_known	0	0	1
+validity	mean-longitudinal-60c	source_pressure_known	0	0	1
+scalar	mean-longitudinal-100c	stock-shapes	mean_longitudinal_clte	16e-5	K^-1	constant
+uncertainty	mean-longitudinal-100c	unstated	-	-	-	-
+validity	mean-longitudinal-100c	source_grade	1	1	1
+validity	mean-longitudinal-100c	immediately_after_machining	1	1	1
+validity	mean-longitudinal-100c	source_reference_temperature	296.15	296.15	K
+validity	mean-longitudinal-100c	source_range_end_temperature	373.15	373.15	K
+validity	mean-longitudinal-100c	source_moisture_condition_known	0	0	1
+validity	mean-longitudinal-100c	source_pressure_known	0	0	1

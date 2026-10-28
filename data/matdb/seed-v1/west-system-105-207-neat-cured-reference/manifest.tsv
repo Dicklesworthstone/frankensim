@@ -1,0 +1,25 @@
+frankensim.matdb-manifest.v3
+pack_id	west-system-105-207-neat-cured-reference
+redistribution	permitted	Selected attributed numerical facts and original notes only; no source document or table layout is redistributed
+citation	WEST SYSTEM, Compare Epoxy Physical Properties, 105/207 column and laboratory specimen conditions; https://www.westsystem.com/compare-epoxy-physical-properties/ ; mix ratio and test methods: 105/207 TDS October 2014, https://www.westsystem.com/app/uploads/2022/12/105-207-Epoxy-Resin.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	west-system-105-207-neat-cured-reference	properties.tsv	material-tsv-v1
+property	specific_gravity	specific-gravity	dimensional
+property	compressive_yield_strength	compressive-yield-strength	dimensional
+property	tensile_strength	tensile-strength	dimensional
+property	tensile_elongation	tensile-elongation	dimensional
+property	tensile_modulus	tensile-modulus	dimensional
+property	flexural_strength	flexural-strength	dimensional
+property	flexural_modulus	flexural-modulus	dimensional
+axis	source_grade	source-grade-west-system-105-207	dimensional
+axis	cured_material	cured-material	dimensional
+axis	cure_age	cure-age	dimensional
+axis	specified_resin_hardener_mass_ratio	specified-resin-hardener-mass-ratio	dimensional
+axis	added_fillers	added-fillers	dimensional
+axis	added_fiber_reinforcement	added-fiber-reinforcement	dimensional
+axis	source_cure_temperature_known	source-cure-temperature-known	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	source_test_rate_known	source-test-rate-known	dimensional
+axis	specific_gravity_reference_temperature_known	specific-gravity-reference-temperature-known	dimensional
