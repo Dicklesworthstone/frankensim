@@ -167,29 +167,6 @@ impl<F> FluidTransport for RheologyMaterial<F> {
     }
 }
 
-// Add the half-force transformation before reusing the existing stress
-// estimators. Its second moment is +(u F^T + F u^T)/2. This is the raw Guo
-// source, WITHOUT the collision prefactor (1 - 1/(2 tau)). See Premnath,
-// Pattison and Banerjee, arXiv:0901.2786, equations (5), (7), and (B23):
-// https://arxiv.org/pdf/0901.2786 . This restores the physical non-equilibrium
-// second moment of the time-explicit transformed populations.
-fn force_corrected<const D: usize, const Q: usize>(
-    mut f: [f64; Q],
-    velocities: [[f64; D]; Q],
-    weights: [f64; Q],
-    u: [f64; D],
-    force: [f64; D],
-) -> [f64; Q] {
-    for q in 0..Q {
-        let eu: f64 = velocities[q].iter().zip(u).map(|(e, u)| e * u).sum();
-        let raw: f64 = (0..D)
-            .map(|d| (3.0 * (velocities[q][d] - u[d]) + 9.0 * eu * velocities[q][d]) * force[d])
-            .sum();
-        f[q] += 0.5 * weights[q] * raw;
-    }
-    f
-}
-
 trait StressSlab<const D: usize, const Q: usize>: Slab<D, Q> {
     fn shear_numerator(&self, cell: usize) -> f64;
 }
@@ -197,19 +174,7 @@ impl StressSlab<2, 5> for ThermalLbm {
     fn shear_numerator(&self, cell: usize) -> f64 {
         let m = self.grid.moments(cell);
         let force = std::array::from_fn(|d| self.grid.g[d].mul_add(m.rho, self.grid.fext[cell][d]));
-        let corrected = force_corrected(
-            self.grid.f[cell],
-            crate::E.map(|e| [f64::from(e.0), f64::from(e.1)]),
-            crate::W,
-            m.u,
-            force,
-        );
-        crate::core2::shear_rate(
-            &corrected,
-            &crate::equilibrium(m.rho, m.u[0], m.u[1]),
-            m.rho,
-            1.0,
-        )
+        crate::core2::force_corrected_shear_rate(&self.grid.f[cell], m.rho, m.u, force, 1.0)
     }
 }
 impl StressSlab<3, 7> for ThermalLbm3 {

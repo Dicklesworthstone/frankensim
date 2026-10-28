@@ -28,9 +28,9 @@
 //! determinism hash stays a replay-checked CANDIDATE until the
 //! GOLDEN_POLICY four-quadrant ceremony, as in the 40p2 precedent).
 
-use crate::thermal::{ThermalForcingError, forcing::validate_external_forces};
-use super::{CollisionModel3, E3, OPP3, Q3, W3, collide_cell3, equilibrium3};
+use super::{CollisionModel3, E3, OPP3, Q3, collide_cell3, equilibrium3};
 use crate::rheology::{Rheology, RheologyStats, TAU_CAP, TAU_FLOOR};
+use crate::thermal::{ThermalForcingError, forcing::validate_external_forces};
 
 /// Flow-lattice sound speed squared (D3Q19).
 const CS2_F: f64 = 1.0 / 3.0;
@@ -224,8 +224,14 @@ impl PlatesGrid3 {
 /// The local shear-rate magnitude from the D3Q19 non-equilibrium second
 /// moment — the exact 3-D extension of the 2-D convention:
 /// `S_ab = −(3/(2ρτ)) Σ_q e_qa e_qb (f_q − feq_q)`, `γ̇ = √(2 S:S)`.
+/// This raw estimator assumes unforced populations. Guo-forced consumers
+/// must include the half-source stress correction.
 #[must_use]
 pub fn shear_rate3(f: &[f64; Q3], feq: &[f64; Q3], rho: f64, tau: f64) -> f64 {
+    shear_rate_from_stress3(nonequilibrium_stress3(f, feq), rho, tau)
+}
+
+fn nonequilibrium_stress3(f: &[f64; Q3], feq: &[f64; Q3]) -> [f64; 6] {
     let mut sxx = 0.0f64;
     let mut syy = 0.0f64;
     let mut szz = 0.0f64;
@@ -242,6 +248,10 @@ pub fn shear_rate3(f: &[f64; Q3], feq: &[f64; Q3], rho: f64, tau: f64) -> f64 {
         sxz += ex * ez * neq;
         syz += ey * ez * neq;
     }
+    [sxx, syy, szz, sxy, sxz, syz]
+}
+
+fn shear_rate_from_stress3([sxx, syy, szz, sxy, sxz, syz]: [f64; 6], rho: f64, tau: f64) -> f64 {
     let c = -3.0 / (2.0 * rho * tau);
     let (sxx, syy, szz) = (c * sxx, c * syy, c * szz);
     let (sxy, sxz, syz) = (c * sxy, c * sxz, c * syz);
@@ -261,16 +271,21 @@ pub(crate) fn force_corrected_shear_rate3(
     force: [f64; 3],
     tau: f64,
 ) -> f64 {
-    let mut corrected = *f;
-    for q in 0..Q3 {
-        let e = [f64::from(E3[q].0), f64::from(E3[q].1), f64::from(E3[q].2)];
-        let eu: f64 = e.iter().zip(u).map(|(e, u)| e * u).sum();
-        let raw: f64 = (0..3)
-            .map(|d| (3.0 * (e[d] - u[d]) + 9.0 * eu * e[d]) * force[d])
-            .sum();
-        corrected[q] += 0.5 * W3[q] * raw;
-    }
-    shear_rate3(&corrected, &equilibrium3(rho, u), rho, tau)
+    let [sxx, syy, szz, sxy, sxz, syz] = nonequilibrium_stress3(f, &equilibrium3(rho, u));
+    // Apply the exact source second moment directly: six scalar corrections
+    // replace a full D3Q19 source construction and second population pass.
+    shear_rate_from_stress3(
+        [
+            sxx + u[0] * force[0],
+            syy + u[1] * force[1],
+            szz + u[2] * force[2],
+            sxy + 0.5 * (u[0] * force[1] + u[1] * force[0]),
+            sxz + 0.5 * (u[0] * force[2] + u[2] * force[0]),
+            syz + 0.5 * (u[1] * force[2] + u[2] * force[1]),
+        ],
+        rho,
+        tau,
+    )
 }
 
 /// Update every fluid cell's τ from its local shear rate under `law` —
@@ -289,8 +304,8 @@ pub fn update_tau3(grid: &mut PlatesGrid3, law: Rheology) -> RheologyStats {
             for x in 0..grid.nx {
                 let i = grid.idx(x, y, z);
                 let (rho, u) = grid.moments3(i);
-                let feq = equilibrium3(rho, u);
-                let gdot = shear_rate3(&grid.f[i], &feq, rho, grid.tau[i]);
+                let gdot =
+                    force_corrected_shear_rate3(&grid.f[i], rho, u, grid.fext[i], grid.tau[i]);
                 let nu = law.viscosity(gdot);
                 assert!(
                     nu.is_finite() && nu > 0.0,
@@ -472,8 +487,15 @@ impl ThermalLbm3 {
     /// planes, whose loads are ignored. It contains EXTERNAL forces only, not
     /// the previous step's total `fext`. Admission failures leave state intact;
     /// ordinary solver-state and stability requirements still apply.
-    pub fn step_with_external_forces(&mut self, forces: &[[f64; 3]]) -> Result<(), ThermalForcingError> {
-        let plane = self.grid.nx.checked_mul(self.grid.ny).ok_or(ThermalForcingError::Layout)?;
+    pub fn step_with_external_forces(
+        &mut self,
+        forces: &[[f64; 3]],
+    ) -> Result<(), ThermalForcingError> {
+        let plane = self
+            .grid
+            .nx
+            .checked_mul(self.grid.ny)
+            .ok_or(ThermalForcingError::Layout)?;
         validate_external_forces(forces, &self.gpop, plane, self.gbeta, self.t_ref)?;
         self.step_with_forces_inner(Some(forces), None);
         Ok(())
@@ -481,16 +503,24 @@ impl ThermalLbm3 {
 
     // The shared transactional source owner admits the complete rate field.
     pub(crate) fn step_with_local_thermal_relaxation(
-        &mut self, forces: &[[f64; 3]], thermal_tau: &[f64],
+        &mut self,
+        forces: &[[f64; 3]],
+        thermal_tau: &[f64],
     ) -> Result<(), ThermalForcingError> {
-        let plane = self.grid.nx.checked_mul(self.grid.ny).ok_or(ThermalForcingError::Layout)?;
+        let plane = self
+            .grid
+            .nx
+            .checked_mul(self.grid.ny)
+            .ok_or(ThermalForcingError::Layout)?;
         validate_external_forces(forces, &self.gpop, plane, self.gbeta, self.t_ref)?;
         self.step_with_forces_inner(Some(forces), Some(thermal_tau));
         Ok(())
     }
 
     fn step_with_forces_inner(
-        &mut self, external: Option<&[[f64; 3]]>, thermal_tau: Option<&[f64]>,
+        &mut self,
+        external: Option<&[[f64; 3]]>,
+        thermal_tau: Option<&[f64]>,
     ) {
         let (nx, ny, nz) = (self.grid.nx, self.grid.ny, self.grid.nz);
         for z in 1..nz - 1 {

@@ -9,7 +9,7 @@
 //! represent at this resolution — the ledger says HOW MANY, honestly,
 //! instead of silently going unstable).
 
-use crate::core2::{Cell, Grid, shear_rate};
+use crate::core2::{Cell, Grid, force_corrected_shear_rate};
 use crate::{CS2, Q};
 
 /// The τ stability floor (ν > 0 with margin; BGK folklore-free zone
@@ -118,7 +118,9 @@ pub struct RheologyStats {
 
 /// Update every fluid/interface cell's τ from its local shear rate
 /// under `law`, flooring at [`TAU_FLOOR`]. Call between collide-stream
-/// steps (one-step lag — the standard explicit local scheme).
+/// steps (one-step lag — the standard explicit local scheme). The strain
+/// includes the Guo half-source correction for both body acceleration and
+/// local external force; uniform acceleration is not material shear.
 #[must_use]
 pub fn update_tau(grid: &mut Grid, law: Rheology) -> RheologyStats {
     let mut stats = RheologyStats {
@@ -132,8 +134,8 @@ pub fn update_tau(grid: &mut Grid, law: Rheology) -> RheologyStats {
             continue;
         }
         let mm = grid.moments(i);
-        let feq = crate::equilibrium(mm.rho, mm.u[0], mm.u[1]);
-        let gdot = shear_rate(&grid.f[i], &feq, mm.rho, grid.tau[i]);
+        let force = std::array::from_fn(|d| grid.g[d].mul_add(mm.rho, grid.fext[i][d]));
+        let gdot = force_corrected_shear_rate(&grid.f[i], mm.rho, mm.u, force, grid.tau[i]);
         let nu = law.viscosity(gdot);
         require_positive_finite("apparent viscosity", nu);
         let mut tau = nu / CS2 + 0.5;
@@ -225,4 +227,72 @@ pub fn channel_flow(
         }
     }
     (grid, steps, stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Rheology, update_tau};
+    use crate::{CS2, E, Grid, W, equilibrium};
+
+    /// G0/G3: changing the Guo force frame must not change the physical
+    /// strain or the apparent viscosity. The equilibrium case represents
+    /// uniform accelerated flow, whose material strain is exactly zero.
+    #[test]
+    fn forced_rheology_recovers_physical_strain_and_viscosity() {
+        let law = Rheology::Carreau {
+            nu0: 0.2,
+            nu_inf: 0.01,
+            lambda: 1000.0,
+            n: 0.5,
+        };
+        let u = [0.06, -0.03];
+        for rho in [0.4, 2.5] {
+            for tau in [0.7, 1.8] {
+                for strain in [
+                    [[0.0, 0.0], [0.0, 0.0]],
+                    [[0.003, -0.004], [-0.004, -0.003]],
+                ] {
+                    let rate =
+                        (2.0_f64 * strain.iter().flatten().map(|s| s * s).sum::<f64>()).sqrt();
+                    let expected_tau = 0.5 + law.viscosity(rate) / CS2;
+                    for (acceleration, local_force) in [
+                        ([0.0, 0.0], [0.0, 0.0]),
+                        ([0.004, -0.002], [0.003, 0.005]),
+                        ([-0.003, 0.005], [-0.002, -0.004]),
+                    ] {
+                        let mut grid = Grid::uniform(2, 2, tau);
+                        grid.g = acceleration;
+                        grid.fext.fill(local_force);
+                        let force: [f64; 2] =
+                            std::array::from_fn(|d| acceleration[d].mul_add(rho, local_force[d]));
+                        let mut populations = equilibrium(rho, u[0], u[1]);
+                        for q in 0..E.len() {
+                            let e = [f64::from(E[q].0), f64::from(E[q].1)];
+                            let eu = e[0] * u[0] + e[1] * u[1];
+                            let trace = strain[0][0] + strain[1][1];
+                            let quadratic = e[0] * (strain[0][0] * e[0] + strain[0][1] * e[1])
+                                + e[1] * (strain[1][0] * e[0] + strain[1][1] * e[1]);
+                            // Hermite reconstruction of Π = -2 rho cs² tau D,
+                            // followed by the independent population-space
+                            // half-source transform f_bar = f - S/2.
+                            let source: f64 = (0..2)
+                                .map(|d| (3.0 * (e[d] - u[d]) + 9.0 * eu * e[d]) * force[d])
+                                .sum();
+                            populations[q] -= 3.0 * W[q] * rho * tau * (quadratic - CS2 * trace)
+                                + 0.5 * W[q] * source;
+                        }
+                        grid.f.fill(populations);
+                        let stats = update_tau(&mut grid, law);
+                        assert!(
+                            (stats.max_shear - rate).abs() < 2e-14,
+                            "rho={rho}, tau={tau}, force={force:?}: {} != {rate}",
+                            stats.max_shear,
+                        );
+                        assert!(grid.tau.iter().all(|t| (t - expected_tau).abs() < 2e-12));
+                        assert_eq!((stats.floored, stats.capped), (0, 0));
+                    }
+                }
+            }
+        }
+    }
 }

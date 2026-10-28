@@ -329,7 +329,15 @@ rollback. Their addition does not establish executed native validation.
 - `rheology::Rheology`, `rheology::update_tau`, and
   `rheology::channel_flow` — local apparent-viscosity laws and explicit
   τ updates with floor/cap counts for cells outside the representable
-  relaxation window.
+  relaxation window. Both D2Q9 `update_tau` and D3Q19 `update_tau3` infer
+  strain from `Pi_neq + (u F + F u)/2` in the physical Guo frame. D2Q9
+  includes both `rho*g` and the local external force density. Uniform
+  acceleration is not shear. The shared estimators correct three/six tensor
+  entries directly, avoiding source-array construction and an extra population
+  pass; the material-driven rheology paths reuse them. The force-reframing
+  regressions cover zero/full strain, density and relaxation changes, and
+  independent force directions; the existing analytic channel gates remain
+  the flow-level checks.
 - `thermal::ThermalLbm` and `thermal::gbeta_for_rayleigh` — D2Q9 flow plus
   D2Q5 temperature populations for Rayleigh-Bénard-style onset fixtures with
   fixed-temperature wall rows.

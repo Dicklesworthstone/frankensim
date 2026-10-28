@@ -7,7 +7,8 @@
 //! 40p2 precedent.
 
 use fs_lbm::d3q19::{
-    PlatesGrid3, ThermalLbm3, gbeta_for_rayleigh3, plate_channel_flow3, update_tau3,
+    E3, PlatesGrid3, ThermalLbm3, W3, equilibrium3, gbeta_for_rayleigh3, plate_channel_flow3,
+    update_tau3,
 };
 use fs_lbm::rheology::{Rheology, powerlaw_poiseuille_analytic};
 
@@ -235,4 +236,68 @@ fn lbm3x_006_ledger_honesty_and_refusals() {
         bad_rheology.is_err() && bad_rayleigh.is_err() && bad_grid.is_err(),
         "invalid rheology, Rayleigh setup, and grid are rejected before NaNs propagate",
     );
+}
+
+/// G0/G3: the same prescribed strain and Carreau response must be recovered
+/// under arbitrary force orientation, including an accelerated zero-strain
+/// state. Normal and all three off-diagonal stresses participate.
+#[test]
+fn lbm3x_007_forced_rheology_recovers_physical_strain_and_viscosity() {
+    let law = Rheology::Carreau {
+        nu0: 0.2,
+        nu_inf: 0.01,
+        lambda: 1000.0,
+        n: 0.5,
+    };
+    let u = [0.06, -0.03, 0.02];
+    for rho in [0.4, 2.5] {
+        for tau in [0.7, 1.8] {
+            for strain in [
+                [[0.0; 3]; 3],
+                [
+                    [0.003, -0.004, 0.002],
+                    [-0.004, -0.005, 0.001],
+                    [0.002, 0.001, 0.002],
+                ],
+            ] {
+                let rate = (2.0_f64 * strain.iter().flatten().map(|s| s * s).sum::<f64>()).sqrt();
+                let expected_tau = 0.5 + 3.0 * law.viscosity(rate);
+                for force in [[0.0; 3], [0.004, -0.002, 0.003], [-0.003, 0.005, -0.004]] {
+                    let mut grid = PlatesGrid3::plates(2, 2, 2, tau);
+                    grid.fext.fill(force);
+                    let mut populations = equilibrium3(rho, u);
+                    for q in 0..E3.len() {
+                        let e = [f64::from(E3[q].0), f64::from(E3[q].1), f64::from(E3[q].2)];
+                        let eu: f64 = (0..3).map(|d| e[d] * u[d]).sum();
+                        let trace: f64 = (0..3).map(|d| strain[d][d]).sum();
+                        let quadratic: f64 = (0..3)
+                            .map(|i| (0..3).map(|j| e[i] * strain[i][j] * e[j]).sum::<f64>())
+                            .sum();
+                        let source: f64 = (0..3)
+                            .map(|d| (3.0 * (e[d] - u[d]) + 9.0 * eu * e[d]) * force[d])
+                            .sum();
+                        // Hermite strain population and Guo half-source
+                        // transform, independent of the direct tensor correction.
+                        populations[q] -= 3.0 * W3[q] * rho * tau * (quadratic - trace / 3.0)
+                            + 0.5 * W3[q] * source;
+                    }
+                    grid.f.fill(populations);
+                    let stats = update_tau3(&mut grid, law);
+                    assert!(
+                        (stats.max_shear - rate).abs() < 2e-14,
+                        "rho={rho}, tau={tau}, force={force:?}: {} != {rate}",
+                        stats.max_shear,
+                    );
+                    for z in 1..grid.nz - 1 {
+                        for y in 0..grid.ny {
+                            for x in 0..grid.nx {
+                                assert!((grid.tau[grid.idx(x, y, z)] - expected_tau).abs() < 2e-12);
+                            }
+                        }
+                    }
+                    assert_eq!((stats.floored, stats.capped), (0, 0));
+                }
+            }
+        }
+    }
 }

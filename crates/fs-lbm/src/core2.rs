@@ -2089,10 +2089,15 @@ fn regularized_populations(rho: f64, velocity: [f64; 2], stress: [[f64; 2]; 2]) 
 
 /// Strain-rate magnitude (sqrt(2 S:S)) of one cell from its
 /// non-equilibrium populations — the LOCAL quantity non-Newtonian
-/// relaxation adapts to. `feq` must match the cell's moments.
+/// relaxation adapts to. `feq` must match the cell's moments. This raw
+/// estimator is for unforced populations; Guo-forced consumers must restore
+/// the half-source stress before extracting strain.
 #[must_use]
 pub fn shear_rate(f: &[f64; Q], feq: &[f64; Q], rho: f64, tau: f64) -> f64 {
-    // S_ab = −(3 / (2 ρ τ)) Σ_q e_qa e_qb (f_q − feq_q)   (c_s² = 1/3)
+    shear_rate_from_stress(nonequilibrium_stress(f, feq), rho, tau)
+}
+
+fn nonequilibrium_stress(f: &[f64; Q], feq: &[f64; Q]) -> [f64; 3] {
     let mut sxx = 0.0f64;
     let mut sxy = 0.0f64;
     let mut syy = 0.0f64;
@@ -2103,8 +2108,40 @@ pub fn shear_rate(f: &[f64; Q], feq: &[f64; Q], rho: f64, tau: f64) -> f64 {
         sxy += ex * ey * neq;
         syy += ey * ey * neq;
     }
+    [sxx, sxy, syy]
+}
+
+fn shear_rate_from_stress([sxx, sxy, syy]: [f64; 3], rho: f64, tau: f64) -> f64 {
+    // S_ab = −(3 / (2 ρ τ)) Π_ab^neq   (c_s² = 1/3).
     let c = -3.0 / (2.0 * rho * tau);
     let (sxx, sxy, syy) = (c * sxx, c * sxy, c * syy);
     let ss = 2.0f64.mul_add(sxy * sxy, sxx.mul_add(sxx, syy * syy));
     (2.0 * ss).sqrt()
+}
+
+/// Molecular strain rate in the physical Guo frame. `u` includes the
+/// half-force velocity correction; `force` is total force density, including
+/// `rho * g`, without the collision prefactor `1 - 1/(2 tau)`.
+///
+/// The raw source's second moment is `u F^T + F u^T`, so correcting the three
+/// independent tensor entries avoids a second population loop and temporary
+/// source array. See Premnath, Pattison and Banerjee, arXiv:0901.2786,
+/// equations (5), (7) and (B23).
+pub(crate) fn force_corrected_shear_rate(
+    f: &[f64; Q],
+    rho: f64,
+    u: [f64; 2],
+    force: [f64; 2],
+    tau: f64,
+) -> f64 {
+    let [sxx, sxy, syy] = nonequilibrium_stress(f, &crate::equilibrium(rho, u[0], u[1]));
+    shear_rate_from_stress(
+        [
+            sxx + u[0] * force[0],
+            sxy + 0.5 * (u[0] * force[1] + u[1] * force[0]),
+            syy + u[1] * force[1],
+        ],
+        rho,
+        tau,
+    )
 }
