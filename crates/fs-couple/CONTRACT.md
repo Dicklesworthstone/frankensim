@@ -8784,3 +8784,43 @@ Six focused integration references cover reversible elastic cooling, stationary
 loaded heating, analytical Jenkins heat/numerical-loss separation, unequal
 surface temperatures with conduction and frame transport, and domain,
 rollback, cancellation and deterministic replay behavior.
+
+## Finite third-body friction heating
+
+`friction_heat::third_body` places physical friction loss in an existing finite
+enthalpy layer cell. Its original mass and caloric law retain heat; both body
+conductances come from actual half-cell geometry, endpoint conductivity and
+source contact resistance. Independent layer and whole-network accounts keep
+layer storage, signed body conduction, outside heat and friction work distinct.
+An insulated layer retains heat. Reversible elastic and coefficient work remain
+with their constitutive owners.
+
+`FrictionModalSystem::step_with_third_body_heat` accepts original mechanical
+motion, friction history and the finite layer/body thermal network together.
+The layer's own caloric law supplies the same-step friction temperature, with
+no extra temperature store. Five thermal and two native modal regressions cover
+analytical finite-capacity/resistance balances, actual viscoplastic heat,
+insulation, cancellation/retry and an 8/16/32 timestep ladder with approximately
+first-order error reduction. This fixed-geometry rung uses one uniform,
+orthogonal layer cell with two opposite conductive faces; spatial uniformity
+and loaded thermoelastic applicability remain explicit model requirements.
+
+## Resolved-conduction flash comparison
+
+`friction_heat::flash::FlashHeatHistory` observes accepted, conduction-derived
+signed body heat as bounded piecewise-constant flux pulses. Heating and cooldown
+reuse the original `fs_tribo::flash_temperature_candidate` half-space kernel;
+`FlashTemperatureInput::for_duration` supplies physical exposure time without
+inventing traverse geometry. Stable pulse superposition avoids cancellation of
+nearly equal square roots. Original route/material/geometry and initially
+uniform body temperatures bind the comparison. Refused receipts, exhausted
+history and cancellation leave the observer and thermal owner unchanged.
+
+The oracle is read-only: it does not route production heat, create storage,
+prescribe body fractions or replace an accepted temperature. Its declared limit
+is stationary, one-dimensional, constant-property half-space conduction.
+Three resolved spatial rungs give maximum relative temperature-rise errors
+1.5781%, 0.3687% and 0.07344%; variable heating/cooldown and exact legacy-duration
+equivalence are also checked. These are numerical model comparisons with
+synthetic analytical materials, not experimental qualification or a validity
+claim at arbitrary moving-source Peclet number.

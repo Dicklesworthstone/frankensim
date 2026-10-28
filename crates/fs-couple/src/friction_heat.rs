@@ -29,6 +29,9 @@ use std::cell::RefCell;
 /// Physical finite-layer storage and source-derived conduction into both bodies.
 pub mod third_body;
 
+/// Bounded pulse-history flash-temperature comparison against resolved conduction.
+pub mod flash;
+
 fn invalid(message: &'static str) -> DepositionError {
     DepositionError::InvalidInput(message)
 }

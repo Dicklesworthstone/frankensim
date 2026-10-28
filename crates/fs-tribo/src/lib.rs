@@ -1390,10 +1390,15 @@ pub struct FlashTemperatureInput {
     dissipated_power_w: f64,
     partition: HeatPartition,
     contact_area_m2: f64,
-    traverse_length_m: f64,
-    slip_speed_mps: f64,
+    exposure: FlashExposure,
     surface_a: Option<SurfaceThermalProperties>,
     surface_b: Option<SurfaceThermalProperties>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum FlashExposure {
+    Traverse { length_m: f64, speed_mps: f64 },
+    Duration(f64),
 }
 
 impl FlashTemperatureInput {
@@ -1417,8 +1422,36 @@ impl FlashTemperatureInput {
             dissipated_power_w,
             partition,
             contact_area_m2,
-            traverse_length_m,
-            slip_speed_mps,
+            exposure: FlashExposure::Traverse {
+                length_m: traverse_length_m,
+                speed_mps: slip_speed_mps,
+            },
+            surface_a,
+            surface_b,
+        })
+    }
+
+    /// A measured or resolved positive exposure duration, without inventing a
+    /// traverse length or slip speed. This uses the SAME uniform-flux,
+    /// semi-infinite response as `new`; duration alone supplies no moving-source
+    /// geometry, heat partition or additional model validity.
+    pub fn for_duration(
+        dissipated_power_w: f64,
+        partition: HeatPartition,
+        contact_area_m2: f64,
+        duration_s: f64,
+        surface_a: Option<SurfaceThermalProperties>,
+        surface_b: Option<SurfaceThermalProperties>,
+    ) -> Result<Self, TriboError> {
+        nonnegative_finite(dissipated_power_w, "dissipated_power_w")?;
+        partition.validate()?;
+        positive_finite(contact_area_m2, "contact_area_m2")?;
+        positive_finite(duration_s, "flash_dwell_time_s")?;
+        Ok(Self {
+            dissipated_power_w,
+            partition,
+            contact_area_m2,
+            exposure: FlashExposure::Duration(duration_s),
             surface_a,
             surface_b,
         })
@@ -1505,11 +1538,12 @@ pub fn flash_temperature_candidate(
     input: FlashTemperatureInput,
 ) -> Result<FlashTemperatureEstimate, TriboError> {
     interface.validate()?;
-    let dwell_time_s = checked_div(
-        input.traverse_length_m,
-        input.slip_speed_mps,
-        "flash_dwell_time_s",
-    )?;
+    let dwell_time_s = match input.exposure {
+        FlashExposure::Traverse { length_m, speed_mps } => {
+            checked_div(length_m, speed_mps, "flash_dwell_time_s")?
+        }
+        FlashExposure::Duration(duration) => duration,
+    };
     let surface_a_heat_flux_w_per_m2 = checked_div(
         checked_mul(
             input.dissipated_power_w,
