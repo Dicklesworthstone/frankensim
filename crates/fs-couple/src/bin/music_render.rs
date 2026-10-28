@@ -35,6 +35,9 @@
 //! Repeated `--lip FILE` and `--voice FILE` also compose the standalone lip and
 //! glottal pressure producers, including their original gas-source bindings,
 //! mechanics substeps and microphone delays, into that same ensemble.
+//! Repeated `--flue FILE` composes the existing network or DG flue source with
+//! its complete material/gas inputs and continuous physical gesture history;
+//! the selected native microphone or explicitly internal trace is preserved.
 //!
 //! `music_render wind INPUT.performance OUT.wav [--block N] [--decimate] [--self-contained]`
 //! renders authored reed primitives, segmented ducts and pressure phrases.

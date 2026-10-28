@@ -17,6 +17,10 @@ use fs_couple::bernoulli_aperture::two_sided::ValveSide;
 use fs_couple::bowed_string::runtime::schedule::file::{BowedPerformance, BOWED_PERFORMANCE_SCHEMA, MAX_BOWED_PERFORMANCE_BYTES};
 use fs_couple::brass_loop::performance::{LipDescription, LIP_PERFORMANCE_SCHEMA, MAX_LIP_PERFORMANCE_BYTES};
 use fs_couple::voice_performance::{VoiceDescription, VOICE_PERFORMANCE_SCHEMA, MAX_VOICE_PERFORMANCE_BYTES};
+use fs_couple::flue_loop::dg::performance::file::{FlueDgFilePerformance, FLUE_DG_PERFORMANCE_SCHEMA};
+use fs_couple::flue_loop::network::performance::file::{
+    FlueFilePerformance, FLUE_PERFORMANCE_SCHEMA, MAX_FLUE_PERFORMANCE_BYTES,
+};
 use fs_couple::pcm_wav::observation::{DecimatedRenderer, PressureRenderer};
 use fs_couple::pcm_wav::observation::ensemble::{PressureEnsemble, PressureEnsembleConfig};
 use fs_couple::render::plate::file::{PlatePerformance, PLATE_PERFORMANCE_SCHEMA};
@@ -33,10 +37,10 @@ const MAX_CONTROLS: usize = 262_144;
 const MAX_SAMPLES: u64 = 600 * RATE as u64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kind { Modal, Plate, Bow, Reed, Valve, Lip, Voice }
+enum Kind { Modal, Plate, Bow, Reed, Valve, Flue, Lip, Voice }
 impl Kind {
     fn label(self) -> &'static str {
-        match self { Self::Modal => "modal", Self::Plate => "plate", Self::Bow => "bow", Self::Reed => "reed", Self::Valve => "valve", Self::Lip => "lip", Self::Voice => "voice" }
+        match self { Self::Modal => "modal", Self::Plate => "plate", Self::Bow => "bow", Self::Reed => "reed", Self::Valve => "valve", Self::Flue => "flue", Self::Lip => "lip", Self::Voice => "voice" }
     }
 }
 struct Input { kind: Kind, path: PathBuf }
@@ -56,11 +60,11 @@ fn options(args: &[String]) -> Result<Options, String> {
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
-            "--modal" | "--plate" | "--bow" | "--reed" | "--valve" | "--lip" | "--voice" => {
+            "--modal" | "--plate" | "--bow" | "--reed" | "--valve" | "--flue" | "--lip" | "--voice" => {
                 if inputs.len() == MAX_PARTS { return Err("ensemble exceeds the 16-part budget".into()); }
                 let path = iter.next().filter(|s| !s.starts_with("--"))
                     .ok_or_else(|| format!("{arg} requires a source performance path"))?;
-                inputs.push(Input { kind: match arg.as_str() { "--modal" => Kind::Modal, "--plate" => Kind::Plate, "--bow" => Kind::Bow, "--reed" => Kind::Reed, "--valve" => Kind::Valve, "--lip" => Kind::Lip, _ => Kind::Voice },
+                inputs.push(Input { kind: match arg.as_str() { "--modal" => Kind::Modal, "--plate" => Kind::Plate, "--bow" => Kind::Bow, "--reed" => Kind::Reed, "--valve" => Kind::Valve, "--flue" => Kind::Flue, "--lip" => Kind::Lip, _ => Kind::Voice },
                     path: PathBuf::from(path) });
             }
             "--block" => {
@@ -81,7 +85,7 @@ fn options(args: &[String]) -> Result<Options, String> {
             }
             value if value.starts_with('-') => return Err(format!("unsupported ensemble option {value:?}")),
             value => {
-                if output.is_some() { return Err("ensemble accepts exactly one output path; inputs require --modal/--plate/--bow/--reed/--valve/--lip/--voice".into()); }
+                if output.is_some() { return Err("ensemble accepts exactly one output path; inputs require --modal/--plate/--bow/--reed/--valve/--flue/--lip/--voice".into()); }
                 output = Some(PathBuf::from(value));
             }
         }
@@ -190,6 +194,7 @@ fn load_with_gas_sources(
     let file = std::fs::File::open(&input.path).map_err(|e| format!("input {}: {e}", input.path.display()))?;
     let max_bytes = match input.kind {
         Kind::Bow => MAX_BOWED_PERFORMANCE_BYTES, Kind::Reed => MAX_REED_PERFORMANCE_BYTES,
+        Kind::Flue => MAX_FLUE_PERFORMANCE_BYTES,
         Kind::Lip => MAX_LIP_PERFORMANCE_BYTES, Kind::Voice => MAX_VOICE_PERFORMANCE_BYTES,
         _ => MAX_PART_BYTES,
     };
@@ -199,6 +204,17 @@ fn load_with_gas_sources(
     if bytes.len() > max_bytes { return Err(format!("ensemble source exceeds its {max_bytes}-byte input budget")); }
     // A part's material-card packs are named relative to that part's own file.
     let parent = input.path.parent().unwrap_or(std::path::Path::new("."));
+    let load_radiation = |name: &str| {
+        let file = std::fs::File::open(parent.join(name))
+            .map_err(|e| format!("MIMO radiation artifact {name:?} open failed: {e}"))?;
+        let mut bytes = Vec::new();
+        file.take((MAX_MIMO_RADIATION_BYTES + 1) as u64).read_to_end(&mut bytes)
+            .map_err(|e| format!("MIMO radiation artifact {name:?} read failed: {e}"))?;
+        if bytes.len() > MAX_MIMO_RADIATION_BYTES {
+            return Err("MIMO radiation artifact exceeds its input budget".into());
+        }
+        Ok(bytes)
+    };
     let result = match input.kind {
         Kind::Lip => {
             let description = LipDescription::from_bytes_with_gas_sources(&bytes, sources)?;
@@ -281,6 +297,69 @@ fn load_with_gas_sources(
                 components: 1, modes: i.retained_modes, controls: 0, exterior_json: gas_json, listener,
             })
         }
+        Kind::Flue => match std::str::from_utf8(&bytes)
+            .map_err(|_| "flue performance must be UTF-8")?
+            .lines().next().unwrap_or("").trim()
+        {
+            FLUE_PERFORMANCE_SCHEMA => {
+                let p = FlueFilePerformance::from_bytes_with_all_sources(
+                    &bytes, block, &CancelGate::new(), sources,
+                    super::plate_input::section_pack_loader(parent), load_radiation,
+                ).map_err(|e| e.to_string())?;
+                let i = p.info();
+                let renderer = p.renderer();
+                // The source owns the complete phrase, all mechanical substeps
+                // and its differentiating microphone. Mix its output pressure.
+                let exterior = renderer.radiation_input()
+                    .ok_or("flue microphone requires its declared complete exterior gas")?;
+                let listener = Listener::Gas(ListenerMedium::of(&exterior.exterior));
+                let source_filter_delay_samples = renderer.receiver().filter_delay_samples();
+                let mechanics_samples = i.samples.checked_mul(renderer.mechanics_per_output() as u64)
+                    .ok_or("flue mechanical window overflow")?;
+                let exterior_json = format!(",{},\"observation_scope\":\"exterior pressure from the original multirate flue receiver\"",
+                    super::wind_input::flue_provenance(&p));
+                (Box::new(p.into_renderer()) as Box<dyn PressureRenderer>, SourceInfo {
+                    kind: input.kind, schema: FLUE_PERFORMANCE_SCHEMA, hash: i.input_hash,
+                    rate: i.sample_rate_hz, samples: i.samples,
+                    mechanics_rate: i.mechanics_rate_hz, mechanics_samples,
+                    source_filter_delay_samples, source_full_scale_pa: i.full_scale_pa,
+                    components: 1, modes: 0, controls: i.compiled_controls, exterior_json, listener,
+                })
+            }
+            FLUE_DG_PERFORMANCE_SCHEMA => {
+                let p = FlueDgFilePerformance::from_bytes_with_sources(
+                    &bytes, block, &CancelGate::new(), sources,
+                    super::plate_input::section_pack_loader(parent),
+                ).map_err(|e| e.to_string())?;
+                let i = p.info();
+                let renderer = p.renderer();
+                let microphone = renderer.baffled_receiver();
+                let listener = if microphone.is_some() {
+                    let exterior = renderer.voice().dg()
+                        .ok_or("DG flue microphone lacks its original bore")?
+                        .load().radiation_record()
+                        .ok_or("DG flue microphone lacks its original computed radiation source")?
+                        .gas_record().state();
+                    Listener::Gas(ListenerMedium::of(exterior))
+                } else {
+                    Listener::Unconstrained("internal DG inlet trace; no exterior microphone")
+                };
+                let source_filter_delay_samples = microphone.map_or(0.0, |m| m.filter_delay_samples());
+                let scope = if microphone.is_some() {
+                    "computed DG flue terminal and optional mouth flows through their original baffled exterior receivers"
+                } else { "internal DG step-mean inlet pressure; not an exterior microphone" };
+                let exterior_json = format!(",{},\"observation_scope\":{}",
+                    super::wind_input::flue_dg_provenance(&p), json_string(scope));
+                (Box::new(p.into_renderer()) as Box<dyn PressureRenderer>, SourceInfo {
+                    kind: input.kind, schema: FLUE_DG_PERFORMANCE_SCHEMA, hash: i.input_hash,
+                    rate: i.sample_rate_hz, samples: i.samples,
+                    mechanics_rate: i.mechanics_rate_hz, mechanics_samples: i.samples,
+                    source_filter_delay_samples, source_full_scale_pa: i.full_scale_pa,
+                    components: 1, modes: 0, controls: i.compiled_controls, exterior_json, listener,
+                })
+            }
+            _ => return Err("--flue requires a supported flue or flue-DG source schema".into()),
+        },
         Kind::Valve => match std::str::from_utf8(&bytes)
             .map_err(|_| "valve performance must be UTF-8")?
             .lines().next().unwrap_or("").trim()
@@ -321,17 +400,7 @@ fn load_with_gas_sources(
             MATERIAL_MODAL_VALVE_SCHEMA => {
                 let p = MaterialModalValvePerformance::from_bytes_with_all_sources(
                     &bytes, block, &CancelGate::new(), sources,
-                    super::plate_input::section_pack_loader(parent), |name| {
-                        let file = std::fs::File::open(parent.join(name))
-                            .map_err(|e| format!("MIMO radiation artifact {name:?} open failed: {e}"))?;
-                        let mut bytes = Vec::new();
-                        file.take((MAX_MIMO_RADIATION_BYTES + 1) as u64).read_to_end(&mut bytes)
-                            .map_err(|e| format!("MIMO radiation artifact {name:?} read failed: {e}"))?;
-                        if bytes.len() > MAX_MIMO_RADIATION_BYTES {
-                            return Err("MIMO radiation artifact exceeds its input budget".into());
-                        }
-                        Ok(bytes)
-                    },
+                    super::plate_input::section_pack_loader(parent), load_radiation,
                 ).map_err(|e| e.to_string())?;
                 let i = p.info();
                 let renderer = p.renderer();

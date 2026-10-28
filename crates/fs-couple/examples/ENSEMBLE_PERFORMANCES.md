@@ -19,7 +19,7 @@ force footprint and modal reduction all come from the existing source loaders.
 No new oscillator, collision law, integrator or material-name preset is added.
 
 Repeat `--modal FILE`, `--plate FILE`, `--bow FILE`, `--reed FILE`,
-`--valve FILE`, `--lip FILE` and `--voice FILE` in the desired summation order. Every
+`--valve FILE`, `--flue FILE`, `--lip FILE` and `--voice FILE` in the desired summation order. Every
 supported modal performance version retains its existing bilateral, normal
 contact, friction, force-port and preload semantics. Sources are independent:
 this is acoustic superposition, **not mechanical coupling between files**.
@@ -41,6 +41,44 @@ source pack data, therefore reaches its flow, duct losses and emitted pressure
 before mixing. Every part with an exterior medium must agree on the listener's
 complete gas state; incompatible pressure or mixture declarations refuse before
 output creation. No ensemble option substitutes air for an unresolved source.
+
+## Flue phrases alongside the other native sources
+
+`--flue FILE` accepts the existing `frankensim-flue-performance-v1` network
+source and `frankensim-flue-dg-performance-v1` DG source used by
+`music_render wind`. Each complete source keeps its original jet card,
+geometry, wall/key material packs, regional gas records, blowing/angle/key
+control history, physical loads and selected microphone. Material and supplied
+MIMO-radiation files resolve relative to that performance file, as they do for
+the other native ensemble sources. The shared gas-component registry also
+reaches both flue loaders. No note-triggered reconstruction interrupts their
+jet, bore, material-memory or gesture histories.
+
+For example, combine two existing DG performances covering the same 2048
+mechanical intervals (1024 output samples). Each contributes the pressure from
+its own explicitly described microphone:
+
+```sh
+cargo run --release -p fs-couple --bin music_render -- \
+  ensemble /tmp/two-flues.wav --full-scale-pa 20 --decimate \
+  --flue crates/fs-couple/examples/flue-dg-baffled.performance \
+  --flue crates/fs-couple/examples/flue-dg-side-openings.performance --block 37
+```
+
+Replace either path with another complete, equal-duration source and repeat
+any supported source flag to include reeds, bowed strings or other physical
+parts. Matching exterior gas states remain mandatory. The graph source owns
+its internal mechanical substeps and multirate microphone; the DG source keeps
+its same-clock pressure producer and requires explicit output decimation when
+its clock is above 48 kHz. Both report their original numerical microphone
+delay separately from physical travel time.
+
+A DG file explicitly selecting `observation inlet-pressure` still contributes
+its internal diagnostic trace and is identified as having no exterior
+microphone. Ensemble admission does not turn it into radiated sound.
+The source jet's exploration-only status and every existing physical-model
+limitation remain in the shared source receipt; composing a phrase does not
+qualify a measured flute.
 
 ## Clocks, latency and duration
 
@@ -91,7 +129,7 @@ and provenance files are never overwritten.
 The command admits at most 16 files of 4 MiB each, 128 source components,
 8192 retained modes, 262144 compiled outer controls and 600 output seconds.
 Every individual loader's own stricter budget remains enforced (bow, lip and
-voice files are limited to 1 MiB). Bow controls are counted inside their hosted scheduler, not
+voice and flue files are limited to 1 MiB). Bow controls are counted inside their hosted scheduler, not
 misreported as an empty outer schedule. Reduction and
 source-state memory are unchanged; pressure/PCM staging is callback-sized.
 These are workload bounds, not a real-time throughput claim.
@@ -121,6 +159,7 @@ cargo test --release -p fs-couple --bin music_render --test music_render_ensembl
 
 These tests compare real physical trajectories, source-clock controls, separate
 filtering and indexed latency alignment against the mixed path, including actual
-contact-plus-mesh WAV output, lip/voice microphone-delay alignment, arbitrary
+contact-plus-mesh WAV output, continuous graph/DG flue phrases and wall-material
+substitution, flue/lip/voice microphone-delay alignment, arbitrary
 source-backed gas changes, and incompatible listener-medium refusals. Native execution
 is still required; source review is not compilation or physical validation.

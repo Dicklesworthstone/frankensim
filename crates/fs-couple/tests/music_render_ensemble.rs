@@ -15,6 +15,9 @@ use fs_material::gas_species::input::ThermochemicalSources;
 #[allow(dead_code)]
 mod gas_sources;
 
+#[path = "music_render_ensemble/flue.rs"]
+mod flue;
+
 const STRIKER: &str = include_str!("../examples/free-striker-192k.performance");
 const PLATE: &str = include_str!("../examples/plate-mesh.performance");
 const REED_OUTLET: &str = include_str!("../examples/reed-baffled-mixture.performance");
