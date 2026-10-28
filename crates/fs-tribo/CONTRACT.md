@@ -107,6 +107,18 @@ patch, interface, and state data for deterministic replay; equality of those
 inputs is not external physical validation. Rolling-deformation loss remains
 a separate, zero channel in this rung.
 
+The returned wrench remains the **endpoint** spring force and torsional moment.
+Its backward-Euler interval work is computed independently as
+`-F_end dot Delta u - M_end Delta theta`. The quadratic storage identity is
+`work = Delta H + physical microslip heat + D_num`, where
+`D_num = k |Delta e|² / 2 + k_t (Delta theta_elastic)² / 2`.
+`GeneralizedWork` exposes this nonnegative numerical dissipation and the
+independently reconstructed closure residual. Numerical loss is never sent to
+the physical heat channels. In particular, a purely elastic load/unload cycle
+produces no frictional heat but retains first-order integration loss, which
+decreases under timestep refinement. This is discrete endpoint work, not a
+resolved continuous-time integral or an energy-conserving midpoint update.
+
 ### Rolling and contour-deformation loss rungs
 
 `rolling_loss` provides three immutable, separately sourced candidates:

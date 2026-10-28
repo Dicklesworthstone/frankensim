@@ -273,14 +273,7 @@ fn stick_partial_slip_and_gross_slide_keep_mode_work_and_loss_explicit() {
         let receipt = adapter
             .prepare(
                 &state,
-                &request(
-                    interval,
-                    0,
-                    SurfaceOrder::DiscThenBase,
-                    creepage,
-                    0.0,
-                    0.0,
-                ),
+                &request(interval, 0, SurfaceOrder::DiscThenBase, creepage, 0.0, 0.0),
             )
             .expect("admitted direct lane");
         assert_eq!(receipt.mode, mode);
@@ -288,7 +281,15 @@ fn stick_partial_slip_and_gross_slide_keep_mode_work_and_loss_explicit() {
         assert!(receipt.heat_j >= 0.0);
         close(
             receipt.exact_relative_body_work_j,
-            -receipt.signed_storage_change_j - receipt.irreversible_loss_j,
+            -receipt.signed_storage_change_j
+                - receipt.irreversible_loss_j
+                - receipt.numerical_dissipation_j,
+        );
+        assert!(receipt.numerical_dissipation_j >= 0.0);
+        close(receipt.energy_closure_residual_j, 0.0);
+        close(
+            receipt.exact_relative_body_work_j,
+            receipt.endpoint_relative_power_w * 1.0e-3,
         );
         assert_eq!(
             adapter
@@ -448,8 +449,11 @@ fn smooth_lane_preserves_checkpoint_recontact_and_exact_work_identity() {
     assert!(replay_a.irreversible_loss_j >= 0.0);
     close(
         replay_a.exact_relative_body_work_j,
-        -replay_a.signed_storage_change_j - replay_a.irreversible_loss_j,
+        -replay_a.signed_storage_change_j
+            - replay_a.irreversible_loss_j
+            - replay_a.numerical_dissipation_j,
     );
+    close(replay_a.energy_closure_residual_j, 0.0);
 }
 
 #[test]

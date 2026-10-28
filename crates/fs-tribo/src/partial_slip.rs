@@ -11,6 +11,9 @@
 //! remainder is nonzero in this lumped law; it is **not** a claimed resolved
 //! slipping-area fraction.  Rolling-deformation loss is deliberately absent:
 //! its energy channel is always zero and must be composed separately.
+//! The endpoint return map is backward Euler: changing elastic strain also
+//! removes numerical energy. That defect is reported separately from physical
+//! microslip heat, and interval work is measured from the returned wrench.
 
 use core::fmt;
 
@@ -523,7 +526,38 @@ impl PartialSlipLaw {
         )?;
         let new_storage = stored_energy(self.parameters, next_displacement, next_twist)?;
         let storage_change_j = checked_add(new_storage, -old_storage, "storage_change_j")?;
-        let work_into_interface_j = checked_add(storage_change_j, dissipation_j, "work_closure_j")?;
+        // The endpoint force does work on the TOTAL slip, not just its plastic
+        // part. For the quadratic spring, backward Euler contributes
+        // D_num = (Delta e)^T K (Delta e) / 2 in addition to physical slip heat:
+        // -F_end . Delta u = Delta H + D_physical + D_num.
+        // Computing work from the wrench avoids a tautological energy audit.
+        let numerical_dissipation_j = stored_energy(
+            self.parameters,
+            sub2(
+                next_displacement,
+                state.elastic_displacement_m,
+                "elastic_displacement_change",
+            )?,
+            checked_add(next_twist, -state.elastic_twist_rad, "elastic_twist_change")?,
+        )?;
+        let work_into_interface_j = -checked_add(
+            dot2(
+                force_tangent,
+                delta_displacement,
+                "tangential_interval_work",
+            )?,
+            checked_mul(torsional_moment_nm, delta_twist, "torsional_interval_work")?,
+            "interval_body_work",
+        )?;
+        let closure_residual_j = checked_add(
+            checked_add(
+                checked_add(storage_change_j, dissipation_j, "physical_energy_change")?,
+                numerical_dissipation_j,
+                "accounted_energy_change",
+            )?,
+            -work_into_interface_j,
+            "energy_closure_residual",
+        )?;
         let reconstructed_body_power_w = -work_into_interface_j / kinematics.dt_s;
         finite(reconstructed_body_power_w, "reconstructed_body_power_w")?;
         let wrench = TangentialWrench {
@@ -579,6 +613,8 @@ impl PartialSlipLaw {
             generalized_work: GeneralizedWork {
                 ownership: ownership.clone(),
                 work_into_interface_j,
+                numerical_dissipation_j,
+                closure_residual_j,
                 reconstructed_body_power_w,
                 endpoint_body_power_w,
             },
@@ -1039,8 +1075,15 @@ pub struct DissipationAndHeat {
 pub struct GeneralizedWork {
     /// The unique patch/interval/generalized-coordinate owner.
     pub ownership: GeneralizedWorkOwnership,
-    /// Exact discrete work closure: storage change plus heat, in J.
+    /// Work entering the interface from the endpoint wrench contracted with
+    /// the total relative displacement and twist, in J. This is backward-Euler
+    /// interval work, not a time integral of an independently resolved trajectory.
     pub work_into_interface_j: f64,
+    /// Non-negative backward-Euler defect `Delta e^T K Delta e / 2`, in J.
+    /// It is numerical dissipation and MUST NOT enter a physical heat port.
+    pub numerical_dissipation_j: f64,
+    /// `Delta H + physical heat + numerical dissipation - wrench work`, in J.
+    pub closure_residual_j: f64,
     /// `-work_into_interface_j / dt_s`, W; negative means body energy is dissipated/stored.
     pub reconstructed_body_power_w: f64,
     /// Endpoint wrench power `F·v + M·ω`, W, retained separately from discrete closure.
@@ -1075,7 +1118,7 @@ pub struct PartialSlipStep {
     pub storage_change_j: f64,
     /// Passive heat/dissipation ledger.
     pub dissipation: DissipationAndHeat,
-    /// Exact discrete energy closure and ownership keys.
+    /// Independently measured discrete work, numerical defect, and ownership keys.
     pub generalized_work: GeneralizedWork,
     /// Candidate internal state; the caller commits it only after solver acceptance.
     pub next_state: PartialSlipState,
@@ -1500,15 +1543,25 @@ mod tests {
         assert_eq!(response.dissipation.rolling_deformation_loss_j, 0.0);
     }
 
-    /// G0 exact discrete accounting: stored-energy change plus heat owns all interval work.
+    /// G0: independently measured wrench work closes storage, heat and numerical loss.
     #[test]
     fn work_heat_and_storage_close_exactly() {
         let response = step(frame(), &PartialSlipState::zero(), [6.0, 2.0], 2.0);
         assert!(response.dissipation.heat_j >= 0.0);
         close(
             response.generalized_work.work_into_interface_j,
-            response.storage_change_j + response.dissipation.heat_j,
+            response.storage_change_j
+                + response.dissipation.heat_j
+                + response.generalized_work.numerical_dissipation_j,
         );
+        close(
+            response.generalized_work.work_into_interface_j,
+            -0.001
+                * (response.tangent_force_n[0] * 6.0
+                    + response.tangent_force_n[1] * 2.0
+                    + response.torsional_moment_nm * 2.0),
+        );
+        close(response.generalized_work.closure_residual_j, 0.0);
         close(
             response.generalized_work.reconstructed_body_power_w,
             -response.generalized_work.work_into_interface_j / 0.001,
@@ -1520,6 +1573,124 @@ mod tests {
                 .tangential_and_torsional_microslip_j
                 .to_bits()
         );
+    }
+
+    /// G1: purely elastic loading has numerical loss, but no frictional heat.
+    #[test]
+    fn elastic_loading_and_unloading_measure_actual_endpoint_work() {
+        let loaded = step(frame(), &PartialSlipState::zero(), [1.0, 0.0], 0.0);
+        close(loaded.stored_energy_j, 0.005);
+        close(loaded.dissipation.heat_j, 0.0);
+        close(loaded.generalized_work.work_into_interface_j, 0.01);
+        close(loaded.generalized_work.numerical_dissipation_j, 0.005);
+        close(loaded.generalized_work.closure_residual_j, 0.0);
+
+        let unloaded = step(frame(), &loaded.next_state, [-0.5, 0.0], 0.0);
+        close(unloaded.storage_change_j, -0.00375);
+        close(unloaded.dissipation.heat_j, 0.0);
+        close(unloaded.generalized_work.work_into_interface_j, -0.0025);
+        close(unloaded.generalized_work.numerical_dissipation_j, 0.00125);
+        close(unloaded.generalized_work.closure_residual_j, 0.0);
+        assert!(unloaded.generalized_work.reconstructed_body_power_w > 0.0);
+    }
+
+    /// G1/G3: closed elastic cycles expose first-order algorithmic damping.
+    #[test]
+    fn elastic_cycle_numerical_loss_refines_without_becoming_heat() {
+        fn cycle(steps_per_leg: usize) -> (f64, f64) {
+            let mut state = PartialSlipState::zero();
+            let mut work = 0.0;
+            let mut numerical = 0.0;
+            let dt = 0.001 / steps_per_leg as f64;
+            for direction in [1.0, -1.0] {
+                for _ in 0..steps_per_leg {
+                    let response = law()
+                        .advance(
+                            &patch(),
+                            &interface(),
+                            frame(),
+                            PartialSlipKinematics {
+                                creepage: [direction, 0.0],
+                                rolling_speed_mps: 1.0,
+                                torsional_spin_rad_per_s: 0.0,
+                                dt_s: dt,
+                            },
+                            &ownership(),
+                            &state,
+                        )
+                        .expect("elastic cycle");
+                    assert_eq!(response.state, PartialSlipStateKind::Sticking);
+                    close(response.dissipation.heat_j, 0.0);
+                    work += response.generalized_work.work_into_interface_j;
+                    numerical += response.generalized_work.numerical_dissipation_j;
+                    state = response.next_state;
+                }
+            }
+            close(state.elastic_displacement_m[0], 0.0);
+            close(work, numerical);
+            (work, numerical)
+        }
+        let coarse = cycle(4);
+        let medium = cycle(8);
+        let fine = cycle(16);
+        close(coarse.1, 0.01 / 4.0);
+        close(coarse.1, 2.0 * medium.1);
+        close(medium.1, 2.0 * fine.1);
+    }
+
+    /// G0/G3: combined translation/spin reversals never hide or heat numerical loss.
+    #[test]
+    fn mixed_reversal_history_closes_against_world_wrench_work() {
+        let rotated = frame().rotated(0.43).expect("rotated frame");
+        let mut state = PartialSlipState::zero();
+        let mut total_work = 0.0;
+        let mut total_heat = 0.0;
+        let mut total_numerical = 0.0;
+        let mut final_storage = 0.0;
+        for (creepage, spin) in [
+            ([1.0, -0.5], 0.1),
+            ([6.0, 2.0], 2.0),
+            ([-20.0, 0.5], -10.0),
+            ([0.0, 0.0], 0.0),
+            ([10.0, -10.0], 5.0),
+            ([-0.25, 0.5], -0.2),
+        ] {
+            let response = step(rotated, &state, creepage, spin);
+            let velocity = world(rotated, creepage);
+            let body_power = (0..3)
+                .map(|i| {
+                    response.wrench.force_n[i] * velocity[i]
+                        + response.wrench.torque_nm[i] * rotated.normal()[i] * spin
+                })
+                .sum::<f64>();
+            let work = -body_power * 0.001;
+            close(response.generalized_work.work_into_interface_j, work);
+            close(response.generalized_work.closure_residual_j, 0.0);
+            assert!(response.generalized_work.numerical_dissipation_j >= 0.0);
+            assert!(response.dissipation.heat_j >= 0.0);
+            total_work += work;
+            total_heat += response.dissipation.heat_j;
+            total_numerical += response.generalized_work.numerical_dissipation_j;
+            final_storage = response.stored_energy_j;
+            state = response.next_state;
+        }
+        close(total_work, final_storage + total_heat + total_numerical);
+        assert!(total_numerical > 0.0);
+    }
+
+    /// G1: steady saturated sliding transfers real frictional work entirely to heat.
+    #[test]
+    fn steady_gross_sliding_has_heat_without_numerical_storage_loss() {
+        let first = step(frame(), &PartialSlipState::zero(), [20.0, 0.0], 0.0);
+        let steady = step(frame(), &first.next_state, [20.0, 0.0], 0.0);
+        close(steady.storage_change_j, 0.0);
+        close(steady.generalized_work.numerical_dissipation_j, 0.0);
+        close(steady.dissipation.heat_j, 40.0 * 0.02);
+        close(
+            steady.generalized_work.work_into_interface_j,
+            steady.dissipation.heat_j,
+        );
+        close(steady.generalized_work.closure_residual_j, 0.0);
     }
 
     /// G3 reversal is deterministic and changes the gross-slide force direction.

@@ -153,6 +153,10 @@ tangent-plane slip MAGNITUDE (isotropic), never per frame component, so the
 world-frame receipt is covariant under the caller's tangent-frame rotation —
 the componentwise form was an executed defect (7e-5 relative world-force
 frame dependence) caught when the parked SO(2) conformance test first ran.
+The endpoint wrench and its work remain unchanged by energy bookkeeping:
+`SmoothResidual` forwards the law's independent work-closure residual and
+nonnegative backward-Euler numerical loss. This loss is separate from the
+physical microslip heat, including on purely elastic intervals.
 
 ## Invariants
 

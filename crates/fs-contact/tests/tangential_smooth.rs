@@ -113,6 +113,38 @@ fn state(
 }
 
 #[test]
+fn elastic_work_exposes_numerical_damping_without_physical_heat() {
+    let adapter = adapter(1.0e-4);
+    let state = state(&adapter);
+    let receipt = adapter
+        .prepare(
+            &law(),
+            &patch(NormalPatchAuthority::SyntheticFixture),
+            &interface(NormalPatchAuthority::SyntheticFixture),
+            &state,
+            &query(0, "elastic-work", [0.1, 0.02], 0.01),
+        )
+        .expect("elastic interval");
+    let step = &receipt.partial_slip_step;
+    assert_eq!(step.state, PartialSlipStateKind::Sticking);
+    close(step.dissipation.heat_j, 0.0);
+    assert!(receipt.residual.numerical_dissipation_j > 0.0);
+    close(
+        receipt.residual.numerical_dissipation_j,
+        step.stored_energy_j,
+    );
+    close(receipt.residual.energy_closure_residual_j, 0.0);
+    close(
+        -receipt.residual.endpoint_relative_power_w * receipt.regularized_kinematics.dt_s,
+        step.storage_change_j + receipt.residual.numerical_dissipation_j,
+    );
+    close(
+        receipt.residual.endpoint_relative_power_w,
+        receipt.residual.reconstructed_body_power_w,
+    );
+}
+
+#[test]
 fn fixed_branch_tangent_agrees_with_independent_centered_difference() {
     let adapter = adapter(1.0e-4);
     let state = state(&adapter);

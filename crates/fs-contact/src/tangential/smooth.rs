@@ -225,6 +225,8 @@ impl SmoothTangentialAdapter {
                 torsional_moment_nm: step.torsional_moment_nm,
                 endpoint_relative_power_w: step.generalized_work.endpoint_body_power_w,
                 reconstructed_body_power_w: step.generalized_work.reconstructed_body_power_w,
+                numerical_dissipation_j: step.generalized_work.numerical_dissipation_j,
+                energy_closure_residual_j: step.generalized_work.closure_residual_j,
             },
             partial_slip_step: step,
             prior_state: state.clone(),
@@ -417,6 +419,8 @@ impl SmoothTangentialAdapter {
                 torsional_moment_nm: step.torsional_moment_nm,
                 endpoint_relative_power_w: step.generalized_work.endpoint_body_power_w,
                 reconstructed_body_power_w: step.generalized_work.reconstructed_body_power_w,
+                numerical_dissipation_j: step.generalized_work.numerical_dissipation_j,
+                energy_closure_residual_j: step.generalized_work.closure_residual_j,
             },
             partial_slip_step: step,
             prior_state: state.clone(),
@@ -589,8 +593,12 @@ pub struct SmoothResidual {
     pub torsional_moment_nm: f64,
     /// Endpoint relative-wrench power, W, for the regularized kinematics only.
     pub endpoint_relative_power_w: f64,
-    /// Exact discrete-work power reconstructed by the constitutive rung, W.
+    /// Backward-Euler wrench-work power from the constitutive rung, W.
     pub reconstructed_body_power_w: f64,
+    /// Non-negative algorithmic energy loss, J; separate from physical heat.
+    pub numerical_dissipation_j: f64,
+    /// Storage + physical heat + numerical loss - applied wrench work, J.
+    pub energy_closure_residual_j: f64,
 }
 
 impl SmoothResidual {

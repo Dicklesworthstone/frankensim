@@ -4,7 +4,8 @@
 //! It refuses unresolved finite-slip creepage and pre-constitutive patch states, then
 //! delegates the actual return map to `fs-tribo` (or the `fs-contact` smooth
 //! transaction wrapper).  The emitted receipt keeps the generic discrete work
-//! closure distinct from the disc endpoint-power diagnostic.
+//! work and its numerical dissipation distinct from physical microslip heat.
+//! Endpoint forces are not silently replaced by step-average forces.
 
 use core::fmt;
 
@@ -375,6 +376,8 @@ impl EulerTangentialContactAdapter {
             stored_energy_j: step.stored_energy_j,
             irreversible_loss_j: step.dissipation.tangential_and_torsional_microslip_j,
             heat_j: step.dissipation.heat_j,
+            numerical_dissipation_j: step.generalized_work.numerical_dissipation_j,
+            energy_closure_residual_j: step.generalized_work.closure_residual_j,
             exact_relative_body_power_w: step.generalized_work.reconstructed_body_power_w,
             exact_relative_body_work_j: -step.generalized_work.work_into_interface_j,
             endpoint_relative_power_w: step.generalized_work.endpoint_body_power_w,
@@ -574,9 +577,14 @@ pub struct TangentialContactReceipt {
     pub irreversible_loss_j: f64,
     /// Non-negative heat assigned by the generic rung, J.
     pub heat_j: f64,
-    /// Exact discrete relative-body power reconstructed by the generic law, W.
+    /// Non-negative backward-Euler numerical loss, J; not a physical heat source.
+    pub numerical_dissipation_j: f64,
+    /// Storage + physical loss + numerical loss - relative wrench work, J.
+    pub energy_closure_residual_j: f64,
+    /// Backward-Euler relative-body power from the returned endpoint wrench, W.
     pub exact_relative_body_power_w: f64,
-    /// Exact discrete relative-body work reconstructed by the generic law, J.
+    /// Returned endpoint wrench contracted with the relative increment, J.
+    /// This is discrete work, not a resolved continuous-time work integral.
     pub exact_relative_body_work_j: f64,
     /// Endpoint relative-wrench power kept separately from discrete closure, W.
     pub endpoint_relative_power_w: f64,

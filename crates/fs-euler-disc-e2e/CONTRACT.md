@@ -1013,6 +1013,12 @@ starts rolling history, and seals the explicitly selected gas channel into one
 checkpoint. It does not infer any constitutive coefficient or contact radius
 from a specimen name. Product drivers therefore share the same initialization
 boundary instead of recreating synthetic normal-patch state by hand.
+The tangential adapter retains the generic endpoint wrench and measures its
+discrete relative work independently of the storage/heat sum. Its receipt
+keeps backward-Euler numerical dissipation separate from physical microslip
+loss and heat, with `work = Delta storage + physical loss + numerical loss`;
+the residual remains explicit rather than silently assigning numerical damping
+to a thermal source.
 Product drivers may also initialize rolling motion from explicitly declared
 precession and spin rates through the same resolved profile. That generic
 initializer derives mass, principal inertia, ground support, linear momentum,
