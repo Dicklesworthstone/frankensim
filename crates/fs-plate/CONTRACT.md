@@ -374,8 +374,15 @@ against CST/DKT.
   and all mass/stiffness/damping derivatives are implemented without dense
   matrices or per-action scratch. `PlateLoad` supplies a pure time-dependent
   reduced load and its parameter VJP, permitting moving mesh-point stencils.
-  Positive diagonal lumped mass is required; the exact mass preconditioner
-  supports consistent acceleration and its initialization pullback. An
+  The supplied mass may be lumped or consistent, including displacement/slope
+  and stiffener cross inertia. Diagonal mass keeps linear-time admission;
+  consistent mass is checked for symmetry to assembly roundoff and positive
+  sparse LDLT inertia once, without changing or lumping the physical matrix.
+  `new_with_mass_options` exposes the original factor's numeric byte/pivot
+  controls; cancellation is checked around that bounded synchronous work.
+  The mass Jacobi preconditioner is exact only for lumped mass; consistent
+  acceleration and its initialization pullback solve the full original matrix
+  under explicit Krylov restart/cycle limits. An
   effective-operator Jacobi preconditioner supports the explicit adjoint
   solve. Forward Newton/FGMRES automatically uses the same physical diagonal
   through the model hook, using the integrator's actual effective mass,
@@ -388,7 +395,7 @@ against CST/DKT.
   owned by the shared time integrator. Geometry, supports and reference
   matrices are fixed; stiffness scaling also scales any prestress/stiffeners.
   The adapter does not independently certify positive-semidefinite K or
-  identify physical damping. It retains the DKT/lumped-mass spatial model,
+  identify physical damping. It retains the supplied DKT/inertia spatial model,
   linear small-deflection kinematics, and the supplied initial-state chain.
   `examples/moving_plate.rs` advances a force across a clamped DKT mesh and
   differentiates sampled deflection through all four mechanical parameters

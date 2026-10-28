@@ -2314,6 +2314,7 @@ dependencies = [
  "fs-contact",
  "fs-dcontact",
  "fs-evidence",
+ "fs-la",
  "fs-matdb",
  "fs-material",
  "fs-phs",

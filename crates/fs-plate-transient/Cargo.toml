@@ -20,6 +20,7 @@ fs-time = { path = "../fs-time" }
 fs-solver = { path = "../fs-solver" }
 
 [dev-dependencies]
+fs-la = { path = "../fs-la" }
 fs-evidence = { path = "../fs-evidence" }
 fs-matdb = { path = "../fs-matdb" }
 fs-material = { path = "../fs-material" }

@@ -8,14 +8,14 @@
 //! it is a Young-modulus derivative only when those contributions scale with it.
 //!
 //! Geometry, support elimination and reference matrices remain fixed. This
-//! inherits the spatial DKT/lumped-mass approximation and small-deflection plate
+//! inherits the supplied spatial DKT/inertia approximation and small-deflection plate
 //! assumptions. Nonnegative Rayleigh coefficients dissipate energy when the
 //! supplied stiffness is positive semidefinite; this adapter does not establish
 //! that spectral property or identify physical damping from material data.
 
 use crate::PlateModel;
 use fs_solver::FlexiblePreconditioner;
-use fs_sparse::Csr;
+use fs_sparse::{Csr, DirectOrdering, LdltError, LdltOptions, SymbolicLdlt};
 use fs_time::galpha::second_order_adjoint::SecondOrderVjp;
 use fs_time::galpha::second_order_adjoint::trajectory::StructuralTrajectoryModel;
 use fs_time::galpha::{SecondOrderOperatorWeights, SecondOrderProblem};
@@ -57,7 +57,7 @@ impl PlateLoad for NoPlateLoad {
 pub struct PlateDynamicsParameters {
     /// Positive multiplier of the complete reference stiffness.
     pub stiffness_scale: f64,
-    /// Positive multiplier of the complete reference lumped mass.
+    /// Positive multiplier of the complete reference mass, including cross terms.
     pub mass_scale: f64,
     /// Nonnegative mass-proportional damping coefficient, 1/s.
     pub mass_damping_per_s: f64,
@@ -81,12 +81,14 @@ pub struct PlateDynamicsBudget {
 }
 
 /// Admission, preconditioning or cancellation refusal.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PlateDynamicsError {
     /// Incompatible model, nonfinite inputs or inadmissible physical controls.
     InvalidInput(&'static str),
     /// The model exceeded an explicit pre-scan admission ceiling.
     Budget(&'static str),
+    /// The original sparse mass factorization refused, including its byte cap.
+    MassFactor(LdltError),
     /// Cancellation observed before publishing a model or preconditioner.
     Cancelled,
 }
@@ -120,10 +122,11 @@ fn dot_row(matrix: &Csr, row: usize, input: &[f64]) -> f64 {
 /// One immutable spatial plate and load parameter point.
 ///
 /// Implements the existing structural residual, explicit transposed actions,
-/// parameter VJP and time-dependent trajectory loading. The mass must be the
-/// positive diagonal lumped operator produced by plate assembly. K may include
-/// prestress and stiffeners. Its stored transpose is used explicitly, without
-/// assuming that floating-point assembly preserved exact symmetry.
+/// parameter VJP and time-dependent trajectory loading. The supplied mass may
+/// be lumped or consistent; positive definiteness is checked once at admission.
+/// K may include prestress and stiffeners. Transposed actions use the original
+/// stored entries, including all mass cross terms, without assuming bitwise
+/// symmetry of floating-point assembly.
 pub struct PlateDynamics<'a, L: ?Sized> {
     model: &'a PlateModel,
     parameters: PlateDynamicsParameters,
@@ -147,12 +150,37 @@ impl<'a, L: PlateLoad + ?Sized> PlateDynamics<'a, L> {
     }
 
     /// Bind admitted sparse operators and pure load callbacks.
-    #[allow(clippy::too_many_lines)]
     pub fn new<C: FnMut() -> bool>(
         model: &'a PlateModel,
         parameters: PlateDynamicsParameters,
         load: &'a L,
         budget: PlateDynamicsBudget,
+        cancelled: &mut C,
+    ) -> Result<Self, PlateDynamicsError> {
+        Self::new_with_mass_options(
+            model,
+            parameters,
+            load,
+            budget,
+            &LdltOptions::default(),
+            cancelled,
+        )
+    }
+
+    /// Bind the same physical model with explicit consistent-mass factor limits.
+    /// Diagonal mass uses the original linear-time admission and needs no factor.
+    /// For consistent mass, the existing sparse LDLT service checks positive
+    /// definiteness once; its factors are then discarded. No mass lumping or
+    /// modified physical operator is introduced. Set `max_factor_bytes` to bound
+    /// the numeric factor and scratch separately from the source operator budget.
+    /// Cancellation is checked around the bounded synchronous factorization.
+    #[allow(clippy::too_many_lines)]
+    pub fn new_with_mass_options<C: FnMut() -> bool>(
+        model: &'a PlateModel,
+        parameters: PlateDynamicsParameters,
+        load: &'a L,
+        budget: PlateDynamicsBudget,
+        mass_options: &LdltOptions,
         cancelled: &mut C,
     ) -> Result<Self, PlateDynamicsError> {
         poll(cancelled)?;
@@ -219,19 +247,47 @@ impl<'a, L: PlateLoad + ?Sized> PlateDynamics<'a, L> {
                 "incomplete reduced DOF mapping",
             ));
         }
+        let mut diagonal_mass = true;
         for row in 0..n {
             poll(cancelled)?;
             let (columns, values) = model.m.row(row);
-            if columns != [row]
-                || !values[0].is_finite()
-                || values[0] <= 0.0
-                || p.mass_scale * values[0] <= 0.0
-                || !(p.mass_scale * values[0]).is_finite()
-                || !(p.mass_scale * p.mass_damping_per_s * values[0]).is_finite()
+            let diagonal = model.m.get(row, row);
+            if !diagonal.is_finite()
+                || diagonal <= 0.0
+                || p.mass_scale * diagonal <= 0.0
+                || !(p.mass_scale * diagonal).is_finite()
             {
                 return Err(PlateDynamicsError::InvalidInput(
-                    "finite positive diagonal plate mass required",
+                    "finite positive scaled plate mass diagonal required",
                 ));
+            }
+            for (column_chunk, value_chunk) in columns.chunks(256).zip(values.chunks(256)) {
+                poll(cancelled)?;
+                for (&column, &value) in column_chunk.iter().zip(value_chunk) {
+                    if !value.is_finite()
+                        || !(p.mass_scale * value).is_finite()
+                        || !(p.mass_scale * p.mass_damping_per_s * value).is_finite()
+                    {
+                        return Err(PlateDynamicsError::InvalidInput(
+                            "finite representable mass and damping entries required",
+                        ));
+                    }
+                    if column != row && value != 0.0 {
+                        diagonal_mass = false;
+                        let mirror = model.m.get(column, row);
+                        // Admit assembly roundoff only; do not silently use one
+                        // triangle of a genuinely nonsymmetric inertia operator.
+                        let scale = diagonal.sqrt() * model.m.get(column, column).sqrt();
+                        if !scale.is_finite()
+                            || !mirror.is_finite()
+                            || (value - mirror).abs() > 64.0 * f64::EPSILON * scale
+                        {
+                            return Err(PlateDynamicsError::InvalidInput(
+                                "consistent plate mass must be symmetric to assembly roundoff",
+                            ));
+                        }
+                    }
+                }
             }
             for chunk in model.k.row(row).1.chunks(256) {
                 poll(cancelled)?;
@@ -244,6 +300,19 @@ impl<'a, L: PlateLoad + ?Sized> PlateDynamics<'a, L> {
                         "finite representable stiffness and damping entries required",
                     ));
                 }
+            }
+        }
+        if !diagonal_mass {
+            let symbolic = SymbolicLdlt::analyze(&model.m, DirectOrdering::Amd)
+                .map_err(PlateDynamicsError::MassFactor)?;
+            poll(cancelled)?;
+            let factor = symbolic
+                .factor(&model.m, mass_options)
+                .map_err(PlateDynamicsError::MassFactor)?;
+            if factor.inertia().negative != 0 {
+                return Err(PlateDynamicsError::InvalidInput(
+                    "consistent plate mass must be positive definite",
+                ));
             }
         }
         poll(cancelled)?;
@@ -261,8 +330,10 @@ impl<'a, L: PlateLoad + ?Sized> PlateDynamics<'a, L> {
         self.model
     }
 
-    /// Exact inverse of the admitted positive diagonal scaled mass. Use for
-    /// both consistent-initialization primal and transposed mass solves.
+    /// Jacobi inverse of the scaled mass diagonal, for both initialization
+    /// primal and transposed mass solves. It is exact for lumped mass only;
+    /// consistent mass retains its full sparse action in the iterative solve.
+    /// Supply sufficient Krylov restart/cycle limits for that physical operator.
     #[must_use]
     pub fn mass_preconditioner(&self) -> PlateMassPreconditioner<'_> {
         PlateMassPreconditioner {
@@ -529,7 +600,7 @@ impl<L: PlateLoad + ?Sized> StructuralTrajectoryModel for PlateDynamics<'_, L> {
     }
 }
 
-/// Allocation-free exact diagonal mass inverse at one fixed parameter point.
+/// Allocation-free Jacobi mass inverse at one fixed parameter point.
 pub struct PlateMassPreconditioner<'a> {
     mass: &'a Csr,
     scale: f64,

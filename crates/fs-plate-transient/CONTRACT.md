@@ -23,6 +23,37 @@ only through the public `PlateModel`.
 `moving_plate` / `preconditioned_plate` examples live in this crate.
 `fs-ascent`'s `plate_calibration` example includes `examples/moving_plate.rs`.
 
+## Consistent physical inertia
+
+`PlateDynamics::new` admits the complete symmetric positive-definite sparse
+mass, including the consistent panel/beam and displacement/slope cross terms.
+The existing diagonal mass takes its original linear-time path. Nondiagonal
+mass uses the existing sparse LDLT owner once for positive-definiteness
+admission; it is neither diagonalized nor replaced by the admission factor.
+Symmetry is required within 64 eps times the geometric mean of the two mass
+diagonals, admitting assembly rounding but refusing materially nonsymmetric
+inertia. Every original stored entry continues through the primal action,
+explicit transpose, Rayleigh damping, energy and parameter derivatives.
+
+`new_with_mass_options` accepts the existing `LdltOptions` for explicit pivot
+and numeric factor-byte ceilings. Original operator/DOF ceilings apply before
+scanning, and cancellation is checked around the synchronous sparse analysis
+and factorization. Singular, indefinite and nonfinite mass refuse before a
+model is returned. No factorization or temporary matrix is added to time steps.
+The allocation-free mass Jacobi preconditioner is exact only for lumped mass;
+consistent-mass initialization and its adjoint require adequate explicitly
+supplied Krylov controls. This is admission and integration of the chosen
+discretization, not an independent continuum accuracy certificate.
+
+`tests/consistent_mass.rs` supplies a manufactured displacement/slope pencil
+with cross inertia. Its G1/G3 trajectory and all five physical/load parameter
+derivatives are compared with dense LU initialization and stepping (state
+tolerance 2e-10 relative with a 1e-3 component scale floor, gradient tolerance
+2e-6 relative). A midpoint free-vibration test checks assembled energy at
+2e-9 relative and dissipative decay; G4 checks cancellation and mass/factor
+refusals. Full crate and measured shell/plate qualification remain separate
+from these bounded mathematical regressions.
+
 The `preconditioned_plate` example accepts mesh size 8 (147 free DOFs) or 12
 (363 free DOFs), comparing physical Jacobi scaling against the default identity
 hook under identical short-restart controls. These are measured fixed-mesh,
