@@ -5,6 +5,16 @@ use super::*;
 pub(super) fn admit_port(network: &CoupledModalSystem, port: &ModalFrictionPort,
     config: ModalFrictionConfig) -> Result<Vec<f64>, ModalFrictionError>
 {
+    // The numerical contact owner is shared with stateful TangentialLaw ports.
+    // A law is admitted separately; attachment projection has no dry-law default.
+    port.law.regularized_traction_1d(0.0, 0.0, 1.0)?;
+    admit_attachments(network, &port.left, port.right.as_ref(), config)
+}
+
+pub(super) fn admit_attachments(network: &CoupledModalSystem, left: &ModalAttachment,
+    right: Option<&ModalAttachment>, config: ModalFrictionConfig)
+    -> Result<Vec<f64>, ModalFrictionError>
+{
     if !(1..=128).contains(&config.max_iterations)
         || [config.maximum_force_n, config.maximum_slip_speed_m_s,
             config.force_absolute_tolerance_n, config.force_relative_tolerance,
@@ -12,12 +22,9 @@ pub(super) fn admit_port(network: &CoupledModalSystem, port: &ModalFrictionPort,
         || config.force_relative_tolerance >= 1.0 {
         return Err(invalid("friction requires explicit positive finite physical and numerical budgets").into());
     }
-    // This public owner entry validates all parameters before its zero-slip
-    // early return. No regularized traction is used in the actual dynamics.
-    port.law.regularized_traction_1d(0.0, 0.0, 1.0)?;
     let mut column = vec![0.0; network.mode_count()];
-    for (attachment, sign) in std::iter::once((&port.left, 1.0))
-        .chain(port.right.as_ref().map(|right| (right, -1.0))) {
+    for (attachment, sign) in std::iter::once((left, 1.0))
+        .chain(right.map(|right| (right, -1.0))) {
         let model = network.models.get(attachment.component)
             .ok_or_else(|| invalid("friction attachment names an unknown component"))?;
         if attachment.shapes.len() != model.modes().len()

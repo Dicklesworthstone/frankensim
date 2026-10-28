@@ -8873,6 +8873,35 @@ checks do not establish numerical convergence or instrument realism.
 
 This flow-then-motion split is first order. Prescribed-drive mechanics, timestep/event resolution, combustion and empirical valve applicability remain with callers. G0/G1/G3 tests cover independently computed constant-Cv pressure work, analytic Otto efficiency under refinement, variable-Cp compression against an entropy oracle, simultaneous inlet/outlet flow with motion, species conservation and link-order invariance, held-volume heat, and late-refusal/cancellation rollback.
 
+## Stateful tangential contact on the shared modal network
+
+`friction::tangential::TangentialModalSystem<L>` accepts the existing
+`fs_tribo::TangentialLaw` directly. It uses the complete original bilateral
+network's released increment and held-force compliance, then applies that law's
+work-conjugate effort to the same network. Both body reactions, material memory
+and admitted acoustic loads remain in the original evolution. Reversible
+interface storage is included in the total-energy ceiling and work audit;
+only the law's irreversible loss is exported as friction heat. Constitutive
+state, mechanics and observations publish atomically. Actual displacement,
+constitutive storage, physical heat and external work are checked together.
+
+The current adapter has one fixed tangential coordinate and a prescribed normal
+load. Explicit pressure and temperature inputs pass unchanged to the law; this
+adapter alone does not evolve thermal state or establish material authority.
+Transverse constitutive response refuses rather than losing an unassembled work
+coordinate. G1/G3 regressions compare elastic shear against an independent
+two-oscillator load line, close reversal hysteresis work, reproduce the original
+Coulomb consumer and preserve loaded history on refusal/cancellation. The
+same public consumer runs the analytic Cattaneo--Mindlin law: its accepted
+motion reproduces the Hertz tangential backbone and its path-average effort
+closes body work, reversible contact storage and microslip heat together.
+Loaded reversals retain the original contact memory and reject a changed normal
+load without modifying mechanics or history; the law's fixed-load scope remains.
+Each accepted sample represents one constitutive displacement segment, so time
+refinement must resolve reversals within a sample. A three-rung elastic-limit
+test checks second-order convergence to the independent stiffness-shifted
+oscillator frequency; energy closure alone is not a time-accuracy claim.
+
 ## Shared finite-network friction heating
 
 `friction_heat::FrictionHeatRoute` binds an existing perfect-contact link between

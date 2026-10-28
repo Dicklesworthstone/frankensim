@@ -549,3 +549,6 @@ pub mod heat;
 
 /// Adhesive junction shear on frozen real contact geometry.
 pub mod adhesive;
+
+/// Stateful tangential laws with reversible contact storage on the same network.
+pub mod tangential;
