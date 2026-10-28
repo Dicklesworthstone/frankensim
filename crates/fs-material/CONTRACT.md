@@ -3607,3 +3607,38 @@ chamber and frozen nozzle. Its native execution produced 902.699280458 K chamber
 temperature with 3.47e-18 kg mass residual and 3.64e-12 J enthalpy residual.
 These values validate that authored integration fixture, not real propellant
 or engine performance. The full repository Cargo workspace was not run.
+
+
+### Stable simultaneous species and additional-energy exchange
+
+`species::network::exchange_candidate_with_heat` combines original species
+streams with antisymmetric signed additional energy before one reconstruction
+per affected finite gas. Heat-only nodes use the same owner. Additional energy
+is separate from the existing transported partial enthalpy and may supply a
+molecular energy correction; prescribing it does not establish a physical rate
+law or entropy guarantee. Canonical endpoint/amount ordering and compensated
+summation retain deterministic aggregation. A shared input bound covers mass
+and energy records, and original gross species-withdrawal limits remain intact.
+
+At each original node temperature T0, the thermal target uses incoming original
+species enthalpy increments plus net species mass times R_i*T0, then additional
+energy. The target composition is reconstructed once through the original
+NASA temperature-increment owner. This cancels conserved species reference
+constants before arithmetic, preserving counterflow heat when absolute formation
+energies are enormous. Imported species must support T0 and the declared common
+caloric bracket; source extrapolation and missing identities refuse atomically.
+
+The local energy residual is the original-law sensible storage minus that
+thermal target. The global residual sums these local closures after the paired
+species/energy ledger cancels analytically. Actual total and per-species inventory
+rounding is independently admitted against the intended mass changes. Displayed
+absolute energy/enthalpy accounts retain their source references and are not
+subtracted to judge a small caloric residual. The existing no-additional-energy
+entry point delegates to this same stable owner.
+
+Seven new regressions cover heat-only nodes, combined mass/heat, canonical order,
+rollback, extreme reference shifts, zero-net-mass counterflow heat and changing
+mixtures with distinct species datums. Final files passed Rustfmt parsing and
+independent source/equation review. A final test typecheck was blocked before
+source analysis when the executor's genuine core dependency archives disappeared;
+these seven tests are not claimed as compiled or executed.
