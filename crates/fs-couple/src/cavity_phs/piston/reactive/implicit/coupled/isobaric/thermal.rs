@@ -5,6 +5,9 @@
 //! The original implicit mechanism, material closure and scalar heat solver
 //! remain the numerical owners. Contact heat is evaluated at the final gas.
 
+/// Reciprocal finite-body enthalpy, latent phase and combined entropy accounts.
+pub mod body;
+
 use super::{GasReaction, GasReactionError, GasReactionSolve, ClosedGasParcel,
     IsobaricGasReactionStep};
 use crate::cavity_phs::piston::thermal::{
