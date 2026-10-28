@@ -15,9 +15,11 @@
 
 mod runtime;
 pub use runtime::{FrameResponseLimits, FrameVibrationResponse, FrameVibrationRuntime};
+mod material;
+pub use material::FrameVibrationComponent;
 
 use fs_math::c64::C64;
-use fs_solid::frame2d::{Frame2d, FrameMode, FrameModeStatus};
+use fs_solid::frame2d::{Frame2d, FrameMaterialDamping, FrameMode, FrameModeStatus};
 use fs_solid::SolidError;
 
 use crate::modal_acoustic_time::{
@@ -45,6 +47,8 @@ pub enum FrameVibrationError {
     Solid(SolidError),
     /// Original shared time-domain owner refusal.
     Modal(ModalAcousticTimeError),
+    /// Original simultaneous modal connection/propagation owner refusal.
+    Coupling(crate::render::schedule::force::coupled::ModalCouplingError),
     /// No unstable mode may be hidden by retaining a smaller positive subset.
     UnstableMode { mode: usize, eigenvalue_per_s2: f64 },
     /// A near-zero mode cannot be silently converted into a positive oscillator.
@@ -63,6 +67,14 @@ impl From<SolidError> for FrameVibrationError {
 }
 impl From<ModalAcousticTimeError> for FrameVibrationError {
     fn from(error: ModalAcousticTimeError) -> Self { Self::Modal(error) }
+}
+impl From<crate::render::schedule::force::coupled::ModalCouplingError> for FrameVibrationError {
+    fn from(error: crate::render::schedule::force::coupled::ModalCouplingError) -> Self {
+        match error {
+            crate::render::schedule::force::coupled::ModalCouplingError::Cancelled => Self::Cancelled,
+            other => Self::Coupling(other),
+        }
+    }
 }
 
 /// An existing modal mechanical port plus its frozen physical reference datum.
@@ -83,6 +95,7 @@ pub struct FrameVibrationBasis {
     available_modes: usize,
     influence_mass_kg: [f64; 2],
     effective_mass_kg: [f64; 2],
+    material_damping: Option<FrameMaterialDamping>,
 }
 
 impl FrameVibrationBasis {
@@ -134,10 +147,15 @@ impl FrameVibrationBasis {
         if reference_displacement.iter().any(|x| !x.is_finite()) {
             return Err(FrameVibrationError::Invalid("nonfinite frozen frame displacement"));
         }
+        // The same immutable source operator serves native Newmark and every
+        // reduced receiver. It retains the complete spectrum's sampling gate,
+        // so truncation cannot hide an unresolved material-damped frame mode.
+        let material_damping = frame.material_damping_operator()?;
         poll(&mut cancelled)?;
         Ok(Self {
             modes: analysis.modes, reference_displacement, available_modes,
             influence_mass_kg: analysis.base_influence_mass_kg, effective_mass_kg,
+            material_damping,
         })
     }
 
@@ -153,12 +171,33 @@ impl FrameVibrationBasis {
     pub fn base_influence_mass_kg(&self) -> [f64; 2] { self.influence_mass_kg }
     /// Sum of retained squared participation factors, not the complete inventory.
     pub fn retained_effective_mass_kg(&self) -> [f64; 2] { self.effective_mass_kg }
+    /// Original physical viscosity operator and all retained member sources.
+    pub fn material_damping(&self) -> Option<&FrameMaterialDamping> {
+        self.material_damping.as_ref()
+    }
 
     /// Construct the ORIGINAL exact held-force modal owner, with explicitly
     /// supplied per-mode viscous damping ratios. No acoustic pressure transfer
     /// is guessed from a planar structural model. This component can also be
     /// passed directly to `CoupledModalSystem` and its existing contact wrappers.
+    /// Material-viscous frames require [`Self::coupled_component`], which carries
+    /// their complete nonproportional damping into that SAME coupled owner.
+    /// This independent-mode path refuses rather than dropping those losses.
     pub fn time_model(
+        &self,
+        sample_rate_hz: u32,
+        damping_ratios: &[f64],
+        budget: ModalAcousticTimeBudget,
+    ) -> Result<ModalAcousticTimeModel, FrameVibrationError> {
+        if self.material_damping.is_some() {
+            return Err(FrameVibrationError::Invalid(
+                "material frame viscosity requires the complete coupled_component binding",
+            ));
+        }
+        self.oscillator_model(sample_rate_hz, damping_ratios, budget)
+    }
+
+    fn oscillator_model(
         &self,
         sample_rate_hz: u32,
         damping_ratios: &[f64],

@@ -26,6 +26,12 @@ on:
       - 'crates/fs-lbm/Cargo.toml'
       - 'crates/fs-lbm/src/conjugate/enthalpy*'
       - 'crates/fs-lbm/src/conjugate/enthalpy/**'
+      - 'crates/fs-lbm/src/conjugate/simple.rs'
+      - 'crates/fs-lbm/src/conjugate/simple/phase_capture.rs'
+      - 'crates/fs-lbm/src/conjugate/simple/viscous_heat/unsteady.rs'
+      - 'crates/fs-lbm/src/conjugate/unsteady/material.rs'
+      - 'crates/fs-lbm/tests/liquid_flow_enthalpy*'
+      - 'crates/fs-lbm/tests/liquid_flow_enthalpy/**'
       - 'crates/fs-lbm/tests/joule_enthalpy*'
       - 'crates/fs-lbm/src/conjugate/material_coupling/interfaces.rs'
       - 'crates/fs-lbm/examples/joule_phase_change*'
@@ -38,6 +44,8 @@ on:
       - 'crates/fs-couple/tests/circuit_enthalpy*'
       - 'crates/fs-couple/tests/circuit_enthalpy/**'
       - 'crates/fs-couple/tests/circuit_material_network.rs'
+      - 'crates/fs-couple/tests/conduction_enthalpy*'
+      - 'crates/fs-couple/tests/conduction_enthalpy/**'
       - 'crates/fs-couple/Cargo.toml'
       - 'crates/fs-solver/src/finite_difference.rs'
       - '.github/workflows/shared-thermal.yml'
@@ -138,6 +146,11 @@ jobs:
         run: |
           set -o pipefail
           cargo test --no-fail-fast -p fs-lbm --features implicit-enthalpy-coupling --test joule_enthalpy --test joule_enthalpy_transport --test joule_enthalpy_composed --test joule_enthalpy_interfaces --test joule_enthalpy_implicit --test material_electrical_interface --example joule_phase_change -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/electrothermal.log"
+      - name: Native phase flow and supported freezing
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test -p fs-lbm --features enthalpy-coupling --test liquid_flow_enthalpy -- --test-threads=1
+          cargo test -p fs-lbm --features enthalpy-coupling --lib phase_capture -- --test-threads=1
       - name: Heated layer expansion and fixed-end acoustic response
         if: ${{ !cancelled() }}
         shell: bash
@@ -154,7 +167,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          cargo test --no-fail-fast -p fs-couple --test circuit_enthalpy --test circuit_material_network -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/circuit-thermal.log"
+          cargo test --no-fail-fast -p fs-couple --test circuit_enthalpy --test circuit_material_network --test conduction_enthalpy -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/circuit-thermal.log"
       - name: Retain integration diagnostics and resolved dependency lock
         if: always()
         run: |

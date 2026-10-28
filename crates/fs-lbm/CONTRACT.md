@@ -4307,3 +4307,34 @@ cancellation or any refusal publishes no accepted fluid/material state.
 still bounds total intervals. This removes the explicit thermal stability limit
 without enlarging capacity, clipping geometry or inferring heat. Backward Euler
 and the thermal/flow split remain first-order; temporal refinement is required.
+
+### Inelastic freezing into an explicit stationary support
+
+With `enthalpy-coupling`, the exact-phase feedback owner's
+`advance_with_supported_freezing` permits a bounded moving-to-solid endpoint.
+It requires native unsteady physical heating, equal constant phase density,
+fixed geometry, a no-op inner observer, and an explicit infinitely massive
+zero-velocity `StationaryPhaseSupport`. Only the requested final endpoint
+defers moving-face admission; earlier substep phase events still refuse.
+
+Capture uses the SAME staggered face mass as native kinetic accounting.
+Removed linear/angular momentum reaches the support, whose zero velocity does
+no mechanical work. Removed kinetic energy heats the original mapped caloric
+cells through `apply_heat_j`, with native half-cell weights. The separate
+`support_capture_heat_j` channel is part of generated physical heat; molecular,
+Darcy and backward-Euler numerical losses remain distinct. Final kinetic
+history includes capture and continues on the same accepted clock.
+
+Surviving native velocities remain unchanged. A nonzero face between newly
+solid and surviving liquid refuses because its momentum redistribution needs
+a pressure/impulse solve. After depositing capture heat, all material sources
+are queried again and the final exact phase mask must agree. Remelting,
+unsupported capture, source exits and cancellation publish none of the thermal,
+flow or support candidate. This first-order endpoint closure admits complete
+moving components and zero-flux phase boundaries; it does not supply moving
+solid mechanics, shrinkage or arbitrary partial freezing.
+
+The `liquid_flow_enthalpy::mushy::occupancy::locking` regressions and native
+`phase_capture` unit test specify independent energy/torque references,
+graded half-cell transfers, data-only viscosity/latent changes, freeze/remelt
+continuation, preserved separate flow, and deterministic refused retries.

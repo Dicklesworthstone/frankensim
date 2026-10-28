@@ -9907,3 +9907,50 @@ held-force subdivision in the linear limit, signed compact pressure/flow,
 and physical-input refusals. The compact pressure observation uses step-mean
 acceleration; it is not a retarded or finite-wavelength acoustic field. The
 existing nonlinear time-resolution gate and source/reduction limits remain.
+
+### Shared material storage on spatial electrothermal circuits
+
+`ConductionCircuit::new_with_material_storage` applies the original material
+capacitor/inductor reductions before ordinary circuit admission. The spatial
+conductor, other material resistors, and field storage therefore share the
+existing circuit/finite-heat trajectory without independent C/L overrides.
+Complete dielectric/core source records and geometry survive continuation.
+
+Storage contexts remain fixed during electrothermal intervals.
+`rebind_storage_candidate` changes source/geometry at unchanged charge and
+flux linkage and reports required external work from the SAME material energy
+law, delta(q²/(2C) + lambda²/(2L)), shared with the lumped material circuit.
+The spatial field owner is retained unchanged. Incompatible ideal-source
+constraints, incomplete sources and cancellation refuse transactionally.
+Parameter work is not Joule heat. Automatic temperature-dependent dielectric
+or magnetic storage requires compatible reversible field-entropy ownership.
+The `conduction_enthalpy::circuit::storage` regressions cover independent
+RC/RL source swaps, actual spatial fields/heat, work reversal and refusal.
+
+### Material frame viscosity through the common modal owner
+
+`FrameVibrationBasis` retains the native `FrameMaterialDamping` and its original
+section sources. `coupled_component` projects each native positive resistance
+port through the unchanged mass-normalized basis. The existing
+`CoupledModalSystem` receives every complete column, so its ordinary and
+prepared propagators preserve the full Galerkin damping operator Phi^T C Phi,
+including nonproportional cross terms. There is no diagonal damping fit,
+second integrator or invented pressure transfer.
+
+`FrameVibrationComponent` keeps source basis, oscillator state and all material
+connections together. `into_system` prepares the original coupled owner;
+`into_parts` remaps every port for a larger contact/radiation/modal assembly.
+The returned basis retains physical force/observation maps and provenance.
+Original nonzero modal states survive preparation. Material loss enters
+`connection_dissipation_j`; separately authored modal loss enters
+`component_dissipation_j`. Neither is implicitly deposited into thermal cells.
+
+The scalar `time_model` and its independent-mode runtime refuse source-viscous
+frames instead of dropping their coupling. Complete native-spectrum and
+material-band admission remains in force after explicit modal truncation.
+Projection and native setup work are bounded. Truncation does not reconstruct
+omitted motion/loss. `tests/frame_vibration_material.rs` specifies continuous
+physical references, heterogeneous off-diagonal damping, larger-assembly
+work/state continuity and rejection behavior. The existing `frame_vibration`
+example now accepts manufactured density, stiffness and viscosity data and
+uses this complete shared path for its SI response and loss output.

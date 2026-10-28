@@ -2144,3 +2144,29 @@ integrated viscous loss; endpoint-force quadrature corrections and the combined
 energy audit use that same work. Bulk loss, intrinsic fracture and bond viscosity
 stay distinct. Loss is not silently deposited as heat, and source coefficients
 are not refreshed across a damaged bond history.
+
+### Source-bound frame strain-rate dissipation
+
+`FrameViscousSection::try_new` binds explicit axial and bending viscosity
+properties to the SAME original layered elastic section.
+`Frame2d::add_material_viscous_element` retains those sources, stiffness and
+reference inertia together. Every native Newmark call includes the complete
+physical damping matrix. Heterogeneous member losses retain directional,
+rotational and inter-node terms; no common Rayleigh ratio is inferred.
+
+`FrameMaterialDamping` retains the original sections and three positive
+work-conjugate resistance ports per member. The native full matrix is assembled
+from those exact ports, which are also available to reduced receivers. Each
+port maps physical nodal displacement to an extension in metres; rotational
+weights therefore carry metres. `material_damping_energy` and
+`rayleigh_damping_energy` are separate parts of the existing total damping work,
+not additional heat sources.
+
+This path requires fixed linear geometry and elasticity throughout the frame,
+positive inertia on every free coordinate, explicit viscosity support from DC
+through the actual sampled Nyquist band, and the complete original spectrum
+below Nyquist even when a receiver retains fewer modes. Temperature and geometry
+remain frozen. It adds no hereditary loss, thermal deposition or acoustic
+radiation. `tests/frame2d_viscosity.rs` supplies continuous oscillator and
+heterogeneous two-coordinate references, physical-port work equivalence,
+continuation, and source/admission regressions.

@@ -80,8 +80,10 @@ impl FrameVibrationResponse {
 /// It cannot interrupt an individual original scalar-mode propagation loop.
 ///
 /// The original frame/material history is not modified. For nonlinear contact
-/// or multibody feedback, use the same basis's `time_model` and attachment maps
-/// with the existing `CoupledModalSystem`, rather than staggering this wrapper.
+/// or multibody feedback, use the same basis's `coupled_component` and attachment
+/// maps with the existing `CoupledModalSystem`. That complete binding also
+/// carries source section viscosity; this independent-mode wrapper refuses it
+/// through `time_model` rather than silently discarding its modal cross terms.
 pub struct FrameVibrationRuntime {
     basis: FrameVibrationBasis,
     accepted: ModalAcousticTimeModel,

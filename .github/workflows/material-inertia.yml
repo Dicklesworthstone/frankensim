@@ -7,6 +7,15 @@ on:
       - 'crates/fs-solid/src/linear3.rs'
       - 'crates/fs-solid/src/prestress.rs'
       - 'crates/fs-solid/tests/thermal_prestress.rs'
+      - 'crates/fs-solid/src/frame2d*'
+      - 'crates/fs-solid/src/frame2d/**'
+      - 'crates/fs-solid/tests/frame2d_*'
+      - 'crates/fs-material/src/section.rs'
+      - 'crates/fs-material/src/section/axial.rs'
+      - 'crates/fs-couple/src/frame_vibration*'
+      - 'crates/fs-couple/src/frame_vibration/**'
+      - 'crates/fs-couple/tests/frame_vibration*'
+      - 'crates/fs-couple/examples/frame_vibration.rs'
       - 'crates/fs-contact/src/normal_patch/**'
       - 'crates/fs-contact/tests/source_point*'
       - 'crates/fs-contact/tests/source_point/**'
@@ -70,6 +79,12 @@ jobs:
         run: |
           set -o pipefail
           cargo test -p fs-solid --test thermal_prestress 2>&1 | tee "$RUNNER_TEMP/material-prestress.log"
+      - name: Material frame inertia, viscosity and native vibration
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test -p fs-solid --test frame2d_material --test frame2d_viscosity -- --test-threads=1
+          cargo test -p fs-couple --test frame_vibration --test frame_vibration_material -- --test-threads=1
+          cargo build -p fs-couple --example frame_vibration
       - name: Source-bound normal contact through the original finite-patch law
         run: cargo test -p fs-contact --test source_point -- --test-threads=1
       - name: Contact work deposited in finite material thermal storage
