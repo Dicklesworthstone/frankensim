@@ -1,0 +1,15 @@
+frankensim.matdb-manifest.v3
+pack_id	finsa-fibrapan-model-30mm-2026
+redistribution	permitted	Selected attributed numerical facts and original notes only; source document and table layout are not redistributed
+citation	Finsa, FibraPan Model technical datasheet, revision 28/05/2026, page 1, 30 mm column; https://files.finsa.com/datasheets/fichasTecnicas/en/technical-datasheet-fibrapan-model-en.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	finsa-model	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	bending_moe_specification	bending-moe-specification	dimensional
+property	bending_mor_specification	bending-mor-specification	dimensional
+property	internal_bond_specification	internal-bond-strength-specification	dimensional
+property	thickness_swelling_24h_specification	thickness-swelling-24h-specification	dimensional
+axis	source_product_fibrapan_model_2026	source-product-fibrapan-model-2026	dimensional
+axis	nominal_thickness	nominal-thickness	dimensional
+axis	source_temperature_known	source-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional

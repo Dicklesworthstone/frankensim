@@ -1,0 +1,15 @@
+frankensim.matdb-manifest.v3
+pack_id	bauroc-ecoterm-plus-aac-2020
+redistribution	permitted	Selected attributed numerical facts and original notes only; source document and table layout are not redistributed
+citation	Bauroc, Product Catalogue 2020, technical properties of blocks and partition plates, ECOTERM+ column; https://bauroc.eu/uploads/2020/04/brochure_bauroc_2020_2.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	bauroc-ecoterm	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	density_tolerance	density-declared-tolerance	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	compressive_strength	compressive-strength	dimensional
+axis	source_product_bauroc_ecoterm_plus_2020	source-product-bauroc-ecoterm-plus-2020	dimensional
+axis	source_temperature_known	source-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	dry_condition	dry-condition	dimensional
+axis	temperature	temperature	absolute-temperature

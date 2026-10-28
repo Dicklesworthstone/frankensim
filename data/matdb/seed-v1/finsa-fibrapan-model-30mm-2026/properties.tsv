@@ -1,0 +1,32 @@
+frankensim.matdb-source.v1
+observation	board	Finsa FibraPan Model high-density fibreboard, MDF.H, 30 mm	2026 datasheet; EN 323 density, EN 310 bending, EN 319 internal bond, EN 317 swelling	Density is an approximate guide, not a measured specimen density or certified bound. Mechanical and swelling entries are product specifications without printed inequalities. The EN 310 modulus describes bending, not a complete isotropic constitutive law. The product is moisture-resistant high-density fibreboard intended for mould models. Delivered moisture is 7 +/-3 percent; test conditioning, resin formulation and density profile are unstated. No thermal, creep, immersion-strength or other-thickness extrapolation is supplied.
+scalar	density	board	density	900	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_product_fibrapan_model_2026	1	1	1
+validity	density	nominal_thickness	0.03	0.03	m
+validity	density	source_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+scalar	bending-moe	board	bending_moe_specification	3600	MPa	constant
+uncertainty	bending-moe	unstated	-	-	-	-
+validity	bending-moe	source_product_fibrapan_model_2026	1	1	1
+validity	bending-moe	nominal_thickness	0.03	0.03	m
+validity	bending-moe	source_temperature_known	0	0	1
+validity	bending-moe	source_moisture_condition_known	0	0	1
+scalar	bending-mor	board	bending_mor_specification	43	MPa	constant
+uncertainty	bending-mor	unstated	-	-	-	-
+validity	bending-mor	source_product_fibrapan_model_2026	1	1	1
+validity	bending-mor	nominal_thickness	0.03	0.03	m
+validity	bending-mor	source_temperature_known	0	0	1
+validity	bending-mor	source_moisture_condition_known	0	0	1
+scalar	internal-bond	board	internal_bond_specification	1.5	MPa	constant
+uncertainty	internal-bond	unstated	-	-	-	-
+validity	internal-bond	source_product_fibrapan_model_2026	1	1	1
+validity	internal-bond	nominal_thickness	0.03	0.03	m
+validity	internal-bond	source_temperature_known	0	0	1
+validity	internal-bond	source_moisture_condition_known	0	0	1
+scalar	swelling	board	thickness_swelling_24h_specification	0.05	1	constant
+uncertainty	swelling	unstated	-	-	-	-
+validity	swelling	source_product_fibrapan_model_2026	1	1	1
+validity	swelling	nominal_thickness	0.03	0.03	m
+validity	swelling	source_temperature_known	0	0	1
+validity	swelling	source_moisture_condition_known	0	0	1

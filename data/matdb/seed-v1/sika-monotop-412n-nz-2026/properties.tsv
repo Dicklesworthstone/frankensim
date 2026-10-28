@@ -1,0 +1,71 @@
+frankensim.matdb-source.v1
+observation	fresh	Sika MonoTop-412 N NZ fresh fibre-reinforced cement repair mortar	May 2026 datasheet page 1	Approximate fresh mortar density; explicitly not hardened solid density. Sulphate-resistant cement, aggregates and additives; recommended water is 3.6-3.9 litres per 25 kg powder. The exact laboratory mixing amount, temperature and moisture are not stated.
+observation	cured	Sika MonoTop-412 N NZ hardened repair mortar	May 2026 datasheet page 2; EN 12190 strengths, EN 13412 compression modulus, EN 1770 expansion	Approximate strengths at exactly 1, 7 and 28 days remain separate claims; no curing interpolation or hydration law is inferred. The compression modulus is a lower specification limit with unstated age. Thermal expansion also has unstated age. Application-temperature limits are not laboratory test conditions. No hardened density, Poisson ratio, heat capacity or thermal conductivity is supplied.
+scalar	fresh-density	fresh	fresh_density	2100	kg/m3	constant
+uncertainty	fresh-density	unstated	-	-	-	-
+validity	fresh-density	source_product_monotop_412n_nz_2026	1	1	1
+validity	fresh-density	fresh_mortar	1	1	1
+validity	fresh-density	source_temperature_known	0	0	1
+validity	fresh-density	source_moisture_condition_known	0	0	1
+scalar	compressive-1d	cured	compressive_strength	17	MPa	constant
+uncertainty	compressive-1d	unstated	-	-	-	-
+validity	compressive-1d	source_product_monotop_412n_nz_2026	1	1	1
+validity	compressive-1d	fresh_mortar	0	0	1
+validity	compressive-1d	cure_age	86400	86400	s
+validity	compressive-1d	source_cure_age_known	1	1	1
+validity	compressive-1d	source_temperature_known	0	0	1
+validity	compressive-1d	source_moisture_condition_known	0	0	1
+scalar	compressive-7d	cured	compressive_strength	40	MPa	constant
+uncertainty	compressive-7d	unstated	-	-	-	-
+validity	compressive-7d	source_product_monotop_412n_nz_2026	1	1	1
+validity	compressive-7d	fresh_mortar	0	0	1
+validity	compressive-7d	cure_age	604800	604800	s
+validity	compressive-7d	source_cure_age_known	1	1	1
+validity	compressive-7d	source_temperature_known	0	0	1
+validity	compressive-7d	source_moisture_condition_known	0	0	1
+scalar	compressive-28d	cured	compressive_strength	55	MPa	constant
+uncertainty	compressive-28d	unstated	-	-	-	-
+validity	compressive-28d	source_product_monotop_412n_nz_2026	1	1	1
+validity	compressive-28d	fresh_mortar	0	0	1
+validity	compressive-28d	cure_age	2419200	2419200	s
+validity	compressive-28d	source_cure_age_known	1	1	1
+validity	compressive-28d	source_temperature_known	0	0	1
+validity	compressive-28d	source_moisture_condition_known	0	0	1
+scalar	flexural-1d	cured	flexural_strength	4	MPa	constant
+uncertainty	flexural-1d	unstated	-	-	-	-
+validity	flexural-1d	source_product_monotop_412n_nz_2026	1	1	1
+validity	flexural-1d	fresh_mortar	0	0	1
+validity	flexural-1d	cure_age	86400	86400	s
+validity	flexural-1d	source_cure_age_known	1	1	1
+validity	flexural-1d	source_temperature_known	0	0	1
+validity	flexural-1d	source_moisture_condition_known	0	0	1
+scalar	flexural-7d	cured	flexural_strength	6	MPa	constant
+uncertainty	flexural-7d	unstated	-	-	-	-
+validity	flexural-7d	source_product_monotop_412n_nz_2026	1	1	1
+validity	flexural-7d	fresh_mortar	0	0	1
+validity	flexural-7d	cure_age	604800	604800	s
+validity	flexural-7d	source_cure_age_known	1	1	1
+validity	flexural-7d	source_temperature_known	0	0	1
+validity	flexural-7d	source_moisture_condition_known	0	0	1
+scalar	flexural-28d	cured	flexural_strength	8	MPa	constant
+uncertainty	flexural-28d	unstated	-	-	-	-
+validity	flexural-28d	source_product_monotop_412n_nz_2026	1	1	1
+validity	flexural-28d	fresh_mortar	0	0	1
+validity	flexural-28d	cure_age	2419200	2419200	s
+validity	flexural-28d	source_cure_age_known	1	1	1
+validity	flexural-28d	source_temperature_known	0	0	1
+validity	flexural-28d	source_moisture_condition_known	0	0	1
+scalar	compression-modulus	cured	compression_modulus_minimum	20	GPa	constant
+uncertainty	compression-modulus	unstated	-	-	-	-
+validity	compression-modulus	source_product_monotop_412n_nz_2026	1	1	1
+validity	compression-modulus	fresh_mortar	0	0	1
+validity	compression-modulus	source_cure_age_known	0	0	1
+validity	compression-modulus	source_temperature_known	0	0	1
+validity	compression-modulus	source_moisture_condition_known	0	0	1
+scalar	expansion	cured	thermal_expansion	0.0000105	K^-1	constant
+uncertainty	expansion	unstated	-	-	-	-
+validity	expansion	source_product_monotop_412n_nz_2026	1	1	1
+validity	expansion	fresh_mortar	0	0	1
+validity	expansion	source_cure_age_known	0	0	1
+validity	expansion	source_temperature_known	0	0	1
+validity	expansion	source_moisture_condition_known	0	0	1

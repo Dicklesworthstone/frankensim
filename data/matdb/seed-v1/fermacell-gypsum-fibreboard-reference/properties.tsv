@@ -1,0 +1,32 @@
+frankensim.matdb-source.v1
+observation	board	fermacell standard gypsum fibreboard, gypsum and recycled paper fibre	Manufacturer technical specifications; bulk density and thermal properties	Nominal density 1150 kg/m3 and its separately declared +/-50 kg/m3 tolerance are not a statistical confidence interval. The reported expansion 0.001 percent/K converts to 0.00001/K. Conductivity and heat capacity are product reference values with unstated test conditioning. The separate 20 C/65 percent RH equilibrium-moisture result does not establish these tests' conditions. No density profile, elastic tensor, dehydration, fire-temperature curve, or TB-edge areal mass is inferred. These values support an explicitly approximate constant-property thermal model.
+scalar	density	board	density	1150	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_product_fermacell_gypsum_standard	1	1	1
+validity	density	source_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+scalar	density-tolerance	board	density_tolerance	50	kg/m3	constant
+uncertainty	density-tolerance	unstated	-	-	-	-
+validity	density-tolerance	source_product_fermacell_gypsum_standard	1	1	1
+validity	density-tolerance	source_temperature_known	0	0	1
+validity	density-tolerance	source_moisture_condition_known	0	0	1
+scalar	conductivity	board	thermal_conductivity	0.32	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	source_product_fermacell_gypsum_standard	1	1	1
+validity	conductivity	source_temperature_known	0	0	1
+validity	conductivity	source_moisture_condition_known	0	0	1
+scalar	heat-capacity	board	specific_heat	1100	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	source_product_fermacell_gypsum_standard	1	1	1
+validity	heat-capacity	source_temperature_known	0	0	1
+validity	heat-capacity	source_moisture_condition_known	0	0	1
+scalar	expansion	board	thermal_expansion	0.00001	K^-1	constant
+uncertainty	expansion	unstated	-	-	-	-
+validity	expansion	source_product_fermacell_gypsum_standard	1	1	1
+validity	expansion	source_temperature_known	0	0	1
+validity	expansion	source_moisture_condition_known	0	0	1
+scalar	vapor-resistance	board	water_vapor_resistance	13	1	constant
+uncertainty	vapor-resistance	unstated	-	-	-	-
+validity	vapor-resistance	source_product_fermacell_gypsum_standard	1	1	1
+validity	vapor-resistance	source_temperature_known	0	0	1
+validity	vapor-resistance	source_moisture_condition_known	0	0	1

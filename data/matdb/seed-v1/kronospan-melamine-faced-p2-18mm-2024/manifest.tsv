@@ -1,0 +1,15 @@
+frankensim.matdb-manifest.v3
+pack_id	kronospan-melamine-faced-p2-18mm-2024
+redistribution	permitted	Selected attributed numerical facts and original notes only; source document and table layout are not redistributed
+citation	Kronospan, Melamine Faced Particleboard MF PB, KC/QUAL/DOC/0006 version 6, 09/08/2024, pages 1-2; https://www.kronospan.com/en_IE/ajax/express_services/download/?args%5B0%5D=express-services&args%5B1%5D=downloads&args%5B2%5D=United-Kingdom&args%5B3%5D=certificates-and-datasheets&args%5B4%5D=mf-particleboard-technical-datasheet-website-version.pdf&show=1 ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	kronospan-mf-pb	properties.tsv	material-tsv-v1
+property	core_bending_moe_specification	core-bending-moe-specification	dimensional
+property	core_bending_mor_specification	core-bending-mor-specification	dimensional
+property	core_internal_bond_specification	core-internal-bond-strength-specification	dimensional
+property	surface_scratch_force_lower_limit	surface-scratch-force-lower-limit	dimensional
+axis	source_product_kronospan_mf_p2_2024	source-product-kronospan-mf-p2-2024	dimensional
+axis	nominal_thickness	nominal-thickness	dimensional
+axis	source_temperature_known	source-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	pearl_effect_decor	pearl-effect-decor	dimensional

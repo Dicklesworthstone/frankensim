@@ -1,0 +1,15 @@
+frankensim.matdb-manifest.v3
+pack_id	fermacell-gypsum-fibreboard-reference
+redistribution	permitted	Selected attributed numerical facts and original notes only; source page and table layout are not redistributed
+citation	James Hardie Europe, fermacell gypsum fibreboard, Standard Gypsum Fibreboard technical specifications; https://www.fermacell.com/eu-en/products/wall-solutions/gypsum-fibreboard ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	fermacell-gypsum	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	density_tolerance	density-declared-tolerance	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	specific_heat	specific-heat	dimensional
+property	thermal_expansion	thermal-expansion	dimensional
+property	water_vapor_resistance	water-vapor-diffusion-resistance-factor	dimensional
+axis	source_product_fermacell_gypsum_standard	source-product-fermacell-gypsum-standard	dimensional
+axis	source_temperature_known	source-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional

@@ -1,0 +1,15 @@
+frankensim.matdb-manifest.v3
+pack_id	finsa-fimapan-af-38mm-2026
+redistribution	permitted	Selected attributed numerical facts and original notes only; source document and table layout are not redistributed
+citation	Finsa, FimaPan AF technical datasheet, revision 01/06/2026, page 1, greater-than-32-to-40 mm column; https://files.finsa.com/datasheets/fichasTecnicas/en/technical-datasheet-fimapan-af-en.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	finsa-af	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	bending_moe_specification	bending-moe-specification	dimensional
+property	bending_mor_specification	bending-mor-specification	dimensional
+property	internal_bond_specification	internal-bond-strength-specification	dimensional
+property	thickness_swelling_2h_specification	thickness-swelling-2h-specification	dimensional
+axis	source_product_fimapan_af_2026	source-product-fimapan-af-2026	dimensional
+axis	nominal_thickness	nominal-thickness	dimensional
+axis	source_temperature_known	source-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional

@@ -1,0 +1,26 @@
+frankensim.matdb-source.v1
+observation	block	Bauroc ECOTERM+ autoclaved aerated concrete block, 2020 product	Producer catalogue technical-properties table	This lower-density formulation remains distinct from CLASSIC. Density tolerance is a product declaration rather than statistical uncertainty. Conductivity is dry-material lambda_10dry at 10 C; it excludes mortar joints and moist service. Compressive-strength conditioning is unstated. No common density-scaling law, heat capacity, elastic modulus or unmeasured temperature dependence is supplied.
+scalar	density	block	density	300	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_product_bauroc_ecoterm_plus_2020	1	1	1
+validity	density	source_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	1	1	1
+validity	density	dry_condition	1	1	1
+scalar	density-tolerance	block	density_tolerance	25	kg/m3	constant
+uncertainty	density-tolerance	unstated	-	-	-	-
+validity	density-tolerance	source_product_bauroc_ecoterm_plus_2020	1	1	1
+validity	density-tolerance	source_temperature_known	0	0	1
+validity	density-tolerance	source_moisture_condition_known	1	1	1
+validity	density-tolerance	dry_condition	1	1	1
+scalar	conductivity	block	thermal_conductivity	0.072	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	source_product_bauroc_ecoterm_plus_2020	1	1	1
+validity	conductivity	source_temperature_known	1	1	1
+validity	conductivity	source_moisture_condition_known	1	1	1
+validity	conductivity	dry_condition	1	1	1
+validity	conductivity	temperature	10	10	degC
+scalar	compression	block	compressive_strength	1.8	MPa	constant
+uncertainty	compression	unstated	-	-	-	-
+validity	compression	source_product_bauroc_ecoterm_plus_2020	1	1	1
+validity	compression	source_temperature_known	0	0	1
+validity	compression	source_moisture_condition_known	0	0	1

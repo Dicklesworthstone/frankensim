@@ -1,0 +1,32 @@
+frankensim.matdb-source.v1
+observation	board	Finsa FimaPan AF P2 particleboard, 38 mm, dry interior use	2026 datasheet; EN 323 density, EN 310 bending, EN 319 internal bond, EN 317 swelling	Selected 38 mm within the printed greater-than-32-to-40 mm band. Density is a rough guide; mechanical and swelling entries are product specifications without printed inequalities. Two-hour swelling is not a 24-hour value or a moisture constitutive law. EN 310 bending modulus is retained separately from bulk elasticity. Delivered moisture is 8 +/-3 percent; exact test temperature/moisture, resin chemistry, density profile and thermal properties are unknown. This uncoated board is not a melamine laminate or load-bearing timber grade.
+scalar	density	board	density	600	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_product_fimapan_af_2026	1	1	1
+validity	density	nominal_thickness	0.038	0.038	m
+validity	density	source_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+scalar	bending-moe	board	bending_moe_specification	1250	MPa	constant
+uncertainty	bending-moe	unstated	-	-	-	-
+validity	bending-moe	source_product_fimapan_af_2026	1	1	1
+validity	bending-moe	nominal_thickness	0.038	0.038	m
+validity	bending-moe	source_temperature_known	0	0	1
+validity	bending-moe	source_moisture_condition_known	0	0	1
+scalar	bending-mor	board	bending_mor_specification	8.5	MPa	constant
+uncertainty	bending-mor	unstated	-	-	-	-
+validity	bending-mor	source_product_fimapan_af_2026	1	1	1
+validity	bending-mor	nominal_thickness	0.038	0.038	m
+validity	bending-mor	source_temperature_known	0	0	1
+validity	bending-mor	source_moisture_condition_known	0	0	1
+scalar	internal-bond	board	internal_bond_specification	0.25	MPa	constant
+uncertainty	internal-bond	unstated	-	-	-	-
+validity	internal-bond	source_product_fimapan_af_2026	1	1	1
+validity	internal-bond	nominal_thickness	0.038	0.038	m
+validity	internal-bond	source_temperature_known	0	0	1
+validity	internal-bond	source_moisture_condition_known	0	0	1
+scalar	swelling	board	thickness_swelling_2h_specification	0.06	1	constant
+uncertainty	swelling	unstated	-	-	-	-
+validity	swelling	source_product_fimapan_af_2026	1	1	1
+validity	swelling	nominal_thickness	0.038	0.038	m
+validity	swelling	source_temperature_known	0	0	1
+validity	swelling	source_moisture_condition_known	0	0	1

@@ -1,0 +1,17 @@
+frankensim.matdb-manifest.v3
+pack_id	sika-monotop-412n-nz-2026
+redistribution	permitted	Selected attributed numerical facts and original notes only; source document and table layout are not redistributed
+citation	Sika New Zealand, Sika MonoTop-412 N product data sheet, May 2026 version 01.03, pages 1-2; https://nzl.sika.com/content/dam/dms/nz01/j/sika_monotop_-412n.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	sika-nz	properties.tsv	material-tsv-v1
+property	fresh_density	fresh-mortar-density	dimensional
+property	compressive_strength	compressive-strength	dimensional
+property	flexural_strength	flexural-strength	dimensional
+property	compression_modulus_minimum	compression-modulus-minimum	dimensional
+property	thermal_expansion	thermal-expansion	dimensional
+axis	source_product_monotop_412n_nz_2026	source-product-monotop-412n-nz-2026	dimensional
+axis	fresh_mortar	fresh-mortar	dimensional
+axis	cure_age	cure-age	dimensional
+axis	source_cure_age_known	source-cure-age-known	dimensional
+axis	source_temperature_known	source-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional

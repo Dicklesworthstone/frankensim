@@ -1,0 +1,28 @@
+frankensim.matdb-source.v1
+observation	core	Kronospan melamine-faced P2 particleboard, 18 mm, core specification	2024 datasheet page 1; EN 310 bending and EN 319 internal bond	These values describe the three-layer particleboard core in the greater-than-13-to-20 mm thickness band, not a measured composite laminate or neat melamine resin. Decorative paper is impregnated with melamine resin on both faces. Neither face thickness nor resin fraction is given. The stated dry-use climate is not a test temperature/moisture. No finished-board stiffness, density, thermal constants or isotropic elasticity is inferred.
+observation	surface	Kronospan melamine decorative surface, non-pearl finish	2024 datasheet page 2; EN 14323 scratch resistance	The printed requirement is strictly greater than 1.5 N, not a measured critical force. Pearl-effect decors are excluded by the source footnote. Retained as a lower limit with unknown distribution; not a friction coefficient, indentation hardness or tensile strength.
+scalar	core-moe	core	core_bending_moe_specification	1600	MPa	constant
+uncertainty	core-moe	unstated	-	-	-	-
+validity	core-moe	source_product_kronospan_mf_p2_2024	1	1	1
+validity	core-moe	nominal_thickness	0.018	0.018	m
+validity	core-moe	source_temperature_known	0	0	1
+validity	core-moe	source_moisture_condition_known	0	0	1
+scalar	core-mor	core	core_bending_mor_specification	11	MPa	constant
+uncertainty	core-mor	unstated	-	-	-	-
+validity	core-mor	source_product_kronospan_mf_p2_2024	1	1	1
+validity	core-mor	nominal_thickness	0.018	0.018	m
+validity	core-mor	source_temperature_known	0	0	1
+validity	core-mor	source_moisture_condition_known	0	0	1
+scalar	core-bond	core	core_internal_bond_specification	0.35	MPa	constant
+uncertainty	core-bond	unstated	-	-	-	-
+validity	core-bond	source_product_kronospan_mf_p2_2024	1	1	1
+validity	core-bond	nominal_thickness	0.018	0.018	m
+validity	core-bond	source_temperature_known	0	0	1
+validity	core-bond	source_moisture_condition_known	0	0	1
+scalar	scratch-limit	surface	surface_scratch_force_lower_limit	1.5	N	constant
+uncertainty	scratch-limit	unstated	-	-	-	-
+validity	scratch-limit	source_product_kronospan_mf_p2_2024	1	1	1
+validity	scratch-limit	nominal_thickness	0.018	0.018	m
+validity	scratch-limit	source_temperature_known	0	0	1
+validity	scratch-limit	source_moisture_condition_known	0	0	1
+validity	scratch-limit	pearl_effect_decor	0	0	1

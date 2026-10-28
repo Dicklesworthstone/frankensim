@@ -1,0 +1,40 @@
+frankensim.matdb-source.v1
+observation	board	fermacell Powerpanel H2O cement-bonded board, 12.5 mm	Manufacturer technical specifications; conductivity DIN EN 12664	Conductivity is specifically lambda_10,tr: dry material at 10 C. It is not a universal moist-board value. Other properties have unstated test conditioning; approximate density and modulus remain estimates and flexural strength remains a lower specification limit. The source does not identify the elastic-modulus test mode, so it is not renamed Young modulus or a complete bending tensor. Nominal board thickness is a validity condition rather than an intrinsic material property. No heat-of-hydration, moisture law or fire response is supplied.
+scalar	density	board	density	1000	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_product_fermacell_powerpanel_h2o	1	1	1
+validity	density	nominal_thickness	0.0125	0.0125	m
+validity	density	source_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+scalar	conductivity	board	thermal_conductivity	0.17	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	source_product_fermacell_powerpanel_h2o	1	1	1
+validity	conductivity	nominal_thickness	0.0125	0.0125	m
+validity	conductivity	source_temperature_known	1	1	1
+validity	conductivity	source_moisture_condition_known	1	1	1
+validity	conductivity	temperature	10	10	degC
+validity	conductivity	dry_condition	1	1	1
+scalar	heat-capacity	board	specific_heat	1000	J/kg/K	constant
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	heat-capacity	source_product_fermacell_powerpanel_h2o	1	1	1
+validity	heat-capacity	nominal_thickness	0.0125	0.0125	m
+validity	heat-capacity	source_temperature_known	0	0	1
+validity	heat-capacity	source_moisture_condition_known	0	0	1
+scalar	flexural-strength	board	flexural_strength_minimum	6	MPa	constant
+uncertainty	flexural-strength	unstated	-	-	-	-
+validity	flexural-strength	source_product_fermacell_powerpanel_h2o	1	1	1
+validity	flexural-strength	nominal_thickness	0.0125	0.0125	m
+validity	flexural-strength	source_temperature_known	0	0	1
+validity	flexural-strength	source_moisture_condition_known	0	0	1
+scalar	modulus	board	source_elastic_modulus	4200	MPa	constant
+uncertainty	modulus	unstated	-	-	-	-
+validity	modulus	source_product_fermacell_powerpanel_h2o	1	1	1
+validity	modulus	nominal_thickness	0.0125	0.0125	m
+validity	modulus	source_temperature_known	0	0	1
+validity	modulus	source_moisture_condition_known	0	0	1
+scalar	vapor-resistance	board	water_vapor_resistance	56	1	constant
+uncertainty	vapor-resistance	unstated	-	-	-	-
+validity	vapor-resistance	source_product_fermacell_powerpanel_h2o	1	1	1
+validity	vapor-resistance	nominal_thickness	0.0125	0.0125	m
+validity	vapor-resistance	source_temperature_known	0	0	1
+validity	vapor-resistance	source_moisture_condition_known	0	0	1

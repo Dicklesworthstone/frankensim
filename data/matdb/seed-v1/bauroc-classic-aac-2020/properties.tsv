@@ -1,0 +1,26 @@
+frankensim.matdb-source.v1
+observation	block	Bauroc CLASSIC autoclaved aerated concrete block, 2020 product	Producer catalogue technical-properties table	Dry density and its declared tolerance are retained separately without a confidence interpretation. Lambda_10dry is conductivity at 10 C in dry condition, not moisture-dependent wall performance. The compressive-strength row does not state specimen moisture or test temperature. Block geometry, mortar joints, coatings and reinforcement are excluded. No heat capacity, elastic modulus, hydration, moisture transport or strength distribution is inferred.
+scalar	density	block	density	425	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_product_bauroc_classic_2020	1	1	1
+validity	density	source_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	1	1	1
+validity	density	dry_condition	1	1	1
+scalar	density-tolerance	block	density_tolerance	30	kg/m3	constant
+uncertainty	density-tolerance	unstated	-	-	-	-
+validity	density-tolerance	source_product_bauroc_classic_2020	1	1	1
+validity	density-tolerance	source_temperature_known	0	0	1
+validity	density-tolerance	source_moisture_condition_known	1	1	1
+validity	density-tolerance	dry_condition	1	1	1
+scalar	conductivity	block	thermal_conductivity	0.10	W/m/K	constant
+uncertainty	conductivity	unstated	-	-	-	-
+validity	conductivity	source_product_bauroc_classic_2020	1	1	1
+validity	conductivity	source_temperature_known	1	1	1
+validity	conductivity	source_moisture_condition_known	1	1	1
+validity	conductivity	dry_condition	1	1	1
+validity	conductivity	temperature	10	10	degC
+scalar	compression	block	compressive_strength	3.0	MPa	constant
+uncertainty	compression	unstated	-	-	-	-
+validity	compression	source_product_bauroc_classic_2020	1	1	1
+validity	compression	source_temperature_known	0	0	1
+validity	compression	source_moisture_condition_known	0	0	1
