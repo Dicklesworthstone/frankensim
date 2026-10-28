@@ -14,6 +14,8 @@
 
 mod ambient;
 pub use ambient::MaterialRadiationEntropyExchange;
+/// Combined reflected/emitted photon modes in an explicitly black isotropic bath.
+pub mod bath;
 
 use fs_math::det;
 
@@ -256,6 +258,28 @@ impl PreparedPhotonEntropy {
     }
 }
 
+impl crate::AmbientRadiationPatch {
+    /// Explicit gray/diffuse photon observation using this original patch's
+    /// selected emissivity, actual surface temperature and black bath.
+    /// A total emissivity measurement alone does not establish spectral grayness.
+    /// The existing heat law admits the surface's source domain; evaluating it
+    /// here does not apply heat. The returned closure is not another cooling
+    /// debit and does not carry new source authority. Retain this original patch
+    /// and rebind after temperature/source changes. Spatially nonuniform traces
+    /// require local observations, not entropy at an averaged temperature.
+    pub fn gray_photon_exchange(&self, surface_temperature_k: f64)
+        -> Result<bath::GrayBlackBathExchange, crate::ConductionError>
+    {
+        self.heat_flux_w_m2(surface_temperature_k)?;
+        GrayPhotonEmission::new(surface_temperature_k,self.emissivity().value())
+            .and_then(|emission| emission.in_black_bath(self.ambient_temperature_k()))
+            .map_err(|error| crate::ConductionError::Radiation {
+                surface: self.region().into(), what: error.to_string(),
+                fix: "use a representable, explicitly gray/diffuse surface and black bath".into(),
+            })
+    }
+}
+
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), RadiationEntropyError> {
     if cancelled() { Err(RadiationEntropyError::Cancelled) } else { Ok(()) }
 }
@@ -320,3 +344,49 @@ impl Sum {
 #[cfg(test)]
 #[path = "radiation_entropy/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod bath_source_tests {
+    use super::*;
+    use fs_evidence::ValidityDomain;
+    use fs_matdb::{ClaimSet,InterpolationPolicy,MaterialCard,MaterialStateId,PropertyClaim,
+        PropertyKey,PropertyValue,Provenance,SelectionPolicy,UncertaintyModel};
+    fn patch(ambient: f64) -> crate::AmbientRadiationPatch {
+        let dims = crate::EMISSIVITY_DIMS;
+        let mut claims = ClaimSet::new();
+        claims.insert_claim(PropertyClaim {
+            key: PropertyKey::new(crate::SURFACE_EMISSIVITY_PROPERTY,dims),
+            value: PropertyValue::Scalar { value: 0.4,dims },
+            validity: ValidityDomain::unconstrained().with("T",250.0,500.0),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::ConstantWithinValidity, observations: Vec::new(),
+            provenance: Provenance { source: "analytic photon bath fixture".into(),
+                license: "internal-test-use".into(), artifact: None },
+        }).unwrap();
+        let card = MaterialCard::assemble(MaterialStateId { chemistry: "gray-fixture".into(),
+            phase: "solid".into(),process: "test".into(),revision: 0 },claims,Vec::new()).unwrap();
+        let source = crate::SurfaceEmissivity::from_card("surface",&card,350.0,
+            SelectionPolicy::SingleClaimOnly).unwrap();
+        crate::AmbientRadiationPatch::new("surface",source,ambient).unwrap()
+    }
+    #[test]
+    fn original_sources_and_surface_domains_survive_the_photon_binding() {
+        let original = patch(1000.0);
+        let saved = original.clone();
+        let model = original.gray_photon_exchange(400.0).unwrap();
+        assert_eq!(model.surface_temperature_k(),400.0);
+        assert_eq!(model.bath_temperature_k(),1000.0);
+        assert_eq!(model.emissivity(),original.emissivity().value());
+        assert!(model.spectrum_nm(10_000.0).unwrap().heat_out_w_m2_nm<0.0);
+        assert!(original.gray_photon_exchange(501.0).is_err());
+        assert!(original.gray_photon_exchange(0.0).is_err());
+        assert_eq!(original,saved);
+    }
+    #[test]
+    fn equilibrium_patch_has_no_photon_or_material_production() {
+        let original = patch(350.0);
+        let model = original.gray_photon_exchange(350.0).unwrap();
+        assert_eq!(model.spectrum_nm(10_000.0).unwrap().total_generation_w_m2_k_nm,0.0);
+        assert_eq!(original.material_entropy_exchange(350.0).unwrap().generation_w_m2_k,0.0);
+    }
+}
