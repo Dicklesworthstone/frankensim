@@ -1076,6 +1076,24 @@ charged; previous results remain intact. Authority remains Estimated, with no
 stress, buckling, continuum, mesh-independent optimum, geometric manufacturing
 tolerance or experimental-validation claim.
 
+### Scientific field export for 3-D studies
+
+`report <study-run> <ledger.db>` also exports `<study-run>.vtu` for the adaptive
+SIMP, stress-limited and robust load-space 3-D producers. The generic exporter
+uses the sealed selected-design artifact and needs neither original source
+files nor a new solve. It retains physical node coordinates, VTK voxel corner
+ordering, raw and projected cell densities, cut-cell volumes and the available
+displacement fields. Stress exports retain sampled relaxed stress; load-space
+exports retain all robust density realizations, basis displacements and the
+worst-combination displacement. The source artifact hash and explicit export
+status accompany the path in text and JSON output. No field is invented when
+there is no solved baseline or no feasible selected design.
+
+These cells are the active octree background boxes, not a reconstructed cut
+surface or manufactured solid. Export preserves the selected incumbent's
+Estimated authority. Bounded allocation and validation reject malformed field
+dimensions, nonfinite data and inconsistent voxel geometry.
+
 ### Native cooling probability study
 
 `study <study.fsim> <ledger.db> [--budget N]` recognizes

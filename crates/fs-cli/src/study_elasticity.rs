@@ -32,6 +32,9 @@ use continuation::drive;
 #[path = "study_elasticity/assessment.rs"]
 mod assessment;
 
+#[path = "study_elasticity/field_export.rs"]
+mod field_export;
+
 #[cfg(feature = "sdf3-study")]
 #[path = "study_elasticity/sdf3.rs"]
 mod sdf3;
@@ -1195,6 +1198,25 @@ pub(crate) fn export(
             crate::report::write_retained(&dest, &bytes)
                 .map_err(|error| fail("cli-study-elasticity-export", error))?;
             let _ = write!(paths, ",{key:?}:{}", quoted(&dest.to_string_lossy()));
+            if key == "design" {
+                let driver = loaded.value.str_field("driver").unwrap_or("");
+                let projection = field_export::render(driver, &bytes)?;
+                let _ = write!(paths, ",\"field_vtu_source_design\":{},\"field_vtu_scope\":{}",
+                    quoted(loaded.value.str_field("design").unwrap_or("")),
+                    quoted(field_export::SCOPE));
+                match projection {
+                    field_export::Projection::Available(xml) => {
+                        let dest = dir.join(format!("{pointer}.vtu"));
+                        crate::report::write_retained(&dest, xml.as_bytes())
+                            .map_err(|error| fail("cli-study-elasticity-export", error))?;
+                        let _ = write!(paths, ",\"field_vtu\":{},\"field_vtu_status\":\"available\"",
+                            quoted(&dest.to_string_lossy()));
+                    }
+                    field_export::Projection::Unavailable(reason) => {
+                        let _ = write!(paths, ",\"field_vtu\":null,\"field_vtu_status\":{}", quoted(reason));
+                    }
+                }
+            }
         }
         Ok(format!(
             "{{\"command\":{command:?},\"status\":\"ok\",\"run\":{pointer:?},\"study_status\":{},\"authority\":\"projection-of-retained-estimates\",\"verification\":\"sealed-evidence\"{}{paths}}}\n",
@@ -1215,7 +1237,9 @@ pub(crate) fn export(
                 stdout = format!(
                     "command={command}\nstatus=ok\nrun={pointer}\nauthority=projection-of-retained-estimates\n"
                 );
-                for field in ["study_status", "report_html", "report_json", "package", "checker", "checker_authority"] {
+                for field in ["study_status", "report_html", "report_json", "design", "iterations",
+                    "field_vtu", "field_vtu_status", "field_vtu_source_design", "field_vtu_scope",
+                    "package", "checker", "checker_authority"] {
                     if let Some(value) = value.str_field(field) {
                         let _ = writeln!(stdout, "{field}={}", crate::escape_text(value));
                     }

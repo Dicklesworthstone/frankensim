@@ -309,6 +309,10 @@ fn g4_sdf3_exhausted_initial_solve_exports_no_unassessed_design() {
             .and_then(J::as_f64),
         Some(1.0)
     );
+    let exported = document(&command("report").arg(result.str_field("run_id").unwrap())
+        .arg(&ledger).output().unwrap(), 0);
+    assert_eq!(exported.get("field_vtu"), Some(&J::Null));
+    assert_eq!(exported.str_field("field_vtu_status"), Some("no-solved-baseline"));
 }
 
 #[path = "study_sdf3_cli/checkpoint.rs"]
@@ -316,3 +320,6 @@ mod checkpoint;
 
 #[path = "study_sdf3_cli/stress.rs"]
 mod stress;
+
+#[path = "study_sdf3_cli/field_export.rs"]
+mod field_export;
