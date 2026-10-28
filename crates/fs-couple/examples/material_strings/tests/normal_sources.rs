@@ -120,6 +120,35 @@ fn receiver_material_swap_changes_reaction_and_pressure_on_the_same_physical_ban
 }
 
 #[test]
+fn material_normal_law_participates_in_nonlinear_static_preload_without_losing_sources() {
+    scoped(|cx, gate| {
+        // The original microscopic contact envelope needs a correspondingly
+        // small force. This checks source composition, not a macroscopic finger.
+        let text = include_str!("../nonlinear-stopped-preload.material-strings")
+            .replace("48000 4096", "48000 129")
+            .replace("port 0 0.2 centreline 0.5", "port 0 0.2 centreline 0.00000001");
+        let build = |young| input::Spec::parse(text.as_bytes()).unwrap().compile_with_profiles(
+            cx, gate, None, Some(profile(gate, "sleeve.fsmatpk", "receiver.fsmatpk")),
+            |name| Ok(bulk(name, young))).unwrap();
+        let mut original = build(2e7);
+        let mut changed = build(4e7);
+        let system = original.performance.bank().system();
+        assert!(system.nonlinear_preload_diagnostics().is_some());
+        let source = system.obstacle_source(0).unwrap().model().identity();
+        assert_ne!(source, changed.performance.bank().system().obstacle_source(0).unwrap().model().identity());
+        assert_ne!(system.components()[0].states(), changed.performance.bank().system().components()[0].states());
+        assert!(system.last_frame().is_none() && system.last_obstacle_frames().is_none());
+        assert_eq!(original.performance.preload_energy_j(), Some(system.total_energy_j().unwrap()));
+        let expected = pressure(&mut original, 37);
+        assert_ne!(expected, pressure(&mut changed, 128));
+        assert_eq!(expected, pressure(&mut build(2e7), 1));
+        assert_eq!(source, original.performance.bank().system().obstacle_source(0).unwrap().model().identity());
+        let frame = original.performance.bank().system().last_frame().unwrap();
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+    });
+}
+
+#[test]
 fn canonical_material_stop_sources_preserve_ordered_identity_and_physics() {
     scoped(|cx, gate| {
         let card = |name: &str, young| fs_matdb::NormalizedMaterialCardPack::new(

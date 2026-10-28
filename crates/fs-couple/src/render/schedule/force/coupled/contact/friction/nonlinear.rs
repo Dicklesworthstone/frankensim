@@ -452,9 +452,10 @@ impl FrictionModalSystem {
 }
 impl NonlinearFrictionState {
     pub(super) fn initialize_equilibrium(&self, network: &mut CoupledModalSystem,
-        external: &[f64], gate: &CancelGate) -> Result<NonlinearPreloadDiagnostics, ModalFrictionError>
+        external: &[f64], obstacles: Option<&super::multiple::obstacles::ObstacleSet>,
+        gate: &CancelGate) -> Result<NonlinearPreloadDiagnostics, ModalFrictionError>
     {
-        equilibrium::initialize(self, network, external, gate)
+        equilibrium::initialize(self, network, external, obstacles, gate)
     }
     fn potential_energy(&self, q: &[f64]) -> Result<f64, ModalCouplingError> {
         let mut energy = 0.0;

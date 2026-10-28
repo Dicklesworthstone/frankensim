@@ -361,22 +361,25 @@ impl MultiFrictionModalSystem {
     /// compliance matrix. Original per-obstacle limits, joint sweep count and
     /// obstacle setup budget apply. Dashpots carry no static load.
     ///
-    /// Bound nonlinear storage uses the joint constitutive preload when no
-    /// normal obstacles are attached. Their combined static problem still
-    /// refuses; neither mechanism is silently omitted.
+    /// Bound nonlinear storage and normal contacts share one conservative
+    /// equilibrium objective and the original nonlinear force/iteration limits.
+    /// Stationary contact gradients carry no dynamic dashpot force. Original
+    /// normal source domains and force/penetration limits apply to the result.
     /// Refuses after any sample or nonzero initial vibration; all sources,
     /// observers and clocks survive. No fallible work follows state publication.
     /// Returns initial storage INCLUDING obstacles, not prior actuator work.
     pub fn initialize_released_equilibrium(&mut self, external: &[f64], gate: &CancelGate)
         -> Result<f64, ModalFrictionError>
     {
-        // This must precede the obstacle branch: that original equilibrium
-        // owner has no bound geometric potential and cannot silently omit it.
-        if self.core.has_nonlinear_potentials() && self.obstacles.is_some() {
-            return Err(invalid("nonlinear static preload with normal obstacles requires a joint constrained equilibrium solve").into());
-        }
         if self.shear_layers.iter().any(Option::is_some) {
             return Err(invalid("released static preload cannot discard retained material-layer shear").into());
+        }
+        if let Some(state) = &mut self.core.nonlinear {
+            let report = state.initialize_equilibrium(&mut self.core.network, external,
+                self.obstacles.as_ref(), gate)?;
+            let energy = report.total_energy_j;
+            state.preload = Some(report);
+            return Ok(energy);
         }
         if let Some(obstacles) = &self.obstacles {
             return obstacles.initialize_equilibrium(&mut self.core.network, external,

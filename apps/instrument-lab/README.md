@@ -340,6 +340,16 @@ manufactured integration specimens, not measured clarinet or oboe models.
 
 ### Material-string performances
 
+The **Strings — force-loaded contact and nonlinear material** starter opens
+`nonlinear-stopped-preload.material-strings`. Attach `wire.fsmatpk`,
+`sleeve.fsmatpk`, `body.fsmatpk` and `stopped-pluck.stops`, then select that
+stop file as the **Finger, fret and contact profile**. The same static solver
+now includes both nonlinear string storage and the original compliant normal
+potential, with reciprocal motion of any coupled contact receiver. Final
+source, force, penetration and energy limits apply before initialization is
+accepted. The supplied support is manufactured; source-bound `material-stop`
+profiles use the same path. This specimen is not a measured instrument.
+
 The **Strings — force-loaded nonlinear pizzicato** starter opens
 `nonlinear-preload.material-strings`. Attach `wire.fsmatpk`, `sleeve.fsmatpk`
 and `body.fsmatpk` using the [native string source instructions](../../crates/fs-couple/examples/material_strings/README.md).

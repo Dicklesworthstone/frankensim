@@ -1687,9 +1687,34 @@ sample advances during initialization. Its stored energy is an initial condition
 not an inferred history of actuator work. Selected Maxwell arms start relaxed at
 that shape, and unloaded gas-memory position gauges retain zero displacement.
 
-Normal-contact obstacles, retained shear layers and nonlinear-only support of
-otherwise free coordinates still require a more general static solve and refuse
-this initialization. Their existing dynamic `forces retain` path is unchanged.
+Compliant finger/fret and other normal contacts now participate in that same
+equilibrium. Their original unilateral potentials determine contact activity
+and reciprocal reactions; stationary contact has no dashpot force. Changing a
+material-bound receiver changes its source-derived contact law, initial loaded
+shape and released sound without changing the retained string/body solver.
+Every normal force, indentation and source envelope is checked at the accepted
+shape before the original mechanical state and relaxed histories publish.
+
+`nonlinear-stopped-preload.material-strings` combines the bonded two-plane,
+torsional string, causal gas memory and shared body/cavity with the existing
+compliant stop. Use the same wire/body/sleeve packs and copy
+`stopped-pluck.stops` into the performance directory:
+
+```bash
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/nonlinear-stopped-preload.material-strings" "$demo/nonlinear-stopped-preload.wav" \
+  --stop-profile "$demo/stopped-pluck.stops"
+```
+
+The declared 0.5 N load is released at sample zero. Its support is a manufactured
+law, not measured finger tissue. Existing `material-stop` records can select
+the original bulk/interface/model sources instead. The 128-trial cap includes
+normal-contact evaluations and all backtracking; no separate settling clock or
+initial transient removal is used.
+
+Retained shear layers, obstacle residual compliance and nonlinear-only support
+of otherwise free coordinates still require a more general static solve and
+refuse this initialization. Their existing dynamic `forces retain` path is unchanged.
 Failed convergence, cancellation or any source/energy/force limit publishes no
 accepted mechanical or material state. Refine modes, time and the physical
 model before claiming instrument accuracy; the example is manufactured

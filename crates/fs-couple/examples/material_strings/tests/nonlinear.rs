@@ -175,6 +175,53 @@ fn nonlinear_force_loaded_material_pluck_reaches_shared_body_gas_cavity_and_pcm(
 }
 
 #[test]
+fn nonlinear_stopped_preload_keeps_material_body_gas_and_contact_in_one_pressure_history() {
+    scoped(|cx, gate| {
+        let text = include_str!("../nonlinear-stopped-preload.material-strings")
+            .replace("48000 4096", "48000 129");
+        let profile = include_str!("../stopped-pluck.stops");
+        let build = |young, source: &str| input::Spec::parse(text.as_bytes()).unwrap()
+            .compile_with_profiles(cx, gate, None, Some(stops::Profile::parse(source.as_bytes()).unwrap()),
+                |name| Ok(elastic_pack(name, young))).unwrap();
+        let mut original = build(200e9, profile);
+        let mut stiff_wire = build(400e9, profile);
+        let stronger_support = profile.replace("5000 1", "10000 1");
+        let mut hard_stop = build(200e9, &stronger_support);
+        let system = original.performance.bank().system();
+        assert!(system.nonlinear_preload_diagnostics().is_some());
+        assert_eq!(system.obstacle_count(), 1);
+        assert_eq!(system.samples_rendered(), 0);
+        assert!(system.last_frame().is_none() && system.last_obstacle_frames().is_none());
+        assert_eq!(original.performance.preload_energy_j(), Some(system.total_energy_j().unwrap()));
+        let contact = system.obstacle(0).unwrap();
+        let displacement = |attachment: &fs_couple::render::schedule::force::coupled::ModalAttachment| {
+            attachment.shapes.iter().zip(system.components()[attachment.component].states())
+                .map(|(shape, state)| shape*state.displacement_m_sqrt_kg).sum::<f64>()
+        };
+        assert!(displacement(&contact.left)-displacement(&contact.right)
+            > contact.law.gaps()[0], "the held load must engage the physical stop");
+        assert_ne!(system.components()[0].states(), stiff_wire.performance.bank().system().components()[0].states());
+        assert_ne!(system.components()[0].states(), hard_stop.performance.bank().system().components()[0].states());
+        for (a, b) in system.components().iter().zip(hard_stop.performance.bank().system().components()) {
+            assert_eq!(a.modes(), b.modes(), "contact force does not retune the retained material basis");
+        }
+        assert!(original.performance.bank().source().bank().geometric_stretching().is_some());
+        assert!(original.performance.bank().source().bank().cylinder_gas_loading().is_some());
+        assert!(original.performance.bank().source().bank().material_cavity().is_some());
+        let expected = pressure(&mut original, 37);
+        assert!(expected.iter().any(|p| p.abs() > 1e-12));
+        assert_ne!(expected, pressure(&mut stiff_wire, 128));
+        assert_ne!(expected, pressure(&mut hard_stop, 128));
+        assert_eq!(expected, pressure(&mut build(200e9, profile), 1));
+        let (wav, summary) = build(200e9, profile).write(Cursor::new(Vec::<u8>::new()), gate).unwrap();
+        assert_eq!(wav.into_inner(), fs_couple::pcm_wav::encode_pcm16_wav(&expected, 48000, 0.01).unwrap().0);
+        assert_eq!(summary.samples, 129);
+        let frame = original.performance.bank().system().last_frame().unwrap();
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+    });
+}
+
+#[test]
 fn retained_axial_modes_equilibrate_with_the_same_force_loaded_string() {
     scoped(|cx,gate| {
         let text=preload_text().replace("geometric-stretching 0.2 64 100000 1e-11 1e-10",

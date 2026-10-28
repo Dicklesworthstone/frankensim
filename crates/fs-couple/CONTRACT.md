@@ -4575,12 +4575,27 @@ pre-window actuator work. `NonlinearPreloadDiagnostics` records the accepted
 residual and storage; no stability or uniqueness certificate is implied.
 The native material-string `forces preload` path therefore supports geometric
 stretching, retained longitudinal waves and compatible conservative bow fibers
-through their original coupled body/cavity/fluid network. Normal obstacles,
-retained shear films and nonlinear-only support of otherwise free coordinates
-still refuse this static path; their dynamic owners remain unchanged. Focused
+through their original coupled body/cavity/fluid network. Compliant normal
+obstacles join the same stationary energy and exact gradient through their
+original `ContactStorage`, including reciprocal receiver forces, original
+accepted attachment maps and normal offsets. Dynamic contact loss is absent at
+equilibrium. Each actual candidate normal force, penetration and material
+kinematic envelope passes before publication; no source law is averaged or
+replaced. Contact storage contributes to the complete preload energy while its
+first dynamic report remains absent until the first accepted physical sample.
+Retained shear films, obstacle residual compliance and nonlinear-only support
+of otherwise free coordinates still refuse this static path; their dynamic
+owners remain unchanged. Focused
 regressions cover independent cubic and mapped-strain equilibria, strong
 nonlinear loading, held/released motion, relaxed material histories, refusal
 atomicity, source substitution and callback-identical native pressure/PCM.
+The joint contact regressions independently solve a quartic-plus-normal force
+equation and a two-body Hertz/strain equilibrium, preserve relaxed Maxwell
+history, exercise held silence and physical release, and check a source-bound
+receiver substitution in the native material performer. The manufactured
+`nonlinear-stopped-preload.material-strings` uses the existing stop-profile
+grammar. Source/format checks and independent numerical oracles do not replace
+native Cargo execution or measured instrument qualification.
 
 `ReciprocalStringBank::with_geometric_stretching` adds those same source-owned
 quartic channels to the existing `FrictionModalSystem`, preserving every original
@@ -4612,9 +4627,10 @@ use the jointly solved current reaction and release on separation. Prescribed
 support motion translates along fixed normals; optional source-derived station
 motion below admits independent contact relocation. Rejected trials preserve accepted
 contact reports and support offsets as well as the complete mechanical state.
-Cold attachment is explicit; subsequent gas/torque rebuilds and linear static
-preload refuse rather than dropping storage. The static-preload guard precedes
-normal-contact equilibrium because that owner does not include geometric storage.
+Cold attachment is explicit; subsequent gas/torque rebuilds refuse rather than
+dropping storage. Static force loading dispatches to the joint conservative
+preload above when geometric storage is present; the linear-only contact
+equilibrium owner cannot silently omit it.
 This bounded iterated DG composition is not SAV, a full rod model, a unique
 nonlinear-branch guarantee or measured instrument/trajectory qualification.
 

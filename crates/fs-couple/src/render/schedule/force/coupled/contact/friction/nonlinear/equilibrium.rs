@@ -1,12 +1,13 @@
 //! Static loading of the original conservative constitutive potentials.
 //!
 //! One factorization of the original bilateral stiffness preconditions descent
-//! of U_linear(q) + V(q) - F.q. A positive secant curvature predicts the next
+//! of U_linear(q) + V(q) + U_normal(q) - F.q. A positive secant curvature predicts the next
 //! step length; backtracking uses the same stored energy and
 //! exact gradient as playback, including mapped replacement stiffness. There
 //! is no settling time integration, invented damping, retuning or modal reset.
 //! A stationary result is accepted only after every actual generalized force
 //! closes its declared allowance. This is not a uniqueness or stability proof.
+use super::super::multiple::obstacles::ObstacleSet;
 use super::*;
 use crate::render::schedule::force::coupled::equilibrium::StaticResponse;
 
@@ -24,7 +25,8 @@ pub struct NonlinearPreloadDiagnostics {
     /// Conservative correction to the original linear storage [J]. May be
     /// signed when the full potential replaces selected diagonal stiffness.
     pub nonlinear_energy_j: f64,
-    /// Complete stored energy [J]. This is not pre-window actuator work.
+    /// Complete stored energy, including any bound normal contacts [J]. This
+    /// is not pre-window actuator work.
     pub total_energy_j: f64,
 }
 
@@ -43,6 +45,7 @@ struct Evaluation {
     work_scale_j: f64,
     gradient: Vec<f64>,
     reaction: Vec<f64>,
+    normal_energy_j: f64,
 }
 
 // The static diagonal and bilateral springs are exactly the original network
@@ -53,12 +56,25 @@ fn evaluate(
     network: &CoupledModalSystem,
     q: &[f64],
     external: &[f64],
+    obstacles: Option<&ObstacleSet>,
+    admit_contacts: bool,
     gate: &CancelGate,
 ) -> Result<Evaluation, ModalFrictionError> {
     poll(Some(gate))?;
     let mut energy = state.potential_energy(q)?;
     let mut reaction = vec![0.0; q.len()];
     state.reactions(q, q, &mut reaction, Some(gate))?;
+    let normal_energy = match obstacles {
+        Some(obstacles) => obstacles.static_response(
+            q,
+            &mut reaction,
+            admit_contacts,
+            network.sample_period_s(),
+            gate,
+        )?,
+        None => 0.0,
+    };
+    energy = finite(energy + normal_energy)?;
     let mut gradient = external
         .iter()
         .zip(&reaction)
@@ -95,6 +111,7 @@ fn evaluate(
         work_scale_j: work_scale,
         gradient,
         reaction,
+        normal_energy_j: normal_energy,
     })
 }
 
@@ -183,13 +200,14 @@ pub(super) fn initialize(
     state: &NonlinearFrictionState,
     network: &mut CoupledModalSystem,
     external: &[f64],
+    obstacles: Option<&ObstacleSet>,
     gate: &CancelGate,
 ) -> Result<NonlinearPreloadDiagnostics, ModalFrictionError> {
     poll(Some(gate))?;
     network.require_static_initialization(external)?;
     let response = StaticResponse::new(network, gate)?;
     let mut q = vec![0.0; network.mode_count()];
-    let mut value = evaluate(state, network, &q, external, gate)?;
+    let mut value = evaluate(state, network, &q, external, obstacles, false, gate)?;
     let mut iterations = 0;
     let mut predicted_step = 1.0;
     loop {
@@ -209,8 +227,23 @@ pub(super) fn initialize(
                 Some(&check.allowance),
                 gate,
             )?;
-            let nonlinear = state.potential_energy(&q)?;
-            let energy = finite(linear + nonlinear)?;
+            // Re-evaluate the original normal potential on the staged states,
+            // admitting every source domain and physical bound before publication.
+            // No reaction variable is approximated: each is the exact stationary
+            // derivative at these coordinates, and every generalized balance
+            // still has to pass the same constitutive force allowance.
+            let actual_q = coordinates(&network.candidates);
+            let actual = evaluate(state, network, &actual_q, external, obstacles, true, gate)?;
+            let nonlinear = state.potential_energy(&actual_q)?;
+            let actual_check = residual(&actual, external, state.config)?;
+            if !actual_check.closed {
+                return Err(ModalFrictionError::NonlinearEquilibrium {
+                    residual: actual_check.force,
+                    tolerance: actual_check.tolerance,
+                    iterations,
+                });
+            }
+            let energy = finite(finite(linear + nonlinear)? + actual.normal_energy_j)?;
             if energy < 0.0 {
                 return Err(invalid("nonlinear static total storage is negative").into());
             }
@@ -227,8 +260,8 @@ pub(super) fn initialize(
             );
             return Ok(NonlinearPreloadDiagnostics {
                 iterations,
-                force_residual: check.force,
-                force_tolerance: check.tolerance,
+                force_residual: actual_check.force,
+                force_tolerance: actual_check.tolerance,
                 nonlinear_energy_j: nonlinear,
                 total_energy_j: energy,
             });
@@ -264,7 +297,7 @@ pub(super) fn initialize(
                 return Err(failed(iterations));
             }
             iterations += 1;
-            match evaluate(state, network, &trial_q, external, gate) {
+            match evaluate(state, network, &trial_q, external, obstacles, false, gate) {
                 Ok(trial) => {
                     // Armijo descent, with only arithmetic roundoff admitted.
                     // This allowance never replaces the physical force gate.

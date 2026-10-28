@@ -84,7 +84,7 @@ impl MultiBowStringBank {
     /// Drive indentation and load-release with the existing physical-force
     /// performer. Static preload includes the original normal contact potentials
     /// in the full-network equilibrium, with every bow released before the window;
-    /// bound geometric storage requires a nonlinear equilibrium owner and refuses.
+    /// bound geometric/material storage participates in the same static objective.
     /// A vibrating string may leave and re-enter a stop without a state reset.
     ///
     /// A declared normal can differ from the bow tangent or plucking direction.

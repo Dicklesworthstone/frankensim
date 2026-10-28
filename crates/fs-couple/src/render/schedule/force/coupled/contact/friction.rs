@@ -390,7 +390,7 @@ impl FrictionModalSystem {
         -> Result<f64, ModalFrictionError>
     {
         if let Some(state) = &mut self.nonlinear {
-            let report = state.initialize_equilibrium(&mut self.network, external, gate)?;
+            let report = state.initialize_equilibrium(&mut self.network, external, None, gate)?;
             let energy = report.total_energy_j;
             state.preload = Some(report);
             return Ok(energy);

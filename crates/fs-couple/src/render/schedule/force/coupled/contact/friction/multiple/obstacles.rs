@@ -84,8 +84,8 @@ impl MultiFrictionModalSystem {
     /// Empty input is an exact no-op. A nonempty set binds once, at sample zero.
     /// Bound geometric storage retains these same contact trials, including
     /// initial/final potential, loss and support work in the joint DG balance.
-    /// Released-friction preload solves these contacts at equilibrium only when
-    /// no additional nonlinear storage is bound.
+    /// Released-friction preload solves these same stationary potentials jointly
+    /// with any bound conservative material/geometric storage.
     /// Existing linear bandwidth checks are not a nonlinear anti-aliasing proof.
     pub fn with_obstacles(mut self, contacts: Vec<(ModalContact, ModalContactConfig)>,
         limits: FrictionObstacleConfig, gate: &CancelGate) -> Result<Self, ModalFrictionError>
@@ -314,7 +314,7 @@ impl NormalPoint {
     }
 }
 
-pub(super) struct ObstacleSet {
+pub(in super::super) struct ObstacleSet {
     points: Vec<NormalPoint>,
     limits: FrictionObstacleConfig,
     // Both mixed directions are evaluated; do not assume numerical symmetry.
@@ -349,6 +349,40 @@ fn opposed(a: &[f64], q: usize, i: usize, j: usize) -> bool {
 }
 
 impl ObstacleSet {
+    /// Stationary potential and its reciprocal generalized reaction. Mathematical
+    /// trial positions do not publish contact histories or dynamic reports.
+    /// Physical source/force/penetration limits apply to the accepted candidate;
+    /// an unconstrained trial need not itself be a realizable initial condition.
+    pub(in super::super) fn static_response(&self, q: &[f64], reaction: &mut [f64],
+        admit: bool, dt: f64, gate: &CancelGate) -> Result<f64, ModalCouplingError>
+    {
+        if self.residual.is_some() {
+            return Err(invalid("nonlinear static preload does not include obstacle residual compliance"));
+        }
+        let mut energy = 0.0;
+        for (i, point) in self.points.iter().enumerate() {
+            poll(Some(gate))?;
+            let offset = self.motion.as_ref().map_or(0.0, |motion| motion.accepted[i]);
+            let x = finite(dot(&point.column, q)? - offset)?;
+            let mut gradient = [0.0; 2];
+            point.storage.gradient(&[-x, 0.0], &mut gradient);
+            let force = finite(-gradient[0])?;
+            if force < 0.0 { return Err(invalid("static normal reaction cannot be attractive")); }
+            if admit {
+                limit("static contact force", force, point.config.maximum_force_n)?;
+                let penetration = point.penetration(x)?;
+                if let Some(source) = &point.source {
+                    source.validate_kinematics(penetration, 0.0, dt)
+                        .map_err(ModalCouplingError::ContactMaterial)?;
+                }
+            }
+            energy = finite(energy + point.energy(x)?)?;
+            for (value, shape) in reaction.iter_mut().zip(&point.column) {
+                *value = finite(*value - shape * force)?;
+            }
+        }
+        Ok(energy)
+    }
     pub(super) const fn has_residual(&self) -> bool { self.residual.is_some() }
     // Closure lag of contact i through the omitted modes under reactions `r`: (G r)_i.
     fn lag(&self, i: usize, reactions: &[f64]) -> Result<f64, ModalCouplingError> {

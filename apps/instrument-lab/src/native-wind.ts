@@ -12,6 +12,7 @@ import materialReedSource from "../../../crates/fs-couple/examples/material_moda
 import materialReedDgSource from "../../../crates/fs-couple/examples/material_modal_valve/paired-dg-chimney.performance?raw";
 import stringExampleSource from "../../../crates/fs-couple/examples/material_strings/pluck-and-bow.material-strings?raw";
 import nonlinearPreloadStringSource from "../../../crates/fs-couple/examples/material_strings/nonlinear-preload.material-strings?raw";
+import stoppedNonlinearStringSource from "../../../crates/fs-couple/examples/material_strings/nonlinear-stopped-preload.material-strings?raw";
 import observedStringSource from "../../../crates/fs-couple/examples/material_strings/rayleigh-observed.material-strings?raw";
 import regionalCavityStringSource from "../../../crates/fs-couple/examples/material_strings/regional-cavity.material-strings?raw";
 import layeredStringSource from "../../../crates/fs-couple/examples/material_strings/relaxing-layered-strings.material-strings?raw";
@@ -132,6 +133,15 @@ const EXAMPLES = [
     decimate: false,
     intro: "Starter: a force-loaded material string with bonded layers, two transverse planes, torsion, geometric stretching and a coupled body/cavity. Attach wire.fsmatpk, sleeve.fsmatpk and body.fsmatpk from the native string examples. The force is released at sample zero from the solved coupled equilibrium.",
     help: "Change material sources, geometry or the declared preload force. The native solver derives the initial deformation from the same storage law used during playback, retaining the original relaxed material histories. Longitudinal-wave descriptions use this same preload path. This manufactured specimen does not establish measured violin, cello or bass accuracy.",
+  },
+  {
+    name: "material_strings/nonlinear-stopped-preload.material-strings",
+    label: "Strings — force-loaded contact and nonlinear material",
+    renderer: "strings",
+    source: stoppedNonlinearStringSource,
+    decimate: false,
+    intro: "Starter: a force-loaded layered string equilibrates against the original compliant stop while retaining geometric stretching, torsion, body and cavity motion. Attach wire.fsmatpk, sleeve.fsmatpk, body.fsmatpk and stopped-pluck.stops; select stopped-pluck.stops as the finger/fret/contact profile below.",
+    help: "The native solver balances material, support and normal-contact forces together before releasing the declared load at sample zero. Change material sources or the attached stop profile to change the initial shape and ensuing pressure. The supplied stop is manufactured data; material-stop profiles use source-bound normal contact through the same solver. This is not a measured violin, cello or bass.",
   },
   {
     name: "material_strings/rayleigh-observed.material-strings",

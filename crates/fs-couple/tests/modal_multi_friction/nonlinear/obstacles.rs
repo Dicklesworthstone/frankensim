@@ -201,13 +201,34 @@ fn rejected_constitutive_trial_and_cancel_preserve_joint_state_then_retry_exactl
 }
 
 #[test]
-fn linear_static_preload_cannot_publish_through_nonlinear_obstacles() {
+fn static_preload_solves_quartic_and_normal_storage_together_then_releases() {
     let mut system = fixture([0.0; 2], 1.0, true);
-    let states = all_states(&system);
-    assert!(system.initialize_released_equilibrium(&[0.0, 0.2], &CancelGate::new()).is_err());
-    assert_eq!(all_states(&system), states);
+    let energy = system.initialize_released_equilibrium(&[0.0, 0.2], &CancelGate::new()).unwrap();
+    // Independent scalar force equation: (omega^2+k)q + beta q^3 = F.
+    let (mut low, mut high) = (0.0, 0.2 / (OMEGA[1].powi(2) + STIFFNESS));
+    for _ in 0..96 {
+        let q = f64::midpoint(low, high);
+        if (OMEGA[1].powi(2) + STIFFNESS) * q + BETA * q.powi(3) > 0.2 { high = q; }
+        else { low = q; }
+    }
+    let q = f64::midpoint(low, high);
+    assert_eq!(all_states(&system)[0].displacement_m_sqrt_kg, 0.0);
+    assert!((all_states(&system)[1].displacement_m_sqrt_kg - q).abs() < 1e-10*q);
+    let expected = 0.5*(OMEGA[1].powi(2) + STIFFNESS)*q*q + 0.25*BETA*q.powi(4);
+    assert!((energy-expected).abs() < 1e-10*expected);
     assert_eq!(system.samples_rendered(), 0);
     assert!(system.last_frame().is_none());
     assert!(system.last_obstacle_frames().is_none());
-    assert_eq!(system.total_energy_j().unwrap(), 0.0);
+    assert_eq!(system.total_energy_j().unwrap(), energy);
+    let released = [drive(0.0, 0.0); 2];
+    for _ in 0..8 {
+        let frame = system.step(&[0.0, 0.2], &released).unwrap();
+        assert!(frame.observer_pressure_pa.abs() < 1e-8, "held contact equilibrium radiates");
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+    }
+    let normal = system.last_obstacle_frames().unwrap()[0];
+    assert!((normal.normal_force_n - STIFFNESS*q).abs() < 1e-9);
+    let frame = system.step(&[0.0; 2], &released).unwrap();
+    assert!(frame.observer_pressure_pa.abs() > 0.05);
+    assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
 }

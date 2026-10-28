@@ -1,9 +1,12 @@
 //! G1/G3: independently solved force-loaded nonlinear storage and release.
 use super::*;
 use fs_couple::render::schedule::force::coupled::contact::friction::ModalFrictionError;
+use fs_couple::render::schedule::force::coupled::contact::friction::multiple::obstacles::FrictionObstacleConfig;
 use fs_couple::render::schedule::force::coupled::contact::friction::nonlinear::{
     MappedModalPotentialBinding, ModalCoordinate,
 };
+use fs_couple::render::schedule::force::coupled::contact::{ModalContact, ModalContactConfig};
+use fs_dcontact::Obstacle;
 
 struct LocalQuartic {
     coefficient: f64,
@@ -317,4 +320,146 @@ fn failed_domain_work_budget_or_cancellation_keeps_all_accepted_state() {
     );
     assert_eq!(states(&system), loaded);
     assert_eq!(system.nonlinear_preload_diagnostics(), Some(&report));
+}
+
+fn contacted(maximum_force_n: f64, maximum_penetration_m: f64) -> MultiFrictionModalSystem {
+    let gate = CancelGate::new_clock_free();
+    let point = |component, shape| ModalAttachment {
+        component,
+        shapes: vec![shape],
+    };
+    let law = |gap| {
+        Obstacle::new(
+            vec![-1.0],
+            1,
+            1,
+            vec![gap],
+            vec![1.0],
+            2e6,
+            1.5,
+            "manufactured nonlinear preload contact".into(),
+        )
+        .unwrap()
+        .with_internal_loss(0.4)
+        .unwrap()
+    };
+    let limits = ModalContactConfig {
+        max_iterations: 96,
+        maximum_force_n,
+        maximum_penetration_m,
+        force_absolute_tolerance_n: 1e-12,
+        force_relative_tolerance: 1e-10,
+    };
+    bind(base(true, false), 1e12, 0.01, 128)
+        .with_additional_ports(vec![], joint_config(), &gate)
+        .unwrap()
+        .with_obstacles(
+            vec![
+                (
+                    ModalContact {
+                        left: point(0, 1.0),
+                        right: point(1, 1.0),
+                        law: law(5e-5),
+                    },
+                    limits,
+                ),
+                (
+                    ModalContact {
+                        left: point(0, -1.0),
+                        right: point(1, -1.0),
+                        law: law(0.001),
+                    },
+                    limits,
+                ),
+            ],
+            FrictionObstacleConfig {
+                max_contacts: 2,
+                max_setup_terms: 100000,
+            },
+            &gate,
+        )
+        .unwrap()
+}
+
+#[test]
+fn hertz_reciprocal_receiver_and_relaxed_memory_share_nonlinear_equilibrium() {
+    let gate = CancelGate::new_clock_free();
+    let mut system = contacted(100.0, 0.01);
+    let q = [0.0003_f64, 0.0001_f64];
+    let penetration = q[0] - q[1] - 5e-5;
+    let normal = 2e6 * penetration.powf(1.5);
+    let force = [
+        10000.0 * q[0] + 4000.0 * (q[0] - q[1]) + 1e12 * q[0].powi(3) + normal,
+        22500.0 * q[1] - 4000.0 * (q[0] - q[1]) - normal,
+    ];
+    let energy = system
+        .initialize_released_equilibrium(&force, &gate)
+        .unwrap();
+    for (actual, expected) in all_states(&system).iter().zip(q) {
+        assert!((actual.displacement_m_sqrt_kg - expected).abs() < 2e-9 * expected);
+        assert_eq!(actual.velocity_m_sqrt_kg_per_s, 0.0);
+    }
+    let expected = 0.5 * 10000.0 * q[0] * q[0]
+        + 0.5 * 22500.0 * q[1] * q[1]
+        + 0.5 * 4000.0 * (q[0] - q[1]).powi(2)
+        + 0.25 * 1e12 * q[0].powi(4)
+        + normal * penetration / 2.5;
+    assert!((energy - expected).abs() < 2e-9 * expected);
+    assert_eq!(energy, system.total_energy_j().unwrap());
+    let actual = all_states(&system);
+    let relaxed = 5000.0_f64.sqrt()
+        * (actual[0].displacement_m_sqrt_kg - 0.5 * actual[1].displacement_m_sqrt_kg);
+    assert!((system.material_memory()[0] - relaxed).abs() < 1e-15);
+    let report = *system.nonlinear_preload_diagnostics().unwrap();
+    assert!(report.force_residual <= report.force_tolerance && report.iterations <= 128);
+    assert!(system.last_frame().is_none() && system.last_obstacle_frames().is_none());
+    for _ in 0..8 {
+        let frame = system.step(&force, &[drive(0.0, 0.0)]).unwrap();
+        assert!(frame.observer_pressure_pa.abs() < 1e-7);
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+    }
+    let normals = system.last_obstacle_frames().unwrap();
+    assert!((normals[0].normal_force_n - normal).abs() < 1e-8);
+    assert_eq!(
+        normals[1].normal_force_n, 0.0,
+        "opposite contact remains separated"
+    );
+    let frame = system.step(&[0.0; 2], &[drive(0.0, 0.0)]).unwrap();
+    assert!(frame.observer_pressure_pa.abs() > 1.0);
+    assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+}
+
+#[test]
+fn joint_preload_contact_limits_and_cancellation_never_publish_partial_state() {
+    let gate = CancelGate::new_clock_free();
+    for (force, penetration) in [(1e-4, 0.01), (100.0, 1e-8)] {
+        let mut system = contacted(force, penetration);
+        let before = all_states(&system);
+        let memory = system.material_memory().to_vec();
+        let source = system.obstacle(0).unwrap().law.provenance().to_string();
+        assert!(
+            system
+                .initialize_released_equilibrium(&[100.0, 0.0], &gate)
+                .is_err()
+        );
+        let cancelled = CancelGate::new_clock_free();
+        cancelled.request();
+        assert!(
+            system
+                .initialize_released_equilibrium(&[0.0; 2], &cancelled)
+                .is_err()
+        );
+        assert_eq!(all_states(&system), before);
+        assert_eq!(system.material_memory(), memory);
+        assert_eq!(system.obstacle(0).unwrap().law.provenance(), source);
+        assert_eq!(system.samples_rendered(), 0);
+        assert!(system.last_frame().is_none() && system.last_obstacle_frames().is_none());
+        assert!(system.nonlinear_preload_diagnostics().is_none());
+        assert_eq!(
+            system
+                .initialize_released_equilibrium(&[0.0; 2], &gate)
+                .unwrap(),
+            0.0
+        );
+    }
 }
