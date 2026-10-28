@@ -28,7 +28,8 @@
 use crate::Refusal;
 use crate::dragledger::{DragLedger, wright_ledger_v1};
 use crate::propcoupling::{
-    CANDIDATE_A, CoupledStep, PropCouplingSolverSpec, PropDisk, coupled_prop_airframe_step,
+    CANDIDATE_A, CoupledStep, IncidentInflow, PropCouplingSolverSpec, PropDisk,
+    coupled_prop_airframe_step, coupled_prop_airframe_step_with_incident,
 };
 use fs_airscrew::{BladeStation, Rotor};
 use fs_blake3::hash_domain;
@@ -370,6 +371,67 @@ impl OpenLoopDesign {
         rho_kg_m3: f64,
         warm: Option<[f64; 2]>,
     ) -> Result<ForceBuildup, Refusal> {
+        self.force_buildup_impl(
+            v_mps,
+            alpha_rad,
+            delta_canard_rad,
+            omega_prop_rad_s,
+            q_pitch_rad_s,
+            rho_kg_m3,
+            warm,
+            None,
+        )
+    }
+
+    /// Build actual distributed loads from a frozen incident field. The
+    /// callback receives body FRD positions measured from the wing reference
+    /// and returns translational body-relative air velocity there. This method
+    /// adds the rigid pitch velocity `omega × (position - CG)` exactly once;
+    /// it does not also apply the legacy pitch-rate twist approximation.
+    /// Every wing/canard strip and both propeller disk centers are sampled.
+    /// Local accepted prop wash enters circulation, Kutta–Joukowsky forces,
+    /// profile drag, and section moments consistently. Parasite/induced-drag
+    /// estimates and the common straight wake retain the supplied CG reference.
+    ///
+    /// # Errors
+    /// As [`Self::force_buildup_warm`], plus incident-field and local-flow
+    /// admission refusals. No uniform-flow fallback follows a local refusal.
+    #[allow(clippy::too_many_arguments)]
+    pub fn force_buildup_with_incident(
+        &self,
+        v_mps: f64,
+        alpha_rad: f64,
+        delta_canard_rad: f64,
+        omega_prop_rad_s: f64,
+        q_pitch_rad_s: f64,
+        rho_kg_m3: f64,
+        warm: Option<[f64; 2]>,
+        incident: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
+    ) -> Result<ForceBuildup, Refusal> {
+        self.force_buildup_impl(
+            v_mps,
+            alpha_rad,
+            delta_canard_rad,
+            omega_prop_rad_s,
+            q_pitch_rad_s,
+            rho_kg_m3,
+            warm,
+            Some(incident),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn force_buildup_impl(
+        &self,
+        v_mps: f64,
+        alpha_rad: f64,
+        delta_canard_rad: f64,
+        omega_prop_rad_s: f64,
+        q_pitch_rad_s: f64,
+        rho_kg_m3: f64,
+        warm: Option<[f64; 2]>,
+        incident: Option<&dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>>,
+    ) -> Result<ForceBuildup, Refusal> {
         if !(v_mps.is_finite()
             && v_mps > 1.0
             && alpha_rad.is_finite()
@@ -399,7 +461,7 @@ impl OpenLoopDesign {
         // under +q and sees Δα = −q·dx/V (the tail-aft mirror gives the
         // classical +q·l_t/V — both are DAMPING). Quasi-steady, enters
         // as strip twist; q = 0 leaves the strips bitwise untouched.
-        if q_pitch_rad_s != 0.0 {
+        if q_pitch_rad_s != 0.0 && incident.is_none() {
             for st in &mut strips {
                 let p0 = &panels[st.panel_indices[0]];
                 let dx = 0.5 * (p0.a[0] + p0.b[0]) - self.cg_m[0];
@@ -450,24 +512,69 @@ impl OpenLoopDesign {
                 ..self.disks[1]
             },
         ];
-        let coupled = coupled_prop_airframe_step(
-            &op,
-            &panels,
-            &strips,
-            &closure,
-            &self.rotor,
-            &disks,
-            fs_v,
-            rho_kg_m3,
-            &self.coupling,
-            warm,
-        )?;
+        let coupled = if let Some(incident) = incident {
+            let sample = |point: [f64; 3]| -> Result<[f64; 3], Refusal> {
+                let mut velocity = incident(point)?;
+                velocity[0] += q_pitch_rad_s * (point[2] - self.cg_m[2]);
+                velocity[2] -= q_pitch_rad_s * (point[0] - self.cg_m[0]);
+                Ok(velocity)
+            };
+            let mut local_strips = Vec::with_capacity(strips.len());
+            for strip in &strips {
+                let front = &panels[strip.panel_indices[0]];
+                local_strips.push(sample([
+                    0.5 * (front.a[0] + front.b[0]),
+                    0.5 * (front.a[1] + front.b[1]),
+                    0.5 * (front.a[2] + front.b[2]),
+                ])?);
+            }
+            let local_disks = [sample(disks[0].center_m)?, sample(disks[1].center_m)?];
+            coupled_prop_airframe_step_with_incident(
+                &op,
+                &panels,
+                &strips,
+                &closure,
+                &self.rotor,
+                &disks,
+                fs_v,
+                rho_kg_m3,
+                &self.coupling,
+                warm,
+                IncidentInflow {
+                    strip_velocity_mps: &local_strips,
+                    disk_velocity_mps: local_disks,
+                },
+            )?
+        } else {
+            coupled_prop_airframe_step(
+                &op,
+                &panels,
+                &strips,
+                &closure,
+                &self.rotor,
+                &disks,
+                fs_v,
+                rho_kg_m3,
+                &self.coupling,
+                warm,
+            )?
+        };
         let q = 0.5 * rho_kg_m3 * v_mps * v_mps;
         let vhat = [fs_v[0] / v_mps, 0.0, fs_v[2] / v_mps];
+        let panel_velocity = coupled.strip_velocity_mps.as_ref().map(|local| {
+            let mut velocity = vec![fs_v; panels.len()];
+            for (s, strip) in strips.iter().enumerate() {
+                for &panel in &strip.panel_indices {
+                    velocity[panel] = local[s];
+                }
+            }
+            velocity
+        });
         // Per-panel Kutta–Joukowsky forces + moments about the CG ref.
         let mut force = [0.0f64; 3];
         let mut m_y = 0.0f64;
         for (j, p) in panels.iter().enumerate() {
+            let fs_v = panel_velocity.as_ref().map_or(fs_v, |local| local[j]);
             let seg = [p.b[0] - p.a[0], p.b[1] - p.a[1], p.b[2] - p.a[2]];
             // Statement-split (bead guzez.7.2.1): every fusable
             // mul-add/mul-sub in this assembly binds its products to
@@ -504,7 +611,16 @@ impl OpenLoopDesign {
         // + profile drag at the strip line.
         let cm0 = -core::f64::consts::PI * self.camber_ratio;
         let mut d_prof = 0.0;
-        for st in &strips {
+        for (s, st) in strips.iter().enumerate() {
+            let (q, vhat) = match &coupled.strip_velocity_mps {
+                Some(local) => {
+                    let v = local[s];
+                    let speed2 = v[0] * v[0] + v[2] * v[2];
+                    let speed = speed2.sqrt();
+                    (0.5 * rho_kg_m3 * speed2, [v[0] / speed, 0.0, v[2] / speed])
+                }
+                None => (q, vhat),
+            };
             let p0 = &panels[st.panel_indices[0]];
             let width = (p0.b[1] - p0.a[1]).abs();
             let c = st.chord_m;

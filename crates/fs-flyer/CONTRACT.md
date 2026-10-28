@@ -97,6 +97,44 @@ checkpoint bytes retain their existing behavior. Focused tests live in
 gust exclusion, observer independence, rail/airborne replay, and gravity-frame
 consistency. Run with `cargo test -p fs-flyer --lib simloop::spatial_wind`.
 
+### Distributed strip and propeller inflow
+
+`SimLoop::init_with_distributed_spatial_wind` samples every wing/canard strip
+reference point and both propeller disk centers from the same frozen tick.
+`OpenLoopDesign::force_buildup_with_incident` admits the corresponding explicit
+body-relative incident field. Rigid pitch velocity `q cross (position - CG)`
+enters each local sample once; the legacy pitch-as-twist approximation is
+disabled on this path. Local chord-plane speed and incidence drive the nonlinear
+strip solve, and its accepted local velocity drives Kutta-Joukowsky forces,
+profile drag and section pitching moments. Converged propeller wash is included
+in both circulation and force velocity. The separate disk-center axial inflows
+drive the two BEMT thrust/torque solves and the existing engine dynamics.
+
+`coupled_prop_airframe_step_with_incident` carries disk-induced velocity `vi`,
+with `T = 2 rho A vi (V_disk + vi)`, and applies `wash_factor * vi` at each
+strip. Returned strip velocities belong to the actual evaluated iterate that
+produced circulation. Distributed acceptance checks each disk's relative
+fixed-point residual separately; a strong rotor cannot mask the weak rotor's
+error. The rationalized momentum root retains weak-loading accuracy.
+Existing legacy and CG modes retain their previous wash
+scaling and arithmetic. Invalid or reversed local flow and below-ground surface
+samples refuse through the existing envelope receipt without a CG-flow fallback.
+
+Distributed runs select V4 checkpoint integrity and a distinct run identity;
+the complete OU state, wind specification and inertial velocity retain their
+existing encoding. V3 explicitly selects CG loading and V2 selects legacy
+loading. Changing a distributed payload to V3 cannot silently downgrade its
+scenario identity. Focused coupling, force and lifecycle regressions cover
+independent rotor inflow, the momentum/wash relation, canard-only gust pitch
+loads, local-force reconstruction, single pitch-motion ownership and replay.
+
+This remains quasi-steady strip aerodynamics with the existing spanwise prop-wash
+overlap approximation, a common straight wake and
+reference chord-row circulation ratios, axial disk-center BEMT, reference-flow
+parasite/classical induced-drag estimates and reduced longitudinal motion.
+It does not supply chordwise gust memory, crossflow dynamics, disk harmonics,
+or a validation of historical turbulent flight.
+
 ## Error model
 
 Typed `Refusal { code, message, ranked_repairs }`. Codes:

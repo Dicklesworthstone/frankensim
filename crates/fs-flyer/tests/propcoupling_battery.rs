@@ -6,7 +6,8 @@
 
 use fs_airscrew::{BladeStation, Rotor, bemt_solve};
 use fs_flyer::propcoupling::{
-    CANDIDATE_A, PropCouplingSolverSpec, PropDisk, coupled_prop_airframe_step,
+    CANDIDATE_A, CANDIDATE_B, IncidentInflow, PropCouplingSolverSpec, PropDisk,
+    coupled_prop_airframe_step, coupled_prop_airframe_step_with_incident, wash_factor,
 };
 use fs_wing::nonlinear::{InfluenceOperator, StripSpec};
 use fs_wing::{SurfaceId, flat_surface};
@@ -99,6 +100,158 @@ fn camber_closure(_s: usize, alpha: f64) -> (f64, fs_wing::nonlinear::StripRegim
         2.0 * std::f64::consts::PI * (alpha + 0.1),
         fs_wing::nonlinear::StripRegime::Attached,
     )
+}
+
+#[test]
+fn distributed_incident_field_drives_separate_rotors_and_consistent_wash() {
+    let (panels, strips) = wing_setup();
+    let velocity = freestream();
+    let op = InfluenceOperator::build(&panels, velocity, RHO).unwrap();
+    let rotor = rotor_1903();
+    let disks = disks();
+    let local = vec![velocity; strips.len()];
+    let disk_flow = [[10.0, 0.0, 0.0], [16.0, 0.0, 0.0]];
+    let result = coupled_prop_airframe_step_with_incident(
+        &op,
+        &panels,
+        &strips,
+        &camber_closure,
+        &rotor,
+        &disks,
+        velocity,
+        RHO,
+        &CANDIDATE_B,
+        None,
+        IncidentInflow {
+            strip_velocity_mps: &local,
+            disk_velocity_mps: disk_flow,
+        },
+    )
+    .unwrap();
+    assert!(result.thrust_n[0] > result.thrust_n[1]);
+    assert_ne!(result.torque_nm[0].to_bits(), result.torque_nm[1].to_bits());
+    let area = core::f64::consts::PI * rotor.radius_m * rotor.radius_m;
+    for k in 0..2 {
+        let induced =
+            fs_wing::induced_velocity_free(disks[k].center_m, &panels, &result.gamma, velocity);
+        let axial = disk_flow[k][0] + induced[0];
+        let vi = result.w_slip[k];
+        let momentum_thrust = 2.0 * RHO * area * vi * (axial + vi);
+        assert!((momentum_thrust - result.thrust_n[k]).abs() < 1.0e-9);
+    }
+    let accepted = result.strip_velocity_mps.as_ref().unwrap();
+    let mut washed = 0;
+    let mut disk_checked = [false; 2];
+    for (s, strip) in strips.iter().enumerate() {
+        let p = panels[strip.panel_indices[0]];
+        let x = 0.5 * (p.a[0] + p.b[0]);
+        let y = 0.5 * (p.a[1] + p.b[1]);
+        let factors = disks.map(|disk| {
+            wash_factor(
+                x - disk.center_m[0],
+                (y - disk.center_m[1]).abs(),
+                rotor.radius_m,
+            )
+        });
+        let expected = factors[0] * result.w_slip[0] + factors[1] * result.w_slip[1];
+        let actual = accepted[s][0] - velocity[0];
+        // Gamma and force velocity belong to evaluated x; w_slip is G(x).
+        // Bound their difference by each disk's declared relative residual.
+        let bound = CANDIDATE_B.tol / (1.0 - CANDIDATE_B.tol)
+            * (factors[0].abs() * (result.w_slip[0].abs() + 1.0e-6)
+                + factors[1].abs() * (result.w_slip[1].abs() + 1.0e-6));
+        assert!((actual - expected).abs() <= bound + 1.0e-12);
+        for k in 0..2 {
+            if factors[k] > 0.0 && factors[1 - k] == 0.0 {
+                let evaluated = actual / factors[k];
+                let relative = (result.w_slip[k] - evaluated).abs() / (evaluated.abs() + 1.0e-6);
+                assert!(relative < CANDIDATE_B.tol + 1.0e-11);
+                disk_checked[k] = true;
+            }
+        }
+        if expected > 0.0 {
+            washed += 1;
+        }
+    }
+    assert!(
+        washed > 0,
+        "fixture must include strips inside real disk wash"
+    );
+    assert!(disk_checked.into_iter().all(|checked| checked));
+}
+
+#[test]
+fn malformed_strip_map_refuses_before_sampling_wash() {
+    let (panels, strips) = wing_setup();
+    let velocity = freestream();
+    let op = InfluenceOperator::build(&panels, velocity, RHO).unwrap();
+    let mut empty_strip = strips.clone();
+    empty_strip[0].panel_indices.clear();
+    let mut invalid_index = strips.clone();
+    invalid_index[0].panel_indices[0] = panels.len();
+    for malformed in [Vec::new(), empty_strip, invalid_index] {
+        let local = vec![velocity; malformed.len()];
+        let legacy = coupled_prop_airframe_step(
+            &op,
+            &panels,
+            &malformed,
+            &camber_closure,
+            &rotor_1903(),
+            &disks(),
+            velocity,
+            RHO,
+            &CANDIDATE_B,
+            None,
+        )
+        .unwrap_err();
+        let distributed = coupled_prop_airframe_step_with_incident(
+            &op,
+            &panels,
+            &malformed,
+            &camber_closure,
+            &rotor_1903(),
+            &disks(),
+            velocity,
+            RHO,
+            &CANDIDATE_B,
+            None,
+            IncidentInflow {
+                strip_velocity_mps: &local,
+                disk_velocity_mps: [velocity; 2],
+            },
+        )
+        .unwrap_err();
+        assert_eq!(legacy.code, "strips-invalid");
+        assert_eq!(distributed.code, "strips-invalid");
+    }
+}
+
+#[test]
+fn distributed_disk_reversal_refuses_without_uniform_fallback() {
+    let (panels, strips) = wing_setup();
+    let velocity = freestream();
+    let op = InfluenceOperator::build(&panels, velocity, RHO).unwrap();
+    let local = vec![velocity; strips.len()];
+    for axial in [-100.0, f64::NAN] {
+        let error = coupled_prop_airframe_step_with_incident(
+            &op,
+            &panels,
+            &strips,
+            &camber_closure,
+            &rotor_1903(),
+            &disks(),
+            velocity,
+            RHO,
+            &CANDIDATE_B,
+            None,
+            IncidentInflow {
+                strip_velocity_mps: &local,
+                disk_velocity_mps: [[axial, 0.0, 0.0]; 2],
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "disk-inflow-invalid");
+    }
 }
 
 #[test]

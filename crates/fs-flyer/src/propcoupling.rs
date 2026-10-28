@@ -20,7 +20,9 @@
 use crate::Refusal;
 use fs_airscrew::{Rotor, bemt_solve};
 use fs_blake3::hash_domain;
-use fs_wing::nonlinear::{InfluenceOperator, SectionClosure, StripSpec, solve_nonlinear};
+use fs_wing::nonlinear::{
+    InfluenceOperator, SectionClosure, StripSpec, solve_nonlinear, solve_nonlinear_with_incident,
+};
 use fs_wing::{Panel, induced_velocity_free};
 
 /// Aitken candidate A (the Round-3 tuple; family selection is E4.5+).
@@ -91,10 +93,21 @@ pub struct PropDisk {
     pub omega_rad_s: f64,
 }
 
+/// Incident relative-air velocities before prop-induced wash, all sampled at
+/// one physical tick in body FRD coordinates. The rotor model consumes the
+/// separate disk-center axial components, not disk harmonics or crossflow.
+#[derive(Clone, Copy, Debug)]
+pub struct IncidentInflow<'a> {
+    /// One local velocity per wing/canard strip.
+    pub strip_velocity_mps: &'a [[f64; 3]],
+    /// Separate left/right disk-center velocities.
+    pub disk_velocity_mps: [[f64; 3]; 2],
+}
+
 /// The coupled result.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CoupledStep {
-    /// Converged slipstream increments [w_L, w_R] [m/s].
+    /// Converged disk-induced axial velocities [vi_L, vi_R] [m/s].
     pub w_slip: [f64; 2],
     /// L/R thrust [N].
     pub thrust_n: [f64; 2],
@@ -105,9 +118,13 @@ pub struct CoupledStep {
     /// Converged per-panel circulations (the washed solve's Γ — the
     /// moment build-up consumes these; not part of the golden payload).
     pub gamma: Vec<f64>,
+    /// Accepted local strip velocities including prop wash in distributed
+    /// mode; force assembly must use these with `gamma`. Legacy mode is None.
+    pub strip_velocity_mps: Option<Vec<[f64; 3]>>,
     /// Aitken corrections used.
     pub corrections: u32,
-    /// Final joint residual (relative).
+    /// Final relative residual: joint L2 in legacy mode; maximum per-disk
+    /// relative residual in distributed mode (1e-6 m/s denominator safeguard).
     pub residual: f64,
     /// The spec digest this step ran under.
     pub spec_digest: String,
@@ -195,6 +212,67 @@ pub fn coupled_prop_airframe_step(
     spec: &PropCouplingSolverSpec,
     warm: Option<[f64; 2]>,
 ) -> Result<CoupledStep, Refusal> {
+    coupled_step_impl(
+        op, panels, strips, closure, rotor, disks, freestream, rho, spec, warm, None,
+    )
+}
+
+/// Two-way propeller/wing solve with nonuniform incident velocities. The
+/// converged momentum state is disk-induced velocity `vi`, satisfying
+/// `T = 2 rho A vi (V_disk + vi)`; strip wash is `wash_factor * vi`.
+/// Local section incidence, circulation, and returned force velocities all
+/// receive this same wash. Existing legacy wash scaling remains unchanged.
+/// Each disk must meet its own relative convergence tolerance, so a strongly
+/// loaded disk cannot hide an unconverged weak disk. The momentum root uses
+/// its rationalized form to retain small nonzero induction at weak loading.
+///
+/// # Errors
+/// As [`coupled_prop_airframe_step`]; `disk-inflow-invalid` for non-finite
+/// disk samples or reversed net axial disk inflow; `disk-momentum-invalid`
+/// for a non-real/non-finite momentum root; local strip refusals.
+#[allow(clippy::too_many_arguments)]
+pub fn coupled_prop_airframe_step_with_incident(
+    op: &InfluenceOperator,
+    panels: &[Panel],
+    strips: &[StripSpec],
+    closure: SectionClosure<'_>,
+    rotor: &Rotor,
+    disks: &[PropDisk; 2],
+    freestream: [f64; 3],
+    rho: f64,
+    spec: &PropCouplingSolverSpec,
+    warm: Option<[f64; 2]>,
+    incident: IncidentInflow<'_>,
+) -> Result<CoupledStep, Refusal> {
+    coupled_step_impl(
+        op,
+        panels,
+        strips,
+        closure,
+        rotor,
+        disks,
+        freestream,
+        rho,
+        spec,
+        warm,
+        Some(incident),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn coupled_step_impl(
+    op: &InfluenceOperator,
+    panels: &[Panel],
+    strips: &[StripSpec],
+    closure: SectionClosure<'_>,
+    rotor: &Rotor,
+    disks: &[PropDisk; 2],
+    freestream: [f64; 3],
+    rho: f64,
+    spec: &PropCouplingSolverSpec,
+    warm: Option<[f64; 2]>,
+    incident: Option<IncidentInflow<'_>>,
+) -> Result<CoupledStep, Refusal> {
     let map_err = |e: fs_wing::Refusal| Refusal {
         code: e.code,
         message: e.message,
@@ -205,6 +283,32 @@ pub fn coupled_prop_airframe_step(
         message: e.message,
         ranked_repairs: e.ranked_repairs,
     };
+    // wash_map reads the front panel before the nonlinear wing admission.
+    // Admit those indices here so malformed public input cannot panic.
+    if strips.is_empty()
+        || strips.iter().any(|strip| {
+            strip.panel_indices.is_empty() || strip.panel_indices.iter().any(|&i| i >= panels.len())
+        })
+    {
+        return Err(Refusal {
+            code: "strips-invalid",
+            message: "empty strip or panel index outside the supplied layout".into(),
+            ranked_repairs: vec!["supply nonempty strips referencing existing panels".into()],
+        });
+    }
+    if incident.is_some_and(|flow| {
+        !flow
+            .disk_velocity_mps
+            .iter()
+            .flatten()
+            .all(|v| v.is_finite())
+    }) {
+        return Err(Refusal {
+            code: "disk-inflow-invalid",
+            message: "non-finite incident disk velocity".into(),
+            ranked_repairs: vec!["sample both disks from the admitted physical atmosphere".into()],
+        });
+    }
     let wash = wash_map(strips, panels, disks, rotor.radius_m);
     let disk_area = core::f64::consts::PI * rotor.radius_m * rotor.radius_m;
     let mut x = warm.unwrap_or([0.5, 0.5]);
@@ -226,32 +330,68 @@ pub fn coupled_prop_airframe_step(
                 // Statement-split (guzez.7.2.1): no fused mul-add.
                 let a = w[0] * x[0];
                 let b = w[1] * x[1];
-                0.5 * (a + b)
+                if incident.is_some() {
+                    a + b
+                } else {
+                    0.5 * (a + b)
+                }
             })
             .collect();
-        let wing = solve_nonlinear(
-            op,
-            panels,
-            strips,
-            freestream,
-            rho,
-            closure,
-            Some(&du),
-            None,
-        )
+        let wing = match incident {
+            Some(flow) => solve_nonlinear_with_incident(
+                op,
+                panels,
+                strips,
+                freestream,
+                rho,
+                closure,
+                flow.strip_velocity_mps,
+                Some(&du),
+                None,
+            ),
+            None => solve_nonlinear(
+                op,
+                panels,
+                strips,
+                freestream,
+                rho,
+                closure,
+                Some(&du),
+                None,
+            ),
+        }
         .map_err(map_err)?;
         let mut g = [0.0f64; 2];
         let mut thrust = [0.0f64; 2];
         let mut torque = [0.0f64; 2];
         for k in 0..2 {
             let vi = induced_velocity_free(disks[k].center_m, panels, &wing.gamma, freestream);
-            let v_disk = (freestream[0] + vi[0]).max(0.1);
+            let axial = incident.map_or(freestream[0], |flow| flow.disk_velocity_mps[k][0]);
+            let v_disk = if incident.is_some() {
+                let net = axial + vi[0];
+                if !net.is_finite() || net < 0.0 {
+                    return Err(Refusal {
+                        code: "disk-inflow-invalid",
+                        message: format!("disk {k} has reversed/non-finite axial inflow {net}"),
+                        ranked_repairs: vec![
+                            "the axial BEMT model does not admit reversed inflow".into(),
+                        ],
+                    });
+                }
+                net
+            } else {
+                (axial + vi[0]).max(0.1)
+            };
             let sol = bemt_solve(rotor, rho, v_disk, disks[k].omega_rad_s).map_err(map_err_a)?;
             thrust[k] = sol.thrust_n;
             torque[k] = sol.torque_nm;
             let t_term = sol.thrust_n / (2.0 * rho * disk_area);
-            let disc = v_disk * v_disk + 4.0 * t_term;
-            g[k] = 0.5 * (-v_disk + disc.sqrt());
+            g[k] = if incident.is_some() {
+                momentum_disk_root(v_disk, t_term)?
+            } else {
+                let disc = v_disk * v_disk + 4.0 * t_term;
+                0.5 * (-v_disk + disc.sqrt())
+            };
         }
         Ok((g, thrust, torque, wing.total_lift_n, wing.gamma))
     };
@@ -264,7 +404,11 @@ pub fn coupled_prop_airframe_step(
         let r12 = r[1] * r[1];
         let x02 = x[0] * x[0];
         let x12 = x[1] * x[1];
-        let res = (r02 + r12).sqrt() / ((x02 + x12).sqrt() + 1e-6);
+        let res = if incident.is_some() {
+            (r[0].abs() / (x[0].abs() + 1e-6)).max(r[1].abs() / (x[1].abs() + 1e-6))
+        } else {
+            (r02 + r12).sqrt() / ((x02 + x12).sqrt() + 1e-6)
+        };
         if res < spec.tol {
             return Ok(CoupledStep {
                 w_slip: g,
@@ -272,6 +416,21 @@ pub fn coupled_prop_airframe_step(
                 torque_nm: torque,
                 wing_lift_n: lift,
                 gamma,
+                strip_velocity_mps: incident.map(|flow| {
+                    flow.strip_velocity_mps
+                        .iter()
+                        .zip(&wash)
+                        .map(|(velocity, factors)| {
+                            let mut velocity = *velocity;
+                            // `gamma` belongs to the evaluated x, not the next
+                            // predictor g returned as the warm-start state.
+                            let left = factors[0] * x[0];
+                            let right = factors[1] * x[1];
+                            velocity[0] += left + right;
+                            velocity
+                        })
+                        .collect()
+                }),
                 corrections,
                 residual: res,
                 spec_digest: spec.digest(),
@@ -361,5 +520,55 @@ pub fn coupled_prop_airframe_step(
         r_prev = Some(r);
         res_prev = res;
         corrections += 1;
+    }
+}
+
+/// Solve vi(V+vi)=t without subtracting nearly equal positive numbers.
+fn momentum_disk_root(axial_mps: f64, t: f64) -> Result<f64, Refusal> {
+    let disc = axial_mps * axial_mps + 4.0 * t;
+    if !axial_mps.is_finite()
+        || axial_mps < 0.0
+        || !t.is_finite()
+        || !disc.is_finite()
+        || disc < 0.0
+    {
+        return Err(Refusal {
+            code: "disk-momentum-invalid",
+            message: format!("non-real/non-finite disk momentum state V={axial_mps}, t={t}"),
+            ranked_repairs: vec!["use the admitted real axial actuator-disk branch".into()],
+        });
+    }
+    let denominator = axial_mps + disc.sqrt();
+    Ok(if denominator == 0.0 {
+        0.0
+    } else {
+        2.0 * t / denominator
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::momentum_disk_root;
+
+    #[test]
+    fn momentum_disk_root_retains_weak_loading_and_refuses_nonreal_states() {
+        let weak = momentum_disk_root(1.0e6, 1.0e-12).unwrap();
+        assert!(
+            weak > 0.0,
+            "subtractive root would round this induction to zero"
+        );
+        assert!((weak / 1.0e-18 - 1.0).abs() < 1.0e-15);
+        for (v, t) in [(0.0, 4.0), (10.0, 20.0), (10.0, -20.0), (1.0e6, 1.0e-12)] {
+            let vi = momentum_disk_root(v, t).unwrap();
+            assert!((vi * (v + vi) / t - 1.0).abs() < 1.0e-15);
+        }
+        assert_eq!(momentum_disk_root(0.0, 0.0).unwrap(), 0.0);
+        assert_eq!(momentum_disk_root(10.0, 0.0).unwrap(), 0.0);
+        for (v, t) in [(0.0, -1.0), (10.0, -26.0), (f64::INFINITY, 1.0)] {
+            assert_eq!(
+                momentum_disk_root(v, t).unwrap_err().code,
+                "disk-momentum-invalid"
+            );
+        }
     }
 }

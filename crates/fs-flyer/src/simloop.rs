@@ -23,6 +23,9 @@
 //! wall-compatible evolving field sampled at the CG, inertial longitudinal
 //! ground kinematics, and a complete V3 wind checkpoint. Distributed wing
 //! gust loads and crosswind/sideslip dynamics remain outside that mode.
+//! `init_with_distributed_spatial_wind` adds local wing/canard strip and
+//! separate disk-center inflow to the actual force and rotor solves, with V4
+//! checkpoints. Crosswind/sideslip dynamics remain outside the reduced tier.
 
 use crate::Refusal;
 use crate::aerowarp::ReducedAeroelasticWarp;
@@ -460,7 +463,8 @@ impl SimLoop {
     /// (bead guzez.7.1.1, E6.1-i): bit-exact capture with an embedded
     /// blake3 integrity digest. The opt-in spatial-wind path emits V3,
     /// including its explicit model, both sequential OU quadratures, and
-    /// inertial ground velocity. Legacy V2 reconstructs its OU state by
+    /// inertial ground velocity. Distributed strip/disk sampling emits V4.
+    /// Legacy V2 reconstructs its OU state by
     /// replaying the canonical prehistory through the saved tick.
     ///
     /// # Errors
@@ -475,7 +479,11 @@ impl SimLoop {
             });
         }
         let mut b = Vec::new();
-        let version = if self.spatial_wind.is_some() { 3u32 } else { 2 };
+        let version = match &self.spatial_wind {
+            Some(wind) if wind.distributed => 4u32,
+            Some(_) => 3,
+            None => 2,
+        };
         b.extend_from_slice(&version.to_le_bytes());
         b.extend_from_slice(&self.tick.to_le_bytes());
         b.push(match self.phase {
@@ -529,10 +537,10 @@ impl SimLoop {
         if let Some(wind) = &self.spatial_wind {
             wind.encode(&self.run_intent_id, &mut b);
         }
-        let domain = if version == 3 {
-            "org.frankensim.wf.checkpoint-state.v3"
-        } else {
-            "org.frankensim.wf.checkpoint-state.v2"
+        let domain = match version {
+            4 => "org.frankensim.wf.checkpoint-state.v4",
+            3 => "org.frankensim.wf.checkpoint-state.v3",
+            _ => "org.frankensim.wf.checkpoint-state.v2",
         };
         let digest = hash_domain(domain, &b);
         b.extend_from_slice(digest.as_bytes());
@@ -570,10 +578,12 @@ impl SimLoop {
         let digest_v1 = hash_domain("org.frankensim.wf.checkpoint-state.v1", body);
         let digest_v2 = hash_domain("org.frankensim.wf.checkpoint-state.v2", body);
         let digest_v3 = hash_domain("org.frankensim.wf.checkpoint-state.v3", body);
+        let digest_v4 = hash_domain("org.frankensim.wf.checkpoint-state.v4", body);
         let matches_v1 = digest_v1.as_bytes() == tail;
         let matches_v2 = digest_v2.as_bytes() == tail;
         let matches_v3 = digest_v3.as_bytes() == tail;
-        if !matches_v1 && !matches_v2 && !matches_v3 {
+        let matches_v4 = digest_v4.as_bytes() == tail;
+        if !matches_v1 && !matches_v2 && !matches_v3 && !matches_v4 {
             return Err(Refusal {
                 code: "checkpoint-tampered",
                 message: "embedded digest mismatch".into(),
@@ -585,9 +595,9 @@ impl SimLoop {
             .and_then(|v| <[u8; 4]>::try_from(v).ok())
             .map(u32::from_le_bytes)
             .ok_or_else(|| bad("missing version"))?;
-        match (version, matches_v1, matches_v2, matches_v3) {
-            (2, _, true, _) | (3, _, _, true) => {}
-            (1, true, _, _) => {
+        match (version, matches_v1, matches_v2, matches_v3, matches_v4) {
+            (2, _, true, _, _) | (3, _, _, true, _) | (4, _, _, _, true) => {}
+            (1, true, _, _, _) => {
                 return Err(Refusal {
                     code: "checkpoint-version-unsupported",
                     message: "CheckpointStateV1 lacks lateral state and cannot exact-resume v2"
@@ -642,16 +652,22 @@ impl SimLoop {
         } else {
             None
         };
-        let restored_wind = if version == 3 {
+        let restored_wind = if version >= 3 {
             if tick > spec.max_ticks || !f.iter().all(|v| v.is_finite()) || f[1] < 0.0 {
                 return Err(bad("invalid spatial lifecycle state"));
             }
-            Some(SpatialWindState::decode(&body[pos..], spec.seed, tick)?)
+            let (mut wind, intent) = SpatialWindState::decode(&body[pos..], spec.seed, tick)?;
+            wind.distributed = version == 4;
+            Some((wind, intent))
         } else {
             None
         };
         let mut sim = if let Some((wind, intent)) = &restored_wind {
-            let sim = SimLoop::init_with_spatial_wind(spec, wind.spec.clone())?;
+            let sim = if wind.distributed {
+                SimLoop::init_with_distributed_spatial_wind(spec, wind.spec.clone())?
+            } else {
+                SimLoop::init_with_spatial_wind(spec, wind.spec.clone())?
+            };
             if &sim.run_intent_id != intent {
                 return Err(bad("spatial checkpoint belongs to a different scenario"));
             }
@@ -840,15 +856,7 @@ impl SimLoop {
                 gust_w / v_air
             };
         let alpha_clamped = alpha.clamp(-0.55, 0.55);
-        let b = match self.design.force_buildup_warm(
-            v_air,
-            alpha_clamped,
-            dc_eff.clamp(-0.55, 0.55),
-            self.omega.clamp(10.5, 119.5),
-            self.q.clamp(-2.9, 2.9),
-            self.spec.rho_kg_m3,
-            self.warm_slip,
-        ) {
+        let b = match self.force_buildup_current_wind(v_air, alpha_clamped, dc_eff) {
             Ok(b) => b,
             Err(refusal) => {
                 // The flight left the certified aero envelope (a wild

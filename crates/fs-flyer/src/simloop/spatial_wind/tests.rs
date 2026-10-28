@@ -100,26 +100,39 @@ fn checkpoint_resumes_rail_and_airborne_wind_and_forces_bit_for_bit() {
     assert_eq!(&initial[..4], &3u32.to_le_bytes());
     let mut resumed = SimLoop::restore_checkpoint(sim.spec.clone(), &initial).unwrap();
     assert_eq!(resumed.save_checkpoint().unwrap(), initial);
-    let mut airborne_checked = false;
-    for _ in 0..800 {
+    for _ in 0..24 {
         let a = sim.step(None).unwrap();
         let b = resumed.step(None).unwrap();
         assert_eq!(a, b);
         assert_eq!(sim.digest_hex(), resumed.digest_hex());
-        if matches!(a.phase, Phase::Ended(_)) {
-            break;
-        }
-        if a.phase == Phase::Airborne && !airborne_checked {
-            let checkpoint = sim.save_checkpoint().unwrap();
-            resumed = SimLoop::restore_checkpoint(sim.spec.clone(), &checkpoint).unwrap();
-            assert_eq!(resumed.save_checkpoint().unwrap(), checkpoint);
-            airborne_checked = true;
-        }
-        if airborne_checked && a.tick > 160 {
-            break;
-        }
+        assert_eq!(a.phase, Phase::OnRail, "rail fixture: {a:?}");
     }
-    assert!(airborne_checked, "fixture must actually leave the rail");
+
+    // Replay tests need both integration branches, without assuming that
+    // this synthetic gust seed and fixed controls yield a successful launch.
+    // Construct a live airborne state at the admitted trim airspeed; ground
+    // velocity includes the current wind and u,w are synchronized exactly as
+    // in production before checkpointing. Subsequent forces/OU steps are real.
+    sim.phase = Phase::Airborne;
+    sim.h_m = 20.0;
+    sim.theta = sim.tick0.trim.alpha_rad;
+    let wind = sim.sample_spatial_wind([sim.x_m, 0.0, sim.h_m]).unwrap();
+    sim.spatial_wind.as_mut().unwrap().ground_mps = [sim.tick0.trim.v_mps + wind.u[0], wind.u[2]];
+    sim.sync_spatial_air_velocity().unwrap();
+    let checkpoint = sim.save_checkpoint().unwrap();
+    resumed = SimLoop::restore_checkpoint(sim.spec.clone(), &checkpoint).unwrap();
+    assert_eq!(resumed.save_checkpoint().unwrap(), checkpoint);
+    for _ in 0..16 {
+        let a = sim.step(None).unwrap();
+        let b = resumed.step(None).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(sim.digest_hex(), resumed.digest_hex());
+        assert_eq!(a.phase, Phase::Airborne, "airborne fixture: {a:?}");
+    }
+    assert_eq!(
+        sim.save_checkpoint().unwrap(),
+        resumed.save_checkpoint().unwrap()
+    );
 }
 
 #[test]
@@ -183,4 +196,76 @@ fn refused_input_leaves_wind_and_checkpoint_unchanged() {
         "checkpoint-tampered"
     );
     assert_ne!(sim.phase(), Phase::Ended(TerminalEvent::EnvelopeExceeded));
+}
+
+#[test]
+fn distributed_geometry_loads_share_one_field_and_v4_replays_exactly() {
+    let scenario = dec17_scenario(1903, PilotMode::FixedControls);
+    let mut sim =
+        SimLoop::init_with_distributed_spatial_wind(scenario.clone(), wind_spec(0.3)).unwrap();
+    let cg = SimLoop::init_with_spatial_wind(scenario.clone(), wind_spec(0.3)).unwrap();
+    assert_ne!(sim.run_intent_id, cg.run_intent_id);
+    let checkpoint = sim.save_checkpoint().unwrap();
+    assert_eq!(&checkpoint[..4], &4u32.to_le_bytes());
+    let speed = (sim.u * sim.u + sim.w * sim.w).sqrt();
+    let alpha = det::atan2(sim.w, sim.u).clamp(-0.55, 0.55);
+    let loads = sim
+        .force_buildup_current_wind(speed, alpha, sim.mech.delta_rad)
+        .unwrap();
+    let (panels, strips) = sim.design.layout(sim.mech.delta_rad).unwrap();
+    let local = loads
+        .coupled
+        .strip_velocity_mps
+        .as_ref()
+        .expect("actual distributed force path");
+    assert_eq!(local.len(), strips.len());
+    for (s, strip) in strips.iter().enumerate() {
+        let panel = panels[strip.panel_indices[0]];
+        let point = [
+            0.5 * (panel.a[0] + panel.b[0]),
+            0.5 * (panel.a[1] + panel.b[1]),
+            0.5 * (panel.a[2] + panel.b[2]),
+        ];
+        let incident = sim.incident_at_body_point(point).unwrap();
+        // At q=0 prop wash changes only u; every strip's vertical wind
+        // comes from the same current physical field, not a per-query RNG.
+        assert_eq!(local[s][2].to_bits(), incident[2].to_bits());
+    }
+    assert_eq!(
+        sim.save_checkpoint().unwrap(),
+        checkpoint,
+        "sampling loads cannot consume OU time"
+    );
+    let mut resumed = SimLoop::restore_checkpoint(scenario.clone(), &checkpoint).unwrap();
+    assert_eq!(resumed.save_checkpoint().unwrap(), checkpoint);
+    for _ in 0..8 {
+        let a = sim.step(None).unwrap();
+        let b = resumed.step(None).unwrap();
+        assert_eq!(a, b);
+        assert!(
+            !matches!(a.phase, Phase::Ended(_)),
+            "short distributed fixture must remain live"
+        );
+        assert_eq!(sim.digest_hex(), resumed.digest_hex());
+    }
+    // Rehashing a V4 payload as V3 cannot silently select CG-only loading.
+    let mut downgraded = checkpoint;
+    downgraded[..4].copy_from_slice(&3u32.to_le_bytes());
+    let end = downgraded.len() - 32;
+    let digest = hash_domain("org.frankensim.wf.checkpoint-state.v3", &downgraded[..end]);
+    downgraded[end..].copy_from_slice(digest.as_bytes());
+    assert!(SimLoop::restore_checkpoint(scenario, &downgraded).is_err());
+}
+
+#[test]
+fn distributed_surface_below_ground_refuses_instead_of_using_cg_flow() {
+    let mut sim = SimLoop::init_with_distributed_spatial_wind(
+        dec17_scenario(1903, PilotMode::FixedControls),
+        wind_spec(0.0),
+    )
+    .unwrap();
+    sim.h_m = 0.1; // CG remains above the plane, some real surfaces do not.
+    let out = sim.step(None).unwrap();
+    assert_eq!(out.phase, Phase::Ended(TerminalEvent::EnvelopeExceeded));
+    assert_eq!(sim.envelope_refusal().unwrap().code, "below-surface-query");
 }

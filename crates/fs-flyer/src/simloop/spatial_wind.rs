@@ -34,6 +34,7 @@ pub struct SpatialWindSpec {
 pub(super) struct SpatialWindState {
     pub spec: SpatialWindSpec,
     pub field: EvolvingTurbulenceField,
+    pub distributed: bool,
     /// Ground velocity in flight-line-forward / vertical-up coordinates.
     pub ground_mps: [f64; 2],
 }
@@ -55,6 +56,7 @@ impl SpatialWindState {
         Ok(Self {
             spec,
             field,
+            distributed: false,
             ground_mps: [0.0; 2],
         })
     }
@@ -191,6 +193,36 @@ impl SpatialWindState {
 }
 
 impl SimLoop {
+    /// Opt into local wing/canard strip and separate propeller disk inflow.
+    /// Uses the same evolving field, time convention, and inertial ground
+    /// state as [`Self::init_with_spatial_wind`], but local incident velocity
+    /// and prop wash now feed actual circulation, forces, pitch moment, drag,
+    /// and rotor torque. Pitch-rate motion enters each sample exactly once.
+    /// This remains quasi-steady strip aerodynamics with a shared straight
+    /// wake, axial disk-center BEMT, and reduced longitudinal flight motion.
+    /// It does not add gust memory, disk harmonics, or lateral gust dynamics.
+    /// V4 checkpoints preserve this explicit mode; V3 retains CG sampling.
+    ///
+    /// # Errors
+    /// As [`Self::init_with_spatial_wind`]. Local-flow/ground-plane refusals
+    /// during stepping end the run with the existing envelope receipt.
+    pub fn init_with_distributed_spatial_wind(
+        scenario: super::ScenarioSpec,
+        wind: SpatialWindSpec,
+    ) -> Result<Self, Refusal> {
+        let mut sim = Self::init_with_spatial_wind(scenario, wind)?;
+        sim.spatial_wind
+            .as_mut()
+            .expect("initialized spatial field")
+            .distributed = true;
+        sim.run_intent_id = hash_domain(
+            "org.frankensim.wf.distributed-wind-intent.v1",
+            sim.run_intent_id.as_bytes(),
+        )
+        .to_hex();
+        Ok(sim)
+    }
+
     /// Opt into a spatially coherent, evolving wind sampled at the CG. This
     /// replaces the reduced scalar OU gust; it is never added a second time.
     /// Longitudinal aerodynamic/propeller loads use the sampled relative u,w
@@ -281,6 +313,64 @@ impl SimLoop {
         self.u = c * vx + s * vh;
         self.w = s * vx - c * vh;
         Ok(sample.u[2])
+    }
+
+    /// Translational relative flow at a body point. The aircraft assembly
+    /// owns the additional q×r velocity; observer queries never advance time.
+    fn incident_at_body_point(&self, point: [f64; 3]) -> Result<[f64; 3], Refusal> {
+        let wind = self
+            .spatial_wind
+            .as_ref()
+            .expect("distributed spatial path");
+        let r = [
+            point[0] - self.design.cg_m[0],
+            point[1] - self.design.cg_m[1],
+            point[2] - self.design.cg_m[2],
+        ];
+        let (s, c) = (det::sin(self.theta), det::cos(self.theta));
+        let position = [
+            self.x_m + c * r[0] + s * r[2],
+            r[1],
+            self.h_m + s * r[0] - c * r[2],
+        ];
+        let sample = wind.sample(position)?;
+        let vx = wind.ground_mps[0] - sample.u[0];
+        let vh = wind.ground_mps[1] - sample.u[2];
+        Ok([c * vx + s * vh, -sample.u[1], s * vx - c * vh])
+    }
+
+    pub(super) fn force_buildup_current_wind(
+        &self,
+        v_air: f64,
+        alpha: f64,
+        dc: f64,
+    ) -> Result<crate::aircraft::ForceBuildup, Refusal> {
+        if self
+            .spatial_wind
+            .as_ref()
+            .is_some_and(|wind| wind.distributed)
+        {
+            self.design.force_buildup_with_incident(
+                v_air,
+                alpha,
+                dc.clamp(-0.55, 0.55),
+                self.omega.clamp(10.5, 119.5),
+                self.q.clamp(-2.9, 2.9),
+                self.spec.rho_kg_m3,
+                self.warm_slip,
+                &|point| self.incident_at_body_point(point),
+            )
+        } else {
+            self.design.force_buildup_warm(
+                v_air,
+                alpha,
+                dc.clamp(-0.55, 0.55),
+                self.omega.clamp(10.5, 119.5),
+                self.q.clamp(-2.9, 2.9),
+                self.spec.rho_kg_m3,
+                self.warm_slip,
+            )
+        }
     }
 
     pub(super) fn finish_spatial_tick(&mut self) -> Result<Option<f64>, Refusal> {

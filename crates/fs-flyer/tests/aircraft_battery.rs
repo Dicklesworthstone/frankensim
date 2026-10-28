@@ -13,6 +13,75 @@ fn jlog(case: &str, payload: &str) {
 const RHO: f64 = 1.294;
 
 #[test]
+fn local_canard_gust_changes_pitch_and_uses_local_force_velocity() {
+    let mut design = wright_openloop_v1();
+    design.coupling = fs_flyer::propcoupling::CANDIDATE_B;
+    let velocity = [
+        13.86 * fs_math::det::cos(0.06),
+        0.0,
+        13.86 * fs_math::det::sin(0.06),
+    ];
+    let baseline = design
+        .force_buildup_with_incident(13.86, 0.06, 0.05, 40.0, 0.0, RHO, None, &|_| Ok(velocity))
+        .unwrap();
+    let gust = design
+        .force_buildup_with_incident(13.86, 0.06, 0.05, 40.0, 0.0, RHO, None, &|point| {
+            let mut v = velocity;
+            if point[0] > 1.0 {
+                v[2] += 0.2;
+            }
+            Ok(v)
+        })
+        .unwrap();
+    assert!(
+        gust.moment_y_nm > baseline.moment_y_nm + 5.0,
+        "canard upgust must pitch nose-up"
+    );
+    assert_ne!(gust.force_n[2].to_bits(), baseline.force_n[2].to_bits());
+    let (panels, strips) = design.layout(0.05).unwrap();
+    let local = gust.coupled.strip_velocity_mps.as_ref().unwrap();
+    let mut lift = 0.0;
+    for (s, strip) in strips.iter().enumerate() {
+        for &j in &strip.panel_indices {
+            let panel = panels[j];
+            let cross_z =
+                local[s][0] * (panel.b[1] - panel.a[1]) - local[s][1] * (panel.b[0] - panel.a[0]);
+            lift -= RHO * gust.coupled.gamma[j] * cross_z;
+        }
+    }
+    assert!((gust.lift_n - lift).abs() < 1.0e-9);
+    assert!((gust.lift_n - gust.coupled.wing_lift_n).abs() < 1.0e-9);
+}
+
+#[test]
+fn distributed_pitch_motion_enters_relative_flow_once() {
+    let mut design = wright_openloop_v1();
+    design.coupling = fs_flyer::propcoupling::CANDIDATE_B;
+    let velocity = [
+        13.86 * fs_math::det::cos(0.06),
+        0.0,
+        13.86 * fs_math::det::sin(0.06),
+    ];
+    let q = 0.1;
+    let rotating = design
+        .force_buildup_with_incident(13.86, 0.06, 0.05, 40.0, q, RHO, None, &|_| Ok(velocity))
+        .unwrap();
+    let explicit_motion = design
+        .force_buildup_with_incident(13.86, 0.06, 0.05, 40.0, 0.0, RHO, None, &|point| {
+            Ok([
+                velocity[0] + q * (point[2] - design.cg_m[2]),
+                0.0,
+                velocity[2] - q * (point[0] - design.cg_m[0]),
+            ])
+        })
+        .unwrap();
+    assert_eq!(
+        rotating, explicit_motion,
+        "no second pitch-rate twist may accompany q cross r"
+    );
+}
+
+#[test]
 fn force_buildup_per_axis_oracles() {
     let d = wright_openloop_v1();
     let b = d.force_buildup(13.86, 0.06, 0.05, 40.0, 0.0, RHO).unwrap();
