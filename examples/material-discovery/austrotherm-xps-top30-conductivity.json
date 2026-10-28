@@ -1,0 +1,20 @@
+{
+  "schema": "frankensim.discovery.v1",
+  "target": "properties",
+  "properties": [
+    { "name": "thermal-conductivity", "unit": "W/m/K", "kind": "thermal-conductivity" }
+  ],
+  "models": [],
+  "domain": {
+    "mode": "local-state",
+    "axes": [
+      { "name": "nominal-thickness", "kind": "dimensional", "value": "0.05 m" },
+      { "name": "source-grade-austrotherm-xps-top30-sf-2026", "kind": "dimensional", "value": "1" },
+      { "name": "source-is-declared-value", "kind": "dimensional", "value": "1" },
+      { "name": "source-temperature-known", "kind": "dimensional", "value": "0" },
+      { "name": "source-moisture-condition-known", "kind": "dimensional", "value": "0" },
+      { "name": "source-pressure-known", "kind": "dimensional", "value": "0" }
+    ]
+  },
+  "selection": "single-claim-only"
+}

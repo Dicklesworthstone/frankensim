@@ -1,5 +1,23 @@
 # Material data inventory
 
+## Current additions: 2026-10-28
+
+The source catalog now contains **336 manifest-bearing source bundles**, up from
+302 before this expansion. The **34 new bundles contain 272 property claims**:
+61 across elements/minerals/glass/alloys, 131 across eight wood species, and 80
+across engineering plastics, foams, insulation and cured resins. These are exact
+source-bundle/claim counts, not deduplicated counts of complete materials.
+
+The [seed catalog's October expansion section](../data/matdb/seed-v1/README.md#october-2026-material-expansion)
+lists every new bundle, its usable property set, discovery requests and remaining
+condition limits. The focused regression is
+`xtask/tests/material_catalog_expansion.rs`; it checks source-to-pack/query
+behavior, including the EPS two-variable conductivity surface, discrete plastic
+compression data, wood moisture/direction and source-specific foam/resin states.
+Broader physical-consumer qualification remains separate.
+
+## Historical September inventory
+
 Snapshot: **2026-09-10 UTC**, refreshed after the warm NASA 316 thermal table and preceding material additions, current shared working tree on main, including uncommitted material additions. This is an inventory of populated source records, not a claim that every bundle compiles, every property is measured, or every material can run a complete simulation.
 
 Focused consumer evidence now includes actual source compilation, storage, material resolution and steady conduction for NIST 304/316/6061 and IAPWS liquid water. The water check covers 20–25 °C and 60–65 °C at exactly 0.1 MPa, retains liquid-phase receipts and refuses unsupported states. These manufactured temperature/flux and energy-balance checks exercise the declared interpolants; they do not establish experimental accuracy, flowing-water behavior, transient heat or phase changes. The executable cases are in [matdb_pack_cli.rs](../xtask/tests/matdb_pack_cli.rs).

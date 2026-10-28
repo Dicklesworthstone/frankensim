@@ -4,6 +4,97 @@ This directory retains the human-reviewable source inputs compiled by
 `xtask matdb-pack`. Generated binary packs are deliberately not committed:
 the compiler must reproduce them from the pinned manifest and source record.
 
+## October 2026 material expansion
+
+The October 28 expansion adds **34 source bundles and 272 property claims**:
+14 elemental/mineral/glass/alloy references, eight wood species, four engineering
+plastics, six insulation/structural-foam products, and two cured epoxy systems.
+These are source-condition bundles, not 34 universally complete material laws.
+Each manifest identifies its original source and redistribution terms; each
+property retains units, observations, uncertainty and required query conditions.
+
+| Family | New source bundles | Useful coverage |
+| --- | --- | --- |
+| Elements | `diamond-crystran-thermal-reference`, `germanium-crystran-thermal-reference`, `molybdenum-attl-reference`, `tantalum-efinea-reference`, `magnesium-espi-reference` | Density, heat capacity and thermal conductivity; selected electrical resistivity and modulus values |
+| Minerals and glass | `fluorite-caf2-crystran-reference`, `halite-nacl-crystran-reference`, `periclase-mgo-crystran-reference`, `fused-silica-crystran-reference` | Complete thermal triplets; amorphous fused silica also supplies Young modulus and Poisson ratio |
+| Alloys | `aluminum-5005-austral-wright-reference`, `aluminum-5052-austral-wright-reference`, `bronze-c93200-cda-reference`, `bronze-c95400-cda-reference`, `cupronickel-c70600-cda-reference` | Thermal triplets and stiffness, with shear modulus, resistivity and explicitly derived Poisson ratios where supported |
+| Woods | `pine-{loblolly,longleaf,slash,ponderosa}-fpl-gtr282`, `oak-{northern-red,white}-fpl-gtr282`, `cedar-northern-white-fpl-gtr282`, `fir-subalpine-fpl-gtr282` | Density, bending/longitudinal stiffness and strength at 12% moisture; six conifers also retain directional stiffness and Poisson ratios |
+| Engineering plastics | `ensinger-tecaform-ah-natural`, `ensinger-tecamid-6-natural`, `ensinger-tecapet-white`, `ensinger-tecaflon-pvdf-natural` | POM-C, PA6, PET and PVDF density/Cp/conductivity, distinct test moduli and discrete compression observations |
+| Insulation | `eps-nist-srm1453-2013`, `rockwool-prorox-sl960-en-2020`, `austrotherm-xps-top30-sf-2026`, `austrotherm-xps-top70-sf-2026` | EPS conductivity as a density/mean-temperature surface; stone-wool conductivity over 50–660 °C; product/thickness-specific XPS declared conductivity and mechanical data |
+| Structural foam | `evonik-rohacell-51-igf-2022`, `evonik-rohacell-110-igf-2022` | Separate closed-cell PMI grades with density, compression/tensile/shear response |
+| Resins | `west-system-105-205-neat-cured`, `west-system-gflex-650-neat-cured` | Separate neat epoxies after 14-day room-temperature cure: tensile/flexural/compressive properties and specific gravity |
+
+### Compile and discover the additions
+
+Run from the repository root; choose a previously absent output filename:
+
+```sh
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/ensinger-tecaform-ah-natural/manifest.tsv \
+  --out /tmp/tecaform-pom-c.fsmatpk
+
+cargo run -p fs-cli -- --json discover \
+  examples/material-discovery/tecaform-pom-c-thermal.json \
+  /tmp/tecaform-pom-c.fsmatpk
+```
+
+Discovery consumes the generated pack paths explicitly. The following requests
+select useful property sets and preserve the required source context:
+
+| Discovery request under `examples/material-discovery/` | Applicable new packs |
+| --- | --- |
+| `engineering-reference-thermal-293k.json` | Five alloys, molybdenum, tantalum, germanium and fluorite at the declared 293.15 K reference |
+| `minerals-reference-thermal-273k.json` | Diamond, halite and periclase frozen references over 273–274 K |
+| `glass-magnesium-reference-thermal-298k.json` | Fused silica and magnesium frozen references over 298.15–299.15 K |
+| `clear-wood-12pct.json` | All eight new wood species; longitudinal mechanics, not an isotropic elastic request |
+| `tecaform-pom-c-thermal.json`, `tecamid-pa6-thermal.json`, `tecapet-pet-thermal.json`, `tecaflon-pvdf-thermal.json` | Exact named plastic grades and their stated unknown-condition flags |
+| `eps-srm1453-conductivity.json` | SRM1453 lot, 281–313 K mean temperature, 37–46 kg/m3, measured 20 K temperature difference |
+| `rockwool-sl960-conductivity.json` | European 2020 SL960 conductivity curve with its actual source range |
+| `rohacell-51-mechanical.json` | Full-sheet 51 IG-F density and compression modulus; 110 IG-F remains a distinct grade |
+| `west-105-205-mechanical.json` | Neat 105/205 epoxy at 14-day cure; G/flex remains a distinct formulation |
+| `austrotherm-xps-top30-conductivity.json` | TOP30 SF at a supported declared board thickness |
+
+### Conditions that remain explicit
+
+The 14 elemental/mineral/glass/alloy packs are **frozen engineering references**.
+Their one-kelvin intervals are author-declared calculation ranges, not measured
+temperature curves. Queries require `engineering-reference-model=1` and
+`source-temperatures-matched=0`; per-property observations retain actual source
+temperatures. Derived Poisson ratios are labeled as derivations. Cubic-crystal
+thermal scalars do not establish isotropic elasticity.
+
+USDA values describe clear-specimen species averages at 12% moisture, not
+graded-lumber allowables. The six conifers retain the input names used by
+`fs_material::state_point::resolve_orthotropic_elastic_state_point_from_reference_ratios`.
+The two oaks deliberately lack unsupported directional ratios. Density derives
+from the table's dry-mass specific gravity and stated moisture convention.
+
+Plastic compression points remain `TabulatedOnly`: for example, the POM data
+support the measured 1%, 2% and 5% points, not an invented 3% stress or unloading
+law. Test moduli remain distinct from isotropic Young modulus. PA6 retains its
+immediately-after-machining condition. Unknown source temperatures stay unknown.
+
+EPS uses the published affine surface, not a density-independent constant.
+Its 1.5% uncertainty retains NIST's stated posterior-predictive interpretation.
+ROCKWOOL and XPS data do not supply missing heat capacity or porous-acoustic laws.
+XPS declared conductivity is not silently relabeled as a national design value;
+unsupported board thicknesses and thermally bonded variants remain separate.
+ROHACELL manufacturing spreads are not statistical confidence intervals.
+Epoxy specific gravity remains dimensionless because no reference-water
+temperature is supplied; no bulk density or joint adhesion law is inferred.
+
+Focused regression command:
+
+```sh
+cargo test -p xtask --test material_catalog_expansion
+```
+
+The regression exercises the real compiler, canonical pack decoding, source
+literals and SI conversions, typed queries and receipt replay, interpolation,
+and refusals for unsupported material conditions. It verifies the database and
+evaluator path; it does not qualify every source as a measured specimen or run
+a full thermo-mechanical simulation for every new material.
+
 ## Compiler profiles
 
 Bulk scalar/curve sources use `material-tsv-v1`. Ordered interface-system

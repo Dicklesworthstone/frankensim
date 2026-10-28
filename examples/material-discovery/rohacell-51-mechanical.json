@@ -1,0 +1,20 @@
+{
+  "schema": "frankensim.discovery.v1",
+  "target": "properties",
+  "properties": [
+    { "name": "density", "unit": "kg/m3", "kind": "dimensional" },
+    { "name": "compression-modulus", "unit": "Pa", "kind": "dimensional" }
+  ],
+  "models": [],
+  "domain": {
+    "mode": "local-state",
+    "axes": [
+      { "name": "source-grade-rohacell-51-igf-2022", "kind": "dimensional", "value": "1" },
+      { "name": "source-temperature-known", "kind": "dimensional", "value": "0" },
+      { "name": "source-moisture-condition-known", "kind": "dimensional", "value": "0" },
+      { "name": "source-test-rate-known", "kind": "dimensional", "value": "0" },
+      { "name": "full-sheet-at-least-10mm", "kind": "dimensional", "value": "1" }
+    ]
+  },
+  "selection": "single-claim-only"
+}

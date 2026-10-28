@@ -1,0 +1,20 @@
+{
+  "schema": "frankensim.discovery.v1",
+  "target": "properties",
+  "properties": [
+    { "name": "density", "unit": "kg/m3", "kind": "dimensional" },
+    { "name": "specific-heat-capacity", "unit": "J/kg/K", "kind": "dimensional" },
+    { "name": "thermal-conductivity", "unit": "W/m/K", "kind": "thermal-conductivity" }
+  ],
+  "models": [],
+  "domain": {
+    "mode": "local-state",
+    "axes": [
+      { "name": "source-grade-tecaflon-pvdf-natural", "kind": "dimensional", "value": "1" },
+      { "name": "source-temperature-known", "kind": "dimensional", "value": "0" },
+      { "name": "source-moisture-condition-known", "kind": "dimensional", "value": "0" },
+      { "name": "source-pressure-known", "kind": "dimensional", "value": "0" }
+    ]
+  },
+  "selection": "single-claim-only"
+}

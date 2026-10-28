@@ -1,0 +1,69 @@
+frankensim.matdb-source.v1
+observation	xps	Austrotherm XPS TOP 30 SF smooth stepped-edge insulation board	2026 technical table: EN 1602 density; EN 12667/12939 conductivity; EN 826 compression; EN ISO 4590 cells	Density is approximate; CS(10\Y)300 strength and closed-cell fraction are lower limits, not measured values. Compression modulus is not isotropic Young modulus. Conductivity is declared lambda_D and thickness-specific. Separate claims preserve printed thickness groups and gaps without interpolation. The shared SF/TB SF 180-400 mm conductivity row is excluded: this exact SF product technical table stops at 160 mm. PDF values take precedence over inconsistent webpage summaries. Temperature, moisture, pressure and test rate are unspecified; the 70 C application limit is not a test condition. No uncertainty distribution, heat capacity, creep, aging or density-scaling law is inferred.
+scalar	density	xps	density	30	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade_austrotherm_xps_top30_sf_2026	1	1	1
+validity	density	source_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+validity	density	source_pressure_known	0	0	1
+scalar	k-30mm	xps	thermal_conductivity	0.033	W/m/K	constant
+uncertainty	k-30mm	unstated	-	-	-	-
+validity	k-30mm	source_grade_austrotherm_xps_top30_sf_2026	1	1	1
+validity	k-30mm	source_temperature_known	0	0	1
+validity	k-30mm	source_moisture_condition_known	0	0	1
+validity	k-30mm	source_pressure_known	0	0	1
+validity	k-30mm	source_is_declared_value	1	1	1
+validity	k-30mm	nominal_thickness	0.03	0.03	m
+scalar	k-40-50mm	xps	thermal_conductivity	0.032	W/m/K	constant
+uncertainty	k-40-50mm	unstated	-	-	-	-
+validity	k-40-50mm	source_grade_austrotherm_xps_top30_sf_2026	1	1	1
+validity	k-40-50mm	source_temperature_known	0	0	1
+validity	k-40-50mm	source_moisture_condition_known	0	0	1
+validity	k-40-50mm	source_pressure_known	0	0	1
+validity	k-40-50mm	source_is_declared_value	1	1	1
+validity	k-40-50mm	nominal_thickness	0.04	0.05	m
+scalar	k-60mm	xps	thermal_conductivity	0.033	W/m/K	constant
+uncertainty	k-60mm	unstated	-	-	-	-
+validity	k-60mm	source_grade_austrotherm_xps_top30_sf_2026	1	1	1
+validity	k-60mm	source_temperature_known	0	0	1
+validity	k-60mm	source_moisture_condition_known	0	0	1
+validity	k-60mm	source_pressure_known	0	0	1
+validity	k-60mm	source_is_declared_value	1	1	1
+validity	k-60mm	nominal_thickness	0.06	0.06	m
+scalar	k-70-120mm	xps	thermal_conductivity	0.035	W/m/K	constant
+uncertainty	k-70-120mm	unstated	-	-	-	-
+validity	k-70-120mm	source_grade_austrotherm_xps_top30_sf_2026	1	1	1
+validity	k-70-120mm	source_temperature_known	0	0	1
+validity	k-70-120mm	source_moisture_condition_known	0	0	1
+validity	k-70-120mm	source_pressure_known	0	0	1
+validity	k-70-120mm	source_is_declared_value	1	1	1
+validity	k-70-120mm	nominal_thickness	0.07	0.12	m
+scalar	k-140-160mm	xps	thermal_conductivity	0.036	W/m/K	constant
+uncertainty	k-140-160mm	unstated	-	-	-	-
+validity	k-140-160mm	source_grade_austrotherm_xps_top30_sf_2026	1	1	1
+validity	k-140-160mm	source_temperature_known	0	0	1
+validity	k-140-160mm	source_moisture_condition_known	0	0	1
+validity	k-140-160mm	source_pressure_known	0	0	1
+validity	k-140-160mm	source_is_declared_value	1	1	1
+validity	k-140-160mm	nominal_thickness	0.14	0.16	m
+scalar	compression-modulus	xps	compression_modulus	12000	kPa	constant
+uncertainty	compression-modulus	unstated	-	-	-	-
+validity	compression-modulus	source_grade_austrotherm_xps_top30_sf_2026	1	1	1
+validity	compression-modulus	source_temperature_known	0	0	1
+validity	compression-modulus	source_moisture_condition_known	0	0	1
+validity	compression-modulus	source_pressure_known	0	0	1
+validity	compression-modulus	source_test_rate_known	0	0	1
+scalar	compression-strength-minimum	xps	compression_strength_minimum	300	kPa	constant
+uncertainty	compression-strength-minimum	unstated	-	-	-	-
+validity	compression-strength-minimum	source_grade_austrotherm_xps_top30_sf_2026	1	1	1
+validity	compression-strength-minimum	source_temperature_known	0	0	1
+validity	compression-strength-minimum	source_moisture_condition_known	0	0	1
+validity	compression-strength-minimum	source_pressure_known	0	0	1
+validity	compression-strength-minimum	source_test_rate_known	0	0	1
+validity	compression-strength-minimum	source_cs10y_class	1	1	1
+scalar	closed-cell-fraction-minimum	xps	closed_cell_fraction_minimum	0.95	1	constant
+uncertainty	closed-cell-fraction-minimum	unstated	-	-	-	-
+validity	closed-cell-fraction-minimum	source_grade_austrotherm_xps_top30_sf_2026	1	1	1
+validity	closed-cell-fraction-minimum	source_temperature_known	0	0	1
+validity	closed-cell-fraction-minimum	source_moisture_condition_known	0	0	1
+validity	closed-cell-fraction-minimum	source_pressure_known	0	0	1

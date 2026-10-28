@@ -287,14 +287,7 @@ fn g0_g3_elements_minerals_and_alloys_keep_reference_model_guards() {
             240.0,
             140.0,
         ),
-        (
-            "tantalum-efinea-reference",
-            4,
-            293.15,
-            16650.0,
-            140.0,
-            57.5,
-        ),
+        ("tantalum-efinea-reference", 4, 293.15, 16650.0, 140.0, 57.5),
     ] {
         let pack = compile(slug, count);
         let p = temperature(
@@ -539,4 +532,119 @@ fn g0_g3_insulation_curves_and_density_temperature_surface_keep_typed_axes() {
         repeated.to_bytes(),
         "source surface compilation is deterministic"
     );
+}
+
+#[test]
+fn g0_g3_xps_keeps_declared_conductivity_thickness_gaps_and_grade_limits() {
+    let cases = [
+        (
+            "30",
+            9,
+            30.0,
+            12e6,
+            300e3,
+            &[
+                (0.03, 0.033),
+                (0.04, 0.032),
+                (0.05, 0.032),
+                (0.06, 0.033),
+                (0.07, 0.035),
+                (0.12, 0.035),
+                (0.14, 0.036),
+                (0.16, 0.036),
+            ] as &[(f64, f64)],
+            [0.035, 0.13, 0.20],
+        ),
+        (
+            "70",
+            7,
+            39.0,
+            25e6,
+            700e3,
+            &[
+                (0.05, 0.033),
+                (0.06, 0.033),
+                (0.08, 0.035),
+                (0.14, 0.035),
+                (0.16, 0.036),
+            ] as &[(f64, f64)],
+            [0.07, 0.15, 0.20],
+        ),
+    ];
+    for (grade, count, rho, modulus, minimum_strength, thicknesses, gaps) in cases {
+        let slug = format!("austrotherm-xps-top{grade}-sf-2026");
+        let pack = compile(&slug, count);
+        let grade_axis = format!("source-grade-{slug}");
+        let p = flags(&[
+            (&grade_axis, 1.0),
+            ("source-temperature-known", 0.0),
+            ("source-moisture-condition-known", 0.0),
+            ("source-pressure-known", 0.0),
+        ]);
+        sample(&pack, "density", RHO, &p, rho);
+        sample(&pack, "closed-cell-fraction-minimum", Dims::NONE, &p, 0.95);
+        let mechanical = p
+            .clone()
+            .with_quantity(
+                "source-test-rate-known",
+                QuantitySpec::dimensional(Dims::NONE),
+                0.0,
+            )
+            .unwrap();
+        sample(&pack, "compression-modulus", PA, &mechanical, modulus);
+        let strength = mechanical
+            .with_quantity(
+                "source-cs10y-class",
+                QuantitySpec::dimensional(Dims::NONE),
+                1.0,
+            )
+            .unwrap();
+        sample(
+            &pack,
+            "compression-strength-minimum",
+            PA,
+            &strength,
+            minimum_strength,
+        );
+
+        let declared = p
+            .clone()
+            .with_quantity(
+                "source-is-declared-value",
+                QuantitySpec::dimensional(Dims::NONE),
+                1.0,
+            )
+            .unwrap();
+        let at_thickness = |metres| {
+            declared
+                .clone()
+                .with_quantity(
+                    "nominal-thickness",
+                    QuantitySpec::dimensional(Dims([1, 0, 0, 0, 0, 0])),
+                    metres,
+                )
+                .unwrap()
+        };
+        for &(metres, expected) in thicknesses {
+            sample(
+                &pack,
+                "thermal-conductivity",
+                K,
+                &at_thickness(metres),
+                expected,
+            );
+        }
+        for unsupported in gaps {
+            refuses(&pack, "thermal-conductivity", K, &at_thickness(unsupported));
+        }
+        refuses(
+            &pack,
+            "thermal-conductivity",
+            K,
+            &at_thickness(0.05)
+                .with("source-is-declared-value", 0.0)
+                .unwrap(),
+        );
+        refuses(&pack, "density", RHO, &p.with(&grade_axis, 0.0).unwrap());
+    }
 }

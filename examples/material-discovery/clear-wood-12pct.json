@@ -1,0 +1,20 @@
+{
+  "schema": "frankensim.discovery.v1",
+  "target": "properties",
+  "properties": [
+    { "name": "density", "unit": "kg/m3", "kind": "dimensional" },
+    { "name": "young_modulus_longitudinal", "unit": "Pa", "kind": "dimensional" },
+    { "name": "bending_mor", "unit": "Pa", "kind": "dimensional" },
+    { "name": "compression_parallel_maximum", "unit": "Pa", "kind": "dimensional" }
+  ],
+  "models": [],
+  "domain": {
+    "mode": "local-state",
+    "axes": [
+      { "name": "moisture-content", "kind": "dimensional", "value": "0.12" },
+      { "name": "clear-specimen", "kind": "dimensional", "value": "1" },
+      { "name": "source-test-temperature-known", "kind": "dimensional", "value": "0" }
+    ]
+  },
+  "selection": "single-claim-only"
+}

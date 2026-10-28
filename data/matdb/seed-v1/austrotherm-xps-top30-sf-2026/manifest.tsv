@@ -1,0 +1,19 @@
+frankensim.matdb-manifest.v3
+pack_id	austrotherm-xps-top30-sf-2026
+redistribution	permitted	Selected attributed numerical facts and original notes only; neither the producer document nor its table layout is redistributed
+citation	Austrotherm GmbH, Austrotherm XPS Technische Daten 2026, TOP 30 SF column, p. 1; https://www.austrotherm.at/fileadmin/user_upload/Technische_Daten_Austrotherm_XPS_2026.pdf ; SF identity, declared conductivity and 30-160 mm technical-table range: https://www.austrotherm.at/produkte/austrotherm-xps/austrotherm-xps-top-30-sf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	austrotherm-xps-top30-sf-2026	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	compression_modulus	compression-modulus	dimensional
+property	compression_strength_minimum	compression-strength-minimum	dimensional
+property	closed_cell_fraction_minimum	closed-cell-fraction-minimum	dimensional
+axis	source_grade_austrotherm_xps_top30_sf_2026	source-grade-austrotherm-xps-top30-sf-2026	dimensional
+axis	source_temperature_known	source-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	source_test_rate_known	source-test-rate-known	dimensional
+axis	source_is_declared_value	source-is-declared-value	dimensional
+axis	source_cs10y_class	source-cs10y-class	dimensional
+axis	nominal_thickness	nominal-thickness	dimensional

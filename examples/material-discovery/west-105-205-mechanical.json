@@ -1,0 +1,22 @@
+{
+  "schema": "frankensim.discovery.v1",
+  "target": "properties",
+  "properties": [
+    { "name": "tensile-modulus", "unit": "Pa", "kind": "dimensional" },
+    { "name": "tensile-strength", "unit": "Pa", "kind": "dimensional" },
+    { "name": "flexural-modulus", "unit": "Pa", "kind": "dimensional" }
+  ],
+  "models": [],
+  "domain": {
+    "mode": "local-state",
+    "axes": [
+      { "name": "source-grade-west-105-205", "kind": "dimensional", "value": "1" },
+      { "name": "room-temperature-cure", "kind": "dimensional", "value": "1" },
+      { "name": "neat-unreinforced-resin", "kind": "dimensional", "value": "1" },
+      { "name": "cure-age", "kind": "dimensional", "value": "1209600 s" },
+      { "name": "source-temperature-known", "kind": "dimensional", "value": "0" },
+      { "name": "source-test-rate-known", "kind": "dimensional", "value": "0" }
+    ]
+  },
+  "selection": "single-claim-only"
+}
