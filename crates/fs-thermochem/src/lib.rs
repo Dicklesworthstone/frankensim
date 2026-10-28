@@ -23,6 +23,7 @@ pub mod equilibrium;
 pub mod kinetics;
 pub mod mixture;
 pub mod transport;
+pub mod water;
 
 use core::fmt;
 use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, MatDbError};

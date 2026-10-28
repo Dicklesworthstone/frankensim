@@ -957,3 +957,31 @@ and mechanism calibration remain outside this closure. Troe alpha is admitted
 in [0,1] with positive finite characteristic temperatures. References:
 <https://cantera.org/3.2/reference/kinetics/reaction-rates.html> and
 <https://cantera.org/3.2/reference/kinetics/rate-constants.html>.
+
+## Ordinary-water saturation source (IAPWS SR1-86(1992))
+
+`water::SaturatedWaterState` evaluates equations (1)–(9) of the IAPWS
+Revised Supplementary Release on Saturation Properties of Ordinary Water
+Substance (September 1992, ITS-90):
+<https://iapws.org/public/documents/6dGkr/Supp-sat.pdf>.
+Its inclusive source range is 273.16–647.096 K. The immutable state carries
+saturation pressure, analytic dp/dT, both phase densities, and a common-source
+enthalpy, entropy, and internal-energy datum. It is a saturation source, not
+an off-saturation equation of state or a phase-change time integrator.
+
+The implementation shares deterministic fractional powers and evaluates the
+phase volume gap before subtractive cancellation. Latent quantities obey
+Delta h = T(dp/dT)Delta v, Delta s = (dp/dT)Delta v, and
+Delta u = (T dp/dT - p)Delta v. The exact critical state has zero phase gaps;
+consumers requiring distinct phase inventories must reject that degeneracy.
+Published coefficient precision, including the small triple-point reference
+residuals, is retained without an extra datum shift.
+
+Pressure inversion uses the original correlation with safeguarded Newton and
+bisection, a caller-declared absolute pressure residual budget, bounded work,
+and cancellation. The returned source pressure is never replaced by the target.
+Admission uses evaluated endpoint pressures rather than rounded table entries.
+Numerical solve tolerances are not claims about the release's material uncertainty.
+Tests cover every published reference-table row at its stated precision,
+independent pressure differentiation, Clapeyron/Gibbs/pressure-work identities,
+critical coalescence, inversion, domain limits, work bounds, and cancellation.
