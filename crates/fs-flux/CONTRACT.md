@@ -606,6 +606,41 @@ semantics. This supplies a fixed-mesh state derivative; mesh/shape derivatives,
 material-temperature evolution, mixed open-boundary Jacobians and time-history
 checkpointing require their own operators and evidence.
 
+## Gravity-aware capillary rise and drainage
+
+`step_newtonian_inclined_circular_meniscus` extends the horizontal
+Newtonian/no-slip model with constant liquid density and signed gravity
+projected along the tube. Its input embeds `CircularMeniscusInput` and names
+`density_kg_m3` and `opposing_gravity_m_s2`; positive projection means uphill.
+The inlet is at the reservoir elevation and the vented gas pressure is
+prescribed uniformly. Zero projected gravity delegates exactly to the
+horizontal path.
+
+The motion satisfies `x dx/dt = K (A - b x)`, with
+`K = R²/(8 mu)`, `A = delta_p + 2 sigma cos(theta)/R`, and
+`b = rho g_parallel`. The separated analytic travel-time map is inverted
+within a monotone bracket. Stable log1p endpoint weights retain the small
+gravity limit; a bounded Newton/bisection solve approaches the finite Jurin
+height without crossing it. The gravity-only branch is linear. Inlet/outlet
+events retain actual travel time; an equilibrium is approached asymptotically
+and does not authorize throughflow.
+
+The result embeds the existing meniscus result and adds gravitational energy
+change and accepted hydrostatic pressure. The viscous account now closes
+`W_pressure - delta E_wall - delta E_gravity = D >= 0`.
+The affine driving force's displacement average evaluates dissipation without
+subtracting nearly equal large work terms. The computation allocates nothing
+and adds no dependency. It retains the horizontal model's no-claim boundaries
+for inertia/startup, entrance loss, gas drag, dynamic wetting and changing end
+topology. It has no internal cancellation point or cross-ISA bit-equality claim.
+
+The focused G0/G1/G3 tests compare with the dimensionless Washburn/Jurin
+analytic solution, rise and drainage around equilibrium, inclination scaling,
+nonwetting downhill entry thresholds, the gravity-only and horizontal limits,
+time composition, end events, signed energy closure and input refusal.
+Reference: Fries & Dreyer (2008), doi:10.1016/j.jcis.2008.01.009.
+
+
 ## Damped Newton BDF1 for stiff rheology
 
 `FluxSystem::bdf1_rheology_newton_step` advances the same fully implicit
