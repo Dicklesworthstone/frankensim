@@ -20,6 +20,7 @@
 //! than presenting the raw field as an exactly equilibrated H(div) field.
 
 /// Saturation from the original reversible H(B) source and its dual energy.
+pub mod force;
 pub mod nonlinear;
 
 use crate::planar::permanent::MagneticEnergyReference;

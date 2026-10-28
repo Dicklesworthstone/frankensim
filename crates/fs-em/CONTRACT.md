@@ -978,3 +978,25 @@ single-valued scalar-potential model; currents, hysteresis, eddy currents,
 moving work and thermal evolution require their respective owners. P1 flux
 jumps and finite exterior truncation remain discretization errors; these tests
 do not establish an experimental material calibration or a performance claim.
+
+### Three-dimensional Maxwell force and torque
+
+`SpatialMagneticField` and `SpatialNonlinearField` expose `maxwell_wrench`
+through one private 3D surface integrator. Original tetrahedron selection
+defines a closed outward surface. Exact triangle area/centroid quadrature
+integrates outer-cell Maxwell stress and torque. Every contour neighbor must
+share one complete source-identical induced-linear exterior snapshot;
+nonlinear/recoil interfaces and mesh boundaries refuse. Saturated and remanent
+targets may be enclosed inside a linear collar. Canonical Se3 placement and an
+explicit receiving-frame torque origin return the native Wrench with a
+canonical compensated reduction, work budgets and cancellation.
+
+The five focused force tests cover independent nonzero cuboid refinement on
+two surfaces, saturated-core symmetry and interface refusal, frame/origin
+behavior, and source/region admission. The cuboid result has first-order raw
+field/surface convergence. Test-only extrapolation checks its independent
+continuum limit; the public API returns the raw discrete stress result, with
+no extrapolation or inferred error bound. Field and surface refinement are
+required for useful force accuracy. This is fixed-geometry static loading;
+moving-geometry work exchange, material striction, equilibrated stress and a
+virtual-work cross-check require separate physical work.
