@@ -114,10 +114,10 @@ impl FlexiblePreconditioner for Identity {
 
 const H: f64 = 0.15;
 
-fn method(rho: f64) -> OperatorGeneralizedAlpha {
+fn method(rho: f64, h: f64) -> OperatorGeneralizedAlpha {
     OperatorGeneralizedAlpha::new(
         2,
-        H,
+        h,
         rho,
         ImplicitSolveConfig {
             newton: NewtonKrylovConfig {
@@ -220,7 +220,7 @@ fn variables(input: [f64; 10]) -> [Dual; 10] {
 }
 
 #[allow(clippy::many_single_char_names)] // Two-component algebraic reference.
-fn oracle_step(input: &[Dual; 10], rho: f64) -> [Dual; 6] {
+fn oracle_step(input: &[Dual; 10], rho: f64, h: f64) -> [Dual; 6] {
     let [x, y, vx, vy, ax, ay, fx, fy, k, d] = *input;
     let am = (2.0 * rho - 1.0) / (rho + 1.0);
     let af = rho / (rho + 1.0);
@@ -241,10 +241,10 @@ fn oracle_step(input: &[Dual; 10], rho: f64) -> [Dual; 6] {
     let mut acceleration = [ax, ay];
     let endpoint = |a: [Dual; 2]| {
         [
-            x + c(H) * vx + c(H * H) * (c(0.5 - beta) * ax + c(beta) * a[0]),
-            y + c(H) * vy + c(H * H) * (c(0.5 - beta) * ay + c(beta) * a[1]),
-            vx + c(H) * (c(1.0 - gamma) * ax + c(gamma) * a[0]),
-            vy + c(H) * (c(1.0 - gamma) * ay + c(gamma) * a[1]),
+            x + c(h) * vx + c(h * h) * (c(0.5 - beta) * ax + c(beta) * a[0]),
+            y + c(h) * vy + c(h * h) * (c(0.5 - beta) * ay + c(beta) * a[1]),
+            vx + c(h) * (c(1.0 - gamma) * ax + c(gamma) * a[0]),
+            vy + c(h) * (c(1.0 - gamma) * ay + c(gamma) * a[1]),
         ]
     };
     for iteration in 0..10 {
@@ -286,8 +286,8 @@ fn oracle_step(input: &[Dual; 10], rho: f64) -> [Dual; 6] {
         ];
         let jacobian: [Dual; 4] = std::array::from_fn(|i| {
             c(1.0 - am) * mass[i]
-                + c((1.0 - af) * gamma * H) * damping[i]
-                + c((1.0 - af) * beta * H * H) * tangent[i]
+                + c((1.0 - af) * gamma * h) * damping[i]
+                + c((1.0 - af) * beta * h * h) * tangent[i]
         });
         let det = jacobian[0] * jacobian[3] - jacobian[1] * jacobian[2];
         acceleration[0] =
@@ -337,7 +337,7 @@ fn structural_step_matches_duals_and_five_point_differences_for_all_inputs() {
             0.2 + random(),
         ];
         let terminal: [f64; 6] = std::array::from_fn(|_| random() - 0.5);
-        let method = method(rho);
+        let method = method(rho, H);
         let initial = SecondOrderState::new(0.2, &input[..2], &input[2..4], &input[4..6]);
         let gradient = method
             .step_vjp(
@@ -354,7 +354,7 @@ fn structural_step_matches_duals_and_five_point_differences_for_all_inputs() {
         assert!(gradient.primal.newton.converged);
         assert!(gradient.adjoint.converged);
         assert!(gradient.adjoint.euclidean_rel_residual().unwrap() < 1e-13);
-        let endpoint = oracle_step(&variables(input), rho);
+        let endpoint = oracle_step(&variables(input), rho, H);
         let dual = (0..6).fold(c(0.0), |sum, i| sum + c(terminal[i]) * endpoint[i]);
         for (actual, expected) in gradient
             .q
@@ -376,7 +376,7 @@ fn structural_step_matches_duals_and_five_point_differences_for_all_inputs() {
         for i in 0..10 {
             close(actual[i], dual.derivative[i], 3e-10);
             let difference = finite_difference(input, i, |x| {
-                let end = oracle_step(&x.map(c), rho);
+                let end = oracle_step(&x.map(c), rho, H);
                 (0..6).map(|j| terminal[j] * end[j].value).sum()
             });
             close(actual[i], difference, 2e-9);
@@ -387,7 +387,7 @@ fn structural_step_matches_duals_and_five_point_differences_for_all_inputs() {
 fn trajectory(input: &[Dual; 10], rho: f64, steps: usize) -> [Dual; 6] {
     let mut state = *input;
     for _ in 0..steps {
-        let next = oracle_step(&state, rho);
+        let next = oracle_step(&state, rho, H);
         state[..6].copy_from_slice(&next);
     }
     [state[0], state[1], state[2], state[3], state[4], state[5]]
@@ -411,7 +411,7 @@ fn structural_trajectory_chains_q_v_a_and_descends_stiffness_and_damping_loss() 
         })
     };
     let dual = loss(variables(input));
-    let method = method(rho);
+    let method = method(rho, H);
     let model = Model([input[8], input[9]]);
     let mut state = SecondOrderState::new(0.2, &input[..2], &input[2..4], &input[4..6]);
     let mut checkpoints = Vec::new();
@@ -473,4 +473,56 @@ fn structural_trajectory_chains_q_v_a_and_descends_stiffness_and_damping_loss() 
         candidate[8 + i] -= parameter_gradient[i];
     }
     assert!(loss(candidate.map(c)).value < 0.999 * dual.value);
+}
+
+#[test]
+fn acceleration_observation_gradients_survive_vibration_step_refinement() {
+    // Acceleration/pressure observations retain O(1) stiffness and damping
+    // derivatives as h -> 0. Recovering them by subtracting two O(1)
+    // acceleration cotangents and dividing by h^2 destroys those derivatives.
+    // The existing independent acceleration solve provides forward duals for
+    // every input, including noncommuting nonsymmetric M/C and nonlinear K.
+    let input = [0.9, -0.4, 0.2, -0.1, -0.1, 0.3, 0.3, 0.8, 0.8, 0.6];
+    for h in [1e-4, 1e-6, 1e-8, 1e-10] {
+        for rho in [0.0, 0.35, 1.0] {
+            for terminal in [
+                [0.0, 0.0, 0.0, 0.0, 1.0, -0.7],
+                [0.2, -0.4, 0.8, -0.3, -0.6, 0.5],
+            ] {
+                let method = method(rho, h);
+                let initial = SecondOrderState::new(0.0, &input[..2], &input[2..4], &input[4..6]);
+                let gradient = method
+                    .step_vjp(
+                        &initial,
+                        &Model([input[8], input[9]]),
+                        &input[6..8],
+                        (&terminal[..2], &terminal[2..4], &terminal[4..]),
+                        &Identity,
+                        config(),
+                        method.adjoint_workspace_components(2, config()).unwrap(),
+                        &mut || false,
+                    )
+                    .unwrap();
+                let endpoint = oracle_step(&variables(input), rho, h);
+                let dual = (0..6).fold(c(0.0), |sum, i| sum + c(terminal[i]) * endpoint[i]);
+                let actual = [
+                    gradient.initial_q.as_slice(),
+                    &gradient.initial_v,
+                    &gradient.initial_a,
+                    &gradient.forcing,
+                    &gradient.parameters,
+                ]
+                .concat();
+                for i in 0..10 {
+                    assert!(
+                        (actual[i] - dual.derivative[i]).abs()
+                            < 2e-10 * (1.0 + dual.derivative[i].abs()),
+                        "h={h:e}, rho={rho}, input={i}: actual={:.16e}, expected={:.16e}",
+                        actual[i],
+                        dual.derivative[i]
+                    );
+                }
+            }
+        }
+    }
 }

@@ -132,6 +132,16 @@ where claimed below.
   an independently preconditioned transposed FGMRES solve. Workspaces are
   conservatively capped, prior input history is borrowed, and failed solves,
   incomplete derivatives or cancellation return no partial result.
+  The reverse pass differentiates the primal's Newmark correction directly;
+  it never recovers displacement/velocity cotangents by subtracting nearly
+  equal acceleration cotangents and dividing by `h²`. Stage displacement and
+  velocity are reconstructed from the same increments used by the forward
+  residual, retaining motion that rounds away in the absolute endpoint.
+  `structural_generalized_alpha_adjoint::acceleration_observation_gradients_survive_vibration_step_refinement`
+  checks all state, forcing and material-parameter cotangents against an
+  independent forward-dual acceleration solve over `h=1e-4..1e-10`, with
+  nonsymmetric coupled mass/damping, nonlinear stiffness and three spectral
+  radii (G3, `2e-10*(1+|reference|)`).
 - `galpha::initialization::{first_order_rate, second_order_acceleration}` solve
   the initial mass equations `M rate = f-r(t,u)` and `M a = f-Cv-r(q)` with
   bounded FGMRES and an explicit mass preconditioner. The corresponding

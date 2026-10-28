@@ -8,7 +8,7 @@
 
 use super::{
     ImplicitStepTelemetry, OperatorGeneralizedAlpha, SecondOrderProblem, SecondOrderState,
-    TimeSolveError, checked_time_advance, structural_admit, structural_poll,
+    TimeSolveError, checked_time_advance, structural_admit, structural_increment, structural_poll,
 };
 use fs_solver::{FgmresState, FlexiblePreconditioner, LinearOp, SolveReport, StallDiagnosis};
 use std::cell::RefCell;
@@ -350,12 +350,10 @@ impl OperatorGeneralizedAlpha {
         )
     }
 
-    fn adjoint_coefficients(&self) -> Result<[f64; 4], SecondOrderAdjointError> {
+    fn adjoint_coefficients(&self) -> Result<[f64; 2], SecondOrderAdjointError> {
         let coefficients = [
             1.0 / (self.beta * self.h * self.h),
-            1.0 / (self.beta * self.h),
-            0.5 / self.beta - 1.0,
-            self.gamma * self.h,
+            self.gamma / (self.beta * self.h),
         ];
         if finite(&coefficients) {
             Ok(coefficients)
@@ -398,8 +396,7 @@ impl OperatorGeneralizedAlpha {
             structural_poll(cancelled)?;
             structural_admit(admission, phase)?;
         }
-        let [acceleration_q, acceleration_v, acceleration_a, velocity_a] =
-            self.adjoint_coefficients()?;
+        let [acceleration_correction, velocity_correction] = self.adjoint_coefficients()?;
         if !finite(&next.q) || !finite(&next.v) || !finite(&next.a) {
             return Err(SecondOrderAdjointError::NonFiniteAccumulation);
         }
@@ -408,12 +405,17 @@ impl OperatorGeneralizedAlpha {
         let mut a_eval = vec![0.0; self.n];
         let mut rhs = vec![0.0; self.n];
         for i in 0..self.n {
-            q_eval[i] = (1.0 - self.alpha_f).mul_add(next.q[i], self.alpha_f * initial.q[i]);
-            v_eval[i] = (1.0 - self.alpha_f).mul_add(next.v[i], self.alpha_f * initial.v[i]);
+            // Replay the production increment, including motion that rounds
+            // away in the stored absolute endpoint. Interpolating two rounded
+            // endpoints can evaluate a different nonlinear tangent/force.
+            let correction = (self.beta * self.h * self.h) * next.a[i];
+            let (dq, dv, _) = structural_increment(self, initial.v[i], initial.a[i], correction);
+            q_eval[i] = (1.0 - self.alpha_f).mul_add(dq, initial.q[i]);
+            v_eval[i] = (1.0 - self.alpha_f).mul_add(dv, initial.v[i]);
             a_eval[i] = (1.0 - self.alpha_m).mul_add(next.a[i], self.alpha_m * initial.a[i]);
-            rhs[i] = acceleration_q.mul_add(
-                velocity_a.mul_add(terminal.1[i], terminal.2[i]),
-                terminal.0[i],
+            rhs[i] = acceleration_correction.mul_add(
+                terminal.2[i],
+                velocity_correction.mul_add(terminal.1[i], terminal.0[i]),
             );
         }
         if !finite(&q_eval) || !finite(&v_eval) || !finite(&a_eval) || !finite(&rhs) {
@@ -487,15 +489,19 @@ impl OperatorGeneralizedAlpha {
         let mut initial_v = vec![0.0; self.n];
         let mut initial_a = vec![0.0; self.n];
         for i in 0..self.n {
-            // Reverse the residual's intermediate-state interpolation, then
-            // v1=v0+h[(1-gamma)a0+gamma*a1] and
-            // a1=A(q1-q0)-B*v0-D*a0. This preserves all three initial seeds.
+            // Differentiate the same correction delta=beta*h²*a1 used by
+            // the primal. At fixed delta, q1=q0+h*v0+h²*(1/2-beta)*a0+delta
+            // and v1=v0+h*(1-gamma)*a0+gamma/(beta*h)*delta.
+            // Pulling back a1 from q1-q0 instead subtracts O(1) adjoints and
+            // amplifies their roundoff by 1/h², erasing acceleration/pressure
+            // sensitivities as the vibration timestep is refined.
+            let q_bar = terminal.0[i] - (1.0 - self.alpha_f) * internal_bar[i];
             let v_bar = terminal.1[i] - (1.0 - self.alpha_f) * damping_bar[i];
-            let a_bar = terminal.2[i] - (1.0 - self.alpha_m) * mass_bar[i] + velocity_a * v_bar;
-            initial_q[i] = -self.alpha_f * internal_bar[i] - acceleration_q * a_bar;
-            initial_v[i] = -self.alpha_f * damping_bar[i] + v_bar - acceleration_v * a_bar;
-            initial_a[i] = -self.alpha_m * mass_bar[i] + self.h * (1.0 - self.gamma) * v_bar
-                - acceleration_a * a_bar;
+            initial_q[i] = terminal.0[i] - internal_bar[i];
+            initial_v[i] = self.h.mul_add(q_bar, terminal.1[i] - damping_bar[i]);
+            initial_a[i] = (self.h * self.h * (0.5 - self.beta))
+                .mul_add(q_bar, self.h * (1.0 - self.gamma) * v_bar)
+                - self.alpha_m * mass_bar[i];
         }
         for value in &mut parameters {
             *value = -*value;
