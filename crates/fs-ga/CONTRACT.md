@@ -77,6 +77,11 @@ fs-scenario frames, the gradient stack's manifold variants.
    wrong-grade, and non-unit inputs; they never silently normalize. The
    quaternion/motor double cover is canonicalized without rescaling, using a
    deterministic lexicographic tie-break at exactly π.
+   Vector rotations, rotation matrices, and motor translation extraction
+   evaluate the projective action with the rotor norm-squared divisor, just
+   as the point sandwich does. An admitted unit-norm roundoff defect must
+   not become physical vector scaling or translation drift; this does not
+   rescale the stored quaternion or motor.
 8. **Differentials and duality**: SO(3) Jacobian/inverse products agree with
    identity through zero, tiny, general, and near-π cases; SE(3) `dexp` uses
    the convergent `Σ adⁿ/(n+1)!` series with a submultiplicative infinity-norm

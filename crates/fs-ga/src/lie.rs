@@ -1072,17 +1072,20 @@ fn rotation_matrix(quat: Quat) -> Mat3 {
     let wx = quat.w * quat.x;
     let wy = quat.w * quat.y;
     let wz = quat.w * quat.z;
+    // Match the projective vector action even when the validated quaternion
+    // has a small unit-norm defect. Do not alter its stored representative.
+    let scale = 2.0 / (quat.w * quat.w + xx + yy + zz);
     Mat3 {
         m: [
-            1.0 - 2.0 * (yy + zz),
-            2.0 * (xy - wz),
-            2.0 * (xz + wy),
-            2.0 * (xy + wz),
-            1.0 - 2.0 * (xx + zz),
-            2.0 * (yz - wx),
-            2.0 * (xz - wy),
-            2.0 * (yz + wx),
-            1.0 - 2.0 * (xx + yy),
+            1.0 - scale * (yy + zz),
+            scale * (xy - wz),
+            scale * (xz + wy),
+            scale * (xy + wz),
+            1.0 - scale * (xx + zz),
+            scale * (yz - wx),
+            scale * (xz - wy),
+            scale * (yz + wx),
+            1.0 - scale * (xx + yy),
         ],
     }
 }
@@ -1165,6 +1168,47 @@ mod tests {
             i += 1;
         }
         max_abs_slice(&residual)
+    }
+
+    #[test]
+    fn g0_admitted_norm_defect_does_not_scale_physical_vectors_or_translation() {
+        let unit = So3::exp(So3Tangent::new(Vec3::new(0.4, -0.7, 0.3))).unwrap();
+        let q = *unit.as_quat();
+        let scale = 1.0 + 1.0e-12;
+        let input = Quat {
+            w: q.w * scale,
+            x: q.x * scale,
+            y: q.y * scale,
+            z: q.z * scale,
+        };
+        let rotation = So3::try_from_quat(input).unwrap();
+        assert_eq!(*rotation.as_quat(), input, "stored quaternion was rescaled");
+        let vector = Vec3::new(0.7, -1.2, 2.3);
+        let rotated = rotation.rotate(vector).unwrap();
+        assert!(vec_error(rotated, unit.rotate(vector).unwrap()) < 2e-15);
+        assert!((rotated.norm() - vector.norm()).abs() < 2e-15);
+        assert!(vec_error(rotation.inverse().rotate(rotated).unwrap(), vector) < 2e-15);
+        assert!(vec_error(rotation.matrix().apply(vector), rotated) < 2e-15);
+        let translation = Vec3::new(2.0, -3.0, 0.7);
+        let pose = Se3::from_parts(rotation, translation).unwrap();
+        assert_eq!(*pose.rotation().as_quat(), input);
+        assert!(vec_error(pose.translation(), translation) < 2e-15);
+        assert!(
+            vec_error(
+                pose.translation(),
+                pose.transform_point(Vec3::new(0.0, 0.0, 0.0)).unwrap()
+            ) < 2e-15
+        );
+        let twist = Twist::new(Vec3::new(0.2, 0.3, -0.5), vector);
+        let wrench = Wrench::new(Vec3::new(-0.1, 0.8, 0.6), Vec3::new(1.4, -0.7, 0.2));
+        assert!(
+            (wrench
+                .transform_by(&pose)
+                .pairing(twist.transform_by(&pose))
+                - wrench.pairing(twist))
+            .abs()
+                < 5e-15
+        );
     }
 
     #[test]

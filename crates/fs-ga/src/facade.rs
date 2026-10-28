@@ -142,10 +142,16 @@ impl core::ops::Mul for Quat {
 impl Quat {
     /// Rotate a vector (the hand-written baseline path the GA motor is
     /// benchmarked against).
+    ///
+    /// Evaluate the projective action `q v q⁻¹`, including the norm-squared
+    /// divisor. A finite, nonzero quaternion is required. This also prevents
+    /// an admitted unit-norm roundoff defect from scaling physical vectors;
+    /// the stored quaternion is never rescaled.
     #[must_use]
     pub fn rotate(self, v: Vec3) -> Vec3 {
         let q = Vec3::new(self.x, self.y, self.z);
-        let t = q.cross(v).scale(2.0);
+        let norm_sq = self.w * self.w + self.x * self.x + self.y * self.y + self.z * self.z;
+        let t = q.cross(v).scale(2.0 / norm_sq);
         v + t.scale(self.w) + q.cross(t)
     }
 
@@ -182,15 +188,18 @@ impl Motor {
 
     /// Recover `(q, t)`. The quaternion is a bitwise-exact relabeling of
     /// the motor's scalar + Euclidean-bivector components; the
-    /// translation is recovered by one motor product (tight ULP).
+    /// translation is recovered by one motor product divided by the rotor's
+    /// norm squared (tight ULP). This is the same projective scale cancellation
+    /// as the point sandwich, not normalization of the stored motor.
     #[must_use]
     pub fn to_parts(&self) -> (Quat, Vec3) {
         let q = Quat::from_rotor(self);
         let translator = self.compose(&q.to_rotor().reverse());
+        let scale = -2.0 / (q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
         let t = Vec3::new(
-            -2.0 * translator.0.0[E01],
-            -2.0 * translator.0.0[E02],
-            -2.0 * translator.0.0[E03],
+            scale * translator.0.0[E01],
+            scale * translator.0.0[E02],
+            scale * translator.0.0[E03],
         );
         (q, t)
     }
