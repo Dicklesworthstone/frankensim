@@ -6,7 +6,8 @@
 //! In the diagonal-star inner products `⟨u, v⟩_k = uᵀ M_k v`:
 //! - EXACT part: the M-orthogonal projection onto `im d_{k−1}`
 //!   (normal equations `d ᵀ M d a = d ᵀ M x`, matrix-free CG);
-//! - COEXACT part: the projection onto `im δ_{k+1}` via the SPD system
+//! - COEXACT part: the projection onto `im δ_{k+1}` via the compatible
+//!   positive-semidefinite system
 //!   `(d_k M_k⁻¹ d_kᵀ) w = d_k x`, coexact `= M_k⁻¹ d_kᵀ w`;
 //! - HARMONIC part: the remainder — orthogonal to both by projection,
 //!   with dimension equal to the Betti number `b_k` (cross-checked
@@ -18,6 +19,9 @@
 //! (a cycle pairing) extracts `Γ` from the harmonic component of a flow
 //! cochain — Kutta–Joukowski `L' = ρ V Γ` — and harmonic bases deflate
 //! saddle systems so they are well-posed on domains with handles.
+
+/// Prepared, bounded coexact projection operators; the caller owns the solver.
+pub mod coexact;
 
 use crate::cochain::cell_count;
 use crate::hodge::hodge_diagonal_barycentric;

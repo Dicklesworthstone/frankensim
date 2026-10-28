@@ -22,6 +22,7 @@
 /// Saturation from the original reversible H(B) source and its dual energy.
 pub mod force;
 pub mod nonlinear;
+pub mod vector_potential;
 
 use crate::planar::permanent::MagneticEnergyReference;
 use fs_feec::{

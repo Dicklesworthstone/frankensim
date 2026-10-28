@@ -1089,3 +1089,20 @@ oversized windows and cancellation refuse. The sparse modal owner is reused;
 no heat stepper, penalty boundary or copied geometry is introduced. The original
 single eigensolver call has its existing cancellation granularity. Box/mixed-wall
 modal and normalization regressions supplement the higher-level acoustic tests.
+
+### Bounded complete coexact edge projection
+
+`cohomology::coexact::PreparedCoexact1` selects the original discrete curl's
+free-edge columns D and the original positive barycentric edge metric M. It
+prepares P = D M^-1 D^T after checking the sparse-product work budget and
+removing zero face rows. P is positive semidefinite; D x is a compatible right
+hand side. The caller owns the bounded checked solve, true residual and
+physical acceptance. Recovery M^-1 D^T w is M-orthogonal to the entire kernel
+of D, including harmonic components, without inferring topology from a random
+basis. No uniqueness of w or full-space SPD claim is made.
+
+The fs-em vector-potential owner uses this same preparation for complete
+current compatibility and flux-preserving gauge recovery. Its six focused
+physics tests include a multiply connected source refusal, field refinement,
+and bounded solver/cancellation behavior. Existing cohomology interfaces and
+algorithms retain their owners.

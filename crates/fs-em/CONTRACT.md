@@ -1000,3 +1000,15 @@ no extrapolation or inferred error bound. Field and surface refinement are
 required for useful force accuracy. This is fixed-geometry static loading;
 moving-geometry work exchange, material striction, equilibrated stress and a
 virtual-work cross-check require separate physical work.
+
+### Current-carrying three-dimensional vector-potential magnetostatics
+
+`spatial::vector_potential` prepares the actual lowest-order 3D Whitney curl-curl operator d1^T M_(nu,2) d1 for source-bound isotropic linear and oriented fixed-recoil media. It admits exact piecewise-constant impressed-current loads, exterior tangential-potential edge traces, and natural n cross H=0 elsewhere. Current continuity and the entire relative curl-kernel compatibility are checked, including harmonic modes on handled domains, without silently changing the source. The existing checked CG solves the explicitly compatible invariant ranges of semidefinite operators; neither the full curl-curl operator nor the auxiliary face operator is claimed globally SPD. The bounded original cohomology-metric projection removes all curl-free gauge components and must preserve every magnetic face flux. Accepted fields retain truthful free-edge equations, divergence-free face flux, reconstructed B/H, original recoil-envelope admission, shifted storage, and independent current/trace constitutive pairing. The shared Maxwell integrator additionally requires one source-identical induced-linear current-free exterior collar. This is static lowest-order magnetostatics; higher-order spaces, Coulomb saddle/HX solvers, 3D eddy or nonlinear vector evolution, and TEAM qualification remain open.
+
+The six focused spatial_vector_potential tests cover an independent
+current-driven quadratic-potential manufactured solution under refinement,
+exact uniform vector fields with gradient-shifted traces, a handled-domain
+harmonic source that passes local continuity but must be refused globally,
+recoil energy and limits, actual budgets/cancellation, and the current-free
+Maxwell collar. The stored static source/trace pairings are not time-integrated
+work or Ohmic heat.
