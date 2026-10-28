@@ -17,6 +17,8 @@
 
 /// Prescribed active fibre stress on top of the passive hyperelastic laws (M0.3-W3).
 pub mod active_tissue;
+/// Finite gas/solid adsorption with sourced equilibrium, kinetics and calorics.
+pub mod adsorption;
 /// Source-bound monotonic axial comparisons from reported tensile/compression moduli.
 pub mod axial_reference;
 /// Bounded compression references from original nominal stress/strain observations.

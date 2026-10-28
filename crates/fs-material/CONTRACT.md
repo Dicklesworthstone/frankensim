@@ -3436,10 +3436,10 @@ Eight added integration regressions cover independently derived pure/binary
 flux scaling, residual-gas diffusion, exact flooding, repeated wet updates,
 radius dependence, retained source identity/slip refusal and anisotropic series
 layers. Both modified production files and all new tests passed Rustfmt parsing.
-The nine standalone wet-law tests passed natively. At this commit the expanded
-actual-source native run remains blocked by unavailable dependency metadata and
-full executor filesystems; these eight integration tests are not yet claimed as
-executed.
+The nine standalone wet-law tests passed natively. The complete selected-source
+Rust test typecheck also passed after restoring the real gas dependencies.
+Native execution of the eight added integration tests remains blocked by full
+executor storage; it is not claimed here.
 
 
 ### Transient heterogeneous pore-body gas storage
@@ -3469,6 +3469,49 @@ solid heat, sorption and a resolved nonlinear throat profile are separate owners
 Five focused regressions cover delayed forwarding, first-order convergence
 against the independent three-volume diffusion eigenmodes, heterogeneous
 storage/throat coefficients, bounded adaptive withdrawal and atomic refusal.
-New files passed Rustfmt parsing. The selected actual-source test typecheck
-reached metadata emission without source/type errors; executor storage prevented
-completion and native execution. These five tests are not claimed as run.
+New files passed Rustfmt parsing and the selected actual-source Rust test
+typecheck completed successfully. Native execution remains blocked by full
+executor storage. These five tests are not claimed as run.
+
+
+### Finite gas/solid adsorption with binding-energy storage
+
+`adsorption` binds one retained gas species to a homogeneous Langmuir site
+population, an original capacity/affinity/kinetic material source and two original
+single-phase caloric charts. Capacity is per dry skeleton mass, affinity has
+inverse-pressure units, and the bound adsorbate has an explicit enthalpy-datum
+offset into the original NASA gas reference. The reference affinity fixes its
+entropy datum. Temperature-dependent affinity follows the same gas/bound caloric
+integrals and satisfies the corresponding van't Hoff relation; adsorption heat
+is their enthalpy difference and is not added again as an external heat source.
+
+Frozen original partial pressure and surface temperature give an analytic site
+update and both integrated gross streams. Gross adsorption is limited by the
+original gas inventory; total site turnover is bounded separately. Newly adsorbed
+molecules may desorb within this exact frozen site solution. Original gas bulk
+enthalpy travels with each direction. One finite gas reconstruction and one
+bracketed, safeguarded-Newton solid caloric inversion produce a joint immutable
+candidate. Both temperatures evolve; the original source domains, thermal-change
+bounds, final affinity, mass/energy budgets and combined gas/site entropy must
+all admit the endpoint. Cancellation or any late refusal leaves inputs intact.
+
+The source adapter rejects stale temperature/pressure aliases and unowned
+conditions. Adsorbate caloric, transport and pack identities remain bound.
+Stable relative caloric operations cancel arbitrary reference energies before
+thermal inversion and entropy admission. The shared
+`ResolvedHeatCapacityCurve::specific_entropy_change` now integrates the original
+chart's chord Cp/T directly between temperatures, preserving tiny thermal changes
+even when a large enthalpy datum would round their absolute h values together.
+
+This rigid, near-isothermal local kinetic closure uses one noncompetitive site
+population and a declared bulk-enthalpy stream convention. It does not supply
+free-molecular impingement, surface diffusion, liquid displacement, swelling,
+hysteresis or solid heat conduction. Time refinement is required for the finite
+bath's pressure/temperature feedback. It does not impose a hidden thermostat.
+
+Eleven adsorption regressions and one new shared caloric regression cover exact
+frozen kinetics and turnover, independent affinity/entropy derivatives, finite
+uptake/desorption energy and entropy, equilibrium turnover, reference invariance,
+piecewise caloric inversion and atomic/source refusals. All pass actual-source
+Rust test typechecking together with the wet/DGM/pore-domain tests. Native
+execution of these new coupled tests remains blocked by full executor storage.
