@@ -8,6 +8,9 @@
 /// Configuration-admitted force/contact/drift on the original rigid bodies.
 pub mod step;
 
+/// Automatic swept sphere geometry and event-resolved native body trajectories.
+pub mod spheres;
+
 use crate::{DynamicsError, MassProperties, RigidBodyState, Vec3};
 use fs_contact::frictional_multicontact::{
     FrictionalContact, FrictionalContactConfig, FrictionalContactDeterminacy,
