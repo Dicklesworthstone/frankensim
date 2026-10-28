@@ -8,6 +8,9 @@ use fs_thermal::enthalpy::*;
 use fs_tribo::{FrictionLaw, TangentialLaw, TangentialSolveConfig, TangentialStepInput};
 use std::collections::BTreeMap;
 
+#[path = "friction_heat/entropy.rs"]
+mod entropy;
+
 struct Sensible;
 impl ThermalLaw for Sensible {
     fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
@@ -20,6 +23,13 @@ impl ThermalLaw for Sensible {
     }
     fn maximum_temperature_slope(&self) -> f64 {
         1.0
+    }
+    fn specific_entropy_change_j_kg_k(
+        &self, a: f64, b: f64,
+    ) -> Result<Option<f64>, DepositionError> {
+        let ta = self.temperature_k(a)?;
+        self.temperature_k(b)?;
+        Ok(Some(((b - a) / ta).ln_1p()))
     }
 }
 static SENSIBLE: Sensible = Sensible;
@@ -39,6 +49,17 @@ fn network(
     capacity_per_volume: [f64; 2],
     cooling: [f64; 2],
     initial_rise: [f64; 2],
+) -> DepositionSimulation<'static> {
+    network_with_law(n, lengths, k, capacity_per_volume, cooling, initial_rise, &SENSIBLE)
+}
+fn network_with_law(
+    n: usize,
+    lengths: [f64; 2],
+    k: [f64; 2],
+    capacity_per_volume: [f64; 2],
+    cooling: [f64; 2],
+    initial_rise: [f64; 2],
+    law: &'static dyn ThermalLaw,
 ) -> DepositionSimulation<'static> {
     let mut events = Vec::new();
     for side in 0..2 {
@@ -112,7 +133,7 @@ fn network(
     });
     DepositionSimulation::new(
         events,
-        &[(MaterialId(1), &SENSIBLE as &dyn ThermalLaw)],
+        &[(MaterialId(1), law)],
         DepositionBudget {
             max_cells: 2 * n,
             max_links: 2 * n,
