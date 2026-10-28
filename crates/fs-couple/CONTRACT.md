@@ -4052,6 +4052,21 @@ model checks, not experimental actuator or ferromagnetic-material validation.
 Native execution is pending; source review and independent numerical oracles
 are not a Rust test pass.
 
+### Semidefinite modal reed viscosity
+
+`ModalAperture::with_viscosity` admits passive relative-motion losses with a
+coupled undamped subspace, including a dashpot between two modal coordinates.
+The existing shared pivoted PSD factor acts on mass-normalized C; its channels
+must also reconstruct every physical entry within `1e-10` of the corresponding
+diagonal geometric scale. The original C remains in the simultaneous force and
+response equations. Midpoint loss uses nonnegative channel squares for singular
+laws; exact propagation retains its integrated full-C loss. No damping floor
+fills null directions. Unresolved reconstructions and indefinite laws refuse.
+Previously accepted SPD and exact-zero laws retain their original arithmetic;
+factorization stays outside the stepping loop. Authored raw matrices confer no
+material identity. Regressions cover a lossless common mode, analytic relative
+decay, simultaneous pressure/flow/work, signed coordinate scaling and refusals.
+
 ### Material modal reed relaxation
 
 `ModalAperture::with_material_relaxation` binds generalized-Maxwell spectra from

@@ -4,6 +4,7 @@
 use super::{
     AcousticRealizeError, MAX_MODES, ModalAperture, ModalApertureSpec, invalid, nonlinear,
 };
+use crate::plate_viscosity::ModalPlateViscosity;
 use fs_exec::CancelGate;
 use fs_la::factor::{Cholesky, cholesky};
 
@@ -14,6 +15,7 @@ pub(super) struct ApertureViscosity {
     scale: Vec<f64>,
     pressure: Vec<f64>,
     contact: Vec<f64>,
+    passive_columns: Vec<Vec<f64>>,
 }
 fn poll(gate: &CancelGate) -> Result<(), AcousticRealizeError> {
     if gate.is_requested() {
@@ -53,8 +55,9 @@ impl ApertureViscosity {
             }
         }
         // Explicitly undamped coordinates are allowed (e.g. one lossless blade).
-        // The remaining principal block must be resolved SPD. No eigenvalue
-        // clipping, loss floor, symmetrization or fictitious material is applied.
+        // Coupled nullspaces also occur in localized/interface damping. Retain
+        // the original SPD arithmetic; the shared PSD owner admits those laws
+        // without a loss floor or an independent modal decomposition.
         let active: Vec<_> = (0..n).filter(|&i| matrix[n * i + i] > 0.0).collect();
         if active.is_empty() {
             return Ok(Self {
@@ -64,6 +67,7 @@ impl ApertureViscosity {
                 scale: vec![],
                 pressure: vec![],
                 contact: vec![],
+                passive_columns: vec![],
             });
         }
         let mut normalized = Vec::with_capacity(active.len() * active.len());
@@ -73,7 +77,36 @@ impl ApertureViscosity {
                     .push(matrix[n * i + j] / matrix[n * i + i].sqrt() / matrix[n * j + j].sqrt());
             }
         }
-        cholesky(&normalized, active.len()).map_err(nonlinear)?;
+        let passive_columns = if cholesky(&normalized, active.len()).is_ok() {
+            vec![]
+        } else {
+            // The shared owner's C is mass-normalized [1/s]. Transform back
+            // before evaluating physical work, and check every original entry:
+            // its rank tolerance must not discard a weak physical coordinate.
+            let root_mass: Vec<_> = spec.modes.iter().map(|m| m.mass_kg.sqrt()).collect();
+            let per_s: Vec<_> = (0..n * n)
+                .map(|ij| matrix[ij] / root_mass[ij / n] / root_mass[ij % n])
+                .collect();
+            let passive = ModalPlateViscosity::from_psd_modal_matrix(per_s, n, 1.0, gate)?;
+            let columns: Vec<Vec<f64>> = passive.channel_shapes().iter()
+                .map(|b| b.iter().zip(&root_mass).map(|(b, m)| b * m).collect())
+                .collect();
+            for i in 0..n {
+                for j in 0..n {
+                    let actual: f64 = columns.iter().map(|b| b[i] * b[j]).sum();
+                    let allowance = 1e-10 * matrix[n * i + i].sqrt()
+                        * matrix[n * j + j].sqrt();
+                    if !actual.is_finite() || !allowance.is_finite()
+                        || (actual - matrix[n * i + j]).abs() > allowance
+                    {
+                        return Err(invalid(
+                            "passive channels do not reconstruct the original physical viscosity",
+                        ));
+                    }
+                }
+            }
+            columns
+        };
         let h = 0.5 * spec.time_step_s;
         let scale: Vec<_> = spec
             .modes
@@ -105,6 +138,7 @@ impl ApertureViscosity {
             scale,
             pressure: spec.modes.iter().map(|m| h * m.pressure_area_m2).collect(),
             contact: spec.modes.iter().map(|m| h * m.gap_projection).collect(),
+            passive_columns,
         };
         let solve = |rhs: &mut [f64]| {
             solve_scaled(
@@ -161,7 +195,16 @@ impl ApertureViscosity {
         {
             *out = row.iter().zip(velocity).map(|(c, v)| c * v).sum();
         }
-        let power: f64 = force.iter().zip(velocity).map(|(f, v)| f * v).sum();
+        let power: f64 = if self.passive_columns.is_empty() {
+            force.iter().zip(velocity).map(|(f, v)| f * v).sum()
+        } else {
+            // Sum passive channel powers, so cancellation in a coupled
+            // undamped subspace cannot become negative dissipated work.
+            self.passive_columns.iter().map(|b| {
+                let speed: f64 = b.iter().zip(velocity).map(|(b, v)| b * v).sum();
+                speed * speed
+            }).sum()
+        };
         if force.iter().any(|x| !x.is_finite()) || !power.is_finite() || power < 0.0 {
             return Err(invalid("full viscous force or passive power is unresolved"));
         }
@@ -250,8 +293,12 @@ impl ModalAperture {
     ///
     /// This raw-matrix API confers no material identity. Material-driven callers
     /// must project C on the SAME eigenbasis, never recompute modes separately.
-    /// Explicit zero rows/columns are supported; the remaining block must be SPD.
-    /// Other nonzero singular laws are refused, not silently regularized.
+    /// Positive semidefinite laws include coupled undamped subspaces, such as
+    /// a relative-motion dashpot. The shared passive-channel owner resolves
+    /// singular laws in mass-normalized coordinates, with reconstruction of
+    /// every physical C entry to 1e-10 of its diagonal geometric scale. Midpoint
+    /// loss uses channel squares; the original C remains in force and response.
+    /// Unresolved laws refuse; no artificial damping fills their nullspaces.
     /// Zero C uses the original diagonal-zero arithmetic. No new per-step matrix
     /// factorization or allocation is added. Memory is bounded by 32² entries
     /// per retained matrix; the shared Cholesky owner performs cold factor work.

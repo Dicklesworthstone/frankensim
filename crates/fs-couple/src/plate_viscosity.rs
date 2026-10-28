@@ -525,6 +525,9 @@ impl ModalPlateViscosity {
     #[must_use] pub const fn mode_count(&self)->usize {self.modes}
     /// Number of passive channels. Zero tensors allocate no artificial damping.
     #[must_use] pub fn channel_count(&self)->usize {self.columns.len()}
+    /// Borrow the admitted passive columns without rebuilding connection objects.
+    /// Their reference resistance is the one supplied to this factor's constructor.
+    pub(crate) fn channel_shapes(&self)->&[Vec<f64>] { &self.columns }
     /// Realize C through the original bilateral dashpot law on one component.
     /// Its coordinate origin is zero; no added spring, mass, or external forcing.
     /// The same component on both sides keeps the complete coordinate order.

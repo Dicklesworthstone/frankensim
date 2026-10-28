@@ -36,38 +36,111 @@ fn full_viscosity_matches_manufactured_simultaneous_momentum_flow_and_work() {
     let mut s = undamped(); s.modes.truncate(2);
     s.modes[0].force_projection = [1.0,0.0];
     s.modes[1].force_projection = [0.0,1.0];
-    let c = [0.03,0.012,0.012,0.02];
     let old = [BladeState { displacement_m:1e-6, velocity_m_s:0.01 },
         BladeState { displacement_m:-2e-6, velocity_m_s:0.005 }];
     let midpoint = [0.02,-0.006];
-    for dp in [-100.0_f64,0.0,100.0] {
-        let mut a = ModalAperture::new(s.clone(), old.to_vec(), contact()).unwrap()
-            .with_viscosity(c.to_vec(), &CancelGate::new_clock_free()).unwrap();
-        let dt = s.time_step_s;
-        let opening = s.rest_opening_m + s.modes.iter().enumerate()
-            .map(|(i,m)| m.gap_projection*(old[i].displacement_m + 0.5*dt*midpoint[i])).sum::<f64>();
-        let jet = s.width_m*opening*dp.signum()*(2.0*dp.abs()/s.density_kg_m3).sqrt();
-        let swept = -s.modes.iter().zip(midpoint).map(|(m,v)|m.pressure_area_m2*v).sum::<f64>();
-        let incoming = 13.0;
-        let body = -1e-7;
-        let upstream = dp + 2.0*incoming + s.impedance_pa_s_m3*(jet + swept + body);
-        let forces = std::array::from_fn(|i| {
-            let m = s.modes[i];
-            2.0*m.mass_kg*(midpoint[i]-old[i].velocity_m_s)/dt
-                + m.stiffness_n_m*(old[i].displacement_m+0.5*dt*midpoint[i])
-                + c[2*i]*midpoint[0]+c[2*i+1]*midpoint[1]+m.pressure_area_m2*dp
-        });
-        let frame = a.step(ApertureDrive { upstream_pressure_pa:upstream,
-            incoming_pressure_pa:incoming, body_flow_m3_s:body }, forces).unwrap();
-        for i in 0..2 {
-            assert!((frame.modes[i].displacement_m-old[i].displacement_m-dt*midpoint[i]).abs()<1e-14);
-            assert!((frame.modes[i].velocity_m_s-(2.0*midpoint[i]-old[i].velocity_m_s)).abs()<1e-9);
-            assert!(frame.momentum_residual_n[i].abs()<1e-9);
+    for c in [[0.03,0.012,0.012,0.02], [0.03,-0.03,-0.03,0.03]] {
+        for dp in [-100.0_f64,0.0,100.0] {
+            let mut a = ModalAperture::new(s.clone(), old.to_vec(), contact()).unwrap()
+                .with_viscosity(c.to_vec(), &CancelGate::new_clock_free()).unwrap();
+            let dt = s.time_step_s;
+            let opening = s.rest_opening_m + s.modes.iter().enumerate()
+                .map(|(i,m)| m.gap_projection*(old[i].displacement_m + 0.5*dt*midpoint[i])).sum::<f64>();
+            let jet = s.width_m*opening*dp.signum()*(2.0*dp.abs()/s.density_kg_m3).sqrt();
+            let swept = -s.modes.iter().zip(midpoint).map(|(m,v)|m.pressure_area_m2*v).sum::<f64>();
+            let incoming = 13.0;
+            let body = -1e-7;
+            let upstream = dp + 2.0*incoming + s.impedance_pa_s_m3*(jet + swept + body);
+            let forces = std::array::from_fn(|i| {
+                let m = s.modes[i];
+                2.0*m.mass_kg*(midpoint[i]-old[i].velocity_m_s)/dt
+                    + m.stiffness_n_m*(old[i].displacement_m+0.5*dt*midpoint[i])
+                    + c[2*i]*midpoint[0]+c[2*i+1]*midpoint[1]+m.pressure_area_m2*dp
+            });
+            let frame = a.step(ApertureDrive { upstream_pressure_pa:upstream,
+                incoming_pressure_pa:incoming, body_flow_m3_s:body }, forces).unwrap();
+            for i in 0..2 {
+                assert!((frame.modes[i].displacement_m-old[i].displacement_m-dt*midpoint[i]).abs()<1e-14);
+                assert!((frame.modes[i].velocity_m_s-(2.0*midpoint[i]-old[i].velocity_m_s)).abs()<1e-9);
+                assert!(frame.momentum_residual_n[i].abs()<1e-9);
+            }
+            assert!((frame.pressure_drop_pa-dp).abs()<1e-6);
+            let power: f64 = (0..2).map(|i| (0..2).map(|j|midpoint[i]*c[2*i+j]*midpoint[j]).sum::<f64>()).sum();
+            assert!((frame.aperture.dissipated_energy_j-dt*(dp*jet+power)).abs()<1e-12);
+            assert!(frame.aperture.balance_residual_j().abs()<1e-12);
         }
-        assert!((frame.pressure_drop_pa-dp).abs()<1e-6);
-        let power: f64 = (0..2).map(|i| (0..2).map(|j|midpoint[i]*c[2*i+j]*midpoint[j]).sum::<f64>()).sum();
-        assert!((frame.aperture.dissipated_energy_j-dt*(dp*jet+power)).abs()<1e-12);
-        assert!(frame.aperture.balance_residual_j().abs()<1e-12);
+    }
+}
+
+#[test]
+fn relative_dashpot_preserves_common_motion_and_resolves_differential_decay() {
+    use fs_couple::bernoulli_aperture::paired::BladePropagator;
+    let mut s = undamped(); s.modes.truncate(2);
+    s.modes[1].mass_kg = s.modes[0].mass_kg;
+    s.modes[1].stiffness_n_m = s.modes[0].stiffness_n_m;
+    for m in &mut s.modes { m.pressure_area_m2 = 0.0; }
+    s.modes[1].gap_projection = -s.modes[0].gap_projection;
+    let c = vec![0.03,-0.03,-0.03,0.03];
+    for propagator in [BladePropagator::Midpoint, BladePropagator::ExactZoh] {
+        for sign in [1.0,-1.0] {
+            let old = vec![BladeState { displacement_m:0.0,velocity_m_s:0.1 },
+                BladeState { displacement_m:0.0,velocity_m_s:sign*0.1 }];
+            let mut a = ModalAperture::new_with_propagator(s.clone(),old.clone(),contact(),propagator)
+                .unwrap().with_viscosity(c.clone(),&CancelGate::new_clock_free()).unwrap();
+            let mut lossless = ModalAperture::new_with_propagator(s.clone(),old,contact(),propagator).unwrap();
+            assert_eq!(a.viscosity_matrix_n_s_m(),Some(c.as_slice()));
+            let initial = a.stored_energy_j(); let mut loss = 0.0;
+            for _ in 0..512 {
+                let frame = a.step(drive(0.0),[0.0;2]).unwrap();
+                loss += frame.aperture.dissipated_energy_j;
+                if sign == 1.0 {
+                    let reference = lossless.step(drive(0.0),[0.0;2]).unwrap();
+                    for (actual,expected) in frame.modes.iter().zip(reference.modes) {
+                        assert!((actual.displacement_m-expected.displacement_m).abs()<1e-13);
+                        assert!((actual.velocity_m_s-expected.velocity_m_s).abs()<1e-9);
+                    }
+                } else {
+                    assert!(frame.aperture.dissipated_energy_j>=0.0);
+                }
+            }
+            assert!((initial-a.stored_energy_j()-loss).abs()<1e-17);
+            if sign == 1.0 { assert!(loss.abs()<1e-24); }
+            else { assert!(loss>0.5*initial); }
+            if propagator == BladePropagator::ExactZoh {
+                let t = 512.0*s.time_step_s;
+                let alpha = if sign == 1.0 {0.0} else {0.03/s.modes[0].mass_kg};
+                let omega = (s.modes[0].stiffness_n_m/s.modes[0].mass_kg-alpha*alpha).sqrt();
+                let q = 0.1*(-alpha*t).exp()*(omega*t).sin()/omega;
+                let v = 0.1*(-alpha*t).exp()*((omega*t).cos()-alpha*(omega*t).sin()/omega);
+                assert!((a.modal_states()[0].displacement_m-q).abs()<1e-13);
+                assert!((a.modal_states()[0].velocity_m_s-v).abs()<1e-9);
+            }
+        }
+    }
+}
+
+#[test]
+fn singular_viscosity_retains_signed_physical_coordinate_scaling() {
+    let mut s = undamped(); s.modes.truncate(2);
+    let mut transformed = s.clone(); let scales = [-2.0,0.5];
+    for (m,scale) in transformed.modes.iter_mut().zip(scales) {
+        m.mass_kg *= scale*scale; m.stiffness_n_m *= scale*scale;
+        m.pressure_area_m2 *= scale; m.gap_projection *= scale;
+        for p in &mut m.force_projection { *p *= scale; }
+    }
+    let c = vec![0.03,-0.03,-0.03,0.03];
+    let scaled = (0..4).map(|ij|c[ij]*scales[ij/2]*scales[ij%2]).collect();
+    let (mut a,mut b) = (coupled(s,c),coupled(transformed,scaled));
+    for n in 0..256 {
+        let input = drive(if n<128 {2000.0} else {0.0});
+        let f = [if n<50 {0.001} else {0.0},0.0];
+        let x = a.step(input,f).unwrap(); let y = b.step(input,f).unwrap();
+        for i in 0..2 {
+            assert!((x.modes[i].displacement_m-y.modes[i].displacement_m*scales[i]).abs()<1e-11);
+            assert!((x.modes[i].velocity_m_s-y.modes[i].velocity_m_s*scales[i]).abs()<1e-7);
+        }
+        assert!((x.aperture.dissipated_energy_j-y.aperture.dissipated_energy_j).abs()<1e-12);
+        assert!((x.aperture.outgoing_pressure_pa-y.aperture.outgoing_pressure_pa).abs()<1e-5);
     }
 }
 
