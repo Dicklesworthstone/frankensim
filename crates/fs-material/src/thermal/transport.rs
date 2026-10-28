@@ -12,6 +12,10 @@
 //! evolution or uncertainty propagation is inferred. Existing caloric and
 //! conservative thermal owners remain responsible for those operations.
 
+/// Local thermal response from directly supplied volumetric heat capacity.
+#[path = "transport/volumetric.rs"]
+pub mod volumetric;
+
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{
     ClaimSelection, MaterialCard, PropertyKey, PropertyLineSlice, PropertySupportError, QueryPoint,
@@ -185,37 +189,8 @@ impl PreparedThermalTransport {
                 ));
             }
         }
-        let absolute = QuantitySpec::semantic(SemanticType::new(
-            QuantityKind::AbsoluteTemperature,
-            ValueForm::Static,
-        ));
         for point in [query.lower, query.upper] {
-            if !point
-                .axes()
-                .get(query.temperature_axis)
-                .is_some_and(|&t| positive(t))
-                || !point
-                    .axis_quantities()
-                    .get(query.temperature_axis)
-                    .is_some_and(|q| *q == absolute || *q == QuantitySpec::dimensional(TEMPERATURE))
-            {
-                return Err(invalid(
-                    "the source path requires positive absolute temperatures in kelvin",
-                ));
-            }
-            if point.axes().iter().any(|(axis, value)| {
-                *value != 0.0
-                    && (axis == "omega"
-                        || axis == "frequency"
-                        || point
-                            .axis_quantities()
-                            .get(axis)
-                            .is_some_and(|q| q.dims() == INVERSE_TIME))
-            }) {
-                return Err(invalid(
-                    "nonzero frequency or rate coordinates require an explicitly coupled thermal owner",
-                ));
-            }
+            admit_temperature_point(point, query.temperature_axis)?;
         }
         if query.lower.axes()[query.temperature_axis] >= query.upper.axes()[query.temperature_axis]
         {
@@ -224,58 +199,14 @@ impl PreparedThermalTransport {
             ));
         }
         let resolve = |index: usize| {
-            let source = card
-                .claims()
-                .query_line_typed(
-                    keys[index],
-                    query.temperature_axis,
-                    query.lower,
-                    query.upper,
-                    query.selections[index],
-                )
-                .map_err(|error| ThermalTransportError::Source {
-                    property: keys[index].name().to_owned(),
-                    error: Box::new(error),
-                })?;
-            let claim = card
-                .claims()
-                .claim(source.knots[0].1.receipt.selected)
-                .expect("canonical source line selected an existing claim");
-            if !claim.validity.bounds().contains_key(query.temperature_axis) {
-                return Err(invalid(
-                    "each thermal source must explicitly bound the temperature coordinate",
-                ));
-            }
-            if claim.validity.bounds().keys().any(|axis| {
-                axis != query.temperature_axis
-                    && (axis == "T"
-                        || query
-                            .lower
-                            .axis_quantities()
-                            .get(axis)
-                            .is_some_and(|q| q.dims() == TEMPERATURE))
-            }) {
-                return Err(invalid(
-                    "a second source temperature requires an explicitly coupled thermal owner",
-                ));
-            }
-            if !claim.value.axes().all(|(axis, dims)| {
-                if axis == query.temperature_axis {
-                    dims == TEMPERATURE
-                } else {
-                    dims != TEMPERATURE
-                        && query
-                            .lower
-                            .axis_quantities()
-                            .get(axis)
-                            .is_some_and(|q| q.dims() == dims)
-                        && (dims != INVERSE_TIME || query.lower.axes().get(axis) == Some(&0.0))
-                }
-            }) {
-                return Err(invalid(
-                    "source value axes must match the typed temperature and fixed static conditions",
-                ));
-            }
+            let source = source_line(
+                card,
+                keys[index],
+                query.temperature_axis,
+                query.lower,
+                query.upper,
+                query.selections[index],
+            )?;
             if source
                 .knots
                 .iter()
@@ -405,14 +336,8 @@ fn checked_sample(
     values: [f64; 3],
 ) -> Result<ThermalTransportSample, ThermalTransportError> {
     let volumetric_heat_capacity = values[0] * values[1];
-    let diffusivity = values[2] / volumetric_heat_capacity;
-    // Avoid overflow in k*rho*c when its square root is representable.
-    let effusivity = values[2].sqrt() * volumetric_heat_capacity.sqrt();
-    if !values.into_iter().all(positive)
-        || ![volumetric_heat_capacity, diffusivity, effusivity]
-            .into_iter()
-            .all(positive)
-    {
+    let [diffusivity, effusivity] = transport_values(volumetric_heat_capacity, values[2])?;
+    if !values.into_iter().all(positive) {
         return Err(ThermalTransportError::Invalid(
             "thermal inputs or derived transport are not positive finite representable values",
         ));
@@ -425,6 +350,108 @@ fn checked_sample(
         diffusivity,
         effusivity,
     })
+}
+
+fn transport_values(capacity: f64, conductivity: f64) -> Result<[f64; 2], ThermalTransportError> {
+    let diffusivity = conductivity / capacity;
+    // Avoid overflow in k*C when its square root is representable.
+    let effusivity = conductivity.sqrt() * capacity.sqrt();
+    if ![capacity, conductivity, diffusivity, effusivity]
+        .into_iter()
+        .all(positive)
+    {
+        return Err(ThermalTransportError::Invalid(
+            "thermal inputs or derived transport are not positive finite representable values",
+        ));
+    }
+    Ok([diffusivity, effusivity])
+}
+
+fn admit_temperature_point(point: &QueryPoint, axis: &str) -> Result<(), ThermalTransportError> {
+    let absolute = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature,
+        ValueForm::Static,
+    ));
+    if !point.axes().get(axis).is_some_and(|&t| positive(t))
+        || !point
+            .axis_quantities()
+            .get(axis)
+            .is_some_and(|q| *q == absolute || *q == QuantitySpec::dimensional(TEMPERATURE))
+    {
+        return Err(ThermalTransportError::Invalid(
+            "the source path requires positive absolute temperatures in kelvin",
+        ));
+    }
+    if point.axes().iter().any(|(name, value)| {
+        *value != 0.0
+            && (name == "omega"
+                || name == "frequency"
+                || point
+                    .axis_quantities()
+                    .get(name)
+                    .is_some_and(|q| q.dims() == INVERSE_TIME))
+    }) {
+        return Err(ThermalTransportError::Invalid(
+            "nonzero frequency or rate coordinates require an explicitly coupled thermal owner",
+        ));
+    }
+    Ok(())
+}
+
+fn source_line(
+    card: &MaterialCard,
+    key: &PropertyKey,
+    axis: &str,
+    lower: &QueryPoint,
+    upper: &QueryPoint,
+    selection: ClaimSelection,
+) -> Result<PropertyLineSlice, ThermalTransportError> {
+    let invalid = ThermalTransportError::Invalid;
+    let source = card
+        .claims()
+        .query_line_typed(key, axis, lower, upper, selection)
+        .map_err(|error| ThermalTransportError::Source {
+            property: key.name().to_owned(),
+            error: Box::new(error),
+        })?;
+    let claim = card
+        .claims()
+        .claim(source.knots[0].1.receipt.selected)
+        .expect("canonical source line selected an existing claim");
+    if !claim.validity.bounds().contains_key(axis) {
+        return Err(invalid(
+            "each thermal source must explicitly bound the temperature coordinate",
+        ));
+    }
+    if claim.validity.bounds().keys().any(|name| {
+        name != axis
+            && (name == "T"
+                || lower
+                    .axis_quantities()
+                    .get(name)
+                    .is_some_and(|q| q.dims() == TEMPERATURE))
+    }) {
+        return Err(invalid(
+            "a second source temperature requires an explicitly coupled thermal owner",
+        ));
+    }
+    if !claim.value.axes().all(|(name, dims)| {
+        if name == axis {
+            dims == TEMPERATURE
+        } else {
+            dims != TEMPERATURE
+                && lower
+                    .axis_quantities()
+                    .get(name)
+                    .is_some_and(|q| q.dims() == dims)
+                && (dims != INVERSE_TIME || lower.axes().get(name) == Some(&0.0))
+        }
+    }) {
+        return Err(invalid(
+            "source value axes must match the typed temperature and fixed static conditions",
+        ));
+    }
+    Ok(source)
 }
 
 fn source_value(source: &PropertyLineSlice, temperature: f64) -> f64 {
