@@ -11,6 +11,7 @@
 //! and rigid-backing formulas remain solely in [`PorousCard`].
 
 use super::{PorousAmbient, PorousCard};
+use super::permeability::IntrinsicPermeability;
 use crate::{MaterialError, gas::GasState};
 use fs_math::c64::C64;
 
@@ -29,7 +30,7 @@ use fs_math::c64::C64;
 pub struct PorousGasLaw {
     card: PorousCard,
     reference_dynamic_viscosity_pa_s: f64,
-    viscous_permeability_m2: f64,
+    viscous_permeability: IntrinsicPermeability,
 }
 
 impl PorousAmbient {
@@ -77,7 +78,7 @@ impl PorousGasLaw {
         Ok(Self {
             card,
             reference_dynamic_viscosity_pa_s,
-            viscous_permeability_m2: permeability,
+            viscous_permeability: IntrinsicPermeability::isotropic(permeability)?,
         })
     }
 
@@ -96,7 +97,14 @@ impl PorousGasLaw {
     /// Intrinsic viscous permeability [m2], unchanged by gas substitution.
     #[must_use]
     pub const fn viscous_permeability_m2(&self) -> f64 {
-        self.viscous_permeability_m2
+        self.viscous_permeability.principal_m2()[0]
+    }
+
+    /// The same intrinsic pore geometry used by continuum Darcy consumers.
+    /// Acoustic frequency support alone does not qualify a steady-flow regime.
+    #[must_use]
+    pub const fn intrinsic_permeability(&self) -> IntrinsicPermeability {
+        self.viscous_permeability
     }
 
     /// Surface impedance [Pa s/m] of the gas-filled, rigid-backed layer.
@@ -127,7 +135,7 @@ impl PorousGasLaw {
         }
         let mut current = self.card.clone();
         if gas.dynamic_viscosity != self.reference_dynamic_viscosity_pa_s {
-            current.flow_resistivity = gas.dynamic_viscosity / self.viscous_permeability_m2;
+            current.flow_resistivity = gas.dynamic_viscosity / self.viscous_permeability_m2();
         }
         let impedance = current.surface_impedance_rigid(ambient, omega, thickness_m)?;
         if !impedance.re.is_finite() || !impedance.im.is_finite() || impedance.re < 0.0 {

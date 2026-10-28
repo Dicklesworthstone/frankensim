@@ -53,6 +53,8 @@ use crate::MaterialError;
 
 /// Resolve the existing rigid-frame law in a shared, changing gas state.
 pub mod gas;
+/// Typed intrinsic permeability and conservative, compressible Darcy barriers.
+pub mod permeability;
 
 /// Ambient gas seen by the equivalent fluid (SI).
 #[derive(Debug, Clone, Copy, PartialEq)]
