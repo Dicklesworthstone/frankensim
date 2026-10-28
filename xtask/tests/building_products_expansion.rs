@@ -85,7 +85,10 @@ fn temperature(p: QueryPoint, kelvin: f64) -> QueryPoint {
 }
 
 fn key(name: &str, dims: Dims) -> PropertyKey {
-    let spec = if name == "thermal-conductivity" {
+    let spec = if matches!(
+        name,
+        "thermal-conductivity" | "apparent-thermal-conductivity"
+    ) {
         assert_eq!(dims, K);
         QuantitySpec::semantic(SemanticType::new(
             QuantityKind::ThermalConductivity,
@@ -427,4 +430,172 @@ fn g0_g3_osb_and_lvl_preserve_direction_statistics_and_thickness() {
         PA,
         &p.with("source-product-kerto-s-2023", 0.0).unwrap(),
     );
+}
+
+#[test]
+fn g0_g3_pyrogel_keeps_source_points_model_opt_in_and_compressive_load() {
+    let pack = compile("aspen-pyrogel-xte-rev42", 4);
+    let unloaded = flags(&[
+        ("source-grade-aspen-pyrogel-xte-rev42", 1.0),
+        ("source-moisture-condition-known", 0.0),
+        ("source-gas-pressure-known", 0.0),
+        ("source-specimens-matched", 0.0),
+        ("source-thermal-direction-known", 0.0),
+        ("source-test-temperature-difference-known", 0.0),
+        ("source-test-thickness-known", 0.0),
+    ]);
+    let stress = 13789.514586336722;
+    let loaded = quantity(unloaded.clone(), "test-compressive-stress", PA, stress);
+    let raw = loaded
+        .clone()
+        .with_quantity(
+            "mean-test-temperature",
+            QuantitySpec::semantic(SemanticType::new(
+                QuantityKind::AbsoluteTemperature,
+                ValueForm::Static,
+            )),
+            373.15,
+        )
+        .unwrap();
+    sample(&pack, "apparent-thermal-conductivity", K, &raw, 0.023);
+    assert!(matches!(
+        pack.claims().query_typed(
+            &key("apparent-thermal-conductivity", K),
+            &raw.clone().with("mean-test-temperature", 423.15).unwrap(),
+            SelectionPolicy::SingleClaimOnly,
+        ),
+        Err(fs_matdb::MatDbError::UnsupportedEvaluation { .. })
+    ));
+    let no_selectors = temperature(loaded, 423.15);
+    refuses(&pack, "thermal-conductivity", K, &no_selectors);
+    for selector in [
+        "engineering-reference-model",
+        "mean-test-temperature-as-local-model",
+    ] {
+        refuses(
+            &pack,
+            "thermal-conductivity",
+            K,
+            &quantity(no_selectors.clone(), selector, Dims::NONE, 1.0),
+        );
+    }
+    let model = quantity(
+        quantity(no_selectors, "engineering-reference-model", Dims::NONE, 1.0),
+        "mean-test-temperature-as-local-model",
+        Dims::NONE,
+        1.0,
+    );
+    sample(&pack, "thermal-conductivity", K, &model, 0.0255);
+    let answer = pack
+        .claims()
+        .query_typed(
+            &key("thermal-conductivity", K),
+            &model,
+            SelectionPolicy::SingleClaimOnly,
+        )
+        .unwrap();
+    assert_eq!(
+        answer.receipt.axis_quantities["test-compressive-stress"],
+        QuantitySpec::dimensional(PA)
+    );
+    assert!(!answer.receipt.axis_quantities.contains_key("pressure"));
+    pack.claims().verify_receipt(&answer.receipt).unwrap();
+    // A gas-pressure coordinate cannot substitute for the mechanical test load.
+    let gas_pressure = temperature(unloaded.clone(), 423.15)
+        .with_quantity(
+            "pressure",
+            QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static)),
+            stress,
+        )
+        .unwrap();
+    let gas_pressure = quantity(
+        quantity(gas_pressure, "engineering-reference-model", Dims::NONE, 1.0),
+        "mean-test-temperature-as-local-model",
+        Dims::NONE,
+        1.0,
+    );
+    refuses(&pack, "thermal-conductivity", K, &gas_pressure);
+    refuses(
+        &pack,
+        "thermal-conductivity",
+        K,
+        &model
+            .clone()
+            .with("test-compressive-stress", 101325.0)
+            .unwrap(),
+    );
+    refuses(
+        &pack,
+        "thermal-conductivity",
+        K,
+        &quantity(model.clone(), "test-compressive-stress", Dims::NONE, stress),
+    );
+    for outside in [272.15, 874.15] {
+        refuses(
+            &pack,
+            "thermal-conductivity",
+            K,
+            &model.clone().with("temperature", outside).unwrap(),
+        );
+    }
+    refuses(&pack, "specific-heat-capacity", CP, &model);
+}
+
+#[test]
+fn g0_g3_superwool_density_grades_keep_mean_temperature_and_local_models_separate() {
+    for (density, midpoint) in [(96, 0.07), (128, 0.065), (160, 0.055)] {
+        let slug = format!("morgan-superwool-plus-{density}-2025");
+        let pack = compile(&slug, 4);
+        let grade = format!("source-grade-{slug}");
+        let base = flags(&[
+            (&grade, 1.0),
+            ("source-moisture-condition-known", 0.0),
+            ("source-gas-pressure-known", 0.0),
+            ("source-specimens-matched", 0.0),
+            ("source-thermal-direction-known", 0.0),
+            ("source-test-temperature-difference-known", 0.0),
+            ("source-test-thickness-known", 0.0),
+            ("source-compressive-load-known", 0.0),
+        ]);
+        let raw = base
+            .clone()
+            .with_quantity(
+                "mean-test-temperature",
+                QuantitySpec::semantic(SemanticType::new(
+                    QuantityKind::AbsoluteTemperature,
+                    ValueForm::Static,
+                )),
+                573.15,
+            )
+            .unwrap();
+        refuses(&pack, "apparent-thermal-conductivity", K, &raw);
+        let model = quantity(
+            quantity(
+                temperature(base, 573.15),
+                "engineering-reference-model",
+                Dims::NONE,
+                1.0,
+            ),
+            "mean-test-temperature-as-local-model",
+            Dims::NONE,
+            1.0,
+        );
+        sample(&pack, "thermal-conductivity", K, &model, midpoint);
+        refuses(
+            &pack,
+            "thermal-conductivity",
+            K,
+            &model.clone().with(&grade, 0.0).unwrap(),
+        );
+        refuses(
+            &pack,
+            "thermal-conductivity",
+            K,
+            &model
+                .clone()
+                .with("mean-test-temperature-as-local-model", 0.0)
+                .unwrap(),
+        );
+        refuses(&pack, "specific-heat-capacity", CP, &model);
+    }
 }

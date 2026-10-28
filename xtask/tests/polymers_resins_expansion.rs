@@ -584,3 +584,90 @@ fn g0_g3_wood_glue_liquid_and_polyurethane_cure_remain_distinct_states() {
     );
     refuses(&resin, "young-modulus", PA, &cured);
 }
+
+#[test]
+fn g0_g3_cured_potting_resins_keep_thermal_points_and_reported_diffusivity() {
+    let diffusivity_dims = Dims([2, 0, -1, 0, 0, 0]);
+    for (grade, count, ratio, rho, cp, k, alpha) in [
+        ("834htc", 7, 10.0, 1700.0, 1300.0, 0.9, 4e-7),
+        ("832tc", 7, 1.1, 1700.0, 1400.0, 0.7, 3e-7),
+        ("832c", 7, 2.3, 1100.0, 2100.0, 0.3, 2e-7),
+        ("832fx", 6, 1.22, 1100.0, 2700.0, 0.3, 1e-7),
+        ("8810", 7, 1.7, 1200.0, 1700.0, 0.3, 1e-7),
+    ] {
+        let pack = compile(&format!("mg-chemicals-{grade}-cured-2026"), count);
+        let grade_axis = format!("source-grade-mg-{grade}");
+        let without_cure = temperature(
+            flags(&[
+                (&grade_axis, 1.0),
+                ("cured-material", 1.0),
+                ("specified-resin-to-hardener-mass-ratio", ratio),
+                ("source-moisture-condition-known", 0.0),
+                ("source-pressure-known", 0.0),
+                ("source-specimens-matched", 0.0),
+                ("source-measurement-direction-known", 0.0),
+            ]),
+            "temperature",
+            298.15,
+        );
+        let point = axis_value(
+            without_cure.clone(),
+            "source-cure-schedule-known",
+            Dims::NONE,
+            0.0,
+        );
+        for (property, dims, expected) in [
+            ("thermal-conductivity", K, k),
+            ("specific-heat-capacity", CP, cp),
+            ("thermal-diffusivity", diffusivity_dims, alpha),
+        ] {
+            sample(&pack, property, dims, &point, expected);
+            refuses(&pack, property, dims, &without_cure);
+            refuses(
+                &pack,
+                property,
+                dims,
+                &point.clone().with(&grade_axis, 0.0).unwrap(),
+            );
+            for outside in [297.15, 299.15] {
+                refuses(
+                    &pack,
+                    property,
+                    dims,
+                    &point.clone().with("temperature", outside).unwrap(),
+                );
+            }
+        }
+        // Density carries an explicitly unknown test temperature; it must not
+        // be accepted under a claim that its measurement temperature is known.
+        refuses(&pack, "density", RHO, &point);
+        let density_point = axis_value(
+            point.clone(),
+            "source-density-temperature-known",
+            Dims::NONE,
+            0.0,
+        );
+        sample(&pack, "density", RHO, &density_point, rho);
+        refuses(
+            &pack,
+            "density",
+            RHO,
+            &density_point
+                .with("source-density-temperature-known", 1.0)
+                .unwrap(),
+        );
+        if grade == "832c" {
+            let reported = pack
+                .claims()
+                .query_typed(
+                    &key("thermal-diffusivity", diffusivity_dims),
+                    &point,
+                    SelectionPolicy::SingleClaimOnly,
+                )
+                .unwrap();
+            assert_eq!(reported.evidence.value.value.to_bits(), 2e-7_f64.to_bits());
+            assert!((reported.evidence.value.value - k / (rho * cp)).abs() > 5e-8);
+            pack.claims().verify_receipt(&reported.receipt).unwrap();
+        }
+    }
+}

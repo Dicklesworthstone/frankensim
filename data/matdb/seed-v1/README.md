@@ -48,6 +48,102 @@ calculations and do not complete a transient-heating profile. Nominal density
 does not supply a density-temperature law. Service-temperature or melting
 ratings are not promoted to conductivity-domain extensions or latent heat.
 
+### Run the insulation data through a nonlinear wall
+
+The existing `material_wall` example accepts arbitrary source packs in a
+`nonlinear` mode. It retains every source knot and query receipt, then calls
+the existing `LayeredWall::solve_temperature_dependent` owner. The original
+three-path CFAST invocation remains available.
+
+For these four insulation packs, choosing the engineering curve is explicit:
+both `engineering-reference-model=1` and
+`mean-test-temperature-as-local-model=1` must be supplied. The producer's
+mean-test-temperature measurements remain separate tabulated-only claims.
+The following are authored steady planar calculations using that local-k
+approximation; they are not measurements of a 50 mm product assembly.
+
+From the repository root, in Bash:
+
+```bash
+cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/aspen-pyrogel-xte-rev42/manifest.tsv --out /tmp/pyrogel-xte.fsmatpk
+cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/morgan-superwool-plus-128-2025/manifest.tsv --out /tmp/superwool-128.fsmatpk
+
+wall_axes=(
+  --axis engineering-reference-model=1
+  --axis mean-test-temperature-as-local-model=1
+  --axis source-moisture-condition-known=0
+  --axis source-gas-pressure-known=0
+  --axis source-specimens-matched=0
+  --axis source-thermal-direction-known=0
+  --axis source-test-temperature-difference-known=0
+  --axis source-test-thickness-known=0
+)
+
+cargo run -p fs-conduction --example material_wall -- nonlinear \
+  --left-k 873.15 --right-k 473.15 --area-m2 0.01 \
+  --layer /tmp/pyrogel-xte.fsmatpk 0.05 "${wall_axes[@]}" \
+  --axis source-grade-aspen-pyrogel-xte-rev42=1 \
+  --axis test-compressive-stress=13789.514586336722
+
+cargo run -p fs-conduction --example material_wall -- nonlinear \
+  --left-k 873.15 --right-k 473.15 --area-m2 0.01 \
+  --layer /tmp/superwool-128.fsmatpk 0.05 "${wall_axes[@]}" \
+  --axis source-grade-morgan-superwool-plus-128-2025=1 \
+  --axis source-compressive-load-known=0
+```
+
+The CLI types each source axis from its claim declaration. In particular,
+Pyrogel's `test-compressive-stress` is pressure in Pa, preserving the source's
+2 psi compressive test load; it is not ambient gas pressure. The Superwool
+source leaves compressive test load unknown.
+
+For the declared 873.15 K / 473.15 K face pair, 0.05 m thickness and
+0.01 m² area, independent piecewise integration gives:
+
+| Local-k reference | Integral of k from 473.15 to 873.15 K, W/m | Heat flux, W/m² | Heat rate, W | Midplane, K |
+| --- | ---: | ---: | ---: | ---: |
+| Pyrogel XTE | 20.35 | 407 | 4.07 | 731.2251150283 |
+| Superwool Plus 96 | 37 | 740 | 7.40 | 720.0897989875 |
+| Superwool Plus 128 | 33 | 660 | 6.60 | 714.7380433164 |
+| Superwool Plus 160 | 29 | 580 | 5.80 | 720.0126966597 |
+
+These values follow from `q = integral(k(T), Tc..Th) / L`, using the stated
+linear engineering interpolation. They do not replace source uncertainty.
+To use another Superwool density, compile its own manifest and supply the
+matching grade axis; density classes are not interchangeable.
+
+The model's nonlinear midplane can also be exposed as two identical 25 mm
+layers with an explicitly zero contact resistance:
+
+```bash
+cargo run -p fs-conduction --example material_wall -- nonlinear \
+  --left-k 873.15 --right-k 473.15 --area-m2 0.01 \
+  --layer /tmp/pyrogel-xte.fsmatpk 0.025 "${wall_axes[@]}" \
+  --axis source-grade-aspen-pyrogel-xte-rev42=1 \
+  --axis test-compressive-stress=13789.514586336722 \
+  --contact 0 \
+  --layer /tmp/pyrogel-xte.fsmatpk 0.025 "${wall_axes[@]}" \
+  --axis source-grade-aspen-pyrogel-xte-rev42=1 \
+  --axis test-compressive-stress=13789.514586336722
+```
+
+The shared layer face is approximately 731.225115 K, with unchanged heat
+rate. Optional `--films LEFT RIGHT` and every `--contact R` are explicit
+scenario resistances in m² K/W. Omitted films prescribe the material face
+temperatures. Each layer owns the `--axis` entries following it; the next
+layer requires a contact declaration, including zero for ideal contact.
+
+Output includes pack/card identities, typed source-query receipts, layer
+face temperatures, signed left-to-right flux, total heat rate, secant R/U
+for that boundary pair, and numerical Fourier/boundary residuals. These
+residuals diagnose the solve and are not an error bound for the source data.
+Every layer must support the full reservoir interval. Omitted model
+selectors, wrong compressive load, undeclared axes and out-of-domain
+temperatures are refused before a successful result is printed. This
+example accepts distinct positive reservoir temperatures, up to 16 layers,
+64 axes per layer, 512 arguments, 128 KiB argument bytes, and 16 MiB per
+source pack. No heat capacity or transient behavior is inferred.
+
 ## Cured electronics-potting resins: MG Chemicals 2026
 
 Five producer grades add 34 claims for cured thermosets: 834HTC and 832TC thermally conductive epoxies, 832C translucent epoxy, 832FX flexible epoxy, and 8810 rigid polyurethane. Each pack contains cured density, thermal conductivity, specific heat capacity, independently reported thermal diffusivity, tensile strength, and electrical resistivity. Four also contain compressive strength; 832FX does not report it.
