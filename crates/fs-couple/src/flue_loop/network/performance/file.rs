@@ -20,7 +20,6 @@
 
 use super::{FlueMouthRadiation, FlueOutletConfig, FlueOutletPerformance, FlueRadiationInput};
 use crate::bernoulli_aperture::fractional::FractionalTubePolicy;
-use crate::bernoulli_aperture::contraction::ContractionSpec;
 use crate::bernoulli_aperture::network::{NetworkNode, TubeNetworkSpec, TubeSection};
 use crate::bernoulli_aperture::viscothermal::ViscothermalSectionSpec;
 use crate::bernoulli_aperture::radiation::environment::BaffledOutletBinding;
@@ -30,8 +29,6 @@ use crate::bernoulli_aperture::radiation::environment::multiport::input::{
 use crate::bernoulli_aperture::radiation::environment::multiport::source::{
     ComputedBaffledInput, ComputedBaffledRecord, MimoSourceInput, MimoSourceRecord,
 };
-use crate::flue_loop::forced_jet::ForcedJetSpec;
-use crate::flue_loop::nolle_jet::{ChannelClass, NolleSpec};
 use crate::flue_loop::window_radiation::{WindowFlux, WindowRadiationLoad, cut_up_piston};
 use crate::flue_loop::{FlueError, FlueGeometry, FlueVoice};
 use crate::flue_loop::network::{FlueNetworkSpec, FlueSourcePaths};
@@ -54,6 +51,8 @@ mod wall;
 mod material;
 mod boundary;
 mod window;
+pub(crate) mod excitation;
+use excitation::{FlueFlowInput, FlueJetInput};
 pub use wall::{FlueWallRecord, MAX_FLUE_WALL_PACK_BYTES};
 pub use window::FlueWindowRecord;
 pub use boundary::{FlueBoundaryRecord, boundary_closing_force_path, flue_source_control_paths};
@@ -111,18 +110,6 @@ impl core::fmt::Display for FlueInputError {
 }
 impl std::error::Error for FlueInputError {}
 fn bad(line: usize, what: &'static str) -> FlueInputError { FlueInputError::Input { line, what } }
-
-/// Optional `jet_response forced-bickley SPACING WINDOW`; `None` keeps the island's own chain.
-pub(crate) fn read_jet_response(rows: &mut Rows<'_>) -> Result<Option<ForcedJetSpec>, FlueInputError> {
-    if !rows.next_is("jet_response") { return Ok(None); }
-    let mut row = rows.row("jet_response")?;
-    if row.fields.next() != Some("forced-bickley") {
-        return Err(bad(rows.line, "jet_response requires forced-bickley SPACING WINDOW"));
-    }
-    let spec = ForcedJetSpec { spacing: row.scalar()?, window: row.scalar()? };
-    row.end()?;
-    Ok(Some(spec))
-}
 
 /// The held note's pressure: the highest the gesture's blowing tracks reach, the legacy target or
 /// the declared source's pressure path. It sets the Reynolds number of the forced jet's integration.
@@ -470,34 +457,7 @@ impl FlueFilePerformance {
             bore_area_m2: core::f64::consts::PI * radius_m * radius_m,
         };
         row.end()?;
-        // Optional in V1: one explicit physical/numerical windway selection.
-        let windway = if rows.next_is("windway") {
-            let mut row = rows.row("windway")?;
-            let choice = match row.fields.next() {
-                Some("none") => WindwayInput::None,
-                Some("slit") => WindwayInput::QuasiSteady { length_m: row.scalar()? },
-                Some("slit-developing") => WindwayInput::Developing { length_m: row.scalar()? },
-                Some("unsteady") => WindwayInput::Unsteady { length_m: row.scalar()?,
-                    transverse_cells: row.number()?, convection_cells: row.number()? },
-                _ => return Err(bad(rows.line, "windway requires none, slit LENGTH, slit-developing LENGTH, or unsteady LENGTH TRANSVERSE_CELLS CONVECTION_CELLS")),
-            };
-            row.end()?;
-            choice
-        } else { WindwayInput::None };
-        let mouth_loss = if rows.next_is("mouth_loss") {
-            let mut row = rows.row("mouth_loss")?;
-            let spec = match row.fields.next() {
-                Some("none") => None,
-                Some("contraction") => Some(ContractionSpec {
-                    area_ratio: row.scalar()?, maximum_contracted_mach: row.scalar()?,
-                    provenance: row.fields.next().ok_or_else(||
-                        bad(rows.line, "mouth contraction needs an explicit source token"))?.to_string(),
-                }),
-                _ => return Err(bad(rows.line, "mouth_loss requires none or contraction AREA_RATIO MAXIMUM_MACH SOURCE_TOKEN")),
-            };
-            row.end()?;
-            spec
-        } else { None };
+        let flow_input = FlueFlowInput::read(&mut rows)?;
         let card_source = rows.record("jet_card")?;
         let (card, jet_card_source) = if card_source == "tonal-interim" {
             (mint_tonal_interim_card(), "tonal-interim")
@@ -511,38 +471,7 @@ impl FlueFilePerformance {
         let voice_seed = row.number()?;
         let voice_index = row.number()?;
         row.end()?;
-        // Optional, by name (pexfp.135.5): the card reads the exit's centre speed, not the bulk speed.
-        let card_centreline = if rows.next_is("jet_speed") {
-            let mut row = rows.row("jet_speed")?;
-            if row.fields.next() != Some("card-centreline") {
-                return Err(bad(rows.line, "jet_speed requires card-centreline"));
-            }
-            row.end()?;
-            true
-        } else { false };
-        // Optional, by name: the published Nolle/Price jet transfer replaces the island's own
-        // receptivity chain (the `jet` gain above is then unused). The channel class picks the
-        // measured phase velocity (de la Cuadra 2005): `long-channel` 0.3 U0, `short-channel` 0.5 U0.
-        let jet_transfer = if rows.next_is("jet_transfer") {
-            let mut row = rows.row("jet_transfer")?;
-            if row.fields.next() != Some("nolle-price-2015") {
-                return Err(bad(rows.line, "jet_transfer requires nolle-price-2015 CHANNEL CHAMFER_DEPTH_M"));
-            }
-            let channel = match row.fields.next() {
-                Some("long-channel") => ChannelClass::Long,
-                Some("short-channel") => ChannelClass::Short,
-                _ => return Err(bad(rows.line, "jet_transfer channel must be long-channel or short-channel")),
-            };
-            let chamfer_depth_m = row.scalar()?;
-            row.end()?;
-            Some(NolleSpec::price_2015(channel, chamfer_depth_m)
-                .map_err(|what| FlueInputError::Physics(FlueError::Invalid { what }))?)
-        } else { None };
-        // Optional, by name: the forced Bickley jet's causal response replaces the same chain.
-        let jet_response = read_jet_response(&mut rows)?;
-        if jet_transfer.is_some() && jet_response.is_some() {
-            return Err(bad(rows.line, "jet_transfer and jet_response exclude each other"));
-        }
+        let jet_input = FlueJetInput::read(&mut rows)?;
         let mut row = rows.row("jet_limits")?;
         let minimum_jet_speed_m_s = row.scalar()?;
         let maximum_jet_mach = row.scalar()?;
@@ -662,40 +591,9 @@ impl FlueFilePerformance {
                 geometry, source, walls, policy, mechanics_rate_hz, voice_seed, voice_index, gate)
                 .map_err(FlueInputError::Physics)?, Vec::new())
         };
-        let voice = match mouth_loss {
-            Some(spec) => voice.with_mouth_contraction(spec).map_err(FlueInputError::Physics)?,
-            None => voice,
-        };
-        let voice = match windway {
-            WindwayInput::None => voice,
-            WindwayInput::QuasiSteady { length_m } =>
-                voice.with_viscous_windway(length_m).map_err(FlueInputError::Physics)?,
-            WindwayInput::Developing { length_m } => voice.with_developing_windway(length_m,
-                held_blowing_pressure(&schedule, control_source.as_ref())).map_err(FlueInputError::Physics)?,
-            WindwayInput::Unsteady { length_m, transverse_cells, convection_cells } =>
-                voice.with_unsteady_windway(length_m, transverse_cells, convection_cells)
-                    .map_err(FlueInputError::Physics)?,
-        };
-        let voice = if card_centreline {
-            voice.with_card_centreline_speed(held_blowing_pressure(&schedule, control_source.as_ref()))
-                .map_err(FlueInputError::Physics)?
-        } else { voice };
-        let voice = match jet_transfer {
-            Some(spec) => voice.with_nolle_jet(spec).map_err(FlueInputError::Physics)?,
-            None => voice,
-        };
-        let voice = match jet_response {
-            Some(spec) => {
-                // The integration is one bounded attach-time task between two gate polls.
-                poll(gate)?;
-                let voice = voice.with_forced_jet(spec,
-                    held_blowing_pressure(&schedule, control_source.as_ref()))
-                    .map_err(FlueInputError::Physics)?;
-                poll(gate)?;
-                voice
-            }
-            None => voice,
-        };
+        let held_pressure_pa = held_blowing_pressure(&schedule, control_source.as_ref());
+        let voice = flow_input.attach(voice, held_pressure_pa)?;
+        let voice = jet_input.attach(voice, held_pressure_pa, gate)?;
         let voice = match &window {
             Some(record) => voice.with_window_mass(record.ladder.mass_per_density,
                 record.riser_mass_per_density).map_err(FlueInputError::Physics)?,
@@ -808,13 +706,6 @@ pub(in crate::flue_loop) fn read_mouth_aperture(rows: &mut Rows<'_>)
     }
     row.end()?;
     Ok(Some(size))
-}
-
-enum WindwayInput {
-    None,
-    QuasiSteady { length_m: f64 },
-    Developing { length_m: f64 },
-    Unsteady { length_m: f64, transverse_cells: usize, convection_cells: usize },
 }
 
 pub(in crate::flue_loop) struct Rows<'a> {

@@ -15,8 +15,10 @@
 //! replacement, the original compact self reaction, or one complete shared
 //! rectangular-mouth/circular-terminal reaction. The latter includes all
 //! reciprocal cross terms and requires source quadrature over mechanical Nyquist.
-//! The `jet` row may be followed by `jet_response forced-bickley SPACING WINDOW`, which selects
-//! the forced Bickley jet (`flue_loop::forced_jet`) in place of the authored-gain chain by name.
+//! Windway, mouth-contraction and jet-source selections share the characteristic
+//! network's parser and original physical owners. Thus `jet_transfer
+//! nolle-price-2015 CHANNEL CHAMFER_DEPTH_M`, the forced Bickley response and
+//! card centreline speed retain the same source-profile validity boundaries.
 
 use super::{FlueDgConfig, FlueDgPerformance, FlueMouthRadiation};
 use crate::dg_port::input::{DgSourceError, DgSourceInput};
@@ -25,8 +27,9 @@ use crate::dg_port::input::wall::regions::{DgMaterialWallLayout, DgMaterialWallL
 use crate::flue_loop::dg::FlueDgSpec;
 use crate::flue_loop::network::performance::file::{
     FlueInputError, FluePerformanceInfo, MAX_FLUE_PERFORMANCE_BYTES, Rows,
-    held_blowing_pressure, read_jet_response,
+    held_blowing_pressure,
 };
+use crate::flue_loop::network::performance::file::excitation::{FlueFlowInput, FlueJetInput};
 use crate::flue_loop::{FlueGeometry, FlueVoice};
 use crate::pcm_wav::baffled::CircularOutletReceiver;
 use fs_aeroac::jetcard::{JetCard, mint_tonal_interim_card};
@@ -242,14 +245,7 @@ impl FlueDgFilePerformance {
             bore_area_m2: 0.0,
         };
         row.end()?;
-        let mut row = rows.row("windway")?;
-        let windway = match row.fields.next() {
-            Some("none") => None,
-            Some("slit") => Some((row.scalar()?, None)),
-            Some("unsteady") => Some((row.scalar()?, Some((row.number()?, row.number()?)))),
-            _ => return Err(bad(row.line, "windway requires none, slit LENGTH or unsteady LENGTH TRANSVERSE_CELLS CONVECTION_CELLS")),
-        };
-        row.end()?;
+        let flow_input = FlueFlowInput::read(&mut rows)?;
         let card_source = rows.record("jet_card")?;
         let (card, jet_card_source) = if card_source == "tonal-interim" {
             (mint_tonal_interim_card(), "tonal-interim")
@@ -265,7 +261,7 @@ impl FlueDgFilePerformance {
         let voice_seed = row.number()?;
         let voice_index = row.number()?;
         row.end()?;
-        let jet_response = read_jet_response(&mut rows)?;
+        let jet_input = FlueJetInput::read(&mut rows)?;
         let mut row = rows.row("jet_limits")?;
         let minimum_jet_speed_m_s = row.scalar()?;
         let maximum_jet_mach = row.scalar()?;
@@ -312,25 +308,9 @@ impl FlueDgFilePerformance {
             FlueDgSpec { load, minimum_jet_speed_m_s, maximum_jet_mach, max_jet_history_samples },
             sample_rate_hz, voice_seed, voice_index, gate,
         ).map_err(FlueInputError::Physics)?;
-        let voice = match windway {
-            None => voice,
-            Some((length, None)) => voice.with_viscous_windway(length)
-                .map_err(FlueInputError::Physics)?,
-            Some((length, Some((transverse, convection)))) => voice
-                .with_unsteady_windway(length, transverse, convection)
-                .map_err(FlueInputError::Physics)?,
-        };
-        let voice = match jet_response {
-            Some(spec) => {
-                // The forced jet's integration is one bounded attach-time task between two polls.
-                poll(gate)?;
-                let voice = voice.with_forced_jet(spec, held_blowing_pressure(&schedule, None))
-                    .map_err(FlueInputError::Physics)?;
-                poll(gate)?;
-                voice
-            }
-            None => voice,
-        };
+        let held_pressure_pa = held_blowing_pressure(&schedule, None);
+        let voice = flow_input.attach(voice, held_pressure_pa)?;
+        let voice = jet_input.attach(voice, held_pressure_pa, gate)?;
         let config = FlueDgConfig {
             sample_rate_hz, samples, max_block, max_controls, max_compile_work,
             maximum_abs_pressure_pa,

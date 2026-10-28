@@ -5,6 +5,7 @@ import flueExampleSource from "../../../crates/fs-couple/examples/flue-nolle.per
 import flueDgSource from "../../../crates/fs-couple/examples/flue-dg-baffled.performance?raw";
 import resolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg.performance?raw";
 import molecularFlueSource from "../../../crates/fs-couple/examples/flue-dg-molecular.performance?raw";
+import nolleMolecularFlueSource from "../../../crates/fs-couple/examples/flue-dg-nolle-molecular.performance?raw";
 import conicalMolecularFlueSource from "../../../crates/fs-couple/examples/flue-dg-conical-molecular.performance?raw";
 import fieldMolecularFlueSource from "../../../crates/fs-couple/examples/flue-dg-field-molecular.performance?raw";
 import materialReedSource from "../../../crates/fs-couple/examples/material_modal_valve/paired-walls.performance?raw";
@@ -68,6 +69,15 @@ const EXAMPLES = [
     decimate: true,
     intro: "Starter: a generic flue-driven tube uses one explicitly declared terrestrial-air relaxation law in its spatial bore and exterior microphone paths. Native decimation retains the 96 kHz mechanics. This numerical fixture uses an interim jet model; it is not a measured flute.",
     help: "dg_molecular and observer_gas molecular select the shared native relaxation law. The ISO terrestrial-air declaration has a limited composition domain: enriching oxygen or adding other gases may be refused until a compatible molecular-law declaration is supplied. The atmosphere editor changes the original gas records and preserves the selected law; it never substitutes an air law or invents molecular coefficients.",
+  },
+  {
+    name: "flue-dg-nolle-molecular.performance",
+    label: "Flute — Nolle jet, viscous windway and molecular gas",
+    renderer: "wind",
+    source: nolleMolecularFlueSource,
+    decimate: true,
+    intro: "Starter: the existing Nolle/Price jet source drives a spatial bore through a viscous windway. The bore and microphone paths retain molecular gas relaxation. Change the original atmosphere, windway, mouth or bore data and render through the shared native owners.",
+    help: "jet_transfer selects the small-signal long-channel source; windway slit derives the channel flow from gas density and viscosity. Internal and exterior gases remain separate. The ISO terrestrial-air relaxation law has a bounded composition domain. This numerical fixture is not a resolved turbulent jet or a measured flute; native decimation retains its 96 kHz mechanics.",
   },
   {
     name: "flue-dg-conical-molecular.performance",

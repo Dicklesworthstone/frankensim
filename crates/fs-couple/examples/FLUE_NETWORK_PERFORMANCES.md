@@ -521,15 +521,44 @@ Source records, in order, are `clock RATE`,
 `output SAMPLES FULL_SCALE_PA MAX_ABS_PRESSURE_PA`, `gas GAS_RECORD`,
 the shared `dg_tube` or `dg_bore` declaration and its geometry/gas-field rows,
 `flue WIDTH HEIGHT CUT_UP OFFSET ANGLE MOUTH_LOSS_REL`,
-`windway none|slit LENGTH|unsteady LENGTH TRANSVERSE_CELLS CONVECTION_CELLS`,
+optional `windway none|slit LENGTH|slit-developing LENGTH|unsteady LENGTH TRANSVERSE_CELLS CONVECTION_CELLS`,
+optional `mouth_loss none|contraction AREA_RATIO MAXIMUM_MACH SOURCE_TOKEN`,
 `jet_card tonal-interim|json CANONICAL_CARD`,
-`jet DISPLACEMENT_GAIN SEED_AMPLITUDE VOICE_SEED VOICE_INDEX`, an optional
-`jet_response forced-bickley SPACING WINDOW`,
+`jet DISPLACEMENT_GAIN SEED_AMPLITUDE VOICE_SEED VOICE_INDEX`, optional
+`jet_speed card-centreline`, `jet_transfer nolle-price-2015 CHANNEL CHAMFER_DEPTH_M`
+or `jet_response forced-bickley SPACING WINDOW`,
 `jet_limits MIN_SPEED MAX_MACH MAX_HISTORY`, `controls MAX_CONTROLS MAX_WORK`,
 and `observation inlet-pressure` or `observation baffled X Y Z RINGS ANGLES FMAX_HZ`,
 followed by the existing canonical `gesture` suffix. Pressure and optional jet-angle tracks retain their existing
 physical units and interpolation. The actual DG inlet supplies mouth bore area,
 density, viscosity and sound speed; there is no second authored inlet medium.
+
+Both bore renderers use one source-selection parser and the same `FlueVoice`
+attachments. A developing slit uses its material gas and Shah law at the held
+pressure, with its own domain checks. Card centreline speed reads that source's
+exit profile. Nolle/Price and forced Bickley transfers own their profiles and
+exclude card centreline selection and developing/unsteady windways; incompatible
+selections refuse rather than silently substituting a source law. The prescribed
+mouth contraction uses the same current-flow solve and actual inlet gas.
+
+`flue-dg-nolle-molecular.performance` connects the existing Nolle/Price transfer
+to the causal DG bore, its molecular/thermal memory, computed exterior radiation
+and molecular microphone propagation. It selects a declared long-channel
+Poiseuille windway. Changing the gas changes the viscous source velocity, jet
+forcing, bore response and exterior propagation through their original owners.
+The original `jet` displacement gain is unused by Nolle/Price; it is not another
+gain applied after the shared transfer.
+
+```sh
+cargo run --release -p fs-couple --bin music_render -- wind \
+  crates/fs-couple/examples/flue-dg-nolle-molecular.performance nolle-dg.wav --decimate
+```
+
+This remains a manufactured short-tube integration example. The Nolle/Price
+owner retains its published small-signal assumptions, blocked-pipe gain and
+declared realization error; linking it to spatial material physics does not
+qualify a measured flute or resolve the jet/edge flow. The ISO molecular law
+keeps its terrestrial-air composition domain.
 
 `DISPLACEMENT_GAIN` is the default jet chain's AUTHORED gain. The cards' 90 is
 about 7-18x the forced jet's response at each note's speaking mode (mail 7491).
@@ -539,7 +568,7 @@ WINDOW` row, in this file and in the network files after the `jet` row, selects 
 forced Bickley jet's causal response by name in place of that chain. It is
 integrated at grid SPACING [b] over WINDOW [b/U0] at the Reynolds number of the
 gesture's highest blowing pressure, and register physics is graded on 0.1 90. The
-gain is then unused. In network files it excludes `jet_transfer nolle-price-2015`.
+gain is then unused. In both source formats it excludes `jet_transfer nolle-price-2015`.
 
 During a pressure gesture the response uses the accumulated convective clock
 `tau = integral U0(t)/b dt`. Each accepted physical-time velocity interval keeps

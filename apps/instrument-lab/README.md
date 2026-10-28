@@ -296,6 +296,16 @@ admit the change. The browser neither substitutes a different law nor invents
 relaxation coefficients. This is a generic flue-tube integration fixture with an
 interim jet closure, not a measured flute or an instrument-fidelity claim.
 
+The **Flute — Nolle jet, viscous windway and molecular gas** starter opens
+`flue-dg-nolle-molecular.performance`. The characteristic-network and spatial
+duct performers now share the original windway and jet selection path, so the
+Nolle/Price transfer can drive the molecular bore without substituting another
+source model. The windway uses the inlet gas's density and viscosity; the bore
+and microphone paths retain their separately declared media. This 96 kHz
+fixture enables native decimation. The Nolle source remains a small-signal
+transfer model with its existing channel/profile domain; it does not establish
+resolved turbulent-flow or measured-flute accuracy.
+
 The **Conical flue — material gas dynamics (exploration)** starter opens
 `flue-dg-conical-molecular.performance`. Its `dg_bore` and `dg_segment cone`
 records retain the taper while the shared material law drives molecular and
