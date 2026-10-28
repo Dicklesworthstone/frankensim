@@ -8,12 +8,17 @@
 //! for a fixed resolved gradient. Neither supplies unresolved fluctuations,
 //! transition prediction, an energy equation, or a DNS/acceptance claim.
 //!
+//! [`vreman_eddy_viscosity`] additionally admits three directional filter
+//! widths, retaining grid anisotropy in Vreman's local gradient model.
+//!
 //! No model or coefficient is a default. [`SgsUse::AcceptanceRender`] is
 //! refused. The grid integration is an explicit per-step choice and never
 //! changes the constructor's molecular collision law.
 
 mod model;
 pub use model::{SgsConfig, SgsError, SgsModel, SgsUse, eddy_viscosity};
+mod vreman;
+pub use vreman::vreman_eddy_viscosity;
 
 /// Grid failures and closure refusals remain distinguishable to callers.
 #[derive(Clone, Debug)]
