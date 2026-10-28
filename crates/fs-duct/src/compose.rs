@@ -797,7 +797,10 @@ pub(crate) struct PreparedOpenHole {
     pub sigma: f64,
     pub half_series_impedance: C64,
     pub open_chimney_impedance: C64,
+    pub closed_chimney_impedance: Option<C64>,
+    pub shunt_impedance: C64,
     pub chimney_u_mouth_over_u_in: C64,
+    pub self_radiation_resistance_pa_s_m3: f64,
     pub shunt_port_reference_pa_s_m3: f64,
     pub orifice_quadratic_coeff_pa_s2_m6: f64,
 }
@@ -829,6 +832,34 @@ pub(crate) fn prepare_open_hole(
         state, exterior, hole_radius, chimney_height, bore_radius, omega, loss,
         compact_corrections, wall,
     )?;
+    let closed_chimney_impedance = if sigma < 1.0 {
+        Some(crate::chimney_line_impedance_with_wall(
+            state,
+            exterior,
+            hole_radius,
+            chimney_height,
+            omega,
+            loss,
+            Termination::Closed,
+            wall,
+        )?)
+    } else {
+        None
+    };
+    let shunt_impedance = match closed_chimney_impedance {
+        Some(z_closed) => {
+            (open.impedance.recip().scale(sigma) + z_closed.recip().scale(1.0 - sigma)).recip()
+        }
+        None => open.impedance,
+    };
+    let (z_rad_self, _) = crate::exterior::termination_impedance(
+        Termination::FlangedOpen,
+        state,
+        exterior,
+        site.effective_radius_m,
+        omega,
+    )?;
+    let self_radiation_resistance_pa_s_m3 = z_rad_self.map_or(0.0, |z| z.re.max(0.0));
     let series_length = if compact_corrections {
         fs_phs::side_hole_series_length(hole_radius, bore_radius) * sigma + extra_series_m
     } else {
@@ -852,7 +883,10 @@ pub(crate) fn prepare_open_hole(
         sigma,
         half_series_impedance: half,
         open_chimney_impedance: open.impedance,
+        closed_chimney_impedance,
+        shunt_impedance,
         chimney_u_mouth_over_u_in: open.u_mouth_over_u_in,
+        self_radiation_resistance_pa_s_m3,
         shunt_port_reference_pa_s_m3: z0_port,
         orifice_quadratic_coeff_pa_s2_m6: k_quad,
     })
@@ -1110,14 +1144,203 @@ pub(crate) fn duct_chain_in_exterior(
             }
         }
     }
-    Ok((
-        PreparedChain {
-            blocks,
-            reference_impedance: reference,
-            min_shear_number: min_shear,
-        },
-        open_holes,
-    ))
+    let mut chain = PreparedChain {
+        blocks,
+        reference_impedance: reference,
+        min_shear_number: min_shear,
+    };
+    let full_open_count = open_holes.iter().filter(|h| h.sigma >= 1.0).count();
+    if compact_corrections && full_open_count >= 2 && loss != LossModel::Lossless {
+        apply_open_hole_mutual_radiation(
+            duct,
+            state,
+            exterior,
+            omega,
+            options,
+            &mut chain,
+            &mut open_holes,
+        )?;
+    }
+    Ok((chain, open_holes))
+}
+
+/// Point-source half-space (`2π` flanged baffle) mutual radiation impedance
+/// `Z_{ij}(ω)` between two open tone-hole mouths separated by `separation_m`
+/// in `exterior`, under `fs-duct`'s pinned `e^{-iωt}` convention (`Im Z < 0` is
+/// positive inertance `Z = R - i ω L`):
+///
+/// `Z_{ij}(ω) = -i (ω ρ_ext / (2π d_{ij})) e^{i k_ext d_{ij}}`
+/// `          = (ρ_ext c_ext k_ext^2 / (2π)) (sin(k_ext d_{ij}) / (k_ext d_{ij}) - i cos(k_ext d_{ij}) / (k_ext d_{ij}))`
+///
+/// Point-source mutual terms assume `d_{ij} / b >= 4` so the piston directivity
+/// factor `2 J_1(k b) / (k b)` is within `O((k b)^2)` of unity (`Pritchard 1960`,
+/// *JASA* 32(6):730–737, Eq. 12; `Dalmont, Gazengel, Gilbert & Kergomard 1995`,
+/// *Acta Acustica* 3:423–436, Sec. 3.3, Eqs. 15–18; `Moers & Kergomard 2011`,
+/// *Acta Acust. united Ac.* 97:984–996, Sec. 2.3).
+pub(crate) fn open_hole_mutual_radiation_impedance(
+    exterior: &GasState,
+    omega: f64,
+    separation_m: f64,
+) -> C64 {
+    let k_ext = omega / exterior.sound_speed;
+    let scale = exterior.density * omega * omega
+        / (2.0 * core::f64::consts::PI * exterior.sound_speed);
+    let kd = k_ext * separation_m.abs();
+    if kd > 1.0e-9 {
+        C64::new(scale * (det::sin(kd) / kd), -scale * (det::cos(kd) / kd))
+    } else {
+        C64::from_re(scale)
+    }
+}
+
+/// External mutual radiation coupling between open/vented tone holes in the
+/// exterior half-space (`Pritchard 1960`, Eq. 12; `Dalmont, Gazengel, Gilbert &
+/// Kergomard 1995`, Sec. 3.3, Eqs. 15–18; `Moers & Kergomard 2011`, Sec. 2.3).
+///
+/// Uses the same half-space (`2π`) Green's function as the flanged self-radiation
+/// load (`flanged_pipe_impedance_with_exterior`), with the real part scaled by
+/// `sqrt(R_{ii} R_{jj}) / ((ρ_ext ω^2) / (2π c_ext))` so the `d -> 0` limit
+/// connects continuously to the multimodal flanged self resistance at all `ka`.
+/// Solving the self-consistent multi-port Thévenin equations
+/// `Z_{net,i} u_i + sum_{j != i} Z_{ij} u_j = Z_{net,i} u_i^{(0)}` yields the
+/// coupled hole flows `u_i`, and folds the full complex mutual radiation load
+/// `Delta Z_{rad,i} = sum_{j != i} Z_{ij} (u_j / u_i)` into each open chimney's
+/// shunt impedance and 2-port block while preserving 1-port passivity.
+fn apply_open_hole_mutual_radiation(
+    duct: &Duct,
+    state: &GasState,
+    exterior: &GasState,
+    omega: f64,
+    options: ComposeOptions,
+    chain: &mut PreparedChain,
+    open_holes: &mut [PreparedOpenHole],
+) -> Result<(), DuctError> {
+    let outlet_radius = duct
+        .segments
+        .last()
+        .ok_or(DuctError::EmptyDuct)?
+        .outlet_radius();
+    let (z_bell, _) = crate::exterior::termination_impedance(
+        Termination::FlangedOpen,
+        state,
+        exterior,
+        outlet_radius,
+        omega,
+    )?;
+    let Ok(flows0) = open_hole_flows(chain, open_holes, z_bell, options) else {
+        return Ok(());
+    };
+    let n = open_holes.len();
+    if flows0.len() != n {
+        return Ok(());
+    }
+    let u0: Vec<C64> = flows0.iter().map(|f| f.u_hole_over_u_in).collect();
+    let mut u = u0.clone();
+    let mut z_net = Vec::with_capacity(n);
+    for f in &flows0 {
+        let denom = C64::ONE - f.shunt_port_reflection;
+        if denom.abs() <= 1.0e-30 {
+            return Ok(());
+        }
+        z_net.push(
+            ((C64::ONE + f.shunt_port_reflection) / denom).scale(f.shunt_port_reference_pa_s_m3),
+        );
+    }
+    let r_point = exterior.density * omega * omega
+        / (2.0 * core::f64::consts::PI * exterior.sound_speed);
+    let mut z_mut = vec![C64::ZERO; n * n];
+    for i in 0..n {
+        if open_holes[i].sigma < 1.0 {
+            continue;
+        }
+        let r_ii = open_holes[i].self_radiation_resistance_pa_s_m3;
+        for j in (i + 1)..n {
+            if open_holes[j].sigma < 1.0 {
+                continue;
+            }
+            let r_jj = open_holes[j].self_radiation_resistance_pa_s_m3;
+            let d = (open_holes[i].axial_position_m - open_holes[j].axial_position_m).abs();
+            if d <= 1.0e-9 {
+                continue;
+            }
+            let z_pt = open_hole_mutual_radiation_impedance(exterior, omega, d);
+            let re_scale = if r_point > 1.0e-30 {
+                det::sqrt(r_ii * r_jj) / r_point
+            } else {
+                1.0
+            };
+            let z_ij = C64::new(z_pt.re * re_scale, z_pt.im);
+            z_mut[i * n + j] = z_ij;
+            z_mut[j * n + i] = z_ij;
+        }
+    }
+    for _ in 0..6 {
+        let mut u_next = vec![C64::ZERO; n];
+        for i in 0..n {
+            if open_holes[i].sigma < 1.0 {
+                u_next[i] = u0[i];
+                continue;
+            }
+            let mut v_mut = C64::ZERO;
+            for j in 0..n {
+                if i != j && open_holes[j].sigma >= 1.0 {
+                    v_mut = v_mut + z_mut[i * n + j] * u[j];
+                }
+            }
+            u_next[i] = u0[i] - v_mut / z_net[i];
+        }
+        u = u_next;
+    }
+    for (i, hole) in open_holes.iter_mut().enumerate() {
+        if hole.sigma < 1.0 {
+            continue;
+        }
+        let ui = u[i];
+        let ui_norm2 = ui.norm_sq();
+        if !ui_norm2.is_finite() || ui_norm2 <= 1.0e-30 {
+            continue;
+        }
+        let mut delta_z_mouth = C64::ZERO;
+        for j in 0..n {
+            if i != j && z_mut[i * n + j] != C64::ZERO {
+                delta_z_mouth = delta_z_mouth + z_mut[i * n + j] * (u[j] / ui);
+            }
+        }
+        let scale_chimney = hole.chimney_u_mouth_over_u_in.norm_sq();
+        if !scale_chimney.is_finite() || scale_chimney <= 0.0 {
+            continue;
+        }
+        let delta_r_chimney = delta_z_mouth.re.max(0.0) * scale_chimney;
+        let delta_x_chimney = delta_z_mouth.im * scale_chimney;
+        // Preserve inductive sign of the chimney below half-wave cutoff if a weakly
+        // excited hole receives out-of-phase exterior pressure from a stronger hole.
+        let new_im = if hole.open_chimney_impedance.im < 0.0 {
+            (hole.open_chimney_impedance.im + delta_x_chimney)
+                .min(0.25 * hole.open_chimney_impedance.im)
+        } else {
+            hole.open_chimney_impedance.im + delta_x_chimney
+        };
+        let new_open = C64::new(hole.open_chimney_impedance.re + delta_r_chimney, new_im);
+        if !finite(new_open) {
+            continue;
+        }
+        hole.open_chimney_impedance = new_open;
+        hole.shunt_impedance = match hole.closed_chimney_impedance {
+            Some(z_closed) => (hole.open_chimney_impedance.recip().scale(hole.sigma)
+                + z_closed.recip().scale(1.0 - hole.sigma))
+            .recip(),
+            None => hole.open_chimney_impedance,
+        };
+        let shunt = [C64::ONE, C64::ZERO, hole.shunt_impedance.recip(), C64::ONE];
+        let m = if hole.half_series_impedance == C64::ZERO {
+            shunt
+        } else {
+            let series = [C64::ONE, hole.half_series_impedance, C64::ZERO, C64::ONE];
+            crate::mul2(crate::mul2(series, shunt), series)
+        };
+        chain.blocks[hole.block_index] = TwoPort::from_abcd(m, chain.reference_impedance)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn open_hole_flows(
@@ -1239,6 +1462,20 @@ fn exterior_options(duct: &Duct, state: &GasState, exterior: &GasState) -> Compo
                 Segment::ToneHole { state, .. } if crate::hole_sigma(*state) > 0.0
             )
         });
+    let full_open_count = duct
+        .segments
+        .iter()
+        .filter(|segment| {
+            matches!(
+                segment,
+                Segment::ToneHole {
+                    state: HoleState::Open,
+                    ..
+                }
+            )
+        })
+        .count();
+    options.preserve_well_conditioned_bits &= full_open_count <= 1;
     options
 }
 

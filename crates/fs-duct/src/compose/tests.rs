@@ -1228,3 +1228,106 @@ fn open_tone_hole_flows_conserve_dc_and_match_prefix_suffix_split() {
         }
     }
 }
+
+#[test]
+fn open_hole_mutual_radiation_convention_reciprocity_coincident_limit_and_two_hole_sign() {
+    let g = gas();
+    // 1. Reciprocity Z_ij = Z_ji and hand-computed e^{-i omega t} sign:
+    // Under fs-duct's e^{-i omega t} convention, mass reactance is negative imaginary
+    // (Z = R - i omega L), so Z_ij(d) = (rho c k^2 / 2pi) * (sin(kd)/kd - i cos(kd)/kd).
+    for &hz in &[350.0, 950.0, 1250.0] {
+        let omega = TAU * hz;
+        let k = omega / g.sound_speed;
+        let scale = g.density * omega * omega / (2.0 * PI * g.sound_speed);
+        for &d in &[0.021, 0.042, 0.084] {
+            let z_ij = super::open_hole_mutual_radiation_impedance(&g, omega, d);
+            let z_ji = super::open_hole_mutual_radiation_impedance(&g, omega, -d);
+            assert_eq!(z_ij, z_ji, "reciprocity Z_ij == Z_ji at hz={hz} d={d}");
+            let kd = k * d;
+            let hand = C64::new(scale * (kd.sin() / kd), -scale * (kd.cos() / kd));
+            assert!(
+                relative(z_ij, hand) < 1.0e-14,
+                "hz={hz} d={d}: got {z_ij:?}, hand {hand:?}"
+            );
+            if kd < 0.5 * PI {
+                assert!(
+                    z_ij.re > 0.0 && z_ij.im < 0.0,
+                    "hz={hz} d={d}: expected Re > 0 and Im < 0 (positive inertance under e^(-iwt)), got {z_ij:?}"
+                );
+            }
+        }
+        // 2. Coincident limit d -> 0 approaches the existing flanged self term's low-ka Re part:
+        let b = 0.0025; // d / b >= 4 holds for d >= 0.010 m; check low-ka self radiation at b = 2.5 mm
+        let z_self = crate::flanged_pipe_impedance(&g, b, omega, crate::FLANGED_MODES).unwrap();
+        let z_d0 = super::open_hole_mutual_radiation_impedance(&g, omega, 0.0);
+        let low_ka_re = (g.density * g.sound_speed / (PI * b * b)) * 0.5 * (k * b).powi(2);
+        assert!(
+            (z_d0.re - low_ka_re).abs() / low_ka_re < 1.0e-14,
+            "d->0 exact low-ka identity failed: {} vs {}",
+            z_d0.re,
+            low_ka_re
+        );
+        let rel_self = (z_d0.re - z_self.re).abs() / z_self.re;
+        assert!(
+            rel_self < (k * b).powi(2),
+            "hz={hz}: d->0 Re(Z_ij)={} did not approach Re(Z_self)={} (rel={rel_self})",
+            z_d0.re,
+            z_self.re
+        );
+    }
+
+    // 3. Two-hole duct (d = 24 mm, b = 3.5 mm, d/b = 6.86 > 4):
+    // Verify that mutual radiation adds positive resistance (Re delta_Z > 0) and
+    // positive inertance (Im delta_Z < 0 under e^{-i omega t}) to each open chimney.
+    let (a, b, h, d) = (0.0075, 0.0035, 0.006, 0.024);
+    let two_hole = Duct {
+        segments: vec![
+            Segment::Cylinder { radius: a, length: 0.22 },
+            Segment::ToneHole {
+                hole_radius: b,
+                chimney_height: h,
+                bore_radius: a,
+                state: HoleState::Open,
+            },
+            Segment::Cylinder { radius: a, length: d },
+            Segment::ToneHole {
+                hole_radius: b,
+                chimney_height: h,
+                bore_radius: a,
+                state: HoleState::Open,
+            },
+            Segment::Cylinder { radius: a, length: 0.12 },
+        ],
+    };
+    let omega = TAU * 1150.0;
+    let options = super::exterior_options(&two_hole, &g, &g);
+    let (_, coupled_holes) = super::duct_chain_with_wall_and_holes(
+        &two_hole,
+        &g,
+        omega,
+        LossModel::Bessel,
+        WallModel::Rigid,
+        options,
+        true,
+        || false,
+    )
+    .unwrap();
+    let (uncoupled_open, _) = crate::chimney_open_response_with_wall(
+        &g,
+        &g,
+        b,
+        h,
+        a,
+        omega,
+        LossModel::Bessel,
+        true,
+        WallModel::Rigid,
+    )
+    .unwrap();
+    assert_eq!(coupled_holes.len(), 2);
+    let dz0 = coupled_holes[0].open_chimney_impedance - uncoupled_open.impedance;
+    assert!(
+        dz0.re > 0.0 && dz0.im < 0.0,
+        "coupled open hole 0 must gain positive radiation resistance (dz.re > 0) and positive inertance under e^(-iwt) (dz.im < 0), got {dz0:?}"
+    );
+}
