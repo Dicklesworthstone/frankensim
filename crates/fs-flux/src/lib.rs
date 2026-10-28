@@ -53,13 +53,15 @@ pub use gas_film::{
 #[cfg(feature = "continuum")]
 pub use material::{
     MaterialFluxError, MaterialFluxNumerics, MaterialFluxRheologyPoint, MaterialFluxRheologySample,
-    MaterialFluxRheologyStep, MaterialFluxSolution, MaterialFluxSystem,
+    MaterialFluxRheologyStep, MaterialFluxSolution, MaterialFluxSystem, MaterialStokesBoundary,
+    MaterialStokesRheologySolution,
 };
 #[cfg(feature = "continuum")]
 pub use ns::adjoint::{FluxAdjointError, FluxAdjointSolution};
 #[cfg(feature = "continuum")]
 pub use ns::boundary::{
-    StokesAssembly, StokesBoundary, StokesBoundaryError, StokesPressureReference, StokesSolution,
+    StokesAssembly, StokesBoundary, StokesBoundaryError, StokesPressureReference,
+    StokesRheologyControls, StokesRheologySolution, StokesSolution,
 };
 #[cfg(feature = "continuum")]
 pub use ns::linearization::{

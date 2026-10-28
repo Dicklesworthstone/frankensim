@@ -1,4 +1,5 @@
 //! Discrete viscosity sensitivities through the actual transposed flow system.
+#![cfg(feature = "continuum")]
 
 use fs_flux::bdm::{edge_gauss_pub, eval_basis, tri_quad};
 use fs_flux::{FluxAdjointError, FluxParams, FluxSystem, TriMesh};

@@ -1,4 +1,5 @@
 //! G1/G3: independent residual differences and nonlinear re-solve gradients.
+#![cfg(feature = "continuum")]
 
 use fs_flux::bdm::{edge_gauss_pub, eval_basis, tri_quad};
 use fs_flux::ns::linearization::{FluxLinearizationError, FluxViscosityTangent};

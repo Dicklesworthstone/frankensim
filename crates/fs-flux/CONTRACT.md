@@ -373,8 +373,9 @@ geometry and must never be labelled as volts or discharge reach.
   fixtures. `linearize_rheology` supplies constitutive/convection state
   Jacobians for prescribed-velocity boundaries. Mixed-boundary nonlinear
   Jacobians and time-dependent adjoint checkpointing remain outside that API.
-- Nonlinear/backflow and transient open-boundary conditions. Steady linear
-  Stokes velocity/total-traction boundaries are provided by the API below.
+- Nonlinear convection/backflow and transient open-boundary conditions.
+  Steady generalized-Newtonian Stokes velocity/total-traction boundaries
+  are provided by the APIs below.
 - The affine-triangle GCL receipt does not remap fields, assemble or
   advance ALE Navier–Stokes, generate mesh motion, support curved faces
   or 3-D cells, couple FSI, or certify the continuum solver. It carries
@@ -517,7 +518,7 @@ identity; and checked coefficient refusal without publishing a fallback.
 examples/pressure_channel.rs is runnable with
 cargo run -p fs-flux --example pressure_channel.
 
-This extension covers steady linear, constant-density Stokes with frozen
+The frozen-field assembly above covers steady linear, constant-density Stokes with frozen
 positive spatially varying Newtonian viscosity on the existing straight-sided
 2D triangulation. It does not add
 nonlinear convection/backflow, open-boundary time integration, pure-traction
@@ -638,3 +639,50 @@ and strict iteration/search budgets. The four constitutive-Jacobian regressions
 remain green. These establish the numerical fixed-mesh BDF1 capability, not
 experimental fluid calibration, mixed/open-boundary Newton flow, evolving
 thermal fields, variable density or a time-history adjoint.
+
+## Generalized-Newtonian mixed velocity/traction Stokes flow
+
+`FluxSystem::solve_stokes_mixed_rheology` closes steady Stokes viscosity on the
+current cell strain rate `gamma = sqrt(2 D:D)`, with the same prescribed-velocity
+and total-traction boundary ownership as the frozen-field assembly. Boundary
+samples are admitted and frozen once. The initial velocity supplies the first
+rates; the solver does not probe the material at an invented zero-shear state.
+The first solved flow establishes the boundary and continuity constraints.
+Later corrections may be under-relaxed by the caller in (0, 1], while the
+undamped update is measured so that tiny relaxation cannot manufacture
+convergence. Acceptance requires a small update and independent reassembly of
+the original and row-scaled nonlinear residuals at the accepted velocity.
+The returned `FluxSolution` residuals describe those nonlinear equations and
+are checked against the nonlinear tolerance, separately from the inner linear
+solve tolerance. Exhausted budgets or failed admission publish no solution and
+leave caller input unchanged.
+
+`MaterialFluxSystem::solve_stokes_mixed_rheology` owns the SI conversion:
+dynamic viscosity, force density in N/m^3 and total traction in Pa are divided
+by the same immutable reference density. Returned pressure is in Pa with its
+traction datum retained, and kinetic energy is in J/m. The exact original
+material response and query at every accepted endpoint cell are retained.
+A shared cell/rate cache also serves the existing material BDF1 entry; unchanged
+cell/rate queries are reused instead of re-querying sources in quadrature
+loops. Original material errors take precedence over generic solver errors,
+and changed density refuses.
+
+Four focused native tests on the pinned compiler cover an independently
+integrated open shear-thinning channel, a source-owned two-layer thickening
+flow, Newtonian reduction and refusal boundaries. Channel velocity L2 error
+falls from 0.0119366 to 0.00328519 under refinement (order 1.8613), with 2.1039%
+fine-grid outlet-flow error, divergence 6.30e-16 and nonlinear residual
+1.55e-11. The layered flow preserves physical velocity, stress and pressure at
+reference densities 2 and 7, scales kinetic energy coherently, and retains
+the exact source objects with one query per cell/state. Its velocity L2 error
+is about 3.50e-10, stress error 1.22e-10 and physical pressure error 9.68e-9 Pa.
+Both existing material BDF1 ownership/refusal regressions pass after the cache
+extraction.
+
+This entry covers fixed-geometry, steady generalized-Newtonian Stokes with
+fixed external temperature/material context and one reference density.
+It adds no nonlinear convection/backflow policy, open-boundary time integration,
+thermal evolution, viscoelastic memory or mixed-boundary constitutive tangent.
+Convergence is conditional and bounded by the caller's explicit solve budget;
+these finite fixtures do not establish continuum error bounds or production
+throughput.

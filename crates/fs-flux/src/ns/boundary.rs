@@ -10,6 +10,10 @@ use crate::bdm::edge_gauss_pub;
 use fs_sparse::Csr;
 use std::cell::Cell;
 
+#[path = "boundary/rheology.rs"]
+mod rheology;
+pub use rheology::{StokesRheologyControls, StokesRheologySolution};
+
 /// Exactly one condition must own each boundary edge of the supplied mesh.
 /// Interior edges cannot be assigned. Callbacks must be pure.
 #[derive(Clone, Copy)]
@@ -79,6 +83,8 @@ pub enum StokesBoundaryError {
     NoVelocityBoundary,
     /// This entry point admits one connected fluid domain.
     DisconnectedMesh,
+    /// The constitutive/momentum iteration refused its candidate.
+    Rheology(crate::ns::FluxRheologyError),
     /// The assembled linear system could not be factored.
     SingularSystem,
     /// An explicitly recomputed residual did not meet the requested tolerance.
@@ -191,6 +197,12 @@ impl StokesAssembly<'_, '_> {
                 scaled_relative_residual,
             });
         }
+        self.report_solution(field)
+    }
+
+    // Share the physical pressure interpretation after either checked linear
+    // convergence or checked nonlinear endpoint convergence.
+    fn report_solution(&self, field: FluxSolution) -> Result<StokesSolution, StokesBoundaryError> {
         let pressure = match self.reference {
             StokesPressureReference::MeanZero => self.system.pressure(&field.x),
             StokesPressureReference::TractionDatum => field.x[self.system.n_u..].to_vec(),
@@ -268,20 +280,17 @@ impl<'m> FluxSystem<'m> {
         force: &dyn Fn([f64; 2]) -> [f64; 2],
         boundaries: &[StokesBoundary<'_>],
     ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError> {
-        if !(params.sigma.is_finite()
-            && params.sigma > 0.0
-            && params.tol.is_finite()
-            && params.tol > 0.0)
-            || params.max_iters == 0
-        {
-            return Err(StokesBoundaryError::InvalidInput(
-                "invalid Stokes parameters",
-            ));
-        }
-        if self.mesh.tris.is_empty() {
-            return Err(StokesBoundaryError::InvalidInput("empty fluid mesh"));
-        }
-        let admitted = self.admit_stokes_boundaries(boundaries)?;
+        let admitted = self.admit_stokes_problem(params, boundaries)?;
+        self.assemble_stokes_admitted_viscosity(params, viscosity, force, &admitted)
+    }
+
+    fn assemble_stokes_admitted_viscosity<'a>(
+        &'a self,
+        params: FluxParams,
+        viscosity: &dyn Fn(usize, [f64; 2]) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        admitted: &AdmittedBoundary,
+    ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError> {
         let bad_viscosity = Cell::new(None);
         let checked_viscosity = |cell, point| {
             if bad_viscosity.get().is_some() {
@@ -315,7 +324,7 @@ impl<'m> FluxSystem<'m> {
             None,
             0.0,
             None,
-            Some(&admitted),
+            Some(admitted),
         );
         if let Some((cell, point, value)) = bad_viscosity.get() {
             return Err(StokesBoundaryError::InvalidViscosity { cell, point, value });
@@ -342,6 +351,27 @@ impl<'m> FluxSystem<'m> {
                 StokesPressureReference::MeanZero
             },
         })
+    }
+
+    fn admit_stokes_problem(
+        &self,
+        params: FluxParams,
+        boundaries: &[StokesBoundary<'_>],
+    ) -> Result<AdmittedBoundary, StokesBoundaryError> {
+        if !(params.sigma.is_finite()
+            && params.sigma > 0.0
+            && params.tol.is_finite()
+            && params.tol > 0.0)
+            || params.max_iters == 0
+        {
+            return Err(StokesBoundaryError::InvalidInput(
+                "invalid Stokes parameters",
+            ));
+        }
+        if self.mesh.tris.is_empty() {
+            return Err(StokesBoundaryError::InvalidInput("empty fluid mesh"));
+        }
+        self.admit_stokes_boundaries(boundaries)
     }
 
     pub(super) fn admit_stokes_boundaries(

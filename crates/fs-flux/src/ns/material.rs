@@ -10,17 +10,23 @@
 //!
 //! Geometry is in metres, velocity in m/s, force density in N/m³, and time
 //! in seconds. The base binding is a homogeneous Newtonian incompressible
-//! snapshot. Its rheological BDF1 entry resolves cellwise endpoint material
-//! responses at the evolving strain, retaining their exact source owners.
+//! snapshot. Its rheological BDF1 and mixed Stokes entries resolve cellwise
+//! material responses at the evolving strain, retaining their exact owners.
 //! Neither entry infers gas compressibility, phase validity or thermal evolution.
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 
 use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use fs_sparse::Csr;
 
 use crate::ns::{FluxParams, FluxRheologyError, FluxSolution, FluxSystem};
+
+#[path = "material/mixed.rs"]
+pub mod mixed;
+#[path = "material/rheology.rs"]
+mod rheology;
+pub use mixed::{MaterialStokesBoundary, MaterialStokesRheologySolution};
 
 /// Numerical choices, separate from the material's physical viscosity.
 #[derive(Clone, Copy, Debug)]
@@ -67,6 +73,8 @@ pub enum MaterialFluxError {
     },
     /// The fully implicit constitutive/momentum step refused its candidate.
     Rheology(FluxRheologyError),
+    /// Mixed-boundary admission or a checked constitutive flow solve refused.
+    Boundary(crate::ns::boundary::StokesBoundaryError),
 }
 
 impl core::fmt::Display for MaterialFluxError {
@@ -86,6 +94,7 @@ impl core::fmt::Display for MaterialFluxError {
                 "material flow: Picard did not converge in {iterations} iterations (update {update})"
             ),
             Self::Rheology(error) => write!(f, "material flow: {error}"),
+            Self::Boundary(error) => write!(f, "material flow: {error}"),
         }
     }
 }
@@ -419,90 +428,27 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> MaterialFluxSystem<'s, 'm, 'a, F> {
         relative_tolerance: f64,
         resolve: impl FnMut(MaterialFluxRheologyPoint, &FluidTransportState) -> Result<G, MaterialError>,
     ) -> Result<MaterialFluxRheologyStep<G>, MaterialFluxError> {
-        let samples: RefCell<Vec<Option<MaterialFluxRheologySample<G>>>> =
-            RefCell::new((0..self.system.mesh.tris.len()).map(|_| None).collect());
-        let source_error = RefCell::new(None);
-        let resolve = RefCell::new(resolve);
-        let result = {
-            let law = |cell: usize, _: [f64; 2], rate: f64| {
-                if source_error.borrow().is_some() {
-                    // Complete only the in-progress assembly with finite
-                    // coefficients. The checked step stops before solving it.
-                    return self.params.nu;
-                }
-                let mut samples = samples.borrow_mut();
-                if let Some(sample) = &samples[cell]
-                    && sample.point.shear_rate_per_s.to_bits() == rate.to_bits()
-                {
-                    return sample.transport.kinematic_viscosity_m2_s();
-                }
-                let response = (|| {
-                    if !rate.is_finite() || rate < 0.0 {
-                        return Err(MaterialFluxError::Invalid(
-                            "physical shear rate must be finite and nonnegative",
-                        ));
-                    }
-                    let point = MaterialFluxRheologyPoint {
-                        cell,
-                        position_m: self.system.mesh.centroids[cell],
-                        shear_rate_per_s: rate,
-                    };
-                    let material = resolve.borrow_mut()(point, &self.transport)?;
-                    let transport = material.transport_state()?;
-                    if transport.density_kg_m3() != self.transport.density_kg_m3() {
-                        return Err(MaterialFluxError::Invalid(
-                            "rheological flow must retain its constant reference density",
-                        ));
-                    }
-                    Ok(MaterialFluxRheologySample {
-                        point,
-                        material,
-                        transport,
-                    })
-                })();
-                match response {
-                    Ok(sample) => {
-                        let nu = sample.transport.kinematic_viscosity_m2_s();
-                        samples[cell] = Some(sample);
-                        nu
-                    }
-                    Err(error) => {
-                        *source_error.borrow_mut() = Some(error);
-                        self.params.nu
-                    }
-                }
-            };
-            self.with_inputs(
-                force_density,
-                boundary_velocity,
-                |acceleration, velocity| {
-                    self.system.bdf1_rheology_step_checked(
-                        self.params,
-                        &law,
-                        acceleration,
-                        velocity,
-                        previous_velocity,
-                        timestep_s,
-                        maximum_iterations,
-                        relative_tolerance,
-                        &|| source_error.borrow().is_none(),
-                    )
-                },
-            )
-        };
-        if let Some(error) = source_error.into_inner() {
-            return Err(error);
-        }
-        let step = result?.map_err(MaterialFluxError::Rheology)?;
-        let samples = samples
-            .into_inner()
-            .into_iter()
-            .map(|sample| {
-                sample.ok_or(MaterialFluxError::Invalid(
-                    "accepted flow is missing a cell material response",
-                ))
-            })
-            .collect::<Result<_, _>>()?;
+        let field =
+            rheology::RheologyField::new(&self.system.mesh.centroids, &self.transport, resolve);
+        let result = self.with_inputs(
+            force_density,
+            boundary_velocity,
+            |acceleration, velocity| {
+                self.system.bdf1_rheology_step_checked(
+                    self.params,
+                    &|cell, _, rate| field.viscosity(cell, rate),
+                    acceleration,
+                    velocity,
+                    previous_velocity,
+                    timestep_s,
+                    maximum_iterations,
+                    relative_tolerance,
+                    &|| field.is_valid(),
+                )
+            },
+        );
+        let (step, samples) =
+            field.finish(result.and_then(|step| step.map_err(MaterialFluxError::Rheology)))?;
         Ok(MaterialFluxRheologyStep {
             flow: self.physical_solution(step.solution)?,
             samples,
