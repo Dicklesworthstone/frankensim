@@ -1,0 +1,15 @@
+; Illustrative amplitude and inlet distributions, not measured statistics.
+; Original schedule is 20 W for 0.25 s, then off: amplitude scales its 5 J.
+(fsim-uncertainty-study
+  :version 1
+  :project "../heatsink-fan/heatsink-fan-pulse.fsim"
+  :samples 8 :seed 29 :wall-time 240s
+  :method monte-carlo :correlation independent :qoi "temperature-peak"
+  :geometry ((mesh :role "heatsink" :path "../heatsink-fan/heatsink.stl"
+    :unit "m" :max-hole-edges 0))
+  :materials ("../../data/reference-project/aa6061.fsmcdpk") :interfaces ()
+  :parameters (
+    (uniform :name "pulse-amplitude" :target power-schedule-scale :entity "metal"
+      :low 0.5 :high 1.5)
+    (uniform :name "inlet" :target air-inlet-temperature :entity "metal"
+      :low 293.15K :high 303.15K)))

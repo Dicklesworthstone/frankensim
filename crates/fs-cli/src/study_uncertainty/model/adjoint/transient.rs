@@ -34,6 +34,7 @@ fn admit_controls(spec: &ProjectSpec, parameters: &[UniformParameter]) -> Result
     for parameter in parameters.iter().filter(|p| p.low != p.high) {
         let supported = match parameter.target {
             Target::Power => setup.regions.iter().any(|r| r.region == parameter.entity),
+            Target::PowerScheduleScale => false,
             Target::ConvectionCoefficient | Target::ConvectionTemperature => true,
             Target::AirInletTemperature
             | Target::FanSpeedRatio
@@ -319,6 +320,8 @@ pub(super) fn coefficients(
         if parameter.low == parameter.high { return Ok(0.0); }
         let entity = parameter.entity.as_str();
         let derivative = match parameter.target {
+            Target::PowerScheduleScale => return Err(invalid(
+                "schedule-amplitude calibration requires interval-power contraction; use coordinate-secant controls")),
             Target::Power => {
                 let power = spec.power.as_deref().unwrap_or(&[]).iter()
                     .find(|row| row.region == entity)
@@ -393,4 +396,3 @@ pub(super) fn coefficients(
 #[cfg(test)]
 #[path = "transient/tests.rs"]
 mod tests;
-

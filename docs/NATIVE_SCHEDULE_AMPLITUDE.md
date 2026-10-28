@@ -1,0 +1,44 @@
+# Native transient workload amplitude
+
+The `power-schedule-scale` uncertainty target changes the amplitude of one
+named volume region's original `power-schedules` declaration. Its coordinate
+is a finite, nonnegative dimensionless multiplier, not watts or duty:
+
+```lisp
+(uniform :name "pulse" :target power-schedule-scale :entity "metal"
+  :low 0.5 :high 1.5)
+```
+
+Every sample scales all delivered-watt entries of that original schedule.
+Switch times, off intervals, source attribution, static power and duty,
+other regions, initial state and solver controls remain unchanged. Since a
+schedule already supplies delivered power, duty is not applied again.
+For the example's 20 W, 0.25 s startup pulse, the support gives 10..30 W
+and 2.5..7.5 J without changing the pulse duration or subsequent off period.
+Each candidate starts from the immutable base project, never the previous
+sample. Zero disables that region's scheduled heating without disabling its
+storage, conduction or boundary exchange. An overflowing or underflowing
+positive pulse refuses rather than being clipped or silently erased.
+
+The target requires exactly one existing schedule on a volumetric conduction
+region. A missing transient, missing/ambiguous schedule or simultaneous static
+`power` coordinate for that same overridden region refuses. An invalid base
+cannot be repaired by sampling a zero amplitude. Other model/domain refusals
+remain those of the ordinary native physical solve.
+
+```bash
+cargo run -p fs-cli --bin frankensim -- --json study examples/native-uncertainty/pulse-amplitude.fsim pulse-amplitude.db
+```
+
+The ordinary Monte Carlo, replicated QMC/LHS, independent-input Sobol and
+Bernoulli-compliance paths consume the same physical coordinate. Final and
+sampled-peak observations retain their original meanings. Coordinate-secant
+mean controls are supported; nominal-adjoint amplitude calibration requires
+its explicit interval-power contraction and currently refuses rather than
+using the unrelated static-power derivative. Retained source-independent
+resume reconstructs the same scaled schedule.
+
+The example's probability laws, capacity and fan data are illustrative.
+Schedule scaling does not assert that real workload statistics are uniform,
+that temperature is monotone in amplitude, or that a sampled peak bounds
+continuous-time temperature. No material/source authority is added.

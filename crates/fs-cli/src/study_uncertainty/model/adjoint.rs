@@ -81,6 +81,7 @@ impl Model {
 fn target_name(target: Target) -> &'static str {
     match target {
         Target::Power => "power",
+        Target::PowerScheduleScale => "power-schedule-scale",
         Target::ConvectionCoefficient => "convection-coefficient",
         Target::ConvectionTemperature => "convection-temperature",
         Target::HeatFlux => "heat-flux",

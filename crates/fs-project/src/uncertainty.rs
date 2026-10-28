@@ -27,6 +27,7 @@ use crate::{ConsequenceClass, DecisionGate, ProjectError, ProjectSpec,
     RequirementDirection, ThermalBoundaryCondition};
 
 mod contact_inputs;
+mod schedule;
 mod design;
 pub use design::{DesignControl, DesignOperatingCase, DesignPolicy};
 mod lhs;
@@ -47,6 +48,9 @@ pub const MAX_SAMPLES: usize = 256;
 pub enum Target {
     /// Declared dissipation watts; the original duty factor is retained.
     Power,
+    /// Nonnegative amplitude of one original delivered-watt schedule.
+    /// Switching times and static power/duty remain unchanged.
+    PowerScheduleScale,
     /// A declared convection coefficient, never a correlation-derived one.
     ConvectionCoefficient,
     /// A declared convection reservoir temperature.
@@ -97,7 +101,7 @@ impl Target {
             | Self::NaturalConvectionAmbient | Self::RadiationReservoirTemperature
             | Self::FixedTemperature => "K",
             Self::HeatFlux => "W/m^2",
-            Self::FanSpeedRatio => "1",
+            Self::FanSpeedRatio | Self::PowerScheduleScale => "1",
             Self::ContactPressure => "Pa",
             Self::ContactThickness | Self::ContactGap => "m",
             Self::ContactTorque => "N*m",
@@ -112,7 +116,7 @@ impl Target {
             | Self::NaturalConvectionAmbient | Self::RadiationReservoirTemperature
             | Self::FixedTemperature => dims::TEMPERATURE,
             Self::HeatFlux => dims::HEAT_FLUX,
-            Self::FanSpeedRatio => Dims::NONE,
+            Self::FanSpeedRatio | Self::PowerScheduleScale => Dims::NONE,
             Self::ContactPressure => dims::PRESSURE,
             Self::ContactThickness | Self::ContactGap => dims::LENGTH,
             Self::ContactTorque => Dims([2, 1, -2, 0, 0, 0]),
@@ -252,6 +256,7 @@ fn parse_target(node: &Node) -> Result<Target> {
     match &node.kind {
         NodeKind::Symbol(name) => Ok(match name.as_str() {
             "power" => Target::Power,
+            "power-schedule-scale" => Target::PowerScheduleScale,
             "convection-coefficient" => Target::ConvectionCoefficient,
             "convection-temperature" => Target::ConvectionTemperature,
             "air-inlet-temperature" => Target::AirInletTemperature,
@@ -431,7 +436,7 @@ impl UncertaintyStudy {
             }
             let low = quantity(p["low"], target.dims())?;
             let high = quantity(p["high"], target.dims())?;
-            if low > high || (target == Target::Power && low < 0.0)
+            if low > high || (matches!(target, Target::Power | Target::PowerScheduleScale) && low < 0.0)
                 || (matches!(target, Target::ConvectionCoefficient | Target::ConvectionTemperature
                     | Target::AirInletTemperature | Target::FanSpeedRatio
                     | Target::NaturalConvectionAmbient | Target::RadiationReservoirTemperature
@@ -520,6 +525,7 @@ impl UncertaintyStudy {
     pub fn bind(self, base: &ProjectSpec) -> Result<BoundStudy> {
         validate_project(base)?;
         design::admit(&self, base)?;
+        schedule::admit(&self, base)?;
         let metadata = base.metadata.as_ref().ok_or_else(|| error("missing metadata"))?;
         if metadata.decision_gate != DecisionGate::ScopingEstimate || metadata.consequence != ConsequenceClass::Advisory {
             return Err(error("empirical native UQ is advisory scoping, not a compliance signoff"));
@@ -626,6 +632,9 @@ fn validate_project(project: &ProjectSpec) -> Result<()> {
 fn apply(project: &mut ProjectSpec, parameter: &UniformParameter, value: f64) -> Result<()> {
     if parameter.target.contact_axis().is_some() {
         return contact_inputs::apply(project, parameter, value);
+    }
+    if parameter.target == Target::PowerScheduleScale {
+        return schedule::apply(project, parameter, value);
     }
     let mut matches = 0;
     if parameter.target == Target::Power {
