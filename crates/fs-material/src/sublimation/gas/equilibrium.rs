@@ -1,35 +1,34 @@
-//! Sublimation from a finite SOLID inventory on the original solid/liquid chart.
+//! Scalar access to the shared solid/liquid sublimation inventory owner.
 //!
-//! The bulk enthalpy stores sensible and fusion energy once. Only its solid
-//! mass supplies outgoing molecules; latent compatibility uses PURE SOLID h,
-//! never the mixture h. The original molecular and gas-energy owners supply
-//! both gross streams, reflected heat and the one accepted gas endpoint.
+//! The original equilibrium chart owns bulk sensible/fusion storage. The same
+//! SharpMeltingCaloric used by the joint chamber owns constituent admission;
+//! the original molecular law and extensive storage update own all exchange.
+//! Only initially solid mass is available for emission. Pure-solid h, not
+//! mixture h, determines compatibility with the sublimation latent heat.
 //!
-//! This reduction assumes local solid/liquid thermal equilibrium for ONE pure
-//! substance, a sharp isothermal fusion plateau and a fixed-pressure caloric
-//! chart. Exposed SOLID area is explicitly authored, not inferred from volume
-//! fraction. Liquid evaporation, solutes, mushy melting intervals, nucleation,
-//! changing pressure/volume work and automatic surface topology are absent.
-//! Complete disappearance of the solid phase refuses until an event owner can
-//! change the interface law. A finite interval remains first-order explicit.
+//! Exposed SOLID area is explicitly authored. Liquid evaporation, nucleation,
+//! alloy mushy ranges, pressure-dependent melting and moving topology are not
+//! inferred. This scalar facade refuses an all-liquid endpoint; the shared
+//! chamber can report exact completion for a surrounding interface event owner.
 
 use super::{
-    ClosedGasParcel, GasSpeciesSnapshot, GasSurfaceBinding, GasSurfaceCandidate,
-    GasSurfaceError, GasSurfaceSolve, PreparedSurface, SolidSurfaceState,
-    SpeciesBoundaryTransfer, SublimationLaw, SurfaceSnapshot, ThermochemicalGasModel,
-    admit_surface_inventory, compatibility, finish_surface, invalid, phase_at, poll,
-    positive, prepare_surface_with_endpoint, snapshot_surface, species_snapshot, validate_controls,
+    ClosedGasParcel, GasSurfaceBinding, GasSurfaceCandidate, GasSurfaceError,
+    GasSurfaceSolve, SolidSurfaceState, SpeciesBoundaryTransfer, SublimationError,
+    SublimationLaw, ThermochemicalGasModel, admit_surface_inventory, finish_surface,
+    invalid, poll, positive, species_snapshot, validate_controls,
 };
 use super::accommodation::{ReflectedHeatStep, ThermalAccommodation};
-use crate::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState};
+use super::chamber::{GasChamberSurface, mixed::{self, CondensedInventory, SharpMeltingCaloric}};
+use crate::phase::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState};
 use std::collections::BTreeMap;
 
-/// Borrow the original immutable chart; no second caloric table is constructed.
+#[cfg(test)]
+use crate::phase::EnthalpyPhaseKnot;
+
+/// Borrow the SAME admitted sharp-phase source as the joint chamber.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EquilibriumSublimation<'a> {
-    curve: &'a EquilibriumEnthalpyPhaseCurve,
-    solidus: EnthalpyPhaseKnot,
-    liquidus: EnthalpyPhaseKnot,
+    source: SharpMeltingCaloric<'a>,
 }
 
 /// Actual phase masses at the same accepted bulk enthalpy and temperature.
@@ -56,114 +55,31 @@ pub struct PhaseInventoryStep {
 }
 
 impl<'a> EquilibriumSublimation<'a> {
-    /// Admit a sharp pure-substance transition. All source knots are inspected
-    /// once; queries thereafter use the original O(log knots) state evaluator.
-    /// The plateau must obey h=h_s+f_liquid*(h_l-h_s), within binary64 roundoff.
+    /// Admit the original sharp pure-substance fusion chart once, without
+    /// constructing another interpolation table or duplicating source rules.
     pub fn new(curve: &'a EquilibriumEnthalpyPhaseCurve) -> Result<Self, GasSurfaceError> {
-        let knots = curve.knots();
-        if knots.len() > crate::phase::MAX_HEAT_CAPACITY_ENTHALPY_KNOTS {
-            return Err(invalid("equilibrium sublimation exceeds its caloric knot budget"));
-        }
-        let first_mixed = knots.iter().position(|k| k.liquid_mass_fraction > 0.0)
-            .ok_or(invalid("solid/liquid sublimation requires an explicit fusion plateau"))?;
-        if first_mixed == 0 {
-            return Err(invalid("an original pure-solid endpoint is required"));
-        }
-        let last = knots.iter().position(|k| k.liquid_mass_fraction == 1.0)
-            .ok_or(invalid("complete original fusion plateau required"))?;
-        let solidus = knots[first_mixed - 1];
-        let liquidus = knots[last];
-        let latent = liquidus.specific_enthalpy_j_kg - solidus.specific_enthalpy_j_kg;
-        if !positive(latent) || solidus.temperature_k != liquidus.temperature_k {
-            return Err(invalid("sublimation requires a sharp isothermal fusion plateau"));
-        }
-        for (i, k) in knots.iter().enumerate() {
-            if i < first_mixed {
-                if k.liquid_mass_fraction != 0.0
-                    || (i > 0 && k.temperature_k <= knots[i - 1].temperature_k) {
-                    return Err(invalid("original solid branch must be strictly sensible"));
-                }
-            } else if i <= last {
-                let fraction = (k.specific_enthalpy_j_kg - solidus.specific_enthalpy_j_kg) / latent;
-                if k.temperature_k != solidus.temperature_k
-                    || (fraction - k.liquid_mass_fraction).abs() > 128.0 * f64::EPSILON {
-                    return Err(invalid("original fusion plateau violates the pure-substance lever rule"));
-                }
-            } else if k.liquid_mass_fraction != 1.0 || k.temperature_k <= knots[i - 1].temperature_k {
-                return Err(invalid("original liquid branch must be strictly sensible"));
-            }
-        }
-        Ok(Self { curve, solidus, liquidus })
+        Ok(Self { source: SharpMeltingCaloric::new(curve)? })
     }
-
     #[must_use]
-    pub const fn curve(self) -> &'a EquilibriumEnthalpyPhaseCurve { self.curve }
-
+    pub const fn curve(self) -> &'a EquilibriumEnthalpyPhaseCurve { self.source.curve() }
+    /// Same immutable source binding for the joint/adaptive partitioned chamber.
     #[must_use]
-    pub fn fusion_latent_heat_j_kg(self) -> f64 {
-        self.liquidus.specific_enthalpy_j_kg - self.solidus.specific_enthalpy_j_kg
-    }
+    pub const fn source(self) -> SharpMeltingCaloric<'a> { self.source }
+    #[must_use]
+    pub fn fusion_latent_heat_j_kg(self) -> f64 { self.source.fusion_latent_heat_j_kg() }
 
-    /// Source-evaluated phase partition. No liquid is silently made available
-    /// for sublimation, and an entirely liquid inventory is not a solid surface.
+    /// Source-evaluated phase partition. This scalar lane requires a remaining
+    /// solid seed; liquid mass is never silently available for sublimation.
     pub fn state(self, bulk: SolidSurfaceState) -> Result<PhaseInventoryState, GasSurfaceError> {
-        if !positive(bulk.mass_kg) || !bulk.area_m2.is_finite() || bulk.area_m2 < 0.0 {
-            return Err(invalid("finite positive condensed mass and explicit solid exposure required"));
+        if !bulk.area_m2.is_finite() || bulk.area_m2 < 0.0 {
+            return Err(invalid("finite nonnegative exposed solid area required"));
         }
-        let equilibrium = self.curve.state_at_specific_enthalpy(bulk.specific_enthalpy_j_kg)
-            .map_err(|_| invalid("original equilibrium chart refused bulk enthalpy"))?;
-        let solid_mass_kg = bulk.mass_kg * equilibrium.solid_mass_fraction();
-        let liquid_mass_kg = bulk.mass_kg * equilibrium.liquid_mass_fraction();
-        if !positive(solid_mass_kg) || !liquid_mass_kg.is_finite()
-            || (equilibrium.liquid_mass_fraction() > 0.0 && liquid_mass_kg == 0.0) {
+        let state = CondensedInventory::new(self.source, bulk)?;
+        if !positive(state.solid_mass_kg) {
             return Err(invalid("solid phase is absent or its inventory is unrepresentable"));
         }
-        Ok(PhaseInventoryState { equilibrium, mass_kg: bulk.mass_kg, solid_mass_kg, liquid_mass_kg })
-    }
-
-    fn pure_solid_h(self, state: EquilibriumPhaseState) -> Result<f64, GasSurfaceError> {
-        if state.is_fully_solid() {
-            Ok(state.specific_enthalpy_j_kg())
-        } else if state.solid_mass_fraction() > 0.0 && state.temperature_k() == self.solidus.temperature_k {
-            Ok(self.solidus.specific_enthalpy_j_kg)
-        } else {
-            Err(invalid("no supported pure-solid caloric endpoint at the mixture temperature"))
-        }
-    }
-
-    pub(super) fn snapshot<L: SublimationLaw + ?Sized>(
-        self, law: &L, binding: &GasSurfaceBinding, bulk: SolidSurfaceState,
-        gas: GasSpeciesSnapshot, catalog: &ThermochemicalGasModel,
-        duration_s: f64, controls: GasSurfaceSolve,
-    ) -> Result<SurfaceSnapshot, GasSurfaceError> {
-        let initial = self.state(bulk)?;
-        let pure = SolidSurfaceState {
-            mass_kg: initial.solid_mass_kg,
-            specific_enthalpy_j_kg: self.pure_solid_h(initial.equilibrium)?,
-            area_m2: bulk.area_m2,
-        };
-        // Reuse the original kinetics and pure-solid/vapor compatibility gate.
-        // Only storage is replaced by the complete original condensed inventory.
-        let mut snapshot = snapshot_surface(law, binding, pure, gas, catalog,
-            &|_| Ok(initial.equilibrium.temperature_k()), duration_s, controls)?;
-        snapshot.solid = bulk;
-        Ok(snapshot)
-    }
-
-    pub(super) fn prepare<L: SublimationLaw + ?Sized>(
-        self, law: &L, binding: &GasSurfaceBinding, snapshot: SurfaceSnapshot,
-        catalog: &ThermochemicalGasModel, controls: GasSurfaceSolve, reflected_heat_j: f64,
-    ) -> Result<PreparedSurface, GasSurfaceError> {
-        prepare_surface_with_endpoint(binding, snapshot, controls, reflected_heat_j, |h| {
-            let state = self.state(SolidSurfaceState { specific_enthalpy_j_kg: h, ..snapshot.solid })?;
-            let t = state.equilibrium.temperature_k();
-            let properties = phase_at(law, t, snapshot.gas.molar_mass)?;
-            let vapor_h = catalog.species_specific_enthalpy_j_kg(&binding.species, t)?;
-            compatibility(vapor_h, self.pure_solid_h(state.equilibrium)?,
-                binding.solid_enthalpy_offset_j_kg, properties.latent_heat_j_kg, t,
-                controls.latent_compatibility_tolerance_j_kg)?;
-            Ok((t, properties))
-        })
+        Ok(PhaseInventoryState { equilibrium: state.caloric, mass_kg: bulk.mass_kg,
+            solid_mass_kg: state.solid_mass_kg, liquid_mass_kg: state.liquid_mass_kg })
     }
 
     /// Phase balances reconstructed from actual endpoints, not from gross rates.
@@ -190,7 +106,7 @@ impl<'a> EquilibriumSublimation<'a> {
     }
 }
 
-/// The original gas endpoint with the actual remaining solid/liquid partition.
+/// Original gas endpoint and actual remaining solid/liquid inventory.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EquilibriumSurfaceCandidate<'curve, 'catalog> {
     inventory: EquilibriumSublimation<'curve>,
@@ -199,9 +115,9 @@ pub struct EquilibriumSurfaceCandidate<'curve, 'catalog> {
     reflection: Option<ReflectedHeatStep>,
 }
 impl<'curve, 'catalog> EquilibriumSurfaceCandidate<'curve, 'catalog> {
-    /// In this opt-in path, solid() and solid_energy_change_j on the underlying
-    /// exchange describe the WHOLE condensed body, not just its solid phase.
-    /// Its recession is a vapor-transfer-equivalent thickness, not mesh motion.
+    /// Underlying solid() and solid_energy_change_j describe the WHOLE
+    /// condensed body here. Recession is a vapor-transfer-equivalent thickness,
+    /// not actual mixed-body geometry or interface motion from melting.
     #[must_use]
     pub const fn exchange(&self) -> &GasSurfaceCandidate<'catalog> { &self.exchange }
     #[must_use]
@@ -218,30 +134,33 @@ impl<'curve, 'catalog> EquilibriumSurfaceCandidate<'curve, 'catalog> {
 
 /// Sublimate/deposit at an explicitly exposed solid part of a mixed inventory.
 ///
-/// Bulk mass and h belong to the original equilibrium chart. Gross evaporation
-/// cannot spend initially liquid mass, even if cooling freezes some liquid in
-/// this interval. The accepted h may leave the latent plateau into the solid
-/// branch; complete melting refuses rather than switching to evaporation.
-/// Optional reflection acts on the SAME declared solid area. No extra fusion
-/// heat is supplied: it already resides in the original caloric coordinate.
+/// Gross emission cannot spend initially liquid mass, including material frozen
+/// later in this interval. The accepted h may leave the fusion plateau into the
+/// original solid branch. Reflection acts on the same declared solid area.
+/// No extra fusion heat is supplied: it already resides in bulk enthalpy.
+/// All intermediate preparation is private; either both owners accept or neither.
 #[allow(clippy::too_many_arguments)]
-pub fn advance_equilibrium_surface<'curve, 'catalog, L: SublimationLaw + ?Sized>(
-    inventory: EquilibriumSublimation<'curve>, law: &L, binding: &GasSurfaceBinding,
+pub fn advance_equilibrium_surface<'curve, 'catalog>(
+    inventory: EquilibriumSublimation<'curve>, law: &dyn SublimationLaw, binding: &GasSurfaceBinding,
     bulk: SolidSurfaceState, gas: &ClosedGasParcel, catalog: &'catalog ThermochemicalGasModel,
     accommodation: Option<&ThermalAccommodation>, duration_s: f64, controls: GasSurfaceSolve,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<EquilibriumSurfaceCandidate<'curve, 'catalog>, GasSurfaceError> {
     poll(&mut cancelled)?;
     validate_controls(controls, duration_s)?;
+    let caloric = |h| inventory.curve().temperature_at_specific_enthalpy(h)
+        .map_err(|_| SublimationError::Invalid("original solid/liquid caloric chart refused state"));
+    let surface = GasChamberSurface { id: 0, law, binding, solid: bulk,
+        temperature_from_enthalpy: &caloric };
     let gas_snapshot = species_snapshot(gas, catalog, &binding.species)?;
-    let snapshot = inventory.snapshot(law, binding, bulk, gas_snapshot, catalog, duration_s, controls)?;
+    let snapshot = mixed::snapshot(&surface, inventory.source, gas_snapshot, catalog, duration_s, controls)?;
     admit_surface_inventory(snapshot, duration_s, controls)?;
     let reflection = match accommodation {
         Some(law) => Some(law.evaluate(binding, gas, snapshot.temperature_k,
             bulk.area_m2, duration_s, &mut cancelled)?),
         None => None,
     };
-    let prepared = inventory.prepare(law, binding, snapshot, catalog, controls,
+    let prepared = mixed::prepare(&surface, inventory.source, snapshot, catalog, controls,
         reflection.as_ref().map_or(0.0, |row| row.heat_into_gas_j))?;
     let mut rows = BTreeMap::new();
     if let Some(reflection) = &reflection {

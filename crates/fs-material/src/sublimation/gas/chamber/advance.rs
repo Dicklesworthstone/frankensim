@@ -15,19 +15,26 @@
 //!
 //! The moving-front entry point refreshes mass-owned geometry on every trial
 //! and half step and also controls radius/thickness error. Existing entry points
-//! retain fixed areas and their original physical update.
+//! retain fixed areas and their original physical update. The partitioned entry
+//! point additionally controls BOTH condensed phase masses, resolving latent
+//! plateaus even when total mass and temperature do not change. Its source
+//! charts are borrowed across trials, not rebuilt or replaced by apparent Cp.
 //!
 //! The estimate controls local temporal error, not a rigorous global bound or
 //! experimental accuracy. It supplies no external heat, topology change,
-//! mixed-phase partition, gas-flow model or thermal event scheduling.
+//! gas-flow model or thermal event scheduling. Mixed inventory and moving
+//! pure-body geometry are separate model choices, not automatically composable.
 //! Inventory-limit refusals alone are retryable. Invalid constitutive data,
 //! unsupported caloric endpoints and cancellation remain immediate failures.
 
 /// Mass-owned changing area on this same adaptive, conservative history owner.
 pub mod moving;
+/// Actual solid/liquid inventory error control on this same adaptive owner.
+pub mod partitioned;
 
 use super::super::{ClosedGasParcel, GasSurfaceError, SublimationError, ThermochemicalGasModel};
 use super::super::accommodation::{ReflectedHeatStep, ThermalAccommodation};
+use super::mixed::{self as phase_inventory, SharpMeltingCaloric};
 use super::{
     GasChamberCandidate, GasChamberSolve, GasChamberSurface, GasChamberSurfaceStep,
     advance_chamber_with_accommodation, advance_chamber_with_gas,
@@ -39,7 +46,8 @@ use std::collections::BTreeMap;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GasChamberAdvanceSolve {
     pub step: GasChamberSolve,
-    /// Absolute error scale for each solid and EACH original gas species [kg].
+    /// Absolute error scale for each condensed body and EACH gas species [kg].
+    /// The partitioned lane also applies this to each SOLID and LIQUID mass.
     pub absolute_mass_tolerance_kg: f64,
     /// Absolute error scale for each surface and the gas [K].
     pub absolute_temperature_tolerance_k: f64,
@@ -81,6 +89,8 @@ pub struct GasSurfaceHistory {
     pub reflected_heat_into_gas_j: f64,
     /// Sum of accepted normal retreat. Fixed-area paths use dm/(rho*A);
     /// the moving path uses the geometry's actual shell displacement.
+    /// Mixed-body output is vapor-transfer-equivalent thickness, not geometry
+    /// change from fusion or a reconstructed wetting/contact boundary.
     pub recession_m: f64,
     pub surface_temperature_k: [f64; 2],
 }
@@ -214,15 +224,23 @@ fn smaller_step(requested: f64, old: f64, minimum: f64) -> Result<f64, GasChambe
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn evaluate_interval<'catalog>(
     surfaces: &[GasChamberSurface<'_>], accommodation: Option<&BTreeMap<u64, ThermalAccommodation>>,
-    geometry: Option<&moving::MovingChamberGeometry>, gas: &ClosedGasParcel,
+    geometry: Option<&moving::MovingChamberGeometry>,
+    calorics: Option<&BTreeMap<u64, SharpMeltingCaloric<'_>>>, gas: &ClosedGasParcel,
     catalog: &'catalog ThermochemicalGasModel, duration_s: f64, controls: GasChamberSolve,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<(GasChamberCandidate<'catalog>, BTreeMap<u64, ReflectedHeatStep>), GasSurfaceError> {
     if let Some(geometry) = geometry { geometry.admit_interval(surfaces, gas, &mut cancelled)?; }
-    let mut result = match accommodation {
-        Some(laws) => advance_chamber_with_accommodation(surfaces, laws, gas, catalog, duration_s, controls, &mut cancelled),
-        None => advance_chamber_with_gas(surfaces, gas, catalog, duration_s, controls, &mut cancelled)
-            .map(|endpoint| (endpoint, BTreeMap::new())),
+    let mut result = if let Some(calorics) = calorics {
+        // Reuse the joint snapshot/aggregation owner; do not construct a second
+        // per-trial phase report or reconstruct gas once per condensed body.
+        super::advance_chamber(surfaces, accommodation, Some(calorics), gas, catalog,
+            duration_s, controls, &mut cancelled)
+    } else {
+        match accommodation {
+            Some(laws) => advance_chamber_with_accommodation(surfaces, laws, gas, catalog, duration_s, controls, &mut cancelled),
+            None => advance_chamber_with_gas(surfaces, gas, catalog, duration_s, controls, &mut cancelled)
+                .map(|endpoint| (endpoint, BTreeMap::new())),
+        }
     }?;
     if let Some(geometry) = geometry { geometry.refresh_endpoint(surfaces, &mut result.0, &mut cancelled)?; }
     Ok(result)
@@ -268,10 +286,23 @@ pub fn advance_chamber_adaptive_with_accommodation<'catalog>(
     advance_history(surfaces, Some(accommodation), None, gas, catalog, duration_s, controls, cancelled)
 }
 
+// Preserve the original entry used by pure-solid and moving-body callers.
 #[allow(clippy::too_many_arguments)]
 fn advance_history<'catalog>(
     surfaces: &[GasChamberSurface<'_>], accommodation: Option<&BTreeMap<u64, ThermalAccommodation>>,
     geometry: Option<&moving::MovingChamberGeometry>, gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel, duration_s: f64, controls: GasChamberAdvanceSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<GasChamberAdvanceCandidate<'catalog>, GasChamberAdvanceError> {
+    advance_history_with_calorics(surfaces, accommodation, geometry, None,
+        gas, catalog, duration_s, controls, cancelled)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_history_with_calorics<'catalog>(
+    surfaces: &[GasChamberSurface<'_>], accommodation: Option<&BTreeMap<u64, ThermalAccommodation>>,
+    geometry: Option<&moving::MovingChamberGeometry>,
+    calorics: Option<&BTreeMap<u64, SharpMeltingCaloric<'_>>>, gas: &ClosedGasParcel,
     catalog: &'catalog ThermochemicalGasModel, duration_s: f64, controls: GasChamberAdvanceSolve,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<GasChamberAdvanceCandidate<'catalog>, GasChamberAdvanceError> {
@@ -294,6 +325,12 @@ fn advance_history<'catalog>(
         for surface in &templates {
             poll(&mut cancelled)?;
             if !laws.contains_key(&surface.id) { return Err(GasChamberAdvanceError::Invalid("missing surface accommodation")); }
+        }
+    }
+    if let Some(calorics) = calorics {
+        phase_inventory::validate_roster(&templates, calorics)?;
+        if geometry.is_some() {
+            return Err(GasChamberAdvanceError::Invalid("mixed inventories cannot infer pure-body moving geometry"));
         }
     }
     if let Some(geometry) = geometry { geometry.validate(&templates)?; }
@@ -325,7 +362,7 @@ fn advance_history<'catalog>(
         let current_gas = endpoint.as_ref().map_or(gas, |value| value.gas());
         let mut evaluate = |rows: &[GasChamberSurface<'_>], gas: &ClosedGasParcel, duration| {
             evaluations += 1;
-            evaluate_interval(rows, accommodation, geometry, gas, catalog, duration, controls.step, &mut cancelled)
+            evaluate_interval(rows, accommodation, geometry, calorics, gas, catalog, duration, controls.step, &mut cancelled)
         };
         let trial = (|| {
             // A coarse trial is an error probe, never an accepted heat history.
@@ -345,6 +382,9 @@ fn advance_history<'catalog>(
             Err(error) => return Err(error.into()),
         };
         let mut ratio = compare(&before, current_gas, catalog, &coarse, &second, controls, &mut cancelled)?;
+        if let Some(calorics) = calorics {
+            ratio = ratio.max(partitioned::compare(&before, calorics, &coarse, &second, controls, &mut cancelled)?);
+        }
         if let Some(geometry) = geometry {
             ratio = ratio.max(geometry.compare(&before, &coarse, &second, controls.relative_tolerance, &mut cancelled)?);
         }
@@ -371,7 +411,7 @@ fn advance_history<'catalog>(
         Some(endpoint) => endpoint,
         None => {
             evaluations += 1;
-            evaluate_interval(&templates, accommodation, geometry, gas, catalog, 0.0, controls.step, &mut cancelled)?.0
+            evaluate_interval(&templates, accommodation, geometry, calorics, gas, catalog, 0.0, controls.step, &mut cancelled)?.0
         }
     };
     let mut solid_energy = Sum::default();

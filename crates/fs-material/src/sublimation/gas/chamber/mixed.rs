@@ -22,7 +22,8 @@ use super::{GasChamberCandidate, GasChamberSolve, GasChamberSurface};
 use super::super::{
     ClosedGasParcel, GasSpeciesSnapshot, GasSurfaceError, GasSurfaceSolve,
     PreparedSurface, SolidSurfaceState, SurfaceSnapshot, ThermochemicalGasModel,
-    compatibility, invalid, phase_at, poll, positive, snapshot_surface,
+    compatibility, invalid, phase_at, poll, positive, prepare_surface_with_endpoint,
+    snapshot_surface,
 };
 use super::super::accommodation::{ReflectedHeatStep, ThermalAccommodation};
 
@@ -41,6 +42,9 @@ impl<'a> SharpMeltingCaloric<'a> {
     /// enthalpy above the liquid end of the plateau. No mushy data are fitted.
     pub fn new(curve: &'a EquilibriumEnthalpyPhaseCurve) -> Result<Self, GasSurfaceError> {
         let knots = curve.knots();
+        if knots.len() > crate::phase::MAX_HEAT_CAPACITY_ENTHALPY_KNOTS {
+            return Err(invalid("sharp fusion exceeds its original caloric knot budget"));
+        }
         let first_liquid = knots.iter().position(|k| k.liquid_mass_fraction > 0.0)
             .ok_or(invalid("sharp fusion requires an original solid/liquid caloric chart"))?;
         let end = knots.iter().position(|k| k.liquid_mass_fraction == 1.0)
@@ -80,6 +84,12 @@ impl<'a> SharpMeltingCaloric<'a> {
     #[must_use]
     pub const fn curve(&self) -> &'a EquilibriumEnthalpyPhaseCurve { self.curve }
 
+    /// Original plateau energy difference, not a separately supplied heat term.
+    #[must_use]
+    pub fn fusion_latent_heat_j_kg(&self) -> f64 {
+        self.liquid_at_melting_h_j_kg - self.solid_at_melting_h_j_kg
+    }
+
     /// Original-source state, including its identity. Exact all-liquid completion
     /// is a valid endpoint; a subsequent solid-interface interval must refuse.
     pub fn resolve(&self, h_j_kg: f64) -> Result<EquilibriumPhaseState, GasSurfaceError> {
@@ -100,9 +110,8 @@ impl<'a> SharpMeltingCaloric<'a> {
     }
     fn admit_density(&self, state: EquilibriumPhaseState, density: f64) -> Result<(), GasSurfaceError> {
         if !positive(density) || (density / self.solid_density(state) - 1.0).abs() > 64.0 * f64::EPSILON {
-            return Err(invalid("sublimation density disagrees with the original SOLID caloric branch"));
-        }
-        Ok(())
+            Err(invalid("sublimation density disagrees with the original SOLID caloric branch"))
+        } else { Ok(()) }
     }
 }
 
@@ -171,9 +180,9 @@ pub(super) fn validate_roster(
     Ok(())
 }
 
-// Reuse the original solid/vapor snapshot owner with the ACTUAL solid phase's
-// enthalpy and mass. Never substitute bulk enthalpy for constituent enthalpy.
-pub(super) fn snapshot(
+// Shared by the scalar facade and the joint chamber. Only the ACTUAL old solid
+// inventory and constituent h enter this original molecular snapshot.
+pub(in crate::sublimation::gas) fn snapshot(
     surface: &GasChamberSurface<'_>, caloric: SharpMeltingCaloric<'_>, gas: GasSpeciesSnapshot,
     catalog: &ThermochemicalGasModel, dt: f64, controls: GasSurfaceSolve,
 ) -> Result<SurfaceSnapshot, GasSurfaceError> {
@@ -194,57 +203,26 @@ pub(super) fn snapshot(
     }, gas, catalog, &|_| Ok(temperature), dt, controls)
 }
 
-// Same extensive energy equation as the pure-solid owner, but its storage
-// receiver is the whole condensed body and compatibility uses only solid h.
-pub(super) fn prepare(
-    surface: &GasChamberSurface<'_>, caloric: SharpMeltingCaloric<'_>, snapshot: SurfaceSnapshot,
+// One extensive update shared with the pure-solid owner. Only the caloric
+// endpoint admission differs; no duplicate storage or fusion-energy arithmetic.
+pub(in crate::sublimation::gas) fn prepare(
+    surface: &GasChamberSurface<'_>, caloric: SharpMeltingCaloric<'_>, mut snapshot: SurfaceSnapshot,
     catalog: &ThermochemicalGasModel, controls: GasSurfaceSolve, reflected_heat: f64,
 ) -> Result<PreparedSurface, GasSurfaceError> {
-    let bulk = surface.solid;
-    let dm = snapshot.transferred_mass_kg;
-    let difference = snapshot.incoming_specific_energy_j_kg
-        .map_or(0.0, |energy| snapshot.outgoing_specific_energy_j_kg - energy);
-    let phase_energy = dm * snapshot.outgoing_specific_energy_j_kg + snapshot.incoming_mass_kg * difference;
-    let energy_into_gas_j = if reflected_heat == 0.0 { phase_energy } else { phase_energy + reflected_heat };
-    let next_mass = bulk.mass_kg - dm;
-    if !reflected_heat.is_finite() || !energy_into_gas_j.is_finite() || !positive(next_mass)
-        || (dm != 0.0 && next_mass == bulk.mass_kg) {
-        return Err(invalid("mixed condensed mass or molecular energy is unrepresentable"));
-    }
-    let offset = surface.binding.solid_enthalpy_offset_j_kg;
-    let caloric_change = dm * (bulk.specific_enthalpy_j_kg + offset - snapshot.outgoing_specific_energy_j_kg)
-        - snapshot.incoming_mass_kg * difference;
-    let delta_h = if reflected_heat == 0.0 { caloric_change / next_mass }
-        else { (caloric_change - reflected_heat) / next_mass };
-    let h = bulk.specific_enthalpy_j_kg + delta_h;
-    if !delta_h.is_finite() || !h.is_finite() || (delta_h != 0.0 && h == bulk.specific_enthalpy_j_kg) {
-        return Err(invalid("mixed condensed caloric increment is unrepresentable"));
-    }
-    let final_state = caloric.resolve(h)?;
-    let temperature = final_state.temperature_k();
-    if (surface.temperature_from_enthalpy)(h)? != temperature {
-        return Err(invalid("endpoint callback disagrees with the original phase chart"));
-    }
-    let phase = phase_at(surface.law, temperature, snapshot.gas.molar_mass)?;
-    caloric.admit_density(final_state, phase.solid_density_kg_m3)?;
-    let vapor_h = catalog.species_specific_enthalpy_j_kg(&surface.binding.species, temperature)?;
-    compatibility(vapor_h, caloric.solid_enthalpy(final_state), offset, phase.latent_heat_j_kg,
-        temperature, controls.latent_compatibility_tolerance_j_kg)?;
-    let stored = next_mass * (h - bulk.specific_enthalpy_j_kg)
-        + (next_mass - bulk.mass_kg) * (bulk.specific_enthalpy_j_kg + offset);
-    let residual = stored + energy_into_gas_j;
-    if !stored.is_finite() || !residual.is_finite() || residual.abs() > controls.gas.energy_tolerance_j {
-        return Err(GasSurfaceError::EnergyBalance { residual_j: residual, tolerance_j: controls.gas.energy_tolerance_j });
-    }
-    let recession = if bulk.area_m2 == 0.0 { 0.0 } else { dm / phase.solid_density_kg_m3 / bulk.area_m2 };
-    if !recession.is_finite() { return Err(invalid("mixed solid-interface retreat is unrepresentable")); }
-    Ok(PreparedSurface {
-        solid: SolidSurfaceState { mass_kg: next_mass, specific_enthalpy_j_kg: h, area_m2: bulk.area_m2 },
-        surface_temperature_k: [snapshot.temperature_k, temperature],
-        outgoing_mass_kg: snapshot.outgoing_mass_kg, incoming_mass_kg: snapshot.incoming_mass_kg,
-        transferred_mass_kg: dm, outgoing_specific_energy_j_kg: snapshot.outgoing_specific_energy_j_kg,
-        incoming_specific_energy_j_kg: snapshot.incoming_specific_energy_j_kg,
-        energy_into_gas_j, solid_energy_change_j: stored, energy_residual_j: residual, recession_m: recession,
+    snapshot.solid = surface.solid;
+    prepare_surface_with_endpoint(surface.binding, snapshot, controls, reflected_heat, |h| {
+        let final_state = caloric.resolve(h)?;
+        let temperature = final_state.temperature_k();
+        if (surface.temperature_from_enthalpy)(h)? != temperature {
+            return Err(invalid("endpoint callback disagrees with the original phase chart"));
+        }
+        let phase = phase_at(surface.law, temperature, snapshot.gas.molar_mass)?;
+        caloric.admit_density(final_state, phase.solid_density_kg_m3)?;
+        let vapor_h = catalog.species_specific_enthalpy_j_kg(&surface.binding.species, temperature)?;
+        compatibility(vapor_h, caloric.solid_enthalpy(final_state),
+            surface.binding.solid_enthalpy_offset_j_kg, phase.latent_heat_j_kg,
+            temperature, controls.latent_compatibility_tolerance_j_kg)?;
+        Ok((temperature, phase))
     })
 }
 
