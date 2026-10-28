@@ -260,10 +260,11 @@ fn dg_wall_source_metadata(
 fn dg_wall_provenance(
     layout: &fs_couple::dg_port::input::wall::regions::DgMaterialWallLayout,
 ) -> String {
-    let source = if let Some(source) = layout.uniform_record() {
+    fn source(layout: &fs_couple::dg_port::input::wall::regions::DgMaterialWallLayout) -> String {
+        if let Some(source) = layout.uniform_record() {
         dg_wall_source_metadata(source)
     } else if layout.regions().is_empty() {
-        return ",\"solid_wall\":null,\"solid_wall_scope\":\"rigid\"".into();
+        "null".into()
     } else {
         let regions = layout.regions().iter().map(|region| {
             let interval = region.interval_m();
@@ -276,8 +277,19 @@ fn dg_wall_provenance(
         } else { "regional-isotropic-local-ring-membranes" };
         format!("{{\"model\":\"{model}\",\"regions\":[{regions}],\"band_hz\":[{:e},{:e}],\"propagator\":\"original-exact-dg\"}}",
             band[0], band[1])
+        }
+    }
+    let main = source(layout);
+    if main == "null" && layout.chimneys().is_empty() {
+        return ",\"solid_wall\":null,\"solid_wall_scope\":\"rigid\"".into();
+    }
+    let chimneys = if layout.chimneys().is_empty() { String::new() } else {
+        let records = layout.chimneys().iter().map(|chimney| format!(
+            "{{\"port\":{},\"source\":{}}}", chimney.port().0, source(chimney.layout())
+        )).collect::<Vec<_>>().join(",");
+        format!(",\"chimney_walls\":[{records}]")
     };
-    format!(",\"solid_wall\":{source},\"solid_wall_scope\":\"whole cylindrical main bore; original physical source regions aligned to DG faces; reciprocal frozen-state radial inertia and material response in the original gas propagator; side chimneys rigid; no axial shell waves or exterior wall radiation\"")
+    format!(",\"solid_wall\":{main}{chimneys},\"solid_wall_scope\":\"original cylindrical main-bore and explicitly assigned finite-chimney sources; physical regions aligned to each duct's DG faces; reciprocal frozen-state radial inertia and material response in each original gas propagator; omitted chimneys rigid; no axial shell waves or exterior wall radiation\"")
 }
 
 fn flue_boundary_provenance(p: &FlueFilePerformance) -> String {

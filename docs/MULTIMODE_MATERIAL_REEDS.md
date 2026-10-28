@@ -169,3 +169,30 @@ Independent full-matrix reference checks ran 160 simultaneous contact/flow cases
 full-matrix basis projections and 3072 six-mode two-network steps, with a maximum
 combined energy residual of 8.38e-24 J. These do not execute Rust, DKT, or the
 pressure renderer and are not experimental validation.
+
+### Materials on finite DG side branches
+
+The DG flute and material-reed performances accept material walls on the actual
+finite chimneys as well as the main bore. Inside the existing `dg_wall` block:
+
+```text
+dg_wall assembly 2
+dg_wall_main rigid
+dg_wall_chimney 7 isotropic wall.fsmcdpk 293.15 1000 0.00002 stress-free 50 2000 kelvin-voigt
+```
+
+An assembly declares exactly one main duct and distinct original finite-chimney
+port IDs. Each target accepts the same rigid, isotropic, orthotropic or
+`regions N` source syntax; a region's axial coordinates start at that target's
+inlet and must align with its own DG element faces. Omitted chimneys retain the
+existing rigid-wall model. This is a source assignment, not a new material law:
+each target uses the original local membrane/DG owner with its actual radius,
+regional gas and viscothermal history. All gas, radial wall and hereditary
+states count toward the complete DG allowance. Material artifacts are shared
+across the assembly and, in the reed path, the blade source cache.
+
+Changing only a chimney material therefore changes its coupled impedance,
+radial motion and returning pressure in the same source-to-microphone path.
+The existing thin cylindrical membrane, frozen material state and linear
+acoustic limits remain; this does not resolve axial shell waves or exterior
+radiation from the solid wall.

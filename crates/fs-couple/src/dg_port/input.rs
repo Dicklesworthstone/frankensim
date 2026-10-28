@@ -517,23 +517,25 @@ impl DgSourceInput {
                 wall.clone().bind_dg_controlled(owner, &mut || gate.is_requested())
                     .map(|bound| bound.into_duct()).map_err(DgSourceError::Physics)
             } else { Ok(owner) }
-        })
+        }, Ok)
     }
 
-    /// Bind a whole-bore source or physically positioned material regions to
-    /// the same native gas/port/radiation path. Regions never follow mesh indices.
+    /// Bind physical main-bore and optional finite-chimney wall assignments to
+    /// the same native gas/port/radiation path. Regions never follow mesh indices;
+    /// all original branch gas, wall and hereditary states enter the shared DOF budget.
     pub fn prepare_with_material_wall_layout(
         self, ambient: &GasState, dt: f64, gate: &CancelGate,
         wall: &wall::regions::DgMaterialWallLayout,
     ) -> Result<DgPortLoad, DgSourceError> {
-        self.prepare_with_solid_wall(ambient, dt, gate, wall.band_hz(),
-            |owner| wall.bind(owner, gate))
+        self.prepare_with_solid_wall(ambient, dt, gate, wall.complete_band_hz(),
+            |owner| wall.bind(owner, gate), |branches| wall.bind_chimneys(branches, gate))
     }
 
     fn prepare_with_solid_wall(
         self, ambient: &GasState, dt: f64, gate: &CancelGate,
         wall_band_hz: Option<[f64; 2]>,
         bind_wall: impl FnOnce(DgDuct) -> Result<DgDuct, DgSourceError>,
+        bind_branches: impl FnOnce(Vec<DgBranch>) -> Result<Vec<DgBranch>, DgSourceError>,
     ) -> Result<DgPortLoad, DgSourceError> {
         checkpoint(gate, self.line)?;
         if wall_band_hz.is_some_and(|band|
@@ -570,7 +572,7 @@ impl DgSourceInput {
         checkpoint(gate, self.line)?;
         let owner = bind_wall(owner)?;
         checkpoint(gate, self.line)?;
-        let branches = self.prepare_chimneys(gate)?;
+        let branches = bind_branches(self.prepare_chimneys(gate)?)?;
         let load = if let Some((controls, exterior)) = self.radiation {
             let rate = (1.0 / dt + 0.5) as u32;
             if rate == 0 || dt.to_bits() != (1.0 / f64::from(rate)).to_bits() {

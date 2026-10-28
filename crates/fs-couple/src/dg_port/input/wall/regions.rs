@@ -6,7 +6,8 @@
 use super::{DgMaterialWallInput, DgMaterialWallRecord, MAX_DG_WALL_PACK_BYTES};
 use super::super::{DgSourceError, Row, bad, checkpoint};
 use crate::bernoulli_aperture::wall::material::RegionalMaterialWallDg;
-use fs_duct::dg::DgDuct;
+use crate::dg_port::DgBranch;
+use fs_duct::dg::{DgDuct, PortId};
 use fs_exec::CancelGate;
 use fs_matdb::NormalizedMaterialCardPack;
 use std::{collections::BTreeMap, str::SplitAsciiWhitespace, sync::Arc};
@@ -29,6 +30,7 @@ enum LayoutInput {
 pub struct DgMaterialWallLayoutInput {
     line: usize,
     layout: LayoutInput,
+    chimneys: Vec<(PortId, DgMaterialWallLayoutInput)>,
 }
 
 /// Original material source and its authored physical support.
@@ -52,22 +54,85 @@ pub struct DgMaterialWallLayout {
     line: usize,
     uniform: Option<DgMaterialWallRecord>,
     regions: Vec<DgMaterialWallRegion>,
+    chimneys: Vec<DgMaterialWallChimney>,
+}
+
+/// Explicit wall source for a finite DG branch, addressed by its original port.
+#[derive(Clone, Debug)]
+pub struct DgMaterialWallChimney {
+    port: PortId,
+    layout: DgMaterialWallLayout,
+}
+
+impl DgMaterialWallChimney {
+    /// Original side-port identity, independent of authored or numerical order.
+    pub const fn port(&self) -> PortId { self.port }
+    /// Uniform or regional wall source, in coordinates from this branch inlet.
+    pub const fn layout(&self) -> &DgMaterialWallLayout { &self.layout }
 }
 
 impl DgMaterialWallLayoutInput {
     /// Read the existing rigid/isotropic row, or "regions N" followed by N rows:
     /// "dg_wall_region X_BEGIN X_END isotropic PACK T OMEGA H AXIAL FMIN FMAX LOSS".
-    /// Regions cover the whole main bore. Partial/rigid regional mixtures need
-    /// an explicit different physical owner and are not silently completed.
+    /// Regions cover the complete selected duct. An assembly names one main
+    /// duct and independently supplied finite side chimneys:
+    /// `assembly COUNT`, followed by `dg_wall_main LAYOUT` and
+    /// `dg_wall_chimney PORT_ID LAYOUT`. Each LAYOUT uses this same rigid,
+    /// isotropic, orthotropic or regional grammar; nested assemblies refuse.
+    /// Omitted chimneys retain their existing explicit rigid-wall model.
+    /// Partial rigid/material regional mixtures are not silently completed.
     pub fn read<'a, E: From<DgSourceError>>(
         line: usize,
         fields: &mut SplitAsciiWhitespace<'a>,
         next: &mut impl FnMut() -> Result<(usize, SplitAsciiWhitespace<'a>), E>,
     ) -> Result<Self, E> {
+        if fields.clone().next() == Some("assembly") {
+            let mut row = Row { line, fields };
+            row.word()?;
+            let count = row.count(MAX_DG_WALL_REGIONS + 1)?;
+            row.finish()?;
+            if count == 0 {
+                return Err(bad(line, "DG wall assembly needs one main duct and explicit branch targets").into());
+            }
+            let mut main = None;
+            let mut chimneys = Vec::new();
+            for _ in 0..count {
+                let (line, mut fields) = next()?;
+                let mut row = Row { line, fields: &mut fields };
+                let target = match row.word()? {
+                    "dg_wall_main" => {
+                        if main.is_some() {
+                            return Err(bad(line, "DG wall assembly repeats its main duct").into());
+                        }
+                        None
+                    }
+                    "dg_wall_chimney" => {
+                        let port = PortId(row.word()?.parse::<u32>()
+                            .map_err(|_| bad(line, "DG wall chimney port must be a u32 identity"))?);
+                        if chimneys.iter().any(|(previous, _)| *previous == port) {
+                            return Err(bad(line, "DG wall assembly repeats a chimney port").into());
+                        }
+                        Some(port)
+                    }
+                    _ => return Err(bad(line, "expected dg_wall_main or dg_wall_chimney").into()),
+                };
+                if row.fields.clone().next() == Some("assembly") {
+                    return Err(bad(line, "DG wall targets cannot contain nested assemblies").into());
+                }
+                let layout = Self::read(line, row.fields, next)?;
+                match target {
+                    Some(port) => chimneys.push((port, layout)),
+                    None => main = Some(layout),
+                }
+            }
+            let mut main = main.ok_or_else(|| bad(line, "DG wall assembly must declare its main duct"))?;
+            main.chimneys = chimneys;
+            return Ok(main);
+        }
         if fields.clone().next() != Some("regions") {
             let layout = DgMaterialWallInput::read(line, fields)?
                 .map_or(LayoutInput::Rigid, LayoutInput::Uniform);
-            return Ok(Self { line, layout });
+            return Ok(Self { line, layout, chimneys: Vec::new() });
         }
         let mut row = Row { line, fields };
         row.word()?;
@@ -98,7 +163,7 @@ impl DgMaterialWallLayoutInput {
             row.finish()?;
             regions.push(RegionInput { interval_m, source });
         }
-        Ok(Self { line, layout: LayoutInput::Regions(regions) })
+        Ok(Self { line, layout: LayoutInput::Regions(regions), chimneys: Vec::new() })
     }
 
     /// Resolve each original artifact once, sharing it across regions and with
@@ -110,9 +175,17 @@ impl DgMaterialWallLayoutInput {
         gate: &CancelGate,
         load: &mut impl FnMut(&str, usize) -> Result<Arc<NormalizedMaterialCardPack>, E>,
     ) -> Result<DgMaterialWallLayout, E> {
-        checkpoint(gate, self.line)?;
         let mut cache = BTreeMap::<String, Arc<NormalizedMaterialCardPack>>::new();
         let mut bytes = 0usize;
+        self.resolve_cached(gate, load, &mut cache, &mut bytes)
+    }
+
+    fn resolve_cached<E: From<DgSourceError>>(
+        self, gate: &CancelGate,
+        load: &mut impl FnMut(&str, usize) -> Result<Arc<NormalizedMaterialCardPack>, E>,
+        cache: &mut BTreeMap<String, Arc<NormalizedMaterialCardPack>>, bytes: &mut usize,
+    ) -> Result<DgMaterialWallLayout, E> {
+        checkpoint(gate, self.line)?;
         let mut resolve = |input: DgMaterialWallInput| -> Result<DgMaterialWallRecord, E> {
             checkpoint(gate, input.line())?;
             let path = input.path().to_owned();
@@ -120,9 +193,9 @@ impl DgMaterialWallLayoutInput {
                 Arc::clone(pack)
             } else {
                 let pack = load(&path, input.line())?;
-                bytes = bytes.checked_add(pack.to_bytes().len())
+                *bytes = bytes.checked_add(pack.to_bytes().len())
                     .ok_or_else(|| bad(input.line(), "DG wall source byte count overflow"))?;
-                if bytes > MAX_DG_WALL_PACK_BYTES {
+                if *bytes > MAX_DG_WALL_PACK_BYTES {
                     return Err(bad(input.line(), "complete DG wall sources exceed 8 MiB").into());
                 }
                 cache.insert(path, Arc::clone(&pack));
@@ -144,8 +217,14 @@ impl DgMaterialWallLayoutInput {
                 (None, regions)
             }
         };
-        let result = DgMaterialWallLayout { line: self.line, uniform, regions };
-        if result.band_hz().is_some_and(|band| band[0] >= band[1]) {
+        let mut chimneys = Vec::with_capacity(self.chimneys.len());
+        for (port, input) in self.chimneys {
+            chimneys.push(DgMaterialWallChimney {
+                port, layout: input.resolve_cached(gate, load, cache, bytes)?,
+            });
+        }
+        let result = DgMaterialWallLayout { line: self.line, uniform, regions, chimneys };
+        if result.complete_band_hz().is_some_and(|band| band[0] >= band[1]) {
             return Err(bad(self.line, "DG wall source regions have no common positive frequency band").into());
         }
         checkpoint(gate, self.line)?;
@@ -160,16 +239,43 @@ impl DgMaterialWallLayout {
     }
     /// Original physical regions in inlet-to-outlet order.
     pub fn regions(&self) -> &[DgMaterialWallRegion] { &self.regions }
-    /// Intersection of original applicability bands, not an accuracy certificate.
+    /// Explicit material/rigid assignments for original finite side branches.
+    pub fn chimneys(&self) -> &[DgMaterialWallChimney] { &self.chimneys }
+    /// Intersection of this duct's original applicability bands.
     pub fn band_hz(&self) -> Option<[f64; 2]> {
-        if let Some(source) = &self.uniform {
-            return Some(source.wall().band_hz());
+        self.uniform.iter().map(|source| source.wall().band_hz())
+            .chain(self.regions.iter().map(|region| region.source.wall().band_hz()))
+            .reduce(|band, next| [band[0].max(next[0]), band[1].min(next[1])])
+    }
+    /// Common source band across the main bore and all supplied finite branches.
+    pub fn complete_band_hz(&self) -> Option<[f64; 2]> {
+        self.band_hz().into_iter()
+            .chain(self.chimneys.iter().filter_map(|chimney| chimney.layout.band_hz()))
+            .reduce(|band, next| [band[0].max(next[0]), band[1].min(next[1])])
+    }
+
+    /// Bind each declared finite branch to the SAME local solid-wall owner.
+    /// Its original geometry and local gas/diffusion state remain unchanged.
+    /// Unknown targets refuse; no port is invented and no main-bore material
+    /// is implicitly copied to a chimney. The caller includes all resulting
+    /// gas, solid and hereditary states in its complete DG state allowance.
+    pub fn bind_chimneys(&self, branches: Vec<DgBranch>, gate: &CancelGate)
+        -> Result<Vec<DgBranch>, DgSourceError>
+    {
+        checkpoint(gate, self.line)?;
+        for chimney in &self.chimneys {
+            if !branches.iter().any(|branch| branch.port == chimney.port) {
+                return Err(bad(self.line, "DG wall chimney target is not an actual finite branch"));
+            }
         }
-        let first = self.regions.first()?;
-        Some(self.regions.iter().skip(1).fold(first.source.wall().band_hz(), |band, region| {
-            let next = region.source.wall().band_hz();
-            [band[0].max(next[0]), band[1].min(next[1])]
-        }))
+        branches.into_iter().map(|branch| {
+            checkpoint(gate, self.line)?;
+            let duct = match self.chimneys.iter().find(|source| source.port == branch.port) {
+                Some(source) => source.layout.bind(branch.duct, gate)?,
+                None => branch.duct,
+            };
+            Ok(DgBranch { port: branch.port, duct })
+        }).collect()
     }
 
     /// Bind to the original mesh, retaining every wall and gas memory in its

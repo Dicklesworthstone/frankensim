@@ -218,3 +218,48 @@ fn physical_wall_regions_share_reed_artifacts_and_retain_local_material_memory()
     let changed = text.replace("0.00001 stress-free", "0.00002 stress-free");
     assert_ne!(reference.0, render(build(&changed, 37)).0);
 }
+
+#[test]
+fn finite_chimney_material_shares_reed_sources_and_changes_the_original_modal_feedback() {
+    let declaration = concat!(
+        "dg_wall assembly 2\n",
+        "dg_wall_main rigid\n",
+        "dg_wall_chimney 7 isotropic blade.matpack 293.15 100 0.00002 stress-free 50 2000 maxwell 1 1 0.5 boundary_modulus boundary_time\n",
+    );
+    let text = include_str!("../../../../../../examples/material_modal_valve/paired-dg-chimney.performance")
+        .replace("audio 96000 96000 4800 20", "audio 96000 96000 512 20")
+        .replace("slit_length", &format!("{declaration}slit_length"));
+    let mut loads = 0;
+    let source = MaterialModalDgValvePerformance::from_bytes_with_sources(
+        text.as_bytes(), 37, &CancelGate::new_clock_free(), None, |path| {
+            assert_eq!(path, "blade.matpack"); loads += 1; Ok(pack(900.0, false))
+        },
+    ).unwrap();
+    assert_eq!(loads, 1);
+    assert!(source.wall_record().is_none());
+    let chimney = &source.wall_layout().chimneys()[0];
+    assert_eq!(chimney.port(), fs_duct::dg::PortId(7));
+    assert!(std::ptr::eq(chimney.layout().uniform_record().unwrap().pack(),
+        source.material_records()[0].pack()));
+    let load = source.renderer().system().load();
+    assert!(load.duct().compliant_wall().is_none());
+    let branch = &load.branches()[0];
+    assert_ne!(branch.duct().inlet_gas(), load.duct().inlet_gas());
+    assert!((branch.duct().compliant_wall().unwrap().surface_density - 0.018).abs() < 1e-15);
+    let reference = render(source);
+    assert_eq!(reference.0, render(build(&text, 1)).0);
+    let branch = &reference.1.system().load().branches()[0];
+    let state = branch.duct().compliant_wall_state(branch.state()).unwrap();
+    assert!(state.stored_energy_j > 0.0 && state.relaxation_stored_energy_j > 0.0);
+    let changed = text.replace("dg_wall_chimney 7 isotropic blade.matpack",
+        "dg_wall_chimney 7 isotropic altered.matpack");
+    let changed = build(&changed, 37);
+    assert_eq!(changed.material_records()[0].pack(), &pack(900.0, false));
+    let changed = render(changed);
+    assert_ne!(reference.0, changed.0, "only the finite branch material changed");
+    let states = |source: &LoadedDgPerformance| match source.system().aperture() {
+        LoadedAperture::Modal(valve) => valve.modal_states().to_vec(),
+        _ => panic!("the original material reed must remain active"),
+    };
+    assert_ne!(states(&reference.1), states(&changed.1));
+}
