@@ -1,0 +1,188 @@
+frankensim.matdb-source.v1
+observation	product-context	wisa-spruce-plywood-18mm-upm001-2026	Producer reference for the specified construction	Uncoated structural spruce plywood, nominal 18 mm and seven crosswise plies, with EN 314-2 Class 3 bonding. The declaration does not identify adhesive chemistry. Numeric test temperature, moisture conditioning and pressure are unstated; service classes do not supply these conditions. Nominal thickness is not measured thickness. Separate property summaries are not matched specimen measurements.
+observation	density	UPM001CPR spruce plywood	Page 2 mean density and EN 1995-1-1 racking density	Mean density is the mass-density property; the characteristic racking value has a separate role.
+observation	mechanical	18 mm seven-ply panel	Page 3 mean bending and axial MOE; characteristic bending, compression and tension strengths	Directions are parallel or perpendicular to face-veneer grain. Mean bending MOE differs from the shared compression/tension MOE. Characteristic strengths are not mean failure values or factored design allowables. No complete orthotropic tensor, creep law or through-thickness constants are inferred.
+observation	thermal	UPM001CPR spruce plywood	Page 2 declared thermal conductivity	The declaration supplies a scalar with no numeric test temperature, moisture content or heat-flow direction. It does not establish local k(T), a finite thermal domain, isotropy or heat capacity.
+observation	vapor	Uncoated UPM001CPR spruce plywood	Page 2 wet and dry water-vapor diffusion resistance factors	The wet/dry label is a discrete source method state: source-vapor-method-wet is 1 or 0. Numeric humidity endpoints, test temperature and vapor transport direction are unstated; these two factors are not a continuous moisture curve.
+scalar	mean-density	product-context,density	density	460	kg/m^3	constant
+uncertainty	mean-density	unstated	-	-	-	-
+validity	mean-density	source_grade_wisa_spruce_plywood_18mm_upm001_2026	1	1	1
+validity	mean-density	nominal_thickness	0.018	0.018	m
+validity	mean-density	ply_count	7	7	1
+validity	mean-density	surface_is_coated	0	0	1
+validity	mean-density	source_temperature_known	0	0	1
+validity	mean-density	source_moisture_condition_known	0	0	1
+validity	mean-density	source_pressure_known	0	0	1
+validity	mean-density	source_is_declared_value	1	1	1
+validity	mean-density	source_specimens_matched	0	0	1
+scalar	racking-density	product-context,density	characteristic_density_for_racking	420	kg/m^3	constant
+uncertainty	racking-density	unstated	-	-	-	-
+validity	racking-density	source_grade_wisa_spruce_plywood_18mm_upm001_2026	1	1	1
+validity	racking-density	nominal_thickness	0.018	0.018	m
+validity	racking-density	ply_count	7	7	1
+validity	racking-density	surface_is_coated	0	0	1
+validity	racking-density	source_temperature_known	0	0	1
+validity	racking-density	source_moisture_condition_known	0	0	1
+validity	racking-density	source_pressure_known	0	0	1
+validity	racking-density	source_is_declared_value	1	1	1
+validity	racking-density	source_specimens_matched	0	0	1
+scalar	declared-conductivity	product-context,thermal	thermal_conductivity	0.13	W/m/K	constant
+uncertainty	declared-conductivity	unstated	-	-	-	-
+validity	declared-conductivity	source_grade_wisa_spruce_plywood_18mm_upm001_2026	1	1	1
+validity	declared-conductivity	nominal_thickness	0.018	0.018	m
+validity	declared-conductivity	ply_count	7	7	1
+validity	declared-conductivity	surface_is_coated	0	0	1
+validity	declared-conductivity	source_temperature_known	0	0	1
+validity	declared-conductivity	source_moisture_condition_known	0	0	1
+validity	declared-conductivity	source_pressure_known	0	0	1
+validity	declared-conductivity	source_is_declared_value	1	1	1
+validity	declared-conductivity	source_specimens_matched	0	0	1
+validity	declared-conductivity	source_conductivity_direction_known	0	0	1
+scalar	bending-modulus-parallel	product-context,mechanical	bending_modulus	8170	MPa	constant
+uncertainty	bending-modulus-parallel	unstated	-	-	-	-
+validity	bending-modulus-parallel	source_grade_wisa_spruce_plywood_18mm_upm001_2026	1	1	1
+validity	bending-modulus-parallel	nominal_thickness	0.018	0.018	m
+validity	bending-modulus-parallel	ply_count	7	7	1
+validity	bending-modulus-parallel	surface_is_coated	0	0	1
+validity	bending-modulus-parallel	source_temperature_known	0	0	1
+validity	bending-modulus-parallel	source_moisture_condition_known	0	0	1
+validity	bending-modulus-parallel	source_pressure_known	0	0	1
+validity	bending-modulus-parallel	source_is_declared_value	1	1	1
+validity	bending-modulus-parallel	source_specimens_matched	0	0	1
+validity	bending-modulus-parallel	load_parallel_to_face_grain	1	1	1
+scalar	axial-modulus-parallel	product-context,mechanical	axial_modulus	6682	MPa	constant
+uncertainty	axial-modulus-parallel	unstated	-	-	-	-
+validity	axial-modulus-parallel	source_grade_wisa_spruce_plywood_18mm_upm001_2026	1	1	1
+validity	axial-modulus-parallel	nominal_thickness	0.018	0.018	m
+validity	axial-modulus-parallel	ply_count	7	7	1
+validity	axial-modulus-parallel	surface_is_coated	0	0	1
+validity	axial-modulus-parallel	source_temperature_known	0	0	1
+validity	axial-modulus-parallel	source_moisture_condition_known	0	0	1
+validity	axial-modulus-parallel	source_pressure_known	0	0	1
+validity	axial-modulus-parallel	source_is_declared_value	1	1	1
+validity	axial-modulus-parallel	source_specimens_matched	0	0	1
+validity	axial-modulus-parallel	load_parallel_to_face_grain	1	1	1
+scalar	characteristic-bending-strength-parallel	product-context,mechanical	characteristic_bending_strength	20.4	MPa	constant
+uncertainty	characteristic-bending-strength-parallel	unstated	-	-	-	-
+validity	characteristic-bending-strength-parallel	source_grade_wisa_spruce_plywood_18mm_upm001_2026	1	1	1
+validity	characteristic-bending-strength-parallel	nominal_thickness	0.018	0.018	m
+validity	characteristic-bending-strength-parallel	ply_count	7	7	1
+validity	characteristic-bending-strength-parallel	surface_is_coated	0	0	1
+validity	characteristic-bending-strength-parallel	source_temperature_known	0	0	1
+validity	characteristic-bending-strength-parallel	source_moisture_condition_known	0	0	1
+validity	characteristic-bending-strength-parallel	source_pressure_known	0	0	1
+validity	characteristic-bending-strength-parallel	source_is_declared_value	1	1	1
+validity	characteristic-bending-strength-parallel	source_specimens_matched	0	0	1
+validity	characteristic-bending-strength-parallel	load_parallel_to_face_grain	1	1	1
+scalar	characteristic-compression-strength-parallel	product-context,mechanical	characteristic_compression_strength	16.7	MPa	constant
+uncertainty	characteristic-compression-strength-parallel	unstated	-	-	-	-
+validity	characteristic-compression-strength-parallel	source_grade_wisa_spruce_plywood_18mm_upm001_2026	1	1	1
+validity	characteristic-compression-strength-parallel	nominal_thickness	0.018	0.018	m
+validity	characteristic-compression-strength-parallel	ply_count	7	7	1
+validity	characteristic-compression-strength-parallel	surface_is_coated	0	0	1
+validity	characteristic-compression-strength-parallel	source_temperature_known	0	0	1
+validity	characteristic-compression-strength-parallel	source_moisture_condition_known	0	0	1
+validity	characteristic-compression-strength-parallel	source_pressure_known	0	0	1
+validity	characteristic-compression-strength-parallel	source_is_declared_value	1	1	1
+validity	characteristic-compression-strength-parallel	source_specimens_matched	0	0	1
+validity	characteristic-compression-strength-parallel	load_parallel_to_face_grain	1	1	1
+scalar	characteristic-tensile-strength-parallel	product-context,mechanical	characteristic_tensile_strength	10.0	MPa	constant
+uncertainty	characteristic-tensile-strength-parallel	unstated	-	-	-	-
+validity	characteristic-tensile-strength-parallel	source_grade_wisa_spruce_plywood_18mm_upm001_2026	1	1	1
+validity	characteristic-tensile-strength-parallel	nominal_thickness	0.018	0.018	m
+validity	characteristic-tensile-strength-parallel	ply_count	7	7	1
+validity	characteristic-tensile-strength-parallel	surface_is_coated	0	0	1
+validity	characteristic-tensile-strength-parallel	source_temperature_known	0	0	1
+validity	characteristic-tensile-strength-parallel	source_moisture_condition_known	0	0	1
+validity	characteristic-tensile-strength-parallel	source_pressure_known	0	0	1
+validity	characteristic-tensile-strength-parallel	source_is_declared_value	1	1	1
+validity	characteristic-tensile-strength-parallel	source_specimens_matched	0	0	1
+validity	characteristic-tensile-strength-parallel	load_parallel_to_face_grain	1	1	1
+scalar	bending-modulus-perpendicular	product-context,mechanical	bending_modulus	3830	MPa	constant
+uncertainty	bending-modulus-perpendicular	unstated	-	-	-	-
+validity	bending-modulus-perpendicular	source_grade_wisa_spruce_plywood_18mm_upm001_2026	1	1	1
+validity	bending-modulus-perpendicular	nominal_thickness	0.018	0.018	m
+validity	bending-modulus-perpendicular	ply_count	7	7	1
+validity	bending-modulus-perpendicular	surface_is_coated	0	0	1
+validity	bending-modulus-perpendicular	source_temperature_known	0	0	1
+validity	bending-modulus-perpendicular	source_moisture_condition_known	0	0	1
+validity	bending-modulus-perpendicular	source_pressure_known	0	0	1
+validity	bending-modulus-perpendicular	source_is_declared_value	1	1	1
+validity	bending-modulus-perpendicular	source_specimens_matched	0	0	1
+validity	bending-modulus-perpendicular	load_parallel_to_face_grain	0	0	1
+scalar	axial-modulus-perpendicular	product-context,mechanical	axial_modulus	5318	MPa	constant
+uncertainty	axial-modulus-perpendicular	unstated	-	-	-	-
+validity	axial-modulus-perpendicular	source_grade_wisa_spruce_plywood_18mm_upm001_2026	1	1	1
+validity	axial-modulus-perpendicular	nominal_thickness	0.018	0.018	m
+validity	axial-modulus-perpendicular	ply_count	7	7	1
+validity	axial-modulus-perpendicular	surface_is_coated	0	0	1
+validity	axial-modulus-perpendicular	source_temperature_known	0	0	1
+validity	axial-modulus-perpendicular	source_moisture_condition_known	0	0	1
+validity	axial-modulus-perpendicular	source_pressure_known	0	0	1
+validity	axial-modulus-perpendicular	source_is_declared_value	1	1	1
+validity	axial-modulus-perpendicular	source_specimens_matched	0	0	1
+validity	axial-modulus-perpendicular	load_parallel_to_face_grain	0	0	1
+scalar	characteristic-bending-strength-perpendicular	product-context,mechanical	characteristic_bending_strength	13.0	MPa	constant
+uncertainty	characteristic-bending-strength-perpendicular	unstated	-	-	-	-
+validity	characteristic-bending-strength-perpendicular	source_grade_wisa_spruce_plywood_18mm_upm001_2026	1	1	1
+validity	characteristic-bending-strength-perpendicular	nominal_thickness	0.018	0.018	m
+validity	characteristic-bending-strength-perpendicular	ply_count	7	7	1
+validity	characteristic-bending-strength-perpendicular	surface_is_coated	0	0	1
+validity	characteristic-bending-strength-perpendicular	source_temperature_known	0	0	1
+validity	characteristic-bending-strength-perpendicular	source_moisture_condition_known	0	0	1
+validity	characteristic-bending-strength-perpendicular	source_pressure_known	0	0	1
+validity	characteristic-bending-strength-perpendicular	source_is_declared_value	1	1	1
+validity	characteristic-bending-strength-perpendicular	source_specimens_matched	0	0	1
+validity	characteristic-bending-strength-perpendicular	load_parallel_to_face_grain	0	0	1
+scalar	characteristic-compression-strength-perpendicular	product-context,mechanical	characteristic_compression_strength	13.3	MPa	constant
+uncertainty	characteristic-compression-strength-perpendicular	unstated	-	-	-	-
+validity	characteristic-compression-strength-perpendicular	source_grade_wisa_spruce_plywood_18mm_upm001_2026	1	1	1
+validity	characteristic-compression-strength-perpendicular	nominal_thickness	0.018	0.018	m
+validity	characteristic-compression-strength-perpendicular	ply_count	7	7	1
+validity	characteristic-compression-strength-perpendicular	surface_is_coated	0	0	1
+validity	characteristic-compression-strength-perpendicular	source_temperature_known	0	0	1
+validity	characteristic-compression-strength-perpendicular	source_moisture_condition_known	0	0	1
+validity	characteristic-compression-strength-perpendicular	source_pressure_known	0	0	1
+validity	characteristic-compression-strength-perpendicular	source_is_declared_value	1	1	1
+validity	characteristic-compression-strength-perpendicular	source_specimens_matched	0	0	1
+validity	characteristic-compression-strength-perpendicular	load_parallel_to_face_grain	0	0	1
+scalar	characteristic-tensile-strength-perpendicular	product-context,mechanical	characteristic_tensile_strength	8.0	MPa	constant
+uncertainty	characteristic-tensile-strength-perpendicular	unstated	-	-	-	-
+validity	characteristic-tensile-strength-perpendicular	source_grade_wisa_spruce_plywood_18mm_upm001_2026	1	1	1
+validity	characteristic-tensile-strength-perpendicular	nominal_thickness	0.018	0.018	m
+validity	characteristic-tensile-strength-perpendicular	ply_count	7	7	1
+validity	characteristic-tensile-strength-perpendicular	surface_is_coated	0	0	1
+validity	characteristic-tensile-strength-perpendicular	source_temperature_known	0	0	1
+validity	characteristic-tensile-strength-perpendicular	source_moisture_condition_known	0	0	1
+validity	characteristic-tensile-strength-perpendicular	source_pressure_known	0	0	1
+validity	characteristic-tensile-strength-perpendicular	source_is_declared_value	1	1	1
+validity	characteristic-tensile-strength-perpendicular	source_specimens_matched	0	0	1
+validity	characteristic-tensile-strength-perpendicular	load_parallel_to_face_grain	0	0	1
+scalar	vapor-wet	product-context,vapor	water_vapor_diffusion_resistance_factor	66	1	constant
+uncertainty	vapor-wet	unstated	-	-	-	-
+validity	vapor-wet	source_grade_wisa_spruce_plywood_18mm_upm001_2026	1	1	1
+validity	vapor-wet	nominal_thickness	0.018	0.018	m
+validity	vapor-wet	ply_count	7	7	1
+validity	vapor-wet	surface_is_coated	0	0	1
+validity	vapor-wet	source_temperature_known	0	0	1
+validity	vapor-wet	source_moisture_condition_known	0	0	1
+validity	vapor-wet	source_pressure_known	0	0	1
+validity	vapor-wet	source_is_declared_value	1	1	1
+validity	vapor-wet	source_specimens_matched	0	0	1
+validity	vapor-wet	source_vapor_method_wet	1	1	1
+validity	vapor-wet	source_vapor_humidity_endpoints_known	0	0	1
+validity	vapor-wet	source_vapor_direction_known	0	0	1
+scalar	vapor-dry	product-context,vapor	water_vapor_diffusion_resistance_factor	190	1	constant
+uncertainty	vapor-dry	unstated	-	-	-	-
+validity	vapor-dry	source_grade_wisa_spruce_plywood_18mm_upm001_2026	1	1	1
+validity	vapor-dry	nominal_thickness	0.018	0.018	m
+validity	vapor-dry	ply_count	7	7	1
+validity	vapor-dry	surface_is_coated	0	0	1
+validity	vapor-dry	source_temperature_known	0	0	1
+validity	vapor-dry	source_moisture_condition_known	0	0	1
+validity	vapor-dry	source_pressure_known	0	0	1
+validity	vapor-dry	source_is_declared_value	1	1	1
+validity	vapor-dry	source_specimens_matched	0	0	1
+validity	vapor-dry	source_vapor_method_wet	0	0	1
+validity	vapor-dry	source_vapor_humidity_endpoints_known	0	0	1
+validity	vapor-dry	source_vapor_direction_known	0	0	1

@@ -1,0 +1,465 @@
+frankensim.matdb-source.v1
+observation	product-context	steico-lvl-x-39mm-design-guide-2026	Producer reference for the specified construction	STEICO LVL X, pine and/or spruce, nominal 39 mm and 13 veneers, with three transverse veneers; uses the X thickness-at-least-27-mm mechanical column. Layer bonding and interior scarf joints use phenolic adhesive; top-surface scarf joints use melamine adhesive. The approximate production wood moisture of 9 percent is not assigned as mechanical or thermal test conditioning. Temperature, specimen moisture, pressure and covariance across property summaries are unstated. No substitution for other LVL products or lay-ups is authorized.
+observation	density	STEICO LVL X	Mechanical table: mean and fifth-percentile density	Mean density and fifth-percentile characteristic density remain separate properties; the latter is not mass density.
+observation	bending	STEICO LVL X 39 mm	Mechanical table and load diagrams A-D	Parallel/perpendicular refer to the top veneer grain. load-edgewise=1 selects edgewise loading and 0 flatwise. Mean and characteristic bending stiffness are separate. Edgewise characteristic bending strength refers to 300 mm depth; no size correction is applied. Missing performance is absent, not zero. A bending modulus does not define a full orthotropic tensor.
+observation	axial	STEICO LVL X 39 mm	Mechanical table and load diagrams E-I	Parallel characteristic tensile strength refers to 3000 mm reference length. Compression and tension are separate roles. Footnotes 1 and 2 assign the R transverse-edgewise modulus to compression, whereas X transverse moduli describe bending; these roles must not be interchanged. Strength values require separate design factors before structural design use.
+observation	shear	STEICO LVL X 39 mm	Mechanical table and load diagrams J-M	Edgewise and flatwise shear are distinct load cases. Published mean and characteristic moduli and characteristic strengths are retained separately. No missing perpendicular-edgewise shear modulus or Poisson ratio is inferred.
+observation	thermal	STEICO LVL X	Physical properties table: design thermal conductivity lambda-R	This design-reference scalar has no stated test temperature, specimen moisture or heat-flow direction. It is not a measured local-conductivity curve or evidence for a heat-capacity value.
+observation	vapor	STEICO LVL X	Physical properties table: wet and dry vapor diffusion resistance factors	source-vapor-method-wet=1 identifies wet and 0 dry. Numeric humidity endpoints, test temperature and direction are unstated; no interpolation between these method states is supplied.
+observation	moisture	STEICO LVL X	Physical properties table: dimensional change below fiber saturation	The source reports percent dimension change per one percentage-point wood-moisture change. Percent divided by percent gives the stored dimensionless strain-per-moisture-fraction coefficient. dimensional-change-direction=1 is longitudinal, 2 in-plane transverse and 3 through thickness. Longitudinal and transverse entries cite DIN EN 1995-1-1/NA Table NA.7; thickness entries are internal producer tests. Applicability requires source-below-fiber-saturation=1; a numeric saturation threshold, moisture endpoints, conditioning and uncertainty are not supplied. These coefficients are not a calibrated drying model, thermal expansion or evidence for a numeric moisture validity range.
+scalar	mean-density	product-context,density	density	530	kg/m^3	constant
+uncertainty	mean-density	unstated	-	-	-	-
+validity	mean-density	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	mean-density	nominal_thickness	0.039	0.039	m
+validity	mean-density	ply_count	13	13	1
+validity	mean-density	cross_ply_count	3	3	1
+validity	mean-density	source_temperature_known	0	0	1
+validity	mean-density	source_moisture_condition_known	0	0	1
+validity	mean-density	source_pressure_known	0	0	1
+validity	mean-density	source_is_declared_value	1	1	1
+validity	mean-density	source_specimens_matched	0	0	1
+scalar	characteristic-density	product-context,density	characteristic_density_fifth_percentile	480	kg/m^3	constant
+uncertainty	characteristic-density	unstated	-	-	-	-
+validity	characteristic-density	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	characteristic-density	nominal_thickness	0.039	0.039	m
+validity	characteristic-density	ply_count	13	13	1
+validity	characteristic-density	cross_ply_count	3	3	1
+validity	characteristic-density	source_temperature_known	0	0	1
+validity	characteristic-density	source_moisture_condition_known	0	0	1
+validity	characteristic-density	source_pressure_known	0	0	1
+validity	characteristic-density	source_is_declared_value	1	1	1
+validity	characteristic-density	source_specimens_matched	0	0	1
+scalar	design-conductivity	product-context,thermal	design_thermal_conductivity	0.13	W/m/K	constant
+uncertainty	design-conductivity	unstated	-	-	-	-
+validity	design-conductivity	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	design-conductivity	nominal_thickness	0.039	0.039	m
+validity	design-conductivity	ply_count	13	13	1
+validity	design-conductivity	cross_ply_count	3	3	1
+validity	design-conductivity	source_temperature_known	0	0	1
+validity	design-conductivity	source_moisture_condition_known	0	0	1
+validity	design-conductivity	source_pressure_known	0	0	1
+validity	design-conductivity	source_is_declared_value	1	1	1
+validity	design-conductivity	source_specimens_matched	0	0	1
+validity	design-conductivity	source_conductivity_direction_known	0	0	1
+scalar	vapor-wet	product-context,vapor	water_vapor_diffusion_resistance_factor	75	1	constant
+uncertainty	vapor-wet	unstated	-	-	-	-
+validity	vapor-wet	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	vapor-wet	nominal_thickness	0.039	0.039	m
+validity	vapor-wet	ply_count	13	13	1
+validity	vapor-wet	cross_ply_count	3	3	1
+validity	vapor-wet	source_temperature_known	0	0	1
+validity	vapor-wet	source_moisture_condition_known	0	0	1
+validity	vapor-wet	source_pressure_known	0	0	1
+validity	vapor-wet	source_is_declared_value	1	1	1
+validity	vapor-wet	source_specimens_matched	0	0	1
+validity	vapor-wet	source_vapor_method_wet	1	1	1
+validity	vapor-wet	source_vapor_humidity_endpoints_known	0	0	1
+validity	vapor-wet	source_vapor_direction_known	0	0	1
+scalar	vapor-dry	product-context,vapor	water_vapor_diffusion_resistance_factor	205	1	constant
+uncertainty	vapor-dry	unstated	-	-	-	-
+validity	vapor-dry	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	vapor-dry	nominal_thickness	0.039	0.039	m
+validity	vapor-dry	ply_count	13	13	1
+validity	vapor-dry	cross_ply_count	3	3	1
+validity	vapor-dry	source_temperature_known	0	0	1
+validity	vapor-dry	source_moisture_condition_known	0	0	1
+validity	vapor-dry	source_pressure_known	0	0	1
+validity	vapor-dry	source_is_declared_value	1	1	1
+validity	vapor-dry	source_specimens_matched	0	0	1
+validity	vapor-dry	source_vapor_method_wet	0	0	1
+validity	vapor-dry	source_vapor_humidity_endpoints_known	0	0	1
+validity	vapor-dry	source_vapor_direction_known	0	0	1
+scalar	moisture-change-1	product-context,moisture	swelling_shrinkage_strain_per_wood_moisture_fraction_change	0.01	1	constant
+uncertainty	moisture-change-1	unstated	-	-	-	-
+validity	moisture-change-1	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	moisture-change-1	nominal_thickness	0.039	0.039	m
+validity	moisture-change-1	ply_count	13	13	1
+validity	moisture-change-1	cross_ply_count	3	3	1
+validity	moisture-change-1	source_temperature_known	0	0	1
+validity	moisture-change-1	source_moisture_condition_known	0	0	1
+validity	moisture-change-1	source_pressure_known	0	0	1
+validity	moisture-change-1	source_is_declared_value	1	1	1
+validity	moisture-change-1	source_specimens_matched	0	0	1
+validity	moisture-change-1	dimensional_change_direction	1	1	1
+validity	moisture-change-1	source_below_fiber_saturation	1	1	1
+validity	moisture-change-1	source_fiber_saturation_value_known	0	0	1
+scalar	moisture-change-2	product-context,moisture	swelling_shrinkage_strain_per_wood_moisture_fraction_change	0.03	1	constant
+uncertainty	moisture-change-2	unstated	-	-	-	-
+validity	moisture-change-2	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	moisture-change-2	nominal_thickness	0.039	0.039	m
+validity	moisture-change-2	ply_count	13	13	1
+validity	moisture-change-2	cross_ply_count	3	3	1
+validity	moisture-change-2	source_temperature_known	0	0	1
+validity	moisture-change-2	source_moisture_condition_known	0	0	1
+validity	moisture-change-2	source_pressure_known	0	0	1
+validity	moisture-change-2	source_is_declared_value	1	1	1
+validity	moisture-change-2	source_specimens_matched	0	0	1
+validity	moisture-change-2	dimensional_change_direction	2	2	1
+validity	moisture-change-2	source_below_fiber_saturation	1	1	1
+validity	moisture-change-2	source_fiber_saturation_value_known	0	0	1
+scalar	moisture-change-3	product-context,moisture	swelling_shrinkage_strain_per_wood_moisture_fraction_change	0.32	1	constant
+uncertainty	moisture-change-3	unstated	-	-	-	-
+validity	moisture-change-3	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	moisture-change-3	nominal_thickness	0.039	0.039	m
+validity	moisture-change-3	ply_count	13	13	1
+validity	moisture-change-3	cross_ply_count	3	3	1
+validity	moisture-change-3	source_temperature_known	0	0	1
+validity	moisture-change-3	source_moisture_condition_known	0	0	1
+validity	moisture-change-3	source_pressure_known	0	0	1
+validity	moisture-change-3	source_is_declared_value	1	1	1
+validity	moisture-change-3	source_specimens_matched	0	0	1
+validity	moisture-change-3	dimensional_change_direction	3	3	1
+validity	moisture-change-3	source_below_fiber_saturation	1	1	1
+validity	moisture-change-3	source_fiber_saturation_value_known	0	0	1
+scalar	mean-bending-parallel-edgewise	product-context,bending	bending_modulus	10600	MPa	constant
+uncertainty	mean-bending-parallel-edgewise	unstated	-	-	-	-
+validity	mean-bending-parallel-edgewise	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	mean-bending-parallel-edgewise	nominal_thickness	0.039	0.039	m
+validity	mean-bending-parallel-edgewise	ply_count	13	13	1
+validity	mean-bending-parallel-edgewise	cross_ply_count	3	3	1
+validity	mean-bending-parallel-edgewise	source_temperature_known	0	0	1
+validity	mean-bending-parallel-edgewise	source_moisture_condition_known	0	0	1
+validity	mean-bending-parallel-edgewise	source_pressure_known	0	0	1
+validity	mean-bending-parallel-edgewise	source_is_declared_value	1	1	1
+validity	mean-bending-parallel-edgewise	source_specimens_matched	0	0	1
+validity	mean-bending-parallel-edgewise	load_parallel_to_face_grain	1	1	1
+validity	mean-bending-parallel-edgewise	load_edgewise	1	1	1
+scalar	characteristic-bending-parallel-edgewise	product-context,bending	characteristic_bending_modulus	9000	MPa	constant
+uncertainty	characteristic-bending-parallel-edgewise	unstated	-	-	-	-
+validity	characteristic-bending-parallel-edgewise	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	characteristic-bending-parallel-edgewise	nominal_thickness	0.039	0.039	m
+validity	characteristic-bending-parallel-edgewise	ply_count	13	13	1
+validity	characteristic-bending-parallel-edgewise	cross_ply_count	3	3	1
+validity	characteristic-bending-parallel-edgewise	source_temperature_known	0	0	1
+validity	characteristic-bending-parallel-edgewise	source_moisture_condition_known	0	0	1
+validity	characteristic-bending-parallel-edgewise	source_pressure_known	0	0	1
+validity	characteristic-bending-parallel-edgewise	source_is_declared_value	1	1	1
+validity	characteristic-bending-parallel-edgewise	source_specimens_matched	0	0	1
+validity	characteristic-bending-parallel-edgewise	load_parallel_to_face_grain	1	1	1
+validity	characteristic-bending-parallel-edgewise	load_edgewise	1	1	1
+scalar	bending-strength-parallel-edgewise	product-context,bending	characteristic_bending_strength	32	MPa	constant
+uncertainty	bending-strength-parallel-edgewise	unstated	-	-	-	-
+validity	bending-strength-parallel-edgewise	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	bending-strength-parallel-edgewise	nominal_thickness	0.039	0.039	m
+validity	bending-strength-parallel-edgewise	ply_count	13	13	1
+validity	bending-strength-parallel-edgewise	cross_ply_count	3	3	1
+validity	bending-strength-parallel-edgewise	source_temperature_known	0	0	1
+validity	bending-strength-parallel-edgewise	source_moisture_condition_known	0	0	1
+validity	bending-strength-parallel-edgewise	source_pressure_known	0	0	1
+validity	bending-strength-parallel-edgewise	source_is_declared_value	1	1	1
+validity	bending-strength-parallel-edgewise	source_specimens_matched	0	0	1
+validity	bending-strength-parallel-edgewise	load_parallel_to_face_grain	1	1	1
+validity	bending-strength-parallel-edgewise	load_edgewise	1	1	1
+validity	bending-strength-parallel-edgewise	reference_member_depth	0.3	0.3	m
+scalar	mean-bending-parallel-flatwise	product-context,bending	bending_modulus	10600	MPa	constant
+uncertainty	mean-bending-parallel-flatwise	unstated	-	-	-	-
+validity	mean-bending-parallel-flatwise	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	mean-bending-parallel-flatwise	nominal_thickness	0.039	0.039	m
+validity	mean-bending-parallel-flatwise	ply_count	13	13	1
+validity	mean-bending-parallel-flatwise	cross_ply_count	3	3	1
+validity	mean-bending-parallel-flatwise	source_temperature_known	0	0	1
+validity	mean-bending-parallel-flatwise	source_moisture_condition_known	0	0	1
+validity	mean-bending-parallel-flatwise	source_pressure_known	0	0	1
+validity	mean-bending-parallel-flatwise	source_is_declared_value	1	1	1
+validity	mean-bending-parallel-flatwise	source_specimens_matched	0	0	1
+validity	mean-bending-parallel-flatwise	load_parallel_to_face_grain	1	1	1
+validity	mean-bending-parallel-flatwise	load_edgewise	0	0	1
+scalar	characteristic-bending-parallel-flatwise	product-context,bending	characteristic_bending_modulus	9000	MPa	constant
+uncertainty	characteristic-bending-parallel-flatwise	unstated	-	-	-	-
+validity	characteristic-bending-parallel-flatwise	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	characteristic-bending-parallel-flatwise	nominal_thickness	0.039	0.039	m
+validity	characteristic-bending-parallel-flatwise	ply_count	13	13	1
+validity	characteristic-bending-parallel-flatwise	cross_ply_count	3	3	1
+validity	characteristic-bending-parallel-flatwise	source_temperature_known	0	0	1
+validity	characteristic-bending-parallel-flatwise	source_moisture_condition_known	0	0	1
+validity	characteristic-bending-parallel-flatwise	source_pressure_known	0	0	1
+validity	characteristic-bending-parallel-flatwise	source_is_declared_value	1	1	1
+validity	characteristic-bending-parallel-flatwise	source_specimens_matched	0	0	1
+validity	characteristic-bending-parallel-flatwise	load_parallel_to_face_grain	1	1	1
+validity	characteristic-bending-parallel-flatwise	load_edgewise	0	0	1
+scalar	bending-strength-parallel-flatwise	product-context,bending	characteristic_bending_strength	36	MPa	constant
+uncertainty	bending-strength-parallel-flatwise	unstated	-	-	-	-
+validity	bending-strength-parallel-flatwise	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	bending-strength-parallel-flatwise	nominal_thickness	0.039	0.039	m
+validity	bending-strength-parallel-flatwise	ply_count	13	13	1
+validity	bending-strength-parallel-flatwise	cross_ply_count	3	3	1
+validity	bending-strength-parallel-flatwise	source_temperature_known	0	0	1
+validity	bending-strength-parallel-flatwise	source_moisture_condition_known	0	0	1
+validity	bending-strength-parallel-flatwise	source_pressure_known	0	0	1
+validity	bending-strength-parallel-flatwise	source_is_declared_value	1	1	1
+validity	bending-strength-parallel-flatwise	source_specimens_matched	0	0	1
+validity	bending-strength-parallel-flatwise	load_parallel_to_face_grain	1	1	1
+validity	bending-strength-parallel-flatwise	load_edgewise	0	0	1
+scalar	mean-bending-perpendicular-edgewise	product-context,bending	bending_modulus	3000	MPa	constant
+uncertainty	mean-bending-perpendicular-edgewise	unstated	-	-	-	-
+validity	mean-bending-perpendicular-edgewise	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	mean-bending-perpendicular-edgewise	nominal_thickness	0.039	0.039	m
+validity	mean-bending-perpendicular-edgewise	ply_count	13	13	1
+validity	mean-bending-perpendicular-edgewise	cross_ply_count	3	3	1
+validity	mean-bending-perpendicular-edgewise	source_temperature_known	0	0	1
+validity	mean-bending-perpendicular-edgewise	source_moisture_condition_known	0	0	1
+validity	mean-bending-perpendicular-edgewise	source_pressure_known	0	0	1
+validity	mean-bending-perpendicular-edgewise	source_is_declared_value	1	1	1
+validity	mean-bending-perpendicular-edgewise	source_specimens_matched	0	0	1
+validity	mean-bending-perpendicular-edgewise	load_parallel_to_face_grain	0	0	1
+validity	mean-bending-perpendicular-edgewise	load_edgewise	1	1	1
+scalar	characteristic-bending-perpendicular-edgewise	product-context,bending	characteristic_bending_modulus	2300	MPa	constant
+uncertainty	characteristic-bending-perpendicular-edgewise	unstated	-	-	-	-
+validity	characteristic-bending-perpendicular-edgewise	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	characteristic-bending-perpendicular-edgewise	nominal_thickness	0.039	0.039	m
+validity	characteristic-bending-perpendicular-edgewise	ply_count	13	13	1
+validity	characteristic-bending-perpendicular-edgewise	cross_ply_count	3	3	1
+validity	characteristic-bending-perpendicular-edgewise	source_temperature_known	0	0	1
+validity	characteristic-bending-perpendicular-edgewise	source_moisture_condition_known	0	0	1
+validity	characteristic-bending-perpendicular-edgewise	source_pressure_known	0	0	1
+validity	characteristic-bending-perpendicular-edgewise	source_is_declared_value	1	1	1
+validity	characteristic-bending-perpendicular-edgewise	source_specimens_matched	0	0	1
+validity	characteristic-bending-perpendicular-edgewise	load_parallel_to_face_grain	0	0	1
+validity	characteristic-bending-perpendicular-edgewise	load_edgewise	1	1	1
+scalar	bending-strength-perpendicular-edgewise	product-context,bending	characteristic_bending_strength	8	MPa	constant
+uncertainty	bending-strength-perpendicular-edgewise	unstated	-	-	-	-
+validity	bending-strength-perpendicular-edgewise	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	bending-strength-perpendicular-edgewise	nominal_thickness	0.039	0.039	m
+validity	bending-strength-perpendicular-edgewise	ply_count	13	13	1
+validity	bending-strength-perpendicular-edgewise	cross_ply_count	3	3	1
+validity	bending-strength-perpendicular-edgewise	source_temperature_known	0	0	1
+validity	bending-strength-perpendicular-edgewise	source_moisture_condition_known	0	0	1
+validity	bending-strength-perpendicular-edgewise	source_pressure_known	0	0	1
+validity	bending-strength-perpendicular-edgewise	source_is_declared_value	1	1	1
+validity	bending-strength-perpendicular-edgewise	source_specimens_matched	0	0	1
+validity	bending-strength-perpendicular-edgewise	load_parallel_to_face_grain	0	0	1
+validity	bending-strength-perpendicular-edgewise	load_edgewise	1	1	1
+validity	bending-strength-perpendicular-edgewise	reference_member_depth	0.3	0.3	m
+scalar	mean-bending-perpendicular-flatwise	product-context,bending	bending_modulus	2500	MPa	constant
+uncertainty	mean-bending-perpendicular-flatwise	unstated	-	-	-	-
+validity	mean-bending-perpendicular-flatwise	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	mean-bending-perpendicular-flatwise	nominal_thickness	0.039	0.039	m
+validity	mean-bending-perpendicular-flatwise	ply_count	13	13	1
+validity	mean-bending-perpendicular-flatwise	cross_ply_count	3	3	1
+validity	mean-bending-perpendicular-flatwise	source_temperature_known	0	0	1
+validity	mean-bending-perpendicular-flatwise	source_moisture_condition_known	0	0	1
+validity	mean-bending-perpendicular-flatwise	source_pressure_known	0	0	1
+validity	mean-bending-perpendicular-flatwise	source_is_declared_value	1	1	1
+validity	mean-bending-perpendicular-flatwise	source_specimens_matched	0	0	1
+validity	mean-bending-perpendicular-flatwise	load_parallel_to_face_grain	0	0	1
+validity	mean-bending-perpendicular-flatwise	load_edgewise	0	0	1
+scalar	characteristic-bending-perpendicular-flatwise	product-context,bending	characteristic_bending_modulus	1800	MPa	constant
+uncertainty	characteristic-bending-perpendicular-flatwise	unstated	-	-	-	-
+validity	characteristic-bending-perpendicular-flatwise	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	characteristic-bending-perpendicular-flatwise	nominal_thickness	0.039	0.039	m
+validity	characteristic-bending-perpendicular-flatwise	ply_count	13	13	1
+validity	characteristic-bending-perpendicular-flatwise	cross_ply_count	3	3	1
+validity	characteristic-bending-perpendicular-flatwise	source_temperature_known	0	0	1
+validity	characteristic-bending-perpendicular-flatwise	source_moisture_condition_known	0	0	1
+validity	characteristic-bending-perpendicular-flatwise	source_pressure_known	0	0	1
+validity	characteristic-bending-perpendicular-flatwise	source_is_declared_value	1	1	1
+validity	characteristic-bending-perpendicular-flatwise	source_specimens_matched	0	0	1
+validity	characteristic-bending-perpendicular-flatwise	load_parallel_to_face_grain	0	0	1
+validity	characteristic-bending-perpendicular-flatwise	load_edgewise	0	0	1
+scalar	bending-strength-perpendicular-flatwise	product-context,bending	characteristic_bending_strength	8	MPa	constant
+uncertainty	bending-strength-perpendicular-flatwise	unstated	-	-	-	-
+validity	bending-strength-perpendicular-flatwise	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	bending-strength-perpendicular-flatwise	nominal_thickness	0.039	0.039	m
+validity	bending-strength-perpendicular-flatwise	ply_count	13	13	1
+validity	bending-strength-perpendicular-flatwise	cross_ply_count	3	3	1
+validity	bending-strength-perpendicular-flatwise	source_temperature_known	0	0	1
+validity	bending-strength-perpendicular-flatwise	source_moisture_condition_known	0	0	1
+validity	bending-strength-perpendicular-flatwise	source_pressure_known	0	0	1
+validity	bending-strength-perpendicular-flatwise	source_is_declared_value	1	1	1
+validity	bending-strength-perpendicular-flatwise	source_specimens_matched	0	0	1
+validity	bending-strength-perpendicular-flatwise	load_parallel_to_face_grain	0	0	1
+validity	bending-strength-perpendicular-flatwise	load_edgewise	0	0	1
+scalar	tensile-strength-parallel	product-context,axial	characteristic_tensile_strength	18	MPa	constant
+uncertainty	tensile-strength-parallel	unstated	-	-	-	-
+validity	tensile-strength-parallel	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	tensile-strength-parallel	nominal_thickness	0.039	0.039	m
+validity	tensile-strength-parallel	ply_count	13	13	1
+validity	tensile-strength-parallel	cross_ply_count	3	3	1
+validity	tensile-strength-parallel	source_temperature_known	0	0	1
+validity	tensile-strength-parallel	source_moisture_condition_known	0	0	1
+validity	tensile-strength-parallel	source_pressure_known	0	0	1
+validity	tensile-strength-parallel	source_is_declared_value	1	1	1
+validity	tensile-strength-parallel	source_specimens_matched	0	0	1
+validity	tensile-strength-parallel	load_parallel_to_face_grain	1	1	1
+validity	tensile-strength-parallel	reference_member_length	3	3	m
+scalar	tensile-strength-perpendicular-edgewise	product-context,axial	characteristic_tensile_strength	5	MPa	constant
+uncertainty	tensile-strength-perpendicular-edgewise	unstated	-	-	-	-
+validity	tensile-strength-perpendicular-edgewise	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	tensile-strength-perpendicular-edgewise	nominal_thickness	0.039	0.039	m
+validity	tensile-strength-perpendicular-edgewise	ply_count	13	13	1
+validity	tensile-strength-perpendicular-edgewise	cross_ply_count	3	3	1
+validity	tensile-strength-perpendicular-edgewise	source_temperature_known	0	0	1
+validity	tensile-strength-perpendicular-edgewise	source_moisture_condition_known	0	0	1
+validity	tensile-strength-perpendicular-edgewise	source_pressure_known	0	0	1
+validity	tensile-strength-perpendicular-edgewise	source_is_declared_value	1	1	1
+validity	tensile-strength-perpendicular-edgewise	source_specimens_matched	0	0	1
+validity	tensile-strength-perpendicular-edgewise	load_parallel_to_face_grain	0	0	1
+validity	tensile-strength-perpendicular-edgewise	load_edgewise	1	1	1
+scalar	compression-strength-parallel	product-context,axial	characteristic_compression_strength	30	MPa	constant
+uncertainty	compression-strength-parallel	unstated	-	-	-	-
+validity	compression-strength-parallel	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	compression-strength-parallel	nominal_thickness	0.039	0.039	m
+validity	compression-strength-parallel	ply_count	13	13	1
+validity	compression-strength-parallel	cross_ply_count	3	3	1
+validity	compression-strength-parallel	source_temperature_known	0	0	1
+validity	compression-strength-parallel	source_moisture_condition_known	0	0	1
+validity	compression-strength-parallel	source_pressure_known	0	0	1
+validity	compression-strength-parallel	source_is_declared_value	1	1	1
+validity	compression-strength-parallel	source_specimens_matched	0	0	1
+validity	compression-strength-parallel	load_parallel_to_face_grain	1	1	1
+scalar	compression-strength-perpendicular-edgewise	product-context,axial	characteristic_compression_strength	9	MPa	constant
+uncertainty	compression-strength-perpendicular-edgewise	unstated	-	-	-	-
+validity	compression-strength-perpendicular-edgewise	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	compression-strength-perpendicular-edgewise	nominal_thickness	0.039	0.039	m
+validity	compression-strength-perpendicular-edgewise	ply_count	13	13	1
+validity	compression-strength-perpendicular-edgewise	cross_ply_count	3	3	1
+validity	compression-strength-perpendicular-edgewise	source_temperature_known	0	0	1
+validity	compression-strength-perpendicular-edgewise	source_moisture_condition_known	0	0	1
+validity	compression-strength-perpendicular-edgewise	source_pressure_known	0	0	1
+validity	compression-strength-perpendicular-edgewise	source_is_declared_value	1	1	1
+validity	compression-strength-perpendicular-edgewise	source_specimens_matched	0	0	1
+validity	compression-strength-perpendicular-edgewise	load_parallel_to_face_grain	0	0	1
+validity	compression-strength-perpendicular-edgewise	load_edgewise	1	1	1
+scalar	compression-strength-perpendicular-flatwise	product-context,axial	characteristic_compression_strength	4	MPa	constant
+uncertainty	compression-strength-perpendicular-flatwise	unstated	-	-	-	-
+validity	compression-strength-perpendicular-flatwise	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	compression-strength-perpendicular-flatwise	nominal_thickness	0.039	0.039	m
+validity	compression-strength-perpendicular-flatwise	ply_count	13	13	1
+validity	compression-strength-perpendicular-flatwise	cross_ply_count	3	3	1
+validity	compression-strength-perpendicular-flatwise	source_temperature_known	0	0	1
+validity	compression-strength-perpendicular-flatwise	source_moisture_condition_known	0	0	1
+validity	compression-strength-perpendicular-flatwise	source_pressure_known	0	0	1
+validity	compression-strength-perpendicular-flatwise	source_is_declared_value	1	1	1
+validity	compression-strength-perpendicular-flatwise	source_specimens_matched	0	0	1
+validity	compression-strength-perpendicular-flatwise	load_parallel_to_face_grain	0	0	1
+validity	compression-strength-perpendicular-flatwise	load_edgewise	0	0	1
+scalar	shear-strength-parallel-edgewise	product-context,shear	characteristic_shear_strength	4.6	MPa	constant
+uncertainty	shear-strength-parallel-edgewise	unstated	-	-	-	-
+validity	shear-strength-parallel-edgewise	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	shear-strength-parallel-edgewise	nominal_thickness	0.039	0.039	m
+validity	shear-strength-parallel-edgewise	ply_count	13	13	1
+validity	shear-strength-parallel-edgewise	cross_ply_count	3	3	1
+validity	shear-strength-parallel-edgewise	source_temperature_known	0	0	1
+validity	shear-strength-parallel-edgewise	source_moisture_condition_known	0	0	1
+validity	shear-strength-parallel-edgewise	source_pressure_known	0	0	1
+validity	shear-strength-parallel-edgewise	source_is_declared_value	1	1	1
+validity	shear-strength-parallel-edgewise	source_specimens_matched	0	0	1
+validity	shear-strength-parallel-edgewise	load_parallel_to_face_grain	1	1	1
+validity	shear-strength-parallel-edgewise	load_edgewise	1	1	1
+scalar	mean-shear-parallel-edgewise	product-context,shear	shear_modulus	600	MPa	constant
+uncertainty	mean-shear-parallel-edgewise	unstated	-	-	-	-
+validity	mean-shear-parallel-edgewise	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	mean-shear-parallel-edgewise	nominal_thickness	0.039	0.039	m
+validity	mean-shear-parallel-edgewise	ply_count	13	13	1
+validity	mean-shear-parallel-edgewise	cross_ply_count	3	3	1
+validity	mean-shear-parallel-edgewise	source_temperature_known	0	0	1
+validity	mean-shear-parallel-edgewise	source_moisture_condition_known	0	0	1
+validity	mean-shear-parallel-edgewise	source_pressure_known	0	0	1
+validity	mean-shear-parallel-edgewise	source_is_declared_value	1	1	1
+validity	mean-shear-parallel-edgewise	source_specimens_matched	0	0	1
+validity	mean-shear-parallel-edgewise	load_parallel_to_face_grain	1	1	1
+validity	mean-shear-parallel-edgewise	load_edgewise	1	1	1
+scalar	characteristic-shear-parallel-edgewise	product-context,shear	characteristic_shear_modulus	400	MPa	constant
+uncertainty	characteristic-shear-parallel-edgewise	unstated	-	-	-	-
+validity	characteristic-shear-parallel-edgewise	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	characteristic-shear-parallel-edgewise	nominal_thickness	0.039	0.039	m
+validity	characteristic-shear-parallel-edgewise	ply_count	13	13	1
+validity	characteristic-shear-parallel-edgewise	cross_ply_count	3	3	1
+validity	characteristic-shear-parallel-edgewise	source_temperature_known	0	0	1
+validity	characteristic-shear-parallel-edgewise	source_moisture_condition_known	0	0	1
+validity	characteristic-shear-parallel-edgewise	source_pressure_known	0	0	1
+validity	characteristic-shear-parallel-edgewise	source_is_declared_value	1	1	1
+validity	characteristic-shear-parallel-edgewise	source_specimens_matched	0	0	1
+validity	characteristic-shear-parallel-edgewise	load_parallel_to_face_grain	1	1	1
+validity	characteristic-shear-parallel-edgewise	load_edgewise	1	1	1
+scalar	shear-strength-parallel-flatwise	product-context,shear	characteristic_shear_strength	1.1	MPa	constant
+uncertainty	shear-strength-parallel-flatwise	unstated	-	-	-	-
+validity	shear-strength-parallel-flatwise	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	shear-strength-parallel-flatwise	nominal_thickness	0.039	0.039	m
+validity	shear-strength-parallel-flatwise	ply_count	13	13	1
+validity	shear-strength-parallel-flatwise	cross_ply_count	3	3	1
+validity	shear-strength-parallel-flatwise	source_temperature_known	0	0	1
+validity	shear-strength-parallel-flatwise	source_moisture_condition_known	0	0	1
+validity	shear-strength-parallel-flatwise	source_pressure_known	0	0	1
+validity	shear-strength-parallel-flatwise	source_is_declared_value	1	1	1
+validity	shear-strength-parallel-flatwise	source_specimens_matched	0	0	1
+validity	shear-strength-parallel-flatwise	load_parallel_to_face_grain	1	1	1
+validity	shear-strength-parallel-flatwise	load_edgewise	0	0	1
+scalar	mean-shear-parallel-flatwise	product-context,shear	shear_modulus	150	MPa	constant
+uncertainty	mean-shear-parallel-flatwise	unstated	-	-	-	-
+validity	mean-shear-parallel-flatwise	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	mean-shear-parallel-flatwise	nominal_thickness	0.039	0.039	m
+validity	mean-shear-parallel-flatwise	ply_count	13	13	1
+validity	mean-shear-parallel-flatwise	cross_ply_count	3	3	1
+validity	mean-shear-parallel-flatwise	source_temperature_known	0	0	1
+validity	mean-shear-parallel-flatwise	source_moisture_condition_known	0	0	1
+validity	mean-shear-parallel-flatwise	source_pressure_known	0	0	1
+validity	mean-shear-parallel-flatwise	source_is_declared_value	1	1	1
+validity	mean-shear-parallel-flatwise	source_specimens_matched	0	0	1
+validity	mean-shear-parallel-flatwise	load_parallel_to_face_grain	1	1	1
+validity	mean-shear-parallel-flatwise	load_edgewise	0	0	1
+scalar	characteristic-shear-parallel-flatwise	product-context,shear	characteristic_shear_modulus	130	MPa	constant
+uncertainty	characteristic-shear-parallel-flatwise	unstated	-	-	-	-
+validity	characteristic-shear-parallel-flatwise	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	characteristic-shear-parallel-flatwise	nominal_thickness	0.039	0.039	m
+validity	characteristic-shear-parallel-flatwise	ply_count	13	13	1
+validity	characteristic-shear-parallel-flatwise	cross_ply_count	3	3	1
+validity	characteristic-shear-parallel-flatwise	source_temperature_known	0	0	1
+validity	characteristic-shear-parallel-flatwise	source_moisture_condition_known	0	0	1
+validity	characteristic-shear-parallel-flatwise	source_pressure_known	0	0	1
+validity	characteristic-shear-parallel-flatwise	source_is_declared_value	1	1	1
+validity	characteristic-shear-parallel-flatwise	source_specimens_matched	0	0	1
+validity	characteristic-shear-parallel-flatwise	load_parallel_to_face_grain	1	1	1
+validity	characteristic-shear-parallel-flatwise	load_edgewise	0	0	1
+scalar	shear-strength-perpendicular-edgewise	product-context,shear	characteristic_shear_strength	4.6	MPa	constant
+uncertainty	shear-strength-perpendicular-edgewise	unstated	-	-	-	-
+validity	shear-strength-perpendicular-edgewise	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	shear-strength-perpendicular-edgewise	nominal_thickness	0.039	0.039	m
+validity	shear-strength-perpendicular-edgewise	ply_count	13	13	1
+validity	shear-strength-perpendicular-edgewise	cross_ply_count	3	3	1
+validity	shear-strength-perpendicular-edgewise	source_temperature_known	0	0	1
+validity	shear-strength-perpendicular-edgewise	source_moisture_condition_known	0	0	1
+validity	shear-strength-perpendicular-edgewise	source_pressure_known	0	0	1
+validity	shear-strength-perpendicular-edgewise	source_is_declared_value	1	1	1
+validity	shear-strength-perpendicular-edgewise	source_specimens_matched	0	0	1
+validity	shear-strength-perpendicular-edgewise	load_parallel_to_face_grain	0	0	1
+validity	shear-strength-perpendicular-edgewise	load_edgewise	1	1	1
+scalar	shear-strength-perpendicular-flatwise	product-context,shear	characteristic_shear_strength	1.1	MPa	constant
+uncertainty	shear-strength-perpendicular-flatwise	unstated	-	-	-	-
+validity	shear-strength-perpendicular-flatwise	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	shear-strength-perpendicular-flatwise	nominal_thickness	0.039	0.039	m
+validity	shear-strength-perpendicular-flatwise	ply_count	13	13	1
+validity	shear-strength-perpendicular-flatwise	cross_ply_count	3	3	1
+validity	shear-strength-perpendicular-flatwise	source_temperature_known	0	0	1
+validity	shear-strength-perpendicular-flatwise	source_moisture_condition_known	0	0	1
+validity	shear-strength-perpendicular-flatwise	source_pressure_known	0	0	1
+validity	shear-strength-perpendicular-flatwise	source_is_declared_value	1	1	1
+validity	shear-strength-perpendicular-flatwise	source_specimens_matched	0	0	1
+validity	shear-strength-perpendicular-flatwise	load_parallel_to_face_grain	0	0	1
+validity	shear-strength-perpendicular-flatwise	load_edgewise	0	0	1
+scalar	mean-shear-perpendicular-flatwise	product-context,shear	shear_modulus	150	MPa	constant
+uncertainty	mean-shear-perpendicular-flatwise	unstated	-	-	-	-
+validity	mean-shear-perpendicular-flatwise	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	mean-shear-perpendicular-flatwise	nominal_thickness	0.039	0.039	m
+validity	mean-shear-perpendicular-flatwise	ply_count	13	13	1
+validity	mean-shear-perpendicular-flatwise	cross_ply_count	3	3	1
+validity	mean-shear-perpendicular-flatwise	source_temperature_known	0	0	1
+validity	mean-shear-perpendicular-flatwise	source_moisture_condition_known	0	0	1
+validity	mean-shear-perpendicular-flatwise	source_pressure_known	0	0	1
+validity	mean-shear-perpendicular-flatwise	source_is_declared_value	1	1	1
+validity	mean-shear-perpendicular-flatwise	source_specimens_matched	0	0	1
+validity	mean-shear-perpendicular-flatwise	load_parallel_to_face_grain	0	0	1
+validity	mean-shear-perpendicular-flatwise	load_edgewise	0	0	1
+scalar	characteristic-shear-perpendicular-flatwise	product-context,shear	characteristic_shear_modulus	130	MPa	constant
+uncertainty	characteristic-shear-perpendicular-flatwise	unstated	-	-	-	-
+validity	characteristic-shear-perpendicular-flatwise	source_grade_steico_lvl_x_39mm_design_guide_2026	1	1	1
+validity	characteristic-shear-perpendicular-flatwise	nominal_thickness	0.039	0.039	m
+validity	characteristic-shear-perpendicular-flatwise	ply_count	13	13	1
+validity	characteristic-shear-perpendicular-flatwise	cross_ply_count	3	3	1
+validity	characteristic-shear-perpendicular-flatwise	source_temperature_known	0	0	1
+validity	characteristic-shear-perpendicular-flatwise	source_moisture_condition_known	0	0	1
+validity	characteristic-shear-perpendicular-flatwise	source_pressure_known	0	0	1
+validity	characteristic-shear-perpendicular-flatwise	source_is_declared_value	1	1	1
+validity	characteristic-shear-perpendicular-flatwise	source_specimens_matched	0	0	1
+validity	characteristic-shear-perpendicular-flatwise	load_parallel_to_face_grain	0	0	1
+validity	characteristic-shear-perpendicular-flatwise	load_edgewise	0	0	1

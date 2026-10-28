@@ -1,0 +1,29 @@
+frankensim.matdb-manifest.v3
+pack_id	wisa-spruce-plywood-18mm-upm001-2026
+redistribution	permitted	Selected attributed numerical facts and original condition notes only; source prose, diagrams and table layout are not redistributed
+citation	UPM Plywood, WISA structural spruce plywood Declaration of Performance UPM001CPR effective 2026-01-01, pages 2-3, nominal 18 mm 7-ply column, accessed 2026-10-28; https://www.wisaplywood.com/siteassets/documents/dop/upm001cpr-2026-01-01-en.pdf
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	producer-reference	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	characteristic_density_for_racking	characteristic-density-for-racking	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	bending_modulus	bending-modulus	dimensional
+property	axial_modulus	axial-modulus	dimensional
+property	characteristic_bending_strength	characteristic-bending-strength	dimensional
+property	characteristic_compression_strength	characteristic-compression-strength	dimensional
+property	characteristic_tensile_strength	characteristic-tensile-strength	dimensional
+property	water_vapor_diffusion_resistance_factor	water-vapor-diffusion-resistance-factor	dimensional
+axis	source_grade_wisa_spruce_plywood_18mm_upm001_2026	source-grade-wisa-spruce-plywood-18mm-upm001-2026	dimensional
+axis	nominal_thickness	nominal-thickness	dimensional
+axis	ply_count	ply-count	dimensional
+axis	surface_is_coated	surface-is-coated	dimensional
+axis	source_temperature_known	source-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	source_is_declared_value	source-is-declared-value	dimensional
+axis	source_specimens_matched	source-specimens-matched	dimensional
+axis	source_conductivity_direction_known	source-conductivity-direction-known	dimensional
+axis	load_parallel_to_face_grain	load-parallel-to-face-grain	dimensional
+axis	source_vapor_method_wet	source-vapor-method-wet	dimensional
+axis	source_vapor_humidity_endpoints_known	source-vapor-humidity-endpoints-known	dimensional
+axis	source_vapor_direction_known	source-vapor-direction-known	dimensional
