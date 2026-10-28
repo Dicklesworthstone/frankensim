@@ -100,8 +100,15 @@ impl SpatialMaterialRod {
         candidate.gravity = if acceleration_m_s2.iter().all(|v| *v == 0.0) {
             None
         } else {
+            let mut masses = self.reference_mass.nodal_mass_kg().to_vec();
+            for link in &self.tension_links {
+                checkpoint(gate)?;
+                for attachment in link.attachments() {
+                    masses[attachment.node] += 0.5 * link.reference_mass_kg();
+                }
+            }
             let mut force_n = Vec::with_capacity(self.rod.positions.len());
-            for &mass in self.reference_mass.nodal_mass_kg() {
+            for mass in masses {
                 checkpoint(gate)?;
                 let force = acceleration_m_s2.map(|g| mass * g);
                 if force.iter().zip(acceleration_m_s2).any(|(&f, g)|
@@ -123,7 +130,8 @@ impl SpatialMaterialRod {
     pub fn gravity_m_s2(&self) -> Option<[f64; 3]> {
         self.gravity.as_ref().map(|load| load.acceleration_m_s2)
     }
-    /// Actual world-frame body forces [N], INCLUDING the constrained root node.
+    /// World-frame body forces [N], including root and attached-link inventory.
+    /// Rotating link offsets also contribute `gravity_nodal_moments_body_nm`.
     #[must_use]
     pub fn gravity_nodal_forces_n(&self) -> Option<&[[f64; 3]]> {
         self.gravity.as_ref().map(|load| load.force_n.as_slice())
@@ -140,6 +148,12 @@ impl SpatialMaterialRod {
             let reference = self.reference_geometry.as_ref().map_or(
                 [node as f64 * rod.l0, 0.0, 0.0], |geometry| geometry.positions_m()[node]);
             for c in 0..3 { potential -= force[c] * (position[c] - reference[c]); }
+        }
+        // Nodal forces above already account for link centerline translations.
+        // Only their rotating offsets remain; adding whole endpoint potentials
+        // here would count that translational work twice.
+        if !self.tension_links.is_empty() {
+            potential += self.link_gravity_offset_potential(rod, load.acceleration_m_s2)?;
         }
         if !potential.is_finite() {
             return Err(SpatialRodError::Invalid("gravity potential is unrepresentable"));

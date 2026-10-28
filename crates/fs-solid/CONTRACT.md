@@ -1209,6 +1209,38 @@ G0/G1/G3 tests in `rod_material_field/reference.rs` cover intrinsic zero stress,
 a three-rung circular-arc end-moment limit, material changes, gravity datum and
 objectivity; `rod_material_source.rs` covers source/temperature continuity.
 
+### Source-bound tensile members on material rods
+
+`SpatialMaterialRod::with_tension_links` attaches up to 64 immutable
+`MaterialTensionLink` bundles to existing nodes, including body-frame offsets.
+Each keeps its original `ConcentricElasticSection`, natural length, strand count
+and explicit tensile-strain limit. At the actual deformed endpoint distance L,
+the complete bundle stores EA/(2 L0) max(L-L0,0)^2; slack links exert no compressive
+force. The original rod energy/Newton/support-reaction owner sees this energy
+once. Rotating offsets therefore transmit reciprocal forces and moments through
+the same equilibrium, including on intrinsically cambered rods. Public link
+observations report span, tension, storage and endpoint force/moment pullbacks.
+
+The source-bound reference mass uses natural length, not the stretched span.
+Explicit gravity includes half that mass at each endpoint and the corresponding
+rotating offset potential and moment. Replacing a link rebuilds these weights
+from retained inventories. `reference_mass()` remains the rod-only receipt;
+`total_reference_mass_kg()` includes links and each link retains its own source.
+`gravity_nodal_forces_n()` and `gravity_nodal_moments_body_nm()` expose the
+matching loads. The separate link is held at its explicitly resolved material
+state; rod heating does not silently refresh its properties or natural length.
+
+This is bounded quasistatic straight-link mechanics with tensile linear strain,
+not a sagging cable, dynamic bow ribbon, thermal link, rosin/contact law, damage,
+or validated instrument model. Nonstatic material claims, invalid attachments,
+unrepresentable inventory and trial strains outside the declared domain refuse.
+G1/G3 tests in `rod_material_field/tension.rs` cover analytic parallel compliance,
+energy-derived offset reactions, camber/material preload sensitivity, conserved
+mass, gravity work, slack and refusal preservation. The existing
+`fs-couple` `heated_material_rod` example accepts an explicit `--tension-link`
+natural-length/offset/strand-count record and reports its physical observations;
+its separately cold 300 K member is not a horsehair material preset.
+
 ## Invariants
 
 1. Patch tests exact: linear displacement fields are reproduced to

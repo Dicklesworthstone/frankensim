@@ -13,6 +13,8 @@ use fs_solid::rod::material_field::{SpatialMaterialRod, SpatialRodError};
 
 #[path = "rod_material_field/reference.rs"]
 mod reference;
+#[path = "rod_material_field/tension.rs"]
+mod tension;
 
 fn section(scale: f64) -> ConcentricShearSection {
     let mut claims = ClaimSet::new();

@@ -1,6 +1,9 @@
 //! Source data -> shared enthalpy transport -> shared material rod equilibrium.
 //! Guided or cantilever mechanics remain quasistatic and one-way thermomechanical.
 //! Mechanical energy is observed separately, NOT silently added to the heat audit.
+//! Optional `--tension-link NATURAL_LENGTH_M OFFSET_Y_M STRANDS` attaches a
+//! separate member at root/tip, using this source's reference 300 K section.
+//! It remains cold while the rod heats; it is not a horsehair/bow preset.
 #[path = "heated_material_rod/material.rs"]
 mod material;
 
@@ -13,6 +16,7 @@ use fs_material::state_point::{DENSITY_PROPERTY, MaterialPropertySelection,
 use fs_solid::rod::TipLoad;
 use fs_solid::rod::material_field::{SpatialMaterialRod, supports::RodSupport};
 use fs_solid::rod::material_field::thermal::source::{RodLayerSource, RodMaterialSource, RodSegmentSource};
+use fs_solid::rod::material_field::tension::{MaterialTensionLink, TensionLinkAttachment};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const N: usize = 4;
@@ -35,6 +39,7 @@ struct Experiment<'a> {
     duration_s: f64,
     cantilever: bool,
     gravity_m_s2: [f64; 3],
+    tension_link: Option<MaterialTensionLink>,
 }
 #[derive(Clone)]
 struct State<'a> {
@@ -70,7 +75,7 @@ impl<'a> Experiment<'a> {
             return Err("caloric and mechanical density must select the same card, claim and fixed coordinates".into());
         }
         Ok(Self { material, source, fixed_end, power_w, duration_s,
-            cantilever: false, gravity_m_s2: [0.0; 3] })
+            cantilever: false, gravity_m_s2: [0.0; 3], tension_link: None })
     }
     fn boundary(&self, cell: usize, powered: bool) -> Boundary {
         Boundary { ambient_k: 300.0, htc_w_m2_k: HTC, reservoir: None,
@@ -85,6 +90,9 @@ impl<'a> Experiment<'a> {
                 frame: Some(self.source.reference_rod().frames()[node]),
             }).collect();
             rod = rod.with_supports(&supports, gate)?;
+        }
+        if let Some(link) = &self.tension_link {
+            rod = rod.with_tension_links(vec![link.clone()], gate)?;
         }
         if self.gravity_m_s2 != [0.0; 3] {
             rod = rod.with_gravity(self.gravity_m_s2, gate)?;
@@ -179,6 +187,19 @@ fn gravity_args(args: &[String]) -> Result<[f64; 3]> {
     if !gravity.iter().all(|g| g.is_finite()) { return Err("gravity components must be finite".into()); }
     Ok(gravity)
 }
+fn loading_args(args: &[String]) -> Result<(Option<(f64, f64, u32)>, [f64; 3])> {
+    if args.first().is_some_and(|a| a == "--tension-link") {
+        if args.len() < 4 { return Err("tension link requires natural length, body-frame y offset and strand count".into()); }
+        let link = (args[1].parse()?, args[2].parse()?, args[3].parse()?);
+        Ok((Some(link), gravity_args(&args[4..])?))
+    } else { Ok((None, gravity_args(args)?)) }
+}
+fn cold_link(source: &RodMaterialSource<'_>, natural: f64, offset: f64, strands: u32) -> Result<MaterialTensionLink> {
+    Ok(MaterialTensionLink::try_new(source.reference_rod().sections()[0].elastic().clone(), [
+        TensionLinkAttachment { node: 0, offset_body_m: [0.0, offset, 0.0] },
+        TensionLinkAttachment { node: N, offset_body_m: [0.0, offset, 0.0] },
+    ], natural, strands, 0.03)?)
+}
 fn loading_observations(state: &State<'_>, gate: &CancelGate) -> Result<String> {
     let root = state.rod.root_support_reaction(gate)?;
     let moment = root.moment_body_nm.ok_or("root frame is not constrained")?;
@@ -186,14 +207,14 @@ fn loading_observations(state: &State<'_>, gate: &CancelGate) -> Result<String> 
         root.force_n[1].ok_or("root y is not constrained")?, root.force_n[2].ok_or("root z is not constrained")?];
     let residual = state.rod.support_reactions(&TipLoad::default(), gate)?.free_residual_norm;
     Ok(format!(",{},{},{},{},{},{},{},{},{},{},{}", state.rod.positions_m()[N][1],
-        state.rod.positions_m()[N][2], state.rod.reference_mass().total_mass_kg(), state.rod.gravity_potential_j()?,
+        state.rod.positions_m()[N][2], state.rod.total_reference_mass_kg(), state.rod.gravity_potential_j()?,
         forces[0], forces[1], forces[2], moment[0], moment[1], moment[2], residual))
 }
 fn run(args: &[String]) -> Result<()> {
-    if args.len() != 6 && args.len() != 10 {
-        return Err("usage: heated_material_rod --demo CP_J_KG_K|--pack MATERIAL_PACK free|fixed|cantilever POWER_W DURATION_S INTERVALS [--gravity GX GY GZ]".into());
+    if args.len() < 6 {
+        return Err("usage: heated_material_rod --demo CP_J_KG_K|--pack MATERIAL_PACK free|fixed|cantilever POWER_W DURATION_S INTERVALS [--tension-link NATURAL_LENGTH_M OFFSET_Y_M STRANDS] [--gravity GX GY GZ]".into());
     }
-    let gravity = gravity_args(&args[6..])?;
+    let (link_spec, gravity) = loading_args(&args[6..])?;
     let material = match args[0].as_str() {
         "--demo" => material::demo(args[1].parse()?, 1.0, 500.0)?,
         "--pack" => material::Material::load(&args[1])?,
@@ -209,13 +230,18 @@ fn run(args: &[String]) -> Result<()> {
     let mut experiment = Experiment::new(&material, fixed, args[3].parse()?, args[4].parse()?, &gate)?;
     experiment.cantilever = cantilever;
     experiment.gravity_m_s2 = gravity;
+    if let Some((natural, offset, strands)) = link_spec {
+        experiment.tension_link = Some(cold_link(&experiment.source, natural, offset, strands)?);
+    }
     let mut state = experiment.initial(&gate)?;
     let initial_heat = state.heat.energy_j();
     eprintln!("source={}, length_m={LENGTH}, radius_m={RADIUS}, segments={N}, h_W_m2_K={HTC}, reference_K=300, caloric_span_K=[300,500], axial_guides={}, fixed_end={fixed}, gravity_m_s2={gravity:?}, reference_mass_kg={}; one-way quasistatic mechanics, fixed thermal geometry, no melting or total thermomechanical energy claim",
-        material.card.content_hash().to_hex(), !cantilever, experiment.source.reference_mass_kg());
-    let extended = cantilever || args.len() == 10;
+        material.card.content_hash().to_hex(), !cantilever, state.rod.total_reference_mass_kg());
+    if link_spec.is_some() { eprintln!("attached tensile member uses the original 300 K material state and its own conserved mass; no thermal exchange with that member is modeled"); }
+    let extended = cantilever || args.len() > 6;
     let extra_header = if extended { ",tip_y_m,tip_z_m,reference_mass_kg,gravity_potential_J,root_fx_N,root_fy_N,root_fz_N,root_mx_Nm,root_my_Nm,root_mz_Nm,free_equilibrium_residual" } else { "" };
-    println!("time_s,T0_K,T1_K,T2_K,T3_K,tip_extension_m,axial_force_N,elastic_energy_J,stored_heat_change_J,external_heat_J,heat_residual_J,applied_k0_W_m_K{extra_header}");
+    let link_header = if link_spec.is_some() { ",tension_link_length_m,tension_link_tension_N,tension_link_energy_J" } else { "" };
+    println!("time_s,T0_K,T1_K,T2_K,T3_K,tip_extension_m,axial_force_N,elastic_energy_J,stored_heat_change_J,external_heat_J,heat_residual_J,applied_k0_W_m_K{extra_header}{link_header}");
     for step in 1..=intervals {
         let target = experiment.duration_s * (step as f64 / intervals as f64);
         state = experiment.advance(&state, target, &gate)?.0;
@@ -223,7 +249,10 @@ fn run(args: &[String]) -> Result<()> {
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let heat_change = state.heat.energy_j()-initial_heat;
         let extra = if extended { loading_observations(&state, &gate)? } else { String::new() };
-        println!("{target},{},{},{},{},{},{},{},{},{},{},{}{extra}", temperatures[0], temperatures[1], temperatures[2], temperatures[3],
+        let links = state.rod.tension_link_states()?;
+        let link_extra = links.first().map_or_else(String::new, |link|
+            format!(",{},{},{}", link.length_m, link.tension_n, link.stored_energy_j));
+        println!("{target},{},{},{},{},{},{},{},{},{},{},{}{extra}{link_extra}", temperatures[0], temperatures[1], temperatures[2], temperatures[3],
             state.rod.positions_m()[N][0]-LENGTH, state.rod.segment_resultants(N-1)?.0[0],
             state.rod.energy_j()?, heat_change, state.external_heat_j, heat_change-state.external_heat_j,
             k(&state.applied_conductivity[0]));
@@ -347,5 +376,39 @@ mod gravity_tests {
         gate.request();
         assert!(experiment.advance(&old, 0.01, &gate).is_err());
         assert_eq!(old.heat.cells(), &cells);
+    }
+}
+
+#[cfg(test)]
+mod tension_tests {
+    use super::*;
+
+    #[test]
+    fn original_heat_path_changes_cold_link_tension_through_shared_equilibrium() {
+        let gate = CancelGate::new();
+        let material = material::demo(500.0, 1.0, 500.0).unwrap();
+        let mut experiment = Experiment::new(&material, false, 1.0, 4.0, &gate).unwrap();
+        experiment.tension_link = Some(cold_link(&experiment.source, LENGTH * 0.999, 0.0, 1).unwrap());
+        let initial = experiment.initial(&gate).unwrap();
+        let final_state = experiment.advance(&initial, 0.5, &gate).unwrap().0;
+        let before = &initial.rod.tension_link_states().unwrap()[0];
+        let after = &final_state.rod.tension_link_states().unwrap()[0];
+        assert!(after.tension_n > before.tension_n);
+        assert!(after.length_m > before.length_m);
+        assert_eq!(initial.rod.tension_links(), final_state.rod.tension_links());
+        assert_eq!(initial.rod.total_reference_mass_kg(), final_state.rod.total_reference_mass_kg());
+        assert_eq!(final_state.rod.tension_links()[0].section(), experiment.source.reference_rod().sections()[0].elastic());
+        assert!((final_state.heat.energy_j() - final_state.external_heat_j).abs() < 1e-8);
+        assert!(final_state.rod.total_reference_mass_kg() > final_state.heat.cells().values().map(|c| c.mass_kg).sum::<f64>());
+    }
+
+    #[test]
+    fn optional_link_geometry_and_gravity_use_the_declared_order_and_units() {
+        let input = |values: &[&str]| values.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>();
+        assert_eq!(loading_args(&input(&["--tension-link", "0.03999", "0.002", "3", "--gravity", "0", "-1", "0"])).unwrap(),
+            (Some((0.03999, 0.002, 3)), [0.0, -1.0, 0.0]));
+        assert!(loading_args(&input(&["--tension-link", "0.04"])).is_err());
+        assert!(loading_args(&input(&["--tension-link", "0.04", "0", "-1"])).is_err());
+        assert!(loading_args(&input(&["--gravity", "0", "0", "1", "--tension-link", "0.04", "0", "1"])).is_err());
     }
 }

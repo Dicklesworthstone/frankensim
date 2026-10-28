@@ -23,6 +23,8 @@ pub mod supports;
 pub mod gravity;
 /// Stress-free curved centerlines and material frames, independent of material.
 pub mod reference;
+/// Source-bound tension-only links sharing this rod's equilibrium and gravity.
+pub mod tension;
 
 use super::{MAX_MATERIAL_ROD_SEGMENTS, Rod, RodSection, TipLoad};
 use crate::SolidError;
@@ -76,6 +78,7 @@ pub struct SpatialMaterialRod {
     reference_mass: Arc<gravity::RodReferenceMass>,
     gravity: Option<gravity::GravityLoad>,
     reference_geometry: Option<Arc<reference::RodReferenceGeometry>>,
+    tension_links: Vec<tension::MaterialTensionLink>,
 }
 
 impl SpatialMaterialRod {
@@ -125,7 +128,7 @@ impl SpatialMaterialRod {
         let free_dofs = (0..rod.ndof()).collect();
         Ok(Self { rod, sections, stiffness, reference_length_m: length_m, thermal: None,
             supports: Vec::new(), free_dofs, reference_mass, gravity: None,
-            reference_geometry: None })
+            reference_geometry: None, tension_links: Vec::new() })
     }
 
     /// Original material assignments and all layer receipts, in spatial order.
@@ -167,7 +170,7 @@ impl SpatialMaterialRod {
         Ok((force, moment))
     }
 
-    /// Stored strain energy [J] from every segment's own material law.
+    /// Stored strain energy [J] from every segment and attached tensile link.
     pub fn energy_j(&self) -> Result<f64, SpatialRodError> {
         self.energy_for(&self.rod)
     }
@@ -176,7 +179,9 @@ impl SpatialMaterialRod {
     // translation probes geometrically while retaining exact uniform/spatial
     // parity for the original unheated elastic path.
     fn probe_translation_scale_m(&self) -> f64 {
-        if self.thermal.is_some() || self.reference_geometry.is_some() { self.rod.l0 } else { 1.0 }
+        if self.thermal.is_some() || self.reference_geometry.is_some() || !self.tension_links.is_empty() {
+            self.rod.l0
+        } else { 1.0 }
     }
 
     fn strains_for(&self, rod: &Rod, segment: usize)
@@ -209,6 +214,9 @@ impl SpatialMaterialRod {
                 }
                 None => 0.5 * rod.l0 * section.twice_energy_per_length(g, k),
             };
+        }
+        for link in &self.tension_links {
+            energy += link.state_for(rod)?.stored_energy_j;
         }
         if !energy.is_finite() {
             return Err(SpatialRodError::Invalid("material strain energy is unrepresentable"));
