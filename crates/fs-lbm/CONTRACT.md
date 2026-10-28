@@ -3856,3 +3856,36 @@ flow and heat with the unforced slab, and checks independently gauged 3D
 conducting sheets against four-resistor motional-EMF power balances at the
 accepted midpoint velocities. Explicit and local material-transport entry points
 retain their prior topology behavior.
+
+## Incoming-time material rheology on the reference 3-D grid
+
+`lattice3::rheology` supplies material-rheology steps for `Grid3` and
+`ForcedGrid3`. Each incoming velocity field is interpreted with its same-time
+uniform or spatial half-force shift. The shared centered/quadratic-halfway-wall
+stencil evaluates `gamma = sqrt(2 sym(grad u):sym(grad u)) / dt` in 1/s. The
+original producer resolves one material response per fluid cell, its transport
+view is frozen once, and `tau = 1/2 + (mu/rho0) dt / (cs^2 dx^2)` drives that
+collision/stream step. Source objects and query coordinates, time and rate are
+retained. Reference dx/dt/rho0 stay fixed; nonmatching density refuses. D3Q27
+independent bulk/higher rates and all equilibrium choices survive; D3Q19 moment
+models retain their existing second-order bulk/shear tie.
+
+This is explicit incoming-time generalized-Newtonian feedback, not a
+self-consistent nonequilibrium-stress closure or implicit time integration.
+No source-domain extension, viscosity floor/cap, material fit, heat deposition,
+thermal evolution or hereditary memory is added. The preparation sweep caches
+velocities in O(N) storage/work and queries sources in fixed serial cell order.
+Failed source, scaling, collision or cancellation checks publish no step.
+Time-varying force endpoints remain owned by the existing trapezoidal force
+step and are not used to reinterpret incoming strain.
+
+Five native exact-source serial tests exercise the actual grid owners and real
+execution context: all seven Newtonian collision variants reproduce existing
+population bits; force-centered Carreau queries ignore rigid rotation;
+quadratic wall shear is recovered; original source/query ownership and rollback
+are retained; and a CM power-law channel with index 0.75 reduces maximum
+analytic-profile error from 0.723% at 12 fluid rows to 0.190% at 24. Every source
+query stays outside the fixture's explicitly declared low-rate regularization.
+Pooled wrappers reuse the same preparation and existing pool owner, but pooled
+execution was not included in this qualification; no cross-ISA or throughput
+claim is added.

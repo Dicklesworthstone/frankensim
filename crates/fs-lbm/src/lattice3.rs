@@ -8,6 +8,8 @@ use core::{fmt, marker::PhantomData, ops::ControlFlow};
 use fs_exec::{CancelGate, Cancelled, Cx, KernelRunner, Reduce, TileKernel, TilePlan};
 use std::sync::Mutex;
 
+/// Source-preserving generalized-Newtonian viscosity on the existing 3-D step.
+pub mod rheology;
 mod sgs;
 /// Spatial and time-dependent force fields on the same native step owner.
 pub mod sources;

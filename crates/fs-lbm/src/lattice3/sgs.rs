@@ -1,6 +1,6 @@
 //! SGS integration through the existing per-cell collision owner.
 
-use super::{Grid3, GridError3, coordinates, macro_cell};
+use super::{Grid3, GridError3, Lattice3, coordinates, macro_cell};
 use crate::sgs3::{
     SgsConfig, SgsError, SgsLattice3, SgsReport, SgsStepError, SgsWorkspace3, eddy_viscosity,
 };
@@ -145,7 +145,7 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
             if !(nu.is_finite() && nu > 0.0) {
                 return Err(SgsError::InvalidMolecularViscosity { cell }.into());
             }
-            let gradient = self.sgs_gradient(cell, &workspace.velocity);
+            let gradient = self.velocity_gradient(cell, &workspace.velocity);
             let eddy = eddy_viscosity(config.model, config.filter_width_lu, gradient)?;
             let ratio = eddy / nu;
             if !ratio.is_finite() || ratio > config.maximum_eddy_to_molecular {
@@ -185,8 +185,12 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
         }
         Ok(report)
     }
+}
 
-    fn sgs_neighbour(
+// One velocity-gradient stencil for molecular rheology and exploratory SGS.
+// The caller supplies the same-time, force-centered macroscopic velocity.
+impl<L: Lattice3<Q>, const Q: usize> Grid3<L, Q> {
+    fn velocity_neighbour(
         &self,
         mut p: [usize; 3],
         axis: usize,
@@ -218,12 +222,12 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
         }
     }
 
-    fn sgs_gradient(&self, cell: usize, velocity: &[[f64; 3]]) -> [[f64; 3]; 3] {
+    pub(super) fn velocity_gradient(&self, cell: usize, velocity: &[[f64; 3]]) -> [[f64; 3]; 3] {
         let p = coordinates(cell, self.dims);
         let mut gradient = [[0.0; 3]; 3];
         for axis in 0..3 {
-            let minus = self.sgs_neighbour(p, axis, false, velocity);
-            let plus = self.sgs_neighbour(p, axis, true, velocity);
+            let minus = self.velocity_neighbour(p, axis, false, velocity);
+            let plus = self.velocity_neighbour(p, axis, true, velocity);
             for component in 0..3 {
                 gradient[component][axis] = match (minus, plus) {
                     (Some(low), Some(high)) => 0.5 * (high[component] - low[component]),
