@@ -37,7 +37,7 @@
       "name": "CC BY 4.0",
       "url": "https://zenodo.org/records/10696680",
       "credit": "Montserrat Pàmies-Vilà, with Alexander Mayer, Ewa Matusiak and Vasileios Chatziioannou; mdw University of Music and Performing Arts Vienna, 2024",
-      "notes": "License verified from the Zenodo record API. Original synchronized audio and motion capture; no audio or motion CSV is redistributed in Git."
+      "notes": "License verified from the Zenodo record API (metadata.license.id = cc-by-4.0). Original synchronized audio and motion capture; no audio or motion CSV is redistributed in Git."
     },
     {
       "id": "uiowa-mis",
@@ -101,13 +101,6 @@
       "url": "https://depositonce.tu-berlin.de/items/f81ba73c-4d9b-48de-9fbc-31cb03d5b9bc/full",
       "credit": "Henrik von Coler, Jonas Margraf and Paul Schuladen; violinist Michiko Feuerlein; recording engineer Philipp Pawlowski; TU Berlin Electronic Music Studio",
       "notes": "Keep the distributed recordings and labels unchanged. Source record and package insert: DOI 10.14279/depositonce-6747. No recording bytes are redistributed in Git."
-    },
-    {
-      "id": "iwk-cello-spring-cc-by-4",
-      "name": "CC BY 4.0",
-      "url": "https://zenodo.org/records/10696680",
-      "credit": "Montserrat Pamies-Vila, Alexander Mayer, Ewa Matusiak and Vasileios Chatziioannou; Department of Music Acoustics, mdw Vienna",
-      "notes": "Zenodo API metadata.license.id = cc-by-4.0, checked at acquisition; synchronized motion and audio, February 2023 session."
     }
   ],
   "chains": [
@@ -118,7 +111,7 @@
       "distance_m": 0.45,
       "format": "16-bit/44.1 kHz mono WAV (verified)",
       "room": "Department of Music Acoustics, mdw, Vienna; February 2023",
-      "notes": "Microphone in front of the cello. Vivaldi Spring adaptation on open A3, D3 and G2; human player and two robotic reproductions. The source does not provide a pressure calibration or room transfer function.",
+      "notes": "Microphone in front of the cello. Vivaldi Spring adaptation on open A3, D3 and G2; human player and two robotic reproductions. The source does not provide a pressure calibration or room transfer function. Original audio is retained without normalization, resampling or retuning.",
       "source_sha256": "bedc1e0cbcec4d7c7d1450e336b999e99fc03b793d2108f287445bcb4be427f0"
     },
     {
@@ -169,15 +162,6 @@
       "format": "distributed selected files: 16-bit/96 kHz mono PCM WAV",
       "room": "anechoic chamber, SIM Berlin",
       "notes": "Package insert states 24-bit/96 kHz capture. All 20 selected distributed WAVs independently decode as pcm_s16le at 96 kHz. Two microphones observe the same performances. Exact distance and specimen geometry are not supplied by the insert; single-note table is referenced to A4 = 443 Hz. Original segmentation files are preserved."
-    },
-    {
-      "id": "iwk-cello-spring-2023",
-      "source_url": "https://zenodo.org/records/10696680/files/ReadMe_CelloSpringRecordings.txt",
-      "mic": "ROGA Instruments RG50",
-      "distance_m": 0.45,
-      "format": "16-bit/44.1 kHz mono PCM WAV",
-      "room": "Department of Music Acoustics, mdw Vienna; room response not characterized in the README",
-      "notes": "One professional player and two robot performances, synchronized with OptiTrack Prime 13 motion at 240 fps. Robot case A has t_z = 16 mm and case B t_z = 15 mm; the latter bow is closer to the instrument. No bow force or hair-contact signal is supplied."
     }
   ],
   "files": [
@@ -204,8 +188,10 @@
         "bits_per_sample": 16,
         "frames": 2999169,
         "duration_s": 68.00836734693877,
-        "decode_check": "ffmpeg full decode succeeded"
-      }
+        "decode_check": "ffmpeg full decode succeeded",
+        "codec_name": "pcm_s16le"
+      },
+      "source_checksum": "md5:ccee5293141e0d2a41a9adcc1009fcfe"
     },
     {
       "id": "mdw-cello-2024-player-motion",
@@ -251,8 +237,10 @@
         "bits_per_sample": 16,
         "frames": 2999169,
         "duration_s": 68.00836734693877,
-        "decode_check": "ffmpeg full decode succeeded"
-      }
+        "decode_check": "ffmpeg full decode succeeded",
+        "codec_name": "pcm_s16le"
+      },
+      "source_checksum": "md5:b9e14a9e2ef2e5c0c3eb1747e6070cca"
     },
     {
       "id": "mdw-cello-2024-robot-a-motion",
@@ -297,8 +285,10 @@
         "bits_per_sample": 16,
         "frames": 2999169,
         "duration_s": 68.00836734693877,
-        "decode_check": "ffmpeg full decode succeeded"
-      }
+        "decode_check": "ffmpeg full decode succeeded",
+        "codec_name": "pcm_s16le"
+      },
+      "source_checksum": "md5:2b0c5f8776d6d34f6e0a98eed75374f4"
     },
     {
       "id": "mdw-cello-2024-robot-b-motion",
@@ -1419,113 +1409,34 @@
       ]
     },
     {
-      "id": "iwk-cello-spring-robot-a",
-      "instrument": "Cello",
-      "kind": "performance",
-      "path": "CelloSpring/sound_caseA.wav",
-      "url": "https://zenodo.org/api/records/10696680/files/sound_caseA.wav/content",
-      "sha256": "4a1ee4fdeb45b65ef22c660291ea07936cd0da992f774bc49fc650633a47e24d",
-      "bytes": 5998382,
-      "source_checksum": "md5:b9e14a9e2ef2e5c0c3eb1747e6070cca",
-      "licence": "iwk-cello-spring-cc-by-4",
-      "source_page": "https://zenodo.org/records/10696680",
-      "chain": "iwk-cello-spring-2023",
-      "articulation": "robot case A, t_z = 16 mm",
-      "range": "open A3, D3, G2",
-      "dynamic": null,
-      "gradable": false,
-      "audio": {
-        "codec_name": "pcm_s16le",
-        "sample_rate_hz": 44100,
-        "channels": 1,
-        "bits_per_sample": 16,
-        "duration_s": 68.008367,
-        "decode_check": "ffmpeg full decode succeeded"
-      },
-      "notes": "Vivaldi Spring adaptation. Original synchronized phrase; no normalization, resampling or retuning. The existing player-kinematics table derives from this record, but contains neither force nor a hair-contact signal; the specimen materials and body geometry are not characterized."
-    },
-    {
-      "id": "iwk-cello-spring-human",
-      "instrument": "Cello",
-      "kind": "performance",
-      "path": "CelloSpring/sound_player.wav",
-      "url": "https://zenodo.org/api/records/10696680/files/sound_player.wav/content",
-      "sha256": "7148e1883105b782e3c311bd5c4987b4d46860df865645ba8fd966bf3a9e177a",
-      "bytes": 5998382,
-      "source_checksum": "md5:ccee5293141e0d2a41a9adcc1009fcfe",
-      "licence": "iwk-cello-spring-cc-by-4",
-      "source_page": "https://zenodo.org/records/10696680",
-      "chain": "iwk-cello-spring-2023",
-      "articulation": "professional player",
-      "range": "open A3, D3, G2",
-      "dynamic": null,
-      "gradable": false,
-      "audio": {
-        "codec_name": "pcm_s16le",
-        "sample_rate_hz": 44100,
-        "channels": 1,
-        "bits_per_sample": 16,
-        "duration_s": 68.008367,
-        "decode_check": "ffmpeg full decode succeeded"
-      },
-      "notes": "Vivaldi Spring adaptation. Original synchronized phrase; no normalization, resampling or retuning. The existing player-kinematics table derives from this record, but contains neither force nor a hair-contact signal; the specimen materials and body geometry are not characterized.",
-      "player_motion_table": "data/instruments/descriptions/players/cello-open-strings-bow-kinematics-pamies-vila-2024.tsv"
-    },
-    {
-      "id": "iwk-cello-spring-robot-b",
-      "instrument": "Cello",
-      "kind": "performance",
-      "path": "CelloSpring/sound_caseB.wav",
-      "url": "https://zenodo.org/api/records/10696680/files/sound_caseB.wav/content",
-      "sha256": "2c4060faabb501eb10d4a0a01c9aff8bfa8dbf4936ed33822f6f9ec904b74837",
-      "bytes": 5998382,
-      "source_checksum": "md5:2b0c5f8776d6d34f6e0a98eed75374f4",
-      "licence": "iwk-cello-spring-cc-by-4",
-      "source_page": "https://zenodo.org/records/10696680",
-      "chain": "iwk-cello-spring-2023",
-      "articulation": "robot case B, t_z = 15 mm",
-      "range": "open A3, D3, G2",
-      "dynamic": null,
-      "gradable": false,
-      "audio": {
-        "codec_name": "pcm_s16le",
-        "sample_rate_hz": 44100,
-        "channels": 1,
-        "bits_per_sample": 16,
-        "duration_s": 68.008367,
-        "decode_check": "ffmpeg full decode succeeded"
-      },
-      "notes": "Vivaldi Spring adaptation. Original synchronized phrase; no normalization, resampling or retuning. The existing player-kinematics table derives from this record, but contains neither force nor a hair-contact signal; the specimen materials and body geometry are not characterized."
-    },
-    {
-      "id": "iwk-cello-spring-score",
+      "id": "mdw-cello-2024-score",
       "instrument": "Cello",
       "kind": "annotation",
-      "path": "CelloSpring/MusicScore_Spring_CelloOpenStrings.pdf",
+      "path": "MDWCello2024/MusicScore_Spring_CelloOpenStrings.pdf",
       "url": "https://zenodo.org/api/records/10696680/files/MusicScore_Spring_CelloOpenStrings.pdf/content",
       "sha256": "282e25dace10ec129b1041aef961c104dd6086acb879a8256c4b0bacd8c6cef2",
       "bytes": 31950,
       "source_checksum": "md5:fbb1ed480d28a5135ce2ffa2a68124d3",
-      "licence": "iwk-cello-spring-cc-by-4",
+      "licence": "mdw-cello-cc-by-4",
       "source_page": "https://zenodo.org/records/10696680",
-      "chain": "iwk-cello-spring-2023",
+      "chain": "mdw-cello-2023-rg50",
       "articulation": "original open-string score",
       "range": "open A3, D3, G2",
       "dynamic": null,
       "gradable": false
     },
     {
-      "id": "iwk-cello-spring-readme",
+      "id": "mdw-cello-2024-readme",
       "instrument": "Cello",
       "kind": "annotation",
-      "path": "CelloSpring/ReadMe_CelloSpringRecordings.txt",
+      "path": "MDWCello2024/ReadMe_CelloSpringRecordings.txt",
       "url": "https://zenodo.org/api/records/10696680/files/ReadMe_CelloSpringRecordings.txt/content",
       "sha256": "bedc1e0cbcec4d7c7d1450e336b999e99fc03b793d2108f287445bcb4be427f0",
       "bytes": 1862,
       "source_checksum": "md5:e4371d57063bdd6e800759657f1a044d",
-      "licence": "iwk-cello-spring-cc-by-4",
+      "licence": "mdw-cello-cc-by-4",
       "source_page": "https://zenodo.org/records/10696680",
-      "chain": "iwk-cello-spring-2023",
+      "chain": "mdw-cello-2023-rg50",
       "articulation": "original recording and motion-capture documentation",
       "range": "open A3, D3, G2",
       "dynamic": null,

@@ -36,8 +36,8 @@ bash data/instruments/fetch-references.sh \
 `--instrument` is case-insensitive and exact; both selectors are repeatable.
 Combining `--instrument` and `--id` intersects them. Unknown selectors and empty
 intersections fail before downloading. No selector means the entire chosen
-manifest: about 2.2 GB for the supplement, including the 1.61 GB TU-Note violin
-ZIP and the 388 MB drum-kit archive.
+manifest: about 2.2 GB for the supplement, including the 1.61 GB TU-Note ZIP
+and the 388 MB drum-kit archive.
 
 Fetch the smaller Iowa selection without copying its IDs:
 
@@ -69,8 +69,9 @@ must match their pins before any new audio file is published. Failed downloads
 leave `.part` files for inspection; existing recordings and partial files are
 never overwritten. A repeat run verifies the extracted recordings without
 downloading the archive again. `--pin --members` reports the archive and member
-digests without retaining downloads. Other files selected with `--members`
-follow the ordinary acquisition path.
+digests without retaining downloads. ZIP archives use a verified local archive
+for random access, as described for TU-Note below. Other files selected with
+`--members` follow the ordinary acquisition path.
 
 The 27 Salamander members
 supply every reference used by `apps/instrument-lab/tools/kitgrade.py`: a primary
@@ -89,7 +90,9 @@ every performed note.
 | Instrument or state | Acquired recording | Source |
 |---|---|---|
 | Violin | arco and pizzicato A4–B4 on A string; arco G3–B3 on G string | Iowa 2012 |
+| Violin | open-string notes at multiple dynamics, legato transition, scales and Massenet phrase; two microphone views | TU-Note 2018 |
 | Cello | arco A3–Ab4 on A string; arco and pizzicato C2–B2 on C string | Iowa 2012 |
+| Cello | open-string Vivaldi phrase, human player and two robot reproductions, with synchronized motion | mdw 2024 |
 | Viola | arco A4–B4 on A string | Iowa 2012 |
 | Double bass | arco E1–B1 on E string | Iowa 2012 |
 | Guitar | B3 on B string, mf | Iowa |
@@ -140,62 +143,6 @@ These checks streamed the actual recordings through memory; they do not claim
 a persistent audio cache or improved simulation fidelity. The new `--members`
 path was also exercised against the real pan-pipe and steel-string archives.
 
-## Bowed notes, transitions and measured player motion
-
-The supplement now also contains two independent bowed-string recording sets:
-
-- [TU-Note Violin](https://doi.org/10.14279/depositonce-6747), by Henrik von
-  Coler, Jonas Margraf and Paul Schuladen, recorded with violinist Michiko
-  Feuerlein and engineer Philipp Pawlowski in the SIM Berlin anechoic chamber.
-  The selection contains **20 original WAVs**: open G3/D4/A4/E5 at mf, A4 at
-  pp/ff, a D4-to-A3 legato transition without vibrato, plain ascending/descending
-  scales, and a Massenet *Meditation* phrase, each in both original microphone
-  positions. The **12 original label files** retain attack, sustain, release
-  and transition boundaries and the source's note tables. The two microphones
-  observe the same performances; they are not independent takes. The source
-  uses A4 = 443 Hz. Its insert describes 24-bit/96 kHz capture, while all selected
-  distributed WAVs were measured as **16-bit/96 kHz mono**. The CC BY-ND 4.0
-  recordings and labels remain unchanged.
-- [Pàmies-Vilà and colleagues' cello player/robot recordings](https://zenodo.org/records/10696680)
-  provide **three synchronized 68-second phrases** on open A3/D3/G2, adapting
-  Vivaldi's *Spring*: one professional player and two robot performances. This
-  is the source of the already-ingested
-  `descriptions/players/cello-open-strings-bow-kinematics-pamies-vila-2024.tsv`.
-  The original README specifies a ROGA RG50 microphone 45 cm in front of the
-  cello and 240 fps motion capture; the delivered audio is PCM16/44.1 kHz mono.
-  The source's CC BY 4.0 license, README and score are retained. The kinematics
-  supply motion, **not normal force or a hair-contact measurement**; they do
-  not characterize the instrument's materials and geometry.
-
-Fetch the new selections with the existing command:
-
-```sh
-bash data/instruments/fetch-references.sh --members \
-  --manifest data/instruments/references-supplemental.json --instrument Violin
-bash data/instruments/fetch-references.sh \
-  --manifest data/instruments/references-supplemental.json --instrument Cello
-```
-
-ZIP needs random access to its directory, so `--members` retains the verified
-compressed ZIP at `TU-Note_Violin.zip` on the reference volume and extracts only
-the 32 pinned members under `TU-Note/`. It does not unpack the complete library
-or buffer the archive in memory. `--pin --members` for ZIP requires that local
-source archive; it then reports member digests without writing extracted files.
-Tar sources retain their existing streaming behavior. A partial earlier
-download is preserved and causes refusal instead of being overwritten.
-
-The 23 new recordings and all 66 previously selected recordings were retained,
-hash-verified and fully decoded in this session: **89 audio files, 348,320,151
-bytes and 2,225.17089 seconds**. The new violin archive's complete SHA-256 and
-each selected member's hash are in the supplement. The three cello recordings
-also matched the source-published MD5 checksums before SHA-256 pins were added.
-Annotations and compressed archives are excluded from the audio counts.
-
-These additions expose onset and transition errors and permit a comparison
-with a recorded player motion. They do not authorize changing physical
-parameters to fit the recordings, or establish same-specimen validation of the
-current simulated bodies.
-
 ## Synchronized cello motion and sound
 
 The [mdw cello dataset](https://zenodo.org/records/10696680) pairs the professional
@@ -205,9 +152,9 @@ reproductions, with source position controls of 16 mm and 15 mm. All three
 original WAVs are 68.008367 seconds, mono, 16-bit, 44.1 kHz; their synchronized
 stick, nut and bridge markers were recorded at 240 frames per second.
 
-The six `mdw-cello-2024-*` entries link each audio recording to its original
-motion CSV by ID. The existing fetcher acquires both kinds of file and verifies their
-independent hashes:
+The supplement links each of the three audio recordings to its original motion
+CSV by ID, and retains the original README and score in the same cohort. The
+fetcher acquires all eight files and verifies their independent hashes:
 
 ```sh
 bash data/instruments/fetch-references.sh \
@@ -230,11 +177,46 @@ passed full FFmpeg decode. All **69 audio files (280,543,511 bytes)** and the
 motion sources were retained outside Git in the session reference directory;
 the manifest does not depend on that transient cache.
 
-This 69-file acquisition check is a subset of the 89 distinct recordings
-above. The `mdw-cello-2024-*` and `iwk-cello-spring-*` WAV entries name the
-same three source recordings at separately retained paths; count each
-SHA-256 once when reporting unique recordings. Both source identities and
-all original annotations are preserved.
+## Violin notes, transitions and phrases
+
+[TU-Note Violin](https://doi.org/10.14279/depositonce-6747), by Henrik von Coler,
+Jonas Margraf and Paul Schuladen, supplies unchanged recordings of Michiko
+Feuerlein, recorded by Philipp Pawlowski in the SIM Berlin anechoic chamber.
+The selected 20 WAVs cover open G3, D4, A4 and E5 at mf; A4 at
+pp and ff; a D4-to-A3 legato transition without vibrato; plain major ascending
+and minor descending scales; and a phrase from Massenet's *Méditation*. Each
+performance has both a DPA 4099 and a Brüel & Kjær 4006 microphone recording.
+These are two microphone views of the same performance, not independent takes.
+
+Twelve original annotation files accompany the WAVs, including note tables and
+attack, sustain, release and transition labels. The source's note table uses
+A4 = 443 Hz. The package insert describes 24-bit/96 kHz capture, while all 20
+selected distributed WAVs decode as mono PCM16 at 96 kHz. The manifest records
+both facts; acquisition does not retune or change the delivered encoding.
+
+```sh
+bash data/instruments/fetch-references.sh --members \
+  --manifest data/instruments/references-supplemental.json --instrument Violin
+```
+
+ZIP extraction caches and verifies the complete 1,605,101,158-byte compressed
+archive as `TU-Note_Violin.zip` for random access, then retains only the 32 selected members
+(67,807,308 bytes) under `TU-Note`. It does not unpack the complete collection.
+An existing verified member is reused. `--pin --members` for ZIP requires the
+archive already in the reference directory and reports member digests without
+extracting them. The source's CC BY-ND 4.0 license, attribution, original member
+paths and all byte hashes are recorded in the manifest.
+
+The combined selection contains **89 unique audio files**, totaling
+**348,320,151 bytes and 2,225.17089 seconds**. All matched their SHA-256 and
+byte-length pins and passed full FFmpeg decoding during acquisition. This
+counts the three mdw cello WAVs once and includes the 20 TU-Note WAVs in addition
+to the 66 existing recordings. Archives, motion CSVs and annotation files are
+excluded from the audio count. The three cello originals also matched the
+source-published MD5 checksums before their SHA-256 pins were added. These
+checks establish available, intact
+recordings; the TU-Note source does not provide measured bow force, bow speed or
+specimen geometry, and no material or excitation parameter was fitted to it.
 
 ## Recording limits and attribution
 
@@ -287,7 +269,8 @@ interpreting a discrepancy.
 Existing geometry sources include `geometry/violin-mclennan2009`,
 `geometry/violin-cannone-guarneri-1743-esrf2026` and
 `geometry/loc-stradivari-family-bouts`. These are different specimens from the
-Iowa recordings; a shared family name does not establish geometric equivalence.
+Iowa and TU-Note recordings; a shared family name does not establish geometric
+equivalence.
 
 [Woodhouse's friction/rosin treatment](https://euphonics.org/9-6-friction-and-rosin-a-sticky-problem/)
 and [thermal-model discussion](https://euphonics.org/9-6-3-exploring-the-thermal-bowing-models/)
