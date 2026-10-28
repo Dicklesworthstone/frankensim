@@ -13,6 +13,9 @@
 //! Outputs lie in the retained modal subspace: no residual static flexibility
 //! or instantaneous load-dependent massless-coordinate feedthrough is inferred.
 
+mod runtime;
+pub use runtime::{FrameResponseLimits, FrameVibrationResponse, FrameVibrationRuntime};
+
 use fs_math::c64::C64;
 use fs_solid::frame2d::{Frame2d, FrameMode, FrameModeStatus};
 use fs_solid::SolidError;
@@ -275,4 +278,204 @@ fn checked_sum(values: impl Iterator<Item = f64>) -> Result<f64, FrameVibrationE
     }
     let result = sum + correction;
     if result.is_finite() { Ok(result) } else { Err(FrameVibrationError::Invalid("frame projection overflow")) }
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use crate::frame_vibration::{FrameResponseLimits, FrameVibrationBasis,
+        FrameVibrationBudget, FrameVibrationError, FrameVibrationRuntime};
+    use crate::modal_acoustic_time::{ModalAcousticState, ModalAcousticTimeBudget};
+    use fs_solid::frame2d::{Frame2d, Geometry, SectionModel};
+
+    fn limits() -> FrameResponseLimits {
+        FrameResponseLimits {
+            maximum_incremental_translation_m: 1.0, maximum_incremental_rotation_rad: 2.0,
+            maximum_translation_speed_m_s: 10.0, maximum_angular_speed_rad_s: 20.0,
+            maximum_absolute_translation_acceleration_m_s2: 100.0,
+            maximum_angular_acceleration_rad_s2: 200.0,
+        }
+    }
+    fn basis(preload: f64) -> FrameVibrationBasis {
+        let mut frame = Frame2d::new(Geometry::Linear);
+        frame.add_node(0.0, 0.0); frame.add_node(1.0, 0.0);
+        frame.fix(0, [true; 3]); frame.fix(1, [true, false, false]);
+        frame.add_mass(1, 2.0);
+        frame.add_element(0, 1, 3, 0.0, &|| SectionModel::Elastic { ea: 200.0, ei: 8.0 }).unwrap();
+        if preload != 0.0 { frame.static_load(&[0.0,0.0,0.0,0.0,preload,0.0], 1).unwrap(); }
+        FrameVibrationBasis::from_frame(&frame, 1,
+            FrameVibrationBudget { max_frame_dofs: 6, max_dense_entries: 36 }, || false).unwrap()
+    }
+    fn runtime(zeta: f64, initial: ModalAcousticState, limit: FrameResponseLimits) -> FrameVibrationRuntime {
+        FrameVibrationRuntime::new(basis(0.0), 1000, &[zeta],
+            ModalAcousticTimeBudget::audible_reference(), limit, &[initial], || false).unwrap()
+    }
+    fn close(a:f64,b:f64) { assert!((a-b).abs() < 2e-9*(1.0+a.abs()+b.abs()), "{a:e} != {b:e}"); }
+
+    #[test]
+    fn held_nodal_load_reaches_analytic_motion_with_closed_work() {
+        let mut sim = runtime(0.0, ModalAcousticState::default(), limits());
+        let (mut work, mut loss) = (0.0, 0.0);
+        for _ in 0..125 {
+            let r = sim.step(&[0.0,0.0,0.0,0.0,4.0,0.0], [0.0; 2], || false).unwrap();
+            work += r.input_work_j; loss += r.viscous_dissipation_j;
+            close(r.nodal_work_j, r.input_work_j);
+            assert_eq!(r.base_inertial_work_j, 0.0);
+            assert!(r.work_projection_residual_j.abs() <= r.work_projection_tolerance_j);
+        }
+        let r = sim.response();
+        let omega = 12.0_f64.sqrt();
+        assert_eq!(r.sample, 125); assert_eq!(r.time_s, 0.125);
+        close(r.displacement[4], 4.0/24.0*(1.0-(omega*0.125).cos()));
+        close(r.relative_velocity[4], 4.0/24.0*omega*(omega*0.125).sin());
+        close(r.relative_acceleration[4], 2.0*(omega*0.125).cos());
+        close(r.retained_energy_j+loss, work);
+        close(work, 4.0*r.displacement[4]);
+    }
+
+    #[test]
+    fn accelerometer_output_includes_base_and_work_remains_relative() {
+        let zeta = 0.03;
+        let mut sim = runtime(zeta, ModalAcousticState::default(), limits());
+        for _ in 0..40 {
+            let r = sim.step(&[0.0,0.0,0.0,0.0,3.0,0.0], [0.2,0.4], || false).unwrap();
+            close(r.absolute_acceleration[0], 0.2);
+            close(r.absolute_acceleration[1], 0.4);
+            close(r.relative_acceleration[0], 0.0);
+            close(r.relative_acceleration[1], 0.0);
+            close(r.absolute_acceleration[4]-r.relative_acceleration[4], 0.4);
+            close(2.0*r.absolute_acceleration[4] + 4.0*zeta*12.0_f64.sqrt()*r.relative_velocity[4]
+                +24.0*r.incremental_displacement[4], 3.0);
+            close(r.input_work_j, r.nodal_work_j+r.base_inertial_work_j);
+            close(r.base_inertial_work_j, -0.8/3.0*r.nodal_work_j);
+        }
+    }
+
+    #[test]
+    fn initial_pluck_ringdown_reuses_shared_damping_and_storage() {
+        let initial = ModalAcousticState { displacement_m_sqrt_kg: 0.2, velocity_m_sqrt_kg_per_s: -0.1 };
+        let mut sim = runtime(0.1, initial, limits());
+        let energy0 = sim.response().retained_energy_j;
+        close(energy0, 0.245);
+        let (mut loss, mut previous) = (0.0, energy0);
+        for _ in 0..500 {
+            let r = sim.step(&[0.0; 6], [0.0; 2], || false).unwrap();
+            assert!(r.retained_energy_j <= previous+1e-13);
+            assert!(r.viscous_dissipation_j >= -r.dissipation_roundoff_tolerance_j);
+            assert_eq!(r.input_work_j, 0.0);
+            loss += r.viscous_dissipation_j;
+            previous = r.retained_energy_j;
+        }
+        close(previous+loss, energy0);
+        assert!(loss > 0.01);
+    }
+
+    #[test]
+    fn late_physical_limit_preserves_modal_state_response_and_clock() {
+        let mut bound = limits(); bound.maximum_incremental_translation_m = 1e-12;
+        let mut sim = runtime(0.0, ModalAcousticState::default(), bound);
+        let before = sim.response().clone();
+        let states = sim.states().to_vec();
+        assert!(sim.step(&[0.0,0.0,0.0,0.0,4.0,0.0], [0.0; 2], || false).is_err());
+        assert_eq!(sim.response(), &before); assert_eq!(sim.states(), states.as_slice());
+        let resumed = sim.step(&[0.0; 6], [0.0; 2], || false).unwrap();
+        assert_eq!(resumed.sample, 1); assert_eq!(resumed.retained_energy_j, 0.0);
+    }
+
+    #[test]
+    fn final_cancellation_rolls_back_and_retry_matches_uninterrupted_history() {
+        let load = [0.0,0.0,0.0,0.0,4.0,0.0];
+        let mut reference = runtime(0.02, ModalAcousticState::default(), limits());
+        let mut checks = 0;
+        reference.step(&load, [0.1,0.2], || { checks += 1; false }).unwrap();
+        let mut sim = runtime(0.02, ModalAcousticState::default(), limits());
+        let before = sim.response().clone();
+        let states = sim.states().to_vec();
+        let mut seen = 0;
+        assert!(matches!(sim.step(&load, [0.1,0.2], || { seen += 1; seen == checks }),
+            Err(FrameVibrationError::Cancelled)));
+        assert_eq!(seen, checks);
+        assert_eq!(sim.response(), &before); assert_eq!(sim.states(), states.as_slice());
+        sim.step(&load, [0.1,0.2], || false).unwrap();
+        assert_eq!(sim.response(), reference.response()); assert_eq!(sim.states(), reference.states());
+    }
+
+    #[test]
+    fn preload_is_maintained_without_double_applying_its_force_or_energy() {
+        let mut sim = FrameVibrationRuntime::new(basis(4.0), 1000, &[0.02],
+            ModalAcousticTimeBudget::audible_reference(), limits(),
+            &[ModalAcousticState::default()], || false).unwrap();
+        for _ in 0..8 {
+            let r = sim.step(&[0.0; 6], [0.0; 2], || false).unwrap();
+            close(r.displacement[4], 4.0/24.0);
+            assert_eq!(r.incremental_displacement, vec![0.0; 6]);
+            assert_eq!(r.retained_energy_j, 0.0); assert_eq!(r.input_work_j, 0.0);
+        }
+    }
+
+    #[test]
+    fn invalid_initial_and_trial_data_cannot_publish_a_response() {
+        let mut bad = limits(); bad.maximum_angular_speed_rad_s = f64::NAN;
+        assert!(FrameVibrationRuntime::new(basis(0.0), 1000, &[0.0],
+            ModalAcousticTimeBudget::audible_reference(), bad,
+            &[ModalAcousticState::default()], || false).is_err());
+        let mut sim = runtime(0.0, ModalAcousticState::default(), limits());
+        let initial = sim.response().clone();
+        assert!(sim.step(&[0.0; 5], [0.0; 2], || false).is_err());
+        assert!(sim.step(&[0.0; 6], [f64::NAN,0.0], || false).is_err());
+        assert!(sim.step(&[0.0; 6], [101.0,0.0], || false).is_err());
+        assert_eq!(sim.response(), &initial);
+    }
+
+    #[test]
+    fn physical_frames_exchange_vibration_through_the_original_reciprocal_network() {
+        use crate::render::schedule::force::coupled::{CoupledModalSystem, ModalConnection, ModalCouplingConfig};
+        use fs_exec::CancelGate;
+        let left = basis(0.0); let right = basis(0.0);
+        let mut left_model = left.time_model(100, &[0.0], ModalAcousticTimeBudget::audible_reference()).unwrap();
+        let right_model = right.time_model(100, &[0.0], ModalAcousticTimeBudget::audible_reference()).unwrap();
+        left_model.restore_states(&[ModalAcousticState {
+            displacement_m_sqrt_kg: 0.02/left.modes()[0].displacement[4],
+            velocity_m_sqrt_kg_per_s: 0.0,
+        }]).unwrap();
+        let link = ModalConnection {
+            left: left.translation_attachment(0, 1, [0.0,1.0]).unwrap().port,
+            right: right.translation_attachment(1, 1, [0.0,1.0]).unwrap().port,
+            stiffness_n_m: 6.0, damping_n_s_m: 0.0, rest_extension_m: 0.0,
+        };
+        let mut system = CoupledModalSystem::new(vec![left_model,right_model], vec![link], ModalCouplingConfig {
+            max_modes: 2, max_connections: 1, max_setup_terms: 8192,
+            nyquist_guard_fraction: 0.9, maximum_total_energy_j: 10.0,
+            maximum_abs_pressure_pa: 100.0, maximum_abs_connection_force_n: 100.0,
+            solve_relative_tolerance: 1e-10, energy_absolute_tolerance_j: 1e-11,
+            energy_relative_tolerance: 1e-9,
+        }, &CancelGate::new()).unwrap();
+        close(system.total_energy_j().unwrap(), 0.006);
+        for _ in 0..20 { system.step(&[0.0; 2]).unwrap(); }
+        let (mut ul, mut ur, mut vl, mut vr) = ([0.0; 6],[0.0; 6],[0.0; 6],[0.0; 6]);
+        left.reconstruct_into(system.components()[0].states(), &mut ul, &mut vl, || false).unwrap();
+        right.reconstruct_into(system.components()[1].states(), &mut ur, &mut vr, || false).unwrap();
+        let (symmetric, antisymmetric) = ((12.0_f64.sqrt()*0.2).cos(), (18.0_f64.sqrt()*0.2).cos());
+        close(ul[4], 0.01*(symmetric+antisymmetric));
+        close(ur[4], 0.01*(symmetric-antisymmetric));
+        close(system.total_energy_j().unwrap(), 0.006);
+        assert!(ur[4] > 0.001);
+    }
+
+    #[test]
+    fn rigid_motion_and_compressive_instability_are_not_hidden_by_mode_selection() {
+        use fs_solid::frame2d::FrameMassFormulation;
+        let mut free = Frame2d::with_mass_formulation(Geometry::Linear, FrameMassFormulation::ConsistentReference);
+        free.add_node(0.0,0.0); free.add_node(1.0,0.0);
+        free.add_element(0,1,3,2.0,&|| SectionModel::Elastic { ea: 200.0, ei: 8.0 }).unwrap();
+        let admission = FrameVibrationBudget { max_frame_dofs: 6, max_dense_entries: 36 };
+        assert!(matches!(FrameVibrationBasis::from_frame(&free,1,admission,||false),
+            Err(FrameVibrationError::UnresolvedMode { .. })));
+        let mut compressed = Frame2d::new(Geometry::Corotational);
+        compressed.add_node(0.0,0.0); compressed.add_node(1.0,0.0);
+        compressed.fix(0,[true;3]); compressed.add_mass(1,2.0);
+        compressed.add_element(0,1,3,0.0,&|| SectionModel::Elastic { ea: 2.0e6, ei: 8.0 }).unwrap();
+        compressed.static_load(&[0.0,0.0,0.0,-40.0,0.0,0.0],4).unwrap();
+        assert!(matches!(FrameVibrationBasis::from_frame(&compressed,1,admission,||false),
+            Err(FrameVibrationError::UnstableMode { .. })));
+    }
 }
