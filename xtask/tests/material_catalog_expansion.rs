@@ -1206,3 +1206,6 @@ fn g0_g3_peek_model_curves_preserve_cubic_accuracy_and_explicit_model_domain() {
         );
     }
 }
+
+#[path = "material_catalog_expansion/engineering.rs"]
+mod engineering;
