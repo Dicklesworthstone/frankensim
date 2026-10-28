@@ -6468,12 +6468,24 @@ publication advances the string, thermal network and gas together;
 source-domain exits, failed balances, work limits and cancellation leave all
 three accepted owners unchanged.
 
-The parcel is a well-mixed fixed-volume thermal inventory with frozen species.
-This first-order partitioned path does not supply chamber acoustics, gas flow,
-pressure-volume work, reactions, evolving geometry or complete bowed-instrument
-body/radiation feedback. The inherited fixed-section, solid-caloric,
-small-strain and source-law limits still apply. The compact pressure observer
-is diagnostic; it is not a second heat source.
+The heat-only path keeps species fixed. The optional
+`ThermalConcentricStringRuntime::step_with_isochoric_gas_nozzle` composition
+then exchanges species and upstream enthalpy with a second finite gas parcel
+using the original source-resolved nozzle. Both directions preserve species
+inventories and total extensive gas storage; transported flow work and jet
+energy are not deposited again as heat. Final drag and pressure use the
+conserved mixture on the continuing layered motion, with one sample and the
+previous accepted observer acceleration. Heat-stage gas/source receipts remain
+explicitly separate from the subsequent flow endpoint. All four owners publish
+together.
+
+These are well-mixed fixed-volume gas inventories. Heat followed by flow is
+an explicit first-order partition and needs physical timestep refinement.
+No chamber acoustics, resolved jet force, pressure-volume work, reactions,
+evolving geometry or complete bowed-instrument body/radiation feedback is
+supplied. The inherited fixed-section, solid-caloric, small-strain and source-law
+limits still apply. The compact pressure observer is diagnostic; it is not a
+second heat source.
 
 The source-bound conduction adapter also checks the actual exposed outer area,
 original conductivity claim and conditions, and the native lumped Biot limit.
