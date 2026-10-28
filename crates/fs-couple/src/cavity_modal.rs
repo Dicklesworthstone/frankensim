@@ -113,6 +113,25 @@ fn invalid(what: &'static str) -> AcousticRealizeError {
 fn network_invalid(what: &'static str) -> ModalCouplingError {
     ModalCouplingError::Invalid { what }
 }
+
+/// Admit distinct frozen interior and exterior media around one unloaded
+/// acoustic equilibrium. Composition and temperature may differ; reference
+/// pressure must agree to roundoff. A finite pressure difference needs its own
+/// static load/prestress solve, which this small-signal cavity does not supply.
+/// This does not model species diffusion or mean heat/mass exchange at a mouth.
+pub fn validate_cavity_media(interior: &GasState, exterior: &GasState)
+    -> Result<(), AcousticRealizeError>
+{
+    for gas in [interior, exterior] {
+        gas.validate_coherence().map_err(|e| AcousticRealizeError::Ambient(e.to_string()))?;
+    }
+    let pressure_scale = interior.pressure.max(exterior.pressure);
+    if (interior.pressure-exterior.pressure).abs() > 64.0*f64::EPSILON*pressure_scale {
+        return Err(invalid("cavity and exterior reference pressures must agree without an explicit static pressure-load solve"));
+    }
+    Ok(())
+}
+
 impl HelmholtzModalCavity {
     /// Lower the original linear pHS, preserving its exact selected parameters.
     /// The two unit-basis effort evaluations recover its quadratic coefficients
@@ -182,6 +201,23 @@ impl HelmholtzModalCavity {
     #[must_use] pub const fn geometry(&self) -> &HelmholtzCavity { &self.geometry }
     /// The same gas used for neck inertia, cavity compliance and selected loss.
     #[must_use] pub const fn gas(&self) -> &GasState { &self.gas }
+    /// Check the medium on the other side of the actual mouth. Legacy compact
+    /// end corrections include exterior inertia and loss evaluated in `gas`,
+    /// so they cannot be rebound to a different atmosphere. An exterior-owned
+    /// mouth retains only internal inertia/loss and hands the complete outer
+    /// load to its explicitly bound exterior owner.
+    ///
+    /// The existing frozen Bessel resistance keeps its declared interior-gas
+    /// reference frequency; this is not a broadband neck-loss model.
+    pub fn validate_exterior_gas(&self, exterior: &GasState)
+        -> Result<(), AcousticRealizeError>
+    {
+        validate_cavity_media(&self.gas, exterior)?;
+        if &self.gas != exterior && self.loss != CavityNeckLoss::ExteriorMouth {
+            return Err(invalid("distinct cavity media require an exterior-owned mouth; the compact neck end law owns one gas"));
+        }
+        Ok(())
+    }
     /// Original loss-model selection; not an experimental validation claim.
     #[must_use] pub const fn loss(&self) -> CavityNeckLoss { self.loss }
     /// Physical neck mass [kg], including the original owner's end correction.

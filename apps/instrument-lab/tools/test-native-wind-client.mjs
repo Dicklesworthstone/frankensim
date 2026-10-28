@@ -169,10 +169,10 @@ test("higher mechanical clocks request the original native decimator without mod
 test("canonical DG flute and reed atmosphere records reach the native packet unchanged", async () => {
   const connected = {...status, maximumAttachments:32, maximumAttachmentFileBytes:8388608,
     maximumAttachmentBytes:33554432, maximumRequestBytes:48000000};
-  for (const path of ["flue-dg-baffled.performance", "flue-dg-molecular.performance", "material_modal_valve/paired-dg-chimney.performance"]) {
+  for (const path of ["flue-dg-baffled.performance", "flue-dg-molecular.performance", "flue-dg-conical-molecular.performance", "material_modal_valve/paired-dg-chimney.performance"]) {
     const bytes = await readFile(new URL(`../../../crates/fs-couple/examples/${path}`, import.meta.url));
     const source = bytes.toString("utf8");
-    if (path === "flue-dg-molecular.performance") {
+    if (path.endsWith("-molecular.performance")) {
       assert.match(source, /^dg_molecular iso9613-terrestrial-air$/m);
       assert.match(source, /^observer_gas molecular \d+ \d+ \d+ iso9613-terrestrial-air$/m);
     } else assert.match(source, /^observer_gas stokes-kirchhoff \d+ \d+ \d+$/m);

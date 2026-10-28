@@ -175,7 +175,8 @@ impl ReciprocalStringBank {
     pub fn with_material_shell_cavity(
         self, fe: &HelmholtzFe<'_>, options: ShellCavityOptions, gate: &CancelGate,
     ) -> Result<Self, ShellCavityError> {
-        self.with_material_shell_cavity_inner(fe, options, Vec::new(), None, gate)
+        let gas = self.source.gas;
+        self.with_material_shell_cavity_inner(fe, gas, options, Vec::new(), None, gate)
     }
 
     /// Connect explicitly declared compact mouths to the same original FE and
@@ -192,7 +193,8 @@ impl ReciprocalStringBank {
         self, fe: &HelmholtzFe<'_>, options: ShellCavityOptions,
         openings: Vec<ShellCavityOpening>, gate: &CancelGate,
     ) -> Result<Self, ShellCavityError> {
-        self.with_material_shell_cavity_inner(fe, options, openings, None, gate)
+        let gas = self.source.gas;
+        self.with_material_shell_cavity_inner(fe, gas, options, openings, None, gate)
     }
 
     /// Couple gas heat diffusion on the SAME original cavity FE to every solid,
@@ -210,7 +212,27 @@ impl ReciprocalStringBank {
         gate: &CancelGate,
     ) -> Result<Self, ShellCavityError> {
         thermal.validate()?;
-        self.with_material_shell_cavity_inner(fe, options, openings, Some(thermal), gate)
+        let gas = self.source.gas;
+        self.with_material_shell_cavity_inner(fe, gas, options, openings, Some(thermal), gate)
+    }
+
+    /// The original pressure FE, necks and thermal diffusion in an explicitly
+    /// declared interior gas. The bank's gas remains the exterior atmosphere
+    /// for string drag, body loading and microphone pressure. Every interior
+    /// coefficient and compact-mouth normalization derives from `gas`.
+    ///
+    /// Reference pressures must agree: this cold small-signal construction
+    /// does not add a mean pressure load to the structural equilibrium. With
+    /// mouths, compositions are frozen on the acoustic experiment's time
+    /// scale; diffusion, mean flow and interfacial heat exchange are absent.
+    /// The complete exterior mouth reaction remains its separate BEM owner.
+    pub fn with_material_shell_cavity_in_gas(
+        self, fe: &HelmholtzFe<'_>, gas: GasState, options: ShellCavityOptions,
+        openings: Vec<ShellCavityOpening>, thermal: Option<ShellCavityThermalOptions>,
+        gate: &CancelGate,
+    ) -> Result<Self, ShellCavityError> {
+        if let Some(thermal) = thermal { thermal.validate()?; }
+        self.with_material_shell_cavity_inner(fe, gas, options, openings, thermal, gate)
     }
 
     /// One source-derived interior/compact-mouth/exterior construction. The
@@ -224,12 +246,13 @@ impl ReciprocalStringBank {
         openings: Vec<ShellCavityOpening>,
         exterior: super::radiation::bem::ShellBemOptions, gate: &CancelGate,
     ) -> Result<(Self, super::radiation::bem::ShellBemReport), ShellCavityError> {
-        self.with_material_shell_cavity_inner(fe, options, openings, None, gate)?
+        let gas = self.source.gas;
+        self.with_material_shell_cavity_inner(fe, gas, options, openings, None, gate)?
             .with_material_shell_bem(exterior, gate).map_err(ShellCavityError::Radiation)
     }
 
     fn with_material_shell_cavity_inner(
-        mut self, fe: &HelmholtzFe<'_>, options: ShellCavityOptions,
+        mut self, fe: &HelmholtzFe<'_>, gas: GasState, options: ShellCavityOptions,
         opening_sources: Vec<ShellCavityOpening>, thermal: Option<ShellCavityThermalOptions>,
         gate: &CancelGate,
     ) -> Result<Self, ShellCavityError> {
@@ -250,16 +273,17 @@ impl ReciprocalStringBank {
         {
             return Err(bad("distributed cavity requires one cold material body without duplicated air or discarded motion"));
         }
-        self.source.gas.validate_coherence().map_err(|_| bad("incoherent body cavity gas"))?;
-        if fe.medium().density_kg_m3.to_bits() != self.source.gas.density.to_bits()
-            || fe.medium().sound_speed_m_s.to_bits() != self.source.gas.sound_speed.to_bits()
+        crate::cavity_modal::validate_cavity_media(&gas, &self.source.gas)
+            .map_err(|error| ShellCavityError::Bank(ReciprocalStringError::Material(error)))?;
+        if fe.medium().density_kg_m3.to_bits() != gas.density.to_bits()
+            || fe.medium().sound_speed_m_s.to_bits() != gas.sound_speed.to_bits()
         {
-            return Err(bad("cavity pressure basis and original material bank must share the same coherent gas"));
+            return Err(bad("cavity pressure basis must match its exact declared interior gas"));
         }
         let body = self.system.components()[string_count].clone();
         let (identity, _) = self.source.body_radiation_basis(&self.system, gate)
             .map_err(ShellCavityError::Bank)?;
-        let (binding, area) = prepare(&self.source, fe, options, identity,
+        let (binding, area) = prepare(&self.source, fe, gas, options, identity,
             body.modes().len(), self.source.options.network.max_modes, opening_sources, thermal, gate)?;
         let mut image = if binding.openings.is_empty() {
             binding.coupling.modal_network(body, self.source.options.sample_rate_hz,
@@ -440,7 +464,7 @@ fn parts(source: &MaterialStringBankSource) -> Result<Vec<ShellPart<'_>>, ShellC
     } else { Err(bad("distributed cavity requires the retained original material-shell basis")) }
 }
 
-fn prepare(source: &MaterialStringBankSource, fe: &HelmholtzFe<'_>, options: ShellCavityOptions,
+fn prepare(source: &MaterialStringBankSource, fe: &HelmholtzFe<'_>, gas: GasState, options: ShellCavityOptions,
     identity: ContentHash, body_modes: usize, maximum_mechanical_modes: usize,
     opening_sources: Vec<ShellCavityOpening>, thermal: Option<ShellCavityThermalOptions>, gate: &CancelGate)
     -> Result<(MaterialShellCavity, f64), ShellCavityError>
@@ -515,7 +539,7 @@ fn prepare(source: &MaterialStringBankSource, fe: &HelmholtzFe<'_>, options: She
     }
     let basis = CavityModes { omegas: frequencies, lambdas: norms,
         interface: vec![Vec::new(); count], loss_factor: 0.0,
-        rho0: source.gas.density, c0: source.gas.sound_speed };
+        rho0: gas.density, c0: gas.sound_speed };
     let mut coupling = CavityCoupling::new_with_mode_budget(&basis, body_modes,
         &overlap_rows, &vec![0.0; count], maximum_mechanical_modes)
         .map_err(ShellCavityError::Coupling)?;
@@ -528,17 +552,17 @@ fn prepare(source: &MaterialStringBankSource, fe: &HelmholtzFe<'_>, options: She
             let omega = coupling.neck_fixed_wall_angular_frequency_rad_s(index)
                 .map_err(ShellCavityError::Coupling)?
                 .max(core::f64::consts::TAU*options.maximum_hz);
-            if omega*opening.extent_m/source.gas.sound_speed > 0.3 {
+            if omega*opening.extent_m/gas.sound_speed > 0.3 {
                 return Err(bad("complete mouth patch exceeds the compact acoustic chart"));
             }
         }
     }
     check_cancel(gate)?;
     let thermal_loss = thermal.map(|thermal| ShellCavityThermalLoss::prepare(fe,
-        &source.gas, &pressure_shapes, &coupling, &openings, thermal, &options.eigensolver, gate))
+        &gas, &pressure_shapes, &coupling, &openings, thermal, &options.eigensolver, gate))
         .transpose()?;
     if thermal_loss.is_some() { coupling.require_compression_memory(); }
-    Ok((MaterialShellCavity { gas: source.gas, basis_identity: identity,
+    Ok((MaterialShellCavity { gas, basis_identity: identity,
         positions: fe.positions().to_vec(), tetrahedra: fe.tetrahedra().to_vec(),
         order, options, modal_report, pressure_shapes, overlap_rows, volume_m3: volume,
         coupling, openings, thermal_loss }, area))

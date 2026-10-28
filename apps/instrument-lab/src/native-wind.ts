@@ -5,10 +5,12 @@ import flueExampleSource from "../../../crates/fs-couple/examples/flue-nolle.per
 import flueDgSource from "../../../crates/fs-couple/examples/flue-dg-baffled.performance?raw";
 import resolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg.performance?raw";
 import molecularFlueSource from "../../../crates/fs-couple/examples/flue-dg-molecular.performance?raw";
+import conicalMolecularFlueSource from "../../../crates/fs-couple/examples/flue-dg-conical-molecular.performance?raw";
 import materialReedSource from "../../../crates/fs-couple/examples/material_modal_valve/paired-walls.performance?raw";
 import materialReedDgSource from "../../../crates/fs-couple/examples/material_modal_valve/paired-dg-chimney.performance?raw";
 import stringExampleSource from "../../../crates/fs-couple/examples/material_strings/pluck-and-bow.material-strings?raw";
 import observedStringSource from "../../../crates/fs-couple/examples/material_strings/rayleigh-observed.material-strings?raw";
+import regionalCavityStringSource from "../../../crates/fs-couple/examples/material_strings/regional-cavity.material-strings?raw";
 import layeredStringSource from "../../../crates/fs-couple/examples/material_strings/relaxing-layered-strings.material-strings?raw";
 import shearStringSource from "../../../crates/fs-couple/examples/material_strings/shear-layer-bow.material-strings?raw";
 import { nativeWindStatus, renderNativePerformance, type NativeWindStatus, type NativeWindAttachment, type NativeWindGasSources, type NativeStringProfiles } from "./native-wind-client.mjs";
@@ -66,6 +68,15 @@ const EXAMPLES = [
     help: "dg_molecular and observer_gas molecular select the shared native relaxation law. The ISO terrestrial-air declaration has a limited composition domain: enriching oxygen or adding other gases may be refused until a compatible molecular-law declaration is supplied. The atmosphere editor changes the original gas records and preserves the selected law; it never substitutes an air law or invents molecular coefficients.",
   },
   {
+    name: "flue-dg-conical-molecular.performance",
+    label: "Conical flue — material gas dynamics (exploration)",
+    renderer: "wind",
+    source: conicalMolecularFlueSource,
+    decimate: true,
+    intro: "Starter: a flue drives a conical bore with coupled molecular and wall heat exchange. Change the cone geometry or its uniform gas data, then render the resulting pressure through the original exterior atmosphere.",
+    help: "The dg_segment record owns the taper; dg_molecular owns the selected gas relaxation law. The atmosphere controls preserve both. The ISO terrestrial-air law may refuse enriched or additional species until a compatible law is supplied. This example uses a local cylindrical wall approximation and an interim jet source; it does not establish measured oboe, saxophone or flute accuracy. Native decimation retains the 96 kHz mechanics.",
+  },
+  {
     name: "material_modal_valve/paired-walls.performance",
     label: "Material reeds — paired blades and compliant duct walls",
     renderer: "wind",
@@ -100,6 +111,15 @@ const EXAMPLES = [
     decimate: false,
     intro: "Starter: a plucked material string drives a regional orthotropic plate, with reciprocal acoustic loading and a microphone at its declared position. Attach wire.fsmatpk, directional-body.fsmatpk and orthotropic.body, then select orthotropic.body as the body profile below.",
     help: "The native observer integrates signed plate motion over source-to-microphone paths through the original gas. Change material sources or atmosphere data and render again. The body uses an infinite baffle and synthetic specimen data; this flat-plate fixture does not represent a complete measured violin, cello or bass.",
+  },
+  {
+    name: "material_strings/regional-cavity.material-strings",
+    label: "Strings — independent cavity and exterior gases",
+    renderer: "strings",
+    source: regionalCavityStringSource,
+    decimate: false,
+    intro: "Starter: a material string and closed shell with a helium-filled interior and a separately declared exterior atmosphere. Attach wire.fsmatpk, closed-shell.fsmatpk and closed-shell-cavity.body, then select that body profile below.",
+    help: "cavity_gas supplies the original interior acoustic field; gas supplies the exterior and string drag. Change either atmosphere independently while keeping their static pressures equal, or apply a common pressure with the atmosphere editor. The body profile is required for the cavity declaration. This manufactured shell fixture is not a measured violin, cello or bass.",
   },
   {
     name: "material_strings/relaxing-layered-strings.material-strings",

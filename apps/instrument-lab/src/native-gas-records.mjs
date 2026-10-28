@@ -1,6 +1,6 @@
 // Edit primitive gas data in the native source. Constitutive evaluation and
 // physical domain admission remain in fs_material::gas_species::input.
-const standalone = new Set(['gas', 'ambient', 'exterior', 'dg_exterior', 'dg_chimney_gas']);
+const standalone = new Set(['gas', 'cavity_gas', 'ambient', 'exterior', 'dg_exterior', 'dg_chimney_gas']);
 const segments = new Set(['cylinder', 'cone', 'hole', 'duct_section']);
 const numeric = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i;
 const finite = value => typeof value === 'string' && numeric.test(value) && Number.isFinite(Number(value));

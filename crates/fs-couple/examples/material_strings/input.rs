@@ -181,6 +181,9 @@ pub struct Spec {
     pub temperature: f64, pub omega: f64, pub gas: GasState, pub body: Body, pub strings: Vec<Wire>,
     /// Retain original thermochemical composition and pack authority with the coefficients.
     pub gas_record: GasRecord,
+    /// Optional independent interior atmosphere. Omission inherits gas_record;
+    /// an explicit record must be consumed by a lumped or spatial body cavity.
+    pub cavity_gas_record: Option<GasRecord>,
     pub bridge_interfaces: bridge_interfaces::Inputs,
     pub rotational_bridges: Vec<RotationalBridge>,
     pub translational_bridges: Vec<TranslationalBridge>,
@@ -245,6 +248,15 @@ impl Spec {
         let mut row = r.row("gas")?;
         let gas_record = read_gas_record(&mut row.words, None, sources)?; row.end()?;
         let gas = *gas_record.state();
+        let cavity_gas_record = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("cavity_gas") {
+            let mut row = r.row("cavity_gas")?;
+            let record = read_gas_record(&mut row.words, None, sources)?;
+            row.end()?;
+            fs_couple::cavity_modal::validate_cavity_media(record.state(), &gas)?;
+            Some(record)
+        } else { None };
+        let cavity_gas = *cavity_gas_record.as_ref().unwrap_or(&gas_record).state();
         let mut row = r.row("body")?;
         let body = Body { pack: row.path()?, length: row.positive()?, width: row.positive()?,
             thickness: row.positive()?, modes: row.count(MAX_BODY_MODES)?, listener: row.positive()? };
@@ -717,7 +729,7 @@ impl Spec {
                     neck_length_m: row.positive()?, inner_end: fs_scenario::NeckEnd::Flanged,
                     outer_end: fs_scenario::NeckEnd::Flanged };
                 let resistance = row.scalar()?; let listener_m = row.positive()?;
-                Some(MaterialBodyCavity { cavity: HelmholtzModalCavity::new(description, gas,
+                Some(MaterialBodyCavity { cavity: HelmholtzModalCavity::new(description, cavity_gas,
                     CavityNeckLoss::Resistance(resistance))?, modal_budget: modal_budget(), listener_m })
             },
             kind @ ("physical-neck" | "exterior-neck") => {
@@ -737,8 +749,9 @@ impl Spec {
                 let description = HelmholtzCavity {
                     volume_m3, neck_radius_m, neck_length_m, inner_end, outer_end,
                 };
-                // One coherent gas supplies inertia, compression, Bessel neck
-                // loss and the declared exterior end's radiation resistance.
+                // Interior gas supplies inertia, compression and Bessel neck
+                // loss. A compact outer-end law still requires that same gas
+                // outside; a skin load can own a distinct exterior atmosphere.
                 // The original owner counts each end correction exactly once.
                 // An exterior-owned outer end gives its mass and radiation to the
                 // skin's computed load on the aperture caps, and has none without it.
@@ -750,12 +763,13 @@ impl Spec {
                 } else {
                     CavityNeckLoss::RadiationAtResonance
                 };
-                Some(MaterialBodyCavity { cavity: HelmholtzModalCavity::new(description, gas, loss)?,
+                Some(MaterialBodyCavity { cavity: HelmholtzModalCavity::new(description, cavity_gas, loss)?,
                     modal_budget: modal_budget(), listener_m })
             },
             _ => return Err("cavity must be none, neck V R L RESISTANCE LISTENER_M, or physical-neck|exterior-neck V R L INNER_END OUTER_END LISTENER_M".into()),
         };
         row.end()?;
+        if let Some(cavity) = &cavity { cavity.cavity.validate_exterior_gas(&gas)?; }
         let mut row = r.row("friction")?;
         let friction = match row.word()? {
             "coulomb" => {
@@ -972,7 +986,7 @@ impl Spec {
         }
         friction.validate_tracks(&schedule)?;
         let spec = Self { bytes: bytes.to_vec(), rate, samples, full_scale, block, temperature, omega,
-            gas, gas_record, body, strings, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
+            gas, gas_record, cavity_gas_record, body, strings, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
             rotational_bridges, translational_bridges, cylinder_gas_loading, prepared_linear, residual_flexibility, geometric_stretching,
             longitudinal_waves, longitudinal_loss, axial_bearings, bending_memory, body_radiation, shell_bem_angular_refinement,
             plate_observer, shell_observer, shell_receiver_quadrature, one_way_observer, cavity, friction, contact_thermal: false, bow_ribbon, bow_fibers,
@@ -982,6 +996,26 @@ impl Spec {
         if let Some(layers) = spec.friction.shear_layers() { layers.preflight(&spec)?; }
         spec.network_dimensions(false)?;
         Ok(spec)
+    }
+
+    /// The complete source record for interior pressure, inertia and heat loss.
+    /// It may share data with the exterior by inheritance, never by replacing
+    /// an explicit original regional declaration.
+    pub fn cavity_gas_record(&self) -> &GasRecord {
+        self.cavity_gas_record.as_ref().unwrap_or(&self.gas_record)
+    }
+
+    pub fn cavity_gas(&self) -> &GasState { self.cavity_gas_record().state() }
+
+    pub fn validate_cavity_gas(&self) -> Result<()> {
+        fs_couple::cavity_modal::validate_cavity_media(self.cavity_gas(), &self.gas)?;
+        if let Some(cavity) = &self.cavity {
+            if cavity.cavity.gas() != self.cavity_gas() {
+                return Err("body cavity must retain its original interior gas source record".into());
+            }
+            cavity.cavity.validate_exterior_gas(&self.gas)?;
+        }
+        Ok(())
     }
 
     /// The optional listener must observe the same explicitly loaded shell.

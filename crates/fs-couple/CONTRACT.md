@@ -6357,7 +6357,7 @@ An optional `interior-fe-v1` trailer on v3/v4 body profiles supplies the
 original tetrahedral volume, pressure FE order, complete frequency window and
 explicit numerical allowances to the existing Helmholtz and
 `with_material_shell_cavity` owners. Gas properties come only from the
-performance's coherent material gas. The declared volume must conform to the
+performance's coherent material gas or its explicit `cavity_gas` source. The declared volume must conform to the
 original shell's complete cavity surface; missing walls and open apertures
 refuse rather than acquire invented closing faces. A separate lumped cavity
 cannot be supplied simultaneously.
@@ -6377,6 +6377,19 @@ Regression source covers physical motion/PCM propagation, pressure/composition
 and solid-material substitutions, retained fluid augmentation, zero-inertia
 uniform compression and strict resource/geometry admission. Fixture topology
 was checked independently; native Rust execution remains required.
+
+`with_material_shell_cavity_in_gas` binds an independent frozen interior to the
+same FE, compression, compact-neck and optional thermal-diffusion owners. The
+bank's exterior gas remains authoritative for string drag, exterior loading and
+pressure observation. The interior FE density/sound speed must exactly match its
+declared interior GasState. Both regions must share the static reference
+pressure to roundoff; mean pressure preload, heat exchange and species diffusion
+are not supplied. Native `cavity_gas` follows `gas` before `body`, retains the
+original GasRecord and refuses when no actual cavity consumes it. Omission
+preserves the original equal-medium trajectory. Distinct lumped media require
+an exterior-owned mouth and its native computed skin load; one-medium compact
+outer-end models refuse substitution instead of silently using interior density
+for exterior inertia. No new gas law or time integrator is introduced.
 
 ## Material-wind ensembles and complete numerical observation latency
 

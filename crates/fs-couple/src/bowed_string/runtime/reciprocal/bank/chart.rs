@@ -55,8 +55,9 @@ impl ReciprocalStringBank {
     /// certified modes, signed bridge participation and radiating areas together.
     /// Selected material viscosity contributes actual regional curvature loss,
     /// including conservative prestress dilution, to the same retained modes.
-    /// The same gas supplies string drag, cavity compression/inertia and pressure
-    /// density. Material and geometry receipts remain attached through scheduling.
+    /// The exterior gas supplies string drag and pressure density. An admitted
+    /// distinct cavity gas supplies internal compression/inertia. Material and
+    /// geometry receipts remain attached through scheduling.
     /// A new realization starts at rest; this does not morph a vibrating state.
     ///
     /// Geometry assembly/eigensolving is synchronous in its original owner. The

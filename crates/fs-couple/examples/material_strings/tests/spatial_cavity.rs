@@ -6,6 +6,8 @@ use super::*;
 mod openings;
 #[path = "spatial_cavity/thermal.rs"]
 mod thermal;
+#[path = "spatial_cavity/regional.rs"]
+mod regional;
 
 const BODY: &str = include_str!("../closed-shell-cavity.body");
 const PERFORMANCE: &str = include_str!("../closed-shell-cavity.material-strings");

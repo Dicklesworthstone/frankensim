@@ -223,8 +223,8 @@ the local companion described above.
 **Regional atmosphere** edits the native performance's temperature (kelvin),
 absolute pressure (pascals), relative humidity or declared composition directly.
 Choose a region, change its values, then **Apply atmosphere** and render again.
-The same controls work with material strings, flute/reed bore and exterior gases,
-DG chimneys and explicit cylinder/cone/hole/duct-section gas overrides. Every
+The same controls work with material-string exterior and cavity gases, flute/reed
+bore and exterior gases, DG chimneys and explicit cylinder/cone/hole/duct-section gas overrides. Every
 other source record, including geometry, gestures, mechanical clock, observer
 law and pressure-to-PCM scale, is preserved. Apply or discard pending atmosphere
 edits before rendering, saving or switching performances.
@@ -277,6 +277,21 @@ admit the change. The browser neither substitutes a different law nor invents
 relaxation coefficients. This is a generic flue-tube integration fixture with an
 interim jet closure, not a measured flute or an instrument-fidelity claim.
 
+The **Conical flue — material gas dynamics (exploration)** starter opens
+`flue-dg-conical-molecular.performance`. Its `dg_bore` and `dg_segment cone`
+records retain the taper while the shared material law drives molecular and
+thermal pressure dynamics at the original wall quadrature points. Edit the
+cone dimensions in the source or use **Regional atmosphere** for the uniform
+internal mixture and explicit exterior. These edits preserve the geometry,
+selected relaxation law, excitation, mechanical clock and pressure scale.
+Native decimation is selected for the source's 96 kHz mechanics.
+
+This is a generic tapered-bore integration fixture. The spatial wall model uses
+the local cylindrical approximation; a varying axial temperature/composition
+field and live molecular-history transfer are not supported by this molecular
+path. The same gas law still enforces its source domain. The example's interim
+jet does not provide measured oboe, saxophone or flute qualification.
+
 ### Material reeds and compliant walls
 
 The **Material reeds** starters open the original paired-blade descriptions.
@@ -304,8 +319,20 @@ gas, while the same plate retains its reciprocal acoustic load. Atmosphere
 controls edit that original gas record. This is a synthetic flat-plate specimen
 in an infinite baffle, not a measured violin-family body.
 
+The **Strings — independent cavity and exterior gases** starter opens
+`regional-cavity.material-strings`. Attach `wire.fsmatpk`, `closed-shell.fsmatpk`
+and `closed-shell-cavity.body`, selecting the last file as the body profile.
+The performance's `cavity_gas` record supplies the existing interior acoustic
+field independently of `gas`, which supplies the exterior and string drag.
+Use **Regional atmosphere** to change either composition or temperature; use
+the common-pressure option when changing pressure because this quiescent model
+requires equal interior and exterior reference pressures. Omitting `cavity_gas`
+retains the original inherited-gas behavior. Declaring it without the supporting
+interior field refuses instead of silently ignoring the material change.
+This manufactured closed-shell fixture is not a measured violin-family body.
+
 Select **Strings — materials, bow/contact and shared body** in **Physical performer**,
-or choose either canonical string starter. `pluck-and-bow.material-strings` connects
+or choose a canonical string starter. `pluck-and-bow.material-strings` connects
 pluck and bow gestures to shared strings and a body; `relaxing-layered-strings.material-strings`
 retains each bonded layer's original material relaxation spectrum. Attach the
 original packs named in the selected source. The

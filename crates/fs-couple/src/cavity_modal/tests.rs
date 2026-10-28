@@ -139,6 +139,35 @@ fn invalid_geometry_gas_loss_and_attachment_mapping_refuse() {
     assert!(model.connections(0, 1, &[f64::NAN]).is_err());
 }
 
+#[test]
+fn distinct_cavity_media_keep_internal_neck_inertia_and_require_a_real_exterior_owner() {
+    let interior = gas(101_325.0);
+    let exterior = GasState::try_new(&GasSpec::dry_air_ussa1976(), 313.15, 101_325.0).unwrap();
+    let cavity = HelmholtzModalCavity::new(geometry(), interior, CavityNeckLoss::ExteriorMouth)
+        .unwrap();
+    cavity.validate_exterior_gas(&interior).unwrap();
+    cavity.validate_exterior_gas(&exterior).unwrap();
+    let geo = geometry();
+    let area = core::f64::consts::PI*geo.neck_radius_m.powi(2);
+    let inner_length = geo.neck_length_m
+        + fs_phs::neck_end_correction(geo.neck_radius_m, neck_ends(&geo).inner).unwrap();
+    let mass = interior.density*area*inner_length;
+    let stiffness = interior.density*interior.sound_speed.powi(2)*area.powi(2)/geo.volume_m3;
+    assert!((cavity.neck_mass_kg()/mass-1.0).abs() < 2e-14);
+    assert!((cavity.compression_stiffness_n_m()/stiffness-1.0).abs() < 2e-14);
+    // Admission cannot turn the exterior into extra internal neck mass.
+    assert_eq!(cavity.gas(), &interior);
+    for loss in [CavityNeckLoss::Resistance(0.0), CavityNeckLoss::RadiationAtResonance] {
+        let compact = HelmholtzModalCavity::new(geo, interior, loss).unwrap();
+        compact.validate_exterior_gas(&interior).unwrap();
+        assert!(compact.validate_exterior_gas(&exterior).is_err());
+    }
+    assert!(cavity.validate_exterior_gas(&gas(100_000.0)).is_err());
+    let mut incoherent = exterior;
+    incoherent.sound_speed *= 2.0;
+    assert!(cavity.validate_exterior_gas(&incoherent).is_err());
+}
+
 
 #[test]
 fn neck_is_a_real_free_inertia_without_a_hidden_compression_spring() {

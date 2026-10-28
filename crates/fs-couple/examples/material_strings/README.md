@@ -774,7 +774,7 @@ schedule
 
 `gas mixture T P mole COUNT SPECIES FRACTION ...` (or `mass`) delegates to the
 existing named-gas parser used by wind instruments. Its species/state refusals
-remain binding. That **same** frozen gas supplies all string drag, cavity
+remain binding. By default that same frozen gas supplies string drag, cavity
 mechanics and compact body/neck pressure observations. Gas changes are a new
 realization, not a live atmosphere mutation or an output equalizer.
 
@@ -789,7 +789,54 @@ admission policy. Source identities, composition, validity and phase admission
 stay attached to the resolved gas and are included in the render log. Unsupported
 or incomplete source data refuse before rendering; a species name never supplies
 missing thermal or transport properties. The atmosphere remains frozen during a
-performance, with the same resolved state reaching all of the consumers above.
+performance, with each original regional source reaching its own consumers.
+
+### Independent cavity and exterior atmospheres
+
+An optional `cavity_gas` row immediately after `gas` and before `body` declares
+the interior medium with the same native gas grammar. Omission inherits `gas`.
+For example, a helium-filled body in the original exterior atmosphere is:
+
+```text
+gas mixture 293.15 101325 mole 2 N2 0.8 O2 0.2
+cavity_gas mixture 293.15 101325 mole 1 He 1
+```
+
+The existing spatial cavity FE, volume-compression springs, neck inertias and
+optional thermal-diffusion histories use `cavity_gas`. String drag, the complete
+exterior acoustic load and microphone pressure still use `gas`. Internal gas
+changes therefore alter the body's actual reciprocal pressure loading before
+sound observation. Both records retain their own species/source receipts;
+`cavity_gas thermochemical ...` uses the same attached source registry.
+
+The two reference pressures must agree to roundoff. A mean pressure difference
+requires a static structural load/prestress solve, which this acoustic path
+does not perform. Temperature and composition can differ as frozen regional
+states; mean heat exchange and species diffusion are outside this model.
+Open-mouth regions additionally retain the original compact acoustic limits.
+
+A distinct lumped interior is supported only by `cavity exterior-neck` with
+its actual `body-radiation skin` load and aperture geometry. The internal neck
+keeps its original inner-end mass and frozen Bessel loss; the exterior load
+owns the outer inertia and radiation in the exterior gas. The existing neck
+resistance still uses its interior-gas reference frequency, not a broadband
+neck law. Mixed-media `neck` and `physical-neck` declarations refuse because
+their compact outer-end laws include inertia/loss from the one supplied gas.
+An explicit `cavity_gas` without any lumped or spatial cavity also refuses.
+
+`regional-cavity.material-strings` uses the original manufactured
+`closed-shell-cavity.body`, `closed-shell.fsmatpk` and `wire.fsmatpk`:
+
+```bash
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/regional-cavity.material-strings" "$demo/regional-cavity.wav" \
+  --body-profile "$demo/closed-shell-cavity.body"
+```
+
+Build the body pack from `closed-shell-manifest.tsv` with the existing
+`xtask matdb-pack` command and copy that original body profile alongside the
+performance. This closed-shell specimen and compact body pressure remain
+integration examples, not measured violin/cello/bass or free-field validation.
 
 For a cavity whose neck loss follows the actual atmosphere, use:
 

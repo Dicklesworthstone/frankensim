@@ -11,10 +11,12 @@ test('one data editor reaches canonical flute, reed, chimney and string gases', 
   const cases = [
     ['flue-dg-baffled.performance', ['gas', 'dg_exterior']],
     ['flue-dg-molecular.performance', ['gas', 'dg_exterior']],
+    ['flue-dg-conical-molecular.performance', ['gas', 'dg_exterior']],
     ['resolved-dg.performance', ['gas', 'dg_exterior']],
     ['reed-two-medium-tone-hole.performance', ['ambient', 'exterior', 'cylinder']],
     ['material_modal_valve/paired-dg-chimney.performance', ['ambient', 'dg_chimney_gas', 'dg_exterior']],
     ['material_strings/rayleigh-observed.material-strings', ['gas']],
+    ['material_strings/regional-cavity.material-strings', ['gas', 'cavity_gas']],
   ];
   for (const [name, keys] of cases) {
     const source = await fixture(name), regions = nativeGasRegions(source);
@@ -38,6 +40,42 @@ test('adding helium changes only the selected exterior data and keeps clocks and
   const packet = validateInput(new TextEncoder().encode(serializeNativeExperiment(changed, [], {renderer:'wind', decimate:true})), true);
   assert.equal(new TextDecoder().decode(packet.source), expected);
   assert.equal(packet.decimate, true);
+});
+
+test('conical molecular atmosphere edits preserve geometry, constitutive laws and saved source exactly', async () => {
+  const source = await fixture('flue-dg-conical-molecular.performance');
+  assert.match(source, /^dg_bore /m);
+  assert.match(source, /^dg_segment cone /m);
+  const [internal, exterior] = nativeGasRegions(source);
+  assert.deepEqual([internal.key, exterior.key], ['gas', 'dg_exterior']);
+  const changed = editNativeGasRegion(source, internal, {...internal.values, pressure:'85000'}, true);
+  assert.equal(changed, source.replaceAll(' 101325 ', ' 85000 '));
+  const packet = validateInput(new TextEncoder().encode(serializeNativeExperiment(changed, [], {
+    renderer:'wind', decimate:true,
+  })), true);
+  assert.equal(new TextDecoder().decode(packet.source), changed);
+  assert.equal(packet.decimate, true);
+  assert.deepEqual(packet.attachments, []);
+});
+
+test('string cavity gas edits preserve the exterior, body, forces and saved performer', async () => {
+  const source = await fixture('material_strings/regional-cavity.material-strings');
+  const [exterior, cavity] = nativeGasRegions(source);
+  assert.deepEqual([exterior.key, cavity.key], ['gas', 'cavity_gas']);
+  const changed = editNativeGasRegion(source, cavity, {kind:'mixture', temperature:'303.15',
+    pressure:'101325', basis:'mole', components:[{species:'He', fraction:'0.5'}, {species:'N2', fraction:'0.5'}]});
+  assert.equal(changed, source.replace(/^cavity_gas .+$/m,
+    'cavity_gas mixture 303.15 101325 mole 2 He 0.5 N2 0.5'));
+  assert.deepEqual(nativeGasRegions(changed)[0].values, exterior.values);
+  const packet = validateInput(new TextEncoder().encode(serializeNativeExperiment(changed, [], {
+    renderer:'strings', decimate:false,
+  })), true);
+  assert.equal(new TextDecoder().decode(packet.source), changed);
+  assert.equal(packet.renderer, 'strings');
+  assert.equal(packet.decimate, false);
+  const common = editNativeGasRegion(source, exterior, {...exterior.values, pressure:'85000'}, true);
+  assert.equal(common, source.replaceAll(' 101325 ', ' 85000 '));
+  assert.deepEqual(nativeGasRegions(common).map(region => region.values.pressure), ['85000', '85000']);
 });
 
 test('common absolute pressure reaches explicit regions without changing inherited pressure or aliases', () => {

@@ -32,8 +32,9 @@ pub struct MaterialPlateBody {
 /// change and outward neck volume use the same signed area projections.
 #[derive(Clone, Debug)]
 pub struct MaterialBodyCavity {
-    /// Existing Helmholtz law, geometry, selected loss and coherent gas. Must
-    /// equal the assembly gas; a stale independently built cavity refuses.
+    /// Existing Helmholtz law, geometry, selected loss and coherent INTERIOR
+    /// gas. A distinct exterior requires an exterior-owned mouth and equal
+    /// reference pressure; legacy compact necks retain their one-gas law.
     pub cavity: HelmholtzModalCavity,
     /// Limits for the physical neck inertia. Compression energy belongs to the
     /// network's collective spring and is also checked by the network budget.
@@ -126,8 +127,9 @@ impl ReciprocalMaterialString {
             return Err(invalid("material string/plate requires linear modes within budget, a positive clock/distance and an interior bridge"));
         }
         if let Some(c) = &cavity {
-            if c.cavity.gas() != &gas || !c.listener_m.is_finite() || c.listener_m <= 0.0 {
-                return Err(invalid("body cavity must use the exact assembly gas and a positive finite observer distance"));
+            c.cavity.validate_exterior_gas(&gas).map_err(ReciprocalStringError::Material)?;
+            if !c.listener_m.is_finite() || c.listener_m <= 0.0 {
+                return Err(invalid("body cavity requires a positive finite observer distance"));
             }
         }
         let image = reduce_material_body(&body.specimen, &gas, options.sample_rate_hz,
@@ -153,7 +155,7 @@ impl ReciprocalMaterialString {
 
 // One body reduction for one-string and sympathetic multi-string realizations.
 // Modal mass, signed bridge/volume shapes, cavity reactions and pressure output
-// come from the same physical owners and one common gas.
+// come from the same physical owners and their explicitly bound gas regions.
 pub(super) struct MaterialBodyImage {
     pub(super) bodies: Vec<ModalAcousticTimeModel>,
     pub(super) bridge: Vec<f64>,
@@ -189,8 +191,9 @@ pub(super) fn validate_body_medium(
         return Err(invalid("shared material body requires a positive clock and observer distance"));
     }
     if let Some(c) = cavity {
-        if c.cavity.gas() != gas || !c.listener_m.is_finite() || c.listener_m <= 0.0 {
-            return Err(invalid("body cavity must use the exact assembly gas and a positive finite observer distance"));
+        c.cavity.validate_exterior_gas(gas).map_err(ReciprocalStringError::Material)?;
+        if !c.listener_m.is_finite() || c.listener_m <= 0.0 {
+            return Err(invalid("body cavity requires a positive finite observer distance"));
         }
     }
     Ok(())

@@ -224,24 +224,19 @@ impl Spec {
         poll(gate)?;
         self.preflight(spec)?;
         let positions = self.physical_positions(spec);
+        let gas = *spec.cavity_gas();
         let fe = HelmholtzFe::new(&self.complex, &positions, self.order, Medium {
-            density_kg_m3: spec.gas.density,
-            sound_speed_m_s: spec.gas.sound_speed,
+            density_kg_m3: gas.density,
+            sound_speed_m_s: gas.sound_speed,
         })?;
         poll(gate)?;
         // The original owner verifies every wall and opening and constructs
         // the reciprocal ports before subsequent nonlinear attachments. The
         // authored source cannot return until its mandatory BEM stage binds
         // the complete body/opening exterior load.
-        Ok(if let Some(thermal) = self.thermal {
-            bank.with_material_shell_cavity_thermal(
-                &fe, self.options, self.openings.clone(), thermal, gate,
-            )?
-        } else if self.openings.is_empty() {
-            bank.with_material_shell_cavity(&fe, self.options, gate)?
-        } else {
-            bank.with_material_shell_cavity_openings(&fe, self.options, self.openings.clone(), gate)?
-        })
+        Ok(bank.with_material_shell_cavity_in_gas(
+            &fe, gas, self.options, self.openings.clone(), self.thermal, gate,
+        )?)
     }
 }
 

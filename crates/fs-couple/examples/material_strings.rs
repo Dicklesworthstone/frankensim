@@ -210,6 +210,11 @@ impl input::Spec {
         if self.gas != *self.gas_record.state() {
             return Err("material-string gas coefficients must retain their original source record".into());
         }
+        self.validate_cavity_gas()?;
+        if self.cavity_gas_record.is_some() && self.cavity.is_none()
+            && !profile.as_ref().is_some_and(body::Profile::has_spatial_cavity) {
+            return Err("cavity_gas requires an actual lumped or spatial body cavity".into());
+        }
         self.validate_shell_observer()?;
         let bow_station_program = self.bow_station_program(gate)?;
         if let Some(layers)=self.friction.shear_layers() { layers.preflight(&self)?; }
@@ -825,6 +830,10 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     eprintln!("input_bytes={}; gas={:?}; preload_J={:?}",ready.spec.bytes.len(),ready.spec.gas,ready.performance.preload_energy_j());
     let gas_source_json=thermochemical::provenance(core::slice::from_ref(&ready.spec.gas_record));
     if !gas_source_json.is_empty() { eprintln!("gas_source={{\"scope\":\"frozen material-string atmosphere\"{gas_source_json}}}"); }
+    if let Some(interior) = &ready.spec.cavity_gas_record {
+        let source = thermochemical::provenance(core::slice::from_ref(interior));
+        eprintln!("cavity_gas={:?}; cavity_gas_source={{\"scope\":\"frozen cavity interior\"{source}}}", interior.state());
+    }
     // Complete source, geometry, frequency, schedule and preload admission is
     // finished before creating output. Never overwrite any existing path.
     if source_options.decimate {

@@ -76,6 +76,7 @@ impl Profile {
         Ok(Self { bytes: bytes.to_vec(), model, interior, skin, observer_store: None })
     }
     pub fn has_acoustic_skin(&self) -> bool { self.skin.is_some() }
+    pub fn has_spatial_cavity(&self) -> bool { self.interior.is_some() }
     /// The declared closed acoustic skin in the performance body's frame, if any.
     pub fn acoustic_skin(&self, spec: &input::Spec) -> Option<ShellAcousticSkin> {
         self.skin.as_ref().map(|skin| skin.resolve(spec))
@@ -96,6 +97,10 @@ impl Profile {
         self.observer_store.as_ref().map(|store| store.entry(key))
     }
     pub fn preflight(&self, spec: &input::Spec) -> Result<()> {
+        spec.validate_cavity_gas()?;
+        if spec.cavity_gas_record.is_some() && spec.cavity.is_none() && self.interior.is_none() {
+            return Err("cavity_gas requires an actual lumped or spatial body cavity".into());
+        }
         match &self.model {
             BodyModel::Plate(_) if spec.body.modes > input::MAX_PLATE_BODY_MODES => Err(format!(
                 "flat plate body profiles admit 1..={} retained body modes", input::MAX_PLATE_BODY_MODES).into()),
