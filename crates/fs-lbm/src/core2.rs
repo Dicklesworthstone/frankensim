@@ -8,6 +8,9 @@
 use crate::{CS2, E, OPP, Q, W};
 use std::f64::consts::{PI, SQRT_2};
 
+/// Finite-inertia disk motion with geometry rasterized on the native lattice.
+pub mod moving_disk;
+
 const MAX_REGULARIZED_BOUNDARY_SPEED_SQ: f64 = 0.03;
 const UNIT_NORMAL_TOLERANCE: f64 = 128.0 * f64::EPSILON;
 

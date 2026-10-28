@@ -3999,6 +3999,44 @@ mobility, sum actual population/body momentum, verify passive light-body
 collision energy and replay, and exercise common rigid motion, the zero-solid
 limit and atomic early/late refusals.
 
+### Moving disk geometry on the same finite-inertia operator
+
+`core2::moving_disk::MovingDisk2` advances a disk's center, material angle,
+translation, spin and actual native fluid populations on each lattice tick.
+A half-drift places the disk at the collision configuration; one original
+finite-inertia solve supplies the reciprocal impulse; the accepted velocity
+supplies the final half-drift. Each free drift is parallel to its own linear
+momentum and therefore preserves orbital angular momentum. The step receipt
+also reports the collision center and the external angular impulse about the
+fixed lattice origin. The existing midpoint work and kinetic account remain
+those of the original velocity-coupling operator.
+
+Circle/square intersection areas provide analytic partial-cell fractions,
+including subcell disks and exact tangencies. One reusable fraction buffer
+clears only the previous bounding box and fills the new one. Interior and
+exterior cells avoid sector integration. Native populations retain their mass
+and momentum as occupancy changes; no fresh-cell population reconstruction or
+additional full fluid candidate is introduced. Body mass and polar inertia
+are explicitly the additional solid degree of freedom: retained interior
+fluid remains part of the discrete model. This is not a physical-density or
+displaced-fluid inertia closure.
+
+The whole swept bounding box of each half-drift must contain fluid cells and
+remain within the interior domain halo. The endpoint is admitted before native
+streaming or accepted body publication; a late refusal changes only reusable
+scratch, which the next call rebuilds. Fixed radius/inertia, one disk, force-free
+BGK and lattice `dx = dt = 1` are the supported scope. Multiple bodies, wall
+contact, periodic body seam crossing and free surfaces require further owners.
+Native outer-wall reactions and periodic fluid angular flux remain distinct
+from immersed exchange. No global temporal order, physical drag calibration or
+complete moving-boundary qualification is inferred.
+
+`tests/moving_disk.rs` checks analytic translated area, common translation over
+many actual steps without stale-cell coupling, independent fluid-plus-body
+linear/orbital/spin balances before outer-boundary transport, bitwise replay,
+and late-endpoint rollback with scratch recovery. The broad moving-boundary
+bead remains open.
+
 ### Electrically insulating interfaces in moving conductors
 
 `ElectricSetup::solve_with_cell_motion_topology` and
