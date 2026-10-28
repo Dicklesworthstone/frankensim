@@ -32,10 +32,8 @@ cargo run -p fs-cli --bin frankensim -- --json study examples/native-uncertainty
 
 The ordinary Monte Carlo, replicated QMC/LHS, independent-input Sobol and
 Bernoulli-compliance paths consume the same physical coordinate. Final and
-sampled-peak observations retain their original meanings. Coordinate-secant
-mean controls are supported; nominal-adjoint amplitude calibration requires
-its explicit interval-power contraction and currently refuses rather than
-using the unrelated static-power derivative. Retained source-independent
+sampled-peak observations retain their original meanings. Coordinate-secant and nominal-adjoint
+mean controls use the same amplitude coordinate. Retained source-independent
 resume reconstructs the same scaled schedule.
 
 The example's probability laws, capacity and fan data are illustrative.
@@ -81,3 +79,33 @@ actually evaluated scaled watt history at its governing operating case.
 Completion requires both coordinate and temperature tolerances, or a passing
 upper bound. Measured nonmonotonicity refuses; global monotonicity remains the
 explicit caller assumption.
+
+## One-probe trajectory adjoint calibration
+
+Version 3 admits `:mean-control (nominal-adjoint :max-solves 1)` for this
+coordinate with both capacity and total-enthalpy storage, and final or selected
+sampled-peak observations. It reuses the existing complete accepted-trajectory
+adjoint, including every admitted material, contact and boundary feedback.
+The amplitude derivative contracts each interval's absolute delivered-watt
+partial with that interval's **original** scheduled watts:
+
+`dJ/da = sum_i (dJ/dP_i) * P_original,i`.
+
+Neither the timestep nor static duty is multiplied again. No division by the
+sampled amplitude occurs, so zero amplitude does not erase the underlying
+workload or turn a nonzero physical response into zero. The retained original
+and sampled source, region, event times, scaled watts and complete native fine
+grid must match; future intervals must have zero influence on an earlier
+selected peak. Off periods contribute zero without borrowing another region's
+power. The contraction makes no extra physical or transpose solve.
+
+The existing one calibration solve supplies all supported controls before
+probability samples start. Its frozen coefficients and original workload are
+recovered from retained evidence, without the source files. Raw physical
+samples and their numerical pass events remain unchanged. A selected maximum
+branch is a local discrete derivative; ties, a switching active peak, numerical
+error and physical-model uncertainty retain their existing limitations.
+
+```bash
+cargo run -p fs-cli --bin frankensim -- --json study examples/native-uncertainty/pulse-amplitude-adjoint.fsim pulse-adjoint.db
+```

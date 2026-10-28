@@ -62,9 +62,10 @@ impl Model {
             // Chain logarithmic/delivered controls at the actual calibration
             // point, whose marginal means can differ from the original model.
             let project = self.project(&sample.parameters)?;
-            let mut calibration = transient::coefficients(&receipt, &project.spec,
+            let mut calibration = transient::coefficients_with_reference(&receipt, &project.spec,
                 self.bound.study().parameters(), sample.value_k, region,
-                self.bound.study().uses_sampled_peak())?;
+                self.bound.study().uses_sampled_peak(),
+                Some((self.bound.base(), &sample.parameters)))?;
             let report = receipt.get("transient").and_then(|value| value.get("adjoint"))
                 .ok_or_else(|| invalid("nominal calibration has no selected trajectory adjoint"))?;
             contact::convert(self, sample, report, &mut calibration.gradient)?;

@@ -9,6 +9,7 @@ use super::{J, NominalCalibration, Result, Target, UniformParameter, array, inva
 
 #[path = "transient/peak.rs"]
 mod peak;
+mod schedule;
 
 const FINAL: &str = "temperature-final-adjoint";
 const FINAL_MATERIAL: &str = "temperature-final-material-adjoint";
@@ -30,11 +31,13 @@ fn admit_controls(spec: &ProjectSpec, parameters: &[UniformParameter]) -> Result
         .as_ref()
         .and_then(|c| c.conduction.as_ref())
         .ok_or_else(|| invalid("transient calibration has no conduction setup"))?;
-    policy(spec).ok_or_else(|| invalid("transient calibration has no time policy"))?;
+    let time = policy(spec).ok_or_else(|| invalid("transient calibration has no time policy"))?;
     for parameter in parameters.iter().filter(|p| p.low != p.high) {
         let supported = match parameter.target {
             Target::Power => setup.regions.iter().any(|r| r.region == parameter.entity),
-            Target::PowerScheduleScale => false,
+            Target::PowerScheduleScale => time.power_schedules.iter()
+                .filter(|row| row.region == parameter.entity).count() == 1
+                && setup.regions.iter().any(|row| row.region == parameter.entity),
             Target::ConvectionCoefficient | Target::ConvectionTemperature => true,
             Target::AirInletTemperature
             | Target::FanSpeedRatio
@@ -253,13 +256,25 @@ fn prescribed_boundary(
 /// Bind the derivative to the same selected state, storage law and fine grid.
 /// A peak branch supplies fixed controls even when the maximum is not unique;
 /// its active state, vertex and tie count remain explicit calibration data.
+#[cfg(test)]
 pub(super) fn coefficients(
+    receipt: &J, spec: &ProjectSpec, parameters: &[UniformParameter],
+    nominal: f64, region: &str, sampled_peak: bool,
+) -> Result<NominalCalibration> {
+    coefficients_with_reference(receipt, spec, parameters, nominal, region, sampled_peak, None)
+}
+
+/// Retain the immutable original schedule, including its nonzero watts at a
+/// zero-amplitude calibration point. Other coordinates keep their existing
+/// sampled-law contractions. No additional trajectory or transpose is solved.
+pub(super) fn coefficients_with_reference(
     receipt: &J,
     spec: &ProjectSpec,
     parameters: &[UniformParameter],
     nominal: f64,
     region: &str,
     sampled_peak: bool,
+    reference: Option<(&ProjectSpec, &[f64])>,
 ) -> Result<NominalCalibration> {
     admit_controls(spec, parameters)?;
     let time = policy(spec).ok_or_else(|| invalid("missing transient calibration policy"))?;
@@ -316,12 +331,22 @@ pub(super) fn coefficients(
             "transient adjoint storage, selected state, grid, functional or residual differs from the sealed calibration",
         ));
     }
-    let gradient = parameters.iter().map(|parameter| {
+    let gradient = parameters.iter().enumerate().map(|(index, parameter)| {
         if parameter.low == parameter.high { return Ok(0.0); }
         let entity = parameter.entity.as_str();
         let derivative = match parameter.target {
-            Target::PowerScheduleScale => return Err(invalid(
-                "schedule-amplitude calibration requires interval-power contraction; use coordinate-secant controls")),
+            Target::PowerScheduleScale => {
+                let (original, coordinates) = reference
+                    .ok_or_else(|| invalid("schedule sensitivity requires its immutable original workload"))?;
+                if coordinates.len() != parameters.len() {
+                    return Err(invalid("schedule sensitivity calibration coordinate count differs"));
+                }
+                let amplitude = coordinates[index];
+                if !amplitude.is_finite() || amplitude < parameter.low || amplitude > parameter.high {
+                    return Err(invalid("schedule sensitivity point is outside its declared amplitude support"));
+                }
+                schedule::coefficient(report, original, spec, entity, amplitude, prefix_steps)?
+            },
             Target::Power => {
                 let power = spec.power.as_deref().unwrap_or(&[]).iter()
                     .find(|row| row.region == entity)
@@ -380,7 +405,7 @@ pub(super) fn coefficients(
         // check to initial-state or constitutive-chart coordinates: those must
         // retain their genuine native initial-observation contribution.
         let future_only = matches!(parameter.target,
-            Target::Power | Target::ConvectionCoefficient | Target::ConvectionTemperature
+            Target::Power | Target::PowerScheduleScale | Target::ConvectionCoefficient | Target::ConvectionTemperature
                 | Target::AirInletTemperature | Target::FanSpeedRatio
                 | Target::NaturalConvectionAmbient | Target::RadiationReservoirTemperature
                 | Target::FixedTemperature | Target::HeatFlux | Target::ContactPressure
