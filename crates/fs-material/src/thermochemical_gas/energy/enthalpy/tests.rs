@@ -225,3 +225,92 @@ fn capacity_bound_refuses_nonpositive_cv_including_interior_dips() {
     let species = coefficient_species(coefficients, [200.0, 1000.0]);
     assert!(minimum_cp(&species, hot_controls(300.0, 900.0)).is_err());
 }
+
+fn multiregion_model(low_coefficients: [f64; 9], high_coefficients: [f64; 9]) -> ThermochemicalGasModel {
+    let low = coefficient_species(low_coefficients, [200.0, 1000.0]);
+    let high = coefficient_species(high_coefficients, [1000.0, 6000.0]);
+    let species = Nasa9StandardStateModelV1::new(low.species().clone(), low.molar_mass(),
+        low.convention().clone(), vec![low.regions()[0].clone(), high.regions()[0].clone()]).unwrap();
+    ThermochemicalGasModel::new(
+        fs_thermochem::mixture::FrozenIdealGasMixtureModelV1::new(vec![species], mole(vec![1.0])).unwrap(),
+        vec![crate::thermochemical_gas::tests::transport_in_domain(
+            "N2", 1.8e-5, 0.03, [200.0, 6000.0], [1000.0, 1e7],
+        )], None,
+    ).unwrap()
+}
+
+#[test]
+fn reconciled_nitrogen_heating_crosses_source_regions_with_one_energy_owner() {
+    let raw = multiregion_model(nitrogen_coefficients("low"), nitrogen_coefficients("high"));
+    let controls = hot_controls(280.0, 3000.0);
+    assert!(GasEnthalpyLaw::from_mole(&raw, mole(vec![1.0]),
+        point(300.0, 100000.0), controls).is_err());
+    let gas = raw.with_caloric_continuity(Temperature::new(298.15),
+        fs_thermochem::MolarEnergyQuantityV1::new(1e-3),
+        fs_thermochem::MolarThermalQuantityV1::new(1e-5)).unwrap();
+    let law = GasEnthalpyLaw::from_mole(&gas, mole(vec![1.0]),
+        point(300.0, 100000.0), controls).unwrap();
+    let cv_slope = gas.maximum_isochoric_temperature_slope(controls).unwrap();
+    for t in [280.0, 900.0, 999.999, 1000.0, 1000.001, 2500.0, 3000.0] {
+        let h = law.enthalpy_at_temperature(t).unwrap();
+        let solved = law.resolve_enthalpy(h, || false).unwrap();
+        assert!((solved.state().state().temperature - t).abs() < 1e-8);
+        assert!(solved.residual_j_kg().abs() <= controls.energy_tolerance_j_kg);
+        let properties = solved.state().thermodynamics().properties();
+        assert!(law.maximum_temperature_slope() >= 1.0 / properties.mass_specific_cp().value());
+        assert!(cv_slope >= 1.0 / properties.mass_specific_cv().value());
+        assert!(solved.state().thermodynamics().receipt().component_receipts()[0]
+            .caloric_reference().is_some());
+    }
+    let h0 = law.enthalpy_at_temperature(300.0).unwrap();
+    let h1 = law.enthalpy_at_temperature(2500.0).unwrap();
+    let entropy = law.specific_entropy_change_j_kg_k(h0, h1).unwrap().unwrap();
+    let expected_entropy = gas.thermodynamics().specific_entropy_change(
+        Temperature::new(300.0), fs_qty::Pressure::new(100000.0),
+        Temperature::new(2500.0), fs_qty::Pressure::new(100000.0)).unwrap().value();
+    assert!((entropy - expected_entropy).abs() < 1e-8);
+    let mut parcel = super::super::IsochoricGasParcel::new(gas, point(300.0, 100000.0), 0.01).unwrap();
+    let mass = parcel.mass_kg();
+    let heat = mass * (h1 - h0 - UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / 0.0280134 * 2200.0);
+    let report = parcel.add_heat(heat, controls, || false).unwrap();
+    assert!((parcel.state().state().temperature - 2500.0).abs() < 1e-8);
+    assert!((parcel.state().state().pressure - 100000.0 * 2500.0 / 300.0).abs() < 1e-4);
+    assert!(report.residual_j.abs() <= mass * controls.energy_tolerance_j_kg);
+    assert!((report.stored_energy_change_j - heat).abs() <= mass * controls.energy_tolerance_j_kg);
+}
+
+#[test]
+fn caloric_transport_reference_binds_policy_but_preserves_the_full_species_catalog() {
+    let raw = model(vec![0.75, 0.25], 0.001);
+    let corrected = raw.with_caloric_continuity(Temperature::new(300.0),
+        fs_thermochem::MolarEnergyQuantityV1::new(0.0),
+        fs_thermochem::MolarThermalQuantityV1::new(0.0)).unwrap();
+    let law = |source: &ThermochemicalGasModel, fractions: Vec<f64>| {
+        GasEnthalpyLaw::from_mole(source, mole(fractions), point(300.0, 100000.0), controls()).unwrap()
+    };
+    let original = law(&raw, vec![1.0, 0.0]);
+    let a = law(&corrected, vec![1.0, 0.0]);
+    let b = law(&corrected, vec![0.0, 1.0]);
+    assert_eq!(a.enthalpy_at_temperature(330.0).unwrap(), original.enthalpy_at_temperature(330.0).unwrap());
+    assert_ne!(a.advected_composition().unwrap().enthalpy_reference,
+        original.advected_composition().unwrap().enthalpy_reference);
+    assert_eq!(a.advected_composition().unwrap().enthalpy_reference,
+        b.advected_composition().unwrap().enthalpy_reference);
+}
+
+#[test]
+fn reconciled_regions_still_refuse_nonpositive_cv_at_the_selected_seam_endpoint() {
+    let mut low = [0.0; 9]; low[2] = 3.5;
+    let mut high = [0.0; 9]; high[2] = 0.5;
+    // Match the raw h/s reference at 1000 K so this exercises Cv admission.
+    high[7] = 3000.0;
+    high[8] = 3.0 * fs_math::det::ln(1000.0);
+    let raw = multiregion_model(low, high);
+    let gas = raw.with_caloric_continuity(Temperature::new(300.0),
+        fs_thermochem::MolarEnergyQuantityV1::new(100000.0),
+        fs_thermochem::MolarThermalQuantityV1::new(1000.0)).unwrap();
+    assert!(gas.maximum_isochoric_temperature_slope(hot_controls(280.0, 999.0)).is_ok());
+    assert!(gas.maximum_isochoric_temperature_slope(hot_controls(280.0, 1000.0)).is_err());
+    assert!(GasEnthalpyLaw::from_mole(&gas, mole(vec![1.0]), point(300.0, 100000.0),
+        hot_controls(280.0, 3000.0)).is_err());
+}

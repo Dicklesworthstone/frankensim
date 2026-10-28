@@ -2421,18 +2421,37 @@ Program anchor: MR43 (`frankensim-material-reality-ui2if.7.1`), remains open.
 ## Finite ideal-gas internal-energy capacity for coupled exchange
 
 `ThermochemicalGasModel::maximum_isochoric_temperature_slope` bounds `dT/du`
-over an explicit single-region temperature bracket using the original NASA-9
+over an explicit source-supported temperature bracket using the original NASA-9
 coefficient interval bounds with bounded deterministic temperature subdivision
 and each species' `cv = cp - R/M`. Every accepted subinterval proves positive
-`cv`; an unresolved or unstable source range refuses. A fixed 13-entry stack
-limits construction to 8,191 interval evaluations per species, and the exact
-NASA caloric values remain unchanged. Cross-region brackets remain refused.
-The bound is a
-timestep aid; the existing source model still owns actual `u(T)` and inversion.
+`cv`; an unresolved or unstable source range refuses. The bound is a timestep
+aid; the existing source model still owns actual `u(T)` and inversion.
+
+`ThermochemicalGasModel::with_caloric_continuity` applies the explicit
+thermochemical reference policy to each retained species while preserving
+composition, transport models, and source-pack identities. `GasEnthalpyLaw`
+and isochoric capacity bounds may cross NASA-9 region boundaries only for
+species carrying that admitted policy. Raw models retain the single-region
+requirement. Each intersected source region receives its own outward-rounded
+Cp/Cv bound, including the upper chart selected when the bracket ends exactly
+at an internal seam. The minimum admitted capacity bounds the complete bracket;
+reconciliation alone does not establish caloric stability. A fixed 13-entry
+stack limits subdivision to 8,191 interval evaluations per intersected region,
+with at most 16 regions per species.
+
+For corrected models, transport enthalpy-reference identity includes the
+complete retained species catalog and every explicit caloric policy,
+independently of the current mixture fractions. Mixtures of the same corrected
+catalog remain compatible across composition changes; raw and corrected
+references, or different correction policies, remain distinguishable. Source
+thermochemistry, energy inversion, thermal entropy changes, and reaction
+thermochemistry therefore use the same declared caloric reference.
+
 `IsochoricGasParcel::model` exposes that same immutable composition/source model
 for coupled film queries. No constant heat capacity, enthalpy substitution or
-second gas caloric law is introduced. A focused test compares the bound with
-actual mixture heat capacities and refuses a bracket outside source support.
+second gas caloric law is introduced. Regressions cover source-supported
+multi-region nitrogen heating, inversion, entropy and pressure response,
+unchanged raw admission, and refusal of nonpositive Cv at a selected seam.
 
 ## Biased incremental longitudinal magnetostriction
 

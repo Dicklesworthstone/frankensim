@@ -53,6 +53,28 @@ fn temperature(
 }
 
 impl ThermochemicalGasModel {
+    /// Reconcile every retained species to an explicit continuous caloric reference.
+    ///
+    /// Budgets are molar and apply to each species separately. The common anchor
+    /// temperature selects each species' unchanged source region. Transport,
+    /// water association, composition and original source-pack identities survive.
+    /// No original model is changed or partially published on refusal.
+    pub fn with_caloric_continuity(
+        &self, anchor_temperature: Temperature,
+        maximum_enthalpy_correction: fs_thermochem::MolarEnergyQuantityV1,
+        maximum_entropy_correction: fs_thermochem::MolarThermalQuantityV1,
+    ) -> Result<Self, GasEnergyError> {
+        let components = self.thermodynamics().components().iter()
+            .map(|species| species.with_caloric_continuity(anchor_temperature,
+                maximum_enthalpy_correction, maximum_entropy_correction))
+            .collect::<Result<Vec<_>, _>>().map_err(conversion_error)?;
+        let thermodynamics = fs_thermochem::mixture::FrozenIdealGasMixtureModelV1::new(
+            components, self.thermodynamics().declared_composition().clone(),
+        ).map_err(conversion_error)?;
+        let mut reconciled = self.clone();
+        reconciled.thermodynamics = thermodynamics;
+        Ok(reconciled)
+    }
     /// Reconstruct temperature at the explicitly typed pressure in context.
     /// All other source coordinates survive; the accepted medium is resolved
     /// once through the existing complete material/thermochemistry owner.
@@ -215,18 +237,67 @@ pub(super) fn minimum_cp(
 ) -> Result<f64, GasEnergyError> {
     let lo = controls.minimum_temperature_k;
     let hi = controls.maximum_temperature_k;
-    // A single source region avoids asserting continuity across independently
-    // fitted NASA-9 charts. Breath-temperature brackets fit within this scope.
     let regions = species.regions();
-    let region = regions.iter().enumerate().find_map(|(index, region)| {
+    // Preserve the original single-chart path, including endpoint selection.
+    if let Some(region) = regions.iter().enumerate().find_map(|(index, region)| {
         let upper = region.temperature_max().value();
         if lo >= region.temperature_min().value()
             && (hi < upper || (index + 1 == regions.len() && hi <= upper))
         { Some(region) } else { None }
-    }).ok_or(GasEnergyError::Invalid("caloric bracket must stay within one NASA-9 region per active species"))?;
-    region_minimum_cp(region, species.molar_mass().value(), lo, hi)
+    }) {
+        return region_minimum_cp(region, species.molar_mass().value(), lo, hi);
+    }
+    if species.caloric_reference().is_none() {
+        return Err(GasEnergyError::Invalid("caloric bracket must stay within one NASA-9 region per active species"));
+    }
+    // The explicit source policy has already checked every seam for support
+    // and h/s continuity. Cp itself still needs a conservative bound per chart.
+    if lo < regions[0].temperature_min().value()
+        || hi > regions[regions.len() - 1].temperature_max().value()
+    {
+        return Err(GasEnergyError::Invalid("caloric bracket exceeds continuous source support"));
+    }
+    let mut lower: f64 = f64::INFINITY;
+    for region in regions {
+        let start = lo.max(region.temperature_min().value());
+        let end = hi.min(region.temperature_max().value());
+        if start < end || (start == end && hi == region.temperature_min().value()) {
+            lower = lower.min(region_minimum_cp(region, species.molar_mass().value(), start, end)?);
+        }
+    }
+    if !lower.is_finite() || lower <= 0.0 {
+        return Err(GasEnergyError::Invalid("no stable continuous caloric interval"));
+    }
+    Ok(lower)
 }
 
+fn caloric_reference_identity(source: &ThermochemicalGasModel) -> Option<fs_blake3::ContentHash> {
+    let components = source.thermodynamics().components();
+    if components.iter().all(|species| species.caloric_reference().is_none()) { return None; }
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&(components.len() as u64).to_le_bytes());
+    for species in components {
+        let name = species.species().as_str().as_bytes();
+        payload.extend_from_slice(&(name.len() as u64).to_le_bytes());
+        payload.extend_from_slice(name);
+        payload.extend_from_slice(&species.molar_mass().value().to_bits().to_le_bytes());
+        payload.extend_from_slice(&(species.regions().len() as u64).to_le_bytes());
+        for region in species.regions() { payload.extend_from_slice(region.card_identity()); }
+        if let Some(policy) = species.caloric_reference() {
+            payload.push(1);
+            payload.extend_from_slice(&policy.evaluator_version().to_le_bytes());
+            payload.extend_from_slice(&policy.anchor_temperature().value().to_bits().to_le_bytes());
+            payload.extend_from_slice(&(policy.anchor_region() as u64).to_le_bytes());
+            payload.extend_from_slice(&policy.maximum_enthalpy_correction().value().to_bits().to_le_bytes());
+            payload.extend_from_slice(&policy.maximum_entropy_correction().value().to_bits().to_le_bytes());
+            for region in policy.regions() {
+                payload.extend_from_slice(&region.enthalpy_offset().value().to_bits().to_le_bytes());
+                payload.extend_from_slice(&region.entropy_offset().value().to_bits().to_le_bytes());
+            }
+        } else { payload.push(0); }
+    }
+    Some(fs_blake3::hash_domain("org.frankensim.fs-material.gas-caloric-reference.v1", &payload))
+}
 impl GasEnthalpyLaw {
     /// Construct a frozen mixture caloric law from one verified common source
     /// set. Its mass fractions are explicit, canonical and immutable.
@@ -280,9 +351,13 @@ impl GasEnthalpyLaw {
         if !maximum_slope.is_finite() || maximum_slope <= 0.0 {
             return Err(GasEnergyError::Invalid("caloric CFL slope is not representable"));
         }
-        let enthalpy_reference = format!("NASA9:{:?}:{:?}:{:016x}:{}",
+        let mut enthalpy_reference = format!("NASA9:{:?}:{:?}:{:016x}:{}",
             convention.phase(), convention.eos(), convention.reference_pressure().value().to_bits(),
             convention.elemental_reference().as_str());
+        if let Some(identity) = caloric_reference_identity(source) {
+            enthalpy_reference.push_str(":caloric:");
+            enthalpy_reference.push_str(&identity.to_hex());
+        }
         Ok(Self {
             model, context, controls,
             species: source.thermodynamics().components().iter()

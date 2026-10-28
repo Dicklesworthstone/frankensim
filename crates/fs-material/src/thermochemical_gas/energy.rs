@@ -118,7 +118,8 @@ impl ThermochemicalGasModel {
     /// Conservative upper bound on `dT/du` [kg K/J] for a frozen ideal gas.
     ///
     /// The original NASA-9 coefficients bound each active species' cp over the
-    /// supplied single-region temperature bracket. Subtracting its own R/M
+    /// supplied source-supported bracket; crossing regions requires an explicit
+    /// continuous caloric reference. Subtracting each species' own R/M
     /// bounds cv; the smallest active species bound also bounds every positive
     /// mass-weighted mixture. This is a stability bound, not a replacement
     /// caloric law: actual storage and inversion still use NASA-9 u(T).
