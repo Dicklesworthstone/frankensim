@@ -47,9 +47,13 @@ fn dictionary(low:f64,high:f64)->Vec<(f64,f64)> {
 }
 /// In-band resonators every `spacing` rad/s from the band bottom, each with
 /// half-power bandwidth 2*spacing (zeta = spacing/omega, at most 0.5), continued
-/// GUARD_TERMS past the top; lossless storage just above the band for the
-/// frequency-dependent added mass, which damped terms cannot supply without
-/// spurious resistance; and the shared sub-band and high-band terms.
+/// GUARD_TERMS past the top; storage just above the band for the frequency-
+/// dependent added mass; and the shared sub-band and high-band terms. The
+/// storage terms carry the same travel-time bandwidth as the in-band
+/// resonators: the kernel holds no delay longer than D/c, so no term may ring
+/// longer than they do. Lossless storage did: above a board whose modes stop
+/// at the band top, each such pole was an undamped mode of the whole system,
+/// heard as steady lines at 1.15..8x the top in every air-loaded piano render.
 fn resolved_dictionary(low:f64,high:f64,spacing:f64)->Vec<(f64,f64)> {
     let mut poles=Vec::new();
     for &factor in &[0.35,0.55,0.80] {poles.push((low*factor,0.25));}
@@ -60,7 +64,7 @@ fn resolved_dictionary(low:f64,high:f64,spacing:f64)->Vec<(f64,f64)> {
     for j in 1..=6 {
         poles.push((det::exp(det::ln(high)+(det::ln(8.*high)-det::ln(high))*f64::from(j)/6.),0.25));
     }
-    for &factor in &[1.15,1.3,1.6,2.,3.,5.,8.] {poles.push((factor*high,0.));}
+    for &factor in &[1.15,1.3,1.6,2.,3.,5.,8.] {let w=factor*high;poles.push((w,(spacing/w).min(0.5)));}
     poles
 }
 fn normalization(p:(f64,f64))->f64 {if p.1==0. {p.0} else {2.*p.1*p.0}}
@@ -399,6 +403,9 @@ mod tests {
         let spacing = TAU * medium.sound_speed / (6.0 * surface.maximum_distance_m());
         let resolved = fit_resolved(&omega, &data, ports, spacing).unwrap();
         assert!(resolved.rms_error <= 0.02 && resolved.resistance_rms_error <= 0.05);
+        // No term at or above the band outlasts the travel time: a lossless off-band pole rang for ever.
+        assert!(resolved.model.poles.iter().filter(|p| p.omega >= omega[0])
+            .all(|p| p.zeta * p.omega >= spacing * (1.0 - 1e-12)));
         // Too few training samples for that spacing refuses instead of interpolating.
         let sparse: Vec<f64> = (0..33).map(|i| TAU * (90.0 + 900.0 * i as f64 / 32.0)).collect();
         let sparse_data: Vec<Vec<C64>> = sparse.iter()
