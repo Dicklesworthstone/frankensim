@@ -64,6 +64,8 @@ pub mod section_temperature;
 /// Source-bound effective sheet mass, membrane and independent bending response.
 pub mod sheet;
 pub mod state_point;
+/// Bounded solid-vapor pressure and latent-heat laws for shared phase transfer.
+pub mod sublimation;
 pub mod tensor;
 pub mod thermal;
 /// Source-bound reciprocal Seebeck and Peltier cross-domain transport.

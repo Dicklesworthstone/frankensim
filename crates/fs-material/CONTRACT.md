@@ -2781,3 +2781,29 @@ initiation-sensitive and retained-history tangents, nonproportional work,
 straight-path subdivision, compression/shear, source-unit/domain refusals and
 actual native-equilibrium load histories. Temperature/rate-dependent toughness,
 fatigue, evolving mode-mix calibration and fracture heat partition remain separate.
+
+
+## Solid-vapor constitutive laws
+
+`sublimation` supplies the shared `fs_thermal::sublimation::SublimationLaw`
+interface. `WaterIceSublimation` evaluates the IAPWS ice-Ih pressure curve on
+50..=273.16 K; `CarbonDioxideSublimation` evaluates the NIST solid-CO2 Antoine
+fit on 154.26..=195.89 K, with explicit bar-to-Pa conversion. Named curves
+refuse extrapolation. Pressure derivatives are analytic. Their temperature-
+dependent latent heat and derivative follow Clausius-Clapeyron with ideal
+vapor and negligible solid specific volume; they are not independently
+measured calorimetry or a real-fluid equation of state. Original sources and
+approximations are documented beside each law. Density is explicitly supplied
+by the caller and held constant; no porosity, accommodation or geometry is
+inferred from the material name.
+
+`ClausiusClapeyronSublimation` admits caller-calibrated reference pressure,
+reference temperature, constant latent heat, molar mass, density and a bounded
+validity interval. Log-pressure evaluation avoids avoidable overflow and keeps
+the exact reference anchor. All scalar laws allocate nothing and use the shared
+`fs_math` deterministic transcendental kernels. Ice saturation pressure is also
+available independently of density for humidity consumers. The six focused
+regressions check published pressure anchors, analytic derivatives, units,
+latent-heat behavior, explicit domains and representability refusals. These
+laws supply constitutive data; phase inventory, transport and energy evolution
+remain with their physical consumers.
