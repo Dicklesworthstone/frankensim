@@ -69,6 +69,9 @@ pub use open_boundary::{
     NsfBoundaryExchange, NsfBoundaryTrace, NsfCharacteristicAxis, NsfCharacteristicBoundary,
 };
 use open_boundary::{BoundaryFlux, IncomingPopulations, OpenFaces};
+mod characteristic_trial;
+/// Unpublished original NSF interval for reciprocal characteristic coupling.
+pub use characteristic_trial::NsfCharacteristicTrial;
 
 /// Exact linearized Navier-Stokes-Fourier modes (test support of the qualification, shipped for reuse).
 pub mod dispersion;

@@ -40,6 +40,7 @@ fs-feec = { path = "../fs-feec" }
 fs-fft = { path = "../fs-fft" }
 fs-iface = { path = "../fs-iface" }
 fs-la = { path = "../fs-la" }
+fs-lbm = { path = "../fs-lbm" }
 fs-material = { path = "../fs-material" }
 fs-mbd-material = { path = "../fs-mbd-material" }
 fs-matdb = { path = "../fs-matdb" }

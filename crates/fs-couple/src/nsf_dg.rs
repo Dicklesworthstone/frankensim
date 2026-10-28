@@ -1,0 +1,357 @@
+//! Original resolved NSF flow coupled to the original causal DG bore.
+//!
+//! One complete planar characteristic face is projected onto the uniform
+//! acoustic mode. Its interval mean pressure and volume flow obey the SAME
+//! current DG law p = H + Z Q; only the incoming NSF characteristic is solved.
+//! The NSF lattice step, thermochemical owner and DG propagator are unchanged.
+//! Both candidates remain private until pressure and acoustic-work checks pass.
+//!
+//! This bounded, zero-reference-flow interface is an acoustic projection, not
+//! full mass/entropy/enthalpy transport into a compressible duct. The actual NSF
+//! mass and total-energy flux remain separate. The difference between integral
+//! p' u and mean(p') integral(u) is retained as signed projection covariance,
+//! never relabeled as heat or silently credited to make a balance close.
+//! Face location, transverse modes, time resolution and the original first-order
+//! NSF boundary still require independent refinement; no jet qualification or
+//! reflection guarantee follows from this composition.
+
+use crate::acoustic_realize::AcousticRealizeError;
+use crate::dg_port::{DgPortLoad, DgTerminalFrame};
+use fs_duct::dg::{DgPortResponse, DgStepOutput};
+use fs_exec::CancelGate;
+use fs_lbm::lattice3::Lattice3;
+use fs_lbm::nsf3::{
+    EnergyLedger, NsfBoundaryExchange, NsfCharacteristicTrial, NsfError, NsfGrid3,
+};
+use fs_material::gas::GasState;
+
+/// Finite physical pressure playback through the shared observer/PCM interface.
+pub mod performance;
+
+/// Original owner failures and explicit coupling/refinement refusals.
+#[derive(Debug)]
+pub enum NsfDgError {
+    /// Invalid source, interface geometry, clock or numerical allowance.
+    Input(&'static str),
+    /// Original fluid material, boundary or step refusal.
+    Flow(NsfError),
+    /// Original acoustic material, port or step refusal.
+    Acoustic(AcousticRealizeError),
+    /// Cancellation publishes neither candidate.
+    Cancelled,
+    /// Caller-supplied incoming-characteristic bracket contains no sign change.
+    NoBracket {
+        /// Pressure residual at the caller's two bracket endpoints [Pa].
+        residual_pa: [f64; 2],
+    },
+    /// The original owners did not meet the pressure budget within bounded work.
+    Convergence {
+        /// Last evaluated pressure mismatch [Pa].
+        residual_pa: f64,
+        /// Actual number of original candidate intervals evaluated.
+        evaluations: usize,
+    },
+    /// The uniform/held-flow projection exceeds the caller's work allowance.
+    Projection {
+        /// Signed resolved work minus original DG inlet work [J].
+        residual_j: f64,
+        /// Caller-declared allowed magnitude [J].
+        allowance_j: f64,
+    },
+}
+impl core::fmt::Display for NsfDgError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "resolved NSF/DG coupling: {self:?}")
+    }
+}
+impl std::error::Error for NsfDgError {}
+
+/// Explicit work, horizon, root and acoustic-projection limits.
+#[derive(Clone, Copy, Debug)]
+pub struct NsfDgLimits {
+    /// Original NSF steps per held DG interval.
+    pub substeps: usize,
+    /// Maximum actual grid cells, including solid cells in the retained snapshot.
+    pub maximum_cells: usize,
+    /// Maximum cell-steps across ALL trials of one coupled interval.
+    pub maximum_cell_steps: usize,
+    /// Root evaluations per interval, in 3..=256.
+    pub maximum_evaluations: usize,
+    /// Finite positive interval horizon.
+    pub maximum_steps: u64,
+    /// Absolute incoming-characteristic bracket [m/s], never an amplitude clamp.
+    /// Both endpoints must remain inside the original NSF admission domain.
+    pub incoming_bracket_m_s: [f64; 2],
+    /// Absolute pressure-matching allowance [Pa].
+    pub pressure_absolute_tolerance_pa: f64,
+    /// Relative pressure allowance, in (0, 1e-3].
+    pub pressure_relative_tolerance: f64,
+    /// Absolute difference between resolved acoustic work and DG inlet work [J].
+    pub projection_absolute_tolerance_j: f64,
+    /// Relative work allowance against the sum of both absolute works, in [0, 1].
+    /// Choosing a loose bound does not qualify the interface accuracy.
+    pub projection_relative_tolerance: f64,
+}
+
+/// One accepted resolved/acoustic interval, with no duplicated excitation owner.
+#[derive(Debug, Clone)]
+pub struct NsfDgFrame {
+    /// One-based accepted DG interval.
+    pub step: u64,
+    /// Number of original NSF candidate intervals evaluated.
+    pub evaluations: usize,
+    /// Accepted incoming characteristic on the coupled face [m/s].
+    pub incoming_characteristic_m_s: f64,
+    /// Original NSF face accounts: low, high. Flux/work are summed over all
+    /// substeps; pressure and continuum flow are their interval means.
+    pub faces: [NsfBoundaryExchange; 2],
+    /// Original NSF energy accounting; its viscous heating is a budget remainder.
+    pub flow: EnergyLedger,
+    /// Actual change of original NSF mass [kg], independent of the face sum.
+    pub flow_mass_change_kg: f64,
+    /// Actual change of original NSF sensible-chart total energy [J].
+    pub flow_energy_change_j: f64,
+    /// Original aggregate DG/branch accounts, retaining their inferred-loss class.
+    pub duct: DgStepOutput,
+    /// Original downstream terminal order, suitable for its bound microphone.
+    pub terminals: Vec<DgTerminalFrame>,
+    /// Held continuum volume flow into the DG duct [m³/s].
+    pub inlet_flow_m3_s: f64,
+    /// Actual original DG step-mean inlet pressure [Pa].
+    pub inlet_pressure_pa: f64,
+    /// Resolved mean acoustic pressure minus actual DG inlet pressure [Pa].
+    pub pressure_residual_pa: f64,
+    /// Resolved integral(p' u) minus mean(p') mean(Q) dt [J].
+    /// Contains transverse and temporal covariance, not physical heat.
+    pub projection_covariance_j: f64,
+    /// Resolved acoustic work minus original DG integrated inlet work [J].
+    pub acoustic_work_residual_j: f64,
+    /// Original DG inlet work minus its mean-pressure/held-flow product [J].
+    pub port_work_residual_j: f64,
+    /// Actual lattice mass flux minus rho_ref times continuum swept volume [kg].
+    /// Includes finite-amplitude and discretization differences; not a correction.
+    pub mass_projection_difference_kg: f64,
+}
+
+/// The only accepted flow and acoustic owners. An initial resolved pulse or
+/// interior flow is retained, while both clocks must be cold at binding.
+pub struct NsfDg<L: Lattice3<27>> {
+    zone: NsfGrid3<L>,
+    load: DgPortLoad,
+    limits: NsfDgLimits,
+    high: bool,
+    reference: GasState,
+    area_m2: f64,
+    steps: u64,
+}
+
+fn poll(gate: &CancelGate) -> Result<(), NsfDgError> {
+    if gate.is_requested() { Err(NsfDgError::Cancelled) } else { Ok(()) }
+}
+pub(super) fn same_clock(a: f64, b: f64) -> bool {
+    a.is_finite() && b.is_finite() && a > 0.0 && b > 0.0
+        && (a-b).abs() <= 8.0 * f64::EPSILON * a.abs().max(b.abs())
+}
+
+impl<L: Lattice3<27>> NsfDg<L> {
+    /// Bind one complete face to the DG inlet. Areas agree to floating-point
+    /// geometry roundoff; clocks differ by at most derived-clock roundoff.
+    /// Both characteristic reference velocities must be zero. The complete gas
+    /// at the coupled reference must equal the actual DG inlet gas.
+    pub fn new(
+        zone: NsfGrid3<L>, load: DgPortLoad, high: bool,
+        limits: NsfDgLimits, gate: &CancelGate,
+    ) -> Result<Self, NsfDgError> {
+        poll(gate)?;
+        if limits.maximum_cells == 0 || zone.cell_count() > limits.maximum_cells {
+            return Err(NsfDgError::Input("resolved grid exceeds the declared retained-cell budget"));
+        }
+        let open = zone.characteristic_axis().ok_or(NsfDgError::Input(
+            "resolved coupling requires the original characteristic axis"))?;
+        let reference = zone.characteristic_reference_gas(high).map_err(NsfDgError::Flow)?;
+        let traces = zone.open_boundary_traces(high).ok_or(NsfDgError::Input(
+            "resolved coupling requires complete original face quadrature"))?;
+        // The original Cartesian face has one identical area per trace. A
+        // count/product avoids resolution-dependent accumulated-sum roundoff.
+        let area = traces.first().ok_or(NsfDgError::Input(
+            "resolved coupling requires a nonempty characteristic face"))?.area_m2
+            * traces.len() as f64;
+        let duct_area = load.duct().inlet_area_m2();
+        let work = zone.cell_count().checked_mul(limits.substeps)
+            .and_then(|n| n.checked_mul(limits.maximum_evaluations));
+        let bracket = limits.incoming_bracket_m_s;
+        if zone.steps() != 0 || load.state().step_count() != 0 || load.has_driven_mouth()
+            || zone.cell_count() > limits.maximum_cells || limits.maximum_cells == 0
+            || !(1..=65_536).contains(&limits.substeps)
+            || !(3..=256).contains(&limits.maximum_evaluations)
+            || work.is_none_or(|n| n > limits.maximum_cell_steps)
+            || limits.maximum_steps == 0
+            || limits.maximum_steps > (usize::MAX / limits.substeps) as u64
+            || !bracket.iter().all(|x| x.is_finite()) || bracket[0] >= bracket[1]
+            || open.faces.iter().any(|face| face.reference_velocity_m_s != [0.0; 3])
+            || load.duct().inlet_gas() != &reference
+            || !area.is_finite() || area <= 0.0 || !duct_area.is_finite()
+            || (area-duct_area).abs() > 32.0 * f64::EPSILON * area.max(duct_area)
+            || !same_clock(zone.law().dt_s * limits.substeps as f64, load.propagator().dt())
+            || !limits.pressure_absolute_tolerance_pa.is_finite()
+            || limits.pressure_absolute_tolerance_pa < 0.0
+            || !limits.pressure_relative_tolerance.is_finite()
+            || !(0.0 < limits.pressure_relative_tolerance && limits.pressure_relative_tolerance <= 1e-3)
+            || !limits.projection_absolute_tolerance_j.is_finite()
+            || limits.projection_absolute_tolerance_j < 0.0
+            || !limits.projection_relative_tolerance.is_finite()
+            || !(0.0..=1.0).contains(&limits.projection_relative_tolerance)
+        {
+            return Err(NsfDgError::Input("NSF/DG requires cold matching gas, area and clock, zero reference flow and finite complete work/projection budgets"));
+        }
+        Ok(Self { zone, load, limits, high, reference, area_m2: area, steps: 0 })
+    }
+    /// Original resolved fluid state and thermochemical source.
+    pub const fn zone(&self) -> &NsfGrid3<L> { &self.zone }
+    /// Original acoustic state, material walls and exterior loads.
+    pub const fn load(&self) -> &DgPortLoad { &self.load }
+    /// Complete reference material state used by this interface.
+    pub const fn reference_gas(&self) -> &GasState { &self.reference }
+    /// Actual complete characteristic face area [m²].
+    pub const fn area_m2(&self) -> f64 { self.area_m2 }
+    /// Original explicit numerical limits.
+    pub const fn limits(&self) -> &NsfDgLimits { &self.limits }
+    /// Accepted coupled intervals.
+    pub const fn accepted_steps(&self) -> u64 { self.steps }
+
+    /// Hold the OTHER face's incoming characteristic for one interval [m/s].
+    /// The coupled face is solved inside the caller's bracket. No synthetic jet
+    /// source, output gain, limiter or lagged reflection is added.
+    pub fn step(&mut self, external_incoming_m_s: f64, gate: &CancelGate)
+        -> Result<NsfDgFrame, NsfDgError>
+    {
+        poll(gate)?;
+        if !external_incoming_m_s.is_finite() || self.steps >= self.limits.maximum_steps {
+            return Err(NsfDgError::Input("resolved interface input is nonfinite or its horizon is exhausted"));
+        }
+        let relation = self.load.port_response().map_err(NsfDgError::Acoustic)?;
+        let limits = self.limits;
+        let side = usize::from(self.high);
+        let mut bracket = limits.incoming_bracket_m_s;
+        let mut values = [0.0; 2];
+        let mut incoming = bracket[0];
+        let mut last_residual = 0.0;
+        let mut evaluations = 0;
+        for evaluation in 1..=limits.maximum_evaluations {
+            poll(gate)?;
+            evaluations = evaluation;
+            let mut drive = [external_incoming_m_s; 2];
+            drive[side] = incoming;
+            let candidate = self.zone.preview_characteristic_interval(
+                drive, limits.substeps, limits.maximum_cell_steps, || gate.is_requested(),
+            ).map_err(|e| if gate.is_requested() { NsfDgError::Cancelled } else { NsfDgError::Flow(e) })?;
+            let face = candidate.boundary_exchange()[side];
+            let flow = face.normal_volume_flow_m3_s;
+            let residual = face.mean_acoustic_pressure_pa
+                - (relation.history_pressure_pa + relation.impedance_pa_s_m3 * flow);
+            let scale = face.mean_acoustic_pressure_pa.abs() + relation.history_pressure_pa.abs()
+                + (relation.impedance_pa_s_m3 * flow).abs();
+            if !residual.is_finite() || !scale.is_finite() {
+                return Err(NsfDgError::Input("resolved interface pressure equation overflowed"));
+            }
+            let allowance = limits.pressure_absolute_tolerance_pa
+                + limits.pressure_relative_tolerance * scale;
+            if residual.abs() <= allowance {
+                let frame = accept_candidate(candidate, &mut self.load, side, relation,
+                    self.reference, limits, incoming, evaluation, self.steps + 1, gate)?;
+                self.steps += 1;
+                return Ok(frame);
+            }
+            last_residual = residual;
+            drop(candidate);
+            if evaluation == 1 {
+                values[0] = residual;
+                incoming = bracket[1];
+                continue;
+            }
+            if evaluation == 2 {
+                values[1] = residual;
+                if values[0].is_sign_positive() == values[1].is_sign_positive() {
+                    return Err(NsfDgError::NoBracket { residual_pa: values });
+                }
+            } else {
+                let side = usize::from(residual.is_sign_positive() != values[0].is_sign_positive());
+                bracket[side] = incoming;
+                values[side] = residual;
+            }
+            // A safeguarded secant proposal accelerates the nearly linear
+            // characteristic law. Only a strict interior point is evaluated;
+            // the physical amplitude is never clamped to a bracket endpoint.
+            let proposed = bracket[0] - values[0]
+                * ((bracket[1]-bracket[0]) / (values[1]-values[0]));
+            incoming = if proposed.is_finite()
+                && proposed > bracket[0] + 0.1*(bracket[1]-bracket[0])
+                && proposed < bracket[1] - 0.1*(bracket[1]-bracket[0])
+            { proposed } else { f64::midpoint(bracket[0], bracket[1]) };
+            if incoming <= bracket[0] || incoming >= bracket[1] { break; }
+        }
+        Err(NsfDgError::Convergence { residual_pa: last_residual,
+            evaluations })
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn accept_candidate<L: Lattice3<27>>(
+    fluid: NsfCharacteristicTrial<'_, L>, load: &mut DgPortLoad, side: usize,
+    relation: DgPortResponse, reference: GasState, limits: NsfDgLimits,
+    incoming: f64, evaluations: usize, step: u64, gate: &CancelGate,
+) -> Result<NsfDgFrame, NsfDgError> {
+    let face = fluid.boundary_exchange()[side];
+    let q = face.normal_volume_flow_m3_s;
+    let dt = load.propagator().dt();
+    let inlet = load.inlet();
+    let acoustic = load.preview_step(q).map_err(NsfDgError::Acoustic)?;
+    let p = acoustic.output().port_outputs.iter().find(|port| port.id == inlet)
+        .ok_or(NsfDgError::Input("original DG inlet observation disappeared"))?.conjugate_rate;
+    let pressure_residual = face.mean_acoustic_pressure_pa - p;
+    let scale = face.mean_acoustic_pressure_pa.abs() + p.abs()
+        + relation.history_pressure_pa.abs() + (relation.impedance_pa_s_m3 * q).abs();
+    let inlet_work = acoustic.inlet_work_j();
+    let port_defect = inlet_work - p * (q * dt);
+    let covariance = face.acoustic_pressure_work_out_j
+        - face.mean_acoustic_pressure_pa * (q * dt);
+    let work_residual = face.acoustic_pressure_work_out_j - inlet_work;
+    let work_scale = face.acoustic_pressure_work_out_j.abs() + inlet_work.abs();
+    let allowance = limits.projection_absolute_tolerance_j
+        + limits.projection_relative_tolerance * work_scale;
+    if ![p, pressure_residual, scale, inlet_work, port_defect, covariance,
+        work_residual, work_scale, allowance].iter().all(|x| x.is_finite())
+        || pressure_residual.abs() > limits.pressure_absolute_tolerance_pa
+            + limits.pressure_relative_tolerance * scale
+        || port_defect.abs() > 1e-10 * (inlet_work.abs() + scale*q.abs()*dt).max(1e-300)
+    {
+        return Err(NsfDgError::Input("original mean pressure or integrated port work disagrees at the resolved interface"));
+    }
+    if work_residual.abs() > allowance {
+        return Err(NsfDgError::Projection { residual_j: work_residual, allowance_j: allowance });
+    }
+    let faces = *fluid.boundary_exchange();
+    let flow = *fluid.energy_ledger();
+    let mass_change = fluid.grid().total_mass_kg() - fluid.previous_mass_kg();
+    let energy_change = fluid.grid().total_energy_j() - fluid.previous_energy_j();
+    let mass_projection = face.mass_out_kg - reference.density * (q * dt);
+    let terminals = acoustic.terminal_frames().to_vec();
+    if ![mass_change, energy_change, mass_projection].iter().all(|x| x.is_finite()) {
+        return Err(NsfDgError::Input("resolved interval mass or energy difference overflowed"));
+    }
+    poll(gate)?;
+    // All source, allocation, pressure, work and cancellation checks precede
+    // publication of either original owner.
+    fluid.accept();
+    let duct = acoustic.accept();
+    Ok(NsfDgFrame {
+        step, evaluations, incoming_characteristic_m_s: incoming, faces, flow,
+        flow_mass_change_kg: mass_change, flow_energy_change_j: energy_change, duct, terminals,
+        inlet_flow_m3_s: q, inlet_pressure_pa: p, pressure_residual_pa: pressure_residual,
+        projection_covariance_j: covariance, acoustic_work_residual_j: work_residual,
+        port_work_residual_j: port_defect, mass_projection_difference_kg: mass_projection,
+    })
+}
+
+#[cfg(test)]
+mod tests;

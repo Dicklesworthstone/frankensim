@@ -75,6 +75,8 @@ pub mod modal_acoustic_time {
     /// Opt-in broadband pressure observation using the original exact modal step.
     pub mod broadband;
 }
+/// Original resolved compressible flow coupled to the original causal DG bore.
+pub mod nsf_dg;
 pub mod pcm_wav;
 pub mod piano_vertical;
 pub mod pickup;

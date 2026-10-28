@@ -75,6 +75,13 @@ pub struct NsfBoundaryExchange {
     /// Integral of p*u_n over area and this step [J]. This is not generally
     /// mean_pressure_pa * normal_volume_flow_m3_s * dt for a nonuniform face.
     pub pressure_work_out_j: f64,
+    /// Mean pressure relative to this face's declared reference [Pa].
+    /// Subtraction occurs at the original quadrature, before time averaging.
+    pub mean_acoustic_pressure_pa: f64,
+    /// Integral of (p-p_ref)*u_n over the original face/time quadrature [J].
+    /// Kept independently of the much larger absolute pressure work; it is
+    /// not reconstructed by subtracting two nearly equal interval totals.
+    pub acoustic_pressure_work_out_j: f64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -213,6 +220,19 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         }
         Some(traces)
     }
+
+    /// Complete original material gas at a declared characteristic reference.
+    /// No source law, composition or transport coefficient is substituted.
+    pub fn characteristic_reference_gas(&self, high: bool)
+        -> Result<fs_material::gas::GasState, NsfError>
+    {
+        let open = self.open.ok_or(NsfError::Input("no characteristic axis is attached"))?;
+        let face = open.faces[usize::from(high)];
+        self.spec.gas.at(face.reference_temperature_k, face.reference_pressure_pa)
+    }
+
+    /// Actual allocated fluid/solid cell count, for a caller's trial budget.
+    pub const fn cell_count(&self) -> usize { self.n }
 
     /// Fluid mass [kg], independent of the face bookkeeping.
     #[must_use]
@@ -433,6 +453,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         for side in 0..2 {
             let sign = if side == 0 { -1.0 } else { 1.0 };
             let out = &mut result[side];
+            let reference_pressure = self.open.as_ref()?.faces[side].reference_pressure_pa;
             out.mass_out_kg = links[side].mass * mass_unit;
             out.momentum_out_kg_m_s = links[side].momentum.map(|p| p * mass_unit * velocity_unit);
             out.total_energy_out_j = 0.5 * (self.open_out.total_out[side] + flux_after.total_out[side])
@@ -442,12 +463,19 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                     * (old.rho * (old.theta - THETA0) + new.rho * (new.theta - THETA0))
                     * mass_unit * velocity_unit;
                 out.mean_pressure_pa += 0.5 * (old.pressure_pa + new.pressure_pa);
+                let old_acoustic = old.pressure_pa - reference_pressure;
+                let new_acoustic = new.pressure_pa - reference_pressure;
+                out.mean_acoustic_pressure_pa += 0.5 * (old_acoustic + new_acoustic);
+                out.acoustic_pressure_work_out_j += 0.5 * sign
+                    * (old_acoustic * old.u[axis] + new_acoustic * new.u[axis])
+                    * velocity_unit * area * self.law.dt_s;
                 out.normal_volume_flow_m3_s += 0.5 * sign * (old.u[axis] + new.u[axis]) * velocity_unit * area;
                 out.pressure_work_out_j += 0.5 * sign
                     * (old.pressure_pa * old.u[axis] + new.pressure_pa * new.u[axis])
                     * velocity_unit * area * self.law.dt_s;
             }
             out.mean_pressure_pa /= before.values[side].len() as f64;
+            out.mean_acoustic_pressure_pa /= before.values[side].len() as f64;
         }
         Some(result)
     }

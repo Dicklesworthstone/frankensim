@@ -1317,6 +1317,7 @@ dependencies = [
  "fs-io",
  "fs-la",
  "fs-ladder",
+ "fs-lbm",
  "fs-matdb",
  "fs-material",
  "fs-math",

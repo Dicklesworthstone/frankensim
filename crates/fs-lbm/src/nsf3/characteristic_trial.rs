@@ -1,0 +1,137 @@
+//! Reversible intervals of the original characteristic NSF owner.
+//! No source function is cloned or reevaluated on another clock: characteristic
+//! topology already excludes manufactured volume sources. Every physical state,
+//! boundary force chart, source material and cumulative ledger remains retained.
+
+use super::{EnergyLedger, NsfBoundaryExchange, NsfError, NsfGrid3};
+use crate::lattice3::Lattice3;
+
+/// A complete unpublished interval. Dropping it changes no accepted field,
+/// characteristic, material cache, boundary history or clock.
+pub struct NsfCharacteristicTrial<'a, L: Lattice3<27>> {
+    owner: &'a mut NsfGrid3<L>,
+    candidate: NsfGrid3<L>,
+    exchange: [NsfBoundaryExchange; 2],
+    ledger: EnergyLedger,
+    mass_before_kg: f64,
+    energy_before_j: f64,
+}
+
+impl<L: Lattice3<27>> NsfCharacteristicTrial<'_, L> {
+    /// Original candidate grid, including source thermochemistry and face traces.
+    pub const fn grid(&self) -> &NsfGrid3<L> { &self.candidate }
+    /// Summed mass, momentum, energy and work; pressure/flow are interval means.
+    pub const fn boundary_exchange(&self) -> &[NsfBoundaryExchange; 2] { &self.exchange }
+    /// Original step accounts summed over this interval, with final storage and
+    /// the interval total-energy residual. Viscous heat keeps its budget-remainder
+    /// qualification; no independently resolved heat account is invented here.
+    pub const fn energy_ledger(&self) -> &EnergyLedger { &self.ledger }
+    /// Accepted mass before any incoming-data or step trial [kg].
+    pub const fn previous_mass_kg(&self) -> f64 { self.mass_before_kg }
+    /// Accepted sensible-chart total energy before the trial [J].
+    pub const fn previous_energy_j(&self) -> f64 { self.energy_before_j }
+    /// Publish the already admitted complete candidate. No fallible work follows.
+    pub fn accept(self) { *self.owner = self.candidate; }
+}
+
+impl<L: Lattice3<27>> NsfGrid3<L> {
+    /// Preview held incoming characteristics for a positive number of original
+    /// lattice steps. The caller bounds cell-step work and can cancel before
+    /// the snapshot or between steps. A failed interval changes no accepted state.
+    /// Every original per-step material, Mach, thermal and boundary refusal applies.
+    pub fn preview_characteristic_interval(
+        &mut self,
+        incoming_m_s: [f64; 2],
+        steps: usize,
+        maximum_cell_steps: usize,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<NsfCharacteristicTrial<'_, L>, NsfError> {
+        if cancelled() {
+            return Err(NsfError::Input("characteristic interval cancelled"));
+        }
+        if self.open.is_none() || self.sources.is_some() || steps == 0
+            || self.n.checked_mul(steps).is_none_or(|work| work > maximum_cell_steps)
+            || self.steps.checked_add(steps).is_none()
+        {
+            return Err(NsfError::Input("characteristic interval requires bounded positive source-free cell-step work"));
+        }
+        let mass_before_kg = self.total_mass_kg();
+        let energy_before_j = self.total_energy_j();
+        let mut candidate = self.characteristic_copy();
+        candidate.set_incoming_characteristics(incoming_m_s)?;
+        let mut exchange = [NsfBoundaryExchange::default(); 2];
+        let mut ledger = EnergyLedger::default();
+        for _ in 0..steps {
+            if cancelled() {
+                return Err(NsfError::Input("characteristic interval cancelled"));
+            }
+            let step = candidate.step()?;
+            ledger.internal_j = step.internal_j;
+            ledger.kinetic_j = step.kinetic_j;
+            ledger.viscous_heating_j += step.viscous_heating_j;
+            ledger.unresolved_internal_exchange_j += step.unresolved_internal_exchange_j;
+            ledger.pressure_work_j += step.pressure_work_j;
+            ledger.wall_heat_j += step.wall_heat_j;
+            ledger.open_boundary_energy_j += step.open_boundary_energy_j;
+            ledger.open_energy_j += step.open_energy_j;
+            ledger.source_energy_j += step.source_energy_j;
+            for (total, step) in exchange.iter_mut().zip(
+                candidate.last_boundary_exchange().expect("admitted characteristic step"))
+            {
+                total.mass_out_kg += step.mass_out_kg;
+                for a in 0..3 { total.momentum_out_kg_m_s[a] += step.momentum_out_kg_m_s[a]; }
+                total.total_energy_out_j += step.total_energy_out_j;
+                total.mean_pressure_pa += step.mean_pressure_pa;
+                total.normal_volume_flow_m3_s += step.normal_volume_flow_m3_s;
+                total.pressure_work_out_j += step.pressure_work_out_j;
+                total.mean_acoustic_pressure_pa += step.mean_acoustic_pressure_pa;
+                total.acoustic_pressure_work_out_j += step.acoustic_pressure_work_out_j;
+            }
+        }
+        for face in &mut exchange {
+            face.mean_pressure_pa /= steps as f64;
+            face.mean_acoustic_pressure_pa /= steps as f64;
+            face.normal_volume_flow_m3_s /= steps as f64;
+        }
+        let energy = candidate.total_energy_j();
+        ledger.residual_rel = (energy - energy_before_j - ledger.wall_heat_j
+            - ledger.open_boundary_energy_j - ledger.open_energy_j - ledger.source_energy_j).abs()
+            / energy_before_j.abs().max(energy.abs()).max(1e-300);
+        if exchange.iter().any(|face| ![
+            face.mass_out_kg, face.total_energy_out_j, face.mean_pressure_pa,
+            face.normal_volume_flow_m3_s, face.pressure_work_out_j,
+            face.mean_acoustic_pressure_pa, face.acoustic_pressure_work_out_j,
+        ].into_iter().chain(face.momentum_out_kg_m_s).all(f64::is_finite))
+            || ![mass_before_kg, energy_before_j, energy, candidate.total_mass_kg(),
+                ledger.internal_j, ledger.kinetic_j, ledger.viscous_heating_j,
+                ledger.unresolved_internal_exchange_j, ledger.pressure_work_j,
+                ledger.wall_heat_j, ledger.open_boundary_energy_j,
+                ledger.open_energy_j, ledger.source_energy_j, ledger.residual_rel]
+                .iter().all(|x| x.is_finite())
+        {
+            return Err(NsfError::Input("characteristic interval exchange overflowed"));
+        }
+        if cancelled() {
+            return Err(NsfError::Input("characteristic interval cancelled"));
+        }
+        Ok(NsfCharacteristicTrial {
+            owner: self, candidate, exchange, ledger, mass_before_kg, energy_before_j,
+        })
+    }
+
+    // Characteristic topology prohibits SourceFn. Copy every remaining owner
+    // field rather than reconstructing populations from macroscopic values.
+    fn characteristic_copy(&self) -> Self {
+        Self {
+            spec: self.spec.clone(), law: self.law.clone(), material: self.material.clone(),
+            n: self.n, solid: self.solid.clone(), f: self.f.clone(), e: self.e.clone(),
+            theta: self.theta.clone(), force: self.force.clone(), div: self.div.clone(),
+            wall_out: self.wall_out, open: self.open, open_faces: self.open_faces.clone(),
+            reservoir_faces: self.reservoir_faces, open_out: self.open_out,
+            last_boundary_exchange: self.last_boundary_exchange, steps: self.steps,
+            cumulative: self.cumulative, edge_velocity: self.edge_velocity,
+            moving_walls: self.moving_walls, sources: None, src_now: self.src_now.clone(),
+            marker: core::marker::PhantomData,
+        }
+    }
+}
