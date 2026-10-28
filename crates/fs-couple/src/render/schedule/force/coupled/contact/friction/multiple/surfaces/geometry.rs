@@ -16,6 +16,25 @@ pub struct FrictionGeometry {
     pub right: Option<ModalAttachment>,
 }
 
+/// Actual start/end velocity maps for source-domain admission. The held map
+/// still supplies the work-conjugate integration and interval-average check.
+/// Normal load comes from the original mechanical drive/normal-contact owner;
+/// it cannot be overridden or set to zero to bypass endpoint applicability.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FrictionEndpointGeometry {
+    pub start: FrictionGeometry,
+    pub end: FrictionGeometry,
+    pub start_speed_m_s: f64,
+    pub end_speed_m_s: f64,
+}
+
+pub(crate) struct EndpointControls {
+    start_column: Vec<f64>,
+    end_column: Vec<f64>,
+    start_speed_m_s: f64,
+    end_speed_m_s: f64,
+}
+
 /// Explicit per-update work allowance, including mixed normal/tangent responses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrictionGeometryConfig {
@@ -48,6 +67,73 @@ impl MultiFrictionModalSystem {
             return Err(invalid("moving friction exceeds max_update_terms").into());
         }
         Ok(())
+    }
+
+    /// Same held-map transaction, checking original material applicability at
+    /// the ACTUAL start/end velocities and attachments before publication.
+    /// Each column comes from the original signed port admission. The original
+    /// solver still checks its work-conjugate average slip and owns every force,
+    /// loss and state update; no endpoint force or extra integration is added.
+    /// Endpoint column work reserves an additional `2 * modes * ports` terms.
+    /// These sampled checks do not certify unsampled continuous-time extrema.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_friction_geometry_and_endpoints(
+        &mut self, external: &[f64], drives: &[FrictionDrive], geometry: &[FrictionGeometry],
+        endpoints: &[FrictionEndpointGeometry], normal_geometry: Option<&[ObstacleGeometry]>,
+        normal_offsets_m: Option<&[f64]>, config: FrictionGeometryConfig, gate: &CancelGate,
+    ) -> Result<&MultiFrictionFrame, ModalFrictionError> {
+        poll(Some(gate))?;
+        if endpoints.len() != self.points.len() || self.endpoint_controls.is_some() {
+            return Err(invalid("endpoint applicability needs one complete pair per original port").into());
+        }
+        let endpoint_terms = self.mode_count().checked_mul(self.points.len())
+            .and_then(|terms| terms.checked_mul(2))
+            .ok_or_else(|| invalid("friction endpoint work count overflow"))?;
+        let config = FrictionGeometryConfig { max_update_terms: config.max_update_terms
+            .checked_sub(endpoint_terms).ok_or_else(|| invalid("friction endpoints exceed max_update_terms"))? };
+        self.validate_friction_geometry_config(config)?;
+        let mut controls = Vec::with_capacity(endpoints.len());
+        for (endpoint, old) in endpoints.iter().zip(&self.points) {
+            poll(Some(gate))?;
+            if !endpoint.start_speed_m_s.is_finite() || !endpoint.end_speed_m_s.is_finite() {
+                return Err(invalid("friction endpoint speeds must be finite").into());
+            }
+            let column = |map: &FrictionGeometry| {
+                if map.left.component != old.port.left.component
+                    || map.right.as_ref().map(|r| r.component)
+                        != old.port.right.as_ref().map(|r| r.component) {
+                    return Err(invalid("endpoint maps must preserve original contact participants").into());
+                }
+                scalar::admit_port(&self.core.network, &ModalFrictionPort {
+                    left: map.left.clone(), right: map.right.clone(), law: old.port.law.clone(),
+                }, old.config)
+            };
+            controls.push(EndpointControls {
+                start_column: column(&endpoint.start)?, end_column: column(&endpoint.end)?,
+                start_speed_m_s: endpoint.start_speed_m_s, end_speed_m_s: endpoint.end_speed_m_s,
+            });
+        }
+        self.endpoint_controls = Some(controls);
+        let result = self.step_with_friction_geometry(external, drives, geometry,
+            normal_geometry, normal_offsets_m, config, gate).map(|_| ());
+        // Clear per-call data after success OR failure. The original geometry
+        // transaction has already restored held maps on any refused trial.
+        self.endpoint_controls = None;
+        result?;
+        Ok(&self.frame)
+    }
+
+    pub(crate) fn check_interface_endpoint(&self, port: usize,
+        models: &[ModalAcousticTimeModel], drive: FrictionDrive, final_endpoint: bool,
+    ) -> Result<(), ModalFrictionError> {
+        let (column, speed_m_s) = match &self.endpoint_controls {
+            Some(controls) if final_endpoint => (&controls[port].end_column,
+                controls[port].end_speed_m_s),
+            Some(controls) => (&controls[port].start_column, controls[port].start_speed_m_s),
+            None => (&self.points[port].column, drive.speed_m_s),
+        };
+        interface::check_endpoint(self.interface(port), column, models,
+            FrictionDrive { speed_m_s, normal_force_n: drive.normal_force_n })
     }
 
     /// Solve with new held friction maps and optional original normal controls.

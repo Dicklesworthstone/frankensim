@@ -744,3 +744,217 @@ fn fiber_strain_refuses_invalid_motion_and_mismatched_joint_solve() {
         );
     });
 }
+
+#[test]
+fn axial_support_inertia_is_the_original_fiber_mass_projection() {
+    let gate = CancelGate::new_clock_free();
+    let mut previous_error = 1.0;
+    for modes in [3, 7, 15] {
+        let ribbon = fibers(3, modes, 1300.0, 3e9, 0.0, 40.0, 1_000_000, &gate);
+        let gamma = ribbon.axial_translation_participation();
+        let mass = ribbon.mass_kg();
+        let resolved = 3.0 * gamma.iter().map(|v| v*v).sum::<f64>();
+        assert!(resolved < mass);
+        let error = 1.0-resolved/mass;
+        assert!(error < previous_error); previous_error = error;
+        for n in 1..=modes {
+            if n%2 == 0 { assert_eq!(gamma[n-1],0.0); }
+            // Independent midpoint integration of the normalized continuum shape.
+            let cells=32768;
+            let integral: f64=(0..cells).map(|i| {
+                let s=(i as f64+0.5)/cells as f64;
+                (n as f64*core::f64::consts::PI*s).sin()
+            }).sum::<f64>()/cells as f64;
+            let expected=(2.0*mass/3.0).sqrt()*integral;
+            assert!((gamma[n-1]-expected).abs() < 2e-8*mass.sqrt());
+        }
+        assert!(gamma[modes..].iter().all(|v| *v==0.0));
+    }
+    assert!(previous_error < 0.026);
+}
+
+fn support_limits() -> fs_couple::bowed_string::runtime::reciprocal::bank::multiple::ribbon::motion::FiberSupportMotionLimits {
+    fs_couple::bowed_string::runtime::reciprocal::bank::multiple::ribbon::motion::FiberSupportMotionLimits {
+        maximum_speed_m_s:1.0,maximum_acceleration_m_s2:2000.0,
+        maximum_step_m:0.001,max_update_terms:1_048_576,
+    }
+}
+
+#[test]
+fn accelerating_and_reversing_fibers_reuse_the_exact_joint_owner_and_moving_material_basis() {
+    use fs_couple::render::schedule::force::coupled::{ModalAttachment,
+        contact::friction::multiple::surfaces::geometry::{FrictionGeometry,FrictionGeometryConfig}};
+    with_cx(|cx,gate| {
+        let make=||base(cx,gate,7800.0).with_tensioned_fiber_ribbon(
+            fibers(3,2,1300.0,3e9,50.0,40.0,48000,gate),0.4,ribbon_limits(),gate).unwrap();
+        let mut actual=make().with_fiber_support_motion(0.0,support_limits(),gate).unwrap();
+        let (source,mut expected)=make().into_parts();
+        let fiber=source.fiber_ribbon().unwrap();
+        let first=fiber.component_start();
+        let offset:usize=expected.components()[..first].iter().map(|m|m.modes().len()).sum();
+        let mu=fiber.model().cell_line_density_kg_m();
+        let length=fiber.model().geometry().length_m;
+        let normalized_mass=(2.0*mu*length).sqrt()*2.0/core::f64::consts::PI;
+        let zero=vec![0.0;expected.mode_count()];
+        let originals:Vec<_>=expected.components().iter().map(|m|m.modes().to_vec()).collect();
+        let mut velocity=0.0;
+        let mut displacement=0.0;
+        for end_velocity in [0.01,0.02,0.02,0.005,-0.01,-0.02,0.0,0.0] {
+            let dt=expected.sample_period_s();
+            let mean=0.5*velocity+0.5*end_velocity;
+            let acceleration=(end_velocity-velocity)/dt;
+            let mid=0.4-(displacement+dt*(0.375*velocity+0.125*end_velocity))/length;
+            let shape=fiber.model().displacement_map(mid,FiberDirection::Axial).unwrap();
+            let mut forces=zero.clone();
+            let mut geometry=Vec::new();
+            for cell in 0..3 {
+                forces[offset+cell*4]=-acceleration*normalized_mass;
+                geometry.push(FrictionGeometry { left:expected.port(cell).unwrap().left.clone(),
+                    right:Some(ModalAttachment {component:first+cell,shapes:shape.clone()}) });
+            }
+            let want=expected.step_with_friction_geometry(&forces,&vec![drive(mean,0.002);3],
+                &geometry,None,None,FrictionGeometryConfig {max_update_terms:1_048_576},gate).unwrap().clone();
+            let got=actual.step(&zero,&vec![drive(end_velocity,0.002);3]).unwrap().clone();
+            assert_eq!(got,want);
+            assert!(got.energy_residual_j.abs() <= got.energy_tolerance_j);
+            displacement += dt*mean; velocity=end_velocity;
+            let kinematics=actual.fiber_support_kinematics().unwrap();
+            assert_eq!(kinematics.velocity_m_s,velocity);
+            assert_eq!(kinematics.displacement_m,displacement);
+            assert_eq!(kinematics.station_fraction,0.4-displacement/length);
+        }
+        assert_eq!(actual.source().fiber_ribbon().unwrap().station_fraction(),0.4);
+        assert_eq!(actual.system().components().iter().map(|m|m.modes().to_vec()).collect::<Vec<_>>(),originals);
+        assert_eq!(states(&actual),expected.components().iter().flat_map(|m|m.states().iter().copied()).collect::<Vec<_>>());
+        assert!(actual.system().components()[first..].iter().flat_map(|m|m.states())
+            .any(|s|s.velocity_m_sqrt_kg_per_s!=0.0));
+    });
+}
+
+#[test]
+fn invalid_fiber_stroke_does_not_consume_geometry_clock_or_mechanical_history() {
+    with_cx(|cx,gate| {
+        let make=||base(cx,gate,7800.0).with_tensioned_fiber_ribbon(
+            fibers(3,2,1300.0,3e9,50.0,40.0,48000,gate),0.4,ribbon_limits(),gate).unwrap()
+            .with_fiber_support_motion(0.0,support_limits(),gate).unwrap();
+        let mut actual=make();let mut expected=make();
+        let zero=vec![0.0;actual.system().mode_count()];
+        let drive0=vec![drive(0.01,0.002);3];
+        actual.step(&zero,&drive0).unwrap();expected.step(&zero,&drive0).unwrap();
+        let state=states(&actual);let support=actual.fiber_support_kinematics();
+        let maps:Vec<_>=(0..3).map(|i|actual.system().port(i).unwrap().clone()).collect();
+        for drives in [vec![drive(0.2,0.002);3],vec![drive(f64::NAN,0.002);3],
+            vec![drive(0.01,0.002),drive(0.02,0.002),drive(0.01,0.002)]] {
+            assert!(actual.step(&zero,&drives).is_err());
+            assert_eq!(states(&actual),state);
+            assert_eq!(actual.fiber_support_kinematics(),support);
+            assert_eq!(actual.system().samples_rendered(),1);
+            assert_eq!((0..3).map(|i|actual.system().port(i).unwrap().clone()).collect::<Vec<_>>(),maps);
+        }
+        let next=vec![drive(-0.01,0.002);3];
+        assert_eq!(actual.step(&zero,&next).unwrap(),expected.step(&zero,&next).unwrap());
+        assert_eq!(states(&actual),states(&expected));
+    });
+}
+
+fn motion_interface(maximum_speed: f64)
+    -> fs_couple::render::schedule::force::coupled::contact::friction::interface::DryFrictionBinding
+{
+    use fs_couple::render::schedule::force::coupled::contact::friction::interface::DryFrictionBinding;
+    use fs_tribo::{ApplicabilityRange as Range, DryFrictionApplicability,
+        DryInterfaceSystemCard, InputAuthority, InterfaceMedium, InterfaceSystemRef};
+    DryFrictionBinding::new(DryInterfaceSystemCard::new(InterfaceSystemRef::new(
+        "synthetic/string->moving-fiber", "synthetic/dry-history", "synthetic/endpoint-domain",
+        InputAuthority::SyntheticFixture, InterfaceMedium::Dry).unwrap(), law(),
+        DryFrictionApplicability::new(Range::new(280.0,320.0).unwrap(),
+            Range::new(0.001,1e6).unwrap(), Range::new(0.0,maximum_speed).unwrap()).unwrap()).unwrap(),
+        293.15,1e-6).unwrap()
+}
+
+#[test]
+fn fiber_source_domain_uses_actual_start_and_final_speed_and_preserves_refused_history() {
+    use fs_couple::render::schedule::force::coupled::contact::friction::ModalFrictionError;
+    with_cx(|cx,gate| {
+        for cells in [1,3] {
+            for (initial,target) in [(0.0,0.02),(0.02,0.0)] {
+                // Near the original end the inertial hair response is small;
+                // both fictitious midpoint endpoint rates fit the domain, but
+                // the actual initial OR final relative velocity does not.
+                let make=||base(cx,gate,7800.0).with_tensioned_fiber_ribbon(
+                    fibers(cells,1,1300.0,3e9,50.0,40.0,48000,gate),0.05,ribbon_limits(),gate).unwrap();
+                let mut bare=make().with_fiber_support_motion(initial,support_limits(),gate).unwrap();
+                let zero=vec![0.0;bare.system().mode_count()];
+                let commands=vec![drive(target,1e-7);cells];
+                let unbound=bare.step(&zero,&commands).unwrap().clone();
+                let mean=0.5*initial+0.5*target;
+                assert!(mean.abs()<0.015);
+                for port in 0..cells {
+                    let held=bare.system().port(port).unwrap();
+                    let velocity=|attachment:&fs_couple::render::schedule::force::coupled::ModalAttachment| {
+                        attachment.shapes.iter().zip(bare.system().components()[attachment.component].states())
+                            .map(|(shape,state)|shape*state.velocity_m_sqrt_kg_per_s).sum::<f64>()
+                    };
+                    let held_relative=mean-velocity(&held.left)+velocity(held.right.as_ref().unwrap());
+                    assert!(held_relative.abs()<0.015);
+                    assert!((unbound.ports[port].slip_distance_m/bare.system().sample_period_s()).abs()<0.015);
+                }
+                let build=|bind_first| {
+                    let mut bank=make();
+                    if !bind_first { bank=bank.with_fiber_support_motion(initial,support_limits(),gate).unwrap(); }
+                    for port in 0..cells { bank=bank.with_bow_interface(port,motion_interface(0.015)).unwrap(); }
+                    if bind_first { bank=bank.with_fiber_support_motion(initial,support_limits(),gate).unwrap(); }
+                    bank
+                };
+                for bind_first in [false,true] {
+                    let mut actual=build(bind_first);let mut expected=build(bind_first);
+                    let before=states(&actual);let support=actual.fiber_support_kinematics();
+                    let ports:Vec<_>=(0..cells).map(|i|actual.system().port(i).unwrap().clone()).collect();
+                    assert!(matches!(actual.step(&zero,&commands),Err(ModalFrictionError::Law(_))));
+                    assert_eq!(states(&actual),before);
+                    assert_eq!(actual.fiber_support_kinematics(),support);
+                    assert_eq!(actual.system().samples_rendered(),0);
+                    assert!(actual.system().last_frame().is_none());
+                    assert_eq!((0..cells).map(|i|actual.system().port(i).unwrap().clone()).collect::<Vec<_>>(),ports);
+                    // The initial out-of-domain state may only leave while
+                    // released; a valid in-domain acceleration remains loaded.
+                    let retry=vec![drive(if initial==0.0 {0.01}else{0.0},
+                        if initial==0.0 {1e-7}else{0.0});cells];
+                    assert_eq!(actual.step(&zero,&retry).unwrap(),expected.step(&zero,&retry).unwrap());
+                    assert_eq!(states(&actual),states(&expected));
+                    assert_eq!(actual.fiber_support_kinematics(),expected.fiber_support_kinematics());
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn real_endpoint_maps_do_not_refuse_a_valid_reversal_using_fictitious_midpoint_speed() {
+    with_cx(|cx,gate| {
+        for cells in [1,3] {
+            let make=||base(cx,gate,7800.0).with_tensioned_fiber_ribbon(
+                fibers(cells,1,1300.0,3e9,50.0,40.0,48000,gate),0.4,ribbon_limits(),gate).unwrap()
+                .with_fiber_support_motion(-0.01,support_limits(),gate).unwrap();
+            let mut actual=make();
+            for port in 0..cells {actual=actual.with_bow_interface(port,motion_interface(0.015)).unwrap();}
+            let zero=vec![0.0;actual.system().mode_count()];
+            // Reversal excites a genuine axial wave. Its endpoint speed exceeds
+            // the source bound when combined with the fictitious held speed 0,
+            // but actual +/-0.01 support endpoints and average slip are valid.
+            let frame=actual.step(&zero,&vec![drive(0.01,1e-7);cells]).unwrap().clone();
+            assert!(frame.energy_residual_j.abs()<=frame.energy_tolerance_j);
+            for port in 0..cells {
+                let map=actual.system().port(port).unwrap();
+                let velocity=|attachment:&fs_couple::render::schedule::force::coupled::ModalAttachment| {
+                    attachment.shapes.iter().zip(actual.system().components()[attachment.component].states())
+                        .map(|(shape,state)|shape*state.velocity_m_sqrt_kg_per_s).sum::<f64>()
+                };
+                let fictitious=-velocity(&map.left)+velocity(map.right.as_ref().unwrap());
+                assert!(fictitious.abs()>0.015);
+                assert!((frame.ports[port].slip_distance_m/actual.system().sample_period_s()).abs()<0.015);
+            }
+            assert_eq!(actual.system().samples_rendered(),1);
+            assert_eq!(actual.fiber_support_kinematics().unwrap().velocity_m_s,0.01);
+        }
+    });
+}

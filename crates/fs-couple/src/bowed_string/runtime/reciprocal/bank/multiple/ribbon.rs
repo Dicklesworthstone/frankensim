@@ -21,6 +21,9 @@ use crate::fiber_ribbon::{FiberDirection, TensionedFiberRibbon};
 use crate::render::schedule::force::coupled::ModalAttachment;
 use crate::render::schedule::force::coupled::contact::friction::multiple::surfaces::FrictionSurfaceAttachment;
 
+/// Translating fiber supports, their inertial loads and moving material contact.
+pub mod motion;
+
 /// Material fibers present as mechanical components of the SAME string bank.
 #[derive(Clone, Debug)]
 pub struct MaterialFiberRibbon {
@@ -156,6 +159,8 @@ impl ReciprocalStringBank {
     /// translating support frame, not a complete stroke/moving-frog model.
     /// `FrictionDrive::speed_m_s` is that frame's prescribed constant speed.
     /// Nonuniform support acceleration and contact migration are not inferred.
+    /// Explicit `with_fiber_support_motion` adds these from endpoint velocities
+    /// and original material mass for the prescribed-load dry-friction rung.
     /// Normal load is still prescribed unless the returned normal receivers
     /// are explicitly composed with `with_string_stops` and
     /// `with_bow_contact_loads`. Dry friction is not a thermal rosin law.

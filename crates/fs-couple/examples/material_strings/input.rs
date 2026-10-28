@@ -775,7 +775,7 @@ impl Spec {
                 length_m: row.positive()?, fiber_count: row.count(1 << 24)?,
                 tension_n: row.positive()?, station_fraction: row.scalar()?,
                 axial_modes: row.count(MAX_MODES)?, transverse_modes: row.count(MAX_MODES)?,
-                strain: None,
+                strain: None, motion: None,
             };
             row.end()?;
             if r.lines.clone().next()
@@ -792,6 +792,17 @@ impl Spec {
                 limits.validate()?;
                 config.validate()?;
                 input.strain = Some((limits, config));
+            }
+            if r.lines.clone().next()
+                .and_then(|line| line.split_ascii_whitespace().next()) == Some("bow_fiber_motion") {
+                let mut row = r.row("bow_fiber_motion")?;
+                let limits = fibers::FiberSupportMotionLimits {
+                    maximum_speed_m_s: row.positive()?, maximum_acceleration_m_s2: row.positive()?,
+                    maximum_step_m: row.positive()?, max_update_terms: row.count(1_048_576)?,
+                };
+                row.end()?;
+                limits.validate()?;
+                input.motion = Some(limits);
             }
             Some(input)
         } else { None };

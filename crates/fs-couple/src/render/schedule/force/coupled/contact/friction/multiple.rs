@@ -168,6 +168,9 @@ pub struct MultiFrictionModalSystem {
     frame: MultiFrictionFrame,
     accepted: bool,
     interfaces: Vec<Option<interface::DryFrictionBinding>>,
+    // Per-call applicability maps only. The original held map still owns
+    // integration/work; these true endpoint maps never become physical history.
+    endpoint_controls: Option<Vec<surfaces::geometry::EndpointControls>>,
     obstacles: Option<obstacles::ObstacleSet>,
     contact_loads: Vec<Option<usize>>,
     // Optional massless series spring-dashpot drive per port (bow-hair
@@ -235,14 +238,17 @@ impl MultiFrictionModalSystem {
             }
         }
         poll(Some(gate))?;
+        let mut branches = vec![ContactBranch::Fresh; p];
+        branches[0] = core.branch;
         Ok(Self { core, points, config, compliance, free_delta: vec![0.0; n],
             free_slip: vec![0.0; p], tractions: vec![0.0; p],
             regimes: vec![ModalFrictionRegime::Released; p], iterations: vec![0; p],
-            branches: vec![ContactBranch::Fresh; p], staged_branches: vec![ContactBranch::Fresh; p],
+            staged_branches: branches.clone(), branches,
             load_lines: vec![None; p], port_roots: vec![None; p],
             staged_ports: vec![FrictionPortFrame::default(); p],
             frame: MultiFrictionFrame { ports: vec![FrictionPortFrame::default(); p], ..MultiFrictionFrame::default() },
-            accepted: false, interfaces: vec![None; p-1], obstacles: None, contact_loads: vec![None; p],
+            accepted: false, interfaces: vec![None; p-1], endpoint_controls: None,
+            obstacles: None, contact_loads: vec![None; p],
             series_drives: vec![None; p], staged_stretch: vec![0.0; p],
             shear_layers: vec![None; p], active_set_budget: 4 * p + 16, obstacle_resolves: 0 })
     }
@@ -394,8 +400,11 @@ impl MultiFrictionModalSystem {
         self.prepare_step(drives, obstacle_offsets, obstacle_geometry, gate)?;
         let p = self.points.len();
         if p == 1 && self.obstacles.is_none() && self.series_drives.iter().all(Option::is_none)
-            && self.shear_layers.iter().all(Option::is_none) {
+            && self.shear_layers.iter().all(Option::is_none) && self.endpoint_controls.is_none() {
             let f = *self.core.step_inner(external, drives[0], gate)?;
+            // A later endpoint-bound step uses the joint owner. Preserve the
+            // same accepted nonmonotone contact branch across both routes.
+            self.branches[0] = self.core.branch;
             self.frame.ports[0] = FrictionPortFrame { normal_force_n: drives[0].normal_force_n, traction_n: f.traction_n, slip_distance_m: f.slip_distance_m,
                 drive_work_j: f.drive_work_j, dissipation_j: f.friction_dissipation_j,
                 series_drive_dissipation_j: 0.0,
@@ -463,6 +472,7 @@ impl MultiFrictionModalSystem {
         self.core.network.staged_frame.observer_pressure_pa = accepted.observer_pressure_pa;
         self.core.network.publish_staged();
         self.branches.copy_from_slice(&self.staged_branches);
+        self.core.branch = self.branches[0];
         for (drive, &stretch) in self.series_drives.iter_mut().zip(&self.staged_stretch) {
             if let Some(drive) = drive { drive.commit(stretch); }
         }
@@ -623,8 +633,7 @@ impl MultiFrictionModalSystem {
         for i in 0..p {
             poll(gate)?;
             if self.contact_loads[i].is_none() {
-                interface::check_endpoint(self.interface(i), &self.points[i].column,
-                    &self.core.network.models, drives[i])?;
+                self.check_interface_endpoint(i, &self.core.network.models, drives[i], false)?;
             }
         }
         let before = self.total_energy_j()?;
@@ -745,12 +754,10 @@ impl MultiFrictionModalSystem {
             // Validate all three slip rates with that same held reaction before
             // any candidate, observer, normal offset or clock is published.
             if self.contact_loads[i].is_some() {
-                interface::check_endpoint(self.interface(i), &self.points[i].column,
-                    &self.core.network.models, drive)?;
+                self.check_interface_endpoint(i, &self.core.network.models, drive, false)?;
             }
             interface::check_average(self.interface(i), drive, slip, self.sample_period_s())?;
-            interface::check_endpoint(self.interface(i), &self.points[i].column,
-                &self.core.network.candidates, drive)?;
+            self.check_interface_endpoint(i, &self.core.network.candidates, drive, true)?;
             let supply = finite(self.tractions[i]*distance)?;
             loss = finite(loss+dissipation+hair_loss)?; work = finite(work+supply)?;
             absolute_work = finite(absolute_work+supply.abs())?;

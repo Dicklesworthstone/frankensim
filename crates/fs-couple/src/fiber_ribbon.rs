@@ -246,6 +246,19 @@ impl TensionedFiberRibbon {
     pub fn cell_models(&self) -> Vec<ModalAcousticTimeModel> {
         vec![self.cell.clone(); self.resolution.cells]
     }
+    /// Mass projection of rigid axial support translation, in this cell's
+    /// mass-normalized basis. Relative motion receives `-Gamma_n X''`, where
+    /// `Gamma_n = integral(mu phi_n ds) = sqrt(2 mu L) (1-(-1)^n)/(n pi)`.
+    /// Normal modes have zero axial participation; cell refinement partitions
+    /// the original fiber mass instead of adding any support inertia.
+    pub fn axial_translation_participation(&self) -> Vec<f64> {
+        let scale = (2.0 * self.cell_line_density_kg_m * self.geometry.length_m).sqrt();
+        let mut participation = vec![0.0; self.cell.modes().len()];
+        for mode in (1..=self.resolution.axial_modes).step_by(2) {
+            participation[mode - 1] = 2.0 * scale / (mode as f64 * core::f64::consts::PI);
+        }
+        participation
+    }
     /// Material-point displacement/force row at a fixed interior fiber station.
     /// Both directions refer to this SAME component: axial modes precede normal.
     pub fn displacement_map(

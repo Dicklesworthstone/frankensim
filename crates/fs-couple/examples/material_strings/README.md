@@ -218,6 +218,41 @@ The optional record follows `bow_ribbon WIDTH_M CELLS`:
 bow_fibers PACK RADIUS_M LENGTH_M FIBER_COUNT TOTAL_TENSION_N CONTACT_FRACTION AXIAL_MODES NORMAL_MODES
 ```
 
+For an accelerating or reversing stroke, explicitly add this record after
+`bow_fibers` and optional `bow_fiber_strain`:
+
+```text
+bow_fiber_motion MAX_SPEED_M_S MAX_ACCELERATION_M_S2 MAX_STEP_M MAX_UPDATE_TERMS
+```
+
+The original bow track now supplies endpoint support velocities. A control
+tick activates its target at the unchanged schedule boundary; the support
+reaches that target at the **following mechanical endpoint**, one physical
+interval later. Initial velocity is already co-moving. On each mechanical
+interval the renderer derives the uniform-support acceleration,
+applies its mass-projected inertial load to the actual axial fiber modes,
+integrates support travel, and moves the contact along the original fiber
+material coordinates. The existing joint solver still owns string/fiber/body
+waves, traction, loss, pressure and PCM output. Stroke endpoints and reversals
+must remain inside the original hair span; excessive acceleration or map work
+refuses before a physical step commits. Low-rate velocity steps represent
+finite-interval accelerations, so refine the control rate together with the
+mechanical rate. This is not a reset or a change to string frequency.
+
+The original dry-interface material domain is checked against both actual
+endpoint support speeds and both endpoint maps, as well as the work-conjugate
+average slip. String and fiber motion both contribute; a mean speed cannot
+hide an out-of-domain endpoint. These sampled checks do not certify unsampled
+continuous-time extrema. Endpoint columns reserve `2 * modes * ports` additional
+terms within the same explicit map-work budget.
+
+This motion rung presently accepts prescribed normal loads and dry friction.
+Normal contacts on hair, contact-loaded bows and retained rosin/thermal patches
+require spatial history transport and still refuse. Its energy ledger is in the
+accelerating support frame, with inertial-force work included in external work;
+it is not laboratory-frame anchor work. Omitting `bow_fiber_motion` retains the
+explicit constant-speed, frozen-station model used by the fixtures below.
+
 Each cell receives its quadrature share of the **original fiber count**, mass,
 axial stiffness, bending stiffness, tension and material losses. Independent
 axial and transverse wave modes follow the source section and length. Contact
