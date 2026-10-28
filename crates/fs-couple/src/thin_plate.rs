@@ -354,6 +354,75 @@ impl VkBody {
         )
     }
 
+    /// Add causal Maxwell material memory to a body at rest.
+    ///
+    /// Each branch uses the original mass-normalized state order
+    /// `[q0, p0, q1, p1, ...]` and may project only displacement entries.
+    /// The existing pHS owner adds `(sqrt(k) b.q - z)^2 / 2` to the
+    /// equilibrium storage and evolves `z` with the declared relaxation time.
+    /// Cross-mode strain, frequency-dependent stiffness and dissipation are
+    /// retained together; the branch is never replaced by a damping ratio.
+    /// For a source projection already scaled by sqrt(stiffness), use k = 1.
+    /// The source reducer must supply branches in this body's SAME basis and
+    /// within their constitutive applicability domain.
+    ///
+    /// This is one cold attachment: the original state must be zero and have
+    /// no material memories. All new histories start at zero, which is both
+    /// relaxed and unrelaxed at zero displacement. Existing equilibrium
+    /// stiffness must exclude the added relaxing stiffness. An empty list is
+    /// an exact no-op. `maximum_memory_states` bounds the complete branch set
+    /// (at most 256); the shared render owner also admits total state capacity
+    /// and the complete mechanical/relaxation rate when stepping.
+    ///
+    /// # Errors
+    /// Refuses motion or existing memory, exhausted capacity, momentum-loaded
+    /// or malformed branches, nonphysical coefficients, and shared pHS/render
+    /// admission failures. No branch or off-diagonal coupling is discarded.
+    pub fn with_relaxation_branches(
+        self,
+        branches: Vec<fs_phs::RelaxationBranch>,
+        maximum_memory_states: usize,
+    ) -> Result<Self, AcousticRealizeError> {
+        if branches.is_empty() {
+            return Ok(self);
+        }
+        let base_dim = 2 * self.n_modes();
+        if maximum_memory_states > 256 || branches.len() > maximum_memory_states
+            || self.x.len() != base_dim || self.sys.state_dim() != base_dim
+            || self.x.iter().any(|x| *x != 0.0)
+        {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "nonlinear material memory needs one zero-state attachment within its declared capacity",
+            });
+        }
+        if branches.iter().any(|branch| branch.projection.len() != base_dim
+            || branch.projection.iter().enumerate().any(|(i, b)|
+                !b.is_finite() || i % 2 == 1 && *b != 0.0))
+        {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "nonlinear material memory needs finite displacement-only projections on the original modal basis",
+            });
+        }
+        let sys = self.sys.with_relaxation_branches(branches)
+            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+        let linear = prepare_render_linear(&sys)?;
+        let x = vec![0.0; sys.state_dim()];
+        Ok(Self { sys, linear, x, areas: self.areas })
+    }
+
+    /// Accepted state: mass-normalized `[q0, p0, q1, p1, ...]`, followed by
+    /// energy-normalized material histories in the original branch order.
+    #[must_use]
+    pub fn state(&self) -> &[f64] {
+        &self.x
+    }
+
+    /// Complete mechanical AND material-memory storage [J].
+    #[must_use]
+    pub fn stored_energy_j(&self) -> f64 {
+        self.sys.hamiltonian(&self.x)
+    }
+
     /// Build from a thin plate.
     ///
     /// # Errors

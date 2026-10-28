@@ -9966,3 +9966,26 @@ wholly negative and asymmetric zero-diagonal matrices refuse, and negative
 diagonal checks scale with the actual tensor. Native regressions verify a
 rank-one damper's lossless common motion, complete differential work, retained
 full-rank arithmetic and active off-diagonal refusals across coefficient scales.
+
+## Nonlinear plate material memory
+
+`VkBody::with_relaxation_branches` composes the existing Maxwell owner with the
+body's original nonlinear storage and full viscous damping matrix. Branches
+project only displacement entries in the same mass-normalized basis; one
+energy-normalized material history per branch follows the mechanical state.
+Complete cross-mode hereditary stiffness and loss are retained, with no
+replacement by scalar damping ratios. The equilibrium storage excludes the
+added relaxing stiffness. Attachment requires zero original state, no prior
+memory, and an explicit memory-state ceiling; shared pHS/render capacity and
+full-rate time-resolution checks remain in force. Empty branches are an exact
+no-op. Read-only state and total mechanical-plus-memory energy are exposed.
+
+`nonlinear_plate_relaxation` checks the linear exact limit against independent
+continuous equations and held-input subdivision, a physically unstrained
+lossless combination, and nonlinear convergence over 200/400/800 steps against
+independent RK4. It also checks complete energy decay after forcing stops,
+compact step-mean pressure/volume-flow consistency, and admission/rollback.
+Native tests pass without relaxing the original time-resolution bound. Branch
+coefficients and applicability must come from the caller's source reduction;
+this API does not automatically derive a hereditary material tensor or add
+finite-wavelength acoustic back-reaction.
