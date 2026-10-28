@@ -909,3 +909,44 @@ Six analytical tests cover open-circuit charge separation without spurious drag,
 shorted braking, loaded generation and motor signs, rotated anisotropic currents,
 imposed-current EMF, heterogeneous counter-moving layers and stationary/refusal
 behavior. Synthetic sources verify these equations, not an empirical material fit.
+
+### Three-dimensional current-free magnetic fields
+
+`spatial::SpatialMagnetostatics` solves `H = -grad(phi)`,
+`B = mu H + Br` and weak `div(B) = 0` on actual tetrahedra. Each original
+cell retains its resolved positive permeability or source-backed oriented recoil
+law. The original Whitney 1-form material Hodge, incidence/stiffness assembly
+and checked CG own the numerical operator. Prepared geometry and stiffness are
+reused across boundary solves. `try_element_geometry` supplies a checked
+companion to the original tetrahedral geometry owner and refuses malformed,
+singular or unrepresentable cells before field publication.
+
+Explicit exterior faces accept continuous nodal magnetic potential [A] or
+outward normal B [T]; unspecified faces impose zero normal flux. Each disconnected
+pure-flux component must satisfy its own integrated flux compatibility and
+receives one deterministic gauge. The independent full weak residual includes
+the artificial gauge node, so the gauge cannot supply missing flux. Relative
+potentials preserve field and energy under representable common gauge shifts.
+
+Recovery returns actual cell H/B, original recoil operating-point admission,
+weak boundary fluxes and interior normal-flux jumps. Recovered cell energy is
+checked against the assembled Hodge energy. Fixed remanence uses the existing
+shifted reference `mu |H|^2 / 2`; this is not an independent force or variable-
+magnetization energy law. Failed domain, solve, work or cancellation checks
+return no partial field.
+
+This is a single-valued scalar-potential model on current-free domains with
+fixed linear/recoil sources and explicit finite boundaries. Linked free-current
+circulation, general 3D current-driven curl-curl fields, induction, saturation,
+hysteresis, motion and infinite-domain accuracy require other owners. The mesh
+must be a conforming nonoverlapping tetrahedral complex; local adjacency checks
+do not certify absence of remote cell intersections. Raw P1 B is cellwise
+constant and its interface jumps are reported, not claimed to be an exactly
+equilibrated H(div) flux.
+
+Seven analytical tests cover vector fields with potential/flux boundaries,
+large gauge offsets, oriented recoil/air demagnetizing layers and energy,
+harmonic-field mesh convergence, disconnected compatibility and malformed
+geometry/boundaries, original recoil limits, true solver-budget exhaustion and
+late cancellation. These are synthetic physical oracles, not measured device
+validation or a general 3D electromagnetic capability claim.

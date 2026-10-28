@@ -26,6 +26,15 @@ pub struct ElementGeometry {
     pub gram: Vec<[[f64; 4]; 4]>,
 }
 
+/// Invalid or unrepresentable tetrahedral geometry, before publication.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ElementGeometryError {
+    /// Coordinates do not match the declared vertices, or are nonfinite.
+    Positions,
+    /// Invalid indices, repeated vertices, singular or unrepresentable cell.
+    Cell(usize),
+}
+
 /// Build element geometry for every tet.
 ///
 /// # Panics
@@ -33,6 +42,36 @@ pub struct ElementGeometry {
 /// not a runtime condition.
 #[must_use]
 pub fn element_geometry(complex: &TetComplex, positions: &[[f64; 3]]) -> ElementGeometry {
+    try_element_geometry(complex, positions).expect("invalid tetrahedral element geometry")
+}
+
+/// Checked companion for physical field owners accepting external meshes.
+/// It uses the original batched determinant/inverse kernels, but refuses bad
+/// topology, singular cells and nonfinite metrics instead of panicking.
+pub fn try_element_geometry(
+    complex: &TetComplex,
+    positions: &[[f64; 3]],
+) -> Result<ElementGeometry, ElementGeometryError> {
+    if positions.len() != complex.vertex_count || positions.iter().flatten().any(|v| !v.is_finite())
+    {
+        return Err(ElementGeometryError::Positions);
+    }
+    for (cell, tet) in complex.tets.iter().enumerate() {
+        let mut sorted = *tet;
+        sorted.sort_unstable();
+        if sorted.windows(2).any(|p| p[0] == p[1])
+            || sorted.iter().any(|&v| v as usize >= positions.len())
+        {
+            return Err(ElementGeometryError::Cell(cell));
+        }
+        let origin = positions[tet[0] as usize];
+        if tet[1..]
+            .iter()
+            .any(|&v| (0..3).any(|j| !(positions[v as usize][j] - origin[j]).is_finite()))
+        {
+            return Err(ElementGeometryError::Cell(cell));
+        }
+    }
     let nt = complex.tets.len();
     // Jacobian columns are edge vectors from vertex 0.
     let jac = BatchMat::from_fn(3, nt, |m, i, j| {
@@ -40,12 +79,17 @@ pub fn element_geometry(complex: &TetComplex, positions: &[[f64; 3]]) -> Element
         positions[t[j + 1] as usize][i] - positions[t[0] as usize][i]
     });
     let dets = batch_det(&jac);
+    if let Some(cell) = dets
+        .iter()
+        .position(|d| !d.is_finite() || *d == 0.0 || d / 6.0 == 0.0)
+    {
+        return Err(ElementGeometryError::Cell(cell));
+    }
     let mut jinv = BatchMat::zeros(3, nt);
     let flags = batch_inv(&jac, &mut jinv);
-    assert!(
-        flags.is_empty(),
-        "degenerate tets in element_geometry: {flags:?}"
-    );
+    if let Some((cell, _)) = flags.first() {
+        return Err(ElementGeometryError::Cell(*cell));
+    }
     let mut vol_signed = Vec::with_capacity(nt);
     let mut grads = Vec::with_capacity(nt);
     let mut gram = Vec::with_capacity(nt);
@@ -69,14 +113,21 @@ pub fn element_geometry(complex: &TetComplex, positions: &[[f64; 3]]) -> Element
                 gr[a][b] = g[a][0].mul_add(g[b][0], g[a][1].mul_add(g[b][1], g[a][2] * g[b][2]));
             }
         }
+        if g.iter()
+            .flatten()
+            .chain(gr.iter().flatten())
+            .any(|v| !v.is_finite())
+        {
+            return Err(ElementGeometryError::Cell(m));
+        }
         grads.push(g);
         gram.push(gr);
     }
-    ElementGeometry {
+    Ok(ElementGeometry {
         vol_signed,
         grads,
         gram,
-    }
+    })
 }
 
 /// Local index (0..4) of a global vertex within a tet.

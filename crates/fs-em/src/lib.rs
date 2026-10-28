@@ -55,6 +55,8 @@ pub mod conduction;
 pub mod electrostatic;
 pub mod force;
 pub mod planar;
+/// Three-dimensional current-free fields with sourced linear/recoil materials.
+pub mod spatial;
 pub mod transfer;
 pub mod winding;
 
