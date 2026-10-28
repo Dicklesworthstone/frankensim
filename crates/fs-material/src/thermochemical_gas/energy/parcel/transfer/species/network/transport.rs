@@ -20,6 +20,9 @@ pub mod dusty_gas;
 pub mod pore_domain;
 /// Bidirectional free-molecular species and energy transfer through thin apertures.
 pub mod effusion;
+mod sample;
+pub use sample::GasTransportRates;
+pub(crate) use sample::sample_transfers;
 
 use std::collections::BTreeMap;
 use super::{ClosedGasParcel, GasEnergySolve, SpeciesNetworkError, SpeciesNetworkSolve,
@@ -248,69 +251,16 @@ pub fn step_candidate_with_paths(
     duration_s: f64, endpoints: &BTreeMap<u64, GasEnergySolve>,
     controls: GasTransportSolve, mut cancelled: impl FnMut() -> bool,
 ) -> Result<GasTransportCandidate, Error> {
-    check(&mut cancelled)?;
-    let count = [paths.nozzles.len(), paths.diffusion.len(), paths.porous.len(),
-        paths.membranes.len(), paths.dusty_gas.len(), paths.effusion.len()]
-        .into_iter().try_fold(0usize, |total, n| total.checked_add(n));
-    if count.is_none_or(|n| n > MAX_SNAPSHOT_TRANSFERS) {
-        return Err(Error::Invalid("combined connection count exceeds the shared transport bound"));
-    }
-    let (bulk, nozzle_reports) = pressure::sample_transfers(
-        parcels, paths.nozzles, duration_s, endpoints, &mut cancelled)?;
-    let (mut transfers, diffusion_reports) = molecular::sample_transfers(
-        parcels, paths.diffusion, duration_s, endpoints,
-        DiffusionNetworkSolve { exchange: controls.exchange,
-            entropy_tolerance_j_k: controls.entropy_tolerance_j_k }, &mut cancelled)?;
-    let (porous_bulk, porous_reports) = porous::sample_transfers(
-        parcels, paths.porous, duration_s, &mut cancelled)?;
-    let (selective, membrane_reports) = membrane::sample_transfers(
-        parcels, paths.membranes, duration_s, &mut cancelled)?;
-    let (pore_species, dusty_gas_reports) = dusty_gas::sample_transfers(
-        parcels, paths.dusty_gas, duration_s, &mut cancelled)?;
-    let (molecular_beams, molecular_energy, effusion_reports) = effusion::sample_transfers(
-        parcels, paths.effusion, duration_s, &mut cancelled)?;
-    if [transfers.len(), selective.len(), pore_species.len(), molecular_beams.len(), molecular_energy.len()]
-        .into_iter().try_fold(0usize, |total, n| total.checked_add(n))
-        .is_none_or(|n| n > MAX_SNAPSHOT_TRANSFERS) {
-        return Err(Error::Invalid("combined selective flux count exceeds the shared work bound"));
-    }
-    transfers.extend(selective);
-    transfers.extend(pore_species);
-    transfers.extend(molecular_beams);
-    for row in bulk.into_iter().chain(porous_bulk) {
-        check(&mut cancelled)?;
-        if row.mass_kg == 0.0 { continue; }
-        // The original composition owner converts mole fractions to mass.
-        // Summing dm_i*h_i is exactly the bulk upstream dm*h mixture law;
-        // the shared species owner evaluates h_i with original source references.
-        let parts = inventory(parcels[&row.donor].model(), row.mass_kg)
-            .map_err(|error| super::material(row.donor, error))?;
-        for (species, mass_kg) in parts {
-            check(&mut cancelled)?;
-            if transfers.len() + molecular_energy.len() == MAX_SNAPSHOT_TRANSFERS {
-                return Err(Error::Invalid("combined species flux count exceeds the shared work bound"));
-            }
-            transfers.push(SpeciesNetworkTransfer { donor: row.donor,
-                receiver: row.receiver, species, mass_kg });
-        }
-    }
-    let proposal = super::exchange_candidate_with_heat(parcels, &transfers, &molecular_energy,
+    let sampled = sample_transfers(parcels, paths, duration_s, endpoints, controls, &mut cancelled)?;
+    let proposal = super::exchange_candidate_with_heat(parcels, &sampled.transfers, &sampled.heat,
         endpoints, controls.exchange, &mut cancelled)?;
-    // Evaluate pressure crossing on the FINAL combined inventory, not on either
-    // mechanism in isolation. Neither failed proposal publishes a subset.
-    pressure::admit_pressures(proposal.parcels(), &nozzle_reports, &mut cancelled)?;
-    porous::admit_pressures(proposal.parcels(), &porous_reports, &mut cancelled)?;
-    membrane::admit_partial_pressures(proposal.parcels(), &membrane_reports, &mut cancelled)?;
+    sampled.rates.admit_endpoint_driving_forces(proposal.parcels(), &mut cancelled)?;
     let entropy_change_j_k = molecular::admit_entropy(parcels, proposal.parcels(),
         controls.entropy_tolerance_j_k, controls.exchange.mass_tolerance_kg, &mut cancelled)?;
     check(&mut cancelled)?;
     let (parcels, exchange) = proposal.into_parts();
-    Ok(GasTransportCandidate { parcels, step: GasTransportStep { duration_s,
-        nozzles: nozzle_reports, diffusion: diffusion_reports, porous: porous_reports,
-        membranes: membrane_reports, dusty_gas: dusty_gas_reports, effusion: effusion_reports,
-        exchange, entropy_change_j_k } })
+    Ok(GasTransportCandidate { parcels, step:sampled.rates.into_closed_step(exchange, entropy_change_j_k) })
 }
 
 #[cfg(test)]
 mod tests;
-
