@@ -57,7 +57,18 @@ for QMC Gaussian germs instead of duplicating the polynomial.
   ordinates), `cqc` (Der Kiureghian coefficients; collapses to `srss`
   for separated modes, exceeds it for close modes),
   `bilinear_peak_ductility` + `ida_fragility` (the nonlinear IDA
-  workhorse; monotone exceedance curves). `anytime` —
+  workhorse). Both oscillator paths use implicit Newmark average acceleration
+  from initial rest; the first acceleration sample initializes equilibrium,
+  so N samples span N−1 intervals and empty/single-sample records return zero.
+  The bilinear path solves its monotone piecewise-linear equilibrium in at
+  most two scalar solves per interval, without allocating or iterating Newton;
+  plastic history changes only after the accepted branch is solved. It uses
+  a parallel elastic and elastic-perfectly-plastic spring with post-yield
+  stiffness ratio in `[0,1]`. CQC preserves signed modal contributions and
+  exact unit diagonal correlation; distinct undamped frequencies are
+  uncorrelated, while identical undamped frequencies combine coherently.
+  Pair symmetry halves coefficient work and ordered frequency ratios avoid
+  overflow across wide bands. `anytime` —
   `estimate_probability_anytime`: a sub-Gaussian (σ = 1/2) mixture
   confidence sequence stops the moment its RADIUS meets the decision's
   half-width — valid AT the stopping time by construction (fs-eproc's
@@ -97,6 +108,9 @@ REPORTED (captured variance, reconstruction error, per-level
 variances), never assumed. The canonical CVaR re-exports instead return
 structured `RobustError` values for empty samples, invalid tail levels, and
 non-finite losses; they do not panic.
+The scalar seismic response/CQC fronts also assert their finite physical
+parameters, array dimensions and representable arithmetic; NaNs must not
+silently disappear into a seemingly valid peak response.
 
 ## Determinism class
 
@@ -145,7 +159,21 @@ report for fractional and tied integer boundaries, mixed-sign extremes,
 constant `f64::MAX`, and input permutations; invalid risk inputs return
 structured errors rather than panicking.
 
+`seismic` unit tests: implicit bilinear dynamics match the linear limit for
+undamped, critical and overdamped oscillators; a short-period oscillator stays
+within its analytic constant-load amplitude bound at `omega*dt = 5`; a yielded
+step solves its accepted restoring force; cyclic plastic peaks converge to an
+independent 600,000-step explicit reference. CQC checks zero damping, signed
+degeneracy, unequal damping, frequency-unit changes and extreme peak scales.
+
 ## No-claim boundaries
+
+- Newmark's linear stability does not remove temporal accuracy requirements:
+  callers must resolve ground-motion bandwidth, structural periods and yield
+  reversals. `ida_fragility` retains its explicit fixture clock of 0.01 s;
+  its observed monotonicity is not a theorem for every nonlinear motion suite.
+  The zero-damping CQC convention is the coherent/uncorrelated modal limit,
+  not a finite stationary variance for undamped white-noise excitation.
 
 - `product_plan::UqPropagator` currently executes only fixed-count Philox Monte
   Carlo with 1..=256 parameters and 2..=1,000,000 samples. Independent Gaussian

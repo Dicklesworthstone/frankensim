@@ -67,23 +67,36 @@ impl KanaiTajimi {
     }
 }
 
-/// Peak absolute displacement of a LINEAR SDOF (`wn`, `zeta`) under a
-/// ground record (Newmark average-acceleration; the response-spectrum
-/// ordinate).
+/// Maximum absolute RELATIVE displacement [m] of a linear SDOF under a
+/// ground-acceleration record [m/s²], using Newmark average acceleration.
+/// `wn` is the undamped angular frequency [rad/s], `zeta` its damping ratio.
+/// The oscillator starts at rest at the first sample; N samples span N−1
+/// intervals. Empty and single-sample records therefore have zero response.
+///
+/// # Panics
+/// Nonfinite samples, nonpositive/nonfinite `dt` or `wn`, negative/nonfinite
+/// damping, or an unrepresentable response refuse rather than entering a peak.
 #[must_use]
 pub fn sdof_peak(record: &[f64], dt: f64, wn: f64, zeta: f64) -> f64 {
+    let (k, c) = sdof_coefficients(dt, wn, zeta);
     let (mut u, mut v) = (0.0f64, 0.0f64);
     let mut a = -record.first().copied().unwrap_or(0.0);
-    let (k, c) = (wn * wn, 2.0 * zeta * wn);
+    assert!(a.is_finite(), "ground acceleration must be finite");
+    let denom = 1.0 + 0.5 * dt * c + 0.25 * dt * dt * k;
+    assert!(denom.is_finite(), "SDOF effective stiffness must be finite");
     let mut peak = 0.0f64;
-    for &ag in &record[1..] {
+    for &ag in record.iter().skip(1) {
+        assert!(ag.is_finite(), "ground acceleration must be finite");
         // Newmark beta = 1/4, gamma = 1/2 on u'' + c u' + k u = -ag.
         let rhs = -ag - c * (v + 0.5 * dt * a) - k * (u + dt * v + 0.25 * dt * dt * a);
-        let denom = 1.0 + 0.5 * dt * c + 0.25 * dt * dt * k;
         let a_new = rhs / denom;
         u += dt * v + 0.25 * dt * dt * (a + a_new);
         v += 0.5 * dt * (a + a_new);
         a = a_new;
+        assert!(
+            u.is_finite() && v.is_finite() && a.is_finite(),
+            "SDOF response must be finite"
+        );
         peak = peak.max(u.abs());
     }
     peak
@@ -92,23 +105,99 @@ pub fn sdof_peak(record: &[f64], dt: f64, wn: f64, zeta: f64) -> f64 {
 /// CQC (complete quadratic combination) of modal peaks with the
 /// Der Kiureghian correlation coefficients — the response-spectrum
 /// fast path. Falls back to SRSS exactly when modes are uncorrelated.
+/// Peaks retain their modal signs. Zero-damped distinct frequencies have
+/// zero correlation; equal-frequency, zero-damped modes are identical linear
+/// responses and combine coherently. This limiting convention is not a
+/// stationary-response claim for undamped white-noise excitation.
+///
+/// # Panics
+/// Array lengths must agree, frequencies must be positive and finite, damping
+/// ratios nonnegative and finite, and modal peaks finite.
 #[must_use]
 pub fn cqc(peaks: &[f64], freqs: &[f64], damps: &[f64]) -> f64 {
     let n = peaks.len();
+    assert_eq!(freqs.len(), n, "CQC frequency count must match modal peaks");
+    assert_eq!(damps.len(), n, "CQC damping count must match modal peaks");
+    let mut scale = 0.0f64;
+    for i in 0..n {
+        assert!(peaks[i].is_finite(), "CQC modal peaks must be finite");
+        assert!(
+            freqs[i].is_finite() && freqs[i] > 0.0,
+            "CQC frequencies must be positive and finite"
+        );
+        assert!(
+            damps[i].is_finite() && damps[i] >= 0.0,
+            "CQC damping must be nonnegative and finite"
+        );
+        scale = scale.max(peaks[i].abs());
+    }
+    if scale == 0.0 {
+        return 0.0;
+    }
     let mut acc = 0.0f64;
     for i in 0..n {
-        for j in 0..n {
-            let (zi, zj) = (damps[i], damps[j]);
-            let r = freqs[j] / freqs[i];
-            let num = 8.0 * (zi * zj).sqrt() * (zi + r * zj) * fs_math::det::pow(r, 1.5);
-            let den = (1.0 - r * r).powi(2)
-                + 4.0 * zi * zj * r * (1.0 + r * r)
-                + 4.0 * (zi * zi + zj * zj) * r * r;
-            let rho = num / den;
-            acc += rho * peaks[i] * peaks[j];
+        let pi = peaks[i] / scale;
+        // The diagonal is exactly one, including a zero-damped mode; the
+        // literal coefficient formula is 0/0 there. Symmetry halves the work.
+        acc += pi * pi;
+        for j in 0..i {
+            let rho = cqc_correlation(freqs[i], freqs[j], damps[i], damps[j]);
+            acc += 2.0 * rho * pi * (peaks[j] / scale);
         }
     }
-    acc.sqrt()
+    // Coincident modes of opposite sign can cancel exactly. The correlation
+    // form is nonnegative; only summation roundoff may cross zero.
+    scale * acc.max(0.0).sqrt()
+}
+
+fn cqc_correlation(wi: f64, wj: f64, zi: f64, zj: f64) -> f64 {
+    if zi == 0.0 || zj == 0.0 {
+        return if zi == zj && wi == wj { 1.0 } else { 0.0 };
+    }
+    // Choose r <= 1 so that wide modal bands cannot overflow r^4. Scale
+    // damping before products, preserving the unequal-damping formula.
+    let (r, zi, zj) = if wj <= wi {
+        (wj / wi, zi, zj)
+    } else {
+        (wi / wj, zj, zi)
+    };
+    if r == 0.0 {
+        return 0.0;
+    }
+    let damping_scale = zi.max(zj);
+    let zi = zi / damping_scale;
+    let zj = zj / damping_scale;
+    if r == 1.0 {
+        return 2.0 * zi.sqrt() * zj.sqrt() / (zi + zj);
+    }
+    let detuning = ((1.0 - r) * (1.0 + r)) / damping_scale;
+    let num = 8.0 * zi.sqrt() * zj.sqrt() * (zi + r * zj) * r * r.sqrt();
+    let den =
+        detuning * detuning + 4.0 * zi * zj * r * (1.0 + r * r) + 4.0 * (zi * zi + zj * zj) * r * r;
+    let rho = num / den;
+    assert!(rho.is_finite(), "CQC correlation must be representable");
+    rho.clamp(0.0, 1.0)
+}
+
+fn sdof_coefficients(dt: f64, wn: f64, zeta: f64) -> (f64, f64) {
+    assert!(
+        dt.is_finite() && dt > 0.0,
+        "SDOF time step must be positive and finite"
+    );
+    assert!(
+        wn.is_finite() && wn > 0.0,
+        "SDOF frequency must be positive and finite"
+    );
+    assert!(
+        zeta.is_finite() && zeta >= 0.0,
+        "SDOF damping must be nonnegative and finite"
+    );
+    let (k, c) = (wn * wn, 2.0 * zeta * wn);
+    assert!(
+        k.is_finite() && c.is_finite(),
+        "SDOF stiffness and damping must be finite"
+    );
+    (k, c)
 }
 
 /// SRSS combination (the uncorrelated-modes baseline CQC reduces to).
@@ -120,6 +209,21 @@ pub fn srss(peaks: &[f64]) -> f64 {
 /// Peak DUCTILITY of a BILINEAR-hysteretic SDOF (yield displacement
 /// `uy`, post-yield stiffness ratio `alpha`) under a scaled record —
 /// the nonlinear time-history IDA workhorse.
+///
+/// Uses implicit Newmark average acceleration, with the same sample clock
+/// and initial rest state as [`sdof_peak`]. The restoring force is a parallel
+/// elastic spring and an elastic-perfectly-plastic spring:
+/// `R = alpha*k0*u + (1-alpha)*k0*clamp(u-up, -uy, uy)`.
+/// The monotone, piecewise-linear equilibrium is solved exactly in at most
+/// two scalar solves; plastic history is committed only after branch selection.
+/// This removes the explicit method's stability restriction, but does not
+/// remove the need to resolve excitation, oscillation and yield reversals in time.
+/// See the Newmark kinematics in
+/// <https://opensees.github.io/OpenSeesDocumentation/user/manual/analysis/integrator/Newmark.html>.
+///
+/// # Panics
+/// As for [`sdof_peak`], plus nonpositive/nonfinite yield displacement,
+/// `alpha` outside `[0, 1]`, nonfinite record scale, or unrepresentable response.
 #[must_use]
 pub fn bilinear_peak_ductility(
     record: &[f64],
@@ -130,27 +234,57 @@ pub fn bilinear_peak_ductility(
     alpha: f64,
     scale: f64,
 ) -> f64 {
-    let (k0, c) = (wn * wn, 2.0 * zeta * wn);
+    let (k0, c) = sdof_coefficients(dt, wn, zeta);
+    assert!(
+        uy.is_finite() && uy > 0.0,
+        "yield displacement must be positive and finite"
+    );
+    assert!(
+        (0.0..=1.0).contains(&alpha),
+        "post-yield stiffness ratio must be in [0, 1]"
+    );
+    assert!(scale.is_finite(), "ground-motion scale must be finite");
     let (mut u, mut v) = (0.0f64, 0.0f64);
+    let mut a = -scale * record.first().copied().unwrap_or(0.0);
+    assert!(a.is_finite(), "scaled ground acceleration must be finite");
     // Hysteretic state: plastic offset of the yield surface.
     let mut up = 0.0f64;
+    let beta_dt2 = 0.25 * dt * dt;
+    let gamma_dt = 0.5 * dt;
+    let k_post = alpha * k0;
+    let k_plastic = (1.0 - alpha) * k0;
+    let elastic_denom = 1.0 + gamma_dt * c + beta_dt2 * k0;
+    let yielded_denom = 1.0 + gamma_dt * c + beta_dt2 * k_post;
+    assert!(
+        elastic_denom.is_finite(),
+        "SDOF effective stiffness must be finite"
+    );
     let mut peak = 0.0f64;
-    // Explicit central-difference march with the bilinear force
-    // (simple, robust for the fixture's dt).
-    let force = |u: f64, up: &mut f64| -> f64 {
-        let elastic = u - *up;
-        if elastic > uy {
-            *up += elastic - uy;
-        } else if elastic < -uy {
-            *up += elastic + uy;
+    for &ag in record.iter().skip(1) {
+        let load = -scale * ag;
+        assert!(
+            load.is_finite(),
+            "scaled ground acceleration must be finite"
+        );
+        let u_predict = u + dt * v + beta_dt2 * a;
+        let v_predict = v + gamma_dt * a;
+        let rhs = load - c * v_predict;
+        let mut a_next = (rhs - k0 * u_predict + k_plastic * up) / elastic_denom;
+        let trial = u_predict + beta_dt2 * a_next - up;
+        if trial.abs() > uy && alpha < 1.0 {
+            let elastic = uy.copysign(trial);
+            a_next = (rhs - k_post * u_predict - k_plastic * elastic) / yielded_denom;
+            // The accepted displacement returns the plastic spring to its
+            // yield surface; failed elastic trials never mutate the history.
+            up = u_predict + beta_dt2 * a_next - elastic;
         }
-        k0 * (alpha * u + (1.0 - alpha) * (u - *up))
-    };
-    for &ag in record {
-        let f = force(u, &mut up);
-        let acc = -scale * ag - c * v - f;
-        v += dt * acc;
-        u += dt * v;
+        u = u_predict + beta_dt2 * a_next;
+        v = v_predict + gamma_dt * a_next;
+        a = a_next;
+        assert!(
+            u.is_finite() && v.is_finite() && a.is_finite() && up.is_finite(),
+            "SDOF response must be finite"
+        );
         peak = peak.max(u.abs());
     }
     peak / uy
@@ -206,4 +340,187 @@ pub fn ida_fragility(
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bilinear_peak_ductility, cqc, sdof_peak};
+
+    #[test]
+    fn g0_empty_and_single_sample_records_do_not_advance_time() {
+        for record in [&[][..], &[3.0][..]] {
+            assert_eq!(sdof_peak(record, 0.01, 12.0, 0.05), 0.0);
+            assert_eq!(
+                bilinear_peak_ductility(record, 0.01, 12.0, 0.05, 0.01, 0.1, 2.0),
+                0.0
+            );
+        }
+    }
+
+    #[test]
+    fn g1_bilinear_elastic_limit_matches_the_linear_response_spectrum() {
+        // Nonzero first acceleration exposes an extra initial step or an
+        // inconsistent acceleration initialization. Stiff cases exceed the
+        // old explicit method's stability limit by an order of magnitude.
+        let record: Vec<_> = (0..1000)
+            .map(|i| {
+                2.0 * fs_math::det::cos(0.017 * f64::from(i))
+                    + 0.5 * fs_math::det::sin(0.11 * f64::from(i))
+            })
+            .collect();
+        let scaled: Vec<_> = record.iter().map(|ag| -1.7 * ag).collect();
+        for wn in [2.0, 20.0, 1000.0] {
+            for zeta in [0.0, 0.05, 1.0, 3.0] {
+                let want = sdof_peak(&scaled, 0.01, wn, zeta);
+                for (alpha, uy) in [(1.0, 0.001), (0.1, 100.0)] {
+                    let got =
+                        bilinear_peak_ductility(&record, 0.01, wn, zeta, uy, alpha, -1.7) * uy;
+                    assert!(
+                        (got - want).abs() <= 2.0e-11 * want.max(1.0e-12),
+                        "wn={wn} zeta={zeta} alpha={alpha}: {got} vs {want}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g1_short_period_oscillator_remains_bounded_under_constant_acceleration() {
+        let record = vec![1.0; 2000];
+        let wn = 500.0;
+        let uy = 0.001;
+        let peak = bilinear_peak_ductility(&record, 0.01, wn, 0.0, uy, 0.1, 1.0) * uy;
+        // The initial state is rest; undamped constant loading oscillates
+        // about -1/wn² with amplitude 1/wn². Average acceleration preserves
+        // that quadratic energy even at wn*dt=5; phase still requires refinement.
+        assert!(peak.is_finite() && peak > 1.9 / (wn * wn));
+        assert!(peak <= 2.0 / (wn * wn) * (1.0 + 1.0e-10));
+    }
+
+    #[test]
+    fn g1_yielded_step_solves_the_accepted_restoring_force() {
+        // One interval from zero load into yield. beta*h²=.01, k0=100,
+        // k_post=10, plastic yield force=.09, so a1=(1-.09)/(1+.1).
+        let got = bilinear_peak_ductility(&[0.0, -1.0], 0.2, 10.0, 0.0, 0.001, 0.1, 1.0);
+        let want = 0.01 * (1.0 - 0.09) / 1.1 / 0.001;
+        assert!((got - want).abs() < 2.0e-14);
+        // Reflection reverses the plastic branch but not the absolute peak.
+        let reflected = bilinear_peak_ductility(&[0.0, 1.0], 0.2, 10.0, 0.0, 0.001, 0.1, 1.0);
+        assert_eq!(got.to_bits(), reflected.to_bits());
+    }
+
+    fn cyclic_ground(t: f64) -> f64 {
+        3.0 * fs_math::det::sin(7.0 * t) + 1.1 * fs_math::det::sin(19.0 * t)
+    }
+
+    fn fine_explicit_hysteresis_peak(n: u32) -> f64 {
+        // Independent first-order reference: resolve elastic/plastic reversals
+        // with 300k/600k explicit steps, no Newmark prediction or branch solve.
+        let dt = 3.0 / f64::from(n);
+        let (mut u, mut v, mut up, mut peak) = (0.0_f64, 0.0, 0.0, 0.0_f64);
+        for i in 0..n {
+            let elastic = (u - up).clamp(-0.01, 0.01);
+            up = u - elastic;
+            let force = 144.0 * (0.1 * u + 0.9 * elastic);
+            let a = -cyclic_ground(f64::from(i) * dt) - 1.2 * v - force;
+            v += dt * a;
+            u += dt * v;
+            peak = peak.max(u.abs());
+        }
+        peak / 0.01
+    }
+
+    #[test]
+    fn g1_cyclic_plastic_response_converges_to_independent_fine_history() {
+        let reference = fine_explicit_hysteresis_peak(600_000);
+        let reference_coarse = fine_explicit_hysteresis_peak(300_000);
+        assert!((reference - reference_coarse).abs() < 3.0e-5);
+        assert!(
+            reference > 10.0,
+            "the comparison must exercise substantial yield"
+        );
+        let mut previous_error = f64::INFINITY;
+        for n in [300, 600, 1200] {
+            let dt = 3.0 / f64::from(n);
+            let record: Vec<_> = (0..=n).map(|i| cyclic_ground(f64::from(i) * dt)).collect();
+            let got = bilinear_peak_ductility(&record, dt, 12.0, 0.05, 0.01, 0.1, 1.0);
+            let error = (got - reference).abs();
+            assert!(
+                error < 0.4 * previous_error,
+                "n={n}: refinement error {error} vs {previous_error}"
+            );
+            previous_error = error;
+        }
+        assert!(previous_error / reference < 1.2e-4);
+    }
+
+    #[test]
+    fn g0_cqc_handles_undamped_modes_and_coherent_degeneracy() {
+        assert_eq!(cqc(&[], &[], &[]), 0.0);
+        assert_eq!(cqc(&[-3.0], &[10.0], &[0.0]), 3.0);
+        assert_eq!(cqc(&[3.0, 4.0], &[10.0, 20.0], &[0.0, 0.0]), 5.0);
+        assert_eq!(cqc(&[3.0, 4.0], &[10.0, 10.0], &[0.0, 0.0]), 7.0);
+        assert_eq!(cqc(&[2.0, -1.0], &[10.0, 10.0], &[0.0, 0.0]), 1.0);
+        assert_eq!(cqc(&[1.0e200, -1.0e200], &[10.0, 10.0], &[0.0, 0.0]), 0.0);
+        assert_eq!(cqc(&[3.0, 4.0], &[1.0e-200, 1.0e200], &[0.05, 0.05]), 5.0);
+    }
+
+    #[test]
+    fn g3_cqc_unequal_damping_preserves_symmetry_units_and_zero_loss_limit() {
+        let peaks = [1.0, -0.6];
+        let (zi, zj) = (0.02_f64, 0.08_f64);
+        let r = 18.0_f64 / 17.0;
+        // Literal published expression, evaluated independently without the
+        // implementation's frequency ordering or damping scaling.
+        let rho = 8.0 * (zi * zj).sqrt() * (zi + r * zj) * r * r.sqrt()
+            / ((1.0 - r * r).powi(2)
+                + 4.0 * zi * zj * r * (1.0 + r * r)
+                + 4.0 * (zi * zi + zj * zj) * r * r);
+        let want = (1.36 - 1.2 * rho).sqrt();
+        for scale in [1.0e-100, 1.0, 1.0e100] {
+            let got = cqc(&peaks, &[17.0 * scale, 18.0 * scale], &[zi, zj]);
+            let reversed = cqc(&[-0.6, 1.0], &[18.0 * scale, 17.0 * scale], &[zj, zi]);
+            assert!((got - want).abs() < 5.0e-15);
+            assert_eq!(got.to_bits(), reversed.to_bits());
+        }
+        let lossless = cqc(&peaks, &[17.0, 18.0], &[0.0, 0.0]);
+        let small_loss = cqc(&peaks, &[17.0, 18.0], &[1.0e-12, 1.0e-12]);
+        assert_eq!(lossless.to_bits(), small_loss.to_bits());
+        let degenerate = cqc(&[1.0, 1.0], &[17.0, 17.0], &[zi, zj]);
+        assert!((degenerate - (2.0 + 4.0 * (zi * zj).sqrt() / (zi + zj)).sqrt()).abs() < 1.0e-15);
+    }
+
+    #[test]
+    fn g0_nonphysical_inputs_cannot_turn_into_plausible_peak_values() {
+        assert!(std::panic::catch_unwind(|| sdof_peak(&[], 0.0, 10.0, 0.05)).is_err());
+        assert!(
+            std::panic::catch_unwind(|| sdof_peak(&[0.0, f64::NAN], 0.01, 10.0, 0.05)).is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(|| bilinear_peak_ductility(
+                &[0.0],
+                0.01,
+                10.0,
+                -0.1,
+                0.01,
+                0.1,
+                1.0
+            ))
+            .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(|| bilinear_peak_ductility(
+                &[0.0],
+                0.01,
+                10.0,
+                0.05,
+                0.01,
+                -0.1,
+                1.0
+            ))
+            .is_err()
+        );
+        assert!(std::panic::catch_unwind(|| cqc(&[1.0], &[], &[0.05])).is_err());
+        assert!(std::panic::catch_unwind(|| cqc(&[1.0], &[0.0], &[0.05])).is_err());
+    }
 }
