@@ -1,0 +1,67 @@
+frankensim.matdb-source.v1
+observation	foam	Plastazote LD33 crosslinked polyethylene block foam	Zotefoams A012 issue 1 revision 1 June 2026; ISO 7214:2012, ISO 8067:2008 method B, ISO 8301:1991	Grade-specific typical population values, not design minima or confidence limits. Density is nominal skin-to-skin. The two compression stresses and two recovery observations are discrete, with no zero-strain point, unloading path, relaxation fit or implied stiffness. Compression-set history is 25 percent compression for 22 hours at 23 C; recovery temperature is not independently reported. Compression/tension rate, specimen dimensions, direction, moisture and pressure are unstated. The 2026 revision is retained without importing earlier 2017 values or geometry. Conductivity is reported at mean 10 C only; no heat capacity, complete thermal profile or service-temperature validity is inferred. All uncertainty is unstated.
+scalar	density	foam	density	33	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade_plastazote_ld33_2026	1	1	1
+validity	density	density_includes_skins	1	1	1
+validity	density	source_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+validity	density	source_pressure_known	0	0	1
+scalar	cell-diameter	foam	cell_diameter	0.4	mm	constant
+uncertainty	cell-diameter	unstated	-	-	-	-
+validity	cell-diameter	source_grade_plastazote_ld33_2026	1	1	1
+validity	cell-diameter	source_temperature_known	0	0	1
+validity	cell-diameter	source_orientation_known	0	0	1
+curve	compression-points	foam	compressive_stress	compressive_strain	1	kPa	0.25:66,0.5:134	tabulated
+uncertainty	compression-points	unstated	-	-	-	-
+validity	compression-points	source_grade_plastazote_ld33_2026	1	1	1
+validity	compression-points	compressive_strain	0.25	0.5	1
+validity	compression-points	source_temperature_known	0	0	1
+validity	compression-points	source_moisture_condition_known	0	0	1
+validity	compression-points	source_pressure_known	0	0	1
+validity	compression-points	source_orientation_known	0	0	1
+validity	compression-points	source_test_rate_known	0	0	1
+validity	compression-points	source_specimen_geometry_known	0	0	1
+scalar	tensile-strength	foam	tensile_strength	416	kPa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	source_grade_plastazote_ld33_2026	1	1	1
+validity	tensile-strength	source_temperature_known	0	0	1
+validity	tensile-strength	source_moisture_condition_known	0	0	1
+validity	tensile-strength	source_pressure_known	0	0	1
+validity	tensile-strength	source_orientation_known	0	0	1
+validity	tensile-strength	source_test_rate_known	0	0	1
+validity	tensile-strength	source_specimen_geometry_known	0	0	1
+scalar	tensile-elongation	foam	tensile_elongation	1.48	1	constant
+uncertainty	tensile-elongation	unstated	-	-	-	-
+validity	tensile-elongation	source_grade_plastazote_ld33_2026	1	1	1
+validity	tensile-elongation	source_temperature_known	0	0	1
+validity	tensile-elongation	source_moisture_condition_known	0	0	1
+validity	tensile-elongation	source_orientation_known	0	0	1
+validity	tensile-elongation	source_test_rate_known	0	0	1
+validity	tensile-elongation	source_specimen_geometry_known	0	0	1
+curve	compression-set-recovery	foam	compression_set	recovery_time	s	1	1800:0.09,86400:0.04	tabulated
+uncertainty	compression-set-recovery	unstated	-	-	-	-
+validity	compression-set-recovery	source_grade_plastazote_ld33_2026	1	1	1
+validity	compression-set-recovery	compressive_strain	0.25	0.25	1
+validity	compression-set-recovery	compression_duration	79200	79200	s
+validity	compression-set-recovery	compression_temperature	296.15	296.15	K
+validity	compression-set-recovery	recovery_time	1800	86400	s
+validity	compression-set-recovery	source_recovery_temperature_known	0	0	1
+validity	compression-set-recovery	source_moisture_condition_known	0	0	1
+validity	compression-set-recovery	source_orientation_known	0	0	1
+validity	compression-set-recovery	source_specimen_geometry_known	0	0	1
+scalar	tear-strength	foam	tear_strength	1888	N/m	constant
+uncertainty	tear-strength	unstated	-	-	-	-
+validity	tear-strength	source_grade_plastazote_ld33_2026	1	1	1
+validity	tear-strength	source_temperature_known	0	0	1
+validity	tear-strength	source_moisture_condition_known	0	0	1
+validity	tear-strength	source_orientation_known	0	0	1
+validity	tear-strength	source_test_rate_known	0	0	1
+validity	tear-strength	source_specimen_geometry_known	0	0	1
+scalar	thermal-conductivity	foam	thermal_conductivity	0.039	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	source_grade_plastazote_ld33_2026	1	1	1
+validity	thermal-conductivity	mean_temperature	283.15	283.15	K
+validity	thermal-conductivity	source_moisture_condition_known	0	0	1
+validity	thermal-conductivity	source_pressure_known	0	0	1
+validity	thermal-conductivity	source_orientation_known	0	0	1

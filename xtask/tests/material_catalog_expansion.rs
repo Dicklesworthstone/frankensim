@@ -1537,3 +1537,6 @@ mod polymers_foams;
 
 #[path = "material_catalog_expansion/adhesives.rs"]
 mod adhesives;
+
+#[path = "material_catalog_expansion/cushioning.rs"]
+mod cushioning;

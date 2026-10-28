@@ -1,0 +1,115 @@
+frankensim.matdb-source.v1
+observation	foam	PORON 4701-30 very-soft polyurethane, 320 kg/m3 density column, black 04	Rogers 17-006 July 2023; ASTM D3574-95 test A density, D3574-75 test E tension, D264-91 die C tear, C518-98 conductivity	The 320 kg/m3 column covers the stated 1.57-3.18 mm commercial thickness band; actual test geometry is unstated. Published rounded SI values are retained. Typical properties and reported limits use separate keys and selectors; density tolerance is manufacturing variation, not a statistical uncertainty. The compression datum applies only at 25 percent deflection and 0.51 cm/min crosshead speed; the source labels that dimensional speed as strain rate. Test temperature, direction, conditioning, pressure and uncertainty are unstated. No zero-strain origin, compression modulus, unloading, relaxation, heat capacity or temperature-validity range is inferred. This unsupported foam is not the separately film-supported PORON 4701-30P.
+scalar	density	foam	density	320	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade_poron_4701_30_320_2023	1	1	1
+validity	density	source_thickness_band	1	1	1
+validity	density	source_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+validity	density	source_pressure_known	0	0	1
+validity	density	source_is_typical_value	1	1	1
+scalar	compression-typical	foam	compressive_stress	35	kPa	constant
+uncertainty	compression-typical	unstated	-	-	-	-
+validity	compression-typical	source_grade_poron_4701_30_320_2023	1	1	1
+validity	compression-typical	source_thickness_band	1	1	1
+validity	compression-typical	compressive_strain	0.25	0.25	1
+validity	compression-typical	test_speed	0.000085	0.000085	m/s
+validity	compression-typical	source_temperature_known	0	0	1
+validity	compression-typical	source_moisture_condition_known	0	0	1
+validity	compression-typical	source_pressure_known	0	0	1
+validity	compression-typical	source_orientation_known	0	0	1
+validity	compression-typical	source_specimen_geometry_known	0	0	1
+validity	compression-typical	source_is_typical_value	1	1	1
+scalar	compression-lower	foam	compressive_stress_lower	21	kPa	constant
+uncertainty	compression-lower	unstated	-	-	-	-
+validity	compression-lower	source_grade_poron_4701_30_320_2023	1	1	1
+validity	compression-lower	source_thickness_band	1	1	1
+validity	compression-lower	compressive_strain	0.25	0.25	1
+validity	compression-lower	test_speed	0.000085	0.000085	m/s
+validity	compression-lower	source_temperature_known	0	0	1
+validity	compression-lower	source_moisture_condition_known	0	0	1
+validity	compression-lower	source_pressure_known	0	0	1
+validity	compression-lower	source_orientation_known	0	0	1
+validity	compression-lower	source_specimen_geometry_known	0	0	1
+validity	compression-lower	source_is_typical_value	0	0	1
+scalar	compression-upper	foam	compressive_stress_upper	55	kPa	constant
+uncertainty	compression-upper	unstated	-	-	-	-
+validity	compression-upper	source_grade_poron_4701_30_320_2023	1	1	1
+validity	compression-upper	source_thickness_band	1	1	1
+validity	compression-upper	compressive_strain	0.25	0.25	1
+validity	compression-upper	test_speed	0.000085	0.000085	m/s
+validity	compression-upper	source_temperature_known	0	0	1
+validity	compression-upper	source_moisture_condition_known	0	0	1
+validity	compression-upper	source_pressure_known	0	0	1
+validity	compression-upper	source_orientation_known	0	0	1
+validity	compression-upper	source_specimen_geometry_known	0	0	1
+validity	compression-upper	source_is_typical_value	0	0	1
+scalar	tensile-typical	foam	tensile_strength	346	kPa	constant
+uncertainty	tensile-typical	unstated	-	-	-	-
+validity	tensile-typical	source_grade_poron_4701_30_320_2023	1	1	1
+validity	tensile-typical	source_thickness_band	1	1	1
+validity	tensile-typical	source_temperature_known	0	0	1
+validity	tensile-typical	source_moisture_condition_known	0	0	1
+validity	tensile-typical	source_orientation_known	0	0	1
+validity	tensile-typical	source_test_rate_known	0	0	1
+validity	tensile-typical	source_specimen_geometry_known	0	0	1
+validity	tensile-typical	source_is_typical_value	1	1	1
+scalar	tensile-minimum	foam	tensile_strength_minimum	207	kPa	constant
+uncertainty	tensile-minimum	unstated	-	-	-	-
+validity	tensile-minimum	source_grade_poron_4701_30_320_2023	1	1	1
+validity	tensile-minimum	source_thickness_band	1	1	1
+validity	tensile-minimum	source_temperature_known	0	0	1
+validity	tensile-minimum	source_moisture_condition_known	0	0	1
+validity	tensile-minimum	source_orientation_known	0	0	1
+validity	tensile-minimum	source_test_rate_known	0	0	1
+validity	tensile-minimum	source_specimen_geometry_known	0	0	1
+validity	tensile-minimum	source_is_typical_value	0	0	1
+scalar	elongation-typical	foam	tensile_elongation	1.55	1	constant
+uncertainty	elongation-typical	unstated	-	-	-	-
+validity	elongation-typical	source_grade_poron_4701_30_320_2023	1	1	1
+validity	elongation-typical	source_thickness_band	1	1	1
+validity	elongation-typical	source_temperature_known	0	0	1
+validity	elongation-typical	source_moisture_condition_known	0	0	1
+validity	elongation-typical	source_orientation_known	0	0	1
+validity	elongation-typical	source_test_rate_known	0	0	1
+validity	elongation-typical	source_specimen_geometry_known	0	0	1
+validity	elongation-typical	source_is_typical_value	1	1	1
+scalar	elongation-minimum	foam	tensile_elongation_minimum	1	1	constant
+uncertainty	elongation-minimum	unstated	-	-	-	-
+validity	elongation-minimum	source_grade_poron_4701_30_320_2023	1	1	1
+validity	elongation-minimum	source_thickness_band	1	1	1
+validity	elongation-minimum	source_temperature_known	0	0	1
+validity	elongation-minimum	source_moisture_condition_known	0	0	1
+validity	elongation-minimum	source_orientation_known	0	0	1
+validity	elongation-minimum	source_test_rate_known	0	0	1
+validity	elongation-minimum	source_specimen_geometry_known	0	0	1
+validity	elongation-minimum	source_is_typical_value	0	0	1
+scalar	tear-typical	foam	tear_strength	1200	N/m	constant
+uncertainty	tear-typical	unstated	-	-	-	-
+validity	tear-typical	source_grade_poron_4701_30_320_2023	1	1	1
+validity	tear-typical	source_thickness_band	1	1	1
+validity	tear-typical	source_temperature_known	0	0	1
+validity	tear-typical	source_moisture_condition_known	0	0	1
+validity	tear-typical	source_orientation_known	0	0	1
+validity	tear-typical	source_test_rate_known	0	0	1
+validity	tear-typical	source_specimen_geometry_known	0	0	1
+validity	tear-typical	source_is_typical_value	1	1	1
+scalar	tear-minimum	foam	tear_strength_minimum	500	N/m	constant
+uncertainty	tear-minimum	unstated	-	-	-	-
+validity	tear-minimum	source_grade_poron_4701_30_320_2023	1	1	1
+validity	tear-minimum	source_thickness_band	1	1	1
+validity	tear-minimum	source_temperature_known	0	0	1
+validity	tear-minimum	source_moisture_condition_known	0	0	1
+validity	tear-minimum	source_orientation_known	0	0	1
+validity	tear-minimum	source_test_rate_known	0	0	1
+validity	tear-minimum	source_specimen_geometry_known	0	0	1
+validity	tear-minimum	source_is_typical_value	0	0	1
+scalar	thermal-conductivity	foam	thermal_conductivity	0.076	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	source_grade_poron_4701_30_320_2023	1	1	1
+validity	thermal-conductivity	source_thickness_band	1	1	1
+validity	thermal-conductivity	source_temperature_known	0	0	1
+validity	thermal-conductivity	source_moisture_condition_known	0	0	1
+validity	thermal-conductivity	source_pressure_known	0	0	1
+validity	thermal-conductivity	source_orientation_known	0	0	1
+validity	thermal-conductivity	source_is_typical_value	1	1	1

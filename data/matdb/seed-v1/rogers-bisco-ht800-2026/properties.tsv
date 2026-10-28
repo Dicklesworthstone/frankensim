@@ -1,0 +1,94 @@
+frankensim.matdb-source.v1
+observation	foam	BISCO HT-800 medium cellular silicone foam	Rogers 180-070 August 2026; internal density, ASTM D1056 compression, ASTM C518 conductivity, ASTM D257 resistivity	Typical historical values and specification limits remain separate; specification ranges are not statistical uncertainty or interpolation domains. This revision states ASTM D1056 for compression force deflection but no numeric deflection or speed, so these remain unknown rather than imported from older sheets. Compression set retains 50 percent compression, 22 hours and 100 C; recovery time and temperature are unstated, and the less-than-five-percent limit stays exclusive. Resistivity converts 10^14 ohm cm to 10^12 ohm m. Other temperatures, conditioning, pressure, directions and actual specimen geometry are unstated. Commercial service-temperature and thickness ranges do not extend property validity. No compression modulus, tensile behavior, cyclic/relaxation law, heat capacity, confidence interval or adhesive-backed assembly is inferred.
+scalar	density-typical	foam	density	352	kg/m3	constant
+uncertainty	density-typical	unstated	-	-	-	-
+validity	density-typical	source_grade_bisco_ht800_2026	1	1	1
+validity	density-typical	source_temperature_known	0	0	1
+validity	density-typical	source_moisture_condition_known	0	0	1
+validity	density-typical	source_pressure_known	0	0	1
+validity	density-typical	source_is_typical_value	1	1	1
+scalar	density-minimum	foam	density_minimum	300	kg/m3	constant
+uncertainty	density-minimum	unstated	-	-	-	-
+validity	density-minimum	source_grade_bisco_ht800_2026	1	1	1
+validity	density-minimum	source_temperature_known	0	0	1
+validity	density-minimum	source_moisture_condition_known	0	0	1
+validity	density-minimum	source_pressure_known	0	0	1
+validity	density-minimum	source_is_typical_value	0	0	1
+scalar	density-maximum	foam	density_maximum	473	kg/m3	constant
+uncertainty	density-maximum	unstated	-	-	-	-
+validity	density-maximum	source_grade_bisco_ht800_2026	1	1	1
+validity	density-maximum	source_temperature_known	0	0	1
+validity	density-maximum	source_moisture_condition_known	0	0	1
+validity	density-maximum	source_pressure_known	0	0	1
+validity	density-maximum	source_is_typical_value	0	0	1
+scalar	compression-typical	foam	compression_force_deflection	67	kPa	constant
+uncertainty	compression-typical	unstated	-	-	-	-
+validity	compression-typical	source_grade_bisco_ht800_2026	1	1	1
+validity	compression-typical	source_temperature_known	0	0	1
+validity	compression-typical	source_moisture_condition_known	0	0	1
+validity	compression-typical	source_pressure_known	0	0	1
+validity	compression-typical	source_orientation_known	0	0	1
+validity	compression-typical	source_test_rate_known	0	0	1
+validity	compression-typical	source_specimen_geometry_known	0	0	1
+validity	compression-typical	source_deflection_known	0	0	1
+validity	compression-typical	source_is_typical_value	1	1	1
+scalar	compression-minimum	foam	compression_force_deflection_minimum	41	kPa	constant
+uncertainty	compression-minimum	unstated	-	-	-	-
+validity	compression-minimum	source_grade_bisco_ht800_2026	1	1	1
+validity	compression-minimum	source_temperature_known	0	0	1
+validity	compression-minimum	source_moisture_condition_known	0	0	1
+validity	compression-minimum	source_pressure_known	0	0	1
+validity	compression-minimum	source_orientation_known	0	0	1
+validity	compression-minimum	source_test_rate_known	0	0	1
+validity	compression-minimum	source_specimen_geometry_known	0	0	1
+validity	compression-minimum	source_deflection_known	0	0	1
+validity	compression-minimum	source_is_typical_value	0	0	1
+scalar	compression-maximum	foam	compression_force_deflection_maximum	97	kPa	constant
+uncertainty	compression-maximum	unstated	-	-	-	-
+validity	compression-maximum	source_grade_bisco_ht800_2026	1	1	1
+validity	compression-maximum	source_temperature_known	0	0	1
+validity	compression-maximum	source_moisture_condition_known	0	0	1
+validity	compression-maximum	source_pressure_known	0	0	1
+validity	compression-maximum	source_orientation_known	0	0	1
+validity	compression-maximum	source_test_rate_known	0	0	1
+validity	compression-maximum	source_specimen_geometry_known	0	0	1
+validity	compression-maximum	source_deflection_known	0	0	1
+validity	compression-maximum	source_is_typical_value	0	0	1
+scalar	compression-set-typical	foam	compression_set	0.024	1	constant
+uncertainty	compression-set-typical	unstated	-	-	-	-
+validity	compression-set-typical	source_grade_bisco_ht800_2026	1	1	1
+validity	compression-set-typical	compressive_strain	0.5	0.5	1
+validity	compression-set-typical	compression_duration	79200	79200	s
+validity	compression-set-typical	compression_temperature	373.15	373.15	K
+validity	compression-set-typical	source_recovery_time_known	0	0	1
+validity	compression-set-typical	source_recovery_temperature_known	0	0	1
+validity	compression-set-typical	source_moisture_condition_known	0	0	1
+validity	compression-set-typical	source_specimen_geometry_known	0	0	1
+validity	compression-set-typical	source_is_typical_value	1	1	1
+scalar	compression-set-upper-limit	foam	compression_set_limit	0.05	1	constant
+uncertainty	compression-set-upper-limit	unstated	-	-	-	-
+validity	compression-set-upper-limit	source_grade_bisco_ht800_2026	1	1	1
+validity	compression-set-upper-limit	compressive_strain	0.5	0.5	1
+validity	compression-set-upper-limit	compression_duration	79200	79200	s
+validity	compression-set-upper-limit	compression_temperature	373.15	373.15	K
+validity	compression-set-upper-limit	source_recovery_time_known	0	0	1
+validity	compression-set-upper-limit	source_recovery_temperature_known	0	0	1
+validity	compression-set-upper-limit	source_moisture_condition_known	0	0	1
+validity	compression-set-upper-limit	source_specimen_geometry_known	0	0	1
+validity	compression-set-upper-limit	source_is_typical_value	0	0	1
+scalar	thermal-conductivity	foam	thermal_conductivity	0.076	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	source_grade_bisco_ht800_2026	1	1	1
+validity	thermal-conductivity	source_temperature_known	0	0	1
+validity	thermal-conductivity	source_moisture_condition_known	0	0	1
+validity	thermal-conductivity	source_pressure_known	0	0	1
+validity	thermal-conductivity	source_orientation_known	0	0	1
+validity	thermal-conductivity	source_is_typical_value	1	1	1
+scalar	electrical-resistivity	foam	electrical_resistivity	1e12	Ohm*m	constant
+uncertainty	electrical-resistivity	unstated	-	-	-	-
+validity	electrical-resistivity	source_grade_bisco_ht800_2026	1	1	1
+validity	electrical-resistivity	source_temperature_known	0	0	1
+validity	electrical-resistivity	source_moisture_condition_known	0	0	1
+validity	electrical-resistivity	source_orientation_known	0	0	1
+validity	electrical-resistivity	source_electrical_test_voltage_known	0	0	1
+validity	electrical-resistivity	source_is_typical_value	1	1	1

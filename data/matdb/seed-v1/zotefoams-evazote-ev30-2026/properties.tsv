@@ -1,0 +1,60 @@
+frankensim.matdb-source.v1
+observation	foam	Evazote EV30 closed-cell crosslinked ethylene copolymer block foam	Zotefoams A034 issue 1 revision 2 June 2026; ISO 7214:2012 and ISO 8067:2008 method B	Grade-specific typical population values, not design minima or confidence limits. Density is nominal skin-to-skin. The two compression stresses and two recovery observations are discrete, with no zero-strain point, unloading path, relaxation fit or implied stiffness. Compression-set history is 50 percent compression for 22 hours at 23 C; recovery temperature is not independently reported. Compression/tension rate, specimen dimensions, direction, moisture and pressure are unstated. No conductivity, heat capacity, rate-dependent cushioning or service-temperature validity is inferred. Earlier product revisions are not pooled. All uncertainty is unstated.
+scalar	density	foam	density	30	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade_evazote_ev30_2026	1	1	1
+validity	density	density_includes_skins	1	1	1
+validity	density	source_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+validity	density	source_pressure_known	0	0	1
+scalar	cell-diameter	foam	cell_diameter	0.4	mm	constant
+uncertainty	cell-diameter	unstated	-	-	-	-
+validity	cell-diameter	source_grade_evazote_ev30_2026	1	1	1
+validity	cell-diameter	source_temperature_known	0	0	1
+validity	cell-diameter	source_orientation_known	0	0	1
+curve	compression-points	foam	compressive_stress	compressive_strain	1	kPa	0.25:39,0.5:100	tabulated
+uncertainty	compression-points	unstated	-	-	-	-
+validity	compression-points	source_grade_evazote_ev30_2026	1	1	1
+validity	compression-points	compressive_strain	0.25	0.5	1
+validity	compression-points	source_temperature_known	0	0	1
+validity	compression-points	source_moisture_condition_known	0	0	1
+validity	compression-points	source_pressure_known	0	0	1
+validity	compression-points	source_orientation_known	0	0	1
+validity	compression-points	source_test_rate_known	0	0	1
+validity	compression-points	source_specimen_geometry_known	0	0	1
+scalar	tensile-strength	foam	tensile_strength	520	kPa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	source_grade_evazote_ev30_2026	1	1	1
+validity	tensile-strength	source_temperature_known	0	0	1
+validity	tensile-strength	source_moisture_condition_known	0	0	1
+validity	tensile-strength	source_pressure_known	0	0	1
+validity	tensile-strength	source_orientation_known	0	0	1
+validity	tensile-strength	source_test_rate_known	0	0	1
+validity	tensile-strength	source_specimen_geometry_known	0	0	1
+scalar	tensile-elongation	foam	tensile_elongation	2.05	1	constant
+uncertainty	tensile-elongation	unstated	-	-	-	-
+validity	tensile-elongation	source_grade_evazote_ev30_2026	1	1	1
+validity	tensile-elongation	source_temperature_known	0	0	1
+validity	tensile-elongation	source_moisture_condition_known	0	0	1
+validity	tensile-elongation	source_orientation_known	0	0	1
+validity	tensile-elongation	source_test_rate_known	0	0	1
+validity	tensile-elongation	source_specimen_geometry_known	0	0	1
+curve	compression-set-recovery	foam	compression_set	recovery_time	s	1	1800:0.13,86400:0.04	tabulated
+uncertainty	compression-set-recovery	unstated	-	-	-	-
+validity	compression-set-recovery	source_grade_evazote_ev30_2026	1	1	1
+validity	compression-set-recovery	compressive_strain	0.5	0.5	1
+validity	compression-set-recovery	compression_duration	79200	79200	s
+validity	compression-set-recovery	compression_temperature	296.15	296.15	K
+validity	compression-set-recovery	recovery_time	1800	86400	s
+validity	compression-set-recovery	source_recovery_temperature_known	0	0	1
+validity	compression-set-recovery	source_moisture_condition_known	0	0	1
+validity	compression-set-recovery	source_orientation_known	0	0	1
+validity	compression-set-recovery	source_specimen_geometry_known	0	0	1
+scalar	tear-strength	foam	tear_strength	1675	N/m	constant
+uncertainty	tear-strength	unstated	-	-	-	-
+validity	tear-strength	source_grade_evazote_ev30_2026	1	1	1
+validity	tear-strength	source_temperature_known	0	0	1
+validity	tear-strength	source_moisture_condition_known	0	0	1
+validity	tear-strength	source_orientation_known	0	0	1
+validity	tear-strength	source_test_rate_known	0	0	1
+validity	tear-strength	source_specimen_geometry_known	0	0	1

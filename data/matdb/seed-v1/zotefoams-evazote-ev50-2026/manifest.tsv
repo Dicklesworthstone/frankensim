@@ -1,0 +1,26 @@
+frankensim.matdb-manifest.v3
+pack_id	zotefoams-evazote-ev50-2026
+redistribution	permitted	Selected attributed numerical facts and original notes only; no source document or table layout is redistributed
+citation	Zotefoams, Evazote EV50 Product Information Sheet A037, issue 1 revision 1, June 2026, p. 1; https://www.zotefoams.com/wp-content/uploads/2025/03/PIS-A037-Evazote-EV50.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	zotefoams-evazote-ev50-2026	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	cell_diameter	cell-diameter	dimensional
+property	compressive_stress	compressive-stress	dimensional
+property	tensile_strength	tensile-strength	dimensional
+property	tensile_elongation	tensile-elongation	dimensional
+property	compression_set	compression-set	dimensional
+property	tear_strength	tear-strength	dimensional
+axis	source_grade_evazote_ev50_2026	source-grade-evazote-ev50-2026	dimensional
+axis	source_temperature_known	source-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	source_orientation_known	source-orientation-known	dimensional
+axis	source_test_rate_known	source-test-rate-known	dimensional
+axis	source_specimen_geometry_known	source-specimen-geometry-known	dimensional
+axis	density_includes_skins	density-includes-skins	dimensional
+axis	compressive_strain	compressive-strain	dimensional
+axis	compression_duration	compression-duration	dimensional
+axis	compression_temperature	compression-temperature	absolute-temperature
+axis	recovery_time	recovery-time	dimensional
+axis	source_recovery_temperature_known	source-recovery-temperature-known	dimensional
