@@ -27,7 +27,10 @@ fn pressure_driven_channel_refines_and_conserves_mass() {
     for n in [3, 6] {
         let mesh = TriMesh::from_mesh2(&Mesh2::triangles(2.0, 1.0, 2 * n, n));
         let system = FluxSystem::new(&mesh);
-        let params = FluxParams { nu: 0.4, ..FluxParams::default() };
+        let params = FluxParams {
+            nu: 0.4,
+            ..FluxParams::default()
+        };
         let wall = |_: [f64; 2]| [0.0; 2];
         let traction = |x: [f64; 2], normal: [f64; 2]| {
             let pressure = 5.3 - 0.8 * x[0];
@@ -44,7 +47,10 @@ fn pressure_driven_channel_refines_and_conserves_mass() {
             .filter(|(edge, _)| mesh.is_boundary(*edge))
             .map(|(edge, geometry)| {
                 if geometry.normal[0].abs() > 0.5 {
-                    StokesBoundary::TotalTraction { edge, value: &traction }
+                    StokesBoundary::TotalTraction {
+                        edge,
+                        value: &traction,
+                    }
                 } else {
                     StokesBoundary::Velocity { edge, value: &wall }
                 }
@@ -54,11 +60,12 @@ fn pressure_driven_channel_refines_and_conserves_mass() {
             .assemble_stokes_mixed(params, &|_| [0.0; 2], &boundaries)
             .expect("admit pressure-driven channel");
         let solution = assembly.solve().expect("solve pressure-driven channel");
-        assert_eq!(solution.pressure_reference, StokesPressureReference::TractionDatum);
-        let (error, divergence) = system.velocity_error(
-            &solution.field.x,
-            &|x| [x[1] * (1.0 - x[1]), 0.0],
+        assert_eq!(
+            solution.pressure_reference,
+            StokesPressureReference::TractionDatum
         );
+        let (error, divergence) =
+            system.velocity_error(&solution.field.x, &|x| [x[1] * (1.0 - x[1]), 0.0]);
         assert!(divergence < 2e-10, "n={n}, divergence={divergence:e}");
         assert!(solution.field.rel_residual <= params.tol);
         let mut inward = 0.0;
@@ -78,8 +85,12 @@ fn pressure_driven_channel_refines_and_conserves_mass() {
         if n == 6 {
             assert!(error < 0.02, "channel velocity L2={error:e}");
             assert!((outward - 1.0 / 6.0).abs() < 0.008, "outlet Q={outward:e}");
-            let mean = solution.pressure.iter().zip(&mesh.areas)
-                .map(|(pressure, area)| pressure * area).sum::<f64>()
+            let mean = solution
+                .pressure
+                .iter()
+                .zip(&mesh.areas)
+                .map(|(pressure, area)| pressure * area)
+                .sum::<f64>()
                 / mesh.areas.iter().sum::<f64>();
             assert!((mean - 4.5).abs() < 0.05, "pressure datum mean={mean}");
         }
@@ -95,7 +106,10 @@ fn pressure_driven_channel_refines_and_conserves_mass() {
 fn mixed_affine_traction_patch_retains_pressure_datum_and_shift() {
     let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 3, 3));
     let system = FluxSystem::new(&mesh);
-    let params = FluxParams { nu: 0.7, ..FluxParams::default() };
+    let params = FluxParams {
+        nu: 0.7,
+        ..FluxParams::default()
+    };
     let velocity = |x: [f64; 2]| [0.2 + 1.3 * x[1], 0.0];
     let mut previous: Option<Vec<f64>> = None;
     for pressure in [7.0, 32.0] {
@@ -106,13 +120,22 @@ fn mixed_affine_traction_patch_retains_pressure_datum_and_shift() {
                 shear * normal[0] - pressure * normal[1],
             ]
         };
-        let boundaries: Vec<_> = mesh.edges.iter().enumerate()
+        let boundaries: Vec<_> = mesh
+            .edges
+            .iter()
+            .enumerate()
             .filter(|(edge, _)| mesh.is_boundary(*edge))
             .map(|(edge, geometry)| {
                 if geometry.normal[0] < -0.5 {
-                    StokesBoundary::Velocity { edge, value: &velocity }
+                    StokesBoundary::Velocity {
+                        edge,
+                        value: &velocity,
+                    }
                 } else {
-                    StokesBoundary::TotalTraction { edge, value: &traction }
+                    StokesBoundary::TotalTraction {
+                        edge,
+                        value: &traction,
+                    }
                 }
             })
             .collect();
@@ -122,12 +145,26 @@ fn mixed_affine_traction_patch_retains_pressure_datum_and_shift() {
             .solve()
             .expect("solve mixed patch");
         let (error, divergence) = system.velocity_error(&solution.field.x, &velocity);
-        assert!(error < 5e-11 && divergence < 5e-11, "error={error:e}, div={divergence:e}");
-        assert!(solution.pressure.iter().all(|value| (value - pressure).abs() < 5e-10));
-        assert_eq!(solution.pressure_reference, StokesPressureReference::TractionDatum);
+        assert!(
+            error < 5e-11 && divergence < 5e-11,
+            "error={error:e}, div={divergence:e}"
+        );
+        assert!(
+            solution
+                .pressure
+                .iter()
+                .all(|value| (value - pressure).abs() < 5e-10)
+        );
+        assert_eq!(
+            solution.pressure_reference,
+            StokesPressureReference::TractionDatum
+        );
         if let Some(old) = previous.as_ref() {
-            assert!(old.iter().zip(&solution.field.x[..system.n_u])
-                .all(|(a, b)| (a - b).abs() < 5e-11));
+            assert!(
+                old.iter()
+                    .zip(&solution.field.x[..system.n_u])
+                    .all(|(a, b)| (a - b).abs() < 5e-11)
+            );
         }
         previous = Some(solution.field.x[..system.n_u].to_vec());
     }
@@ -139,16 +176,22 @@ fn mixed_affine_traction_patch_retains_pressure_datum_and_shift() {
 fn all_velocity_partition_preserves_existing_operator_bits() {
     let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 2));
     let system = FluxSystem::new(&mesh);
-    let params = FluxParams { nu: 0.37, ..FluxParams::default() };
+    let params = FluxParams {
+        nu: 0.37,
+        ..FluxParams::default()
+    };
     let velocity = |x: [f64; 2]| [0.3 - x[1], x[0] - 0.2];
     let force = |x: [f64; 2]| [x[0] - 0.4, -2.0 * x[1]];
     let boundaries = velocity_boundaries(&mesh, &velocity);
-    let (matrix, rhs) = system.assemble_variable_viscosity(
-        params, &|_, _| params.nu, &force, &velocity, None,
-    );
-    let mixed = system.assemble_stokes_mixed(params, &force, &boundaries)
+    let (matrix, rhs) =
+        system.assemble_variable_viscosity(params, &|_, _| params.nu, &force, &velocity, None);
+    let mixed = system
+        .assemble_stokes_mixed(params, &force, &boundaries)
         .expect("compatible prescribed velocities");
-    assert_eq!(mixed.pressure_reference(), StokesPressureReference::MeanZero);
+    assert_eq!(
+        mixed.pressure_reference(),
+        StokesPressureReference::MeanZero
+    );
     for row in 0..matrix.nrows() {
         let (old_columns, old_values) = matrix.row(row);
         let (new_columns, new_values) = mixed.matrix().row(row);
@@ -192,14 +235,23 @@ fn boundary_ownership_and_closed_domain_flux_are_checked_before_solve() {
         system.assemble_stokes_mixed(params, &|_| [0.0; 2], &boundaries[1..]),
         Err(StokesBoundaryError::MissingEdge { .. })
     ));
-    let interior = (0..mesh.edges.len()).find(|edge| !mesh.is_boundary(*edge)).unwrap();
+    let interior = (0..mesh.edges.len())
+        .find(|edge| !mesh.is_boundary(*edge))
+        .unwrap();
     let mut wrong_owner = boundaries.clone();
-    wrong_owner.push(StokesBoundary::Velocity { edge: interior, value: &velocity });
+    wrong_owner.push(StokesBoundary::Velocity {
+        edge: interior,
+        value: &velocity,
+    });
     assert!(matches!(
         system.assemble_stokes_mixed(params, &|_| [0.0; 2], &wrong_owner),
         Err(StokesBoundaryError::InteriorEdge { .. })
     ));
-    assert_eq!(calls.get(), 0, "ownership must fail before callback evaluation");
+    assert_eq!(
+        calls.get(),
+        0,
+        "ownership must fail before callback evaluation"
+    );
 
     let outward = |x: [f64; 2]| x;
     let incompatible = velocity_boundaries(&mesh, &outward);
@@ -208,9 +260,15 @@ fn boundary_ownership_and_closed_domain_flux_are_checked_before_solve() {
         Err(StokesBoundaryError::IncompatibleFlux { .. })
     ));
     let zero_traction = |_: [f64; 2], _: [f64; 2]| [0.0; 2];
-    let unanchored: Vec<_> = mesh.edges.iter().enumerate()
+    let unanchored: Vec<_> = mesh
+        .edges
+        .iter()
+        .enumerate()
         .filter(|(edge, _)| mesh.is_boundary(*edge))
-        .map(|(edge, _)| StokesBoundary::TotalTraction { edge, value: &zero_traction })
+        .map(|(edge, _)| StokesBoundary::TotalTraction {
+            edge,
+            value: &zero_traction,
+        })
         .collect();
     assert!(matches!(
         system.assemble_stokes_mixed(params, &|_| [0.0; 2], &unanchored),
@@ -219,5 +277,94 @@ fn boundary_ownership_and_closed_domain_flux_are_checked_before_solve() {
     assert!(matches!(
         system.assemble_stokes_mixed(params, &|_| [f64::NAN, 0.0], &boundaries),
         Err(StokesBoundaryError::NonFiniteForce)
+    ));
+}
+
+/// A natural boundary removes the pressure pin. Above the dense cutoff the
+/// block Schur solve must recover that physical datum, not a mean-zero shift.
+#[test]
+fn sparse_mixed_traction_retains_pressure_datum_and_short_budgets_refuse() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 16, 16));
+    let system = FluxSystem::new(&mesh);
+    assert!(system.n > 1500);
+    let params = FluxParams {
+        nu: 0.7,
+        tol: 1e-13,
+        max_iters: 4000,
+        ..FluxParams::default()
+    };
+    let pressure = 7.0;
+    let velocity = |x: [f64; 2]| [0.2 + 1.3 * x[1], 0.0];
+    let traction = |_: [f64; 2], normal: [f64; 2]| {
+        let shear = params.nu * 1.3;
+        [
+            -pressure * normal[0] + shear * normal[1],
+            shear * normal[0] - pressure * normal[1],
+        ]
+    };
+    let boundaries: Vec<_> = mesh
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(edge, _)| mesh.is_boundary(*edge))
+        .map(|(edge, geometry)| {
+            if geometry.normal[0] < -0.5 {
+                StokesBoundary::Velocity {
+                    edge,
+                    value: &velocity,
+                }
+            } else {
+                StokesBoundary::TotalTraction {
+                    edge,
+                    value: &traction,
+                }
+            }
+        })
+        .collect();
+    let assembly = system
+        .assemble_stokes_mixed(params, &|_| [0.0; 2], &boundaries)
+        .unwrap();
+    assert_eq!(
+        assembly.pressure_reference(),
+        StokesPressureReference::TractionDatum
+    );
+    let solution = assembly.solve().unwrap();
+    let (error, divergence) = system.velocity_error(&solution.field.x, &velocity);
+    let pressure_error = solution
+        .pressure
+        .iter()
+        .fold(0.0_f64, |error, value| error.max((value - pressure).abs()));
+    eprintln!(
+        "sparse mixed Stokes: dofs={}, iterations={}, L2={error:e}, div={divergence:e}, pressure={pressure_error:e}, residual={:e}, scaled={:e}",
+        system.n,
+        solution.field.iters,
+        solution.field.rel_residual,
+        solution.field.scaled_rel_residual,
+    );
+    assert!(solution.field.iters > 0 && solution.field.iters <= params.max_iters);
+    assert!(solution.field.converged(params.tol));
+    assert!(error < 2e-10 && divergence < 2e-9);
+    assert!(pressure_error < 2e-9);
+
+    // A partial restart is admitted and bounded; it must not be rounded up
+    // to an old 100-iteration cycle or published as a converged flow.
+    let short = system
+        .assemble_stokes_mixed(
+            FluxParams {
+                max_iters: 1,
+                ..params
+            },
+            &|_| [0.0; 2],
+            &boundaries,
+        )
+        .unwrap();
+    assert!(matches!(
+        short.solve(),
+        Err(StokesBoundaryError::NotConverged {
+            iterations,
+            relative_residual,
+            scaled_relative_residual,
+        }) if iterations <= 1
+            && (relative_residual > params.tol || scaled_relative_residual > params.tol)
     ));
 }

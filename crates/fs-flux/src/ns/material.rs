@@ -340,9 +340,9 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> MaterialFluxSystem<'s, 'm, 'a, F> {
         &self,
         discrete: FluxSolution,
     ) -> Result<MaterialFluxSolution, MaterialFluxError> {
-        if !discrete.rel_residual.is_finite() || discrete.rel_residual > self.params.tol {
+        if !discrete.converged(self.params.tol) {
             return Err(MaterialFluxError::LinearConvergence {
-                residual: discrete.rel_residual,
+                residual: discrete.rel_residual.max(discrete.scaled_rel_residual),
                 tolerance: self.params.tol,
             });
         }

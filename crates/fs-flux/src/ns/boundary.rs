@@ -72,12 +72,14 @@ pub enum StokesBoundaryError {
     DisconnectedMesh,
     /// The assembled linear system could not be factored.
     SingularSystem,
-    /// The explicitly recomputed residual did not meet the requested tolerance.
+    /// An explicitly recomputed residual did not meet the requested tolerance.
     NotConverged {
         /// Linear iterations performed.
         iterations: usize,
-        /// True Euclidean ||b-Ax|| / max(||b||, 1e-150).
+        /// True Euclidean ||b-Ax|| / max(||b||, f64::MIN_POSITIVE).
         relative_residual: f64,
+        /// Relative residual after normalizing each equation by its row norm.
+        scaled_relative_residual: f64,
     },
 }
 
@@ -159,7 +161,8 @@ impl StokesAssembly<'_, '_> {
         self.reference
     }
 
-    /// Solve and require a true residual, without changing traction pressure.
+    /// Require both original and row-scaled residuals without shifting
+    /// traction pressure or hiding constraint error in large viscous loads.
     ///
     /// # Errors
     /// Refuses singular systems, non-finite results or exhausted convergence.
@@ -168,30 +171,25 @@ impl StokesAssembly<'_, '_> {
             .system
             .solve_linear_result(&self.matrix, &self.rhs, self.params)?;
         let mut residual = vec![0.0; self.rhs.len()];
-        self.matrix.spmv(&field.x, &mut residual);
-        let mut error = 0.0_f64;
-        let mut load = 0.0_f64;
-        for (actual, target) in residual.into_iter().zip(&self.rhs) {
-            error = error.hypot(actual - target);
-            load = load.hypot(*target);
-        }
-        let relative_residual = error / load.max(1e-150);
-        if !field.x.iter().all(|value| value.is_finite())
-            || !relative_residual.is_finite()
-            || relative_residual > self.params.tol
-        {
+        let (relative_residual, scaled_relative_residual) =
+            super::sparse::residuals(&self.matrix, &self.rhs, &field.x, &mut residual);
+        field.rel_residual = relative_residual;
+        field.scaled_rel_residual = scaled_relative_residual;
+        if !field.x.iter().all(|value| value.is_finite()) || !field.converged(self.params.tol) {
             return Err(StokesBoundaryError::NotConverged {
                 iterations: field.iters,
                 relative_residual,
+                scaled_relative_residual,
             });
         }
-        field.rel_residual = relative_residual;
         let pressure = match self.reference {
             StokesPressureReference::MeanZero => self.system.pressure(&field.x),
             StokesPressureReference::TractionDatum => field.x[self.system.n_u..].to_vec(),
         };
         if !pressure.iter().all(|value| value.is_finite()) {
-            return Err(StokesBoundaryError::InvalidInput("non-finite reported pressure"));
+            return Err(StokesBoundaryError::InvalidInput(
+                "non-finite reported pressure",
+            ));
         }
         Ok(StokesSolution {
             field,
@@ -225,20 +223,20 @@ impl<'m> FluxSystem<'m> {
         force: &dyn Fn([f64; 2]) -> [f64; 2],
         boundaries: &[StokesBoundary<'_>],
     ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError> {
-        if !(params.nu.is_finite() && params.nu > 0.0
-            && params.sigma.is_finite() && params.sigma > 0.0
-            && params.tol.is_finite() && params.tol > 0.0)
+        if !(params.nu.is_finite()
+            && params.nu > 0.0
+            && params.sigma.is_finite()
+            && params.sigma > 0.0
+            && params.tol.is_finite()
+            && params.tol > 0.0)
             || params.max_iters == 0
         {
-            return Err(StokesBoundaryError::InvalidInput("invalid Stokes parameters"));
+            return Err(StokesBoundaryError::InvalidInput(
+                "invalid Stokes parameters",
+            ));
         }
         if self.mesh.tris.is_empty() {
             return Err(StokesBoundaryError::InvalidInput("empty fluid mesh"));
-        }
-        if self.n > 1500 && params.max_iters < 100 {
-            return Err(StokesBoundaryError::InvalidInput(
-                "iterative Stokes needs a budget of at least one 100-step GMRES cycle",
-            ));
         }
         let admitted = self.admit_stokes_boundaries(boundaries)?;
         let bad_force = Cell::new(false);
@@ -266,11 +264,12 @@ impl<'m> FluxSystem<'m> {
             return Err(StokesBoundaryError::NonFiniteForce);
         }
         if !rhs.iter().all(|value| value.is_finite())
-            || (0..matrix.nrows()).any(|row| {
-                !matrix.row(row).1.iter().all(|value| value.is_finite())
-            })
+            || (0..matrix.nrows())
+                .any(|row| !matrix.row(row).1.iter().all(|value| value.is_finite()))
         {
-            return Err(StokesBoundaryError::InvalidInput("non-finite assembled operator or load"));
+            return Err(StokesBoundaryError::InvalidInput(
+                "non-finite assembled operator or load",
+            ));
         }
         Ok(StokesAssembly {
             system: self,
@@ -329,7 +328,11 @@ impl<'m> FluxSystem<'m> {
         while let Some(cell) = queue.pop() {
             for &(edge, _) in &mesh.tri_edges[cell] {
                 let adjacent = mesh.edges[edge].tris;
-                let other = if adjacent.0 == cell { adjacent.1 } else { adjacent.0 };
+                let other = if adjacent.0 == cell {
+                    adjacent.1
+                } else {
+                    adjacent.0
+                };
                 if other != usize::MAX && !visited[other] {
                     visited[other] = true;
                     queue.push(other);
@@ -345,10 +348,7 @@ impl<'m> FluxSystem<'m> {
         for (edge, owner) in owners.into_iter().enumerate() {
             let Some(owner) = owner else { continue };
             let geometry = &mesh.edges[edge];
-            let points = edge_gauss_pub(
-                mesh.verts[geometry.verts.0],
-                mesh.verts[geometry.verts.1],
-            );
+            let points = edge_gauss_pub(mesh.verts[geometry.verts.0], mesh.verts[geometry.verts.1]);
             let mut values = [[0.0; 2]; 2];
             for (q, (point, weight)) in points.into_iter().enumerate() {
                 values[q] = match owner {
@@ -379,9 +379,15 @@ impl<'m> FluxSystem<'m> {
                 * boundaries.len() as f64
                 * absolute_flux.max(f64::MIN_POSITIVE);
             if net_flux.abs() > tolerance {
-                return Err(StokesBoundaryError::IncompatibleFlux { net_flux, tolerance });
+                return Err(StokesBoundaryError::IncompatibleFlux {
+                    net_flux,
+                    tolerance,
+                });
             }
         }
-        Ok(AdmittedBoundary { samples, has_traction })
+        Ok(AdmittedBoundary {
+            samples,
+            has_traction,
+        })
     }
 }

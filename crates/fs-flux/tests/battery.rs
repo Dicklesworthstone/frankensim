@@ -510,6 +510,199 @@ fn flux_016_implicit_rheology_refuses_invalid_or_unconverged_steps() {
     ));
 }
 
+/// G0/G1: the sparse pressure/velocity solve agrees with direct factorization
+/// for the actual symmetric-stress operator, including discontinuous material
+/// viscosity, BDF1 mass and nonsymmetric convection/strong boundary rows.
+#[test]
+fn flux_017_sparse_saddle_matches_direct_variable_viscosity() {
+    let mesh = unit_mesh(4);
+    let sys = FluxSystem::new(&mesh);
+    let params = FluxParams {
+        tol: 1e-11,
+        max_iters: 1200,
+        ..FluxParams::default()
+    };
+    let advect = interpolate(&mesh, sys.n_u, &|x| [0.1 * x[1], 0.0]);
+    for (contrast, inv_dt) in [(1.0, 0.0), (100.0, 0.0), (100.0, 50.0)] {
+        let viscosity = |cell: usize, x: [f64; 2]| {
+            (1.0 + x[0])
+                * if mesh.centroids[cell][1] < 0.5 {
+                    1.0
+                } else {
+                    contrast
+                }
+        };
+        let (a, rhs) = sys.assemble_viscous_transient(
+            params,
+            &viscosity,
+            &|x| mms_f(x, 1.0),
+            &|_| [0.0; 2],
+            Some(&advect),
+            inv_dt,
+            Some(&advect),
+        );
+        let direct = sys.solve_linear(&a, &rhs, params);
+        let sparse = sys.solve_sparse(&a, &rhs, params);
+        let error = sparse
+            .x
+            .iter()
+            .zip(&direct.x)
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let norm = direct.x.iter().map(|v| v * v).sum::<f64>().sqrt();
+        verdict(
+            "flux-017-sparse-direct-agreement",
+            sparse.converged(params.tol) && error / norm < 2e-8,
+            &format!(
+                "contrast={contrast}, inv_dt={inv_dt}, iterations={}, residual={:.3e}, relative error={:.3e}",
+                sparse.iters,
+                sparse.rel_residual,
+                error / norm
+            ),
+        );
+    }
+}
+
+/// G1: an exact affine shear with spatial viscosity crosses the former
+/// dense-solver cutoff. Reciprocal viscous traction requires both load
+/// components; the transient mass/convection terms preserve this steady field.
+#[test]
+fn flux_018_sparse_variable_viscosity_flow_above_dense_cutoff() {
+    let mesh = unit_mesh(16);
+    let sys = FluxSystem::new(&mesh);
+    assert!(sys.n > 1500);
+    let params = FluxParams {
+        tol: 1e-11,
+        max_iters: 1600,
+        ..FluxParams::default()
+    };
+    let velocity = |x: [f64; 2]| [x[1], 0.0];
+    let previous = interpolate(&mesh, sys.n_u, &velocity);
+    let viscosity = |_: usize, x: [f64; 2]| 0.2 + 3.0 * x[0] * x[0] + 0.25 * x[1];
+    let (a, rhs) = sys.assemble_viscous_transient(
+        params,
+        &viscosity,
+        &|x| [-0.25, -6.0 * x[0]],
+        &velocity,
+        Some(&previous),
+        25.0,
+        Some(&previous),
+    );
+    let solution = sys.solve_linear(&a, &rhs, params);
+    let (error, div) = sys.velocity_error(&solution.x, &velocity);
+    verdict(
+        "flux-018-sparse-physical-flow",
+        solution.converged(params.tol) && error < 2e-8 && div < 2e-8,
+        &format!(
+            "dofs={}, iterations={}, residual={:.3e}, L2={error:.3e}, divergence={div:.3e}",
+            sys.n, solution.iters, solution.rel_residual
+        ),
+    );
+}
+
+/// G0: a sparse solve cannot spend a complete restart after its caller's
+/// remaining budget, and reports the true unpreconditioned equation defect.
+#[test]
+fn flux_019_sparse_solver_honors_short_iteration_budgets() {
+    let mesh = unit_mesh(4);
+    let sys = FluxSystem::new(&mesh);
+    let params = FluxParams {
+        max_iters: 3,
+        ..FluxParams::default()
+    };
+    let (a, rhs) = sys.assemble_variable_viscosity(
+        params,
+        &|_, x| 0.1 + x[0] * x[0],
+        &|x| mms_f(x, 1.0),
+        &|_| [0.0; 2],
+        None,
+    );
+    let short = sys.solve_sparse(&a, &rhs, params);
+    assert_eq!(short.iters, 3);
+    assert!(!short.converged(params.tol));
+    assert!(short.rel_residual > params.tol);
+    let mut ax = vec![0.0; sys.n];
+    a.spmv(&short.x, &mut ax);
+    let defect = ax
+        .iter()
+        .zip(&rhs)
+        .fold(0.0_f64, |s, (a, b)| s.hypot(a - b));
+    let norm = rhs.iter().fold(0.0_f64, |s, v| s.hypot(*v));
+    assert_eq!(short.rel_residual, defect / norm);
+    let zero = sys.solve_sparse(
+        &a,
+        &vec![0.0; sys.n],
+        FluxParams {
+            max_iters: 0,
+            ..params
+        },
+    );
+    assert_eq!(zero.iters, 0);
+    assert_eq!(zero.rel_residual, 0.0);
+    assert_eq!(zero.scaled_rel_residual, 0.0);
+    assert!(zero.converged(params.tol));
+}
+
+/// G1: momentum loads at a 10,000:1 material interface must not hide continuity
+/// or strong boundary errors. The exact layered Couette velocity has continuous
+/// traction and its kink lies on the mesh; all cells, including the pinned
+/// pressure cell, must remain divergence-free above the dense cutoff.
+#[test]
+fn flux_020_sparse_high_contrast_preserves_mass_and_boundary_moments() {
+    let mesh = unit_mesh(16);
+    let sys = FluxSystem::new(&mesh);
+    let params = FluxParams {
+        tol: 1e-11,
+        max_iters: 1600,
+        ..FluxParams::default()
+    };
+    let contrast = 10_000.0;
+    let traction = 1.0 / (0.5 + 0.5 / contrast);
+    let velocity = |x: [f64; 2]| {
+        [
+            traction * (x[1].min(0.5) + (x[1] - 0.5).max(0.0) / contrast),
+            0.0,
+        ]
+    };
+    let (matrix, rhs) = sys.assemble_variable_viscosity(
+        params,
+        &|cell, _| {
+            if mesh.centroids[cell][1] < 0.5 {
+                1.0
+            } else {
+                contrast
+            }
+        },
+        &|_| [0.0; 2],
+        &velocity,
+        None,
+    );
+    let solution = sys.solve_linear(&matrix, &rhs, params);
+    let (error, divergence) = sys.velocity_error(&solution.x, &velocity);
+    let exact_moments = interpolate(&mesh, sys.n_u, &velocity);
+    let mut boundary_error = 0.0_f64;
+    for edge in 0..mesh.edges.len() {
+        if mesh.is_boundary(edge) {
+            for moment in 0..2 {
+                let dof = 2 * edge + moment;
+                boundary_error = boundary_error.max((solution.x[dof] - exact_moments[dof]).abs());
+            }
+        }
+    }
+    verdict(
+        "flux-020-sparse-high-contrast-constraints",
+        solution.converged(params.tol)
+            && error < 2e-8
+            && divergence < 2e-8
+            && boundary_error < 2e-10,
+        &format!(
+            "iterations={}, original={:.3e}, scaled={:.3e}, L2={error:.3e}, divergence={divergence:.3e}, boundary={boundary_error:.3e}",
+            solution.iters, solution.rel_residual, solution.scaled_rel_residual
+        ),
+    );
+}
+
 /// flux-001: the BDM1 basis reproduces its defining dofs (Kronecker
 /// identity), its divergence is the constant matching the net normal
 /// flux, and the normal trace is single-valued across interior edges

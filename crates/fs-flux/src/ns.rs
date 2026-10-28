@@ -15,9 +15,9 @@
 use crate::bdm::{CellBasis, cell_basis, eval_basis, tri_quad};
 use crate::trimesh::TriMesh;
 use fs_la::factor::lu;
-use fs_solver::krylov::GmresState;
-use fs_solver::op::CsrOp;
 use fs_sparse::{Coo, Csr};
+
+mod sparse;
 
 /// Checked steady velocity/total-traction boundary partition.
 pub mod boundary;
@@ -78,8 +78,25 @@ pub struct FluxSolution {
     pub n_u: usize,
     /// GMRES iterations of the last solve.
     pub iters: usize,
-    /// Final relative residual.
+    /// Final Euclidean relative residual of the original assembled equations.
     pub rel_residual: f64,
+    /// Relative residual after dividing each equation and load by the largest
+    /// absolute entry in its matrix row. This protects constraint equations
+    /// from being hidden by large viscous momentum loads.
+    pub scaled_rel_residual: f64,
+}
+
+impl FluxSolution {
+    /// Both independently recomputed equation defects satisfy the tolerance.
+    #[must_use]
+    pub fn converged(&self, tolerance: f64) -> bool {
+        tolerance.is_finite()
+            && tolerance > 0.0
+            && self.rel_residual.is_finite()
+            && self.scaled_rel_residual.is_finite()
+            && self.rel_residual <= tolerance
+            && self.scaled_rel_residual <= tolerance
+    }
 }
 
 /// Accepted fully implicit generalized-Newtonian time step. The nonlinear
@@ -91,7 +108,8 @@ pub struct FluxRheologyStep {
     pub iterations: usize,
     /// Last relative velocity update.
     pub relative_update: f64,
-    /// Relative residual of the actual nonlinear BDF1 equations.
+    /// Larger of the original and row-equilibrated relative residuals of the
+    /// independently reassembled nonlinear BDF1 equations.
     pub nonlinear_residual: f64,
 }
 
@@ -611,9 +629,9 @@ impl<'m> FluxSystem<'m> {
         }
     }
 
-    /// Solve an assembled system: dense LU below the fixture cutoff
-    /// (exact, deterministic — the saddle is unpreconditioned poison
-    /// for plain Krylov), GMRES restarts above it.
+    /// Solve an assembled system: dense LU below the fixture cutoff,
+    /// sparse block-preconditioned FGMRES above it. Both routes report
+    /// the residual of the original assembled equations.
     ///
     /// # Panics
     /// If the dense factorization hits a zero pivot (singular system).
@@ -631,12 +649,9 @@ impl<'m> FluxSystem<'m> {
     ) -> Result<FluxSolution, boundary::StokesBoundaryError> {
         if self.n <= 1500 {
             let flat = a.to_dense();
-            let f = lu(&flat, self.n)
-                .map_err(|_| boundary::StokesBoundaryError::SingularSystem)?;
+            let f = lu(&flat, self.n).map_err(|_| boundary::StokesBoundaryError::SingularSystem)?;
             let mut x = rhs.to_vec();
             f.solve(&mut x);
-            let mut r2 = 0.0;
-            let mut b2 = 0.0;
             let mut ax = vec![0.0f64; self.n];
             // Viscosity contrasts badly scale the velocity block against
             // the exact continuity rows. Reuse the LU for two residual
@@ -652,28 +667,16 @@ impl<'m> FluxSystem<'m> {
                     x[i] += ax[i];
                 }
             }
-            a.spmv(&x, &mut ax);
-            for i in 0..self.n {
-                r2 += (ax[i] - rhs[i]).powi(2);
-                b2 += rhs[i].powi(2);
-            }
+            let (rel_residual, scaled_rel_residual) = sparse::residuals(a, rhs, &x, &mut ax);
             return Ok(FluxSolution {
                 x,
                 n_u: self.n_u,
                 iters: 0,
-                rel_residual: (r2 / b2.max(1e-300)).sqrt(),
+                rel_residual,
+                scaled_rel_residual,
             });
         }
-        let op = CsrOp::general(a.clone());
-        let mut st = GmresState::new(rhs, 100);
-        let cycles = params.max_iters / 100;
-        let _ = st.run(&op, rhs, params.tol, cycles.max(1), false);
-        Ok(FluxSolution {
-            x: st.x.clone(),
-            n_u: self.n_u,
-            iters: st.iters,
-            rel_residual: st.rel_residual(),
-        })
+        Ok(self.solve_sparse(a, rhs, params))
     }
 
     /// Solve the TRANSPOSED system (discrete adjoint), dense path.
@@ -880,6 +883,35 @@ impl<'m> FluxSystem<'m> {
         maximum_iterations: usize,
         relative_tolerance: f64,
     ) -> Result<FluxRheologyStep, FluxRheologyError> {
+        self.bdf1_rheology_step_checked(
+            params,
+            law,
+            force,
+            boundary,
+            previous_velocity,
+            timestep_s,
+            maximum_iterations,
+            relative_tolerance,
+            &|| true,
+        )
+    }
+
+    // Material owners retain their concrete query error outside the scalar
+    // assembly callback. Stop after the already-started assembly, before any
+    // linear solve; the owner returns its original error and publishes no state.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn bdf1_rheology_step_checked(
+        &self,
+        params: FluxParams,
+        law: &dyn Fn(usize, [f64; 2], f64) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundary: &dyn Fn([f64; 2]) -> [f64; 2],
+        previous_velocity: &[f64],
+        timestep_s: f64,
+        maximum_iterations: usize,
+        relative_tolerance: f64,
+        source_is_valid: &dyn Fn() -> bool,
+    ) -> Result<FluxRheologyStep, FluxRheologyError> {
         if self.mesh.tris.is_empty()
             || previous_velocity.len() != self.n_u
             || previous_velocity.iter().any(|value| !value.is_finite())
@@ -962,14 +994,14 @@ impl<'m> FluxSystem<'m> {
         };
         for iteration in 1..=maximum_iterations {
             let (operator, rhs) = assemble(&current);
+            if !source_is_valid() {
+                return Err(FluxRheologyError::Invalid("constitutive source refused"));
+            }
             let next = self.solve_linear(&operator, &rhs, params);
-            if !next.rel_residual.is_finite()
-                || next.rel_residual > params.tol
-                || next.x.iter().any(|value| !value.is_finite())
-            {
+            if !next.converged(params.tol) || next.x.iter().any(|value| !value.is_finite()) {
                 return Err(FluxRheologyError::LinearConvergence {
                     iteration,
-                    residual: next.rel_residual,
+                    residual: next.rel_residual.max(next.scaled_rel_residual),
                 });
             }
             let mut difference = 0.0_f64;
@@ -981,15 +1013,17 @@ impl<'m> FluxSystem<'m> {
             let update = difference / magnitude.max(f64::MIN_POSITIVE);
             if update <= relative_tolerance || iteration == maximum_iterations {
                 let (nonlinear, rhs) = assemble(&next.x);
-                let mut residual = vec![0.0; self.n];
-                nonlinear.spmv(&next.x, &mut residual);
-                let mut defect = 0.0_f64;
-                let mut scale = 0.0_f64;
-                for i in 0..self.n {
-                    defect = defect.hypot(residual[i] - rhs[i]);
-                    scale = scale.hypot(rhs[i]);
+                if !source_is_valid() {
+                    return Err(FluxRheologyError::Invalid("constitutive source refused"));
                 }
-                let defect = defect / scale.max(f64::MIN_POSITIVE);
+                let mut residual = vec![0.0; self.n];
+                let (original, scaled) =
+                    sparse::residuals(&nonlinear, &rhs, &next.x, &mut residual);
+                let defect = if original.is_finite() && scaled.is_finite() {
+                    original.max(scaled)
+                } else {
+                    f64::INFINITY
+                };
                 if update <= relative_tolerance && defect <= relative_tolerance {
                     return Ok(FluxRheologyStep {
                         solution: next,

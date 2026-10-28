@@ -68,7 +68,23 @@ adjoints.
   for IMEX transients (implicit Stokes, lagged convection),
   `solve_adjoint` for the transposed system. Dense LU under n ≤ 1500
   (fixture path, with two residual-correction solves reusing the factors),
-  GMRES restarts above.
+  sparse block-preconditioned FGMRES above.
+- `FluxSystem::solve_sparse` also exposes the sparse path below that cutoff.
+  A velocity ILU(0) and pressure approximate Schur ILU(0),
+  `C - B diag(A_u)^-1 G`, are built from the actual assembled blocks, including
+  local viscosity, transient mass, convection, boundary identity rows and the
+  pressure pin. Block LDU applications reuse their scratch buffers; no dense
+  system or dense Schur matrix is formed. Rows and loads are equilibrated by
+  their largest absolute matrix entry so large viscous momentum loads do not
+  conceal constraint errors. Every restart independently recomputes both
+  residuals against the original matrix. `FluxSolution::rel_residual` remains
+  the original Euclidean relative residual; `scaled_rel_residual` exposes the
+  row-equilibrated relative residual. `converged(tol)` requires both to pass,
+  and the implicit rheology and physical material wrappers use that guard.
+  Dense solves report both diagnostics after residual correction as well.
+  `max_iters` is a strict Krylov iteration budget, including the last short
+  restart. An approximate factorization breakdown falls back to identity
+  preconditioning without changing the equations or asserting convergence.
 - `FluxSystem::assemble_variable_viscosity` assembles the full Newtonian
   stress `-div(2 nu D(u))`, where `D=(grad u + grad u^T)/2`. Its callback
   receives the cell index and quadrature point and returns positive finite
@@ -99,8 +115,10 @@ adjoints.
   loads, and boundary callbacks describe the endpoint; the law can capture
   caller-supplied endpoint temperature and material fields. The previous
   velocity supplies the initial iterate. Acceptance requires both the relative
-  velocity update and an independently reassembled nonlinear residual to meet
-  the supplied tolerance. This extra residual assembly is deferred until the
+  velocity update and both original and row-equilibrated independently
+  reassembled nonlinear residuals to meet the supplied tolerance. The returned
+  scalar nonlinear diagnostic is the larger of those two residuals. This extra
+  residual assembly is deferred until the
   update is small or the iteration budget is exhausted.
   `FluxRheologyStep` returns the accepted solution, iteration count, update, and
   nonlinear residual. `FluxRheologyError` refuses invalid controls/state,
@@ -244,6 +262,11 @@ Carreau startup against its independently differentiated stress and endpoint
 equations, flux-014 temporal refinement of a spatially exact shear field,
 flux-015 unforced viscous energy decay, and flux-016 refusal of exhausted
 nonlinear iterations, invalid timesteps, and incompatible boundary mass flux.
+The sparse lane adds flux-017 agreement with dense factorization under
+discontinuous viscosity, mass and convection; flux-018 a spatially varying
+viscosity flow above the 1500-dof dense cutoff; flux-019 strict iteration budgets
+and original-residual reporting; and flux-020 a 10,000:1 layered Couette flow
+above the cutoff with independent all-cell divergence and boundary-moment gates.
 These remain 2-D finite-element checks,
 not a high-Re, large-scale, or cross-ISA qualification.
 
@@ -294,9 +317,9 @@ geometry and must never be labelled as volts or discharge reach.
 - Fine-mesh Ghia tables, Re=1000 cavity, cylinder benchmarks, and
   asymptotic-regime convergence confirmation — perf-lane scope,
   ledgered in invariants 2 and 4.
-- Preconditioned iterative saddle solvers at scale (the dense-LU
-  fixture path is the shipped truth; block preconditioners are
-  successor work).
+- Mesh-independent iteration counts, multilevel saddle preconditioning and
+  production-scale throughput are not established by the sparse finite-element
+  fixtures. The discrete adjoint still uses the dense path up to 1500 dofs.
 - Nonlinear/backflow and transient open-boundary conditions. Steady linear
   Stokes velocity/total-traction boundaries are provided by the API below.
 - The affine-triangle GCL receipt does not remap fields, assemble or
@@ -404,8 +427,8 @@ Duplicate, missing, interior and out-of-range ownership is refused before
 callbacks run. Boundary quadrature samples are retained once for consistent
 strong moments and SIP. Non-finite loads and assembly, incompatible net flux
 for all-prescribed velocity, singular factorization and failed explicit
-Euclidean residual admission return StokesBoundaryError without a solution.
-No hidden grounding is added for pure-traction rigid modes.
+original or row-equilibrated residual admission return StokesBoundaryError
+without a solution. No hidden grounding is added for pure-traction rigid modes.
 
 All-velocity problems retain the original pressure pin and report MeanZero
 pressure. With any total-traction edge, all continuity equations are retained,
@@ -416,10 +439,10 @@ mean thermodynamic/EOS absolute pressure. A pressure shift dp requires changing
 the prescribed total traction by -dp*n. A pressure-only load is -p*n, but a
 fully developed channel's end traction also contains tangential viscous stress.
 
-The legacy assembly/solve entry points keep their existing numerical path.
-The new checked solve shares the same LU/GMRES kernels and additionally
-recomputes b-Ax before publishing a result. Its read-only matrix is available
-to the existing discrete transpose solver.
+The legacy assembly entry points keep their existing forms. The new checked
+solve shares the same LU/sparse-FGMRES kernels and additionally recomputes both
+original and row-equilibrated residuals before publishing a result. Its
+read-only matrix is available to the existing discrete transpose solver.
 
 tests/stokes_boundary.rs supplies the pressure-driven channel analytic
 refinement/flux oracle, exact affine shear and pressure-datum shift patch,
