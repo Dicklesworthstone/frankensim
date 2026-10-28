@@ -17,6 +17,9 @@ use fs_tribo::layer_contact::ThirdBodyLayerContact;
 use fs_tribo::mindlin::{MindlinDeresiewiczPoint, MindlinPointParameters};
 use fs_tribo::{FrictionLaw, TangentialLaw};
 
+#[path = "modal_tangential/heat.rs"]
+mod heat;
+
 fn budgets() -> ModalCouplingConfig {
     ModalCouplingConfig {
         max_modes: 8,

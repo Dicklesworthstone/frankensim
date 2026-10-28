@@ -8,7 +8,9 @@
 //! resolve intrastep reversals. Exact linear propagation and energy closure do
 //! not establish exact nonlinear contact trajectories.
 //! The single retained tangent and prescribed normal load do not claim normal
-//! contact evolution, two-dimensional slip, or a temperature evolution model.
+//! contact evolution or two-dimensional slip. The optional [`heat`] composition
+//! solves the interface temperature and deposits physical heat into the original
+//! finite thermal network without replacing the constitutive law or its history.
 
 use super::{
     CoupledModalSystem, ModalAttachment, ModalCouplingError, ModalFrictionConfig,
@@ -16,6 +18,9 @@ use super::{
 };
 use fs_exec::CancelGate;
 use fs_tribo::{FrictionRegime, TangentialLaw, TangentialSolveConfig, TangentialStepInput};
+
+/// Stateful shear and the original finite thermal network accept together.
+pub mod heat;
 
 /// One held driver motion and its explicitly supplied contact environment.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -84,6 +89,11 @@ pub struct TangentialModalSystem<L: TangentialLaw> {
     compliance: f64,
     forces: Vec<f64>,
     last: Option<TangentialModalFrame>,
+}
+
+struct TangentialModalCandidate<S> {
+    frame: TangentialModalFrame,
+    state: S,
 }
 
 impl<L: TangentialLaw> TangentialModalSystem<L> {
@@ -173,6 +183,19 @@ impl<L: TangentialLaw> TangentialModalSystem<L> {
         drive: TangentialModalDrive,
         gate: Option<&CancelGate>,
     ) -> Result<&TangentialModalFrame, ModalFrictionError> {
+        let candidate = self.stage_candidate(external, drive, gate)?;
+        poll(gate)?;
+        Ok(self.publish_candidate(candidate))
+    }
+
+    // Every thermal trial starts from the same accepted body and contact state.
+    // Only the final jointly admitted trial may cross the publication boundary.
+    fn stage_candidate(
+        &mut self,
+        external: &[f64],
+        drive: TangentialModalDrive,
+        gate: Option<&CancelGate>,
+    ) -> Result<TangentialModalCandidate<L::State>, ModalFrictionError> {
         poll(gate)?;
         if !drive.speed_m_s.is_finite()
             || !drive.normal_force_n.is_finite()
@@ -311,8 +334,18 @@ impl<L: TangentialLaw> TangentialModalSystem<L> {
             iterations: step.iterations,
         };
         poll(gate)?;
+        Ok(TangentialModalCandidate {
+            frame: accepted,
+            state: step.state,
+        })
+    }
+
+    fn publish_candidate(
+        &mut self,
+        candidate: TangentialModalCandidate<L::State>,
+    ) -> &TangentialModalFrame {
         self.network.publish_staged();
-        self.state = step.state;
-        Ok(self.last.insert(accepted))
+        self.state = candidate.state;
+        self.last.insert(candidate.frame)
     }
 }

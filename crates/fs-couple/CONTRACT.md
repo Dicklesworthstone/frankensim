@@ -8923,6 +8923,42 @@ refinement must resolve reversals within a sample. A three-rung elastic-limit
 test checks second-order convergence to the independent stiffness-shifted
 oscillator frequency; energy closure alone is not a time-accuracy claim.
 
+### Stateful shear memory and finite-body thermal evolution
+
+`friction::tangential::heat` connects `TangentialModalSystem<L>` to the original
+`FrictionHeatRoute` and finite `DepositionSimulation` in one accepted sample.
+The existing nonlinear thermal owner solves original cell enthalpy increments
+and a common interface temperature. Each trial supplies that temperature to the
+same immutable `TangentialLaw`, repeats mechanics from accepted history, and
+routes only its irreversible loss into the original cells. Geometry and actual
+endpoint conductivities determine the heat split; no fraction or thermal store
+is introduced. Reversible shear storage remains mechanical and still counts
+toward the total-energy ceiling. Friction heat cancels once in the combined
+mechanical/caloric work balance.
+
+Prediction and publication are separated in the original tangential consumer.
+The final accepted root is explicitly restaged after numerical probes; all
+thermal admission, source callbacks, energy checks and cancellation polls finish
+before mechanics, constitutive history and caloric state publish together.
+Pressure and normal load remain explicit. A prescribed interface temperature
+is refused because this operation solves it. Source callbacks may supply
+transport and receipts but cannot replace the retained law or checkpoint.
+
+Temperature-dependent dissipation is supported when the law admits the solved
+temperature. Frozen-temperature material laws retain their refusal instead of
+being reconstructed with unloaded history. Variable elastic coefficients need
+explicit free-energy/entropy work; this adapter does not infer that coupling.
+The fixed-property native Mindlin law therefore supplies a declared constant-
+property heating rung. Moving footprints and thermal geometry evolution remain
+with their existing dedicated owners.
+
+Five groups in `tests/modal_tangential/heat.rs` cover native Mindlin heating and
+reversal storage, an independently reduced thermal-softening fixed point using
+the original Coulomb solver, ordinary hot-to-cold conduction at zero friction,
+loaded-history refusal/cancellation/retry, and frozen-temperature law refusal.
+The tests use original mechanical and thermal owners; their complete native
+Cargo execution remains pending the upstream runtime build resource limit.
+
 ## Shared finite-network friction heating
 
 `friction_heat::FrictionHeatRoute` binds an existing perfect-contact link between
