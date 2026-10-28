@@ -1,0 +1,12 @@
+frankensim.matdb-manifest.v3
+pack_id	mylar-1000a-dupont-conductivity
+redistribution	permitted	Selected attributed numerical facts and original notes only; no source document or table layout is redistributed
+citation	DuPont Teijin Films, Mylar Physical-Thermal Properties, Table 1, conductivity explicitly identified as Mylar 1000A; manufacturer bulletin mirrored at https://www.polyesline.com/wp-content/uploads/2019/12/Mylar_Physical_Thermal_Properties.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	mylar-1000a-dupont-conductivity	properties.tsv	material-tsv-v1
+property	mean_thermal_conductivity	mean-thermal-conductivity	thermal-conductivity
+axis	source_grade_mylar_1000a	source-grade-mylar-1000a	dimensional
+axis	interval_temperature_lower	interval-temperature-lower	absolute-temperature
+axis	interval_temperature_upper	interval-temperature-upper	absolute-temperature
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_direction_known	source-direction-known	dimensional

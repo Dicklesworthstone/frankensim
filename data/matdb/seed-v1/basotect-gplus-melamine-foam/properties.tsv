@@ -1,0 +1,19 @@
+frankensim.matdb-source.v1
+observation	open-cell-foam	BASF Basotect G+ open-cell melamine-resin foam	BASF transportation brochure Figure 3; EN ISO 845 density, EN ISO 3386-1 compression hardness, DIN EN 12667 conductivity	Nominal density is 9 kg/m3 with printed +/-1.5 product spread, not a confidence interval. Conductivity is an inclusive upper limit 0.035 W/(m K); average compression hardness is strictly greater than 9 kPa. Bound-valued facts have distinct property names so a thermal or mechanical consumer cannot silently treat them as point estimates. Test temperature, moisture, orientation and statistical uncertainty are unspecified. No exact conductivity, heat capacity, cushioning hysteresis or acoustic absorption spectrum is supplied; thermoset melamine foam is not dense melamine molding resin.
+scalar	nominal-density	open-cell-foam	density	9	kg/m3	constant
+uncertainty	nominal-density	unstated	-	-	-	-
+validity	nominal-density	source_grade_basotect_gplus	1	1	1
+validity	nominal-density	source_temperature_known	0	0	1
+validity	nominal-density	source_moisture_condition_known	0	0	1
+scalar	conductivity-upper-limit	open-cell-foam	thermal_conductivity_upper_limit	0.035	W/m/K	constant
+uncertainty	conductivity-upper-limit	unstated	-	-	-	-
+validity	conductivity-upper-limit	source_grade_basotect_gplus	1	1	1
+validity	conductivity-upper-limit	source_temperature_known	0	0	1
+validity	conductivity-upper-limit	source_moisture_condition_known	0	0	1
+validity	conductivity-upper-limit	source_direction_known	0	0	1
+scalar	compression-hardness-lower-limit	open-cell-foam	compression_hardness_lower_limit	9	kPa	constant
+uncertainty	compression-hardness-lower-limit	unstated	-	-	-	-
+validity	compression-hardness-lower-limit	source_grade_basotect_gplus	1	1	1
+validity	compression-hardness-lower-limit	source_temperature_known	0	0	1
+validity	compression-hardness-lower-limit	source_moisture_condition_known	0	0	1
+validity	compression-hardness-lower-limit	source_direction_known	0	0	1

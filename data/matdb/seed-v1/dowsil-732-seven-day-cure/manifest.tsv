@@ -1,0 +1,19 @@
+frankensim.matdb-manifest.v3
+pack_id	dowsil-732-seven-day-cure
+redistribution	permitted	Selected attributed numerical facts and original notes only; no source document or table layout is redistributed
+citation	Dow, DOWSIL 732 Multi-Purpose Sealant, 2017 Form 95-1059-01 B, p. 1; manufacturer document mirrored at https://www.gtmidwest.com/ASSETS/DOCUMENTS/ITEMS/EN/dow_732_tds.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	dowsil-732-seven-day-cure	properties.tsv	material-tsv-v1
+property	specific_gravity	specific-gravity	dimensional
+property	tensile_strength	tensile-strength	dimensional
+property	tensile_elongation	tensile-elongation	dimensional
+property	relative_permittivity	relative-permittivity	dimensional
+property	dielectric_loss_tangent	dielectric-loss-tangent	dimensional
+property	electrical_resistivity	electrical-resistivity	dimensional
+axis	source_grade_dowsil_732	source-grade-dowsil-732	dimensional
+axis	cure_age	cure-age	dimensional
+axis	cure_temperature	cure-temperature	absolute-temperature
+axis	cure_relative_humidity	cure-relative-humidity	dimensional
+axis	source_test_temperature_known	source-test-temperature-known	dimensional
+axis	source_test_rate_known	source-test-rate-known	dimensional
+axis	frequency	frequency	dimensional

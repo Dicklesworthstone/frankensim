@@ -1,0 +1,33 @@
+frankensim.matdb-source.v1
+observation	unfoamed-polymer	SABIC LDPE 2102TX00 additive-free tubular-process low-density polyethylene resin	SABIC revision 20121112, ISO 1183 density, proprietary SABIC modulus method, DIN 53765 DSC	Typical unfoamed polymer properties; suitability for foam extrusion does not make these foam properties. Source gives modulus 250 MPa without specimen, direction or strain rate; it remains elastic-modulus-reference, not an isotropic Young modulus. Density-test temperature, moisture, DSC heating/cooling rate and uncertainty are unspecified. Melting/crystallization values are DSC transition observations, not equilibrium phase boundaries. Average DSC heat of fusion 110 J/g becomes 110000 J/kg; no caloric phase-change model is synthesized. No thermal conductivity or heat capacity is inferred.
+scalar	density	unfoamed-polymer	density	921	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade_ldpe_2102tx00	1	1	1
+validity	density	unfoamed_resin	1	1	1
+validity	density	source_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+scalar	modulus-reference	unfoamed-polymer	elastic_modulus_reference	250	MPa	constant
+uncertainty	modulus-reference	unstated	-	-	-	-
+validity	modulus-reference	source_grade_ldpe_2102tx00	1	1	1
+validity	modulus-reference	unfoamed_resin	1	1	1
+validity	modulus-reference	source_temperature_known	0	0	1
+validity	modulus-reference	source_moisture_condition_known	0	0	1
+validity	modulus-reference	source_test_rate_known	0	0	1
+scalar	dsc-melting-temperature	unfoamed-polymer	dsc_melting_temperature	381.15	K	constant
+uncertainty	dsc-melting-temperature	unstated	-	-	-	-
+validity	dsc-melting-temperature	source_grade_ldpe_2102tx00	1	1	1
+validity	dsc-melting-temperature	unfoamed_resin	1	1	1
+validity	dsc-melting-temperature	source_dsc_rate_known	0	0	1
+validity	dsc-melting-temperature	source_moisture_condition_known	0	0	1
+scalar	dsc-crystallization-temperature	unfoamed-polymer	dsc_crystallization_temperature	370.15	K	constant
+uncertainty	dsc-crystallization-temperature	unstated	-	-	-	-
+validity	dsc-crystallization-temperature	source_grade_ldpe_2102tx00	1	1	1
+validity	dsc-crystallization-temperature	unfoamed_resin	1	1	1
+validity	dsc-crystallization-temperature	source_dsc_rate_known	0	0	1
+validity	dsc-crystallization-temperature	source_moisture_condition_known	0	0	1
+scalar	dsc-heat-of-fusion	unfoamed-polymer	dsc_heat_of_fusion	110000	J/kg	constant
+uncertainty	dsc-heat-of-fusion	unstated	-	-	-	-
+validity	dsc-heat-of-fusion	source_grade_ldpe_2102tx00	1	1	1
+validity	dsc-heat-of-fusion	unfoamed_resin	1	1	1
+validity	dsc-heat-of-fusion	source_dsc_rate_known	0	0	1
+validity	dsc-heat-of-fusion	source_moisture_condition_known	0	0	1

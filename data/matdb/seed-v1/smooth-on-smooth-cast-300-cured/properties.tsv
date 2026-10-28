@@ -1,0 +1,73 @@
+frankensim.matdb-source.v1
+observation	seven-day-resin	Smooth-On Smooth-Cast 300 white polyurethane casting resin	Technical Overview: ASTM D638 tensile, ASTM D790 flexural, ASTM D695 compression, ASTM D2566 molding shrinkage	Source volume mix ratio A:B is 1:1; its separate weight ratio is 100:90. Properties are measured after seven days at 23 C, not at the ten-minute demold time. Original tensile strength/modulus are 3000/139500 psi, flexural strength/modulus 4510/128000 psi and compression strength/modulus 4000/45800 psi; conversion uses 6894.757293168 Pa/psi. Test rate, moisture and uncertainty are unstated. Casting pressure and any post-cure history used for the table are not identified by the processing recommendations. Molding shrinkage is a process observation, not thermal expansion. These different test moduli do not supply an isotropic elastic law.
+scalar	tensile-strength	seven-day-resin	tensile_strength	20684271.879504	Pa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	source_grade_smooth_cast_300	1	1	1
+validity	tensile-strength	part_a_to_b_volume_ratio	1	1	1
+validity	tensile-strength	temperature	296.15	296.15	K
+validity	tensile-strength	cure_age	604800	604800	s
+validity	tensile-strength	source_moisture_condition_known	0	0	1
+validity	tensile-strength	source_test_rate_known	0	0	1
+validity	tensile-strength	source_processing_history_known	0	0	1
+scalar	tensile-modulus	seven-day-resin	tensile_modulus	961818642.396936	Pa	constant
+uncertainty	tensile-modulus	unstated	-	-	-	-
+validity	tensile-modulus	source_grade_smooth_cast_300	1	1	1
+validity	tensile-modulus	part_a_to_b_volume_ratio	1	1	1
+validity	tensile-modulus	temperature	296.15	296.15	K
+validity	tensile-modulus	cure_age	604800	604800	s
+validity	tensile-modulus	source_moisture_condition_known	0	0	1
+validity	tensile-modulus	source_test_rate_known	0	0	1
+validity	tensile-modulus	source_processing_history_known	0	0	1
+scalar	tensile-elongation	seven-day-resin	tensile_elongation	0.05	1	constant
+uncertainty	tensile-elongation	unstated	-	-	-	-
+validity	tensile-elongation	source_grade_smooth_cast_300	1	1	1
+validity	tensile-elongation	part_a_to_b_volume_ratio	1	1	1
+validity	tensile-elongation	temperature	296.15	296.15	K
+validity	tensile-elongation	cure_age	604800	604800	s
+validity	tensile-elongation	source_moisture_condition_known	0	0	1
+validity	tensile-elongation	source_test_rate_known	0	0	1
+validity	tensile-elongation	source_processing_history_known	0	0	1
+scalar	flexural-strength	seven-day-resin	flexural_strength	31095355.39218768	Pa	constant
+uncertainty	flexural-strength	unstated	-	-	-	-
+validity	flexural-strength	source_grade_smooth_cast_300	1	1	1
+validity	flexural-strength	part_a_to_b_volume_ratio	1	1	1
+validity	flexural-strength	temperature	296.15	296.15	K
+validity	flexural-strength	cure_age	604800	604800	s
+validity	flexural-strength	source_moisture_condition_known	0	0	1
+validity	flexural-strength	source_test_rate_known	0	0	1
+validity	flexural-strength	source_processing_history_known	0	0	1
+scalar	flexural-modulus	seven-day-resin	flexural_modulus	882528933.525504	Pa	constant
+uncertainty	flexural-modulus	unstated	-	-	-	-
+validity	flexural-modulus	source_grade_smooth_cast_300	1	1	1
+validity	flexural-modulus	part_a_to_b_volume_ratio	1	1	1
+validity	flexural-modulus	temperature	296.15	296.15	K
+validity	flexural-modulus	cure_age	604800	604800	s
+validity	flexural-modulus	source_moisture_condition_known	0	0	1
+validity	flexural-modulus	source_test_rate_known	0	0	1
+validity	flexural-modulus	source_processing_history_known	0	0	1
+scalar	compressive-strength	seven-day-resin	compressive_strength	27579029.172672	Pa	constant
+uncertainty	compressive-strength	unstated	-	-	-	-
+validity	compressive-strength	source_grade_smooth_cast_300	1	1	1
+validity	compressive-strength	part_a_to_b_volume_ratio	1	1	1
+validity	compressive-strength	temperature	296.15	296.15	K
+validity	compressive-strength	cure_age	604800	604800	s
+validity	compressive-strength	source_moisture_condition_known	0	0	1
+validity	compressive-strength	source_test_rate_known	0	0	1
+validity	compressive-strength	source_processing_history_known	0	0	1
+scalar	compression-modulus	seven-day-resin	compression_modulus	315779884.0270944	Pa	constant
+uncertainty	compression-modulus	unstated	-	-	-	-
+validity	compression-modulus	source_grade_smooth_cast_300	1	1	1
+validity	compression-modulus	part_a_to_b_volume_ratio	1	1	1
+validity	compression-modulus	temperature	296.15	296.15	K
+validity	compression-modulus	cure_age	604800	604800	s
+validity	compression-modulus	source_moisture_condition_known	0	0	1
+validity	compression-modulus	source_test_rate_known	0	0	1
+validity	compression-modulus	source_processing_history_known	0	0	1
+scalar	linear-molding-shrinkage	seven-day-resin	linear_molding_shrinkage	0.01	1	constant
+uncertainty	linear-molding-shrinkage	unstated	-	-	-	-
+validity	linear-molding-shrinkage	source_grade_smooth_cast_300	1	1	1
+validity	linear-molding-shrinkage	part_a_to_b_volume_ratio	1	1	1
+validity	linear-molding-shrinkage	temperature	296.15	296.15	K
+validity	linear-molding-shrinkage	cure_age	604800	604800	s
+validity	linear-molding-shrinkage	source_moisture_condition_known	0	0	1
+validity	linear-molding-shrinkage	source_processing_history_known	0	0	1

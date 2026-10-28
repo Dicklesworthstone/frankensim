@@ -1,0 +1,16 @@
+frankensim.matdb-manifest.v3
+pack_id	mylar-92a-dupont-physical-thermal
+redistribution	permitted	Selected attributed numerical facts and original notes only; no source document or table layout is redistributed
+citation	DuPont Teijin Films, Mylar Physical-Thermal Properties, Table 1, industrial gauge/type 92A; manufacturer bulletin mirrored at https://www.polyesline.com/wp-content/uploads/2019/12/Mylar_Physical_Thermal_Properties.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	mylar-92a-dupont-physical-thermal	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	tensile_modulus	tensile-modulus	dimensional
+property	tensile_strength	tensile-strength	dimensional
+property	tensile_elongation	tensile-elongation	dimensional
+axis	source_grade_mylar_92a	source-grade-mylar-92a	dimensional
+axis	source_temperature_known	source-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_test_rate_known	source-test-rate-known	dimensional
+axis	film_material_axis	film-material-axis	dimensional

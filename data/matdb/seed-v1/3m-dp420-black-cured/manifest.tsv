@@ -1,0 +1,20 @@
+frankensim.matdb-manifest.v3
+pack_id	3m-dp420-black-cured
+redistribution	permitted	Selected attributed numerical facts and original notes only; no source document or table layout is redistributed
+citation	3M, Scotch-Weld Epoxy Adhesive DP420 Black, English-US V-7, December 2025, pp. 2-4; https://multimedia.3m.com/mws/media/2365743O/3M-Scotch-Weld-Epoxy-Adhesive-DP420-Black.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	3m-dp420-black-cured	properties.tsv	material-tsv-v1
+property	tensile_modulus	tensile-modulus	dimensional
+property	tensile_strength	tensile-strength	dimensional
+property	tensile_elongation	tensile-elongation	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+axis	source_grade_dp420_black	source-grade-dp420-black	dimensional
+axis	base_to_accelerator_volume_ratio	base-to-accelerator-volume-ratio	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	pressure	pressure	pressure
+axis	test_speed	test-speed	dimensional
+axis	cure_age	cure-age	dimensional
+axis	source_cure_age_known	source-cure-age-known	dimensional
+axis	source_cure_temperature_known	source-cure-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_test_conditions_known	source-test-conditions-known	dimensional

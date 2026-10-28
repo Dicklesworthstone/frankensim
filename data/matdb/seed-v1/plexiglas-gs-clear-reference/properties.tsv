@@ -1,0 +1,53 @@
+frankensim.matdb-source.v1
+observation	cast-sheet	PLEXIGLAS GS 0F00 (233) clear cast PMMA sheet	Evonik January 2013 typical values: ISO 1183 density; ISO 527 tensile; ISO 178 flexure; ISO 604 compression; DIN 52612 conductivity; DIN VDE 0303 permittivity	Source reference climate is 23 C and 50% RH except the explicitly listed tensile-strength temperatures. Cp has no stated test method. Tensile modulus uses ISO 527-2/1B/1; strength uses 1B/5, preserving crosshead speeds of 1 and 5 mm/min. Flexural specimen is 80x10x4 mm. Density and Cp are converted to SI. These are typical short-term properties with unstated uncertainty and pressure. Temperature and dielectric-frequency samples remain discrete; no time-dependent, printed-part, impact-modified, isotropic, or broadband dielectric law is inferred.
+scalar	density	cast-sheet	density	1190	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade_plexiglas_gs_0f00_233	1	1	1
+validity	density	temperature	296.15	296.15	K
+validity	density	relative_humidity	0.5	0.5	1
+validity	density	source_pressure_known	0	0	1
+scalar	thermal-conductivity	cast-sheet	thermal_conductivity	0.19	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	source_grade_plexiglas_gs_0f00_233	1	1	1
+validity	thermal-conductivity	temperature	296.15	296.15	K
+validity	thermal-conductivity	relative_humidity	0.5	0.5	1
+validity	thermal-conductivity	source_pressure_known	0	0	1
+scalar	specific-heat-capacity	cast-sheet	specific_heat_capacity	1470	J/kg/K	constant
+uncertainty	specific-heat-capacity	unstated	-	-	-	-
+validity	specific-heat-capacity	source_grade_plexiglas_gs_0f00_233	1	1	1
+validity	specific-heat-capacity	temperature	296.15	296.15	K
+validity	specific-heat-capacity	relative_humidity	0.5	0.5	1
+validity	specific-heat-capacity	source_pressure_known	0	0	1
+scalar	tensile-modulus	cast-sheet	tensile_modulus	3300	MPa	constant
+uncertainty	tensile-modulus	unstated	-	-	-	-
+validity	tensile-modulus	source_grade_plexiglas_gs_0f00_233	1	1	1
+validity	tensile-modulus	temperature	296.15	296.15	K
+validity	tensile-modulus	relative_humidity	0.5	0.5	1
+validity	tensile-modulus	source_pressure_known	0	0	1
+validity	tensile-modulus	test_speed	1.6666666666666667e-5	1.6666666666666667e-5	m/s
+curve	tensile-strength-temperatures	cast-sheet	tensile_strength	temperature	K	MPa	233.15:110,296.15:80,343.15:40	tabulated
+uncertainty	tensile-strength-temperatures	unstated	-	-	-	-
+validity	tensile-strength-temperatures	temperature	233.15	343.15	K
+validity	tensile-strength-temperatures	source_grade_plexiglas_gs_0f00_233	1	1	1
+validity	tensile-strength-temperatures	relative_humidity	0.5	0.5	1
+validity	tensile-strength-temperatures	source_pressure_known	0	0	1
+validity	tensile-strength-temperatures	test_speed	8.333333333333333e-5	8.333333333333333e-5	m/s
+scalar	flexural-strength	cast-sheet	flexural_strength	115	MPa	constant
+uncertainty	flexural-strength	unstated	-	-	-	-
+validity	flexural-strength	source_grade_plexiglas_gs_0f00_233	1	1	1
+validity	flexural-strength	temperature	296.15	296.15	K
+validity	flexural-strength	relative_humidity	0.5	0.5	1
+validity	flexural-strength	source_pressure_known	0	0	1
+scalar	compressive-yield-stress	cast-sheet	compressive_yield_stress	110	MPa	constant
+uncertainty	compressive-yield-stress	unstated	-	-	-	-
+validity	compressive-yield-stress	source_grade_plexiglas_gs_0f00_233	1	1	1
+validity	compressive-yield-stress	temperature	296.15	296.15	K
+validity	compressive-yield-stress	relative_humidity	0.5	0.5	1
+validity	compressive-yield-stress	source_pressure_known	0	0	1
+curve	dielectric-frequency-points	cast-sheet	relative_permittivity	frequency	Hz	1	50:3.6,100000:2.7	tabulated
+uncertainty	dielectric-frequency-points	unstated	-	-	-	-
+validity	dielectric-frequency-points	frequency	50	100000	Hz
+validity	dielectric-frequency-points	source_grade_plexiglas_gs_0f00_233	1	1	1
+validity	dielectric-frequency-points	temperature	296.15	296.15	K
+validity	dielectric-frequency-points	relative_humidity	0.5	0.5	1
+validity	dielectric-frequency-points	source_pressure_known	0	0	1

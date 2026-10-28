@@ -1,0 +1,21 @@
+frankensim.matdb-manifest.v3
+pack_id	smooth-on-smooth-cast-300-cured
+redistribution	permitted	Selected attributed numerical facts and original notes only; no source document or table layout is redistributed
+citation	Smooth-On, Smooth-Cast 300 Series Technical Bulletin, 031824DH, p. 1, Smooth-Cast 300 row and seven-day measurement footnote; https://www.smooth-on.com/tb/files/Smooth-Cast_300q,_300,_305___310.pdf ; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	smooth-on-smooth-cast-300-cured	properties.tsv	material-tsv-v1
+property	tensile_strength	tensile-strength	dimensional
+property	tensile_modulus	tensile-modulus	dimensional
+property	tensile_elongation	tensile-elongation	dimensional
+property	flexural_strength	flexural-strength	dimensional
+property	flexural_modulus	flexural-modulus	dimensional
+property	compressive_strength	compressive-strength	dimensional
+property	compression_modulus	compression-modulus	dimensional
+property	linear_molding_shrinkage	linear-molding-shrinkage	dimensional
+axis	source_grade_smooth_cast_300	source-grade-smooth-cast-300	dimensional
+axis	part_a_to_b_volume_ratio	part-a-to-b-volume-ratio	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	cure_age	cure-age	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_test_rate_known	source-test-rate-known	dimensional
+axis	source_processing_history_known	source-processing-history-known	dimensional

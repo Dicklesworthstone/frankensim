@@ -1,0 +1,54 @@
+frankensim.matdb-source.v1
+observation	biaxial-film	DuPont Mylar 92A uncoated PET polyester film	DuPont physical-thermal bulletin Table 1; ASTM D1505 density and ASTM D882 tension	Typical values with unstated temperature, moisture, test rate and uncertainty. Film-material-axis 0 is machine direction (MD), 1 transverse direction (TD); neither is a through-thickness value. The printed kg/mm2 values are interpreted as kgf/mm2 using 9.80665 MPa per kgf/mm2; independently rounded kpsi values are not mixed. Specific heat uses 4.184 J/cal. Mylar 1000A conductivity is deliberately absent because it is a different gauge. Directional tensile moduli are not an isotropic Young modulus or a complete elastic tensor; service limits do not create a temperature domain.
+scalar	density	biaxial-film	density	1390	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade_mylar_92a	1	1	1
+validity	density	source_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+scalar	specific-heat-capacity	biaxial-film	specific_heat_capacity	1171.52	J/kg/K	constant
+uncertainty	specific-heat-capacity	unstated	-	-	-	-
+validity	specific-heat-capacity	source_grade_mylar_92a	1	1	1
+validity	specific-heat-capacity	source_temperature_known	0	0	1
+validity	specific-heat-capacity	source_moisture_condition_known	0	0	1
+scalar	tensile-modulus-md	biaxial-film	tensile_modulus	4805.2585	MPa	constant
+uncertainty	tensile-modulus-md	unstated	-	-	-	-
+validity	tensile-modulus-md	source_grade_mylar_92a	1	1	1
+validity	tensile-modulus-md	source_temperature_known	0	0	1
+validity	tensile-modulus-md	source_moisture_condition_known	0	0	1
+validity	tensile-modulus-md	source_test_rate_known	0	0	1
+validity	tensile-modulus-md	film_material_axis	0	0	1
+scalar	tensile-modulus-td	biaxial-film	tensile_modulus	5001.3915	MPa	constant
+uncertainty	tensile-modulus-td	unstated	-	-	-	-
+validity	tensile-modulus-td	source_grade_mylar_92a	1	1	1
+validity	tensile-modulus-td	source_temperature_known	0	0	1
+validity	tensile-modulus-td	source_moisture_condition_known	0	0	1
+validity	tensile-modulus-td	source_test_rate_known	0	0	1
+validity	tensile-modulus-td	film_material_axis	1	1	1
+scalar	tensile-strength-md	biaxial-film	tensile_strength	196.133	MPa	constant
+uncertainty	tensile-strength-md	unstated	-	-	-	-
+validity	tensile-strength-md	source_grade_mylar_92a	1	1	1
+validity	tensile-strength-md	source_temperature_known	0	0	1
+validity	tensile-strength-md	source_moisture_condition_known	0	0	1
+validity	tensile-strength-md	source_test_rate_known	0	0	1
+validity	tensile-strength-md	film_material_axis	0	0	1
+scalar	tensile-strength-td	biaxial-film	tensile_strength	235.3596	MPa	constant
+uncertainty	tensile-strength-td	unstated	-	-	-	-
+validity	tensile-strength-td	source_grade_mylar_92a	1	1	1
+validity	tensile-strength-td	source_temperature_known	0	0	1
+validity	tensile-strength-td	source_moisture_condition_known	0	0	1
+validity	tensile-strength-td	source_test_rate_known	0	0	1
+validity	tensile-strength-td	film_material_axis	1	1	1
+scalar	tensile-elongation-md	biaxial-film	tensile_elongation	1.16	1	constant
+uncertainty	tensile-elongation-md	unstated	-	-	-	-
+validity	tensile-elongation-md	source_grade_mylar_92a	1	1	1
+validity	tensile-elongation-md	source_temperature_known	0	0	1
+validity	tensile-elongation-md	source_moisture_condition_known	0	0	1
+validity	tensile-elongation-md	source_test_rate_known	0	0	1
+validity	tensile-elongation-md	film_material_axis	0	0	1
+scalar	tensile-elongation-td	biaxial-film	tensile_elongation	0.91	1	constant
+uncertainty	tensile-elongation-td	unstated	-	-	-	-
+validity	tensile-elongation-td	source_grade_mylar_92a	1	1	1
+validity	tensile-elongation-td	source_temperature_known	0	0	1
+validity	tensile-elongation-td	source_moisture_condition_known	0	0	1
+validity	tensile-elongation-td	source_test_rate_known	0	0	1
+validity	tensile-elongation-td	film_material_axis	1	1	1

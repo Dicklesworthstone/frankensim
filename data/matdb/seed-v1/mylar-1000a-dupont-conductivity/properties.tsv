@@ -1,0 +1,9 @@
+frankensim.matdb-source.v1
+observation	thermal-film	DuPont Mylar 1000A PET film conductivity interval	DuPont physical-thermal bulletin Table 1, 25-75 C	Typical interval-reported conductivity 3.7e-4 cal cm/(cm2 s C), converted using 4.184 J/cal and 100 cm/m. Direction, moisture and statistical uncertainty are unstated. Retained as mean-thermal-conductivity with both interval endpoints, not a pointwise temperature law and not a 92A film property.
+scalar	interval-conductivity	thermal-film	mean_thermal_conductivity	0.154808	W/m/K	constant
+uncertainty	interval-conductivity	unstated	-	-	-	-
+validity	interval-conductivity	source_grade_mylar_1000a	1	1	1
+validity	interval-conductivity	interval_temperature_lower	298.15	298.15	K
+validity	interval-conductivity	interval_temperature_upper	348.15	348.15	K
+validity	interval-conductivity	source_moisture_condition_known	0	0	1
+validity	interval-conductivity	source_direction_known	0	0	1

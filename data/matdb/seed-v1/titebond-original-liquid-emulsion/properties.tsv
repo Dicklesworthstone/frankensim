@@ -1,0 +1,24 @@
+frankensim.matdb-source.v1
+observation	liquid-emulsion	Titebond Original aliphatic resin emulsion wood glue, uncured liquid	Manufacturer Physical Properties; measurement methods and temperature unstated	Liquid density converts 9.2 lb per US gallon using 0.45359237 kg/lb and 0.003785411784 m3/US gallon. Reported 3200 cP becomes 3.2 Pa*s; shear rate is unknown, so this is an apparent viscosity observation and not a Newtonian flow law. The 46 percent solids value retains an unstated mass/volume basis. Application and storage temperatures do not define measurement temperature. These liquid properties do not describe cured adhesive film, bonded wood joints or structural strength. Uncertainty is unstated.
+scalar	density	liquid-emulsion	density	1102.403131315449	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade_titebond_original	1	1	1
+validity	density	uncured_liquid_emulsion	1	1	1
+validity	density	source_temperature_known	0	0	1
+scalar	apparent-dynamic-viscosity	liquid-emulsion	apparent_dynamic_viscosity	3.2	Pa*s	constant
+uncertainty	apparent-dynamic-viscosity	unstated	-	-	-	-
+validity	apparent-dynamic-viscosity	source_grade_titebond_original	1	1	1
+validity	apparent-dynamic-viscosity	uncured_liquid_emulsion	1	1	1
+validity	apparent-dynamic-viscosity	source_temperature_known	0	0	1
+validity	apparent-dynamic-viscosity	source_shear_rate_known	0	0	1
+scalar	reported-solids-fraction	liquid-emulsion	reported_solids_fraction	0.46	1	constant
+uncertainty	reported-solids-fraction	unstated	-	-	-	-
+validity	reported-solids-fraction	source_grade_titebond_original	1	1	1
+validity	reported-solids-fraction	uncured_liquid_emulsion	1	1	1
+validity	reported-solids-fraction	source_temperature_known	0	0	1
+validity	reported-solids-fraction	source_solids_basis_known	0	0	1
+scalar	ph	liquid-emulsion	ph	4.0	1	constant
+uncertainty	ph	unstated	-	-	-	-
+validity	ph	source_grade_titebond_original	1	1	1
+validity	ph	uncured_liquid_emulsion	1	1	1
+validity	ph	source_temperature_known	0	0	1

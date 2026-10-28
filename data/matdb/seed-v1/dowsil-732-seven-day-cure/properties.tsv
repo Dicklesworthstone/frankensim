@@ -1,0 +1,48 @@
+frankensim.matdb-source.v1
+observation	cured-silicone	DOWSIL 732 one-component acetoxy silicone sealant, seven-day air cure	Dow Form 95-1059-01 B, CTM 0097B/ASTM D1475, CTM 0137A/ASTM D412, CTM 0112/ASTM D150	Typical product values after 7 days curing at 25 C and 50% RH. Cure climate is retained separately from unstated test temperature and rate. Specific gravity remains dimensionless; no arbitrary water-density reference is supplied. Elongation 540% becomes 5.4; resistivity 1.5e15 Ohm cm becomes 1.5e13 Ohm m. Two printed dielectric frequencies are discrete, not a broadband response. Statistical uncertainty is unstated. No bulk density, elastic modulus, relaxation, thermal capacity, bonded-joint law or color-specific formulation is inferred.
+scalar	specific-gravity	cured-silicone	specific_gravity	1.04	1	constant
+uncertainty	specific-gravity	unstated	-	-	-	-
+validity	specific-gravity	source_grade_dowsil_732	1	1	1
+validity	specific-gravity	cure_age	604800	604800	s
+validity	specific-gravity	cure_temperature	298.15	298.15	K
+validity	specific-gravity	cure_relative_humidity	0.5	0.5	1
+validity	specific-gravity	source_test_temperature_known	0	0	1
+scalar	tensile-strength	cured-silicone	tensile_strength	2.3	MPa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	source_grade_dowsil_732	1	1	1
+validity	tensile-strength	cure_age	604800	604800	s
+validity	tensile-strength	cure_temperature	298.15	298.15	K
+validity	tensile-strength	cure_relative_humidity	0.5	0.5	1
+validity	tensile-strength	source_test_temperature_known	0	0	1
+validity	tensile-strength	source_test_rate_known	0	0	1
+scalar	tensile-elongation	cured-silicone	tensile_elongation	5.4	1	constant
+uncertainty	tensile-elongation	unstated	-	-	-	-
+validity	tensile-elongation	source_grade_dowsil_732	1	1	1
+validity	tensile-elongation	cure_age	604800	604800	s
+validity	tensile-elongation	cure_temperature	298.15	298.15	K
+validity	tensile-elongation	cure_relative_humidity	0.5	0.5	1
+validity	tensile-elongation	source_test_temperature_known	0	0	1
+validity	tensile-elongation	source_test_rate_known	0	0	1
+curve	dielectric-frequency-points	cured-silicone	relative_permittivity	frequency	Hz	1	100:2.8,100000:2.8	tabulated
+uncertainty	dielectric-frequency-points	unstated	-	-	-	-
+validity	dielectric-frequency-points	frequency	100	100000	Hz
+validity	dielectric-frequency-points	source_grade_dowsil_732	1	1	1
+validity	dielectric-frequency-points	cure_age	604800	604800	s
+validity	dielectric-frequency-points	cure_temperature	298.15	298.15	K
+validity	dielectric-frequency-points	cure_relative_humidity	0.5	0.5	1
+validity	dielectric-frequency-points	source_test_temperature_known	0	0	1
+curve	dielectric-loss-points	cured-silicone	dielectric_loss_tangent	frequency	Hz	1	100:0.0015,100000:0.0015	tabulated
+uncertainty	dielectric-loss-points	unstated	-	-	-	-
+validity	dielectric-loss-points	frequency	100	100000	Hz
+validity	dielectric-loss-points	source_grade_dowsil_732	1	1	1
+validity	dielectric-loss-points	cure_age	604800	604800	s
+validity	dielectric-loss-points	cure_temperature	298.15	298.15	K
+validity	dielectric-loss-points	cure_relative_humidity	0.5	0.5	1
+validity	dielectric-loss-points	source_test_temperature_known	0	0	1
+scalar	electrical-resistivity	cured-silicone	electrical_resistivity	1.5e13	Ohm*m	constant
+uncertainty	electrical-resistivity	unstated	-	-	-	-
+validity	electrical-resistivity	source_grade_dowsil_732	1	1	1
+validity	electrical-resistivity	cure_age	604800	604800	s
+validity	electrical-resistivity	cure_temperature	298.15	298.15	K
+validity	electrical-resistivity	cure_relative_humidity	0.5	0.5	1
+validity	electrical-resistivity	source_test_temperature_known	0	0	1

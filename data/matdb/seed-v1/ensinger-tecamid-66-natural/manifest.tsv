@@ -1,7 +1,7 @@
 frankensim.matdb-manifest.v3
 pack_id	ensinger-tecamid-66-natural
-redistribution	permitted	Selected attributed numerical facts and original notes only; neither the producer document nor its table layout is redistributed
-citation	Ensinger Group / Ensinger Asia Holding, TECAMID 66 natural stock shapes, 2023-07-19 version AD, p. 1; https://www.ensinger-online.com/modules/public/sheet/createsheet.php?FILENAME=TECAMID_66_natural_13.PDF&FL=13&SID=792&ZOOM=1.2 ; accessed 2026-10-28
+redistribution	permitted	Selected attributed numerical facts and original notes only; no source document or table layout is redistributed
+citation	Ensinger, TECAMID 66 natural stock shapes, 2023-07-19 version AD; https://www.ensinger-online.com/modules/public/sheet/createsheet.php?FILENAME=TECAMID_66_natural_13.PDF&FL=13&SID=792&ZOOM=1.2 ; accessed 2026-10-28
 license	Attributed-Numerical-Facts-Only-No-Source-Document-License
 source	ensinger-tecamid-66-natural	properties.tsv	material-tsv-v1
 property	density	density	dimensional
@@ -18,4 +18,3 @@ axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
 axis	source_pressure_known	source-pressure-known	dimensional
 axis	test_speed	test-speed	dimensional
 axis	compressive_strain	compressive-strain	dimensional
-axis	immediately_after_machining	immediately-after-machining	dimensional
