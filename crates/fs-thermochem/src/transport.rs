@@ -1,9 +1,12 @@
 //! Bounded dilute-gas transport-property mixing closures.
 //!
-//! Version 1 implements only Wilke's gas-mixture viscosity rule. It combines
+//! The root module implements Wilke's gas-mixture viscosity rule. It combines
 //! caller-supplied pure-species viscosities at one explicitly declared
 //! temperature; it does not evaluate those viscosities, authenticate their
 //! common state, establish dilute-gas validity, or own a transport solver.
+
+/// Bounded molecular diffusion algebra in the mass-averaged gas frame.
+pub mod maxwell_stefan;
 
 use core::fmt;
 

@@ -985,3 +985,39 @@ Numerical solve tolerances are not claims about the release's material uncertain
 Tests cover every published reference-table row at its stated precision,
 independent pressure differentiation, Clapeyron/Gibbs/pressure-work identities,
 critical coalescence, inversion, domain limits, work bounds, and cancellation.
+
+## Barycentric Maxwell-Stefan molecular diffusion
+
+`transport::maxwell_stefan` supplies a bounded L1 constitutive friction solve,
+without evolving any spatial field. `MaxwellStefanV1` retains canonical original
+species IDs and molar masses. Its reusable workspace accepts actual mole
+fractions, their spatial gradients, T, p, grad(log p), and a complete symmetric
+positive binary-diffusivity matrix in coherent SI.
+
+For `z_i=j_i/M_i`, it solves
+`sum_j (x_j z_i-x_i z_j)/D_ij = -c [grad(x_i)+(x_i-Y_i) grad(log p)]`
+with the barycentric constraint `sum_i M_i z_i=0`. The returned mass fluxes are
+relative to mass-averaged velocity, unlike the existing material parcel's
+molar-averaged public diffusion contract. Unequal molecular masses, coupled
+crossdiffusion and barodiffusion are retained. Exact zero mole fractions are
+admitted without division by x, seeding or flux clipping.
+
+The maximum is 128 species. Scaled pivot elimination reuses fixed-dimension
+matrix and output buffers. Every original friction row, including the gauge
+row replaced by the mass constraint, and the actual published mass-flux sum
+must close their explicit absolute/relative budgets before return. Cancellation
+is polled at bounded assembly/elimination/check boundaries. Successful
+evaluations allocate no storage. The optional local pair-friction entropy
+production is absent at an exact-zero composition carrying nonzero flux; no
+finite chemical potential is invented there.
+
+Seven focused native tests pass: unequal-mass binary analytic flux; independent
+ternary crossdiffusion (including flux at zero own-species gradient);
+manufactured unequal-mass ternary original equations; exact-zero and structural
+species; analytic pressure diffusion; canonicalization/scaling/buffer reuse;
+and maximum-species, invalid-data and late-cancellation behavior. Thermal
+(Soret) diffusion, external species forces, ions, nonideal activities and a
+fully discrete entropy theorem remain outside this algebra. Pair coefficients
+and their thermodynamic-state support remain caller-owned source data.
+Primary formulation:
+<https://doc.comsol.com/6.4/doc/com.comsol.help.chem/chem_ug_chemsptrans.08.257.html>.
