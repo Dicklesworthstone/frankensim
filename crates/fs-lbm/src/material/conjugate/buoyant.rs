@@ -17,7 +17,9 @@ use fs_exec::CancelGate;
 use fs_material::{
     MaterialError,
     fluid_transport::{FluidTransport, FluidTransportState},
+    state_point::MaterialStatePointError,
 };
+use super::solid::{SolidConductivityLaw, SolidConductivitySample};
 
 /// Physical approximation limits and bounded steady fixed-point iteration.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -28,7 +30,7 @@ pub struct MaterialBuoyancyConfig {
     pub maximum_passes: usize,
     /// Absolute unrelaxed fixed-point temperature defect [K].
     pub temperature_tolerance_k: f64,
-    /// Relative tolerance on local molecular viscosity and conductivity.
+    /// Relative tolerance on fluid viscosity and all fluid/solid conductivities.
     pub transport_relative_tolerance: f64,
     /// Absolute tolerance on each buoyancy-force component [N/m3].
     pub force_tolerance_n_m3: f64,
@@ -57,7 +59,7 @@ pub struct MaterialBuoyancyReport {
     pub passes: usize,
     /// Maximum unrelaxed output-minus-trial temperature magnitude [K].
     pub temperature_defect_k: f64,
-    /// Maximum relative change of any local dynamic viscosity/conductivity.
+    /// Maximum relative change of fluid viscosity or any fluid/solid conductivity.
     pub transport_relative_defect: f64,
     /// Maximum componentwise output-minus-trial buoyancy magnitude [N/m3].
     pub force_defect_n_m3: f64,
@@ -76,6 +78,12 @@ pub struct MaterialBuoyancySolution<F> {
     /// Fresh source support at the returned temperatures; differences from
     /// `applied` passed the explicit nonlinear tolerances in `report`.
     pub endpoint: Vec<MaterialBuoyancySample<F>>,
+    /// Original solid sources actually used in the heat solve. Empty for the
+    /// explicitly fixed-coefficient entry point.
+    pub solid_applied: Vec<SolidConductivitySample>,
+    /// Those same solid sources at the returned temperature field. Their
+    /// conductivity changes pass the same transport convergence gate.
+    pub solid_endpoint: Vec<SolidConductivitySample>,
     /// Actual defects admitted at the returned fixed point.
     pub report: MaterialBuoyancyReport,
 }
@@ -90,6 +98,12 @@ pub enum MaterialBuoyancyError {
         cell: usize,
         temperature_k: f64,
         source: MaterialError,
+    },
+    /// Original solid conductivity source refused at this exact cell/state.
+    SolidMaterial {
+        cell: usize,
+        temperature_k: f64,
+        source: MaterialStatePointError,
     },
     /// Original momentum, thermal or cancellation refusal.
     Solver(ChtError),
@@ -187,6 +201,23 @@ fn samples<F: FluidTransport>(
     Ok(output)
 }
 
+fn solid_samples(
+    domain: &VoxelDomain, temperature: &[f64],
+    sources: Option<&[SolidConductivityLaw<'_>]>, gate: &CancelGate,
+) -> Result<Vec<SolidConductivitySample>, MaterialBuoyancyError> {
+    let Some(sources) = sources else { return Ok(Vec::new()); };
+    let mut samples = Vec::new();
+    for (cell, &temperature_k) in temperature.iter().enumerate() {
+        poll(gate)?;
+        let Voxel::Solid(index) = domain.voxel_at(cell) else { continue; };
+        let source = sources.get(usize::from(index)).ok_or(MaterialBuoyancyError::Invalid(
+            "solid voxel refers to an absent material source"))?;
+        samples.push(source.at_temperature(cell, index, temperature_k)
+            .map_err(|source| MaterialBuoyancyError::SolidMaterial { cell, temperature_k, source })?);
+    }
+    Ok(samples)
+}
+
 impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     /// Close material feedback through the original steady flow/heat solvers.
     ///
@@ -222,7 +253,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     /// Source callbacks must be repeatable queries, never commit physical history.
     /// Any material, convergence or cancellation failure returns no partial
     /// solution and leaves every caller-owned input untouched.
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments)]
     pub fn solve_natural_convection<S: FluidTransport>(
         &self,
         domain: &VoxelDomain,
@@ -233,6 +264,50 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         initial_temperature_k: &[f64],
         config: MaterialBuoyancyConfig,
         gate: &CancelGate,
+        resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
+    ) -> Result<MaterialBuoyancySolution<S>, MaterialBuoyancyError> {
+        self.solve_natural_convection_inner(domain, solids, None, flow_config, thermal,
+            energy_config, initial_temperature_k, config, gate, resolve)
+    }
+
+    /// Close BOTH solid and fluid material response on the same temperature field.
+    ///
+    /// Every original solid assignment names one source-bound conductivity law.
+    /// Its complete source bundle is refreshed at the actual trial, seed and
+    /// returned endpoint temperatures, with original claims pinned. Scalar or
+    /// explicitly grid-aligned orthotropic conductivity flows through the same
+    /// conservative half-cell/interface heat assembly. The original flow solver
+    /// then sees the resulting fluid temperature, density and viscosity.
+    ///
+    /// Acceptance includes every solid principal conductivity in the existing
+    /// transport-defect gate; small temperature changes cannot conceal a large
+    /// material change. Source refusals, cancellation and nonlinear exhaustion
+    /// return no partial solution and mutate neither inputs nor material laws.
+    /// Steady fixed geometry and the original Boussinesq/laminar approximation
+    /// remain; this supplies no solid storage, deformation, melting or off-axis
+    /// conductivity discretization. No second thermal solver is introduced.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_natural_convection_with_material_solids<S: FluidTransport>(
+        &self, domain: &VoxelDomain, sources: &[SolidConductivityLaw<'_>],
+        flow_config: &SimpleConfig, thermal: &ThermalSetup, energy_config: &EnergyConfig,
+        initial_temperature_k: &[f64], config: MaterialBuoyancyConfig, gate: &CancelGate,
+        resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
+    ) -> Result<MaterialBuoyancySolution<S>, MaterialBuoyancyError> {
+        poll(gate)?;
+        let solids: Vec<_> = sources.iter().map(|source| {
+            let k = source.reference_conductivity_w_m_k();
+            SolidMaterial::new("source-bound solid", k[0]).with_orthotropic(k)
+        }).collect();
+        self.solve_natural_convection_inner(domain, &solids, Some(sources), flow_config,
+            thermal, energy_config, initial_temperature_k, config, gate, resolve)
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn solve_natural_convection_inner<S: FluidTransport>(
+        &self, domain: &VoxelDomain, solids: &[SolidMaterial],
+        solid_sources: Option<&[SolidConductivityLaw<'_>]>,
+        flow_config: &SimpleConfig, thermal: &ThermalSetup, energy_config: &EnergyConfig,
+        initial_temperature_k: &[f64], config: MaterialBuoyancyConfig, gate: &CancelGate,
         mut resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
     ) -> Result<MaterialBuoyancySolution<S>, MaterialBuoyancyError> {
         poll(gate)?;
@@ -247,7 +322,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
             || solids.iter().any(|s| !s.conductivity_table.is_empty())
         {
             return Err(MaterialBuoyancyError::Invalid(
-                "material steady feedback requires laminar flow, no independent eddy conductivity and fixed solid conductivities",
+                "material steady feedback requires laminar flow and no independently authored eddy or solid conductivity tables",
             ));
         }
         let mut conductivity =
@@ -272,6 +347,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
             gate,
             &mut resolve,
         )?;
+        let mut solid_applied = solid_samples(domain, &temperature, solid_sources, gate)?;
         let mut viscosity = vec![self.transport.dynamic_viscosity_pa_s(); domain.cell_count()];
         let mut force = vec![[0.0; 3]; domain.cell_count()];
         let mut seeded = false;
@@ -283,6 +359,9 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
                     viscosity[sample.cell] = transport.dynamic_viscosity_pa_s();
                     conductivity[sample.cell] = [transport.thermal_conductivity_w_m_k(); 3];
                     force[sample.cell] = sample.force_n_m3;
+                }
+                for sample in &solid_applied {
+                    conductivity[sample.cell] = sample.conductivity_w_m_k;
                 }
                 let flow = simple_flow_with_viscosity_and_force(
                     domain,
@@ -345,6 +424,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
                     gate,
                     &mut resolve,
                 )?;
+                solid_applied = solid_samples(domain, &temperature, solid_sources, gate)?;
                 seeded = true;
             };
             let endpoint = samples(
@@ -355,6 +435,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
                 gate,
                 &mut resolve,
             )?;
+            let solid_endpoint = solid_samples(domain, &energy.temperature, solid_sources, gate)?;
             let mut report = MaterialBuoyancyReport {
                 passes: pass,
                 temperature_defect_k: 0.0,
@@ -383,6 +464,13 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
                     report.force_defect_n_m3 = report.force_defect_n_m3.max((b - a).abs());
                 }
             }
+            for (old, next) in solid_applied.iter().zip(&solid_endpoint) {
+                poll(gate)?;
+                for (x, y) in old.conductivity_w_m_k.iter().zip(next.conductivity_w_m_k) {
+                    report.transport_relative_defect = report.transport_relative_defect
+                        .max((x-y).abs()/x.max(y));
+                }
+            }
             poll(gate)?;
             if report.temperature_defect_k <= config.temperature_tolerance_k
                 && report.transport_relative_defect <= config.transport_relative_tolerance
@@ -394,6 +482,8 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
                     energy,
                     applied,
                     endpoint,
+                    solid_applied,
+                    solid_endpoint,
                     report,
                 });
             }
@@ -403,6 +493,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
             if config.temperature_relaxation == 1.0 {
                 temperature = energy.temperature;
                 applied = endpoint;
+                solid_applied = solid_endpoint;
             } else {
                 for (old, next) in temperature.iter_mut().zip(energy.temperature) {
                     *old = (1.0 - config.temperature_relaxation) * *old
@@ -416,6 +507,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
                     gate,
                     &mut resolve,
                 )?;
+                solid_applied = solid_samples(domain, &temperature, solid_sources, gate)?;
             }
         }
         unreachable!("positive bounded pass count either accepts or refuses its final pass")

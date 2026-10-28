@@ -14,6 +14,28 @@ dimension checks, `fs-exec` for cancel gates and pooled sweeps, and
 `fs-sparse` (COO/CSR assembly and ILU(0)) for the conjugate energy and
 projection solves. Pure, deterministic (fixed tile/cell/link order).
 
+### Shared solid/fluid material feedback in natural convection
+
+`MaterialChtFluid::solve_natural_convection_with_material_solids` resolves both
+the fluid response and every solid's conductivity on the same steady temperature
+field. `SolidConductivityLaw` retains the complete original material bundle and
+pins its sources while changing only its declared absolute temperature. Scalar
+or explicitly grid-aligned orthotropic coefficients feed the original conservative
+half-cell/contact heat assembly; its temperature feeds the same buoyancy/viscosity
+momentum owner. Solid conductivity defects participate in the existing nonlinear
+acceptance gate, alongside fluid transport, force and temperature defects.
+
+Applied and endpoint solid receipts are retained. Unsupported source states,
+cancellation and exhausted coupling budgets publish no partial result. The
+fixed-solid entry point retains its explicit constant-coefficient semantics.
+This remains laminar, steady, fixed-geometry Boussinesq conjugate heat transfer,
+without solid heat storage, melting, deformation or off-grid conductivity tensors.
+Focused G1/G3 tests check independent nonlinear two-layer heat balances, data-only
+material and principal-axis changes; G0 tests check source/cancellation refusal
+and a sharp conductivity change hidden by a small temperature defect. A coarse
+heated-cavity G3 regression checks that a solid-only source substitution changes
+the actual fluid buoyancy and circulation while conserving heat.
+
 ### Solved material flow on the shared enthalpy timeline
 
 With `enthalpy-coupling`, `MaterialChtFluid::solve_flow` retains the actual

@@ -10,6 +10,8 @@
 
 /// Closed, source-resolved steady buoyancy, viscosity and conductivity feedback.
 pub mod buoyant;
+/// Original solid material sources on the coupled fluid/solid temperature field.
+pub mod solid;
 
 use fs_exec::CancelGate;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};

@@ -436,3 +436,204 @@ fn natural_material_card_swap_refreshes_same_source_claims_at_thermal_endpoint()
     assert_ne!(outcomes[0].0, outcomes[1].0);
     assert!(outcomes[1].1 < outcomes[0].1);
 }
+
+mod solid_feedback {
+    use super::*;
+    use fs_evidence::ValidityDomain;
+    use fs_lbm::material::conjugate::solid::SolidConductivityLaw;
+    use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId,
+        PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint, UncertaintyModel};
+    use fs_material::state_point::{MaterialPropertySelection, ScalarAdmissibility,
+        ScalarPropertyRequirement, THERMAL_CONDUCTIVITY_DIMS, resolve_material_state_point};
+    use fs_qty::{QuantitySpec, Temperature};
+    use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+
+    fn quantity(kind: QuantityKind) -> QuantitySpec {
+        QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))
+    }
+    fn card(slopes: [f64; 3], upper: f64, sharp: bool) -> MaterialCard {
+        let mut claims = ClaimSet::new();
+        for (name, slope) in ["kx", "ky", "kz"].into_iter().zip(slopes) {
+            let knots = if sharp {
+                vec![(300.0, 1.0), (310.0-1e-6, 1.0), (310.0, 2.0), (upper, 2.0)]
+            } else { vec![(300.0, 1.0), (upper, 1.0+slope*(upper-300.0))] };
+            claims.insert_claim(PropertyClaim {
+                key: PropertyKey::with_quantity(name, quantity(QuantityKind::ThermalConductivity)),
+                value: PropertyValue::Curve { abscissa: "T".into(), abscissa_dims: Temperature::DIMS,
+                    knots, dims: THERMAL_CONDUCTIVITY_DIMS },
+                validity: ValidityDomain::unconstrained()
+                    .with_quantity("T", quantity(QuantityKind::AbsoluteTemperature), 300.0, upper)
+                    .with_quantity("pressure", quantity(QuantityKind::Pressure), 100000.0, 100000.0),
+                interpolation: InterpolationPolicy::LinearInside,
+                uncertainty: UncertaintyModel::Unstated, observations: vec![],
+                provenance: Provenance { source: "synthetic solid conductivity oracle, not measurements".into(),
+                    license: "test-only".into(), artifact: None },
+            }).unwrap();
+        }
+        MaterialCard::assemble(MaterialStateId { chemistry: "synthetic thermal solid".into(),
+            phase: "solid".into(), process: "numerical fixture".into(), revision: 0 }, claims, vec![]).unwrap()
+    }
+    fn law(card: &MaterialCard) -> SolidConductivityLaw<'_> {
+        let point = QueryPoint::new().with_quantity("T", quantity(QuantityKind::AbsoluteTemperature), 300.0)
+            .unwrap().with_quantity("pressure", quantity(QuantityKind::Pressure), 100000.0).unwrap();
+        let requirements = ["kx", "ky", "kz"].map(|name| ScalarPropertyRequirement::try_with_quantity(
+            name, quantity(QuantityKind::ThermalConductivity), ScalarAdmissibility::StrictlyPositive).unwrap());
+        let source = resolve_material_state_point(card, &point, &requirements,
+            MaterialPropertySelection::SingleClaimOnly).unwrap();
+        SolidConductivityLaw::try_new(card, source, "T", ["kx", "ky", "kz"]).unwrap()
+    }
+    fn setup(axis: usize) -> (VoxelDomain, ThermalSetup) {
+        let mut cells = [1; 3]; cells[axis] = 2;
+        let mut domain = VoxelDomain::new(cells[0], cells[1], cells[2], 1.0).unwrap();
+        domain.set(0, 0, 0, Voxel::Solid(0));
+        let mut faces = [ThermalFace::Adiabatic; 6];
+        faces[2*axis] = ThermalFace::Temperature(300.0);
+        faces[2*axis+1] = ThermalFace::Temperature(400.0);
+        (domain, ThermalSetup::new(faces))
+    }
+
+    #[test]
+    fn g1_g3_solid_material_and_axis_changes_reach_same_conjugate_heat_solution() {
+        let fluid = FluidTransportState::try_new(1.0, 2.0, 2.0, 1.0).unwrap();
+        let bound = MaterialChtFluid::try_new(&fluid).unwrap();
+        let flow = SimpleConfig::new([FvBoundary::wall(); 6]);
+        let mut controls = natural_material_controls();
+        controls.boussinesq.gravity_m_s2 = [0.0; 3];
+        for slopes in [[0.0; 3], [0.01, 0.02, 0.03]] {
+            let card = card(slopes, 400.0, false);
+            let source = law(&card);
+            for axis in 0..3 {
+                let (domain, thermal) = setup(axis);
+                let result = bound.solve_natural_convection_with_material_solids(
+                    &domain, std::slice::from_ref(&source), &flow, &thermal,
+                    &EnergyConfig::default(), &[300.0; 2], controls, &CancelGate::new(),
+                    |_, _, _| Ok(fluid)).unwrap();
+                // Independent two-layer FV balance: theta*(3+a*theta)=100.
+                // The solid and fluid halves carry exactly the same heat.
+                let a = slopes[axis];
+                let theta = if a == 0.0 { 100.0/3.0 }
+                    else { 200.0 / (3.0+(9.0+400.0*a).sqrt()) };
+                let heat = 2.0*(1.0+a*theta)*theta;
+                near(result.energy.temperature[0], 300.0+theta, 1e-11);
+                near(result.energy.temperature[1], 400.0-heat/4.0, 1e-11);
+                near(result.energy.solid_to_fluid_heat_w(&domain), -heat, 1e-9);
+                assert!(result.energy.report.balance.residual_w.abs() < 1e-8);
+                assert!(result.flow.velocity_m_s.iter().all(|v| *v == [0.0; 3]));
+                let endpoint = &result.solid_endpoint[0];
+                assert_eq!(endpoint.cell, 0);
+                assert_eq!(endpoint.material_index, 0);
+                assert_eq!(endpoint.temperature_k, result.energy.temperature[0]);
+                assert_eq!(endpoint.material.card_identity(), card.content_hash());
+                for name in ["kx", "ky", "kz"] {
+                    let receipt = &endpoint.material.property(name).unwrap().answer().receipt;
+                    assert_eq!(receipt.selected, source.reference().property(name).unwrap().answer().receipt.selected);
+                    assert!(receipt.query_point.contains(&("T".into(), endpoint.temperature_k)));
+                    assert!(receipt.query_point.contains(&("pressure".into(), 100000.0)));
+                }
+                near(endpoint.conductivity_w_m_k[axis], 1.0+a*theta, 1e-11);
+                assert!(result.report.transport_relative_defect <= controls.transport_relative_tolerance);
+            }
+        }
+    }
+
+    #[test]
+    fn g3_solid_only_substitution_changes_actual_fluid_buoyancy_and_circulation() {
+        // The existing differentially heated FV cavity, with a conducting left
+        // wall column. This is a coupling regression, not a mesh-convergence or
+        // experimental claim. The fluid law, geometry and forcing stay fixed.
+        let n = 6;
+        let mut domain = VoxelDomain::new(n, n, 1, 1.0/n as f64).unwrap();
+        for y in 0..n { domain.set(0, y, 0, Voxel::Solid(0)); }
+        let mut faces = [ThermalFace::Adiabatic; 6];
+        faces[0] = ThermalFace::Temperature(310.0);
+        faces[1] = ThermalFace::Temperature(300.0);
+        let thermal = ThermalSetup::new(faces);
+        let mut flow = SimpleConfig::new([FvBoundary::wall(), FvBoundary::wall(),
+            FvBoundary::wall(), FvBoundary::wall(), FvBoundary::Symmetry, FvBoundary::Symmetry]);
+        flow.tolerance = 1e-10;
+        flow.pressure_tolerance = 1e-12;
+        let fluid = FluidTransportState::try_new(1.0, 2.0, 1.0, 1.0).unwrap();
+        let bound = MaterialChtFluid::try_new(&fluid).unwrap();
+        let mut controls = natural_material_controls();
+        controls.boussinesq.gravity_m_s2 = [0.0, -9.81, 0.0];
+        controls.temperature_tolerance_k = 1e-8;
+        controls.transport_relative_tolerance = 1e-9;
+        controls.force_tolerance_n_m3 = 1e-9;
+        let mut results = Vec::new();
+        for slope in [0.0, 1.0] {
+            let card = card([slope; 3], 400.0, false);
+            let result = bound.solve_natural_convection_with_material_solids(
+                &domain, &[law(&card)], &flow, &thermal, &EnergyConfig::default(),
+                &vec![300.0; domain.cell_count()], controls, &CancelGate::new(),
+                |_, t, _| FluidTransportState::try_new(1.0-0.001*(t-300.0), 2.0, 1.0, 1.0))
+                .unwrap();
+            assert!(result.energy.report.balance.residual_w.abs() < 1e-8);
+            let peak = result.flow.velocity_m_s.iter().flat_map(|v| v.iter())
+                .copied().map(f64::abs).fold(0.0, f64::max);
+            assert!(peak > 1e-8);
+            for sample in &result.endpoint {
+                near(sample.force_n_m3[1], 9.81*0.001*(sample.temperature_k-300.0), 1e-12);
+            }
+            for sample in &result.solid_endpoint {
+                assert_eq!(sample.temperature_k, result.energy.temperature[sample.cell]);
+                near(sample.conductivity_w_m_k[0], 1.0+slope*(sample.temperature_k-300.0), 1e-12);
+            }
+            results.push(result);
+        }
+        let velocity_change = results[0].flow.velocity_m_s.iter().zip(&results[1].flow.velocity_m_s)
+            .flat_map(|(a,b)| a.iter().zip(b).map(|(a,b)| (a-b).abs())).fold(0.0, f64::max);
+        let force_change = results[0].endpoint.iter().zip(&results[1].endpoint)
+            .map(|(a,b)| (a.force_n_m3[1]-b.force_n_m3[1]).abs()).fold(0.0, f64::max);
+        assert!(force_change > 1e-4);
+        assert!(velocity_change > 1e-7);
+    }
+
+    #[test]
+    fn g0_solid_endpoint_refusal_and_cancel_preserve_original_inputs() {
+        let card = card([0.01; 3], 320.0, false);
+        let source = law(&card);
+        let original = source.reference().clone();
+        let (domain, thermal) = setup(0);
+        let original_thermal = thermal.clone();
+        let initial = [300.0; 2];
+        let fluid = FluidTransportState::try_new(1.0, 2.0, 2.0, 1.0).unwrap();
+        let bound = MaterialChtFluid::try_new(&fluid).unwrap();
+        let flow = SimpleConfig::new([FvBoundary::wall(); 6]);
+        let gate = CancelGate::new();
+        assert!(matches!(bound.solve_natural_convection_with_material_solids(
+            &domain, std::slice::from_ref(&source), &flow, &thermal, &EnergyConfig::default(),
+            &initial, natural_material_controls(), &gate, |_, _, _| Ok(fluid)),
+            Err(MaterialBuoyancyError::SolidMaterial { cell: 0, .. })));
+        assert!(matches!(bound.solve_natural_convection_with_material_solids(
+            &domain, std::slice::from_ref(&source), &flow, &thermal, &EnergyConfig::default(),
+            &initial, natural_material_controls(), &gate, |_, _, _| { gate.request(); Ok(fluid) }),
+            Err(MaterialBuoyancyError::Solver(fs_lbm::conjugate::ChtError::Cancelled))));
+        assert_eq!(source.reference(), &original);
+        assert_eq!(thermal, original_thermal);
+        assert_eq!(initial, [300.0; 2]);
+    }
+
+    #[test]
+    fn g0_solid_conductivity_jump_has_its_own_nonlinear_acceptance_gate() {
+        let card = card([0.0; 3], 400.0, true);
+        let source = law(&card);
+        let (domain, _) = setup(0);
+        let thermal = ThermalSetup::new([ThermalFace::Temperature(310.0); 6]);
+        let fluid = FluidTransportState::try_new(1.0, 2.0, 2.0, 1.0).unwrap();
+        let bound = MaterialChtFluid::try_new(&fluid).unwrap();
+        let mut controls = natural_material_controls();
+        controls.maximum_passes = 1;
+        controls.temperature_tolerance_k = 1e-3;
+        let result = bound.solve_natural_convection_with_material_solids(
+            &domain, &[source], &SimpleConfig::new([FvBoundary::wall(); 6]), &thermal,
+            &EnergyConfig::default(), &[310.0-1e-6, 310.0], controls, &CancelGate::new(),
+            |_, _, _| Ok(fluid));
+        match result {
+            Err(MaterialBuoyancyError::NotConverged(report)) => {
+                assert!(report.temperature_defect_k < controls.temperature_tolerance_k);
+                assert!(report.transport_relative_defect > 0.49);
+            }
+            _ => panic!("a solid material jump must fail even when temperature already agrees"),
+        }
+    }
+}
