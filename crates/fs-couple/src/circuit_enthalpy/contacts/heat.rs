@@ -183,6 +183,20 @@ impl<'a> MaterialHeatNetwork<'a> {
 }
 
 impl PreparedHeatNetwork<'_, '_> {
+    // Spatial electrical consumers retain this exact original material assembly.
+    // A graph resistor/contact must not disappear when no graph is being stepped.
+    pub(crate) fn thermal_material_network(
+        &self,
+    ) -> Result<&crate::circuit_enthalpy::material::MaterialNetwork<'_>, HeatNetworkError> {
+        let electrical = self.network.electrical;
+        if !electrical.bulk.resistors.is_empty() || !electrical.contacts.is_empty()
+            || !electrical.electrical_bases.is_empty() {
+            return Err(HeatNetworkError::Invalid(
+                "spatial conduction cannot discard graph resistors, electrical contacts or circuit source bindings"));
+        }
+        Ok(electrical.bulk)
+    }
+
     /// Original bulk heat routes for consumers composing additional physics.
     pub fn resistor_destinations(&self) -> Vec<super::ResistorCell> {
         self.electrical.resistor_destinations()
@@ -257,7 +271,7 @@ impl PreparedHeatNetwork<'_, '_> {
 fn as_circuit_error(e: HeatNetworkError) -> CircuitEnthalpyError<HeatNetworkError> {
     match e { HeatNetworkError::Cancelled => CircuitEnthalpyError::Cancelled, other => CircuitEnthalpyError::Source(other) }
 }
-fn closed_balance(dt: f64, residual: f64, sample: &HeatNetworkSample, tolerance: f64)
+pub(crate) fn closed_balance(dt: f64, residual: f64, sample: &HeatNetworkSample, tolerance: f64)
     -> Result<(), HeatNetworkError>
 {
     let corrected = residual + dt * sample.radiation_net_power_w();

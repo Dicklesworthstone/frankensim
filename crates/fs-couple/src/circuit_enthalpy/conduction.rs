@@ -9,10 +9,12 @@
 pub mod circuit;
 /// Retained dielectric charge and local conduction heat on this same material network.
 pub mod dielectric;
+// The complete sourced heat network enters this same electrical/thermal residual.
+mod heat;
 
 use super::{
-    CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, DrivenCoefficients,
-    DriverAccount, ThermalDriver, cell_driver_candidate, finite,
+    CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, CircuitThermalCoefficients,
+    DrivenCoefficients, DriverAccount, ThermalDriver, cell_driver_candidate, finite,
     magnetic::same_material,
     material::{
         ConductionLink, MaterialCell, MaterialNetwork, MaterialNetworkError, MaterialNetworkSample,
@@ -140,6 +142,7 @@ pub struct ConductionThermalNetwork<'a> {
 #[derive(Debug)]
 pub enum ConductionThermalError {
     Material(MaterialNetworkError),
+    Heat(super::contacts::heat::HeatNetworkError),
     Conductor(ConductorError),
     Field(ConductionError),
     Dielectric(fs_em::electrostatic::relaxation::DielectricRelaxationError),
@@ -226,19 +229,19 @@ impl<C: PlanarConductorMaterial> ThermalDriver for FieldCandidate<C> {
 
 /// Jointly accepted heat history and its endpoint spatial material operator.
 /// Consume them together to continue; all original inputs remain unchanged.
-pub struct ConductionEnthalpyCandidate<'t, C = ResolvedConductorState> {
+pub struct ConductionEnthalpyCandidate<'t, C = ResolvedConductorState, S = MaterialNetworkSample> {
     thermal: DepositionSimulation<'t>,
     problem: PlanarConduction<C>,
-    report: CircuitEnthalpyReport<MaterialNetworkSample, ConductionThermalStep>,
+    report: CircuitEnthalpyReport<S, ConductionThermalStep>,
 }
-impl<'t, C: PlanarConductorMaterial> ConductionEnthalpyCandidate<'t, C> {
+impl<'t, C: PlanarConductorMaterial, S> ConductionEnthalpyCandidate<'t, C, S> {
     pub fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
     pub fn problem(&self) -> &PlanarConduction<C> {
         &self.problem
     }
-    pub fn report(&self) -> &CircuitEnthalpyReport<MaterialNetworkSample, ConductionThermalStep> {
+    pub fn report(&self) -> &CircuitEnthalpyReport<S, ConductionThermalStep> {
         &self.report
     }
     pub fn into_parts(
@@ -246,7 +249,7 @@ impl<'t, C: PlanarConductorMaterial> ConductionEnthalpyCandidate<'t, C> {
     ) -> (
         DepositionSimulation<'t>,
         PlanarConduction<C>,
-        CircuitEnthalpyReport<MaterialNetworkSample, ConductionThermalStep>,
+        CircuitEnthalpyReport<S, ConductionThermalStep>,
     ) {
         (self.thermal, self.problem, self.report)
     }
@@ -321,6 +324,51 @@ impl ConductionThermalNetwork<'_> {
     ) -> Result<ConductionEnthalpyCandidate<'t, C>, Error> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
+        self.admit_step(
+            thermal,
+            target_s,
+            problem,
+            assembly,
+            controls,
+            initial_energy_increments_j,
+        )?;
+        let network = MaterialNetwork {
+            cells: self.cells,
+            resistors: &[],
+            links: self.links,
+        };
+        let prepared = network
+            .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
+            .map_err(material)?;
+        self.step_resolved_candidate(
+            thermal,
+            target_s,
+            problem,
+            drive,
+            assembly,
+            field_controls,
+            controls,
+            initial_energy_increments_j,
+            |state| {
+                prepared
+                    .resolve(state, || (*cancel.borrow_mut())())
+                    .map_err(material)
+            },
+            |source| source,
+            &cancel,
+        )
+    }
+
+    // Admission precedes material preparation and is shared with complete heat.
+    fn admit_step<C: PlanarConductorMaterial>(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        target_s: f64,
+        problem: &PlanarConduction<C>,
+        assembly: WeightedAssemblyLimits,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+    ) -> Result<f64, Error> {
         super::admit_driver_unknowns(thermal, controls, initial_energy_increments_j)?;
         let dt = finite(target_s - thermal.time_s())?;
         if dt <= 0.0 || self.cells.len() != thermal.cells().len() {
@@ -342,19 +390,38 @@ impl ConductionThermalNetwork<'_> {
                 "electrical geometry exceeds the declared assembly capacity",
             ));
         }
-        let network = MaterialNetwork {
-            cells: self.cells,
-            resistors: &[],
-            links: self.links,
-        };
-        let prepared = network
-            .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
-            .map_err(material)?;
-        let routes = self.admit_routes(thermal, problem, &cancel)?;
-        let accepted = prepared
-            .resolve(thermal, || (*cancel.borrow_mut())())
-            .map_err(material)?;
-        let initial = self.materials_at(problem, &accepted.source, &routes, &cancel)?;
+        Ok(dt)
+    }
+
+    // One spatial current, source refresh, Joule deposition and nonlinear owner.
+    // Both concrete public entry points retain their original source samples.
+    #[allow(clippy::too_many_arguments)]
+    fn step_resolved_candidate<'t, C: PlanarConductorMaterial, S>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        problem: &PlanarConduction<C>,
+        drive: ConductionDrive<'_>,
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        resolve: impl Fn(&DepositionSimulation<'_>) -> Result<CircuitThermalCoefficients<S>, Error>,
+        sample: impl Fn(&S) -> &MaterialNetworkSample,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<ConductionEnthalpyCandidate<'t, C, S>, Error> {
+        check(cancel)?;
+        let dt = self.admit_step(
+            thermal,
+            target_s,
+            problem,
+            assembly,
+            controls,
+            initial_energy_increments_j,
+        )?;
+        let routes = self.admit_routes(thermal, problem, cancel)?;
+        let accepted = resolve(thermal)?;
+        let initial = self.materials_at(problem, sample(&accepted.source), &routes, cancel)?;
         if initial.iter().zip(problem.conductors()).any(|(a, b)| {
             a.source_basis() != b.source_basis()
                 || a.frame() != b.frame()
@@ -370,11 +437,10 @@ impl ConductionThermalNetwork<'_> {
             controls,
             initial_energy_increments_j,
             |state, _remaining| {
-                check(&cancel)?;
-                let coefficients = prepared
-                    .resolve(state, || (*cancel.borrow_mut())())
-                    .map_err(material)?;
-                let sources = self.materials_at(problem, &coefficients.source, &routes, &cancel)?;
+                check(cancel)?;
+                let coefficients = resolve(state)?;
+                let sources =
+                    self.materials_at(problem, sample(&coefficients.source), &routes, cancel)?;
                 let next =
                     PlanarConduction::new(problem.mesh().clone(), sources, assembly, &mut || {
                         (*cancel.borrow_mut())()
@@ -436,7 +502,7 @@ impl ConductionThermalNetwork<'_> {
             },
             || (*cancel.borrow_mut())(),
         )?;
-        check(&cancel)?;
+        check(cancel)?;
         Ok(ConductionEnthalpyCandidate {
             thermal,
             problem,
@@ -493,13 +559,13 @@ impl ConductionThermalNetwork<'_> {
                 .ok_or_else(|| invalid("electrical receiver lacks a caloric binding"))?;
             for knot in binding.curve.knots() {
                 check(cancel)?;
-                if knot.liquid_mass_fraction != 0.0 && binding.point.liquid_fraction_axis.is_none() {
+                if knot.liquid_mass_fraction != 0.0 && binding.point.liquid_fraction_axis.is_none()
+                {
                     return Err(invalid(
                         "non-solid electrical charts require an explicit liquid mass fraction coordinate",
                     ));
                 }
-                if (finite(cell.mass_kg / knot.bulk_density_kg_m3)? - cell.geometry.volume_m3)
-                    .abs()
+                if (finite(cell.mass_kg / knot.bulk_density_kg_m3)? - cell.geometry.volume_m3).abs()
                     > self.volume_tolerance_m3
                 {
                     return Err(invalid(
