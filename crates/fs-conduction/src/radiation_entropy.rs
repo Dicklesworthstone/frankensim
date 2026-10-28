@@ -12,6 +12,9 @@
 //! change of variable, an explicit work budget and a numerical error ESTIMATE.
 //! See Kabelac and Conrad, Entropy 14 (2012), 717–735, doi:10.3390/e14040717.
 
+mod ambient;
+pub use ambient::MaterialRadiationEntropyExchange;
+
 use fs_math::det;
 
 const H: f64 = 6.626_070_15e-34;
@@ -62,6 +65,8 @@ pub struct PhotonEmissionSpectrum {
 pub struct GrayPhotonEmission {
     temperature_k: f64,
     emissivity: f64,
+    log_temperature: f64,
+    log_emissivity: f64,
 }
 
 /// Relative accuracy for a positive dimensionless integral, separate from model error.
@@ -87,12 +92,14 @@ pub struct PhotonEmissionFlux {
     pub entropy_w_m2_k: f64,
     /// Estimated absolute quadrature error in entropy, W/(m² K), not certified.
     pub estimated_entropy_error_w_m2_k: f64,
-    /// Integrand evaluations. Exact black or nonemitting limits need none.
+    /// Integrand evaluations used to prepare this factor, not repeated for a
+    /// temperature-only evaluation. Exact black or nonemitting limits need none.
     pub evaluations: usize,
 }
 
 impl GrayPhotonEmission {
-    /// Explicitly admit the wavelength-independent gray/diffuse approximation.
+    /// Prepare the wavelength-independent gray/diffuse approximation, caching
+    /// temperature/emissivity logarithms for repeated allocation-free spectra.
     /// A hemispherical-total emissivity claim alone does not establish it.
     pub fn new(temperature_k: f64, emissivity: f64) -> Result<Self, RadiationEntropyError> {
         if !temperature_k.is_finite() || temperature_k <= 0.0 {
@@ -101,7 +108,10 @@ impl GrayPhotonEmission {
         if !emissivity.is_finite() || !(0.0..=1.0).contains(&emissivity) {
             return Err(RadiationEntropyError::Emissivity);
         }
-        Ok(Self { temperature_k, emissivity })
+        Ok(Self { temperature_k, emissivity,
+            log_temperature: det::ln(temperature_k),
+            log_emissivity: if emissivity == 0.0 { f64::NEG_INFINITY } else { det::ln(emissivity) },
+        })
     }
 
     /// Evaluate both spectra without allocating or first forming an underflowing
@@ -118,13 +128,13 @@ impl GrayPhotonEmission {
             return Ok(PhotonEmissionSpectrum { energy_w_m2_sr_nm: 0.0, entropy_w_m2_sr_k_nm: 0.0 });
         }
         let log_lambda = det::ln(wavelength_nm);
-        let log_x = det::ln(C2_NM_K) - log_lambda - det::ln(self.temperature_k);
+        let log_x = det::ln(C2_NM_K) - log_lambda - self.log_temperature;
         let raw_x = (C2_NM_K / wavelength_nm) / self.temperature_k;
         let x = if raw_x.is_finite() && raw_x > 0.0 { raw_x } else { det::exp(log_x) };
         let log_n = if x == 0.0 {
-            det::ln(self.emissivity) - log_x
+            self.log_emissivity - log_x
         } else {
-            log_occupation(x, det::ln(self.emissivity))
+            log_occupation(x, self.log_emissivity)
         };
         Ok(PhotonEmissionSpectrum {
             energy_w_m2_sr_nm: represented_exp(det::ln(C1_NM) - 5.0*log_lambda + log_n)?,
@@ -133,11 +143,25 @@ impl GrayPhotonEmission {
     }
 
     /// Integrate emitted entropy over ALL wavelengths, not just the render band.
-    /// The integrand is normalized by epsilon before quadrature, keeping very
-    /// weak gray emission resolvable. Refinement reuses previous evaluations and
-    /// polls cancellation at most every 64 new nodes. No state is mutated.
+    /// For many temperatures at unchanged emissivity, prepare once with
+    /// `prepare_bolometric` and reuse its temperature-only evaluation.
     pub fn bolometric(self, controls: PhotonEntropyQuadrature, mut cancelled: impl FnMut() -> bool)
         -> Result<PhotonEmissionFlux, RadiationEntropyError>
+    {
+        let prepared = self.prepare_bolometric(controls, &mut cancelled)?;
+        let result = prepared.flux_at_log_temperature(self.log_temperature)?;
+        poll(&mut cancelled)?;
+        Ok(result)
+    }
+
+    /// Prepare the temperature-independent full-spectrum entropy factor once.
+    /// Quadrature is normalized by emissivity to retain weak gray emission;
+    /// refinement reuses prior evaluations, allocates nothing and checks
+    /// cancellation at most every 64 new nodes. The result may be reused at
+    /// arbitrary positive temperatures under the SAME explicitly gray model.
+    /// Its reuse does not extend any material source's temperature validity.
+    pub fn prepare_bolometric(self, controls: PhotonEntropyQuadrature,
+        mut cancelled: impl FnMut() -> bool) -> Result<PreparedPhotonEntropy, RadiationEntropyError>
     {
         poll(&mut cancelled)?;
         if !controls.relative_tolerance.is_finite()
@@ -145,19 +169,14 @@ impl GrayPhotonEmission {
             || !(33..=1_048_577).contains(&controls.maximum_evaluations)
         { return Err(RadiationEntropyError::Quadrature); }
         if self.emissivity == 0.0 {
-            return Ok(PhotonEmissionFlux { energy_w_m2: 0.0, entropy_w_m2_k: 0.0,
-                estimated_entropy_error_w_m2_k: 0.0, evaluations: 0 });
+            return Ok(PreparedPhotonEntropy { log_emissivity: f64::NEG_INFINITY,
+                normalized_integral: 0.0, estimated_error: 0.0, evaluations: 0 });
         }
-        let log_e = det::ln(self.emissivity);
-        let log_t = det::ln(self.temperature_k);
-        let log_sigma = det::ln(crate::radiation::STEFAN_BOLTZMANN_W_M2_K4);
-        let energy = represented_exp(log_e + log_sigma + 4.0*log_t)?;
-        let log_scale = log_e + log_sigma + det::ln(4.0/3.0) + 3.0*log_t - det::ln(BLACK_INTEGRAL);
+        let log_e = self.log_emissivity;
         if self.emissivity == 1.0 {
-            let entropy = represented_exp(log_sigma + det::ln(4.0/3.0) + 3.0*log_t)?;
             poll(&mut cancelled)?;
-            return Ok(PhotonEmissionFlux { energy_w_m2: energy, entropy_w_m2_k: entropy,
-                estimated_entropy_error_w_m2_k: 0.0, evaluations: 0 });
+            return Ok(PreparedPhotonEntropy { log_emissivity: 0.0,
+                normalized_integral: BLACK_INTEGRAL, estimated_error: 0.0, evaluations: 0 });
         }
         let mut n = 8usize;
         let mut sum = Sum::default();
@@ -181,18 +200,59 @@ impl GrayPhotonEmission {
             if let Some(previous) = previous_simpson {
                 let error = f64::abs(simpson-previous)/15.0;
                 if simpson > 0.0 && error <= controls.relative_tolerance*simpson {
-                    let entropy = represented_exp(log_scale + det::ln(simpson))?;
-                    let estimate = if error == 0.0 { 0.0 }
-                        else { represented_exp(log_scale + det::ln(error))? };
                     poll(&mut cancelled)?;
-                    return Ok(PhotonEmissionFlux { energy_w_m2: energy, entropy_w_m2_k: entropy,
-                        estimated_entropy_error_w_m2_k: estimate, evaluations: next_n+1 });
+                    return Ok(PreparedPhotonEntropy { log_emissivity: log_e,
+                        normalized_integral: simpson, estimated_error: error, evaluations: next_n+1 });
                 }
             }
             previous_simpson = Some(simpson);
             trapezoid = refined;
             n = next_n;
         }
+    }
+}
+
+/// Prepared full-spectrum coefficient for one unchanged gray emissivity.
+/// Stores no thermal history and allocates nothing. A temperature sweep needs
+/// no further quadrature, material query or cancellation-controlled iteration.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreparedPhotonEntropy {
+    log_emissivity: f64,
+    normalized_integral: f64,
+    estimated_error: f64,
+    evaluations: usize,
+}
+impl PreparedPhotonEntropy {
+    /// Evaluate analytic T^4 energy and T^3 photon entropy scaling. The caller
+    /// remains responsible for the original material's validity at this T.
+    pub fn flux_at_temperature(self, temperature_k: f64)
+        -> Result<PhotonEmissionFlux, RadiationEntropyError>
+    {
+        if !temperature_k.is_finite() || temperature_k <= 0.0 {
+            return Err(RadiationEntropyError::Temperature);
+        }
+        self.flux_at_log_temperature(det::ln(temperature_k))
+    }
+    fn flux_at_log_temperature(self, log_t: f64)
+        -> Result<PhotonEmissionFlux, RadiationEntropyError>
+    {
+        if self.normalized_integral == 0.0 {
+            return Ok(PhotonEmissionFlux { energy_w_m2: 0.0, entropy_w_m2_k: 0.0,
+                estimated_entropy_error_w_m2_k: 0.0, evaluations: 0 });
+        }
+        let log_sigma = det::ln(crate::radiation::STEFAN_BOLTZMANN_W_M2_K4);
+        let energy = represented_exp(self.log_emissivity+log_sigma+4.0*log_t)?;
+        let log_base = self.log_emissivity+log_sigma+det::ln(4.0/3.0)+3.0*log_t;
+        let entropy = if self.log_emissivity == 0.0 {
+            represented_exp(log_base)?
+        } else {
+            represented_exp(log_base-det::ln(BLACK_INTEGRAL)+det::ln(self.normalized_integral))?
+        };
+        let error = if self.estimated_error == 0.0 { 0.0 } else {
+            represented_exp(log_base-det::ln(BLACK_INTEGRAL)+det::ln(self.estimated_error))?
+        };
+        Ok(PhotonEmissionFlux { energy_w_m2: energy, entropy_w_m2_k: entropy,
+            estimated_entropy_error_w_m2_k: error, evaluations: self.evaluations })
     }
 }
 

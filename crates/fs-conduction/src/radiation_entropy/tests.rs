@@ -107,3 +107,22 @@ fn exact_zero_invalid_coordinates_budgets_and_cancellation_are_distinct() {
     assert_eq!(emitter.bolometric(PhotonEntropyQuadrature::default(), || { polls += 1; polls > 4 }), Err(RadiationEntropyError::Cancelled));
     assert!(emitter.bolometric(PhotonEntropyQuadrature::default(), || false).is_ok());
 }
+
+#[test]
+fn prepared_factor_reuses_the_same_quadrature_across_temperature_sweeps() {
+    for emissivity in [0.0, 0.1, 0.5, 1.0] {
+        let emitter = GrayPhotonEmission::new(300.0, emissivity).unwrap();
+        let controls = PhotonEntropyQuadrature::default();
+        let prepared = emitter.prepare_bolometric(controls, || false).unwrap();
+        let mut evaluations = None;
+        for t in [1.0, 300.0, 1000.0, 5778.0, 1e6] {
+            let reused = prepared.flux_at_temperature(t).unwrap();
+            let fresh = GrayPhotonEmission::new(t, emissivity).unwrap()
+                .bolometric(controls, || false).unwrap();
+            assert_eq!(reused, fresh);
+            if let Some(n) = evaluations { assert_eq!(reused.evaluations, n); }
+            evaluations = Some(reused.evaluations);
+        }
+        assert_eq!(prepared.flux_at_temperature(0.0), Err(RadiationEntropyError::Temperature));
+    }
+}
