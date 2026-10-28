@@ -32,6 +32,8 @@ use std::collections::BTreeMap;
 pub mod sites;
 /// Source-bound isothermal diffusion of bound species through shared vacancies.
 pub mod surface;
+/// Shared-snapshot gas transport and finite competitive adsorption.
+pub mod network;
 pub use sites::{CompetitiveSiteStep, backward_euler_sites};
 pub const MAX_COMPETITIVE_SPECIES: usize = 32;
 
@@ -294,11 +296,23 @@ fn combined_entropy_change(old: &CompetitiveSolid, new: &CompetitiveSolid,
     sum(terms)
 }
 
-/// Simultaneous competitive uptake/desorption, finite solid heat and one gas
-/// reconstruction. Caller accepts the whole immutable candidate or none of it.
-pub fn advance_candidate<'catalog>(solid: &CompetitiveSolid, gas: &ClosedGasParcel,
-    catalog: &'catalog ThermochemicalGasModel, duration_s: f64, controls: CompetitiveSolve,
-    mut cancelled: impl FnMut()->bool) -> Result<CompetitiveCandidate<'catalog>> {
+// Shared by pair and network coupling. Sampling changes no gas inventory and
+// returns the original finite solid proposal, not an independently evolved bath.
+struct PreparedAdsorption {
+    next: CompetitiveSolid,
+    sites: CompetitiveSiteStep,
+    before: Vec<LangmuirProperties>,
+    transfers: Vec<SpeciesBoundaryTransfer>,
+    boundary: Vec<crate::thermochemical_gas::energy::parcel::transfer::species::network::boundary::BoundarySpeciesTransfer>,
+    sensible: [f64; 2],
+    heat: f64,
+    binding: Vec<f64>,
+    iterations: usize,
+}
+fn prepare_adsorption(solid: &CompetitiveSolid, gas: &ClosedGasParcel,
+    catalog: &ThermochemicalGasModel, duration_s: f64, controls: CompetitiveSolve,
+    mut cancelled: impl FnMut()->bool) -> Result<PreparedAdsorption> {
+    use crate::thermochemical_gas::energy::parcel::transfer::species::network::boundary::BoundarySpeciesTransfer;
     controls.validate(duration_s)?; poll(&mut cancelled)?;
     let (ts,tg)=(solid.temperature_k,gas.state().state().temperature);
     if (ts-tg).abs()>controls.maximum_gas_surface_temperature_difference_k {
@@ -331,6 +345,7 @@ pub fn advance_candidate<'catalog>(solid: &CompetitiveSolid, gas: &ClosedGasParc
         return Err(AdsorptionError::InventoryLimit { gross_gas_fraction:maximum_gross,site_turnover:turnover });
     }
     let mut transfers=Vec::with_capacity(solid.moles.len());
+    let mut boundary=Vec::with_capacity(solid.moles.len());
     let mut heats=Vec::with_capacity(solid.moles.len()); let mut binding=Vec::with_capacity(solid.moles.len());
     for (i,law) in solid.model.channels.iter().enumerate() {
         poll(&mut cancelled)?;
@@ -345,6 +360,12 @@ pub fn advance_candidate<'catalog>(solid: &CompetitiveSolid, gas: &ClosedGasParc
         let hb=law.calorics.bound_adsorbate.state_at_temperature(ts)?.specific_enthalpy_j_kg()
             +law.calorics.bound_enthalpy_offset_j_kg;
         binding.push(finite(dm*hb)?);
+        let mass_in=finite(sites.gross_desorption_mol[i]*law.molar_mass())?;
+        let mass_out=finite(sites.gross_adsorption_mol[i]*law.molar_mass())?;
+        if sites.gross_desorption_mol[i]>0.0 && mass_in==0.0 { return Err(invalid("competitive gross desorption underflow")); }
+        boundary.push(BoundarySpeciesTransfer { species:law.species.clone(), incoming_mass_kg:mass_in,
+            outgoing_mass_kg:mass_out, net_mass_into_gas_kg:-dm,
+            relative_energy_into_gas_j:finite(-sites.gross_desorption_mol[i]*dh)? });
         transfers.push(SpeciesBoundaryTransfer { species:law.species.clone(),mass_into_gas_kg:-dm,energy_into_gas_j:energy });
     }
     let heat=sum(heats)?;
@@ -353,6 +374,19 @@ pub fn advance_candidate<'catalog>(solid: &CompetitiveSolid, gas: &ClosedGasParc
     if (temperature-ts).abs()>controls.maximum_temperature_change_k { return Err(invalid("competitive solid heating exceeds frozen-rate allowance")); }
     let next=CompetitiveSolid::ordered(Arc::clone(&solid.model),solid.dry_mass_kg,sites.final_moles.clone(),temperature)?;
     if sites.vacancy_moles[1]>0.0 && next.vacancy_moles()?<=0.0 { return Err(invalid("competitive endpoint lost a positive vacancy inventory")); }
+    poll(&mut cancelled)?;
+    Ok(PreparedAdsorption { next,sites,before,transfers,boundary,sensible,heat,binding,iterations })
+}
+
+/// Simultaneous competitive uptake/desorption, finite solid heat and one gas
+/// reconstruction. Caller accepts the whole immutable candidate or none of it.
+pub fn advance_candidate<'catalog>(solid: &CompetitiveSolid, gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel, duration_s: f64, controls: CompetitiveSolve,
+    mut cancelled: impl FnMut()->bool) -> Result<CompetitiveCandidate<'catalog>> {
+    let PreparedAdsorption { next,sites,before,transfers,sensible,heat,binding,iterations,.. } =
+        prepare_adsorption(solid,gas,catalog,duration_s,controls,&mut cancelled)?;
+    let (ts,tg)=(solid.temperature_k,gas.state().state().temperature);
+    let temperature=next.temperature_k;
     let candidate=gas.exchange_species_boundary(catalog,&transfers,GasSpeciesBoundarySolve {
         energy_tolerance_j:0.5*controls.gas.energy_tolerance_j,..controls.gas },&mut cancelled)?;
     let gas_next=candidate.gas(); let tg_next=gas_next.state().state().temperature;
