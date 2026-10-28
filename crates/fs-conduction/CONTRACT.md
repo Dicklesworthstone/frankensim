@@ -1993,6 +1993,27 @@ flash temperatures, evolving pressure/composition or ambient/radiative exchange.
 The coupled impact regression uses the actual mechanical contact area and
 publishes both reservoir proposals through the existing coupled thermal owner.
 
+## Pointwise radiation in coupled endpoint evaluation
+
+`EnthalpyBackwardEuler` and its heterogeneous wrapper expose
+`evaluate_endpoint_with_pointwise_ambient_radiation` and
+`evaluate_endpoint_with_pointwise_enclosure_radiation`. They evaluate supplied
+enthalpy candidates through the same original transport, radiation loads and
+prescribed-temperature reactions as the implicit primal. They do not advance
+history, require a constitutive tangent, or assert convergence. Latent plateaus
+and their corners remain admissible physical endpoints.
+
+The complete nodal residual includes local radiation; the heat balance retains
+the selected operator's actual net outward heat, including a closed enclosure's
+signed closure defect. Original Robin heat alone is exposed to convection or
+coolant consumers. Each prepared radiation owner must match the exact transport
+mesh and current physical boundary. Outer couplers must check both the original
+nodal-residual and joule tolerances: zero total enclosure heat can conceal
+opposite local defects. Existing cancellation and source-domain refusals remain
+active. Focused regressions compare independent surface moments and tetrahedral
+balance rows, latent-corner storage, heterogeneous zero-sum/nonzero-local
+enclosure balance, and the accepted prescribed-temperature reaction.
+
 ### Finite-body contact entropy
 
 Every accepted LumpedContactStep now carries LumpedContactEntropy from the

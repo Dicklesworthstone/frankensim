@@ -89,6 +89,55 @@ fn oracle(fixture: &Fixture, temperature: &[f64]) -> (Vec<f64>, [f64; 2], [f64; 
 }
 
 #[test]
+fn heterogeneous_pointwise_enclosure_exposes_local_defects_when_total_energy_cancels() {
+    use fs_conduction::transient::enthalpy::heterogeneous::{
+        HeterogeneousEnthalpyBackwardEuler, ReferenceEnthalpyMaterial,
+    };
+    let fixture = Fixture::new(true);
+    let boundary = boundary(&fixture, false);
+    let source = ScalarField::Uniform(0.0);
+    let old = [997.0, 997.0, 997.0, 997.0, 501.0, 501.0, 501.0, 501.0];
+    let candidate = [1000.0, 1000.0, 1000.0, 1000.0, 500.0, 500.0, 500.0, 500.0];
+    with_cx(|cx| {
+        let radiation = PointwiseEnclosureRadiation::new(
+            cx, &fixture.mesh, &boundary, &fixture.enclosure,
+            PointwiseEnclosureTolerance::default(),
+        ).unwrap();
+        let materials = [
+            ReferenceEnthalpyMaterial { curve: &fixture.curve, reference_density_kg_m3: 8.0 },
+            ReferenceEnthalpyMaterial { curve: &fixture.curve, reference_density_kg_m3: 24.0 },
+        ];
+        let engine = HeterogeneousEnthalpyBackwardEuler::new(
+            cx, &fixture.mesh, &materials, &[0, 1],
+            EnthalpyBudget { max_vertices: 8, max_elements: 2 },
+        ).unwrap();
+        let got = engine.evaluate_endpoint_with_pointwise_enclosure_radiation(
+            cx, problem(&fixture, &boundary, &source), None,
+            &old, &candidate, DT, step_config(), &radiation,
+        ).unwrap();
+        // Equal tetrahedral volumes and rho=[8,24], dh=[3,-1] give zero
+        // total storage. Each hot node nevertheless has +6V joules, each
+        // cold node -6V, and reflected radiation increases these local defects.
+        let volume = 2.0_f64.sqrt() / 12.0;
+        let heat = 3.0_f64.sqrt() * STEFAN_BOLTZMANN_W_M2_K4
+            * (350.0_f64.powi(4) - 300.0_f64.powi(4))
+            / (1.0 / EPS[0] + 1.0 / EPS[1] - 1.0);
+        let nodal_defect = 6.0 * volume + DT * heat / 4.0;
+        close(got.residual_norm_j, 8.0_f64.sqrt() * nodal_defect, 1e-10);
+        close(got.stored_energy_change_j, 0.0, 1e-12);
+        close(got.radiation_out_w, 0.0, 1e-9);
+        close(got.energy_residual_j, 0.0, 1e-9);
+        assert!(got.residual_norm_j > 1.0);
+        assert_eq!(got.free_dofs, 8);
+        assert!(got.convective_robin_fluxes.is_empty());
+        for &temperature in &got.temperature[..4] { close(temperature, 350.0, 1e-12); }
+        for &temperature in &got.temperature[4..] { close(temperature, 300.0, 1e-12); }
+    });
+    assert_eq!(old, [997.0, 997.0, 997.0, 997.0, 501.0, 501.0, 501.0, 501.0]);
+    assert_eq!(candidate, [1000.0, 1000.0, 1000.0, 1000.0, 500.0, 500.0, 500.0, 500.0]);
+}
+
+#[test]
 fn local_hot_spots_drive_exact_emission_reflection_and_a_nonsymmetric_tangent() {
     let fixture = Fixture::new(false);
     let boundary = boundary(&fixture, false);

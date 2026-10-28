@@ -31,6 +31,106 @@ fn close(actual: f64, expected: f64, tolerance: f64) {
 }
 
 #[test]
+fn supplied_pointwise_endpoint_matches_independent_local_flux_and_nodal_residual() {
+    let mesh = regular_tet();
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .remainder("exterior", ThermalBc::robin(HTC, 300.0).unwrap())
+        .unwrap().finish().unwrap();
+    let material = ConductivityModel::isotropic_declared(K).unwrap();
+    let source = ScalarField::Uniform(7.0);
+    let curve = phase_curve(false);
+    let patches = [patch(400.0, 600.0)];
+    let problem = ConductionProblem {
+        mesh: &mesh, boundary: &boundary, material: &material,
+        source: &source, element_materials: None,
+    };
+    let temperature = [300.0, 320.0, 430.0, 500.0];
+    let candidate = temperature.map(|t| CP * (t - 200.0));
+    let old = [1000.0; 4];
+    let dt = 0.2;
+    let volume = 2.0_f64.sqrt() / 12.0;
+    let area = 3.0_f64.sqrt();
+    let sum: f64 = temperature.iter().sum();
+    let mut radiative = [0.0; 4];
+    for face in mesh.boundary() {
+        let values = exact_face_load(face.vertices.map(|v| temperature[v as usize]), face.area, 400.0);
+        for (local, &vertex) in face.vertices.iter().enumerate() {
+            radiative[vertex as usize] += values[local];
+        }
+    }
+    let expected_residual: [f64; 4] = std::array::from_fn(|v| {
+        let conduction = K * volume * (2.0 * temperature[v] - 0.5 * sum);
+        let convection = HTC * area / 24.0 * (2.0 * temperature[v] + sum - 1800.0);
+        RHO * volume / 4.0 * (candidate[v] - old[v])
+            + dt * (conduction + convection + radiative[v] - 7.0 * volume / 4.0)
+    });
+    with_cx(|cx| {
+        let radiation = PointwiseAmbientRadiation::new(cx, &mesh, &boundary, &patches).unwrap();
+        let engine = EnthalpyBackwardEuler::uniform(cx, &mesh, &curve, RHO, budget()).unwrap();
+        let got = engine.evaluate_endpoint_with_pointwise_ambient_radiation(
+            cx, problem, None, &old, &candidate, dt, config(), &radiation,
+        ).unwrap();
+        let radiant: f64 = radiative.iter().sum();
+        let convection = HTC * area * (sum / 4.0 - 300.0);
+        let stored = RHO * volume / 4.0 * candidate.iter().zip(old).map(|(h, old)| h - old).sum::<f64>();
+        close(got.residual_norm_j, expected_residual.iter().map(|r| r * r).sum::<f64>().sqrt(), 1e-9);
+        close(got.radiation_out_w, radiant, 1e-9);
+        close(got.convective_out_w, convection, 1e-10);
+        close(got.source_w, 7.0 * volume, 1e-12);
+        close(got.stored_energy_change_j, stored, 1e-10);
+        close(got.energy_residual_j, stored + dt * (convection + radiant - 7.0 * volume), 1e-9);
+        assert!(got.residual_norm_j > 1.0, "evaluation must retain an unconverged candidate's defect");
+        assert_eq!(got.free_dofs, 4);
+        assert_eq!(got.convective_robin_fluxes.len(), 1);
+        close(got.convective_robin_fluxes[0].heat_rate_w, convection, 1e-10);
+        close(got.convective_robin_fluxes[0].mean_htc_w_per_m2_k, HTC, 1e-12);
+    });
+    assert_eq!(old, [1000.0; 4]);
+    assert_eq!(candidate, temperature.map(|t| CP * (t - 200.0)));
+}
+
+#[test]
+fn pointwise_endpoint_admits_latent_corners_without_losing_storage_or_demanding_a_tangent() {
+    use fs_conduction::transient::enthalpy::heterogeneous::{
+        HeterogeneousEnthalpyBackwardEuler, ReferenceEnthalpyMaterial,
+    };
+    let mesh = regular_tet();
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .remainder("exterior", ThermalBc::adiabatic()).unwrap().finish().unwrap();
+    let material = ConductivityModel::isotropic_declared(K).unwrap();
+    let source = ScalarField::Uniform(0.0);
+    let curve = phase_curve(true);
+    let patches = [patch(400.0, 500.0)];
+    let problem = ConductionProblem {
+        mesh: &mesh, boundary: &boundary, material: &material,
+        source: &source, element_materials: None,
+    };
+    with_cx(|cx| {
+        let radiation = PointwiseAmbientRadiation::new(cx, &mesh, &boundary, &patches).unwrap();
+        let engine = HeterogeneousEnthalpyBackwardEuler::new(cx, &mesh,
+            &[ReferenceEnthalpyMaterial { curve: &curve, reference_density_kg_m3: RHO }],
+            &[0], budget()).unwrap();
+        let dt = 0.25;
+        let heat = EPSILON * STEFAN_BOLTZMANN_W_M2_K4 * 3.0_f64.sqrt()
+            * (350.0_f64.powi(4) - 400.0_f64.powi(4));
+        for enthalpy in [1000.0, 3000.0] {
+            let got = engine.evaluate_endpoint_with_pointwise_ambient_radiation(
+                cx, problem, None, &[1000.0; 4], &[enthalpy; 4], dt, config(), &radiation,
+            ).unwrap();
+            let stored = RHO * 2.0_f64.sqrt() / 12.0 * (enthalpy - 1000.0);
+            let defect = stored + dt * heat;
+            for &temperature in &got.temperature { close(temperature, 350.0, 1e-12); }
+            close(got.stored_energy_change_j, stored, 1e-10);
+            close(got.radiation_out_w, heat, 1e-9);
+            close(got.energy_residual_j, defect, 1e-9);
+            close(got.residual_norm_j, defect.abs() / 2.0, 1e-9);
+            assert_eq!(got.convective_out_w, 0.0);
+            assert!(got.convective_robin_fluxes.is_empty());
+        }
+    });
+}
+
+#[test]
 fn local_surface_quartic_and_tangent_match_independent_simplex_moments() {
     let mesh = regular_tet();
     let boundary = ThermalBoundaryBuilder::new(&mesh)
@@ -312,6 +412,16 @@ fn nonuniform_radiating_wall_uses_local_quartic_and_accounts_for_prescribed_reac
             })
             .sum();
         close(radiative_w, independent_w, 1e-10);
+        let evaluated = stepper.evaluate_endpoint_with_pointwise_ambient_radiation(
+            cx, problem, None, &old, &solution.specific_enthalpy_j_kg,
+            dt, config(), &radiation,
+        ).unwrap();
+        assert_eq!(evaluated.free_dofs, 1);
+        assert!(evaluated.residual_norm_j < 1e-7);
+        close(evaluated.dirichlet_in_w, solution.dirichlet_in_w, 1e-8);
+        close(evaluated.convective_out_w, solution.robin_out_w, 1e-9);
+        close(evaluated.radiation_out_w, radiative_w, 1e-9);
+        close(evaluated.energy_residual_j, solution.energy_residual_j, 1e-9);
         close(
             solution.stored_energy_change_j
                 - dt * (solution.dirichlet_in_w - solution.robin_out_w - radiative_w),

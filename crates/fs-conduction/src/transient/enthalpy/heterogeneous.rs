@@ -405,6 +405,47 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
         )
     }
 
+    /// Measure local ambient radiation and the complete physical balance of a
+    /// supplied heterogeneous endpoint without advancing its immutable history.
+    /// Returns original convection separately from radiation; the caller owns
+    /// acceptance of both the local residual and global energy defect.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_endpoint_with_pointwise_ambient_radiation(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_h: &[f64],
+        candidate_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        radiation: &crate::PointwiseAmbientRadiation<'_>,
+    ) -> Result<super::EnthalpyEndpointEvaluation, EnthalpyError> {
+        self.inner.evaluate_endpoint_with_pointwise_ambient_radiation(
+            cx, problem, interfaces, old_h, candidate_h, dt_s, config, radiation,
+        )
+    }
+
+    /// Measure local emission and reflected enclosure exchange with each
+    /// vertex's own chart and reference mass. No tangent or Newton solve is
+    /// required; a zero total enclosure heat does not imply nodal equilibrium.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_endpoint_with_pointwise_enclosure_radiation(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_h: &[f64],
+        candidate_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        radiation: &crate::PointwiseEnclosureRadiation<'_>,
+    ) -> Result<super::EnthalpyEndpointEvaluation, EnthalpyError> {
+        self.inner.evaluate_endpoint_with_pointwise_enclosure_radiation(
+            cx, problem, interfaces, old_h, candidate_h, dt_s, config, radiation,
+        )
+    }
+
     /// Integrate ambient radiation over the local P1 temperature field within
     /// the enthalpy Newton solve, retaining heterogeneous phase charts and masses.
     #[allow(clippy::too_many_arguments)]

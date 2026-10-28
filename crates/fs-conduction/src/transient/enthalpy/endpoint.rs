@@ -9,9 +9,12 @@ use fs_solver::norm2;
 
 use super::{
     ASSEMBLY_TILE, DofMap, EnthalpyBackwardEuler, EnthalpyError, EnthalpyStepConfig, StepContext,
-    energy_balance, finite, poll, radiation::boundary_at_temperature,
+    energy_balance, finite, poll, radiation::boundary_at_temperature, PointwiseBoundary,
 };
-use crate::{AmbientRadiationPatch, ConductionProblem, RobinFlux, ThermalInterfaces};
+use crate::{
+    AmbientRadiationPatch, ConductionProblem, PointwiseAmbientRadiation,
+    PointwiseEnclosureRadiation, RobinFlux, ThermalInterfaces,
+};
 
 /// Physical balances of an arbitrary candidate, with immutable physical history.
 ///
@@ -21,7 +24,8 @@ use crate::{AmbientRadiationPatch, ConductionProblem, RobinFlux, ThermalInterfac
 pub struct EnthalpyEndpointEvaluation {
     /// Candidate temperatures resolved from each vertex's declared phase chart, K.
     pub temperature: Vec<f64>,
-    /// Euclidean norm of `m*(h-h_old) + dt*(A(T,f)*T-b)`, in joules.
+    /// Euclidean norm of the full nodal balance, including local radiation
+    /// where selected: `m*(h-h_old) + dt*(A(T,f)*T-b+q_rad)`, in joules.
     pub residual_norm_j: f64,
     /// Number of unconstrained enthalpy unknowns included in the norm.
     pub free_dofs: usize,
@@ -35,7 +39,8 @@ pub struct EnthalpyEndpointEvaluation {
     pub dirichlet_in_w: f64,
     /// Original boundary convection only, W outward.
     pub convective_out_w: f64,
-    /// Nonlinear area-mean ambient-radiation heat, W outward.
+    /// Actual outward radiative heat, W, under the selected spatial model.
+    /// For a closed enclosure this is its retained net internal exchange defect.
     pub radiation_out_w: f64,
     /// Storage minus dt times complete physical net input, J.
     pub energy_residual_j: f64,
@@ -72,6 +77,89 @@ impl EnthalpyBackwardEuler<'_, '_> {
         config: EnthalpyStepConfig,
         patches: Option<&[AmbientRadiationPatch]>,
     ) -> Result<EnthalpyEndpointEvaluation, EnthalpyError> {
+        self.evaluate_endpoint_radiative(
+            cx, problem, interfaces, old_specific_h, candidate_specific_h,
+            dt_s, config, patches, None,
+        )
+    }
+
+    /// Measure a supplied endpoint with local P1 ambient radiation, using the
+    /// same physical residual and prescribed-temperature reaction as the primal.
+    /// Original Robin heat alone is exposed to convection/coolant consumers.
+    ///
+    /// This performs no Newton step, needs no constitutive tangent and does
+    /// not apply an acceptance gate: the outer coupling owner must check both
+    /// the returned nodal residual and energy defect against its fixed limits.
+    /// Radiation must retain this exact mesh and current physical boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_endpoint_with_pointwise_ambient_radiation(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_specific_h: &[f64],
+        candidate_specific_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        radiation: &PointwiseAmbientRadiation<'_>,
+    ) -> Result<EnthalpyEndpointEvaluation, EnthalpyError> {
+        poll(cx, 0)?;
+        if !radiation.matches(problem.mesh, problem.boundary) {
+            return Err(EnthalpyError::InvalidInput(
+                "pointwise radiation must retain the exact transport mesh and boundary",
+            ));
+        }
+        self.evaluate_endpoint_radiative(
+            cx, problem, interfaces, old_specific_h, candidate_specific_h,
+            dt_s, config, None, Some(PointwiseBoundary::Ambient(radiation)),
+        )
+    }
+
+    /// Measure a supplied endpoint with local emission and fresh reflected
+    /// enclosure exchange. The same radiosity and enclosure-closure gates as
+    /// the primal apply; net internal radiation stays separate from convection.
+    /// No history is advanced, tangent requested or convergence asserted.
+    ///
+    /// A closed enclosure can have zero total heat while individual vertices
+    /// remain far from equilibrium. Consumers must check the nodal residual,
+    /// not only the summed energy balance, before publishing an outer iterate.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_endpoint_with_pointwise_enclosure_radiation(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_specific_h: &[f64],
+        candidate_specific_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        radiation: &PointwiseEnclosureRadiation<'_>,
+    ) -> Result<EnthalpyEndpointEvaluation, EnthalpyError> {
+        poll(cx, 0)?;
+        if !radiation.matches(problem.mesh, problem.boundary) {
+            return Err(EnthalpyError::InvalidInput(
+                "pointwise enclosure must retain the exact transport mesh and boundary",
+            ));
+        }
+        self.evaluate_endpoint_radiative(
+            cx, problem, interfaces, old_specific_h, candidate_specific_h,
+            dt_s, config, None, Some(PointwiseBoundary::Enclosure(radiation)),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_endpoint_radiative(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_specific_h: &[f64],
+        candidate_specific_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        patches: Option<&[AmbientRadiationPatch]>,
+        pointwise_radiation: Option<PointwiseBoundary<'_>>,
+    ) -> Result<EnthalpyEndpointEvaluation, EnthalpyError> {
         self.admit_step(cx, problem, old_specific_h, dt_s, config)?;
         config.newton.validate().map_err(EnthalpyError::Newton)?;
         let n = self.masses.len();
@@ -95,7 +183,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
             interfaces,
             old: old_specific_h,
             dt: dt_s,
-            pointwise_radiation: None,
+            pointwise_radiation,
         };
         context.check_prescribed_values(candidate_specific_h)?;
         let temperature = context.temperatures(candidate_specific_h)?;
@@ -163,7 +251,13 @@ impl EnthalpyBackwardEuler<'_, '_> {
         } else {
             Vec::new()
         };
-        let mut radiation_out_w = 0.0;
+        let mut radiation_out_w = match pointwise_radiation {
+            Some(radiation) => {
+                let (_, report) = radiation.load_and_report(cx, &temperature)?;
+                finite(report.outward_heat_w())?
+            }
+            None => 0.0,
+        };
         if let Some(patches) = patches {
             for (index, patch) in patches.iter().enumerate() {
                 poll(cx, index)?;
