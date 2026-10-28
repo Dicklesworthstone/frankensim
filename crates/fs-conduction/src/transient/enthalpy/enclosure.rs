@@ -21,26 +21,11 @@ use super::{
 use crate::{
     AmbientRadiationConfig, ConductionError, ConductionProblem, RobinFlux, ScalarField, ThermalBc,
     ThermalBoundary, ThermalInterfaces,
-    assemble::ASSEMBLY_TILE,
     radiation::{GrayDiffuseEnclosure, RadiosityReport},
 };
 
-/// Accepted exchange and actual work over all enclosure trials.
-#[derive(Debug, Clone)]
-pub struct EnthalpyEnclosureReport {
-    /// Fresh radiosity evaluated at the accepted chart-resolved temperatures.
-    pub radiosity: RadiosityReport,
-    /// Signed patch watts actually supplied to the accepted inner solve.
-    pub applied_heat_w: Vec<f64>,
-    /// Maximum applied-versus-fresh patch heat difference, W.
-    pub max_heat_mismatch_w: f64,
-    /// Number of inner solid solves; none advances history independently.
-    pub iterations: usize,
-    /// Sum of actual Newton attempts across all inner solves.
-    pub solid_iterations: usize,
-    /// Sum of actual Newton linear iterations across all inner solves.
-    pub krylov_iterations: usize,
-}
+pub use crate::radiation::EnclosureExchangeReport as EnthalpyEnclosureReport;
+use crate::radiation::enclosure_exchange::{self as exchange, Patch, PatchLaw};
 
 /// One accepted physical step with separately identified convection and exchange.
 #[derive(Debug, Clone)]
@@ -68,16 +53,6 @@ pub struct EnthalpyEnclosureStepSolution {
     /// Inward bath reaction using fresh enclosure exchange, W, distinct from
     /// the applied-boundary reaction in `conduction`.
     pub physical_dirichlet_in_w: f64,
-}
-
-struct Patch {
-    region: usize,
-    law: PatchLaw,
-}
-
-enum PatchLaw {
-    Convection { htc: f64, reference: f64 },
-    PrescribedFlux { outward_flux: f64 },
 }
 
 impl EnthalpyBackwardEuler<'_, '_> {
@@ -279,210 +254,38 @@ impl EnthalpyBackwardEuler<'_, '_> {
     }
 }
 
-fn bind(
-    cx: &Cx<'_>,
-    problem: ConductionProblem<'_>,
-    enclosure: &GrayDiffuseEnclosure,
-    temperature: &[f64],
-) -> Result<Vec<Patch>, EnthalpyError> {
-    if enclosure.surfaces().is_empty() || enclosure.surfaces().len() > 64 {
-        return Err(EnthalpyError::InvalidInput(
-            "enthalpy enclosure requires 1..=64 patches",
-        ));
-    }
-    let mut patches = Vec::with_capacity(enclosure.surfaces().len());
-    for surface in enclosure.surfaces() {
-        poll(cx, patches.len())?;
-        // Public trace query checks the exact mesh identity before slot access.
-        surface.mean_temperature(problem.mesh, temperature)?;
-        let region = problem
-            .boundary
-            .region_names()
-            .iter()
-            .position(|name| name == surface.name())
-            .ok_or(EnthalpyError::InvalidInput(
-                "unknown enthalpy enclosure region",
-            ))?;
-        let law = match problem.boundary.conditions()[region] {
-            ThermalBc::Robin {
-                htc: ScalarField::Uniform(htc),
-                t_ref: ScalarField::Uniform(reference),
-            } if htc > 0.0 => PatchLaw::Convection { htc, reference },
-            ThermalBc::Neumann { outward_flux: ScalarField::Uniform(outward_flux) } => {
-                PatchLaw::PrescribedFlux { outward_flux }
-            }
-            _ => {
-                return Err(EnthalpyError::InvalidInput(
-                    "enclosure requires uniform Robin or Neumann patches",
-                ));
-            }
-        };
-        let mut count = 0_usize;
-        for slot in 0..problem.mesh.boundary().len() {
-            if slot % ASSEMBLY_TILE == 0 {
-                poll(cx, slot)?;
-            }
-            if problem.boundary.region_for(slot) == Some(region) {
-                count += 1;
-            }
-        }
-        if count != surface.face_slots().len()
-            || surface
-                .face_slots()
-                .iter()
-                .any(|&slot| problem.boundary.region_for(slot) != Some(region))
-        {
-            return Err(EnthalpyError::InvalidInput(
-                "enclosure patch must exactly cover its named natural region",
-            ));
-        }
-        patches.push(Patch { region, law });
-    }
-    Ok(patches)
+fn bind(cx: &Cx<'_>, problem: ConductionProblem<'_>, enclosure: &GrayDiffuseEnclosure,
+    temperature: &[f64]) -> Result<Vec<Patch>, EnthalpyError> {
+    Ok(exchange::bind(cx, problem, enclosure, temperature)?)
 }
 
-fn means(
-    cx: &Cx<'_>,
-    problem: ConductionProblem<'_>,
-    enclosure: &GrayDiffuseEnclosure,
-    temperature: &[f64],
-) -> Result<Vec<f64>, EnthalpyError> {
-    enclosure
-        .surfaces()
-        .iter()
-        .enumerate()
-        .map(|(i, surface)| {
-            poll(cx, i)?;
-            Ok(surface.mean_temperature(problem.mesh, temperature)?)
-        })
-        .collect()
+fn means(cx: &Cx<'_>, problem: ConductionProblem<'_>, enclosure: &GrayDiffuseEnclosure,
+    temperature: &[f64]) -> Result<Vec<f64>, EnthalpyError> {
+    Ok(exchange::means(cx, problem, enclosure, temperature)?)
 }
 
 fn heat_tolerance(config: AmbientRadiationConfig, a: f64, b: f64) -> Result<f64, EnthalpyError> {
-    finite(
-        config
-            .balance_relative_tolerance
-            .mul_add(a.abs().max(b.abs()), config.balance_tolerance_w),
-    )
+    Ok(exchange::heat_tolerance(config, a, b)?)
 }
 
-fn radiosity(
-    cx: &Cx<'_>,
-    enclosure: &GrayDiffuseEnclosure,
-    temperature: &[f64],
-    config: AmbientRadiationConfig,
-) -> Result<RadiosityReport, EnthalpyError> {
-    poll(cx, 0)?;
-    let report = enclosure.solve(cx, temperature)?;
-    for &value in report.radiosity_w_m2.iter().chain(&report.irradiation_w_m2) {
-        if !value.is_finite() || value < 0.0 {
-            return Err(EnthalpyError::InvalidInput(
-                "nonphysical enclosure radiosity",
-            ));
-        }
-    }
-    for &value in report
-        .net_outward_flux_w_m2
-        .iter()
-        .chain(&report.net_outward_heat_w)
-    {
-        finite(value)?;
-    }
-    let area = enclosure
-        .surfaces()
-        .iter()
-        .map(|surface| surface.area_m2())
-        .fold(0.0_f64, f64::max);
-    let tolerance = heat_tolerance(config, report.enclosure_energy_scale_w, 0.0)?;
-    if finite(report.linear_residual_max_w_m2 * area)? > tolerance
-        || finite(report.enclosure_energy_closure_w)?.abs() > tolerance
-    {
-        return Err(EnthalpyError::InvalidInput(
-            "enclosure radiosity equations or closed energy sum exceed their allowance",
-        ));
-    }
-    Ok(report)
+fn radiosity(cx: &Cx<'_>, enclosure: &GrayDiffuseEnclosure, temperature: &[f64],
+    config: AmbientRadiationConfig) -> Result<RadiosityReport, EnthalpyError> {
+    Ok(exchange::radiosity(cx, enclosure, temperature, config)?)
 }
 
-fn shifted_boundary(
-    problem: ConductionProblem<'_>,
-    patches: &[Patch],
-    radiosity: &RadiosityReport,
-) -> Result<ThermalBoundary, EnthalpyError> {
-    let mut robin = Vec::new();
-    let mut neumann = Vec::new();
-    for (patch, &flux) in patches.iter().zip(&radiosity.net_outward_flux_w_m2) {
-        match patch.law {
-            PatchLaw::Convection { htc, reference } => {
-                robin.push((patch.region, htc, finite(reference - flux / htc)?));
-            }
-            PatchLaw::PrescribedFlux { .. } => neumann.push((patch.region, flux)),
-        }
-    }
-    Ok(problem.boundary.with_uniform_robin_replacements(&robin)?
-        .with_uniform_neumann_additions(&neumann)?)
+fn shifted_boundary(problem: ConductionProblem<'_>, patches: &[Patch],
+    radiosity: &RadiosityReport) -> Result<ThermalBoundary, EnthalpyError> {
+    Ok(exchange::shifted_boundary(problem, patches, radiosity)?)
 }
 
-// Integrate the authored boundary independently. A mixed Robin/Neumann
-// enclosure generally transfers nonzero net radiative heat through either
-// subset, so the inner solve's Neumann watts cannot be treated as external.
-fn prescribed_neumann_heat(
-    cx: &Cx<'_>,
-    problem: ConductionProblem<'_>,
-) -> Result<f64, EnthalpyError> {
-    let mut heat = 0.0;
-    for (slot, face) in problem.mesh.boundary().iter().enumerate() {
-        if slot % ASSEMBLY_TILE == 0 { poll(cx, slot)?; }
-        if let Some(ThermalBc::Neumann { outward_flux }) = problem.boundary.condition_for(slot) {
-            let mean = face.vertices.iter().map(|&v| outward_flux.at(v as usize)).sum::<f64>() / 3.0;
-            heat = finite(heat + face.area * mean)?;
-        }
-    }
-    poll(cx, problem.mesh.boundary().len())?;
-    Ok(heat)
+fn prescribed_neumann_heat(cx: &Cx<'_>, problem: ConductionProblem<'_>)
+    -> Result<f64, EnthalpyError> {
+    Ok(exchange::prescribed_neumann_heat(cx, problem)?)
 }
 
-fn convection(
-    cx: &Cx<'_>,
-    problem: ConductionProblem<'_>,
-    solid: &EnthalpyStepSolution,
-) -> Result<(Vec<RobinFlux>, f64), EnthalpyError> {
-    let mut total = 0.0;
-    let mut rows = Vec::with_capacity(solid.robin_fluxes.len());
-    for (ordinal, row) in solid.robin_fluxes.iter().enumerate() {
-        poll(cx, ordinal)?;
-        let region = problem
-            .boundary
-            .region_names()
-            .iter()
-            .position(|name| *name == row.region)
-            .ok_or(EnthalpyError::InvalidInput(
-                "unknown original convection region",
-            ))?;
-        let mut original = row.clone();
-        match &problem.boundary.conditions()[region] {
-            ThermalBc::Robin {
-                htc: ScalarField::Uniform(h),
-                t_ref: ScalarField::Uniform(reference),
-            } => {
-                original.mean_htc_w_per_m2_k = *h;
-                original.mean_reference_temperature_k = *reference;
-                original.heat_rate_w =
-                    finite(h * row.area_m2 * (row.mean_wall_temperature_k - reference))?;
-            }
-            // Only radiating rows are changed. Unrelated nonuniform Robin
-            // rows retain their exact inner-solve integrals.
-            ThermalBc::Robin { .. } => {}
-            _ => {
-                return Err(EnthalpyError::InvalidInput(
-                    "enclosure report contains a non-Robin row",
-                ));
-            }
-        }
-        total = finite(total + original.heat_rate_w)?;
-        rows.push(original);
-    }
-    Ok((rows, total))
+fn convection(cx: &Cx<'_>, problem: ConductionProblem<'_>, solid: &EnthalpyStepSolution)
+    -> Result<(Vec<RobinFlux>, f64), EnthalpyError> {
+    Ok(exchange::convection(cx, problem, &solid.robin_fluxes)?)
 }
 
 fn initial_target(
@@ -518,4 +321,58 @@ fn initial_target(
             .absolute_tolerance
             .max(config.newton.relative_tolerance * initial.residual_norm().max(f64::MIN_POSITIVE)),
     )
+}
+
+impl EnthalpyBackwardEuler<'_, '_> {
+    /// Re-evaluate a supplied enclosure endpoint under the original boundary laws.
+    ///
+    /// No solve is performed and neither candidate nor old specific enthalpy is
+    /// modified. Fresh reflected radiation enters the same physical residual and
+    /// prescribed-temperature reaction as the primal. Returned convection and
+    /// Neumann heat retain their authored values, excluding internal radiation.
+    /// The caller applies its original fixed residual and energy allowances.
+    ///
+    /// # Errors
+    /// Refuses invalid storage/candidate/boundary data, failed radiosity gates,
+    /// mismatched traces, nonfinite arithmetic or cancellation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_endpoint_with_enclosure(
+        &self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>, old_h: &[f64], candidate_h: &[f64],
+        dt_s: f64, config: EnthalpyStepConfig, enclosure: &GrayDiffuseEnclosure,
+        radiation_config: AmbientRadiationConfig,
+    ) -> Result<super::EnthalpyEndpointEvaluation, EnthalpyError> {
+        self.admit_step(cx, problem, old_h, dt_s, config)?;
+        radiation_config.validate()?;
+        if candidate_h.len() != self.masses.len() {
+            return Err(EnthalpyError::InvalidInput(
+                "candidate enclosure enthalpy must match the reference mass mesh",
+            ));
+        }
+        let context = StepContext {
+            storage: self, cx, problem, interfaces, old: old_h, dt: dt_s,
+            pointwise_radiation: None,
+        };
+        context.check_prescribed_values(candidate_h)?;
+        let temperature = context.temperatures(candidate_h)?;
+        let patches = bind(cx, problem, enclosure, &temperature)?;
+        let fresh = radiosity(cx, enclosure,
+            &means(cx, problem, enclosure, &temperature)?, radiation_config)?;
+        let boundary = shifted_boundary(problem, &patches, &fresh)?;
+        let mut physical = self.evaluate_endpoint(cx,
+            ConductionProblem { boundary: &boundary, ..problem }, interfaces,
+            old_h, candidate_h, dt_s, config, None)?;
+        let (rows, convection_w) =
+            exchange::convection(cx, problem, &physical.convective_robin_fluxes)?;
+        physical.convective_robin_fluxes = rows;
+        physical.convective_out_w = convection_w;
+        physical.neumann_out_w = prescribed_neumann_heat(cx, problem)?;
+        physical.radiation_out_w = fresh.enclosure_energy_closure_w;
+        physical.energy_residual_j = finite(physical.stored_energy_change_j - dt_s * (
+            physical.source_w + physical.dirichlet_in_w - physical.neumann_out_w
+                - physical.convective_out_w - physical.radiation_out_w
+        ))?;
+        poll(cx, candidate_h.len())?;
+        Ok(physical)
+    }
 }

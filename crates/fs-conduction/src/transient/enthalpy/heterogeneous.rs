@@ -384,6 +384,27 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
         )
     }
 
+    /// Audit a supplied heterogeneous endpoint with fresh reflected enclosure
+    /// exchange, retaining its original external heat and immutable history.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_endpoint_with_enclosure(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_h: &[f64],
+        candidate_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        enclosure: &crate::radiation::GrayDiffuseEnclosure,
+        radiation_config: crate::AmbientRadiationConfig,
+    ) -> Result<super::EnthalpyEndpointEvaluation, EnthalpyError> {
+        self.inner.evaluate_endpoint_with_enclosure(
+            cx, problem, interfaces, old_h, candidate_h, dt_s, config,
+            enclosure, radiation_config,
+        )
+    }
+
     /// Integrate ambient radiation over the local P1 temperature field within
     /// the enthalpy Newton solve, retaining heterogeneous phase charts and masses.
     #[allow(clippy::too_many_arguments)]
@@ -631,6 +652,28 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
             enclosure,
             radiation_config,
         )
+    }
+
+    /// Bind complete reflected exchange and the same immutable density history.
+    #[allow(clippy::too_many_arguments)]
+    pub fn linearize_accepted_parameters_with_enclosure_radiation(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        enclosure: &crate::radiation::GrayDiffuseEnclosure,
+        radiation_config: crate::AmbientRadiationConfig,
+        accepted: EnthalpyStepSolution,
+        max_feedback_entries: usize,
+    ) -> Result<HeterogeneousEnthalpyStepLinearization<'m>, EnthalpyAdjointError> {
+        let inner = self.inner.linearize_accepted_with_enclosure_radiation(
+            cx, problem, interfaces, old_h, dt_s, config, enclosure,
+            radiation_config, accepted, max_feedback_entries,
+        )?;
+        self.bind_linearization(cx, old_h, inner)
     }
 
     /// Recheck and retain the complete enclosure tangent in h coordinates;

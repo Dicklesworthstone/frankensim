@@ -2,6 +2,8 @@
 mod support;
 #[path = "enthalpy_enclosure/vacuum.rs"]
 mod vacuum;
+#[path = "enthalpy_enclosure/endpoint.rs"]
+mod endpoint;
 #[path = "enthalpy_enclosure/pointwise.rs"]
 mod pointwise;
 

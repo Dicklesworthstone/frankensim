@@ -44,6 +44,8 @@ mod radiosity_adjoint;
 pub use radiosity_adjoint::{EnclosureRadiosityLinearization, EnclosureRadiosityPullback};
 mod balance;
 mod convection;
+pub(crate) mod enclosure_exchange;
+pub use enclosure_exchange::EnclosureExchangeReport;
 mod prepared;
 mod equilibrium;
 /// Spatially resolved nonlinear T^4 exchange and its exact local tangent.
