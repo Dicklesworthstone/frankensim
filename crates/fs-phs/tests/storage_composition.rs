@@ -145,3 +145,102 @@ fn unsupported_child_does_not_manufacture_a_complete_remainder() {
         None
     );
 }
+
+struct ShiftedQuadratic {
+    original: QuadraticStorage,
+    datum: f64,
+}
+impl Storage for ShiftedQuadratic {
+    fn hamiltonian(&self, x: &[f64]) -> f64 {
+        self.datum + self.original.hamiltonian(x)
+    }
+    fn gradient(&self, x: &[f64], out: &mut [f64]) {
+        self.original.gradient(x, out);
+    }
+    fn quadratic_part(&self) -> Option<fs_phs::linear_exact::QuadraticPart> {
+        self.original.quadratic_part()
+    }
+    fn exact_quadratic_matrix(&self) -> Option<&[f64]> {
+        self.original.exact_quadratic_matrix()
+    }
+    fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], mid: &[f64]) -> Option<f64> {
+        self.original.midpoint_energy_remainder(a, b, mid)
+    }
+}
+
+#[test]
+fn complete_exact_flow_keeps_small_physical_work_above_an_arbitrary_energy_datum() {
+    use fs_phs::linear_exact::{LinearSplitBudget, split_quadratic, step_render};
+    let initial = 0.8_f64;
+    let force = 0.4;
+    let rate = 2.0;
+    let dt = 0.25;
+    let equilibrium = force / rate;
+    let departure = initial - equilibrium;
+    let decay = (-rate * dt).exp();
+    let expected_state = equilibrium + departure * decay;
+    let first_integral = -(-rate * dt).exp_m1() / rate;
+    let second_integral = -(-2.0 * rate * dt).exp_m1() / (2.0 * rate);
+    let work = force * (equilibrium * dt + departure * first_integral);
+    let heat = rate * (equilibrium * equilibrium * dt
+        + 2.0 * equilibrium * departure * first_integral
+        + departure * departure * second_integral);
+    for datum in [0.0, 1e30, -1e30] {
+        let system = PortHamiltonian::new(1, 1, vec![0.0], vec![rate], vec![1.0],
+            Box::new(ShiftedQuadratic {
+                original: QuadraticStorage::new(vec![1.0], 1).unwrap(), datum,
+            })).unwrap();
+        let split = split_quadratic(&system, LinearSplitBudget {
+            max_modes: 1, max_omega_dt: 1.0,
+        }).unwrap();
+        let record = step_render(&system, &split, &[initial], &[force], dt).unwrap();
+        close(record.x[0], expected_state);
+        close(record.supplied, work);
+        close(record.dissipated, heat);
+        close(record.delta_h, 0.5 * (expected_state - initial) * (expected_state + initial));
+        close(record.balance_residual(), 0.0);
+        assert!(record.delta_h.abs() > 0.1);
+    }
+}
+
+#[test]
+fn frequency_matching_retains_the_original_remainder_and_its_quadratic_correction() {
+    use fs_phs::linear_exact::{LinearPropagator, LinearSplitBudget, split_quadratic, step_split};
+    let initial = [0.8, 0.3];
+    let dt = 0.1;
+    let mut reference = None;
+    for datum in [0.0, 1e30, -1e30] {
+        let system = PortHamiltonian::new(2, 1, vec![0.0, 1.0, -1.0, 0.0],
+            vec![0.0, 0.0, 0.0, 0.2], vec![0.0, 1.0],
+            Box::new(ShiftedQuadratic {
+                original: QuadraticStorage::new(vec![4.0, 0.0, 0.0, 1.0], 2).unwrap(), datum,
+            })).unwrap();
+        let split = split_quadratic(&system, LinearSplitBudget {
+            max_modes: 2, max_omega_dt: 1.0,
+        }).unwrap();
+        let record = step_split(&system, &split, LinearPropagator::FrequencyMatched,
+            &initial, &[0.4], dt).unwrap();
+        if let Some(expected) = &reference {
+            let expected: &fs_phs::StepRecord = expected;
+            for (actual, expected) in record.x.iter().zip(&expected.x) {
+                close(*actual, *expected);
+            }
+            close(record.delta_h, expected.delta_h);
+            close(record.supplied, expected.supplied);
+            close(record.dissipated, expected.dissipated);
+        }
+        let correction = split.quadratic_correction(dt).unwrap();
+        let mut modified_change = 0.0;
+        for i in 0..2 {
+            for j in 0..2 {
+                let q = correction[i * 2 + j]
+                    + if i == j { if i == 0 { 4.0 } else { 1.0 } } else { 0.0 };
+                modified_change += 0.5 * (record.x[i] - initial[i]) * q
+                    * (record.x[j] + initial[j]);
+            }
+        }
+        close(record.delta_h, modified_change);
+        close(record.balance_residual(), 0.0);
+        reference = Some(record);
+    }
+}

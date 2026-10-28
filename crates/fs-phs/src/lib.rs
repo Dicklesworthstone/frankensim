@@ -48,6 +48,8 @@ use fs_la::factor::lu;
 
 /// Opt-in exact linear evolution and frequency-matched discrete gradients.
 pub mod linear_exact;
+/// Work-conjugate physical coupling of complete subsystems on different clocks.
+pub mod multirate;
 
 /// Prepared collective lossless exchange of normalized coordinate banks.
 pub mod port_exchange;
@@ -134,22 +136,7 @@ impl QuadraticStorage {
 
 impl Storage for QuadraticStorage {
     fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], mid: &[f64]) -> Option<f64> {
-        // Evaluate H(b)-H(a)-gradH(mid)·(b-a) without subtracting endpoint
-        // energies. Retain represented-midpoint rounding and admitted tiny
-        // matrix asymmetry. Scale coefficients before sums to avoid overflow.
-        let mut remainder = 0.0;
-        for i in 0..self.n {
-            let mut row = 0.0;
-            for j in 0..self.n {
-                let qij = self.q[i * self.n + j];
-                let qji = self.q[j * self.n + i];
-                let offset = (a[j] - mid[j]) + (b[j] - mid[j]);
-                row += (0.25 * qij + 0.25 * qji) * offset
-                    + (0.5 * qji - 0.5 * qij) * mid[j];
-            }
-            remainder += (b[i] - a[i]) * row;
-        }
-        Some(remainder)
+        Some(quadratic_midpoint_remainder(&self.q, a, b, mid))
     }
 
     fn exact_quadratic_matrix(&self) -> Option<&[f64]> {
@@ -181,6 +168,28 @@ impl Storage for QuadraticStorage {
             out[i] = row;
         }
     }
+}
+
+// Shared by original quadratic storage and the declared frequency-matching
+// correction. No matrix allocation or repeated positive-semidefinite admission.
+fn quadratic_midpoint_remainder(q: &[f64], a: &[f64], b: &[f64], mid: &[f64]) -> f64 {
+    // Evaluate H(b)-H(a)-gradH(mid)·(b-a) without subtracting endpoint
+    // energies. Retain represented-midpoint rounding and admitted tiny
+    // matrix asymmetry. Scale coefficients before sums to avoid overflow.
+    let n = a.len();
+    let mut remainder = 0.0;
+    for i in 0..n {
+        let mut row = 0.0;
+        for j in 0..n {
+            let qij = q[i * n + j];
+            let qji = q[j * n + i];
+            let offset = (a[j] - mid[j]) + (b[j] - mid[j]);
+            row += (0.25 * qij + 0.25 * qji) * offset
+                + (0.5 * qji - 0.5 * qij) * mid[j];
+        }
+        remainder += (b[i] - a[i]) * row;
+    }
+    remainder
 }
 
 /// Separable non-quadratic storage: `H = sum_i h_i(x_i)` with per-state

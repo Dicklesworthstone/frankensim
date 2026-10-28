@@ -15,7 +15,8 @@
 //! compliance and damped rates are not exact in this mode. Use ZOH for held
 //! linear input. Neither mode certifies a nonlinear trajectory or a render.
 
-use crate::{PhsError, PortHamiltonian, StepRecord, Storage, discrete_gradient};
+use crate::{PhsError, PortHamiltonian, StepRecord, Storage, discrete_gradient,
+    quadratic_midpoint_remainder, storage_energy_change};
 use fs_la::eigen::{admit_jacobi_eigh, jacobi_eigh};
 use fs_la::factor::lu;
 use fs_math::det;
@@ -24,6 +25,9 @@ mod gramian;
 use gramian::{accumulate, identity, product};
 /// Cold caching of the same complete quadratic trajectory and its integrals.
 pub mod prepared;
+mod prepared_zoh;
+pub use prepared_zoh::PreparedExactZoh;
+pub(crate) use prepared_zoh::energetic_scale;
 
 /// Conservative midpoint angular-rate band. For a damped oscillatory pole
 /// with |lambda|*dt <= 0.04, Cayley-map phase error is below one cent even in
@@ -874,18 +878,19 @@ fn exact_zoh_loss(
         .collect();
     let y: Vec<_> = end[n + 1..].iter().map(|v| v / dt).collect();
     let supplied = end[n + 1..].iter().zip(u).map(|(a, b)| a * b).sum::<f64>();
-    let delta_h = sys.hamiltonian(&x) - sys.hamiltonian(x0);
-    let energy_scale = sys
-        .hamiltonian(x0)
-        .abs()
-        .max(sys.hamiltonian(&x).abs())
+    let delta_h = storage_energy_change(sys.storage.as_ref(), x0, &x,
+        &mut vec![0.0; n], &mut vec![0.0; n]);
+    let energy_scale = energetic_scale(sys, x0)
+        .max(energetic_scale(sys, &x))
+        .max(delta_h.abs())
         .max(dissipated.abs())
         .max(supplied.abs())
         .max(f64::MIN_POSITIVE);
     let defect = delta_h + dissipated - supplied;
     if !finite(&x)
         || !finite(&y)
-        || !finite(&[delta_h, dissipated, supplied])
+        || !finite(&[delta_h, dissipated, supplied, energy_scale, defect])
+        || !sys.hamiltonian(x0).is_finite() || !sys.hamiltonian(&x).is_finite()
         || dissipated < -1e-12 * energy_scale
         || (check_balance && defect.abs() > 1e-12 * energy_scale)
     {
@@ -910,6 +915,11 @@ struct MatchedStorage<'a> {
     correction: &'a [f64],
 }
 impl Storage for MatchedStorage<'_> {
+    fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], mid: &[f64]) -> Option<f64> {
+        Some(self.original.midpoint_energy_remainder(a, b, mid)?
+            + quadratic_midpoint_remainder(self.correction, a, b, mid))
+    }
+
     fn hamiltonian(&self, x: &[f64]) -> f64 {
         self.original.hamiltonian(x) + 0.5 * quadratic(self.correction, x)
     }
@@ -963,8 +973,10 @@ fn gonzalez(
             let dissipated = dt * quadratic(&sys.r, &dg);
             let y = sys.output_from_effort(&dg);
             let supplied = dt * u.iter().zip(&y).map(|(a, b)| a * b).sum::<f64>();
-            let delta_h = storage.hamiltonian(&x) - storage.hamiltonian(x0);
-            if !finite(&[delta_h, dissipated, supplied]) {
+            let delta_h = storage_energy_change(storage, x0, &x,
+                &mut vec![0.0; n], &mut vec![0.0; n]);
+            if !finite(&[delta_h, dissipated, supplied])
+                || !storage.hamiltonian(x0).is_finite() || !storage.hamiltonian(&x).is_finite() {
                 return Err(refuse("nonfinite matched ledger"));
             }
             return Ok(StepRecord {

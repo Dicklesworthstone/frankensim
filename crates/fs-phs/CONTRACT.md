@@ -615,3 +615,46 @@ flux, or other differential coordinate is projected or newly created to make
 an ideal source fit. The source-onset regression covers an interleaved RLC
 network with zero stored coordinates and nonzero instantaneous source/capacitor
 currents; incompatible ideal clamps still refuse.
+
+### Prepared complete flow and physical multirate coupling
+
+`linear_exact::PreparedExactZoh` wraps the existing `PreparedQuadraticFlow` for
+a fixed original quadratic owner and clock. It caches the complete exponential,
+original resistance heat integral and all conjugate port integrals; no state,
+mode, damping term or port is removed. Warm calls perform matrix-vector products
+and quadratic contractions, with allocating result vectors. Heat is independently
+integrated from the original loss law, never recovered as an energy remainder.
+
+`multirate::MultiratePair` advances both complete physical states on independently
+declared clocks of 1 through 16 native steps per common window. Its held interface
+inputs satisfy `u_left = -average(y_right)` and `u_right = average(y_left)` using
+the original integrators' actual window-average conjugate outputs. Consequently
+interface works cancel over that SAME physical duration. Authored external inputs,
+each owner's physical heat, and interface exchange are reported separately. The
+whole-window constitutive energy increment is also checked independently against
+the compensated sum of native increments; a supplied nonadditive remainder cannot
+hide merely because each individual update closes its own equation.
+
+Quadratic pairs prepare the complete affine interface response and its LU once.
+Nonlinear pairs retain the original Gonzalez `StepWorkspace`, with bounded
+interface Newton updates and at most 32 paired ports. Caller-declared local pole
+rate and optional contact-resolution bounds are enforced before preparation.
+All subsystem states are returned together only on success; refusal/cancellation
+does not publish a state or advance a clock. Numerical scratch may change.
+
+Relative energy gates use a conservative coordinate-dependent numerical scale
+from `sum(abs(x_i*gradient_i(H)))`, actual changes, input work and heat. This scale
+is invariant under a constant Hamiltonian datum; it is not itself thermodynamic
+stored energy. Explicit absolute allowances are never silently enlarged.
+
+This is a held-interface time discretization with second-order convergence on
+smooth converged owners, not the exact interconnected flow. Internal subcycling
+cannot eliminate common-window phase error: both clocks AND the coupling window
+require refinement. Local exact flow does not certify a macro frequency band,
+and no observation-rate anti-aliasing, nonlinear tangent-bound inference,
+million-step drift certification or full multirate-bead closure is claimed. The
+nine focused integration regressions exercise 10,000 lossless windows across four
+clock ratios, physical heat/source separation, three-rung full-flow convergence,
+nonlinear subcycle convergence, multiple ports and numerical scaling, explicit
+clock limits, cancellation retry, stiff analytic heat/work and datum-invariant
+rejection of an inconsistent storage law.
