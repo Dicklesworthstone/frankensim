@@ -1,0 +1,23 @@
+frankensim.matdb-manifest.v3
+pack_id	concrete-nac-wc045-moreno2019
+redistribution	permitted	The original CSIC article is distributed under CC BY 4.0. This transcription retains authors, DOI, table and specimen-series identity; source prose is paraphrased and numerical facts are preserved.
+citation	Moreno-Maroto, J. M.; Beaucour, A. L.; Gonzalez-Corrochano, B.; Alonso-Azcarate, J. (2019), Study of the suitability of a new structural concrete manufactured with carbon fiber reinforced lightweight aggregates sintered from wastes, Materiales de Construccion 69(336), e204, Sections 2.2-2.5 and 3.4, Table 2; https://doi.org/10.3989/mc.2019.05719 ; https://materconstrucc.revistas.csic.es/index.php/materconstrucc/article/download/2269/2981?inline=1
+license	CC-BY-4.0
+source	primary	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	measured_thermal_diffusivity	measured-thermal-diffusivity	dimensional
+property	compressive_strength	compressive-strength	dimensional
+property	flexural_strength	flexural-strength	dimensional
+property	dynamic_youngs_modulus	dynamic-youngs-modulus	dimensional
+property	mean_p_wave_speed	mean-p-wave-speed	dimensional
+property	connected_porosity	connected-porosity	dimensional
+axis	source_reference_state	source-reference-state	dimensional
+axis	source_temperature_known	source-temperature-known	dimensional
+axis	water_cement_mass_ratio	water-cement-mass-ratio	dimensional
+axis	water_curing_duration	water-curing-duration	dimensional
+axis	source_moisture_protocol	source-moisture-protocol	dimensional
+axis	source_derived_heat_capacity	source-derived-heat-capacity	dimensional
+axis	source_thermal_closure_verified	source-thermal-closure-verified	dimensional
+axis	source_ultrasonic_dynamic_modulus	source-ultrasonic-dynamic-modulus	dimensional

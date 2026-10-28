@@ -1,0 +1,79 @@
+frankensim.matdb-source.v1
+observation	identity	Moreno-Maroto 2019 AXC-0.45, water/cement mass ratio 0.45	Exact research mix and conditioning history	Lightweight concrete with the sieved 8/10 mm fraction of Argex AR 4/10-550 expanded-clay aggregate, presaturated for 24 h and surface dried before mixing. Binder is Portland CEM I 52.5; fine aggregate is 0/4 mm Seine sand. Concrete coarse aggregate and sand were in a 50:50 proportion, together 67.3 volume-percent of the mixture; water plus cement were the remaining 32.7 volume-percent. Mortar was made with the same formulation with coarse aggregate omitted. Three 40x40x160 mm prisms per mix were compacted in two layers on a vibrating table, covered in molds for 24 h, then demolded and water cured for 28 days. The 28-day condition is a curing-history coordinate, not a strength-age evolution law or elapsed age after subsequent drying. Source measurement temperature is not numerically established here; source-reference-state=1 and source-temperature-known=0 are mandatory. No service temperature interval, fire/dehydration curve, static elastic law, design allowable, or interpolation across mixtures is supplied.
+observation	wet	AXC-0.45, Table 2 wet specimens after water cure	Hydrostatic density, ultrasonic result and mechanical strength observations	Wet density 1.87 g/cm3 is measured after the 28-day water cure with a hydrostatic balance. P-wave speed 4220 m/s is the average of longitudinal and transverse ultrasonic measurements using PUNDIT 7 PC1012 after removal from water. Dynamic Youngs modulus 28.7 GPa is the source estimate from wave speed and wet density using Equation 2, not measured static Youngs modulus or a complete elastic constitutive law. Flexural strength 7.2 MPa is for the source prisms; compressive strength 17.7 MPa is for the halves remaining after flexural testing. Moisture protocol 1 denotes these wet, pre-oven-drying observations. Individual-property statistical uncertainty is not tabulated; pooled standard deviations discussed across all mixtures do not become confidence intervals for this mix.
+observation	dry	AXC-0.45, Table 2 oven-dry thermal reference	Dry density and transient-plane-source thermal properties	Remaining halves and fragments were oven dried at 80 deg C to constant weight. Moisture protocol 0 denotes that dry conditioning; 80 deg C is the drying temperature, not the thermal measurement temperature. Reported dry density is 1.66 g/cm3. Thermal measurements used a Hot Disk TPS 1500 with a 6.403 mm radius Kapton probe between dried intact halves, in triplicate. Conductivity 1.02 W/(m K) and diffusivity 0.70 mm2/s were measured; specific heat 922.1 J/(kg K) is the source-computed value from conductivity, diffusivity and dry density, not independent calorimetry and not a value inferred by this pack. Preserve the separately published Table 2 numbers: they do not exactly close alpha=k/(rho*Cp), and the source does not supply joint raw data or a reconciliation for that discrepancy. Cp requires source-derived-heat-capacity=1 and source-thermal-closure-verified=0; the measured-diffusivity property also requires the latter. No self-consistent calibrated transient thermal profile is asserted. Statistical uncertainty and covariance remain unstated.
+observation	porosity	AXC-0.45, Table 2 connected porosity	Vacuum-water-saturation open-porosity measurement	Connected porosity 28.6 percent was measured on one dried half according to NF P18-459, evacuating air and soaking under vacuum for 48 h to fill accessible pores. Moisture protocol 2 identifies this destructive conditioning sequence. The value is accessible pore-volume fraction, not total porosity, current relative humidity, water mass fraction, or an equilibrium moisture isotherm.
+scalar	wet-density	identity,wet	density	1.87	g/cm3	constant
+uncertainty	wet-density	unstated	-	-	-	-
+validity	wet-density	source_reference_state	1	1	1
+validity	wet-density	source_temperature_known	0	0	1
+validity	wet-density	water_cement_mass_ratio	0.45	0.45	1
+validity	wet-density	water_curing_duration	2419200	2419200	s
+validity	wet-density	source_moisture_protocol	1	1	1
+scalar	dry-density	identity,dry	density	1.66	g/cm3	constant
+uncertainty	dry-density	unstated	-	-	-	-
+validity	dry-density	source_reference_state	1	1	1
+validity	dry-density	source_temperature_known	0	0	1
+validity	dry-density	water_cement_mass_ratio	0.45	0.45	1
+validity	dry-density	water_curing_duration	2419200	2419200	s
+validity	dry-density	source_moisture_protocol	0	0	1
+scalar	dry-thermal-conductivity	identity,dry	thermal_conductivity	1.02	W/m/K	constant
+uncertainty	dry-thermal-conductivity	unstated	-	-	-	-
+validity	dry-thermal-conductivity	source_reference_state	1	1	1
+validity	dry-thermal-conductivity	source_temperature_known	0	0	1
+validity	dry-thermal-conductivity	water_cement_mass_ratio	0.45	0.45	1
+validity	dry-thermal-conductivity	water_curing_duration	2419200	2419200	s
+validity	dry-thermal-conductivity	source_moisture_protocol	0	0	1
+scalar	dry-source-specific-heat	identity,dry	specific_heat_capacity	922.1	J/kg/K	constant
+uncertainty	dry-source-specific-heat	unstated	-	-	-	-
+validity	dry-source-specific-heat	source_reference_state	1	1	1
+validity	dry-source-specific-heat	source_temperature_known	0	0	1
+validity	dry-source-specific-heat	water_cement_mass_ratio	0.45	0.45	1
+validity	dry-source-specific-heat	water_curing_duration	2419200	2419200	s
+validity	dry-source-specific-heat	source_moisture_protocol	0	0	1
+validity	dry-source-specific-heat	source_derived_heat_capacity	1	1	1
+validity	dry-source-specific-heat	source_thermal_closure_verified	0	0	1
+scalar	dry-measured-diffusivity	identity,dry	measured_thermal_diffusivity	7e-07	m2/s	constant
+uncertainty	dry-measured-diffusivity	unstated	-	-	-	-
+validity	dry-measured-diffusivity	source_reference_state	1	1	1
+validity	dry-measured-diffusivity	source_temperature_known	0	0	1
+validity	dry-measured-diffusivity	water_cement_mass_ratio	0.45	0.45	1
+validity	dry-measured-diffusivity	water_curing_duration	2419200	2419200	s
+validity	dry-measured-diffusivity	source_moisture_protocol	0	0	1
+validity	dry-measured-diffusivity	source_thermal_closure_verified	0	0	1
+scalar	wet-compressive-strength	identity,wet	compressive_strength	17.7	MPa	constant
+uncertainty	wet-compressive-strength	unstated	-	-	-	-
+validity	wet-compressive-strength	source_reference_state	1	1	1
+validity	wet-compressive-strength	source_temperature_known	0	0	1
+validity	wet-compressive-strength	water_cement_mass_ratio	0.45	0.45	1
+validity	wet-compressive-strength	water_curing_duration	2419200	2419200	s
+validity	wet-compressive-strength	source_moisture_protocol	1	1	1
+scalar	wet-flexural-strength	identity,wet	flexural_strength	7.2	MPa	constant
+uncertainty	wet-flexural-strength	unstated	-	-	-	-
+validity	wet-flexural-strength	source_reference_state	1	1	1
+validity	wet-flexural-strength	source_temperature_known	0	0	1
+validity	wet-flexural-strength	water_cement_mass_ratio	0.45	0.45	1
+validity	wet-flexural-strength	water_curing_duration	2419200	2419200	s
+validity	wet-flexural-strength	source_moisture_protocol	1	1	1
+scalar	wet-source-dynamic-modulus	identity,wet	dynamic_youngs_modulus	28.7	GPa	constant
+uncertainty	wet-source-dynamic-modulus	unstated	-	-	-	-
+validity	wet-source-dynamic-modulus	source_reference_state	1	1	1
+validity	wet-source-dynamic-modulus	source_temperature_known	0	0	1
+validity	wet-source-dynamic-modulus	water_cement_mass_ratio	0.45	0.45	1
+validity	wet-source-dynamic-modulus	water_curing_duration	2419200	2419200	s
+validity	wet-source-dynamic-modulus	source_moisture_protocol	1	1	1
+validity	wet-source-dynamic-modulus	source_ultrasonic_dynamic_modulus	1	1	1
+scalar	wet-mean-p-wave-speed	identity,wet	mean_p_wave_speed	4220	m/s	constant
+uncertainty	wet-mean-p-wave-speed	unstated	-	-	-	-
+validity	wet-mean-p-wave-speed	source_reference_state	1	1	1
+validity	wet-mean-p-wave-speed	source_temperature_known	0	0	1
+validity	wet-mean-p-wave-speed	water_cement_mass_ratio	0.45	0.45	1
+validity	wet-mean-p-wave-speed	water_curing_duration	2419200	2419200	s
+validity	wet-mean-p-wave-speed	source_moisture_protocol	1	1	1
+scalar	vacuum-connected-porosity	identity,porosity	connected_porosity	28.6	%	constant
+uncertainty	vacuum-connected-porosity	unstated	-	-	-	-
+validity	vacuum-connected-porosity	source_reference_state	1	1	1
+validity	vacuum-connected-porosity	source_temperature_known	0	0	1
+validity	vacuum-connected-porosity	water_cement_mass_ratio	0.45	0.45	1
+validity	vacuum-connected-porosity	water_curing_duration	2419200	2419200	s
+validity	vacuum-connected-porosity	source_moisture_protocol	2	2	1
