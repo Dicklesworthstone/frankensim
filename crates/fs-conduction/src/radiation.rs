@@ -38,6 +38,8 @@ use crate::solve::{
 };
 
 mod ambient;
+mod adjoint;
+pub use adjoint::{EnclosureRadiationGradient, pullback_gray_diffuse_enclosure};
 mod radiosity_adjoint;
 pub use radiosity_adjoint::{EnclosureRadiosityLinearization, EnclosureRadiosityPullback};
 mod balance;

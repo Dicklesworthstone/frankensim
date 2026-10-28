@@ -2,6 +2,9 @@
 
 mod support;
 
+#[path = "radiation/adjoint.rs"]
+mod enclosure_adjoint;
+
 use fs_conduction::bc::{ThermalBc, ThermalBoundary, ThermalBoundaryBuilder};
 use fs_conduction::field::ScalarField;
 use fs_conduction::fixtures::{box_grid, on_box_face};
