@@ -17,6 +17,9 @@
 //! cover published pressure values, derivatives and domains; no cross-platform
 //! execution claim is made by these tests.
 
+/// Conservative molecular exchange with the original thermochemical gas owner.
+pub mod gas;
+
 use fs_thermal::sublimation::{SublimationError, SublimationLaw, SublimationProperties};
 
 const GAS_CONSTANT_J_MOL_K: f64 = 8.314_462_618_153_24;

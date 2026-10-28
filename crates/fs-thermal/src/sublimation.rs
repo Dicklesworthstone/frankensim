@@ -14,6 +14,8 @@
 //! owner; this module's executed repeatability evidence is same-ISA only.
 /// Joint phase exchange between several surfaces and one finite vapor chamber.
 pub mod chamber;
+/// Opposing molecular streams for a nonisothermal interface energy owner.
+pub mod molecular;
 
 use core::fmt;
 

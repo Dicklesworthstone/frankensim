@@ -3005,3 +3005,37 @@ Source domains, bounded inversion and frozen-composition restrictions remain
 in force. These adapters enable shared thermal entropy audits without a second
 caloric law. Independent sensible/latent and variable-cp gas regressions cover
 storage, endpoint reversal, no-ops and refused source-domain exits.
+
+
+## Molecular sublimation with evolving gas energy
+
+`sublimation::gas::advance_surface_with_gas` couples one original solid caloric
+law to the original `ClosedGasParcel` and its retained complete source catalog.
+Both temperatures, species inventories, pressure and gas properties evolve.
+The explicit species binding supplies a fixed solid enthalpy reference offset;
+source molar mass must agree, and h_v(T)-(h_s+offset)=L(T) must hold within the
+caller's declared absolute tolerance at both accepted surface endpoints.
+Incompatible caloric temperature dependence refuses rather than being hidden
+by a new energy datum.
+
+The shared molecular law supplies gross incoming and outgoing streams. Each
+stream carries the original species h(T)-R_specific*T/2, with separate surface
+and gas temperatures. Counterflow can therefore transfer heat at zero net mass.
+The original gas boundary owner reconstructs the endpoint once. The candidate
+checks actual combined mass and energy and retains signed recession; neither
+input changes until the surrounding consumer accepts both endpoints together.
+
+This is a bounded first-order explicit interval. Both gross withdrawals must
+fit their initial inventories and the caller's maximum fraction, even when
+net mass is zero; timestep refinement resolves thermal and pressure feedback.
+Unsupported domains, incompatible references, unrepresentable increments,
+exhaustion and cancellation refuse atomically. The local Maxwellian/sticking
+assumptions exclude a gas film, carrier thermal accommodation, external heat,
+resolved flow and geometry changes. Multi-surface shared-chamber evolution is
+separate and retains its thermostatted contract.
+
+Six new native coupled regressions passed with the original thermochemistry,
+EOS, transport and gas-energy implementation: dry-carrier sublimation,
+deposition, zero-net-mass heat transfer, formation-reference invariance,
+timestep convergence and atomic refusal. The six existing species-boundary
+regressions also passed in the same actual-source native executable.

@@ -186,3 +186,22 @@ redistribution, original caloric charts and heat graph, canonical order,
 event timing, work ceilings and late cancellation. The runnable fs-material
 example `ice_cold_trap` uses the real ice law to compute frost growth on a cold
 film supplied by a warmer film through an initially empty shared chamber.
+
+
+## Molecular counterflux for nonisothermal interfaces
+
+`sublimation::molecular` returns both nonnegative half-space mass fluxes and
+one signed net flux from the original bounded constitutive and kinetic owners.
+The equal-temperature path retains stable pressure-difference evaluation.
+Different surface and local vapor temperatures remain distinct; volatile
+partial pressure is never replaced by total carrier pressure. Scalar work is
+constant and allocation-free. Four native regressions cover equilibrium,
+unequal temperatures, pressure semantics and refusal boundaries.
+
+An energy consumer must retain the opposing streams: zero net mass does not
+imply zero heat exchange. For Maxwellian ideal vapor with equilibrium internal
+modes, each stream carries h(T)-R_specific*T/2 in an explicitly aligned energy
+reference. The material gas adapter owns that caloric evaluation and both
+endpoint energy accounts. This interface assumes energy/angle-independent
+equal sticking and specular nonsticking reflection; it supplies no gas-film,
+diffuse thermal accommodation, Knudsen-layer or moving-geometry model.
