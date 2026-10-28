@@ -13,10 +13,13 @@
 //! No incompatible source is silently projected away. The final coexact A is
 //! M-orthogonal to all curl-free variations and must preserve every face flux.
 //!
-//! This is a static, lowest-order, isotropic linear/fixed-recoil rung. There is
-//! no Coulomb saddle/HX/higher-order/eddy-current/saturation or TEAM claim.
+//! The baseline owner is a static, lowest-order, isotropic linear/fixed-recoil
+//! model. `nonlinear` adds reversible saturation; `induction` adds coupled
+//! linear/fixed-recoil moving-conductor evolution. These rungs do not claim a
+//! Coulomb saddle/HX/higher-order discretization or TEAM qualification.
 //! Weak-form reference: https://mfem.org/tesla-notes/ .
 
+pub mod induction;
 pub mod nonlinear;
 
 use super::{

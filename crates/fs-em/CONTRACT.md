@@ -1077,3 +1077,44 @@ re-solved coenergy translation finite differences, reuse/frame/origin/geometry
 identity, complete closed weights and source/fractional-plateau refusal,
 a saturated enclosed core, and vector/current-collar admission. The original
 surface-force regressions remain in the same target.
+
+
+## Moving-conductor 3D A–phi induction on the native Whitney owner
+
+`spatial::vector_potential::induction` continues an admitted
+`SpatialVectorField` with fixed tangential-A traces and original linear or
+fixed-recoil magnetic materials. Prepared sparse curl-curl and conductivity
+blocks couple the magnetic increment to electric scalar potential:
+`J = sigma * (-A_dot - grad(phi) + v cross B_mid)`. The same P1 stage current
+enters Ampere's law, charge conservation, Ohmic heat and Lorentz mechanical work.
+Exact tetrahedral P1-product integration supplies the quadratic transfers.
+
+A deterministic relative tree gauge removes gradient freedom while retaining
+harmonic circulation. Dynamic A is not independently projected into a static
+coexact representative. Face-connected conducting components own separate
+floating potentials, including distinct potential DOFs at incidental point or
+edge contacts. Conductor boundaries/interfaces are naturally insulating.
+The sparse nonsymmetric motion operator uses the original bounded, cancellable
+FGMRES owner with a recomputed true residual of the actually retained increment. Rounded
+zero-physics A increments are admitted only when this residual and all physical
+gates still pass; solver tolerances are not relaxed. Full physical Ampere equations,
+including gauge-eliminated rows, every component's charge equations, endpoint
+insulating equations, discrete div-curl, recoil operating bounds and complete
+field/Ohmic/Lorentz/impressed-work balance independently gate acceptance.
+Unknown/assembly/Krylov budgets and a caller-admitted cell magnetic Peclet
+allowance bound the prepared operation.
+
+Conductivity must retain the identical original magnetic material bundle and
+fixed external conditions. Impressed cell current is piecewise linear in time;
+nodal velocity is held over a step. Coefficients and Eulerian occupancy stay
+fixed. This is a lowest-order, linear/fixed-recoil MQS rung: moving interfaces,
+ALE, terminals, displacement current, saturation, hysteresis and thermal
+feedback are not inferred. Heat and mechanical transfers require their own
+receivers; returned candidates do not silently advance either receiver.
+
+`spatial_induction` checks real floating charge cancellation of uniform motion,
+gradient-gauge invariance, an independently integrated charge-eliminated cube
+mode and second-order time refinement, analytic three-dimensional motional
+feedback/Ohmic/Lorentz work, separated floating conductors, fixed-recoil energy
+and source limits, and bounded/cancelled deterministic rollback. Synthetic
+materials qualify equations and discretization, not empirical devices.
