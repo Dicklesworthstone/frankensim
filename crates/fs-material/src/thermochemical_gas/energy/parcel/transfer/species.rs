@@ -10,6 +10,8 @@
 pub mod boundary;
 /// Source-backed multicomponent molecular mixing and conservative pair advancement.
 pub mod diffusion;
+/// Reciprocal free-molecular transport through qualified thin apertures.
+pub mod effusion;
 /// Shared-snapshot selective transport on branching and cyclic volume networks.
 pub mod network;
 mod entropy;

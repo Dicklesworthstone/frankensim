@@ -3642,3 +3642,56 @@ mixtures with distinct species datums. Final files passed Rustfmt parsing and
 independent source/equation review. A final test typecheck was blocked before
 source analysis when the executor's genuine core dependency archives disappeared;
 these seven tests are not claimed as compiled or executed.
+
+
+### Reciprocal free-molecular species and thermal transport
+
+`species::effusion` samples both original Maxwellian molecular beams through a
+qualified fixed thin aperture. Species i has directional molar rate
+A*tau_i*p_i/sqrt(2*pi*M_i*R*T). Reciprocal transmissions are explicitly authored
+or bound to original selected dimensionless constant source claims. The same
+probability applies in both directions and is independent of molecular energy
+and internal state. Gas caloric/transport/pack identities and active water
+binding are checked directly without rebuilding a calibration composition.
+
+Crossing energy is original partial h_i(T)-R*T/(2*M_i). The monatomic limit is
+2RT per mole. Polyatomic use explicitly assumes equilibrated internal modes
+independent of translational velocity. Net energy uses original relative NASA
+enthalpy increments for paired counterstreams, so thermal transfer survives
+large arbitrary formation-energy references. Scaled binary products retain
+representable small positive rates; true underflow/overflow refuses. Species
+and caller-input counts are bounded before sorting.
+
+The authored qualification covers all mixtures/subsets of the retained original
+gas catalog over its complete T/p support. Aperture diameter/minimum mean free
+path <=0.1 and wall thickness/diameter <=0.01 are explicit approximation gates,
+not experimental validation or rigorous error bounds. Reservoirs are stationary,
+well mixed and locally Maxwellian; interface collisions, wall accommodation,
+adsorption, energy filtering, bulk drift and moving-wall work are excluded.
+A long accommodating pore requires its own wall-energy/transport closure.
+Zero exposed area queries no inactive sources. A selected zero transmission
+still admits its actual source domain at both reservoir states.
+
+`network::transport::GasTransportPaths::effusion` retains both directional
+species withdrawals and their molecular energy correction. The correction uses
+the actual rounded integrated beam masses and a stable temperature difference.
+It joins every other mechanism's original-inventory allowance and the ONE
+shared species/energy reconstruction. No pressure-order gate is applied to
+thermal transpiration. The original final entropy admission remains in force.
+In the pure-gas limit p_left/sqrt(T_left)=p_right/sqrt(T_right) gives zero net
+mass while unequal temperatures still exchange energy. Separate apertures may
+be composed with other paths; the same exposed area must not be counted twice.
+
+Nine face regressions and five finite-network regressions cover independent
+monatomic/polyatomic energy, mass dependence, thermal balance, reversal, large
+reference shifts, source/geometry/domain limits, tiny-rate representability,
+finite analytical temperatures, uphill-pressure mass transfer, shared nozzle
+withdrawal and atomic closure/cancellation. Final files passed actual Rustfmt
+parsing and independent equation/source/API review. The final combined test
+typecheck was blocked by missing genuine core dependency archives; these
+fourteen new tests are not claimed as compiled or executed.
+
+The earlier wet/DGM/pore/adsorption selection passed test typechecking at commit
+642daa253c4136a65787ad22eae82c20c7344438, and nine standalone wet-law tests ran
+successfully. Full-workspace validation and execution of the expanded coupled
+suite, including subsequent network/effusion changes, remain unverified.
