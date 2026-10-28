@@ -1,0 +1,57 @@
+frankensim.matdb-source.v1
+observation	producer-table	ROHACELL 71 IG-F PMI structural foam	April 2022 typical property table at nominal density	Typical data, not specimen measurements or design allowables. Density 75 kg/m3 has stated manufacturing spread +/-15 kg/m3 on full-size sheets at least 10 mm thick. Methods: density ISO 845, compression ISO 844, tension ISO 527-2, shear DIN 53294; accompanying ASTM references are comparisons. Numeric temperature, moisture, pressure, rate and loading direction are unstated. No Poisson ratio, isotropy, thermal law or unloading response is supplied.
+scalar	density	producer-table	density	75	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade_rohacell_71_igf_2022	1	1	1
+validity	density	source_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+validity	density	source_pressure_known	0	0	1
+validity	density	full_sheet_at_least_10mm	1	1	1
+scalar	compression-strength	producer-table	compression_strength	1.5	MPa	constant
+uncertainty	compression-strength	unstated	-	-	-	-
+validity	compression-strength	source_grade_rohacell_71_igf_2022	1	1	1
+validity	compression-strength	source_temperature_known	0	0	1
+validity	compression-strength	source_moisture_condition_known	0	0	1
+validity	compression-strength	source_pressure_known	0	0	1
+validity	compression-strength	source_test_rate_known	0	0	1
+validity	compression-strength	source_loading_direction_known	0	0	1
+scalar	compression-modulus	producer-table	compression_modulus	73	MPa	constant
+uncertainty	compression-modulus	unstated	-	-	-	-
+validity	compression-modulus	source_grade_rohacell_71_igf_2022	1	1	1
+validity	compression-modulus	source_temperature_known	0	0	1
+validity	compression-modulus	source_moisture_condition_known	0	0	1
+validity	compression-modulus	source_pressure_known	0	0	1
+validity	compression-modulus	source_test_rate_known	0	0	1
+validity	compression-modulus	source_loading_direction_known	0	0	1
+scalar	tensile-strength	producer-table	tensile_strength	2.8	MPa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	source_grade_rohacell_71_igf_2022	1	1	1
+validity	tensile-strength	source_temperature_known	0	0	1
+validity	tensile-strength	source_moisture_condition_known	0	0	1
+validity	tensile-strength	source_pressure_known	0	0	1
+validity	tensile-strength	source_test_rate_known	0	0	1
+validity	tensile-strength	source_loading_direction_known	0	0	1
+scalar	tensile-modulus	producer-table	tensile_modulus	92	MPa	constant
+uncertainty	tensile-modulus	unstated	-	-	-	-
+validity	tensile-modulus	source_grade_rohacell_71_igf_2022	1	1	1
+validity	tensile-modulus	source_temperature_known	0	0	1
+validity	tensile-modulus	source_moisture_condition_known	0	0	1
+validity	tensile-modulus	source_pressure_known	0	0	1
+validity	tensile-modulus	source_test_rate_known	0	0	1
+validity	tensile-modulus	source_loading_direction_known	0	0	1
+scalar	shear-strength	producer-table	shear_strength	1.3	MPa	constant
+uncertainty	shear-strength	unstated	-	-	-	-
+validity	shear-strength	source_grade_rohacell_71_igf_2022	1	1	1
+validity	shear-strength	source_temperature_known	0	0	1
+validity	shear-strength	source_moisture_condition_known	0	0	1
+validity	shear-strength	source_pressure_known	0	0	1
+validity	shear-strength	source_test_rate_known	0	0	1
+validity	shear-strength	source_loading_direction_known	0	0	1
+scalar	shear-modulus	producer-table	shear_modulus	29	MPa	constant
+uncertainty	shear-modulus	unstated	-	-	-	-
+validity	shear-modulus	source_grade_rohacell_71_igf_2022	1	1	1
+validity	shear-modulus	source_temperature_known	0	0	1
+validity	shear-modulus	source_moisture_condition_known	0	0	1
+validity	shear-modulus	source_pressure_known	0	0	1
+validity	shear-modulus	source_test_rate_known	0	0	1
+validity	shear-modulus	source_loading_direction_known	0	0	1

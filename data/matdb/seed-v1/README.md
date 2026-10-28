@@ -4,6 +4,59 @@ This directory retains the human-reviewable source inputs compiled by
 `xtask matdb-pack`. Generated binary packs are deliberately not committed:
 the compiler must reproduce them from the pinned manifest and source record.
 
+## Additional structural foams: ROHACELL and AIREX
+
+Four producer-attributed packs add 50 claims for low-density PMI and structural
+PVC foams. The ROHACELL 31/71 IG-F packs use the
+[April 2022 Evonik sheet](https://products.evonik.com/assets/35/34/ROHACELL_IG_F_2022_April_EN_243534.pdf);
+the AIREX C70.55/C70.130 packs use the
+[August 2022 metric sheet](https://www.3accorematerials.com/uploads/pdf/TDS-AIREX-C70-E-08.2022-ex-Europe.pdf).
+
+| Pack | Density, kg/m³ | Compression modulus, MPa | Tensile modulus, MPa |
+| --- | ---: | --- | ---: |
+| `evonik-rohacell-31-igf-2022` | 32 | 17 | 36 |
+| `evonik-rohacell-71-igf-2022` | 75 | 73 | 92 |
+| `airex-c70-55-2022` | 60 | 69 ISO/DIN; 58 ASTM | 45 |
+| `airex-c70-130-2022` | 130 | 170 ISO/DIN; 145 ASTM | 115 |
+
+These are typical/average producer values. AIREX minimum mechanical values use
+separate `-minimum` property keys; the source's DNV-GL minimum definition is not
+a confidence interval. Its compression is normal to the sheet, tension is
+in-plane, and the shear plane is unknown. Density and compression retain the
+block-center, at-least-40-mm specimen condition. ISO/DIN and ASTM compression
+and shear modulus rows remain distinct selectable claims. Conductivity retains
+the source's unspecified numerical room temperature and unknown direction;
+no heat capacity or Poisson ratio is inferred.
+
+For example, compile C70.55 and use its ISO/DIN compression modulus in an
+authored 50-mm-long, 100-mm², 0.1%-strain axial reference:
+
+```sh
+cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/airex-c70-55-2022/manifest.tsv --out /tmp/airex-c70-55.fsmatpk
+cargo run -p fs-material --example material_axial_reference -- \
+  /tmp/airex-c70-55.fsmatpk compression density compression-modulus 0.05 0.0001 0.001 \
+  --axis source-grade-airex-c70-55-2022 1 \
+  --axis source-temperature-known 0 --axis source-moisture-condition-known 0 \
+  --axis source-pressure-known 0 --axis source-test-rate-known 0 \
+  --axis block-center-specimen 1 --axis source-specimen-at-least-40mm 1 \
+  --axis loading-in-sheet-plane 0 --axis loading-normal-to-sheet 1 \
+  --axis compression-modulus-method-astm-c365 0 --step -0.00005 1
+```
+
+Selecting `compression-modulus-method-astm-c365=1` chooses the separate ASTM
+row. Omitting that selector leaves the modulus query incomplete. The one-second
+ramp and strain ceiling are scenario choices because the source supplies no
+test rate or validated linear range. This uses the axial modulus reference;
+it does not establish foam crushing, recovery, unloading, or three-dimensional
+isotropy.
+
+ROHACELL additionally requires the exact grade flag, unknown-temperature,
+moisture and pressure flags, `source-test-rate-known=0`,
+`source-loading-direction-known=0`, and `full-sheet-at-least-10mm=1` for
+density. Its stated density spreads are manufacturing variation. The reported
+ISO/DIN methods are retained; ASTM comparisons are not relabeled as performed
+tests.
+
 ## Run axial reference calculations for plastics and foams
 
 `material_axial_reference` resolves density and a named tensile or compression

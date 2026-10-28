@@ -1,0 +1,34 @@
+frankensim.matdb-manifest.v3
+pack_id	airex-c70-55-2022
+redistribution	permitted	Selected attributed numerical facts and original notes only; neither the producer document nor its table layout is redistributed
+citation	Airex AG / 3A Composites, AIREX C70, GM--TDS-094, August 2022, replaces March 2022, metric table p. 2; https://www.3accorematerials.com/uploads/pdf/TDS-AIREX-C70-E-08.2022-ex-Europe.pdf; accessed 2026-10-28
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	airex-c70-55-2022	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	compression_strength	compression-strength	dimensional
+property	compression_strength_minimum	compression-strength-minimum	dimensional
+property	compression_modulus	compression-modulus	dimensional
+property	compression_modulus_minimum	compression-modulus-minimum	dimensional
+property	tensile_strength	tensile-strength	dimensional
+property	tensile_strength_minimum	tensile-strength-minimum	dimensional
+property	tensile_modulus	tensile-modulus	dimensional
+property	tensile_modulus_minimum	tensile-modulus-minimum	dimensional
+property	shear_strength	shear-strength	dimensional
+property	shear_strength_minimum	shear-strength-minimum	dimensional
+property	shear_modulus	shear-modulus	dimensional
+property	shear_modulus_minimum	shear-modulus-minimum	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+axis	source_grade_airex_c70_55_2022	source-grade-airex-c70-55-2022	dimensional
+axis	source_temperature_known	source-temperature-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	block_center_specimen	block-center-specimen	dimensional
+axis	source_specimen_at_least_40mm	source-specimen-at-least-40mm	dimensional
+axis	source_test_rate_known	source-test-rate-known	dimensional
+axis	loading_in_sheet_plane	loading-in-sheet-plane	dimensional
+axis	loading_normal_to_sheet	loading-normal-to-sheet	dimensional
+axis	compression_modulus_method_astm_c365	compression-modulus-method-astm-c365	dimensional
+axis	source_shear_plane_known	source-shear-plane-known	dimensional
+axis	shear_method_astm_c393	shear-method-astm-c393	dimensional
+axis	source_room_temperature	source-room-temperature	dimensional
+axis	source_thermal_direction_known	source-thermal-direction-known	dimensional

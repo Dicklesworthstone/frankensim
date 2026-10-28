@@ -1,0 +1,179 @@
+frankensim.matdb-source.v1
+observation	producer-table	AIREX C70.55 closed-cell structural PVC foam	August 2022 metric property table; averages and minimums retained separately	Density average 60 kg/m3; typical range 54-69 kg/m3 is not a confidence interval. Density/compression specimens are from block centers, at least 40 mm thick. Compression is normal to sheet; tension is in-plane. Minimums follow the source's DNV-GL definition. Temperature, moisture, pressure and rate are numerically unspecified. Method-specific values do not establish isotropy, a constitutive curve or recovery.
+observation	methods	AIREX C70.55 closed-cell structural PVC foam	Compression strength ISO 844 / ASTM C365; compression modulus separate ISO 844 / DIN 53421 and ASTM C365 rows; tension ISO 527 1-2; shear separate ISO 1922 and ASTM C393 rows; conductivity ISO 8301	Method flags select the printed modulus rows; the compression-strength row lists its methods together. Shear plane is unspecified. Conductivity is reported at room temperature without a numerical temperature or direction. No Cp or Poisson ratio is supplied.
+scalar	density	producer-table	density	60	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade_airex_c70_55_2022	1	1	1
+validity	density	source_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+validity	density	source_pressure_known	0	0	1
+validity	density	block_center_specimen	1	1	1
+validity	density	source_specimen_at_least_40mm	1	1	1
+scalar	compression-strength-average	producer-table,methods	compression_strength	0.9	MPa	constant
+uncertainty	compression-strength-average	unstated	-	-	-	-
+validity	compression-strength-average	source_grade_airex_c70_55_2022	1	1	1
+validity	compression-strength-average	source_temperature_known	0	0	1
+validity	compression-strength-average	source_moisture_condition_known	0	0	1
+validity	compression-strength-average	source_pressure_known	0	0	1
+validity	compression-strength-average	source_test_rate_known	0	0	1
+validity	compression-strength-average	block_center_specimen	1	1	1
+validity	compression-strength-average	source_specimen_at_least_40mm	1	1	1
+validity	compression-strength-average	loading_in_sheet_plane	0	0	1
+validity	compression-strength-average	loading_normal_to_sheet	1	1	1
+scalar	compression-strength-minimum	producer-table,methods	compression_strength_minimum	0.75	MPa	constant
+uncertainty	compression-strength-minimum	unstated	-	-	-	-
+validity	compression-strength-minimum	source_grade_airex_c70_55_2022	1	1	1
+validity	compression-strength-minimum	source_temperature_known	0	0	1
+validity	compression-strength-minimum	source_moisture_condition_known	0	0	1
+validity	compression-strength-minimum	source_pressure_known	0	0	1
+validity	compression-strength-minimum	source_test_rate_known	0	0	1
+validity	compression-strength-minimum	block_center_specimen	1	1	1
+validity	compression-strength-minimum	source_specimen_at_least_40mm	1	1	1
+validity	compression-strength-minimum	loading_in_sheet_plane	0	0	1
+validity	compression-strength-minimum	loading_normal_to_sheet	1	1	1
+scalar	compression-modulus-iso-average	producer-table,methods	compression_modulus	69	MPa	constant
+uncertainty	compression-modulus-iso-average	unstated	-	-	-	-
+validity	compression-modulus-iso-average	source_grade_airex_c70_55_2022	1	1	1
+validity	compression-modulus-iso-average	source_temperature_known	0	0	1
+validity	compression-modulus-iso-average	source_moisture_condition_known	0	0	1
+validity	compression-modulus-iso-average	source_pressure_known	0	0	1
+validity	compression-modulus-iso-average	source_test_rate_known	0	0	1
+validity	compression-modulus-iso-average	block_center_specimen	1	1	1
+validity	compression-modulus-iso-average	source_specimen_at_least_40mm	1	1	1
+validity	compression-modulus-iso-average	loading_in_sheet_plane	0	0	1
+validity	compression-modulus-iso-average	loading_normal_to_sheet	1	1	1
+validity	compression-modulus-iso-average	compression_modulus_method_astm_c365	0	0	1
+scalar	compression-modulus-iso-minimum	producer-table,methods	compression_modulus_minimum	55	MPa	constant
+uncertainty	compression-modulus-iso-minimum	unstated	-	-	-	-
+validity	compression-modulus-iso-minimum	source_grade_airex_c70_55_2022	1	1	1
+validity	compression-modulus-iso-minimum	source_temperature_known	0	0	1
+validity	compression-modulus-iso-minimum	source_moisture_condition_known	0	0	1
+validity	compression-modulus-iso-minimum	source_pressure_known	0	0	1
+validity	compression-modulus-iso-minimum	source_test_rate_known	0	0	1
+validity	compression-modulus-iso-minimum	block_center_specimen	1	1	1
+validity	compression-modulus-iso-minimum	source_specimen_at_least_40mm	1	1	1
+validity	compression-modulus-iso-minimum	loading_in_sheet_plane	0	0	1
+validity	compression-modulus-iso-minimum	loading_normal_to_sheet	1	1	1
+validity	compression-modulus-iso-minimum	compression_modulus_method_astm_c365	0	0	1
+scalar	compression-modulus-astm-average	producer-table,methods	compression_modulus	58	MPa	constant
+uncertainty	compression-modulus-astm-average	unstated	-	-	-	-
+validity	compression-modulus-astm-average	source_grade_airex_c70_55_2022	1	1	1
+validity	compression-modulus-astm-average	source_temperature_known	0	0	1
+validity	compression-modulus-astm-average	source_moisture_condition_known	0	0	1
+validity	compression-modulus-astm-average	source_pressure_known	0	0	1
+validity	compression-modulus-astm-average	source_test_rate_known	0	0	1
+validity	compression-modulus-astm-average	block_center_specimen	1	1	1
+validity	compression-modulus-astm-average	source_specimen_at_least_40mm	1	1	1
+validity	compression-modulus-astm-average	loading_in_sheet_plane	0	0	1
+validity	compression-modulus-astm-average	loading_normal_to_sheet	1	1	1
+validity	compression-modulus-astm-average	compression_modulus_method_astm_c365	1	1	1
+scalar	compression-modulus-astm-minimum	producer-table,methods	compression_modulus_minimum	45	MPa	constant
+uncertainty	compression-modulus-astm-minimum	unstated	-	-	-	-
+validity	compression-modulus-astm-minimum	source_grade_airex_c70_55_2022	1	1	1
+validity	compression-modulus-astm-minimum	source_temperature_known	0	0	1
+validity	compression-modulus-astm-minimum	source_moisture_condition_known	0	0	1
+validity	compression-modulus-astm-minimum	source_pressure_known	0	0	1
+validity	compression-modulus-astm-minimum	source_test_rate_known	0	0	1
+validity	compression-modulus-astm-minimum	block_center_specimen	1	1	1
+validity	compression-modulus-astm-minimum	source_specimen_at_least_40mm	1	1	1
+validity	compression-modulus-astm-minimum	loading_in_sheet_plane	0	0	1
+validity	compression-modulus-astm-minimum	loading_normal_to_sheet	1	1	1
+validity	compression-modulus-astm-minimum	compression_modulus_method_astm_c365	1	1	1
+scalar	tensile-strength-average	producer-table,methods	tensile_strength	1.3	MPa	constant
+uncertainty	tensile-strength-average	unstated	-	-	-	-
+validity	tensile-strength-average	source_grade_airex_c70_55_2022	1	1	1
+validity	tensile-strength-average	source_temperature_known	0	0	1
+validity	tensile-strength-average	source_moisture_condition_known	0	0	1
+validity	tensile-strength-average	source_pressure_known	0	0	1
+validity	tensile-strength-average	source_test_rate_known	0	0	1
+validity	tensile-strength-average	loading_in_sheet_plane	1	1	1
+validity	tensile-strength-average	loading_normal_to_sheet	0	0	1
+scalar	tensile-strength-minimum	producer-table,methods	tensile_strength_minimum	1	MPa	constant
+uncertainty	tensile-strength-minimum	unstated	-	-	-	-
+validity	tensile-strength-minimum	source_grade_airex_c70_55_2022	1	1	1
+validity	tensile-strength-minimum	source_temperature_known	0	0	1
+validity	tensile-strength-minimum	source_moisture_condition_known	0	0	1
+validity	tensile-strength-minimum	source_pressure_known	0	0	1
+validity	tensile-strength-minimum	source_test_rate_known	0	0	1
+validity	tensile-strength-minimum	loading_in_sheet_plane	1	1	1
+validity	tensile-strength-minimum	loading_normal_to_sheet	0	0	1
+scalar	tensile-modulus-average	producer-table,methods	tensile_modulus	45	MPa	constant
+uncertainty	tensile-modulus-average	unstated	-	-	-	-
+validity	tensile-modulus-average	source_grade_airex_c70_55_2022	1	1	1
+validity	tensile-modulus-average	source_temperature_known	0	0	1
+validity	tensile-modulus-average	source_moisture_condition_known	0	0	1
+validity	tensile-modulus-average	source_pressure_known	0	0	1
+validity	tensile-modulus-average	source_test_rate_known	0	0	1
+validity	tensile-modulus-average	loading_in_sheet_plane	1	1	1
+validity	tensile-modulus-average	loading_normal_to_sheet	0	0	1
+scalar	tensile-modulus-minimum	producer-table,methods	tensile_modulus_minimum	35	MPa	constant
+uncertainty	tensile-modulus-minimum	unstated	-	-	-	-
+validity	tensile-modulus-minimum	source_grade_airex_c70_55_2022	1	1	1
+validity	tensile-modulus-minimum	source_temperature_known	0	0	1
+validity	tensile-modulus-minimum	source_moisture_condition_known	0	0	1
+validity	tensile-modulus-minimum	source_pressure_known	0	0	1
+validity	tensile-modulus-minimum	source_test_rate_known	0	0	1
+validity	tensile-modulus-minimum	loading_in_sheet_plane	1	1	1
+validity	tensile-modulus-minimum	loading_normal_to_sheet	0	0	1
+scalar	shear-strength-average	producer-table,methods	shear_strength	0.85	MPa	constant
+uncertainty	shear-strength-average	unstated	-	-	-	-
+validity	shear-strength-average	source_grade_airex_c70_55_2022	1	1	1
+validity	shear-strength-average	source_temperature_known	0	0	1
+validity	shear-strength-average	source_moisture_condition_known	0	0	1
+validity	shear-strength-average	source_pressure_known	0	0	1
+validity	shear-strength-average	source_test_rate_known	0	0	1
+validity	shear-strength-average	source_shear_plane_known	0	0	1
+validity	shear-strength-average	shear_method_astm_c393	0	0	1
+scalar	shear-strength-minimum	producer-table,methods	shear_strength_minimum	0.7	MPa	constant
+uncertainty	shear-strength-minimum	unstated	-	-	-	-
+validity	shear-strength-minimum	source_grade_airex_c70_55_2022	1	1	1
+validity	shear-strength-minimum	source_temperature_known	0	0	1
+validity	shear-strength-minimum	source_moisture_condition_known	0	0	1
+validity	shear-strength-minimum	source_pressure_known	0	0	1
+validity	shear-strength-minimum	source_test_rate_known	0	0	1
+validity	shear-strength-minimum	source_shear_plane_known	0	0	1
+validity	shear-strength-minimum	shear_method_astm_c393	0	0	1
+scalar	shear-modulus-iso-average	producer-table,methods	shear_modulus	19	MPa	constant
+uncertainty	shear-modulus-iso-average	unstated	-	-	-	-
+validity	shear-modulus-iso-average	source_grade_airex_c70_55_2022	1	1	1
+validity	shear-modulus-iso-average	source_temperature_known	0	0	1
+validity	shear-modulus-iso-average	source_moisture_condition_known	0	0	1
+validity	shear-modulus-iso-average	source_pressure_known	0	0	1
+validity	shear-modulus-iso-average	source_test_rate_known	0	0	1
+validity	shear-modulus-iso-average	source_shear_plane_known	0	0	1
+validity	shear-modulus-iso-average	shear_method_astm_c393	0	0	1
+scalar	shear-modulus-iso-minimum	producer-table,methods	shear_modulus_minimum	16	MPa	constant
+uncertainty	shear-modulus-iso-minimum	unstated	-	-	-	-
+validity	shear-modulus-iso-minimum	source_grade_airex_c70_55_2022	1	1	1
+validity	shear-modulus-iso-minimum	source_temperature_known	0	0	1
+validity	shear-modulus-iso-minimum	source_moisture_condition_known	0	0	1
+validity	shear-modulus-iso-minimum	source_pressure_known	0	0	1
+validity	shear-modulus-iso-minimum	source_test_rate_known	0	0	1
+validity	shear-modulus-iso-minimum	source_shear_plane_known	0	0	1
+validity	shear-modulus-iso-minimum	shear_method_astm_c393	0	0	1
+scalar	shear-modulus-astm-average	producer-table,methods	shear_modulus	22	MPa	constant
+uncertainty	shear-modulus-astm-average	unstated	-	-	-	-
+validity	shear-modulus-astm-average	source_grade_airex_c70_55_2022	1	1	1
+validity	shear-modulus-astm-average	source_temperature_known	0	0	1
+validity	shear-modulus-astm-average	source_moisture_condition_known	0	0	1
+validity	shear-modulus-astm-average	source_pressure_known	0	0	1
+validity	shear-modulus-astm-average	source_test_rate_known	0	0	1
+validity	shear-modulus-astm-average	source_shear_plane_known	0	0	1
+validity	shear-modulus-astm-average	shear_method_astm_c393	1	1	1
+scalar	shear-modulus-astm-minimum	producer-table,methods	shear_modulus_minimum	18	MPa	constant
+uncertainty	shear-modulus-astm-minimum	unstated	-	-	-	-
+validity	shear-modulus-astm-minimum	source_grade_airex_c70_55_2022	1	1	1
+validity	shear-modulus-astm-minimum	source_temperature_known	0	0	1
+validity	shear-modulus-astm-minimum	source_moisture_condition_known	0	0	1
+validity	shear-modulus-astm-minimum	source_pressure_known	0	0	1
+validity	shear-modulus-astm-minimum	source_test_rate_known	0	0	1
+validity	shear-modulus-astm-minimum	source_shear_plane_known	0	0	1
+validity	shear-modulus-astm-minimum	shear_method_astm_c393	1	1	1
+scalar	thermal-conductivity	producer-table,methods	thermal_conductivity	0.031	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	source_grade_airex_c70_55_2022	1	1	1
+validity	thermal-conductivity	source_temperature_known	0	0	1
+validity	thermal-conductivity	source_moisture_condition_known	0	0	1
+validity	thermal-conductivity	source_pressure_known	0	0	1
+validity	thermal-conductivity	source_room_temperature	1	1	1
+validity	thermal-conductivity	source_thermal_direction_known	0	0	1
