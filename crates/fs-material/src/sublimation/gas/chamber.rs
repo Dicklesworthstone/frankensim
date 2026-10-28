@@ -16,6 +16,8 @@
 
 /// Bounded adaptive histories using the same conservative joint interval.
 pub mod advance;
+/// Explicit solid/liquid inventories on original sharp-melting caloric charts.
+pub mod mixed;
 
 use super::{
     ClosedGasParcel, GasSpeciesBoundaryCandidate, GasSpeciesSnapshot, GasSurfaceBinding,
@@ -28,6 +30,8 @@ use super::accommodation::{ReflectedHeatStep, ThermalAccommodation};
 
 /// One caller-owned physical surface and its original constitutive charts.
 /// Identity is explicit and stable across intervals; input order is immaterial.
+/// On the opt-in mixed path, `solid` stores total condensed mass and bulk h;
+/// the separate admitted phase chart owns its actual solid/liquid partition.
 #[derive(Clone, Copy)]
 pub struct GasChamberSurface<'a> {
     pub id: u64,
@@ -57,10 +61,12 @@ pub struct GasChamberSurfaceStep {
     pub incoming_specific_energy_j_kg: Option<f64>,
     pub energy_into_gas_j: f64,
     /// Actual solid storage change in its explicitly aligned gas datum.
+    /// On the mixed path this is the COMPLETE condensed-body storage change.
     pub solid_energy_change_j: f64,
     /// Solid storage change plus its allocated stream energy. The actual gas
     /// storage change is accounted for only in the joint chamber report.
     pub energy_residual_j: f64,
+    /// Phase-transfer retreat only; mixed-path fusion is reported separately.
     pub recession_m: f64,
 }
 impl GasChamberSurfaceStep {
@@ -253,7 +259,7 @@ pub fn advance_chamber_with_gas<'catalog>(
     controls: GasChamberSolve,
     cancelled: impl FnMut() -> bool,
 ) -> Result<GasChamberCandidate<'catalog>, GasSurfaceError> {
-    advance_chamber(surfaces, None, gas, catalog, duration_s, controls, cancelled)
+    advance_chamber(surfaces, None, None, gas, catalog, duration_s, controls, cancelled)
         .map(|(candidate, _)| candidate)
 }
 
@@ -280,13 +286,14 @@ pub fn advance_chamber_with_accommodation<'catalog>(
     controls: GasChamberSolve,
     cancelled: impl FnMut() -> bool,
 ) -> Result<(GasChamberCandidate<'catalog>, BTreeMap<u64, ReflectedHeatStep>), GasSurfaceError> {
-    advance_chamber(surfaces, Some(accommodation), gas, catalog, duration_s, controls, cancelled)
+    advance_chamber(surfaces, Some(accommodation), None, gas, catalog, duration_s, controls, cancelled)
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn advance_chamber<'catalog>(
     surfaces: &[GasChamberSurface<'_>],
     accommodation: Option<&BTreeMap<u64, ThermalAccommodation>>,
+    calorics: Option<&BTreeMap<u64, mixed::SharpMeltingCaloric<'_>>>,
     gas: &ClosedGasParcel,
     catalog: &'catalog ThermochemicalGasModel,
     duration_s: f64,
@@ -314,6 +321,7 @@ fn advance_chamber<'catalog>(
             return Err(invalid("thermal accommodation must cover exactly the active chamber surfaces"));
         }
     }
+    if let Some(laws) = calorics { mixed::validate_roster(surfaces, laws)?; }
     let mut reflections = BTreeMap::new();
     let mut species: BTreeMap<SpeciesId, SpeciesAccount> = BTreeMap::new();
     let mut snapshots = Vec::with_capacity(ordered.len());
@@ -325,16 +333,19 @@ fn advance_chamber<'catalog>(
             Some(account) => account.gas,
             None => species_snapshot(gas, catalog, id)?,
         };
-        let snapshot = snapshot_surface(
-            surface.law,
-            surface.binding,
-            surface.solid,
-            context,
-            catalog,
-            surface.temperature_from_enthalpy,
-            duration_s,
-            controls.surface,
-        )?;
+        let snapshot = match calorics {
+            Some(laws) => mixed::snapshot(surface, laws[&surface.id], context, catalog, duration_s, controls.surface)?,
+            None => snapshot_surface(
+                surface.law,
+                surface.binding,
+                surface.solid,
+                context,
+                catalog,
+                surface.temperature_from_enthalpy,
+                duration_s,
+                controls.surface,
+            )?,
+        };
         let account = species.entry(id.clone()).or_insert_with(|| {
             SpeciesAccount::new(context, snapshot.outgoing_specific_energy_j_kg)
         });
@@ -346,7 +357,8 @@ fn advance_chamber<'catalog>(
             inventory_limit(
                 duration_s,
                 snapshot.outgoing_mass_kg,
-                surface.solid.mass_kg,
+                // In a mixture this is only its OLD solid inventory.
+                snapshot.solid.mass_kg,
                 controls.surface.maximum_gross_inventory_fraction,
             ),
         );
@@ -392,15 +404,18 @@ fn advance_chamber<'catalog>(
             }
             reflections.insert(surface.id, reflection);
         }
-        let prepared = prepare_surface_with_heat(
-            surface.law,
-            surface.binding,
-            snapshot,
-            catalog,
-            surface.temperature_from_enthalpy,
-            controls.surface,
-            reflected_heat,
-        )?;
+        let prepared = match calorics {
+            Some(laws) => mixed::prepare(surface, laws[&surface.id], snapshot, catalog, controls.surface, reflected_heat)?,
+            None => prepare_surface_with_heat(
+                surface.law,
+                surface.binding,
+                snapshot,
+                catalog,
+                surface.temperature_from_enthalpy,
+                controls.surface,
+                reflected_heat,
+            )?,
+        };
         let account = species
             .get_mut(&surface.binding.species)
             .expect("snapshot retains its original species account");
