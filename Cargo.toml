@@ -134,6 +134,7 @@ members = [
     "crates/fs-couple",
     "crates/fs-ports",
     "crates/fs-lbm",
+    "crates/fs-gas",
     "crates/fs-em",
     "crates/fs-iga",
     "crates/fs-surrogate",

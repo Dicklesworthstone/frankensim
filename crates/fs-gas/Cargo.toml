@@ -1,0 +1,31 @@
+[package]
+name = "fs-gas"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Source-owned conservative gas dynamics and finite-rate gas reactors."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[features]
+default = []
+experimental-euler = []
+
+[dependencies]
+fs-math = { path = "../fs-math" }
+fs-qty = { path = "../fs-qty" }
+fs-thermochem = { path = "../fs-thermochem" }
+
+[dev-dependencies]
+fs-matdb = { path = "../fs-matdb" }
+fs-evidence = { path = "../fs-evidence" }
+
+[[example]]
+name = "shock_tube"
+required-features = ["experimental-euler"]
+
+[lints]
+workspace = true

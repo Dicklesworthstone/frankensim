@@ -1757,6 +1757,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-gas"
+version = "0.0.1"
+dependencies = [
+ "fs-evidence",
+ "fs-matdb",
+ "fs-math",
+ "fs-qty",
+ "fs-thermochem",
+]
+
+[[package]]
 name = "fs-gen"
 version = "0.0.1"
 
