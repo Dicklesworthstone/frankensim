@@ -3407,3 +3407,36 @@ a rotating/inertial Earth model. Its effective hydrostatic gravity must not be
 silently substituted for a different flight-frame gravity law. Focused tests
 cover source layer values, the common gas state, layer continuity, the altitude
 crosswalk, hydrostatic balance and upper-domain refusal.
+
+
+### Saturation in the shared gas transport owners
+
+`PorousGasLayer::with_wet_state` retains intrinsic permeability, original axes,
+source records and gas support while applying the sampled gas relative mobility.
+`DarcyGasBarrier::with_wet_states` recompiles each original series layer once;
+repeated saturation updates replace their preceding factors. A flooded layer
+closes the pressure-driven path exactly. Existing Darcy consumers receive this
+behavior through the same barrier. Dry-gas Klinkenberg calibrations refuse wet
+use rather than silently extending gas-specific slip authority.
+
+`DustyGasMedium` distinguishes reference pore geometry from its effective wet
+geometry. The molecular and Knudsen terms use the independently sampled absolute
+diffusivity factor; the Knudsen term also uses the current gas-pore radius.
+Relative Darcy mobility is not multiplied into diffusion. Full liquid saturation
+closes all gas transport before inactive gas or binary sources are queried.
+The complete wet calibration remains attached to the reported medium.
+
+These are prescribed instantaneous constitutive updates. They do not move liquid,
+resize a retained gas inventory, account for displaced-gas work, infer pore
+connectivity or evolve a hysteresis branch. Those operations require a coupled
+storage/geometry owner. The active gas law retains its original domain and
+finite-step mass, energy and entropy admission.
+
+Eight added integration regressions cover independently derived pure/binary
+flux scaling, residual-gas diffusion, exact flooding, repeated wet updates,
+radius dependence, retained source identity/slip refusal and anisotropic series
+layers. Both modified production files and all new tests passed Rustfmt parsing.
+The nine standalone wet-law tests passed natively. At this commit the expanded
+actual-source native run remains blocked by unavailable dependency metadata and
+full executor filesystems; these eight integration tests are not yet claimed as
+executed.

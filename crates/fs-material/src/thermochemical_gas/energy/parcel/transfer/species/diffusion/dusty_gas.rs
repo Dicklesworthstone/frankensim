@@ -16,8 +16,8 @@
 //!
 //! The face uses concentration-weighted composition at one declared mean T;
 //! the admitted small temperature difference is ignored in the driving force.
-//! No thermal transpiration, Soret effect, adsorption, surface diffusion, wet
-//! relative permeability, pore storage, pore-size distribution or Forchheimer
+//! No thermal transpiration, Soret effect, adsorption, surface diffusion,
+//! pore storage, pore-size distribution or Forchheimer
 //! inertia is inferred. Central face sampling requires spatial/time refinement;
 //! it is not a resolved steady nonlinear composition profile through the slab.
 
@@ -68,7 +68,7 @@ impl DustyGasPores {
     pub fn provenance(&self) -> &str { &self.provenance }
 }
 
-/// One homogeneous pore geometry and the original intrinsic-permeability law.
+/// One homogeneous reference pore geometry and the original permeability law.
 /// The Arc shares immutable source records across reports. Zero intrinsic k
 /// disables viscous flow only; explicit pore diffusivity can still conduct gas.
 #[derive(Clone, Debug, PartialEq)]
@@ -87,8 +87,41 @@ impl DustyGasMedium {
         Ok(Self { barrier: Arc::new(barrier), pores })
     }
     pub fn barrier(&self) -> &DarcyGasBarrier { &self.barrier }
-    pub const fn pores(&self) -> &DustyGasPores { &self.pores }
+    /// Authored reference geometry. The effective getters below include the
+    /// current wet response and are the geometry consumed by transport/storage.
+    pub const fn reference_pores(&self) -> &DustyGasPores { &self.pores }
     pub fn thickness_m(&self) -> f64 { self.barrier.layers()[0].thickness_m() }
+    pub fn wet_state(&self) -> Option<&crate::porous::wet::WetPoreGasState> {
+        self.barrier.layers()[0].wet_state()
+    }
+    pub fn gas_filled_porosity(&self) -> f64 {
+        self.wet_state().map_or(self.pores.gas_filled_porosity, |state| state.gas_filled_porosity())
+    }
+    pub fn mean_gas_pore_radius_m(&self) -> f64 {
+        self.wet_state().map_or(self.pores.mean_pore_radius_m, |state| state.mean_gas_pore_radius_m())
+    }
+    pub fn effective_diffusivity_factor(&self) -> f64 {
+        self.wet_state().map_or(self.pores.effective_diffusivity_factor,
+            |state| state.effective_diffusivity_factor())
+    }
+    /// Fully liquid-filled pores have no finite effective gas tortuosity.
+    pub fn transport_tortuosity_factor(&self) -> Option<f64> {
+        match self.wet_state() {
+            Some(state) => state.transport_tortuosity_factor(),
+            None => Some(self.pores.transport_tortuosity_factor),
+        }
+    }
+    /// Snapshot the prescribed saturation and pore geometry. Darcy mobility
+    /// uses krg once; molecular and Knudsen diffusion use the independently
+    /// calibrated absolute diffusion factor once. Rewetting never compounds
+    /// an earlier factor. Liquid motion, displaced-gas work and pore-body volume
+    /// changes remain the enclosing coupled owner's responsibility.
+    pub fn with_wet_state(&self, state: crate::porous::wet::WetPoreGasState)
+        -> Result<Self, GasEnergyError>
+    {
+        Ok(Self { barrier: Arc::new(self.barrier.with_wet_states(&[state])?),
+            pores: self.pores.clone() })
+    }
 }
 
 /// Explicit face approximation and original-equation numerical admission.
@@ -130,7 +163,7 @@ pub struct DustyGasFlux {
     pub species: Vec<DustyGasSpeciesFlux>,
     /// Original binary diffusivities before the explicit porosity/tortuosity factor.
     pub pairs: Vec<BinaryDiffusionSample>,
-    /// None only for a closed area, which does not query inactive gas sources.
+    /// None for zero area or fully flooded pores; inactive gas sources are not queried.
     pub face_state: Option<ResolvedThermochemicalGasState>,
     pub darcy: Option<DarcyGasFlow>,
     pub maximum_gradient_residual_per_m: f64,
@@ -162,7 +195,9 @@ impl ClosedGasParcel {
             pairs: Vec::new(), face_state: None, darcy: None,
             maximum_gradient_residual_per_m: 0.0,
             local_entropy_production_w_m3_k: 0.0, net_molar_flux_mol_m2_s: 0.0 };
-        if area_m2 == 0.0 { poll(&mut cancelled)?; return Ok(report); }
+        if area_m2 == 0.0 || medium.gas_filled_porosity() == 0.0 {
+            poll(&mut cancelled)?; return Ok(report);
+        }
         let (left, right_state) = (self.state().state(), right.state().state());
         let temperature = 0.5*left.temperature + 0.5*right_state.temperature;
         let pressure = 0.5*left.pressure + 0.5*right_state.pressure;
@@ -212,8 +247,8 @@ impl ClosedGasParcel {
             let row_gradient = ((b-a)/pressure)/distance;
             let molecular_speed = det::sqrt((8.0/core::f64::consts::PI)
                 *(R*temperature/species.molar_mass().value()));
-            let dk = ((2.0/3.0)*medium.pores.mean_pore_radius_m)
-                *medium.pores.effective_diffusivity_factor*molecular_speed;
+            let dk = ((2.0/3.0)*medium.mean_gas_pore_radius_m())
+                *medium.effective_diffusivity_factor()*molecular_speed;
             if !positive(fraction) || !row_gradient.is_finite() || !positive(dk)
                 || (lx != 0.0 && a == 0.0) || (rx != 0.0 && b == 0.0)
                 || (a != b && row_gradient == 0.0) {
@@ -247,7 +282,7 @@ impl ClosedGasParcel {
                 let boundary = updated_point(binding.context, state.temperature, state.pressure)?;
                 material.at_query_point(binding.material, &boundary).map_err(source_error)?;
             }
-            let effective = medium.pores.effective_diffusivity_factor*d;
+            let effective = medium.effective_diffusivity_factor()*d;
             if !positive(effective) { return Err(invalid("effective binary diffusivity is unrepresentable")); }
             diffusion[i*n+j] = effective; diffusion[j*n+i] = effective; scale = scale.min(effective);
             report.pairs.push(BinaryDiffusionSample { species: [components[i].species().clone(),

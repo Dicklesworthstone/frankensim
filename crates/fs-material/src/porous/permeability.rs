@@ -122,6 +122,7 @@ pub struct PorousGasLayer {
     klinkenberg_slip_pa: f64,
     provenance: String,
     source: Option<ResolvedMaterialStatePoint>,
+    wet_state: Option<super::wet::WetPoreGasState>,
 }
 impl PorousGasLayer {
     /// Explicit data/model-input constructor. The caller separately supplies
@@ -133,7 +134,8 @@ impl PorousGasLayer {
             || provenance.trim().is_empty() || provenance.len() > 4096 {
             return Err(invalid("porous layer needs positive thickness, nonnegative slip and bounded explicit provenance"));
         }
-        Ok(Self { permeability, thickness_m, klinkenberg_slip_pa, provenance, source: None })
+        Ok(Self { permeability, thickness_m, klinkenberg_slip_pa, provenance,
+            source: None, wet_state: None })
     }
     /// Bind source-resolved intrinsic permeability [m2], and optionally an
     /// explicitly selected Klinkenberg factor [Pa]. Only validity-wide scalar
@@ -168,6 +170,22 @@ impl PorousGasLayer {
     pub const fn klinkenberg_slip_pa(&self) -> f64 { self.klinkenberg_slip_pa }
     pub fn provenance(&self) -> &str { &self.provenance }
     pub const fn source(&self) -> Option<&ResolvedMaterialStatePoint> { self.source.as_ref() }
+    /// Current prescribed saturation/geometry response; intrinsic k and its
+    /// original material source remain unchanged. No liquid inventory advances.
+    pub const fn wet_state(&self) -> Option<&super::wet::WetPoreGasState> { self.wet_state.as_ref() }
+    pub fn gas_relative_permeability(&self) -> f64 {
+        self.wet_state.as_ref().map_or(1.0, |state| state.gas_relative_permeability())
+    }
+    /// Replace, rather than multiply, the previous wet response. A dry-gas
+    /// slip calibration does not qualify wet pores and therefore refuses.
+    pub fn with_wet_state(&self, state: super::wet::WetPoreGasState) -> Result<Self, MaterialError> {
+        if self.klinkenberg_slip_pa != 0.0 {
+            return Err(invalid("wet-pore mobility requires no-slip intrinsic permeability; dry slip calibration does not qualify wet pores"));
+        }
+        let mut layer = self.clone();
+        layer.wet_state = Some(state);
+        Ok(layer)
+    }
 }
 fn source_value(source: &ResolvedMaterialStatePoint, name: &str, dims: Dims) -> Result<f64, MaterialError> {
     let property = source.property(name).ok_or_else(|| invalid("missing selected permeability/slip source property"))?;
@@ -330,7 +348,12 @@ impl DarcyGasBarrier {
         let mut permeabilities = [0.0; MAX_POROUS_LAYERS];
         let mut sealed = false;
         for (i, layer) in layers.iter().enumerate() {
-            permeabilities[i] = layer.permeability.normal_permeability(normal)?;
+            let intrinsic = layer.permeability.normal_permeability(normal)?;
+            let relative = layer.gas_relative_permeability();
+            permeabilities[i] = intrinsic*relative;
+            if intrinsic > 0.0 && relative > 0.0 && permeabilities[i] == 0.0 {
+                return Err(invalid("nonzero wet-pore Darcy permeability is unrepresentable"));
+            }
             sealed |= permeabilities[i] == 0.0;
             if let Some(source) = &layer.source {
                 for property in source.properties() {
@@ -380,6 +403,18 @@ impl DarcyGasBarrier {
     /// None means heterogeneous factors, never an averaged or inferred factor.
     pub const fn klinkenberg_slip_pa(&self) -> Option<f64> { self.common_slip_pa }
     pub const fn calibrated_gas_model(&self) -> Option<&ThermochemicalGasModel> { self.slip_gas_model.as_ref() }
+    /// Compile one current saturation response per original layer. The original
+    /// ordered geometry, intrinsic tensors, sources and gas support are retained.
+    /// Updating a wet barrier never applies its previous relative factor again.
+    pub fn with_wet_states(&self, states: &[super::wet::WetPoreGasState]) -> Result<Self, MaterialError> {
+        if states.len() != self.layers.len() {
+            return Err(invalid("wet Darcy response must cover every original layer exactly once"));
+        }
+        let layers = self.layers.iter().zip(states)
+            .map(|(layer, state)| layer.with_wet_state(state.clone()))
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::compile(layers, self.normal, self.support, self.slip_gas_model.clone())
+    }
 
     /// Frozen, low-pressure-drop resistance [Pa s/m3]. None means sealed.
     /// The consumer owns its low-drop bound and must enforce the solved
