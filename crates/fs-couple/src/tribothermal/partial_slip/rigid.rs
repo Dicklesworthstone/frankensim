@@ -20,6 +20,9 @@ use super::resolved::{
 use super::*;
 use fs_mbd::{DynamicsError, MassProperties, RigidBodyState, Vec3};
 
+/// Simultaneous retained contacts sharing original rigid bodies and caloric cells.
+pub mod network;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RigidCaloricContactSolve {
     pub contact: ResolvedCaloricContactSolve,

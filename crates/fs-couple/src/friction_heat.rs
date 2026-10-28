@@ -152,6 +152,10 @@ impl FrictionHeatRoute {
     pub const fn cells(&self) -> [CellId; 2] {
         [self.patch.link.a, self.patch.link.b]
     }
+    /// Identity of the original admitted thermal contact link.
+    pub const fn link_id(&self) -> u64 {
+        self.patch.link.id
+    }
     /// Physical area of the original admitted contact face [m²].
     pub const fn contact_area_m2(&self) -> f64 {
         self.patch.link.area_m2
