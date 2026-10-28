@@ -3943,6 +3943,9 @@ unchanged. A dense column buffer and two bounded cell passes avoid a global
 surface solve or per-cell allocation.
 
 Source/geometry/slope/carry/cancellation refusal discards the entire candidate.
+Raw interface fractions must remain monotone and in [0,1]. The original native
+conversion hysteresis may retain over/underfilled cells; these candidates
+refuse the graph reduction even when the native VOF solver could retain them.
 This remains a resolved height-graph reduction with held-force time splitting;
 it does not admit overhangs, detached drops, internal solid walls, dynamic
 contact lines, surfactants, a conservative surface-energy closure or a curved
@@ -3954,3 +3957,31 @@ and volume scaling, quadratic mixed slopes, constant sigma, all orientations,
 pressure/traction consistency and geometry refusal. Material regressions check
 SI traction, conservative mass/enthalpy evolution, exact uniform-sigma baseline
 population bits, source-validity refusal and cancellation rollback.
+
+### Local thermocapillary traction on detached interfaces
+
+`free_surface3_from_cells_with_local_thermocapillarity` retains the original
+material, enthalpy, native pressure and Guo-force owners while removing the
+global tank-column restriction. `LocalThermocapillarity` bounds the smallest
+positive cut-cell fill and the conditioning of the local source reconstruction.
+Complete monotone raw-VOF height stencils share their derivatives with native
+curvature; local traction may try bounded axial depths of 7, 11 and 15 cells.
+The selected graph must have a normal-axis magnitude of at least one half.
+Native pressure keeps its existing seven-cell curvature stencil and fallback.
+
+A volume-matching plane/cube intersection supplies each partial cell's surface
+area and centroid. A weighted affine fit uses only face-connected wet samples
+in a 3-by-3-by-3 neighborhood. Its tangential projection times actual area,
+divided by occupied liquid volume, supplies traction. The same fit extrapolates
+sigma to the patch centroid for native Laplace pressure. Empty/full closure
+ghosts receive coefficients from connected partial patches and own no duplicate
+surface area or force. The reconstruction uses fixed-size per-cell arrays and
+bounded plane inversion; it performs no global surface solve.
+
+Source fitting, cut geometry, tiny volumes, pressure-domain violations, missing
+support or cancellation refuse before publishing a candidate field. Walls,
+contact lines, ambiguous disconnected ghost neighborhoods and all-full/all-empty
+unresolved interfaces are not admitted. Sigma is reconstructed from sourced
+bulk cell values, not evaluated at an independently solved surface temperature;
+the approximation requires spatial refinement. This extension does not add
+surfactant transport, capillary heating or a conservative surface-energy step.

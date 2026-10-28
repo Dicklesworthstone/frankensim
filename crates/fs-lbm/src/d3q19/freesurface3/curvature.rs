@@ -11,9 +11,34 @@
 /// `normal` points out of the liquid. No allocation or field mutation occurs.
 pub(super) fn height_function(
     normal: [f64; 3],
-    mut sample: impl FnMut([i64; 3]) -> Option<f64>,
+    sample: impl FnMut([i64; 3]) -> Option<f64>,
 ) -> Option<f64> {
-    if normal.iter().any(|n| !n.is_finite()) {
+    height_geometry(normal, sample).map(|geometry| geometry.curvature)
+}
+
+/// One complete raw-VOF height reconstruction shared by normal pressure and
+/// local surface traction. The input normal chooses only the column direction;
+/// the returned unit normal comes from the unsmoothed height derivatives.
+pub(super) struct HeightGeometry3 {
+    pub normal: [f64; 3],
+    pub curvature: f64,
+}
+
+pub(super) fn height_geometry(
+    normal: [f64; 3],
+    sample: impl FnMut([i64; 3]) -> Option<f64>,
+) -> Option<HeightGeometry3> {
+    height_geometry_with_depth(normal, 3, sample)
+}
+
+/// The wider bounded local-traction stencil uses the same volume integration
+/// and derivatives. Native pressure retains its original three-cell half-depth.
+pub(super) fn height_geometry_with_depth(
+    normal: [f64; 3],
+    half_depth: i64,
+    mut sample: impl FnMut([i64; 3]) -> Option<f64>,
+) -> Option<HeightGeometry3> {
+    if normal.iter().any(|n| !n.is_finite()) || !(1..=7).contains(&half_depth) {
         return None;
     }
     let mut axis = 0;
@@ -36,7 +61,7 @@ pub(super) fn height_function(
     for (a, column) in heights.iter_mut().enumerate() {
         for (b, height) in column.iter_mut().enumerate() {
             let mut previous = 1.0;
-            for depth in -3..=3 {
+            for depth in -half_depth..=half_depth {
                 let mut offset = [0; 3];
                 offset[axis] = depth * outward;
                 offset[tangent[0]] = a as i64 - 1;
@@ -45,8 +70,8 @@ pub(super) fn height_function(
                 if !fill.is_finite()
                     || !(-TOLERANCE..=1.0 + TOLERANCE).contains(&fill)
                     || fill > previous + TOLERANCE
-                    || (depth == -3 && fill < 1.0 - TOLERANCE)
-                    || (depth == 3 && fill > TOLERANCE)
+                    || (depth == -half_depth && fill < 1.0 - TOLERANCE)
+                    || (depth == half_depth && fill > TOLERANCE)
                 {
                     return None;
                 }
@@ -65,7 +90,15 @@ pub(super) fn height_function(
     let metric = 1.0 + hu * hu + hv * hv;
     let curvature = -(huu * (1.0 + hv * hv) + hvv * (1.0 + hu * hu) - 2.0 * huv * hu * hv)
         / (metric * metric.sqrt());
-    curvature.is_finite().then_some(curvature)
+    if !curvature.is_finite() {
+        return None;
+    }
+    let length = metric.sqrt();
+    let mut normal = [0.0; 3];
+    normal[axis] = outward as f64 / length;
+    normal[tangent[0]] = -hu / length;
+    normal[tangent[1]] = -hv / length;
+    Some(HeightGeometry3 { normal, curvature })
 }
 
 #[cfg(test)]

@@ -9,6 +9,10 @@
 
 use super::*;
 
+mod graph;
+pub(crate) mod local;
+pub(crate) use local::LocalSurface3;
+
 /// All lengths are in lattice cell widths; material ingress supplies SI units.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PlanarSurface3 {
@@ -317,23 +321,7 @@ impl FreeSurface3 {
         gate: &CancelGate,
     ) -> Result<BTreeMap<(u64, usize), [f64; 3]>, FreeSurfaceError3> {
         self.admit_surface_tensions(sigma, gate)?;
-        if graph.axis >= 3
-            || ![-1, 1].contains(&graph.outward_sign)
-            || !graph.maximum_slope.is_finite()
-            || !(0.0..=1.0).contains(&graph.maximum_slope)
-            || !graph.minimum_fill.is_finite()
-            || graph.minimum_fill <= 0.0
-            || graph.minimum_fill > 1.0
-            || !self.solid.is_empty()
-            || self.planar_contact.is_some()
-            || self.planar_contact_field.is_some()
-            || self.contact != ContactModel3::Neutral
-            || self.carry != 0.0
-        {
-            return Err(invalid(
-                "height-graph traction needs resolved Cartesian columns, neutral walls and bounded slopes",
-            ));
-        }
+        let patches = self.height_graph_geometry(graph, gate)?;
         let (nx, ny, nz) = self.grid.tile_dims();
         let size = [nx * TILE, ny * TILE, nz * TILE];
         let tangent = match graph.axis {
@@ -342,100 +330,41 @@ impl FreeSurface3 {
             _ => [0, 1],
         };
         let shape = [size[tangent[0]], size[tangent[1]]];
-        let count = shape[0]
-            .checked_mul(shape[1])
-            .ok_or(invalid("height-graph column count overflows"))?;
-        if shape.iter().any(|&n| n < 3) || count > self.tiles.len().saturating_mul(TILE_CELLS) {
-            return Err(invalid("height graph has unresolved tank columns"));
+        let mut columns: Vec<_> = patches
+            .iter()
+            .map(|patch| SurfaceColumn {
+                height: patch.centroid[graph.axis],
+                volume: patch.volume,
+                sigma: 0.0,
+                force: [0.0; 3],
+            })
+            .collect();
+        let mut references = vec![None; columns.len()];
+        // Preserve the material band's occupied-volume average. Difference
+        // first so uniform sigma produces exactly zero tangential force.
+        for (&key, tile) in &self.tiles {
+            check_cancel(gate)?;
+            let slot = self.grid.slot_of(key).expect("active interface tile");
+            for (lane, &cell) in tile.cells.iter().enumerate() {
+                if cell != Cell3::Interface || tile.mass[lane] <= 0.0 {
+                    continue;
+                }
+                let p = Self::transport_coordinates(MassLocation3::Cell(key, lane))
+                    .ok_or(invalid("unlocated height-graph interface"))?;
+                let index = p[tangent[0]] + shape[0] * p[tangent[1]];
+                let fill = (tile.mass[lane]
+                    / self.grid.populations(slot, lane).iter().sum::<f64>())
+                .min(1.0);
+                let value = sigma[&(key, lane)];
+                let reference = *references[index].get_or_insert(value);
+                columns[index].sigma += fill * (value - reference);
+            }
         }
-        const TOLERANCE: f64 = 64.0 * f64::EPSILON;
-        let mut columns = Vec::with_capacity(count);
-        for b in 0..shape[1] {
-            for a in 0..shape[0] {
-                check_cancel(gate)?;
-                let mut height = 0.0;
-                let mut previous = 1.0;
-                let mut volume = 0.0;
-                let mut reference = None;
-                let mut sigma_difference = 0.0;
-                for depth in 0..size[graph.axis] {
-                    if depth % TILE == 0 {
-                        check_cancel(gate)?;
-                    }
-                    let mut p = [0; 3];
-                    p[tangent[0]] = a;
-                    p[tangent[1]] = b;
-                    p[graph.axis] = if graph.outward_sign > 0 {
-                        depth
-                    } else {
-                        size[graph.axis] - 1 - depth
-                    };
-                    let location = self
-                        .grid
-                        .resolve_source(p[0] as i64, p[1] as i64, p[2] as i64);
-                    let (fill, interface) = match location {
-                        Some((slot, lane)) => {
-                            let key = self.grid.active_keys()[slot];
-                            match self.tiles[&key].cells[lane] {
-                                Cell3::Gas => (0.0, None),
-                                Cell3::Fluid => (1.0, None),
-                                Cell3::Interface => {
-                                    let rho = self.grid.populations(slot, lane).iter().sum::<f64>();
-                                    if !rho.is_finite() || rho <= 0.0 {
-                                        return Err(invalid("invalid density in height graph"));
-                                    }
-                                    (self.tiles[&key].mass[lane] / rho, Some((key, lane)))
-                                }
-                            }
-                        }
-                        None => (0.0, None),
-                    };
-                    // A full-to-empty monotone column is essential. It rules
-                    // out unresolved folds, disconnected drops and overfill.
-                    if !fill.is_finite()
-                        || fill < 0.0
-                        || fill > 1.0 + TOLERANCE
-                        || fill > previous + TOLERANCE
-                        || (depth == 0 && fill < 1.0 - TOLERANCE)
-                        || (depth + 1 == size[graph.axis] && fill > 0.0)
-                    {
-                        return Err(invalid(
-                            "height graph requires complete monotone liquid-to-gas columns",
-                        ));
-                    }
-                    let fill = fill.min(1.0);
-                    height += fill;
-                    previous = fill;
-                    if let Some(location) = interface.filter(|_| fill > 0.0) {
-                        let value = sigma[&location];
-                        let first = *reference.get_or_insert(value);
-                        sigma_difference += fill * (value - first);
-                        volume += fill;
-                    }
-                }
-                if height <= 1.0
-                    || height >= (size[graph.axis] - 1) as f64
-                    || volume < graph.minimum_fill
-                {
-                    return Err(invalid(
-                        "height graph needs liquid depth, gas clearance and a resolved interface volume",
-                    ));
-                }
-                let value = reference.ok_or(invalid("height graph has no liquid interface"))?
-                    + sigma_difference / volume;
-                if !value.is_finite() {
-                    return Err(invalid("height-graph surface tension is not representable"));
-                }
-                columns.push(SurfaceColumn {
-                    height: if graph.outward_sign > 0 {
-                        height
-                    } else {
-                        size[graph.axis] as f64 - height
-                    },
-                    volume,
-                    sigma: value,
-                    force: [0.0; 3],
-                });
+        for (column, reference) in columns.iter_mut().zip(references) {
+            column.sigma = reference.ok_or(invalid("height graph has no liquid interface"))?
+                + column.sigma / column.volume;
+            if !column.sigma.is_finite() || column.sigma <= 0.0 {
+                return Err(invalid("height-graph surface tension is not representable"));
             }
         }
         for b in 0..shape[1] {
@@ -452,16 +381,10 @@ impl FreeSurface3 {
                     graph_derivative(p, 0, shape, s),
                     graph_derivative(p, 1, shape, s),
                 ];
-                let square = slope[0] * slope[0] + slope[1] * slope[1];
-                if !square.is_finite() || square.sqrt() > graph.maximum_slope + TOLERANCE {
-                    return Err(invalid(
-                        "free surface exceeded its height-graph slope envelope",
-                    ));
-                }
-                let metric = 1.0 + square;
+                let metric = 1.0 + slope[0] * slope[0] + slope[1] * slope[1];
                 let normal_component = (slope[0] * gradient[0] + slope[1] * gradient[1]) / metric;
                 let column = &mut columns[a + shape[0] * b];
-                let scale = metric.sqrt() / column.volume;
+                let scale = patches[a + shape[0] * b].area / column.volume;
                 let mut force = [0.0; 3];
                 force[tangent[0]] = (gradient[0] - slope[0] * normal_component) * scale;
                 force[tangent[1]] = (gradient[1] - slope[1] * normal_component) * scale;
