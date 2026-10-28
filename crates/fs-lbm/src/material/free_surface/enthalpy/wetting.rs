@@ -15,7 +15,7 @@
 use super::*;
 use crate::d3q19::freesurface3::PlanarWall3;
 use crate::material::free_surface::wetting::{
-    FreeSurfaceWettingControls, FreeSurfaceWettingSample,
+    CoxVoinovLaw, FreeSurfaceWettingControls, FreeSurfaceWettingSample, WettingThermalPoint,
 };
 use fs_matdb::InterfaceSystemCard;
 use fs_material::state_point::{MaterialPropertySelection, ResolvedInterfaceStatePoint};
@@ -59,6 +59,43 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
 }
 
 impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
+    /// Add a hydrodynamic Cox law to an existing STATIC hysteresis binding.
+    /// The actual local source viscosity follows the enthalpy trajectory; sigma
+    /// remains the native constant. Shear-dependent liquids and already dynamic
+    /// angle curves refuse because this is a Newtonian single-liquid closure.
+    /// Apparent angles alter momentum, without manufacturing capillary heat.
+    pub fn with_cox_voinov_wetting(
+        mut self,
+        law: CoxVoinovLaw,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        poll(gate)?;
+        if self.rheology.is_some() {
+            return Err(Error::Invalid("Cox wetting requires a Newtonian liquid"));
+        }
+        let binding = self
+            .wetting
+            .take()
+            .ok_or(Error::Invalid(
+                "Cox wetting requires a sourced static hysteresis binding",
+            ))?
+            .with_cox_voinov(law, &self.flow.scaling, gate)?;
+        let temperatures = temperatures(&self.states, self.law.temperature_axis(), gate)?;
+        let binding = binding.at_temperatures(self.law.temperature_axis(), &temperatures, gate)?;
+        binding.install(&mut self.flow.lattice, gate)?;
+        poll(gate)?;
+        self.wetting = Some(binding);
+        Ok(self)
+    }
+
+    /// Explicit physical matching scales and limits of the active Cox model.
+    #[must_use]
+    pub fn cox_voinov_wetting_law(&self) -> Option<&CoxVoinovLaw> {
+        self.wetting
+            .as_ref()
+            .and_then(WettingBinding::cox_voinov_law)
+    }
+
     /// Original selected interface bundle, including both angle claims.
     #[must_use]
     pub fn wetting_source(&self) -> Option<&ResolvedInterfaceStatePoint> {
@@ -98,12 +135,15 @@ pub(super) fn temperatures(
     states: &BTreeMap<MassLocation3, ResolvedLiquidState>,
     axis: &str,
     gate: &CancelGate,
-) -> Result<BTreeMap<[usize; 3], f64>, Error> {
+) -> Result<BTreeMap<[usize; 3], WettingThermalPoint>, Error> {
     let mut field = BTreeMap::new();
     for (&location, state) in states {
         poll(gate)?;
         if let Some(position) = FreeSurface3::transport_coordinates(location) {
-            field.insert(position, temperature(state, axis)?);
+            field.insert(position, WettingThermalPoint {
+                temperature_k: temperature(state, axis)?,
+                dynamic_viscosity_pa_s: state.dynamic_viscosity_pa_s(),
+            });
         }
     }
     Ok(field)

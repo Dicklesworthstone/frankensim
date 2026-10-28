@@ -338,3 +338,124 @@ fn g4_late_temperature_and_endpoint_speed_refusals_preserve_every_participant() 
         });
     }
 }
+
+#[test]
+fn g1_cox_contact_angle_uses_local_heated_viscosity_without_inventing_heat() {
+    use fs_lbm::material::free_surface::wetting::{CoxVoinovControls, CoxVoinovLaw};
+    let base = source_card(0.004, false, 500.0);
+    let mut claims = ClaimSet::new();
+    for (_, original) in base.claims().claims_ordered() {
+        let mut claim = original.clone();
+        if claim.key.name() == "dynamic_viscosity" {
+            claim.value = PropertyValue::Curve {
+                abscissa: "T".into(),
+                abscissa_dims: Temperature::DIMS,
+                knots: vec![(300.0, 0.12), (500.0, 0.08)],
+                dims: claim.key.dims(),
+            };
+            claim.interpolation = InterpolationPolicy::LinearInside;
+        }
+        claims.insert_claim(claim).unwrap();
+    }
+    let liquid = MaterialCard::assemble(base.id().clone(), claims, base.models().to_vec()).unwrap();
+    let solid = body::wall_card(0.5, 500.0);
+    let interface = interface(&liquid, &solid, 0.0, 0.0, 500.0, 100.0);
+    let source = liquid_source(&liquid, false);
+    let law = LiquidTemperatureLaw::try_from_material(
+        &liquid,
+        source.material().clone(),
+        "T",
+        LiquidViscosityBasis::Dynamic,
+    )
+    .unwrap();
+    let chart = caloric(&liquid);
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        let initial = cells()
+            .into_iter()
+            .map(|mut cell| {
+                cell.velocity_m_s = [0.0; 3];
+                cell
+            })
+            .collect::<Vec<_>>();
+        let flow = plan_free_surface_from_material(&source, 0.001, 0.00002, 0.1)
+            .unwrap()
+            .free_surface3_from_cells(domain(), &initial, cx)
+            .unwrap();
+        let mut thermal = flow
+            .with_enthalpy(
+                &law,
+                &chart,
+                FreeSurfaceEnthalpyControls::default(),
+                |_| 200000.0,
+                &gate,
+            )
+            .unwrap()
+            .with_dynamic_planar_wetting(
+                PlanarWall3::XMin,
+                &interface,
+                MaterialPropertySelection::SingleClaimOnly,
+                wetting_controls(),
+                &gate,
+            )
+            .unwrap()
+            .with_cox_voinov_wetting(
+                CoxVoinovLaw::try_new(
+                    CoxVoinovControls {
+                        microscopic_cutoff_m: 1e-9,
+                        observation_length_m: 0.001,
+                        maximum_capillary_number: 0.01,
+                        minimum_angle_radians: 0.01,
+                        maximum_angle_radians: 3.0,
+                    },
+                    &gate,
+                )
+                .unwrap(),
+                &gate,
+            )
+            .unwrap();
+        let before = thermal.total_enthalpy_j().unwrap();
+        let heat = initial
+            .iter()
+            .map(|cell| FreeSurfaceCellHeat {
+                coordinates: cell.coordinates,
+                energy_j: 0.04,
+            })
+            .collect::<Vec<_>>();
+        let supplied = heat.iter().map(|entry| entry.energy_j).sum::<f64>();
+        let report = thermal.step_with_heat(&heat, &gate).unwrap();
+        near(thermal.total_enthalpy_j().unwrap() - before, supplied, 2e-9);
+        near(report.external_heat_j, supplied, 2e-12);
+        assert_eq!(report.viscous_heat_j, 0.0);
+        let mut heated_moving_samples = 0;
+        for (&position, sample) in thermal.wetting_samples().unwrap() {
+            let prediction = sample.hydrodynamic.unwrap();
+            assert_eq!(
+                sample.material.state_coordinate(DYNAMIC_WETTING_SPEED_AXIS),
+                Some(0.0)
+            );
+            if let Some(state) = thermal.material_at(position) {
+                let mu = state.dynamic_viscosity_pa_s();
+                near(prediction.dynamic_viscosity_pa_s, mu, 1e-14);
+                near(mu, 0.1 - 0.0002 * (temperature(state) - 400.0), 2e-12);
+                near(
+                    prediction.signed_capillary_number,
+                    mu * sample.signed_speed_m_s / 0.004,
+                    1e-14,
+                );
+                if sample.signed_speed_m_s != 0.0 && (mu - 0.1).abs() > 1e-4 {
+                    heated_moving_samples += 1;
+                }
+            }
+            if sample.regime != ContactLineRegime2::Pinned {
+                let expected = thermal
+                    .cox_voinov_wetting_law()
+                    .unwrap()
+                    .apparent_angle_radians(1.2, prediction.signed_capillary_number)
+                    .unwrap();
+                near(sample.applied_angle_radians, expected, 1e-13);
+            }
+        }
+        assert!(heated_moving_samples > 0);
+    });
+}

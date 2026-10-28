@@ -3480,6 +3480,48 @@ and `material_free_surface_enthalpy`'s
 `conduction::capillarity::thermocapillary` module with `enthalpy-coupling` enabled.
 The broad MR26/MR27 deliveries remain open.
 
+### Hydrodynamic adhesion from static hysteresis (MR26 increment)
+
+`MaterialFreeSurfaceWetting3::with_cox_voinov` and
+`MaterialFreeSurfaceEnthalpy3::with_cox_voinov_wetting` add the single-liquid
+Cox relation to an existing sourced static advancing/receding binding. The
+through-liquid apparent angle satisfies
+`g(theta_app) - g(theta_micro) = (mu U / sigma) ln(L/l)`, using the full angular
+integral `g(theta) = integral_0^theta (u - sin(u)cos(u))/(2sin(u)) du`, rather
+than extending the small-angle cubic approximation to hydrophobic surfaces.
+Reference: Chan et al., *Journal of Fluid Mechanics* 900 A8 (2020), equations
+(1.1)-(1.3), <https://doi.org/10.1017/jfm.2020.499>.
+
+The caller supplies the effective microscopic cutoff, apparent-angle observation
+scale, maximum capillary number (at most 0.01) and angular domain within
+[1e-4, 3] radians. The cutoff is not silently interpreted as a measured Navier
+slip length. A shared 2048-interval fixed Gauss/Hermite table is constructed
+once with cancellation checkpoints; each subsequent prediction uses bounded
+arithmetic and table lookup, without allocation or transcendental evaluation.
+Static source receipts stay at zero contact speed. Measured speed-dependent
+angle curves refuse, preventing duplicate rate effects. Predicted angle and
+signed capillary number are explicit model outputs, separate from the claims.
+
+Both native flow paths consume the angle in their original curvature and
+pressure reconstruction. The thermal path uses each liquid cell's actual
+source viscosity, including conduction substeps and advected endpoint states;
+dry numerical ghosts retain the reference coefficients. Source tension remains
+the native constant. Non-Newtonian rheology, missing tension, high capillary
+number and absent solutions within the declared angular domain refuse before
+publishing candidate flow or heat. No angle is clipped to conceal a film
+transition. The existing pinning deadband and first-cell speed estimate retain
+their prior limitations. Gas viscosity, resolved slip, entrainment, contact-line
+calibration and conservative surface-energy accounting are not added.
+
+G1/G3 tests compare full-angle predictions against independent Simpson
+quadrature, recover the cubic small-angle limit, check length-scale similarity,
+and exercise actual capillary flow from static source data. Thermal integration
+checks local viscosity and unchanged enthalpy accounting; G0/G4 tests cover
+double-counting refusal, model exits and transactional state preservation.
+Run `cargo test -p fs-lbm --lib cox_voinov`,
+`cargo test -p fs-lbm --test material_free_surface3 dynamic_wetting`, and
+`cargo test -p fs-lbm --features enthalpy-coupling --test material_free_surface_enthalpy conduction::capillarity::wetting`.
+
 ### Solved liquid/gas/radiative surface temperature (MR19/MR20 increment)
 
 `MaterialFreeSurfaceEnthalpy3::step_with_surface_exchange` solves one shared

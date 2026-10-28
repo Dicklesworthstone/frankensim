@@ -23,6 +23,23 @@ use fs_material::state_point::{
 };
 use fs_qty::{Dims, QuantitySpec};
 
+mod cox_voinov;
+pub use cox_voinov::{CoxVoinovControls, CoxVoinovLaw, CoxVoinovSample};
+
+/// Local liquid properties supplied by the existing enthalpy source owner.
+#[derive(Clone, Copy)]
+pub(super) struct WettingThermalPoint {
+    pub temperature_k: f64,
+    pub dynamic_viscosity_pa_s: f64,
+}
+
+#[derive(Clone)]
+struct HydrodynamicWetting {
+    law: CoxVoinovLaw,
+    reference_viscosity_pa_s: f64,
+    surface_tension_n_m: f64,
+}
+
 /// Explicit model/numerical inputs; the deadband has no invented source receipt.
 #[derive(Clone, Copy, Debug)]
 pub struct FreeSurfaceWettingControls {
@@ -43,6 +60,8 @@ pub struct FreeSurfaceWettingSample {
     pub geometric_angle_radians: f64,
     /// Angle used by the next native curvature reconstruction [rad].
     pub applied_angle_radians: f64,
+    /// Optional explicit hydrodynamic prediction, separate from static source claims.
+    pub hydrodynamic: Option<CoxVoinovSample>,
     /// Both pinned endpoint claims, ordered surfaces, source point and receipts.
     pub material: ResolvedInterfaceStatePoint,
 }
@@ -108,6 +127,7 @@ pub(super) struct WettingBinding<'m> {
     controls: FreeSurfaceWettingControls,
     geometry: BTreeMap<[usize; 3], WallFill3>,
     samples: BTreeMap<[usize; 3], FreeSurfaceWettingSample>,
+    hydrodynamic: Option<HydrodynamicWetting>,
 }
 
 impl<'s> MaterialFreeSurface3<'s> {
@@ -202,6 +222,7 @@ impl<'m> WettingBinding<'m> {
             controls,
             geometry,
             samples: BTreeMap::new(),
+            hydrodynamic: None,
         };
         let samples = candidate.resolve_samples(
             &candidate.geometry, None, &flow.scaling, None, gate,
@@ -213,6 +234,27 @@ impl<'m> WettingBinding<'m> {
 }
 
 impl MaterialFreeSurfaceWetting3<'_, '_> {
+    /// Add the full-angle Cox law to STATIC advancing/receding endpoints.
+    /// Source curves with a contact-speed axis are refused to avoid counting
+    /// measured rate dependence twice. Source receipts remain at speed zero;
+    /// actual speed, viscosity and model-predicted angle are separate samples.
+    /// The apparent angle feeds the existing native capillary reconstruction.
+    pub fn with_cox_voinov(mut self, law: CoxVoinovLaw, gate: &CancelGate) -> Result<Self, Error> {
+        let binding = self
+            .binding
+            .with_cox_voinov(law, &self.flow.scaling, gate)?;
+        binding.install(&mut self.flow.lattice, gate)?;
+        checkpoint(gate)?;
+        self.binding = binding;
+        Ok(self)
+    }
+
+    /// Explicit scales and limits of the optional hydrodynamic closure.
+    #[must_use]
+    pub fn cox_voinov_law(&self) -> Option<&CoxVoinovLaw> {
+        self.binding.cox_voinov_law()
+    }
+
     /// Read-only actual flow, native populations, mass ledger and physical units.
     #[must_use]
     pub const fn flow(&self) -> &MaterialFreeSurface3<'_> {
@@ -247,6 +289,58 @@ impl MaterialFreeSurfaceWetting3<'_, '_> {
 }
 
 impl WettingBinding<'_> {
+    pub(super) fn cox_voinov_law(&self) -> Option<&CoxVoinovLaw> {
+        self.hydrodynamic.as_ref().map(|binding| &binding.law)
+    }
+
+    pub(super) fn with_cox_voinov(
+        mut self,
+        law: CoxVoinovLaw,
+        scaling: &MaterialFreeSurfaceScaling<'_>,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        checkpoint(gate)?;
+        if self.hydrodynamic.is_some() {
+            return Err(Error::Invalid("contact line already owns a Cox model"));
+        }
+        if scaling.material.rheology_axes().is_some() {
+            return Err(Error::Invalid(
+                "Cox wetting requires Newtonian liquid viscosity",
+            ));
+        }
+        for property in self.source.properties() {
+            if property
+                .source_axes()
+                .iter()
+                .any(|(axis, _)| axis == DYNAMIC_WETTING_SPEED_AXIS)
+            {
+                return Err(Error::Invalid(
+                    "Cox wetting cannot add rate dependence to a measured dynamic-angle curve",
+                ));
+            }
+            law.admit_angle(property.value_si())?;
+        }
+        let surface_tension_n_m = scaling
+            .material
+            .surface_tension_n_m()
+            .ok_or(Error::Invalid(
+                "Cox wetting requires sourced positive surface tension",
+            ))?;
+        self.hydrodynamic = Some(HydrodynamicWetting {
+            law,
+            reference_viscosity_pa_s: scaling.material.dynamic_viscosity_pa_s(),
+            surface_tension_n_m,
+        });
+        let mut samples = BTreeMap::new();
+        for (&position, current) in &self.geometry {
+            checkpoint(gate)?;
+            let speed = self.samples[&position].signed_speed_m_s;
+            samples.insert(position, self.sample(current, speed, None)?);
+        }
+        self.samples = samples;
+        Ok(self)
+    }
+
     pub(super) fn source(&self) -> &ResolvedInterfaceStatePoint {
         &self.source
     }
@@ -272,7 +366,7 @@ impl WettingBinding<'_> {
         &self,
         lattice: &mut FreeSurface3,
         scaling: &MaterialFreeSurfaceScaling<'_>,
-        temperatures: Option<(&str, &BTreeMap<[usize; 3], f64>)>,
+        temperatures: Option<(&str, &BTreeMap<[usize; 3], WettingThermalPoint>)>,
         gate: &CancelGate,
     ) -> Result<Self, Error> {
         let geometry = lattice.planar_wall_fill(self.wall, self.controls.maximum_wall_cells, gate)?;
@@ -289,7 +383,7 @@ impl WettingBinding<'_> {
     pub(super) fn at_temperatures(
         &self,
         axis: &str,
-        temperatures: &BTreeMap<[usize; 3], f64>,
+        temperatures: &BTreeMap<[usize; 3], WettingThermalPoint>,
         gate: &CancelGate,
     ) -> Result<Self, Error> {
         let mut samples = BTreeMap::new();
@@ -307,12 +401,13 @@ impl WettingBinding<'_> {
         position: [usize; 3],
         axis: &str,
         temperature_k: f64,
+        dynamic_viscosity_pa_s: f64,
     ) -> Result<(), Error> {
         if let Some(current) = self.geometry.get(&position) {
             self.sample(
                 current,
                 self.samples[&position].signed_speed_m_s,
-                Some((axis, temperature_k)),
+                Some((axis, WettingThermalPoint { temperature_k, dynamic_viscosity_pa_s })),
             )?;
         }
         Ok(())
@@ -323,7 +418,7 @@ impl WettingBinding<'_> {
         geometry: &BTreeMap<[usize; 3], WallFill3>,
         previous: Option<&BTreeMap<[usize; 3], WallFill3>>,
         scaling: &MaterialFreeSurfaceScaling<'_>,
-        temperatures: Option<(&str, &BTreeMap<[usize; 3], f64>)>,
+        temperatures: Option<(&str, &BTreeMap<[usize; 3], WettingThermalPoint>)>,
         gate: &CancelGate,
     ) -> Result<BTreeMap<[usize; 3], FreeSurfaceWettingSample>, Error> {
         let mut result = BTreeMap::new();
@@ -349,22 +444,59 @@ impl WettingBinding<'_> {
         &self,
         current: &WallFill3,
         speed: f64,
-        temperature: Option<(&str, f64)>,
+        temperature: Option<(&str, WettingThermalPoint)>,
     ) -> Result<FreeSurfaceWettingSample, Error> {
-        let mut point = self.source.query().with(DYNAMIC_WETTING_SPEED_AXIS, speed.abs())?;
+        // A hydrodynamic prediction uses zero-speed endpoint measurements.
+        // Its rate dependence must never be laundered into a material receipt.
+        let query_speed = if self.hydrodynamic.is_some() {
+            0.0
+        } else {
+            speed.abs()
+        };
+        let mut point = self
+            .source
+            .query()
+            .with(DYNAMIC_WETTING_SPEED_AXIS, query_speed)?;
         if let Some((axis, value)) = temperature {
-            point = point.with(axis, value)?;
+            point = point.with(axis, value.temperature_k)?;
         }
         let material = self.source.at_query_point(self.card, &point)?;
         let (receding, advancing) = bracket(&material)?;
-        let (regime, applied_angle_radians) = select_angle(
+        let (regime, mut applied_angle_radians) = select_angle(
             speed, self.controls.pinning_speed_m_s, current.angle_radians, receding, advancing,
         );
+        let hydrodynamic = if let Some(binding) = &self.hydrodynamic {
+            binding.law.admit_angle(receding)?;
+            binding.law.admit_angle(advancing)?;
+            let viscosity = temperature.map_or(binding.reference_viscosity_pa_s, |(_, state)| {
+                state.dynamic_viscosity_pa_s
+            });
+            if !viscosity.is_finite() || viscosity <= 0.0 {
+                return Err(Error::Invalid(
+                    "Cox wetting needs finite positive source viscosity",
+                ));
+            }
+            let capillary = (viscosity * speed) / binding.surface_tension_n_m;
+            binding.law.admit_capillary_number(capillary)?;
+            if regime != ContactLineRegime2::Pinned {
+                applied_angle_radians = binding
+                    .law
+                    .apparent_angle_radians(applied_angle_radians, capillary)?;
+            }
+            Some(CoxVoinovSample {
+                signed_capillary_number: capillary,
+                dynamic_viscosity_pa_s: viscosity,
+                surface_tension_n_m: binding.surface_tension_n_m,
+            })
+        } else {
+            None
+        };
         Ok(FreeSurfaceWettingSample {
             signed_speed_m_s: speed,
             regime,
             geometric_angle_radians: current.angle_radians,
             applied_angle_radians,
+            hydrodynamic,
             material,
         })
     }

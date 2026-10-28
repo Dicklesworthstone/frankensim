@@ -207,6 +207,7 @@ impl Conduction<'_, '_> {
                 wetting.admit_temperature(
                     self.liquid_coordinates[&id], self.law.temperature_axis(),
                     super::wetting::temperature(&state, self.law.temperature_axis())?,
+                    state.dynamic_viscosity_pa_s(),
                 )?;
             }
             states.insert(id, state);

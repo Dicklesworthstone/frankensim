@@ -298,3 +298,160 @@ fn g4_source_exit_and_cancellation_preserve_populations_and_contact_history() {
     );
     assert_eq!(retry.samples(), reference.samples());
 }
+
+fn cox_controls(
+    maximum_capillary_number: f64,
+) -> fs_lbm::material::free_surface::wetting::CoxVoinovControls {
+    fs_lbm::material::free_surface::wetting::CoxVoinovControls {
+        microscopic_cutoff_m: 1e-9,
+        observation_length_m: 0.001,
+        maximum_capillary_number,
+        minimum_angle_radians: 0.01,
+        maximum_angle_radians: 3.0,
+    }
+}
+
+fn static_card(bulk: &ResolvedLiquidSurfaceState, angle: f64) -> InterfaceSystemCard {
+    let base = interface_card(bulk, None, Dims::NONE, false, None);
+    let mut claims = ClaimSet::new();
+    for name in [
+        RECEDING_CONTACT_ANGLE_PROPERTY,
+        ADVANCING_CONTACT_ANGLE_PROPERTY,
+    ] {
+        let mut endpoint = claim(name, angle, Dims::NONE);
+        // Measurement support is stationary ONLY. Predicted dynamic angles
+        // must not relabel these source receipts as measurements at speed U.
+        endpoint.validity = endpoint.validity.with_quantity(
+            DYNAMIC_WETTING_SPEED_AXIS,
+            QuantitySpec::dimensional(DYNAMIC_WETTING_SPEED_DIMS),
+            0.0,
+            0.0,
+        );
+        claims.insert_claim(endpoint).unwrap();
+    }
+    InterfaceSystemCard::assemble(
+        base.surface_a().clone(),
+        base.surface_b().clone(),
+        base.context().clone(),
+        claims,
+        vec![],
+    )
+    .unwrap()
+}
+
+fn slow_static_flow<'s, 'm>(
+    bulk: &'s ResolvedLiquidSurfaceState,
+    card: &'m InterfaceSystemCard,
+) -> MaterialFreeSurfaceWetting3<'s, 'm> {
+    plan_free_surface_from_material(bulk, 0.001, 0.00002, 0.1)
+        .unwrap()
+        .free_surface3(domain(), drop_shape)
+        .unwrap()
+        .with_dynamic_planar_wetting(
+            PlanarWall3::ZMin,
+            card,
+            MaterialPropertySelection::SingleClaimOnly,
+            controls(),
+            &CancelGate::new_clock_free(),
+        )
+        .unwrap()
+}
+
+#[test]
+fn g1_g3_cox_wetting_drives_native_flow_from_static_source_endpoints() {
+    use fs_lbm::material::free_surface::wetting::CoxVoinovLaw;
+    let bulk = liquid(0, 300.0, Some(0.05));
+    let angle = 1.2;
+    let static_data = static_card(&bulk, angle);
+    let measured_rate_independent = dynamic_card(&bulk, [angle; 2], [angle; 2], 100.0, false);
+    let gate = CancelGate::new_clock_free();
+    let mut cox = slow_static_flow(&bulk, &static_data)
+        .with_cox_voinov(
+            CoxVoinovLaw::try_new(cox_controls(0.01), &gate).unwrap(),
+            &gate,
+        )
+        .unwrap();
+    let mut unchanged_angle = slow_static_flow(&bulk, &measured_rate_independent);
+    let mass = cox.flow().ledger_mass_kg().unwrap();
+    cox.step_with_gate(&gate).unwrap();
+    unchanged_angle.step_with_gate(&gate).unwrap();
+    assert_eq!(
+        cox.flow().lattice().grid().state_bits(),
+        unchanged_angle.flow().lattice().grid().state_bits()
+    );
+    assert!(
+        cox.samples()
+            .values()
+            .any(|sample| sample.signed_speed_m_s != 0.0)
+    );
+    for sample in cox.samples().values() {
+        assert_eq!(
+            sample.material.state_coordinate(DYNAMIC_WETTING_SPEED_AXIS),
+            Some(0.0)
+        );
+        let prediction = sample.hydrodynamic.unwrap();
+        assert_eq!(
+            prediction.dynamic_viscosity_pa_s,
+            bulk.dynamic_viscosity_pa_s()
+        );
+        assert_eq!(prediction.surface_tension_n_m, 0.05);
+        if sample.regime != ContactLineRegime2::Pinned {
+            let expected = cox
+                .cox_voinov_law()
+                .unwrap()
+                .apparent_angle_radians(angle, prediction.signed_capillary_number)
+                .unwrap();
+            assert_eq!(sample.applied_angle_radians, expected);
+        }
+    }
+    cox.step_with_gate(&gate).unwrap();
+    unchanged_angle.step_with_gate(&gate).unwrap();
+    assert_ne!(
+        cox.flow().lattice().grid().state_bits(),
+        unchanged_angle.flow().lattice().grid().state_bits()
+    );
+    assert!((cox.flow().ledger_mass_kg().unwrap() - mass).abs() < mass * 1e-10);
+}
+
+#[test]
+fn g0_g4_cox_refuses_double_rate_counting_and_preserves_state_on_model_exit() {
+    use fs_lbm::material::free_surface::wetting::CoxVoinovLaw;
+    let bulk = liquid(0, 300.0, Some(0.05));
+    let gate = CancelGate::new_clock_free();
+    let dynamic = dynamic_card(&bulk, [1.2, 1.0], [1.2, 1.4], 100.0, false);
+    assert!(
+        slow_static_flow(&bulk, &dynamic)
+            .with_cox_voinov(
+                CoxVoinovLaw::try_new(cox_controls(0.01), &gate).unwrap(),
+                &gate
+            )
+            .is_err()
+    );
+    let static_data = static_card(&bulk, 1.2);
+    let mut flow = slow_static_flow(&bulk, &static_data)
+        .with_cox_voinov(
+            CoxVoinovLaw::try_new(cox_controls(1e-18), &gate).unwrap(),
+            &gate,
+        )
+        .unwrap();
+    let bits = flow.flow().lattice().grid().state_bits();
+    let mass = flow.flow().ledger_mass_kg().unwrap();
+    let samples = flow.samples().clone();
+    let conversions = flow.flow().lattice().conversions();
+    assert!(flow.step_with_gate(&gate).is_err());
+    assert_eq!(flow.flow().lattice().grid().state_bits(), bits);
+    assert_eq!(flow.flow().ledger_mass_kg().unwrap(), mass);
+    assert_eq!(flow.samples(), &samples);
+    assert_eq!(flow.flow().lattice().conversions(), conversions);
+
+    let neglected = liquid(0, 300.0, None);
+    let no_sigma = static_card(&neglected, 1.2);
+    assert!(
+        slow_static_flow(&neglected, &no_sigma)
+            .with_cox_voinov(
+                CoxVoinovLaw::try_new(cox_controls(0.01), &gate).unwrap(),
+                &gate
+            )
+            .is_err()
+    );
+}
