@@ -3,6 +3,8 @@
 mod expansion_curve;
 #[path = "thermoplastic_feedback/modulus_curve.rs"]
 mod modulus_curve;
+#[path = "thermoplastic_feedback/kinematic.rs"]
+mod kinematic;
 
 use fs_conduction::lumped::{LumpedThermalEnvironment, LumpedThermalTransport};
 use fs_evidence::ValidityDomain;

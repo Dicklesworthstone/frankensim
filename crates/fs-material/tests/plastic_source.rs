@@ -7,6 +7,7 @@ use fs_matdb::{
 use fs_material::SmallStrainLaw;
 use fs_material::plastic::source::{
     HardeningPropertyBasis, ISOTROPIC_HARDENING_MODULUS_PROPERTY,
+    KINEMATIC_HARDENING_MODULUS_PROPERTY,
     POST_YIELD_TANGENT_MODULUS_PROPERTY, ResolvedJ2Plasticity, j2_requirements,
     resolve_j2_plasticity,
 };
@@ -128,6 +129,41 @@ fn source_coefficients_feed_the_native_law_and_its_declared_strain_bound() {
         resolved.law().update_state(&strain, &state),
         native.update_state(&strain, &state)
     );
+}
+
+#[test]
+fn mixed_hardening_requires_two_independent_sources_and_preserves_their_selection() {
+    let mixed = HardeningPropertyBasis::MixedPlasticStrainModuli;
+    let mut properties = claims(H, 40.0);
+    properties.push(scalar(KINEMATIC_HARDENING_MODULUS_PROPERTY, Pressure::DIMS, 160.0));
+    let source = card(properties);
+    let resolved = resolve(&source, mixed);
+    assert_eq!(resolved.material().properties().len(), 5);
+    assert_eq!(resolved.material().card_identity(), source.content_hash());
+    near(resolved.hardening_modulus_pa(), 40.0);
+    near(resolved.kinematic_hardening_modulus_pa(), 160.0);
+    assert_eq!(resolved.kinematic_hardening_source().unwrap().requirement().name(),
+        KINEMATIC_HARDENING_MODULUS_PROPERTY);
+    let same_card_isotropic = resolve(&source, H);
+    assert_eq!(same_card_isotropic.kinematic_hardening_modulus_pa(), 0.0);
+    assert!(same_card_isotropic.kinematic_hardening_source().is_none());
+    let strain = [0.006, -0.001, -0.001, 0.0002, 0.0, 0.0];
+    let native = fs_material::plastic::J2Plasticity::new_mixed(
+        resolved.law().elastic.clone(), 1.0, 40.0, 160.0).unwrap();
+    let state = native.initial_state();
+    assert_eq!(resolved.stress(&strain, &state), native.stress(&strain, &state));
+    assert_eq!(resolved.update_state(&strain, &state), native.update_state(&strain, &state));
+    for datum in [None,
+        Some(scalar(KINEMATIC_HARDENING_MODULUS_PROPERTY, Pressure::DIMS, -1.0)),
+        Some(scalar(KINEMATIC_HARDENING_MODULUS_PROPERTY, Density::DIMS, 160.0))] {
+        let mut properties = claims(H, 40.0);
+        properties.extend(datum);
+        assert!(resolve_j2_plasticity(&card(properties), &QueryPoint::new(),
+            MaterialPropertySelection::SingleClaimOnly, mixed, 0.02).is_err());
+    }
+    // A monotonic Et source does not authorize inventing either part of a split.
+    assert!(resolve_j2_plasticity(&card(claims(ET, 100.0)), &QueryPoint::new(),
+        MaterialPropertySelection::SingleClaimOnly, mixed, 0.02).is_err());
 }
 
 #[test]

@@ -2,7 +2,9 @@
 //!
 //! Let f(T) = integral(alpha(theta) dtheta), a(T) = alpha(T) I and
 //! e = eps - eps_p - f(T) I. The Helmholtz contribution is
-//! psi = e:C(T):e/2 + H(T) p^2/2. With fixed nu and affine E/H its entropy is
+//! psi = e:C(T):e/2 + H(T) p^2/2 + H_k dev(eps_p):dev(eps_p)/3.
+//! The optional Prager modulus H_k is fixed over the admitted thermal chart
+//! and contributes storage but no temperature derivative. With fixed nu and affine E/H its entropy is
 //! s = a(T):sigma - (E'/E) psi_elastic - H' p^2/2; internal energy is psi + T s.
 //! The native backward-Euler return map freezes coefficients at T_1. Retain its
 //! original physical/numerical losses and add the frozen-history coefficient

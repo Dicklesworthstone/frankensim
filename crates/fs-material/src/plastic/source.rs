@@ -29,6 +29,8 @@ use crate::{MaterialAdmissibility, MaterialError, SmallStrainLaw, Tangent6, Voig
 
 /// Slope of the yield stress with respect to equivalent plastic strain [Pa].
 pub const ISOTROPIC_HARDENING_MODULUS_PROPERTY: &str = "isotropic_hardening_modulus";
+/// Prager modulus H_k [Pa], with backstress a=(2/3)H_k dev(epsilon_p).
+pub const KINEMATIC_HARDENING_MODULUS_PROPERTY: &str = "kinematic_hardening_modulus";
 /// Monotonic uniaxial post-yield stress slope with respect to total strain [Pa].
 pub const POST_YIELD_TANGENT_MODULUS_PROPERTY: &str = "post_yield_tangent_modulus";
 
@@ -37,6 +39,10 @@ pub const POST_YIELD_TANGENT_MODULUS_PROPERTY: &str = "post_yield_tangent_modulu
 pub enum HardeningPropertyBasis {
     /// The native J2 hardening modulus `H = d(sigma_y)/d(alpha)`.
     PlasticStrainModulus,
+    /// Independent H_iso and H_k sources. The isotropic property remains
+    /// d(sigma_y)/d(alpha); H_k translates the surface through retained plastic
+    /// strain. A monotonic total-strain tangent cannot identify this split.
+    MixedPlasticStrainModuli,
     /// A uniaxial total-strain tangent `Et`, converted by `H = Et E/(E-Et)`.
     ///
     /// This conversion assumes monotonic uniaxial stress in the same bilinear
@@ -49,12 +55,13 @@ impl HardeningPropertyBasis {
     #[must_use]
     pub const fn property_name(self) -> &'static str {
         match self {
-            Self::PlasticStrainModulus => ISOTROPIC_HARDENING_MODULUS_PROPERTY,
+            Self::PlasticStrainModulus | Self::MixedPlasticStrainModuli => ISOTROPIC_HARDENING_MODULUS_PROPERTY,
             Self::UniaxialTangentModulus => POST_YIELD_TANGENT_MODULUS_PROPERTY,
         }
     }
 
-    /// Include the selected source in a shared multiphysics material bundle.
+    /// Include the primary hardening source in a shared material bundle.
+    /// For mixed hardening, `j2_requirements` also requires its independent H_k.
     pub fn requirement(self) -> Result<ScalarPropertyRequirement, MaterialStatePointError> {
         ScalarPropertyRequirement::try_new(
             self.property_name(),
@@ -68,8 +75,8 @@ impl HardeningPropertyBasis {
 /// Perfect plasticity requires an explicit zero hardening datum.
 pub fn j2_requirements(
     basis: HardeningPropertyBasis,
-) -> Result<[ScalarPropertyRequirement; 4], MaterialStatePointError> {
-    Ok([
+) -> Result<Vec<ScalarPropertyRequirement>, MaterialStatePointError> {
+    let mut requirements = vec![
         ScalarPropertyRequirement::try_new(
             YOUNG_MODULUS_PROPERTY,
             Pressure::DIMS,
@@ -89,7 +96,15 @@ pub fn j2_requirements(
             ScalarAdmissibility::StrictlyPositive,
         )?,
         basis.requirement()?,
-    ])
+    ];
+    if basis == HardeningPropertyBasis::MixedPlasticStrainModuli {
+        requirements.push(ScalarPropertyRequirement::try_new(
+            KINEMATIC_HARDENING_MODULUS_PROPERTY,
+            Pressure::DIMS,
+            ScalarAdmissibility::NonNegative,
+        )?);
+    }
+    Ok(requirements)
 }
 
 /// An immutable native J2 law together with its complete source-use evidence.
@@ -141,7 +156,8 @@ impl ResolvedJ2Plasticity {
         }
         let elastic = IsotropicElastic::new(youngs, poisson, strain_limit)?;
         let hardening = match basis {
-            HardeningPropertyBasis::PlasticStrainModulus => source_hardening,
+            HardeningPropertyBasis::PlasticStrainModulus
+                | HardeningPropertyBasis::MixedPlasticStrainModuli => source_hardening,
             HardeningPropertyBasis::UniaxialTangentModulus => {
                 if source_hardening >= youngs {
                     return Err(J2SourceError::Invalid(
@@ -160,10 +176,13 @@ impl ResolvedJ2Plasticity {
                 "hardening conversion is not representable",
             ));
         }
-        let law = J2Plasticity::new(elastic, yield_stress, hardening)?;
+        let kinematic = if basis == HardeningPropertyBasis::MixedPlasticStrainModuli {
+            coefficient(&material, KINEMATIC_HARDENING_MODULUS_PROPERTY, Pressure::DIMS)?.value_si()
+        } else { 0.0 };
+        let law = J2Plasticity::new_mixed(elastic, yield_stress, hardening, kinematic)?;
         let (lambda, mu) = law.elastic.lame();
         let bulk = lambda + 2.0 * mu / 3.0;
-        let denominator = 3.0 * mu + hardening;
+        let denominator = 3.0 * mu + law.combined_hardening();
         if !(mu.is_finite()
             && mu > 0.0
             && bulk.is_finite()
@@ -212,6 +231,20 @@ impl ResolvedJ2Plasticity {
         self.law.hardening
     }
 
+    /// Separately sourced Prager modulus, zero in the original isotropic modes.
+    #[must_use]
+    pub const fn kinematic_hardening_modulus_pa(&self) -> f64 {
+        self.law.kinematic_hardening
+    }
+
+    /// Selected independent H_k source, only when mixed hardening is active.
+    #[must_use]
+    pub fn kinematic_hardening_source(&self) -> Option<&ResolvedScalarProperty> {
+        if self.basis == HardeningPropertyBasis::MixedPlasticStrainModuli {
+            self.material.property(KINEMATIC_HARDENING_MODULUS_PROPERTY)
+        } else { None }
+    }
+
     /// Original H or Et source, retaining its selection receipt and uncertainty.
     #[must_use]
     pub fn hardening_source(&self) -> &ResolvedScalarProperty {
@@ -249,7 +282,7 @@ impl SmallStrainLaw for ResolvedJ2Plasticity {
     }
 }
 
-/// Resolve all four coefficients at one common material state.
+/// Resolve all four isotropic or five mixed coefficients at one material state.
 /// No material name, absent hardening source or unsupported state supplies a
 /// default metal or an implicit perfectly plastic law.
 ///

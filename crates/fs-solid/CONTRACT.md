@@ -1171,6 +1171,16 @@ thermal feedback, state remapping, or finite-strain mechanics.
 
 The homogeneous numerical measurements below predate this field extension.
 
+The source-selected `MixedPlasticStrainModuli` J2 extension uses this same
+P1 owner and retained per-element plastic strain. Its Prager backstress changes
+reverse yielding while the supplied isotropic and kinematic moduli can retain
+the same monotonic tangent. A focused authored regression in
+`tests/plastic3_material.rs` drives tension, unloading and reversal on the
+original six-tetrahedron coupon and compares reactions and accumulated/signed
+plastic strains with independent uniaxial equations. This introduces no
+alternate solver, fatigue-life estimate or finite-strain plasticity claim;
+the test's presence is not a claim of native execution.
+
 Conformance (`tests/plastic3.rs`, executed): homogeneous uniaxial tension
 with linear hardening (E = 1000, nu = 0.3, sigma_y = 1, H = 100) follows the
 closed form through yield to eps = 0.006 (force 1.4545454547 vs

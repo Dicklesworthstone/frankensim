@@ -524,7 +524,8 @@ homogenization, the P2 milestone.
 - `IsotropicElastic` (E, ν → Lamé), `OrthotropicElastic` (engineering
   constants; construction REFUSES thermodynamically inadmissible Poisson
   sets via compliance positive-definiteness minors).
-- `J2Plasticity`: radial-return mapping with linear isotropic hardening
+- `J2Plasticity`: radial-return mapping with linear isotropic or explicitly
+  split isotropic/Prager kinematic hardening
   and the Simo–Hughes algorithmic moduli
   `C = κ I⊗I + 2μθ I_dev − 2μθ̄ n̂⊗n̂`.
 - `Hyperelastic` (`NeoHookean`, `MooneyRivlin`, decoupled `Ogden`,
@@ -1120,8 +1121,9 @@ bitwise determinism.
   (declared on the card): no cyclic stiffness degradation beyond the
   residual-strain rule, no tension stiffening. Full Mander cyclic rules
   are follow-up work for the fiber-beam bead.
-- **J2 has no Bauschinger effect** (isotropic hardening only; kinematic/
-  mixed hardening is a follow-up law, the card says so).
+- **J2 cyclic response is bounded**: the opt-in linear Prager component
+  translates the yield surface, but supplies no nonlinear backstress saturation,
+  calibrated ratcheting, damage accumulation or fatigue-life prediction.
 - **No damage/softening 3D laws yet**; failure envelopes are declarative.
 - **Rank-one convexity is SAMPLED**, a necessary-condition spot test —
   not a polyconvexity proof (interval-certified convexity belongs to the
@@ -1854,7 +1856,7 @@ pressure, composition, moisture or concentration, alongside fixed absolute
 temperature. The shared external-condition admission rejects mechanical,
 frequency and rate coordinates that would require an evolving physical owner.
 
-The selected hardening basis is either the plastic-strain modulus H or a
+The original hardening bases are the plastic-strain modulus H or a
 monotonic uniaxial total-strain tangent Et. For the latter, H = Et E/(E-Et) is
 derived after resolving both coefficients at the same state; 0 <= Et < E is
 required. Perfect plasticity needs an explicit zero source. The original Et
@@ -1864,6 +1866,51 @@ Coefficients remain frozen within one load path; temperature re-resolution
 starts a different law, not an energy-accounted transfer of plastic history.
 The declared strain bound is limited to 0.05 and remains a caller obligation.
 Creep, rate effects, softening, phase changes and finite strain are outside this law.
+
+### Source-backed mixed J2 hardening and cyclic reversal
+
+`J2Plasticity::new_mixed` adds an explicitly supplied nonnegative Prager
+modulus `H_k` to the original associative return map. The backstress is
+`a=(2/3) H_k dev(eps_p)`, reconstructed from the same retained plastic strain;
+there is no second history vector or reset on load reversal. The yield function
+is `q(stress-a) - sigma_y - H_iso alpha`. Its radial return and algorithmic
+tangent use the same effective trial direction and denominator
+`3 mu + H_iso + H_k`. `yield_function_with_state` accepts physical stress and
+subtracts this backstress; the original `yield_function(stress, alpha)` is the
+centered effective-stress diagnostic. Existing `new` and `H_k=0` retain the
+original isotropic numerical path and model metadata.
+
+`HardeningPropertyBasis::MixedPlasticStrainModuli` requires separate
+`isotropic_hardening_modulus` and `kinematic_hardening_modulus` source claims
+in Pa, with the convention above. Each retains its source identity and actual
+state query. No monotonic tangent measurement identifies or silently supplies
+the split. The original isotropic choices remain isotropic even if a shared
+bundle contains a kinematic datum. The exact requirements are returned as a
+vector because the mixed reduction has five mechanical roles.
+
+Recoverable free energy includes `H_k dev(eps_p):dev(eps_p)/3`, reported as
+`kinematic_hardening_j_m3` separately from isotropic hardening storage.
+The corresponding quadratic increment belongs to backward-Euler numerical
+loss. Physical dissipation remains `sigma_y delta_alpha`; selected native
+linear overstress adds `eta delta_alpha^2/dt` once and includes `H_k` in the
+same return denominator. Neither recoverable backstress storage nor numerical
+loss becomes plastic heat.
+
+The original `ThermoplasticSource` accepts this same explicit split, but `H_k`
+must be constant at every source-line knot across its whole caloric chart.
+It then adds no omitted temperature derivative to mechanical entropy. Existing
+affine E/H_iso, thermal expansion, yield softening, actual finite caloric
+feedback and sourced overstress retain their original owners and accounts.
+Temperature-dependent H_k refuses, even if its initial and endpoint values
+coincide. Native 3-D small-strain solids consume the resolved law unchanged.
+
+Authored regressions compare an independent reverse-yield limit, distinct
+cyclic response at identical monotonic tangent, nonproportional consistent
+tangents, separate recoverable/physical/numerical energy, the zero-H_k limit,
+source refusal, a native P1 cyclic coupon and finite caloric heating.
+They do not establish executed test results or empirical cyclic calibration.
+This advances MR22/MR62 without claiming nonlinear cyclic hardening, fatigue
+counting, life prediction, finite-strain plasticity or broad bead completion.
 
 ### Isothermal liquid momentum and free-surface source bundle
 
@@ -1937,7 +1984,9 @@ contains the backward-Euler loss
 `0.5 delta_e:C:delta_e + 0.5 H (delta_alpha)^2`; that numerical term is
 reported separately and is never a physical heat source.
 
-Callers must retain the same elastic coefficients and H across the increment.
+The mixed extension above adds its separately reported Prager storage and
+quadratic increment to these accounts. Callers must retain the same elastic
+coefficients and both hardening moduli across the increment.
 Changing only the yield offset can release stored energy at fixed total strain.
 The owner checks coefficients, tensor strain bounds, finite deviatoric plastic
 history and its accumulated-strain bound, endpoint yield consistency, and an
@@ -1955,8 +2004,9 @@ yield reduction at fixed strain, and invalid-history refusal.
 `plastic::thermal::CaloricPoint` binds a virgin native J2 history to a
 source-resolved, strictly increasing solid caloric chart. Yield stress and heat
 capacity may vary with absolute temperature; Young's modulus E and native
-energetic hardening H may be globally affine in temperature. Poisson ratio,
-density and reference thermal geometry remain fixed. All property roles share
+energetic isotropic hardening H may be globally affine in temperature. Poisson
+ratio, any selected Prager modulus, density and reference thermal geometry
+remain fixed. All property roles share
 one material card and source context. Each selected claim supplies one
 continuously supported canonical temperature line over the full chart. Every
 crossed curve knot and surface-cell edge participates in affine-slope, fixed
@@ -1969,7 +2019,8 @@ conversion retains its constant-E/Et path; variable E with exactly zero Et is
 also admitted, but a generally rational derived H(T) is not treated as affine.
 
 This reduction declares energetic isotropic hardening: `H alpha^2/2` is stored
-energy. `sigma_y(T1) delta_alpha` is the physical plastic heat supplied to the
+energy; optional Prager storage is separate and also recoverable.
+`sigma_y(T1) delta_alpha` is the physical plastic heat supplied to the
 existing `UniformEnthalpyStep` transport owner; selected expansion adds the
 signed reversible exchange below. Elastic storage, hardening storage,
 boundary heat and backward-Euler numerical loss remain distinct. Every thermal
@@ -2299,14 +2350,16 @@ with the explicitly declared associative Perzyna n=1 law
 `alpha_dot = max(q - sigma_y - H alpha, 0)/eta`. The native tensor convention,
 history, trial stress and consistent algorithmic tangent remain shared. For an
 actual physical interval dt, backward Euler gives
-`delta_alpha = max(f_trial,0)/(3 mu + H + eta/dt)`. Positive endpoint overstress
+`delta_alpha = max(f_trial,0)/(3 mu + H_iso + H_k + eta/dt)`, where `H_k=0`
+for the original isotropic law and q is formed from stress minus backstress.
+Positive endpoint overstress
 is a legitimate committed state; the consistency gate checks
 `q - sigma_y - H alpha - eta delta_alpha/dt`. Every new interval starts from
 the accepted internal variables. Native viscosity and duration must be finite,
 positive and representable together with the return denominator.
 
 The energetic-hardening interpretation remains explicit:
-`psi=e:C:e/2 + H alpha^2/2`. Physical dissipation is
+`psi=e:C:e/2 + H_iso alpha^2/2 + H_k dev(eps_p):dev(eps_p)/3`. Physical dissipation is
 `sigma_y delta_alpha + eta delta_alpha^2/dt`; the viscosity is not added to
 hardening storage. The original backward-Euler numerical loss is separate and
 never deposited as heat. Fixed-strain stress relaxation can therefore warm the
@@ -2331,7 +2384,7 @@ integrated expansion accounts remain intact.
 the same interval-aware source law; their duration-free counterparts refuse a
 source that explicitly selected overstress. Coupling proposals and thermal
 substeps cannot accumulate extra plastic time. This is small-strain linear
-overstress with energetic isotropic hardening, not a nonlinear rate exponent,
+overstress with energetic linear hardening, not a nonlinear rate exponent,
 finite-strain creep, damage, phase transformation or empirical validation.
 
 Synthetic `tests/plastic_rate.rs` compares independent radial-return/storage/

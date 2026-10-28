@@ -1,11 +1,11 @@
 //! Linear associative J2 overstress on the original radial-return owner.
 //!
-//! With `f = q - sigma_y - H alpha`, the declared Perzyna n=1 law is
+//! With `f = q(stress-backstress) - sigma_y - H_iso alpha`, the declared Perzyna n=1 law is
 //! `alpha_dot = max(f, 0)/eta`, eta in Pa s. Backward Euler gives
-//! `delta_alpha = max(f_trial,0)/(3 mu + H + eta/dt)`. The endpoint may
+//! `delta_alpha = max(f_trial,0)/(3 mu + H_iso + H_k + eta/dt)`. The endpoint may
 //! legitimately remain outside the rate-independent yield surface. The
 //! original consistent tangent uses the same denominator. No artificial
-//! hardening is stored: only H enters the free energy, while
+//! hardening is stored: only the selected physical hardening terms enter free energy, while
 //! `sigma_y delta_alpha + eta delta_alpha^2/dt` is physical dissipation.
 //!
 //! This is a bounded small-strain linear-overstress model, not arbitrary
@@ -45,7 +45,7 @@ impl LinearOverstressJ2 {
             viscosity_pa_s,
             duration_s,
             modulus,
-            3.0 * mu + backbone.hardening + modulus,
+            3.0 * mu + backbone.combined_hardening() + modulus,
         ]
         .iter()
         .any(|x| !x.is_finite() || *x <= 0.0)
@@ -135,7 +135,8 @@ impl SmallStrainLaw for LinearOverstressJ2 {
             vec![
                 "small strain".into(),
                 "associative linear overstress".into(),
-                "energetic linear isotropic hardening".into(),
+                if self.backbone.kinematic_hardening == 0.0 { "energetic linear isotropic hardening" }
+                    else { "energetic linear isotropic and Prager hardening" }.into(),
                 "backward Euler at explicit physical dt".into(),
             ],
             ValidityDomain::unconstrained().with(

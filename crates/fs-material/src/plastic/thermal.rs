@@ -1,6 +1,7 @@
 //! Source-bound uniform thermoplastic heat feedback using native J2 and transport.
 //!
-//! The declared reduction has energetic linear isotropic hardening, fixed
+//! The declared reduction has energetic linear isotropic hardening and optional
+//! fixed-modulus Prager kinematic hardening, fixed
 //! reference geometry/density and Poisson ratio, globally affine E(T) and native
 //! energetic H(T), optional sourced isotropic expansion, and a strictly increasing
 //! single-solid caloric chart. Yield stress, Cp and expansion may be piecewise linear.
@@ -26,7 +27,8 @@ pub use expansion::{ThermalJ2, ThermoplasticIncrement};
 
 use super::J2State;
 use super::energy::{EnergyError, EnergyIncrement, EnergyTolerances};
-use super::source::{HardeningPropertyBasis, J2SourceError, ResolvedJ2Plasticity, j2_requirements};
+use super::source::{HardeningPropertyBasis, J2SourceError, ResolvedJ2Plasticity,
+    KINEMATIC_HARDENING_MODULUS_PROPERTY, j2_requirements};
 use crate::phase::{
     EquilibriumPhaseState, PhaseStateError, ResolvedHeatCapacityCurve, UniformEnthalpyStep,
     UniformEnthalpyStepInput,
@@ -46,7 +48,7 @@ use fs_qty::{Dims, QuantitySpec, Temperature};
 pub const MAX_FEEDBACK_ITERATIONS: usize = 256;
 
 /// Fixed external source context. The initial temperature must agree with h0.
-/// Selection applies to the four mechanical roles; Cp and density retain the
+/// Selection applies to the four or five mechanical roles; Cp and density retain the
 /// exact claims already admitted by the supplied caloric owner. Optional
 /// expansion has its own explicit source selection and retains that claim.
 #[derive(Clone, Debug)]
@@ -61,7 +63,7 @@ pub struct SourceQuery<'a> {
     pub temperature_axis: String,
     /// Initial mechanical claim selection; subsequent queries pin those IDs.
     pub selection: MaterialPropertySelection,
-    /// Independent H or uniaxial Et source convention.
+    /// Independent H, uniaxial Et, or separately sourced H_iso/H_k convention.
     pub hardening_basis: HardeningPropertyBasis,
     /// None explicitly selects the zero-expansion reduction. Some selects the
     /// canonical instantaneous linear expansion coefficient from this same card.
@@ -221,10 +223,10 @@ pub struct FeedbackStep<'a, R> {
 
 impl<'a> ThermoplasticSource<'a> {
     /// Bind one source at its initial enthalpy, without creating a material point.
-    /// The six source roles and optional expansion share one card, context and temperature. Every
+    /// Mechanical/caloric source roles and optional expansion share one card, context and temperature. Every
     /// selected claim must continuously cover the complete caloric chart.
     /// E and native H may vary affinely over the complete temperature span;
-    /// nu and density remain fixed. A nonzero uniaxial Et reduction remains
+    /// nu, density and any Prager H_k remain fixed. A nonzero uniaxial Et reduction remains
     /// constant: its generally rational H(T) conversion is not an affine law.
     /// Expansion is integrated along its complete pinned path. Every crossed
     /// source knot/surface edge is checked; equal endpoints alone do not suffice.
@@ -271,8 +273,7 @@ impl<'a> ThermoplasticSource<'a> {
             ));
         }
         let mut requirements = j2_requirements(query.hardening_basis)
-            .map_err(|e| FeedbackError::Source(e.into()))?
-            .to_vec();
+            .map_err(|e| FeedbackError::Source(e.into()))?;
         let first_material = resolve_material_state_point(
             query.card,
             &query.context,
@@ -323,7 +324,7 @@ impl<'a> ThermoplasticSource<'a> {
                 || requirements.iter().any(|r| r.name() == claim.key.name())
             {
                 return Err(FeedbackError::Invalid(
-                    "six distinct roles with exact SI quantities are required",
+                    "distinct mechanical and caloric roles with exact SI quantities are required",
                 ));
             }
             requirements.push(
@@ -422,7 +423,8 @@ impl<'a> ThermoplasticSource<'a> {
                 name == crate::state_point::LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY;
             let youngs = name == YOUNG_MODULUS_PROPERTY;
             let hardening = name == query.hardening_basis.property_name();
-            let fixed = name == POISSON_RATIO_PROPERTY || name == density_name;
+            let fixed = name == POISSON_RATIO_PROPERTY || name == density_name
+                || name == KINEMATIC_HARDENING_MODULUS_PROPERTY;
             // Mechanics, caloric data and linked transport use the same
             // admission of instantaneous coefficients at fixed external context.
             admit_rate_independent_property(property, &query.temperature_axis)?;
@@ -467,7 +469,7 @@ impl<'a> ThermoplasticSource<'a> {
                 }
                 if fixed && value != property.value_si() {
                     return Err(FeedbackError::Invalid(
-                        "Poisson ratio and reference density must be constant on every source-line segment",
+                        "Poisson ratio, reference density and Prager modulus must be constant on every source-line segment",
                     ));
                 }
                 if !fixed && !expansion && !hardening && !positive(value) {
@@ -494,7 +496,8 @@ impl<'a> ThermoplasticSource<'a> {
             source.hardening_source().value_si(),
         ).map_err(FeedbackError::Invalid)?;
         let hardening_temperature_slope_pa_k = match query.hardening_basis {
-            HardeningPropertyBasis::PlasticStrainModulus => hardening_source_slope,
+            HardeningPropertyBasis::PlasticStrainModulus
+                | HardeningPropertyBasis::MixedPlasticStrainModuli => hardening_source_slope,
             HardeningPropertyBasis::UniaxialTangentModulus => {
                 if (youngs_temperature_slope_pa_k != 0.0 || hardening_source_slope != 0.0)
                     && hardening_knots.iter().any(|(_, value)| *value != 0.0)
@@ -699,6 +702,7 @@ impl<'a> ThermoplasticSource<'a> {
         )
         .map_err(FeedbackError::Source)?;
         if source.law().elastic.poisson != self.source.law().elastic.poisson
+            || source.law().kinematic_hardening != self.source.law().kinematic_hardening
             || self.youngs_temperature_slope_pa_k == 0.0
                 && source.law().elastic.youngs != self.source.law().elastic.youngs
             || self.hardening_temperature_slope_pa_k == 0.0

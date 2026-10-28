@@ -1,14 +1,16 @@
 //! Incremental work of the existing J2 return map, per reference volume.
 //!
 //! This is the explicitly ENERGETIC linear-hardening interpretation:
-//! psi = 1/2 e:C:e + 1/2 H alpha^2. The yield offset dissipates
+//! psi = 1/2 e:C:e + 1/2 H_iso alpha^2 + H_k dev(eps_p):dev(eps_p)/3.
+//! The separately selected Prager term is recoverable backstress storage.
+//! The yield offset dissipates
 //! sigma_y delta_alpha; selected linear overstress adds eta delta_alpha^2/dt
 //! to physical dissipation. Hardening energy is stored. An empirical hardening
 //! curve alone does not establish this heat partition for a real specimen.
 //!
 //! Endpoint stress work closes as delta_psi + physical_dissipation +
 //! backward_Euler_loss. The last term is numerical loss, never a heat source.
-//! Elastic coefficients and H must be identical across this increment.
+//! Elastic coefficients and both hardening moduli must be identical across this increment.
 //! The yield offset may change without changing the stored-energy function.
 //! No radial return, flow rule or tangent is duplicated here.
 
@@ -35,11 +37,17 @@ pub struct StoredEnergy {
     pub elastic_j_m3: f64,
     /// Stored energy density of the explicitly energetic hardening law.
     pub hardening_j_m3: f64,
+    /// Recoverable Prager storage H_k dev(eps_p):dev(eps_p)/3, never plastic heat.
+    pub kinematic_hardening_j_m3: f64,
 }
 impl StoredEnergy {
     /// Sum of recoverable elastic and hardening energy density.
     #[must_use]
-    pub fn total_j_m3(self) -> f64 { self.elastic_j_m3 + self.hardening_j_m3 }
+    pub fn total_j_m3(self) -> f64 {
+        let original = self.elastic_j_m3 + self.hardening_j_m3;
+        if self.kinematic_hardening_j_m3 == 0.0 { original }
+        else { original + self.kinematic_hardening_j_m3 }
+    }
 }
 
 /// Actual endpoint work and separately identified losses [J/m3].
@@ -53,7 +61,8 @@ pub struct IncrementEnergy {
     pub mechanical_work_j_m3: f64,
     /// Yield-offset and, when selected, linear-overstress dissipation.
     pub physical_dissipation_j_m3: f64,
-    /// 1/2 delta_e:C:delta_e + 1/2 H (delta_alpha)^2.
+    /// 1/2 delta_e:C:delta_e + 1/2 H_iso (delta_alpha)^2
+    /// + H_k dev(delta_eps_p):dev(delta_eps_p)/3.
     pub numerical_dissipation_j_m3: f64,
     /// work - delta_stored - physical_dissipation - numerical_dissipation.
     pub residual_j_m3: f64,
@@ -62,8 +71,11 @@ impl IncrementEnergy {
     /// Stored-energy change, subtracting the two storage components separately.
     #[must_use]
     pub fn stored_change_j_m3(self) -> f64 {
-        (self.final_state.elastic_j_m3 - self.initial.elastic_j_m3)
-            + (self.final_state.hardening_j_m3 - self.initial.hardening_j_m3)
+        let original = (self.final_state.elastic_j_m3 - self.initial.elastic_j_m3)
+            + (self.final_state.hardening_j_m3 - self.initial.hardening_j_m3);
+        let kinematic = self.final_state.kinematic_hardening_j_m3
+            - self.initial.kinematic_hardening_j_m3;
+        if kinematic == 0.0 { original } else { original + kinematic }
     }
 }
 
@@ -137,7 +149,7 @@ impl J2Plasticity {
         }
         let e = self.admit_energy_history(strain, state)?;
         let stress = self.elastic.stress(&e, &());
-        let residual = finite(self.yield_function(&stress, state.alpha))?;
+        let residual = finite(self.yield_function_with_state(&stress, state))?;
         if residual > yield_tolerance_pa {
             return Err(EnergyError::YieldResidual {
                 residual_pa: residual, tolerance_pa: yield_tolerance_pa,
@@ -181,7 +193,7 @@ impl J2Plasticity {
             || delta_alpha == 0.0 && state.plastic_strain != old_state.plastic_strain {
             return Err(EnergyError::Invalid("plastic history increment is not representable or monotone"));
         }
-        let yield_residual = finite(self.yield_function(&stress_pa, state.alpha)
+        let yield_residual = finite(self.yield_function_with_state(&stress_pa, &state)
             - product(overstress_modulus, delta_alpha)?)?;
         if yield_residual > tolerances.yield_pa
             || delta_alpha > 0.0 && yield_residual.abs() > tolerances.yield_pa {
@@ -196,11 +208,12 @@ impl J2Plasticity {
         } else {
             self.validate_overstress_history(strain, &state)?;
         }
-        let initial = self.energy_of(&old_e, old_state.alpha)?;
-        let final_state = self.energy_of(&new_e, state.alpha)?;
+        let initial = self.energy_of(&old_e, old_state.alpha, &old_state.plastic_strain)?;
+        let final_state = self.energy_of(&new_e, state.alpha, &state.plastic_strain)?;
         let delta_e = subtract(&new_e, &old_e);
         let delta_strain = subtract(strain, old_strain);
-        let numerical = self.energy_of(&delta_e, delta_alpha)?;
+        let delta_plastic = subtract(&state.plastic_strain, &old_state.plastic_strain);
+        let numerical = self.energy_of(&delta_e, delta_alpha, &delta_plastic)?;
         let mut energy = IncrementEnergy {
             initial, final_state,
             mechanical_work_j_m3: finite(contract(&stress_pa, &delta_strain))?,
@@ -230,8 +243,9 @@ impl J2Plasticity {
             || !positive(self.elastic.strain_limit)
             || !positive(self.yield_stress)
             || !(self.hardening.is_finite() && self.hardening >= 0.0)
+            || !(self.kinematic_hardening.is_finite() && self.kinematic_hardening >= 0.0)
             || !positive(mu) || !positive(bulk)
-            || !positive(3.0 * mu + self.hardening)
+            || !positive(3.0 * mu + self.combined_hardening())
             || self.elastic.stiffness().iter().flatten().any(|x| !x.is_finite()) {
             return Err(EnergyError::Invalid("energetic coefficients are not admissible or representable"));
         }
@@ -265,16 +279,21 @@ impl J2Plasticity {
         Ok(e)
     }
 
-    fn energy_of(&self, elastic_strain: &Voigt, alpha: f64)
+    fn energy_of(&self, elastic_strain: &Voigt, alpha: f64, plastic_strain: &Voigt)
         -> Result<StoredEnergy, EnergyError> {
         let stress = self.elastic.stress(elastic_strain, &());
         let elastic_j_m3 = product(0.5, finite(contract(elastic_strain, &stress))?)?;
         let hardening_j_m3 = product(0.5, product(product(self.hardening, alpha)?, alpha)?)?;
+        let kinematic_hardening_j_m3 = if self.kinematic_hardening == 0.0 { 0.0 } else {
+            let plastic = crate::tensor::deviator(plastic_strain);
+            product(1.0 / 3.0, product(self.kinematic_hardening, finite(contract(&plastic, &plastic))?)?)?
+        };
         if elastic_j_m3 < 0.0 || hardening_j_m3 < 0.0
-            || !(elastic_j_m3 + hardening_j_m3).is_finite() {
+            || kinematic_hardening_j_m3 < 0.0
+            || !(elastic_j_m3 + hardening_j_m3 + kinematic_hardening_j_m3).is_finite() {
             return Err(EnergyError::Invalid("stored elastic or hardening energy is not admissible"));
         }
-        Ok(StoredEnergy { elastic_j_m3, hardening_j_m3 })
+        Ok(StoredEnergy { elastic_j_m3, hardening_j_m3, kinematic_hardening_j_m3 })
     }
 }
 

@@ -12,6 +12,7 @@ use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_material::plastic::J2State;
 use fs_material::plastic::source::{
     HardeningPropertyBasis, ISOTROPIC_HARDENING_MODULUS_PROPERTY,
+    KINEMATIC_HARDENING_MODULUS_PROPERTY,
     POST_YIELD_TANGENT_MODULUS_PROPERTY, ResolvedJ2Plasticity, resolve_j2_plasticity,
 };
 use fs_material::state_point::{
@@ -51,6 +52,9 @@ fn material_card(
             POST_YIELD_TANGENT_MODULUS_PROPERTY,
             [cold, hot].map(|p| p.young * p.hardening / (p.young + p.hardening)),
         ),
+        HardeningPropertyBasis::MixedPlasticStrainModuli => {
+            panic!("mixed coupon needs an explicitly added independent kinematic source")
+        }
     };
     let mut claims = ClaimSet::new();
     for (name, dims, values) in [
@@ -281,6 +285,54 @@ fn data_only_yield_hardening_and_elastic_swaps_change_the_same_coupon() {
     assert!(forces[2] > forces[0]);
     assert!(forces[3] < forces[0]);
     assert!(forces[4] > forces[0]);
+}
+
+#[test]
+fn sourced_mixed_hardening_changes_reverse_yield_on_the_original_tetrahedral_coupon() {
+    let p = Parameters { young: 1000.0, poisson: 0.3, yield_stress: 1.0, hardening: 20.0 };
+    let original = material_card("mixed-hardening coupon", p, p, HardeningPropertyBasis::PlasticStrainModulus);
+    let mut claims = original.claims().clone();
+    claims.insert_claim(PropertyClaim {
+        key: PropertyKey::new(KINEMATIC_HARDENING_MODULUS_PROPERTY, Pressure::DIMS),
+        value: PropertyValue::Scalar { value: 80.0, dims: Pressure::DIMS },
+        validity: ValidityDomain::unconstrained().with("T", 300.0, 600.0),
+        uncertainty: UncertaintyModel::Unstated,
+        interpolation: InterpolationPolicy::ConstantWithinValidity,
+        observations: vec![],
+        provenance: Provenance { source: "authored cyclic Prager coupon".into(), license: "test-only".into(), artifact: None },
+    }).unwrap();
+    let source = MaterialCard::assemble(MaterialStateId {
+        chemistry: "mixed-hardening coupon".into(), phase: "solid".into(),
+        process: "synthetic cyclic coupon".into(), revision: 0,
+    }, claims, vec![]).unwrap();
+    let mixed = resolve(&source, 300.0, HardeningPropertyBasis::MixedPlasticStrainModuli);
+    let path = [0.0005, 0.006, 0.0038, -0.004, 0.002];
+    let solution = solve(&mixed, &path);
+    let mut plastic: f64 = 0.0;
+    let mut accumulated: f64 = 0.0;
+    for (&epsilon, record) in path.iter().zip(&solution.increments) {
+        // Independent one-dimensional Prager/Hooke equations; the native
+        // three-dimensional mesh must also solve its free lateral strains.
+        let effective_trial = p.young * (epsilon - plastic) - 80.0 * plastic;
+        let excess = effective_trial.abs() - (p.yield_stress + p.hardening * accumulated);
+        if excess > 0.0 {
+            let increment = excess / (p.young + p.hardening + 80.0);
+            plastic += effective_trial.signum() * increment;
+            accumulated += increment;
+        }
+        close(axial_reaction(record), p.young * (epsilon - plastic), 2e-8);
+    }
+    for state in &solution.element_states {
+        close(state.plastic_strain[0], plastic, 1e-9);
+        close(state.plastic_strain[1], -plastic / 2.0, 1e-9);
+        close(state.alpha, accumulated, 1e-9);
+    }
+    let mono = Parameters { hardening: 100.0, ..p };
+    let isotropic = resolve(&material_card("same monotonic tangent", mono, mono,
+        HardeningPropertyBasis::PlasticStrainModulus), 300.0, HardeningPropertyBasis::PlasticStrainModulus);
+    let other = solve(&isotropic, &path);
+    close(axial_reaction(&solution.increments[1]), axial_reaction(&other.increments[1]), 2e-8);
+    assert!((axial_reaction(&solution.increments[2]) - axial_reaction(&other.increments[2])).abs() > 1e-3);
 }
 
 #[test]
