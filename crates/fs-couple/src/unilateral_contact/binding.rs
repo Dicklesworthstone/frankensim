@@ -57,16 +57,16 @@ impl BoundNormalContact {
                 what: "bound normal contact needs a finite nonzero mechanical map and gap",
             });
         }
-        // This is a one-sided adapter, so its origin must be unloaded. A curve
-        // with precompression needs its own declared reference, not clipping.
+        // Unilateral owners need an unloaded origin. Adhesive owners carry
+        // their own detached reference and must retain nonzero force at touch.
         let origin = source
-            .potential(0.0)
+            .energy_and_force(0.0)
             .map_err(|_| DContactError::Parameter {
-                what: "bound source must cover an unloaded zero approach",
+                what: "bound source must cover zero approach",
             })?;
-        if origin.0 != 0.0 || origin.1 != 0.0 {
+        if !source.supports_signed_approach() && (origin.0 != 0.0 || origin.1 != 0.0) {
             return Err(DContactError::Parameter {
-                what: "bound source zero approach must have zero energy and force",
+                what: "unilateral source zero approach must have zero energy and force",
             });
         }
         Ok(Self {
@@ -101,7 +101,11 @@ impl BoundNormalContact {
                 what: "bound contact approach overflow",
             });
         }
-        Ok(delta.max(0.0))
+        Ok(if self.source.supports_signed_approach() {
+            delta
+        } else {
+            delta.max(0.0)
+        })
     }
 }
 
@@ -163,7 +167,7 @@ impl BoundNormalStorage {
             let delta = site.approach(x).map_err(BoundNormalContactError::Contact)?;
             energy += site
                 .source
-                .potential(delta)
+                .energy_and_force(delta)
                 .map_err(BoundNormalContactError::Source)?
                 .0;
         }
@@ -188,7 +192,7 @@ impl BoundNormalStorage {
             let delta = site.approach(x).map_err(BoundNormalContactError::Contact)?;
             let force = site
                 .source
-                .potential(delta)
+                .energy_and_force(delta)
                 .map_err(BoundNormalContactError::Source)?
                 .1;
             for (k, b) in site.collocation.iter().enumerate() {
@@ -206,7 +210,8 @@ impl BoundNormalStorage {
     /// Positive resisting state-flow for the same implicit pHS equation.
     /// `effort` is its actual discrete gradient; `step_s` is explicit. The
     /// point owner enforces the complete rate/step envelope before loss is
-    /// projected. A finite-gap elastic source contributes no internal loss.
+    /// projected. Finite-gap elastic and conservative DMT owners contribute no
+    /// internal loss; adhesive attraction is not dissipative resistance.
     /// On refusal discard the trial output; no physical state is changed.
     pub fn dissipative_flow_into(
         &self,
@@ -241,7 +246,7 @@ impl BoundNormalStorage {
                     .map_err(|e| BoundNormalContactError::Source(NormalLawSourceError::Point(e)))?;
                 let elastic = site
                     .source
-                    .potential(delta)
+                    .energy_and_force(delta)
                     .map_err(BoundNormalContactError::Source)?
                     .1;
                 let force = elastic * (source.dissipation_s_per_m() * rate);
@@ -269,7 +274,78 @@ impl Storage for BoundNormalStorage {
             out.fill(f64::NAN);
         }
     }
+
+    fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], mid: &[f64]) -> Option<f64> {
+        if a.len() != b.len()
+            || a.len() != mid.len()
+            || a.iter().chain(b).chain(mid).any(|v| !v.is_finite())
+        {
+            return None;
+        }
+        // Never return only a subset of the stored-energy contributions.
+        let mut sum = if let Some(value) = self.inner.midpoint_energy_remainder(a, b, mid) {
+            value
+        } else {
+            let q = self.inner.exact_quadratic_matrix()?;
+            let n = a.len();
+            if q.len() != n.checked_mul(n)? {
+                return None;
+            }
+            let mut total = 0.0;
+            let mut error = 0.0;
+            for i in 0..n {
+                let mut offset = 0.0;
+                let mut offset_error = 0.0;
+                for j in 0..n {
+                    let (center, low) = fs_math::eft::two_sum(0.5 * a[j], 0.5 * b[j]);
+                    compensated_add(
+                        &mut offset,
+                        &mut offset_error,
+                        q[i * n + j] * ((center - mid[j]) + low),
+                    );
+                }
+                compensated_add(
+                    &mut total,
+                    &mut error,
+                    (b[i] - a[i]) * (offset + offset_error),
+                );
+            }
+            total + error
+        };
+        let mut error = 0.0;
+        for site in &self.contacts {
+            let da = site.approach(a).ok()?;
+            let db = site.approach(b).ok()?;
+            let dm = site.approach(mid).ok()?;
+            let remainder = site.source.midpoint_energy_remainder(da, db, dm).ok()??;
+            let force = site.source.energy_and_force(dm).ok()?.1;
+            let mut mapped_dx = 0.0;
+            let mut mapped_error = 0.0;
+            for (k, weight) in site.collocation.iter().enumerate() {
+                compensated_add(
+                    &mut mapped_dx,
+                    &mut mapped_error,
+                    weight * (b[2 * k] - a[2 * k]),
+                );
+            }
+            let (delta, delta_error) = fs_math::eft::two_sum(db, -da);
+            let correction = force * (((delta - mapped_dx) + delta_error) - mapped_error);
+            compensated_add(&mut sum, &mut error, remainder);
+            compensated_add(&mut sum, &mut error, correction);
+        }
+        let total = sum + error;
+        total.is_finite().then_some(total)
+    }
 }
+
+fn compensated_add(sum: &mut f64, error: &mut f64, value: f64) {
+    let (high, low) = fs_math::eft::two_sum(*sum, value);
+    *sum = high;
+    *error += low;
+}
+
+#[cfg(test)]
+mod adhesive_tests;
 
 #[cfg(test)]
 #[path = "../../../fs-contact/tests/source_point/common.rs"]

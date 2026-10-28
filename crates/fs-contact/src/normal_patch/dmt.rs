@@ -15,6 +15,9 @@
 //! Roughness, viscoelasticity, fluid bridges, mixed-mode fracture and changes
 //! of the frozen source conditions require other owners.
 
+#[path = "dmt/energy.rs"]
+mod energy;
+
 use core::f64::consts::PI;
 
 use fs_blake3::{ContentHash, DomainHasher};
@@ -562,21 +565,6 @@ impl SourceDmtSphereContact {
             });
         }
         self.evaluate(delta)
-    }
-
-    /// Exact conservative endpoint work for prescribed approach, J.
-    /// This local single-valued law creates no intrinsic hysteresis or heat.
-    /// Instability and kinetic energy released by an external compliant system
-    /// remain that system's responsibility.
-    pub fn reversible_work_between(&self, from_m: f64, to_m: f64) -> Result<f64, DmtError> {
-        let work =
-            self.evaluate(to_m)?.reversible_energy_j - self.evaluate(from_m)?.reversible_energy_j;
-        if !work.is_finite() {
-            return Err(DmtError::Unrepresentable {
-                field: "DMT reversible work",
-            });
-        }
-        Ok(work)
     }
 }
 

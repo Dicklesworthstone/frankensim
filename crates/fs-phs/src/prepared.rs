@@ -457,7 +457,9 @@ impl StepWorkspace {
             } else {
                 for col in 0..n {
                     poll()?;
-                    let h = 1.0e-6 * (scale + self.x[col].abs());
+                    // Match the native unprepared probe scale at zero initial
+                    // coordinates with nonzero internal force. Admission is unchanged.
+                    let h = 1.0e-6 * (scale.max(rnorm) + self.x[col].abs());
                     if !h.is_finite() || h <= 0.0 { return Err(dimensions("invalid finite-difference increment").into()); }
                     self.trial.copy_from_slice(&self.x);
                     self.trial[col] += h;

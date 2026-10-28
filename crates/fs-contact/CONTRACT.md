@@ -695,3 +695,18 @@ input must preserve its common contact temperature and repulsive load. A
 nominal-pressure source refresh is not inferred. Original synthetic/caller
 authority is preserved. The adapter implements the existing tangential trial
 trait and neither owns normal-area evolution nor claims mixed-mode peeling.
+
+## Conservative DMT work in native dynamics
+
+`NormalLawSource::DmtSphere` retains the original immutable DMT owner and its
+absolute detached-reference potential. Signed negative approach reaches the
+finite-range attractive branch. `energy_and_force` remains continuous at
+touch and range cutoff, while the smooth-tangent `potential` interface still
+refuses those corners. The low-Tabor envelope and source identity remain
+authoritative.
+
+`reversible_work_between` integrates the original piecewise force analytically
+without subtracting nearly equal endpoint energies. The allocation-free scalar
+midpoint numerator uses a centered Hertz series and exact quadratic-hinge
+remainders for the same potential. No new damping, heat, snap hysteresis,
+Maugis detached reference, or changing-source energy law is inferred.

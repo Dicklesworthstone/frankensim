@@ -2,6 +2,7 @@
 //! No power-law fit is made to a finite-gap table, and no authority is upgraded.
 use super::{
     FiniteGapResponseCurve, FiniteGapResponseCurveError, NormalPatchError,
+    dmt::{DmtError, SourceDmtSphereContact},
     source::SourcePointContact,
 };
 use fs_blake3::ContentHash;
@@ -15,6 +16,8 @@ pub enum NormalLawSource {
     /// Whole-footprint force curve from retained finite-gap half-space solves.
     /// Its force and energy already integrate the physical surface-cell areas.
     FiniteGap(Box<FiniteGapResponseCurve>),
+    /// Conservative DMT contact and its explicitly selected finite-range attraction.
+    DmtSphere(Box<SourceDmtSphereContact>),
 }
 
 /// Original source-owner refusal, preserved across the potential view.
@@ -24,6 +27,8 @@ pub enum NormalLawSourceError {
     Point(NormalPatchError),
     /// Finite-gap curve refused; extrapolation is never substituted.
     FiniteGap(FiniteGapResponseCurveError),
+    /// Original adhesive owner refused the approach or smooth tangent.
+    Dmt(DmtError),
 }
 
 impl core::fmt::Display for NormalLawSourceError {
@@ -31,6 +36,7 @@ impl core::fmt::Display for NormalLawSourceError {
         match self {
             Self::Point(e) => core::fmt::Display::fmt(e, f),
             Self::FiniteGap(e) => core::fmt::Display::fmt(e, f),
+            Self::Dmt(e) => core::fmt::Display::fmt(e, f),
         }
     }
 }
@@ -47,6 +53,12 @@ impl From<FiniteGapResponseCurve> for NormalLawSource {
     }
 }
 
+impl From<SourceDmtSphereContact> for NormalLawSource {
+    fn from(source: SourceDmtSphereContact) -> Self {
+        Self::DmtSphere(Box::new(source))
+    }
+}
+
 impl NormalLawSource {
     /// Original point limiting-response receipt (including geometry/envelope),
     /// or complete curve identity, without minting a new receipt.
@@ -55,6 +67,45 @@ impl NormalLawSource {
         match self {
             Self::HertzPoint(s) => s.limiting_response().receipt_id,
             Self::FiniteGap(s) => s.identity,
+            Self::DmtSphere(s) => s.identity(),
+        }
+    }
+
+    /// Whether this owner defines an absolute potential at signed finite gap.
+    /// Unilateral Hertz/finite-gap owners retain their existing clipping policy.
+    #[must_use]
+    pub const fn supports_signed_approach(&self) -> bool {
+        matches!(self, Self::DmtSphere(_))
+    }
+
+    /// Continuous energy and force, including adhesive touch/range corners.
+    /// A discrete-gradient step needs these values, not a nonexistent smooth
+    /// tangent at a piecewise-law corner.
+    pub fn energy_and_force(&self, delta_m: f64) -> Result<(f64, f64), NormalLawSourceError> {
+        if let Self::DmtSphere(source) = self {
+            let r = source
+                .evaluate(delta_m)
+                .map_err(NormalLawSourceError::Dmt)?;
+            Ok((r.reversible_energy_j, r.normal_force_n))
+        } else {
+            self.potential(delta_m).map(|(u, f, _)| (u, f))
+        }
+    }
+
+    /// Cancellation-stable scalar Gonzalez numerator when the original owner
+    /// supplies it. `None` preserves the native endpoint-subtraction fallback.
+    pub fn midpoint_energy_remainder(
+        &self,
+        from_m: f64,
+        to_m: f64,
+        midpoint_m: f64,
+    ) -> Result<Option<f64>, NormalLawSourceError> {
+        match self {
+            Self::DmtSphere(source) => source
+                .midpoint_energy_remainder(from_m, to_m, midpoint_m)
+                .map(Some)
+                .map_err(NormalLawSourceError::Dmt),
+            _ => Ok(None),
         }
     }
 
@@ -64,6 +115,15 @@ impl NormalLawSource {
     /// interpolation segment, so its derivative and energy cannot drift apart.
     pub fn potential(&self, delta_m: f64) -> Result<(f64, f64, f64), NormalLawSourceError> {
         match self {
+            Self::DmtSphere(source) => {
+                let r = source
+                    .evaluate(delta_m)
+                    .map_err(NormalLawSourceError::Dmt)?;
+                let tangent = r
+                    .tangent_n_per_m
+                    .ok_or(NormalLawSourceError::Dmt(DmtError::CornerTangent))?;
+                Ok((r.reversible_energy_j, r.normal_force_n, tangent))
+            }
             Self::HertzPoint(source) => {
                 let r = source
                     .evaluate(

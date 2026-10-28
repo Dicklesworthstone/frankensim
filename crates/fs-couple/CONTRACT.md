@@ -9239,3 +9239,27 @@ world-frame exhaust-energy model. The `rocket_flight` example runs the complete
 source -> nozzle -> finite tank -> variable-mass translation journey using the
 existing explicitly manufactured gas-source fixture and emits time-resolved
 mass, thrust, position, velocity and coupling residuals.
+
+## Signed adhesive normal storage and native approach dynamics
+
+`BoundNormalContact` and `BoundNormalStorage` accept the original conservative
+DMT source through `NormalLawSource`, preserve negative geometric approach, and
+project signed force through the same work-conjugate mechanical map. Finite-gap
+attraction can accelerate bodies before solid contact. Unilateral Hertz and
+finite-gap sources keep their unloaded-origin and clipping behavior. DMT
+attraction adds no internal damping and is not frictional heat.
+
+The existing native Gonzalez integration consumes a cancellation-stable complete
+storage numerator when every constituent supplies one (or the inner owner
+explicitly declares an exact quadratic matrix). Missing constituent support
+returns `None`; no partial numerator is substituted. Affine-map and supplied
+midpoint roundoff corrections are included. Source validity remains active at
+every trial, including corner crossings. This is frozen-source elastic
+adhesive dynamics; evolving adhesion, radiation, plasticity, and JKR snap
+energy require their explicit physical owners.
+
+Focused regressions cover the real pHS reference and prepared steppers,
+acceleration from rest at finite gap, contact onset, equal/opposite momentum,
+energy conservation, and coordinate translation. Native finite-difference
+probes include the current residual scale so internal force at a zero state
+remains numerically resolvable; solver tolerances and budgets are unchanged.

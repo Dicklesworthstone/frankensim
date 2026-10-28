@@ -1541,7 +1541,10 @@ pub fn step(sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64) -> Result<Ste
             x1 = bx;
             break;
         }
-        let jac = fd_jacobian(sys, x0, &x1, scale, &residual);
+        // A zero state can still have finite internal force (for example an
+        // adhesive gap). The residual is a state increment and supplies a
+        // resolvable probe scale without relaxing the convergence target.
+        let jac = fd_jacobian(sys, x0, &x1, scale.max(rnorm), &residual);
         let fact = lu(&jac, n).map_err(|_| PhsError::NewtonStalled { residual: rnorm })?;
         let mut delta = res;
         fact.solve(&mut delta);
