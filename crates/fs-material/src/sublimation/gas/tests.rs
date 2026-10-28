@@ -8,9 +8,9 @@ const MOLAR_MASS: f64 = 0.018015;
 const LATENT: f64 = 200000.0;
 
 #[derive(Clone, Copy)]
-struct Phase {
-    molar_mass: f64,
-    reference_temperature_k: f64,
+pub(super) struct Phase {
+    pub(super) molar_mass: f64,
+    pub(super) reference_temperature_k: f64,
 }
 impl SublimationLaw for Phase {
     fn temperature_range_k(&self) -> [f64; 2] {
@@ -33,10 +33,10 @@ impl SublimationLaw for Phase {
         })
     }
 }
-fn species() -> SpeciesId {
+pub(super) fn species() -> SpeciesId {
     SpeciesId::new("B").unwrap()
 }
-fn catalog(reference: f64) -> ThermochemicalGasModel {
+pub(super) fn catalog(reference: f64) -> ThermochemicalGasModel {
     ThermochemicalGasModel::new(
         FrozenIdealGasMixtureModelV1::new(
             vec![
@@ -51,7 +51,11 @@ fn catalog(reference: f64) -> ThermochemicalGasModel {
     )
     .unwrap()
 }
-fn gas(catalog: &ThermochemicalGasModel, temperature: f64, vapor_pressure: f64) -> ClosedGasParcel {
+pub(super) fn gas(
+    catalog: &ThermochemicalGasModel,
+    temperature: f64,
+    vapor_pressure: f64,
+) -> ClosedGasParcel {
     let fraction = vapor_pressure / 100000.0;
     let model = catalog
         .with_composition(
@@ -69,14 +73,14 @@ fn gas(catalog: &ThermochemicalGasModel, temperature: f64, vapor_pressure: f64) 
     )
     .unwrap()
 }
-fn binding(offset: f64) -> GasSurfaceBinding {
+pub(super) fn binding(offset: f64) -> GasSurfaceBinding {
     GasSurfaceBinding {
         species: species(),
         accommodation_coefficient: 0.1,
         solid_enthalpy_offset_j_kg: offset,
     }
 }
-fn controls() -> GasSurfaceSolve {
+pub(super) fn controls() -> GasSurfaceSolve {
     GasSurfaceSolve {
         gas: GasSpeciesBoundarySolve {
             gas: crate::thermochemical_gas::energy::GasEnergySolve {
@@ -96,7 +100,7 @@ fn controls() -> GasSurfaceSolve {
 // The NASA-9 fixture is explicitly constant cp. Derive its caloric coefficients
 // from the ORIGINAL species evaluation, then define h_s=h_v-L-offset exactly.
 // This manufactured chart makes no empirical ice-accuracy claim.
-fn chart(catalog: &ThermochemicalGasModel, binding: &GasSurfaceBinding) -> (f64, f64) {
+pub(super) fn chart(catalog: &ThermochemicalGasModel, binding: &GasSurfaceBinding) -> (f64, f64) {
     let component = catalog
         .thermodynamics()
         .components()
@@ -112,7 +116,7 @@ fn chart(catalog: &ThermochemicalGasModel, binding: &GasSurfaceBinding) -> (f64,
         - binding.solid_enthalpy_offset_j_kg;
     (h, cp)
 }
-fn temperature(h: f64, chart: (f64, f64)) -> Result<f64, SublimationError> {
+pub(super) fn temperature(h: f64, chart: (f64, f64)) -> Result<f64, SublimationError> {
     let t = 400.0 + (h - chart.0) / chart.1;
     if !t.is_finite() {
         Err(SublimationError::Invalid(
@@ -122,20 +126,20 @@ fn temperature(h: f64, chart: (f64, f64)) -> Result<f64, SublimationError> {
         Ok(t)
     }
 }
-fn solid(temperature_k: f64, chart: (f64, f64)) -> SolidSurfaceState {
+pub(super) fn solid(temperature_k: f64, chart: (f64, f64)) -> SolidSurfaceState {
     SolidSurfaceState {
         mass_kg: 0.01,
         area_m2: 1e-4,
         specific_enthalpy_j_kg: chart.0 + chart.1 * (temperature_k - 400.0),
     }
 }
-fn near(actual: f64, expected: f64, tolerance: f64) {
+pub(super) fn near(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() <= tolerance,
         "{actual} != {expected}"
     );
 }
-fn phase() -> Phase {
+pub(super) fn phase() -> Phase {
     Phase {
         molar_mass: MOLAR_MASS,
         reference_temperature_k: 400.0,

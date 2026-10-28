@@ -3129,3 +3129,31 @@ Six new native regressions and all 19 existing porous/acoustic regressions pass,
 including independent per-layer mass balance, manufactured interfaces, stack
 orientation, subdivision, adjacent-float pressure differences, exact closed
 limits, calibration refusal, extreme slip contrast and bounded 64-layer work.
+
+
+## Joint nonisothermal multi-surface sublimation
+
+`sublimation::gas::chamber::advance_chamber_with_gas` advances heterogeneous
+surfaces against one original gas snapshot. Each surface retains its explicit
+identity, species, phase law, caloric callback and fixed energy-reference offset.
+Every participating species is evaluated once at the original gas state.
+Canonical surface/species accumulation precedes exactly one original gas
+boundary reconstruction; input ordering cannot change the accepted result.
+
+Gross incoming streams share each species' OLD inventory allowance. Gas emitted
+by another surface cannot fund an additional withdrawal in the same explicit
+interval. Each solid separately bounds gross emission. `InventoryLimit` returns
+a conservative retry duration instead of clipping streams. Common-reference
+energy aggregation preserves heat transfer during counterflow without repeatedly
+adding large opposing formation energies. All solids and gas pass actual total
+and per-species mass balance, original caloric compatibility and energy checks
+before one immutable joint candidate is returned.
+
+The existing single-surface API shares the same physical preparation. Fixed
+area, local Maxwellian vapor, original source domains, specular nonsticking
+reflection and pure-solid restrictions remain. This explicit model does not
+supply gas transport, mixed phases, extinction topology or external heating.
+Six new native regressions cover warm/cold redistribution, different volatile
+species, exact single-surface equivalence, order independence, shared gross
+withdrawal, energy-reference invariance and atomic refusal. All 18 actual-source
+joint/scalar/species-boundary tests passed with the original gas reconstruction.
