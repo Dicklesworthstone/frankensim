@@ -10,6 +10,7 @@ dg_radiation computed-baffled 20 65 4 8 12 20 0.1 67108864 2 100 1e-8 64 1048576
 dg_exterior mixture 293.15 101325 mole 2 N2 0.8 CO2 0.2
 slit_length 0.001
 observation baffled-outlet 0 0 0.2 8 32 1000
+observer_gas stokes-kirchhoff 4096 1000000 50000000
 valve 0.0004
 limits 0.001 10 1 512 1e-14 1e-11
 contact 100000000 2 0.5

@@ -2,6 +2,7 @@ import "./native-wind.css";
 // Canonical native fixtures, bundled verbatim by Vite; no copied physics defaults.
 import reedExampleSource from "../../../crates/fs-couple/examples/reed-two-medium-tone-hole.performance?raw";
 import flueExampleSource from "../../../crates/fs-couple/examples/flue-nolle.performance?raw";
+import flueDgSource from "../../../crates/fs-couple/examples/flue-dg-baffled.performance?raw";
 import materialReedSource from "../../../crates/fs-couple/examples/material_modal_valve/paired-walls.performance?raw";
 import materialReedDgSource from "../../../crates/fs-couple/examples/material_modal_valve/paired-dg-chimney.performance?raw";
 import stringExampleSource from "../../../crates/fs-couple/examples/material_strings/pluck-and-bow.material-strings?raw";
@@ -34,6 +35,15 @@ const EXAMPLES = [
     help: "gas owns the internal medium; exterior sets the surrounding gas. jet_transfer selects the short-channel Nolle/Price source. The native description owns the mechanical and output clocks, and the jet and acoustic mouth are solved together. This synthetic example is not a measured flute.",
   },
   {
+    name: "flue-dg-baffled.performance",
+    label: "Flute — resolved duct and material atmosphere",
+    renderer: "wind",
+    source: flueDgSource,
+    decimate: true,
+    intro: "Starter: a flute jet drives a spatial duct with a radiating outlet and mouth. Change the bore and exterior gas compositions independently; the native pressure observer propagates each source through the declared exterior atmosphere.",
+    help: "dg_exterior supplies density, sound speed, viscosity, conductivity and heat capacities to the shared Stokes–Kirchhoff propagation law. observer_gas selects that law and its numerical budgets; lossless is an explicit comparison. Native decimation observes the unchanged 96 kHz mechanics at 48 kHz. This short integration fixture uses an interim jet model and is not a measured flute.",
+  },
+  {
     name: "material_modal_valve/paired-walls.performance",
     label: "Material reeds — paired blades and compliant duct walls",
     renderer: "wind",
@@ -49,7 +59,7 @@ const EXAMPLES = [
     source: materialReedDgSource,
     decimate: true,
     intro: "Starter: the same material-derived paired blades drive a spatially resolved duct with a side chimney. Attach blade.matpack. The bore, chimney and exterior have separately declared gas sources and feed the original radiating boundary.",
-    help: "This canonical source runs at 96 kHz. Native decimation is selected below to observe its unchanged mechanical trajectory at 48 kHz. Material, gas, geometry and numerical resolution remain authored source data; the browser adds no acoustic coefficients.",
+    help: "This canonical source runs at 96 kHz, with native decimation selected for 48 kHz playback. observer_gas propagates the outlet and chimney sound through dg_exterior using the shared Stokes–Kirchhoff law. Change the material pack or gas data in the source; the same native solver derives the pressure output.",
   },
   {
     name: "material_strings/pluck-and-bow.material-strings",
@@ -58,7 +68,7 @@ const EXAMPLES = [
     source: stringExampleSource,
     decimate: false,
     intro: "Starter: one material-derived string, body and cavity, with a physical preload and bow gesture. Attach wire.fsmatpk and body.fsmatpk using the source-pack instructions linked below, or open your own complete material-string performance.",
-    help: "The string performer derives modes and losses from original material data and geometry. It retains sympathetic strings, reciprocal body/contact forces and the declared gas. Optional profiles add body geometry, fingers/frets and contact heat. This is a numerical integration fixture, not a measured violin, cello or bass.",
+    help: "The string performer accepts the same full material cards as the reed and wall solvers, along with legacy claim packs. Replace an attached source at its declared path to change the solved material without browser coefficients. Optional profiles add body geometry, fingers/frets and contact heat. This is a numerical integration fixture, not a measured violin, cello or bass.",
   },
   {
     name: "material_strings/relaxing-layered-strings.material-strings",

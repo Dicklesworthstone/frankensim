@@ -4,6 +4,50 @@ use fs_couple::bernoulli_aperture::performance::{ApertureObservation,CoupledAper
 use fs_couple::bernoulli_aperture::performance::file::PlateValvePerformance;
 use fs_vfit::impedance::SeriesImpedanceSpec;
 
+/// Applied physical gas law and its actual bounded per-surface preparation.
+/// A missing report keeps the legacy lossless observation explicit.
+pub(super) fn observer_gas_provenance(
+    report: Option<&fs_couple::pcm_wav::baffled::gas::GasPropagationReport>,
+) -> String {
+    use fs_couple::air_path::{GasAbsorptionModel, ObserverFilterReceipt};
+    let Some(report) = report else { return "null".into(); };
+    let law = match report.law {
+        GasAbsorptionModel::StokesKirchhoff => "stokes-kirchhoff",
+        GasAbsorptionModel::Iso9613Air { .. } => "iso9613",
+        GasAbsorptionModel::MolecularRelaxation => "molecular-relaxation",
+        GasAbsorptionModel::Lossless => "lossless",
+    };
+    // The finite native sidecar is a summary, not an unbounded second copy of
+    // every path receipt. Complete per-path evidence remains in the report API.
+    let bounds = |value: fn(&ObserverFilterReceipt) -> f64| {
+        if report.filters.is_empty() { return "null".to_owned(); }
+        let (mut low, mut high) = (f64::INFINITY, f64::NEG_INFINITY);
+        for filter in &report.filters {
+            let x = value(filter);
+            low = low.min(x);
+            high = high.max(x);
+        }
+        format!("[{low:e},{high:e}]")
+    };
+    let total_taps: usize = report.filters.iter().map(|filter| filter.taps).sum();
+    let maximum_taps = report.filters.iter().map(|filter| filter.taps).max().unwrap_or(0);
+    let maximum_truncated_energy = report.filters.iter().map(|filter| filter.truncated_energy)
+        .fold(0.0_f64, f64::max);
+    let maximum_budget_fraction = report.filters.iter().filter(|filter| filter.budget_energy > 0.0)
+        .map(|filter| filter.truncated_energy / filter.budget_energy).fold(0.0_f64, f64::max);
+    let molecular_relaxation_omitted = report.filters.iter()
+        .any(|filter| filter.absorption.relaxation_omitted.is_some());
+    let validity = report.filters.iter().filter_map(|filter| filter.classical_validity_exceeded_from_hz)
+        .reduce(f64::min).map_or_else(|| "null".to_owned(), |frequency| format!("{frequency:e}"));
+    let filters = format!("{{\"total_taps\":{total_taps},\"maximum_taps\":{maximum_taps},\"range_m\":{},\"maximum_truncated_energy\":{maximum_truncated_energy:e},\"budget_energy\":{},\"maximum_truncation_budget_fraction\":{maximum_budget_fraction:e},\"low_frequency_delay_s\":{},\"receiver_delay_s\":{},\"filter_latency_s\":{},\"classical_validity_exceeded_from_hz\":{validity},\"molecular_relaxation_omitted\":{molecular_relaxation_omitted}}}",
+        bounds(|filter| filter.range_m), bounds(|filter| filter.budget_energy),
+        bounds(|filter| filter.low_frequency_delay_s), bounds(|filter| filter.receiver_delay_s),
+        bounds(|filter| filter.latency_s));
+    format!("{{\"law\":\"{law}\",\"gas\":{},\"surface_paths\":{},\"unique_paths\":{},\"additional_latency_samples\":{},\"kernel_terms\":{},\"filter_summary\":{filters},\"scope\":\"physical exterior propagation on original quadrature paths; unchanged source and reaction; no bore bulk relaxation or free-field body scattering\"}}",
+        gas_state(&report.gas), report.surface_filter_indices.len(), report.filters.len(),
+        report.additional_latency_samples, report.kernel_terms)
+}
+
 pub(super) fn computed_baffled_provenance(
     record: &fs_couple::bernoulli_aperture::radiation::environment::multiport::source::ComputedBaffledRecord,
 ) -> String {

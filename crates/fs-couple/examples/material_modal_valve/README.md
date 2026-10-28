@@ -751,6 +751,26 @@ the shared computed DG radiation declaration and uses that reaction source's
 original outlet geometry and exterior gas. It does not infer an exterior
 from the reed's inlet gas.
 
+Immediately after a baffled observation, the optional shared record
+`observer_gas stokes-kirchhoff 4096 1000000 50000000` enables physical classical
+gas absorption on each original terminal-to-microphone quadrature path. The
+three positive budgets bound distinct exact path lengths, retained source
+filter taps and kernel construction terms; their ceilings are 16,384,
+4,000,000 and 500,000,000. `lossless` is an explicit comparison, and omission
+retains the previous lossless observer. Inlet-pressure output rejects this
+exterior-only record.
+
+`paired-dg-chimney.performance` uses this selection for both its bore outlet
+and finite chimney. The complete bound exterior gas supplies density, sound
+speed, viscosity, thermal conductivity and heat capacity. Changing its source
+data rebuilds the original physical path filters while retaining signed
+terminal flow, geometry and relative phase. The shared owner also serves the
+native DG flute, including its optional mouth. It does not change the reed,
+bore or radiation reaction, and reports physical gas, path work, numerical
+latency and the classical law's omitted molecular relaxation in the native
+sidecar. No species relaxation data is inferred from an instrument or material
+name; the existing programmatic molecular law requires its sourced state.
+
 `valve`, `limits`, `contact`, `loss`, `blades`, the complete plate blocks,
 optional wetted surfaces, pressure shapes, spatial closure, source forces,
 source pressures, and the canonical schedule keep the same record meanings

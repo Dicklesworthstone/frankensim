@@ -50,6 +50,31 @@ impl GasPropagation {
             limits,
         }
     }
+
+    /// Shared native record tail: LAW MAX_PATHS MAX_FILTER_TAPS MAX_KERNEL_TERMS.
+    /// Classical transport uses the complete bound gas. Lossless is an explicit
+    /// comparison; species relaxation data and terrestrial-air eligibility are
+    /// never inferred from a name or from temperature alone.
+    pub fn read_record(fields: &mut std::str::SplitAsciiWhitespace<'_>)
+        -> Result<Self, &'static str>
+    {
+        let law = match fields.next() {
+            Some("stokes-kirchhoff") => GasAbsorptionModel::StokesKirchhoff,
+            Some("lossless") => GasAbsorptionModel::Lossless,
+            _ => return Err("observer_gas requires stokes-kirchhoff or lossless and three work budgets"),
+        };
+        let ceiling = GasPropagationLimits::surface_reference();
+        let mut count = |maximum| fields.next().and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0 && n <= maximum)
+            .ok_or("observer_gas work budget is outside its positive shared ceiling");
+        let limits = GasPropagationLimits {
+            max_unique_paths: count(ceiling.max_unique_paths)?,
+            max_filter_taps: count(ceiling.max_filter_taps)?,
+            max_kernel_terms: count(ceiling.max_kernel_terms)?,
+        };
+        if fields.next().is_some() { return Err("unexpected observer_gas fields"); }
+        Ok(Self { law, relaxation: None, limits })
+    }
 }
 
 /// Original physical law and each source-derived path filter, before the
@@ -86,6 +111,31 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), String> {
 }
 
 impl BaffledPressure {
+    /// Align separately prepared physical apertures to one numerical padding.
+    /// Called only on cold material-path receivers before publication. Relative
+    /// physical travel and gas dispersion stay intact; the same reported latency
+    /// then accompanies the mouth and terminals when their pressure is summed.
+    pub(crate) fn align_gas_latency(
+        &mut self, report: &mut GasPropagationReport, latency: usize,
+    ) -> Result<(), String> {
+        let extra = latency.checked_sub(report.additional_latency_samples)
+            .ok_or("material receiver alignment cannot remove causal padding")?;
+        if extra == 0 { return Ok(()); }
+        let last = self.delay_samples.1.checked_add(extra)
+            .filter(|&last| last < MAX_HISTORY)
+            .ok_or("aligned material receiver exceeds its causal-history budget")?;
+        let frames = last + 1;
+        let samples = frames.checked_mul(self.modes).ok_or("aligned receiver history overflow")?;
+        self.history = vec![0.0; samples];
+        self.history_frames = frames;
+        for (delay, _) in &mut self.kernels { *delay += extra; }
+        self.delay_samples = (self.delay_samples.0 + extra, last);
+        self.material_path_delay += extra;
+        report.additional_latency_samples = latency;
+        self.prepare_taps();
+        Ok(())
+    }
+
     /// Shared bandlimited Rayleigh observer with source-gas propagation on
     /// EVERY physical quadrature path. The original ObserverFilter owns all
     /// absorption, dispersion, source admission and response-tail certificates.

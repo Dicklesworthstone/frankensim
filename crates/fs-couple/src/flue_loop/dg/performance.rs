@@ -17,6 +17,7 @@ use super::super::network::performance::controls::{
 use super::super::{FlueError, FlueVoice};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver};
+use crate::pcm_wav::baffled::gas::{GasPropagation, GasPropagationReport};
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::RenderError;
 use crate::render::schedule::GestureCompileError;
@@ -66,6 +67,7 @@ pub struct FlueDgPerformance {
     launched: Vec<f64>,
     outlet: Option<BaffledOutletObservation>,
     mouth: Option<mouth::MouthPressure>,
+    observer_gas: Option<GasPropagationReport>,
     poisoned: bool,
 }
 
@@ -148,7 +150,7 @@ impl FlueDgPerformance {
             .map_err(|_| invalid("DG flue callback exceeds available allocation"))?;
         launched.resize(config.max_block, 0.0);
         Ok(Self { voice, schedule, config, controls, next: 0, launched, outlet,
-            mouth: None, poisoned: false })
+            mouth: None, observer_gas: None, poisoned: false })
     }
 
     pub const fn voice(&self) -> &FlueVoice { &self.voice }

@@ -9,6 +9,7 @@ use crate::bernoulli_aperture::radiation::environment::multiport::input::MimoRad
 use crate::bernoulli_aperture::radiation::environment::multiport::source::ComputedBaffledInput;
 use crate::pcm_wav::baffled::openings::CircularOpening;
 use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver};
+use crate::pcm_wav::baffled::gas::{GasPropagation, GasPropagationReport};
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_exec::CancelGate;
 use fs_duct::dg::PortId;
@@ -212,6 +213,34 @@ impl DgPortLoad {
         mechanics_rate_hz: u32,
         receiver: CircularOutletReceiver,
     ) -> Result<BaffledPressure, AcousticRealizeError> {
+        self.admit_baffled_receiver(mechanics_rate_hz, receiver)?;
+        let source = self.radiation_record().expect("admitted exterior source");
+        BaffledPressure::circular_openings_multirate_differentiating(
+            source.apertures(), mechanics_rate_hz, mechanics_rate_hz,
+            receiver, source.gas_record().state().into(),
+        ).map_err(AcousticRealizeError::Nonlinear)
+    }
+
+    /// Observe the same accepted terminal flows with the complete bound exterior
+    /// material on every source-to-microphone path. The selected gas law belongs
+    /// to the shared Rayleigh owner, never to a reed or jet. It does not change
+    /// the physical terminal reaction or add bulk absorption inside the bore.
+    pub fn baffled_receiver_with_gas(
+        &self, mechanics_rate_hz: u32, receiver: CircularOutletReceiver,
+        propagation: &GasPropagation, gate: &CancelGate,
+    ) -> Result<(BaffledPressure, GasPropagationReport), AcousticRealizeError> {
+        self.admit_baffled_receiver(mechanics_rate_hz, receiver)?;
+        let source = self.radiation_record().expect("admitted exterior source");
+        BaffledPressure::circular_openings_multirate_gas_differentiating(
+            source.apertures(), mechanics_rate_hz, mechanics_rate_hz,
+            receiver, source.gas_record().state(), propagation,
+            &mut || gate.is_requested(),
+        ).map_err(AcousticRealizeError::Nonlinear)
+    }
+
+    fn admit_baffled_receiver(
+        &self, mechanics_rate_hz: u32, receiver: CircularOutletReceiver,
+    ) -> Result<(), AcousticRealizeError> {
         if mechanics_rate_hz == 0 || self.state().step_count() != 0
             || self.propagator().dt().to_bits()
                 != (1.0 / f64::from(mechanics_rate_hz)).to_bits()
@@ -247,9 +276,6 @@ impl DgPortLoad {
         {
             return Err(invalid("baffled DG receiver exceeds its radiation or wall-loss band"));
         }
-        BaffledPressure::circular_openings_multirate_differentiating(
-            source.apertures(), mechanics_rate_hz, mechanics_rate_hz,
-            receiver, source.gas_record().state().into(),
-        ).map_err(AcousticRealizeError::Nonlinear)
+        Ok(())
     }
 }

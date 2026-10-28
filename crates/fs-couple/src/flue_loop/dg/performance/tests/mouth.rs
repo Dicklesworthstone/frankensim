@@ -2,6 +2,50 @@ use super::*;
 use crate::pcm_wav::baffled::openings::RectangularOutletReceiver;
 
 #[test]
+fn shared_observer_gas_covers_mouth_and_terminals_without_changing_the_source() {
+    use crate::pcm_wav::baffled::gas::{GasPropagation, GasPropagationLimits};
+    let gate = CancelGate::new_clock_free();
+    let input = baffled_input().replace("observation baffled 0 0 0.2 8 32 2000",
+        concat!("observation baffled 0 0 0.2 8 32 2000\n",
+            "observer_gas stokes-kirchhoff 4096 1000000 50000000\n",
+            "mouth_radiation -0.03 0 4 2"));
+    let source = FlueDgFilePerformance::from_bytes(input.as_bytes(), 37, &gate).unwrap();
+    let renderer = source.renderer();
+    let report = renderer.observer_gas().unwrap();
+    let mouth_report = renderer.mouth_observer_gas().unwrap();
+    let load = renderer.voice().dg().unwrap().load();
+    assert_eq!(report.gas, *load.radiation_record().unwrap().gas_record().state());
+    assert_eq!(report.gas, mouth_report.gas);
+    assert_ne!(report.gas, *renderer.voice().gas());
+    assert_eq!(report.additional_latency_samples, mouth_report.additional_latency_samples);
+    assert_eq!(renderer.baffled_receiver().unwrap().filter_delay_samples(),
+        renderer.mouth_receiver().unwrap().filter_delay_samples());
+    let make = |block| {
+        let mut config = *renderer.config();
+        config.max_block = block;
+        FlueDgPerformance::with_baffled_outlet(replica_voice(&source),
+            renderer.schedule().clone(), config, renderer.baffled_receiver_config().unwrap())
+            .unwrap().with_mouth_radiation(renderer.mouth_radiation().unwrap()).unwrap()
+    };
+    let mut original = make(512);
+    let mut partitioned = make(37).with_observer_gas(
+        &GasPropagation::classical(GasPropagationLimits::surface_reference()), &gate,
+    ).unwrap();
+    let mut authored = source.into_renderer();
+    let (mut expected, mut whole, mut changed) = (vec![0.0;512], vec![0.0;512], vec![0.0;512]);
+    original.block(&mut expected).unwrap();
+    for block in whole.chunks_mut(37) { authored.block(block).unwrap(); }
+    for block in changed.chunks_mut(37) { partitioned.block(block).unwrap(); }
+    assert_eq!(whole, changed);
+    assert!(whole.iter().zip(&expected).any(|(a,b)| a != b));
+    assert_eq!(authored.voice().dg().unwrap().load().state(), original.voice().dg().unwrap().load().state());
+    assert_eq!(authored.voice().dg().unwrap().load().state(), partitioned.voice().dg().unwrap().load().state());
+    assert!(authored.with_observer_gas(
+        &GasPropagation::classical(GasPropagationLimits::surface_reference()), &gate,
+    ).is_err());
+}
+
+#[test]
 fn material_bound_mouth_reaction_and_signed_radiation_share_the_accepted_dg_step() {
     let input = baffled_input()
         .replace("flue 0.010 0.001 0.004 0 0 0.02", "flue 0.010 0.001 0.004 0 0 0")

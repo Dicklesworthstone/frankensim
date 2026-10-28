@@ -7,10 +7,12 @@ use crate::acoustic_realize::AcousticRealizeError;
 use crate::flue_loop::mouth_radiation::RectangularMouthLoad;
 use crate::pcm_wav::baffled::openings::RectangularOutletReceiver;
 use fs_exec::CancelGate;
+use super::{GasPropagation, GasPropagationReport};
 
 pub(super) struct MouthPressure {
     input: FlueMouthRadiation,
     receiver: BaffledPressure,
+    observer_gas: Option<GasPropagationReport>,
 }
 
 impl MouthPressure {
@@ -41,7 +43,8 @@ impl FlueDgPerformance {
         if input.aperture_size_m.is_some() {
             return Err(invalid("independent mouth aperture is supported only by the flue network"));
         }
-        if self.poisoned || self.voice.samples_rendered() != 0 || self.mouth.is_some() {
+        if self.poisoned || self.voice.samples_rendered() != 0 || self.mouth.is_some()
+            || self.observer_gas.is_some() {
             return Err(invalid("DG mouth observation requires one cold attachment"));
         }
         let outlet = self.outlet.as_ref()
@@ -76,8 +79,65 @@ impl FlueDgPerformance {
         ).map_err(|error| GestureCompileError::Render(RenderError::Voice(
             AcousticRealizeError::Nonlinear(error),
         )))?;
-        self.mouth = Some(MouthPressure { input, receiver });
+        self.mouth = Some(MouthPressure { input, receiver, observer_gas: None });
         Ok(self)
+    }
+
+    /// Apply the same physical exterior gas law to ALL observed openings.
+    /// Attach the optional mouth first. Terminal and mouth preparations retain
+    /// their actual paths and receive the same reported numerical padding before
+    /// publication, so summing them preserves physical phase and flight time.
+    /// This changes only the observer, not the jet, bore or radiation reaction.
+    pub fn with_observer_gas(
+        mut self, propagation: &GasPropagation, gate: &CancelGate,
+    ) -> Result<Self, GestureCompileError> {
+        if self.poisoned || self.voice.samples_rendered() != 0 || self.observer_gas.is_some() {
+            return Err(invalid("DG gas observation requires one cold attachment"));
+        }
+        let outlet = self.outlet.as_ref()
+            .ok_or_else(|| invalid("gas propagation requires the bound exterior microphone"))?;
+        let load = self.voice.dg().expect("admitted DG source").load();
+        let source = load.radiation_record().expect("admitted computed exterior");
+        let (mut receiver, mut report) = load.baffled_receiver_with_gas(
+            self.config.sample_rate_hz, outlet.config, propagation, gate,
+        ).map_err(|error| GestureCompileError::Render(RenderError::Voice(error)))?;
+        let mut mouth_receiver = if let Some(mouth) = &self.mouth {
+            Some(BaffledPressure::rectangular_outlet_multirate_gas_differentiating(
+                [self.voice.geometry.flue_width_m, self.voice.geometry.cut_up_m],
+                self.config.sample_rate_hz, self.config.sample_rate_hz,
+                RectangularOutletReceiver {
+                    center_m: mouth.input.center_m, position_m: outlet.config.position_m,
+                    cells: mouth.input.cells,
+                    maximum_frequency_hz: outlet.config.maximum_frequency_hz,
+                }, source.gas_record().state(), propagation, &mut || gate.is_requested(),
+            ).map_err(|error| GestureCompileError::Render(RenderError::Voice(
+                AcousticRealizeError::Nonlinear(error),
+            )))?)
+        } else { None };
+        if let Some((mouth, mouth_report)) = &mut mouth_receiver {
+            let latency = report.additional_latency_samples.max(mouth_report.additional_latency_samples);
+            let align_error = |error| GestureCompileError::Render(RenderError::Voice(
+                AcousticRealizeError::Nonlinear(error)));
+            receiver.align_gas_latency(&mut report, latency).map_err(align_error)?;
+            mouth.align_gas_latency(mouth_report, latency).map_err(align_error)?;
+        }
+        if gate.is_requested() { return Err(invalid("DG material observation cancelled")); }
+        self.outlet.as_mut().expect("admitted exterior observer").receiver = receiver;
+        self.observer_gas = Some(report);
+        if let Some((receiver, report)) = mouth_receiver {
+            let mouth = self.mouth.as_mut().expect("original physical mouth");
+            mouth.receiver = receiver;
+            mouth.observer_gas = Some(report);
+        }
+        Ok(self)
+    }
+
+    /// Source-derived gas propagation on every circular terminal path.
+    pub fn observer_gas(&self) -> Option<&GasPropagationReport> { self.observer_gas.as_ref() }
+
+    /// Same exterior law and common numerical padding on the original mouth.
+    pub fn mouth_observer_gas(&self) -> Option<&GasPropagationReport> {
+        self.mouth.as_ref().and_then(|mouth| mouth.observer_gas.as_ref())
     }
 
     /// Replace the authored mouth loss and end correction with the existing

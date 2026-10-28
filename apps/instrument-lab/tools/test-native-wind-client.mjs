@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFile } from "node:fs/promises";
 import { nativeWindStatus, renderNativeWind, renderNativeWindBundle } from "../src/native-wind-client.mjs";
+import { validateInput } from "./native-wind-protocol.mjs";
 
 const status = { available: true, busy: false, token: "test-session",
   maximumSourceBytes: 1_048_576, maximumOutputBytes: 16_777_216, timeoutMs: 60_000 };
@@ -162,6 +164,24 @@ test("higher mechanical clocks request the original native decimator without mod
     assert.equal(Buffer.from(packet.source, "base64").toString(), source);
     return audio();
   });
+});
+
+test("canonical DG flute and reed atmosphere records reach the native packet unchanged", async () => {
+  const connected = {...status, maximumAttachments:32, maximumAttachmentFileBytes:8388608,
+    maximumAttachmentBytes:33554432, maximumRequestBytes:48000000};
+  for (const path of ["flue-dg-baffled.performance", "material_modal_valve/paired-dg-chimney.performance"]) {
+    const bytes = await readFile(new URL(`../../../crates/fs-couple/examples/${path}`, import.meta.url));
+    const source = bytes.toString("utf8");
+    assert.match(source, /^observer_gas stokes-kirchhoff \d+ \d+ \d+$/m);
+    assert.match(source, /^(?:clock 96000|audio 96000 96000 \d+ \S+)$/m);
+    await renderNativeWindBundle(source, [], connected, {decimate:true}, undefined, async (_url, options) => {
+      const packet = validateInput(Buffer.from(options.body), true);
+      assert.deepEqual(Buffer.from(packet.source), bytes);
+      assert.equal(packet.renderer ?? "wind", "wind");
+      assert.equal(packet.decimate, true);
+      return audio();
+    });
+  }
 });
 
 test("gas source associations accompany exact source and pack bytes without browser coefficients", async () => {

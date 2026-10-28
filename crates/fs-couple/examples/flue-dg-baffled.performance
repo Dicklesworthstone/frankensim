@@ -12,6 +12,7 @@ jet 8 1e-6 3 0
 jet_limits 1 0.3 8192
 controls 128 100000
 observation baffled 0 0 0.2 8 32 2000
+observer_gas stokes-kirchhoff 4096 1000000 50000000
 gesture
 frankensim-gesture-schedule-v1
 control_rate_hz	1000

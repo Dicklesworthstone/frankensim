@@ -177,6 +177,29 @@ admission, convergence limits and specimen qualifications still apply when
 rendering. Opening or saving works on the hosted viewer too; rendering requires
 the local companion described above.
 
+### Flute and reed atmosphere propagation
+
+The **Flute — resolved duct and material atmosphere** starter opens the original
+`flue-dg-baffled.performance`. Its spatial duct, outlet and rectangular mouth
+use the native solver, with separate bore and exterior gases. Native decimation
+is selected for its 96 kHz mechanical clock.
+
+The flute starter and `paired-dg-chimney.performance` declare
+`observer_gas stokes-kirchhoff MAX_PATHS MAX_FILTER_TAPS MAX_KERNEL_TERMS`
+after `observation`. This applies the existing material-dependent propagation
+law to each physical source-to-microphone path, using the complete `dg_exterior`
+state. Temperature, pressure and mixture changes therefore reach density,
+sound speed, viscous and thermal absorption, and the associated dispersion.
+The flute mouth and outlet retain their relative propagation delay. The three
+integer limits bound preparation work; they are numerical budgets rather than
+acoustic parameters.
+
+For an explicit comparison, change only `stokes-kirchhoff` to `lossless`, keeping
+the rest of the source and PCM scale fixed. The observer selection changes
+exterior propagation; it does not add molecular-relaxation dynamics inside the
+bore or qualify the interim jet model as a measured flute. The browser sends the
+original records unchanged and adds no equalization or normalization.
+
 ### Material reeds and compliant walls
 
 The **Material reeds** starters open the original paired-blade descriptions.
@@ -203,6 +226,21 @@ original packs named in the selected source. The
 [native string instructions](../../crates/fs-couple/examples/material_strings/README.md)
 show how to build those packs from the supplied manifests. Both starters are
 synthetic integration fixtures, not measured violin, cello or bass models.
+
+String, body, region, fiber and contact-layer material paths accept full
+`NormalizedMaterialCardPack` artifacts (`FSMCDPK`) as well as legacy
+`NormalizedPack` claim artifacts (`FSMATPK`). These are the same full material
+cards used by material reeds and duct walls. The native decoder reads the wire
+format, independent of filename suffix. Use **Replace…** on an attached file to
+keep its declared path when comparing a different material.
+
+Full cards retain their original chemistry, phase, process, revision, source
+identity and associated model records. The native string resolver uses the
+declared temperature in kelvin and angular frequency in radians per second,
+including compatible typed material axes. Missing claims, incompatible axis
+quantities or unavailable constitutive laws still refuse; retaining a model
+record does not enable an arbitrary new law. No browser conversion to copied
+material constants is involved.
 
 The **Material shear layer** starter uses the original
 `shear-layer-bow.material-strings`. Attach `wire.fsmatpk`, `body.fsmatpk` and

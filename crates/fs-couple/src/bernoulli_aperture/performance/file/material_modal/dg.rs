@@ -10,7 +10,9 @@
 //! geometry/gas/radiation records and optional material walls; optional
 //! upstream_tract followed by the same DG source/wall records; slit_length
 //! none|LENGTH; observation
-//! inlet-pressure|baffled-outlet X Y Z RINGS ANGLES FMAX_HZ; valve REST_GAP;
+//! inlet-pressure|baffled-outlet X Y Z RINGS ANGLES FMAX_HZ; optional observer_gas
+//! stokes-kirchhoff|lossless MAX_PATHS MAX_FILTER_TAPS MAX_KERNEL_TERMS;
+//! valve REST_GAP;
 //! limits; contact; loss; blades and original plate records; optional
 //! wetted_surfaces, pressure_shapes, closure, source_forces, source_pressures;
 //! compile_limits; schedule and the canonical blowing-pressure gesture suffix.
@@ -18,6 +20,8 @@
 //! Audio frames are mechanical samples. Explicit downstream decimation retains
 //! the pressure owner and its reported delay. A baffled observer requires the
 //! actual computed DG terminal and its independently declared exterior gas.
+//! Its optional gas law acts on every original terminal-to-receiver surface
+//! path; omission keeps the original lossless receiver.
 
 use super::{
     BladePropagator, BladeState, LossSelection, MaterialCache,
@@ -37,6 +41,7 @@ use fs_blake3::hash_domain;
 use fs_exec::CancelGate;
 use fs_material::gas::GasState;
 use fs_material::gas_species::input::{GasRecord, ThermochemicalSources};
+use crate::pcm_wav::baffled::gas::GasPropagation;
 
 /// Exact selector for material modal mechanics coupled to the original DG bore.
 pub const MATERIAL_MODAL_DG_VALVE_SCHEMA: &str = "frankensim-material-modal-dg-valve-v1";
@@ -180,6 +185,13 @@ impl MaterialModalDgValvePerformance {
                 "DG observation requires inlet-pressure or baffled-outlet X Y Z RINGS ANGLES FMAX_HZ")),
         };
         row.finish()?;
+        let observer_gas = if rows.lines.clone().next().and_then(|line|
+            line.split_ascii_whitespace().next()) == Some("observer_gas")
+        {
+            let mut row = rows.row("observer_gas")?;
+            Some(GasPropagation::read_record(&mut row.fields)
+                .map_err(|what| bad(row.line, what))?)
+        } else { None };
         let mut row = rows.row("valve")?;
         let rest_opening = row.scalar()?;
         row.finish()?;
@@ -297,6 +309,10 @@ impl MaterialModalDgValvePerformance {
                 sample_rate_hz: mechanics, samples, max_block, max_compile_work, max_controls,
             },
         ).map_err(PlateValveInputError::Gesture)?;
+        if let Some(propagation) = observer_gas {
+            renderer = renderer.with_observer_gas(&propagation, gate)
+                .map_err(PlateValveInputError::Gesture)?;
+        }
         for (blade, events) in forces.into_iter().enumerate() {
             if !events.is_empty() {
                 renderer = renderer.with_material_plate_force_controls(blade, events)

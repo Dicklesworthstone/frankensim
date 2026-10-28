@@ -4,6 +4,8 @@
 //! The geometry is an infinite rigid baffle, not an unbaffled instrument body.
 use super::{BaffledPressure, CircularOutletReceiver, RayleighMedium, MAX_RAYLEIGH_INPUTS};
 use std::collections::BTreeMap;
+use super::gas::{GasPropagation, GasPropagationReport};
+use fs_material::gas::GasState;
 
 /// Physical duct-port binding and complete substep traces, shared by wind sources.
 #[path = "baffled_pressure_duct.rs"]
@@ -134,6 +136,24 @@ impl BaffledPressure {
             output_rate, receiver.position_m, medium)
     }
 
+    /// The same rectangle with material transport on every surface path.
+    /// The complete exterior state, signed flow, quadrature and physical delay
+    /// enter the shared gas Rayleigh owner; no filter follows the pressure sum.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rectangular_outlet_multirate_gas_differentiating(
+        size_m: [f64; 2], mechanics_rate: u32, output_rate: u32,
+        receiver: RectangularOutletReceiver, gas: &GasState,
+        propagation: &GasPropagation, cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Self, GasPropagationReport), String> {
+        Self::opening_clock_ratio(mechanics_rate, output_rate)?;
+        if receiver.maximum_frequency_hz > 0.45 * f64::from(output_rate) {
+            return Err("rectangular receiver band exceeds its differentiating output clock".into());
+        }
+        let surface = Self::rectangular_surface(size_m, receiver, gas.into())?;
+        Self::new_multirate_gas_differentiating(&surface, 1, mechanics_rate,
+            output_rate, receiver.position_m, gas, propagation, cancelled)
+    }
+
     pub(crate) fn rectangular_surface(size_m: [f64; 2], receiver: RectangularOutletReceiver,
         medium: RayleighMedium) -> Result<Vec<super::SurfaceSample>, String>
     {
@@ -238,6 +258,40 @@ impl BaffledPressure {
         })
     }
 
+    /// Original circular opening surfaces with absorption and dispersion from
+    /// the complete exterior gas on each individual quadrature path. All disks
+    /// share one physical kernel and causal padding, preserving their relative
+    /// phases and signed volume-flow basis.
+    #[allow(clippy::too_many_arguments)]
+    pub fn circular_openings_multirate_gas_differentiating(
+        openings: &[CircularOpening], mechanics_rate: u32, output_rate: u32,
+        receiver: CircularOutletReceiver, gas: &GasState,
+        propagation: &GasPropagation, cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Self, GasPropagationReport), String> {
+        Self::opening_clock_ratio(mechanics_rate, output_rate)?;
+        Self::admit_openings(openings, receiver)?;
+        if receiver.maximum_frequency_hz > 0.45 * f64::from(output_rate) {
+            return Err("differentiating outlet band exceeds 0.45 of its output clock".into());
+        }
+        let mut surface = Vec::new();
+        for (index, opening) in openings.iter().enumerate() {
+            if cancelled() { return Err("material opening propagation cancelled".into()); }
+            let local = CircularOutletReceiver { position_m: [
+                receiver.position_m[0] - opening.center_m[0],
+                receiver.position_m[1] - opening.center_m[1], receiver.position_m[2]], ..receiver };
+            for mut sample in Self::circular_surface(opening.radius_m, local, gas.into())? {
+                sample.position_m[0] += opening.center_m[0];
+                sample.position_m[1] += opening.center_m[1];
+                let weight = sample.mode_shape[0];
+                sample.mode_shape = vec![0.0; openings.len()];
+                sample.mode_shape[index] = weight;
+                surface.push(sample);
+            }
+        }
+        Self::new_multirate_gas_differentiating(&surface, openings.len(),
+            mechanics_rate, output_rate, receiver.position_m, gas, propagation, cancelled)
+    }
+
     fn opening_clock_ratio(mechanics: u32, output: u32) -> Result<usize, String> {
         if !(8_000..=192_000).contains(&output) || mechanics == 0
             || mechanics % output != 0 || !(1..=16).contains(&(mechanics / output)) {
@@ -250,27 +304,7 @@ impl BaffledPressure {
         ratio: usize, mut disk_receiver: impl FnMut(f64, CircularOutletReceiver) -> Result<Self, String>)
         -> Result<Self, String>
     {
-        if !(1..=MAX_RAYLEIGH_INPUTS).contains(&openings.len())
-            || !(1..=128).contains(&receiver.radial_rings)
-            || !(8..=512).contains(&receiver.angular_points)
-            || openings.len() * receiver.radial_rings * receiver.angular_points > 120_000 {
-            return Err("circular opening array exceeds the shared input or surface budget".into());
-        }
-        for (i, opening) in openings.iter().enumerate() {
-            if !opening.radius_m.is_finite() || opening.radius_m <= 0.0
-                || opening.center_m.iter().any(|x| !x.is_finite()) {
-                return Err("circular opening needs finite coordinates and positive radius".into());
-            }
-            for other in &openings[..i] {
-                let dx = opening.center_m[0] - other.center_m[0];
-                let dy = opening.center_m[1] - other.center_m[1];
-                let distance = fs_math::det::sqrt(dx * dx + dy * dy);
-                let minimum = opening.radius_m + other.radius_m;
-                if !distance.is_finite() || !minimum.is_finite() || distance < minimum {
-                    return Err("coplanar circular openings must not overlap".into());
-                }
-            }
-        }
+        Self::admit_openings(openings, receiver)?;
         let mut bins = BTreeMap::<usize, Vec<f64>>::new();
         let mut first = None;
         for (i, opening) in openings.iter().enumerate() {
@@ -307,5 +341,32 @@ impl BaffledPressure {
         // evaluator even when growing the history retained its allocation.
         result.prepare_taps();
         Ok(result)
+    }
+
+    fn admit_openings(openings: &[CircularOpening], receiver: CircularOutletReceiver)
+        -> Result<(), String>
+    {
+        if !(1..=MAX_RAYLEIGH_INPUTS).contains(&openings.len())
+            || !(1..=128).contains(&receiver.radial_rings)
+            || !(8..=512).contains(&receiver.angular_points)
+            || openings.len() * receiver.radial_rings * receiver.angular_points > 120_000 {
+            return Err("circular opening array exceeds the shared input or surface budget".into());
+        }
+        for (i, opening) in openings.iter().enumerate() {
+            if !opening.radius_m.is_finite() || opening.radius_m <= 0.0
+                || opening.center_m.iter().any(|x| !x.is_finite()) {
+                return Err("circular opening needs finite coordinates and positive radius".into());
+            }
+            for other in &openings[..i] {
+                let dx = opening.center_m[0] - other.center_m[0];
+                let dy = opening.center_m[1] - other.center_m[1];
+                let distance = fs_math::det::sqrt(dx * dx + dy * dy);
+                let minimum = opening.radius_m + other.radius_m;
+                if !distance.is_finite() || !minimum.is_finite() || distance < minimum {
+                    return Err("coplanar circular openings must not overlap".into());
+                }
+            }
+        }
+        Ok(())
     }
 }

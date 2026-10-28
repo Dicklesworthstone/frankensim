@@ -80,6 +80,38 @@ fn material_key_file_reaches_actual_wav_through_the_existing_reed_renderer() {
 fn pack() -> NormalizedMaterialCardPack {
     pack_with_density(900.0)
 }
+
+#[test]
+fn native_material_dg_observer_gas_preserves_source_and_pcm() {
+    use fs_couple::bernoulli_aperture::performance::file::material_modal::dg::MaterialModalDgValvePerformance;
+    use fs_couple::pcm_wav::observation::DecimatedRenderer;
+    let text = include_str!("../../examples/material_modal_valve/paired-dg-chimney.performance")
+        .replace("audio 96000 96000 4800 20", "audio 96000 96000 512 0.02");
+    let material = pack();
+    let source = MaterialModalDgValvePerformance::from_bytes_with_sources(
+        text.as_bytes(), 37, &CancelGate::new_clock_free(), None, |_| Ok(material.clone()),
+    ).unwrap();
+    let report = source.renderer().observer_gas().unwrap();
+    assert_eq!(report.gas, *source.renderer().system().load().radiation_record()
+        .unwrap().gas_record().state());
+    assert_eq!(report.surface_filter_indices.len(), 2*8*32);
+    let mut renderer = DecimatedRenderer::new(source.into_renderer(), 96000, 48000, 37).unwrap();
+    let mut pressure = vec![0.0;256];
+    for block in pressure.chunks_mut(37) { renderer.block(block).unwrap(); }
+    let expected = encode_pcm16_wav(&pressure, 48000, 0.02).unwrap().0;
+    let dir = directory();
+    let input = dir.join("reed-observer-gas.performance");
+    std::fs::write(&input, text).unwrap();
+    std::fs::write(dir.join("blade.matpack"), material.to_bytes()).unwrap();
+    let output = dir.join("reed-observer-gas.wav");
+    success(run(&input, &output, 37, true));
+    assert_eq!(std::fs::read(&output).unwrap(), expected);
+    let metadata = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
+    for token in ["\"observer_gas\":{\"law\":\"stokes-kirchhoff\"",
+        "\"retained_modes\":6", "\"molecular_relaxation_omitted\":true"] {
+        assert!(metadata.contains(token), "{token}");
+    }
+}
 fn pack_with_density(density: f64) -> NormalizedMaterialCardPack {
     pack_with_relaxation(density, 1e8, 0.001)
 }

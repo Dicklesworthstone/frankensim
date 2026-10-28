@@ -481,6 +481,7 @@ At the existing observation position, select:
 
 ```text
 observation baffled 0 0 0.2 8 32 2000
+observer_gas stokes-kirchhoff 4096 1000000 50000000
 ```
 
 These are microphone X/Y/Z in metres, radial/angular quadrature counts and
@@ -488,6 +489,30 @@ maximum declared frequency in Hz. Every accepted outward outlet-flow sample
 enters the original differentiating retarded Rayleigh observer once. It uses
 the retained source's exact opening and exterior, without adding a second
 reaction. Inlet observation remains available with the same reaction active.
+
+The optional `observer_gas` record follows `observation` and precedes any
+`mouth_radiation` row. It selects `stokes-kirchhoff` or an explicit `lossless`
+comparison, followed by positive limits for distinct exact path lengths,
+retained source-filter taps and kernel construction terms. Their shared
+ceilings are 16,384, 4,000,000 and 500,000,000. Omission preserves the previous
+lossless observation. An internal-pressure observation cannot select an
+exterior propagation law.
+
+Classical propagation uses the complete bound `dg_exterior` state: density,
+sound speed, viscosity, conductivity and heat capacity. A change of gas
+composition, pressure or temperature therefore rebuilds the physical transfer
+of every original surface path. It applies to all declared circular terminals
+and to the optional rectangular flute mouth before their signed pressures are
+summed. Physical flight time and gas phase remain separate from one common,
+reported numerical latency; no post-mix equalizer or extra reaction is added.
+Metadata retains the applied law, actual gas, path work and source-filter tail
+certificate bounds; the library report keeps every original path receipt.
+Molecular relaxation is explicitly reported as omitted by this
+classical law; the native record does not invent species relaxation spectra or
+apply a terrestrial-air law to an arbitrary gas mixture. Library callers may
+select the existing validated ISO or sourced molecular law through the same
+`GasPropagation` owner. This selection does not add bulk molecular relaxation
+inside the bore.
 
 This observer runs on the mechanical clock within its original 8–192 kHz rate
 domain. The existing `--decimate` path remains available for explicit 96-to-48

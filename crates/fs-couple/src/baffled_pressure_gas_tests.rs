@@ -228,6 +228,50 @@ fn common_padding_preserves_near_receiver_physical_delay_without_future_samples(
 }
 
 #[test]
+fn separately_prepared_apertures_keep_one_latency_and_their_physical_relative_phase() {
+    let (gas, air) =
+        fs_material::iso9613::TerrestrialAir::moist_air(293.15, 101_325.0, 0.5).unwrap();
+    let mut selection = controls();
+    selection.law = GasAbsorptionModel::Iso9613Air { relative_humidity: 0.5, air };
+    let surfaces = [
+        SurfaceSample { position_m: [0.0; 3], area_m2: 0.01, mode_shape: vec![1.0] },
+        SurfaceSample { position_m: [2.0, 0.0, 0.0], area_m2: 0.02, mode_shape: vec![-0.4] },
+    ];
+    let mut receivers: Vec<_> = surfaces.iter().map(|surface|
+        BaffledPressure::new_multirate_gas_differentiating(
+            core::slice::from_ref(surface), 1, 48_000, 48_000, [0.0, 0.0, 0.05],
+            &gas, &selection, &mut || false,
+        ).unwrap()
+    ).collect();
+    assert_ne!(receivers[0].1.additional_latency_samples, receivers[1].1.additional_latency_samples);
+    let latency = receivers.iter().map(|(_, report)| report.additional_latency_samples).max().unwrap();
+    assert!(latency > 0);
+    for (receiver, report) in &mut receivers {
+        receiver.align_gas_latency(report, latency).unwrap();
+        let (gain, moment) = receiver.kernels.iter().fold((0.0, 0.0), |(g,m), (n,row)|
+            (g + row[0], m + *n as f64 * row[0]));
+        let expected = report.filters[0].range_m / gas.sound_speed * 48_000.0
+            + latency as f64 + path::HALF as f64;
+        assert!((moment/gain - expected).abs() < 1e-4);
+        assert_eq!(report.additional_latency_samples, latency);
+    }
+    assert_eq!(receivers[0].0.filter_delay_samples(), receivers[1].0.filter_delay_samples());
+    // Independent physical contributions must reconstruct the single signed
+    // surface integral, including frequency-dependent gas phase and flight time.
+    let (together, report) = BaffledPressure::new_multirate_gas_differentiating(
+        &surfaces, 1, 48_000, 48_000, [0.0, 0.0, 0.05], &gas, &selection, &mut || false,
+    ).unwrap();
+    assert_eq!(report.additional_latency_samples, latency);
+    for frequency in [100.0, 4000.0, 12_000.0, 21_000.0] {
+        let omega = TAU * frequency / 48_000.0;
+        let a = kernel(&receivers[0].0, 0, omega);
+        let b = kernel(&receivers[1].0, 0, omega);
+        let actual = kernel(&together, 0, omega);
+        assert!((actual[0]-a[0]-b[0]).hypot(actual[1]-a[1]-b[1]) < 1e-12);
+    }
+}
+
+#[test]
 fn exact_distance_sharing_and_all_work_source_and_cancellation_refusals_are_explicit() {
     let gas = gas(1.0);
     let surface = surface();
@@ -291,4 +335,62 @@ fn exact_distance_sharing_and_all_work_source_and_cancellation_refusals_are_expl
     .unwrap();
     assert_eq!(report.filters.len(), 1);
     assert_eq!(report.surface_filter_indices, [0, 0]);
+}
+
+#[test]
+fn opening_array_keeps_each_signed_path_and_material_transport_at_fixed_density_and_speed() {
+    use super::super::{CircularOutletReceiver, openings::CircularOpening};
+    let openings = [
+        CircularOpening { center_m: [-0.05, 0.0], radius_m: 0.001 },
+        CircularOpening { center_m: [0.05, 0.0], radius_m: 0.001 },
+    ];
+    let config = CircularOutletReceiver { position_m: [0.02, 0.0, 0.5],
+        radial_rings: 1, angular_points: 8, maximum_frequency_hz: 12_000.0 };
+    let build = |gas: &GasState, selection: &GasPropagation| {
+        BaffledPressure::circular_openings_multirate_gas_differentiating(
+            &openings, 48_000, 48_000, config, gas, selection, &mut || false,
+        ).unwrap()
+    };
+    let gases = [gas(1.0), gas(100.0)];
+    let (mut low, report) = build(&gases[0], &controls());
+    let (mut high, altered) = build(&gases[1], &controls());
+    assert_eq!(report.surface_filter_indices.len(), 16);
+    assert!(report.filters.len() > 1, "actual path lengths cannot collapse to one range");
+    assert_eq!(report.gas.density, altered.gas.density);
+    assert_eq!(report.gas.sound_speed, altered.gas.sound_speed);
+    assert_ne!(report.gas.dynamic_viscosity, altered.gas.dynamic_viscosity);
+    let mut difference = 0.0;
+    for sample in 0..1024 {
+        let v = (TAU * 12_000.0 * sample as f64 / 48_000.0).sin() * 1e-6;
+        let a = low.step_trace(&[v, 0.0]).unwrap();
+        let b = high.step_trace(&[v, 0.0]).unwrap();
+        difference += (a-b).powi(2);
+    }
+    assert!(difference > 1e-14);
+    let mut lossless = controls();
+    lossless.law = GasAbsorptionModel::Lossless;
+    let (mut explicit, _) = build(&gases[0], &lossless);
+    let mut original = BaffledPressure::circular_openings_multirate_differentiating(
+        &openings, 48_000, 48_000, config, (&gases[0]).into(),
+    ).unwrap();
+    for sample in 0..512 {
+        let v = (sample as f64 * 0.3).sin() * 1e-6;
+        let flow = [v, -v];
+        let (a,b) = (explicit.step_trace(&flow).unwrap(), original.step_trace(&flow).unwrap());
+        assert!((a-b).abs() < 1e-12, "original signed cancellation is retained");
+    }
+}
+
+#[test]
+fn shared_native_gas_record_rejects_implicit_species_laws_and_unbounded_work() {
+    let read = |text: &str| GasPropagation::read_record(&mut text.split_ascii_whitespace());
+    assert_eq!(read("stokes-kirchhoff 4096 1000000 50000000").unwrap().law,
+        GasAbsorptionModel::StokesKirchhoff);
+    assert_eq!(read("lossless 1 1 1000").unwrap().law, GasAbsorptionModel::Lossless);
+    for text in ["", "iso9613 1 1 1", "molecular 1 1 1",
+        "stokes-kirchhoff 0 1 1", "stokes-kirchhoff 16385 1 1",
+        "stokes-kirchhoff 1 4000001 1", "stokes-kirchhoff 1 1 500000001",
+        "lossless 1 1", "lossless 1 1 1 extra"] {
+        assert!(read(text).is_err(), "{text}");
+    }
 }

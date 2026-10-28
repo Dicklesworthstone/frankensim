@@ -15,6 +15,7 @@ use crate::bernoulli_aperture::performance::force::ForceSchedule;
 use crate::bernoulli_aperture::tube::TubeDrive;
 use crate::bernoulli_aperture::two_sided::observer::schedule::spatial_pressures::PressureSchedule;
 use crate::pcm_wav::baffled::BaffledPressure;
+use crate::pcm_wav::baffled::gas::{GasPropagation, GasPropagationReport};
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::RenderError;
 use crate::render::schedule::{GestureCompileError, ScheduledControl};
@@ -36,6 +37,7 @@ pub struct LoadedDgPerformance {
     system: LoadedApertureDg,
     observation: ApertureObservation,
     receiver: Option<BaffledPressure>,
+    observer_gas: Option<GasPropagationReport>,
     terminal_flows: Vec<f64>,
     config: AperturePerformanceConfig,
     schedule: GestureSchedule,
@@ -83,11 +85,37 @@ impl LoadedDgPerformance {
             vec![0.0; system.load().terminal_ports().len()]
         } else { Vec::new() };
         Ok(Self {
-            system, observation, receiver, terminal_flows, config, schedule, controls, next: 0,
+            system, observation, receiver, observer_gas: None, terminal_flows, config, schedule, controls, next: 0,
             held_pressure_pa: 0.0, plate_forces: [None, None],
             spatial_pressures: [None, None], last: None, poisoned: false,
         })
     }
+
+    /// Apply an explicit physical exterior propagation law before the first
+    /// sample. Material modes, duct state, reactions and accepted flow are
+    /// unchanged; the shared surface receiver preserves every path and its
+    /// original exterior material, including gas dispersion and causal delay.
+    pub fn with_observer_gas(
+        mut self, propagation: &GasPropagation, gate: &fs_exec::CancelGate,
+    ) -> Result<Self, GestureCompileError> {
+        if self.poisoned || self.system.aperture().accepted_steps() != 0
+            || self.observer_gas.is_some()
+        {
+            return Err(invalid("material gas observation requires one cold attachment"));
+        }
+        let ApertureObservation::TubeBaffled(receiver) = self.observation else {
+            return Err(invalid("material gas propagation requires an exterior receiver"));
+        };
+        let (receiver, report) = self.system.load().baffled_receiver_with_gas(
+            self.config.sample_rate_hz, receiver, propagation, gate,
+        ).map_err(|error| GestureCompileError::Render(RenderError::Voice(error)))?;
+        self.receiver = Some(receiver);
+        self.observer_gas = Some(report);
+        Ok(self)
+    }
+
+    /// Applied exterior law and the source-derived individual path responses.
+    pub fn observer_gas(&self) -> Option<&GasPropagationReport> { self.observer_gas.as_ref() }
 
     /// Complete original mechanical, material and acoustic owners.
     #[must_use]

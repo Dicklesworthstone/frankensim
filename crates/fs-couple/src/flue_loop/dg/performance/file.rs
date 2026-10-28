@@ -5,6 +5,10 @@
 //! paths. Observation is explicitly internal mean-inlet pressure or the
 //! computed outlet's baffled microphone in its original exterior gas. The jet
 //! card remains an exploration source, never a resolved-flow qualification.
+//! After observation, optional `observer_gas stokes-kirchhoff|lossless
+//! MAX_PATHS MAX_FILTER_TAPS MAX_KERNEL_TERMS` selects the shared physical
+//! exterior propagation for every observed opening, including the optional
+//! mouth. Omission retains the original lossless receiver.
 //! After a baffled observation, optional `mouth_radiation X Y WIDTH_CELLS
 //! CUT_UP_CELLS` adds the actual rectangular mouth to that same microphone.
 //! Optional `mouth_reaction none|compact-baffled|mutual-baffled` selects no
@@ -32,6 +36,7 @@ use fs_material::gas_species::input::{GasRecord, ThermochemicalSources};
 use fs_matdb::NormalizedMaterialCardPack;
 use fs_scenario::gesture::GestureSchedule;
 use std::sync::Arc;
+use crate::pcm_wav::baffled::gas::GasPropagation;
 
 pub const FLUE_DG_PERFORMANCE_SCHEMA: &str = "frankensim-flue-dg-performance-v1";
 
@@ -266,6 +271,11 @@ impl FlueDgFilePerformance {
             return Err(bad(rows.line, "DG flue control budget exceeds 262144 ticks"));
         }
         let observation = read_observation(&mut rows)?;
+        let observer_gas = if rows.next_is("observer_gas") {
+            let mut row = rows.row("observer_gas")?;
+            Some(GasPropagation::read_record(&mut row.fields)
+                .map_err(|what| bad(row.line, what))?)
+        } else { None };
         let (mouth_radiation, mouth_reaction) = read_mouth(&mut rows, observation.is_some())?;
         if rows.lines.next().is_some() {
             return Err(bad(rows.line + 1, "unexpected records before gesture section"));
@@ -331,6 +341,10 @@ impl FlueDgFilePerformance {
             MouthReaction::MutualBaffled => renderer.with_mutual_mouth_reaction(gate)
                 .map_err(FlueInputError::Performance)?,
         };
+        if let Some(propagation) = observer_gas {
+            renderer = renderer.with_observer_gas(&propagation, gate)
+                .map_err(FlueInputError::Performance)?;
+        }
         poll(gate)?;
         let info = FluePerformanceInfo {
             input_hash: hash_domain("org.frankensim.fs-couple.flue-dg-performance.v1", bytes),

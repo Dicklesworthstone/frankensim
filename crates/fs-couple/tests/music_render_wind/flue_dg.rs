@@ -49,3 +49,33 @@ fn original_dg_flue_reaches_the_existing_wind_decimator_and_pcm_writer() {
     assert!(!output.exists());
     assert!(!output.with_extension("provenance.json").exists());
 }
+
+#[test]
+fn native_dg_flue_observer_gas_reaches_mouth_terminal_and_pcm() {
+    let data = include_str!("../../examples/flue-dg-baffled.performance")
+        .replace("output 2048 20", "output 512 0.02")
+        .replace("50000000\n", "50000000\nmouth_radiation -0.03 0 4 2\n")
+        .replace("events\t1\nevent\t1e-2\t0e0\tpressure-pa\t0e0\n", "events\t0\n");
+    let source = FlueDgFilePerformance::from_bytes(data.as_bytes(), 37,
+        &CancelGate::new_clock_free()).unwrap();
+    assert!(source.renderer().observer_gas().is_some());
+    assert!(source.renderer().mouth_observer_gas().is_some());
+    let info = source.info();
+    let mut renderer = DecimatedRenderer::new(source.into_renderer(),
+        info.sample_rate_hz, 48000, 37).unwrap();
+    let mut pressure = vec![0.0; 256];
+    for chunk in pressure.chunks_mut(37) { renderer.block(chunk).unwrap(); }
+    let expected = encode_pcm16_wav(&pressure, 48000, info.full_scale_pa).unwrap().0;
+    let dir = directory();
+    let input = dir.join("gas-mouth.performance");
+    std::fs::write(&input, data).unwrap();
+    let output = dir.join("gas-mouth.wav");
+    success(run(&input, &output, 37, true));
+    assert_eq!(std::fs::read(&output).unwrap(), expected);
+    let metadata = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
+    for token in ["\"observer_gas\":{\"law\":\"stokes-kirchhoff\"",
+        "\"mouth_observer_gas\":{\"law\":\"stokes-kirchhoff\"",
+        "\"molecular_relaxation_omitted\":true", "\"additional_latency_samples\":"] {
+        assert!(metadata.contains(token), "{token}");
+    }
+}

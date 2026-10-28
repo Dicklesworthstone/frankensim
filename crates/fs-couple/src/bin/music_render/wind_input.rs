@@ -471,6 +471,8 @@ pub(super) fn material_modal_dg_provenance(
     let gas_sources = super::thermochemical::provenance(p.gas_records());
     let radiation = super::duct_metadata::dg_radiation_provenance(load);
     let solid_wall = dg_wall_provenance(p.wall_layout());
+    let observation = format!("{observation},\"observer_gas\":{}",
+        super::duct_metadata::observer_gas_provenance(source.observer_gas()));
     let upstream = source.system().upstream_load().map_or_else(String::new, |tract| {
         let duct = tract.duct();
         let mesh = duct.mesh();
@@ -729,6 +731,9 @@ pub(super) fn flue_dg_provenance(
             wall.resolution.quadrature_points, wall.resolution.poles_per_field,
             wall.max_complex_error, wall.max_real_loss_error));
     let solid_wall = dg_wall_provenance(p.wall_layout());
+    let pressure_observation = format!("{pressure_observation},\"observer_gas\":{},\"mouth_observer_gas\":{}",
+        super::duct_metadata::observer_gas_provenance(p.renderer().observer_gas()),
+        super::duct_metadata::observer_gas_provenance(p.renderer().mouth_observer_gas()));
     let source_json = format!("\"flue_dg_input\":{{\"schema\":\"frankensim-flue-dg-performance-v1\",\"blake3\":\"{}\",\"jet_card_source\":\"{}\",\"jet_card_hash\":\"{:016x}\",\"jet_card_authority\":\"{}\",\"compiled_controls\":{},\"propagator\":\"original-exact-dg\",\"operator_identity\":\"{}\",\"total_dofs\":{},\"length_m\":{:e},\"inlet_area_m2\":{:e},\"outlet_area_m2\":{:e},\"inlet_gas\":{inlet_gas},\"outlet_gas\":{outlet_gas},\"wall_band_rad_s\":{band},\"wall_owner\":{wall},\"flue_width_m\":{:e},\"flue_height_m\":{:e},\"cut_up_m\":{:e},\"pressure_point\":\"{pressure_point}\",\"model_scope\":\"original estimated jet and causal material-gas DG bore; solid wall image explicitly recorded; taper uses local-cylinder Webster approximation; source, spatial and nonlinear time convergence remain separate; no resolved turbulence or measured flute qualification\"{pressure_observation}{radiation}{field}{gas_sources}{solid_wall}}}",
         i.input_hash.to_hex(), i.jet_card_source, i.jet_card_hash, p.card().authority.label(),
         i.compiled_controls, duct.operator_identity().to_hex(), duct.total_dofs(),
