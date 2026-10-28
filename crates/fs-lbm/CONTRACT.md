@@ -4459,3 +4459,70 @@ releases it and advances native free-surface motion with data-only rheology
 variants. It independently checks molecular heat against the volume sum of
 mu*gamma_dot^2*dt and face conduction against the same source k(T,gamma_dot),
 alongside the original transfer budgets, clock and refusal rollback.
+
+
+## Spatial finite-inertia immersed-body coupling on D3Q19
+
+`BoundaryGrid3::step_with_partial_saturation_body` couples the three translational
+and three angular velocities of `PartialSaturationBody3` to the native BGK
+populations and then runs the existing pull stream. The supplied symmetric,
+positive-definite inertia is expressed in world axes about the body's center;
+off-diagonal products and asymmetric sampled fractions are retained. Fractions
+are row-major `(z*ny+y)*nx+x`; cell centers are `[x+0.5,y+0.5,z+0.5]`.
+
+At offset `r`, `Gv = V + omega cross r`. The same Noble-Torczynski
+non-equilibrium reflection law as D2Q9 supplies solid impulse
+`B*rho*(u-Gv)`, with `B=epsilon*(tau-1/2)/(1-epsilon+tau-1/2)`.
+The operator reduces `K=sum(B*rho*G^T*G)` through a scalar weight, first
+moments and the six independent rotary moments; one deterministic 6-by-6
+Cholesky solve advances `(M+K/2)*delta_v=sum(B*rho*G^T*(u-Gv_n))+J_external`.
+It never feeds an explicit fluid load back through a tiny inverse body mass.
+The native collision runs once at the solved midpoint velocity. No grid-sized
+matrix, per-step field allocation, nonlinear coupling iteration, or duplicated
+fluid owner is introduced. Existing post/next buffers are reused; first-use
+next storage and fixed 3-by-3/6-by-6 Cholesky factors allocate.
+
+The receipt measures the actual population correction to ordinary BGK,
+equal-and-opposite body impulse and angular impulse about a caller-selected
+origin, center torque reduced without distant-origin subtraction, and midpoint
+body work. Actual rounded velocity changes independently determine body
+kinetic-energy change and a six-component momentum residual. External linear
+impulse acts at the center; the final three external components are a couple.
+All stationary exterior/voxel wall exchanges are separately measured from the
+blended populations using the existing native link receipt. Thus the immersed
+body's action/reaction is not confused with wall reaction. Global angular
+balance on a periodic domain additionally needs periodic transport flux.
+
+This is a force-free BGK, fixed-geometry/world-inertia velocity substep in
+lattice units `dx=dt=1`. The caller owns pose drift and gyroscopic evolution and
+must rotate world inertia when orientation changes. Fluid populations and their
+mass/momentum remain in the immersed volume: body inertia is **additional** to
+that retained fluid, not the physical body density with displaced interior
+fluid removed. This rung does not claim moving geometry/remap, physical-density
+closure, multiple overlapping bodies, body contact, lubrication, free surfaces,
+high-Re validity, calibrated 3-D drag, or complete rigid-body trajectories.
+It also makes no suspension-stress/rheology claim: the inherited
+non-equilibrium reflection law can mispredict stresslets even when torque is
+accurate (Najuch and Sun, *Computers & Fluids* 189, 2019,
+<https://doi.org/10.1016/j.compfluid.2019.05.004>). Momentum balance does not
+validate that constitutive response.
+
+Admission requires finite positive mass, exactly symmetric numerically SPD
+inertia, fractions in `[0,1]` positive only on fluid cells, zero fluid forcing,
+periodic or stationary-wall faces, and body center/covered-point speeds squared
+below `0.03` at the initial, midpoint and final velocities. Unsupported models,
+invalid requests, numerical overflow and cancellation return
+`PartialSaturationError3` without publishing populations, body state or topology
+admission. Scratch may change. Polling occurs at every 64-cell tile in fraction/
+response assembly, collision, first-use scratch initialization and streaming,
+plus immediately before publication; allocation itself is not interruptible.
+
+G0/G3 coverage in `tests/partial_saturation_body3.rs` independently reconstructs
+streamed linear and angular impulse for all six velocities with off-diagonal
+inertia, off-center loading and arbitrary moment origin; checks midpoint work;
+exercises mass/inertia down to `1e-18`; closes repeated full-domain momentum with
+nonzero stationary-wall reaction; verifies common-translation invariance, proper
+axis rotation and origin covariance; reproduces ordinary BGK bits at zero
+fractions; and checks invalid-model/input/cancellation refusal and bit-identical
+retry. These are discrete balance/conformance checks, not a continuum error or
+performance certification, and do not close the full moving-boundary bead.

@@ -24,6 +24,11 @@ mod sgs;
 pub use sgs::{BoundarySgsError3, BoundarySgsReport3};
 mod profile;
 pub use profile::{BoundaryProfileError3, InletFlux3, VelocityProfileReport3};
+mod partial_saturation;
+pub use partial_saturation::{
+    PartialSaturationBody3, PartialSaturationBodyExchange3, PartialSaturationError3,
+    PartialSaturationExchange3,
+};
 
 /// Bit-semantics version for the D3Q19 boundary surface.
 ///
