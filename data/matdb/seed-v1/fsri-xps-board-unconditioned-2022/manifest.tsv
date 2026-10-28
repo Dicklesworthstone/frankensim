@@ -1,0 +1,30 @@
+frankensim.matdb-manifest.v3
+pack_id	fsri-xps-board-unconditioned-2022
+redistribution	permitted	Selected attributed numerical facts from primary FSRI experiments, with original annotations and explicitly identified arithmetic reductions. No source photographs, prose, table layout, raw file or source document is redistributed. Public access and government funding are not asserted to grant a source-document license.
+citation	McKinnon, Weinschenk, Dow, DiDomizio and Madrzykowski, Materials and Products Database, FSRI, UL Research Institutes (2023); Extruded polystyrene insulation board, unconditioned January 2022 HFM experiments; https://materials.fsri.org/materialdetail/extruded-polystyrene-board; source snapshot https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/EPS_Foam_Board; methodology https://materials.fsri.org/experimentalmethodology; reduction https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/02_Scripts/plot_HFM_data_html.py; accessed 2026-10-28.
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	fsri-hfm	properties.tsv	material-tsv-v1
+property	volumetric_capacity	volumetric-heat-capacity	dimensional
+property	specific_heat	specific-heat-capacity	dimensional
+property	apparent_conductivity	apparent-thermal-conductivity	thermal-conductivity
+property	local_conductivity	thermal-conductivity	thermal-conductivity
+property	capacity_sd	computed-volumetric-heat-capacity-sample-standard-deviation	dimensional
+property	specific_heat_sd	reported-specific-heat-capacity-standard-deviation	dimensional
+property	conductivity_sd	reported-apparent-thermal-conductivity-standard-deviation	dimensional
+property	normalization_density	reference-normalization-density	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	test_mean_temperature	test-mean-temperature	absolute-temperature
+axis	local_model	mean-test-temperature-as-local-model	dimensional
+axis	family	source-fsri-xps-board	dimensional
+axis	unconditioned	source-unconditioned	dimensional
+axis	grade_known	source-grade-known	dimensional
+axis	formulation_known	source-formulation-known	dimensional
+axis	moisture_known	source-moisture-content-known	dimensional
+axis	pressure_known	source-contact-pressure-known	dimensional
+axis	statistic	source-statistic-is-mean	dimensional
+axis	specimens	source-specimen-count	dimensional
+axis	stock_thickness	source-stock-thickness	dimensional
+axis	through_thickness	source-hfm-through-thickness	dimensional
+axis	upward	source-hfm-upward-heat-flow	dimensional
+axis	plate_delta	source-hfm-temperature-difference	temperature-difference
+axis	density_temperature_known	source-density-temperature-known	dimensional

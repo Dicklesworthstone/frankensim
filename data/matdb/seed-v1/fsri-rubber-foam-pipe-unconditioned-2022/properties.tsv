@@ -1,0 +1,117 @@
+frankensim.matdb-source.v1
+observation	identity	fsri-rubber-foam-pipe-unconditioned-2022	Elastomeric closed-cell pipe insulation; https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Rubber_Foam_Pipe_Insulation/material.json	Tube-wall stock, nominally 12 mm thick. The source calls this rubber/elastomeric insulation; exact polymer blend, additives, blowing agent and manufacturer are unknown. No EPDM or nitrile identity is inferred. The profile identifies the tested FSRI product population, not a universal foam formulation or a named commercial grade. The stock-thickness selector is source identity metadata; measured instrument thicknesses differ and are recorded below. Unknown pressure and moisture content cannot be replaced with atmospheric pressure or zero moisture. No strength, cell gas transport, thermal expansion, fire/degradation or service-temperature qualification is supplied.
+observation	method	fsri-rubber-foam-pipe-unconditioned-2022	FSRI HFM specimen preparation and methods; https://materials.fsri.org/experimentalmethodology	Unconditioned, named Wet in raw files, means indoor storage at 22 +/- 3 degC and relative humidity 40 +/- 20 percent. It does not mean water-saturated; exact sample moisture is not measured here. These are not oven-dried specimens. General HFM preparation produces planar specimens; conductivity is measured through the sample thickness with upward heat flow. Conductivity follows the source's general ASTM C518 method; heat capacity follows its general ASTM C1784-20 method using equal-temperature plate steps. Applied contact pressure, material-axis mapping, instrument calibration uncertainty and cross-property covariance are not supplied. Cp/volumetric capacity and conductivity are different runs on the same product/conditioning population, not proof of the exact same physical coupon or independent measurements.
+observation	capacity-r1	fsri-rubber-foam-pipe-unconditioned-2022	HFM native volume-capacity results R1; https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Rubber_Foam_Pipe_Insulation/HFM/Rubber_Foam_Pipe_Insulation_HFM_Wet_heatcapacity_220114_R1.tst	Instrument thickness 13.22 mm. Raw result-table temperatures 10.00,20.01,30.01,40.01 degC; corresponding reported heat capacities 68116,69732,72042,74765 J/(m3 K). These values are volumetric, despite the instrument label Specific Heat; they are not J/(kg K). Equal-plate heating steps run 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC. Values summarize those finite steps at their mean temperatures, not infinitesimal calorimetry. No source standard uncertainty is reported for this individual run.
+observation	capacity-r2	fsri-rubber-foam-pipe-unconditioned-2022	HFM native volume-capacity results R2; https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Rubber_Foam_Pipe_Insulation/HFM/Rubber_Foam_Pipe_Insulation_HFM_Wet_heatcapacity_220114_R2.tst	Instrument thickness 13.18 mm. Raw result-table temperatures 10.00,20.01,30.01,40.01 degC; corresponding reported heat capacities 69293,70005,73986,76291 J/(m3 K). These values are volumetric, despite the instrument label Specific Heat; they are not J/(kg K). Equal-plate heating steps run 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC. Values summarize those finite steps at their mean temperatures, not infinitesimal calorimetry. No source standard uncertainty is reported for this individual run.
+observation	capacity-r3	fsri-rubber-foam-pipe-unconditioned-2022	HFM native volume-capacity results R3; https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Rubber_Foam_Pipe_Insulation/HFM/Rubber_Foam_Pipe_Insulation_HFM_Wet_heatcapacity_220114_R3.tst	Instrument thickness 13.13 mm. Raw result-table temperatures 10.00,20.01,30.01,40.01 degC; corresponding reported heat capacities 69043,70991,73602,76075 J/(m3 K). These values are volumetric, despite the instrument label Specific Heat; they are not J/(kg K). Equal-plate heating steps run 5 to 15, 15 to 25, 25 to 35 and 35 to 45 degC. Values summarize those finite steps at their mean temperatures, not infinitesimal calorimetry. No source standard uncertainty is reported for this individual run.
+observation	capacity-reduction	fsri-rubber-foam-pipe-unconditioned-2022	Explicit arithmetic reduction following FSRI temperature grouping; https://github.com/ulfsri/fsri_materials_database/blob/a432697e4b7d40f642b5cc8f384506439ebb32df/02_Scripts/plot_HFM_data_html.py	The three recorded volume-capacity values are arithmetically averaged at each source temperature. Following the primary reduction, temperatures are rounded to 0.1 degC, giving 10,20,30,40 degC; Celsius-to-Kelvin adds exactly 273.15. Computed replicate sample standard deviation is sqrt(sum((C_i-mean_C)^2)/(3-1)), retained as a separate TabulatedOnly statistic rather than a confidence interval or instrument uncertainty. Extra decimal places in computed means/standard deviations are arithmetic, not additional measurement resolution. Linear interpolation of the mean C(T) and reported Cp(T) is an authored approximation between these four source temperature groups, with no extrapolation or quantified interpolation error. No source-independent density(T) is needed for C(T).
+observation	density-normalization	fsri-rubber-foam-pipe-unconditioned-2022	Reported source density inputs; https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Rubber_Foam_Pipe_Insulation/HFM/	Files Rubber_Foam_Pipe_Insulation_Density_Wet_R1.csv, Rubber_Foam_Pipe_Insulation_Density_Wet_R2.csv and Rubber_Foam_Pipe_Insulation_Density_Wet_R3.csv report densities 52,52,51 kg/m3, respectively; masses 27.5,27.8,28.4 g and volumes 529.2,537.3,559.5 cm3. FSRI uses the mean of the reported rounded density column, 51.666666666666664 kg/m3, for heat-capacity normalization; recomputing mass/volume would change that published reduction. Density measurement temperature is unspecified. The reference-normalization-density value is an arithmetic normalization input with no temperature validity, not a constant density law or bulk-density measurement at every thermal knot.
+observation	specific-heat-reduction	fsri-rubber-foam-pipe-unconditioned-2022	Published mass-specific means and scatter; https://materials.fsri.org/materialdetail/rubber-foam-pipe-insulation	FSRI divides mean native volumetric heat capacity by the common mean reported density, then rounds to whole J/(kg K): 1332,1360,1417,1465 at 10,20,30,40 degC. Reported standard deviations 12,13,20,16 J/(kg K) divide native volume-capacity sample SD by that same mean density, rounded to whole units. They do not propagate density scatter or calibration uncertainty. Cp, C and normalization density are algebraically related; they are not three independent measurements. Rounded published Cp is retained without replacing it with an unrounded ratio.
+observation	conductivity	fsri-rubber-foam-pipe-unconditioned-2022	Published apparent conductivity and raw runs; https://materials.fsri.org/materialdetail/rubber-foam-pipe-insulation; https://github.com/ulfsri/fsri_materials_database/tree/a432697e4b7d40f642b5cc8f384506439ebb32df/01_Data/Rubber_Foam_Pipe_Insulation/HFM/	Raw files Rubber_Foam_Pipe_Insulation_HFM_Wet_conductivity_220113_R1.tst, Rubber_Foam_Pipe_Insulation_HFM_Wet_conductivity_220114_R2.tst, Rubber_Foam_Pipe_Insulation_HFM_Wet_conductivity_220114_R3.tst have instrument thicknesses 12.95,13.11,13.3 mm. Each of three specimens has three repeated cycles at each mean temperature, giving nine readings per temperature, not nine independent specimens. Upper/lower plate setpoints are 5/25 and 35/55 degC, a nominal 20 K difference with upward heat flow. The primary script rounds measured mean temperatures 15.01/45.01 degC to 15/45 degC, pools the readings, and rounds means and sample SD to 0.001 W/(m K). Published mean values are 0.034,0.038 W/(m K); both printed SD values are 0.000 due to rounding, not zero uncertainty. This is apparent through-thickness conductivity at a finite temperature difference. Between the two mean-temperature groups, linear interpolation is an authored approximation without a measured error bound; no in-plane or isotropic equivalence is asserted.
+observation	local-model	fsri-rubber-foam-pipe-unconditioned-2022	Explicit use of HFM apparent mean-temperature data as a local conductivity approximation	The local thermal-conductivity curve requires mean-test-temperature-as-local-model=1. This accepts substitution of the source's apparent HFM mean-temperature conductivity for a local scalar through-thickness conductivity at the same numerical temperature. It is an authored engineering approximation, not a deconvolution of the finite 20 K plate difference, proof of isotropy, or a new point measurement. The independent apparent-thermal-conductivity curve retains its native test-mean-temperature axis.
+curve	mean-volume-capacity	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction	volumetric_capacity	temperature	K	J/m3/K	283.15:68817.33333333333,293.15:70242.66666666667,303.15:73210,313.15:75710.33333333333	linear
+uncertainty	mean-volume-capacity	unstated	-	-	-	-
+validity	mean-volume-capacity	family	1	1	1
+validity	mean-volume-capacity	unconditioned	1	1	1
+validity	mean-volume-capacity	grade_known	0	0	1
+validity	mean-volume-capacity	formulation_known	0	0	1
+validity	mean-volume-capacity	moisture_known	0	0	1
+validity	mean-volume-capacity	pressure_known	0	0	1
+validity	mean-volume-capacity	statistic	1	1	1
+validity	mean-volume-capacity	specimens	3	3	1
+validity	mean-volume-capacity	stock_thickness	0.012	0.012	m
+validity	mean-volume-capacity	temperature	283.15	313.15	K
+curve	published-specific-heat	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction,density-normalization,specific-heat-reduction	specific_heat	temperature	K	J/kg/K	283.15:1332,293.15:1360,303.15:1417,313.15:1465	linear
+uncertainty	published-specific-heat	unstated	-	-	-	-
+validity	published-specific-heat	family	1	1	1
+validity	published-specific-heat	unconditioned	1	1	1
+validity	published-specific-heat	grade_known	0	0	1
+validity	published-specific-heat	formulation_known	0	0	1
+validity	published-specific-heat	moisture_known	0	0	1
+validity	published-specific-heat	pressure_known	0	0	1
+validity	published-specific-heat	statistic	1	1	1
+validity	published-specific-heat	specimens	3	3	1
+validity	published-specific-heat	stock_thickness	0.012	0.012	m
+validity	published-specific-heat	temperature	283.15	313.15	K
+curve	apparent-conductivity	identity,method,conductivity	apparent_conductivity	test_mean_temperature	K	W/m/K	288.15:0.034,318.15:0.038	linear
+uncertainty	apparent-conductivity	unstated	-	-	-	-
+validity	apparent-conductivity	family	1	1	1
+validity	apparent-conductivity	unconditioned	1	1	1
+validity	apparent-conductivity	grade_known	0	0	1
+validity	apparent-conductivity	formulation_known	0	0	1
+validity	apparent-conductivity	moisture_known	0	0	1
+validity	apparent-conductivity	pressure_known	0	0	1
+validity	apparent-conductivity	statistic	1	1	1
+validity	apparent-conductivity	specimens	3	3	1
+validity	apparent-conductivity	stock_thickness	0.012	0.012	m
+validity	apparent-conductivity	through_thickness	1	1	1
+validity	apparent-conductivity	upward	1	1	1
+validity	apparent-conductivity	plate_delta	20	20	K
+validity	apparent-conductivity	test_mean_temperature	288.15	318.15	K
+curve	local-conductivity	identity,method,conductivity,local-model	local_conductivity	temperature	K	W/m/K	288.15:0.034,318.15:0.038	linear
+uncertainty	local-conductivity	unstated	-	-	-	-
+validity	local-conductivity	family	1	1	1
+validity	local-conductivity	unconditioned	1	1	1
+validity	local-conductivity	grade_known	0	0	1
+validity	local-conductivity	formulation_known	0	0	1
+validity	local-conductivity	moisture_known	0	0	1
+validity	local-conductivity	pressure_known	0	0	1
+validity	local-conductivity	statistic	1	1	1
+validity	local-conductivity	specimens	3	3	1
+validity	local-conductivity	stock_thickness	0.012	0.012	m
+validity	local-conductivity	through_thickness	1	1	1
+validity	local-conductivity	upward	1	1	1
+validity	local-conductivity	plate_delta	20	20	K
+validity	local-conductivity	local_model	1	1	1
+validity	local-conductivity	temperature	288.15	318.15	K
+curve	computed-volume-capacity-sd	identity,method,capacity-r1,capacity-r2,capacity-r3,capacity-reduction	capacity_sd	temperature	K	J/m3/K	283.15:620.1018733509304,293.15:662.294748079232,303.15:1029.5785545552121,313.15:825.7755950216338	tabulated
+uncertainty	computed-volume-capacity-sd	unstated	-	-	-	-
+validity	computed-volume-capacity-sd	family	1	1	1
+validity	computed-volume-capacity-sd	unconditioned	1	1	1
+validity	computed-volume-capacity-sd	grade_known	0	0	1
+validity	computed-volume-capacity-sd	formulation_known	0	0	1
+validity	computed-volume-capacity-sd	moisture_known	0	0	1
+validity	computed-volume-capacity-sd	pressure_known	0	0	1
+validity	computed-volume-capacity-sd	statistic	0	0	1
+validity	computed-volume-capacity-sd	specimens	3	3	1
+validity	computed-volume-capacity-sd	stock_thickness	0.012	0.012	m
+validity	computed-volume-capacity-sd	temperature	283.15	313.15	K
+curve	published-specific-heat-sd	identity,method,density-normalization,specific-heat-reduction	specific_heat_sd	temperature	K	J/kg/K	283.15:12,293.15:13,303.15:20,313.15:16	tabulated
+uncertainty	published-specific-heat-sd	unstated	-	-	-	-
+validity	published-specific-heat-sd	family	1	1	1
+validity	published-specific-heat-sd	unconditioned	1	1	1
+validity	published-specific-heat-sd	grade_known	0	0	1
+validity	published-specific-heat-sd	formulation_known	0	0	1
+validity	published-specific-heat-sd	moisture_known	0	0	1
+validity	published-specific-heat-sd	pressure_known	0	0	1
+validity	published-specific-heat-sd	statistic	0	0	1
+validity	published-specific-heat-sd	specimens	3	3	1
+validity	published-specific-heat-sd	stock_thickness	0.012	0.012	m
+validity	published-specific-heat-sd	temperature	283.15	313.15	K
+curve	published-conductivity-sd	identity,method,conductivity	conductivity_sd	test_mean_temperature	K	W/m/K	288.15:0,318.15:0	tabulated
+uncertainty	published-conductivity-sd	unstated	-	-	-	-
+validity	published-conductivity-sd	family	1	1	1
+validity	published-conductivity-sd	unconditioned	1	1	1
+validity	published-conductivity-sd	grade_known	0	0	1
+validity	published-conductivity-sd	formulation_known	0	0	1
+validity	published-conductivity-sd	moisture_known	0	0	1
+validity	published-conductivity-sd	pressure_known	0	0	1
+validity	published-conductivity-sd	statistic	0	0	1
+validity	published-conductivity-sd	specimens	3	3	1
+validity	published-conductivity-sd	stock_thickness	0.012	0.012	m
+validity	published-conductivity-sd	through_thickness	1	1	1
+validity	published-conductivity-sd	upward	1	1	1
+validity	published-conductivity-sd	plate_delta	20	20	K
+validity	published-conductivity-sd	test_mean_temperature	288.15	318.15	K
+scalar	normalization-density	identity,method,density-normalization	normalization_density	51.666666666666664	kg/m3	constant
+uncertainty	normalization-density	unstated	-	-	-	-
+validity	normalization-density	family	1	1	1
+validity	normalization-density	unconditioned	1	1	1
+validity	normalization-density	grade_known	0	0	1
+validity	normalization-density	formulation_known	0	0	1
+validity	normalization-density	moisture_known	0	0	1
+validity	normalization-density	pressure_known	0	0	1
+validity	normalization-density	statistic	1	1	1
+validity	normalization-density	specimens	3	3	1
+validity	normalization-density	stock_thickness	0.012	0.012	m
+validity	normalization-density	density_temperature_known	0	0	1
