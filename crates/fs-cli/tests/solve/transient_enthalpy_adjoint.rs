@@ -14,6 +14,7 @@ mod json;
 use json::JsonValue as J;
 
 mod prescribed;
+mod flux;
 
 const CP: f64 = 10.0;
 const VOLUME: f64 = 8.0 / 3.0;

@@ -47,21 +47,31 @@ pub(super) fn render(
     } else {
         iteration_limit
     };
-    // Old request names retain the exact old scope and JSON bytes. The new
-    // project-bound names explicitly select the extra material coordinates.
+    // Preserve the existing scope when no new boundary control is present.
+    // The material request independently selects its extra coordinates.
     let material_scope = objective.material_controls().then(|| SCOPE.replace(
         "Surface-power, prescribed-temperature, conductivity, contact, geometry and time-grid derivatives are not supplied.",
         MATERIAL_SCOPE,
     ));
+    let mut scope = material_scope.as_deref().unwrap_or(SCOPE).to_owned();
+    if !result.prescribed_temperature.is_empty() {
+        scope = scope.replace("geometry, prescribed temperatures and material laws", "geometry and material laws")
+            .replace("Surface-power, prescribed-temperature, ", "Surface-power, ");
+        scope.push_str(" Independent prescribed bath temperatures are differentiated throughout the selected prefix, using the same complete physical dual, its fixed-node direct objective and the full conductive/contact/Robin/reflected-flux lift. Initial temperatures are held fixed; an initial sampled peak has zero future bath sensitivity. Shared prescribed vertices have no independent bath coordinate.");
+    }
+    let heat_flux = &result.prescribed_heat_flux;
+    if !heat_flux.is_empty() {
+        scope.push_str(" Independent original outward heat-flux densities are differentiated on their unchanged named P1 traces throughout the selected prefix. Their negative load contractions use the same complete physical dual, including all admitted feedback, with no extra timestep factor or solve.");
+    }
     poll(cx, deadline)?;
-    Ok(format!("{{\"schema\":\"fs-cli-native-transient-adjoint-v1\",\"output\":{},\"method\":\"discrete-backward-euler-reverse\",\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"active_ties\":{},\"unique_sampled_maximum\":{},\"dtemperature_duniform_initial_k_per_k\":{},\"dtemperature_dinitial_temperatures\":[{}],\"dtemperature_dcapacity_multiplier_k\":{},\"regional_power\":[{}],\"robin\":[{}],\"intervals\":[{}],\"reconstructed_solid_endpoints\":{},\"revalidated_solid_endpoints\":{},\"reconstruction_krylov_iterations\":{},\"adjoint_krylov_iterations\":{},\"maximum_dual_relative_residual\":{},\"max_reverse_steps\":{},\"max_krylov_iterations_per_linear_solve\":{},\"max_reconstruction_krylov_iterations\":{},\"max_adjoint_krylov_iterations\":{},\"additional_storage_estimate_bytes\":{},\"authority\":\"Estimated\",\"scope\":{}{}{}{}}}",
+    Ok(format!("{{\"schema\":\"fs-cli-native-transient-adjoint-v1\",\"output\":{},\"method\":\"discrete-backward-euler-reverse\",\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"active_ties\":{},\"unique_sampled_maximum\":{},\"dtemperature_duniform_initial_k_per_k\":{},\"dtemperature_dinitial_temperatures\":[{}],\"dtemperature_dcapacity_multiplier_k\":{},\"regional_power\":[{}],\"robin\":[{}],\"intervals\":[{}],\"reconstructed_solid_endpoints\":{},\"revalidated_solid_endpoints\":{},\"reconstruction_krylov_iterations\":{},\"adjoint_krylov_iterations\":{},\"maximum_dual_relative_residual\":{},\"max_reverse_steps\":{},\"max_krylov_iterations_per_linear_solve\":{},\"max_reconstruction_krylov_iterations\":{},\"max_adjoint_krylov_iterations\":{},\"additional_storage_estimate_bytes\":{},\"authority\":\"Estimated\",\"scope\":{}{}{}{}{}{heat_flux}}}",
         json_string(objective.name()), number(selected.value)?, number(time)?, selected.state,
         selected.vertex, selected.ties, selected.ties == 1, number(initial_uniform)?, initial.join(","),
         number(result.capacity)?, regional.join(","), robin.join(","), intervals.join(","), result.reconstructed_steps, result.revalidated_steps,
         result.primal_iterations, result.dual_iterations, number(result.worst_dual)?, ends.len(),
         config.linear.max_iterations, reconstruction_limit, iteration_limit,
-        result.additional_storage_bytes, json_string(material_scope.as_deref().unwrap_or(SCOPE)),
-        result.radiation, result.convection, result.material_controls))
+        result.additional_storage_bytes, json_string(&scope),
+        result.radiation, result.convection, result.material_controls, result.prescribed_temperature))
 }
 
 const MATERIAL_SCOPE: &str = "Independent regional conductivity multipliers scale each region's full tensor/curve at one throughout the selected trajectory. Named matching-interface resistance multipliers scale every retained face resistance together at one, preserving mapped values, both temperature traces and consistent P1 integration. Both controls contract the same complete watt-coordinate multiplier without another timestep factor or solve. They retain distinct material/interface identities and have zero future influence at an initial selected peak. They are not absolute tensor-entry derivatives, new material claims or uncertainty propagation. Surface-power, prescribed-temperature, geometry, constitutive-knot and time-grid derivatives are not supplied.";

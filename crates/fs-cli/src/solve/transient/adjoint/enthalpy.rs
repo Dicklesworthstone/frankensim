@@ -22,14 +22,14 @@ use fs_exec::Cx;
 use fs_project::{ProjectSpec, TransientEnthalpy};
 use fs_solver::NewtonReport;
 
-use super::{Objective, Tape, finite, select};
+use super::{Objective, Tape, finite, select, flux_controls};
 use super::super::{SolveRefusal, Workload, airflow, bad, buoyancy, json_string,
     lower, number, poll, radiation};
 
 mod convection;
 mod enclosure;
 mod pointwise;
-mod prescribed_controls;
+pub(super) mod prescribed_controls;
 mod robin_controls;
 pub(super) mod material_controls;
 pub(in crate::solve::transient) use material_controls::storage_bytes as material_control_storage_bytes;
@@ -387,6 +387,7 @@ pub(in crate::solve::transient) fn finish(
         n, elements, spec.materials.as_deref().unwrap_or(&[]).len(),
         spec.interface_cards.as_deref().unwrap_or(&[]).len(),
     )?;
+    let flux_workspace = flux_controls::storage_bytes(spec, n)?;
     let combined_feedback_entries = max_feedback_entries
         .checked_add(convection::feedback_entries(n, convection_ports)?)
         .ok_or_else(|| bad("combined enthalpy boundary-feedback allowance overflows"))?;
@@ -394,7 +395,8 @@ pub(in crate::solve::transient) fn finish(
         n, elements, ends_s.len(), storage.materials.len(),
         problem.boundary.conditions().len(), config.max_newton_iterations,
         linear.max_iterations,
-    )?.checked_add(radiation_workspace)
+    )?.checked_add(flux_workspace)
+        .and_then(|v| v.checked_add(radiation_workspace))
         .and_then(|v| v.checked_add(convection_workspace))
         .and_then(|v| v.checked_add(control_workspace))
         .and_then(|v| v.checked_add(material_workspace))
@@ -500,6 +502,7 @@ pub(in crate::solve::transient) fn finish(
     let mut convection_controls = convection::Controls::new(cx, spec, natural, airflow, deadline)?;
     let mut prescribed_controls = prescribed_controls::Controls::new(cx, spec, problem, deadline)?;
     let mut robin_controls = robin_controls::Controls::new(cx, spec, problem, deadline)?;
+    let mut flux_controls = flux_controls::Controls::new(cx, spec, problem, deadline)?;
     let mut material_controls = material_controls::Controls::new(
         cx, spec, problem, interfaces, labels, region_ids, &tape.temperature.states[0], deadline,
     )?;
@@ -692,6 +695,7 @@ pub(in crate::solve::transient) fn finish(
             &nodal_load_adjoint, deadline,
         )?;
         robin_controls.add(cx, step_problem, expected, &nodal_load_adjoint, deadline)?;
+        flux_controls.add(cx, &nodal_load_adjoint, deadline)?;
         if let Some(controls) = pointwise_controls.as_mut() {
             controls.add(cx, step.transport(), &nodal_load_adjoint, deadline)?;
         } else if let (Some(model), Some(controls)) = (enclosure, enclosure_controls.as_mut()) {
@@ -828,6 +832,7 @@ pub(in crate::solve::transient) fn finish(
     let material_fragment = material_controls.fragment(selected.state)?;
     let prescribed_fragment = prescribed_controls.fragment(selected.state)?;
     let robin_fragment = robin_controls.fragment(selected.state)?;
+    let flux_fragment = flux_controls.fragment(selected.state)?;
     let controls_fragment = convection_controls.as_ref()
         .map(|controls| controls.fragment(selected.state)).transpose()?.unwrap_or_default();
     let convection_fragment = if convection_ports == 0 { String::new() } else { format!(
@@ -835,16 +840,21 @@ pub(in crate::solve::transient) fn finish(
         natural.len(), airflow.map_or(0, |path| path.segments.len()), selected.state,
     ) };
     let pointwise_scope = pointwise.is_some().then(|| pointwise::history_scope(SCOPE));
+    let flux_scope = (!flux_fragment.is_empty()).then(||
+        pointwise_scope.as_deref().unwrap_or(SCOPE).replace(
+            "Prescribed Neumann data, phase-law parameters and the time grid are fixed.",
+            "Independent original outward heat-flux densities use the same complete physical dual and exact named P1 traces throughout the selected prefix. Phase-law parameters and the time grid are fixed.",
+        ));
     poll(cx, deadline)?;
     Ok(format!(
-        "{{\"schema\":\"fs-cli-native-enthalpy-adjoint-v1\",\"output\":{},\"method\":\"discrete-total-enthalpy-backward-euler-reverse\",\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"active_ties\":{},\"unique_sampled_maximum\":{},\"dtemperature_duniform_initial_specific_enthalpy_k_kg_per_j\":{},\"dtemperature_dinitial_specific_enthalpy_k_kg_per_j\":[{}],\"dtemperature_dreference_density_multiplier_k\":{},\"regional_storage\":[{}],\"regional_power\":[{}],\"intervals\":[{}],\"revalidated_solid_endpoints\":{},\"adjoint_krylov_iterations\":{},\"maximum_dual_relative_residual\":{},\"max_reverse_steps\":{},\"max_krylov_iterations_per_linear_solve\":{},\"max_restart_columns_per_linear_solve\":{},\"max_adjoint_krylov_iterations\":{},\"additional_storage_estimate_bytes\":{}{radiation_fragment}{convection_fragment}{material_fragment}{prescribed_fragment}{robin_fragment},\"authority\":\"Estimated\",\"scope\":{}}}",
+        "{{\"schema\":\"fs-cli-native-enthalpy-adjoint-v1\",\"output\":{},\"method\":\"discrete-total-enthalpy-backward-euler-reverse\",\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"active_ties\":{},\"unique_sampled_maximum\":{},\"dtemperature_duniform_initial_specific_enthalpy_k_kg_per_j\":{},\"dtemperature_dinitial_specific_enthalpy_k_kg_per_j\":[{}],\"dtemperature_dreference_density_multiplier_k\":{},\"regional_storage\":[{}],\"regional_power\":[{}],\"intervals\":[{}],\"revalidated_solid_endpoints\":{},\"adjoint_krylov_iterations\":{},\"maximum_dual_relative_residual\":{},\"max_reverse_steps\":{},\"max_krylov_iterations_per_linear_solve\":{},\"max_restart_columns_per_linear_solve\":{},\"max_adjoint_krylov_iterations\":{},\"additional_storage_estimate_bytes\":{}{radiation_fragment}{convection_fragment}{material_fragment}{prescribed_fragment}{robin_fragment}{flux_fragment},\"authority\":\"Estimated\",\"scope\":{}}}",
         json_string(objective.name()), number(selected.value)?, number(selected_time)?,
         selected.state, selected.vertex, selected.ties, selected.ties == 1,
         number(initial_uniform)?, initial_rows.join(","), number(density_multiplier)?,
         regional_storage.join(","), regional_power.join(","), intervals.join(","),
         selected.state, dual_iterations, number(worst_dual)?, ends_s.len(),
         linear.max_iterations, linear.restart, iteration_limit, estimate,
-        json_string(pointwise_scope.as_deref().unwrap_or(SCOPE)),
+        json_string(flux_scope.as_deref().or(pointwise_scope.as_deref()).unwrap_or(SCOPE)),
     ))
 }
 

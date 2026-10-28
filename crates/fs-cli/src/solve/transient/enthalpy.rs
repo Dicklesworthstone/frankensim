@@ -818,6 +818,8 @@ pub(super) fn solve(
                 n, elements, spec.materials.as_deref().unwrap_or(&[]).len(),
                 spec.interface_cards.as_deref().unwrap_or(&[]).len(),
             ).ok().and_then(|extra| value.checked_add(extra)))
+            .and_then(|value| adjoint::heat_flux_storage_bytes(spec, n)
+                .ok().and_then(|extra| value.checked_add(extra)))
             .ok_or_else(|| bad("combined enthalpy forward/adjoint storage allowance overflows"))?
     } else {
         0

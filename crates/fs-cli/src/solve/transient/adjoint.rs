@@ -11,9 +11,11 @@ use super::{SolveRefusal, bad, poll};
 mod reverse;
 pub(super) use reverse::{
     NaturalCoupling, finish, airflow_storage_bytes, natural_storage_bytes, radiation_storage_bytes,
-    material_control_storage_bytes,
+    material_control_storage_bytes, prescribed_control_storage_bytes,
 };
 mod enthalpy;
+mod flux_controls;
+pub(super) use flux_controls::storage_bytes as heat_flux_storage_bytes;
 pub(super) use enthalpy::{
     EnthalpyTape, finish as finish_enthalpy, storage_bytes as enthalpy_storage_bytes,
     radiation_storage_bytes as enthalpy_radiation_storage_bytes,

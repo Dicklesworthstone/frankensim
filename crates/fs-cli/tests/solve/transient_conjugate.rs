@@ -12,6 +12,8 @@ use json::JsonValue as J;
 
 #[path = "transient_conjugate/material_controls.rs"]
 mod material_controls;
+#[path = "transient_conjugate/prescribed_controls.rs"]
+mod prescribed_controls;
 
 const INLET_K: f64 = 293.15;
 const INITIAL_K: f64 = 330.0;

@@ -2,6 +2,7 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 use fs_conduction::{ConductionProblem, PowerMap, ScalarField, ThermalBc, ThermalInterfaces};
+use fs_conduction::adjoint::robin::RobinResponse;
 use fs_conduction::transient::backward_euler::{BackwardEuler, NonlinearStepConfig, StepConfig};
 use fs_conduction::radiation::{EnclosureRadiationLinearization, GrayDiffuseEnclosure};
 use fs_exec::Cx;
@@ -9,8 +10,8 @@ use fs_project::ProjectSpec;
 use crate::solve::conjugate::ConjugatePath;
 use crate::solve::radiation::LoweredRadiation;
 use crate::solve::natural::NaturalLaw;
-use super::{Objective, Selected, Tape, finite, select, storage_bytes};
-use super::enthalpy::material_controls;
+use super::{Objective, Selected, Tape, finite, select, storage_bytes, flux_controls};
+use super::enthalpy::{material_controls, prescribed_controls};
 use super::super::{SolveRefusal, Workload, bad, lower, poll};
 
 mod report;
@@ -63,6 +64,25 @@ pub(in crate::solve::transient) fn material_control_storage_bytes(
     )
 }
 
+/// The shared prescribed lift assembles the existing sparse spatial Jacobian.
+/// Charge its bounded construction scratch and the deduplicated nodal bath map
+/// before the forward run; there is no dense nodal matrix or extra linear solve.
+pub(in crate::solve::transient) fn prescribed_control_storage_bytes(
+    spec: &ProjectSpec, nodes: usize, elements: usize, faces: usize,
+) -> Result<usize, SolveRefusal> {
+    let count = spec.cooling.as_ref().and_then(|c| c.conduction.as_ref())
+        .map_or(0, |setup| setup.boundaries.iter().filter(|row| matches!(
+            row.condition, fs_project::ThermalBoundaryCondition::FixedTemperature { .. },
+        )).count());
+    if count == 0 { return Ok(0); }
+    nodes.checked_mul(128)
+        .and_then(|v| elements.checked_mul(4096).and_then(|b| v.checked_add(b)))
+        .and_then(|v| faces.checked_mul(4096).and_then(|b| v.checked_add(b)))
+        .and_then(|v| count.checked_mul(4096).and_then(|b| v.checked_add(b)))
+        .filter(|&v| isize::try_from(v).is_ok())
+        .ok_or_else(|| bad("capacity prescribed-temperature workspace overflows"))
+}
+
 struct Derivatives {
     selected: Selected,
     initial: Vec<f64>,
@@ -83,6 +103,8 @@ struct Derivatives {
     radiation: String,
     convection: String,
     material_controls: String,
+    prescribed_temperature: String,
+    prescribed_heat_flux: String,
 }
 
 fn dot(cx: &Cx<'_>, a: &[f64], b: &[f64], deadline: Option<(Instant, f64)>)
@@ -179,11 +201,17 @@ pub(in crate::solve::transient) fn finish(
     let material_workspace = if objective.material_controls() {
         material_control_storage_bytes(spec, n, problem.mesh.element_count())?
     } else { 0 };
+    let prescribed_workspace = prescribed_control_storage_bytes(
+        spec, n, problem.mesh.element_count(), problem.mesh.boundary().len(),
+    )?;
+    let flux_workspace = flux_controls::storage_bytes(spec, n)?;
     let additional_storage_bytes = storage_bytes(n, ends_s.len(), names.len())?
         .checked_add(radiation_workspace)
         .and_then(|value| value.checked_add(natural_workspace))
         .and_then(|value| value.checked_add(air_workspace))
         .and_then(|value| value.checked_add(material_workspace))
+        .and_then(|value| value.checked_add(prescribed_workspace))
+        .and_then(|value| value.checked_add(flux_workspace))
         .ok_or_else(|| bad("native capacity adjoint total workspace overflows"))?;
     let patch_count = radiation.map_or(0, LoweredRadiation::surface_count);
     let mut emissivities = vec![0.0; patch_count];
@@ -198,6 +226,8 @@ pub(in crate::solve::transient) fn finish(
             cx, spec, problem, interfaces, labels, region_ids, &tape.states[0], deadline,
         )?)
     } else { None };
+    let mut prescribed_controls = prescribed_controls::Controls::new(cx, spec, problem, deadline)?;
+    let mut flux_controls = flux_controls::Controls::new(cx, spec, problem, deadline)?;
     let fixed_ports: Vec<usize> = ports.iter().enumerate().filter_map(|(index, &name)| {
         let owned = natural.is_some_and(|coupling|
             coupling.laws.iter().any(|law| law.target == name))
@@ -213,7 +243,8 @@ pub(in crate::solve::transient) fn finish(
     let feedback_entry_cap = n.checked_mul(ports.len()).and_then(|v| v.checked_mul(4))
         .and_then(|entries| entries.checked_add(flux_entries))
         .ok_or_else(|| bad("capacity cooling feedback entry count overflows"))?;
-    let zero_feedback = if enclosure.is_some() || natural.is_some() || airflow.is_some() {
+    let zero_feedback = if enclosure.is_some() || natural.is_some() || airflow.is_some()
+        || prescribed_controls.has_controls() {
         vec![0.0; ports.len() * ports.len()]
     } else {
         Vec::new()
@@ -232,6 +263,12 @@ pub(in crate::solve::transient) fn finish(
     let mut radiosity_iterations = 0usize;
     let mut worst_radiosity_dual = 0.0_f64;
     let max_dual_solves_per_step = enclosure.map_or(1, |model| model.surfaces().len() + 2);
+    let prescribed_entries = problem.mesh.element_count().checked_mul(32)
+        .and_then(|v| problem.mesh.boundary().len().checked_mul(27).and_then(|b| v.checked_add(b)))
+        .and_then(|v| v.checked_add(n))
+        .and_then(|v| v.checked_add(ports.len() * ports.len()))
+        .and_then(|v| v.checked_add(feedback_entry_cap))
+        .ok_or_else(|| bad("capacity prescribed-temperature entry allowance overflows"))?;
     for index in (0..selected.state).rev() {
         poll(cx, deadline)?;
         let start = if index == 0 { 0.0 } else { ends_s[index - 1] };
@@ -387,6 +424,33 @@ pub(in crate::solve::transient) fn finish(
         if !gradient.relative_residual.is_finite() || gradient.relative_residual >= config.linear.tolerance {
             return Err(bad("native transient transpose failed its recomputed residual gate"));
         }
+        if prescribed_controls.has_controls() {
+            let (boundary, h_slopes, reference_slopes, reference_feedback, flux_feedback) =
+                if let Some(bound) = &enclosure_bound {
+                    (bound.boundary(), bound.convective_mean_slopes(),
+                        bound.local_reference_slopes(), bound.reference_feedback(), bound.flux_feedback())
+                } else if let Some(bound) = &bound {
+                    (&bound.boundary, bound.h_mean_slopes.as_slice(),
+                        bound.local_reference_slopes.as_slice(), bound.reference_feedback.as_slice(), None)
+                } else {
+                    (convection_problem.boundary,
+                        natural_bound.as_ref().map_or(zero_ports.as_slice(), |bound| bound.h_mean_slopes.as_slice()),
+                        zero_ports.as_slice(),
+                        air_bound.as_ref().map_or(zero_feedback.as_slice(), |bound| bound.reference_feedback.as_slice()), None)
+                };
+            // C is row-sum lumped: C_FD is zero, so the spatial lift is exactly
+            // the endpoint lift. The complete physical dual already contains
+            // C/dt and every feedback term; never multiply this partial by dt.
+            let bars = RobinResponse::prescribed_temperature_pullback_with_flux_feedback(
+                cx, ConductionProblem { boundary, ..convection_problem }, interfaces,
+                expected, &carry, &gradient.nodal_load, &ports, h_slopes,
+                reference_slopes, reference_feedback, flux_feedback, prescribed_entries,
+            ).map_err(lower)?;
+            prescribed_controls.add(cx, &bars, deadline)?;
+        } else {
+            // Retain the exact selected-prefix accounting for an empty set.
+            prescribed_controls.add(cx, &gradient.nodal_load, deadline)?;
+        }
         if let Some(bound) = &natural_bound {
             let ambient = bound.ambient_partials(cx, &gradient, deadline)?;
             if ambient.len() != natural_ambients.len() {
@@ -407,6 +471,7 @@ pub(in crate::solve::transient) fn finish(
             )?;
         }
         let density_bar = step.source_density_pullback(cx, &gradient.nodal_load).map_err(lower)?;
+        flux_controls.add(cx, &gradient.nodal_load, deadline)?;
         for (region, basis) in bases.iter().enumerate() {
             source_controls[index][region] = dot(cx, &density_bar, basis, deadline)?;
         }
@@ -467,6 +532,8 @@ pub(in crate::solve::transient) fn finish(
     }).transpose()?.unwrap_or_default();
     let material_controls = material_controls.as_ref()
         .map(|controls| controls.fragment(selected.state)).transpose()?.unwrap_or_default();
+    let prescribed_temperature = prescribed_controls.fragment_for_capacity(selected.state)?;
+    let prescribed_heat_flux = flux_controls.fragment(selected.state)?;
     let result = Derivatives {
         selected, initial: carry, region_names: names, source_controls, source_multipliers,
         capacity: capacities, ports: fixed_ports.iter().map(|&i| ports[i].to_owned()).collect(),
@@ -474,7 +541,7 @@ pub(in crate::solve::transient) fn finish(
         coefficients: fixed_ports.iter().map(|&i| coefficients[i]).collect(),
         primal_iterations, dual_iterations, max_dual_solves_per_step, worst_dual,
         reconstructed_steps, revalidated_steps, additional_storage_bytes, radiation, convection,
-        material_controls,
+        material_controls, prescribed_temperature, prescribed_heat_flux,
     };
     report::render(cx, &result, ends_s, objective, config, deadline)
 }

@@ -256,7 +256,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// solves, retaining the same physical owner in natural and transported-air audits.
 /// Version 90 connects pointwise enthalpy radiation to complete trajectory
 /// adjoints, physical boundary controls and nominal-adjoint uncertainty studies.
-pub const SOLVE_DRIVER_VERSION: u32 = 90;
+/// Version 91 connects prescribed capacity baths and original heat-flux controls
+/// to complete transient adjoints and native uncertainty calibration.
+pub const SOLVE_DRIVER_VERSION: u32 = 91;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

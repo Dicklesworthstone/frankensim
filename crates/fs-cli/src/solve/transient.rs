@@ -774,6 +774,12 @@ pub(super) fn solve(
     let bytes = if objective.is_some() {
         let mut additional = adjoint::storage_bytes(problem.mesh.vertex_count(), fine_steps,
             policy.capacities.len())?;
+        additional = additional.checked_add(adjoint::heat_flux_storage_bytes(
+            spec, problem.mesh.vertex_count(),
+        )?).ok_or_else(|| bad("combined heat-flux adjoint memory estimate overflows"))?;
+        additional = additional.checked_add(adjoint::prescribed_control_storage_bytes(
+            spec, problem.mesh.vertex_count(), problem.mesh.element_count(), problem.mesh.boundary().len(),
+        )?).ok_or_else(|| bad("combined prescribed-temperature adjoint memory estimate overflows"))?;
         if objective.is_some_and(adjoint::Objective::material_controls) {
             additional = additional.checked_add(adjoint::material_control_storage_bytes(
                 spec, problem.mesh.vertex_count(), problem.mesh.element_count(),

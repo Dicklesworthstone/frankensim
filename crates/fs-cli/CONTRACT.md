@@ -2740,6 +2740,37 @@ Product regressions cover monotonic storage heating, equal-energy early/late
 pulses followed by cooling, an initially hot body cooling through contact and
 the distinct initial temperature of its initially cold neighbor.
 
+### Shared native transient boundary controls
+
+Driver 91 connects prescribed baths and original outward heat-flux densities
+to the accepted-trajectory adjoints. Both capacity and total-enthalpy storage
+retain independently named controls throughout the selected final-time or
+sampled-peak prefix, with zero future influence at an initial sampled peak.
+
+Capacity baths reuse the conduction owner's complete prescribed-value lift
+and the existing enthalpy bath accumulator. The same checked physical dual
+includes nonlinear conductivity, matching contact, natural convection,
+transported air and ambient or reflected enclosure radiation. Fixed-node
+objectives retain their direct term. Row-sum-lumped capacity has no free-to-fixed
+mass cross term, so no additional timestep factor or transpose solve is needed.
+Shared prescribed vertices retain an unsupported independent-control record.
+
+Both storage modes reuse `MeanFluxFeedback`'s exact named P1 injection basis
+for original Neumann controls. `prescribed_heat_flux` records each declared
+outward flux in W/m2 and its temperature derivative in K per (W/m2). The complete
+masked load multiplier supplies the timestep convention once; positive outward
+flux contributes with a negative load sign. Radiation remains separate from the
+original prescribed flux even when both act on the same physical trace.
+
+Workspace allowances are charged before forward execution. These controls
+leave the accepted temperature and energy history unchanged, differentiate
+the selected discrete objective only, and supply no physical-validation or
+continuum certificate. The existing native solve tests include independent
+energy and nonuniform-timestep scalar references, fresh physical finite
+differences, fixed-node masking and initial-peak controls. Native execution of
+the new tests remains unverified in this session: the pinned `asupersync`
+dependency compilation was killed before `fs-cli` compiled.
+
 ### Native enthalpy convection uncertainty controls
 
 Driver 87 connects declared enthalpy trajectories to native nominal-adjoint
