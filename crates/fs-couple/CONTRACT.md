@@ -48,6 +48,39 @@ without conversion or duplicate types. That lower boundary depends only on
 
 ## Public types and semantics
 
+### Continuous loaded modal and cavity response
+
+`CoupledModalSystem::harmonic_response` solves the original continuous linear
+network in peak phasors with `exp(-i omega t)`. Original component damping,
+complete signed connection columns, Maxwell material relaxation and attached
+multiport radiation all enter the same complex system. Maxwell histories are
+eliminated exactly; acoustic oscillators remain explicit, preserving a finite
+joint antiresonance at a bare lossless acoustic pole. The existing cancellable
+complex LU supplies the solve, with an original-equation backward-residual
+gate. Returned original modal and memory coordinates include cycle-mean storage,
+source power, each physical loss and their power residual. These are the AC
+particular solution about equilibrium, independent of accepted transients and
+DC rest lengths; analysis never advances the clock or changes a ledger.
+
+`SharedCavity::harmonic_response` maps original surface forces and incident
+neck pressure into that same solve and returns physical internal pressure,
+surface volume rate, outward neck flow, mutual exterior reaction and gas
+compression availability. Internal and radiated pressures remain reactions,
+not extra external drives. Thermal pressure uses the admitted compression law;
+viscous and thermal queries refuse outside their sampled admission bands.
+Radiation validity remains with its producer, including the declared band of
+geometry-derived fits.
+
+A caller work allowance bounds `d^3+d^2*(connections+material_arms+3)` before
+dense allocation, with `d=mechanical_modes+acoustic_poles <= 1024`. No mode or
+pole is truncated. Nonpositive frequency, singular or unrepresentable response,
+and prepared constant-loss connection semantics explicitly refuse. The latter
+requires its original coupled-basis damping law, not a Kelvin-Voigt substitution.
+This continuous response is not the sampled held-force transfer. Independent
+physical pressure/flow condensation, pressure-diffusion availability, separate
+loss channels, signed basis invariance and unchanged accepted histories are
+tested alongside analytic loaded resonances.
+
 ### Shared cavity exterior loading
 
 `cavity_modal::shared::SharedCavity::with_exterior_radiation` connects the

@@ -19,6 +19,7 @@ use crate::modal_acoustic_time::{
 
 mod exact;
 mod relaxation;
+pub mod harmonic;
 pub mod radiation;
 pub use exact::prepared::{MAX_PREPARED_MODAL_MODES, PreparedModalBudget};
 
