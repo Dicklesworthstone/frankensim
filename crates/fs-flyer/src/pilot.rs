@@ -114,9 +114,12 @@ pub fn pilot_family_v1(member: u32) -> Result<PilotGains, Refusal> {
         // attempt record also includes failed starts). Reaction 6 ticks
         // (50 ms) is anticipatory-fast: this member is a SIM-PLANT
         // CALIBRATION, never a human-parameter claim.
-        // That sweep predates the inertial-momentum/world-gravity fix.
+        // That sweep predates the inertial-momentum/world-gravity and
+        // stationary-rail frame corrections.
         // Its crash-class validation does not apply to the corrected plant:
-        // seed 1903 now remains airborne through the 20 s reference window.
+        // seed 1903 now reaches the original rail end without lifting.
+        // The lifecycle battery uses an explicit catapult test fixture for
+        // airborne behavior; that fixture is not a historical launch claim.
         // These registered gains are retained without retuning.
         3 => Ok(PilotGains {
             k_theta: 0.55,

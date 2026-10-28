@@ -39,6 +39,12 @@ pub(super) struct SpatialWindState {
     pub ground_mps: [f64; 2],
 }
 
+pub(super) struct SampledFlightLoads {
+    pub forces: crate::aircraft::ForceBuildup,
+    pub airspeed_mps: f64,
+    pub alpha_rad: f64,
+}
+
 impl SpatialWindState {
     fn new(spec: SpatialWindSpec, seed: u64) -> Result<Self, Refusal> {
         spec.mean.admit().map_err(map_atmo)?;
@@ -319,7 +325,16 @@ impl SimLoop {
 
     /// Translational relative flow at a body point. The aircraft assembly
     /// owns the additional q×r velocity; observer queries never advance time.
+    #[cfg(test)]
     fn incident_at_body_point(&self, point: [f64; 3]) -> Result<[f64; 3], Refusal> {
+        self.incident_at_motion(self.current_flight_motion(), point)
+    }
+
+    fn incident_at_motion(
+        &self,
+        state: motion::FlightMotion,
+        point: [f64; 3],
+    ) -> Result<[f64; 3], Refusal> {
         let wind = self
             .spatial_wind
             .as_ref()
@@ -329,15 +344,16 @@ impl SimLoop {
             point[1] - self.design.cg_m[1],
             point[2] - self.design.cg_m[2],
         ];
-        let (s, c) = (det::sin(self.theta), det::cos(self.theta));
+        let theta = state.longitudinal.theta_rad;
+        let (s, c) = (det::sin(theta), det::cos(theta));
         let position = [
-            self.x_m + c * r[0] + s * r[2],
+            state.longitudinal.position_m[0] + c * r[0] + s * r[2],
             r[1],
-            self.h_m + s * r[0] - c * r[2],
+            state.longitudinal.position_m[1] + s * r[0] - c * r[2],
         ];
         let sample = wind.sample(position)?;
-        let vx = wind.ground_mps[0] - sample.u[0];
-        let vh = wind.ground_mps[1] - sample.u[2];
+        let vx = state.longitudinal.ground_mps[0] - sample.u[0];
+        let vh = state.longitudinal.ground_mps[1] - sample.u[2];
         Ok([c * vx + s * vh, -sample.u[1], s * vx - c * vh])
     }
 
@@ -346,6 +362,23 @@ impl SimLoop {
         v_air: f64,
         alpha: f64,
         dc: f64,
+    ) -> Result<crate::aircraft::ForceBuildup, Refusal> {
+        self.force_buildup_at_motion(
+            self.current_flight_motion(),
+            v_air,
+            alpha,
+            dc,
+            self.warm_slip,
+        )
+    }
+
+    fn force_buildup_at_motion(
+        &self,
+        state: motion::FlightMotion,
+        v_air: f64,
+        alpha: f64,
+        dc: f64,
+        warm_slip: Option<[f64; 2]>,
     ) -> Result<crate::aircraft::ForceBuildup, Refusal> {
         if self
             .spatial_wind
@@ -356,23 +389,175 @@ impl SimLoop {
                 v_air,
                 alpha,
                 dc.clamp(-0.55, 0.55),
-                self.omega.clamp(10.5, 119.5),
-                self.q.clamp(-2.9, 2.9),
+                state.rotor_rad_s.clamp(10.5, 119.5),
+                state.longitudinal.q_rad_s.clamp(-2.9, 2.9),
                 self.spec.rho_kg_m3,
-                self.warm_slip,
-                &|point| self.incident_at_body_point(point),
+                warm_slip,
+                &|point| self.incident_at_motion(state, point),
             )
         } else {
             self.design.force_buildup_warm(
                 v_air,
                 alpha,
                 dc.clamp(-0.55, 0.55),
-                self.omega.clamp(10.5, 119.5),
-                self.q.clamp(-2.9, 2.9),
+                state.rotor_rad_s.clamp(10.5, 119.5),
+                state.longitudinal.q_rad_s.clamp(-2.9, 2.9),
                 self.spec.rho_kg_m3,
-                self.warm_slip,
+                warm_slip,
             )
         }
+    }
+
+    fn current_flight_motion(&self) -> motion::FlightMotion {
+        motion::FlightMotion {
+            longitudinal: motion::LongitudinalMotion {
+                position_m: [self.x_m, self.h_m],
+                ground_mps: self.spatial_wind.as_ref().map_or_else(
+                    || {
+                        motion::ground_velocity(
+                            [self.u, self.w],
+                            self.theta,
+                            [-self.spec.headwind_mps, 0.0],
+                        )
+                    },
+                    |wind| wind.ground_mps,
+                ),
+                theta_rad: self.theta,
+                q_rad_s: self.q,
+            },
+            rotor_rad_s: self.omega,
+        }
+    }
+
+    fn flight_acceleration(
+        &self,
+        state: motion::FlightMotion,
+        loads: &crate::aircraft::ForceBuildup,
+        alpha: f64,
+    ) -> motion::FlightAcceleration {
+        motion::FlightAcceleration {
+            world_mps2: motion::world_acceleration(
+                motion::nongravity_acceleration(
+                    [loads.force_n[0], loads.force_n[2]],
+                    alpha,
+                    self.design.gross_mass_kg,
+                ),
+                state.longitudinal.theta_rad,
+                motion::GRAVITY_MPS2,
+            ),
+            pitch_rad_s2: loads.moment_y_nm / super::IYY_KG_M2,
+            rotor_rad_s2: loads.torque_imbalance_nm / 1.6,
+        }
+    }
+
+    fn publish_flight_motion(&mut self, state: motion::FlightMotion) {
+        [self.x_m, self.h_m] = state.longitudinal.position_m;
+        self.theta = state.longitudinal.theta_rad;
+        self.q = state.longitudinal.q_rad_s;
+        self.omega = state.rotor_rad_s;
+        if let Some(wind) = &mut self.spatial_wind {
+            wind.ground_mps = state.longitudinal.ground_mps;
+            // The sole endpoint clock advance also updates observed airspeed.
+        } else {
+            [self.u, self.w] = motion::body_air_velocity(
+                state.longitudinal.ground_mps,
+                self.theta,
+                [-self.spec.headwind_mps, 0.0],
+            );
+        }
+    }
+
+    /// One extra native load solve at a predicted midpoint couples translation,
+    /// pitch and rotor inertia. Control and temporal wind remain held during the
+    /// tick, while spatial wind is sampled at the predicted material positions.
+    /// A refused stage publishes neither predicted motion nor its warm start.
+    /// `None` is the existing terminal-ground branch, which has no smooth-order
+    /// or localized-contact claim and never queries the atmosphere underground.
+    pub(super) fn advance_airborne_motion(
+        &mut self,
+        start_loads: &crate::aircraft::ForceBuildup,
+        start_alpha: f64,
+        dc: f64,
+        gust_w: f64,
+        dt: f64,
+    ) -> Result<Option<SampledFlightLoads>, Refusal> {
+        let start = self.current_flight_motion();
+        let initial_acceleration = self.flight_acceleration(start, start_loads, start_alpha);
+        let stage = motion::midpoint_stage(start, initial_acceleration, dt);
+        let mut terminal = motion::held_load_step(
+            start.longitudinal,
+            motion::nongravity_acceleration(
+                [start_loads.force_n[0], start_loads.force_n[2]],
+                start_alpha,
+                self.design.gross_mass_kg,
+            ),
+            initial_acceleration.pitch_rad_s2,
+            motion::GRAVITY_MPS2,
+            dt,
+        );
+        let terminal_rotor = start.rotor_rad_s + dt * initial_acceleration.rotor_rad_s2;
+        if !stage.is_finite()
+            || !(motion::FlightMotion {
+                longitudinal: terminal,
+                rotor_rad_s: terminal_rotor,
+            })
+            .is_finite()
+        {
+            return Err(invalid_flight_stage());
+        }
+        if stage.longitudinal.position_m[1] <= 0.0 || terminal.position_m[1] <= 0.0 {
+            terminal.position_m[1] = 0.0;
+            self.publish_flight_motion(motion::FlightMotion {
+                longitudinal: terminal,
+                rotor_rad_s: terminal_rotor,
+            });
+            self.phase = super::Phase::Ended(super::TerminalEvent::GroundContact);
+            self.warm_slip = Some(start_loads.coupled.w_slip);
+            return Ok(None);
+        }
+        let wind = if let Some(wind) = &self.spatial_wind {
+            let [x, h] = stage.longitudinal.position_m;
+            let sample = wind.sample([x, 0.0, h])?;
+            [sample.u[0], sample.u[2]]
+        } else {
+            [-self.spec.headwind_mps, 0.0]
+        };
+        let [u, w] = motion::body_air_velocity(
+            stage.longitudinal.ground_mps,
+            stage.longitudinal.theta_rad,
+            wind,
+        );
+        let airspeed_mps = det::sqrt(u * u + w * w).max(0.1);
+        let alpha_rad = (det::atan2(w, u)
+            + if self.spatial_wind.is_some() {
+                0.0
+            } else {
+                gust_w / airspeed_mps
+            })
+        .clamp(-0.55, 0.55);
+        let forces = self.force_buildup_at_motion(
+            stage,
+            airspeed_mps,
+            alpha_rad,
+            dc,
+            Some(start_loads.coupled.w_slip),
+        )?;
+        let next = motion::finish_midpoint(
+            start,
+            stage,
+            self.flight_acceleration(stage, &forces, alpha_rad),
+            dt,
+        );
+        if !next.is_finite() {
+            return Err(invalid_flight_stage());
+        }
+        self.publish_flight_motion(next);
+        self.warm_slip = Some(forces.coupled.w_slip);
+        Ok(Some(SampledFlightLoads {
+            forces,
+            airspeed_mps,
+            alpha_rad,
+        }))
     }
 
     /// Use the already accepted force solve, not a second wind sample after
@@ -419,62 +604,41 @@ impl SimLoop {
         }
     }
 
-    pub(super) fn advance_spatial_motion(
+    /// One rail owner for ordinary and spatial wind. The existing discrete
+    /// constraint holds vertical ground velocity at zero through the release
+    /// tick and marks Airborne at its endpoint; this has no smooth-order or
+    /// localized-release claim. Release inserts no velocity jump or frame change.
+    pub(super) fn advance_rail_motion(
         &mut self,
         loads: &crate::aircraft::ForceBuildup,
         alpha: f64,
         dt: f64,
     ) {
         let mass = self.design.gross_mass_kg;
-        let wind = self.spatial_wind.as_mut().expect("spatial path");
-        match self.phase {
-            super::Phase::OnRail => {
-                let weight = mass * motion::GRAVITY_MPS2;
-                let fx = loads.force_n[0] + weight * det::sin(alpha);
-                let fz = loads.force_n[2] - weight * det::cos(alpha);
-                let (s, c) = (det::sin(self.theta), det::cos(self.theta));
-                let forward = c * fx + s * fz;
-                let upward = s * fx - c * fz;
-                let normal = (weight - upward).max(0.0);
-                let tow = match self.spec.catapult {
-                    Some(tow) if self.x_m < tow.pull_length_m => tow.pull_force_n,
-                    _ => 0.0,
-                };
-                wind.ground_mps[0] = (wind.ground_mps[0]
-                    + dt * (forward + tow - super::RAIL_MU * normal) / mass)
-                    .max(0.0);
-                self.x_m += dt * wind.ground_mps[0];
-                if upward >= weight {
-                    self.phase = super::Phase::Airborne;
-                } else if self.x_m > self.spec.rail_length_m {
-                    self.phase = super::Phase::Ended(super::TerminalEvent::RailEndWithoutLift);
-                }
-            }
-            super::Phase::Airborne => {
-                let next = motion::held_load_step(
-                    motion::LongitudinalMotion {
-                        position_m: [self.x_m, self.h_m],
-                        ground_mps: wind.ground_mps,
-                        theta_rad: self.theta,
-                        q_rad_s: self.q,
-                    },
-                    motion::nongravity_acceleration(
-                        [loads.force_n[0], loads.force_n[2]],
-                        alpha,
-                        mass,
-                    ),
-                    loads.moment_y_nm / super::IYY_KG_M2,
-                    motion::GRAVITY_MPS2,
-                    dt,
-                );
-                wind.ground_mps = next.ground_mps;
-                [self.x_m, self.h_m] = next.position_m;
-                self.theta = next.theta_rad;
-                self.q = next.q_rad_s;
-            }
-            super::Phase::Ended(_) => unreachable!("live integration only"),
+        let weight = mass * motion::GRAVITY_MPS2;
+        let fx = loads.force_n[0] + weight * det::sin(alpha);
+        let fz = loads.force_n[2] - weight * det::cos(alpha);
+        let (s, c) = (det::sin(self.theta), det::cos(self.theta));
+        let forward = c * fx + s * fz;
+        let upward = s * fx - c * fz;
+        let normal = (weight - upward).max(0.0);
+        let tow = match self.spec.catapult {
+            Some(tow) if self.x_m < tow.pull_length_m => tow.pull_force_n,
+            _ => 0.0,
+        };
+        let mut next = self.current_flight_motion();
+        next.longitudinal.ground_mps[0] = (next.longitudinal.ground_mps[0]
+            + dt * (forward + tow - super::RAIL_MU * normal) / mass)
+            .max(0.0);
+        next.longitudinal.ground_mps[1] = 0.0;
+        next.longitudinal.position_m[0] += dt * next.longitudinal.ground_mps[0];
+        next.rotor_rad_s += dt * loads.torque_imbalance_nm / 1.6;
+        self.publish_flight_motion(next);
+        if upward >= weight {
+            self.phase = super::Phase::Airborne;
+        } else if self.x_m > self.spec.rail_length_m {
+            self.phase = super::Phase::Ended(super::TerminalEvent::RailEndWithoutLift);
         }
-        self.omega += dt * loads.torque_imbalance_nm / 1.6;
     }
 }
 
@@ -483,6 +647,16 @@ fn invalid(message: &str) -> Refusal {
         code: "spatial-wind-invalid",
         message: message.into(),
         ranked_repairs: vec!["use the original admitted wind model and matching checkpoint".into()],
+    }
+}
+
+fn invalid_flight_stage() -> Refusal {
+    Refusal {
+        code: "flight-stage-invalid",
+        message: "airborne load integration produced a nonfinite stage".into(),
+        ranked_repairs: vec![
+            "keep the state and held loads within the admitted flight envelope".into(),
+        ],
     }
 }
 

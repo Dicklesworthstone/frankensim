@@ -39,10 +39,20 @@ fn airborne_step_consumes_the_accepted_gust_torque_once_and_replays() {
     let dt = 1.0 / super::super::PERCEPTION_HZ;
     let speed = (sim.u * sim.u + sim.w * sim.w).sqrt().max(0.1);
     let alpha = det::atan2(sim.w, sim.u).clamp(-0.55, 0.55);
-    // Independently prepare exactly the physical controls and accepted loads
-    // of the next human-input step. Neither load query advances the field.
+    // Independently prepare the physical controls and two native load stages
+    // of the next human-input step. Neither query advances the wind field.
     let dc = sim.mech_spec.step(sim.mech, 0.0, 0.0, dt).unwrap().0.delta_rad;
-    let loads = sim.force_buildup_current_wind(speed, alpha, dc).unwrap();
+    let first = sim.force_buildup_current_wind(speed, alpha, dc).unwrap();
+    let start = sim.current_flight_motion();
+    let stage = motion::midpoint_stage(start, sim.flight_acceleration(start, &first, alpha), dt);
+    let [x, h] = stage.longitudinal.position_m;
+    let wind = sim.sample_spatial_wind([x, 0.0, h]).unwrap();
+    let [u, w] = motion::body_air_velocity(stage.longitudinal.ground_mps,
+        stage.longitudinal.theta_rad, [wind.u[0], wind.u[2]]);
+    let speed = det::sqrt(u * u + w * w).max(0.1);
+    let alpha = det::atan2(w, u).clamp(-0.55, 0.55);
+    let loads = sim.force_buildup_at_motion(stage, speed, alpha, dc,
+        Some(first.coupled.w_slip)).unwrap();
     let moments = sim.design.distributed_lateral_loads(
         &loads, dc.clamp(-0.55, 0.55), sim.spec.rho_kg_m3,
     ).unwrap().net();

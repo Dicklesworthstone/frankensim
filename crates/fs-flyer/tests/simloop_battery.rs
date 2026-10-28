@@ -3,8 +3,8 @@
 //! bit-identical digests; RunIntentId minted after (and sensitive to
 //! intent, insensitive backward — tick-0 digest never changes with
 //! intent); phase transitions with receipts; human-mode input law;
-//! scenario caps at cap AND cap+1; the fixed-control flight ends on
-//! the ground (the physics says it must); golden.
+//! scenario caps at cap AND cap+1; explicit catapult-assisted flight
+//! fixtures; the original unaided launch shortfall; deterministic golden.
 //! Repro: cargo test -p fs-flyer --test simloop_battery
 
 use fs_flyer::simloop::{
@@ -16,8 +16,18 @@ fn jlog(case: &str, payload: &str) {
     println!("{{\"suite\":\"fs-flyer-e51\",\"case\":\"{case}\",{payload}}}");
 }
 
-fn run_lifecycle(mode: PilotMode) -> (SimLoop, u64, Phase, f64) {
-    let mut sim = SimLoop::init(dec17_scenario(1903, mode)).unwrap();
+// Test-only assisted launch, explicitly distinct from historical Dec-17.
+// Correct rail kinematics no longer lift the unchanged 18.3 m reference.
+// Use the existing registered tow law to exercise airborne consumers without
+// retuning pitch, controls, aerodynamic parameters or pilot gains.
+fn assisted_launch_scenario(mode: PilotMode) -> ScenarioSpec {
+    let mut spec = dec17_scenario(1903, mode);
+    spec.catapult = Some(fs_flyer::simloop::CATAPULT_1904_V1);
+    spec
+}
+
+fn run_assisted_lifecycle(mode: PilotMode) -> (SimLoop, u64, Phase, f64) {
+    let mut sim = SimLoop::init(assisted_launch_scenario(mode)).unwrap();
     let mut last_phase = Phase::OnRail;
     let mut x_end = 0.0;
     let mut last_out: Option<fs_flyer::simloop::SimStateOut> = None;
@@ -77,10 +87,10 @@ fn run_lifecycle(mode: PilotMode) -> (SimLoop, u64, Phase, f64) {
 }
 
 #[test]
-fn fixed_control_lifecycle_flies_and_ends_on_the_ground() {
-    let (sim, _t, phase, x_end) = run_lifecycle(PilotMode::FixedControls);
-    // The open-loop aircraft MUST leave the rail (Dec-17 headwind +
-    // thrust) and MUST end the run under physics, not by tick budget or
+fn fixed_control_assisted_lifecycle_flies_until_a_physical_terminal() {
+    let (sim, _t, phase, x_end) = run_assisted_lifecycle(PilotMode::FixedControls);
+    // The explicit assisted fixture MUST leave the rail and MUST end
+    // the run under physics, not by tick budget or
     // rail overrun: ground contact, or a receipted envelope exit (the
     // measured open-loop path loops up and out of the certified domain).
     assert!(
@@ -110,13 +120,13 @@ fn fixed_control_lifecycle_flies_and_ends_on_the_ground() {
 #[test]
 fn lifecycle_is_bit_identical_twice() {
     // The DONE-WHEN determinism clause, native form.
-    let (a, _, _, ax) = run_lifecycle(PilotMode::FixedControls);
-    let (b, _, _, bx) = run_lifecycle(PilotMode::FixedControls);
+    let (a, _, _, ax) = run_assisted_lifecycle(PilotMode::FixedControls);
+    let (b, _, _, bx) = run_assisted_lifecycle(PilotMode::FixedControls);
     assert_eq!(a.digest_hex(), b.digest_hex(), "bit-identical lifecycles");
     assert_eq!(ax.to_bits(), bx.to_bits());
     // And the historical pilot too (remnant streams are tick-addressed).
-    let (c, _, _, _) = run_lifecycle(PilotMode::Historical(2));
-    let (d, _, _, _) = run_lifecycle(PilotMode::Historical(2));
+    let (c, _, _, _) = run_assisted_lifecycle(PilotMode::Historical(2));
+    let (d, _, _, _) = run_assisted_lifecycle(PilotMode::Historical(2));
     assert_eq!(c.digest_hex(), d.digest_hex());
     assert_ne!(a.digest_hex(), c.digest_hex(), "modes must differ");
     jlog(
@@ -126,8 +136,8 @@ fn lifecycle_is_bit_identical_twice() {
 }
 
 #[test]
-fn historical_pilot_flies_the_undulating_flight() {
-    let (sim, _, phase, x_end) = run_lifecycle(PilotMode::Historical(2));
+fn historical_pilot_assisted_fixture_reaches_a_physical_terminal() {
+    let (sim, _, phase, x_end) = run_assisted_lifecycle(PilotMode::Historical(2));
     assert!(matches!(
         phase,
         Phase::Ended(TerminalEvent::GroundContact) | Phase::Ended(TerminalEvent::EnvelopeExceeded)
@@ -220,7 +230,7 @@ fn human_input_refusals_do_not_consume_physical_time() {
 
 #[test]
 fn human_warp_drives_real_lateral_state_into_payload_v2() {
-    let mut spec = dec17_scenario(1903, PilotMode::Human);
+    let mut spec = assisted_launch_scenario(PilotMode::Human);
     spec.max_ticks = 1_200;
     let mut sim = SimLoop::init(spec).unwrap();
     let mut last = None;
@@ -306,7 +316,7 @@ fn scenario_caps_at_cap_and_cap_plus_one() {
 
 #[test]
 fn rail_phase_produces_receipted_transition() {
-    let mut sim = SimLoop::init(dec17_scenario(1903, PilotMode::FixedControls)).unwrap();
+    let mut sim = SimLoop::init(assisted_launch_scenario(PilotMode::FixedControls)).unwrap();
     let mut saw_rail = false;
     let mut transition_tick = None;
     for _ in 0..2400 {
@@ -321,21 +331,19 @@ fn rail_phase_produces_receipted_transition() {
         }
     }
     assert!(saw_rail, "must start on the rail");
-    let t = transition_tick.expect("must lift off in the Dec-17 headwind");
+    let t = transition_tick.expect("the explicit catapult fixture must lift off");
     assert!(t > 1, "liftoff is not instantaneous");
     jlog("rail", &format!("\"liftoff_tick\":{t}"));
 }
 
 #[test]
-fn member3_flies_the_reference_window_with_corrected_momentum() {
-    // Member 3's gains remain unchanged. Its earlier crash-class oracle
-    // was calibrated with explicit body transport and level-flight gravity.
-    // Correcting both lets this seed fly through the reference window:
-    // 14.57 s airborne, seven undulations and 53.10 m. This is a bounded
-    // plant regression, not validation of the historical crash ending;
-    // that earlier calibration claim is withdrawn for the corrected plant.
+fn member3_assisted_fixture_has_bounded_undulating_flight() {
+    // Registered gains are unchanged. This explicit catapult fixture yields
+    // 12.5 s airborne, five undulations and 42.80 m before ground contact.
+    // It is a bounded plant regression, not a historical calibration claim.
+    // The original unaided reference is checked separately below.
     let run = || {
-        let mut sim = SimLoop::init(dec17_scenario(1903, PilotMode::Historical(3))).unwrap();
+        let mut sim = SimLoop::init(assisted_launch_scenario(PilotMode::Historical(3))).unwrap();
         let mut liftoff = None;
         let mut undulation_flips = 0u32;
         let mut last_sign = 0i8;
@@ -371,20 +379,22 @@ fn member3_flies_the_reference_window_with_corrected_momentum() {
     let (liftoff, undulations, (terminal, end_tick, x_end), digest) = run();
     assert_eq!(
         terminal,
-        TerminalEvent::MaxTicks,
-        "the corrected plant must sustain this reference window"
+        TerminalEvent::GroundContact,
+        "the explicit assisted fixture has a measured ground terminal"
     );
     assert_eq!(
-        end_tick,
-        dec17_scenario(1903, PilotMode::Historical(3)).max_ticks,
-        "the reference window must run to its configured cap"
+        end_tick, 1_574,
+        "registered controls and the corrected plant must reproduce the terminal tick"
     );
     let airborne_s = (end_tick - liftoff) as f64 / 120.0;
-    assert!(airborne_s >= 8.0, "controlled flight duration: {airborne_s} s");
+    assert!(
+        airborne_s >= 8.0,
+        "controlled flight duration: {airborne_s} s"
+    );
     assert!(undulations >= 3, "undulating flight: {undulations}");
     assert!(
         (25.0..90.0).contains(&x_end),
-        "ground distance in the reference-window band: {x_end} m"
+        "ground distance in the assisted-flight band: {x_end} m"
     );
     // Deterministic registration evidence.
     let (_, _, _, digest2) = run();
@@ -399,10 +409,54 @@ fn member3_flies_the_reference_window_with_corrected_momentum() {
 }
 
 #[test]
+fn original_dec17_reference_reports_the_corrected_rail_shortfall() {
+    for mode in [
+        PilotMode::FixedControls,
+        PilotMode::Historical(2),
+        PilotMode::Historical(3),
+    ] {
+        let spec = dec17_scenario(1903, mode);
+        let mut sim = SimLoop::init(spec.clone()).unwrap();
+        let end = loop {
+            let out = sim.step(None).unwrap();
+            // Independently reconstruct ground vertical velocity: the pitched
+            // aircraft remains constrained to the rail, including its endpoint.
+            let (s, c) = out.theta_rad.sin_cos();
+            assert!((s * out.u_mps - c * out.w_mps).abs() < 2e-12);
+            assert_ne!(
+                out.phase,
+                Phase::Airborne,
+                "do not fabricate a launch: {out:?}"
+            );
+            if let Phase::Ended(_) = out.phase {
+                break out;
+            }
+        };
+        assert_eq!(end.phase, Phase::Ended(TerminalEvent::RailEndWithoutLift));
+        assert_eq!(end.tick, 975);
+        assert!((spec.rail_length_m..spec.rail_length_m + 0.04).contains(&end.x_m));
+        assert!(sim.envelope_refusal().is_none());
+        if mode == PilotMode::FixedControls {
+            assert_eq!(
+                sim.digest_hex(),
+                "81fcae99804ee631945d8a9ef0bf722f9af8e7b3ed532a3cfb81191dadbe753b"
+            );
+        }
+        jlog(
+            "corrected-rail-shortfall",
+            &format!(
+                "\"mode\":\"{mode:?}\",\"end_tick\":{},\"x_end_m\":{}",
+                end.tick, end.x_m
+            ),
+        );
+    }
+}
+
+#[test]
 fn catapult_mechanics_and_the_huffman_low_speed_block() {
     // E5.4 (bead guzez.6.7). Part 1 — catapult mechanics INSIDE the
-    // certified envelope: the Dec-17 KDH scenario with the registered
-    // 1904 catapult lifts off substantially earlier than unaided
+    // certified envelope: explicit 60 m test rails with the same KDH wind
+    // let both runs lift; the registered 1904 catapult launches earlier
     // (executed comparative discriminator), the tow binds into
     // RunIntentId but never the tick-0 digest, and both catapult axes
     // cap at cap AND cap+1.
@@ -411,6 +465,7 @@ fn catapult_mechanics_and_the_huffman_low_speed_block() {
     };
     let liftoff_x = |catapult: Option<CatapultSpec>| -> f64 {
         let mut spec = dec17_scenario(1903, PilotMode::FixedControls);
+        spec.rail_length_m = 60.0; // test-only extension; original shortfall is tested above
         spec.catapult = catapult;
         let mut sim = SimLoop::init(spec).unwrap();
         loop {
@@ -483,7 +538,7 @@ fn catapult_mechanics_and_the_huffman_low_speed_block() {
     // the probe 2026-08-21 reads: 2-3 m/s REFUSE (the near-calm run
     // stays outside the admitted envelope — the honest outcome; the
     // near-static solve schedule remains future work), 4-8 m/s LIFT
-    // unaided (the fabrication crash is gone). The floor bracket is
+    // with the scenario's catapult. The floor bracket is
     // asserted below; THIS near-calm assertion flips to a liftoff
     // claim only if a near-static solve tier ever lands AND the
     // historical catapult requirement is re-argued.
@@ -509,7 +564,7 @@ fn catapult_mechanics_and_the_huffman_low_speed_block() {
     // Part 3 — the 5.7.1 FLOOR BRACKET (executed both sides): at
     // 3 m/s the coupled core still refuses (calm-class Huffman needs
     // the catapult, matching the record); at 4 m/s the same scenario
-    // lifts unaided within the 30 m rail. Both outcomes are receipts,
+    // lifts with the declared catapult within the 30 m rail. Both outcomes are receipts,
     // not assumptions.
     let outcome_at = |headwind: f64| -> (bool, bool) {
         let mut spec = huffman_scenario(1904, PilotMode::FixedControls);
@@ -528,10 +583,7 @@ fn catapult_mechanics_and_the_huffman_low_speed_block() {
     let (lift3, refused3) = outcome_at(3.0);
     assert!(!lift3 && refused3, "3 m/s must refuse (calm class)");
     let (lift4, _) = outcome_at(4.0);
-    assert!(
-        lift4,
-        "4 m/s must lift unaided (the fabrication crash is gone)"
-    );
+    assert!(lift4, "4 m/s must lift with the declared catapult");
     jlog(
         "huffman-floor-bracket",
         "\"refuses_at\":3.0,\"lifts_at\":4.0",
@@ -540,7 +592,7 @@ fn catapult_mechanics_and_the_huffman_low_speed_block() {
 
 #[test]
 fn golden_digest() {
-    let (sim, _, _, _) = run_lifecycle(PilotMode::FixedControls);
+    let (sim, _, _, _) = run_assisted_lifecycle(PilotMode::FixedControls);
     let digest = sim.digest_hex();
     jlog("golden", &format!("\"digest\":\"{digest}\""));
     // Golden bump 2026-08-21 (bead guzez.7.2.1): ground-contact
@@ -555,8 +607,13 @@ fn golden_digest() {
     // Golden bump 2026-10-28: airborne translation now advances world
     // momentum with actual vertical gravity and midpoint held-load motion;
     // explicit body-frame transport no longer creates kinetic energy.
+    // Golden bump 2026-10-28: coupled translation/pitch/rotor midpoint loads
+    // and a physically stationary rail state replace tick-start flight loads
+    // and the spurious launch velocity. This flight golden explicitly uses
+    // the existing catapult fixture; the unmodified reference's rail refusal
+    // has its own exact digest in the preceding regression.
     assert_eq!(
-        digest, "fa01e33e9079c9a1372a2fd7c582c3c86103e69eeadf70d7c736d8b6806491bf",
+        digest, "d22e11c02092be3d93010529bdec7ced7cb4c16b0eb998c7ea547fb4128f514e",
         "lifecycle golden moved — determinism regression or an \
          intentional physics change requiring the golden-bump protocol"
     );

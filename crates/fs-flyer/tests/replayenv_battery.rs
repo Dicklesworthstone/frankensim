@@ -1,8 +1,8 @@
 //! E6.1-ii battery (bead wf-root-guzez.7.1.2): envelope round-trip
 //! (bytes -> parse -> bytes bitwise), scrub-to-tick EQUALS
 //! uninterrupted execution BITWISE at rail/airborne/checkpoint-edge/
-//! terminal ticks, the event index matches the measured run (liftoff
-//! 626 class, terminal), hostile twins (tamper, truncation, trailing
+//! terminal ticks, the event index matches the measured explicit catapult
+//! fixture (liftoff and terminal), hostile twins (tamper, truncation, trailing
 //! bytes, bad terminal code), Human-mode recording refuses (v1 law),
 //! interval caps at cap AND cap+1.
 //! Repro: cargo test -p fs-flyer --test replayenv_battery --release
@@ -12,7 +12,10 @@ use fs_flyer::replayenv::{
     MAX_CHECKPOINT_INTERVAL, ReplayEnvelope, record_replay,
     record_replay_with_distributed_spatial_wind, record_replay_with_spatial_wind,
 };
-use fs_flyer::simloop::{Phase, PilotMode, SimLoop, SimStateOut, SpatialWindSpec, dec17_scenario};
+use fs_flyer::simloop::{
+    CATAPULT_1904_V1, Phase, PilotMode, ScenarioSpec, SimLoop, SimStateOut, SpatialWindSpec,
+    dec17_scenario,
+};
 use fs_math::det;
 
 fn jlog(case: &str, payload: &str) {
@@ -21,7 +24,7 @@ fn jlog(case: &str, payload: &str) {
 
 /// Uninterrupted per-tick states (tick -> SimStateOut).
 fn truth_states() -> Vec<SimStateOut> {
-    let mut sim = SimLoop::init(dec17_scenario(1903, PilotMode::FixedControls)).unwrap();
+    let mut sim = SimLoop::init(assisted_fixture()).unwrap();
     let mut out = Vec::new();
     loop {
         let s = sim.step(None).unwrap();
@@ -31,6 +34,15 @@ fn truth_states() -> Vec<SimStateOut> {
         }
     }
     out
+}
+
+// Explicit test launch: the corrected unassisted Dec-17 reference reaches
+// its rail end before liftoff. Keep actual airborne scrub coverage without
+// changing the production scenario or tuning its gains/initial attitude.
+fn assisted_fixture() -> ScenarioSpec {
+    let mut spec = dec17_scenario(1903, PilotMode::FixedControls);
+    spec.catapult = Some(CATAPULT_1904_V1);
+    spec
 }
 
 fn bitwise_eq(a: &SimStateOut, b: &SimStateOut) -> bool {
@@ -56,7 +68,7 @@ fn bitwise_eq(a: &SimStateOut, b: &SimStateOut) -> bool {
 
 #[test]
 fn scrub_equals_uninterrupted_bitwise_and_events_match() {
-    let env = record_replay(dec17_scenario(1903, PilotMode::FixedControls), 200).unwrap();
+    let env = record_replay(assisted_fixture(), 200).unwrap();
     let truth = truth_states();
     // Event index vs the measured run.
     assert_eq!(env.events.terminal_tick, truth.last().unwrap().tick);
@@ -68,7 +80,7 @@ fn scrub_equals_uninterrupted_bitwise_and_events_match() {
     assert_eq!(env.events.terminal_code, 5, "fixed run: envelope exit");
     // Scrub points: rail, airborne, exactly ON a checkpoint tick, and
     // the terminal tick itself.
-    for t in [150u64, 401, 800, 1000, env.events.terminal_tick] {
+    for t in [50u64, 74, 75, 200, 401, 600, env.events.terminal_tick] {
         let scrubbed = env.scrub_to_tick(t).unwrap();
         let truth_at = truth.iter().find(|s| s.tick == t).unwrap();
         assert!(

@@ -76,13 +76,28 @@ with `mech-step-non-finite` and `mech-step-unresolved`, respectively.
 
 ## Spatial wind in the flight lifecycle
 
-Both ordinary and spatial-wind airborne paths use one shared longitudinal
-held-load momentum step. Non-gravity body loads rotate at the midpoint attitude
-under the accepted constant pitch moment; the resulting world impulse advances
-ground velocity, and mean ground velocity advances the centre of mass. Constant
-pitch acceleration and ballistic gravity integrate exactly, while a rotating
-held body force has second-order kinematics. Loads still come from one tick-start
-aerodynamic solve, so this is not a fully coupled second-order flight method.
+Ordinary, CG spatial-wind and distributed-wind airborne paths share one coupled
+longitudinal/rotor midpoint step. The first native aerodynamic solve predicts
+midpoint velocity, pitch attitude/rate and rotor speed. A second solve evaluates
+the actual loads at that predicted state, including spatial wind at the stage's
+CG and material points. Both stages use the same held controls and temporal wind
+realization; the legacy scalar gust's incidence increment uses stage airspeed.
+The first solution warm-starts the second, and only the accepted midpoint wash
+is cached for the next tick. There is no duplicate aerodynamic owner or extra
+atmosphere/control clock advance.
+
+The force point uses `X_mid = X_n + dt V_n / 2`; accepted centre-of-mass drift
+uses the mean of initial and final ground velocities. This closes both linear
+impulse and orbital angular impulse about any translated origin to roundoff:
+`Δ(X × mV) = dt X_mid × F_mid`. Pitch and rotor inertia receive their respective
+midpoint torques. Smooth coupled longitudinal/rotor dynamics are second order
+under the held inputs; this does not extend the claim to OU innovations,
+discrete controls, existing load-envelope clamps or the reduced lateral model.
+Constant force/gravity and constant angular accelerations integrate exactly.
+A refused midpoint publishes no predicted motion or warm cache. An explicitly
+detected ground crossing uses the existing held-load terminal predictor and
+GroundContact treatment, without querying below ground; that event branch has
+no smooth-order or continuous collision/localized-contact claim.
 
 The ordinary path retains body airspeed as stored state, converting through the
 steady headwind offset before and after the inertial step. Force-free attitude
@@ -91,14 +106,26 @@ of creating energy through explicit rotating-frame transport. Airborne ground
 motion may be backward. Both paths remove the force assembly's level-flight
 gravity convention and apply vertical world gravity once, independent of angle
 of attack, pitch attitude or a gust. Focused analytic regressions live in
-`simloop/motion.rs`; the launch-rail constraints retain their existing treatment.
+`simloop/motion.rs`. Ordinary and spatial launches also share one constrained
+world-momentum step: stationary pitched aircraft have both body airspeed
+components, the rail holds vertical ground velocity at zero, and actual rotated
+non-gravity loads determine support, friction and release. Releasing support
+does not insert a velocity jump. The existing first-order rail event holds the
+constraint for the release tick and begins free flight at its endpoint; it does
+not resolve the within-tick vertical/pitch impulse after support is lost. The
+existing tow law and single rail force solve remain unchanged.
 
 Pilot member 3 retains its registered gains. Its earlier crash-class calibration
-predates this momentum/gravity correction and is no longer a validation claim for
-the current plant. The corrected seed-1903 reference runs through its 20 s cap
-with 14.57 s airborne, seven undulations and 53.10 m of travel; the lifecycle
-battery checks that bounded trajectory and exact replay without retuning gains
-to reproduce the earlier flawed-physics ending.
+predates these momentum/gravity corrections and is no longer a validation claim
+for the current plant. With consistent stationary/rail velocity, the unchanged
+seed-1903 Dec-17 reference reaches RailEndWithoutLift at tick 975, approximately
+18.316 m: the 18.3 m rail is too short for this currently calibrated plant.
+The battery pins that outcome rather than fabricating lift or retuning gains.
+Airborne lifecycle tests explicitly add the existing registered catapult as a
+test fixture, distinct from historical Dec-17. Member 3 then flies 12.5 s with
+five undulations and 42.80 m of travel before GroundContact at tick 1574. The
+assisted fixture and original rail shortfall both retain deterministic evidence;
+neither establishes a revised historical launch or pilot calibration.
 
 `SimLoop::init_with_spatial_wind(scenario, SpatialWindSpec)` opts into the
 wall-compatible evolving `fs-atmo` field. The specification declares the mean

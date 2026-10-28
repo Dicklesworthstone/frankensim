@@ -395,7 +395,7 @@ impl SimLoop {
         };
         // Rail start: aircraft at rest on the rail (airspeed = headwind).
         let theta0 = tick0.trim.alpha_rad;
-        let v_air0 = spec.headwind_mps.max(0.1);
+        let [u0, w0] = motion::body_air_velocity([0.0; 2], theta0, [-spec.headwind_mps, 0.0]);
         let digest_acc =
             *hash_domain("org.frankensim.wf.sim-digest.v1", tick0.digest.as_bytes()).as_bytes();
         Ok(SimLoop {
@@ -418,8 +418,8 @@ impl SimLoop {
             phase: Phase::OnRail,
             x_m: 0.0,
             h_m: 2.4, // rail height class above the sand (visual datum)
-            u: v_air0,
-            w: 0.0,
+            u: u0,
+            w: w0,
             q: 0.0,
             theta: theta0,
             warp: 0.0,
@@ -778,8 +778,8 @@ impl SimLoop {
         let dt = 1.0 / PERCEPTION_HZ;
         self.tick += 1;
         let mut gust_w = if self.spatial_wind.is_some() {
-            // Explicit n→n+1 force update uses the accepted position and
-            // atmosphere at n. Advance the wind only after integration;
+            // Both load stages use the atmosphere realization at n, sampled
+            // at their own positions. Advance the wind only after integration;
             // every published endpoint then has state and wind at n+1.
             self.sync_spatial_air_velocity()?
         } else {
@@ -882,108 +882,61 @@ impl SimLoop {
                 return Ok(out);
             }
         };
-        self.warm_slip = Some(b.coupled.w_slip);
-        let m = self.design.gross_mass_kg;
         match self.phase {
             Phase::OnRail => {
-                if self.spatial_wind.is_some() {
-                    self.advance_spatial_motion(&b, alpha_clamped, dt);
-                } else {
-                    // Constrained: normal force carries weight minus lift;
-                    // accelerate along the rail under thrust − drag −
-                    // rolling friction. Gravity is inside force_n already —
-                    // remove its x-component and use the rail-plane balance.
-                    let lift = b.lift_n;
-                    let weight = m * 9.80665;
-                    let normal = (weight - lift).max(0.0);
-                    let thrust = b.thrust_n[0] + b.thrust_n[1];
-                    // Catapult tow: constant force while the pull lasts
-                    // (x_m measures rail distance; the drop exhausts at
-                    // pull_length — constant-force tier, declared).
-                    let tow = match &self.spec.catapult {
-                        Some(c) if self.x_m < c.pull_length_m => c.pull_force_n,
-                        _ => 0.0,
-                    };
-                    let du_ground = (thrust + tow - b.drag_n - RAIL_MU * normal) / m;
-                    let inc_u = dt * du_ground;
-                    self.u += inc_u;
-                    let inc_x = dt * (self.u - self.spec.headwind_mps).max(0.0);
-                    self.x_m += inc_x;
-                    let inc_om = dt * b.torque_imbalance_nm / 1.6;
-                    self.omega += inc_om;
-                    if lift >= weight {
-                        self.phase = Phase::Airborne;
-                    } else if self.x_m > self.spec.rail_length_m {
-                        self.phase = Phase::Ended(TerminalEvent::RailEndWithoutLift);
-                    }
-                }
+                self.warm_slip = Some(b.coupled.w_slip);
+                self.advance_rail_motion(&b, alpha_clamped, dt);
             }
             Phase::Airborne => {
-                if self.spatial_wind.is_some() {
-                    self.advance_spatial_motion(&b, alpha_clamped, dt);
-                } else {
-                    // Store body airspeed as before, but advance inertial
-                    // ground momentum. Steady headwind is a velocity offset;
-                    // the legacy scalar gust still enters only the load alpha.
-                    let wind = [-self.spec.headwind_mps, 0.0];
-                    let next = motion::held_load_step(
-                        motion::LongitudinalMotion {
-                            position_m: [self.x_m, self.h_m],
-                            ground_mps: motion::ground_velocity([self.u, self.w], self.theta, wind),
-                            theta_rad: self.theta,
-                            q_rad_s: self.q,
-                        },
-                        motion::nongravity_acceleration(
-                            [b.force_n[0], b.force_n[2]],
-                            alpha_clamped,
-                            m,
-                        ),
-                        b.moment_y_nm / IYY_KG_M2,
-                        motion::GRAVITY_MPS2,
-                        dt,
-                    );
-                    [self.x_m, self.h_m] = next.position_m;
-                    self.theta = next.theta_rad;
-                    self.q = next.q_rad_s;
-                    [self.u, self.w] = motion::body_air_velocity(next.ground_mps, self.theta, wind);
-                    let inc_om = dt * b.torque_imbalance_nm / 1.6;
-                    self.omega += inc_om;
-                }
-                // Project the achieved antisymmetric strip twists back
-                // onto the registered warp basis. Common trim washout
-                // is symmetric and therefore contributes no lateral
-                // command; the authority-bearing component drives the
-                // reduced roll/yaw state.
-                let lateral_result = self
-                    .warp_model
-                    .evaluate(
-                        self.warp,
-                        0.5 * self.spec.rho_kg_m3 * v_air * v_air,
-                        alpha_clamped,
-                    )
-                    .and_then(|loaded| {
-                        let (projection, norm) = loaded
-                            .strips
-                            .iter()
-                            .zip(&self.warp_model.basis)
-                            .fold((0.0, 0.0), |(projection, norm), (strip, basis)| {
-                                (projection + strip.loaded_rad * basis, norm + basis * basis)
+                match self.advance_airborne_motion(&b, alpha_clamped, dc_eff, gust_w, dt) {
+                    Err(refusal) => {
+                        // A midpoint outside the native load envelope publishes
+                        // no predicted motion or warm start. The common endpoint
+                        // path below advances the wind exactly once.
+                        self.phase = Phase::Ended(TerminalEvent::EnvelopeExceeded);
+                        self.envelope_refusal = Some(refusal);
+                    }
+                    Ok(midpoint) => {
+                        let v_air = midpoint
+                            .as_ref()
+                            .map_or(v_air, |sample| sample.airspeed_mps);
+                        let alpha = midpoint
+                            .as_ref()
+                            .map_or(alpha_clamped, |sample| sample.alpha_rad);
+                        let loads = midpoint.as_ref().map_or(&b, |sample| &sample.forces);
+                        // Reuse the accepted load stage for lateral forcing;
+                        // common trim washout supplies no antisymmetric command.
+                        let lateral_result = self
+                            .warp_model
+                            .evaluate(self.warp, 0.5 * self.spec.rho_kg_m3 * v_air * v_air, alpha)
+                            .and_then(|loaded| {
+                                let (projection, norm) = loaded
+                                    .strips
+                                    .iter()
+                                    .zip(&self.warp_model.basis)
+                                    .fold((0.0, 0.0), |(projection, norm), (strip, basis)| {
+                                        (
+                                            projection + strip.loaded_rad * basis,
+                                            norm + basis * basis,
+                                        )
+                                    });
+                                self.step_lateral_current_wind(
+                                    projection / norm,
+                                    v_air,
+                                    dc_eff,
+                                    loads,
+                                    dt,
+                                )
                             });
-                        self.step_lateral_current_wind(
-                            projection / norm,
-                            v_air,
-                            dc_eff,
-                            &b,
-                            dt,
-                        )
-                    });
-                if let Err(refusal) = lateral_result {
-                    self.phase = Phase::Ended(TerminalEvent::EnvelopeExceeded);
-                    self.envelope_refusal = Some(refusal);
-                }
-                if self.h_m <= 0.0 && !matches!(self.phase, Phase::Ended(_)) {
-                    self.h_m = 0.0;
-                    self.phase = Phase::Ended(TerminalEvent::GroundContact);
+                        if let Err(refusal) = lateral_result {
+                            self.phase = Phase::Ended(TerminalEvent::EnvelopeExceeded);
+                            self.envelope_refusal = Some(refusal);
+                        }
+                        if self.h_m <= 0.0 && !matches!(self.phase, Phase::Ended(_)) {
+                            self.h_m = 0.0;
+                            self.phase = Phase::Ended(TerminalEvent::GroundContact);
+                        }
+                    }
                 }
             }
             Phase::Ended(_) => unreachable!("guarded above"),

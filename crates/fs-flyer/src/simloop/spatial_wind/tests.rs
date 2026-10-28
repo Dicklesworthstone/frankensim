@@ -25,6 +25,69 @@ fn simulation(seed: u64, sigma_mps: f64) -> SimLoop {
 }
 
 #[test]
+fn ordinary_rail_initialization_is_stationary_in_the_world_frame() {
+    let sim = SimLoop::init(dec17_scenario(1903, PilotMode::FixedControls)).unwrap();
+    let (s, c) = sim.theta.sin_cos();
+    assert!(
+        sim.theta.abs() > 0.001,
+        "pitched fixture must expose the frame error"
+    );
+    assert!((c * sim.u + s * sim.w - sim.spec.headwind_mps).abs() < 1e-12);
+    assert!((s * sim.u - c * sim.w).abs() < 1e-12);
+    assert!((sim.w - s * sim.spec.headwind_mps).abs() < 1e-12);
+    assert_eq!(sim.phase, Phase::OnRail);
+}
+
+#[test]
+fn releasing_the_rail_reaction_adds_no_horizontal_or_vertical_impulse() {
+    for mode in 0..3 {
+        let spec = dec17_scenario(1903, PilotMode::FixedControls);
+        let mut sim = match mode {
+            0 => SimLoop::init(spec).unwrap(),
+            1 => SimLoop::init_with_spatial_wind(spec, wind_spec(0.0)).unwrap(),
+            _ => SimLoop::init_with_distributed_spatial_wind(spec, wind_spec(0.0)).unwrap(),
+        };
+        let speed = 3.7;
+        if let Some(wind) = &mut sim.spatial_wind {
+            wind.ground_mps = [speed, 0.0];
+            sim.sync_spatial_air_velocity().unwrap();
+        } else {
+            [sim.u, sim.w] =
+                motion::body_air_velocity([speed, 0.0], sim.theta, [-sim.spec.headwind_mps, 0.0]);
+        }
+        let start = sim.current_flight_motion();
+        let alpha = 0.12;
+        let weight = sim.design.gross_mass_kg * motion::GRAVITY_MPS2;
+        let upward = 1.1 * weight;
+        let (s, c) = (det::sin(sim.theta), det::cos(sim.theta));
+        let mut loads = sim.tick0.trim.buildup.clone();
+        // A purely vertical prescribed non-gravity force releases the rail;
+        // it supplies no horizontal impulse during this constrained tick.
+        loads.force_n = [
+            s * upward - weight * det::sin(alpha),
+            0.0,
+            -c * upward + weight * det::cos(alpha),
+        ];
+        loads.moment_y_nm = 0.0;
+        loads.torque_imbalance_nm = 0.0;
+        let dt = 1.0 / 120.0;
+        sim.advance_rail_motion(&loads, alpha, dt);
+        let next = sim.current_flight_motion();
+        assert_eq!(sim.phase, Phase::Airborne);
+        assert!((next.longitudinal.ground_mps[0] - speed).abs() < 1e-12);
+        assert!(next.longitudinal.ground_mps[1].abs() < 1e-12);
+        assert!((next.longitudinal.position_m[0] - dt * speed).abs() < 1e-12);
+        assert_eq!(
+            next.longitudinal.position_m[1],
+            start.longitudinal.position_m[1]
+        );
+        assert_eq!(next.longitudinal.theta_rad, start.longitudinal.theta_rad);
+        assert_eq!(next.longitudinal.q_rad_s, start.longitudinal.q_rad_s);
+        assert_eq!(next.rotor_rad_s, start.rotor_rad_s);
+    }
+}
+
+#[test]
 fn spatial_gust_changes_actual_force_and_propeller_torque() {
     let mut calm = simulation(1903, 0.0);
     let mut turbulent = simulation(1903, 0.8);
@@ -149,7 +212,15 @@ fn gust_does_not_rotate_gravity_or_impulse_ground_velocity() {
         sim.spatial_wind.as_mut().unwrap().ground_mps = [0.0; 2];
         // A force build-up containing only its documented gravity term.
         loads.force_n = [-weight * det::sin(alpha), 0.0, weight * det::cos(alpha)];
-        sim.advance_spatial_motion(&loads, alpha, 1.0 / 120.0);
+        let start = sim.current_flight_motion();
+        let acceleration = sim.flight_acceleration(start, &loads, alpha);
+        let stage = motion::midpoint_stage(start, acceleration, 1.0 / 120.0);
+        sim.publish_flight_motion(motion::finish_midpoint(
+            start,
+            stage,
+            acceleration,
+            1.0 / 120.0,
+        ));
         let ground = sim.spatial_ground_velocity_mps().unwrap();
         assert_eq!(ground[0], 0.0, "gravity must never accelerate horizontally");
         assert_eq!(ground[1], -9.80665 / 120.0);
@@ -268,4 +339,185 @@ fn distributed_surface_below_ground_refuses_instead_of_using_cg_flow() {
     let out = sim.step(None).unwrap();
     assert_eq!(out.phase, Phase::Ended(TerminalEvent::EnvelopeExceeded));
     assert_eq!(sim.envelope_refusal().unwrap().code, "below-surface-query");
+}
+
+fn airborne_fixture(mode: usize) -> SimLoop {
+    let scenario = dec17_scenario(1903, PilotMode::FixedControls);
+    let mut sim = match mode {
+        0 => SimLoop::init(scenario).unwrap(),
+        1 => SimLoop::init_with_spatial_wind(scenario, wind_spec(0.3)).unwrap(),
+        _ => SimLoop::init_with_distributed_spatial_wind(scenario, wind_spec(0.3)).unwrap(),
+    };
+    sim.phase = Phase::Airborne;
+    sim.h_m = 20.0;
+    sim.q = 0.15;
+    sim.omega += 2.0;
+    let wind = sim
+        .spatial_wind
+        .as_ref()
+        .map_or([-sim.spec.headwind_mps, 0.0], |w| {
+            let sample = w.sample([sim.x_m, 0.0, sim.h_m]).unwrap();
+            [sample.u[0], sample.u[2]]
+        });
+    let ground = [sim.tick0.trim.v_mps + wind[0], wind[1]];
+    if let Some(w) = &mut sim.spatial_wind {
+        w.ground_mps = ground;
+    }
+    [sim.u, sim.w] = motion::body_air_velocity(ground, sim.theta, wind);
+    sim
+}
+
+fn motion_values(state: motion::FlightMotion) -> [f64; 7] {
+    [
+        state.longitudinal.position_m[0],
+        state.longitudinal.position_m[1],
+        state.longitudinal.ground_mps[0],
+        state.longitudinal.ground_mps[1],
+        state.longitudinal.theta_rad,
+        state.longitudinal.q_rad_s,
+        state.rotor_rad_s,
+    ]
+}
+
+#[test]
+fn actual_airborne_impulses_use_midpoint_aerodynamics_and_rotor_speed() {
+    for mode in 0..3 {
+        let mut sim = airborne_fixture(mode);
+        let gust = if mode == 0 { 0.17 } else { 0.0 };
+        let speed = (sim.u * sim.u + sim.w * sim.w).sqrt();
+        let alpha = (det::atan2(sim.w, sim.u) + gust / speed).clamp(-0.55, 0.55);
+        let dc = sim.mech.delta_rad;
+        let first = sim.force_buildup_current_wind(speed, alpha, dc).unwrap();
+        let start = sim.current_flight_motion();
+        let dt = 1.0 / 60.0;
+        let stage =
+            motion::midpoint_stage(start, sim.flight_acceleration(start, &first, alpha), dt);
+        let before_wind = sim.spatial_wind.as_ref().map(|w| w.field.checkpoint());
+        let middle = sim
+            .advance_airborne_motion(&first, alpha, dc, gust, dt)
+            .unwrap()
+            .unwrap();
+        let next = sim.current_flight_motion();
+        assert_ne!(middle.forces.torque_imbalance_nm, first.torque_imbalance_nm);
+        assert_ne!(middle.forces.force_n, first.force_n);
+        assert_ne!(stage.rotor_rad_s, start.rotor_rad_s);
+        let mass = sim.design.gross_mass_kg;
+        let weight = mass * motion::GRAVITY_MPS2;
+        let body = [
+            middle.forces.force_n[0] + weight * middle.alpha_rad.sin(),
+            middle.forces.force_n[2] - weight * middle.alpha_rad.cos(),
+        ];
+        let (s, c) = stage.longitudinal.theta_rad.sin_cos();
+        let expected_force = [
+            c * body[0] + s * body[1],
+            s * body[0] - c * body[1] - weight,
+        ];
+        for axis in 0..2 {
+            let actual =
+                mass * (next.longitudinal.ground_mps[axis] - start.longitudinal.ground_mps[axis]);
+            assert!((actual - dt * expected_force[axis]).abs() < 2e-10);
+        }
+        assert!(
+            (super::super::IYY_KG_M2 * (next.longitudinal.q_rad_s - start.longitudinal.q_rad_s)
+                - dt * middle.forces.moment_y_nm)
+                .abs()
+                < 2e-12
+        );
+        assert!(
+            (1.6 * (next.rotor_rad_s - start.rotor_rad_s) - dt * middle.forces.torque_imbalance_nm)
+                .abs()
+                < 2e-12
+        );
+        assert_eq!(sim.warm_slip, Some(middle.forces.coupled.w_slip));
+        assert_eq!(
+            sim.spatial_wind.as_ref().map(|w| w.field.checkpoint()),
+            before_wind,
+            "midpoint load sampling must not consume an OU innovation"
+        );
+    }
+}
+
+#[test]
+fn refused_midpoint_keeps_motion_and_warm_start_unchanged() {
+    let mut sim = airborne_fixture(0);
+    sim.q = 0.0;
+    let speed = (sim.u * sim.u + sim.w * sim.w).sqrt();
+    let alpha = det::atan2(sim.w, sim.u);
+    let dc = sim.mech.delta_rad;
+    let mut first = sim.force_buildup_current_wind(speed, alpha, dc).unwrap();
+    let start = sim.current_flight_motion();
+    let warm = sim.warm_slip;
+    let dt = 1.0 / 120.0;
+    // A finite prescribed start load predicts almost zero airspeed. The
+    // ORIGINAL aero owner then refuses that midpoint (its floor is 1 m/s).
+    let wind = [-sim.spec.headwind_mps, 0.0];
+    let acceleration = [
+        (wind[0] - start.longitudinal.ground_mps[0]) / (0.5 * dt),
+        (wind[1] - start.longitudinal.ground_mps[1]) / (0.5 * dt) + motion::GRAVITY_MPS2,
+    ];
+    let body = motion::body_air_velocity(acceleration, sim.theta, [0.0; 2]);
+    let mass = sim.design.gross_mass_kg;
+    let weight = mass * motion::GRAVITY_MPS2;
+    first.force_n = [
+        mass * body[0] - weight * det::sin(alpha),
+        0.0,
+        mass * body[1] + weight * det::cos(alpha),
+    ];
+    first.moment_y_nm = 0.0;
+    first.torque_imbalance_nm = 0.0;
+    assert!(
+        sim.advance_airborne_motion(&first, alpha, dc, 0.0, dt)
+            .is_err()
+    );
+    assert_eq!(
+        motion_values(sim.current_flight_motion()),
+        motion_values(start)
+    );
+    assert_eq!(sim.warm_slip, warm);
+    assert_eq!(sim.tick, 0);
+    assert_eq!(sim.phase, Phase::Airborne);
+}
+
+#[test]
+fn actual_ground_crossing_uses_terminal_branch_and_one_endpoint_wind_advance() {
+    for spatial in [false, true] {
+        let mut sim = if spatial {
+            simulation(1903, 0.0)
+        } else {
+            SimLoop::init(dec17_scenario(1903, PilotMode::FixedControls)).unwrap()
+        };
+        sim.phase = Phase::Airborne;
+        sim.h_m = 0.001;
+        sim.q = 0.0;
+        let wind = if spatial {
+            let sample = sim.sample_spatial_wind([sim.x_m, 0.0, sim.h_m]).unwrap();
+            [sample.u[0], sample.u[2]]
+        } else {
+            [-sim.spec.headwind_mps, 0.0]
+        };
+        let ground = [sim.tick0.trim.v_mps + wind[0], -0.4 + wind[1]];
+        if let Some(w) = &mut sim.spatial_wind {
+            w.ground_mps = ground;
+        }
+        [sim.u, sim.w] = motion::body_air_velocity(ground, sim.theta, wind);
+        let mut expected = sim
+            .spatial_wind
+            .as_ref()
+            .map(|w| EvolvingTurbulenceField::resume(w.field.checkpoint()).unwrap());
+        if let Some(field) = &mut expected {
+            field.advance_to(1).unwrap();
+        }
+        let out = sim.step(None).unwrap();
+        assert_eq!(
+            out.phase,
+            Phase::Ended(TerminalEvent::GroundContact),
+            "{out:?}"
+        );
+        assert_eq!(out.h_m, 0.0);
+        assert_eq!(out.tick, 1);
+        assert_eq!(
+            sim.spatial_wind.as_ref().map(|w| w.field.checkpoint()),
+            expected.map(|w| w.checkpoint())
+        );
+    }
 }

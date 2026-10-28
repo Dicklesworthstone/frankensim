@@ -16,7 +16,7 @@
 use asupersync::types::Budget;
 use fs_contact::{CcdVerdict, SpacetimeBody, certified_ccd};
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
-use fs_flyer::simloop::{Phase, PilotMode, ScenarioSpec, SimLoop, TerminalEvent};
+use fs_flyer::simloop::{CATAPULT_1904_V1, Phase, PilotMode, ScenarioSpec, SimLoop, TerminalEvent};
 use fs_ga::Motor;
 use fs_geom::{Aabb, Point3};
 use fs_ivl::Interval;
@@ -220,15 +220,17 @@ fn replay_certify(
     })
 }
 
-/// Record a REAL lifecycle run's motion trace (airborne portion).
-fn record_reference_flight() -> (Vec<MotionSample>, Option<u64>) {
+/// Record a real, explicitly catapult-assisted test flight's airborne motion.
+/// The corrected original Dec-17 rail cannot launch this calibrated plant;
+/// this fixture preserves non-vacuous CCD coverage without a historical claim.
+fn record_assisted_flight() -> (Vec<MotionSample>, Option<u64>) {
     let spec = ScenarioSpec {
         seed: 1903,
         rho_kg_m3: 1.294,
         headwind_mps: 11.0,
-        pilot_mode: PilotMode::Historical(0),
+        pilot_mode: PilotMode::FixedControls,
         assist: None,
-        catapult: None,
+        catapult: Some(CATAPULT_1904_V1),
         rail_length_m: 18.3,
         max_ticks: 1_200,
     };
@@ -266,15 +268,15 @@ fn flat_ground() -> Aabb {
 }
 
 #[test]
-fn reference_flight_replay_is_certified() {
-    let (trace, contact_tick) = record_reference_flight();
+fn assisted_flight_replay_is_certified() {
+    let (trace, contact_tick) = record_assisted_flight();
     assert!(
         trace.len() >= 30,
-        "non-vacuity: the reference flight must actually fly ({} airborne ticks)",
+        "non-vacuity: the explicit assisted fixture must fly ({} airborne ticks)",
         trace.len()
     );
     let receipt =
-        replay_certify("dec17-ref-seed1903", &trace, &[flat_ground()], contact_tick).unwrap();
+        replay_certify("catapult-test-seed1903", &trace, &[flat_ground()], contact_tick).unwrap();
     assert_eq!(
         receipt.verdict, "CERTIFIED",
         "first missed: {:?}",
@@ -301,7 +303,7 @@ fn reference_flight_replay_is_certified() {
     assert!(clear >= 30);
     // Determinism: bit-identical receipt twice.
     let again =
-        replay_certify("dec17-ref-seed1903", &trace, &[flat_ground()], contact_tick).unwrap();
+        replay_certify("catapult-test-seed1903", &trace, &[flat_ground()], contact_tick).unwrap();
     assert_eq!(
         again.receipt_digest, receipt.receipt_digest,
         "bit-identical twice"
