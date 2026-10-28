@@ -149,7 +149,7 @@ fn full_normal_tangent_coupling_changes_the_impact_in_stick_and_slide() {
     }
 }
 
-fn two_link(joint: JointModel) -> ArticulatedModel {
+pub(super) fn two_link(joint: JointModel) -> ArticulatedModel {
     let inertia = |mass: f64, moment: f64| {
         SpatialInertia::new(
             mass,

@@ -13,6 +13,9 @@ use fs_mbd::articulated_contacts::{
 
 #[path = "articulated_contacts/friction.rs"]
 mod friction;
+
+#[path = "articulated_contacts/tangential.rs"]
+mod tangential;
 #[path = "articulated_contacts/momentum.rs"]
 mod momentum;
 

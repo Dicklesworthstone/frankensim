@@ -669,6 +669,47 @@ with deterministic retry. This is a frozen-configuration point impulse with one
 common static/kinetic coefficient. It adds no contact discovery, time stepper,
 velocity-dependent friction, finite-patch spin loss, or heat allocation.
 
+### Stateful articulated shear and reversible contact storage
+
+`articulated_contacts::tangential::advance_articulated_tangential` consumes the
+shared `fs_tribo::TangentialLaw` and its retained checkpoint on one fixed physical
+tangent. The original articulated ABA supplies the exact projected mobility
+`W = J M^-1 J^T`; the frozen-configuration midpoint force compliance is
+`dt^2 W / 2`. The constitutive owner's work-conjugate average traction applies
+`dt F` to that same mechanics. Joint/base recoil and both dynamic counterparts
+remain in the response; no lumped link mass or scalar approximation to a 2-D
+mobility is introduced. A translating prescribed support supplies signed work.
+
+Actual endpoint velocities reconstruct the midpoint slip after native impulse
+application. Contact storage before/after, constitutive work, physical heat,
+support work and native kinetic-energy change close one account. The shared
+mechanical audit now includes explicit reversible contact-storage change, so a
+preloaded contact can accelerate resting bodies by releasing stored energy.
+Normal-only and ideal Coulomb impact calls retain zero contact-storage change
+and their existing passivity semantics. Lost mechanical energy from an impact
+is not automatically labeled friction heat by the new consumer.
+
+Input bodies, law and history are borrowed. One complete trial returns both the
+constitutive checkpoint and all native body responses; failure and cancellation
+publish neither. Geometry, force, time, slip-speed, compatibility and work budgets
+are explicit. Foreign law/source histories retain their original refusals;
+transverse force or motion refuses because only one coordinate is assembled.
+The caller keeps the physical tangent/history association unchanged and publishes
+all returned state together. This operation provides no pose integration,
+normal-response constraint, changing-load history transfer, multiple coupled
+shear ports, finite-patch spin/rolling, thermal allocation or contact discovery.
+Dry sticking is step-averaged; time refinement must resolve branch transitions
+and intrastep reversals independently of work closure.
+
+Six G1/G3/G4 groups in `tests/articulated_contacts/tangential.rs` cover an
+independently derived off-centre elastic load line, preload energy release,
+prismatic/revolute joint recoil, dynamic-pair momentum and frame covariance,
+the analytic Mindlin backbone and retained reversal memory, dry sliding heat,
+and late refusal/cancellation with exact retry. All six and the thirteen prior
+normal/Coulomb groups pass natively using the original mechanics, contact and
+numerical solver bodies. This focused source-selected validation excludes
+unrelated runtime consumers and does not establish a full Cargo/DSR gate.
+
 ## Native rigid-body finite-patch tangential impulses
 
 `tangential_friction::apply_rigid_friction` binds supplied positive normal

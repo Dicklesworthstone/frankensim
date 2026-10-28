@@ -4,10 +4,13 @@
 //! All impulses are solved together and accumulated before any physical state
 //! is evaluated. The caller supplies the event configuration and contact set;
 //! this is not collision detection, position repair, or a contact time stepper.
-//! The normal-only entry point and [`friction`] share the same native mechanics.
+//! The normal-only, [`friction`] and [`tangential`] entries share native mechanics.
 
 /// Coupled normal and circular Coulomb friction on original articulated states.
 pub mod friction;
+
+/// Stateful, work-conjugate tangential contact on original articulated states.
+pub mod tangential;
 
 use core::fmt;
 use fs_contact::frictional_multicontact::FrictionalContactError;
@@ -16,6 +19,7 @@ use fs_contact::multicontact::{
     solve_normal_impacts,
 };
 use fs_ga::{GaError, Twist, Vec3, Wrench};
+use fs_tribo::TriboError;
 
 use crate::articulated::{
     ArticulatedError, ArticulatedModel, BaseState, FreeFloatingBaseState,
@@ -119,6 +123,8 @@ pub enum ArticulatedContactError {
     ContactLaw(MultiImpactError),
     /// Shared coupled normal/Coulomb law refused.
     FrictionLaw(FrictionalContactError),
+    /// Shared stateful tangential constitutive law refused.
+    TangentialLaw(TriboError),
     /// Redundant impulses do not determine work between independently moving
     /// supports. A common support translation has determined total work.
     UnresolvedSupportWork,
@@ -144,6 +150,7 @@ impl fmt::Display for ArticulatedContactError {
             Self::Geometry(error) => write!(f, "impact geometry: {error}"),
             Self::ContactLaw(error) => write!(f, "simultaneous contact: {error}"),
             Self::FrictionLaw(error) => write!(f, "simultaneous frictional contact: {error}"),
+            Self::TangentialLaw(error) => write!(f, "stateful tangential contact: {error}"),
             Self::UnresolvedSupportWork => {
                 f.write_str("redundant impulses do not determine moving-support work")
             }
@@ -176,6 +183,11 @@ impl From<FrictionalContactError> for ArticulatedContactError {
         } else {
             Self::FrictionLaw(error)
         }
+    }
+}
+impl From<TriboError> for ArticulatedContactError {
+    fn from(error: TriboError) -> Self {
+        Self::TangentialLaw(error)
     }
 }
 
@@ -289,6 +301,7 @@ pub fn resolve_articulated_contacts(
         EventResponse {
             impulses: &law.normal_impulses,
             predicted_speeds: &law.relative_normal_speeds_after,
+            stored_energy_change: 0.0,
             dissipated_energy: law.dissipated_energy,
             velocity_tolerance,
             energy_tolerance,
@@ -320,6 +333,9 @@ struct EventWorkspace {
 struct EventResponse<'a> {
     impulses: &'a [f64],
     predicted_speeds: &'a [f64],
+    // Zero for impact-only laws. Stateful shear can release this storage into
+    // positive body kinetic work while total physical dissipation stays >= 0.
+    stored_energy_change: f64,
     dissipated_energy: f64,
     velocity_tolerance: f64,
     energy_tolerance: f64,
@@ -328,6 +344,7 @@ struct EventResult {
     responses: Vec<FreeFloatingImpulseResponse>,
     speeds_after: Vec<f64>,
     plane_work: f64,
+    kinetic_energy_change: f64,
     energy_balance_residual: f64,
     linear_momentum_residual: Vec3,
     angular_momentum_residual: Vec3,
@@ -468,7 +485,8 @@ impl EventWorkspace {
         let mut responses = Vec::with_capacity(systems.len());
         let mut after = Vec::with_capacity(systems.len());
         let mut energy_change = 0.0;
-        let mut energy_scale = plane_work.abs() + law.dissipated_energy.abs();
+        let mut energy_scale =
+            plane_work.abs() + law.dissipated_energy.abs() + law.stored_energy_change.abs();
         let mut linear_change = Vec3::default();
         let mut angular_change = Vec3::default();
         let mut linear_scale = linear_impulse_scale + magnitude(external_linear);
@@ -548,11 +566,14 @@ impl EventWorkspace {
             speeds_after.push(actual);
         }
         let relative_work = finite(energy_change - plane_work)?;
-        let energy_balance_residual = finite(relative_work + law.dissipated_energy)?;
+        let stored_and_mechanical_work = finite(relative_work + law.stored_energy_change)?;
+        let energy_balance_residual = finite(stored_and_mechanical_work + law.dissipated_energy)?;
         let energy_allowance = finite(law.energy_tolerance + roundoff * energy_scale)?;
-        if relative_work > energy_allowance || energy_balance_residual.abs() > energy_allowance {
+        if stored_and_mechanical_work > energy_allowance
+            || energy_balance_residual.abs() > energy_allowance
+        {
             return Err(ArticulatedContactError::Unresolved(
-                "actual global impact energy failed admission",
+                "actual global kinetic and contact energy failed admission",
             ));
         }
         let linear_momentum_residual = linear_change - external_linear;
@@ -571,6 +592,7 @@ impl EventWorkspace {
             responses,
             speeds_after,
             plane_work,
+            kinetic_energy_change: energy_change,
             energy_balance_residual,
             linear_momentum_residual,
             angular_momentum_residual,

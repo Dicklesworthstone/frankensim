@@ -214,6 +214,7 @@ pub fn resolve_articulated_frictional_contacts(
         EventResponse {
             impulses: &impulses,
             predicted_speeds: &predicted_speeds,
+            stored_energy_change: 0.0,
             dissipated_energy: contact.dissipated_energy,
             velocity_tolerance: config.velocity_tolerance,
             energy_tolerance: config.energy_tolerance,
