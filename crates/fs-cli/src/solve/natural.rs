@@ -356,6 +356,7 @@ pub(super) fn solve_mixed_steady(
     laws: &[NaturalLaw],
     pressure_pa: f64,
     path: &super::conjugate::ConjugatePath,
+    adaptive_goal_tolerance: Option<f64>,
     mut solve: impl FnMut(
         &BTreeMap<String, (f64, f64)>,
     ) -> Result<super::radiation::SolidSolution, SolveRefusal>,
@@ -373,6 +374,15 @@ pub(super) fn solve_mixed_steady(
         )) }
     };
     poll()?;
+    if adaptive_goal_tolerance.is_some_and(|tolerance|
+        !tolerance.is_finite() || tolerance <= 0.0 || tolerance >= 1.0)
+    {
+        return Err(conduction_error(
+            "cli-solve-conduction-mixed-adaptive",
+            "the mixed adaptive goal requires a finite residual tolerance in (0, 1)",
+            "declare an admitted positive solver tolerance",
+        ));
+    }
     if laws.is_empty() || path.segments.is_empty()
         || laws.iter().any(|law| path.segments.iter().any(|segment| segment.target == law.target))
     {
@@ -382,7 +392,12 @@ pub(super) fn solve_mixed_steady(
             "partition the exterior into separate natural-reservoir and airflow targets",
         ));
     }
-    let config = super::conjugate::exchange_config(false);
+    let adaptive = adaptive_goal_tolerance.is_some();
+    let config = super::conjugate::exchange_config(adaptive);
+    // The comparison independently rebuilds the complete physical residual.
+    // Leave room below its gate for both the solid solve and changed wall laws.
+    let coefficient_tolerance = adaptive_goal_tolerance.map_or(TOLERANCE_REL,
+        |tolerance| TOLERANCE_REL.min(tolerance * 0.1));
     let mut htc = initial_coefficients(laws, pressure_pa)?;
     let mut total_air_iterations = 0usize;
     let mut total_solid_responses = 0usize;
@@ -391,7 +406,7 @@ pub(super) fn solve_mixed_steady(
         let natural_rows: BTreeMap<String, (f64, f64)> = laws.iter()
             .map(|law| (law.target.clone(), (htc[&law.target], law.ambient_k)))
             .collect();
-        let mut exchange = super::conjugate::solve_steady_exchange(cx, path, false, |air_rows| {
+        let mut exchange = super::conjugate::solve_steady_exchange(cx, path, adaptive, |air_rows| {
             let mut derived = natural_rows.clone();
             derived.extend(air_rows.iter().map(|(target, values)| (target.clone(), *values)));
             solve(&derived)
@@ -432,18 +447,19 @@ pub(super) fn solve_mixed_steady(
                 mean_wall_k: flux.mean_wall_temperature_k, heat_rate_w: flux.heat_rate_w,
             });
         }
-        if worst_relative <= TOLERANCE_REL && worst_heat_ratio <= 1.0 {
+        if worst_relative <= coefficient_tolerance && worst_heat_ratio <= 1.0 {
             // Retain the rows actually applied to the published field, rather
             // than silently replacing them with the next coefficient iterate.
             exchange.derived.extend(natural_rows);
             let mut natural_receipt = receipt_fragment(&converged, iteration)?;
             natural_receipt.pop();
             natural_receipt.push_str(&format!(
-                ",\"coupling\":{{\"method\":\"natural-picard-around-complete-air-exchange\",\"max_outer_iterations\":{MAX_ITERATIONS},\"total_air_iterations\":{total_air_iterations},\"total_solid_responses\":{total_solid_responses},\"max_relative_coefficient_change\":{},\"max_natural_heat_mismatch_w\":{},\"max_natural_heat_gate_ratio\":{},\"scope\":{}}}}}",
+                ",\"coupling\":{{\"method\":\"natural-picard-around-complete-air-exchange\",\"max_outer_iterations\":{MAX_ITERATIONS},\"total_air_iterations\":{total_air_iterations},\"total_solid_responses\":{total_solid_responses},\"coefficient_tolerance_rel\":{},\"max_relative_coefficient_change\":{},\"max_natural_heat_mismatch_w\":{},\"max_natural_heat_gate_ratio\":{},\"scope\":{}}}}}",
+                canonical_f64(coefficient_tolerance).expect("finite positive coefficient tolerance"),
                 canonical_f64(worst_relative).expect("finite relative change"),
                 canonical_f64(worst_heat_w).expect("finite heat mismatch"),
                 canonical_f64(worst_heat_ratio).expect("finite heat gate ratio"),
-                json_string("Steady natural reservoirs and forced-air surfaces exchange through the complete shared solid. Each outer iteration closes every air branch; natural heat and radiation remain outside air transport. Counts cover solid responses; inner material/radiation work retains its existing separate caps. No mixed adaptive-goal claim."),
+                json_string("Steady natural reservoirs and forced-air surfaces exchange through the complete shared solid. Each outer iteration closes every air branch; natural heat and radiation remain outside air transport. Counts cover solid responses; inner material/radiation work retains its existing separate caps. Adaptive goals, when requested, separately check the complete physical residual and transpose; this heat balance alone is not a spatial error estimate."),
             ));
             poll()?;
             return Ok(MixedSteady { exchange, natural_receipt });
@@ -461,8 +477,8 @@ pub(super) fn solve_mixed_steady(
 }
 
 /// Admit only natural cards whose full coefficient tangent is implemented.
-/// Base and ladder keep their original card surface. Radiation retains its
-/// separate capability gate; no combined-law derivative is inferred here.
+/// Base and ladder keep their original card surface. Mixed goals retain
+/// natural coefficients and the full air-reference feedback on distinct traces.
 pub(super) fn admit_fidelity(
     spec: &fs_project::ProjectSpec,
     setup: &ConductionSetup,
@@ -471,13 +487,6 @@ pub(super) fn admit_fidelity(
         solver.fidelity == super::SOLVER_FIDELITY_ADAPTIVE)
     {
         return Ok(());
-    }
-    if has_mixed_boundaries(setup) {
-        return Err(conduction_error(
-            "cli-solve-conduction-mixed-adaptive",
-            "adaptive goals do not yet include combined natural and airflow feedback",
-            "select auto or ladder fidelity for a steady mixed-convection solve",
-        ));
     }
     let laws = natural_laws(setup)?;
     if laws.len() > 64 || laws.iter().any(|law|

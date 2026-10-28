@@ -1493,9 +1493,9 @@ receipt address as an Estimated statement: its existing structural checker
 does not independently authenticate or reverify the continuum producer.
 Builds without the feature explicitly refuse this output request.
 
-Native steady mixed convection is available without a feature flag in driver
-59. Separate `natural-convection` and `airflow-convection` targets exchange
-heat through the same solid on auto and ladder fidelities. Every natural
+Native steady mixed convection is available without a feature flag. Separate
+`natural-convection` and `airflow-convection` targets exchange heat through the
+same solid on auto, ladder and adaptive fidelities. Every natural
 coefficient update encloses a complete existing multi-branch IQN-ILS air
 exchange, including its final solid response and decomposition check. The
 existing conductivity, matching-contact and ambient-radiation solvers remain
@@ -1514,13 +1514,35 @@ their signed flux; equilibrium and card-domain refusals remain explicit.
 Cancellation and the remaining invocation wall budget are checked between
 bounded responses; failure publishes no partial conduction field.
 
-The `natural_convection.coupling` receipt records outer/inner work and final
-coefficient and natural heat discrepancies. The returned derived boundary is
-the one actually applied to the published field. Inner conductivity/radiation
-work retains its separate existing budgets. Mixed adaptive goal refinement
-explicitly refuses; the linear inverse-error certificate is unavailable and
-the whole-model tolerance estimate remains.
-The result retains Estimated authority.
+The `natural_convection.coupling` receipt records outer/inner work, the admitted
+coefficient tolerance, and final coefficient and natural heat discrepancies.
+The returned derived boundary is the one actually applied to the published
+field. Inner conductivity/radiation work retains its separate existing budgets.
+The linear inverse-error certificate is unavailable and the whole-model
+tolerance estimate remains. The result retains Estimated authority.
+
+Driver 79 admits adaptive mixed-convection goals, including optional ambient
+radiation, on at most 64 uniform Robin traces. Each enriched comparison
+re-evaluates the original Churchill-Chu law at both the solved fine field and
+prolonged coarse field, and marches both fields through every physical air
+path. The existing core FGMRES transpose includes the signed natural
+coefficient slope and the full streamwise air-reference Jacobian together;
+radiation also differentiates its combined coefficient and weighted reservoir
+reference. Natural and forced-air targets must remain distinct. The shared
+primal exchange uses the adaptive air-reference gate and tightens the natural
+coefficient tolerance below the goal residual tolerance. The independently
+reconstructed primal and dual residuals must pass before a comparison can mark
+cells or supply the observed discretization estimate.
+
+Nonradiating mixed history rows name `natural-air-full-transpose`; radiating
+rows retain `area-mean-radiation-full-transpose`. Both disclose
+`air_reference_feedback` and `natural_coefficient_feedback`. The existing
+nonlinear and maximum-owner remainders, refinement quality gates and
+last-probed-field budget stopping remain active. `cli-solve-conduction-boundary-adaptive`
+refuses inconsistent retained boundary laws or insufficient feedback storage.
+This is an Estimated two-space comparison, not a continuum bound or a
+linear inverse-error certificate. Natural reservoir and radiative heat never
+enter the air enthalpy balance.
 
 Driver 63 admits steady mixed nominal adjoints through the existing complete
 material/radiation/air transpose. Signed natural wall and ambient coefficient
@@ -1534,7 +1556,8 @@ certificates. Two physical re-solve regressions in
 `tests/solve/mixed_convection/adjoint.rs` cover both natural heat signs,
 smooth conductivity, radiation and the prescribed-temperature lift. `tests/solve/mixed_convection.rs`
 supplies signed-reservoir, independent correlation/energy, radiation
-composition, deterministic replay and unsupported-mode regressions.
+composition, adaptive feedback, deterministic replay and unresolved-budget
+regressions.
 
 Native transient conduction is available without a feature flag through the
 schema-v13 `conduction.transient` declaration. The runnable input and commands

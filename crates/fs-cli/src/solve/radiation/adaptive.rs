@@ -1,9 +1,10 @@
-//! Native enriched goals for the same area-mean radiation law as the primal.
-//! Each field owns its radiative secant and its natural law or physical air march.
+//! Native enriched goals through the primal's complete mean-boundary laws.
+//! Each field owns its natural law, physical air march and optional radiation.
 //! The core owner supplies the complete transpose, material/contact terms and
 //! observed nonlinear remainder. Nothing here certifies continuum error.
 
 use fs_airflow::conjugate::goal::{CoupledGoalError, maximum::affine_reference_law};
+use fs_conduction::adjoint::RobinResponse;
 use fs_conduction::radiation::AmbientRadiationGradient;
 use fs_conduction::{ConductionError, ConductionProblem, ScalarField, ThermalBc};
 use fs_exec::Cx;
@@ -14,14 +15,14 @@ const MAX_REGIONS: usize = 64;
 
 fn bad(what: impl Into<String>) -> SolveRefusal {
     conduction_error(
-        "cli-solve-conduction-radiation-adaptive",
+        "cli-solve-conduction-boundary-adaptive",
         what,
-        "check the retained radiation laws, original convection/air traces and feedback budget; tighten physical radiation and solid/air convergence tolerances rather than freezing a coefficient",
+        "check the retained natural/radiative laws, original convection/air traces and feedback budget; tighten physical boundary and solid/air convergence tolerances rather than freezing a coefficient",
     )
 }
 
 fn interrupted() -> SolveRefusal {
-    conduction_error("cli-solve-cancelled", "radiative adaptive comparison cancelled", "resume the retained solve prefix")
+    conduction_error("cli-solve-cancelled", "coupled boundary adaptive comparison cancelled", "resume the retained solve prefix")
 }
 
 fn poll(cx: &Cx<'_>, index: usize) -> Result<(), SolveRefusal> {
@@ -30,12 +31,12 @@ fn poll(cx: &Cx<'_>, index: usize) -> Result<(), SolveRefusal> {
 }
 
 fn finite(value: f64) -> Result<f64, SolveRefusal> {
-    if value.is_finite() { Ok(value) } else { Err(bad("nonfinite radiative adaptive arithmetic")) }
+    if value.is_finite() { Ok(value) } else { Err(bad("nonfinite coupled boundary adaptive arithmetic")) }
 }
 
 fn zeros<T: Default + Clone>(n: usize) -> Result<Vec<T>, SolveRefusal> {
     let mut values = Vec::new();
-    values.try_reserve_exact(n).map_err(|_| bad("radiative adaptive scratch allocation refused"))?;
+    values.try_reserve_exact(n).map_err(|_| bad("coupled boundary adaptive scratch allocation refused"))?;
     values.resize(n, T::default());
     Ok(values)
 }
@@ -43,7 +44,7 @@ fn zeros<T: Default + Clone>(n: usize) -> Result<Vec<T>, SolveRefusal> {
 fn solid_error(error: ConductionError) -> SolveRefusal {
     match error {
         ConductionError::Cancelled { .. } => interrupted(),
-        error => bad(format!("complete radiative goal refused: {error}")),
+        error => bad(format!("complete boundary-law goal refused: {error}")),
     }
 }
 
@@ -52,25 +53,26 @@ fn air_error(error: CoupledGoalError) -> SolveRefusal {
         CoupledGoalError::Interrupted
         | CoupledGoalError::Solid(ConductionError::Cancelled { .. })
         | CoupledGoalError::Air(fs_airflow::AirflowError::Cancelled { .. }) => interrupted(),
-        error => bad(format!("radiative adaptive air law refused: {error}")),
+        error => bad(format!("adaptive air law refused: {error}")),
     }
 }
 
-/// Only called for a retained radiation operator. An incomplete binding is a
-/// refusal, never a fall-through to a frozen, nonradiating goal calculation.
+/// Shared binding for radiative or mixed natural/air goals. An incomplete
+/// radiation binding refuses instead of falling through to a nonradiating
+/// comparison. Natural coefficients and air references are evaluated at BOTH
+/// fields; their local and cross-wall derivatives enter one total transpose.
 pub(in crate::solve) fn probe(
     cx: &Cx<'_>, coarse: &RungSolved, fine: &RungSolved, approximate: &[f64],
     region: u32, memory_bytes: u64,
 ) -> Result<AdaptiveProbe, SolveRefusal> {
     poll(cx, 0)?;
-    let data = fine.adjoint_data.as_ref().ok_or_else(|| bad("missing radiative goal operator"))?;
-    let combined = data.radiating_boundary.as_ref()
-        .ok_or_else(|| bad("radiation patches lack their accepted combined boundary"))?;
-    if data.radiation_patches.is_empty() {
-        return Err(bad("radiative adaptive goals require retained physical patches"));
+    let data = fine.adjoint_data.as_ref().ok_or_else(|| bad("missing coupled boundary goal operator"))?;
+    let combined = data.radiating_boundary.as_ref();
+    if combined.is_some() == data.radiation_patches.is_empty() {
+        return Err(bad("radiation patches and their accepted combined boundary must be retained together"));
     }
-    if data.natural_goal.is_some() && !data.air_paths.is_empty() {
-        return Err(bad("simultaneous natural and forced airflow laws have no admitted combined model"));
+    if combined.is_none() && (data.natural_goal.is_none() || data.air_paths.is_empty()) {
+        return Err(bad("a nonradiating coupled boundary comparison needs both natural and forced convection"));
     }
     let n = fine.mesh.vertex_count();
     if approximate.len() != n || fine.solution.temperature.len() != n
@@ -79,12 +81,12 @@ pub(in crate::solve) fn probe(
         || coarse.solution.temperature.len() != coarse.mesh.vertex_count()
         || coarse.mesh.element_count().checked_mul(8) != Some(fine.mesh.element_count())
     {
-        return Err(bad("radiative adaptive fields or uniform enrichment lineage differ"));
+        return Err(bad("coupled adaptive fields or uniform enrichment lineage differ"));
     }
     for (i, &value) in approximate.iter().chain(&fine.solution.temperature)
         .chain(&coarse.solution.temperature).enumerate()
     { poll(cx, i)?; finite(value)?; }
-    if combined.region_names() != data.boundary.region_names() {
+    if combined.is_some_and(|boundary| boundary.region_names() != data.boundary.region_names()) {
         return Err(bad("radiation changed the original convection region ownership"));
     }
     let mut names = Vec::new();
@@ -95,13 +97,13 @@ pub(in crate::solve) fn probe(
         poll(cx, i)?;
         match bc {
             ThermalBc::Robin { htc: ScalarField::Uniform(h), t_ref: ScalarField::Uniform(r) } => {
-                if names.len() == MAX_REGIONS { return Err(bad("radiative adaptive goal exceeds 64 Robin traces")); }
+                if names.len() == MAX_REGIONS { return Err(bad("coupled adaptive goal exceeds 64 Robin traces")); }
                 names.push(data.boundary.region_names()[i].as_str());
                 regions.push(i);
                 points.push([*h, *r, 0.0, 0.0]);
                 other.push([*h, *r]);
             }
-            ThermalBc::Robin { .. } => return Err(bad("radiative adaptive goals require uniform original Robin traces")),
+            ThermalBc::Robin { .. } => return Err(bad("coupled adaptive goals require uniform original Robin traces")),
             _ => {},
         }
     }
@@ -109,13 +111,13 @@ pub(in crate::solve) fn probe(
     let entries = usize::try_from(memory_bytes / 32).unwrap_or(usize::MAX);
     if m == 0 || m*m > entries
         || n.checked_mul(4).and_then(|v| v.checked_mul(m)).is_none_or(|v| v > entries)
-    { return Err(bad("radiative adaptive goal exceeds the declared feedback-entry budget")); }
+    { return Err(bad("coupled adaptive goal exceeds the declared feedback-entry budget")); }
     let mut areas = zeros::<f64>(m)?;
     let mut means = zeros::<[f64; 2]>(m)?;
     for (slot, face) in fine.mesh.boundary().iter().enumerate() {
         poll(cx, slot)?;
         let region = data.boundary.region_for(slot);
-        if combined.region_for(slot) != region {
+        if combined.is_some_and(|boundary| boundary.region_for(slot) != region) {
             return Err(bad("radiation changed the original convection face ownership"));
         }
         let Some(i) = region.and_then(|r| regions.iter().position(|&v| v == r)) else { continue; };
@@ -126,7 +128,7 @@ pub(in crate::solve) fn probe(
         }
     }
     for i in 0..m {
-        if areas[i] <= 0.0 { return Err(bad("radiative adaptive Robin trace has no positive area")); }
+        if areas[i] <= 0.0 { return Err(bad("coupled adaptive Robin trace has no positive area")); }
         means[i][0] = finite(means[i][0] / areas[i])?;
         means[i][1] = finite(means[i][1] / areas[i])?;
     }
@@ -140,6 +142,11 @@ pub(in crate::solve) fn probe(
     let mut feedback = zeros::<f64>(m*m)?;
     if !data.air_paths.is_empty() {
         let law = affine_reference_law(cx, &data.air_paths, MAX_REGIONS, entries).map_err(air_error)?;
+        if data.natural_goal.as_ref().is_some_and(|natural|
+            law.regions().iter().any(|name| natural.contains_target(name)))
+        {
+            return Err(bad("natural reservoirs and forced-air segments must own distinct Robin traces"));
+        }
         let indices: Vec<usize> = law.regions().iter().map(|name| names.iter()
             .position(|&selected| selected == name.as_str())
             .ok_or_else(|| bad("an air segment has no original convection trace")))
@@ -187,21 +194,27 @@ pub(in crate::solve) fn probe(
             { peak = Some(v); }
         }
     }
-    let peak = peak.ok_or_else(|| bad("radiative adaptive goal region has no tetrahedra"))?;
+    let peak = peak.ok_or_else(|| bad("coupled adaptive goal region has no tetrahedra"))?;
     let mut weights = zeros::<f64>(n)?;
     weights[peak] = 1.0;
     let problem = ConductionProblem { mesh: &fine.mesh, boundary: &data.boundary,
         material: &data.fallback, element_materials: Some(&data.materials), source: &data.source };
-    let dual = AmbientRadiationGradient::compare_goal_at(cx, problem, data.interfaces.as_ref(),
-        data.linear, &fine.solution.temperature, approximate, &names, &points, &other,
-        &feedback, &data.radiation_patches, &weights, entries).map_err(solid_error)?;
+    let dual = if combined.is_some() {
+        AmbientRadiationGradient::compare_goal_at(cx, problem, data.interfaces.as_ref(),
+            data.linear, &fine.solution.temperature, approximate, &names, &points, &other,
+            &feedback, &data.radiation_patches, &weights, entries)
+    } else {
+        RobinResponse::compare_mean_robin_goal_with_reference_feedback_at(
+            cx, problem, data.interfaces.as_ref(), data.linear, &fine.solution.temperature,
+            approximate, &names, &points, &other, &feedback, &weights, entries)
+    }.map_err(solid_error)?;
     let coarse_max = ladder_functional(&coarse.labels, &coarse.mesh.complex().tets,
         &coarse.solution.temperature, Some(region));
     let remainder = finite(approximate[peak] - coarse_max)?;
     let measured = finite(fine.solution.temperature[peak] - coarse_max)?;
     let estimated = finite(dual.signed_residual_change.abs()
         + dual.linearization_remainder.abs() + remainder.abs())?;
-    if dual.nodal_contributions.len() != n { return Err(bad("radiative goal lost nodal contribution ownership")); }
+    if dual.nodal_contributions.len() != n { return Err(bad("coupled goal lost nodal contribution ownership")); }
     let mut incidence = zeros::<usize>(n)?;
     for (index, tet) in fine.mesh.complex().tets.iter().enumerate() {
         poll(cx, index)?;

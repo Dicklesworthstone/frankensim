@@ -87,7 +87,9 @@ pub(super) fn probe_pair(
         let approximate = adaptive_prolongation(cx, complex, coarse, split, fine)?;
         let radiating = fine.adjoint_data.as_ref().is_some_and(|data|
             data.radiating_boundary.is_some() || !data.radiation_patches.is_empty());
-        let probe = if radiating {
+        let mixed = fine.adjoint_data.as_ref().is_some_and(|data|
+            data.natural_goal.is_some() && !data.air_paths.is_empty());
+        let probe = if radiating || mixed {
             super::radiation::adaptive::probe(cx, coarse, fine, &approximate, region, memory_bytes)?
         } else {
             adaptive_probe(cx, coarse, fine, &approximate, region)?
@@ -196,10 +198,14 @@ pub(super) fn probe_pair(
         })?;
     // This method is a full core FGMRES transpose, not the legacy IQN-ILS
     // interface iteration. Preserve that distinction in retained evidence.
-    let comparison = if fine.adjoint_data.as_ref().is_some_and(|data| data.radiating_boundary.is_some()) {
-        format!(",\"comparison_model\":\"area-mean-radiation-full-transpose\",\"air_reference_feedback\":{}",
-            fine.adjoint_data.as_ref().is_some_and(|data| !data.air_paths.is_empty()))
-    } else { String::new() };
+    let comparison = match fine.adjoint_data.as_ref() {
+        Some(data) if data.radiating_boundary.is_some() => format!(
+            ",\"comparison_model\":\"area-mean-radiation-full-transpose\",\"air_reference_feedback\":{}",
+            !data.air_paths.is_empty()),
+        Some(data) if data.natural_goal.is_some() && !data.air_paths.is_empty() =>
+            ",\"comparison_model\":\"natural-air-full-transpose\",\"air_reference_feedback\":true".to_string(),
+        _ => String::new(),
+    };
     let receipt = format!(
         "{{\"status\":{},\"correction_rounds\":{},\"correction_round_limit\":{},\"additional_correction_iterations\":{},\"field_updates\":{},\
          \"discretization_half_width_k\":{},\"pair_allowance_k\":{},\

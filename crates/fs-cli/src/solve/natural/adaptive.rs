@@ -54,6 +54,12 @@ impl NaturalGoal {
             max_feedback_entries: usize::try_from(memory_bytes / 32).unwrap_or(usize::MAX) })
     }
 
+    /// Natural reservoirs and forced-air segments must never own the same
+    /// physical trace, even if their current coefficients happen to agree.
+    pub(in crate::solve) fn contains_target(&self, target: &str) -> bool {
+        self.laws.iter().any(|law| law.target == target)
+    }
+
     /// Re-evaluate every natural law before the radiation owner combines it
     /// with its independent reservoir. The means and original convection rows
     /// use the caller's Robin ordering, not the order of these natural laws.

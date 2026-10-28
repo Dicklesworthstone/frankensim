@@ -230,7 +230,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// actual marched references, with an original target and counted physical audits.
 /// Version 78 includes complete streamwise airflow feedback and physical inlet
 /// and independent fan-bank speed controls in capacity-storage trajectory adjoints.
-pub const SOLVE_DRIVER_VERSION: u32 = 78;
+/// Version 79 admits mixed natural/forced-convection adaptive goals, with
+/// optional ambient radiation and complete physical boundary-law feedback.
+pub const SOLVE_DRIVER_VERSION: u32 = 79;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -6529,12 +6531,11 @@ fn conduction_solve_receipt(
                 "declare region seeds and thermal boundary laws under cooling.conduction",
             )
         })?;
-    // Neither adaptive goal comparison may freeze a nonlinear boundary law.
-    // Natural base/ladder solves and their complete nominal adjoints remain
-    // admitted; the enriched-goal producer has not acquired that feedback.
+    // Admit only natural cards with a complete boundary-law tangent; mixed
+    // comparisons retain both their coefficient and air-reference feedback.
     natural::admit_fidelity(spec, setup)?;
-    // This patch-mean radiation model has its own nonlinear closure. Until
-    // that complete residual has a total tangent, it cannot enter a DWR goal.
+    // The patch-mean radiation closure retains its original physical laws in
+    // both the primal and the complete enriched-goal comparison.
     let radiation = radiation::lower(spec, setup, cards)?;
     let geometry = spec.geometry.as_deref().unwrap_or(&[]);
     if geometry.len() != context.verified_imports.len()
@@ -6957,7 +6958,12 @@ fn conduction_solve_receipt(
             let path = airflow_path.as_ref().expect("declared airflow was lowered");
             let pressure_pa = spec.envelope.as_ref().map_or(101_325.0, |e| e.pressure.value);
             let mixed = natural::solve_mixed_steady(
-                &cx, &natural_laws, pressure_pa, path, solve_once,
+                &cx, &natural_laws, pressure_pa, path,
+                adaptive_requested.then(|| spec.solver.as_ref().map_or(
+                    fs_conduction::LinearConfig::default().tolerance,
+                    |solver| (solver.tolerance_rel * 1e-2).max(1e-13),
+                )),
+                solve_once,
             )?;
             natural_fragment = Some(mixed.natural_receipt);
             let exchange = mixed.exchange;

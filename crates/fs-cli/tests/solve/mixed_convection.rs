@@ -174,28 +174,175 @@ fn g3_mixed_convection_keeps_radiation_out_of_both_convective_heat_accounts() {
     );
 }
 
+fn adaptive_controls(spec: &mut ProjectSpec) {
+    let solver = spec.solver.as_mut().unwrap();
+    solver.fidelity = "adaptive".to_string();
+    solver.tolerance_rel = 1e-8;
+    spec.budgets.as_mut().unwrap().accuracy_rel = 0.05;
+    if let Some(radiation) = spec
+        .cooling
+        .as_mut()
+        .unwrap()
+        .conduction
+        .as_mut()
+        .unwrap()
+        .radiation
+        .as_mut()
+    {
+        radiation.temperature_tolerance.value = 1e-10;
+        radiation.heat_tolerance.value = 1e-10;
+    }
+}
+
+fn check_adaptive_comparison(receipt: &J, radiating: bool) {
+    let adaptive = receipt.get("adaptive").unwrap();
+    let history = adaptive.get("history").unwrap().as_array().unwrap();
+    assert!(
+        !history.is_empty(),
+        "mixed adaptive goals must solve and probe a real mesh"
+    );
+    assert!(n(adaptive, "solved_meshes") >= 2.0);
+    for row in history {
+        let balance = row.get("algebraic_balance").unwrap();
+        assert_eq!(
+            balance.str_field("comparison_model"),
+            Some(if radiating {
+                "area-mean-radiation-full-transpose"
+            } else {
+                "natural-air-full-transpose"
+            })
+        );
+        assert_eq!(balance.get("air_reference_feedback"), Some(&J::Bool(true)));
+        assert_eq!(
+            row.get("natural_coefficient_feedback"),
+            Some(&J::Bool(true))
+        );
+        assert_eq!(
+            balance.str_field("status"),
+            Some("unsupported-model"),
+            "a nonlinear mixed comparison must not mint a linear inverse-error certificate"
+        );
+        let linear = n(row, "signed_linear_change_k");
+        let nonlinear = n(row, "linearization_remainder_k");
+        let relocation = n(row, "maximum_remainder_k");
+        close(
+            linear + nonlinear + relocation,
+            n(row, "measured_change_k"),
+            1e-9,
+        );
+        close(
+            linear.abs() + nonlinear.abs() + relocation.abs(),
+            n(row, "estimated_change_k"),
+            1e-9,
+        );
+        assert_eq!(n(row, "probe_tets"), 8.0 * n(row, "tets"));
+        assert!(n(row, "primal_residual") <= 1e-10, "{row:?}");
+        assert!(n(row, "dual_residual") <= 1e-10, "{row:?}");
+    }
+    assert_eq!(adaptive.get("continuum_error_bound"), Some(&J::Bool(false)));
+}
+
 #[test]
-fn g0_mixed_adaptive_goal_refuses_before_solving() {
+fn g1_mixed_adaptive_convection_closes_both_feedback_laws_and_replays() {
     let bytes = tetra_stl();
-    for (mode, expected_code) in [
-        ("adaptive", "cli-solve-conduction-mixed-adaptive"),
-    ] {
-        let mut spec = project(&bytes, 300.0);
-        match mode {
-            "adaptive" => spec.solver.as_mut().unwrap().fidelity = "adaptive".to_string(),
-            _ => unreachable!(),
-        }
+    for ambient in [293.15, 300.0] {
+        let mut spec = project(&bytes, ambient);
+        adaptive_controls(&mut spec);
         let ledger = Ledger::open(":memory:").unwrap();
         import_fixture(&ledger, &spec, bytes.clone());
-        let refusal = run_solve(
-            &ledger,
-            &CancelGate::new_clock_free(),
-            &mut benign_clock(),
-            &decode(&spec),
-            &fixture_cards(),
-            &mut Vec::new(),
-        )
-        .expect_err("an unimplemented coupled adaptive goal must refuse");
-        assert_eq!(refusal.code, expected_code, "{refusal:?}");
+        let decoded = decode(&spec);
+        let cards = fixture_cards();
+        let (run_id, qoi, conduction, field) =
+            run_conjugate_to_completion(&ledger, &decoded, &cards);
+        let receipt = J::parse(&conduction).unwrap();
+        check_adaptive_comparison(&receipt, false);
+        let heat = check_balance(&receipt, ambient);
+        assert_eq!(heat < 0.0, ambient == 300.0);
+        assert_eq!(
+            receipt.get("adaptive").unwrap().str_field("status"),
+            Some("observed-tolerance-met"),
+            "{conduction}"
+        );
+        assert!(
+            qoi.contains("\"kind\":\"discretization\",\"state\":\"interval\""),
+            "a measured mixed-convection comparison must reach the reported QoI: {qoi}"
+        );
+        let hashes = stage_receipt_hashes(&ledger, &run_id);
+        assert_eq!(hashes.len(), 7);
+        let (_, replay_qoi, replay_conduction, replay_field) =
+            run_conjugate_to_completion(&ledger, &decoded, &cards);
+        assert_eq!(conduction, replay_conduction);
+        assert_eq!(qoi, replay_qoi);
+        assert_eq!(field, replay_field);
     }
+}
+
+#[test]
+fn g3_mixed_adaptive_radiation_keeps_reservoir_heat_out_of_air_transport() {
+    let bytes = tetra_stl();
+    let (cards, card) = radiation_product::emissivity_cards(&fixture_cards(), 0.85);
+    for reservoir in [293.15, 310.0] {
+        let mut spec = project(&bytes, 300.0);
+        radiation_product::declare(&mut spec, &card, "natural-wall", reservoir);
+        adaptive_controls(&mut spec);
+        let (receipt, _) = run(&spec, &bytes, &cards);
+        check_adaptive_comparison(&receipt, true);
+        let natural_heat = check_balance(&receipt, 300.0);
+        let radiation = receipt.get("radiation").unwrap();
+        let air_heat = n(receipt.get("conjugate").unwrap(), "air_total_w");
+        assert_eq!(n(radiation, "radiative_out_w") < 0.0, reservoir == 310.0);
+        assert!(n(radiation, "radiative_out_w").abs() > 0.01);
+        close(
+            n(radiation, "convective_out_w"),
+            air_heat + natural_heat,
+            1e-6,
+        );
+        let surface = &radiation.get("surfaces").unwrap().as_array().unwrap()[0];
+        let mean = n(surface, "mean_temperature_k");
+        let physical_radiation =
+            0.85 * 5.670_374_419e-8 * n(surface, "area_m2") * (mean.powi(4) - reservoir.powi(4));
+        close(n(radiation, "radiative_out_w"), physical_radiation, 1e-7);
+    }
+}
+
+#[test]
+fn g1_mixed_adaptive_budget_keeps_the_last_probed_field_unresolved() {
+    let bytes = tetra_stl();
+    let mut spec = project(&bytes, 300.0);
+    adaptive_controls(&mut spec);
+    let budgets = spec.budgets.as_mut().unwrap();
+    budgets.accuracy_rel = 1e-12;
+    budgets.memory_bytes = 64 * 1024;
+    let ledger = Ledger::open(":memory:").unwrap();
+    import_fixture(&ledger, &spec, bytes);
+    let (_, qoi, conduction, _) =
+        run_conjugate_to_completion(&ledger, &decode(&spec), &fixture_cards());
+    let receipt = J::parse(&conduction).unwrap();
+    check_adaptive_comparison(&receipt, false);
+    check_balance(&receipt, 300.0);
+    let adaptive = receipt.get("adaptive").unwrap();
+    assert_eq!(
+        adaptive.str_field("status"),
+        Some("unresolved"),
+        "{conduction}"
+    );
+    let history = adaptive.get("history").unwrap().as_array().unwrap();
+    assert!(
+        history.len() > 1,
+        "a tight request must execute refinement before exhausting memory"
+    );
+    let last = history.last().unwrap();
+    assert_eq!(
+        receipt_number_field(&conduction, "elements"),
+        n(last, "tets")
+    );
+    assert_eq!(receipt_number_field(&conduction, "max"), n(last, "t_max_k"));
+    assert_eq!(
+        n(adaptive, "last_estimated_change_k"),
+        n(last, "estimated_change_k")
+    );
+    assert!(
+        qoi.contains("\"kind\":\"discretization\",\"state\":\"no-data\""),
+        "an unresolved mixed comparison must not publish a converged estimate: {qoi}"
+    );
 }
