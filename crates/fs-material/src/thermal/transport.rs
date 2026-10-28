@@ -20,6 +20,10 @@ pub mod volumetric;
 #[path = "transport/expansion.rs"]
 pub mod expansion;
 
+/// Sourced heat transport using constant-mass free-expansion density.
+#[path = "transport/expanding.rs"]
+pub mod expanding;
+
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{
     ClaimSelection, MaterialCard, PropertyKey, PropertyLineSlice, PropertySupportError, QueryPoint,
