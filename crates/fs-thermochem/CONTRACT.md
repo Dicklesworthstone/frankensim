@@ -865,3 +865,36 @@ energy differences, and feed/reference scaling, source continuity, work budgets
 and cancellation. These are neutral ideal-gas numerical closures, not a
 finite-rate combustion, ignition, detonation, real-gas or phase-stability model,
 and the manufactured fixtures are not an external CEA validation.
+
+## Reversible elementary finite-rate kinetics algebra
+
+`kinetics` binds up to 128 caller-authored reversible elementary Arrhenius
+reactions to the original neutral NASA-9 bank and the exact `fs-qty`
+conservation certificate. Separate integer reactant/product orders retain
+explicit catalysts. Molecular-mass consistency is independently checked against
+the caller's bounded tolerance; species inventories are never repaired.
+
+Rates use concentrations normalized by 1 mol/m3. Reverse-rate equilibrium
+constants include the original `p0/(R T)` concentration standard, and analytic
+concentration/temperature Jacobians include changing molecular count and exact
+zero species. The Gibbs-derived affinity is independent of a disabled rate or
+absent catalyst; an indeterminate both-sides-absent affinity is explicit.
+Species sources are evaluated once per trial into reusable bounded scratch;
+accepted rate evaluations allocate no heap storage. Near-equilibrium progress
+uses affinity and `expm1`, with the ideal-mixture entropy-production boundary
+limits retained. Original source thermodynamics supplies the adiabatic
+instantaneous temperature rate, with formation energy included once.
+
+Seven new native regressions cover Arrhenius scaling and heat release,
+dissociation equilibrium against the Gibbs owner, zero species and catalysts,
+400-decade rate scales near equilibrium, the complete constrained-UV Jacobian,
+source/conservation/range/cancellation refusals and deterministic scratch reuse.
+All 110 `fs-thermochem` library tests passed through the existing scoped native
+Cargo manifest using the full original crate source. This is not a workspace
+or cross-ISA qualification. The primary rate convention follows the
+[Cantera 3.2 elementary-reaction and modified-Arrhenius reference](https://cantera.org/3.2/reference/kinetics/reaction-rates.html).
+
+This L1 module owns immutable laws and algebra. It supplies no time integrator,
+empirical mechanism inference, generic collider/falloff law, irreversible or
+fractional-order global reaction, ions, or real-gas kinetics. A supplied
+mechanism's physical accuracy remains a property of its original source data.

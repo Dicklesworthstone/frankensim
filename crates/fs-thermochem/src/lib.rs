@@ -20,6 +20,7 @@ mod enthalpy;
 mod entropy;
 pub mod eos;
 pub mod equilibrium;
+pub mod kinetics;
 pub mod mixture;
 pub mod transport;
 
