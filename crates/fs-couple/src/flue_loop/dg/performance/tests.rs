@@ -3,6 +3,7 @@ use file::FlueDgFilePerformance;
 use fs_exec::CancelGate;
 
 mod mouth;
+mod channels;
 
 fn input() -> String {
     let example = include_str!("../../../../examples/flue-dg.performance");

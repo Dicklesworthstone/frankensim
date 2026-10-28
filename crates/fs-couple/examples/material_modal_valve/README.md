@@ -721,10 +721,10 @@ shown above. This DG route has one explicit upstream pressure supply; it
 does not declare the separate upstream tract or moving graph boundaries of
 the two-sided schema. Every force/pressure event uses the mechanical clock.
 
-### Finite DG terminal gaps and closures
+### Finite DG terminal passages and closures
 
 Every source using the shared DG bore grammar can now place an explicit fixed
-slit channel or rigid closure between a terminal and the complete exterior
+slit or circular channel, or a rigid closure, between a terminal and the complete exterior
 radiation load. This includes the flute, scalar aperture and material-modal
 reed paths. After any `dg_side_openings` block and before `dg_radiation`, use:
 
@@ -739,10 +739,24 @@ width, height and length in metres, transverse finite-volume cell count, and
 the maximum admitted local Mach number. A closure row needs only its existing
 port ID. Port 1 is the axial outlet; additional IDs come from the declared side
 openings or finite chimneys. Omitted ports retain their direct connection.
-The separate cell allowance sums every slit field; closures require no fluid
+The separate cell allowance sums every slit and circular field; closures require no fluid
 states and may use an allowance of zero.
 
-Each slit uses the actual terminal's original gas, including a finite chimney's
+For a circular no-slip passage, replace the slit row with:
+
+```text
+dg_terminal_circular 7 0.0001 0.002 16 0.1
+```
+
+The fields are `PORT RADIUS_M LENGTH_M RADIAL_CELLS MAX_MACH`. Annular finite
+volumes resolve the radial velocity profile, including axis symmetry and the
+outer no-slip wall, through the same momentum and energy owner as the slit.
+The radius must not exceed one tenth of the length; at least two radial cells
+and the same Mach limits apply. Both rows describe **additional passage
+geometry** between the duct's pressure plane and its exterior load. Do not
+count a chimney's already resolved length or viscous loss again here.
+
+Each passage uses the actual terminal's original gas, including a finite chimney's
 own gas record. Density and viscosity therefore change the channel inertia,
 velocity profile and dissipation when the source data change. Its original
 unsteady transverse momentum solver participates in the same interval solve
@@ -754,8 +768,8 @@ The original channel's numerical loss is reported separately from viscous loss.
 The admitted slit has fixed parallel no-slip walls, at least two transverse
 cells, height no more than one tenth of either width or length, and a declared
 Mach ceiling in `(0, 0.3]`. Its area cannot exceed a known attached duct area.
-The declared exterior circular surface remains unchanged; the slit is a finite
-series channel, not a replacement annular radiation surface. Moving-pad volume
+The declared exterior circular surface remains unchanged; each passage is a finite
+series channel, not a replacement radiation surface. Moving-pad volume
 work, lateral-wall corrections, entrance/exit shedding and turbulent losses
 are outside this reduction. Changing a pad gap during playback needs the
 corresponding moving-boundary operator and is not exposed by these records.

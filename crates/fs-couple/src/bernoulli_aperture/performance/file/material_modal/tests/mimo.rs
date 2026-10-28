@@ -42,7 +42,7 @@ fn native_mimo_retains_original_material_modes_gases_order_and_unselected_side_l
     assert_eq!(system.source(ValveSide::Downstream).gases[1].temperature, 303.15);
     assert_eq!(system.viscothermal_sections(ValveSide::Downstream).len(), 1);
     assert!(system.fractional_sections(ValveSide::Downstream).is_some());
-    assert_eq!(system.supply_channel().unwrap().spec().length_m, 0.00002);
+    assert_eq!(system.supply_channel().unwrap().slit().unwrap().spec().length_m, 0.00002);
     assert_eq!(loaded.renderer().source().mechanical_samples_rendered(), 0);
 }
 

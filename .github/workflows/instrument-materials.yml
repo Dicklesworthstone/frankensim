@@ -92,6 +92,12 @@ on:
       - 'crates/fs-couple/src/bernoulli_aperture/paired*'
       - 'crates/fs-couple/src/bernoulli_aperture/paired/**'
       - 'crates/fs-couple/src/bernoulli_aperture/paired_network/**'
+      - 'crates/fs-couple/src/bernoulli_aperture/slit_channel*'
+      - 'crates/fs-couple/src/bernoulli_aperture/slit_channel/**'
+      - 'crates/fs-couple/tests/slit_channel.rs'
+      - 'crates/fs-couple/tests/circular_channel.rs'
+      - 'crates/fs-couple/src/dg_port*'
+      - 'crates/fs-couple/src/dg_port/**'
       - 'crates/fs-couple/src/bernoulli_aperture/two_sided*'
       - 'crates/fs-couple/src/bernoulli_aperture/two_sided/**'
       - 'crates/fs-couple/tests/two_sided*'
@@ -197,6 +203,12 @@ jobs:
       - name: Source-bound interfaces, string loads and plucks
         if: ${{ !cancelled() }}
         run: cargo test -p fs-couple --no-fail-fast --test force_program --test modal_friction_interface --test material_bow_interface -- --test-threads=1
+      - name: Shared circular and slit momentum with coupled duct and flute feedback
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test -p fs-couple --no-fail-fast --test slit_channel --test circular_channel -- --test-threads=1
+          cargo test -p fs-couple --lib dg_port:: -- --test-threads=1
+          cargo test -p fs-couple --lib flue_loop::dg::performance::tests::channels -- --test-threads=1
       - name: Two-sided material reed physics and exterior pressure
         if: ${{ !cancelled() }}
         run: |

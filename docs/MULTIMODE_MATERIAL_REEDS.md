@@ -7,6 +7,18 @@ regional gas, fractional/viscothermal propagation, material bore walls, exterior
 radiation and multirate pressure observation. No downstream pitch or amplitude
 normalization is introduced.
 
+The file-driven two-sided source also accepts `supply circular LENGTH_M RADIUS_M
+RADIAL_CELLS`, alongside the existing planar `supply slit` declaration. A shared
+finite-volume momentum owner resolves either planar strips or cylindrical
+annuli from the complete inlet gas. The circular radius therefore changes real
+inertial pressure, shear loss and retained flow profile, while gas density and
+viscosity propagate from the same material state used at both reed faces.
+Channel work enters the original coupled energy account once; physical viscous
+heat remains separate from backward-Euler numerical loss. This is a fixed,
+fully developed, incompressible laminar passage, with independent spatial and
+temporal refinement. It does not model taper, entrance flow, moving walls or a
+complete measured staple. Do not include the same passage in a duct network.
+
 For modal displacement q and midpoint velocity v, the declared ports are:
 
 ```

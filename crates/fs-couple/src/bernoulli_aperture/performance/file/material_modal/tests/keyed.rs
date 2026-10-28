@@ -145,7 +145,7 @@ pub(super) fn direct_system(source: &MaterialModalValvePerformance) -> TwoSidedA
         spec.time_step_s, spec.max_steps, spec.limits, reed.modal_states().to_vec(), contact,
         reed.blade_propagator(), &gate).unwrap();
     valve.set_material_viscous_slit(0.001).unwrap();
-    let channel = original.supply_channel().unwrap();
+    let channel = original.supply_channel().unwrap().slit().unwrap();
     let channel = SlitChannel::from_gas(channel.gas(), *channel.spec()).unwrap();
     let policies = SIDES.map(|side| original.fractional_sections(side).unwrap().0);
     let mut system = TwoSidedAperture::with_material_walls_and_supply_channel(

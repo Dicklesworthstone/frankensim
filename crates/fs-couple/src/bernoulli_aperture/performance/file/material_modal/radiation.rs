@@ -96,7 +96,7 @@ pub(super) fn prepare(
     valve: LoadedAperture,
     sides: [ApertureDuctSpec; 2],
     walls: [Option<MaterialWallInput>; 2],
-    channel: Option<SlitChannel>,
+    channel: Option<FixedChannel>,
     coupling: TwoSidedLimits,
     policies: Option<[FractionalTubePolicy; 2]>,
     spec: DuctRadiationSpec,

@@ -96,10 +96,13 @@ pub(super) fn dg_radiation_provenance(load: &fs_couple::dg_port::DgPortLoad) -> 
                 DgTerminalChannelKind::Slit {
                     width_m, height_m, length_m, transverse_cells, maximum_mach,
                 } => format!("\"kind\":\"unsteady-fixed-slit\",\"width_m\":{width_m:e},\"height_m\":{height_m:e},\"length_m\":{length_m:e},\"transverse_cells\":{transverse_cells},\"maximum_mach\":{maximum_mach:e}"),
+                DgTerminalChannelKind::Circular {
+                    radius_m, length_m, radial_cells, maximum_mach,
+                } => format!("\"kind\":\"unsteady-fixed-circular\",\"radius_m\":{radius_m:e},\"length_m\":{length_m:e},\"radial_cells\":{radial_cells},\"maximum_mach\":{maximum_mach:e}"),
             };
             format!("{{\"port\":{},{law},\"gas\":{}}}", input.port.0, gas_state(bound.gas()))
         }).collect::<Vec<_>>().join(",");
-        output.push_str(&format!(",\"terminal_channels\":[{channels}],\"terminal_channel_scope\":\"same-step original transverse-momentum slit states or exact zero-flow closures in the complete exterior matrix; fixed geometry and laminar port reduction; no moving-pad work, annular-gap resolution, edge shedding or turbulent-loss calibration\""));
+        output.push_str(&format!(",\"terminal_channels\":[{channels}],\"terminal_channel_scope\":\"same-step original transverse-momentum slit/circular states or exact zero-flow closures in the complete exterior matrix; additional fixed passage geometry and laminar port reduction; no moving-pad work, annular-gap resolution, edge shedding or turbulent-loss calibration\""));
     }
     if !load.duct().side_ports().is_empty() {
         let ports = load.terminal_ports().iter().map(|port| port.0.to_string())

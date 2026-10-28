@@ -64,7 +64,7 @@ impl TwoSidedAperture {
         limits: TwoSidedLimits,
         policies: Option<[FractionalTubePolicy; 2]>,
         gate: &CancelGate,
-        supply_channel: Option<crate::bernoulli_aperture::slit_channel::SlitChannel>,
+        supply_channel: Option<crate::bernoulli_aperture::slit_channel::FixedChannel>,
     ) -> Result<Self, AcousticRealizeError> {
         poll(gate)?;
         let dt = valve.time_step_s();

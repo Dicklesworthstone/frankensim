@@ -8331,3 +8331,33 @@ material-only substitutions, full phase-chart retention and late refusal/retry.
 All four changed Rust files passed syntax parsing; independent two-element
 reference equations and bounded source/API/physics reviews were completed.
 Native compilation, Cargo tests and rustfmt remain unexecuted in this environment.
+
+
+### Shared unsteady planar and circular fluid passages
+
+`slit_channel::FixedChannel` retains either the original planar slit or an
+explicit circular passage. Both use one finite-volume momentum owner with
+geometry-supplied cell areas, masses and no-slip shear conductances. Circular
+annuli implement radial symmetry at the axis and the half-cell outer-wall
+condition. The same pressure/flow condensation, continuing velocity field and
+signed work account distinguish kinetic storage, physical viscous loss and
+backward-Euler numerical loss. Failed proposals publish no accepted history.
+The original public `SlitChannel` constructors and methods remain available;
+coupled consumers select `.slit()` or `.circular()` for geometry-specific data.
+
+Material-modal reed files accept `supply circular LENGTH_M RADIUS_M CELLS`.
+The shared DG grammar accepts
+`dg_terminal_circular PORT_ID RADIUS_M LENGTH_M CELLS MAX_MACH`. Each uses
+the actual retained local gas and mechanical clock. Circular and slit terminal
+fields share the declared cell budget and original duct/radiation transaction;
+microphone pressure follows the accepted physical flow. CLI provenance retains
+the actual radius and radial resolution. No instrument-name dispatch, fitted
+oscillator or independent material constants are introduced.
+
+This is a fixed, fully developed, incompressible laminar passage reduction.
+Additional passage length must not duplicate either acoustic duct. Entrance
+development, taper, turbulent transport, compressible passage storage and moving
+walls require separate admitted models. Regression definitions cover radial
+Poiseuille and temporal Fourier–Bessel refinement, signed work and rollback,
+material/atmosphere changes through reed and flute mechanics and pressure,
+and the original uncondensed multiport equations with mixed passage geometries.

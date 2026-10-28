@@ -114,6 +114,7 @@ fn run() -> Result<(), String> {
             valve.into(), sides, [None,None], limits, None, radiation, 240, &gate),
     }.map_err(|e| e.to_string())?;
     if let Some(channel) = source.system().supply_channel() {
+        let channel = channel.slit().expect("this example declares a planar supply passage");
         eprintln!("supply_length_m={}; supply_width_m={}; supply_height_m={}; transverse_cells={}; gas_density={}; gas_viscosity={}",
             channel.spec().length_m, channel.spec().width_m, channel.spec().height_m,
             channel.spec().transverse_cells, channel.gas().density, channel.gas().dynamic_viscosity);
