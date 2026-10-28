@@ -12,7 +12,7 @@ layer = "L3"
 
 [features]
 default = ["continuum", "quarter-wave"]
-continuum = ["dep:fs-la", "dep:fs-material", "dep:fs-solid", "dep:fs-solver", "dep:fs-sparse"]
+continuum = ["dep:fs-la", "dep:fs-material", "dep:fs-solid", "dep:fs-solver", "dep:fs-sparse", "dep:fs-time"]
 quarter-wave = []
 
 [dependencies]
@@ -22,6 +22,7 @@ fs-material = { path = "../fs-material", optional = true }
 fs-solid = { path = "../fs-solid", optional = true }
 fs-solver = { path = "../fs-solver", optional = true }
 fs-sparse = { path = "../fs-sparse", optional = true }
+fs-time = { path = "../fs-time", optional = true }
 
 [[test]]
 name = "ale_gcl"

@@ -13,11 +13,17 @@
 //! A prescribed coefficient change supplies free energy A_mean * delta_sigma.
 //! It is not heat: a temperature-dependent tension needs a separate surface
 //! entropy/internal-energy model. No surfactant transport, bending elasticity,
-//! topology changes, intermediate-path validity or time integrator is implied.
+//! topology changes or intermediate-path validity is implied. The optional
+//! `dynamics` adapter applies these forces through the original structural
+//! midpoint integrator, with independently admitted momentum and energy balances.
 //! The triangle leaves allocate nothing. Patch assembly is synchronous and
 //! linear in the supplied vertices/faces; callers own tiling and cancellation.
 
 type Vector = [f64; 3];
+
+/// Conservative material-surface motion through the existing structural owner.
+#[cfg(feature = "continuum")]
+pub mod dynamics;
 
 /// Invalid geometry, coefficient field or unrepresentable arithmetic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -911,11 +917,20 @@ mod tests {
             // Gram work correction, without subtracting nearly equal skinny
             // geometries in a poorly conditioned finite-difference oracle.
             let direction = [[0.0; 3], [0.2, -0.1, 0.3], [0.2, -0.1 + 0.1 * width, 0.3]];
-            let tangent = triangle_surface_tension_step_tangent(before, after, 1.0, 1.0, direction).unwrap();
+            let tangent =
+                triangle_surface_tension_step_tangent(before, after, 1.0, 1.0, direction).unwrap();
             let endpoint = triangle_surface_tension(after, 1.0).unwrap();
-            let derivative = (0..3).map(|i| dot(tangent[i], sub(after[i], before[i]))
-                + dot(result.forces_n[i], direction[i]) - dot(endpoint.forces_n[i], direction[i])).sum::<f64>();
-            assert!(derivative.abs() < 2e-11, "width={width:e}, work derivative={derivative:e}");
+            let derivative = (0..3)
+                .map(|i| {
+                    dot(tangent[i], sub(after[i], before[i]))
+                        + dot(result.forces_n[i], direction[i])
+                        - dot(endpoint.forces_n[i], direction[i])
+                })
+                .sum::<f64>();
+            assert!(
+                derivative.abs() < 2e-11,
+                "width={width:e}, work derivative={derivative:e}"
+            );
         }
     }
 }

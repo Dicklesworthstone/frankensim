@@ -664,14 +664,62 @@ reductions in fixed face order. Invalid coordinates, zero-area faces,
 negative/nonfinite tension, inconsistent field sizes, invalid connectivity
 indices and unrepresentable outputs refuse. No intermediate deformation path,
 manifoldness, topology change, surfactant transport, thermal surface entropy,
-fluid advection or time integration is claimed. Triangle operations are bounded;
+fluid advection or time integration is claimed by the force operator. Triangle operations are bounded;
 patch callers own their tiling/cancellation boundary.
 
-Eight G0/G1/G3 tests check analytic triangle line forces, independent energy
+Nine G0/G1/G3 tests check analytic triangle line forces, independent energy
 gradients, finite-deformation work and midpoint torque, rigid-motion objectivity,
 unit scaling, coefficient supply, variable-tension patch scatter, skinny-face
-work and invalid geometry/data. The discrete-gradient principle follows
+work, invalid geometry/data and analytic endpoint tangents under nonuniform
+deformation and finite rotation. The discrete-gradient principle follows
 Gonzalez (1996), doi:10.1007/BF02440162; the Gram formulas are derived locally.
+
+## Conservative inertial capillary material surfaces
+
+With `continuum`, `capillary::surface::dynamics::CapillarySurfaceDynamics`
+binds fixed triangle connectivity and strictly positive reference nodal masses
+to the existing `fs-time::galpha::SecondOrderState`. It advances actual xyz
+positions and velocities through the original matrix-free structural
+generalized-alpha owner at `rho_inf=1`. No other time integrator or liquid
+solver is introduced. Initial acceleration is physical force divided by mass;
+subsequent acceleration retains the native Newmark auxiliary-state semantics.
+
+The midpoint resistance is the negative original endpoint capillary force.
+Its analytic tangent differentiates the Gram formula and its symmetric
+skinny-face work correction, then composes the endpoint/midpoint chain rule.
+The original Newton--Krylov driver owns globalization and linear iteration;
+positive lumped mass supplies its right preconditioner. Face callbacks allocate
+nothing and never form a dense mesh Jacobian. Explicit topology/restart limits
+and native iteration budgets bound work. Cancellation is checked between native
+callbacks and at most every 64 faces within surface evaluation.
+
+Every accepted endpoint independently satisfies the caller's SI tolerances for
+`M delta v - dt (F_surface + F_external)`,
+`delta x - dt v_mean`, and
+`delta kinetic + delta surface - external force work - A_mean delta sigma`.
+The nonlinear solver's convergence report does not substitute for these gates.
+Kinetic change uses mean velocity times momentum change to avoid subtraction
+of large aggregate energies. Rejection leaves positions, velocities,
+accelerations, physical time, accepted-step count and history unchanged.
+The trial does not clone the accumulated trajectory history.
+
+Prescribed per-face tension change supplies external free energy, never
+inferred heat. This rung represents a tension-only material surface with fixed
+reference mass, including explicitly authored ideal inertial films. It does
+not replace an elastic-solid material law, solve bulk incompressibility or
+assign physical mass from current area. The caller identifies every interface
+(including both sides of a film) and owns fixed-topology applicability.
+No contact/support constraints, bending, viscosity, intermediate-path
+nonintersection, remeshing, surface entropy, thermal coupling or dynamics
+adjoint is claimed. Temporal and spatial refinement remain necessary.
+
+Five focused G1/G3/G4 tests exercise the analytic midpoint map for an equilateral
+breathing patch and second-order temporal convergence; actual rotating,
+nonuniformly deforming surface evolution with energy and linear/angular momentum
+conservation; explicit coefficient supply, held-force equilibrium and the
+analytically accelerated zero-tension limit; finite
+rotation/translation objectivity and checkpoint replay; and transactional
+invalid-data, cancellation, nonlinear-budget and independent-balance refusals.
 
 
 ## Damped Newton BDF1 for stiff rheology
