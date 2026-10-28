@@ -112,6 +112,7 @@ pub struct HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
     element_material_ids: Vec<usize>,
     vertex_material_ids: Vec<usize>,
     material_count: usize,
+    reference_materials: Vec<ReferenceEnthalpyMaterial<'c>>,
 }
 
 impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
@@ -245,7 +246,28 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
             element_material_ids: element_material_ids.to_vec(),
             vertex_material_ids,
             material_count: materials.len(),
+            reference_materials: materials.to_vec(),
         })
+    }
+
+    /// Exact stationary reference mesh used by storage and transport assembly.
+    #[must_use]
+    pub const fn mesh(&self) -> &'m ConductionMesh {
+        self.inner.mesh
+    }
+
+    /// Original borrowed caloric chart and frozen reference density. Coupled
+    /// Lagrangian owners must use this inventory, not a fresh density at T.
+    #[must_use]
+    pub fn reference_material(&self, material: usize) -> Option<ReferenceEnthalpyMaterial<'c>> {
+        self.reference_materials.get(material).copied()
+    }
+
+    /// Whether a separately declared phase multiplier modifies conductivity.
+    /// Source-bound consumers can refuse an additional, unbound coefficient.
+    #[must_use]
+    pub const fn has_phase_conductivity(&self) -> bool {
+        self.inner.phase_conductivity.is_some()
     }
 
     /// Bind one explicit liquid-mass-fraction conductivity multiplier per

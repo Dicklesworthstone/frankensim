@@ -27,6 +27,8 @@ pub mod thermoelastic;
 pub mod gas;
 /// Accepted local heat histories drive the existing pressure-valve reduction.
 pub mod valve;
+/// Native nodal enthalpy transport drives the same tetrahedral solid mesh.
+pub mod spatial;
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
