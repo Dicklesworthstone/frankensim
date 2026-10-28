@@ -150,7 +150,7 @@ impl ConductionThermalNetwork<'_> {
             .map_err(material)?;
         let sources = self.materials_at(problem, &initial.source, &routes, &cancel)?;
         if sources.iter().zip(problem.conductors()).any(|(a, b)| {
-            a.source_basis() != b.source_basis()
+            !a.has_same_electrical_source(b)
                 || a.frame() != b.frame()
                 || !same_material(a.material(), b.material())
         }) {

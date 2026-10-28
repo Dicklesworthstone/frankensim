@@ -103,13 +103,19 @@ pub trait PlanarConductorMaterial: sealed::Sealed + Clone {
     fn frame(&self) -> Option<PlanarElectricalFrame>;
     /// One explicitly owned liquid-mass-fraction coordinate; never inferred.
     fn liquid_mass_fraction_axis(&self) -> Option<&str>;
-    fn source_property_names(&self) -> &'static [&'static str];
+    /// Borrow the actual selected source names, including noncanonical keys.
+    fn source_property_names(&self) -> impl Iterator<Item = &str>;
+    /// Keep the independent electrical quantity and its exact source binding.
+    fn has_same_electrical_source(&self, other: &Self) -> bool {
+        self.source_basis() == other.source_basis()
+            && self.source_property_names().eq(other.source_property_names())
+    }
     fn conductivity(&self) -> PlanarConductivity;
     /// Rebuild the SAME law/basis/orientation around an atomically refreshed
     /// original material bundle. Never choose alternate properties by name.
     fn with_material(&self, material: ResolvedMaterialStatePoint) -> Result<Self, ConductorError>;
     fn source_properties(&self) -> impl Iterator<Item = &ResolvedScalarProperty> {
-        self.source_property_names().iter().map(|name| {
+        self.source_property_names().map(|name| {
             self.material()
                 .property(name)
                 .expect("canonical conductor retains every admitted electrical property")
@@ -144,21 +150,14 @@ impl PlanarConductorMaterial for ResolvedConductorState {
     fn liquid_mass_fraction_axis(&self) -> Option<&str> {
         self.liquid_mass_fraction_axis()
     }
-    fn source_property_names(&self) -> &'static [&'static str] {
-        match self.source_basis() {
-            ElectricalPropertyBasis::Resistivity => &[ELECTRICAL_RESISTIVITY_PROPERTY],
-            ElectricalPropertyBasis::Conductivity => &[ELECTRICAL_CONDUCTIVITY_PROPERTY],
-        }
+    fn source_property_names(&self) -> impl Iterator<Item = &str> {
+        core::iter::once(self.source_key().name())
     }
     fn conductivity(&self) -> PlanarConductivity {
         PlanarConductivity::Scalar(self.resistivity_ohm_m().recip())
     }
     fn with_material(&self, material: ResolvedMaterialStatePoint) -> Result<Self, ConductorError> {
-        let next = Self::try_from_material_with_basis(material, self.source_basis())?;
-        match self.liquid_mass_fraction_axis() {
-            Some(axis) => next.with_liquid_mass_fraction_axis(axis),
-            None => Ok(next),
-        }
+        ResolvedConductorState::with_material(self, material)
     }
 }
 
@@ -329,8 +328,8 @@ impl PlanarConductorMaterial for ResolvedOrthotropicConductor2 {
     fn liquid_mass_fraction_axis(&self) -> Option<&str> {
         self.liquid_mass_fraction_axis()
     }
-    fn source_property_names(&self) -> &'static [&'static str] {
-        principal_names(self.basis)
+    fn source_property_names(&self) -> impl Iterator<Item = &str> {
+        principal_names(self.basis).iter().copied()
     }
     fn conductivity(&self) -> PlanarConductivity {
         PlanarConductivity::Tensor(self.conductivity_s_m)
@@ -388,11 +387,15 @@ impl PlanarConductorMaterial for ResolvedPlanarConductor {
             Self::Orthotropic(s) => s.liquid_mass_fraction_axis(),
         }
     }
-    fn source_property_names(&self) -> &'static [&'static str] {
-        match self {
-            Self::Isotropic(s) => s.source_property_names(),
-            Self::Orthotropic(s) => s.source_property_names(),
-        }
+    fn source_property_names(&self) -> impl Iterator<Item = &str> {
+        let names = match self {
+            Self::Isotropic(s) => [Some(s.source_key().name()), None],
+            Self::Orthotropic(s) => {
+                let names = principal_names(s.basis);
+                [Some(names[0]), Some(names[1])]
+            }
+        };
+        names.into_iter().flatten()
     }
     fn conductivity(&self) -> PlanarConductivity {
         match self {

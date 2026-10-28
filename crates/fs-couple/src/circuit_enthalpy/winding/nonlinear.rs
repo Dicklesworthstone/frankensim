@@ -338,6 +338,7 @@ impl WindingThermalNetwork<'_> {
                     && !circuit.graph_resistor_materials().iter().any(|old| {
                         old.branch == source.branch
                             && old.conductor.source_basis() == source.conductor.source_basis()
+                            && old.conductor.source_key() == source.conductor.source_key()
                             && old.conductor.length_m().to_bits()
                                 == source.conductor.length_m().to_bits()
                             && old.conductor.area_m2().to_bits()
@@ -383,6 +384,7 @@ impl WindingThermalNetwork<'_> {
             || initial.iter().any(|(triangle, source)| {
                 conductors.get(triangle).is_none_or(|original| {
                     source.source_basis() != original.source_basis()
+                        || source.source_key() != original.source_key()
                         || source.resistivity_ohm_m().to_bits()
                             != original.resistivity_ohm_m().to_bits()
                         || !same_material(source.material(), original.material())

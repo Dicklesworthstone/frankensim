@@ -351,6 +351,7 @@ impl WindingThermalNetwork<'_> {
 fn same_conductor_state(a: &WindingConductor, b: &WindingConductor) -> bool {
     a.triangle == b.triangle
         && a.conductor.source_basis() == b.conductor.source_basis()
+        && a.conductor.source_key() == b.conductor.source_key()
         && a.conductor.resistivity_ohm_m().to_bits() == b.conductor.resistivity_ohm_m().to_bits()
         && same_material(a.conductor.material(), b.conductor.material())
 }

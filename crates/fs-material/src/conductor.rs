@@ -10,7 +10,7 @@ pub mod planar;
 
 use core::fmt;
 
-use fs_matdb::{MaterialCard, QueryPoint};
+use fs_matdb::{MaterialCard, PropertyKey, QueryPoint};
 use fs_qty::{Dims, QuantitySpec};
 
 use crate::state_point::{
@@ -69,6 +69,23 @@ impl ElectricalPropertyBasis {
             self.property_name(), self.dimensions(), ScalarAdmissibility::StrictlyPositive,
         )
     }
+
+    /// Bind the independent electrical quantity to an exact source key. Names
+    /// are never normalized or guessed; the scalar DC dimensions remain fixed.
+    pub fn requirement_for(
+        self,
+        key: &PropertyKey,
+    ) -> Result<ScalarPropertyRequirement, ConductorError> {
+        if key.quantity() != QuantitySpec::dimensional(self.dimensions()) {
+            return Err(ConductorError::InvalidInput {
+                quantity: "exact electrical source key must match the selected scalar DC basis",
+            });
+        }
+        Ok(ScalarPropertyRequirement::try_with_key(
+            key,
+            ScalarAdmissibility::StrictlyPositive,
+        )?)
+    }
 }
 
 /// Ideal quasi-static electrical boundary condition for a uniform resistor.
@@ -88,6 +105,7 @@ pub enum OhmicDrive {
 pub struct ResolvedConductorState {
     material: ResolvedMaterialStatePoint,
     source_basis: ElectricalPropertyBasis,
+    source_key: PropertyKey,
     resistivity_ohm_m: f64,
     liquid_mass_fraction_axis: Option<String>,
 }
@@ -138,7 +156,25 @@ impl ResolvedConductorState {
         material: ResolvedMaterialStatePoint,
         source_basis: ElectricalPropertyBasis,
     ) -> Result<Self, ConductorError> {
-        let property = material.property(source_basis.property_name())
+        let key = PropertyKey::new(source_basis.property_name(), source_basis.dimensions());
+        Self::try_from_material_with_property(material, source_basis, &key)
+    }
+
+    /// Adopt an exact electrical property from the original complete bundle.
+    /// The caller declares whether that property is scalar DC resistivity or
+    /// conductivity. Its key, conditions, support and receipts survive all
+    /// lowering and refresh; an absent key never falls back to a similar name.
+    ///
+    /// # Errors
+    /// A key with the wrong quantity, a missing exact property, a nonpositive
+    /// source value, or an unrepresentable conductivity reciprocal.
+    pub fn try_from_material_with_property(
+        material: ResolvedMaterialStatePoint,
+        source_basis: ElectricalPropertyBasis,
+        source_key: &PropertyKey,
+    ) -> Result<Self, ConductorError> {
+        source_basis.requirement_for(source_key)?;
+        let property = material.property_by_key(source_key)
             .ok_or(ConductorError::InvalidInput {
                 quantity: source_basis.property_name(),
             })?;
@@ -166,6 +202,7 @@ impl ResolvedConductorState {
         Ok(Self {
             material,
             source_basis,
+            source_key: source_key.clone(),
             resistivity_ohm_m,
             liquid_mass_fraction_axis: None,
         })
@@ -219,11 +256,31 @@ impl ResolvedConductorState {
     #[must_use]
     pub const fn source_basis(&self) -> ElectricalPropertyBasis { self.source_basis }
 
+    /// Complete original source key, including its quantity declaration.
+    #[must_use]
+    pub const fn source_key(&self) -> &PropertyKey { &self.source_key }
+
+    /// Rebuild this same electrical law around a refreshed complete bundle.
+    /// Source selection and domain checks belong to the material refresh owner;
+    /// this method retains the exact key, basis and any declared phase axis.
+    pub fn with_material(
+        &self,
+        material: ResolvedMaterialStatePoint,
+    ) -> Result<Self, ConductorError> {
+        let next = Self::try_from_material_with_property(
+            material, self.source_basis, &self.source_key,
+        )?;
+        match self.liquid_mass_fraction_axis() {
+            Some(axis) => next.with_liquid_mass_fraction_axis(axis),
+            None => Ok(next),
+        }
+    }
+
     /// Original selected property, including support, uncertainty and receipt.
     /// A derived resistivity is never inserted into the material bundle.
     #[must_use]
     pub fn source_property(&self) -> &ResolvedScalarProperty {
-        self.material.property(self.source_basis.property_name())
+        self.material.property_by_key(&self.source_key)
             .expect("the immutable conductor retains its admitted source property")
     }
 
@@ -251,6 +308,7 @@ impl ResolvedConductorState {
         Ok(ResolvedConductor {
             material: self.material,
             source_basis: self.source_basis,
+            source_key: self.source_key,
             length_m,
             area_m2,
             resistance_ohm,
@@ -312,9 +370,28 @@ pub fn resolve_conductor_state_with_basis(
     selection: MaterialPropertySelection,
     source_basis: ElectricalPropertyBasis,
 ) -> Result<ResolvedConductorState, ConductorError> {
-    let requirement = source_basis.requirement()?;
+    let key = PropertyKey::new(source_basis.property_name(), source_basis.dimensions());
+    resolve_conductor_state_with_property(card, point, selection, source_basis, &key)
+}
+
+/// Resolve one explicitly named electrical source without rewriting its card.
+/// The full caller-supplied point and selection policy are checked by the same
+/// state-point owner as canonical sources. Conductivity is evaluated before
+/// taking its reciprocal; no temperature law or missing condition is inferred.
+///
+/// # Errors
+/// Wrong basis/key quantities, source/selection/domain failures or an
+/// unrepresentable reciprocal. No partial state or synthetic claim is returned.
+pub fn resolve_conductor_state_with_property(
+    card: &MaterialCard,
+    point: &QueryPoint,
+    selection: MaterialPropertySelection,
+    source_basis: ElectricalPropertyBasis,
+    source_key: &PropertyKey,
+) -> Result<ResolvedConductorState, ConductorError> {
+    let requirement = source_basis.requirement_for(source_key)?;
     let material = resolve_material_state_point(card, point, &[requirement], selection)?;
-    ResolvedConductorState::try_from_material_with_basis(material, source_basis)
+    ResolvedConductorState::try_from_material_with_property(material, source_basis, source_key)
 }
 
 /// A uniform conductor resolved from one source-supported material state.
@@ -322,6 +399,7 @@ pub fn resolve_conductor_state_with_basis(
 pub struct ResolvedConductor {
     material: ResolvedMaterialStatePoint,
     source_basis: ElectricalPropertyBasis,
+    source_key: PropertyKey,
     length_m: f64,
     area_m2: f64,
     resistance_ohm: f64,
@@ -343,10 +421,25 @@ impl ResolvedConductor {
     #[must_use]
     pub const fn source_basis(&self) -> ElectricalPropertyBasis { self.source_basis }
 
+    /// Complete original source key, retained through geometric lowering.
+    #[must_use]
+    pub const fn source_key(&self) -> &PropertyKey { &self.source_key }
+
+    /// Refresh the electrical source while retaining this exact key and the
+    /// caller-owned geometry. No thermal expansion or phase evolution is added.
+    pub fn with_material(
+        &self,
+        material: ResolvedMaterialStatePoint,
+    ) -> Result<Self, ConductorError> {
+        ResolvedConductorState::try_from_material_with_property(
+            material, self.source_basis, &self.source_key,
+        )?.into_uniform_conductor(self.length_m, self.area_m2)
+    }
+
     /// The original resistivity or conductivity source, never a synthetic claim.
     #[must_use]
     pub fn source_property(&self) -> &ResolvedScalarProperty {
-        self.material.property(self.source_basis.property_name())
+        self.material.property_by_key(&self.source_key)
             .expect("the immutable conductor retains its admitted source property")
     }
 
@@ -531,6 +624,26 @@ pub fn resolve_uniform_conductor_with_basis(
 ) -> Result<ResolvedConductor, ConductorError> {
     validate_geometry(length_m, area_m2)?;
     resolve_conductor_state_with_basis(card, point, selection, source_basis)?
+        .into_uniform_conductor(length_m, area_m2)
+}
+
+/// Resolve an exact source key and use the existing uniform resistance and
+/// Joule-power owners at the caller's physical geometry.
+///
+/// # Errors
+/// Invalid geometry, wrong source quantity, material query refusals or an
+/// unrepresentable resistance. No contact or temperature model is inferred.
+pub fn resolve_uniform_conductor_with_property(
+    card: &MaterialCard,
+    point: &QueryPoint,
+    selection: MaterialPropertySelection,
+    source_basis: ElectricalPropertyBasis,
+    source_key: &PropertyKey,
+    length_m: f64,
+    area_m2: f64,
+) -> Result<ResolvedConductor, ConductorError> {
+    validate_geometry(length_m, area_m2)?;
+    resolve_conductor_state_with_property(card, point, selection, source_basis, source_key)?
         .into_uniform_conductor(length_m, area_m2)
 }
 

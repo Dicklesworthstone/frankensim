@@ -143,6 +143,7 @@ impl MagneticThermalNetwork<'_> {
                 .any(|((triangle, c), s)| {
                     *triangle != s.triangle
                         || c.source_basis() != s.conductor.source_basis()
+                        || c.source_key() != s.conductor.source_key()
                         || !same_material(c.material(), s.conductor.material())
                 })
         {

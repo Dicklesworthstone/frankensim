@@ -251,6 +251,7 @@ pub(super) fn bind_sources(
         let winding = owners[source.triangle].ok_or(Invalid("conductor binding names an inactive triangle"))?;
         if previous.is_some_and(|p| p[index].triangle != source.triangle
             || p[index].conductor.source_basis() != source.conductor.source_basis()
+            || p[index].conductor.source_key() != source.conductor.source_key()
             || {
                 let before = p[index].conductor.material();
                 let after = source.conductor.material();

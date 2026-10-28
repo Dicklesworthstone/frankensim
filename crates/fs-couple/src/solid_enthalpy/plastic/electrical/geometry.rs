@@ -222,9 +222,10 @@ pub(super) fn refresh(
             ))?;
         // Adopt the actual same-point source bundle; do not resolve or fit a
         // separate material coefficient, and do not change any circuit history.
-        resistor.conductor = ResolvedConductorState::try_from_material_with_basis(
+        resistor.conductor = ResolvedConductorState::try_from_material_with_property(
             resistor.conductor.material().clone(),
             resistor.conductor.source_basis(),
+            resistor.conductor.source_key(),
         )
         .and_then(|state| {
             state.into_uniform_conductor(path.length_m * stretch, path.area_m2 * j / stretch)

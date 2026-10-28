@@ -357,10 +357,7 @@ impl MagneticThermalNetwork<'_> {
                 original.clone()
             };
             if let Some(source) = source {
-                let conductor = ResolvedConductorState::try_from_material_with_basis(
-                    snapshot.clone(),
-                    source.source_basis(),
-                )
+                let conductor = source.with_material(snapshot.clone())
                 .map_err(|e| CircuitEnthalpyError::Source(MagneticThermalError::Conductor(e)))?;
                 result.push((triangle, conductor));
             }

@@ -324,6 +324,7 @@ fn bind(
             p[i].triangle != source.triangle
                 || p[i].region != source.region
                 || p[i].conductor.source_basis() != source.conductor.source_basis()
+                || p[i].conductor.source_key() != source.conductor.source_key()
                 || {
                     let before = p[i].conductor.material();
                     let after = source.conductor.material();

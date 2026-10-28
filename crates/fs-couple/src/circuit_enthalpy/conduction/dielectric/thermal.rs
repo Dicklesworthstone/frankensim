@@ -107,7 +107,7 @@ impl ConductionThermalNetwork<'_> {
         let sample = prepared.resolve(thermal, || (*cancel.borrow_mut())()).map_err(material)?;
         let sources = self.materials_at(problem, &sample.source, &routes, &cancel)?;
         if sources.iter().zip(problem.conductors()).any(|(a, b)| {
-            a.source_basis() != b.source_basis() || a.frame() != b.frame()
+            !a.has_same_electrical_source(b) || a.frame() != b.frame()
                 || !same_material(a.material(), b.material())
         }) {
             return Err(invalid("accepted dielectric sources must match the actual caloric state"));

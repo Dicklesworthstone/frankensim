@@ -6,6 +6,10 @@ use fs_material::conductor::{
     OhmicDrive, ResolvedConductorState, resolve_conductor_state,
     resolve_conductor_state_with_basis, resolve_uniform_conductor_with_basis,
 };
+use fs_material::conductor::planar::{PlanarConductorMaterial, ResolvedPlanarConductor};
+use fs_material::conductor::{
+    resolve_conductor_state_with_property, resolve_uniform_conductor_with_property,
+};
 use fs_material::state_point::{
     DENSITY_PROPERTY, MaterialPropertySelection, ResolvedMaterialStatePoint,
     SPECIFIC_HEAT_CAPACITY_DIMS, SPECIFIC_HEAT_CAPACITY_PROPERTY,
@@ -79,6 +83,118 @@ fn complete_source_bundle_survives_bulk_and_geometric_lowering() {
     assert!((wire.resistance_ohm() - 0.2).abs() < 1e-15);
     let current = wire.current_a_for_drive(OhmicDrive::Voltage(3.0)).unwrap();
     assert!((wire.joule_power_w(current).unwrap() - 3.0 * current).abs() < 1e-12);
+}
+
+#[test]
+fn exact_electrical_key_survives_bundle_lowering_and_planar_refresh() {
+    let key = PropertyKey::new("grade-resistivity", ELECTRICAL_RESISTIVITY_DIMS);
+    let (card, requirements) = fixture_with_electrical(&[
+        (key.name(), 1e-7, ELECTRICAL_RESISTIVITY_DIMS),
+    ]);
+    let point = QueryPoint::new().with("T", 300.0).unwrap();
+    let original = resolve_material_state_point(
+        &card, &point, &requirements, MaterialPropertySelection::SingleClaimOnly,
+    ).unwrap();
+    let bulk = ResolvedConductorState::try_from_material_with_property(
+        original.clone(), ElectricalPropertyBasis::Resistivity, &key,
+    ).unwrap();
+    assert_eq!(bulk.material(), &original);
+    assert_eq!(bulk.source_key(), &key);
+    assert_eq!(bulk.source_property(), original.property_by_key(&key).unwrap());
+    assert_eq!(bulk.source_property_names().collect::<Vec<_>>(), vec![key.name()]);
+    assert_eq!(bulk.source_properties().collect::<Vec<_>>(), vec![bulk.source_property()]);
+    assert!(resolve_conductor_state(
+        &card, &point, MaterialPropertySelection::SingleClaimOnly,
+    ).is_err());
+
+    let next_point = QueryPoint::new().with("T", 350.0).unwrap();
+    let next_bundle = original.at_query_point(&card, &next_point).unwrap();
+    let refreshed = PlanarConductorMaterial::with_material(&bulk, next_bundle.clone()).unwrap();
+    assert_eq!(refreshed.source_key(), &key);
+    assert_eq!(refreshed.material(), &next_bundle);
+    assert!(bulk.has_same_electrical_source(&refreshed));
+    assert_eq!(refreshed.source_property().answer().receipt.selected,
+        bulk.source_property().answer().receipt.selected);
+    let mixed = ResolvedPlanarConductor::from(bulk.clone());
+    let next_mixed = mixed.with_material(next_bundle.clone()).unwrap();
+    assert!(mixed.has_same_electrical_source(&next_mixed));
+    assert_eq!(next_mixed.source_property_names().collect::<Vec<_>>(), vec![key.name()]);
+
+    let wire = bulk.into_uniform_conductor(2.0, 1e-6).unwrap();
+    assert_eq!(wire.material(), &original);
+    assert_eq!(wire.source_key(), &key);
+    assert!((wire.resistance_ohm() - 0.2).abs() < 1e-15);
+    assert!((wire.joule_power_w(3.0).unwrap() - 1.8).abs() < 1e-14);
+    let next_wire = wire.with_material(next_bundle.clone()).unwrap();
+    assert_eq!(next_wire.material(), &next_bundle);
+    assert_eq!(next_wire.source_key(), &key);
+    assert_eq!(next_wire.length_m(), wire.length_m());
+    assert_eq!(next_wire.area_m2(), wire.area_m2());
+    assert!(wire.with_material(bundle(Some((1e-7, ELECTRICAL_RESISTIVITY_DIMS)))).is_err());
+
+    // Exact source selection still refuses unsupported state changes.
+    assert!(resolve_conductor_state_with_property(
+        &card, &QueryPoint::new().with("T", 600.0).unwrap(),
+        MaterialPropertySelection::SingleClaimOnly, ElectricalPropertyBasis::Resistivity, &key,
+    ).is_err());
+}
+
+#[test]
+fn equal_values_in_one_bundle_do_not_make_different_electrical_keys_interchangeable() {
+    let first = PropertyKey::new("first-resistivity", ELECTRICAL_RESISTIVITY_DIMS);
+    let second = PropertyKey::new("second-resistivity", ELECTRICAL_RESISTIVITY_DIMS);
+    let (card, requirements) = fixture_with_electrical(&[
+        (first.name(), 1e-7, ELECTRICAL_RESISTIVITY_DIMS),
+        (second.name(), 1e-7, ELECTRICAL_RESISTIVITY_DIMS),
+    ]);
+    let original = resolve_material_state_point(
+        &card, &QueryPoint::new().with("T", 300.0).unwrap(), &requirements,
+        MaterialPropertySelection::SingleClaimOnly,
+    ).unwrap();
+    let a = ResolvedConductorState::try_from_material_with_property(
+        original.clone(), ElectricalPropertyBasis::Resistivity, &first,
+    ).unwrap();
+    let b = ResolvedConductorState::try_from_material_with_property(
+        original.clone(), ElectricalPropertyBasis::Resistivity, &second,
+    ).unwrap();
+    assert_eq!(a.material(), b.material());
+    assert_eq!(a.resistivity_ohm_m(), b.resistivity_ohm_m());
+    assert!(!a.has_same_electrical_source(&b));
+    assert!(!ResolvedPlanarConductor::from(a).has_same_electrical_source(
+        &ResolvedPlanarConductor::from(b),
+    ));
+    // Choosing a conductivity interpretation cannot relabel a resistivity.
+    assert!(ResolvedConductorState::try_from_material_with_property(
+        original.clone(), ElectricalPropertyBasis::Conductivity, &first,
+    ).is_err());
+    assert!(ResolvedConductorState::try_from_material_with_property(
+        original, ElectricalPropertyBasis::Resistivity,
+        &PropertyKey::new(first.name(), Pressure::DIMS),
+    ).is_err());
+}
+
+#[test]
+fn explicit_source_binding_keeps_canonical_behavior_and_reciprocal_law() {
+    let alias = PropertyKey::new("grade-conductivity", ELECTRICAL_CONDUCTIVITY_DIMS);
+    let (card, _) = fixture_with_electrical(&[
+        (ELECTRICAL_RESISTIVITY_PROPERTY, 2e-7, ELECTRICAL_RESISTIVITY_DIMS),
+        (alias.name(), 1e7, ELECTRICAL_CONDUCTIVITY_DIMS),
+    ]);
+    let point = QueryPoint::new().with("T", 300.0).unwrap();
+    let legacy = resolve_conductor_state(
+        &card, &point, MaterialPropertySelection::SingleClaimOnly,
+    ).unwrap();
+    assert_eq!(legacy.source_key().name(), ELECTRICAL_RESISTIVITY_PROPERTY);
+    assert_eq!(legacy.resistivity_ohm_m(), 2e-7);
+    let wire = resolve_uniform_conductor_with_property(
+        &card, &point, MaterialPropertySelection::SingleClaimOnly,
+        ElectricalPropertyBasis::Conductivity, &alias, 2.0, 1e-6,
+    ).unwrap();
+    assert_eq!(wire.source_key(), &alias);
+    assert_eq!(wire.source_property().value_si(), 1e7);
+    assert!(wire.material().property(ELECTRICAL_RESISTIVITY_PROPERTY).is_none());
+    assert!((wire.resistance_ohm() - 0.2).abs() < 1e-15);
+    assert!((wire.joule_power_w(3.0).unwrap() - 1.8).abs() < 1e-14);
 }
 
 #[test]

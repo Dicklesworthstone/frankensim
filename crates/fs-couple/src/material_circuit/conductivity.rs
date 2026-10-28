@@ -6,7 +6,7 @@
 //! solver advances time and accounts for source work and Joule heat.
 
 use fs_matdb::MaterialCard;
-use fs_material::conductor::{ConductorError, ResolvedConductor, ResolvedConductorState};
+use fs_material::conductor::{ConductorError, ResolvedConductor};
 use fs_qty::{Dims, QuantitySpec};
 
 use super::{
@@ -191,6 +191,7 @@ fn admit<'a, 'b>(
             || binding.card.content_hash() != material.card_identity()
             || seed.branch != original.branch
             || seed.conductor.source_basis() != original.conductor.source_basis()
+            || seed.conductor.source_key() != original.conductor.source_key()
             || seed.conductor.length_m().to_bits() != original.conductor.length_m().to_bits()
             || seed.conductor.area_m2().to_bits() != original.conductor.area_m2().to_bits()
             || binding.axes.len() > 2
@@ -294,10 +295,7 @@ fn refresh(
         .material()
         .at_query_point(binding.card, &query)
         .map_err(ConductorError::MaterialState)?;
-    Ok(
-        ResolvedConductorState::try_from_material_with_basis(material, original.source_basis())?
-            .into_uniform_conductor(original.length_m(), original.area_m2())?,
-    )
+    Ok(original.with_material(material)?)
 }
 
 // The constitutive iteration is shared by the original fixed and moving-field

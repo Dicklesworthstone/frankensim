@@ -290,6 +290,16 @@ homogenization, the P2 milestone.
   concentric sections can mix conductivity- and resistivity-sourced layers in
   their existing parallel-current and layer-specific Joule-heat calculation.
   This scalar reciprocal law does not invert tensors or admit AC response.
+  `resolve_conductor_state_with_property` and
+  `resolve_uniform_conductor_with_property` bind a caller-selected exact
+  `PropertyKey` to that same explicit resistivity/conductivity basis. They do
+  not normalize names or infer aliases. The key must retain the basis's exact
+  dimensional quantity; the complete original bundle, conditions and receipts
+  remain authoritative. `source_key()` survives bulk-to-uniform lowering and
+  material refresh. Planar source-name iterators borrow the actual bound names,
+  and coupled refresh guards retain the selected key even when two properties
+  in the same bundle have equal values. The canonical entrypoints retain their
+  original requirements and refusal behavior.
 - `field_storage::{ResolvedCapacitor, ResolvedInductor}` adopt complete material
   state bundles and derive `C = epsilon A / d` and `L = mu N^2 A / l` from
   explicit uniform geometry. Absolute SI electric permittivity [F/m] and

@@ -287,7 +287,7 @@ fn admit_refresh<C: PlanarConductorMaterial>(old: &[C], new: &[C]) -> Result<(),
     }
     for (a, b) in old.iter().zip(new) {
         let (before, after) = (a.material(), b.material());
-        if a.source_basis() != b.source_basis()
+        if !a.has_same_electrical_source(b)
             || a.frame() != b.frame()
             || a.liquid_mass_fraction_axis() != b.liquid_mass_fraction_axis()
             || before.card_identity() != after.card_identity()
