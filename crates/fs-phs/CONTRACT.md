@@ -57,10 +57,17 @@ byte/work boundaries. Native execution is pending.
 
 `ExactZoh` advances the full coupled `(J-R)Q` operator with held input. Port
 outputs are step averages; dissipation is the independently evaluated integral
-of `grad H^T R grad H`, obtained by a Van Loan block exponential. It is NOT
+of `grad H^T R grad H`, obtained by a joint propagator/finite-horizon Gramian
+calculation. It is NOT
 `dt*dg^T R dg` for the endpoint Gonzalez gradient. The independent energy
-balance must close to 1e-12 relative or the step refuses. The dense exponential
-uses a converged scaled Taylor series and bounded squaring; this is floating
+balance must close to 1e-12 relative or the step refuses. A converged scaled
+Taylor/Lyapunov series computes the short-interval transition `E` and loss
+integral `W`; doubling uses `W <- W + E^T W E` and `E <- E E`. This avoids
+forming an exponentially growing inverse propagator for stiff passive decay,
+while retaining held sources, every port output, zero-energy coordinates and
+separate resistance channels. The calculation uses state-sized dense matrices
+and retains the original capacity, 32-term and 48-doubling bounds. It neither
+clips loss nor infers heat from the storage difference. This is floating
 point evidence, not an interval certificate, allocation-free kernel or
 cooperative cancellation guarantee. Callers poll at their existing block
 boundary. Purely quadratic storage is mandatory; nonlinear ZOH is refused.
@@ -81,6 +88,12 @@ over 10,000 steps (1e-12 absolute at unit scale), lossless phase (0.01 cents),
 exact damping radius (1e-12 relative), independent energy balance (1e-12
 relative), a live quartic remainder, cap/cap+1, the tangent-pole refusal,
 static compliance, free inertia, stale splits and unsupported storage.
+`linear_exact::gramian::tests` additionally checks million-relaxation-time
+decay, independently integrated stiff source work, nilpotent transport and
+noncommuting damping/rotation. `tests/stiff_energy.rs` exercises the complete
+public propagator across quadratic storage scales, separate physical heat
+channels and driven thermal/electrical-style steady states. These retain the
+independent 1e-12 energy-balance gate rather than widening its tolerance.
 
 `admit_midpoint_band(rate, dt)` is the one-cent admission for every midpoint
 (Gonzalez/Cayley) linear block. The caller supplies a bound on ALL its linear

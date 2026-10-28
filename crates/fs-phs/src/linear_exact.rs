@@ -3,7 +3,9 @@
 //! Exact ZOH retains the full state and all damping/coupling entries. A Jacobi
 //! basis balances the quadratic energy before a dense exponential; it is not
 //! modal truncation. Held-force work and loss are independently integrated by
-//! a Van Loan block exponential, not inferred from the energy difference.
+//! a jointly integrated finite-horizon Gramian, not inferred from the energy
+//! difference. Stable doubling never forms an exponentially growing inverse
+//! propagator for a physically decaying mode.
 //!
 //! Frequency matching replaces Q by Q + delta_Q in the Gonzalez Hamiltonian.
 //! In energy coordinates K = sqrt(Q) J sqrt(Q), each eigenvalue omega^2 of
@@ -17,6 +19,9 @@ use crate::{PhsError, PortHamiltonian, StepRecord, Storage, discrete_gradient};
 use fs_la::eigen::{admit_jacobi_eigh, jacobi_eigh};
 use fs_la::factor::lu;
 use fs_math::det;
+
+mod gramian;
+use gramian::{accumulate, identity, product};
 
 /// Conservative midpoint angular-rate band. For a damped oscillatory pole
 /// with |lambda|*dt <= 0.04, Cayley-map phase error is below one cent even in
@@ -136,40 +141,6 @@ fn refuse(what: &'static str) -> PhsError {
 
 fn finite(values: &[f64]) -> bool {
     values.iter().all(|v| v.is_finite())
-}
-
-fn identity(n: usize) -> Vec<f64> {
-    let mut a = vec![0.0; n * n];
-    for i in 0..n {
-        a[i * n + i] = 1.0;
-    }
-    a
-}
-
-fn product(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
-    let mut out = vec![0.0; n * n];
-    accumulate(&mut out, a, b, n);
-    out
-}
-
-/// out += a b. Every entry adds its k = 0, 1, ... terms after what it holds,
-/// in the order of the textbook i-k-j loop, so a product started from zero is
-/// the same bit for bit. Four rows share each row of b while it is in cache,
-/// and the slice update vectorizes over j.
-fn accumulate(out: &mut [f64], a: &[f64], b: &[f64], n: usize) {
-    if n == 0 {
-        return;
-    }
-    for (a_rows, out_rows) in a.chunks(4 * n).zip(out.chunks_mut(4 * n)) {
-        for (k, b_row) in b.chunks_exact(n).enumerate() {
-            for (a_row, out_row) in a_rows.chunks_exact(n).zip(out_rows.chunks_exact_mut(n)) {
-                let scale = a_row[k];
-                for (value, &right) in out_row.iter_mut().zip(b_row) {
-                    *value += scale * right;
-                }
-            }
-        }
-    }
 }
 
 fn quadratic(a: &[f64], x: &[f64]) -> f64 {
@@ -880,27 +851,22 @@ fn exact_zoh_loss(
                 .sum();
         }
     }
-    // Van Loan: exp([ -B^T C; 0 B ] dt) = [ E^-T X; 0 E ],
-    // W = E^T X = integral exp(B^T t) C exp(B t) dt.
-    let dim = 2 * d;
-    let mut block = vec![0.0; dim * dim];
-    for i in 0..d {
-        for j in 0..d {
-            block[i * dim + j] = -dt * b[j * d + i];
-            block[i * dim + d + j] = dt * loss[i * d + j];
-            block[(d + i) * dim + d + j] = dt * b[i * d + j];
-        }
-    }
-    let exp = exponential(&block, dim)?;
+    // Preserve the original dense capacity gate. Joint Taylor/Lyapunov
+    // propagation works on d x d matrices and doubles W as W + E^T W E.
+    // No exp(-B^T dt) is formed: stiff physical decay retains finite heat.
+    admit_exponential(2 * d, DenseExponentialBudget {
+        max_dimension: MAX_LINEAR_EXPONENTIAL_BLOCK_DIM,
+        max_dense_bytes: usize::MAX,
+        max_multiply_terms: u64::MAX,
+    })?;
+    let flow = gramian::flow_integral(&b, &loss, d, dt).map_err(refuse)?;
     let mut end = vec![0.0; d];
-    let mut cross = vec![0.0; d];
     for i in 0..d {
         for j in 0..d {
-            end[i] += exp[(d + i) * dim + d + j] * initial[j];
-            cross[i] += exp[i * dim + d + j] * initial[j];
+            end[i] += flow.transition[i * d + j] * initial[j];
         }
     }
-    let dissipated: f64 = end.iter().zip(&cross).map(|(a, b)| a * b).sum();
+    let dissipated = quadratic(&flow.loss_integral, &initial);
     let x: Vec<_> = (0..n)
         .map(|i| (0..n).map(|j| inverse[i * n + j] * end[j]).sum())
         .collect();
