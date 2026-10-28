@@ -1,3 +1,6 @@
+use super::volume::{
+    EquilibriumInternalEnergySolveV1, EquilibriumVolumeErrorV1, EquilibriumVolumeSolveV1,
+};
 use super::*;
 use crate::{
     ElementId, ElementalReferenceIdV1, InitialStatePolicy, MolarEnergyQuantityV1, NASA9_LAW_ID_V1,
@@ -7,6 +10,7 @@ use crate::{
 use fs_evidence::ValidityDomain;
 use fs_matdb::{ConstitutiveModelCard, LawId, LawParameter, Provenance};
 use fs_qty::MolarMass;
+use fs_qty::Volume;
 use std::collections::BTreeMap;
 
 const R: f64 = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
@@ -136,6 +140,380 @@ fn hp_controls() -> EquilibriumEnthalpySolveV1 {
         enthalpy_tolerance_j: 1e-6,
         maximum_temperature_iterations: 80,
     }
+}
+
+fn uv_controls() -> EquilibriumInternalEnergySolveV1 {
+    EquilibriumInternalEnergySolveV1 {
+        volume: EquilibriumVolumeSolveV1::default(),
+        minimum_temperature_k: 200.0,
+        maximum_temperature_k: 2500.0,
+        energy_tolerance_j: 1e-6,
+        maximum_temperature_iterations: 80,
+    }
+}
+
+#[test]
+fn g1_tv_dissociation_closes_molecular_count_and_pressure_independently() {
+    let chemistry = dissociation();
+    let feed = [(id("A2"), Amount::new(1.0))];
+    for volume in [0.0001, 0.001, 0.01, 0.1, 1.0, 10.0] {
+        let result = chemistry
+            .equilibrate_tv(
+                Temperature::new(REFERENCE_T),
+                Volume::new(volume),
+                &feed,
+                EquilibriumVolumeSolveV1::default(),
+                || false,
+            )
+            .unwrap();
+        // Kp=1 for A2 <=> 2A at 1000 K: 4 q alpha^2 = 1-alpha,
+        // q=RT/(V p0). Rationalized positive root avoids small-volume cancellation.
+        let q = R * REFERENCE_T / (volume * 100000.0);
+        let alpha = 2.0 / (1.0 + (1.0 + 16.0 * q).sqrt());
+        let state = result.equilibrium();
+        close(species(state, "A").amount.value(), 2.0 * alpha, 2e-9);
+        close(species(state, "A2").amount.value(), 1.0 - alpha, 2e-9);
+        close(
+            state.pressure().value(),
+            (1.0 + alpha) * R * REFERENCE_T / volume,
+            2e-9,
+        );
+        close(state.mass().value(), 0.002, 1e-12);
+        close(
+            state.mass().value() / result.thermodynamic().response().density_kg_m3,
+            volume,
+            1e-10,
+        );
+        assert!(result.relative_volume_residual().abs() <= 1e-10);
+        assert!(result.energy_residual().is_none());
+        assert!(state.species().iter().all(|s| s.source.is_some()));
+    }
+}
+
+#[test]
+fn g1_uv_releases_chemical_energy_at_fixed_volume_not_fixed_pressure() {
+    let chemistry = isomers(20000.0);
+    let feed = [(id("A"), Amount::new(1.0))];
+    let initial_t = 500.0;
+    let volume = Volume::new(0.02);
+    let result = chemistry
+        .equilibrate_uv(
+            volume,
+            &feed,
+            Temperature::new(initial_t),
+            uv_controls(),
+            || false,
+        )
+        .unwrap();
+    // Independent mass-action and rigid-vessel first law for A <=> B.
+    // Cp=4R, Cv=3R, u_B=u_A-q, y_B=1/(1+exp(-q/RT)).
+    let mut lower = initial_t;
+    let mut upper = 2500.0;
+    for _ in 0..60 {
+        let t = 0.5 * (lower + upper);
+        let product = 1.0 / (1.0 + (-20000.0 / (R * t)).exp());
+        if 3.0 * R * (t - initial_t) - 20000.0 * product < 0.0 {
+            lower = t;
+        } else {
+            upper = t;
+        }
+    }
+    let expected = 0.5 * (lower + upper);
+    close(result.equilibrium().temperature().value(), expected, 2e-9);
+    close(
+        result.equilibrium().pressure().value(),
+        R * expected / volume.value(),
+        2e-9,
+    );
+    close(result.internal_energy().value(), 3.0 * R * initial_t, 2e-10);
+    assert!(result.energy_residual().unwrap().value().abs() <= 1e-6);
+    let hp = chemistry
+        .equilibrate_hp(
+            Pressure::new(R * initial_t / volume.value()),
+            &feed,
+            Temperature::new(initial_t),
+            hp_controls(),
+            || false,
+        )
+        .unwrap();
+    assert!(result.equilibrium().temperature().value() > hp.temperature().value() + 100.0);
+}
+
+#[test]
+fn g1_uv_reacting_cv_matches_fixed_volume_energy_derivative() {
+    let chemistry = dissociation();
+    let feed = [(id("A2"), Amount::new(1.0))];
+    let volume = Volume::new(0.05);
+    let tv = |t| {
+        chemistry
+            .equilibrate_tv(
+                Temperature::new(t),
+                volume,
+                &feed,
+                EquilibriumVolumeSolveV1::default(),
+                || false,
+            )
+            .unwrap()
+    };
+    let center = tv(1000.0);
+    let derivative =
+        (tv(1000.1).internal_energy().value() - tv(999.9).internal_energy().value()) / 0.2;
+    close(
+        center.thermodynamic().response().heat_capacity_v_j_k,
+        derivative,
+        2e-6,
+    );
+    let uv = chemistry
+        .equilibrate_uv_energy(
+            volume,
+            &feed,
+            center.internal_energy(),
+            uv_controls(),
+            || false,
+        )
+        .unwrap();
+    close(uv.equilibrium().temperature().value(), 1000.0, 2e-9);
+    close(
+        uv.equilibrium().pressure().value(),
+        center.equilibrium().pressure().value(),
+        2e-9,
+    );
+    let independent_u: f64 = uv
+        .equilibrium()
+        .species()
+        .iter()
+        .map(|s| {
+            let m = chemistry
+                .models()
+                .iter()
+                .find(|m| m.species() == &s.species)
+                .unwrap();
+            s.amount.value()
+                * m.evaluate_properties(uv.equilibrium().temperature())
+                    .unwrap()
+                    .u()
+                    .value()
+        })
+        .sum();
+    close(independent_u, uv.internal_energy().value(), 1e-12);
+}
+
+#[test]
+fn g3_uv_preserves_feed_scale_and_elemental_energy_reference() {
+    let chemistry = isomers(20000.0);
+    let reference = chemistry
+        .equilibrate_uv(
+            Volume::new(0.02),
+            &[(id("A"), Amount::new(1.0))],
+            Temperature::new(500.0),
+            uv_controls(),
+            || false,
+        )
+        .unwrap();
+    for scale in [1e-6, 1.0, 1e6] {
+        let mut controls = uv_controls();
+        controls.energy_tolerance_j *= scale;
+        let state = chemistry
+            .equilibrate_uv(
+                Volume::new(0.02 * scale),
+                &[(id("A"), Amount::new(scale))],
+                Temperature::new(500.0),
+                controls,
+                || false,
+            )
+            .unwrap();
+        close(
+            state.equilibrium().temperature().value(),
+            reference.equilibrium().temperature().value(),
+            2e-9,
+        );
+        close(
+            state.equilibrium().pressure().value(),
+            reference.equilibrium().pressure().value(),
+            2e-9,
+        );
+        close(
+            state.internal_energy().value(),
+            scale * reference.internal_energy().value(),
+            2e-9,
+        );
+    }
+    let shift = 50000.0;
+    let shifted = owner(
+        vec![
+            model("A", 0.01, 4.0, shift, shift / (R * REFERENCE_T)),
+            model(
+                "B",
+                0.01,
+                4.0,
+                shift - 20000.0,
+                (shift - 20000.0) / (R * REFERENCE_T),
+            ),
+        ],
+        &["H"],
+        vec![vec![1, 1]],
+    );
+    let state = shifted
+        .equilibrate_uv(
+            Volume::new(0.02),
+            &[(id("A"), Amount::new(1.0))],
+            Temperature::new(500.0),
+            uv_controls(),
+            || false,
+        )
+        .unwrap();
+    close(
+        state.equilibrium().temperature().value(),
+        reference.equilibrium().temperature().value(),
+        2e-9,
+    );
+    close(
+        state.internal_energy().value() - reference.internal_energy().value(),
+        shift,
+        2e-10,
+    );
+}
+
+#[test]
+fn g3_g4_volume_energy_and_work_refusals_publish_no_partial_state() {
+    let chemistry = dissociation();
+    let before = chemistry.clone();
+    let feed = [(id("A2"), Amount::new(1.0))];
+    for volume in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            chemistry
+                .equilibrate_tv(
+                    Temperature::new(1000.0),
+                    Volume::new(volume),
+                    &feed,
+                    EquilibriumVolumeSolveV1::default(),
+                    || false
+                )
+                .is_err()
+        );
+    }
+    for temperature in [0.0, -1.0, f64::NAN, f64::INFINITY, 100.0] {
+        assert!(
+            chemistry
+                .equilibrate_tv(
+                    Temperature::new(temperature),
+                    Volume::new(0.05),
+                    &feed,
+                    EquilibriumVolumeSolveV1::default(),
+                    || false
+                )
+                .is_err()
+        );
+    }
+    let mut one_trial = EquilibriumVolumeSolveV1::default();
+    one_trial.maximum_pressure_iterations = 1;
+    assert!(matches!(
+        chemistry.equilibrate_tv(
+            Temperature::new(1000.0),
+            Volume::new(0.05),
+            &feed,
+            one_trial,
+            || false
+        ),
+        Err(EquilibriumVolumeErrorV1::VolumeNoConvergence { .. })
+    ));
+    let mut invalid = uv_controls();
+    invalid.volume.maximum_pressure_iterations = 0;
+    assert!(
+        chemistry
+            .equilibrate_uv(
+                Volume::new(0.05),
+                &feed,
+                Temperature::new(1000.0),
+                invalid,
+                || false
+            )
+            .is_err()
+    );
+    let impossible = chemistry.equilibrate_uv_energy(
+        Volume::new(0.05),
+        &feed,
+        Energy::new(1e20),
+        uv_controls(),
+        || false,
+    );
+    assert!(matches!(
+        impossible,
+        Err(EquilibriumVolumeErrorV1::InternalEnergyNotBracketed { .. })
+    ));
+    for limit in [0, 10, 200] {
+        let mut polls = 0;
+        let result = chemistry.equilibrate_uv(
+            Volume::new(0.05),
+            &feed,
+            Temperature::new(1000.0),
+            uv_controls(),
+            || {
+                polls += 1;
+                polls > limit
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(EquilibriumVolumeErrorV1::Equilibrium(
+                CompositionEquilibriumErrorV1::Cancelled
+            )) | Err(EquilibriumVolumeErrorV1::Response(
+                EquilibriumExpansionErrorV1::Equilibrium(CompositionEquilibriumErrorV1::Cancelled)
+            ))
+        ));
+    }
+    assert_eq!(chemistry, before);
+}
+
+#[test]
+fn g3_uv_temperature_path_requires_explicit_caloric_continuity() {
+    let original = model("A", 0.01, 4.0, 0.0, 0.0);
+    let mut lower = original.regions()[0].card().clone();
+    lower.validity = ValidityDomain::unconstrained().with("T", 200.0, 1000.0);
+    let mut upper = lower.clone();
+    upper.validity = ValidityDomain::unconstrained().with("T", 1000.0, 6000.0);
+    let raw = Nasa9StandardStateModelV1::new(
+        id("A"),
+        MolarMass::new(0.01),
+        original.convention().clone(),
+        vec![
+            Nasa9RegionV1::from_card(lower).unwrap(),
+            Nasa9RegionV1::from_card(upper).unwrap(),
+        ],
+    )
+    .unwrap();
+    let corrected = raw
+        .with_caloric_continuity(
+            Temperature::new(500.0),
+            MolarEnergyQuantityV1::new(0.0),
+            crate::MolarThermalQuantityV1::new(0.0),
+        )
+        .unwrap();
+    let feed = [(id("A"), Amount::new(1.0))];
+    let call = |chemistry: &IdealGasEquilibriumV1| {
+        chemistry.equilibrate_uv(
+            Volume::new(0.05),
+            &feed,
+            Temperature::new(1500.0),
+            uv_controls(),
+            || false,
+        )
+    };
+    assert!(matches!(
+        call(&owner(vec![raw], &["H"], vec![vec![1]])),
+        Err(EquilibriumVolumeErrorV1::Response(
+            EquilibriumExpansionErrorV1::Invalid(_)
+        ))
+    ));
+    close(
+        call(&owner(vec![corrected], &["H"], vec![vec![1]]))
+            .unwrap()
+            .equilibrium()
+            .temperature()
+            .value(),
+        1500.0,
+        2e-9,
+    );
 }
 
 #[test]

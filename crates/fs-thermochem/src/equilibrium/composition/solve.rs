@@ -8,6 +8,7 @@ use CompositionEquilibriumErrorV1 as E;
 use fs_math::det::{exp, ln};
 
 pub(super) mod expansion;
+pub mod volume;
 
 pub(super) struct Workspace {
     pressure: Pressure,

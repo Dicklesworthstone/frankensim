@@ -20,6 +20,8 @@ use core::fmt;
 use fs_qty::{Amount, Energy, Mass, Pressure, Temperature};
 
 mod solve;
+/// Fixed-volume composition and adiabatic internal-energy equilibrium.
+pub use solve::volume;
 /// Reusable source-bound equilibrium isentropes for flow consumers.
 pub use solve::expansion::path as isentrope;
 pub use solve::expansion::{

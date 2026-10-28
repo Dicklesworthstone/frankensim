@@ -195,15 +195,24 @@ impl Workspace {
         owner: &IdealGasEquilibriumV1,
         controls: EquilibriumEntropySolveV1,
     ) -> Result<(), EquilibriumExpansionErrorV1> {
+        self.admit_temperature_range(owner, controls.minimum_temperature_k, controls.maximum_temperature_k)
+    }
+
+    pub(super) fn admit_temperature_range(
+        &self,
+        owner: &IdealGasEquilibriumV1,
+        minimum_temperature_k: f64,
+        maximum_temperature_k: f64,
+    ) -> Result<(), EquilibriumExpansionErrorV1> {
         for &i in &self.active {
             let model = &owner.models[i];
-            let lower = model.region_for_temperature(controls.minimum_temperature_k)
-                .ok_or(EquilibriumExpansionErrorV1::Invalid("SP lower temperature lacks source support"))?.0;
-            let upper = model.region_for_temperature(controls.maximum_temperature_k)
-                .ok_or(EquilibriumExpansionErrorV1::Invalid("SP upper temperature lacks source support"))?.0;
+            let lower = model.region_for_temperature(minimum_temperature_k)
+                .ok_or(EquilibriumExpansionErrorV1::Invalid("equilibrium lower temperature lacks source support"))?.0;
+            let upper = model.region_for_temperature(maximum_temperature_k)
+                .ok_or(EquilibriumExpansionErrorV1::Invalid("equilibrium upper temperature lacks source support"))?.0;
             if lower != upper && model.caloric_reference.is_none() {
                 return Err(EquilibriumExpansionErrorV1::Invalid(
-                    "cross-region equilibrium expansion requires explicit caloric continuity",
+                    "cross-region equilibrium path requires explicit caloric continuity",
                 ));
             }
         }
@@ -230,7 +239,7 @@ impl Workspace {
 
     // Reuse the original element matrix and dense solver for pressure response.
     // q_i=dln(n_i)/dln(p): q_i-q_total-A_i.lambda_p=-1, A diag(n) q=0.
-    fn pressure_sensitivity(&mut self, cancelled: &mut impl FnMut() -> bool) -> Result<(), E> {
+    pub(super) fn pressure_sensitivity(&mut self, cancelled: &mut impl FnMut() -> bool) -> Result<(), E> {
         poll(cancelled)?;
         let ns = self.n.len();
         let (total, _) = self.fill_matrix()?;
@@ -277,7 +286,7 @@ impl Workspace {
         poll(cancelled)
     }
 
-    fn admit_sensitivity(&self, owner: &IdealGasEquilibriumV1, thermal_rt: Option<f64>,
+    pub(super) fn admit_sensitivity(&self, owner: &IdealGasEquilibriumV1, thermal_rt: Option<f64>,
         controls: EquilibriumSolveV1) -> Result<f64, EquilibriumExpansionErrorV1> {
         let ns = self.n.len();
         let mut total = Sum::default();
@@ -334,7 +343,7 @@ impl Workspace {
         Ok(mean)
     }
 
-    fn response(&mut self, owner: &IdealGasEquilibriumV1, temperature: Temperature,
+    pub(super) fn response(&mut self, owner: &IdealGasEquilibriumV1, temperature: Temperature,
         controls: EquilibriumSolveV1, cancelled: &mut impl FnMut() -> bool)
         -> Result<EquilibriumThermodynamicResponseV1, EquilibriumExpansionErrorV1> {
         let r = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
@@ -453,7 +462,7 @@ impl Workspace {
         Err(EquilibriumExpansionErrorV1::EntropyNoConvergence { iterations: steps, residual_j_k: residual })
     }
 
-    fn publish_response(&mut self, owner: &IdealGasEquilibriumV1, temperature: Temperature,
+    pub(super) fn publish_response(&mut self, owner: &IdealGasEquilibriumV1, temperature: Temperature,
         controls: EquilibriumSolveV1, iterations: usize, thermal_iterations: usize,
         target_entropy_j_k: Option<f64>, cancelled: &mut impl FnMut() -> bool)
         -> Result<EquilibriumThermodynamicStateV1, EquilibriumExpansionErrorV1> {

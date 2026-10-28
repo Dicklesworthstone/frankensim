@@ -832,3 +832,36 @@ They cover analytic pressure-dependent dissociation, minor-element balance,
 strong-product KKT fallback, trace underflow, independent adiabatic energy
 closure, distinct inlet temperatures, equilibrium heat-capacity derivatives,
 feed/reference invariance, source and work-budget refusals, and cancellation.
+
+### Fixed-volume and adiabatic internal-energy equilibrium
+
+`equilibrium::composition::volume` adds TV and UV endpoints through the same
+original NASA-9 and element-constrained Gibbs owner. `equilibrate_tv` determines
+the pressure satisfying `p V = N(T,p) R T`; it does not hold the feed pressure
+when reactions change molecular count. Conserved elemental amounts bound the
+pressure search. Safeguarded Newton steps use the existing analytic reacting
+compressibility, with a bounded log-pressure bracket and an explicit relative
+volume residual. One workspace, including its lazily allocated trace-species
+KKT fallback, is reused through every trial.
+
+`equilibrate_uv` derives total feed internal energy from the original species
+`u = h - R T`. `equilibrate_uv_energy` accepts that target explicitly, including
+separate-temperature feeds or declared heat/work contributions. Both conserve
+volume and elements while solving temperature and pressure; they neither reuse
+constant-pressure enthalpy nor add formation energy a second time. The UV
+Newton slope is the equilibrium constant-volume heat capacity, including
+chemical composition response. Every eligible source must support the complete
+temperature bracket; traversing NASA regions requires the existing explicit
+caloric-continuity policy. Absolute energy and volume tolerances remain separate.
+
+Only accepted endpoints allocate source receipts. Results retain the full
+chemical state and thermodynamic response, original source identity, total
+internal energy, volume/energy residuals and actual pressure/composition work.
+Pressure and temperature trial counts are explicitly bounded, cancellation
+prevents publication, and no supplied chemistry or feed is mutated. G1/G3/G4
+regressions compare dissociation pressure to an independent closed form, rigid
+exothermic energy balance to a separate scalar root, reacting Cv to fixed-volume
+energy differences, and feed/reference scaling, source continuity, work budgets
+and cancellation. These are neutral ideal-gas numerical closures, not a
+finite-rate combustion, ignition, detonation, real-gas or phase-stability model,
+and the manufactured fixtures are not an external CEA validation.
