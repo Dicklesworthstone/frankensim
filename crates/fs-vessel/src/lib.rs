@@ -8,7 +8,7 @@
 //! modes and stations, the differentiable laminarity proxy of
 //! Appendix C), VALIDATION (fs-lbm free-surface pours over the lip
 //! under a rotating-gravity tilt schedule, strict mass ledger,
-//! Carreau viscosity band, Plateau–Rayleigh fragment scoring, and the
+//! Carreau viscosity band, explicit capillarity, 2-D liquid connectivity, and the
 //! CONTACT-LINE BRACKET — the genuinely open problem handled by
 //! reporting a sensitivity band, never pretended certainty),
 //! ROBUSTIFICATION (CVaR over the fluid band, e-raced candidates

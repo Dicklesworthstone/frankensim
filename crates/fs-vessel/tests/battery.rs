@@ -77,9 +77,15 @@ fn vsl_003_contact_bracket() {
     let b = run_pour(&rig, ContactModel::Wetting, newtonian());
     let pour_band = (a.poured_mass - b.poured_mass).abs();
     let dribble_band = a.dribble_cells.abs_diff(b.dribble_cells);
+    let field_difference: f64 = a
+        .mass_field
+        .iter()
+        .zip(&b.mass_field)
+        .map(|(x, y)| (x - y).abs())
+        .sum();
     verdict(
         "vsl-003-contact-bracket",
-        a.mass_drift < 1e-10 && b.mass_drift < 1e-10,
+        a.mass_drift < 1e-10 && b.mass_drift < 1e-10 && field_difference > 1e-8,
         &format!(
             "BRACKET (reported, never hidden): poured {:.2} vs {:.2} (band {pour_band:.2}); dribble {} vs {} cells (band {dribble_band}); both ledgers strict",
             a.poured_mass, b.poured_mass, a.dribble_cells, b.dribble_cells

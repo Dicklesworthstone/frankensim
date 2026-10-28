@@ -1,8 +1,8 @@
 //! Stage 3 + 5: the free-surface POUR validator and the deliverable
 //! render. A tank with a weir lip pours under a rotating-gravity TILT
 //! SCHEDULE (the moving frame fs-lbm's G3 gate pins); the outcome
-//! record carries the STRICT mass-ledger drift, the Plateau–Rayleigh
-//! fragment count of the free jet, and the dribble indicator (wetted
+//! record carries the STRICT mass-ledger drift, the connected-component
+//! count of the 2-D liquid, and the dribble indicator (wetted
 //! outer-lip cells after the pour) — computed under BOTH contact
 //! models so the bracketing band is a first-class output, per the
 //! plan's honest handling of contact-line fidelity. The render binds
@@ -27,6 +27,10 @@ pub struct PourRig {
     pub lip_h: usize,
     /// Gravity magnitude.
     pub g0: f64,
+    /// Liquid/gas surface tension in lattice units; zero explicitly omits it.
+    /// Convert SI values with `sigma_lu = sigma_si * dt^2 / (rho_si * dx^3)`.
+    /// This fixture coefficient is not a sourced fluid-property calibration.
+    pub surface_tension: f64,
     /// Tilt schedule: final angle (radians) reached linearly over the
     /// run (rotating gravity — the fs-scenario moving-frame stand-in).
     pub tilt_final: f64,
@@ -45,6 +49,7 @@ impl Default for PourRig {
             // 1.2e-4 the slosh barely crossed the chamber in 700 steps
             // and NOTHING poured (measured); 6e-4 pours decisively.
             g0: 6e-4,
+            surface_tension: 0.002,
             tilt_final: 0.7,
             steps: 900,
         }
@@ -56,7 +61,8 @@ impl Default for PourRig {
 pub struct PourOutcome {
     /// Worst relative mass-ledger drift over the run.
     pub mass_drift: f64,
-    /// Free-surface fragments at the end (Plateau–Rayleigh score).
+    /// Connected liquid components in this 2-D fixture. This is not a
+    /// quantitative Plateau–Rayleigh breakup model for a cylindrical jet.
     pub fragments: usize,
     /// Fluid mass that crossed the lip (the pour actually poured).
     pub poured_mass: f64,
@@ -107,7 +113,7 @@ pub fn run_pour(rig: &PourRig, contact: ContactModel, law: Rheology) -> PourOutc
             grid.flags[i] = Cell::Fluid;
         }
     }
-    let mut sim = FreeSurface::new(grid, 0.0, contact);
+    let mut sim = FreeSurface::new(grid, rig.surface_tension, contact);
     let m0 = sim.ledger_mass();
     let mut mass_drift = 0.0f64;
     for step in 0..rig.steps {
@@ -158,6 +164,50 @@ pub fn run_pour(rig: &PourRig, contact: ContactModel, law: Rheology) -> PourOutc
         poured_mass: poured,
         dribble_cells: dribble,
         mass_field,
+    }
+}
+
+#[cfg(test)]
+mod capillary_tests {
+    use super::*;
+
+    #[test]
+    fn capillary_pour_responds_to_tension_and_wetting_without_losing_mass() {
+        let rig = PourRig::default();
+        assert!(rig.surface_tension > 0.0);
+        let liquid = Rheology::Newtonian { nu: 0.0167 };
+        let neutral = run_pour(&rig, ContactModel::Neutral, liquid);
+        let wetting = run_pour(&rig, ContactModel::Wetting, liquid);
+        let no_tension = run_pour(
+            &PourRig {
+                surface_tension: 0.0,
+                ..rig
+            },
+            ContactModel::Neutral,
+            liquid,
+        );
+        for result in [&neutral, &wetting, &no_tension] {
+            assert!(
+                result.mass_drift < 1e-10,
+                "mass drift {}",
+                result.mass_drift
+            );
+            assert!(
+                result.poured_mass > 1.0,
+                "poured mass {}",
+                result.poured_mass
+            );
+            assert!(result.mass_field.iter().all(|mass| mass.is_finite()));
+        }
+        let difference = |a: &PourOutcome, b: &PourOutcome| {
+            a.mass_field
+                .iter()
+                .zip(&b.mass_field)
+                .map(|(x, y)| (x - y).abs())
+                .sum::<f64>()
+        };
+        assert!(difference(&neutral, &wetting) > 1e-8);
+        assert!(difference(&neutral, &no_tension) > 1e-8);
     }
 }
 

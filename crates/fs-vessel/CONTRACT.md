@@ -33,11 +33,14 @@ COMPOSITION with certificates at every joint.
   `modes` Orr–Sommerfeld modes (α = 1.02056, n = 32 collocation) of
   the real growth rate. Negative = every mode decays (laminar proxy).
 - `pour::PourRig` — the weir-tank fixture (48×28 lattice, lip column,
-  rotating-gravity tilt schedule). Defaults pour decisively
-  (g0 = 6e-4, tilt 0.7 rad over 900 steps).
+  rotating-gravity tilt schedule, and explicit nonnegative lattice surface
+  tension). Defaults use g0 = 6e-4, sigma = 0.002 and tilt 0.7 rad over
+  900 steps. Set sigma explicitly to zero for a no-capillarity comparison.
+  SI conversion is sigma_lu = sigma_SI dt² / (rho_SI dx³); the fixture
+  default does not imply a sourced water or other fluid calibration.
 - `pour::run_pour(rig, contact, law) -> PourOutcome` — one pour;
   outcome carries `mass_drift` (worst relative ledger drift),
-  `fragments` (Plateau–Rayleigh score), `poured_mass` (mass right of
+  `fragments` (2-D connected-component count), `poured_mass` (mass right of
   the weir), `dribble_cells` (wet outer-lip cells), and `mass_field`
   (the same bytes the render binds).
 - `pour::render_pour(outcome, nx, ny, res)` — fs-render Woodcock
@@ -146,12 +149,13 @@ REPORTED):
   than wide lip (2.4) through the thickness flank, AND the Orszag
   bracket σ(5000) < 0 < σ(6000) re-gated through this crate's call
   path.
-- **vsl-002** the pour POURS with a strict ledger: drift 7.96e-14,
-  poured mass 46.11, under the rotating-gravity tilt schedule.
-- **vsl-003** contact bracket: Neutral vs Wetting band REPORTED
-  (poured band 0.00, dribble band 0 on the default rig — the models
-  do not differentiate this fixture; the honest row says so); gate is
-  strictness of both ledgers only.
+- **vsl-002** the capillary-enabled pour crosses the lip while retaining
+  a strict mass ledger under the rotating-gravity tilt schedule.
+- **vsl-003** contact bracket: Neutral vs Wetting must change the solved
+  mass field while both mass ledgers remain strict. A companion native
+  pour test requires a nonzero response to turning surface tension off.
+  These are numerical sensitivity checks, not calibrated contact-line
+  or quantitative cylindrical-jet breakup validation.
 - **vsl-004** Carreau band: three fluids pour [7.04, 16.71, 18.13] —
   spread 11.09 (the family responds); all ledgers strict.
 - **vsl-005** robustification: robust lip 0.92 stays stable off-band

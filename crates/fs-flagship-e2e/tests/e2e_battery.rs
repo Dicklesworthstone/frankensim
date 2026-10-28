@@ -164,8 +164,13 @@ const GOLDEN_LBM_CORE: u64 = 0x1539_430c_dae4_7762;
 
 fn vessel_smoke() -> (StageArtifact, f64) {
     let t0 = Instant::now();
+    // This historical golden pins the original zero-capillarity trajectory.
+    // The default capillary/wetting response is checked by fs-vessel's native
+    // pour test and contact-bracket battery, rather than silently changing
+    // the physical scenario under an existing cross-ISA golden.
     let rig = PourRig {
         steps: 300,
+        surface_tension: 0.0,
         ..PourRig::default()
     };
     let out = run_pour(
